@@ -1,0 +1,28 @@
+// v0.9.2 ITEM D (NEGATIVE, honest finiteness bound): an UNBOUNDED structured
+// modal tuple-key fails closed with a precise RESOURCE/finiteness diagnostic.
+//
+// Structured finite+typed modal keys (fixed-arity lists `[a, b]` / compounds
+// `f(a, b)` of scalar elements) are accepted and flattened element-wise onto the
+// GPU. A `cons` pattern `[H|T]`, by contrast, has a statically-UNKNOWN tail
+// length, so it has NO finite, typed GPU key-column set. It is rejected -- but
+// NOT as an "unsupported construct": the diagnostic names the true finiteness
+// bound and tells the user to bind a fixed-arity list literal instead.
+//
+// Expected (exit 1):
+//   Error: ResourceExhausted { context: "modal tuple-key for watched uses a
+//   `cons` pattern whose tail length is not statically fixed, so it has no
+//   finite, typed GPU key-column set; bind it to a fixed-arity list literal
+//   `[a, b, ...]` instead", ... }
+
+#pragma epistemic_mode = faeel
+
+pred host(u32).
+pred watched(u32).
+pred alert(u32).
+
+host(1). host(2).
+watched(1).
+
+alert(H) :- host(H), know watched([H | T]).
+
+?- alert(H).

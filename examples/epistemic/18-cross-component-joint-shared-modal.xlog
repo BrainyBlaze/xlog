@@ -1,0 +1,45 @@
+// v0.9.2 Bundle 3 COMPLETION: cross-component epistemic JOINT-SOLVING (multi-output).
+//
+// Two epistemic heads share ONE base modal predicate `q` (a SharedModalPredicate
+// coalesce), but neither head feeds the other -- `q` is a base/invariant
+// relation, NOT an epistemic-derived head. Local splittability would place
+// `known(X)` and `maybe(X)` in different components, yet they share the modal
+// predicate `q`, so the dependency graph coalesces them into ONE component
+// carrying TWO epistemic output heads.
+//
+// This is the canonical joint-solving target: ONE candidate enumeration +
+// world-view validation over the component's COMBINED modal literals
+// (`know q(X)` and `possible q(X)`), then EACH head relation is materialized
+// against the SAME accepted world view. Because the accepted world-view set is
+// determined by `q` independently of which head is being materialized,
+// per-head materialization against the shared world view equals the
+// semantically-correct reference -- joint-solving is sound.
+//
+// The know/possible filters genuinely DIFFER: `known` keeps a node only when its
+// `q` membership is universally true across accepted world views, while `maybe`
+// keeps a node when its `q` membership holds in at least one accepted world view.
+// With `q` an invariant base fact set, both modalities resolve over the same
+// accepted set, so:
+//   node = {1, 2, 3}, color = {2, 3}, q = {1, 2}.
+//   known(X) :- node(X), know q(X).      -> known   = {1, 2}
+//   maybe(X) :- color(X), possible q(X). -> maybe   = {2}    (3 is colored but q(3) false)
+//
+// BOTH coupled heads must be materialized and displayed by `xlog run`.
+
+#pragma epistemic_mode = faeel
+
+pred node(u32).
+pred color(u32).
+pred q(u32).
+pred known(u32).
+pred maybe(u32).
+
+node(1). node(2). node(3).
+color(2). color(3).
+q(1). q(2).
+
+known(X) :- node(X), know q(X).
+maybe(X) :- color(X), possible q(X).
+
+?- known(X).
+?- maybe(X).

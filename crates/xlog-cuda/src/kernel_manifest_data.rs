@@ -33,6 +33,7 @@ pub const KERNEL_CU_NAMES: &[&str] = &[
     "ilp_exact",
     "epistemic",
     "wcoj",
+    "mc_resident",
 ];
 
 /// Describes a single CUDA module: the .cu file name, the runtime module name
@@ -473,6 +474,7 @@ pub const KERNEL_MODULES: &[KernelModuleSpec] = &[
             "epistemic_populate_model_membership_from_tuple_source_arity3_u8",
             "epistemic_populate_model_membership_from_tuple_source_arity_n_u8",
             "epistemic_validate_world_views_u8",
+            "epistemic_validate_constraints_u8",
             "epistemic_materialize_accepted_candidates_u8",
             "epistemic_materialize_final_result_flags_u8",
             "epistemic_build_final_tuple_row_map_u8",
@@ -529,6 +531,11 @@ pub const KERNEL_MODULES: &[KernelModuleSpec] = &[
             "wcoj_clique8_materialize_hg_u64",
         ],
     },
+    KernelModuleSpec {
+        cu_name: "mc_resident",
+        module_name: "xlog_mc_resident",
+        kernels: &["mc_resident_engine"],
+    },
 ];
 
 #[cfg(test)]
@@ -554,8 +561,8 @@ mod tests {
     }
 
     #[test]
-    fn kernel_modules_count_is_24() {
-        assert_eq!(KERNEL_MODULES.len(), 24);
+    fn kernel_modules_count_is_25() {
+        assert_eq!(KERNEL_MODULES.len(), 25);
     }
 
     #[test]

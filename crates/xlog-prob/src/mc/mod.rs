@@ -13,27 +13,27 @@
 
 mod buffers;
 mod evidence;
+mod resident;
 mod results;
-mod sampling;
 
 pub use evidence::{EvidenceForcing, ForceabilityReason};
+pub use resident::{
+    compile_resident_plan, McNoHostStats, McResidentResult, ResidentPlan, ResidentRejectKind,
+    ResidentRejection,
+};
 
+#[cfg(feature = "host-io")]
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 #[cfg(feature = "host-io")]
 use cudarc::driver::DeviceSlice;
-use cudarc::driver::LaunchConfig;
-use xlog_core::{MemoryBudget, RelId, Result, Schema, XlogError};
+use xlog_core::{MemoryBudget, Result, XlogError};
 use xlog_cuda::memory::TrackedCudaSlice;
-use xlog_cuda::provider::{mc_eval_kernels, MC_EVAL_MODULE};
-use xlog_cuda::{CudaBuffer, CudaDevice, CudaKernelProvider, GpuMemoryManager, LaunchAsync};
+use xlog_cuda::{CudaDevice, CudaKernelProvider, GpuMemoryManager};
 #[cfg(feature = "host-io")]
 use xlog_logic::ast::{BodyLiteral, Rule};
 use xlog_logic::ast::{Directives, Evidence, ProbMethod, ProbQuery, Program};
-use xlog_logic::compile::Compiler;
-use xlog_logic::stratify::analyze_stratification;
-use xlog_runtime::Executor;
 
 use crate::exact::GpuConfig;
 #[cfg(feature = "host-io")]
@@ -209,6 +209,36 @@ pub struct McResult {
     pub sampling_method: McSamplingMethod,
 }
 
+/// **Legacy back-compat surface** — tracked (data-plane) host<->device transfer
+/// deltas measured around the MC measured region.
+///
+/// This struct dates from the predecessor `a894aab4` engine, which removed only
+/// *tracked* data-plane transfers from a still-host-orchestrated loop. The
+/// current resident megakernel engine has a *stronger* property — **no host
+/// interaction at all** in the measured region — so the authoritative contract
+/// now lives in [`McNoHostStats`] (`McResidentResult::no_host`), which also
+/// counts untracked metadata reads, host fixpoint iterations, and in-region
+/// device allocations. `McDeviceResult` retains this field for API
+/// back-compatibility; for the resident engine its tracked-call fields are zero.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct McHotLoopTransfers {
+    /// Tracked host-to-device calls in the measured region.
+    pub htod_calls: u64,
+    /// Tracked device-to-host calls in the measured region.
+    pub dtoh_calls: u64,
+    /// Tracked host-to-device bytes in the measured region.
+    pub htod_bytes: u64,
+    /// Tracked device-to-host bytes in the measured region.
+    pub dtoh_bytes: u64,
+}
+
+impl McHotLoopTransfers {
+    /// True when no tracked host/device transfer occurred in the measured region.
+    pub fn is_zero(&self) -> bool {
+        self.htod_calls == 0 && self.dtoh_calls == 0
+    }
+}
+
 /// Device-resident Monte Carlo result counts.
 pub struct McDeviceResult {
     pub query_counts: TrackedCudaSlice<u32>,
@@ -220,6 +250,10 @@ pub struct McDeviceResult {
     pub nonmonotone_cycles: usize,
     pub nonmonotone_iteration_limit_hits: usize,
     pub sampling_method: McSamplingMethod,
+    /// Legacy back-compat field: tracked transfers measured around the resident
+    /// engine's measured region (zero). The authoritative no-host contract is
+    /// [`McNoHostStats`] on [`McResidentResult`]; see [`McHotLoopTransfers`].
+    pub hot_loop_transfers: McHotLoopTransfers,
 }
 
 #[derive(Debug, Clone)]
@@ -232,35 +266,8 @@ pub(super) struct ProbFactSpec {
 pub(super) struct AdSpec {
     pub(super) decision_vars: Vec<usize>,
     pub(super) choices: Vec<GroundAtom>,
+    #[cfg_attr(not(feature = "host-io"), allow(dead_code))]
     pub(super) has_none: bool,
-}
-
-pub(super) struct GpuMcPlan {
-    pub(super) program: Program,
-    pub(super) plan: xlog_ir::ExecutionPlan,
-    pub(super) schemas: HashMap<String, Schema>,
-    pub(super) rel_ids: HashMap<String, RelId>,
-    pub(super) query_rel_names: Vec<String>,
-    pub(super) evidence_rel_specs: Vec<(String, bool)>,
-    pub(super) nonmonotone_sccs: HashSet<usize>,
-}
-
-pub(super) struct ProbTableDevice {
-    pub(super) predicate: String,
-    pub(super) buffer: CudaBuffer,
-    pub(super) var_idx: TrackedCudaSlice<u32>,
-}
-
-pub(super) struct AdDecisionDevice {
-    pub(super) decision_vars: TrackedCudaSlice<u32>,
-}
-
-pub(super) struct AdTableDevice {
-    pub(super) predicate: String,
-    pub(super) buffer: CudaBuffer,
-    pub(super) decision_offsets: TrackedCudaSlice<u32>,
-    pub(super) decision_lengths: TrackedCudaSlice<u32>,
-    pub(super) choice_positions: TrackedCudaSlice<u32>,
 }
 
 #[cfg(feature = "host-io")]
@@ -300,6 +307,7 @@ pub(super) struct SccPlan {
     pub(super) kind: SccKind,
 }
 
+#[cfg_attr(not(feature = "host-io"), allow(dead_code))]
 #[derive(Debug, Clone, Default)]
 pub(super) struct EvalStats {
     pub(super) nonmonotone_sccs: usize,
@@ -338,6 +346,14 @@ impl McProgram {
         self.bernoulli_probs.len()
     }
 
+    /// Host-facing MC evaluation: runs the resident megakernel engine
+    /// ([`Self::evaluate_gpu_device_with_provider`]) and then **materializes the
+    /// result on the host** by downloading the final query/evidence counts
+    /// *after* the measured region. The download is a host-result
+    /// materialization, not part of the measured region — the no-host property
+    /// belongs to the resident engine, not to this convenience wrapper. Use
+    /// [`Self::evaluate_gpu_device`] when you want device-resident counts with no
+    /// host download at all.
     #[cfg(feature = "host-io")]
     pub fn evaluate(&self, cfg: McEvalConfig) -> Result<McResult> {
         let provider = Arc::new(self.provider()?);
@@ -410,6 +426,16 @@ impl McProgram {
         })
     }
 
+    /// CPU **oracle / debug** MC path. Downloads the full sampled-bit matrix to
+    /// the host and evaluates every sampled world on a host relation store.
+    ///
+    /// This is intentionally *not* GPU-native: it performs a large DtoH of the
+    /// sample matrix and runs the deterministic core on the CPU. It exists solely
+    /// as a deterministic, seed-matched oracle for validating the GPU-native
+    /// device counts (the GPU sampler is shared, so for the same program/seed the
+    /// two paths see identical samples). It must **never** be used as zero-host /
+    /// GPU-native release evidence, and the acceptance matrix excludes it and the
+    /// tests that call it (`tests/gpu_mc_vs_cpu.rs`, `tests/mc.rs`).
     #[cfg(feature = "host-io")]
     pub fn evaluate_cpu(&self, cfg: McEvalConfig) -> Result<McResult> {
         if cfg.samples == 0 {
@@ -573,484 +599,73 @@ impl McProgram {
         })
     }
 
+    /// Alias for [`Self::evaluate`]: GPU device evaluation followed by host-result
+    /// materialization (final-count download after the measured region). The
+    /// `_gpu` suffix denotes that the *compute* runs on the GPU — it does **not**
+    /// imply a zero-host result, since it returns a host [`McResult`]. For the
+    /// device-resident, no-host-download API use [`Self::evaluate_gpu_device`].
     #[cfg(feature = "host-io")]
     pub fn evaluate_gpu(&self, cfg: McEvalConfig) -> Result<McResult> {
         self.evaluate(cfg)
     }
 
+    /// GPU-native device-resident MC evaluation via the resident megakernel
+    /// engine ([`resident`]). Returns [`McDeviceResult`] with counts left on the
+    /// device (no host download). The engine evaluates all worlds in a single
+    /// launch with **no host interaction in the measured region** (no host
+    /// sample loop, no per-sample/per-operator host launches or allocations, no
+    /// tracked transfers, and no untracked metadata reads); see
+    /// [`McResidentResult::no_host`] / [`McNoHostStats::is_no_host`] for the full
+    /// measured contract.
     pub fn evaluate_gpu_device(&self, cfg: McEvalConfig) -> Result<McDeviceResult> {
         let provider = Arc::new(self.provider()?);
         self.evaluate_gpu_device_with_provider(cfg, provider)
     }
 
+    /// GPU-native device-resident MC evaluation using a caller-supplied provider
+    /// (enables provider/buffer reuse across calls). Static setup (arena
+    /// allocation, plan upload, sampling) happens before the measured region;
+    /// the measured region is a single resident-engine launch with **zero host
+    /// interaction** — no host loop over samples or fixpoint iterations, no
+    /// per-sample/per-operator host launches or device allocations, no tracked
+    /// HtoD/DtoH transfers, and no untracked metadata reads. The full contract is
+    /// measured by [`McNoHostStats`] (`McResidentResult::no_host`) and gated by
+    /// `tests/mc_resident.rs`. Counts remain device-resident; the caller decides
+    /// whether/when to download them.
     pub fn evaluate_gpu_device_with_provider(
         &self,
         cfg: McEvalConfig,
         provider: Arc<CudaKernelProvider>,
     ) -> Result<McDeviceResult> {
-        let (method, forcing) = self.resolve_sampling_method(cfg.sampling_method)?;
-        let strategy = McCountStrategy::from_method(method);
-
-        let prob_query_count = self.queries.len();
-        let evidence_count = self.evidence.len();
-        let prob_query_count_u32 = u32::try_from(prob_query_count).map_err(|_| {
-            XlogError::Execution(format!(
-                "MC inference requires queries <= u32::MAX (got {})",
-                prob_query_count
-            ))
-        })?;
-        let evidence_count_u32 = u32::try_from(evidence_count).map_err(|_| {
-            XlogError::Execution(format!(
-                "MC inference requires evidence <= u32::MAX (got {})",
-                evidence_count
-            ))
-        })?;
-        // In QueriesOnly mode, pass 0 evidence to the truth kernel so it sets evidence_ok = 1
-        let effective_evidence_count_u32 = match strategy {
-            McCountStrategy::QueriesOnly => 0u32,
-            McCountStrategy::QueriesAndEvidence => evidence_count_u32,
-        };
-
-        let mut d_query_counts = provider.memory().alloc::<u32>(prob_query_count)?;
-        if prob_query_count > 0 {
-            provider
-                .device()
-                .inner()
-                .memset_zeros(&mut d_query_counts)
-                .map_err(|e| XlogError::Kernel(format!("Failed to zero MC query counts: {}", e)))?;
-        }
-        let mut d_evidence_count = provider.memory().alloc::<u32>(1)?;
-        // Design note (QueriesOnly mode): The spec requires evidence_count ==
-        // cfg.samples at the end of inference.  We achieve this without a
-        // separate HtoD upload: the truth kernel always sets evidence_ok = 1
-        // (because effective_evidence_count = 0 ⇒ all evidence trivially
-        // satisfied), so the accumulate kernel atomicAdd's evidence_count once
-        // per sample, arriving at exactly cfg.samples after the loop.
-        provider
-            .device()
-            .inner()
-            .memset_zeros(&mut d_evidence_count)
-            .map_err(|e| XlogError::Kernel(format!("Failed to zero MC evidence count: {}", e)))?;
-
-        let mut d_query_flags = provider.memory().alloc::<u8>(prob_query_count)?;
-        let mut d_evidence_ok = provider.memory().alloc::<u8>(1)?;
-        let mut d_query_ptrs = provider.memory().alloc::<u64>(prob_query_count)?;
-        let mut d_zero_count = provider.memory().alloc::<u32>(1)?;
-        provider
-            .device()
-            .inner()
-            .memset_zeros(&mut d_zero_count)
-            .map_err(|e| XlogError::Kernel(format!("Failed to zero MC zero-count: {}", e)))?;
-
-        // In QueriesOnly mode, skip evidence-side buffer allocations.
-        // We still need 1-element sentinel slices for the truth kernel args.
-        let evidence_alloc_count = match strategy {
-            McCountStrategy::QueriesOnly => 1,
-            McCountStrategy::QueriesAndEvidence => evidence_count.max(1),
-        };
-        let mut d_evidence_ptrs = provider.memory().alloc::<u64>(evidence_alloc_count)?;
-        let mut d_evidence_expected = provider.memory().alloc::<u8>(evidence_alloc_count)?;
-
-        if evidence_count > 0 && strategy == McCountStrategy::QueriesAndEvidence {
-            let expected: Vec<u8> = self
-                .evidence
-                .iter()
-                .map(|(_, v)| if *v { 1u8 } else { 0u8 })
-                .collect();
-            buffers::upload_slice(
-                &provider,
-                &expected,
-                &mut d_evidence_expected,
-                "MC evidence expected",
-            )?;
-        }
-
-        let truth_fn = provider
-            .device()
-            .inner()
-            .get_func(
-                MC_EVAL_MODULE,
-                mc_eval_kernels::MC_EVAL_QUERY_EVIDENCE_TRUTH,
-            )
-            .ok_or_else(|| {
-                XlogError::Kernel("mc_eval_query_evidence_truth kernel not found".to_string())
-            })?;
-        let accum_fn = provider
-            .device()
-            .inner()
-            .get_func(MC_EVAL_MODULE, mc_eval_kernels::MC_EVAL_ACCUMULATE_COUNTS)
-            .ok_or_else(|| {
-                XlogError::Kernel("mc_accumulate_counts kernel not found".to_string())
-            })?;
-        let accum_config = LaunchConfig {
-            grid_dim: (1, 1, 1),
-            block_dim: (1, 1, 1),
-            shared_mem_bytes: 0,
-        };
-
-        // Pre-allocate host-side pointer vectors outside the per-sample closure
-        // to avoid repeated heap allocation.  Query/evidence relations are dynamic
-        // (re-created each sample), so the device pointers themselves are NOT
-        // stable -- we still upload every sample -- but the host Vec storage is
-        // reused across iterations.
-        let mut query_ptrs_buf: Vec<u64> = vec![0u64; prob_query_count];
-        let mut evidence_ptrs_buf: Vec<u64> = vec![0u64; evidence_count];
-
-        let stats = self.evaluate_gpu_counts_with(
-            &cfg,
-            &forcing,
-            method,
-            provider.clone(),
-            |executor, plan, count| {
-                let zero_ptr = *d_zero_count.device_ptr();
-
-                query_ptrs_buf.clear();
-                for rel_name in plan.query_rel_names.iter().take(count) {
-                    let ptr = executor
-                        .store()
-                        .get(rel_name)
-                        .map(|buf| *buf.num_rows_device().device_ptr())
-                        .unwrap_or(zero_ptr);
-                    query_ptrs_buf.push(ptr);
-                }
-                buffers::upload_slice(
-                    &provider,
-                    &query_ptrs_buf,
-                    &mut d_query_ptrs,
-                    "MC query count ptrs",
-                )?;
-
-                if strategy == McCountStrategy::QueriesAndEvidence {
-                    evidence_ptrs_buf.clear();
-                    for (rel_name, _) in plan.evidence_rel_specs.iter() {
-                        let ptr = executor
-                            .store()
-                            .get(rel_name)
-                            .map(|buf| *buf.num_rows_device().device_ptr())
-                            .unwrap_or(zero_ptr);
-                        evidence_ptrs_buf.push(ptr);
-                    }
-                    buffers::upload_slice(
-                        &provider,
-                        &evidence_ptrs_buf,
-                        &mut d_evidence_ptrs,
-                        "MC evidence count ptrs",
-                    )?;
-                }
-
-                let block_dim = 128u32;
-                let threads = if count == 0 { 1 } else { count as u32 };
-                let grid_dim = threads.div_ceil(block_dim);
-                // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
-                unsafe {
-                    truth_fn
-                        .clone()
-                        .launch(
-                            LaunchConfig {
-                                grid_dim: (grid_dim, 1, 1),
-                                block_dim: (block_dim, 1, 1),
-                                shared_mem_bytes: 0,
-                            },
-                            (
-                                &d_query_ptrs,
-                                prob_query_count_u32,
-                                &d_evidence_ptrs,
-                                &d_evidence_expected,
-                                effective_evidence_count_u32,
-                                &mut d_query_flags,
-                                &mut d_evidence_ok,
-                            ),
-                        )
-                        .map_err(|e| {
-                            XlogError::Kernel(format!("mc_eval_query_evidence_truth failed: {}", e))
-                        })?;
-                }
-                // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
-                unsafe {
-                    accum_fn
-                        .clone()
-                        .launch(
-                            accum_config,
-                            (
-                                &d_query_flags,
-                                prob_query_count_u32,
-                                &d_evidence_ok,
-                                &mut d_query_counts,
-                                &mut d_evidence_count,
-                            ),
-                        )
-                        .map_err(|e| {
-                            XlogError::Kernel(format!("mc_accumulate_counts failed: {}", e))
-                        })?;
-                }
-                Ok(())
-            },
-        )?;
-
-        provider.device().synchronize()?;
-
+        // The GPU-resident megakernel engine is the sole MC execution path: there
+        // is no host-orchestrated per-sample fallback. It evaluates ALL worlds in
+        // a single launch with zero host interaction in the measured region, then
+        // returns device-resident counts. Programs outside the supported bounded
+        // fragment fail closed (typed `ResidentRejection`).
+        let r = self.evaluate_resident_with_provider(cfg, provider)?;
         Ok(McDeviceResult {
-            query_counts: d_query_counts,
-            evidence_count: d_evidence_count,
-            total_samples: cfg.samples,
-            seed: cfg.seed,
-            confidence: cfg.confidence,
-            nonmonotone_sccs: stats.nonmonotone_sccs,
-            nonmonotone_cycles: stats.nonmonotone_cycles,
-            nonmonotone_iteration_limit_hits: stats.nonmonotone_iteration_limit_hits,
-            sampling_method: method,
+            query_counts: r.query_counts,
+            evidence_count: r.evidence_count,
+            total_samples: r.total_samples,
+            seed: r.seed,
+            confidence: r.confidence,
+            // The resident engine accepts only bounded positive Datalog and
+            // device-evaluates its fixpoint; legacy non-monotone SCC bookkeeping
+            // is not part of this engine's reported state.
+            nonmonotone_sccs: 0,
+            nonmonotone_cycles: 0,
+            nonmonotone_iteration_limit_hits: 0,
+            sampling_method: r.sampling_method,
+            // Back-compat surface: `hot_loop_transfers` reports the resident
+            // engine's tracked transfers (zero). Richer no-host evidence (untracked
+            // reads, fixpoint/alloc counts) lives in `McResidentResult::no_host`.
+            hot_loop_transfers: McHotLoopTransfers {
+                htod_calls: r.no_host.tracked_htod_calls,
+                dtoh_calls: r.no_host.tracked_dtoh_calls,
+                htod_bytes: 0,
+                dtoh_bytes: 0,
+            },
         })
-    }
-
-    fn build_gpu_plan(&self) -> Result<GpuMcPlan> {
-        let mut plan_program = self.program.clone();
-        plan_program.queries.clear();
-
-        for ProbQuery { atom } in &plan_program.prob_queries {
-            plan_program
-                .queries
-                .push(xlog_logic::ast::Query { atom: atom.clone() });
-        }
-
-        let evidence_offset = plan_program.queries.len();
-        for Evidence { atom, .. } in &plan_program.evidence {
-            plan_program
-                .queries
-                .push(xlog_logic::ast::Query { atom: atom.clone() });
-        }
-
-        buffers::ensure_predicate_decls(&mut plan_program)?;
-
-        let max_recursion = plan_program.directives.max_recursion_depth.unwrap_or(100);
-        let expanded = xlog_logic::expand_program_functions(&plan_program, max_recursion)
-            .map_err(|e| XlogError::Compilation(e.to_string()))?;
-
-        let mut compiler = Compiler::new();
-        let plan = compiler.compile_program(&expanded)?;
-        let mut schemas = compiler.schemas().clone();
-        buffers::augment_schemas_for_program(&expanded, &mut schemas)?;
-        let rel_ids = compiler.rel_ids().clone();
-
-        let strat = analyze_stratification(&expanded);
-        let nonmonotone_sccs = strat.non_monotone_sccs;
-
-        let mut query_rel_names: Vec<String> = Vec::new();
-        for i in 0..expanded.queries.len() {
-            query_rel_names.push(format!("__xlog_query_{}", i));
-        }
-
-        let mut evidence_rel_specs: Vec<(String, bool)> = Vec::new();
-        for (idx, Evidence { value, .. }) in expanded.evidence.iter().enumerate() {
-            let rel_idx = evidence_offset + idx;
-            evidence_rel_specs.push((format!("__xlog_query_{}", rel_idx), *value));
-        }
-
-        Ok(GpuMcPlan {
-            program: expanded,
-            plan,
-            schemas,
-            rel_ids,
-            query_rel_names,
-            evidence_rel_specs,
-            nonmonotone_sccs,
-        })
-    }
-
-    fn evaluate_gpu_counts_with<F>(
-        &self,
-        cfg: &McEvalConfig,
-        forcing: &EvidenceForcing,
-        method: McSamplingMethod,
-        provider: Arc<CudaKernelProvider>,
-        mut on_sample: F,
-    ) -> Result<EvalStats>
-    where
-        F: FnMut(&Executor, &GpuMcPlan, usize) -> Result<()>,
-    {
-        if cfg.samples == 0 {
-            return Err(XlogError::Execution(
-                "MC inference requires samples > 0".to_string(),
-            ));
-        }
-        if !(0.0 < cfg.confidence && cfg.confidence < 1.0) || cfg.confidence.is_nan() {
-            return Err(XlogError::Execution(format!(
-                "MC inference requires 0 < confidence < 1, got {}",
-                cfg.confidence
-            )));
-        }
-        if cfg.max_nonmonotone_iterations == 0 {
-            return Err(XlogError::Execution(
-                "MC inference requires max_nonmonotone_iterations > 0".to_string(),
-            ));
-        }
-        if cfg.samples > (u32::MAX as usize) {
-            return Err(XlogError::Execution(format!(
-                "MC inference requires samples <= u32::MAX (got {})",
-                cfg.samples
-            )));
-        }
-
-        let gpu_plan = self.build_gpu_plan()?;
-        let prob_query_count = self.queries.len();
-
-        let mut executor = Executor::new(provider.clone());
-        executor.set_profiling(false);
-
-        for (name, rel_id) in &gpu_plan.rel_ids {
-            executor.register_relation(*rel_id, name);
-        }
-
-        for (name, schema) in &gpu_plan.schemas {
-            executor.put_relation(name, provider.create_empty_buffer(schema.clone())?);
-        }
-
-        buffers::load_deterministic_facts(
-            &gpu_plan.program,
-            &gpu_plan.schemas,
-            &provider,
-            &mut executor,
-        )?;
-
-        let (prob_tables, ad_tables, ad_decisions) =
-            buffers::build_prob_tables_device(self, &provider, &gpu_plan.schemas)?;
-
-        // Build the targeted reset plan: preserve pure deterministic base
-        // relations, clear everything else, and snapshot base facts for
-        // predicates that are both deterministic and dynamic.
-        let reset_plan = buffers::build_sample_reset_plan(&gpu_plan, self, &provider, &executor)?;
-
-        let num_vars = self.bernoulli_probs.len();
-
-        // Allocate force arrays: upload actual forcing data in clamped mode, zero-fill otherwise
-        let mut d_force_mask = provider.memory().alloc::<u8>(num_vars.max(1))?;
-        let mut d_forced_value = provider.memory().alloc::<u8>(num_vars.max(1))?;
-        if method == McSamplingMethod::EvidenceClamping && num_vars > 0 {
-            provider
-                .htod_sync_copy_into_tracked(&forcing.force_mask, &mut d_force_mask)
-                .map_err(|e| XlogError::Kernel(format!("Failed to upload force_mask: {}", e)))?;
-            provider
-                .htod_sync_copy_into_tracked(&forcing.forced_value, &mut d_forced_value)
-                .map_err(|e| XlogError::Kernel(format!("Failed to upload forced_value: {}", e)))?;
-        } else {
-            provider
-                .device()
-                .inner()
-                .memset_zeros(&mut d_force_mask)
-                .map_err(|e| XlogError::Kernel(format!("Failed to zero force_mask: {}", e)))?;
-            provider
-                .device()
-                .inner()
-                .memset_zeros(&mut d_forced_value)
-                .map_err(|e| XlogError::Kernel(format!("Failed to zero forced_value: {}", e)))?;
-        }
-
-        let mc_profile = std::env::var("XLOG_MC_PROFILE")
-            .ok()
-            .map(|v| v == "1")
-            .unwrap_or(false);
-        let mut timing = McTimingBreakdown::default();
-
-        let t0 = std::time::Instant::now();
-        let samples_device = if self.bernoulli_probs.is_empty() || cfg.samples == 0 {
-            provider.memory().alloc::<u8>(0)?
-        } else {
-            provider.sample_bernoulli_matrix_device(
-                &self.bernoulli_probs,
-                cfg.samples,
-                cfg.seed,
-                &d_force_mask.slice(..),
-                &d_forced_value.slice(..),
-            )?
-        };
-        if mc_profile {
-            timing.sampler_us = t0.elapsed().as_micros() as u64;
-        }
-
-        let mut stats = EvalStats::default();
-
-        // Pre-compute reference slices for the reset plan (avoids per-sample allocation).
-        let preserve_refs: Vec<&str> = reset_plan.preserve.iter().map(|s| s.as_str()).collect();
-        let clear_refs: Vec<(&str, Schema)> = reset_plan
-            .clear
-            .iter()
-            .map(|(s, sc)| (s.as_str(), sc.clone()))
-            .collect();
-
-        for sample_idx in 0..cfg.samples {
-            let t_reset = std::time::Instant::now();
-            executor.reset_for_mc_relations(&preserve_refs, &clear_refs)?;
-            // Re-load deterministic base facts for predicates that are both
-            // deterministic and dynamic (e.g., `a(1). 0.5::a(2).`).
-            for (pred, base_buf) in &reset_plan.reload_base {
-                let cloned = if base_buf.is_empty() {
-                    provider.create_empty_buffer(base_buf.schema().clone())?
-                } else {
-                    buffers::clone_buffer_device(&provider, base_buf)?
-                };
-                executor.put_relation(pred, cloned);
-            }
-            if mc_profile {
-                timing.sample_reset_us += t_reset.elapsed().as_micros() as u64;
-            }
-
-            let start = sample_idx * num_vars;
-            let end = start + num_vars;
-            let sample_bits = samples_device.slice(start..end);
-
-            let t_build = std::time::Instant::now();
-            let sample_buffers = buffers::build_sample_buffers(
-                &provider,
-                &sample_bits,
-                &prob_tables,
-                &ad_tables,
-                &ad_decisions,
-            )?;
-
-            for (pred, buf) in sample_buffers {
-                if buf.is_empty() {
-                    continue;
-                }
-                let merged = match executor.store().get(&pred) {
-                    Some(existing) if !existing.is_empty() => provider.union_gpu(existing, &buf)?,
-                    _ => buffers::dedup_relation(&provider, &buf)?,
-                };
-                executor.put_relation(&pred, merged);
-            }
-            if mc_profile {
-                timing.sample_build_us += t_build.elapsed().as_micros() as u64;
-            }
-
-            let t_eval = std::time::Instant::now();
-            let sample_stats = sampling::evaluate_program_gpu(
-                &provider,
-                &mut executor,
-                &gpu_plan.plan,
-                &gpu_plan.nonmonotone_sccs,
-                cfg.max_nonmonotone_iterations,
-            )?;
-            if mc_profile {
-                timing.eval_us += t_eval.elapsed().as_micros() as u64;
-            }
-            stats.nonmonotone_sccs += sample_stats.nonmonotone_sccs;
-            stats.nonmonotone_cycles += sample_stats.nonmonotone_cycles;
-            stats.nonmonotone_iteration_limit_hits += sample_stats.nonmonotone_iteration_limit_hits;
-
-            let t_count = std::time::Instant::now();
-            on_sample(&executor, &gpu_plan, prob_query_count)?;
-            if mc_profile {
-                timing.count_us += t_count.elapsed().as_micros() as u64;
-            }
-        }
-
-        if mc_profile {
-            eprintln!(
-                "[MC Profile] samples={} sampler={}us reset={}us build={}us eval={}us count={}us total={}us",
-                cfg.samples, timing.sampler_us, timing.sample_reset_us, timing.sample_build_us,
-                timing.eval_us, timing.count_us, timing.total_us()
-            );
-        }
-
-        Ok(stats)
     }
 
     fn compile_program(program: &Program) -> Result<Self> {

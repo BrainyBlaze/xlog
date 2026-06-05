@@ -2,12 +2,13 @@
 
 use xlog_core::Result;
 use xlog_ir::{
-    EirAtom, EirBodyLiteral, EirEpistemicLiteral, EirEpistemicMode, EirEpistemicOp, EirProgram,
-    EirRule, EirTerm,
+    EirAtom, EirBodyLiteral, EirConstraint, EirEpistemicLiteral, EirEpistemicMode, EirEpistemicOp,
+    EirProgram, EirRule, EirTerm,
 };
 
 use crate::ast::{
-    AggOp, Atom, BodyLiteral, EpistemicMode, EpistemicOp, Program, Rule as AstRule, Term,
+    AggOp, Atom, BodyLiteral, Constraint as AstConstraint, EpistemicMode, EpistemicOp, Program,
+    Rule as AstRule, Term,
 };
 
 /// Build EIR from parsed frontend AST without lowering to RIR.
@@ -15,7 +16,14 @@ pub fn build_eir(program: &Program) -> Result<EirProgram> {
     Ok(EirProgram {
         mode: convert_mode(program.directives.epistemic_mode_or_default()),
         rules: program.rules.iter().map(convert_rule).collect(),
+        constraints: program.constraints.iter().map(convert_constraint).collect(),
     })
+}
+
+fn convert_constraint(constraint: &AstConstraint) -> EirConstraint {
+    EirConstraint {
+        body: constraint.body.iter().map(convert_body_literal).collect(),
+    }
 }
 
 fn convert_rule(rule: &AstRule) -> EirRule {

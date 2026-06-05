@@ -1,7 +1,11 @@
 # XLOG Development Roadmap
 
-Last updated: May 27, 2026
-Current tagged release: v0.8.6; v0.9.0-rc is the current epistemic/solver release candidate. v0.6.0 shipped the stream-safe runtime
+Last updated: June 2, 2026
+Current release: v0.9.2. v0.9.2 ships the epistemic executor semantic
+completion under the exact GPU-backed WFS contract: accepted cyclic
+negated-modal recursion uses the `xlog-gpu` GPU-backed WFS plan without the
+old `xlog_prob` host-WFS solver, but this is not a device-resident/no-host
+WFS residency claim. v0.6.0 shipped the stream-safe runtime
 and recorded launch discipline. v0.6.1 shipped recorded CSM hash-join
 dispatch and explicit CSM cert-mode labeling. v0.6.2 shipped the first
 productized WCOJ slice: hypergraph planner / oracle foundations plus
@@ -30,6 +34,18 @@ rule-weight training, differentiable proof traces, learned-rule inventories,
 CUDA host-transfer audits, module-boundary diagnostics, grouped transfer
 metrics, and the BFO UCR validation package.
 
+Branch checkpoint (May 31, 2026): the MC resident engine now includes a bounded
+sparse/WCOJ production slice for generic positive joins. `evaluate_gpu_device*`
+continues to route through the resident no-host engine; exact resident pilots
+cover single joins, multiway joins, arity-3 relation input, rule chaining,
+recursive device-side fixpoint traces, device sparse row counts/offsets,
+kernel-written convergence/overflow diagnostics, cooperative multi-block-per-world
+recursion with fenced cooperative barriers and atomic device change/continue
+reads, constant no-host counters, and fail-closed preallocation budget
+diagnostics. The dense bitset remains a
+bounded device-side membership index, not the final unbounded out-of-core
+sparse columnar engine.
+
 This roadmap is version-oriented so planned work is not hidden inside subsystem
 sections. Historical and current-main work uses checked boxes. Future work uses
 unchecked boxes and is assigned to a concrete future version.
@@ -37,8 +53,11 @@ After the tagged v0.8.0 feature pack, v0.8.5 completed the Language
 Completeness and Developer Experience train. v0.8.6 closed the deferred
 DTS-DLM runtime / GPU-native optimizer completion backlog that v0.9.0 needs as
 runtime substrate. v0.8.7-v0.8.9 are integrated predecessor diagnostics
-surfaces in the v0.9.0 Epistemic/Solver Semantics train, and v0.10.0 is the
-Multi-GPU / Out-of-Core train.
+surfaces in the v0.9.0 Epistemic/Solver Semantics train. v0.9.1 completes the
+bounded epistemic executor into a load-bearing surface (EIR-derived candidate
+enumeration, value-level modal membership, per-tuple-key FAEEL foundedness,
+epistemic constraints, safe split equivalence, and joint multi-epistemic
+solving), and v0.10.0 is the Multi-GPU / Out-of-Core train.
 
 ## v0.0.1 - Workspace Foundation
 
@@ -1861,6 +1880,41 @@ validator.
 - [x] Add alternative knowledge compilers such as c2d and miniC2D. Evidence:
       `c2d_and_minic2d_compiler_adapters_are_explicitly_represented` in
       `cargo test -p xlog-prob --test epistemic_prob`.
+- [x] Make the Monte Carlo GPU-native hot loop zero **tracked** (data-plane)
+      host transfer: per-sample query/evidence count-pointer arrays are built
+      once (into engine-owned stable row-count buffers) and refreshed each sample
+      via device-to-device copies, removing the prior per-sample HtoD upload.
+      Bounded control-plane metadata reads (`num_rows` scalars via
+      `dtoh_scalar_untracked`) remain, exempted by the engine-wide
+      data-plane contract. The boundary is measured via
+      `McDeviceResult::hot_loop_transfers` and asserted across the
+      clamped and rejection strategies plus fact-marginal, evidence,
+      annotated-disjunction, and recursive pilots. Host-facing
+      `evaluate`/`evaluate_gpu` are documented as host-result materialization
+      (final-count download after the loop); `evaluate_cpu` is a CPU oracle only.
+      Zero-host MC acceptance is `tests/mc_gpu_native.rs` and
+      `tests/gpu_mc_device_counts.rs`, **not** a full `cargo test -p xlog-prob`
+      run (which includes CPU-oracle `tests/mc.rs` / `tests/gpu_mc_vs_cpu.rs`).
+      Evidence: `cargo test -p xlog-prob --release --features host-io --test
+      mc_gpu_native -- --test-threads=1`.
+- [x] **GPU-resident Datalog/MC execution engine** — supersede the above
+      (`a894aab4`) host-orchestrated loop entirely. A single megakernel
+      (`mc_resident.cu` + `mc/resident.rs`) evaluates ALL worlds in one launch
+      with the sample/world id as the CUDA grid dimension; recursive programs use
+      a device-side double-buffered naive fixpoint with a shared change flag.
+      The measured region has **zero host interaction** (0 tracked HtoD/DtoH,
+      **0 untracked metadata reads**, 0 host loop iterations, 0 per-sample host
+      launches), proven constant across N=128/1024 via `McNoHostStats`. Whereas
+      `a894aab4` only removed *tracked* transfers but kept per-sample host
+      orchestration + untracked `dtoh_scalar_untracked` reads, this engine removes
+      host orchestration entirely. `evaluate_gpu_device*` route solely through it
+      (no fallback); unsupported programs fail closed with typed
+      `ResidentRejection`. The legacy host-loop Rust (`evaluate_gpu_counts_with`,
+      `build_gpu_plan`, `sampling.rs`, dead `buffers.rs`) is deleted.
+      Evidence: `cargo test -p xlog-prob --release --features host-io --test
+      mc_resident -- --test-threads=1` (exact-value resident pilots, including
+      sparse arity-3 WCOJ input, plus fail-closed
+      negatives).
 
 ### Documentation and Tests
 
@@ -1871,35 +1925,194 @@ validator.
       `cargo test -p xlog-solve --test gpu_solver_production_reuse`, and
       `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution`.
 
-### Concurrency Hardening Retargeted Out Of v0.9.0 Closure
+## v0.9.1 - Epistemic Executor Completion
 
-- [ ] **Retargeted: certify same-process multi-executor concurrency
-      against one CUDA primary context.** Surfaced by the
-      v0.6.0 A3/A4 stress harness
-      (`crates/xlog-integration/tests/test_a3_a4_stress.rs`,
-      commit `27ec3bd9`): A3 in-process thread-of-N drift
-      (~3% on recursive Datalog workloads) is reproducible
-      against the legacy default path (no
-      `XLOG_USE_DEVICE_RUNTIME`, no `XLOG_USE_RECORDED_OPS`),
-      so it is NOT a v0.6.0 stream-safety bug — it is a
-      pre-existing same-process multi-executor /
-      multi-provider concurrency issue. Re-target candidates:
-      `xlog-runtime::Executor` mutability under thread
-      contention, `xlog-cuda::CudaKernelProvider` shared
-      kernel/index caches, cudarc primary-context module-load
-      semantics under concurrent first-launch. Pass criterion:
-      A3 thread-of-N drift drops to zero on the harness's
-      `per_thread` and `shared` fixture modes (matrix run
-      via `XLOG_A3_FIXTURE_MODE=...`). This is not part of the
-      `docs/plans/2026-05-18-agent-v090-epistemic-solver-goal.md`
-      KPI surface and is not claimed by the v0.9.0 closure proposal;
-      it remains a runtime-concurrency backlog item for the next
-      runtime hardening train.
+Turns the v0.9.0 bounded epistemic executor into a load-bearing execution
+surface: candidate worlds are derived from EIR, modal membership is value-level
+on the device, FAEEL foundedness is per tuple key, epistemic constraints prune
+world views, splits are equivalence-checked, and multi-epistemic-predicate rules
+are solved jointly. EIR remains the semantic boundary and direct raw RIR
+lowering stays a rejection boundary. All accepted work holds the cross-cutting
+locks (no hidden CPU fallback, no fake predicate rewriting, no parallel side
+engines, typed fail-closed, real runtime/device pilots). Status summary:
+`docs/plans/2026-05-29-v091-epistemic-executor-completion-status.md`.
+
+### xlog-logic / xlog-runtime / xlog-cuda (epistemic executor)
+
+- [x] EGB-02 tuple-key and bound-value modal membership: ground, single/multi
+      bound variable, repeated-variable equality, anonymous wildcard, and
+      arity-0 keys on the GPU device path; fixed a global-gate soundness bug
+      where ground/anonymous/nullary modal literals were left ungated. Evidence:
+      `XLOG_USE_DEVICE_RUNTIME=1 cargo test -p xlog-runtime --test test_epistemic_gpu_workspace --release --features epistemic-logic-tests` (`egb02_*`).
+- [x] EGB-01 EIR-derived candidate-world enumeration: candidate space derived
+      from the program (full device lattice), with generated/propagated/tested/
+      accepted/rejected/reason trace counts, deterministic results, empty
+      accepted-world-view distinguished from failure, and resource fail-closed
+      before partial execution. Evidence: `egb01_*` device pilots.
+- [x] EGB-07 FAEEL founded self-support: per-tuple-key foundedness; unfounded
+      `p() :- possible p().` executes to the defined empty founded extension,
+      independently founded support is admitted, and G91 self-support stays a
+      separate compatibility mode. Evidence:
+      `cargo test -p xlog-logic --test test_epistemic_faeel_foundedness`,
+      `--test test_epistemic_g91`, and examples `31`/`32`.
+- [x] EGB-04 epistemic integrity constraints (core): `:- know/possible/not possible g().`
+      prune candidate world views via a GPU constraint kernel (rejection reason
+      6), constraints dropped from the reduced ordinary program (no RIR rewrite).
+      Evidence: `egb04_*` device pilots.
+- [x] EGB-04.K2 constraint-specific rejection reasons: a parallel
+      `constraint_violation_index` device buffer records which constraint fired
+      per candidate (reason code 6 unchanged), surfaced as
+      `result.semantic_trace.constraint_violation_indices`. Evidence:
+      `egb04_constraint_specific_reason_identifies_firing_constraint` (asserts the
+      specific firing index).
+- [x] EGB-05 safe split dependency and coupling: split/coalesce/reject decisions
+      explained via typed `EpistemicComponentMergeReason`; paired split-vs-unsplit
+      equivalence; recomposition covers each source rule exactly once; shared
+      source facts remain extensional inputs and no longer force independent
+      bound-variable output heads into one single-plan multi-output execution.
+      Evidence: `cargo test -p xlog-logic --test test_epistemic_split`.
+- [x] EGB-06 joint multi-epistemic-predicate solving: rules coupling more than
+      one distinct-name epistemic predicate (any operator mix incl. negated
+      modal) solved jointly over the candidate world view, matching unsplit.
+      Evidence: `egb06_*` device pilots and the integration coupling test.
+- [x] EGB-03/C2 nested modal operators: finite two-operator chains with leading,
+      interior, or atom-adjacent negation normalize by parity/duality into a
+      single-level epistemic literal and execute through `xlog run`; no
+      parser-precedence accident and no world-of-worlds shortcut. Evidence:
+      `cargo test -p xlog-logic --test test_epistemic_eir` and examples
+      `13`/`13b`-`13v` plus the explicit-G91 `13w*` companion matrix.
+- [x] Fixed nullary EDB fact materialization (pre-existing): `pred().` was
+      materialized as 0 rows (read as absent), breaking ordinary nullary queries
+      and ground/nullary modal membership. Added
+      `CudaKernelProvider::create_zero_arity_buffer`; arity-0 facts now
+      materialize one unit tuple. Evidence: `examples/epistemic/*` via
+      `cargo test -p xlog-cli --test run_cli_tests test_xlog_run_epistemic_examples`.
+- [x] Full-surface verification: device epistemic coverage, certification suite,
+      epistemic logic suites, successful `xlog run` semantic examples including
+      nested-modal negation matrices, same-name multi-arity matrices, G91
+      possible recursion, and WFS negated-modal recursion, plus `xlog-cuda` and
+      `xlog-integration` gates.
+
+### In-spec typed fail-closed (REQUIRED by the goal — rejection-by-design, not debt)
+
+Mandated by each bundle's "Expected Rejected Behavior" and cross-cutting lock #5;
+verified by negative pilots. Accepting these would violate the no-fake / no-CPU-
+fallback locks.
+
+- [x] Nested modal **semantics** are solved for finite two-operator chains:
+      leading/interior/atom-adjacent negation normalizes by parity/duality and the
+      64-cell `13g`-`13v` FAEEL example matrix plus the explicit-G91 `13w*`
+      companion matrix execute through `xlog run`.
+- [x] Finite typed compound/list modal tuple keys execute by flattening; genuinely
+      unbounded, untyped, predref, or aggregate modal tuple keys fail closed.
+- [x] Variable-keyed, diagonal, shared-variable join, and range-restricted negated
+      epistemic constraints execute on the device path; unsafe unbound negated
+      variables and CPU-only world-view scans fail closed.
+- [x] Same-name multi-arity modal coupling is SOLVED in v0.9.2 (ITEM F): distinct
+      arities are distinct relations, so the modal tuple-source resolution
+      disambiguates by arity (arity-qualified store key `p/1`/`p/2`, bare-name
+      fallback). Joint-solves on device to exact tuples per arity, identical
+      split-vs-unsplit, zero CPU fallback, and the committed `42a*`/`42b*`
+      examples exhaust the single-literal and cross-arity modal truth tables
+      through production `xlog run`. Genuinely-cyclic modal coupling
+      (`a:-know b. b:-know a.`, no founded order) stays typed fail-closed
+      end-to-end.
+- [x] Recursive epistemic execution covers Case-A/invariant and
+      determined-head stratification, positive Case-B founded recursion, G91
+      positive `possible` recursion, stratified negated-modal recursion, and
+      cyclic negated-modal recursion through the `xlog-gpu` GPU-backed WFS plan.
+      Fresh focused and full gates passed under the no-old-host-WFS-solver
+      contract. This is not a device-resident/no-host-interaction WFS residency
+      claim.
+      The WFS example surface covers the finite mode x negated-modal operator x
+      seed-state matrix, both with and without ordinary EDB negation in the same
+      reduced SCC, plus a load-bearing EDB target-state matrix. Host WFS is not an accepted production fallback. Unsupported
+      modal cycles without a founded order remain typed fail-closed.
+
+### Genuine follow-up (NOT goal-mandated; tracked)
+
+- [x] EGB-04.K2 constraint-specific rejection reasons — CLOSED (commit `e39bcd33`).
+- [x] Mixed per-row + global modal literals in a single rule — CLOSED in v0.9.2
+      (EGB-02B): the two gate classes compose conjunctively on the GPU path.
+- [x] Case-A recursive epistemic fixpoint execution — CLOSED in v0.9.2 (invariant
+      modal atoms reduce to gated relations, reduced ordinary recursion runs through
+      the GPU recursive engine).
+- [x] Multi-epistemic-output-head cross-component joint solving — CLOSED in v0.9.2
+      (SharedModalPredicate-over-base fragment joint-solved with multi-output
+      materialization, incl. heads of differing arity via per-head projection).
+- [x] Coupling/recursion over an epistemic-DERIVED head — CLOSED in v0.9.2 by
+      STRATIFIED epistemic execution: a modal over a DETERMINED derived head (its
+      modals bottom out in invariant/EDB relations, acyclically; transitive,
+      multi-column, binding) is gated once and materialized into the store as a lower
+      stratum, and the higher stratum gates against it via the existing filter — the
+      `know R ≡ R` theorem applied at the store boundary (no resolve-into-body, no
+      double-gating). The determined-modal family is now complete under the exact
+      v0.9.2 contract: determined targets resolve; positive Case-B/G91 recursion,
+      FAEEL-unfounded self-support, finite nested modal chains, and WFS-defined
+      negated-modal recursion execute with their defined semantics; only forms with
+      no founded, G91, WFS, finite-key, or safe-variable interpretation stay
+      fail-closed.
+
+## v0.9.2 - Epistemic Executor Semantic Completion
+
+Closes the three honest Category-B semantic gaps from v0.9.1, all validated on the
+production `xlog run` path. Status:
+`docs/plans/2026-05-31-v092-epistemic-semantic-completion-status.md`.
+
+- [x] EGB-02B mixed-literal modal membership: global modal gate + per-row bound
+      tuple-key gate compose conjunctively on the GPU device path. Evidence: 8
+      value-level pilots (exact tuples) + mutation proof + `examples/epistemic/14-mixed-literal-membership.xlog`.
+- [x] Case-A recursive epistemic fixpoint: recursive ordinary predicates whose modal
+      atoms range over invariant relations evaluate to fixpoint via the existing GPU
+      recursive engine. Evidence: `examples/epistemic/15-recursive-epistemic-closure.xlog`
+      ({(1,2),(2,3),(1,3)}) and `15-recursive-epistemic-chain.xlog` (3-hop (1,4)).
+- [x] Cross-component epistemic coupling: a coalesced component with >1 epistemic
+      output head sharing a base modal predicate is JOINT-SOLVED with multi-output
+      materialization (each head materialized against one shared accepted world
+      view), including heads of differing arity via per-head projection. Evidence:
+      `examples/epistemic/18-cross-component-joint-shared-modal.xlog` (both heads
+      `known={1,2}`, `maybe={2}`), `21` (three heads), `27` (augmented differing-arity)
+      + K2 split-vs-unsplit equivalence.
+- [x] Stratified epistemic execution (coupling/recursion over a DETERMINED derived
+      head): the determined head is gated once and materialized into the store as a
+      lower stratum; the higher stratum gates against it via the existing filter
+      (`know R ≡ R` at the store boundary). Transitive, multi-column, binding; negated
+      modal over an invariant relation reduces to ordinary negation. Evidence:
+      `17` (chained), `24` (transitive determined-ordinary), `25` (recursion over a
+      determined head), `26` (negated-modal-over-invariant), `28` (determined-epistemic
+      multi-column binding). The determined-modal family is COMPLETE.
+
+### Remaining genuinely-undefined boundaries (correct fail-closed cases)
+
+Every modal target is either DETERMINED (resolved above) or NON-DETERMINED and
+handled by founded/G91/WFS semantics when those semantics are defined. Only forms
+with no founded, G91, WFS, finite-key, or safe-variable interpretation stay
+fail-closed:
+
+- [x] Genuinely cyclic modal coupling with no founded/WFS order
+      (`a() :- know b(). b() :- know a().`) remains typed fail-closed.
+- [x] Unbounded/untyped modal tuple keys and unsafe unbound negated epistemic
+      variables remain typed fail-closed.
+- [x] FAEEL-unfounded self-support (`p() :- possible p()`) executes to the defined
+      empty extension, while explicit G91 accepts the same self-supporting program.
 
 ## v0.10.0 - Multi-GPU and Out-of-Core Execution
 
 ### Runtime and Memory
 
+- [ ] Certify same-process multi-executor concurrency against one CUDA primary
+      context. Surfaced by the v0.6.0 A3/A4 stress harness
+      (`crates/xlog-integration/tests/test_a3_a4_stress.rs`, commit
+      `27ec3bd9`): A3 in-process thread-of-N drift (~3% on recursive Datalog
+      workloads) is reproducible against the legacy default path (no
+      `XLOG_USE_DEVICE_RUNTIME`, no `XLOG_USE_RECORDED_OPS`), so it is not a
+      v0.6.0 stream-safety bug. Re-target candidates:
+      `xlog-runtime::Executor` mutability under thread contention,
+      `xlog-cuda::CudaKernelProvider` shared kernel/index caches, and cudarc
+      primary-context module-load semantics under concurrent first-launch. Pass
+      criterion: A3 thread-of-N drift drops to zero on the harness's
+      `per_thread` and `shared` fixture modes (matrix run via
+      `XLOG_A3_FIXTURE_MODE=...`).
 - [ ] Add out-of-core execution for relations exceeding GPU memory.
 - [ ] Add checkpointing and recovery.
 - [ ] Add out-of-core spilling.

@@ -1,0 +1,32 @@
+// v0.9.2 E1 (negated-difference): `:- q(X), not know p(X).` -- a positive ordinary literal
+// binds X (range-restriction) and a negated modal subtracts the known-`p` extension --
+// forbids any X that is in `q` but NOT known-`p`. (Contrast the standalone `:- not know p(X)`,
+// which is UNSAFE -- X has no positive binder -- and is a NAF safety error, example handled
+// in test_epistemic_split.)
+//
+// Resolved by the same sound PROGRAM-level desugaring:
+//
+//   :- q(X), not know p(X).
+//     becomes
+//   __epi_join_0(X) :- q(X), not p(X).   -- ordinary set difference q \ p
+//   :- know __epi_join_0(X).             -- single-occurrence variable-keyed constraint
+//
+// Sound because for a base/EDB target `know p == p`, so `not know p == not p` and the helper
+// is exactly `q \ p`. Here `q \ p = {3}` is non-empty, so the constraint fires and the world
+// view is pruned -> `report` is EMPTY. (Were `q` a subset of `p`, `report = {5}`.)
+
+#pragma epistemic_mode = faeel
+
+pred p(u32).
+pred q(u32).
+pred gate(u32).
+pred report(u32).
+
+p(1). p(2).
+q(2). q(3).
+gate(5).
+
+report(X) :- gate(X), know gate(X).
+:- q(X), not know p(X).
+
+?- report(X).

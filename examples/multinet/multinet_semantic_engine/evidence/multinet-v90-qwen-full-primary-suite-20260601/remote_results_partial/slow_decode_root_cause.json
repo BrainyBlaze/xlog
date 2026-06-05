@@ -1,0 +1,9 @@
+{
+  "dispatch_package": "/tmp/multinet-official-benchmarks-kxifp6r8/workspace/benchmarks/official/amr_smatch/.multinet_official_state/qwen_handoff_official/job_request.json",
+  "max_tokens": 5300,
+  "model_name": "Qwen/Qwen3.5-2B",
+  "observed_stage": "amr_smatch qwen candidate inference",
+  "request_id": "multinet-official-qwen-amr_smatch",
+  "root_cause": "qwen subprocess inherited 5300 max_tokens because --max-new-tokens was not explicitly bounded",
+  "source_batch_command": "4 source ids"
+}

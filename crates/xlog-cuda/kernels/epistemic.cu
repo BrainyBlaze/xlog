@@ -521,7 +521,11 @@ static __device__ uint8_t epistemic_tuple_key_row_matches_arity_n(
 
         uint8_t match_mode = tuple_key_match_modes[key];
         uint8_t matches = 0u;
-        if (match_mode == 1u) {
+        if (match_mode == 2u) {
+            // Anonymous wildcard: this key column imposes no equality
+            // requirement, so it matches every stable-model tuple row.
+            matches = 1u;
+        } else if (match_mode == 1u) {
             const uint8_t* bound_value_col =
                 reinterpret_cast<const uint8_t*>(bound_value_col_ptrs[key]);
             matches = epistemic_tuple_key_bound_cell_matches(
@@ -753,6 +757,60 @@ extern "C" __global__ void epistemic_validate_world_views_u8(
     }
 }
 
+extern "C" __global__ void epistemic_validate_constraints_u8(
+    uint32_t literal_count,
+    uint32_t candidate_count,
+    uint32_t constraint_count,
+    const uint32_t* __restrict__ constraint_literal_offsets,
+    const uint32_t* __restrict__ constraint_literal_counts,
+    const uint32_t* __restrict__ constraint_literal_indices,
+    const uint8_t* __restrict__ candidate_assumptions,
+    uint32_t* __restrict__ rejection_reasons,
+    uint32_t* __restrict__ constraint_violation_index
+) {
+    uint32_t candidate = blockIdx.x * blockDim.x + threadIdx.x;
+    if (candidate >= candidate_count) return;
+
+    // Only world views still accepted after modal world-view validation can be
+    // pruned by an integrity constraint. World-view validation has pinned each
+    // surviving candidate's assumption bit to the negation-folded observed modal
+    // value of its literal, so a constraint body holds in this accepted world
+    // view exactly when every referenced literal's assumption bit is set.
+    if (rejection_reasons[candidate] != 0u) return;
+
+    uint32_t assumption_base = candidate * literal_count;
+    for (uint32_t constraint = 0u; constraint < constraint_count; ++constraint) {
+        uint32_t offset = constraint_literal_offsets[constraint];
+        uint32_t count = constraint_literal_counts[constraint];
+        if (count == 0u) continue;
+
+        uint8_t body_holds = 1u;
+        for (uint32_t entry = 0u; entry < count; ++entry) {
+            uint32_t literal = constraint_literal_indices[offset + entry];
+            if (literal >= literal_count) {
+                body_holds = 0u;
+                break;
+            }
+            if (candidate_assumptions[assumption_base + literal] == 0u) {
+                body_holds = 0u;
+                break;
+            }
+        }
+
+        if (body_holds != 0u) {
+            // Integrity-constraint violation: this accepted world view satisfies
+            // a `:- know/possible ...` constraint body and must be pruned.
+            // Record WHICH constraint fired (declaration order index) alongside
+            // the unchanged class-level reason code so rejected candidates carry
+            // a constraint-specific reason. The reason code stays 6u so existing
+            // assertions and `trace_constraint_violations` counters are intact.
+            rejection_reasons[candidate] = 6u;
+            constraint_violation_index[candidate] = constraint;
+            return;
+        }
+    }
+}
+
 extern "C" __global__ void epistemic_materialize_accepted_candidates_u8(
     uint32_t candidate_count,
     uint32_t world_stride,
@@ -789,13 +847,34 @@ static __device__ uint8_t epistemic_final_tuple_has_accepted_membership(
     uint32_t world_stride,
     const uint32_t* __restrict__ rejection_reasons,
     const uint8_t* __restrict__ model_membership,
-    const uint8_t* __restrict__ world_views
+    const uint8_t* __restrict__ world_views,
+    const uint8_t* __restrict__ candidate_assumptions,
+    const uint8_t* __restrict__ gate_literal_required
 ) {
     if (literal_count == 0u || reduction_count == 0u || models_per_reduction == 0u) return 0u;
 
     for (uint32_t candidate = 0u; candidate < candidate_count; ++candidate) {
         if (rejection_reasons[candidate] != 0u) continue;
         if (world_views[candidate * world_stride] == 0u) continue;
+
+        // Global-gate literals (pure-ground, pure-anonymous, arity-0) must
+        // actually hold in this accepted candidate's world view. The accepted
+        // candidate's assumption bit equals the observed body literal value
+        // (validation guarantees assumption == observed, with `know`/`possible`
+        // modality and negation already folded in), so the body literal holds
+        // iff the assumption bit is set.
+        uint8_t gate_holds = 1u;
+        for (uint32_t literal = 0u; literal < literal_count; ++literal) {
+            if (gate_literal_required[literal] == 0u) continue;
+            uint8_t assumed =
+                candidate_assumptions[candidate * literal_count + literal] != 0u ? 1u : 0u;
+            if (assumed == 0u) {
+                gate_holds = 0u;
+                break;
+            }
+        }
+        if (gate_holds == 0u) continue;
+
         uint8_t active_membership = 0u;
         for (uint32_t reduction = 0u;
              reduction < reduction_count && active_membership == 0u;
@@ -830,13 +909,36 @@ static __device__ uint8_t epistemic_final_tuple_has_accepted_membership_for_row(
     uint32_t output_row,
     const uint32_t* __restrict__ rejection_reasons,
     const uint8_t* __restrict__ model_membership,
-    const uint8_t* __restrict__ world_views
+    const uint8_t* __restrict__ world_views,
+    const uint8_t* __restrict__ candidate_assumptions,
+    const uint8_t* __restrict__ gate_literal_required
 ) {
     if (output_row >= models_per_reduction) return 0u;
 
     for (uint32_t candidate = 0u; candidate < candidate_count; ++candidate) {
         if (rejection_reasons[candidate] != 0u) continue;
         if (world_views[candidate * world_stride] == 0u) continue;
+
+        // Global-gate literals (pure-ground, pure-anonymous, arity-0) must hold
+        // in this accepted candidate's world view even on the per-row path. The
+        // accepted candidate's assumption bit equals the observed body literal
+        // value (validation guarantees assumption == observed, with
+        // `know`/`possible` modality and negation already folded in), so the
+        // body literal holds iff the assumption bit is set. Composing this with
+        // the per-row membership check below enforces the global gate and the
+        // per-row bound tuple-key gate conjunctively for mixed rules.
+        uint8_t gate_holds = 1u;
+        for (uint32_t literal = 0u; literal < literal_count; ++literal) {
+            if (gate_literal_required[literal] == 0u) continue;
+            uint8_t assumed =
+                candidate_assumptions[candidate * literal_count + literal] != 0u ? 1u : 0u;
+            if (assumed == 0u) {
+                gate_holds = 0u;
+                break;
+            }
+        }
+        if (gate_holds == 0u) continue;
+
         for (uint32_t reduction = 0u; reduction < reduction_count; ++reduction) {
             for (uint32_t literal = 0u; literal < literal_count; ++literal) {
                 uint32_t literal_offset =
@@ -877,7 +979,9 @@ extern "C" __global__ void epistemic_build_final_tuple_row_map_u8(
     const uint32_t* __restrict__ bound_value_col_widths,
     uint32_t row_filter_count,
     uint32_t* __restrict__ row_map,
-    uint32_t* __restrict__ final_row_count
+    uint32_t* __restrict__ final_row_count,
+    const uint8_t* __restrict__ candidate_assumptions,
+    const uint8_t* __restrict__ gate_literal_required
 ) {
     uint32_t row = blockIdx.x * blockDim.x + threadIdx.x;
     uint32_t rows = output_row_count[0];
@@ -892,7 +996,9 @@ extern "C" __global__ void epistemic_build_final_tuple_row_map_u8(
             world_stride,
             rejection_reasons,
             model_membership,
-            world_views
+            world_views,
+            candidate_assumptions,
+            gate_literal_required
         )
         : epistemic_final_tuple_has_accepted_membership_for_row(
             literal_count,
@@ -903,7 +1009,9 @@ extern "C" __global__ void epistemic_build_final_tuple_row_map_u8(
             row,
             rejection_reasons,
             model_membership,
-            world_views
+            world_views,
+            candidate_assumptions,
+            gate_literal_required
         );
     if (accepted_membership == 0u) return;
 

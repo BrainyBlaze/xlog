@@ -4,6 +4,236 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+## [0.9.2] — 2026-06-02
+
+v0.9.2 Epistemic Executor Semantic Completion. Closes the three honest
+Category-B semantic gaps tracked after v0.9.1, all validated on the production
+`xlog run` path.
+
+### Added (v0.9.2)
+
+- EGB-02B: a rule combining a global modal gate (ground/anonymous/nullary modal)
+  with a per-row bound-variable modal gate now composes both gate classes
+  conjunctively on the GPU device path (the row-map kernel's per-row path applies
+  the global-gate check); the prior fail-closed guard is removed. Example
+  `14-mixed-literal-membership.xlog`.
+- Case-A recursive epistemic fixpoint: recursive ordinary predicates inside
+  epistemic programs now evaluate to fixpoint when every modal atom ranges over an
+  invariant relation (EDB / lower non-recursive non-epistemic stratum) — the modal
+  literal reduces to its gated relation and the reduced ordinary recursive program
+  runs through the existing GPU recursive fixpoint engine. Examples
+  `15-recursive-epistemic-closure.xlog` / `15-recursive-epistemic-chain.xlog`
+  (transitive closure incl. derived multi-hop tuples).
+- Cross-component epistemic coupling: a coalesced component with more than one
+  epistemic output head sharing a base modal predicate is JOINT-SOLVED with
+  multi-output materialization — one candidate enumeration + world-view validation
+  over the combined modals, then each head materialized against the same accepted
+  world view (per-head scoped row-filter + per-head output projection via
+  `public_head_arity`, reusing the WCOJ-promoted reduced runtime plan and EGB-01
+  enumeration). Heads of DIFFERING arity sharing a base modal are supported.
+  Examples `18-cross-component-joint-shared-modal.xlog` (`known={1,2}`,
+  `maybe={2}`), `21` (three heads), `27` (augmented differing-arity).
+- Stratified epistemic execution: a modal over an epistemic-DERIVED head that is
+  itself DETERMINED (its modals bottom out in invariant/EDB relations, acyclically)
+  is resolved by stratified execution — the determined head is gated once and
+  materialized into the relation store as a lower stratum
+  (`LogicExecutionPlan::EpistemicStratified`), and the higher stratum reads it as a
+  plain base relation through the existing membership/join filter. The theorem
+  `know R ≡ R` (for determined `R`) is applied at the STORE boundary, not the rule
+  body — no resolve-into-body, no double-gating. Determined-closure is transitive
+  (ordinary predicates over determined heads), supports multi-column binding modals,
+  and a negated modal over an invariant relation reduces to ordinary negation.
+  Examples `17` (chained `b:-know a`), `24` (transitive determined-ordinary), `25`
+  (recursion over a determined head), `26` (negated-modal-over-invariant in
+  recursion), `28` (determined-epistemic multi-column binding).
+- Structured modal tuple-keys: list/compound/anonymous modal keys
+  (`know watched([H])`) flatten element-wise into the existing N-column GPU matcher;
+  unbounded forms (cons `[H|T]`, predref, aggregate) reject with a `ResourceExhausted`
+  finiteness diagnostic. Example `23`.
+- Variable-keyed + nested epistemic constraints: a single-occurrence positive
+  constraint variable (`:- know p(X).`) lowers to an Anonymous wildcard and ranges
+  existentially on device; multi-literal distinct-variable conjunctions
+  (`:- know p(X), know q(Y).`) AND the independent existentials. Examples `34`/`35`/`36`.
+- Shared-variable epistemic constraint joins (item E1): the join
+  `:- know p(X), possible q(X).`, the diagonal `:- know p(X,X).`, and the
+  negated-difference `:- q(X), not know p(X).` are resolved by a sound program-level
+  desugaring at normalization — `:- L1,…,Ln.` ⟶ `__epi_join_N(Vars) :- ord(L1),…,ord(Ln).`
+  + `:- know __epi_join_N(Vars).`, where `ord` ordinary-izes each modal literal
+  (`know/possible r → r`, `not know/possible r → not r`). For a base/EDB or
+  ordinary-derived target `know r ≡ possible r ≡ r`, so the ordinary join is exactly the
+  forbidden binding set and the single-occurrence `:- know __epi_join_N(Vars)` routes
+  through the existing variable-keyed prune-to-empty path — no new kernel. Guarded to
+  non-modal-derived targets. Examples `38`/`39` (diagonal), `40` (join), `41`
+  (negated-difference).
+- Stratified negated-modal recursion (item A1): a negated modal `not know R` over a
+  recursive relation in a strictly-lower stratum executes on GPU as ordinary stratified
+  negation (`not know R ≡ not R` once R is materialized). Example `37`.
+- Same-name multi-arity modal coupling (item F): distinct arities of the same predicate
+  name are treated as distinct relations (arity-qualified modal tuple-source resolution);
+  derived-head coupling stratifies with a split-vs-unsplit equivalence proof; a genuine
+  cyclic modal coupling stays rejected with a precise diagnostic.
+
+### Changed (v0.9.2)
+
+- A standalone negated-variable-keyed integrity constraint whose variable appears only
+  under negation (`:- not know p(X).`) now reports the same NAF safety error as ordinary
+  Datalog (`:- not r(X).`, "unbound variable … in negated atom") instead of a misleading
+  "unimplemented" diagnostic — the variable is not range-restricted, so the program is
+  ill-formed, not a missing feature. The meaningful negated form `:- q(X), not know p(X).`
+  (X positively bound) is the shared-variable join above (item E1).
+
+- Recursive epistemic programs are no longer uniformly fail-closed: the Case-A
+  invariant-modal fragment AND recursion/coupling over any DETERMINED head (via
+  stratified execution, see above), positive Case-B founded recursion, explicit
+  G91 positive `possible` recursion, stratified negated-modal recursion, and cyclic
+  negated-modal recursion through WFS are now supported. A negated modal over an
+  invariant or materialized determined relation reduces to ordinary negation.
+
+### Determined and recursive modal families tightened
+
+The determined/non-determined boundary is closed under composition. Every modal
+target is either DETERMINED (fixed extension → `know R ≡ R` → resolved, via
+joint-solving or stratified execution; any arity, filtering or binding, coupling or
+recursion) or NON-DETERMINED and handled by the appropriate recursive semantics or
+typed boundary:
+
+- Positive Case-B `know` recursion computes the FAEEL founded least fixpoint.
+- Positive G91 `possible` recursion applies the G91 compatibility self-support
+  assumption.
+- Negated-modal recursion that is stratified reduces to ordinary anti-join after
+  the lower fixpoint materializes; cyclic negated-modal recursion routes through
+  GPU-backed WFS alternating fixpoint rather than host WFS, with committed
+  examples covering mode `{FAEEL,G91}` x modal `{not know,not possible}` x seed
+  `{present,absent}` for both plain WFS and WFS plus ordinary EDB negation.
+- Genuinely cyclic modal coupling with no founded/WFS order remains typed
+  fail-closed.
+
+Remaining genuinely-undefined cases are CI-enforced as over-broadening gates
+(for example cyclic modal coupling with no founded/WFS order and unbounded
+tuple-key pilots such as `23b`): because determined-closure acceptance is
+permissive, they assert no undefined program leaks a wrong-but-non-empty answer.
+Defined recursive/self-support cases execute instead: examples `22`, `31`, `32`,
+`33`, and `43` cover FAEEL founded recursion, empty FAEEL self-support, G91
+self-support, cyclic negated-modal WFS, and G91 positive possible recursion.
+
+Full v0.9.2 status: `docs/plans/2026-05-31-v092-epistemic-semantic-completion-status.md`.
+
+---
+
+v0.9.1 Epistemic Executor Completion. Turns the v0.9.0 bounded epistemic
+executor into a load-bearing execution surface while preserving the existing
+fail-closed boundaries. Candidate worlds are derived from EIR, modal membership
+is value-level on the device, FAEEL foundedness is checked per tuple key,
+epistemic integrity constraints prune candidate world views, splits are
+equivalence-checked, and rules coupling multiple distinct epistemic predicates
+are solved jointly. EIR remains the semantic boundary and direct raw RIR
+lowering stays a rejection boundary. Completed-vs-scoped-out semantics are
+recorded in `docs/plans/2026-05-29-v091-epistemic-executor-completion-status.md`.
+
+### Added (v0.9.1)
+
+- Added EIR-derived candidate-world enumeration: the candidate epistemic
+  assumption space is derived from the program (full device lattice) with
+  deterministic generated/propagated/tested/accepted/rejected/reason trace
+  counts; empty accepted-world-view results are distinguished from execution
+  failure and over-budget candidate spaces fail closed before partial execution.
+- Added value-level tuple-key modal membership on the GPU device path: ground,
+  single and multiple bound variables, repeated-variable equality, anonymous
+  wildcard positions, and arity-0 keys; unsupported term classes remain typed
+  fail-closed.
+- Added per-tuple-key FAEEL founded self-support: unfounded `p() :- possible p().`
+  is rejected, self-reference is accepted only with independent founded support
+  for the same tuple key, and G91 compatibility self-support stays separate.
+- Added GPU epistemic integrity constraints: `:- know g().`,
+  `:- possible g().`, and `:- not possible g().` prune candidate world views via
+  a new constraint kernel (rejection reason `WorldViewConstraintViolation`);
+  epistemic constraints are dropped from the reduced ordinary program with no
+  ordinary-RIR rewrite. Rejected candidates carry the specific firing constraint
+  index (KPI EGB04.K2) via a parallel `constraint_violation_index` buffer,
+  surfaced as `result.semantic_trace.constraint_violation_indices`.
+- Added explainable safe-split semantics: split, coalesce, and reject decisions
+  carry typed `EpistemicComponentMergeReason`s, valid splits are equivalence-
+  checked against unsplit execution, and recomposition covers each source rule
+  exactly once.
+- Added joint multi-epistemic-predicate solving: rules coupling more than one
+  distinct-name epistemic predicate (any operator mix, including negated modal
+  literals) are solved as a joint modal conjunction over the candidate world
+  view, matching unsplit execution.
+- Added `CudaKernelProvider::create_zero_arity_buffer` for materializing nullary
+  relations with a presence row.
+
+### Fixed (v0.9.1)
+
+- Fixed nullary EDB facts (`pred().`) being materialized as zero rows (read as
+  absent), which broke ordinary nullary queries and ground/nullary modal
+  membership; arity-0 facts now materialize one unit tuple, restoring `xlog run`
+  on `examples/epistemic/02-05`.
+- Fixed a global-membership-gate soundness bug where pure-ground, anonymous, or
+  nullary modal literals were left ungated, so `know flag(...)` could emit rows
+  regardless of whether the literal held.
+- Fixed unstable typed diagnostics for nested modal forms with interspersed
+  `not` (e.g. `know not possible p()`), which previously fell through to a
+  generic parse error instead of a stable `UnsupportedEpistemicConstruct`.
+- Fixed `xlog run` routing for multi-output epistemic programs that combine
+  bound-variable modal membership with multiple output heads; shared source
+  facts such as `node(X)` no longer force otherwise independent split
+  components into one single-plan multi-output execution.
+- Fixed recursive epistemic programs to fail closed with
+  `UnsupportedEpistemicConstruct { construct: "recursive epistemic program" }`
+  instead of entering the bounded single-pass executor, which does not yet
+  iterate recursive epistemic fixpoints.
+
+### Changed (v0.9.1)
+
+- The epistemic split layer no longer blanket-rejects rules coupling multiple
+  distinct epistemic predicates; such rules are routed to joint solving. The
+  `xlog-integration` split-coupling test was updated to the new accepted
+  contract.
+- Source facts are treated as reusable extensional inputs for split planning,
+  not as derived component producers. Components still coalesce on ordinary
+  derived dependencies and integrity constraints.
+
+### Known gaps (v0.9.1, tracked — closed or narrowed in v0.9.2)
+
+- **EGB-02 mixed per-row + global modal literal in one rule:** _CLOSED in v0.9.2
+  (EGB-02B)_ — the two gate classes now compose conjunctively on the GPU path.
+- **Recursive epistemic fixpoints:** _CLOSED in v0.9.2 under the exact
+  GPU-backed WFS contract_ — Case-A invariant-modal recursion,
+  determined-head stratification, positive Case-B founded recursion, G91 positive
+  `possible` recursion, stratified negated-modal recursion, and cyclic
+  negated-modal recursion through the `xlog-gpu` GPU-backed WFS plan execute
+  through `xlog run` without the old `xlog_prob` host-WFS solver. This closure
+  is not a device-resident/no-host-interaction WFS residency claim; the WFS path
+  still uses host orchestration and may use metadata row-count reads for
+  convergence.
+  The focused WFS example set covers mode, negated-modal operator,
+  seed-present/seed-absent, ordinary EDB-negation-in-SCC axes, and a load-bearing
+  EDB target-state axis where `not banned(2)` flips the seed-founded reach tuple.
+  Host WFS is not an accepted production fallback.
+
+- **Same-name multi-arity modal coupling:** _SOLVED in v0.9.2 (ITEM F)_ — a
+  program using the same predicate name at two arities in modal literals
+  (`know p(X)`, `possible p(X,Y)`) is no longer rejected. Distinct arities are
+  distinct relations, so the modal tuple-source resolution disambiguates by arity
+  (arity-qualified store key `p/1`/`p/2`, bare-name fallback). The coupling
+  joint-solves on device to exact tuples per arity with zero CPU fallback.
+- **Derived-head modal coupling:** modal coupling over an epistemically-DETERMINED
+  derived head is solved by STRATIFICATION (the stratified joint result equals the
+  per-stratum independent reference exactly); a genuinely-CYCLIC modal coupling
+  (`a:-know b. b:-know a.`) has no founded order and stays typed fail-closed
+  end-to-end with a precise diagnostic naming both coupled heads.
+
+Goal-mandated typed fail-closed fragments (aggregate/compound/list/predref modal
+keys, unsafe variable-keyed or CPU-scan epistemic constraints, genuinely-cyclic
+modal coupling with no founded order) remain rejection-by-design per the bundle
+spec and lock #5 — verified by negative pilots, not debt. Finite nested modal
+semantics are no longer in this rejection bucket in v0.9.2: examples 13/13b/13c
+execute, 13f plus its companions prove the interior-negation duality in both target states and
+both modes, 13g-13v cover all 64
+two-operator negation cells under FAEEL, and 13w* replays those cells under explicit G91.
+Historical v0.9.1 rejection list:
+`docs/plans/2026-05-29-v091-epistemic-executor-completion-status.md`.
+
 v0.9.0 Epistemic Solver Release Candidate. This branch layers the v0.8.7-v0.8.9
 BFO diagnostics and provenance pack into the v0.9.0 GPU-native epistemic,
 solver, and probabilistic release candidate.
@@ -78,6 +308,14 @@ v0.8.9 UCR diagnostic surfaces.
 - Added `xlog_logic::diagnose_module_boundaries(...)` for frozen kernel
   predicates, adapter-only fact modules, held-out module declarations, and
   held-out-label candidate provenance.
+- Added the sparse/WCOJ resident MC slice: structurally checked generic positive
+  joins now run from a preallocated world-segmented sparse column arena with
+  device row counters/offsets, arity-3 relation columns, exact no-host
+  instrumentation, recursive sparse fixpoint evidence, kernel-written
+  convergence/overflow diagnostics, an opt-in cooperative multi-block-per-world
+  execution path with fenced cooperative barriers and atomic device
+  change/continue reads, and deterministic `resident_resource_budget` fail-closed
+  diagnostics before device allocation.
 - Added `pyxlog.transfer_diagnostics.compute_transfer_diagnostics(...)` for
   grouped macro F1, minimum group F1, bootstrap confidence intervals, baseline
   uplift, paired sign tests, and missing-domain or missing-variant failures.
@@ -113,8 +351,50 @@ v0.8.9 UCR diagnostic surfaces.
   programs and dispatches them through the existing single/split epistemic GPU
   runtime instead of treating production examples as fixture-only inputs.
 
+### Added
+
+- **GPU-resident Datalog/MC execution engine** (`crates/xlog-prob/src/mc/resident.rs`
+  + `crates/xlog-cuda/kernels/mc_resident.cu`). Replaces the host-sequenced
+  per-sample Monte Carlo loop with a single device megakernel that evaluates ALL
+  worlds in one launch. The sample/world id is the CUDA grid dimension; sampled
+  facts, derived relations, evidence flags, query counts, and fixpoint state are
+  device-resident (bounded-Herbrand dense-boolean). Recursive programs converge
+  via a device-side double-buffered naive fixpoint with a shared change flag and a
+  per-world iteration trace; no host reads drive control flow.
+  - **Distinct from the predecessor `a894aab4`**: that commit only removed
+    *tracked data-plane* HtoD/DtoH from the host loop but kept host orchestration
+    (a Rust per-sample loop, per-sample kernel launches, and per-sample untracked
+    `dtoh_scalar_untracked` row-count reads). The resident engine has **zero host
+    interaction in the measured region**: 0 tracked HtoD, 0 tracked DtoH, 0
+    untracked metadata reads, 0 host loop iterations, 0 per-sample host launches —
+    proven CONSTANT across N=128 and N=1024 (`McNoHostStats`, new
+    `untracked_metadata_dtoh_count` provider counter).
+  - `evaluate_gpu_device*` now routes solely through this engine (no
+    host-orchestrated fallback). Programs outside the supported fragment
+    (bounded-domain positive Datalog; arity ≤ 3, body ≤ 3, ≤ 8 vars, bounded
+    universe) **fail closed** before execution with a typed `ResidentRejection`
+    (kind + construct + context). The CPU path survives only as a seed-matched
+    test oracle, never accepted execution.
+  - Acceptance (`tests/mc_resident.rs`): exact-value GPU-resident pilots (fact
+    marginal, probabilistic marginal, evidence conditioning, multi-evidence,
+    annotated-disjunction/exclusive choice, recursive transitive closure with a
+    non-base derived tuple, ≥3-hop recursion proving >1 fixpoint iteration) + 4
+    fail-closed negative tests.
+
 ### Fixed
 
+- Made the Monte Carlo GPU-native hot loop zero **tracked** (data-plane)
+  host/device transfer: the per-sample query/evidence count-pointer arrays are
+  now built once before the loop (into engine-owned stable row-count buffers) and
+  refreshed each sample with device-to-device copies, eliminating the prior
+  one-tracked-HtoD-per-sample pointer upload. `McDeviceResult` now carries an
+  always-on `hot_loop_transfers` (`McHotLoopTransfers`) measured around the
+  sample/evaluate/count loop. As elsewhere in the engine, bounded control-plane
+  metadata reads (relation `num_rows` scalars via `dtoh_scalar_untracked`) remain
+  and are intentionally not counted by the data-plane transfer contract.
+  `evaluate`/`evaluate_gpu` are clarified as host-result materialization (final
+  count download *after* the loop) and `evaluate_cpu` as a CPU oracle/debug path,
+  never zero-host/GPU-native release evidence.
 - Hardened `scripts/stage_pyxlog_kernels.sh` so pyxlog release kernel staging
   builds the release target before resolving the release `OUT_DIR`, preventing
   stale kernel artifacts from being selected after source changes.
@@ -141,6 +421,14 @@ v0.8.9 UCR diagnostic surfaces.
   staging rebuild order before release `OUT_DIR` discovery.
 - Added `test_xlog_run_epistemic_examples` to execute every epistemic example
   through the compiled CLI and assert production output values.
+- Added the MC transfer-budget gate
+  `tests/mc_gpu_native.rs::mc_hot_loop_is_zero_transfer_both_strategies`
+  (asserts zero hot-loop HtoD/DtoH across the clamped and rejection count
+  strategies) plus GPU-native exact-count pilots for fact-marginal,
+  evidence-conditioning (vs seeded CPU oracle), annotated-disjunction
+  exclusive-choice, and recursive transitive-closure workloads. Classified
+  `tests/mc.rs` and `tests/gpu_mc_vs_cpu.rs` as CPU-oracle/host-output tests,
+  excluded from the zero-host acceptance matrix.
 
 ## [0.8.6] — 2026-05-19
 

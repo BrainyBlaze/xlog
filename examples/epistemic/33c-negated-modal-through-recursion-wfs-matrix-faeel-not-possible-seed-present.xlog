@@ -1,0 +1,17 @@
+// WFS exhaustive matrix cell: mode faeel, cyclic recursion through not possible, seed-present.
+// v0.9.2 A1: accepted cyclic negated-modal recursion routes through the
+// GPU-backed WFS alternating-fixpoint path, not host WFS.
+// Seed support is present only for reach(1,2).
+// Expected WFS true tuples: reach(1,2); all other vertex x vertex reach tuples are undefined/absent.
+#pragma epistemic_mode = faeel
+pred vertex(u32).
+pred seed(u32, u32).
+pred linked(u32, u32).
+pred reach(u32, u32).
+vertex(1). vertex(2). vertex(3).
+seed(1, 2).
+reach(X, Y) :- linked(X, Y).
+reach(X, Z) :- reach(X, Y), linked(Y, Z).
+linked(X, Y) :- vertex(X), vertex(Y), not possible reach(X, Y).
+linked(X, Y) :- seed(X, Y).
+?- reach(X, Y).

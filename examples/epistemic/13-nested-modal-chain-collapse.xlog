@@ -1,0 +1,35 @@
+// v0.9.2 ITEM C: NESTED MODAL OPERATORS execute via sound chain-collapse.
+//
+// A modal CHAIN (a sequence of know/possible operators over an atom) collapses
+// to a single epistemic literal under the autoepistemic modal axioms XLOG's
+// operators assume (KD45/S5 positive+negative introspection). The operator
+// ADJACENT to the atom (the innermost one) wins; outer operators are absorbed:
+//   know possible p  ==  possible p          (KM == M, axioms 4/5)
+//   possible know p  ==  know p              (MK == K)
+//   know know p      ==  know p              (KK == K)
+//   possible possible p == possible p        (MM == M)
+// This equivalence holds in BOTH epistemic modes (FAEEL and G91): introspection
+// holds WITHIN any admissible world view in both modes; the modes differ only in
+// WHICH world views are admissible, which the collapsed single-level literal
+// inherits unchanged. So the collapse is a sound modal-logic theorem applied as
+// AST normalization, NOT a parser hack -- it routes through the existing
+// single-level epistemic execution path with no new evaluator.
+//
+// Here `know possible p()` collapses to `possible p()`. `p()` is an EDB fact, so
+// its modal target is DETERMINED (fixed extension), and over a determined target
+// `know R == possible R == R` is itself a theorem. Hence:
+//   q() :- know possible p().   ==   q() :- possible p().   ==   q() :- p().
+// p() holds, so q() holds.
+//
+// PER-MODE: identical in FAEEL and G91 (determined EDB target, no foundedness
+// branch). Expect: accepted, rows: 1.
+
+#pragma epistemic_mode = faeel
+
+pred p().
+pred q().
+
+p().
+q() :- know possible p().
+
+?- q().

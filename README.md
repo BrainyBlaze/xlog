@@ -2,13 +2,14 @@
 
 [![License](https://img.shields.io/badge/license-MIT%2FApache--2.0-blue.svg)](#license)
 [![CUDA Tests](https://img.shields.io/badge/CUDA%20tests-207%2F207-brightgreen.svg)](docs/architecture/cuda-certification.md)
-[![Version](https://img.shields.io/badge/version-v0.9.0-rc-blue.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-v0.9.2-blue.svg)](CHANGELOG.md)
 
-> **Release status:** `v0.9.0-rc`; this release candidate integrates the
-> v0.8.7-v0.8.9 BFO-derived diagnostics from the
+> **Release status:** `v0.9.2`; this release integrates the v0.8.7-v0.8.9
+> BFO-derived diagnostics from the
 > Autonomous Science Engine, Living World Model, and Universal Case Reasoner as
-> predecessor surfaces, and adds the v0.9.0 GPU-native epistemic, solver, and
-> probabilistic release-candidate surface. The integrated diagnostics include
+> predecessor surfaces, the v0.9.0 GPU-native epistemic, solver, and
+> probabilistic release-candidate surface, and the v0.9.1/v0.9.2 epistemic
+> executor semantic completion. The integrated diagnostics include
 > generated-rule diagnostics over inline and external candidate rows, native
 > biomedical graph stream provenance, source/generated rule provenance, proof
 > traces, relation-delta planner telemetry, validation staging,
@@ -76,7 +77,7 @@ XLOG is not a DSL bolted onto a tensor framework. It is a full typed logic progr
 | **v0.8.5 language** | Finite `list<T>` and `term` surfaces, safe `findall` / `maplist` / inspection predicates, deterministic NAF, magic sets, aggregate lifting, approximate-inference pragmas |
 | **v0.8.6 runtime** | Delta coalescing, relation callbacks, typed exact induction, chain shared-memory scoring, runtime CSE, adaptive re-optimization, persistent hash-index reuse, behavior-probe consumer certification |
 | **v0.8.9 BFO diagnostics** | Generated-rule row decisions, source/generated rule provenance, proof traces, native biomedical graph stream provenance, delta planner telemetry/equivalence probes, validation staging, temporal/general relation evidence, nn/4 lineage and hot-loop diagnostics, joint `nn/4`/symbolic training, rule inventories, CUDA host-transfer audits, module-boundary diagnostics, grouped transfer metrics |
-| **v0.9.0 epistemic solver** | EIR, G91, FAEEL, Generate-Propagate-Test execution, epistemic splitting, production `xlog run` pilots, GPU-native executable plans, solver-service integration, MaxSAT, GPU portfolio solving, and probabilistic epistemic evidence paths |
+| **v0.9.2 epistemic solver** | EIR, G91, FAEEL, Generate-Propagate-Test execution, finite nested modal chains, same-name multi-arity modal predicates, recursive epistemic execution through the exact GPU-backed WFS contract, epistemic splitting, production `xlog run` pilots, GPU-backed executable plans, solver-service integration, MaxSAT, GPU portfolio solving, and probabilistic epistemic evidence paths |
 | **Neural-symbolic** | Neural predicates (`nn/k`), PyTorch autograd integration, circuit caching, term embeddings |
 | **dILP training** | Sparse GPU mask, deterministic mode, promotion pipeline, holdout validation, artifact save/load |
 | **Bounded exact induction** | `xlog-induce` plus `ilp_exact` CUDA scoring with top-K per topology and fixed-size D2H summaries |

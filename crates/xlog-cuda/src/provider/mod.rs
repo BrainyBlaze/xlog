@@ -283,6 +283,7 @@ pub const PACK_MODULE: &str = "xlog_pack";
 pub const CIRCUIT_MODULE: &str = "xlog_circuit";
 pub const MC_SAMPLE_MODULE: &str = "xlog_mc_sample";
 pub const MC_EVAL_MODULE: &str = "xlog_mc_eval";
+pub const MC_RESIDENT_MODULE: &str = "xlog_mc_resident";
 pub const ARITH_MODULE: &str = "xlog_arith";
 pub const SAT_MODULE: &str = "xlog_sat";
 pub const D4_MODULE: &str = "xlog_d4";
@@ -297,8 +298,8 @@ pub const ILP_EXACT_MODULE: &str = "xlog_ilp_exact";
 pub const EPISTEMIC_MODULE: &str = "xlog_epistemic";
 pub const WCOJ_MODULE: &str = "xlog_wcoj";
 
-// Compile-time check: kernel manifest lists exactly 24 modules.
-const _: () = assert!(crate::kernel_manifest_data::KERNEL_CU_NAMES.len() == 24);
+// Compile-time check: kernel manifest lists exactly 25 modules.
+const _: () = assert!(crate::kernel_manifest_data::KERNEL_CU_NAMES.len() == 25);
 
 /// Kernel function names in the GPU WCOJ module.
 pub mod wcoj_kernels {
@@ -361,6 +362,13 @@ pub mod mc_eval_kernels {
     pub const MC_EVAL_ACCUMULATE_COUNTS: &str = "mc_accumulate_counts";
 }
 
+/// Kernel function names in the GPU-resident Datalog/MC engine module.
+pub mod mc_resident_kernels {
+    /// Single megakernel: evaluates all MC worlds to fixpoint and counts
+    /// query/evidence satisfaction with zero host interaction in-region.
+    pub const MC_RESIDENT_ENGINE: &str = "mc_resident_engine";
+}
+
 /// Kernel function names in the arithmetic module
 pub mod arith_kernels {
     pub const ARITH_BINARY_I64: &str = "arith_binary_i64";
@@ -420,6 +428,8 @@ pub mod epistemic_kernels {
         "epistemic_populate_model_membership_from_tuple_source_arity_n_u8";
     /// Device-side world-view validation kernel.
     pub const EPISTEMIC_VALIDATE_WORLD_VIEWS_U8: &str = "epistemic_validate_world_views_u8";
+    /// Device-side world-view integrity-constraint validation kernel.
+    pub const EPISTEMIC_VALIDATE_CONSTRAINTS_U8: &str = "epistemic_validate_constraints_u8";
     /// Device-side accepted-candidate materialization staging kernel.
     pub const EPISTEMIC_MATERIALIZE_ACCEPTED_CANDIDATES_U8: &str =
         "epistemic_materialize_accepted_candidates_u8";
@@ -956,6 +966,13 @@ pub struct CudaKernelProvider {
     ptx_load_profile: Option<PtxLoadProfile>,
     /// Column-level D2H transfer counter (incremented by each download_column_* call)
     d2h_transfer_count: AtomicU64,
+    /// Untracked control-plane metadata D2H read counter. Incremented by every
+    /// `dtoh_scalar_untracked` / `dtoh_small_metadata_untracked` call. These are
+    /// bounded metadata reads (row counts, scan totals) exempt from the
+    /// data-plane transfer contract, but the GPU-resident MC engine's no-host
+    /// gate must prove they are *also* zero inside the measured region — hence an
+    /// explicit, resettable counter.
+    untracked_metadata_dtoh_count: AtomicU64,
     /// Strict deterministic-Datalog D2H gate. When `true`, any data-plane D2H
     /// transfer (column downloads or `dtoh_sync_copy_into_tracked`) increments
     /// the violation counter and returns `XlogError::Execution` from the
@@ -1127,6 +1144,7 @@ impl CudaKernelProvider {
             transfer_tracker: HostTransferTracker::default(),
             ptx_load_profile,
             d2h_transfer_count: AtomicU64::new(0),
+            untracked_metadata_dtoh_count: AtomicU64::new(0),
             strict_deterministic_d2h: AtomicBool::new(false),
             deterministic_d2h_violations: AtomicU64::new(0),
             recorded_op_stream: OnceLock::new(),
@@ -1525,6 +1543,18 @@ impl CudaKernelProvider {
         self.d2h_transfer_count.store(0, Ordering::Relaxed);
     }
 
+    /// Count of untracked control-plane metadata D2H reads
+    /// (`dtoh_scalar_untracked` + `dtoh_small_metadata_untracked`).
+    pub fn untracked_metadata_dtoh_count(&self) -> u64 {
+        self.untracked_metadata_dtoh_count.load(Ordering::Relaxed)
+    }
+
+    /// Reset the untracked metadata D2H read counter to zero.
+    pub fn reset_untracked_metadata_dtoh_count(&self) {
+        self.untracked_metadata_dtoh_count
+            .store(0, Ordering::Relaxed);
+    }
+
     /// Enable the strict deterministic-Datalog D2H gate.
     ///
     /// While enabled, any data-plane device-to-host transfer (column downloads
@@ -1661,6 +1691,8 @@ impl CudaKernelProvider {
             ))
         })?;
         let mut buf: Vec<T> = vec![T::default(); count];
+        self.untracked_metadata_dtoh_count
+            .fetch_add(1, Ordering::Relaxed);
         self.device
             .inner()
             .dtoh_sync_copy_into(&slice, &mut buf)
@@ -1696,6 +1728,8 @@ impl CudaKernelProvider {
             ))
         })?;
         let mut buf = [T::default()];
+        self.untracked_metadata_dtoh_count
+            .fetch_add(1, Ordering::Relaxed);
         self.device
             .inner()
             .dtoh_sync_copy_into(&slice, &mut buf)
@@ -2668,6 +2702,22 @@ impl CudaKernelProvider {
             columns.push(self.memory.alloc::<u8>(0)?.into());
         }
         self.buffer_from_columns(columns, 0, schema)
+    }
+
+    /// Create a zero-arity (nullary) relation buffer carrying `rows` unit tuples.
+    ///
+    /// A nullary relation holds exactly when it has at least one row; its single
+    /// possible tuple is the empty tuple `()`. `create_buffer_from_slices` with no
+    /// column slices routes to `create_empty_buffer` (0 rows), which represents the
+    /// relation as *absent* — wrong for an asserted nullary fact. Nullary facts must
+    /// use this path so presence is materialized as one row.
+    pub fn create_zero_arity_buffer(&self, schema: Schema, rows: u32) -> Result<CudaBuffer> {
+        debug_assert_eq!(
+            schema.arity(),
+            0,
+            "create_zero_arity_buffer requires arity 0"
+        );
+        self.buffer_from_columns(Vec::new(), u64::from(rows), schema)
     }
 
     pub(crate) fn buffer_from_columns(

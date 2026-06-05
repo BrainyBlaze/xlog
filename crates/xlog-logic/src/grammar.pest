@@ -76,15 +76,30 @@ is_expr = { variable ~ "is" ~ arith_expr }
 
 // Body literals
 epistemic_op = @{ ("know" | "possible") ~ !ident_continue }
-unsupported_nested_epistemic_atom = { epistemic_op ~ epistemic_op ~ atom }
-negated_unsupported_nested_epistemic_atom = { "not" ~ unsupported_nested_epistemic_atom }
+// A named `not` keyword so the parser builder can see EXACTLY where each
+// negation sits in a modal chain (leading / interior / atom-adjacent). The
+// bare `"not"` literal in the single-level rules below is unchanged; this
+// captured form is used only inside `nested_modal_chain` so interior vs
+// leading negations are structurally distinguishable for the S5/KD45 collapse.
+not_kw = @{ "not" ~ !ident_continue }
+// A nested modal chain is a SEQUENCE of two-or-more epistemic operators
+// (`know`/`possible`), with `not` allowed before any operator and before the
+// final atom, applied to a single atom (e.g. `know possible p()`,
+// `not know possible p()`). It is NOT rejected at parse time: the parser
+// builder collapses it to a single epistemic literal using the modal-logic
+// (KD45/S5) equivalence in which the operator ADJACENT to the atom wins
+// (`know possible p ≡ possible p`, `know know p ≡ know p`). Leading,
+// interior, and atom-adjacent `not` tokens are accepted in the finite chain and
+// folded by the parser builder's parity/duality rules.
+nested_modal_chain = {
+    not_kw? ~ epistemic_op ~ (not_kw? ~ epistemic_op)+ ~ not_kw? ~ atom
+}
 epistemic_atom = { epistemic_op ~ atom }
 negated_epistemic_atom = { "not" ~ epistemic_atom }
 negated_atom = { "not" ~ atom }
 univ = { term ~ "=.." ~ term }
 body_literal = {
-    negated_unsupported_nested_epistemic_atom
-    | unsupported_nested_epistemic_atom
+    nested_modal_chain
     | negated_epistemic_atom
     | epistemic_atom
     | negated_atom

@@ -1,0 +1,25 @@
+#pragma epistemic_mode = g91
+
+pred target(u32).
+pred case_4001(u32).
+pred case_4002(u32).
+pred case_4004(u32).
+pred case_4007(u32).
+pred holds(u32).
+
+target(4001).
+target(4002).
+target(4004).
+target(4007).
+
+case_4001(4001).
+case_4002(4002).
+case_4004(4004).
+case_4007(4007).
+
+holds(ID) :- case_4001(ID), possible possible not target(ID).
+holds(ID) :- case_4002(ID), possible not possible target(ID).
+holds(ID) :- case_4004(ID), not possible possible target(ID).
+holds(ID) :- case_4007(ID), not possible not possible not target(ID).
+
+?- holds(ID).

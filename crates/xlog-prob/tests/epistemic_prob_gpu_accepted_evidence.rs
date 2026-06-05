@@ -3521,6 +3521,7 @@ fn accepted_ground_literal_executable() -> EpistemicExecutablePlan {
         vec![EpistemicReductionPlan {
             rule_index: 0,
             head_predicate: "out".to_string(),
+            public_head_arity: 1,
             relational_body_atoms: 1,
             wcoj_status: EpistemicWcojReductionStatus::NotWcojCandidate,
         }],
@@ -3548,6 +3549,7 @@ fn accepted_variable_bound_literal_executable() -> EpistemicExecutablePlan {
         vec![EpistemicReductionPlan {
             rule_index: 0,
             head_predicate: "out".to_string(),
+            public_head_arity: 1,
             relational_body_atoms: 1,
             wcoj_status: EpistemicWcojReductionStatus::NotWcojCandidate,
         }],
@@ -3582,6 +3584,7 @@ fn accepted_ground_literal_component_executable(
         vec![EpistemicReductionPlan {
             rule_index: 0,
             head_predicate: output_predicate.to_string(),
+            public_head_arity: 1,
             relational_body_atoms: 1,
             wcoj_status: EpistemicWcojReductionStatus::NotWcojCandidate,
         }],

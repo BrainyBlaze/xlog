@@ -1,0 +1,36 @@
+// v0.9.2 Case-A: NEGATED modal over an INVARIANT relation in a RECURSIVE context
+// (ACCEPTED).
+//
+// `not know blocked(Y)` ranges over the INVARIANT EDB relation `blocked`. On an
+// invariant relation the accepted world view agrees with the relation, so
+// `not know blocked` equals ordinary `not blocked` (an anti-join, NO modal
+// gating). This is cleanly reducible to ordinary negation, so the recursive
+// program is admissible Case-A and iterates through the existing semi-naive
+// engine -- it must NOT fail closed.
+//
+// edge = {(1,2),(2,3),(3,4)}, blocked = {3}.
+//   reach(X,Y) :- edge(X,Y),  not know blocked(Y).
+//   reach(X,Z) :- reach(X,Y), edge(Y,Z), not know blocked(Z).
+// blocked node 3 severs the chain:
+//   reach(1,2): not blocked(2)               -> kept
+//   reach(2,3): blocked(3)                    -> DROPPED
+//   reach(3,4): not blocked(4)               -> kept
+//   transitive (1,2)->(2,3): blocked(3)       -> DROPPED
+// Expect reach = {(1,2),(3,4)} -- node 3 is gated out, proving negated-modal
+// filtering (the result strictly differs from the ungated edge closure).
+
+#pragma epistemic_mode = faeel
+
+pred vertex(u32).
+pred edge(u32, u32).
+pred blocked(u32).
+pred reach(u32, u32).
+
+vertex(1). vertex(2). vertex(3). vertex(4).
+edge(1, 2). edge(2, 3). edge(3, 4).
+blocked(3).
+
+reach(X, Y) :- edge(X, Y), not know blocked(Y).
+reach(X, Z) :- reach(X, Y), edge(Y, Z), not know blocked(Z).
+
+?- reach(X, Y).

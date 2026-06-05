@@ -1,0 +1,25 @@
+// v0.9.2 ITEM C2: an INTERIOR-negation modal chain executes by modal duality.
+//
+//   q() :- know not possible p().
+//
+// A nested modal chain is normalized by S5/KD45 modal dualities before EIR
+// lowering. `possible p` is true when p holds in some accepted model, so
+// `not possible p` is true exactly when p is absent from every accepted model.
+// Since that modal subformula is world-view global, the outer `know` preserves it:
+//
+//   know not possible p() == not possible p()
+//
+// Because p() is present below, q() is not derived. The successful empty result
+// proves C2 reaches the production `xlog run` path rather than a typed rejection.
+//
+// Expect: `q` rows: 0, exit 0.
+
+#pragma epistemic_mode = faeel
+
+pred p().
+pred q().
+
+p().
+q() :- know not possible p().
+
+?- q().

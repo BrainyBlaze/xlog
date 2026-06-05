@@ -65,8 +65,8 @@ XLOG is a unified platform spanning four closely-related reasoning paradigms:
 ├─────────────────────────────────────────────────────────────────────────────┤
 │                                                                             │
 │  ┌─────────────┐   ┌─────────────┐   ┌─────────────┐   ┌─────────────┐    │
-│  │ xlog-logic  │   │ xlog-prob   │   │ xlog-elp    │   │ xlog-solve  │    │
-│  │             │   │             │   │ (planned)   │   │             │    │
+│  │ xlog-logic  │   │ xlog-prob   │   │ EIR/GPU     │   │ xlog-solve  │    │
+│  │             │   │             │   │ epistemic   │   │             │    │
 │  │ Datalog     │   │ ProbLog     │   │ Epistemic   │   │ SAT/MaxSAT  │    │
 │  │ recursion   │   │ inference   │   │ world views │   │ solving     │    │
 │  │ stratified  │   │ WMC/MC      │   │ K/M ops     │   │ GPU search  │    │
@@ -87,7 +87,7 @@ XLOG is a unified platform spanning four closely-related reasoning paradigms:
 |-----------|---------|---------------------|
 | **xlog-logic** | Deterministic Datalog-style recursion and stratified negation | GPUlog (HISA indexing), VFLog (columnar GPU Datalog) |
 | **xlog-prob** | Probabilistic + differentiable reasoning | ProbLog knowledge compilation (d-DNNF/SDD/BDD), WMC |
-| **xlog-elp** | Epistemic Logic Programming with world views (planned) | eclingo (G91 guess-check), FAEEL founded world views |
+| **EIR/GPU epistemic** | Accepted v0.9.x epistemic execution surface with explicit EIR, FAEEL default semantics, G91 compatibility mode, split/joint planning, and GPU-backed runtime paths | eclingo (G91 context), FAEEL founded world views |
 | **xlog-solve** | SAT/MaxSAT solver services (GPU CDCL verifier + CLS) | Deterministic CDCL (watched literals + 1-UIP + on-GPU model/proof validation), FastFourierSAT-inspired CLS |
 
 ### Intermediate Representations
@@ -126,7 +126,7 @@ Source Code
 |----|---------|----------------|
 | **RIR** | Relational operations for deterministic logic | `Unit` (identity), `Scan`, `Filter`, `Project`, `Join`, `GroupBy`, `Union`, `Distinct`, `Diff`, `Fixpoint`, `TensorMaskedJoin` |
 | **PIR** | Provenance tracking for probabilistic inference | `PIR_Lit`, `PIR_NegLit`, `PIR_And`, `PIR_Or`, `PIR_Decision` — weighted Boolean formula / circuit terms |
-| **EIR** | Epistemic reasoning structures (planned) | `EAtom`, `SplitPlan`, `GuessSpace`, `PropagationRules`, `TestTask`, `WorldViewCandidate` |
+| **EIR** | Epistemic reasoning structures for the accepted v0.9.x surface | epistemic literals/modes, executable plans, split plans, world-view candidates, GPU runtime traces |
 | **SIR** | Boolean satisfiability and optimization | `SIR_CNF`, `SIR_Cardinality`, `SIR_Weights`, `SIR_Objective`, `SIR_ProofPolicy` |
 | **XGCF** | GPU-evaluable circuit format | Levelized DAG with `node_type[]`, `value[]`, `adj[]` for forward/backward evaluation |
 
@@ -178,17 +178,19 @@ XLOG implements **ProbLog-style distribution semantics**:
 - OR: `adj[child_j] += adj[parent] * exp(v_child_j - v_parent)` (softmax weights)
 - Gradients flow back to neural predicates via PyTorch custom autograd
 
-#### Epistemic Logic (`xlog-elp`, planned)
+#### Epistemic Logic (EIR/GPU, v0.9.x accepted surface)
 
-XLOG will implement **epistemic logic programming with world views**:
+XLOG implements an accepted **epistemic logic programming** surface with world
+views through explicit EIR and GPU-backed execution paths:
 
-- **Modal operators**: `K l` (known: l is true in all answer sets), `M l` (possible: l is true in some answer set)
-- **Default semantics**: FAEEL-style founded world views (avoids self-supported world views)
-- **Compatibility mode**: Gelfond 1991 (G91) semantics for interoperability
+- **Modal operators**: `know atom(...)`, `possible atom(...)`, `not know atom(...)`, `not possible atom(...)`, and finite nested modal chains normalized by parity/duality.
+- **Default semantics**: FAEEL-style founded world views, including foundedness gates for self-support.
+- **Compatibility mode**: Gelfond 1991 (G91) semantics for explicit interoperability, including accepted self-supported `possible` cases in G91 mode.
+- **Execution surface**: EIR-derived candidate generation, value-level tuple-key membership, safe split/joint solving, same-name multi-arity disambiguation, determined-head stratification, and GPU-backed runtime/WCOJ dispatch for accepted v0.9.x programs.
 
 **Complexity**: World view existence is **Σ_P^3-complete**, requiring careful engineering.
 
-**Inference tiers (planned):**
+**Inference tiers:**
 
 | Tier | Name | Description | Feasibility Bounds |
 |------|------|-------------|--------------------|
@@ -374,6 +376,14 @@ Tier 4:         pyxlog ────────────> 9 crates (integrati
 
 **Wave 1 changes** (2026-03-10): removed `xlog-logic → xlog-runtime` (moved to dev-deps),
 removed `xlog-stats → xlog-cuda` (was unused), added `xlog-neural → xlog-core`.
+
+**v0.9.2 epistemic WFS boundary:** `xlog-gpu` intentionally has no `xlog-prob`
+dependency. Accepted cyclic negated-modal WFS execution must route through the
+GPU-backed WFS plan in `xlog-gpu`; the host `HashMap`/`HashSet` WFS implementation
+in `xlog-prob` remains a probabilistic/provenance subsystem and is not an accepted
+fallback for production epistemic execution. This boundary is not a
+device-resident/no-host-interaction WFS residency guarantee: host orchestration
+and metadata row-count reads may still participate in WFS convergence.
 
 ### Crate Responsibilities
 

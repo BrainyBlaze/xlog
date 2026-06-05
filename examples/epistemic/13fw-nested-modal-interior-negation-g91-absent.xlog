@@ -1,0 +1,8 @@
+// v0.9.2 ITEM C2: explicit G91 absent-target companion for interior negation.
+// `know not possible p()` dualizes to `not possible p()`.
+// Because p() is absent, q() is derived.
+#pragma epistemic_mode = g91
+pred p().
+pred q().
+q() :- know not possible p().
+?- q().

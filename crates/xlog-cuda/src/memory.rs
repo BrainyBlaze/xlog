@@ -55,6 +55,11 @@ pub struct GpuMemoryManager {
     budget: MemoryBudget,
     /// Currently allocated bytes (tracked atomically for thread safety)
     allocated: AtomicU64,
+    /// Count of `alloc` calls (device allocation requests). Resettable; used by
+    /// the GPU-resident MC engine's no-host gate to prove that **zero** device
+    /// allocations happen inside the measured region (all arenas are allocated
+    /// before it). Distinct from `allocated` (bytes).
+    alloc_count: AtomicU64,
     /// Optional v0.6 device runtime. When set, [`alloc_raw`]
     /// reserves through the runtime's resource stack in addition
     /// to enforcing the local budget; both must accept for the
@@ -311,6 +316,7 @@ impl GpuMemoryManager {
             device,
             budget,
             allocated: AtomicU64::new(0),
+            alloc_count: AtomicU64::new(0),
             runtime: None,
         }
     }
@@ -335,6 +341,7 @@ impl GpuMemoryManager {
             device,
             budget,
             allocated: AtomicU64::new(0),
+            alloc_count: AtomicU64::new(0),
             runtime: Some(runtime),
         }
     }
@@ -373,6 +380,9 @@ impl GpuMemoryManager {
         self: &Arc<Self>,
         len: usize,
     ) -> Result<TrackedCudaSlice<T>> {
+        // Count every device allocation request (resettable no-host-gate counter).
+        self.alloc_count.fetch_add(1, Ordering::Relaxed);
+
         // Fix Issue 2: Use checked_mul to prevent integer overflow before cast
         let bytes = (len as u64)
             .checked_mul(std::mem::size_of::<T>() as u64)
@@ -533,6 +543,18 @@ impl GpuMemoryManager {
     /// Get the current allocated memory in bytes
     pub fn allocated_bytes(&self) -> u64 {
         self.allocated.load(Ordering::SeqCst)
+    }
+
+    /// Number of `alloc` calls issued so far (device allocation requests).
+    /// The GPU-resident MC engine snapshots this around the measured region to
+    /// prove `per_operator_host_allocations == 0` (all arenas pre-allocated).
+    pub fn alloc_count(&self) -> u64 {
+        self.alloc_count.load(Ordering::Relaxed)
+    }
+
+    /// Reset the allocation-request counter to zero.
+    pub fn reset_alloc_count(&self) {
+        self.alloc_count.store(0, Ordering::Relaxed);
     }
 
     /// Get the memory budget

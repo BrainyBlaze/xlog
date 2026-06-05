@@ -1,0 +1,19 @@
+// same-name cross: unary not-possible/absent, binary not-know/present
+// v0.9.2 same-name multi-arity exhaustive matrix cell.
+// The queried tuple is p(1) for arity 1 and p(1,10) for arity 2;
+// nonmatching distractor facts keep both p/1 and p/2 present in the relation store.
+#pragma epistemic_mode = faeel
+
+pred p(u32).
+pred p(u32, u32).
+pred case_id(u32).
+pred holds(u32).
+
+p(2).
+p(1, 10).
+case_id(1).
+
+// Expected holds rows: 0.
+holds(ID) :- case_id(ID), not possible p(1), not know p(1, 10).
+
+?- holds(ID).

@@ -137,6 +137,7 @@ fn workspace_layout_sizes_all_required_epistemic_gpu_buffers() {
         vec![EpistemicReductionPlan {
             rule_index: 0,
             head_predicate: "out".to_string(),
+            public_head_arity: 1,
             relational_body_atoms: 3,
             wcoj_status: EpistemicWcojReductionStatus::RequiresPlannerEligibility,
         }],
@@ -167,6 +168,7 @@ fn workspace_layout_rejects_zero_candidate_capacity() {
         vec![EpistemicReductionPlan {
             rule_index: 0,
             head_predicate: "out".to_string(),
+            public_head_arity: 1,
             relational_body_atoms: 1,
             wcoj_status: EpistemicWcojReductionStatus::NotWcojCandidate,
         }],
@@ -451,6 +453,662 @@ fn parsed_epistemic_kclique_reduction_dispatches_wcoj_runtime_path() {
     result
         .require_runtime_dispatch_certification()
         .expect("parsed K5 runtime result should retain dispatch and semantic certification");
+}
+
+#[cfg(feature = "epistemic-logic-tests")]
+#[test]
+fn single_head_modal_only_bound_over_invariant_materializes_q_extension_on_device() {
+    // v0.9.2 sound consequence of the invariant-resolve: a single epistemic head whose
+    // ONLY binder of its output variable is a POSITIVE modal over an INVARIANT relation
+    // is accepted and materializes the gated extension. For invariant `q`,
+    // `possible q(X) == know q(X) == q(X)`, so `p(X) :- possible q(X)` yields p = q.
+    // EXACT tuples (non-tautological: p mirrors q's full extension via the gate).
+    //   q = {1, 2, 3}  ->  p = {1, 2, 3}
+    let Some(fixture) = runtime_fixture() else {
+        return;
+    };
+    let program = parse_program(
+        r#"
+        #pragma epistemic_mode = faeel
+        pred p(u32).
+        pred q(u32).
+        q(1). q(2). q(3).
+        p(X) :- possible q(X).
+        "#,
+    )
+    .expect("parse single-head modal-only-bound-over-invariant program");
+
+    let executable = compile_epistemic_gpu_execution(&program)
+        .expect("modal-only-bound output over an invariant relation must compile");
+
+    let mut executor = Executor::new(Arc::clone(&fixture.provider));
+    for (name, rel) in &executable.relation_ids {
+        executor.register_relation(*rel, name);
+    }
+    executor.put_relation("q", upload_unary_u32(&fixture.memory, &[1, 2, 3], "x"));
+
+    let result = executor
+        .execute_epistemic_gpu_execution(
+            &executable,
+            EpistemicGpuWorkspaceCapacities {
+                max_candidates: 8,
+                max_worlds: 2,
+                max_models_per_reduction: 8,
+            },
+        )
+        .expect("single-head invariant-resolve component must execute on device");
+
+    result
+        .require_runtime_dispatch_certification()
+        .expect("runtime result must retain dispatch certification");
+    assert_eq!(result.semantic_trace.cpu_candidate_enumerations, 0);
+    assert_eq!(result.semantic_trace.cpu_world_view_validations, 0);
+    assert!(result.prepared.preflight.cpu_fallbacks.is_zero());
+
+    let mut rows = fixture
+        .provider
+        .download_column::<u32>(&result.final_output, 0)
+        .expect("download p column");
+    rows.sort_unstable();
+    assert_eq!(
+        rows,
+        vec![1u32, 2u32, 3u32],
+        "p = possible q = q's full extension {{1,2,3}}"
+    );
+}
+
+#[cfg(feature = "epistemic-logic-tests")]
+#[test]
+fn nested_modal_chain_collapses_and_materializes_on_device_no_cpu_fallback() {
+    // v0.9.2 ITEM C: a NESTED modal CHAIN executes on the GPU path via the sound
+    // KD45/S5 collapse, with NO CPU fallback and NO CPU candidate enumeration.
+    //
+    // `p(X) :- know possible q(X)` collapses (KM == M, inner operator wins) to
+    // `p(X) :- possible q(X)`. Over an INVARIANT `q`, `possible q == q`, so the
+    // collapsed program routes through the EXACT single-level invariant path:
+    //   q = {1, 2, 3}  ->  p = {1, 2, 3}.
+    // The collapse adds no new evaluator and no CPU work: the REAL counters must be
+    // zero, proving the GPU device path is used end-to-end.
+    let Some(fixture) = runtime_fixture() else {
+        return;
+    };
+    let program = parse_program(
+        r#"
+        #pragma epistemic_mode = faeel
+        pred p(u32).
+        pred q(u32).
+        q(1). q(2). q(3).
+        p(X) :- know possible q(X).
+        "#,
+    )
+    .expect("parse nested-modal-chain program");
+
+    // The chain must normalize to a SINGLE epistemic literal at the AST boundary,
+    // and the surviving operator must be the INNER one (`possible`, not `know`).
+    // This guards the collapse DIRECTION at the device-test layer too: a wrong
+    // (outer-op) collapse would leave `know` here.
+    let modal: Vec<_> = program
+        .rules
+        .iter()
+        .flat_map(|rule| rule.body.iter())
+        .filter_map(|lit| match lit {
+            xlog_logic::ast::BodyLiteral::Epistemic(e) => Some((e.op, e.negated)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        modal,
+        vec![(xlog_logic::ast::EpistemicOp::Possible, false)],
+        "know possible q must collapse to a single `possible q` literal (inner op wins)"
+    );
+
+    let executable = compile_epistemic_gpu_execution(&program)
+        .expect("collapsed nested-modal chain must compile to GPU execution");
+
+    let mut executor = Executor::new(Arc::clone(&fixture.provider));
+    for (name, rel) in &executable.relation_ids {
+        executor.register_relation(*rel, name);
+    }
+    executor.put_relation("q", upload_unary_u32(&fixture.memory, &[1, 2, 3], "x"));
+
+    let result = executor
+        .execute_epistemic_gpu_execution(
+            &executable,
+            EpistemicGpuWorkspaceCapacities {
+                max_candidates: 8,
+                max_worlds: 2,
+                max_models_per_reduction: 8,
+            },
+        )
+        .expect("collapsed nested-modal chain must execute on device");
+
+    result
+        .require_runtime_dispatch_certification()
+        .expect("runtime result must retain dispatch certification");
+    // REAL no-fallback counters (NOT the cpu_fallback_total_zero JSON string).
+    assert_eq!(result.semantic_trace.cpu_candidate_enumerations, 0);
+    assert_eq!(result.semantic_trace.cpu_world_view_validations, 0);
+    assert!(result.prepared.preflight.cpu_fallbacks.is_zero());
+
+    let mut rows = fixture
+        .provider
+        .download_column::<u32>(&result.final_output, 0)
+        .expect("download p column");
+    rows.sort_unstable();
+    assert_eq!(
+        rows,
+        vec![1u32, 2u32, 3u32],
+        "know possible q == possible q == q (invariant) -> p = {{1,2,3}}"
+    );
+}
+
+#[cfg(feature = "epistemic-logic-tests")]
+#[test]
+fn determined_multicol_binding_modal_materializes_higher_stratum_on_device() {
+    // v0.9.2 DETERMINED-EPISTEMIC MULTI-COLUMN BINDING (example 28), POST-MATERIALIZATION
+    // higher stratum in isolation. The full program is
+    //   r(X, Y) :- edge(X, Y), know flag(X).   -- DETERMINED multi-column epistemic head
+    //   out(X)  :- node(X), know r(X, Y).        -- modal BINDS the extra output column Y
+    // and is executed by the stratified driver (logic.rs), which materializes the GATED
+    // `r` into the store as a base relation BEFORE running the `out` stratum (the theorem
+    // applied ONCE at the store boundary). Stratification orchestration sits ABOVE this
+    // workspace harness, so this test exercises the HIGHER stratum directly: `r` is
+    // present as a materialized base relation `{(1,2),(1,3)}` and `out`'s augmenting
+    // `know r(X, Y)` binds `Y` via the existing EGB-02 membership/join over that base
+    // (the strict invariant resolve — `r` is invariant once materialized). This is the
+    // exact GPU mechanism the schema fix unblocks end-to-end.
+    //
+    //   node = {1, 2, 3}, r = {(1,2),(1,3)}  ->  out = {X in node : exists Y r(X,Y)} = {1}
+    // ANTI-GAMING: out STRICTLY OMITS nodes 2 and 3 (the `know r` gate is load-bearing —
+    // dropping the literal would give out = node = {1,2,3}); the binding `Y` column is
+    // projected away so out's tuples differ from the raw `r` base.
+    let Some(fixture) = runtime_fixture() else {
+        return;
+    };
+    let program = parse_program(
+        r#"
+        #pragma epistemic_mode = faeel
+        pred node(u32).
+        pred r(u32, u32).
+        pred out(u32).
+        node(1). node(2). node(3).
+        r(1, 2). r(1, 3).
+        out(X) :- node(X), know r(X, Y).
+        "#,
+    )
+    .expect("parse determined-multicol higher-stratum program");
+
+    let executable = compile_epistemic_gpu_execution(&program)
+        .expect("augmenting modal binding output over a (materialized) base relation must compile");
+    // The augmenting modal binds Y, so the plan carries a public projection that drops
+    // the binding column down to out's public arity 1.
+    assert!(executable.gpu_plan.final_output_columns.is_some());
+
+    let mut executor = Executor::new(Arc::clone(&fixture.provider));
+    for (name, rel) in &executable.relation_ids {
+        executor.register_relation(*rel, name);
+    }
+    executor.put_relation("node", upload_unary_u32(&fixture.memory, &[1, 2, 3], "x"));
+    executor.put_relation(
+        "r",
+        upload_binary_u32(&fixture.memory, &[(1, 2), (1, 3)], "x", "y"),
+    );
+
+    let result = executor
+        .execute_epistemic_gpu_execution(
+            &executable,
+            EpistemicGpuWorkspaceCapacities {
+                max_candidates: 8,
+                max_worlds: 2,
+                max_models_per_reduction: 8,
+            },
+        )
+        .expect("determined-multicol binding higher stratum must execute on device");
+
+    result
+        .require_runtime_dispatch_certification()
+        .expect("runtime result must retain dispatch certification");
+    // ANTI-GAMING: zero CPU fallback / zero CPU candidate enumeration for the binding join.
+    assert_eq!(result.semantic_trace.cpu_candidate_enumerations, 0);
+    assert_eq!(result.semantic_trace.cpu_world_view_validations, 0);
+    assert!(result.prepared.preflight.cpu_fallbacks.is_zero());
+
+    let mut rows = fixture
+        .provider
+        .download_column::<u32>(&result.final_output, 0)
+        .expect("download out column");
+    rows.sort_unstable();
+    assert_eq!(
+        rows,
+        vec![1u32],
+        "out = {{X in node : exists Y r(X,Y)}} = {{1}} (gate omits nodes 2 and 3)"
+    );
+}
+
+#[cfg(feature = "epistemic-logic-tests")]
+#[test]
+fn augmented_multi_head_per_head_projection_materializes_differing_arity_on_device() {
+    // PER-HEAD AUGMENTED PROJECTION: two coupled heads share the base modal predicate
+    // `edge/2` but have DIFFERING public arity, so their augmented reduced relations
+    // need DIFFERENT output projections:
+    //   one_hop(X)    :- node(X),  know edge(X, Y).      -- public arity 1 -> project [0]
+    //   pair(X, Y)    :- color(X), possible edge(X, Y).  -- public arity 2 -> project [0,1]
+    // The plan-global `final_output_columns` (derived from the first head) cannot
+    // project both; the per-head materialization projects each head by its OWN
+    // `public_head_arity`. This is the genuine differing-arity proof (the shared-modal
+    // split-test case has coincident projections and cannot distinguish the bug).
+    //
+    //   node = {1, 2}, color = {2, 3}, edge = {(1,10),(2,20),(2,21),(3,30)}.
+    //   one_hop = {X in node : exists Y edge(X,Y)}        -> {1, 2}
+    //   pair    = {(X,Y) : X in color, edge(X,Y)}         -> {(2,20),(2,21),(3,30)}
+    // ANTI-GAMING: each head's tuples differ from the raw EDB input (one_hop drops the
+    // edge target column; pair keeps both columns but is filtered by `color`).
+    let Some(fixture) = runtime_fixture() else {
+        return;
+    };
+    let program = parse_program(
+        r#"
+        #pragma epistemic_mode = faeel
+        pred node(u32).
+        pred color(u32).
+        pred edge(u32, u32).
+        pred one_hop(u32).
+        pred pair(u32, u32).
+        node(1). node(2).
+        color(2). color(3).
+        edge(1, 10). edge(2, 20). edge(2, 21). edge(3, 30).
+        one_hop(X) :- node(X), know edge(X, Y).
+        pair(X, Y) :- color(X), possible edge(X, Y).
+        "#,
+    )
+    .expect("parse augmented differing-arity two-head program");
+
+    let split = compile_epistemic_gpu_split_execution(&program)
+        .expect("augmented multi-head coupling must joint-solve with per-head projection");
+    assert_eq!(
+        split.components.len(),
+        1,
+        "coupled heads share ONE component"
+    );
+    let executable = &split.components[0].executable;
+    // Plan carries a public projection (augmentation present) and records each head's
+    // own public arity (1 for one_hop, 2 for pair).
+    assert!(executable.gpu_plan.final_output_columns.is_some());
+    let arity_by_head: std::collections::BTreeMap<&str, usize> = executable
+        .gpu_plan
+        .reductions
+        .iter()
+        .map(|r| (r.head_predicate.as_str(), r.public_head_arity))
+        .collect();
+    assert_eq!(arity_by_head.get("one_hop"), Some(&1));
+    assert_eq!(arity_by_head.get("pair"), Some(&2));
+
+    let mut executor = Executor::new(Arc::clone(&fixture.provider));
+    for (name, rel) in &executable.relation_ids {
+        executor.register_relation(*rel, name);
+    }
+    executor.put_relation("node", upload_unary_u32(&fixture.memory, &[1, 2], "x"));
+    executor.put_relation("color", upload_unary_u32(&fixture.memory, &[2, 3], "x"));
+    executor.put_relation(
+        "edge",
+        upload_binary_u32(
+            &fixture.memory,
+            &[(1, 10), (2, 20), (2, 21), (3, 30)],
+            "x",
+            "y",
+        ),
+    );
+
+    let result = executor
+        .execute_epistemic_gpu_execution(
+            executable,
+            EpistemicGpuWorkspaceCapacities {
+                max_candidates: 8,
+                max_worlds: 2,
+                max_models_per_reduction: 8,
+            },
+        )
+        .expect("augmented multi-head component must execute on device");
+
+    result
+        .require_runtime_dispatch_certification()
+        .expect("per-head projection runtime result must retain dispatch certification");
+    // ANTI-GAMING: zero CPU fallback for the joint enumeration / validation.
+    assert_eq!(result.semantic_trace.cpu_candidate_enumerations, 0);
+    assert_eq!(result.semantic_trace.cpu_world_view_validations, 0);
+    assert!(result.prepared.preflight.cpu_fallbacks.is_zero());
+    assert_eq!(result.transfer_budget.tracked_dtoh_calls, 0);
+    assert_eq!(result.additional_head_outputs.len(), 1);
+
+    // Primary head is the LAST reduction; collect its tuples by arity.
+    let primary_head = executable
+        .gpu_plan
+        .reductions
+        .last()
+        .unwrap()
+        .head_predicate
+        .clone();
+
+    // Helper: download `arity` columns from a buffer as sorted tuples.
+    let download_unary = |buffer: &CudaBuffer| -> Vec<u32> {
+        let mut rows = fixture
+            .provider
+            .download_column::<u32>(buffer, 0)
+            .expect("download col0");
+        rows.sort_unstable();
+        rows
+    };
+    let download_pairs = |buffer: &CudaBuffer| -> Vec<(u32, u32)> {
+        let c0 = fixture
+            .provider
+            .download_column::<u32>(buffer, 0)
+            .expect("download col0");
+        let c1 = fixture
+            .provider
+            .download_column::<u32>(buffer, 1)
+            .expect("download col1");
+        let mut pairs: Vec<(u32, u32)> = c0.into_iter().zip(c1).collect();
+        pairs.sort_unstable();
+        pairs
+    };
+
+    // Locate each head's buffer (primary in final_output, the other in additionals).
+    let (one_hop_buf, pair_buf): (&CudaBuffer, &CudaBuffer) = if primary_head == "pair" {
+        assert_eq!(result.additional_head_outputs[0].0, "one_hop");
+        (&result.additional_head_outputs[0].1, &result.final_output)
+    } else {
+        assert_eq!(primary_head, "one_hop");
+        assert_eq!(result.additional_head_outputs[0].0, "pair");
+        (&result.final_output, &result.additional_head_outputs[0].1)
+    };
+
+    // EXACT per-head tuples with DIFFERING arity, each projected by its own public arity.
+    assert_eq!(
+        download_unary(one_hop_buf),
+        vec![1u32, 2u32],
+        "one_hop projects public arity 1 -> {{1,2}}"
+    );
+    assert_eq!(
+        download_pairs(pair_buf),
+        vec![(2u32, 20u32), (2u32, 21u32), (3u32, 30u32)],
+        "pair projects public arity 2 -> {{(2,20),(2,21),(3,30)}}"
+    );
+}
+
+#[cfg(feature = "epistemic-logic-tests")]
+#[test]
+fn shared_modal_two_head_coupling_joint_solves_multi_output_on_device() {
+    // v0.9.2 Bundle 3 COMPLETION (K1/K2): two epistemic heads share ONE base modal
+    // predicate `q` (SharedModalPredicate coalesce). The coalesced component is
+    // JOINT-SOLVED: ONE candidate enumeration + world-view validation over the
+    // combined modal literals (`know q`, `possible q`), then EACH head relation is
+    // materialized against the SAME accepted world view. `known` and `maybe` must
+    // both yield their exact tuples, with zero CPU fallback.
+    //
+    //   node = {1, 2, 3}, color = {2, 3}, q = {1, 2}.
+    //   known(X) :- node(X),  know q(X).      -> {1, 2}
+    //   maybe(X) :- color(X), possible q(X).  -> {2}
+    let Some(fixture) = runtime_fixture() else {
+        return;
+    };
+    let program = parse_program(
+        r#"
+        #pragma epistemic_mode = faeel
+        pred node(u32).
+        pred color(u32).
+        pred q(u32).
+        pred known(u32).
+        pred maybe(u32).
+        node(1). node(2). node(3).
+        color(2). color(3).
+        q(1). q(2).
+        known(X) :- node(X), know q(X).
+        maybe(X) :- color(X), possible q(X).
+        "#,
+    )
+    .expect("parse shared-modal two-head joint-solving program");
+
+    let split = compile_epistemic_gpu_split_execution(&program)
+        .expect("shared-modal two-head coupling must joint-solve through split compile");
+    assert_eq!(
+        split.components.len(),
+        1,
+        "coupled heads must share ONE jointly-enumerated component"
+    );
+    let executable = &split.components[0].executable;
+    // The single joint plan carries BOTH output heads.
+    let plan_heads: std::collections::BTreeSet<&str> = executable
+        .gpu_plan
+        .reductions
+        .iter()
+        .map(|reduction| reduction.head_predicate.as_str())
+        .collect();
+    assert_eq!(
+        plan_heads,
+        ["known", "maybe"].into_iter().collect(),
+        "joint plan must enumerate both coupled heads"
+    );
+
+    let mut executor = Executor::new(Arc::clone(&fixture.provider));
+    for (name, rel) in &executable.relation_ids {
+        executor.register_relation(*rel, name);
+    }
+    executor.put_relation("node", upload_unary_u32(&fixture.memory, &[1, 2, 3], "x"));
+    executor.put_relation("color", upload_unary_u32(&fixture.memory, &[2, 3], "x"));
+    executor.put_relation("q", upload_unary_u32(&fixture.memory, &[1, 2], "x"));
+
+    let result = executor
+        .execute_epistemic_gpu_execution(
+            executable,
+            EpistemicGpuWorkspaceCapacities {
+                max_candidates: 4,
+                max_worlds: 2,
+                max_models_per_reduction: 4,
+            },
+        )
+        .expect("joint multi-head component must execute on device");
+
+    result
+        .require_runtime_dispatch_certification()
+        .expect("joint multi-head runtime result must retain dispatch certification");
+    // ANTI-GAMING: zero CPU fallback for the joint enumeration / validation.
+    assert_eq!(result.semantic_trace.cpu_candidate_enumerations, 0);
+    assert_eq!(result.semantic_trace.cpu_world_view_validations, 0);
+    assert!(result.prepared.preflight.cpu_fallbacks.is_zero());
+    assert_eq!(result.transfer_budget.tracked_dtoh_calls, 0);
+
+    // Exactly one ADDITIONAL coupled head besides the primary.
+    assert_eq!(
+        result.additional_head_outputs.len(),
+        1,
+        "joint multi-head result must materialize the second coupled head"
+    );
+
+    // Gather (head -> sorted tuples) from primary `final_output` + additional head.
+    let primary_head = executable
+        .gpu_plan
+        .reductions
+        .last()
+        .unwrap()
+        .head_predicate
+        .clone();
+    let mut by_head: std::collections::BTreeMap<String, Vec<u32>> =
+        std::collections::BTreeMap::new();
+    let mut primary_rows = fixture
+        .provider
+        .download_column::<u32>(&result.final_output, 0)
+        .expect("download primary head column");
+    primary_rows.sort_unstable();
+    by_head.insert(primary_head, primary_rows);
+    for (head, buffer) in &result.additional_head_outputs {
+        let mut rows = fixture
+            .provider
+            .download_column::<u32>(buffer, 0)
+            .expect("download additional head column");
+        rows.sort_unstable();
+        by_head.insert(head.clone(), rows);
+    }
+
+    // K1: EXACT tuples for EVERY coupled head, materialized against the shared
+    // accepted world view.
+    assert_eq!(
+        by_head.get("known").map(Vec::as_slice),
+        Some([1u32, 2u32].as_slice()),
+        "known = node ∩ know q = {{1,2}}; got {:?}",
+        by_head.get("known")
+    );
+    assert_eq!(
+        by_head.get("maybe").map(Vec::as_slice),
+        Some([2u32].as_slice()),
+        "maybe = color ∩ possible q = {{2}}; got {:?}",
+        by_head.get("maybe")
+    );
+}
+
+#[cfg(feature = "epistemic-logic-tests")]
+#[test]
+fn joint_multi_head_output_equals_per_head_split_reference_on_device() {
+    // v0.9.2 Bundle 3 COMPLETION (K2): split-vs-unsplit OUTPUT equivalence.
+    //
+    // REFERENCE = the per-head SPLIT evaluation: each coupled head solved as its
+    // OWN single-head epistemic program (the semantically-correct independent
+    // result against the shared base modal predicate `q`). This reference is kept
+    // OUT of the production path -- production JOINT-SOLVES one component.
+    //
+    // The joint multi-head result (one enumeration, per-head materialization) must
+    // equal the per-head reference EXACTLY for EVERY head. Because the modal
+    // predicate `q` is a base/invariant relation, the accepted world view is
+    // identical across the joint and per-head evaluations, so equivalence holds.
+    let Some(fixture) = runtime_fixture() else {
+        return;
+    };
+
+    let node = [1u32, 2, 3];
+    let color = [2u32, 3];
+    let q = [1u32, 2];
+
+    // --- JOINT (production) path: one coalesced multi-head component. ---
+    let joint_program = parse_program(
+        r#"
+        #pragma epistemic_mode = faeel
+        pred node(u32).
+        pred color(u32).
+        pred q(u32).
+        pred known(u32).
+        pred maybe(u32).
+        node(1). node(2). node(3).
+        color(2). color(3).
+        q(1). q(2).
+        known(X) :- node(X), know q(X).
+        maybe(X) :- color(X), possible q(X).
+        "#,
+    )
+    .expect("parse joint program");
+    let joint = compile_epistemic_gpu_split_execution(&joint_program)
+        .expect("joint program must compile through joint-solving split path");
+    let joint_exec = &joint.components[0].executable;
+    let mut joint_executor = Executor::new(Arc::clone(&fixture.provider));
+    for (name, rel) in &joint_exec.relation_ids {
+        joint_executor.register_relation(*rel, name);
+    }
+    joint_executor.put_relation("node", upload_unary_u32(&fixture.memory, &node, "x"));
+    joint_executor.put_relation("color", upload_unary_u32(&fixture.memory, &color, "x"));
+    joint_executor.put_relation("q", upload_unary_u32(&fixture.memory, &q, "x"));
+    let joint_result = joint_executor
+        .execute_epistemic_gpu_execution(
+            joint_exec,
+            EpistemicGpuWorkspaceCapacities {
+                max_candidates: 4,
+                max_worlds: 2,
+                max_models_per_reduction: 4,
+            },
+        )
+        .expect("joint multi-head execution");
+
+    let mut joint_by_head: std::collections::BTreeMap<String, Vec<u32>> =
+        std::collections::BTreeMap::new();
+    let primary_head = joint_exec
+        .gpu_plan
+        .reductions
+        .last()
+        .unwrap()
+        .head_predicate
+        .clone();
+    let mut primary = fixture
+        .provider
+        .download_column::<u32>(&joint_result.final_output, 0)
+        .expect("download joint primary head");
+    primary.sort_unstable();
+    joint_by_head.insert(primary_head, primary);
+    for (head, buffer) in &joint_result.additional_head_outputs {
+        let mut rows = fixture
+            .provider
+            .download_column::<u32>(buffer, 0)
+            .expect("download joint additional head");
+        rows.sort_unstable();
+        joint_by_head.insert(head.clone(), rows);
+    }
+
+    // --- REFERENCE: each head as its OWN single-head epistemic program. ---
+    let mut reference_by_head: std::collections::BTreeMap<String, Vec<u32>> =
+        std::collections::BTreeMap::new();
+    let head_programs = [
+        (
+            "known",
+            r#"
+            #pragma epistemic_mode = faeel
+            pred node(u32). pred q(u32). pred known(u32).
+            node(1). node(2). node(3). q(1). q(2).
+            known(X) :- node(X), know q(X).
+            "#,
+        ),
+        (
+            "maybe",
+            r#"
+            #pragma epistemic_mode = faeel
+            pred color(u32). pred q(u32). pred maybe(u32).
+            color(2). color(3). q(1). q(2).
+            maybe(X) :- color(X), possible q(X).
+            "#,
+        ),
+    ];
+    for (head, src) in head_programs {
+        let program = parse_program(src).expect("parse per-head reference program");
+        let executable =
+            compile_epistemic_gpu_execution(&program).expect("compile per-head reference");
+        let mut executor = Executor::new(Arc::clone(&fixture.provider));
+        for (name, rel) in &executable.relation_ids {
+            executor.register_relation(*rel, name);
+        }
+        executor.put_relation("node", upload_unary_u32(&fixture.memory, &node, "x"));
+        executor.put_relation("color", upload_unary_u32(&fixture.memory, &color, "x"));
+        executor.put_relation("q", upload_unary_u32(&fixture.memory, &q, "x"));
+        let result = executor
+            .execute_epistemic_gpu_execution(
+                &executable,
+                EpistemicGpuWorkspaceCapacities {
+                    max_candidates: 4,
+                    max_worlds: 2,
+                    max_models_per_reduction: 4,
+                },
+            )
+            .expect("per-head reference execution");
+        let mut rows = fixture
+            .provider
+            .download_column::<u32>(&result.final_output, 0)
+            .expect("download reference head");
+        rows.sort_unstable();
+        reference_by_head.insert(head.to_string(), rows);
+    }
+
+    // K2: joint multi-head output == per-head split reference, EXACT rows per head.
+    assert_eq!(
+        joint_by_head, reference_by_head,
+        "joint multi-head output must equal per-head split reference exactly"
+    );
+    // Sanity: the reference is non-trivial and the modalities genuinely differ.
+    assert_eq!(reference_by_head["known"], vec![1, 2]);
+    assert_eq!(reference_by_head["maybe"], vec![2]);
 }
 
 #[test]
@@ -925,6 +1583,321 @@ fn parsed_split_components_execute_through_gpu_runtime_batch() {
             .require_runtime_dispatch_certification()
             .expect("parsed split component runtime evidence must remain certified");
     }
+}
+
+/// EGB-05 K1 equivalence: a split component's GPU output must be *row-identical*
+/// to running that component's isolated subprogram through the UNSPLIT
+/// single-execution path.
+///
+/// The unsplit engine rejects multi-output programs
+/// (`require_single_epistemic_output_relation`), so whole-program "split vs
+/// unsplit" cannot be expressed directly for an independent 2-component program.
+/// Per-component identity here, combined with exactly-once recomposition
+/// coverage (logic-side `recomposition_covers_each_relevant_rule_exactly_once`),
+/// establishes whole-program equivalence. Both sides are real device runs;
+/// neither output is hardcoded.
+#[cfg(feature = "epistemic-logic-tests")]
+#[test]
+fn split_component_outputs_match_unsplit_single_execution_outputs() {
+    let Some(fixture) = runtime_fixture() else {
+        return;
+    };
+    let program = parse_program(
+        r#"
+        pred left_edge(u32, u32).
+        pred left_gate(u32).
+        pred left_out(u32).
+        pred right_edge(u32, u32).
+        pred right_gate(u32).
+        pred right_out(u32).
+
+        left_out(Y) :- left_edge(X, Y), know left_gate(X).
+        right_out(Y) :- right_edge(X, Y), know right_gate(X).
+        "#,
+    )
+    .expect("parse independent two-component equivalence program");
+    let split = compile_epistemic_gpu_split_execution(&program).expect("compile split components");
+    assert_eq!(split.components.len(), 2);
+    assert_eq!(split.recomposed_rule_indices(), vec![0, 1]);
+
+    let left_edge_rows = [(1u32, 10u32), (2, 20), (3, 30), (4, 10)];
+    let left_gate_rows = [1u32, 3, 4];
+    let right_edge_rows = [(5u32, 40u32), (6, 50), (7, 60), (8, 40)];
+    let right_gate_rows = [5u32, 7];
+
+    // --- SPLIT side: run the whole program through the batch adapter. ---
+    let mut split_executor = Executor::new(Arc::clone(&fixture.provider));
+    for component in split.recomposed_components() {
+        for (name, rel) in &component.executable.relation_ids {
+            split_executor.register_relation(*rel, name);
+        }
+    }
+    split_executor.put_relation(
+        "left_edge",
+        upload_binary_u32(&fixture.memory, &left_edge_rows, "x", "y"),
+    );
+    split_executor.put_relation(
+        "left_gate",
+        upload_unary_u32(&fixture.memory, &left_gate_rows, "x"),
+    );
+    split_executor.put_relation(
+        "right_edge",
+        upload_binary_u32(&fixture.memory, &right_edge_rows, "x", "y"),
+    );
+    split_executor.put_relation(
+        "right_gate",
+        upload_unary_u32(&fixture.memory, &right_gate_rows, "x"),
+    );
+    let recomposed = split.recomposed_components();
+    let executables: Vec<_> = recomposed
+        .iter()
+        .map(|component| &component.executable)
+        .collect();
+    let batch = split_executor
+        .execute_epistemic_gpu_execution_batch_with_trace(
+            &executables,
+            EpistemicGpuWorkspaceCapacities {
+                max_candidates: 2,
+                max_worlds: 2,
+                max_models_per_reduction: 2,
+            },
+        )
+        .expect("split components should execute through GPU runtime batch adapter");
+    assert_eq!(batch.results.len(), 2);
+    // K4 fallback safety: split orchestration must keep CPU fallbacks at zero.
+    assert_eq!(batch.trace.cpu_recomposition_steps, 0);
+    assert_eq!(batch.trace.cpu_candidate_enumerations, 0);
+    assert_eq!(batch.trace.cpu_world_view_validations, 0);
+    assert_eq!(batch.trace.cpu_solver_search_fallbacks, 0);
+    assert_eq!(batch.trace.cpu_probability_recomputations, 0);
+
+    let mut split_left = fixture
+        .provider
+        .download_column::<u32>(&batch.results[0].final_output, 0)
+        .expect("download split left output");
+    let mut split_right = fixture
+        .provider
+        .download_column::<u32>(&batch.results[1].final_output, 0)
+        .expect("download split right output");
+    split_left.sort_unstable();
+    split_right.sort_unstable();
+
+    // --- UNSPLIT side: run each component's isolated subprogram through the
+    // single-execution path and compare row-for-row. ---
+    let unsplit_left = run_unsplit_single_component_output(
+        &fixture,
+        r#"
+        pred left_edge(u32, u32).
+        pred left_gate(u32).
+        pred left_out(u32).
+        left_out(Y) :- left_edge(X, Y), know left_gate(X).
+        "#,
+        &[
+            ("left_edge", &binary(&left_edge_rows)),
+            ("left_gate", &unary(&left_gate_rows)),
+        ],
+    );
+    let unsplit_right = run_unsplit_single_component_output(
+        &fixture,
+        r#"
+        pred right_edge(u32, u32).
+        pred right_gate(u32).
+        pred right_out(u32).
+        right_out(Y) :- right_edge(X, Y), know right_gate(X).
+        "#,
+        &[
+            ("right_edge", &binary(&right_edge_rows)),
+            ("right_gate", &unary(&right_gate_rows)),
+        ],
+    );
+
+    assert_eq!(
+        split_left, unsplit_left,
+        "split left component must equal unsplit single-execution output"
+    );
+    assert_eq!(
+        split_right, unsplit_right,
+        "split right component must equal unsplit single-execution output"
+    );
+    // Sanity: outputs are non-empty derived rows (not a vacuous match).
+    assert!(!split_left.is_empty());
+    assert!(!split_right.is_empty());
+
+    for result in &batch.results {
+        assert_eq!(result.semantic_trace.cpu_candidate_enumerations, 0);
+        assert_eq!(result.semantic_trace.cpu_world_view_validations, 0);
+        result
+            .require_runtime_dispatch_certification()
+            .expect("split equivalence component evidence must remain certified");
+    }
+}
+
+/// v0.9.2 Bundle 3 K2: split-vs-unsplit OUTPUT equivalence for the ACCEPTED
+/// cross-component coupling case.
+///
+/// The accepted coupling (`trusted(X) :- node(X), know vetted(X). report(X) :-
+/// trusted(X).`) coalesces the epistemic-derived head `trusted` and its ordinary
+/// consumer `report` into ONE dependency component, but it has exactly ONE
+/// epistemic output head, so the WHOLE program compiles through BOTH the
+/// monolithic single-execution path (`compile_epistemic_gpu_execution`) and the
+/// split path (`compile_epistemic_gpu_split_execution`). This test runs both on
+/// the device and asserts the epistemic output relation is row-identical -- the
+/// coalesced split is recomposition-equivalent to the unsplit program, not a
+/// behavioral change. Both sides are real device runs; neither is hardcoded.
+#[cfg(feature = "epistemic-logic-tests")]
+#[test]
+fn accepted_cross_component_coupling_split_matches_unsplit_output() {
+    let Some(fixture) = runtime_fixture() else {
+        return;
+    };
+    let source = r#"
+        pred node(u32).
+        pred vetted(u32).
+        pred trusted(u32).
+        pred report(u32).
+        trusted(X) :- node(X), know vetted(X).
+        report(X) :- trusted(X).
+    "#;
+    let node_rows = [1u32, 2, 3];
+    let vetted_rows = [1u32, 3];
+    let caps = EpistemicGpuWorkspaceCapacities {
+        max_candidates: 2,
+        max_worlds: 2,
+        max_models_per_reduction: 2,
+    };
+
+    // --- UNSPLIT side: whole program through the monolithic single-execution path. ---
+    let unsplit_output = run_unsplit_single_component_output_with_caps(
+        &fixture,
+        source,
+        &[
+            ("node", &unary(&node_rows)),
+            ("vetted", &unary(&vetted_rows)),
+        ],
+        caps,
+    );
+
+    // --- SPLIT side: whole program through the split path's coalesced component. ---
+    let program = parse_program(source).expect("parse accepted coupling program");
+    let split =
+        compile_epistemic_gpu_split_execution(&program).expect("accepted coupling must compile");
+    // The coupling coalesces into a single epistemic component (recomposition
+    // covers both source rules exactly once).
+    assert_eq!(split.components.len(), 1);
+    assert_eq!(split.recomposed_rule_indices(), vec![0, 1]);
+    let mut split_executor = Executor::new(Arc::clone(&fixture.provider));
+    for component in split.recomposed_components() {
+        for (name, rel) in &component.executable.relation_ids {
+            split_executor.register_relation(*rel, name);
+        }
+    }
+    split_executor.put_relation("node", upload_unary_u32(&fixture.memory, &node_rows, "x"));
+    split_executor.put_relation(
+        "vetted",
+        upload_unary_u32(&fixture.memory, &vetted_rows, "x"),
+    );
+    let recomposed = split.recomposed_components();
+    let executables: Vec<_> = recomposed
+        .iter()
+        .map(|component| &component.executable)
+        .collect();
+    let batch = split_executor
+        .execute_epistemic_gpu_execution_batch_with_trace(&executables, caps)
+        .expect("accepted coupling split component must execute on device");
+    assert_eq!(batch.results.len(), 1);
+    // No CPU fallbacks anywhere in the coupled split orchestration.
+    assert_eq!(batch.trace.cpu_recomposition_steps, 0);
+    assert_eq!(batch.trace.cpu_candidate_enumerations, 0);
+    assert_eq!(batch.trace.cpu_world_view_validations, 0);
+    assert_eq!(batch.trace.cpu_solver_search_fallbacks, 0);
+    assert_eq!(batch.trace.cpu_probability_recomputations, 0);
+    let mut split_output = fixture
+        .provider
+        .download_column::<u32>(&batch.results[0].final_output, 0)
+        .expect("download accepted coupling split output");
+    split_output.sort_unstable();
+
+    // K2: identical rows, and the exact gated tuples {1, 3} (node 2 is not vetted).
+    assert_eq!(
+        split_output, unsplit_output,
+        "split coupled output must equal unsplit single-execution output"
+    );
+    assert_eq!(
+        split_output,
+        vec![1, 3],
+        "accepted coupling must materialize the exact gated tuples"
+    );
+}
+
+/// Compile a single-output epistemic subprogram through the UNSPLIT path, run it
+/// on the device, and return its sorted output column. Used as the equivalence
+/// reference for split-component outputs.
+#[cfg(feature = "epistemic-logic-tests")]
+fn run_unsplit_single_component_output(
+    fixture: &RuntimeFixture,
+    source: &str,
+    relations: &[(&str, &[Vec<u32>])],
+) -> Vec<u32> {
+    run_unsplit_single_component_output_with_caps(
+        fixture,
+        source,
+        relations,
+        EpistemicGpuWorkspaceCapacities {
+            max_candidates: 2,
+            max_worlds: 2,
+            max_models_per_reduction: 2,
+        },
+    )
+}
+
+#[cfg(feature = "epistemic-logic-tests")]
+fn run_unsplit_single_component_output_with_caps(
+    fixture: &RuntimeFixture,
+    source: &str,
+    relations: &[(&str, &[Vec<u32>])],
+    capacities: EpistemicGpuWorkspaceCapacities,
+) -> Vec<u32> {
+    let program = parse_program(source).expect("parse unsplit component subprogram");
+    let executable = compile_epistemic_gpu_execution(&program)
+        .expect("unsplit single-component compile must succeed");
+    let mut executor = Executor::new(Arc::clone(&fixture.provider));
+    for (name, rel) in &executable.relation_ids {
+        executor.register_relation(*rel, name);
+    }
+    for (name, rows) in relations {
+        let buffer = if rows.iter().all(|row| row.len() == 1) {
+            let flat: Vec<u32> = rows.iter().map(|row| row[0]).collect();
+            upload_unary_u32(&fixture.memory, &flat, "x")
+        } else {
+            let pairs: Vec<(u32, u32)> = rows.iter().map(|row| (row[0], row[1])).collect();
+            upload_binary_u32(&fixture.memory, &pairs, "x", "y")
+        };
+        executor.put_relation(name, buffer);
+    }
+    let result = executor
+        .execute_epistemic_gpu_execution(&executable, capacities)
+        .expect("unsplit single-component execution must succeed");
+    assert_eq!(result.semantic_trace.cpu_candidate_enumerations, 0);
+    assert_eq!(result.semantic_trace.cpu_world_view_validations, 0);
+    result
+        .require_runtime_dispatch_certification()
+        .expect("unsplit reference evidence must remain certified");
+    let mut output = fixture
+        .provider
+        .download_column::<u32>(&result.final_output, 0)
+        .expect("download unsplit component output");
+    output.sort_unstable();
+    output
+}
+
+#[cfg(feature = "epistemic-logic-tests")]
+fn unary(rows: &[u32]) -> Vec<Vec<u32>> {
+    rows.iter().map(|value| vec![*value]).collect()
+}
+
+#[cfg(feature = "epistemic-logic-tests")]
+fn binary(rows: &[(u32, u32)]) -> Vec<Vec<u32>> {
+    rows.iter().map(|(a, b)| vec![*a, *b]).collect()
 }
 
 #[cfg(feature = "epistemic-logic-tests")]
@@ -2171,6 +3144,177 @@ fn parsed_faeel_tuple_founded_possible_executes_on_gpu_runtime_values() {
         .expect("tuple-founded FAEEL runtime path should retain GPU semantic certification");
 }
 
+// === v0.9.2 ITEM B: FAEEL unfounded self-support -> EXACT empty founded extension ===
+
+#[cfg(feature = "epistemic-logic-tests")]
+#[test]
+fn parsed_faeel_unfounded_zero_arity_self_support_materializes_empty_on_gpu() {
+    // MANDATE HEADLINE: `p() :- possible p()` is supported ONLY by circular modal
+    // self-support, with no independent founded derivation. Under default FAEEL it is
+    // UNFOUNDED, so the founded model is EMPTY. The program EXECUTES to that empty
+    // extension on the GPU runtime (rows: 0) — it is NOT rejected. The empty result is
+    // computed by the existing GPU world-view validation over the reduced base (which
+    // dropped the circular self-support rule); ZERO CPU fallback / candidate enumeration.
+    let Some(fixture) = runtime_fixture() else {
+        return;
+    };
+    let program = parse_program(
+        r#"
+        pred p().
+        p() :- possible p().
+        "#,
+    )
+    .expect("parse unfounded zero-arity FAEEL self-support program");
+    let executable = compile_epistemic_gpu_execution(&program)
+        .expect("compile unfounded zero-arity FAEEL self-support GPU plan");
+    let mut executor = Executor::new(Arc::clone(&fixture.provider));
+
+    for (name, rel) in &executable.relation_ids {
+        executor.register_relation(*rel, name);
+    }
+    // The circular self-support rule for `p` is dropped from the reduced base, so the
+    // reduced runtime plan never materializes `p`. Mirror the production execution
+    // harness (`LogicProgram::evaluate_with_options`, which pre-creates an empty buffer
+    // for every declared schema): pre-register the declared head `p` as an EMPTY
+    // relation. This IS the founded model for an unfounded head (p false / absent).
+    executor.put_relation("p", upload_zero_arity(&fixture.memory, 0));
+
+    let result = executor
+        .execute_epistemic_gpu_execution(
+            &executable,
+            EpistemicGpuWorkspaceCapacities {
+                max_candidates: 2,
+                max_worlds: 2,
+                max_models_per_reduction: 1,
+            },
+        )
+        .expect("FAEEL unfounded self-support must EXECUTE to its empty founded extension");
+
+    assert!(result.prepared.preflight.is_faeel_mode());
+    // EXACT empty founded extension.
+    assert_eq!(result.final_result_transfer.final_output_rows, 0);
+    // Computed on the GPU path: no CPU fallback / candidate enumeration.
+    assert_eq!(result.semantic_trace.cpu_candidate_enumerations, 0);
+    assert_eq!(result.semantic_trace.cpu_world_view_validations, 0);
+    assert!(result.prepared.preflight.cpu_fallbacks.is_zero());
+    result
+        .require_runtime_dispatch_certification()
+        .expect("empty FAEEL founded-extension path must retain GPU semantic certification");
+}
+
+#[cfg(feature = "epistemic-logic-tests")]
+#[test]
+fn parsed_faeel_unfounded_nonzero_self_support_materializes_empty_on_gpu() {
+    // `p(X) :- dom(X), possible p(X)` with `dom(1)`: X is bound by dom (safe), but p
+    // has NO independent founding rule — every p(X) is supported only by circular
+    // self-support. The founded model is EMPTY (rows: 0), executed on the GPU runtime.
+    let Some(fixture) = runtime_fixture() else {
+        return;
+    };
+    let program = parse_program(
+        r#"
+        pred dom(u32).
+        pred p(u32).
+        dom(1).
+        p(X) :- dom(X), possible p(X).
+        "#,
+    )
+    .expect("parse unfounded nonzero FAEEL self-support program");
+    let executable = compile_epistemic_gpu_execution(&program)
+        .expect("compile unfounded nonzero FAEEL self-support GPU plan");
+    let mut executor = Executor::new(Arc::clone(&fixture.provider));
+
+    for (name, rel) in &executable.relation_ids {
+        executor.register_relation(*rel, name);
+    }
+    executor.put_relation("dom", upload_unary_u32(&fixture.memory, &[1], "x"));
+    // Unfounded self-support rule for `p` is dropped, so the reduced plan never
+    // materializes `p`; pre-register the declared head as an EMPTY relation (the
+    // founded model), mirroring the production execution harness.
+    executor.put_relation("p", upload_unary_u32(&fixture.memory, &[], "x"));
+
+    let result = executor
+        .execute_epistemic_gpu_execution(
+            &executable,
+            EpistemicGpuWorkspaceCapacities {
+                max_candidates: 2,
+                max_worlds: 2,
+                max_models_per_reduction: 1,
+            },
+        )
+        .expect("FAEEL unfounded nonzero self-support must EXECUTE to its empty founded extension");
+
+    assert!(result.prepared.preflight.is_faeel_mode());
+    assert_eq!(result.final_result_transfer.final_output_rows, 0);
+    assert_eq!(result.semantic_trace.cpu_candidate_enumerations, 0);
+    assert_eq!(result.semantic_trace.cpu_world_view_validations, 0);
+    assert!(result.prepared.preflight.cpu_fallbacks.is_zero());
+    result.require_runtime_dispatch_certification().expect(
+        "empty nonzero FAEEL founded-extension path must retain GPU semantic certification",
+    );
+}
+
+#[cfg(feature = "epistemic-logic-tests")]
+#[test]
+fn parsed_faeel_partial_tuple_split_materializes_founded_subset_on_gpu() {
+    // PARTIAL FOUNDED/UNFOUNDED SPLIT: p(X) has an independent founding rule
+    // `p(X) :- seed(X)` (founds p(1)) AND a circular self-support rule over the wider
+    // `node` domain {1,2}. p(2) is supported ONLY by self-support → UNFOUNDED →
+    // excluded; p(1) is founded via seed → present. The founded model is EXACTLY {1}.
+    let Some(fixture) = runtime_fixture() else {
+        return;
+    };
+    let program = parse_program(
+        r#"
+        pred seed(u32).
+        pred node(u32).
+        pred p(u32).
+        seed(1).
+        node(1).
+        node(2).
+        p(X) :- seed(X).
+        p(X) :- node(X), possible p(X).
+        "#,
+    )
+    .expect("parse partial-founded FAEEL self-support program");
+    let executable = compile_epistemic_gpu_execution(&program)
+        .expect("compile partial-founded FAEEL self-support GPU plan");
+    let mut executor = Executor::new(Arc::clone(&fixture.provider));
+
+    for (name, rel) in &executable.relation_ids {
+        executor.register_relation(*rel, name);
+    }
+    executor.put_relation("seed", upload_unary_u32(&fixture.memory, &[1], "x"));
+    executor.put_relation("node", upload_unary_u32(&fixture.memory, &[1, 2], "x"));
+
+    let result = executor
+        .execute_epistemic_gpu_execution(
+            &executable,
+            EpistemicGpuWorkspaceCapacities {
+                max_candidates: 4,
+                max_worlds: 4,
+                max_models_per_reduction: 2,
+            },
+        )
+        .expect("partial-founded FAEEL self-support must EXECUTE to its founded subset");
+
+    assert!(result.prepared.preflight.is_faeel_mode());
+    // EXACT founded subset: only the seed-founded tuple p(1); the self-supported p(2)
+    // is excluded from the founded model.
+    assert_eq!(result.final_result_transfer.final_output_rows, 1);
+    assert_eq!(result.semantic_trace.cpu_candidate_enumerations, 0);
+    assert_eq!(result.semantic_trace.cpu_world_view_validations, 0);
+    assert!(result.prepared.preflight.cpu_fallbacks.is_zero());
+    let rows = fixture
+        .provider
+        .download_column::<u32>(&result.final_output, 0)
+        .expect("download partial-founded FAEEL output values");
+    assert_eq!(rows, vec![1]);
+    result
+        .require_runtime_dispatch_certification()
+        .expect("partial-founded FAEEL path must retain GPU semantic certification");
+}
+
 #[cfg(feature = "epistemic-logic-tests")]
 #[test]
 fn parsed_faeel_ground_tuple_founded_possible_executes_on_gpu_runtime_values() {
@@ -3194,6 +4338,914 @@ fn parsed_bound_quaternary_know_filters_final_gpu_tuple_values() {
         .expect("bound quaternary know row-filter path should retain GPU semantic certification");
 }
 
+// =====================================================================
+// EGB-04 epistemic integrity constraint world-view pilots.
+//
+// `:- know unsafe().` must prune candidate world views in which the
+// constraint body holds, leaving valid world views untouched. The
+// constraint literal is lowered as a first-class epistemic literal sharing
+// the rule reduction's active-model context, and a device kernel rejects
+// surviving candidates whose accepted world view satisfies the constraint
+// body. No ordinary-RIR constraint rewrite is involved.
+// =====================================================================
+
+#[cfg(feature = "epistemic-logic-tests")]
+#[test]
+fn parsed_know_constraint_does_not_prune_when_constraint_body_false() {
+    let Some(fixture) = runtime_fixture() else {
+        return;
+    };
+    // `unsafe(7)` has no extension, so `know unsafe(7)` is false in every
+    // accepted model: the integrity constraint never fires and the gated
+    // world view is accepted normally.
+    let program = parse_program(
+        r#"
+        pred seed(u32).
+        pred gate(u32).
+        pred unsafe(u32).
+        pred out(u32).
+
+        out(X) :- seed(X), know gate(X).
+        :- know unsafe(7).
+        "#,
+    )
+    .expect("parse know-constraint program (constraint body false)");
+    let executable =
+        compile_epistemic_gpu_execution(&program).expect("compile know-constraint GPU plan");
+    let mut executor = Executor::new(Arc::clone(&fixture.provider));
+
+    for (name, rel) in &executable.relation_ids {
+        executor.register_relation(*rel, name);
+    }
+    executor.put_relation("seed", upload_unary_u32(&fixture.memory, &[7], "x"));
+    executor.put_relation("gate", upload_unary_u32(&fixture.memory, &[7], "x"));
+    executor.put_relation("unsafe", upload_unary_u32(&fixture.memory, &[], "x"));
+
+    let result = executor
+        .execute_epistemic_gpu_execution(
+            &executable,
+            EpistemicGpuWorkspaceCapacities {
+                max_candidates: 8,
+                max_worlds: 4,
+                max_models_per_reduction: 1,
+            },
+        )
+        .expect("know-constraint program with false body should execute on GPU");
+
+    assert_eq!(result.constraint_world_view_validation.constraint_count, 1);
+    assert_eq!(result.constraint_world_view_validation.kernel_launches, 1);
+    assert_eq!(result.constraint_world_view_validation.host_write_ops, 0);
+    assert!(result.semantic_trace.accepted_candidates >= 1);
+    assert_eq!(result.final_result_transfer.final_output_rows, 1);
+    // No candidate carries the world-view constraint-violation reason code.
+    assert!(!result
+        .semantic_trace
+        .rejection_reasons
+        .iter()
+        .any(|&code| code == EpistemicGpuRejectionReason::WorldViewConstraintViolation.code()));
+    assert_eq!(result.semantic_trace.cpu_candidate_enumerations, 0);
+    assert_eq!(result.semantic_trace.cpu_world_view_validations, 0);
+    result
+        .require_runtime_dispatch_certification()
+        .expect("know-constraint accepted path should retain GPU semantic certification");
+}
+
+#[cfg(feature = "epistemic-logic-tests")]
+#[test]
+fn parsed_know_constraint_prunes_world_view_when_constraint_body_true() {
+    let Some(fixture) = runtime_fixture() else {
+        return;
+    };
+    // `unsafe(7)` holds in every accepted model, so `know unsafe(7)` is true
+    // and the integrity constraint prunes every candidate world view. The
+    // pipeline returns Ok with an empty accepted result, NOT a runtime error,
+    // and every rejected candidate carries the constraint-violation reason.
+    let program = parse_program(
+        r#"
+        pred seed(u32).
+        pred gate(u32).
+        pred unsafe(u32).
+        pred out(u32).
+
+        out(X) :- seed(X), know gate(X).
+        :- know unsafe(7).
+        "#,
+    )
+    .expect("parse know-constraint program (constraint body true)");
+    let executable =
+        compile_epistemic_gpu_execution(&program).expect("compile know-constraint GPU plan");
+    let mut executor = Executor::new(Arc::clone(&fixture.provider));
+
+    for (name, rel) in &executable.relation_ids {
+        executor.register_relation(*rel, name);
+    }
+    executor.put_relation("seed", upload_unary_u32(&fixture.memory, &[7], "x"));
+    executor.put_relation("gate", upload_unary_u32(&fixture.memory, &[7], "x"));
+    executor.put_relation("unsafe", upload_unary_u32(&fixture.memory, &[7], "x"));
+
+    let result = executor
+        .execute_epistemic_gpu_execution(
+            &executable,
+            EpistemicGpuWorkspaceCapacities {
+                max_candidates: 8,
+                max_worlds: 4,
+                max_models_per_reduction: 1,
+            },
+        )
+        .expect("know-constraint program with true body should return Ok with empty accepted set");
+
+    assert_eq!(result.constraint_world_view_validation.constraint_count, 1);
+    assert_eq!(result.constraint_world_view_validation.kernel_launches, 1);
+    assert_eq!(result.constraint_world_view_validation.host_write_ops, 0);
+    assert_eq!(result.semantic_trace.accepted_candidates, 0);
+    assert_eq!(result.final_result_transfer.final_output_rows, 0);
+    // At least one candidate is pruned by the world-view integrity constraint.
+    let constraint_code = EpistemicGpuRejectionReason::WorldViewConstraintViolation.code();
+    assert!(
+        result
+            .semantic_trace
+            .rejection_reasons
+            .iter()
+            .any(|&code| code == constraint_code),
+        "expected a constraint-violation rejection reason, got {:?}",
+        result.semantic_trace.rejection_reasons
+    );
+    // Every nonzero rejection code decodes to a typed reason (no crash codes).
+    let typed = result
+        .semantic_trace
+        .typed_rejection_reasons()
+        .expect("rejection reasons decode to typed reasons");
+    assert!(typed.contains(&EpistemicGpuRejectionReason::WorldViewConstraintViolation));
+    assert_eq!(result.semantic_trace.cpu_candidate_enumerations, 0);
+    assert_eq!(result.semantic_trace.cpu_world_view_validations, 0);
+    result
+        .require_runtime_dispatch_certification()
+        .expect("all-pruned know-constraint path should retain GPU semantic certification");
+}
+
+// EGB-04.K2: rejected candidates must carry constraint-SPECIFIC reasons.
+// With two integrity constraints, the surviving rejected world view must
+// identify WHICH constraint (by source-declaration index) actually fired,
+// not merely that "some" constraint did. The kernel evaluates constraints in
+// declaration order and returns on the first whose body holds, so designing
+// inputs so that exactly one of the two bodies holds pins the firing index.
+#[cfg(feature = "epistemic-logic-tests")]
+#[test]
+fn egb04_constraint_specific_reason_identifies_firing_constraint() {
+    let Some(fixture) = runtime_fixture() else {
+        return;
+    };
+
+    // Helper: run a two-constraint program and return the per-rejected-candidate
+    // constraint indices aligned with `rejected_candidate_indices`.
+    fn run_two_constraints(
+        fixture: &RuntimeFixture,
+        unsafe_a_present: bool,
+        unsafe_b_present: bool,
+    ) -> (Vec<usize>, Vec<Option<u32>>, Vec<u32>) {
+        // Constraint index 0 is `:- know unsafe_a(7).`
+        // Constraint index 1 is `:- know unsafe_b(7).`
+        let program = parse_program(
+            r#"
+            pred seed(u32).
+            pred gate(u32).
+            pred unsafe_a(u32).
+            pred unsafe_b(u32).
+            pred out(u32).
+
+            out(X) :- seed(X), know gate(X).
+            :- know unsafe_a(7).
+            :- know unsafe_b(7).
+            "#,
+        )
+        .expect("parse two-constraint program");
+        let executable =
+            compile_epistemic_gpu_execution(&program).expect("compile two-constraint GPU plan");
+        let mut executor = Executor::new(Arc::clone(&fixture.provider));
+
+        for (name, rel) in &executable.relation_ids {
+            executor.register_relation(*rel, name);
+        }
+        executor.put_relation("seed", upload_unary_u32(&fixture.memory, &[7], "x"));
+        executor.put_relation("gate", upload_unary_u32(&fixture.memory, &[7], "x"));
+        // Present => `know unsafe_x(7)` true => that constraint body holds.
+        let unsafe_a = if unsafe_a_present { vec![7] } else { vec![] };
+        let unsafe_b = if unsafe_b_present { vec![7] } else { vec![] };
+        executor.put_relation(
+            "unsafe_a",
+            upload_unary_u32(&fixture.memory, &unsafe_a, "x"),
+        );
+        executor.put_relation(
+            "unsafe_b",
+            upload_unary_u32(&fixture.memory, &unsafe_b, "x"),
+        );
+
+        let result = executor
+            .execute_epistemic_gpu_execution(
+                &executable,
+                EpistemicGpuWorkspaceCapacities {
+                    max_candidates: 8,
+                    max_worlds: 4,
+                    max_models_per_reduction: 1,
+                },
+            )
+            .expect("two-constraint program should return Ok");
+        assert_eq!(result.constraint_world_view_validation.constraint_count, 2);
+        assert_eq!(result.constraint_world_view_validation.kernel_launches, 1);
+        assert_eq!(result.constraint_world_view_validation.host_write_ops, 0);
+        result
+            .require_runtime_dispatch_certification()
+            .expect("two-constraint path should retain GPU semantic certification");
+        (
+            result.semantic_trace.rejected_candidate_indices.clone(),
+            result.semantic_trace.constraint_violation_indices.clone(),
+            result.semantic_trace.rejection_reasons.clone(),
+        )
+    }
+
+    // Case A: only constraint index 1 (`:- know unsafe_b(7).`) fires.
+    let (rejected_a, indices_a, reasons_a) = run_two_constraints(&fixture, false, true);
+    assert!(
+        !rejected_a.is_empty(),
+        "constraint index 1 should prune at least one candidate"
+    );
+    // Reason code 6 must be unchanged for the rejected candidate(s).
+    let constraint_code = EpistemicGpuRejectionReason::WorldViewConstraintViolation.code();
+    assert!(
+        reasons_a.iter().any(|&code| code == constraint_code),
+        "expected reason code 6 (constraint violation), got {:?}",
+        reasons_a
+    );
+    // The firing constraint index must be SPECIFICALLY 1, not merely "some".
+    assert!(
+        indices_a.iter().any(|idx| *idx == Some(1)),
+        "expected constraint-specific index Some(1) for a `unsafe_b` violation, got {:?}",
+        indices_a
+    );
+    assert!(
+        !indices_a.iter().any(|idx| *idx == Some(0)),
+        "constraint index 0 (`unsafe_a`) must NOT be reported when only `unsafe_b` is present, got {:?}",
+        indices_a
+    );
+    assert_eq!(
+        indices_a.len(),
+        rejected_a.len(),
+        "constraint_violation_indices must be aligned 1:1 with rejected_candidate_indices"
+    );
+
+    // Case B: only constraint index 0 (`:- know unsafe_a(7).`) fires.
+    let (rejected_b, indices_b, reasons_b) = run_two_constraints(&fixture, true, false);
+    assert!(
+        !rejected_b.is_empty(),
+        "constraint index 0 should prune at least one candidate"
+    );
+    assert!(
+        reasons_b.iter().any(|&code| code == constraint_code),
+        "expected reason code 6 (constraint violation), got {:?}",
+        reasons_b
+    );
+    assert!(
+        indices_b.iter().any(|idx| *idx == Some(0)),
+        "expected constraint-specific index Some(0) for an `unsafe_a` violation, got {:?}",
+        indices_b
+    );
+}
+
+#[cfg(feature = "epistemic-logic-tests")]
+#[test]
+fn parsed_possible_constraint_does_not_prune_when_contradiction_absent() {
+    let Some(fixture) = runtime_fixture() else {
+        return;
+    };
+    // Keep direction for `:- possible contradiction().`: with `contradiction`
+    // absent, `possible contradiction` is false in every accepted model, so the
+    // constraint never fires and the gated world view is accepted.
+    let program = parse_program(
+        r#"
+        pred seed(u32).
+        pred gate(u32).
+        pred contradiction().
+        pred out(u32).
+
+        out(X) :- seed(X), know gate(X).
+        :- possible contradiction().
+        "#,
+    )
+    .expect("parse possible-constraint keep-direction program");
+    let executable =
+        compile_epistemic_gpu_execution(&program).expect("compile possible-constraint GPU plan");
+    let mut executor = Executor::new(Arc::clone(&fixture.provider));
+
+    for (name, rel) in &executable.relation_ids {
+        executor.register_relation(*rel, name);
+    }
+    executor.put_relation("seed", upload_unary_u32(&fixture.memory, &[7], "x"));
+    executor.put_relation("gate", upload_unary_u32(&fixture.memory, &[7], "x"));
+    executor.put_relation("contradiction", upload_zero_arity(&fixture.memory, 0));
+
+    let result = executor
+        .execute_epistemic_gpu_execution(
+            &executable,
+            EpistemicGpuWorkspaceCapacities {
+                max_candidates: 8,
+                max_worlds: 4,
+                max_models_per_reduction: 1,
+            },
+        )
+        .expect("possible-constraint program with false body should accept the world view");
+
+    assert!(result.semantic_trace.accepted_candidates >= 1);
+    assert_eq!(result.final_result_transfer.final_output_rows, 1);
+    assert!(!result
+        .semantic_trace
+        .rejection_reasons
+        .iter()
+        .any(|&code| code == EpistemicGpuRejectionReason::WorldViewConstraintViolation.code()));
+    result
+        .require_runtime_dispatch_certification()
+        .expect("possible-constraint accepted path should retain GPU semantic certification");
+}
+
+#[cfg(feature = "epistemic-logic-tests")]
+#[test]
+fn parsed_possible_constraint_prunes_when_contradiction_possible() {
+    let Some(fixture) = runtime_fixture() else {
+        return;
+    };
+    // `:- possible contradiction().` prunes a candidate world view whose
+    // accepted model makes `contradiction` possible. With the fact present,
+    // `possible contradiction` holds and the candidate is pruned.
+    let program = parse_program(
+        r#"
+        pred seed(u32).
+        pred gate(u32).
+        pred contradiction().
+        pred out(u32).
+
+        out(X) :- seed(X), know gate(X).
+        :- possible contradiction().
+        "#,
+    )
+    .expect("parse possible-constraint program");
+    let executable =
+        compile_epistemic_gpu_execution(&program).expect("compile possible-constraint GPU plan");
+    let mut executor = Executor::new(Arc::clone(&fixture.provider));
+
+    for (name, rel) in &executable.relation_ids {
+        executor.register_relation(*rel, name);
+    }
+    executor.put_relation("seed", upload_unary_u32(&fixture.memory, &[7], "x"));
+    executor.put_relation("gate", upload_unary_u32(&fixture.memory, &[7], "x"));
+    executor.put_relation("contradiction", upload_zero_arity(&fixture.memory, 1));
+
+    let result = executor
+        .execute_epistemic_gpu_execution(
+            &executable,
+            EpistemicGpuWorkspaceCapacities {
+                max_candidates: 8,
+                max_worlds: 4,
+                max_models_per_reduction: 1,
+            },
+        )
+        .expect("possible-constraint program should return Ok with empty accepted set");
+
+    assert_eq!(result.constraint_world_view_validation.constraint_count, 1);
+    assert_eq!(result.semantic_trace.accepted_candidates, 0);
+    assert_eq!(result.final_result_transfer.final_output_rows, 0);
+    let constraint_code = EpistemicGpuRejectionReason::WorldViewConstraintViolation.code();
+    assert!(result
+        .semantic_trace
+        .rejection_reasons
+        .iter()
+        .any(|&code| code == constraint_code));
+    assert_eq!(result.semantic_trace.cpu_candidate_enumerations, 0);
+    assert_eq!(result.semantic_trace.cpu_world_view_validations, 0);
+    result
+        .require_runtime_dispatch_certification()
+        .expect("all-pruned possible-constraint path should retain GPU semantic certification");
+}
+
+// =====================================================================
+// v0.9.2 ITEM E: VARIABLE-KEYED epistemic integrity constraints.
+//
+// `:- know flagged(X).` ranges X EXISTENTIALLY over the modal relation's
+// tuple-key domain: a world view is pruned iff there EXISTS a binding of X for
+// which `know flagged(X)` holds (flagged is non-empty in the accepted model).
+// The single-occurrence key variable lowers to an Anonymous wildcard column and
+// the existing GPU wildcard tuple-key matcher evaluates the existential entirely
+// on device. `flagged` carries MULTIPLE tuples so a ground `know flagged(c)`
+// could not express "some flagged value exists": the range is load-bearing.
+// =====================================================================
+
+#[cfg(feature = "epistemic-logic-tests")]
+#[test]
+fn egb_e_variable_keyed_constraint_prunes_when_relation_non_empty() {
+    let Some(fixture) = runtime_fixture() else {
+        return;
+    };
+    // `flagged` carries multiple tuples {7, 9, 11}, so `know flagged(X)` holds
+    // existentially and the integrity constraint prunes the world view. The
+    // pipeline returns Ok with an empty accepted result (NOT an error) and the
+    // rejected candidate carries constraint-violation reason code 6 / index 0.
+    let program = parse_program(
+        r#"
+        pred seed(u32).
+        pred gate(u32).
+        pred flagged(u32).
+        pred report(u32).
+
+        report(X) :- seed(X), know gate(X).
+        :- know flagged(X).
+        "#,
+    )
+    .expect("parse variable-keyed-constraint program (relation non-empty)");
+    let executable = compile_epistemic_gpu_execution(&program)
+        .expect("compile variable-keyed-constraint GPU plan");
+    let mut executor = Executor::new(Arc::clone(&fixture.provider));
+
+    for (name, rel) in &executable.relation_ids {
+        executor.register_relation(*rel, name);
+    }
+    executor.put_relation("seed", upload_unary_u32(&fixture.memory, &[1], "x"));
+    executor.put_relation("gate", upload_unary_u32(&fixture.memory, &[1], "x"));
+    executor.put_relation(
+        "flagged",
+        upload_unary_u32(&fixture.memory, &[7, 9, 11], "x"),
+    );
+
+    let result = executor
+        .execute_epistemic_gpu_execution(
+            &executable,
+            EpistemicGpuWorkspaceCapacities {
+                max_candidates: 8,
+                max_worlds: 4,
+                max_models_per_reduction: 1,
+            },
+        )
+        .expect(
+            "variable-keyed-constraint non-empty relation should return Ok with empty accepted set",
+        );
+
+    assert_eq!(result.constraint_world_view_validation.constraint_count, 1);
+    assert_eq!(result.constraint_world_view_validation.kernel_launches, 1);
+    assert_eq!(result.constraint_world_view_validation.host_write_ops, 0);
+    // EXACT pruning: zero accepted candidates, zero surviving output rows.
+    assert_eq!(result.semantic_trace.accepted_candidates, 0);
+    assert_eq!(result.final_result_transfer.final_output_rows, 0);
+    let constraint_code = EpistemicGpuRejectionReason::WorldViewConstraintViolation.code();
+    assert!(
+        result
+            .semantic_trace
+            .rejection_reasons
+            .iter()
+            .any(|&code| code == constraint_code),
+        "expected constraint-violation reason code 6, got {:?}",
+        result.semantic_trace.rejection_reasons
+    );
+    // The firing constraint is SPECIFICALLY declaration-index 0.
+    assert!(
+        result
+            .semantic_trace
+            .constraint_violation_indices
+            .iter()
+            .any(|idx| *idx == Some(0)),
+        "expected firing constraint index Some(0), got {:?}",
+        result.semantic_trace.constraint_violation_indices
+    );
+    // REAL counters: no CPU fallback, no CPU candidate enumeration / world-view
+    // validation in the accepted path.
+    assert!(result.prepared.preflight.cpu_fallbacks.is_zero());
+    assert_eq!(result.semantic_trace.cpu_candidate_enumerations, 0);
+    assert_eq!(result.semantic_trace.cpu_world_view_validations, 0);
+    result
+        .require_runtime_dispatch_certification()
+        .expect("variable-keyed-constraint prune path should retain GPU semantic certification");
+}
+
+#[cfg(feature = "epistemic-logic-tests")]
+#[test]
+fn egb_e_variable_keyed_constraint_survives_when_relation_empty() {
+    let Some(fixture) = runtime_fixture() else {
+        return;
+    };
+    // SAME program shape as the prune test, but `flagged` is EMPTY: no binding of
+    // X satisfies `know flagged(X)`, so the existential body is false in the
+    // accepted model and the world view SURVIVES. report = {1} EXACTLY. The
+    // mode difference (empty -> survives {1} vs non-empty -> pruned {}) is the
+    // load-bearing existential effect; without the wildcard range the constraint
+    // could not range over the relation's domain at all.
+    let program = parse_program(
+        r#"
+        pred seed(u32).
+        pred gate(u32).
+        pred flagged(u32).
+        pred report(u32).
+
+        report(X) :- seed(X), know gate(X).
+        :- know flagged(X).
+        "#,
+    )
+    .expect("parse variable-keyed-constraint program (relation empty)");
+    let executable = compile_epistemic_gpu_execution(&program)
+        .expect("compile variable-keyed-constraint GPU plan");
+    let mut executor = Executor::new(Arc::clone(&fixture.provider));
+
+    for (name, rel) in &executable.relation_ids {
+        executor.register_relation(*rel, name);
+    }
+    executor.put_relation("seed", upload_unary_u32(&fixture.memory, &[1], "x"));
+    executor.put_relation("gate", upload_unary_u32(&fixture.memory, &[1], "x"));
+    executor.put_relation("flagged", upload_unary_u32(&fixture.memory, &[], "x"));
+
+    let result = executor
+        .execute_epistemic_gpu_execution(
+            &executable,
+            EpistemicGpuWorkspaceCapacities {
+                max_candidates: 8,
+                max_worlds: 4,
+                max_models_per_reduction: 1,
+            },
+        )
+        .expect("variable-keyed-constraint empty relation should accept the world view");
+
+    assert_eq!(result.constraint_world_view_validation.constraint_count, 1);
+    assert!(result.semantic_trace.accepted_candidates >= 1);
+    assert_eq!(result.final_result_transfer.final_output_rows, 1);
+    // No candidate carries the constraint-violation reason.
+    assert!(!result
+        .semantic_trace
+        .rejection_reasons
+        .iter()
+        .any(|&code| code == EpistemicGpuRejectionReason::WorldViewConstraintViolation.code()));
+    // EXACT surviving tuple: report = {1}.
+    let report = fixture
+        .provider
+        .download_column::<u32>(&result.final_output, 0)
+        .expect("download report column for surviving world view");
+    assert_eq!(report, vec![1]);
+    assert!(result.prepared.preflight.cpu_fallbacks.is_zero());
+    assert_eq!(result.semantic_trace.cpu_candidate_enumerations, 0);
+    assert_eq!(result.semantic_trace.cpu_world_view_validations, 0);
+    result
+        .require_runtime_dispatch_certification()
+        .expect("variable-keyed-constraint survive path should retain GPU semantic certification");
+}
+
+// ITEM E multi-literal (DISTINCT variables): `:- know p(X), know q(Y).` with
+// INDEPENDENT single-occurrence X, Y factors to (∃X: know p(X)) AND
+// (∃Y: know q(Y)) = "p non-empty AND q non-empty in the accepted model". Each
+// literal lowers to an independent Anonymous wildcard, and the constraint kernel
+// ANDs the two assumption bits across its multi-entry literal loop. The body
+// holds (and prunes) iff BOTH relations are non-empty; if EITHER is empty the
+// conjunction fails and the world view SURVIVES. This is the independent-
+// existential conjunction, NOT the shared-variable JOIN (see the scope-boundary
+// test below). The empty-q companion proves the SECOND literal is load-bearing.
+#[cfg(feature = "epistemic-logic-tests")]
+#[test]
+fn egb_e_distinct_variable_multi_literal_constraint_prunes_when_both_non_empty() {
+    let Some(fixture) = runtime_fixture() else {
+        return;
+    };
+    let program = parse_program(
+        r#"
+        pred seed(u32).
+        pred gate(u32).
+        pred p(u32).
+        pred q(u32).
+        pred report(u32).
+
+        report(X) :- seed(X), know gate(X).
+        :- know p(X), know q(Y).
+        "#,
+    )
+    .expect("parse distinct-variable multi-literal constraint program");
+    let executable = compile_epistemic_gpu_execution(&program)
+        .expect("compile distinct-variable multi-literal constraint GPU plan");
+    let mut executor = Executor::new(Arc::clone(&fixture.provider));
+
+    for (name, rel) in &executable.relation_ids {
+        executor.register_relation(*rel, name);
+    }
+    executor.put_relation("seed", upload_unary_u32(&fixture.memory, &[1], "x"));
+    executor.put_relation("gate", upload_unary_u32(&fixture.memory, &[1], "x"));
+    // BOTH non-empty: the conjunctive body holds and prunes the world view.
+    executor.put_relation("p", upload_unary_u32(&fixture.memory, &[7, 9], "x"));
+    executor.put_relation("q", upload_unary_u32(&fixture.memory, &[3], "x"));
+
+    let result = executor
+        .execute_epistemic_gpu_execution(
+            &executable,
+            EpistemicGpuWorkspaceCapacities {
+                max_candidates: 8,
+                max_worlds: 4,
+                max_models_per_reduction: 1,
+            },
+        )
+        .expect("distinct-variable multi-literal (both non-empty) should return Ok empty");
+
+    assert_eq!(result.constraint_world_view_validation.constraint_count, 1);
+    // TWO constraint-body literal references checked on device.
+    assert_eq!(
+        result
+            .constraint_world_view_validation
+            .constraint_literal_refs,
+        2
+    );
+    assert_eq!(result.semantic_trace.accepted_candidates, 0);
+    assert_eq!(result.final_result_transfer.final_output_rows, 0);
+    assert!(result
+        .semantic_trace
+        .rejection_reasons
+        .iter()
+        .any(|&code| code == EpistemicGpuRejectionReason::WorldViewConstraintViolation.code()));
+    assert!(result.prepared.preflight.cpu_fallbacks.is_zero());
+    assert_eq!(result.semantic_trace.cpu_candidate_enumerations, 0);
+    assert_eq!(result.semantic_trace.cpu_world_view_validations, 0);
+    result
+        .require_runtime_dispatch_certification()
+        .expect("distinct-variable multi-literal prune path retains GPU semantic certification");
+}
+
+#[cfg(feature = "epistemic-logic-tests")]
+#[test]
+fn egb_e_distinct_variable_multi_literal_constraint_survives_when_one_empty() {
+    let Some(fixture) = runtime_fixture() else {
+        return;
+    };
+    // SAME program; `p` non-empty but `q` EMPTY -> `know q(Y)` false -> conjunction
+    // fails -> world view SURVIVES (report = {1}). This flip vs the both-non-empty
+    // case proves the SECOND literal is load-bearing: a single-literal constraint
+    // could not express "AND q non-empty".
+    let program = parse_program(
+        r#"
+        pred seed(u32).
+        pred gate(u32).
+        pred p(u32).
+        pred q(u32).
+        pred report(u32).
+
+        report(X) :- seed(X), know gate(X).
+        :- know p(X), know q(Y).
+        "#,
+    )
+    .expect("parse distinct-variable multi-literal constraint program (q empty)");
+    let executable = compile_epistemic_gpu_execution(&program)
+        .expect("compile distinct-variable multi-literal constraint GPU plan");
+    let mut executor = Executor::new(Arc::clone(&fixture.provider));
+
+    for (name, rel) in &executable.relation_ids {
+        executor.register_relation(*rel, name);
+    }
+    executor.put_relation("seed", upload_unary_u32(&fixture.memory, &[1], "x"));
+    executor.put_relation("gate", upload_unary_u32(&fixture.memory, &[1], "x"));
+    executor.put_relation("p", upload_unary_u32(&fixture.memory, &[7, 9], "x"));
+    executor.put_relation("q", upload_unary_u32(&fixture.memory, &[], "x"));
+
+    let result = executor
+        .execute_epistemic_gpu_execution(
+            &executable,
+            EpistemicGpuWorkspaceCapacities {
+                max_candidates: 8,
+                max_worlds: 4,
+                max_models_per_reduction: 1,
+            },
+        )
+        .expect("distinct-variable multi-literal (q empty) should accept the world view");
+
+    assert_eq!(
+        result
+            .constraint_world_view_validation
+            .constraint_literal_refs,
+        2
+    );
+    assert!(result.semantic_trace.accepted_candidates >= 1);
+    assert_eq!(result.final_result_transfer.final_output_rows, 1);
+    assert!(!result
+        .semantic_trace
+        .rejection_reasons
+        .iter()
+        .any(|&code| code == EpistemicGpuRejectionReason::WorldViewConstraintViolation.code()));
+    let report = fixture
+        .provider
+        .download_column::<u32>(&result.final_output, 0)
+        .expect("download report column for surviving world view");
+    assert_eq!(report, vec![1]);
+    assert!(result.prepared.preflight.cpu_fallbacks.is_zero());
+    assert_eq!(result.semantic_trace.cpu_candidate_enumerations, 0);
+    assert_eq!(result.semantic_trace.cpu_world_view_validations, 0);
+    result
+        .require_runtime_dispatch_certification()
+        .expect("distinct-variable multi-literal survive path retains GPU semantic certification");
+}
+
+// ITEM E scope boundary: a SHARED tuple-key variable across constraint literals
+// (`:- know p(X), q(X).`) needs an existential JOIN over the shared key, which
+// independent wildcards cannot express. This is finite+typed, NOT an unbounded
+// domain, so it fails closed as UNIMPLEMENTED scope with a plain
+// UnsupportedEpistemicConstruct — explicitly NOT a ResourceExhausted/finiteness
+// diagnostic.
+#[cfg(feature = "epistemic-logic-tests")]
+#[test]
+fn egb_e_shared_variable_constraint_rejected_as_unimplemented_scope() {
+    let program = parse_program(
+        r#"
+        pred seed(u32).
+        pred gate(u32).
+        pred p(u32).
+        pred q(u32).
+        pred report(u32).
+
+        report(X) :- seed(X), know gate(X).
+        :- know p(X), possible q(X).
+        "#,
+    )
+    .expect("parse shared-variable constraint program");
+    let err = compile_epistemic_gpu_execution(&program)
+        .expect_err("shared-variable epistemic constraint join must fail closed");
+    match err {
+        xlog_core::XlogError::UnsupportedEpistemicConstruct { context, .. } => {
+            assert!(
+                context.contains("shared-variable")
+                    || context.contains("reuses tuple-key variable"),
+                "expected unimplemented-join diagnostic, got: {context}"
+            );
+        }
+        xlog_core::XlogError::ResourceExhausted { .. } => {
+            panic!(
+                "shared-variable constraint is finite+typed unimplemented scope, NOT a \
+                 finiteness/resource bound; must not surface as ResourceExhausted"
+            );
+        }
+        other => panic!("unexpected error for shared-variable constraint: {other:?}"),
+    }
+}
+
+// ITEM E / E2: a NEGATED variable-keyed constraint literal whose variable appears
+// ONLY under negation (`:- not know p(X).`) has NO positive binder — X is not
+// range-restricted. This is the SAME unsafe shape ordinary Datalog rejects
+// (`:- not r(X).` -> "unbound variable ... in negated atom"). The sound answer is
+// that NAF safety error, NOT a "missing feature" diagnostic. The meaningful negated
+// form `:- q(X), not know p(X).` binds X with a positive literal and is the
+// shared-variable join. (Negated ALL-GROUND constraint literals stay supported via
+// the EGB-04 ground path.)
+#[cfg(feature = "epistemic-logic-tests")]
+#[test]
+fn egb_e_standalone_negated_variable_keyed_constraint_is_unbound_safety_error() {
+    let program = parse_program(
+        r#"
+        pred seed(u32).
+        pred gate(u32).
+        pred flagged(u32).
+        pred report(u32).
+
+        report(X) :- seed(X), know gate(X).
+        :- not know flagged(X).
+        "#,
+    )
+    .expect("parse negated variable-keyed constraint program");
+    let err = compile_epistemic_gpu_execution(&program)
+        .expect_err("standalone negated-only constraint variable is unsafe (no positive binder)");
+    match err {
+        xlog_core::XlogError::Compilation(msg) => {
+            assert!(
+                msg.contains("unbound") && msg.contains('X'),
+                "expected unbound-variable NAF safety diagnostic naming X, got: {msg}"
+            );
+            assert!(
+                !msg.contains("not yet implemented"),
+                "an ill-formed (unsafe) program must not be labeled a missing feature: {msg}"
+            );
+        }
+        other => panic!("expected NAF safety error (unbound variable), got: {other:?}"),
+    }
+}
+
+#[cfg(feature = "epistemic-logic-tests")]
+#[test]
+fn parsed_not_possible_constraint_prunes_when_required_absent() {
+    let Some(fixture) = runtime_fixture() else {
+        return;
+    };
+    // `:- not possible required().` prunes a candidate world view in which
+    // `required` is possible in no accepted model. With `required` absent,
+    // `not possible required` holds and the candidate is pruned.
+    let program = parse_program(
+        r#"
+        pred seed(u32).
+        pred gate(u32).
+        pred required().
+        pred out(u32).
+
+        out(X) :- seed(X), know gate(X).
+        :- not possible required().
+        "#,
+    )
+    .expect("parse not-possible-constraint program");
+    let executable = compile_epistemic_gpu_execution(&program)
+        .expect("compile not-possible-constraint GPU plan");
+    let mut executor = Executor::new(Arc::clone(&fixture.provider));
+
+    for (name, rel) in &executable.relation_ids {
+        executor.register_relation(*rel, name);
+    }
+    executor.put_relation("seed", upload_unary_u32(&fixture.memory, &[7], "x"));
+    executor.put_relation("gate", upload_unary_u32(&fixture.memory, &[7], "x"));
+    executor.put_relation("required", upload_zero_arity(&fixture.memory, 0));
+
+    let result = executor
+        .execute_epistemic_gpu_execution(
+            &executable,
+            EpistemicGpuWorkspaceCapacities {
+                max_candidates: 8,
+                max_worlds: 4,
+                max_models_per_reduction: 1,
+            },
+        )
+        .expect("not-possible-constraint program should return Ok with empty accepted set");
+
+    assert_eq!(result.constraint_world_view_validation.constraint_count, 1);
+    assert_eq!(result.semantic_trace.accepted_candidates, 0);
+    assert_eq!(result.final_result_transfer.final_output_rows, 0);
+    let constraint_code = EpistemicGpuRejectionReason::WorldViewConstraintViolation.code();
+    assert!(result
+        .semantic_trace
+        .rejection_reasons
+        .iter()
+        .any(|&code| code == constraint_code));
+    assert_eq!(result.semantic_trace.cpu_candidate_enumerations, 0);
+    assert_eq!(result.semantic_trace.cpu_world_view_validations, 0);
+    result
+        .require_runtime_dispatch_certification()
+        .expect("all-pruned not-possible-constraint path should retain GPU semantic certification");
+}
+
+#[cfg(feature = "epistemic-logic-tests")]
+#[test]
+fn parsed_constraint_with_relational_body_fails_closed() {
+    // A constraint that mixes a relational atom with a modal literal is out of
+    // the world-view constraint fragment and must fail closed with typed source
+    // context, not be silently rewritten into an ordinary RIR constraint.
+    let program = parse_program(
+        r#"
+        pred seed(u32).
+        pred gate(u32).
+        pred unsafe(u32).
+        pred out(u32).
+
+        out(X) :- seed(X), know gate(X).
+        :- seed(7), know unsafe(7).
+        "#,
+    )
+    .expect("parse mixed-body constraint program");
+    let err = compile_epistemic_gpu_execution(&program)
+        .expect_err("mixed relational+modal constraint body must fail closed");
+    match err {
+        xlog_core::XlogError::UnsupportedEpistemicConstruct { construct, context } => {
+            assert_eq!(construct, "epistemic GPU world-view constraint");
+            assert!(
+                context.contains("non-epistemic body literals"),
+                "unexpected fail-closed context: {context}"
+            );
+        }
+        other => panic!("expected typed UnsupportedEpistemicConstruct, got {other:?}"),
+    }
+}
+
+#[cfg(feature = "epistemic-logic-tests")]
+#[test]
+fn parsed_constraint_without_epistemic_rule_fails_closed() {
+    // An epistemic integrity constraint needs an epistemic rule reduction to
+    // host its world-view evaluation. Without one, lowering fails closed with a
+    // typed reason instead of silently accepting an unsound world view.
+    let program = parse_program(
+        r#"
+        pred seed(u32).
+        pred unsafe(u32).
+        pred out(u32).
+
+        out(X) :- seed(X).
+        :- know unsafe(7).
+        "#,
+    )
+    .expect("parse constraint-only program without epistemic rule");
+    let err = compile_epistemic_gpu_execution(&program)
+        .expect_err("epistemic constraint without epistemic rule must fail closed");
+    match err {
+        // Either the generic "no epistemic literal" guard (a program with only
+        // an ordinary rule plus a modal constraint has no rule-derived modal
+        // literal) or the constraint-specific "no reduction to host" guard is an
+        // acceptable typed fail-closed boundary.
+        xlog_core::XlogError::UnsupportedEpistemicConstruct { construct, .. } => {
+            assert!(
+                construct == "epistemic GPU world-view constraint"
+                    || construct == "epistemic GPU execution plan",
+                "unexpected fail-closed construct: {construct}"
+            );
+        }
+        other => panic!("expected typed UnsupportedEpistemicConstruct, got {other:?}"),
+    }
+}
+
 #[test]
 fn runtime_preflight_rejects_nonzero_cpu_fallback_counters() {
     let cases: [(&str, fn(&mut EpistemicCpuFallbackCounters)); 4] = [
@@ -3680,6 +5732,7 @@ fn workspace_reset_trace_records_device_zeroing_for_all_buffers() {
         vec![EpistemicReductionPlan {
             rule_index: 0,
             head_predicate: "out".to_string(),
+            public_head_arity: 1,
             relational_body_atoms: 3,
             wcoj_status: EpistemicWcojReductionStatus::RequiresPlannerEligibility,
         }],
@@ -4347,6 +6400,345 @@ fn cycle4_epistemic_literal() -> EirEpistemicLiteral {
     }
 }
 
+// =====================================================================
+// EGB-02B: mixed per-row + global modal membership value-level pilots.
+//
+// Each pilot compiles a single rule that combines a GLOBAL modal gate
+// (nullary `know flag()` / `possible flag()` / `not possible block()`)
+// with a PER-ROW bound-variable modal literal (`possible edge(X)` etc.).
+// The two gate classes must compose CONJUNCTIVELY on the GPU row-map
+// kernel:
+//   * global gate true  + per-row tuple true  -> exact rows emitted
+//   * global gate true  + per-row tuple false -> those rows rejected
+//   * global gate false + per-row tuple true  -> ALL rows rejected
+// Pilots assert EXACT output tuples (never non-empty) and 0 CPU fallback.
+// =====================================================================
+
+#[cfg(feature = "epistemic-logic-tests")]
+struct MixedModalPilotInputs<'a> {
+    seed: &'a [u32],
+    /// Per-row bound-variable membership source (`possible edge(X)`).
+    edge: &'a [u32],
+    /// Nullary global gate fact (`flag()` non-empty -> gate holds).
+    flag_rows: u32,
+}
+
+#[cfg(feature = "epistemic-logic-tests")]
+fn run_mixed_modal_pilot(
+    fixture: &RuntimeFixture,
+    source: &str,
+    inputs: MixedModalPilotInputs<'_>,
+) -> xlog_runtime::EpistemicGpuExecutionResult {
+    let program = parse_program(source).expect("parse mixed modal pilot program");
+    let executable =
+        compile_epistemic_gpu_execution(&program).expect("compile mixed modal pilot GPU plan");
+    let mut executor = Executor::new(Arc::clone(&fixture.provider));
+    for (name, rel) in &executable.relation_ids {
+        executor.register_relation(*rel, name);
+    }
+    executor.put_relation("seed", upload_unary_u32(&fixture.memory, inputs.seed, "x"));
+    executor.put_relation("edge", upload_unary_u32(&fixture.memory, inputs.edge, "x"));
+    // Nullary global-gate fact: a 0-arity relation modelled by a single
+    // row-count-only buffer when present, empty otherwise.
+    executor.put_relation("flag", upload_zero_arity(&fixture.memory, inputs.flag_rows));
+    executor
+        .execute_epistemic_gpu_execution(
+            &executable,
+            EpistemicGpuWorkspaceCapacities {
+                max_candidates: 16,
+                max_worlds: 4,
+                max_models_per_reduction: 4,
+            },
+        )
+        .expect("mixed per-row + global modal rule should execute on GPU")
+}
+
+#[cfg(feature = "epistemic-logic-tests")]
+fn assert_no_cpu_fallback(result: &xlog_runtime::EpistemicGpuExecutionResult) {
+    assert_eq!(result.semantic_trace.cpu_candidate_enumerations, 0);
+    assert_eq!(result.semantic_trace.cpu_world_view_validations, 0);
+    // K3: membership is device-backed. The single per-row `possible edge(X)`
+    // literal drives exactly one tuple-source key column read on the GPU; the
+    // nullary global gate (`flag()` / `block()`) drives zero. This is NOT
+    // subsumed by `require_runtime_dispatch_certification()`.
+    assert_eq!(
+        result.model_membership.tuple_source_key_column_device_reads, 1,
+        "per-row modal membership must read exactly one device key column"
+    );
+    result
+        .require_runtime_dispatch_certification()
+        .expect("mixed modal runtime path must remain GPU-certified");
+}
+
+#[cfg(feature = "epistemic-logic-tests")]
+fn sorted_output_rows(
+    fixture: &RuntimeFixture,
+    result: &xlog_runtime::EpistemicGpuExecutionResult,
+) -> Vec<u32> {
+    let mut rows = fixture
+        .provider
+        .download_column::<u32>(&result.final_output, 0)
+        .expect("download mixed modal pilot output values");
+    rows.sort_unstable();
+    rows
+}
+
+#[cfg(feature = "epistemic-logic-tests")]
+const MIXED_KNOW_FLAG_POSSIBLE_EDGE: &str = r#"
+    pred seed(u32).
+    pred flag().
+    pred edge(u32).
+    pred out(u32).
+
+    out(X) :- seed(X), know flag(), possible edge(X).
+"#;
+
+// Pilot 1: global gate TRUE + per-row tuple TRUE -> exact rows emitted.
+#[cfg(feature = "epistemic-logic-tests")]
+#[test]
+fn mixed_modal_global_true_row_true_emits_exact_rows() {
+    let Some(fixture) = runtime_fixture() else {
+        return;
+    };
+    let result = run_mixed_modal_pilot(
+        &fixture,
+        MIXED_KNOW_FLAG_POSSIBLE_EDGE,
+        MixedModalPilotInputs {
+            seed: &[1, 2, 3],
+            edge: &[1, 2, 3],
+            flag_rows: 1,
+        },
+    );
+    assert_eq!(sorted_output_rows(&fixture, &result), vec![1, 2, 3]);
+    assert_no_cpu_fallback(&result);
+}
+
+// Pilot 2: global gate TRUE + per-row tuple PARTIAL -> only matching rows.
+#[cfg(feature = "epistemic-logic-tests")]
+#[test]
+fn mixed_modal_global_true_row_partial_filters_rows() {
+    let Some(fixture) = runtime_fixture() else {
+        return;
+    };
+    let result = run_mixed_modal_pilot(
+        &fixture,
+        MIXED_KNOW_FLAG_POSSIBLE_EDGE,
+        MixedModalPilotInputs {
+            seed: &[1, 2, 3],
+            edge: &[1, 3],
+            flag_rows: 1,
+        },
+    );
+    // edge(2) absent -> seed 2's per-row tuple gate fails -> rejected.
+    assert_eq!(sorted_output_rows(&fixture, &result), vec![1, 3]);
+    assert_no_cpu_fallback(&result);
+}
+
+// Pilot 3: global gate TRUE + per-row tuple FALSE (no edges) -> all rejected.
+#[cfg(feature = "epistemic-logic-tests")]
+#[test]
+fn mixed_modal_global_true_row_false_rejects_all_rows() {
+    let Some(fixture) = runtime_fixture() else {
+        return;
+    };
+    let result = run_mixed_modal_pilot(
+        &fixture,
+        MIXED_KNOW_FLAG_POSSIBLE_EDGE,
+        MixedModalPilotInputs {
+            seed: &[1, 2, 3],
+            edge: &[],
+            flag_rows: 1,
+        },
+    );
+    assert_eq!(sorted_output_rows(&fixture, &result), Vec::<u32>::new());
+    assert_no_cpu_fallback(&result);
+}
+
+// Pilot 4: global gate FALSE + per-row tuple TRUE -> ALL rows rejected,
+// because the global gate fails once per accepted candidate.
+#[cfg(feature = "epistemic-logic-tests")]
+#[test]
+fn mixed_modal_global_false_row_true_rejects_all_rows() {
+    let Some(fixture) = runtime_fixture() else {
+        return;
+    };
+    let result = run_mixed_modal_pilot(
+        &fixture,
+        MIXED_KNOW_FLAG_POSSIBLE_EDGE,
+        MixedModalPilotInputs {
+            seed: &[1, 2, 3],
+            edge: &[1, 2, 3],
+            flag_rows: 0,
+        },
+    );
+    assert_eq!(sorted_output_rows(&fixture, &result), Vec::<u32>::new());
+    assert_no_cpu_fallback(&result);
+}
+
+// Pilot 5: global `possible` gate TRUE + per-row `possible` tuple -> exact.
+#[cfg(feature = "epistemic-logic-tests")]
+#[test]
+fn mixed_modal_possible_global_and_row_emits_exact_rows() {
+    let Some(fixture) = runtime_fixture() else {
+        return;
+    };
+    let result = run_mixed_modal_pilot(
+        &fixture,
+        r#"
+        pred seed(u32).
+        pred flag().
+        pred edge(u32).
+        pred out(u32).
+
+        out(X) :- seed(X), possible flag(), possible edge(X).
+        "#,
+        MixedModalPilotInputs {
+            seed: &[4, 5, 6],
+            edge: &[4, 6],
+            flag_rows: 1,
+        },
+    );
+    assert_eq!(sorted_output_rows(&fixture, &result), vec![4, 6]);
+    assert_no_cpu_fallback(&result);
+}
+
+// Pilot 6: global `know` gate TRUE + `not possible` global block + per-row
+// `possible` tuple -> mixed know + possible + not-possible conjunction.
+#[cfg(feature = "epistemic-logic-tests")]
+#[test]
+fn mixed_modal_know_notpossible_and_row_emits_exact_rows() {
+    let Some(fixture) = runtime_fixture() else {
+        return;
+    };
+    let program = parse_program(
+        r#"
+        pred seed(u32).
+        pred flag().
+        pred block().
+        pred edge(u32).
+        pred out(u32).
+
+        out(X) :- seed(X), know flag(), not possible block(), possible edge(X).
+        "#,
+    )
+    .expect("parse know+not-possible mixed pilot");
+    let executable =
+        compile_epistemic_gpu_execution(&program).expect("compile know+not-possible mixed pilot");
+    let mut executor = Executor::new(Arc::clone(&fixture.provider));
+    for (name, rel) in &executable.relation_ids {
+        executor.register_relation(*rel, name);
+    }
+    executor.put_relation("seed", upload_unary_u32(&fixture.memory, &[7, 8, 9], "x"));
+    executor.put_relation("edge", upload_unary_u32(&fixture.memory, &[7, 9], "x"));
+    executor.put_relation("flag", upload_zero_arity(&fixture.memory, 1));
+    // block() is empty -> `not possible block()` global gate holds.
+    executor.put_relation("block", upload_zero_arity(&fixture.memory, 0));
+    let result = executor
+        .execute_epistemic_gpu_execution(
+            &executable,
+            EpistemicGpuWorkspaceCapacities {
+                max_candidates: 16,
+                max_worlds: 4,
+                max_models_per_reduction: 4,
+            },
+        )
+        .expect("know + not-possible + per-row mixed rule should execute on GPU");
+    assert_eq!(sorted_output_rows(&fixture, &result), vec![7, 9]);
+    assert_no_cpu_fallback(&result);
+}
+
+// Pilot 7: global `know` gate TRUE but `not possible block()` FALSE (block
+// non-empty) + per-row tuple TRUE -> ALL rows rejected (global gate fails).
+#[cfg(feature = "epistemic-logic-tests")]
+#[test]
+fn mixed_modal_know_notpossible_global_false_rejects_all_rows() {
+    let Some(fixture) = runtime_fixture() else {
+        return;
+    };
+    let program = parse_program(
+        r#"
+        pred seed(u32).
+        pred flag().
+        pred block().
+        pred edge(u32).
+        pred out(u32).
+
+        out(X) :- seed(X), know flag(), not possible block(), possible edge(X).
+        "#,
+    )
+    .expect("parse know+not-possible global-false mixed pilot");
+    let executable =
+        compile_epistemic_gpu_execution(&program).expect("compile global-false mixed pilot");
+    let mut executor = Executor::new(Arc::clone(&fixture.provider));
+    for (name, rel) in &executable.relation_ids {
+        executor.register_relation(*rel, name);
+    }
+    executor.put_relation("seed", upload_unary_u32(&fixture.memory, &[7, 8, 9], "x"));
+    executor.put_relation("edge", upload_unary_u32(&fixture.memory, &[7, 8, 9], "x"));
+    executor.put_relation("flag", upload_zero_arity(&fixture.memory, 1));
+    // block() non-empty -> `not possible block()` FAILS -> global gate false.
+    executor.put_relation("block", upload_zero_arity(&fixture.memory, 1));
+    let result = executor
+        .execute_epistemic_gpu_execution(
+            &executable,
+            EpistemicGpuWorkspaceCapacities {
+                max_candidates: 16,
+                max_worlds: 4,
+                max_models_per_reduction: 4,
+            },
+        )
+        .expect("global-false mixed rule should execute (and reject) on GPU");
+    assert_eq!(sorted_output_rows(&fixture, &result), Vec::<u32>::new());
+    assert_no_cpu_fallback(&result);
+}
+
+// K4 negative pilot (v0.9.2 ITEM D): a MIXED rule whose per-row tuple key is a
+// genuinely UNBOUNDED structured class (a `cons` `[X | T]` with a
+// statically-unknown tail) must still fail closed via an INDEPENDENT guard --
+// now the structured-key FINITENESS guard -- proving removal of the mixed guard
+// opened no hole. Note the contract shift: a FINITE+TYPED 1-element list `[X]`
+// is now ACCEPTED and flattened onto the GPU (see the structured-key device
+// tests); only unbounded/untyped forms stay rejected, and they reject with a
+// precise resource/finiteness diagnostic rather than a blanket "unsupported
+// construct".
+#[cfg(feature = "epistemic-logic-tests")]
+#[test]
+fn mixed_modal_unsupported_tuple_key_still_fails_closed() {
+    let Some(fixture) = runtime_fixture() else {
+        return;
+    };
+    let program = parse_program(
+        r#"
+        pred seed(u32).
+        pred flag().
+        pred edge(u32).
+        pred out(u32).
+
+        out(X) :- seed(X), know flag(), possible edge([X | T]).
+        "#,
+    )
+    .expect("parse mixed rule with unbounded cons tuple key");
+    // The unbounded-cons key has no finite, typed GPU key-column set, so the plan
+    // fails closed at COMPILE time with a precise finiteness/resource diagnostic.
+    let err = match compile_epistemic_gpu_execution(&program) {
+        Ok(_) => panic!("unbounded structured tuple-key in a mixed rule must fail closed"),
+        Err(err) => err,
+    };
+    match err {
+        xlog_core::XlogError::ResourceExhausted { context, .. } => {
+            assert!(
+                context.contains("cons") && context.contains("tail length is not statically fixed"),
+                "finiteness diagnostic must name the unbounded cons tail: {context}"
+            );
+            assert!(
+                context.contains("fixed-arity list literal"),
+                "finiteness diagnostic must point at the finite-typed alternative: {context}"
+            );
+        }
+        other => panic!("expected precise finiteness/resource error, got {other:?}"),
+    }
+}
+
 fn complete_k5_edge_rows() -> Vec<(u32, u32)> {
     let mut rows = Vec::new();
     for left in 1..=5 {
@@ -4717,6 +7109,7 @@ fn executable_with_operator_mix() -> EpistemicExecutablePlan {
         vec![EpistemicReductionPlan {
             rule_index: 0,
             head_predicate: "out".to_string(),
+            public_head_arity: 1,
             relational_body_atoms: 1,
             wcoj_status: EpistemicWcojReductionStatus::NotWcojCandidate,
         }],
@@ -4744,6 +7137,7 @@ fn nonzero_arity_row_count_only_membership_executable() -> EpistemicExecutablePl
         vec![EpistemicReductionPlan {
             rule_index: 0,
             head_predicate: "out".to_string(),
+            public_head_arity: 1,
             relational_body_atoms: 1,
             wcoj_status: EpistemicWcojReductionStatus::NotWcojCandidate,
         }],
@@ -4777,6 +7171,7 @@ fn accepted_ground_literal_component_executable(
         vec![EpistemicReductionPlan {
             rule_index: 0,
             head_predicate: output_predicate.to_string(),
+            public_head_arity: 1,
             relational_body_atoms: 1,
             wcoj_status: EpistemicWcojReductionStatus::NotWcojCandidate,
         }],
@@ -4796,6 +7191,7 @@ fn executable_with_kclique_wcoj_plan() -> EpistemicExecutablePlan {
         vec![EpistemicReductionPlan {
             rule_index: 0,
             head_predicate: "clique5".to_string(),
+            public_head_arity: 5,
             relational_body_atoms: 10,
             wcoj_status: EpistemicWcojReductionStatus::RequiresPlannerEligibility,
         }],
@@ -4818,6 +7214,7 @@ fn executable_with_planned_hash_route() -> EpistemicExecutablePlan {
         vec![EpistemicReductionPlan {
             rule_index: 0,
             head_predicate: "clique5".to_string(),
+            public_head_arity: 5,
             relational_body_atoms: 10,
             wcoj_status: EpistemicWcojReductionStatus::RequiresPlannerEligibility,
         }],
@@ -4837,6 +7234,7 @@ fn executable_with_live_kclique_wcoj_literal() -> EpistemicExecutablePlan {
         vec![EpistemicReductionPlan {
             rule_index: 0,
             head_predicate: "clique5".to_string(),
+            public_head_arity: 5,
             relational_body_atoms: 10,
             wcoj_status: EpistemicWcojReductionStatus::RequiresPlannerEligibility,
         }],
@@ -4866,6 +7264,7 @@ fn executable_with_kclique_helper_metadata_only_plan() -> EpistemicExecutablePla
         vec![EpistemicReductionPlan {
             rule_index: 0,
             head_predicate: "clique5".to_string(),
+            public_head_arity: 5,
             relational_body_atoms: 10,
             wcoj_status: EpistemicWcojReductionStatus::RequiresPlannerEligibility,
         }],
@@ -4885,6 +7284,7 @@ fn executable_with_kclique_helper_scan_outside_wcoj_plan() -> EpistemicExecutabl
         vec![EpistemicReductionPlan {
             rule_index: 0,
             head_predicate: "clique5".to_string(),
+            public_head_arity: 5,
             relational_body_atoms: 10,
             wcoj_status: EpistemicWcojReductionStatus::RequiresPlannerEligibility,
         }],
@@ -4907,6 +7307,7 @@ fn executable_with_kclique_empty_edge_permutation_plan() -> EpistemicExecutableP
         vec![EpistemicReductionPlan {
             rule_index: 0,
             head_predicate: "clique5".to_string(),
+            public_head_arity: 5,
             relational_body_atoms: 10,
             wcoj_status: EpistemicWcojReductionStatus::RequiresPlannerEligibility,
         }],
@@ -4929,6 +7330,7 @@ fn executable_with_v070_4cycle_wcoj_plan() -> EpistemicExecutablePlan {
         vec![EpistemicReductionPlan {
             rule_index: 0,
             head_predicate: "cycle4".to_string(),
+            public_head_arity: 4,
             relational_body_atoms: 4,
             wcoj_status: EpistemicWcojReductionStatus::RequiresPlannerEligibility,
         }],
@@ -4952,6 +7354,7 @@ fn executable_with_live_triangle_wcoj_literal() -> EpistemicExecutablePlan {
         vec![EpistemicReductionPlan {
             rule_index: 0,
             head_predicate: "tri".to_string(),
+            public_head_arity: 3,
             relational_body_atoms: 3,
             wcoj_status: EpistemicWcojReductionStatus::RequiresPlannerEligibility,
         }],
@@ -4988,6 +7391,7 @@ fn executable_with_live_v070_4cycle_wcoj_literal_with_plan(
         vec![EpistemicReductionPlan {
             rule_index: 0,
             head_predicate: "cycle4".to_string(),
+            public_head_arity: 4,
             relational_body_atoms: 4,
             wcoj_status: EpistemicWcojReductionStatus::RequiresPlannerEligibility,
         }],
@@ -5407,4 +7811,1793 @@ fn kclique_order_without_edge_permutation() -> KCliqueVariableOrder {
         }],
         StreamGroupId(0),
     )
+}
+
+// =====================================================================
+// EGB-02: tuple-key / bound-value modal membership KPI pilots.
+//
+// Each pilot parses a real epistemic program, compiles it through the
+// production lowering boundary, and executes it on the GPU device path.
+// They assert (a) the exact founded result rows, (b) device-backed
+// tuple-key column reads, and (c) zero forbidden CPU fallback counters.
+// =====================================================================
+
+#[cfg(feature = "epistemic-logic-tests")]
+fn egb02_run_unary_result(
+    fixture: &RuntimeFixture,
+    source: &str,
+    unary_inputs: &[(&str, &[u32])],
+    binary_inputs: &[(&str, &[(u32, u32)])],
+    ternary_inputs: &[(&str, &[(u32, u32, u32)])],
+    expected_key_column_reads: u32,
+) -> Vec<u32> {
+    let program = parse_program(source).expect("parse EGB-02 pilot program");
+    let executable = compile_epistemic_gpu_execution(&program).expect("compile EGB-02 pilot plan");
+    let mut executor = Executor::new(Arc::clone(&fixture.provider));
+    for (name, rel) in &executable.relation_ids {
+        executor.register_relation(*rel, name);
+    }
+    for &(name, rows) in unary_inputs {
+        executor.put_relation(name, upload_unary_u32(&fixture.memory, rows, "x"));
+    }
+    for &(name, rows) in binary_inputs {
+        executor.put_relation(name, upload_binary_u32(&fixture.memory, rows, "x", "y"));
+    }
+    for &(name, rows) in ternary_inputs {
+        executor.put_relation(
+            name,
+            upload_ternary_u32(&fixture.memory, rows, "x", "y", "z"),
+        );
+    }
+
+    let result = executor
+        .execute_epistemic_gpu_execution(
+            &executable,
+            EpistemicGpuWorkspaceCapacities {
+                max_candidates: 8,
+                max_worlds: 2,
+                max_models_per_reduction: 4,
+            },
+        )
+        .expect("EGB-02 pilot should execute through GPU runtime path");
+
+    // K3/K4 lock evidence: device-backed tuple-key reads, zero CPU fallback.
+    assert_eq!(
+        result.model_membership.tuple_source_key_column_device_reads, expected_key_column_reads,
+        "tuple-key column reads must be device-backed for {source:?}"
+    );
+    assert_eq!(result.semantic_trace.cpu_candidate_enumerations, 0);
+    assert_eq!(result.semantic_trace.cpu_world_view_validations, 0);
+    result
+        .require_runtime_dispatch_certification()
+        .expect("EGB-02 pilot runtime evidence must remain certified");
+
+    let mut rows = fixture
+        .provider
+        .download_column::<u32>(&result.final_output, 0)
+        .expect("download EGB-02 pilot output column 0");
+    rows.sort_unstable();
+    rows
+}
+
+/// K1: ground arity-1 tuple key gates candidates on a present ground tuple.
+#[cfg(feature = "epistemic-logic-tests")]
+#[test]
+fn egb02_ground_arity_one_tuple_key_through_gpu_membership() {
+    let Some(fixture) = runtime_fixture() else {
+        return;
+    };
+    // know flag(7) holds (flag has row 7), so every node row is founded.
+    let present = egb02_run_unary_result(
+        &fixture,
+        r#"
+        pred node(u32).
+        pred flag(u32).
+        pred gated(u32).
+
+        gated(X) :- node(X), know flag(7).
+        "#,
+        &[("node", &[1, 2, 3][..]), ("flag", &[7][..])],
+        &[],
+        &[],
+        1,
+    );
+    assert_eq!(present, vec![1, 2, 3]);
+
+    // know flag(7) fails (flag lacks row 7), so no node row is founded.
+    let absent = egb02_run_unary_result(
+        &fixture,
+        r#"
+        pred node(u32).
+        pred flag(u32).
+        pred gated(u32).
+
+        gated(X) :- node(X), know flag(7).
+        "#,
+        &[("node", &[1, 2, 3][..]), ("flag", &[9][..])],
+        &[],
+        &[],
+        1,
+    );
+    assert!(absent.is_empty(), "absent ground key must found no rows");
+}
+
+/// K1: ground arity-2 tuple key matches a specific stable-model edge tuple.
+#[cfg(feature = "epistemic-logic-tests")]
+#[test]
+fn egb02_ground_arity_two_tuple_key_through_gpu_membership() {
+    let Some(fixture) = runtime_fixture() else {
+        return;
+    };
+    let present = egb02_run_unary_result(
+        &fixture,
+        r#"
+        pred node(u32).
+        pred edge(u32, u32).
+        pred gated(u32).
+
+        gated(X) :- node(X), know edge(1, 10).
+        "#,
+        &[("node", &[1, 2, 3][..])],
+        &[("edge", &[(1, 10), (2, 20)][..])],
+        &[],
+        2,
+    );
+    assert_eq!(present, vec![1, 2, 3]);
+
+    let absent = egb02_run_unary_result(
+        &fixture,
+        r#"
+        pred node(u32).
+        pred edge(u32, u32).
+        pred gated(u32).
+
+        gated(X) :- node(X), know edge(1, 99).
+        "#,
+        &[("node", &[1, 2, 3][..])],
+        &[("edge", &[(1, 10), (2, 20)][..])],
+        &[],
+        2,
+    );
+    assert!(absent.is_empty(), "absent ground edge must found no rows");
+}
+
+/// K1: ground arity-3 tuple key matches a specific stable-model triple.
+#[cfg(feature = "epistemic-logic-tests")]
+#[test]
+fn egb02_ground_arity_three_tuple_key_through_gpu_membership() {
+    let Some(fixture) = runtime_fixture() else {
+        return;
+    };
+    let present = egb02_run_unary_result(
+        &fixture,
+        r#"
+        pred node(u32).
+        pred triple(u32, u32, u32).
+        pred gated(u32).
+
+        gated(X) :- node(X), know triple(1, 10, 100).
+        "#,
+        &[("node", &[5, 6][..])],
+        &[],
+        &[("triple", &[(1, 10, 100), (2, 20, 200)][..])],
+        3,
+    );
+    assert_eq!(present, vec![5, 6]);
+
+    let absent = egb02_run_unary_result(
+        &fixture,
+        r#"
+        pred node(u32).
+        pred triple(u32, u32, u32).
+        pred gated(u32).
+
+        gated(X) :- node(X), know triple(1, 10, 999).
+        "#,
+        &[("node", &[5, 6][..])],
+        &[],
+        &[("triple", &[(1, 10, 100), (2, 20, 200)][..])],
+        3,
+    );
+    assert!(absent.is_empty(), "absent ground triple must found no rows");
+}
+
+/// K2: a single bound variable yields exactly the founded rows, deterministic.
+#[cfg(feature = "epistemic-logic-tests")]
+#[test]
+fn egb02_single_bound_variable_tuple_key_through_gpu_membership() {
+    let Some(fixture) = runtime_fixture() else {
+        return;
+    };
+    let source = r#"
+        pred node(u32).
+        pred child(u32).
+        pred known_child(u32).
+
+        known_child(X) :- node(X), know child(X).
+        "#;
+    let inputs_unary = &[("node", &[1, 2, 3, 4][..]), ("child", &[2, 4][..])];
+    let first = egb02_run_unary_result(&fixture, source, inputs_unary, &[], &[], 1);
+    assert_eq!(first, vec![2, 4]);
+    // Determinism across reruns (K2).
+    let second = egb02_run_unary_result(&fixture, source, inputs_unary, &[], &[], 1);
+    assert_eq!(first, second);
+}
+
+/// K2: multiple bound variables type-correct on both columns and match by value.
+#[cfg(feature = "epistemic-logic-tests")]
+#[test]
+fn egb02_multiple_bound_variables_tuple_key_through_gpu_membership() {
+    let Some(fixture) = runtime_fixture() else {
+        return;
+    };
+    // out(X,Y) :- pair(X,Y), know edge(X,Y). Only pairs that are also edges
+    // are founded.
+    let program = parse_program(
+        r#"
+        pred pair(u32, u32).
+        pred edge(u32, u32).
+        pred out(u32, u32).
+
+        out(X, Y) :- pair(X, Y), know edge(X, Y).
+        "#,
+    )
+    .expect("parse multi-bound-variable pilot program");
+    let executable =
+        compile_epistemic_gpu_execution(&program).expect("compile multi-bound pilot plan");
+    let mut executor = Executor::new(Arc::clone(&fixture.provider));
+    for (name, rel) in &executable.relation_ids {
+        executor.register_relation(*rel, name);
+    }
+    executor.put_relation(
+        "pair",
+        upload_binary_u32(&fixture.memory, &[(1, 10), (2, 20), (3, 30)], "x", "y"),
+    );
+    executor.put_relation(
+        "edge",
+        upload_binary_u32(&fixture.memory, &[(1, 10), (3, 30), (4, 40)], "x", "y"),
+    );
+    let result = executor
+        .execute_epistemic_gpu_execution(
+            &executable,
+            EpistemicGpuWorkspaceCapacities {
+                max_candidates: 8,
+                max_worlds: 2,
+                max_models_per_reduction: 4,
+            },
+        )
+        .expect("multi-bound pilot should execute through GPU runtime path");
+    assert_eq!(
+        result.model_membership.tuple_source_key_column_device_reads, 2,
+        "two bound columns must read two device key columns"
+    );
+    assert_eq!(result.semantic_trace.cpu_candidate_enumerations, 0);
+    assert_eq!(result.semantic_trace.cpu_world_view_validations, 0);
+    result
+        .require_runtime_dispatch_certification()
+        .expect("multi-bound pilot runtime evidence must remain certified");
+    let mut xs = fixture
+        .provider
+        .download_column::<u32>(&result.final_output, 0)
+        .expect("download multi-bound X column");
+    let mut ys = fixture
+        .provider
+        .download_column::<u32>(&result.final_output, 1)
+        .expect("download multi-bound Y column");
+    xs.sort_unstable();
+    ys.sort_unstable();
+    assert_eq!(xs, vec![1, 3]);
+    assert_eq!(ys, vec![10, 30]);
+}
+
+/// K2: a repeated variable enforces value equality across both key columns.
+#[cfg(feature = "epistemic-logic-tests")]
+#[test]
+fn egb02_repeated_variable_tuple_key_enforces_equality_through_gpu_membership() {
+    let Some(fixture) = runtime_fixture() else {
+        return;
+    };
+    // X is bound by node(X). know loop(X, X) only matches stable-model tuples
+    // where both columns equal X, so loop rows like (3, 7) must NOT found X=3.
+    let founded = egb02_run_unary_result(
+        &fixture,
+        r#"
+        pred node(u32).
+        pred loop(u32, u32).
+        pred reflexive(u32).
+
+        reflexive(X) :- node(X), know loop(X, X).
+        "#,
+        &[("node", &[1, 2, 3, 4][..])],
+        &[("loop", &[(1, 1), (2, 5), (4, 4), (3, 7)][..])],
+        &[],
+        2,
+    );
+    // Only loop(1,1) and loop(4,4) satisfy the repeated-variable equality.
+    assert_eq!(founded, vec![1, 4]);
+}
+
+/// K1/K3: an anonymous position acts as a wildcard (no equality requirement).
+#[cfg(feature = "epistemic-logic-tests")]
+#[test]
+fn egb02_anonymous_position_tuple_key_is_wildcard_through_gpu_membership() {
+    let Some(fixture) = runtime_fixture() else {
+        return;
+    };
+    // out(X) :- node(X), know edge(X, _). X is founded iff edge has ANY row
+    // whose first column equals X, regardless of the second column.
+    let founded = egb02_run_unary_result(
+        &fixture,
+        r#"
+        pred node(u32).
+        pred edge(u32, u32).
+        pred reachable(u32).
+
+        reachable(X) :- node(X), know edge(X, _).
+        "#,
+        &[("node", &[1, 2, 3, 4][..])],
+        &[("edge", &[(1, 10), (3, 30), (3, 99)][..])],
+        &[],
+        2,
+    );
+    // X=1 (edge 1,10) and X=3 (edge 3,30 / 3,99) match; X=2,4 have no edge.
+    assert_eq!(founded, vec![1, 3]);
+}
+
+/// K1/K3: a pure-anonymous modal atom (no bound variable) is a global gate that
+/// holds iff the tuple source is non-empty.
+#[cfg(feature = "epistemic-logic-tests")]
+#[test]
+fn egb02_pure_anonymous_global_gate_through_gpu_membership() {
+    let Some(fixture) = runtime_fixture() else {
+        return;
+    };
+    // know flag(_): holds iff flag has any row.
+    let nonempty = egb02_run_unary_result(
+        &fixture,
+        r#"
+        pred node(u32).
+        pred flag(u32).
+        pred out(u32).
+
+        out(X) :- node(X), know flag(_).
+        "#,
+        &[("node", &[1, 2, 3][..]), ("flag", &[9][..])],
+        &[],
+        &[],
+        1,
+    );
+    assert_eq!(
+        nonempty,
+        vec![1, 2, 3],
+        "anonymous gate holds when non-empty"
+    );
+
+    let empty = egb02_run_unary_result(
+        &fixture,
+        r#"
+        pred node(u32).
+        pred flag(u32).
+        pred out(u32).
+
+        out(X) :- node(X), know flag(_).
+        "#,
+        &[("node", &[1, 2, 3][..]), ("flag", &[][..])],
+        &[],
+        &[],
+        1,
+    );
+    assert!(empty.is_empty(), "anonymous gate fails when empty");
+
+    // know edge(_, _): arity-2 pure-anonymous global gate.
+    let edge_nonempty = egb02_run_unary_result(
+        &fixture,
+        r#"
+        pred node(u32).
+        pred edge(u32, u32).
+        pred out(u32).
+
+        out(X) :- node(X), know edge(_, _).
+        "#,
+        &[("node", &[5, 6][..])],
+        &[("edge", &[(1, 10)][..])],
+        &[],
+        2,
+    );
+    assert_eq!(edge_nonempty, vec![5, 6]);
+}
+
+/// K1: an arity-0 (nullary) modal atom is a global gate on a fact relation.
+#[cfg(feature = "epistemic-logic-tests")]
+#[test]
+fn egb02_arity_zero_tuple_key_through_gpu_membership() {
+    let Some(fixture) = runtime_fixture() else {
+        return;
+    };
+    // know ready(): holds iff ready has a (zero-arity) fact row.
+    let run = |ready_rows: u32| -> Vec<u32> {
+        let program = parse_program(
+            r#"
+            pred node(u32).
+            pred ready().
+            pred out(u32).
+
+            out(X) :- node(X), know ready().
+            "#,
+        )
+        .expect("parse arity-zero modal program");
+        let executable =
+            compile_epistemic_gpu_execution(&program).expect("compile arity-zero modal plan");
+        let mut executor = Executor::new(Arc::clone(&fixture.provider));
+        for (name, rel) in &executable.relation_ids {
+            executor.register_relation(*rel, name);
+        }
+        executor.put_relation("node", upload_unary_u32(&fixture.memory, &[1, 2, 3], "x"));
+        executor.put_relation("ready", upload_zero_arity(&fixture.memory, ready_rows));
+        let result = executor
+            .execute_epistemic_gpu_execution(
+                &executable,
+                EpistemicGpuWorkspaceCapacities {
+                    max_candidates: 8,
+                    max_worlds: 2,
+                    max_models_per_reduction: 4,
+                },
+            )
+            .expect("arity-zero modal pilot should execute through GPU runtime path");
+        assert_eq!(
+            result.model_membership.tuple_source_key_column_device_reads, 0,
+            "arity-zero tuple sources read no key columns"
+        );
+        result
+            .require_runtime_dispatch_certification()
+            .expect("arity-zero pilot runtime evidence must remain certified");
+        let mut rows = fixture
+            .provider
+            .download_column::<u32>(&result.final_output, 0)
+            .expect("download arity-zero output column 0");
+        rows.sort_unstable();
+        rows
+    };
+    assert_eq!(
+        run(1),
+        vec![1, 2, 3],
+        "nullary gate holds when fact present"
+    );
+    assert!(run(0).is_empty(), "nullary gate fails when fact absent");
+}
+
+/// EGB-02B: a rule mixing a per-row (bound-variable) modal literal with a
+/// global gate (ground/nullary) modal literal now executes SOUNDLY. The global
+/// gate and the per-row bound tuple-key gate compose conjunctively on the GPU
+/// row-map kernel: a row is emitted iff its per-row tuple holds AND every
+/// global-gate literal holds in the accepted candidate. Here `know flag(7)` is
+/// the global gate (bound to the constant 7, no output column) and
+/// `know child(X)` is the per-row bound-variable filter.
+#[cfg(feature = "epistemic-logic-tests")]
+#[test]
+fn egb02_mixed_per_row_and_global_modal_executes_conjunctively() {
+    let Some(fixture) = runtime_fixture() else {
+        return;
+    };
+    let src = r#"
+        pred node(u32).
+        pred child(u32).
+        pred flag(u32).
+        pred out(u32).
+
+        out(X) :- node(X), know child(X), know flag(7).
+        "#;
+    let run = |flag_rows: &[u32], child_rows: &[u32]| -> Vec<u32> {
+        let program = parse_program(src).expect("parse mixed per-row + global modal program");
+        let executable = compile_epistemic_gpu_execution(&program)
+            .expect("compile mixed per-row + global modal program");
+        let mut executor = Executor::new(Arc::clone(&fixture.provider));
+        for (name, rel) in &executable.relation_ids {
+            executor.register_relation(*rel, name);
+        }
+        executor.put_relation("node", upload_unary_u32(&fixture.memory, &[1, 2, 3], "x"));
+        executor.put_relation("child", upload_unary_u32(&fixture.memory, child_rows, "x"));
+        executor.put_relation("flag", upload_unary_u32(&fixture.memory, flag_rows, "x"));
+        let result = executor
+            .execute_epistemic_gpu_execution(
+                &executable,
+                EpistemicGpuWorkspaceCapacities {
+                    max_candidates: 16,
+                    max_worlds: 4,
+                    max_models_per_reduction: 4,
+                },
+            )
+            .expect("mixed per-row + global modal rule should execute on GPU");
+        assert_eq!(result.semantic_trace.cpu_candidate_enumerations, 0);
+        assert_eq!(result.semantic_trace.cpu_world_view_validations, 0);
+        result
+            .require_runtime_dispatch_certification()
+            .expect("mixed per-row + global runtime evidence must remain certified");
+        let mut rows = fixture
+            .provider
+            .download_column::<u32>(&result.final_output, 0)
+            .expect("download mixed per-row + global output column 0");
+        rows.sort_unstable();
+        rows
+    };
+    // global gate flag(7) TRUE + per-row child {1,2} TRUE -> exact {1,2}.
+    assert_eq!(run(&[7], &[1, 2]), vec![1, 2]);
+    // global gate TRUE + per-row child {1} -> only row 1 (2,3 filtered).
+    assert_eq!(run(&[7], &[1]), vec![1]);
+    // global gate flag(7) FALSE (flag holds only 9) + per-row TRUE ->
+    // ALL rows rejected once per accepted candidate.
+    assert_eq!(run(&[9], &[1, 2, 3]), Vec::<u32>::new());
+}
+
+/// K2/K3: an empty `possible` tuple source founds nothing; `not possible`
+/// founds everything (the negated empty membership).
+#[cfg(feature = "epistemic-logic-tests")]
+#[test]
+fn egb02_empty_possible_tuple_source_through_gpu_membership() {
+    let Some(fixture) = runtime_fixture() else {
+        return;
+    };
+    let possible_rows = egb02_run_unary_result(
+        &fixture,
+        r#"
+        pred node(u32).
+        pred maybe(u32).
+        pred out(u32).
+
+        out(X) :- node(X), possible maybe(X).
+        "#,
+        &[("node", &[1, 2, 3][..]), ("maybe", &[][..])],
+        &[],
+        &[],
+        1,
+    );
+    assert!(
+        possible_rows.is_empty(),
+        "empty possible source must found no rows"
+    );
+
+    let not_possible_rows = egb02_run_unary_result(
+        &fixture,
+        r#"
+        pred node(u32).
+        pred maybe(u32).
+        pred out(u32).
+
+        out(X) :- node(X), not possible maybe(X).
+        "#,
+        &[("node", &[1, 2, 3][..]), ("maybe", &[][..])],
+        &[],
+        &[],
+        1,
+    );
+    assert_eq!(not_possible_rows, vec![1, 2, 3]);
+}
+
+/// v0.9.2 SCOPE-LIMIT CLOSED: a modal-local variable (`Y`) absent from the head over
+/// an INVARIANT relation is now resolved by augmented projection, not fail-closed.
+#[cfg(feature = "epistemic-logic-tests")]
+#[test]
+fn egb02_augmenting_modal_variable_over_invariant_resolves_with_projection() {
+    // `Y` appears only inside the positive modal atom `know edge(X, Y)` over the
+    // INVARIANT EDB `edge`. The augmented-projection reduction resolves it into a
+    // positive `edge(X, Y)` join (binding `Y`), augments the reduced head to carry
+    // `Y`, and the per-head projection emits the PUBLIC arity-1 `out`. So
+    //   out(X) :- node(X), know edge(X, Y)   ==>   out = {X in node : exists Y edge(X,Y)}
+    // EXACT tuples (non-tautological: out drops the edge target column and is filtered
+    // by node).
+    //   node = {1, 2, 3}, edge = {(1,10),(2,20),(2,21)}  ->  out = {1, 2}
+    let Some(fixture) = runtime_fixture() else {
+        return;
+    };
+    let program = parse_program(
+        r#"
+        #pragma epistemic_mode = faeel
+        pred node(u32).
+        pred edge(u32, u32).
+        pred out(u32).
+        node(1). node(2). node(3).
+        edge(1, 10). edge(2, 20). edge(2, 21).
+        out(X) :- node(X), know edge(X, Y).
+        "#,
+    )
+    .expect("parse augmenting-modal-variable program");
+
+    let executable = compile_epistemic_gpu_execution(&program)
+        .expect("augmenting modal over an invariant relation must compile via projection");
+    assert!(executable.gpu_plan.final_output_columns.is_some());
+    assert_eq!(
+        executable.gpu_plan.reductions[0].public_head_arity, 1,
+        "out has public arity 1 (Y is an augmented internal column)"
+    );
+
+    let mut executor = Executor::new(Arc::clone(&fixture.provider));
+    for (name, rel) in &executable.relation_ids {
+        executor.register_relation(*rel, name);
+    }
+    executor.put_relation("node", upload_unary_u32(&fixture.memory, &[1, 2, 3], "x"));
+    executor.put_relation(
+        "edge",
+        upload_binary_u32(&fixture.memory, &[(1, 10), (2, 20), (2, 21)], "x", "y"),
+    );
+
+    let result = executor
+        .execute_epistemic_gpu_execution(
+            &executable,
+            EpistemicGpuWorkspaceCapacities {
+                max_candidates: 8,
+                max_worlds: 2,
+                max_models_per_reduction: 8,
+            },
+        )
+        .expect("augmenting-modal component must execute on device");
+    result
+        .require_runtime_dispatch_certification()
+        .expect("runtime result must retain dispatch certification");
+    assert!(result.prepared.preflight.cpu_fallbacks.is_zero());
+
+    let mut rows = fixture
+        .provider
+        .download_column::<u32>(&result.final_output, 0)
+        .expect("download out column");
+    rows.sort_unstable();
+    assert_eq!(
+        rows,
+        vec![1u32, 2u32],
+        "out = {{X in node : exists Y edge(X,Y)}} = {{1,2}} (node 3 has no edge)"
+    );
+}
+
+/// K3: a type mismatch between a bound variable and the tuple-key column is
+/// rejected with a typed diagnostic before result materialization.
+#[cfg(feature = "epistemic-logic-tests")]
+#[test]
+fn egb02_type_mismatch_bound_variable_is_fail_closed() {
+    let Some(fixture) = runtime_fixture() else {
+        return;
+    };
+    // node carries a Symbol column; child carries a U32 column. Binding X
+    // (Symbol) against child's U32 key column is a type error.
+    let program = parse_program(
+        r#"
+        pred node(symbol).
+        pred child(u32).
+        pred out(symbol).
+
+        out(X) :- node(X), know child(X).
+        "#,
+    )
+    .expect("parse type-mismatch program");
+    let executable = match compile_epistemic_gpu_execution(&program) {
+        Ok(executable) => executable,
+        Err(xlog_core::XlogError::UnsupportedEpistemicConstruct { .. })
+        | Err(xlog_core::XlogError::UnsafeVariable(_))
+        | Err(xlog_core::XlogError::Type(_))
+        | Err(xlog_core::XlogError::Compilation(_)) => return,
+        Err(other) => panic!("unexpected compile error: {other:?}"),
+    };
+    let mut executor = Executor::new(Arc::clone(&fixture.provider));
+    for (name, rel) in &executable.relation_ids {
+        executor.register_relation(*rel, name);
+    }
+    executor.put_relation(
+        "node",
+        upload_unary_typed_u32(&fixture.memory, &[1, 2], "x", ScalarType::Symbol),
+    );
+    executor.put_relation("child", upload_unary_u32(&fixture.memory, &[1], "x"));
+    let err = executor
+        .execute_epistemic_gpu_execution(
+            &executable,
+            EpistemicGpuWorkspaceCapacities {
+                max_candidates: 8,
+                max_worlds: 2,
+                max_models_per_reduction: 4,
+            },
+        )
+        .err()
+        .expect("type mismatch must be rejected before result materialization");
+    match err {
+        xlog_core::XlogError::UnsupportedEpistemicConstruct { .. }
+        | xlog_core::XlogError::UnsafeVariable(_)
+        | xlog_core::XlogError::Type(_)
+        | xlog_core::XlogError::Compilation(_) => {}
+        other => panic!("expected typed type-mismatch diagnostic, got {other:?}"),
+    }
+}
+
+/// K1/K3: pure-ground `not know` / `possible` / `not possible` global gates.
+/// These ride the global membership gate (no bound output column), which must
+/// honor body-literal semantics including negation.
+#[cfg(feature = "epistemic-logic-tests")]
+#[test]
+fn egb02_ground_global_gate_honors_negation_and_modality() {
+    let Some(fixture) = runtime_fixture() else {
+        return;
+    };
+
+    // not know flag(7): holds iff flag(7) is absent.
+    let not_know_absent = egb02_run_unary_result(
+        &fixture,
+        r#"
+        pred node(u32).
+        pred flag(u32).
+        pred out(u32).
+
+        out(X) :- node(X), not know flag(7).
+        "#,
+        &[("node", &[1, 2, 3][..]), ("flag", &[9][..])],
+        &[],
+        &[],
+        1,
+    );
+    assert_eq!(not_know_absent, vec![1, 2, 3], "not know of absent holds");
+
+    let not_know_present = egb02_run_unary_result(
+        &fixture,
+        r#"
+        pred node(u32).
+        pred flag(u32).
+        pred out(u32).
+
+        out(X) :- node(X), not know flag(7).
+        "#,
+        &[("node", &[1, 2, 3][..]), ("flag", &[7][..])],
+        &[],
+        &[],
+        1,
+    );
+    assert!(
+        not_know_present.is_empty(),
+        "not know of present must found no rows"
+    );
+
+    // possible flag(7): holds iff flag(7) is present (single-world FAEEL).
+    let possible_present = egb02_run_unary_result(
+        &fixture,
+        r#"
+        pred node(u32).
+        pred flag(u32).
+        pred out(u32).
+
+        out(X) :- node(X), possible flag(7).
+        "#,
+        &[("node", &[1, 2, 3][..]), ("flag", &[7][..])],
+        &[],
+        &[],
+        1,
+    );
+    assert_eq!(possible_present, vec![1, 2, 3], "possible present holds");
+
+    let possible_absent = egb02_run_unary_result(
+        &fixture,
+        r#"
+        pred node(u32).
+        pred flag(u32).
+        pred out(u32).
+
+        out(X) :- node(X), possible flag(7).
+        "#,
+        &[("node", &[1, 2, 3][..]), ("flag", &[9][..])],
+        &[],
+        &[],
+        1,
+    );
+    assert!(
+        possible_absent.is_empty(),
+        "possible absent must found no rows"
+    );
+}
+
+/// K1/K2: a modal atom mixing a bound variable and a ground value matches by
+/// value on both positions.
+#[cfg(feature = "epistemic-logic-tests")]
+#[test]
+fn egb02_mixed_bound_and_ground_tuple_key_through_gpu_membership() {
+    let Some(fixture) = runtime_fixture() else {
+        return;
+    };
+    // out(X) :- node(X), know edge(X, 10). X founded iff edge(X, 10) holds.
+    let founded = egb02_run_unary_result(
+        &fixture,
+        r#"
+        pred node(u32).
+        pred edge(u32, u32).
+        pred out(u32).
+
+        out(X) :- node(X), know edge(X, 10).
+        "#,
+        &[("node", &[1, 2, 3][..])],
+        &[("edge", &[(1, 10), (2, 20)][..])],
+        &[],
+        2,
+    );
+    assert_eq!(founded, vec![1]);
+}
+
+// ---------------------------------------------------------------------------
+// EGB-01: arbitrary-EIR candidate-world enumeration.
+//
+// These pilots prove the production device path
+// (compile_epistemic_gpu_execution -> execute_epistemic_gpu_execution) derives
+// the candidate assumption space FROM the program's EIR epistemic literals --
+// no hand-supplied EpistemicInterpretation candidate lists -- generates the
+// full 2^literal_count lattice on device, evaluates each candidate against the
+// reduced stable-model semantics through the production runtime path, and emits
+// the K2 trace counts. They route through the same single-plan GPU runtime path
+// as every other accepted epistemic execution; nothing here touches the CPU
+// fixture layer (run_generate_propagate_test).
+// ---------------------------------------------------------------------------
+
+/// EGB-01 K1/K2: a program with MULTIPLE epistemic literals derives its full
+/// candidate space (2^literal_count) FROM the EIR program -- no fixture list --
+/// and emits every required trace count (generated, propagated, tested,
+/// accepted, rejected, rejection reasons) from device-derived semantics.
+#[cfg(feature = "epistemic-logic-tests")]
+#[test]
+fn egb01_multi_literal_program_enumerates_candidate_space_from_eir() {
+    let Some(fixture) = runtime_fixture() else {
+        return;
+    };
+    // Three epistemic literals across distinct predicates -> 2^3 = 8 candidates,
+    // each a distinct assumption assignment derived purely from the EIR program.
+    let program = parse_program(
+        r#"
+        pred seed(u32).
+        pred a(u32).
+        pred b(u32).
+        pred c(u32).
+        pred out(u32).
+
+        out(X) :- seed(X), know a(X), possible b(X), not possible c(X).
+        "#,
+    )
+    .expect("parse EGB-01 multi-literal program");
+    let executable =
+        compile_epistemic_gpu_execution(&program).expect("compile EGB-01 multi-literal plan");
+    // The candidate space is derived from the program's epistemic literals,
+    // not supplied by the caller.
+    assert_eq!(
+        executable.gpu_plan.epistemic_literals.len(),
+        3,
+        "candidate space must be derived from the three EIR epistemic literals"
+    );
+
+    let mut executor = Executor::new(Arc::clone(&fixture.provider));
+    for (name, rel) in &executable.relation_ids {
+        executor.register_relation(*rel, name);
+    }
+    // a(7) and b(7) present, c(7) absent => exactly the all-assumptions-satisfied
+    // candidate (index 7) is accepted; every other candidate is rejected.
+    for (name, rows) in [
+        ("seed", &[7][..]),
+        ("a", &[7][..]),
+        ("b", &[7][..]),
+        ("c", &[][..]),
+    ] {
+        executor.put_relation(name, upload_unary_u32(&fixture.memory, rows, "x"));
+    }
+
+    let result = executor
+        .execute_epistemic_gpu_execution(
+            &executable,
+            EpistemicGpuWorkspaceCapacities {
+                max_candidates: 8,
+                max_worlds: 4,
+                max_models_per_reduction: 1,
+            },
+        )
+        .expect("EGB-01 multi-literal program should enumerate and evaluate on device");
+
+    // K2: every required trace count is emitted from device-derived semantics.
+    let trace = &result.semantic_trace;
+    assert_eq!(trace.generated_candidates, 8, "generated = 2^3");
+    assert_eq!(trace.guesses, 24, "guesses = 8 candidates * 3 literals");
+    assert_eq!(trace.propagated_candidates, 8, "propagated");
+    assert_eq!(trace.tested_candidates, 8, "tested");
+    assert_eq!(trace.accepted_candidates, 1, "accepted");
+    assert_eq!(trace.rejected_candidates, 7, "rejected");
+    assert_eq!(trace.accepted_candidate_indices, vec![7]);
+    assert_eq!(trace.rejected_candidate_indices, vec![0, 1, 2, 3, 4, 5, 6]);
+    assert_eq!(
+        trace.rejection_reasons.len(),
+        7,
+        "a rejection reason is emitted for each rejected candidate"
+    );
+    assert!(
+        trace
+            .typed_rejection_reasons()
+            .expect("decode typed rejection reasons")
+            .iter()
+            .all(|reason| *reason == EpistemicGpuRejectionReason::UnsatisfiedMembership),
+        "rejected candidates fail membership against the EIR-derived assumptions"
+    );
+    // K4: no CPU fallback in candidate enumeration / world-view validation.
+    assert_eq!(trace.cpu_candidate_enumerations, 0);
+    assert_eq!(trace.cpu_world_view_validations, 0);
+    assert!(result.prepared.preflight.cpu_fallbacks.is_zero());
+    assert_eq!(result.transfer_budget.per_candidate_host_round_trips, 0);
+
+    let rows = fixture
+        .provider
+        .download_column::<u32>(&result.final_output, 0)
+        .expect("download EGB-01 multi-literal output");
+    assert_eq!(rows, vec![7]);
+    result
+        .require_runtime_dispatch_certification()
+        .expect("EGB-01 multi-literal result must retain dispatch + semantic certification");
+}
+
+/// EGB-01 K3: an EIR-derived candidate space where EVERY candidate is rejected
+/// returns Ok cleanly with an empty accepted world-view set -- distinguishable
+/// from execution failure (which returns Err) -- and still emits a full
+/// rejection trace.
+#[cfg(feature = "epistemic-logic-tests")]
+#[test]
+fn egb01_empty_accepted_world_view_is_distinct_from_failure() {
+    let Some(fixture) = runtime_fixture() else {
+        return;
+    };
+    // know a(X) can never hold: a has no rows, so no candidate that assumes a
+    // is founded, and the candidate that does not assume a fails the literal.
+    // Every candidate in the 2^2 space is therefore rejected.
+    let program = parse_program(
+        r#"
+        pred seed(u32).
+        pred a(u32).
+        pred b(u32).
+        pred out(u32).
+
+        out(X) :- seed(X), know a(X), possible b(X).
+        "#,
+    )
+    .expect("parse EGB-01 empty-world-view program");
+    let executable =
+        compile_epistemic_gpu_execution(&program).expect("compile EGB-01 empty-world-view plan");
+    let mut executor = Executor::new(Arc::clone(&fixture.provider));
+    for (name, rel) in &executable.relation_ids {
+        executor.register_relation(*rel, name);
+    }
+    for (name, rows) in [("seed", &[7][..]), ("a", &[][..]), ("b", &[7][..])] {
+        executor.put_relation(name, upload_unary_u32(&fixture.memory, rows, "x"));
+    }
+
+    // Execution SUCCEEDS (Ok) even though zero candidates are accepted -- this is
+    // the empty-accepted-world-view vs execution-failure distinction.
+    let result = executor
+        .execute_epistemic_gpu_execution(
+            &executable,
+            EpistemicGpuWorkspaceCapacities {
+                max_candidates: 4,
+                max_worlds: 4,
+                max_models_per_reduction: 1,
+            },
+        )
+        .expect("empty accepted world view must be Ok, not an execution failure");
+
+    let trace = &result.semantic_trace;
+    assert_eq!(trace.generated_candidates, 4, "generated = 2^2");
+    assert_eq!(trace.tested_candidates, 4, "tested");
+    assert_eq!(trace.accepted_candidates, 0, "no candidate is accepted");
+    assert!(
+        trace.accepted_candidate_indices.is_empty(),
+        "accepted world-view set is empty"
+    );
+    assert_eq!(trace.accepted_world_views, 0);
+    assert_eq!(trace.rejected_candidates, 4, "every candidate is rejected");
+    assert_eq!(
+        trace.rejection_reasons.len(),
+        4,
+        "a rejection reason is emitted for each rejected candidate"
+    );
+    assert_eq!(trace.cpu_candidate_enumerations, 0);
+    assert_eq!(trace.cpu_world_view_validations, 0);
+
+    // Empty accepted set => empty final output, not an error.
+    assert_eq!(result.final_result_transfer.final_output_rows, 0);
+    let rows = fixture
+        .provider
+        .download_column::<u32>(&result.final_output, 0)
+        .expect("download empty EGB-01 output column");
+    assert!(rows.is_empty(), "empty accepted world view yields no rows");
+    result
+        .require_runtime_dispatch_certification()
+        .expect("empty-world-view result must still be a certified runtime dispatch");
+}
+
+/// EGB-01 K3: repeated deterministic runs of the same EIR-derived enumeration
+/// produce identical candidate AND result sets.
+#[cfg(feature = "epistemic-logic-tests")]
+#[test]
+fn egb01_repeated_runs_are_deterministic() {
+    let Some(fixture) = runtime_fixture() else {
+        return;
+    };
+    let source = r#"
+        pred seed(u32).
+        pred a(u32).
+        pred b(u32).
+        pred c(u32).
+        pred out(u32).
+
+        out(X) :- seed(X), know a(X), possible b(X), not possible c(X).
+        "#;
+    let capacities = EpistemicGpuWorkspaceCapacities {
+        max_candidates: 8,
+        max_worlds: 4,
+        max_models_per_reduction: 1,
+    };
+
+    let run_once = || {
+        let program = parse_program(source).expect("parse EGB-01 determinism program");
+        let executable =
+            compile_epistemic_gpu_execution(&program).expect("compile EGB-01 determinism plan");
+        let mut executor = Executor::new(Arc::clone(&fixture.provider));
+        for (name, rel) in &executable.relation_ids {
+            executor.register_relation(*rel, name);
+        }
+        for (name, rows) in [
+            ("seed", &[7, 8][..]),
+            ("a", &[7, 8][..]),
+            ("b", &[7, 8][..]),
+            ("c", &[][..]),
+        ] {
+            executor.put_relation(name, upload_unary_u32(&fixture.memory, rows, "x"));
+        }
+        let result = executor
+            .execute_epistemic_gpu_execution(&executable, capacities)
+            .expect("EGB-01 determinism run should execute on device");
+        let mut rows = fixture
+            .provider
+            .download_column::<u32>(&result.final_output, 0)
+            .expect("download EGB-01 determinism output");
+        rows.sort_unstable();
+        (
+            result.semantic_trace.accepted_candidate_indices.clone(),
+            result.semantic_trace.rejected_candidate_indices.clone(),
+            result.semantic_trace.rejection_reasons.clone(),
+            rows,
+        )
+    };
+
+    let first = run_once();
+    let second = run_once();
+    assert_eq!(
+        first, second,
+        "repeated deterministic runs must produce identical candidate and result sets"
+    );
+    // Candidate set was genuinely enumerated (not empty), so determinism is meaningful.
+    assert_eq!(
+        first.0,
+        vec![7],
+        "accepted candidate index is the all-true assignment"
+    );
+    assert_eq!(
+        first.3,
+        vec![7, 8],
+        "accepted world view materializes both seed rows"
+    );
+}
+
+// ============================================================================
+// EGB-06: joint multi-epistemic-predicate solving.
+//
+// A rule coupling more than one DISTINCT epistemic body predicate is solved as a
+// JOINT modal conjunction over the candidate world view. Because such a rule has
+// a single output relation, the WHOLE program is expressible on both the split
+// path (`compile_epistemic_gpu_split_execution`) and the unsplit joint path
+// (`compile_epistemic_gpu_execution`); EGB-06 requires the two to be
+// row-identical. Both sides are real device runs; neither output is hardcoded.
+// ============================================================================
+
+/// Run a single-output epistemic program through the SPLIT path and return its
+/// sorted output column-0 plus the joint-handling preflight from the (single)
+/// component result.
+#[cfg(feature = "epistemic-logic-tests")]
+fn run_split_single_output(
+    fixture: &RuntimeFixture,
+    source: &str,
+    relations: &[(&str, &[Vec<u32>])],
+    capacities: EpistemicGpuWorkspaceCapacities,
+) -> (Vec<u32>, EpistemicGpuRuntimePreflight, usize) {
+    let program = parse_program(source).expect("parse split single-output program");
+    let split =
+        compile_epistemic_gpu_split_execution(&program).expect("split single-output compile");
+    assert_eq!(
+        split.components.len(),
+        1,
+        "a single-output multi-epistemic rule must form exactly one joint component"
+    );
+    let recomposed = split.recomposed_components();
+    let mut executor = Executor::new(Arc::clone(&fixture.provider));
+    for component in &recomposed {
+        for (name, rel) in &component.executable.relation_ids {
+            executor.register_relation(*rel, name);
+        }
+    }
+    for (name, rows) in relations {
+        let buffer = if rows.iter().all(|row| row.len() == 1) {
+            let flat: Vec<u32> = rows.iter().map(|row| row[0]).collect();
+            upload_unary_u32(&fixture.memory, &flat, "x")
+        } else {
+            let pairs: Vec<(u32, u32)> = rows.iter().map(|row| (row[0], row[1])).collect();
+            upload_binary_u32(&fixture.memory, &pairs, "x", "y")
+        };
+        executor.put_relation(name, buffer);
+    }
+    let executables: Vec<_> = recomposed
+        .iter()
+        .map(|component| &component.executable)
+        .collect();
+    let batch = executor
+        .execute_epistemic_gpu_execution_batch_with_trace(&executables, capacities)
+        .expect("split single-output component executes through GPU runtime batch");
+    assert_eq!(batch.results.len(), 1);
+    // K4 / LOCK 1: split orchestration keeps every CPU fallback counter at zero.
+    assert_eq!(batch.trace.cpu_recomposition_steps, 0);
+    assert_eq!(batch.trace.cpu_candidate_enumerations, 0);
+    assert_eq!(batch.trace.cpu_world_view_validations, 0);
+    assert_eq!(batch.trace.cpu_solver_search_fallbacks, 0);
+    assert_eq!(batch.trace.cpu_probability_recomputations, 0);
+    let result = &batch.results[0];
+    result
+        .require_runtime_dispatch_certification()
+        .expect("joint split component evidence must remain certified");
+    let mut output = fixture
+        .provider
+        .download_column::<u32>(&result.final_output, 0)
+        .expect("download joint split output");
+    output.sort_unstable();
+    (
+        output,
+        result.prepared.preflight,
+        result.final_result_transfer.final_output_rows,
+    )
+}
+
+/// EGB-06 K1/K2/K3: distinct-predicate modal conjunction (`know p(X), possible q(X)`)
+/// with mixed operators. Joint split execution must equal unsplit single execution
+/// row-for-row, and the joint-handling preflight must show ONE reduction binding
+/// BOTH modal predicates (not two independent split pieces).
+#[cfg(feature = "epistemic-logic-tests")]
+#[test]
+fn egb06_distinct_predicate_conjunction_joint_matches_unsplit() {
+    let Some(fixture) = runtime_fixture() else {
+        return;
+    };
+    let source = r#"
+        pred seed(u32).
+        pred p(u32).
+        pred q(u32).
+        pred a(u32).
+        a(X) :- seed(X), know p(X), possible q(X).
+    "#;
+    // seed = {1,2,3}; p = {1,2,3}; q = {1,3}. Joint conjunction holds for X in {1,3}.
+    let relations: &[(&str, &[Vec<u32>])] = &[
+        ("seed", &unary(&[1, 2, 3])),
+        ("p", &unary(&[1, 2, 3])),
+        ("q", &unary(&[1, 3])),
+    ];
+    let caps = EpistemicGpuWorkspaceCapacities {
+        max_candidates: 8,
+        max_worlds: 4,
+        max_models_per_reduction: 2,
+    };
+
+    let (split_out, preflight, split_rows) =
+        run_split_single_output(&fixture, source, relations, caps);
+    let unsplit_out =
+        run_unsplit_single_component_output_with_caps(&fixture, source, relations, caps);
+
+    // K2 unsplit parity: row-identical output.
+    assert_eq!(
+        split_out, unsplit_out,
+        "joint split output must equal unsplit single-execution output"
+    );
+    // K1 modal-conjunction correctness: exactly the rows where BOTH modal atoms hold.
+    assert_eq!(
+        split_out,
+        vec![1, 3],
+        "head derived iff full modal conjunction holds"
+    );
+    assert_eq!(split_rows, 2);
+    assert!(!split_out.is_empty(), "non-vacuous joint derivation");
+
+    // K3 joint-handling trace: ONE reduction binds BOTH distinct modal predicates,
+    // with operator-specific semantics preserved (one know + one possible). This is
+    // the structural proof the rule was solved JOINTLY, not split into independent
+    // unsound pieces.
+    assert_eq!(
+        preflight.reduced_runtime_rule_count, 1,
+        "joint rule must compile to a single reduced reduction"
+    );
+    assert_eq!(
+        preflight.tuple_membership_binding_count, 2,
+        "both modal predicates are jointly bound under one reduction"
+    );
+    assert_eq!(preflight.know_operator_count, 1);
+    assert_eq!(preflight.possible_operator_count, 1);
+    assert_eq!(preflight.not_know_operator_count, 0);
+    assert_eq!(preflight.not_possible_operator_count, 0);
+    assert_eq!(preflight.cpu_fallbacks.candidate_enumeration, 0);
+    assert_eq!(preflight.cpu_fallbacks.world_view_validation, 0);
+}
+
+/// EGB-06 K1/K2/K3: all-operator joint conjunction including negated modals
+/// (`not know`, `not possible`) over four distinct modal predicates. Joint split
+/// execution equals unsplit, and negated modal literals participate in the same
+/// candidate test.
+#[cfg(feature = "epistemic-logic-tests")]
+#[test]
+fn egb06_mixed_operator_conjunction_joint_matches_unsplit() {
+    let Some(fixture) = runtime_fixture() else {
+        return;
+    };
+    let source = r#"
+        pred seed(u32).
+        pred known_gate(u32).
+        pred possible_gate(u32).
+        pred not_known_gate(u32).
+        pred not_possible_gate(u32).
+        pred out(u32).
+        out(X) :- seed(X), know known_gate(X), possible possible_gate(X),
+                  not know not_known_gate(X), not possible not_possible_gate(X).
+    "#;
+    // seed/known/possible = {7,8,9}; not_known = {7}; not_possible = {8}.
+    // Joint conjunction holds only for X = 9 (7 blocked by not-know, 8 by not-possible).
+    let relations: &[(&str, &[Vec<u32>])] = &[
+        ("seed", &unary(&[7, 8, 9])),
+        ("known_gate", &unary(&[7, 8, 9])),
+        ("possible_gate", &unary(&[7, 8, 9])),
+        ("not_known_gate", &unary(&[7])),
+        ("not_possible_gate", &unary(&[8])),
+    ];
+    let caps = EpistemicGpuWorkspaceCapacities {
+        max_candidates: 16,
+        max_worlds: 4,
+        max_models_per_reduction: 1,
+    };
+
+    let (split_out, preflight, _rows) = run_split_single_output(&fixture, source, relations, caps);
+    let unsplit_out =
+        run_unsplit_single_component_output_with_caps(&fixture, source, relations, caps);
+
+    assert_eq!(
+        split_out, unsplit_out,
+        "joint mixed-operator split output must equal unsplit single-execution output"
+    );
+    assert_eq!(
+        split_out,
+        vec![9],
+        "head derived iff full mixed-operator modal conjunction holds"
+    );
+    // K3: one reduction binds all four distinct modal predicates with their
+    // operator-specific semantics.
+    assert_eq!(preflight.reduced_runtime_rule_count, 1);
+    assert_eq!(preflight.tuple_membership_binding_count, 4);
+    assert_eq!(preflight.know_operator_count, 1);
+    assert_eq!(preflight.possible_operator_count, 1);
+    assert_eq!(preflight.not_know_operator_count, 1);
+    assert_eq!(preflight.not_possible_operator_count, 1);
+}
+
+/// EGB-06 K2/K4 (v0.9.2F): cross-arity SAME-NAME predicate coupling
+/// (`know p(X), possible p(X,Y)`) is now SOLVED by treating the two arities as
+/// DISTINCT relations. The relation store and the executable's `relation_ids` map
+/// stay name-keyed, but the modal tuple-source resolution disambiguates by ARITY:
+/// each binding resolves its source via the arity-qualified store key (`p/1`,
+/// `p/2`) with a bare-name fallback. The user uploads each arity's facts under its
+/// own qualified key, and the joint enumeration consults BOTH distinctly.
+///
+/// EXACT tuples (each arity independently load-bearing):
+///   seed = {(1,10),(2,20),(3,30)}, p/1 = {1,2}, p/2 = {(1,10),(2,99)}.
+///   a(X,Y) :- seed(X,Y), know p(X), possible p(X,Y) accepts exactly {(1,10)}:
+///     (1,10): X=1∈p/1 ✓, (1,10)∈p/2 ✓                  -> accepted
+///     (2,20): X=2∈p/1 ✓, (2,20)∉p/2 (p/2 has (2,99))   -> removed by ARITY-2 filter
+///     (3,30): X=3∉p/1                                    -> removed by ARITY-1 filter
+///
+/// Both the SPLIT and UNSPLIT paths must reach the SAME exact tuples (split-vs-
+/// unsplit equivalence — non-tautological: each path is a distinct compile +
+/// execute), with no CPU fallback or CPU candidate enumeration.
+#[cfg(feature = "epistemic-logic-tests")]
+#[test]
+fn egb06_cross_arity_same_name_solved_identically_split_and_unsplit() {
+    let Some(fixture) = runtime_fixture() else {
+        return;
+    };
+    let source = r#"
+        pred seed(u32, u32).
+        pred p(u32).
+        pred p(u32, u32).
+        pred a(u32, u32).
+        a(X, Y) :- seed(X, Y), know p(X), possible p(X, Y).
+    "#;
+    let caps = EpistemicGpuWorkspaceCapacities {
+        max_candidates: 8,
+        max_worlds: 4,
+        max_models_per_reduction: 2,
+    };
+    let seed_rows = [(1u32, 10u32), (2, 20), (3, 30)];
+    // p/1 facts uploaded under the arity-qualified key "p/1"; p/2 under "p/2".
+    let p1_rows = [1u32, 2];
+    let p2_rows = [(1u32, 10u32), (2, 99)];
+    let expected: Vec<(u32, u32)> = vec![(1, 10)];
+
+    let read_a_tuples = |result_output: &CudaBuffer| -> Vec<(u32, u32)> {
+        let col0 = fixture
+            .provider
+            .download_column::<u32>(result_output, 0)
+            .expect("download a col0");
+        let col1 = fixture
+            .provider
+            .download_column::<u32>(result_output, 1)
+            .expect("download a col1");
+        let mut tuples: Vec<(u32, u32)> = col0.into_iter().zip(col1).collect();
+        tuples.sort_unstable();
+        tuples
+    };
+
+    let upload_sources = |executor: &mut Executor| {
+        executor.put_relation(
+            "seed",
+            upload_binary_u32(&fixture.memory, &seed_rows, "x", "y"),
+        );
+        executor.put_relation("p/1", upload_unary_u32(&fixture.memory, &p1_rows, "x"));
+        executor.put_relation(
+            "p/2",
+            upload_binary_u32(&fixture.memory, &p2_rows, "x", "y"),
+        );
+    };
+
+    // --- SPLIT path ---
+    let split_program = parse_program(source).expect("parse cross-arity program");
+    let split = compile_epistemic_gpu_split_execution(&split_program)
+        .expect("cross-arity program compiles on the split path");
+    assert_eq!(split.components.len(), 1);
+    let recomposed = split.recomposed_components();
+    let mut split_executor = Executor::new(Arc::clone(&fixture.provider));
+    for component in &recomposed {
+        for (name, rel) in &component.executable.relation_ids {
+            split_executor.register_relation(*rel, name);
+        }
+    }
+    upload_sources(&mut split_executor);
+    let split_executables: Vec<_> = recomposed.iter().map(|c| &c.executable).collect();
+    let split_batch = split_executor
+        .execute_epistemic_gpu_execution_batch_with_trace(&split_executables, caps)
+        .expect("split cross-arity coupling solves with arity-disambiguated sources");
+    assert_eq!(split_batch.trace.cpu_candidate_enumerations, 0);
+    let split_result = split_batch
+        .results
+        .last()
+        .expect("split batch yields a result");
+    assert!(split_result.prepared.preflight.cpu_fallbacks.is_zero());
+    assert_eq!(split_result.semantic_trace.cpu_candidate_enumerations, 0);
+    assert_eq!(read_a_tuples(&split_result.final_output), expected);
+
+    // --- UNSPLIT path: must produce the SAME exact tuples ---
+    let unsplit_program = parse_program(source).expect("parse cross-arity program");
+    let unsplit = compile_epistemic_gpu_execution(&unsplit_program)
+        .expect("cross-arity program compiles on the unsplit path too");
+    let mut unsplit_executor = Executor::new(Arc::clone(&fixture.provider));
+    for (name, rel) in &unsplit.relation_ids {
+        unsplit_executor.register_relation(*rel, name);
+    }
+    upload_sources(&mut unsplit_executor);
+    let unsplit_result = unsplit_executor
+        .execute_epistemic_gpu_execution(&unsplit, caps)
+        .expect("unsplit cross-arity coupling solves with arity-disambiguated sources");
+    assert!(unsplit_result.prepared.preflight.cpu_fallbacks.is_zero());
+    assert_eq!(unsplit_result.semantic_trace.cpu_candidate_enumerations, 0);
+    assert_eq!(read_a_tuples(&unsplit_result.final_output), expected);
+
+    // Split-vs-unsplit EQUIVALENCE: identical exact tuples from two distinct
+    // compile+execute paths.
+    assert_eq!(
+        read_a_tuples(&split_result.final_output),
+        read_a_tuples(&unsplit_result.final_output),
+        "split and unsplit cross-arity coupling must yield identical exact tuples"
+    );
+}
+
+/// EGB-06 K1: empty/contradictory candidate evidence yields an accepted but EMPTY
+/// result (no crash). Here `possible q` never holds, so the joint conjunction is
+/// false for every seed row.
+#[cfg(feature = "epistemic-logic-tests")]
+#[test]
+fn egb06_contradictory_joint_conjunction_yields_empty_accepted() {
+    let Some(fixture) = runtime_fixture() else {
+        return;
+    };
+    let source = r#"
+        pred seed(u32).
+        pred p(u32).
+        pred q(u32).
+        pred a(u32).
+        a(X) :- seed(X), know p(X), possible q(X).
+    "#;
+    let relations: &[(&str, &[Vec<u32>])] = &[
+        ("seed", &unary(&[1, 2])),
+        ("p", &unary(&[1, 2])),
+        ("q", &unary(&[])), // q empty: possible q(X) never holds.
+    ];
+    let caps = EpistemicGpuWorkspaceCapacities {
+        max_candidates: 8,
+        max_worlds: 4,
+        max_models_per_reduction: 2,
+    };
+    let (split_out, _preflight, rows) = run_split_single_output(&fixture, source, relations, caps);
+    assert!(
+        split_out.is_empty(),
+        "no row satisfies the joint conjunction"
+    );
+    assert_eq!(rows, 0, "empty accepted result, not a crash");
+}
+
+/// EGB-06 K4: over-budget joint solving fails with a resource diagnostic BEFORE
+/// partial execution, surfaced through the SPLIT entry. Candidate capacity below
+/// the 2^N guess space for the joint reduction (here N=3 → 8 guesses) is rejected.
+#[cfg(feature = "epistemic-logic-tests")]
+#[test]
+fn egb06_over_budget_joint_fails_closed_before_execution() {
+    let Some(fixture) = runtime_fixture() else {
+        return;
+    };
+    let program = parse_program(
+        r#"
+        pred seed(u32).
+        pred p(u32).
+        pred q(u32).
+        pred r(u32).
+        pred a(u32).
+        a(X) :- seed(X), know p(X), possible q(X), not possible r(X).
+        "#,
+    )
+    .expect("parse over-budget joint program");
+    let split = compile_epistemic_gpu_split_execution(&program)
+        .expect("over-budget joint program compiles (resource guard is a runtime concern)");
+    assert_eq!(split.components.len(), 1);
+    let recomposed = split.recomposed_components();
+    let mut executor = Executor::new(Arc::clone(&fixture.provider));
+    for component in &recomposed {
+        for (name, rel) in &component.executable.relation_ids {
+            executor.register_relation(*rel, name);
+        }
+    }
+    for (name, rows) in [
+        ("seed", &[1][..]),
+        ("p", &[1][..]),
+        ("q", &[1][..]),
+        ("r", &[][..]),
+    ] {
+        executor.put_relation(name, upload_unary_u32(&fixture.memory, rows, "x"));
+    }
+    let executables: Vec<_> = recomposed
+        .iter()
+        .map(|component| &component.executable)
+        .collect();
+    let err = match executor.execute_epistemic_gpu_execution_batch_with_trace(
+        &executables,
+        EpistemicGpuWorkspaceCapacities {
+            max_candidates: 4, // below 2^3 = 8 joint guess space
+            max_worlds: 2,
+            max_models_per_reduction: 1,
+        },
+    ) {
+        Ok(_) => panic!("over-budget joint solving must fail closed before execution"),
+        Err(err) => err,
+    };
+    match err {
+        xlog_core::XlogError::ResourceExhausted {
+            context,
+            estimated_bytes,
+            budget_bytes,
+        } => {
+            assert_eq!(context, "epistemic GPU execution candidate capacity");
+            assert_eq!(estimated_bytes, 8);
+            assert_eq!(budget_bytes, 4);
+        }
+        other => panic!("expected joint resource-capacity diagnostic, got {other:?}"),
+    }
+}
+
+/// EGB-06 K4: a joint rule whose coupling depends on unsupported semantics
+/// (here an unsafe shared modal variable) fails with the relevant typed diagnostic
+/// through the split entry, rather than being silently accepted by removing the
+/// blanket coupling rejection.
+#[cfg(feature = "epistemic-logic-tests")]
+#[test]
+fn egb06_cross_arity_joint_coupling_over_invariant_resolves_on_device() {
+    // v0.9.2 sound consequence of the invariant-resolve: a head variable bound ONLY by
+    // positive modal literals over INVARIANT relations is range-restricted by resolving
+    // those modals into positive join atoms. `a(X, Y) :- know p(X), possible link(X, Y)`
+    // reduces to `a(X, Y) :- p(X), link(X, Y)` (both invariant), which is safe and
+    // materializes the gated intersection. EXACT tuples (the `know p(X)` gate is
+    // load-bearing: node 3 has a link but no `p`, so it is excluded).
+    //   p = {1, 2}, link = {(1,10),(2,20),(3,30)}  ->  a = {(1,10),(2,20)}
+    let Some(fixture) = runtime_fixture() else {
+        return;
+    };
+    let program = parse_program(
+        r#"
+        #pragma epistemic_mode = faeel
+        pred a(u32, u32).
+        pred p(u32).
+        pred link(u32, u32).
+        p(1). p(2).
+        link(1, 10). link(2, 20). link(3, 30).
+        a(X, Y) :- know p(X), possible link(X, Y).
+        "#,
+    )
+    .expect("parse cross-arity joint coupling program");
+
+    let split = compile_epistemic_gpu_split_execution(&program)
+        .expect("cross-arity coupling over invariant relations must resolve and compile");
+    assert_eq!(
+        split.components.len(),
+        1,
+        "coupled modals share ONE component"
+    );
+    let executable = &split.components[0].executable;
+
+    let mut executor = Executor::new(Arc::clone(&fixture.provider));
+    for (name, rel) in &executable.relation_ids {
+        executor.register_relation(*rel, name);
+    }
+    executor.put_relation("p", upload_unary_u32(&fixture.memory, &[1, 2], "x"));
+    executor.put_relation(
+        "link",
+        upload_binary_u32(&fixture.memory, &[(1, 10), (2, 20), (3, 30)], "x", "y"),
+    );
+
+    let result = executor
+        .execute_epistemic_gpu_execution(
+            executable,
+            EpistemicGpuWorkspaceCapacities {
+                max_candidates: 8,
+                max_worlds: 2,
+                max_models_per_reduction: 8,
+            },
+        )
+        .expect("cross-arity invariant-resolve component must execute on device");
+    result
+        .require_runtime_dispatch_certification()
+        .expect("runtime result must retain dispatch certification");
+    assert!(result.prepared.preflight.cpu_fallbacks.is_zero());
+
+    let c0 = fixture
+        .provider
+        .download_column::<u32>(&result.final_output, 0)
+        .expect("download a col0");
+    let c1 = fixture
+        .provider
+        .download_column::<u32>(&result.final_output, 1)
+        .expect("download a col1");
+    let mut pairs: Vec<(u32, u32)> = c0.into_iter().zip(c1).collect();
+    pairs.sort_unstable();
+    assert_eq!(
+        pairs,
+        vec![(1u32, 10u32), (2u32, 20u32)],
+        "a = {{(X,Y): p(X), link(X,Y)}} = {{(1,10),(2,20)}} (node 3 lacks p)"
+    );
+}
+
+#[cfg(feature = "epistemic-logic-tests")]
+#[test]
+fn single_element_list_modal_key_binds_element_against_scalar_column_on_device() {
+    // v0.9.2 ITEM D: a STRUCTURED finite+typed modal tuple-key. The key term is a
+    // 1-element list `[H]` whose element `H` is a bound variable. The list is
+    // flattened element-wise into the modal relation's scalar key columns, so
+    // `know watched([H])` binds `H` against the single u32 column of `watched`.
+    // EXACT (load-bearing: the modal gate FILTERS `host` by `watched` membership):
+    //   host = {1, 2}, watched = {1}  ->  alert = {1}   (node 2 gated out)
+    let Some(fixture) = runtime_fixture() else {
+        return;
+    };
+    let program = parse_program(
+        r#"
+        #pragma epistemic_mode = faeel
+        pred host(u32).
+        pred watched(u32).
+        pred alert(u32).
+        host(1). host(2).
+        watched(1).
+        alert(H) :- host(H), know watched([H]).
+        "#,
+    )
+    .expect("parse single-element list modal-key program");
+
+    let executable = compile_epistemic_gpu_execution(&program)
+        .expect("1-element list modal key must compile (flatten element into scalar column)");
+
+    let mut executor = Executor::new(Arc::clone(&fixture.provider));
+    for (name, rel) in &executable.relation_ids {
+        executor.register_relation(*rel, name);
+    }
+    executor.put_relation("host", upload_unary_u32(&fixture.memory, &[1, 2], "x"));
+    executor.put_relation("watched", upload_unary_u32(&fixture.memory, &[1], "x"));
+
+    let result = executor
+        .execute_epistemic_gpu_execution(
+            &executable,
+            EpistemicGpuWorkspaceCapacities {
+                max_candidates: 8,
+                max_worlds: 2,
+                max_models_per_reduction: 8,
+            },
+        )
+        .expect("single-element list modal-key component must execute on device");
+
+    result
+        .require_runtime_dispatch_certification()
+        .expect("runtime result must retain dispatch certification");
+    assert_eq!(result.semantic_trace.cpu_candidate_enumerations, 0);
+    assert_eq!(result.semantic_trace.cpu_world_view_validations, 0);
+    assert!(result.prepared.preflight.cpu_fallbacks.is_zero());
+
+    let mut rows = fixture
+        .provider
+        .download_column::<u32>(&result.final_output, 0)
+        .expect("download alert column");
+    rows.sort_unstable();
+    assert_eq!(
+        rows,
+        vec![1u32],
+        "alert = {{H : host(H), know watched([H])}} = {{1}} (node 2 not watched)"
+    );
+}
+
+#[cfg(feature = "epistemic-logic-tests")]
+#[test]
+fn multi_element_list_modal_key_binds_elements_against_columns_on_device() {
+    // v0.9.2 ITEM D: a multi-element list `[A, B]` modal key over an arity-2
+    // relation. Each element flattens into its own scalar key column, so the
+    // PER-ELEMENT conjunctive match is load-bearing: a row of `host` survives only
+    // when BOTH `A` and `B` match the SAME `watched` tuple.
+    //
+    // The data DISCRIMINATES col1 specifically: `host` carries `(1, 9)`, which
+    // shares col0=1 with the watched tuple `(1, 2)` but differs in col1. A
+    // col0-only matcher would wrongly keep `(1, 9)`; the correct conjunctive
+    // matcher drops it because col1 9 != 2.
+    // EXACT: host = {(1,2),(1,9),(3,4)}, watched = {(1,2)}  ->  q = {(1,2)}.
+    let Some(fixture) = runtime_fixture() else {
+        return;
+    };
+    let program = parse_program(
+        r#"
+        #pragma epistemic_mode = faeel
+        pred host(u32, u32).
+        pred watched(u32, u32).
+        pred q(u32, u32).
+        host(1, 2). host(1, 9). host(3, 4).
+        watched(1, 2).
+        q(A, B) :- host(A, B), know watched([A, B]).
+        "#,
+    )
+    .expect("parse multi-element list modal-key program");
+
+    let executable = compile_epistemic_gpu_execution(&program)
+        .expect("2-element list modal key must compile (flatten into 2 scalar columns)");
+
+    let mut executor = Executor::new(Arc::clone(&fixture.provider));
+    for (name, rel) in &executable.relation_ids {
+        executor.register_relation(*rel, name);
+    }
+    executor.put_relation(
+        "host",
+        upload_binary_u32(&fixture.memory, &[(1, 2), (1, 9), (3, 4)], "a", "b"),
+    );
+    executor.put_relation(
+        "watched",
+        upload_binary_u32(&fixture.memory, &[(1, 2)], "a", "b"),
+    );
+
+    let result = executor
+        .execute_epistemic_gpu_execution(
+            &executable,
+            EpistemicGpuWorkspaceCapacities {
+                max_candidates: 8,
+                max_worlds: 2,
+                max_models_per_reduction: 8,
+            },
+        )
+        .expect("multi-element list modal-key component must execute on device");
+
+    result
+        .require_runtime_dispatch_certification()
+        .expect("runtime result must retain dispatch certification");
+    assert_eq!(result.semantic_trace.cpu_candidate_enumerations, 0);
+    assert_eq!(result.semantic_trace.cpu_world_view_validations, 0);
+    assert!(result.prepared.preflight.cpu_fallbacks.is_zero());
+
+    let c0 = fixture
+        .provider
+        .download_column::<u32>(&result.final_output, 0)
+        .expect("download q col0");
+    let c1 = fixture
+        .provider
+        .download_column::<u32>(&result.final_output, 1)
+        .expect("download q col1");
+    let mut pairs: Vec<(u32, u32)> = c0.into_iter().zip(c1).collect();
+    pairs.sort_unstable();
+    assert_eq!(
+        pairs,
+        vec![(1u32, 2u32)],
+        "q = {{(A,B): host(A,B), know watched([A,B])}} = {{(1,2)}} ((1,9) shares col0 but col1 \
+         differs; (3,4) not watched) -- proves BOTH columns are matched conjunctively"
+    );
+}
+
+#[cfg(feature = "epistemic-logic-tests")]
+#[test]
+fn anonymous_wildcard_list_modal_key_matches_any_in_position_on_device() {
+    // v0.9.2 ITEM D: an anonymous `_` inside a structured list key is a per-column
+    // WILDCARD -- it imposes no equality on that flattened column, while the bound
+    // element still filters. `know watched([A, _])` keeps rows whose first column
+    // matches some watched tuple's first column, regardless of the second.
+    // EXACT: host = {(1,2),(3,4)}, watched = {(1,9)}  ->  q = {(1,2)}
+    //   (A=1 matches watched col0=1; second position is wildcard; (3,4) has no A=3).
+    let Some(fixture) = runtime_fixture() else {
+        return;
+    };
+    let program = parse_program(
+        r#"
+        #pragma epistemic_mode = faeel
+        pred host(u32, u32).
+        pred watched(u32, u32).
+        pred q(u32, u32).
+        host(1, 2). host(3, 4).
+        watched(1, 9).
+        q(A, B) :- host(A, B), know watched([A, _]).
+        "#,
+    )
+    .expect("parse anonymous-wildcard list modal-key program");
+
+    let executable = compile_epistemic_gpu_execution(&program)
+        .expect("anonymous wildcard in a list modal key must compile");
+
+    let mut executor = Executor::new(Arc::clone(&fixture.provider));
+    for (name, rel) in &executable.relation_ids {
+        executor.register_relation(*rel, name);
+    }
+    executor.put_relation(
+        "host",
+        upload_binary_u32(&fixture.memory, &[(1, 2), (3, 4)], "a", "b"),
+    );
+    executor.put_relation(
+        "watched",
+        upload_binary_u32(&fixture.memory, &[(1, 9)], "a", "b"),
+    );
+
+    let result = executor
+        .execute_epistemic_gpu_execution(
+            &executable,
+            EpistemicGpuWorkspaceCapacities {
+                max_candidates: 8,
+                max_worlds: 2,
+                max_models_per_reduction: 8,
+            },
+        )
+        .expect("anonymous-wildcard list modal-key component must execute on device");
+
+    result
+        .require_runtime_dispatch_certification()
+        .expect("runtime result must retain dispatch certification");
+    assert_eq!(result.semantic_trace.cpu_candidate_enumerations, 0);
+    assert_eq!(result.semantic_trace.cpu_world_view_validations, 0);
+    assert!(result.prepared.preflight.cpu_fallbacks.is_zero());
+
+    let c0 = fixture
+        .provider
+        .download_column::<u32>(&result.final_output, 0)
+        .expect("download q col0");
+    let c1 = fixture
+        .provider
+        .download_column::<u32>(&result.final_output, 1)
+        .expect("download q col1");
+    let mut pairs: Vec<(u32, u32)> = c0.into_iter().zip(c1).collect();
+    pairs.sort_unstable();
+    assert_eq!(
+        pairs,
+        vec![(1u32, 2u32)],
+        "q = {{(A,B): host(A,B), know watched([A,_])}} = {{(1,2)}} (A=1 matches; second is wildcard)"
+    );
 }

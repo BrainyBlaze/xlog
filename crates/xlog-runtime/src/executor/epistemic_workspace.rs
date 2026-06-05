@@ -125,6 +125,13 @@ pub struct EpistemicGpuWorkspace {
     pub model_membership: TrackedCudaSlice<u8>,
     /// Structured rejection-reason code buffer.
     pub rejection_reasons: TrackedCudaSlice<u32>,
+    /// Per-candidate firing integrity-constraint index buffer. Parallel to
+    /// `rejection_reasons`, sized `layout.rejection_reason_slots`. Holds the
+    /// declaration-order index of the constraint that rejected a candidate, or
+    /// the sentinel `u32::MAX` when no integrity constraint rejected it. The
+    /// reason code in `rejection_reasons` is left at 6 for constraint
+    /// violations; this buffer adds the constraint-specific detail.
+    pub constraint_violation_index: TrackedCudaSlice<u32>,
 }
 
 impl EpistemicGpuWorkspace {
@@ -134,13 +141,14 @@ impl EpistemicGpuWorkspace {
             || self.world_views.len() != self.layout.world_view_bytes
             || self.model_membership.len() != self.layout.model_membership_bytes
             || self.rejection_reasons.len() != self.layout.rejection_reason_slots
+            || self.constraint_violation_index.len() != self.layout.rejection_reason_slots
         {
             return Err(XlogError::UnsupportedEpistemicConstruct {
                 construct: construct.to_string(),
                 context: format!(
                     "prepared GPU workspace buffer lengths do not match layout: \
                      candidate_bytes={}/{} world_view_bytes={}/{} model_membership_bytes={}/{} \
-                     rejection_reason_slots={}/{}",
+                     rejection_reason_slots={}/{} constraint_violation_index_slots={}/{}",
                     self.candidate_assumptions.len(),
                     self.layout.candidate_assumption_bytes,
                     self.world_views.len(),
@@ -148,6 +156,8 @@ impl EpistemicGpuWorkspace {
                     self.model_membership.len(),
                     self.layout.model_membership_bytes,
                     self.rejection_reasons.len(),
+                    self.layout.rejection_reason_slots,
+                    self.constraint_violation_index.len(),
                     self.layout.rejection_reason_slots
                 ),
             });
@@ -388,6 +398,8 @@ pub enum EpistemicGpuRejectionReason {
     MissingReducedModel,
     /// Candidate assumptions were not supported by model-membership evidence.
     UnsatisfiedMembership,
+    /// Accepted world view satisfied an epistemic integrity constraint body.
+    WorldViewConstraintViolation,
 }
 
 impl EpistemicGpuRejectionReason {
@@ -398,6 +410,7 @@ impl EpistemicGpuRejectionReason {
             Self::InvalidCandidateBit => 3,
             Self::MissingReducedModel => 4,
             Self::UnsatisfiedMembership => 5,
+            Self::WorldViewConstraintViolation => 6,
         }
     }
 
@@ -408,6 +421,7 @@ impl EpistemicGpuRejectionReason {
             3 => Ok(Self::InvalidCandidateBit),
             4 => Ok(Self::MissingReducedModel),
             5 => Ok(Self::UnsatisfiedMembership),
+            6 => Ok(Self::WorldViewConstraintViolation),
             other => Err(XlogError::UnsupportedEpistemicConstruct {
                 construct: "epistemic GPU rejection reason".to_string(),
                 context: format!("unknown device rejection code {other}"),
@@ -443,6 +457,12 @@ pub struct EpistemicGpuSemanticTrace {
     pub rejected_candidate_indices: Vec<usize>,
     /// Nonzero rejection reason codes copied from the device rejection buffer.
     pub rejection_reasons: Vec<u32>,
+    /// Constraint-specific reason per rejected candidate, aligned 1:1 with
+    /// `rejected_candidate_indices`. `Some(idx)` when an integrity constraint
+    /// (reason code 6) rejected the candidate, where `idx` is the firing
+    /// constraint's declaration-order index; `None` for every other rejection
+    /// reason. Surfaces EGB-04.K2 constraint-specific rejection detail.
+    pub constraint_violation_indices: Vec<Option<u32>>,
     /// Bounded metadata reads from the device rejection buffer after the hot path.
     pub rejection_reason_device_reads: u32,
     /// Bytes read as bounded rejection-reason metadata after the hot path.
@@ -513,6 +533,31 @@ pub struct EpistemicGpuWorldViewValidationTrace {
     /// World-view validation kernel launches.
     pub kernel_launches: u32,
     /// Host writes used by world-view validation. Accepted execution requires zero.
+    pub host_write_ops: u32,
+    /// CUDA-event timing for the launched kernel.
+    pub kernel_timing: EpistemicGpuKernelTimingTrace,
+}
+
+/// Trace proving epistemic integrity constraints were evaluated against world
+/// views on GPU.
+///
+/// World-view integrity constraints (`:- know unsafe().`) prune accepted
+/// candidate world views on device after modal world-view validation. The
+/// device kernel never reads accepted worlds back to the host, so accepted
+/// execution keeps `host_write_ops` at zero.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EpistemicGpuConstraintWorldViewValidationTrace {
+    /// Number of epistemic integrity constraints checked on device.
+    pub constraint_count: usize,
+    /// Number of constraint-body literal references checked on device.
+    pub constraint_literal_refs: usize,
+    /// Number of candidate world views checked by the constraint kernel.
+    pub candidates_checked: usize,
+    /// Rejection-reason slots written by the kernel.
+    pub rejection_reason_slots_written: usize,
+    /// Constraint world-view validation kernel launches.
+    pub kernel_launches: u32,
+    /// Host writes used by constraint validation. Accepted execution requires zero.
     pub host_write_ops: u32,
     /// CUDA-event timing for the launched kernel.
     pub kernel_timing: EpistemicGpuKernelTimingTrace,
@@ -951,6 +996,17 @@ impl EpistemicGpuFinalTupleMaterializationTrace {
                     ),
                 });
             }
+            return Ok(());
+        }
+
+        // EMPTY FOUNDED EXTENSION: a row-filtered reduction whose reduced base is
+        // empty (e.g. an unfounded FAEEL self-support rule excluded from the founded
+        // model) legitimately materializes zero output rows. With no candidate output
+        // rows there is no row-specific membership window to cover, so the
+        // coverage-equality invariant below (which requires a positive output capacity)
+        // does not apply. This mirrors the `row_filter_count == 0` early-Ok above: an
+        // all-empty result is sound, not under-coverage.
+        if final_output_rows == 0 && self.output_row_capacity == 0 {
             return Ok(());
         }
 
@@ -1468,9 +1524,19 @@ impl EpistemicGpuSemanticTrace {
 
         let raw_rejection_reasons = provider
             .dtoh_small_metadata_untracked(&workspace.rejection_reasons, candidate_count)?;
+        // Bounded metadata read of the parallel constraint-violation index buffer.
+        // Like `rejection_reasons`, this is an untracked post-hot-path metadata
+        // read, not a data-plane transfer.
+        let raw_constraint_violation_index = provider.dtoh_small_metadata_untracked(
+            &workspace.constraint_violation_index,
+            candidate_count,
+        )?;
+        let constraint_violation_code =
+            EpistemicGpuRejectionReason::WorldViewConstraintViolation.code();
         let mut accepted_candidate_indices = Vec::new();
         let mut rejected_candidate_indices = Vec::new();
         let mut rejection_reasons = Vec::new();
+        let mut constraint_violation_indices: Vec<Option<u32>> = Vec::new();
         for (candidate_index, reason) in raw_rejection_reasons.into_iter().enumerate() {
             if reason == 0 {
                 accepted_candidate_indices.push(candidate_index);
@@ -1478,6 +1544,21 @@ impl EpistemicGpuSemanticTrace {
                 EpistemicGpuRejectionReason::from_code(reason)?;
                 rejected_candidate_indices.push(candidate_index);
                 rejection_reasons.push(reason);
+                // Gate the constraint-specific index on the integrity-constraint
+                // reason code: the kernel writes `rejection_reasons[c] = 6` and
+                // `constraint_violation_index[c] = constraint` together, so the
+                // index is trustworthy exactly when the reason is 6. Any other
+                // reason -> None, independent of buffer contents (also defends
+                // the zero-constraint path where the sentinel is never written).
+                let firing = raw_constraint_violation_index
+                    .get(candidate_index)
+                    .copied()
+                    .unwrap_or(u32::MAX);
+                if reason == constraint_violation_code && firing != u32::MAX {
+                    constraint_violation_indices.push(Some(firing));
+                } else {
+                    constraint_violation_indices.push(None);
+                }
             }
         }
         let accepted_candidates = accepted_candidate_indices.len();
@@ -1505,6 +1586,12 @@ impl EpistemicGpuSemanticTrace {
             rejected_candidates,
             rejected_candidate_indices,
             rejection_reasons,
+            constraint_violation_indices,
+            // Counts the bounded metadata read of the rejection-reason code buffer
+            // specifically (the certification invariant scopes to that buffer's
+            // bytes). The parallel constraint-violation index buffer is a
+            // separate bounded metadata read tracked alongside it, not folded
+            // into this rejection-reason-specific counter.
             rejection_reason_device_reads: 1,
             rejection_reason_metadata_bytes,
             cpu_candidate_enumerations: 0,
@@ -1951,7 +2038,13 @@ impl EpistemicGpuRuntimePreflight {
         }
         executable.gpu_plan.validate_tuple_membership_bindings()?;
         executable.gpu_plan.validate_solver_contract()?;
-        require_single_epistemic_output_relation(&executable.gpu_plan)?;
+        // A plan may carry MULTIPLE epistemic output heads: a JOINT-SOLVED
+        // coalesced multi-head component shares ONE candidate enumeration +
+        // world-view validation and materializes each head against the shared
+        // accepted world view (see `execute_epistemic_gpu_execution`). Soundness of
+        // the coupling is gated in the logic lowering
+        // (`classify_cross_component_modal_coupling`); the runtime executes the
+        // resulting well-formed plan and is no longer restricted to one head.
         require_epistemic_gpu_kernel_phases(&executable.gpu_plan)?;
         require_epistemic_gpu_buffer_contract(&executable.gpu_plan)?;
 
@@ -2573,6 +2666,8 @@ pub struct EpistemicGpuExecutionResult {
     pub model_membership: EpistemicGpuModelMembershipTrace,
     /// World-view validation trace captured after model-membership staging.
     pub world_view_validation: EpistemicGpuWorldViewValidationTrace,
+    /// World-view integrity-constraint validation trace captured after world-view validation.
+    pub constraint_world_view_validation: EpistemicGpuConstraintWorldViewValidationTrace,
     /// Accepted-candidate materialization trace captured after world-view validation.
     pub materialization: EpistemicGpuMaterializationTrace,
     /// Final result materialization trace captured from reduced output metadata.
@@ -2590,7 +2685,19 @@ pub struct EpistemicGpuExecutionResult {
     /// Tuple-membership bindings that were validated and executed for this result.
     pub tuple_membership_bindings: Vec<EpistemicTupleMembershipBinding>,
     /// Device-resident final query output buffer.
+    ///
+    /// For a single epistemic output head this is the only materialized relation.
+    /// For a JOINT-SOLVED coalesced multi-head component this is the PRIMARY head's
+    /// output (the last reduction's head); the remaining coupled heads, each
+    /// materialized against the SAME accepted world view, are in
+    /// [`Self::additional_head_outputs`].
     pub final_output: CudaBuffer,
+    /// Additional coupled-head outputs for a JOINT-SOLVED multi-head component.
+    ///
+    /// Empty for single-head execution. Each entry is `(head_predicate, buffer)`
+    /// for a distinct epistemic output head OTHER than the primary head, filtered
+    /// against the shared accepted world view via that head's row-filter bindings.
+    pub additional_head_outputs: Vec<(String, CudaBuffer)>,
     /// Device-resident final tuple evidence buffer before public projection.
     pub tuple_evidence_output: Option<CudaBuffer>,
     /// Output buffer returned by the reduced production execution plan.
@@ -3244,6 +3351,8 @@ enum TupleSourceLaunch<'a> {
 
 const TUPLE_KEY_MATCH_MODE_GROUND: u8 = 0;
 const TUPLE_KEY_MATCH_MODE_BOUND_OUTPUT: u8 = 1;
+/// Anonymous wildcard tuple-key position: matches any stable-model value.
+const TUPLE_KEY_MATCH_MODE_WILDCARD: u8 = 2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct TupleKeyExpectation {
@@ -3331,6 +3440,31 @@ fn tuple_key_expectation_error(context: String) -> XlogError {
 }
 
 impl Executor {
+    /// Resolve a modal tuple-source relation, disambiguating same-name multi-arity
+    /// modal predicates by arity.
+    ///
+    /// The relation store is keyed by name, so a program using the SAME predicate
+    /// name at two different arities in modal literals (`know p(X)` over `p/1` AND
+    /// `possible p(X,Y)` over `p/2`) could not resolve both sources under the bare
+    /// name. Distinct arities ARE distinct relations, so this resolves the
+    /// ARITY-QUALIFIED store key (`"p/1"`, `"p/2"`) FIRST, falling back to the bare
+    /// predicate name when no qualified entry exists. Single-arity epistemic
+    /// programs keep uploading under the bare name and hit the fallback unchanged
+    /// (no regression); a multi-arity program uploads each arity under its own
+    /// qualified key and both resolve distinctly.
+    ///
+    /// The `"/"` separator is collision-safe: parser predicate names cannot contain
+    /// `"/"`, so a qualified key can never shadow a real bare-name relation.
+    ///
+    /// Resolution is structural (driven by `arity`, never by a specific arity VALUE
+    /// or predicate NAME), so it introduces no special-casing.
+    fn resolve_modal_tuple_source(&self, predicate: &str, arity: usize) -> Option<&CudaBuffer> {
+        let qualified = format!("{predicate}/{arity}");
+        self.store()
+            .get(qualified.as_str())
+            .or_else(|| self.store().get(predicate))
+    }
+
     /// Snapshot runtime counters used by epistemic GPU certification.
     pub fn epistemic_gpu_runtime_counters(&self) -> EpistemicGpuRuntimeCounters {
         EpistemicGpuRuntimeCounters {
@@ -3388,6 +3522,7 @@ impl Executor {
             world_views: memory.alloc::<u8>(layout.world_view_bytes)?,
             model_membership: memory.alloc::<u8>(layout.model_membership_bytes)?,
             rejection_reasons: memory.alloc::<u32>(layout.rejection_reason_slots)?,
+            constraint_violation_index: memory.alloc::<u32>(layout.rejection_reason_slots)?,
         })
     }
 
@@ -3938,16 +4073,15 @@ impl Executor {
 
         let mut tuple_sources = Vec::with_capacity(gpu_plan.tuple_membership_bindings.len());
         for binding in &gpu_plan.tuple_membership_bindings {
-            let source_relation =
-                self.store()
-                    .get(binding.predicate.as_str())
-                    .ok_or_else(|| XlogError::UnsupportedEpistemicConstruct {
-                        construct: "epistemic GPU stable-model tuple membership".to_string(),
-                        context: format!(
-                            "missing reduced stable-model tuple source relation {}",
-                            binding.predicate
-                        ),
-                    })?;
+            let source_relation = self
+                .resolve_modal_tuple_source(binding.predicate.as_str(), binding.arity)
+                .ok_or_else(|| XlogError::UnsupportedEpistemicConstruct {
+                    construct: "epistemic GPU stable-model tuple membership".to_string(),
+                    context: format!(
+                        "missing reduced stable-model tuple source relation {} (arity {})",
+                        binding.predicate, binding.arity
+                    ),
+                })?;
             if source_relation.arity() != binding.arity {
                 return Err(XlogError::UnsupportedEpistemicConstruct {
                     construct: "epistemic GPU stable-model tuple membership".to_string(),
@@ -3963,6 +4097,14 @@ impl Executor {
                 .key_terms
                 .iter()
                 .any(|term| matches!(term, EirTerm::Variable(_)));
+            // Anonymous wildcards are value-level matches handled only by the
+            // general arm; route any binding carrying a variable or an anonymous
+            // term there. The specialized arity arms remain a fast path for
+            // all-ground tuple keys.
+            let has_value_level_keys = binding
+                .key_terms
+                .iter()
+                .any(|term| matches!(term, EirTerm::Variable(_) | EirTerm::Anonymous));
             match binding.key_columns.as_slice() {
                 [] => tuple_sources.push(TupleSourceLaunch::ArityZero {
                     literal_index: binding.literal_index as u32,
@@ -3970,7 +4112,7 @@ impl Executor {
                     negated: binding.negated as u8,
                     row_count: source_relation.num_rows_device(),
                 }),
-                &[key_col] if !has_bound_value_keys => {
+                &[key_col] if !has_value_level_keys => {
                     let key_col0 = source_relation.column(key_col).ok_or_else(|| {
                         XlogError::UnsupportedEpistemicConstruct {
                             construct: "epistemic GPU stable-model tuple membership".to_string(),
@@ -4013,7 +4155,7 @@ impl Executor {
                         expected_key_col0_type_code: key_col0_expectation.type_code,
                     });
                 }
-                &[key_col0, key_col1] if !has_bound_value_keys => {
+                &[key_col0, key_col1] if !has_value_level_keys => {
                     let key_col0_ref = source_relation.column(key_col0).ok_or_else(|| {
                         XlogError::UnsupportedEpistemicConstruct {
                             construct: "epistemic GPU stable-model tuple membership".to_string(),
@@ -4085,7 +4227,7 @@ impl Executor {
                         expected_key_col1_type_code: key_col1_expectation.type_code,
                     });
                 }
-                &[key_col0, key_col1, key_col2] if !has_bound_value_keys => {
+                &[key_col0, key_col1, key_col2] if !has_value_level_keys => {
                     let key_col0_ref = source_relation.column(key_col0).ok_or_else(|| {
                         XlogError::UnsupportedEpistemicConstruct {
                             construct: "epistemic GPU stable-model tuple membership".to_string(),
@@ -4294,6 +4436,17 @@ impl Executor {
                                 tuple_key_match_modes_host.push(TUPLE_KEY_MATCH_MODE_BOUND_OUTPUT);
                                 bound_value_col_ptrs_host.push(*bound_col.device_ptr());
                                 bound_value_col_widths_host.push(bound_col_width as u32);
+                            }
+                            EirTerm::Anonymous => {
+                                // Wildcard: no equality requirement on this
+                                // tuple-key column. The device still reads the
+                                // column pointer/width, but the kernel matches
+                                // every stable-model value in this position.
+                                expected_key_bits_host.push(0);
+                                expected_key_type_codes_host.push(key_col_type.to_code());
+                                tuple_key_match_modes_host.push(TUPLE_KEY_MATCH_MODE_WILDCARD);
+                                bound_value_col_ptrs_host.push(0);
+                                bound_value_col_widths_host.push(0);
                             }
                             term => {
                                 let expectation =
@@ -4889,6 +5042,187 @@ impl Executor {
         Ok(trace.with_kernel_timing(kernel_timing))
     }
 
+    /// Prune accepted candidate world views that satisfy an epistemic integrity
+    /// constraint body.
+    ///
+    /// Runs after [`Self::validate_epistemic_gpu_world_views`]: each surviving
+    /// candidate's assumption bit equals the negation-folded observed modal
+    /// value of its literal, so a constraint body holds in this accepted world
+    /// view exactly when every referenced literal's assumption bit is set. Such
+    /// candidates are pruned on device with the world-view constraint-violation
+    /// rejection code; no accepted world is read back to the host.
+    pub fn validate_epistemic_gpu_world_view_constraints(
+        &self,
+        workspace: &mut EpistemicGpuWorkspace,
+        gpu_plan: &EpistemicGpuPlan,
+        candidate_count: usize,
+    ) -> Result<EpistemicGpuConstraintWorldViewValidationTrace> {
+        gpu_plan.validate_constraints()?;
+        let literal_count = gpu_plan.epistemic_literals.len();
+        let constraint_count = gpu_plan.constraints.len();
+
+        // Initialize the parallel constraint-violation index buffer to the
+        // sentinel `u32::MAX` ("not rejected by a constraint") for every
+        // candidate, BEFORE the zero-constraint early return below. Zero is a
+        // valid constraint index, so the buffer cannot be left zeroed: any
+        // candidate rejected by reason codes 1-5 (or accepted) must read back as
+        // the sentinel, never a spurious `Some(0)`. The upload rides the
+        // launch-metadata channel (like the CSR buffers below), so it adds no
+        // tracked data-plane HTOD and keeps `host_write_ops` at zero.
+        if candidate_count > workspace.layout.rejection_reason_slots {
+            return Err(XlogError::ResourceExhausted {
+                context: "epistemic GPU constraint-violation index workspace".to_string(),
+                estimated_bytes: candidate_count as u64,
+                budget_bytes: workspace.layout.rejection_reason_slots as u64,
+            });
+        }
+        if candidate_count > 0 {
+            let sentinel_host = vec![u32::MAX; candidate_count];
+            let fill_len = candidate_count;
+            let mut sentinel_view = workspace.constraint_violation_index.slice_mut(0..fill_len);
+            self.provider
+                .htod_launch_metadata_sync_copy_into(&sentinel_host, &mut sentinel_view)
+                .map_err(|e| {
+                    XlogError::execution_ctx(
+                        "epistemic GPU world-view constraint metadata",
+                        "initialize constraint-violation index sentinel",
+                        &e,
+                    )
+                })?;
+        }
+
+        // Flatten constraint -> literal index references into CSR-style buffers.
+        let mut offsets_host = Vec::with_capacity(constraint_count);
+        let mut counts_host = Vec::with_capacity(constraint_count);
+        let mut indices_host: Vec<u32> = Vec::new();
+        for constraint in &gpu_plan.constraints {
+            offsets_host.push(indices_host.len() as u32);
+            counts_host.push(constraint.literal_indices.len() as u32);
+            for &literal_index in &constraint.literal_indices {
+                indices_host.push(literal_index as u32);
+            }
+        }
+        let constraint_literal_refs = indices_host.len();
+
+        let trace = EpistemicGpuConstraintWorldViewValidationTrace {
+            constraint_count,
+            constraint_literal_refs,
+            candidates_checked: candidate_count,
+            rejection_reason_slots_written: candidate_count,
+            kernel_launches: 0,
+            host_write_ops: 0,
+            kernel_timing: EpistemicGpuKernelTimingTrace::unrecorded(),
+        };
+
+        if constraint_count == 0 {
+            // No world-view constraints to evaluate; leave the rejection buffer
+            // untouched so accepted candidates flow through unchanged.
+            return Ok(trace);
+        }
+
+        if candidate_count > workspace.layout.rejection_reason_slots {
+            return Err(XlogError::ResourceExhausted {
+                context: "epistemic GPU world-view constraint rejection workspace".to_string(),
+                estimated_bytes: candidate_count as u64,
+                budget_bytes: workspace.layout.rejection_reason_slots as u64,
+            });
+        }
+        if candidate_count > u32::MAX as usize
+            || literal_count > u32::MAX as usize
+            || constraint_count > u32::MAX as usize
+            || constraint_literal_refs > u32::MAX as usize
+        {
+            return Err(XlogError::ResourceExhausted {
+                context: "epistemic GPU world-view constraint dimensions".to_string(),
+                estimated_bytes: candidate_count
+                    .max(literal_count)
+                    .max(constraint_count)
+                    .max(constraint_literal_refs) as u64,
+                budget_bytes: u32::MAX as u64,
+            });
+        }
+
+        let memory = self.provider.memory();
+        let mut constraint_literal_offsets = memory.alloc::<u32>(constraint_count)?;
+        let mut constraint_literal_counts = memory.alloc::<u32>(constraint_count)?;
+        let mut constraint_literal_indices = memory.alloc::<u32>(constraint_literal_refs.max(1))?;
+        self.provider
+            .htod_launch_metadata_sync_copy_into(&offsets_host, &mut constraint_literal_offsets)
+            .map_err(|e| {
+                XlogError::execution_ctx(
+                    "epistemic GPU world-view constraint metadata",
+                    "upload constraint literal offsets",
+                    &e,
+                )
+            })?;
+        self.provider
+            .htod_launch_metadata_sync_copy_into(&counts_host, &mut constraint_literal_counts)
+            .map_err(|e| {
+                XlogError::execution_ctx(
+                    "epistemic GPU world-view constraint metadata",
+                    "upload constraint literal counts",
+                    &e,
+                )
+            })?;
+        if !indices_host.is_empty() {
+            self.provider
+                .htod_launch_metadata_sync_copy_into(&indices_host, &mut constraint_literal_indices)
+                .map_err(|e| {
+                    XlogError::execution_ctx(
+                        "epistemic GPU world-view constraint metadata",
+                        "upload constraint literal indices",
+                        &e,
+                    )
+                })?;
+        }
+
+        let literal_count_u32 = literal_count as u32;
+        let candidate_count_u32 = candidate_count as u32;
+        let constraint_count_u32 = constraint_count as u32;
+        let func = self
+            .provider
+            .device()
+            .inner()
+            .get_func(
+                EPISTEMIC_MODULE,
+                epistemic_kernels::EPISTEMIC_VALIDATE_CONSTRAINTS_U8,
+            )
+            .ok_or_else(|| {
+                XlogError::Execution(
+                    "epistemic world-view constraint validation kernel not found".to_string(),
+                )
+            })?;
+        let config = LaunchConfig::for_num_elems(candidate_count_u32);
+
+        let kernel_timing = self.time_epistemic_gpu_kernel_launch(
+            "epistemic GPU world-view constraint validation",
+            || unsafe {
+                // SAFETY: kernel arguments match the PTX signature; the capacity
+                // check above proves the rejection buffer covers every candidate,
+                // and CSR offset/count/index buffers are sized to the constraint
+                // literal references uploaded above.
+                let mut params: Vec<*mut c_void> = vec![
+                    literal_count_u32.as_kernel_param(),
+                    candidate_count_u32.as_kernel_param(),
+                    constraint_count_u32.as_kernel_param(),
+                    (&constraint_literal_offsets).as_kernel_param(),
+                    (&constraint_literal_counts).as_kernel_param(),
+                    (&constraint_literal_indices).as_kernel_param(),
+                    (&workspace.candidate_assumptions).as_kernel_param(),
+                    (&mut workspace.rejection_reasons).as_kernel_param(),
+                    (&mut workspace.constraint_violation_index).as_kernel_param(),
+                ];
+                func.clone().launch(config, &mut params)
+            },
+        )?;
+
+        Ok(EpistemicGpuConstraintWorldViewValidationTrace {
+            kernel_launches: 1,
+            kernel_timing,
+            ..trace
+        })
+    }
+
     /// Materialize accepted candidate flags into the GPU world-view buffer.
     pub fn materialize_epistemic_gpu_candidates(
         &self,
@@ -5057,6 +5391,42 @@ impl Executor {
         reduction_count: usize,
         models_per_reduction: usize,
     ) -> Result<(CudaBuffer, EpistemicGpuFinalTupleMaterializationTrace)> {
+        self.materialize_epistemic_gpu_final_tuples_scoped(
+            workspace,
+            output,
+            gpu_plan,
+            literal_count,
+            candidate_count,
+            reduction_count,
+            models_per_reduction,
+            None,
+        )
+    }
+
+    /// Materialize final query tuples, optionally scoping the modal row-filter to a
+    /// single coalesced head's reductions.
+    ///
+    /// `head_reduction_filter` is the JOINT-SOLVING multi-output seam: the joint
+    /// candidate enumeration + world-view validation runs ONCE over the combined
+    /// modal literals (so the accepted world view in `workspace` is shared by every
+    /// head), then this method is called once per distinct head with that head's
+    /// reduction indices. Only the row-filter bindings whose `reduction_index` is
+    /// in the filter drive that head's output filtering; the full joint plan
+    /// (`gpu_plan`) is still validated and the joint workspace dimensions are
+    /// preserved, so each head is materialized against the SAME accepted world
+    /// view. `None` materializes against every binding (the single-head path).
+    #[allow(clippy::too_many_arguments)]
+    fn materialize_epistemic_gpu_final_tuples_scoped(
+        &self,
+        workspace: &mut EpistemicGpuWorkspace,
+        output: &CudaBuffer,
+        gpu_plan: &EpistemicGpuPlan,
+        literal_count: usize,
+        candidate_count: usize,
+        reduction_count: usize,
+        models_per_reduction: usize,
+        head_reduction_filter: Option<&BTreeSet<usize>>,
+    ) -> Result<(CudaBuffer, EpistemicGpuFinalTupleMaterializationTrace)> {
         gpu_plan.validate_tuple_membership_bindings()?;
         if candidate_count > workspace.layout.rejection_reason_slots {
             return Err(XlogError::ResourceExhausted {
@@ -5083,7 +5453,8 @@ impl Executor {
             })?;
         let output_row_capacity_u32 =
             checked_u32_dimension(output_row_capacity, "epistemic GPU final-tuple output rows")?;
-        let final_output_columns = final_output_columns_for_materialization(output, gpu_plan)?;
+        let final_output_columns =
+            final_output_columns_for_materialization(output, gpu_plan, head_reduction_filter)?;
         let mut tuple_bytes_capacity = 0usize;
         let mut source_columns: Vec<(&CudaColumn, u32, u32)> =
             Vec::with_capacity(final_output_columns.len());
@@ -5140,6 +5511,11 @@ impl Executor {
             .tuple_membership_bindings
             .iter()
             .filter(|binding| binding.bound_output_columns.iter().any(Option::is_some))
+            .filter(|binding| {
+                head_reduction_filter
+                    .map(|reductions| reductions.contains(&binding.reduction_index))
+                    .unwrap_or(true)
+            })
             .collect();
         if row_filter_bindings.len() > u32::MAX as usize {
             return Err(XlogError::ResourceExhausted {
@@ -5255,16 +5631,15 @@ impl Executor {
                 row_filter_key_counts_host.push(row_filter_key_count);
                 row_filter_negated_host.push(binding.negated as u8);
 
-                let source_relation =
-                    self.store()
-                        .get(binding.predicate.as_str())
-                        .ok_or_else(|| XlogError::UnsupportedEpistemicConstruct {
-                            construct: "epistemic GPU final tuple row filtering".to_string(),
-                            context: format!(
-                                "missing tuple source relation {} for final row filter",
-                                binding.predicate
-                            ),
-                        })?;
+                let source_relation = self
+                    .resolve_modal_tuple_source(binding.predicate.as_str(), binding.arity)
+                    .ok_or_else(|| XlogError::UnsupportedEpistemicConstruct {
+                        construct: "epistemic GPU final tuple row filtering".to_string(),
+                        context: format!(
+                            "missing tuple source relation {} (arity {}) for final row filter",
+                            binding.predicate, binding.arity
+                        ),
+                    })?;
                 let tuple_source_row_count = self.clone_device_row_count(source_relation)?;
                 tuple_source_row_count_ptrs_host.push(*tuple_source_row_count.device_ptr());
                 tuple_source_row_counts.push(tuple_source_row_count);
@@ -5359,6 +5734,15 @@ impl Executor {
                             tuple_key_match_modes_host.push(TUPLE_KEY_MATCH_MODE_BOUND_OUTPUT);
                             bound_value_col_ptrs_host.push(*bound_col.device_ptr());
                             bound_value_col_widths_host.push(bound_col_width as u32);
+                        }
+                        EirTerm::Anonymous => {
+                            // Wildcard: this tuple-key column imposes no
+                            // equality requirement when filtering output rows.
+                            expected_key_bits_host.push(0);
+                            expected_key_type_codes_host.push(key_col_type.to_code());
+                            tuple_key_match_modes_host.push(TUPLE_KEY_MATCH_MODE_WILDCARD);
+                            bound_value_col_ptrs_host.push(0);
+                            bound_value_col_widths_host.push(0);
                         }
                         term => {
                             let expectation = TupleKeyExpectation::from_term(term, key_col_type)?;
@@ -5530,6 +5914,61 @@ impl Executor {
                 })?;
         }
 
+        // Global-gate literal mask: a literal that does not bind any reduced
+        // output column (pure-ground, pure-anonymous, or arity-0) is checked by
+        // the global membership gate rather than a per-row filter. For those
+        // literals the body literal must actually hold in the accepted
+        // candidate's world view; per-row (bound-variable) literals are already
+        // enforced by the row-filter loop above. The accepted candidate's
+        // assumption bit already folds in `know`/`possible` modality and
+        // negation (the validation kernel guarantees assumption == observed for
+        // accepted candidates), so the gate requires the assumption bit to be
+        // set for every global-gate literal.
+        // Constraint literals participate in modal world-view evaluation (model
+        // membership + assumption-bit pinning) but must NOT gate output rows:
+        // their pruning is enforced by the separate world-view constraint kernel,
+        // which rejects candidates whose accepted world view satisfies the
+        // constraint body. Treating them as required gates would invert the
+        // semantics (emit rows only when the forbidden body holds), so exclude
+        // them from the output-gating mask.
+        let mut is_constraint_literal = vec![false; literal_count.max(1)];
+        for constraint in &gpu_plan.constraints {
+            for &literal_index in &constraint.literal_indices {
+                if literal_index < literal_count {
+                    is_constraint_literal[literal_index] = true;
+                }
+            }
+        }
+        let mut gate_literal_required_host = vec![0u8; literal_count.max(1)];
+        for binding in &gpu_plan.tuple_membership_bindings {
+            if !binding.bound_output_columns.iter().any(Option::is_some)
+                && binding.literal_index < literal_count
+                && !is_constraint_literal[binding.literal_index]
+            {
+                gate_literal_required_host[binding.literal_index] = 1u8;
+            }
+        }
+        // A rule mixing a per-row (bound-variable) modal literal with a global
+        // gate (pure-ground/anonymous/arity-0) literal is materialized soundly:
+        // the row-map kernel applies the global-gate `gate_literal_required`
+        // mask on BOTH the global membership path and the per-row membership
+        // path, so global-gate literals and per-row bound tuple-key gates
+        // compose conjunctively. The two gate buffers below are passed to the
+        // row-map kernel for both paths.
+        let mut gate_literal_required = memory.alloc::<u8>(literal_count.max(1))?;
+        self.provider
+            .htod_launch_metadata_sync_copy_into(
+                &gate_literal_required_host,
+                &mut gate_literal_required,
+            )
+            .map_err(|e| {
+                XlogError::execution_ctx(
+                    "epistemic GPU final tuple gate metadata",
+                    "upload global-gate literal mask",
+                    &e,
+                )
+            })?;
+
         let row_map_func = self
             .provider
             .device()
@@ -5602,6 +6041,8 @@ impl Executor {
                     row_filter_count.as_kernel_param(),
                     (&row_map).as_kernel_param(),
                     (&final_row_count).as_kernel_param(),
+                    (&workspace.candidate_assumptions).as_kernel_param(),
+                    (&gate_literal_required).as_kernel_param(),
                 ];
                 row_map_func.clone().launch(
                     LaunchConfig::for_num_elems(output_row_capacity_u32.max(1)),
@@ -5762,6 +6203,35 @@ impl Executor {
         })
     }
 
+    /// Materialize a stratum's GATED epistemic head output into the relation store
+    /// as a base relation, for stratified epistemic execution.
+    ///
+    /// After a lower stratum computes its modal-gated head extension (the
+    /// `final_output`/additional-head buffer), the higher stratum's `know`/
+    /// `possible` over that head must read the GATED extension — not the ungated
+    /// reduced relation the reduced runtime plan leaves in the store. This OVERWRITES
+    /// the store relation under `name` with a device-side clone of the gated buffer,
+    /// so the existing EGB-02 tuple-membership filter (which reads the source
+    /// relation from the store by predicate name) gates the higher stratum against
+    /// the correct extension. No resolve-into-body is performed, so there is no
+    /// double-gating against the GPU world-view filter.
+    pub fn materialize_epistemic_head_relation(
+        &mut self,
+        name: &str,
+        gated_output: &CudaBuffer,
+    ) -> Result<()> {
+        let cloned = self.clone_buffer(gated_output)?;
+        self.put_relation(name, cloned);
+        Ok(())
+    }
+
+    /// Device-side clone of a store-resident relation buffer, for surfacing a
+    /// stratified ordinary stratum's output as a query result without moving it out
+    /// of the store.
+    pub fn clone_store_relation(&self, buffer: &CudaBuffer) -> Result<CudaBuffer> {
+        self.clone_buffer(buffer)
+    }
+
     /// Execute the reduced production runtime plan and capture epistemic GPU evidence.
     pub fn execute_epistemic_gpu_execution(
         &mut self,
@@ -5836,6 +6306,11 @@ impl Executor {
             candidate_count,
             capacities.max_models_per_reduction,
         )?;
+        let constraint_world_view_validation = self.validate_epistemic_gpu_world_view_constraints(
+            &mut prepared.workspace,
+            &executable.gpu_plan,
+            candidate_count,
+        )?;
         let materialization =
             self.materialize_epistemic_gpu_candidates(&mut prepared.workspace, candidate_count)?;
         let final_result_materialization = self.materialize_epistemic_gpu_final_results(
@@ -5843,8 +6318,19 @@ impl Executor {
             &output,
             candidate_count,
         )?;
+        // Distinct epistemic output heads and the reduction indices that feed each.
+        // A single-head plan keeps the unscoped (None) row filter. A JOINT-SOLVED
+        // coalesced multi-head plan materializes EACH head against the SAME accepted
+        // world view by scoping the modal row-filter to that head's reductions.
+        let head_reductions = epistemic_head_reduction_indices(&executable.gpu_plan);
+        let is_multi_head = head_reductions.len() > 1;
+        let primary_head_filter = if is_multi_head {
+            head_reductions.get(output_relation).cloned()
+        } else {
+            None
+        };
         let (final_output, final_tuple_materialization) = self
-            .materialize_epistemic_gpu_final_tuples(
+            .materialize_epistemic_gpu_final_tuples_scoped(
                 &mut prepared.workspace,
                 &output,
                 &executable.gpu_plan,
@@ -5852,7 +6338,44 @@ impl Executor {
                 candidate_count,
                 executable.gpu_plan.reductions.len(),
                 capacities.max_models_per_reduction,
+                primary_head_filter.as_ref(),
             )?;
+        // Materialize every OTHER coupled head against the shared accepted world
+        // view. Each head's reduced relation (already computed jointly by the single
+        // reduced-program dispatch above) is the materialization source; only that
+        // head's modal row-filter bindings apply.
+        let mut additional_head_outputs: Vec<(String, CudaBuffer)> = Vec::new();
+        if is_multi_head {
+            for (head, reductions) in &head_reductions {
+                if head.as_str() == output_relation {
+                    continue;
+                }
+                let head_output = {
+                    let reduced_head = self.store().get(head.as_str()).ok_or_else(|| {
+                        XlogError::UnsupportedEpistemicConstruct {
+                            construct: "epistemic GPU reduced output".to_string(),
+                            context: format!(
+                                "missing reduced output relation {head} after production runtime \
+                                 dispatch for joint multi-head materialization"
+                            ),
+                        }
+                    })?;
+                    self.clone_buffer(reduced_head)?
+                };
+                let (head_final_output, _head_trace) = self
+                    .materialize_epistemic_gpu_final_tuples_scoped(
+                        &mut prepared.workspace,
+                        &head_output,
+                        &executable.gpu_plan,
+                        literal_count,
+                        candidate_count,
+                        executable.gpu_plan.reductions.len(),
+                        capacities.max_models_per_reduction,
+                        Some(reductions),
+                    )?;
+                additional_head_outputs.push((head.clone(), head_final_output));
+            }
+        }
         let tuple_evidence_output = if executable.gpu_plan.final_output_columns.is_some() {
             let mut evidence_plan = executable.gpu_plan.clone();
             evidence_plan.final_output_columns = None;
@@ -5903,6 +6426,7 @@ impl Executor {
             candidate_validation,
             model_membership,
             world_view_validation,
+            constraint_world_view_validation,
             materialization,
             final_result_materialization,
             final_tuple_materialization,
@@ -5912,6 +6436,7 @@ impl Executor {
             semantic_trace,
             tuple_membership_bindings: executable.gpu_plan.tuple_membership_bindings.clone(),
             final_output,
+            additional_head_outputs,
             tuple_evidence_output,
             output,
             trace,
@@ -6172,10 +6697,63 @@ fn checked_u32_dimension(value: usize, context: &str) -> Result<u32> {
     })
 }
 
+/// Map each distinct epistemic output head to the reduction indices feeding it.
+///
+/// Reduction index = position in `gpu_plan.reductions`, which is exactly the
+/// `reduction_index` carried by every tuple-membership binding, so the returned
+/// sets scope each head's modal row-filter for joint multi-head materialization.
+fn epistemic_head_reduction_indices(
+    gpu_plan: &EpistemicGpuPlan,
+) -> std::collections::BTreeMap<String, BTreeSet<usize>> {
+    let mut heads: std::collections::BTreeMap<String, BTreeSet<usize>> =
+        std::collections::BTreeMap::new();
+    for (reduction_index, reduction) in gpu_plan.reductions.iter().enumerate() {
+        heads
+            .entry(reduction.head_predicate.clone())
+            .or_default()
+            .insert(reduction_index);
+    }
+    heads
+}
+
 fn final_output_columns_for_materialization(
     output: &CudaBuffer,
     gpu_plan: &EpistemicGpuPlan,
+    head_reduction_filter: Option<&BTreeSet<usize>>,
 ) -> Result<Vec<usize>> {
+    // PER-HEAD augmented projection: in a JOINT-SOLVED multi-head component each head
+    // is materialized from its OWN reduced relation buffer with its OWN reduction
+    // filter. The plan-global `final_output_columns` is derived from the first
+    // epistemic rule's head and would mis-project coupled heads of DIFFERING arity.
+    // When a head filter is supplied, project the first `public_head_arity` columns of
+    // THAT head (the augmented modal-literal columns are appended after the public head
+    // terms), so heads of differing arity/projection each materialize their own public
+    // tuple shape. This reads only the store/world-view boundary (the reduced relation
+    // buffer's arity + the plan's recorded public arity) — never a resolved body.
+    if let Some(filter) = head_reduction_filter {
+        if let Some(public_head_arity) = gpu_plan
+            .reductions
+            .iter()
+            .enumerate()
+            .filter(|(reduction_index, _)| filter.contains(reduction_index))
+            .map(|(_, reduction)| reduction.public_head_arity)
+            .max()
+        {
+            if public_head_arity > output.arity() {
+                return Err(XlogError::UnsupportedEpistemicConstruct {
+                    construct: "epistemic GPU final output projection".to_string(),
+                    context: format!(
+                        "per-head public arity {} exceeds reduced output arity {} for the \
+                         joint multi-head materialization",
+                        public_head_arity,
+                        output.arity()
+                    ),
+                });
+            }
+            return Ok((0..public_head_arity).collect());
+        }
+    }
+
     let Some(final_output_columns) = &gpu_plan.final_output_columns else {
         return Ok((0..output.arity()).collect());
     };
@@ -6276,26 +6854,6 @@ fn require_epistemic_gpu_buffer_contract(gpu_plan: &EpistemicGpuPlan) -> Result<
         }
     }
 
-    Ok(())
-}
-
-fn require_single_epistemic_output_relation(gpu_plan: &EpistemicGpuPlan) -> Result<()> {
-    let output_relations: BTreeSet<&str> = gpu_plan
-        .reductions
-        .iter()
-        .map(|reduction| reduction.head_predicate.as_str())
-        .collect();
-    if output_relations.len() > 1 {
-        return Err(XlogError::UnsupportedEpistemicConstruct {
-            construct: "epistemic GPU final output relation".to_string(),
-            context: format!(
-                "single-plan GPU execution materializes one final output buffer, but reductions \
-                 target multiple head predicates {:?}; use split GPU execution for independent \
-                 epistemic outputs",
-                output_relations
-            ),
-        });
-    }
     Ok(())
 }
 

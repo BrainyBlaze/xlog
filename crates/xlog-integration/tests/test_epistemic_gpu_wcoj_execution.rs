@@ -1408,6 +1408,7 @@ fn gpu_tuple_membership_matches_key_terms_by_binding_position_for_permuted_colum
         vec![EpistemicReductionPlan {
             rule_index: 0,
             head_predicate: "out".to_string(),
+            public_head_arity: 1,
             relational_body_atoms: 1,
             wcoj_status: EpistemicWcojReductionStatus::NotWcojCandidate,
         }],
@@ -1502,6 +1503,7 @@ fn gpu_final_tuple_row_filter_matches_key_terms_by_binding_position_for_permuted
         vec![EpistemicReductionPlan {
             rule_index: 0,
             head_predicate: "out".to_string(),
+            public_head_arity: 1,
             relational_body_atoms: 1,
             wcoj_status: EpistemicWcojReductionStatus::NotWcojCandidate,
         }],
@@ -1602,6 +1604,7 @@ fn gpu_final_tuple_row_filter_matches_mixed_ground_and_bound_keys_for_permuted_c
         vec![EpistemicReductionPlan {
             rule_index: 0,
             head_predicate: "out".to_string(),
+            public_head_arity: 1,
             relational_body_atoms: 1,
             wcoj_status: EpistemicWcojReductionStatus::NotWcojCandidate,
         }],
@@ -1704,6 +1707,7 @@ fn gpu_final_tuple_row_filter_matches_ternary_mixed_keys_for_permuted_columns() 
         vec![EpistemicReductionPlan {
             rule_index: 0,
             head_predicate: "out".to_string(),
+            public_head_arity: 1,
             relational_body_atoms: 1,
             wcoj_status: EpistemicWcojReductionStatus::NotWcojCandidate,
         }],
@@ -1811,6 +1815,7 @@ fn gpu_final_tuple_row_filter_matches_quaternary_mixed_keys_for_permuted_columns
         vec![EpistemicReductionPlan {
             rule_index: 0,
             head_predicate: "out".to_string(),
+            public_head_arity: 1,
             relational_body_atoms: 1,
             wcoj_status: EpistemicWcojReductionStatus::NotWcojCandidate,
         }],
@@ -6175,7 +6180,14 @@ fn accepted_split_quaternary_all_operator_batch_rejects_hot_path_host_transfers(
 }
 
 #[test]
-fn split_multi_membership_modal_coupling_rejects_gpu_batching() {
+fn split_multi_membership_modal_coupling_solves_jointly_per_component() {
+    // EGB-06: a rule coupling more than one DISTINCT epistemic body predicate is no
+    // longer rejected by the split layer. Each such rule's modal predicates are
+    // unioned into a single component that the joint path solves as a full modal
+    // conjunction over the candidate world view; independent heads form independent
+    // components. The per-rule joint semantics are verified on the device path
+    // (both_known={1}, safe_alt={2}); here we assert the split layer now ACCEPTS the
+    // coupling and forms two independent joint components instead of failing closed.
     let program = parse_program(
         r#"
         pred node(u32).
@@ -6190,18 +6202,13 @@ fn split_multi_membership_modal_coupling_rejects_gpu_batching() {
         "#,
     )
     .expect("parse split multi-membership fixture");
-    let err = compile_epistemic_gpu_split_execution_with_stats_snapshot(&program, None)
-        .expect_err("multi-membership modal coupling must reject unsafe split batching");
-
-    match err {
-        xlog_core::XlogError::UnsupportedEpistemicConstruct { construct, context } => {
-            assert_eq!(construct, "epistemic splitting");
-            assert!(context.contains("rule[0] couples epistemic predicates"));
-            assert!(context.contains("edge/1"));
-            assert!(context.contains("color/1"));
-        }
-        other => panic!("expected typed split rejection, got {other:?}"),
-    }
+    let split = compile_epistemic_gpu_split_execution_with_stats_snapshot(&program, None)
+        .expect("multi-membership modal coupling now solves jointly per component");
+    assert_eq!(
+        split.components.len(),
+        2,
+        "two independent heads form two joint components"
+    );
 }
 
 #[test]

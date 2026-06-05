@@ -80,6 +80,12 @@ pub struct EpistemicReductionPlan {
     pub rule_index: usize,
     /// Head predicate materialized by the reduced production runtime plan.
     pub head_predicate: String,
+    /// PUBLIC head arity (the user-visible head term count, before any augmentation
+    /// with modal-literal variables). The reduced relation buffer may carry extra
+    /// augmented columns appended after these; per-head materialization projects the
+    /// first `public_head_arity` columns so each coupled head keeps ITS OWN projection
+    /// (coupled heads of differing arity all materialize their own public tuple shape).
+    pub public_head_arity: usize,
     /// Positive relational body atom count after removing epistemic literals.
     pub relational_body_atoms: usize,
     /// WCOJ planner status for the reduced ordinary body.
@@ -109,6 +115,27 @@ pub struct EpistemicTupleMembershipBinding {
     pub op: EirEpistemicOp,
     /// Whether the epistemic literal is explicitly negated.
     pub negated: bool,
+}
+
+/// World-view integrity constraint lowered for accepted GPU execution.
+///
+/// An epistemic integrity constraint (`:- know unsafe().`) must reject a
+/// candidate world view when the conjunction of its body literals evaluates
+/// true under the selected epistemic semantics. Each body epistemic literal is
+/// kept first-class as an [`EpistemicGpuPlan::epistemic_literals`] entry; this
+/// plan only records which literal indices form the constraint conjunction so
+/// the device constraint kernel can prune candidates whose accepted world view
+/// satisfies the constraint body.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EpistemicConstraintPlan {
+    /// Source-order constraint index.
+    pub constraint_index: usize,
+    /// Indices into [`EpistemicGpuPlan::epistemic_literals`] forming the body conjunction.
+    ///
+    /// The accepted world view violates the constraint exactly when every
+    /// referenced literal's negation-folded modal value holds, so the device
+    /// kernel rejects a candidate when all of these literal assumption bits are set.
+    pub literal_indices: Vec<usize>,
 }
 
 /// Solver production capability required by accepted epistemic execution.
@@ -226,6 +253,8 @@ pub struct EpistemicGpuPlan {
     pub reductions: Vec<EpistemicReductionPlan>,
     /// Per-literal stable-model tuple membership bindings.
     pub tuple_membership_bindings: Vec<EpistemicTupleMembershipBinding>,
+    /// World-view integrity constraints lowered for accepted GPU execution.
+    pub constraints: Vec<EpistemicConstraintPlan>,
     /// Reduced-output columns copied into the public final output.
     /// `None` means identity/all columns; `Some([])` is a real zero-arity projection.
     pub final_output_columns: Option<Vec<usize>>,
@@ -300,6 +329,7 @@ impl EpistemicGpuPlan {
             ],
             reductions,
             tuple_membership_bindings,
+            constraints: Vec::new(),
             final_output_columns: None,
             solver_contract: EpistemicSolverServiceContract::production_default(
                 solver_assumption_bindings,
@@ -317,10 +347,58 @@ impl EpistemicGpuPlan {
         self
     }
 
+    /// Attach world-view integrity constraints lowered for accepted GPU execution.
+    pub fn with_constraints(mut self, constraints: Vec<EpistemicConstraintPlan>) -> Self {
+        self.constraints = constraints;
+        self
+    }
+
     /// Set the public projection applied after GPU tuple membership row filtering.
     pub fn with_final_output_columns(mut self, final_output_columns: Option<Vec<usize>>) -> Self {
         self.final_output_columns = final_output_columns;
         self
+    }
+
+    /// Validate that every world-view constraint references in-range epistemic literals.
+    pub fn validate_constraints(&self) -> xlog_core::Result<()> {
+        for constraint in &self.constraints {
+            if constraint.literal_indices.is_empty() {
+                return Err(xlog_core::XlogError::UnsupportedEpistemicConstruct {
+                    construct: "epistemic GPU world-view constraint".to_string(),
+                    context: format!(
+                        "constraint[{}] has no epistemic body literals; epistemic integrity \
+                         constraints must constrain accepted world views through at least one \
+                         know/possible literal",
+                        constraint.constraint_index
+                    ),
+                });
+            }
+            let mut seen = vec![false; self.epistemic_literals.len()];
+            for &literal_index in &constraint.literal_indices {
+                if literal_index >= self.epistemic_literals.len() {
+                    return Err(xlog_core::XlogError::UnsupportedEpistemicConstruct {
+                        construct: "epistemic GPU world-view constraint".to_string(),
+                        context: format!(
+                            "constraint[{}] references literal_index {} exceeding literal count {}",
+                            constraint.constraint_index,
+                            literal_index,
+                            self.epistemic_literals.len()
+                        ),
+                    });
+                }
+                if seen[literal_index] {
+                    return Err(xlog_core::XlogError::UnsupportedEpistemicConstruct {
+                        construct: "epistemic GPU world-view constraint".to_string(),
+                        context: format!(
+                            "constraint[{}] references literal_index {} more than once",
+                            constraint.constraint_index, literal_index
+                        ),
+                    });
+                }
+                seen[literal_index] = true;
+            }
+        }
+        Ok(())
     }
 
     /// Replace inferred solver obligations with planner-derived obligations.

@@ -247,9 +247,10 @@ fixtures. It is a non-empty set of accepted stable models. Over a world view:
 - `not know p/arity` is true when `know p/arity` is false.
 - `not possible p/arity` is true when `possible p/arity` is false.
 
-The current implementation constructs these world views directly in tests. It
-does not yet derive them from arbitrary EIR through GPU-native
-Generate-Propagate-Test execution.
+The accepted production path derives bounded candidate world views from EIR
+through the GPU Generate-Propagate-Test executor for the supported epistemic
+surface. Fixture-constructed `EpistemicWorldView` values remain CPU oracle/test
+surfaces only and are not release evidence by themselves.
 
 ## Epistemic Source Surface
 
@@ -265,9 +266,14 @@ accepted() :- not know fact().
 accepted() :- not possible fact().
 ```
 
-Nested epistemic operators are rejected with a typed diagnostic. The EIR
-boundary is exposed through `xlog_logic::build_eir`, which preserves epistemic
-literals as `EirBodyLiteral::Epistemic`.
+Finite nested epistemic chains are accepted when they normalize to one
+single-level modal literal. The parser/EIR path preserves `know`/`possible`
+chains with leading, interior, or atom-adjacent negation, then normalizes by
+parity and duality before GPU execution: `know possible p()` becomes
+`possible p()`, `know not possible p()` becomes `not possible p()`, and
+`know possible not p()` becomes `not know p()`. The EIR boundary is exposed
+through `xlog_logic::build_eir`, which preserves epistemic literals as
+`EirBodyLiteral::Epistemic`.
 
 ## G91 Compatibility
 
@@ -302,12 +308,13 @@ FAEEL is the default mode. In the bounded fixture evaluator:
 - known plus rejected support is rejected as `Contradiction`;
 - otherwise unsatisfied epistemic literals are reported as `UnsatisfiedLiteral`.
 
-At the production executable-plan boundary, default FAEEL also rejects direct
-self-support such as `p() :- possible p().` before the reduced ordinary runtime
-plan is compiled. If `p/arity` has separate ordinary support without epistemic
-body literals, the self-`possible` rule is treated as independently founded and
-may lower into accepted GPU runtime execution. The unsupported self-support
-fixture is allowed only with explicit `#pragma epistemic_mode = g91`.
+At the production executable-plan boundary, default FAEEL treats direct
+self-support such as `p() :- possible p().` as unfounded and executes it to the
+defined empty founded extension rather than rejecting the program. If `p/arity`
+has separate ordinary support without epistemic body literals, the
+self-`possible` rule is treated as independently founded and may lower into
+accepted GPU runtime execution. The same unsupported self-support is accepted
+only with explicit `#pragma epistemic_mode = g91`.
 
 ## Generate-Propagate-Test
 
@@ -367,14 +374,20 @@ G91/FAEEL/GPT/splitting case.
 
 ## Epistemic Splitting
 
-`split_epistemic_program` builds deterministic components from source rules and
-rejects a rule that couples more than one distinct epistemic body predicate. For
-accepted split fixtures, `recomposed_rule_indices()` must recover the original
+`split_epistemic_program` builds deterministic components from source rules. As
+of v0.9.1 (EGB-06) it no longer rejects a rule that couples more than one distinct
+epistemic body predicate: such a rule's modal predicates are unioned into a single
+component solved jointly as a full modal conjunction over the candidate world view.
+For accepted split fixtures, `recomposed_rule_indices()` must recover the original
 source rule order.
-Integration coverage now pins the GPU split-lowering boundary with
-`split_multi_membership_modal_coupling_rejects_gpu_batching`, which rejects the
-multi-membership `know edge(X)`/`know color(X)` fixture in a mixed program with
-`possible alt(X)`/`not possible blocked(X)` before component batching can run.
+Integration coverage pins the joint-solving contract with
+`split_multi_membership_modal_coupling_solves_jointly_per_component`, which takes
+the multi-membership `know edge(X)`/`know color(X)` fixture in a mixed program with
+`possible alt(X)`/`not possible blocked(X)` and accepts it as two independent joint
+components (per-rule joint semantics verified on device: `both_known={1}`,
+`safe_alt={2}`). Same-name multi-arity coupling now disambiguates by
+arity-qualified tuple sources (`p/1`, `p/2`) and is exercised by the production
+`xlog run` base example plus the committed `42a*`/`42b*` exhaustive matrix.
 
 `compile_epistemic_gpu_split_execution` lowers valid epistemic split components
 through `compile_epistemic_gpu_execution_with_stats_snapshot`, producing one

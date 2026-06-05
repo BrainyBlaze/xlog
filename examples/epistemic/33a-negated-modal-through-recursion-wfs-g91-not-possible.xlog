@@ -1,0 +1,23 @@
+// WFS matrix cell: mode g91, cyclic recursion through not possible.
+// v0.9.2 A1: the reduced ordinary program contains a non-monotone SCC and
+// executes through the GPU-backed WFS alternating-fixpoint path.
+//
+// `xlog run` emits true WFS tuples only:
+//   TRUE:      reach(1,2)
+//   UNDEFINED: all other vertex x vertex reach tuples
+#pragma epistemic_mode = g91
+
+pred vertex(u32).
+pred seed(u32, u32).
+pred linked(u32, u32).
+pred reach(u32, u32).
+
+vertex(1). vertex(2). vertex(3).
+seed(1, 2).
+
+reach(X, Y) :- linked(X, Y).
+reach(X, Z) :- reach(X, Y), linked(Y, Z).
+linked(X, Y) :- vertex(X), vertex(Y), not possible reach(X, Y).
+linked(X, Y) :- seed(X, Y).
+
+?- reach(X, Y).

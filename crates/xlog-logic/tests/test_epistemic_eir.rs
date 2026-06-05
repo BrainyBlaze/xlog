@@ -92,38 +92,108 @@ fn epistemic_literal_preserves_tuple_terms_for_gpu_key_matching() {
     );
 }
 
-#[test]
-fn nested_epistemic_literal_returns_typed_error() {
-    let err = parse_program("bad(X) :- know possible edge(X).").unwrap_err();
-    match err {
-        XlogError::UnsupportedEpistemicConstruct { construct, .. } => {
-            assert_eq!(construct, "nested epistemic literal");
+/// Helper: parse a one-rule program, build its EIR, and return the (op, negated)
+/// of the FIRST epistemic literal in rule 0's body. The EIR is the semantic
+/// boundary, so checking the collapsed literal there proves the chain normalizes
+/// to an ordinary single-level epistemic literal (no raw-RIR shortcut).
+fn first_eir_epistemic(src: &str) -> (EirEpistemicOp, bool, String) {
+    let program = parse_program(src).unwrap_or_else(|e| panic!("parse failed for {src:?}: {e:?}"));
+    let eir = build_eir(&program).unwrap_or_else(|e| panic!("eir failed for {src:?}: {e:?}"));
+    for lit in &eir.rules[0].body {
+        if let EirBodyLiteral::Epistemic(e) = lit {
+            return (e.op, e.negated, e.atom.predicate.clone());
         }
-        other => panic!("expected typed epistemic diagnostic, got {other:?}"),
+    }
+    panic!("no epistemic literal in EIR for {src:?}");
+}
+
+/// v0.9.2 ITEM C: a bare modal CHAIN (`know possible p`) is NOT rejected — it
+/// collapses via the KD45/S5 equivalence to its innermost (atom-adjacent)
+/// operator and normalizes into an ordinary single-level epistemic literal in
+/// the EIR. `know possible edge` -> `possible edge`.
+#[test]
+fn nested_epistemic_chain_collapses_to_inner_operator_in_eir() {
+    assert_eq!(
+        first_eir_epistemic("bad(X) :- know possible edge(X)."),
+        (EirEpistemicOp::Possible, false, "edge".to_string())
+    );
+    assert_eq!(
+        first_eir_epistemic("bad(X) :- possible know edge(X)."),
+        (EirEpistemicOp::Know, false, "edge".to_string())
+    );
+    assert_eq!(
+        first_eir_epistemic("bad(X) :- know know edge(X)."),
+        (EirEpistemicOp::Know, false, "edge".to_string())
+    );
+    assert_eq!(
+        first_eir_epistemic("bad(X) :- possible possible edge(X)."),
+        (EirEpistemicOp::Possible, false, "edge".to_string())
+    );
+    // 3-deep: innermost still wins.
+    assert_eq!(
+        first_eir_epistemic("bad(X) :- know possible know edge(X)."),
+        (EirEpistemicOp::Know, false, "edge".to_string())
+    );
+}
+
+/// A bare chain under a single LEADING negation distributes the negation and
+/// collapses to a negated single-level epistemic literal. `not know possible
+/// edge` -> `not possible edge`.
+#[test]
+fn negated_nested_epistemic_chain_collapses_in_eir() {
+    assert_eq!(
+        first_eir_epistemic("bad(X) :- not know possible edge(X)."),
+        (EirEpistemicOp::Possible, true, "edge".to_string())
+    );
+    assert_eq!(
+        first_eir_epistemic("bad(X) :- not possible know edge(X)."),
+        (EirEpistemicOp::Know, true, "edge".to_string())
+    );
+}
+
+/// Nested modal forms with interior or atom-adjacent negation dualize to the
+/// equivalent single-level modal literal before EIR lowering.
+#[test]
+fn nested_epistemic_with_interior_or_atom_negation_dualizes_in_eir() {
+    let cases = [
+        (
+            "bad(X) :- know not possible edge(X).",
+            (EirEpistemicOp::Possible, true, "edge".to_string()),
+        ),
+        (
+            "bad(X) :- possible not know edge(X).",
+            (EirEpistemicOp::Know, true, "edge".to_string()),
+        ),
+        (
+            "bad(X) :- know possible not edge(X).",
+            (EirEpistemicOp::Know, true, "edge".to_string()),
+        ),
+        (
+            "bad(X) :- not know not possible edge(X).",
+            (EirEpistemicOp::Possible, false, "edge".to_string()),
+        ),
+    ];
+    for (src, expected) in cases {
+        assert_eq!(first_eir_epistemic(src), expected);
     }
 }
 
+/// Single-level epistemic forms (including single-operator negated forms) MUST
+/// continue to parse — the broadened nested rule must not swallow them.
 #[test]
-fn negated_nested_epistemic_literal_returns_typed_error() {
-    let err = parse_program("bad(X) :- not know possible edge(X).").unwrap_err();
-    match err {
-        XlogError::UnsupportedEpistemicConstruct { construct, context } => {
-            assert_eq!(construct, "nested epistemic literal");
-            assert!(context.contains("not know possible edge(X)"));
-        }
-        other => panic!("expected typed negated epistemic diagnostic, got {other:?}"),
-    }
-}
-
-#[test]
-fn negated_possible_nested_epistemic_literal_returns_typed_error() {
-    let err = parse_program("bad(X) :- not possible know edge(X).").unwrap_err();
-    match err {
-        XlogError::UnsupportedEpistemicConstruct { construct, context } => {
-            assert_eq!(construct, "nested epistemic literal");
-            assert!(context.contains("not possible know edge(X)"));
-        }
-        other => panic!("expected typed negated possible epistemic diagnostic, got {other:?}"),
+fn single_level_epistemic_forms_still_parse() {
+    let cases = [
+        "good(X) :- node(X), know edge(X).",
+        "good(X) :- node(X), possible edge(X).",
+        "good(X) :- node(X), not know edge(X).",
+        "good(X) :- node(X), not possible edge(X).",
+        "good(X) :- a(X), know b(X), not possible c(X).",
+    ];
+    for src in cases {
+        assert!(
+            parse_program(src).is_ok(),
+            "single-level epistemic form must still parse: {src:?}"
+        );
     }
 }
 
