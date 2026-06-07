@@ -19,7 +19,7 @@ xlog-runtime.workspace = true
 
 [dev-dependencies]
 criterion = "0.5"
-serial_test = "3.0"
+serial_test = "3.5"
 
 [[bench]]
 name = "logic_bench"
