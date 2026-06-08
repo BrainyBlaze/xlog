@@ -641,6 +641,38 @@ class McDeviceEvalResult:
     nonmonotone_iteration_limit_hits: int
     sampling_method: str
 
+class DifferentiableProofTraceMap:
+    """XLOG differentiable proof traces keyed by stable proof ids."""
+
+    def insert(
+        self,
+        answer_key: str,
+        clause_id: str,
+        support_atoms: list[str],
+        initial_weight: float,
+    ) -> int:
+        """Insert one differentiable proof trace and return its stable proof id."""
+        ...
+
+    def trace(self, proof_id: int) -> Optional[dict[str, Any]]:
+        """Return one exported proof trace or ``None``."""
+        ...
+
+    def traces(self) -> list[dict[str, Any]]:
+        """Return all exported proof traces with weights and gradients."""
+        ...
+
+    def accumulate_binary_logistic_gradients(
+        self,
+        targets: list[tuple[str, float]],
+    ) -> float:
+        """Accumulate binary-logistic gradients grouped by answer key."""
+        ...
+
+    def apply_gradients(self, learning_rate: float) -> None:
+        """Apply accumulated proof-trace gradients to symbolic weights."""
+        ...
+
 # ---------------------------------------------------------------------------
 # Training infrastructure
 # ---------------------------------------------------------------------------
@@ -991,6 +1023,10 @@ def dlpack_roundtrip(
 
     Primarily used for testing the DLPack import/export pipeline.
     """
+    ...
+
+def dlpack_is_cuda(tensor: Any) -> bool:
+    """Return True when a DLPack capsule is backed by CUDA memory."""
     ...
 
 # The following two functions are only present when pyxlog is compiled with

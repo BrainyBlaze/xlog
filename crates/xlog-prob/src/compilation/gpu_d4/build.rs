@@ -508,6 +508,7 @@ mod tests {
 
     #[test]
     fn gpu_d4_compile_phase1_unit_clause_is_equivalent_via_gpu_cdcl() {
+        let _gpu_guard = crate::test_gpu_lock::lock();
         let Some(provider) = try_provider() else {
             return;
         };
@@ -796,6 +797,7 @@ mod tests {
 
     #[test]
     fn gpu_d4_compile_phase1_binary_clause_branches_and_is_equivalent_via_gpu_cdcl() {
+        let _gpu_guard = crate::test_gpu_lock::lock();
         let Some(provider) = try_provider() else {
             return;
         };
@@ -1088,6 +1090,7 @@ mod tests {
 
     #[test]
     fn gpu_d4_compile_phase1_unsat_is_equivalent_via_gpu_cdcl() {
+        let _gpu_guard = crate::test_gpu_lock::lock();
         let Some(provider) = try_provider() else {
             return;
         };
@@ -1375,6 +1378,7 @@ mod tests {
 
     #[test]
     fn gpu_d4_compile_phase1_frontier_depth2_multi_leaf_is_equivalent_via_gpu_cdcl() {
+        let _gpu_guard = crate::test_gpu_lock::lock();
         let Some(provider) = try_provider() else {
             return;
         };
@@ -1659,6 +1663,7 @@ mod tests {
 
     #[test]
     fn gpu_d4_compile_phase1_component_decomposition_emits_and_root() {
+        let _gpu_guard = crate::test_gpu_lock::lock();
         let Some(provider) = try_provider() else {
             return;
         };

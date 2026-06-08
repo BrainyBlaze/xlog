@@ -161,6 +161,14 @@ fn download_pairs_u64(buf: &CudaBuffer) -> Vec<(u64, u64)> {
     out
 }
 
+fn sync_stream(fix: &RuntimeFixture, stream: StreamId) {
+    fix.pool
+        .resolve(stream)
+        .expect("resolve stream")
+        .synchronize()
+        .expect("sync stream");
+}
+
 fn cpu_sort_dedup(rows: &[(u64, u64)]) -> Vec<(u64, u64)> {
     let set: BTreeSet<(u64, u64)> = rows.iter().copied().collect();
     set.into_iter().collect()
@@ -251,6 +259,7 @@ fn wcoj_layout_u64_sorts_unsorted_input_lex() {
         .provider
         .wcoj_layout_u64_recorded(&buf, stream)
         .expect("layout u64");
+    sync_stream(&fix, stream);
     assert_eq!(out.schema.column_type(0), Some(ScalarType::U64));
     assert_eq!(out.schema.column_type(1), Some(ScalarType::U64));
     assert_eq!(download_pairs_u64(&out), cpu_sort_dedup(&input));
@@ -276,6 +285,7 @@ fn wcoj_layout_u64_removes_duplicates() {
         .provider
         .wcoj_layout_u64_recorded(&buf, stream)
         .expect("layout u64 dedup");
+    sync_stream(&fix, stream);
     assert_eq!(download_pairs_u64(&out), cpu_sort_dedup(&input));
 }
 
@@ -291,6 +301,7 @@ fn wcoj_layout_u64_empty_input_produces_empty_output() {
         .provider
         .wcoj_layout_u64_recorded(&buf, stream)
         .expect("layout u64 empty");
+    sync_stream(&fix, stream);
     assert_eq!(download_pairs_u64(&out), Vec::<(u64, u64)>::new());
 }
 
@@ -308,6 +319,7 @@ fn wcoj_layout_u64_already_sorted_deduped_round_trips() {
         .provider
         .wcoj_layout_u64_recorded(&buf, stream)
         .expect("layout u64 sorted/deduped");
+    sync_stream(&fix, stream);
     assert_eq!(download_pairs_u64(&out), input);
 }
 
@@ -392,12 +404,14 @@ fn wcoj_layout_then_triangle_u64_matches_cpu_oracle() {
         .provider
         .wcoj_layout_u64_recorded(&buf_xz_raw, stream)
         .expect("layout xz");
+    sync_stream(&fix, stream);
 
     let tri_stream = fix.pool.acquire().expect("triangle stream");
     let result = fix
         .provider
         .wcoj_triangle_u64_recorded(&buf_xy, &buf_yz, &buf_xz, tri_stream)
         .expect("triangle u64");
+    sync_stream(&fix, tri_stream);
     assert_eq!(result.schema.column_type(0), Some(ScalarType::U64));
     assert_eq!(result.schema.column_type(1), Some(ScalarType::U64));
     assert_eq!(result.schema.column_type(2), Some(ScalarType::U64));

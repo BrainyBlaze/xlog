@@ -2282,6 +2282,7 @@ mod tests {
 
     #[test]
     fn test_exact_negation_probability() {
+        let _gpu_guard = crate::test_gpu_lock::lock();
         if CudaDevice::new(0).is_err() {
             eprintln!("Skipping test: CUDA runtime unavailable");
             return;
@@ -2308,6 +2309,7 @@ query(dry()).
 
     #[test]
     fn test_exact_multi_layer_negation() {
+        let _gpu_guard = crate::test_gpu_lock::lock();
         if CudaDevice::new(0).is_err() {
             eprintln!("Skipping test: CUDA runtime unavailable");
             return;
@@ -2336,6 +2338,7 @@ query(a()).
 
     #[test]
     fn test_eval_log_z_changes_for_sprinkler_given_wet() {
+        let _gpu_guard = crate::test_gpu_lock::lock();
         if CudaDevice::new(0).is_err() {
             eprintln!("Skipping test: CUDA runtime unavailable");
             return;

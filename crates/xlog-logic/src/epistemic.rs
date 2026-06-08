@@ -339,16 +339,16 @@ pub fn plan_epistemic_gpu_execution(program: &Program) -> Result<EpistemicGpuPla
 
     for (rule_index, rule) in eir.rules.iter().enumerate() {
         let mut rule_epistemic_literals = Vec::new();
-        let mut relational_body_atoms = 0usize;
+        let mut positive_relational_atoms = Vec::new();
         let mut has_negated_relational_atom = false;
 
         for lit in &rule.body {
             match lit {
-                EirBodyLiteral::Relational { negated, .. } => {
+                EirBodyLiteral::Relational { negated, atom } => {
                     if *negated {
                         has_negated_relational_atom = true;
                     } else {
-                        relational_body_atoms += 1;
+                        positive_relational_atoms.push(atom.clone());
                     }
                 }
                 EirBodyLiteral::Epistemic(lit) => {
@@ -403,9 +403,9 @@ pub fn plan_epistemic_gpu_execution(program: &Program) -> Result<EpistemicGpuPla
             rule_index,
             head_predicate: rule.head.predicate.clone(),
             public_head_arity: rule.head.terms.len(),
-            relational_body_atoms,
+            relational_body_atoms: positive_relational_atoms.len(),
             wcoj_status: wcoj_status_for_reduction(
-                relational_body_atoms,
+                &positive_relational_atoms,
                 has_negated_relational_atom,
             ),
         });
@@ -2177,13 +2177,63 @@ fn append_body_local_tuple_key_variables_to_head(rule: &mut crate::ast::Rule) {
 }
 
 fn wcoj_status_for_reduction(
-    relational_body_atoms: usize,
+    positive_relational_atoms: &[xlog_ir::EirAtom],
     has_negated_relational_atom: bool,
 ) -> EpistemicWcojReductionStatus {
-    if relational_body_atoms >= 3 && !has_negated_relational_atom {
+    if !has_negated_relational_atom
+        && positive_relational_atoms_are_supported_wcoj_shape(positive_relational_atoms)
+    {
         EpistemicWcojReductionStatus::RequiresPlannerEligibility
     } else {
         EpistemicWcojReductionStatus::NotWcojCandidate
+    }
+}
+
+fn positive_relational_atoms_are_supported_wcoj_shape(atoms: &[xlog_ir::EirAtom]) -> bool {
+    let mut edges: BTreeSet<(String, String)> = BTreeSet::new();
+    let mut degrees: BTreeMap<String, usize> = BTreeMap::new();
+    for atom in atoms {
+        if atom.arity != 2 || atom.terms.len() != 2 {
+            return false;
+        }
+        let Some(left) = eir_variable_name(&atom.terms[0]) else {
+            return false;
+        };
+        let Some(right) = eir_variable_name(&atom.terms[1]) else {
+            return false;
+        };
+        if left == right {
+            return false;
+        }
+        let edge = if left < right {
+            (left.to_string(), right.to_string())
+        } else {
+            (right.to_string(), left.to_string())
+        };
+        if !edges.insert(edge.clone()) {
+            return false;
+        }
+        *degrees.entry(edge.0).or_insert(0) += 1;
+        *degrees.entry(edge.1).or_insert(0) += 1;
+    }
+
+    match edges.len() {
+        3 => degrees.len() == 3 && degrees.values().all(|degree| *degree == 2),
+        4 => degrees.len() == 4 && degrees.values().all(|degree| *degree == 2),
+        10 | 15 | 21 => {
+            let variable_count = degrees.len();
+            (5..=7).contains(&variable_count)
+                && edges.len() == variable_count * (variable_count - 1) / 2
+                && degrees.values().all(|degree| *degree == variable_count - 1)
+        }
+        _ => false,
+    }
+}
+
+fn eir_variable_name(term: &EirTerm) -> Option<&str> {
+    match term {
+        EirTerm::Variable(name) => Some(name.as_str()),
+        _ => None,
     }
 }
 
@@ -3622,4 +3672,74 @@ fn split_component_program(
         .cloned()
         .collect();
     Ok(component_program)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::parse_program;
+
+    #[test]
+    fn high_arity_epistemic_adapter_reduction_is_not_wcoj_required() {
+        let program = parse_program(
+            r#"
+            pred case_variant(u32, u32).
+            pred case_domain_variant(u32, u32, u32).
+            pred domain_adapter_root(u32, u32, u32).
+            pred domain_adapter_intervention(u32, u32, u32).
+            pred domain_candidate_seed(u32, u32, u32, u32).
+            pred heldout_label_seed(u32, u32).
+            pred blocked_candidate(u32, u32, u32).
+            pred generated_candidate(u32, u32, u32, u32, u32).
+
+            generated_candidate(Case, Variant, Candidate, Root, Intervention) :-
+                case_domain_variant(Case, Variant, Domain),
+                domain_adapter_root(Domain, Candidate, Root),
+                domain_adapter_intervention(Domain, Candidate, Intervention),
+                domain_candidate_seed(Domain, Candidate, Root, Intervention),
+                know domain_candidate_seed(Domain, Candidate, Root, Intervention),
+                possible case_variant(Case, Variant),
+                not know heldout_label_seed(Case, Candidate),
+                not possible blocked_candidate(Case, Variant, Candidate).
+            "#,
+        )
+        .expect("parse high-arity adapter epistemic program");
+
+        let plan = plan_epistemic_gpu_execution(&program)
+            .expect("plan high-arity adapter epistemic program");
+
+        assert_eq!(plan.reductions.len(), 1);
+        assert_eq!(
+            plan.reductions[0].wcoj_status,
+            EpistemicWcojReductionStatus::NotWcojCandidate
+        );
+    }
+
+    #[test]
+    fn binary_triangle_epistemic_reduction_still_requires_wcoj() {
+        let program = parse_program(
+            r#"
+            pred xy(u32, u32).
+            pred yz(u32, u32).
+            pred xz(u32, u32).
+            pred tri(u32, u32, u32).
+
+            tri(X, Y, Z) :-
+                xy(X, Y),
+                yz(Y, Z),
+                xz(X, Z),
+                know xy(X, Y).
+            "#,
+        )
+        .expect("parse binary triangle epistemic program");
+
+        let plan =
+            plan_epistemic_gpu_execution(&program).expect("plan binary triangle epistemic program");
+
+        assert_eq!(plan.reductions.len(), 1);
+        assert_eq!(
+            plan.reductions[0].wcoj_status,
+            EpistemicWcojReductionStatus::RequiresPlannerEligibility
+        );
+    }
 }

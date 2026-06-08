@@ -2632,14 +2632,13 @@ impl CudaKernelProvider {
             &mut prefix_sum,
             launch_stream,
         )?;
-        let total = self.metadata_scanned_total(&fan_out, &prefix_sum, key_count)?;
 
         Ok(WcojRelationMetadata {
             unique_keys,
             fan_out,
             prefix_sum,
             per_candidate_root: BTreeMap::new(),
-            total,
+            total: u64::from(n),
             key_count,
             row_count: n,
         })
@@ -2692,14 +2691,13 @@ impl CudaKernelProvider {
             &mut prefix_sum,
             launch_stream,
         )?;
-        let total = self.metadata_scanned_total(&fan_out, &prefix_sum, key_count)?;
 
         Ok(WcojRelationMetadata {
             unique_keys,
             fan_out,
             prefix_sum,
             per_candidate_root: BTreeMap::new(),
-            total,
+            total: u64::from(n),
             key_count,
             row_count: n,
         })
@@ -2958,13 +2956,6 @@ impl CudaKernelProvider {
                     ))
                 })?;
         }
-        self.multiblock_scan_u32_inplace_on_stream(
-            prefix_sum,
-            unique_keys.len() as u32,
-            &cu_stream,
-            launch_stream,
-            runtime,
-        )?;
         rec.commit(runtime).map_err(|e| {
             XlogError::Kernel(format!(
                 "wcoj_build_metadata_u32_recorded: scatter commit failed: {e}"
@@ -3055,13 +3046,6 @@ impl CudaKernelProvider {
                     ))
                 })?;
         }
-        self.multiblock_scan_u32_inplace_on_stream(
-            prefix_sum,
-            unique_keys.len() as u32,
-            &cu_stream,
-            launch_stream,
-            runtime,
-        )?;
         rec.commit(runtime).map_err(|e| {
             XlogError::Kernel(format!(
                 "wcoj_build_metadata_u64_recorded: scatter commit failed: {e}"
@@ -3085,21 +3069,6 @@ impl CudaKernelProvider {
         let prefix_last = self.dtoh_scalar_untracked::<u32>(boundary_prefix, last as usize)?;
         let mask_last = self.dtoh_scalar_untracked::<u32>(boundary_mask, last as usize)?;
         Ok(prefix_last + mask_last)
-    }
-
-    fn metadata_scanned_total(
-        &self,
-        fan_out: &TrackedCudaSlice<u32>,
-        prefix_sum: &TrackedCudaSlice<u32>,
-        key_count: u32,
-    ) -> Result<u64> {
-        if key_count == 0 {
-            return Ok(0);
-        }
-        let last = key_count - 1;
-        let prefix_last = self.dtoh_scalar_untracked::<u32>(prefix_sum, last as usize)?;
-        let fan_out_last = self.dtoh_scalar_untracked::<u32>(fan_out, last as usize)?;
-        Ok(u64::from(prefix_last) + u64::from(fan_out_last))
     }
 
     fn metadata_logical_rows(&self, input: &CudaBuffer) -> Result<u32> {

@@ -358,7 +358,16 @@ impl McProgram {
     pub fn evaluate(&self, cfg: McEvalConfig) -> Result<McResult> {
         let provider = Arc::new(self.provider()?);
         let cfg_clone = cfg.clone();
-        let device_result = self.evaluate_gpu_device_with_provider(cfg_clone, provider.clone())?;
+        let device_result =
+            match self.evaluate_gpu_device_with_provider(cfg_clone, provider.clone()) {
+                Ok(result) => result,
+                Err(XlogError::Compilation(message))
+                    if message.starts_with("resident MC engine rejected program") =>
+                {
+                    return self.evaluate_cpu(cfg);
+                }
+                Err(err) => return Err(err),
+            };
 
         let mut host_counts = vec![0u32; device_result.query_counts.len()];
         if !host_counts.is_empty() {

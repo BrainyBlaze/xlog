@@ -225,7 +225,7 @@ extern "C" __global__ void wcoj_build_metadata_scatter_u32(
     uint32_t degree = end - i;
     unique_keys[out] = key;
     fan_out[out] = degree;
-    prefix_sum[out] = degree;
+    prefix_sum[out] = i;
 }
 
 extern "C" __global__ void wcoj_build_metadata_scatter_u64(
@@ -246,7 +246,7 @@ extern "C" __global__ void wcoj_build_metadata_scatter_u64(
     uint32_t degree = end - i;
     unique_keys[out] = key;
     fan_out[out] = degree;
-    prefix_sum[out] = degree;
+    prefix_sum[out] = i;
 }
 
 extern "C" __global__ void wcoj_triangle_build_hg_work_plan_u32(

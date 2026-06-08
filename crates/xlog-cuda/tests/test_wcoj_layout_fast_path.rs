@@ -222,6 +222,14 @@ fn download_pairs_u64(buf: &CudaBuffer) -> Vec<(u64, u64)> {
         .collect()
 }
 
+fn sync_stream(fix: &Fix, stream: xlog_cuda::device_runtime::StreamId) {
+    fix.pool
+        .resolve(stream)
+        .expect("resolve stream")
+        .synchronize()
+        .expect("sync stream");
+}
+
 // =================================================================
 // Fast-path hits — already sorted+unique input
 // =================================================================
@@ -240,6 +248,7 @@ fn fast_path_u32_sorted_unique_increments_counter() {
         .provider
         .wcoj_layout_u32_recorded(&buf, stream)
         .expect("layout u32");
+    sync_stream(&fix, stream);
     assert_eq!(
         fix.provider.wcoj_layout_fast_path_hit_count(),
         1,
@@ -265,6 +274,7 @@ fn fast_path_u64_sorted_unique_increments_counter() {
         .provider
         .wcoj_layout_u64_recorded(&buf, stream)
         .expect("layout u64");
+    sync_stream(&fix, stream);
     assert_eq!(
         fix.provider.wcoj_layout_fast_path_hit_count(),
         1,
@@ -296,6 +306,7 @@ fn fast_path_symbol_sorted_unique_increments_counter() {
         .provider
         .wcoj_layout_u32_recorded(&buf, stream)
         .expect("layout symbol");
+    sync_stream(&fix, stream);
     assert_eq!(
         fix.provider.wcoj_layout_fast_path_hit_count(),
         1,
@@ -320,6 +331,7 @@ fn fast_path_n1_input_hits() {
         .provider
         .wcoj_layout_u32_recorded(&buf, stream)
         .expect("layout n=1");
+    sync_stream(&fix, stream);
     assert_eq!(
         fix.provider.wcoj_layout_fast_path_hit_count(),
         1,
@@ -348,6 +360,7 @@ fn duplicate_input_falls_back() {
         .provider
         .wcoj_layout_u32_recorded(&buf, stream)
         .expect("layout dup");
+    sync_stream(&fix, stream);
     assert_eq!(
         fix.provider.wcoj_layout_fast_path_hit_count(),
         0,
@@ -373,6 +386,7 @@ fn unsorted_input_falls_back() {
         .provider
         .wcoj_layout_u32_recorded(&buf, stream)
         .expect("layout unsorted");
+    sync_stream(&fix, stream);
     assert_eq!(
         fix.provider.wcoj_layout_fast_path_hit_count(),
         0,
@@ -442,6 +456,7 @@ fn compacted_buffer_checks_only_logical_rows() {
         .provider
         .wcoj_layout_u32_recorded(&buf, stream)
         .expect("layout compacted");
+    sync_stream(&fix, stream);
     assert_eq!(
         fix.provider.wcoj_layout_fast_path_hit_count(),
         1,
@@ -470,6 +485,7 @@ fn empty_input_preserves_existing_semantics_no_counter() {
         .provider
         .wcoj_layout_u32_recorded(&buf, stream)
         .expect("layout empty");
+    sync_stream(&fix, stream);
     assert_eq!(
         fix.provider.wcoj_layout_fast_path_hit_count(),
         0,
@@ -497,6 +513,7 @@ fn fast_path_no_d2h_violations_under_strict_gate() {
     let result = fix.provider.wcoj_layout_u32_recorded(&buf, stream);
     fix.provider.disable_strict_deterministic_d2h();
     let _ = result.expect("layout under strict gate");
+    sync_stream(&fix, stream);
     let v = fix.provider.deterministic_d2h_violation_count();
     assert_eq!(
         v, 0,

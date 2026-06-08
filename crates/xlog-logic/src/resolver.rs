@@ -1,6 +1,6 @@
 //! Module resolution for XLOG programs.
 
-use crate::ast::Program;
+use crate::ast::{Program, UseDecl};
 use crate::module::{module_path_to_string, LoadedModule, ModuleError, ModulePath};
 use crate::parser::parse_program;
 use std::collections::{HashMap, HashSet};
@@ -282,6 +282,57 @@ impl ModuleResolver {
         self.loaded.keys().map(|s| s.as_str()).collect()
     }
 
+    fn imported_item_set(use_decl: &UseDecl) -> Option<HashSet<String>> {
+        match &use_decl.imports {
+            Some(items) if !items.is_empty() => Some(items.iter().cloned().collect()),
+            _ => None,
+        }
+    }
+
+    fn import_merge_key(
+        module_path: &[String],
+        imported_items: Option<&HashSet<String>>,
+    ) -> String {
+        let mut key = module_path_to_string(module_path);
+        if let Some(items) = imported_items {
+            let mut sorted_items = items.iter().cloned().collect::<Vec<_>>();
+            sorted_items.sort();
+            key.push_str("::{");
+            key.push_str(&sorted_items.join(","));
+            key.push('}');
+        } else {
+            key.push_str("::*");
+        }
+        key
+    }
+
+    fn merge_import_closure(
+        &self,
+        program: &mut Program,
+        use_decl: &UseDecl,
+        merged_imports: &mut HashSet<String>,
+    ) -> Result<(), ModuleError> {
+        let path_key = module_path_to_string(&use_decl.module_path);
+        let loaded_module = self
+            .loaded
+            .get(&path_key)
+            .ok_or_else(|| ModuleError::NotFound {
+                path: use_decl.module_path.clone(),
+                searched: vec![],
+            })?;
+
+        for nested_use in &loaded_module.program.imports {
+            self.merge_import_closure(program, nested_use, merged_imports)?;
+        }
+
+        let imported_items = Self::imported_item_set(use_decl);
+        let merge_key = Self::import_merge_key(&use_decl.module_path, imported_items.as_ref());
+        if merged_imports.insert(merge_key) {
+            program.merge_from(&loaded_module.program, imported_items.as_ref());
+        }
+        Ok(())
+    }
+
     /// Merge all imported modules into a program.
     /// Returns a new program with all imports resolved and merged.
     ///
@@ -291,31 +342,12 @@ impl ModuleResolver {
     /// # Returns
     /// The program with all imports merged in
     pub fn merge_imports(&self, mut program: Program) -> Result<Program, ModuleError> {
+        let entry_rules = std::mem::take(&mut program.rules);
+        let mut merged_imports = HashSet::new();
         for use_decl in &program.imports.clone() {
-            let path_key = module_path_to_string(&use_decl.module_path);
-            let loaded_module =
-                self.loaded
-                    .get(&path_key)
-                    .ok_or_else(|| ModuleError::NotFound {
-                        path: use_decl.module_path.clone(),
-                        searched: vec![],
-                    })?;
-
-            // Determine which items to import
-            let imported_items = match &use_decl.imports {
-                Some(items) if !items.is_empty() => {
-                    // Import specific items
-                    Some(items.iter().cloned().collect())
-                }
-                _ => {
-                    // Import all public items
-                    None
-                }
-            };
-
-            // Merge the module into the program
-            program.merge_from(&loaded_module.program, imported_items.as_ref());
+            self.merge_import_closure(&mut program, use_decl, &mut merged_imports)?;
         }
+        program.rules.extend(entry_rules);
 
         Ok(program)
     }
