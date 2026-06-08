@@ -6,7 +6,9 @@ The previous sections describe xlog as a purely symbolic system: Datalog evaluat
 
 In xlog, a neural network \emph{is} a predicate. The \texttt{nn/4} declaration embeds a network directly into the Datalog program:
 
-\begin{lstlisting}[style=xlogstyle]
+\begin{lstlisting}[style=xlogstyle,
+                   caption={Neural predicate declaration syntax (\texttt{nn/4}).},
+                   label={lst:nn-decl}]
 nn(network_name, [input_vars], output_var, [output_labels]) :: predicate(args).
 \end{lstlisting}
 
@@ -14,13 +16,17 @@ This is not a foreign-function call or an escape hatch. The declaration states t
 
 On the Python side, networks are registered via the \texttt{pyxlog} API. The \texttt{CompiledProgram.register\_network()} method accepts a PyTorch \texttt{nn.Module}, an optimizer, and optional configuration parameters:
 
-\begin{lstlisting}[style=pythonstyle]
+\begin{lstlisting}[style=pythonstyle,
+                   caption={Registering a PyTorch module against a neural predicate via \texttt{pyxlog}.},
+                   label={lst:nn-register}]
 program.register_network("mnist_net", net, optimizer)
 \end{lstlisting}
 
-Under the hood, the Rust-side \texttt{NetworkRegistry} (in \texttt{crates/xlog-neural/src/registry.rs}) manages a collection of \texttt{NetworkHandle} instances, each holding a reference to the PyTorch module, optimizer, and optional learning rate scheduler. The \texttt{NetworkConfig} struct exposes builder-pattern configuration for batching (grouping multiple queries into a single forward pass), top-k sampling (restricting the output space when most classes have near-zero probability), deterministic mode (argmax instead of probabilistic sampling), and output caching (avoiding redundant forward passes for repeated inputs, up to a configurable cache size of 10{,}000 entries by default).
+Under the hood, the Rust-side network registry manages a handle per network, each holding a reference to the PyTorch module, optimizer, and optional learning-rate scheduler. The \texttt{NetworkConfig} struct exposes builder-pattern configuration for batching (grouping multiple queries into a single forward pass), top-k sampling (restricting the output space when most classes have near-zero probability), deterministic mode (argmax instead of probabilistic sampling), and output caching (avoiding redundant forward passes for repeated inputs, up to a configurable cache size of 10{,}000 entries by default).
 
 The data flow through a neural predicate proceeds in two directions. \textbf{Forward:} when the logic engine encounters an \texttt{nn/4}-backed predicate during evaluation, it invokes the registered PyTorch module. The network's softmax output vector is decomposed into weighted probabilistic facts---one per output label---which are fed into the PIR/CNF/D4/XGCF compilation pipeline. Because the circuit structure depends on the logic program and not on the weight values, the compiled XGCF template is cached (\Cref{sec:prob}) and only the leaf weights are updated on subsequent iterations. \textbf{Backward:} after the XGCF circuit computes the forward log-probability and backward gradients via level-parallel CUDA kernels, the per-leaf gradient buffers are exported as DLPack tensors and injected into PyTorch's autograd graph. The optimizer then updates the network parameters as usual. The Python GIL is released during GPU-resident work using \texttt{py.allow\_threads()}, ensuring that CUDA kernel execution and GPU memory operations do not block the Python interpreter.
+
+\textbf{Production neural-bridge surface.} For downstream consumer integration, the v0.8.0 bridge exposes registered-network top-$k$ and deterministic output modes with stable top-$k$ tie-breaking, neural-cache hit/miss telemetry, and a family of loss helpers---Belnap pro/contra/quarantine losses for paraconsistent four-valued supervision, semantic loss, mean-squared error, and an information-theoretic loss---so that training pipelines drive the symbolic engine without reaching into internal crates. Native exact induction is reachable from the same Python surface (\texttt{pyxlog.ilp.exact\_induce.induce\_exact(\ldots, backend="native")}), routing tensorized-ILP candidate scoring through the GPU \texttt{ilp\_exact} kernel with a constant device-to-host transfer budget.
 
 \subsection{End-to-End Training Loop}
 
@@ -28,7 +34,9 @@ To make the integration concrete, we walk through the MNIST addition example---t
 
 \textbf{The logic program.} The complete xlog source (\texttt{examples/neural/01\_minimal/minimal.xlog}) is:
 
-\begin{lstlisting}[style=xlogstyle]
+\begin{lstlisting}[style=xlogstyle,
+                   caption={MNIST addition program: a CNN-backed digit predicate plus an addition rule.},
+                   label={lst:mnist-prog}]
 // Neural predicate declaration
 // nn(network_name, [input_vars], output_var, [output_labels]) :: predicate(args).
 //
@@ -62,7 +70,9 @@ Two lines of logic define the entire reasoning structure. The \texttt{nn/4} decl
 
 \textbf{The training script.} The Python driver (\texttt{examples/neural/01\_minimal/train.py}) compiles the program, registers the network, and runs training through the \texttt{pyxlog.train\_model\_tensor} API:
 
-\begin{lstlisting}[style=pythonstyle]
+\begin{lstlisting}[style=pythonstyle,
+                   caption={Python driver for MNIST addition: compile, register network, train.},
+                   label={lst:mnist-train}]
 program = pyxlog.Program.compile("""
     nn(mnist_net, [X], Y, [0,1,2,3,4,5,6,7,8,9]) :: digit(X, Y).
     addition(X, Y, Z) :- digit(X, D1), digit(Y, D2), Z is D1 + D2.
@@ -123,27 +133,21 @@ Version 0.5.0 introduces a term embedding API that attaches dense vector represe
 The Python API provides two methods on \texttt{CompiledProgram}:
 
 \begin{itemize}
-  \item \textbf{\texttt{register\_embedding(name, module\_or\_tensor, trainable=True)}} accepts either a PyTorch \texttt{nn.Embedding} module or a raw 2D \texttt{torch.Tensor}. For \texttt{nn.Embedding}, the weight matrix shape $[\text{vocab\_size}, \text{dim}]$ is read from the module. For raw tensors, \texttt{trainable} must be \texttt{False} (frozen embeddings). The Rust-side \texttt{EmbeddingHandle} (in \texttt{crates/xlog-neural/src/handle.rs}) stores the module reference, dimensionality, vocabulary size, and trainability flag. Embeddings are registered in the same \texttt{NetworkRegistry} as neural predicates, keyed by name.
+  \item \textbf{\texttt{register\_embedding(name, module\_or\_tensor, trainable=True)}} accepts either a PyTorch \texttt{nn.Embedding} module or a raw 2D \texttt{torch.Tensor}. For \texttt{nn.Embedding}, the weight matrix shape $[\text{vocab\_size}, \text{dim}]$ is read from the module. For raw tensors, \texttt{trainable} must be \texttt{False} (frozen embeddings). The Rust side stores the module reference, dimensionality, vocabulary size, and trainability flag, registered in the same registry as neural predicates and keyed by name.
   \item \textbf{\texttt{forward\_embedding(name, ids)}} looks up embedding vectors by integer IDs, returning a batched \texttt{torch.Tensor} with shape $[\text{len(ids)}, \text{dim}]$. For trainable \texttt{nn.Embedding} modules, the returned tensor carries autograd history, so gradients flow through the embedding lookup. For frozen tensors, the result has \texttt{requires\_grad=False}. Internally, the method determines the device from the embedding weight tensor and creates the ID tensor on the same device to avoid CPU/CUDA mismatches.
 \end{itemize}
 
-This API enables entity representation learning within the logic framework. For example, a knowledge graph completion task can attach learned embeddings to entity symbols, combine them with relational predicates in xlog rules, and jointly train the embeddings alongside neural perception networks. The embeddings are the only gradient-carrying embedding API in v0.5.0; future releases may integrate embedding lookups directly into the circuit evaluation path.
+This API enables entity representation learning within the logic framework. For example, a knowledge graph completion task can attach learned embeddings to entity symbols, combine them with relational predicates in xlog rules, and jointly train the embeddings alongside neural perception networks. The embeddings are the only gradient-carrying embedding API as of v0.9.2; future releases may integrate embedding lookups directly into the circuit evaluation path.
 
 \subsection{Differentiable ILP (Beta)}
 
 \begin{quote}\small
-\textbf{Note:} The differentiable ILP subsystem is in \textbf{beta} as of v0.5.0. The API surface, promotion pipeline, and artifact format may change in future releases. The schema version is \texttt{beta-v2}.
+\textbf{Note:} The differentiable ILP subsystem is in \textbf{beta} as of v0.9.2. The API surface, promotion pipeline, and artifact format may change in future releases. The schema version is \texttt{beta-v2}.
 \end{quote}
 
 xlog includes a differentiable inductive logic programming (dILP) trainer~\cite{dilp} that learns first-order rules from examples. Unlike the neural predicate path (which trains network parameters given fixed rules), dILP searches the space of candidate rules, using gradient-based optimization to assign soft probabilities to candidates and hard selection to commit the best rule.
 
-\textbf{Sparse GPU mask API.} A key scalability challenge in dILP is the candidate mask computation. For a program with $R$ relations of arity $A$, the naive candidate space is $O(R^A)$, which can easily reach millions of candidates. Materializing a dense $N \times N \times N$ mask on the Python side is prohibitive. The \texttt{CompiledIlpProgram} class (in \texttt{crates/pyxlog/src/ilp.rs}) provides three sparse mask methods of increasing strictness:
-
-\begin{itemize}
-  \item \texttt{set\_rule\_mask\_sparse(name, candidate\_ids, soft\_probs\_dlpack, budget)}---accepts a DLPack GPU tensor of soft probabilities, performs deterministic top-k selection on the Rust side, and stores a sparse \texttt{IlpMask} without dense materialization.
-  \item \texttt{set\_rule\_mask\_sparse\_selected(name, selected\_candidate\_ids, selected\_soft\_probs\_dlpack)}---the caller preselects candidate IDs, avoiding the full-vector probability download entirely.
-  \item \texttt{set\_rule\_mask\_sparse\_selected\_device(name, \ldots)}---the strictest path where selected candidate IDs remain as a device tensor, with Rust resolving them against a fixed candidate order uploaded via \texttt{set\_candidate\_map()}.
-\end{itemize}
+\textbf{Sparse GPU mask API.} The scalability bottleneck in dILP is the candidate mask: for $R$ relations of arity $A$ the naive candidate space is $O(R^A)$, so materializing a dense mask on the Python side is prohibitive. xlog instead offers a graduated family of sparse-mask entry points that trade Python convenience for strictness---from accepting a full DLPack probability vector and selecting top-$k$ on the Rust side, to a fully device-resident path where preselected candidate IDs never leave the GPU (resolved against a fixed, pre-uploaded candidate order). The strictest path keeps the entire mask-construction step transfer-free.
 
 The GPU loss/gradient computation (\texttt{compute\_ilp\_loss\_grad\_gpu}) builds a sparse COO structure from the per-entry membership masks, converts it to CSR via device-side sort, and launches forward (credit gather + NLL loss) and backward (gradient scatter) CUDA kernels. The entire credit/loss path is GPU-resident with zero host transfers when using the strict sparse device mask.
 

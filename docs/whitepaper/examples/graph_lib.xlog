@@ -1,3 +1,4 @@
+// library: graph_lib.xlog
 pred edge(u32, u32).
 pred reach(u32, u32).
 

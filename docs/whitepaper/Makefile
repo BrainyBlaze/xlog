@@ -1,4 +1,4 @@
-# Makefile for xlog v0.5.0 whitepaper (arxiv-style LaTeX).
+# Makefile for xlog v0.9.2 whitepaper (arxiv-style LaTeX).
 # Requires: latexmk, pdflatex, biber (MiKTeX or TeX Live).
 # Optional: mmdc (@mermaid-js/mermaid-cli) for rebuilding figures from .mmd sources.
 

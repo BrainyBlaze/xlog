@@ -34,66 +34,40 @@ Artifact-backed values are quoted directly from checked-in JSON/Markdown evidenc
 
 \subsubsection{Deterministic Subsystem}
 
-The GPU logic engine (\texttt{xlog-gpu}) targets throughput on three core operations: transitive closure (recursive fixpoint), hash join, and aggregation. \Cref{tab:throughput} reproduces the current benchmark contract from \texttt{docs/BENCHMARKS.md}; for deterministic execution the repository publishes target envelopes, not archived Criterion result tables.
+For transitive closure, hash join, and aggregation in isolation the repository publishes target throughput envelopes (\Cref{app:contract}) rather than archived result tables, so we make no measured absolute-throughput claim for these operations here. The measured deterministic result reported in this paper is the worst-case-optimal join ablation below.
+
+\subsubsection{Worst-Case Optimal Joins}
+
+The WCOJ subsystem (\Cref{sec:datalog}) is measured against the binary-join baseline on four paper-scale fixtures (call-graph edges, Andersen points-to~\cite{andersen1994}, \texttt{ddisasm}-style disassembly~\cite{ddisasm}, and a neural-symbolic mining analog), each with 4{,}194{,}304 input rows. The first three are standard Datalog program-analysis shapes; the fourth is a recursive neural-symbolic rule-mining workload. We measure at this scale deliberately: WCOJ speedups depend strongly on input size and skew, and synthetic micro-benchmarks systematically overstate them, so multi-rule recursive workloads at millions of tuples are the honest setting for a reproducible claim. \Cref{tab:wcoj} reports the artifact-backed speedups; both paths are required to produce identical row sets before timing, and every measurement is a median over 10 runs with coefficient of variation ${\le}0.05$.
 
 \begin{table}[htbp]
   \centering
-  \caption{Deterministic benchmark targets from \texttt{docs/BENCHMARKS.md}.}
-  \label{tab:throughput}
+  \caption{WCOJ vs.\ binary-join speedup on paper-scale fixtures (4.19M input rows each). Source: \texttt{docs/evidence/2026-05-18-g39-w39-dts-dlm-analog/}.}
+  \label{tab:wcoj}
   \small
-  \begin{tabular}{@{}lll@{}}
+  \begin{tabular}{@{}lr@{}}
     \toprule
-    \textbf{Operation} & \textbf{Configuration} & \textbf{Benchmark Contract} \\
+    \textbf{Fixture} & \textbf{WCOJ speedup} \\
     \midrule
-    Transitive closure & 100K random edges (sparse)       & ${>}1$M rows/sec \\
-    Transitive closure & 1M random edges (medium)         & ${>}5$M rows/sec \\
-    Transitive closure & $K_{500,500}$ bipartite (dense)  & ${>}10$M rows/sec \\
-    Hash join          & 100K $\times$ 100K               & ${>}50$M rows/sec \\
-    Hash join          & 1M $\times$ 100K                 & ${>}100$M rows/sec \\
-    Hash join          & High selectivity                 & ${>}20$M rows/sec \\
-    Aggregation        & 1M rows, 100K groups             & Tracked in groups/sec; no fixed public threshold yet \\
+    \texttt{call\_graph\_edge} & $29.62\times$ \\
+    \texttt{andersen}         & $26.96\times$ \\
+    \texttt{ddisasm}          & $28.79\times$ \\
+    \texttt{nesy\_analog}      & $26.60\times$ \\
+    \midrule
+    \textbf{Geometric mean}   & $\mathbf{27.96\times}$ \\
     \bottomrule
   \end{tabular}
 \end{table}
 
-These targets represent the current performance contract on the development GPU. Actual measured throughput depends on graph structure, key distribution, and output cardinality. The semi-naive fixpoint iteration benchmark (\texttt{crates/xlog-gpu/benches/logic\_bench.rs}) exercises the full recursive evaluation pipeline including delta maintenance and deduplication.
+These are single-system measurements of xlog's own WCOJ path against its own binary-join path on skewed inputs; on uniform or empty inputs the adaptive classifier falls back to the binary-join chain. They are an ablation, not a comparison against another engine---this paper makes no head-to-head claim against any external system (\Cref{sec:limits}). Peak observed allocation was roughly $2.29$\,GB, within the device's 12\,GB budget.
+
+\subsubsection{Runtime Optimization Layer}
+
+The v0.8.6 runtime optimizations (\Cref{sec:datalog}) are measured on dedicated repeated-session fixtures. The persistent hash-index manager records a $3.21\times$ speedup on a build-heavy repeated-session semi-join (cached median $0.079$\,s vs.\ uncached $0.255$\,s) against a $1.5\times$ target, with zero tracked device-to-host or host-to-device transfers (\texttt{docs/evidence/2026-05-19-v086-persistent-hash-index/}). The profile-gated shared-memory chain scorer records a $5.58\times$ speedup on a chain-hot fixture, with a bounded ${-}1.3\%$ regression on the small-input control (\texttt{docs/evidence/2026-05-19-v086-chain-smem/}). Common-subexpression elimination and adaptive re-optimization are validated for output equivalence and duplicate-work reduction with no added data-plane transfers, but are reported here as correctness-gated optimizations rather than headline speedups.
 
 \subsubsection{Probabilistic Subsystem}
 
-The probabilistic engine (\texttt{xlog-prob}) supports two inference modes: exact inference via Decision-DNNF knowledge compilation and GPU-accelerated Monte Carlo sampling.
-
-\begin{table}[htbp]
-  \centering
-  \caption{Exact inference targets (\texttt{docs/BENCHMARKS.md}).}
-  \label{tab:exact-targets}
-  \small
-  \begin{tabular}{@{}lll@{}}
-    \toprule
-    \textbf{Configuration} & \textbf{Target} & \textbf{Notes} \\
-    \midrule
-    20-variable probabilistic path & ${<}100$\,ms & Small d-DNNF circuit \\
-    50-variable Bayesian network   & ${<}500$\,ms & Medium circuit complexity \\
-    With gradient computation      & ${<}2\times$ base time & Backward pass overhead \\
-    \bottomrule
-  \end{tabular}
-\end{table}
-
-\begin{table}[htbp]
-  \centering
-  \caption{Monte Carlo inference targets (\texttt{docs/BENCHMARKS.md}).}
-  \label{tab:mc-targets}
-  \small
-  \begin{tabular}{@{}lll@{}}
-    \toprule
-    \textbf{Configuration} & \textbf{Target} & \textbf{Notes} \\
-    \midrule
-    100K samples, 100 variables & ${>}10$M worlds/sec & Throughput mode \\
-    10K samples, 500 variables  & ${>}5$M worlds/sec  & Complexity mode \\
-    \bottomrule
-  \end{tabular}
-\end{table}
-
-\textbf{MC evidence status.} The implementation clearly contains the relevant hot-loop optimizations---targeted reset planning, bulk GPU sampling, and pointer-buffer reuse---but the repository does not currently ship a standalone archived MC timing report with stable phase-by-phase numbers. Accordingly, this section treats MC performance as target-level evidence (\Cref{tab:mc-targets}) rather than quoting unsupported absolute timings.
+The probabilistic engine supports exact inference via Decision-DNNF knowledge compilation and GPU-accelerated Monte Carlo sampling. The repository publishes target latency and throughput envelopes for both (\Cref{app:contract}) but does not yet ship archived absolute-timing reports with stable per-phase numbers, so we make no measured absolute-latency claim for the engine in isolation. The measured probabilistic result in this paper is the circuit-caching ablation of the next subsection. The MC engine's hot-loop optimizations---targeted reset planning, bulk GPU sampling, and pointer-buffer reuse---are present in the implementation but unquantified here.
 
 \subsubsection{Neural-Symbolic Subsystem}
 
@@ -147,9 +121,9 @@ The cache ablation study compared circuit-cached vs.\ uncached training over 3 s
   \end{tabularx}
 \end{table*}
 
-\textbf{Published GPU Datalog results.} GPUlog~\cite{gpulog} reports up to $45\times$ speedup over CPU baselines using HISA (Hash-Indexed Sorted Array) indexing~\cite{hisa} with lock-free deduplication. VFLog~\cite{vflog} demonstrates up to $200\times$ gains over CPU column engines with a column-oriented GPU Datalog runtime. Both systems are restricted to deterministic evaluation; neither supports probabilistic inference, knowledge compilation, or neural network integration. xlog draws on the same insight---that Datalog's relational algebra maps naturally to GPU parallelism---but extends the execution model through the probabilistic and neural-symbolic layers described in \Cref{sec:prob,sec:nesy}.
+\textbf{Published GPU Datalog results.} GPUlog~\cite{gpulog} reports up to $45\times$ speedup over CPU baselines using HISA (Hash-Indexed Sorted Array) indexing with lock-free deduplication. VFLog~\cite{vflog} demonstrates up to $200\times$ gains over CPU column engines with a column-oriented GPU Datalog runtime. Both systems are restricted to deterministic evaluation; neither supports probabilistic inference, knowledge compilation, or neural network integration. xlog draws on the same insight---that Datalog's relational algebra maps naturally to GPU parallelism---but extends the execution model through the probabilistic and neural-symbolic layers described in \Cref{sec:prob,sec:nesy}.
 
-\textbf{Honest framing.} The comparison above is qualitative. xlog has not been benchmarked head-to-head against GPUlog or VFLog on identical workloads. The deterministic throughput targets in \Cref{tab:throughput} represent xlog's own benchmark contract, not comparative claims. The DeepProbLog comparison is limited to the \texttt{01\_minimal} task with differing dataset sizes, metrics, and partially completed archived runs, as noted above.
+\textbf{Honest framing.} The comparison above is qualitative. xlog has not been benchmarked head-to-head against GPUlog or VFLog on identical workloads. The deterministic throughput targets (\Cref{app:contract}) represent xlog's own benchmark contract, not comparative claims, and the WCOJ and circuit-caching numbers are ablations against xlog's own baselines. The DeepProbLog comparison is limited to the \texttt{01\_minimal} task with differing dataset sizes, metrics, and partially completed archived runs, as noted above.
 
 \subsection{CUDA Certification}
 

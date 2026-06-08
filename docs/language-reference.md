@@ -11,7 +11,7 @@ programming language.
 The v0.8.5 additions remain the language-completeness contract for finite
 terms, lists, safe meta-predicates, deterministic negation, magic sets,
 probabilistic aggregates, approximate inference, and CLI inspectability.
-v0.9.0-rc adds the accepted epistemic source surface: `know`, `possible`,
+The v0.9.x line adds the accepted epistemic source surface: `know`, `possible`,
 `not know`, `not possible`, and `#pragma epistemic_mode = faeel|g91`.
 Accepted epistemic programs route through the high-level EIR and GPU epistemic
 runtime; unsupported forms must fail with typed diagnostics rather than
@@ -207,7 +207,7 @@ to typed relation layouts before execution:
 | Type form | Meaning | Execution status |
 |-----------|---------|------------------|
 | `domain name: type` | Named alias for an existing scalar type | Existing source form; v0.8.5 requires alias preservation in diagnostics and schema metadata |
-| `column: type` | Named predicate column | v0.8.5 contract; rejected until `G085_TYPES` lands |
+| `column: type` | Named predicate column | v0.8.5 contract; named predicate columns are accepted and preserved in schema metadata |
 | `list<T>` | Finite homogeneous list of `T` | v0.8.5 contract; accepted lists lower to helper relations, not CPU term heaps |
 | `term` | Finite ground term value | v0.8.5 contract; only finite, typed terms are accepted |
 | `compound` | Finite compound term with functor and arity | v0.8.5 contract; unsupported recursive or open compounds are rejected |
@@ -1515,7 +1515,7 @@ query(p).  // P(p) ≈ 0.5 ± CI
 
 ## Epistemic Logic
 
-*Introduced in v0.9.0-rc.*
+*Introduced in v0.9.0; executor completed through v0.9.2.*
 
 Epistemic logic adds modal body literals for bounded knowledge and possibility
 reasoning. Modal literals are valid in rule bodies and use the same atom syntax
@@ -2052,8 +2052,7 @@ Block comments (`/* ... */`) are **not supported**.
 ## Complete Grammar Reference
 
 The following is a summary of the current XLOG grammar plus the v0.8.5 contract
-extensions and v0.9 epistemic source surface in PEG-style notation. Contract
-extensions are source-audited again as their implementation nodes land.
+extensions and v0.9.x epistemic source surface in PEG-style notation.
 
 ### Lexical Elements
 
@@ -2305,7 +2304,7 @@ program = { SOI ~ statement* ~ EOI }
 
 - [Architecture Guide](ARCHITECTURE.md) - System design and implementation details
 - [v0.8.5 Language Architecture Contract](architecture/language-v085.md) - Parser, term, probability, CLI, and v0.9.0 handoff contract
-- [Epistemic Semantics And EIR](architecture/epistemic-semantics.md) - v0.9.0 epistemic source surface, EIR boundary, and GPU runtime path
+- [Epistemic Semantics And EIR](architecture/epistemic-semantics.md) - v0.9.x epistemic source surface, EIR boundary, and GPU runtime path
 - [Arithmetic Expressions](architecture/arithmetic-expressions.md) - Detailed `is` syntax documentation
 - [Probabilistic Tier](architecture/xlog-prob.md) - Exact and Monte Carlo inference
 - [GPU Execution](architecture/gpu-execution.md) - GPU-resident evaluation details

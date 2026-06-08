@@ -11,60 +11,66 @@ The executor in \texttt{crates/xlog-runtime/src/executor/} processes an \texttt{
 \textbf{Recursive SCCs.} The \texttt{execute\_recursive\_scc} method in \texttt{crates/xlog-runtime/src/executor/recursive.rs} implements semi-naive evaluation. The algorithm proceeds in three phases:
 
 \begin{enumerate}
-  \item \textbf{Seeding.} All rules in the SCC are evaluated once against the current relation store to produce initial results. Per-predicate delta relations are allocated as distinct GPU-resident buffers with dedicated \texttt{RelId} identifiers (named \texttt{\_\_delta\_\{pred\}\_\{id\}}). The initial delta for each predicate is computed as the set difference between the newly derived tuples and any pre-existing tuples.
-  \item \textbf{Iteration.} On each iteration, the executor re-evaluates rules using delta-rewritten variants. For each rule, it identifies recursive scan occurrences and rewrites each one individually to reference the corresponding delta relation, producing one evaluation variant per recursive scan site. This per-occurrence rewriting handles self-joins correctly: a rule body containing \texttt{p(X,Y), p(Y,Z)} generates two variants, each substituting the delta into exactly one scan. Variant results are unioned per head predicate. The raw delta is then differenced against the full relation (\texttt{delta\_new = delta\_raw - full}) and deduplicated, all on-device. A \texttt{DeltaRelationTracker} records whether any predicate produced new tuples; if none did, fixpoint has been reached.
-  \item \textbf{Merge and cleanup.} After each iteration, new delta tuples are merged into the full relation via \texttt{union\_gpu} followed by \texttt{dedup\_sorted}. When the fixpoint is reached or the configurable iteration limit (default 1{,}000{,}000, set via \texttt{RuntimeConfig.max\_iterations}) is exceeded, delta relations are removed from the store and their \texttt{RelId} mappings are unregistered.
+  \item \textbf{Seeding.} Every rule in the SCC is evaluated once against the current relation store, and each predicate's initial delta is the set difference between the newly derived tuples and any pre-existing ones. Delta relations are distinct on-device buffers.
+  \item \textbf{Iteration.} Each rule is re-evaluated through delta-rewritten variants---one variant per recursive scan occurrence, so self-joins are handled correctly: a body containing \texttt{p(X,Y), p(Y,Z)} yields two variants, each substituting the delta into exactly one scan. Variant results are unioned per head predicate, differenced against the full relation, and deduplicated, all on-device. When no predicate produces new tuples, the fixpoint is reached.
+  \item \textbf{Merge and cleanup.} New delta tuples are merged into the full relation by union and sorted deduplication. At fixpoint---or when the iteration cap (default 1{,}000{,}000) is hit---delta relations are freed.
 \end{enumerate}
 
-All intermediate buffers---full relations, delta relations, union results, difference results---remain GPU-resident throughout. The profiler records per-operator timing, input/output row counts, and peak GPU memory at each step, enabling the feedback loop described in \Cref{sec:datalog}.
+All intermediate buffers remain on-device throughout. The profiler records per-operator timing, row counts, and peak memory, feeding the optimizer loop described below.
 
 \subsection{Kernel Design}
 
-xlog implements eight core relational CUDA kernels, totaling 3{,}259 lines of device code. Each kernel is a direct CUDA implementation, not a wrapper around cuBLAS, cuSPARSE, or Thrust.
+xlog implements its relational algebra as eight direct CUDA kernels rather than wrappers over cuBLAS, cuSPARSE, or Thrust. The reason is the residency contract: a library operator imposes its own allocation, synchronization, and host-staging behavior, which would defeat the zero-transfer guarantee of \Cref{sec:arch}. Bespoke kernels keep every intermediate buffer on-device and let every launch flow through the recorded-launch discipline. \Cref{tab:kernels} summarizes them; the worst-case-optimal multiway join described below is a ninth kernel family.
 
 \begin{table}[htbp]
   \centering
   \caption{Core relational CUDA kernels in \texttt{xlog-cuda}.}
   \label{tab:kernels}
   \small
-  \begin{tabularx}{\linewidth}{@{}l r X@{}}
+  \begin{tabularx}{\linewidth}{@{}l X@{}}
     \toprule
-    \textbf{Kernel} & \textbf{LOC} & \textbf{Purpose} \\
+    \textbf{Kernel} & \textbf{Purpose} \\
     \midrule
-    \texttt{join.cu}    & 361  & Hash join with linked-list collision chains. FNV-1a composite hashing for multi-column keys. All scalar types supported by hashing raw bytes. \\
-    \texttt{sort.cu}    & 452  & 4-bit radix sort (8 passes over 32-bit keys). Stable: elements with equal digits preserve input order. Three-phase per pass: histogram, prefix sum, scatter. \\
-    \texttt{filter.cu}  & 942  & Comparison operators (Eq, Ne, Lt, Le, Gt, Ge) for column-vs-constant and column-vs-column, with stream compaction via prefix sum. Fused compare-and-scan variants for all scalar types. \\
-    \texttt{groupby.cu} & 248  & Sorted-input grouped aggregation. Detects group boundaries in sorted key columns, then applies per-group reduction (Count, Sum, Min, Max, LogSumExp). \\
-    \texttt{dedup.cu}   & 289  & Sort-based deduplication with prefix-sum compaction. Type-aware equality including IEEE~754 float handling: $-0.0$ and $+0.0$ equal, NaN equal only when bit-identical. \\
-    \texttt{set\_ops.cu} & 116 & Union (concat~+~sort~+~dedup) and set difference via sorted-array binary search. Columnar concat kernel copies both inputs into a pre-allocated output buffer. \\
-    \texttt{scan.cu}    & 270  & Blelloch parallel prefix sum (inclusive). Block-level scan with shared memory, inter-block propagation via block sums. Building block for filter compaction, dedup, and group-by. \\
-    \texttt{pack.cu}    & 581  & Multi-column key packing on device. Packs up to 4 separate column buffers into row-major byte arrays and computes FNV-1a hashes, eliminating host roundtrips for multi-column join key preparation. \\
+    \texttt{join.cu}    & Hash join with linked-list collision chains and FNV-1a composite hashing over raw key bytes, so all scalar types share one path. Includes count\,$\to$\,scan\,$\to$\,materialize (CSM) variants for Inner and LeftOuter joins. \\
+    \texttt{sort.cu}    & Stable 4-bit radix sort (8 passes over 32-bit keys): per-pass histogram, prefix sum, scatter. \\
+    \texttt{filter.cu}  & Comparison operators for column-vs-constant and column-vs-column, with stream compaction via prefix sum and fused compare-and-scan variants. \\
+    \texttt{groupby.cu} & Sorted-input grouped aggregation: boundary detection in sorted keys, then per-group Count/Sum/Min/Max/LogSumExp reduction. \\
+    \texttt{dedup.cu}   & Sort-based deduplication and set difference with type-aware equality, including IEEE~754 float handling. \\
+    \texttt{set\_ops.cu} & Union (concat\,+\,sort\,+\,dedup) and set difference via sorted-array binary search. \\
+    \texttt{scan.cu}    & Blelloch parallel prefix sum---the building block for filter compaction, dedup, and group-by. \\
+    \texttt{pack.cu}    & Multi-column key packing into row-major byte arrays with FNV-1a hashing, eliminating host roundtrips for join-key preparation. \\
     \bottomrule
   \end{tabularx}
 \end{table}
+
+Every operator also exposes a recorded-launch sibling (since v0.6.0) that routes through the \texttt{LaunchRecorder} preflight/commit discipline of \Cref{sec:arch}, selectable per-operator or via an umbrella flag, with the legacy path as the default.
 
 \textbf{IEEE~754 total ordering.} The filter kernel implements a correctness-critical design choice for floating-point comparisons. Equality and inequality (Eq, Ne) use standard IEEE~754 semantics where $\mathrm{NaN} \neq \mathrm{NaN}$. Ordered comparisons (Lt, Le, Gt, Ge) use a total ordering transformation: the \texttt{float\_to\_ordered\_f64} device function converts an \texttt{f64} bit pattern to an \texttt{i64} such that the resulting integer order matches the IEEE~754 \texttt{totalOrder} predicate. The ordering is: $-\mathrm{NaN} < -\mathrm{Inf} <$ negative finites $< -0.0 < +0.0 <$ positive finites $< +\mathrm{Inf} < +\mathrm{NaN}$. The transformation works by flipping all bits except the sign bit for negative values and flipping only the sign bit for non-negative values, matching Rust's \texttt{f64::total\_cmp()} algorithm. An analogous \texttt{float\_to\_ordered\_f32} function handles 32-bit floats. This ensures that Datalog programs produce deterministic, well-defined results for all floating-point inputs, including edge cases involving NaN and signed zeros.
 
 \subsection{Adaptive Join Planning}
 
-The optimizer in \texttt{crates/xlog-logic/src/optimizer.rs} performs cost-based query transformations using runtime statistics collected by the \texttt{StatsManager} in \texttt{crates/xlog-stats/src/manager.rs}.
+The optimizer performs cost-based query transformations using runtime statistics collected during prior executions.
 
-\textbf{Cost model.} Each plan node receives a \texttt{PlanCost} estimate with four dimensions: expected row count, CPU coordination cost, peak GPU memory, and number of host--device transfers. The scalar cost function weights these components, with transfers penalized heavily (default multiplier: $100\times$) to reflect PCIe latency. GPU memory cost is scaled at 0.001 per byte, making 1\,GB equivalent to 1M cost units.
+\textbf{Cost model.} Each plan node is costed along four dimensions---expected row count, CPU coordination cost, peak GPU memory, and number of host--device transfers---with transfers penalized heavily to reflect PCIe latency. The transfer penalty is what makes the planner prefer device-resident plans even when they cost more raw compute.
 
 \textbf{Predicate pushdown.} When enabled (the default), the optimizer pushes \texttt{Filter} nodes below \texttt{Project} and \texttt{Join} nodes. Filters above joins are decomposed: predicates referencing only left-side columns are pushed into the left input, predicates referencing only right-side columns into the right input, and cross-predicates remain above the join. Filters above projections are remapped through pass-through columns where possible.
 
-\textbf{Join ordering.} For queries involving up to \texttt{dp\_threshold} relations (default: 10), the optimizer uses dynamic programming to enumerate join orderings and select the minimum-cost plan. Join cardinality estimation uses cached selectivity data from \texttt{StatsManager.estimate\_join\_cardinality}, which multiplies left and right cardinalities by a selectivity factor derived from prior executions. When the relation count exceeds the threshold, the optimizer falls back to a greedy heuristic to avoid exponential planning time.
+\textbf{Join ordering.} For queries of up to ten relations the optimizer uses dynamic programming to select the minimum-cost join order; above that threshold it falls back to a greedy heuristic to avoid exponential planning time. Cardinality estimates multiply left and right cardinalities by a selectivity factor learned from prior executions.
 
-\textbf{Feedback loop.} The \texttt{Executor} exposes a \texttt{stats\_snapshot()} method that captures a \texttt{StatsSnapshot} containing per-relation cardinality, byte size, access heat, column-level statistics, join selectivities, and a \texttt{RelId}-to-predicate-name mapping. This snapshot can be fed back into the \texttt{StatsManager} via \texttt{merge\_snapshot()} before the next compilation, closing the loop between execution and optimization. The predicate-name mapping ensures that statistics are applied correctly across compilations even when \texttt{RelId} assignments change.
+\textbf{Feedback loop.} The executor can export a statistics snapshot---per-relation cardinality, byte size, access heat, column statistics, and join selectivities---and merge it back before the next compilation, closing the loop between execution and optimization. A predicate-name mapping keeps these statistics valid across compilations even when internal relation IDs are reassigned.
+
+\subsection{Worst-Case Optimal Joins}
+
+Binary-join plans can materialize intermediate relations that are asymptotically larger than the final result---the classic pathology for cyclic queries such as triangle enumeration. This is not a corner case for the Datalog workloads xlog targets: program-analysis queries (points-to analysis, call-graph and reachability inference over code-dependency graphs) are dominated by cyclic, skewed join patterns where the intermediate blowup, not the final answer, governs cost. xlog addresses this with a worst-case-optimal join (WCOJ) subsystem~\cite{ngo2018wcoj,veldhuizen2014leapfrog,wang2023freejoin}. A pure-Rust hypergraph planner (\texttt{xlog-logic::hypergraph}) analyzes rule bodies for multiway-join eligibility, derives a deterministic variable ordering from cardinality and selectivity statistics, and emits a \texttt{MultiWayJoin}/\texttt{ChainJoin} RIR node when promotion provably preserves output semantics; otherwise the binary-join plan is retained as a certified fallback. Planner verdicts and GPU outputs are certified against the same CPU oracle fixtures before executor wiring.
+
+The GPU side (\texttt{wcoj.cu}, 2{,}262 LOC) executes the join via count $\to$ device-side prefix scan $\to$ materialize over flat sorted-column storage, with a four-byte metadata D2H total and no count-vector transfer. A sorted-layout fast path proves already-sorted-and-unique inputs with a recorded checker kernel and clones on-device instead of re-sorting. Coverage extends from the canonical triangle to 4-cycles, K-clique templates (K${=}5$--$8$), recursive/SCC integration, and helper-relation splitting that exposes inner skew to root-level histograms.
+
+A default-on adaptive skew classifier decides per query whether to dispatch WCOJ: high-skew inputs take the WCOJ path while uniform or empty inputs fall back to the binary-join chain. \texttt{XLOG\_DISABLE\_WCOJ\_TRIANGLE=1} is the hard kill switch. \Cref{sec:eval} reports the measured speedup envelope on skewed paper-scale workloads.
+
+\subsection{Runtime Optimization Layer}
+
+Interactive and long-running deployments---REPL sessions, iterative solver loops, incremental ML training---repeatedly evaluate similar queries over relations that change little between calls. A stateless executor rebuilds join indices and recomputes shared subplans on every call, paying the dominant cost each time. v0.8.6 adds three runtime optimizations that exploit this between-call stability, each with explicit off/on controls and zero added data-plane host transfers. \emph{Common-subexpression elimination} caches the results of safe deterministic subplans within an evaluation, invalidated on relation-generation change, removing duplicate work. \emph{Adaptive re-optimization} lets the executor adopt a compiler-supplied candidate plan (via \texttt{execute\_plan\_with\_adaptive\_candidate}) when deterministic mis-plan telemetry crosses a configurable ratio, with GPU output equivalence and rollback diagnostics. A \emph{persistent hash-index manager}, keyed on relation generation, schema, and device, retains built indices across repeated session evaluations with deterministic LRU eviction and background-build accounting; on a build-heavy repeated-session fixture it records a $3.21\times$ speedup against a $1.5\times$ target with zero tracked host transfers (\Cref{sec:eval}). Persistent sessions additionally coalesce relation-delta batches and expose opt-in, metadata-only relation-change callbacks.
 
 \subsection{Reversible Symbols}
 
-Datalog programs operate on strings (predicate arguments, constants), but GPU kernels operate on fixed-width numeric columns. xlog bridges this gap with a global symbol table implemented in \texttt{crates/xlog-core/src/symbol.rs}.
-
-\textbf{Interning.} The \texttt{intern(s: \&str) -> u32} function assigns sequential 32-bit IDs to unique strings. A read-write lock (\texttt{RwLock<SymbolRegistry>}) guards the bidirectional mapping: a \texttt{HashMap<String, u32>} for forward lookup and a \texttt{Vec<String>} for reverse resolution. The fast path acquires only a read lock; the slow path (new symbol) double-checks after acquiring the write lock to avoid races. Sequential allocation means IDs are dense and start at 0, which benefits GPU memory access patterns.
-
-\textbf{Reverse resolution.} The \texttt{resolve(id: u32) -> String} function recovers the original string from an ID in $O(1)$ via the vector index. This is used at query output time to present human-readable results.
-
-\textbf{Arrow dictionary encoding.} The \texttt{ScalarType::Symbol} variant maps to Arrow's \texttt{Dictionary(UInt32, Utf8)} type. The \texttt{to\_arrow} function builds a \texttt{DictionaryArray} from a slice of symbol IDs: it collects unique IDs, resolves them to strings to form the dictionary, and remaps keys. The inverse \texttt{from\_arrow} function interns all dictionary strings and maps Arrow keys back to global symbol IDs. This encoding enables zero-copy export to frameworks that consume Arrow data (cuDF, Polars, DuckDB) while preserving the compact u32 representation used internally.
-
-\textbf{GPU representation.} On the GPU, symbol columns are stored as contiguous \texttt{u32} arrays---the same representation as any other 4-byte integer column. Join, sort, filter, and dedup kernels operate on these integer IDs without special-casing. The symbol table itself remains on the host, since string data is variable-length and only needed at ingestion and output boundaries.
+Datalog programs operate on strings, but GPU kernels operate on fixed-width numeric columns. xlog bridges this with a global symbol table that interns each unique string to a dense, sequential \texttt{u32} identifier and resolves it back in $O(1)$ at output time. Dense zero-based IDs give GPU-friendly access patterns, and symbol columns then \emph{are} ordinary \texttt{u32} columns---join, sort, filter, and dedup kernels operate on them with no special-casing. The table itself stays host-side, since variable-length string data is needed only at ingestion and output boundaries. The \texttt{symbol} type maps to Arrow's \texttt{Dictionary(UInt32, Utf8)}, so export to Arrow consumers (cuDF, Polars, DuckDB) is zero-copy while preserving the compact internal representation.

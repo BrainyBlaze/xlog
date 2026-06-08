@@ -32,15 +32,18 @@
 \definecolor{codestring}{RGB}{163,21,21}
 
 \lstdefinelanguage{xlog}{
-  morekeywords={nn,true,false,not,and,or,if,then,else,query,fact,rule},
+  morekeywords={pred,func,domain,use,private,nn,true,false,not,and,or,if,then,else,is,query,fact,rule,count,sum,min,max,logsumexp,abs,pow,cast},
   sensitive=true,
-  morecomment=[l]{\%},
+  morecomment=[l]{//},
+  morecomment=[s]{/*}{*/},
   morestring=[b]",
   literate={:-}{{{\color{codekey}:-}}}2
            {::}{{{\color{codekey}::}}}2
+           {?-}{{{\color{codekey}?-}}}2
+           {->}{{{\color{codekey}->}}}2
 }
-\lstdefinestyle{xlogstyle}{
-  language=xlog,
+% Shared base style; xlog/python only override `language=`.
+\lstdefinestyle{codebase}{
   backgroundcolor=\color{codebg},
   basicstyle=\ttfamily\small,
   keywordstyle=\color{codekey}\bfseries,
@@ -49,30 +52,28 @@
   frame=single,
   framerule=0.3pt,
   breaklines=true,
+  breakatwhitespace=false,
+  prebreak=\mbox{\textcolor{codecomment}{$\hookleftarrow$}},
+  postbreak=\mbox{\textcolor{codecomment}{$\hookrightarrow$}\space},
   columns=fullflexible,
   showstringspaces=false,
   numbers=none,
+  captionpos=b,
+  abovecaptionskip=0.5em,
+  belowcaptionskip=0.5em,
 }
-\lstdefinestyle{pythonstyle}{
-  language=Python,
-  backgroundcolor=\color{codebg},
-  basicstyle=\ttfamily\small,
-  keywordstyle=\color{codekey}\bfseries,
-  commentstyle=\color{codecomment}\itshape,
-  stringstyle=\color{codestring},
-  frame=single,
-  framerule=0.3pt,
-  breaklines=true,
-  columns=fullflexible,
-  showstringspaces=false,
-  numbers=none,
-}
+\lstdefinestyle{xlogstyle}{style=codebase,language=xlog}
+\lstdefinestyle{pythonstyle}{style=codebase,language=Python}
 \lstset{style=xlogstyle}
+
+% Listings are referenced as "Listing N" via cleveref.
+\crefname{lstlisting}{Listing}{Listings}
+\Crefname{lstlisting}{Listing}{Listings}
 
 % --- Title block ---
 \title{xlog: A GPU-Native Logic Programming Language for Unified Symbolic Reasoning}
-\author{The xlog Project\\\small v0.5.0 Technical Whitepaper}
-\date{March 2026}
+\author{The xlog Project\\\small v0.9.2 Technical Whitepaper}
+\date{June 2026}
 
 \begin{document}
 \maketitle
@@ -88,10 +89,14 @@
 \input{sections/04_gpu_datalog.tex}
 \input{sections/05_probabilistic.tex}
 \input{sections/06_neural_symbolic.tex}
+\input{sections/065_epistemic.tex}
 \input{sections/07_interop.tex}
 \input{sections/08_evaluation.tex}
 \input{sections/09_related_work.tex}
 \input{sections/10_limitations.tex}
+
+\appendix
+\input{sections/A_performance_contract.tex}
 
 \printbibliography
 

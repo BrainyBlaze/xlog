@@ -2,9 +2,7 @@
 pred edge(u32, u32).
 pred reach(u32, u32).
 
-edge(1, 2).
-edge(2, 3).
-edge(3, 4).
+edge(1, 2). edge(2, 3). edge(3, 4).
 
 reach(X, Y) :- edge(X, Y).
 reach(X, Z) :- reach(X, Y), edge(Y, Z).

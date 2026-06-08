@@ -1,10 +1,10 @@
 # RFC: Tensorized Differentiable ILP in XLOG
 
-> **Implementation status (v0.5.0):** The design in this RFC is **shipped**. See `docs/architecture/dilp-training.md` for the current architecture and `docs/architecture/dilp-showcase-report.md` for validation. This document is retained as the design reference that motivates and records the resolved decisions (RD-1 through RD-27).
+> **Implementation status:** The design in this RFC is **shipped** (since v0.5.0; current as of v0.8.6). See `docs/architecture/dilp-training.md` for the current architecture and `docs/architecture/dilp-showcase-report.md` for validation. This document is retained as the design reference that motivates and records the resolved decisions (RD-1 through RD-27).
 >
 > **Entry points:** Python trainer at `crates/pyxlog/python/pyxlog/ilp/trainer.py` (`train_only`, `train_and_promote`). Rust registry at `crates/xlog-runtime/src/ilp_registry.rs`. GPU kernels at `kernels/ilp.cu`, `kernels/ilp_credit.cu`.
 
-**Status:** Design reference (v5, implemented in v0.5.0)
+**Status:** Design reference (v5, implemented in v0.5.0; current as of v0.8.6)
 **Date:** 2026-03-05
 **Supersedes:** earlier RFC drafts v1–v4.4
 

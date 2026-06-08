@@ -1,4 +1,4 @@
-// Import predicates and rules from the `graph_lib` module.
+// entry: graph_main.xlog
 use graph_lib.
 
 ?- reach(1, N).

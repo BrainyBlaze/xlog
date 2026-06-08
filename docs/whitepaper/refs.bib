@@ -1,26 +1,30 @@
-% refs.bib --- xlog v0.5.0 whitepaper bibliography
+% refs.bib --- xlog v0.6.1 whitepaper bibliography
 
 @inproceedings{gpulog,
-  author    = {Martinez-Angeles, Carlos Alberto and Dutra, In{\^e}s and Costa, V{\'i}tor Santos and Bueno, Francisco},
-  title     = {A {D}atalog Engine for {GPU}s},
-  booktitle = {Proceedings of the 25th Symposium on the Implementation and Application of Functional and Logic Programming Languages (WFLP)},
-  year      = {2013},
+  author    = {Sun, Yihao and Shovon, Ahmedur Rahman and Gilray, Thomas and Kumar, Sidharth and Micinski, Kristopher},
+  title     = {Optimizing {D}atalog for the {GPU}},
+  booktitle = {Proceedings of the 30th ACM International Conference on Architectural Support for Programming Languages and Operating Systems (ASPLOS)},
+  year      = {2025},
+  doi       = {10.1145/3669940.3707274},
 }
 
-@article{vflog,
-  author  = {Wu, Yijian and Hua, Wentao and He, Bingsheng},
-  title   = {{VFLog}: A High-Performance Vertical-Fused {GPU} {D}atalog Engine},
-  journal = {Proceedings of the ACM on Management of Data},
-  volume  = {2},
-  number  = {1},
-  year    = {2024},
+@inproceedings{vflog,
+  author    = {Sun, Yihao and Kumar, Sidharth and Gilray, Thomas and Micinski, Kristopher},
+  title     = {Column-Oriented {D}atalog on the {GPU}},
+  booktitle = {Proceedings of the AAAI Conference on Artificial Intelligence},
+  volume    = {39},
+  number    = {14},
+  pages     = {15177--15185},
+  year      = {2025},
+  doi       = {10.1609/aaai.v39i14.33665},
 }
 
-@misc{mnmgdatalog,
-  author = {Gu, Yihao and others},
-  title  = {Scalable Multi-Node Multi-{GPU} {D}atalog via Radix-Hash Partitioning},
-  note   = {arXiv preprint},
-  year   = {2023},
+@inproceedings{mnmgdatalog,
+  author    = {Shovon, Ahmedur Rahman and Sun, Yihao and Gilray, Thomas and Micinski, Kristopher and Kumar, Sidharth},
+  title     = {Multi-Node Multi-{GPU} {D}atalog},
+  booktitle = {Proceedings of the 39th ACM International Conference on Supercomputing (ICS)},
+  year      = {2025},
+  doi       = {10.1145/3721145.3730431},
 }
 
 @article{problog2,
@@ -47,19 +51,21 @@
   year      = {2020},
 }
 
-@article{parafrost,
-  author  = {Osama, Muhammad and Wijs, Anton and Biere, Armin},
-  title   = {{ParaFROST}: A Parallel {SAT} Solver with {GPU} Clause Simplification},
-  journal = {Journal of Automated Reasoning},
-  volume  = {66},
-  number  = {3},
-  pages   = {407--440},
-  year    = {2022},
+@inproceedings{parafrost,
+  author    = {Osama, Muhammad and Wijs, Anton and Biere, Armin},
+  title     = {{SAT} Solving with {GPU} Accelerated Inprocessing},
+  booktitle = {Tools and Algorithms for the Construction and Analysis of Systems (TACAS)},
+  series    = {Lecture Notes in Computer Science},
+  volume    = {12651},
+  pages     = {133--151},
+  publisher = {Springer},
+  year      = {2021},
+  doi       = {10.1007/978-3-030-72016-2_8},
 }
 
 @article{dilp,
   author  = {Evans, Richard and Grefenstette, Edward},
-  title   = {Learning Explanatory Rules through Neural Satisfiability},
+  title   = {Learning Explanatory Rules from Noisy Data},
   journal = {Journal of Artificial Intelligence Research},
   volume  = {61},
   pages   = {1--64},
@@ -92,13 +98,6 @@
   year      = {2004},
 }
 
-@misc{pysdd,
-  author       = {Meert, Wannes and Vlasselaer, Jonas and {Van den Broeck}, Guy},
-  title        = {{PySDD}: Python package for {S}entential {D}ecision {D}iagrams},
-  howpublished = {\url{https://github.com/wannesm/PySDD}},
-  note         = {Accessed 2026},
-}
-
 @article{tseitin,
   author  = {Tseitin, Grigori S.},
   title   = {On the Complexity of Derivation in Propositional Calculus},
@@ -114,17 +113,10 @@
 }
 
 @misc{fastfouriersat,
-  author = {Kyrillidis, Anastasios and others},
-  title  = {{FastFourierSAT}: {GPU}-Accelerated {SAT} via Fourier Coefficient Optimization},
-  note   = {Preprint},
+  author = {Cen, Yunuo and Zhang, Zhiwei and Fong, Xuanyao},
+  title  = {Massively Parallel Continuous Local Search for Hybrid {SAT} Solving on {GPU}s},
+  note   = {arXiv:2308.15020},
   year   = {2023},
-}
-
-@inproceedings{hisa,
-  author    = {Aref, Molham and others},
-  title     = {Design and Implementation of the {LogicBlox} System},
-  booktitle = {Proceedings of the ACM SIGMOD International Conference on Management of Data},
-  year      = {2015},
 }
 
 @misc{pyo3,
@@ -177,4 +169,47 @@
   number  = {1},
   pages   = {27--82},
   year    = {2019},
+}
+
+@article{ngo2018wcoj,
+  author  = {Ngo, Hung Q. and Porat, Ely and R{\'e}, Christopher and Rudra, Atri},
+  title   = {Worst-case Optimal Join Algorithms},
+  journal = {Journal of the ACM},
+  volume  = {65},
+  number  = {3},
+  pages   = {16:1--16:40},
+  year    = {2018},
+}
+
+@inproceedings{veldhuizen2014leapfrog,
+  author    = {Veldhuizen, Todd L.},
+  title     = {Leapfrog Triejoin: A Simple, Worst-Case Optimal Join Algorithm},
+  booktitle = {International Conference on Database Theory (ICDT)},
+  pages     = {96--106},
+  year      = {2014},
+}
+
+@article{wang2023freejoin,
+  author  = {Wang, Yisu Remy and Willsey, Max and Suciu, Dan},
+  title   = {Free Join: Unifying Worst-Case Optimal and Traditional Joins},
+  journal = {Proceedings of the ACM on Management of Data (SIGMOD)},
+  volume  = {1},
+  number  = {2},
+  pages   = {150:1--150:23},
+  year    = {2023},
+}
+
+@phdthesis{andersen1994,
+  author = {Andersen, Lars Ole},
+  title  = {Program Analysis and Specialization for the {C} Programming Language},
+  school = {University of Copenhagen},
+  year   = {1994},
+}
+
+@inproceedings{ddisasm,
+  author    = {Flores-Montoya, Antonio and Schulte, Eric},
+  title     = {Datalog Disassembly},
+  booktitle = {USENIX Security Symposium},
+  pages     = {1075--1092},
+  year      = {2020},
 }

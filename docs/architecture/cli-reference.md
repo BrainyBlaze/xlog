@@ -10,15 +10,17 @@ exposes two execution subcommands:
 - `xlog run` — Deterministic program execution
 - `xlog prob` — Probabilistic program execution
 
-The v0.8.5 language contract adds developer-experience commands:
+The v0.8.5 language contract added developer-experience commands, which ship as
+of v0.8.5:
 
 - `xlog explain` — Inspect parse, strata, RIR, optimizer, magic-set, WCOJ,
   probabilistic plans, rule provenance, and proof traces
 - `xlog repl` — Interactive multiline source/query session
 - `xlog watch` — Debounced file-change rerun with typed diagnostics
 
-Published artifacts follow tagged releases and may lag the current workspace
-surface.
+Unsupported subcommands fail explicitly rather than silently falling back to
+another mode. Published artifacts follow tagged releases and may lag the current
+workspace surface.
 
 ## Installation
 

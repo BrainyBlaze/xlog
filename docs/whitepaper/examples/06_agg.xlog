@@ -3,13 +3,8 @@ pred degree(u32, u32).
 
 edge(1, 2). edge(1, 3). edge(1, 4). edge(2, 3).
 
-// Stratified aggregation: count outgoing edges per source node.
-// Aggregate appears head-positional (grammar: head_term_list).
 degree(X, count(Y)) :- edge(X, Y).
 
-// Integrity constraint: every node that appears as an edge source must
-// have a non-empty degree record (satisfied by construction above, but
-// demonstrates the syntax).
 :- edge(X, _), not degree(X, _).
 
 ?- degree(X, N).
