@@ -360,10 +360,16 @@ fn load_relations(path: &PathBuf) -> Result<BTreeMap<String, (usize, Vec<Vec<u32
                 )));
             }
             let mut row = Vec::with_capacity(arity);
-            for cell in row_array {
-                row.push(cell.as_u64().ok_or_else(|| {
+            for (column_index, cell) in row_array.iter().enumerate() {
+                let value = cell.as_u64().ok_or_else(|| {
                     XlogError::Parse(format!("relation {name} cells must be u32 integers"))
-                })? as u32);
+                })?;
+                let value = u32::try_from(value).map_err(|_| {
+                    XlogError::Parse(format!(
+                        "relation {name} cell {column_index} value {value} exceeds u32::MAX"
+                    ))
+                })?;
+                row.push(value);
             }
             rows.push(row);
         }
@@ -742,10 +748,11 @@ fn download_rows(
         return Ok(Vec::new());
     }
     let mut columns = Vec::with_capacity(arity);
+    provider.device().synchronize()?;
     for column_index in 0..arity {
         let mut bytes = vec![0u8; rows * std::mem::size_of::<u32>()];
         unsafe {
-            sys::cuMemcpyDtoH_v2(
+            let copy = sys::cuMemcpyDtoH_v2(
                 bytes.as_mut_ptr() as *mut _,
                 *buffer
                     .column(column_index)
@@ -755,6 +762,12 @@ fn download_rows(
                     .device_ptr(),
                 bytes.len(),
             );
+            if copy != sys::cudaError_enum::CUDA_SUCCESS {
+                return Err(XlogError::Execution(format!(
+                    "cuMemcpyDtoH_v2 failed for output column {column_index}: {:?}",
+                    copy
+                )));
+            }
         }
         columns.push(
             bytes
@@ -1906,6 +1919,31 @@ mod tests {
     #[test]
     fn rejects_zero_gpu_budget() {
         assert!(gpu_budget_bytes(0).is_err());
+    }
+
+    #[test]
+    fn load_relations_rejects_cells_outside_u32_range() {
+        let mut path = std::env::temp_dir();
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock before unix epoch")
+            .as_nanos();
+        path.push(format!(
+            "xlog-epistemic-evidence-u32-range-{}-{nonce}.json",
+            std::process::id()
+        ));
+        fs::write(
+            &path,
+            r#"{"relations":{"too_wide":{"arity":1,"rows":[[4294967296]]}}}"#,
+        )
+        .expect("write relation fixture");
+
+        let err = load_relations(&path).expect_err("out-of-range cell must fail");
+        let _ = fs::remove_file(&path);
+        assert!(
+            err.to_string().contains("exceeds u32::MAX"),
+            "unexpected error: {err}"
+        );
     }
 }
 

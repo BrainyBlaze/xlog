@@ -2220,9 +2220,9 @@ fn positive_relational_atoms_are_supported_wcoj_shape(atoms: &[xlog_ir::EirAtom]
     match edges.len() {
         3 => degrees.len() == 3 && degrees.values().all(|degree| *degree == 2),
         4 => degrees.len() == 4 && degrees.values().all(|degree| *degree == 2),
-        10 | 15 | 21 => {
+        10 | 15 | 21 | 28 => {
             let variable_count = degrees.len();
-            (5..=7).contains(&variable_count)
+            (5..=8).contains(&variable_count)
                 && edges.len() == variable_count * (variable_count - 1) / 2
                 && degrees.values().all(|degree| *degree == variable_count - 1)
         }
@@ -3735,6 +3735,57 @@ mod tests {
 
         let plan =
             plan_epistemic_gpu_execution(&program).expect("plan binary triangle epistemic program");
+
+        assert_eq!(plan.reductions.len(), 1);
+        assert_eq!(
+            plan.reductions[0].wcoj_status,
+            EpistemicWcojReductionStatus::RequiresPlannerEligibility
+        );
+    }
+
+    #[test]
+    fn binary_eight_clique_epistemic_reduction_requires_wcoj() {
+        let program = parse_program(
+            r#"
+            pred edge(u32, u32).
+            pred clique8(u32, u32, u32, u32, u32, u32, u32, u32).
+
+            clique8(A, B, C, D, E, F, G, H) :-
+                edge(A, B),
+                edge(A, C),
+                edge(A, D),
+                edge(A, E),
+                edge(A, F),
+                edge(A, G),
+                edge(A, H),
+                edge(B, C),
+                edge(B, D),
+                edge(B, E),
+                edge(B, F),
+                edge(B, G),
+                edge(B, H),
+                edge(C, D),
+                edge(C, E),
+                edge(C, F),
+                edge(C, G),
+                edge(C, H),
+                edge(D, E),
+                edge(D, F),
+                edge(D, G),
+                edge(D, H),
+                edge(E, F),
+                edge(E, G),
+                edge(E, H),
+                edge(F, G),
+                edge(F, H),
+                edge(G, H),
+                know edge(A, B).
+            "#,
+        )
+        .expect("parse binary eight-clique epistemic program");
+
+        let plan = plan_epistemic_gpu_execution(&program)
+            .expect("plan binary eight-clique epistemic program");
 
         assert_eq!(plan.reductions.len(), 1);
         assert_eq!(
