@@ -323,6 +323,19 @@ fn build_explain_report(
 }
 
 fn explain_epistemic(program: &Program) -> serde_json::Value {
+    if !program_has_epistemic_literals(program) {
+        let not_applicable = serde_json::json!({
+            "status": "not_applicable",
+            "reason": "program has no epistemic literals",
+            "epistemic_literal_count": 0,
+        });
+        return serde_json::json!({
+            "eir": not_applicable.clone(),
+            "gpu_plan": not_applicable.clone(),
+            "executable_plan": not_applicable,
+        });
+    }
+
     let eir = match xlog_logic::build_eir(program) {
         Ok(eir) => {
             let literals = eir
@@ -458,6 +471,19 @@ fn explain_epistemic(program: &Program) -> serde_json::Value {
         "eir": eir,
         "gpu_plan": gpu_plan,
         "executable_plan": executable_plan,
+    })
+}
+
+fn program_has_epistemic_literals(program: &Program) -> bool {
+    program.rules.iter().any(|rule| {
+        rule.body
+            .iter()
+            .any(|lit| matches!(lit, BodyLiteral::Epistemic(_)))
+    }) || program.constraints.iter().any(|constraint| {
+        constraint
+            .body
+            .iter()
+            .any(|lit| matches!(lit, BodyLiteral::Epistemic(_)))
     })
 }
 

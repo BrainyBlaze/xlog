@@ -67,6 +67,19 @@ query(out_degree(1, 2)).
     assert!(stdout.contains("\"optimizer\""), "{stdout}");
     assert!(stdout.contains("\"wcoj\""), "{stdout}");
     assert!(stdout.contains("\"probability\""), "{stdout}");
+    let payload: serde_json::Value = serde_json::from_str(&stdout).expect("valid explain json");
+    assert_eq!(
+        payload["epistemic"]["eir"]["status"], "not_applicable",
+        "{stdout}"
+    );
+    assert_eq!(
+        payload["epistemic"]["gpu_plan"]["status"], "not_applicable",
+        "{stdout}"
+    );
+    assert_eq!(
+        payload["epistemic"]["executable_plan"]["status"], "not_applicable",
+        "{stdout}"
+    );
 }
 
 #[test]
@@ -205,6 +218,8 @@ gated(X) :- know know support(X).
         String::from_utf8_lossy(&output.stderr)
     );
     let stdout = String::from_utf8(output.stdout).expect("utf8 stdout");
+    let payload: serde_json::Value = serde_json::from_str(&stdout).expect("valid explain json");
+    assert_eq!(payload["ast"]["rules"], 2, "{stdout}");
     assert!(stdout.contains("\"epistemic\""), "{stdout}");
     assert!(stdout.contains("\"eir\""), "{stdout}");
     assert!(stdout.contains("\"gpu_plan\""), "{stdout}");
