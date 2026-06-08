@@ -5,6 +5,7 @@ configure_kernel_search_path()
 
 # Re-export everything from the native Rust module
 import asyncio
+import ctypes
 import hashlib
 from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
@@ -24,6 +25,11 @@ except ModuleNotFoundError as exc:
 __doc__ = _native.__doc__ if _native is not None else "pyxlog pure-Python helpers"
 if _native is not None and hasattr(_native, "__all__"):
     __all__ = _native.__all__
+    CompiledLogicProgram = _native.CompiledLogicProgram
+    LogicRelationSession = _native.LogicRelationSession
+    CompiledProgram = _native.CompiledProgram
+    LogicQueryResult = _native.LogicQueryResult
+    LogicEvalResult = _native.LogicEvalResult
 elif _native is None:
     class _NativeUnavailableIlpProgramFactory:
         @staticmethod
@@ -31,6 +37,68 @@ elif _native is None:
             raise RuntimeError("pyxlog._native is not available")
 
     IlpProgramFactory = _NativeUnavailableIlpProgramFactory
+
+
+_DLPACK_CAPSULE_NAME = b"dltensor"
+_K_DLCUDA = 2
+
+
+class _DLDevice(ctypes.Structure):
+    _fields_ = [("device_type", ctypes.c_int), ("device_id", ctypes.c_int)]
+
+
+class _DLDataType(ctypes.Structure):
+    _fields_ = [
+        ("code", ctypes.c_uint8),
+        ("bits", ctypes.c_uint8),
+        ("lanes", ctypes.c_uint16),
+    ]
+
+
+class _DLTensor(ctypes.Structure):
+    _fields_ = [
+        ("data", ctypes.c_void_p),
+        ("device", _DLDevice),
+        ("ndim", ctypes.c_int),
+        ("dtype", _DLDataType),
+        ("shape", ctypes.POINTER(ctypes.c_int64)),
+        ("strides", ctypes.POINTER(ctypes.c_int64)),
+        ("byte_offset", ctypes.c_uint64),
+    ]
+
+
+class _DLManagedTensor(ctypes.Structure):
+    _fields_ = [
+        ("dl_tensor", _DLTensor),
+        ("manager_ctx", ctypes.c_void_p),
+        ("deleter", ctypes.c_void_p),
+    ]
+
+
+_pycapsule_is_valid = ctypes.pythonapi.PyCapsule_IsValid
+_pycapsule_is_valid.argtypes = [ctypes.py_object, ctypes.c_char_p]
+_pycapsule_is_valid.restype = ctypes.c_int
+_pycapsule_get_pointer = ctypes.pythonapi.PyCapsule_GetPointer
+_pycapsule_get_pointer.argtypes = [ctypes.py_object, ctypes.c_char_p]
+_pycapsule_get_pointer.restype = ctypes.c_void_p
+
+
+def _dlpack_is_cuda_fallback(capsule: Any) -> bool:
+    if _pycapsule_is_valid(capsule, _DLPACK_CAPSULE_NAME) == 0:
+        raise ValueError("Expected a DLPack capsule (dltensor)")
+    ptr = _pycapsule_get_pointer(capsule, _DLPACK_CAPSULE_NAME)
+    if ptr is None:
+        raise RuntimeError("Failed to get DLPack pointer")
+    managed = ctypes.cast(ptr, ctypes.POINTER(_DLManagedTensor)).contents
+    return int(managed.dl_tensor.device.device_type) == _K_DLCUDA
+
+
+if "dlpack_is_cuda" not in globals():
+    dlpack_is_cuda = _dlpack_is_cuda_fallback
+    try:
+        __all__ = list(__all__) + ["dlpack_is_cuda"]
+    except NameError:
+        __all__ = ["dlpack_is_cuda"]
 
 
 class AsyncEvaluation:

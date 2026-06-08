@@ -2,6 +2,7 @@
 name = "xlog-cli"
 version.workspace = true
 edition.workspace = true
+default-run = "xlog"
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
@@ -14,6 +15,10 @@ readme = "../../README.md"
 name = "xlog"
 path = "src/main.rs"
 
+[[bin]]
+name = "xlog-epistemic-evidence"
+path = "src/bin/xlog-epistemic-evidence.rs"
+
 [dependencies]
 clap = { version = "4.5", features = ["derive"] }
 arrow = { version = "53", default-features = false, features = ["ffi", "ipc", "csv", "prettyprint"] }
@@ -25,6 +30,9 @@ xlog-ir.workspace = true
 xlog-logic.workspace = true
 xlog-gpu.workspace = true
 xlog-prob.workspace = true
+xlog-runtime.workspace = true
+xlog-solve.workspace = true
+cudarc.workspace = true
 
 [dev-dependencies]
 assert_cmd = "2.0"

@@ -250,6 +250,14 @@ fn download_triples(buf: &CudaBuffer) -> Vec<(u32, u32, u32)> {
     out
 }
 
+fn sync_stream(fix: &RuntimeFixture, stream: StreamId) {
+    fix.pool
+        .resolve(stream)
+        .expect("resolve stream")
+        .synchronize()
+        .expect("sync stream");
+}
+
 // ---------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------
@@ -268,6 +276,7 @@ fn wcoj_layout_u32_sorts_unsorted_input_lex() {
         .provider
         .wcoj_layout_u32_recorded(&buf, launch_stream)
         .expect("layout construction must succeed");
+    sync_stream(&fix, launch_stream);
     let host = download_pairs(&out);
     assert_eq!(host, cpu_sort_dedup(&input));
 }
@@ -287,6 +296,7 @@ fn wcoj_layout_u32_removes_duplicates() {
         .provider
         .wcoj_layout_u32_recorded(&buf, launch_stream)
         .expect("must succeed");
+    sync_stream(&fix, launch_stream);
     let host = download_pairs(&out);
     assert_eq!(host, vec![(1, 2), (2, 3), (3, 4)]);
 }
@@ -304,6 +314,7 @@ fn wcoj_layout_u32_empty_input_produces_empty_output() {
         .provider
         .wcoj_layout_u32_recorded(&buf, launch_stream)
         .expect("empty input must succeed");
+    sync_stream(&fix, launch_stream);
     assert_eq!(out.num_rows(), 0);
     assert_eq!(out.arity(), 2);
 }
@@ -323,6 +334,7 @@ fn wcoj_layout_u32_already_sorted_deduped_round_trips() {
         .provider
         .wcoj_layout_u32_recorded(&buf, launch_stream)
         .expect("must succeed");
+    sync_stream(&fix, launch_stream);
     let host = download_pairs(&out);
     assert_eq!(host, input);
 }
@@ -348,6 +360,7 @@ fn wcoj_layout_u32_survives_drop_and_reuse() {
             .provider
             .wcoj_layout_u32_recorded(&buf, launch_stream)
             .expect("layout");
+        sync_stream(&fix, launch_stream);
         let host = download_pairs(&out);
         assert_eq!(host, vec![(1, 0), (1, 1), (2, 1)]);
     }
@@ -447,12 +460,14 @@ fn wcoj_layout_then_triangle_u32_matches_cpu_oracle() {
         .provider
         .wcoj_layout_u32_recorded(&buf_xz_raw, stream)
         .expect("layout xz");
+    sync_stream(&fix, stream);
 
     let tri_stream = fix.pool.acquire().expect("triangle stream");
     let result = fix
         .provider
         .wcoj_triangle_u32_recorded(&buf_xy, &buf_yz, &buf_xz, tri_stream)
         .expect("triangle");
+    sync_stream(&fix, tri_stream);
     let host_result = download_triples(&result);
 
     // CPU oracle on deduped input.
@@ -534,6 +549,7 @@ fn wcoj_layout_symbol_round_trips_with_correct_schema() {
         .provider
         .wcoj_layout_u32_recorded(&buf, launch_stream)
         .expect("layout must accept Symbol input");
+    sync_stream(&fix, launch_stream);
     // Schema preservation: output columns must remain Symbol.
     assert_eq!(
         out.schema.column_type(0),
@@ -579,6 +595,7 @@ fn wcoj_triangle_symbol_matches_cpu_reference() {
         .provider
         .wcoj_triangle_u32_recorded(&buf_xy, &buf_yz, &buf_xz, stream)
         .expect("triangle must accept Symbol inputs");
+    sync_stream(&fix, stream);
     // Output schema: each column must carry its input scalar
     // type (Symbol here, since all inputs are Symbol).
     assert_eq!(result.schema.column_type(0), Some(ScalarType::Symbol));

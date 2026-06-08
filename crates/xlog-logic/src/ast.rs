@@ -883,7 +883,9 @@ impl Program {
                     continue;
                 }
             }
-            self.rules.push(rule.clone());
+            if !self.rules.iter().any(|existing| existing == rule) {
+                self.rules.push(rule.clone());
+            }
         }
 
         // Merge domains

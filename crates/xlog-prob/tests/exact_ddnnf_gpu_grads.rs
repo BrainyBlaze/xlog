@@ -1,7 +1,16 @@
 #![cfg(feature = "host-io")]
 
+use std::sync::{Mutex, MutexGuard, OnceLock};
+
 use xlog_cuda::CudaDevice;
 use xlog_prob::exact::ExactDdnnfProgram;
+
+fn gpu_grads_test_lock() -> MutexGuard<'static, ()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
 
 fn has_cuda_device() -> bool {
     // cudarc::driver::CudaDevice::count() may panic in restricted containers. Attempt real init instead.
@@ -28,6 +37,7 @@ fn has_cuda_device() -> bool {
 /// The negative gradient for grad_true confirms that increasing p_rain decreases P(dry).
 #[test]
 fn test_exact_negation_gradient_direction() {
+    let _gpu_guard = gpu_grads_test_lock();
     if !has_cuda_device() {
         eprintln!("Skipping test: no CUDA device available");
         return;
@@ -112,6 +122,7 @@ query(dry()).
 /// This confirms the gradient formula works for non-symmetric probabilities.
 #[test]
 fn test_exact_negation_gradient_asymmetric() {
+    let _gpu_guard = gpu_grads_test_lock();
     if !has_cuda_device() {
         eprintln!("Skipping test: no CUDA device available");
         return;
@@ -165,6 +176,7 @@ query(dry()).
 
 #[test]
 fn test_exact_ddnnf_gpu_with_grads_matches_expected_for_or_evidence() {
+    let _gpu_guard = gpu_grads_test_lock();
     if !has_cuda_device() {
         eprintln!("Skipping test: no CUDA device available");
         return;

@@ -393,6 +393,116 @@ pub(crate) fn dlpack_from_py(obj: &Bound<'_, PyAny>) -> PyResult<DlpackManagedTe
     Ok(unsafe { DlpackManagedTensor::from_raw(ptr as *mut xlog_cuda::DLManagedTensor) })
 }
 
+#[pyfunction]
+fn dlpack_is_cuda(obj: &Bound<'_, PyAny>) -> PyResult<bool> {
+    // SAFETY: capsule validity is checked before reading the DLPack header. This
+    // does not consume the capsule; ownership remains with its destructor.
+    if unsafe {
+        pyo3::ffi::PyCapsule_IsValid(obj.as_ptr(), DLPACK_CAPSULE_NAME.as_ptr() as *const c_char)
+    } == 0
+    {
+        return Err(PyValueError::new_err(
+            "Expected a DLPack capsule (dltensor)",
+        ));
+    }
+
+    // SAFETY: capsule validity was checked immediately before this call.
+    let ptr = unsafe {
+        pyo3::ffi::PyCapsule_GetPointer(obj.as_ptr(), DLPACK_CAPSULE_NAME.as_ptr() as *const c_char)
+    };
+    if ptr.is_null() {
+        return Err(PyRuntimeError::new_err("Failed to get DLPack pointer"));
+    }
+
+    // SAFETY: ptr is non-null and points to a DLManagedTensor owned by the capsule.
+    let managed = unsafe { &*(ptr as *const xlog_cuda::DLManagedTensor) };
+    Ok(managed.dl_tensor.device.device_type == xlog_cuda::dlpack::K_DLCUDA)
+}
+
+#[pyclass(name = "DifferentiableProofTraceMap")]
+pub struct PyDifferentiableProofTraceMap {
+    inner: xlog_logic::DifferentiableProofTraceMap,
+}
+
+fn pack_differentiable_proof_trace(
+    py: Python<'_>,
+    trace: &xlog_logic::ProofTrace,
+) -> PyResult<PyObject> {
+    let dict = PyDict::new(py);
+    dict.set_item("proof_id", trace.proof_id)?;
+    dict.set_item("answer_key", &trace.answer_key)?;
+    dict.set_item("clause_id", &trace.clause_id)?;
+    dict.set_item("support_atoms", &trace.support_atoms)?;
+    dict.set_item("weight", trace.weight)?;
+    dict.set_item("gradient", trace.gradient)?;
+    Ok(dict.into())
+}
+
+#[pymethods]
+impl PyDifferentiableProofTraceMap {
+    #[new]
+    fn new() -> Self {
+        Self {
+            inner: xlog_logic::DifferentiableProofTraceMap::new(),
+        }
+    }
+
+    fn insert(
+        &mut self,
+        answer_key: String,
+        clause_id: String,
+        support_atoms: Vec<String>,
+        initial_weight: f64,
+    ) -> PyResult<u64> {
+        if !initial_weight.is_finite() {
+            return Err(PyValueError::new_err(
+                "initial_weight must be a finite float",
+            ));
+        }
+        Ok(self.inner.insert(xlog_logic::ProofTraceSpec {
+            answer_key,
+            clause_id,
+            support_atoms,
+            initial_weight,
+        }))
+    }
+
+    fn trace(&self, py: Python<'_>, proof_id: u64) -> PyResult<Option<PyObject>> {
+        self.inner
+            .trace(proof_id)
+            .map(|trace| pack_differentiable_proof_trace(py, trace))
+            .transpose()
+    }
+
+    fn traces(&self, py: Python<'_>) -> PyResult<PyObject> {
+        let list = PyList::empty(py);
+        for trace in self.inner.traces() {
+            list.append(pack_differentiable_proof_trace(py, trace)?)?;
+        }
+        Ok(list.into())
+    }
+
+    fn accumulate_binary_logistic_gradients(
+        &mut self,
+        targets: Vec<(String, f64)>,
+    ) -> PyResult<f64> {
+        if targets.iter().any(|(_, target)| !target.is_finite()) {
+            return Err(PyValueError::new_err("targets must be finite floats"));
+        }
+        Ok(self.inner.accumulate_binary_logistic_gradients(&targets))
+    }
+
+    fn apply_gradients(&mut self, learning_rate: f64) -> PyResult<()> {
+        if !learning_rate.is_finite() || learning_rate < 0.0 {
+            return Err(PyValueError::new_err(
+                "learning_rate must be a finite non-negative float",
+            ));
+        }
+        self.inner.apply_gradients(learning_rate);
+        Ok(())
+    }
+}
+
 #[pyclass]
 pub struct Program;
 
@@ -666,6 +776,7 @@ fn pyxlog(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<McDeviceEvalResult>()?;
     m.add_class::<EvalResult>()?;
     // Training infrastructure
+    m.add_class::<PyDifferentiableProofTraceMap>()?;
     m.add_class::<EpochStats>()?;
     m.add_class::<TrainingHistory>()?;
     // ILP bindings
@@ -675,6 +786,7 @@ fn pyxlog(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(training::train_model, m)?)?;
     m.add_function(wrap_pyfunction!(training::train_model_tensor, m)?)?;
     m.add_function(wrap_pyfunction!(dlpack::dlpack_roundtrip, m)?)?;
+    m.add_function(wrap_pyfunction!(dlpack_is_cuda, m)?)?;
     #[cfg(feature = "arrow-device-import")]
     m.add_function(wrap_pyfunction!(dlpack::export_arrow_device, m)?)?;
     #[cfg(feature = "arrow-device-import")]

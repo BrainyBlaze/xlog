@@ -492,6 +492,7 @@ mod tests {
 
     #[test]
     fn gpu_d4_frontier_prepare_and_expand_unit_clause_prunes_branching() {
+        let _gpu_guard = crate::test_gpu_lock::lock();
         let Some(provider) = try_provider() else {
             return;
         };
@@ -690,6 +691,7 @@ mod tests {
 
     #[test]
     fn gpu_d4_frontier_prepare_and_expand_branches_on_first_clause_min_var() {
+        let _gpu_guard = crate::test_gpu_lock::lock();
         let Some(provider) = try_provider() else {
             return;
         };
@@ -897,6 +899,7 @@ mod tests {
 
     #[test]
     fn gpu_d4_build_frontier_dense_depth2_sets_expected_assignments() {
+        let _gpu_guard = crate::test_gpu_lock::lock();
         let Some(provider) = try_provider() else {
             return;
         };
@@ -1204,6 +1207,7 @@ mod tests {
 
     #[test]
     fn gpu_d4_build_frontier_bitset_depth2_sets_expected_assignments() {
+        let _gpu_guard = crate::test_gpu_lock::lock();
         let Some(provider) = try_provider() else {
             return;
         };
