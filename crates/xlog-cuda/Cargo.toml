@@ -30,7 +30,12 @@ bytemuck = "1.14"
 # v0.6.2 plan→provider cert: tests that the pure-Rust hypergraph
 # planner and the GPU WCOJ provider agree on the same fixture.
 # Dev-only — no runtime coupling between xlog-cuda and xlog-logic.
-xlog-logic.workspace = true
+# Path-only (no version): xlog-cuda publishes before xlog-logic in the
+# crates.io dependency order, so a versioned dev-dep would make
+# `cargo publish` for xlog-cuda demand an xlog-logic that isn't on the
+# registry yet. cargo strips version-less dev-deps from the packaged
+# manifest, breaking the publish-order cycle while keeping in-workspace tests.
+xlog-logic = { path = "../xlog-logic" }
 
 [features]
 default = []
