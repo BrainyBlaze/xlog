@@ -112,13 +112,20 @@ print(candidates[0][1])
 PY
 }
 
-build_pyxlog_release() {
-  cargo build -p pyxlog --release --locked --features host-io
+build_kernels_release() {
+  # We only need the CUDA kernel artifacts that xlog-cuda's build.rs emits
+  # into OUT_DIR (*.portable.ptx). Build xlog-cuda directly instead of pyxlog:
+  # building pyxlog with `--features host-io` (no extension-module) makes pyo3
+  # link libpython of the container's default interpreter (python3.10), which
+  # breaks every wheel-matrix leg whose interpreter is not 3.10
+  # ("rust-lld: error: unable to find library -lpython3.10"). xlog-cuda has no
+  # pyo3 dependency, so it produces the same kernels with no libpython linkage.
+  cargo build -p xlog-cuda --release --locked
 }
 
 cd "$repo_root"
 
-build_pyxlog_release
+build_kernels_release
 target_dir="$(resolve_target_dir)"
 kernel_out_dir="$(resolve_kernel_out_dir_from_dep_info "$target_dir" || true)"
 if [[ -z "$kernel_out_dir" ]]; then

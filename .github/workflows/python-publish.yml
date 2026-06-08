@@ -53,9 +53,13 @@ jobs:
           set -euo pipefail
           python_pkg="python${{ matrix.python-version }}"
           pip_bootstrap_url="https://bootstrap.pypa.io/get-pip.py"
-          if [[ "${{ matrix.python-version }}" == "3.8" ]]; then
-            pip_bootstrap_url="https://bootstrap.pypa.io/pip/3.8/get-pip.py"
-          fi
+          # The default get-pip.py now requires Python >= 3.10. Older
+          # interpreters need their version-pinned bootstrap script.
+          case "${{ matrix.python-version }}" in
+            3.8|3.9)
+              pip_bootstrap_url="https://bootstrap.pypa.io/pip/${{ matrix.python-version }}/get-pip.py"
+              ;;
+          esac
           add-apt-repository ppa:deadsnakes/ppa -y
           apt-get update
           packages=("$python_pkg" "${python_pkg}-dev" "${python_pkg}-venv")
