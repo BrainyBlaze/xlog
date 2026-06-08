@@ -21,6 +21,7 @@ serde_json = "1"
 thiserror.workspace = true
 xlog-core.workspace = true
 xlog-cuda.workspace = true
+xlog-ir.workspace = true
 xlog-logic.workspace = true
 xlog-gpu.workspace = true
 xlog-prob.workspace = true

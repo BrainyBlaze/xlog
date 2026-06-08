@@ -67,6 +67,19 @@ query(out_degree(1, 2)).
     assert!(stdout.contains("\"optimizer\""), "{stdout}");
     assert!(stdout.contains("\"wcoj\""), "{stdout}");
     assert!(stdout.contains("\"probability\""), "{stdout}");
+    let payload: serde_json::Value = serde_json::from_str(&stdout).expect("valid explain json");
+    assert_eq!(
+        payload["epistemic"]["eir"]["status"], "not_applicable",
+        "{stdout}"
+    );
+    assert_eq!(
+        payload["epistemic"]["gpu_plan"]["status"], "not_applicable",
+        "{stdout}"
+    );
+    assert_eq!(
+        payload["epistemic"]["executable_plan"]["status"], "not_applicable",
+        "{stdout}"
+    );
 }
 
 #[test]
@@ -158,4 +171,67 @@ contradiction(X) :- holds(X), not_holds(X).
     assert!(stdout.contains("\"source_facts\""), "{stdout}");
     assert!(stdout.contains("holds(a)"), "{stdout}");
     assert!(stdout.contains("not_holds(a)"), "{stdout}");
+}
+
+#[test]
+fn test_xlog_explain_json_resolves_module_path_imports_and_reports_epistemic_plan() {
+    let root =
+        std::env::temp_dir().join(format!("xlog_explain_module_path_{}", std::process::id()));
+    let modules = root.join("modules");
+    std::fs::create_dir_all(&modules).expect("create module dir");
+    let module = modules.join("support.xlog");
+    std::fs::write(
+        &module,
+        r#"
+pred support(u32).
+support(1).
+"#,
+    )
+    .expect("write support module");
+    let program = root.join("main.xlog");
+    std::fs::write(
+        &program,
+        r#"
+#pragma epistemic_mode = faeel
+use support.
+pred gated(u32).
+gated(X) :- know know support(X).
+?- gated(X).
+"#,
+    )
+    .expect("write main program");
+
+    let output = cargo_bin_cmd!("xlog")
+        .args([
+            "explain",
+            "--format",
+            "json",
+            "--module-path",
+            modules.to_str().expect("valid module path"),
+            program.to_str().expect("valid program path"),
+        ])
+        .output()
+        .expect("run xlog explain json with module path");
+    assert!(
+        output.status.success(),
+        "xlog explain failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).expect("utf8 stdout");
+    let payload: serde_json::Value = serde_json::from_str(&stdout).expect("valid explain json");
+    assert_eq!(payload["ast"]["rules"], 2, "{stdout}");
+    assert!(stdout.contains("\"epistemic\""), "{stdout}");
+    assert!(stdout.contains("\"eir\""), "{stdout}");
+    assert!(stdout.contains("\"gpu_plan\""), "{stdout}");
+    assert!(stdout.contains("\"executable_plan\""), "{stdout}");
+    assert!(
+        stdout.contains("\"status\":\"ok\"") || stdout.contains("\"status\": \"ok\""),
+        "{stdout}"
+    );
+    assert!(stdout.contains("\"epistemic_literal_count\""), "{stdout}");
+    assert!(
+        stdout.contains("\"predicate\":\"support\"")
+            || stdout.contains("\"predicate\": \"support\""),
+        "{stdout}"
+    );
 }
