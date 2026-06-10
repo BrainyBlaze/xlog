@@ -15,15 +15,15 @@
       "severity": "blocker",
       "status": "resolved",
       "expected_behavior": "XLOG should let a project declare neural predicates, learned clauses, symbolic rule weights, and proof-level training objectives in one executable neuro-symbolic program.",
-      "actual_behavior": "Resolved in v0.8.9 by pyxlog.ilp.neurosymbolic.train_neurosymbolic_program, which accepts one source containing nn/4, trainable_rule, and train objectives, trains neural parameters plus symbolic rule weights, and emits a learned rule inventory.",
+      "actual_behavior": "The v0.8.9 closure was a scalar-bias surrogate (regex parsing, no engine evaluation) and was re-resolved post-v0.9.2: train_neurosymbolic_program now desugars trainable_rule into guard neural predicates, compiles the whole source through the native xlog parser (pyxlog.Program.compile), and trains via CompiledProgram.forward_backward so the rule body is evaluated by the compiled GPU circuit and gradients flow through actual inference into both networks and rule weights. Credit assignment is exported through DifferentiableProofTraceMap.",
       "minimal_reproducer_command": "python examples/BFO/universal_case_reasoner/repro/repro_001_nn4_scoring_not_dilp.py",
       "reproducer_path": "repro/repro_001_nn4_scoring_not_dilp.py",
       "evidence_artifact_path": "programs/production_ranker.xlog",
       "resolution_artifact_path": "crates/pyxlog/python/pyxlog/ilp/neurosymbolic.py",
-      "proposed_fix": "Implemented a first-class trainable neuro-symbolic pyxlog rule form that binds nn/4 outputs to learned symbolic clause weights and emits learned rule metadata.",
+      "proposed_fix": "Route the symbolic part through the real engine: native parse of the whole program, rule weights as guard-predicate probabilities inside the compiled circuit, joint gradients from circuit evaluation, behavioral (mutation + exact-semantics) regression assertions.",
       "suggested_regression_test": {
         "repo_location": "python/tests/test_nn4_dilp_training_surface.py",
-        "assertion": "A minimal nn/4 program with a learnable clause trains both neural predicate parameters and symbolic rule weights, then emits a learned rule inventory."
+        "assertion": "Engine-reported query probabilities equal exact circuit conjunction semantics with frozen parameters; mutating only the trainable rule body changes the loss; invalid xlog is rejected by the real parser; proof-level credit assignment flows through DifferentiableProofTraceMap."
       }
     },
     {

@@ -13,7 +13,7 @@ responsible only for domain semantics, evidence files, and scientific thresholds
 
 | Finding | Upstream owner | Runtime surface | Regression |
 | --- | --- | --- | --- |
-| `UCR-XLOG-001` | `pyxlog.ilp` | `train_neurosymbolic_program(...)` trains `nn/4` outputs and symbolic rule weights from one source | `python/tests/test_nn4_dilp_training_surface.py` |
+| `UCR-XLOG-001` | `pyxlog.ilp` | `train_neurosymbolic_program(...)` trains `nn/4` outputs and symbolic rule weights from one source through the real engine (native parse + GPU circuit evaluation via `forward_backward`) | `python/tests/test_nn4_dilp_training_surface.py` |
 | `UCR-XLOG-002` | `xlog-logic` | `DifferentiableProofTraceMap` exports stable proof IDs, support atoms, clause weights, and gradients | `crates/xlog-logic/tests/differentiable_proof_trace.rs` |
 | `UCR-XLOG-003` | `pyxlog.ilp` | `RuleInventory` and `PromotionResult.rule_inventory` record selected/rejected clauses, folds, held-out domains, and kernel checksums | `python/tests/test_ilp_rule_inventory.py` |
 | `UCR-XLOG-004` | `pyxlog` | `CudaExecutionAudit` fails closed on tensor host materialization, scalar extraction, score-row downloads, or recorded transfers | `python/tests/test_nn4_cuda_no_host_transfer_contract.py` |
@@ -43,10 +43,21 @@ them without reimplementing example-local checks.
 ## pyxlog Additions
 
 `pyxlog.ilp.neurosymbolic.train_neurosymbolic_program(...)` accepts one source
-containing `nn(...)`, `trainable_rule(...)`, and `train(...)` declarations. It
-binds registered PyTorch networks to symbolic rule weights, runs the requested
-training objective, and returns neural gradient evidence, symbolic gradients,
-final symbolic weights, and a learned-rule inventory.
+containing `nn(...)`, `trainable_rule(...)`, and `train(...)` declarations.
+`trainable_rule` clauses are desugared into guard neural predicates whose
+probability is a learnable parameter; the whole program is then parsed and
+compiled by the native engine (`pyxlog.Program.compile`), and every training
+step evaluates the supervised rule's compiled circuit on the GPU via
+`CompiledProgram.forward_backward`. Gradients for both PyTorch networks and
+symbolic rule weights come from the same circuit evaluation — there is no
+surrogate scoring path, and the trainable rule's body determines the query
+probability. The result reports neural gradient evidence, symbolic gradients,
+learned rule-weight probabilities, engine-reported query probabilities, a
+weight-thresholded learned-rule inventory (selected/rejected at 0.5), and a
+`DifferentiableProofTraceMap` carrying proof-level credit assignment.
+Supervised rule bodies must consist of `nn/4` predicates and builtins; other
+relations in a supervised body fail closed with a typed error from the neural
+query template path.
 
 `pyxlog.ilp.inventory.build_rule_inventory(...)` builds a stable audit artifact
 from a learned ILP artifact. `train_and_promote(...)` now accepts fold,

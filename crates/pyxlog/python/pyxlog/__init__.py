@@ -30,6 +30,7 @@ if _native is not None and hasattr(_native, "__all__"):
     CompiledProgram = _native.CompiledProgram
     LogicQueryResult = _native.LogicQueryResult
     LogicEvalResult = _native.LogicEvalResult
+    DifferentiableProofTraceMap = _native.DifferentiableProofTraceMap
 elif _native is None:
     class _NativeUnavailableIlpProgramFactory:
         @staticmethod
