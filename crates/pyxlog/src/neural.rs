@@ -1769,13 +1769,39 @@ impl CompiledProgram {
 
         let mut groups: Vec<NeuralGroup> = Vec::with_capacity(rule.body.len());
         for literal in &rule.body {
+            // The query template grounds ONLY nn/4 predicates; any other
+            // relational literal would silently evaluate over an empty
+            // relation and collapse the query probability. Fail closed.
             let body_atom = match literal {
                 BodyLiteral::Positive(atom) => atom,
+                BodyLiteral::Negated(atom) => {
+                    return Err(PyValueError::new_err(format!(
+                        "Query rule for '{}' has negated literal 'not {}(..)'; \
+                         negation is not supported by the neural query template path",
+                        pred_name, atom.predicate
+                    )));
+                }
+                BodyLiteral::Epistemic(_) => {
+                    return Err(PyValueError::new_err(format!(
+                        "Query rule for '{}' has an epistemic literal; \
+                         epistemic operators are not supported by the neural query template path",
+                        pred_name
+                    )));
+                }
+                // Comparisons / is-expressions / univ are grounded by the
+                // circuit compiler itself and remain supported.
                 _ => continue,
             };
 
             if self.neural_registry.get(&body_atom.predicate).is_none() {
-                continue;
+                return Err(PyValueError::new_err(format!(
+                    "Query rule for '{}' references relation '{}/{}' which is not an nn/4 \
+                     neural predicate; the neural query template path grounds only neural \
+                     predicates, so this body literal would evaluate over an empty relation",
+                    pred_name,
+                    body_atom.predicate,
+                    body_atom.terms.len()
+                )));
             }
 
             let info = self.match_neural_decl_for_atom(body_atom)?;
@@ -1860,6 +1886,12 @@ impl CompiledProgram {
         let target_positions: Vec<usize> = (0..arity)
             .filter(|pos| !used_head_positions.contains(pos))
             .collect();
+        if target_positions.is_empty() {
+            // Every head position is consumed by a neural input, so the query
+            // atom is fully ground: supervise the truth of the derived atom
+            // itself (boolean NLL with the caller's `expected` flag).
+            return Ok(QuerySignature::Boolean { groups });
+        }
         if target_positions.len() != 1 {
             return Err(PyValueError::new_err(format!(
                 "Could not determine unique target position for '{}': target positions {:?}",
@@ -1929,6 +1961,16 @@ impl CompiledProgram {
         let mut template_program = xlog_logic::ast::Program::default();
         let mut target_domain = self.generate_target_domain(query_pred, query_arity, signature)?;
 
+        // Canonical placeholder per head position: groups that read the same
+        // head variable must share one placeholder constant so their template
+        // facts unify with the (single) binding of that variable.
+        let mut head_to_group: StdHashMap<usize, usize> = StdHashMap::new();
+        for (idx, group) in signature.groups().iter().enumerate() {
+            if let InputSource::QueryArg(pos) = group.input_source {
+                head_to_group.entry(pos).or_insert(idx);
+            }
+        }
+
         for (group_idx, group) in signature.groups().iter().enumerate() {
             let labels = group.info.labels.as_ref().ok_or_else(|| {
                 PyValueError::new_err(format!(
@@ -1949,7 +1991,13 @@ impl CompiledProgram {
                 let mut terms = Vec::with_capacity(group.info.predicate_arity);
                 for pos in 0..group.info.predicate_arity {
                     if group.info.input_positions.contains(&pos) {
-                        terms.push(Term::Integer(group_idx as i64));
+                        let placeholder = match group.input_source {
+                            InputSource::QueryArg(head_pos) => {
+                                *head_to_group.get(&head_pos).unwrap_or(&group_idx)
+                            }
+                            InputSource::ImplicitSlot(_) => group_idx,
+                        };
+                        terms.push(Term::Integer(placeholder as i64));
                     } else if pos == group.info.output_position {
                         terms.push(self.label_string_to_term(label));
                     } else {
@@ -1975,12 +2023,24 @@ impl CompiledProgram {
 
         match signature {
             QuerySignature::Boolean { .. } => {
+                // Fully-ground boolean query: each head position carries the
+                // canonical placeholder of the neural group that consumes it.
+                let mut terms = Vec::with_capacity(query_arity);
+                for pos in 0..query_arity {
+                    let group_idx = head_to_group.get(&pos).ok_or_else(|| {
+                        PyValueError::new_err(format!(
+                            "Boolean query '{}' head position {} is not bound to any neural input",
+                            query_pred, pos
+                        ))
+                    })?;
+                    terms.push(Term::Integer(*group_idx as i64));
+                }
                 template_program
                     .prob_queries
                     .push(xlog_logic::ast::ProbQuery {
                         atom: Atom {
                             predicate: query_pred.to_string(),
-                            terms: Vec::new(),
+                            terms,
                         },
                     });
             }
@@ -1992,13 +2052,6 @@ impl CompiledProgram {
                         "Targeted signature '{}' has empty target domain",
                         query_pred
                     )));
-                }
-
-                let mut head_to_group: StdHashMap<usize, usize> = StdHashMap::new();
-                for (idx, group) in signature.groups().iter().enumerate() {
-                    if let InputSource::QueryArg(pos) = group.input_source {
-                        head_to_group.entry(pos).or_insert(idx);
-                    }
                 }
 
                 for target in target_domain.iter() {
