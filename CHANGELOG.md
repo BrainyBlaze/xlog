@@ -23,6 +23,15 @@ All notable changes to this project are documented in this file.
 
 ### Added
 
+- *(cuda)* Aggregate-fused WCOJ widening (S1b): `sum`/`min`/`max` over a
+  triangle output variable (Y or Z, U32 values) and u64-key `count` now
+  dispatch through fused group-by-root kernels that never materialize the
+  triangle rows (`wcoj_triangle_groupby_root_{sum,min,max}_hg_u32`,
+  `wcoj_triangle_groupby_root_count_hg_u64`); the recorded groupby `Sum`
+  accepts U64 value columns (`groupby_sum_u64`). Structural mismatches keep
+  declining silently to materialize+groupby, and the
+  `XLOG_DISABLE_WCOJ_GROUPBY_FUSION` kill switch covers the widened paths.
+  Gate evidence: `docs/evidence/2026-06-11-s1b-agg-widening/`.
 - *(runtime)* WCOJ pipeline errors (layout/kernel failures) are now counted
   (`Executor::wcoj_error_decline_count`) and logged when they decline to the
   binary-join fallback; `XLOG_WCOJ_STRICT=1` propagates the error instead.
