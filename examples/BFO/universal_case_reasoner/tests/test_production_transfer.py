@@ -38,6 +38,68 @@ def _runner_module():
     return module
 
 
+def test_computed_metrics_keep_showcase_baselines_namespaced() -> None:
+    runner = _runner_module()
+    records = [
+        {
+            "domain_id": "cybersecurity_intrusion",
+            "root_label": "cyber_root",
+            "root_prediction": "cyber_root",
+            "intervention_label": "cyber_fix",
+            "intervention_prediction": "cyber_fix",
+            "explanation_valid": True,
+        },
+        {
+            "domain_id": "clinical_deterioration",
+            "root_label": "clinical_root",
+            "root_prediction": "clinical_root",
+            "intervention_label": "clinical_fix",
+            "intervention_prediction": "clinical_fix",
+            "explanation_valid": True,
+        },
+    ]
+    ablation_records = [
+        {
+            "domain_id": "cybersecurity_intrusion",
+            "neural_only": {"root_label": "cyber_root", "root_prediction": "wrong_root"},
+            "domain_symbolic": {"root_label": "cyber_root", "root_prediction": "wrong_root"},
+            "shared_symbolic": {"root_label": "cyber_root", "root_prediction": "wrong_root"},
+            "neuro_symbolic": {"root_label": "cyber_root", "root_prediction": "cyber_root"},
+        }
+    ]
+    invalid_records = [{"rejected": True}]
+
+    computed = runner._computed_metrics_from_records(
+        records,
+        ablation_records,
+        invalid_records,
+        "cybersecurity_intrusion",
+    )
+
+    assert "baseline_metrics" not in computed
+    assert "strongest_baseline" not in computed
+    assert "relative_uplift_over_best_baseline_pct" not in computed
+    assert computed["showcase_metrics"]["baseline_metrics"] == {
+        "domain_symbolic": 0.0,
+        "neural_only": 0.0,
+        "neuro_symbolic": 1.0,
+        "shared_symbolic": 0.0,
+    }
+    assert computed["showcase_metrics"]["relative_uplift_over_best_baseline_pct"] == 100.0
+
+
+def test_public_benchmark_report_is_explicit_nonclaim_until_adapters_exist() -> None:
+    runner = _runner_module()
+
+    report = runner._public_benchmark_report()
+
+    assert report["status"] == "FAIL"
+    assert report["external_sota_claim"] is False
+    assert report["covered_public_benchmark_families"] == []
+    assert report["missing_public_benchmark_families"]
+    assert "MISSING_PUBLIC_SOTA_RUNNER" in report["blockers"]
+
+
 def test_cuda_ranking_hot_paths_do_not_materialize_host_scalars_or_score_rows() -> None:
     runner = _runner_module()
     hot_functions = [
@@ -576,18 +638,34 @@ def test_production_transfer_runner_reports_transfer_scale_and_soak_contract(
     assert payload["computed_metrics"]["promoted_rule_quality"]["precision"] >= 0.98
     assert payload["computed_metrics"]["promoted_rule_quality"]["recall"] >= 0.95
     assert payload["computed_metrics"]["promoted_rule_quality"]["f1"] >= 0.965
+    public_benchmark = payload["public_benchmark_report"]
+    assert public_benchmark["status"] == "FAIL"
+    assert public_benchmark["external_sota_claim"] is False
+    assert public_benchmark["covered_public_benchmark_families"] == []
+    assert public_benchmark["missing_public_benchmark_families"]
+    assert "MISSING_PUBLIC_SOTA_RUNNER" in public_benchmark["blockers"]
+    assert "baseline_metrics" not in payload
+    assert "strongest_baseline" not in payload
+    assert "relative_uplift_over_best_baseline_pct" not in payload
+    assert "baseline_metrics" not in payload["computed_metrics"]
     ablations = payload["metric_inputs"]["ablation_records"]
     assert ablations
     recomputed = {}
     for method in ["neural_only", "domain_symbolic", "shared_symbolic", "neuro_symbolic"]:
         recomputed[method] = sum(_score(record[method]) for record in ablations) / len(ablations)
-    assert payload["computed_metrics"]["baseline_metrics"] == pytest.approx(recomputed)
-    assert payload["ablation_scoring"]["primary_metric"] == "root_cause_accuracy"
-    assert payload["relative_uplift_over_best_baseline_pct"] == pytest.approx(
-        payload["computed_metrics"]["relative_uplift_over_best_baseline_pct"]
+    showcase_metrics = payload["showcase_metrics"]
+    assert showcase_metrics["baseline_metrics"] == pytest.approx(recomputed)
+    assert payload["computed_metrics"]["showcase_metrics"]["baseline_metrics"] == pytest.approx(
+        recomputed
     )
-    assert payload["computed_metrics"]["strongest_baseline_value"] <= 1.0
-    assert set(payload["baseline_metrics"]) == {
+    assert showcase_metrics["ablation_scoring"]["primary_metric"] == "root_cause_accuracy"
+    assert showcase_metrics["relative_uplift_over_best_baseline_pct"] == pytest.approx(
+        payload["computed_metrics"]["showcase_metrics"][
+            "relative_uplift_over_best_baseline_pct"
+        ]
+    )
+    assert showcase_metrics["strongest_baseline_value"] <= 1.0
+    assert set(showcase_metrics["baseline_metrics"]) == {
         "neural_only",
         "domain_symbolic",
         "shared_symbolic",

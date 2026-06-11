@@ -102,3 +102,21 @@ building blocks exist (4-cycle work plan, `match_multiway_4cycle`, root
 row recovery in `wcoj_4cycle_count_hg_u32`), but it needs its own
 inside-aggregate promoter sibling plus the full TDD/parity/measurement
 cycle, which did not fit this slice.
+
+## Controlled rerun (2026-06-11, post-merge main, idle GPU)
+
+Clock locking is not permitted on this GPU (`nvidia-smi -lgc`: permission
+denied, WSL laptop); instead: three consecutive full measurement runs on an
+otherwise idle GPU with SM clock and temperature recorded per run
+(180 MHz cold-start -> 1942 MHz sustained, 60 C throughout).
+
+Result: **18/18 observations PASS the >=3x gate** (sum/min/max x
+hub_10k/hub_50k x 3 runs). Worst observation 4.80x (max_z hub_50k, during
+the 180 MHz cold-clock run); sustained-clock range 8.14x-23.04x. The
+2.1x-2.9x bimodal dips reported in the qualified verdict above did NOT
+reproduce; absolute times vary ~3x with clock state but the fused/unfused
+ratio clears the gate in every observation. Verdict upgraded: S1b gate
+PASS on all fixtures, all observations, under recorded thermal/clock
+conditions. Repro: loop
+`cargo test -p xlog-cuda-tests --release --test test_wcoj_groupby_root_agg -- --ignored --nocapture`
+3x with `nvidia-smi --query-gpu=clocks.sm,temperature.gpu` before each.

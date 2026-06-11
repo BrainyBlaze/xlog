@@ -1031,6 +1031,115 @@ def test_validator_requires_generalization_uplift_over_strongest_baseline() -> N
     assert assessment["computed"]["baseline_uplift"]["beats_strongest_baseline"] is False
 
 
+def test_validator_rejects_legacy_baseline_namespaces_that_contradict_gen007() -> None:
+    validator = _validator_module()
+    domains = [
+        "clinical_deterioration",
+        "manufacturing_quality",
+        "cybersecurity_intrusion",
+        "lab_operations_incident",
+        "cloud_operations_rca",
+    ]
+    records = [
+        _generalization_record(
+            domain=domain,
+            index=index,
+            label=f"{domain}_root",
+            prediction=f"{domain}_root",
+        )
+        for domain in domains
+        for index in range(100)
+    ]
+    ablation_records = []
+    for record in records:
+        label = str(record["root_label"])
+        ablation_records.append(
+            {
+                "neuro_symbolic": {"root_label": label, "root_prediction": label},
+                "symbolic_only": {"root_label": label, "root_prediction": "wrong_root"},
+                "neural_only": {"root_label": label, "root_prediction": "wrong_root"},
+                "domain_specific_classifier": {
+                    "root_label": label,
+                    "root_prediction": "wrong_root",
+                },
+                "retrieval_rag_nearest_neighbor": {
+                    "root_label": label,
+                    "root_prediction": "wrong_root",
+                },
+                "majority_prior": {"root_label": label, "root_prediction": "wrong_root"},
+            }
+        )
+    payload = _generalization_report_fixture(
+        domains=domains,
+        records=records,
+        ablation_records=ablation_records,
+    )
+    payload["generalization_report"]["baseline_uplift"][
+        "relative_uplift_over_best_baseline_pct"
+    ] = 100.0
+    payload["baseline_metrics"] = {
+        "neural_only": 1.0,
+        "neuro_symbolic": 1.0,
+    }
+    payload["computed_metrics"] = {
+        "baseline_metrics": {
+            "neural_only": 1.0,
+            "neuro_symbolic": 1.0,
+        }
+    }
+
+    assessment = validator._generalization_assessment(payload)
+    gen007 = assessment["gates"]["GEN-007"]
+
+    assert gen007["passed"] is False
+    assert gen007["summary_metric_consistency"]["passed"] is False
+    assert sorted(gen007["summary_metric_consistency"]["legacy_metric_locations"]) == [
+        "baseline_metrics",
+        "computed_metrics.baseline_metrics",
+    ]
+
+
+def test_public_benchmark_assessment_requires_explicit_nonclaim_or_coverage() -> None:
+    validator = _validator_module()
+
+    missing = validator._public_benchmark_assessment({})
+    assert missing["passed"] is False
+    assert "PUBLIC-SOTA-REPORT-MISSING" in missing["blockers"]
+
+    nonclaim = validator._public_benchmark_assessment(
+        {
+            "public_benchmark_report": {
+                "status": "FAIL",
+                "external_sota_claim": False,
+                "runner": "MISSING_PUBLIC_SOTA_RUNNER",
+                "covered_public_benchmark_families": [],
+                "blockers": [
+                    "MISSING_PUBLIC_SOTA_RUNNER",
+                    "PUBLIC-SOTA-FAMILY-COVERAGE",
+                    "PUBLIC-SOTA-UNMET",
+                ],
+            }
+        }
+    )
+    assert nonclaim["passed"] is True
+    assert nonclaim["external_sota_claim"] is False
+    assert nonclaim["missing_public_benchmark_families"]
+
+    unsupported_claim = validator._public_benchmark_assessment(
+        {
+            "public_benchmark_report": {
+                "status": "PASS",
+                "external_sota_claim": True,
+                "runner": "MISSING_PUBLIC_SOTA_RUNNER",
+                "covered_public_benchmark_families": [],
+                "blockers": [],
+            }
+        }
+    )
+    assert unsupported_claim["passed"] is False
+    assert "PUBLIC-SOTA-FAMILY-COVERAGE" in unsupported_claim["blockers"]
+
+
 def test_validator_requires_heldout_scoring_through_xlog_nn4() -> None:
     validator = _validator_module()
     domains = [

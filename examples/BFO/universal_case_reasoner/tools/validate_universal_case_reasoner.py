@@ -98,6 +98,15 @@ REQUIRED_ADVERSARIAL_VARIANTS = {
     "missing_field",
     "distractor_candidate",
 }
+REQUIRED_PUBLIC_BENCHMARK_FAMILIES = {
+    "aiops_rca",
+    "clinical_diagnosis",
+    "cross_domain_ontology_shift",
+    "cybersecurity_intrusion",
+    "manufacturing_equipment_fault",
+    "phm_fault",
+    "root_cause_aiops",
+}
 GENERALIZATION_THRESHOLDS = {
     "macro_f1": 0.90,
     "min_domain_f1": 0.85,
@@ -524,6 +533,8 @@ def _load_production_transfer_evidence(output: Path) -> dict[str, Any]:
             ),
         }
     payload["output"] = str(output)
+    if isinstance(payload.get("computed_metrics"), dict):
+        payload["source_computed_metrics"] = payload["computed_metrics"]
     payload["computed_metrics"] = _compute_production_metrics(payload)
     return payload
 
@@ -659,6 +670,18 @@ def _compute_production_metrics(payload: dict[str, Any]) -> dict[str, Any]:
         100.0 if neuro_value > 0.0 else 0.0
     )
 
+    showcase_metrics = {
+        "baseline_metrics": baseline_metrics,
+        "ablation_scoring": {
+            "primary_metric": "root_cause_accuracy",
+            "intervention_precision_reported_separately": True,
+            "explanation_coverage_reported_separately": True,
+        },
+        "strongest_baseline": strongest_baseline,
+        "strongest_baseline_value": strongest_value,
+        "relative_uplift_over_best_baseline_pct": uplift,
+    }
+
     return {
         "valid": True,
         "held_out_root_cause_f1": _safe_ratio(root_correct, len(held_out_records)),
@@ -690,15 +713,7 @@ def _compute_production_metrics(payload: dict[str, Any]) -> dict[str, Any]:
             "f1": _safe_ratio(promoted_correct, len(non_held_out_records)),
             "kernel_mutated": False,
         },
-        "baseline_metrics": baseline_metrics,
-        "ablation_scoring": {
-            "primary_metric": "root_cause_accuracy",
-            "intervention_precision_reported_separately": True,
-            "explanation_coverage_reported_separately": True,
-        },
-        "strongest_baseline": strongest_baseline,
-        "strongest_baseline_value": strongest_value,
-        "relative_uplift_over_best_baseline_pct": uplift,
+        "showcase_metrics": showcase_metrics,
     }
 
 
@@ -800,6 +815,123 @@ def _reported_float(value: Any) -> float | None:
     if isinstance(value, (int, float)):
         return float(value)
     return None
+
+
+def _legacy_baseline_namespace_assessment(
+    production_transfer: dict[str, Any],
+    canonical_baseline_macro_f1: dict[str, float],
+) -> dict[str, Any]:
+    legacy_metric_locations: list[str] = []
+    legacy_metric_values: dict[str, Any] = {}
+    conflict_details: dict[str, dict[str, dict[str, Any]]] = {}
+    for location, candidate in [
+        ("baseline_metrics", production_transfer.get("baseline_metrics")),
+        (
+            "computed_metrics.baseline_metrics",
+            (production_transfer.get("computed_metrics") or {}).get("baseline_metrics")
+            if isinstance(production_transfer.get("computed_metrics"), dict)
+            else None,
+        ),
+        (
+            "source_computed_metrics.baseline_metrics",
+            (production_transfer.get("source_computed_metrics") or {}).get("baseline_metrics")
+            if isinstance(production_transfer.get("source_computed_metrics"), dict)
+            else None,
+        ),
+    ]:
+        if not isinstance(candidate, dict):
+            continue
+        legacy_metric_locations.append(location)
+        legacy_metric_values[location] = candidate
+        location_conflicts: dict[str, dict[str, Any]] = {}
+        for method, raw_value in candidate.items():
+            reported_value = _reported_float(raw_value)
+            canonical_value = canonical_baseline_macro_f1.get(str(method))
+            if (
+                reported_value is None
+                or canonical_value is None
+                or abs(reported_value - canonical_value) > 1e-9
+            ):
+                location_conflicts[str(method)] = {
+                    "legacy_value": raw_value,
+                    "canonical_generalization_value": canonical_value,
+                }
+        if location_conflicts:
+            conflict_details[location] = location_conflicts
+    return {
+        "passed": not legacy_metric_locations,
+        "canonical_metric_source": "generalization_report.baseline_uplift",
+        "canonical_baseline_macro_f1": canonical_baseline_macro_f1,
+        "legacy_metric_locations": legacy_metric_locations,
+        "legacy_metric_values": legacy_metric_values,
+        "conflicts": conflict_details,
+        "required_action": (
+            "keep showcase ablation metrics under showcase_metrics and leave "
+            "generalization_report.baseline_uplift as the only baseline-uplift source"
+        ),
+    }
+
+
+def _public_benchmark_assessment(production_transfer: dict[str, Any]) -> dict[str, Any]:
+    report = production_transfer.get("public_benchmark_report")
+    if not isinstance(report, dict):
+        return {
+            "passed": False,
+            "status": "MISSING",
+            "external_sota_claim": None,
+            "covered_public_benchmark_families": [],
+            "required_public_benchmark_families": sorted(REQUIRED_PUBLIC_BENCHMARK_FAMILIES),
+            "missing_public_benchmark_families": sorted(REQUIRED_PUBLIC_BENCHMARK_FAMILIES),
+            "blockers": ["PUBLIC-SOTA-REPORT-MISSING"],
+            "claim_boundary": "public benchmark report is required for honest claim scope",
+        }
+
+    covered = {
+        str(family)
+        for family in report.get("covered_public_benchmark_families") or []
+        if str(family)
+    }
+    missing_families = sorted(REQUIRED_PUBLIC_BENCHMARK_FAMILIES - covered)
+    blockers = [str(blocker) for blocker in report.get("blockers") or [] if str(blocker)]
+    status = str(report.get("status", "")).upper()
+    external_sota_claim = report.get("external_sota_claim")
+    runner = str(report.get("runner") or "")
+
+    if external_sota_claim is True:
+        if status != "PASS":
+            blockers.append("PUBLIC-SOTA-STATUS-NOT-PASS")
+        if runner == "MISSING_PUBLIC_SOTA_RUNNER" or not runner:
+            blockers.append("MISSING_PUBLIC_SOTA_RUNNER")
+        if missing_families:
+            blockers.append("PUBLIC-SOTA-FAMILY-COVERAGE")
+        passed = not blockers and not missing_families
+        claim_boundary = "external SOTA claimed"
+    elif external_sota_claim is False:
+        if status not in {"FAIL", "BLOCKED", "NOT_CLAIMED"}:
+            blockers.append("PUBLIC-SOTA-NONCLAIM-STATUS-MISSING")
+        if not blockers:
+            blockers.append("PUBLIC-SOTA-NONCLAIM-BLOCKERS-MISSING")
+        passed = status in {"FAIL", "BLOCKED", "NOT_CLAIMED"} and bool(blockers)
+        claim_boundary = "external SOTA not claimed"
+    else:
+        blockers.append("PUBLIC-SOTA-CLAIM-BOUNDARY-MISSING")
+        passed = False
+        claim_boundary = "external SOTA claim boundary missing"
+
+    blockers = sorted(set(blockers))
+    return {
+        "passed": passed,
+        "status": status or "UNKNOWN",
+        "external_sota_claim": external_sota_claim,
+        "runner": runner,
+        "covered_public_benchmark_families": sorted(covered),
+        "required_public_benchmark_families": sorted(REQUIRED_PUBLIC_BENCHMARK_FAMILIES),
+        "missing_public_benchmark_families": missing_families,
+        "blockers": blockers,
+        "claim_boundary": claim_boundary,
+        "protocol_hashes": report.get("protocol_hashes") or {},
+        "baseline_citations": report.get("baseline_citations") or {},
+    }
 
 
 def _generalization_assessment(production_transfer: dict[str, Any]) -> dict[str, Any]:
@@ -1020,10 +1152,15 @@ def _generalization_assessment(production_transfer: dict[str, Any]) -> dict[str,
     }
     reported_uplift = report.get("baseline_uplift")
     reported_uplift = reported_uplift if isinstance(reported_uplift, dict) else {}
+    summary_metric_consistency = _legacy_baseline_namespace_assessment(
+        production_transfer,
+        baseline_macro_f1,
+    )
     baseline_uplift_passed = (
         REQUIRED_GENERALIZATION_BASELINES <= baseline_methods
         and baseline_uplift["beats_strongest_baseline"] is True
         and reported_uplift.get("beats_strongest_baseline") is True
+        and summary_metric_consistency["passed"] is True
         and abs(
             _safe_ratio(
                 float(reported_uplift.get("relative_uplift_over_best_baseline_pct", 0.0))
@@ -1107,6 +1244,7 @@ def _generalization_assessment(production_transfer: dict[str, Any]) -> dict[str,
             "missing_baselines": sorted(REQUIRED_GENERALIZATION_BASELINES - baseline_methods),
             "baseline_uplift": baseline_uplift,
             "reported_baseline_uplift": reported_uplift,
+            "summary_metric_consistency": summary_metric_consistency,
             "minimum_relative_uplift_pct": GENERALIZATION_THRESHOLDS[
                 "baseline_uplift_pct"
             ],
@@ -1655,6 +1793,7 @@ def _production_transfer_passed(production_transfer: dict[str, Any]) -> bool:
         and float(computed.get("held_out_root_cause_f1", 0.0)) >= 0.90
         and float(computed.get("accepted_intervention_precision", 0.0)) >= 0.95
         and float(computed.get("explanations_complete_pct", 0.0)) >= 100.0
+        and bool((gen_gates.get("GEN-007") or {}).get("passed"))
         and gen_uplift.get("beats_strongest_baseline") is True
         and float(gen_uplift.get("relative_uplift_over_best_baseline_pct", 0.0)) >= 15.0
     )
@@ -1820,6 +1959,8 @@ def _build_gates(
     gen_gates = generalization.get("gates") or {}
     dilp = _dilp_assessment(production_transfer)
     dilp_gates = dilp.get("gates") or {}
+    public_benchmark = _public_benchmark_assessment(production_transfer)
+    showcase_metrics = computed.get("showcase_metrics") or {}
     zero_hot_loop_transfers = runtime_contract_passed and all(
         int(transfer_stats.get(key, -1)) == 0
         for key in ["dtoh_calls", "htod_calls", "dtoh_bytes", "htod_bytes"]
@@ -1968,11 +2109,11 @@ def _build_gates(
                 {
                     "scope": production_transfer.get("scope"),
                     "status": production_transfer.get("status"),
-                    "baseline_metrics": computed.get("baseline_metrics"),
-                    "showcase_relative_uplift_over_best_baseline_pct": computed.get(
+                    "showcase_baseline_metrics": showcase_metrics.get("baseline_metrics"),
+                    "showcase_relative_uplift_over_best_baseline_pct": showcase_metrics.get(
                         "relative_uplift_over_best_baseline_pct"
                     ),
-                    "showcase_strongest_baseline": computed.get("strongest_baseline"),
+                    "showcase_strongest_baseline": showcase_metrics.get("strongest_baseline"),
                     "generalization_baseline_uplift": (
                         (gen_gates.get("GEN-007") or {}).get("baseline_uplift")
                     ),
@@ -2002,6 +2143,12 @@ def _build_gates(
             )
             for requirement_id, description in DILP_REQUIREMENTS.items()
         ],
+        _gate(
+            public_benchmark["passed"],
+            "PUBLIC-SOTA-001",
+            "Public benchmark state is explicit; external SOTA claims require required-family coverage.",
+            json.dumps(public_benchmark, sort_keys=True),
+        ),
         _gate(
             bundle_reuse_passed,
             "BUNDLE-001",
@@ -2165,6 +2312,7 @@ def _summary(args: argparse.Namespace, elapsed_sec: float) -> dict[str, Any]:
     production_transfer = _load_production_transfer_evidence(args.production_transfer)
     generalization = _generalization_assessment(production_transfer)
     dilp = _dilp_assessment(production_transfer)
+    public_benchmark = _public_benchmark_assessment(production_transfer)
     gates = _build_gates(
         strict=args.strict,
         gpu_required=args.gpu_required,
@@ -2230,6 +2378,7 @@ def _summary(args: argparse.Namespace, elapsed_sec: float) -> dict[str, Any]:
             "production_transfer": production_transfer,
             "generalization_assessment": generalization,
             "dilp_assessment": dilp,
+            "public_benchmark_assessment": public_benchmark,
             "validation_plan": str(ROOT / "VALIDATION_PLAN.md"),
         },
         "gqm_metrics": metrics,

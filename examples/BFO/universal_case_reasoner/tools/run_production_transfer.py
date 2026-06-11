@@ -39,6 +39,15 @@ GENERALIZATION_THRESHOLDS = {
     "baseline_uplift_pct": 15.0,
     "adversarial_macro_f1": 0.80,
 }
+REQUIRED_PUBLIC_BENCHMARK_FAMILIES = {
+    "aiops_rca",
+    "clinical_diagnosis",
+    "cross_domain_ontology_shift",
+    "cybersecurity_intrusion",
+    "manufacturing_equipment_fault",
+    "phm_fault",
+    "root_cause_aiops",
+}
 HF_DOMAIN_SOURCES = {
     "clinical_deterioration": [
         {
@@ -2583,6 +2592,17 @@ def _computed_metrics_from_records(
         if strongest_value
         else 100.0
     )
+    showcase_metrics = {
+        "baseline_metrics": baseline_metrics,
+        "ablation_scoring": {
+            "primary_metric": "root_cause_accuracy",
+            "intervention_precision_reported_separately": True,
+            "explanation_coverage_reported_separately": True,
+        },
+        "strongest_baseline": strongest_baseline,
+        "strongest_baseline_value": strongest_value,
+        "relative_uplift_over_best_baseline_pct": round(uplift, 6),
+    }
     return {
         "valid": True,
         "held_out_root_cause_f1": root_correct / len(held_out),
@@ -2606,15 +2626,29 @@ def _computed_metrics_from_records(
             "f1": promoted_correct / len(non_held_out),
             "kernel_mutated": False,
         },
-        "baseline_metrics": baseline_metrics,
-        "ablation_scoring": {
-            "primary_metric": "root_cause_accuracy",
-            "intervention_precision_reported_separately": True,
-            "explanation_coverage_reported_separately": True,
-        },
-        "strongest_baseline": strongest_baseline,
-        "strongest_baseline_value": strongest_value,
-        "relative_uplift_over_best_baseline_pct": round(uplift, 6),
+        "showcase_metrics": showcase_metrics,
+    }
+
+
+def _public_benchmark_report() -> dict[str, Any]:
+    return {
+        "status": "FAIL",
+        "external_sota_claim": False,
+        "runner": "MISSING_PUBLIC_SOTA_RUNNER",
+        "covered_public_benchmark_families": [],
+        "required_public_benchmark_families": sorted(REQUIRED_PUBLIC_BENCHMARK_FAMILIES),
+        "missing_public_benchmark_families": sorted(REQUIRED_PUBLIC_BENCHMARK_FAMILIES),
+        "protocol_hashes": {},
+        "baseline_citations": {},
+        "blockers": [
+            "MISSING_PUBLIC_SOTA_RUNNER",
+            "PUBLIC-SOTA-FAMILY-COVERAGE",
+            "PUBLIC-SOTA-UNMET",
+        ],
+        "claim_boundary": (
+            "Local production/generalization/DILP evidence is not an external SOTA claim; "
+            "public benchmark adapters and protocols are required before external SOTA is claimed."
+        ),
     }
 
 
@@ -3987,9 +4021,8 @@ def run(
     )
     soak = _run_soak(session, soak_seconds)
 
-    baseline_metrics = computed_metrics["baseline_metrics"]
-    strongest_baseline = computed_metrics["strongest_baseline"]
-    uplift = computed_metrics["relative_uplift_over_best_baseline_pct"]
+    showcase_metrics = computed_metrics["showcase_metrics"]
+    baseline_metrics = showcase_metrics["baseline_metrics"]
     production_scale = (
         scale_profile["symbolic_bfo_fact_count"] >= PRODUCTION_THRESHOLDS["symbolic_facts"]
         and scale_profile["neural_observation_count"]
@@ -4041,14 +4074,12 @@ def run(
             "rejection_mode": "no shared-kernel evidence/causal join for mismatched adapter facts",
         },
         "promoted_rule_quality": computed_metrics["promoted_rule_quality"],
-        "baseline_metrics": baseline_metrics,
-        "ablation_scoring": computed_metrics["ablation_scoring"],
-        "strongest_baseline": strongest_baseline,
-        "relative_uplift_over_best_baseline_pct": round(uplift, 6),
+        "showcase_metrics": showcase_metrics,
         "neural": neural,
         "computed_metrics": computed_metrics,
         "generalization_report": generalization_evidence["report"],
         "dilp_report": dilp_evidence,
+        "public_benchmark_report": _public_benchmark_report(),
         "metric_inputs": {
             "prediction_records": prediction_records,
             "ablation_records": [
