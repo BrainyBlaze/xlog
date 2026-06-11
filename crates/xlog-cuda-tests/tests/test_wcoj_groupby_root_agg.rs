@@ -1174,3 +1174,66 @@ fn s1c_measurement_u64_agg_fused_vs_unfused() {
         );
     }
 }
+
+/// Provider-level lock: the u32 fused agg entry must reject Symbol value
+/// columns (symbol ids are not summable/orderable data; the unfused
+/// groupby rejects them too, so a silent fused result would diverge).
+#[test]
+fn groupby_root_agg_rejects_symbol_value_columns() {
+    let Some(fix) = make_fixture() else {
+        eprintln!("skipping symbol_value_reject: no CUDA device");
+        return;
+    };
+    let upload_symbol = |rows: &[(u32, u32)]| -> CudaBuffer {
+        let n = rows.len() as u32;
+        let mut col0 = fix.memory.alloc::<u8>(rows.len() * 4).expect("alloc col0");
+        let mut col1 = fix.memory.alloc::<u8>(rows.len() * 4).expect("alloc col1");
+        let mut d_num_rows = fix.memory.alloc::<u32>(1).expect("alloc d_num_rows");
+        let col0_bytes: Vec<u8> = rows.iter().flat_map(|(a, _)| a.to_le_bytes()).collect();
+        let col1_bytes: Vec<u8> = rows.iter().flat_map(|(_, b)| b.to_le_bytes()).collect();
+        let device = fix.memory.device().inner();
+        device
+            .htod_sync_copy_into(&col0_bytes, &mut col0)
+            .expect("htod col0");
+        device
+            .htod_sync_copy_into(&col1_bytes, &mut col1)
+            .expect("htod col1");
+        device
+            .htod_sync_copy_into(&[n], &mut d_num_rows)
+            .expect("htod d_num_rows");
+        let schema = Schema::new(vec![
+            ("col0".to_string(), ScalarType::Symbol),
+            ("col1".to_string(), ScalarType::Symbol),
+        ]);
+        CudaBuffer::from_columns_with_host_count(
+            vec![col0.into(), col1.into()],
+            n as u64,
+            d_num_rows,
+            schema,
+            n,
+        )
+    };
+    let e_xy = upload_symbol(&[(1, 2)]);
+    let e_yz = upload_symbol(&[(2, 3)]);
+    let e_xz = upload_symbol(&[(1, 3)]);
+    let stream = fix.pool.acquire().expect("stream");
+    for agg in [AggOp::Sum, AggOp::Min, AggOp::Max] {
+        let err = match fix.provider.wcoj_triangle_groupby_root_agg_u32_recorded(
+            &e_xy,
+            &e_yz,
+            &e_xz,
+            agg,
+            WcojRootAggValue::Z,
+            WCOJ_HG_BLOCK_WORK_UNIT_DEFAULT,
+            stream,
+        ) {
+            Err(err) => err,
+            Ok(_) => panic!("{agg:?}: Symbol value columns must be rejected"),
+        };
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("must be U32"),
+            "{agg:?}: rejection must name the value-type gate, got: {msg}"
+        );
+    }
+}

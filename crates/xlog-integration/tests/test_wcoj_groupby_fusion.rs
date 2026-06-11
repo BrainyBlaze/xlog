@@ -636,6 +636,156 @@ fn groupby_fusion_max_y_u64_fires_end_to_end_with_parity() {
     );
 }
 
+/// Upload a binary relation with Symbol-typed columns (u32-physical).
+fn upload_binary_symbol(memory: &Arc<GpuMemoryManager>, rows: &[(u32, u32)]) -> CudaBuffer {
+    let n = rows.len() as u32;
+    let mut col0 = memory
+        .alloc::<u8>(rows.len() * std::mem::size_of::<u32>())
+        .expect("alloc col0");
+    let mut col1 = memory
+        .alloc::<u8>(rows.len() * std::mem::size_of::<u32>())
+        .expect("alloc col1");
+    let mut d_num_rows = memory.alloc::<u32>(1).expect("alloc d_num_rows");
+    let col0_bytes: Vec<u8> = rows.iter().flat_map(|(a, _)| a.to_le_bytes()).collect();
+    let col1_bytes: Vec<u8> = rows.iter().flat_map(|(_, b)| b.to_le_bytes()).collect();
+    let device = memory.device().inner();
+    device
+        .htod_sync_copy_into(&col0_bytes, &mut col0)
+        .expect("htod col0");
+    device
+        .htod_sync_copy_into(&col1_bytes, &mut col1)
+        .expect("htod col1");
+    device
+        .htod_sync_copy_into(&[n], &mut d_num_rows)
+        .expect("htod d_num_rows");
+    let schema = Schema::new(vec![
+        ("col0".to_string(), ScalarType::Symbol),
+        ("col1".to_string(), ScalarType::Symbol),
+    ]);
+    CudaBuffer::from_columns_with_host_count(
+        vec![col0.into(), col1.into()],
+        n as u64,
+        d_num_rows,
+        schema,
+        n,
+    )
+}
+
+/// Compile + execute an aggregate program over Symbol relations; returns
+/// the execute_plan Result alongside the executor so callers can assert
+/// either success-with-rows or matching rejection.
+fn run_symbol_program(
+    fix: &Fixture,
+    source: &str,
+    inputs: &BTreeMap<&str, Vec<(u32, u32)>>,
+) -> (xlog_core::Result<()>, Executor) {
+    let mut compiler = Compiler::new();
+    let plan = compiler.compile(source).expect("compile aggregate rule");
+    let mut executor = Executor::new(Arc::clone(&fix.provider));
+    for (name, rel_id) in compiler.rel_ids() {
+        executor.register_relation(*rel_id, name);
+    }
+    for (name, rows) in inputs {
+        executor.put_relation(name, upload_binary_symbol(&fix.memory, rows));
+    }
+    let result = executor.execute_plan(&plan).map(|_| ());
+    (result, executor)
+}
+
+/// Symbol-typed relations are u32-physical: the fused count path must fire
+/// and match the kill-switch rows (count never reads the value column, so
+/// Symbol keys/values are admissible).
+#[test]
+fn groupby_fusion_count_symbol_fires_end_to_end_with_parity() {
+    let Some(fix) = make_fixture() else {
+        eprintln!("Skipping: CUDA runtime unavailable");
+        return;
+    };
+    let _guard = env_lock();
+    let inputs = triangle_inputs();
+    let expected = vec![(1u32, 3u64), (2, 1), (5, 1)];
+
+    let (result, executor) = run_symbol_program(&fix, SOURCE, &inputs);
+    result.expect("fused symbol count plan must execute");
+    let deg = executor.store().get("deg").expect("deg relation");
+    assert_eq!(
+        deg.schema().column_type(0),
+        Some(ScalarType::Symbol),
+        "fused output must preserve the Symbol key type"
+    );
+    let fused_rows = download_group_counts(&fix.memory, deg);
+    assert_eq!(fused_rows, expected, "fused symbol count row set");
+    assert_eq!(
+        executor.wcoj_groupby_fusion_dispatch_count(),
+        1,
+        "fused count over Symbol relations must fire exactly once"
+    );
+
+    // SAFETY: serialized by ENV_LOCK; restored below.
+    unsafe {
+        std::env::set_var("XLOG_DISABLE_WCOJ_GROUPBY_FUSION", "1");
+    }
+    let (result, executor) = run_symbol_program(&fix, SOURCE, &inputs);
+    unsafe {
+        std::env::remove_var("XLOG_DISABLE_WCOJ_GROUPBY_FUSION");
+    }
+    result.expect("kill-switch symbol count plan must execute");
+    let deg = executor.store().get("deg").expect("deg relation");
+    let unfused_rows = download_group_counts(&fix.memory, deg);
+    assert_eq!(unfused_rows, expected, "kill-switch symbol count row set");
+    assert_eq!(
+        executor.wcoj_groupby_fusion_dispatch_count(),
+        0,
+        "kill switch must keep the counter at 0"
+    );
+}
+
+/// Min/max/sum over Symbol VALUES is semantically questionable (symbol ids
+/// carry no arithmetic order), and the unfused groupby rejects it with an
+/// error. The fused path must DECLINE (counter == 0) so the query fails
+/// through the same unfused rejection — never silently aggregating ids.
+#[test]
+fn groupby_fusion_symbol_valued_min_declines_and_unfused_rejects() {
+    let Some(fix) = make_fixture() else {
+        eprintln!("Skipping: CUDA runtime unavailable");
+        return;
+    };
+    let _guard = env_lock();
+    let source = "agg(X, min(Z)) :- e1(X, Y), e2(Y, Z), e3(X, Z).";
+    let inputs = triangle_inputs();
+
+    // Fusion enabled: the hook declines (Symbol value column), the unfused
+    // groupby rejects, and the query errors.
+    let (result, executor) = run_symbol_program(&fix, source, &inputs);
+    let err = result.expect_err("min over Symbol values must be rejected");
+    assert!(
+        format!("{err}").contains("values"),
+        "rejection must come from the groupby value-type gate, got: {err}"
+    );
+    assert_eq!(
+        executor.wcoj_groupby_fusion_dispatch_count(),
+        0,
+        "fused path must decline Symbol-valued min, not dispatch it"
+    );
+
+    // Kill switch: identical rejection through the same unfused gate.
+    // SAFETY: serialized by ENV_LOCK; restored below.
+    unsafe {
+        std::env::set_var("XLOG_DISABLE_WCOJ_GROUPBY_FUSION", "1");
+    }
+    let (result_unfused, _) = run_symbol_program(&fix, source, &inputs);
+    unsafe {
+        std::env::remove_var("XLOG_DISABLE_WCOJ_GROUPBY_FUSION");
+    }
+    let err_unfused =
+        result_unfused.expect_err("kill-switch min over Symbol values must be rejected");
+    assert_eq!(
+        format!("{err}"),
+        format!("{err_unfused}"),
+        "fused-declined and kill-switch runs must reject identically"
+    );
+}
+
 /// Shared 4-cycle fixture. Completions per root W:
 /// W=1 -> (X,Y,Z) in {(10,20,30),(10,21,30),(11,20,30)};
 /// W=2 -> {(10,20,30),(10,21,30)}. W=3 has e1/e2/e3 paths but no closing
