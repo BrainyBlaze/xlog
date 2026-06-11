@@ -219,12 +219,12 @@ impl Executor {
                 key_cols,
                 aggs,
             } => {
-                // D1 aggregate fusion: a count-by-root over a promoted
-                // triangle dispatches the fused kernel and never
+                // D1 aggregate fusion: a count/sum/min/max-by-root over a
+                // promoted triangle dispatches the fused kernels and never
                 // materializes the join. Declines fall through to the
                 // standard materialize+groupby path below.
                 if let Some(fused) =
-                    self.try_dispatch_wcoj_groupby_root_count(input, key_cols, aggs)?
+                    self.try_dispatch_wcoj_groupby_root_agg(input, key_cols, aggs)?
                 {
                     return Ok(fused);
                 }

@@ -78,6 +78,7 @@ use std::collections::HashSet;
 use xlog_core::{RelId, Result, ScalarType, Schema};
 use xlog_cuda::device_runtime::StreamId;
 use xlog_cuda::provider::NESTED_LOOP_TOTAL_THRESHOLD;
+use xlog_cuda::wcoj_metadata::WcojRootAggValue;
 use xlog_cuda::CudaBuffer;
 use xlog_cuda::JoinType as CudaJoinType;
 use xlog_ir::{
@@ -1350,28 +1351,40 @@ impl Executor {
 
     /// D1 aggregate-fused WCOJ: dispatch
     /// `GroupBy { Project { MultiWayJoin(triangle) }, key_cols: [0],
-    /// aggs: [(_, Count)] }` through the fused group-by-root count kernel,
-    /// which never materializes the triangle rows. The group key column 0 is
-    /// the variable-order root X in the canonical triangle output, the
-    /// condition under which one-pass aggregate propagation over the
-    /// variable order is sound. Every structural mismatch (other keys/aggs,
-    /// computed projections, non-triangle shape, non-4-byte width, missing
-    /// buffers/runtime, kill switch) returns `Ok(None)` — silent decline to
-    /// the existing materialize+groupby path. Pipeline errors route through
+    /// aggs: [(_, Count | Sum | Min | Max)] }` through the fused
+    /// group-by-root kernels, which never materialize the triangle rows.
+    /// The group key column 0 is the variable-order root X in the canonical
+    /// triangle output, the condition under which one-pass aggregate
+    /// propagation over the variable order is sound. For Sum/Min/Max the
+    /// aggregate value column must itself map to a triangle output variable
+    /// (Y or Z, both plain U32) so the kernel can read it during traversal;
+    /// Count ignores the value column. Every structural mismatch (other
+    /// keys/aggs, computed projections, value column not Y/Z or not U32,
+    /// non-triangle shape, non-4-byte width, missing buffers/runtime, kill
+    /// switch) returns `Ok(None)` — silent decline to the existing
+    /// materialize+groupby path. Pipeline errors route through
     /// [`wcoj_decline_on_error`] (counted; `XLOG_WCOJ_STRICT=1` propagates).
-    pub(super) fn try_dispatch_wcoj_groupby_root_count(
+    pub(super) fn try_dispatch_wcoj_groupby_root_agg(
         &mut self,
         input: &RirNode,
         key_cols: &[usize],
         aggs: &[(usize, xlog_core::AggOp)],
     ) -> Result<Option<CudaBuffer>> {
+        use xlog_core::AggOp;
         if wcoj_groupby_fusion_disabled() {
             return Ok(None);
         }
         if key_cols != [0] {
             return Ok(None);
         }
-        if aggs.len() != 1 || !matches!(aggs[0].1, xlog_core::AggOp::Count) {
+        if aggs.len() != 1 {
+            return Ok(None);
+        }
+        let (agg_col, agg_op) = aggs[0];
+        if !matches!(
+            agg_op,
+            AggOp::Count | AggOp::Sum | AggOp::Min | AggOp::Max
+        ) {
             return Ok(None);
         }
         let RirNode::Project {
@@ -1382,8 +1395,7 @@ impl Executor {
             return Ok(None);
         };
         // The group projection must pass column 0 (X) through as the key and
-        // contain only plain column references — Count never reads the value
-        // column, so any pass-through value columns are admissible.
+        // contain only plain column references.
         if columns.is_empty() || !matches!(columns[0], ProjectExpr::Column(0)) {
             return Ok(None);
         }
@@ -1393,6 +1405,20 @@ impl Executor {
         {
             return Ok(None);
         }
+        // For value-reading aggregates the value column must map to a
+        // triangle output variable the kernel can see: Y (col 1) or Z
+        // (col 2). Anything else (the key itself, out-of-range refs)
+        // declines. Count never reads the value column, so any
+        // pass-through value columns are admissible.
+        let agg_value = if matches!(agg_op, AggOp::Count) {
+            None
+        } else {
+            match columns.get(agg_col) {
+                Some(ProjectExpr::Column(1)) => Some(WcojRootAggValue::Y),
+                Some(ProjectExpr::Column(2)) => Some(WcojRootAggValue::Z),
+                _ => return Ok(None),
+            }
+        };
         let Some(matched) = match_multiway_triangle(multiway) else {
             return Ok(None);
         };
@@ -1420,13 +1446,36 @@ impl Executor {
             Some(b) => b,
             None => return Ok(None),
         };
-        match (
+        let width = match (
             classify_two_col_wcoj_width(buf_xy),
             classify_two_col_wcoj_width(buf_yz),
             classify_two_col_wcoj_width(buf_xz),
         ) {
-            (Some(WcojKeyWidth::FourByte), Some(WcojKeyWidth::FourByte), Some(WcojKeyWidth::FourByte)) => {}
+            (Some(WcojKeyWidth::FourByte), Some(WcojKeyWidth::FourByte), Some(WcojKeyWidth::FourByte)) => {
+                WcojKeyWidth::FourByte
+            }
+            (Some(WcojKeyWidth::EightByte), Some(WcojKeyWidth::EightByte), Some(WcojKeyWidth::EightByte)) => {
+                WcojKeyWidth::EightByte
+            }
             _ => return Ok(None),
+        };
+        // Sum/Min/Max are arithmetic: the columns supplying the value must
+        // be plain U32 (Symbol ids are not summable/orderable data; U64
+        // value aggregates have no fused kernel yet).
+        match agg_value {
+            Some(WcojRootAggValue::Y) => {
+                if buf_xy.schema().column_type(1) != Some(xlog_core::ScalarType::U32) {
+                    return Ok(None);
+                }
+            }
+            Some(WcojRootAggValue::Z) => {
+                if buf_yz.schema().column_type(1) != Some(xlog_core::ScalarType::U32)
+                    || buf_xz.schema().column_type(1) != Some(xlog_core::ScalarType::U32)
+                {
+                    return Ok(None);
+                }
+            }
+            None => {}
         }
         if self.provider.memory().runtime().is_none() {
             return Ok(None);
@@ -1434,13 +1483,40 @@ impl Executor {
         let Some(launch_stream) = self.wcoj_dispatch_stream_or_init() else {
             return Ok(None);
         };
-        match self.provider.wcoj_triangle_groupby_root_count_u32_recorded(
-            buf_xy,
-            buf_yz,
-            buf_xz,
-            wcoj_block_work_unit(),
-            launch_stream,
-        ) {
+        let result = match (agg_value, width) {
+            (None, WcojKeyWidth::FourByte) => {
+                self.provider.wcoj_triangle_groupby_root_count_u32_recorded(
+                    buf_xy,
+                    buf_yz,
+                    buf_xz,
+                    wcoj_block_work_unit(),
+                    launch_stream,
+                )
+            }
+            (None, WcojKeyWidth::EightByte) => {
+                self.provider.wcoj_triangle_groupby_root_count_u64_recorded(
+                    buf_xy,
+                    buf_yz,
+                    buf_xz,
+                    wcoj_block_work_unit(),
+                    launch_stream,
+                )
+            }
+            (Some(value), WcojKeyWidth::FourByte) => {
+                self.provider.wcoj_triangle_groupby_root_agg_u32_recorded(
+                    buf_xy,
+                    buf_yz,
+                    buf_xz,
+                    agg_op,
+                    value,
+                    wcoj_block_work_unit(),
+                    launch_stream,
+                )
+            }
+            // No fused u64-key sum/min/max kernels yet.
+            (Some(_), WcojKeyWidth::EightByte) => return Ok(None),
+        };
+        match result {
             Ok(buf) => {
                 self.wcoj_groupby_fusion_dispatch_count += 1;
                 Ok(Some(buf))
