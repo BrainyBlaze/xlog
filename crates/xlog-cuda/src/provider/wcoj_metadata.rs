@@ -2,14 +2,14 @@ use std::collections::BTreeMap;
 use std::ffi::c_void;
 
 use cudarc::driver::sys;
-use xlog_core::{Result, ScalarType, Schema, XlogError};
+use xlog_core::{AggOp, Result, ScalarType, Schema, XlogError};
 
-use super::{wcoj_kernels, CudaKernelProvider, WCOJ_MODULE};
+use super::{arith_kernels, wcoj_kernels, CudaKernelProvider, ARITH_MODULE, WCOJ_MODULE};
 use crate::device_runtime::StreamId;
 use crate::launch::LaunchRecorder;
 use crate::memory::{CudaColumn, TrackedCudaSlice};
 use crate::wcoj_metadata::{
-    WcojCycle4HgWorkPlanU32, WcojCycle4HgWorkPlanU64, WcojRelationMetadata,
+    WcojCycle4HgWorkPlanU32, WcojCycle4HgWorkPlanU64, WcojRelationMetadata, WcojRootAggValue,
     WcojTriangleHgCountPhaseU32, WcojTriangleHgWorkPlanU32, WcojTriangleHgWorkPlanU64,
 };
 use crate::{AsKernelParam, CudaBuffer, LaunchAsync, LaunchConfig};
@@ -551,6 +551,284 @@ impl CudaKernelProvider {
             &[(1, xlog_core::AggOp::Sum)],
             launch_stream,
         )
+    }
+
+    /// D1 widening — aggregate-fused triangle sum/min/max: evaluate
+    /// `q(X, agg(V)) :- e_xy(X,Y), e_yz(Y,Z), e_xz(X,Z)` with
+    /// `agg ∈ {Sum, Min, Max}` and `V ∈ {Y, Z}` grouped by the
+    /// variable-order root X, WITHOUT materializing the triangle rows.
+    ///
+    /// Pipeline (all recorded; the triangle result never exists as rows):
+    /// 1. the standard histogram-guided work plan;
+    /// 2. the per-op fused kernel accumulates, per e_xy row, a match count
+    ///    (compaction mask) and the per-row partial aggregate (integer
+    ///    atomics — order-insensitive, deterministic values). Sum partials
+    ///    are u64 (a per-row partial can exceed `u32::MAX`); min partials
+    ///    start at `u32::MAX`, max partials at 0;
+    /// 3. a 3-column (X, count, agg) staging buffer over the *input* rows
+    ///    is compacted to count>0 rows (groups with no completion must be
+    ///    absent) and reduced per X via the recorded groupby with the same
+    ///    `AggOp` (Sum over the u64 partials; Min/Max over u32).
+    ///
+    /// All reduction work is O(n_xy) — input-sized, never join-output-sized.
+    ///
+    /// Output schema matches the unfused materialize+groupby baseline:
+    /// `col0` = X (e_xy.col0 type, U32/Symbol), `col1` = U64 for Sum,
+    /// U32 for Min/Max.
+    ///
+    /// Bag semantics: every (Y, Z) completion contributes its value,
+    /// exactly like aggregating the materialized projection.
+    ///
+    /// # Errors
+    /// * `XlogError::Kernel` if `agg_op` is not Sum/Min/Max, the value
+    ///   columns are not plain U32, the manager has no runtime, the launch
+    ///   stream does not resolve, an input is not 2-column U32/Symbol, or
+    ///   any kernel launch fails.
+    pub fn wcoj_triangle_groupby_root_agg_u32_recorded(
+        &self,
+        e_xy: &CudaBuffer,
+        e_yz: &CudaBuffer,
+        e_xz: &CudaBuffer,
+        agg_op: AggOp,
+        value: WcojRootAggValue,
+        block_work_unit: u32,
+        launch_stream: StreamId,
+    ) -> Result<CudaBuffer> {
+        let ctx = "wcoj_triangle_groupby_root_agg_u32_recorded";
+        let (kernel_name, agg_elem_size, agg_scalar, agg_name) = match agg_op {
+            AggOp::Sum => (
+                wcoj_kernels::WCOJ_TRIANGLE_GROUPBY_ROOT_SUM_HG_U32,
+                std::mem::size_of::<u64>(),
+                ScalarType::U64,
+                "sum_0",
+            ),
+            AggOp::Min => (
+                wcoj_kernels::WCOJ_TRIANGLE_GROUPBY_ROOT_MIN_HG_U32,
+                std::mem::size_of::<u32>(),
+                ScalarType::U32,
+                "min_0",
+            ),
+            AggOp::Max => (
+                wcoj_kernels::WCOJ_TRIANGLE_GROUPBY_ROOT_MAX_HG_U32,
+                std::mem::size_of::<u32>(),
+                ScalarType::U32,
+                "max_0",
+            ),
+            other => {
+                return Err(XlogError::Kernel(format!(
+                    "{ctx}: unsupported AggOp {other:?} (Sum/Min/Max only; use \
+                     wcoj_triangle_groupby_root_count_u32_recorded for Count)"
+                )))
+            }
+        };
+        validate_binary_u32(ctx, "e_xy", e_xy)?;
+        validate_binary_u32(ctx, "e_yz", e_yz)?;
+        validate_binary_u32(ctx, "e_xz", e_xz)?;
+        // The aggregate value is arithmetic: require plain U32 value
+        // columns (Symbol ids are not summable/orderable data).
+        let value_cols: &[(&CudaBuffer, &str)] = match value {
+            WcojRootAggValue::Y => &[(e_xy, "e_xy")],
+            WcojRootAggValue::Z => &[(e_yz, "e_yz"), (e_xz, "e_xz")],
+        };
+        for (buf, label) in value_cols {
+            let ty = buf.schema().column_type(1).expect("validated 2-col");
+            if ty != ScalarType::U32 {
+                return Err(XlogError::Kernel(format!(
+                    "{ctx}: {label}.col1 supplies the aggregate value and must be U32, got {ty:?}"
+                )));
+            }
+        }
+
+        let plan = self.wcoj_triangle_hg_work_plan_u32_recorded(
+            e_xy,
+            e_yz,
+            e_xz,
+            block_work_unit,
+            launch_stream,
+        )?;
+        let n_xy = plan.row_count;
+        let x_type = e_xy.schema().column_type(0).expect("xy.col0 type");
+        let out_schema = Schema::new(vec![
+            ("x".to_string(), x_type),
+            (agg_name.to_string(), agg_scalar),
+        ]);
+        if n_xy == 0 || plan.total_work == 0 {
+            return self.create_empty_buffer(out_schema);
+        }
+
+        let runtime = self.memory().runtime().ok_or_else(|| {
+            XlogError::Kernel(format!("{ctx} requires a runtime-backed GpuMemoryManager"))
+        })?;
+        let cu_stream = runtime
+            .stream_pool()
+            .resolve(launch_stream)
+            .ok_or_else(|| {
+                XlogError::Kernel(format!(
+                    "{ctx}: launch_stream StreamId({}) does not resolve",
+                    launch_stream.0
+                ))
+            })?;
+
+        let yz_col1 = metadata_column_u32(e_yz, 1)?;
+        let xz_col1 = metadata_column_u32(e_xz, 1)?;
+        let xy_col1 = metadata_column_u32(e_xy, 1)?;
+        let n_yz = self.metadata_logical_rows(e_yz)?;
+        let n_xz = self.metadata_logical_rows(e_xz)?;
+        let value_from_z: u32 = match value {
+            WcojRootAggValue::Y => 0,
+            WcojRootAggValue::Z => 1,
+        };
+
+        // Per-e_xy-row match counters + aggregate partials, allocated as
+        // the u8-backed column layout so the arrays double as the staging
+        // buffer's columns after the kernel fills them.
+        let mut row_counts = self
+            .memory()
+            .alloc::<u8>(n_xy as usize * std::mem::size_of::<u32>())?;
+        self.device()
+            .inner()
+            .memset_zeros(&mut row_counts)
+            .map_err(|e| XlogError::Kernel(format!("{ctx}: zero row counts failed: {e}")))?;
+        let mut row_agg = self.memory().alloc::<u8>(n_xy as usize * agg_elem_size)?;
+        self.device()
+            .inner()
+            .memset_zeros(&mut row_agg)
+            .map_err(|e| XlogError::Kernel(format!("{ctx}: zero row aggregates failed: {e}")))?;
+
+        let grid = plan.total_work.div_ceil(plan.block_work_unit);
+        let mut rec = LaunchRecorder::new_strict(launch_stream);
+        rec.read(e_xy.num_rows_device());
+        rec.read(e_yz.num_rows_device());
+        rec.read(e_xz.num_rows_device());
+        rec.read_column(e_yz.column(1).expect("yz.col1"));
+        rec.read_column(e_xz.column(1).expect("xz.col1"));
+        rec.read_column(e_xy.column(1).expect("xy.col1"));
+        rec.read(&plan.xy_work_prefix);
+        rec.read(&plan.xy_yz_start);
+        rec.read(&plan.xy_yz_end);
+        rec.read(&plan.xy_xz_start);
+        rec.read(&plan.xy_xz_end);
+        rec.write(&row_counts);
+        rec.write(&row_agg);
+        rec.preflight(runtime)
+            .map_err(|e| XlogError::Kernel(format!("{ctx}: preflight failed: {e}")))?;
+        if matches!(agg_op, AggOp::Min) {
+            // Min identity: u32::MAX (compaction drops untouched rows).
+            let fill = self
+                .device()
+                .inner()
+                .get_func(ARITH_MODULE, arith_kernels::ARITH_FILL_CONST_U32)
+                .ok_or_else(|| {
+                    XlogError::Kernel("arith_fill_const_u32 kernel not found".to_string())
+                })?;
+            let row_agg_u32 = unsafe { reinterpret_u8_as_u32(&mut row_agg) };
+            // SAFETY: arith_fill_const_u32(value, n, output)
+            unsafe {
+                fill.clone()
+                    .launch_on_stream(
+                        &cu_stream,
+                        LaunchConfig::for_num_elems(n_xy),
+                        (u32::MAX, n_xy, &mut *row_agg_u32),
+                    )
+                    .map_err(|e| {
+                        XlogError::Kernel(format!("{ctx}: min identity fill failed: {e}"))
+                    })?;
+            }
+        }
+        {
+            let kernel = self
+                .device()
+                .inner()
+                .get_func(WCOJ_MODULE, kernel_name)
+                .ok_or_else(|| {
+                    XlogError::Kernel(format!("{kernel_name} kernel not found"))
+                })?;
+            let mut params: Vec<*mut c_void> = vec![
+                yz_col1.as_kernel_param(),
+                n_yz.as_kernel_param(),
+                xz_col1.as_kernel_param(),
+                n_xz.as_kernel_param(),
+                xy_col1.as_kernel_param(),
+                value_from_z.as_kernel_param(),
+                (&plan.xy_work_prefix).as_kernel_param(),
+                (&plan.xy_yz_start).as_kernel_param(),
+                (&plan.xy_yz_end).as_kernel_param(),
+                (&plan.xy_xz_start).as_kernel_param(),
+                (&plan.xy_xz_end).as_kernel_param(),
+                plan.row_count.as_kernel_param(),
+                plan.total_work.as_kernel_param(),
+                plan.block_work_unit.as_kernel_param(),
+                (&row_counts).as_kernel_param(),
+                (&row_agg).as_kernel_param(),
+            ];
+            unsafe {
+                kernel
+                    .clone()
+                    .launch_on_stream(
+                        &cu_stream,
+                        LaunchConfig {
+                            grid_dim: (grid, 1, 1),
+                            block_dim: (BLOCK_SIZE, 1, 1),
+                            shared_mem_bytes: 0,
+                        },
+                        &mut params,
+                    )
+                    .map_err(|e| {
+                        XlogError::Kernel(format!("{ctx}: groupby-agg launch failed: {e}"))
+                    })?;
+            }
+        }
+        rec.commit(runtime)
+            .map_err(|e| XlogError::Kernel(format!("{ctx}: commit failed: {e}")))?;
+
+        // Staging buffer (X, count, agg) over the n_xy input rows: X is a
+        // device-to-device copy of e_xy.col0; count and agg are the
+        // kernel-filled arrays. Rows stay lex-sorted by X.
+        let x_src = match e_xy.column(0).expect("xy.col0") {
+            CudaColumn::Owned(slice) => slice,
+            _ => {
+                return Err(XlogError::Kernel(format!(
+                    "{ctx}: e_xy.col0 must be an owned CudaColumn"
+                )))
+            }
+        };
+        let mut x_copy = self
+            .memory()
+            .alloc::<u8>(n_xy as usize * std::mem::size_of::<u32>())?;
+        self.device()
+            .inner()
+            .dtod_copy(x_src, &mut x_copy)
+            .map_err(|e| XlogError::Kernel(format!("{ctx}: copy X column failed: {e}")))?;
+        let mut d_num_rows = self.memory().alloc::<u32>(1)?;
+        self.device()
+            .inner()
+            .dtod_copy(e_xy.num_rows_device(), &mut d_num_rows)
+            .map_err(|e| XlogError::Kernel(format!("{ctx}: copy row count failed: {e}")))?;
+        let staging_schema = Schema::new(vec![
+            ("x".to_string(), x_type),
+            ("count".to_string(), ScalarType::U32),
+            ("agg".to_string(), agg_scalar),
+        ]);
+        let staging = CudaBuffer::from_columns_with_host_count(
+            vec![x_copy.into(), row_counts.into(), row_agg.into()],
+            n_xy as u64,
+            d_num_rows,
+            staging_schema,
+            n_xy,
+        );
+
+        // Keep only roots with at least one completed triangle, then reduce
+        // per X with the same AggOp. Both steps run over input-sized data.
+        let mask = self.compare_const_mask_recorded::<u32>(
+            &staging,
+            1,
+            0u32,
+            crate::CompareOp::Gt,
+            launch_stream,
+        )?;
+        let compacted =
+            self.compact_buffer_by_device_mask_counted_recorded(&staging, &mask, launch_stream)?;
+        self.groupby_multi_agg_recorded(&compacted, &[0], &[(2, agg_op)], launch_stream)
     }
 
     pub fn wcoj_triangle_hg_count_phase_u32_recorded(

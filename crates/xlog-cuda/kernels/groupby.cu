@@ -108,6 +108,21 @@ extern "C" __global__ void groupby_sum(
     atomicAdd((unsigned long long*)&sums[group], (unsigned long long)values[tid]);
 }
 
+// Sum aggregation per group over u64 values (D1 widening: consumed by the
+// fused WCOJ root-sum path, whose per-row partial sums are already u64).
+extern "C" __global__ void groupby_sum_u64(
+    const uint64_t* __restrict__ values,
+    const uint32_t* __restrict__ group_ids,
+    uint32_t num_rows,
+    uint64_t* __restrict__ sums
+) {
+    uint32_t tid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (tid >= num_rows) return;
+
+    uint32_t group = group_ids[tid];
+    atomicAdd((unsigned long long*)&sums[group], (unsigned long long)values[tid]);
+}
+
 // Min aggregation per group
 extern "C" __global__ void groupby_min(
     const uint32_t* __restrict__ values,

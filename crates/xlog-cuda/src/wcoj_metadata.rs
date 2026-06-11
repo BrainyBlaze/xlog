@@ -45,6 +45,18 @@ pub struct WcojRelationMetadata<K: DeviceRepr> {
     pub row_count: u32,
 }
 
+/// D1 widening — which triangle output variable supplies the aggregate
+/// value for the fused group-by-root sum/min/max kernels. The group key is
+/// always the variable-order root X; the value must itself be a triangle
+/// output variable (Y or Z) so the kernel can read it during traversal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WcojRootAggValue {
+    /// Aggregate over Y (`e_xy.col1` of the root row).
+    Y,
+    /// Aggregate over Z (the matched intersection value).
+    Z,
+}
+
 pub struct WcojTriangleHgWorkPlanU32 {
     pub xy_work_prefix: TrackedCudaSlice<u32>,
     pub xy_yz_start: TrackedCudaSlice<u32>,
