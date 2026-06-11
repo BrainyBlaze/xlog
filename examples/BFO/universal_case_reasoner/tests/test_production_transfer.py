@@ -100,6 +100,19 @@ def test_public_benchmark_report_is_explicit_nonclaim_until_adapters_exist() -> 
     assert "MISSING_PUBLIC_SOTA_RUNNER" in report["blockers"]
 
 
+def test_artifact_provenance_records_current_git_sha() -> None:
+    runner = _runner_module()
+    expected_sha = subprocess.check_output(
+        ["git", "rev-parse", "HEAD"],
+        cwd=ROOT.parents[2],
+        text=True,
+    ).strip()
+
+    provenance = runner._artifact_provenance()
+
+    assert provenance["git_sha"] == expected_sha
+
+
 def test_cuda_ranking_hot_paths_do_not_materialize_host_scalars_or_score_rows() -> None:
     runner = _runner_module()
     hot_functions = [

@@ -10,6 +10,7 @@ import json
 import math
 import random
 import re
+import subprocess
 import time
 from pathlib import Path
 from typing import Any
@@ -2652,6 +2653,23 @@ def _public_benchmark_report() -> dict[str, Any]:
     }
 
 
+def _artifact_provenance() -> dict[str, Any]:
+    git_sha = subprocess.check_output(
+        ["git", "rev-parse", "HEAD"],
+        cwd=REPO_ROOT,
+        text=True,
+    ).strip()
+    branch = subprocess.check_output(
+        ["git", "branch", "--show-current"],
+        cwd=REPO_ROOT,
+        text=True,
+    ).strip()
+    return {
+        "git_sha": git_sha,
+        "branch": branch,
+    }
+
+
 GENERALIZATION_VARIANTS = [
     "clean",
     "noisy",
@@ -4033,8 +4051,10 @@ def run(
         and soak["duration_sec"] >= PRODUCTION_THRESHOLDS["soak_seconds"]
     )
     scope = "production" if production_scale else "development"
+    provenance = _artifact_provenance()
     payload = {
         "schema_version": 1,
+        **provenance,
         "status": "FAIL",
         "scope": scope,
         "domain_count": len(domain["domain_ids"]),
