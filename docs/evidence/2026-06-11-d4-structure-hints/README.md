@@ -113,6 +113,26 @@ family) showed the same shape: frontier 64/64, d4_compile_sec medians
 0.0843 off vs 0.0830 on (−1.5%) — direction flips between runs,
 confirming noise, not signal.
 
+Independent replication (2026-06-11, separate session, GPU otherwise idle,
+wall 337.0 s, exit 0): same harness at commit `c7b71bb7` — frontier_items
+64/64 in all 6 compiles; d4_compile_sec medians 0.0784 off vs 0.0830 on
+(+5.9%, off spread 0.0763..0.0886, on spread 0.0747..0.0870 — overlapping);
+verify_sec medians 55.53 off vs 53.85 on (−3%, off 51.9..58.2, on
+48.8..66.0 — overlapping); prob 0.439406864922 in all 6 compiles, < 1e-9
+from the host oracle. Third run, same shape: frontier insensitive to the
+hint, timing deltas flip sign across runs (noise).
+
+Suite status for that replication: full
+`cargo test -p xlog-prob --features host-io --release` green (exit 0,
+0 failed across all test binaries + `--lib` + key gates
+`test_v085_prob_aggregates` 8, `test_v085_aggregate_lifting` 5,
+`test_v085_approx` 4, `exact_ddnnf` 10). One prior full-suite pass had a
+single `gpu_xgcf_cached::cached_eval_matches_direct_eval` failure that
+occurred while a concurrent `cargo test -p xlog-cuda-tests --release` from
+another worktree was sharing the GPU; it passed in isolation and in the
+full re-run, and no code in this slice touches the XGCF cache path —
+root-caused as GPU-contention flake, not a regression.
+
 Scaling probe: a 19-fact 4-layer variant (`0 -> {1..4} -> {5..7} -> 8`)
 hard-fails D4 Phase-1 compilation in BOTH hint modes with a device-side
 trap (`Failed to zero level_counts: CUDA_ERROR_LAUNCH_FAILED`, surfaced at
