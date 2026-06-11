@@ -243,6 +243,21 @@ Checks:
 - Raw output paths.
 - Explanation paths.
 - Failure/blocker descriptions with exact requirement IDs.
+- Separate `showcase_metrics`, `generalization_report`, `dilp_report`, and
+  `public_benchmark_report` namespaces. The canonical baseline-uplift source is
+  `generalization_report.baseline_uplift`; legacy top-level baseline metrics or
+  `computed_metrics.baseline_metrics` must fail strict validation.
+
+## Public Benchmark Claim Boundary
+
+- `PUBLIC-SOTA-001` must be present in strict validation.
+- External SOTA requires runnable adapters, exact protocol/version hashes, and
+  baseline citations for AIOps RCA, clinical diagnosis, cross-domain ontology
+  shift, cybersecurity intrusion, manufacturing equipment/fault, PHM fault, and
+  root-cause AIOps benchmark families.
+- Until those adapters exist, `public_benchmark_report` must be fail-closed with
+  `external_sota_claim: false`, explicit blockers, and the missing required
+  families listed.
 
 ## XLOG Findings Output
 

@@ -549,6 +549,7 @@ def test_validation_plan_covers_all_p0_requirement_sections() -> None:
         "Bundle Reuse",
         "Scale And Performance",
         "Evidence Schema",
+        "Public Benchmark Claim Boundary",
     ]:
         assert section in plan
 

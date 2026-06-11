@@ -114,6 +114,14 @@ This directory contains:
   every P0 gate, and exact blockers for unsupported requirements.
 - `generalization_report` plus raw generalization prediction records that close
   `GEN-001` through `GEN-010` before making a robust-generalization claim.
+- `public_benchmark_report` that either records runnable public benchmark
+  coverage for every required family before any external SOTA claim, or
+  fail-closes with `external_sota_claim: false` and exact missing-family
+  blockers.
+- Separate `showcase_metrics`, `generalization_report`, `dilp_report`, and
+  `public_benchmark_report` namespaces; baseline uplift claims must come from
+  `generalization_report.baseline_uplift`, not legacy top-level
+  `baseline_metrics`.
 - `XLOG_FINDINGS.md`, `xlog_issue_ledger.json`, `proposed_fixes.md`, and
   `repro/` so the project reports what it revealed about XLOG, which runtime or
   pyxlog features are weak, and what upstream regression tests should be added.

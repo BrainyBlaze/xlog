@@ -116,6 +116,22 @@ evidence bundle that excludes a production domain from the aggregate.
   metrics from raw generalization prediction records and fail if any production
   domain is excluded.
 
+## Public Benchmark Claim Boundary
+
+- PUBLIC-SOTA-001 PUBLIC_BENCHMARK_STATE: strict validation must include a
+  `public_benchmark_report`.
+- External SOTA may be claimed only when runnable public benchmark adapters
+  cover every required family, exact split/protocol/version hashes are recorded,
+  baseline citations are present, and the public benchmark report status is
+  `PASS`.
+- If public benchmark adapters are not yet implemented, the report must mark
+  `external_sota_claim: false`, include fail-closed blockers, and leave covered
+  public benchmark families empty or partial. This can preserve a local
+  production/generalization claim, but it is not an external SOTA claim.
+- Required public benchmark families: AIOps RCA, clinical diagnosis,
+  cross-domain ontology shift, cybersecurity intrusion, manufacturing
+  equipment/fault, PHM fault, and root-cause AIOps.
+
 ## Device-Resident Execution
 
 - Data-plane D2H transfers in the hot loop: 0.
@@ -160,3 +176,9 @@ Production profile minimums:
 - Raw output paths.
 - Explanation paths.
 - Failure/blocker descriptions with exact requirement IDs.
+- `showcase_metrics`, `generalization_report`, `dilp_report`, and
+  `public_benchmark_report` as separate evidence namespaces. Legacy top-level
+  `baseline_metrics`, top-level baseline uplift fields, or
+  `computed_metrics.baseline_metrics` are invalid because
+  `generalization_report.baseline_uplift` is the canonical baseline-uplift
+  source.
