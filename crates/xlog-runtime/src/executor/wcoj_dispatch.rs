@@ -1642,10 +1642,30 @@ impl Executor {
             Some(b) => b,
             None => return Ok(None),
         };
-        for buf in [buf_e1, buf_e2, buf_e3, buf_e4] {
-            if classify_two_col_wcoj_width(buf) != Some(WcojKeyWidth::FourByte) {
-                return Ok(None);
-            }
+        let width = match (
+            classify_two_col_wcoj_width(buf_e1),
+            classify_two_col_wcoj_width(buf_e2),
+            classify_two_col_wcoj_width(buf_e3),
+            classify_two_col_wcoj_width(buf_e4),
+        ) {
+            (
+                Some(WcojKeyWidth::FourByte),
+                Some(WcojKeyWidth::FourByte),
+                Some(WcojKeyWidth::FourByte),
+                Some(WcojKeyWidth::FourByte),
+            ) => WcojKeyWidth::FourByte,
+            (
+                Some(WcojKeyWidth::EightByte),
+                Some(WcojKeyWidth::EightByte),
+                Some(WcojKeyWidth::EightByte),
+                Some(WcojKeyWidth::EightByte),
+            ) => WcojKeyWidth::EightByte,
+            _ => return Ok(None),
+        };
+        // Sum/Min/Max are 4-byte-only (u64-key 4-cycle sum/min/max fusion
+        // is deferred and declines to materialize+groupby).
+        if agg_value.is_some() && width != WcojKeyWidth::FourByte {
+            return Ok(None);
         }
         // Sum/Min/Max are arithmetic: the column supplying the value must
         // be plain U32 (Symbol ids are not summable/orderable data — and
@@ -1675,16 +1695,31 @@ impl Executor {
             agg_value.is_some() || matches!(agg_op, AggOp::Count),
             "non-Count aggregates resolve a value column above"
         );
-        let result = match agg_value {
-            None => self.provider.wcoj_4cycle_groupby_root_count_u32_recorded(
-                buf_e1,
-                buf_e2,
-                buf_e3,
-                buf_e4,
-                wcoj_block_work_unit(),
-                launch_stream,
-            ),
-            Some(value) => self.provider.wcoj_4cycle_groupby_root_agg_u32_recorded(
+        let result = match (agg_value, width) {
+            (None, WcojKeyWidth::FourByte) => {
+                self.provider.wcoj_4cycle_groupby_root_count_u32_recorded(
+                    buf_e1,
+                    buf_e2,
+                    buf_e3,
+                    buf_e4,
+                    wcoj_block_work_unit(),
+                    launch_stream,
+                )
+            }
+            // S1d slice 2: u64-key count through the metadata-driven
+            // segment reduction (the recorded groupby is U32/Symbol-key
+            // only).
+            (None, WcojKeyWidth::EightByte) => {
+                self.provider.wcoj_4cycle_groupby_root_count_u64_recorded(
+                    buf_e1,
+                    buf_e2,
+                    buf_e3,
+                    buf_e4,
+                    wcoj_block_work_unit(),
+                    launch_stream,
+                )
+            }
+            (Some(value), _) => self.provider.wcoj_4cycle_groupby_root_agg_u32_recorded(
                 buf_e1,
                 buf_e2,
                 buf_e3,

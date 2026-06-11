@@ -358,6 +358,8 @@ pub mod wcoj_kernels {
     pub const WCOJ_4CYCLE_BUILD_E2_WORK_PREFIX_U64: &str = "wcoj_4cycle_build_e2_work_prefix_u64";
     pub const WCOJ_4CYCLE_BUILD_HG_WORK_PLAN_U64: &str = "wcoj_4cycle_build_hg_work_plan_u64";
     pub const WCOJ_4CYCLE_COUNT_HG_U64: &str = "wcoj_4cycle_count_hg_u64";
+    pub const WCOJ_4CYCLE_GROUPBY_ROOT_COUNT_HG_U64: &str =
+        "wcoj_4cycle_groupby_root_count_hg_u64";
     pub const WCOJ_4CYCLE_MATERIALIZE_HG_U64: &str = "wcoj_4cycle_materialize_hg_u64";
     // W3.2/W6.4 — General-arity clique kernels (k=5..8 from single template).
     pub const WCOJ_CLIQUE5_COUNT_HG_U32: &str = "wcoj_clique5_count_hg_u32";

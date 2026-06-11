@@ -487,3 +487,384 @@ fn s1c_measurement_4cycle_count_fused_vs_unfused() {
         );
     }
 }
+
+// =====================================================================
+// S1d slice 2 — u64-key 4-cycle count fusion.
+// =====================================================================
+
+fn upload_binary_u64(memory: &Arc<GpuMemoryManager>, rows: &[(u64, u64)]) -> CudaBuffer {
+    let n = rows.len() as u32;
+    let mut col0 = memory
+        .alloc::<u8>(rows.len() * std::mem::size_of::<u64>())
+        .expect("alloc col0");
+    let mut col1 = memory
+        .alloc::<u8>(rows.len() * std::mem::size_of::<u64>())
+        .expect("alloc col1");
+    let mut d_num_rows = memory.alloc::<u32>(1).expect("alloc d_num_rows");
+    let col0_bytes: Vec<u8> = rows.iter().flat_map(|(a, _)| a.to_le_bytes()).collect();
+    let col1_bytes: Vec<u8> = rows.iter().flat_map(|(_, b)| b.to_le_bytes()).collect();
+    let device = memory.device().inner();
+    device
+        .htod_sync_copy_into(&col0_bytes, &mut col0)
+        .expect("htod col0");
+    device
+        .htod_sync_copy_into(&col1_bytes, &mut col1)
+        .expect("htod col1");
+    device
+        .htod_sync_copy_into(&[n], &mut d_num_rows)
+        .expect("htod d_num_rows");
+    let schema = Schema::new(vec![
+        ("col0".to_string(), ScalarType::U64),
+        ("col1".to_string(), ScalarType::U64),
+    ]);
+    CudaBuffer::from_columns_with_host_count(
+        vec![col0.into(), col1.into()],
+        n as u64,
+        d_num_rows,
+        schema,
+        n,
+    )
+}
+
+/// Sorted (W, count) pairs from a 2-column (U64 key, U64 count) buffer.
+fn download_group_counts_u64(
+    memory: &Arc<GpuMemoryManager>,
+    buffer: &CudaBuffer,
+) -> Vec<(u64, u64)> {
+    let keys = download_u64_column(memory, buffer, 0);
+    let counts = download_u64_column(memory, buffer, 1);
+    assert_eq!(keys.len(), counts.len());
+    let mut out: Vec<(u64, u64)> = keys.into_iter().zip(counts).collect();
+    out.sort();
+    out
+}
+
+/// Host brute-force oracle, u64 keys: per-W count of (X, Y, Z) 4-cycle
+/// completions.
+fn oracle_group_counts_u64(
+    e1: &[(u64, u64)],
+    e2: &[(u64, u64)],
+    e3: &[(u64, u64)],
+    e4: &[(u64, u64)],
+) -> Vec<(u64, u64)> {
+    let e4_set: BTreeSet<(u64, u64)> = e4.iter().copied().collect();
+    let mut e2_by_x: BTreeMap<u64, Vec<u64>> = BTreeMap::new();
+    for (x, y) in e2 {
+        e2_by_x.entry(*x).or_default().push(*y);
+    }
+    let mut e3_by_y: BTreeMap<u64, Vec<u64>> = BTreeMap::new();
+    for (y, z) in e3 {
+        e3_by_y.entry(*y).or_default().push(*z);
+    }
+    let mut counts: BTreeMap<u64, u64> = BTreeMap::new();
+    for (w, x) in e1 {
+        if let Some(ys) = e2_by_x.get(x) {
+            for y in ys {
+                if let Some(zs) = e3_by_y.get(y) {
+                    for z in zs {
+                        if e4_set.contains(&(*z, *w)) {
+                            *counts.entry(*w).or_default() += 1;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    counts.into_iter().collect()
+}
+
+fn sorted_unique_u64(rows: impl IntoIterator<Item = (u64, u64)>) -> Vec<(u64, u64)> {
+    let set: BTreeSet<(u64, u64)> = rows.into_iter().collect();
+    set.into_iter().collect()
+}
+
+fn run_case_u64(
+    name: &str,
+    e1_rows: &[(u64, u64)],
+    e2_rows: &[(u64, u64)],
+    e3_rows: &[(u64, u64)],
+    e4_rows: &[(u64, u64)],
+) {
+    let Some(fix) = make_fixture() else {
+        eprintln!("skipping {name}: no CUDA device");
+        return;
+    };
+    let expected = oracle_group_counts_u64(e1_rows, e2_rows, e3_rows, e4_rows);
+    assert!(
+        !expected.is_empty(),
+        "{name}: fixture must contain at least one 4-cycle"
+    );
+
+    let e1 = upload_binary_u64(&fix.memory, e1_rows);
+    let e2 = upload_binary_u64(&fix.memory, e2_rows);
+    let e3 = upload_binary_u64(&fix.memory, e3_rows);
+    let e4 = upload_binary_u64(&fix.memory, e4_rows);
+
+    // Unfused production baseline: materialize u64 4-cycles, groupby count
+    // (the legacy groupby is the u64-key route).
+    let stream = fix.pool.acquire().expect("stream");
+    let quads = fix
+        .provider
+        .wcoj_4cycle_hg_u64_recorded(&e1, &e2, &e3, &e4, WCOJ_HG_BLOCK_WORK_UNIT_DEFAULT, stream)
+        .expect("baseline u64 4-cycle materialize");
+    let grouped = fix
+        .provider
+        .groupby_multi_agg(&quads, &[0], &[(1, AggOp::Count)])
+        .expect("baseline u64 groupby count");
+    let baseline = download_group_counts_u64(&fix.memory, &grouped);
+    assert_eq!(baseline, expected, "{name}: unfused u64 baseline vs oracle");
+
+    let fused = fix
+        .provider
+        .wcoj_4cycle_groupby_root_count_u64_recorded(
+            &e1,
+            &e2,
+            &e3,
+            &e4,
+            WCOJ_HG_BLOCK_WORK_UNIT_DEFAULT,
+            stream,
+        )
+        .expect("fused u64 4-cycle groupby-root count");
+    let fused = download_group_counts_u64(&fix.memory, &fused);
+    assert_eq!(fused, expected, "{name}: fused u64 vs oracle");
+}
+
+#[test]
+fn cycle4_groupby_root_count_u64_matches_oracle_small() {
+    // Same small fixture shifted above 2^33 so width truncation visibly
+    // fails.
+    const B: u64 = 1 << 33;
+    let map = |rows: &[(u32, u32)]| -> Vec<(u64, u64)> {
+        sorted_unique_u64(rows.iter().map(|&(a, b)| (B + a as u64, B + b as u64)))
+    };
+    let e1 = map(&[(1, 10), (1, 11), (2, 10), (3, 12)]);
+    let e2 = map(&[(10, 20), (10, 21), (11, 20), (12, 22)]);
+    let e3 = map(&[(20, 30), (21, 30), (22, 31)]);
+    let e4 = map(&[(30, 1), (30, 2), (31, 9)]);
+    run_case_u64("cycle4_u64_small", &e1, &e2, &e3, &e4);
+}
+
+#[test]
+fn cycle4_groupby_root_count_u64_matches_oracle_skewed_hub() {
+    // Hub W=B with 256 X-fanout, shared Y/Z bands, keys above 2^40.
+    const B: u64 = 1 << 40;
+    let mut e1: Vec<(u64, u64)> = Vec::new();
+    let mut e2: Vec<(u64, u64)> = Vec::new();
+    let mut e3: Vec<(u64, u64)> = Vec::new();
+    let mut e4: Vec<(u64, u64)> = Vec::new();
+    for x in 1..=256u64 {
+        e1.push((B, B + x));
+        for y in 1000..1008u64 {
+            e2.push((B + x, B + y));
+        }
+    }
+    for y in 1000..1008u64 {
+        for z in 2000..2008u64 {
+            e3.push((B + y, B + z));
+        }
+    }
+    for z in 2000..2008u64 {
+        e4.push((B + z, B));
+    }
+    for i in 0..200u64 {
+        let (a, b, c, d) = (B + 10_000 + i, B + 20_000 + i, B + 30_000 + i, B + 40_000 + i);
+        e1.push((a, b));
+        e2.push((b, c));
+        e3.push((c, d));
+        e4.push((d, a));
+    }
+    let e1 = sorted_unique_u64(e1);
+    let e2 = sorted_unique_u64(e2);
+    let e3 = sorted_unique_u64(e3);
+    let e4 = sorted_unique_u64(e4);
+    run_case_u64("cycle4_u64_skewed_hub", &e1, &e2, &e3, &e4);
+}
+
+#[test]
+fn cycle4_groupby_root_count_u64_empty_intersection_roots_are_absent() {
+    const B: u64 = 1 << 33;
+    let map = |rows: &[(u32, u32)]| -> Vec<(u64, u64)> {
+        sorted_unique_u64(rows.iter().map(|&(a, b)| (B + a as u64, B + b as u64)))
+    };
+    let e1 = map(&[(1, 10), (9, 10), (9, 11)]);
+    let e2 = map(&[(10, 20)]);
+    let e3 = map(&[(20, 30)]);
+    let e4 = map(&[(30, 1)]);
+
+    let Some(fix) = make_fixture() else {
+        eprintln!("skipping cycle4_u64_empty_intersection: no CUDA device");
+        return;
+    };
+    let e1_b = upload_binary_u64(&fix.memory, &e1);
+    let e2_b = upload_binary_u64(&fix.memory, &e2);
+    let e3_b = upload_binary_u64(&fix.memory, &e3);
+    let e4_b = upload_binary_u64(&fix.memory, &e4);
+    let stream = fix.pool.acquire().expect("stream");
+    let fused = fix
+        .provider
+        .wcoj_4cycle_groupby_root_count_u64_recorded(
+            &e1_b,
+            &e2_b,
+            &e3_b,
+            &e4_b,
+            WCOJ_HG_BLOCK_WORK_UNIT_DEFAULT,
+            stream,
+        )
+        .expect("fused u64 4-cycle groupby-root count");
+    let fused = download_group_counts_u64(&fix.memory, &fused);
+    assert_eq!(fused, vec![(B + 1, 1u64)], "only W=B+1 closes a 4-cycle");
+}
+
+/// S1d measurement, u64-key 4-cycle count (gate: fused >= 3x vs unfused on
+/// the skewed 4-cycle fixture). Run explicitly:
+/// `cargo test -p xlog-cuda-tests --test test_wcoj_4cycle_groupby_root_count \
+///    --release -- --ignored s1d_measurement_4cycle_count_u64 --nocapture`
+#[test]
+#[ignore = "S1d measurement: run explicitly with --ignored --nocapture"]
+fn s1d_measurement_4cycle_count_u64_fused_vs_unfused() {
+    let Some(fix) = make_fixture() else {
+        eprintln!("skipping s1d_measurement_u64: no CUDA device");
+        return;
+    };
+
+    // Hub W=B with n_x X-fanout above 2^40; X values share a 16-wide Y
+    // band; Y values share a 16-wide Z band; every Z closes back to W=B.
+    // Completions per root row: 256.
+    const B: u64 = 1 << 40;
+    let hub = |n_x: u64| {
+        let mut e1 = Vec::new();
+        let mut e2 = Vec::new();
+        let mut e3 = Vec::new();
+        let mut e4 = Vec::new();
+        for x in 1..=n_x {
+            e1.push((B, B + x));
+            for y in 0..16u64 {
+                e2.push((B + x, B + 1_000_000 + y));
+            }
+        }
+        for y in 0..16u64 {
+            for z in 0..16u64 {
+                e3.push((B + 1_000_000 + y, B + 2_000_000 + z));
+            }
+        }
+        for z in 0..16u64 {
+            e4.push((B + 2_000_000 + z, B));
+        }
+        for i in 0..1000u64 {
+            let (a, b, c, d) = (
+                B + 3_000_000 + i,
+                B + 4_000_000 + i,
+                B + 5_000_000 + i,
+                B + 6_000_000 + i,
+            );
+            e1.push((a, b));
+            e2.push((b, c));
+            e3.push((c, d));
+            e4.push((d, a));
+        }
+        (
+            sorted_unique_u64(e1),
+            sorted_unique_u64(e2),
+            sorted_unique_u64(e3),
+            sorted_unique_u64(e4),
+        )
+    };
+
+    let (e1_rows, e2_rows, e3_rows, e4_rows) = hub(10_000);
+    let expected = oracle_group_counts_u64(&e1_rows, &e2_rows, &e3_rows, &e4_rows);
+    let e1 = upload_binary_u64(&fix.memory, &e1_rows);
+    let e2 = upload_binary_u64(&fix.memory, &e2_rows);
+    let e3 = upload_binary_u64(&fix.memory, &e3_rows);
+    let e4 = upload_binary_u64(&fix.memory, &e4_rows);
+
+    // One stream reused across reps (grow-only StreamPool).
+    let stream = fix.pool.acquire().expect("stream");
+    // Warmup + parity for both paths.
+    let warm_quads = fix
+        .provider
+        .wcoj_4cycle_hg_u64_recorded(&e1, &e2, &e3, &e4, WCOJ_HG_BLOCK_WORK_UNIT_DEFAULT, stream)
+        .expect("baseline warmup");
+    let warm_grouped = fix
+        .provider
+        .groupby_multi_agg(&warm_quads, &[0], &[(1, AggOp::Count)])
+        .expect("baseline warmup groupby");
+    assert_eq!(
+        download_group_counts_u64(&fix.memory, &warm_grouped),
+        expected,
+        "u64 unfused parity"
+    );
+    drop(warm_grouped);
+    drop(warm_quads);
+    let warm = fix
+        .provider
+        .wcoj_4cycle_groupby_root_count_u64_recorded(
+            &e1,
+            &e2,
+            &e3,
+            &e4,
+            WCOJ_HG_BLOCK_WORK_UNIT_DEFAULT,
+            stream,
+        )
+        .expect("fused warmup");
+    assert_eq!(
+        download_group_counts_u64(&fix.memory, &warm),
+        expected,
+        "u64 fused parity"
+    );
+    drop(warm);
+
+    const REPS: usize = 5;
+    let mut unfused_ms = Vec::with_capacity(REPS);
+    let mut fused_ms = Vec::with_capacity(REPS);
+    for _ in 0..REPS {
+        let t = std::time::Instant::now();
+        let quads = fix
+            .provider
+            .wcoj_4cycle_hg_u64_recorded(
+                &e1,
+                &e2,
+                &e3,
+                &e4,
+                WCOJ_HG_BLOCK_WORK_UNIT_DEFAULT,
+                stream,
+            )
+            .expect("baseline 4-cycle");
+        let grouped = fix
+            .provider
+            .groupby_multi_agg(&quads, &[0], &[(1, AggOp::Count)])
+            .expect("baseline groupby");
+        fix.provider.device().inner().synchronize().expect("sync");
+        unfused_ms.push(t.elapsed().as_secs_f64() * 1e3);
+        drop(grouped);
+        drop(quads);
+
+        let t = std::time::Instant::now();
+        let fused = fix
+            .provider
+            .wcoj_4cycle_groupby_root_count_u64_recorded(
+                &e1,
+                &e2,
+                &e3,
+                &e4,
+                WCOJ_HG_BLOCK_WORK_UNIT_DEFAULT,
+                stream,
+            )
+            .expect("fused");
+        fix.provider.device().inner().synchronize().expect("sync");
+        fused_ms.push(t.elapsed().as_secs_f64() * 1e3);
+        drop(fused);
+    }
+    unfused_ms.sort_by(|a, b| a.total_cmp(b));
+    fused_ms.sort_by(|a, b| a.total_cmp(b));
+    let med_unfused = unfused_ms[REPS / 2];
+    let med_fused = fused_ms[REPS / 2];
+    println!(
+        "S1d cycle4_u64_hub_10k count: unfused median {med_unfused:.3} ms, fused median \
+         {med_fused:.3} ms, speedup {:.2}x (n_e1={}, n_e2={}, n_e3={}, n_e4={})",
+        med_unfused / med_fused,
+        e1_rows.len(),
+        e2_rows.len(),
+        e3_rows.len(),
+        e4_rows.len()
+    );
+}

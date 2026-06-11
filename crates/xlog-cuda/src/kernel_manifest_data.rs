@@ -528,6 +528,7 @@ pub const KERNEL_MODULES: &[KernelModuleSpec] = &[
             "wcoj_4cycle_build_e2_work_prefix_u64",
             "wcoj_4cycle_build_hg_work_plan_u64",
             "wcoj_4cycle_count_hg_u64",
+            "wcoj_4cycle_groupby_root_count_hg_u64",
             "wcoj_4cycle_materialize_hg_u64",
             // W3.2/W6.4 — General-arity clique kernel (k=5..8 from
             // single C++ template; ABI wrappers below are

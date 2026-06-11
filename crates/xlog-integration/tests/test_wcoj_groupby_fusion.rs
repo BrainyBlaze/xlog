@@ -976,6 +976,53 @@ fn groupby_fusion_4cycle_symbol_valued_min_declines_and_unfused_rejects() {
     );
 }
 
+/// S1d slice 2 — u64-key 4-cycle count fusion: same 4-cycle fixture
+/// shifted above 2^33 so width truncation visibly fails.
+#[test]
+fn groupby_fusion_4cycle_count_u64_fires_end_to_end_with_parity() {
+    let Some(fix) = make_fixture() else {
+        eprintln!("Skipping: CUDA runtime unavailable");
+        return;
+    };
+    let _guard = env_lock();
+    let source = "agg(W, count(Z)) :- e1(W, X), e2(X, Y), e3(Y, Z), e4(Z, W).";
+
+    const B: u64 = 1 << 33;
+    let mut inputs: BTreeMap<&str, Vec<(u64, u64)>> = BTreeMap::new();
+    for (name, rows) in cycle4_inputs() {
+        inputs.insert(
+            name,
+            rows.iter()
+                .map(|&(a, b)| (B + a as u64, B + b as u64))
+                .collect(),
+        );
+    }
+    let expected = vec![(B + 1, 3u64), (B + 2, 2)];
+
+    // Phase 1: fused u64 4-cycle path fires and is correct.
+    let (fused_rows, fused_count) = run_agg_program_u64(&fix, source, &inputs);
+    assert_eq!(fused_rows, expected, "fused u64 4-cycle count row set");
+    assert_eq!(
+        fused_count, 1,
+        "fused u64 4-cycle group-by-root count dispatch must fire exactly once"
+    );
+
+    // Phase 2: kill switch forces the materialize+groupby path.
+    // SAFETY: serialized by ENV_LOCK; restored below.
+    unsafe {
+        std::env::set_var("XLOG_DISABLE_WCOJ_GROUPBY_FUSION", "1");
+    }
+    let (unfused_rows, unfused_count) = run_agg_program_u64(&fix, source, &inputs);
+    unsafe {
+        std::env::remove_var("XLOG_DISABLE_WCOJ_GROUPBY_FUSION");
+    }
+    assert_eq!(
+        unfused_rows, expected,
+        "kill-switch u64 4-cycle count row set"
+    );
+    assert_eq!(unfused_count, 0, "kill switch must keep the counter at 0");
+}
+
 #[test]
 fn groupby_fusion_sum_declines_non_triangle_shape() {
     let Some(fix) = make_fixture() else {
