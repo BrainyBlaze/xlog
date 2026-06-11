@@ -833,23 +833,146 @@ fn groupby_fusion_4cycle_count_fires_end_to_end_with_parity() {
     assert_eq!(unfused_count, 0, "kill switch must keep the counter at 0");
 }
 
+/// S1d fused-vs-kill-switch phases for one u64-valued 4-cycle aggregate
+/// source (sum).
+fn assert_4cycle_fusion_parity_u64(fix: &Fixture, source: &str, expected: &[(u32, u64)]) {
+    let _guard = env_lock();
+    let inputs = cycle4_inputs();
+    let (fused, fused_count) = run_agg_program(fix, source, &inputs, download_group_counts);
+    assert_eq!(fused, expected, "fused path row set: {source}");
+    assert_eq!(fused_count, 1, "fused dispatch must fire once: {source}");
+
+    // SAFETY: serialized by ENV_LOCK; restored below.
+    unsafe {
+        std::env::set_var("XLOG_DISABLE_WCOJ_GROUPBY_FUSION", "1");
+    }
+    let (unfused, unfused_count) = run_agg_program(fix, source, &inputs, download_group_counts);
+    unsafe {
+        std::env::remove_var("XLOG_DISABLE_WCOJ_GROUPBY_FUSION");
+    }
+    assert_eq!(unfused, expected, "kill-switch path row set: {source}");
+    assert_eq!(unfused_count, 0, "kill switch must keep the counter at 0");
+}
+
+/// S1d fused-vs-kill-switch phases for one u32-valued 4-cycle aggregate
+/// source (min/max).
+fn assert_4cycle_fusion_parity_u32(fix: &Fixture, source: &str, expected: &[(u32, u32)]) {
+    let _guard = env_lock();
+    let inputs = cycle4_inputs();
+    let (fused, fused_count) = run_agg_program(fix, source, &inputs, download_groups_u32);
+    assert_eq!(fused, expected, "fused path row set: {source}");
+    assert_eq!(fused_count, 1, "fused dispatch must fire once: {source}");
+
+    // SAFETY: serialized by ENV_LOCK; restored below.
+    unsafe {
+        std::env::set_var("XLOG_DISABLE_WCOJ_GROUPBY_FUSION", "1");
+    }
+    let (unfused, unfused_count) = run_agg_program(fix, source, &inputs, download_groups_u32);
+    unsafe {
+        std::env::remove_var("XLOG_DISABLE_WCOJ_GROUPBY_FUSION");
+    }
+    assert_eq!(unfused, expected, "kill-switch path row set: {source}");
+    assert_eq!(unfused_count, 0, "kill switch must keep the counter at 0");
+}
+
 #[test]
-fn groupby_fusion_4cycle_sum_declines_to_unfused() {
-    // Only Count is fused for the 4-cycle shape: sum must decline silently
-    // (counter == 0) and the standard path must produce the correct sums.
+fn groupby_fusion_4cycle_sum_z_fires_end_to_end_with_parity() {
+    let Some(fix) = make_fixture() else {
+        eprintln!("Skipping: CUDA runtime unavailable");
+        return;
+    };
+    // W=1: 30+30+30 = 90; W=2: 30+30 = 60.
+    assert_4cycle_fusion_parity_u64(
+        &fix,
+        "agg(W, sum(Z)) :- e1(W, X), e2(X, Y), e3(Y, Z), e4(Z, W).",
+        &[(1u32, 90u64), (2, 60)],
+    );
+}
+
+#[test]
+fn groupby_fusion_4cycle_sum_x_fires_end_to_end_with_parity() {
+    let Some(fix) = make_fixture() else {
+        eprintln!("Skipping: CUDA runtime unavailable");
+        return;
+    };
+    // W=1: 10+10+11 = 31; W=2: 10+10 = 20.
+    assert_4cycle_fusion_parity_u64(
+        &fix,
+        "agg(W, sum(X)) :- e1(W, X), e2(X, Y), e3(Y, Z), e4(Z, W).",
+        &[(1u32, 31u64), (2, 20)],
+    );
+}
+
+#[test]
+fn groupby_fusion_4cycle_min_x_fires_end_to_end_with_parity() {
+    let Some(fix) = make_fixture() else {
+        eprintln!("Skipping: CUDA runtime unavailable");
+        return;
+    };
+    // W=1: min(10, 10, 11) = 10; W=2: min(10, 10) = 10.
+    assert_4cycle_fusion_parity_u32(
+        &fix,
+        "agg(W, min(X)) :- e1(W, X), e2(X, Y), e3(Y, Z), e4(Z, W).",
+        &[(1u32, 10u32), (2, 10)],
+    );
+}
+
+#[test]
+fn groupby_fusion_4cycle_max_y_fires_end_to_end_with_parity() {
+    let Some(fix) = make_fixture() else {
+        eprintln!("Skipping: CUDA runtime unavailable");
+        return;
+    };
+    // W=1: max(20, 21, 20) = 21; W=2: max(20, 21) = 21.
+    assert_4cycle_fusion_parity_u32(
+        &fix,
+        "agg(W, max(Y)) :- e1(W, X), e2(X, Y), e3(Y, Z), e4(Z, W).",
+        &[(1u32, 21u32), (2, 21)],
+    );
+}
+
+/// S1d Symbol lock, 4-cycle sibling of
+/// `groupby_fusion_symbol_valued_min_declines_and_unfused_rejects`: min
+/// over Symbol VALUES on a 4-cycle body must DECLINE fused (counter == 0)
+/// and fail through the same unfused value-type rejection in fused-enabled
+/// and kill-switch runs alike.
+#[test]
+fn groupby_fusion_4cycle_symbol_valued_min_declines_and_unfused_rejects() {
     let Some(fix) = make_fixture() else {
         eprintln!("Skipping: CUDA runtime unavailable");
         return;
     };
     let _guard = env_lock();
-    let source = "agg(W, sum(Z)) :- e1(W, X), e2(X, Y), e3(Y, Z), e4(Z, W).";
+    let source = "agg(W, min(Z)) :- e1(W, X), e2(X, Y), e3(Y, Z), e4(Z, W).";
     let inputs = cycle4_inputs();
-    // W=1: 30+30+30 = 90; W=2: 30+30 = 60.
-    let (rows, count) = run_agg_program(&fix, source, &inputs, download_group_counts);
-    assert_eq!(rows, vec![(1u32, 90u64), (2, 60)], "4-cycle sum rows");
+
+    let (result, executor) = run_symbol_program(&fix, source, &inputs);
+    let err = result.expect_err("4-cycle min over Symbol values must be rejected");
+    assert!(
+        format!("{err}").contains("values"),
+        "rejection must come from the groupby value-type gate, got: {err}"
+    );
     assert_eq!(
-        count, 0,
-        "4-cycle sum must not consume the fusion counter (Count-only fusion)"
+        executor.wcoj_groupby_fusion_dispatch_count(),
+        0,
+        "fused path must decline Symbol-valued 4-cycle min, not dispatch it"
+    );
+
+    // Kill switch: identical rejection through the same unfused gate.
+    // SAFETY: serialized by ENV_LOCK; restored below.
+    unsafe {
+        std::env::set_var("XLOG_DISABLE_WCOJ_GROUPBY_FUSION", "1");
+    }
+    let (result_unfused, _) = run_symbol_program(&fix, source, &inputs);
+    unsafe {
+        std::env::remove_var("XLOG_DISABLE_WCOJ_GROUPBY_FUSION");
+    }
+    let err_unfused =
+        result_unfused.expect_err("kill-switch 4-cycle min over Symbol values must be rejected");
+    assert_eq!(
+        format!("{err}"),
+        format!("{err_unfused}"),
+        "fused-declined and kill-switch runs must reject identically"
     );
 }
 

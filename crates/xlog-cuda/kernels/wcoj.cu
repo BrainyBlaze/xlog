@@ -1826,6 +1826,197 @@ extern "C" __global__ void wcoj_4cycle_groupby_root_count_hg_u32(
     }
 }
 
+namespace {
+
+// S1d helper: resolve one flattened work index to its e1 root row and, on
+// a completed 4-cycle, the aggregate value (X = e1.col1 when
+// `value_sel == 0`, the resolved Y when 1, the matched Z when 2).
+// Traversal is identical to `wcoj_4cycle_groupby_root_count_hg_u32`.
+// Returns false for padding / out-of-range / unmatched work items.
+__device__ __forceinline__ bool groupby_root_4cycle_match_value_u32(
+    const uint32_t* __restrict__ e1_col0,
+    const uint32_t* __restrict__ e1_col1,
+    uint32_t n_e1,
+    const uint32_t* __restrict__ e2_col1,
+    const uint32_t* __restrict__ e3_col0,
+    const uint32_t* __restrict__ e3_col1,
+    uint32_t n_e3,
+    const uint32_t* __restrict__ e4_col0,
+    const uint32_t* __restrict__ e4_col1,
+    uint32_t n_e4,
+    uint32_t value_sel,
+    const uint32_t* __restrict__ e1_work_prefix,
+    const uint32_t* __restrict__ e2_work_prefix,
+    const uint32_t* __restrict__ e1_e2_start,
+    const uint32_t* __restrict__ e1_e2_end,
+    uint32_t work_idx,
+    uint32_t* __restrict__ out_e1_idx,
+    uint32_t* __restrict__ out_value) {
+    uint32_t root_pos = upper_bound_u32(e1_work_prefix, n_e1 + 1, work_idx);
+    if (root_pos == 0) {
+        return false;
+    }
+    uint32_t e1_idx = root_pos - 1;
+    if (e1_idx >= n_e1) {
+        return false;
+    }
+    uint32_t local = work_idx - e1_work_prefix[e1_idx];
+    uint32_t w = e1_col0[e1_idx];
+    uint32_t e2_lo = e1_e2_start[e1_idx];
+    uint32_t e2_hi = e1_e2_end[e1_idx];
+    uint32_t y = 0;
+    uint32_t z = 0;
+    if (!resolve_4cycle_e2_work_u32(
+            e2_work_prefix, e2_col1, e3_col0, e3_col1, n_e3, e2_lo, e2_hi, local, &y, &z)
+        || !contains_pair_u32(e4_col0, e4_col1, n_e4, z, w)) {
+        return false;
+    }
+    *out_e1_idx = e1_idx;
+    *out_value = (value_sel == 0u) ? e1_col1[e1_idx] : (value_sel == 1u ? y : z);
+    return true;
+}
+
+}  // anonymous namespace
+
+// S1d: sum/min/max variants of the aggregate-fused 4-cycle root kernel.
+// Each completed 4-cycle contributes its value (X, Y or Z — all 4-cycle
+// output variables) to the e1 root row's accumulator, alongside a match
+// counter (`out_row_counts`) that downstream compaction uses to drop roots
+// with no completion. Integer atomics are order-insensitive, so final
+// accumulator values are deterministic. Host pre-initializes accumulators:
+// 0 for sum/max, 0xFFFFFFFF for min.
+extern "C" __global__ void wcoj_4cycle_groupby_root_sum_hg_u32(
+    const uint32_t* __restrict__ e1_col0,
+    const uint32_t* __restrict__ e1_col1,
+    uint32_t n_e1,
+    const uint32_t* __restrict__ e2_col1,
+    const uint32_t* __restrict__ e3_col0,
+    const uint32_t* __restrict__ e3_col1,
+    uint32_t n_e3,
+    const uint32_t* __restrict__ e4_col0,
+    const uint32_t* __restrict__ e4_col1,
+    uint32_t n_e4,
+    uint32_t value_sel,
+    const uint32_t* __restrict__ e1_work_prefix,
+    const uint32_t* __restrict__ e2_work_prefix,
+    const uint32_t* __restrict__ e1_e2_start,
+    const uint32_t* __restrict__ e1_e2_end,
+    uint32_t total_work,
+    uint32_t block_work_unit,
+    uint32_t* __restrict__ out_row_counts,
+    unsigned long long* __restrict__ out_row_sums) {
+    uint32_t block_start = blockIdx.x * block_work_unit;
+    if (block_start >= total_work) {
+        return;
+    }
+    uint32_t block_end = block_start + block_work_unit;
+    if (block_end < block_start || block_end > total_work) {
+        block_end = total_work;
+    }
+    for (uint32_t work_idx = block_start + threadIdx.x;
+         work_idx < block_end;
+         work_idx += blockDim.x) {
+        uint32_t e1_idx = 0;
+        uint32_t value = 0;
+        if (groupby_root_4cycle_match_value_u32(
+                e1_col0, e1_col1, n_e1, e2_col1, e3_col0, e3_col1, n_e3,
+                e4_col0, e4_col1, n_e4, value_sel, e1_work_prefix,
+                e2_work_prefix, e1_e2_start, e1_e2_end, work_idx, &e1_idx,
+                &value)) {
+            atomicAdd(&out_row_counts[e1_idx], 1u);
+            atomicAdd(&out_row_sums[e1_idx], (unsigned long long)value);
+        }
+    }
+}
+
+extern "C" __global__ void wcoj_4cycle_groupby_root_min_hg_u32(
+    const uint32_t* __restrict__ e1_col0,
+    const uint32_t* __restrict__ e1_col1,
+    uint32_t n_e1,
+    const uint32_t* __restrict__ e2_col1,
+    const uint32_t* __restrict__ e3_col0,
+    const uint32_t* __restrict__ e3_col1,
+    uint32_t n_e3,
+    const uint32_t* __restrict__ e4_col0,
+    const uint32_t* __restrict__ e4_col1,
+    uint32_t n_e4,
+    uint32_t value_sel,
+    const uint32_t* __restrict__ e1_work_prefix,
+    const uint32_t* __restrict__ e2_work_prefix,
+    const uint32_t* __restrict__ e1_e2_start,
+    const uint32_t* __restrict__ e1_e2_end,
+    uint32_t total_work,
+    uint32_t block_work_unit,
+    uint32_t* __restrict__ out_row_counts,
+    uint32_t* __restrict__ out_row_mins) {
+    uint32_t block_start = blockIdx.x * block_work_unit;
+    if (block_start >= total_work) {
+        return;
+    }
+    uint32_t block_end = block_start + block_work_unit;
+    if (block_end < block_start || block_end > total_work) {
+        block_end = total_work;
+    }
+    for (uint32_t work_idx = block_start + threadIdx.x;
+         work_idx < block_end;
+         work_idx += blockDim.x) {
+        uint32_t e1_idx = 0;
+        uint32_t value = 0;
+        if (groupby_root_4cycle_match_value_u32(
+                e1_col0, e1_col1, n_e1, e2_col1, e3_col0, e3_col1, n_e3,
+                e4_col0, e4_col1, n_e4, value_sel, e1_work_prefix,
+                e2_work_prefix, e1_e2_start, e1_e2_end, work_idx, &e1_idx,
+                &value)) {
+            atomicAdd(&out_row_counts[e1_idx], 1u);
+            atomicMin(&out_row_mins[e1_idx], value);
+        }
+    }
+}
+
+extern "C" __global__ void wcoj_4cycle_groupby_root_max_hg_u32(
+    const uint32_t* __restrict__ e1_col0,
+    const uint32_t* __restrict__ e1_col1,
+    uint32_t n_e1,
+    const uint32_t* __restrict__ e2_col1,
+    const uint32_t* __restrict__ e3_col0,
+    const uint32_t* __restrict__ e3_col1,
+    uint32_t n_e3,
+    const uint32_t* __restrict__ e4_col0,
+    const uint32_t* __restrict__ e4_col1,
+    uint32_t n_e4,
+    uint32_t value_sel,
+    const uint32_t* __restrict__ e1_work_prefix,
+    const uint32_t* __restrict__ e2_work_prefix,
+    const uint32_t* __restrict__ e1_e2_start,
+    const uint32_t* __restrict__ e1_e2_end,
+    uint32_t total_work,
+    uint32_t block_work_unit,
+    uint32_t* __restrict__ out_row_counts,
+    uint32_t* __restrict__ out_row_maxs) {
+    uint32_t block_start = blockIdx.x * block_work_unit;
+    if (block_start >= total_work) {
+        return;
+    }
+    uint32_t block_end = block_start + block_work_unit;
+    if (block_end < block_start || block_end > total_work) {
+        block_end = total_work;
+    }
+    for (uint32_t work_idx = block_start + threadIdx.x;
+         work_idx < block_end;
+         work_idx += blockDim.x) {
+        uint32_t e1_idx = 0;
+        uint32_t value = 0;
+        if (groupby_root_4cycle_match_value_u32(
+                e1_col0, e1_col1, n_e1, e2_col1, e3_col0, e3_col1, n_e3,
+                e4_col0, e4_col1, n_e4, value_sel, e1_work_prefix,
+                e2_work_prefix, e1_e2_start, e1_e2_end, work_idx, &e1_idx,
+                &value)) {
+            atomicAdd(&out_row_counts[e1_idx], 1u);
+            atomicMax(&out_row_maxs[e1_idx], value);
+        }
+    }
+}
+
 extern "C" __global__ void wcoj_4cycle_materialize_hg_u32(
     const uint32_t* __restrict__ e1_col0,
     const uint32_t* __restrict__ e1_col1,

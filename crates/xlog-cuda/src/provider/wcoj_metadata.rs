@@ -9,8 +9,9 @@ use crate::device_runtime::StreamId;
 use crate::launch::LaunchRecorder;
 use crate::memory::{CudaColumn, TrackedCudaSlice};
 use crate::wcoj_metadata::{
-    WcojCycle4HgWorkPlanU32, WcojCycle4HgWorkPlanU64, WcojRelationMetadata, WcojRootAggValue,
-    WcojTriangleHgCountPhaseU32, WcojTriangleHgWorkPlanU32, WcojTriangleHgWorkPlanU64,
+    Wcoj4CycleRootAggValue, WcojCycle4HgWorkPlanU32, WcojCycle4HgWorkPlanU64,
+    WcojRelationMetadata, WcojRootAggValue, WcojTriangleHgCountPhaseU32,
+    WcojTriangleHgWorkPlanU32, WcojTriangleHgWorkPlanU64,
 };
 use crate::{AsKernelParam, CudaBuffer, LaunchAsync, LaunchConfig};
 
@@ -3434,6 +3435,325 @@ impl CudaKernelProvider {
             &[(1, xlog_core::AggOp::Sum)],
             launch_stream,
         )
+    }
+
+    /// S1d — aggregate-fused 4-cycle sum/min/max: evaluate
+    /// `q(W, agg(V)) :- e1(W,X), e2(X,Y), e3(Y,Z), e4(Z,W)` with
+    /// `agg ∈ {Sum, Min, Max}` and `V ∈ {X, Y, Z}` grouped by the
+    /// variable-order root W, WITHOUT materializing the 4-cycle rows.
+    ///
+    /// Pipeline (all recorded; the 4-cycle result never exists as rows):
+    /// 1. the standard 4-cycle histogram-guided work plan;
+    /// 2. the per-op fused kernel accumulates, per e1 row, a match count
+    ///    (compaction mask) and the per-row partial aggregate (integer
+    ///    atomics — order-insensitive, deterministic values). Sum partials
+    ///    are u64 (a per-row partial can exceed `u32::MAX`); min partials
+    ///    start at `u32::MAX`, max partials at 0;
+    /// 3. a 3-column (W, count, agg) staging buffer over the *input* rows
+    ///    is compacted to count>0 rows (roots with no completion must be
+    ///    absent) and reduced per W via the recorded groupby with the same
+    ///    `AggOp` (Sum over the u64 partials; Min/Max over u32).
+    ///
+    /// All reduction work is O(n_e1) — input-sized, never join-output-sized.
+    ///
+    /// Output schema matches the unfused materialize+groupby baseline:
+    /// `col0` = W (e1.col0 type, U32/Symbol), `col1` = U64 for Sum,
+    /// U32 for Min/Max.
+    ///
+    /// Bag semantics: every (X, Y, Z) completion contributes its value,
+    /// exactly like aggregating the materialized projection.
+    ///
+    /// # Errors
+    /// * `XlogError::Kernel` if `agg_op` is not Sum/Min/Max, the value
+    ///   column is not plain U32, the manager has no runtime, the launch
+    ///   stream does not resolve, an input is not 2-column U32/Symbol, or
+    ///   any kernel launch fails.
+    #[allow(clippy::too_many_arguments)]
+    pub fn wcoj_4cycle_groupby_root_agg_u32_recorded(
+        &self,
+        e1: &CudaBuffer,
+        e2: &CudaBuffer,
+        e3: &CudaBuffer,
+        e4: &CudaBuffer,
+        agg_op: AggOp,
+        value: Wcoj4CycleRootAggValue,
+        block_work_unit: u32,
+        launch_stream: StreamId,
+    ) -> Result<CudaBuffer> {
+        let ctx = "wcoj_4cycle_groupby_root_agg_u32_recorded";
+        // Layout-normalize per dispatch (sorted-fast-path clone when the
+        // input is already lex-sorted + unique): the fused path must give
+        // the same guarantee as the unfused pipeline instead of trusting
+        // store-buffer sortedness — unsorted/duplicated inputs previously
+        // produced silently wrong (empty) fused results.
+        let e1 = &self.wcoj_layout_u32_recorded(e1, launch_stream)?;
+        let e2 = &self.wcoj_layout_u32_recorded(e2, launch_stream)?;
+        let e3 = &self.wcoj_layout_u32_recorded(e3, launch_stream)?;
+        let e4 = &self.wcoj_layout_u32_recorded(e4, launch_stream)?;
+        let (kernel_name, agg_elem_size, agg_scalar, agg_name) = match agg_op {
+            AggOp::Sum => (
+                wcoj_kernels::WCOJ_4CYCLE_GROUPBY_ROOT_SUM_HG_U32,
+                std::mem::size_of::<u64>(),
+                ScalarType::U64,
+                "sum_0",
+            ),
+            AggOp::Min => (
+                wcoj_kernels::WCOJ_4CYCLE_GROUPBY_ROOT_MIN_HG_U32,
+                std::mem::size_of::<u32>(),
+                ScalarType::U32,
+                "min_0",
+            ),
+            AggOp::Max => (
+                wcoj_kernels::WCOJ_4CYCLE_GROUPBY_ROOT_MAX_HG_U32,
+                std::mem::size_of::<u32>(),
+                ScalarType::U32,
+                "max_0",
+            ),
+            other => {
+                return Err(XlogError::Kernel(format!(
+                    "{ctx}: unsupported AggOp {other:?} (Sum/Min/Max only; use \
+                     wcoj_4cycle_groupby_root_count_u32_recorded for Count)"
+                )))
+            }
+        };
+        validate_binary_u32(ctx, "e1", e1)?;
+        validate_binary_u32(ctx, "e2", e2)?;
+        validate_binary_u32(ctx, "e3", e3)?;
+        validate_binary_u32(ctx, "e4", e4)?;
+        // The aggregate value is arithmetic: require a plain U32 value
+        // column (Symbol ids are not summable/orderable data). The column
+        // checked is exactly the one the kernel reads the value from —
+        // and the one whose type the materialized (W, X, Y, Z) baseline
+        // schema carries (`build_4cycle_head_schema`).
+        let (value_buf, value_label) = match value {
+            Wcoj4CycleRootAggValue::X => (e1, "e1"),
+            Wcoj4CycleRootAggValue::Y => (e2, "e2"),
+            Wcoj4CycleRootAggValue::Z => (e3, "e3"),
+        };
+        {
+            let ty = value_buf.schema().column_type(1).expect("validated 2-col");
+            if ty != ScalarType::U32 {
+                return Err(XlogError::Kernel(format!(
+                    "{ctx}: {value_label}.col1 supplies the aggregate value and must be U32, \
+                     got {ty:?}"
+                )));
+            }
+        }
+
+        let plan = self.wcoj_4cycle_hg_work_plan_u32_recorded(
+            e1,
+            e2,
+            e3,
+            e4,
+            block_work_unit,
+            launch_stream,
+        )?;
+        let n_e1 = plan.row_count;
+        let w_type = e1.schema().column_type(0).expect("e1.col0 type");
+        let out_schema = Schema::new(vec![
+            ("w".to_string(), w_type),
+            (agg_name.to_string(), agg_scalar),
+        ]);
+        if n_e1 == 0 || plan.total_work == 0 {
+            return self.create_empty_buffer(out_schema);
+        }
+
+        let runtime = self.memory().runtime().ok_or_else(|| {
+            XlogError::Kernel(format!("{ctx} requires a runtime-backed GpuMemoryManager"))
+        })?;
+        let cu_stream = runtime
+            .stream_pool()
+            .resolve(launch_stream)
+            .ok_or_else(|| {
+                XlogError::Kernel(format!(
+                    "{ctx}: launch_stream StreamId({}) does not resolve",
+                    launch_stream.0
+                ))
+            })?;
+
+        let e1_col0 = metadata_column_u32(e1, 0)?;
+        let e1_col1 = metadata_column_u32(e1, 1)?;
+        let e2_col1 = metadata_column_u32(e2, 1)?;
+        let e3_col0 = metadata_column_u32(e3, 0)?;
+        let e3_col1 = metadata_column_u32(e3, 1)?;
+        let e4_col0 = metadata_column_u32(e4, 0)?;
+        let e4_col1 = metadata_column_u32(e4, 1)?;
+        let n_e3 = self.metadata_logical_rows(e3)?;
+        let n_e4 = self.metadata_logical_rows(e4)?;
+        let value_sel: u32 = match value {
+            Wcoj4CycleRootAggValue::X => 0,
+            Wcoj4CycleRootAggValue::Y => 1,
+            Wcoj4CycleRootAggValue::Z => 2,
+        };
+
+        // Per-e1-row match counters + aggregate partials, allocated as
+        // the u8-backed column layout so the arrays double as the staging
+        // buffer's columns after the kernel fills them.
+        let mut row_counts = self
+            .memory()
+            .alloc::<u8>(n_e1 as usize * std::mem::size_of::<u32>())?;
+        self.device()
+            .inner()
+            .memset_zeros(&mut row_counts)
+            .map_err(|e| XlogError::Kernel(format!("{ctx}: zero row counts failed: {e}")))?;
+        let mut row_agg = self.memory().alloc::<u8>(n_e1 as usize * agg_elem_size)?;
+        self.device()
+            .inner()
+            .memset_zeros(&mut row_agg)
+            .map_err(|e| XlogError::Kernel(format!("{ctx}: zero row aggregates failed: {e}")))?;
+
+        let grid = plan.total_work.div_ceil(plan.block_work_unit);
+        let mut rec = LaunchRecorder::new_strict(launch_stream);
+        rec.read(e1.num_rows_device());
+        rec.read(e2.num_rows_device());
+        rec.read(e3.num_rows_device());
+        rec.read(e4.num_rows_device());
+        rec.read_column(e1.column(0).expect("e1.col0"));
+        rec.read_column(e1.column(1).expect("e1.col1"));
+        rec.read_column(e2.column(1).expect("e2.col1"));
+        rec.read_column(e3.column(0).expect("e3.col0"));
+        rec.read_column(e3.column(1).expect("e3.col1"));
+        rec.read_column(e4.column(0).expect("e4.col0"));
+        rec.read_column(e4.column(1).expect("e4.col1"));
+        rec.read(&plan.e1_work_prefix);
+        rec.read(&plan.e2_work_prefix);
+        rec.read(&plan.e1_e2_start);
+        rec.read(&plan.e1_e2_end);
+        rec.write(&row_counts);
+        rec.write(&row_agg);
+        rec.preflight(runtime)
+            .map_err(|e| XlogError::Kernel(format!("{ctx}: preflight failed: {e}")))?;
+        if matches!(agg_op, AggOp::Min) {
+            // Min identity: u32::MAX (compaction drops untouched rows).
+            let fill = self
+                .device()
+                .inner()
+                .get_func(ARITH_MODULE, arith_kernels::ARITH_FILL_CONST_U32)
+                .ok_or_else(|| {
+                    XlogError::Kernel("arith_fill_const_u32 kernel not found".to_string())
+                })?;
+            let row_agg_u32 = unsafe { reinterpret_u8_as_u32(&mut row_agg) };
+            // SAFETY: arith_fill_const_u32(value, n, output)
+            unsafe {
+                fill.clone()
+                    .launch_on_stream(
+                        &cu_stream,
+                        LaunchConfig::for_num_elems(n_e1),
+                        (u32::MAX, n_e1, &mut *row_agg_u32),
+                    )
+                    .map_err(|e| {
+                        XlogError::Kernel(format!("{ctx}: min identity fill failed: {e}"))
+                    })?;
+            }
+        }
+        {
+            let kernel = self
+                .device()
+                .inner()
+                .get_func(WCOJ_MODULE, kernel_name)
+                .ok_or_else(|| {
+                    XlogError::Kernel(format!("{kernel_name} kernel not found"))
+                })?;
+            let mut params: Vec<*mut c_void> = vec![
+                e1_col0.as_kernel_param(),
+                e1_col1.as_kernel_param(),
+                plan.row_count.as_kernel_param(),
+                e2_col1.as_kernel_param(),
+                e3_col0.as_kernel_param(),
+                e3_col1.as_kernel_param(),
+                n_e3.as_kernel_param(),
+                e4_col0.as_kernel_param(),
+                e4_col1.as_kernel_param(),
+                n_e4.as_kernel_param(),
+                value_sel.as_kernel_param(),
+                (&plan.e1_work_prefix).as_kernel_param(),
+                (&plan.e2_work_prefix).as_kernel_param(),
+                (&plan.e1_e2_start).as_kernel_param(),
+                (&plan.e1_e2_end).as_kernel_param(),
+                plan.total_work.as_kernel_param(),
+                plan.block_work_unit.as_kernel_param(),
+                (&row_counts).as_kernel_param(),
+                (&row_agg).as_kernel_param(),
+            ];
+            unsafe {
+                kernel
+                    .clone()
+                    .launch_on_stream(
+                        &cu_stream,
+                        LaunchConfig {
+                            grid_dim: (grid, 1, 1),
+                            block_dim: (BLOCK_SIZE, 1, 1),
+                            shared_mem_bytes: 0,
+                        },
+                        &mut params,
+                    )
+                    .map_err(|e| {
+                        XlogError::Kernel(format!("{ctx}: groupby-agg launch failed: {e}"))
+                    })?;
+            }
+        }
+        rec.commit(runtime)
+            .map_err(|e| XlogError::Kernel(format!("{ctx}: commit failed: {e}")))?;
+
+        // Staging buffer (W, count, agg) over the n_e1 input rows: W is a
+        // device-to-device copy of e1.col0; count and agg are the
+        // kernel-filled arrays. Rows stay lex-sorted by W.
+        let w_src = match e1.column(0).expect("e1.col0") {
+            CudaColumn::Owned(slice) => slice,
+            _ => {
+                return Err(XlogError::Kernel(format!(
+                    "{ctx}: e1.col0 must be an owned CudaColumn"
+                )))
+            }
+        };
+        let w_copy = self
+            .memory()
+            .alloc::<u8>(n_e1 as usize * std::mem::size_of::<u32>())?;
+        // Explicit-length copy: layout-normalized columns are allocated at
+        // capacity, which can exceed the logical n_e1 * 4 bytes a full-slice
+        // typed copy would assert on.
+        unsafe {
+            let res = sys::cuMemcpyDtoD_v2(
+                *w_copy.device_ptr(),
+                *w_src.device_ptr(),
+                n_e1 as usize * std::mem::size_of::<u32>(),
+            );
+            if res != sys::cudaError_enum::CUDA_SUCCESS {
+                return Err(XlogError::Kernel(format!(
+                    "{ctx}: copy W column failed: {res:?}"
+                )));
+            }
+        }
+        let mut d_num_rows = self.memory().alloc::<u32>(1)?;
+        self.device()
+            .inner()
+            .dtod_copy(e1.num_rows_device(), &mut d_num_rows)
+            .map_err(|e| XlogError::Kernel(format!("{ctx}: copy row count failed: {e}")))?;
+        let staging_schema = Schema::new(vec![
+            ("w".to_string(), w_type),
+            ("count".to_string(), ScalarType::U32),
+            ("agg".to_string(), agg_scalar),
+        ]);
+        let staging = CudaBuffer::from_columns_with_host_count(
+            vec![w_copy.into(), row_counts.into(), row_agg.into()],
+            n_e1 as u64,
+            d_num_rows,
+            staging_schema,
+            n_e1,
+        );
+
+        // Keep only roots with at least one completed 4-cycle, then reduce
+        // per W with the same AggOp. Both steps run over input-sized data.
+        let mask = self.compare_const_mask_recorded::<u32>(
+            &staging,
+            1,
+            0u32,
+            crate::CompareOp::Gt,
+            launch_stream,
+        )?;
+        let compacted =
+            self.compact_buffer_by_device_mask_counted_recorded(&staging, &mask, launch_stream)?;
+        self.groupby_multi_agg_recorded(&compacted, &[0], &[(2, agg_op)], launch_stream)
     }
 
     pub fn wcoj_4cycle_hg_work_plan_u64_recorded(

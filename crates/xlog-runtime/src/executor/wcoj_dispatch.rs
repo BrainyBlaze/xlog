@@ -78,7 +78,7 @@ use std::collections::HashSet;
 use xlog_core::{RelId, Result, ScalarType, Schema};
 use xlog_cuda::device_runtime::StreamId;
 use xlog_cuda::provider::NESTED_LOOP_TOTAL_THRESHOLD;
-use xlog_cuda::wcoj_metadata::WcojRootAggValue;
+use xlog_cuda::wcoj_metadata::{Wcoj4CycleRootAggValue, WcojRootAggValue};
 use xlog_cuda::CudaBuffer;
 use xlog_cuda::JoinType as CudaJoinType;
 use xlog_ir::{
@@ -1407,27 +1407,35 @@ impl Executor {
             return Ok(None);
         }
         // For value-reading aggregates the value column must map to a
-        // triangle output variable the kernel can see: Y (col 1) or Z
-        // (col 2). Anything else (the key itself, out-of-range refs)
-        // declines. Count never reads the value column, so any
-        // pass-through value columns are admissible.
-        let agg_value = if matches!(agg_op, AggOp::Count) {
+        // non-key join output variable the per-shape kernel can see
+        // (triangle: Y/Z; 4-cycle: X/Y/Z). Resolve the raw output column
+        // here (the key itself and non-column refs decline); the
+        // per-shape mapping happens after shape match. Count never reads
+        // the value column, so any pass-through value columns are
+        // admissible.
+        let agg_value_col = if matches!(agg_op, AggOp::Count) {
             None
         } else {
             match columns.get(agg_col) {
-                Some(ProjectExpr::Column(1)) => Some(WcojRootAggValue::Y),
-                Some(ProjectExpr::Column(2)) => Some(WcojRootAggValue::Z),
+                Some(ProjectExpr::Column(c)) if *c >= 1 => Some(*c),
                 _ => return Ok(None),
             }
         };
         let Some(matched) = match_multiway_triangle(multiway) else {
-            // S1c: 4-cycle sibling of the triangle fusion. Only Count is
-            // fused for the 4-cycle shape (no fused 4-cycle sum/min/max
-            // kernels); everything else declines to materialize+groupby.
-            if !matches!(agg_op, AggOp::Count) {
-                return Ok(None);
-            }
-            return self.try_dispatch_wcoj_groupby_root_count_4cycle(multiway);
+            // S1c/S1d: 4-cycle sibling of the triangle fusion.
+            return self.try_dispatch_wcoj_groupby_root_agg_4cycle(
+                multiway,
+                agg_op,
+                agg_value_col,
+            );
+        };
+        // Triangle output space: col 1 = Y, col 2 = Z. Anything else
+        // (e.g. an out-of-range ref) declines.
+        let agg_value = match agg_value_col {
+            None => None,
+            Some(1) => Some(WcojRootAggValue::Y),
+            Some(2) => Some(WcojRootAggValue::Z),
+            Some(_) => return Ok(None),
         };
         let name_xy = match self.get_rel_name(matched.rel_xy) {
             Some(s) => s.to_string(),
@@ -1552,13 +1560,14 @@ impl Executor {
         }
     }
 
-    /// S1c aggregate-fused WCOJ, 4-cycle count: dispatch the inner
-    /// `MultiWayJoin(4-cycle)` of a count-by-root aggregate through the
-    /// fused group-by-root kernel, which never materializes the 4-cycle
-    /// rows. Both accepted `output_columns` layouts place the variable-
-    /// order root W at output position 0, so the caller's
+    /// S1c/S1d aggregate-fused WCOJ, 4-cycle: dispatch the inner
+    /// `MultiWayJoin(4-cycle)` of a count/sum/min/max-by-root aggregate
+    /// through the fused group-by-root kernels, which never materialize
+    /// the 4-cycle rows. Both accepted `output_columns` layouts place the
+    /// variable-order root W at output position 0, so the caller's
     /// `key_cols == [0]` + `columns[0] == Column(0)` checks pin the group
-    /// key to W — the soundness condition for one-pass count propagation.
+    /// key to W — the soundness condition for one-pass aggregate
+    /// propagation.
     ///
     /// Gating decision (documented per the S1c brief): the fused path
     /// mirrors the triangle fusion — enabled by default behind the shared
@@ -1569,16 +1578,37 @@ impl Executor {
     /// because a declined or kill-switched fusion falls back to that
     /// independently-gated path (default: embedded binary fallback).
     ///
-    /// Only uniform 4-byte (U32/Symbol) keys are fused; U64-key 4-cycle
-    /// count fusion is deferred and declines silently. Pipeline errors
-    /// route through [`wcoj_decline_on_error`] (counted;
-    /// `XLOG_WCOJ_STRICT=1` propagates).
-    fn try_dispatch_wcoj_groupby_root_count_4cycle(
+    /// S1d value-column mapping (same rules as the triangle): for
+    /// Sum/Min/Max the aggregate value must map to a 4-cycle output
+    /// variable the kernel can read during traversal — X (col 1, from
+    /// e1.col1), Y (col 2, from e2.col1) or Z (col 3, from e3.col1) —
+    /// with plain U32 type. Symbol values decline (the unfused groupby
+    /// rejects them with the same value-type error, so fused and
+    /// kill-switch runs fail identically). Count admits any pass-through
+    /// value column and, uniquely, uniform U64 keys.
+    ///
+    /// Sum/Min/Max are 4-byte-only; u64-key 4-cycle sum/min/max fusion is
+    /// deferred and declines silently. Pipeline errors route through
+    /// [`wcoj_decline_on_error`] (counted; `XLOG_WCOJ_STRICT=1`
+    /// propagates).
+    fn try_dispatch_wcoj_groupby_root_agg_4cycle(
         &mut self,
         multiway: &RirNode,
+        agg_op: xlog_core::AggOp,
+        agg_value_col: Option<usize>,
     ) -> Result<Option<CudaBuffer>> {
+        use xlog_core::AggOp;
         let Some(matched) = match_multiway_4cycle(multiway) else {
             return Ok(None);
+        };
+        // 4-cycle output space: col 1 = X, col 2 = Y, col 3 = Z. Anything
+        // else (e.g. an out-of-range ref) declines.
+        let agg_value = match agg_value_col {
+            None => None,
+            Some(1) => Some(Wcoj4CycleRootAggValue::X),
+            Some(2) => Some(Wcoj4CycleRootAggValue::Y),
+            Some(3) => Some(Wcoj4CycleRootAggValue::Z),
+            Some(_) => return Ok(None),
         };
         let name_e1 = match self.get_rel_name(matched.rel_e1) {
             Some(s) => s.to_string(),
@@ -1617,20 +1647,55 @@ impl Executor {
                 return Ok(None);
             }
         }
+        // Sum/Min/Max are arithmetic: the column supplying the value must
+        // be plain U32 (Symbol ids are not summable/orderable data — and
+        // the unfused groupby rejects Symbol values too, so declining
+        // keeps both paths aligned). The checked column matches the
+        // materialized (W, X, Y, Z) baseline schema's type source
+        // (`build_4cycle_head_schema`): X from e1.col1, Y from e2.col1,
+        // Z from e3.col1.
+        let value_source = match agg_value {
+            None => None,
+            Some(Wcoj4CycleRootAggValue::X) => Some(buf_e1),
+            Some(Wcoj4CycleRootAggValue::Y) => Some(buf_e2),
+            Some(Wcoj4CycleRootAggValue::Z) => Some(buf_e3),
+        };
+        if let Some(src) = value_source {
+            if src.schema().column_type(1) != Some(xlog_core::ScalarType::U32) {
+                return Ok(None);
+            }
+        }
         if self.provider.memory().runtime().is_none() {
             return Ok(None);
         }
         let Some(launch_stream) = self.wcoj_dispatch_stream_or_init() else {
             return Ok(None);
         };
-        match self.provider.wcoj_4cycle_groupby_root_count_u32_recorded(
-            buf_e1,
-            buf_e2,
-            buf_e3,
-            buf_e4,
-            wcoj_block_work_unit(),
-            launch_stream,
-        ) {
+        debug_assert!(
+            agg_value.is_some() || matches!(agg_op, AggOp::Count),
+            "non-Count aggregates resolve a value column above"
+        );
+        let result = match agg_value {
+            None => self.provider.wcoj_4cycle_groupby_root_count_u32_recorded(
+                buf_e1,
+                buf_e2,
+                buf_e3,
+                buf_e4,
+                wcoj_block_work_unit(),
+                launch_stream,
+            ),
+            Some(value) => self.provider.wcoj_4cycle_groupby_root_agg_u32_recorded(
+                buf_e1,
+                buf_e2,
+                buf_e3,
+                buf_e4,
+                agg_op,
+                value,
+                wcoj_block_work_unit(),
+                launch_stream,
+            ),
+        };
+        match result {
             Ok(buf) => {
                 self.wcoj_groupby_fusion_dispatch_count += 1;
                 Ok(Some(buf))
