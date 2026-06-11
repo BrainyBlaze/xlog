@@ -69,3 +69,60 @@ Option A accepted: Phase A stands under the production-routing argument —
 dedicated shapes (triangle/4-cycle/k-clique) never route to Free Join;
 the triangle measurement is retained as the recorded bound on the cost
 of generality (1.73x / 2.04x). Phase B authorized.
+
+## Phase B — production integration (manual session 3)
+
+RIR-level integration landed on `feat/d2-free-join`:
+
+- **General multiway promoter** (`try_promote_general_multiway` +
+  arity-aware `walk_general_node` in `xlog-logic/src/promote.rs`): any
+  Project(inner-join tree) body with >= 3 Scan atoms that every dedicated
+  promoter declined becomes a generic `MultiWayJoin` with dense
+  first-occurrence variable classes. Scan widths come from the new
+  `ExecutionPlan.rel_arities` (populated by the lowerer's AST pre-pass);
+  Cartesian (keyless) joins stay on the W4.2 nested-loop routing.
+- **Executor dispatch** (`try_dispatch_free_join` in
+  `xlog-runtime/src/executor/wcoj_dispatch.rs`): binary2fj over slot
+  order with earliest-node probe pushing; declines silently (prefix
+  violation, non-u32/Symbol inputs, repeated cover vars) to the embedded
+  binary fallback. Wired into BOTH executor paths — recursive
+  (`execute_wcoj_or_fallback_node`) and the non-recursive inline chain in
+  `execute_stratum_impl` (gap found by the e2e test: the inline chain
+  never called the shared helper). Fresh installs dedup explicitly (Free
+  Join emits one row per derivation path, unlike the dedicated kernels).
+  Counter `free_join_dispatch_count`; kill switch
+  `XLOG_DISABLE_FREE_JOIN=1`.
+- **Provenance bug found by regression and fixed.** All dedicated
+  promoters reorder `inputs` canonically while `output_columns` stays in
+  the fallback's column space (documented MultiWayJoin convention).
+  Interpreting those nodes positionally permuted head columns whenever a
+  stats-reordered triangle declined dedicated dispatch and fell through
+  to Free Join (5 row-set parity failures:
+  test_selectivity_pass_reordering, test_w26_heat_selectivity x3,
+  test_wcoj_4cycle_rir_shape_cert). A leaf-sequence check would be
+  unsound for self-join bodies, so the fix is provenance: new
+  `MultiwayPlan::FreeJoin` variant set ONLY by the general promoter
+  (whose inputs are the fallback's leaves in traversal order, making the
+  two column spaces coincide); the dispatcher accepts exactly that
+  variant, which also subsumes the dedicated-shape carve-out for rotated
+  nodes the structural matchers miss.
+- **Epistemic certification awareness**: generic Free Join routes are a
+  separate preflight bucket (`free_join_route_count`) excluded from the
+  hard dedicated-WCOJ obligation (opportunistic-by-contract), with
+  `free_join_dispatch_count` recorded in the runtime counter trace and
+  CLI evidence JSON.
+
+Verification (local, functional only — perf measurements are
+RunPod-only by standing rule):
+- e2e (`xlog-integration/tests/test_free_join_e2e.rs`): 4-atom chain
+  fires (counter == 1) with kill-switch row parity; dedicated triangle
+  declines (counter == 0, rows correct); non-prefix body declines
+  (counter == 0, rows correct via fallback).
+- Promoter pipeline shape test
+  (`xlog-logic/tests/test_promote_multiway.rs`): chain lands as generic
+  MultiWayJoin, FreeJoin-marked, dense vars, fallback preserved.
+- Full workspace regression (`cargo test --workspace --all-targets
+  --exclude pyxlog --release --no-fail-fast`): 263 targets ok; one
+  failure (`g38_mint11_vram` -> g04_transfer_efficiency 7/8) attributed
+  to GPU contention from concurrent test binaries — passes 207/207 in
+  isolation; D2 touches no transfer path.

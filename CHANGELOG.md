@@ -109,6 +109,25 @@ All notable changes to this project are documented in this file.
   lex-sorted+deduped by construction, satisfying the fused layout contract.
   Aggregates *inside* recursive rules remain stratification-rejected by
   language contract.
+- *(runtime)* **GPU Free Join for general multiway bodies (D2).** Inner-join
+  bodies with >= 3 atoms and no dedicated kernel shape (any arity mix, any
+  join-tree shape) now promote to a generic `MultiWayJoin`
+  (`MultiwayPlan::FreeJoin`) and dispatch through a Free Join frontier
+  engine (flat sorted-range tries + level-synchronous columnar frontier,
+  identity-group fast path, fused probe filters; SIGMOD'23 Free Join
+  adapted to bulk GPU execution). Spike gate on the 4-atom blowup chain:
+  2.59x median vs the binary-join path (isolated serial runs); the dedicated
+  triangle comparison is retained as the recorded cost-of-generality bound
+  (1.73x-2.04x) and triangle/4-cycle/K-clique keep their dedicated kernels —
+  Free Join never takes a dedicated shape
+  (`docs/evidence/2026-06-12-s2-free-join-spike/`). Opportunistic by
+  contract: non-prefix bound columns, non-u32/Symbol inputs, and repeated
+  cover variables decline silently to the embedded binary fallback with
+  identical results. Counter `Executor::free_join_dispatch_count`; kill
+  switch `XLOG_DISABLE_FREE_JOIN=1`. Epistemic GPU certification classifies
+  Free Join routes as a separate opportunistic preflight bucket
+  (`free_join_route_count`) and traces dispatches without hardening them
+  into dedicated-kernel obligations.
 - *(prob)* **Factorized outcome folding for exact non-count aggregates
   (D4).** Probabilistic `sum`/`min`/`max`/`logsumexp` provenance no longer
   enumerates one conjunction per 2^k outcome mask; the factorized encoding
