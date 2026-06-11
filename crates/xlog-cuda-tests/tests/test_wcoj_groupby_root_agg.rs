@@ -710,6 +710,91 @@ fn groupby_recorded_sum_u64_values_matches_host() {
     );
 }
 
+/// S1d slice 3 — the recorded groupby must accept U64 value columns for
+/// Min/Max (previously only the legacy path was widened) and produce
+/// exactly the legacy path's rows, so u32-keyed pipelines that carry u64
+/// values can use the recorded discipline end to end.
+#[test]
+fn groupby_recorded_min_max_u64_values_matches_host_and_legacy() {
+    let Some(fix) = make_fixture() else {
+        eprintln!("skipping recorded_min_max_u64: no CUDA device");
+        return;
+    };
+    // (key u32, value u64) with values above u32::MAX to prove 64-bit
+    // reads, plus a 0 to pin the max identity and u64::MAX to pin min.
+    let rows: Vec<(u32, u64)> = vec![
+        (1, 5_000_000_000),
+        (1, 7),
+        (2, u64::MAX),
+        (2, u32::MAX as u64 + 1),
+        (3, 0),
+    ];
+    let n = rows.len() as u32;
+    let mut col0 = fix.memory.alloc::<u8>(rows.len() * 4).expect("alloc col0");
+    let mut col1 = fix.memory.alloc::<u8>(rows.len() * 8).expect("alloc col1");
+    let mut d_num_rows = fix.memory.alloc::<u32>(1).expect("alloc d_num_rows");
+    let col0_bytes: Vec<u8> = rows.iter().flat_map(|(k, _)| k.to_le_bytes()).collect();
+    let col1_bytes: Vec<u8> = rows.iter().flat_map(|(_, v)| v.to_le_bytes()).collect();
+    let device = fix.memory.device().inner();
+    device
+        .htod_sync_copy_into(&col0_bytes, &mut col0)
+        .expect("htod col0");
+    device
+        .htod_sync_copy_into(&col1_bytes, &mut col1)
+        .expect("htod col1");
+    device
+        .htod_sync_copy_into(&[n], &mut d_num_rows)
+        .expect("htod d_num_rows");
+    let schema = Schema::new(vec![
+        ("k".to_string(), ScalarType::U32),
+        ("v".to_string(), ScalarType::U64),
+    ]);
+    let buffer = CudaBuffer::from_columns_with_host_count(
+        vec![col0.into(), col1.into()],
+        n as u64,
+        d_num_rows,
+        schema,
+        n,
+    );
+    let stream = fix.pool.acquire().expect("stream");
+    for (agg, expected) in [
+        (
+            AggOp::Min,
+            vec![(1u32, 7u64), (2, u32::MAX as u64 + 1), (3, 0)],
+        ),
+        (
+            AggOp::Max,
+            vec![(1u32, 5_000_000_000u64), (2, u64::MAX), (3, 0)],
+        ),
+    ] {
+        let recorded = fix
+            .provider
+            .groupby_multi_agg_recorded(&buffer, &[0], &[(1, agg)], stream)
+            .unwrap_or_else(|e| panic!("recorded groupby {agg:?} over u64 values: {e}"));
+        assert_eq!(
+            recorded.schema().column_type(1),
+            Some(ScalarType::U64),
+            "{agg:?}: u64 values must reduce to a u64 result column"
+        );
+        assert_eq!(
+            download_groups_u64(&fix.memory, &recorded),
+            expected,
+            "{agg:?}: recorded vs host"
+        );
+        // Legacy path is the pre-existing widened baseline: outputs must
+        // match the recorded path bit for bit.
+        let legacy = fix
+            .provider
+            .groupby_multi_agg(&buffer, &[0], &[(1, agg)])
+            .unwrap_or_else(|e| panic!("legacy groupby {agg:?} over u64 values: {e}"));
+        assert_eq!(
+            download_groups_u64(&fix.memory, &legacy),
+            expected,
+            "{agg:?}: legacy vs host"
+        );
+    }
+}
+
 // =====================================================================
 // S1c widening — u64-key sum/min/max.
 // =====================================================================
