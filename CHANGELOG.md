@@ -44,6 +44,16 @@ All notable changes to this project are documented in this file.
   declining silently to materialize+groupby, and the
   `XLOG_DISABLE_WCOJ_GROUPBY_FUSION` kill switch covers the widened paths.
   Gate evidence: `docs/evidence/2026-06-11-s1b-agg-widening/`.
+- *(prob)* **Factorized outcome folding for exact non-count aggregates
+  (D4).** Probabilistic `sum`/`min`/`max`/`logsumexp` provenance no longer
+  enumerates one conjunction per 2^k outcome mask; the factorized encoding
+  keeps the PIR polynomial in k (k=14 fixture: < 4096 nodes vs >= 16384
+  masks) with probability parity locked at 1e-12 against finite oracles.
+- *(prob)* Opt-in `decision_order_hint` for GPU D4 compilation
+  (default off). Measured verdict is **negative** — 0% frontier reduction,
+  independently replicated (`docs/evidence/2026-06-11-d4-structure-hints/`)
+  — kept for its `frontier_items` profiling counter and as the harness for
+  future kernel-side variable-priority work.
 - *(docs)* Factorized-hypergraph research report
   (`docs/plans/2026-06-11-factorized-hypergraph-research.md`):
   adversarially verified algorithm landscape (f-/d-representations, FAQ,
