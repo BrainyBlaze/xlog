@@ -326,26 +326,54 @@ the triangle rows:
      fusion for `deg(W, count(V)) :- e1(W,X), e2(X,Y), e3(Y,Z), e4(Z,W)`.
      `try_promote_4cycle_inside_aggregate` descends the aggregate wrapper
      (output position 0 = the variable-order root W in both certified
-     `output_columns` layouts); the executor branch is Count-only and
-     4-byte-only. Gating decision: the fused path mirrors the triangle
-     fusion (default-on behind `XLOG_DISABLE_WCOJ_GROUPBY_FUSION`); the
-     opt-in `XLOG_USE_WCOJ_4CYCLE*` gates keep governing only the
-     non-aggregate materialize dispatch, which is exactly what a declined
-     or kill-switched fusion falls back to.
+     `output_columns` layouts). Gating decision: the fused path mirrors
+     the triangle fusion (default-on behind
+     `XLOG_DISABLE_WCOJ_GROUPBY_FUSION`); the opt-in
+     `XLOG_USE_WCOJ_4CYCLE*` gates keep governing only the non-aggregate
+     materialize dispatch, which is exactly what a declined or
+     kill-switched fusion falls back to.
+   * `wcoj_4cycle_groupby_root_agg_u32_recorded` (S1d;
+     `wcoj_4cycle_groupby_root_{sum,min,max}_hg_u32` kernels): 4-cycle
+     sum/min/max sibling, same per-row accumulator design as the triangle
+     agg entry (u64 atomicAdd sum partials, u32 atomicMin/atomicMax with
+     `u32::MAX`/0 identities; (W, count, agg) staging compacted to
+     count>0, recorded groupby reduce). The aggregate value must be a
+     4-cycle output variable the kernel reads during traversal —
+     `Wcoj4CycleRootAggValue::{X, Y, Z}`, i.e. output cols 1/2/3 sourced
+     from e1.col1 / e2.col1 / e3.col1 (the same columns
+     `build_4cycle_head_schema` types the materialized baseline from) —
+     with plain U32 type. 4-byte keys only.
+   * `wcoj_4cycle_groupby_root_count_u64_recorded` (S1d;
+     `wcoj_4cycle_groupby_root_count_hg_u64` kernel): u64-key 4-cycle
+     count sibling, reducing per-row match counts per unique root through
+     the WCOJ relation metadata plus
+     `wcoj_groupby_root_segment_sum_counts_u32` (the recorded groupby is
+     U32/Symbol-key only), then compacting totals>0. Output schema
+     (W: U64, count: U64).
 
-   Symbol semantics (S1c, locked by tests): count over Symbol-keyed/valued
-   bodies fuses — Symbol is u32-physical and count never reads values —
-   and the output preserves the Symbol key type. Sum/min/max over Symbol
-   VALUES is not meaningful data arithmetic: the fused hook declines and
-   the unfused groupby rejects with the same value-type error, so fused
-   and kill-switch runs fail identically.
+   Symbol semantics (S1c/S1d, locked by tests): count over
+   Symbol-keyed/valued bodies fuses — Symbol is u32-physical and count
+   never reads values — and the output preserves the Symbol key type.
+   Sum/min/max over Symbol VALUES is not meaningful data arithmetic: the
+   fused hook declines (triangle and 4-cycle alike) and the unfused
+   groupby rejects with the same value-type error, so fused and
+   kill-switch runs fail identically.
+
+   Recorded-groupby value widths (S1d): `groupby_multi_agg_recorded`
+   accepts U64 value columns for Sum (S1b) and Min/Max (S1d,
+   `groupby_min_u64`/`groupby_max_u64`, result schema preserves the value
+   width) under its U32/Symbol-key constraint, matching the legacy
+   groupby's u64-value semantics bit for bit.
 
    All reduction work is O(n_xy) — input-sized, never join-output-sized.
 
 Gate evidence for the S1b widening (sum/min/max + u64 count):
 `docs/evidence/2026-06-11-s1b-agg-widening/`. Gate evidence for the S1c
 completion (4-cycle count, u64 sum/min/max, Symbol locks):
-`docs/evidence/2026-06-11-s1c-4cycle-width-completion/`.
+`docs/evidence/2026-06-11-s1c-4cycle-width-completion/`. Gate evidence
+for the S1d completion (4-cycle sum/min/max, u64-key 4-cycle count,
+recorded u64-value min/max):
+`docs/evidence/2026-06-11-s1d-4cycle-agg-variants/`.
 
 **Recursive-stratum inputs (covered, no code change needed).** A
 non-recursive aggregate rule in a later stratum whose triangle body reads
@@ -364,10 +392,37 @@ counter == 1, kill-switch row parity, host-oracle parity). Aggregates
 *inside* recursive rules remain stratification-rejected at compile time —
 out of scope by language contract, not by this dispatch surface.
 
-Deferred (stated explicitly): u64-key 4-cycle count fusion, 4-cycle
-sum/min/max fusion, k-clique (K=5..8) count fusion, LogSumExp/float
-aggregates, recorded-groupby u64-value min/max (only the legacy path was
-widened — u64 keys route there).
+Deferred (stated explicitly): u64-key 4-cycle sum/min/max fusion (the
+count path has its u64 sibling; the agg path declines 8-byte keys),
+k-clique (K=5..8) count fusion, LogSumExp/float aggregates.
+
+**Design decision — float/LogSumExp fused aggregates are deferred, not
+just unimplemented (S1d).** The fused kernels' correctness argument rests
+on integer atomics being associative, commutative AND exact: any
+interleaving of `atomicAdd`/`atomicMin`/`atomicMax` on integers yields
+bit-identical accumulators, which is what lets the per-row partials be
+deterministic values under the GPU contract. Float `atomicAdd` is
+commutative but NOT associative in IEEE-754 — accumulator bits depend on
+warp scheduling, so a float-summing fused kernel would return
+run-to-run-different values and break the deterministic-values contract
+(the same reason `groupby_multi_agg_recorded` rejects LogSumExp today:
+its max → sumexp → final chain needs deterministic intermediate sums).
+Candidate designs, in preference order, for whoever picks this up:
+
+1. *Per-block deterministic tree reduction:* keep the work plan's
+   fixed-shape block slicing, reduce each block's float partials in a
+   shared-memory tree with a fixed combine order, then combine the
+   per-block partials in block-index order (one ordered pass, no float
+   atomics anywhere). Cost: an extra block_partials buffer sized
+   grid * n_roots_touched and a second ordered-combine kernel.
+2. *Fixed-point encoding:* scale f64 values into i64/u128 fixed-point,
+   reuse the existing exact integer atomics, convert back after the
+   recorded reduce. Cost: range/precision analysis per aggregate, and
+   LogSumExp still needs its max pass first.
+
+Either way the unfused baseline must come first (the legacy and recorded
+groupbys reject float values for sum/min/max today), mirroring how the
+S1c/S1d widenings landed: widen the baseline, lock parity, then fuse.
 
 ## Cost Model and Variable Ordering
 
