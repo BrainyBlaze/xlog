@@ -23,6 +23,23 @@ All notable changes to this project are documented in this file.
 
 ### Added
 
+- *(runtime)* **Aggregate-fused WCOJ (factorized aggregates, D1).**
+  `deg(X, count(V)) :- e_xy(X,Y), e_yz(Y,Z), e_xz(X,Z)` now executes through
+  a fused group-by-root count kernel that never materializes the triangle
+  rows — all reduction work is input-sized instead of join-output-sized.
+  Measured 6.05x / 5.37x vs the materialize+groupby path on skewed hub
+  fixtures and 2.49x on small uniform
+  (`docs/evidence/2026-06-11-s1-aggregate-fused-wcoj/`). Transparent:
+  count-by-root-variable aggregates over triangle bodies fuse automatically
+  (counter `Executor::wcoj_groupby_fusion_dispatch_count`); every structural
+  mismatch falls back to the existing path with identical results; kill
+  switch `XLOG_DISABLE_WCOJ_GROUPBY_FUSION=1`. Scope: u32/Symbol keys,
+  single `count` aggregate, non-recursive triangle bodies.
+- *(docs)* Factorized-hypergraph research report
+  (`docs/plans/2026-06-11-factorized-hypergraph-research.md`):
+  adversarially verified algorithm landscape (f-/d-representations, FAQ,
+  Free Join, factorized provenance), codebase asset/gap map, four ranked
+  integration directions with bench-spike gates (D1 shipped above).
 - *(runtime)* WCOJ pipeline errors (layout/kernel failures) are now counted
   (`Executor::wcoj_error_decline_count`) and logged when they decline to the
   binary-join fallback; `XLOG_WCOJ_STRICT=1` propagates the error instead.
