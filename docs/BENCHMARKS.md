@@ -235,9 +235,20 @@ All random data generation uses deterministic seeding:
 
 Development hardware: **NVIDIA RTX PRO 3000 Blackwell Generation Laptop GPU** (12 GB, SM120, compute capability 12.0, driver 591.59).
 
-All baseline targets below are calibrated on this device. Throughput numbers on desktop-class GPUs (e.g. RTX 4090, RTX 5090) will differ due to higher memory bandwidth and SM count.
+> **Status of the tables below (audited 2026-06-10):** the Transitive
+> Closure, Hash Join, Exact Inference, and Monte Carlo tables are
+> **aspirational targets**, not measured results. No published in-repo run
+> backs them — the Criterion harnesses exist (`crates/xlog-gpu/benches/`,
+> `crates/xlog-prob/benches/`) but their output is git-ignored and no
+> baseline has been committed. Do not cite these numbers as evidence.
+> Measured, source-backed results in this repo are: the WCOJ super-hub
+> speedups (10.5×–33.8×, `docs/evidence/2026-05-01-wcoj-bench-baseline/`)
+> and the neural-symbolic cache ablation below (2.74×, CI-backed,
+> measured 2026-02-18).
 
-### Transitive Closure
+Throughput on desktop-class GPUs (e.g. RTX 4090, RTX 5090) will differ due to higher memory bandwidth and SM count.
+
+### Transitive Closure (targets — unmeasured)
 
 | Configuration | Target | Notes |
 |---------------|--------|-------|
@@ -245,7 +256,7 @@ All baseline targets below are calibrated on this device. Throughput numbers on 
 | 1M random edges | >5M rows/sec | Medium graph |
 | K_{500,500} bipartite | >10M rows/sec | Dense output |
 
-### Hash Join
+### Hash Join (targets — unmeasured)
 
 | Configuration | Target | Notes |
 |---------------|--------|-------|
@@ -253,7 +264,7 @@ All baseline targets below are calibrated on this device. Throughput numbers on 
 | 1M × 100K | >100M rows/sec | Large left relation |
 | High selectivity | >20M rows/sec | Many output rows |
 
-### Exact Inference
+### Exact Inference (targets — unmeasured)
 
 | Configuration | Target | Notes |
 |---------------|--------|-------|
@@ -261,7 +272,7 @@ All baseline targets below are calibrated on this device. Throughput numbers on 
 | 50-variable Bayesian | <500ms | Medium complexity |
 | With gradients | <2× base | Backward pass overhead |
 
-### Monte Carlo
+### Monte Carlo (targets — unmeasured)
 
 | Configuration | Target | Notes |
 |---------------|--------|-------|

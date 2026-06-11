@@ -1388,11 +1388,20 @@ contributing rows per group; cap excess fails with a typed
 `v0.8.5 prob_aggregate error` that recommends MC or reducing the finite domain.
 
 **Monte Carlo** supports probabilistic rules and non-monotone recursion.
-Aggregate support follows the v0.8.5 probabilistic aggregate contract and must
-run through GPU sampling plus deterministic aggregate execution when accepted:
+The production MC path is the GPU-resident megakernel engine, which rejects
+negation, aggregates, and other unbounded constructs with a typed
+`ResidentRejection`. Programs in that fragment (including non-monotone
+recursion and v0.8.5 probabilistic aggregates under MC) require an explicit
+opt-in to the **labeled CPU oracle** — `--allow-cpu-oracle` on the CLI,
+`allow_cpu_oracle=True` in Python, `McEvalConfig::allow_cpu_oracle_fallback`
+in Rust — and their results carry `mc_engine = "cpu-oracle"`. Without the
+opt-in, such programs fail closed with the typed rejection (corrected
+2026-06-10; previously this fallback was silent and unlabeled):
 
 ```bash
 xlog prob program.xlog --prob-engine mc --samples 10000 --seed 42
+# resident-rejected fragment (negation / aggregates) needs the explicit oracle:
+xlog prob program.xlog --prob-engine mc --samples 10000 --allow-cpu-oracle
 ```
 
 ### Probabilistic Aggregates

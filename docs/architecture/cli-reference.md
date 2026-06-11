@@ -107,6 +107,10 @@ xlog prob [OPTIONS] <SOURCE>
 - `--samples <N>` — Monte Carlo sample count (with `--prob-engine mc`)
 - `--seed <N>` — Random seed for Monte Carlo (with `--prob-engine mc`)
 - `--confidence <LEVEL>` — Confidence level for MC intervals (default: 0.95)
+- `--allow-cpu-oracle` — Allow the labeled CPU oracle when the GPU-resident MC
+  engine rejects the program (negation, aggregates, ...). Fail-closed when
+  unset; the result is labeled `mc_engine: "cpu-oracle"` and is never
+  GPU-native evidence
 - `--output <FORMAT>` — Output format: `pretty` (default), `csv`, `arrow`
 - `--output-dir <DIR>` — Directory for Arrow output files (with `--output arrow`)
 - `--device <N>` — CUDA device index (default: 0)

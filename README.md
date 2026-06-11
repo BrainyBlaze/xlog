@@ -32,7 +32,8 @@ the GPU; every training iteration pays a PCIe round-trip that dominates wall-clo
 XLOG closes that gap: its compiler and runtime span four reasoning paradigms - deterministic
 Datalog evaluation, probabilistic inference via knowledge compilation (PIR -> CNF -> D4 -> XGCF),
 SAT/MaxSAT verification, and differentiable neural-symbolic training - on a single CUDA runtime
-with zero host-device transfers in production paths. Implemented in Rust with custom CUDA kernels,
+with zero tracked host-device transfers in production data planes (bounded control-plane
+metadata reads, such as fixpoint row counts, are documented exemptions). Implemented in Rust with custom CUDA kernels,
 XLOG caches compiled circuits across training iterations, yielding a measured **2.74x end-to-end
 speedup** (95% CI `[2.29, 3.18]`) on the MNIST addition benchmark, and exposes GPU-resident
 results via DLPack and Arrow for zero-copy interop with PyTorch, JAX, and cuDF.
@@ -58,7 +59,7 @@ XLOG is not a DSL bolted onto a tensor framework. It is a full typed logic progr
 ## When to use XLOG
 
 - **Neural-symbolic training** where logic structure depends on the program, not on network weights. Compiled circuits are cached across iterations; only weights change, not the DAG.
-- **Probabilistic reasoning at scale** where exact inference benefits from a compile-once, evaluate-many discipline across repeated queries or training loops.
+- **Probabilistic reasoning** where exact inference benefits from a compile-once, evaluate-many discipline across repeated queries or training loops (see `docs/BENCHMARKS.md` for which numbers are measured vs. targets).
 - **Graph analytics, program analysis, and recursive queries** over device-resident data, with semi-naive fixpoint evaluation and minimal host round-trips.
 - **Learned-rule induction (dILP)** with GPU-resident credit assignment, sparse candidate masks, and transactional promotion gates.
 

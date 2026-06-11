@@ -83,6 +83,20 @@ If a program uses aggregation, use `prob_engine=mc`.
 
 **Non-monotone SCC semantics:** `xlog_prob::mc::NONMONOTONE_SEMANTICS` (also surfaced to Python results).
 
+**Engine split + fail-closed contract (2026-06-10):** the production MC path
+is the GPU-resident megakernel engine, which **rejects** negation, aggregates,
+and other unbounded constructs with a typed `ResidentRejection`. Programs in
+that fragment do NOT run on the GPU: `McProgram::evaluate` fails closed with
+the rejection unless the caller explicitly sets
+`McEvalConfig::allow_cpu_oracle_fallback` (CLI: `--allow-cpu-oracle`; Python:
+`evaluate(..., allow_cpu_oracle=True)`), in which case the **CPU oracle**
+evaluates the program and the result is labeled `McResult::engine =
+McEngine::CpuOracle` (`mc_engine: "cpu-oracle"` in CLI JSON / Python
+metadata). CPU-oracle results are never valid GPU-native or zero-host
+evidence. Before 2026-06-10 this fallback was silent and unlabeled; the
+v0.8.5 MC-aggregate evidence was corrected accordingly
+(`docs/evidence/2026-05-19-v085-prob-aggregates/README.md`).
+
 ## v0.9 Epistemic Integration Contract
 
 The v0.9 epistemic work treats accepted world views as the only valid source of
@@ -153,6 +167,19 @@ This is implemented in `crates/xlog-prob/src/exact.rs` (`ExactDdnnfProgram::eval
 `ExactDdnnfProgram` compiles CNF on the GPU, invokes GPU D4 + GPU CDCL verification, and stores the resulting circuit in a
 device-resident `GpuCircuitCache`. The program holds a cache handle and CUDA provider in `GpuExactState`; evaluations reuse
 the cached slot and run cache-aware XGCF kernels with no CPU D4 invocation and no CNF/DDNNF host materialization.
+
+### Orchestration boundary (honest residency statement)
+
+XGCF forward evaluation launches one kernel **per circuit level** from a host
+loop (`eval_log_wmc_device_inplace`, `crates/xlog-prob/src/gpu.rs`). On the
+GPU-D4-native path the loop reads no per-level data back from the device
+(level sizing uses device-resident arrays; the host-side `level_offsets`
+mirror is populated only for host-uploaded circuits), and results stay on
+device until the caller downloads O(1) scalars (logZ, per-query gradients)
+after evaluation. Unlike the MC resident megakernel, exact inference is
+therefore **GPU-accelerated with host-orchestrated level launches**, not a
+single-launch device-resident engine — do not cite it under the MC engine's
+no-host-interaction measured contract.
 
 ### CPU D4/DDNNF compilation (removed)
 
