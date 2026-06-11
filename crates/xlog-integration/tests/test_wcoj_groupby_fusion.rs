@@ -521,6 +521,73 @@ fn groupby_fusion_count_u64_fires_end_to_end_with_parity() {
     assert_eq!(unfused_count, 0, "kill switch must keep the counter at 0");
 }
 
+/// Shared 4-cycle fixture. Completions per root W:
+/// W=1 -> (X,Y,Z) in {(10,20,30),(10,21,30),(11,20,30)};
+/// W=2 -> {(10,20,30),(10,21,30)}. W=3 has e1/e2/e3 paths but no closing
+/// e4 edge back to itself.
+fn cycle4_inputs() -> BTreeMap<&'static str, Vec<(u32, u32)>> {
+    let mut inputs: BTreeMap<&str, Vec<(u32, u32)>> = BTreeMap::new();
+    inputs.insert("e1", vec![(1, 10), (1, 11), (2, 10), (3, 12)]);
+    inputs.insert("e2", vec![(10, 20), (10, 21), (11, 20), (12, 22)]);
+    inputs.insert("e3", vec![(20, 30), (21, 30), (22, 31)]);
+    inputs.insert("e4", vec![(30, 1), (30, 2), (31, 9)]);
+    inputs
+}
+
+#[test]
+fn groupby_fusion_4cycle_count_fires_end_to_end_with_parity() {
+    let Some(fix) = make_fixture() else {
+        eprintln!("Skipping: CUDA runtime unavailable");
+        return;
+    };
+    let _guard = env_lock();
+    let source = "agg(W, count(Z)) :- e1(W, X), e2(X, Y), e3(Y, Z), e4(Z, W).";
+    let inputs = cycle4_inputs();
+    let expected = vec![(1u32, 3u64), (2, 2)];
+
+    // Phase 1: fused 4-cycle count path fires and is correct.
+    let (fused_rows, fused_count) =
+        run_agg_program(&fix, source, &inputs, download_group_counts);
+    assert_eq!(fused_rows, expected, "fused 4-cycle count row set");
+    assert_eq!(
+        fused_count, 1,
+        "fused 4-cycle group-by-root count dispatch must fire exactly once"
+    );
+
+    // Phase 2: kill switch forces the materialize+groupby path.
+    // SAFETY: serialized by ENV_LOCK; restored below.
+    unsafe {
+        std::env::set_var("XLOG_DISABLE_WCOJ_GROUPBY_FUSION", "1");
+    }
+    let (unfused_rows, unfused_count) =
+        run_agg_program(&fix, source, &inputs, download_group_counts);
+    unsafe {
+        std::env::remove_var("XLOG_DISABLE_WCOJ_GROUPBY_FUSION");
+    }
+    assert_eq!(unfused_rows, expected, "kill-switch 4-cycle count row set");
+    assert_eq!(unfused_count, 0, "kill switch must keep the counter at 0");
+}
+
+#[test]
+fn groupby_fusion_4cycle_sum_declines_to_unfused() {
+    // Only Count is fused for the 4-cycle shape: sum must decline silently
+    // (counter == 0) and the standard path must produce the correct sums.
+    let Some(fix) = make_fixture() else {
+        eprintln!("Skipping: CUDA runtime unavailable");
+        return;
+    };
+    let _guard = env_lock();
+    let source = "agg(W, sum(Z)) :- e1(W, X), e2(X, Y), e3(Y, Z), e4(Z, W).";
+    let inputs = cycle4_inputs();
+    // W=1: 30+30+30 = 90; W=2: 30+30 = 60.
+    let (rows, count) = run_agg_program(&fix, source, &inputs, download_group_counts);
+    assert_eq!(rows, vec![(1u32, 90u64), (2, 60)], "4-cycle sum rows");
+    assert_eq!(
+        count, 0,
+        "4-cycle sum must not consume the fusion counter (Count-only fusion)"
+    );
+}
+
 #[test]
 fn groupby_fusion_sum_declines_non_triangle_shape() {
     let Some(fix) = make_fixture() else {

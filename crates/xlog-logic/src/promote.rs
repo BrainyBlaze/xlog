@@ -154,6 +154,13 @@ pub fn promote_multiway(
             if try_promote_triangle_inside_aggregate(&mut rule.body, stats, config) {
                 continue;
             }
+            // S1c: 4-cycle sibling of the descent above (atom-count gates
+            // make the two matchers disjoint). The executor's fused hook
+            // dispatches Count only; declined dispatches still execute the
+            // embedded binary fallback unchanged.
+            if try_promote_4cycle_inside_aggregate(&mut rule.body, stats, config) {
+                continue;
+            }
             if let Some(promoted) = try_promote_chain(&rule.body) {
                 rule.body = promoted;
                 continue;
@@ -636,6 +643,76 @@ fn try_promote_triangle_inside_aggregate(
     let normalized = normalize_triangle_to_left_deep(&canonical);
     let candidate = normalized.as_ref().unwrap_or(&canonical);
     let Some(promoted) = try_promote_triangle(candidate, stats, config) else {
+        return false;
+    };
+    let RirNode::MultiWayJoin { output_columns, .. } = &promoted else {
+        return false;
+    };
+    let mut remapped: Vec<ProjectExpr> = Vec::with_capacity(group_cols.len());
+    for col in group_cols.iter() {
+        let ProjectExpr::Column(c) = col else {
+            return false;
+        };
+        let Some(pos) = output_columns
+            .iter()
+            .position(|oc| matches!(oc, ProjectExpr::Column(x) if x == c))
+        else {
+            return false;
+        };
+        remapped.push(ProjectExpr::Column(pos));
+    }
+    *group_cols = remapped;
+    **inner = promoted;
+    true
+}
+
+/// S1c groupby fusion: 4-cycle sibling of
+/// [`try_promote_triangle_inside_aggregate`]. Promotes a 4-cycle join tree
+/// sitting inside an aggregate rule's
+/// `Project{ GroupBy { Project { <join tree> } } }` wrapper. The inner tree
+/// is matched exactly like a top-level 4-cycle body via a synthesized
+/// canonical (W, X, Y, Z) projection (join-output columns [0, 1, 3, 5] of
+/// the canonical-cycle tree), and on success the group projection's column
+/// indices are remapped from join-output space into the MultiWayJoin's
+/// (W, X, Y, Z) output space — output position 0 is the variable-order
+/// root W by construction, which is what the executor's fused dispatch
+/// requires for the group key. Returns false — leaving the rule
+/// untouched — on any structural mismatch.
+fn try_promote_4cycle_inside_aggregate(
+    body: &mut RirNode,
+    stats: &StatsManager,
+    config: &CompilerConfig,
+) -> bool {
+    let RirNode::Project { input: gb, .. } = body else {
+        return false;
+    };
+    let RirNode::GroupBy {
+        input: group_input, ..
+    } = gb.as_mut()
+    else {
+        return false;
+    };
+    let RirNode::Project {
+        input: inner,
+        columns: group_cols,
+    } = group_input.as_mut()
+    else {
+        return false;
+    };
+    // The matcher expects the canonical 4-cycle projection
+    // (W, X, Y, Z) = join-output columns [0, 1, 3, 5].
+    let canonical = RirNode::Project {
+        input: inner.clone(),
+        columns: vec![
+            ProjectExpr::Column(0),
+            ProjectExpr::Column(1),
+            ProjectExpr::Column(3),
+            ProjectExpr::Column(5),
+        ],
+    };
+    let normalized = normalize_4cycle_to_bushy(&canonical);
+    let candidate = normalized.as_ref().unwrap_or(&canonical);
+    let Some(promoted) = try_promote_4cycle(candidate, stats, config) else {
         return false;
     };
     let RirNode::MultiWayJoin { output_columns, .. } = &promoted else {
