@@ -553,6 +553,12 @@ pub const KERNEL_MODULES: &[KernelModuleSpec] = &[
             // width-class, K=5/6).
             "wcoj_clique5_groupby_root_count_hg_u32",
             "wcoj_clique6_groupby_root_count_hg_u32",
+            // D2 S2 spike — Free Join level-synchronous frontier
+            // engine primitives.
+            "fj_expand_work_prefix_u32",
+            "fj_expand_count_u32",
+            "fj_expand_emit_u32",
+            "fj_probe_refine_u32",
         ],
     },
     KernelModuleSpec {

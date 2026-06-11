@@ -3277,3 +3277,214 @@ extern "C" __global__ void wcoj_clique6_groupby_root_count_hg_u32(
     uint32_t* out_row_counts) {
     wcoj_clique_template_groupby_root_count_hg_grid_t<6, uint32_t>(edge_col0, edge_col1, edge_n, leader_edge_idx, edge_order, iteration_order, leader_count, unique_keys, fan_out, prefix_sum, total, block_work_unit, out_row_counts);
 }
+
+// =====================================================================
+// D2 Free Join (S2 spike) — level-synchronous frontier engine
+// primitives (docs/plans/2026-06-12-d2-free-join-design.md §2).
+//
+// A frontier is a SoA set of u32 columns; each row is one partial
+// binding plus, per not-yet-exhausted atom, a (lo, hi) trie range
+// into that atom's lex-sorted dedup'd buffer (flat sorted-range
+// tries: a trie node IS a contiguous row range; get(key) is a
+// binary-search refinement). Column sets are passed as device
+// pointer tables so the kernels stay arity-generic.
+//
+// Determinism contract (§2.3): two-phase count → scan → emit, no
+// atomics anywhere; output order is parent-row order × lex order of
+// the cover range, so results are canonical without re-sorting.
+//
+// Work-index mapping: when the cover atom has per-row parent ranges
+// (has_parent_range == 1) work item w maps to frontier row r via the
+// exclusive work prefix (same upper_bound discipline as the triangle
+// HG kernels). When the cover atom is untouched every row shares the
+// constant range [const_lo, const_hi), so the mapping is a uniform
+// divide/modulo and no work prefix is materialized at all.
+
+// Per-frontier-row cover range length, written into work_prefix[i];
+// work_prefix[n_frontier] zeroed for the exclusive scan that follows
+// (mirrors wcoj_triangle_build_hg_work_plan_u32).
+extern "C" __global__ void fj_expand_work_prefix_u32(
+    const uint32_t* __restrict__ parent_lo,
+    const uint32_t* __restrict__ parent_hi,
+    uint32_t n_frontier,
+    uint32_t* __restrict__ work_prefix) {
+    uint32_t i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i == 0) {
+        work_prefix[n_frontier] = 0;
+    }
+    if (i >= n_frontier) {
+        return;
+    }
+    work_prefix[i] = parent_hi[i] - parent_lo[i];
+}
+
+// Phase 1 of EXPAND: mark distinct cover-prefix group starts. A
+// candidate position starts a group iff it is the first position of
+// its frontier row's range or any of the cover columns changes value
+// vs the previous position (ranges are lex-sorted, so groups are
+// contiguous runs). group_marks has length total_work + 1; the
+// trailing slot is zeroed for the exclusive scan.
+extern "C" __global__ void fj_expand_count_u32(
+    const uint32_t* const* __restrict__ cover_cols,
+    uint32_t n_cover_cols,
+    const uint32_t* __restrict__ parent_lo,
+    const uint32_t* __restrict__ work_prefix,
+    uint32_t has_parent_range,
+    uint32_t const_lo,
+    uint32_t const_hi,
+    uint32_t n_frontier,
+    uint32_t total_work,
+    uint32_t* __restrict__ group_marks) {
+    uint32_t w = blockIdx.x * blockDim.x + threadIdx.x;
+    if (w == 0) {
+        group_marks[total_work] = 0;
+    }
+    if (w >= total_work) {
+        return;
+    }
+    uint32_t lo;
+    uint32_t pos;
+    if (has_parent_range != 0u) {
+        uint32_t r = upper_bound_u32(work_prefix, n_frontier + 1, w) - 1u;
+        lo = parent_lo[r];
+        pos = lo + (w - work_prefix[r]);
+    } else {
+        uint32_t len = const_hi - const_lo;
+        lo = const_lo;
+        pos = const_lo + (w % len);
+    }
+    uint32_t start = (pos == lo) ? 1u : 0u;
+    if (start == 0u) {
+        for (uint32_t j = 0; j < n_cover_cols; ++j) {
+            const uint32_t* col = cover_cols[j];
+            if (col[pos] != col[pos - 1u]) {
+                start = 1u;
+                break;
+            }
+        }
+    }
+    group_marks[w] = start;
+}
+
+// Phase 2 of EXPAND: emit one child frontier row per distinct cover
+// group. Output index = group_offsets[w] (exclusive scan of the
+// marks), so emission is atomics-free and deterministic. The group's
+// refined subrange [pos, g_hi) is recovered by successive
+// upper_bound refinement on the cover columns (each column is sorted
+// within the prefix-equal range of the previous columns).
+extern "C" __global__ void fj_expand_emit_u32(
+    const uint32_t* const* __restrict__ cover_cols,
+    uint32_t n_cover_cols,
+    const uint32_t* __restrict__ parent_lo,
+    const uint32_t* __restrict__ parent_hi,
+    const uint32_t* __restrict__ work_prefix,
+    uint32_t has_parent_range,
+    uint32_t const_lo,
+    uint32_t const_hi,
+    uint32_t n_frontier,
+    uint32_t total_work,
+    const uint32_t* __restrict__ group_offsets,
+    const uint32_t* const* __restrict__ parent_copy_cols,
+    uint32_t* const* __restrict__ child_copy_cols,
+    uint32_t n_copy_cols,
+    uint32_t* const* __restrict__ child_var_cols,
+    uint32_t keep_cover_range,
+    uint32_t* __restrict__ child_cover_lo,
+    uint32_t* __restrict__ child_cover_hi) {
+    uint32_t w = blockIdx.x * blockDim.x + threadIdx.x;
+    if (w >= total_work) {
+        return;
+    }
+    uint32_t r;
+    uint32_t lo;
+    uint32_t pos;
+    uint32_t row_hi;
+    if (has_parent_range != 0u) {
+        r = upper_bound_u32(work_prefix, n_frontier + 1, w) - 1u;
+        lo = parent_lo[r];
+        pos = lo + (w - work_prefix[r]);
+        row_hi = parent_hi[r];
+    } else {
+        uint32_t len = const_hi - const_lo;
+        r = w / len;
+        lo = const_lo;
+        pos = const_lo + (w % len);
+        row_hi = const_hi;
+    }
+    // Recompute the group-start predicate (cheaper than re-reading
+    // the marks array; identical result by construction).
+    bool start = (pos == lo);
+    if (!start) {
+        for (uint32_t j = 0; j < n_cover_cols; ++j) {
+            const uint32_t* col = cover_cols[j];
+            if (col[pos] != col[pos - 1u]) {
+                start = true;
+                break;
+            }
+        }
+    }
+    if (!start) {
+        return;
+    }
+    uint32_t out = group_offsets[w];
+    for (uint32_t j = 0; j < n_copy_cols; ++j) {
+        child_copy_cols[j][out] = parent_copy_cols[j][r];
+    }
+    uint32_t g_hi = row_hi;
+    for (uint32_t j = 0; j < n_cover_cols; ++j) {
+        const uint32_t* col = cover_cols[j];
+        uint32_t v = col[pos];
+        child_var_cols[j][out] = v;
+        g_hi = pos + upper_bound_u32(col + pos, g_hi - pos, v);
+    }
+    if (keep_cover_range != 0u) {
+        child_cover_lo[out] = pos;
+        child_cover_hi[out] = g_hi;
+    }
+}
+
+// PROBE: per frontier row, refine the probe atom's current trie
+// range by binary search on each probe key column (all keys already
+// bound — they are frontier columns, so reads coalesce). Writes the
+// refined range (when the atom still has unconsumed columns) and the
+// survival mask consumed by the existing mask+scan+gather
+// compaction. combine_mask == 1 ANDs into an earlier probe's mask.
+extern "C" __global__ void fj_probe_refine_u32(
+    const uint32_t* const* __restrict__ probe_cols,
+    uint32_t n_probe_cols,
+    const uint32_t* const* __restrict__ key_cols,
+    const uint32_t* __restrict__ in_lo,
+    const uint32_t* __restrict__ in_hi,
+    uint32_t has_range,
+    uint32_t const_lo,
+    uint32_t const_hi,
+    uint32_t n_frontier,
+    uint32_t keep_range,
+    uint32_t* __restrict__ out_lo,
+    uint32_t* __restrict__ out_hi,
+    uint8_t* __restrict__ mask,
+    uint32_t combine_mask) {
+    uint32_t i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n_frontier) {
+        return;
+    }
+    uint32_t lo = (has_range != 0u) ? in_lo[i] : const_lo;
+    uint32_t hi = (has_range != 0u) ? in_hi[i] : const_hi;
+    for (uint32_t j = 0; j < n_probe_cols && lo < hi; ++j) {
+        const uint32_t* col = probe_cols[j];
+        uint32_t v = key_cols[j][i];
+        uint32_t new_lo = lo + lower_bound_u32(col + lo, hi - lo, v);
+        uint32_t new_hi = lo + upper_bound_u32(col + lo, hi - lo, v);
+        lo = new_lo;
+        hi = new_hi;
+    }
+    uint8_t hit = (lo < hi) ? 1u : 0u;
+    if (combine_mask != 0u) {
+        hit = (mask[i] != 0u && hit != 0u) ? 1u : 0u;
+    }
+    mask[i] = hit;
+    if (keep_range != 0u) {
+        out_lo[i] = lo;
+        out_hi[i] = hi;
+    }
+}
