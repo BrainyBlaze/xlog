@@ -65,6 +65,13 @@ All notable changes to this project are documented in this file.
     symbol ids). Evidence:
     `docs/evidence/2026-06-11-s1c-4cycle-width-completion/`.
   Gate evidence: `docs/evidence/2026-06-11-s1b-agg-widening/`.
+- *(runtime)* Aggregate fusion over recursive-stratum inputs verified and
+  locked by tests: later-stratum count/sum aggregates whose triangle bodies
+  read semi-naive fixpoint outputs (incl. all-recursive self-joins)
+  dispatch the fused path with oracle parity — recursive merges are
+  lex-sorted+deduped by construction, satisfying the fused layout contract.
+  Aggregates *inside* recursive rules remain stratification-rejected by
+  language contract.
 - *(prob)* **Factorized outcome folding for exact non-count aggregates
   (D4).** Probabilistic `sum`/`min`/`max`/`logsumexp` provenance no longer
   enumerates one conjunction per 2^k outcome mask; the factorized encoding
