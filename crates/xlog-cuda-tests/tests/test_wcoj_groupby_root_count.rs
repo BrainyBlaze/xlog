@@ -11,7 +11,6 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use cudarc::driver::sys;
-use cudarc::driver::DevicePtr;
 
 use xlog_core::{AggOp, MemoryBudget, ScalarType, Schema};
 use xlog_cuda::device_runtime::{
@@ -427,6 +426,349 @@ fn s1_measurement_fused_vs_unfused() {
             e_xz_rows.len()
         );
     }
+}
+
+// =====================================================================
+// D1 widening — u64-key variant of the fused count path.
+// =====================================================================
+
+fn upload_binary_u64(memory: &Arc<GpuMemoryManager>, rows: &[(u64, u64)]) -> CudaBuffer {
+    let n = rows.len() as u32;
+    let mut col0 = memory
+        .alloc::<u8>(rows.len() * std::mem::size_of::<u64>())
+        .expect("alloc col0");
+    let mut col1 = memory
+        .alloc::<u8>(rows.len() * std::mem::size_of::<u64>())
+        .expect("alloc col1");
+    let mut d_num_rows = memory.alloc::<u32>(1).expect("alloc d_num_rows");
+    let col0_bytes: Vec<u8> = rows.iter().flat_map(|(a, _)| a.to_le_bytes()).collect();
+    let col1_bytes: Vec<u8> = rows.iter().flat_map(|(_, b)| b.to_le_bytes()).collect();
+    let device = memory.device().inner();
+    device
+        .htod_sync_copy_into(&col0_bytes, &mut col0)
+        .expect("htod col0");
+    device
+        .htod_sync_copy_into(&col1_bytes, &mut col1)
+        .expect("htod col1");
+    device
+        .htod_sync_copy_into(&[n], &mut d_num_rows)
+        .expect("htod d_num_rows");
+    let schema = Schema::new(vec![
+        ("col0".to_string(), ScalarType::U64),
+        ("col1".to_string(), ScalarType::U64),
+    ]);
+    CudaBuffer::from_columns_with_host_count(
+        vec![col0.into(), col1.into()],
+        n as u64,
+        d_num_rows,
+        schema,
+        n,
+    )
+}
+
+/// Sorted (X, count) pairs from a 2-column (U64 key, U64 count) buffer.
+fn download_group_counts_u64(
+    memory: &Arc<GpuMemoryManager>,
+    buffer: &CudaBuffer,
+) -> Vec<(u64, u64)> {
+    let keys = download_u64_column(memory, buffer, 0);
+    let counts = download_u64_column(memory, buffer, 1);
+    assert_eq!(keys.len(), counts.len());
+    let mut out: Vec<(u64, u64)> = keys.into_iter().zip(counts).collect();
+    out.sort();
+    out
+}
+
+fn oracle_group_counts_u64(
+    e_xy: &[(u64, u64)],
+    e_yz: &[(u64, u64)],
+    e_xz: &[(u64, u64)],
+) -> Vec<(u64, u64)> {
+    let xz_set: BTreeSet<(u64, u64)> = e_xz.iter().copied().collect();
+    let mut yz_by_y: BTreeMap<u64, Vec<u64>> = BTreeMap::new();
+    for (y, z) in e_yz {
+        yz_by_y.entry(*y).or_default().push(*z);
+    }
+    let mut counts: BTreeMap<u64, u64> = BTreeMap::new();
+    for (x, y) in e_xy {
+        if let Some(zs) = yz_by_y.get(y) {
+            for z in zs {
+                if xz_set.contains(&(*x, *z)) {
+                    *counts.entry(*x).or_default() += 1;
+                }
+            }
+        }
+    }
+    counts.into_iter().collect()
+}
+
+fn sorted_unique_u64(rows: impl IntoIterator<Item = (u64, u64)>) -> Vec<(u64, u64)> {
+    let set: BTreeSet<(u64, u64)> = rows.into_iter().collect();
+    set.into_iter().collect()
+}
+
+fn run_case_u64(
+    name: &str,
+    e_xy_rows: &[(u64, u64)],
+    e_yz_rows: &[(u64, u64)],
+    e_xz_rows: &[(u64, u64)],
+) {
+    let Some(fix) = make_fixture() else {
+        eprintln!("skipping {name}: no CUDA device");
+        return;
+    };
+    let expected = oracle_group_counts_u64(e_xy_rows, e_yz_rows, e_xz_rows);
+    assert!(
+        !expected.is_empty(),
+        "{name}: fixture must contain at least one triangle"
+    );
+
+    let e_xy = upload_binary_u64(&fix.memory, e_xy_rows);
+    let e_yz = upload_binary_u64(&fix.memory, e_yz_rows);
+    let e_xz = upload_binary_u64(&fix.memory, e_xz_rows);
+
+    // Unfused production baseline: materialize u64 triangles, groupby count.
+    let stream = fix.pool.acquire().expect("stream");
+    let tri = fix
+        .provider
+        .wcoj_triangle_hg_u64_recorded(&e_xy, &e_yz, &e_xz, WCOJ_HG_BLOCK_WORK_UNIT_DEFAULT, stream)
+        .expect("baseline u64 triangle materialize");
+    let grouped = fix
+        .provider
+        .groupby_multi_agg(&tri, &[0], &[(1, AggOp::Count)])
+        .expect("baseline u64 groupby count");
+    let baseline = download_group_counts_u64(&fix.memory, &grouped);
+    assert_eq!(baseline, expected, "{name}: unfused u64 baseline vs oracle");
+
+    let fused = fix
+        .provider
+        .wcoj_triangle_groupby_root_count_u64_recorded(
+            &e_xy,
+            &e_yz,
+            &e_xz,
+            WCOJ_HG_BLOCK_WORK_UNIT_DEFAULT,
+            stream,
+        )
+        .expect("fused u64 groupby-root count");
+    let fused = download_group_counts_u64(&fix.memory, &fused);
+    assert_eq!(fused, expected, "{name}: fused u64 vs oracle");
+}
+
+#[test]
+fn groupby_root_count_u64_matches_oracle_small() {
+    // Same K4 + disjoint triangle shape, but with keys above u32::MAX so a
+    // width-truncating path would visibly fail.
+    const B: u64 = 1 << 33;
+    let map = |rows: &[(u32, u32)]| -> Vec<(u64, u64)> {
+        sorted_unique_u64(rows.iter().map(|&(a, b)| (B + a as u64, B + b as u64)))
+    };
+    let e_xy = map(&[
+        (1, 2),
+        (1, 3),
+        (1, 4),
+        (2, 3),
+        (2, 4),
+        (3, 4),
+        (5, 6),
+        (5, 7),
+        (6, 7),
+    ]);
+    let e_yz = map(&[(2, 3), (2, 4), (3, 4), (6, 7)]);
+    let e_xz = map(&[(1, 3), (1, 4), (2, 4), (3, 4), (5, 7)]);
+    run_case_u64("u64_small", &e_xy, &e_yz, &e_xz);
+}
+
+#[test]
+fn groupby_root_count_u64_matches_oracle_skewed_hub() {
+    const B: u64 = 1 << 40;
+    let mut e_xy: Vec<(u64, u64)> = Vec::new();
+    let mut e_yz: Vec<(u64, u64)> = Vec::new();
+    let mut e_xz: Vec<(u64, u64)> = Vec::new();
+    for y in 1..=512u64 {
+        e_xy.push((B, B + y));
+        for z in 1000..1016u64 {
+            e_yz.push((B + y, B + z));
+        }
+    }
+    for z in 1000..1016u64 {
+        e_xz.push((B, B + z));
+    }
+    for i in 0..200u64 {
+        let (a, b, c) = (B + 2000 + i, B + 3000 + i, B + 4000 + i);
+        e_xy.push((a, b));
+        e_yz.push((b, c));
+        e_xz.push((a, c));
+    }
+    let e_xy = sorted_unique_u64(e_xy);
+    let e_yz = sorted_unique_u64(e_yz);
+    let e_xz = sorted_unique_u64(e_xz);
+    run_case_u64("u64_skewed_hub", &e_xy, &e_yz, &e_xz);
+}
+
+/// S1b measurement, u64-key count (agg-widening gate: fused >= 3x vs
+/// unfused on skewed fixtures). Run explicitly:
+/// `cargo test -p xlog-cuda-tests --test test_wcoj_groupby_root_count \
+///    --release -- --ignored --nocapture`
+#[test]
+#[ignore = "S1b measurement: run explicitly with --ignored --nocapture"]
+fn s1b_measurement_u64_count_fused_vs_unfused() {
+    let Some(fix) = make_fixture() else {
+        eprintln!("skipping s1b_measurement_u64: no CUDA device");
+        return;
+    };
+
+    const B: u64 = 1 << 40;
+    let hub = |n_y: u64, n_z: u64| {
+        let mut e_xy = Vec::new();
+        let mut e_yz = Vec::new();
+        let mut e_xz = Vec::new();
+        for y in 1..=n_y {
+            e_xy.push((B, B + y));
+            for z in 0..n_z {
+                e_yz.push((B + y, B + 1_000_000 + z));
+            }
+        }
+        for z in 0..n_z {
+            e_xz.push((B, B + 1_000_000 + z));
+        }
+        for i in 0..1000u64 {
+            let (a, b, c) = (B + 2_000_000 + i, B + 3_000_000 + i, B + 4_000_000 + i);
+            e_xy.push((a, b));
+            e_yz.push((b, c));
+            e_xz.push((a, c));
+        }
+        (
+            sorted_unique_u64(e_xy),
+            sorted_unique_u64(e_yz),
+            sorted_unique_u64(e_xz),
+        )
+    };
+
+    let cases: Vec<(&str, (Vec<(u64, u64)>, Vec<(u64, u64)>, Vec<(u64, u64)>))> = vec![
+        ("u64_hub_10k_z16", hub(10_000, 16)),
+        ("u64_hub_50k_z16", hub(50_000, 16)),
+    ];
+
+    const REPS: usize = 5;
+    for (name, (e_xy_rows, e_yz_rows, e_xz_rows)) in &cases {
+        let expected = oracle_group_counts_u64(e_xy_rows, e_yz_rows, e_xz_rows);
+        let e_xy = upload_binary_u64(&fix.memory, e_xy_rows);
+        let e_yz = upload_binary_u64(&fix.memory, e_yz_rows);
+        let e_xz = upload_binary_u64(&fix.memory, e_xz_rows);
+
+        let stream = fix.pool.acquire().expect("stream");
+        // Warmup both paths once; assert fused parity vs the host oracle.
+        let tri = fix
+            .provider
+            .wcoj_triangle_hg_u64_recorded(
+                &e_xy,
+                &e_yz,
+                &e_xz,
+                WCOJ_HG_BLOCK_WORK_UNIT_DEFAULT,
+                stream,
+            )
+            .expect("baseline warmup");
+        drop(tri);
+        let warm = fix
+            .provider
+            .wcoj_triangle_groupby_root_count_u64_recorded(
+                &e_xy,
+                &e_yz,
+                &e_xz,
+                WCOJ_HG_BLOCK_WORK_UNIT_DEFAULT,
+                stream,
+            )
+            .expect("fused warmup");
+        assert_eq!(
+            download_group_counts_u64(&fix.memory, &warm),
+            expected,
+            "{name}: fused parity"
+        );
+        drop(warm);
+
+        let mut unfused_ms = Vec::with_capacity(REPS);
+        let mut fused_ms = Vec::with_capacity(REPS);
+        for _ in 0..REPS {
+            let t = std::time::Instant::now();
+            let tri = fix
+                .provider
+                .wcoj_triangle_hg_u64_recorded(
+                    &e_xy,
+                    &e_yz,
+                    &e_xz,
+                    WCOJ_HG_BLOCK_WORK_UNIT_DEFAULT,
+                    stream,
+                )
+                .expect("baseline triangle");
+            let grouped = fix
+                .provider
+                .groupby_multi_agg(&tri, &[0], &[(1, AggOp::Count)])
+                .expect("baseline groupby");
+            fix.provider.device().inner().synchronize().expect("sync");
+            unfused_ms.push(t.elapsed().as_secs_f64() * 1e3);
+            drop(grouped);
+
+            let t = std::time::Instant::now();
+            let fused = fix
+                .provider
+                .wcoj_triangle_groupby_root_count_u64_recorded(
+                    &e_xy,
+                    &e_yz,
+                    &e_xz,
+                    WCOJ_HG_BLOCK_WORK_UNIT_DEFAULT,
+                    stream,
+                )
+                .expect("fused");
+            fix.provider.device().inner().synchronize().expect("sync");
+            fused_ms.push(t.elapsed().as_secs_f64() * 1e3);
+            drop(fused);
+        }
+        unfused_ms.sort_by(|a, b| a.total_cmp(b));
+        fused_ms.sort_by(|a, b| a.total_cmp(b));
+        let med_unfused = unfused_ms[REPS / 2];
+        let med_fused = fused_ms[REPS / 2];
+        println!(
+            "S1b {name}: unfused median {med_unfused:.3} ms, fused median {med_fused:.3} ms, \
+             speedup {:.2}x (n_xy={}, n_yz={}, n_xz={})",
+            med_unfused / med_fused,
+            e_xy_rows.len(),
+            e_yz_rows.len(),
+            e_xz_rows.len()
+        );
+    }
+}
+
+#[test]
+fn groupby_root_count_u64_empty_intersection_roots_are_absent() {
+    const B: u64 = 1 << 33;
+    let e_xy = sorted_unique_u64([(B + 1, B + 2), (B + 9, B + 2), (B + 9, B + 3)]);
+    let e_yz = sorted_unique_u64([(B + 2, B + 3)]);
+    let e_xz = sorted_unique_u64([(B + 1, B + 3)]);
+
+    let Some(fix) = make_fixture() else {
+        eprintln!("skipping u64_empty_intersection: no CUDA device");
+        return;
+    };
+    let e_xy_b = upload_binary_u64(&fix.memory, &e_xy);
+    let e_yz_b = upload_binary_u64(&fix.memory, &e_yz);
+    let e_xz_b = upload_binary_u64(&fix.memory, &e_xz);
+    let stream = fix.pool.acquire().expect("stream");
+    let fused = fix
+        .provider
+        .wcoj_triangle_groupby_root_count_u64_recorded(
+            &e_xy_b,
+            &e_yz_b,
+            &e_xz_b,
+            WCOJ_HG_BLOCK_WORK_UNIT_DEFAULT,
+            stream,
+        )
+        .expect("fused u64 groupby-root count");
+    let fused = download_group_counts_u64(&fix.memory, &fused);
+    assert_eq!(
+        fused,
+        vec![(B + 1, 1u64)],
+        "only X=B+1 completes a triangle"
+    );
 }
 
 #[test]

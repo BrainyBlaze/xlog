@@ -35,6 +35,15 @@ All notable changes to this project are documented in this file.
   mismatch falls back to the existing path with identical results; kill
   switch `XLOG_DISABLE_WCOJ_GROUPBY_FUSION=1`. Scope: u32/Symbol keys,
   single `count` aggregate, non-recursive triangle bodies.
+- *(cuda)* Aggregate-fused WCOJ widening (S1b): `sum`/`min`/`max` over a
+  triangle output variable (Y or Z, U32 values) and u64-key `count` now
+  dispatch through fused group-by-root kernels that never materialize the
+  triangle rows (`wcoj_triangle_groupby_root_{sum,min,max}_hg_u32`,
+  `wcoj_triangle_groupby_root_count_hg_u64`); the recorded groupby `Sum`
+  accepts U64 value columns (`groupby_sum_u64`). Structural mismatches keep
+  declining silently to materialize+groupby, and the
+  `XLOG_DISABLE_WCOJ_GROUPBY_FUSION` kill switch covers the widened paths.
+  Gate evidence: `docs/evidence/2026-06-11-s1b-agg-widening/`.
 - *(docs)* Factorized-hypergraph research report
   (`docs/plans/2026-06-11-factorized-hypergraph-research.md`):
   adversarially verified algorithm landscape (f-/d-representations, FAQ,

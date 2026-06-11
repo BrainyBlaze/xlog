@@ -1016,7 +1016,17 @@ impl super::CudaKernelProvider {
                 .ok_or_else(|| XlogError::Kernel("Value column has no type".to_string()))?;
             match agg_op {
                 AggOp::Count => {}
-                AggOp::Sum | AggOp::Min | AggOp::Max => {
+                AggOp::Sum => {
+                    // D1 widening: U64 values reduce through the u64-value
+                    // sum kernel (same u64 accumulator as the U32 path).
+                    if !matches!(value_ty, ScalarType::U32 | ScalarType::U64) {
+                        return Err(XlogError::Kernel(format!(
+                            "Sum currently requires U32 or U64 values, got {:?}",
+                            value_ty
+                        )));
+                    }
+                }
+                AggOp::Min | AggOp::Max => {
                     if value_ty != ScalarType::U32 {
                         return Err(XlogError::Kernel(format!(
                             "{:?} currently requires U32 values, got {:?}",
@@ -1317,23 +1327,46 @@ impl super::CudaKernelProvider {
                 }
                 AggOp::Sum => {
                     self.memset_zeros_u8_on_stream(output, &cu_stream)?;
-                    let values_view = self.column_as_u32_view(values, row_cap_usize)?;
-                    let sum_func = device
-                        .get_func(GROUPBY_MODULE, groupby_kernels::GROUPBY_SUM)
-                        .ok_or_else(|| {
-                            XlogError::Kernel("groupby_sum kernel not found".to_string())
-                        })?;
-                    // SAFETY: groupby_sum(values, group_ids, num_rows, sums)
-                    unsafe {
-                        sum_func.clone().launch_on_stream(
-                            &cu_stream,
-                            cfg,
-                            (&values_view, &group_ids, num_rows, &*output),
-                        )
-                    }
-                    .map_err(|e| {
-                        XlogError::Kernel(format!("groupby_sum (on_stream) failed: {}", e))
+                    let value_ty = sorted.schema().column_type(*value_col).ok_or_else(|| {
+                        XlogError::Kernel("Value column has no type".to_string())
                     })?;
+                    if value_ty == ScalarType::U64 {
+                        let values_view = self.column_as_u64_view(values, row_cap_usize)?;
+                        let sum_func = device
+                            .get_func(GROUPBY_MODULE, groupby_kernels::GROUPBY_SUM_U64)
+                            .ok_or_else(|| {
+                                XlogError::Kernel("groupby_sum_u64 kernel not found".to_string())
+                            })?;
+                        // SAFETY: groupby_sum_u64(values, group_ids, num_rows, sums)
+                        unsafe {
+                            sum_func.clone().launch_on_stream(
+                                &cu_stream,
+                                cfg,
+                                (&values_view, &group_ids, num_rows, &*output),
+                            )
+                        }
+                        .map_err(|e| {
+                            XlogError::Kernel(format!("groupby_sum_u64 (on_stream) failed: {}", e))
+                        })?;
+                    } else {
+                        let values_view = self.column_as_u32_view(values, row_cap_usize)?;
+                        let sum_func = device
+                            .get_func(GROUPBY_MODULE, groupby_kernels::GROUPBY_SUM)
+                            .ok_or_else(|| {
+                                XlogError::Kernel("groupby_sum kernel not found".to_string())
+                            })?;
+                        // SAFETY: groupby_sum(values, group_ids, num_rows, sums)
+                        unsafe {
+                            sum_func.clone().launch_on_stream(
+                                &cu_stream,
+                                cfg,
+                                (&values_view, &group_ids, num_rows, &*output),
+                            )
+                        }
+                        .map_err(|e| {
+                            XlogError::Kernel(format!("groupby_sum (on_stream) failed: {}", e))
+                        })?;
+                    }
                 }
                 AggOp::Min => {
                     let fill_fn = device

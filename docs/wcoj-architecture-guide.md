@@ -273,26 +273,53 @@ the triangle rows:
    `Project{final} -> GroupBy -> Project{group} -> <join tree>`; the
    descent promotes the inner triangle to `MultiWayJoin` and remaps the
    group projection from join-output space into the (X, Y, Z) output space.
-2. **Executor hook** (`try_dispatch_wcoj_groupby_root_count`,
+2. **Executor hook** (`try_dispatch_wcoj_groupby_root_agg`,
    `executor/wcoj_dispatch.rs`): fires on `GroupBy { Project { MultiWayJoin
-   (triangle) }, key_cols == [0], aggs == [(_, Count)] }` with 4-byte keys.
+   (triangle) }, key_cols == [0], aggs == [(_, Count | Sum | Min | Max)] }`.
    The group key being column 0 = the variable-order root X is the
-   soundness condition for one-pass aggregate propagation. Counter:
-   `wcoj_groupby_fusion_dispatch_count`. Kill switch:
+   soundness condition for one-pass aggregate propagation. For Sum/Min/Max
+   the aggregate value column must map to a triangle output variable (Y =
+   col 1 or Z = col 2) with plain U32 type, so the kernel can read it
+   during traversal (4-byte keys only). Count also admits uniform U64-key
+   triangles. Counter: `wcoj_groupby_fusion_dispatch_count`. Kill switch:
    `XLOG_DISABLE_WCOJ_GROUPBY_FUSION=1`. Structural mismatches decline
    silently to materialize+groupby; pipeline errors go through
    `wcoj_decline_on_error` (`XLOG_WCOJ_STRICT` honored).
-3. **Provider** (`wcoj_triangle_groupby_root_count_u32_recorded`,
-   `xlog-cuda/src/provider/wcoj_metadata.rs` +
-   `wcoj_triangle_groupby_root_count_hg_u32` kernel): the count-phase
-   traversal accumulates per-e_xy-row match counts (integer atomicAdd —
-   order-insensitive, deterministic values), then compacts count>0 roots
-   and reduces per X with the recorded groupby Sum. All reduction work is
-   O(n_xy) — input-sized, never join-output-sized. Output schema (X: U32,
-   count: U64) matches the unfused baseline.
+3. **Provider** (`xlog-cuda/src/provider/wcoj_metadata.rs`):
+   * `wcoj_triangle_groupby_root_count_u32_recorded`
+     (`wcoj_triangle_groupby_root_count_hg_u32` kernel): the count-phase
+     traversal accumulates per-e_xy-row match counts (integer atomicAdd —
+     order-insensitive, deterministic values), then compacts count>0 roots
+     and reduces per X with the recorded groupby Sum. Output schema
+     (X: U32/Symbol, count: U64) matches the unfused baseline.
+   * `wcoj_triangle_groupby_root_agg_u32_recorded` (S1b widening;
+     `wcoj_triangle_groupby_root_{sum,min,max}_hg_u32` kernels): same
+     traversal, but each match also folds its value (Y or Z, selected by
+     `WcojRootAggValue`) into a per-row accumulator — u64 atomicAdd for
+     sum (a per-row partial can exceed `u32::MAX`), u32 atomicMin/atomicMax
+     for min/max (min identity `u32::MAX`, max identity 0). The 3-column
+     (X, count, agg) staging buffer is compacted to count>0 and reduced per
+     X with the recorded groupby using the same AggOp (the recorded groupby
+     Sum was widened to accept U64 value columns via `groupby_sum_u64`).
+     Output schema: (X, U64) for sum, (X, U32) for min/max — matching the
+     unfused baseline. Bag semantics: every (Y, Z) completion contributes
+     its value, exactly like aggregating the materialized projection.
+   * `wcoj_triangle_groupby_root_count_u64_recorded` (S1b widening;
+     `wcoj_triangle_groupby_root_count_hg_u64` kernel): u64-key count
+     sibling. The recorded groupby is U32/Symbol-key only, so the per-X
+     reduction reuses the WCOJ relation metadata (one unique root per
+     group, e_xy lex-sorted) plus `wcoj_groupby_root_segment_sum_counts_u32`
+     (per-row atomicAdd into per-unique-root u64 totals), then compacts
+     totals>0. Output schema (X: U64, count: U64).
 
-Deferred (stated in the plan): u64/Symbol-beyond-u32 widths, 4-cycle and
-k-clique fusion, sum/min/max, recursive-context fusion.
+   All reduction work is O(n_xy) — input-sized, never join-output-sized.
+
+Gate evidence for the S1b widening (sum/min/max + u64 count):
+`docs/evidence/2026-06-11-s1b-agg-widening/`.
+
+Deferred (stated explicitly): u64-key sum/min/max, Symbol-valued
+aggregates, 4-cycle and k-clique fusion, LogSumExp/float aggregates,
+recursive-context fusion.
 
 ## Cost Model and Variable Ordering
 
