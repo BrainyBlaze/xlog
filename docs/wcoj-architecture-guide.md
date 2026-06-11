@@ -317,9 +317,25 @@ the triangle rows:
 Gate evidence for the S1b widening (sum/min/max + u64 count):
 `docs/evidence/2026-06-11-s1b-agg-widening/`.
 
+**Recursive-stratum inputs (covered, no code change needed).** A
+non-recursive aggregate rule in a later stratum whose triangle body reads
+predicates computed by an earlier recursive stratum (e.g.
+`deg(X, count(Z)) :- tc(X,Y), tc(Y,Z), q(X,Z)` after a `tc` fixpoint)
+dispatches through the same fused path: the promoter's inside-aggregate
+descent is shape-only (no recursive-RelId gating), and the recursive
+engine's merged relations are produced by `union_gpu`/`diff_gpu`, whose
+outputs are lex-sorted + deduped — exactly the layout the fused provider
+entry's binary-search work plan assumes (the unfused triangle dispatch
+re-sorts per dispatch via `wcoj_layout_*_recorded`; the fused entry relies
+on this store invariant instead). Verified empirically and locked by
+`crates/xlog-integration/tests/test_wcoj_groupby_fusion_recursive.rs`
+(count + sum, mixed tc/tc/q body, all-recursive tc self-join body; fused
+counter == 1, kill-switch row parity, host-oracle parity). Aggregates
+*inside* recursive rules remain stratification-rejected at compile time —
+out of scope by language contract, not by this dispatch surface.
+
 Deferred (stated explicitly): u64-key sum/min/max, Symbol-valued
-aggregates, 4-cycle and k-clique fusion, LogSumExp/float aggregates,
-recursive-context fusion.
+aggregates, 4-cycle and k-clique fusion, LogSumExp/float aggregates.
 
 ## Cost Model and Variable Ordering
 
