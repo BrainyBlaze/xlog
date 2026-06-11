@@ -69,6 +69,25 @@ All notable changes to this project are documented in this file.
     symbol ids). Evidence:
     `docs/evidence/2026-06-11-s1c-4cycle-width-completion/`.
   Gate evidence: `docs/evidence/2026-06-11-s1b-agg-widening/`.
+- *(cuda)* Aggregate-fused WCOJ 4-cycle agg variants (S1d):
+  - 4-cycle `sum`/`min`/`max` fusion — `agg(W, op(V)) :- e1(W,X), e2(X,Y),
+    e3(Y,Z), e4(Z,W)` with `V ∈ {X, Y, Z}` (U32 values) dispatches
+    `wcoj_4cycle_groupby_root_{sum,min,max}_hg_u32` without materializing
+    the 4-cycle rows (3.3x-12.8x vs materialize+groupby on the skewed hub
+    fixture, gate >= 3x); Symbol values decline fused and are rejected by
+    the unfused groupby with an identical error.
+  - u64-key 4-cycle `count` fusion —
+    `wcoj_4cycle_groupby_root_count_hg_u64` plus the metadata-driven
+    segment reduction (16.4x-26.1x on the skewed u64 hub fixture, gate
+    >= 3x). u64-key 4-cycle `sum`/`min`/`max` stays deferred and declines.
+  - The recorded groupby accepts U64 value columns for `Min`/`Max`
+    (`groupby_min_u64`/`groupby_max_u64` on the recorded path; result
+    preserves the value width), matching the legacy path widened in S1c.
+  - Float/LogSumExp fused aggregates: design-decision note recorded in the
+    architecture guide (float atomics break the deterministic-values
+    contract; per-block deterministic tree reduction preferred over
+    fixed-point encoding). Evidence:
+    `docs/evidence/2026-06-11-s1d-4cycle-agg-variants/`.
 - *(runtime)* Aggregate fusion over recursive-stratum inputs verified and
   locked by tests: later-stratum count/sum aggregates whose triangle bodies
   read semi-naive fixpoint outputs (incl. all-recursive self-joins)
