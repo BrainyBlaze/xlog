@@ -151,6 +151,37 @@ extern "C" __global__ void groupby_max(
     atomicMax(&maxs[group], values[tid]);
 }
 
+// Min aggregation per group over u64 values (S1c widening: the legacy
+// groupby is the unfused baseline for u64-key WCOJ relations, whose value
+// columns are U64). Host pre-fills `mins` with u64::MAX.
+extern "C" __global__ void groupby_min_u64(
+    const uint64_t* __restrict__ values,
+    const uint32_t* __restrict__ group_ids,
+    uint32_t num_rows,
+    unsigned long long* __restrict__ mins
+) {
+    uint32_t tid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (tid >= num_rows) return;
+
+    uint32_t group = group_ids[tid];
+    atomicMin(&mins[group], (unsigned long long)values[tid]);
+}
+
+// Max aggregation per group over u64 values (S1c widening). Host zeroes
+// `maxs`.
+extern "C" __global__ void groupby_max_u64(
+    const uint64_t* __restrict__ values,
+    const uint32_t* __restrict__ group_ids,
+    uint32_t num_rows,
+    unsigned long long* __restrict__ maxs
+) {
+    uint32_t tid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (tid >= num_rows) return;
+
+    uint32_t group = group_ids[tid];
+    atomicMax(&maxs[group], (unsigned long long)values[tid]);
+}
+
 // Detect group boundaries in sorted data (single-column version)
 // More efficient for single-key groupby operations
 extern "C" __global__ void detect_boundaries(

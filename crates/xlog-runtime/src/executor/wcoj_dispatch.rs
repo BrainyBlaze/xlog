@@ -1357,8 +1357,9 @@ impl Executor {
     /// triangle output, the condition under which one-pass aggregate
     /// propagation over the variable order is sound. For Sum/Min/Max the
     /// aggregate value column must itself map to a triangle output variable
-    /// (Y or Z, both plain U32) so the kernel can read it during traversal;
-    /// Count ignores the value column. Every structural mismatch (other
+    /// (Y or Z; plain U32 on the 4-byte path, uniform U64 on the 8-byte
+    /// path) so the kernel can read it during traversal; Count ignores the
+    /// value column. Every structural mismatch (other
     /// keys/aggs, computed projections, value column not Y/Z or not U32,
     /// non-triangle shape, non-4-byte width, missing buffers/runtime, kill
     /// switch) returns `Ok(None)` — silent decline to the existing
@@ -1420,7 +1421,13 @@ impl Executor {
             }
         };
         let Some(matched) = match_multiway_triangle(multiway) else {
-            return Ok(None);
+            // S1c: 4-cycle sibling of the triangle fusion. Only Count is
+            // fused for the 4-cycle shape (no fused 4-cycle sum/min/max
+            // kernels); everything else declines to materialize+groupby.
+            if !matches!(agg_op, AggOp::Count) {
+                return Ok(None);
+            }
+            return self.try_dispatch_wcoj_groupby_root_count_4cycle(multiway);
         };
         let name_xy = match self.get_rel_name(matched.rel_xy) {
             Some(s) => s.to_string(),
@@ -1459,23 +1466,28 @@ impl Executor {
             }
             _ => return Ok(None),
         };
-        // Sum/Min/Max are arithmetic: the columns supplying the value must
-        // be plain U32 (Symbol ids are not summable/orderable data; U64
-        // value aggregates have no fused kernel yet).
-        match agg_value {
-            Some(WcojRootAggValue::Y) => {
-                if buf_xy.schema().column_type(1) != Some(xlog_core::ScalarType::U32) {
-                    return Ok(None);
+        // Sum/Min/Max are arithmetic: on the 4-byte path the columns
+        // supplying the value must be plain U32 (Symbol ids are not
+        // summable/orderable data — and the unfused groupby rejects Symbol
+        // values too, so declining keeps both paths aligned). On the
+        // 8-byte path the width classifier already guarantees uniform U64
+        // columns, which the u64 fused kernels consume directly.
+        if matches!(width, WcojKeyWidth::FourByte) {
+            match agg_value {
+                Some(WcojRootAggValue::Y) => {
+                    if buf_xy.schema().column_type(1) != Some(xlog_core::ScalarType::U32) {
+                        return Ok(None);
+                    }
                 }
-            }
-            Some(WcojRootAggValue::Z) => {
-                if buf_yz.schema().column_type(1) != Some(xlog_core::ScalarType::U32)
-                    || buf_xz.schema().column_type(1) != Some(xlog_core::ScalarType::U32)
-                {
-                    return Ok(None);
+                Some(WcojRootAggValue::Z) => {
+                    if buf_yz.schema().column_type(1) != Some(xlog_core::ScalarType::U32)
+                        || buf_xz.schema().column_type(1) != Some(xlog_core::ScalarType::U32)
+                    {
+                        return Ok(None);
+                    }
                 }
+                None => {}
             }
-            None => {}
         }
         if self.provider.memory().runtime().is_none() {
             return Ok(None);
@@ -1513,8 +1525,19 @@ impl Executor {
                     launch_stream,
                 )
             }
-            // No fused u64-key sum/min/max kernels yet.
-            (Some(_), WcojKeyWidth::EightByte) => return Ok(None),
+            // S1c widening: u64-key sum/min/max through the u64 fused
+            // kernels (value columns are uniform U64 by classification).
+            (Some(value), WcojKeyWidth::EightByte) => {
+                self.provider.wcoj_triangle_groupby_root_agg_u64_recorded(
+                    buf_xy,
+                    buf_yz,
+                    buf_xz,
+                    agg_op,
+                    value,
+                    wcoj_block_work_unit(),
+                    launch_stream,
+                )
+            }
         };
         match result {
             Ok(buf) => {
@@ -1524,6 +1547,97 @@ impl Executor {
             Err(err) => wcoj_decline_on_error(
                 &mut self.wcoj_error_decline_count,
                 "groupby-fusion",
+                err,
+            ),
+        }
+    }
+
+    /// S1c aggregate-fused WCOJ, 4-cycle count: dispatch the inner
+    /// `MultiWayJoin(4-cycle)` of a count-by-root aggregate through the
+    /// fused group-by-root kernel, which never materializes the 4-cycle
+    /// rows. Both accepted `output_columns` layouts place the variable-
+    /// order root W at output position 0, so the caller's
+    /// `key_cols == [0]` + `columns[0] == Column(0)` checks pin the group
+    /// key to W — the soundness condition for one-pass count propagation.
+    ///
+    /// Gating decision (documented per the S1c brief): the fused path
+    /// mirrors the triangle fusion — enabled by default behind the shared
+    /// `XLOG_DISABLE_WCOJ_GROUPBY_FUSION` kill switch (checked by the
+    /// caller). The `XLOG_USE_WCOJ_4CYCLE*` gates govern only the
+    /// NON-aggregate 4-cycle materialize dispatch (opt-in pending its own
+    /// default-on evidence); they are intentionally not consulted here,
+    /// because a declined or kill-switched fusion falls back to that
+    /// independently-gated path (default: embedded binary fallback).
+    ///
+    /// Only uniform 4-byte (U32/Symbol) keys are fused; U64-key 4-cycle
+    /// count fusion is deferred and declines silently. Pipeline errors
+    /// route through [`wcoj_decline_on_error`] (counted;
+    /// `XLOG_WCOJ_STRICT=1` propagates).
+    fn try_dispatch_wcoj_groupby_root_count_4cycle(
+        &mut self,
+        multiway: &RirNode,
+    ) -> Result<Option<CudaBuffer>> {
+        let Some(matched) = match_multiway_4cycle(multiway) else {
+            return Ok(None);
+        };
+        let name_e1 = match self.get_rel_name(matched.rel_e1) {
+            Some(s) => s.to_string(),
+            None => return Ok(None),
+        };
+        let name_e2 = match self.get_rel_name(matched.rel_e2) {
+            Some(s) => s.to_string(),
+            None => return Ok(None),
+        };
+        let name_e3 = match self.get_rel_name(matched.rel_e3) {
+            Some(s) => s.to_string(),
+            None => return Ok(None),
+        };
+        let name_e4 = match self.get_rel_name(matched.rel_e4) {
+            Some(s) => s.to_string(),
+            None => return Ok(None),
+        };
+        let buf_e1 = match self.store.get(&name_e1) {
+            Some(b) => b,
+            None => return Ok(None),
+        };
+        let buf_e2 = match self.store.get(&name_e2) {
+            Some(b) => b,
+            None => return Ok(None),
+        };
+        let buf_e3 = match self.store.get(&name_e3) {
+            Some(b) => b,
+            None => return Ok(None),
+        };
+        let buf_e4 = match self.store.get(&name_e4) {
+            Some(b) => b,
+            None => return Ok(None),
+        };
+        for buf in [buf_e1, buf_e2, buf_e3, buf_e4] {
+            if classify_two_col_wcoj_width(buf) != Some(WcojKeyWidth::FourByte) {
+                return Ok(None);
+            }
+        }
+        if self.provider.memory().runtime().is_none() {
+            return Ok(None);
+        }
+        let Some(launch_stream) = self.wcoj_dispatch_stream_or_init() else {
+            return Ok(None);
+        };
+        match self.provider.wcoj_4cycle_groupby_root_count_u32_recorded(
+            buf_e1,
+            buf_e2,
+            buf_e3,
+            buf_e4,
+            wcoj_block_work_unit(),
+            launch_stream,
+        ) {
+            Ok(buf) => {
+                self.wcoj_groupby_fusion_dispatch_count += 1;
+                Ok(Some(buf))
+            }
+            Err(err) => wcoj_decline_on_error(
+                &mut self.wcoj_error_decline_count,
+                "groupby-fusion-4cycle",
                 err,
             ),
         }

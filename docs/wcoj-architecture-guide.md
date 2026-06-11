@@ -312,10 +312,40 @@ the triangle rows:
      (per-row atomicAdd into per-unique-root u64 totals), then compacts
      totals>0. Output schema (X: U64, count: U64).
 
+   * `wcoj_triangle_groupby_root_agg_u64_recorded` (S1c widening;
+     `wcoj_triangle_groupby_root_{sum,min,max}_hg_u64` kernels): u64-key
+     sum/min/max sibling. Per-row u64 partials (sum wraps like
+     `groupby_sum_u64`; min identity `u64::MAX`, max 0) reduce per unique
+     root through the WCOJ relation metadata plus
+     `wcoj_groupby_root_segment_{sum,min,max}_values_u64`, then count>0
+     groups are compacted. The unfused baseline exists because the legacy
+     groupby was widened to u64-value sum/min/max (`groupby_min_u64` /
+     `groupby_max_u64`; min/max result schema preserves the value width).
+   * `wcoj_4cycle_groupby_root_count_u32_recorded` (S1c;
+     `wcoj_4cycle_groupby_root_count_hg_u32` kernel): 4-cycle count
+     fusion for `deg(W, count(V)) :- e1(W,X), e2(X,Y), e3(Y,Z), e4(Z,W)`.
+     `try_promote_4cycle_inside_aggregate` descends the aggregate wrapper
+     (output position 0 = the variable-order root W in both certified
+     `output_columns` layouts); the executor branch is Count-only and
+     4-byte-only. Gating decision: the fused path mirrors the triangle
+     fusion (default-on behind `XLOG_DISABLE_WCOJ_GROUPBY_FUSION`); the
+     opt-in `XLOG_USE_WCOJ_4CYCLE*` gates keep governing only the
+     non-aggregate materialize dispatch, which is exactly what a declined
+     or kill-switched fusion falls back to.
+
+   Symbol semantics (S1c, locked by tests): count over Symbol-keyed/valued
+   bodies fuses — Symbol is u32-physical and count never reads values —
+   and the output preserves the Symbol key type. Sum/min/max over Symbol
+   VALUES is not meaningful data arithmetic: the fused hook declines and
+   the unfused groupby rejects with the same value-type error, so fused
+   and kill-switch runs fail identically.
+
    All reduction work is O(n_xy) — input-sized, never join-output-sized.
 
 Gate evidence for the S1b widening (sum/min/max + u64 count):
-`docs/evidence/2026-06-11-s1b-agg-widening/`.
+`docs/evidence/2026-06-11-s1b-agg-widening/`. Gate evidence for the S1c
+completion (4-cycle count, u64 sum/min/max, Symbol locks):
+`docs/evidence/2026-06-11-s1c-4cycle-width-completion/`.
 
 **Recursive-stratum inputs (covered, no code change needed).** A
 non-recursive aggregate rule in a later stratum whose triangle body reads
@@ -334,8 +364,10 @@ counter == 1, kill-switch row parity, host-oracle parity). Aggregates
 *inside* recursive rules remain stratification-rejected at compile time —
 out of scope by language contract, not by this dispatch surface.
 
-Deferred (stated explicitly): u64-key sum/min/max, Symbol-valued
-aggregates, 4-cycle and k-clique fusion, LogSumExp/float aggregates.
+Deferred (stated explicitly): u64-key 4-cycle count fusion, 4-cycle
+sum/min/max fusion, k-clique (K=5..8) count fusion, LogSumExp/float
+aggregates, recorded-groupby u64-value min/max (only the legacy path was
+widened — u64 keys route there).
 
 ## Cost Model and Variable Ordering
 

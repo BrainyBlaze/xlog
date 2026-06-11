@@ -324,8 +324,20 @@ pub mod wcoj_kernels {
     pub const WCOJ_TRIANGLE_COUNT_HG_U64: &str = "wcoj_triangle_count_hg_u64";
     pub const WCOJ_TRIANGLE_GROUPBY_ROOT_COUNT_HG_U64: &str =
         "wcoj_triangle_groupby_root_count_hg_u64";
+    pub const WCOJ_TRIANGLE_GROUPBY_ROOT_SUM_HG_U64: &str =
+        "wcoj_triangle_groupby_root_sum_hg_u64";
+    pub const WCOJ_TRIANGLE_GROUPBY_ROOT_MIN_HG_U64: &str =
+        "wcoj_triangle_groupby_root_min_hg_u64";
+    pub const WCOJ_TRIANGLE_GROUPBY_ROOT_MAX_HG_U64: &str =
+        "wcoj_triangle_groupby_root_max_hg_u64";
     pub const WCOJ_GROUPBY_ROOT_SEGMENT_SUM_COUNTS_U32: &str =
         "wcoj_groupby_root_segment_sum_counts_u32";
+    pub const WCOJ_GROUPBY_ROOT_SEGMENT_SUM_VALUES_U64: &str =
+        "wcoj_groupby_root_segment_sum_values_u64";
+    pub const WCOJ_GROUPBY_ROOT_SEGMENT_MIN_VALUES_U64: &str =
+        "wcoj_groupby_root_segment_min_values_u64";
+    pub const WCOJ_GROUPBY_ROOT_SEGMENT_MAX_VALUES_U64: &str =
+        "wcoj_groupby_root_segment_max_values_u64";
     pub const WCOJ_TRIANGLE_MATERIALIZE_HG_U64: &str = "wcoj_triangle_materialize_hg_u64";
     pub const WCOJ_TRIANGLE_COUNT_HG_CACHED_U32: &str = "wcoj_triangle_count_hg_cached_u32";
     pub const WCOJ_TRIANGLE_MATERIALIZE_HG_CACHED_U32: &str =
@@ -337,6 +349,8 @@ pub mod wcoj_kernels {
     pub const WCOJ_4CYCLE_BUILD_E2_WORK_PREFIX_U32: &str = "wcoj_4cycle_build_e2_work_prefix_u32";
     pub const WCOJ_4CYCLE_BUILD_HG_WORK_PLAN_U32: &str = "wcoj_4cycle_build_hg_work_plan_u32";
     pub const WCOJ_4CYCLE_COUNT_HG_U32: &str = "wcoj_4cycle_count_hg_u32";
+    pub const WCOJ_4CYCLE_GROUPBY_ROOT_COUNT_HG_U32: &str =
+        "wcoj_4cycle_groupby_root_count_hg_u32";
     pub const WCOJ_4CYCLE_MATERIALIZE_HG_U32: &str = "wcoj_4cycle_materialize_hg_u32";
     pub const WCOJ_4CYCLE_BUILD_E2_WORK_PREFIX_U64: &str = "wcoj_4cycle_build_e2_work_prefix_u64";
     pub const WCOJ_4CYCLE_BUILD_HG_WORK_PLAN_U64: &str = "wcoj_4cycle_build_hg_work_plan_u64";
@@ -653,7 +667,9 @@ pub mod groupby_kernels {
     pub const GROUPBY_SUM: &str = "groupby_sum";
     pub const GROUPBY_SUM_U64: &str = "groupby_sum_u64";
     pub const GROUPBY_MIN: &str = "groupby_min";
+    pub const GROUPBY_MIN_U64: &str = "groupby_min_u64";
     pub const GROUPBY_MAX: &str = "groupby_max";
+    pub const GROUPBY_MAX_U64: &str = "groupby_max_u64";
     pub const GROUPBY_LOGSUMEXP_MAX: &str = "groupby_logsumexp_max";
     pub const GROUPBY_LOGSUMEXP_SUMEXP: &str = "groupby_logsumexp_sumexp";
     pub const GROUPBY_LOGSUMEXP_FINAL: &str = "groupby_logsumexp_final";

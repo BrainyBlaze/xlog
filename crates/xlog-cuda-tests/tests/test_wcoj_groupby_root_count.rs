@@ -800,3 +800,41 @@ fn groupby_root_count_empty_intersection_roots_are_absent() {
     let fused = download_group_counts(&fix.memory, &fused);
     assert_eq!(fused, vec![(1u32, 1u64)], "only X=1 completes a triangle");
 }
+
+#[test]
+fn groupby_root_count_layout_normalizes_unsorted_inputs() {
+    // The unfused triangle dispatch sorts+dedups inputs per dispatch
+    // (wcoj_layout_u32_recorded); the fused entries must give the same
+    // guarantee instead of trusting store-buffer sortedness. Unsorted,
+    // duplicated uploads must still produce oracle-correct counts.
+    let e_xy_raw = vec![(5u32, 6u32), (1, 3), (1, 2), (2, 3), (1, 3), (5, 7), (1, 4), (2, 4), (3, 4), (6, 7)];
+    let e_yz_raw = vec![(3u32, 4u32), (2, 4), (2, 3), (6, 7), (2, 3)];
+    let e_xz_raw = vec![(2u32, 4u32), (1, 4), (1, 3), (3, 4), (5, 7), (1, 3)];
+
+    let expected = oracle_group_counts(
+        &sorted_unique(e_xy_raw.clone()),
+        &sorted_unique(e_yz_raw.clone()),
+        &sorted_unique(e_xz_raw.clone()),
+    );
+
+    let Some(fix) = make_fixture() else {
+        eprintln!("skipping unsorted-layout test: no CUDA device");
+        return;
+    };
+    let e_xy = upload_binary_u32(&fix.memory, &e_xy_raw);
+    let e_yz = upload_binary_u32(&fix.memory, &e_yz_raw);
+    let e_xz = upload_binary_u32(&fix.memory, &e_xz_raw);
+    let stream = fix.pool.acquire().expect("stream");
+    let fused = fix
+        .provider
+        .wcoj_triangle_groupby_root_count_u32_recorded(
+            &e_xy,
+            &e_yz,
+            &e_xz,
+            WCOJ_HG_BLOCK_WORK_UNIT_DEFAULT,
+            stream,
+        )
+        .expect("fused groupby-root count on unsorted inputs");
+    let fused = download_group_counts(&fix.memory, &fused);
+    assert_eq!(fused, expected, "unsorted+duplicated inputs must be layout-normalized");
+}

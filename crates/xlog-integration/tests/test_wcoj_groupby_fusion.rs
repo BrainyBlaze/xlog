@@ -521,6 +521,338 @@ fn groupby_fusion_count_u64_fires_end_to_end_with_parity() {
     assert_eq!(unfused_count, 0, "kill switch must keep the counter at 0");
 }
 
+/// Run an aggregate program over U64 relations and return rows + counter.
+fn run_agg_program_u64(
+    fix: &Fixture,
+    source: &str,
+    inputs: &BTreeMap<&str, Vec<(u64, u64)>>,
+) -> (Vec<(u64, u64)>, u64) {
+    let mut compiler = Compiler::new();
+    let plan = compiler.compile(source).expect("compile aggregate rule");
+    let mut executor = Executor::new(Arc::clone(&fix.provider));
+    for (name, rel_id) in compiler.rel_ids() {
+        executor.register_relation(*rel_id, name);
+    }
+    for (name, rows) in inputs {
+        executor.put_relation(name, upload_binary_u64(&fix.memory, rows));
+    }
+    executor.execute_plan(&plan).expect("execute plan");
+    let agg = executor.store().get("agg").expect("agg relation");
+    let rows = download_groups_u64_u64(&fix.memory, agg);
+    (rows, executor.wcoj_groupby_fusion_dispatch_count())
+}
+
+/// U64 triangle fixture: the K4 + disjoint triangle shape shifted above
+/// 2^33 so width truncation visibly fails.
+fn triangle_inputs_u64() -> (BTreeMap<&'static str, Vec<(u64, u64)>>, u64) {
+    const B: u64 = 1 << 33;
+    let map = |rows: &[(u32, u32)]| -> Vec<(u64, u64)> {
+        rows.iter()
+            .map(|&(a, b)| (B + a as u64, B + b as u64))
+            .collect()
+    };
+    let mut inputs: BTreeMap<&str, Vec<(u64, u64)>> = BTreeMap::new();
+    inputs.insert(
+        "e1",
+        map(&[
+            (1, 2),
+            (1, 3),
+            (1, 4),
+            (2, 3),
+            (2, 4),
+            (3, 4),
+            (5, 6),
+            (5, 7),
+            (6, 7),
+        ]),
+    );
+    inputs.insert("e2", map(&[(2, 3), (2, 4), (3, 4), (6, 7)]));
+    inputs.insert("e3", map(&[(1, 3), (1, 4), (2, 4), (3, 4), (5, 7)]));
+    (inputs, B)
+}
+
+/// Fused-vs-kill-switch phases for one u64-relation aggregate source.
+fn assert_fusion_parity_u64_keys(fix: &Fixture, source: &str, expected: &[(u64, u64)]) {
+    let _guard = env_lock();
+    let (inputs, _) = triangle_inputs_u64();
+    let (fused, fused_count) = run_agg_program_u64(fix, source, &inputs);
+    assert_eq!(fused, expected, "fused u64 path row set: {source}");
+    assert_eq!(fused_count, 1, "fused dispatch must fire once: {source}");
+
+    // SAFETY: serialized by ENV_LOCK; restored below.
+    unsafe {
+        std::env::set_var("XLOG_DISABLE_WCOJ_GROUPBY_FUSION", "1");
+    }
+    let (unfused, unfused_count) = run_agg_program_u64(fix, source, &inputs);
+    unsafe {
+        std::env::remove_var("XLOG_DISABLE_WCOJ_GROUPBY_FUSION");
+    }
+    assert_eq!(unfused, expected, "kill-switch u64 path row set: {source}");
+    assert_eq!(unfused_count, 0, "kill switch must keep the counter at 0");
+}
+
+#[test]
+fn groupby_fusion_sum_z_u64_fires_end_to_end_with_parity() {
+    let Some(fix) = make_fixture() else {
+        eprintln!("Skipping: CUDA runtime unavailable");
+        return;
+    };
+    const B: u64 = 1 << 33;
+    // Sums of Z per root (B-shifted): X=1: 3B+11; X=2: B+4; X=5: B+7.
+    assert_fusion_parity_u64_keys(
+        &fix,
+        "agg(X, sum(Z)) :- e1(X, Y), e2(Y, Z), e3(X, Z).",
+        &[(B + 1, 3 * B + 11), (B + 2, B + 4), (B + 5, B + 7)],
+    );
+}
+
+#[test]
+fn groupby_fusion_min_z_u64_fires_end_to_end_with_parity() {
+    let Some(fix) = make_fixture() else {
+        eprintln!("Skipping: CUDA runtime unavailable");
+        return;
+    };
+    const B: u64 = 1 << 33;
+    // Min of Z. X=1: B+3; X=2: B+4; X=5: B+7.
+    assert_fusion_parity_u64_keys(
+        &fix,
+        "agg(X, min(Z)) :- e1(X, Y), e2(Y, Z), e3(X, Z).",
+        &[(B + 1, B + 3), (B + 2, B + 4), (B + 5, B + 7)],
+    );
+}
+
+#[test]
+fn groupby_fusion_max_y_u64_fires_end_to_end_with_parity() {
+    let Some(fix) = make_fixture() else {
+        eprintln!("Skipping: CUDA runtime unavailable");
+        return;
+    };
+    const B: u64 = 1 << 33;
+    // Max of Y. X=1: B+3; X=2: B+3; X=5: B+6.
+    assert_fusion_parity_u64_keys(
+        &fix,
+        "agg(X, max(Y)) :- e1(X, Y), e2(Y, Z), e3(X, Z).",
+        &[(B + 1, B + 3), (B + 2, B + 3), (B + 5, B + 6)],
+    );
+}
+
+/// Upload a binary relation with Symbol-typed columns (u32-physical).
+fn upload_binary_symbol(memory: &Arc<GpuMemoryManager>, rows: &[(u32, u32)]) -> CudaBuffer {
+    let n = rows.len() as u32;
+    let mut col0 = memory
+        .alloc::<u8>(rows.len() * std::mem::size_of::<u32>())
+        .expect("alloc col0");
+    let mut col1 = memory
+        .alloc::<u8>(rows.len() * std::mem::size_of::<u32>())
+        .expect("alloc col1");
+    let mut d_num_rows = memory.alloc::<u32>(1).expect("alloc d_num_rows");
+    let col0_bytes: Vec<u8> = rows.iter().flat_map(|(a, _)| a.to_le_bytes()).collect();
+    let col1_bytes: Vec<u8> = rows.iter().flat_map(|(_, b)| b.to_le_bytes()).collect();
+    let device = memory.device().inner();
+    device
+        .htod_sync_copy_into(&col0_bytes, &mut col0)
+        .expect("htod col0");
+    device
+        .htod_sync_copy_into(&col1_bytes, &mut col1)
+        .expect("htod col1");
+    device
+        .htod_sync_copy_into(&[n], &mut d_num_rows)
+        .expect("htod d_num_rows");
+    let schema = Schema::new(vec![
+        ("col0".to_string(), ScalarType::Symbol),
+        ("col1".to_string(), ScalarType::Symbol),
+    ]);
+    CudaBuffer::from_columns_with_host_count(
+        vec![col0.into(), col1.into()],
+        n as u64,
+        d_num_rows,
+        schema,
+        n,
+    )
+}
+
+/// Compile + execute an aggregate program over Symbol relations; returns
+/// the execute_plan Result alongside the executor so callers can assert
+/// either success-with-rows or matching rejection.
+fn run_symbol_program(
+    fix: &Fixture,
+    source: &str,
+    inputs: &BTreeMap<&str, Vec<(u32, u32)>>,
+) -> (xlog_core::Result<()>, Executor) {
+    let mut compiler = Compiler::new();
+    let plan = compiler.compile(source).expect("compile aggregate rule");
+    let mut executor = Executor::new(Arc::clone(&fix.provider));
+    for (name, rel_id) in compiler.rel_ids() {
+        executor.register_relation(*rel_id, name);
+    }
+    for (name, rows) in inputs {
+        executor.put_relation(name, upload_binary_symbol(&fix.memory, rows));
+    }
+    let result = executor.execute_plan(&plan).map(|_| ());
+    (result, executor)
+}
+
+/// Symbol-typed relations are u32-physical: the fused count path must fire
+/// and match the kill-switch rows (count never reads the value column, so
+/// Symbol keys/values are admissible).
+#[test]
+fn groupby_fusion_count_symbol_fires_end_to_end_with_parity() {
+    let Some(fix) = make_fixture() else {
+        eprintln!("Skipping: CUDA runtime unavailable");
+        return;
+    };
+    let _guard = env_lock();
+    let inputs = triangle_inputs();
+    let expected = vec![(1u32, 3u64), (2, 1), (5, 1)];
+
+    let (result, executor) = run_symbol_program(&fix, SOURCE, &inputs);
+    result.expect("fused symbol count plan must execute");
+    let deg = executor.store().get("deg").expect("deg relation");
+    assert_eq!(
+        deg.schema().column_type(0),
+        Some(ScalarType::Symbol),
+        "fused output must preserve the Symbol key type"
+    );
+    let fused_rows = download_group_counts(&fix.memory, deg);
+    assert_eq!(fused_rows, expected, "fused symbol count row set");
+    assert_eq!(
+        executor.wcoj_groupby_fusion_dispatch_count(),
+        1,
+        "fused count over Symbol relations must fire exactly once"
+    );
+
+    // SAFETY: serialized by ENV_LOCK; restored below.
+    unsafe {
+        std::env::set_var("XLOG_DISABLE_WCOJ_GROUPBY_FUSION", "1");
+    }
+    let (result, executor) = run_symbol_program(&fix, SOURCE, &inputs);
+    unsafe {
+        std::env::remove_var("XLOG_DISABLE_WCOJ_GROUPBY_FUSION");
+    }
+    result.expect("kill-switch symbol count plan must execute");
+    let deg = executor.store().get("deg").expect("deg relation");
+    let unfused_rows = download_group_counts(&fix.memory, deg);
+    assert_eq!(unfused_rows, expected, "kill-switch symbol count row set");
+    assert_eq!(
+        executor.wcoj_groupby_fusion_dispatch_count(),
+        0,
+        "kill switch must keep the counter at 0"
+    );
+}
+
+/// Min/max/sum over Symbol VALUES is semantically questionable (symbol ids
+/// carry no arithmetic order), and the unfused groupby rejects it with an
+/// error. The fused path must DECLINE (counter == 0) so the query fails
+/// through the same unfused rejection — never silently aggregating ids.
+#[test]
+fn groupby_fusion_symbol_valued_min_declines_and_unfused_rejects() {
+    let Some(fix) = make_fixture() else {
+        eprintln!("Skipping: CUDA runtime unavailable");
+        return;
+    };
+    let _guard = env_lock();
+    let source = "agg(X, min(Z)) :- e1(X, Y), e2(Y, Z), e3(X, Z).";
+    let inputs = triangle_inputs();
+
+    // Fusion enabled: the hook declines (Symbol value column), the unfused
+    // groupby rejects, and the query errors.
+    let (result, executor) = run_symbol_program(&fix, source, &inputs);
+    let err = result.expect_err("min over Symbol values must be rejected");
+    assert!(
+        format!("{err}").contains("values"),
+        "rejection must come from the groupby value-type gate, got: {err}"
+    );
+    assert_eq!(
+        executor.wcoj_groupby_fusion_dispatch_count(),
+        0,
+        "fused path must decline Symbol-valued min, not dispatch it"
+    );
+
+    // Kill switch: identical rejection through the same unfused gate.
+    // SAFETY: serialized by ENV_LOCK; restored below.
+    unsafe {
+        std::env::set_var("XLOG_DISABLE_WCOJ_GROUPBY_FUSION", "1");
+    }
+    let (result_unfused, _) = run_symbol_program(&fix, source, &inputs);
+    unsafe {
+        std::env::remove_var("XLOG_DISABLE_WCOJ_GROUPBY_FUSION");
+    }
+    let err_unfused =
+        result_unfused.expect_err("kill-switch min over Symbol values must be rejected");
+    assert_eq!(
+        format!("{err}"),
+        format!("{err_unfused}"),
+        "fused-declined and kill-switch runs must reject identically"
+    );
+}
+
+/// Shared 4-cycle fixture. Completions per root W:
+/// W=1 -> (X,Y,Z) in {(10,20,30),(10,21,30),(11,20,30)};
+/// W=2 -> {(10,20,30),(10,21,30)}. W=3 has e1/e2/e3 paths but no closing
+/// e4 edge back to itself.
+fn cycle4_inputs() -> BTreeMap<&'static str, Vec<(u32, u32)>> {
+    let mut inputs: BTreeMap<&str, Vec<(u32, u32)>> = BTreeMap::new();
+    inputs.insert("e1", vec![(1, 10), (1, 11), (2, 10), (3, 12)]);
+    inputs.insert("e2", vec![(10, 20), (10, 21), (11, 20), (12, 22)]);
+    inputs.insert("e3", vec![(20, 30), (21, 30), (22, 31)]);
+    inputs.insert("e4", vec![(30, 1), (30, 2), (31, 9)]);
+    inputs
+}
+
+#[test]
+fn groupby_fusion_4cycle_count_fires_end_to_end_with_parity() {
+    let Some(fix) = make_fixture() else {
+        eprintln!("Skipping: CUDA runtime unavailable");
+        return;
+    };
+    let _guard = env_lock();
+    let source = "agg(W, count(Z)) :- e1(W, X), e2(X, Y), e3(Y, Z), e4(Z, W).";
+    let inputs = cycle4_inputs();
+    let expected = vec![(1u32, 3u64), (2, 2)];
+
+    // Phase 1: fused 4-cycle count path fires and is correct.
+    let (fused_rows, fused_count) =
+        run_agg_program(&fix, source, &inputs, download_group_counts);
+    assert_eq!(fused_rows, expected, "fused 4-cycle count row set");
+    assert_eq!(
+        fused_count, 1,
+        "fused 4-cycle group-by-root count dispatch must fire exactly once"
+    );
+
+    // Phase 2: kill switch forces the materialize+groupby path.
+    // SAFETY: serialized by ENV_LOCK; restored below.
+    unsafe {
+        std::env::set_var("XLOG_DISABLE_WCOJ_GROUPBY_FUSION", "1");
+    }
+    let (unfused_rows, unfused_count) =
+        run_agg_program(&fix, source, &inputs, download_group_counts);
+    unsafe {
+        std::env::remove_var("XLOG_DISABLE_WCOJ_GROUPBY_FUSION");
+    }
+    assert_eq!(unfused_rows, expected, "kill-switch 4-cycle count row set");
+    assert_eq!(unfused_count, 0, "kill switch must keep the counter at 0");
+}
+
+#[test]
+fn groupby_fusion_4cycle_sum_declines_to_unfused() {
+    // Only Count is fused for the 4-cycle shape: sum must decline silently
+    // (counter == 0) and the standard path must produce the correct sums.
+    let Some(fix) = make_fixture() else {
+        eprintln!("Skipping: CUDA runtime unavailable");
+        return;
+    };
+    let _guard = env_lock();
+    let source = "agg(W, sum(Z)) :- e1(W, X), e2(X, Y), e3(Y, Z), e4(Z, W).";
+    let inputs = cycle4_inputs();
+    // W=1: 30+30+30 = 90; W=2: 30+30 = 60.
+    let (rows, count) = run_agg_program(&fix, source, &inputs, download_group_counts);
+    assert_eq!(rows, vec![(1u32, 90u64), (2, 60)], "4-cycle sum rows");
+    assert_eq!(
+        count, 0,
+        "4-cycle sum must not consume the fusion counter (Count-only fusion)"
+    );
+}
+
 #[test]
 fn groupby_fusion_sum_declines_non_triangle_shape() {
     let Some(fix) = make_fixture() else {
