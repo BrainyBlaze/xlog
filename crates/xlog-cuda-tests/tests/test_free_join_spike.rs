@@ -875,3 +875,120 @@ fn s2_measurement_triangle_vs_dedicated_kernel() {
         expected.len()
     );
 }
+
+/// 10x-scale companion to the gate fixture: quantifies how much of the
+/// small-fixture ratio is fixed per-node launch/sync overhead (which
+/// amortizes with work size) vs algorithmic cost (which does not).
+/// Production routing keeps triangles on the dedicated kernel either
+/// way (design §3); this measurement informs the gate interpretation,
+/// it does not replace the gate.
+#[test]
+#[ignore = "S2 scale measurement: run explicitly with --ignored --nocapture"]
+fn s2_measurement_triangle_at_scale() {
+    let Some(fix) = make_fixture() else {
+        eprintln!("skipping s2 triangle scale: no CUDA device");
+        return;
+    };
+    let mut e_xy = Vec::new();
+    let mut e_yz = Vec::new();
+    let mut e_xz = Vec::new();
+    for y in 1..=100_000u32 {
+        e_xy.push((0u32, y));
+        for z in 0..32u32 {
+            e_yz.push((y, 1_000_000 + z));
+        }
+    }
+    for z in 0..32u32 {
+        e_xz.push((0u32, 1_000_000 + z));
+    }
+    for i in 0..1000u32 {
+        let (a, b, c) = (2_000_000 + i, 3_000_000 + i, 4_000_000 + i);
+        e_xy.push((a, b));
+        e_yz.push((b, c));
+        e_xz.push((a, c));
+    }
+    let e_xy = sorted_unique(e_xy);
+    let e_yz = sorted_unique(e_yz);
+    let e_xz = sorted_unique(e_xz);
+
+    let bufs = [
+        upload_binary_u32(&fix.memory, &e_xy),
+        upload_binary_u32(&fix.memory, &e_yz),
+        upload_binary_u32(&fix.memory, &e_xz),
+    ];
+    let inputs: Vec<&CudaBuffer> = bufs.iter().collect();
+    let stream = fix.pool.acquire().expect("stream");
+
+    let run_dedicated = || -> CudaBuffer {
+        let l_xy = fix
+            .provider
+            .wcoj_layout_u32_recorded(&bufs[0], stream)
+            .expect("layout xy");
+        let l_yz = fix
+            .provider
+            .wcoj_layout_u32_recorded(&bufs[1], stream)
+            .expect("layout yz");
+        let l_xz = fix
+            .provider
+            .wcoj_layout_u32_recorded(&bufs[2], stream)
+            .expect("layout xz");
+        let tri = fix
+            .provider
+            .wcoj_triangle_hg_u32_recorded(
+                &l_xy,
+                &l_yz,
+                &l_xz,
+                WCOJ_HG_BLOCK_WORK_UNIT_DEFAULT,
+                stream,
+            )
+            .expect("dedicated triangle");
+        fix.provider.device().inner().synchronize().expect("sync");
+        tri
+    };
+    let plan = triangle_plan();
+    let run_fj = || -> CudaBuffer {
+        let out = fix
+            .provider
+            .free_join_execute_u32_recorded(&inputs, &plan, stream)
+            .expect("free join triangle");
+        fix.provider.device().inner().synchronize().expect("sync");
+        out
+    };
+
+    // Warmup + cheap parity (row counts; full row-set parity is locked
+    // by the gate fixture's oracle comparison).
+    let warm_dedicated = run_dedicated();
+    let n_dedicated = buffer_rows(&fix.memory, &warm_dedicated);
+    drop(warm_dedicated);
+    let warm_fj = run_fj();
+    let n_fj = buffer_rows(&fix.memory, &warm_fj);
+    drop(warm_fj);
+    assert_eq!(n_fj, n_dedicated, "row-count parity at scale");
+
+    const RUNS: usize = 3;
+    let mut dedicated_ms = Vec::with_capacity(RUNS);
+    let mut fj_ms = Vec::with_capacity(RUNS);
+    for _ in 0..RUNS {
+        let t0 = std::time::Instant::now();
+        let out = run_dedicated();
+        dedicated_ms.push(t0.elapsed().as_secs_f64() * 1e3);
+        drop(out);
+
+        let t0 = std::time::Instant::now();
+        let out = run_fj();
+        fj_ms.push(t0.elapsed().as_secs_f64() * 1e3);
+        drop(out);
+    }
+    let med_dedicated = median(&mut dedicated_ms);
+    let med_fj = median(&mut fj_ms);
+    println!(
+        "S2 hub triangle AT SCALE: dedicated median {med_dedicated:.3} ms, free-join \
+         median {med_fj:.3} ms, ratio {:.2}x of dedicated [informative] \
+         (n_xy={}, n_yz={}, n_xz={}, |Q|={})",
+        med_fj / med_dedicated,
+        e_xy.len(),
+        e_yz.len(),
+        e_xz.len(),
+        n_fj
+    );
+}

@@ -396,6 +396,68 @@ impl CudaKernelProvider {
             // n_children == total_work (the emit kernel takes its
             // out == w branch via a null group_offsets pointer).
             let identity = depth + c >= arities[a];
+            // ---- Fused-probe analysis: a probe folds into the count
+            // pass iff (a) its key variables are all bound by THIS
+            // node's cover (the kernel reads keys from cover_cols at
+            // the candidate position; earlier bindings are already
+            // encoded in the probe's carried range), and (b) it
+            // consumes through its atom's last column (existence-only —
+            // no refined range survives for later nodes). Fused probes
+            // skip the separate probe kernel and the mask compaction
+            // entirely: the emit pass materializes exactly the
+            // surviving children.
+            let is_fusable = |pr: &FjSubAtom| {
+                consumed[pr.input_idx] + pr.var_positions.len() >= arities[pr.input_idx]
+                    && pr
+                        .var_positions
+                        .iter()
+                        .all(|v| node.cover.var_positions.contains(v))
+            };
+            let fused: Vec<&FjSubAtom> = node.probes.iter().filter(|p| is_fusable(p)).collect();
+            // The count pass runs when groups need marking (non-identity
+            // cover) OR fused probes need evaluating.
+            let count_ran = !identity || !fused.is_empty();
+            // Pack one descriptor per fused probe, sequentially:
+            // [n_cols, has_range, in_lo_ptr, in_hi_ptr, n_atom_rows,
+            //  data_col_ptr * n_cols, cover_var_idx * n_cols].
+            let mut fused_desc: Vec<u64> = Vec::new();
+            for pr in &fused {
+                let p = pr.input_idx;
+                let live = frontier.iter().any(|(t, _)| *t == ColTag::RangeLo(p));
+                fused_desc.push(pr.var_positions.len() as u64);
+                fused_desc.push(u64::from(live));
+                if live {
+                    fused_desc.push(*find_col(&frontier, ColTag::RangeLo(p), ctx)?.device_ptr());
+                    fused_desc.push(*find_col(&frontier, ColTag::RangeHi(p), ctx)?.device_ptr());
+                } else {
+                    fused_desc.push(0);
+                    fused_desc.push(0);
+                }
+                fused_desc.push(u64::from(n_rows[p]));
+                for i in consumed[p]..consumed[p] + pr.var_positions.len() {
+                    fused_desc.push(owned_col_ptr(&norm[p], i, ctx)?);
+                }
+                for v in &pr.var_positions {
+                    fused_desc.push(
+                        node.cover
+                            .var_positions
+                            .iter()
+                            .position(|cv| cv == v)
+                            .expect("fusable probe keys are cover variables")
+                            as u64,
+                    );
+                }
+            }
+            let d_fused_desc: Option<TrackedCudaSlice<u64>> = if fused_desc.is_empty() {
+                None
+            } else {
+                let mut tbl = self.memory().alloc::<u64>(fused_desc.len())?;
+                self.htod_launch_metadata_sync_copy_into(&fused_desc, &mut tbl)
+                    .map_err(|e| {
+                        XlogError::Kernel(format!("{ctx}: htod fused-probe table failed: {e}"))
+                    })?;
+                Some(tbl)
+            };
             let cover_ptrs: Vec<u64> = (depth..depth + c)
                 .map(|i| owned_col_ptr(&norm[a], i, ctx))
                 .collect::<Result<_>>()?;
@@ -407,7 +469,7 @@ impl CudaKernelProvider {
             let const_lo: u32 = 0;
             let const_hi: u32 = n_rows[a];
             let null_ptr: u64 = 0;
-            if !identity {
+            if count_ran {
                 let mut rec = LaunchRecorder::new_strict(launch_stream);
                 rec.read(norm[a].num_rows_device());
                 for i in depth..depth + c {
@@ -417,6 +479,20 @@ impl CudaKernelProvider {
                 if let Some(wp) = work_prefix.as_ref() {
                     rec.read(wp);
                     rec.read(find_col(&frontier, ColTag::RangeLo(a), ctx)?);
+                }
+                if let Some(d) = d_fused_desc.as_ref() {
+                    rec.read(d);
+                    for pr in &fused {
+                        let p = pr.input_idx;
+                        rec.read(norm[p].num_rows_device());
+                        for i in consumed[p]..consumed[p] + pr.var_positions.len() {
+                            rec.read_column(norm[p].column(i).expect("validated probe column"));
+                        }
+                        if frontier.iter().any(|(t, _)| *t == ColTag::RangeLo(p)) {
+                            rec.read(find_col(&frontier, ColTag::RangeLo(p), ctx)?);
+                            rec.read(find_col(&frontier, ColTag::RangeHi(p), ctx)?);
+                        }
+                    }
                 }
                 rec.write(&marks);
                 rec.preflight(runtime).map_err(|e| {
@@ -431,6 +507,8 @@ impl CudaKernelProvider {
                     })?;
                 let grid = total_work.div_ceil(BLOCK_SIZE);
                 let c_u32 = c as u32;
+                let identity_u32: u32 = u32::from(identity);
+                let n_fused_u32: u32 = fused.len() as u32;
                 // SAFETY: fj_expand_count_u32(cover_cols,
                 // n_cover_cols, parent_lo, work_prefix,
                 // has_parent_range, const_lo, const_hi, n_frontier,
@@ -456,13 +534,12 @@ impl CudaKernelProvider {
                         const_hi.as_kernel_param(),
                         count.as_kernel_param(),
                         total_work.as_kernel_param(),
-                        // Fusion analysis is not wired yet: with
-                        // identity_groups = 0, probe_desc = null, and
-                        // n_fused_probes = 0 the widened kernel behaves
-                        // exactly like the pre-fusion kernel.
-                        0u32.as_kernel_param(),
-                        null_ptr.as_kernel_param(),
-                        0u32.as_kernel_param(),
+                        identity_u32.as_kernel_param(),
+                        match d_fused_desc.as_ref() {
+                            Some(d) => d.as_kernel_param(),
+                            None => null_ptr.as_kernel_param(),
+                        },
+                        n_fused_u32.as_kernel_param(),
                         (&marks).as_kernel_param(),
                     ];
                     kernel
@@ -490,13 +567,13 @@ impl CudaKernelProvider {
                 rec.commit(runtime)
                     .map_err(|e| XlogError::Kernel(format!("{ctx}: count commit failed: {e}")))?;
             }
-            let n_children = if identity {
-                total_work
-            } else {
+            let n_children = if count_ran {
                 cu_stream
                     .synchronize()
                     .map_err(|e| XlogError::Kernel(format!("{ctx}: count sync failed: {e}")))?;
                 self.dtoh_scalar_untracked::<u32>(&marks, total_work as usize)?
+            } else {
+                total_work
             };
             if n_children == 0 {
                 return self.create_empty_buffer(out_schema);
@@ -563,7 +640,7 @@ impl CudaKernelProvider {
                 out_hi: Option<TrackedCudaSlice<u8>>,
             }
             let mut probe_plans: Vec<ProbePlan> = Vec::with_capacity(node.probes.len());
-            for probe in &node.probes {
+            for probe in node.probes.iter().filter(|pr| !is_fusable(pr)) {
                 let p = probe.input_idx;
                 let p_len = probe.var_positions.len();
                 let p_depth = consumed[p];
@@ -596,7 +673,7 @@ impl CudaKernelProvider {
                     out_hi,
                 });
             }
-            let mask: Option<TrackedCudaSlice<u8>> = if node.probes.is_empty() {
+            let mask: Option<TrackedCudaSlice<u8>> = if probe_plans.is_empty() {
                 None
             } else {
                 Some(self.memory().alloc::<u8>(n_children as usize)?)
@@ -608,7 +685,7 @@ impl CudaKernelProvider {
                     rec.read_column(norm[a].column(i).expect("validated cover column"));
                 }
                 rec.read(&d_cover_tbl);
-                if !identity {
+                if count_ran {
                     rec.read(&marks);
                 }
                 if let Some(wp) = work_prefix.as_ref() {
@@ -625,9 +702,9 @@ impl CudaKernelProvider {
                 for (_, slice) in &child_cols {
                     rec.write(slice);
                 }
-                for (pp, probe) in probe_plans.iter().zip(node.probes.iter()) {
-                    let p = probe.input_idx;
-                    for i in consumed[p]..consumed[p] + probe.var_positions.len() {
+                for pp in probe_plans.iter() {
+                    let p = pp.input_idx;
+                    for i in consumed[p]..consumed[p] + pp.n_cols as usize {
                         rec.read_column(norm[p].column(i).expect("validated probe column"));
                     }
                     rec.read(norm[p].num_rows_device());
@@ -698,12 +775,12 @@ impl CudaKernelProvider {
                         const_hi.as_kernel_param(),
                         count.as_kernel_param(),
                         total_work.as_kernel_param(),
-                        // Identity path: null offsets select the kernel's
+                        // No-count path: null offsets select the kernel's
                         // out == w branch (every position is its own group).
-                        if identity {
-                            null_ptr.as_kernel_param()
-                        } else {
+                        if count_ran {
                             (&marks).as_kernel_param()
+                        } else {
+                            null_ptr.as_kernel_param()
                         },
                         (&d_parent_copy_tbl).as_kernel_param(),
                         (&d_child_copy_tbl).as_kernel_param(),
@@ -812,6 +889,14 @@ impl CudaKernelProvider {
             consumed[a] += c;
             for probe in &node.probes {
                 consumed[probe.input_idx] += probe.var_positions.len();
+            }
+            // Fused probes exhaust their atoms in the count pass: drop
+            // their stale copied ranges from the child frontier.
+            for pr in &fused {
+                let p = pr.input_idx;
+                child_cols.retain(|(t, _)| {
+                    !matches!(t, ColTag::RangeLo(x) | ColTag::RangeHi(x) if *x == p)
+                });
             }
             // Replace probed atoms' stale (copied) ranges with the
             // refined outputs; exhausted atoms drop their ranges.

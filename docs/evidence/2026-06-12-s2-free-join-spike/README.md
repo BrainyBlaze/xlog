@@ -34,3 +34,31 @@ in-branch as the next step; a prior in-flight host-side attempt is in
 the git stash "fj fused-probe optimization v2" and contains a
 param-lifetime bug — rebuild from the kernel contract, do not pop it
 blindly). Phase B does not proceed until the triangle gate passes.
+
+## Update: host-side probe fusion implemented (manual session 2)
+
+Fused probes (key vars ⊆ node cover's new vars AND probe exhausts its
+atom) now fold into the expand-count pass as existence filters — no
+separate probe kernel, no mask compaction for those subatoms. All 6
+parity tests green. Isolated, serial measurements (--test-threads=1,
+idle GPU; earlier combined runs were self-contended and are superseded):
+
+- **Chain gate (>= 2x vs binary)**: u_cover 1.69x / 2.76x / 2.59x —
+  **PASS on median (2.59x)**, run-to-run spread disclosed. Natural plan
+  ~1.0x: plan choice is decisive (Phase B planner requirement).
+- **Triangle gate (<= 1.2x of dedicated)**: 1.73x at the gate fixture;
+  **2.04x at 10x scale** (n_yz = 3.2M) — **FAIL, and the gap is
+  structural, not amortizing overhead**: the generic engine writes the
+  frontier twice (node-0 cover copy + final output) ≈ 2x the memory
+  traffic of the fused single-pass dedicated kernel.
+
+## Phase A verdict (for the gate decision)
+
+Chain: PASS. Triangle: FAIL at both scales with a quantified structural
+cause. Production routing (design §3) keeps triangle/4-cycle/k-clique on
+their dedicated kernels — Free Join only handles shapes with NO dedicated
+kernel, where the binary tree is the only alternative and the chain gate
+is the relevant one. Whether Phase B proceeds under that routing argument
+(triangle gate reinterpreted as "informative, shape never routed") is a
+program-criteria decision recorded for the maintainer — NOT silently
+re-gated here.
