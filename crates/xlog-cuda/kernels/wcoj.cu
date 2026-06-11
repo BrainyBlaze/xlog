@@ -3439,6 +3439,10 @@ extern "C" __global__ void fj_expand_count_u32(
 // (group_offsets[w + 1] > group_offsets[w]), NOT recomputed from the
 // group-start predicate — fused probe filters in the count pass can
 // zero a mark that the predicate alone would set.
+// Copied parent columns are split into two groups so the same launch
+// shape serves every width class: VAR columns hold bound data values
+// (uint32_t here, uint64_t in the _u64 twin) while RANGE columns hold
+// u32 row indices in every width class.
 extern "C" __global__ void fj_expand_emit_u32(
     const uint32_t* const* __restrict__ cover_cols,
     uint32_t n_cover_cols,
@@ -3451,9 +3455,12 @@ extern "C" __global__ void fj_expand_emit_u32(
     uint32_t n_frontier,
     uint32_t total_work,
     const uint32_t* __restrict__ group_offsets,
-    const uint32_t* const* __restrict__ parent_copy_cols,
-    uint32_t* const* __restrict__ child_copy_cols,
-    uint32_t n_copy_cols,
+    const uint32_t* const* __restrict__ parent_copy_var_cols,
+    uint32_t* const* __restrict__ child_copy_var_cols,
+    uint32_t n_copy_var_cols,
+    const uint32_t* const* __restrict__ parent_copy_range_cols,
+    uint32_t* const* __restrict__ child_copy_range_cols,
+    uint32_t n_copy_range_cols,
     uint32_t* const* __restrict__ child_var_cols,
     uint32_t keep_cover_range,
     uint32_t* __restrict__ child_cover_lo,
@@ -3487,8 +3494,11 @@ extern "C" __global__ void fj_expand_emit_u32(
             return; // not a surviving group start
         }
     }
-    for (uint32_t j = 0; j < n_copy_cols; ++j) {
-        child_copy_cols[j][out] = parent_copy_cols[j][r];
+    for (uint32_t j = 0; j < n_copy_var_cols; ++j) {
+        child_copy_var_cols[j][out] = parent_copy_var_cols[j][r];
+    }
+    for (uint32_t j = 0; j < n_copy_range_cols; ++j) {
+        child_copy_range_cols[j][out] = parent_copy_range_cols[j][r];
     }
     for (uint32_t j = 0; j < n_cover_cols; ++j) {
         child_var_cols[j][out] = cover_cols[j][pos];
@@ -3548,4 +3558,229 @@ extern "C" __global__ void fj_probe_refine_u32(
         out_lo[i] = lo;
         out_hi[i] = hi;
     }
+}
+
+// ---------------------------------------------------------------
+// D2 Free Join — u64 width-class twins. Row indices, ranges, work
+// prefixes, and group marks stay u32 (the frontier budget bounds
+// total_work below 2^32); only DATA columns (cover, probe, var) and
+// their value comparisons widen to uint64_t. The fused-probe
+// descriptor layout is unchanged — data_col_ptr entries simply point
+// at uint64_t columns.
+// ---------------------------------------------------------------
+
+extern "C" __global__ void fj_expand_count_u64(
+    const uint64_t* const* __restrict__ cover_cols,
+    uint32_t n_cover_cols,
+    const uint32_t* __restrict__ parent_lo,
+    const uint32_t* __restrict__ work_prefix,
+    uint32_t has_parent_range,
+    uint32_t const_lo,
+    uint32_t const_hi,
+    uint32_t n_frontier,
+    uint32_t total_work,
+    uint32_t identity_groups,
+    const unsigned long long* __restrict__ probe_desc,
+    uint32_t n_fused_probes,
+    uint32_t* __restrict__ group_marks) {
+    uint32_t w = blockIdx.x * blockDim.x + threadIdx.x;
+    if (w == 0) {
+        group_marks[total_work] = 0;
+    }
+    if (w >= total_work) {
+        return;
+    }
+    uint32_t r = 0;
+    uint32_t lo;
+    uint32_t pos;
+    if (has_parent_range != 0u) {
+        r = upper_bound_u32(work_prefix, n_frontier + 1, w) - 1u;
+        lo = parent_lo[r];
+        pos = lo + (w - work_prefix[r]);
+    } else {
+        uint32_t len = const_hi - const_lo;
+        r = w / len;
+        lo = const_lo;
+        pos = const_lo + (w % len);
+    }
+    if (identity_groups == 0u) {
+        uint32_t start = (pos == lo) ? 1u : 0u;
+        if (start == 0u) {
+            for (uint32_t j = 0; j < n_cover_cols; ++j) {
+                const uint64_t* col = cover_cols[j];
+                if (col[pos] != col[pos - 1u]) {
+                    start = 1u;
+                    break;
+                }
+            }
+        }
+        if (start == 0u) {
+            group_marks[w] = 0;
+            return;
+        }
+    }
+    uint32_t ok = 1;
+    const unsigned long long* d = probe_desc;
+    for (uint32_t q = 0; q < n_fused_probes; ++q) {
+        uint32_t p_cols = (uint32_t)d[0];
+        uint32_t p_has_range = (uint32_t)d[1];
+        uint32_t p_lo;
+        uint32_t p_hi;
+        if (p_has_range != 0u) {
+            p_lo = ((const uint32_t*)d[2])[r];
+            p_hi = ((const uint32_t*)d[3])[r];
+        } else {
+            p_lo = 0;
+            p_hi = (uint32_t)d[4];
+        }
+        for (uint32_t k = 0; k < p_cols && p_lo < p_hi; ++k) {
+            const uint64_t* col = (const uint64_t*)d[5 + k];
+            uint32_t cover_idx = (uint32_t)d[5 + p_cols + k];
+            uint64_t v = cover_cols[cover_idx][pos];
+            uint32_t new_lo = p_lo + lower_bound_u64(col + p_lo, p_hi - p_lo, v);
+            uint32_t new_hi = p_lo + upper_bound_u64(col + p_lo, p_hi - p_lo, v);
+            p_lo = new_lo;
+            p_hi = new_hi;
+        }
+        if (p_lo >= p_hi) {
+            ok = 0;
+            break;
+        }
+        d += 5 + 2 * (size_t)p_cols;
+    }
+    group_marks[w] = ok;
+}
+
+extern "C" __global__ void fj_expand_emit_u64(
+    const uint64_t* const* __restrict__ cover_cols,
+    uint32_t n_cover_cols,
+    const uint32_t* __restrict__ parent_lo,
+    const uint32_t* __restrict__ parent_hi,
+    const uint32_t* __restrict__ work_prefix,
+    uint32_t has_parent_range,
+    uint32_t const_lo,
+    uint32_t const_hi,
+    uint32_t n_frontier,
+    uint32_t total_work,
+    const uint32_t* __restrict__ group_offsets,
+    const uint64_t* const* __restrict__ parent_copy_var_cols,
+    uint64_t* const* __restrict__ child_copy_var_cols,
+    uint32_t n_copy_var_cols,
+    const uint32_t* const* __restrict__ parent_copy_range_cols,
+    uint32_t* const* __restrict__ child_copy_range_cols,
+    uint32_t n_copy_range_cols,
+    uint64_t* const* __restrict__ child_var_cols,
+    uint32_t keep_cover_range,
+    uint32_t* __restrict__ child_cover_lo,
+    uint32_t* __restrict__ child_cover_hi) {
+    uint32_t w = blockIdx.x * blockDim.x + threadIdx.x;
+    if (w >= total_work) {
+        return;
+    }
+    uint32_t r;
+    uint32_t lo;
+    uint32_t pos;
+    uint32_t row_hi;
+    if (has_parent_range != 0u) {
+        r = upper_bound_u32(work_prefix, n_frontier + 1, w) - 1u;
+        lo = parent_lo[r];
+        pos = lo + (w - work_prefix[r]);
+        row_hi = parent_hi[r];
+    } else {
+        uint32_t len = const_hi - const_lo;
+        r = w / len;
+        lo = const_lo;
+        pos = const_lo + (w % len);
+        row_hi = const_hi;
+    }
+    uint32_t out;
+    if (group_offsets == nullptr) {
+        out = w;
+    } else {
+        out = group_offsets[w];
+        if (group_offsets[w + 1u] == out) {
+            return; // not a surviving group start
+        }
+    }
+    for (uint32_t j = 0; j < n_copy_var_cols; ++j) {
+        child_copy_var_cols[j][out] = parent_copy_var_cols[j][r];
+    }
+    for (uint32_t j = 0; j < n_copy_range_cols; ++j) {
+        child_copy_range_cols[j][out] = parent_copy_range_cols[j][r];
+    }
+    for (uint32_t j = 0; j < n_cover_cols; ++j) {
+        child_var_cols[j][out] = cover_cols[j][pos];
+    }
+    if (keep_cover_range != 0u) {
+        uint32_t g_hi = row_hi;
+        for (uint32_t j = 0; j < n_cover_cols; ++j) {
+            const uint64_t* col = cover_cols[j];
+            g_hi = pos + upper_bound_u64(col + pos, g_hi - pos, col[pos]);
+        }
+        child_cover_lo[out] = pos;
+        child_cover_hi[out] = g_hi;
+    }
+}
+
+extern "C" __global__ void fj_probe_refine_u64(
+    const uint64_t* const* __restrict__ probe_cols,
+    uint32_t n_probe_cols,
+    const uint64_t* const* __restrict__ key_cols,
+    const uint32_t* __restrict__ in_lo,
+    const uint32_t* __restrict__ in_hi,
+    uint32_t has_range,
+    uint32_t const_lo,
+    uint32_t const_hi,
+    uint32_t n_frontier,
+    uint32_t keep_range,
+    uint32_t* __restrict__ out_lo,
+    uint32_t* __restrict__ out_hi,
+    uint8_t* __restrict__ mask,
+    uint32_t combine_mask) {
+    uint32_t i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n_frontier) {
+        return;
+    }
+    uint32_t lo = (has_range != 0u) ? in_lo[i] : const_lo;
+    uint32_t hi = (has_range != 0u) ? in_hi[i] : const_hi;
+    for (uint32_t j = 0; j < n_probe_cols && lo < hi; ++j) {
+        const uint64_t* col = probe_cols[j];
+        uint64_t v = key_cols[j][i];
+        uint32_t new_lo = lo + lower_bound_u64(col + lo, hi - lo, v);
+        uint32_t new_hi = lo + upper_bound_u64(col + lo, hi - lo, v);
+        lo = new_lo;
+        hi = new_hi;
+    }
+    uint8_t hit = (lo < hi) ? 1u : 0u;
+    if (combine_mask != 0u) {
+        hit = (mask[i] != 0u && hit != 0u) ? 1u : 0u;
+    }
+    mask[i] = hit;
+    if (keep_range != 0u) {
+        out_lo[i] = lo;
+        out_hi[i] = hi;
+    }
+}
+
+// COUNT epilogue (§2.4 factorized counting): per surviving frontier
+// row, the count multiplicity is the product of the remaining live
+// trie-range lengths (unconsumed trailing columns of partially
+// consumed atoms — the d-representation count). Width-agnostic:
+// ranges are u32 row indices in every width class. n_ranges == 0
+// (fully-consumed plans) degenerates to multiplicity 1.
+extern "C" __global__ void fj_count_multiplicity(
+    const uint32_t* const* __restrict__ range_lo_cols,
+    const uint32_t* const* __restrict__ range_hi_cols,
+    uint32_t n_ranges,
+    uint32_t n_frontier,
+    unsigned long long* __restrict__ mult) {
+    uint32_t i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n_frontier) {
+        return;
+    }
+    unsigned long long m = 1ull;
+    for (uint32_t k = 0; k < n_ranges; ++k) {
+        m *= (unsigned long long)(range_hi_cols[k][i] - range_lo_cols[k][i]);
+    }
+    mult[i] = m;
 }

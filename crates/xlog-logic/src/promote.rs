@@ -174,6 +174,16 @@ pub fn promote_multiway(
             if try_promote_clique_inside_aggregate(&mut rule.body, stats) {
                 continue;
             }
+            // D2 §2.4: general multiway sibling of the descents above
+            // — any >=3-atom inner-join tree under an aggregate
+            // wrapper that no dedicated descent recognized becomes a
+            // FreeJoin-marked MultiWayJoin. The executor's fused hook
+            // dispatches factorized count-by-root only; declined
+            // dispatches still execute the embedded binary fallback
+            // unchanged.
+            if try_promote_general_multiway_inside_aggregate(&mut rule.body, &rel_arities) {
+                continue;
+            }
             if let Some(promoted) = try_promote_chain(&rule.body) {
                 rule.body = promoted;
                 continue;
@@ -1630,6 +1640,54 @@ fn try_promote_general_multiway(
         plan: Some(MultiwayPlan::FreeJoin),
         var_order: None,
     })
+}
+
+/// D2 §2.4 groupby fusion: general multiway sibling of
+/// [`try_promote_triangle_inside_aggregate`]. Promotes any >=3-atom
+/// inner-join tree sitting inside an aggregate rule's
+/// `Project{ GroupBy { Project { <join tree> } } }` wrapper through
+/// [`try_promote_general_multiway`].
+///
+/// Unlike the dedicated descents, no column remapping gymnastics are
+/// needed: FreeJoin-marked nodes keep `output_columns` in the
+/// join-output column space (inputs are the tree's Scan leaves in
+/// traversal order), so the group projection's columns are handed to
+/// the promoter as the head projection verbatim and the group
+/// projection becomes the identity over the MultiWayJoin's output.
+/// Returns false — leaving the rule untouched — on any structural
+/// mismatch.
+fn try_promote_general_multiway_inside_aggregate(
+    body: &mut RirNode,
+    arities: &HashMap<RelId, usize>,
+) -> bool {
+    let RirNode::Project { input: gb, .. } = body else {
+        return false;
+    };
+    let RirNode::GroupBy {
+        input: group_input, ..
+    } = gb.as_mut()
+    else {
+        return false;
+    };
+    let RirNode::Project {
+        input: inner,
+        columns: group_cols,
+    } = group_input.as_mut()
+    else {
+        return false;
+    };
+    let candidate = RirNode::Project {
+        input: inner.clone(),
+        columns: group_cols.clone(),
+    };
+    let Some(promoted) = try_promote_general_multiway(&candidate, arities) else {
+        return false;
+    };
+    // The MultiWayJoin's output IS the group projection, so the group
+    // projection becomes positional identity over it.
+    *group_cols = (0..group_cols.len()).map(ProjectExpr::Column).collect();
+    **inner = promoted;
+    true
 }
 
 /// W3.2/W6.4 K-clique promoter for k ∈ {5, 6, 7, 8}.

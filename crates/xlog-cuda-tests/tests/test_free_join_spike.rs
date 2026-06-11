@@ -992,3 +992,334 @@ fn s2_measurement_triangle_at_scale() {
         n_fj
     );
 }
+
+// =====================================================================
+// u64 width-class parity (Phase C)
+// =====================================================================
+
+fn upload_binary_u64(memory: &Arc<GpuMemoryManager>, rows: &[(u64, u64)]) -> CudaBuffer {
+    let n = rows.len() as u32;
+    let mut col0 = memory
+        .alloc::<u8>(rows.len() * std::mem::size_of::<u64>())
+        .expect("alloc col0");
+    let mut col1 = memory
+        .alloc::<u8>(rows.len() * std::mem::size_of::<u64>())
+        .expect("alloc col1");
+    let mut d_num_rows = memory.alloc::<u32>(1).expect("alloc d_num_rows");
+    let col0_bytes: Vec<u8> = rows.iter().flat_map(|(a, _)| a.to_le_bytes()).collect();
+    let col1_bytes: Vec<u8> = rows.iter().flat_map(|(_, b)| b.to_le_bytes()).collect();
+    let device = memory.device().inner();
+    device
+        .htod_sync_copy_into(&col0_bytes, &mut col0)
+        .expect("htod col0");
+    device
+        .htod_sync_copy_into(&col1_bytes, &mut col1)
+        .expect("htod col1");
+    device
+        .htod_sync_copy_into(&[n], &mut d_num_rows)
+        .expect("htod d_num_rows");
+    let schema = Schema::new(vec![
+        ("col0".to_string(), ScalarType::U64),
+        ("col1".to_string(), ScalarType::U64),
+    ]);
+    CudaBuffer::from_columns_with_host_count(
+        vec![col0.into(), col1.into()],
+        n as u64,
+        d_num_rows,
+        schema,
+        n,
+    )
+}
+
+fn download_u64_column(
+    memory: &Arc<GpuMemoryManager>,
+    buffer: &CudaBuffer,
+    col: usize,
+) -> Vec<u64> {
+    let n = buffer_rows(memory, buffer);
+    let mut bytes = vec![0u8; n * 8];
+    if n == 0 {
+        return Vec::new();
+    }
+    let CudaColumn::Owned(c) = buffer.column(col).expect("column") else {
+        panic!("column must be owned");
+    };
+    unsafe {
+        let res = sys::cuMemcpyDtoH_v2(bytes.as_mut_ptr() as *mut _, *c.device_ptr(), bytes.len());
+        assert_eq!(res, sys::cudaError_enum::CUDA_SUCCESS, "dtoh column copy");
+    }
+    bytes
+        .chunks_exact(8)
+        .map(|c| u64::from_le_bytes(c.try_into().unwrap()))
+        .collect()
+}
+
+fn download_rows_sorted_u64(
+    memory: &Arc<GpuMemoryManager>,
+    buffer: &CudaBuffer,
+) -> Vec<Vec<u64>> {
+    let arity = buffer.arity();
+    let cols: Vec<Vec<u64>> = (0..arity)
+        .map(|c| download_u64_column(memory, buffer, c))
+        .collect();
+    let n = cols.first().map(|c| c.len()).unwrap_or(0);
+    let mut rows: Vec<Vec<u64>> = (0..n)
+        .map(|i| cols.iter().map(|c| c[i]).collect())
+        .collect();
+    rows.sort();
+    rows
+}
+
+fn sorted_unique_u64(rows: impl IntoIterator<Item = (u64, u64)>) -> Vec<(u64, u64)> {
+    let set: BTreeSet<(u64, u64)> = rows.into_iter().collect();
+    set.into_iter().collect()
+}
+
+fn oracle_chain_u64(
+    r: &[(u64, u64)],
+    s: &[(u64, u64)],
+    t: &[(u64, u64)],
+    u: &[(u64, u64)],
+) -> Vec<Vec<u64>> {
+    let mut out: BTreeSet<Vec<u64>> = BTreeSet::new();
+    for &(a, x) in r {
+        for &(sx, y) in s {
+            if sx != x {
+                continue;
+            }
+            for &(ty, z) in t {
+                if ty != y {
+                    continue;
+                }
+                for &(uz, b) in u {
+                    if uz != z {
+                        continue;
+                    }
+                    out.insert(vec![a, x, y, z, b]);
+                }
+            }
+        }
+    }
+    out.into_iter().collect()
+}
+
+fn oracle_triangle_u64(
+    r: &[(u64, u64)],
+    s: &[(u64, u64)],
+    t: &[(u64, u64)],
+) -> Vec<Vec<u64>> {
+    let mut out: BTreeSet<Vec<u64>> = BTreeSet::new();
+    for &(x, y) in r {
+        for &(sy, z) in s {
+            if sy != y {
+                continue;
+            }
+            if t.contains(&(x, z)) {
+                out.insert(vec![x, y, z]);
+            }
+        }
+    }
+    out.into_iter().collect()
+}
+
+/// The u64 fixtures are adversarial against u32 truncation: HI-bit
+/// pairs collide modulo 2^32 (`v` vs `v + 2^32`), so a truncating
+/// engine would join rows the u64 oracle rejects (and the assertion
+/// below would catch the extra rows).
+const HI: u64 = 1u64 << 32;
+
+#[test]
+fn fj_chain_u64_matches_oracle() {
+    let Some(fix) = make_fixture() else {
+        eprintln!("skipping fj_chain_u64: no CUDA device");
+        return;
+    };
+    // (1, 5) joins s only via the TRUE u64 key 5; (5 + HI, ...) rows
+    // are truncation decoys. Genuine high-bit matches go through
+    // 7 + HI and 20 + 3*HI.
+    let r = sorted_unique_u64([(1, 5), (2, 7 + HI), (9 + HI, 99)]);
+    let s = sorted_unique_u64([
+        (5, 10),
+        (5 + HI, 666),
+        (7 + HI, 20 + 3 * HI),
+        (7, 667),
+    ]);
+    let t = sorted_unique_u64([
+        (10, 30),
+        (10 + HI, 668),
+        (20 + 3 * HI, 31 + HI),
+        (20, 669),
+    ]);
+    let u = sorted_unique_u64([(30, 8), (31 + HI, 9 + 5 * HI), (31, 670), (70, 70)]);
+    let expected = oracle_chain_u64(&r, &s, &t, &u);
+    assert!(!expected.is_empty(), "fixture must produce rows");
+    // The decoys must actually exercise truncation: a u32-truncated
+    // oracle would produce MORE rows.
+    let truncate =
+        |rows: &[(u64, u64)]| -> Vec<(u64, u64)> {
+            rows.iter()
+                .map(|&(a, b)| (a & 0xFFFF_FFFF, b & 0xFFFF_FFFF))
+                .collect()
+        };
+    let truncated = oracle_chain_u64(&truncate(&r), &truncate(&s), &truncate(&t), &truncate(&u));
+    assert!(
+        truncated.len() > expected.len(),
+        "fixture must distinguish u64 keys from their u32 truncations"
+    );
+
+    let bufs = [
+        upload_binary_u64(&fix.memory, &r),
+        upload_binary_u64(&fix.memory, &s),
+        upload_binary_u64(&fix.memory, &t),
+        upload_binary_u64(&fix.memory, &u),
+    ];
+    let inputs: Vec<&CudaBuffer> = bufs.iter().collect();
+    let stream = fix.pool.acquire().expect("stream");
+
+    for (label, plan) in [
+        ("natural", chain_plan_natural()),
+        ("u_cover", chain_plan_u_cover()),
+    ] {
+        let out = fix
+            .provider
+            .free_join_execute_u64_recorded(&inputs, &plan, stream)
+            .expect("free join chain u64");
+        let got = download_rows_sorted_u64(&fix.memory, &out);
+        assert_eq!(got, expected, "chain u64 ({label}) vs oracle");
+    }
+}
+
+#[test]
+fn fj_triangle_u64_matches_oracle() {
+    let Some(fix) = make_fixture() else {
+        eprintln!("skipping fj_triangle_u64: no CUDA device");
+        return;
+    };
+    // Triangle (x, y, z) with one genuine high-bit triangle and a
+    // truncation-decoy edge set; exercises multi-probe + fused-probe
+    // paths over u64 columns.
+    let x0 = 1 + HI;
+    let y0 = 2 + 2 * HI;
+    let z0 = 3 + 3 * HI;
+    let r = sorted_unique_u64([(x0, y0), (1, 2), (4, 2 + 2 * HI)]);
+    let s = sorted_unique_u64([(y0, z0), (2, 3), (2 + 2 * HI, 3 + 7 * HI)]);
+    let t = sorted_unique_u64([(x0, z0), (1, 3), (4, 3 + 7 * HI), (1, 3 + 3 * HI)]);
+    let expected = oracle_triangle_u64(&r, &s, &t);
+    assert!(!expected.is_empty(), "fixture must produce rows");
+
+    let bufs = [
+        upload_binary_u64(&fix.memory, &r),
+        upload_binary_u64(&fix.memory, &s),
+        upload_binary_u64(&fix.memory, &t),
+    ];
+    let inputs: Vec<&CudaBuffer> = bufs.iter().collect();
+    let stream = fix.pool.acquire().expect("stream");
+    let out = fix
+        .provider
+        .free_join_execute_u64_recorded(&inputs, &triangle_plan(), stream)
+        .expect("free join triangle u64");
+    let got = download_rows_sorted_u64(&fix.memory, &out);
+    assert_eq!(got, expected, "triangle u64 vs oracle");
+}
+
+// =====================================================================
+// §2.4 factorized count-by-root parity (Phase C)
+// =====================================================================
+
+/// Chain count plan with U's trailing column UNCONSUMED: node 2's
+/// probe leaves U's live range (z-refined), and the multiplicity
+/// epilogue counts |range| per frontier row instead of expanding b —
+/// the d-representation count.
+fn chain_count_plan_factorized() -> FjPlan {
+    FjPlan {
+        num_vars: 5,
+        nodes: vec![
+            FjNode {
+                cover: sub(0, &[0, 1]),
+                probes: vec![sub(1, &[1])],
+            },
+            FjNode {
+                cover: sub(1, &[2]),
+                probes: vec![sub(2, &[2])],
+            },
+            FjNode {
+                cover: sub(2, &[3]),
+                probes: vec![sub(3, &[3])],
+            },
+        ],
+        output_vars: vec![0],
+    }
+}
+
+/// Fully-consumed chain count plan (n_ranges == 0 epilogue path).
+fn chain_count_plan_full() -> FjPlan {
+    let mut plan = chain_plan_natural();
+    plan.output_vars = vec![0];
+    plan
+}
+
+fn count_by_root_u32(rows: &[Vec<u32>]) -> Vec<(u32, u64)> {
+    let mut m: std::collections::BTreeMap<u32, u64> = std::collections::BTreeMap::new();
+    for r in rows {
+        *m.entry(r[0]).or_insert(0) += 1;
+    }
+    m.into_iter().collect()
+}
+
+fn count_by_root_u64(rows: &[Vec<u64>]) -> Vec<(u64, u64)> {
+    let mut m: std::collections::BTreeMap<u64, u64> = std::collections::BTreeMap::new();
+    for r in rows {
+        *m.entry(r[0]).or_insert(0) += 1;
+    }
+    m.into_iter().collect()
+}
+
+#[test]
+fn fj_count_by_root_matches_oracle() {
+    let Some(fix) = make_fixture() else {
+        eprintln!("skipping fj_count_by_root: no CUDA device");
+        return;
+    };
+    let r = sorted_unique([(0, 1), (0, 2), (7, 2), (9, 99)]);
+    let s = sorted_unique([(1, 10), (1, 11), (2, 10), (2, 12), (50, 50)]);
+    let t = sorted_unique([(10, 20), (10, 21), (11, 22), (12, 23), (60, 60)]);
+    let u = sorted_unique([(20, 5), (21, 5), (21, 6), (23, 7), (70, 70)]);
+    let expected = count_by_root_u32(&oracle_chain(&r, &s, &t, &u));
+    assert!(!expected.is_empty(), "fixture must produce groups");
+    // The trailing column must matter: at least one group's count must
+    // exceed its frontier-row count for the factorized epilogue to be
+    // exercised beyond multiplicity 1.
+    assert!(
+        expected.iter().any(|(_, c)| *c > 1),
+        "fixture must have multiplicity > 1 groups"
+    );
+
+    let bufs = [
+        upload_binary_u32(&fix.memory, &r),
+        upload_binary_u32(&fix.memory, &s),
+        upload_binary_u32(&fix.memory, &t),
+        upload_binary_u32(&fix.memory, &u),
+    ];
+    let inputs: Vec<&CudaBuffer> = bufs.iter().collect();
+    let stream = fix.pool.acquire().expect("stream");
+
+    for (label, plan) in [
+        ("factorized", chain_count_plan_factorized()),
+        ("full", chain_count_plan_full()),
+    ] {
+        let out = fix
+            .provider
+            .free_join_count_by_root_u32_recorded(&inputs, &plan, stream)
+            .expect("free join count");
+        let keys = download_u32_column(&fix.memory, &out, 0);
+        let counts = download_u64_column(&fix.memory, &out, 1);
+        let mut got: Vec<(u32, u64)> = keys.into_iter().zip(counts).collect();
+        got.sort();
+        assert_eq!(got, expected, "count-by-root ({label}) vs oracle");
+    }
+}
+
+// NOTE: no u64 count-by-root test — the fused count reduction reuses
+// the recorded groupby, whose KEY columns are bounded engine-wide to
+// U32/Symbol (multi-type recorded sort is deferred there). u64 bodies
+// stay on the materialize path (covered by fj_chain_u64/fj_triangle_u64).

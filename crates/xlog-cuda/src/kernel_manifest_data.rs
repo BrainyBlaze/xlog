@@ -559,6 +559,13 @@ pub const KERNEL_MODULES: &[KernelModuleSpec] = &[
             "fj_expand_count_u32",
             "fj_expand_emit_u32",
             "fj_probe_refine_u32",
+            // Phase C — u64 width-class twins (work prefix is
+            // width-agnostic and shared).
+            "fj_expand_count_u64",
+            "fj_expand_emit_u64",
+            "fj_probe_refine_u64",
+            // Phase C — factorized count epilogue (width-agnostic).
+            "fj_count_multiplicity",
         ],
     },
     KernelModuleSpec {

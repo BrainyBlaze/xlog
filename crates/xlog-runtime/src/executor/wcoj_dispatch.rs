@@ -1408,9 +1408,13 @@ impl Executor {
         if inputs.len() < 3 {
             return Ok(None);
         }
-        // Resolve scans -> store buffers; every column must be 4-byte
-        // (the Phase B provider entry is the u32/Symbol engine).
+        // Resolve scans -> store buffers; all columns across all
+        // inputs must share ONE width class — u32/Symbol or u64
+        // (mixed widths and other types decline; the engine's flat
+        // sorted-range tries are width-uniform per execution).
         let mut bufs: Vec<&CudaBuffer> = Vec::with_capacity(inputs.len());
+        let mut all_u32 = true;
+        let mut all_u64 = true;
         for input in inputs {
             let RirNode::Scan { rel } = input else {
                 return Ok(None);
@@ -1422,16 +1426,17 @@ impl Executor {
             let Some(buf) = self.store.get(&name) else {
                 return Ok(None);
             };
-            let four_byte = (0..buf.arity()).all(|i| {
-                matches!(
-                    buf.schema().column_type(i),
-                    Some(ScalarType::U32 | ScalarType::Symbol)
-                )
-            });
-            if !four_byte {
-                return Ok(None);
+            for i in 0..buf.arity() {
+                match buf.schema().column_type(i) {
+                    Some(ScalarType::U32 | ScalarType::Symbol) => all_u64 = false,
+                    Some(ScalarType::U64) => all_u32 = false,
+                    _ => return Ok(None),
+                }
             }
             bufs.push(buf);
+        }
+        if !all_u32 && !all_u64 {
+            return Ok(None);
         }
         // Dense variable ids: remap slot_vars' class ids to 0..n.
         let mut class_to_var: Vec<u32> = Vec::new();
@@ -1537,10 +1542,14 @@ impl Executor {
         let Some(launch_stream) = self.wcoj_dispatch_stream_or_init() else {
             return Ok(None);
         };
-        match self
-            .provider
-            .free_join_execute_u32_recorded(&bufs, &fj_plan, launch_stream)
-        {
+        let outcome = if all_u32 {
+            self.provider
+                .free_join_execute_u32_recorded(&bufs, &fj_plan, launch_stream)
+        } else {
+            self.provider
+                .free_join_execute_u64_recorded(&bufs, &fj_plan, launch_stream)
+        };
+        match outcome {
             Ok(buf) => {
                 self.free_join_dispatch_count += 1;
                 Ok(Some(buf))
@@ -1548,6 +1557,208 @@ impl Executor {
             Err(err) => {
                 wcoj_decline_on_error(&mut self.wcoj_error_decline_count, "free-join", err)
             }
+        }
+    }
+
+    /// D2 §2.4 — factorized Free Join count-by-root: fused dispatch
+    /// for `count` aggregates over FreeJoin-marked general multiway
+    /// bodies. The plan is derived like
+    /// [`Self::try_dispatch_free_join`], with one §2.4 refinement:
+    /// trailing cover variables PRIVATE to their atom (single global
+    /// occurrence, not the group key) are left unconsumed — the
+    /// engine multiplies their live trie-range lengths instead of
+    /// expanding the frontier (the d-representation count). Count
+    /// semantics match the unfused pipeline exactly: the lowered
+    /// group input is a non-deduplicating projection of the join
+    /// output, so both paths count distinct full body bindings.
+    /// u32/Symbol width only (the recorded groupby's engine-wide key
+    /// support); every decline silently leaves the unfused path to
+    /// run.
+    fn try_dispatch_free_join_count(
+        &mut self,
+        node: &RirNode,
+        group_cols: &[ProjectExpr],
+    ) -> Result<Option<CudaBuffer>> {
+        use xlog_cuda::provider::{FjNode, FjPlan, FjSubAtom};
+
+        if free_join_disabled() {
+            return Ok(None);
+        }
+        let RirNode::MultiWayJoin {
+            inputs,
+            slot_vars,
+            plan,
+            ..
+        } = node
+        else {
+            return Ok(None);
+        };
+        if !matches!(plan, Some(MultiwayPlan::FreeJoin)) {
+            return Ok(None);
+        }
+        if inputs.len() < 3 {
+            return Ok(None);
+        }
+        let mut bufs: Vec<&CudaBuffer> = Vec::with_capacity(inputs.len());
+        for input in inputs {
+            let RirNode::Scan { rel } = input else {
+                return Ok(None);
+            };
+            let name = match self.get_rel_name(*rel) {
+                Some(s) => s.to_string(),
+                None => return Ok(None),
+            };
+            let Some(buf) = self.store.get(&name) else {
+                return Ok(None);
+            };
+            let four_byte = (0..buf.arity()).all(|i| {
+                matches!(
+                    buf.schema().column_type(i),
+                    Some(ScalarType::U32 | ScalarType::Symbol)
+                )
+            });
+            if !four_byte {
+                return Ok(None);
+            }
+            bufs.push(buf);
+        }
+        // Dense variable ids (same scheme as the materialize
+        // dispatcher).
+        let mut class_to_var: Vec<u32> = Vec::new();
+        let mut dense = |class: u32| -> usize {
+            match class_to_var.iter().position(|c| *c == class) {
+                Some(i) => i,
+                None => {
+                    class_to_var.push(class);
+                    class_to_var.len() - 1
+                }
+            }
+        };
+        let mut atom_vars: Vec<Vec<usize>> = Vec::with_capacity(slot_vars.len());
+        for (i, cols) in slot_vars.iter().enumerate() {
+            if cols.len() != bufs[i].arity() {
+                return Ok(None);
+            }
+            let mut vars = Vec::with_capacity(cols.len());
+            for c in cols {
+                let Some(class) = c else { return Ok(None) };
+                vars.push(dense(*class));
+            }
+            atom_vars.push(vars);
+        }
+        let num_vars = class_to_var.len();
+        // Group key: the group projection's column 0 through the
+        // concatenated-inputs column space (FreeJoin provenance).
+        let mut col_to_var: Vec<usize> = Vec::new();
+        for vars in &atom_vars {
+            col_to_var.extend(vars.iter().copied());
+        }
+        let Some(ProjectExpr::Column(key_col)) = group_cols.first() else {
+            return Ok(None);
+        };
+        let Some(&group_var) = col_to_var.get(*key_col) else {
+            return Ok(None);
+        };
+        // Variable occurrence counts: single-occurrence variables are
+        // private to their atom and (unless they key the group)
+        // prunable as trailing covers.
+        let mut occurrences = vec![0usize; num_vars];
+        for vars in &atom_vars {
+            for &v in vars {
+                occurrences[v] += 1;
+            }
+        }
+        // binary2fj with §2.4 trailing-private pruning.
+        let mut bound_at: Vec<Option<usize>> = vec![None; num_vars];
+        let mut nodes: Vec<FjNode> = Vec::new();
+        for (i, vars) in atom_vars.iter().enumerate() {
+            let split = vars
+                .iter()
+                .take_while(|v| bound_at[**v].is_some())
+                .count();
+            if vars[split..].iter().any(|v| bound_at[*v].is_some()) {
+                // Non-prefix body (see the materialize dispatcher).
+                return Ok(None);
+            }
+            let mut keep_end = vars.len();
+            while keep_end > split {
+                let v = vars[keep_end - 1];
+                if occurrences[v] == 1 && v != group_var {
+                    keep_end -= 1;
+                } else {
+                    break;
+                }
+            }
+            if split == 0 && keep_end == 0 {
+                // Fully-private atom: nothing binds or probes it
+                // (cannot arise from the promoter — keyless joins
+                // are rejected there — but decline defensively).
+                return Ok(None);
+            }
+            if split > 0 {
+                let probe = FjSubAtom {
+                    input_idx: i,
+                    var_positions: vars[..split].to_vec(),
+                };
+                if nodes.is_empty() {
+                    return Ok(None);
+                }
+                let target = vars[..split]
+                    .iter()
+                    .map(|v| bound_at[*v].expect("prefix vars are bound"))
+                    .max()
+                    .expect("split > 0");
+                nodes[target].probes.push(probe);
+            }
+            if split < keep_end {
+                let cover_vars = vars[split..keep_end].to_vec();
+                let mut seen = HashSet::new();
+                if !cover_vars.iter().all(|v| seen.insert(*v)) {
+                    return Ok(None);
+                }
+                let k = nodes.len();
+                for v in &cover_vars {
+                    bound_at[*v] = Some(k);
+                }
+                nodes.push(FjNode {
+                    cover: FjSubAtom {
+                        input_idx: i,
+                        var_positions: cover_vars,
+                    },
+                    probes: Vec::new(),
+                });
+            } else if nodes.is_empty() {
+                return Ok(None);
+            }
+        }
+        if bound_at[group_var].is_none() {
+            return Ok(None);
+        }
+        let fj_plan = FjPlan {
+            num_vars,
+            nodes,
+            output_vars: vec![group_var],
+        };
+        if self.provider.memory().runtime().is_none() {
+            return Ok(None);
+        }
+        let Some(launch_stream) = self.wcoj_dispatch_stream_or_init() else {
+            return Ok(None);
+        };
+        match self
+            .provider
+            .free_join_count_by_root_u32_recorded(&bufs, &fj_plan, launch_stream)
+        {
+            Ok(buf) => {
+                self.free_join_dispatch_count += 1;
+                self.wcoj_groupby_fusion_dispatch_count += 1;
+                Ok(Some(buf))
+            }
+            Err(err) => wcoj_decline_on_error(
+                &mut self.wcoj_error_decline_count,
+                "free-join-count",
+                err,
+            ),
         }
     }
 
@@ -1652,7 +1863,15 @@ impl Executor {
             if !matches!(agg_op, AggOp::Count) {
                 return Ok(None);
             }
-            return self.try_dispatch_wcoj_groupby_root_count_clique(multiway, columns);
+            if let Some(buf) =
+                self.try_dispatch_wcoj_groupby_root_count_clique(multiway, columns)?
+            {
+                return Ok(Some(buf));
+            }
+            // D2 §2.4 — factorized Free Join count-by-root for
+            // FreeJoin-marked general multiway bodies (any shape the
+            // dedicated fused kernels above declined).
+            return self.try_dispatch_free_join_count(multiway, columns);
         };
         // Triangle output space: col 1 = Y, col 2 = Z. Anything else
         // (e.g. an out-of-range ref) declines.

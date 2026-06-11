@@ -534,8 +534,12 @@ fn non_clique_aggregate_body_declines_silently() {
         return;
     };
     let _guard = env_lock();
-    // 9-atom body (e34 dropped): not a complete K_5, so the promoter
-    // leaves the rule untouched and the executor never fuses.
+    // 9-atom body (e34 dropped): not a complete K_5, so the CLIQUE
+    // promoter must leave it alone. Since D2 Phase C the general
+    // multiway promoter picks such bodies up instead, and the
+    // executor fuses them through the factorized Free Join
+    // count-by-root route — the fusion counter advances via the
+    // FREE JOIN dispatch counter, never the clique path.
     let src = "agg(V0, count(V4)) :- \
                e01(V0, V1), e02(V0, V2), e03(V0, V3), e04(V0, V4), \
                e12(V1, V2), e13(V1, V3), e14(V1, V4), \
@@ -566,12 +570,58 @@ fn non_clique_aggregate_body_declines_silently() {
         executor.put_relation(&format!("e{i}{j}"), upload_binary_u32(&fix.memory, &rows));
     }
     executor.execute_plan(&plan).expect("execute plan");
+    // D2 Phase C contract: the body fuses through the generic Free
+    // Join count route (one fused dispatch, attributed to the Free
+    // Join counter) — NOT through any clique kernel (the clique
+    // promotion assert above pins that).
     assert_eq!(
         executor.wcoj_groupby_fusion_dispatch_count(),
-        0,
-        "non-clique body must not fuse"
+        1,
+        "non-clique body fuses via Free Join count"
+    );
+    assert_eq!(
+        executor.free_join_dispatch_count(),
+        1,
+        "the fused dispatch must be the Free Join route"
     );
     let agg = executor.store().get("agg").expect("agg relation");
     let rows = download_group_counts(&fix.memory, agg);
     assert!(!rows.is_empty(), "9-atom body still produces counts");
+
+    // Behavioral parity: the unfused (kill-switch) path must produce
+    // the identical group counts.
+    // SAFETY: single-threaded phase of this test; restored below.
+    unsafe {
+        std::env::set_var("XLOG_DISABLE_FREE_JOIN", "1");
+    }
+    let mut unfused_executor = xlog_runtime::Executor::new_with_config(
+        Arc::clone(&fix.provider),
+        RuntimeConfig::default(),
+    );
+    for (name, rel_id) in compiler.rel_ids() {
+        unfused_executor.register_relation(*rel_id, name);
+    }
+    for (i, j) in canonical_edge_list(5) {
+        if (i, j) == (3, 4) {
+            continue;
+        }
+        let edge_rows = edges.get(&(i, j)).cloned().unwrap_or_default();
+        unfused_executor.put_relation(
+            &format!("e{i}{j}"),
+            upload_binary_u32(&fix.memory, &edge_rows),
+        );
+    }
+    let unfused_result = unfused_executor.execute_plan(&plan);
+    unsafe {
+        std::env::remove_var("XLOG_DISABLE_FREE_JOIN");
+    }
+    unfused_result.expect("execute plan (kill switch)");
+    assert_eq!(
+        unfused_executor.free_join_dispatch_count(),
+        0,
+        "kill switch must keep the free join counter at 0"
+    );
+    let unfused_agg = unfused_executor.store().get("agg").expect("agg relation");
+    let unfused_rows = download_group_counts(&fix.memory, unfused_agg);
+    assert_eq!(rows, unfused_rows, "fused vs unfused group-count parity");
 }

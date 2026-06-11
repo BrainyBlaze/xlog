@@ -31,9 +31,14 @@
 //!     sanctioned `dtoh_scalar_untracked` metadata scalars (scan
 //!     totals, compaction counts); recorded launches throughout.
 //!
-//! Phase A scope: u32/Symbol width-class, hand-built plans, full
-//! expansion at the last node (the factorized trailing-range
-//! enumeration of §2.4 is Phase C).
+//! Width classes: u32/Symbol (`free_join_execute_u32_recorded`) and
+//! u64 (`free_join_execute_u64_recorded`, Phase C) share one
+//! width-parameterized pipeline — frontier VAR columns carry
+//! width-sized data values while RANGE columns are u32 row indices in
+//! every width class (the staging/compaction/projection helpers are
+//! schema-driven per column, so mixed-width frontiers need no special
+//! casing). Full expansion runs at the last node (the factorized
+//! trailing-range enumeration of §2.4 remains future work).
 
 use std::ffi::c_void;
 
@@ -102,6 +107,74 @@ enum ColTag {
 
 type FrontierCol = (ColTag, TrackedCudaSlice<u8>);
 
+/// Data width class of a Free Join execution. Row indices, trie
+/// ranges, work prefixes, and group marks are u32 in every class;
+/// only DATA columns (cover/probe/var values) take this width.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FjWidth {
+    U32,
+    U64,
+}
+
+impl FjWidth {
+    fn var_bytes(self) -> usize {
+        match self {
+            Self::U32 => std::mem::size_of::<u32>(),
+            Self::U64 => std::mem::size_of::<u64>(),
+        }
+    }
+
+    fn var_type(self) -> ScalarType {
+        match self {
+            Self::U32 => ScalarType::U32,
+            Self::U64 => ScalarType::U64,
+        }
+    }
+
+    fn count_kernel(self) -> &'static str {
+        match self {
+            Self::U32 => wcoj_kernels::FJ_EXPAND_COUNT_U32,
+            Self::U64 => wcoj_kernels::FJ_EXPAND_COUNT_U64,
+        }
+    }
+
+    fn emit_kernel(self) -> &'static str {
+        match self {
+            Self::U32 => wcoj_kernels::FJ_EXPAND_EMIT_U32,
+            Self::U64 => wcoj_kernels::FJ_EXPAND_EMIT_U64,
+        }
+    }
+
+    fn probe_kernel(self) -> &'static str {
+        match self {
+            Self::U32 => wcoj_kernels::FJ_PROBE_REFINE_U32,
+            Self::U64 => wcoj_kernels::FJ_PROBE_REFINE_U64,
+        }
+    }
+}
+
+/// Per-tag column type within a frontier of the given width: VAR
+/// columns are width-sized data, RANGE columns are u32 row indices.
+fn tag_type(tag: ColTag, width: FjWidth) -> ScalarType {
+    match tag {
+        ColTag::Var(_) => width.var_type(),
+        ColTag::RangeLo(_) | ColTag::RangeHi(_) => ScalarType::U32,
+    }
+}
+
+/// What the pipeline produces after the last plan node.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FjMode {
+    /// Materialize the projected row set (`output_vars` columns).
+    Materialize,
+    /// Design §2.4 factorized count: reduce to
+    /// `(output_vars[0], count)` where each frontier row contributes
+    /// the PRODUCT of its remaining live trie-range lengths
+    /// (unconsumed trailing columns never expand). Plans may
+    /// partially consume atoms, but every atom must be touched.
+    CountByRoot,
+}
+
 fn owned_col_ptr(buf: &CudaBuffer, idx: usize, ctx: &str) -> Result<u64> {
     match buf.column(idx) {
         Some(CudaColumn::Owned(s)) => Ok(*s.device_ptr()),
@@ -123,7 +196,12 @@ fn find_col<'a>(cols: &'a [FrontierCol], tag: ColTag, ctx: &str) -> Result<&'a T
 
 /// Validate the plan against the input arities. Returns the variable
 /// binding order (covers' variables in plan order).
-fn validate_plan(plan: &FjPlan, arities: &[usize], ctx: &str) -> Result<Vec<usize>> {
+fn validate_plan(
+    plan: &FjPlan,
+    arities: &[usize],
+    mode: FjMode,
+    ctx: &str,
+) -> Result<Vec<usize>> {
     if plan.nodes.is_empty() {
         return Err(XlogError::Kernel(format!("{ctx}: plan has no nodes")));
     }
@@ -196,15 +274,36 @@ fn validate_plan(plan: &FjPlan, arities: &[usize], ctx: &str) -> Result<Vec<usiz
         }
     }
     for (i, (&used, &arity)) in consumed.iter().zip(arities.iter()).enumerate() {
-        if used != arity {
-            return Err(XlogError::Kernel(format!(
-                "{ctx}: plan consumes {used}/{arity} columns of input {i} \
-                 (Phase A requires full consumption)"
-            )));
+        match mode {
+            FjMode::Materialize => {
+                if used != arity {
+                    return Err(XlogError::Kernel(format!(
+                        "{ctx}: plan consumes {used}/{arity} columns of input {i} \
+                         (materialization requires full consumption)"
+                    )));
+                }
+            }
+            // §2.4 factorized counting: unconsumed trailing columns
+            // contribute their live range lengths as multiplicities,
+            // but an untouched atom has no range to read — reject.
+            FjMode::CountByRoot => {
+                if used == 0 {
+                    return Err(XlogError::Kernel(format!(
+                        "{ctx}: count plan never touches input {i} \
+                         (untouched atoms have no live range)"
+                    )));
+                }
+            }
         }
     }
     if plan.output_vars.is_empty() {
         return Err(XlogError::Kernel(format!("{ctx}: empty output_vars")));
+    }
+    if mode == FjMode::CountByRoot && plan.output_vars.len() != 1 {
+        return Err(XlogError::Kernel(format!(
+            "{ctx}: count plans take exactly one output (group) variable, got {}",
+            plan.output_vars.len()
+        )));
     }
     for &v in &plan.output_vars {
         if v >= plan.num_vars || !bound[v] {
@@ -241,7 +340,74 @@ impl CudaKernelProvider {
         plan: &FjPlan,
         launch_stream: StreamId,
     ) -> Result<CudaBuffer> {
-        let ctx = "free_join_execute_u32_recorded";
+        self.free_join_execute_recorded_impl(
+            inputs,
+            plan,
+            launch_stream,
+            FjWidth::U32,
+            FjMode::Materialize,
+            "free_join_execute_u32_recorded",
+        )
+    }
+
+    /// u64 width-class twin of [`Self::free_join_execute_u32_recorded`]
+    /// (Phase C): identical pipeline, contract, and invariants; every
+    /// input column must be `U64` and the output columns are `U64`.
+    pub fn free_join_execute_u64_recorded(
+        &self,
+        inputs: &[&CudaBuffer],
+        plan: &FjPlan,
+        launch_stream: StreamId,
+    ) -> Result<CudaBuffer> {
+        self.free_join_execute_recorded_impl(
+            inputs,
+            plan,
+            launch_stream,
+            FjWidth::U64,
+            FjMode::Materialize,
+            "free_join_execute_u64_recorded",
+        )
+    }
+
+    /// Design §2.4 factorized count-by-root over the Free Join
+    /// frontier (Phase C): runs the same pipeline but reduces to
+    /// `(group, count)` instead of materializing rows. The plan's
+    /// `output_vars` must be exactly `[group_var]`; atoms may be
+    /// PARTIALLY consumed — each surviving frontier row contributes
+    /// the product of its remaining live trie-range lengths (the
+    /// d-representation count), so trailing private variables never
+    /// expand the frontier. Output schema: `(group: U32, count: U64)`.
+    ///
+    /// u32/Symbol width-class only: the reduction reuses the recorded
+    /// groupby, whose KEY columns are bounded engine-wide to
+    /// U32/Symbol (multi-type recorded sort is deferred there) — u64
+    /// bodies stay on the materialize path.
+    pub fn free_join_count_by_root_u32_recorded(
+        &self,
+        inputs: &[&CudaBuffer],
+        plan: &FjPlan,
+        launch_stream: StreamId,
+    ) -> Result<CudaBuffer> {
+        self.free_join_execute_recorded_impl(
+            inputs,
+            plan,
+            launch_stream,
+            FjWidth::U32,
+            FjMode::CountByRoot,
+            "free_join_count_by_root_u32_recorded",
+        )
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn free_join_execute_recorded_impl(
+        &self,
+        inputs: &[&CudaBuffer],
+        plan: &FjPlan,
+        launch_stream: StreamId,
+        width: FjWidth,
+        mode: FjMode,
+        ctx: &str,
+    ) -> Result<CudaBuffer> {
         if self.memory().runtime().is_none() {
             return Err(XlogError::Kernel(format!(
                 "{ctx} requires a runtime-backed GpuMemoryManager \
@@ -252,7 +418,7 @@ impl CudaKernelProvider {
             return Err(XlogError::Kernel(format!("{ctx}: no inputs")));
         }
         let arities: Vec<usize> = inputs.iter().map(|b| b.arity()).collect();
-        let bind_order = validate_plan(plan, &arities, ctx)?;
+        let bind_order = validate_plan(plan, &arities, mode, ctx)?;
 
         // Layout-normalize every input per dispatch (31b0ccf0
         // contract). Arity-2 inputs go through the triangle-grade
@@ -260,10 +426,11 @@ impl CudaKernelProvider {
         // wider inputs use the generic W3.1 sort+dedup entry.
         let mut norm: Vec<CudaBuffer> = Vec::with_capacity(inputs.len());
         for input in inputs {
-            let normalized = if input.arity() == 2 {
-                self.wcoj_layout_u32_recorded(input, launch_stream)?
-            } else {
-                self.wcoj_layout_sort_u32_recorded(input, launch_stream)?
+            let normalized = match (width, input.arity()) {
+                (FjWidth::U32, 2) => self.wcoj_layout_u32_recorded(input, launch_stream)?,
+                (FjWidth::U32, _) => self.wcoj_layout_sort_u32_recorded(input, launch_stream)?,
+                (FjWidth::U64, 2) => self.wcoj_layout_u64_recorded(input, launch_stream)?,
+                (FjWidth::U64, _) => self.wcoj_layout_sort_u64_recorded(input, launch_stream)?,
             };
             norm.push(normalized);
         }
@@ -276,12 +443,18 @@ impl CudaKernelProvider {
             n_rows.push(n);
         }
 
-        let out_schema = Schema::new(
-            plan.output_vars
-                .iter()
-                .map(|v| (format!("v{v}"), ScalarType::U32))
-                .collect(),
-        );
+        let out_schema = match mode {
+            FjMode::Materialize => Schema::new(
+                plan.output_vars
+                    .iter()
+                    .map(|v| (format!("v{v}"), width.var_type()))
+                    .collect(),
+            ),
+            FjMode::CountByRoot => Schema::new(vec![
+                (format!("v{}", plan.output_vars[0]), width.var_type()),
+                ("count".to_string(), ScalarType::U64),
+            ]),
+        };
         // Inner-join semantics: any empty atom empties the result.
         if n_rows.iter().any(|&n| n == 0) {
             return self.create_empty_buffer(out_schema);
@@ -304,6 +477,13 @@ impl CudaKernelProvider {
         // atom untouched (constant range [0, n)).
         let mut frontier: Vec<FrontierCol> = Vec::new();
         let mut count: u32 = 1;
+        // Column CAPACITY of the current frontier (the last node's
+        // n_children): compaction shrinks the logical count without
+        // reallocating, and every CudaBuffer built over frontier
+        // columns must carry row_cap == capacity (columns are
+        // row_cap × elem bytes by contract), with the logical count
+        // riding on num_rows_device.
+        let mut frontier_cap: u32 = 1;
         let mut consumed = vec![0usize; inputs.len()];
 
         for node in &plan.nodes {
@@ -501,9 +681,9 @@ impl CudaKernelProvider {
                 let kernel = self
                     .device()
                     .inner()
-                    .get_func(WCOJ_MODULE, wcoj_kernels::FJ_EXPAND_COUNT_U32)
+                    .get_func(WCOJ_MODULE, width.count_kernel())
                     .ok_or_else(|| {
-                        XlogError::Kernel("fj_expand_count_u32 kernel not found".to_string())
+                        XlogError::Kernel(format!("{} kernel not found", width.count_kernel()))
                     })?;
                 let grid = total_work.div_ceil(BLOCK_SIZE);
                 let c_u32 = c as u32;
@@ -554,7 +734,10 @@ impl CudaKernelProvider {
                             &mut params,
                         )
                         .map_err(|e| {
-                            XlogError::Kernel(format!("fj_expand_count_u32 launch failed: {e}"))
+                            XlogError::Kernel(format!(
+                                "{} launch failed: {e}",
+                                width.count_kernel()
+                            ))
                         })?;
                 }
                 self.multiblock_scan_u32_inplace_on_stream(
@@ -585,30 +768,46 @@ impl CudaKernelProvider {
             // the cover atom keeps unconsumed columns), the probe
             // range outputs, and the survival mask — all before the
             // recorder, per the established discipline.
-            let child_bytes = (n_children as usize) * std::mem::size_of::<u32>();
-            let mut parent_copy_ptrs: Vec<u64> = Vec::new();
-            let mut child_copy_ptrs: Vec<u64> = Vec::new();
+            // VAR columns are width-sized data; RANGE columns are u32
+            // row indices in every width class. The emit kernel takes
+            // the two copy groups separately so one launch shape
+            // serves both widths.
+            let var_bytes = (n_children as usize) * width.var_bytes();
+            let range_bytes = (n_children as usize) * std::mem::size_of::<u32>();
+            let mut parent_copy_var_ptrs: Vec<u64> = Vec::new();
+            let mut child_copy_var_ptrs: Vec<u64> = Vec::new();
+            let mut parent_copy_range_ptrs: Vec<u64> = Vec::new();
+            let mut child_copy_range_ptrs: Vec<u64> = Vec::new();
             let mut child_cols: Vec<FrontierCol> = Vec::new();
             for (tag, slice) in &frontier {
                 if matches!(tag, ColTag::RangeLo(x) | ColTag::RangeHi(x) if *x == a) {
                     continue; // cover range is refined, not copied
                 }
-                let dst = self.memory().alloc::<u8>(child_bytes)?;
-                parent_copy_ptrs.push(*slice.device_ptr());
-                child_copy_ptrs.push(*dst.device_ptr());
+                let is_var = matches!(tag, ColTag::Var(_));
+                let dst = self
+                    .memory()
+                    .alloc::<u8>(if is_var { var_bytes } else { range_bytes })?;
+                if is_var {
+                    parent_copy_var_ptrs.push(*slice.device_ptr());
+                    child_copy_var_ptrs.push(*dst.device_ptr());
+                } else {
+                    parent_copy_range_ptrs.push(*slice.device_ptr());
+                    child_copy_range_ptrs.push(*dst.device_ptr());
+                }
                 child_cols.push((*tag, dst));
             }
-            let n_copy = parent_copy_ptrs.len();
+            let n_copy_var = parent_copy_var_ptrs.len();
+            let n_copy_range = parent_copy_range_ptrs.len();
             let mut child_var_ptrs: Vec<u64> = Vec::with_capacity(c);
             for &v in &node.cover.var_positions {
-                let dst = self.memory().alloc::<u8>(child_bytes)?;
+                let dst = self.memory().alloc::<u8>(var_bytes)?;
                 child_var_ptrs.push(*dst.device_ptr());
                 child_cols.push((ColTag::Var(v), dst));
             }
             let keep_cover = depth + c < arities[a];
             if keep_cover {
-                let lo = self.memory().alloc::<u8>(child_bytes)?;
-                let hi = self.memory().alloc::<u8>(child_bytes)?;
+                let lo = self.memory().alloc::<u8>(range_bytes)?;
+                let hi = self.memory().alloc::<u8>(range_bytes)?;
                 child_cols.push((ColTag::RangeLo(a), lo));
                 child_cols.push((ColTag::RangeHi(a), hi));
             }
@@ -623,8 +822,10 @@ impl CudaKernelProvider {
                 }
                 Ok(tbl)
             };
-            let d_parent_copy_tbl = upload_tbl(&parent_copy_ptrs)?;
-            let d_child_copy_tbl = upload_tbl(&child_copy_ptrs)?;
+            let d_parent_copy_var_tbl = upload_tbl(&parent_copy_var_ptrs)?;
+            let d_child_copy_var_tbl = upload_tbl(&child_copy_var_ptrs)?;
+            let d_parent_copy_range_tbl = upload_tbl(&parent_copy_range_ptrs)?;
+            let d_child_copy_range_tbl = upload_tbl(&child_copy_range_ptrs)?;
             let d_child_var_tbl = upload_tbl(&child_var_ptrs)?;
 
             // Probe pre-allocations (key tables, data tables,
@@ -656,8 +857,8 @@ impl CudaKernelProvider {
                 let keep = p_depth + p_len < arities[p];
                 let (out_lo, out_hi) = if keep {
                     (
-                        Some(self.memory().alloc::<u8>(child_bytes)?),
-                        Some(self.memory().alloc::<u8>(child_bytes)?),
+                        Some(self.memory().alloc::<u8>(range_bytes)?),
+                        Some(self.memory().alloc::<u8>(range_bytes)?),
                     )
                 } else {
                     (None, None)
@@ -696,8 +897,10 @@ impl CudaKernelProvider {
                 for (_, slice) in &frontier {
                     rec.read(slice);
                 }
-                rec.read(&d_parent_copy_tbl);
-                rec.read(&d_child_copy_tbl);
+                rec.read(&d_parent_copy_var_tbl);
+                rec.read(&d_child_copy_var_tbl);
+                rec.read(&d_parent_copy_range_tbl);
+                rec.read(&d_child_copy_range_tbl);
                 rec.read(&d_child_var_tbl);
                 for (_, slice) in &child_cols {
                     rec.write(slice);
@@ -726,19 +929,22 @@ impl CudaKernelProvider {
                 let emit_kernel = self
                     .device()
                     .inner()
-                    .get_func(WCOJ_MODULE, wcoj_kernels::FJ_EXPAND_EMIT_U32)
+                    .get_func(WCOJ_MODULE, width.emit_kernel())
                     .ok_or_else(|| {
-                        XlogError::Kernel("fj_expand_emit_u32 kernel not found".to_string())
+                        XlogError::Kernel(format!("{} kernel not found", width.emit_kernel()))
                     })?;
                 let grid = total_work.div_ceil(BLOCK_SIZE);
                 let c_u32 = c as u32;
-                let n_copy_u32 = n_copy as u32;
+                let n_copy_var_u32 = n_copy_var as u32;
+                let n_copy_range_u32 = n_copy_range as u32;
                 let keep_cover_u32 = u32::from(keep_cover);
-                // SAFETY: fj_expand_emit_u32(cover_cols, n_cover_cols,
-                // parent_lo, parent_hi, work_prefix, has_parent_range,
-                // const_lo, const_hi, n_frontier, total_work,
-                // group_offsets, parent_copy_cols, child_copy_cols,
-                // n_copy_cols, child_var_cols, keep_cover_range,
+                // SAFETY: fj_expand_emit_{u32,u64}(cover_cols,
+                // n_cover_cols, parent_lo, parent_hi, work_prefix,
+                // has_parent_range, const_lo, const_hi, n_frontier,
+                // total_work, group_offsets, parent_copy_var_cols,
+                // child_copy_var_cols, n_copy_var_cols,
+                // parent_copy_range_cols, child_copy_range_cols,
+                // n_copy_range_cols, child_var_cols, keep_cover_range,
                 // child_cover_lo, child_cover_hi). Nullable pointers
                 // are only dereferenced behind their flags.
                 unsafe {
@@ -782,9 +988,12 @@ impl CudaKernelProvider {
                         } else {
                             null_ptr.as_kernel_param()
                         },
-                        (&d_parent_copy_tbl).as_kernel_param(),
-                        (&d_child_copy_tbl).as_kernel_param(),
-                        n_copy_u32.as_kernel_param(),
+                        (&d_parent_copy_var_tbl).as_kernel_param(),
+                        (&d_child_copy_var_tbl).as_kernel_param(),
+                        n_copy_var_u32.as_kernel_param(),
+                        (&d_parent_copy_range_tbl).as_kernel_param(),
+                        (&d_child_copy_range_tbl).as_kernel_param(),
+                        n_copy_range_u32.as_kernel_param(),
                         (&d_child_var_tbl).as_kernel_param(),
                         keep_cover_u32.as_kernel_param(),
                         cover_lo_param,
@@ -802,7 +1011,10 @@ impl CudaKernelProvider {
                             &mut params,
                         )
                         .map_err(|e| {
-                            XlogError::Kernel(format!("fj_expand_emit_u32 launch failed: {e}"))
+                            XlogError::Kernel(format!(
+                                "{} launch failed: {e}",
+                                width.emit_kernel()
+                            ))
                         })?;
                 }
 
@@ -810,9 +1022,9 @@ impl CudaKernelProvider {
                 let probe_kernel = self
                     .device()
                     .inner()
-                    .get_func(WCOJ_MODULE, wcoj_kernels::FJ_PROBE_REFINE_U32)
+                    .get_func(WCOJ_MODULE, width.probe_kernel())
                     .ok_or_else(|| {
-                        XlogError::Kernel("fj_probe_refine_u32 kernel not found".to_string())
+                        XlogError::Kernel(format!("{} kernel not found", width.probe_kernel()))
                     })?;
                 let probe_grid = n_children.div_ceil(BLOCK_SIZE);
                 for (probe_idx, pp) in probe_plans.iter().enumerate() {
@@ -876,7 +1088,8 @@ impl CudaKernelProvider {
                             )
                             .map_err(|e| {
                                 XlogError::Kernel(format!(
-                                    "fj_probe_refine_u32 launch failed: {e}"
+                                    "{} launch failed: {e}",
+                                    width.probe_kernel()
                                 ))
                             })?;
                     }
@@ -920,9 +1133,13 @@ impl CudaKernelProvider {
             // ---- Compaction (single mask pass per node).
             if let Some(mask) = mask {
                 let tags: Vec<ColTag> = child_cols.iter().map(|(t, _)| *t).collect();
+                // Per-tag column types: the compaction helper sizes
+                // its per-column copies from the schema, so the mixed
+                // VAR/RANGE width classes need no special casing.
                 let schema = Schema::new(
-                    (0..child_cols.len())
-                        .map(|i| (format!("f{i}"), ScalarType::U32))
+                    tags.iter()
+                        .enumerate()
+                        .map(|(i, t)| (format!("f{i}"), tag_type(*t, width)))
                         .collect(),
                 );
                 let d_nr = self.memory().alloc::<u32>(1)?;
@@ -967,6 +1184,120 @@ impl CudaKernelProvider {
                 frontier = child_cols;
                 count = n_children;
             }
+            frontier_cap = n_children;
+        }
+
+        // ---- COUNT epilogue (§2.4): per-row multiplicity = product
+        // of remaining live trie-range lengths, then the existing
+        // recorded groupby Sum reduces (group, multiplicity) to
+        // (group, count). Unconsumed trailing columns never expand
+        // the frontier — this is the d-representation count.
+        if mode == FjMode::CountByRoot {
+            let group_var = plan.output_vars[0];
+            let mut lo_ptrs: Vec<u64> = Vec::new();
+            let mut hi_ptrs: Vec<u64> = Vec::new();
+            for (t, s) in &frontier {
+                if let ColTag::RangeLo(x) = t {
+                    lo_ptrs.push(*s.device_ptr());
+                    hi_ptrs.push(*find_col(&frontier, ColTag::RangeHi(*x), ctx)?.device_ptr());
+                }
+            }
+            let upload_tbl = |ptrs: &[u64]| -> Result<TrackedCudaSlice<u64>> {
+                let mut tbl = self.memory().alloc::<u64>(ptrs.len().max(1))?;
+                if !ptrs.is_empty() {
+                    self.htod_launch_metadata_sync_copy_into(ptrs, &mut tbl)
+                        .map_err(|e| {
+                            XlogError::Kernel(format!("{ctx}: htod range table failed: {e}"))
+                        })?;
+                }
+                Ok(tbl)
+            };
+            let d_lo_tbl = upload_tbl(&lo_ptrs)?;
+            let d_hi_tbl = upload_tbl(&hi_ptrs)?;
+            // Sized to the frontier CAPACITY so the staging buffer's
+            // row_cap invariant holds; only the logical `count`
+            // prefix is written/read.
+            let mut mult = self
+                .memory()
+                .alloc::<u8>(frontier_cap as usize * std::mem::size_of::<u64>())?;
+            {
+                let mut rec = LaunchRecorder::new_strict(launch_stream);
+                for (t, s) in &frontier {
+                    if matches!(t, ColTag::RangeLo(_) | ColTag::RangeHi(_)) {
+                        rec.read(s);
+                    }
+                }
+                rec.read(&d_lo_tbl);
+                rec.read(&d_hi_tbl);
+                rec.write(&mult);
+                rec.preflight(runtime).map_err(|e| {
+                    XlogError::Kernel(format!("{ctx}: multiplicity preflight failed: {e}"))
+                })?;
+                let kernel = self
+                    .device()
+                    .inner()
+                    .get_func(WCOJ_MODULE, wcoj_kernels::FJ_COUNT_MULTIPLICITY)
+                    .ok_or_else(|| {
+                        XlogError::Kernel("fj_count_multiplicity kernel not found".to_string())
+                    })?;
+                let grid = count.div_ceil(BLOCK_SIZE);
+                let n_ranges = lo_ptrs.len() as u32;
+                // SAFETY: fj_count_multiplicity(range_lo_cols,
+                // range_hi_cols, n_ranges, n_frontier, mult);
+                // device-resident, preflighted.
+                unsafe {
+                    kernel
+                        .clone()
+                        .launch_on_stream(
+                            &cu_stream,
+                            LaunchConfig {
+                                grid_dim: (grid, 1, 1),
+                                block_dim: (BLOCK_SIZE, 1, 1),
+                                shared_mem_bytes: 0,
+                            },
+                            (&d_lo_tbl, &d_hi_tbl, n_ranges, count, &mut mult),
+                        )
+                        .map_err(|e| {
+                            XlogError::Kernel(format!(
+                                "fj_count_multiplicity launch failed: {e}"
+                            ))
+                        })?;
+                }
+                rec.commit(runtime).map_err(|e| {
+                    XlogError::Kernel(format!("{ctx}: multiplicity commit failed: {e}"))
+                })?;
+            }
+            let key_idx = frontier
+                .iter()
+                .position(|(t, _)| *t == ColTag::Var(group_var))
+                .ok_or_else(|| {
+                    XlogError::Kernel(format!("{ctx}: group variable {group_var} missing"))
+                })?;
+            let (_, key_col) = frontier.swap_remove(key_idx);
+            let d_nr = self.memory().alloc::<u32>(1)?;
+            self.htod_launch_metadata_async_copy_one(
+                &count,
+                &d_nr,
+                &cu_stream,
+                &format!("{ctx}: staging num_rows"),
+            )?;
+            let staging_schema = Schema::new(vec![
+                (format!("v{group_var}"), width.var_type()),
+                ("count".to_string(), ScalarType::U64),
+            ]);
+            let staging = CudaBuffer::from_columns_with_host_count(
+                vec![key_col.into(), mult.into()],
+                u64::from(frontier_cap),
+                d_nr,
+                staging_schema,
+                count,
+            );
+            return self.groupby_multi_agg_recorded(
+                &staging,
+                &[0],
+                &[(1, xlog_core::AggOp::Sum)],
+                launch_stream,
+            );
         }
 
         // ---- Final materialization: project the head variables out
@@ -986,8 +1317,10 @@ impl CudaKernelProvider {
             })
             .collect::<Result<_>>()?;
         let schema = Schema::new(
-            (0..frontier.len())
-                .map(|i| (format!("f{i}"), ScalarType::U32))
+            frontier
+                .iter()
+                .enumerate()
+                .map(|(i, (t, _))| (format!("f{i}"), tag_type(*t, width)))
                 .collect(),
         );
         let d_nr = self.memory().alloc::<u32>(1)?;
@@ -998,9 +1331,12 @@ impl CudaKernelProvider {
             &format!("{ctx}: result num_rows"),
         )?;
         let columns: Vec<CudaColumn> = frontier.into_iter().map(|(_, s)| s.into()).collect();
+        // row_cap = frontier CAPACITY (compaction shrinks the logical
+        // count without reallocating columns); the logical count rides
+        // on num_rows_device + the host cache.
         let src = CudaBuffer::from_columns_with_host_count(
             columns,
-            u64::from(count),
+            u64::from(frontier_cap),
             d_nr,
             schema,
             count,
