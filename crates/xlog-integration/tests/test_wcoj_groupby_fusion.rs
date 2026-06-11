@@ -521,6 +521,121 @@ fn groupby_fusion_count_u64_fires_end_to_end_with_parity() {
     assert_eq!(unfused_count, 0, "kill switch must keep the counter at 0");
 }
 
+/// Run an aggregate program over U64 relations and return rows + counter.
+fn run_agg_program_u64(
+    fix: &Fixture,
+    source: &str,
+    inputs: &BTreeMap<&str, Vec<(u64, u64)>>,
+) -> (Vec<(u64, u64)>, u64) {
+    let mut compiler = Compiler::new();
+    let plan = compiler.compile(source).expect("compile aggregate rule");
+    let mut executor = Executor::new(Arc::clone(&fix.provider));
+    for (name, rel_id) in compiler.rel_ids() {
+        executor.register_relation(*rel_id, name);
+    }
+    for (name, rows) in inputs {
+        executor.put_relation(name, upload_binary_u64(&fix.memory, rows));
+    }
+    executor.execute_plan(&plan).expect("execute plan");
+    let agg = executor.store().get("agg").expect("agg relation");
+    let rows = download_groups_u64_u64(&fix.memory, agg);
+    (rows, executor.wcoj_groupby_fusion_dispatch_count())
+}
+
+/// U64 triangle fixture: the K4 + disjoint triangle shape shifted above
+/// 2^33 so width truncation visibly fails.
+fn triangle_inputs_u64() -> (BTreeMap<&'static str, Vec<(u64, u64)>>, u64) {
+    const B: u64 = 1 << 33;
+    let map = |rows: &[(u32, u32)]| -> Vec<(u64, u64)> {
+        rows.iter()
+            .map(|&(a, b)| (B + a as u64, B + b as u64))
+            .collect()
+    };
+    let mut inputs: BTreeMap<&str, Vec<(u64, u64)>> = BTreeMap::new();
+    inputs.insert(
+        "e1",
+        map(&[
+            (1, 2),
+            (1, 3),
+            (1, 4),
+            (2, 3),
+            (2, 4),
+            (3, 4),
+            (5, 6),
+            (5, 7),
+            (6, 7),
+        ]),
+    );
+    inputs.insert("e2", map(&[(2, 3), (2, 4), (3, 4), (6, 7)]));
+    inputs.insert("e3", map(&[(1, 3), (1, 4), (2, 4), (3, 4), (5, 7)]));
+    (inputs, B)
+}
+
+/// Fused-vs-kill-switch phases for one u64-relation aggregate source.
+fn assert_fusion_parity_u64_keys(fix: &Fixture, source: &str, expected: &[(u64, u64)]) {
+    let _guard = env_lock();
+    let (inputs, _) = triangle_inputs_u64();
+    let (fused, fused_count) = run_agg_program_u64(fix, source, &inputs);
+    assert_eq!(fused, expected, "fused u64 path row set: {source}");
+    assert_eq!(fused_count, 1, "fused dispatch must fire once: {source}");
+
+    // SAFETY: serialized by ENV_LOCK; restored below.
+    unsafe {
+        std::env::set_var("XLOG_DISABLE_WCOJ_GROUPBY_FUSION", "1");
+    }
+    let (unfused, unfused_count) = run_agg_program_u64(fix, source, &inputs);
+    unsafe {
+        std::env::remove_var("XLOG_DISABLE_WCOJ_GROUPBY_FUSION");
+    }
+    assert_eq!(unfused, expected, "kill-switch u64 path row set: {source}");
+    assert_eq!(unfused_count, 0, "kill switch must keep the counter at 0");
+}
+
+#[test]
+fn groupby_fusion_sum_z_u64_fires_end_to_end_with_parity() {
+    let Some(fix) = make_fixture() else {
+        eprintln!("Skipping: CUDA runtime unavailable");
+        return;
+    };
+    const B: u64 = 1 << 33;
+    // Sums of Z per root (B-shifted): X=1: 3B+11; X=2: B+4; X=5: B+7.
+    assert_fusion_parity_u64_keys(
+        &fix,
+        "agg(X, sum(Z)) :- e1(X, Y), e2(Y, Z), e3(X, Z).",
+        &[(B + 1, 3 * B + 11), (B + 2, B + 4), (B + 5, B + 7)],
+    );
+}
+
+#[test]
+fn groupby_fusion_min_z_u64_fires_end_to_end_with_parity() {
+    let Some(fix) = make_fixture() else {
+        eprintln!("Skipping: CUDA runtime unavailable");
+        return;
+    };
+    const B: u64 = 1 << 33;
+    // Min of Z. X=1: B+3; X=2: B+4; X=5: B+7.
+    assert_fusion_parity_u64_keys(
+        &fix,
+        "agg(X, min(Z)) :- e1(X, Y), e2(Y, Z), e3(X, Z).",
+        &[(B + 1, B + 3), (B + 2, B + 4), (B + 5, B + 7)],
+    );
+}
+
+#[test]
+fn groupby_fusion_max_y_u64_fires_end_to_end_with_parity() {
+    let Some(fix) = make_fixture() else {
+        eprintln!("Skipping: CUDA runtime unavailable");
+        return;
+    };
+    const B: u64 = 1 << 33;
+    // Max of Y. X=1: B+3; X=2: B+3; X=5: B+6.
+    assert_fusion_parity_u64_keys(
+        &fix,
+        "agg(X, max(Y)) :- e1(X, Y), e2(Y, Z), e3(X, Z).",
+        &[(B + 1, B + 3), (B + 2, B + 3), (B + 5, B + 6)],
+    );
+}
+
 /// Shared 4-cycle fixture. Completions per root W:
 /// W=1 -> (X,Y,Z) in {(10,20,30),(10,21,30),(11,20,30)};
 /// W=2 -> {(10,20,30),(10,21,30)}. W=3 has e1/e2/e3 paths but no closing
