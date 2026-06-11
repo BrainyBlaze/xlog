@@ -3324,6 +3324,21 @@ extern "C" __global__ void fj_expand_work_prefix_u32(
 // vs the previous position (ranges are lex-sorted, so groups are
 // contiguous runs). group_marks has length total_work + 1; the
 // trailing slot is zeroed for the exclusive scan.
+//
+// identity_groups == 1: the cover consumes through the atom's last
+// column, so every position is its own group and the start predicate
+// is skipped (the pass then only exists to evaluate fused probes).
+//
+// Fused probe filters: range-exhausting probe subatoms whose key
+// variables are all bound by THIS node's cover are folded into the
+// mark (group survives only if every fused probe's binary-search
+// refinement is non-empty). Keys are constant within a group (cover
+// values), so per-position evaluation is exact. This removes the
+// separate probe kernel + mask compaction for those subatoms — the
+// emit pass then materializes exactly the surviving children.
+// probe_desc packs one descriptor per fused probe, sequentially:
+//   [n_cols, has_range, in_lo_ptr, in_hi_ptr, n_atom_rows,
+//    data_col_ptr * n_cols, cover_var_idx * n_cols]
 extern "C" __global__ void fj_expand_count_u32(
     const uint32_t* const* __restrict__ cover_cols,
     uint32_t n_cover_cols,
@@ -3334,6 +3349,9 @@ extern "C" __global__ void fj_expand_count_u32(
     uint32_t const_hi,
     uint32_t n_frontier,
     uint32_t total_work,
+    uint32_t identity_groups,
+    const unsigned long long* __restrict__ probe_desc,
+    uint32_t n_fused_probes,
     uint32_t* __restrict__ group_marks) {
     uint32_t w = blockIdx.x * blockDim.x + threadIdx.x;
     if (w == 0) {
@@ -3342,28 +3360,65 @@ extern "C" __global__ void fj_expand_count_u32(
     if (w >= total_work) {
         return;
     }
+    uint32_t r = 0;
     uint32_t lo;
     uint32_t pos;
     if (has_parent_range != 0u) {
-        uint32_t r = upper_bound_u32(work_prefix, n_frontier + 1, w) - 1u;
+        r = upper_bound_u32(work_prefix, n_frontier + 1, w) - 1u;
         lo = parent_lo[r];
         pos = lo + (w - work_prefix[r]);
     } else {
         uint32_t len = const_hi - const_lo;
+        r = w / len;
         lo = const_lo;
         pos = const_lo + (w % len);
     }
-    uint32_t start = (pos == lo) ? 1u : 0u;
-    if (start == 0u) {
-        for (uint32_t j = 0; j < n_cover_cols; ++j) {
-            const uint32_t* col = cover_cols[j];
-            if (col[pos] != col[pos - 1u]) {
-                start = 1u;
-                break;
+    if (identity_groups == 0u) {
+        uint32_t start = (pos == lo) ? 1u : 0u;
+        if (start == 0u) {
+            for (uint32_t j = 0; j < n_cover_cols; ++j) {
+                const uint32_t* col = cover_cols[j];
+                if (col[pos] != col[pos - 1u]) {
+                    start = 1u;
+                    break;
+                }
             }
         }
+        if (start == 0u) {
+            group_marks[w] = 0;
+            return;
+        }
     }
-    group_marks[w] = start;
+    uint32_t ok = 1;
+    const unsigned long long* d = probe_desc;
+    for (uint32_t q = 0; q < n_fused_probes; ++q) {
+        uint32_t p_cols = (uint32_t)d[0];
+        uint32_t p_has_range = (uint32_t)d[1];
+        uint32_t p_lo;
+        uint32_t p_hi;
+        if (p_has_range != 0u) {
+            p_lo = ((const uint32_t*)d[2])[r];
+            p_hi = ((const uint32_t*)d[3])[r];
+        } else {
+            p_lo = 0;
+            p_hi = (uint32_t)d[4];
+        }
+        for (uint32_t k = 0; k < p_cols && p_lo < p_hi; ++k) {
+            const uint32_t* col = (const uint32_t*)d[5 + k];
+            uint32_t cover_idx = (uint32_t)d[5 + p_cols + k];
+            uint32_t v = cover_cols[cover_idx][pos];
+            uint32_t new_lo = p_lo + lower_bound_u32(col + p_lo, p_hi - p_lo, v);
+            uint32_t new_hi = p_lo + upper_bound_u32(col + p_lo, p_hi - p_lo, v);
+            p_lo = new_lo;
+            p_hi = new_hi;
+        }
+        if (p_lo >= p_hi) {
+            ok = 0;
+            break;
+        }
+        d += 5 + 2 * (size_t)p_cols;
+    }
+    group_marks[w] = ok;
 }
 
 // Phase 2 of EXPAND: emit one child frontier row per distinct cover
@@ -3372,6 +3427,18 @@ extern "C" __global__ void fj_expand_count_u32(
 // refined subrange [pos, g_hi) is recovered by successive
 // upper_bound refinement on the cover columns (each column is sorted
 // within the prefix-equal range of the previous columns).
+//
+// group_offsets == null: the host skipped the count pass entirely
+// (identity-group cover with no fused probes — the cover consumes
+// through its atom's LAST column, so rows in a trie range share all
+// columns before the range's depth and, inputs being full-row
+// deduped, the remaining column suffix is distinct within every
+// range: every candidate position is its own group) and out == w.
+//
+// group_offsets != null: survival is read from the scanned marks
+// (group_offsets[w + 1] > group_offsets[w]), NOT recomputed from the
+// group-start predicate — fused probe filters in the count pass can
+// zero a mark that the predicate alone would set.
 extern "C" __global__ void fj_expand_emit_u32(
     const uint32_t* const* __restrict__ cover_cols,
     uint32_t n_cover_cols,
@@ -3411,33 +3478,27 @@ extern "C" __global__ void fj_expand_emit_u32(
         pos = const_lo + (w % len);
         row_hi = const_hi;
     }
-    // Recompute the group-start predicate (cheaper than re-reading
-    // the marks array; identical result by construction).
-    bool start = (pos == lo);
-    if (!start) {
-        for (uint32_t j = 0; j < n_cover_cols; ++j) {
-            const uint32_t* col = cover_cols[j];
-            if (col[pos] != col[pos - 1u]) {
-                start = true;
-                break;
-            }
+    uint32_t out;
+    if (group_offsets == nullptr) {
+        out = w;
+    } else {
+        out = group_offsets[w];
+        if (group_offsets[w + 1u] == out) {
+            return; // not a surviving group start
         }
     }
-    if (!start) {
-        return;
-    }
-    uint32_t out = group_offsets[w];
     for (uint32_t j = 0; j < n_copy_cols; ++j) {
         child_copy_cols[j][out] = parent_copy_cols[j][r];
     }
-    uint32_t g_hi = row_hi;
     for (uint32_t j = 0; j < n_cover_cols; ++j) {
-        const uint32_t* col = cover_cols[j];
-        uint32_t v = col[pos];
-        child_var_cols[j][out] = v;
-        g_hi = pos + upper_bound_u32(col + pos, g_hi - pos, v);
+        child_var_cols[j][out] = cover_cols[j][pos];
     }
     if (keep_cover_range != 0u) {
+        uint32_t g_hi = row_hi;
+        for (uint32_t j = 0; j < n_cover_cols; ++j) {
+            const uint32_t* col = cover_cols[j];
+            g_hi = pos + upper_bound_u32(col + pos, g_hi - pos, col[pos]);
+        }
         child_cover_lo[out] = pos;
         child_cover_hi[out] = g_hi;
     }

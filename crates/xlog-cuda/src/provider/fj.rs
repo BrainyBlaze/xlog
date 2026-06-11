@@ -386,6 +386,16 @@ impl CudaKernelProvider {
 
             // ---- EXPAND phase 1: mark distinct cover-prefix group
             // starts and scan them into output offsets.
+            //
+            // Identity-group fast path: when the cover consumes through
+            // the atom's LAST column, rows within any trie range have
+            // distinct column suffixes (inputs are full-row deduped and
+            // the range fixes all preceding columns), so every candidate
+            // position is its own group — the marks pass, its device
+            // scan, and its host sync are skipped and
+            // n_children == total_work (the emit kernel takes its
+            // out == w branch via a null group_offsets pointer).
+            let identity = depth + c >= arities[a];
             let cover_ptrs: Vec<u64> = (depth..depth + c)
                 .map(|i| owned_col_ptr(&norm[a], i, ctx))
                 .collect::<Result<_>>()?;
@@ -397,7 +407,7 @@ impl CudaKernelProvider {
             let const_lo: u32 = 0;
             let const_hi: u32 = n_rows[a];
             let null_ptr: u64 = 0;
-            {
+            if !identity {
                 let mut rec = LaunchRecorder::new_strict(launch_stream);
                 rec.read(norm[a].num_rows_device());
                 for i in depth..depth + c {
@@ -446,6 +456,13 @@ impl CudaKernelProvider {
                         const_hi.as_kernel_param(),
                         count.as_kernel_param(),
                         total_work.as_kernel_param(),
+                        // Fusion analysis is not wired yet: with
+                        // identity_groups = 0, probe_desc = null, and
+                        // n_fused_probes = 0 the widened kernel behaves
+                        // exactly like the pre-fusion kernel.
+                        0u32.as_kernel_param(),
+                        null_ptr.as_kernel_param(),
+                        0u32.as_kernel_param(),
                         (&marks).as_kernel_param(),
                     ];
                     kernel
@@ -473,10 +490,14 @@ impl CudaKernelProvider {
                 rec.commit(runtime)
                     .map_err(|e| XlogError::Kernel(format!("{ctx}: count commit failed: {e}")))?;
             }
-            cu_stream
-                .synchronize()
-                .map_err(|e| XlogError::Kernel(format!("{ctx}: count sync failed: {e}")))?;
-            let n_children = self.dtoh_scalar_untracked::<u32>(&marks, total_work as usize)?;
+            let n_children = if identity {
+                total_work
+            } else {
+                cu_stream
+                    .synchronize()
+                    .map_err(|e| XlogError::Kernel(format!("{ctx}: count sync failed: {e}")))?;
+                self.dtoh_scalar_untracked::<u32>(&marks, total_work as usize)?
+            };
             if n_children == 0 {
                 return self.create_empty_buffer(out_schema);
             }
@@ -587,7 +608,9 @@ impl CudaKernelProvider {
                     rec.read_column(norm[a].column(i).expect("validated cover column"));
                 }
                 rec.read(&d_cover_tbl);
-                rec.read(&marks);
+                if !identity {
+                    rec.read(&marks);
+                }
                 if let Some(wp) = work_prefix.as_ref() {
                     rec.read(wp);
                     rec.read(find_col(&frontier, ColTag::RangeLo(a), ctx)?);
@@ -675,7 +698,13 @@ impl CudaKernelProvider {
                         const_hi.as_kernel_param(),
                         count.as_kernel_param(),
                         total_work.as_kernel_param(),
-                        (&marks).as_kernel_param(),
+                        // Identity path: null offsets select the kernel's
+                        // out == w branch (every position is its own group).
+                        if identity {
+                            null_ptr.as_kernel_param()
+                        } else {
+                            (&marks).as_kernel_param()
+                        },
                         (&d_parent_copy_tbl).as_kernel_param(),
                         (&d_child_copy_tbl).as_kernel_param(),
                         n_copy_u32.as_kernel_param(),
