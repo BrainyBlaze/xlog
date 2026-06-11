@@ -62,3 +62,10 @@ is the relevant one. Whether Phase B proceeds under that routing argument
 (triangle gate reinterpreted as "informative, shape never routed") is a
 program-criteria decision recorded for the maintainer — NOT silently
 re-gated here.
+
+## Gate decision (maintainer, 2026-06-12)
+
+Option A accepted: Phase A stands under the production-routing argument —
+dedicated shapes (triangle/4-cycle/k-clique) never route to Free Join;
+the triangle measurement is retained as the recorded bound on the cost
+of generality (1.73x / 2.04x). Phase B authorized.
