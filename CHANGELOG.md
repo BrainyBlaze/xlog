@@ -6,6 +6,10 @@ All notable changes to this project are documented in this file.
 
 ### Fixed
 
+- *(cuda)* Fused group-by-root entries now layout-normalize their inputs
+  per dispatch (sorted-fast-path when already lex-sorted+unique), matching
+  the unfused pipeline's guarantee — unsorted or duplicated input buffers
+  previously produced silently wrong (empty) fused aggregate results.
 - *(prob)* **Behavior change — MC fail-closed contract.** `McProgram::evaluate`
   no longer falls back to the CPU oracle silently when the GPU-resident MC
   engine rejects a program (negation, aggregates, unbounded terms). Rejected
