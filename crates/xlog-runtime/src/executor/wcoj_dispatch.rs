@@ -138,6 +138,38 @@ pub(super) fn wcoj_adaptive_enabled(config_override: Option<bool>) -> bool {
     config_override.unwrap_or(true)
 }
 
+/// Diagnostics gate for WCOJ pipeline errors. By default a layout/kernel
+/// error declines to the binary-join fallback (the store is never partially
+/// mutated) but is **counted** (`Executor::wcoj_error_decline_count`) and
+/// logged to stderr, so a regressed kernel cannot silently disappear from
+/// production dispatch behind the silent-fallback contract. Set
+/// `XLOG_WCOJ_STRICT=1` to propagate the error instead (diagnostic mode).
+pub const ENV_WCOJ_STRICT: &str = "XLOG_WCOJ_STRICT";
+
+pub(super) fn wcoj_strict_errors_enabled() -> bool {
+    std::env::var(ENV_WCOJ_STRICT)
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+}
+
+/// Convert a WCOJ pipeline error into a counted, logged decline
+/// (`Ok(None)` — caller falls back to the binary-join path), or propagate
+/// it when [`ENV_WCOJ_STRICT`] is set. Structural declines (gate off,
+/// shape mismatch, missing buffer) stay silent and do NOT go through here;
+/// this seam is only for real layout/kernel failures.
+pub(super) fn wcoj_decline_on_error(
+    counter: &mut u64,
+    stage: &str,
+    err: xlog_core::XlogError,
+) -> Result<Option<CudaBuffer>> {
+    *counter += 1;
+    if wcoj_strict_errors_enabled() {
+        return Err(err);
+    }
+    eprintln!("warning: WCOJ {stage} pipeline error; declining to binary-join fallback: {err}");
+    Ok(None)
+}
+
 /// Goal-039 G_W63_CHAIN gate. Default ON after G_PRE
 /// measured `evaluate_pct >= 0.60`; `XLOG_WCOJ_W63_CHAIN_ENABLE=0`
 /// or `false` disables the route for A/B measurements.
@@ -1043,7 +1075,9 @@ impl Executor {
                 }
                 Ok(Some(buf))
             }
-            Err(_) => Ok(None),
+            Err(err) => {
+                wcoj_decline_on_error(&mut self.wcoj_error_decline_count, "triangle", err)
+            }
         }
     }
 
@@ -1286,6 +1320,16 @@ impl Executor {
         self.wcoj_triangle_dispatch_count
     }
 
+    /// Number of WCOJ pipeline errors (layout or kernel failures, across
+    /// triangle / 4-cycle / k-clique / chain hooks) that were converted
+    /// into binary-join declines. Healthy dispatch keeps this at 0; a
+    /// nonzero value is the signature of a regressed WCOJ pipeline hiding
+    /// behind the silent-fallback contract. Set `XLOG_WCOJ_STRICT=1` to
+    /// propagate such errors instead of declining.
+    pub fn wcoj_error_decline_count(&self) -> u64 {
+        self.wcoj_error_decline_count
+    }
+
     /// v0.6.5 slice 2 — count of times the WCOJ 4-cycle hook
     /// produced a result and the executor installed it. Tracked
     /// separately from triangle so tests can pin which shape
@@ -1418,12 +1462,21 @@ impl Executor {
             )
         };
 
-        let Ok(joined) = joined else {
-            return Ok(None);
+        let joined = match joined {
+            Ok(buf) => buf,
+            Err(err) => {
+                return wcoj_decline_on_error(&mut self.wcoj_error_decline_count, "chain-join", err)
+            }
         };
         let projected = match self.execute_project(&joined, &matched.output_columns) {
             Ok(buf) => buf,
-            Err(_) => return Ok(None),
+            Err(err) => {
+                return wcoj_decline_on_error(
+                    &mut self.wcoj_error_decline_count,
+                    "chain-join-project",
+                    err,
+                )
+            }
         };
         self.stats.record_join_result(
             matched.rel_left,
@@ -1626,7 +1679,9 @@ impl Executor {
                 self.wcoj_4cycle_dispatch_count += 1;
                 Ok(Some(buf))
             }
-            Err(_) => Ok(None),
+            Err(err) => {
+                wcoj_decline_on_error(&mut self.wcoj_error_decline_count, "4-cycle", err)
+            }
         }
     }
 
@@ -2152,7 +2207,13 @@ impl Executor {
             };
             match res {
                 Ok(b) => laid_out.push(b),
-                Err(_) => return Ok(None),
+                Err(err) => {
+                    return wcoj_decline_on_error(
+                        &mut self.wcoj_error_decline_count,
+                        "k-clique-layout",
+                        err,
+                    )
+                }
             }
         }
         // 7. Build the slice of buffer references the provider
@@ -2289,7 +2350,9 @@ impl Executor {
                 }
                 Ok(Some(buf))
             }
-            Err(_) => Ok(None),
+            Err(err) => {
+                wcoj_decline_on_error(&mut self.wcoj_error_decline_count, "k-clique", err)
+            }
         }
     }
 }
@@ -2740,6 +2803,44 @@ mod tests {
             set_env(ENV_USE_WCOJ_TRIANGLE_U32, "0");
             assert!(!wcoj_gate_enabled(None));
             assert!(wcoj_gate_enabled(Some(true)));
+        });
+    }
+
+    // -------------------------------------------------------------
+    // WCOJ error-decline observability (counter + XLOG_WCOJ_STRICT).
+    // -------------------------------------------------------------
+
+    #[test]
+    fn error_decline_counts_and_falls_back_by_default() {
+        with_wcoj_env(|| {
+            let mut counter = 0u64;
+            let err = xlog_core::XlogError::Kernel("synthetic layout failure".to_string());
+            let out = super::wcoj_decline_on_error(&mut counter, "triangle", err)
+                .expect("default mode must decline to the binary-join fallback, not error");
+            assert!(out.is_none(), "decline must hand control to the fallback");
+            assert_eq!(counter, 1, "every error decline must be counted");
+        });
+    }
+
+    #[test]
+    fn error_decline_propagates_under_strict_env() {
+        with_wcoj_env(|| {
+            set_env(super::ENV_WCOJ_STRICT, "1");
+            let mut counter = 0u64;
+            let err = xlog_core::XlogError::Kernel("synthetic layout failure".to_string());
+            let out = super::wcoj_decline_on_error(&mut counter, "triangle", err);
+            // SAFETY: serialized + restored under `with_wcoj_env`'s lock.
+            unsafe {
+                std::env::remove_var(super::ENV_WCOJ_STRICT);
+            }
+            match out {
+                Err(err) => assert!(
+                    err.to_string().contains("synthetic layout failure"),
+                    "strict mode must surface the original error: {err}"
+                ),
+                Ok(_) => panic!("XLOG_WCOJ_STRICT=1 must propagate the pipeline error"),
+            }
+            assert_eq!(counter, 1, "strict mode still counts the decline");
         });
     }
 

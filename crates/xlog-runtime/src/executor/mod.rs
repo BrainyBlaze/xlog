@@ -310,6 +310,13 @@ pub struct Executor {
     /// hash. Public accessor:
     /// `Executor::nested_loop_dispatch_count(&self) -> u64`.
     pub(super) nested_loop_dispatch_count: u64,
+    /// Counts WCOJ pipeline errors (layout or kernel failures) that were
+    /// converted into binary-join declines instead of propagating. Healthy
+    /// dispatch keeps this at 0; nonzero values expose regressed kernels
+    /// that would otherwise hide behind the silent-fallback contract.
+    /// `XLOG_WCOJ_STRICT=1` propagates the error instead. Public accessor:
+    /// `Executor::wcoj_error_decline_count(&self) -> u64`.
+    pub(super) wcoj_error_decline_count: u64,
     /// Cached non-default stream for the WCOJ triangle dispatch hook.
     /// Acquired lazily on first dispatch and reused thereafter — mirrors
     /// [`xlog_cuda::CudaKernelProvider::recorded_op_stream`] for the
@@ -447,6 +454,7 @@ impl Executor {
             kclique_histogram_refresh_count: 0,
             kclique_histogram_refresh_nanos: 0,
             nested_loop_dispatch_count: 0,
+            wcoj_error_decline_count: 0,
             wcoj_dispatch_stream: OnceLock::new(),
             #[cfg(feature = "wcoj-phase-timing")]
             last_wcoj_phase_timing: std::sync::Mutex::new(None),
