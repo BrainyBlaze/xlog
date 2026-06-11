@@ -831,6 +831,267 @@ impl CudaKernelProvider {
         self.groupby_multi_agg_recorded(&compacted, &[0], &[(2, agg_op)], launch_stream)
     }
 
+    /// D1 widening — u64-key sibling of
+    /// [`Self::wcoj_triangle_groupby_root_count_u32_recorded`]: evaluate
+    /// `q(X, count)` over the triangle shape grouped by the root X for U64
+    /// relations, WITHOUT materializing the triangle rows.
+    ///
+    /// The recorded groupby is U32/Symbol-key only, so the per-X reduction
+    /// reuses the WCOJ relation metadata instead: e_xy is lex-sorted, so
+    /// `wcoj_build_metadata_u64_recorded` yields one (unique X, group start)
+    /// pair per root, and `wcoj_groupby_root_segment_sum_counts_u32`
+    /// accumulates the per-row match counts into per-unique-root u64
+    /// totals (integer atomicAdd — deterministic). Roots with zero
+    /// completions are compacted away. All reduction work is O(n_xy).
+    ///
+    /// Output schema matches the unfused materialize+groupby baseline:
+    /// `col0` = X (U64), `col1` = count (U64).
+    ///
+    /// # Errors
+    /// * `XlogError::Kernel` if the manager has no runtime, the launch
+    ///   stream does not resolve, an input is not 2-column U64, or any
+    ///   kernel launch fails.
+    pub fn wcoj_triangle_groupby_root_count_u64_recorded(
+        &self,
+        e_xy: &CudaBuffer,
+        e_yz: &CudaBuffer,
+        e_xz: &CudaBuffer,
+        block_work_unit: u32,
+        launch_stream: StreamId,
+    ) -> Result<CudaBuffer> {
+        let ctx = "wcoj_triangle_groupby_root_count_u64_recorded";
+        validate_binary_u64(ctx, "e_xy", e_xy)?;
+        validate_binary_u64(ctx, "e_yz", e_yz)?;
+        validate_binary_u64(ctx, "e_xz", e_xz)?;
+        let plan = self.wcoj_triangle_hg_work_plan_u64_recorded(
+            e_xy,
+            e_yz,
+            e_xz,
+            block_work_unit,
+            launch_stream,
+        )?;
+        let n_xy = plan.row_count;
+        let out_schema = Schema::new(vec![
+            ("x".to_string(), ScalarType::U64),
+            ("count".to_string(), ScalarType::U64),
+        ]);
+        if n_xy == 0 || plan.total_work == 0 {
+            return self.create_empty_buffer(out_schema);
+        }
+
+        let runtime = self.memory().runtime().ok_or_else(|| {
+            XlogError::Kernel(format!("{ctx} requires a runtime-backed GpuMemoryManager"))
+        })?;
+        let cu_stream = runtime
+            .stream_pool()
+            .resolve(launch_stream)
+            .ok_or_else(|| {
+                XlogError::Kernel(format!(
+                    "{ctx}: launch_stream StreamId({}) does not resolve",
+                    launch_stream.0
+                ))
+            })?;
+
+        let yz_col1 = metadata_column_u64(e_yz, 1)?;
+        let xz_col1 = metadata_column_u64(e_xz, 1)?;
+        let n_yz = self.metadata_logical_rows(e_yz)?;
+        let n_xz = self.metadata_logical_rows(e_xz)?;
+
+        // Per-e_xy-row match counters, zero-initialized.
+        let mut row_counts = self.memory().alloc::<u32>(n_xy as usize)?;
+        self.device()
+            .inner()
+            .memset_zeros(&mut row_counts)
+            .map_err(|e| XlogError::Kernel(format!("{ctx}: zero row counts failed: {e}")))?;
+
+        let grid = plan.total_work.div_ceil(plan.block_work_unit);
+        let mut rec = LaunchRecorder::new_strict(launch_stream);
+        rec.read(e_xy.num_rows_device());
+        rec.read(e_yz.num_rows_device());
+        rec.read(e_xz.num_rows_device());
+        rec.read_column(e_yz.column(1).expect("yz.col1"));
+        rec.read_column(e_xz.column(1).expect("xz.col1"));
+        rec.read(&plan.xy_work_prefix);
+        rec.read(&plan.xy_yz_start);
+        rec.read(&plan.xy_yz_end);
+        rec.read(&plan.xy_xz_start);
+        rec.read(&plan.xy_xz_end);
+        rec.write(&row_counts);
+        rec.preflight(runtime)
+            .map_err(|e| XlogError::Kernel(format!("{ctx}: preflight failed: {e}")))?;
+        {
+            let kernel = self
+                .device()
+                .inner()
+                .get_func(
+                    WCOJ_MODULE,
+                    wcoj_kernels::WCOJ_TRIANGLE_GROUPBY_ROOT_COUNT_HG_U64,
+                )
+                .ok_or_else(|| {
+                    XlogError::Kernel(
+                        "wcoj_triangle_groupby_root_count_hg_u64 kernel not found".to_string(),
+                    )
+                })?;
+            let mut params: Vec<*mut c_void> = vec![
+                yz_col1.as_kernel_param(),
+                n_yz.as_kernel_param(),
+                xz_col1.as_kernel_param(),
+                n_xz.as_kernel_param(),
+                (&plan.xy_work_prefix).as_kernel_param(),
+                (&plan.xy_yz_start).as_kernel_param(),
+                (&plan.xy_yz_end).as_kernel_param(),
+                (&plan.xy_xz_start).as_kernel_param(),
+                (&plan.xy_xz_end).as_kernel_param(),
+                plan.row_count.as_kernel_param(),
+                plan.total_work.as_kernel_param(),
+                plan.block_work_unit.as_kernel_param(),
+                (&row_counts).as_kernel_param(),
+            ];
+            unsafe {
+                kernel
+                    .clone()
+                    .launch_on_stream(
+                        &cu_stream,
+                        LaunchConfig {
+                            grid_dim: (grid, 1, 1),
+                            block_dim: (BLOCK_SIZE, 1, 1),
+                            shared_mem_bytes: 0,
+                        },
+                        &mut params,
+                    )
+                    .map_err(|e| {
+                        XlogError::Kernel(format!("{ctx}: groupby-count launch failed: {e}"))
+                    })?;
+            }
+        }
+        rec.commit(runtime)
+            .map_err(|e| XlogError::Kernel(format!("{ctx}: commit failed: {e}")))?;
+
+        // Per-X reduction via the relation metadata: one (unique X, group
+        // start) pair per root; e_xy is lex-sorted by X so group rows are
+        // contiguous.
+        let meta = self.wcoj_build_metadata_u64_recorded(e_xy, 0, launch_stream)?;
+        let key_count = meta.key_count;
+        if key_count == 0 {
+            return self.create_empty_buffer(out_schema);
+        }
+        let mut sums = self
+            .memory()
+            .alloc::<u8>(key_count as usize * std::mem::size_of::<u64>())?;
+        self.device()
+            .inner()
+            .memset_zeros(&mut sums)
+            .map_err(|e| XlogError::Kernel(format!("{ctx}: zero group sums failed: {e}")))?;
+
+        let mut rec_sum = LaunchRecorder::new_strict(launch_stream);
+        rec_sum.read(&row_counts);
+        rec_sum.read(&meta.prefix_sum);
+        rec_sum.write(&sums);
+        rec_sum
+            .preflight(runtime)
+            .map_err(|e| XlogError::Kernel(format!("{ctx}: reduce preflight failed: {e}")))?;
+        {
+            let kernel = self
+                .device()
+                .inner()
+                .get_func(
+                    WCOJ_MODULE,
+                    wcoj_kernels::WCOJ_GROUPBY_ROOT_SEGMENT_SUM_COUNTS_U32,
+                )
+                .ok_or_else(|| {
+                    XlogError::Kernel(
+                        "wcoj_groupby_root_segment_sum_counts_u32 kernel not found".to_string(),
+                    )
+                })?;
+            let reduce_grid = n_xy.div_ceil(BLOCK_SIZE);
+            let mut params: Vec<*mut c_void> = vec![
+                (&row_counts).as_kernel_param(),
+                n_xy.as_kernel_param(),
+                (&meta.prefix_sum).as_kernel_param(),
+                key_count.as_kernel_param(),
+                (&sums).as_kernel_param(),
+            ];
+            unsafe {
+                kernel
+                    .clone()
+                    .launch_on_stream(
+                        &cu_stream,
+                        LaunchConfig {
+                            grid_dim: (reduce_grid, 1, 1),
+                            block_dim: (BLOCK_SIZE, 1, 1),
+                            shared_mem_bytes: 0,
+                        },
+                        &mut params,
+                    )
+                    .map_err(|e| XlogError::Kernel(format!("{ctx}: reduce launch failed: {e}")))?;
+            }
+        }
+        rec_sum
+            .commit(runtime)
+            .map_err(|e| XlogError::Kernel(format!("{ctx}: reduce commit failed: {e}")))?;
+
+        // (unique X, total) buffer over the key_count roots, then drop the
+        // roots with no completion. The copies run on launch_stream and the
+        // fresh destination blocks are registered through the strict
+        // recorder BEFORE the enqueue — a raw async copy into a freshly
+        // pool-allocated block without recording is a visibility race.
+        let x_copy = self
+            .memory()
+            .alloc::<u8>(key_count as usize * std::mem::size_of::<u64>())?;
+        let d_num_rows = self.memory().alloc::<u32>(1)?;
+        let mut rec_copy = LaunchRecorder::new_strict(launch_stream);
+        rec_copy.read(&meta.unique_keys);
+        rec_copy.write(&x_copy);
+        rec_copy.write(&d_num_rows);
+        rec_copy
+            .preflight(runtime)
+            .map_err(|e| XlogError::Kernel(format!("{ctx}: copy preflight failed: {e}")))?;
+        unsafe {
+            let res = sys::cuMemcpyDtoDAsync_v2(
+                *x_copy.device_ptr(),
+                *meta.unique_keys.device_ptr(),
+                key_count as usize * std::mem::size_of::<u64>(),
+                cu_stream.cu_stream(),
+            );
+            if res != sys::cudaError_enum::CUDA_SUCCESS {
+                return Err(XlogError::Kernel(format!(
+                    "{ctx}: DtoD unique keys copy failed: {res:?}"
+                )));
+            }
+        }
+        self.htod_launch_metadata_async_copy_one(
+            &key_count,
+            &d_num_rows,
+            &cu_stream,
+            &format!("{ctx}: d_num_rows"),
+        )?;
+        rec_copy
+            .commit(runtime)
+            .map_err(|e| XlogError::Kernel(format!("{ctx}: copy commit failed: {e}")))?;
+        cu_stream
+            .synchronize()
+            .map_err(|e| XlogError::Kernel(format!("{ctx}: stream sync failed: {e}")))?;
+        let staging_schema = Schema::new(vec![
+            ("x".to_string(), ScalarType::U64),
+            ("count".to_string(), ScalarType::U64),
+        ]);
+        let staging = CudaBuffer::from_columns_with_host_count(
+            vec![x_copy.into(), sums.into()],
+            u64::from(key_count),
+            d_num_rows,
+            staging_schema,
+            key_count,
+        );
+        let mask = self.compare_const_mask_recorded::<u64>(
+            &staging,
+            1,
+            0u64,
+            crate::CompareOp::Gt,
+            launch_stream,
+        )?;
+        self.compact_buffer_by_device_mask_counted_recorded(&staging, &mask, launch_stream)
+    }
+
     pub fn wcoj_triangle_hg_count_phase_u32_recorded(
         &self,
         e_xy: &CudaBuffer,

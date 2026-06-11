@@ -500,6 +500,8 @@ pub const KERNEL_MODULES: &[KernelModuleSpec] = &[
             "wcoj_triangle_materialize_hg_u32",
             "wcoj_triangle_build_hg_work_plan_u64",
             "wcoj_triangle_count_hg_u64",
+            "wcoj_triangle_groupby_root_count_hg_u64",
+            "wcoj_groupby_root_segment_sum_counts_u32",
             "wcoj_triangle_materialize_hg_u64",
             "wcoj_triangle_count_hg_cached_u32",
             "wcoj_triangle_materialize_hg_cached_u32",
