@@ -324,8 +324,20 @@ pub mod wcoj_kernels {
     pub const WCOJ_TRIANGLE_COUNT_HG_U64: &str = "wcoj_triangle_count_hg_u64";
     pub const WCOJ_TRIANGLE_GROUPBY_ROOT_COUNT_HG_U64: &str =
         "wcoj_triangle_groupby_root_count_hg_u64";
+    pub const WCOJ_TRIANGLE_GROUPBY_ROOT_SUM_HG_U64: &str =
+        "wcoj_triangle_groupby_root_sum_hg_u64";
+    pub const WCOJ_TRIANGLE_GROUPBY_ROOT_MIN_HG_U64: &str =
+        "wcoj_triangle_groupby_root_min_hg_u64";
+    pub const WCOJ_TRIANGLE_GROUPBY_ROOT_MAX_HG_U64: &str =
+        "wcoj_triangle_groupby_root_max_hg_u64";
     pub const WCOJ_GROUPBY_ROOT_SEGMENT_SUM_COUNTS_U32: &str =
         "wcoj_groupby_root_segment_sum_counts_u32";
+    pub const WCOJ_GROUPBY_ROOT_SEGMENT_SUM_VALUES_U64: &str =
+        "wcoj_groupby_root_segment_sum_values_u64";
+    pub const WCOJ_GROUPBY_ROOT_SEGMENT_MIN_VALUES_U64: &str =
+        "wcoj_groupby_root_segment_min_values_u64";
+    pub const WCOJ_GROUPBY_ROOT_SEGMENT_MAX_VALUES_U64: &str =
+        "wcoj_groupby_root_segment_max_values_u64";
     pub const WCOJ_TRIANGLE_MATERIALIZE_HG_U64: &str = "wcoj_triangle_materialize_hg_u64";
     pub const WCOJ_TRIANGLE_COUNT_HG_CACHED_U32: &str = "wcoj_triangle_count_hg_cached_u32";
     pub const WCOJ_TRIANGLE_MATERIALIZE_HG_CACHED_U32: &str =

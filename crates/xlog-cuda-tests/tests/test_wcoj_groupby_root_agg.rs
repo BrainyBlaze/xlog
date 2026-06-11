@@ -819,3 +819,358 @@ fn groupby_legacy_agg_u64_values_matches_host() {
         "legacy u64 max"
     );
 }
+
+/// All (x, y, z) triangle completions over u64 relations.
+fn oracle_triangles_u64(
+    e_xy: &[(u64, u64)],
+    e_yz: &[(u64, u64)],
+    e_xz: &[(u64, u64)],
+) -> Vec<(u64, u64, u64)> {
+    let xz_set: BTreeSet<(u64, u64)> = e_xz.iter().copied().collect();
+    let mut yz_by_y: BTreeMap<u64, Vec<u64>> = BTreeMap::new();
+    for (y, z) in e_yz {
+        yz_by_y.entry(*y).or_default().push(*z);
+    }
+    let mut out = Vec::new();
+    for (x, y) in e_xy {
+        if let Some(zs) = yz_by_y.get(y) {
+            for z in zs {
+                if xz_set.contains(&(*x, *z)) {
+                    out.push((*x, *y, *z));
+                }
+            }
+        }
+    }
+    out
+}
+
+fn oracle_value_u64(triple: (u64, u64, u64), value: WcojRootAggValue) -> u64 {
+    match value {
+        WcojRootAggValue::Y => triple.1,
+        WcojRootAggValue::Z => triple.2,
+    }
+}
+
+/// Host oracle for one u64 aggregate (sum wraps like the u64 accumulator).
+fn oracle_agg_u64(
+    e_xy: &[(u64, u64)],
+    e_yz: &[(u64, u64)],
+    e_xz: &[(u64, u64)],
+    agg: AggOp,
+    value: WcojRootAggValue,
+) -> Vec<(u64, u64)> {
+    let mut out: BTreeMap<u64, u64> = BTreeMap::new();
+    for t in oracle_triangles_u64(e_xy, e_yz, e_xz) {
+        let v = oracle_value_u64(t, value);
+        match agg {
+            AggOp::Sum => {
+                *out.entry(t.0).or_default() = out.get(&t.0).copied().unwrap_or(0).wrapping_add(v)
+            }
+            AggOp::Min => {
+                out.entry(t.0)
+                    .and_modify(|m| *m = (*m).min(v))
+                    .or_insert(v);
+            }
+            AggOp::Max => {
+                out.entry(t.0)
+                    .and_modify(|m| *m = (*m).max(v))
+                    .or_insert(v);
+            }
+            other => panic!("unsupported oracle agg {other:?}"),
+        }
+    }
+    out.into_iter().collect()
+}
+
+fn sorted_unique_u64(rows: impl IntoIterator<Item = (u64, u64)>) -> Vec<(u64, u64)> {
+    let set: BTreeSet<(u64, u64)> = rows.into_iter().collect();
+    set.into_iter().collect()
+}
+
+fn run_case_u64(
+    name: &str,
+    e_xy_rows: &[(u64, u64)],
+    e_yz_rows: &[(u64, u64)],
+    e_xz_rows: &[(u64, u64)],
+) {
+    let Some(fix) = make_fixture() else {
+        eprintln!("skipping {name}: no CUDA device");
+        return;
+    };
+    let e_xy = upload_binary_u64(&fix.memory, e_xy_rows);
+    let e_yz = upload_binary_u64(&fix.memory, e_yz_rows);
+    let e_xz = upload_binary_u64(&fix.memory, e_xz_rows);
+    let stream = fix.pool.acquire().expect("stream");
+
+    for agg in [AggOp::Sum, AggOp::Min, AggOp::Max] {
+        for value in [WcojRootAggValue::Y, WcojRootAggValue::Z] {
+            let case = format!("{name}/{agg:?}/{value:?}");
+            let expected = oracle_agg_u64(e_xy_rows, e_yz_rows, e_xz_rows, agg, value);
+            assert!(
+                !expected.is_empty(),
+                "{case}: fixture must contain at least one triangle"
+            );
+
+            // Unfused production baseline: materialize u64 triangles, then
+            // legacy groupby with the same AggOp over the value column.
+            let tri = fix
+                .provider
+                .wcoj_triangle_hg_u64_recorded(
+                    &e_xy,
+                    &e_yz,
+                    &e_xz,
+                    WCOJ_HG_BLOCK_WORK_UNIT_DEFAULT,
+                    stream,
+                )
+                .expect("baseline u64 triangle materialize");
+            let vcol = match value {
+                WcojRootAggValue::Y => 1,
+                WcojRootAggValue::Z => 2,
+            };
+            let grouped = fix
+                .provider
+                .groupby_multi_agg(&tri, &[0], &[(vcol, agg)])
+                .expect("baseline u64 groupby agg");
+            let baseline = download_groups_u64_u64(&fix.memory, &grouped);
+            assert_eq!(baseline, expected, "{case}: unfused u64 baseline vs oracle");
+
+            let fused = fix
+                .provider
+                .wcoj_triangle_groupby_root_agg_u64_recorded(
+                    &e_xy,
+                    &e_yz,
+                    &e_xz,
+                    agg,
+                    value,
+                    WCOJ_HG_BLOCK_WORK_UNIT_DEFAULT,
+                    stream,
+                )
+                .expect("fused u64 groupby-root agg");
+            let fused = download_groups_u64_u64(&fix.memory, &fused);
+            assert_eq!(fused, expected, "{case}: fused u64 vs oracle");
+        }
+    }
+}
+
+#[test]
+fn groupby_root_agg_u64_matches_oracle_small() {
+    // K4 + disjoint triangle, keys above 2^33 so width truncation visibly
+    // fails; values are the keys themselves (also above 2^33).
+    const B: u64 = 1 << 33;
+    let map = |rows: &[(u32, u32)]| -> Vec<(u64, u64)> {
+        sorted_unique_u64(rows.iter().map(|&(a, b)| (B + a as u64, B + b as u64)))
+    };
+    let e_xy = map(&[
+        (1, 2),
+        (1, 3),
+        (1, 4),
+        (2, 3),
+        (2, 4),
+        (3, 4),
+        (5, 6),
+        (5, 7),
+        (6, 7),
+    ]);
+    let e_yz = map(&[(2, 3), (2, 4), (3, 4), (6, 7)]);
+    let e_xz = map(&[(1, 3), (1, 4), (2, 4), (3, 4), (5, 7)]);
+    run_case_u64("u64_small", &e_xy, &e_yz, &e_xz);
+}
+
+#[test]
+fn groupby_root_agg_u64_matches_oracle_skewed_hub() {
+    const B: u64 = 1 << 40;
+    let mut e_xy: Vec<(u64, u64)> = Vec::new();
+    let mut e_yz: Vec<(u64, u64)> = Vec::new();
+    let mut e_xz: Vec<(u64, u64)> = Vec::new();
+    for y in 1..=512u64 {
+        e_xy.push((B, B + y));
+        for z in 1000..1016u64 {
+            e_yz.push((B + y, B + z));
+        }
+    }
+    for z in 1000..1016u64 {
+        e_xz.push((B, B + z));
+    }
+    for i in 0..200u64 {
+        let (a, b, c) = (B + 2000 + i, B + 3000 + i, B + 4000 + i);
+        e_xy.push((a, b));
+        e_yz.push((b, c));
+        e_xz.push((a, c));
+    }
+    let e_xy = sorted_unique_u64(e_xy);
+    let e_yz = sorted_unique_u64(e_yz);
+    let e_xz = sorted_unique_u64(e_xz);
+    run_case_u64("u64_skewed_hub", &e_xy, &e_yz, &e_xz);
+}
+
+#[test]
+fn groupby_root_agg_u64_empty_intersection_roots_are_absent() {
+    const B: u64 = 1 << 33;
+    let e_xy = sorted_unique_u64([(B + 1, B + 2), (B + 9, B + 2), (B + 9, B + 3)]);
+    let e_yz = sorted_unique_u64([(B + 2, B + 3)]);
+    let e_xz = sorted_unique_u64([(B + 1, B + 3)]);
+
+    let Some(fix) = make_fixture() else {
+        eprintln!("skipping u64_agg_empty_intersection: no CUDA device");
+        return;
+    };
+    let e_xy_b = upload_binary_u64(&fix.memory, &e_xy);
+    let e_yz_b = upload_binary_u64(&fix.memory, &e_yz);
+    let e_xz_b = upload_binary_u64(&fix.memory, &e_xz);
+    let stream = fix.pool.acquire().expect("stream");
+    for agg in [AggOp::Sum, AggOp::Min, AggOp::Max] {
+        let fused = fix
+            .provider
+            .wcoj_triangle_groupby_root_agg_u64_recorded(
+                &e_xy_b,
+                &e_yz_b,
+                &e_xz_b,
+                agg,
+                WcojRootAggValue::Z,
+                WCOJ_HG_BLOCK_WORK_UNIT_DEFAULT,
+                stream,
+            )
+            .expect("fused u64 groupby-root agg");
+        let fused = download_groups_u64_u64(&fix.memory, &fused);
+        assert_eq!(
+            fused,
+            vec![(B + 1, B + 3)],
+            "{agg:?}: only X=B+1 completes a triangle; X=B+9 must be absent"
+        );
+    }
+}
+
+/// S1c measurement, u64-key sum/min/max (gate: fused >= 3x vs unfused on a
+/// skewed fixture). Run explicitly:
+/// `cargo test -p xlog-cuda-tests --test test_wcoj_groupby_root_agg \
+///    --release -- --ignored --nocapture`
+#[test]
+#[ignore = "S1c measurement: run explicitly with --ignored --nocapture"]
+fn s1c_measurement_u64_agg_fused_vs_unfused() {
+    let Some(fix) = make_fixture() else {
+        eprintln!("skipping s1c_measurement_u64_agg: no CUDA device");
+        return;
+    };
+
+    const B: u64 = 1 << 40;
+    let hub = |n_y: u64, n_z: u64| {
+        let mut e_xy = Vec::new();
+        let mut e_yz = Vec::new();
+        let mut e_xz = Vec::new();
+        for y in 1..=n_y {
+            e_xy.push((B, B + y));
+            for z in 0..n_z {
+                e_yz.push((B + y, B + 1_000_000 + z));
+            }
+        }
+        for z in 0..n_z {
+            e_xz.push((B, B + 1_000_000 + z));
+        }
+        for i in 0..1000u64 {
+            let (a, b, c) = (B + 2_000_000 + i, B + 3_000_000 + i, B + 4_000_000 + i);
+            e_xy.push((a, b));
+            e_yz.push((b, c));
+            e_xz.push((a, c));
+        }
+        (
+            sorted_unique_u64(e_xy),
+            sorted_unique_u64(e_yz),
+            sorted_unique_u64(e_xz),
+        )
+    };
+
+    let (e_xy_rows, e_yz_rows, e_xz_rows) = hub(10_000, 16);
+    let e_xy = upload_binary_u64(&fix.memory, &e_xy_rows);
+    let e_yz = upload_binary_u64(&fix.memory, &e_yz_rows);
+    let e_xz = upload_binary_u64(&fix.memory, &e_xz_rows);
+    let stream = fix.pool.acquire().expect("stream");
+
+    const REPS: usize = 5;
+    for agg in [AggOp::Sum, AggOp::Min, AggOp::Max] {
+        let value = WcojRootAggValue::Z;
+        let expected = oracle_agg_u64(&e_xy_rows, &e_yz_rows, &e_xz_rows, agg, value);
+
+        // Warmup both paths once; assert fused parity vs the host oracle.
+        let tri = fix
+            .provider
+            .wcoj_triangle_hg_u64_recorded(
+                &e_xy,
+                &e_yz,
+                &e_xz,
+                WCOJ_HG_BLOCK_WORK_UNIT_DEFAULT,
+                stream,
+            )
+            .expect("baseline warmup");
+        drop(tri);
+        let warm = fix
+            .provider
+            .wcoj_triangle_groupby_root_agg_u64_recorded(
+                &e_xy,
+                &e_yz,
+                &e_xz,
+                agg,
+                value,
+                WCOJ_HG_BLOCK_WORK_UNIT_DEFAULT,
+                stream,
+            )
+            .expect("fused warmup");
+        assert_eq!(
+            download_groups_u64_u64(&fix.memory, &warm),
+            expected,
+            "u64_hub_10k_z16/{agg:?}: fused parity"
+        );
+        drop(warm);
+
+        let mut unfused_ms = Vec::with_capacity(REPS);
+        let mut fused_ms = Vec::with_capacity(REPS);
+        for _ in 0..REPS {
+            let t = std::time::Instant::now();
+            let tri = fix
+                .provider
+                .wcoj_triangle_hg_u64_recorded(
+                    &e_xy,
+                    &e_yz,
+                    &e_xz,
+                    WCOJ_HG_BLOCK_WORK_UNIT_DEFAULT,
+                    stream,
+                )
+                .expect("baseline triangle");
+            let grouped = fix
+                .provider
+                .groupby_multi_agg(&tri, &[0], &[(2, agg)])
+                .expect("baseline groupby");
+            fix.provider.device().inner().synchronize().expect("sync");
+            unfused_ms.push(t.elapsed().as_secs_f64() * 1e3);
+            drop(grouped);
+
+            let t = std::time::Instant::now();
+            let fused = fix
+                .provider
+                .wcoj_triangle_groupby_root_agg_u64_recorded(
+                    &e_xy,
+                    &e_yz,
+                    &e_xz,
+                    agg,
+                    value,
+                    WCOJ_HG_BLOCK_WORK_UNIT_DEFAULT,
+                    stream,
+                )
+                .expect("fused");
+            fix.provider.device().inner().synchronize().expect("sync");
+            fused_ms.push(t.elapsed().as_secs_f64() * 1e3);
+            drop(fused);
+        }
+        unfused_ms.sort_by(|a, b| a.total_cmp(b));
+        fused_ms.sort_by(|a, b| a.total_cmp(b));
+        let med_unfused = unfused_ms[REPS / 2];
+        let med_fused = fused_ms[REPS / 2];
+        println!(
+            "S1c u64_hub_10k_z16 {agg:?}(Z): unfused median {med_unfused:.3} ms, fused median \
+             {med_fused:.3} ms, speedup {:.2}x (n_xy={}, n_yz={}, n_xz={})",
+            med_unfused / med_fused,
+            e_xy_rows.len(),
+            e_yz_rows.len(),
+            e_xz_rows.len()
+        );
+    }
+}
