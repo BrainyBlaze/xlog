@@ -88,7 +88,7 @@ query(out_degree(1, 8)).
 }
 
 #[test]
-fn numeric_operators_report_exact_enumeration_fallback_with_parity() {
+fn numeric_operators_report_factorized_fold_with_parity() {
     let source = r#"
 0.5::obs(1, 2).
 0.25::obs(1, 3).
@@ -113,8 +113,9 @@ query(score_max(1, 3)).
             .iter()
             .find(|entry| entry.predicate == predicate && entry.operator == operator)
             .unwrap_or_else(|| panic!("missing report for {predicate}/{operator}"));
-        assert_eq!(report.status, AggregateLiftStatus::FallbackExactEnumeration);
-        assert!(report.reason.contains("exact finite outcome enumeration"));
+        assert_eq!(report.status, AggregateLiftStatus::Fired);
+        assert!(report.reason.contains("factorized aggregate-state dynamic programming"));
+        assert!(report.dynamic_programming_states > 0);
     }
 
     let sum_five = prov

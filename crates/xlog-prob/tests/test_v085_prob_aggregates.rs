@@ -126,6 +126,68 @@ query(score_max(1, 3)).
 }
 
 #[test]
+fn factorized_numeric_aggregate_folding_keeps_pir_polynomial() {
+    // k = 14 uncertain rows in one group: per-mask enumeration would build one
+    // conjunction per 2^14 outcome masks (>= 16384 distinct AND nodes). The
+    // factorized fold must stay O(k * #distinct-outcomes).
+    let mut source = String::new();
+    for y in 1..=14 {
+        source.push_str(&format!("0.5::obs(1, {y}).\n"));
+    }
+    source.push_str("score_min(X, min(Y)) :- obs(X, Y).\nquery(score_min(1, 1)).\n");
+
+    let prov = extract_from_source(&source).expect("factorized numeric aggregate extraction");
+    eprintln!("factorized k=14 min aggregate PIR nodes: {}", prov.pir.len());
+    assert!(
+        prov.pir.len() < 4096,
+        "expected factorized aggregate PIR (< 4096 nodes), got {} (2^14 mask enumeration exceeds 16384)",
+        prov.pir.len()
+    );
+
+    // Analytic oracle: rows are independent with p=0.5 and values 1..14, so
+    // P(min = j) = P(row j present, rows < j absent) = 0.5^j.
+    for j in [1i64, 7, 14] {
+        let root = prov
+            .query_formula("score_min", &[Value::I64(1), Value::I64(j)])
+            .expect("min formula");
+        let expected = 0.5f64.powi(j as i32);
+        let got = finite_formula_prob(&prov, root);
+        assert!(
+            (got - expected).abs() < 1e-12,
+            "P(min={j}) expected {expected}, got {got}"
+        );
+    }
+}
+
+#[cfg(feature = "host-io")]
+#[test]
+fn exact_gpu_numeric_aggregate_query_matches_analytic_at_k14() {
+    if !has_cuda_device() {
+        eprintln!("Skipping: no CUDA device");
+        return;
+    }
+
+    let mut source = String::new();
+    for y in 1..=14 {
+        source.push_str(&format!("0.5::obs(1, {y}).\n"));
+    }
+    source.push_str("score_min(X, min(Y)) :- obs(X, Y).\nquery(score_min(1, 3)).\n");
+
+    let compiled = xlog_prob::exact::ExactDdnnfProgram::compile_source(&source)
+        .expect("compile exact k=14 min aggregate");
+    let result = compiled.evaluate().expect("evaluate exact k=14 min aggregate");
+    let got = result
+        .query_probs
+        .iter()
+        .find(|q| q.atom.predicate == "score_min")
+        .expect("query result")
+        .prob;
+
+    // P(min = 3) = 0.5^3 = 0.125.
+    assert!((got - 0.125).abs() < 1e-9, "got={}", got);
+}
+
+#[test]
 fn exact_aggregate_domain_cap_reports_typed_diagnostic() {
     let source = r#"
 0.5::obs(1, 1).
