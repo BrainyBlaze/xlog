@@ -311,6 +311,8 @@ pub mod wcoj_kernels {
     pub const WCOJ_BUILD_METADATA_SCATTER_U64: &str = "wcoj_build_metadata_scatter_u64";
     pub const WCOJ_TRIANGLE_BUILD_HG_WORK_PLAN_U32: &str = "wcoj_triangle_build_hg_work_plan_u32";
     pub const WCOJ_TRIANGLE_COUNT_HG_U32: &str = "wcoj_triangle_count_hg_u32";
+    pub const WCOJ_TRIANGLE_GROUPBY_ROOT_COUNT_HG_U32: &str =
+        "wcoj_triangle_groupby_root_count_hg_u32";
     pub const WCOJ_TRIANGLE_MATERIALIZE_HG_U32: &str = "wcoj_triangle_materialize_hg_u32";
     pub const WCOJ_TRIANGLE_BUILD_HG_WORK_PLAN_U64: &str = "wcoj_triangle_build_hg_work_plan_u64";
     pub const WCOJ_TRIANGLE_COUNT_HG_U64: &str = "wcoj_triangle_count_hg_u64";

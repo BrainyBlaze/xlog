@@ -374,6 +374,80 @@ extern "C" __global__ void wcoj_triangle_count_hg_u32(
     }
 }
 
+// D1 aggregate-fused variant of wcoj_triangle_count_hg_u32: instead of
+// reducing matches to one total, each match increments the counter of its
+// e_xy root row (`out_row_counts[xy_idx]`, length n_xy, zero-initialized by
+// the host). e_xy is lex-sorted by (X, Y), so per-X group counts are a
+// segmented sum over contiguous row ranges downstream. Integer atomicAdd is
+// order-insensitive, so the final counter values are deterministic
+// (precedent: groupby_sum). The triangle rows are never materialized.
+extern "C" __global__ void wcoj_triangle_groupby_root_count_hg_u32(
+    const uint32_t* __restrict__ yz_col1,
+    uint32_t n_yz,
+    const uint32_t* __restrict__ xz_col1,
+    uint32_t n_xz,
+    const uint32_t* __restrict__ xy_work_prefix,
+    const uint32_t* __restrict__ xy_yz_start,
+    const uint32_t* __restrict__ xy_yz_end,
+    const uint32_t* __restrict__ xy_xz_start,
+    const uint32_t* __restrict__ xy_xz_end,
+    uint32_t n_xy,
+    uint32_t total_work,
+    uint32_t block_work_unit,
+    uint32_t* __restrict__ out_row_counts) {
+    uint32_t block_start = blockIdx.x * block_work_unit;
+    if (block_start >= total_work) {
+        return;
+    }
+    uint32_t block_end = block_start + block_work_unit;
+    if (block_end < block_start || block_end > total_work) {
+        block_end = total_work;
+    }
+
+    for (uint32_t work_idx = block_start + threadIdx.x;
+         work_idx < block_end;
+         work_idx += blockDim.x) {
+        uint32_t root_pos = upper_bound_u32(xy_work_prefix, n_xy + 1, work_idx);
+        if (root_pos == 0) {
+            continue;
+        }
+        uint32_t xy_idx = root_pos - 1;
+        if (xy_idx >= n_xy) {
+            continue;
+        }
+        uint32_t row_start = xy_work_prefix[xy_idx];
+        uint32_t yz_lo = xy_yz_start[xy_idx];
+        uint32_t yz_hi = xy_yz_end[xy_idx];
+        uint32_t xz_lo = xy_xz_start[xy_idx];
+        uint32_t xz_hi = xy_xz_end[xy_idx];
+        if (yz_hi > n_yz || xz_hi > n_xz || yz_lo >= yz_hi || xz_lo >= xz_hi) {
+            continue;
+        }
+        uint32_t yz_len = yz_hi - yz_lo;
+        uint32_t xz_len = xz_hi - xz_lo;
+        uint32_t probe_offset = work_idx - row_start;
+        bool matched = false;
+        if (yz_len <= xz_len) {
+            if (probe_offset >= yz_len) {
+                continue;
+            }
+            uint32_t z = yz_col1[yz_lo + probe_offset];
+            uint32_t found = lower_bound_u32(xz_col1 + xz_lo, xz_len, z);
+            matched = found < xz_len && xz_col1[xz_lo + found] == z;
+        } else {
+            if (probe_offset >= xz_len) {
+                continue;
+            }
+            uint32_t z = xz_col1[xz_lo + probe_offset];
+            uint32_t found = lower_bound_u32(yz_col1 + yz_lo, yz_len, z);
+            matched = found < yz_len && yz_col1[yz_lo + found] == z;
+        }
+        if (matched) {
+            atomicAdd(&out_row_counts[xy_idx], 1u);
+        }
+    }
+}
+
 extern "C" __global__ void wcoj_triangle_materialize_hg_u32(
     const uint32_t* __restrict__ xy_col0,
     const uint32_t* __restrict__ xy_col1,
