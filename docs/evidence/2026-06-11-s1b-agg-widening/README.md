@@ -31,11 +31,46 @@ are reported.
 | u64_hub_10k_z16 (keys > 2^40) | count | 130.8 / 129.1 | 1.8 / 1.8 | 74.08x / 73.42x | PASS |
 | u64_hub_50k_z16 | count | 135.0 / 134.0 | 2.6 / 2.7 | 51.49x / 50.59x | PASS |
 
-Worst single observation across both runs: 6.11x (min(Z) hub_50k). All
-fixtures clear the >= 3x gate in every run.
+Worst single observation across these two runs: 6.11x (min(Z) hub_50k);
+in these two runs all fixtures cleared the >= 3x gate. See the post-commit
+re-verification below before reading this as a robust per-run guarantee.
 
-Verdict: S1b GATE PASSED for all four widened paths (sum, min, max over a
-triangle output variable; u64-key count).
+## Post-commit independent re-verification (same day, same checkout)
+
+After the commits landed, an independent re-run series on idle GPU
+(verified no concurrent `cargo test` / GPU processes before each run)
+reproduced the gate for most fixtures but exposed run-to-run bimodality
+on the hub_50k sum/max fixtures. Full-fixture runs (same commands):
+
+| fixture | aggregate | speedup run A / B / C |
+|---|---|---|
+| hub_10k_z16 | sum(Z) | 7.27x / 6.53x / 6.62x |
+| hub_50k_z16 | sum(Z) | 5.77x / 4.48x / **2.87x** |
+| hub_10k_z16 | min(Z) | 6.57x / 6.01x / 8.76x |
+| hub_50k_z16 | min(Z) | 7.38x / 5.64x / 7.71x |
+| hub_10k_z16 | max(Z) | 6.38x / 6.96x / 7.16x |
+| hub_50k_z16 | max(Z) | 13.97x / 5.62x / **2.83x** |
+| u64_hub_10k_z16 | count | 59.15x / 43.93x / 54.36x |
+| u64_hub_50k_z16 | count | 7.76x / 26.97x / 13.73x |
+
+Three additional focused re-runs of the agg measurement confirmed the
+bimodality on hub_50k: sum(Z) 5.99x / **2.81x** / 6.12x and max(Z)
+5.14x / 5.71x / **2.12x**. In the slow mode the fused median jumps from
+~3-3.7 ms to ~7-8.4 ms (the dip hits sum or max non-deterministically,
+one per run at most; min and both 10k fixtures never dipped). Absolute
+times on this laptop GPU drift with clocks/thermals run to run.
+
+## Honest verdict
+
+* u64-key count: GATE PASSED — every observation 7.76x-74x.
+* min(Z): GATE PASSED — every observation 5.64x-18.43x.
+* sum(Z)/max(Z), hub_10k: GATE PASSED — every observation >= 6.38x.
+* sum(Z)/max(Z), hub_50k: GATE PASSED ON MEDIAN ONLY — median across
+  runs is well above 3x (4.5-6x typical), but 4 of the 12 re-verification
+  observations (6 per fixture) fell in the 2.1x-2.9x band (bimodal fused time, cause
+  not yet isolated: laptop clock throttling vs. allocator/pool state).
+  A controlled-clock rerun (or a desktop GPU) is needed before claiming
+  an unqualified per-run >= 3x for these two fixtures.
 
 Note on the u64 count margin: the fused u64 path reduces per X through the
 WCOJ relation metadata + a segment-sum kernel (no sort), while the unfused
