@@ -387,6 +387,14 @@ impl CudaKernelProvider {
         launch_stream: StreamId,
     ) -> Result<CudaBuffer> {
         let ctx = "wcoj_triangle_groupby_root_count_u32_recorded";
+        // Layout-normalize per dispatch (sorted-fast-path clone when the
+        // input is already lex-sorted + unique): the fused path must give
+        // the same guarantee as the unfused pipeline instead of trusting
+        // store-buffer sortedness — unsorted/duplicated inputs previously
+        // produced silently wrong (empty) fused results.
+        let e_xy = &self.wcoj_layout_u32_recorded(e_xy, launch_stream)?;
+        let e_yz = &self.wcoj_layout_u32_recorded(e_yz, launch_stream)?;
+        let e_xz = &self.wcoj_layout_u32_recorded(e_xz, launch_stream)?;
         validate_binary_u32(ctx, "e_xy", e_xy)?;
         validate_binary_u32(ctx, "e_yz", e_yz)?;
         validate_binary_u32(ctx, "e_xz", e_xz)?;
@@ -513,10 +521,21 @@ impl CudaKernelProvider {
         let mut x_copy = self
             .memory()
             .alloc::<u8>(n_xy as usize * std::mem::size_of::<u32>())?;
-        self.device()
-            .inner()
-            .dtod_copy(x_src, &mut x_copy)
-            .map_err(|e| XlogError::Kernel(format!("{ctx}: copy X column failed: {e}")))?;
+        // Explicit-length copy: layout-normalized columns are allocated at
+        // capacity, which can exceed the logical n_xy * 4 bytes a full-slice
+        // typed copy would assert on.
+        unsafe {
+            let res = sys::cuMemcpyDtoD_v2(
+                *x_copy.device_ptr(),
+                *x_src.device_ptr(),
+                n_xy as usize * std::mem::size_of::<u32>(),
+            );
+            if res != sys::cudaError_enum::CUDA_SUCCESS {
+                return Err(XlogError::Kernel(format!(
+                    "{ctx}: copy X column failed: {res:?}"
+                )));
+            }
+        }
         let mut d_num_rows = self.memory().alloc::<u32>(1)?;
         self.device()
             .inner()
@@ -595,6 +614,14 @@ impl CudaKernelProvider {
         launch_stream: StreamId,
     ) -> Result<CudaBuffer> {
         let ctx = "wcoj_triangle_groupby_root_agg_u32_recorded";
+        // Layout-normalize per dispatch (sorted-fast-path clone when the
+        // input is already lex-sorted + unique): the fused path must give
+        // the same guarantee as the unfused pipeline instead of trusting
+        // store-buffer sortedness — unsorted/duplicated inputs previously
+        // produced silently wrong (empty) fused results.
+        let e_xy = &self.wcoj_layout_u32_recorded(e_xy, launch_stream)?;
+        let e_yz = &self.wcoj_layout_u32_recorded(e_yz, launch_stream)?;
+        let e_xz = &self.wcoj_layout_u32_recorded(e_xz, launch_stream)?;
         let (kernel_name, agg_elem_size, agg_scalar, agg_name) = match agg_op {
             AggOp::Sum => (
                 wcoj_kernels::WCOJ_TRIANGLE_GROUPBY_ROOT_SUM_HG_U32,
@@ -795,10 +822,21 @@ impl CudaKernelProvider {
         let mut x_copy = self
             .memory()
             .alloc::<u8>(n_xy as usize * std::mem::size_of::<u32>())?;
-        self.device()
-            .inner()
-            .dtod_copy(x_src, &mut x_copy)
-            .map_err(|e| XlogError::Kernel(format!("{ctx}: copy X column failed: {e}")))?;
+        // Explicit-length copy: layout-normalized columns are allocated at
+        // capacity, which can exceed the logical n_xy * 4 bytes a full-slice
+        // typed copy would assert on.
+        unsafe {
+            let res = sys::cuMemcpyDtoD_v2(
+                *x_copy.device_ptr(),
+                *x_src.device_ptr(),
+                n_xy as usize * std::mem::size_of::<u32>(),
+            );
+            if res != sys::cudaError_enum::CUDA_SUCCESS {
+                return Err(XlogError::Kernel(format!(
+                    "{ctx}: copy X column failed: {res:?}"
+                )));
+            }
+        }
         let mut d_num_rows = self.memory().alloc::<u32>(1)?;
         self.device()
             .inner()
@@ -860,6 +898,14 @@ impl CudaKernelProvider {
         launch_stream: StreamId,
     ) -> Result<CudaBuffer> {
         let ctx = "wcoj_triangle_groupby_root_count_u64_recorded";
+        // Layout-normalize per dispatch (sorted-fast-path clone when the
+        // input is already lex-sorted + unique): the fused path must give
+        // the same guarantee as the unfused pipeline instead of trusting
+        // store-buffer sortedness — unsorted/duplicated inputs previously
+        // produced silently wrong (empty) fused results.
+        let e_xy = &self.wcoj_layout_u64_recorded(e_xy, launch_stream)?;
+        let e_yz = &self.wcoj_layout_u64_recorded(e_yz, launch_stream)?;
+        let e_xz = &self.wcoj_layout_u64_recorded(e_xz, launch_stream)?;
         validate_binary_u64(ctx, "e_xy", e_xy)?;
         validate_binary_u64(ctx, "e_yz", e_yz)?;
         validate_binary_u64(ctx, "e_xz", e_xz)?;
@@ -1135,6 +1181,14 @@ impl CudaKernelProvider {
         launch_stream: StreamId,
     ) -> Result<CudaBuffer> {
         let ctx = "wcoj_triangle_groupby_root_agg_u64_recorded";
+        // Layout-normalize per dispatch (sorted-fast-path clone when the
+        // input is already lex-sorted + unique): the fused path must give
+        // the same guarantee as the unfused pipeline instead of trusting
+        // store-buffer sortedness — unsorted/duplicated inputs previously
+        // produced silently wrong (empty) fused results.
+        let e_xy = &self.wcoj_layout_u64_recorded(e_xy, launch_stream)?;
+        let e_yz = &self.wcoj_layout_u64_recorded(e_yz, launch_stream)?;
+        let e_xz = &self.wcoj_layout_u64_recorded(e_xz, launch_stream)?;
         let (kernel_name, segment_kernel_name, agg_name) = match agg_op {
             AggOp::Sum => (
                 wcoj_kernels::WCOJ_TRIANGLE_GROUPBY_ROOT_SUM_HG_U64,
@@ -3191,6 +3245,15 @@ impl CudaKernelProvider {
         launch_stream: StreamId,
     ) -> Result<CudaBuffer> {
         let ctx = "wcoj_4cycle_groupby_root_count_u32_recorded";
+        // Layout-normalize per dispatch (sorted-fast-path clone when the
+        // input is already lex-sorted + unique): the fused path must give
+        // the same guarantee as the unfused pipeline instead of trusting
+        // store-buffer sortedness — unsorted/duplicated inputs previously
+        // produced silently wrong (empty) fused results.
+        let e1 = &self.wcoj_layout_u32_recorded(e1, launch_stream)?;
+        let e2 = &self.wcoj_layout_u32_recorded(e2, launch_stream)?;
+        let e3 = &self.wcoj_layout_u32_recorded(e3, launch_stream)?;
+        let e4 = &self.wcoj_layout_u32_recorded(e4, launch_stream)?;
         validate_binary_u32(ctx, "e1", e1)?;
         validate_binary_u32(ctx, "e2", e2)?;
         validate_binary_u32(ctx, "e3", e3)?;
