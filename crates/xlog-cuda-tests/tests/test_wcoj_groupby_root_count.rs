@@ -11,7 +11,6 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use cudarc::driver::sys;
-use cudarc::driver::DevicePtr;
 
 use xlog_core::{AggOp, MemoryBudget, ScalarType, Schema};
 use xlog_cuda::device_runtime::{

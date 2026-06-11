@@ -85,6 +85,10 @@ impl PirGraph {
         &self.nodes
     }
 
+    pub(crate) fn nodes_mut(&mut self) -> &mut [PirNode] {
+        &mut self.nodes
+    }
+
     pub fn node(&self, id: PirNodeId) -> Option<&PirNode> {
         self.nodes.get(id.0 as usize)
     }

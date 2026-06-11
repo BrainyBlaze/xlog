@@ -51,12 +51,15 @@ fn alloc_component_scratch(
     Ok((uf_parent, uf_aux, comp_list, uf_stride))
 }
 
+/// Compile a gated CNF into an XGCF circuit, also returning the BFS frontier
+/// item count (0 unless `XLOG_WARMUP_PROFILE=1`; the readback is a one-time
+/// compile-path control-plane scalar, mirroring the `compile_needed` read).
 pub(super) fn compile_gpu_d4_with_gate(
     cnf: &GpuCnf,
     provider: &Arc<CudaKernelProvider>,
     config: &GpuCompileConfig,
     compile_needed: &TrackedCudaSlice<u32>,
-) -> Result<GpuXgcf> {
+) -> Result<(GpuXgcf, u32)> {
     if config.max_frontier_items == 0 {
         return Err(XlogError::Compilation(
             "GpuCompileConfig.max_frontier_items must be > 0".to_string(),
@@ -87,6 +90,17 @@ pub(super) fn compile_gpu_d4_with_gate(
     let frontier = build_frontier_bitset(cnf, provider, config, compile_needed)?;
     // No device synchronize after build_frontier: words_per_item is a host-side
     // struct field and all subsequent device ops use same-stream ordering.
+
+    let frontier_items = if crate::compilation::warmup_profiling_enabled() {
+        let size_host: Vec<u32> = provider
+            .device()
+            .inner()
+            .dtoh_sync_copy(frontier.size_device())
+            .map_err(|e| XlogError::Kernel(format!("dtoh frontier size: {}", e)))?;
+        size_host[0]
+    } else {
+        0
+    };
 
     let max_items = config.max_frontier_items;
     let words_per_item = frontier.words_per_item();
@@ -444,7 +458,8 @@ pub(super) fn compile_gpu_d4_with_gate(
         num_edges_device: Some(meta_num_edges),
     };
 
-    GpuXgcf::from_device(builder, layout, provider)
+    let circuit = GpuXgcf::from_device(builder, layout, provider)?;
+    Ok((circuit, frontier_items))
 }
 
 #[cfg(test)]
