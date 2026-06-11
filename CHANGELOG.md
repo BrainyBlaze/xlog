@@ -43,6 +43,27 @@ All notable changes to this project are documented in this file.
   accepts U64 value columns (`groupby_sum_u64`). Structural mismatches keep
   declining silently to materialize+groupby, and the
   `XLOG_DISABLE_WCOJ_GROUPBY_FUSION` kill switch covers the widened paths.
+- *(cuda)* Aggregate-fused WCOJ width/shape completion (S1c):
+  - 4-cycle `count` fusion — `deg(W, count(V)) :- e1(W,X), e2(X,Y),
+    e3(Y,Z), e4(Z,W)` dispatches `wcoj_4cycle_groupby_root_count_hg_u32`
+    without materializing the 4-cycle rows (17.6x-47.6x vs
+    materialize+groupby on skewed hub fixtures, gate >= 3x). The fused
+    path shares the triangle fusion's default-on gating and kill switch;
+    the opt-in `XLOG_USE_WCOJ_4CYCLE*` gates keep governing only the
+    non-aggregate materialize dispatch.
+  - u64-key `sum`/`min`/`max` fusion —
+    `wcoj_triangle_groupby_root_{sum,min,max}_hg_u64` plus metadata-driven
+    segment reduction (30.3x-36.7x on the skewed u64 hub fixture, gate
+    >= 3x). The legacy groupby (the unfused baseline for u64-key
+    relations) was widened to u64-value `sum`/`min`/`max`
+    (`groupby_min_u64` / `groupby_max_u64`; min/max output preserves the
+    value width).
+  - Symbol semantics locked by tests: `count` over Symbol-keyed/valued
+    bodies fuses (u32-physical) and preserves the Symbol key type;
+    `sum`/`min`/`max` over Symbol values declines fused and is rejected by
+    the unfused groupby with an identical error (no silent aggregation of
+    symbol ids). Evidence:
+    `docs/evidence/2026-06-11-s1c-4cycle-width-completion/`.
   Gate evidence: `docs/evidence/2026-06-11-s1b-agg-widening/`.
 - *(prob)* **Factorized outcome folding for exact non-count aggregates
   (D4).** Probabilistic `sum`/`min`/`max`/`logsumexp` provenance no longer
