@@ -128,6 +128,24 @@ All notable changes to this project are documented in this file.
   Free Join routes as a separate opportunistic preflight bucket
   (`free_join_route_count`) and traces dispatches without hardening them
   into dedicated-kernel obligations.
+- *(cuda)* **Free Join completion (D2 Phase C).** u64 width-class engine
+  (`free_join_execute_u64_recorded`): the frontier pipeline is
+  width-parameterized — VAR columns carry width-sized data while trie
+  RANGE columns stay u32 row indices in every class — with parity locked
+  by truncation-adversarial fixtures (keys colliding modulo 2^32).
+  Recursive SCCs verified end-to-end: Free Join fires on the semi-naive
+  seeding pass and on every delta-rewritten variant with exact fixpoint
+  parity under the kill switch. **Factorized count-by-root** (design
+  §2.4): `count` aggregates over FreeJoin-promoted bodies dispatch
+  `free_join_count_by_root_u32_recorded` — trailing variables private to
+  one atom are never expanded; each frontier row contributes the product
+  of its remaining live trie-range lengths (the d-representation count)
+  and the existing recorded groupby reduces `(group, multiplicity)`.
+  Count semantics match the unfused pipeline exactly (both count
+  distinct full body bindings). u32/Symbol-key only, matching the
+  recorded groupby's engine-wide key support; both
+  `XLOG_DISABLE_WCOJ_GROUPBY_FUSION` and `XLOG_DISABLE_FREE_JOIN`
+  disable the fused route with identical fallback results.
 - *(prob)* **Factorized outcome folding for exact non-count aggregates
   (D4).** Probabilistic `sum`/`min`/`max`/`logsumexp` provenance no longer
   enumerates one conjunction per 2^k outcome mask; the factorized encoding

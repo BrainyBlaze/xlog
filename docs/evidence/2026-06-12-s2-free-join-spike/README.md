@@ -126,3 +126,62 @@ RunPod-only by standing rule):
   failure (`g38_mint11_vram` -> g04_transfer_efficiency 7/8) attributed
   to GPU contention from concurrent test binaries — passes 207/207 in
   isolation; D2 touches no transfer path.
+
+## Phase C — completion (manual session 3, same day)
+
+- **u64 width-class engine** (`free_join_execute_u64_recorded`): one
+  width-parameterized pipeline — frontier VAR columns carry width-sized
+  data, trie RANGE columns are u32 row indices in every width class
+  (compaction/projection helpers are schema-driven per column, so the
+  mixed-width frontier needs no special casing). Kernel twins
+  `fj_expand_count_u64` / `fj_expand_emit_u64` / `fj_probe_refine_u64`;
+  the work-prefix kernel is width-agnostic and shared; the emit kernels'
+  copied parent columns are split into VAR/RANGE groups so one launch
+  shape serves both widths. Parity: `fj_chain_u64_matches_oracle` +
+  `fj_triangle_u64_matches_oracle` with truncation-adversarial fixtures
+  (keys colliding modulo 2^32; a u32-truncating engine provably produces
+  extra rows — asserted in-fixture). Executor routes all-U64 bodies to
+  the u64 entry; mixed widths decline.
+- **Recursive-SCC verification**:
+  `free_join_fires_inside_recursive_scc_with_kill_switch_parity` — a
+  linear-recursive 3-atom chain dispatches Free Join on the seeding pass
+  AND every delta-rewritten semi-naive variant (counter >= 2 asserted),
+  exact fixpoint parity under `XLOG_DISABLE_FREE_JOIN=1`.
+- **Factorized count-by-root (design §2.4)**:
+  `free_join_count_by_root_u32_recorded` + `fj_count_multiplicity`
+  kernel. Plans may PARTIALLY consume atoms; each surviving frontier row
+  contributes the product of its remaining live trie-range lengths (the
+  d-representation count), reduced by the existing recorded groupby Sum
+  over a `(group, multiplicity)` staging buffer. Executor integration:
+  `try_promote_general_multiway_inside_aggregate` (no column remapping —
+  FreeJoin provenance keeps output_columns in join-output space) +
+  `try_dispatch_free_join_count` with §2.4 trailing-private pruning
+  (single-occurrence non-key variables are never expanded — including
+  count's own value variable, which Count never reads). Semantics proof
+  point: the lowered group input is a non-deduplicating projection of
+  the join output, so unfused count == distinct full body bindings ==
+  frontier rows x trailing-range products. Parity:
+  `fj_count_by_root_matches_oracle` (factorized AND fully-consumed
+  plans) + e2e `free_join_fused_count_fires_with_kill_switch_parity`
+  (both kill switches force the unfused path; both counters observed).
+- **Boundary kept, not hidden**: fused count is u32/Symbol-key only —
+  the recorded groupby's KEY columns are bounded engine-wide to
+  U32/Symbol ("multi-type sort_recorded is deferred" there); no
+  production path groups by u64 keys today, so u64 bodies stay on the
+  materialize path and an always-failing u64 count entry was removed
+  rather than shipped.
+- **Buffer-contract fix found by the count tests**: frontier columns
+  keep their pre-compaction CAPACITY while the logical count shrinks;
+  both pipeline tails now build result buffers with
+  `row_cap == capacity` (the `num_bytes == row_cap x elem` invariant
+  that `apply_permutation_gpu` enforces) — this was also the latent
+  cause of the earlier 4-cycle-cert `40 vs 32 bytes` failure on the
+  materialize path.
+
+**Open (RunPod-gated): the §2.4 fused-count performance gate (>= 3x on
+a skewed >= 4-atom fixture per the design's Phase C DoD) is NOT yet
+measured.** Performance benchmarks no longer run locally (standing
+rule, 2026-06-11: local perf runs crash the machine); the gate needs a
+minimal RunPod instance and per-run authorization. Functional parity is
+fully locked locally; no performance claim is made for the fused count
+path.
