@@ -261,8 +261,12 @@ fn identity_orders(k: usize) -> (Vec<u8>, Vec<u8>) {
 
 /// Unfused production baseline: materialize cliques via the planned
 /// clique entry (identity plan), then groupby count on the root column.
-fn baseline_group_counts(fix: &Fixture, k: usize, bufs: &[CudaBuffer]) -> Vec<(u32, u64)> {
-    let stream = fix.pool.acquire().expect("stream");
+fn baseline_group_counts(
+    fix: &Fixture,
+    k: usize,
+    bufs: &[CudaBuffer],
+    stream: xlog_cuda::device_runtime::StreamId,
+) -> Vec<(u32, u64)> {
     let refs: Vec<&CudaBuffer> = bufs.iter().collect();
     let (edge_order, iteration_order) = identity_orders(k);
     let cliques = match k {
@@ -287,8 +291,12 @@ fn baseline_group_counts(fix: &Fixture, k: usize, bufs: &[CudaBuffer]) -> Vec<(u
     download_group_counts(&fix.memory, &grouped)
 }
 
-fn fused_group_counts(fix: &Fixture, k: usize, bufs: &[CudaBuffer]) -> Vec<(u32, u64)> {
-    let stream = fix.pool.acquire().expect("stream");
+fn fused_group_counts(
+    fix: &Fixture,
+    k: usize,
+    bufs: &[CudaBuffer],
+    stream: xlog_cuda::device_runtime::StreamId,
+) -> Vec<(u32, u64)> {
     let refs: Vec<&CudaBuffer> = bufs.iter().collect();
     let (edge_order, iteration_order) = identity_orders(k);
     let fused = match k {
@@ -333,10 +341,11 @@ fn run_case(name: &str, k: usize, edges: &EdgeMap) {
     );
 
     let bufs = upload_edges(&fix, k, edges);
-    let baseline = baseline_group_counts(&fix, k, &bufs);
+    let stream = fix.pool.acquire().expect("stream");
+    let baseline = baseline_group_counts(&fix, k, &bufs, stream);
     assert_eq!(baseline, expected, "{name}: unfused baseline vs oracle");
 
-    let fused = fused_group_counts(&fix, k, &bufs);
+    let fused = fused_group_counts(&fix, k, &bufs, stream);
     assert_eq!(fused, expected, "{name}: fused vs oracle");
 }
 
@@ -452,7 +461,8 @@ fn clique5_groupby_root_count_layout_normalizes_unsorted_input() {
             upload_binary_u32(&fix.memory, &dup)
         })
         .collect();
-    let fused = fused_group_counts(&fix, 5, &mangled);
+    let stream = fix.pool.acquire().expect("stream");
+    let fused = fused_group_counts(&fix, 5, &mangled, stream);
     assert_eq!(fused, expected, "fused must normalize unsorted+dup input");
 }
 
@@ -516,23 +526,25 @@ fn s1e_measurement_clique5_count_fused_vs_unfused() {
         let expected = oracle_group_counts(5, edges);
         let bufs = upload_edges(&fix, 5, edges);
 
+        // One stream per case, reused across reps (grow-only StreamPool).
+        let stream = fix.pool.acquire().expect("stream");
         // Warmup both paths once (kernel/module JIT, stream init).
-        let warm_baseline = baseline_group_counts(&fix, 5, &bufs);
+        let warm_baseline = baseline_group_counts(&fix, 5, &bufs, stream);
         assert_eq!(warm_baseline, expected, "{name}: baseline parity");
-        let warm_fused = fused_group_counts(&fix, 5, &bufs);
+        let warm_fused = fused_group_counts(&fix, 5, &bufs, stream);
         assert_eq!(warm_fused, expected, "{name}: fused parity");
 
         let mut unfused_ms = Vec::with_capacity(REPS);
         let mut fused_ms = Vec::with_capacity(REPS);
         for _ in 0..REPS {
             let t = std::time::Instant::now();
-            let b = baseline_group_counts(&fix, 5, &bufs);
+            let b = baseline_group_counts(&fix, 5, &bufs, stream);
             fix.provider.device().inner().synchronize().expect("sync");
             unfused_ms.push(t.elapsed().as_secs_f64() * 1e3);
             drop(b);
 
             let t = std::time::Instant::now();
-            let f = fused_group_counts(&fix, 5, &bufs);
+            let f = fused_group_counts(&fix, 5, &bufs, stream);
             fix.provider.device().inner().synchronize().expect("sync");
             fused_ms.push(t.elapsed().as_secs_f64() * 1e3);
             drop(f);
