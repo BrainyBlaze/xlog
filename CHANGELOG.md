@@ -88,6 +88,20 @@ All notable changes to this project are documented in this file.
     contract; per-block deterministic tree reduction preferred over
     fixed-point encoding). Evidence:
     `docs/evidence/2026-06-11-s1d-4cycle-agg-variants/`.
+- *(cuda)* Aggregate-fused WCOJ K-clique completion (S1e): K=5 and K=6
+  clique `count`-by-root fusion at the u32/Symbol width-class —
+  `q(R, count(*)) :- <complete K-clique body>` grouped by the plan's root
+  variable dispatches `wcoj_clique{5,6}_groupby_root_count_hg_u32`
+  (per-leader-edge-row atomicAdd accumulation over the planned clique
+  count traversal) without materializing the clique rows (3.01x-3.59x vs
+  the planned materialize+groupby path on skewed K=5 hub fixtures, gate
+  >= 3x). The clique root is plan-dependent (`variable_order[0]` +
+  leader-edge orientation/swaps), so the executor fuses only when the
+  group key maps to the planned root variable; non-root keys, K=7/8, and
+  u64 widths decline silently. The promoter descends aggregate wrappers
+  over clique bodies by synthesizing the head projection from the
+  variable-class tournament's topological order. Shared kill switch and
+  counter. Evidence: `docs/evidence/2026-06-11-s1e-kclique-count-fusion/`.
 - *(runtime)* Aggregate fusion over recursive-stratum inputs verified and
   locked by tests: later-stratum count/sum aggregates whose triangle bodies
   read semi-naive fixpoint outputs (incl. all-recursive self-joins)

@@ -1395,17 +1395,19 @@ impl Executor {
         else {
             return Ok(None);
         };
-        // The group projection must pass column 0 (X) through as the key and
-        // contain only plain column references.
-        if columns.is_empty() || !matches!(columns[0], ProjectExpr::Column(0)) {
-            return Ok(None);
-        }
-        if !columns
-            .iter()
-            .all(|c| matches!(c, ProjectExpr::Column(_)))
+        // The group projection must contain only plain column references.
+        if columns.is_empty()
+            || !columns
+                .iter()
+                .all(|c| matches!(c, ProjectExpr::Column(_)))
         {
             return Ok(None);
         }
+        // Triangle and 4-cycle place the variable-order root at output
+        // position 0 by construction, so their group key must be
+        // Column(0). The K-clique root is plan-dependent; its branch
+        // validates the planned root itself.
+        let key_is_col0 = matches!(columns[0], ProjectExpr::Column(0));
         // For value-reading aggregates the value column must map to a
         // non-key join output variable the per-shape kernel can see
         // (triangle: Y/Z; 4-cycle: X/Y/Z). Resolve the raw output column
@@ -1422,12 +1424,26 @@ impl Executor {
             }
         };
         let Some(matched) = match_multiway_triangle(multiway) else {
-            // S1c/S1d: 4-cycle sibling of the triangle fusion.
-            return self.try_dispatch_wcoj_groupby_root_agg_4cycle(
-                multiway,
-                agg_op,
-                agg_value_col,
-            );
+            // S1c/S1d: 4-cycle sibling of the triangle fusion (count +
+            // sum/min/max). The 4-cycle root is output column 0 by
+            // construction, so gate on the key here like the triangle.
+            if key_is_col0 {
+                if let Some(buf) = self.try_dispatch_wcoj_groupby_root_agg_4cycle(
+                    multiway,
+                    agg_op,
+                    agg_value_col,
+                )? {
+                    return Ok(Some(buf));
+                }
+            }
+            // S1e: K-clique (K = 5, 6) count sibling. The clique root is
+            // plan-dependent, so the helper validates the group key against
+            // the planned root itself instead of key_is_col0. Count-only
+            // (no fused clique sum/min/max kernels).
+            if !matches!(agg_op, AggOp::Count) {
+                return Ok(None);
+            }
+            return self.try_dispatch_wcoj_groupby_root_count_clique(multiway, columns);
         };
         // Triangle output space: col 1 = Y, col 2 = Z. Anything else
         // (e.g. an out-of-range ref) declines.
@@ -1437,6 +1453,9 @@ impl Executor {
             Some(2) => Some(WcojRootAggValue::Z),
             Some(_) => return Ok(None),
         };
+        if !key_is_col0 {
+            return Ok(None);
+        }
         let name_xy = match self.get_rel_name(matched.rel_xy) {
             Some(s) => s.to_string(),
             None => return Ok(None),
@@ -2591,44 +2610,21 @@ impl Executor {
         // generic layout-sort helper. Remaining 2-column slots use
         // the narrower WCOJ layout entry, which preserves correctness
         // and can take the sorted-unique fast path.
-        let mut laid_out: Vec<CudaBuffer> = Vec::with_capacity(expected_edges);
-        for (slot, &input_idx) in plan_params.edge_permutation.iter().enumerate() {
-            let src = raw_bufs[input_idx];
-            let swapped = if plan_params.swap_slots.contains(&slot) {
-                Some(
-                    self.provider
-                        .wcoj_project_2col_swap_recorded(src, launch_stream)?,
+        let laid_out = match self.orient_and_layout_kclique_edges(
+            &raw_bufs,
+            &plan_params,
+            is_u64,
+            launch_stream,
+        ) {
+            Ok(bufs) => bufs,
+            Err(err) => {
+                return wcoj_decline_on_error(
+                    &mut self.wcoj_error_decline_count,
+                    "k-clique-layout",
+                    err,
                 )
-            } else {
-                None
-            };
-            let oriented = swapped.as_ref().unwrap_or(src);
-            let res = if plan_params.required_sort_slots.contains(&slot) {
-                if is_u64 {
-                    self.provider
-                        .wcoj_layout_sort_u64_recorded(oriented, launch_stream)
-                } else {
-                    self.provider
-                        .wcoj_layout_sort_u32_recorded(oriented, launch_stream)
-                }
-            } else if is_u64 {
-                self.provider
-                    .wcoj_layout_u64_recorded(oriented, launch_stream)
-            } else {
-                self.provider
-                    .wcoj_layout_u32_recorded(oriented, launch_stream)
-            };
-            match res {
-                Ok(b) => laid_out.push(b),
-                Err(err) => {
-                    return wcoj_decline_on_error(
-                        &mut self.wcoj_error_decline_count,
-                        "k-clique-layout",
-                        err,
-                    )
-                }
             }
-        }
+        };
         // 7. Build the slice of buffer references the provider
         // expects.
         let edge_refs: Vec<&CudaBuffer> = laid_out.iter().collect();
@@ -2766,6 +2762,200 @@ impl Executor {
             Err(err) => {
                 wcoj_decline_on_error(&mut self.wcoj_error_decline_count, "k-clique", err)
             }
+        }
+    }
+
+    /// Orient edges according to a `KCliqueVariableOrder` (edge
+    /// permutation + column swaps), then layout the plan-required
+    /// physical slots through the generic layout-sort helper and the
+    /// remaining 2-column slots through the narrower WCOJ layout entry
+    /// (which preserves correctness and can take the sorted-unique fast
+    /// path). Shared by the unfused K-clique dispatch and the S1e fused
+    /// count-by-root dispatch; callers wrap errors through
+    /// [`wcoj_decline_on_error`].
+    fn orient_and_layout_kclique_edges(
+        &self,
+        raw_bufs: &[&CudaBuffer],
+        plan_params: &KCliqueDispatchParams,
+        is_u64: bool,
+        launch_stream: StreamId,
+    ) -> Result<Vec<CudaBuffer>> {
+        let mut laid_out: Vec<CudaBuffer> = Vec::with_capacity(plan_params.edge_permutation.len());
+        for (slot, &input_idx) in plan_params.edge_permutation.iter().enumerate() {
+            let src = raw_bufs[input_idx];
+            let swapped = if plan_params.swap_slots.contains(&slot) {
+                Some(
+                    self.provider
+                        .wcoj_project_2col_swap_recorded(src, launch_stream)?,
+                )
+            } else {
+                None
+            };
+            let oriented = swapped.as_ref().unwrap_or(src);
+            let res = if plan_params.required_sort_slots.contains(&slot) {
+                if is_u64 {
+                    self.provider
+                        .wcoj_layout_sort_u64_recorded(oriented, launch_stream)
+                } else {
+                    self.provider
+                        .wcoj_layout_sort_u32_recorded(oriented, launch_stream)
+                }
+            } else if is_u64 {
+                self.provider
+                    .wcoj_layout_u64_recorded(oriented, launch_stream)
+            } else {
+                self.provider
+                    .wcoj_layout_u32_recorded(oriented, launch_stream)
+            };
+            laid_out.push(res?);
+        }
+        Ok(laid_out)
+    }
+
+    /// S1e aggregate-fused WCOJ, K-clique count (K = 5, 6; 4-byte keys):
+    /// dispatch the inner `MultiWayJoin(K-clique)` of a count-by-root
+    /// aggregate through the fused group-by-root kernel, which never
+    /// materializes the clique rows.
+    ///
+    /// CAREFUL — the root under `KCliqueVariableOrder` is plan-dependent
+    /// (`variable_order[0]` + leader-edge orientation/swaps determine the
+    /// physical root column). The fusion is sound only when the GroupBy
+    /// key column references the head variable whose planned position is
+    /// 0 (`variable_positions[r] == 0`); everything else declines
+    /// silently to the embedded fallback + groupby path. K = 7/8 (no
+    /// fused kernels), u64/mixed widths, planned-hash routes, and
+    /// missing buffers/runtime also decline. Kill switch
+    /// (`XLOG_DISABLE_WCOJ_GROUPBY_FUSION`) is checked by the caller.
+    /// Pipeline errors route through [`wcoj_decline_on_error`] (counted;
+    /// `XLOG_WCOJ_STRICT=1` propagates).
+    fn try_dispatch_wcoj_groupby_root_count_clique(
+        &mut self,
+        multiway: &RirNode,
+        group_cols: &[ProjectExpr],
+    ) -> Result<Option<CudaBuffer>> {
+        let RirNode::MultiWayJoin {
+            inputs,
+            plan,
+            var_order,
+            ..
+        } = multiway
+        else {
+            return Ok(None);
+        };
+        if matches!(plan, Some(MultiwayPlan::PlannedHashRoute { .. })) {
+            return Ok(None);
+        }
+        let kclique = match var_order.as_ref().and_then(|order| order.kclique.as_ref()) {
+            Some(plan) => plan,
+            None => return Ok(None),
+        };
+        let k = usize::from(kclique.k);
+        if !matches!(k, 5 | 6) {
+            return Ok(None);
+        }
+        let expected_edges = k * (k - 1) / 2;
+        if inputs.len() != expected_edges {
+            return Ok(None);
+        }
+        // Group key must be the planned position-0 root variable.
+        let Some(ProjectExpr::Column(root_var)) = group_cols.first() else {
+            return Ok(None);
+        };
+        let Some(positions) = live_kclique_variable_positions(kclique, k) else {
+            return Ok(None);
+        };
+        if *root_var >= k || positions[*root_var] != 0 {
+            return Ok(None);
+        }
+        // Resolve scans → buffers; only uniform 4-byte keys are fused.
+        let mut rel_ids: Vec<RelId> = Vec::with_capacity(expected_edges);
+        for input in inputs {
+            let RirNode::Scan { rel } = input else {
+                return Ok(None);
+            };
+            rel_ids.push(*rel);
+        }
+        let mut raw_bufs: Vec<&CudaBuffer> = Vec::with_capacity(expected_edges);
+        for rid in &rel_ids {
+            let name = match self.rel_names.get(rid) {
+                Some(n) => n.clone(),
+                None => return Ok(None),
+            };
+            match self.store.get(&name) {
+                Some(b) => raw_bufs.push(b),
+                None => return Ok(None),
+            }
+        }
+        for buf in &raw_bufs {
+            if classify_two_col_wcoj_width(buf) != Some(WcojKeyWidth::FourByte) {
+                return Ok(None);
+            }
+        }
+        if self.provider.memory().runtime().is_none() {
+            return Ok(None);
+        }
+        let Some(launch_stream) = self.wcoj_dispatch_stream_or_init() else {
+            return Ok(None);
+        };
+        let Some(plan_params) = kclique_dispatch_params(kclique, k) else {
+            return Ok(None);
+        };
+        let laid_out = match self.orient_and_layout_kclique_edges(
+            &raw_bufs,
+            &plan_params,
+            false,
+            launch_stream,
+        ) {
+            Ok(bufs) => bufs,
+            Err(err) => {
+                return wcoj_decline_on_error(
+                    &mut self.wcoj_error_decline_count,
+                    "groupby-fusion-clique-layout",
+                    err,
+                )
+            }
+        };
+        let edge_refs: Vec<&CudaBuffer> = laid_out.iter().collect();
+        let result = match k {
+            5 => {
+                let arr: &[&CudaBuffer; 10] = match edge_refs.as_slice().try_into() {
+                    Ok(a) => a,
+                    Err(_) => return Ok(None),
+                };
+                self.provider
+                    .wcoj_clique5_groupby_root_count_u32_recorded_planned(
+                        arr,
+                        plan_params.leader_edge_idx,
+                        &plan_params.edge_order,
+                        &plan_params.iteration_order,
+                        launch_stream,
+                    )
+            }
+            _ => {
+                let arr: &[&CudaBuffer; 15] = match edge_refs.as_slice().try_into() {
+                    Ok(a) => a,
+                    Err(_) => return Ok(None),
+                };
+                self.provider
+                    .wcoj_clique6_groupby_root_count_u32_recorded_planned(
+                        arr,
+                        plan_params.leader_edge_idx,
+                        &plan_params.edge_order,
+                        &plan_params.iteration_order,
+                        launch_stream,
+                    )
+            }
+        };
+        match result {
+            Ok(buf) => {
+                self.wcoj_groupby_fusion_dispatch_count += 1;
+                Ok(Some(buf))
+            }
+            Err(err) => wcoj_decline_on_error(
+                &mut self.wcoj_error_decline_count,
+                "groupby-fusion-clique",
+                err,
+            ),
         }
     }
 }

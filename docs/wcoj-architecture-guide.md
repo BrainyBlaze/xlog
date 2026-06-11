@@ -350,6 +350,32 @@ the triangle rows:
      `wcoj_groupby_root_segment_sum_counts_u32` (the recorded groupby is
      U32/Symbol-key only), then compacting totals>0. Output schema
      (W: U64, count: U64).
+   * `wcoj_clique{5,6}_groupby_root_count_u32_recorded_planned` (S1e;
+     `wcoj_clique{5,6}_groupby_root_count_hg_u32` kernels): K-clique count
+     fusion for `q(R, count(*)) :- <complete K_5 / K_6 body>` grouped by
+     the plan's root variable, at the 4-byte width-class only. The fused
+     kernel reuses the planned clique count traversal
+     (`wcoj_clique_template_count_t` + leader metadata row resolution)
+     but accumulates each leader-edge row's completion count into a
+     per-row counter array via atomicAdd; the row's group key is the
+     oriented leader edge's col0 (the kernel's binding[0] root). Unlike
+     triangle/4-cycle, the root under `KCliqueVariableOrder` is
+     PLAN-DEPENDENT: `variable_order[0]` plus leader-edge
+     orientation/column swaps determine the physical root column, so the
+     executor branch (`try_dispatch_wcoj_groupby_root_count_clique`)
+     fuses only when the GroupBy key column maps to the head variable
+     with `variable_positions[r] == 0`, and declines everything else
+     silently (non-root keys, K=7/8, u64/mixed widths, planned-hash
+     routes). `try_promote_clique_inside_aggregate` descends the
+     aggregate wrapper by synthesizing the canonical k-variable head
+     projection from the unique topological order of the variable-class
+     tournament (first-appearance slot order is unusable — the bushy DP
+     plan reorders scan leaves) and remaps the group projection into
+     clique head-variable space. Edge orientation + layout is shared
+     with the unfused clique dispatch
+     (`orient_and_layout_kclique_edges`); the provider entry
+     additionally layout-normalizes per dispatch (31b0ccf0 contract).
+     Same kill switch and counter as the other fusions.
 
    Symbol semantics (S1c/S1d, locked by tests): count over
    Symbol-keyed/valued bodies fuses — Symbol is u32-physical and count
@@ -374,6 +400,8 @@ completion (4-cycle count, u64 sum/min/max, Symbol locks):
 for the S1d completion (4-cycle sum/min/max, u64-key 4-cycle count,
 recorded u64-value min/max):
 `docs/evidence/2026-06-11-s1d-4cycle-agg-variants/`.
+for the S1e K-clique count fusion (>= 3x vs unfused on the skewed K=5
+hub fixture): `docs/evidence/2026-06-11-s1e-kclique-count-fusion/`.
 
 **Recursive-stratum inputs (covered, no code change needed).** A
 non-recursive aggregate rule in a later stratum whose triangle body reads
@@ -394,7 +422,8 @@ out of scope by language contract, not by this dispatch surface.
 
 Deferred (stated explicitly): u64-key 4-cycle sum/min/max fusion (the
 count path has its u64 sibling; the agg path declines 8-byte keys),
-k-clique (K=5..8) count fusion, LogSumExp/float aggregates.
+u64-key k-clique count fusion, K=7/K=8 clique count fusion, clique
+sum/min/max fusion, LogSumExp/float aggregates.
 
 **Design decision — float/LogSumExp fused aggregates are deferred, not
 just unimplemented (S1d).** The fused kernels' correctness argument rests

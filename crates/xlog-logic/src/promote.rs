@@ -161,6 +161,14 @@ pub fn promote_multiway(
             if try_promote_4cycle_inside_aggregate(&mut rule.body, stats, config) {
                 continue;
             }
+            // S1e: K-clique (k = 5, 6) sibling of the descents above
+            // (scan-count gates keep all three matchers disjoint). The
+            // executor's fused hook dispatches Count grouped by the
+            // plan's root variable only; declined dispatches still
+            // execute the embedded binary fallback unchanged.
+            if try_promote_clique_inside_aggregate(&mut rule.body, stats) {
+                continue;
+            }
             if let Some(promoted) = try_promote_chain(&rule.body) {
                 rule.body = promoted;
                 continue;
@@ -730,6 +738,146 @@ fn try_promote_4cycle_inside_aggregate(
             return false;
         };
         remapped.push(ProjectExpr::Column(pos));
+    }
+    *group_cols = remapped;
+    **inner = promoted;
+    true
+}
+
+/// S1e groupby fusion: K-clique (k = 5, 6) sibling of
+/// [`try_promote_triangle_inside_aggregate`]. Promotes a complete-K_k
+/// join tree sitting inside an aggregate rule's
+/// `Project{ GroupBy { Project { <join tree> } } }` wrapper.
+///
+/// Unlike triangle/4-cycle, the clique matcher derives head variables
+/// from a head projection over the join tree. The aggregate wrapper has
+/// no such projection, so this descent synthesizes one: union-find over
+/// the flattened global slot space yields the k variable classes, and
+/// one representative slot per class (in first-appearance order) forms
+/// the canonical k-variable projection handed to
+/// [`try_promote_clique_k`]. On success the group projection's column
+/// indices are remapped from join-output (global slot) space into the
+/// clique head-variable space via the same classes. K = 7/8 bodies are
+/// left untouched (no fused count kernels exist for them — the
+/// non-aggregate clique route would buy nothing under an aggregate
+/// wrapper that the executor cannot fuse). Returns false — leaving the
+/// rule untouched — on any structural mismatch.
+fn try_promote_clique_inside_aggregate(body: &mut RirNode, stats: &StatsManager) -> bool {
+    let RirNode::Project { input: gb, .. } = body else {
+        return false;
+    };
+    let RirNode::GroupBy {
+        input: group_input, ..
+    } = gb.as_mut()
+    else {
+        return false;
+    };
+    let RirNode::Project {
+        input: inner,
+        columns: group_cols,
+    } = group_input.as_mut()
+    else {
+        return false;
+    };
+    // Flatten the inner join tree directly (no head projection exists
+    // under the aggregate wrapper).
+    let mut scans: Vec<RelId> = Vec::new();
+    let mut key_pairs: Vec<(usize, usize)> = Vec::new();
+    if walk_clique_node(inner, &mut scans, &mut key_pairs).is_none() {
+        return false;
+    }
+    let k = match scans.len() {
+        10 => 5,
+        15 => 6,
+        _ => return false,
+    };
+    // Union-find on the global slot space; representative slot per
+    // class in first-appearance order defines the head variables.
+    let n_slots = 2 * scans.len();
+    let mut parent: Vec<usize> = (0..n_slots).collect();
+    for (a, b) in &key_pairs {
+        if *a >= n_slots || *b >= n_slots {
+            return false;
+        }
+        uf_union_clique(&mut parent, *a, *b);
+    }
+    let mut class_roots: Vec<usize> = Vec::new();
+    let mut first_slot_of_class: HashMap<usize, usize> = HashMap::new();
+    for slot in 0..n_slots {
+        let root = uf_find_clique(&mut parent, slot);
+        if !first_slot_of_class.contains_key(&root) {
+            first_slot_of_class.insert(root, slot);
+            class_roots.push(root);
+        }
+    }
+    if class_roots.len() != k {
+        return false;
+    }
+    // The clique matcher's orientation invariant requires every atom's
+    // col0 class to precede its col1 class in head order. The class
+    // digraph of a canonical complete-K_k body (one atom per unordered
+    // pair, consistent orientation) is a transitive tournament, whose
+    // unique topological order sorts classes by in-degree: head index h
+    // = the class with in-degree h. Duplicate in-degrees mean the
+    // orientation is not transitive (the top-level matcher would reject
+    // it too) — leave the rule untouched. NOTE: first-appearance slot
+    // order is NOT usable here because the lowerer's bushy DP plan
+    // reorders the scan leaves.
+    let class_idx: HashMap<usize, usize> = class_roots
+        .iter()
+        .enumerate()
+        .map(|(idx, root)| (*root, idx))
+        .collect();
+    let mut in_degree = vec![0usize; k];
+    for atom in 0..scans.len() {
+        let cls_a = uf_find_clique(&mut parent, 2 * atom);
+        let cls_b = uf_find_clique(&mut parent, 2 * atom + 1);
+        if cls_a == cls_b {
+            return false;
+        }
+        in_degree[class_idx[&cls_b]] += 1;
+    }
+    let mut class_pos_by_head = vec![usize::MAX; k];
+    for (pos, deg) in in_degree.iter().enumerate() {
+        if *deg >= k || class_pos_by_head[*deg] != usize::MAX {
+            return false;
+        }
+        class_pos_by_head[*deg] = pos;
+    }
+    let representative_slots: Vec<usize> = class_pos_by_head
+        .iter()
+        .map(|pos| first_slot_of_class[&class_roots[*pos]])
+        .collect();
+    let class_to_head: HashMap<usize, usize> = class_pos_by_head
+        .iter()
+        .enumerate()
+        .map(|(head_idx, pos)| (class_roots[*pos], head_idx))
+        .collect();
+    let canonical = RirNode::Project {
+        input: inner.clone(),
+        columns: representative_slots
+            .iter()
+            .map(|slot| ProjectExpr::Column(*slot))
+            .collect(),
+    };
+    let Some(promoted) = try_promote_clique_k(&canonical, k, stats) else {
+        return false;
+    };
+    // Remap the group projection from join-output (global slot) space
+    // into the clique head-variable space via the slot classes.
+    let mut remapped: Vec<ProjectExpr> = Vec::with_capacity(group_cols.len());
+    for col in group_cols.iter() {
+        let ProjectExpr::Column(c) = col else {
+            return false;
+        };
+        if *c >= n_slots {
+            return false;
+        }
+        let root = uf_find_clique(&mut parent, *c);
+        let Some(head_idx) = class_to_head.get(&root) else {
+            return false;
+        };
+        remapped.push(ProjectExpr::Column(*head_idx));
     }
     *group_cols = remapped;
     **inner = promoted;

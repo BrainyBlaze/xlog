@@ -378,6 +378,10 @@ pub mod wcoj_kernels {
     pub const WCOJ_CLIQUE8_MATERIALIZE_HG_U32: &str = "wcoj_clique8_materialize_hg_u32";
     pub const WCOJ_CLIQUE8_COUNT_HG_U64: &str = "wcoj_clique8_count_hg_u64";
     pub const WCOJ_CLIQUE8_MATERIALIZE_HG_U64: &str = "wcoj_clique8_materialize_hg_u64";
+    pub const WCOJ_CLIQUE5_GROUPBY_ROOT_COUNT_HG_U32: &str =
+        "wcoj_clique5_groupby_root_count_hg_u32";
+    pub const WCOJ_CLIQUE6_GROUPBY_ROOT_COUNT_HG_U32: &str =
+        "wcoj_clique6_groupby_root_count_hg_u32";
 }
 
 /// Kernel function names in the Monte Carlo sampling module
