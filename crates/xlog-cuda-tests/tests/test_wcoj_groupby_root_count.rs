@@ -293,6 +293,142 @@ fn groupby_root_count_matches_oracle_skewed_hub() {
     run_case("skewed_hub", &e_xy, &e_yz, &e_xz);
 }
 
+/// S1 measurement (research-plan gate: fused >= 5x on skewed fixtures,
+/// <= 1.1x regression on small uniform). Run explicitly:
+/// `cargo test -p xlog-cuda-tests --test test_wcoj_groupby_root_count \
+///    --release -- --ignored --nocapture`
+/// Asserts parity; timing ratios are PRINTED and recorded as evidence, not
+/// asserted (wall-clock assertions are machine-dependent).
+#[test]
+#[ignore = "S1 measurement: run explicitly with --ignored --nocapture"]
+fn s1_measurement_fused_vs_unfused() {
+    let Some(fix) = make_fixture() else {
+        eprintln!("skipping s1_measurement: no CUDA device");
+        return;
+    };
+
+    let hub = |n_y: u32, n_z: u32| {
+        let mut e_xy = Vec::new();
+        let mut e_yz = Vec::new();
+        let mut e_xz = Vec::new();
+        for y in 1..=n_y {
+            e_xy.push((0u32, y));
+            for z in 0..n_z {
+                e_yz.push((y, 1_000_000 + z));
+            }
+        }
+        for z in 0..n_z {
+            e_xz.push((0u32, 1_000_000 + z));
+        }
+        // Uniform background so the group column is not a single value.
+        for i in 0..1000u32 {
+            let (a, b, c) = (2_000_000 + i, 3_000_000 + i, 4_000_000 + i);
+            e_xy.push((a, b));
+            e_yz.push((b, c));
+            e_xz.push((a, c));
+        }
+        (sorted_unique(e_xy), sorted_unique(e_yz), sorted_unique(e_xz))
+    };
+
+    let small_uniform = {
+        let mut e_xy = Vec::new();
+        let mut e_yz = Vec::new();
+        let mut e_xz = Vec::new();
+        for i in 0..200u32 {
+            let (a, b, c) = (i, 1000 + i, 2000 + i);
+            e_xy.push((a, b));
+            e_yz.push((b, c));
+            e_xz.push((a, c));
+        }
+        (sorted_unique(e_xy), sorted_unique(e_yz), sorted_unique(e_xz))
+    };
+
+    let cases: Vec<(&str, (Vec<(u32, u32)>, Vec<(u32, u32)>, Vec<(u32, u32)>))> = vec![
+        ("hub_10k_z16", hub(10_000, 16)),
+        ("hub_50k_z16", hub(50_000, 16)),
+        ("small_uniform_200", small_uniform),
+    ];
+
+    const REPS: usize = 5;
+    for (name, (e_xy_rows, e_yz_rows, e_xz_rows)) in &cases {
+        let expected = oracle_group_counts(e_xy_rows, e_yz_rows, e_xz_rows);
+        let e_xy = upload_binary_u32(&fix.memory, e_xy_rows);
+        let e_yz = upload_binary_u32(&fix.memory, e_yz_rows);
+        let e_xz = upload_binary_u32(&fix.memory, e_xz_rows);
+
+        // One stream per case, reused across reps: the StreamPool is
+        // grow-only (cap 16), so per-invocation acquisition would drain it.
+        let stream = fix.pool.acquire().expect("stream");
+        // Warmup both paths once (kernel/module JIT, stream init).
+        let _ = baseline_group_counts(&fix, &e_xy, &e_yz, &e_xz);
+        let warm = fix
+            .provider
+            .wcoj_triangle_groupby_root_count_u32_recorded(
+                &e_xy,
+                &e_yz,
+                &e_xz,
+                WCOJ_HG_BLOCK_WORK_UNIT_DEFAULT,
+                stream,
+            )
+            .expect("fused warmup");
+        assert_eq!(
+            download_group_counts(&fix.memory, &warm),
+            expected,
+            "{name}: fused parity"
+        );
+
+        let mut unfused_ms = Vec::with_capacity(REPS);
+        let mut fused_ms = Vec::with_capacity(REPS);
+        for _ in 0..REPS {
+            let t = std::time::Instant::now();
+            let tri = fix
+                .provider
+                .wcoj_triangle_hg_u32_recorded(
+                    &e_xy,
+                    &e_yz,
+                    &e_xz,
+                    WCOJ_HG_BLOCK_WORK_UNIT_DEFAULT,
+                    stream,
+                )
+                .expect("baseline triangle");
+            let grouped = fix
+                .provider
+                .groupby_multi_agg(&tri, &[0], &[(1, AggOp::Count)])
+                .expect("baseline groupby");
+            fix.provider.device().inner().synchronize().expect("sync");
+            unfused_ms.push(t.elapsed().as_secs_f64() * 1e3);
+            drop(grouped);
+
+            let t = std::time::Instant::now();
+            let fused = fix
+                .provider
+                .wcoj_triangle_groupby_root_count_u32_recorded(
+                    &e_xy,
+                    &e_yz,
+                    &e_xz,
+                    WCOJ_HG_BLOCK_WORK_UNIT_DEFAULT,
+                    stream,
+                )
+                .expect("fused");
+            fix.provider.device().inner().synchronize().expect("sync");
+            fused_ms.push(t.elapsed().as_secs_f64() * 1e3);
+            drop(fused);
+        }
+        unfused_ms.sort_by(|a, b| a.total_cmp(b));
+        fused_ms.sort_by(|a, b| a.total_cmp(b));
+        let med_unfused = unfused_ms[REPS / 2];
+        let med_fused = fused_ms[REPS / 2];
+        println!(
+            "S1 {name}: unfused median {med_unfused:.3} ms, fused median {med_fused:.3} ms, \
+             speedup {:.2}x (n_xy={}, n_yz={}, n_xz={})",
+            med_unfused / med_fused,
+            e_xy_rows.len(),
+            e_yz_rows.len(),
+            e_xz_rows.len()
+        );
+    }
+}
+
 #[test]
 fn groupby_root_count_empty_intersection_roots_are_absent() {
     // X=9 has e_xy edges but no completing (Y,Z): it must NOT appear in the
