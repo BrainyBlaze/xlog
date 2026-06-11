@@ -147,6 +147,11 @@ def _check_prob_json(
             report.get("engine") == expected["engine"],
             f"{example} prob_json engine mismatch: {report}",
         )
+    if "mc_engine" in expected:
+        _require(
+            report.get("mc_engine") == expected["mc_engine"],
+            f"{example} prob_json mc_engine mismatch: {report}",
+        )
     for field in ["total_samples", "seed"]:
         if field in expected:
             _require(
@@ -273,7 +278,15 @@ def _load_example_result(example: str, args: argparse.Namespace) -> dict[str, An
         check_results["run"] = _check_run(example, raw, checks["run"])
 
     if "prob_json" in checks:
-        raw = _run_xlog(args, ["prob", program_arg, "--output", "json"], host_io=True)
+        # `extra_args` lets MC examples in the resident-rejected fragment
+        # (aggregates, negation) opt into the labeled CPU oracle explicitly;
+        # such examples must also pin `mc_engine` to "cpu-oracle".
+        extra_args = list(checks["prob_json"].get("extra_args", []))
+        raw = _run_xlog(
+            args,
+            ["prob", program_arg, "--output", "json", *extra_args],
+            host_io=True,
+        )
         raw_outputs["prob_json"] = raw
         check_results["prob_json"] = _check_prob_json(example, raw, checks["prob_json"])
 

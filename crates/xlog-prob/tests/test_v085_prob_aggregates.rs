@@ -205,7 +205,11 @@ query(out_degree(1, 2)).
 
 #[cfg(feature = "host-io")]
 #[test]
-fn mc_gpu_count_aggregate_query_matches_finite_oracle() {
+// Renamed from `mc_gpu_count_aggregate_query_matches_finite_oracle`: aggregate
+// terms are resident-rejected (unbounded_term), so MC aggregates never ran on
+// the GPU engine — they rode the (previously silent) CPU oracle. The opt-in +
+// engine assertion below makes that explicit.
+fn mc_count_aggregate_query_matches_finite_oracle_via_cpu_oracle() {
     if !has_cuda_device() {
         eprintln!("Skipping: no CUDA device");
         return;
@@ -222,7 +226,9 @@ query(out_degree(1, 2)).
     let mut cfg = xlog_prob::mc::McEvalConfig::default();
     cfg.samples = 32;
     cfg.seed = 85;
+    cfg.allow_cpu_oracle_fallback = true;
     let result = program.evaluate(cfg).expect("evaluate MC aggregate");
+    assert_eq!(result.engine, xlog_prob::mc::McEngine::CpuOracle);
     let estimate = result
         .query_estimates
         .iter()

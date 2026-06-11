@@ -692,6 +692,11 @@ pub struct EvalResult {
     pub nonmonotone_iteration_limit_hits: Option<usize>,
     #[pyo3(get)]
     pub sampling_method: Option<String>,
+    /// MC only: which engine produced the result — `"gpu-resident"` for the
+    /// resident megakernel engine, `"cpu-oracle"` for the explicitly opted-in
+    /// CPU oracle. `None` for exact inference.
+    #[pyo3(get)]
+    pub mc_engine: Option<String>,
 }
 
 // =========================================================================

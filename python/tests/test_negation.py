@@ -15,6 +15,40 @@ torch = pytest.importorskip("torch")
 pyxlog = pytest.importorskip("pyxlog")
 
 
+class TestMcEngineContract:
+    """MC fail-closed / engine-label contract on the Python surface."""
+
+    def test_mc_rejected_program_fails_closed_without_opt_in(self):
+        """Negation is resident-rejected; evaluate() must error, not silently
+        run the CPU oracle."""
+        source = """
+0.3::rain().
+dry() :- not rain().
+query(dry()).
+"""
+        program = pyxlog.Program.compile(source, prob_engine='mc')
+        with pytest.raises(Exception, match="resident MC engine rejected program"):
+            program.evaluate(samples=100)
+
+    def test_mc_resident_result_is_labeled_gpu(self):
+        source = """
+0.7::rain().
+query(rain()).
+"""
+        program = pyxlog.Program.compile(source, prob_engine='mc')
+        result = program.evaluate(samples=1000)
+        assert result.mc_engine == "gpu-resident"
+
+    def test_exact_result_has_no_mc_engine(self):
+        source = """
+0.7::rain().
+query(rain()).
+"""
+        program = pyxlog.Program.compile(source)
+        result = program.evaluate()
+        assert result.mc_engine is None
+
+
 class TestStratifiedNegation:
     """Tests for stratified (non-cyclic) negation."""
 
@@ -129,8 +163,10 @@ dry() :- not rain().
 query(dry()).
 """
 
-        source_mc = """
-:- prob_engine=mc, mc_samples=50000.
+        # NOTE: the original source used `:- prob_engine=mc, ...`, which is not
+        # a directive (the real syntax is `#pragma prob_engine = mc`), so this
+        # test silently compared exact-vs-exact. Fixed to actually run MC.
+        source_mc = """#pragma prob_engine = mc
 0.3::rain().
 dry() :- not rain().
 query(dry()).
@@ -140,7 +176,11 @@ query(dry()).
         program_mc = pyxlog.Program.compile(source_mc)
 
         result_exact = program_exact.evaluate()
-        result_mc = program_mc.evaluate()
+        # Negation is rejected by the GPU-resident MC engine; the CPU oracle
+        # is explicit opt-in and the result is labeled.
+        result_mc = program_mc.evaluate(samples=50000, allow_cpu_oracle=True)
+        assert result_mc.mc_engine == "cpu-oracle"
+        assert result_mc.approx is True
 
         prob_exact = torch.from_dlpack(result_exact.prob)[0].item()
         prob_mc = torch.from_dlpack(result_mc.prob)[0].item()
@@ -159,8 +199,9 @@ c() :- a(), not b().
 query(c()).
 """
 
-        source_mc = """
-:- prob_engine=mc, mc_samples=50000.
+        # NOTE: fixed from `:- prob_engine=mc, ...` (not a directive) to the
+        # real `#pragma` syntax — see test_mc_probability_match_simple.
+        source_mc = """#pragma prob_engine = mc
 0.4::a().
 0.6::b().
 c() :- a(), not b().
@@ -171,7 +212,11 @@ query(c()).
         program_mc = pyxlog.Program.compile(source_mc)
 
         result_exact = program_exact.evaluate()
-        result_mc = program_mc.evaluate()
+        # Negation is rejected by the GPU-resident MC engine; the CPU oracle
+        # is explicit opt-in and the result is labeled.
+        result_mc = program_mc.evaluate(samples=50000, allow_cpu_oracle=True)
+        assert result_mc.mc_engine == "cpu-oracle"
+        assert result_mc.approx is True
 
         prob_exact = torch.from_dlpack(result_exact.prob)[0].item()
         prob_mc = torch.from_dlpack(result_mc.prob)[0].item()
@@ -202,9 +247,12 @@ query(p()).
 query(flip()).
 """
 
-        # Use prob_engine parameter to enable MC before stratification
+        # Use prob_engine parameter to enable MC before stratification.
+        # Non-monotone negation is resident-rejected; opt into the labeled
+        # CPU oracle explicitly.
         program = pyxlog.Program.compile(source, prob_engine='mc')
-        result = program.evaluate(samples=50000)
+        result = program.evaluate(samples=50000, allow_cpu_oracle=True)
+        assert result.mc_engine == "cpu-oracle"
 
         probs = torch.from_dlpack(result.prob)
 

@@ -249,6 +249,7 @@ class CompiledProgram:
         max_nonmonotone_iterations: int = 1024,
         sampling_method: Optional[str] = None,
         memory_mb: Optional[int] = None,
+        allow_cpu_oracle: bool = False,
     ) -> EvalResult:
         """Evaluate the program and return probabilities (host-side).
 
@@ -256,7 +257,10 @@ class CompiledProgram:
         ``None``.  Set *return_grads=True* to also compute marginal gradients.
 
         For MC programs: *return_grads* must be ``False``.  *sampling_method*
-        is ``"rejection"`` or ``"evidence_clamping"``.
+        is ``"rejection"`` or ``"evidence_clamping"``.  Programs rejected by
+        the GPU-resident MC engine (negation, aggregates, ...) fail closed
+        unless *allow_cpu_oracle=True*, in which case the labeled CPU oracle
+        runs and ``EvalResult.mc_engine`` is ``"cpu-oracle"``.
         """
         ...
 
@@ -624,6 +628,9 @@ class EvalResult:
     nonmonotone_cycles: Optional[int]
     nonmonotone_iteration_limit_hits: Optional[int]
     sampling_method: Optional[str]
+    mc_engine: Optional[str]
+    """MC only: ``"gpu-resident"`` (production megakernel engine) or
+    ``"cpu-oracle"`` (explicit opt-in via *allow_cpu_oracle*)."""
 
 class McDeviceEvalResult:
     """Device-resident MC result from :meth:`CompiledProgram.evaluate_device`."""

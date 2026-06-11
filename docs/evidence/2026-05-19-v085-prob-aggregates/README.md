@@ -90,9 +90,24 @@ Still gated to later nodes:
 | M085_PROB_AGG.1 exact support | finite `count`, `sum`, `min`, `max`, `logsumexp` fixtures supported or typed-declined | PASS | `exact_count_aggregate_provenance_matches_finite_oracle`; `exact_numeric_aggregate_provenance_matches_finite_oracles` |
 | M085_PROB_AGG.2 provenance blocker | supported aggregate rules no longer hit generic aggregation blocker | PASS | exact provenance tests extract formulas for aggregate output tuples |
 | M085_PROB_AGG.3 oracle parity | exact aggregate probabilities match finite oracle within `1e-9` | PASS | formula probabilities match count/numeric finite oracles within `1e-12` |
-| M085_PROB_AGG.4 MC support | MC aggregate fixtures run on GPU and match oracle within confidence interval | PASS | `mc_gpu_count_aggregate_query_matches_finite_oracle` under `--features host-io` |
+| M085_PROB_AGG.4 MC support | MC aggregate fixtures run on GPU and match oracle within confidence interval | PASS (corrected 2026-06-10: CPU oracle, not GPU) | `mc_count_aggregate_query_matches_finite_oracle_via_cpu_oracle` under `--features host-io` |
 | M085_PROB_AGG.5 evidence/query | at least one evidence fixture and one query fixture reference aggregate output | PASS | count test includes `evidence(out_degree(1, 2), true)` and aggregate queries |
 | M085_PROB_AGG.6 cap diagnostics | exact-domain cap exceeded returns typed diagnostic with remediation | PASS | `exact_aggregate_domain_cap_reports_typed_diagnostic` |
+
+---
+
+## Correction (2026-06-10)
+
+M085_PROB_AGG.4 originally claimed MC aggregate fixtures "run on GPU". An
+engine-contract audit showed aggregate terms are rejected by the resident GPU
+MC engine (`ResidentRejectKind::UnboundedTerm`), so the MC aggregate fixture
+always executed on the CPU oracle through a then-silent fallback in
+`McProgram::evaluate`. The fallback is now explicit opt-in
+(`McEvalConfig::allow_cpu_oracle_fallback`) and every `McResult` is labeled
+with its engine (`McEngine::CpuOracle` here). The test was renamed to
+`mc_count_aggregate_query_matches_finite_oracle_via_cpu_oracle` and asserts
+the label. Semantics and oracle parity are unchanged; the execution-engine
+claim is corrected. GPU-resident MC aggregates remain future work.
 
 ---
 

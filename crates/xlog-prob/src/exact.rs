@@ -301,6 +301,11 @@ impl ExactDdnnfProgram {
             return count_lift_gpu.evaluate();
         }
 
+        // `gpu` is `None` only when compilation found an empty PIR root set
+        // (no probabilistic leaves and no derivations reach any query), so
+        // every query atom is unprovable and P = 0 is the correct semantics —
+        // this is NOT a missing-GPU fallback; a real circuit with an
+        // unavailable GPU fails at compile time instead.
         if self.gpu.is_none() {
             let mut query_probs: Vec<QueryProbability> = Vec::with_capacity(self.queries.len());
             for query in &self.queries {

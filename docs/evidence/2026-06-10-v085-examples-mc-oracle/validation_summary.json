@@ -1,0 +1,509 @@
+{
+  "example_count": 10,
+  "feature_coverage": {
+    "aggregate_lifting": [
+      "07_aggregate_lifting"
+    ],
+    "aggregate_query": [
+      "02_findall_aggregate",
+      "05_prob_aggregate_exact",
+      "06_prob_aggregate_mc",
+      "10_scientific_incremental"
+    ],
+    "approx_inference": [
+      "08_approx_confidence"
+    ],
+    "cli_explain": [
+      "04_magic_reach_explain",
+      "09_repl_watch_explain"
+    ],
+    "cli_repl": [
+      "09_repl_watch_explain"
+    ],
+    "cli_watch": [
+      "09_repl_watch_explain"
+    ],
+    "findall": [
+      "02_findall_aggregate",
+      "10_scientific_incremental"
+    ],
+    "incremental_parse": [
+      "09_repl_watch_explain",
+      "10_scientific_incremental"
+    ],
+    "lists": [
+      "01_list_typed_relation",
+      "02_findall_aggregate",
+      "03_maplist_static_predref",
+      "10_scientific_incremental"
+    ],
+    "magic_sets": [
+      "04_magic_reach_explain",
+      "09_repl_watch_explain"
+    ],
+    "maplist": [
+      "03_maplist_static_predref",
+      "10_scientific_incremental"
+    ],
+    "naf": [
+      "10_scientific_incremental"
+    ],
+    "prob_aggregate_exact": [
+      "05_prob_aggregate_exact",
+      "07_aggregate_lifting"
+    ],
+    "prob_aggregate_mc": [
+      "06_prob_aggregate_mc",
+      "08_approx_confidence"
+    ],
+    "types": [
+      "01_list_typed_relation",
+      "03_maplist_static_predref",
+      "10_scientific_incremental"
+    ]
+  },
+  "interaction_count": 10,
+  "per_example": [
+    {
+      "checks": [
+        "explain_json",
+        "run"
+      ],
+      "features": [
+        "types",
+        "lists"
+      ],
+      "interaction": true,
+      "name": "01_list_typed_relation",
+      "status": "PASS"
+    },
+    {
+      "checks": [
+        "explain_json",
+        "run"
+      ],
+      "features": [
+        "findall",
+        "aggregate_query",
+        "lists"
+      ],
+      "interaction": true,
+      "name": "02_findall_aggregate",
+      "status": "PASS"
+    },
+    {
+      "checks": [
+        "explain_json",
+        "run"
+      ],
+      "features": [
+        "maplist",
+        "lists",
+        "types"
+      ],
+      "interaction": true,
+      "name": "03_maplist_static_predref",
+      "status": "PASS"
+    },
+    {
+      "checks": [
+        "explain_json",
+        "run"
+      ],
+      "features": [
+        "magic_sets",
+        "cli_explain"
+      ],
+      "interaction": true,
+      "name": "04_magic_reach_explain",
+      "status": "PASS"
+    },
+    {
+      "checks": [
+        "explain_json",
+        "prob_json"
+      ],
+      "features": [
+        "prob_aggregate_exact",
+        "aggregate_query"
+      ],
+      "interaction": true,
+      "name": "05_prob_aggregate_exact",
+      "status": "PASS"
+    },
+    {
+      "checks": [
+        "explain_json",
+        "prob_json"
+      ],
+      "features": [
+        "prob_aggregate_mc",
+        "aggregate_query"
+      ],
+      "interaction": true,
+      "name": "06_prob_aggregate_mc",
+      "status": "PASS"
+    },
+    {
+      "checks": [
+        "explain_json",
+        "prob_json"
+      ],
+      "features": [
+        "aggregate_lifting",
+        "prob_aggregate_exact"
+      ],
+      "interaction": true,
+      "name": "07_aggregate_lifting",
+      "status": "PASS"
+    },
+    {
+      "checks": [
+        "explain_json",
+        "prob_json"
+      ],
+      "features": [
+        "approx_inference",
+        "prob_aggregate_mc"
+      ],
+      "interaction": true,
+      "name": "08_approx_confidence",
+      "status": "PASS"
+    },
+    {
+      "checks": [
+        "explain_json",
+        "repl",
+        "run",
+        "watch"
+      ],
+      "features": [
+        "cli_repl",
+        "cli_watch",
+        "cli_explain",
+        "incremental_parse",
+        "magic_sets"
+      ],
+      "interaction": true,
+      "name": "09_repl_watch_explain",
+      "status": "PASS"
+    },
+    {
+      "checks": [
+        "explain_json",
+        "run"
+      ],
+      "features": [
+        "types",
+        "lists",
+        "findall",
+        "maplist",
+        "naf",
+        "aggregate_query",
+        "incremental_parse"
+      ],
+      "interaction": true,
+      "name": "10_scientific_incremental",
+      "status": "PASS"
+    }
+  ],
+  "raw_outputs": {
+    "01_list_typed_relation": {
+      "explain_json": {
+        "cmd": [
+          "target/release/xlog",
+          "explain",
+          "--format",
+          "json",
+          "examples/v085-language/showcase/01_list_typed_relation/program.xlog"
+        ],
+        "duration_sec": 0.003376,
+        "returncode": 0,
+        "stderr": "",
+        "stdout": "{\n  \"parse\": {\n    \"statements\": 15,\n    \"cache_hits\": 0,\n    \"cache_misses\": 15\n  },\n  \"ast\": {\n    \"rules\": 8,\n    \"queries\": 5,\n    \"prob_queries\": 0\n  },\n  \"stratification\": {\n    \"status\": \"ok\",\n    \"strata\": 1\n  },\n  \"rir\": {\n    \"status\": \"ok\",\n    \"sccs\": 15\n  },\n  \"optimizer\": {\n    \"status\": \"ok\",\n    \"est_memory_peak\": 0\n  },\n  \"wcoj\": {\n    \"status\": \"reported\"\n  },\n  \"epistemic\": {\"eir\":{\"epistemic_literal_count\":0,\"reason\":\"program has no epistemic literals\",\"status\":\"not_applicable\"},\"executable_plan\":{\"epistemic_literal_count\":0,\"reason\":\"program has no epistemic literals\",\"status\":\"not_applicable\"},\"gpu_plan\":{\"epistemic_literal_count\":0,\"reason\":\"program has no epistemic literals\",\"status\":\"not_applicable\"}},\n  \"magic_sets\": {\n    \"status\": \"disabled\",\n    \"adorned_predicates\": [],\n    \"generated_predicates\": [],\n    \"declined_reasons\": []\n  },\n  \"probability\": {\n    \"engine\": \"exact_ddnnf\",\n    \"aggregate_lifting_count\": 0\n  },\n  \"aggregate_lifting\": [\n  ],\n  \"rule_provenance\": [\n    {\n      \"rule_id\": \"rule:source:0:6fb9f46d59242807\",\n      \"head\": \"bag(1, [10, 20, 10])\",\n      \"source_kind\": \"source\",\n      \"source_span\": \"rule_index:0\",\n      \"generation_trace_hash\": \"6fb9f46d59242807\",\n      \"support_relation_ids\": [],\n      \"counterexample_relation_ids\": []\n    },\n    {\n      \"rule_id\": \"rule:source:1:8715f083eac7fda5\",\n      \"head\": \"bag(2, [30])\",\n      \"source_kind\": \"source\",\n      \"source_span\": \"rule_index:1\",\n      \"generation_trace_hash\": \"8715f083eac7fda5\",\n      \"support_relation_ids\": [],\n      \"counterexample_relation_ids\": []\n    },\n    {\n      \"rule_id\": \"rule:source:2:ce40cc431b24aedb\",\n      \"head\": \"member_value(Id, X)\",\n      \"source_kind\": \"source\",\n      \"source_span\": \"rule_index:2\",\n      \"generation_trace_hash\": \"ce40cc431b24aedb\",\n      \"support_relation_ids\": [\"bag\", \"member\"],\n      \"counterexample_relation_ids\": []\n    },\n    {\n      \"rule_id\": \"rule:source:3:a825cb86fba5973f\",\n      \"head\": \"checked_member(Id, X)\",\n      \"source_kind\": \"source\",\n      \"source_span\": \"rule_index:3\",\n      \"generation_trace_hash\": \"a825cb86fba5973f\",\n      \"support_relation_ids\": [\"bag\", \"memberchk\"],\n      \"counterexample_relation_ids\": []\n    },\n    {\n      \"rule_id\": \"rule:source:4:76b321c1e2b4d685\",\n      \"head\": \"bag_len(Id, N)\",\n      \"source_kind\": \"source\",\n      \"source_span\": \"rule_index:4\",\n      \"generation_trace_hash\": \"76b321c1e2b4d685\",\n      \"support_relation_ids\": [\"bag\", \"length\"],\n      \"counterexample_relation_ids\": []\n    },\n    {\n      \"rule_id\": \"rule:source:5:883160c4fc08fa54\",\n      \"head\": \"second_value(Id, X)\",\n      \"source_kind\": \"source\",\n      \"source_span\": \"rule_index:5\",\n      \"generation_trace_hash\": \"883160c4fc08fa54\",\n      \"support_relation_ids\": [\"bag\", \"nth\"],\n      \"counterexample_relation_ids\": []\n    },\n    {\n      \"rule_id\": \"rule:source:6:833a889c07484b6b\",\n      \"head\": \"head_tail(Id, Head, Tail)\",\n      \"source_kind\": \"source\",\n      \"source_span\": \"rule_index:6\",\n      \"generation_trace_hash\": \"833a889c07484b6b\",\n      \"support_relation_ids\": [\"bag\"],\n      \"counterexample_relation_ids\": []\n    },\n    {\n      \"rule_id\": \"rule:source:7:71c61b6df37c1425\",\n      \"head\": \"tail_len(Id, N)\",\n      \"source_kind\": \"source\",\n      \"source_span\": \"rule_index:7\",\n      \"generation_trace_hash\": \"71c61b6df37c1425\",\n      \"support_relation_ids\": [\"head_tail\", \"length\"],\n      \"counterexample_relation_ids\": []\n    }\n  ]\n,\n  \"proof_traces\": [\n    {\n      \"query_id\": \"query:source:0:member_value(Id, X)\",\n      \"query\": \"member_value(Id, X)\",\n      \"answer_relation\": \"__xlog_query_0\",\n      \"rule_ids\": [\"rule:source:2:ce40cc431b24aedb\"],\n      \"source_facts\": [\"bag(1, [10, 20, 10]).\", \"bag(2, [30]).\"],\n      \"rejected_alternatives\": []\n    },\n    {\n      \"query_id\": \"query:source:1:checked_member(Id, X)\",\n      \"query\": \"checked_member(Id, X)\",\n      \"answer_relation\": \"__xlog_query_1\",\n      \"rule_ids\": [\"rule:source:3:a825cb86fba5973f\"],\n      \"source_facts\": [\"bag(1, [10, 20, 10]).\", \"bag(2, [30]).\"],\n      \"rejected_alternatives\": []\n    },\n    {\n      \"query_id\": \"query:source:2:bag_len(Id, N)\",\n      \"query\": \"bag_len(Id, N)\",\n      \"answer_relation\": \"__xlog_query_2\",\n      \"rule_ids\": [\"rule:source:4:76b321c1e2b4d685\"],\n      \"source_facts\": [\"bag(1, [10, 20, 10]).\", \"bag(2, [30]).\"],\n      \"rejected_alternatives\": []\n    },\n    {\n      \"query_id\": \"query:source:3:second_value(Id, X)\",\n      \"query\": \"second_value(Id, X)\",\n      \"answer_relation\": \"__xlog_query_3\",\n      \"rule_ids\": [\"rule:source:5:883160c4fc08fa54\"],\n      \"source_facts\": [\"bag(1, [10, 20, 10]).\", \"bag(2, [30]).\"],\n      \"rejected_alternatives\": []\n    },\n    {\n      \"query_id\": \"query:source:4:tail_len(Id, N)\",\n      \"query\": \"tail_len(Id, N)\",\n      \"answer_relation\": \"__xlog_query_4\",\n      \"rule_ids\": [\"rule:source:7:71c61b6df37c1425\"],\n      \"source_facts\": [],\n      \"rejected_alternatives\": []\n    }\n  ]\n,\n  \"generated_rule_diagnostics\": [\n  ]\n}\n"
+      },
+      "run": {
+        "cmd": [
+          "target/release/xlog",
+          "run",
+          "examples/v085-language/showcase/01_list_typed_relation/program.xlog"
+        ],
+        "duration_sec": 11.474041,
+        "returncode": 0,
+        "stderr": "",
+        "stdout": "__xlog_query_0\n+----+-------+\n| id | value |\n+----+-------+\n| 1  | 10    |\n| 1  | 20    |\n| 2  | 30    |\n+----+-------+\n__xlog_query_1\n+----+-------+\n| id | value |\n+----+-------+\n| 1  | 10    |\n| 1  | 20    |\n| 2  | 30    |\n+----+-------+\n__xlog_query_2\n+----+-----+\n| id | len |\n+----+-----+\n| 1  | 3   |\n| 2  | 1   |\n+----+-----+\n__xlog_query_3\n+----+-------+\n| id | value |\n+----+-------+\n| 1  | 20    |\n+----+-------+\n__xlog_query_4\n+----+-----+\n| id | len |\n+----+-----+\n| 1  | 2   |\n| 2  | 0   |\n+----+-----+\n"
+      }
+    },
+    "02_findall_aggregate": {
+      "explain_json": {
+        "cmd": [
+          "target/release/xlog",
+          "explain",
+          "--format",
+          "json",
+          "examples/v085-language/showcase/02_findall_aggregate/program.xlog"
+        ],
+        "duration_sec": 0.004051,
+        "returncode": 0,
+        "stderr": "",
+        "stdout": "{\n  \"parse\": {\n    \"statements\": 14,\n    \"cache_hits\": 0,\n    \"cache_misses\": 14\n  },\n  \"ast\": {\n    \"rules\": 9,\n    \"queries\": 3,\n    \"prob_queries\": 0\n  },\n  \"stratification\": {\n    \"status\": \"ok\",\n    \"strata\": 2\n  },\n  \"rir\": {\n    \"status\": \"ok\",\n    \"sccs\": 13\n  },\n  \"optimizer\": {\n    \"status\": \"ok\",\n    \"est_memory_peak\": 0\n  },\n  \"wcoj\": {\n    \"status\": \"reported\"\n  },\n  \"epistemic\": {\"eir\":{\"epistemic_literal_count\":0,\"reason\":\"program has no epistemic literals\",\"status\":\"not_applicable\"},\"executable_plan\":{\"epistemic_literal_count\":0,\"reason\":\"program has no epistemic literals\",\"status\":\"not_applicable\"},\"gpu_plan\":{\"epistemic_literal_count\":0,\"reason\":\"program has no epistemic literals\",\"status\":\"not_applicable\"}},\n  \"magic_sets\": {\n    \"status\": \"disabled\",\n    \"adorned_predicates\": [],\n    \"generated_predicates\": [],\n    \"declined_reasons\": []\n  },\n  \"probability\": {\n    \"engine\": \"exact_ddnnf\",\n    \"aggregate_lifting_count\": 0\n  },\n  \"aggregate_lifting\": [\n  ],\n  \"rule_provenance\": [\n    {\n      \"rule_id\": \"rule:source:0:be075531dfd98ace\",\n      \"head\": \"edge(1, 2)\",\n      \"source_kind\": \"source\",\n      \"source_span\": \"rule_index:0\",\n      \"generation_trace_hash\": \"be075531dfd98ace\",\n      \"support_relation_ids\": [],\n      \"counterexample_relation_ids\": []\n    },\n    {\n      \"rule_id\": \"rule:source:1:be03b131dfd63e4b\",\n      \"head\": \"edge(1, 3)\",\n      \"source_kind\": \"source\",\n      \"source_span\": \"rule_index:1\",\n      \"generation_trace_hash\": \"be03b131dfd63e4b\",\n      \"support_relation_ids\": [],\n      \"counterexample_relation_ids\": []\n    },\n    {\n      \"rule_id\": \"rule:source:2:ca004e19aabc16bd\",\n      \"head\": \"edge(2, 4)\",\n      \"source_kind\": \"source\",\n      \"source_span\": \"rule_index:2\",\n      \"generation_trace_hash\": \"ca004e19aabc16bd\",\n      \"support_relation_ids\": [],\n      \"counterexample_relation_ids\": []\n    },\n    {\n      \"rule_id\": \"rule:source:3:ca03e219aabf4810\",\n      \"head\": \"edge(2, 5)\",\n      \"source_kind\": \"source\",\n      \"source_span\": \"rule_index:3\",\n      \"generation_trace_hash\": \"ca03e219aabf4810\",\n      \"support_relation_ids\": [],\n      \"counterexample_relation_ids\": []\n    },\n    {\n      \"rule_id\": \"rule:source:4:f0bc26ae7bf702ce\",\n      \"head\": \"neighbors(S, L)\",\n      \"source_kind\": \"source\",\n      \"source_span\": \"rule_index:4\",\n      \"generation_trace_hash\": \"f0bc26ae7bf702ce\",\n      \"support_relation_ids\": [\"findall\", \"source\"],\n      \"counterexample_relation_ids\": []\n    },\n    {\n      \"rule_id\": \"rule:source:5:868c6affb5d5f7e6\",\n      \"head\": \"neighbor_len(S, N)\",\n      \"source_kind\": \"source\",\n      \"source_span\": \"rule_index:5\",\n      \"generation_trace_hash\": \"868c6affb5d5f7e6\",\n      \"support_relation_ids\": [\"findall\", \"length\", \"source\"],\n      \"counterexample_relation_ids\": []\n    },\n    {\n      \"rule_id\": \"rule:source:6:1658839b8ceed857\",\n      \"head\": \"neighbor_count(S, count(D))\",\n      \"source_kind\": \"source\",\n      \"source_span\": \"rule_index:6\",\n      \"generation_trace_hash\": \"1658839b8ceed857\",\n      \"support_relation_ids\": [\"edge\"],\n      \"counterexample_relation_ids\": []\n    },\n    {\n      \"rule_id\": \"rule:source:7:080808966ee3702e\",\n      \"head\": \"source(1)\",\n      \"source_kind\": \"source\",\n      \"source_span\": \"rule_index:7\",\n      \"generation_trace_hash\": \"080808966ee3702e\",\n      \"support_relation_ids\": [],\n      \"counterexample_relation_ids\": []\n    },\n    {\n      \"rule_id\": \"rule:source:8:080b70966ee656bd\",\n      \"head\": \"source(2)\",\n      \"source_kind\": \"source\",\n      \"source_span\": \"rule_index:8\",\n      \"generation_trace_hash\": \"080b70966ee656bd\",\n      \"support_relation_ids\": [],\n      \"counterexample_relation_ids\": []\n    }\n  ]\n,\n  \"proof_traces\": [\n    {\n      \"query_id\": \"query:source:0:neighbors(1, L)\",\n      \"query\": \"neighbors(1, L)\",\n      \"answer_relation\": \"__xlog_query_0\",\n      \"rule_ids\": [\"rule:source:4:f0bc26ae7bf702ce\"],\n      \"source_facts\": [\"source(1).\", \"source(2).\"],\n      \"rejected_alternatives\": []\n    },\n    {\n      \"query_id\": \"query:source:1:neighbor_len(1, N)\",\n      \"query\": \"neighbor_len(1, N)\",\n      \"answer_relation\": \"__xlog_query_1\",\n      \"rule_ids\": [\"rule:source:5:868c6affb5d5f7e6\"],\n      \"source_facts\": [\"source(1).\", \"source(2).\"],\n      \"rejected_alternatives\": []\n    },\n    {\n      \"query_id\": \"query:source:2:neighbor_count(1, N)\",\n      \"query\": \"neighbor_count(1, N)\",\n      \"answer_relation\": \"__xlog_query_2\",\n      \"rule_ids\": [\"rule:source:6:1658839b8ceed857\"],\n      \"source_facts\": [\"edge(1, 2).\", \"edge(1, 3).\", \"edge(2, 4).\", \"edge(2, 5).\"],\n      \"rejected_alternatives\": []\n    }\n  ]\n,\n  \"generated_rule_diagnostics\": [\n  ]\n}\n"
+      },
+      "run": {
+        "cmd": [
+          "target/release/xlog",
+          "run",
+          "examples/v085-language/showcase/02_findall_aggregate/program.xlog"
+        ],
+        "duration_sec": 12.934113,
+        "returncode": 0,
+        "stderr": "",
+        "stdout": "__xlog_query_0\n+---------+\n| results |\n+---------+\n| 1       |\n+---------+\n__xlog_query_1\n+-----+\n| len |\n+-----+\n| 2   |\n+-----+\n__xlog_query_2\n+---------+\n| count_0 |\n+---------+\n| 2       |\n+---------+\n"
+      }
+    },
+    "03_maplist_static_predref": {
+      "explain_json": {
+        "cmd": [
+          "target/release/xlog",
+          "explain",
+          "--format",
+          "json",
+          "examples/v085-language/showcase/03_maplist_static_predref/program.xlog"
+        ],
+        "duration_sec": 0.003083,
+        "returncode": 0,
+        "stderr": "",
+        "stdout": "{\n  \"parse\": {\n    \"statements\": 16,\n    \"cache_hits\": 0,\n    \"cache_misses\": 16\n  },\n  \"ast\": {\n    \"rules\": 10,\n    \"queries\": 3,\n    \"prob_queries\": 0\n  },\n  \"stratification\": {\n    \"status\": \"ok\",\n    \"strata\": 1\n  },\n  \"rir\": {\n    \"status\": \"ok\",\n    \"sccs\": 14\n  },\n  \"optimizer\": {\n    \"status\": \"ok\",\n    \"est_memory_peak\": 0\n  },\n  \"wcoj\": {\n    \"status\": \"reported\"\n  },\n  \"epistemic\": {\"eir\":{\"epistemic_literal_count\":0,\"reason\":\"program has no epistemic literals\",\"status\":\"not_applicable\"},\"executable_plan\":{\"epistemic_literal_count\":0,\"reason\":\"program has no epistemic literals\",\"status\":\"not_applicable\"},\"gpu_plan\":{\"epistemic_literal_count\":0,\"reason\":\"program has no epistemic literals\",\"status\":\"not_applicable\"}},\n  \"magic_sets\": {\n    \"status\": \"disabled\",\n    \"adorned_predicates\": [],\n    \"generated_predicates\": [],\n    \"declined_reasons\": []\n  },\n  \"probability\": {\n    \"engine\": \"exact_ddnnf\",\n    \"aggregate_lifting_count\": 0\n  },\n  \"aggregate_lifting\": [\n  ],\n  \"rule_provenance\": [\n    {\n      \"rule_id\": \"rule:source:0:b572073add23f30e\",\n      \"head\": \"good(1)\",\n      \"source_kind\": \"source\",\n      \"source_span\": \"rule_index:0\",\n      \"generation_trace_hash\": \"b572073add23f30e\",\n      \"support_relation_ids\": [],\n      \"counterexample_relation_ids\": []\n    },\n    {\n      \"rule_id\": \"rule:source:1:b5756f3add26d99d\",\n      \"head\": \"good(2)\",\n      \"source_kind\": \"source\",\n      \"source_span\": \"rule_index:1\",\n      \"generation_trace_hash\": \"b5756f3add26d99d\",\n      \"support_relation_ids\": [],\n      \"counterexample_relation_ids\": []\n    },\n    {\n      \"rule_id\": \"rule:source:2:b578833add293170\",\n      \"head\": \"good(3)\",\n      \"source_kind\": \"source\",\n      \"source_span\": \"rule_index:2\",\n      \"generation_trace_hash\": \"b578833add293170\",\n      \"support_relation_ids\": [],\n      \"counterexample_relation_ids\": []\n    },\n    {\n      \"rule_id\": \"rule:source:3:8870d352776345cd\",\n      \"head\": \"next(1, 10)\",\n      \"source_kind\": \"source\",\n      \"source_span\": \"rule_index:3\",\n      \"generation_trace_hash\": \"8870d352776345cd\",\n      \"support_relation_ids\": [],\n      \"counterexample_relation_ids\": []\n    },\n    {\n      \"rule_id\": \"rule:source:4:f6e1867dcea78cd3\",\n      \"head\": \"next(2, 20)\",\n      \"source_kind\": \"source\",\n      \"source_span\": \"rule_index:4\",\n      \"generation_trace_hash\": \"f6e1867dcea78cd3\",\n      \"support_relation_ids\": [],\n      \"counterexample_relation_ids\": []\n    },\n    {\n      \"rule_id\": \"rule:source:5:5d31825ba6797f55\",\n      \"head\": \"next(3, 30)\",\n      \"source_kind\": \"source\",\n      \"source_span\": \"rule_index:5\",\n      \"generation_trace_hash\": \"5d31825ba6797f55\",\n      \"support_relation_ids\": [],\n      \"counterexample_relation_ids\": []\n    },\n    {\n      \"rule_id\": \"rule:source:6:e7257a9b4bde7e47\",\n      \"head\": \"todo(1, [1, 2, 3])\",\n      \"source_kind\": \"source\",\n      \"source_span\": \"rule_index:6\",\n      \"generation_trace_hash\": \"e7257a9b4bde7e47\",\n      \"support_relation_ids\": [],\n      \"counterexample_relation_ids\": []\n    },\n    {\n      \"rule_id\": \"rule:source:7:609dd31fdc66097f\",\n      \"head\": \"all_good(1)\",\n      \"source_kind\": \"source\",\n      \"source_span\": \"rule_index:7\",\n      \"generation_trace_hash\": \"609dd31fdc66097f\",\n      \"support_relation_ids\": [\"maplist\"],\n      \"counterexample_relation_ids\": []\n    },\n    {\n      \"rule_id\": \"rule:source:8:2697faacbcfa2c91\",\n      \"head\": \"mapped_len(N)\",\n      \"source_kind\": \"source\",\n      \"source_span\": \"rule_index:8\",\n      \"generation_trace_hash\": \"2697faacbcfa2c91\",\n      \"support_relation_ids\": [\"length\", \"maplist\"],\n      \"counterexample_relation_ids\": []\n    },\n    {\n      \"rule_id\": \"rule:source:9:5b25d8f8f86c0f5b\",\n      \"head\": \"todo_size(Id, N)\",\n      \"source_kind\": \"source\",\n      \"source_span\": \"rule_index:9\",\n      \"generation_trace_hash\": \"5b25d8f8f86c0f5b\",\n      \"support_relation_ids\": [\"length\", \"todo\"],\n      \"counterexample_relation_ids\": []\n    }\n  ]\n,\n  \"proof_traces\": [\n    {\n      \"query_id\": \"query:source:0:all_good(1)\",\n      \"query\": \"all_good(1)\",\n      \"answer_relation\": \"__xlog_query_0\",\n      \"rule_ids\": [\"rule:source:7:609dd31fdc66097f\"],\n      \"source_facts\": [],\n      \"rejected_alternatives\": []\n    },\n    {\n      \"query_id\": \"query:source:1:mapped_len(N)\",\n      \"query\": \"mapped_len(N)\",\n      \"answer_relation\": \"__xlog_query_1\",\n      \"rule_ids\": [\"rule:source:8:2697faacbcfa2c91\"],\n      \"source_facts\": [],\n      \"rejected_alternatives\": []\n    },\n    {\n      \"query_id\": \"query:source:2:todo_size(Id, N)\",\n      \"query\": \"todo_size(Id, N)\",\n      \"answer_relation\": \"__xlog_query_2\",\n      \"rule_ids\": [\"rule:source:9:5b25d8f8f86c0f5b\"],\n      \"source_facts\": [\"todo(1, [1, 2, 3]).\"],\n      \"rejected_alternatives\": []\n    }\n  ]\n,\n  \"generated_rule_diagnostics\": [\n  ]\n}\n"
+      },
+      "run": {
+        "cmd": [
+          "target/release/xlog",
+          "run",
+          "examples/v085-language/showcase/03_maplist_static_predref/program.xlog"
+        ],
+        "duration_sec": 14.253692,
+        "returncode": 0,
+        "stderr": "",
+        "stdout": "__xlog_query_0\n+------------+\n| computed_0 |\n+------------+\n| 1          |\n+------------+\n__xlog_query_1\n+-----+\n| len |\n+-----+\n| 3   |\n+-----+\n__xlog_query_2\n+----+-----+\n| id | len |\n+----+-----+\n| 1  | 3   |\n+----+-----+\n"
+      }
+    },
+    "04_magic_reach_explain": {
+      "explain_json": {
+        "cmd": [
+          "target/release/xlog",
+          "explain",
+          "--format",
+          "json",
+          "examples/v085-language/showcase/04_magic_reach_explain/program.xlog"
+        ],
+        "duration_sec": 0.003474,
+        "returncode": 0,
+        "stderr": "",
+        "stdout": "{\n  \"parse\": {\n    \"statements\": 10,\n    \"cache_hits\": 0,\n    \"cache_misses\": 10\n  },\n  \"ast\": {\n    \"rules\": 6,\n    \"queries\": 1,\n    \"prob_queries\": 0\n  },\n  \"stratification\": {\n    \"status\": \"ok\",\n    \"strata\": 1\n  },\n  \"rir\": {\n    \"status\": \"ok\",\n    \"sccs\": 4\n  },\n  \"optimizer\": {\n    \"status\": \"ok\",\n    \"est_memory_peak\": 0\n  },\n  \"wcoj\": {\n    \"status\": \"reported\"\n  },\n  \"epistemic\": {\"eir\":{\"epistemic_literal_count\":0,\"reason\":\"program has no epistemic literals\",\"status\":\"not_applicable\"},\"executable_plan\":{\"epistemic_literal_count\":0,\"reason\":\"program has no epistemic literals\",\"status\":\"not_applicable\"},\"gpu_plan\":{\"epistemic_literal_count\":0,\"reason\":\"program has no epistemic literals\",\"status\":\"not_applicable\"}},\n  \"magic_sets\": {\n    \"status\": \"applied\",\n    \"adorned_predicates\": [\"reach/bf\"],\n    \"generated_predicates\": [\"__xlog_magic_reach_bf\"],\n    \"declined_reasons\": []\n  },\n  \"probability\": {\n    \"engine\": \"exact_ddnnf\",\n    \"aggregate_lifting_count\": 0\n  },\n  \"aggregate_lifting\": [\n  ],\n  \"rule_provenance\": [\n    {\n      \"rule_id\": \"rule:source:0:be075531dfd98ace\",\n      \"head\": \"edge(1, 2)\",\n      \"source_kind\": \"source\",\n      \"source_span\": \"rule_index:0\",\n      \"generation_trace_hash\": \"be075531dfd98ace\",\n      \"support_relation_ids\": [],\n      \"counterexample_relation_ids\": []\n    },\n    {\n      \"rule_id\": \"rule:source:1:ca0a6e19aac4a1a2\",\n      \"head\": \"edge(2, 3)\",\n      \"source_kind\": \"source\",\n      \"source_span\": \"rule_index:1\",\n      \"generation_trace_hash\": \"ca0a6e19aac4a1a2\",\n      \"support_relation_ids\": [],\n      \"counterexample_relation_ids\": []\n    },\n    {\n      \"rule_id\": \"rule:source:2:2628e65c0708625e\",\n      \"head\": \"edge(10, 11)\",\n      \"source_kind\": \"source\",\n      \"source_span\": \"rule_index:2\",\n      \"generation_trace_hash\": \"2628e65c0708625e\",\n      \"support_relation_ids\": [],\n      \"counterexample_relation_ids\": []\n    },\n    {\n      \"rule_id\": \"rule:source:3:fe99099471d358ec\",\n      \"head\": \"edge(11, 12)\",\n      \"source_kind\": \"source\",\n      \"source_span\": \"rule_index:3\",\n      \"generation_trace_hash\": \"fe99099471d358ec\",\n      \"support_relation_ids\": [],\n      \"counterexample_relation_ids\": []\n    },\n    {\n      \"rule_id\": \"rule:source:4:d7856997db3cc602\",\n      \"head\": \"reach(X, Y)\",\n      \"source_kind\": \"source\",\n      \"source_span\": \"rule_index:4\",\n      \"generation_trace_hash\": \"d7856997db3cc602\",\n      \"support_relation_ids\": [\"edge\"],\n      \"counterexample_relation_ids\": []\n    },\n    {\n      \"rule_id\": \"rule:source:5:f5f14c3262666ac0\",\n      \"head\": \"reach(X, Z)\",\n      \"source_kind\": \"source\",\n      \"source_span\": \"rule_index:5\",\n      \"generation_trace_hash\": \"f5f14c3262666ac0\",\n      \"support_relation_ids\": [\"edge\", \"reach\"],\n      \"counterexample_relation_ids\": []\n    },\n    {\n      \"rule_id\": \"rule:generated:0:b5d004442d66db98\",\n      \"head\": \"__xlog_magic_reach_bf(1)\",\n      \"source_kind\": \"generated\",\n      \"source_span\": \"rule_index:0\",\n      \"generation_trace_hash\": \"b5d004442d66db98\",\n      \"support_relation_ids\": [],\n      \"counterexample_relation_ids\": []\n    },\n    {\n      \"rule_id\": \"rule:generated:1:08596212aa2f8b46\",\n      \"head\": \"reach(X, Y)\",\n      \"source_kind\": \"generated\",\n      \"source_span\": \"rule_index:1\",\n      \"generation_trace_hash\": \"08596212aa2f8b46\",\n      \"support_relation_ids\": [\"__xlog_magic_reach_bf\", \"edge\"],\n      \"counterexample_relation_ids\": []\n    },\n    {\n      \"rule_id\": \"rule:generated:2:887d35fb8f698b5c\",\n      \"head\": \"reach(X, Z)\",\n      \"source_kind\": \"generated\",\n      \"source_span\": \"rule_index:2\",\n      \"generation_trace_hash\": \"887d35fb8f698b5c\",\n      \"support_relation_ids\": [\"__xlog_magic_reach_bf\", \"edge\", \"reach\"],\n      \"counterexample_relation_ids\": []\n    }\n  ]\n,\n  \"proof_traces\": [\n    {\n      \"query_id\": \"query:source:0:reach(1, Y)\",\n      \"query\": \"reach(1, Y)\",\n      \"answer_relation\": \"__xlog_query_0\",\n      \"rule_ids\": [\"rule:source:4:d7856997db3cc602\", \"rule:source:5:f5f14c3262666ac0\", \"rule:generated:1:08596212aa2f8b46\", \"rule:generated:2:887d35fb8f698b5c\"],\n      \"source_facts\": [\"edge(1, 2).\", \"edge(10, 11).\", \"edge(11, 12).\", \"edge(2, 3).\"],\n      \"rejected_alternatives\": []\n    }\n  ]\n,\n  \"generated_rule_diagnostics\": [\n  ]\n}\n"
+      },
+      "run": {
+        "cmd": [
+          "target/release/xlog",
+          "run",
+          "examples/v085-language/showcase/04_magic_reach_explain/program.xlog"
+        ],
+        "duration_sec": 1.183136,
+        "returncode": 0,
+        "stderr": "",
+        "stdout": "__xlog_query_0\n+----+\n| c0 |\n+----+\n+----+\n"
+      }
+    },
+    "05_prob_aggregate_exact": {
+      "explain_json": {
+        "cmd": [
+          "target/release/xlog",
+          "explain",
+          "--format",
+          "json",
+          "examples/v085-language/showcase/05_prob_aggregate_exact/program.xlog"
+        ],
+        "duration_sec": 0.004115,
+        "returncode": 0,
+        "stderr": "",
+        "stdout": "{\n  \"parse\": {\n    \"statements\": 10,\n    \"cache_hits\": 0,\n    \"cache_misses\": 10\n  },\n  \"ast\": {\n    \"rules\": 5,\n    \"queries\": 0,\n    \"prob_queries\": 1\n  },\n  \"stratification\": {\n    \"status\": \"ok\",\n    \"strata\": 2\n  },\n  \"rir\": {\n    \"status\": \"ok\",\n    \"sccs\": 7\n  },\n  \"optimizer\": {\n    \"status\": \"ok\",\n    \"est_memory_peak\": 0\n  },\n  \"wcoj\": {\n    \"status\": \"reported\"\n  },\n  \"epistemic\": {\"eir\":{\"epistemic_literal_count\":0,\"reason\":\"program has no epistemic literals\",\"status\":\"not_applicable\"},\"executable_plan\":{\"epistemic_literal_count\":0,\"reason\":\"program has no epistemic literals\",\"status\":\"not_applicable\"},\"gpu_plan\":{\"epistemic_literal_count\":0,\"reason\":\"program has no epistemic literals\",\"status\":\"not_applicable\"}},\n  \"magic_sets\": {\n    \"status\": \"disabled\",\n    \"adorned_predicates\": [],\n    \"generated_predicates\": [],\n    \"declined_reasons\": []\n  },\n  \"probability\": {\n    \"engine\": \"exact_ddnnf\",\n    \"aggregate_lifting_count\": 5\n  },\n  \"aggregate_lifting\": [\n    {\n      \"predicate\": \"score_max\",\n      \"group_key\": [1],\n      \"operator\": \"max\",\n      \"finite_domain_source\": \"grounded body rows\",\n      \"deterministic_rows\": 0,\n      \"uncertain_rows\": 2,\n      \"domain_size\": 2,\n      \"cap\": 16,\n      \"status\": \"fallback_exact_enumeration\",\n      \"reason\": \"operator uses exact finite outcome enumeration; lifted implementation is not selected for this aggregate head\",\n      \"naive_outcomes\": 4,\n      \"dynamic_programming_states\": 0\n    },\n    {\n      \"predicate\": \"score_sum\",\n      \"group_key\": [1],\n      \"operator\": \"sum\",\n      \"finite_domain_source\": \"grounded body rows\",\n      \"deterministic_rows\": 0,\n      \"uncertain_rows\": 2,\n      \"domain_size\": 2,\n      \"cap\": 16,\n      \"status\": \"fallback_exact_enumeration\",\n      \"reason\": \"operator uses exact finite outcome enumeration; lifted implementation is not selected for this aggregate head\",\n      \"naive_outcomes\": 4,\n      \"dynamic_programming_states\": 0\n    },\n    {\n      \"predicate\": \"score_min\",\n      \"group_key\": [1],\n      \"operator\": \"min\",\n      \"finite_domain_source\": \"grounded body rows\",\n      \"deterministic_rows\": 0,\n      \"uncertain_rows\": 2,\n      \"domain_size\": 2,\n      \"cap\": 16,\n      \"status\": \"fallback_exact_enumeration\",\n      \"reason\": \"operator uses exact finite outcome enumeration; lifted implementation is not selected for this aggregate head\",\n      \"naive_outcomes\": 4,\n      \"dynamic_programming_states\": 0\n    },\n    {\n      \"predicate\": \"out_degree\",\n      \"group_key\": [1],\n      \"operator\": \"count\",\n      \"finite_domain_source\": \"grounded body rows\",\n      \"deterministic_rows\": 0,\n      \"uncertain_rows\": 2,\n      \"domain_size\": 2,\n      \"cap\": 64,\n      \"status\": \"fired\",\n      \"reason\": \"finite count domain lifted with exact cardinality dynamic programming\",\n      \"naive_outcomes\": 4,\n      \"dynamic_programming_states\": 6\n    },\n    {\n      \"predicate\": \"score_lse\",\n      \"group_key\": [1],\n      \"operator\": \"logsumexp\",\n      \"finite_domain_source\": \"grounded body rows\",\n      \"deterministic_rows\": 0,\n      \"uncertain_rows\": 2,\n      \"domain_size\": 2,\n      \"cap\": 16,\n      \"status\": \"fallback_exact_enumeration\",\n      \"reason\": \"operator uses exact finite outcome enumeration; lifted implementation is not selected for this aggregate head\",\n      \"naive_outcomes\": 4,\n      \"dynamic_programming_states\": 0\n    }\n  ],\n  \"rule_provenance\": [\n    {\n      \"rule_id\": \"rule:source:0:618b0c753f8fa176\",\n      \"head\": \"out_degree(X, count(Y))\",\n      \"source_kind\": \"source\",\n      \"source_span\": \"rule_index:0\",\n      \"generation_trace_hash\": \"618b0c753f8fa176\",\n      \"support_relation_ids\": [\"edge\"],\n      \"counterexample_relation_ids\": []\n    },\n    {\n      \"rule_id\": \"rule:source:1:fe804b75060b3e3e\",\n      \"head\": \"score_sum(X, sum(Y))\",\n      \"source_kind\": \"source\",\n      \"source_span\": \"rule_index:1\",\n      \"generation_trace_hash\": \"fe804b75060b3e3e\",\n      \"support_relation_ids\": [\"obs\"],\n      \"counterexample_relation_ids\": []\n    },\n    {\n      \"rule_id\": \"rule:source:2:ecfd3365bea0b35c\",\n      \"head\": \"score_min(X, min(Y))\",\n      \"source_kind\": \"source\",\n      \"source_span\": \"rule_index:2\",\n      \"generation_trace_hash\": \"ecfd3365bea0b35c\",\n      \"support_relation_ids\": [\"obs\"],\n      \"counterexample_relation_ids\": []\n    },\n    {\n      \"rule_id\": \"rule:source:3:d388201a360c57a4\",\n      \"head\": \"score_max(X, max(Y))\",\n      \"source_kind\": \"source\",\n      \"source_span\": \"rule_index:3\",\n      \"generation_trace_hash\": \"d388201a360c57a4\",\n      \"support_relation_ids\": [\"obs\"],\n      \"counterexample_relation_ids\": []\n    },\n    {\n      \"rule_id\": \"rule:source:4:05a98c824fa329c4\",\n      \"head\": \"score_lse(X, logsumexp(Y))\",\n      \"source_kind\": \"source\",\n      \"source_span\": \"rule_index:4\",\n      \"generation_trace_hash\": \"05a98c824fa329c4\",\n      \"support_relation_ids\": [\"obs\"],\n      \"counterexample_relation_ids\": []\n    }\n  ]\n,\n  \"proof_traces\": [\n  ]\n,\n  \"generated_rule_diagnostics\": [\n  ]\n}\n"
+      },
+      "prob_json": {
+        "cmd": [
+          "target/release/xlog",
+          "prob",
+          "examples/v085-language/showcase/05_prob_aggregate_exact/program.xlog",
+          "--output",
+          "json"
+        ],
+        "duration_sec": 0.353585,
+        "returncode": 0,
+        "stderr": "",
+        "stdout": "{\n  \"engine\": \"exact_ddnnf\",\n  \"queries\": [\n    {\n      \"atom\": \"out_degree(1, 2)\",\n      \"prob\": 0.125,\n      \"log_prob\": -2.0794415416798357\n    }\n  ]\n}\n"
+      }
+    },
+    "06_prob_aggregate_mc": {
+      "explain_json": {
+        "cmd": [
+          "target/release/xlog",
+          "explain",
+          "--format",
+          "json",
+          "examples/v085-language/showcase/06_prob_aggregate_mc/program.xlog"
+        ],
+        "duration_sec": 0.003537,
+        "returncode": 0,
+        "stderr": "",
+        "stdout": "{\n  \"parse\": {\n    \"statements\": 8,\n    \"cache_hits\": 0,\n    \"cache_misses\": 8\n  },\n  \"ast\": {\n    \"rules\": 1,\n    \"queries\": 0,\n    \"prob_queries\": 1\n  },\n  \"stratification\": {\n    \"status\": \"ok\",\n    \"strata\": 2\n  },\n  \"rir\": {\n    \"status\": \"ok\",\n    \"sccs\": 2\n  },\n  \"optimizer\": {\n    \"status\": \"ok\",\n    \"est_memory_peak\": 0\n  },\n  \"wcoj\": {\n    \"status\": \"reported\"\n  },\n  \"epistemic\": {\"eir\":{\"epistemic_literal_count\":0,\"reason\":\"program has no epistemic literals\",\"status\":\"not_applicable\"},\"executable_plan\":{\"epistemic_literal_count\":0,\"reason\":\"program has no epistemic literals\",\"status\":\"not_applicable\"},\"gpu_plan\":{\"epistemic_literal_count\":0,\"reason\":\"program has no epistemic literals\",\"status\":\"not_applicable\"}},\n  \"magic_sets\": {\n    \"status\": \"disabled\",\n    \"adorned_predicates\": [],\n    \"generated_predicates\": [],\n    \"declined_reasons\": []\n  },\n  \"probability\": {\n    \"engine\": \"mc\",\n    \"aggregate_lifting_count\": 1\n  },\n  \"aggregate_lifting\": [\n    {\n      \"predicate\": \"out_degree\",\n      \"group_key\": [1],\n      \"operator\": \"count\",\n      \"finite_domain_source\": \"grounded body rows\",\n      \"deterministic_rows\": 0,\n      \"uncertain_rows\": 3,\n      \"domain_size\": 3,\n      \"cap\": 64,\n      \"status\": \"fired\",\n      \"reason\": \"finite count domain lifted with exact cardinality dynamic programming\",\n      \"naive_outcomes\": 8,\n      \"dynamic_programming_states\": 10\n    }\n  ],\n  \"rule_provenance\": [\n    {\n      \"rule_id\": \"rule:source:0:618b0c753f8fa176\",\n      \"head\": \"out_degree(X, count(Y))\",\n      \"source_kind\": \"source\",\n      \"source_span\": \"rule_index:0\",\n      \"generation_trace_hash\": \"618b0c753f8fa176\",\n      \"support_relation_ids\": [\"edge\"],\n      \"counterexample_relation_ids\": []\n    }\n  ]\n,\n  \"proof_traces\": [\n  ]\n,\n  \"generated_rule_diagnostics\": [\n  ]\n}\n"
+      },
+      "prob_json": {
+        "cmd": [
+          "target/release/xlog",
+          "prob",
+          "examples/v085-language/showcase/06_prob_aggregate_mc/program.xlog",
+          "--output",
+          "json",
+          "--allow-cpu-oracle"
+        ],
+        "duration_sec": 0.355647,
+        "returncode": 0,
+        "stderr": "",
+        "stdout": "{\n  \"engine\": \"mc\",\n  \"mc_engine\": \"cpu-oracle\",\n  \"total_samples\": 96,\n  \"evidence_samples\": 96,\n  \"seed\": 19,\n  \"confidence\": 0.95,\n  \"sampling_method\": \"rejection\",\n  \"queries\": [\n    {\n      \"atom\": \"out_degree(1, 2)\",\n      \"prob\": 0.20833333333333334,\n      \"log_prob\": -1.5686159179138452,\n      \"stderr\": 0.04144908467469904,\n      \"ci_low\": 0.13910828901260805,\n      \"ci_high\": 0.30000247060583296,\n      \"total_samples\": 96,\n      \"evidence_samples\": 96\n    }\n  ]\n}\n"
+      }
+    },
+    "07_aggregate_lifting": {
+      "explain_json": {
+        "cmd": [
+          "target/release/xlog",
+          "explain",
+          "--format",
+          "json",
+          "examples/v085-language/showcase/07_aggregate_lifting/program.xlog"
+        ],
+        "duration_sec": 0.003087,
+        "returncode": 0,
+        "stderr": "",
+        "stdout": "{\n  \"parse\": {\n    \"statements\": 10,\n    \"cache_hits\": 0,\n    \"cache_misses\": 10\n  },\n  \"ast\": {\n    \"rules\": 1,\n    \"queries\": 0,\n    \"prob_queries\": 1\n  },\n  \"stratification\": {\n    \"status\": \"ok\",\n    \"strata\": 2\n  },\n  \"rir\": {\n    \"status\": \"ok\",\n    \"sccs\": 2\n  },\n  \"optimizer\": {\n    \"status\": \"ok\",\n    \"est_memory_peak\": 0\n  },\n  \"wcoj\": {\n    \"status\": \"reported\"\n  },\n  \"epistemic\": {\"eir\":{\"epistemic_literal_count\":0,\"reason\":\"program has no epistemic literals\",\"status\":\"not_applicable\"},\"executable_plan\":{\"epistemic_literal_count\":0,\"reason\":\"program has no epistemic literals\",\"status\":\"not_applicable\"},\"gpu_plan\":{\"epistemic_literal_count\":0,\"reason\":\"program has no epistemic literals\",\"status\":\"not_applicable\"}},\n  \"magic_sets\": {\n    \"status\": \"disabled\",\n    \"adorned_predicates\": [],\n    \"generated_predicates\": [],\n    \"declined_reasons\": []\n  },\n  \"probability\": {\n    \"engine\": \"exact_ddnnf\",\n    \"aggregate_lifting_count\": 1\n  },\n  \"aggregate_lifting\": [\n    {\n      \"predicate\": \"out_degree\",\n      \"group_key\": [1],\n      \"operator\": \"count\",\n      \"finite_domain_source\": \"grounded body rows\",\n      \"deterministic_rows\": 0,\n      \"uncertain_rows\": 8,\n      \"domain_size\": 8,\n      \"cap\": 64,\n      \"status\": \"fired\",\n      \"reason\": \"finite count domain lifted with exact cardinality dynamic programming\",\n      \"naive_outcomes\": 256,\n      \"dynamic_programming_states\": 45\n    }\n  ],\n  \"rule_provenance\": [\n    {\n      \"rule_id\": \"rule:source:0:618b0c753f8fa176\",\n      \"head\": \"out_degree(X, count(Y))\",\n      \"source_kind\": \"source\",\n      \"source_span\": \"rule_index:0\",\n      \"generation_trace_hash\": \"618b0c753f8fa176\",\n      \"support_relation_ids\": [\"edge\"],\n      \"counterexample_relation_ids\": []\n    }\n  ]\n,\n  \"proof_traces\": [\n  ]\n,\n  \"generated_rule_diagnostics\": [\n  ]\n}\n"
+      },
+      "prob_json": {
+        "cmd": [
+          "target/release/xlog",
+          "prob",
+          "examples/v085-language/showcase/07_aggregate_lifting/program.xlog",
+          "--output",
+          "json"
+        ],
+        "duration_sec": 0.279144,
+        "returncode": 0,
+        "stderr": "",
+        "stdout": "{\n  \"engine\": \"exact_ddnnf\",\n  \"queries\": [\n    {\n      \"atom\": \"out_degree(1, 4)\",\n      \"prob\": 0.2734375,\n      \"log_prob\": -1.2966822024302034\n    }\n  ]\n}\n"
+      }
+    },
+    "08_approx_confidence": {
+      "explain_json": {
+        "cmd": [
+          "target/release/xlog",
+          "explain",
+          "--format",
+          "json",
+          "examples/v085-language/showcase/08_approx_confidence/program.xlog"
+        ],
+        "duration_sec": 0.002385,
+        "returncode": 0,
+        "stderr": "",
+        "stdout": "{\n  \"parse\": {\n    \"statements\": 9,\n    \"cache_hits\": 0,\n    \"cache_misses\": 9\n  },\n  \"ast\": {\n    \"rules\": 1,\n    \"queries\": 0,\n    \"prob_queries\": 1\n  },\n  \"stratification\": {\n    \"status\": \"ok\",\n    \"strata\": 2\n  },\n  \"rir\": {\n    \"status\": \"ok\",\n    \"sccs\": 2\n  },\n  \"optimizer\": {\n    \"status\": \"ok\",\n    \"est_memory_peak\": 0\n  },\n  \"wcoj\": {\n    \"status\": \"reported\"\n  },\n  \"epistemic\": {\"eir\":{\"epistemic_literal_count\":0,\"reason\":\"program has no epistemic literals\",\"status\":\"not_applicable\"},\"executable_plan\":{\"epistemic_literal_count\":0,\"reason\":\"program has no epistemic literals\",\"status\":\"not_applicable\"},\"gpu_plan\":{\"epistemic_literal_count\":0,\"reason\":\"program has no epistemic literals\",\"status\":\"not_applicable\"}},\n  \"magic_sets\": {\n    \"status\": \"disabled\",\n    \"adorned_predicates\": [],\n    \"generated_predicates\": [],\n    \"declined_reasons\": []\n  },\n  \"probability\": {\n    \"engine\": \"mc\",\n    \"aggregate_lifting_count\": 1\n  },\n  \"aggregate_lifting\": [\n    {\n      \"predicate\": \"out_degree\",\n      \"group_key\": [1],\n      \"operator\": \"count\",\n      \"finite_domain_source\": \"grounded body rows\",\n      \"deterministic_rows\": 0,\n      \"uncertain_rows\": 2,\n      \"domain_size\": 2,\n      \"cap\": 64,\n      \"status\": \"fired\",\n      \"reason\": \"finite count domain lifted with exact cardinality dynamic programming\",\n      \"naive_outcomes\": 4,\n      \"dynamic_programming_states\": 6\n    }\n  ],\n  \"rule_provenance\": [\n    {\n      \"rule_id\": \"rule:source:0:618b0c753f8fa176\",\n      \"head\": \"out_degree(X, count(Y))\",\n      \"source_kind\": \"source\",\n      \"source_span\": \"rule_index:0\",\n      \"generation_trace_hash\": \"618b0c753f8fa176\",\n      \"support_relation_ids\": [\"edge\"],\n      \"counterexample_relation_ids\": []\n    }\n  ]\n,\n  \"proof_traces\": [\n  ]\n,\n  \"generated_rule_diagnostics\": [\n  ]\n}\n"
+      },
+      "prob_json": {
+        "cmd": [
+          "target/release/xlog",
+          "prob",
+          "examples/v085-language/showcase/08_approx_confidence/program.xlog",
+          "--output",
+          "json",
+          "--allow-cpu-oracle"
+        ],
+        "duration_sec": 0.321699,
+        "returncode": 0,
+        "stderr": "",
+        "stdout": "{\n  \"engine\": \"mc\",\n  \"mc_engine\": \"cpu-oracle\",\n  \"total_samples\": 128,\n  \"evidence_samples\": 128,\n  \"seed\": 7,\n  \"confidence\": 0.9,\n  \"sampling_method\": \"rejection\",\n  \"queries\": [\n    {\n      \"atom\": \"out_degree(1, 2)\",\n      \"prob\": 1,\n      \"log_prob\": 0,\n      \"stderr\": 0,\n      \"ci_low\": 0.9793004690027592,\n      \"ci_high\": 1,\n      \"total_samples\": 128,\n      \"evidence_samples\": 128\n    }\n  ]\n}\n"
+      }
+    },
+    "09_repl_watch_explain": {
+      "explain_json": {
+        "cmd": [
+          "target/release/xlog",
+          "explain",
+          "--format",
+          "json",
+          "examples/v085-language/showcase/09_repl_watch_explain/program.xlog"
+        ],
+        "duration_sec": 0.003049,
+        "returncode": 0,
+        "stderr": "",
+        "stdout": "{\n  \"parse\": {\n    \"statements\": 8,\n    \"cache_hits\": 0,\n    \"cache_misses\": 8\n  },\n  \"ast\": {\n    \"rules\": 4,\n    \"queries\": 1,\n    \"prob_queries\": 0\n  },\n  \"stratification\": {\n    \"status\": \"ok\",\n    \"strata\": 1\n  },\n  \"rir\": {\n    \"status\": \"ok\",\n    \"sccs\": 4\n  },\n  \"optimizer\": {\n    \"status\": \"ok\",\n    \"est_memory_peak\": 0\n  },\n  \"wcoj\": {\n    \"status\": \"reported\"\n  },\n  \"epistemic\": {\"eir\":{\"epistemic_literal_count\":0,\"reason\":\"program has no epistemic literals\",\"status\":\"not_applicable\"},\"executable_plan\":{\"epistemic_literal_count\":0,\"reason\":\"program has no epistemic literals\",\"status\":\"not_applicable\"},\"gpu_plan\":{\"epistemic_literal_count\":0,\"reason\":\"program has no epistemic literals\",\"status\":\"not_applicable\"}},\n  \"magic_sets\": {\n    \"status\": \"applied\",\n    \"adorned_predicates\": [\"reach/bf\"],\n    \"generated_predicates\": [\"__xlog_magic_reach_bf\"],\n    \"declined_reasons\": []\n  },\n  \"probability\": {\n    \"engine\": \"exact_ddnnf\",\n    \"aggregate_lifting_count\": 0\n  },\n  \"aggregate_lifting\": [\n  ],\n  \"rule_provenance\": [\n    {\n      \"rule_id\": \"rule:source:0:be075531dfd98ace\",\n      \"head\": \"edge(1, 2)\",\n      \"source_kind\": \"source\",\n      \"source_span\": \"rule_index:0\",\n      \"generation_trace_hash\": \"be075531dfd98ace\",\n      \"support_relation_ids\": [],\n      \"counterexample_relation_ids\": []\n    },\n    {\n      \"rule_id\": \"rule:source:1:ca0a6e19aac4a1a2\",\n      \"head\": \"edge(2, 3)\",\n      \"source_kind\": \"source\",\n      \"source_span\": \"rule_index:1\",\n      \"generation_trace_hash\": \"ca0a6e19aac4a1a2\",\n      \"support_relation_ids\": [],\n      \"counterexample_relation_ids\": []\n    },\n    {\n      \"rule_id\": \"rule:source:2:d7856997db3cc602\",\n      \"head\": \"reach(X, Y)\",\n      \"source_kind\": \"source\",\n      \"source_span\": \"rule_index:2\",\n      \"generation_trace_hash\": \"d7856997db3cc602\",\n      \"support_relation_ids\": [\"edge\"],\n      \"counterexample_relation_ids\": []\n    },\n    {\n      \"rule_id\": \"rule:source:3:f5f14c3262666ac0\",\n      \"head\": \"reach(X, Z)\",\n      \"source_kind\": \"source\",\n      \"source_span\": \"rule_index:3\",\n      \"generation_trace_hash\": \"f5f14c3262666ac0\",\n      \"support_relation_ids\": [\"edge\", \"reach\"],\n      \"counterexample_relation_ids\": []\n    },\n    {\n      \"rule_id\": \"rule:generated:0:b5d004442d66db98\",\n      \"head\": \"__xlog_magic_reach_bf(1)\",\n      \"source_kind\": \"generated\",\n      \"source_span\": \"rule_index:0\",\n      \"generation_trace_hash\": \"b5d004442d66db98\",\n      \"support_relation_ids\": [],\n      \"counterexample_relation_ids\": []\n    },\n    {\n      \"rule_id\": \"rule:generated:1:08596212aa2f8b46\",\n      \"head\": \"reach(X, Y)\",\n      \"source_kind\": \"generated\",\n      \"source_span\": \"rule_index:1\",\n      \"generation_trace_hash\": \"08596212aa2f8b46\",\n      \"support_relation_ids\": [\"__xlog_magic_reach_bf\", \"edge\"],\n      \"counterexample_relation_ids\": []\n    },\n    {\n      \"rule_id\": \"rule:generated:2:887d35fb8f698b5c\",\n      \"head\": \"reach(X, Z)\",\n      \"source_kind\": \"generated\",\n      \"source_span\": \"rule_index:2\",\n      \"generation_trace_hash\": \"887d35fb8f698b5c\",\n      \"support_relation_ids\": [\"__xlog_magic_reach_bf\", \"edge\", \"reach\"],\n      \"counterexample_relation_ids\": []\n    }\n  ]\n,\n  \"proof_traces\": [\n    {\n      \"query_id\": \"query:source:0:reach(1, Y)\",\n      \"query\": \"reach(1, Y)\",\n      \"answer_relation\": \"__xlog_query_0\",\n      \"rule_ids\": [\"rule:source:2:d7856997db3cc602\", \"rule:source:3:f5f14c3262666ac0\", \"rule:generated:1:08596212aa2f8b46\", \"rule:generated:2:887d35fb8f698b5c\"],\n      \"source_facts\": [\"edge(1, 2).\", \"edge(2, 3).\"],\n      \"rejected_alternatives\": []\n    }\n  ]\n,\n  \"generated_rule_diagnostics\": [\n  ]\n}\n"
+      },
+      "repl": {
+        "cmd": [
+          "target/release/xlog",
+          "repl"
+        ],
+        "duration_sec": 0.001536,
+        "returncode": 0,
+        "stderr": "",
+        "stdout": "repl: statements=8 cache_hits=0 cache_misses=8\nstate: rules=4 queries=1 prob_queries=0\n"
+      },
+      "run": {
+        "cmd": [
+          "target/release/xlog",
+          "run",
+          "examples/v085-language/showcase/09_repl_watch_explain/program.xlog"
+        ],
+        "duration_sec": 0.748815,
+        "returncode": 0,
+        "stderr": "",
+        "stdout": "__xlog_query_0\n+----+\n| c0 |\n+----+\n+----+\n"
+      },
+      "watch": {
+        "cmd": [
+          "target/release/xlog",
+          "watch",
+          "--once",
+          "--explain",
+          "examples/v085-language/showcase/09_repl_watch_explain/program.xlog"
+        ],
+        "duration_sec": 0.001932,
+        "returncode": 0,
+        "stderr": "",
+        "stdout": "watch: statements=8 cache_hits=0 cache_misses=8\nparse:\n  statements: 8\nast:\n  rules: 4\n  queries: 1\nstratification:\n  status: ok\n  strata: 1\nrir:\n  status: ok\n  sccs: 4\noptimizer:\n  status: ok\n  est_memory_peak: 0\nwcoj:\n  status: reported\nepistemic:\n  eir: not_applicable\n  gpu_plan: not_applicable\n  executable_plan: not_applicable\nmagic_sets:\n  status: applied\n  adorned_predicates:\n    - reach/bf\n  generated_predicates:\n    - __xlog_magic_reach_bf\nrule_provenance:\n  - id: rule:source:0:be075531dfd98ace source_kind: source head: edge(1, 2)\n  - id: rule:source:1:ca0a6e19aac4a1a2 source_kind: source head: edge(2, 3)\n  - id: rule:source:2:d7856997db3cc602 source_kind: source head: reach(X, Y)\n  - id: rule:source:3:f5f14c3262666ac0 source_kind: source head: reach(X, Z)\n  - id: rule:generated:0:b5d004442d66db98 source_kind: generated head: __xlog_magic_reach_bf(1)\n  - id: rule:generated:1:08596212aa2f8b46 source_kind: generated head: reach(X, Y)\n  - id: rule:generated:2:887d35fb8f698b5c source_kind: generated head: reach(X, Z)\nproof_traces:\n  - query: reach(1, Y) rules: 4 source_facts: 2\n"
+      }
+    },
+    "10_scientific_incremental": {
+      "explain_json": {
+        "cmd": [
+          "target/release/xlog",
+          "explain",
+          "--format",
+          "json",
+          "examples/v085-language/showcase/10_scientific_incremental/program.xlog"
+        ],
+        "duration_sec": 0.005838,
+        "returncode": 0,
+        "stderr": "",
+        "stdout": "{\n  \"parse\": {\n    \"statements\": 26,\n    \"cache_hits\": 0,\n    \"cache_misses\": 26\n  },\n  \"ast\": {\n    \"rules\": 18,\n    \"queries\": 3,\n    \"prob_queries\": 0\n  },\n  \"stratification\": {\n    \"status\": \"ok\",\n    \"strata\": 2\n  },\n  \"rir\": {\n    \"status\": \"ok\",\n    \"sccs\": 19\n  },\n  \"optimizer\": {\n    \"status\": \"ok\",\n    \"est_memory_peak\": 0\n  },\n  \"wcoj\": {\n    \"status\": \"reported\"\n  },\n  \"epistemic\": {\"eir\":{\"epistemic_literal_count\":0,\"reason\":\"program has no epistemic literals\",\"status\":\"not_applicable\"},\"executable_plan\":{\"epistemic_literal_count\":0,\"reason\":\"program has no epistemic literals\",\"status\":\"not_applicable\"},\"gpu_plan\":{\"epistemic_literal_count\":0,\"reason\":\"program has no epistemic literals\",\"status\":\"not_applicable\"}},\n  \"magic_sets\": {\n    \"status\": \"disabled\",\n    \"adorned_predicates\": [],\n    \"generated_predicates\": [],\n    \"declined_reasons\": []\n  },\n  \"probability\": {\n    \"engine\": \"exact_ddnnf\",\n    \"aggregate_lifting_count\": 0\n  },\n  \"aggregate_lifting\": [\n  ],\n  \"rule_provenance\": [\n    {\n      \"rule_id\": \"rule:source:0:3127bde004596093\",\n      \"head\": \"sensor(1)\",\n      \"source_kind\": \"source\",\n      \"source_span\": \"rule_index:0\",\n      \"generation_trace_hash\": \"3127bde004596093\",\n      \"support_relation_ids\": [],\n      \"counterexample_relation_ids\": []\n    },\n    {\n      \"rule_id\": \"rule:source:1:3131bde00461b518\",\n      \"head\": \"sensor(2)\",\n      \"source_kind\": \"source\",\n      \"source_span\": \"rule_index:1\",\n      \"generation_trace_hash\": \"3131bde00461b518\",\n      \"support_relation_ids\": [],\n      \"counterexample_relation_ids\": []\n    },\n    {\n      \"rule_id\": \"rule:source:2:312e49e0045eba25\",\n      \"head\": \"sensor(3)\",\n      \"source_kind\": \"source\",\n      \"source_span\": \"rule_index:2\",\n      \"generation_trace_hash\": \"312e49e0045eba25\",\n      \"support_relation_ids\": [],\n      \"counterexample_relation_ids\": []\n    },\n    {\n      \"rule_id\": \"rule:source:3:64941f8a0e49294c\",\n      \"head\": \"reading(1, 10)\",\n      \"source_kind\": \"source\",\n      \"source_span\": \"rule_index:3\",\n      \"generation_trace_hash\": \"64941f8a0e49294c\",\n      \"support_relation_ids\": [],\n      \"counterexample_relation_ids\": []\n    },\n    {\n      \"rule_id\": \"rule:source:4:6490bb8a0e464989\",\n      \"head\": \"reading(1, 11)\",\n      \"source_kind\": \"source\",\n      \"source_span\": \"rule_index:4\",\n      \"generation_trace_hash\": \"6490bb8a0e464989\",\n      \"support_relation_ids\": [],\n      \"counterexample_relation_ids\": []\n    },\n    {\n      \"rule_id\": \"rule:source:5:648da38a0e43eaea\",\n      \"head\": \"reading(1, 12)\",\n      \"source_kind\": \"source\",\n      \"source_span\": \"rule_index:5\",\n      \"generation_trace_hash\": \"648da38a0e43eaea\",\n      \"support_relation_ids\": [],\n      \"counterexample_relation_ids\": []\n    },\n    {\n      \"rule_id\": \"rule:source:6:728ef2404092c3c7\",\n      \"head\": \"reading(2, 10)\",\n      \"source_kind\": \"source\",\n      \"source_span\": \"rule_index:6\",\n      \"generation_trace_hash\": \"728ef2404092c3c7\",\n      \"support_relation_ids\": [],\n      \"counterexample_relation_ids\": []\n    },\n    {\n      \"rule_id\": \"rule:source:7:72814a4040871bf3\",\n      \"head\": \"reading(2, 14)\",\n      \"source_kind\": \"source\",\n      \"source_span\": \"rule_index:7\",\n      \"generation_trace_hash\": \"72814a4040871bf3\",\n      \"support_relation_ids\": [],\n      \"counterexample_relation_ids\": []\n    },\n    {\n      \"rule_id\": \"rule:source:8:60731756bdb6f382\",\n      \"head\": \"blocked_sensor(3)\",\n      \"source_kind\": \"source\",\n      \"source_span\": \"rule_index:8\",\n      \"generation_trace_hash\": \"60731756bdb6f382\",\n      \"support_relation_ids\": [],\n      \"counterexample_relation_ids\": []\n    },\n    {\n      \"rule_id\": \"rule:source:9:15c858319e727178\",\n      \"head\": \"valid_sample(10)\",\n      \"source_kind\": \"source\",\n      \"source_span\": \"rule_index:9\",\n      \"generation_trace_hash\": \"15c858319e727178\",\n      \"support_relation_ids\": [],\n      \"counterexample_relation_ids\": []\n    },\n    {\n      \"rule_id\": \"rule:source:10:15c4e4319e6f7685\",\n      \"head\": \"valid_sample(11)\",\n      \"source_kind\": \"source\",\n      \"source_span\": \"rule_index:10\",\n      \"generation_trace_hash\": \"15c4e4319e6f7685\",\n      \"support_relation_ids\": [],\n      \"counterexample_relation_ids\": []\n    },\n    {\n      \"rule_id\": \"rule:source:11:15c17c319e6c8ff6\",\n      \"head\": \"valid_sample(12)\",\n      \"source_kind\": \"source\",\n      \"source_span\": \"rule_index:11\",\n      \"generation_trace_hash\": \"15c17c319e6c8ff6\",\n      \"support_relation_ids\": [],\n      \"counterexample_relation_ids\": []\n    },\n    {\n      \"rule_id\": \"rule:source:12:f766065ed117e701\",\n      \"head\": \"available(S)\",\n      \"source_kind\": \"source\",\n      \"source_span\": \"rule_index:12\",\n      \"generation_trace_hash\": \"f766065ed117e701\",\n      \"support_relation_ids\": [\"blocked_sensor\", \"sensor\"],\n      \"counterexample_relation_ids\": []\n    },\n    {\n      \"rule_id\": \"rule:source:13:18635b25cf1be76a\",\n      \"head\": \"calibration_window_ok(1)\",\n      \"source_kind\": \"source\",\n      \"source_span\": \"rule_index:13\",\n      \"generation_trace_hash\": \"18635b25cf1be76a\",\n      \"support_relation_ids\": [\"maplist\"],\n      \"counterexample_relation_ids\": []\n    },\n    {\n      \"rule_id\": \"rule:source:14:b29fa9475c62d458\",\n      \"head\": \"sample_values(S, Values)\",\n      \"source_kind\": \"source\",\n      \"source_span\": \"rule_index:14\",\n      \"generation_trace_hash\": \"b29fa9475c62d458\",\n      \"support_relation_ids\": [\"findall\", \"sensor\"],\n      \"counterexample_relation_ids\": []\n    },\n    {\n      \"rule_id\": \"rule:source:15:ae7eee59aee01882\",\n      \"head\": \"sample_count(S, N)\",\n      \"source_kind\": \"source\",\n      \"source_span\": \"rule_index:15\",\n      \"generation_trace_hash\": \"ae7eee59aee01882\",\n      \"support_relation_ids\": [\"findall\", \"length\", \"sensor\"],\n      \"counterexample_relation_ids\": []\n    },\n    {\n      \"rule_id\": \"rule:source:16:12b934c6b67f9e9a\",\n      \"head\": \"reading_count(S, count(V))\",\n      \"source_kind\": \"source\",\n      \"source_span\": \"rule_index:16\",\n      \"generation_trace_hash\": \"12b934c6b67f9e9a\",\n      \"support_relation_ids\": [\"reading\"],\n      \"counterexample_relation_ids\": []\n    },\n    {\n      \"rule_id\": \"rule:source:17:791abf7652d26104\",\n      \"head\": \"stable_sensor(S)\",\n      \"source_kind\": \"source\",\n      \"source_span\": \"rule_index:17\",\n      \"generation_trace_hash\": \"791abf7652d26104\",\n      \"support_relation_ids\": [\"available\", \"calibration_window_ok\", \"sample_count\"],\n      \"counterexample_relation_ids\": []\n    }\n  ]\n,\n  \"proof_traces\": [\n    {\n      \"query_id\": \"query:source:0:stable_sensor(S)\",\n      \"query\": \"stable_sensor(S)\",\n      \"answer_relation\": \"__xlog_query_0\",\n      \"rule_ids\": [\"rule:source:17:791abf7652d26104\"],\n      \"source_facts\": [],\n      \"rejected_alternatives\": []\n    },\n    {\n      \"query_id\": \"query:source:1:sample_count(S, N)\",\n      \"query\": \"sample_count(S, N)\",\n      \"answer_relation\": \"__xlog_query_1\",\n      \"rule_ids\": [\"rule:source:15:ae7eee59aee01882\"],\n      \"source_facts\": [\"sensor(1).\", \"sensor(2).\", \"sensor(3).\"],\n      \"rejected_alternatives\": []\n    },\n    {\n      \"query_id\": \"query:source:2:reading_count(S, N)\",\n      \"query\": \"reading_count(S, N)\",\n      \"answer_relation\": \"__xlog_query_2\",\n      \"rule_ids\": [\"rule:source:16:12b934c6b67f9e9a\"],\n      \"source_facts\": [\"reading(1, 10).\", \"reading(1, 11).\", \"reading(1, 12).\", \"reading(2, 10).\", \"reading(2, 14).\"],\n      \"rejected_alternatives\": []\n    }\n  ]\n,\n  \"generated_rule_diagnostics\": [\n  ]\n}\n"
+      },
+      "run": {
+        "cmd": [
+          "target/release/xlog",
+          "run",
+          "examples/v085-language/showcase/10_scientific_incremental/program.xlog"
+        ],
+        "duration_sec": 13.342205,
+        "returncode": 0,
+        "stderr": "",
+        "stdout": "__xlog_query_0\n+----+\n| id |\n+----+\n| 1  |\n+----+\n__xlog_query_1\n+----+-----+\n| id | len |\n+----+-----+\n| 1  | 3   |\n| 2  | 2   |\n+----+-----+\n__xlog_query_2\n+--------+---------+\n| sensor | count_0 |\n+--------+---------+\n| 1      | 3       |\n| 2      | 2       |\n+--------+---------+\n"
+      }
+    }
+  },
+  "required_example_count": 10,
+  "required_interaction_count": 5,
+  "status": "PASS",
+  "suite": "G085_EXAMPLES"
+}

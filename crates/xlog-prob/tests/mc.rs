@@ -133,8 +133,12 @@ query(flip()).
 "#;
 
     let program = McProgram::compile_source(src).unwrap();
-    let cfg = mc_config(2_000, 999, 128, None);
+    let mut cfg = mc_config(2_000, 999, 128, None);
+    // Negation is resident-rejected; this binary is the classified CPU-oracle
+    // suite, so opt into the labeled oracle explicitly.
+    cfg.allow_cpu_oracle_fallback = true;
     let result = program.evaluate(cfg).unwrap();
+    assert_eq!(result.engine, xlog_prob::mc::McEngine::CpuOracle);
 
     let p_flip = prob_of_atom(&result, "flip");
     let p_p = prob_of_atom(&result, "p");

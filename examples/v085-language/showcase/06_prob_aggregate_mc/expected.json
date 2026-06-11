@@ -4,6 +4,8 @@
   "checks": {
     "prob_json": {
       "engine": "mc",
+      "mc_engine": "cpu-oracle",
+      "extra_args": ["--allow-cpu-oracle"],
       "total_samples": 96,
       "seed": 19,
       "query_atoms": ["out_degree(1, 2)"],

@@ -271,6 +271,7 @@ impl CompiledProgram {
             nonmonotone_cycles: None,
             nonmonotone_iteration_limit_hits: None,
             sampling_method: None,
+            mc_engine: None,
         })
     }
 
@@ -359,6 +360,7 @@ impl CompiledProgram {
             nonmonotone_cycles: None,
             nonmonotone_iteration_limit_hits: None,
             sampling_method: None,
+            mc_engine: None,
         })
     }
 
@@ -455,6 +457,7 @@ impl CompiledProgram {
                 McSamplingMethod::Rejection => "rejection".to_string(),
                 McSamplingMethod::EvidenceClamping => "evidence_clamping".to_string(),
             }),
+            mc_engine: Some(result.engine.as_str().to_string()),
         })
     }
 }
@@ -465,7 +468,7 @@ impl CompiledProgram {
 
 #[pymethods]
 impl CompiledProgram {
-    #[pyo3(signature = (return_grads=false, samples=None, seed=None, confidence=0.95, max_nonmonotone_iterations=1024, sampling_method=None, memory_mb=None))]
+    #[pyo3(signature = (return_grads=false, samples=None, seed=None, confidence=0.95, max_nonmonotone_iterations=1024, sampling_method=None, memory_mb=None, allow_cpu_oracle=false))]
     pub fn evaluate(
         &self,
         _py: Python<'_>,
@@ -476,6 +479,7 @@ impl CompiledProgram {
         max_nonmonotone_iterations: usize,
         sampling_method: Option<String>,
         memory_mb: Option<u64>,
+        allow_cpu_oracle: bool,
     ) -> PyResult<EvalResult> {
         enforce_call_memory_limit(&self.output_provider, memory_mb)?;
         match &self.program {
@@ -516,6 +520,10 @@ impl CompiledProgram {
                 cfg.confidence = confidence;
                 cfg.max_nonmonotone_iterations = max_nonmonotone_iterations;
                 cfg.sampling_method = Self::parse_sampling_method(sampling_method)?;
+                // Fail-closed contract: resident-rejected programs (negation,
+                // aggregates, ...) error unless the caller explicitly opts
+                // into the labeled CPU oracle.
+                cfg.allow_cpu_oracle_fallback = allow_cpu_oracle;
                 #[cfg(feature = "host-io")]
                 {
                     let result = _program.evaluate(cfg).map_err(types::xlog_err)?;

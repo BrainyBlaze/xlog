@@ -87,11 +87,16 @@ fn approximate_count_aggregate_fixture_reports_confidence() {
     let source = std::fs::read_to_string(path).expect("read approximate aggregate example");
     let parsed = parse_program(&source).expect("parse approximate aggregate example");
     let program = McProgram::compile_source(&source).expect("compile aggregate MC program");
-    let cfg = McEvalConfig::from_directives(&parsed.directives).expect("MC config from pragmas");
+    let mut cfg =
+        McEvalConfig::from_directives(&parsed.directives).expect("MC config from pragmas");
+    // Aggregate terms are resident-rejected (unbounded_term); MC aggregates
+    // execute on the labeled CPU oracle, opted into explicitly.
+    cfg.allow_cpu_oracle_fallback = true;
 
     let result = program
         .evaluate(cfg)
         .expect("evaluate aggregate MC program");
+    assert_eq!(result.engine, xlog_prob::mc::McEngine::CpuOracle);
     assert_eq!(result.total_samples, 64);
     assert_eq!(result.evidence_samples, 64);
     assert!((result.confidence - 0.90).abs() < 1e-12);

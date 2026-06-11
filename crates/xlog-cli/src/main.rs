@@ -100,6 +100,11 @@ struct ProbArgs {
     prob_method: Option<ProbMethodCli>,
     #[arg(long, alias = "max-nonmonotone-iterations")]
     prob_max_nonmonotone_iterations: Option<usize>,
+    /// Allow the labeled CPU oracle when the resident GPU MC engine rejects
+    /// the program (negation, aggregates, ...). Fail-closed when unset; the
+    /// result is labeled `mc_engine: cpu-oracle` and is not GPU-native evidence.
+    #[arg(long)]
+    allow_cpu_oracle: bool,
     #[arg(long, value_enum, default_value = "pretty")]
     output: ProbOutputFormat,
     #[arg(long)]
@@ -1606,6 +1611,7 @@ fn apply_mc_cli_overrides(args: &ProbArgs, cfg: &mut McEvalConfig) -> Result<()>
             ProbMethodCli::EvidenceClamping => McSamplingMethod::EvidenceClamping,
         });
     }
+    cfg.allow_cpu_oracle_fallback = args.allow_cpu_oracle;
     cfg.validate()
 }
 
@@ -1712,6 +1718,7 @@ fn emit_prob_mc(
     let seed = result.seed;
     let confidence = result.confidence;
     let sampling_method = result.sampling_method.as_str().to_string();
+    let mc_engine = result.engine.as_str().to_string();
 
     let mut atoms = Vec::new();
     let mut probs = Vec::new();
@@ -1724,6 +1731,7 @@ fn emit_prob_mc(
     let mut seed_col = Vec::new();
     let mut confidence_col = Vec::new();
     let mut sampling_method_col = Vec::new();
+    let mut mc_engine_col = Vec::new();
     for q in result.query_estimates {
         atoms.push(atom_to_string(&q.atom));
         probs.push(q.prob);
@@ -1736,6 +1744,7 @@ fn emit_prob_mc(
         seed_col.push(seed);
         confidence_col.push(confidence);
         sampling_method_col.push(sampling_method.clone());
+        mc_engine_col.push(mc_engine.clone());
     }
 
     let batch = arrow::record_batch::RecordBatch::try_from_iter(vec![
@@ -1787,6 +1796,11 @@ fn emit_prob_mc(
             Arc::new(arrow::array::StringArray::from(sampling_method_col))
                 as Arc<dyn arrow::array::Array>,
         ),
+        (
+            "mc_engine",
+            Arc::new(arrow::array::StringArray::from(mc_engine_col))
+                as Arc<dyn arrow::array::Array>,
+        ),
     ])
     .map_err(|e| XlogError::Execution(format!("Failed to build mc batch: {}", e)))?;
 
@@ -1836,8 +1850,10 @@ fn print_prob_mc_json(result: xlog_prob::mc::McResult) {
     let seed = result.seed;
     let confidence = result.confidence;
     let sampling_method = result.sampling_method.as_str();
+    let mc_engine = result.engine.as_str();
     println!("{{");
     println!("  \"engine\": \"mc\",");
+    println!("  \"mc_engine\": \"{}\",", mc_engine);
     println!("  \"total_samples\": {},", total_samples);
     println!("  \"evidence_samples\": {},", evidence_samples);
     println!("  \"seed\": {},", seed);
