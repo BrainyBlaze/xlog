@@ -655,7 +655,9 @@ pub mod groupby_kernels {
     pub const GROUPBY_SUM: &str = "groupby_sum";
     pub const GROUPBY_SUM_U64: &str = "groupby_sum_u64";
     pub const GROUPBY_MIN: &str = "groupby_min";
+    pub const GROUPBY_MIN_U64: &str = "groupby_min_u64";
     pub const GROUPBY_MAX: &str = "groupby_max";
+    pub const GROUPBY_MAX_U64: &str = "groupby_max_u64";
     pub const GROUPBY_LOGSUMEXP_MAX: &str = "groupby_logsumexp_max";
     pub const GROUPBY_LOGSUMEXP_SUMEXP: &str = "groupby_logsumexp_sumexp";
     pub const GROUPBY_LOGSUMEXP_FINAL: &str = "groupby_logsumexp_final";

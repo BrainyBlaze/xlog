@@ -709,3 +709,113 @@ fn groupby_recorded_sum_u64_values_matches_host() {
         ],
     );
 }
+
+// =====================================================================
+// S1c widening — u64-key sum/min/max.
+// =====================================================================
+
+fn upload_binary_u64(memory: &Arc<GpuMemoryManager>, rows: &[(u64, u64)]) -> CudaBuffer {
+    let n = rows.len() as u32;
+    let mut col0 = memory
+        .alloc::<u8>(rows.len() * std::mem::size_of::<u64>())
+        .expect("alloc col0");
+    let mut col1 = memory
+        .alloc::<u8>(rows.len() * std::mem::size_of::<u64>())
+        .expect("alloc col1");
+    let mut d_num_rows = memory.alloc::<u32>(1).expect("alloc d_num_rows");
+    let col0_bytes: Vec<u8> = rows.iter().flat_map(|(a, _)| a.to_le_bytes()).collect();
+    let col1_bytes: Vec<u8> = rows.iter().flat_map(|(_, b)| b.to_le_bytes()).collect();
+    let device = memory.device().inner();
+    device
+        .htod_sync_copy_into(&col0_bytes, &mut col0)
+        .expect("htod col0");
+    device
+        .htod_sync_copy_into(&col1_bytes, &mut col1)
+        .expect("htod col1");
+    device
+        .htod_sync_copy_into(&[n], &mut d_num_rows)
+        .expect("htod d_num_rows");
+    let schema = Schema::new(vec![
+        ("col0".to_string(), ScalarType::U64),
+        ("col1".to_string(), ScalarType::U64),
+    ]);
+    CudaBuffer::from_columns_with_host_count(
+        vec![col0.into(), col1.into()],
+        n as u64,
+        d_num_rows,
+        schema,
+        n,
+    )
+}
+
+/// Sorted (X, agg) pairs from a 2-column (U64 key, U64 agg) buffer.
+fn download_groups_u64_u64(
+    memory: &Arc<GpuMemoryManager>,
+    buffer: &CudaBuffer,
+) -> Vec<(u64, u64)> {
+    let keys = download_u64_column(memory, buffer, 0);
+    let aggs = download_u64_column(memory, buffer, 1);
+    assert_eq!(keys.len(), aggs.len());
+    let mut out: Vec<(u64, u64)> = keys.into_iter().zip(aggs).collect();
+    out.sort();
+    out
+}
+
+/// The unfused u64-key baseline (materialize + legacy groupby) must reduce
+/// U64 value columns: the legacy groupby is the path u64-key buffers take
+/// (the recorded groupby is U32/Symbol-key only).
+#[test]
+fn groupby_legacy_agg_u64_values_matches_host() {
+    let Some(fix) = make_fixture() else {
+        eprintln!("skipping legacy_agg_u64: no CUDA device");
+        return;
+    };
+    // (key u64 above 2^40, value u64 above u32::MAX) so any width
+    // truncation visibly fails.
+    const B: u64 = 1 << 40;
+    let rows: Vec<(u64, u64)> = vec![
+        (B + 1, 5_000_000_000),
+        (B + 1, 7),
+        (B + 2, 1),
+        (B + 2, u32::MAX as u64 + 1),
+        (B + 3, 0),
+    ];
+    let buffer = upload_binary_u64(&fix.memory, &rows);
+    let grouped = fix
+        .provider
+        .groupby_multi_agg(&buffer, &[0], &[(1, AggOp::Sum)])
+        .expect("legacy groupby sum over u64 values");
+    assert_eq!(
+        download_groups_u64_u64(&fix.memory, &grouped),
+        vec![
+            (B + 1, 5_000_000_007u64),
+            (B + 2, u32::MAX as u64 + 2),
+            (B + 3, 0)
+        ],
+        "legacy u64 sum"
+    );
+    let buffer = upload_binary_u64(&fix.memory, &rows);
+    let grouped = fix
+        .provider
+        .groupby_multi_agg(&buffer, &[0], &[(1, AggOp::Min)])
+        .expect("legacy groupby min over u64 values");
+    assert_eq!(
+        download_groups_u64_u64(&fix.memory, &grouped),
+        vec![(B + 1, 7u64), (B + 2, 1), (B + 3, 0)],
+        "legacy u64 min"
+    );
+    let buffer = upload_binary_u64(&fix.memory, &rows);
+    let grouped = fix
+        .provider
+        .groupby_multi_agg(&buffer, &[0], &[(1, AggOp::Max)])
+        .expect("legacy groupby max over u64 values");
+    assert_eq!(
+        download_groups_u64_u64(&fix.memory, &grouped),
+        vec![
+            (B + 1, 5_000_000_000u64),
+            (B + 2, u32::MAX as u64 + 1),
+            (B + 3, 0)
+        ],
+        "legacy u64 max"
+    );
+}
