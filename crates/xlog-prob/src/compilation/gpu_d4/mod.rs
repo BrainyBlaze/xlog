@@ -407,7 +407,7 @@ pub(crate) fn compile_gpu_d4(
     config: &GpuCompileConfig,
 ) -> Result<GpuXgcf> {
     let compile_needed = alloc_compile_gate(provider, 1)?;
-    build::compile_gpu_d4_with_gate(cnf, provider, config, &compile_needed)
+    Ok(build::compile_gpu_d4_with_gate(cnf, provider, config, &compile_needed)?.0)
 }
 
 /// Compile a device-resident CNF into a device-resident XGCF circuit (Phase 1),
@@ -418,6 +418,17 @@ pub fn compile_gpu_d4_gated(
     config: &GpuCompileConfig,
     compile_needed: &TrackedCudaSlice<u32>,
 ) -> Result<GpuXgcf> {
+    Ok(build::compile_gpu_d4_with_gate(cnf, provider, config, compile_needed)?.0)
+}
+
+/// Gated compile that also returns the BFS frontier item count for profiling
+/// (0 unless `XLOG_WARMUP_PROFILE=1`).
+pub(crate) fn compile_gpu_d4_gated_with_stats(
+    cnf: &GpuCnf,
+    provider: &Arc<CudaKernelProvider>,
+    config: &GpuCompileConfig,
+    compile_needed: &TrackedCudaSlice<u32>,
+) -> Result<(GpuXgcf, u32)> {
     build::compile_gpu_d4_with_gate(cnf, provider, config, compile_needed)
 }
 

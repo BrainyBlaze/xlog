@@ -56,9 +56,12 @@ pub struct CircuitCompileProfile {
     pub free_var_mask_sec: f64,
     pub gpu_cache_hit: bool,
     pub disk_cache_hit: bool,
+    /// BFS frontier item count after `frontier_depth` expansion steps
+    /// (0 on cache hits or when profiling is disabled).
+    pub frontier_items: u32,
 }
 
-fn warmup_profiling_enabled() -> bool {
+pub(crate) fn warmup_profiling_enabled() -> bool {
     std::env::var("XLOG_WARMUP_PROFILE")
         .map(|v| v == "1")
         .unwrap_or(false)
@@ -336,8 +339,13 @@ pub fn compile_gpu_d4_and_verify_cached(
     } else {
         None
     };
-    let circuit_base =
-        gpu_d4::compile_gpu_d4_gated(cnf, provider, &d4_config, handle.compile_needed_device())?;
+    let (circuit_base, frontier_items) = gpu_d4::compile_gpu_d4_gated_with_stats(
+        cnf,
+        provider,
+        &d4_config,
+        handle.compile_needed_device(),
+    )?;
+    profile.frontier_items = frontier_items;
     if let Some(t0) = t_d4 {
         provider
             .device()

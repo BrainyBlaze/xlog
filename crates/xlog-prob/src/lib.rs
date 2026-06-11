@@ -2,6 +2,7 @@
 #![warn(missing_docs)]
 
 mod aggregates;
+mod decision_order;
 #[allow(missing_docs)] // TODO(v0.6): document or make pub(crate)
 pub mod cnf;
 #[allow(missing_docs)] // TODO(v0.6): document or make pub(crate)

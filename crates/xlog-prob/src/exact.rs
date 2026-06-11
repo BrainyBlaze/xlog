@@ -104,6 +104,12 @@ pub struct GpuConfig {
     pub device_ordinal: usize,
     /// Device memory budget in bytes (clamped to available memory at runtime).
     pub memory_bytes: u64,
+    /// Host-side D4 decision-order hint: renumber leaf/choice variables by
+    /// descending structural fanout in the provenance DAG before CNF encoding,
+    /// steering the deterministic variable-id tie-breaks of the (unchanged)
+    /// GPU D4 branching heuristic. Query probabilities are unaffected; only
+    /// compile-time search shape can differ.
+    pub decision_order_hint: bool,
 }
 
 impl Default for GpuConfig {
@@ -111,6 +117,7 @@ impl Default for GpuConfig {
         Self {
             device_ordinal: 0,
             memory_bytes: 32 * 1024 * 1024 * 1024, // 32 GB — clamped to available device memory by GpuMemoryManager at runtime.
+            decision_order_hint: false,
         }
     }
 }
@@ -1347,6 +1354,12 @@ impl ExactDdnnfProgram {
                 "GPU memory budget must be non-zero".to_string(),
             ));
         }
+
+        let provenance = if config.decision_order_hint {
+            crate::decision_order::apply_decision_order_hint(provenance)
+        } else {
+            provenance
+        };
 
         let mut roots_set: HashSet<crate::pir::PirNodeId> = HashSet::new();
 

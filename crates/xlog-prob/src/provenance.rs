@@ -13,7 +13,7 @@ use xlog_logic::stratify::{
 
 use crate::wfs::{evaluate_wfs_rules, WfsAtom, WfsConfig, WfsLiteral, WfsRule};
 
-use crate::aggregates::AggState;
+use crate::aggregates::{AggState, AggStateKey};
 use crate::pir::{ChoiceVarId, LeafId, PirGraph, PirNodeId};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -1401,6 +1401,12 @@ fn eval_aggregate_head_provenance(
                 MAX_EXACT_PROB_AGG_UNCERTAIN_ROWS
             )));
         }
+        let (outcomes, dp_states) = factorized_aggregate_outcomes(
+            &agg_specs,
+            &always_rows,
+            &uncertain_rows,
+            builder,
+        )?;
         record_aggregate_lift_reports(
             aggregate_lifting,
             head,
@@ -1408,32 +1414,17 @@ fn eval_aggregate_head_provenance(
             &agg_specs,
             always_rows.len(),
             uncertain_rows.len(),
-            AggregateLiftStatus::FallbackExactEnumeration,
-            "operator uses exact finite outcome enumeration; lifted implementation is not selected for this aggregate head",
+            AggregateLiftStatus::Fired,
+            "finite outcome domain folded with factorized aggregate-state dynamic programming",
             MAX_EXACT_PROB_AGG_UNCERTAIN_ROWS,
-            0,
+            dp_states,
         );
 
-        let mask_count = 1usize << uncertain_rows.len();
-        for mask in 0..mask_count {
-            if always_rows.is_empty() && mask == 0 {
+        for (agg_states, selected_any, proof) in outcomes {
+            if always_rows.is_empty() && !selected_any {
+                // No deterministic rows and no uncertain row selected: the group
+                // is empty in this outcome, so no head tuple materializes.
                 continue;
-            }
-
-            let mut agg_states: Vec<AggState> =
-                agg_specs.iter().map(|(op, _)| AggState::new(*op)).collect();
-            for row in &always_rows {
-                update_aggregate_states(&mut agg_states, &agg_specs, row)?;
-            }
-
-            let mut proof_terms: Vec<PirNodeId> = Vec::with_capacity(uncertain_rows.len());
-            for (idx, row) in uncertain_rows.iter().enumerate() {
-                if (mask & (1usize << idx)) != 0 {
-                    proof_terms.push(row.prov);
-                    update_aggregate_states(&mut agg_states, &agg_specs, row)?;
-                } else {
-                    proof_terms.push(negate_provenance(row.prov, builder));
-                }
             }
 
             let tuple = materialize_aggregate_tuple(
@@ -1444,13 +1435,89 @@ fn eval_aggregate_head_provenance(
                 &agg_to_pos,
                 &agg_states,
             )?;
-            let proof = builder.and(proof_terms);
             let entry = out.entry(tuple).or_insert_with(|| builder.const_false());
             *entry = builder.or(vec![*entry, proof]);
         }
     }
 
     Ok(out)
+}
+
+/// Factorized aggregate-outcome folding for non-count exact aggregates.
+///
+/// Instead of enumerating all `2^k` present/absent masks over the `k` uncertain
+/// rows (one conjunctive PIR formula per mask), fold the rows one at a time
+/// through a dynamic program keyed by the aggregate state reached so far.
+/// Outcomes that agree on the aggregate state share one PIR sub-DAG, so the
+/// emitted PIR is `O(k * #distinct-states)` instead of `O(2^k)` formulas.
+///
+/// Rows are folded in the same order as the previous mask enumeration
+/// (deterministic rows first, then uncertain rows in index order), so every
+/// outcome value is bit-identical to the enumerated result and the union of
+/// worlds reaching each outcome is unchanged (identical query probabilities).
+///
+/// Returns the folded outcomes as `(aggregate states, any-uncertain-row-selected,
+/// proof formula)` triples plus the total number of DP states visited.
+#[allow(clippy::type_complexity)]
+fn factorized_aggregate_outcomes(
+    agg_specs: &[(AggOp, String)],
+    always_rows: &[AggregateProvRow],
+    uncertain_rows: &[AggregateProvRow],
+    builder: &mut PirBuilder,
+) -> Result<(Vec<(Vec<AggState>, bool, PirNodeId)>, usize)> {
+    use std::collections::btree_map::Entry;
+
+    fn states_key(states: &[AggState]) -> Vec<AggStateKey> {
+        states.iter().map(AggState::dp_key).collect()
+    }
+
+    let mut base: Vec<AggState> = agg_specs.iter().map(|(op, _)| AggState::new(*op)).collect();
+    for row in always_rows {
+        update_aggregate_states(&mut base, agg_specs, row)?;
+    }
+
+    let mut dp: BTreeMap<(Vec<AggStateKey>, bool), (Vec<AggState>, PirNodeId)> = BTreeMap::new();
+    let true_proof = builder.const_true();
+    dp.insert((states_key(&base), false), (base, true_proof));
+    let mut dp_states = dp.len();
+
+    for row in uncertain_rows {
+        let absent = negate_provenance(row.prov, builder);
+        let mut next: BTreeMap<(Vec<AggStateKey>, bool), (Vec<AggState>, PirNodeId)> =
+            BTreeMap::new();
+        for ((key, selected_any), (states, proof)) in dp {
+            let mut present_states = states.clone();
+            update_aggregate_states(&mut present_states, agg_specs, row)?;
+            let present_key = states_key(&present_states);
+            let present_proof = builder.and(vec![proof, row.prov]);
+            match next.entry((present_key, true)) {
+                Entry::Occupied(mut entry) => {
+                    entry.get_mut().1 = builder.or(vec![entry.get().1, present_proof]);
+                }
+                Entry::Vacant(entry) => {
+                    entry.insert((present_states, present_proof));
+                }
+            }
+
+            let absent_proof = builder.and(vec![proof, absent]);
+            match next.entry((key, selected_any)) {
+                Entry::Occupied(mut entry) => {
+                    entry.get_mut().1 = builder.or(vec![entry.get().1, absent_proof]);
+                }
+                Entry::Vacant(entry) => {
+                    entry.insert((states, absent_proof));
+                }
+            }
+        }
+        dp = next;
+        dp_states += dp.len();
+    }
+
+    let outcomes = dp
+        .into_iter()
+        .map(|((_, selected_any), (states, proof))| (states, selected_any, proof))
+        .collect();
+    Ok((outcomes, dp_states))
 }
 
 fn validate_count_lift_rows(
