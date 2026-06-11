@@ -143,6 +143,17 @@ pub fn promote_multiway(
             // first-class `ChainJoin` so walkers and dispatchers can
             // distinguish the chain route from paper-derived
             // `MultiWayJoin` shapes.
+            // D1 groupby fusion: aggregate rules wrap the join tree as
+            // Project{final} -> GroupBy -> Project{group} -> <join tree>,
+            // so the shape gates below (which see only the outer Project)
+            // never promote triangle bodies under aggregate heads. Descend
+            // through the wrapper and promote the inner triangle in place;
+            // the executor's fused group-by-root count hook dispatches it,
+            // and a declined dispatch still executes the embedded binary
+            // fallback unchanged.
+            if try_promote_triangle_inside_aggregate(&mut rule.body, stats, config) {
+                continue;
+            }
             if let Some(promoted) = try_promote_chain(&rule.body) {
                 rule.body = promoted;
                 continue;
@@ -584,6 +595,70 @@ fn normalize_4cycle_to_bushy(node: &RirNode) -> Option<RirNode> {
 /// inner-key combination (`[1]/[0]`, `[1]/[1]`, `[0]/[0]`)
 /// and produce the equivalent `MultiWayJoin` with
 /// `inputs` arranged in canonical semantic order
+/// D1 groupby fusion: promote a triangle join tree sitting inside an
+/// aggregate rule's `Project{ GroupBy { Project { <join tree> } } }`
+/// wrapper. The inner tree is matched exactly like a top-level triangle
+/// body (via a synthesized canonical (X, Y, Z) projection), and on success
+/// the group projection's column indices are remapped from join-output
+/// space into the MultiWayJoin's (X, Y, Z) output space. Returns false —
+/// leaving the rule untouched — on any structural mismatch.
+fn try_promote_triangle_inside_aggregate(
+    body: &mut RirNode,
+    stats: &StatsManager,
+    config: &CompilerConfig,
+) -> bool {
+    let RirNode::Project { input: gb, .. } = body else {
+        return false;
+    };
+    let RirNode::GroupBy {
+        input: group_input, ..
+    } = gb.as_mut()
+    else {
+        return false;
+    };
+    let RirNode::Project {
+        input: inner,
+        columns: group_cols,
+    } = group_input.as_mut()
+    else {
+        return false;
+    };
+    // The matcher expects the canonical left-deep triangle projection
+    // (X, Y, Z) = join-output columns [0, 1, 3].
+    let canonical = RirNode::Project {
+        input: inner.clone(),
+        columns: vec![
+            ProjectExpr::Column(0),
+            ProjectExpr::Column(1),
+            ProjectExpr::Column(3),
+        ],
+    };
+    let normalized = normalize_triangle_to_left_deep(&canonical);
+    let candidate = normalized.as_ref().unwrap_or(&canonical);
+    let Some(promoted) = try_promote_triangle(candidate, stats, config) else {
+        return false;
+    };
+    let RirNode::MultiWayJoin { output_columns, .. } = &promoted else {
+        return false;
+    };
+    let mut remapped: Vec<ProjectExpr> = Vec::with_capacity(group_cols.len());
+    for col in group_cols.iter() {
+        let ProjectExpr::Column(c) = col else {
+            return false;
+        };
+        let Some(pos) = output_columns
+            .iter()
+            .position(|oc| matches!(oc, ProjectExpr::Column(x) if x == c))
+        else {
+            return false;
+        };
+        remapped.push(ProjectExpr::Column(pos));
+    }
+    *group_cols = remapped;
+    **inner = promoted;
+    true
+}
+
 /// `[XY, YZ, XZ]` regardless of positional layout. Returns
 /// `None` for shape deviations.
 fn try_promote_triangle(

@@ -138,6 +138,17 @@ pub(super) fn wcoj_adaptive_enabled(config_override: Option<bool>) -> bool {
     config_override.unwrap_or(true)
 }
 
+/// D1 kill switch for the aggregate-fused group-by-root count dispatch.
+/// Default ON (fusion enabled); set to `1`/`true` to force every
+/// GroupBy-over-triangle through the materialize+groupby path.
+pub const ENV_DISABLE_WCOJ_GROUPBY_FUSION: &str = "XLOG_DISABLE_WCOJ_GROUPBY_FUSION";
+
+pub(super) fn wcoj_groupby_fusion_disabled() -> bool {
+    std::env::var(ENV_DISABLE_WCOJ_GROUPBY_FUSION)
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+}
+
 /// Diagnostics gate for WCOJ pipeline errors. By default a layout/kernel
 /// error declines to the binary-join fallback (the store is never partially
 /// mutated) but is **counted** (`Executor::wcoj_error_decline_count`) and
@@ -1328,6 +1339,118 @@ impl Executor {
     /// propagate such errors instead of declining.
     pub fn wcoj_error_decline_count(&self) -> u64 {
         self.wcoj_error_decline_count
+    }
+
+    /// D1 — count of times the fused group-by-root count hook produced a
+    /// result and the executor installed it (vs. silently falling back to
+    /// the materialize+groupby path with the same answer).
+    pub fn wcoj_groupby_fusion_dispatch_count(&self) -> u64 {
+        self.wcoj_groupby_fusion_dispatch_count
+    }
+
+    /// D1 aggregate-fused WCOJ: dispatch
+    /// `GroupBy { Project { MultiWayJoin(triangle) }, key_cols: [0],
+    /// aggs: [(_, Count)] }` through the fused group-by-root count kernel,
+    /// which never materializes the triangle rows. The group key column 0 is
+    /// the variable-order root X in the canonical triangle output, the
+    /// condition under which one-pass aggregate propagation over the
+    /// variable order is sound. Every structural mismatch (other keys/aggs,
+    /// computed projections, non-triangle shape, non-4-byte width, missing
+    /// buffers/runtime, kill switch) returns `Ok(None)` — silent decline to
+    /// the existing materialize+groupby path. Pipeline errors route through
+    /// [`wcoj_decline_on_error`] (counted; `XLOG_WCOJ_STRICT=1` propagates).
+    pub(super) fn try_dispatch_wcoj_groupby_root_count(
+        &mut self,
+        input: &RirNode,
+        key_cols: &[usize],
+        aggs: &[(usize, xlog_core::AggOp)],
+    ) -> Result<Option<CudaBuffer>> {
+        if wcoj_groupby_fusion_disabled() {
+            return Ok(None);
+        }
+        if key_cols != [0] {
+            return Ok(None);
+        }
+        if aggs.len() != 1 || !matches!(aggs[0].1, xlog_core::AggOp::Count) {
+            return Ok(None);
+        }
+        let RirNode::Project {
+            input: multiway,
+            columns,
+        } = input
+        else {
+            return Ok(None);
+        };
+        // The group projection must pass column 0 (X) through as the key and
+        // contain only plain column references — Count never reads the value
+        // column, so any pass-through value columns are admissible.
+        if columns.is_empty() || !matches!(columns[0], ProjectExpr::Column(0)) {
+            return Ok(None);
+        }
+        if !columns
+            .iter()
+            .all(|c| matches!(c, ProjectExpr::Column(_)))
+        {
+            return Ok(None);
+        }
+        let Some(matched) = match_multiway_triangle(multiway) else {
+            return Ok(None);
+        };
+        let name_xy = match self.get_rel_name(matched.rel_xy) {
+            Some(s) => s.to_string(),
+            None => return Ok(None),
+        };
+        let name_yz = match self.get_rel_name(matched.rel_yz) {
+            Some(s) => s.to_string(),
+            None => return Ok(None),
+        };
+        let name_xz = match self.get_rel_name(matched.rel_xz) {
+            Some(s) => s.to_string(),
+            None => return Ok(None),
+        };
+        let buf_xy = match self.store.get(&name_xy) {
+            Some(b) => b,
+            None => return Ok(None),
+        };
+        let buf_yz = match self.store.get(&name_yz) {
+            Some(b) => b,
+            None => return Ok(None),
+        };
+        let buf_xz = match self.store.get(&name_xz) {
+            Some(b) => b,
+            None => return Ok(None),
+        };
+        match (
+            classify_two_col_wcoj_width(buf_xy),
+            classify_two_col_wcoj_width(buf_yz),
+            classify_two_col_wcoj_width(buf_xz),
+        ) {
+            (Some(WcojKeyWidth::FourByte), Some(WcojKeyWidth::FourByte), Some(WcojKeyWidth::FourByte)) => {}
+            _ => return Ok(None),
+        }
+        if self.provider.memory().runtime().is_none() {
+            return Ok(None);
+        }
+        let Some(launch_stream) = self.wcoj_dispatch_stream_or_init() else {
+            return Ok(None);
+        };
+        match self.provider.wcoj_triangle_groupby_root_count_u32_recorded(
+            buf_xy,
+            buf_yz,
+            buf_xz,
+            wcoj_block_work_unit(),
+            launch_stream,
+        ) {
+            Ok(buf) => {
+                self.wcoj_groupby_fusion_dispatch_count += 1;
+                Ok(Some(buf))
+            }
+            Err(err) => wcoj_decline_on_error(
+                &mut self.wcoj_error_decline_count,
+                "groupby-fusion",
+                err,
+            ),
+        }
     }
 
     /// v0.6.5 slice 2 — count of times the WCOJ 4-cycle hook

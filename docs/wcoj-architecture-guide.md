@@ -259,6 +259,41 @@ route order is:
 The chain dispatcher updates `StatsManager::record_join_result`, increments
 `w63_chain_dispatch_count`, and uses `output_columns` for the final projection.
 
+### D1 — Aggregate-fused group-by-root count (factorized aggregates, slice 1)
+
+Origin: `docs/plans/2026-06-11-factorized-hypergraph-research.md` §4 D1;
+gate evidence: `docs/evidence/2026-06-11-s1-aggregate-fused-wcoj/` (6.05x /
+5.37x vs materialize+groupby on hub fixtures, 2.49x on small uniform).
+
+`deg(X, count(V)) :- e_xy(X,Y), e_yz(Y,Z), e_xz(X,Z)` never materializes
+the triangle rows:
+
+1. **Promoter** (`try_promote_triangle_inside_aggregate`,
+   `xlog-logic/src/promote.rs`): aggregate rules lower to
+   `Project{final} -> GroupBy -> Project{group} -> <join tree>`; the
+   descent promotes the inner triangle to `MultiWayJoin` and remaps the
+   group projection from join-output space into the (X, Y, Z) output space.
+2. **Executor hook** (`try_dispatch_wcoj_groupby_root_count`,
+   `executor/wcoj_dispatch.rs`): fires on `GroupBy { Project { MultiWayJoin
+   (triangle) }, key_cols == [0], aggs == [(_, Count)] }` with 4-byte keys.
+   The group key being column 0 = the variable-order root X is the
+   soundness condition for one-pass aggregate propagation. Counter:
+   `wcoj_groupby_fusion_dispatch_count`. Kill switch:
+   `XLOG_DISABLE_WCOJ_GROUPBY_FUSION=1`. Structural mismatches decline
+   silently to materialize+groupby; pipeline errors go through
+   `wcoj_decline_on_error` (`XLOG_WCOJ_STRICT` honored).
+3. **Provider** (`wcoj_triangle_groupby_root_count_u32_recorded`,
+   `xlog-cuda/src/provider/wcoj_metadata.rs` +
+   `wcoj_triangle_groupby_root_count_hg_u32` kernel): the count-phase
+   traversal accumulates per-e_xy-row match counts (integer atomicAdd —
+   order-insensitive, deterministic values), then compacts count>0 roots
+   and reduces per X with the recorded groupby Sum. All reduction work is
+   O(n_xy) — input-sized, never join-output-sized. Output schema (X: U32,
+   count: U64) matches the unfused baseline.
+
+Deferred (stated in the plan): u64/Symbol-beyond-u32 widths, 4-cycle and
+k-clique fusion, sum/min/max, recursive-context fusion.
+
 ## Cost Model and Variable Ordering
 
 There are two related cost surfaces.

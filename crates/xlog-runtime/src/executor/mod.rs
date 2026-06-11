@@ -317,6 +317,10 @@ pub struct Executor {
     /// `XLOG_WCOJ_STRICT=1` propagates the error instead. Public accessor:
     /// `Executor::wcoj_error_decline_count(&self) -> u64`.
     pub(super) wcoj_error_decline_count: u64,
+    /// D1 — count of fused group-by-root count dispatches that produced the
+    /// installed result. Public accessor:
+    /// `Executor::wcoj_groupby_fusion_dispatch_count(&self) -> u64`.
+    pub(super) wcoj_groupby_fusion_dispatch_count: u64,
     /// Cached non-default stream for the WCOJ triangle dispatch hook.
     /// Acquired lazily on first dispatch and reused thereafter — mirrors
     /// [`xlog_cuda::CudaKernelProvider::recorded_op_stream`] for the
@@ -455,6 +459,7 @@ impl Executor {
             kclique_histogram_refresh_nanos: 0,
             nested_loop_dispatch_count: 0,
             wcoj_error_decline_count: 0,
+            wcoj_groupby_fusion_dispatch_count: 0,
             wcoj_dispatch_stream: OnceLock::new(),
             #[cfg(feature = "wcoj-phase-timing")]
             last_wcoj_phase_timing: std::sync::Mutex::new(None),
