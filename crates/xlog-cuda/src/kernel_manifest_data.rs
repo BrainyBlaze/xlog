@@ -545,6 +545,10 @@ pub const KERNEL_MODULES: &[KernelModuleSpec] = &[
             "wcoj_clique8_materialize_hg_u32",
             "wcoj_clique8_count_hg_u64",
             "wcoj_clique8_materialize_hg_u64",
+            // S1e — aggregate-fused K-clique count-by-root (u32
+            // width-class, K=5/6).
+            "wcoj_clique5_groupby_root_count_hg_u32",
+            "wcoj_clique6_groupby_root_count_hg_u32",
         ],
     },
     KernelModuleSpec {

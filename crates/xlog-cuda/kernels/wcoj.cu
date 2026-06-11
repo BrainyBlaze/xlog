@@ -2931,3 +2931,94 @@ extern "C" __global__ void wcoj_clique8_materialize_hg_u64(
     uint64_t* const* out_cols) {
     wcoj_clique_template_materialize_hg_grid_t<8, uint64_t>(edge_col0, edge_col1, edge_n, leader_edge_idx, edge_order, iteration_order, leader_count, unique_keys, fan_out, prefix_sum, total, block_work_unit, thread_counts, block_offsets, total_rows, out_cols);
 }
+
+// ---------------------------------------------------------------
+// S1e — aggregate-fused variant of wcoj_clique{K}_count_hg_*:
+// instead of reducing matches into block/thread totals, each
+// leader-edge row's K-clique completion count is accumulated into
+// `out_row_counts[row]` (length leader_count, zero-initialized by
+// the host). Leader-edge row identity is the same `i` the count
+// template resolves via `wcoj_clique_metadata_leader_idx`; the
+// row's group key is the leader edge's col0 (= binding[0], the
+// plan's position-0 root variable). The leader edge is lex-sorted
+// by (root, col1), so per-root group counts are a segmented sum
+// over contiguous row ranges downstream. Integer atomicAdd is
+// order-insensitive, so the final counter values are deterministic
+// (precedent: wcoj_triangle_groupby_root_count_hg_u32). The clique
+// rows are never materialized.
+// ---------------------------------------------------------------
+
+template <int K_VAL, typename T>
+__device__ __forceinline__ void wcoj_clique_template_groupby_root_count_hg_grid_t(
+    const T* const* edge_col0,
+    const T* const* edge_col1,
+    const uint32_t* edge_n,
+    uint32_t leader_edge_idx,
+    const uint8_t* edge_order,
+    const uint8_t* iteration_order,
+    uint32_t leader_count,
+    const T* unique_keys,
+    const uint32_t* fan_out,
+    const uint32_t* prefix_sum,
+    uint32_t total,
+    uint32_t block_work_unit,
+    uint32_t* out_row_counts) {
+    uint32_t leader_work_total = wcoj_clique_metadata_leader_work_total<T>(
+        unique_keys, fan_out, prefix_sum, total);
+    if (leader_work_total == 0u || leader_work_total > leader_count) {
+        leader_work_total = leader_count;
+    }
+    uint32_t block_start = blockIdx.x * block_work_unit;
+    if (block_start >= leader_work_total) {
+        return;
+    }
+    uint32_t block_end = block_start + block_work_unit;
+    if (block_end < block_start || block_end > leader_work_total) {
+        block_end = leader_work_total;
+    }
+
+    for (uint32_t work_idx = block_start + threadIdx.x;
+         work_idx < block_end;
+         work_idx += blockDim.x) {
+        uint32_t i = wcoj_clique_metadata_leader_idx(fan_out, prefix_sum, total, work_idx);
+        uint32_t c = wcoj_clique_template_count_t<K_VAL, T>(
+            edge_col0, edge_col1, edge_n, leader_edge_idx, edge_order, iteration_order, i);
+        if (c != 0u) {
+            atomicAdd(&out_row_counts[i], c);
+        }
+    }
+}
+
+extern "C" __global__ void wcoj_clique5_groupby_root_count_hg_u32(
+    const uint32_t* const* edge_col0,
+    const uint32_t* const* edge_col1,
+    const uint32_t* edge_n,
+    uint32_t leader_edge_idx,
+    const uint8_t* edge_order,
+    const uint8_t* iteration_order,
+    uint32_t leader_count,
+    const uint32_t* unique_keys,
+    const uint32_t* fan_out,
+    const uint32_t* prefix_sum,
+    uint32_t total,
+    uint32_t block_work_unit,
+    uint32_t* out_row_counts) {
+    wcoj_clique_template_groupby_root_count_hg_grid_t<5, uint32_t>(edge_col0, edge_col1, edge_n, leader_edge_idx, edge_order, iteration_order, leader_count, unique_keys, fan_out, prefix_sum, total, block_work_unit, out_row_counts);
+}
+
+extern "C" __global__ void wcoj_clique6_groupby_root_count_hg_u32(
+    const uint32_t* const* edge_col0,
+    const uint32_t* const* edge_col1,
+    const uint32_t* edge_n,
+    uint32_t leader_edge_idx,
+    const uint8_t* edge_order,
+    const uint8_t* iteration_order,
+    uint32_t leader_count,
+    const uint32_t* unique_keys,
+    const uint32_t* fan_out,
+    const uint32_t* prefix_sum,
+    uint32_t total,
+    uint32_t block_work_unit,
+    uint32_t* out_row_counts) {
+    wcoj_clique_template_groupby_root_count_hg_grid_t<6, uint32_t>(edge_col0, edge_col1, edge_n, leader_edge_idx, edge_order, iteration_order, leader_count, unique_keys, fan_out, prefix_sum, total, block_work_unit, out_row_counts);
+}

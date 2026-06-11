@@ -518,7 +518,7 @@ impl CudaKernelProvider {
                 )))
             }
         };
-        let mut x_copy = self
+        let x_copy = self
             .memory()
             .alloc::<u8>(n_xy as usize * std::mem::size_of::<u32>())?;
         // Explicit-length copy: layout-normalized columns are allocated at
@@ -819,7 +819,7 @@ impl CudaKernelProvider {
                 )))
             }
         };
-        let mut x_copy = self
+        let x_copy = self
             .memory()
             .alloc::<u8>(n_xy as usize * std::mem::size_of::<u32>())?;
         // Explicit-length copy: layout-normalized columns are allocated at
