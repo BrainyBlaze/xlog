@@ -2749,6 +2749,220 @@ impl CudaKernelProvider {
         ))
     }
 
+    /// S1c — aggregate-fused 4-cycle count: evaluate
+    /// `q(W, count) :- e1(W,X), e2(X,Y), e3(Y,Z), e4(Z,W)` grouped by the
+    /// variable-order root W, WITHOUT materializing the 4-cycle rows.
+    ///
+    /// Pipeline (all recorded; the 4-cycle result never exists as rows):
+    /// 1. the standard 4-cycle histogram-guided work plan;
+    /// 2. `wcoj_4cycle_groupby_root_count_hg_u32` accumulates, per e1 row,
+    ///    a match count (integer atomicAdd — order-insensitive,
+    ///    deterministic values);
+    /// 3. a (W, count) staging buffer over the *input* rows is compacted
+    ///    to count>0 rows (roots with no completion must be absent) and
+    ///    reduced per W via the recorded groupby Sum.
+    ///
+    /// All reduction work is O(n_e1) — input-sized, never join-output-sized.
+    ///
+    /// Output schema matches the unfused materialize+groupby baseline:
+    /// `col0` = W (e1.col0 type, U32/Symbol), `col1` = count (U64).
+    ///
+    /// # Errors
+    /// * `XlogError::Kernel` if the manager has no runtime, the launch
+    ///   stream does not resolve, an input is not 2-column U32/Symbol, or
+    ///   any kernel launch fails.
+    pub fn wcoj_4cycle_groupby_root_count_u32_recorded(
+        &self,
+        e1: &CudaBuffer,
+        e2: &CudaBuffer,
+        e3: &CudaBuffer,
+        e4: &CudaBuffer,
+        block_work_unit: u32,
+        launch_stream: StreamId,
+    ) -> Result<CudaBuffer> {
+        let ctx = "wcoj_4cycle_groupby_root_count_u32_recorded";
+        validate_binary_u32(ctx, "e1", e1)?;
+        validate_binary_u32(ctx, "e2", e2)?;
+        validate_binary_u32(ctx, "e3", e3)?;
+        validate_binary_u32(ctx, "e4", e4)?;
+        let plan = self.wcoj_4cycle_hg_work_plan_u32_recorded(
+            e1,
+            e2,
+            e3,
+            e4,
+            block_work_unit,
+            launch_stream,
+        )?;
+        let n_e1 = plan.row_count;
+        let w_type = e1.schema().column_type(0).expect("e1.col0 type");
+        let out_schema = Schema::new(vec![
+            ("w".to_string(), w_type),
+            ("count".to_string(), ScalarType::U64),
+        ]);
+        if n_e1 == 0 || plan.total_work == 0 {
+            return self.create_empty_buffer(out_schema);
+        }
+
+        let runtime = self.memory().runtime().ok_or_else(|| {
+            XlogError::Kernel(format!("{ctx} requires a runtime-backed GpuMemoryManager"))
+        })?;
+        let cu_stream = runtime
+            .stream_pool()
+            .resolve(launch_stream)
+            .ok_or_else(|| {
+                XlogError::Kernel(format!(
+                    "{ctx}: launch_stream StreamId({}) does not resolve",
+                    launch_stream.0
+                ))
+            })?;
+
+        let e1_col0 = metadata_column_u32(e1, 0)?;
+        let e1_col1 = metadata_column_u32(e1, 1)?;
+        let e2_col1 = metadata_column_u32(e2, 1)?;
+        let e3_col0 = metadata_column_u32(e3, 0)?;
+        let e3_col1 = metadata_column_u32(e3, 1)?;
+        let e4_col0 = metadata_column_u32(e4, 0)?;
+        let e4_col1 = metadata_column_u32(e4, 1)?;
+        let n_e3 = self.metadata_logical_rows(e3)?;
+        let n_e4 = self.metadata_logical_rows(e4)?;
+
+        // Per-e1-row match counters, zero-initialized. Allocated as the
+        // u8-backed column layout so the array doubles as the staging
+        // buffer's count column after the kernel fills it.
+        let mut row_counts = self
+            .memory()
+            .alloc::<u8>(n_e1 as usize * std::mem::size_of::<u32>())?;
+        self.device()
+            .inner()
+            .memset_zeros(&mut row_counts)
+            .map_err(|e| XlogError::Kernel(format!("{ctx}: zero row counts failed: {e}")))?;
+
+        let grid = plan.total_work.div_ceil(plan.block_work_unit);
+        let mut rec = LaunchRecorder::new_strict(launch_stream);
+        rec.read(e1.num_rows_device());
+        rec.read(e2.num_rows_device());
+        rec.read(e3.num_rows_device());
+        rec.read(e4.num_rows_device());
+        rec.read_column(e1.column(0).expect("e1.col0"));
+        rec.read_column(e1.column(1).expect("e1.col1"));
+        rec.read_column(e2.column(1).expect("e2.col1"));
+        rec.read_column(e3.column(0).expect("e3.col0"));
+        rec.read_column(e3.column(1).expect("e3.col1"));
+        rec.read_column(e4.column(0).expect("e4.col0"));
+        rec.read_column(e4.column(1).expect("e4.col1"));
+        rec.read(&plan.e1_work_prefix);
+        rec.read(&plan.e2_work_prefix);
+        rec.read(&plan.e1_e2_start);
+        rec.read(&plan.e1_e2_end);
+        rec.write(&row_counts);
+        rec.preflight(runtime)
+            .map_err(|e| XlogError::Kernel(format!("{ctx}: preflight failed: {e}")))?;
+        {
+            let kernel = self
+                .device()
+                .inner()
+                .get_func(
+                    WCOJ_MODULE,
+                    wcoj_kernels::WCOJ_4CYCLE_GROUPBY_ROOT_COUNT_HG_U32,
+                )
+                .ok_or_else(|| {
+                    XlogError::Kernel(
+                        "wcoj_4cycle_groupby_root_count_hg_u32 kernel not found".to_string(),
+                    )
+                })?;
+            let mut params: Vec<*mut c_void> = vec![
+                e1_col0.as_kernel_param(),
+                e1_col1.as_kernel_param(),
+                plan.row_count.as_kernel_param(),
+                e2_col1.as_kernel_param(),
+                e3_col0.as_kernel_param(),
+                e3_col1.as_kernel_param(),
+                n_e3.as_kernel_param(),
+                e4_col0.as_kernel_param(),
+                e4_col1.as_kernel_param(),
+                n_e4.as_kernel_param(),
+                (&plan.e1_work_prefix).as_kernel_param(),
+                (&plan.e2_work_prefix).as_kernel_param(),
+                (&plan.e1_e2_start).as_kernel_param(),
+                (&plan.e1_e2_end).as_kernel_param(),
+                plan.total_work.as_kernel_param(),
+                plan.block_work_unit.as_kernel_param(),
+                (&row_counts).as_kernel_param(),
+            ];
+            unsafe {
+                kernel
+                    .clone()
+                    .launch_on_stream(
+                        &cu_stream,
+                        LaunchConfig {
+                            grid_dim: (grid, 1, 1),
+                            block_dim: (BLOCK_SIZE, 1, 1),
+                            shared_mem_bytes: 0,
+                        },
+                        &mut params,
+                    )
+                    .map_err(|e| {
+                        XlogError::Kernel(format!("{ctx}: groupby-count launch failed: {e}"))
+                    })?;
+            }
+        }
+        rec.commit(runtime)
+            .map_err(|e| XlogError::Kernel(format!("{ctx}: commit failed: {e}")))?;
+
+        // Staging buffer (W, count) over the n_e1 input rows: W is a
+        // device-to-device copy of e1.col0; the count column is the
+        // kernel-filled array. Rows stay lex-sorted by W.
+        let w_src = match e1.column(0).expect("e1.col0") {
+            CudaColumn::Owned(slice) => slice,
+            _ => {
+                return Err(XlogError::Kernel(format!(
+                    "{ctx}: e1.col0 must be an owned CudaColumn"
+                )))
+            }
+        };
+        let mut w_copy = self
+            .memory()
+            .alloc::<u8>(n_e1 as usize * std::mem::size_of::<u32>())?;
+        self.device()
+            .inner()
+            .dtod_copy(w_src, &mut w_copy)
+            .map_err(|e| XlogError::Kernel(format!("{ctx}: copy W column failed: {e}")))?;
+        let mut d_num_rows = self.memory().alloc::<u32>(1)?;
+        self.device()
+            .inner()
+            .dtod_copy(e1.num_rows_device(), &mut d_num_rows)
+            .map_err(|e| XlogError::Kernel(format!("{ctx}: copy row count failed: {e}")))?;
+        let staging_schema = Schema::new(vec![
+            ("w".to_string(), w_type),
+            ("count".to_string(), ScalarType::U32),
+        ]);
+        let staging = CudaBuffer::from_columns_with_host_count(
+            vec![w_copy.into(), row_counts.into()],
+            n_e1 as u64,
+            d_num_rows,
+            staging_schema,
+            n_e1,
+        );
+
+        // Keep only roots with at least one completed 4-cycle, then reduce
+        // per W. Both steps run over input-sized data.
+        let mask = self.compare_const_mask_recorded::<u32>(
+            &staging,
+            1,
+            0u32,
+            crate::CompareOp::Gt,
+            launch_stream,
+        )?;
+        let compacted =
+            self.compact_buffer_by_device_mask_counted_recorded(&staging, &mask, launch_stream)?;
+        self.groupby_multi_agg_recorded(
+            &compacted,
+            &[0],
+            &[(1, xlog_core::AggOp::Sum)],
+            launch_stream,
+        )
+    }
+
     pub fn wcoj_4cycle_hg_work_plan_u64_recorded(
         &self,
         e1: &CudaBuffer,

@@ -1511,6 +1511,68 @@ extern "C" __global__ void wcoj_4cycle_count_hg_u32(
     }
 }
 
+// S1c aggregate-fused variant of wcoj_4cycle_count_hg_u32: instead of
+// reducing matches to per-block totals, each completed 4-cycle increments
+// the counter of its e1 root row (`out_row_counts[e1_idx]`, length n_e1,
+// zero-initialized by the host). e1 is lex-sorted by (W, X), so per-W group
+// counts are a contiguous-range reduction downstream. Integer atomicAdd is
+// order-insensitive, so the final counter values are deterministic
+// (precedent: wcoj_triangle_groupby_root_count_hg_u32). The 4-cycle rows
+// are never materialized. `e1_col1` is kept for ABI symmetry with the
+// count/materialize siblings.
+extern "C" __global__ void wcoj_4cycle_groupby_root_count_hg_u32(
+    const uint32_t* __restrict__ e1_col0,
+    const uint32_t* __restrict__ e1_col1,
+    uint32_t n_e1,
+    const uint32_t* __restrict__ e2_col1,
+    const uint32_t* __restrict__ e3_col0,
+    const uint32_t* __restrict__ e3_col1,
+    uint32_t n_e3,
+    const uint32_t* __restrict__ e4_col0,
+    const uint32_t* __restrict__ e4_col1,
+    uint32_t n_e4,
+    const uint32_t* __restrict__ e1_work_prefix,
+    const uint32_t* __restrict__ e2_work_prefix,
+    const uint32_t* __restrict__ e1_e2_start,
+    const uint32_t* __restrict__ e1_e2_end,
+    uint32_t total_work,
+    uint32_t block_work_unit,
+    uint32_t* __restrict__ out_row_counts) {
+    (void)e1_col1;
+    uint32_t block_start = blockIdx.x * block_work_unit;
+    if (block_start >= total_work) {
+        return;
+    }
+    uint32_t block_end = block_start + block_work_unit;
+    if (block_end < block_start || block_end > total_work) {
+        block_end = total_work;
+    }
+
+    for (uint32_t work_idx = block_start + threadIdx.x;
+         work_idx < block_end;
+         work_idx += blockDim.x) {
+        uint32_t root_pos = upper_bound_u32(e1_work_prefix, n_e1 + 1, work_idx);
+        if (root_pos == 0) {
+            continue;
+        }
+        uint32_t e1_idx = root_pos - 1;
+        if (e1_idx >= n_e1) {
+            continue;
+        }
+        uint32_t local = work_idx - e1_work_prefix[e1_idx];
+        uint32_t w = e1_col0[e1_idx];
+        uint32_t e2_lo = e1_e2_start[e1_idx];
+        uint32_t e2_hi = e1_e2_end[e1_idx];
+        uint32_t y = 0;
+        uint32_t z = 0;
+        if (resolve_4cycle_e2_work_u32(
+                e2_work_prefix, e2_col1, e3_col0, e3_col1, n_e3, e2_lo, e2_hi, local, &y, &z)
+            && contains_pair_u32(e4_col0, e4_col1, n_e4, z, w)) {
+            atomicAdd(&out_row_counts[e1_idx], 1u);
+        }
+    }
+}
+
 extern "C" __global__ void wcoj_4cycle_materialize_hg_u32(
     const uint32_t* __restrict__ e1_col0,
     const uint32_t* __restrict__ e1_col1,
