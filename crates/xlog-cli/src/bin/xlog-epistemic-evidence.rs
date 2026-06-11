@@ -1955,6 +1955,7 @@ fn preflight_json(preflight: &xlog_runtime::EpistemicGpuRuntimePreflight) -> Val
         "multiway_reduction_count": preflight.multiway_reduction_count,
         "kclique_wcoj_plan_count": preflight.kclique_wcoj_plan_count,
         "planned_hash_route_count": preflight.planned_hash_route_count,
+        "free_join_route_count": preflight.free_join_route_count,
         "tuple_membership_binding_count": preflight.tuple_membership_binding_count,
         "solver_assumption_binding_count": preflight.solver_assumption_binding_count,
         "solver_required_capability_count": preflight.solver_required_capability_count,

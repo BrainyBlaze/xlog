@@ -321,6 +321,10 @@ pub struct Executor {
     /// installed result. Public accessor:
     /// `Executor::wcoj_groupby_fusion_dispatch_count(&self) -> u64`.
     pub(super) wcoj_groupby_fusion_dispatch_count: u64,
+    /// D2 — count of generalized Free Join dispatches that produced the
+    /// installed result. Public accessor:
+    /// `Executor::free_join_dispatch_count(&self) -> u64`.
+    pub(super) free_join_dispatch_count: u64,
     /// Cached non-default stream for the WCOJ triangle dispatch hook.
     /// Acquired lazily on first dispatch and reused thereafter — mirrors
     /// [`xlog_cuda::CudaKernelProvider::recorded_op_stream`] for the
@@ -460,6 +464,7 @@ impl Executor {
             nested_loop_dispatch_count: 0,
             wcoj_error_decline_count: 0,
             wcoj_groupby_fusion_dispatch_count: 0,
+            free_join_dispatch_count: 0,
             wcoj_dispatch_stream: OnceLock::new(),
             #[cfg(feature = "wcoj-phase-timing")]
             last_wcoj_phase_timing: std::sync::Mutex::new(None),
@@ -2870,6 +2875,7 @@ mod tests {
             strata: vec![stratum],
             rules_by_scc: vec![vec![rule]],
             est_memory_peak: 0,
+            rel_arities: std::collections::HashMap::new(),
         };
 
         let result = executor.execute_plan(&plan);
@@ -2937,6 +2943,7 @@ mod tests {
             strata: vec![stratum],
             rules_by_scc: vec![vec![input_rule], vec![output_rule]],
             est_memory_peak: 0,
+            rel_arities: std::collections::HashMap::new(),
         };
 
         executor.execute_plan(&plan).expect("initial execute_plan");
@@ -3034,6 +3041,7 @@ mod tests {
             strata: vec![stratum],
             rules_by_scc: vec![vec![lhs_rule], vec![blocked_rule], vec![out_rule]],
             est_memory_peak: 0,
+            rel_arities: std::collections::HashMap::new(),
         };
 
         executor.execute_plan(&plan).expect("initial execute_plan");
@@ -3338,6 +3346,7 @@ mod tests {
             strata: vec![adaptive_stratum()],
             rules_by_scc: vec![vec![adaptive_rule(body)]],
             est_memory_peak: 0,
+            rel_arities: std::collections::HashMap::new(),
         }
     }
 

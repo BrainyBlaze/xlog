@@ -594,7 +594,32 @@ impl Lowerer {
             );
         }
 
-        Ok(builder.build())
+        let mut plan = builder.build();
+        // Record relation arities for downstream shape promoters (D2
+        // general multiway promotion sizes Scan leaves from these).
+        // One pre-pass over the AST covers every predicate the lowerer
+        // assigned a RelId: rule heads, positive/negated body atoms,
+        // and facts.
+        for rule in program.proper_rules() {
+            if let Some(&id) = self.rel_ids.get(&rule.head.predicate) {
+                plan.rel_arities.insert(id, rule.head.terms.len());
+            }
+            for lit in &rule.body {
+                let atom = match lit {
+                    BodyLiteral::Positive(a) | BodyLiteral::Negated(a) => a,
+                    _ => continue,
+                };
+                if let Some(&id) = self.rel_ids.get(&atom.predicate) {
+                    plan.rel_arities.insert(id, atom.terms.len());
+                }
+            }
+        }
+        for fact in program.facts() {
+            if let Some(&id) = self.rel_ids.get(&fact.head.predicate) {
+                plan.rel_arities.insert(id, fact.head.terms.len());
+            }
+        }
+        Ok(plan)
     }
 
     /// Find the SCC ID for a predicate

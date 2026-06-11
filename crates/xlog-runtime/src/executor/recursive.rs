@@ -75,6 +75,13 @@ impl Executor {
             if let Some(buf) = self.try_dispatch_wcoj_clique8_on_body(node)? {
                 return Ok(buf);
             }
+            // D2 — generalized Free Join for every multiway shape the
+            // dedicated dispatchers declined (the hook re-checks the
+            // dedicated shapes structurally, so it only fires on
+            // general bodies).
+            if let Some(buf) = self.try_dispatch_free_join(node)? {
+                return Ok(buf);
+            }
         }
         self.execute_node(node)
     }
@@ -303,6 +310,31 @@ impl Executor {
                                 self.store_put(&rule.head, merged);
                             } else {
                                 self.store_put(&rule.head, wcoj_result);
+                            }
+                            continue;
+                        }
+
+                        // D2 — generalized Free Join for every multiway
+                        // shape the dedicated dispatchers above declined
+                        // (the dispatcher re-checks those shapes
+                        // structurally, so it only fires on general
+                        // bodies). Unlike the dedicated kernels, the
+                        // frontier engine emits one row per derivation
+                        // path, so the install mirrors the binary-join
+                        // arm below: `union_gpu` dedups, and fresh
+                        // installs dedup explicitly.
+                        if let Some(fj_result) = self.try_dispatch_free_join(&rule.body)? {
+                            if let Some(existing) = self.store.get(&rule.head) {
+                                let merged = self.provider.union_gpu(existing, &fj_result)?;
+                                self.store_put(&rule.head, merged);
+                            } else {
+                                let key_cols: Vec<usize> = (0..fj_result.arity()).collect();
+                                let deduped = if fj_result.is_empty() {
+                                    fj_result
+                                } else {
+                                    self.provider.dedup(&fj_result, &key_cols)?
+                                };
+                                self.store_put(&rule.head, deduped);
                             }
                             continue;
                         }

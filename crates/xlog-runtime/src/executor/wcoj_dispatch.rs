@@ -150,6 +150,17 @@ pub(super) fn wcoj_groupby_fusion_disabled() -> bool {
         .unwrap_or(false)
 }
 
+/// D2 kill switch for the generalized Free Join dispatch. Default ON
+/// (dispatch enabled); set to `1`/`true` to force every general
+/// multiway body through the embedded binary fallback.
+pub const ENV_DISABLE_FREE_JOIN: &str = "XLOG_DISABLE_FREE_JOIN";
+
+pub(super) fn free_join_disabled() -> bool {
+    std::env::var(ENV_DISABLE_FREE_JOIN)
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+}
+
 /// Diagnostics gate for WCOJ pipeline errors. By default a layout/kernel
 /// error declines to the binary-join fallback (the store is never partially
 /// mutated) but is **counted** (`Executor::wcoj_error_decline_count`) and
@@ -1340,6 +1351,204 @@ impl Executor {
     /// propagate such errors instead of declining.
     pub fn wcoj_error_decline_count(&self) -> u64 {
         self.wcoj_error_decline_count
+    }
+
+    /// D2 — count of times the generalized Free Join dispatch produced
+    /// the installed result (vs. the embedded binary fallback).
+    pub fn free_join_dispatch_count(&self) -> u64 {
+        self.free_join_dispatch_count
+    }
+
+    /// D2 — dispatch a general `MultiWayJoin` (any shape WITHOUT a
+    /// dedicated kernel) through the Free Join frontier engine. Runs
+    /// after the triangle/4-cycle/k-clique dispatchers in
+    /// `execute_wcoj_or_fallback_node`, and accepts ONLY nodes
+    /// carrying `MultiwayPlan::FreeJoin` — the general promoter's
+    /// provenance marker guaranteeing `output_columns` lives in the
+    /// concatenated-inputs column space (dedicated promoters reorder
+    /// `inputs` canonically, so positional interpretation of their
+    /// nodes would permute the head). The plan is derived
+    /// `binary2fj`-style over the node's slot order with
+    /// earliest-node probe pushing (paper §4.1); probe keys must form
+    /// a PREFIX of each atom's column order (flat sorted tries
+    /// consume columns physically left-to-right) — non-prefix bodies
+    /// decline silently to the fallback. Pipeline errors route
+    /// through [`wcoj_decline_on_error`] ("free-join" stage).
+    pub(super) fn try_dispatch_free_join(&mut self, node: &RirNode) -> Result<Option<CudaBuffer>> {
+        use xlog_cuda::provider::{FjNode, FjPlan, FjSubAtom};
+
+        if free_join_disabled() {
+            return Ok(None);
+        }
+        let RirNode::MultiWayJoin {
+            inputs,
+            slot_vars,
+            output_columns,
+            plan,
+            ..
+        } = node
+        else {
+            return Ok(None);
+        };
+        // Provenance gate (design §3): accept ONLY nodes the general
+        // multiway promoter marked `MultiwayPlan::FreeJoin`. Their
+        // construction guarantees `inputs` are the fallback's Scan
+        // leaves in traversal order, so `output_columns` (fallback
+        // projection space, the universal MultiWayJoin convention)
+        // coincides with the concatenated-inputs space this
+        // dispatcher projects from. Dedicated-shape promoters
+        // (triangle / 4-cycle / K-clique) reorder `inputs`
+        // canonically — interpreting their `output_columns`
+        // positionally would permute the head — and they carry
+        // `None` / `WcojWithPlan` / `PlannedHashRoute`, so the gate
+        // also subsumes the dedicated-shape carve-out.
+        if !matches!(plan, Some(MultiwayPlan::FreeJoin)) {
+            return Ok(None);
+        }
+        if inputs.len() < 3 {
+            return Ok(None);
+        }
+        // Resolve scans -> store buffers; every column must be 4-byte
+        // (the Phase B provider entry is the u32/Symbol engine).
+        let mut bufs: Vec<&CudaBuffer> = Vec::with_capacity(inputs.len());
+        for input in inputs {
+            let RirNode::Scan { rel } = input else {
+                return Ok(None);
+            };
+            let name = match self.get_rel_name(*rel) {
+                Some(s) => s.to_string(),
+                None => return Ok(None),
+            };
+            let Some(buf) = self.store.get(&name) else {
+                return Ok(None);
+            };
+            let four_byte = (0..buf.arity()).all(|i| {
+                matches!(
+                    buf.schema().column_type(i),
+                    Some(ScalarType::U32 | ScalarType::Symbol)
+                )
+            });
+            if !four_byte {
+                return Ok(None);
+            }
+            bufs.push(buf);
+        }
+        // Dense variable ids: remap slot_vars' class ids to 0..n.
+        let mut class_to_var: Vec<u32> = Vec::new();
+        let mut dense = |class: u32| -> usize {
+            match class_to_var.iter().position(|c| *c == class) {
+                Some(i) => i,
+                None => {
+                    class_to_var.push(class);
+                    class_to_var.len() - 1
+                }
+            }
+        };
+        let mut atom_vars: Vec<Vec<usize>> = Vec::with_capacity(slot_vars.len());
+        for (i, cols) in slot_vars.iter().enumerate() {
+            if cols.len() != bufs[i].arity() {
+                return Ok(None);
+            }
+            let mut vars = Vec::with_capacity(cols.len());
+            for c in cols {
+                let Some(class) = c else { return Ok(None) };
+                vars.push(dense(*class));
+            }
+            atom_vars.push(vars);
+        }
+        let num_vars = class_to_var.len();
+        // binary2fj over slot order with earliest-node probe pushing:
+        // each atom's bound-variable PREFIX probes the earliest node
+        // after which its keys are available; the unbound suffix covers
+        // a new node. Repeated variables within one cover decline (the
+        // provider's rebind check would reject them).
+        let mut bound_at: Vec<Option<usize>> = vec![None; num_vars]; // var -> node idx
+        let mut nodes: Vec<FjNode> = Vec::new();
+        for (i, vars) in atom_vars.iter().enumerate() {
+            let split = vars
+                .iter()
+                .take_while(|v| bound_at[**v].is_some())
+                .count();
+            if vars[split..].iter().any(|v| bound_at[*v].is_some()) {
+                // A bound variable after an unbound one: the trie order
+                // cannot consume it as a key — non-prefix body.
+                return Ok(None);
+            }
+            if split > 0 {
+                let probe = FjSubAtom {
+                    input_idx: i,
+                    var_positions: vars[..split].to_vec(),
+                };
+                if nodes.is_empty() {
+                    return Ok(None);
+                }
+                let target = vars[..split]
+                    .iter()
+                    .map(|v| bound_at[*v].expect("prefix vars are bound"))
+                    .max()
+                    .expect("split > 0");
+                nodes[target].probes.push(probe);
+            }
+            if split < vars.len() {
+                let cover_vars = vars[split..].to_vec();
+                let mut seen = HashSet::new();
+                if !cover_vars.iter().all(|v| seen.insert(*v)) {
+                    return Ok(None);
+                }
+                let k = nodes.len();
+                for v in &cover_vars {
+                    bound_at[*v] = Some(k);
+                }
+                nodes.push(FjNode {
+                    cover: FjSubAtom {
+                        input_idx: i,
+                        var_positions: cover_vars,
+                    },
+                    probes: Vec::new(),
+                });
+            } else if nodes.is_empty() {
+                return Ok(None);
+            }
+        }
+        // Head projection: map join-tree output columns (concatenated
+        // input columns in slot order) to variable ids.
+        let mut col_to_var: Vec<usize> = Vec::new();
+        for vars in &atom_vars {
+            col_to_var.extend(vars.iter().copied());
+        }
+        let mut output_vars: Vec<usize> = Vec::with_capacity(output_columns.len());
+        for oc in output_columns {
+            let ProjectExpr::Column(c) = oc else {
+                return Ok(None);
+            };
+            let Some(v) = col_to_var.get(*c) else {
+                return Ok(None);
+            };
+            output_vars.push(*v);
+        }
+        let fj_plan = FjPlan {
+            num_vars,
+            nodes,
+            output_vars,
+        };
+        if self.provider.memory().runtime().is_none() {
+            return Ok(None);
+        }
+        let Some(launch_stream) = self.wcoj_dispatch_stream_or_init() else {
+            return Ok(None);
+        };
+        match self
+            .provider
+            .free_join_execute_u32_recorded(&bufs, &fj_plan, launch_stream)
+        {
+            Ok(buf) => {
+                self.free_join_dispatch_count += 1;
+                Ok(Some(buf))
+            }
+            Err(err) => {
+                wcoj_decline_on_error(&mut self.wcoj_error_decline_count, "free-join", err)
+            }
+        }
     }
 
     /// D1 — count of times the fused group-by-root count hook produced a
