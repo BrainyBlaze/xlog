@@ -4,6 +4,41 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- *(prob)* **Behavior change — MC fail-closed contract.** `McProgram::evaluate`
+  no longer falls back to the CPU oracle silently when the GPU-resident MC
+  engine rejects a program (negation, aggregates, unbounded terms). Rejected
+  programs now fail with the typed `ResidentRejection` unless the caller opts
+  in explicitly, and every `McResult` carries an engine label so CPU-oracle
+  output can never pass as GPU-native evidence.
+  - **Migration**: MC programs with negation (incl. non-monotone recursion)
+    or aggregates need `McEvalConfig::allow_cpu_oracle_fallback = true`
+    (Rust), `--allow-cpu-oracle` (CLI), or `evaluate(allow_cpu_oracle=True)`
+    (Python). Results report `mc_engine: "gpu-resident" | "cpu-oracle"` in
+    CLI JSON/arrow output and `EvalResult.mc_engine` in Python.
+  - The v0.8.5 MC-aggregate evidence was corrected accordingly: those
+    fixtures always ran on the CPU oracle, not the GPU
+    (`docs/evidence/2026-05-19-v085-prob-aggregates/README.md`).
+
+### Added
+
+- *(runtime)* WCOJ pipeline errors (layout/kernel failures) are now counted
+  (`Executor::wcoj_error_decline_count`) and logged when they decline to the
+  binary-join fallback; `XLOG_WCOJ_STRICT=1` propagates the error instead.
+- *(tests)* `XLOG_REQUIRE_CUDA=1` turns CUDA-init failures in the test
+  harness into hard failures so certification can never pass vacuously on a
+  CPU-only machine; `scripts/validate_release_gpu.sh` sets it and preflights
+  the GPU. Restored the UCR epistemic fixture programs missing since PR #139
+  (9/15 `xlog-epistemic-evidence` tests had been red on `main`).
+
+### Documentation
+
+- BENCHMARKS.md unmeasured throughput tables are labeled as targets;
+  README states the zero-tracked-transfer data-plane contract precisely;
+  the MC engine split and the XGCF per-level host-orchestration boundary
+  are documented in the language/CLI/architecture references.
+
 ## [0.9.2](https://github.com/BrainyBlaze/xlog/compare/xlog-cli-v0.5.0...xlog-cli-v0.9.2) - 2026-06-08
 
 ### Added
