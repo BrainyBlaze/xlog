@@ -1,0 +1,32 @@
+// UCR v0.9.0 FAEEL explanation generation.
+//
+// Python may stage accepted decision claims and raw proof dependency facts as
+// relations, but explanation dependency rows, metadata, support, identifiers,
+// and explanations are emitted only through executable XLOG rules.
+
+#pragma epistemic_mode = faeel
+
+use modules/explanation_support.
+
+pred accepted_claim(u32, u32, u32, u32).
+pred explanation_identifier(u32, u32, u32, u32, u32).
+pred explanation_metadata(u32, u32, u32, u32).
+pred dominated_explanation_metadata(u32, u32, u32, u32).
+pred selected_explanation_metadata(u32, u32, u32, u32).
+pred explanation_support(u32, u32, u32, u32).
+pred explanation_dependency(u32, u32, u32, u32, u32, u32).
+pred explanation_base_dependency(u32, u32).
+pred proof_dependency_relation(u32, u32, u32, u32, u32, u32).
+pred explanation_has_dependency(u32, u32, u32, u32).
+pred blocked_explanation(u32, u32, u32, u32).
+pred xlog_explanation(u32, u32, u32, u32, u32, u32, u32, u32).
+
+xlog_explanation(Case, Candidate, ClaimType, Claim, Explanation, Category, Relation, Kernel) :-
+    explanation_identifier(Case, Candidate, ClaimType, Claim, Explanation),
+    selected_explanation_metadata(ClaimType, Category, Relation, Kernel),
+    know accepted_claim(Case, Candidate, ClaimType, Claim),
+    possible explanation_support(Case, Candidate, ClaimType, Claim),
+    possible explanation_has_dependency(Case, Candidate, ClaimType, Claim),
+    not possible blocked_explanation(Case, Candidate, ClaimType, Claim).
+
+?- xlog_explanation(Case, Candidate, ClaimType, Claim, Explanation, Category, Relation, Kernel).

@@ -1,0 +1,104 @@
+// UCR v0.9.2 modular failure-chain closure.
+//
+// The entry program owns staged input declarations and final claim emission.
+// This module owns the recursive support semantics used to prove that a
+// candidate's root, intervention, and risk-state claims form one connected
+// failure chain.
+
+use component_support.
+
+pred failure_chain_candidate_seed(u32, u32, u32, u32).
+pred failure_chain_root_link(u32, u32, u32).
+pred failure_chain_intervention_link(u32, u32, u32).
+pred failure_chain_risk_state_link(u32, u32, u32).
+pred failure_chain_bfo_support(u32, u32).
+pred seed_failure_chain_root(u32, u32, u32, u32).
+pred seed_failure_chain_intervention(u32, u32, u32, u32).
+pred seed_failure_chain_risk_state(u32, u32, u32, u32).
+pred candidate_root_claim_supported(u32, u32, u32).
+pred candidate_intervention_claim_supported(u32, u32, u32).
+pred candidate_risk_state_claim_supported(u32, u32, u32).
+pred failure_chain_component_edge(u32, u32, u32, u32).
+pred failure_chain_component_reach(u32, u32, u32, u32).
+pred candidate_failure_chain_root_supported(u32, u32, u32).
+pred candidate_failure_chain_intervention_supported(u32, u32, u32).
+pred candidate_failure_chain_risk_state_supported(u32, u32, u32).
+pred candidate_failure_chain_root_intervention_reachable(u32, u32, u32).
+pred candidate_failure_chain_intervention_risk_reachable(u32, u32, u32).
+pred candidate_failure_chain_components_supported(u32, u32, u32).
+pred candidate_failure_chain_support(u32, u32, u32).
+
+seed_failure_chain_root(Case, Candidate, Chain, Root) :-
+    failure_chain_candidate_seed(Case, Candidate, 4, Chain),
+    failure_chain_root_link(Case, Chain, Root).
+
+seed_failure_chain_intervention(Case, Candidate, Chain, Intervention) :-
+    failure_chain_candidate_seed(Case, Candidate, 4, Chain),
+    failure_chain_intervention_link(Case, Chain, Intervention).
+
+seed_failure_chain_risk_state(Case, Candidate, Chain, RiskState) :-
+    failure_chain_candidate_seed(Case, Candidate, 4, Chain),
+    failure_chain_risk_state_link(Case, Chain, RiskState).
+
+candidate_root_claim_supported(Case, Candidate, Root) :-
+    decision_claim_option(Case, Candidate, 1, Root),
+    root_cause_support(Case, Root).
+
+candidate_intervention_claim_supported(Case, Candidate, Intervention) :-
+    decision_claim_option(Case, Candidate, 2, Intervention),
+    intervention_support(Case, Intervention).
+
+candidate_risk_state_claim_supported(Case, Candidate, RiskState) :-
+    decision_claim_option(Case, Candidate, 3, RiskState),
+    risk_state_support(Case, RiskState).
+
+failure_chain_component_edge(Case, Chain, Root, Intervention) :-
+    failure_chain_root_link(Case, Chain, Root),
+    failure_chain_intervention_link(Case, Chain, Intervention).
+
+failure_chain_component_edge(Case, Chain, Intervention, RiskState) :-
+    failure_chain_intervention_link(Case, Chain, Intervention),
+    failure_chain_risk_state_link(Case, Chain, RiskState).
+
+failure_chain_component_reach(Case, Chain, From, To) :-
+    failure_chain_component_edge(Case, Chain, From, To).
+
+failure_chain_component_reach(Case, Chain, From, To) :-
+    failure_chain_root_link(Case, Chain, From),
+    failure_chain_intervention_link(Case, Chain, Mid),
+    failure_chain_risk_state_link(Case, Chain, To).
+
+candidate_failure_chain_root_supported(Case, Candidate, Chain) :-
+    seed_failure_chain_root(Case, Candidate, Chain, Root),
+    candidate_root_claim_supported(Case, Candidate, Root).
+
+candidate_failure_chain_intervention_supported(Case, Candidate, Chain) :-
+    seed_failure_chain_intervention(Case, Candidate, Chain, Intervention),
+    candidate_intervention_claim_supported(Case, Candidate, Intervention).
+
+candidate_failure_chain_risk_state_supported(Case, Candidate, Chain) :-
+    seed_failure_chain_risk_state(Case, Candidate, Chain, RiskState),
+    candidate_risk_state_claim_supported(Case, Candidate, RiskState).
+
+candidate_failure_chain_root_intervention_reachable(Case, Candidate, Chain) :-
+    seed_failure_chain_root(Case, Candidate, Chain, Root),
+    seed_failure_chain_intervention(Case, Candidate, Chain, Intervention),
+    failure_chain_root_link(Case, Chain, Root),
+    failure_chain_intervention_link(Case, Chain, Intervention).
+
+candidate_failure_chain_intervention_risk_reachable(Case, Candidate, Chain) :-
+    seed_failure_chain_intervention(Case, Candidate, Chain, Intervention),
+    seed_failure_chain_risk_state(Case, Candidate, Chain, RiskState),
+    failure_chain_intervention_link(Case, Chain, Intervention),
+    failure_chain_risk_state_link(Case, Chain, RiskState).
+
+candidate_failure_chain_components_supported(Case, Candidate, Chain) :-
+    candidate_failure_chain_root_supported(Case, Candidate, Chain),
+    candidate_failure_chain_intervention_supported(Case, Candidate, Chain),
+    candidate_failure_chain_risk_state_supported(Case, Candidate, Chain),
+    candidate_failure_chain_root_intervention_reachable(Case, Candidate, Chain),
+    candidate_failure_chain_intervention_risk_reachable(Case, Candidate, Chain).
+
+candidate_failure_chain_support(Case, Candidate, Chain) :-
+    candidate_failure_chain_components_supported(Case, Candidate, Chain),
+    failure_chain_bfo_support(Case, Chain).

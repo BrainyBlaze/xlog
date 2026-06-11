@@ -1,0 +1,67 @@
+// Shared explanation support semantics.
+//
+// The entry program owns the final epistemic explanation gate. This module
+// owns stable metadata selection, dependency expansion, explanation identifiers,
+// and support detection from accepted claims.
+
+pred accepted_claim(u32, u32, u32, u32).
+pred explanation_identifier(u32, u32, u32, u32, u32).
+pred explanation_metadata(u32, u32, u32, u32).
+pred dominated_explanation_metadata(u32, u32, u32, u32).
+pred selected_explanation_metadata(u32, u32, u32, u32).
+pred explanation_support(u32, u32, u32, u32).
+pred explanation_dependency(u32, u32, u32, u32, u32, u32).
+pred explanation_base_dependency(u32, u32).
+pred proof_dependency_relation(u32, u32, u32, u32, u32, u32).
+pred explanation_has_dependency(u32, u32, u32, u32).
+
+explanation_metadata(1, 385046675, 1419304611, 39051548) :-
+    accepted_claim(_, _, 1, _).
+
+explanation_metadata(2, 1003123682, 1419304611, 1886114667) :-
+    accepted_claim(_, _, 2, _).
+
+explanation_metadata(3, 385046675, 1278873852, 430743602) :-
+    accepted_claim(_, _, 3, _).
+
+explanation_metadata(4, 1003123682, 1419304611, 2025132508) :-
+    accepted_claim(_, _, 4, _).
+
+explanation_identifier(Case, Candidate, ClaimType, Claim, Explanation) :-
+    accepted_claim(Case, Candidate, ClaimType, Claim),
+    Explanation is (ClaimType * cast(1000, u32)) + Claim.
+
+dominated_explanation_metadata(ClaimType, Category, Relation, Kernel) :-
+    explanation_metadata(ClaimType, Category, Relation, Kernel),
+    explanation_metadata(ClaimType, OtherCategory, OtherRelation, OtherKernel),
+    Category != OtherCategory,
+    OtherCategory < Category.
+
+dominated_explanation_metadata(ClaimType, Category, Relation, Kernel) :-
+    explanation_metadata(ClaimType, Category, Relation, Kernel),
+    explanation_metadata(ClaimType, Category, OtherRelation, OtherKernel),
+    OtherRelation < Relation.
+
+dominated_explanation_metadata(ClaimType, Category, Relation, Kernel) :-
+    explanation_metadata(ClaimType, Category, Relation, Kernel),
+    explanation_metadata(ClaimType, Category, Relation, OtherKernel),
+    OtherKernel < Kernel.
+
+selected_explanation_metadata(ClaimType, Category, Relation, Kernel) :-
+    explanation_metadata(ClaimType, Category, Relation, Kernel),
+    not dominated_explanation_metadata(ClaimType, Category, Relation, Kernel).
+
+explanation_dependency(Case, Candidate, ClaimType, Claim, Dependency, Relation) :-
+    accepted_claim(Case, Candidate, ClaimType, Claim),
+    explanation_base_dependency(Dependency, Relation).
+
+explanation_dependency(Case, Candidate, ClaimType, Claim, Dependency, Relation) :-
+    accepted_claim(Case, Candidate, ClaimType, Claim),
+    proof_dependency_relation(Case, Candidate, ClaimType, Claim, Dependency, Relation).
+
+explanation_has_dependency(Case, Candidate, ClaimType, Claim) :-
+    explanation_dependency(Case, Candidate, ClaimType, Claim, _, _).
+
+explanation_support(Case, Candidate, ClaimType, Claim) :-
+    accepted_claim(Case, Candidate, ClaimType, Claim),
+    explanation_has_dependency(Case, Candidate, ClaimType, Claim).

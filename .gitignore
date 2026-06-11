@@ -1,5 +1,6 @@
 # Build artifacts
 /target/
+/target-sm89-py310/
 
 # Compiled CUDA kernel artifacts (regenerated during build)
 *.ptx
