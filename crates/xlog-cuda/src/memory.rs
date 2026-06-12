@@ -93,6 +93,82 @@ enum Backing {
     },
 }
 
+/// Debug probe: poison legacy allocations with 0xDD at drop so any
+/// live alias of freed memory becomes visually distinct. Gated on
+/// `XLOG_DEBUG_POISON_FREE=1`, read once per process.
+fn poison_free_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("XLOG_DEBUG_POISON_FREE").map(|v| v == "1") == Ok(true)
+    })
+}
+
+/// Debug probe: poison fresh legacy allocations with 0xDD so reads of
+/// unwritten contents surface deterministically. Gated on
+/// `XLOG_DEBUG_POISON_ALLOC=1`, read once per process.
+fn poison_alloc_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("XLOG_DEBUG_POISON_ALLOC").map(|v| v == "1") == Ok(true)
+    })
+}
+
+/// Debug probe: track live legacy allocation ranges and panic if the
+/// allocator ever hands out a region overlapping one that is still
+/// live (double-hand-out / use-after-free detector, timing
+/// independent). Gated on `XLOG_DEBUG_ALLOC_GUARD=1`.
+fn alloc_guard() -> Option<&'static std::sync::Mutex<std::collections::BTreeMap<u64, u64>>> {
+    static GUARD: std::sync::OnceLock<
+        Option<std::sync::Mutex<std::collections::BTreeMap<u64, u64>>>,
+    > = std::sync::OnceLock::new();
+    GUARD
+        .get_or_init(|| {
+            if std::env::var("XLOG_DEBUG_ALLOC_GUARD").map(|v| v == "1") == Ok(true) {
+                Some(std::sync::Mutex::new(std::collections::BTreeMap::new()))
+            } else {
+                None
+            }
+        })
+        .as_ref()
+}
+
+fn alloc_guard_insert(ptr: u64, bytes: u64) {
+    let Some(guard) = alloc_guard() else { return };
+    if bytes == 0 {
+        return;
+    }
+    let mut live = guard.lock().unwrap();
+    // Overlap check against the nearest live range at or below ptr and
+    // the first live range above it.
+    if let Some((&p, &b)) = live.range(..=ptr).next_back() {
+        if p + b > ptr {
+            panic!(
+                "ALLOC GUARD: new allocation [{:#x}, {:#x}) overlaps live [{:#x}, {:#x})",
+                ptr,
+                ptr + bytes,
+                p,
+                p + b
+            );
+        }
+    }
+    if let Some((&p, _)) = live.range(ptr + 1..).next() {
+        if ptr + bytes > p {
+            panic!(
+                "ALLOC GUARD: new allocation [{:#x}, {:#x}) overlaps live starting at {:#x}",
+                ptr,
+                ptr + bytes,
+                p
+            );
+        }
+    }
+    live.insert(ptr, bytes);
+}
+
+fn alloc_guard_remove(ptr: u64) {
+    let Some(guard) = alloc_guard() else { return };
+    guard.lock().unwrap().remove(&ptr);
+}
+
 /// A `CudaSlice` that automatically updates `GpuMemoryManager`
 /// allocation tracking on drop. Inner slice is wrapped in
 /// `ManuallyDrop` so the [`Backing`] enum can choose between
@@ -284,6 +360,21 @@ impl<T: cudarc::driver::DeviceRepr> Drop for TrackedCudaSlice<T> {
     fn drop(&mut self) {
         match &mut self.backing {
             Backing::Cudarc => {
+                // Debug probe (XLOG_DEBUG_POISON_FREE=1): overwrite the
+                // allocation with 0xDD before cudarc frees it, so any
+                // still-live alias of this memory reads the poison
+                // pattern instead of recycled contents. Diagnostic only;
+                // off unless the env var is set.
+                if poison_free_enabled() && self.bytes > 0 {
+                    unsafe {
+                        let _ = cudarc::driver::sys::cuMemsetD8_v2(
+                            self.raw_ptr,
+                            0xDD,
+                            self.bytes as usize,
+                        );
+                    }
+                }
+                alloc_guard_remove(self.raw_ptr);
                 // SAFETY: drop runs at most once per slice, and the
                 // inner CudaSlice<T> has not been moved out by any
                 // method (`into_bytes` consumes `self` by value and
@@ -505,6 +596,23 @@ impl GpuMemoryManager {
         };
         let (raw_ptr, sync) = DevicePtr::device_ptr(&slice, slice.stream());
         std::mem::forget(sync);
+        alloc_guard_insert(raw_ptr, bytes);
+
+        // Debug probe (XLOG_DEBUG_POISON_ALLOC=1): poison fresh legacy
+        // allocations with 0xDD so any read of unwritten allocation
+        // contents becomes a deterministic, recognizable pattern
+        // instead of whatever the recycled memory held. Diagnostic
+        // only; off unless the env var is set.
+        if poison_alloc_enabled() && bytes > 0 {
+            unsafe {
+                let _ = cudarc::driver::sys::cuMemsetD8Async(
+                    raw_ptr,
+                    0xDD,
+                    bytes as usize,
+                    std::ptr::null_mut(),
+                );
+            }
+        }
 
         Ok(TrackedCudaSlice {
             bytes,

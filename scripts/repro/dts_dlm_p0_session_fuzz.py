@@ -190,10 +190,19 @@ def check_garbage_keys(qr, n_facts: int) -> list[str]:
         lo = int(t.min().item()) if t.numel() else 0
         # Generous domain bound: ids, values, preds, fixed-point masses.
         if hi > CLAIM_PRED_BASE + N_PREDS or lo < -1:
+            bad = ((t > CLAIM_PRED_BASE + N_PREDS) | (t < -1)).nonzero().flatten()
+            idxs = bad.tolist()
+            vals = t[bad][:8].tolist()
+            contiguous_tail = bool(idxs) and idxs[-1] == t.numel() - 1 and (
+                len(idxs) == idxs[-1] - idxs[0] + 1
+            )
             problems.append(
                 f"{qr.relation_name}.{name}: out-of-domain [{lo}, {hi}]"
                 f" (id domain < {n_facts}, pred domain"
-                f" < {CLAIM_PRED_BASE + N_PREDS})"
+                f" < {CLAIM_PRED_BASE + N_PREDS}); rows={t.numel()}"
+                f" bad={len(idxs)} first_idx={idxs[0]} last_idx={idxs[-1]}"
+                f" contiguous_tail={contiguous_tail} sample_vals={vals}"
+                f" sample_idxs={idxs[:8]}"
             )
     return problems
 
@@ -210,9 +219,12 @@ def run(args) -> int:
     step = max(1, (fact_hi - fact_lo) // max(1, args.iters - 1))
 
     prev_counts: dict[str, int] | None = None
+    keepalive: list = []
     for it in range(args.iters):
         n_facts = min(fact_hi, fact_lo + it * step)
         rels = make_wmir_relations(n_facts, seed=args.seed + it)
+        if args.keepalive:
+            keepalive.append(rels)
 
         if args.mode == "rotate" and it > 0:
             session = program.session()
@@ -226,6 +238,12 @@ def run(args) -> int:
             for name, columns in rels.items():
                 session.put_relation(name, columns)
             result = session.evaluate()
+            if args.sync_after_evaluate:
+                # Hypothesis probe: if evaluate() returns with async
+                # copies still in flight on xlog's stream, a consumer
+                # reading the DLPack capsules from another stream races
+                # them. A device-wide sync here must close that race.
+                torch.cuda.synchronize()
         except Exception as exc:  # the strike we are hunting
             print(
                 f"\nSTRIKE iter={it} n_facts={n_facts} mode={args.mode}\n"
@@ -267,6 +285,13 @@ def main() -> int:
     ap.add_argument("--iters", type=int, default=200)
     ap.add_argument("--seed", type=int, default=20260612)
     ap.add_argument("--sync-before-put", action="store_true")
+    ap.add_argument("--sync-after-evaluate", action="store_true")
+    ap.add_argument(
+        "--keepalive",
+        action="store_true",
+        help="Keep every generated torch tensor alive for the whole run, "
+        "ruling out torch caching-allocator reuse under live xlog views.",
+    )
     args = ap.parse_args()
     t0 = time.time()
     rc = run(args)
