@@ -566,6 +566,13 @@ pub const KERNEL_MODULES: &[KernelModuleSpec] = &[
             "fj_probe_refine_u64",
             // Phase C — factorized count epilogue (width-agnostic).
             "fj_count_multiplicity",
+            // D3 S3 spike — factorized recursive delta novel-set
+            // pipeline (dense-domain bitmap union–diff).
+            "fj_delta_range_u32",
+            "fj_delta_mark_u32",
+            "fj_delta_subtract_u32",
+            "fj_delta_popcount",
+            "fj_delta_emit_u32",
         ],
     },
     KernelModuleSpec {

@@ -25,6 +25,7 @@ use crate::{
 mod arithmetic;
 mod filter;
 mod fj;
+mod fj_delta;
 mod groupby;
 mod ilp;
 mod ilp_exact;
@@ -396,6 +397,12 @@ pub mod wcoj_kernels {
     pub const FJ_EXPAND_EMIT_U64: &str = "fj_expand_emit_u64";
     pub const FJ_PROBE_REFINE_U64: &str = "fj_probe_refine_u64";
     pub const FJ_COUNT_MULTIPLICITY: &str = "fj_count_multiplicity";
+    // D3 S3 spike — factorized recursive delta novel-set pipeline.
+    pub const FJ_DELTA_RANGE_U32: &str = "fj_delta_range_u32";
+    pub const FJ_DELTA_MARK_U32: &str = "fj_delta_mark_u32";
+    pub const FJ_DELTA_SUBTRACT_U32: &str = "fj_delta_subtract_u32";
+    pub const FJ_DELTA_POPCOUNT: &str = "fj_delta_popcount";
+    pub const FJ_DELTA_EMIT_U32: &str = "fj_delta_emit_u32";
 }
 
 /// Kernel function names in the Monte Carlo sampling module

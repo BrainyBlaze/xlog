@@ -3784,3 +3784,145 @@ extern "C" __global__ void fj_count_multiplicity(
     }
     mult[i] = m;
 }
+
+// ---------------------------------------------------------------------------
+// D3 S3 spike — factorized recursive delta (TC novel-set pipeline).
+//
+// The per-source novel set of a semi-naive TC iteration is
+//   novel[x] = (∪_{y ∈ delta[x]} edge[y]) \ R[x]
+// — a union of sorted trie ranges minus the stable relation's rows.
+// These kernels evaluate that union–diff over a dense-domain
+// characteristic bitvector (one row of `words_per_row` u32 words per
+// source x) instead of materializing the witness-multiplied flat
+// join: rediscoveries and duplicate witnesses collapse in the bitmap
+// and only surviving novel tuples are ever written out. The emit
+// order (word index = (x, z) order) makes the output lex-sorted and
+// full-row-deduped by construction.
+//
+// Out-of-domain ids fail closed: kernels set *error_flag and skip the
+// write; the host surfaces the flag as a typed error after sync.
+
+// Per delta row: locate the edge trie range for y (edge is lex-sorted
+// (y, z), full-row deduped) and record its start + length. Lengths go
+// into work_prefix for the exclusive scan that drives the mark pass;
+// the trailing slot is zeroed for the scan.
+extern "C" __global__ void fj_delta_range_u32(
+    const uint32_t* __restrict__ delta_y,
+    uint32_t n_delta,
+    const uint32_t* __restrict__ edge_y,
+    uint32_t n_edge,
+    uint32_t* __restrict__ range_lo,
+    uint32_t* __restrict__ work_prefix) {
+    uint32_t i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i == 0) {
+        work_prefix[n_delta] = 0;
+    }
+    if (i >= n_delta) {
+        return;
+    }
+    uint32_t y = delta_y[i];
+    uint32_t lo = lower_bound_u32(edge_y, n_edge, y);
+    uint32_t hi = upper_bound_u32(edge_y, n_edge, y);
+    range_lo[i] = lo;
+    work_prefix[i] = hi - lo;
+}
+
+// Mark candidates: one work item per (delta row, range offset). Sets
+// bit (x, z) for every candidate successor; atomicOr collapses
+// duplicate witnesses for free.
+extern "C" __global__ void fj_delta_mark_u32(
+    const uint32_t* __restrict__ delta_x,
+    uint32_t n_delta,
+    const uint32_t* __restrict__ range_lo,
+    const uint32_t* __restrict__ work_prefix,
+    uint32_t total_work,
+    const uint32_t* __restrict__ edge_z,
+    uint32_t* __restrict__ bitmap,
+    uint32_t words_per_row,
+    uint32_t domain,
+    uint32_t* __restrict__ error_flag) {
+    uint32_t w = blockIdx.x * blockDim.x + threadIdx.x;
+    if (w >= total_work) {
+        return;
+    }
+    uint32_t r = upper_bound_u32(work_prefix, n_delta + 1, w) - 1u;
+    uint32_t k = w - work_prefix[r];
+    uint32_t x = delta_x[r];
+    uint32_t z = edge_z[range_lo[r] + k];
+    if (x >= domain || z >= domain) {
+        atomicExch(error_flag, 1u);
+        return;
+    }
+    atomicOr(&bitmap[(size_t)x * words_per_row + (z >> 5)], 1u << (z & 31u));
+}
+
+// Subtract the stable relation: clear bit (x, z) for every row of R.
+// Clearing a bit that was never marked is a no-op, so R needs no
+// pre-filtering against the candidate set.
+extern "C" __global__ void fj_delta_subtract_u32(
+    const uint32_t* __restrict__ r_x,
+    const uint32_t* __restrict__ r_z,
+    uint32_t n_r,
+    uint32_t* __restrict__ bitmap,
+    uint32_t words_per_row,
+    uint32_t domain,
+    uint32_t* __restrict__ error_flag) {
+    uint32_t j = blockIdx.x * blockDim.x + threadIdx.x;
+    if (j >= n_r) {
+        return;
+    }
+    uint32_t x = r_x[j];
+    uint32_t z = r_z[j];
+    if (x >= domain || z >= domain) {
+        atomicExch(error_flag, 1u);
+        return;
+    }
+    atomicAnd(&bitmap[(size_t)x * words_per_row + (z >> 5)], ~(1u << (z & 31u)));
+}
+
+// Per-word survivor counts for the exclusive scan that sizes and
+// places the emit. The trailing slot is zeroed for the scan.
+extern "C" __global__ void fj_delta_popcount(
+    const uint32_t* __restrict__ bitmap,
+    uint32_t n_words,
+    uint32_t* __restrict__ counts) {
+    uint32_t w = blockIdx.x * blockDim.x + threadIdx.x;
+    if (w == 0) {
+        counts[n_words] = 0;
+    }
+    if (w >= n_words) {
+        return;
+    }
+    counts[w] = __popc(bitmap[w]);
+}
+
+// Emit surviving novel pairs at their scanned offsets. Word order is
+// (x, z) order, and bits are drained ascending, so the output is
+// lex-sorted and deduped by construction — it is simultaneously the
+// next iteration's delta and the union input.
+extern "C" __global__ void fj_delta_emit_u32(
+    const uint32_t* __restrict__ bitmap,
+    uint32_t words_per_row,
+    uint32_t n_words,
+    const uint32_t* __restrict__ offsets,
+    uint32_t* __restrict__ out_x,
+    uint32_t* __restrict__ out_z) {
+    uint32_t w = blockIdx.x * blockDim.x + threadIdx.x;
+    if (w >= n_words) {
+        return;
+    }
+    uint32_t bits = bitmap[w];
+    if (bits == 0u) {
+        return;
+    }
+    uint32_t x = w / words_per_row;
+    uint32_t base = (w % words_per_row) << 5;
+    uint32_t o = offsets[w];
+    while (bits != 0u) {
+        uint32_t b = __ffs(bits) - 1u;
+        out_x[o] = x;
+        out_z[o] = base + b;
+        o += 1u;
+        bits &= bits - 1u;
+    }
+}
