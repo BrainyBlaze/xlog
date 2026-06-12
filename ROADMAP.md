@@ -2096,6 +2096,59 @@ fail-closed:
 - [x] FAEEL-unfounded self-support (`p() :- possible p()`) executes to the defined
       empty extension, while explicit G91 accepts the same self-supporting program.
 
+## v0.9.3 - Consumer Runtime Pack (DTS-DLM-driven; ordering pending maintainer decision)
+
+Sourced from the DTS-DLM consolidated requirements package
+(2026-06-12, `dts-dlm docs/upstream/2026-06-12-xlog-requirements.md`;
+desk `#xlog` thread `msg-20260612-112404-c782`). The P0 engine defects
+from that package are closed (`703a2cc2`, production-validated by the
+consumer's M50-pure campaign). The ordering below is the proposed
+priority — P2.1 gates the consumer's training endgame and P1.1 doubles
+as a mitigation for the WSL export-stage corruption residual — but the
+final ordering is a maintainer decision.
+
+### Neural-Symbolic Training
+
+- [ ] Mixed trainable-rule bodies (consumer P2.1): `trainable_rule` bodies
+      joining `nn/k` predicates with ordinary relations and builtins.
+      Required semantics: fact atoms are hard join conditions; probability
+      mass comes only from nn-predicates × σ(w); gradients flow to the
+      network and w, never through fact atoms. Canonical example in the
+      requirements doc (contrary_value_pair over nn_slot_competition +
+      claim_fact + F1 != F2). Consumer-verified precursor: the
+      neurosymbolic fix already trains on their side (gradient norm 0.47).
+
+### Session API and Performance
+
+- [ ] Selective query evaluation (P1.1): `evaluate(query_indices=[...])`
+      computing only the requested closure. Also reduces the multi-query
+      export clone storm implicated in the WSL defect-#2 residual.
+- [ ] Incremental evaluation across evaluates (P1.2): semi-naive
+      maintenance across persistent-session evaluates (delta-puts in,
+      delta-results out). Consumer-measured as their dominant
+      step-latency cost; builds on the v0.8.6 delta-coalescing substrate.
+- [ ] Cheap session forking (P1.3): copy-on-write `session.fork()` with
+      shared base relations + private deltas, making counterfactual
+      branch evaluation O(delta). Enabler for the consumer's M51
+      branch-quantified modality milestone.
+- [ ] Documented determinism contract (P1.4): stated and CI-tested
+      multiplicity guarantee for `evaluate()` outputs (ordering may stay
+      unspecified). Consumer evidence: raw RecursiveSupportResult row-count
+      variance across identical inputs (their ROADMAP M37 finding).
+- [ ] In-body arithmetic ergonomics (P1.5): document supported expression
+      forms; support cast-then-compare in one body
+      (`X is cast(count_result, i64)` followed by comparison).
+
+### Epistemic and Typed Outputs
+
+- [ ] Multi-world epistemic evaluation (P2.2, after P1.3): `known(F)` /
+      `possible(F)` quantified over session-set world branches with
+      cross-world aggregate queries, instead of N full evaluations plus
+      host aggregation.
+- [ ] Float-typed query outputs (P2.3): bless f32 query columns
+      (document + test) so consumers can drop fixed-point `_i64` mirror
+      rules for Belnap channel masses, slot probabilities, and rule weights.
+
 ## v0.10.0 - Multi-GPU and Out-of-Core Execution
 
 ### Runtime and Memory
