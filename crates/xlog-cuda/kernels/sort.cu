@@ -121,7 +121,11 @@ extern "C" __global__ void compute_ranks(
     uint32_t gid = blockIdx.x * blockDim.x + threadIdx.x;
     uint32_t block_start = blockIdx.x * blockDim.x;
     uint32_t block_end = min(block_start + BLOCK_SIZE, actual);
-    uint32_t block_count = block_end - block_start;
+    // Blocks entirely past the live rows (block_start >= actual, possible
+    // whenever the grid was sized from row_cap while the device row count
+    // is smaller) must not write: the unguarded subtraction underflows and
+    // lets every thread through the rank-write guard below.
+    uint32_t block_count = block_end > block_start ? block_end - block_start : 0;
 
     // Load this thread's digit into shared memory
     uint32_t my_digit = 0;
