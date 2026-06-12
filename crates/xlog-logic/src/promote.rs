@@ -119,6 +119,11 @@ pub fn promote_multiway(
     stats: &StatsManager,
     config: &CompilerConfig,
 ) {
+    // D2 Free Join: the general multiway promoter sizes Scan leaves
+    // from relation arities (the clique walker's hardcoded arity-2
+    // assumption does not generalize). Cloned up front because the
+    // per-rule loop holds `rules_by_scc` mutably.
+    let rel_arities = plan.rel_arities.clone();
     for (scc_id, rules) in plan.rules_by_scc.iter_mut().enumerate() {
         if plan.sccs.get(scc_id).is_none() {
             continue;
@@ -169,6 +174,16 @@ pub fn promote_multiway(
             if try_promote_clique_inside_aggregate(&mut rule.body, stats) {
                 continue;
             }
+            // D2 §2.4: general multiway sibling of the descents above
+            // — any >=3-atom inner-join tree under an aggregate
+            // wrapper that no dedicated descent recognized becomes a
+            // FreeJoin-marked MultiWayJoin. The executor's fused hook
+            // dispatches factorized count-by-root only; declined
+            // dispatches still execute the embedded binary fallback
+            // unchanged.
+            if try_promote_general_multiway_inside_aggregate(&mut rule.body, &rel_arities) {
+                continue;
+            }
             if let Some(promoted) = try_promote_chain(&rule.body) {
                 rule.body = promoted;
                 continue;
@@ -206,6 +221,18 @@ pub fn promote_multiway(
                 .or_else(|| try_promote_clique_k(&rule.body, 7, stats))
                 .or_else(|| try_promote_clique_k(&rule.body, 8, stats))
             {
+                rule.body = promoted;
+                continue;
+            }
+            // D2 Free Join — general >=3-atom inner-join bodies that
+            // no dedicated shape promoter recognized become a generic
+            // `MultiWayJoin` (plan: None). The executor derives a Free
+            // Join plan from `slot_vars` at dispatch time
+            // (`try_dispatch_free_join`); structural declines
+            // (non-prefix bound columns, non-u32/Symbol inputs,
+            // repeated cover vars, dedicated-shape carve-outs) execute
+            // the embedded binary fallback unchanged.
+            if let Some(promoted) = try_promote_general_multiway(&rule.body, &rel_arities) {
                 rule.body = promoted;
                 continue;
             }
@@ -1472,6 +1499,195 @@ fn walk_clique_node(
         // any other RIR variant.
         _ => None,
     }
+}
+
+/// D2 Free Join — general multiway flatten walker. Arity-aware
+/// sibling of [`walk_clique_node`]: sizes each Scan leaf from
+/// `arities` instead of the clique walker's hardcoded arity-2
+/// assumption, so global slot offsets are running width sums.
+/// Walks Join/Scan only; rejects non-Inner joins, keyless
+/// (Cartesian) joins — those stay on the bench-grounded W4.2
+/// nested-loop routing — and any other RIR variant. Returns the
+/// subtree width in global slots.
+fn walk_general_node(
+    node: &RirNode,
+    arities: &HashMap<RelId, usize>,
+    scans: &mut Vec<RelId>,
+    widths: &mut Vec<usize>,
+    key_pairs: &mut Vec<(usize, usize)>,
+) -> Option<usize> {
+    match node {
+        RirNode::Scan { rel } => {
+            let width = *arities.get(rel)?;
+            if width == 0 {
+                return None;
+            }
+            scans.push(*rel);
+            widths.push(width);
+            Some(width)
+        }
+        RirNode::Join {
+            left,
+            right,
+            left_keys,
+            right_keys,
+            join_type,
+        } => {
+            if !matches!(join_type, JoinType::Inner) {
+                return None;
+            }
+            // Offset of the left subtree = total width accumulated so
+            // far (widths fills in left-to-right traversal order).
+            let left_offset: usize = widths.iter().sum();
+            let left_width = walk_general_node(left, arities, scans, widths, key_pairs)?;
+            let right_offset = left_offset + left_width;
+            let right_width = walk_general_node(right, arities, scans, widths, key_pairs)?;
+            if left_keys.len() != right_keys.len() || left_keys.is_empty() {
+                return None;
+            }
+            for (lk, rk) in left_keys.iter().zip(right_keys.iter()) {
+                if *lk >= left_width || *rk >= right_width {
+                    return None;
+                }
+                key_pairs.push((left_offset + *lk, right_offset + *rk));
+            }
+            Some(left_width + right_width)
+        }
+        _ => None,
+    }
+}
+
+/// D2 Free Join — promote a general ≥3-atom inner-join body (any
+/// arity mix, any join-tree shape) to a generic `MultiWayJoin`
+/// carrying dense variable classes in `slot_vars` and `plan: None`.
+///
+/// Runs after every dedicated shape promoter declined in the
+/// per-rule loop (triangle / 4-cycle / K-clique successes `continue`
+/// past it), so dedicated shapes never reach this path. The executor
+/// (`try_dispatch_free_join`) derives a Free Join plan from
+/// `slot_vars` at dispatch time and silently declines to the
+/// embedded binary fallback for shapes the GPU engine cannot run.
+///
+/// Idempotent: only `Project(inner-join tree)` bodies match, so an
+/// already-promoted `MultiWayJoin` passes through unchanged.
+fn try_promote_general_multiway(
+    body: &RirNode,
+    arities: &HashMap<RelId, usize>,
+) -> Option<RirNode> {
+    let RirNode::Project { input, columns } = body else {
+        return None;
+    };
+    let mut scans: Vec<RelId> = Vec::new();
+    let mut widths: Vec<usize> = Vec::new();
+    let mut key_pairs: Vec<(usize, usize)> = Vec::new();
+    let total = walk_general_node(input, arities, &mut scans, &mut widths, &mut key_pairs)?;
+    if scans.len() < 3 {
+        return None;
+    }
+
+    // Union-find over the global slot space, then dense class ids in
+    // first-occurrence slot order. The executor treats `slot_vars`
+    // entries as opaque variable classes (it densely remaps again on
+    // its side), so first-occurrence numbering is canonical enough.
+    let mut parent: Vec<usize> = (0..total).collect();
+    for (a, b) in &key_pairs {
+        if *a >= total || *b >= total {
+            return None;
+        }
+        uf_union_clique(&mut parent, *a, *b);
+    }
+    let mut class_of_root: HashMap<usize, u32> = HashMap::new();
+    let mut slot_class: Vec<u32> = Vec::with_capacity(total);
+    for slot in 0..total {
+        let root = uf_find_clique(&mut parent, slot);
+        let next = class_of_root.len() as u32;
+        let cls = *class_of_root.entry(root).or_insert(next);
+        slot_class.push(cls);
+    }
+
+    // Every projection entry must be a plain column inside the slot
+    // space; computed projections stay on the binary path.
+    for c in columns {
+        let ProjectExpr::Column(k) = c else {
+            return None;
+        };
+        if *k >= total {
+            return None;
+        }
+    }
+
+    let inputs: Vec<RirNode> = scans
+        .iter()
+        .map(|rel| RirNode::Scan { rel: *rel })
+        .collect();
+    let mut slot_vars: Vec<Vec<Option<u32>>> = Vec::with_capacity(scans.len());
+    let mut offset = 0usize;
+    for &w in &widths {
+        slot_vars.push((offset..offset + w).map(|s| Some(slot_class[s])).collect());
+        offset += w;
+    }
+
+    Some(RirNode::MultiWayJoin {
+        inputs,
+        slot_vars,
+        output_columns: columns.clone(),
+        fallback: Box::new(body.clone()),
+        // Provenance marker: `inputs` are the fallback's Scan leaves
+        // in traversal order, so `output_columns` coincides with the
+        // concatenated-inputs column space — the contract the Free
+        // Join dispatcher requires (dedicated promoters reorder
+        // `inputs` canonically and must never carry this variant).
+        plan: Some(MultiwayPlan::FreeJoin),
+        var_order: None,
+    })
+}
+
+/// D2 §2.4 groupby fusion: general multiway sibling of
+/// [`try_promote_triangle_inside_aggregate`]. Promotes any >=3-atom
+/// inner-join tree sitting inside an aggregate rule's
+/// `Project{ GroupBy { Project { <join tree> } } }` wrapper through
+/// [`try_promote_general_multiway`].
+///
+/// Unlike the dedicated descents, no column remapping gymnastics are
+/// needed: FreeJoin-marked nodes keep `output_columns` in the
+/// join-output column space (inputs are the tree's Scan leaves in
+/// traversal order), so the group projection's columns are handed to
+/// the promoter as the head projection verbatim and the group
+/// projection becomes the identity over the MultiWayJoin's output.
+/// Returns false — leaving the rule untouched — on any structural
+/// mismatch.
+fn try_promote_general_multiway_inside_aggregate(
+    body: &mut RirNode,
+    arities: &HashMap<RelId, usize>,
+) -> bool {
+    let RirNode::Project { input: gb, .. } = body else {
+        return false;
+    };
+    let RirNode::GroupBy {
+        input: group_input, ..
+    } = gb.as_mut()
+    else {
+        return false;
+    };
+    let RirNode::Project {
+        input: inner,
+        columns: group_cols,
+    } = group_input.as_mut()
+    else {
+        return false;
+    };
+    let candidate = RirNode::Project {
+        input: inner.clone(),
+        columns: group_cols.clone(),
+    };
+    let Some(promoted) = try_promote_general_multiway(&candidate, arities) else {
+        return false;
+    };
+    // The MultiWayJoin's output IS the group projection, so the group
+    // projection becomes positional identity over it.
+    *group_cols = (0..group_cols.len()).map(ProjectExpr::Column).collect();
+    **inner = promoted;
+    true
 }
 
 /// W3.2/W6.4 K-clique promoter for k ∈ {5, 6, 7, 8}.

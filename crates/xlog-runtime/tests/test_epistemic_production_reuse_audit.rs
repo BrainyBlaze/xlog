@@ -191,6 +191,7 @@ fn preflight_requiring_kclique_wcoj() -> EpistemicGpuRuntimePreflight {
         kclique_wcoj_plan_count: 1,
         wcoj_triangle_route_count: 0,
         wcoj_4cycle_route_count: 0,
+        free_join_route_count: 0,
         kclique_wcoj_plan_count_by_arity: [1, 0, 0, 0],
         kclique_wcoj_max_arity: 5,
         kclique_wcoj_edge_permutation_count: 10,

@@ -2168,6 +2168,7 @@ mod helper_split_pass_tests {
                 ])),
             }]],
             est_memory_peak: 0,
+            rel_arities: std::collections::HashMap::new(),
         }
     }
 

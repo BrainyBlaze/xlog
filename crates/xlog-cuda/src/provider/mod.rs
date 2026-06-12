@@ -24,6 +24,7 @@ use crate::{
 
 mod arithmetic;
 mod filter;
+mod fj;
 mod groupby;
 mod ilp;
 mod ilp_exact;
@@ -37,6 +38,8 @@ mod transfer;
 mod wcoj;
 mod wcoj_metadata;
 mod wcoj_project;
+
+pub use fj::{FjNode, FjPlan, FjSubAtom};
 
 /// Per-module PTX load timing (populated only when XLOG_WARMUP_PROFILE=1).
 #[derive(Debug, Clone, Default)]
@@ -382,6 +385,17 @@ pub mod wcoj_kernels {
         "wcoj_clique5_groupby_root_count_hg_u32";
     pub const WCOJ_CLIQUE6_GROUPBY_ROOT_COUNT_HG_U32: &str =
         "wcoj_clique6_groupby_root_count_hg_u32";
+    // D2 S2 spike — Free Join frontier engine primitives. The work
+    // prefix kernel is width-agnostic (ranges are u32 row indices in
+    // every width class); count/emit/probe have u64 data twins.
+    pub const FJ_EXPAND_WORK_PREFIX_U32: &str = "fj_expand_work_prefix_u32";
+    pub const FJ_EXPAND_COUNT_U32: &str = "fj_expand_count_u32";
+    pub const FJ_EXPAND_EMIT_U32: &str = "fj_expand_emit_u32";
+    pub const FJ_PROBE_REFINE_U32: &str = "fj_probe_refine_u32";
+    pub const FJ_EXPAND_COUNT_U64: &str = "fj_expand_count_u64";
+    pub const FJ_EXPAND_EMIT_U64: &str = "fj_expand_emit_u64";
+    pub const FJ_PROBE_REFINE_U64: &str = "fj_probe_refine_u64";
+    pub const FJ_COUNT_MULTIPLICITY: &str = "fj_count_multiplicity";
 }
 
 /// Kernel function names in the Monte Carlo sampling module

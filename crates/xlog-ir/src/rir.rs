@@ -226,6 +226,16 @@ pub enum MultiwayPlan {
         /// Cost evidence that made the route auditable.
         planner_evidence: CostPredictionRecord,
     },
+    /// D2 — generic Free Join route emitted ONLY by the general
+    /// multiway promoter. Provenance contract: `inputs` are the
+    /// fallback body's Scan leaves in left-to-right traversal order,
+    /// so `output_columns` (which carries the fallback projection, as
+    /// on every `MultiWayJoin`) coincides positionally with the
+    /// concatenated-inputs column space — the property the Free Join
+    /// dispatcher's head projection relies on. Dedicated-shape
+    /// promoters reorder `inputs` canonically and must never use this
+    /// variant; the dispatcher declines every other plan value.
+    FreeJoin,
 }
 
 /// Variable-ordering decision attached to a `MultiWayJoin`.

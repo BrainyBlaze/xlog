@@ -109,6 +109,48 @@ All notable changes to this project are documented in this file.
   lex-sorted+deduped by construction, satisfying the fused layout contract.
   Aggregates *inside* recursive rules remain stratification-rejected by
   language contract.
+- *(runtime)* **GPU Free Join for general multiway bodies (D2).** Inner-join
+  bodies with >= 3 atoms and no dedicated kernel shape (any arity mix, any
+  join-tree shape) now promote to a generic `MultiWayJoin`
+  (`MultiwayPlan::FreeJoin`) and dispatch through a Free Join frontier
+  engine (flat sorted-range tries + level-synchronous columnar frontier,
+  identity-group fast path, fused probe filters; SIGMOD'23 Free Join
+  adapted to bulk GPU execution). Spike gate on the 4-atom blowup chain:
+  2.59x median vs the binary-join path (isolated serial runs); the dedicated
+  triangle comparison is retained as the recorded cost-of-generality bound
+  (1.73x-2.04x) and triangle/4-cycle/K-clique keep their dedicated kernels —
+  Free Join never takes a dedicated shape
+  (`docs/evidence/2026-06-12-s2-free-join-spike/`). Opportunistic by
+  contract: non-prefix bound columns, non-u32/Symbol inputs, and repeated
+  cover variables decline silently to the embedded binary fallback with
+  identical results. Counter `Executor::free_join_dispatch_count`; kill
+  switch `XLOG_DISABLE_FREE_JOIN=1`. Epistemic GPU certification classifies
+  Free Join routes as a separate opportunistic preflight bucket
+  (`free_join_route_count`) and traces dispatches without hardening them
+  into dedicated-kernel obligations.
+- *(cuda)* **Free Join completion (D2 Phase C).** u64 width-class engine
+  (`free_join_execute_u64_recorded`): the frontier pipeline is
+  width-parameterized — VAR columns carry width-sized data while trie
+  RANGE columns stay u32 row indices in every class — with parity locked
+  by truncation-adversarial fixtures (keys colliding modulo 2^32).
+  Recursive SCCs verified end-to-end: Free Join fires on the semi-naive
+  seeding pass and on every delta-rewritten variant with exact fixpoint
+  parity under the kill switch. **Factorized count-by-root** (design
+  §2.4): `count` aggregates over FreeJoin-promoted bodies dispatch
+  `free_join_count_by_root_u32_recorded` — trailing variables private to
+  one atom are never expanded; each frontier row contributes the product
+  of its remaining live trie-range lengths (the d-representation count)
+  and the existing recorded groupby reduces `(group, multiplicity)`.
+  Count semantics match the unfused pipeline exactly (both count
+  distinct full body bindings). Measured 3.66x-3.71x vs the
+  materialize+groupby path on a skewed 4-atom fixture (7.8M-row
+  join vs 100k-row factorized frontier; RTX A4000, 3 isolated runs,
+  gate >= 3x —
+  `docs/evidence/2026-06-12-s2-free-join-spike/runpod-count-gate.log`).
+  u32/Symbol-key only, matching the recorded groupby's engine-wide
+  key support; both `XLOG_DISABLE_WCOJ_GROUPBY_FUSION` and
+  `XLOG_DISABLE_FREE_JOIN` disable the fused route with identical
+  fallback results.
 - *(prob)* **Factorized outcome folding for exact non-count aggregates
   (D4).** Probabilistic `sum`/`min`/`max`/`logsumexp` provenance no longer
   enumerates one conjunction per 2^k outcome mask; the factorized encoding

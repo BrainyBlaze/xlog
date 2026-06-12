@@ -1968,6 +1968,13 @@ pub struct EpistemicGpuRuntimePreflight {
     pub wcoj_triangle_route_count: usize,
     /// Number of 4-cycle WCOJ routes reused from the production runtime.
     pub wcoj_4cycle_route_count: usize,
+    /// D2 — generic Free Join multiway routes: `plan: None` nodes
+    /// matching no dedicated kernel shape. Opportunistic by contract —
+    /// the dispatcher may structurally decline to the embedded binary
+    /// fallback (non-prefix bound columns, non-u32 inputs, …), so these
+    /// routes carry no hard dispatch obligation and are excluded from
+    /// the dedicated-WCOJ certification arithmetic.
+    pub free_join_route_count: usize,
     /// K-clique WCOJ plan counts by arity K=5..8.
     pub kclique_wcoj_plan_count_by_arity: [usize; 4],
     /// Maximum K-clique arity observed across production WCOJ plans.
@@ -2174,6 +2181,7 @@ impl EpistemicGpuRuntimePreflight {
             kclique_wcoj_plan_count: routes.kclique_wcoj_plan_count,
             wcoj_triangle_route_count: routes.wcoj_triangle_route_count,
             wcoj_4cycle_route_count: routes.wcoj_4cycle_route_count,
+            free_join_route_count: routes.free_join_route_count,
             kclique_wcoj_plan_count_by_arity: routes.kclique_wcoj_plan_count_by_arity,
             kclique_wcoj_max_arity: routes.kclique_wcoj_max_arity,
             kclique_wcoj_edge_permutation_count: routes.kclique_wcoj_edge_permutation_count,
@@ -2332,6 +2340,12 @@ pub struct EpistemicGpuRuntimeCounters {
     pub wcoj_clique7_dispatch_count: u64,
     /// Successful K=8 clique WCOJ dispatches installed by the executor.
     pub wcoj_clique8_dispatch_count: u64,
+    /// D2 — successful generic Free Join dispatches installed by the
+    /// executor. Observability only: free-join routes carry no hard
+    /// dispatch obligation (structural declines execute the embedded
+    /// binary fallback by contract), so this counter never gates
+    /// certification.
+    pub free_join_dispatch_count: u64,
     /// Provider-level HG triangle dispatch counter.
     pub provider_wcoj_triangle_hg_dispatch_count: u64,
     /// WCOJ layout-sort invocations observed by the provider.
@@ -2421,6 +2435,11 @@ impl EpistemicGpuRuntimeCounters {
                 self.wcoj_clique8_dispatch_count,
                 before.wcoj_clique8_dispatch_count,
             )?,
+            free_join_dispatch_count: Self::checked_counter_delta(
+                "free_join_dispatch_count",
+                self.free_join_dispatch_count,
+                before.free_join_dispatch_count,
+            )?,
             provider_wcoj_triangle_hg_dispatch_count: Self::checked_counter_delta(
                 "provider_wcoj_triangle_hg_dispatch_count",
                 self.provider_wcoj_triangle_hg_dispatch_count,
@@ -2483,6 +2502,9 @@ impl EpistemicGpuRuntimeCounters {
             wcoj_clique8_dispatch_count: self
                 .wcoj_clique8_dispatch_count
                 .saturating_sub(before.wcoj_clique8_dispatch_count),
+            free_join_dispatch_count: self
+                .free_join_dispatch_count
+                .saturating_sub(before.free_join_dispatch_count),
             provider_wcoj_triangle_hg_dispatch_count: self
                 .provider_wcoj_triangle_hg_dispatch_count
                 .saturating_sub(before.provider_wcoj_triangle_hg_dispatch_count),
@@ -3194,12 +3216,19 @@ impl EpistemicGpuRuntimeWcojCertification {
         let wcoj_routed_reduction_count = preflight
             .multiway_reduction_count
             .checked_sub(preflight.planned_hash_route_count)
+            // D2 — generic Free Join routes are opportunistic by
+            // contract (structural decline executes the embedded
+            // binary fallback), so they never form part of the hard
+            // dedicated-WCOJ dispatch obligation.
+            .and_then(|count| count.checked_sub(preflight.free_join_route_count))
             .ok_or_else(|| XlogError::UnsupportedEpistemicConstruct {
                 construct: "epistemic GPU WCOJ route certification".to_string(),
                 context: format!(
-                    "planned hash routes exceed observed route obligations: \
-                     multiway_reductions={} planned_hash_routes={}",
-                    preflight.multiway_reduction_count, preflight.planned_hash_route_count
+                    "planned hash + free-join routes exceed observed route obligations: \
+                     multiway_reductions={} planned_hash_routes={} free_join_routes={}",
+                    preflight.multiway_reduction_count,
+                    preflight.planned_hash_route_count,
+                    preflight.free_join_route_count
                 ),
             })?;
         let required_multiway_reductions = wcoj_routed_reduction_count;
@@ -3475,6 +3504,7 @@ impl Executor {
             wcoj_clique6_dispatch_count: self.wcoj_clique6_dispatch_count(),
             wcoj_clique7_dispatch_count: self.wcoj_clique7_dispatch_count(),
             wcoj_clique8_dispatch_count: self.wcoj_clique8_dispatch_count(),
+            free_join_dispatch_count: self.free_join_dispatch_count(),
             provider_wcoj_triangle_hg_dispatch_count: self
                 .provider
                 .wcoj_triangle_hg_dispatch_count(),
@@ -6492,6 +6522,7 @@ struct RuntimeRouteSummary {
     kclique_wcoj_plan_count: usize,
     wcoj_triangle_route_count: usize,
     wcoj_4cycle_route_count: usize,
+    free_join_route_count: usize,
     kclique_wcoj_plan_count_by_arity: [usize; 4],
     kclique_wcoj_max_arity: u8,
     kclique_wcoj_edge_permutation_count: usize,
@@ -6550,6 +6581,14 @@ fn summarize_runtime_routes(node: &RirNode, routes: &mut RuntimeRouteSummary) {
                             routes.planned_hash_incomplete_stats_count += 1;
                         }
                     }
+                }
+                // D2 — generic Free Join route: provenance variant set
+                // only by the general multiway promoter. Opportunistic
+                // — the dispatcher's structural decline executes the
+                // embedded binary fallback, so no hard dispatch
+                // obligation accrues here.
+                Some(MultiwayPlan::FreeJoin) => {
+                    routes.free_join_route_count += 1;
                 }
                 None => {
                     if super::wcoj_dispatch::match_multiway_triangle(node).is_some() {
