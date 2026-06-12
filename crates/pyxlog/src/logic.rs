@@ -511,6 +511,25 @@ impl LogicRelationSession {
         Ok(dict.into())
     }
 
+    /// Multiway/Free-Join dispatch telemetry for the retained session
+    /// executor. Counters accumulate across evaluates within this session;
+    /// all zeros before the first evaluate.
+    pub fn wcoj_dispatch_stats(&self, py: Python<'_>) -> PyResult<PyObject> {
+        let dict = PyDict::new(py);
+        let stats = self
+            .session_runtime
+            .as_ref()
+            .map(|runtime| runtime.wcoj_dispatch_stats())
+            .unwrap_or_default();
+        dict.set_item("free_join_dispatch_count", stats.free_join_dispatch_count)?;
+        dict.set_item(
+            "wcoj_groupby_fusion_dispatch_count",
+            stats.wcoj_groupby_fusion_dispatch_count,
+        )?;
+        dict.set_item("wcoj_error_decline_count", stats.wcoj_error_decline_count)?;
+        Ok(dict.into())
+    }
+
     pub fn reset_host_transfer_stats(&self) {
         self.provider.reset_host_transfer_stats()
     }

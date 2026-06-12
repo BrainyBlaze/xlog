@@ -54,6 +54,29 @@ impl LogicSessionRuntime {
     pub fn join_index_cache_stats(&self) -> JoinIndexCacheStats {
         self.executor.join_index_cache_stats()
     }
+
+    /// Return multiway/Free-Join dispatch telemetry for the retained executor.
+    pub fn wcoj_dispatch_stats(&self) -> WcojDispatchStats {
+        WcojDispatchStats {
+            free_join_dispatch_count: self.executor.free_join_dispatch_count(),
+            wcoj_groupby_fusion_dispatch_count: self
+                .executor
+                .wcoj_groupby_fusion_dispatch_count(),
+            wcoj_error_decline_count: self.executor.wcoj_error_decline_count(),
+        }
+    }
+}
+
+/// Multiway/Free-Join dispatch telemetry counters for a retained session
+/// executor. Counts accumulate across evaluates within the session.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct WcojDispatchStats {
+    /// Free Join dispatches taken through the multiway plan.
+    pub free_join_dispatch_count: u64,
+    /// Aggregate-fused group-by-root dispatches (no materialized join rows).
+    pub wcoj_groupby_fusion_dispatch_count: u64,
+    /// WCOJ pipeline errors that declined to the binary-join fallback.
+    pub wcoj_error_decline_count: u64,
 }
 
 /// Planner-grade telemetry for a persistent-session relation delta update.

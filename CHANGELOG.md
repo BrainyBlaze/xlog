@@ -174,6 +174,12 @@ All notable changes to this project are documented in this file.
   CPU-only machine; `scripts/validate_release_gpu.sh` sets it and preflights
   the GPU. Restored the UCR epistemic fixture programs missing since PR #139
   (9/15 `xlog-epistemic-evidence` tests had been red on `main`).
+- *(pyxlog)* `LogicRelationSession.wcoj_dispatch_stats()` exposes the
+  session executor's multiway dispatch telemetry
+  (`free_join_dispatch_count`, `wcoj_groupby_fusion_dispatch_count`,
+  `wcoj_error_decline_count`) so consumers can observe whether Free Join
+  and fused-aggregate paths fire on their workloads instead of inferring
+  it from kill-switch timing probes.
 
 ### Documentation
 

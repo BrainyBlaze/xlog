@@ -143,6 +143,15 @@ class LogicRelationSession:
         """Return persistent hash-index cache telemetry for this session."""
         ...
 
+    def wcoj_dispatch_stats(self) -> dict[str, int]:
+        """Multiway/Free-Join dispatch telemetry for this session.
+
+        Keys: ``free_join_dispatch_count``,
+        ``wcoj_groupby_fusion_dispatch_count``, ``wcoj_error_decline_count``.
+        Counters accumulate across evaluates within this session.
+        """
+        ...
+
     def reset_host_transfer_stats(self) -> None:
         """Reset all host-transfer statistics."""
         ...
