@@ -87,8 +87,8 @@ In scope (u32/Symbol width only):
 - 3 CUDA kernels in `wcoj.cu` (`fj_delta_*`), manifest registration, name consts.
 - Provider entry `fj_delta_novel_u32_recorded(delta, edge_norm, full_r, domain, stream)`
   in a new `provider/fj_delta.rs`, plus a thin TC driver loop in the spike test.
-- Domain bound: node ids must satisfy `max_id < domain ≤ 2^26` (bitmap ≤ 512 MB at the
-  extreme; gate fixtures use ≤ 2^13). Checked, fail-closed with a typed error.
+- Domain bound: node ids must satisfy `max_id < domain ≤ 2^16` (bitmap = domain²/8 bytes,
+  512 MB at the bound; gate fixtures use ≤ 2^13). Checked, fail-closed with a typed error.
 - Parity tests (local): CPU-oracle TC on irregular fixtures (cycles, diamonds, skewed
   degrees, non-block structure — the bitmap path is shape-agnostic) + cross-parity vs the
   production executor row set.
