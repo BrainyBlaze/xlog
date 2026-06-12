@@ -55,6 +55,11 @@ pub struct GpuMemoryManager {
     budget: MemoryBudget,
     /// Currently allocated bytes (tracked atomically for thread safety)
     allocated: AtomicU64,
+    /// High-water mark of `allocated` since construction or the last
+    /// [`reset_peak`](Self::reset_peak). Updated at the two reservation
+    /// funnels (`alloc`, `alloc_raw`); used by measurement harnesses to
+    /// report true peak device-memory pressure across an operation.
+    peak: AtomicU64,
     /// Count of `alloc` calls (device allocation requests). Resettable; used by
     /// the GPU-resident MC engine's no-host gate to prove that **zero** device
     /// allocations happen inside the measured region (all arenas are allocated
@@ -407,6 +412,7 @@ impl GpuMemoryManager {
             device,
             budget,
             allocated: AtomicU64::new(0),
+            peak: AtomicU64::new(0),
             alloc_count: AtomicU64::new(0),
             runtime: None,
         }
@@ -432,6 +438,7 @@ impl GpuMemoryManager {
             device,
             budget,
             allocated: AtomicU64::new(0),
+            peak: AtomicU64::new(0),
             alloc_count: AtomicU64::new(0),
             runtime: Some(runtime),
         }
@@ -496,6 +503,7 @@ impl GpuMemoryManager {
                 .compare_exchange(current, new_val, Ordering::SeqCst, Ordering::SeqCst)
                 .is_ok()
             {
+                self.peak.fetch_max(new_val, Ordering::SeqCst);
                 break;
             }
         }
@@ -653,6 +661,22 @@ impl GpuMemoryManager {
         self.allocated.load(Ordering::SeqCst)
     }
 
+    /// High-water mark of allocated bytes since construction or the
+    /// last [`reset_peak`](Self::reset_peak). Always ≥
+    /// [`allocated_bytes`](Self::allocated_bytes) at the moment it was
+    /// recorded. Measurement-harness API (S3 peak-memory gate).
+    pub fn peak_bytes(&self) -> u64 {
+        self.peak.load(Ordering::SeqCst)
+    }
+
+    /// Reset the peak high-water mark to the *current* allocated
+    /// level, so a measurement window starts from live state rather
+    /// than zero. Measurement-harness API.
+    pub fn reset_peak(&self) {
+        self.peak
+            .store(self.allocated.load(Ordering::SeqCst), Ordering::SeqCst);
+    }
+
     /// Number of `alloc` calls issued so far (device allocation requests).
     /// The GPU-resident MC engine snapshots this around the measured region to
     /// prove `per_operator_host_allocations == 0` (all arenas pre-allocated).
@@ -735,6 +759,7 @@ impl GpuMemoryManager {
                 .compare_exchange(current, new_val, Ordering::SeqCst, Ordering::SeqCst)
                 .is_ok()
             {
+                self.peak.fetch_max(new_val, Ordering::SeqCst);
                 break;
             }
         }
@@ -773,6 +798,7 @@ impl GpuMemoryManager {
     /// RAII-based tracking is implemented.
     pub fn reset_tracking(&self) {
         self.allocated.store(0, Ordering::SeqCst);
+        self.peak.store(0, Ordering::SeqCst);
     }
 }
 
@@ -1504,6 +1530,36 @@ mod tests {
         drop(slice);
         assert_eq!(manager.allocated_bytes(), 0);
         assert_eq!(manager.remaining_bytes(), 4096);
+    }
+
+    #[test]
+    fn test_memory_manager_peak_tracking() {
+        let Some(device) = try_device() else {
+            return;
+        };
+        let budget = MemoryBudget::with_limit(8192);
+        let manager = Arc::new(GpuMemoryManager::new(device, budget));
+
+        let a = manager.alloc::<u32>(256).expect("alloc a"); // 1024 B
+        let b = manager.alloc::<u32>(512).expect("alloc b"); // 2048 B
+        assert_eq!(manager.peak_bytes(), 3072);
+
+        // Frees lower `allocated` but never the peak.
+        drop(b);
+        assert_eq!(manager.allocated_bytes(), 1024);
+        assert_eq!(manager.peak_bytes(), 3072);
+
+        // reset_peak restarts the window from live state.
+        manager.reset_peak();
+        assert_eq!(manager.peak_bytes(), 1024);
+
+        let c = manager.alloc::<u32>(128).expect("alloc c"); // 512 B
+        assert_eq!(manager.peak_bytes(), 1536);
+
+        drop(c);
+        drop(a);
+        assert_eq!(manager.allocated_bytes(), 0);
+        assert_eq!(manager.peak_bytes(), 1536);
     }
 
     #[test]
