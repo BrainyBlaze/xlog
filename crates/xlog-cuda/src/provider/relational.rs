@@ -5824,6 +5824,17 @@ impl super::CudaKernelProvider {
     /// This is primarily used when a caller needs owned buffer state for a
     /// separate runtime object while preserving the original relation store.
     pub fn clone_buffer(&self, buffer: &CudaBuffer) -> Result<CudaBuffer> {
+        // Debug probe (XLOG_DEBUG_VERIFY_CLONES=1): byte-compare every
+        // cloned column against its source immediately after the copy.
+        // Discriminates transport faults (clone wrong at birth) from
+        // source faults (clone faithful, source already corrupt).
+        let verify = {
+            static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+            *ENABLED.get_or_init(|| {
+                std::env::var("XLOG_DEBUG_VERIFY_CLONES").map(|v| v == "1") == Ok(true)
+            })
+        };
+
         let mut result_columns = Vec::with_capacity(buffer.arity());
         let device = self.device.inner();
 
@@ -5836,6 +5847,30 @@ impl super::CudaKernelProvider {
                 device
                     .dtod_copy(src_col, &mut dst_col)
                     .map_err(|e| XlogError::Kernel(format!("Failed to clone column: {}", e)))?;
+            }
+            if verify && !src_col.is_empty() {
+                self.device.synchronize()?;
+                let mut src_host = vec![0u8; src_col.len()];
+                let mut dst_host = vec![0u8; dst_col.len()];
+                device
+                    .dtoh_sync_copy_into(src_col, &mut src_host)
+                    .map_err(|e| XlogError::Kernel(format!("verify src dtoh: {}", e)))?;
+                device
+                    .dtoh_sync_copy_into(&dst_col, &mut dst_host)
+                    .map_err(|e| XlogError::Kernel(format!("verify dst dtoh: {}", e)))?;
+                if src_host != dst_host {
+                    let first_diff = src_host
+                        .iter()
+                        .zip(dst_host.iter())
+                        .position(|(a, b)| a != b)
+                        .unwrap_or(0);
+                    return Err(XlogError::Kernel(format!(
+                        "CLONE VERIFY FAILED: column {} differs from source at byte {} of {} (clone is wrong at birth)",
+                        col_idx,
+                        first_diff,
+                        src_col.len(),
+                    )));
+                }
             }
             result_columns.push(dst_col.into());
         }
