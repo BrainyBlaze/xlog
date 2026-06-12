@@ -419,8 +419,11 @@ fn gate_run(k: u32, b: u32, budget_bytes: u64) {
     let mut spike_ms = Vec::new();
     let mut spike_peak = Vec::new();
 
-    // Baseline: unmodified production executor, fresh per rep so
-    // store contents from the previous rep cannot inflate the peak.
+    // Baseline: the LEGACY engine path. Phase B made the factorized
+    // dispatch the engine default, so the baseline pins the kill
+    // switch for its reps (gate tests run isolated/serial — no
+    // concurrent test observes the process-global env var).
+    std::env::set_var("XLOG_DISABLE_FACTORIZED_DELTA", "1");
     for rep in 0..REPS {
         let fix = make_fixture_with_budget(budget_bytes).expect("CUDA fixture");
         let edge_buf = upload_binary_u32(&fix.memory, &edges);
@@ -444,6 +447,8 @@ fn gate_run(k: u32, b: u32, budget_bytes: u64) {
         base_ms.push(dt);
         base_peak.push(peak as f64);
     }
+
+    std::env::remove_var("XLOG_DISABLE_FACTORIZED_DELTA");
 
     // Spike: factorized novel-set loop sharing union_gpu.
     let mut spike_row_set: Option<Vec<(u32, u32)>> = None;
