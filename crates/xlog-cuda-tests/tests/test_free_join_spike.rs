@@ -1266,13 +1266,6 @@ fn count_by_root_u32(rows: &[Vec<u32>]) -> Vec<(u32, u64)> {
     m.into_iter().collect()
 }
 
-fn count_by_root_u64(rows: &[Vec<u64>]) -> Vec<(u64, u64)> {
-    let mut m: std::collections::BTreeMap<u64, u64> = std::collections::BTreeMap::new();
-    for r in rows {
-        *m.entry(r[0]).or_insert(0) += 1;
-    }
-    m.into_iter().collect()
-}
 
 #[test]
 fn fj_count_by_root_matches_oracle() {
@@ -1323,3 +1316,173 @@ fn fj_count_by_root_matches_oracle() {
 // the recorded groupby, whose KEY columns are bounded engine-wide to
 // U32/Symbol (multi-type recorded sort is deferred there). u64 bodies
 // stay on the materialize path (covered by fj_chain_u64/fj_triangle_u64).
+
+/// §2.4 fused-count gate fixture — skewed 4-atom chain
+/// `deg(A, count(B)) :- r(A,X), s(X,Y), t(Y,Z), u(Z,B)`:
+///   r: 10 hubs a, each -> 100 private x          (|r| = 1_000)
+///   s: each x -> 10 private y                    (|s| = 10_000)
+///   t: each y -> hot z=0 + 9 cold z (shared pool) (|t| = 100_000)
+///   u: hot z=0 -> 600 b; cold z -> 20 b          (|u| = 2_580)
+/// Materialized join = 10k*600 + 90k*20 = 7.8M rows; the factorized
+/// count's frontier stops at 100k (a,x,y,z) rows and multiplies the
+/// live u-ranges instead. Skew: 77% of the count mass sits on the
+/// single hot z. Expected: count(a) = 100*10*(600 + 9*20) = 780_000
+/// per hub (analytic — the host oracle would be O(10^9) here; the
+/// binary baseline's independently-computed groupby cross-checks it).
+fn count_gate_fixture() -> (
+    Vec<(u32, u32)>,
+    Vec<(u32, u32)>,
+    Vec<(u32, u32)>,
+    Vec<(u32, u32)>,
+) {
+    let mut r = Vec::new();
+    for a in 0..10u32 {
+        for i in 0..100u32 {
+            r.push((a, 1000 + a * 100 + i));
+        }
+    }
+    let mut s = Vec::new();
+    for &(_, x) in &r {
+        for j in 0..10u32 {
+            s.push((x, x * 10 + j));
+        }
+    }
+    let mut t = Vec::new();
+    for &(_, y) in &s {
+        t.push((y, 0)); // hot z
+        for i in 1..10u32 {
+            t.push((y, (y.wrapping_mul(7).wrapping_add(i)) % 99 + 1)); // cold z in 1..=99
+        }
+    }
+    let mut u = Vec::new();
+    for b in 0..600u32 {
+        u.push((0u32, b));
+    }
+    for z in 1..=99u32 {
+        for b in 0..20u32 {
+            u.push((z, b));
+        }
+    }
+    (
+        sorted_unique(r),
+        sorted_unique(s),
+        sorted_unique(t),
+        sorted_unique(u),
+    )
+}
+
+#[test]
+#[ignore = "S2 measurement: run explicitly with --ignored --nocapture"]
+fn s2_measurement_count_fusion_gate() {
+    use xlog_core::AggOp;
+
+    let Some(fix) = make_fixture_with_budget(2 * 1024 * 1024 * 1024) else {
+        eprintln!("skipping s2 count gate: no CUDA device");
+        return;
+    };
+    let (r, s, t, u) = count_gate_fixture();
+    println!(
+        "S2 count-gate fixture: |r|={} |s|={} |t|={} |u|={}",
+        r.len(),
+        s.len(),
+        t.len(),
+        u.len()
+    );
+    let expected: Vec<(u32, u64)> = (0..10u32).map(|a| (a, 780_000u64)).collect();
+
+    let bufs = [
+        upload_binary_u32(&fix.memory, &r),
+        upload_binary_u32(&fix.memory, &s),
+        upload_binary_u32(&fix.memory, &t),
+        upload_binary_u32(&fix.memory, &u),
+    ];
+    let inputs: Vec<&CudaBuffer> = bufs.iter().collect();
+    let stream = fix.pool.acquire().expect("stream");
+
+    // Unfused production baseline: left-deep hash_join_v2 chain
+    // materializing all 7.8M rows, then the same recorded groupby
+    // count the executor's unfused path drives (key = a at col 0,
+    // count over b at col 7).
+    let run_binary = || -> CudaBuffer {
+        let j1 = fix
+            .provider
+            .hash_join_v2(&bufs[0], &bufs[1], &[1], &[0], JoinType::Inner)
+            .expect("r join s");
+        let j2 = fix
+            .provider
+            .hash_join_v2(&j1, &bufs[2], &[3], &[0], JoinType::Inner)
+            .expect("rs join t");
+        let j3 = fix
+            .provider
+            .hash_join_v2(&j2, &bufs[3], &[5], &[0], JoinType::Inner)
+            .expect("rst join u");
+        let agg = fix
+            .provider
+            .groupby_multi_agg_recorded(&j3, &[0], &[(7, AggOp::Count)], stream)
+            .expect("baseline groupby count");
+        fix.provider.device().inner().synchronize().expect("sync");
+        agg
+    };
+    // Fused factorized count: the same plan
+    // try_dispatch_free_join_count derives for this body (B pruned as
+    // a trailing private variable — u is consumed only by its z probe
+    // and the epilogue multiplies the live u-ranges).
+    let plan = chain_count_plan_factorized();
+    let run_fused = || -> CudaBuffer {
+        let out = fix
+            .provider
+            .free_join_count_by_root_u32_recorded(&inputs, &plan, stream)
+            .expect("fused count");
+        fix.provider.device().inner().synchronize().expect("sync");
+        out
+    };
+
+    let download_counts = |buf: &CudaBuffer| -> Vec<(u32, u64)> {
+        let keys = download_u32_column(&fix.memory, buf, 0);
+        let counts = download_u64_column(&fix.memory, buf, 1);
+        let mut rows: Vec<(u32, u64)> = keys.into_iter().zip(counts).collect();
+        rows.sort();
+        rows
+    };
+
+    // Warmup + parity (fused vs analytic AND vs the independently
+    // computed baseline groupby).
+    let warm_binary = run_binary();
+    assert_eq!(
+        download_counts(&warm_binary),
+        expected,
+        "binary baseline vs analytic counts"
+    );
+    drop(warm_binary);
+    let warm_fused = run_fused();
+    assert_eq!(
+        download_counts(&warm_fused),
+        expected,
+        "fused factorized count vs analytic counts"
+    );
+    drop(warm_fused);
+
+    const RUNS: usize = 3;
+    let mut binary_ms = Vec::with_capacity(RUNS);
+    let mut fused_ms = Vec::with_capacity(RUNS);
+    for _ in 0..RUNS {
+        let t0 = std::time::Instant::now();
+        let out = run_binary();
+        binary_ms.push(t0.elapsed().as_secs_f64() * 1e3);
+        drop(out);
+
+        let t0 = std::time::Instant::now();
+        let out = run_fused();
+        fused_ms.push(t0.elapsed().as_secs_f64() * 1e3);
+        drop(out);
+    }
+    let med_binary = median(&mut binary_ms);
+    let med_fused = median(&mut fused_ms);
+    println!(
+        "S2 count-fusion gate: binary+groupby median {med_binary:.3} ms, fused factorized \
+         count median {med_fused:.3} ms, speedup {:.2}x [gate: >= 3x]",
+        med_binary / med_fused,
+    );
+    println!("binary runs: {binary_ms:?}");
+    println!("fused runs: {fused_ms:?}");
+}
