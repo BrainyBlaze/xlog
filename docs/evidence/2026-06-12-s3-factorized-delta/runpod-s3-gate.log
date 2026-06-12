@@ -1,0 +1,70 @@
+=== HOST ===
+name, memory.total [MiB], driver_version, clocks.current.sm [MHz], temperature.gpu
+NVIDIA RTX A4000, 16376 MiB, 580.119.02, 210 MHz, 36
+nproc=48 ram_gb=125
+Build cuda_12.4.r12.4/compiler.34097967_0
+rustc 1.96.0 (ac68faa20 2026-05-25)
+=== EXTRACT ===
+source: git archive of feat/d3-factorized-delta HEAD 0ae50b41
+=== BUILD ===
+   Compiling xlog-integration v0.1.0 (/root/xlog/crates/xlog-integration)
+    Finished `release` profile [optimized] target(s) in 1m 01s
+  Executable tests/test_factorized_delta_spike.rs (target/release/deps/test_factorized_delta_spike-246e3ec4e2997c0f)
+=== PARITY (this host) ===
+running 6 tests
+test fj_delta_empty_inputs_yield_empty_novel ... ok
+test fj_delta_out_of_domain_fails_closed ... ok
+test fj_delta_step_matches_cpu_oracle ... ok
+test fj_delta_tc_loop_matches_engine_and_oracle ... ok
+test s3_measurement_factorized_delta_gate ... ignored, S3 gate measurement — run on RunPod, never locally
+test s3_measurement_factorized_delta_gate_secondary ... ignored, S3 gate measurement — run on RunPod, never locally
+
+test result: ok. 4 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 0.38s
+
+=== ISOLATED GATE RUN 1 (primary k=4 b=256) ===
+1560 MHz, 37, 2 %
+test s3_measurement_factorized_delta_gate ... S3 gate fixture: k=4 b=256 n=1024 |E|=262144 expected |TC|=1048576
+  baseline rep 0: 2442.6 ms, peak 2445279316 B (live before: 2097156 B)
+  baseline rep 1: 2412.7 ms, peak 2445279316 B (live before: 2097156 B)
+  baseline rep 2: 2414.7 ms, peak 2445279316 B (live before: 2097156 B)
+  spike rep 0: 211.8 ms, peak 61079648 B, 4 iterations (live before: 2097156 B)
+  spike rep 1: 208.9 ms, peak 61079648 B, 4 iterations (live before: 2097156 B)
+  spike rep 2: 209.6 ms, peak 61079648 B, 4 iterations (live before: 2097156 B)
+S3 gate (k=4 b=256): baseline median 2414.7 ms / peak 2332.0 MiB; spike median 209.6 ms / peak 58.3 MiB; peak ratio 40.03x (gate >=5x), wall-clock ratio 0.087x (gate <=1.2x)
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 8.42s
+=== ISOLATED GATE RUN 2 (primary k=4 b=256) ===
+1905 MHz, 44, 28 %
+test s3_measurement_factorized_delta_gate ... S3 gate fixture: k=4 b=256 n=1024 |E|=262144 expected |TC|=1048576
+  baseline rep 0: 2426.8 ms, peak 2445279316 B (live before: 2097156 B)
+  baseline rep 1: 2430.2 ms, peak 2445279316 B (live before: 2097156 B)
+  baseline rep 2: 2429.8 ms, peak 2445279316 B (live before: 2097156 B)
+  spike rep 0: 213.6 ms, peak 61079648 B, 4 iterations (live before: 2097156 B)
+  spike rep 1: 210.8 ms, peak 61079648 B, 4 iterations (live before: 2097156 B)
+  spike rep 2: 211.3 ms, peak 61079648 B, 4 iterations (live before: 2097156 B)
+S3 gate (k=4 b=256): baseline median 2429.8 ms / peak 2332.0 MiB; spike median 211.3 ms / peak 58.3 MiB; peak ratio 40.03x (gate >=5x), wall-clock ratio 0.087x (gate <=1.2x)
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 8.43s
+=== ISOLATED GATE RUN 3 (primary k=4 b=256) ===
+1890 MHz, 50, 6 %
+test s3_measurement_factorized_delta_gate ... S3 gate fixture: k=4 b=256 n=1024 |E|=262144 expected |TC|=1048576
+  baseline rep 0: 2419.0 ms, peak 2445279316 B (live before: 2097156 B)
+  baseline rep 1: 2400.7 ms, peak 2445279316 B (live before: 2097156 B)
+  baseline rep 2: 2403.5 ms, peak 2445279316 B (live before: 2097156 B)
+  spike rep 0: 211.0 ms, peak 61079648 B, 4 iterations (live before: 2097156 B)
+  spike rep 1: 208.0 ms, peak 61079648 B, 4 iterations (live before: 2097156 B)
+  spike rep 2: 208.6 ms, peak 61079648 B, 4 iterations (live before: 2097156 B)
+S3 gate (k=4 b=256): baseline median 2403.5 ms / peak 2332.0 MiB; spike median 208.6 ms / peak 58.3 MiB; peak ratio 40.03x (gate >=5x), wall-clock ratio 0.087x (gate <=1.2x)
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 8.35s
+=== ISOLATED SECONDARY RUN (k=4 b=384) ===
+1920 MHz, 54, 22 %
+test s3_measurement_factorized_delta_gate_secondary ... S3 gate fixture: k=4 b=384 n=1536 |E|=589824 expected |TC|=2359296
+  baseline rep 0: 8100.5 ms, peak 8238661716 B (live before: 4718596 B)
+  baseline rep 1: 8112.4 ms, peak 8238661716 B (live before: 4718596 B)
+  baseline rep 2: 8122.7 ms, peak 8238661716 B (live before: 4718596 B)
+  spike rep 0: 572.2 ms, peak 137429088 B, 4 iterations (live before: 4718596 B)
+  spike rep 1: 570.6 ms, peak 137429088 B, 4 iterations (live before: 4718596 B)
+  spike rep 2: 572.7 ms, peak 137429088 B, 4 iterations (live before: 4718596 B)
+S3 gate (k=4 b=384): baseline median 8112.4 ms / peak 7857.0 MiB; spike median 572.2 ms / peak 131.1 MiB; peak ratio 59.95x (gate >=5x), wall-clock ratio 0.071x (gate <=1.2x)
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 26.60s
+=== END STATE ===
+1905 MHz, 64
+ALL_DONE

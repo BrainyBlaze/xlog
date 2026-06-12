@@ -173,4 +173,14 @@ strata interaction.
 
 ## 9. Gate evidence
 
-(to be filled after the RunPod run)
+**PASS (2026-06-12)** — RunPod RTX A4000, source `0ae50b41`, evidence at
+`docs/evidence/2026-06-12-s3-factorized-delta/`:
+
+- primary k=4 b=256: peak **40.03×** reduction (2332.0 MiB → 58.3 MiB), wall-clock
+  **0.087×** (2403.5–2429.8 ms → 208.6–211.3 ms medians), 3 isolated runs × 3 reps,
+  row-set parity asserted every rep;
+- secondary k=4 b=384: peak **59.95×** (7857.0 MiB → 131.1 MiB), wall-clock **0.071×** —
+  the ratio grows with scale as §5 predicted;
+- on-pod parity suite 4/4 green before measurement; pod deleted + deletion confirmed.
+
+Decision: D3 proceeds to a Phase B production-integration plan (separate doc, own gates).
