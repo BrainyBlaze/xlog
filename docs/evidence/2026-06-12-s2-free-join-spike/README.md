@@ -178,10 +178,33 @@ RunPod-only by standing rule):
   cause of the earlier 4-cycle-cert `40 vs 32 bytes` failure on the
   materialize path.
 
-**Open (RunPod-gated): the §2.4 fused-count performance gate (>= 3x on
-a skewed >= 4-atom fixture per the design's Phase C DoD) is NOT yet
-measured.** Performance benchmarks no longer run locally (standing
-rule, 2026-06-11: local perf runs crash the machine); the gate needs a
-minimal RunPod instance and per-run authorization. Functional parity is
-fully locked locally; no performance claim is made for the fused count
-path.
+## §2.4 fused-count gate — MEASURED, PASS (RunPod, 2026-06-12)
+
+Per the standing rule (no local perf runs), the gate ran on an
+ephemeral authorized RunPod pod:
+
+- Host: RunPod community pod `gq40zfiv243hhf`, NVIDIA RTX A4000 16 GB,
+  driver 580.126.20, nvcc 12.4 (`XLOG_CUBIN_ARCHS=sm_86`; the default
+  sm_120 cubin target fails under nvcc 12.4 — documented build knob),
+  $0.17/hr, deleted after the run (deletion confirmed via pod list).
+- Source: git archive of `feat/d2-free-join` HEAD `9270c738`
+  (checksum-verified upload).
+- Test: `s2_measurement_count_fusion_gate` (skewed 4-atom fixture,
+  |r|=1k |s|=10k |t|=100k |u|=2,580; 7.8M-row materialized join vs
+  100k-row factorized frontier; 77% of count mass on one hot z).
+  On-pod parity re-verified first (`fj_count_by_root_matches_oracle`).
+- Discipline: 3 isolated serial runs (`--test-threads=1`), each a
+  median of 3 reps; SM clocks/temp recorded around every run
+  (1065→1905 MHz warm-up across runs, 43→51 °C).
+
+| run | binary+groupby median | fused count median | speedup |
+|-----|----------------------:|-------------------:|--------:|
+| 1   | 62.482 ms             | 17.058 ms          | 3.66x   |
+| 2   | 55.846 ms             | 15.129 ms          | 3.69x   |
+| 3   | 55.811 ms             | 15.047 ms          | 3.71x   |
+
+**Gate (>= 3x): PASS on all three runs (3.66x–3.71x).** Full log:
+`runpod-count-gate.log` (this directory). Failed first attempt
+recorded honestly: the run died once on `nvcc failed to compile
+join.cu to cubin for sm_120` before the `XLOG_CUBIN_ARCHS=sm_86`
+override; no measurements were taken on that attempt.

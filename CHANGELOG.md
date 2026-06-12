@@ -142,10 +142,15 @@ All notable changes to this project are documented in this file.
   of its remaining live trie-range lengths (the d-representation count)
   and the existing recorded groupby reduces `(group, multiplicity)`.
   Count semantics match the unfused pipeline exactly (both count
-  distinct full body bindings). u32/Symbol-key only, matching the
-  recorded groupby's engine-wide key support; both
-  `XLOG_DISABLE_WCOJ_GROUPBY_FUSION` and `XLOG_DISABLE_FREE_JOIN`
-  disable the fused route with identical fallback results.
+  distinct full body bindings). Measured 3.66x-3.71x vs the
+  materialize+groupby path on a skewed 4-atom fixture (7.8M-row
+  join vs 100k-row factorized frontier; RTX A4000, 3 isolated runs,
+  gate >= 3x —
+  `docs/evidence/2026-06-12-s2-free-join-spike/runpod-count-gate.log`).
+  u32/Symbol-key only, matching the recorded groupby's engine-wide
+  key support; both `XLOG_DISABLE_WCOJ_GROUPBY_FUSION` and
+  `XLOG_DISABLE_FREE_JOIN` disable the fused route with identical
+  fallback results.
 - *(prob)* **Factorized outcome folding for exact non-count aggregates
   (D4).** Probabilistic `sum`/`min`/`max`/`logsumexp` provenance no longer
   enumerates one conjunction per 2^k outcome mask; the factorized encoding
