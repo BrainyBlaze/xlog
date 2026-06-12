@@ -35,7 +35,8 @@ pub use multi_gpu_memory::MultiGpuMemoryManager;
 pub use provider::{
     circuit_kernels, dedup_kernels, filter_kernels, groupby_kernels, ilp_kernels, join_kernels,
     pack_kernels, pir_kernels, scan_kernels, set_ops_kernels, sort_kernels, CompareOp,
-    CudaKernelProvider, FjNode, FjPlan, FjSubAtom, JoinIndexV2, JoinType, CIRCUIT_MODULE,
+    CudaKernelProvider, FjDeltaCols, FjNode, FjPlan, FjSubAtom, JoinIndexV2, JoinType,
+    CIRCUIT_MODULE,
     DEDUP_MODULE, FILTER_MODULE, GROUPBY_MODULE, ILP_MODULE, JOIN_MODULE, PACK_MODULE, PIR_MODULE,
     SCAN_MODULE, SET_OPS_MODULE, SORT_MODULE,
 };

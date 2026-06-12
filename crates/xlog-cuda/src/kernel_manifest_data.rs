@@ -573,6 +573,7 @@ pub const KERNEL_MODULES: &[KernelModuleSpec] = &[
             "fj_delta_subtract_u32",
             "fj_delta_popcount",
             "fj_delta_emit_u32",
+            "fj_delta_max_u32",
         ],
     },
     KernelModuleSpec {

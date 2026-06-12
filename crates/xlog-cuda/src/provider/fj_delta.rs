@@ -46,6 +46,44 @@ const BLOCK_SIZE: u32 = 256;
 /// at the bound; gate fixtures use `domain ≤ 2^13`).
 pub const FJ_DELTA_MAX_DOMAIN: u32 = 1 << 16;
 
+/// Column roles for one factorized delta step. The delta atom binds
+/// (carry, key); the stable relation binds (carry, value) **in head
+/// column order** — `r_carry`/`r_value` therefore double as the output
+/// placement (the novel buffer is built in `full_r`'s schema). The
+/// static side is always consumed key-first (layout-normalized by the
+/// caller), so it needs no indices here.
+#[derive(Debug, Clone, Copy)]
+pub struct FjDeltaCols {
+    /// Delta column carried through to the head (the bitmap row).
+    pub delta_carry: usize,
+    /// Delta column joined against the static side's key.
+    pub delta_key: usize,
+    /// Head/full-R column holding the carry.
+    pub r_carry: usize,
+    /// Head/full-R column holding the static value (the bitmap bit).
+    pub r_value: usize,
+}
+
+impl FjDeltaCols {
+    /// Right-linear TC orientation: delta (x, y), head (x, z).
+    pub const CANONICAL: Self = Self {
+        delta_carry: 0,
+        delta_key: 1,
+        r_carry: 0,
+        r_value: 1,
+    };
+
+    fn validate(&self, ctx: &str) -> Result<()> {
+        let ok = |a: usize, b: usize| a < 2 && b < 2 && a != b;
+        if !ok(self.delta_carry, self.delta_key) || !ok(self.r_carry, self.r_value) {
+            return Err(XlogError::Kernel(format!(
+                "{ctx}: invalid column roles {self:?} (arity-2 indices, pairwise distinct)"
+            )));
+        }
+        Ok(())
+    }
+}
+
 fn require_binary_u32_class(buf: &CudaBuffer, name: &str, ctx: &str) -> Result<()> {
     if buf.arity() != 2 {
         return Err(XlogError::Kernel(format!(
@@ -67,19 +105,21 @@ fn require_binary_u32_class(buf: &CudaBuffer, name: &str, ctx: &str) -> Result<(
 }
 
 impl CudaKernelProvider {
-    /// One factorized semi-naive delta step for transitive closure:
-    /// returns the lex-sorted, full-row-deduped novel set
-    /// `{(x, z) : (x, y) ∈ delta, (y, z) ∈ edge, (x, z) ∉ full_r}`.
+    /// One factorized semi-naive delta step: returns the
+    /// full-row-deduped novel set
+    /// `{head(carry, value) : delta(carry, key), edge(key, value), head ∉ full_r}`
+    /// with column roles given by `cols` (orientation- and
+    /// head-order-agnostic; the buffer is built in `full_r`'s schema).
     ///
-    /// `edge` must be layout-normalized (lex-sorted, deduped); `delta`
-    /// and `full_r` are order-insensitive. All ids must be `< domain`.
-    /// The output schema is `full_r`'s schema (union-compatible with
-    /// the stable relation by construction).
+    /// `edge` must be layout-normalized key-first (lex-sorted,
+    /// deduped); `delta` and `full_r` are order-insensitive. All ids
+    /// must be `< domain` (fail-closed in-kernel check).
     pub fn fj_delta_novel_u32_recorded(
         &self,
         delta: &CudaBuffer,
         edge: &CudaBuffer,
         full_r: &CudaBuffer,
+        cols: FjDeltaCols,
         domain: u32,
         launch_stream: StreamId,
     ) -> Result<CudaBuffer> {
@@ -100,6 +140,7 @@ impl CudaKernelProvider {
                 ))
             })?;
 
+        cols.validate(ctx)?;
         require_binary_u32_class(delta, "delta", ctx)?;
         require_binary_u32_class(edge, "edge", ctx)?;
         require_binary_u32_class(full_r, "full_r", ctx)?;
@@ -130,24 +171,24 @@ impl CudaKernelProvider {
         // domain ≤ 2^16 keeps n_words ≤ 2^27 — well inside u32.
         let n_words = n_words as u32;
 
-        let delta_x = delta
-            .column(0)
-            .ok_or_else(|| XlogError::Kernel(format!("{ctx}: delta column 0 missing")))?;
-        let delta_y = delta
-            .column(1)
-            .ok_or_else(|| XlogError::Kernel(format!("{ctx}: delta column 1 missing")))?;
+        let delta_x = delta.column(cols.delta_carry).ok_or_else(|| {
+            XlogError::Kernel(format!("{ctx}: delta column {} missing", cols.delta_carry))
+        })?;
+        let delta_y = delta.column(cols.delta_key).ok_or_else(|| {
+            XlogError::Kernel(format!("{ctx}: delta column {} missing", cols.delta_key))
+        })?;
         let edge_y = edge
             .column(0)
             .ok_or_else(|| XlogError::Kernel(format!("{ctx}: edge column 0 missing")))?;
         let edge_z = edge
             .column(1)
             .ok_or_else(|| XlogError::Kernel(format!("{ctx}: edge column 1 missing")))?;
-        let r_x = full_r
-            .column(0)
-            .ok_or_else(|| XlogError::Kernel(format!("{ctx}: full_r column 0 missing")))?;
-        let r_z = full_r
-            .column(1)
-            .ok_or_else(|| XlogError::Kernel(format!("{ctx}: full_r column 1 missing")))?;
+        let r_x = full_r.column(cols.r_carry).ok_or_else(|| {
+            XlogError::Kernel(format!("{ctx}: full_r column {} missing", cols.r_carry))
+        })?;
+        let r_z = full_r.column(cols.r_value).ok_or_else(|| {
+            XlogError::Kernel(format!("{ctx}: full_r column {} missing", cols.r_value))
+        })?;
         let delta_x_v = self.column_as_u32_view(delta_x, n_delta as usize)?;
         let delta_y_v = self.column_as_u32_view(delta_y, n_delta as usize)?;
         let edge_y_v = self.column_as_u32_view(edge_y, n_edge as usize)?;
@@ -429,12 +470,98 @@ impl CudaKernelProvider {
             &cu_stream,
             &format!("{ctx}: result num_rows"),
         )?;
+        // Place carry/value at their head positions so the buffer is
+        // schema-faithful to `full_r` (and union-compatible with it).
+        let columns = if cols.r_carry == 0 {
+            vec![out_x.into_bytes().into(), out_z.into_bytes().into()]
+        } else {
+            vec![out_z.into_bytes().into(), out_x.into_bytes().into()]
+        };
         Ok(CudaBuffer::from_columns_with_host_count(
-            vec![out_x.into_bytes().into(), out_z.into_bytes().into()],
+            columns,
             u64::from(total_novel),
             d_nr,
             out_schema,
             total_novel,
         ))
+    }
+
+    /// Max value over the given u32/Symbol columns of the given
+    /// buffers (one atomicMax kernel launch per column into a single
+    /// zeroed cell). Used once per SCC fixpoint to derive the
+    /// factorized-delta domain bound. Returns 0 for all-empty inputs.
+    pub fn fj_delta_columns_max_u32(
+        &self,
+        inputs: &[(&CudaBuffer, &[usize])],
+        launch_stream: StreamId,
+    ) -> Result<u32> {
+        let ctx = "fj_delta_columns_max_u32";
+        let runtime = self.memory().runtime().ok_or_else(|| {
+            XlogError::Kernel(format!("{ctx} requires a runtime-backed GpuMemoryManager"))
+        })?;
+        let cu_stream = runtime
+            .stream_pool()
+            .resolve(launch_stream)
+            .ok_or_else(|| {
+                XlogError::Kernel(format!(
+                    "{ctx}: launch_stream StreamId({}) does not resolve",
+                    launch_stream.0
+                ))
+            })?;
+        let mut d_max = self.memory().alloc::<u32>(1)?;
+        self.device()
+            .inner()
+            .memset_zeros(&mut d_max)
+            .map_err(|e| XlogError::Kernel(format!("{ctx}: zero max cell failed: {e}")))?;
+        let kernel = self
+            .device()
+            .inner()
+            .get_func(WCOJ_MODULE, wcoj_kernels::FJ_DELTA_MAX_U32)
+            .ok_or_else(|| XlogError::Kernel("fj_delta_max_u32 kernel not found".to_string()))?;
+        for (buf, col_idxs) in inputs {
+            let n = match buf.cached_row_count() {
+                Some(c) => c,
+                None => self.dtoh_scalar_untracked::<u32>(buf.num_rows_device(), 0)?,
+            };
+            if n == 0 {
+                continue;
+            }
+            for &idx in *col_idxs {
+                let col = buf.column(idx).ok_or_else(|| {
+                    XlogError::Kernel(format!("{ctx}: column {idx} missing"))
+                })?;
+                let view = self.column_as_u32_view(col, n as usize)?;
+                let mut rec = LaunchRecorder::new_strict(launch_stream);
+                rec.read_column(col);
+                rec.read_write(&d_max);
+                rec.preflight(runtime)
+                    .map_err(|e| XlogError::Kernel(format!("{ctx}: preflight failed: {e}")))?;
+                let grid = n.div_ceil(BLOCK_SIZE);
+                // SAFETY: fj_delta_max_u32(col, n, out_max); buffers
+                // device-resident and preflighted.
+                unsafe {
+                    kernel
+                        .clone()
+                        .launch_on_stream(
+                            &cu_stream,
+                            LaunchConfig {
+                                grid_dim: (grid, 1, 1),
+                                block_dim: (BLOCK_SIZE, 1, 1),
+                                shared_mem_bytes: 0,
+                            },
+                            (&view, n, &mut d_max),
+                        )
+                        .map_err(|e| {
+                            XlogError::Kernel(format!("fj_delta_max_u32 launch failed: {e}"))
+                        })?;
+                }
+                rec.commit(runtime)
+                    .map_err(|e| XlogError::Kernel(format!("{ctx}: commit failed: {e}")))?;
+            }
+        }
+        cu_stream
+            .synchronize()
+            .map_err(|e| XlogError::Kernel(format!("{ctx}: sync failed: {e}")))?;
+        self.dtoh_scalar_untracked::<u32>(&d_max, 0)
     }
 }

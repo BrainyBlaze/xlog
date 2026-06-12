@@ -41,6 +41,7 @@ mod wcoj_metadata;
 mod wcoj_project;
 
 pub use fj::{FjNode, FjPlan, FjSubAtom};
+pub use fj_delta::FjDeltaCols;
 
 /// Per-module PTX load timing (populated only when XLOG_WARMUP_PROFILE=1).
 #[derive(Debug, Clone, Default)]
@@ -403,6 +404,7 @@ pub mod wcoj_kernels {
     pub const FJ_DELTA_SUBTRACT_U32: &str = "fj_delta_subtract_u32";
     pub const FJ_DELTA_POPCOUNT: &str = "fj_delta_popcount";
     pub const FJ_DELTA_EMIT_U32: &str = "fj_delta_emit_u32";
+    pub const FJ_DELTA_MAX_U32: &str = "fj_delta_max_u32";
 }
 
 /// Kernel function names in the Monte Carlo sampling module

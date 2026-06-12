@@ -3926,3 +3926,17 @@ extern "C" __global__ void fj_delta_emit_u32(
         bits &= bits - 1u;
     }
 }
+
+// Column max for the factorized-delta domain bound: one atomicMax per
+// element into a single u32 cell (caller zeroes it). Trivial traffic
+// next to the relations it scans; runs once per SCC fixpoint.
+extern "C" __global__ void fj_delta_max_u32(
+    const uint32_t* __restrict__ col,
+    uint32_t n,
+    uint32_t* __restrict__ out_max) {
+    uint32_t i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) {
+        return;
+    }
+    atomicMax(out_max, col[i]);
+}
