@@ -50,6 +50,7 @@ pub mod promote;
 pub mod proof_trace;
 pub mod resolver;
 pub mod stratify;
+pub mod trainable_body;
 #[allow(dead_code)] // reserved API: type inference not yet wired to main pipeline
 pub mod typeinfer;
 pub mod wcoj_var_ordering;
@@ -83,3 +84,4 @@ pub use optimizer::{Optimizer, OptimizerConfig, PlanCost};
 pub use parser::{parse_program, parse_statement};
 pub use proof_trace::{DifferentiableProofTraceMap, ProofTrace, ProofTraceSpec};
 pub use stratify::{find_sccs_for_lowering, stratify, DependencyGraph, Stratum};
+pub use trainable_body::{classify_trainable_body_literal, TrainableBodyClass};
