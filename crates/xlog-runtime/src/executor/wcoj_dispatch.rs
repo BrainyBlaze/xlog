@@ -161,6 +161,52 @@ pub(super) fn free_join_disabled() -> bool {
         .unwrap_or(false)
 }
 
+/// D3 kill switch for the factorized recursive-delta dispatch. Default
+/// ON (dispatch enabled); set to `1`/`true` to force every recursive
+/// delta step through the legacy hash-join -> diff path.
+pub const ENV_DISABLE_FACTORIZED_DELTA: &str = "XLOG_DISABLE_FACTORIZED_DELTA";
+
+pub(super) fn factorized_delta_disabled() -> bool {
+    std::env::var(ENV_DISABLE_FACTORIZED_DELTA)
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+}
+
+/// Default dense-domain dispatch cap (bitmap 32 MiB + counts 128 MiB).
+/// `XLOG_FACTORIZED_DELTA_MAX_DOMAIN` raises it up to the provider hard
+/// bound `FJ_DELTA_MAX_DOMAIN` (2^16).
+const FACTORIZED_DELTA_DEFAULT_MAX_DOMAIN: u32 = 1 << 14;
+
+fn factorized_delta_max_domain() -> u32 {
+    std::env::var("XLOG_FACTORIZED_DELTA_MAX_DOMAIN")
+        .ok()
+        .and_then(|v| v.parse::<u32>().ok())
+        .unwrap_or(FACTORIZED_DELTA_DEFAULT_MAX_DOMAIN)
+        .min(xlog_cuda::provider::FJ_DELTA_MAX_DOMAIN)
+}
+
+/// Per-iteration work-floor divisor: dispatch only when the estimated
+/// candidate work is at least `n_words / divisor`, protecting sparse /
+/// long-chain fixpoints from the bitmap popcount+scan floor.
+fn factorized_delta_work_divisor() -> u64 {
+    std::env::var("XLOG_FACTORIZED_DELTA_WORK_DIVISOR")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|&v| v >= 1)
+        .unwrap_or(8)
+}
+
+/// Per-fixpoint dispatch context for the factorized recursive delta.
+/// Owned by one `execute_recursive_scc` call: caches the dense-domain
+/// bound per (head, static rel) — `None` records a for-this-fixpoint
+/// decline — and layout-normalized static buffers for non-recursive
+/// (EDB) static sides.
+#[derive(Default)]
+pub(super) struct FactorizedDeltaCtx {
+    domain_by_key: std::collections::HashMap<(String, RelId), Option<u32>>,
+    static_norm_cache: std::collections::HashMap<(RelId, usize), CudaBuffer>,
+}
+
 /// Diagnostics gate for WCOJ pipeline errors. By default a layout/kernel
 /// error declines to the binary-join fallback (the store is never partially
 /// mutated) but is **counted** (`Executor::wcoj_error_decline_count`) and
@@ -1357,6 +1403,283 @@ impl Executor {
     /// the installed result (vs. the embedded binary fallback).
     pub fn free_join_dispatch_count(&self) -> u64 {
         self.free_join_dispatch_count
+    }
+
+    /// D3 — count of times the factorized recursive-delta dispatch
+    /// produced the installed novel set (vs. the legacy
+    /// hash-join -> diff path).
+    pub fn factorized_delta_dispatch_count(&self) -> u64 {
+        self.factorized_delta_dispatch_count
+    }
+
+    /// Layout-normalize one factorized-delta static side key-first:
+    /// key column 0 feeds the layout helper directly; key column 1 is
+    /// column-swapped through the recorded projection first.
+    fn factorized_delta_normalize_static(
+        &self,
+        buf: &CudaBuffer,
+        key_col: usize,
+        launch_stream: StreamId,
+    ) -> Result<CudaBuffer> {
+        if key_col == 0 {
+            return self.provider.wcoj_layout_u32_recorded(buf, launch_stream);
+        }
+        let ty = |i: usize| {
+            buf.schema().column_type(i).ok_or_else(|| {
+                xlog_core::XlogError::Execution(format!(
+                    "factorized-delta: static column {i} type missing"
+                ))
+            })
+        };
+        let swapped = Schema::new(vec![("k".to_string(), ty(1)?), ("v".to_string(), ty(0)?)]);
+        let projected =
+            self.provider
+                .wcoj_project_output_columns_recorded(buf, &[1, 0], swapped, launch_stream)?;
+        self.provider
+            .wcoj_layout_u32_recorded(&projected, launch_stream)
+    }
+
+    /// D3 — dispatch one semi-naive delta step through the factorized
+    /// novel-set pipeline (`fj_delta_novel_u32_recorded`). Accepts the
+    /// per-occurrence delta-rewritten variant body when it is a
+    /// `ChainJoin` over two Scans with exactly one scanning the delta
+    /// relation; the returned buffer is the head-order novel set —
+    /// already diffed against `head_pred`'s stable relation and
+    /// full-row deduped, so the caller may skip the legacy diff when
+    /// every contribution to the head went through this path.
+    ///
+    /// Declines (silent, `Ok(None)`): kill switch, non-ChainJoin or
+    /// non-Scan children, zero/two delta occurrences, non-u32/Symbol
+    /// or non-arity-2 schemas, missing store buffers, head projection
+    /// that is not a permutation of {delta carry, static value},
+    /// dense-domain bound over the cap (cached per fixpoint), and the
+    /// per-iteration work floor. Pipeline errors route through
+    /// [`wcoj_decline_on_error`] ("factorized-delta" stage).
+    pub(super) fn try_dispatch_factorized_delta(
+        &mut self,
+        node: &RirNode,
+        delta_rel: RelId,
+        head_pred: &str,
+        recursive_preds: &HashSet<String>,
+        ctx: &mut FactorizedDeltaCtx,
+    ) -> Result<Option<CudaBuffer>> {
+        use xlog_cuda::provider::FjDeltaCols;
+
+        if factorized_delta_disabled() {
+            return Ok(None);
+        }
+        let RirNode::ChainJoin {
+            left,
+            right,
+            left_key,
+            right_key,
+            output_columns,
+            ..
+        } = node
+        else {
+            return Ok(None);
+        };
+        let (RirNode::Scan { rel: left_rel }, RirNode::Scan { rel: right_rel }) =
+            (left.as_ref(), right.as_ref())
+        else {
+            return Ok(None);
+        };
+        // Exactly one side scans the delta (per-occurrence variant
+        // rewriting guarantees one occurrence; a delta-delta chain or
+        // a chain not touching the delta both decline).
+        let delta_on_left = match (*left_rel == delta_rel, *right_rel == delta_rel) {
+            (true, false) => true,
+            (false, true) => false,
+            _ => return Ok(None),
+        };
+        let (delta_key, static_rel, static_key) = if delta_on_left {
+            (*left_key, *right_rel, *right_key)
+        } else {
+            (*right_key, *left_rel, *left_key)
+        };
+        if delta_key > 1 || static_key > 1 {
+            return Ok(None);
+        }
+        let delta_carry = 1 - delta_key;
+        let static_value = 1 - static_key;
+
+        // Head projection must be a permutation of {delta carry,
+        // static value} in the combined left+right column space.
+        let (delta_off, static_off) = if delta_on_left { (0, 2) } else { (2, 0) };
+        let carry_global = delta_off + delta_carry;
+        let value_global = static_off + static_value;
+        let [ProjectExpr::Column(out0), ProjectExpr::Column(out1)] = output_columns.as_slice()
+        else {
+            return Ok(None);
+        };
+        let (r_carry, r_value) = if (*out0, *out1) == (carry_global, value_global) {
+            (0, 1)
+        } else if (*out0, *out1) == (value_global, carry_global) {
+            (1, 0)
+        } else {
+            return Ok(None);
+        };
+
+        // Resolve store buffers; all three must be arity-2 u32/Symbol.
+        let binary_u32_class = |buf: &CudaBuffer| {
+            buf.arity() == 2
+                && (0..2).all(|i| {
+                    matches!(
+                        buf.schema().column_type(i),
+                        Some(ScalarType::U32) | Some(ScalarType::Symbol)
+                    )
+                })
+        };
+        let Some(delta_name) = self.get_rel_name(delta_rel).map(str::to_string) else {
+            return Ok(None);
+        };
+        let Some(static_name) = self.get_rel_name(static_rel).map(str::to_string) else {
+            return Ok(None);
+        };
+        let Some(delta_buf) = self.store.get(&delta_name) else {
+            return Ok(None);
+        };
+        let Some(static_buf) = self.store.get(&static_name) else {
+            return Ok(None);
+        };
+        let Some(full_buf) = self.store.get(head_pred) else {
+            return Ok(None);
+        };
+        if !binary_u32_class(delta_buf)
+            || !binary_u32_class(static_buf)
+            || !binary_u32_class(full_buf)
+        {
+            return Ok(None);
+        }
+        if self.provider.memory().runtime().is_none() {
+            return Ok(None);
+        }
+        let Some(launch_stream) = self.wcoj_dispatch_stream_or_init() else {
+            return Ok(None);
+        };
+
+        // Dense-domain bound, computed once per (head, static) per
+        // fixpoint at the first dispatch attempt (induction: every
+        // derived id comes from the seeded delta, the stable head
+        // relation, or the static side — exactly the iteration-1
+        // sets). The in-kernel bounds check stays as the fail-closed
+        // backstop.
+        let domain_key = (head_pred.to_string(), static_rel);
+        let domain = match ctx.domain_by_key.get(&domain_key) {
+            Some(Some(d)) => *d,
+            Some(None) => return Ok(None),
+            None => {
+                let max_id = match self.provider.fj_delta_columns_max_u32(
+                    &[
+                        (delta_buf, &[0, 1][..]),
+                        (static_buf, &[0, 1][..]),
+                        (full_buf, &[0, 1][..]),
+                    ],
+                    launch_stream,
+                ) {
+                    Ok(m) => m,
+                    Err(err) => {
+                        return wcoj_decline_on_error(
+                            &mut self.wcoj_error_decline_count,
+                            "factorized-delta",
+                            err,
+                        );
+                    }
+                };
+                let cap = factorized_delta_max_domain();
+                let decided = if max_id >= cap { None } else { Some(max_id + 1) };
+                ctx.domain_by_key.insert(domain_key, decided);
+                match decided {
+                    Some(d) => d,
+                    None => return Ok(None),
+                }
+            }
+        };
+
+        // Per-iteration work floor: the bitmap pipeline pays a
+        // popcount+scan floor over n_words = domain * ceil(domain/32)
+        // words; tiny deltas (sparse / long-chain fixpoints) fall back
+        // to the legacy path for this iteration only.
+        let n_delta = u64::from(self.buffer_row_count(delta_buf)?);
+        let n_static = u64::from(self.buffer_row_count(static_buf)?);
+        if n_delta == 0 || n_static == 0 {
+            return Ok(None);
+        }
+        let n_words = u64::from(domain.div_ceil(32)) * u64::from(domain);
+        let work_est = n_delta.saturating_mul((n_static / u64::from(domain)).max(1));
+        if work_est < n_words / factorized_delta_work_divisor() {
+            return Ok(None);
+        }
+
+        // Static side key-first layout. EDB statics are normalized
+        // once per fixpoint (cached); a recursive static (non-linear
+        // self-join — the stable relation itself) changes every
+        // iteration and is re-normalized (it is already sorted+deduped
+        // from union_gpu, so the layout fast-path applies).
+        let static_is_recursive = recursive_preds.contains(&static_name);
+        let norm_owned;
+        let static_norm: &CudaBuffer = if static_is_recursive {
+            norm_owned =
+                match self.factorized_delta_normalize_static(static_buf, static_key, launch_stream)
+                {
+                    Ok(b) => b,
+                    Err(err) => {
+                        return wcoj_decline_on_error(
+                            &mut self.wcoj_error_decline_count,
+                            "factorized-delta",
+                            err,
+                        );
+                    }
+                };
+            &norm_owned
+        } else {
+            match ctx.static_norm_cache.entry((static_rel, static_key)) {
+                std::collections::hash_map::Entry::Occupied(e) => &*e.into_mut(),
+                std::collections::hash_map::Entry::Vacant(v) => {
+                    let norm = match self.factorized_delta_normalize_static(
+                        static_buf,
+                        static_key,
+                        launch_stream,
+                    ) {
+                        Ok(b) => b,
+                        Err(err) => {
+                            return wcoj_decline_on_error(
+                                &mut self.wcoj_error_decline_count,
+                                "factorized-delta",
+                                err,
+                            );
+                        }
+                    };
+                    &*v.insert(norm)
+                }
+            }
+        };
+
+        let cols = FjDeltaCols {
+            delta_carry,
+            delta_key,
+            r_carry,
+            r_value,
+        };
+        let outcome = self.provider.fj_delta_novel_u32_recorded(
+            delta_buf,
+            static_norm,
+            full_buf,
+            cols,
+            domain,
+            launch_stream,
+        );
+        match outcome {
+            Ok(novel) => {
+                self.factorized_delta_dispatch_count += 1;
+                Ok(Some(novel))
+            }
+            Err(err) => wcoj_decline_on_error(
+                &mut self.wcoj_error_decline_count,
+                "factorized-delta",
+                err,
+            ),
+        }
     }
 
     /// D2 — dispatch a general `MultiWayJoin` (any shape WITHOUT a
