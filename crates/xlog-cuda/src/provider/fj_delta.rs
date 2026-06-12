@@ -234,6 +234,10 @@ impl CudaKernelProvider {
             rec.read(&wp);
             rec.read_write(&bitmap);
             rec.write(&error_flag);
+            if n_r > 0 {
+                rec.read_column(r_x);
+                rec.read_column(r_z);
+            }
             rec.preflight(runtime)
                 .map_err(|e| XlogError::Kernel(format!("{ctx}: mark preflight failed: {e}")))?;
             let mark = self
@@ -276,8 +280,6 @@ impl CudaKernelProvider {
             if n_r > 0 {
                 let r_x_v = self.column_as_u32_view(r_x, n_r as usize)?;
                 let r_z_v = self.column_as_u32_view(r_z, n_r as usize)?;
-                rec.read_column(r_x);
-                rec.read_column(r_z);
                 let subtract = self
                     .device()
                     .inner()
