@@ -57,68 +57,11 @@ EXCLUDED_PARTS = {
     "outputs",
 }
 
-COMMON_UPPERCASE = {
-    "API",
-    "CLI",
-    "CPU",
-    "CSV",
-    "CUDA",
-    "GPU",
-    "HTTP",
-    "JSON",
-    "PDF",
-    "README",
-    "SQL",
-    "TOML",
-    "URI",
-    "URL",
-    "UTF",
-    "UUID",
-    "XML",
-    "XLOG",
-    "YAML",
-}
-
-PROJECT_TERMS = {
-    "BFO": "external biomedical-ontology diagnostic package",
-    "CSM": "counting sort merge",
-    "D2H": "device-to-host transfer",
-    "DILP": "differentiable inductive logic programming",
-    "DLPack": "tensor interchange protocol for zero-copy array sharing",
-    "DNNF": "decomposable negation normal form",
-    "DTS": "external consumer",
-    "DTS-DLM": "external consumer",
-    "EDB": "extensional database relation",
-    "EGB": "epistemic gate bundle",
-    "EIR": "epistemic intermediate representation",
-    "FAEEL": "founded auto-epistemic logic",
-    "HG": "hypergraph",
-    "IDB": "intensional database relation",
-    "ILP": "inductive logic programming",
-    "LWM": "living-world model diagnostic package",
-    "MC": "Monte Carlo",
-    "NAF": "negation as failure",
-    "PIR": "probabilistic intermediate representation",
-    "PTX": "NVIDIA CUDA virtual instruction assembly",
-    "RIR": "relational intermediate representation",
-    "RunPod": "remote GPU execution provider",
-    "SCC": "strongly connected component",
-    "UCR": "external case-reasoner diagnostic package",
-    "WCOJ": "worst-case optimal join",
-    "WFS": "well-founded semantics",
-    "WMC": "weighted model counting",
-    "cuDF": "GPU dataframe library",
-}
-
-TECHNICAL_TERM_PATTERN = re.compile(
-    r"\b(?:"
-    + "|".join(sorted((re.escape(k) for k in PROJECT_TERMS), key=len, reverse=True))
-    + r"|dILP|D2H|H2D|PTX|DLPack|cuDF|RunPod)\b"
-)
+CONSUMER_NAME_PATTERN = re.compile(r"\b(?:DTS-DLM|DTS)\b")
 
 TASK_CODE_PATTERN = re.compile(
     r"\b(?:"
-    r"v\d{3}|v\d+\.\d+(?:\.\d+)?|"
+    r"v\d{3}|"
     r"(?:FRS|REQ|EF|G|W|M|P|D|S|L|B|C)\d{1,3}[A-Za-z]?"
     r"(?:[.+-][A-Z]?\d+[A-Za-z]?|[.+-][A-Z])*"
     r")\b"
@@ -194,21 +137,15 @@ def split_code(text: str, suffix: str) -> tuple[str, str]:
 
 
 def normalize_term(term: str) -> str:
-    if term == "dILP":
-        return "DILP"
     return term
 
 
 def scan_terms(text: str) -> Counter[str]:
     terms: Counter[str] = Counter()
-    for match in TECHNICAL_TERM_PATTERN.finditer(text):
-        value = normalize_term(match.group(0))
-        if value not in COMMON_UPPERCASE:
-            terms[value] += 1
+    for match in CONSUMER_NAME_PATTERN.finditer(text):
+        terms[normalize_term(match.group(0))] += 1
     for match in TASK_CODE_PATTERN.finditer(text):
-        value = match.group(0)
-        if value not in COMMON_UPPERCASE and not value.startswith("UTF"):
-            terms[value] += 1
+        terms[normalize_term(match.group(0))] += 1
     return terms
 
 
@@ -256,9 +193,9 @@ def render_board(scans: list[FileScan]) -> str:
         "",
         "| Artifact | Meaning used during cleanup |",
         "|---|---|",
+        "| `DTS` / `DTS-DLM` | external consumer |",
+        "| task/milestone labels such as `W2.5`, `G39`, `M37-A`, `S1e`, `FRS-042`, `P0.2`, `D3` | replace with the concrete feature, gate, bug, or milestone meaning recovered from plans, boards, history, or code |",
     ]
-    for term, meaning in sorted(PROJECT_TERMS.items()):
-        lines.append(f"| `{term}` | {meaning} |")
     lines.extend(
         [
             "",
