@@ -3,8 +3,8 @@
 Scope: Git-tracked source and documentation files only. Superpowers docs, plan files, evidence directories, generated artifacts, result/output directories, build output, and other worktrees are excluded.
 
 Scanned files: 1430
-Unresolved files: 313
-Comment/prose artifact occurrences: 2030
+Unresolved files: 312
+Comment/prose artifact occurrences: 2012
 Code/identifier artifact occurrences: 761
 
 Resolved means this board found no remaining opaque task/milestone labels or external consumer names in the eligible portions of that file.
@@ -48,7 +48,7 @@ Stable links to excluded plan/evidence artifact paths are not counted as source-
 | `JCODEMUNCH.md` | 0 | 0 | true |  |  |
 | `LEAN-CTX.md` | 0 | 0 | true |  |  |
 | `Makefile` | 0 | 0 | true |  |  |
-| `README.md` | 18 | 0 | false | v087(4), v085(3), v080(3), D4(3), G91(2), v086(1) |  |
+| `README.md` | 0 | 0 | true |  |  |
 | `ROADMAP.md` | 103 | 0 | false | D2H(18), v085(14), G91(11), v086(10), v090(10), D4(6) |  |
 | `SECURITY.md` | 0 | 0 | true |  |  |
 | `SUPPORT.md` | 0 | 0 | true |  |  |
