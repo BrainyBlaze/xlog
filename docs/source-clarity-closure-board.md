@@ -3,9 +3,9 @@
 Scope: Git-tracked source and documentation files only. Superpowers docs, plan files, evidence directories, generated artifacts, result/output directories, build output, and other worktrees are excluded.
 
 Scanned files: 1430
-Unresolved files: 310
-Comment/prose artifact occurrences: 1909
-Code/identifier artifact occurrences: 760
+Unresolved files: 309
+Comment/prose artifact occurrences: 1908
+Code/identifier artifact occurrences: 759
 
 Resolved means this board found no remaining opaque task/milestone labels or external consumer names in the eligible portions of that file.
 
@@ -60,7 +60,7 @@ Stable links to excluded plan/evidence artifact paths are not counted as source-
 | `crates/pyxlog/python/pyxlog/ilp/__init__.py` | 0 | 0 | true |  |  |
 | `crates/pyxlog/python/pyxlog/ilp/backend.py` | 0 | 0 | true |  |  |
 | `crates/pyxlog/python/pyxlog/ilp/entropy.py` | 0 | 0 | true |  |  |
-| `crates/pyxlog/python/pyxlog/ilp/exact_induce.py` | 1 | 1 | false | D2H(1) | D2H(1) |
+| `crates/pyxlog/python/pyxlog/ilp/exact_induce.py` | 0 | 0 | true |  |  |
 | `crates/pyxlog/python/pyxlog/ilp/exact_small.py` | 0 | 0 | true |  |  |
 | `crates/pyxlog/python/pyxlog/ilp/exceptions.py` | 0 | 0 | true |  |  |
 | `crates/pyxlog/python/pyxlog/ilp/holdout.py` | 0 | 0 | true |  |  |
