@@ -41,7 +41,7 @@ mod wcoj_metadata;
 mod wcoj_project;
 
 pub use fj::{FjNode, FjPlan, FjSubAtom};
-pub use fj_delta::FjDeltaCols;
+pub use fj_delta::{FjDeltaCols, FJ_DELTA_MAX_DOMAIN};
 
 /// Per-module PTX load timing (populated only when XLOG_WARMUP_PROFILE=1).
 #[derive(Debug, Clone, Default)]
