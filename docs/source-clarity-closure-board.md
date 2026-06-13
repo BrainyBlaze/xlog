@@ -2,12 +2,12 @@
 
 Scope: Git-tracked source and documentation files only. Superpowers docs, plan files, evidence directories, generated artifacts, result/output directories, build output, and other worktrees are excluded.
 
-Scanned files: 1431
-Unresolved files: 315
+Scanned files: 1430
+Unresolved files: 314
 Comment/prose artifact occurrences: 3342
-Code/identifier artifact occurrences: 775
+Code/identifier artifact occurrences: 765
 
-Resolved means this scan found no remaining opaque project artifact codes, consumer names, or project-specific abbreviations in the eligible portions of that file.
+Resolved means this board found no remaining opaque task/milestone labels or external consumer names in the eligible portions of that file.
 
 ## Term Meanings Used For Resolution
 
@@ -1450,4 +1450,3 @@ Resolved means this scan found no remaining opaque project artifact codes, consu
 | `scripts/xlog_doctor.py` | 0 | 0 | true |  |  |
 | `tools/exdev-shim/build.sh` | 0 | 0 | true |  |  |
 | `tools/exdev-shim/exdev_shim.c` | 0 | 0 | true |  |  |
-| `tools/source_clarity_board.py` | 0 | 10 | false |  | DTS-DLM(2), DTS(2), W2.5(1), G39(1), M37-A(1), S1e(1) |
