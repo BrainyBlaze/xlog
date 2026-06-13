@@ -451,3 +451,136 @@ fn domain_over_cap_declines_silently() {
     let rows = download_row_set_u32(&fix.memory, executor.store().get("q").expect("q"));
     assert_eq!(rows.len(), 9, "closure must still be exact via the legacy path");
 }
+
+// ---------------------------------------------------------------------------
+// Phase B production-dispatch bench guard (#[ignore], RunPod only).
+//
+// Distinct from the S3 spike-loop gate: this drives the PRODUCTION
+// executor on the TC program with the factorized dispatch ON vs the
+// kill switch ON (legacy hash-join -> diff), measuring peak bytes and
+// wall-clock. Two fixtures:
+//   * dense block-cycle (factorized must win — same physics as S3);
+//   * sparse long path chain (the per-iteration work floor must bail,
+//     so ON must NOT regress vs OFF beyond 1.2x).
+
+use std::time::Instant;
+
+fn block_cycle_edges(k: u32, b: u32) -> Vec<(u32, u32)> {
+    let mut edges = Vec::with_capacity((k * b * b) as usize);
+    for i in 0..k {
+        let src = i * b;
+        let dst = ((i + 1) % k) * b;
+        for u in 0..b {
+            for v in 0..b {
+                edges.push((src + u, dst + v));
+            }
+        }
+    }
+    edges
+}
+
+fn median(samples: &mut [f64]) -> f64 {
+    samples.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    samples[samples.len() / 2]
+}
+
+const TC_SOURCE: &str = "pred edge(u32, u32).\n\
+                         pred q(u32, u32).\n\
+                         q(X, Y) :- edge(X, Y).\n\
+                         q(X, Z) :- q(X, Y), edge(Y, Z).";
+
+/// One engine run on `edges`, returning (wall_ms, peak_bytes,
+/// dispatch_count, row_count). Fresh fixture each call so the peak is
+/// attributable to this run alone.
+fn engine_run(edges: &[(u32, u32)], factorized_on: bool) -> (f64, u64, u64, usize) {
+    let fix = make_fixture().expect("CUDA fixture");
+    if factorized_on {
+        std::env::remove_var(KILL_SWITCH);
+    } else {
+        std::env::set_var(KILL_SWITCH, "1");
+    }
+    let edge_buf = upload_binary_u32(&fix.memory, edges);
+    fix.memory.reset_peak();
+    let t0 = Instant::now();
+    let executor = run_program(&fix, TC_SOURCE, edge_buf);
+    let dt = t0.elapsed().as_secs_f64() * 1000.0;
+    let peak = fix.memory.peak_bytes();
+    let q = executor.store().get("q").expect("q");
+    let rows = buffer_rows(&fix.memory, q);
+    (dt, peak, executor.factorized_delta_dispatch_count(), rows)
+}
+
+fn bench_guard(name: &str, edges: &[(u32, u32)], expect_dispatch: bool) {
+    let _guard = env_lock();
+    if make_fixture().is_none() {
+        eprintln!("skipping {name}: no CUDA device");
+        return;
+    }
+    const REPS: usize = 3;
+    let mut off_ms = Vec::new();
+    let mut off_peak = Vec::new();
+    let mut on_ms = Vec::new();
+    let mut on_peak = Vec::new();
+    let mut on_dispatch = 0u64;
+    let mut off_rows = 0usize;
+    let mut on_rows = 0usize;
+
+    for _ in 0..REPS {
+        let (dt, peak, _, rows) = engine_run(edges, false);
+        off_ms.push(dt);
+        off_peak.push(peak as f64);
+        off_rows = rows;
+    }
+    for _ in 0..REPS {
+        let (dt, peak, disp, rows) = engine_run(edges, true);
+        on_ms.push(dt);
+        on_peak.push(peak as f64);
+        on_dispatch = disp;
+        on_rows = rows;
+    }
+    std::env::remove_var(KILL_SWITCH);
+
+    assert_eq!(on_rows, off_rows, "{name}: ON/OFF row counts must match");
+    let om = median(&mut off_ms);
+    let opk = median(&mut off_peak);
+    let nm = median(&mut on_ms);
+    let npk = median(&mut on_peak);
+    eprintln!(
+        "S4 bench {name}: |E|={} rows={on_rows} dispatch_on={on_dispatch} | \
+         legacy {om:.1} ms / {:.1} MiB ; factorized {nm:.1} ms / {:.1} MiB | \
+         peak {:.2}x  wall-clock {:.3}x",
+        edges.len(),
+        opk / (1024.0 * 1024.0),
+        npk / (1024.0 * 1024.0),
+        opk / npk.max(1.0),
+        nm / om.max(1.0),
+    );
+    if expect_dispatch {
+        assert!(on_dispatch >= 1, "{name}: factorized path must fire");
+    } else {
+        assert_eq!(on_dispatch, 0, "{name}: work floor must bail (no dispatch)");
+        // No-regression bar for the sparse path the engine must NOT
+        // route factorized.
+        assert!(
+            nm <= om * 1.2,
+            "{name}: factorized-default must not regress sparse wall-clock beyond 1.2x \
+             (factorized {nm:.1} ms vs legacy {om:.1} ms)"
+        );
+    }
+}
+
+/// Dense block-cycle — factorized dispatch must fire and win.
+#[test]
+#[ignore = "S4 bench guard — run on RunPod, never locally"]
+fn s4_bench_dense_block_cycle() {
+    bench_guard("dense", &block_cycle_edges(4, 256), true);
+}
+
+/// Sparse long path chain (1500 nodes) — late iterations have tiny
+/// deltas; the work floor must bail so ON never regresses vs OFF.
+#[test]
+#[ignore = "S4 bench guard — run on RunPod, never locally"]
+fn s4_bench_sparse_long_chain() {
+    let edges: Vec<(u32, u32)> = (0..1500u32).map(|i| (i, i + 1)).collect();
+    bench_guard("sparse-chain", &edges, false);
+}
