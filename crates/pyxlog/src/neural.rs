@@ -1100,10 +1100,11 @@ impl CompiledProgram {
     /// Forward-backward for a complex query involving neural predicates through rules.
     ///
     /// E.g., `addition(0, 1, 7)` where:
-    /// - `addition(X, Y, Z) :- digit(X, D1), digit(Y, D2), Z is D1 + D2.`
+    /// - `addition(X, Y, Z) :- digit(X, LeftDigit), digit(Y, RightDigit),
+    ///   Z is LeftDigit + RightDigit.`
     /// - `nn(mnist_net, [X], Y, [0,1,2,3,4,5,6,7,8,9]) :: digit(X, Y).`
     ///
-    /// This method uses circuit caching to avoid D4 recompilation:
+    /// This method uses circuit caching to avoid Decision-DNNF circuit recompilation:
     /// 1. Extracts input indices and runs neural networks
     /// 2. Generates template cache key from query structure
     /// 3. If cached: update weights and evaluate

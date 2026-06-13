@@ -3,8 +3,8 @@
 Scope: Git-tracked source and documentation files only. Superpowers docs, plan files, evidence directories, generated artifacts, result/output directories, build output, and other worktrees are excluded.
 
 Scanned files: 1430
-Unresolved files: 305
-Comment/prose artifact occurrences: 1896
+Unresolved files: 304
+Comment/prose artifact occurrences: 1891
 Code/identifier artifact occurrences: 759
 
 Resolved means this board found no remaining opaque task/milestone labels or external consumer names in the eligible portions of that file.
@@ -18,6 +18,7 @@ Technical host-transfer terminology such as `D2H`, `DTOH`, and `H2D` is allowed 
 | Artifact | Meaning used during cleanup |
 |---|---|
 | `DTS` / `DTS-DLM` | external consumer |
+| `D4` | Decision-DNNF knowledge compiler / GPU Decision-DNNF compilation |
 | `M8 Phase 1` | native bounded exact-induction engine |
 | task/milestone labels such as `W2.5`, `G39`, `M37-A`, `S1e`, `FRS-042`, `P0.2`, `D3` | replace with the concrete feature, gate, bug, or milestone meaning recovered from plans, boards, history, or code |
 
@@ -81,7 +82,7 @@ Technical host-transfer terminology such as `D2H`, `DTOH`, and `H2D` is allowed 
 | `crates/pyxlog/src/ilp_gpu.rs` | 0 | 0 | true |  |  |
 | `crates/pyxlog/src/lib.rs` | 0 | 0 | true |  |  |
 | `crates/pyxlog/src/logic.rs` | 0 | 0 | true |  |  |
-| `crates/pyxlog/src/neural.rs` | 5 | 0 | false | D1(2), D2(2), D4(1) |  |
+| `crates/pyxlog/src/neural.rs` | 0 | 0 | true |  |  |
 | `crates/pyxlog/src/neural_registry.rs` | 0 | 0 | true |  |  |
 | `crates/pyxlog/src/program.rs` | 0 | 0 | true |  |  |
 | `crates/pyxlog/src/training.rs` | 0 | 0 | true |  |  |
