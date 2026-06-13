@@ -3,8 +3,8 @@
 Scope: Git-tracked source and documentation files only. Superpowers docs, plan files, evidence directories, generated artifacts, result/output directories, build output, and other worktrees are excluded.
 
 Scanned files: 1430
-Unresolved files: 309
-Comment/prose artifact occurrences: 1908
+Unresolved files: 308
+Comment/prose artifact occurrences: 1906
 Code/identifier artifact occurrences: 759
 
 Resolved means this board found no remaining opaque task/milestone labels or external consumer names in the eligible portions of that file.
@@ -68,7 +68,7 @@ Stable links to excluded plan/evidence artifact paths are not counted as source-
 | `crates/pyxlog/python/pyxlog/ilp/neurosymbolic.py` | 0 | 0 | true |  |  |
 | `crates/pyxlog/python/pyxlog/ilp/promoter.py` | 0 | 0 | true |  |  |
 | `crates/pyxlog/python/pyxlog/ilp/temperature.py` | 0 | 0 | true |  |  |
-| `crates/pyxlog/python/pyxlog/ilp/trainer.py` | 2 | 0 | false | D2H(2) |  |
+| `crates/pyxlog/python/pyxlog/ilp/trainer.py` | 0 | 0 | true |  |  |
 | `crates/pyxlog/python/pyxlog/ilp/types.py` | 0 | 0 | true |  |  |
 | `crates/pyxlog/python/pyxlog/runtime_audit.py` | 0 | 0 | true |  |  |
 | `crates/pyxlog/python/pyxlog/transfer_diagnostics.py` | 0 | 0 | true |  |  |
