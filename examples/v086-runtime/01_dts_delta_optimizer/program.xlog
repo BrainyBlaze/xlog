@@ -1,4 +1,4 @@
-// DTS-DLM-shaped delta, exact-pair, and optimizer fixture.
+// external consumer-shaped delta, exact-pair, and optimizer fixture.
 
 pred wmir_committed(stage: u32, item: u32).
 pred wmir_delta_insert(batch: u32, item: u32).

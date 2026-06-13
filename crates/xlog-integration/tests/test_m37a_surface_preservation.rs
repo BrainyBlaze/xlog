@@ -213,7 +213,7 @@ fn run_dts_triangle_fixture(
 #[test]
 fn m37a_logic_session_delta_runtime_preserves_dts_surface_values() -> Result<()> {
     let Some(provider) = test_provider() else {
-        eprintln!("Skipping M37A DTS surface preservation: CUDA unavailable");
+        eprintln!("Skipping M37A external consumer surface preservation: CUDA unavailable");
         return Ok(());
     };
 
@@ -268,7 +268,7 @@ fn m37a_logic_session_delta_runtime_preserves_dts_surface_values() -> Result<()>
         provider.clone(),
         session_cache
             .as_ref()
-            .expect("cached store after DTS-style delta batch"),
+            .expect("cached store after external consumer-style delta batch"),
     )?;
     let session_rows = sorted_query_rows(&provider, &session_result);
 
@@ -295,7 +295,7 @@ fn m37a_logic_session_delta_runtime_preserves_dts_surface_values() -> Result<()>
 #[test]
 fn m37a_dts_dlm_analog_fixture_runs_through_wcoj_runtime_path() -> Result<()> {
     let Some(provider) = test_runtime_provider() else {
-        eprintln!("Skipping M37A DTS WCOJ surface preservation: CUDA unavailable");
+        eprintln!("Skipping M37A external consumer WCOJ surface preservation: CUDA unavailable");
         return Ok(());
     };
 

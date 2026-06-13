@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run the v0.8.0 DTS showcase examples and write one validation summary."""
+"""Run the v0.8.0 external consumer showcase examples and write one validation summary."""
 
 from __future__ import annotations
 

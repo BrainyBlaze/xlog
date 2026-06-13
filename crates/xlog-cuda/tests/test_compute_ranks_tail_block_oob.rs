@@ -1,4 +1,4 @@
-// RED repro for the compute_ranks tail-block underflow (DTS-DLM P0.1/P0.2/P0.4).
+// RED repro for the compute_ranks tail-block underflow (external consumer P0.1/P0.2/P0.4).
 //
 // When the device row count sits below a block boundary while the launch
 // grid was sized from the row cap, `block_count = block_end - block_start`

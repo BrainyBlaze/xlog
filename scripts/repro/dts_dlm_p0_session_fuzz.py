@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Repro harness for DTS-DLM P0.1/P0.2: session buffer-cap faults.
+"""Repro harness for external consumer P0.1/P0.2: session buffer-cap faults.
 
 Mirrors the consumer usage shape recorded in
 dts-dlm docs/upstream/fixtures/put-schedule.md:

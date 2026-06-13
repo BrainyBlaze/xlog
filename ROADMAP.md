@@ -13,16 +13,16 @@ default-on adaptive GPU triangle WCOJ for `U32`, `Symbol`, and `U64`
 inputs. v0.7.0 ships the completed WCOJ expansion pack: first-class
 multiway RIR, WCOJ cost and variable-ordering models, recursive/SCC
 integration, K-clique production planning, K5-K8 CUDA coverage, CUDA
-Graph hot-loop support, and DTS-DLM end-to-end validation. v0.8.0 ships
-the DTS-DLM ML/Python productization pack: stable `pyxlog` runtime/session
+Graph hot-loop support, and external consumer end-to-end validation. v0.8.0 ships
+the external consumer ML/Python productization pack: stable `pyxlog` runtime/session
 contracts, async and streaming evaluation, relation deltas, diagnostics,
 registered neural top-k/deterministic modes, Belnap bridge helpers, native
-exact-induction integration, and DTS-focused examples. v0.8.5 ships the
+exact-induction integration, and external-consumer-focused examples. v0.8.5 ships the
 language-completeness pack: finite typed lists and terms, safe meta-predicates,
 deterministic NAF, magic-set planning, probabilistic aggregate inference with
 GPU-native count-lift exact evaluation, approximate inference controls,
 incremental parsing, and explain/REPL/watch developer workflows. v0.8.6 ships
-the DTS-DLM runtime completion and GPU-native optimizer pack: device-resident
+the external consumer runtime completion and GPU-native optimizer pack: device-resident
 delta coalescing, relation-change callbacks, typed exact induction,
 profile-gated chain shared-memory scoring, runtime CSE, adaptive
 re-optimization, persistent hash-index reuse, and behavior-probe-backed
@@ -51,7 +51,7 @@ sections. Historical and current-main work uses checked boxes. Future work uses
 unchecked boxes and is assigned to a concrete future version.
 After the tagged v0.8.0 feature pack, v0.8.5 completed the Language
 Completeness and Developer Experience train. v0.8.6 closed the deferred
-DTS-DLM runtime / GPU-native optimizer completion backlog that v0.9.0 needs as
+external consumer runtime / GPU-native optimizer completion backlog that v0.9.0 needs as
 runtime substrate. v0.8.7-v0.8.9 are integrated predecessor diagnostics
 surfaces in the v0.9.0 Epistemic/Solver Semantics train. v0.9.1 completes the
 bounded epistemic executor into a load-bearing surface (EIR-derived candidate
@@ -668,7 +668,7 @@ relocated to the release where the work actually belongs:
   * Per-call Python memory limit + query progress API →
     **v0.8.0 Python runtime/session API**.
   * CLI explain/plan visualization → **post-v0.10 product backlog**
-    unless a DTS-DLM or release-certification consumer materializes.
+    unless an external consumer or release-certification consumer materializes.
 
 ## v0.6.0 - Stream-Safe GPU Runtime And Execution Discipline
 
@@ -1364,25 +1364,25 @@ the v0.7.0 retarget**:
   * Slice 4: Recursive-arm WCOJ dispatch (items #4, #5).
   * Slice 5: `CardinalityAwareCostModel` opt-in.
 
-## v0.8.0 - DTS-DLM ML/Python Productization
+## v0.8.0 - external consumer ML/Python Productization
 
-v0.8.0 is a DTS-DLM-first release train. Its acceptance target is not
-"more language surface"; it is whether DTS-DLM can execute the queued
+v0.8.0 is an external-consumer-first release train. Its acceptance target is not
+"more language surface"; it is whether external consumer can execute the queued
 M37-A+B path with production-grade xlog support: stable pyxlog
 contracts, observable GPU memory / host-transfer behavior, incremental
 persistent sessions, native exact-induction consumer integration, and
 neural-symbolic bridge training hooks.
 
 Broad language, CLI, and general product conveniences remain valid
-backlog items, but they are not v0.8.0 gates unless a named DTS-DLM or
+backlog items, but they are not v0.8.0 gates unless a named external consumer or
 release-certification consumer depends on them.
 
-### DTS-DLM Release Gates
+### External Consumer Release Gates
 
-- [x] Add a canonical DTS-DLM certification pack in xlog that replays
+- [x] Add a canonical external consumer certification pack in xlog that replays
       the relevant Stage-4 and M37-A+B surfaces without requiring a full
-      DTS pilot by default. (`docs/evidence/2026-05-18-v080-cert/`)
-- [x] Gate v0.8.0 on pyxlog public-surface preservation for DTS-DLM:
+      external consumer pilot by default. (`docs/evidence/2026-05-18-v080-cert/`)
+- [x] Gate v0.8.0 on pyxlog public-surface preservation for external consumer:
       `LogicProgram.compile`, `program.session`, `session.put_relation`,
       `session.evaluate`, `session.export_relation`,
       `IlpProgramFactory.compile`, `train_on_compiled_relations`,
@@ -1390,8 +1390,8 @@ release-certification consumer depends on them.
       `add_tensor_source`, `forward_backward_tensor`, `train_epoch`, and
       `optimizer_step`. (`symbol_coverage=17/17`)
 - [x] Add a machine-readable pyxlog API compatibility manifest and diff
-      check, modeled on the DTS-DLM pyxlog 0.7.0 surface evidence.
-- [x] Add DTS-DLM zero-copy and determinism gates: no tracked hot-path
+      check, modeled on the external consumer pyxlog 0.7.0 surface evidence.
+- [x] Add external consumer zero-copy and determinism gates: no tracked hot-path
       D2H/H2D transfers, stable CUDA Graph counters where graph mode is
       enabled, and bit-exact replay on fixed fixtures.
 
@@ -1404,8 +1404,8 @@ release-certification consumer depends on them.
       DLPack zero-copy for chunked tensor columns.
 - [x] Add per-call Python memory limit configuration.
 - [x] Add query progress reporting for long recursive and neural-symbolic
-      evaluations, with stable counters suitable for DTS-DLM pilot logs.
-- [x] Expose production diagnostics for DTS-DLM: host-transfer stats,
+      evaluations, with stable counters suitable for external consumer pilot logs.
+- [x] Expose production diagnostics for external consumer: host-transfer stats,
       CUDA Graph stats, memory-budget usage, and peak-memory snapshots
       through documented pyxlog APIs. Do not fabricate no-op GPU memory
       probes on environments that cannot report them.
@@ -1417,13 +1417,13 @@ release-certification consumer depends on them.
 - [x] Connect Python session deltas to runtime
       `RelationDelta` / `apply_deltas_and_recompute` so monotone
       insert-only SCCs avoid full recompute where the plan permits it.
-- [x] Add DTS-DLM Stage-4 fixture proving delta updates produce
+- [x] Add external consumer Stage-4 fixture proving delta updates produce
       byte-identical output to full `put_relation` replacement while
       reducing full-table re-upload work.
 
 Deferred completion scope moved to v0.8.6:
 
-- Batch update coalescing for repeated DTS-DLM Stage-4 `wmir_committed`
+- Batch update coalescing for repeated external consumer Stage-4 `wmir_committed`
   updates.
 - Change notification callbacks for session-managed relations, scoped to
   explicit Python opt-in.
@@ -1431,14 +1431,14 @@ Deferred completion scope moved to v0.8.6:
 ### Neural-Symbolic Bridge Integration
 
 - [x] Add term embedding inference path coverage to the pyxlog
-      compatibility manifest and DTS-DLM certification pack.
-- [x] Add foreign tensor predicates suitable for DTS-DLM bridge features
+      compatibility manifest and external consumer certification pack.
+- [x] Add foreign tensor predicates suitable for external consumer bridge features
       and other GPU-resident tensor inputs.
 - [x] Add neural output caching with cache-hit telemetry and a documented
       invalidation model.
 - [x] Add top-k deterministic neural mode with fixed tie-breaking for
-      seed-pinned DTS-DLM training and replay.
-- [x] Add Belnap-aware dual-channel loss helpers for DTS-DLM M37-A+B:
+      seed-pinned external consumer training and replay.
+- [x] Add Belnap-aware dual-channel loss helpers for external consumer M37-A+B:
       pro reward, contra penalty, quarantine penalty, and CFR-oriented
       diagnostics. These are Python/ML helpers; Stage-4 structural
       kernels remain agnostic to Belnap pro/contra semantics.
@@ -1454,16 +1454,16 @@ Deferred completion scope moved to v0.8.6:
 - [x] Integrate native exact-induction backend into the downstream
       tensorized ILP consumer path. (Native `kernels/ilp_exact.cu` +
       manifest registration + `crates/pyxlog/src/ilp_exact.rs` wrapper
-      exist; DTS-DLM's `tensorized_ilp.py` calls the public
+      exist; external consumer's `tensorized_ilp.py` calls the public
       `pyxlog.ilp.exact_induce.induce_exact(..., backend="native")`
       surface directly.)
 - [x] Reproduce the downstream 449/449 liveness benchmark with native
-      exact induction. (DTS-DLM evidence
+      exact induction. (external consumer evidence
       `docs/evidence/2026-04-17-m8-phase1-engine-integration.md`
       records native `both_heads_alive == 449/449`, head 0/1
       `449/449`, rollback `0.0`, and quarantine `0.0`.)
 - [x] Decide and document the strict-per-topology compatibility policy
-      for DTS-DLM, including how legacy Python-prototype behavior is
+      for external consumer, including how legacy Python-prototype behavior is
       compared against native per-topology-isolated scoring.
 - [x] Resolve `ilp_exact.ptx` packaging policy: `kernels/ilp_exact.cu`
       is source; generated `ilp_exact.portable.ptx` and `.cubin`
@@ -1482,19 +1482,19 @@ Deferred completion scope moved to v0.8.6:
 
 Deferred completion scope moved to v0.8.6:
 
-- Common subexpression elimination when DTS-DLM M37-A+B, Mistaber, or
+- Common subexpression elimination when external consumer M37-A+B, Mistaber, or
   certification profiles show duplicated subplans on the hot path.
 - Adaptive query re-optimization during execution when runtime telemetry
   shows stable mis-planning on consumer fixtures.
-- Persistent hash index manager with background building after DTS-DLM,
+- Persistent hash index manager with background building after external consumer,
   Mistaber, or pyxlog-session profiles identify index rebuild cost as a
   release blocker.
 
 ### Deferred Product Backlog
 
-These items were intentionally not v0.8.0 gates after the DTS-DLM scope
+These items were intentionally not v0.8.0 gates after the external consumer scope
 review. They were promoted into v0.8.5 because they had named consumers:
-general XLOG users, DTS-DLM future fixtures, and the v0.9.0
+general XLOG users, external consumer future fixtures, and the v0.9.0
 epistemic/solver branch. Their completed tracking lives in the v0.8.5 section
 below.
 
@@ -1570,7 +1570,7 @@ WCOJ, and CLI paths.
       committed evidence JSON.
       Evidence: `docs/evidence/2026-05-19-v085-examples/validation_summary.json`.
 
-## v0.8.6 - DTS-DLM Runtime Completion and GPU-Native Optimizer Pack
+## v0.8.6 - external consumer Runtime Completion and GPU-Native Optimizer Pack
 
 Status: closed, merged, pushed, and tagged as `v0.8.6` after the 2026-05-19
 closure authorization. Governing goal document:
@@ -1580,7 +1580,7 @@ v0.8.6 closes the seven v0.8.0 deferred completion items as a production
 runtime/optimizer hardening pack. Acceptance requires fully GPU-native data
 paths for accepted workloads, zero data-plane host transfers beyond explicit
 control-plane/final-result exceptions, profile-backed optimizer triggers, and
-consumer evidence for DTS-DLM, Mistaber `.xlog` workloads, v0.9.0
+consumer evidence for external consumer, Mistaber `.xlog` workloads, v0.9.0
 epistemic/solver prerequisites, and pyxlog session users.
 
 Hard implementation rule: v0.8.6 must extend and reuse the existing xlog
@@ -1591,7 +1591,7 @@ engines, or parallel helper paths that bypass production dispatch are blockers.
 
 ### Persistent Relation Maintenance Completion
 
-- [x] Add device-resident batch update coalescing for repeated DTS-DLM
+- [x] Add device-resident batch update coalescing for repeated external consumer
       Stage-4 `wmir_committed` updates, with row-level insert/delete
       coalescing before recompute and byte-identical output versus sequential
       deltas.
@@ -1616,7 +1616,7 @@ engines, or parallel helper paths that bypass production dispatch are blockers.
 ### Profile-Gated Optimizer Completion
 
 - [x] Add GPU-native common subexpression elimination for duplicated
-      subplans in DTS-DLM, Mistaber, or certification workloads, including
+      subplans in external consumer, Mistaber, or certification workloads, including
       semantic equivalence checks and no extra data-plane host transfers.
       Evidence: `docs/evidence/2026-05-19-v086-cse/`.
 - [x] Add adaptive query re-optimization during execution when runtime
@@ -1635,7 +1635,7 @@ engines, or parallel helper paths that bypass production dispatch are blockers.
 ### Consumer Certification
 
 - [x] Add v0.8.6 runtime consumer certification examples and validator for
-      DTS-DLM, neutral Mistaber-derived `.xlog` workloads, v0.9.0 substrate
+      external consumer, neutral Mistaber-derived `.xlog` workloads, v0.9.0 substrate
       primitives, and public pyxlog session compatibility. The validator runs
       the new examples through `xlog-cli run/explain`, invokes the existing
       v0.8.0 and v0.8.5 validators, records raw timings/transfer evidence, and
@@ -2096,9 +2096,9 @@ fail-closed:
 - [x] FAEEL-unfounded self-support (`p() :- possible p()`) executes to the defined
       empty extension, while explicit G91 accepts the same self-supporting program.
 
-## v0.9.3 - Consumer Runtime Pack (DTS-DLM-driven; ordering pending maintainer decision)
+## v0.9.3 - Consumer Runtime Pack (external consumer-driven; ordering pending maintainer decision)
 
-Sourced from the DTS-DLM consolidated requirements package
+Sourced from the external consumer consolidated requirements package
 (2026-06-12, `dts-dlm docs/upstream/2026-06-12-xlog-requirements.md`;
 desk `#xlog` thread `msg-20260612-112404-c782`). The P0 engine defects
 from that package are closed (`703a2cc2`, production-validated by the

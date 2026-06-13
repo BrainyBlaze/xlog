@@ -1002,7 +1002,7 @@ All notable changes to this project are documented in this file.
 - *(v086)* add chain exact shared-memory scorer
 - *(v086)* extend exact induction typed dispatch
 - *(g39)* close W66 graph-mode set maintenance
-- *(g39)* certify W66 DTS graph path
+- *(g39)* certify W66 external consumer graph path
 - *(w66)* cache bounded CSM CUDA graphs
 - *(w66)* add bounded CSM CUDA graph path
 - *(w66)* add CUDA graph execution wrapper
@@ -1677,7 +1677,7 @@ v0.8.9 UCR diagnostic surfaces.
 
 ## [0.8.6] — 2026-05-19
 
-DTS-DLM Runtime Completion and GPU-Native Optimizer Pack. This release closes
+external consumer Runtime Completion and GPU-Native Optimizer Pack. This release closes
 the deferred v0.8.0 runtime completion items while preserving the v0.8.5
 language-completeness surface.
 
@@ -1705,7 +1705,7 @@ language-completeness surface.
   records `speedup_ratio=3.206` against the >=1.5x persistent-index target
   with zero tracked DTOH/H2D calls.
 - Added v0.8.6 runtime consumer example-execution fixtures and validator for
-  DTS-DLM-shaped delta/optimizer workloads, neutral Mistaber-derived `.xlog`
+  external consumer-shaped delta/optimizer workloads, neutral Mistaber-derived `.xlog`
   fixtures, v0.9.0 substrate primitives, and public pyxlog compatibility,
   reusing the v0.8.0/v0.8.5 validators and recording production-path evidence.
   The validator now includes a public `LogicRelationSession` persistent-index
@@ -1740,7 +1740,7 @@ Language Completeness and Developer Experience. This release refreshes the
 public language surface for finite terms/lists/meta constructs, explicit NAF,
 magic-set planning, probabilistic aggregate inference, approximate inference
 configuration, incremental parsing, and CLI inspectability while preserving
-the v0.8.0 DTS-DLM runtime compatibility surface.
+the v0.8.0 external consumer runtime compatibility surface.
 
 ### Added
 
@@ -1800,7 +1800,7 @@ the v0.8.0 DTS-DLM runtime compatibility surface.
 ### Migration Notes
 
 - Existing v0.8.0 programs remain compatible. The G085_INT gate revalidated
-  the v0.8.0 DTS example/source guards and strict deterministic D2H runtime
+  the v0.8.0 external consumer example/source guards and strict deterministic D2H runtime
   paths.
 - New finite list/meta features intentionally reject non-finite, dynamic, or
   CPU-only term forms. Unsupported forms emit typed `v0.8.5 ... error`
@@ -1820,9 +1820,9 @@ the v0.8.0 DTS-DLM runtime compatibility surface.
 
 ## [0.8.0] — 2026-05-18
 
-DTS-DLM ML/Python Productization. This release pulls the consumer-critical
+external consumer ML/Python Productization. This release pulls the consumer-critical
 Python, neural-symbolic, incremental-session, and native exact-induction work
-forward so DTS-DLM can execute the queued M37-A+B path against production xlog
+forward so external consumer can execute the queued M37-A+B path against production xlog
 surfaces.
 
 ### Added
@@ -1833,21 +1833,21 @@ surfaces.
 - Persistent relation delta APIs on `LogicRelationSession`, including insert,
   delete, mixed `apply_relation_delta`, and `delta_stats` reporting backed by
   runtime `RelationDelta` recomputation paths.
-- DTS-DLM neural bridge helpers: registered-network top-k and deterministic
+- external consumer neural bridge helpers: registered-network top-k and deterministic
   output modes, stable top-k tie-breaking, neural cache telemetry, Belnap
   pro/contra/quarantine loss helpers, semantic loss, MSE, and infoloss
   surfaces.
 - Native exact-induction consumer integration through
-  `pyxlog.ilp.exact_induce.induce_exact(..., backend="native")` for the DTS
+  `pyxlog.ilp.exact_induce.induce_exact(..., backend="native")` for the external consumer
   tensorized ILP `U64` path, with strict-per-topology compatibility policy and
   packaging of `ilp_exact` CUDA artifacts through the normal `pyxlog/kernels`
   wheel path.
-- A DTS-focused example suite under `examples/v080-dts/` plus
+- An external-consumer-focused example suite under `examples/v080-dts/` plus
   `scripts/validate_v080_examples.py`, covering async/streaming runtime
   controls, relation deltas, neural bridge helpers, native exact induction, and
   probabilistic async diagnostics.
 - A machine-readable v0.8.0 certification pack under
-  `docs/evidence/2026-05-18-v080-cert/` with `17/17` DTS-required pyxlog symbol
+  `docs/evidence/2026-05-18-v080-cert/` with `17/17` external consumer-required pyxlog symbol
   coverage and `signature_drift=0`.
 
 ### Changed
@@ -1855,7 +1855,7 @@ surfaces.
 - Workspace package version and internal xlog crate dependency constraints now
   target `0.8.0`.
 - README and roadmap release status now identify `v0.8.0` as the current
-  tagged release and route DTS-DLM users to the Python bindings and
+  tagged release and route external consumer users to the Python bindings and
   `examples/v080-dts/` suite.
 - v0.9.0 is the next Epistemic/Solver Semantics train; v0.10.0 is the
   Multi-GPU / Out-of-Core train.
@@ -1864,7 +1864,7 @@ surfaces.
 
 - Closure proposal: `docs/plans/2026-05-18-v080-closure-proposal.md`.
 - Certification evidence: `docs/evidence/2026-05-18-v080-*/`.
-- DTS-DLM full 449-doc native-liveness replay is accepted by historical
+- external consumer full 449-doc native-liveness replay is accepted by historical
   evidence waiver; it was not freshly rerun inside the xlog release worktree.
 
 ## [0.7.0] — 2026-05-18
@@ -1873,7 +1873,7 @@ General WCOJ Architecture and Runtime Expansion. This release
 retargets the completed feature pack originally planned as v0.6.5
 to v0.7.0 because the delivered surface is a full WCOJ subsystem
 expansion: cost-aware planning, recursive integration, K-clique
-coverage, paper-aligned helper/runtime mechanisms, DTS-DLM hot-loop
+coverage, paper-aligned helper/runtime mechanisms, external consumer hot-loop
 integration, and release-board closure.
 
 ### Added
@@ -1890,7 +1890,7 @@ integration, and release-board closure.
 - Certification and benchmark surfaces for GPU Same Generation,
   skewed multiway, deep-recursive WCOJ, deterministic mixed execution,
   widened-frontier replay, and paper-class production-scale fixtures.
-- DTS-DLM Phase-2 integration evidence for chain-shaped joins,
+- external consumer Phase-2 integration evidence for chain-shaped joins,
   sort-label propagation, CUDA Graph capture/replay, M37-A surface
   preservation, and m37c-prime end-to-end validation.
 - Dedicated WCOJ architecture and user guides.
@@ -1903,7 +1903,7 @@ integration, and release-board closure.
   historical evidence may still say the work was originally targeted
   as `v0.6.5`.
 - Roadmap release trains move forward: the completed WCOJ expansion is
-  v0.7.0, v0.8.0 is narrowed to DTS-DLM ML/Python
+  v0.7.0, v0.8.0 is narrowed to external consumer ML/Python
   productization, Epistemic/Solver Semantics moves to v0.9.0,
   and Multi-GPU / Out-of-Core moves to v0.10.0. The broader
   language / CLI product backlog is deferred until it has a named
@@ -3127,7 +3127,7 @@ Run before tagging `v0.6.2`:
 - *(v086)* add chain exact shared-memory scorer
 - *(v086)* extend exact induction typed dispatch
 - *(g39)* close W66 graph-mode set maintenance
-- *(g39)* certify W66 DTS graph path
+- *(g39)* certify W66 external consumer graph path
 - *(w66)* cache bounded CSM CUDA graphs
 - *(w66)* add bounded CSM CUDA graph path
 - *(w66)* add CUDA graph execution wrapper
@@ -3387,10 +3387,10 @@ Run before tagging `v0.6.2`:
 
 - **Bounded exact-induction engine** (`xlog-induce` + `ilp_exact` CUDA kernel + `pyxlog`
   bridge): New `xlog-induce` crate scores all `(left, right)` candidate pairs across the
-  four canonical DTS topologies (`chain`, `star`, `fanout`, `fanin`) in a single batched
+  four canonical external consumer topologies (`chain`, `star`, `fanout`, `fanin`) in a single batched
   GPU pass and returns top-K per topology with full candidate metadata
   (`positives_covered`, `negatives_covered`, `next_*_covered`, `tie_class_size`).
-  Designed for DTS's M8 Phase 1 integration; behaviorally equivalent on bounded
+  Designed for external consumer's M8 Phase 1 integration; behaviorally equivalent on bounded
   requests to `pyxlog.ilp.induce_exact(backend="python", strict_per_topology=True)`.
   - **Engine** (`crates/xlog-induce/`): `InduceExactRequest` (indices + buffer handles),
     `ExactInductionResult` / `ScoredCandidate`, pre-kernel classification
@@ -3482,7 +3482,7 @@ Run before tagging `v0.6.2`:
   each topology's inner loop, yielding per-topology-isolated scoring that matches
   the `backend="native"` kernel's by-construction semantics. Default remains
   `False` for full backward compatibility with callers that are calibrated
-  against the prototype's historical numbers (notably DTS Phase 0 liveness
+  against the prototype's historical numbers (notably external consumer Phase 0 liveness
   baselines). The `"native"` backend is unaffected — it is strict by design.
 - **ILP reliability gate 4.6x faster** (`pyxlog`): Compile once per stage and reuse across
   all 5 seeds via `reset_runtime()`, eliminating 16 redundant compilations and 20 holdout

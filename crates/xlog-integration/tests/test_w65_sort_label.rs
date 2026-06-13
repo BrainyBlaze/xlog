@@ -124,10 +124,10 @@ fn w65_dts_style_support_source_emits_partial_unary_rows_by_semantics() {
         ?- support_2(H, A0, A1, R, W0P, W0A0, W0A1, W1P, W1A0, W1A1).
     "#;
 
-    let program = LogicProgram::compile(source).expect("compile DTS-style W65 fixture");
+    let program = LogicProgram::compile(source).expect("compile external consumer-style W65 fixture");
     let result = program
         .evaluate(provider, std::collections::HashMap::new())
-        .expect("evaluate DTS-style W65 fixture");
+        .expect("evaluate external consumer-style W65 fixture");
 
     assert_eq!(result.queries.len(), 2);
     assert_eq!(

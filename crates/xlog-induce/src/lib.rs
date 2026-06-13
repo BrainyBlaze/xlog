@@ -1,6 +1,6 @@
-//! xlog-induce — bounded exact-induction engine for DTS.
+//! xlog-induce — bounded exact-induction engine for external consumer.
 //!
-//! Scores all `(left, right)` candidate pairs for the four DTS topologies
+//! Scores all `(left, right)` candidate pairs for the four external consumer topologies
 //! (chain, star, fanout, fanin) in a single batched GPU pass and returns the
 //! top-K per topology with full candidate metadata.
 //!

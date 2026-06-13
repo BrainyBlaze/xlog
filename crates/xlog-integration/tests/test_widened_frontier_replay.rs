@@ -1,6 +1,6 @@
 #![allow(clippy::arc_with_non_send_sync)]
 
-//! G_W54 / W5.4: replay the DTS-DLM widened-frontier promotion shape through
+//! G_W54 / W5.4: replay the external consumer widened-frontier promotion shape through
 //! xlog and assert deterministic clean output.
 
 use std::collections::BTreeMap;

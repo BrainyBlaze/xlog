@@ -338,7 +338,7 @@ xlog/
 │   ├── xlog-neural/     # Neural-symbolic integration (v0.4.0-alpha)
 │   ├── xlog-solve/      # Solver services (SAT/MaxSAT)
 │   ├── xlog-gpu/        # High-level GPU API (Rust)
-│   ├── xlog-induce/     # Bounded exact-induction engine (DTS M8 Phase 1)
+│   ├── xlog-induce/     # Bounded exact-induction engine (external consumer M8 Phase 1)
 │   ├── xlog-cli/        # CLI binary (deterministic + probabilistic execution)
 │   ├── pyxlog/     # Python module (PyO3 + DLPack + training API)
 │   └── xlog-cuda-tests/ # CUDA/PTX certification suite (not published)

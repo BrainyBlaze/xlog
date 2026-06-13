@@ -807,7 +807,7 @@ def _reuse_audit() -> dict[str, Any]:
         "reused_subsystems": [
             "xlog-cli parser and explain pipeline",
             "xlog-runtime production executor/provider dispatch",
-            "v0.8.0 DTS example validator",
+            "v0.8.0 external consumer example validator",
             "v0.8.5 language showcase validator",
             "committed v0.8.6 feature evidence",
         ],

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""DTS-Fit Benchmark: xlog induction on DTS-shaped request surfaces.
+"""External Consumer Fit Benchmark: xlog induction on external consumer-shaped request surfaces.
 
-Reproduces the exact workload DTS sends to xlog's train_on_compiled_relations():
+Reproduces the exact workload an external consumer sends to xlog's train_on_compiled_relations():
 - 1-3 predicates, 20-30 positives, 4 bootstrap negatives
 - Four topology masks (chain, star, fanout, fanin)
 - Repeated reruns on identical input
@@ -62,11 +62,11 @@ class BenchmarkResult:
 
 
 def build_dts_program(pred_ids: list[int], target_name: str) -> str:
-    """Build a DTS-shaped Datalog program with four learnable topology masks."""
+    """Build an external consumer-shaped Datalog program with four learnable topology masks."""
     lines = []
     for pid in pred_ids:
         lines.append(f"pred p_{pid}(u64, u64).")
-    # Four canonical topologies — same as DTS _run_xlog_training
+    # Four canonical topologies — same as the external consumer _run_xlog_training
     lines.append(f"learnable(W_chain_{target_name}) :: {target_name}(X, Y) :- bL(X, Z), bR(Z, Y).")
     lines.append(f"learnable(W_star_{target_name}) :: {target_name}(X, Y) :- bL(X, Y), bR(X, Y).")
     lines.append(f"learnable(W_fanout_{target_name}) :: {target_name}(X, Y) :- bL(X, Z), bR(X, Y).")
@@ -81,7 +81,7 @@ def generate_dts_facts(
     n_entities: int = 30,
     seed: int = 42,
 ) -> tuple[list[int], int, dict, dict]:
-    """Generate DTS-shaped fact tensors with a planted discoverable rule.
+    """Generate external consumer-shaped fact tensors with a planted discoverable rule.
 
     Plants a chain rule: target(X,Y) :- bL(X,Z), bR(Z,Y)
     Body predicates get random facts. Target positives are derived from the
@@ -185,7 +185,7 @@ def run_benchmark(
     global_step_limit: int = 50,
     seed: int = 42,
 ) -> BenchmarkResult:
-    """Run the DTS-fit benchmark: compile, upload, train four masks, repeat."""
+    """Run the external consumer-fit benchmark: compile, upload, train four masks, repeat."""
     from pyxlog import IlpProgramFactory
     from pyxlog.ilp.trainer import train_on_compiled_relations
     from pyxlog.ilp.types import TrainConfig
@@ -231,7 +231,7 @@ def run_benchmark(
     negatives = {target_name: [negative_facts[target_pid][0], negative_facts[target_pid][1]]}
 
     for rep in range(n_repeats):
-        # Compile fresh each repeat (matches DTS: one compile per _run_xlog_training)
+        # Compile fresh each repeat (matches external consumer: one compile per _run_xlog_training)
         prog = IlpProgramFactory.compile(source, device=0, memory_mb=128)
 
         # Upload all relation data
@@ -241,7 +241,7 @@ def run_benchmark(
                 if a0.shape[0] > 0:
                     prog.put_relation(f"p_{pid}", [a0, a1])
 
-        # Train four masks separately (matches DTS)
+        # Train four masks separately (matches external consumer)
         all_rules = []
         total_steps = 0
         t0 = time.time()
@@ -272,12 +272,12 @@ def run_benchmark(
 
 
 def main():
-    print("=== DTS-FIT XLOG BENCHMARK ===\n")
+    print("=== EXTERNAL CONSUMER FIT XLOG BENCHMARK ===\n")
 
     configs = [
-        # DTS current regime
-        {"n_preds": 3, "n_pos": 27, "n_neg": 4, "deterministic": False, "label": "DTS current (3p, nondeterministic)"},
-        {"n_preds": 3, "n_pos": 27, "n_neg": 4, "deterministic": True, "label": "DTS + deterministic mode"},
+        # external consumer current regime
+        {"n_preds": 3, "n_pos": 27, "n_neg": 4, "deterministic": False, "label": "external consumer current (3p, nondeterministic)"},
+        {"n_preds": 3, "n_pos": 27, "n_neg": 4, "deterministic": True, "label": "external consumer + deterministic mode"},
         # Degenerate case
         {"n_preds": 1, "n_pos": 27, "n_neg": 4, "deterministic": False, "label": "Degenerate (1p)"},
         # Showcase-like

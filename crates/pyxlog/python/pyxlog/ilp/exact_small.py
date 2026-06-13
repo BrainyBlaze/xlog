@@ -7,7 +7,7 @@ positive coverage minus negative hits, and return the best rule.
 This is deterministic, fast, and produces the optimal rule for the
 given positive/negative set — no gradient noise, no local minima.
 
-Used by DTS for the common 1-3 predicate induction regime where
+Used by external consumer for the common 1-3 predicate induction regime where
 gradient descent is overkill.
 """
 from __future__ import annotations

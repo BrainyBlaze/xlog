@@ -5,7 +5,7 @@ GPU-native path for enumerating all `(left, right)` candidate pairs across four
 fixed 2-body Datalog rule templates and returning top-K per template with full
 structured metadata.
 
-Introduced for DTS's M8 Phase 1 as the production replacement for
+Introduced for external consumer's M8 Phase 1 as the production replacement for
 `pyxlog.ilp.induce_exact(backend="python")`, whose host-orchestrated
 `set_rule_mask`/`evaluate`/`batch_fact_membership_device` loop is documented as a
 throwaway prototype.
@@ -119,7 +119,7 @@ pyxlog wrapper repackages into Python ExactInductionResult / ScoredCandidate
   pair-halving reduction is used *within* a block to sum per-thread
   coverage counts.
 
-At DTS-scale sizes (C ≈ 5–20, |P|+|N| ≈ 20–50) the launch is modest
+At external consumer-scale sizes (C ≈ 5–20, |P|+|N| ≈ 20–50) the launch is modest
 (≤ 1 600 blocks × 256 threads) but ample for occupancy. The inner
 per-thread work is O(|L|·|R|) for `chain` and O(|L|+|R|) for the other
 three topologies — microseconds per block in practice.
@@ -170,7 +170,7 @@ The Python prototype gained an opt-in `strict_per_topology: bool = False`
 parameter that zeroes the three "other" topology masks before each
 topology's inner loop, yielding the same per-topology-isolated scoring
 that the kernel produces by construction. **Default is `False`** for
-backward compatibility with DTS Phase 0 callers that are calibrated
+backward compatibility with external consumer Phase 0 callers that are calibrated
 against the historical prototype numbers. The parity test sets
 `strict_per_topology=True` explicitly to match the kernel.
 
@@ -394,5 +394,5 @@ Evidence: `docs/evidence/2026-05-19-v086-chain-smem/`.
 - `docs/architecture/living-world-diagnostics-v087.md` — v0.8.7 provenance
   and diagnostics surfaces for generated rules, source rules, proof traces,
   deltas, temporal metadata, and neural hot loops.
-- `ROADMAP.md` → "Bounded Exact Induction (`xlog-induce`) — DTS M8
-  Phase 1" — milestone-level status, planned DTS-side integration.
+- `ROADMAP.md` → "Bounded Exact Induction (`xlog-induce`) — external consumer M8
+  Phase 1" — milestone-level status, planned external consumer-side integration.

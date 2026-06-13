@@ -186,7 +186,7 @@ the runtime actually touches:
   metadata count/timing, cost-gated hash routing, skew scheduling, and
   helper-splitting specs.
 - Goal 039: reuse the existing production substrate for chain dispatch, K7/K8
-  templates, sort labels, DLPack/zero-transfer discipline, CUDA Graphs, and DTS
+  templates, sort labels, DLPack/zero-transfer discipline, CUDA Graphs, and external consumer
   replay certification only when the epistemic runtime path actually invokes
   those surfaces.
 

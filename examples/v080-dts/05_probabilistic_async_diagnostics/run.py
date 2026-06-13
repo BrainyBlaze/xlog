@@ -15,7 +15,7 @@ def _dlpack_values(capsule: object) -> tuple[list[float], bool]:
 
 def main() -> int:
     if not torch.cuda.is_available():
-        raise RuntimeError("CUDA is required for v0.8.0 DTS examples")
+        raise RuntimeError("CUDA is required for v0.8.0 external consumer examples")
 
     source = Path(__file__).with_name("program.xlog").read_text(encoding="utf-8")
 

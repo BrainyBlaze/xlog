@@ -268,7 +268,7 @@ For v0.9.x epistemic examples covering EIR, G91, FAEEL, Generate-Propagate-Test,
 splitting, recursive/stratified epistemic execution, and constraint joins
 through `xlog run`, see
 [`examples/epistemic/`](examples/epistemic/).
-For DTS-DLM Python productization examples, see
+For external consumer Python productization examples, see
 [`examples/v080-dts/`](examples/v080-dts/). For Rust and Python API usage, see
 [`examples/python/`](examples/python/) and
 [`docs/architecture/python-bindings.md`](docs/architecture/python-bindings.md).
@@ -322,7 +322,7 @@ flag reference.
 | [Roadmap](ROADMAP.md) | Feature status, shipped milestones, and planned work |
 | [Benchmarks](docs/BENCHMARKS.md) | Performance methodology and benchmark artifacts |
 | [WCOJ architecture guide](docs/wcoj-architecture-guide.md) | RIR, promoter, dispatch, cost model, recursive integration, and Phase-2 WCOJ mechanisms |
-| [WCOJ user guide](docs/wcoj-user-guide.md) | Eligibility, fallback behavior, performance tuning, env vars, troubleshooting, and DTS-DLM guidance |
+| [WCOJ user guide](docs/wcoj-user-guide.md) | Eligibility, fallback behavior, performance tuning, env vars, troubleshooting, and external consumer guidance |
 | [v0.8.7 living-world diagnostics](docs/architecture/living-world-diagnostics-v087.md) | Generated-rule provenance, source rule provenance, proof traces, delta debug, temporal metadata, and neural hot-loop diagnostics |
 | [Probabilistic tier](docs/architecture/xlog-prob.md) | Exact knowledge compilation and Monte Carlo inference |
 | [Solver services](docs/architecture/solver-services.md) | GPU CDCL verifier, SAT/MaxSAT services, workspace arena reuse |

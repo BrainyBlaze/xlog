@@ -61,7 +61,7 @@ Neural-symbolic examples, introduced during the `v0.4.0-alpha` milestone and car
 forward in the current `v0.5.x` release line, live under:
 - `examples/neural/`: Neural-symbolic training examples
 
-v0.8.0 DTS-DLM productization examples live under:
+v0.8.0 external consumer productization examples live under:
 - `examples/v080-dts/`: Small certification-friendly showcase examples for
   async/streaming runtime controls, relation deltas, neural bridge helpers,
   native exact induction, and probabilistic async diagnostics.

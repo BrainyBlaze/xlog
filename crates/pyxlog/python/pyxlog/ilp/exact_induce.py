@@ -95,7 +95,7 @@ def induce_exact(
         ``candidate_relations`` may include the head relation — the scorer
         will happily score self-referential rules (e.g. p(X,Y) :- p(X,Z), p(Z,Y)).
         The caller is responsible for excluding the head if self-reference is
-        undesired. DTS production code excludes it; the learned-rules data shows
+        undesired. external consumer production code excludes it; the learned-rules data shows
         self-referential rules ARE frequently the top scorer.
 
     Args:
@@ -118,7 +118,7 @@ def induce_exact(
             original prototype behavior in which stale masks from prior
             outer-loop iterations contaminate later topologies' coverage
             numbers. Kept default-False for backward compatibility with
-            historical DTS Phase 0 measurements (e.g. Phase 0d's 449/449
+            historical external consumer Phase 0 measurements (e.g. Phase 0d's 449/449
             liveness baseline was measured against this behavior).
 
             The ``"native"`` backend implements the strict-per-topology
@@ -203,7 +203,7 @@ def induce_exact(
         # Opt-in: zero out all other topology masks so only this topology's
         # rule can contribute to p_A derivations during evaluate(). See
         # comment on `flat_zero` above. Default-off to preserve historical
-        # DTS Phase 0 measurements that were calibrated against the original
+        # external consumer Phase 0 measurements that were calibrated against the original
         # prototype's cross-topology contamination behavior.
         if strict_per_topology:
             for other_topo, other_mask in zip(TOPOLOGIES, mask_names):

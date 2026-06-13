@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 
-//! W39 — DTS-DLM analog fixture: registration metadata AND real execution.
+//! W39 — external consumer analog fixture: registration metadata AND real execution.
 //!
 //! The original test only asserted that `bundle_path_status` (a hardcoded
 //! `&'static str` on the fixture) contained "PASS" markers — a metadata
@@ -185,7 +185,7 @@ fn dts_dlm_analog_fixture_is_registered_with_paper_class_harness() {
     assert_eq!(
         fixtures.len(),
         4,
-        "G_W39_DTSDLM extends the three paper-class fixtures with one DTS-DLM analog"
+        "G_W39_DTSDLM extends the three paper-class fixtures with one external consumer analog"
     );
 
     let dts = fixtures
@@ -195,15 +195,15 @@ fn dts_dlm_analog_fixture_is_registered_with_paper_class_harness() {
 
     assert!(
         dts.recursive,
-        "DTS-DLM analog must exercise recursive Stage-4 set maintenance"
+        "external consumer analog must exercise recursive Stage-4 set maintenance"
     );
     assert!(
         !dts.e_xy.is_empty() && !dts.e_yz.is_empty() && !dts.e_xz.is_empty(),
-        "DTS-DLM analog must populate every relation in the triangle harness"
+        "external consumer analog must populate every relation in the triangle harness"
     );
     assert!(
         dts.e_yz.len() >= dts.e_xy.len(),
-        "middle-key fanout should model DTS-DLM's chain-2 support expansion"
+        "middle-key fanout should model external consumer's chain-2 support expansion"
     );
     // Registration metadata only — `bundle_path_status` is a hardcoded
     // fixture label, NOT execution evidence. Behavioral coverage is locked
@@ -211,7 +211,7 @@ fn dts_dlm_analog_fixture_is_registered_with_paper_class_harness() {
     assert!(
         dts.bundle_path_status.contains("g_w66_cuda_graph=PASS")
             && dts.bundle_path_status.contains("invoked=7/7"),
-        "DTS-DLM analog registration metadata must keep its bundle-path label"
+        "external consumer analog registration metadata must keep its bundle-path label"
     );
 }
 
@@ -231,7 +231,7 @@ fn dts_dlm_analog_fixture_executes_with_oracle_parity() {
     let expected = brute_force_triangles(&dts.e_xy, &dts.e_yz, &dts.e_xz);
     assert!(
         !expected.is_empty(),
-        "DTS-DLM analog must contain at least one triangle or the workload is vacuous"
+        "external consumer analog must contain at least one triangle or the workload is vacuous"
     );
 
     let source = "tri(X, Y, Z) :- e_xy(X, Y), e_yz(Y, Z), e_xz(X, Z).";
@@ -253,7 +253,7 @@ fn dts_dlm_analog_fixture_executes_with_oracle_parity() {
     let got = download_triples(tri);
     assert_eq!(
         got, expected,
-        "GPU triangle row set over the DTS-DLM analog must match the host brute-force oracle"
+        "GPU triangle row set over the external consumer analog must match the host brute-force oracle"
     );
     assert_eq!(
         executor.wcoj_error_decline_count(),

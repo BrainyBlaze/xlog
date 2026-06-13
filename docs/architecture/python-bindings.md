@@ -169,7 +169,7 @@ The persistent session path is additive:
 
 #### Persistent Relation Deltas
 
-Persistent sessions also support DLPack-backed relation deltas for DTS-DLM
+Persistent sessions also support DLPack-backed relation deltas for external consumer
 Stage-4 update loops. `insert_relation(...)`, `delete_relation(...)`, and
 `apply_relation_delta(...)` update the session relation store through the
 runtime `RelationDelta` / `apply_deltas_and_recompute` path. Insert-only
@@ -347,7 +347,7 @@ class RelationEvidence:
 
 #### v0.8.0 Runtime Controls And Diagnostics
 
-Long-running DTS-DLM callers can submit logic or probabilistic evaluations to a
+Long-running external consumer callers can submit logic or probabilistic evaluations to a
 background Python worker with `evaluate_async(...)`. The returned
 `AsyncEvaluation` is awaitable and also exposes `done()`, `cancel()`,
 `exception()`, and `result(timeout=None)` for synchronous orchestration.
@@ -597,7 +597,7 @@ batch_t = program.nll_loss_batch_tensor(queries)
 avg_loss = program.evaluate_loss(queries)
 ```
 
-### v0.8.0 DTS-DLM Bridge Helpers
+### v0.8.0 external consumer Bridge Helpers
 
 M37-A+B bridge training keeps Belnap pro/contra/quarantine semantics in the
 Python/ML layer. Stage-4 structural kernels remain oblivious to those channels.
@@ -834,7 +834,7 @@ Contract notes:
 ### Bounded Exact Induction API
 
 `pyxlog.ilp.induce_exact(..., backend="native")` exposes the GPU-native
-bounded exact-induction scorer used by DTS-DLM tensorized ILP consumers. The
+bounded exact-induction scorer used by external consumer tensorized ILP consumers. The
 public entry point returns an `ExactInductionResult` containing
 `ScoredCandidate` rows grouped by topology order: `chain`, `star`, `fanout`,
 then `fanin`.

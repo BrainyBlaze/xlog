@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate and verify the v0.8.0 DTS-DLM pyxlog certification manifest."""
+"""Generate and verify the v0.8.0 external consumer pyxlog certification manifest."""
 
 from __future__ import annotations
 
@@ -247,7 +247,7 @@ def build_manifest(repo_root: Path) -> dict:
         "htod_calls": 0,
     }
     determinism = {
-        "fixture": "DTS-DLM fixed pyxlog session replay",
+        "fixture": "external consumer fixed pyxlog session replay",
         "replays": 100,
         "bit_exact_replays": 100,
         "source_guard": "python/tests/test_logic_dts_frozen_replay_determinism.py",
@@ -274,7 +274,7 @@ def build_manifest(repo_root: Path) -> dict:
         "required_symbols": symbol_entries,
         "hot_path_host_transfers": hot_path_host_transfers,
         "hot_path_evidence": {
-            "scope": "certified DTS-DLM pyxlog session hot path",
+            "scope": "certified external consumer pyxlog session hot path",
             "source_guards": [
                 "python/tests/test_ilp_d2h_gate.py::test_host_transfer_stats_methods_accessible",
                 "crates/xlog-integration/tests/test_m37a_surface_preservation.rs",

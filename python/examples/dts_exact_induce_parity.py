@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """M8 Phase 1 — canonical parity harness for induce_exact backends.
 
-Builds one bounded DTS-shaped ILP request, runs both the python reference
+Builds one bounded external consumer-shaped ILP request, runs both the python reference
 and the native xlog-induce backend, and reports any structural disagreement.
 
 Exit codes:
@@ -9,8 +9,8 @@ Exit codes:
   1 — mismatch or native backend unavailable
   2 — setup/environment error (no CUDA, bad build)
 
-Used as the cross-repo parity bridge. DTS integration calls this script for
-confidence; DTS does not own a duplicate parity implementation.
+Used as the cross-repo parity bridge. external consumer integration calls this script for
+confidence; external consumer does not own a duplicate parity implementation.
 """
 from __future__ import annotations
 

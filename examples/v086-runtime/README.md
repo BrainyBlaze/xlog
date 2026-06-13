@@ -7,7 +7,7 @@ the production runtime/provider gates rather than using private hooks.
 
 The suite covers:
 
-- a DTS-DLM-shaped delta and optimizer fixture;
+- an external consumer-shaped delta and optimizer fixture;
 - two neutral scientific/engineering workloads derived from Mistaber-style
   flow and signal reasoning, without project-specific terms in the programs;
 - a v0.9.0 substrate fixture that documents the exact/index/CSE/adaptive

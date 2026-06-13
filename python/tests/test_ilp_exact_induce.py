@@ -43,7 +43,7 @@ _TARGET_SOURCE = """
 
 
 def _build_bounded_request(n_candidates: int = 4):
-    """Build a small DTS-shaped ILP program + positive/negative tensors.
+    """Build a small external consumer-shaped ILP program + positive/negative tensors.
 
     ``n_candidates`` controls how many of ``p_B..p_F`` are passed as
     body candidates (excluding the target ``p_A``).

@@ -1,4 +1,4 @@
-"""DTS-DLM frozen-bundle replay regression for pyxlog LogicProgram sessions."""
+"""external consumer frozen-bundle replay regression for pyxlog LogicProgram sessions."""
 
 from __future__ import annotations
 
@@ -78,7 +78,7 @@ def test_dts_frozen_logic_replay_is_deterministic_across_subprocesses(call_id: i
     if not bundle.exists():
         bundle = FALLBACK_BUNDLE
     if not bundle.exists():
-        pytest.skip(f"DTS frozen replay bundle is not available: {bundle}")
+        pytest.skip(f"external consumer frozen replay bundle is not available: {bundle}")
 
     expected = None
     for replay_idx in range(20):

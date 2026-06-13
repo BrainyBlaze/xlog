@@ -138,7 +138,7 @@ is reused as the production K-clique WCOJ substrate: epistemic lowering consumes
 its planner, sorted-layout, histogram, cost-gate, and helper-splitting surfaces
 rather than defining a parallel WCOJ path. Goal 039 is reused as existing
 production substrate for chain dispatch, K7/K8 templates, sort-label/DLPack
-discipline, CUDA Graphs, and DTS replay certification; the epistemic runtime path
+discipline, CUDA Graphs, and external consumer replay certification; the epistemic runtime path
 dispatches through those surfaces when a reduction is eligible.
 
 This is the lowering front half of the shipped execution path. The runtime
