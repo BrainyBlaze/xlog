@@ -3,9 +3,9 @@
 Scope: Git-tracked source and documentation files only. Superpowers docs, plan files, evidence directories, generated artifacts, result/output directories, build output, and other worktrees are excluded.
 
 Scanned files: 1430
-Unresolved files: 311
+Unresolved files: 310
 Comment/prose artifact occurrences: 1909
-Code/identifier artifact occurrences: 761
+Code/identifier artifact occurrences: 760
 
 Resolved means this board found no remaining opaque task/milestone labels or external consumer names in the eligible portions of that file.
 
@@ -55,7 +55,7 @@ Stable links to excluded plan/evidence artifact paths are not counted as source-
 | `crates/pyxlog/Cargo.toml` | 0 | 0 | true |  |  |
 | `crates/pyxlog/README.md` | 0 | 0 | true |  |  |
 | `crates/pyxlog/pyproject.toml` | 0 | 0 | true |  |  |
-| `crates/pyxlog/python/pyxlog/__init__.py` | 0 | 1 | false |  | v080(1) |
+| `crates/pyxlog/python/pyxlog/__init__.py` | 0 | 0 | true |  |  |
 | `crates/pyxlog/python/pyxlog/_kernel_paths.py` | 0 | 0 | true |  |  |
 | `crates/pyxlog/python/pyxlog/ilp/__init__.py` | 0 | 0 | true |  |  |
 | `crates/pyxlog/python/pyxlog/ilp/backend.py` | 0 | 0 | true |  |  |

@@ -168,9 +168,9 @@ class RelationEvidence:
 # def relation(self, name: str) -> RelationEvidence: ...
 
 
-_V080_EXECUTOR = ThreadPoolExecutor(max_workers=4, thread_name_prefix="pyxlog-v080")
-_V080_ORIGINALS: dict[tuple[type, str], Any] = {}
-_V080_PROGRESS: dict[int, dict[str, Any]] = {}
+_RUNTIME_API_EXECUTOR = ThreadPoolExecutor(max_workers=4, thread_name_prefix="pyxlog-runtime-api")
+_RUNTIME_API_ORIGINALS: dict[tuple[type, str], Any] = {}
+_RUNTIME_API_PROGRESS: dict[int, dict[str, Any]] = {}
 _TEMPORAL_PROVENANCE: dict[int, dict[str, dict[str, Any]]] = {}
 _RELATION_EVIDENCE: dict[int, dict[str, dict[str, Any]]] = {}
 _NN4_LINEAGE: dict[int, dict[str, dict[str, Any]]] = {}
@@ -179,15 +179,15 @@ _NN4_INFLUENCE: dict[int, dict[str, list[dict[str, Any]]]] = {}
 
 def _progress_for(obj: Any) -> dict[str, Any]:
     key = id(obj)
-    if key not in _V080_PROGRESS:
-        _V080_PROGRESS[key] = {
+    if key not in _RUNTIME_API_PROGRESS:
+        _RUNTIME_API_PROGRESS[key] = {
             "evaluations_started": 0,
             "evaluations_completed": 0,
             "evaluations_failed": 0,
             "last_rows": 0,
             "last_error": None,
         }
-    return _V080_PROGRESS[key]
+    return _RUNTIME_API_PROGRESS[key]
 
 
 def _count_logic_rows(result: Any) -> int:
@@ -211,7 +211,7 @@ def _recorded_call(obj: Any, original: Any, *args: Any, **kwargs: Any) -> Any:
 
 
 def _evaluate_async(self: Any, *args: Any, **kwargs: Any) -> AsyncEvaluation:
-    return AsyncEvaluation(_V080_EXECUTOR.submit(self.evaluate, *args, **kwargs))
+    return AsyncEvaluation(_RUNTIME_API_EXECUTOR.submit(self.evaluate, *args, **kwargs))
 
 
 def _progress_stats(self: Any) -> dict[str, Any]:
@@ -450,7 +450,7 @@ def _stable_hash(value: str) -> str:
 
 def _logic_program_evaluate(self: Any, *args: Any, **kwargs: Any) -> Any:
     return _recorded_call(
-        self, _V080_ORIGINALS[(CompiledLogicProgram, "evaluate")], *args, **kwargs
+        self, _RUNTIME_API_ORIGINALS[(CompiledLogicProgram, "evaluate")], *args, **kwargs
     )
 
 
@@ -462,7 +462,7 @@ def _logic_program_evaluate_stream(
 
 def _logic_session_evaluate(self: Any, *args: Any, **kwargs: Any) -> Any:
     return _recorded_call(
-        self, _V080_ORIGINALS[(LogicRelationSession, "evaluate")], *args, **kwargs
+        self, _RUNTIME_API_ORIGINALS[(LogicRelationSession, "evaluate")], *args, **kwargs
     )
 
 
@@ -474,7 +474,7 @@ def _logic_session_evaluate_stream(
 
 def _compiled_program_evaluate(self: Any, *args: Any, **kwargs: Any) -> Any:
     return _recorded_call(
-        self, _V080_ORIGINALS[(CompiledProgram, "evaluate")], *args, **kwargs
+        self, _RUNTIME_API_ORIGINALS[(CompiledProgram, "evaluate")], *args, **kwargs
     )
 
 
@@ -496,7 +496,7 @@ def _compiled_program_register_network_with_lineage(
     cuda_device: str | int | None = None,
     influence_audit: dict[str, Any] | None = None,
 ) -> Any:
-    result = _V080_ORIGINALS[(CompiledProgram, "register_network")](
+    result = _RUNTIME_API_ORIGINALS[(CompiledProgram, "register_network")](
         self, name, module, optimizer, scheduler, batching, k, det, cache, cache_size
     )
     lineage = {
@@ -546,14 +546,14 @@ def _compiled_program_record_nn4_influence(
 
 
 def _compiled_program_neural_hot_loop_diagnostics(self: Any) -> dict[str, Any]:
-    original = _V080_ORIGINALS.get((CompiledProgram, "neural_hot_loop_diagnostics"))
+    original = _RUNTIME_API_ORIGINALS.get((CompiledProgram, "neural_hot_loop_diagnostics"))
     diagnostics = dict(original(self)) if original is not None else {}
     diagnostics["nn4_lineage"] = _compiled_program_nn4_lineage(self)
     return diagnostics
 
 
-def _install_v080_runtime_api() -> None:
-    if getattr(CompiledLogicProgram, "_v080_runtime_api_installed", False):
+def _install_runtime_api_extensions() -> None:
+    if getattr(CompiledLogicProgram, "_runtime_api_extensions_installed", False):
         return
 
     for cls, name, replacement in [
@@ -562,11 +562,11 @@ def _install_v080_runtime_api() -> None:
         (CompiledProgram, "evaluate", _compiled_program_evaluate),
         (CompiledProgram, "register_network", _compiled_program_register_network_with_lineage),
     ]:
-        _V080_ORIGINALS[(cls, name)] = getattr(cls, name)
+        _RUNTIME_API_ORIGINALS[(cls, name)] = getattr(cls, name)
         setattr(cls, name, replacement)
 
     if hasattr(CompiledProgram, "neural_hot_loop_diagnostics"):
-        _V080_ORIGINALS[(CompiledProgram, "neural_hot_loop_diagnostics")] = getattr(
+        _RUNTIME_API_ORIGINALS[(CompiledProgram, "neural_hot_loop_diagnostics")] = getattr(
             CompiledProgram, "neural_hot_loop_diagnostics"
         )
         setattr(
@@ -594,11 +594,11 @@ def _install_v080_runtime_api() -> None:
     setattr(CompiledProgram, "record_nn4_influence", _compiled_program_record_nn4_influence)
     setattr(LogicQueryResult, "iter_chunks", _logic_query_iter_chunks)
     setattr(LogicEvalResult, "iter_query_chunks", _logic_eval_iter_query_chunks)
-    setattr(CompiledLogicProgram, "_v080_runtime_api_installed", True)
+    setattr(CompiledLogicProgram, "_runtime_api_extensions_installed", True)
 
 
 if _NATIVE_AVAILABLE:
-    _install_v080_runtime_api()
+    _install_runtime_api_extensions()
 
 try:
     __all__ = list(__all__) + [
