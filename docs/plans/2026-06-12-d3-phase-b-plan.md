@@ -86,3 +86,28 @@ two Scan children where exactly one scans the delta relation**:
    dense gate fixture and sparse long-chain fixture; record both; ≤1.2× on sparse is the
    no-regression bar; pod deleted + confirmed.
 6. Evidence + CHANGELOG `[Unreleased]` + merge decision posted to #xlog.
+
+## 6. Outcome — S4 PASS, merged (2026-06-14)
+
+Evidence: `docs/evidence/2026-06-14-s4-factorized-delta-dispatch/`. Production-executor
+bench on RunPod RTX A4000 (HEAD `9fcf6788`):
+
+- dense block-cycle: `factorized_delta_dispatch_count == 4`, **41.46× peak** (2332.0 →
+  56.3 MiB) at **0.092× wall-clock**, row-set parity — reproduces S3 through the real
+  dispatch path;
+- sparse 1500-node chain: 0 dispatches (work floor bails), **1.161× wall-clock** (within
+  the 1.2× no-regression bar).
+
+The first S4 run was discarded as confounded (all-legacy-then-all-factorized ordering let
+thermal throttling masquerade as a 1.72× regression; dense OOM'd on a 512 MiB budget). The
+fixed harness interleaves the arms per rep, warms up, and sizes the dense budget.
+
+Local regression: 266 binaries ok + 1 cross-binary GPU-contention flake (passes isolated).
+
+Known residual (follow-up, not blocking): ~16 % per-iteration dispatch-attempt overhead on
+sparse fixpoints where the work floor bails — hoist env-gate reads and redundant
+`buffer_row_count` out of the per-iteration path (FactorizedDeltaCtx caches per fixpoint).
+
+**Decision: gates met (S3 + S4), regression clean, kill switch + counters + fail-closed
+declines in place → merged to main.** Deferred to future phases: u64 width, sparse-domain
+representation, multi-predicate-SCC factorization, the per-iteration overhead reduction.
