@@ -3,11 +3,13 @@
 Scope: Git-tracked source and documentation files only. Superpowers docs, plan files, evidence directories, generated artifacts, result/output directories, build output, and other worktrees are excluded.
 
 Scanned files: 1430
-Unresolved files: 314
-Comment/prose artifact occurrences: 3342
-Code/identifier artifact occurrences: 765
+Unresolved files: 313
+Comment/prose artifact occurrences: 2030
+Code/identifier artifact occurrences: 761
 
 Resolved means this board found no remaining opaque task/milestone labels or external consumer names in the eligible portions of that file.
+
+Stable links to excluded plan/evidence artifact paths are not counted as source-code shorthand; their filenames remain unchanged to avoid breaking historical references.
 
 ## Term Meanings Used For Resolution
 
@@ -38,7 +40,7 @@ Resolved means this board found no remaining opaque task/milestone labels or ext
 | `.github/workflows/python-publish.yml` | 0 | 0 | true |  |  |
 | `.github/workflows/release-plz.yml` | 0 | 0 | true |  |  |
 | `AGENTS.md` | 0 | 0 | true |  |  |
-| `CHANGELOG.md` | 1312 | 4 | false | v090(630), v092(77), v085(63), G1(46), v091(42), v086(36) | D1(2), D2(2) |
+| `CHANGELOG.md` | 0 | 0 | true |  |  |
 | `CLAUDE.md` | 0 | 0 | true |  |  |
 | `CODE_OF_CONDUCT.md` | 0 | 0 | true |  |  |
 | `CONTRIBUTING.md` | 0 | 0 | true |  |  |
