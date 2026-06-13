@@ -3,13 +3,15 @@
 Scope: Git-tracked source and documentation files only. Superpowers docs, plan files, evidence directories, generated artifacts, result/output directories, build output, and other worktrees are excluded.
 
 Scanned files: 1430
-Unresolved files: 308
-Comment/prose artifact occurrences: 1906
+Unresolved files: 307
+Comment/prose artifact occurrences: 1898
 Code/identifier artifact occurrences: 759
 
 Resolved means this board found no remaining opaque task/milestone labels or external consumer names in the eligible portions of that file.
 
 Stable links to excluded plan/evidence artifact paths are not counted as source-code shorthand; their filenames remain unchanged to avoid breaking historical references.
+
+Technical host-transfer terminology such as `D2H`, `DTOH`, and `H2D` is allowed when it refers to device-to-host or host-to-device transfer behavior.
 
 ## Term Meanings Used For Resolution
 
@@ -73,7 +75,7 @@ Stable links to excluded plan/evidence artifact paths are not counted as source-
 | `crates/pyxlog/python/pyxlog/runtime_audit.py` | 0 | 0 | true |  |  |
 | `crates/pyxlog/python/pyxlog/transfer_diagnostics.py` | 0 | 0 | true |  |  |
 | `crates/pyxlog/src/dlpack.rs` | 0 | 0 | true |  |  |
-| `crates/pyxlog/src/ilp.rs` | 8 | 0 | false | D2H(8) |  |
+| `crates/pyxlog/src/ilp.rs` | 0 | 0 | true |  |  |
 | `crates/pyxlog/src/ilp_exact.rs` | 1 | 0 | false | M8(1) |  |
 | `crates/pyxlog/src/ilp_gpu.rs` | 0 | 0 | true |  |  |
 | `crates/pyxlog/src/lib.rs` | 1 | 0 | false | D2H(1) |  |
