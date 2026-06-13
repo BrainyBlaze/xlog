@@ -325,6 +325,10 @@ pub struct Executor {
     /// installed result. Public accessor:
     /// `Executor::free_join_dispatch_count(&self) -> u64`.
     pub(super) free_join_dispatch_count: u64,
+    /// D3 — count of factorized recursive-delta dispatches that produced
+    /// an installed novel set. Public accessor:
+    /// `Executor::factorized_delta_dispatch_count(&self) -> u64`.
+    pub(super) factorized_delta_dispatch_count: u64,
     /// Cached non-default stream for the WCOJ triangle dispatch hook.
     /// Acquired lazily on first dispatch and reused thereafter — mirrors
     /// [`xlog_cuda::CudaKernelProvider::recorded_op_stream`] for the
@@ -465,6 +469,7 @@ impl Executor {
             wcoj_error_decline_count: 0,
             wcoj_groupby_fusion_dispatch_count: 0,
             free_join_dispatch_count: 0,
+            factorized_delta_dispatch_count: 0,
             wcoj_dispatch_stream: OnceLock::new(),
             #[cfg(feature = "wcoj-phase-timing")]
             last_wcoj_phase_timing: std::sync::Mutex::new(None),

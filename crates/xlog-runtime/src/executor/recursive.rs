@@ -592,10 +592,19 @@ impl Executor {
         let mut reached_fixpoint = false;
         let max_iterations = self.config.max_iterations as usize;
         let mut iteration_count = 0usize;
+        // D3 — per-fixpoint dispatch context for the factorized delta
+        // (domain bounds + normalized EDB statics are cached across
+        // iterations).
+        let mut fd_ctx = super::wcoj_dispatch::FactorizedDeltaCtx::default();
         for _iteration in 0..max_iterations {
             iteration_count += 1;
             // Compute delta_new_raw per head by evaluating each rule once per recursive Scan occurrence.
             let mut delta_new_raw_by_head: HashMap<String, CudaBuffer> = HashMap::new();
+            // D3 — factorized novel sets per head: already diffed
+            // against the stable relation and full-row deduped at
+            // dispatch time. Kept separate from the raw accumulator so
+            // all-factorized heads can skip the legacy diff entirely.
+            let mut delta_novel_by_head: HashMap<String, CudaBuffer> = HashMap::new();
 
             for rule in rules {
                 let mut scans = Vec::new();
@@ -637,6 +646,7 @@ impl Executor {
                 }
 
                 let mut rule_delta_raw: Option<CudaBuffer> = None;
+                let mut rule_delta_novel: Option<CudaBuffer> = None;
                 for (rel_id, occ, pred_name) in variants {
                     let delta_rel_id = delta_tracker.delta_rel_id(&pred_name)?;
 
@@ -649,6 +659,25 @@ impl Executor {
                                 ))
                             },
                         )?;
+
+                    // D3 — try the factorized delta pipeline first: a
+                    // qualifying ChainJoin variant returns the novel
+                    // set directly (already diffed against the head's
+                    // stable relation and deduped). Declines are
+                    // silent and fall through to the legacy path.
+                    if let Some(novel) = self.try_dispatch_factorized_delta(
+                        &variant_node,
+                        delta_rel_id,
+                        &rule.head,
+                        &recursive_pred_lookup,
+                        &mut fd_ctx,
+                    )? {
+                        rule_delta_novel = Some(match rule_delta_novel {
+                            Some(acc) => self.provider.union_gpu(&acc, &novel)?,
+                            None => novel,
+                        });
+                        continue;
+                    }
 
                     // v0.6.5 slice 4: try WCOJ on the rewritten variant
                     // body before falling back to the binary-join walker.
@@ -679,6 +708,17 @@ impl Executor {
                     });
                 }
 
+                // D3 — a rule with BOTH factorized and legacy variant
+                // outputs folds its novel set into the raw accumulator
+                // (the legacy diff is a no-op on novel rows, so this is
+                // sound); an all-factorized rule keeps its novel set on
+                // the diff-free track.
+                if rule_delta_raw.is_some() {
+                    if let Some(novel) = rule_delta_novel.take() {
+                        let raw = rule_delta_raw.as_ref().expect("checked above");
+                        rule_delta_raw = Some(self.provider.union_gpu(raw, &novel)?);
+                    }
+                }
                 if let Some(rule_out) = rule_delta_raw {
                     if let Some(acc) = delta_new_raw_by_head.get_mut(&rule.head) {
                         let union_input = acc.num_rows() + rule_out.num_rows();
@@ -700,6 +740,13 @@ impl Executor {
                         delta_new_raw_by_head.insert(rule.head.clone(), rule_out);
                     }
                 }
+                if let Some(rule_novel) = rule_delta_novel {
+                    if let Some(acc) = delta_novel_by_head.get_mut(&rule.head) {
+                        *acc = self.provider.union_gpu(acc, &rule_novel)?;
+                    } else {
+                        delta_novel_by_head.insert(rule.head.clone(), rule_novel);
+                    }
+                }
             }
 
             // Finalize delta_new per head: delta_new = dedup(delta_raw - full).
@@ -718,7 +765,22 @@ impl Executor {
                 let pre_phase4_full_rows = self.buffer_row_count(full)? as u64;
 
                 let delta_raw = delta_new_raw_by_head.remove(pred);
-                let delta_new = if let Some(delta_raw) = delta_raw {
+                let delta_novel = delta_novel_by_head.remove(pred);
+                // D3 — when a head received both raw and factorized
+                // contributions (different rules), fold the novel set
+                // into the raw side before the legacy diff (sound: the
+                // diff is a no-op on novel rows). An all-factorized
+                // head skips the diff entirely — its novel set is
+                // already diffed and deduped by construction.
+                let (delta_raw, delta_novel) = match (delta_raw, delta_novel) {
+                    (Some(raw), Some(novel)) => {
+                        (Some(self.provider.union_gpu(&raw, &novel)?), None)
+                    }
+                    other => other,
+                };
+                let delta_new = if let Some(novel) = delta_novel {
+                    novel
+                } else if let Some(delta_raw) = delta_raw {
                     if self.buffer_row_count(&delta_raw)? == 0 {
                         self.create_empty_buffer(full.schema().clone())?
                     } else {

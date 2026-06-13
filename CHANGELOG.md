@@ -4,6 +4,26 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- *(runtime)* **D3 — factorized recursive deltas.** Transitive-closure-shaped
+  recursive rules (`q(X,Z) :- q(X,Y), edge(Y,Z)` and its left-linear /
+  non-linear-self-join / swapped-head variants) now route their semi-naive
+  delta step through a factorized novel-set pipeline that evaluates
+  `novel[x] = (∪ edge[y]) \ R[x]` over a dense-domain characteristic bitvector
+  instead of materializing the witness-multiplied flat join and diffing it.
+  Measured on RunPod RTX A4000 through the production executor: **41.46× peak
+  memory reduction at 0.092× wall-clock** on a dense block-cycle TC
+  (1,048,576 result rows), with deterministic row-set parity. Gated to the
+  dense-domain regime (`XLOG_FACTORIZED_DELTA_MAX_DOMAIN`, default 2¹⁴, hard
+  bound 2¹⁶) with a per-iteration work floor that bails to the legacy path on
+  sparse/long-chain fixpoints (measured ≤1.161× there, no regression). Kill
+  switch `XLOG_DISABLE_FACTORIZED_DELTA=1`; observability via
+  `Executor::factorized_delta_dispatch_count()`. u32/Symbol arity-2 only;
+  other widths, shapes, and over-cap domains decline silently to the existing
+  hash-join → diff path. Spike (S3) and production-dispatch (S4) gate evidence
+  under `docs/evidence/2026-06-1{2,4}-s{3,4}-factorized-delta*/`.
+
 ### Fixed
 
 - *(cuda)* Fused group-by-root entries now layout-normalize their inputs

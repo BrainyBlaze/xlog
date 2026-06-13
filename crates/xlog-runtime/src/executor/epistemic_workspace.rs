@@ -2346,6 +2346,11 @@ pub struct EpistemicGpuRuntimeCounters {
     /// binary fallback by contract), so this counter never gates
     /// certification.
     pub free_join_dispatch_count: u64,
+    /// D3 — successful factorized recursive-delta dispatches installed
+    /// by the executor. Observability only, same contract as the Free
+    /// Join counter: declines execute the legacy semi-naive path, so
+    /// this counter never gates certification.
+    pub factorized_delta_dispatch_count: u64,
     /// Provider-level HG triangle dispatch counter.
     pub provider_wcoj_triangle_hg_dispatch_count: u64,
     /// WCOJ layout-sort invocations observed by the provider.
@@ -2435,6 +2440,11 @@ impl EpistemicGpuRuntimeCounters {
                 self.wcoj_clique8_dispatch_count,
                 before.wcoj_clique8_dispatch_count,
             )?,
+            factorized_delta_dispatch_count: Self::checked_counter_delta(
+                "factorized_delta_dispatch_count",
+                self.factorized_delta_dispatch_count,
+                before.factorized_delta_dispatch_count,
+            )?,
             free_join_dispatch_count: Self::checked_counter_delta(
                 "free_join_dispatch_count",
                 self.free_join_dispatch_count,
@@ -2505,6 +2515,9 @@ impl EpistemicGpuRuntimeCounters {
             free_join_dispatch_count: self
                 .free_join_dispatch_count
                 .saturating_sub(before.free_join_dispatch_count),
+            factorized_delta_dispatch_count: self
+                .factorized_delta_dispatch_count
+                .saturating_sub(before.factorized_delta_dispatch_count),
             provider_wcoj_triangle_hg_dispatch_count: self
                 .provider_wcoj_triangle_hg_dispatch_count
                 .saturating_sub(before.provider_wcoj_triangle_hg_dispatch_count),
@@ -3505,6 +3518,7 @@ impl Executor {
             wcoj_clique7_dispatch_count: self.wcoj_clique7_dispatch_count(),
             wcoj_clique8_dispatch_count: self.wcoj_clique8_dispatch_count(),
             free_join_dispatch_count: self.free_join_dispatch_count(),
+            factorized_delta_dispatch_count: self.factorized_delta_dispatch_count(),
             provider_wcoj_triangle_hg_dispatch_count: self
                 .provider
                 .wcoj_triangle_hg_dispatch_count(),
