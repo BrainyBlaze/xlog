@@ -27,12 +27,12 @@ delta coalescing, relation-change callbacks, typed exact induction,
 profile-gated chain shared-memory scoring, runtime CSE, adaptive
 re-optimization, persistent hash-index reuse, and behavior-probe-backed
 consumer certification. The v0.9.0 release-candidate branch now integrates the
-predecessor BFO-derived diagnostic packs: Project 1/v0.8.7 generated-rule and
-biomedical graph diagnostics, v0.8.8 living-world provenance refinements, and
-the Universal Case Reasoner diagnostic pack with joint `nn/4` plus symbolic
+predecessor external diagnostic packs: initial v0.8.7 generated-rule and
+biomedical graph diagnostics, v0.8.8 external world-model provenance refinements, and
+an external diagnostic pack with joint `nn/4` plus symbolic
 rule-weight training, differentiable proof traces, learned-rule inventories,
 CUDA host-transfer audits, module-boundary diagnostics, grouped transfer
-metrics, and the BFO UCR validation package.
+metrics, and an external diagnostic validation package.
 
 Branch checkpoint (May 31, 2026): the MC resident engine now includes a bounded
 sparse/WCOJ production slice for generic positive joins. `evaluate_gpu_device*`
@@ -225,7 +225,7 @@ solving), and v0.10.0 is the Multi-GPU / Out-of-Core train.
 - [x] Provenance extraction from positive Datalog.
 - [x] PIR graph construction.
 - [x] Tseitin CNF with stable variable mapping.
-- [x] GPU D4 integration.
+- [x] GPU decision-DNNF compiler integration.
 - [x] GPU CDCL equivalence verifier.
 - [x] Decision-DNNF parsing retained for tests and fixtures.
 - [x] XGCF construction.
@@ -263,7 +263,7 @@ solving), and v0.10.0 is the Multi-GPU / Out-of-Core train.
 - [x] `circuit.cu`: XGCF forward and backward passes.
 - [x] `cache.cu`: GPU circuit cache.
 - [x] `cnf.cu`: GPU PIR-to-CNF encoding.
-- [x] `d4.cu`: GPU D4 compilation.
+- [x] `d4.cu`: GPU decision-DNNF compilation.
 - [x] `sat.cu`: GPU CDCL SAT solver and verifier helpers.
 - [x] `mc_sample.cu`: Bernoulli sampling.
 - [x] `weights.cu`: GPU weight and evidence builders.
@@ -289,10 +289,10 @@ solving), and v0.10.0 is the Multi-GPU / Out-of-Core train.
 - [x] Device-resident CNF metadata.
 - [x] GPU PIR-to-CNF encoder through `encode_cnf_gpu` with device-resident CSR emission and deterministic variable numbering.
 - [x] GPU circuit-to-CNF encoding.
-- [x] GPU D4 core.
-- [x] GPU D4 compile and verify flow.
+- [x] GPU decision-DNNF compiler core.
+- [x] GPU decision-DNNF compile and verify flow.
 - [x] Device-resident circuit cache.
-- [x] CPU D4 invocation replaced by GPU-native path.
+- [x] CPU decision-DNNF compiler invocation replaced by GPU-native path.
 - [x] GPU smoothing seeds with root support.
 - [x] CUDA certification for SAT/CDCL and device counts.
 
@@ -651,8 +651,8 @@ relocated to the release where the work actually belongs:
   * Binary hash-join count → prefix-scan → materialize prototype
     + count-prefix-materialize kernels → **v0.6.0 Recorded Launch
     Paths** (Inner CSM + indexed Inner CSM landed at `510dc33a` /
-    `8cc0882c`; sub-slice 3 LeftOuter CSM captured at
-    `.recovery/sub-slice-3-edits.md`).
+    `8cc0882c`; deferred LeftOuter CSM captured at
+    `a branch-local LeftOuter CSM recovery note`).
   * Shared-memory optimization for small relations + warp-level
     primitives → **v0.6.2 xlog-cuda** (paired with WCOJ kernels).
   * Mixed binary/recursive/WCOJ determinism + Same Generation /
@@ -778,8 +778,7 @@ execution.
       `compare_columns_mask_recorded` →
       `compact_buffer_by_device_mask_counted_recorded` end-to-end.
 - [x] Migrate the fused `compare+scan+compact` filter path
-      (`u32`, `f64`) to the recorded discipline. (slice #3,
-      `filter_fused_scan_recorded`)
+      (`u32`, `f64`) to the recorded discipline.
 - [x] **Decision: defer host-mask compact recorded migration.**
       `compact_buffer_by_mask` stays on its legacy entry; the
       recorded `compact_buffer_by_device_mask_counted_recorded`
@@ -797,17 +796,11 @@ execution.
       is correct and migration would add complexity for no
       observable gain.
 - [x] Migrate sort operator surface to recorded launches against
-      `launch_stream`. (slice #5, `sort_recorded` — narrow to
-      U32 / Symbol keys; multi-type recorded sort deferred.)
+      `launch_stream`.
 - [x] Migrate dedup (full-row) operator surface to recorded launches
-      against `launch_stream`. (slice #5, `dedup_full_row_recorded`
-      — narrow to U32 / Symbol columns; key-based dedup,
-      `diff_full_row`, and union deferred.)
+      against `launch_stream`.
 - [x] Migrate GroupBy operator surface to recorded launches against
-      `launch_stream`. (slice #6, `groupby_multi_agg_recorded` /
-      `groupby_agg_recorded` — narrow to U32 / Symbol keys + Count /
-      Sum / Min / Max aggs; LogSumExp and >4 key-column GroupBy
-      deferred.)
+      `launch_stream`.
 - [x] Migrate hash-join operator surfaces to recorded launches
       against `launch_stream`. (slices #7A / #7B / #7C / #7D —
       `hash_join_v2_recorded` covers Inner / Semi / Anti /
@@ -818,8 +811,7 @@ execution.
       prototype now has its prerequisite operator coverage.)
 - [x] Wire `filter_recorded` / `filter_columns_recorded` into a
       runtime / provider opt-in selector so real callers can route
-      filter operations through the recorded path. (slice #2,
-      `XLOG_USE_RECORDED_FILTERS` env gate.)
+      filter operations through the recorded path.
 - [x] Make binary hash-join materialization deterministic
       through count, prefix-scan, and materialize phases.
       Inner CSM (`510dc33a`), indexed Inner CSM (`8cc0882c`),
@@ -1258,10 +1250,10 @@ stream-safety contracts.
 - [x] Lower eligible plans to a dedicated `MultiWayJoin` /
       `WcojJoin` RIR node. v0.6.2 executor wiring pattern-matches the
       current lowered triangle RIR directly; a first-class RIR node is
-      deferred to this release. **Done in the WCOJ expansion pack
-      originally tracked as v0.6.5 slice 1 — `RirNode::MultiWayJoin`
-      with `inputs`/`slot_vars`/`output_columns`/`fallback`; promoted post-
-      optimizer in `xlog-logic::promote::promote_multiway`.**
+      deferred to this release. **Done in the WCOJ expansion pack:
+      `RirNode::MultiWayJoin` with `inputs`/`slot_vars`/`output_columns`/
+      `fallback`, promoted post-optimizer in
+      `xlog-logic::promote::promote_multiway`.**
 - [x] Add variable-ordering cost model for WCOJ. v0.6.2 ships only
       deterministic appearance-order planning plus a trait boundary for
       future cost models.
@@ -1270,16 +1262,14 @@ stream-safety contracts.
 ### xlog-runtime
 
 - [x] Integrate WCOJ into semi-naive recursive evaluation.
-      **Done in the WCOJ expansion pack originally tracked as v0.6.5
-      slice 4 — `Executor::execute_wcoj_or_fallback_node`
+      **Done in the WCOJ expansion pack landed in the WCOJ expansion pack — `Executor::execute_wcoj_or_fallback_node`
       hooks both the seeding pass and per-variant evaluation in
       `execute_recursive_scc`; promoter gates per-rule on in-SCC
       Scan count.**
 - [x] Preserve deterministic mixed execution across WCOJ and
       binary-join rules inside recursive SCCs. v0.6.2 preserves
       deterministic fallback for unsupported recursive shapes.
-      **Done in the WCOJ expansion pack originally tracked as v0.6.5
-      slice 4 — `MultiWayJoin.fallback` identity
+      **Done in the WCOJ expansion pack landed in the WCOJ expansion pack — `MultiWayJoin.fallback` identity
       invariant + body-keyed `try_dispatch_wcoj_*_on_body`
       preserve binary-join behavior bit-identically when the
       cost model declines or the shape doesn't match.**
@@ -1289,8 +1279,7 @@ stream-safety contracts.
 
 - [x] Add sorted relation accessors beyond the triangle layout helper.
 - [x] Add deterministic WCOJ kernels for 4-way conjunctive joins.
-      **Done in the WCOJ expansion pack originally tracked as v0.6.5
-      slice 2 — `wcoj_4cycle_count` / `wcoj_4cycle_materialize`
+      **Done in the WCOJ expansion pack landed in the WCOJ expansion pack — `wcoj_4cycle_count` / `wcoj_4cycle_materialize`
       kernels (u32 + u64 + Symbol parity); skew classifier with
       max-reduction over the four join positions; force gate +
       adaptive opt-in.**
@@ -1346,29 +1335,29 @@ folded into v0.7.0 closure (NOT deferred):
     `SkewClassifier` to `Cardinality`.
   * Multi-recursive WCOJ (≥ 2 in-SCC body Scans).
 
-**Total open for v0.7.0 tag: 0 items.** W7.1 is DONE: the user
+**Total open for v0.7.0 tag: 0 items.** release-tagging gate is DONE: the user
 authorized "push and tag"; `main` is pushed to `origin/main` through
 `94a8e5f8`, and annotated tag `v0.7.0` is pushed with peeled target
 `0537348f`.
 
-**Closure board:** [`docs/v065-closure-board.md`](docs/v065-closure-board.md)
-— authoritative tracker. Process rules, wave grouping, and
+**Closure board:** the historical closure board is the authoritative tracker.
+Process rules, wave grouping, and
 per-item acceptance gates live there. All v0.7.0 board rows are DONE.
 
 **Historical slices originally shipped against this section before
 the v0.7.0 retarget**:
 
-  * Slice 1: `MultiWayJoin` RIR + promoter (item #1).
-  * Slice 2: 4-cycle WCOJ kernels + adaptive opt-in (item #8).
-  * Slice 3: `WcojCostModel` + `SkewScoreSource` seam.
-  * Slice 4: Recursive-arm WCOJ dispatch (items #4, #5).
-  * Slice 5: `CardinalityAwareCostModel` opt-in.
+    * MultiWayJoin RIR plus promoter.
+    * 4-cycle WCOJ kernels plus adaptive opt-in.
+    * WCOJ cost-model seam.
+    * Recursive-arm WCOJ dispatch.
+    * Cardinality-aware cost-model opt-in.
 
 ## v0.8.0 - external consumer ML/Python Productization
 
 v0.8.0 is an external-consumer-first release train. Its acceptance target is not
 "more language surface"; it is whether external consumer can execute the queued
-M37-A+B path with production-grade xlog support: stable pyxlog
+external-consumer bridge-training path with production-grade xlog support: stable pyxlog
 contracts, observable GPU memory / host-transfer behavior, incremental
 persistent sessions, native exact-induction consumer integration, and
 neural-symbolic bridge training hooks.
@@ -1380,7 +1369,7 @@ release-certification consumer depends on them.
 ### External Consumer Release Gates
 
 - [x] Add a canonical external consumer certification pack in xlog that replays
-      the relevant Stage-4 and M37-A+B surfaces without requiring a full
+      the relevant Stage-4 and external-consumer bridge-training surfaces without requiring a full
       external consumer pilot by default. (`docs/evidence/2026-05-18-v080-cert/`)
 - [x] Gate v0.8.0 on pyxlog public-surface preservation for external consumer:
       `LogicProgram.compile`, `program.session`, `session.put_relation`,
@@ -1438,11 +1427,11 @@ Deferred completion scope moved to v0.8.6:
       invalidation model.
 - [x] Add top-k deterministic neural mode with fixed tie-breaking for
       seed-pinned external consumer training and replay.
-- [x] Add Belnap-aware dual-channel loss helpers for external consumer M37-A+B:
+- [x] Add Belnap-aware dual-channel loss helpers for external consumer external-consumer bridge training:
       pro reward, contra penalty, quarantine penalty, and CFR-oriented
       diagnostics. These are Python/ML helpers; Stage-4 structural
       kernels remain agnostic to Belnap pro/contra semantics.
-- [x] Add semantic loss functions required by M37-A+B, then add MSE,
+- [x] Add semantic loss functions required by external-consumer bridge training, then add MSE,
       semantic, and infoloss variants only where a named consumer uses
       them.
 - [x] Quantify circuit-cache behavior for repeated
@@ -1482,12 +1471,12 @@ Deferred completion scope moved to v0.8.6:
 
 Deferred completion scope moved to v0.8.6:
 
-- Common subexpression elimination when external consumer M37-A+B, Mistaber, or
+- Common subexpression elimination when external consumer external-consumer bridge training, external workload, or
   certification profiles show duplicated subplans on the hot path.
 - Adaptive query re-optimization during execution when runtime telemetry
   shows stable mis-planning on consumer fixtures.
 - Persistent hash index manager with background building after external consumer,
-  Mistaber, or pyxlog-session profiles identify index rebuild cost as a
+  external workload, or pyxlog-session profiles identify index rebuild cost as a
   release blocker.
 
 ### Deferred Product Backlog
@@ -1515,7 +1504,7 @@ WCOJ, and CLI paths.
 
 - [x] Refresh `docs/language-reference.md` to the v0.8.5 language contract,
       including unsupported forms and GPU-native execution guarantees.
-- [x] Add `docs/architecture/language-v085.md` with parser, term, probability,
+- [x] Add `the language architecture record` with parser, term, probability,
       CLI, and v0.9.0 handoff contracts.
       Evidence: `docs/evidence/2026-05-18-v085-docref/README.md`.
 
@@ -1580,7 +1569,7 @@ v0.8.6 closes the seven v0.8.0 deferred completion items as a production
 runtime/optimizer hardening pack. Acceptance requires fully GPU-native data
 paths for accepted workloads, zero data-plane host transfers beyond explicit
 control-plane/final-result exceptions, profile-backed optimizer triggers, and
-consumer evidence for external consumer, Mistaber `.xlog` workloads, v0.9.0
+consumer evidence for external consumer, external workload `.xlog` workloads, v0.9.0
 epistemic/solver prerequisites, and pyxlog session users.
 
 Hard implementation rule: v0.8.6 must extend and reuse the existing xlog
@@ -1616,7 +1605,7 @@ engines, or parallel helper paths that bypass production dispatch are blockers.
 ### Profile-Gated Optimizer Completion
 
 - [x] Add GPU-native common subexpression elimination for duplicated
-      subplans in external consumer, Mistaber, or certification workloads, including
+      subplans in external consumer, external workload, or certification workloads, including
       semantic equivalence checks and no extra data-plane host transfers.
       Evidence: `docs/evidence/2026-05-19-v086-cse/`.
 - [x] Add adaptive query re-optimization during execution when runtime
@@ -1635,7 +1624,7 @@ engines, or parallel helper paths that bypass production dispatch are blockers.
 ### Consumer Certification
 
 - [x] Add v0.8.6 runtime consumer certification examples and validator for
-      external consumer, neutral Mistaber-derived `.xlog` workloads, v0.9.0 substrate
+      external consumer, neutral external workload-derived `.xlog` workloads, v0.9.0 substrate
       primitives, and public pyxlog session compatibility. The validator runs
       the new examples through `xlog-cli run/explain`, invokes the existing
       v0.8.0 and v0.8.5 validators, records raw timings/transfer evidence, and
@@ -1645,15 +1634,15 @@ engines, or parallel helper paths that bypass production dispatch are blockers.
       index session reuse has a passing behavior probe.
       Evidence: `docs/evidence/2026-05-19-v086-consumers/`.
 
-## v0.8.7 - Living-World Diagnostics and Provenance Pack
+## v0.8.7 - External World-Model Diagnostics and Provenance Pack
 
-Status: integrated into the v0.9.0 release candidate through the local
-`integration/v090-v089-union` merge commit `8a7dbd3f`; no standalone v0.8.7
-tag or publication is claimed here. Architecture source of truth:
-`docs/architecture/living-world-diagnostics-v087.md`.
+Status: integrated into the v0.9.0 release candidate through local integration
+merge commit `8a7dbd3f`; no standalone v0.8.7 tag or publication is claimed
+here. Architecture source of truth: the external world-model diagnostics
+architecture record.
 
-v0.8.7 closes the initial living-world and Project 1 auditability gaps without
-changing the production data path. New surfaces report rule metadata,
+v0.8.7 closes external world-model and initial diagnostic auditability gaps
+without changing the production data path. New surfaces report rule metadata,
 generated-rule row decisions, proof frontiers, streamed graph provenance,
 relation-delta planner telemetry, validation staging events, relation evidence,
 and neural lineage/hot-loop state; they do not force host row materialization
@@ -1714,8 +1703,8 @@ unless the caller already selected a host-readable API.
 
 ### Documentation And Validation
 
-- [x] Document the full v0.8.7 diagnostics architecture in
-      `docs/architecture/living-world-diagnostics-v087.md`.
+- [x] Document the full v0.8.7 diagnostics architecture in the external
+      world-model diagnostics architecture record.
 - [x] Update the Python bindings, CLI reference, GPU execution, and bounded
       exact-induction architecture docs for the new public surfaces.
 - [x] Add source-level coverage for the v0.8.7 Python diagnostics API surface,
@@ -1723,23 +1712,23 @@ unless the caller already selected a host-readable API.
       biomedical graph streaming, relation-delta planner telemetry, and
       induction provenance.
 
-## v0.8.8 - Living-World Diagnostics Provenance Refinement
+## v0.8.8 - External World-Model Diagnostics Provenance Refinement
 
 Status: integrated into the v0.9.0 release candidate through the local
-`integration/v090-v089-union` merge commit `8a7dbd3f`; no standalone v0.8.8
+local integration merge commit `8a7dbd3f`; no standalone v0.8.8
 tag or publication is claimed here. Architecture source of truth:
-`docs/architecture/lwm-diagnostics-provenance.md`.
+`the external world-model provenance architecture record`.
 
-v0.8.8 hardens the living-world diagnostics pack with stable induced-rule
+v0.8.8 hardens the external world-model diagnostics pack with stable induced-rule
 aliases, explicit process-boundary and temporal-order provenance, source-level
-coverage for the v0.8.8 pyxlog surface, and BFO reproducer-oriented
+coverage for the v0.8.8 pyxlog surface, and external diagnostic reproducer-oriented
 documentation.
 
 ### Native Induction Provenance
 
 - [x] Add native `InducedRuleProvenance`, `InducedRuleRegistry`, support-row,
-      alternative, and source-kind aliases for living-world induced-rule
-      consumers while preserving the Project 1 induction provenance registry.
+      alternative, and source-kind aliases for external world-model induced-rule
+      consumers while preserving the initial diagnostic induction provenance registry.
 - [x] Preserve search-space size, predicate inventory, support rows, rejected
       alternatives, falsification counts, stable rule ids, and generation trace
       hashes without requiring Python-side law artifacts.
@@ -1760,20 +1749,20 @@ documentation.
 
 - [x] Add `python/tests/test_v088_lwm_source.py` for pyxlog stubs, docs, and
       Rust/Python source-surface coverage.
-- [x] Add `docs/architecture/lwm-diagnostics-provenance.md` as the issue-by-
+- [x] Add `the external world-model provenance architecture record` as the issue-by-
       issue v0.8.8 architecture note.
 
-## v0.8.9 - Universal Case Reasoner Diagnostic Pack
+## v0.8.9 - External Diagnostic Pack
 
 Status: integrated into the v0.9.0 release candidate through the local
-`integration/v090-v089-union` merge commit `8a7dbd3f`, sourced from
-`feat/v089-ucr-xlog-issue-fixes`; no standalone v0.8.9 tag is claimed here.
-Architecture summary: `docs/architecture/ucr-xlog-diagnostics.md`.
-Issue ledger: `examples/BFO/universal_case_reasoner/xlog_issue_ledger.json`.
+local integration merge commit `8a7dbd3f`, sourced from
+the external diagnostic issue-fix branch; no standalone v0.8.9 tag is claimed here.
+Architecture summary: `the external diagnostic architecture summary`.
+Issue ledger: `examples/external diagnostic/universal_case_reasoner/xlog_issue_ledger.json`.
 
-v0.8.9 promotes the reusable XLOG gaps exposed by the BFO demos into core XLOG
-and pyxlog surfaces. Acceptance requires each Project 1, living-world, and
-`UCR-XLOG-*` ledger item to have a reusable implementation, a minimal
+v0.8.9 promotes the reusable XLOG gaps exposed by the external diagnostic demos into core XLOG
+and pyxlog surfaces. Acceptance requires each initial diagnostic, external world-model, and
+`external diagnostic-XLOG-*` ledger item to have a reusable implementation, a minimal
 reproducer, and a focused regression test outside the project-specific
 validator.
 
@@ -1814,11 +1803,11 @@ validator.
       failures.
       Evidence: `python/tests/test_transfer_metric_diagnostics.py`.
 
-### BFO UCR Example And Packaging
+### External Diagnostic Example And Packaging
 
-- [x] Add `examples/BFO/universal_case_reasoner/` with goals, requirements,
-      validation plan, BFO programs, evidence files, minimal reproducers,
-      project-specific tests, validator tooling, and the resolved UCR issue
+- [x] Add `examples/external diagnostic/universal_case_reasoner/` with goals, requirements,
+      validation plan, Datalog programs, evidence files, minimal reproducers,
+      project-specific tests, validator tooling, and the resolved external diagnostic issue
       ledger.
 - [x] Harden `scripts/stage_pyxlog_kernels.sh` so pyxlog release kernel staging
       builds before resolving the release `OUT_DIR`.
@@ -1939,43 +1928,43 @@ engines, typed fail-closed, real runtime/device pilots). Status summary:
 
 ### xlog-logic / xlog-runtime / xlog-cuda (epistemic executor)
 
-- [x] EGB-02 tuple-key and bound-value modal membership: ground, single/multi
+- [x] tuple-key and bound-value modal membership: ground, single/multi
       bound variable, repeated-variable equality, anonymous wildcard, and
       arity-0 keys on the GPU device path; fixed a global-gate soundness bug
       where ground/anonymous/nullary modal literals were left ungated. Evidence:
       `XLOG_USE_DEVICE_RUNTIME=1 cargo test -p xlog-runtime --test test_epistemic_gpu_workspace --release --features epistemic-logic-tests` (`egb02_*`).
-- [x] EGB-01 EIR-derived candidate-world enumeration: candidate space derived
+- [x] EIR-derived candidate-world enumeration: candidate space derived
       from the program (full device lattice), with generated/propagated/tested/
       accepted/rejected/reason trace counts, deterministic results, empty
       accepted-world-view distinguished from failure, and resource fail-closed
       before partial execution. Evidence: `egb01_*` device pilots.
-- [x] EGB-07 FAEEL founded self-support: per-tuple-key foundedness; unfounded
+- [x] FAEEL founded self-support: per-tuple-key foundedness; unfounded
       `p() :- possible p().` executes to the defined empty founded extension,
       independently founded support is admitted, and G91 self-support stays a
       separate compatibility mode. Evidence:
       `cargo test -p xlog-logic --test test_epistemic_faeel_foundedness`,
       `--test test_epistemic_g91`, and examples `31`/`32`.
-- [x] EGB-04 epistemic integrity constraints (core): `:- know/possible/not possible g().`
+- [x] epistemic integrity constraints (core): `:- know/possible/not possible g().`
       prune candidate world views via a GPU constraint kernel (rejection reason
       6), constraints dropped from the reduced ordinary program (no RIR rewrite).
       Evidence: `egb04_*` device pilots.
-- [x] EGB-04.K2 constraint-specific rejection reasons: a parallel
+- [x] constraint-specific rejection reasons: a parallel
       `constraint_violation_index` device buffer records which constraint fired
       per candidate (reason code 6 unchanged), surfaced as
       `result.semantic_trace.constraint_violation_indices`. Evidence:
       `egb04_constraint_specific_reason_identifies_firing_constraint` (asserts the
       specific firing index).
-- [x] EGB-05 safe split dependency and coupling: split/coalesce/reject decisions
+- [x] safe split dependency and coupling: split/coalesce/reject decisions
       explained via typed `EpistemicComponentMergeReason`; paired split-vs-unsplit
       equivalence; recomposition covers each source rule exactly once; shared
       source facts remain extensional inputs and no longer force independent
       bound-variable output heads into one single-plan multi-output execution.
       Evidence: `cargo test -p xlog-logic --test test_epistemic_split`.
-- [x] EGB-06 joint multi-epistemic-predicate solving: rules coupling more than
+- [x] joint multi-epistemic-predicate solving: rules coupling more than
       one distinct-name epistemic predicate (any operator mix incl. negated
       modal) solved jointly over the candidate world view, matching unsplit.
       Evidence: `egb06_*` device pilots and the integration coupling test.
-- [x] EGB-03/C2 nested modal operators: finite two-operator chains with leading,
+- [x] finite nested modal operators: finite two-operator chains with leading,
       interior, or atom-adjacent negation normalize by parity/duality into a
       single-level epistemic literal and execute through `xlog run`; no
       parser-precedence accident and no world-of-worlds shortcut. Evidence:
@@ -2008,7 +1997,7 @@ fallback locks.
 - [x] Variable-keyed, diagonal, shared-variable join, and range-restricted negated
       epistemic constraints execute on the device path; unsafe unbound negated
       variables and CPU-only world-view scans fail closed.
-- [x] Same-name multi-arity modal coupling is SOLVED in v0.9.2 (ITEM F): distinct
+- [x] Same-name multi-arity modal coupling is SOLVED in v0.9.2 : distinct
       arities are distinct relations, so the modal tuple-source resolution
       disambiguates by arity (arity-qualified store key `p/1`/`p/2`, bare-name
       fallback). Joint-solves on device to exact tuples per arity, identical
@@ -2017,8 +2006,8 @@ fallback locks.
       through production `xlog run`. Genuinely-cyclic modal coupling
       (`a:-know b. b:-know a.`, no founded order) stays typed fail-closed
       end-to-end.
-- [x] Recursive epistemic execution covers Case-A/invariant and
-      determined-head stratification, positive Case-B founded recursion, G91
+- [x] Recursive epistemic execution covers invariant-modal and
+      determined-head stratification, positive modal recursion with founded semantics, G91
       positive `possible` recursion, stratified negated-modal recursion, and
       cyclic negated-modal recursion through the `xlog-gpu` GPU-backed WFS plan.
       Fresh focused and full gates passed under the no-old-host-WFS-solver
@@ -2031,10 +2020,10 @@ fallback locks.
 
 ### Genuine follow-up (NOT goal-mandated; tracked)
 
-- [x] EGB-04.K2 constraint-specific rejection reasons — CLOSED (commit `e39bcd33`).
+- [x] constraint-specific rejection reasons — CLOSED (commit `e39bcd33`).
 - [x] Mixed per-row + global modal literals in a single rule — CLOSED in v0.9.2
-      (EGB-02B): the two gate classes compose conjunctively on the GPU path.
-- [x] Case-A recursive epistemic fixpoint execution — CLOSED in v0.9.2 (invariant
+      (mixed-literal modal membership): the two gate classes compose conjunctively on the GPU path.
+- [x] recursive epistemic fixpoint execution — CLOSED in v0.9.2 (invariant
       modal atoms reduce to gated relations, reduced ordinary recursion runs through
       the GPU recursive engine).
 - [x] Multi-epistemic-output-head cross-component joint solving — CLOSED in v0.9.2
@@ -2047,7 +2036,7 @@ fallback locks.
       stratum, and the higher stratum gates against it via the existing filter — the
       `know R ≡ R` theorem applied at the store boundary (no resolve-into-body, no
       double-gating). The determined-modal family is now complete under the exact
-      v0.9.2 contract: determined targets resolve; positive Case-B/G91 recursion,
+      v0.9.2 contract: determined targets resolve; positive modal and G91 recursion,
       FAEEL-unfounded self-support, finite nested modal chains, and WFS-defined
       negated-modal recursion execute with their defined semantics; only forms with
       no founded, G91, WFS, finite-key, or safe-variable interpretation stay
@@ -2055,14 +2044,14 @@ fallback locks.
 
 ## v0.9.2 - Epistemic Executor Semantic Completion
 
-Closes the three honest Category-B semantic gaps from v0.9.1, all validated on the
+Closes the three honest semantic gaps from v0.9.1, all validated on the
 production `xlog run` path. Status:
 `docs/plans/2026-05-31-v092-epistemic-semantic-completion-status.md`.
 
-- [x] EGB-02B mixed-literal modal membership: global modal gate + per-row bound
+- [x] mixed-literal modal membership: global modal gate + per-row bound
       tuple-key gate compose conjunctively on the GPU device path. Evidence: 8
       value-level pilots (exact tuples) + mutation proof + `examples/epistemic/14-mixed-literal-membership.xlog`.
-- [x] Case-A recursive epistemic fixpoint: recursive ordinary predicates whose modal
+- [x] recursive epistemic fixpoint: recursive ordinary predicates whose modal
       atoms range over invariant relations evaluate to fixpoint via the existing GPU
       recursive engine. Evidence: `examples/epistemic/15-recursive-epistemic-closure.xlog`
       ({(1,2),(2,3),(1,3)}) and `15-recursive-epistemic-chain.xlog` (3-hop (1,4)).
@@ -2100,16 +2089,16 @@ fail-closed:
 
 Sourced from the external consumer consolidated requirements package
 (2026-06-12, `dts-dlm docs/upstream/2026-06-12-xlog-requirements.md`;
-desk `#xlog` thread `msg-20260612-112404-c782`). The P0 engine defects
+desk `#xlog` thread `msg-20260612-112404-c782`). The highest-priority engine defects
 from that package are closed (`703a2cc2`, production-validated by the
-consumer's M50-pure campaign). The ordering below is the proposed
-priority — P2.1 gates the consumer's training endgame and P1.1 doubles
+consumer's pure-engine validation campaign). The ordering below is the proposed
+priority — mixed trainable-rule body support gates the consumer's training endgame and selective query evaluation doubles
 as a mitigation for the WSL export-stage corruption residual — but the
 final ordering is a maintainer decision.
 
 ### Neural-Symbolic Training
 
-- [ ] Mixed trainable-rule bodies (consumer P2.1): `trainable_rule` bodies
+- [ ] Mixed trainable-rule bodies (consumer training endgame): `trainable_rule` bodies
       joining `nn/k` predicates with ordinary relations and builtins.
       Required semantics: fact atoms are hard join conditions; probability
       mass comes only from nn-predicates × σ(w); gradients flow to the
@@ -2120,32 +2109,32 @@ final ordering is a maintainer decision.
 
 ### Session API and Performance
 
-- [ ] Selective query evaluation (P1.1): `evaluate(query_indices=[...])`
+- [ ] Selective query evaluation (selective evaluation): `evaluate(query_indices=[...])`
       computing only the requested closure. Also reduces the multi-query
       export clone storm implicated in the WSL defect-#2 residual.
-- [ ] Incremental evaluation across evaluates (P1.2): semi-naive
+- [ ] Incremental evaluation across evaluates (incremental evaluation): semi-naive
       maintenance across persistent-session evaluates (delta-puts in,
       delta-results out). Consumer-measured as their dominant
       step-latency cost; builds on the v0.8.6 delta-coalescing substrate.
-- [ ] Cheap session forking (P1.3): copy-on-write `session.fork()` with
+- [ ] Cheap session forking (cheap session forking): copy-on-write `session.fork()` with
       shared base relations + private deltas, making counterfactual
-      branch evaluation O(delta). Enabler for the consumer's M51
+      branch evaluation O(delta). Enabler for the consumer's branch-quantified modality
       branch-quantified modality milestone.
-- [ ] Documented determinism contract (P1.4): stated and CI-tested
+- [ ] Documented determinism contract (determinism contract): stated and CI-tested
       multiplicity guarantee for `evaluate()` outputs (ordering may stay
       unspecified). Consumer evidence: raw RecursiveSupportResult row-count
-      variance across identical inputs (their ROADMAP M37 finding).
-- [ ] In-body arithmetic ergonomics (P1.5): document supported expression
+      variance across identical inputs (their previous roadmap finding).
+- [ ] In-body arithmetic ergonomics (arithmetic ergonomics): document supported expression
       forms; support cast-then-compare in one body
       (`X is cast(count_result, i64)` followed by comparison).
 
 ### Epistemic and Typed Outputs
 
-- [ ] Multi-world epistemic evaluation (P2.2, after P1.3): `known(F)` /
+- [ ] Multi-world epistemic evaluation (multi-world epistemic evaluation after cheap session forking): `known(F)` /
       `possible(F)` quantified over session-set world branches with
       cross-world aggregate queries, instead of N full evaluations plus
       host aggregation.
-- [ ] Float-typed query outputs (P2.3): bless f32 query columns
+- [ ] Float-typed query outputs (float-typed query outputs): bless f32 query columns
       (document + test) so consumers can drop fixed-point `_i64` mirror
       rules for Belnap channel masses, slot probabilities, and rule weights.
 
@@ -2224,7 +2213,7 @@ final ordering is a maintainer decision.
 ### v0.9.0 Risks
 
 - [ ] Epistemic semantics can introduce high complexity and must remain isolated from stable Datalog execution.
-- [ ] D4 and solver integration must preserve deterministic certification paths.
+- [ ] decision-DNNF compiler and solver integration must preserve deterministic certification paths.
 
 ### v0.10.0 Risks
 

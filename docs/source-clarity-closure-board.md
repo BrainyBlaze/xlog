@@ -3,8 +3,8 @@
 Scope: Git-tracked source and documentation files only. Superpowers docs, plan files, evidence directories, generated artifacts, result/output directories, build output, and other worktrees are excluded.
 
 Scanned files: 1430
-Unresolved files: 312
-Comment/prose artifact occurrences: 2012
+Unresolved files: 311
+Comment/prose artifact occurrences: 1909
 Code/identifier artifact occurrences: 761
 
 Resolved means this board found no remaining opaque task/milestone labels or external consumer names in the eligible portions of that file.
@@ -49,7 +49,7 @@ Stable links to excluded plan/evidence artifact paths are not counted as source-
 | `LEAN-CTX.md` | 0 | 0 | true |  |  |
 | `Makefile` | 0 | 0 | true |  |  |
 | `README.md` | 0 | 0 | true |  |  |
-| `ROADMAP.md` | 103 | 0 | false | D2H(18), v085(14), G91(11), v086(10), v090(10), D4(6) |  |
+| `ROADMAP.md` | 0 | 0 | true |  |  |
 | `SECURITY.md` | 0 | 0 | true |  |  |
 | `SUPPORT.md` | 0 | 0 | true |  |  |
 | `crates/pyxlog/Cargo.toml` | 0 | 0 | true |  |  |
