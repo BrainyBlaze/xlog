@@ -3,8 +3,8 @@
 Scope: Git-tracked source and documentation files only. Superpowers docs, plan files, evidence directories, generated artifacts, result/output directories, build output, and other worktrees are excluded.
 
 Scanned files: 1430
-Unresolved files: 306
-Comment/prose artifact occurrences: 1897
+Unresolved files: 305
+Comment/prose artifact occurrences: 1896
 Code/identifier artifact occurrences: 759
 
 Resolved means this board found no remaining opaque task/milestone labels or external consumer names in the eligible portions of that file.
@@ -79,7 +79,7 @@ Technical host-transfer terminology such as `D2H`, `DTOH`, and `H2D` is allowed 
 | `crates/pyxlog/src/ilp.rs` | 0 | 0 | true |  |  |
 | `crates/pyxlog/src/ilp_exact.rs` | 0 | 0 | true |  |  |
 | `crates/pyxlog/src/ilp_gpu.rs` | 0 | 0 | true |  |  |
-| `crates/pyxlog/src/lib.rs` | 1 | 0 | false | D2H(1) |  |
+| `crates/pyxlog/src/lib.rs` | 0 | 0 | true |  |  |
 | `crates/pyxlog/src/logic.rs` | 0 | 0 | true |  |  |
 | `crates/pyxlog/src/neural.rs` | 5 | 0 | false | D1(2), D2(2), D4(1) |  |
 | `crates/pyxlog/src/neural_registry.rs` | 0 | 0 | true |  |  |
