@@ -39,7 +39,7 @@ struct Fixture {
     provider: Arc<CudaKernelProvider>,
 }
 
-fn make_fixture() -> Option<Fixture> {
+fn make_fixture_with_budget(budget_bytes: u64) -> Option<Fixture> {
     let device = Arc::new(CudaDevice::new(0).ok()?);
     let pool = Arc::new(StreamPool::with_defaults(Arc::clone(&device)));
     let async_resource: Box<dyn DeviceMemoryResource + Send + Sync> = Box::new(
@@ -50,7 +50,7 @@ fn make_fixture() -> Option<Fixture> {
         Arc::new(DiscardSink) as Arc<dyn LoggingSink>,
     ));
     let budget: Box<dyn DeviceMemoryResource + Send + Sync> =
-        Box::new(GlobalDeviceBudget::new(logging, 512 * 1024 * 1024));
+        Box::new(GlobalDeviceBudget::new(logging, budget_bytes as usize));
     let runtime = Arc::new(XlogDeviceRuntime::with_resource(
         Arc::clone(&device),
         0,
@@ -59,12 +59,16 @@ fn make_fixture() -> Option<Fixture> {
     ));
     let memory = Arc::new(GpuMemoryManager::with_runtime(
         Arc::clone(&device),
-        MemoryBudget::with_limit(512 * 1024 * 1024),
+        MemoryBudget::with_limit(budget_bytes),
         runtime,
     ));
     let provider =
         Arc::new(CudaKernelProvider::with_runtime(Arc::clone(&device), Arc::clone(&memory)).ok()?);
     Some(Fixture { memory, provider })
+}
+
+fn make_fixture() -> Option<Fixture> {
+    make_fixture_with_budget(512 * 1024 * 1024)
 }
 
 fn upload_binary_u32(memory: &Arc<GpuMemoryManager>, rows: &[(u32, u32)]) -> CudaBuffer {
@@ -492,8 +496,8 @@ const TC_SOURCE: &str = "pred edge(u32, u32).\n\
 /// One engine run on `edges`, returning (wall_ms, peak_bytes,
 /// dispatch_count, row_count). Fresh fixture each call so the peak is
 /// attributable to this run alone.
-fn engine_run(edges: &[(u32, u32)], factorized_on: bool) -> (f64, u64, u64, usize) {
-    let fix = make_fixture().expect("CUDA fixture");
+fn engine_run(edges: &[(u32, u32)], budget_bytes: u64, factorized_on: bool) -> (f64, u64, u64, usize) {
+    let fix = make_fixture_with_budget(budget_bytes).expect("CUDA fixture");
     if factorized_on {
         std::env::remove_var(KILL_SWITCH);
     } else {
@@ -510,9 +514,15 @@ fn engine_run(edges: &[(u32, u32)], factorized_on: bool) -> (f64, u64, u64, usiz
     (dt, peak, executor.factorized_delta_dispatch_count(), rows)
 }
 
-fn bench_guard(name: &str, edges: &[(u32, u32)], expect_dispatch: bool) {
+/// A/B bench: legacy (kill switch) vs factorized-default. Variants are
+/// INTERLEAVED per rep (legacy, then factorized, repeat) so any
+/// monotonic drift — thermal throttling, fragmentation — lands on both
+/// arms equally instead of mapping onto the A/B axis. Both arms share
+/// `budget_bytes`; the dense fixture needs the legacy path's full peak
+/// headroom or its OFF run OOMs before timing.
+fn bench_guard(name: &str, edges: &[(u32, u32)], budget_bytes: u64, expect_dispatch: bool) {
     let _guard = env_lock();
-    if make_fixture().is_none() {
+    if make_fixture_with_budget(budget_bytes).is_none() {
         eprintln!("skipping {name}: no CUDA device");
         return;
     }
@@ -525,18 +535,27 @@ fn bench_guard(name: &str, edges: &[(u32, u32)], expect_dispatch: bool) {
     let mut off_rows = 0usize;
     let mut on_rows = 0usize;
 
-    for _ in 0..REPS {
-        let (dt, peak, _, rows) = engine_run(edges, false);
-        off_ms.push(dt);
-        off_peak.push(peak as f64);
-        off_rows = rows;
-    }
-    for _ in 0..REPS {
-        let (dt, peak, disp, rows) = engine_run(edges, true);
-        on_ms.push(dt);
-        on_peak.push(peak as f64);
+    // One warm-up of each arm (discarded) to page in PTX / JIT and
+    // reach steady GPU clocks before timed reps.
+    let _ = engine_run(edges, budget_bytes, false);
+    let _ = engine_run(edges, budget_bytes, true);
+
+    for rep in 0..REPS {
+        let (off_dt, off_pk, _, off_r) = engine_run(edges, budget_bytes, false);
+        let (on_dt, on_pk, disp, on_r) = engine_run(edges, budget_bytes, true);
+        off_ms.push(off_dt);
+        off_peak.push(off_pk as f64);
+        on_ms.push(on_dt);
+        on_peak.push(on_pk as f64);
         on_dispatch = disp;
-        on_rows = rows;
+        off_rows = off_r;
+        on_rows = on_r;
+        eprintln!(
+            "S4 {name} rep {rep}: legacy {off_dt:.1} ms / {:.1} MiB ; \
+             factorized {on_dt:.1} ms / {:.1} MiB (dispatch={disp})",
+            off_pk as f64 / (1024.0 * 1024.0),
+            on_pk as f64 / (1024.0 * 1024.0),
+        );
     }
     std::env::remove_var(KILL_SWITCH);
 
@@ -557,6 +576,17 @@ fn bench_guard(name: &str, edges: &[(u32, u32)], expect_dispatch: bool) {
     );
     if expect_dispatch {
         assert!(on_dispatch >= 1, "{name}: factorized path must fire");
+        // The dense path must WIN (it is the whole point of D3).
+        assert!(
+            npk * 5.0 <= opk,
+            "{name}: factorized must cut peak >=5x (peak {:.1} vs {:.1} MiB)",
+            npk / (1024.0 * 1024.0),
+            opk / (1024.0 * 1024.0)
+        );
+        assert!(
+            nm <= om * 1.2,
+            "{name}: factorized must not regress wall-clock (got {nm:.1} vs {om:.1} ms)"
+        );
     } else {
         assert_eq!(on_dispatch, 0, "{name}: work floor must bail (no dispatch)");
         // No-regression bar for the sparse path the engine must NOT
@@ -569,11 +599,13 @@ fn bench_guard(name: &str, edges: &[(u32, u32)], expect_dispatch: bool) {
     }
 }
 
-/// Dense block-cycle — factorized dispatch must fire and win.
+/// Dense block-cycle — factorized dispatch must fire and win. The
+/// legacy arm peaks ~2.3 GiB (S3 evidence), so the shared budget must
+/// clear that or the OFF run OOMs before timing.
 #[test]
 #[ignore = "S4 bench guard — run on RunPod, never locally"]
 fn s4_bench_dense_block_cycle() {
-    bench_guard("dense", &block_cycle_edges(4, 256), true);
+    bench_guard("dense", &block_cycle_edges(4, 256), 10 * 1024 * 1024 * 1024, true);
 }
 
 /// Sparse long path chain (1500 nodes) — late iterations have tiny
@@ -582,5 +614,5 @@ fn s4_bench_dense_block_cycle() {
 #[ignore = "S4 bench guard — run on RunPod, never locally"]
 fn s4_bench_sparse_long_chain() {
     let edges: Vec<(u32, u32)> = (0..1500u32).map(|i| (i, i + 1)).collect();
-    bench_guard("sparse-chain", &edges, false);
+    bench_guard("sparse-chain", &edges, 512 * 1024 * 1024, false);
 }
