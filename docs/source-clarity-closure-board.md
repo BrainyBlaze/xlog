@@ -3,8 +3,8 @@
 Scope: Git-tracked source and documentation files only. Superpowers docs, plan files, evidence directories, generated artifacts, result/output directories, build output, and other worktrees are excluded.
 
 Scanned files: 1430
-Unresolved files: 264
-Comment/prose artifact occurrences: 1726
+Unresolved files: 263
+Comment/prose artifact occurrences: 1723
 Code/identifier artifact occurrences: 686
 
 Resolved means this board found no remaining opaque task/milestone labels or external consumer names in the eligible portions of that file.
@@ -30,6 +30,7 @@ Hardware cache terminology such as `L1` and `L2` is allowed when it refers to GP
 | `C7` | compiled epistemic execution-plan/EIR JSON dump |
 | `v085` | legacy v0.8.5 language milestone/examples |
 | `W2.5` | WCOJ cost-model default flip to the cardinality model |
+| `W3.1` | generic full-row WCOJ layout sort+dedup accessors |
 | `W3.2` | general-arity WCOJ clique kernel family and template-call-only source-audit contract |
 | `W6.4` | K=7/K=8 extension of the general-arity WCOJ clique template surface |
 | `W4.2` | nested-loop inner join production operator and small single-key dispatch path |
@@ -293,7 +294,7 @@ Hardware cache terminology such as `L1` and `L2` is allowed when it refers to GP
 | `crates/xlog-cuda/src/multi_gpu_memory.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-cuda/src/provider/arithmetic.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-cuda/src/provider/filter.rs` | 0 | 0 | true |  |  |
-| `crates/xlog-cuda/src/provider/fj.rs` | 3 | 0 | false | D2(1), S2(1), W3.1(1) |  |
+| `crates/xlog-cuda/src/provider/fj.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-cuda/src/provider/groupby.rs` | 10 | 0 | false | S1c(5), S1d(4), D1(1) |  |
 | `crates/xlog-cuda/src/provider/ilp.rs` | 1 | 0 | false | D2H(1) |  |
 | `crates/xlog-cuda/src/provider/ilp_exact.rs` | 7 | 0 | false | D2H(4), D2D(2), M8(1) |  |
