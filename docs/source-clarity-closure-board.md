@@ -483,7 +483,7 @@ Hardware cache terminology such as `L1` and `L2` is allowed when it refers to GP
 | `crates/xlog-logic/src/hypergraph/reference.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-logic/src/hypergraph/scc.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-logic/src/hypergraph/typed.rs` | 0 | 0 | true |  |  |
-| `crates/xlog-logic/src/hypergraph/var_order.rs` | 2 | 0 | false | W5.2(2) |  |
+| `crates/xlog-logic/src/hypergraph/var_order.rs` | 0 | 0 | true | - | Replaced benchmark-task and PR markers with descriptive planner history. |
 | `crates/xlog-logic/src/incremental_parse.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-logic/src/lib.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-logic/src/list_normalize.rs` | 0 | 0 | true |  |  |

@@ -2,19 +2,19 @@
 //!
 //! The variable order is the sequence in which a multiway evaluator
 //! binds variables. Different orders produce identical *results* but
-//! can vary widely in *cost* (intermediate sizes, work per step). PR
-//! 1 defines the trait shape and ships one trivial implementation
-//! ([`AppearanceOrder`]) so the rest of the planner has something
-//! deterministic to call. Cost-aware implementations slot in here in
-//! later PRs without breaking the trait.
+//! can vary widely in *cost* (intermediate sizes, work per step). The
+//! initial interface defines the trait shape and ships one trivial
+//! implementation ([`AppearanceOrder`]) so the rest of the planner has
+//! something deterministic to call. Cost-aware implementations slot in
+//! here without breaking the trait.
 //!
 //! ## Trait signature rationale
 //!
 //! [`VariableOrder::order`] takes the full [`HypergraphRule`] (not
 //! just a `&[Vertex]`) on purpose: future selectivity-aware
 //! implementations need to inspect hyperedge structure to weigh
-//! orderings. Taking the whole IR now means PR 1's trivial impl and
-//! PR 3's selectivity-aware impl share one signature.
+//! orderings. Taking the whole IR now means the trivial implementation
+//! and the selectivity-aware implementation share one signature.
 
 use super::ir::{HypergraphRule, VertexId};
 use xlog_core::RelId;
@@ -242,7 +242,7 @@ impl KCliqueShape {
         })
     }
 
-    /// Creates the W5.2 4-cycle shape used by the predecessor WCOJ path.
+    /// Creates the four-variable cycle shape used by the predecessor WCOJ path.
     pub fn cycle4(first_rel_id: RelId) -> Option<Self> {
         let variable_count = 4;
         valid_variable_count(variable_count)?;
@@ -289,9 +289,9 @@ pub struct FullVariableOrder {
     pub edge_permutation: Vec<usize>,
     /// HyperCube-derived per-variable share allocation.
     pub variable_share_allocation: Vec<VariableShare>,
-    /// Cost record used for dispatch-gate certification.
+    /// Cost record used for dispatch-gate validation.
     pub cost_prediction: CostPredictionRecord,
-    /// Predicted winner for the measured W5.2-style path comparison.
+    /// Predicted winner for the measured skewed multiway path comparison.
     pub predicted_winner: PredictedWinner,
     /// Helper-relation split requests for buried inner-variable skew.
     pub helper_split_specs: Vec<HelperSplitSpec>,
