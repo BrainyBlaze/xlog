@@ -833,7 +833,7 @@ Hardware cache terminology such as `L1` and `L2` is allowed when it refers to GP
 | `examples/BFO/universal_case_reasoner/validate.sh` | 0 | 0 | true |  |  |
 | `examples/BFO/universal_case_reasoner/validation_summary.json` | 0 | 17 | true |  | P0(5), v080(4), v085(4), v086(2), D2H(2); excluded generated validation/evidence artifact |
 | `examples/BFO/universal_case_reasoner/xlog_issue_ledger.json` | 0 | 14 | true |  | release-line labels(7), transfer shorthand labels(6), project acronym phrase(1) |
-| `examples/README.md` | 9 | 0 | false | v032(6), G91(2), v080(1) |  |
+| `examples/README.md` | 20 | 0 | true | release-line labels(19), external-consumer directory label(1); G91 retained as allowed XLOG terminology |  |
 | `examples/epistemic/01-eir-boundary.xlog` | 0 | 0 | true |  |  |
 | `examples/epistemic/02-g91-compatibility.xlog` | 0 | 1 | false |  | G91(1) |
 | `examples/epistemic/03-faeel-default.xlog` | 0 | 0 | true |  |  |
