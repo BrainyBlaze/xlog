@@ -3,8 +3,8 @@
 Scope: Git-tracked source and documentation files only. Superpowers docs, plan files, evidence directories, generated artifacts, result/output directories, build output, and other worktrees are excluded.
 
 Scanned files: 1430
-Unresolved files: 296
-Comment/prose artifact occurrences: 1852
+Unresolved files: 295
+Comment/prose artifact occurrences: 1845
 Code/identifier artifact occurrences: 752
 
 Resolved means this board found no remaining opaque task/milestone labels or external consumer names in the eligible portions of that file.
@@ -30,6 +30,10 @@ Hardware cache terminology such as `L2` is allowed when it refers to GPU level-2
 | `W5.4` | widened-frontier replay determinism certification |
 | `L2` | GPU level-2 cache |
 | `G01` | XGCF circuit forward kernel certification category |
+| `G02` | XGCF circuit backward kernel certification category |
+| `G02.1` | circuit backward adjoint propagation checks |
+| `G02.2` | circuit backward gradient accumulation checks |
+| `G02.3` | circuit backward numerical verification checks |
 | task/milestone labels such as `W2.5`, `G39`, `M37-A`, `S1e`, `FRS-042`, `P0.2`, `D3` | replace with the concrete feature, gate, bug, or milestone meaning recovered from plans, boards, history, or code |
 
 ## File Board
@@ -139,7 +143,7 @@ Hardware cache terminology such as `L2` is allowed when it refers to GPU level-2
 | `crates/xlog-cuda-tests/src/categories/c24_edge_matrix.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-cuda-tests/src/categories/c25_float_filter.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-cuda-tests/src/categories/g01_circuit_forward.rs` | 0 | 0 | true |  |  |
-| `crates/xlog-cuda-tests/src/categories/g02_circuit_backward.rs` | 7 | 0 | false | G02.1(2), G02.2(2), G02.3(2), G02(1) |  |
+| `crates/xlog-cuda-tests/src/categories/g02_circuit_backward.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-cuda-tests/src/categories/g03_weight_injection.rs` | 5 | 0 | false | G03.1(2), G03.2(2), G03(1) |  |
 | `crates/xlog-cuda-tests/src/categories/g04_transfer_efficiency.rs` | 7 | 0 | false | G04.1(2), G04.2(2), G04.3(2), G04(1) |  |
 | `crates/xlog-cuda-tests/src/categories/g05_circuit_cache.rs` | 5 | 0 | false | G05.1(2), G05.2(2), G05(1) |  |
