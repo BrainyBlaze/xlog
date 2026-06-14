@@ -729,7 +729,7 @@ Hardware cache terminology such as `L1` and `L2` is allowed when it refers to GP
 | `docs/architecture/lwm-diagnostics-provenance.md` | 0 | 0 | true |  |  |
 | `docs/architecture/multi-gpu-join.md` | 4 | 0 | true | release labels(2), P2P(2) | Replaced release-target labels with design/current-roadmap wording and expanded peer-to-peer copy terminology. |
 | `docs/architecture/python-bindings.md` | 34 | 4 | true | release labels(16), diagnostics doc path labels(6), external-consumer names(6), DTOH(4), P2b(1), M37-A+B(1) | D1(2), D2(2) |
-| `docs/architecture/query-optimizer.md` | 2 | 0 | false | D2H(1), v086(1) |  |
+| `docs/architecture/query-optimizer.md` | 11 | 0 | true | release labels(6), runtime evidence codes(2), version-coded fixture path labels(2), D2H(1) | Replaced version/evidence-node labels with production runtime, exact-induction evidence, substrate handoff, and device-to-host wording. |
 | `docs/architecture/recorded-launch-migration.md` | 0 | 0 | true |  |  |
 | `docs/architecture/rfc-tensorized-ilp.md` | 17 | 1 | false | D2H(9), M1(1), M2(1), M3(1), M4(1), M5(1) | D2H(1) |
 | `docs/architecture/solver-services.md` | 2 | 0 | false | D4(2) |  |

@@ -100,8 +100,8 @@ See [`adaptive-indexing.md`](adaptive-indexing.md) for the runtime manager.
 
 ### 5. Common Subexpression Elimination
 
-v0.8.6 adds runtime common subexpression elimination for safe deterministic
-RIR subplans. The control is explicit:
+Runtime common subexpression elimination is available for safe deterministic RIR
+subplans. The control is explicit:
 
 - `RuntimeConfig::with_common_subexpression_elimination(Some(true))`
   enables CSE for one runtime.
@@ -133,13 +133,13 @@ Unsafe boundaries are rejected with diagnostics rather than shared:
 - specialized `MultiWayJoin` and `ChainJoin` use
   `specialized_dispatch_boundary`.
 
-The G086_CSE evidence records output parity, generation invalidation,
-unsafe-boundary rejection, CSE hit/miss telemetry, and zero added data-plane
-D2H calls for the duplicated-subplan fixture.
+The common-subexpression-elimination evidence records output parity, generation
+invalidation, unsafe-boundary rejection, CSE hit/miss telemetry, and zero added
+data-plane device-to-host calls for the duplicated-subplan fixture.
 
 ### 6. Adaptive Runtime Re-Optimization
 
-v0.8.6 adds an adaptive adoption gate for compiler-supplied re-optimized
+Adaptive runtime re-optimization adds an adoption gate for compiler-supplied
 candidate plans. The runtime does not reparse or recompile source text inside
 `Executor`; instead, callers compile a baseline plan and a candidate plan using
 the existing compiler and `StatsSnapshot` feedback path. `Executor` then owns
@@ -166,13 +166,13 @@ snapshot and records a typed diagnostic.
 This keeps adaptive execution inside the existing runtime/provider dispatch
 surface while allowing the compiler to keep owning plan construction.
 
-### v0.9.x Substrate Handoff
+### Epistemic/Solver Substrate Handoff
 
-The v0.9.x epistemic/solver line consumes the completed v0.8.6 runtime
-primitives rather than introducing a private execution path:
+The epistemic/solver line consumes the completed production runtime primitives
+rather than introducing a private execution path:
 
 - exact induction should use the typed native `U64`, `U32`, and `Symbol`
-  dispatch recorded in the G086_EXACT_TYPES evidence;
+  dispatch recorded in the native exact-induction type-dispatch evidence;
 - chain-shaped exact scorers should use the profile-gated shared-memory scorer
   only when the topology gate fires;
 - duplicated deterministic solver subplans should use runtime CSE and its
@@ -182,12 +182,10 @@ primitives rather than introducing a private execution path:
 - repeated solver joins should use the persistent hash-index manager and its
   relation-generation/schema/device keys.
 
-The consumer certification fixture
-`examples/v086-runtime/04_v090_substrate_primitives/program.xlog` documents the
-public `.xlog` shape used for this handoff. Full asynchronous recorded
-persistent-index builds are not claimed by v0.8.6; the current manager records
-background-build request/completion telemetry on the existing provider
-build/reuse path.
+The consumer certification fixture documents the public `.xlog` shape used for
+this handoff. Full asynchronous recorded persistent-index builds are not claimed
+by the current runtime substrate; the current manager records background-build
+request/completion telemetry on the existing provider build/reuse path.
 
 ## Unified Statistics Layer
 
