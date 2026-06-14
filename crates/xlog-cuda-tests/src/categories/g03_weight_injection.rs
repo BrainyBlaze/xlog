@@ -1,4 +1,4 @@
-//! Category G03: Weight Injection Pattern Tests
+//! Weight injection pattern tests
 //!
 //! Tests the weight buffer operations and value handling for XGCF circuits.
 //! These tests verify that weights are correctly uploaded, reused, mapped to
@@ -13,15 +13,15 @@ use std::time::Instant;
 
 /// Run all tests in this category.
 pub fn run_all(ctx: &TestContext) -> CategoryResult {
-    let mut results = CategoryResult::new("g03_weight_injection");
+    let mut results = CategoryResult::new("weight_injection_patterns");
     let start = Instant::now();
 
-    // G03.1: Weight Buffer Operations (3 tests)
+    // Weight buffer operation checks.
     results.add_result(test_weight_upload_integrity(ctx));
     results.add_result(test_weight_buffer_reuse(ctx));
     results.add_result(test_weight_variable_mapping(ctx));
 
-    // G03.2: Weight Value Handling (3 tests)
+    // Weight value handling checks.
     results.add_result(test_weight_extreme_values(ctx));
     results.add_result(test_weight_uniform_distribution(ctx));
     results.add_result(test_weight_sparse_nonzero(ctx));
@@ -31,7 +31,7 @@ pub fn run_all(ctx: &TestContext) -> CategoryResult {
 }
 
 // =============================================================================
-// G03.1: Weight Buffer Operations Tests
+// Weight buffer operation tests
 // =============================================================================
 
 /// Test 1: Weight upload integrity
@@ -441,7 +441,7 @@ fn test_weight_variable_mapping(ctx: &TestContext) -> TestResult {
 }
 
 // =============================================================================
-// G03.2: Weight Value Handling Tests
+// Weight value handling tests
 // =============================================================================
 
 /// Test 4: Weight extreme values
@@ -934,7 +934,7 @@ mod tests {
     }
 
     #[test]
-    fn test_g03_weight_upload_integrity() {
+    fn test_weight_upload_integrity_wrapper() {
         if let Some(ctx) = get_test_context() {
             let result = test_weight_upload_integrity(&ctx);
             assert!(
@@ -946,7 +946,7 @@ mod tests {
     }
 
     #[test]
-    fn test_g03_weight_buffer_reuse() {
+    fn test_weight_buffer_reuse_wrapper() {
         if let Some(ctx) = get_test_context() {
             let result = test_weight_buffer_reuse(&ctx);
             assert!(
@@ -958,7 +958,7 @@ mod tests {
     }
 
     #[test]
-    fn test_g03_weight_variable_mapping() {
+    fn test_weight_variable_mapping_wrapper() {
         if let Some(ctx) = get_test_context() {
             let result = test_weight_variable_mapping(&ctx);
             assert!(
@@ -970,7 +970,7 @@ mod tests {
     }
 
     #[test]
-    fn test_g03_weight_extreme_values() {
+    fn test_weight_extreme_values_wrapper() {
         if let Some(ctx) = get_test_context() {
             let result = test_weight_extreme_values(&ctx);
             assert!(
@@ -982,7 +982,7 @@ mod tests {
     }
 
     #[test]
-    fn test_g03_weight_uniform_distribution() {
+    fn test_weight_uniform_distribution_wrapper() {
         if let Some(ctx) = get_test_context() {
             let result = test_weight_uniform_distribution(&ctx);
             assert!(
@@ -994,7 +994,7 @@ mod tests {
     }
 
     #[test]
-    fn test_g03_weight_sparse_nonzero() {
+    fn test_weight_sparse_nonzero_wrapper() {
         if let Some(ctx) = get_test_context() {
             let result = test_weight_sparse_nonzero(&ctx);
             assert!(
