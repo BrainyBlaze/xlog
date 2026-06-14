@@ -1,19 +1,20 @@
 // crates/xlog-cuda/tests/test_sort_dedup_u64.rs
-//! v0.6.2 commit-1: extend `sort_recorded` and
-//! `dedup_full_row_recorded` to accept U64 key columns.
+//! Recorded U64 sort/dedup regression coverage for `sort_recorded` and
+//! `dedup_full_row_recorded`.
 //!
 //! The legacy non-recorded `sort()` already supports U64 via a
 //! hi/lo radix-pass strategy (`gather_keys_u64_lo_u32` /
 //! `gather_keys_u64_hi_u32`). The recorded variants reject U64
-//! today; this slice ports the same strategy into the recorded
+//! today; this test locks the same strategy into the recorded
 //! path so downstream WCOJ U64 layout primitives can compose
 //! against it.
 //!
-//! Hard scope (per slice spec):
+//! Scope:
 //!   * NO new kernels — reuses the existing hi/lo gather pair
 //!     from `sort.cu`.
-//!   * NO changes to provider/wcoj.rs — that's commit 2.
-//!   * NO AST/RIR dispatch changes — that's commit 3.
+//!   * NO WCOJ layout integration — provider-level WCOJ layout tests
+//!     cover that surface.
+//!   * NO AST/RIR dispatch changes — integration tests cover dispatch.
 //!
 //! Test surface:
 //!   1. `sort_recorded` accepts a single U64 key column and
@@ -186,7 +187,7 @@ fn upload_binary_u64(memory: &Arc<GpuMemoryManager>, rows: &[(u64, u64)]) -> Cud
 }
 
 /// Resolve the logical row count: prefer the cached host count,
-/// fall back to a 4-byte D2H of `d_num_rows`. Mirrors the WCOJ
+/// fall back to a 4-byte device-to-host copy of `d_num_rows`. Mirrors the WCOJ
 /// downloader since dedup compacts in place (`row_cap` ≥ logical).
 fn logical_row_count(buf: &CudaBuffer) -> usize {
     if let Some(c) = buf.cached_row_count() {
