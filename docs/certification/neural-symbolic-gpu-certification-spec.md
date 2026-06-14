@@ -1,36 +1,36 @@
-# XLOG v0.4.0-alpha GPU Certification Test Specification
+# XLOG Neural-Symbolic GPU Certification Test Specification
 
-> **Version target:** v0.4.0-alpha (unreleased)
+> **Certification target:** Neural-symbolic GPU kernel certification
 > **Date:** January 21, 2026
-> **Status:** Implemented (G01-G06 exist in `xlog-cuda-tests`), but the v0.4.0-alpha milestone is not release-gated
-> **Scope:** Neural-Symbolic GPU Kernel Certification (G01-G06 subset of the full certification suite)
+> **Status:** Implemented in `xlog-cuda-tests`; historical specification, not a current release gate
+> **Scope:** Neural-symbolic GPU kernel certification subset of the full certification suite
 
 ---
 
 ## Overview
 
-v0.4.0-alpha introduces neural-symbolic programming capabilities with GPU-accelerated circuit evaluation and gradient computation. This certification extends the existing 25-category CUDA certification suite (C01-C25) with **6 new GPU-focused categories (G01-G06)** specifically for neural-symbolic kernel correctness and efficiency.
+The neural-symbolic integration work introduced GPU-accelerated circuit evaluation and gradient computation. This certification extends the existing CUDA infrastructure certification suite with **six GPU-focused categories** specifically for neural-symbolic kernel correctness and efficiency.
 
 **Primary Goals:**
-1. Verify ALL circuit evaluation kernels are correctly implemented
+1. Verify all circuit evaluation kernels are correctly implemented
 2. Ensure PTX kernels are robust across edge cases
 3. Guarantee 100% GPU-native operation for training loops
 4. Verify 0% CPU data transfer bottlenecks in hot paths
 
 **New Categories:**
-| Category | Name | Tests | Focus |
-|----------|------|-------|-------|
-| **G01** | Circuit Forward Kernel | 8 | `xgcf_forward_level` PTX correctness |
-| **G02** | Circuit Backward Kernels | 12 | `xgcf_backward_level_*` gradient computation |
-| **G03** | Weight Injection Patterns | 6 | GPU weight buffer management |
-| **G04** | Transfer Efficiency | 8 | 0% CPU bottleneck verification |
-| **G05** | Circuit Cache GPU Integration | 6 | GpuXgcf reuse, D4 elimination |
-| **G06** | PTX Kernel Robustness | 10 | Large circuits, edge cases, stability |
+| Area | Name | Tests | Focus |
+|------|------|-------|-------|
+| Forward evaluation | Circuit Forward Kernel | 8 | `xgcf_forward_level` PTX correctness |
+| Reverse-mode gradients | Circuit Backward Kernels | 12 | `xgcf_backward_level_*` gradient computation |
+| Neural weight inputs | Weight Injection Patterns | 6 | GPU weight buffer management |
+| Host-transfer discipline | Transfer Efficiency | 8 | 0% CPU bottleneck verification |
+| Cached circuits | Circuit Cache GPU Integration | 6 | GpuXgcf reuse and external compiler avoidance |
+| Kernel robustness | PTX Kernel Robustness | 10 | Large circuits, edge cases, stability |
 
 **Total New Tests:** 50
-**Total Suite (with existing C01-C25):** 200 tests (snapshot at time of writing)
+**Total Suite (with existing CUDA infrastructure categories):** 200 tests (snapshot at time of writing)
 
-**Current HEAD note:** The certification suite has grown beyond this v0.4.0-alpha subset (e.g., SAT/CDCL + device-count
+**Current main note:** The certification suite has grown beyond this neural-symbolic subset (e.g., SAT/CDCL + device-count
 categories). For the full current suite, see `docs/architecture/cuda-certification.md`.
 
 ---
@@ -77,11 +77,11 @@ categories). For the full current suite, see `docs/architecture/cuda-certificati
 
 ---
 
-## G01: Circuit Forward Kernel Correctness (8 tests)
+## Circuit Forward Kernel Correctness (8 tests)
 
 Validates `xgcf_forward_level` PTX kernel produces correct log-space WMC values.
 
-### G01.1 Node Type Evaluation (4 tests)
+### Node Type Evaluation (4 tests)
 
 | Test | Description | Circuit | Expected |
 |------|-------------|---------|----------|
@@ -90,14 +90,14 @@ Validates `xgcf_forward_level` PTX kernel produces correct log-space WMC values.
 | `test_forward_and_node` | AND of two children | `And(Lit(1), Lit(2))` | log(p1) + log(p2) |
 | `test_forward_or_node` | OR of two children | `Or(Lit(1), Lit(2))` | logsumexp(log(p1), log(p2)) |
 
-### G01.2 Decision Node Evaluation (2 tests)
+### Decision Node Evaluation (2 tests)
 
 | Test | Description | Validation |
 |------|-------------|------------|
 | `test_forward_decision_basic` | Decision node with true/false branches | Correct WMC selection |
 | `test_forward_decision_chain` | Chain of decision nodes | Correct propagation |
 
-### G01.3 Level-by-Level Execution (2 tests)
+### Level-by-Level Execution (2 tests)
 
 | Test | Description | Validation |
 |------|-------------|------------|
@@ -106,11 +106,11 @@ Validates `xgcf_forward_level` PTX kernel produces correct log-space WMC values.
 
 ---
 
-## G02: Circuit Backward Kernels Correctness (12 tests)
+## Circuit Backward Kernels Correctness (12 tests)
 
 Validates `xgcf_backward_level_*` kernels compute correct gradients.
 
-### G02.1 Adjoint Propagation (4 tests)
+### Adjoint Propagation (4 tests)
 
 | Test | Description | Validation |
 |------|-------------|------------|
@@ -119,7 +119,7 @@ Validates `xgcf_backward_level_*` kernels compute correct gradients.
 | `test_backward_or_propagate` | OR node adjoint flow | adj[child] += adj[parent] * softmax_weight |
 | `test_backward_decision_propagate` | Decision node adjoint | Correct branch adjoint |
 
-### G02.2 Gradient Accumulation (4 tests)
+### Gradient Accumulation (4 tests)
 
 | Test | Description | Validation |
 |------|-------------|------------|
@@ -128,7 +128,7 @@ Validates `xgcf_backward_level_*` kernels compute correct gradients.
 | `test_backward_gradient_accumulation` | Multiple paths to same variable | Gradients sum correctly |
 | `test_backward_negative_lit_grad` | Negative literal gradient | Sign flip in gradient |
 
-### G02.3 Numerical Verification (4 tests)
+### Numerical Verification (4 tests)
 
 | Test | Description | Validation |
 |------|-------------|------------|
@@ -139,11 +139,11 @@ Validates `xgcf_backward_level_*` kernels compute correct gradients.
 
 ---
 
-## G03: Weight Injection Memory Patterns (6 tests)
+## Weight Injection Memory Patterns (6 tests)
 
 Validates GPU weight buffer management for neural network integration.
 
-### G03.1 Weight Buffer Operations (3 tests)
+### Weight Buffer Operations (3 tests)
 
 | Test | Description | Validation |
 |------|-------------|------------|
@@ -151,7 +151,7 @@ Validates GPU weight buffer management for neural network integration.
 | `test_weight_buffer_reuse` | Same buffer, different weights | Buffer reused, no realloc |
 | `test_weight_variable_mapping` | Variable index → buffer position | Correct DIMACS-to-buffer mapping |
 
-### G03.2 Weight Value Handling (3 tests)
+### Weight Value Handling (3 tests)
 
 | Test | Description | Validation |
 |------|-------------|------------|
@@ -161,11 +161,11 @@ Validates GPU weight buffer management for neural network integration.
 
 ---
 
-## G04: Transfer Efficiency - 0% CPU Bottleneck Verification (8 tests)
+## Transfer Efficiency - 0% CPU Bottleneck Verification (8 tests)
 
 Validates that GPU operations dominate, with minimal CPU-GPU transfer overhead.
 
-### G04.1 Transfer Size Analysis (3 tests)
+### Transfer Size Analysis (3 tests)
 
 | Test | Description | Validation |
 |------|-------------|------------|
@@ -173,7 +173,7 @@ Validates that GPU operations dominate, with minimal CPU-GPU transfer overhead.
 | `test_transfer_gradient_size` | Gradient download size | 2 * num_vars * 8 bytes only |
 | `test_transfer_circuit_cached` | Circuit NOT re-uploaded on cache hit | 0 bytes circuit transfer |
 
-### G04.2 Transfer vs Compute Ratio (3 tests)
+### Transfer vs Compute Ratio (3 tests)
 
 | Test | Description | Validation |
 |------|-------------|------------|
@@ -181,7 +181,7 @@ Validates that GPU operations dominate, with minimal CPU-GPU transfer overhead.
 | `test_transfer_compute_ratio_large` | 1000 variables | Transfer < 10% of total time |
 | `test_transfer_dominance_check` | Profile forward+backward | GPU compute > 90% of time |
 
-### G04.3 Hot Path Verification (2 tests)
+### Hot Path Verification (2 tests)
 
 | Test | Description | Validation |
 |------|-------------|------------|
@@ -190,19 +190,19 @@ Validates that GPU operations dominate, with minimal CPU-GPU transfer overhead.
 
 ---
 
-## G05: Circuit Cache GPU Integration (6 tests)
+## Circuit Cache GPU Integration (6 tests)
 
-Validates GpuXgcf reuse and D4 elimination for cached queries.
+Validates GpuXgcf reuse and external compiler avoidance for cached queries.
 
-### G05.1 Cache Hit GPU Behavior (3 tests)
+### Cache Hit GPU Behavior (3 tests)
 
 | Test | Description | Validation |
 |------|-------------|------------|
-| `test_cache_hit_no_d4` | Same template query twice | D4 invoked only once |
+| `test_cache_hit_no_external_compile` | Same template query twice | External compiler invoked only once |
 | `test_cache_hit_gpu_reuse` | GpuXgcf instance reused | Same GPU memory addresses |
 | `test_cache_hit_speedup` | Measure cached vs uncached | Cached > 10x faster |
 
-### G05.2 Cache Key Correctness (3 tests)
+### Cache Key Correctness (3 tests)
 
 | Test | Description | Validation |
 |------|-------------|------------|
@@ -212,11 +212,11 @@ Validates GpuXgcf reuse and D4 elimination for cached queries.
 
 ---
 
-## G06: PTX Kernel Robustness (10 tests)
+## PTX Kernel Robustness (10 tests)
 
 Validates circuit.ptx handles edge cases, large circuits, and numerical extremes.
 
-### G06.1 Circuit Size Edge Cases (4 tests)
+### Circuit Size Edge Cases (4 tests)
 
 | Test | Description | Validation |
 |------|-------------|------------|
@@ -225,7 +225,7 @@ Validates circuit.ptx handles edge cases, large circuits, and numerical extremes
 | `test_kernel_deep_circuit` | 100 levels, 1 node each | Sequential levels work |
 | `test_kernel_large_circuit` | 100K nodes, 10K levels | Memory and execution correct |
 
-### G06.2 Variable Count Limits (3 tests)
+### Variable Count Limits (3 tests)
 
 | Test | Description | Validation |
 |------|-------------|------------|
@@ -233,7 +233,7 @@ Validates circuit.ptx handles edge cases, large circuits, and numerical extremes
 | `test_kernel_sparse_variables` | Variables [1, 1000, 50000] | Non-contiguous works |
 | `test_kernel_many_literals` | 10K literal nodes | All literals evaluated |
 
-### G06.3 Numerical Stability (3 tests)
+### Numerical Stability (3 tests)
 
 | Test | Description | Validation |
 |------|-------------|------------|
@@ -247,26 +247,16 @@ Validates circuit.ptx handles edge cases, large circuits, and numerical extremes
 
 ### Test Harness Extension
 
-Add to `crates/xlog-cuda-tests/src/categories/`:
+Add category modules under `crates/xlog-cuda-tests/src/categories/` for:
 
-```
-g01_circuit_forward.rs     // Forward kernel tests
-g02_circuit_backward.rs    // Backward kernel tests
-g03_weight_injection.rs    // Weight buffer tests
-g04_transfer_efficiency.rs // CPU bottleneck verification
-g05_circuit_cache_gpu.rs   // Cache GPU integration
-g06_ptx_robustness.rs      // Edge cases and stability
-```
+- forward kernel tests
+- backward kernel tests
+- weight buffer tests
+- CPU bottleneck verification
+- cache GPU integration
+- edge cases and stability
 
-Update `mod.rs`:
-```rust
-pub mod g01_circuit_forward;
-pub mod g02_circuit_backward;
-pub mod g03_weight_injection;
-pub mod g04_transfer_efficiency;
-pub mod g05_circuit_cache_gpu;
-pub mod g06_ptx_robustness;
-```
+Register those modules from `mod.rs` using the category-module names used by the CUDA certification harness.
 
 ### Test Context Extension
 
@@ -320,20 +310,20 @@ fn numerical_gradient(
 
 ## Test Execution
 
-### Run All v0.4.0-alpha GPU Certification
+### Run Neural-Symbolic GPU Certification
 
 ```bash
 # Full GPU kernel certification
 cargo test -p xlog-cuda-tests --test gpu_certification --release -- --nocapture
 
-# Quick smoke test (G01 + G02 only)
+# Quick smoke test for forward and backward kernels
 cargo test -p xlog-cuda-tests --test gpu_smoke --release
 
-# Single category
-cargo test -p xlog-cuda-tests --test gpu_certification g04 --release
+# Transfer-efficiency category
+cargo test -p xlog-cuda-tests --test gpu_certification transfer_efficiency --release
 ```
 
-### Run Combined Suite (C01-C25 + G01-G06)
+### Run Combined Suite
 
 ```bash
 # Full combined certification (200 tests)
@@ -344,7 +334,7 @@ cargo test -p xlog-cuda-tests --test full_certification --release -- --nocapture
 
 ```bash
 # With CUDA profiler
-nsys profile cargo test -p xlog-cuda-tests --test gpu_certification g04 --release
+nsys profile cargo test -p xlog-cuda-tests --test gpu_certification transfer_efficiency --release
 ```
 
 ---
@@ -355,17 +345,17 @@ nsys profile cargo test -p xlog-cuda-tests --test gpu_certification g04 --releas
 
 | Category | Required Pass Rate | Critical Tests |
 |----------|-------------------|----------------|
-| G01 (Forward) | 100% | All |
-| G02 (Backward) | 100% | All |
-| G03 (Weights) | 100% | All |
-| G04 (Transfer) | 100% | `test_transfer_dominance_check` |
-| G05 (Cache) | 100% | `test_cache_hit_no_d4` |
-| G06 (Robustness) | 100% | `test_kernel_determinism` |
+| Forward kernels | 100% | All |
+| Backward kernels | 100% | All |
+| Weight injection | 100% | All |
+| Transfer efficiency | 100% | `test_transfer_dominance_check` |
+| Circuit cache | 100% | `test_cache_hit_no_external_compile` |
+| Kernel robustness | 100% | `test_kernel_determinism` |
 
-### v0.4.0-alpha Release Gate
+### Neural-Symbolic Certification Gate
 
-- [ ] All G01-G06 tests pass (50 tests)
-- [ ] All existing C01-C25 tests pass (150 tests)
+- [ ] All neural-symbolic GPU tests pass (50 tests)
+- [ ] All existing CUDA infrastructure tests pass (150 tests)
 - [ ] Transfer efficiency: GPU compute > 90% of forward+backward time
 - [ ] Cache speedup: Cached queries > 10x faster than uncached
 - [ ] No NaN/Inf in any gradient computation
@@ -380,7 +370,7 @@ nsys profile cargo test -p xlog-cuda-tests --test gpu_certification g04 --releas
 | Backward pass (10K nodes) | < 10ms | 3 kernels |
 | Weight upload (100 vars) | < 0.1ms | 1.6KB transfer |
 | Gradient download (100 vars) | < 0.1ms | 1.6KB transfer |
-| Cache hit speedup | > 30x | vs D4 compilation |
+| Cache hit speedup | > 30x | vs external compilation |
 
 ---
 
@@ -400,7 +390,7 @@ pub fn gen_and_or_tree(depth: u32, branching: u32) -> Xgcf {
     // Alternating AND/OR levels
 }
 
-/// Create decision tree circuit (from D4 compilation)
+/// Create decision tree circuit from external compiler output
 pub fn gen_decision_tree(num_vars: u32, depth: u32) -> Xgcf {
     // Binary decision tree structure
 }
@@ -439,7 +429,7 @@ pub fn gen_extreme_weights(num_vars: usize) -> Vec<(f64, f64)> {
 
 ## Change Log
 
-| Date | Version | Changes |
-|------|---------|---------|
-| 2026-01-21 | 1.0 | Initial specification (API-focused) |
-| 2026-01-21 | 2.0 | Revised to GPU kernel focus (G01-G06) |
+| Date | Revision | Changes |
+|------|----------|---------|
+| 2026-01-21 | Initial | API-focused specification |
+| 2026-01-21 | GPU kernel focus | Revised to neural-symbolic GPU kernel certification |

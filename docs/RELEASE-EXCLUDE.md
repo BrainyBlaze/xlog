@@ -29,7 +29,7 @@ moving to an archive location or excluding from release:
 | `docs/certification/2026-01-12-cuda-certification-results.md` | v0.4.0-alpha era (133 tests) |
 | `docs/certification/2026-01-14-cuda-certification-results.md` | v0.4.0-alpha era (140 tests) |
 | `docs/certification/2026-01-22-neural-symbolic-certification-report.md` | Untagged neural-symbolic certification report |
-| `docs/certification/v0.4.0-alpha-certification-spec.md` | Pre-v0.5.0 spec |
+| `docs/certification/neural-symbolic-gpu-certification-spec.md` | Historical neural-symbolic certification spec |
 | `clippy-report.txt` (repo root) | Empty build artifact |
 
 ## Notes
