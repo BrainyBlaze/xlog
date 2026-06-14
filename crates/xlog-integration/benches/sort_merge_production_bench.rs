@@ -1,41 +1,36 @@
-//! W4.3 production sort-merge benchmark — sort-merge with
-//! detection cost vs hash + vs nested-loop on the production
-//! eligibility envelope.
+//! Production sort-merge benchmark with sortedness-detection cost versus hash join
+//! and nested-loop join on the production eligibility envelope.
 //!
-//! Differs from the bench-spike at `bench-spike/w43-sort-merge`
-//! by including the W4.3-specific **detection-kernel cost** on
-//! the sort-merge path (per F-W43-3): the timed region for
-//! sort-merge is `is_sorted_ascending_u32(left)` +
+//! Differs from the earlier sort-merge bench spike by including the
+//! sort-merge-specific **detection-kernel cost** on the sort-merge path: the
+//! timed region for sort-merge is `is_sorted_ascending_u32(left)` +
 //! `is_sorted_ascending_u32(right)` + the join kernel itself,
 //! mirroring what production traffic ACTUALLY pays for sorted-
-//! eligible joins after W4.3 lands. The hash and nested-loop
+//! eligible joins when sort-merge is evaluated. The hash and nested-loop
 //! baselines call the provider directly because those branches
 //! never pay the detection cost in production.
 //!
-//! Mirrors W4.2's bench's provider-direct envelope-parity
+//! Mirrors the nested-loop production bench's provider-direct envelope-parity
 //! methodology — the comparison is apples-to-apples on
 //! kernel-level work, with detection added on the sort-merge
-//! side to isolate the W4.3-specific overhead. The
+//! side to isolate the sort-merge-specific overhead. The
 //! `Executor::execute_node` path was considered (initial
 //! iteration of this bench file) but its `execute_scan` buffer-
 //! clone overhead inflates Path 1 with an executor-pipeline cost
 //! that is **identical for sort-merge and hash in production**
 //! (both branches go through scan-clone before dispatch); that
 //! overhead therefore does not differentiate the two paths and
-//! its inclusion only obscures the relative comparison. Per
-//! F-W43-3's INTENT (detection cost included), provider-direct +
-//! explicit detection on the sort-merge side is the cleaner
-//! interpretation.
+//! its inclusion only obscures the relative comparison. Provider-direct timing
+//! plus explicit detection on the sort-merge side is the cleaner interpretation.
 //!
-//! **Two-part bench design (per F-W43-2 + F-W43-3)**:
+//! **Two-part bench design**:
 //!   - **Part A**: sort-merge-with-detection vs hash on sorted-
-//!     eligible cells. D7 acceptance #8 satisfied iff sort-merge
-//!     wins ≥ 2× vs hash on these cells.
+//!     eligible cells. The acceptance gate is satisfied only if sort-merge
+//!     wins at least 2x versus hash on these cells.
 //!   - **Part B**: sort-merge-with-detection vs nested-loop on
-//!     the SAME sorted-eligible cells (D2 precedence overlap
-//!     validation per F-W43-2). If sort-merge wins on overlap,
-//!     D2 precedence (sort-merge > nested-loop) holds. If
-//!     nested-loop wins, iteration-N+ amends D2.
+//!     the SAME sorted-eligible cells. If sort-merge wins on the overlap,
+//!     sort-merge precedence over nested-loop holds. If nested-loop wins,
+//!     a future iteration must revise that precedence decision.
 //!
 //! Methodology:
 //!   * Build provider once. 8 GiB device budget. 1024-stream pool.
@@ -120,7 +115,7 @@ fn make_provider() -> Option<Provider> {
 
 // ---------------------------------------------------------------
 // 3-col U32 fixture upload + 6-col parity download.
-// Mirrors the W4.2 bench's arity choice — multi-col buffers
+// Mirrors the nested-loop production bench's arity choice — multi-col buffers
 // match production traffic shape and exercise the full provider
 // path including `gather_buffer_by_indices`.
 // ---------------------------------------------------------------
@@ -178,7 +173,7 @@ fn download_6col(buf: &CudaBuffer, prov: &CudaKernelProvider) -> Vec<[u32; 6]> {
 }
 
 // ---------------------------------------------------------------
-// Bench matrix (per W4.3 plan iter-5 Step 12).
+// Bench matrix for sort-merge production eligibility validation.
 //
 // Eligible cells are sorted-ascending and within the 4M
 // Cartesian threshold. The cells span the spike's tested matrix
@@ -214,11 +209,11 @@ fn fixture_3col_sorted(num_left: u32, num_right: u32) -> (Vec<Row3>, Vec<Row3>) 
     (left, right)
 }
 
-fn bench_w43_production(c: &mut Criterion) {
+fn bench_sort_merge_production(c: &mut Criterion) {
     let prov_holder = match make_provider() {
         Some(p) => p,
         None => {
-            eprintln!("Skipping w43 production bench: CUDA runtime unavailable");
+            eprintln!("Skipping sort-merge production bench: CUDA runtime unavailable");
             return;
         }
     };
@@ -227,10 +222,10 @@ fn bench_w43_production(c: &mut Criterion) {
 
     // ===========================================================
     // Part A — sort-merge-end-to-end vs hash direct
-    // (D7 #8 acceptance: ≥ 2× vs hash on eligible cells).
+    // (acceptance: at least 2x versus hash on eligible cells).
     //
     // Part B — sort-merge-end-to-end vs nested-loop direct
-    // (D2 precedence overlap validation per F-W43-2).
+    // (dispatcher precedence overlap validation).
     //
     // Both parts share the same cell matrix and the same
     // sort-merge timing measurement; only the second-path
@@ -238,7 +233,7 @@ fn bench_w43_production(c: &mut Criterion) {
     // so the output README can compare all three timings per
     // cell side-by-side.
     // ===========================================================
-    let mut group = c.benchmark_group("w43_production_sort_merge_vs_hash_vs_nested_loop");
+    let mut group = c.benchmark_group("sort_merge_production_vs_hash_vs_nested_loop");
 
     for &(num_left, num_right) in SORTED_ELIGIBLE_MATRIX {
         let (left_rows, right_rows) = fixture_3col_sorted(num_left, num_right);
@@ -278,8 +273,8 @@ fn bench_w43_production(c: &mut Criterion) {
 
         // -------------------------------------------------------
         // Path 1 (Part A + Part B): sort-merge with detection.
-        // Per F-W43-3: timed region includes the W4.3-specific
-        // detection cost (`is_sorted_ascending_u32` × 2 sides).
+        // Timed region includes the sort-merge-specific detection cost
+        // (`is_sorted_ascending_u32` × 2 sides).
         // Excludes execute_scan / clone overhead (which is
         // identical for sort-merge and hash dispatch in
         // production and therefore does not differentiate the
@@ -367,6 +362,6 @@ criterion_group! {
         .sample_size(50)
         .measurement_time(Duration::from_secs(8))
         .warm_up_time(Duration::from_secs(1));
-    targets = bench_w43_production
+    targets = bench_sort_merge_production
 }
 criterion_main!(benches);

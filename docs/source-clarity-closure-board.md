@@ -399,7 +399,7 @@ Hardware cache terminology such as `L1` and `L2` is allowed when it refers to GP
 | `crates/xlog-integration/benches/fixtures/dts_dlm_analog.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-integration/benches/fixtures/paper_class.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-integration/benches/nested_loop_production_bench.rs` | 0 | 0 | true |  |  |
-| `crates/xlog-integration/benches/w43_production_sort_merge_bench.rs` | 21 | 0 | false | W4.3(6), W43-3(4), D2(4), W43-2(3), W4.2(2), D7(2) |  |
+| `crates/xlog-integration/benches/sort_merge_production_bench.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-integration/benches/w52_skewed_multiway_bench.rs` | 2 | 3 | false | W5.2(2) | W67B(1), W52(1), W5.2(1) |
 | `crates/xlog-integration/benches/wcoj_4cycle_bench.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-integration/benches/wcoj_paper_class.rs` | 1 | 2 | false | W3.9(1) | W39(2) |

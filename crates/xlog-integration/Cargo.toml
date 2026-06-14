@@ -44,7 +44,8 @@ path = "benches/nested_loop_production_bench.rs"
 harness = false
 
 [[bench]]
-name = "w43_production_sort_merge_bench"
+name = "sort_merge_production_bench"
+path = "benches/sort_merge_production_bench.rs"
 harness = false
 
 [[bench]]

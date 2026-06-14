@@ -3059,7 +3059,7 @@ impl super::CudaKernelProvider {
     /// Current callers: operator-level provider parity tests in
     /// `crates/xlog-integration/tests/test_w43_sort_merge_dispatch.rs`
     /// and the production sort-merge benchmark at
-    /// `crates/xlog-integration/benches/w43_production_sort_merge_bench.rs`
+    /// `crates/xlog-integration/benches/sort_merge_production_bench.rs`
     /// (sort-merge-with-detection Path 1 timing).
     ///
     /// **Caller contract**: both inputs are pre-sorted ascending
