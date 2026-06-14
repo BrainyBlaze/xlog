@@ -735,7 +735,7 @@ Hardware cache terminology such as `L1` and `L2` is allowed when it refers to GP
 | `docs/architecture/solver-services.md` | 5 | 0 | true | D4(2), release labels(3) | Replaced Decision-DNNF shorthand and release labels with descriptive solver-service wording. |
 | `docs/architecture/external-consumer-diagnostics.md` | 14 | 1 | true | external-consumer names(7), tracking IDs(6), release label(1), filename artifact(1) | Renamed file and replaced consumer-specific issue codes with reusable diagnostic surface descriptions. |
 | `docs/architecture/xlog-prob.md` | 32 | 0 | true | Decision-DNNF shorthand(13), release/date labels(9), phase labels(3), transfer shorthand(4), K1(1), P3(1), v085 evidence label(1) | Expanded Decision-DNNF, Monte Carlo, production-gate, phase/status, and transfer wording. |
-| `docs/certification/2026-01-12-cuda-certification-results.md` | 79 | 0 | false | C21(4), C01(3), C02(3), C03(3), C04(3), C05(3) |  |
+| `docs/certification/2026-01-12-cuda-certification-results.md` | 89 | 0 | true | certification category codes(84), bug codes(4), implementation-version label(1) | Replaced category, bug, range, performance, and implementation-version codes with descriptive certification wording. |
 | `docs/certification/2026-01-14-cuda-certification-results.md` | 80 | 0 | false | C21(4), C01(3), C02(3), C03(3), C04(3), C05(3) |  |
 | `docs/certification/2026-01-22-v0.4.0-alpha-certification-report.md` | 73 | 0 | false | G01-G06(8), C01-C25(6), G04(6), G01(4), G02(4), G03(4) |  |
 | `docs/certification/v0.4.0-alpha-certification-spec.md` | 48 | 3 | false | G01-G06(6), C01-C25(4), D4(4), G01(3), G02(3), G03(3) | G01(1), G02(1), D4(1) |
