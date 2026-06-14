@@ -108,8 +108,8 @@ extern "C" __global__ void groupby_sum(
     atomicAdd((unsigned long long*)&sums[group], (unsigned long long)values[tid]);
 }
 
-// Sum aggregation per group over u64 values (D1 widening: consumed by the
-// fused WCOJ root-sum path, whose per-row partial sums are already u64).
+// Sum aggregation per group over u64 values, consumed by the aggregate-fused
+// WCOJ root-sum path whose per-row partial sums are already u64.
 extern "C" __global__ void groupby_sum_u64(
     const uint64_t* __restrict__ values,
     const uint32_t* __restrict__ group_ids,
@@ -151,9 +151,9 @@ extern "C" __global__ void groupby_max(
     atomicMax(&maxs[group], values[tid]);
 }
 
-// Min aggregation per group over u64 values (S1c widening: the legacy
-// groupby is the unfused baseline for u64-key WCOJ relations, whose value
-// columns are U64). Host pre-fills `mins` with u64::MAX.
+// Min aggregation per group over u64 values. The legacy groupby is the
+// unfused baseline for u64-key WCOJ relations whose value columns are U64.
+// Host pre-fills `mins` with u64::MAX.
 extern "C" __global__ void groupby_min_u64(
     const uint64_t* __restrict__ values,
     const uint32_t* __restrict__ group_ids,
@@ -167,8 +167,7 @@ extern "C" __global__ void groupby_min_u64(
     atomicMin(&mins[group], (unsigned long long)values[tid]);
 }
 
-// Max aggregation per group over u64 values (S1c widening). Host zeroes
-// `maxs`.
+// Max aggregation per group over u64 values. Host zeroes `maxs`.
 extern "C" __global__ void groupby_max_u64(
     const uint64_t* __restrict__ values,
     const uint32_t* __restrict__ group_ids,
