@@ -3,8 +3,8 @@
 Scope: Git-tracked source and documentation files only. Superpowers docs, plan files, evidence directories, generated artifacts, result/output directories, build output, and other worktrees are excluded.
 
 Scanned files: 1430
-Unresolved files: 274
-Comment/prose artifact occurrences: 1767
+Unresolved files: 273
+Comment/prose artifact occurrences: 1765
 Code/identifier artifact occurrences: 686
 
 Resolved means this board found no remaining opaque task/milestone labels or external consumer names in the eligible portions of that file.
@@ -13,7 +13,7 @@ Stable links to excluded plan/evidence artifact paths are not counted as source-
 
 Technical host-transfer terminology such as `D2H`, `DTOH`, and `H2D` is allowed when it refers to device-to-host or host-to-device transfer behavior.
 
-Hardware cache terminology such as `L2` is allowed when it refers to GPU level-2 cache behavior.
+Hardware cache terminology such as `L1` and `L2` is allowed when it refers to GPU level-1 or level-2 cache behavior.
 
 ## Term Meanings Used For Resolution
 
@@ -35,6 +35,7 @@ Hardware cache terminology such as `L2` is allowed when it refers to GPU level-2
 | `W42-15` | checked Cartesian-product capacity guard before nested-loop join allocation |
 | `W43-14` | sort-merge join operator-only scope after benchmark rejection of executor dispatch |
 | `D2` | GPU Free Join level-synchronous factorized join execution |
+| `L1` | GPU level-1 cache |
 | `S1` | aggregate-fused WCOJ triangle group-by-root count measurement gate |
 | `S2` | provider-level Free Join frontier-engine spike and measurement gates |
 | `S1b` | aggregate-fused WCOJ triangle aggregate and u64-key count widening gate |
@@ -257,7 +258,7 @@ Hardware cache terminology such as `L2` is allowed when it refers to GPU level-2
 | `crates/xlog-cuda/kernels/mc_resident.cu` | 0 | 0 | true |  |  |
 | `crates/xlog-cuda/kernels/mc_sample.cu` | 0 | 0 | true |  |  |
 | `crates/xlog-cuda/kernels/neural.cu` | 0 | 0 | true |  |  |
-| `crates/xlog-cuda/kernels/pack.cu` | 2 | 0 | false | L1(1), L2(1) |  |
+| `crates/xlog-cuda/kernels/pack.cu` | 0 | 0 | true |  |  |
 | `crates/xlog-cuda/kernels/pir.cu` | 0 | 0 | true |  |  |
 | `crates/xlog-cuda/kernels/sat.cu` | 0 | 0 | true |  |  |
 | `crates/xlog-cuda/kernels/scan.cu` | 0 | 0 | true |  |  |
