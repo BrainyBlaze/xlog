@@ -559,21 +559,22 @@ fn free_join_fused_count_fires_with_kill_switch_parity() {
 }
 
 // ---------------------------------------------------------------------------
-// D2 skew/order decider (@dts-dlm-main's Tier-2 gate). Free Join derives
-// its plan from the promoter's slot/traversal order with the prefix
-// constraint (a probe's keys must be a leading prefix), so it CANNOT
-// reorder a chain to start from a selective tail. This builds an
-// adversarial chain whose prefix blows up but whose result is tiny (only
-// one tail path survives), and compares FJ's peak memory against the
-// binary fallback's. If FJ's fixed order materializes a much larger peak
-// than binary, that is a real order-loss only W2.x leader/order stats
-// (Tier 2) can fix; if FJ matches/beats binary, the fail-open veto (small
-// joins) plus FJ's existing handling suffice and Tier 1 closes.
+// D2 skew/order gate (@dts-dlm-main's Tier-1.5 acceptance bar). Free Join's
+// plan is a left-deep prefix in COLUMN order (a probe's keys must be a leading
+// prefix of its atom), so it cannot reorder a chain to start from a selective
+// tail the way the binary plan can. This builds an adversarial chain whose
+// prefix blows up to N² but whose result is tiny (one tail path survives).
+//
+// Originally a DECIDER (it measured the 3.07× fixed-order loss that promoted
+// Tier-1.5); now the Tier-1.5 prefix-key-joinable order planner is in place,
+// so this is the ACCEPTANCE GATE: the FJ path must either fire with row parity
+// AND peak <= 1.2× binary, or decline to the binary fallback (row parity). On
+// this chain the only prefix-key-joinable order is the N²-building one, so the
+// planner DECLINES and the loss is gone.
 //
 // Local peak-memory measurement (functional count via peak_bytes, not
-// wall-clock) — no RunPod needed for the decision; the verdict is the
-// finding and is printed, not hard-asserted (correctness + FJ-fires ARE
-// asserted).
+// wall-clock) — no RunPod needed; row parity, the 1-row result, and the 1.2×
+// peak bound are all hard-asserted.
 
 /// Blow-up chain: q(A,E) :- e1(A,B), e2(B,C), e3(C,D), e4(D,E).
 /// e1: A=1 → B in 0..N. e2: identity (keeps prefix N). e3: each C → N D's
@@ -631,9 +632,8 @@ fn d2_skew_order_decider() {
     const N: u32 = 100; // prefix blows to N²=10_000; result = 1 row.
     let inputs = blowup_chain_inputs(N);
 
-    // FJ ON (default): peak + must fire + correct row set.
+    // FJ ON (default + Tier-1.5 planner): peak + dispatch outcome + row set.
     let (on_rows, fj_count, peak_on) = run_with_peak(&fix_on, BLOWUP_CHAIN_SOURCE, &inputs);
-    assert!(fj_count >= 1, "Free Join must fire on the blow-up chain (got {fj_count})");
 
     // FJ OFF (binary fallback): peak + correct row set.
     let fix_off = make_fixture().expect("CUDA fixture");
@@ -649,17 +649,28 @@ fn d2_skew_order_decider() {
 
     let ratio = peak_on as f64 / (peak_off as f64).max(1.0);
     eprintln!(
-        "[D2 skew/order decider] N={N} result_rows={} | FJ peak={} B / binary peak={} B | FJ/binary peak ratio={ratio:.2}",
+        "[D2 skew/order gate] N={N} result_rows={} | FJ-path peak={} B / binary peak={} B | ratio={ratio:.2} | fj_dispatch_count={fj_count}",
         on_rows.len(),
         peak_on,
         peak_off,
     );
-    if ratio > 1.2 {
-        eprintln!("[D2 skew/order decider] VERDICT: FJ fixed-order materializes a LARGER peak than binary on the adversarial chain → real order-loss only W2.x leader/order stats (Tier 2) can fix. PROMOTE Tier 2 to required.");
+    // Tier-1.5 ACCEPTANCE GATE (@dts-dlm-main's bar): the FJ path must EITHER
+    //   (1) fire (fj_count>=1) with row parity AND peak <= 1.2x binary, OR
+    //   (2) decline (fj_count==0) to the binary fallback, which runs with row
+    //       parity (then peak_on == peak_off → ratio 1.0).
+    // Row parity is asserted above; both arms collapse to the single peak
+    // bound below. On this adversarial chain the planner takes arm (2): the
+    // only prefix-key-joinable order is the N²-building left-to-right one,
+    // while the binary plan starts from the 1-row tail — so FJ declines and
+    // the previously-measured 3.07× dispatched loss is gone.
+    if fj_count == 0 {
+        eprintln!("[D2 skew/order gate] FJ DECLINED to binary (no prefix-key-joinable order within 1.2x) → loss avoided.");
     } else {
-        eprintln!("[D2 skew/order decider] VERDICT: FJ peak <= 1.2x binary on the adversarial chain → no order-loss the binary fallback avoids; the Tier-1 fail-open veto (small joins) suffices. Tier 1 CLOSES; Tier 2 stays a follow-on spike.");
+        eprintln!("[D2 skew/order gate] FJ FIRED with a reordered prefix-key-joinable plan within 1.2x of binary.");
     }
-    // Evidence test: correctness + FJ-fires are hard-asserted; the ratio
-    // is the recorded decider, not a pass/fail bar.
+    assert!(
+        ratio <= 1.2,
+        "Tier-1.5 gate: FJ-path peak must be within 1.2x binary (reorder-or-decline); got {ratio:.2}x with fj_count={fj_count}"
+    );
     assert_eq!(on_rows.len(), 1, "blow-up chain result must be exactly 1 row");
 }

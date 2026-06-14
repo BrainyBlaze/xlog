@@ -1864,14 +1864,61 @@ impl Executor {
             atom_vars.push(vars);
         }
         let num_vars = class_to_var.len();
-        // binary2fj over slot order with earliest-node probe pushing:
+        // Tier-1.5 prefix-key-joinable order planner (decline-or-reorder).
+        // FJ's probe-key rule forces a left-deep prefix in COLUMN order, so a
+        // bad atom order can materialize a large intermediate even when the
+        // result is tiny (the decider's 3.07× peak loss). The planner is a
+        // safety net: it keeps the traversal order when it is already
+        // competitive with the binary plan (every winning fixture untouched),
+        // reorders to a better prefix-key-joinable order when one exists, or
+        // declines to the binary fallback when none is competitive.
+        // Cardinalities are the ground-truth row counts of the buffers we are
+        // about to join (NOT StatsManager — always available, never activates
+        // the loss veto on statless winners); per-pair join estimates consult
+        // StatsManager when stats are populated. Only the CardinalityAware
+        // model plans (SkewClassifier opt-out keeps the traversal order).
+        let order: Vec<usize> = {
+            let slot_rels: Vec<RelId> = inputs
+                .iter()
+                .filter_map(|i| match i {
+                    RirNode::Scan { rel } => Some(*rel),
+                    _ => None,
+                })
+                .collect();
+            let cards: Vec<u64> = bufs.iter().map(|b| b.num_rows()).collect();
+            let model = super::wcoj_cost_model::build_wcoj_cost_model(&self.config);
+            let width = if all_u32 {
+                WcojKeyWidth::FourByte
+            } else {
+                WcojKeyWidth::EightByte
+            };
+            let ctx = super::wcoj_cost_model::WcojDispatchCtx {
+                stats: &self.stats,
+                launch_stream: StreamId::DEFAULT,
+                width,
+                slot_rels: &slot_rels,
+            };
+            match model.plan_free_join_order(&ctx, &atom_vars, &cards) {
+                super::wcoj_cost_model::FjOrderDecision::Decline => return Ok(None),
+                super::wcoj_cost_model::FjOrderDecision::Reorder(o) => o,
+                super::wcoj_cost_model::FjOrderDecision::KeepDefault => {
+                    (0..atom_vars.len()).collect()
+                }
+            }
+        };
+        // binary2fj over the planned order with earliest-node probe pushing:
         // each atom's bound-variable PREFIX probes the earliest node
         // after which its keys are available; the unbound suffix covers
         // a new node. Repeated variables within one cover decline (the
         // provider's rebind check would reject them).
         let mut bound_at: Vec<Option<usize>> = vec![None; num_vars]; // var -> node idx
         let mut nodes: Vec<FjNode> = Vec::new();
-        for (i, vars) in atom_vars.iter().enumerate() {
+        // Process atoms in the planned order; `i` stays the ORIGINAL input
+        // index so `input_idx`/`bufs` indexing and the head projection
+        // (`col_to_var`, built in original order below) remain correct — only
+        // the prefix-materialization order changes.
+        for &i in &order {
+            let vars = &atom_vars[i];
             let split = vars
                 .iter()
                 .take_while(|v| bound_at[**v].is_some())
