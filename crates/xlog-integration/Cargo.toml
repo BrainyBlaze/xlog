@@ -49,7 +49,8 @@ path = "benches/sort_merge_production_bench.rs"
 harness = false
 
 [[bench]]
-name = "w52_skewed_multiway_bench"
+name = "skewed_multiway_bench"
+path = "benches/skewed_multiway_bench.rs"
 harness = false
 
 [[bench]]

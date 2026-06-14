@@ -1,7 +1,8 @@
-//! W5.2 skewed multiway benchmark harness.
+//! Skewed multiway benchmark harness.
 //!
 //! Provider-direct Criterion groups compare WCOJ paths against binary
-//! hash-chain baselines for the W5.2 closure evidence.
+//! hash-chain baselines for hub-filtered 4-cycle, diagonal 5-clique, and
+//! pivot-heavy 5-clique workloads.
 
 #![allow(dead_code)]
 
@@ -21,7 +22,7 @@ use xlog_cuda::device_runtime::{
 use xlog_cuda::memory::CudaBuffer;
 use xlog_cuda::{CudaDevice, CudaKernelProvider, GpuMemoryManager, JoinType};
 
-const BENCH_GROUP: &str = "w52_skewed_multiway";
+const BENCH_GROUP: &str = "skewed_multiway";
 const DEVICE_BUDGET_BYTES: u64 = 8 * 1024 * 1024 * 1024;
 const VRAM_GATE_BYTES: u64 = 38 * 1024 * 1024 * 1024;
 const FOUR_CYCLE_CELLS: &[u32] = &[50, 250, 1000, 2000];
@@ -52,8 +53,8 @@ const PIVOT5_EDGE_NAMES: [(&str, &str); 10] = [
     ("c", "d"),
 ];
 
-fn w52_selected_cell(cell: &str) -> bool {
-    std::env::var("XLOG_W52_ONLY_CELL")
+fn skewed_multiway_selected_cell(cell: &str) -> bool {
+    std::env::var("XLOG_SKEWED_MULTIWAY_ONLY_CELL")
         .map(|selected| selected.split(',').any(|s| s.trim() == cell))
         .unwrap_or(true)
 }
@@ -128,11 +129,11 @@ impl CudaMemInfoTracker {
         let total = self.total.load(Ordering::Relaxed);
         let delta = baseline.saturating_sub(min_free);
         eprintln!(
-            "W67B_BENCH38B_VRAM cell={cell} delta_bytes={delta} gate_bytes={VRAM_GATE_BYTES} total_bytes={total}"
+            "SKEWED_MULTIWAY_BENCH_VRAM cell={cell} delta_bytes={delta} gate_bytes={VRAM_GATE_BYTES} total_bytes={total}"
         );
         assert!(
             delta <= VRAM_GATE_BYTES,
-            "W67B bench VRAM delta {delta} exceeds gate {VRAM_GATE_BYTES}"
+            "skewed multiway bench VRAM delta {delta} exceeds gate {VRAM_GATE_BYTES}"
         );
     }
 }
@@ -423,7 +424,7 @@ fn report_kclique_metadata_cost(prov: &Provider, workload: &str, n: u32, wall: D
     );
     assert!(
         ratio <= 0.05,
-        "G_HIST_KC M_HIST_KC.7 metadata build cost must stay <= 5% of W52 K-clique wall-time; workload={workload} N={n} ratio={ratio:.6}"
+        "recursive K-clique metadata build cost must stay <= 5% of skewed multiway K-clique wall-time; workload={workload} N={n} ratio={ratio:.6}"
     );
 }
 
@@ -571,9 +572,9 @@ fn assert_pivot5_parity(prov: &Provider, inputs: &[CudaBuffer; 10], n: u32) {
     );
 }
 
-fn bench_w52_skewed_multiway(c: &mut Criterion) {
+fn bench_skewed_multiway(c: &mut Criterion) {
     let Some(prov) = make_provider() else {
-        eprintln!("Skipping W5.2 skewed multiway bench: CUDA runtime unavailable");
+        eprintln!("Skipping skewed multiway bench: CUDA runtime unavailable");
         return;
     };
 
@@ -590,7 +591,7 @@ fn bench_w52_skewed_multiway(c: &mut Criterion) {
 
     for &n in FOUR_CYCLE_CELLS {
         let cell = format!("4cycle_N{n}");
-        if !w52_selected_cell(&cell) {
+        if !skewed_multiway_selected_cell(&cell) {
             continue;
         }
         let rows = hub_filtered_4cycle(n);
@@ -628,7 +629,7 @@ fn bench_w52_skewed_multiway(c: &mut Criterion) {
 
     for &n in CLIQUE5_CELLS {
         let cell = format!("5clique_N{n}");
-        if !w52_selected_cell(&cell) {
+        if !skewed_multiway_selected_cell(&cell) {
             continue;
         }
         let rows = diagonal_k5_fixture(n);
@@ -666,7 +667,7 @@ fn bench_w52_skewed_multiway(c: &mut Criterion) {
 
     for &n in PIVOT5_CELLS {
         let cell = format!("pivot5_N{n}");
-        if !w52_selected_cell(&cell) {
+        if !skewed_multiway_selected_cell(&cell) {
             continue;
         }
         let rows = pivot_heavy_k5_fixture(n);
@@ -711,6 +712,6 @@ criterion_group! {
         .sample_size(50)
         .measurement_time(Duration::from_secs(8))
         .warm_up_time(Duration::from_secs(1));
-    targets = bench_w52_skewed_multiway
+    targets = bench_skewed_multiway
 }
 criterion_main!(benches);
