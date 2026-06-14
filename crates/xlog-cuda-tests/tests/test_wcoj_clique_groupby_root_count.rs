@@ -1,5 +1,5 @@
-//! S1e — aggregate-fused WCOJ: group-by-root count over the K-clique
-//! shape (K = 5, 6; u32 width-class).
+//! Aggregate-fused WCOJ: group-by-root count over the K-clique shape
+//! (K = 5, 6; u32 width-class).
 //!
 //! Contract under test:
 //! `wcoj_clique{5,6}_groupby_root_count_u32_recorded_planned` computes,
@@ -137,14 +137,22 @@ fn download_column_bytes(
     bytes
 }
 
-fn download_u32_column(memory: &Arc<GpuMemoryManager>, buffer: &CudaBuffer, col: usize) -> Vec<u32> {
+fn download_u32_column(
+    memory: &Arc<GpuMemoryManager>,
+    buffer: &CudaBuffer,
+    col: usize,
+) -> Vec<u32> {
     download_column_bytes(memory, buffer, col, 4)
         .chunks_exact(4)
         .map(|c| u32::from_le_bytes(c.try_into().unwrap()))
         .collect()
 }
 
-fn download_u64_column(memory: &Arc<GpuMemoryManager>, buffer: &CudaBuffer, col: usize) -> Vec<u64> {
+fn download_u64_column(
+    memory: &Arc<GpuMemoryManager>,
+    buffer: &CudaBuffer,
+    col: usize,
+) -> Vec<u64> {
     download_column_bytes(memory, buffer, col, 8)
         .chunks_exact(8)
         .map(|c| u64::from_le_bytes(c.try_into().unwrap()))
@@ -253,10 +261,7 @@ fn upload_edges(fix: &Fixture, k: usize, edges: &EdgeMap) -> Vec<CudaBuffer> {
 
 fn identity_orders(k: usize) -> (Vec<u8>, Vec<u8>) {
     let expected_edges = k * (k - 1) / 2;
-    (
-        (0..expected_edges as u8).collect(),
-        (0..k as u8).collect(),
-    )
+    ((0..expected_edges as u8).collect(), (0..k as u8).collect())
 }
 
 /// Unfused production baseline: materialize cliques via the planned
@@ -408,7 +413,8 @@ fn clique6_groupby_root_count_matches_oracle_small() {
 fn clique5_groupby_root_count_matches_oracle_skewed_hub() {
     // Hub root 0 with a wide V1 fanout; bands of 4 for V2..V4. Heavy
     // per-root fanout: many leader rows feed the same root counter.
-    let band = |v: usize, w: u32| -> Vec<u32> { (0..w).map(|i| (v as u32) * 1_000_000 + i).collect() };
+    let band =
+        |v: usize, w: u32| -> Vec<u32> { (0..w).map(|i| (v as u32) * 1_000_000 + i).collect() };
     let mut edges: EdgeMap = BTreeMap::new();
     for (i, j) in canonical_edge_list(5) {
         let left: Vec<u32> = if i == 0 {
@@ -466,17 +472,17 @@ fn clique5_groupby_root_count_layout_normalizes_unsorted_input() {
     assert_eq!(fused, expected, "fused must normalize unsorted+dup input");
 }
 
-/// S1e measurement (gate: fused >= 3x vs unfused on the skewed K=5 hub
+/// Aggregate-fused WCOJ K-clique count measurement (gate: fused >= 3x vs unfused on the skewed K=5 hub
 /// fixture). Run explicitly:
 /// `cargo test -p xlog-cuda-tests --test test_wcoj_clique_groupby_root_count \
 ///    --release -- --ignored --nocapture`
 /// Asserts parity; timing ratios are PRINTED and recorded as evidence, not
 /// asserted (wall-clock assertions are machine-dependent).
 #[test]
-#[ignore = "S1e measurement: run explicitly with --ignored --nocapture"]
-fn s1e_measurement_clique5_count_fused_vs_unfused() {
+#[ignore = "aggregate-fused WCOJ K-clique count measurement: run explicitly with --ignored --nocapture"]
+fn wcoj_clique_groupby_root_count_measurement_fused_vs_unfused() {
     let Some(fix) = make_fixture() else {
-        eprintln!("skipping s1e_measurement: no CUDA device");
+        eprintln!("skipping aggregate-fused WCOJ K-clique count measurement: no CUDA device");
         return;
     };
 
@@ -484,9 +490,8 @@ fn s1e_measurement_clique5_count_fused_vs_unfused() {
     // bands with all band pairs present. Completions per leader row:
     // 16^3 = 4096 — the materialized clique row count is n_x * 4096.
     let hub = |n_x: u32| -> EdgeMap {
-        let band = |v: usize, w: u32| -> Vec<u32> {
-            (0..w).map(|i| (v as u32) * 1_000_000 + i).collect()
-        };
+        let band =
+            |v: usize, w: u32| -> Vec<u32> { (0..w).map(|i| (v as u32) * 1_000_000 + i).collect() };
         let mut edges: EdgeMap = BTreeMap::new();
         for (i, j) in canonical_edge_list(5) {
             let left: Vec<u32> = if i == 0 {
@@ -558,7 +563,7 @@ fn s1e_measurement_clique5_count_fused_vs_unfused() {
             .map(|p| edges.get(p).map(Vec::len).unwrap_or(0))
             .collect();
         println!(
-            "S1e {name}: unfused median {med_unfused:.3} ms, fused median {med_fused:.3} ms, \
+            "aggregate-fused WCOJ K-clique count {name}: unfused median {med_unfused:.3} ms, fused median {med_fused:.3} ms, \
              speedup {:.2}x (edge rows {:?})",
             med_unfused / med_fused,
             n_rows
