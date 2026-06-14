@@ -60,21 +60,38 @@ the verify explosion is **treewidth-driven, not size-driven** (onset at ~654 var
 legitimate medium programs live), so a pure size bound is too coarse and the CDCL
 branch-budget backstop must be primary — fed `@xlog-claude`'s P0.3 conflict-budget design.
 
-## 5. D2 skew/order decider (the Tier-2 gate) — Tier 2 INDICATED
+## 5. D2 skew/order decider → Tier-1.5 planner (RESOLVED)
 
 `test_free_join_e2e.rs::d2_skew_order_decider`: an adversarial blow-up chain (prefix → N²,
 result = 1 row) where FJ's prefix constraint forces materializing the large intermediate
-while the binary fallback reorders to exploit the selective tail. Result: **FJ peak 746 KB
-vs binary 243 KB = 3.07×**. The fail-open veto does not catch it (large input). Per the
-pre-registered rule, this promotes Tier 2 (order-aware FJ planning) to indicated.
+while the binary fallback reorders to exploit the selective tail. Original result: **FJ peak
+746 KB vs binary 243 KB = 3.07×**. The fail-open veto does not catch it (large input). Per
+the pre-registered rule, this promoted Tier 2 (order-aware FJ planning) to indicated.
 
-Honest framing: the fixture is adversarial — it proves the order-loss EXISTS and is
-structural (FJ cannot reorder a chain; binary can), NOT that real consumer bodies commonly
-hit it. Decision (Tier 2 full planner / Tier 1.5 cardinality-greedy reorder / document as
-known limitation) is `@human`'s; pending.
+`@human` approved Tier-1.5 (2026-06-14). Implemented as a prefix-key-joinable,
+cardinality-greedy order planner at FJ dispatch (`try_dispatch_free_join`;
+`WcojCostModel::plan_free_join_order`), specced in `2026-06-14-tier1.5-fj-order-planner-spec.md`:
+
+- Ground-truth cardinalities from the buffers being joined (never touches `StatsManager`, so
+  the Tier-1 loss veto stays fail-open on statless winners); per-pair estimates via
+  `StatsManager::estimate_join_cardinality` when stats are populated, else the same 10%
+  default model (per `@dts-dlm-main`'s constraints).
+- **Safety net + absolute floor**: only intervenes on LARGE intermediates whose current order
+  is estimated to lose (> 1.2× binary); small joins and already-competitive orders → keep
+  default (every winner untouched). Gated to the CardinalityAware cost model (SkewClassifier
+  opt-out disables it).
+- Reorders to a better prefix-key-joinable order, or **fail-CLOSED declines to binary** when
+  none is within 1.2×.
+
+Acceptance gate (strengthened `d2_skew_order_decider`, `@dts-dlm-main`'s bar) — PASS: on the
+adversarial chain the only prefix-key-joinable order is the N²-building one, so the planner
+**DECLINES** → FJ-path peak **243276 B == binary 243276 B (ratio 1.00, fj_dispatch_count 0)**.
+The 3.07× loss is gone. No-regression: planner units 5/5, free-join e2e 7/7 (incl.
+recursive-SCC winner), D1 fusion 21+12, D3 delta 9, D2 spike 9, runtime lib 157/157.
 
 ## Status
 
-Tier 1 complete and validated. The decider surfaced a real FJ order-loss → the program is NOT
-fully closed until the Tier-2 decision lands. No overclaim: D1–D3 ship as measured; D4 is a
-verified negative; the FJ bad-order case is a documented, decider-proven gap.
+Tier 1 + Tier-1.5 complete and validated. The decider-proven FJ order-loss is resolved
+(reorder-or-decline, fail-closed). No overclaim: D1–D3 ship as measured; D4 is a verified
+negative; the FJ bad-order case is now eliminated, not deferred. The factorized-hypergraph
+research program is closed with no dispatched loss remaining on the branch.
