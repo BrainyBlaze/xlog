@@ -118,3 +118,35 @@ spike PASS → sparse factorization is viable; branch preserved unmerged as spik
 Next phase (separate plan): production integration — a domain-based router selecting
 dense-bitvector vs sparse-hash-set vs legacy inside `try_dispatch_factorized_delta`, then a
 full-fixpoint S4-equivalent bench before any merge.
+
+## 7. Production-integration attempt — S4-sparse gate FAIL on peak (2026-06-14)
+
+Router added to `try_dispatch_factorized_delta` (domain ≤ cap → dense bitvector; > cap →
+sparse hash set; sparse self-declines to legacy over `XLOG_FACTORIZED_DELTA_MAX_TABLE_BYTES`,
+default budget/2). E2E green (9 tests incl. `large_id_tc_fires_via_sparse_route` and the
+budget-decline-to-legacy boundary). HEAD `0458a8c2`.
+
+Full-fixpoint S4-sparse bench (RunPod A4000, large-domain block-cycle k=4 b=128 remapped by
+stride 4096 → domain ~2.09M, |TC|=262144; evidence `runpod-s4-sparse-fullfixpoint-FAIL.log`):
+
+| | wall-clock | peak | dispatch |
+|---|---|---|---|
+| factorized sparse | 131.2 ms | **420.5 MiB** | 4 (fires) |
+| legacy hash-join → diff | 389.7 ms | 293.0 MiB | — |
+| ratio | 0.337× (3× faster) | **0.70× → factorized uses 1.43× MORE** | parity ✓ |
+
+**Verdict: FAIL on peak.** The single-step spike's 2× peak win did NOT generalize: with R
+empty and one extreme-multiplicity step, the table beat legacy; across a fixpoint the
+conservative `2×(|R|+total_work)` power-of-two table is sized to **witnesses**, not distinct
+novel pairs, so it exceeds even legacy's witness-materialization+sort. A load-factor tweak
+cannot bridge a witness-vs-distinct gap that can be arbitrarily large on other shapes.
+
+3× speed confirms the compute is sound (no sort) — the blocker is purely memory sizing.
+
+**Decision: sparse production integration PARKED, branch unmerged.** Dense-only Phase B
+(merged) remains the production state; over-cap domains keep declining to legacy there.
+**Gating follow-up before any sparse merge**: distinct-count-aware table sizing — a 2-pass
+(cheap distinct estimate, e.g. a coarse bitmap/HLL sketch over the candidate keys, then size
+the table to that) or an on-GPU growth/rehash scheme — so the table is sized to
+`|R| + distinct_novel`, not to witness count. Only then can sparse meet the peak gate that
+is D3's core value.
