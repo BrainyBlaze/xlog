@@ -1601,8 +1601,8 @@ fn normalize_program(program: Program) -> Result<Program> {
     let max_recursion = program.directives.max_recursion_depth.unwrap_or(100);
     let expanded = xlog_logic::expand_program_functions(&program, max_recursion)
         .map_err(|e| XlogError::Compilation(e.to_string()))?;
-    let normalized = xlog_logic::normalize_v085_meta(&expanded)?;
-    let listed = xlog_logic::normalize_v085_lists(&normalized)?;
+    let normalized = xlog_logic::normalize_meta_builtins(&expanded)?;
+    let listed = xlog_logic::normalize_list_builtins(&normalized)?;
     Ok(desugar_shared_variable_epistemic_constraints(listed))
 }
 

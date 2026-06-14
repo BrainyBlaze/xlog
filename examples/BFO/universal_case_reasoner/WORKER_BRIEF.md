@@ -18,7 +18,7 @@ separate instruction explicitly authorizes that scope.
 - `docs/architecture/xlog-prob.md`
 - `examples/neural/*`
 - `examples/v080-dts/*`
-- `examples/v085-language/showcase/*`
+- `examples/language-completeness/showcase/*`
 - `examples/v086-runtime/*`
 - `docs/evidence/2026-05-19-v086-consumers/validation_summary.json`
 - `/home/dev/projects/Goal-Driven_Software_Development.pdf`

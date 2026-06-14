@@ -17,10 +17,10 @@ use xlog_ir::ExecutionPlan;
 use xlog_stats::{StatsManager, StatsSnapshot};
 
 use crate::compiler_config::CompilerConfig;
-use crate::list_normalize::normalize_v085_lists;
+use crate::list_normalize::normalize_list_builtins;
 use crate::lower::Lowerer;
-use crate::magic_sets::rewrite_v085_magic_sets;
-use crate::meta_normalize::normalize_v085_meta;
+use crate::magic_sets::rewrite_magic_sets;
+use crate::meta_normalize::normalize_meta_builtins;
 use crate::module::ModuleError;
 use crate::optimizer::Optimizer;
 use crate::parser::parse_program;
@@ -179,10 +179,10 @@ impl Compiler {
         stats_snapshot: Option<&StatsSnapshot>,
     ) -> Result<ExecutionPlan> {
         let program = desugar_queries_and_constraints(program);
-        let program = normalize_v085_meta(&program)?;
-        let program = normalize_v085_lists(&program)?;
-        let program = rewrite_v085_magic_sets(&program)?.program;
-        validate_v085_naf_safety(&program)?;
+        let program = normalize_meta_builtins(&program)?;
+        let program = normalize_list_builtins(&program)?;
+        let program = rewrite_magic_sets(&program)?.program;
+        validate_negation_safety(&program)?;
 
         // Phase 2: Stratify (analyze dependencies, detect cycles)
         let strata = stratify(&program).map_err(map_stratification_to_naf_error)?;
@@ -469,7 +469,7 @@ fn desugar_queries_and_constraints(program: &Program) -> Program {
     out
 }
 
-fn validate_v085_naf_safety(program: &Program) -> Result<()> {
+fn validate_negation_safety(program: &Program) -> Result<()> {
     for rule in &program.rules {
         validate_body_naf_safety(&rule.body, &format!("rule {}", rule.head.predicate))?;
     }
@@ -525,7 +525,7 @@ fn map_stratification_to_naf_error(err: XlogError) -> XlogError {
 }
 
 fn naf_error(message: impl Into<String>) -> XlogError {
-    XlogError::Compilation(format!("v0.8.5 naf error: {}", message.into()))
+    XlogError::Compilation(format!("negation safety error: {}", message.into()))
 }
 
 /// Convenience function to compile source in one call.

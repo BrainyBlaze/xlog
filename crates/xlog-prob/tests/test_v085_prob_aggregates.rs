@@ -137,7 +137,10 @@ fn factorized_numeric_aggregate_folding_keeps_pir_polynomial() {
     source.push_str("score_min(X, min(Y)) :- obs(X, Y).\nquery(score_min(1, 1)).\n");
 
     let prov = extract_from_source(&source).expect("factorized numeric aggregate extraction");
-    eprintln!("factorized k=14 min aggregate PIR nodes: {}", prov.pir.len());
+    eprintln!(
+        "factorized k=14 min aggregate PIR nodes: {}",
+        prov.pir.len()
+    );
     assert!(
         prov.pir.len() < 4096,
         "expected factorized aggregate PIR (< 4096 nodes), got {} (2^14 mask enumeration exceeds 16384)",
@@ -175,7 +178,9 @@ fn exact_gpu_numeric_aggregate_query_matches_analytic_at_k14() {
 
     let compiled = xlog_prob::exact::ExactDdnnfProgram::compile_source(&source)
         .expect("compile exact k=14 min aggregate");
-    let result = compiled.evaluate().expect("evaluate exact k=14 min aggregate");
+    let result = compiled
+        .evaluate()
+        .expect("evaluate exact k=14 min aggregate");
     let got = result
         .query_probs
         .iter()
@@ -221,7 +226,7 @@ query(score_sum(1, 153)).
 #[test]
 fn committed_prob_aggregate_example_extracts_provenance() {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../examples/v085-language/prob_aggregates/finite_outcomes.xlog");
+        .join("../../examples/language-completeness/prob_aggregates/finite_outcomes.xlog");
     let source = std::fs::read_to_string(path).expect("read committed prob aggregate example");
     let prov = extract_from_source(&source).expect("committed prob aggregate example");
     assert!(prov

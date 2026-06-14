@@ -198,7 +198,7 @@ Evidence sources:
 
 - `bundle_reuse` in `evidence/production_transfer.json`.
 - `examples/v080-dts/*` and `scripts/validate_v080_examples.py`.
-- `examples/v085-language/showcase/*` and `scripts/validate_v085_examples.py`.
+- `examples/language-completeness/showcase/*` and `scripts/validate_v085_examples.py`.
 - `python/tests/test_v086_relation_callbacks_runtime.py`.
 - `python/tests/test_v086_pyxlog_persistent_index_runtime.py`.
 

@@ -37,7 +37,7 @@ REQUIRED_FEATURES = [
 
 
 def test_v085_examples_layout_is_committed() -> None:
-    suite = ROOT / "examples/v085-language/showcase"
+    suite = ROOT / "examples/language-completeness/showcase"
 
     assert (suite / "README.md").exists()
     for name in EXAMPLES:
@@ -48,7 +48,7 @@ def test_v085_examples_layout_is_committed() -> None:
 
 
 def test_v085_examples_expected_contracts_include_semantic_execution() -> None:
-    suite = ROOT / "examples/v085-language/showcase"
+    suite = ROOT / "examples/language-completeness/showcase"
 
     for name in EXAMPLES:
         expected = json.loads((suite / name / "expected.json").read_text())
@@ -57,7 +57,7 @@ def test_v085_examples_expected_contracts_include_semantic_execution() -> None:
 
 
 def test_v085_showcase_run_checks_do_not_accept_raw_kernel_schema_errors() -> None:
-    suite = ROOT / "examples/v085-language/showcase"
+    suite = ROOT / "examples/language-completeness/showcase"
     raw_schema_error = " ".join(["Union requires compatible", "schemas"])
 
     for name in EXAMPLES:

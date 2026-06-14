@@ -114,7 +114,9 @@ query(score_max(1, 3)).
             .find(|entry| entry.predicate == predicate && entry.operator == operator)
             .unwrap_or_else(|| panic!("missing report for {predicate}/{operator}"));
         assert_eq!(report.status, AggregateLiftStatus::Fired);
-        assert!(report.reason.contains("factorized aggregate-state dynamic programming"));
+        assert!(report
+            .reason
+            .contains("factorized aggregate-state dynamic programming"));
         assert!(report.dynamic_programming_states > 0);
     }
 
@@ -156,7 +158,7 @@ query(out_degree(1, 65)).
 #[test]
 fn committed_aggregate_lift_example_extracts_report() {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../examples/v085-language/aggregate_lifting/count_lift.xlog");
+        .join("../../examples/language-completeness/aggregate_lifting/count_lift.xlog");
     let source = std::fs::read_to_string(path).expect("read committed aggregate lift example");
     let prov = extract_from_source(&source).expect("committed aggregate lift example");
     let report = prov
@@ -172,7 +174,7 @@ fn committed_aggregate_lift_example_extracts_report() {
 #[test]
 fn committed_aggregate_lift_example_runs_exact_path() {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../examples/v085-language/aggregate_lifting/count_lift.xlog");
+        .join("../../examples/language-completeness/aggregate_lifting/count_lift.xlog");
     let source = std::fs::read_to_string(path).expect("read committed aggregate lift example");
     let mut config = xlog_prob::exact::GpuConfig::default();
     config.memory_bytes = 1024 * 1024 * 1024;

@@ -226,7 +226,7 @@ def _computed_production_evidence_fixture(path: Path) -> None:
                 "feature_count": 15,
                 "reused_artifacts": [
                     "scripts/validate_v085_examples.py",
-                    "examples/v085-language/showcase",
+                    "examples/language-completeness/showcase",
                 ],
             },
             "v086_runtime_optimizer": {
@@ -430,7 +430,7 @@ def _verified_production_evidence_fixture(path: Path) -> None:
                 "feature_count": 15,
                 "reused_artifacts": [
                     "scripts/validate_v085_examples.py",
-                    "examples/v085-language/showcase",
+                    "examples/language-completeness/showcase",
                 ],
             },
             "v086_runtime_optimizer": {

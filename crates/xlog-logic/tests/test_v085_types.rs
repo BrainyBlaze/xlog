@@ -3,14 +3,14 @@ use xlog_logic::ast::{Term, TypeRef};
 use xlog_logic::{parse_program, Compiler};
 
 #[test]
-fn parses_named_columns_domain_aliases_and_v085_type_refs() {
+fn parses_named_columns_domain_aliases_and_language_completeness_type_refs() {
     let src = r#"
         domain user_id: u32.
         pred edge(src: user_id, dst: u32).
         pred bag(owner: user_id, values: list<u32>, payload: term, shape: compound, mapper: predref).
     "#;
 
-    let program = parse_program(src).expect("v085 type refs should parse");
+    let program = parse_program(src).expect("language-completeness type refs should parse");
 
     assert_eq!(program.domains[0].name, "user_id");
     assert_eq!(program.domains[0].typ, ScalarType::U32);
@@ -51,7 +51,7 @@ fn parses_list_cons_and_compound_terms_into_ast() {
         cons([H | T]) :- tail(T).
     "#;
 
-    let program = parse_program(src).expect("v085 terms should parse");
+    let program = parse_program(src).expect("extended terms should parse");
 
     match &program.rules[0].head.terms[0] {
         Term::List(items) => {
@@ -94,7 +94,7 @@ fn named_scalar_and_domain_columns_lower_to_schema_labels() {
 }
 
 #[test]
-fn rejects_remaining_non_lowered_v085_term_forms_with_typed_errors() {
+fn rejects_remaining_non_lowered_extended_term_forms_with_typed_errors() {
     let invalid = [
         (
             "unknown alias",
@@ -114,8 +114,8 @@ fn rejects_remaining_non_lowered_v085_term_forms_with_typed_errors() {
         let err = Compiler::new().compile(src).expect_err(label);
         let msg = err.to_string();
         assert!(
-            msg.contains("v0.8.5") && msg.contains(needle),
-            "{label}: expected typed v085 error containing {needle:?}, got {msg}"
+            msg.contains(needle),
+            "{label}: expected typed extended-term error containing {needle:?}, got {msg}"
         );
     }
 }

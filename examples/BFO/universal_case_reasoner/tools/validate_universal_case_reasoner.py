@@ -1741,7 +1741,7 @@ def _bundle_reuse_passed(production_transfer: dict[str, Any]) -> bool:
         and all(int(v080_transfer.get(key, -1)) == 0 for key in ["dtoh_calls", "htod_calls", "dtoh_bytes", "htod_bytes"])
         and v085.get("status") == "PASS"
         and int(v085.get("feature_count", 0)) >= 10
-        and "examples/v085-language/showcase" in reused_v085
+        and "examples/language-completeness/showcase" in reused_v085
         and v086.get("status") == "PASS"
         and v086.get("apply_relation_delta_batch") is True
         and int(cache_stats.get("builds", 0)) >= 1

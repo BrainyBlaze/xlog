@@ -3697,7 +3697,7 @@ def _run_v080_runtime_session_probe() -> dict[str, Any]:
 def _run_v085_language_contract_probe() -> dict[str, Any]:
     summary_path = REPO_ROOT / "docs/evidence/2026-05-19-v085-examples/validation_summary.json"
     script_path = REPO_ROOT / "scripts/validate_v085_examples.py"
-    showcase_path = REPO_ROOT / "examples/v085-language/showcase"
+    showcase_path = REPO_ROOT / "examples/language-completeness/showcase"
     required_features = {
         "types",
         "lists",
@@ -3733,7 +3733,7 @@ def _run_v085_language_contract_probe() -> dict[str, Any]:
         "example_count": int(summary.get("example_count", 0)),
         "reused_artifacts": [
             "scripts/validate_v085_examples.py",
-            "examples/v085-language/showcase",
+            "examples/language-completeness/showcase",
             "docs/evidence/2026-05-19-v085-examples/validation_summary.json",
         ],
     }

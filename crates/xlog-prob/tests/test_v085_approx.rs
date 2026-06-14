@@ -83,7 +83,7 @@ query(rain()).
 #[test]
 fn approximate_count_aggregate_fixture_reports_confidence() {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../examples/v085-language/approx/aggregate_mc.xlog");
+        .join("../../examples/language-completeness/approx/aggregate_mc.xlog");
     let source = std::fs::read_to_string(path).expect("read approximate aggregate example");
     let parsed = parse_program(&source).expect("parse approximate aggregate example");
     let program = McProgram::compile_source(&source).expect("compile aggregate MC program");

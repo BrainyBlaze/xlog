@@ -16,7 +16,7 @@ use xlog_logic::compile::load_modules;
 #[cfg(feature = "host-io")]
 use xlog_logic::parse_program;
 use xlog_logic::IncrementalParseResult;
-use xlog_logic::{rewrite_v085_magic_sets, MagicSetReport, MagicSetStatus, ParserSession};
+use xlog_logic::{rewrite_magic_sets, MagicSetReport, MagicSetStatus, ParserSession};
 use xlog_logic::{stratify, Compiler};
 use xlog_logic::{QueryProofTrace, RuleProvenance};
 #[cfg(feature = "host-io")]
@@ -287,7 +287,7 @@ fn build_explain_report(
     source_path: Option<&Path>,
 ) -> Result<ExplainReport> {
     let program = parsed.program;
-    let magic_rewrite = rewrite_v085_magic_sets(&program)?;
+    let magic_rewrite = rewrite_magic_sets(&program)?;
     let rule_provenance = xlog_logic::rule_provenance(&program, Some(&magic_rewrite.program));
     let proof_traces = xlog_logic::query_proof_traces(&program, &rule_provenance);
     let magic_sets = magic_rewrite.report;

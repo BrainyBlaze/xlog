@@ -561,7 +561,7 @@ def test_production_transfer_runner_reports_transfer_scale_and_soak_contract(
     assert bundle_reuse["v080_runtime_session"]["relation_delta_equivalence_pct"] == 100.0
     assert bundle_reuse["v085_language_contract"]["status"] == "PASS"
     assert bundle_reuse["v085_language_contract"]["feature_count"] >= 10
-    assert "examples/v085-language/showcase" in bundle_reuse["v085_language_contract"][
+    assert "examples/language-completeness/showcase" in bundle_reuse["v085_language_contract"][
         "reused_artifacts"
     ]
     v086 = bundle_reuse["v086_runtime_optimizer"]

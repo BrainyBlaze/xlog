@@ -13,7 +13,7 @@ from typing import Any
 
 
 ROOT = Path(__file__).resolve().parents[1]
-EXAMPLE_ROOT = ROOT / "examples" / "v085-language" / "showcase"
+EXAMPLE_ROOT = ROOT / "examples" / "language-completeness" / "showcase"
 DEFAULT_OUTPUT = ROOT / "docs" / "evidence" / "2026-05-19-v085-examples" / "validation_summary.json"
 EXAMPLES = [
     "01_list_typed_relation",

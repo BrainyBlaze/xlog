@@ -556,11 +556,11 @@ Hardware cache terminology such as `L1` and `L2` is allowed when it refers to GP
 | `crates/xlog-logic/tests/test_promote_multiway.rs` | 0 | 0 | true | - | Replaced release/slice and D2 labels with compiler-pipeline, dedicated multiway dispatch, and general Free Join wording. |
 | `crates/xlog-logic/tests/test_v085_approx_pragmas.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-logic/tests/test_v085_incremental_parse.rs` | 0 | 0 | true |  |  |
-| `crates/xlog-logic/tests/test_v085_lists.rs` | 0 | 3 | false |  | v085(3) |
-| `crates/xlog-logic/tests/test_v085_magic_sets.rs` | 0 | 1 | false |  | v085(1) |
-| `crates/xlog-logic/tests/test_v085_meta.rs` | 0 | 3 | false |  | v085(3) |
-| `crates/xlog-logic/tests/test_v085_naf.rs` | 0 | 1 | false |  | v085(1) |
-| `crates/xlog-logic/tests/test_v085_types.rs` | 0 | 3 | false |  | v085(3) |
+| `crates/xlog-logic/tests/test_v085_lists.rs` | 0 | 0 | true | - | Replaced version-coded list normalizer API usage and example paths with list-builtin normalization and language-completeness example wording. |
+| `crates/xlog-logic/tests/test_v085_magic_sets.rs` | 0 | 0 | true | - | Replaced the version-coded magic-set rewrite API usage and example path with behavior-named magic-set rewriting and language-completeness example wording. |
+| `crates/xlog-logic/tests/test_v085_meta.rs` | 0 | 0 | true | - | Replaced version-coded meta/list normalizer API usage, diagnostic assertions, and example paths with meta/list normalization and language-completeness wording. |
+| `crates/xlog-logic/tests/test_v085_naf.rs` | 0 | 0 | true | - | Replaced the version-coded negation diagnostic assertion and example path with negation-safety and language-completeness wording. |
+| `crates/xlog-logic/tests/test_v085_types.rs` | 0 | 0 | true | - | Replaced version-coded type/term test names and diagnostics with language-completeness and extended-term wording. |
 | `crates/xlog-logic/tests/test_w21_part_a.rs` | 6 | 0 | false | W2.1(4), W2.2(2) |  |
 | `crates/xlog-logic/tests/test_w26_part_b.rs` | 2 | 0 | false | W2.6(1), W2.1(1) |  |
 | `crates/xlog-logic/tests/test_w32_clique_promoter.rs` | 2 | 0 | false | W3.2(2) |  |
@@ -1285,48 +1285,48 @@ Hardware cache terminology such as `L1` and `L2` is allowed when it refers to GP
 | `examples/v080-dts/05_probabilistic_async_diagnostics/program.xlog` | 0 | 0 | true |  |  |
 | `examples/v080-dts/05_probabilistic_async_diagnostics/run.py` | 0 | 0 | true |  |  |
 | `examples/v080-dts/README.md` | 2 | 1 | false | M37-A+B(1), G080(1) | v080(1) |
-| `examples/v085-language/aggregate_lifting/count_lift.xlog` | 0 | 0 | true |  |  |
-| `examples/v085-language/approx/aggregate_mc.xlog` | 0 | 0 | true |  |  |
-| `examples/v085-language/lists/cons_patterns.xlog` | 0 | 0 | true |  |  |
-| `examples/v085-language/lists/membership.xlog` | 0 | 0 | true |  |  |
-| `examples/v085-language/lists/transforms.xlog` | 0 | 0 | true |  |  |
-| `examples/v085-language/magic_sets/reach_bound.xlog` | 0 | 0 | true |  |  |
-| `examples/v085-language/meta/findall.xlog` | 0 | 0 | true |  |  |
-| `examples/v085-language/meta/inspection.xlog` | 0 | 0 | true |  |  |
-| `examples/v085-language/meta/maplist.xlog` | 0 | 0 | true |  |  |
-| `examples/v085-language/naf/closed_world.xlog` | 0 | 0 | true |  |  |
-| `examples/v085-language/prob_aggregates/finite_outcomes.xlog` | 0 | 0 | true |  |  |
-| `examples/v085-language/showcase/01_list_typed_relation/README.md` | 0 | 0 | true |  |  |
-| `examples/v085-language/showcase/01_list_typed_relation/expected.json` | 0 | 0 | true |  |  |
-| `examples/v085-language/showcase/01_list_typed_relation/program.xlog` | 0 | 0 | true |  |  |
-| `examples/v085-language/showcase/02_findall_aggregate/README.md` | 0 | 0 | true |  |  |
-| `examples/v085-language/showcase/02_findall_aggregate/expected.json` | 0 | 0 | true |  |  |
-| `examples/v085-language/showcase/02_findall_aggregate/program.xlog` | 0 | 0 | true |  |  |
-| `examples/v085-language/showcase/03_maplist_static_predref/README.md` | 0 | 0 | true |  |  |
-| `examples/v085-language/showcase/03_maplist_static_predref/expected.json` | 0 | 0 | true |  |  |
-| `examples/v085-language/showcase/03_maplist_static_predref/program.xlog` | 0 | 0 | true |  |  |
-| `examples/v085-language/showcase/04_magic_reach_explain/README.md` | 0 | 0 | true |  |  |
-| `examples/v085-language/showcase/04_magic_reach_explain/expected.json` | 0 | 0 | true |  |  |
-| `examples/v085-language/showcase/04_magic_reach_explain/program.xlog` | 0 | 0 | true |  |  |
-| `examples/v085-language/showcase/05_prob_aggregate_exact/README.md` | 0 | 0 | true |  |  |
-| `examples/v085-language/showcase/05_prob_aggregate_exact/expected.json` | 0 | 0 | true |  |  |
-| `examples/v085-language/showcase/05_prob_aggregate_exact/program.xlog` | 0 | 0 | true |  |  |
-| `examples/v085-language/showcase/06_prob_aggregate_mc/README.md` | 0 | 0 | true |  |  |
-| `examples/v085-language/showcase/06_prob_aggregate_mc/expected.json` | 0 | 0 | true |  |  |
-| `examples/v085-language/showcase/06_prob_aggregate_mc/program.xlog` | 0 | 0 | true |  |  |
-| `examples/v085-language/showcase/07_aggregate_lifting/README.md` | 0 | 0 | true |  |  |
-| `examples/v085-language/showcase/07_aggregate_lifting/expected.json` | 0 | 0 | true |  |  |
-| `examples/v085-language/showcase/07_aggregate_lifting/program.xlog` | 0 | 0 | true |  |  |
-| `examples/v085-language/showcase/08_approx_confidence/README.md` | 0 | 0 | true |  |  |
-| `examples/v085-language/showcase/08_approx_confidence/expected.json` | 0 | 0 | true |  |  |
-| `examples/v085-language/showcase/08_approx_confidence/program.xlog` | 0 | 0 | true |  |  |
-| `examples/v085-language/showcase/09_repl_watch_explain/README.md` | 0 | 0 | true |  |  |
-| `examples/v085-language/showcase/09_repl_watch_explain/expected.json` | 0 | 0 | true |  |  |
-| `examples/v085-language/showcase/09_repl_watch_explain/program.xlog` | 0 | 0 | true |  |  |
-| `examples/v085-language/showcase/10_scientific_incremental/README.md` | 0 | 0 | true |  |  |
-| `examples/v085-language/showcase/10_scientific_incremental/expected.json` | 0 | 0 | true |  |  |
-| `examples/v085-language/showcase/10_scientific_incremental/program.xlog` | 0 | 0 | true |  |  |
-| `examples/v085-language/showcase/README.md` | 1 | 0 | false | v085(1) |  |
+| `examples/language-completeness/aggregate_lifting/count_lift.xlog` | 0 | 0 | true |  |  |
+| `examples/language-completeness/approx/aggregate_mc.xlog` | 0 | 0 | true |  |  |
+| `examples/language-completeness/lists/cons_patterns.xlog` | 0 | 0 | true |  |  |
+| `examples/language-completeness/lists/membership.xlog` | 0 | 0 | true |  |  |
+| `examples/language-completeness/lists/transforms.xlog` | 0 | 0 | true |  |  |
+| `examples/language-completeness/magic_sets/reach_bound.xlog` | 0 | 0 | true |  |  |
+| `examples/language-completeness/meta/findall.xlog` | 0 | 0 | true |  |  |
+| `examples/language-completeness/meta/inspection.xlog` | 0 | 0 | true |  |  |
+| `examples/language-completeness/meta/maplist.xlog` | 0 | 0 | true |  |  |
+| `examples/language-completeness/naf/closed_world.xlog` | 0 | 0 | true |  |  |
+| `examples/language-completeness/prob_aggregates/finite_outcomes.xlog` | 0 | 0 | true |  |  |
+| `examples/language-completeness/showcase/01_list_typed_relation/README.md` | 0 | 0 | true |  |  |
+| `examples/language-completeness/showcase/01_list_typed_relation/expected.json` | 0 | 0 | true |  |  |
+| `examples/language-completeness/showcase/01_list_typed_relation/program.xlog` | 0 | 0 | true |  |  |
+| `examples/language-completeness/showcase/02_findall_aggregate/README.md` | 0 | 0 | true |  |  |
+| `examples/language-completeness/showcase/02_findall_aggregate/expected.json` | 0 | 0 | true |  |  |
+| `examples/language-completeness/showcase/02_findall_aggregate/program.xlog` | 0 | 0 | true |  |  |
+| `examples/language-completeness/showcase/03_maplist_static_predref/README.md` | 0 | 0 | true |  |  |
+| `examples/language-completeness/showcase/03_maplist_static_predref/expected.json` | 0 | 0 | true |  |  |
+| `examples/language-completeness/showcase/03_maplist_static_predref/program.xlog` | 0 | 0 | true |  |  |
+| `examples/language-completeness/showcase/04_magic_reach_explain/README.md` | 0 | 0 | true |  |  |
+| `examples/language-completeness/showcase/04_magic_reach_explain/expected.json` | 0 | 0 | true |  |  |
+| `examples/language-completeness/showcase/04_magic_reach_explain/program.xlog` | 0 | 0 | true |  |  |
+| `examples/language-completeness/showcase/05_prob_aggregate_exact/README.md` | 0 | 0 | true |  |  |
+| `examples/language-completeness/showcase/05_prob_aggregate_exact/expected.json` | 0 | 0 | true |  |  |
+| `examples/language-completeness/showcase/05_prob_aggregate_exact/program.xlog` | 0 | 0 | true |  |  |
+| `examples/language-completeness/showcase/06_prob_aggregate_mc/README.md` | 0 | 0 | true |  |  |
+| `examples/language-completeness/showcase/06_prob_aggregate_mc/expected.json` | 0 | 0 | true |  |  |
+| `examples/language-completeness/showcase/06_prob_aggregate_mc/program.xlog` | 0 | 0 | true |  |  |
+| `examples/language-completeness/showcase/07_aggregate_lifting/README.md` | 0 | 0 | true |  |  |
+| `examples/language-completeness/showcase/07_aggregate_lifting/expected.json` | 0 | 0 | true |  |  |
+| `examples/language-completeness/showcase/07_aggregate_lifting/program.xlog` | 0 | 0 | true |  |  |
+| `examples/language-completeness/showcase/08_approx_confidence/README.md` | 0 | 0 | true |  |  |
+| `examples/language-completeness/showcase/08_approx_confidence/expected.json` | 0 | 0 | true |  |  |
+| `examples/language-completeness/showcase/08_approx_confidence/program.xlog` | 0 | 0 | true |  |  |
+| `examples/language-completeness/showcase/09_repl_watch_explain/README.md` | 0 | 0 | true |  |  |
+| `examples/language-completeness/showcase/09_repl_watch_explain/expected.json` | 0 | 0 | true |  |  |
+| `examples/language-completeness/showcase/09_repl_watch_explain/program.xlog` | 0 | 0 | true |  |  |
+| `examples/language-completeness/showcase/10_scientific_incremental/README.md` | 0 | 0 | true |  |  |
+| `examples/language-completeness/showcase/10_scientific_incremental/expected.json` | 0 | 0 | true |  |  |
+| `examples/language-completeness/showcase/10_scientific_incremental/program.xlog` | 0 | 0 | true |  |  |
+| `examples/language-completeness/showcase/README.md` | 1 | 0 | false | v085(1) |  |
 | `examples/v086-runtime/01_dts_delta_optimizer/README.md` | 0 | 0 | true |  |  |
 | `examples/v086-runtime/01_dts_delta_optimizer/expected.json` | 0 | 0 | true |  |  |
 | `examples/v086-runtime/01_dts_delta_optimizer/program.xlog` | 0 | 0 | true |  |  |
