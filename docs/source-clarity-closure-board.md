@@ -395,7 +395,7 @@ Hardware cache terminology such as `L1` and `L2` is allowed when it refers to GP
 | `crates/xlog-induce/src/types.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-induce/src/validate.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-induce/tests/rule_induction_provenance.rs` | 0 | 0 | true |  |  |
-| `crates/xlog-integration/Cargo.toml` | 1 | 0 | false | D2H(1) |  |
+| `crates/xlog-integration/Cargo.toml` | 0 | 0 | true |  |  |
 | `crates/xlog-integration/benches/fixtures/dts_dlm_analog.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-integration/benches/fixtures/paper_class.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-integration/benches/w42_production_nested_loop_bench.rs` | 5 | 0 | false | W4.2(4), D7(1) |  |
