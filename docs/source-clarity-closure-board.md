@@ -3,8 +3,8 @@
 Scope: Git-tracked source and documentation files only. Superpowers docs, plan files, evidence directories, generated artifacts, result/output directories, build output, and other worktrees are excluded.
 
 Scanned files: 1430
-Unresolved files: 275
-Comment/prose artifact occurrences: 1785
+Unresolved files: 274
+Comment/prose artifact occurrences: 1767
 Code/identifier artifact occurrences: 686
 
 Resolved means this board found no remaining opaque task/milestone labels or external consumer names in the eligible portions of that file.
@@ -29,6 +29,11 @@ Hardware cache terminology such as `L2` is allowed when it refers to GPU level-2
 | `C7` | compiled epistemic execution-plan/EIR JSON dump |
 | `v085` | legacy v0.8.5 language milestone/examples |
 | `W2.5` | WCOJ cost-model default flip to the cardinality model |
+| `W4.2` | nested-loop inner join production operator and small single-key dispatch path |
+| `W4.3` | sort-merge inner join provider-level operator for pre-sorted single-key inputs |
+| `W42-14` | single-key join column byte-length validation before kernel launch |
+| `W42-15` | checked Cartesian-product capacity guard before nested-loop join allocation |
+| `W43-14` | sort-merge join operator-only scope after benchmark rejection of executor dispatch |
 | `D2` | GPU Free Join level-synchronous factorized join execution |
 | `S1` | aggregate-fused WCOJ triangle group-by-root count measurement gate |
 | `S2` | provider-level Free Join frontier-engine spike and measurement gates |
@@ -247,7 +252,7 @@ Hardware cache terminology such as `L2` is allowed when it refers to GPU level-2
 | `crates/xlog-cuda/kernels/ilp.cu` | 0 | 0 | true |  |  |
 | `crates/xlog-cuda/kernels/ilp_credit.cu` | 0 | 0 | true |  |  |
 | `crates/xlog-cuda/kernels/ilp_exact.cu` | 0 | 0 | true |  |  |
-| `crates/xlog-cuda/kernels/join.cu` | 18 | 0 | false | W4.3(5), W4.2(3), W42-14(2), D2H(1), D1+D2(1), W42-15(1) |  |
+| `crates/xlog-cuda/kernels/join.cu` | 0 | 0 | true |  |  |
 | `crates/xlog-cuda/kernels/mc_eval.cu` | 0 | 0 | true |  |  |
 | `crates/xlog-cuda/kernels/mc_resident.cu` | 0 | 0 | true |  |  |
 | `crates/xlog-cuda/kernels/mc_sample.cu` | 0 | 0 | true |  |  |
