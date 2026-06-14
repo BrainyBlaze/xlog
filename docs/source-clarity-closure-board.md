@@ -625,7 +625,7 @@ Hardware cache terminology such as `L1` and `L2` is allowed when it refers to GP
 | `crates/xlog-prob/tests/epistemic_prob_production_reuse.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-prob/tests/exact_ddnnf.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-prob/tests/exact_ddnnf_gpu_grads.rs` | 0 | 0 | true |  |  |
-| `crates/xlog-prob/tests/gpu_backward_fused_parity.rs` | 4 | 0 | false | L0(1), L1(1), L2(1), L3(1) |  |
+| `crates/xlog-prob/tests/gpu_backward_fused_parity.rs` | 4 | 0 | true | Replaced level shorthand labels with explicit graph level numbers in the circuit layout comment. | L0(1), L1(1), L2(1), L3(1) |
 | `crates/xlog-prob/tests/gpu_cache_compile_and_verify.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-prob/tests/gpu_cache_store.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-prob/tests/gpu_circuit_cache.rs` | 0 | 0 | true |  |  |
