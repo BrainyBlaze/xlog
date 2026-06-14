@@ -1385,7 +1385,7 @@ Hardware cache terminology such as `L1` and `L2` is allowed when it refers to GP
 | `examples/xlog/80-v032-showcase/03-game-analytics/achievements/system.xlog` | 2 | 0 | true | user-defined-function abbreviation comments(2) |  |
 | `examples/xlog/80-v032-showcase/03-game-analytics/main.xlog` | 21 | 113 | true | release label and abbreviation comments(14), schema-comment shorthand(7) | local variable and predicate-name shorthand(113) |
 | `examples/xlog/80-v032-showcase/03-game-analytics/matches/history.xlog` | 0 | 0 | true |  |  |
-| `examples/xlog/80-v032-showcase/03-game-analytics/players/profiles.xlog` | 0 | 10 | false |  | P1(4), P3(3), P2(3) |
+| `examples/xlog/80-v032-showcase/03-game-analytics/players/profiles.xlog` | 7 | 37 | true | identifier and regional shorthand comments(7) | local variable shorthand(37) |
 | `examples/xlog/80-v032-showcase/03-game-analytics/ranking/elo.xlog` | 28 | 0 | true | Elo/Kill-death-assist/user-defined-function abbreviation comments(28) |  |
 | `examples/xlog/80-v032-showcase/04-supply-chain/README.md` | 0 | 1 | false |  | v032(1) |
 | `examples/xlog/80-v032-showcase/04-supply-chain/cost/calculator.xlog` | 0 | 0 | true |  |  |
