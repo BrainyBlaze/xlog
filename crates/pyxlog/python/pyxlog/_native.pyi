@@ -147,6 +147,7 @@ class LogicRelationSession:
         """Multiway/Free-Join dispatch telemetry for this session.
 
         Keys: ``free_join_dispatch_count``,
+        ``factorized_delta_dispatch_count``,
         ``wcoj_groupby_fusion_dispatch_count``, ``wcoj_error_decline_count``.
         Counters accumulate across evaluates within this session.
         """

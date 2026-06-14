@@ -523,6 +523,10 @@ impl LogicRelationSession {
             .unwrap_or_default();
         dict.set_item("free_join_dispatch_count", stats.free_join_dispatch_count)?;
         dict.set_item(
+            "factorized_delta_dispatch_count",
+            stats.factorized_delta_dispatch_count,
+        )?;
+        dict.set_item(
             "wcoj_groupby_fusion_dispatch_count",
             stats.wcoj_groupby_fusion_dispatch_count,
         )?;
