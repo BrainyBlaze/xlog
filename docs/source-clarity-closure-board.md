@@ -458,7 +458,7 @@ Hardware cache terminology such as `L1` and `L2` is allowed when it refers to GP
 | `crates/xlog-ir/src/epistemic_plan.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-ir/src/lib.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-ir/src/metadata.rs` | 0 | 0 | true |  |  |
-| `crates/xlog-ir/src/plan.rs` | 1 | 0 | false | D2(1) |  |
+| `crates/xlog-ir/src/plan.rs` | 0 | 0 | true | - | - |
 | `crates/xlog-ir/src/rir.rs` | 9 | 0 | false | W2.1(3), W6.3(3), W2.2(2), D2(1) |  |
 | `crates/xlog-ir/tests/test_kclique_variable_order.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-ir/tests/test_multiway_plan.rs` | 0 | 0 | true |  |  |
