@@ -722,7 +722,7 @@ Hardware cache terminology such as `L1` and `L2` is allowed when it refers to GP
 | `docs/architecture/device-runtime.md` | 0 | 0 | true |  |  |
 | `docs/architecture/dilp-showcase-report.md` | 0 | 0 | true |  |  |
 | `docs/architecture/dilp-training.md` | 8 | 0 | true | Expanded P0, D2H, DTOH, and versioned Universal Case Reasoner wording to GPU-resident and device-to-host descriptions. |  |
-| `docs/architecture/epistemic-semantics.md` | 10 | 0 | false | G91(9), D2H(1) |  |
+| `docs/architecture/epistemic-semantics.md` | 32 | 0 | true | G91/g91(13), release labels(11), goal labels(3), EGB tags(2), H2D/D2H(2), task-coded helper prefix(1) | Clarified Gelfond 1991 compatibility prose, production WCOJ reuse, accepted runtime surface, and transfer direction wording. |
 | `docs/architecture/gpu-execution.md` | 0 | 0 | true |  |  |
 | `docs/architecture/language-v085.md` | 1 | 0 | false | v085(1) |  |
 | `docs/architecture/living-world-diagnostics-v087.md` | 0 | 0 | true |  |  |
