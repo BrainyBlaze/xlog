@@ -1,14 +1,13 @@
-// crates/xlog-runtime/tests/test_w23_recursive_stats.rs
-//! W2.3 step 7 — recursive-SCC stats integration acceptance gate.
+//! Recursive-SCC stats trace integration tests.
 //!
-//! Part A (3) — iteration-level cardinality evolution via the
+//! Iteration-level cardinality evolution via the
 //!   `recursive-stats-trace` feature-gated trace seam.
-//! Part B (2) — `binary_est_for_variant` reflects the rewritten
+//! `binary_est_for_variant` reflects the rewritten
 //!   variant's `delta_e1` card.
-//! Part C (4) — row-set + dispatch-counter parity vs. the
-//!   pre-W2.3 baseline.
-//! Part D (1) — W4.1 multi-recursive bodies dispatch WCOJ
-//!   (paper P1); W2.3 trace records remain predicate-level.
+//! Row-set + dispatch-counter parity stays unchanged against the
+//!   pre-trace baseline.
+//! Multi-recursive bodies dispatch WCOJ using semi-naive occurrence semantics;
+//!   recursive stats trace records remain predicate-level.
 //!
 //! Total: **10 tests**.
 //!
@@ -22,7 +21,7 @@
 //!     cargo test --workspace --release --tests --exclude pyxlog \
 //!         --features xlog-runtime/recursive-stats-trace
 //!
-//! Anchors on the slice-4 linear-recursive triangle and 4-cycle
+//! Anchors on the linear-recursive dispatch-certified triangle and 4-cycle
 //! programs (`crates/xlog-integration/tests/test_wcoj_recursive_dispatch.rs`
 //! `LINEAR_REC_TRIANGLE` :586, `LINEAR_REC_4CYCLE` :669). Both
 //! fixtures' recursive predicate is `e1`; the WCOJ rule rewrites
@@ -44,7 +43,7 @@ use xlog_runtime::executor::RecursiveStatsPhase;
 use xlog_runtime::Executor;
 
 // ---------------------------------------------------------------
-// Fixture infrastructure (slice-4 cert pattern)
+// Fixture infrastructure (linear-recursive dispatch certification pattern)
 // ---------------------------------------------------------------
 
 struct DiscardSink;
@@ -227,10 +226,10 @@ fn download_quads(buf: &CudaBuffer) -> Vec<(u32, u32, u32, u32)> {
 }
 
 // ---------------------------------------------------------------
-// Slice-4 fixtures (anchor on test_wcoj_recursive_dispatch.rs)
+// Linear-recursive dispatch fixtures (anchor on test_wcoj_recursive_dispatch.rs)
 // ---------------------------------------------------------------
 
-/// `LINEAR_REC_TRIANGLE` — slice-4 anchor.
+/// `LINEAR_REC_TRIANGLE` — linear-recursive dispatch anchor.
 const LINEAR_REC_TRIANGLE: &str = r#"
     pred e1_seed(u32, u32).
     pred e1(u32, u32).
@@ -245,7 +244,7 @@ const LINEAR_REC_TRIANGLE: &str = r#"
 fn linear_rec_triangle_inputs() -> BTreeMap<&'static str, Vec<(u32, u32)>> {
     let mut m: BTreeMap<&'static str, Vec<(u32, u32)>> = BTreeMap::new();
     m.insert("e1_seed", vec![(1, 2)]);
-    // Productive chain mirrors slice-4: (2,3) → (3,4). The 50 filler
+    // Productive chain mirrors the linear-recursive dispatch fixture: (2,3) → (3,4). The 50 filler
     // edges below inflate `e2.cardinality` past the cost-model
     // formula's `min == 1` floor without touching the productive
     // chain (filler X-prefix 10_000+ is unreachable from any
@@ -260,7 +259,7 @@ fn linear_rec_triangle_inputs() -> BTreeMap<&'static str, Vec<(u32, u32)>> {
     m
 }
 
-/// `LINEAR_REC_4CYCLE` — slice-4 anchor.
+/// `LINEAR_REC_4CYCLE` — linear-recursive dispatch anchor.
 const LINEAR_REC_4CYCLE: &str = r#"
     pred e1_seed(u32, u32).
     pred e1(u32, u32).
@@ -277,7 +276,7 @@ fn linear_rec_cycle4_inputs() -> BTreeMap<&'static str, Vec<(u32, u32)>> {
     let mut m: BTreeMap<&'static str, Vec<(u32, u32)>> = BTreeMap::new();
     m.insert("e1_seed", vec![(1, 2)]);
     // Same filler-inflation strategy as triangle: productive chain
-    // mirrors slice-4, 50 unreachable filler edges grow
+    // mirrors the linear-recursive dispatch fixture, 50 unreachable filler edges grow
     // e2.cardinality past the cost-model floor.
     let mut e2: Vec<(u32, u32)> = vec![(2, 3), (3, 4)];
     for i in 0..50 {
@@ -289,10 +288,10 @@ fn linear_rec_cycle4_inputs() -> BTreeMap<&'static str, Vec<(u32, u32)>> {
     m
 }
 
-/// W4.1 multi-recursive triangle — paper P1 anchor pattern.
+/// Multi-recursive triangle anchored on semi-naive occurrence semantics.
 /// Two distinct recursive IDBs (`r1`, `r2`) feed the head rule
-/// with `recursive_scan_count == 2`. Per paper P1 (semi-naïve
-/// occurrence semantics), W4.1's promoter admits this body and
+/// with `recursive_scan_count == 2`. Under semi-naive occurrence
+/// semantics, the multi-recursive promoter admits this body and
 /// the variant-construction loop dispatches WCOJ once per
 /// recursive occurrence with a non-empty delta.
 const MULTIREC_TRIANGLE: &str = r#"
@@ -342,7 +341,7 @@ fn run_with_config(
 }
 
 // ===============================================================
-// Part A — Iteration-level cardinality evolution (3 tests)
+// Iteration-level cardinality evolution (3 tests)
 // ===============================================================
 
 #[test]
@@ -487,10 +486,10 @@ fn recursive_4cycle_e1_full_card_grows_across_iterations() {
 }
 
 // ===============================================================
-// Part B — `binary_est_for_variant` reflects delta_e1 card (2 tests)
+// `binary_est_for_variant` reflects delta_e1 card (2 tests)
 // ===============================================================
 
-/// Helper for Part B: assert the closure-board acceptance line
+/// Helper for the binary-estimate acceptance line
 /// — `binary_est_for_variant` reflects the iteration's actual
 /// delta. Specifically: across Phase 2 entries for `pred ==
 /// "e1"`, at least two distinct `binary_est_for_variant` values
@@ -498,12 +497,12 @@ fn recursive_4cycle_e1_full_card_grows_across_iterations() {
 /// estimates (NOT seed-only).
 ///
 /// Fixture inflates `e2.cardinality` to 52 (productive chain
-/// unchanged from slice-4; 50 filler edges add to e2's row
+/// unchanged from the linear-recursive dispatch fixture; 50 filler edges add to e2's row
 /// count without contributing to the recursive computation).
 /// With `e2.cardinality = 52`:
 /// * `delta_e1 = 0`: estimate = `(0 * 52 * 0.1).max(1) = 1`.
 /// * `delta_e1 = 1`: estimate = `(1 * 52 * 0.1).max(1) = 5`.
-///   The slice-4-shape chain produces `delta_e1 ∈ {1, 0}` across
+///   The linear-recursive fixture shape produces `delta_e1 ∈ {1, 0}` across
 ///   fixpoint iterations (pre-convergence + convergence), so
 ///   `binary_est_for_variant` evolves through `{5, 1}`.
 fn assert_phase2_binary_est_distinct_across_iterations(
@@ -541,14 +540,14 @@ fn assert_phase2_binary_est_distinct_across_iterations(
         populated.len(),
         e1_phase2.len()
     );
-    // **Plan §"Part B" acceptance line: binary_est evolves.**
+    // Acceptance line: binary_est evolves.
     // Assert ≥ 2 distinct values across iterations.
     let distinct_estimates: std::collections::BTreeSet<u64> = populated.iter().copied().collect();
     assert!(
         distinct_estimates.len() >= 2,
         "binary_est_for_variant for `{}` must produce ≥ 2 distinct \
-         values across iterations (W2.3 acceptance: cost model \
-         reads iteration's actual delta, not seed); got series \
+         values across iterations (cost model reads iteration's \
+         actual delta, not seed); got series \
          {:?} (distinct: {:?}). If all values are 1, the formula's \
          `min == 1` clamp is dominating — increase e2.cardinality \
          (filler edges) so the formula's product clears the floor.",
@@ -581,7 +580,7 @@ fn cycle4_binary_est_reflects_delta_e1_card_per_iteration() {
 }
 
 // ===============================================================
-// Part C — Row-set + dispatch counter parity vs. baseline (4 tests)
+// Row-set + dispatch counter parity vs. baseline (4 tests)
 // ===============================================================
 
 fn force_wcoj_triangle() -> RuntimeConfig {
@@ -608,12 +607,17 @@ fn recursive_triangle_row_set_unchanged_under_default_config() {
     ref_cfg.wcoj_triangle_dispatch = Some(false);
     let exec_ref = run_with_config(&fix, ref_cfg, LINEAR_REC_TRIANGLE, &inputs);
     let ref_rows = download_triples(exec_ref.store().get("tri").expect("tri ref"));
-    // W2.3 path: force-WCOJ on (matches slice-4 cert's dispatch path).
-    let exec_w23 = run_with_config(&fix, force_wcoj_triangle(), LINEAR_REC_TRIANGLE, &inputs);
-    let w23_rows = download_triples(exec_w23.store().get("tri").expect("tri W2.3"));
+    // Trace path: force-WCOJ on (matches the dispatch-certified path).
+    let exec_trace = run_with_config(&fix, force_wcoj_triangle(), LINEAR_REC_TRIANGLE, &inputs);
+    let trace_rows = download_triples(
+        exec_trace
+            .store()
+            .get("tri")
+            .expect("tri recursive stats trace path"),
+    );
     assert_eq!(
-        w23_rows, ref_rows,
-        "W2.3 recursive triangle row set must match binary-join reference"
+        trace_rows, ref_rows,
+        "recursive stats trace triangle row set must match binary-join reference"
     );
 }
 
@@ -625,22 +629,22 @@ fn recursive_triangle_dispatch_counter_unchanged_under_default_config() {
     };
     let inputs = linear_rec_triangle_inputs();
     let exec = run_with_config(&fix, force_wcoj_triangle(), LINEAR_REC_TRIANGLE, &inputs);
-    // Slice-4 baseline asserts ≥ 2 (seed + ≥ 1 variant). W2.3 must
+    // Linear-recursive dispatch baseline asserts ≥ 2 (seed + ≥ 1 variant). The trace must
     // not perturb this counter behavior.
-    // Slice-4 baseline counter (captured from da644e3d HEAD,
-    // preserved bit-identically through W2.3): exactly 4
+    // Linear-recursive dispatch baseline counter (captured from da644e3d HEAD,
+    // preserved bit-identically through the recursive stats trace): exactly 4
     // dispatches for the linear-recursive triangle on this
     // fixture (1 seed + 3 fixpoint variant iterations, the
     // chain `(1,2) → tri(1,2,3) → e1(1,3) → tri(1,3,4) → e1(1,4)`
     // converging on iteration 3). The 50 filler e2 edges
-    // inflate `e2.cardinality` for Part B's binary_est test
+    // inflate `e2.cardinality` for the binary-estimate test
     // but do NOT alter the productive chain — they're
     // unreachable from any iteration's variant body. Counter
     // must equal exactly 4 regardless of fixture filler.
     assert_eq!(
         exec.wcoj_triangle_dispatch_count(),
         4,
-        "linear-recursive triangle WCOJ counter must equal slice-4 \
+        "linear-recursive triangle WCOJ counter must equal dispatch-certified \
          baseline of exactly 4 dispatches (1 seed + 3 fixpoint variants); \
          got {}",
         exec.wcoj_triangle_dispatch_count()
@@ -658,11 +662,16 @@ fn recursive_4cycle_row_set_unchanged_under_default_config() {
     ref_cfg.wcoj_4cycle_dispatch = Some(false);
     let exec_ref = run_with_config(&fix, ref_cfg, LINEAR_REC_4CYCLE, &inputs);
     let ref_rows = download_quads(exec_ref.store().get("cyc").expect("cyc ref"));
-    let exec_w23 = run_with_config(&fix, force_wcoj_4cycle(), LINEAR_REC_4CYCLE, &inputs);
-    let w23_rows = download_quads(exec_w23.store().get("cyc").expect("cyc W2.3"));
+    let exec_trace = run_with_config(&fix, force_wcoj_4cycle(), LINEAR_REC_4CYCLE, &inputs);
+    let trace_rows = download_quads(
+        exec_trace
+            .store()
+            .get("cyc")
+            .expect("cyc recursive stats trace path"),
+    );
     assert_eq!(
-        w23_rows, ref_rows,
-        "W2.3 recursive 4-cycle row set must match binary-join reference"
+        trace_rows, ref_rows,
+        "recursive stats trace 4-cycle row set must match binary-join reference"
     );
 }
 
@@ -674,20 +683,20 @@ fn recursive_4cycle_dispatch_counter_unchanged_under_default_config() {
     };
     let inputs = linear_rec_cycle4_inputs();
     let exec = run_with_config(&fix, force_wcoj_4cycle(), LINEAR_REC_4CYCLE, &inputs);
-    // Slice-4 baseline counter (captured from da644e3d HEAD):
+    // Linear-recursive dispatch baseline counter (captured from da644e3d HEAD):
     // exactly 4 dispatches for the linear-recursive 4-cycle on
     // this fixture. Same shape rationale as triangle.
     assert_eq!(
         exec.wcoj_4cycle_dispatch_count(),
         4,
-        "linear-recursive 4-cycle WCOJ counter must equal slice-4 \
+        "linear-recursive 4-cycle WCOJ counter must equal dispatch-certified \
          baseline of exactly 4 dispatches; got {}",
         exec.wcoj_4cycle_dispatch_count()
     );
 }
 
 // ===============================================================
-// Part D — Multi-recursive bodies (W4.1 paper P1) (1 test)
+// Multi-recursive bodies dispatch WCOJ (1 test)
 // ===============================================================
 
 #[test]
@@ -698,9 +707,9 @@ fn multi_recursive_triangle_per_iteration_update_dispatches_wcoj() {
     };
     let inputs = multirec_inputs();
     let exec = run_with_config(&fix, force_wcoj_triangle(), MULTIREC_TRIANGLE, &inputs);
-    // W4.1 paper-P1 anchor: `tri(X, Y, Z) :- r1(X, Y), r2(Y, Z), r3(X, Z).`
+    // Multi-recursive anchor: `tri(X, Y, Z) :- r1(X, Y), r2(Y, Z), r3(X, Z).`
     // has recursive_scan_count == 2 (r1 + r2 are both recursive
-    // IDBs in the SCC). The W4.1 promoter admits this body; the
+    // IDBs in the SCC). The multi-recursive promoter admits this body; the
     // seeding pass dispatches WCOJ once on the full body, and
     // iter 1 with non-empty `r1_init`/`r2_init` deltas dispatches
     // one variant per recursive occurrence — total counter `>= 2`
@@ -713,10 +722,10 @@ fn multi_recursive_triangle_per_iteration_update_dispatches_wcoj() {
         exec.wcoj_triangle_dispatch_count()
     );
     // Per-iteration trace fires for the recursive predicates
-    // (r1, r2) — W2.3 updates are predicate-level, independent
+    // (r1, r2) — recursive stats updates are predicate-level, independent
     // of whether the promoter dispatches WCOJ on the head rule's
-    // body. The check below preserves the W2.3 invariant verbatim
-    // (recursive_pred_records >= 1) across the W4.1 contract flip.
+    // body. The check below preserves the predicate-level trace invariant
+    // (recursive_pred_records >= 1) across the multi-recursive dispatch contract.
     let trace = exec.last_recursive_stats_trace();
     let recursive_pred_records = trace
         .entries
@@ -725,7 +734,7 @@ fn multi_recursive_triangle_per_iteration_update_dispatches_wcoj() {
         .count();
     assert!(
         recursive_pred_records >= 1,
-        "W2.3 trace must contain at least one r1/r2 record — \
+        "recursive stats trace must contain at least one r1/r2 record — \
          predicate-level updates fire regardless of promoter \
          outcome; got {} records: {:?}",
         recursive_pred_records,

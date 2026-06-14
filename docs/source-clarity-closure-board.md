@@ -662,7 +662,7 @@ Hardware cache terminology such as `L1` and `L2` is allowed when it refers to GP
 | `crates/xlog-prob/tests/aggregate_lifting.rs` | 0 | 2 | true | Renamed the legacy milestone test file and replaced the stale aggregate-lift diagnostic assertion with current count aggregate lifting wording. | v085(2) |
 | `crates/xlog-prob/tests/mc_approx.rs` | 0 | 1 | true | Renamed the legacy milestone test file to describe Monte Carlo approximate-inference coverage. | v085(1) |
 | `crates/xlog-prob/tests/prob_aggregates.rs` | 0 | 1 | true | Renamed the legacy milestone test file and replaced stale probabilistic aggregate diagnostic assertions with current exact aggregate wording. | v085(1) |
-| `crates/xlog-runtime/Cargo.toml` | 4 | 0 | false | W2.3(4) |  |
+| `crates/xlog-runtime/Cargo.toml` | 4 | 0 | true | Replaced recursive-stats trace milestone comments and test target metadata with behavior-based wording. | W2.3(4) |
 | `crates/xlog-runtime/src/executor/delta.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-runtime/src/executor/epistemic_workspace.rs` | 10 | 1 | false | D2H(5), D2(4), G91(1) | G91(1) |
 | `crates/xlog-runtime/src/executor/expression.rs` | 0 | 0 | true |  |  |
@@ -683,7 +683,7 @@ Hardware cache terminology such as `L1` and `L2` is allowed when it refers to GP
 | `crates/xlog-runtime/tests/test_epistemic_gpu_workspace.rs` | 1 | 8 | false | S5(1) | G91(7), D2H(1) |
 | `crates/xlog-runtime/tests/test_epistemic_production_reuse_audit.rs` | 0 | 1 | false |  | D2H(1) |
 | `crates/xlog-runtime/tests/test_w21_part_b.rs` | 4 | 0 | false | W2.1(3), W2.2(1) |  |
-| `crates/xlog-runtime/tests/test_w23_recursive_stats.rs` | 20 | 6 | false | W2.3(8), W4.1(7), P1(5) | W2.3(6) |
+| `crates/xlog-runtime/tests/recursive_stats_trace.rs` | 20 | 6 | true | Renamed the legacy milestone test file and replaced recursive-stats, multi-recursive dispatch, semi-naive occurrence, and dispatch-certified fixture prose/variables with behavior-based wording. | W2.3(8), W4.1(7), P1(5) | W2.3(6) |
 | `crates/xlog-runtime/tests/test_w25_default_flip.rs` | 0 | 1 | false |  | W2.5(1) |
 | `crates/xlog-solve/Cargo.toml` | 0 | 0 | true |  |  |
 | `crates/xlog-solve/benches/solver_bench.rs` | 0 | 0 | true |  |  |
