@@ -193,13 +193,13 @@ pub(super) fn wcoj_decline_on_error(
     Ok(None)
 }
 
-/// Goal-039 G_W63_CHAIN gate. Default ON after G_PRE
-/// measured `evaluate_pct >= 0.60`; `XLOG_WCOJ_W63_CHAIN_ENABLE=0`
+/// Chain dispatcher gate. Default ON after profiler traces showed
+/// chain-shaped rules dominated evaluation time; `XLOG_WCOJ_CHAIN_ENABLE=0`
 /// or `false` disables the route for A/B measurements.
-pub const ENV_WCOJ_W63_CHAIN_ENABLE: &str = "XLOG_WCOJ_W63_CHAIN_ENABLE";
+pub const ENV_WCOJ_CHAIN_ENABLE: &str = "XLOG_WCOJ_CHAIN_ENABLE";
 
-pub(super) fn w63_chain_enabled() -> bool {
-    std::env::var(ENV_WCOJ_W63_CHAIN_ENABLE)
+pub(super) fn chain_dispatch_enabled() -> bool {
+    std::env::var(ENV_WCOJ_CHAIN_ENABLE)
         .map(|v| !(v == "0" || v.eq_ignore_ascii_case("false")))
         .unwrap_or(true)
 }
@@ -270,8 +270,8 @@ enum DispatchMode {
     CostModel,
 }
 
-/// Two rel IDs and key positions extracted from a matched W63 chain
-/// RIR. Inputs are in the promoter's left/right order.
+/// Two rel IDs and key positions extracted from a matched chain RIR.
+/// Inputs are in the promoter's left/right order.
 pub(super) struct ChainRirMatch {
     pub rel_left: RelId,
     pub rel_right: RelId,
@@ -280,9 +280,9 @@ pub(super) struct ChainRirMatch {
     pub output_columns: Vec<ProjectExpr>,
 }
 
-/// Goal-039 G_W63_CHAIN production matcher. The chain shape is
-/// encoded as a first-class `ChainJoin`; malformed non-scan inputs
-/// decline dispatch and execute the captured fallback.
+/// ChainJoin production matcher. The chain shape is encoded as a
+/// first-class `ChainJoin`; malformed non-scan inputs decline dispatch
+/// and execute the captured fallback.
 pub(super) fn match_chain_join(body: &RirNode) -> Option<ChainRirMatch> {
     let RirNode::ChainJoin {
         left,
@@ -1098,9 +1098,7 @@ impl Executor {
                 }
                 Ok(Some(buf))
             }
-            Err(err) => {
-                wcoj_decline_on_error(&mut self.wcoj_error_decline_count, "triangle", err)
-            }
+            Err(err) => wcoj_decline_on_error(&mut self.wcoj_error_decline_count, "triangle", err),
         }
     }
 
@@ -1470,10 +1468,7 @@ impl Executor {
         let mut bound_at: Vec<Option<usize>> = vec![None; num_vars]; // var -> node idx
         let mut nodes: Vec<FjNode> = Vec::new();
         for (i, vars) in atom_vars.iter().enumerate() {
-            let split = vars
-                .iter()
-                .take_while(|v| bound_at[**v].is_some())
-                .count();
+            let split = vars.iter().take_while(|v| bound_at[**v].is_some()).count();
             if vars[split..].iter().any(|v| bound_at[*v].is_some()) {
                 // A bound variable after an unbound one: the trie order
                 // cannot consume it as a key — non-prefix body.
@@ -1554,9 +1549,7 @@ impl Executor {
                 self.free_join_dispatch_count += 1;
                 Ok(Some(buf))
             }
-            Err(err) => {
-                wcoj_decline_on_error(&mut self.wcoj_error_decline_count, "free-join", err)
-            }
+            Err(err) => wcoj_decline_on_error(&mut self.wcoj_error_decline_count, "free-join", err),
         }
     }
 
@@ -1672,10 +1665,7 @@ impl Executor {
         let mut bound_at: Vec<Option<usize>> = vec![None; num_vars];
         let mut nodes: Vec<FjNode> = Vec::new();
         for (i, vars) in atom_vars.iter().enumerate() {
-            let split = vars
-                .iter()
-                .take_while(|v| bound_at[**v].is_some())
-                .count();
+            let split = vars.iter().take_while(|v| bound_at[**v].is_some()).count();
             if vars[split..].iter().any(|v| bound_at[*v].is_some()) {
                 // Non-prefix body (see the materialize dispatcher).
                 return Ok(None);
@@ -1754,11 +1744,9 @@ impl Executor {
                 self.wcoj_groupby_fusion_dispatch_count += 1;
                 Ok(Some(buf))
             }
-            Err(err) => wcoj_decline_on_error(
-                &mut self.wcoj_error_decline_count,
-                "free-join-count",
-                err,
-            ),
+            Err(err) => {
+                wcoj_decline_on_error(&mut self.wcoj_error_decline_count, "free-join-count", err)
+            }
         }
     }
 
@@ -1802,10 +1790,7 @@ impl Executor {
             return Ok(None);
         }
         let (agg_col, agg_op) = aggs[0];
-        if !matches!(
-            agg_op,
-            AggOp::Count | AggOp::Sum | AggOp::Min | AggOp::Max
-        ) {
+        if !matches!(agg_op, AggOp::Count | AggOp::Sum | AggOp::Min | AggOp::Max) {
             return Ok(None);
         }
         let RirNode::Project {
@@ -1816,11 +1801,7 @@ impl Executor {
             return Ok(None);
         };
         // The group projection must contain only plain column references.
-        if columns.is_empty()
-            || !columns
-                .iter()
-                .all(|c| matches!(c, ProjectExpr::Column(_)))
-        {
+        if columns.is_empty() || !columns.iter().all(|c| matches!(c, ProjectExpr::Column(_))) {
             return Ok(None);
         }
         // Triangle and 4-cycle place the variable-order root at output
@@ -1848,11 +1829,9 @@ impl Executor {
             // sum/min/max). The 4-cycle root is output column 0 by
             // construction, so gate on the key here like the triangle.
             if key_is_col0 {
-                if let Some(buf) = self.try_dispatch_wcoj_groupby_root_agg_4cycle(
-                    multiway,
-                    agg_op,
-                    agg_value_col,
-                )? {
+                if let Some(buf) =
+                    self.try_dispatch_wcoj_groupby_root_agg_4cycle(multiway, agg_op, agg_value_col)?
+                {
                     return Ok(Some(buf));
                 }
             }
@@ -1913,12 +1892,16 @@ impl Executor {
             classify_two_col_wcoj_width(buf_yz),
             classify_two_col_wcoj_width(buf_xz),
         ) {
-            (Some(WcojKeyWidth::FourByte), Some(WcojKeyWidth::FourByte), Some(WcojKeyWidth::FourByte)) => {
-                WcojKeyWidth::FourByte
-            }
-            (Some(WcojKeyWidth::EightByte), Some(WcojKeyWidth::EightByte), Some(WcojKeyWidth::EightByte)) => {
-                WcojKeyWidth::EightByte
-            }
+            (
+                Some(WcojKeyWidth::FourByte),
+                Some(WcojKeyWidth::FourByte),
+                Some(WcojKeyWidth::FourByte),
+            ) => WcojKeyWidth::FourByte,
+            (
+                Some(WcojKeyWidth::EightByte),
+                Some(WcojKeyWidth::EightByte),
+                Some(WcojKeyWidth::EightByte),
+            ) => WcojKeyWidth::EightByte,
             _ => return Ok(None),
         };
         // Sum/Min/Max are arithmetic: on the 4-byte path the columns
@@ -1999,11 +1982,9 @@ impl Executor {
                 self.wcoj_groupby_fusion_dispatch_count += 1;
                 Ok(Some(buf))
             }
-            Err(err) => wcoj_decline_on_error(
-                &mut self.wcoj_error_decline_count,
-                "groupby-fusion",
-                err,
-            ),
+            Err(err) => {
+                wcoj_decline_on_error(&mut self.wcoj_error_decline_count, "groupby-fusion", err)
+            }
         }
     }
 
@@ -2198,11 +2179,10 @@ impl Executor {
         self.wcoj_4cycle_dispatch_count
     }
 
-    /// Goal-039 G_W63_CHAIN — count of times a two-atom
-    /// `ChainJoin` routed through the chain
+    /// Count of times a two-atom `ChainJoin` routed through the chain
     /// dispatcher instead of the embedded binary fallback.
-    pub fn w63_chain_dispatch_count(&self) -> u64 {
-        self.w63_chain_dispatch_count
+    pub fn chain_dispatch_count(&self) -> u64 {
+        self.chain_dispatch_count
     }
 
     /// W4.2 — count of times `execute_join` routed an inner-join
@@ -2215,8 +2195,8 @@ impl Executor {
         self.nested_loop_dispatch_count
     }
 
-    /// Goal-039 G_W63_CHAIN dispatch. Shape match is done on the
-    /// production `ChainJoin` emitted by the promoter.
+    /// ChainJoin dispatch. Shape match is done on the production
+    /// `ChainJoin` emitted by the promoter.
     ///
     /// Route order:
     ///   1. sorted eligible U32/Symbol inputs -> W4.3 sort-merge
@@ -2225,11 +2205,11 @@ impl Executor {
     ///
     /// The final projection uses the captured `output_columns`, so
     /// row semantics match `MultiWayJoin.fallback`.
-    pub(super) fn try_dispatch_w63_chain_on_body(
+    pub(super) fn try_dispatch_chain_on_body(
         &mut self,
         body: &RirNode,
     ) -> Result<Option<CudaBuffer>> {
-        if !w63_chain_enabled() {
+        if !chain_dispatch_enabled() {
             return Ok(None);
         }
         let Some(matched) = match_chain_join(body) else {
@@ -2349,7 +2329,7 @@ impl Executor {
         if used_nested_loop {
             self.nested_loop_dispatch_count += 1;
         }
-        self.w63_chain_dispatch_count += 1;
+        self.chain_dispatch_count += 1;
         Ok(Some(projected))
     }
 
@@ -2539,9 +2519,7 @@ impl Executor {
                 self.wcoj_4cycle_dispatch_count += 1;
                 Ok(Some(buf))
             }
-            Err(err) => {
-                wcoj_decline_on_error(&mut self.wcoj_error_decline_count, "4-cycle", err)
-            }
+            Err(err) => wcoj_decline_on_error(&mut self.wcoj_error_decline_count, "4-cycle", err),
         }
     }
 
@@ -3187,9 +3165,7 @@ impl Executor {
                 }
                 Ok(Some(buf))
             }
-            Err(err) => {
-                wcoj_decline_on_error(&mut self.wcoj_error_decline_count, "k-clique", err)
-            }
+            Err(err) => wcoj_decline_on_error(&mut self.wcoj_error_decline_count, "k-clique", err),
         }
     }
 
@@ -3535,8 +3511,8 @@ mod tests {
     use std::sync::{Mutex, OnceLock};
 
     use super::{
-        match_chain_join, match_multiway_triangle, w63_chain_enabled, wcoj_adaptive_enabled,
-        wcoj_gate_enabled, ENV_USE_WCOJ_TRIANGLE_U32, ENV_WCOJ_W63_CHAIN_ENABLE,
+        chain_dispatch_enabled, match_chain_join, match_multiway_triangle, wcoj_adaptive_enabled,
+        wcoj_gate_enabled, ENV_USE_WCOJ_TRIANGLE_U32, ENV_WCOJ_CHAIN_ENABLE,
     };
     use xlog_core::RelId;
     use xlog_ir::rir::ProjectExpr;
@@ -3606,32 +3582,32 @@ mod tests {
     }
 
     #[test]
-    fn w63_chain_env_defaults_on_and_can_disable() {
+    fn chain_dispatch_env_defaults_on_and_can_disable() {
         static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
         let _guard = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
-        let old = std::env::var(ENV_WCOJ_W63_CHAIN_ENABLE).ok();
+        let old = std::env::var(ENV_WCOJ_CHAIN_ENABLE).ok();
         // SAFETY: This test holds a local mutex while mutating the
-        // process-global W63 env var, and restores it before unlock.
+        // process-global chain-dispatch env var, and restores it before unlock.
         unsafe {
-            std::env::remove_var(ENV_WCOJ_W63_CHAIN_ENABLE);
+            std::env::remove_var(ENV_WCOJ_CHAIN_ENABLE);
         }
-        assert!(w63_chain_enabled());
+        assert!(chain_dispatch_enabled());
         unsafe {
-            std::env::set_var(ENV_WCOJ_W63_CHAIN_ENABLE, "0");
+            std::env::set_var(ENV_WCOJ_CHAIN_ENABLE, "0");
         }
-        assert!(!w63_chain_enabled());
+        assert!(!chain_dispatch_enabled());
         unsafe {
-            std::env::set_var(ENV_WCOJ_W63_CHAIN_ENABLE, "false");
+            std::env::set_var(ENV_WCOJ_CHAIN_ENABLE, "false");
         }
-        assert!(!w63_chain_enabled());
+        assert!(!chain_dispatch_enabled());
         unsafe {
-            std::env::set_var(ENV_WCOJ_W63_CHAIN_ENABLE, "1");
+            std::env::set_var(ENV_WCOJ_CHAIN_ENABLE, "1");
         }
-        assert!(w63_chain_enabled());
+        assert!(chain_dispatch_enabled());
         unsafe {
             match old {
-                Some(v) => std::env::set_var(ENV_WCOJ_W63_CHAIN_ENABLE, v),
-                None => std::env::remove_var(ENV_WCOJ_W63_CHAIN_ENABLE),
+                Some(v) => std::env::set_var(ENV_WCOJ_CHAIN_ENABLE, v),
+                None => std::env::remove_var(ENV_WCOJ_CHAIN_ENABLE),
             }
         }
     }

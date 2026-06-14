@@ -2330,8 +2330,8 @@ pub struct EpistemicGpuRuntimeCounters {
     pub wcoj_triangle_dispatch_count: u64,
     /// Successful 4-cycle WCOJ dispatches installed by the executor.
     pub wcoj_4cycle_dispatch_count: u64,
-    /// Successful Goal-039 chain dispatches installed by the executor.
-    pub w63_chain_dispatch_count: u64,
+    /// Successful chain dispatches installed by the executor.
+    pub chain_dispatch_count: u64,
     /// Successful K=5 clique WCOJ dispatches installed by the executor.
     pub wcoj_clique5_dispatch_count: u64,
     /// Successful K=6 clique WCOJ dispatches installed by the executor.
@@ -2410,10 +2410,10 @@ impl EpistemicGpuRuntimeCounters {
                 self.wcoj_4cycle_dispatch_count,
                 before.wcoj_4cycle_dispatch_count,
             )?,
-            w63_chain_dispatch_count: Self::checked_counter_delta(
-                "w63_chain_dispatch_count",
-                self.w63_chain_dispatch_count,
-                before.w63_chain_dispatch_count,
+            chain_dispatch_count: Self::checked_counter_delta(
+                "chain_dispatch_count",
+                self.chain_dispatch_count,
+                before.chain_dispatch_count,
             )?,
             wcoj_clique5_dispatch_count: Self::checked_counter_delta(
                 "wcoj_clique5_dispatch_count",
@@ -2487,9 +2487,9 @@ impl EpistemicGpuRuntimeCounters {
             wcoj_4cycle_dispatch_count: self
                 .wcoj_4cycle_dispatch_count
                 .saturating_sub(before.wcoj_4cycle_dispatch_count),
-            w63_chain_dispatch_count: self
-                .w63_chain_dispatch_count
-                .saturating_sub(before.w63_chain_dispatch_count),
+            chain_dispatch_count: self
+                .chain_dispatch_count
+                .saturating_sub(before.chain_dispatch_count),
             wcoj_clique5_dispatch_count: self
                 .wcoj_clique5_dispatch_count
                 .saturating_sub(before.wcoj_clique5_dispatch_count),
@@ -3499,7 +3499,7 @@ impl Executor {
         EpistemicGpuRuntimeCounters {
             wcoj_triangle_dispatch_count: self.wcoj_triangle_dispatch_count(),
             wcoj_4cycle_dispatch_count: self.wcoj_4cycle_dispatch_count(),
-            w63_chain_dispatch_count: self.w63_chain_dispatch_count(),
+            chain_dispatch_count: self.chain_dispatch_count(),
             wcoj_clique5_dispatch_count: self.wcoj_clique5_dispatch_count(),
             wcoj_clique6_dispatch_count: self.wcoj_clique6_dispatch_count(),
             wcoj_clique7_dispatch_count: self.wcoj_clique7_dispatch_count(),

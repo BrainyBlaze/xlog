@@ -42,7 +42,7 @@ impl Executor {
     /// once per rule per call.
     fn execute_wcoj_or_fallback_node(&mut self, node: &RirNode) -> Result<CudaBuffer> {
         if let RirNode::ChainJoin { .. } = node {
-            if let Some(buf) = self.try_dispatch_w63_chain_on_body(node)? {
+            if let Some(buf) = self.try_dispatch_chain_on_body(node)? {
                 return Ok(buf);
             }
             return self.execute_node(node);
@@ -193,15 +193,11 @@ impl Executor {
                 } else {
                     // Non-recursive SCC: execute rules once, union results for same predicate.
                     for rule in rules {
-                        // Goal-039 G_W63_CHAIN — route two-atom
-                        // ChainJoin bodies before the
-                        // triangle/4-cycle/KC attempts. The
-                        // dispatcher silently declines on non-chain
-                        // bodies or when the env gate disables the
-                        // route.
-                        if let Some(chain_result) =
-                            self.try_dispatch_w63_chain_on_body(&rule.body)?
-                        {
+                        // Route two-atom ChainJoin bodies before the
+                        // triangle/4-cycle/KC attempts. The dispatcher
+                        // silently declines on non-chain bodies or when
+                        // the env gate disables the route.
+                        if let Some(chain_result) = self.try_dispatch_chain_on_body(&rule.body)? {
                             if let Some(existing) = self.store.get(&rule.head) {
                                 let merged = self.provider.union_gpu(existing, &chain_result)?;
                                 self.store_put(&rule.head, merged);

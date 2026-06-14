@@ -1,6 +1,6 @@
-//! Goal-039 G_W63_CHAIN cert.
+//! ChainJoin production route fallback identity and timing checks.
 //!
-//! The production route emits `RirNode::ChainJoin`. This cert
+//! The production route emits `RirNode::ChainJoin`. This test
 //! proves the end-to-end path has the required fallback identity:
 //! default-on chain dispatch and env-disabled fallback produce the same
 //! rows, while the dispatch counter distinguishes the paths.
@@ -177,17 +177,42 @@ fn chain_fixture_n(n: u32) -> BTreeMap<&'static str, Vec<(u32, u32)>> {
     m
 }
 
-fn g39_pre_trace_path() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../docs/evidence/2026-05-14-g39-pre-profiler-trace/g39-pre-trace-50.jsonl")
+fn chain_profiler_trace_path() -> PathBuf {
+    let evidence_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../docs/evidence");
+    for dir_entry in fs::read_dir(&evidence_root).expect("read evidence root") {
+        let dir = dir_entry.expect("read evidence directory entry").path();
+        if !dir.is_dir() {
+            continue;
+        }
+        let Some(dir_name) = dir.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        if !dir_name.ends_with("pre-profiler-trace") {
+            continue;
+        }
+        for file_entry in fs::read_dir(&dir).expect("read profiler trace directory") {
+            let file = file_entry.expect("read profiler trace entry").path();
+            let Some(file_name) = file.file_name().and_then(|name| name.to_str()) else {
+                continue;
+            };
+            if file_name.ends_with("trace-50.jsonl") {
+                return file;
+            }
+        }
+    }
+    panic!(
+        "chain profiler trace fixture not found under {}",
+        evidence_root.display()
+    );
 }
 
-fn load_m37c_chain_trace_subset(limit: usize) -> (Vec<u32>, u128) {
-    let text = fs::read_to_string(g39_pre_trace_path()).expect("read G_PRE trace");
+fn load_chain_profiler_trace_subset(limit: usize) -> (Vec<u32>, u128) {
+    let text = fs::read_to_string(chain_profiler_trace_path()).expect("read profiler trace");
     let mut rows = Vec::with_capacity(limit);
     let mut baseline_ns = 0u128;
     for line in text.lines() {
-        let value: serde_json::Value = serde_json::from_str(line).expect("parse G_PRE JSONL row");
+        let value: serde_json::Value =
+            serde_json::from_str(line).expect("parse profiler JSONL row");
         if value.get("kind").and_then(|v| v.as_str()) != Some("xlog_evaluate_step") {
             continue;
         }
@@ -210,7 +235,7 @@ fn load_m37c_chain_trace_subset(limit: usize) -> (Vec<u32>, u128) {
     }
     assert!(
         rows.len() >= limit,
-        "G_PRE trace must contain at least {limit} chain-shaped invocations"
+        "profiler trace must contain at least {limit} chain-shaped invocations"
     );
     (rows, baseline_ns)
 }
@@ -249,8 +274,8 @@ fn env_lock() -> &'static Mutex<()> {
 
 #[test]
 fn chain_dispatch_default_on_matches_env_disabled_fallback() {
-    let _guard = env_lock().lock().expect("W63 env lock poisoned");
-    let old = std::env::var("XLOG_WCOJ_W63_CHAIN_ENABLE").ok();
+    let _guard = env_lock().lock().expect("chain env lock poisoned");
+    let old = std::env::var("XLOG_WCOJ_CHAIN_ENABLE").ok();
     let Some(fix) = make_runtime_backed_fixture() else {
         eprintln!("Skipping: CUDA runtime unavailable");
         return;
@@ -258,7 +283,7 @@ fn chain_dispatch_default_on_matches_env_disabled_fallback() {
     let inputs = chain_fixture();
 
     unsafe {
-        std::env::set_var("XLOG_WCOJ_W63_CHAIN_ENABLE", "0");
+        std::env::set_var("XLOG_WCOJ_CHAIN_ENABLE", "0");
     }
     let fallback = run_chain(Arc::clone(&fix.provider), &fix.memory, &inputs);
     let fallback_rows: BTreeSet<(u32, u32)> = download_pairs(
@@ -269,10 +294,10 @@ fn chain_dispatch_default_on_matches_env_disabled_fallback() {
     )
     .into_iter()
     .collect();
-    assert_eq!(fallback.w63_chain_dispatch_count(), 0);
+    assert_eq!(fallback.chain_dispatch_count(), 0);
 
     unsafe {
-        std::env::remove_var("XLOG_WCOJ_W63_CHAIN_ENABLE");
+        std::env::remove_var("XLOG_WCOJ_CHAIN_ENABLE");
     }
     let dispatched = run_chain(Arc::clone(&fix.provider), &fix.memory, &inputs);
     let dispatched_rows: BTreeSet<(u32, u32)> = download_pairs(
@@ -286,12 +311,12 @@ fn chain_dispatch_default_on_matches_env_disabled_fallback() {
 
     unsafe {
         match old {
-            Some(v) => std::env::set_var("XLOG_WCOJ_W63_CHAIN_ENABLE", v),
-            None => std::env::remove_var("XLOG_WCOJ_W63_CHAIN_ENABLE"),
+            Some(v) => std::env::set_var("XLOG_WCOJ_CHAIN_ENABLE", v),
+            None => std::env::remove_var("XLOG_WCOJ_CHAIN_ENABLE"),
         }
     }
 
-    assert_eq!(dispatched.w63_chain_dispatch_count(), 1);
+    assert_eq!(dispatched.chain_dispatch_count(), 1);
     assert_eq!(dispatched_rows.len(), 128);
     assert_eq!(dispatched_rows, fallback_rows);
 }
@@ -303,7 +328,7 @@ fn timed_loaded_chain_runs(
     iterations: u32,
 ) -> (Duration, u64) {
     let (plan, mut executor) = prepare_chain_executor(provider, memory, inputs);
-    let start_dispatches = executor.w63_chain_dispatch_count();
+    let start_dispatches = executor.chain_dispatch_count();
     let start = Instant::now();
     for _ in 0..iterations {
         executor.store_mut().remove("out");
@@ -312,16 +337,16 @@ fn timed_loaded_chain_runs(
     (
         start.elapsed(),
         executor
-            .w63_chain_dispatch_count()
+            .chain_dispatch_count()
             .saturating_sub(start_dispatches),
     )
 }
 
 #[test]
-#[ignore = "performance smoke; run manually for W63 timing evidence"]
+#[ignore = "performance smoke; run manually for chain timing evidence"]
 fn chain_dispatch_timing_smoke_sorted_threshold_cell() {
-    let _guard = env_lock().lock().expect("W63 env lock poisoned");
-    let old = std::env::var("XLOG_WCOJ_W63_CHAIN_ENABLE").ok();
+    let _guard = env_lock().lock().expect("chain env lock poisoned");
+    let old = std::env::var("XLOG_WCOJ_CHAIN_ENABLE").ok();
     let Some(fix) = make_runtime_backed_fixture() else {
         eprintln!("Skipping: CUDA runtime unavailable");
         return;
@@ -330,27 +355,27 @@ fn chain_dispatch_timing_smoke_sorted_threshold_cell() {
     let iterations = 20;
 
     unsafe {
-        std::env::set_var("XLOG_WCOJ_W63_CHAIN_ENABLE", "0");
+        std::env::set_var("XLOG_WCOJ_CHAIN_ENABLE", "0");
     }
     let (fallback_elapsed, fallback_dispatches) =
         timed_loaded_chain_runs(Arc::clone(&fix.provider), &fix.memory, &inputs, iterations);
 
     unsafe {
-        std::env::remove_var("XLOG_WCOJ_W63_CHAIN_ENABLE");
+        std::env::remove_var("XLOG_WCOJ_CHAIN_ENABLE");
     }
     let (chain_elapsed, chain_dispatches) =
         timed_loaded_chain_runs(Arc::clone(&fix.provider), &fix.memory, &inputs, iterations);
 
     unsafe {
         match old {
-            Some(v) => std::env::set_var("XLOG_WCOJ_W63_CHAIN_ENABLE", v),
-            None => std::env::remove_var("XLOG_WCOJ_W63_CHAIN_ENABLE"),
+            Some(v) => std::env::set_var("XLOG_WCOJ_CHAIN_ENABLE", v),
+            None => std::env::remove_var("XLOG_WCOJ_CHAIN_ENABLE"),
         }
     }
 
     let ratio = fallback_elapsed.as_secs_f64() / chain_elapsed.as_secs_f64();
     eprintln!(
-        "W63_CHAIN_TIMING sorted_threshold n=2000 iterations={} fallback_ms={:.3} chain_ms={:.3} ratio={:.6} fallback_dispatches={} chain_dispatches={}",
+        "CHAIN_DISPATCH_TIMING sorted_threshold n=2000 iterations={} fallback_ms={:.3} chain_ms={:.3} ratio={:.6} fallback_dispatches={} chain_dispatches={}",
         iterations,
         fallback_elapsed.as_secs_f64() * 1000.0,
         chain_elapsed.as_secs_f64() * 1000.0,
@@ -363,10 +388,10 @@ fn chain_dispatch_timing_smoke_sorted_threshold_cell() {
 }
 
 #[test]
-#[ignore = "acceptance timing; run manually for M_W63.2"]
+#[ignore = "acceptance timing; run manually for synthetic large-chain gate"]
 fn chain_dispatch_timing_synthetic_977k() {
-    let _guard = env_lock().lock().expect("W63 env lock poisoned");
-    let old = std::env::var("XLOG_WCOJ_W63_CHAIN_ENABLE").ok();
+    let _guard = env_lock().lock().expect("chain env lock poisoned");
+    let old = std::env::var("XLOG_WCOJ_CHAIN_ENABLE").ok();
     let Some(fix) = make_runtime_backed_fixture_with_budget(512 * 1024 * 1024) else {
         eprintln!("Skipping: CUDA runtime unavailable");
         return;
@@ -375,27 +400,27 @@ fn chain_dispatch_timing_synthetic_977k() {
     let iterations = 3;
 
     unsafe {
-        std::env::set_var("XLOG_WCOJ_W63_CHAIN_ENABLE", "0");
+        std::env::set_var("XLOG_WCOJ_CHAIN_ENABLE", "0");
     }
     let (fallback_elapsed, fallback_dispatches) =
         timed_loaded_chain_runs(Arc::clone(&fix.provider), &fix.memory, &inputs, iterations);
 
     unsafe {
-        std::env::remove_var("XLOG_WCOJ_W63_CHAIN_ENABLE");
+        std::env::remove_var("XLOG_WCOJ_CHAIN_ENABLE");
     }
     let (chain_elapsed, chain_dispatches) =
         timed_loaded_chain_runs(Arc::clone(&fix.provider), &fix.memory, &inputs, iterations);
 
     unsafe {
         match old {
-            Some(v) => std::env::set_var("XLOG_WCOJ_W63_CHAIN_ENABLE", v),
-            None => std::env::remove_var("XLOG_WCOJ_W63_CHAIN_ENABLE"),
+            Some(v) => std::env::set_var("XLOG_WCOJ_CHAIN_ENABLE", v),
+            None => std::env::remove_var("XLOG_WCOJ_CHAIN_ENABLE"),
         }
     }
 
     let ratio = fallback_elapsed.as_secs_f64() / chain_elapsed.as_secs_f64();
     eprintln!(
-        "W63_CHAIN_TIMING synthetic_977k n=977000 iterations={} fallback_ms={:.3} chain_ms={:.3} ratio={:.6} fallback_dispatches={} chain_dispatches={}",
+        "CHAIN_DISPATCH_TIMING synthetic_977k n=977000 iterations={} fallback_ms={:.3} chain_ms={:.3} ratio={:.6} fallback_dispatches={} chain_dispatches={}",
         iterations,
         fallback_elapsed.as_secs_f64() * 1000.0,
         chain_elapsed.as_secs_f64() * 1000.0,
@@ -407,23 +432,23 @@ fn chain_dispatch_timing_synthetic_977k() {
     assert_eq!(chain_dispatches, iterations as u64);
     assert!(
         ratio >= 1.5,
-        "M_W63.2 gate requires synthetic 977K ratio >= 1.5x, got {ratio:.6}x"
+        "synthetic large-chain gate requires ratio >= 1.5x, got {ratio:.6}x"
     );
 }
 
 #[test]
-#[ignore = "acceptance timing; run manually for M_W63.1"]
-fn chain_dispatch_timing_m37c_trace_subset_128() {
-    let _guard = env_lock().lock().expect("W63 env lock poisoned");
-    let old = std::env::var("XLOG_WCOJ_W63_CHAIN_ENABLE").ok();
+#[ignore = "acceptance timing; run manually for profiler-trace gate"]
+fn chain_dispatch_timing_profiler_trace_subset_128() {
+    let _guard = env_lock().lock().expect("chain env lock poisoned");
+    let old = std::env::var("XLOG_WCOJ_CHAIN_ENABLE").ok();
     let Some(fix) = make_runtime_backed_fixture_with_budget(256 * 1024 * 1024) else {
         eprintln!("Skipping: CUDA runtime unavailable");
         return;
     };
-    let (rows, baseline_ns) = load_m37c_chain_trace_subset(128);
+    let (rows, baseline_ns) = load_chain_profiler_trace_subset(128);
 
     unsafe {
-        std::env::remove_var("XLOG_WCOJ_W63_CHAIN_ENABLE");
+        std::env::remove_var("XLOG_WCOJ_CHAIN_ENABLE");
     }
     let mut chain_elapsed = Duration::from_nanos(0);
     let mut dispatches = 0u64;
@@ -435,7 +460,7 @@ fn chain_dispatch_timing_m37c_trace_subset_128() {
         let start = Instant::now();
         executor.execute_plan(&plan).expect("execute trace chain");
         chain_elapsed += start.elapsed();
-        dispatches += executor.w63_chain_dispatch_count();
+        dispatches += executor.chain_dispatch_count();
         output_rows += fix
             .provider
             .device_row_count(executor.store().get("out").expect("out relation"))
@@ -444,8 +469,8 @@ fn chain_dispatch_timing_m37c_trace_subset_128() {
 
     unsafe {
         match old {
-            Some(v) => std::env::set_var("XLOG_WCOJ_W63_CHAIN_ENABLE", v),
-            None => std::env::remove_var("XLOG_WCOJ_W63_CHAIN_ENABLE"),
+            Some(v) => std::env::set_var("XLOG_WCOJ_CHAIN_ENABLE", v),
+            None => std::env::remove_var("XLOG_WCOJ_CHAIN_ENABLE"),
         }
     }
 
@@ -453,12 +478,12 @@ fn chain_dispatch_timing_m37c_trace_subset_128() {
     let chain_ms = chain_elapsed.as_secs_f64() * 1000.0;
     let ratio = baseline_ms / chain_ms;
     eprintln!(
-        "W63_CHAIN_TIMING m37c_trace_subset invocations=128 baseline_ms={:.3} chain_ms={:.3} ratio={:.6} dispatches={} output_rows={}",
+        "CHAIN_DISPATCH_TIMING profiler_trace_subset invocations=128 baseline_ms={:.3} chain_ms={:.3} ratio={:.6} dispatches={} output_rows={}",
         baseline_ms, chain_ms, ratio, dispatches, output_rows
     );
     assert_eq!(dispatches, 128);
     assert!(
         ratio >= 2.0,
-        "M_W63.1 gate requires m37c trace subset ratio >= 2.0x, got {ratio:.6}x"
+        "profiler-trace gate requires ratio >= 2.0x, got {ratio:.6}x"
     );
 }

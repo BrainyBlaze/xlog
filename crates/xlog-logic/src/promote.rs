@@ -1,5 +1,5 @@
 //! v0.6.5 slice 1 — `MultiWayJoin` promotion pass.
-//! Goal-039 W6.3 — `ChainJoin` promotion for 2-atom chains.
+//! `ChainJoin` promotion for 2-atom chains.
 //! v0.6.5 slice 4 — recursive-SCC promotion gated on linear recursion.
 //!
 //! Walks an [`ExecutionPlan`] (post-lowering, post-optimizer) and
@@ -142,9 +142,9 @@ pub fn promote_multiway(
             // after the W4.1 `rewrite_scan_nth` fix at
             // `crates/xlog-runtime/src/executor/rewrite.rs:303-311 +
             // :477-504`.
-            // Goal-039 G_W63_CHAIN: a 2-atom chain is not
+            // ChainJoin promotion: a 2-atom chain is not
             // paper-prescribed WCOJ; it is xlog-original routing
-            // motivated by the G_PRE trace. Production emits a
+            // motivated by profiler traces. Production emits a
             // first-class `ChainJoin` so walkers and dispatchers can
             // distinguish the chain route from paper-derived
             // `MultiWayJoin` shapes.
@@ -1016,7 +1016,7 @@ fn try_promote_triangle(
     })
 }
 
-/// Goal-039 G_W63_CHAIN: recognize a 2-atom inner chain
+/// Recognize a 2-atom inner chain
 /// `Project(Join(Scan, Scan))` with exactly one shared key column
 /// and wrap it as a production `ChainJoin`.
 fn try_promote_chain(node: &RirNode) -> Option<RirNode> {
