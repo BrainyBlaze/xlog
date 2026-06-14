@@ -26,7 +26,8 @@ extern "C" __global__ void extract_nonzero_indices(
 }
 
 /// Fill COO arrays from device-side mask + prefix-sum.
-/// Reads write offset from d_offsets[offset_idx] on device, avoiding mask D2H.
+/// Reads write offset from d_offsets[offset_idx] on device, avoiding a
+/// device-to-host mask copy.
 /// For each set bit in mask, writes the corresponding fact_index and cand_value
 /// into the COO arrays at the position determined by (offset + prefix_sum[tid]).
 ///
