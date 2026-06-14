@@ -1,5 +1,5 @@
-// crates/xlog-integration/tests/test_w51_skewed_multiway_gpu_cert.rs
-//! W5.1 skewed multiway GPU certification.
+// crates/xlog-integration/tests/test_skewed_multiway_gpu.rs
+//! Skewed multiway GPU WCOJ dispatch and output parity.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -176,7 +176,7 @@ fn run_program(
     executor
 }
 
-const SKEWED_MULTIWAY_GPU_CERT: &str = r#"
+const SKEWED_MULTIWAY_GPU_PROGRAM: &str = r#"
     pred big(u32, u32).
     pred small_a(u32, u32).
     pred small_b(u32, u32).
@@ -289,7 +289,7 @@ fn skewed_multiway_gpu_triangle_matches_typed_cpu_oracle() {
         Arc::clone(&fix.provider),
         &fix.memory,
         RuntimeConfig::default().with_wcoj_triangle_dispatch(Some(true)),
-        SKEWED_MULTIWAY_GPU_CERT,
+        SKEWED_MULTIWAY_GPU_PROGRAM,
         &inputs,
     );
 
@@ -297,32 +297,32 @@ fn skewed_multiway_gpu_triangle_matches_typed_cpu_oracle() {
     let fourcycle_counter = executor.wcoj_4cycle_dispatch_count();
     let clique5_counter = executor.wcoj_clique5_dispatch_count();
     let clique6_counter = executor.wcoj_clique6_dispatch_count();
-    eprintln!("Skewed multiway W5.1 measured wcoj_triangle_dispatch_count={triangle_counter}");
+    eprintln!("Skewed multiway GPU measured wcoj_triangle_dispatch_count={triangle_counter}");
     eprintln!(
-        "Skewed multiway W5.1 measured wcoj_4cycle_dispatch_count={fourcycle_counter}, \
+        "Skewed multiway GPU measured wcoj_4cycle_dispatch_count={fourcycle_counter}, \
          wcoj_clique5_dispatch_count={clique5_counter}, \
          wcoj_clique6_dispatch_count={clique6_counter}"
     );
     assert_eq!(
         triangle_counter, 1,
-        "skewed multiway triangle cert must dispatch exactly once"
+        "skewed multiway triangle test must dispatch exactly once"
     );
     assert_eq!(
         fourcycle_counter, 0,
-        "skewed multiway cert must not dispatch the 4-cycle path"
+        "skewed multiway test must not dispatch the 4-cycle path"
     );
     assert_eq!(
         clique5_counter, 0,
-        "skewed multiway cert must not dispatch the clique5 path"
+        "skewed multiway test must not dispatch the clique5 path"
     );
     assert_eq!(
         clique6_counter, 0,
-        "skewed multiway cert must not dispatch the clique6 path"
+        "skewed multiway test must not dispatch the clique6 path"
     );
 
     let gpu_rows = download_triples(executor.store().get("result").expect("result"));
     eprintln!(
-        "Skewed multiway W5.1 measured row_set_size={}",
+        "Skewed multiway GPU measured row_set_size={}",
         gpu_rows.len()
     );
     assert_eq!(
