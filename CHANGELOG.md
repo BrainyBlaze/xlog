@@ -20,9 +20,22 @@ All notable changes to this project are documented in this file.
   sparse/long-chain fixpoints (measured ≤1.161× there, no regression). Kill
   switch `XLOG_DISABLE_FACTORIZED_DELTA=1`; observability via
   `Executor::factorized_delta_dispatch_count()`. u32/Symbol arity-2 only;
-  other widths, shapes, and over-cap domains decline silently to the existing
-  hash-join → diff path. Spike (S3) and production-dispatch (S4) gate evidence
-  under `docs/evidence/2026-06-1{2,4}-s{3,4}-factorized-delta*/`.
+  other widths and shapes decline silently to the existing hash-join → diff
+  path. Spike (S3) and production-dispatch (S4) gate evidence under
+  `docs/evidence/2026-06-1{2,4}-s{3,4}-factorized-delta*/`.
+- *(runtime)* **D3 sparse-domain route.** Domains above the dense cap (which
+  previously declined to legacy) now route through a GPU open-addressing
+  hash-set novel-set with no `domain²` term, so transitive closure over large
+  sparse graphs is accelerated too. The table is sized to the distinct-candidate
+  count (a fixed 8 MiB estimator bitmap), not the witness count; inserts are
+  overflow-safe and decline to legacy if the estimate under-sizes or the table
+  exceeds `XLOG_FACTORIZED_DELTA_MAX_TABLE_BYTES` (default budget/2). Measured
+  on RunPod RTX A4000 through the production executor on a large-domain
+  (~2.09M) blowup TC: **14.63× peak-memory reduction at 0.160× wall-clock**
+  (6.2× faster), row-set parity. The domain-based router selects
+  dense-bitvector | sparse-hash-set | legacy; the same kill switch and counter
+  cover both factorized routes. Evidence under
+  `docs/evidence/2026-06-14-sparse-domain-spike/`.
 
 ### Fixed
 
