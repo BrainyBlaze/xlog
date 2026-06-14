@@ -1,5 +1,5 @@
-// crates/xlog-integration/tests/test_w51_same_generation_gpu_cert.rs
-//! W5.1 Same Generation GPU certification.
+// crates/xlog-integration/tests/test_same_generation_gpu.rs
+//! Same Generation GPU WCOJ dispatch and output parity.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -165,19 +165,19 @@ fn run_program(
     executor
 }
 
-const SAME_GENERATION_GPU_CERT: &str = r#"
+const SAME_GENERATION_GPU_PROGRAM: &str = r#"
     pred parent(u32, u32).
     pred parent_rev(u32, u32).
     pred all_child_pairs(u32, u32).
     pred sg(u32, u32).
     pred sg_witness(u32, u32, u32, u32).
-    pred sg_cert(u32, u32).
+    pred sg_result(u32, u32).
 
     sg(X, Y) :- parent(X, P), parent(Y, P).
     sg(X, Y) :- parent(X, A), sg(A, B), parent(Y, B).
-    sg_cert(X, Y) :- parent(X, P), parent(Y, P).
+    sg_result(X, Y) :- parent(X, P), parent(Y, P).
     sg_witness(W, X, Y, Z) :- parent(W, X), sg(X, Y), parent_rev(Y, Z), all_child_pairs(Z, W).
-    sg_cert(W, Z) :- sg_witness(W, X, Y, Z).
+    sg_result(W, Z) :- sg_witness(W, X, Y, Z).
 "#;
 
 fn sg_reference(parent_edges: &[(u32, u32)]) -> BTreeSet<(u32, u32)> {
@@ -262,12 +262,12 @@ fn same_generation_gpu_4cycle_witness_matches_cpu_oracle() {
         Arc::clone(&fix.provider),
         &fix.memory,
         RuntimeConfig::default().with_wcoj_4cycle_dispatch(Some(true)),
-        SAME_GENERATION_GPU_CERT,
+        SAME_GENERATION_GPU_PROGRAM,
         &inputs,
     );
 
     let four_counter = executor.wcoj_4cycle_dispatch_count();
-    eprintln!("Same Generation W5.1 measured wcoj_4cycle_dispatch_count={four_counter}");
+    eprintln!("Same Generation GPU measured wcoj_4cycle_dispatch_count={four_counter}");
     assert_eq!(
         four_counter, 1,
         "Same Generation 4-cycle witness must dispatch exactly once"
@@ -275,16 +275,16 @@ fn same_generation_gpu_4cycle_witness_matches_cpu_oracle() {
     assert_eq!(
         executor.wcoj_triangle_dispatch_count(),
         0,
-        "Same Generation cert must not dispatch the triangle path"
+        "Same Generation GPU test must not dispatch the triangle path"
     );
 
-    let gpu_rows = download_pairs(executor.store().get("sg_cert").expect("sg_cert"));
+    let gpu_rows = download_pairs(executor.store().get("sg_result").expect("sg_result"));
     eprintln!(
-        "Same Generation W5.1 measured row_set_size={}",
+        "Same Generation GPU measured row_set_size={}",
         gpu_rows.len()
     );
     assert_eq!(
         gpu_rows, cpu_rows,
-        "GPU Same Generation cert output must match the CPU oracle"
+        "GPU Same Generation output must match the CPU oracle"
     );
 }
