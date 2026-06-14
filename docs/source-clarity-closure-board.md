@@ -681,7 +681,7 @@ Hardware cache terminology such as `L1` and `L2` is allowed when it refers to GP
 | `crates/xlog-runtime/src/statistics.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-runtime/tests/statistics_tests.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-runtime/tests/test_epistemic_gpu_workspace.rs` | 66 | 70 | true | Replaced release, item, EGB, K1-K4, scope, and lock labels in comments/doc-comments. `KD45`/`S5` remains as public epistemic terminology. | Replaced task-coded test/helper names and assertion strings. Kept `G91` public Gelfond-1991 enum text and `K5` clique fixture terminology. Expanded hot-path transfer assertion to `device-to-host`. |
-| `crates/xlog-runtime/tests/test_epistemic_production_reuse_audit.rs` | 0 | 1 | false |  | D2H(1) |
+| `crates/xlog-runtime/tests/test_epistemic_production_reuse_audit.rs` | 0 | 1 | true |  | Expanded assertion text from `D2H` to `device-to-host`; retained runtime transfer API field names. |
 | `crates/xlog-runtime/tests/test_w21_part_b.rs` | 4 | 0 | false | W2.1(3), W2.2(1) |  |
 | `crates/xlog-runtime/tests/recursive_stats_trace.rs` | 20 | 6 | true | Renamed the legacy milestone test file and replaced recursive-stats, multi-recursive dispatch, semi-naive occurrence, and dispatch-certified fixture prose/variables with behavior-based wording. | W2.3(8), W4.1(7), P1(5) | W2.3(6) |
 | `crates/xlog-runtime/tests/test_w25_default_flip.rs` | 0 | 1 | false |  | W2.5(1) |
