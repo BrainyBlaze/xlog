@@ -1401,7 +1401,7 @@ Hardware cache terminology such as `L1` and `L2` is allowed when it refers to GP
 | `fuzz/fuzz_targets/fuzz_compiler.rs` | 0 | 0 | true |  |  |
 | `fuzz/fuzz_targets/fuzz_parser.rs` | 0 | 0 | true |  |  |
 | `fuzz/fuzz_targets/fuzz_type_inference.rs` | 0 | 0 | true |  |  |
-| `python/examples/dts_exact_induce_parity.py` | 0 | 1 | false |  | M8(1) |
+| `python/examples/external_consumer_exact_induce_parity.py` | 1 | 1 | true | task/milestone label(1) | external-consumer filename(1) |
 | `python/examples/dts_fit_benchmark.py` | 0 | 0 | true |  |  |
 | `python/examples/ilp_showcase.py` | 0 | 0 | true |  |  |
 | `python/pyproject.toml` | 0 | 0 | true |  |  |

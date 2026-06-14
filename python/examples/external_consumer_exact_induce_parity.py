@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
-"""M8 Phase 1 — canonical parity harness for induce_exact backends.
+"""Canonical parity harness for induce_exact backends.
 
-Builds one bounded external consumer-shaped ILP request, runs both the python reference
-and the native xlog-induce backend, and reports any structural disagreement.
+Builds one bounded external-consumer-shaped inductive-logic-programming request,
+runs both the Python reference and the native xlog-induce backend, and reports
+any structural disagreement.
 
 Exit codes:
-  0 — both backends produced the same ExactInductionResult
-  1 — mismatch or native backend unavailable
-  2 — setup/environment error (no CUDA, bad build)
+  0 - both backends produced the same ExactInductionResult
+  1 - mismatch or native backend unavailable
+  2 - setup/environment error (no CUDA, bad build)
 
 Used as the cross-repo parity bridge. external consumer integration calls this script for
 confidence; external consumer does not own a duplicate parity implementation.
@@ -88,7 +89,7 @@ def _summarize_result(name: str, result) -> None:
     for c in result.candidates:
         print(
             f"    [{c.topology:6s}] rank={c.local_rank} "
-            f"L={c.left_relation} R={c.right_relation} "
+            f"left={c.left_relation} right={c.right_relation} "
             f"pos={c.positives_covered} neg={c.negatives_covered}"
         )
 
