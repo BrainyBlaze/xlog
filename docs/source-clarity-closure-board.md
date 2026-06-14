@@ -440,7 +440,7 @@ Hardware cache terminology such as `L1` and `L2` is allowed when it refers to GP
 | `crates/xlog-integration/tests/test_wcoj_4cycle_executor_wiring.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-integration/tests/test_wcoj_4cycle_rir_shape_cert.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-integration/tests/test_wcoj_adaptive_default_on.rs` | 0 | 0 | true |  |  |
-| `crates/xlog-integration/tests/test_wcoj_adaptive_dispatch.rs` | 4 | 1 | false | D2H(4) | D2H(1) |
+| `crates/xlog-integration/tests/test_wcoj_adaptive_dispatch.rs` | 0 | 0 | true | - | - |
 | `crates/xlog-integration/tests/test_wcoj_cardinality_cost_model.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-integration/tests/test_wcoj_clique_dispatch.rs` | 10 | 0 | false | W3.2(5), D8(3), W6.4(1), W3.1(1) |  |
 | `crates/xlog-integration/tests/test_wcoj_clique_groupby_fusion.rs` | 3 | 0 | false | D2(2), S1e(1) |  |
