@@ -1,31 +1,30 @@
 // crates/xlog-integration/tests/test_multiway_walker_contract.rs
-//! v0.6.5 slice 2 (D2) — `MultiWayJoin` walker contract cross-crate
-//! tests.
+//! `MultiWayJoin` walker contract cross-crate tests.
 //!
-//! Slice 1 introduced [`xlog_ir::RirNode::MultiWayJoin`] and added
-//! explicit walker arms across the workspace. This file pins the
-//! observable behavior of those arms under several runtime entry
-//! points so slice 2a (4-way kernels) and slice 2b (cost model) can
-//! refactor freely without silently regressing the v0.6.2 fallback
-//! contract.
+//! The runtime has explicit walker arms for
+//! [`xlog_ir::RirNode::MultiWayJoin`] across the workspace. This file
+//! pins the observable behavior of those arms under several runtime
+//! entry points so four-way kernels and cost-model refactors can move
+//! without silently regressing the binary fallback contract.
 //!
 //! Test catalogue:
 //!
-//! * **C1** — `Executor::execute_plan` with WCOJ force-on, triangle
-//!   program: WCOJ counter == 1, row set non-empty (slice 1 happy
+//! * **Force-on dispatch** — `Executor::execute_plan` with WCOJ
+//!   force-on, triangle program: WCOJ counter == 1, row set non-empty
+//!   (force-on happy
 //!   path).
-//! * **C2** — `Executor::execute_node` invoked directly on a
+//! * **Direct node fallback** — `Executor::execute_node` invoked directly on a
 //!   synthesized `MultiWayJoin` body: produces the same row set as
 //!   the embedded `fallback`. Locks the safety-net arm in
 //!   `node_dispatch.rs`.
-//! * **C3** — `Executor::execute_plan` with the WCOJ kill switch
+//! * **Kill-switch fallback** — `Executor::execute_plan` with the WCOJ kill switch
 //!   ON: counter == 0, row set still correct (fallback descent in
 //!   `recursive::execute_stratum_impl`).
-//! * **C4** — `Executor::execute_plan` with `wcoj_triangle_dispatch
+//! * **Adaptive opt-out fallback** — `Executor::execute_plan` with `wcoj_triangle_dispatch
 //!   = Some(false)` (explicit force-off, mirrors the bench's
 //!   `Mode::Off` and the adaptive fall-back outcome): counter == 0,
 //!   row set correct.
-//! * **C5** — `Executor::execute_non_recursive_scc` invoked directly
+//! * **Non-recursive SCC fallback** — `Executor::execute_non_recursive_scc` invoked directly
 //!   with rules carrying a synthesized `MultiWayJoin` body: row set
 //!   matches the fallback's row set, no panic. **Load-bearing**:
 //!   this is the path `xlog-prob::mc::sampling` uses for monotone
@@ -236,8 +235,8 @@ fn run_program(
 
 /// Compute the canonical-correct row set for the triangle program by
 /// running it with the WCOJ gate explicitly OFF — the binary-join
-/// chain. Used as the row-set reference that C1/C2/C5 must match
-/// exactly. Without this, "fallback descent works" tests would pass
+/// chain. Used as the row-set reference that the dispatch and fallback tests
+/// must match exactly. Without this, "fallback descent works" tests would pass
 /// even if the walker silently dropped rows (e.g. returned just the
 /// first triangle).
 fn gate_off_reference_rows(
@@ -258,9 +257,9 @@ fn gate_off_reference_rows(
 /// binary-join `fallback` semantically equivalent to
 /// `tri(X,Y,Z) :- e1(X,Y), e2(Y,Z), e3(X,Z)`. The promoter would
 /// produce this for the same source under the canonical lowered
-/// shape; we build it directly so C2 / C5 can exercise the walker
-/// arms without relying on the promoter (which slice 2a may
-/// generalize).
+/// shape; we build it directly so direct-node and non-recursive-SCC
+/// fallback tests can exercise the walker arms without relying on
+/// the promoter.
 fn build_canonical_triangle_body(rel_xy: u32, rel_yz: u32, rel_xz: u32) -> RirNode {
     use xlog_core::RelId;
     let scan_xy = RirNode::Scan { rel: RelId(rel_xy) };
@@ -307,13 +306,13 @@ fn build_canonical_triangle_body(rel_xy: u32, rel_yz: u32, rel_xz: u32) -> RirNo
 }
 
 // ---------------------------------------------------------------
-// C1 — slice 1 happy path (force-on)
+// Force-on WCOJ dispatch path.
 // ---------------------------------------------------------------
 
 #[test]
-fn c1_force_on_dispatches_and_matches_gate_off_row_set() {
+fn force_on_dispatches_and_matches_gate_off_row_set() {
     let Some(fix) = make_runtime_fixture() else {
-        eprintln!("Skipping C1: CUDA runtime unavailable");
+        eprintln!("Skipping force-on dispatch test: CUDA runtime unavailable");
         return;
     };
     let inputs = triangle_fixture();
@@ -341,13 +340,13 @@ fn c1_force_on_dispatches_and_matches_gate_off_row_set() {
 }
 
 // ---------------------------------------------------------------
-// C2 — direct execute_node on a MultiWayJoin → fallback row set
+// Direct execute_node on a MultiWayJoin descends to the fallback row set.
 // ---------------------------------------------------------------
 
 #[test]
-fn c2_direct_execute_node_descends_to_fallback() {
+fn direct_execute_node_descends_to_fallback() {
     let Some(fix) = make_runtime_fixture() else {
-        eprintln!("Skipping C2: CUDA runtime unavailable");
+        eprintln!("Skipping direct-node fallback test: CUDA runtime unavailable");
         return;
     };
     let inputs = triangle_fixture();
@@ -401,13 +400,13 @@ fn c2_direct_execute_node_descends_to_fallback() {
 }
 
 // ---------------------------------------------------------------
-// C3 — kill switch ON: row set correct, counter == 0
+// Kill switch on: row set correct, counter == 0.
 // ---------------------------------------------------------------
 
 #[test]
-fn c3_kill_switch_falls_back_with_correct_row_set() {
+fn kill_switch_falls_back_with_correct_row_set() {
     let Some(fix) = make_runtime_fixture() else {
-        eprintln!("Skipping C3: CUDA runtime unavailable");
+        eprintln!("Skipping kill-switch fallback test: CUDA runtime unavailable");
         return;
     };
     let inputs = triangle_fixture();
@@ -437,13 +436,13 @@ fn c3_kill_switch_falls_back_with_correct_row_set() {
 }
 
 // ---------------------------------------------------------------
-// C4 — adaptive opt-out fall-back
+// Adaptive opt-out fallback.
 // ---------------------------------------------------------------
 
 #[test]
-fn c4_adaptive_optout_falls_back_with_correct_row_set() {
+fn adaptive_optout_falls_back_with_correct_row_set() {
     let Some(fix) = make_runtime_fixture() else {
-        eprintln!("Skipping C4: CUDA runtime unavailable");
+        eprintln!("Skipping adaptive opt-out fallback test: CUDA runtime unavailable");
         return;
     };
     let inputs = triangle_fixture();
@@ -477,13 +476,13 @@ fn c4_adaptive_optout_falls_back_with_correct_row_set() {
 }
 
 // ---------------------------------------------------------------
-// C5 — execute_non_recursive_scc on synthesized MultiWayJoin (R1)
+// execute_non_recursive_scc on synthesized MultiWayJoin.
 // ---------------------------------------------------------------
 
 #[test]
-fn c5_execute_non_recursive_scc_descends_via_safety_net() {
+fn execute_non_recursive_scc_descends_via_safety_net() {
     let Some(fix) = make_runtime_fixture() else {
-        eprintln!("Skipping C5: CUDA runtime unavailable");
+        eprintln!("Skipping non-recursive SCC safety-net test: CUDA runtime unavailable");
         return;
     };
     let inputs = triangle_fixture();
