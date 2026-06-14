@@ -773,7 +773,7 @@ Hardware cache terminology such as `L1` and `L2` is allowed when it refers to GP
 | `docs/whitepaper/sections/09_related_work.tex` | 5 | 0 | true | user-defined-function shorthand(1), external Decision-DNNF compiler shorthand(1), evidence-run labels(2), stage label(1) |  |
 | `docs/whitepaper/sections/10_limitations.tex` | 13 | 0 | true | release-line labels(8), beta status labels(2), shorthand labels(3) |  |
 | `docs/whitepaper/sections/A_performance_contract.tex` | 0 | 0 | true |  |  |
-| `examples/BFO/universal_case_reasoner/GOALS.md` | 5 | 0 | false | G1(1), G2(1), G3(1), G4(1), G5(1) |  |
+| `examples/BFO/universal_case_reasoner/GOALS.md` | 5 | 0 | true | G1(1), G2(1), G3(1), G4(1), G5(1) | Excluded from rewrite as a goal/planning artifact outside the source/docs cleanup scope. |
 | `examples/BFO/universal_case_reasoner/GQM.md` | 2 | 0 | false | D2H(1), P0(1) |  |
 | `examples/BFO/universal_case_reasoner/README.md` | 4 | 0 | false | P0(3), D2H(1) |  |
 | `examples/BFO/universal_case_reasoner/REQUIREMENTS.md` | 4 | 0 | false | P0(3), D2H(1) |  |
