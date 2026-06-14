@@ -3,8 +3,8 @@
 Scope: Git-tracked source and documentation files only. Superpowers docs, plan files, evidence directories, generated artifacts, result/output directories, build output, and other worktrees are excluded.
 
 Scanned files: 1430
-Unresolved files: 279
-Comment/prose artifact occurrences: 1791
+Unresolved files: 278
+Comment/prose artifact occurrences: 1790
 Code/identifier artifact occurrences: 686
 
 Resolved means this board found no remaining opaque task/milestone labels or external consumer names in the eligible portions of that file.
@@ -36,6 +36,7 @@ Hardware cache terminology such as `L2` is allowed when it refers to GPU level-2
 | `S1d` | aggregate-fused WCOJ 4-cycle group-by-root sum/min/max variants and recorded-groupby U64 value-column min/max widening |
 | `S1e` | aggregate-fused WCOJ K-clique group-by-root count fusion |
 | `W5.2` | hub-skewed WCOJ triangle benchmark fixture |
+| `W66` | bounded CUDA Graph capture/replay for Stage-4 CSM hot-loop paths |
 | `G38` | GPU skew-classifier integration path |
 | `W5.4` | widened-frontier replay determinism certification |
 | `L2` | GPU level-2 cache |
@@ -238,7 +239,7 @@ Hardware cache terminology such as `L2` is allowed when it refers to GPU level-2
 | `crates/xlog-cuda/kernels/circuit.cu` | 0 | 0 | true |  |  |
 | `crates/xlog-cuda/kernels/cnf.cu` | 0 | 0 | true |  |  |
 | `crates/xlog-cuda/kernels/d4.cu` | 0 | 0 | true |  |  |
-| `crates/xlog-cuda/kernels/dedup.cu` | 1 | 0 | false | W66(1) |  |
+| `crates/xlog-cuda/kernels/dedup.cu` | 0 | 0 | true |  |  |
 | `crates/xlog-cuda/kernels/epistemic.cu` | 0 | 0 | true |  |  |
 | `crates/xlog-cuda/kernels/filter.cu` | 0 | 0 | true |  |  |
 | `crates/xlog-cuda/kernels/groupby.cu` | 3 | 0 | false | S1c(2), D1(1) |  |
