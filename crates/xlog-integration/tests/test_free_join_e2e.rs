@@ -557,3 +557,109 @@ fn free_join_fused_count_fires_with_kill_switch_parity() {
         assert_eq!(fj_count, 0, "{kill} must keep the free join counter at 0");
     }
 }
+
+// ---------------------------------------------------------------------------
+// D2 skew/order decider (@dts-dlm-main's Tier-2 gate). Free Join derives
+// its plan from the promoter's slot/traversal order with the prefix
+// constraint (a probe's keys must be a leading prefix), so it CANNOT
+// reorder a chain to start from a selective tail. This builds an
+// adversarial chain whose prefix blows up but whose result is tiny (only
+// one tail path survives), and compares FJ's peak memory against the
+// binary fallback's. If FJ's fixed order materializes a much larger peak
+// than binary, that is a real order-loss only W2.x leader/order stats
+// (Tier 2) can fix; if FJ matches/beats binary, the fail-open veto (small
+// joins) plus FJ's existing handling suffice and Tier 1 closes.
+//
+// Local peak-memory measurement (functional count via peak_bytes, not
+// wall-clock) — no RunPod needed for the decision; the verdict is the
+// finding and is printed, not hard-asserted (correctness + FJ-fires ARE
+// asserted).
+
+/// Blow-up chain: q(A,E) :- e1(A,B), e2(B,C), e3(C,D), e4(D,E).
+/// e1: A=1 → B in 0..N. e2: identity (keeps prefix N). e3: each C → N D's
+/// (prefix blows to N²). e4: ONLY D=0 has an E ⇒ result = 1 row. FJ must
+/// expand the N² prefix before e4 collapses it; a tail-first order would
+/// stay tiny throughout.
+fn blowup_chain_inputs(n: u32) -> BTreeMap<&'static str, Vec<(u32, u32)>> {
+    let mut m: BTreeMap<&str, Vec<(u32, u32)>> = BTreeMap::new();
+    m.insert("e1", (0..n).map(|b| (1u32, b)).collect());
+    m.insert("e2", (0..n).map(|x| (x, x)).collect());
+    let mut e3 = Vec::with_capacity((n * n) as usize);
+    for c in 0..n {
+        for d in 0..n {
+            e3.push((c, c * n + d));
+        }
+    }
+    m.insert("e3", e3);
+    // Only D=0 (which is c*n+d == 0, i.e. c=0,d=0) reaches an E.
+    m.insert("e4", vec![(0u32, 7u32)]);
+    m
+}
+
+const BLOWUP_CHAIN_SOURCE: &str =
+    "q(A, E) :- e1(A, B), e2(B, C), e3(C, D), e4(D, E).";
+
+fn run_with_peak(
+    fix: &Fixture,
+    source: &str,
+    inputs: &BTreeMap<&str, Vec<(u32, u32)>>,
+) -> (Vec<Vec<u32>>, u64, u64) {
+    let mut compiler = Compiler::new();
+    let plan = compiler.compile(source).expect("compile rule");
+    let mut executor = Executor::new(Arc::clone(&fix.provider));
+    for (name, rel_id) in compiler.rel_ids() {
+        executor.register_relation(*rel_id, name);
+    }
+    for (name, rows) in inputs {
+        executor.put_relation(name, upload_binary_u32(&fix.memory, rows));
+    }
+    fix.memory.reset_peak();
+    executor.execute_plan(&plan).expect("execute plan");
+    let peak = fix.memory.peak_bytes();
+    let q = executor.store().get("q").expect("q relation");
+    let rows = download_row_set(&fix.memory, q);
+    (rows, executor.free_join_dispatch_count(), peak)
+}
+
+#[test]
+fn d2_skew_order_decider() {
+    let _guard = env_lock();
+    let Some(fix_on) = make_fixture() else {
+        eprintln!("skipping d2_skew_order_decider: no CUDA device");
+        return;
+    };
+    const N: u32 = 100; // prefix blows to N²=10_000; result = 1 row.
+    let inputs = blowup_chain_inputs(N);
+
+    // FJ ON (default): peak + must fire + correct row set.
+    let (on_rows, fj_count, peak_on) = run_with_peak(&fix_on, BLOWUP_CHAIN_SOURCE, &inputs);
+    assert!(fj_count >= 1, "Free Join must fire on the blow-up chain (got {fj_count})");
+
+    // FJ OFF (binary fallback): peak + correct row set.
+    let fix_off = make_fixture().expect("CUDA fixture");
+    unsafe {
+        std::env::set_var("XLOG_DISABLE_FREE_JOIN", "1");
+    }
+    let (off_rows, off_count, peak_off) = run_with_peak(&fix_off, BLOWUP_CHAIN_SOURCE, &inputs);
+    unsafe {
+        std::env::remove_var("XLOG_DISABLE_FREE_JOIN");
+    }
+    assert_eq!(off_count, 0, "kill switch must force the binary fallback");
+    assert_eq!(on_rows, off_rows, "FJ and binary must agree on the row set");
+
+    let ratio = peak_on as f64 / (peak_off as f64).max(1.0);
+    eprintln!(
+        "[D2 skew/order decider] N={N} result_rows={} | FJ peak={} B / binary peak={} B | FJ/binary peak ratio={ratio:.2}",
+        on_rows.len(),
+        peak_on,
+        peak_off,
+    );
+    if ratio > 1.2 {
+        eprintln!("[D2 skew/order decider] VERDICT: FJ fixed-order materializes a LARGER peak than binary on the adversarial chain → real order-loss only W2.x leader/order stats (Tier 2) can fix. PROMOTE Tier 2 to required.");
+    } else {
+        eprintln!("[D2 skew/order decider] VERDICT: FJ peak <= 1.2x binary on the adversarial chain → no order-loss the binary fallback avoids; the Tier-1 fail-open veto (small joins) suffices. Tier 1 CLOSES; Tier 2 stays a follow-on spike.");
+    }
+    // Evidence test: correctness + FJ-fires are hard-asserted; the ratio
+    // is the recorded decider, not a pass/fail bar.
+    assert_eq!(on_rows.len(), 1, "blow-up chain result must be exactly 1 row");
+}
