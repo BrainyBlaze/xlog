@@ -144,8 +144,8 @@ pub(crate) struct RawCudaView<'a, T> {
 ///
 /// The legacy stream-aware scan helper allocates recursive `block_sums`
 /// buffers inside the helper. CUDA Graph capture records concrete allocation
-/// addresses, so W66 needs the scan topology and scratch buffers to be fixed
-/// before capture begins.
+/// addresses, so bounded CSM CUDA Graph replay needs the scan topology and
+/// scratch buffers to be fixed before capture begins.
 pub(crate) struct MultiblockScanScratchU32 {
     levels: Vec<TrackedCudaSlice<u32>>,
 }
@@ -364,7 +364,7 @@ pub mod wcoj_kernels {
     pub const WCOJ_4CYCLE_GROUPBY_ROOT_COUNT_HG_U64: &str =
         "wcoj_4cycle_groupby_root_count_hg_u64";
     pub const WCOJ_4CYCLE_MATERIALIZE_HG_U64: &str = "wcoj_4cycle_materialize_hg_u64";
-    // W3.2/W6.4 — General-arity clique kernels (k=5..8 from single template).
+    // General-arity clique kernels (k=5..8 from a single template).
     pub const WCOJ_CLIQUE5_COUNT_HG_U32: &str = "wcoj_clique5_count_hg_u32";
     pub const WCOJ_CLIQUE5_MATERIALIZE_HG_U32: &str = "wcoj_clique5_materialize_hg_u32";
     pub const WCOJ_CLIQUE5_COUNT_HG_U64: &str = "wcoj_clique5_count_hg_u64";
@@ -385,7 +385,7 @@ pub mod wcoj_kernels {
         "wcoj_clique5_groupby_root_count_hg_u32";
     pub const WCOJ_CLIQUE6_GROUPBY_ROOT_COUNT_HG_U32: &str =
         "wcoj_clique6_groupby_root_count_hg_u32";
-    // D2 S2 spike — Free Join frontier engine primitives. The work
+    // Free Join frontier engine primitives. The work
     // prefix kernel is width-agnostic (ranges are u32 row indices in
     // every width class); count/emit/probe have u64 data twins.
     pub const FJ_EXPAND_WORK_PREFIX_U32: &str = "fj_expand_work_prefix_u32";
@@ -530,7 +530,7 @@ pub mod ilp_credit_kernels {
     pub const ILP_CREDIT_BACKWARD_F64: &str = "ilp_credit_backward_f64";
 }
 
-/// Kernel function names in the ILP exact-induction module (M8 Phase 1).
+/// Kernel function names in the native bounded exact-induction module.
 pub mod ilp_exact_kernels {
     pub const ILP_EXACT_SCORE: &str = "ilp_exact_score";
     pub const ILP_EXACT_SCORE_U32: &str = "ilp_exact_score_u32";
@@ -600,21 +600,22 @@ pub mod weights_kernels {
         "weights_restore_query_vars_true_batched";
 }
 
-/// Kernel function names in the GPU D4 module (CNF validation + circuit levelization).
+/// Kernel function names in the GPU Decision-DNNF compiler module
+/// (CNF validation + circuit levelization).
 pub mod d4_kernels {
     pub const D4_VALIDATE_CNF: &str = "d4_validate_cnf";
     pub const D4_LEVELIZE_COUNTS: &str = "d4_levelize_counts";
     pub const D4_LEVELIZE_EMIT: &str = "d4_levelize_emit";
-    // Task 4: BFS frontier expansion + unit propagation.
+    // BFS frontier expansion and unit propagation.
     pub const D4_FRONTIER_PREPARE: &str = "d4_frontier_prepare";
     pub const D4_FRONTIER_EXPAND: &str = "d4_frontier_expand";
     pub const D4_FRONTIER_PREPARE_DENSE: &str = "d4_frontier_prepare_dense";
     pub const D4_FRONTIER_EXPAND_DENSE: &str = "d4_frontier_expand_dense";
-    // Task 5: per-frontier D4 DFS worker (count+emit).
+    // Per-frontier Decision-DNNF DFS worker (count+emit).
     pub const D4_COMPILE_COUNT: &str = "d4_compile_count";
     pub const D4_COMPILE_EMIT: &str = "d4_compile_emit";
     pub const D4_CAPTURE_EMIT_META: &str = "d4_capture_emit_meta";
-    // Task 6: GPU smoothing (random-var support + wrapper emission).
+    // GPU smoothing with random-variable support and wrapper emission.
     pub const D4_SUPPORT_LEVEL: &str = "d4_support_level";
     pub const D4_SUPPORT_SET_ROOT_BITS: &str = "d4_support_set_root_bits";
     pub const D4_SMOOTH_COUNT: &str = "d4_smooth_count";
@@ -624,7 +625,7 @@ pub mod d4_kernels {
     pub const D4_SMOOTH_INIT_NODES: &str = "d4_smooth_init_nodes";
     pub const D4_SMOOTH_EMIT_LEVEL: &str = "d4_smooth_emit_level";
     pub const D4_SMOOTH_CHECK_EDGE_CAP: &str = "d4_smooth_check_edge_cap";
-    // Task 6: GPU free-var mask (vars in clauses vs circuit).
+    // GPU free-variable mask for variables in clauses versus the circuit.
     pub const D4_MARK_VARS_IN_CLAUSES: &str = "d4_mark_vars_in_clauses";
     pub const D4_MARK_VARS_IN_CIRCUIT: &str = "d4_mark_vars_in_circuit";
     pub const D4_BUILD_FREE_VAR_MASK: &str = "d4_build_free_var_mask";
@@ -651,13 +652,13 @@ pub mod join_kernels {
     pub const HASH_JOIN_SEMI: &str = "hash_join_semi";
     pub const HASH_JOIN_ANTI: &str = "hash_join_anti";
     pub const INIT_HASH_TABLE: &str = "init_hash_table";
-    /// W4.2 nested-loop inner join (emit-pairs design). Reads
+    /// Nested-loop inner join (emit-pairs design). Reads
     /// the single key column from each side; emits matched
     /// `(left_idx, right_idx)` pairs as two parallel u32 arrays.
     /// Payload columns are materialized after the kernel via
     /// `gather_buffer_by_indices` in the provider fn.
     pub const NESTED_LOOP_JOIN_INNER_U32_1KEY_PAIRS: &str = "nested_loop_join_inner_u32_1key_pairs";
-    /// W4.3 sort-merge inner join (emit-pairs design,
+    /// Sort-merge inner join (emit-pairs design,
     /// caller-asserted pre-sorted inputs). Reads the single
     /// key column from each side, performs per-thread binary
     /// search on the right side to find matched-key runs,
@@ -734,7 +735,7 @@ pub mod sort_kernels {
 
     pub const GATHER_KEYS_F64_LO_U32: &str = "gather_keys_f64_lo_u32";
     pub const GATHER_KEYS_F64_HI_U32: &str = "gather_keys_f64_hi_u32";
-    /// W4.3 sortedness-detection kernel — single-pass adjacent-
+    /// Sort-merge sortedness-detection kernel — single-pass adjacent-
     /// pair check; atomically writes 0 to a u32 flag on
     /// `keys[i] > keys[i+1]`. Caller initializes flag to 1
     /// before launch, reads result post-launch. Used by the
@@ -878,7 +879,7 @@ pub mod sat_kernels {
 /// This prevents memory overflow when joining large tables with high cardinality matches.
 pub const DEFAULT_JOIN_MAX_OUTPUT: usize = 1_000_000;
 
-/// W4.2 nested-loop join eligibility threshold (Cartesian product
+/// Nested-loop join eligibility threshold (Cartesian product
 /// upper bound). The dispatcher routes to nested-loop iff
 /// `num_left * num_right <= NESTED_LOOP_TOTAL_THRESHOLD`; the
 /// provider validates the same invariant fail-closed before any
@@ -1052,19 +1053,19 @@ pub struct CudaKernelProvider {
     /// was actually selected for eligible Inner / LeftOuter cases (and
     /// not selected for Semi / Anti or when the env gate is off).
     csm_invocations: AtomicU64,
-    /// Diagnostic counter for W66 bounded CSM CUDA Graph captures.
+    /// Diagnostic counter for bounded CSM CUDA Graph captures.
     csm_cuda_graph_captures: AtomicU64,
-    /// Diagnostic counter for W66 bounded CSM CUDA Graph launches.
+    /// Diagnostic counter for bounded CSM CUDA Graph launches.
     csm_cuda_graph_launches: AtomicU64,
-    /// Diagnostic counter for W66 CSM CUDA Graph ineligibility fallbacks.
+    /// Diagnostic counter for bounded CSM CUDA Graph ineligibility fallbacks.
     csm_cuda_graph_fallbacks: AtomicU64,
-    /// Diagnostic counter for W66 bounded CSM CUDA Graph cache replays.
+    /// Diagnostic counter for bounded CSM CUDA Graph cache replays.
     csm_cuda_graph_cache_hits: AtomicU64,
-    /// Diagnostic counter for W66 graph-mode small full-row set-maintenance
+    /// Diagnostic counter for graph-mode small full-row set-maintenance
     /// sorts. This is test telemetry only; production correctness must not
     /// depend on the value.
     small_full_row_sort_invocations: AtomicU64,
-    /// W66 bounded CSM CUDA Graph replay cache.
+    /// Bounded CSM CUDA Graph replay cache.
     csm_cuda_graph_cache: Mutex<HashMap<CsmCudaGraphKey, CsmCudaGraphEntry>>,
     /// Per-process counter of WCOJ layout fast-path hits. The
     /// fast-path skips `dedup_full_row_recorded` when the input
@@ -1074,19 +1075,17 @@ pub struct CudaKernelProvider {
     /// through to the existing dedup pipeline.
     wcoj_layout_fast_path_hit_count: AtomicU64,
     /// Diagnostic counter for generic WCOJ layout-sort helper
-    /// invocations. Used by goal-038-B dispatch-plan certs to
+    /// invocations. Used by K-clique dispatch-plan certifications to
     /// prove K-clique runtime dispatch no longer routes every edge
     /// through the old all-edge `wcoj_layout_sort_*_recorded` path.
     wcoj_layout_sort_invocation_count: AtomicU64,
-    /// Authorization 5 G_HIST_KC diagnostic counter: number of
-    /// K-clique leader-edge metadata builds.
+    /// Diagnostic counter for K-clique leader-edge metadata builds.
     kclique_metadata_build_count: AtomicU64,
-    /// Authorization 5 G_HIST_KC diagnostic counter: cumulative
-    /// nanoseconds spent building K-clique leader-edge metadata.
+    /// Diagnostic counter for cumulative nanoseconds spent building K-clique
+    /// leader-edge metadata.
     kclique_metadata_build_nanos: AtomicU64,
-    /// W3.3 routing counter: successful triangle dispatches
-    /// accepted through the histogram-guided block-slice provider
-    /// entry.
+    /// Histogram-guided triangle WCOJ routing counter: successful dispatches
+    /// accepted through the block-slice provider entry.
     wcoj_triangle_hg_dispatch_count: AtomicU64,
     /// Diagnostic-only: last WCOJ triangle dispatch's per-phase
     /// CUDA-event timings, populated by `wcoj_triangle_*_recorded`
@@ -1300,8 +1299,8 @@ impl CudaKernelProvider {
 
     /// Whether the recorded sort dispatch is enabled via env.
     /// Reads `XLOG_USE_RECORDED_SORT` or the umbrella
-    /// `XLOG_USE_RECORDED_OPS`. Slice #5 narrowed
-    /// `sort_recorded` to U32 / Symbol keys only — the public
+    /// `XLOG_USE_RECORDED_OPS`. The recorded-sort path is narrowed
+    /// to U32 / Symbol keys only — the public
     /// `sort()` dispatcher checks both this env flag AND key
     /// type compatibility before routing.
     pub(crate) fn use_recorded_sort_env() -> bool {
@@ -1347,7 +1346,7 @@ impl CudaKernelProvider {
         Self::env_flag("XLOG_USE_RECORDED_CSM") || Self::env_flag("XLOG_USE_RECORDED_OPS")
     }
 
-    /// Whether W66's bounded CSM CUDA Graph path is enabled.
+    /// Whether the bounded CSM CUDA Graph path is enabled.
     ///
     /// This is narrower than `XLOG_USE_RECORDED_CSM`: callers must first select
     /// the recorded CSM hash-join path, then opt into graph capture/replay with
@@ -1471,9 +1470,8 @@ impl CudaKernelProvider {
         self.wcoj_layout_fast_path_hit_count.load(Ordering::Relaxed)
     }
 
-    /// W3.3 test/diagnostic counter: successful triangle WCOJ
-    /// dispatches that routed through the HG block-slice provider
-    /// entry.
+    /// Histogram-guided block-slice triangle WCOJ test/diagnostic counter:
+    /// successful dispatches that routed through the provider entry.
     pub fn wcoj_triangle_hg_dispatch_count(&self) -> u64 {
         self.wcoj_triangle_hg_dispatch_count.load(Ordering::Relaxed)
     }
@@ -1486,8 +1484,7 @@ impl CudaKernelProvider {
     }
 
     /// Number of calls to `wcoj_layout_sort_*_recorded` since the
-    /// last reset. Diagnostic-only; used by Step 4 dispatch-plan
-    /// certification.
+    /// last reset. Diagnostic-only; used by dispatch-plan certification.
     pub fn wcoj_layout_sort_invocation_count(&self) -> u64 {
         self.wcoj_layout_sort_invocation_count
             .load(Ordering::Relaxed)
@@ -1542,8 +1539,8 @@ impl CudaKernelProvider {
             .fetch_add(nanos, Ordering::Relaxed);
     }
 
-    /// W3.3 runtime hook: record a successful HG block-slice
-    /// triangle dispatch.
+    /// Runtime hook: record a successful histogram-guided block-slice triangle
+    /// dispatch.
     #[doc(hidden)]
     pub fn record_wcoj_triangle_hg_dispatch(&self) {
         self.wcoj_triangle_hg_dispatch_count
@@ -3326,8 +3323,8 @@ mod tests {
     /// Without this propagation, buffers flowed through the relation store
     /// (`CompiledIlpProgram::put_relation` calls `clone_buffer` before
     /// storing) lose their host-visible count, forcing consumers to choose
-    /// between an extra D2H (blowing the D2H-budget gates used by M8/Phase 1
-    /// and beyond) and a hard error. This test pins the cache-propagation
+    /// between an extra D2H (violating the native bounded exact-induction
+    /// transfer-budget gates) and a hard error. This test pins the cache-propagation
     /// contract directly.
     #[test]
     fn test_clone_buffer_preserves_cached_row_count() {
