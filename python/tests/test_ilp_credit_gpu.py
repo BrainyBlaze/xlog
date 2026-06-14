@@ -283,7 +283,7 @@ def test_compute_ilp_loss_grad_gpu_negative_facts():
 
 
 # ---------------------------------------------------------------------------
-# Task 5: Gradient parity tests — GPU vs Python reference
+# Gradient parity tests: GPU versus Python reference
 # ---------------------------------------------------------------------------
 
 def _reference_loss_grad(prog, cand_probs, ijk_to_cidx, positives, negatives):
@@ -450,11 +450,11 @@ def test_loss_parity_multi_candidate():
 
 
 # ---------------------------------------------------------------------------
-# Task 6: D2H accounting test
+# Device-to-host accounting test
 # ---------------------------------------------------------------------------
 
-def test_zero_dtoh_transfers():
-    """compute_ilp_loss_grad_gpu must not cause additional D2H column transfers."""
+def test_zero_device_to_host_transfers():
+    """compute_ilp_loss_grad_gpu must not cause additional device-to-host column transfers."""
     prog = _compile_reach()
     edge_idx, reach_idx = _edge_edge_reach_candidate(prog)
     prog.set_candidate_map([(edge_idx, edge_idx, reach_idx)])
@@ -474,20 +474,20 @@ def test_zero_dtoh_transfers():
 
     # Coarse gate
     assert prog.d2h_transfer_count() == 0, (
-        f"compute_ilp_loss_grad_gpu caused {prog.d2h_transfer_count()} D2H column transfers; expected 0"
+        f"compute_ilp_loss_grad_gpu caused {prog.d2h_transfer_count()} device-to-host column transfers; expected 0"
     )
     # Strict gate
     stats = prog.host_transfer_stats()
     assert stats['dtoh_calls'] == 0, (
-        f"compute_ilp_loss_grad_gpu caused {stats['dtoh_calls']} D2H calls; expected 0"
+        f"compute_ilp_loss_grad_gpu caused {stats['dtoh_calls']} device-to-host calls; expected 0"
     )
     assert stats['dtoh_bytes'] == 0, (
-        f"compute_ilp_loss_grad_gpu transferred {stats['dtoh_bytes']} D2H bytes; expected 0"
+        f"compute_ilp_loss_grad_gpu transferred {stats['dtoh_bytes']} device-to-host bytes; expected 0"
     )
 
 
-def test_zero_dtoh_strict():
-    """compute_ilp_loss_grad_gpu must cause zero D2H transfers (strict accounting)."""
+def test_zero_device_to_host_strict():
+    """compute_ilp_loss_grad_gpu must cause zero device-to-host transfers."""
     prog = _compile_reach()
     edge_idx, reach_idx = _edge_edge_reach_candidate(prog)
     prog.set_candidate_map([(edge_idx, edge_idx, reach_idx)])
@@ -504,15 +504,15 @@ def test_zero_dtoh_strict():
     stats = prog.host_transfer_stats()
 
     assert stats['dtoh_calls'] == 0, (
-        f"compute_ilp_loss_grad_gpu caused {stats['dtoh_calls']} D2H calls; expected 0"
+        f"compute_ilp_loss_grad_gpu caused {stats['dtoh_calls']} device-to-host calls; expected 0"
     )
     assert stats['dtoh_bytes'] == 0, (
-        f"compute_ilp_loss_grad_gpu transferred {stats['dtoh_bytes']} D2H bytes; expected 0"
+        f"compute_ilp_loss_grad_gpu transferred {stats['dtoh_bytes']} device-to-host bytes; expected 0"
     )
 
 
 # ---------------------------------------------------------------------------
-# Task 7: COO memory cap + chunked fallback
+# COO memory cap and chunked fallback
 # ---------------------------------------------------------------------------
 
 def test_compute_ilp_loss_grad_gpu_memory_cap():
@@ -582,8 +582,8 @@ def test_compute_ilp_loss_grad_gpu_memory_cap():
     )
 
 
-def test_strict_zero_dtoh_chunked_passes():
-    """Chunked path now GPU-only — must pass under strict_zero_dtoh."""
+def test_strict_zero_device_to_host_chunked_passes():
+    """Chunked path now stays GPU-only under strict zero device-to-host mode."""
     prog = pyxlog.IlpProgramFactory.compile("""
         pred edge(u32, u32). pred reach(u32, u32).
         edge(1, 2). edge(2, 3).
@@ -610,7 +610,7 @@ def test_strict_zero_dtoh_chunked_passes():
     prog.set_strict_zero_dtoh(True)
     prog.set_coo_chunk_budget(1)  # Force chunking
 
-    # Reset stats, run loss/grad, verify zero tracked D2H
+    # Reset stats, run loss/grad, verify zero tracked device-to-host transfers.
     prog.reset_host_transfer_stats()
     loss_dl, grad_dl = prog.compute_ilp_loss_grad_gpu(
         [("reach", [1, 3])], [("reach", [1, 2])], cand_probs
@@ -620,10 +620,10 @@ def test_strict_zero_dtoh_chunked_passes():
 
     stats = prog.host_transfer_stats()
     assert stats['dtoh_calls'] == 0, (
-        f"Chunked path caused {stats['dtoh_calls']} tracked D2H calls; expected 0"
+        f"Chunked path caused {stats['dtoh_calls']} tracked device-to-host calls; expected 0"
     )
     assert stats['dtoh_bytes'] == 0, (
-        f"Chunked path transferred {stats['dtoh_bytes']} tracked D2H bytes; expected 0"
+        f"Chunked path transferred {stats['dtoh_bytes']} tracked device-to-host bytes; expected 0"
     )
 
 
