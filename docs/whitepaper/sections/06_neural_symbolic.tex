@@ -24,9 +24,9 @@ program.register_network("mnist_net", net, optimizer)
 
 Under the hood, the Rust-side network registry manages a handle per network, each holding a reference to the PyTorch module, optimizer, and optional learning-rate scheduler. The \texttt{NetworkConfig} struct exposes builder-pattern configuration for batching (grouping multiple queries into a single forward pass), top-k sampling (restricting the output space when most classes have near-zero probability), deterministic mode (argmax instead of probabilistic sampling), and output caching (avoiding redundant forward passes for repeated inputs, up to a configurable cache size of 10{,}000 entries by default).
 
-The data flow through a neural predicate proceeds in two directions. \textbf{Forward:} when the logic engine encounters an \texttt{nn/4}-backed predicate during evaluation, it invokes the registered PyTorch module. The network's softmax output vector is decomposed into weighted probabilistic facts---one per output label---which are fed into the PIR/CNF/D4/XGCF compilation pipeline. Because the circuit structure depends on the logic program and not on the weight values, the compiled XGCF template is cached (\Cref{sec:prob}) and only the leaf weights are updated on subsequent iterations. \textbf{Backward:} after the XGCF circuit computes the forward log-probability and backward gradients via level-parallel CUDA kernels, the per-leaf gradient buffers are exported as DLPack tensors and injected into PyTorch's autograd graph. The optimizer then updates the network parameters as usual. The Python GIL is released during GPU-resident work using \texttt{py.allow\_threads()}, ensuring that CUDA kernel execution and GPU memory operations do not block the Python interpreter.
+The data flow through a neural predicate proceeds in two directions. \textbf{Forward:} when the logic engine encounters an \texttt{nn/4}-backed predicate during evaluation, it invokes the registered PyTorch module. The network's softmax output vector is decomposed into weighted probabilistic facts---one per output label---which are fed into the PIR-to-CNF knowledge-compilation pipeline and then into XGCF evaluation. Because the circuit structure depends on the logic program and not on the weight values, the compiled XGCF template is cached (\Cref{sec:prob}) and only the leaf weights are updated on subsequent iterations. \textbf{Backward:} after the XGCF circuit computes the forward log-probability and backward gradients via level-parallel CUDA kernels, the per-leaf gradient buffers are exported as DLPack tensors and injected into PyTorch's autograd graph. The optimizer then updates the network parameters as usual. The Python GIL is released during GPU-resident work using \texttt{py.allow\_threads()}, ensuring that CUDA kernel execution and GPU memory operations do not block the Python interpreter.
 
-\textbf{Production neural-bridge surface.} For downstream consumer integration, the v0.8.0 bridge exposes registered-network top-$k$ and deterministic output modes with stable top-$k$ tie-breaking, neural-cache hit/miss telemetry, and a family of loss helpers---Belnap pro/contra/quarantine losses for paraconsistent four-valued supervision, semantic loss, mean-squared error, and an information-theoretic loss---so that training pipelines drive the symbolic engine without reaching into internal crates. Native exact induction is reachable from the same Python surface (\texttt{pyxlog.ilp.exact\_induce.induce\_exact(\ldots, backend="native")}), routing tensorized-ILP candidate scoring through the GPU \texttt{ilp\_exact} kernel with a constant device-to-host transfer budget.
+\textbf{Production neural-bridge surface.} For external integration, the neural bridge exposes registered-network top-$k$ and deterministic output modes with stable top-$k$ tie-breaking, neural-cache hit/miss telemetry, and a family of loss helpers---Belnap pro/contra/quarantine losses for paraconsistent four-valued supervision, semantic loss, mean-squared error, and an information-theoretic loss---so that training pipelines drive the symbolic engine without reaching into internal crates. Native exact induction is reachable from the same Python surface (\texttt{pyxlog.ilp.exact\_induce.induce\_exact(\ldots, backend="native")}), routing tensorized-ILP candidate scoring through the GPU \texttt{ilp\_exact} kernel with a constant device-to-host transfer budget.
 
 \subsection{End-to-End Training Loop}
 
@@ -58,12 +58,12 @@ nn(mnist_net, [X], Y, [0,1,2,3,4,5,6,7,8,9]) :: digit(X, Y).
 // The sum of two digits at indices X and Y is Z.
 //
 // This uses probabilistic inference:
-// P(addition(0, 1, 7)) = sum over all (d1, d2) where d1 + d2 = 7 of:
-//                        P(digit(0, d1)) * P(digit(1, d2))
+// P(addition(0, 1, 7)) = sum over all digit pairs where left_digit + right_digit = 7 of:
+//                        P(digit(0, left_digit)) * P(digit(1, right_digit))
 //
-// For example, with d1=3, d2=4:
+// For example, with left_digit=3, right_digit=4:
 // P(addition(0, 1, 7)) includes P(digit(0, 3)) * P(digit(1, 4))
-addition(X, Y, Z) :- digit(X, D1), digit(Y, D2), Z is D1 + D2.
+addition(X, Y, Z) :- digit(X, LeftDigit), digit(Y, RightDigit), Z is LeftDigit + RightDigit.
 \end{lstlisting}
 
 Two lines of logic define the entire reasoning structure. The \texttt{nn/4} declaration connects the \texttt{mnist\_net} CNN to a \texttt{digit/2} predicate. The addition rule computes all consistent decompositions of a sum through probabilistic marginalization.
@@ -75,7 +75,7 @@ Two lines of logic define the entire reasoning structure. The \texttt{nn/4} decl
                    label={lst:mnist-train}]
 program = pyxlog.Program.compile("""
     nn(mnist_net, [X], Y, [0,1,2,3,4,5,6,7,8,9]) :: digit(X, Y).
-    addition(X, Y, Z) :- digit(X, D1), digit(Y, D2), Z is D1 + D2.
+    addition(X, Y, Z) :- digit(X, LeftDigit), digit(Y, RightDigit), Z is LeftDigit + RightDigit.
 """)
 
 program.register_network("mnist_net", net, optimizer)
@@ -103,32 +103,32 @@ Each query has the form \texttt{addition(i, j, expected\_sum)}. The training obj
   \label{fig:training}
 \end{figure}
 
-The critical performance property is that the circuit compilation (D4) happens once, during the first forward pass. All subsequent iterations reuse the cached XGCF structure, executing only the weight update and the level-parallel forward/backward kernels. This is the mechanism behind the $2.74\times$ training speedup reported in \Cref{sec:prob}.
+The critical performance property is that external Decision-DNNF compilation happens once, during the first forward pass. All subsequent iterations reuse the cached XGCF structure, executing only the weight update and the level-parallel forward/backward kernels. This is the mechanism behind the $2.74\times$ training speedup reported in \Cref{sec:prob}.
 
-\textbf{Results.} On the MNIST addition benchmark (512 training images, 256 addition pairs, batch size 64, learning rate $10^{-3}$, CUDA device), the latest checked-in post-fix rerun on \texttt{main} reports the summary in \Cref{tab:training-seeds} over 3 seeds:
+\textbf{Results.} On the MNIST addition benchmark (512 training images, 256 addition pairs, batch size 64, learning rate $10^{-3}$, CUDA device), the checked-in rerun reports the summary in \Cref{tab:training-seeds} over 3 seeds:
 
 \begin{table}[htbp]
   \centering
-  \caption{MNIST addition training summary (\texttt{01\_minimal}, post-fix rerun, 3 seeds).}
+  \caption{MNIST addition training summary (\texttt{01\_minimal}, checked-in rerun, 3 seeds).}
   \label{tab:training-seeds}
   \small
   \begin{tabular}{@{}llll@{}}
     \toprule
     \textbf{Metric} & \textbf{Value} & \textbf{Artifact} & \textbf{Notes} \\
     \midrule
-    Mean first epoch & $71.654$\,s & Track B comparison & Cold start with D4 compile/verify \\
-    Mean steady epoch & $0.248$\,s & Track B comparison & Warm batched path after cache reuse \\
-    Mean total train & $72.645$\,s & Track B comparison & 5 epochs, 3 seeds \\
-    Mean final loss & $2.62953$ & Track B comparison & Final training loss over the 3 recorded seeds \\
+    Mean first epoch & $71.654$\,s & checked-in neural comparison & Cold start with external Decision-DNNF compile/verify \\
+    Mean steady epoch & $0.248$\,s & checked-in neural comparison & Warm batched path after cache reuse \\
+    Mean total train & $72.645$\,s & checked-in neural comparison & 5 epochs, 3 seeds \\
+    Mean final loss & $2.62953$ & checked-in neural comparison & Final training loss over the 3 recorded seeds \\
     \bottomrule
   \end{tabular}
 \end{table}
 
-These measurements come from the post-fix Track B comparison artifact at \texttt{examples/neural/results/track\_b/20260218T145032Z\_track\_b/comparisons/mnist\_xlog\_vs\_scallop.json}, which exercises the full xlog pipeline---compilation, circuit caching, GPU-resident forward/backward, and batched query evaluation---through \texttt{pyxlog.train\_model\_tensor}. The loss reduction across the recorded runs confirms that gradients flow from circuit evaluation through the logic program back to the CNN parameters, and the timing split matches the cold-start vs.\ warm-epoch behavior reported in \Cref{sec:eval}.
+These measurements come from the checked-in neural benchmark comparison artifact, which exercises the full xlog pipeline---compilation, circuit caching, GPU-resident forward/backward, and batched query evaluation---through \texttt{pyxlog.train\_model\_tensor}. The loss reduction across the recorded runs confirms that gradients flow from circuit evaluation through the logic program back to the CNN parameters, and the timing split matches the cold-start vs.\ warm-epoch behavior reported in \Cref{sec:eval}.
 
-\subsection{Term Embeddings (v0.5.0)}
+\subsection{Term Embeddings}
 
-Version 0.5.0 introduces a term embedding API that attaches dense vector representations to Datalog symbols. Where \texttt{nn/4} neural predicates map perception (images, text) to discrete logical facts, term embeddings go in the opposite direction: they give logical entities a continuous representation that can participate in neural computation.
+The term embedding API attaches dense vector representations to Datalog symbols. Where \texttt{nn/4} neural predicates map perception (images, text) to discrete logical facts, term embeddings go in the opposite direction: they give logical entities a continuous representation that can participate in neural computation.
 
 The Python API provides two methods on \texttt{CompiledProgram}:
 
@@ -137,12 +137,12 @@ The Python API provides two methods on \texttt{CompiledProgram}:
   \item \textbf{\texttt{forward\_embedding(name, ids)}} looks up embedding vectors by integer IDs, returning a batched \texttt{torch.Tensor} with shape $[\text{len(ids)}, \text{dim}]$. For trainable \texttt{nn.Embedding} modules, the returned tensor carries autograd history, so gradients flow through the embedding lookup. For frozen tensors, the result has \texttt{requires\_grad=False}. Internally, the method determines the device from the embedding weight tensor and creates the ID tensor on the same device to avoid CPU/CUDA mismatches.
 \end{itemize}
 
-This API enables entity representation learning within the logic framework. For example, a knowledge graph completion task can attach learned embeddings to entity symbols, combine them with relational predicates in xlog rules, and jointly train the embeddings alongside neural perception networks. The embeddings are the only gradient-carrying embedding API as of v0.9.2; future releases may integrate embedding lookups directly into the circuit evaluation path.
+This API enables entity representation learning within the logic framework. For example, a knowledge graph completion task can attach learned embeddings to entity symbols, combine them with relational predicates in xlog rules, and jointly train the embeddings alongside neural perception networks. The embeddings are the only gradient-carrying embedding API in the current Python surface; future releases may integrate embedding lookups directly into the circuit evaluation path.
 
-\subsection{Differentiable ILP (Beta)}
+\subsection{Differentiable ILP}
 
 \begin{quote}\small
-\textbf{Note:} The differentiable ILP subsystem is in \textbf{beta} as of v0.9.2. The API surface, promotion pipeline, and artifact format may change in future releases. The schema version is \texttt{beta-v2}.
+\textbf{Note:} The differentiable ILP subsystem is still evolving. The API surface, promotion pipeline, and artifact format may change in future releases. The artifact schema is versioned and validated on load.
 \end{quote}
 
 xlog includes a differentiable inductive logic programming (dILP) trainer~\cite{dilp} that learns first-order rules from examples. Unlike the neural predicate path (which trains network parameters given fixed rules), dILP searches the space of candidate rules, using gradient-based optimization to assign soft probabilities to candidates and hard selection to commit the best rule.
@@ -166,4 +166,4 @@ A rule that fails any gate receives a \texttt{PromotionStatus} of \texttt{GATE\_
 
 \textbf{Hard-negative mining.} The \texttt{TrainConfig.max\_mined\_negatives} parameter enables hard-negative mining: the trainer identifies examples that the current candidate rule incorrectly covers and adds them as negative examples for subsequent training rounds. This improves precision for rules operating in domains with many near-miss patterns.
 
-\textbf{Artifact persistence.} Learned rules are serialized as \texttt{LearnedArtifact} objects containing the candidate map, final logits, soft probabilities, hard selection, discovered rule text, full \texttt{TrainConfig} snapshot, and training telemetry. The \texttt{save()} method writes JSON with SHA-256 hashes computed over both the candidate map and the configuration snapshot, enabling integrity verification on \texttt{load(path, verify\_hash=True)}. The schema version (\texttt{beta-v2}) is validated on load to prevent silent format incompatibilities. For strict GPU-native training paths where logits and probabilities remain device-resident, a \texttt{StrictLearnedArtifact} variant defers host materialization until \texttt{export\_compat\_artifact()} is explicitly called, avoiding unnecessary device-to-host transfers during automated pipeline runs.
+\textbf{Artifact persistence.} Learned rules are serialized as \texttt{LearnedArtifact} objects containing the candidate map, final logits, soft probabilities, hard selection, discovered rule text, full \texttt{TrainConfig} snapshot, and training telemetry. The \texttt{save()} method writes JSON with SHA-256 hashes computed over both the candidate map and the configuration snapshot, enabling integrity verification on \texttt{load(path, verify\_hash=True)}. The artifact schema version is validated on load to prevent silent format incompatibilities. For strict GPU-native training paths where logits and probabilities remain device-resident, a \texttt{StrictLearnedArtifact} variant defers host materialization until \texttt{export\_compat\_artifact()} is explicitly called, avoiding unnecessary device-to-host transfers during automated pipeline runs.
