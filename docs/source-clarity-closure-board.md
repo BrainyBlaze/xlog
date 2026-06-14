@@ -1371,7 +1371,7 @@ Hardware cache terminology such as `L1` and `L2` is allowed when it refers to GP
 | `examples/xlog/70-aggregates/03_logsumexp.xlog` | 0 | 0 | true |  |  |
 | `examples/xlog/70-aggregates/04_min_max_latency_stats.xlog` | 0 | 0 | true |  |  |
 | `examples/xlog/70-aggregates/05_average_from_sum_count.xlog` | 0 | 0 | true |  |  |
-| `examples/xlog/80-v032-showcase/01-enterprise/README.md` | 0 | 1 | false |  | v032(1) |
+| `examples/xlog/80-v032-showcase/01-enterprise/README.md` | 10 | 1 | true | release label and reader-facing abbreviations(10) | release-coded run path(1) |
 | `examples/xlog/80-v032-showcase/01-enterprise/finance/compensation.xlog` | 0 | 0 | true |  |  |
 | `examples/xlog/80-v032-showcase/01-enterprise/hr/employees.xlog` | 0 | 0 | true |  |  |
 | `examples/xlog/80-v032-showcase/01-enterprise/main.xlog` | 0 | 0 | true |  |  |
