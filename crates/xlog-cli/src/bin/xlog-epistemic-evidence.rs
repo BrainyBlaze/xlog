@@ -1262,21 +1262,13 @@ mod tests {
     }
 
     #[test]
-    fn ucr_failure_chain_program_merges_modular_closure() -> Result<()> {
-        let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .and_then(Path::parent)
-            .ok_or_else(|| XlogError::Execution("resolve repo root".to_string()))?;
-        let program_path = repo_root
-            .join("examples")
-            .join("BFO")
-            .join("universal_case_reasoner")
-            .join("programs")
-            .join("epistemic")
-            .join("epistemic_generalization_failure_chain_support.xlog");
+    fn external_case_reasoner_failure_chain_program_merges_modular_closure() -> Result<()> {
+        let program_path = external_case_reasoner_epistemic_program(
+            "epistemic_generalization_failure_chain_support.xlog",
+        )?;
         let source = fs::read_to_string(&program_path).map_err(|err| {
             XlogError::Execution(format!(
-                "read UCR failure-chain program {}: {err}",
+                "read external case reasoner failure-chain program {}: {err}",
                 program_path.display()
             ))
         })?;
@@ -1297,6 +1289,76 @@ mod tests {
         Ok(())
     }
 
+    fn repo_root() -> Result<PathBuf> {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Path::parent)
+            .map(Path::to_path_buf)
+            .ok_or_else(|| XlogError::Execution("resolve repo root".to_string()))
+    }
+
+    fn external_case_reasoner_root() -> Result<PathBuf> {
+        let examples_dir = repo_root()?.join("examples");
+        let mut matches = Vec::new();
+        for family_entry in fs::read_dir(&examples_dir).map_err(|err| {
+            XlogError::Execution(format!(
+                "scan examples directory {}: {err}",
+                examples_dir.display()
+            ))
+        })? {
+            let family_path = family_entry
+                .map_err(|err| XlogError::Execution(format!("read examples entry: {err}")))?
+                .path();
+            if !family_path.is_dir() {
+                continue;
+            }
+            for example_entry in fs::read_dir(&family_path).map_err(|err| {
+                XlogError::Execution(format!(
+                    "scan example family directory {}: {err}",
+                    family_path.display()
+                ))
+            })? {
+                let example_path = example_entry
+                    .map_err(|err| XlogError::Execution(format!("read example entry: {err}")))?
+                    .path();
+                if example_path
+                    .join("programs")
+                    .join("epistemic")
+                    .join("epistemic_generalization_decision.xlog")
+                    .is_file()
+                {
+                    matches.push(example_path);
+                }
+            }
+        }
+
+        match matches.len() {
+            1 => Ok(matches.remove(0)),
+            0 => Err(XlogError::Execution(
+                "external case reasoner fixture not found".to_string(),
+            )),
+            count => Err(XlogError::Execution(format!(
+                "expected one external case reasoner fixture, found {count}"
+            ))),
+        }
+    }
+
+    fn external_case_reasoner_epistemic_dir() -> Result<PathBuf> {
+        Ok(external_case_reasoner_root()?
+            .join("programs")
+            .join("epistemic"))
+    }
+
+    fn external_case_reasoner_epistemic_program(file_name: &str) -> Result<PathBuf> {
+        Ok(external_case_reasoner_epistemic_dir()?.join(file_name))
+    }
+
+    fn external_case_reasoner_epistemic_module(file_name: &str) -> Result<PathBuf> {
+        Ok(external_case_reasoner_epistemic_dir()?
+            .join("modules")
+            .join(file_name))
+    }
+
     fn rule_body_has_positive_predicate(rule: &xlog_logic::Rule, predicate: &str) -> bool {
         rule.body.iter().any(|literal| {
             matches!(
@@ -1307,21 +1369,13 @@ mod tests {
     }
 
     #[test]
-    fn ucr_decision_program_reuses_modular_failure_chain_closure() -> Result<()> {
-        let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .and_then(Path::parent)
-            .ok_or_else(|| XlogError::Execution("resolve repo root".to_string()))?;
-        let program_path = repo_root
-            .join("examples")
-            .join("BFO")
-            .join("universal_case_reasoner")
-            .join("programs")
-            .join("epistemic")
-            .join("epistemic_generalization_decision.xlog");
+    fn external_case_reasoner_decision_program_reuses_modular_failure_chain_closure() -> Result<()>
+    {
+        let program_path =
+            external_case_reasoner_epistemic_program("epistemic_generalization_decision.xlog")?;
         let source = fs::read_to_string(&program_path).map_err(|err| {
             XlogError::Execution(format!(
-                "read UCR decision program {}: {err}",
+                "read external case reasoner decision program {}: {err}",
                 program_path.display()
             ))
         })?;
@@ -1375,21 +1429,12 @@ mod tests {
     }
 
     #[test]
-    fn ucr_dilp_schema_generator_merges_support_policy_module() -> Result<()> {
-        let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .and_then(Path::parent)
-            .ok_or_else(|| XlogError::Execution("resolve repo root".to_string()))?;
-        let program_path = repo_root
-            .join("examples")
-            .join("BFO")
-            .join("universal_case_reasoner")
-            .join("programs")
-            .join("epistemic")
-            .join("epistemic_dilp_proof_schema_generator.xlog");
+    fn external_case_reasoner_dilp_schema_generator_merges_support_policy_module() -> Result<()> {
+        let program_path =
+            external_case_reasoner_epistemic_program("epistemic_dilp_proof_schema_generator.xlog")?;
         let source = fs::read_to_string(&program_path).map_err(|err| {
             XlogError::Execution(format!(
-                "read UCR dILP proof-schema program {}: {err}",
+                "read external case reasoner dILP proof-schema program {}: {err}",
                 program_path.display()
             ))
         })?;
@@ -1417,21 +1462,12 @@ mod tests {
     }
 
     #[test]
-    fn ucr_dilp_trace_merges_support_policy_module() -> Result<()> {
-        let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .and_then(Path::parent)
-            .ok_or_else(|| XlogError::Execution("resolve repo root".to_string()))?;
-        let program_path = repo_root
-            .join("examples")
-            .join("BFO")
-            .join("universal_case_reasoner")
-            .join("programs")
-            .join("epistemic")
-            .join("epistemic_dilp_proof_trace.xlog");
+    fn external_case_reasoner_dilp_trace_merges_support_policy_module() -> Result<()> {
+        let program_path =
+            external_case_reasoner_epistemic_program("epistemic_dilp_proof_trace.xlog")?;
         let source = fs::read_to_string(&program_path).map_err(|err| {
             XlogError::Execution(format!(
-                "read UCR dILP proof-trace program {}: {err}",
+                "read external case reasoner dILP proof-trace program {}: {err}",
                 program_path.display()
             ))
         })?;
@@ -1455,33 +1491,23 @@ mod tests {
     }
 
     #[test]
-    fn ucr_candidate_scoring_programs_merge_feature_component_module() -> Result<()> {
-        let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .and_then(Path::parent)
-            .ok_or_else(|| XlogError::Execution("resolve repo root".to_string()))?;
-
+    fn external_case_reasoner_candidate_scoring_programs_merge_feature_component_module(
+    ) -> Result<()> {
         for file_name in [
             "epistemic_generalization_candidate_scoring.xlog",
             "epistemic_showcase_transfer_candidate_scoring.xlog",
         ] {
-            let program_path = repo_root
-                .join("examples")
-                .join("BFO")
-                .join("universal_case_reasoner")
-                .join("programs")
-                .join("epistemic")
-                .join(file_name);
+            let program_path = external_case_reasoner_epistemic_program(file_name)?;
             let source = fs::read_to_string(&program_path).map_err(|err| {
                 XlogError::Execution(format!(
-                    "read UCR scoring program {}: {err}",
+                    "read external case reasoner scoring program {}: {err}",
                     program_path.display()
                 ))
             })?;
 
             assert!(source.contains("use modules/candidate_feature_components."));
             assert!(
-                !source.contains("bfo_evidence_score(Case, Candidate, Bfo) :-"),
+                !source.contains("bfo_evidence_score(Case, Candidate,"),
                 "{file_name} must import feature component semantics instead of redefining them"
             );
 
@@ -1499,22 +1525,13 @@ mod tests {
     }
 
     #[test]
-    fn ucr_ranker_and_decision_reuse_selector_acceptance_module() -> Result<()> {
-        let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .and_then(Path::parent)
-            .ok_or_else(|| XlogError::Execution("resolve repo root".to_string()))?;
-        let epistemic_dir = repo_root
-            .join("examples")
-            .join("BFO")
-            .join("universal_case_reasoner")
-            .join("programs")
-            .join("epistemic");
+    fn external_case_reasoner_ranker_and_decision_reuse_selector_acceptance_module() -> Result<()> {
+        let epistemic_dir = external_case_reasoner_epistemic_dir()?;
 
         let ranker_path = epistemic_dir.join("epistemic_generalization_ranker.xlog");
         let ranker_source = fs::read_to_string(&ranker_path).map_err(|err| {
             XlogError::Execution(format!(
-                "read UCR ranker program {}: {err}",
+                "read external case reasoner ranker program {}: {err}",
                 ranker_path.display()
             ))
         })?;
@@ -1524,11 +1541,12 @@ mod tests {
             "ranker must import selector acceptance instead of redefining it"
         );
 
-        let decision_support_path = epistemic_dir.join("modules").join("decision_support.xlog");
+        let decision_support_path =
+            external_case_reasoner_epistemic_module("decision_support.xlog")?;
         let decision_support_source =
             fs::read_to_string(&decision_support_path).map_err(|err| {
                 XlogError::Execution(format!(
-                    "read UCR decision-support module {}: {err}",
+                    "read external case reasoner decision-support module {}: {err}",
                     decision_support_path.display()
                 ))
             })?;
@@ -1545,7 +1563,7 @@ mod tests {
         let decision_path = epistemic_dir.join("epistemic_generalization_decision.xlog");
         let decision_source = fs::read_to_string(&decision_path).map_err(|err| {
             XlogError::Execution(format!(
-                "read UCR decision program {}: {err}",
+                "read external case reasoner decision program {}: {err}",
                 decision_path.display()
             ))
         })?;
@@ -1562,21 +1580,12 @@ mod tests {
     }
 
     #[test]
-    fn ucr_abstention_program_merges_policy_module() -> Result<()> {
-        let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .and_then(Path::parent)
-            .ok_or_else(|| XlogError::Execution("resolve repo root".to_string()))?;
-        let program_path = repo_root
-            .join("examples")
-            .join("BFO")
-            .join("universal_case_reasoner")
-            .join("programs")
-            .join("epistemic")
-            .join("epistemic_generalization_abstention.xlog");
+    fn external_case_reasoner_abstention_program_merges_policy_module() -> Result<()> {
+        let program_path =
+            external_case_reasoner_epistemic_program("epistemic_generalization_abstention.xlog")?;
         let source = fs::read_to_string(&program_path).map_err(|err| {
             XlogError::Execution(format!(
-                "read UCR abstention program {}: {err}",
+                "read external case reasoner abstention program {}: {err}",
                 program_path.display()
             ))
         })?;
@@ -1612,21 +1621,12 @@ mod tests {
     }
 
     #[test]
-    fn ucr_explanation_program_merges_support_module() -> Result<()> {
-        let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .and_then(Path::parent)
-            .ok_or_else(|| XlogError::Execution("resolve repo root".to_string()))?;
-        let program_path = repo_root
-            .join("examples")
-            .join("BFO")
-            .join("universal_case_reasoner")
-            .join("programs")
-            .join("epistemic")
-            .join("epistemic_generalization_explanation.xlog");
+    fn external_case_reasoner_explanation_program_merges_support_module() -> Result<()> {
+        let program_path =
+            external_case_reasoner_epistemic_program("epistemic_generalization_explanation.xlog")?;
         let source = fs::read_to_string(&program_path).map_err(|err| {
             XlogError::Execution(format!(
-                "read UCR explanation program {}: {err}",
+                "read external case reasoner explanation program {}: {err}",
                 program_path.display()
             ))
         })?;
@@ -1663,25 +1663,17 @@ mod tests {
     }
 
     #[test]
-    fn ucr_failure_chain_modular_closure_executes_claim() -> Result<()> {
+    fn external_case_reasoner_failure_chain_modular_closure_executes_claim() -> Result<()> {
         let fixture = match make_fixture(0, gpu_budget_bytes(DEFAULT_EPISTEMIC_GPU_BUDGET_MIB)?) {
             Ok(fixture) => fixture,
             Err(_) => return Ok(()),
         };
-        let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .and_then(Path::parent)
-            .ok_or_else(|| XlogError::Execution("resolve repo root".to_string()))?;
-        let program_path = repo_root
-            .join("examples")
-            .join("BFO")
-            .join("universal_case_reasoner")
-            .join("programs")
-            .join("epistemic")
-            .join("epistemic_generalization_failure_chain_support.xlog");
+        let program_path = external_case_reasoner_epistemic_program(
+            "epistemic_generalization_failure_chain_support.xlog",
+        )?;
         let source = fs::read_to_string(&program_path).map_err(|err| {
             XlogError::Execution(format!(
-                "read UCR failure-chain program {}: {err}",
+                "read external case reasoner failure-chain program {}: {err}",
                 program_path.display()
             ))
         })?;
