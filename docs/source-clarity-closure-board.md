@@ -443,7 +443,7 @@ Hardware cache terminology such as `L1` and `L2` is allowed when it refers to GP
 | `crates/xlog-integration/tests/test_wcoj_adaptive_dispatch.rs` | 0 | 0 | true | - | - |
 | `crates/xlog-integration/tests/test_wcoj_cardinality_cost_model.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-integration/tests/test_wcoj_clique_dispatch.rs` | 0 | 0 | true | - | - |
-| `crates/xlog-integration/tests/test_wcoj_clique_groupby_fusion.rs` | 3 | 0 | false | D2(2), S1e(1) |  |
+| `crates/xlog-integration/tests/test_wcoj_clique_groupby_fusion.rs` | 0 | 0 | true | - | - |
 | `crates/xlog-integration/tests/test_wcoj_dispatch.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-integration/tests/test_wcoj_dispatch_stream_reuse.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-integration/tests/test_wcoj_executor_wiring.rs` | 1 | 0 | false | D2H(1) |  |
