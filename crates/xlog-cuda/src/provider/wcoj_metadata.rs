@@ -356,7 +356,7 @@ impl CudaKernelProvider {
         self.wcoj_triangle_hg_u32_with_plan_recorded(e_xy, e_yz, e_xz, &plan, launch_stream)
     }
 
-    /// D1 aggregate-fused triangle: evaluate
+    /// Aggregate-fused triangle group-by-root count: evaluate
     /// `q(X, count) :- e_xy(X,Y), e_yz(Y,Z), e_xz(X,Z)` grouped by the
     /// variable-order root X, WITHOUT materializing the triangle rows.
     ///
@@ -573,7 +573,7 @@ impl CudaKernelProvider {
         )
     }
 
-    /// D1 widening — aggregate-fused triangle sum/min/max: evaluate
+    /// Aggregate-fused triangle group-by-root sum/min/max: evaluate
     /// `q(X, agg(V)) :- e_xy(X,Y), e_yz(Y,Z), e_xz(X,Z)` with
     /// `agg ∈ {Sum, Min, Max}` and `V ∈ {Y, Z}` grouped by the
     /// variable-order root X, WITHOUT materializing the triangle rows.
@@ -870,7 +870,7 @@ impl CudaKernelProvider {
         self.groupby_multi_agg_recorded(&compacted, &[0], &[(2, agg_op)], launch_stream)
     }
 
-    /// D1 widening — u64-key sibling of
+    /// U64-key aggregate-fused triangle count sibling of
     /// [`Self::wcoj_triangle_groupby_root_count_u32_recorded`]: evaluate
     /// `q(X, count)` over the triangle shape grouped by the root X for U64
     /// relations, WITHOUT materializing the triangle rows.
@@ -1139,7 +1139,7 @@ impl CudaKernelProvider {
         self.compact_buffer_by_device_mask_counted_recorded(&staging, &mask, launch_stream)
     }
 
-    /// S1c widening — u64-key sibling of
+    /// U64-key aggregate-fused triangle sum/min/max sibling of
     /// [`Self::wcoj_triangle_groupby_root_agg_u32_recorded`]: evaluate
     /// `q(X, agg(V)) :- e_xy(X,Y), e_yz(Y,Z), e_xz(X,Z)` with
     /// `agg ∈ {Sum, Min, Max}` and `V ∈ {Y, Z}` over U64 relations,
@@ -3214,7 +3214,7 @@ impl CudaKernelProvider {
         ))
     }
 
-    /// S1c — aggregate-fused 4-cycle count: evaluate
+    /// Aggregate-fused 4-cycle group-by-root count: evaluate
     /// `q(W, count) :- e1(W,X), e2(X,Y), e3(Y,Z), e4(Z,W)` grouped by the
     /// variable-order root W, WITHOUT materializing the 4-cycle rows.
     ///
@@ -3437,7 +3437,7 @@ impl CudaKernelProvider {
         )
     }
 
-    /// S1d — aggregate-fused 4-cycle sum/min/max: evaluate
+    /// Aggregate-fused 4-cycle group-by-root sum/min/max: evaluate
     /// `q(W, agg(V)) :- e1(W,X), e2(X,Y), e3(Y,Z), e4(Z,W)` with
     /// `agg ∈ {Sum, Min, Max}` and `V ∈ {X, Y, Z}` grouped by the
     /// variable-order root W, WITHOUT materializing the 4-cycle rows.
@@ -3756,7 +3756,7 @@ impl CudaKernelProvider {
         self.groupby_multi_agg_recorded(&compacted, &[0], &[(2, agg_op)], launch_stream)
     }
 
-    /// S1d slice 2 — u64-key sibling of
+    /// U64-key aggregate-fused 4-cycle count sibling of
     /// [`Self::wcoj_4cycle_groupby_root_count_u32_recorded`]: evaluate
     /// `q(W, count) :- e1(W,X), e2(X,Y), e3(Y,Z), e4(Z,W)` grouped by the
     /// variable-order root W for U64 relations, WITHOUT materializing the

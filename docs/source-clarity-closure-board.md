@@ -3,8 +3,8 @@
 Scope: Git-tracked source and documentation files only. Superpowers docs, plan files, evidence directories, generated artifacts, result/output directories, build output, and other worktrees are excluded.
 
 Scanned files: 1430
-Unresolved files: 256
-Comment/prose artifact occurrences: 1579
+Unresolved files: 255
+Comment/prose artifact occurrences: 1572
 Code/identifier artifact occurrences: 685
 
 Resolved means this board found no remaining opaque task/milestone labels or external consumer names in the eligible portions of that file.
@@ -307,7 +307,7 @@ Hardware cache terminology such as `L1` and `L2` is allowed when it refers to GP
 | `crates/xlog-cuda/src/provider/relational.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-cuda/src/provider/transfer.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-cuda/src/provider/wcoj.rs` | 0 | 0 | true |  |  |
-| `crates/xlog-cuda/src/provider/wcoj_metadata.rs` | 7 | 0 | false | D1(3), S1c(2), S1d(2) |  |
+| `crates/xlog-cuda/src/provider/wcoj_metadata.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-cuda/src/provider/wcoj_project.rs` | 6 | 0 | false | W2.1(6) |  |
 | `crates/xlog-cuda/src/type_seam.rs` | 5 | 0 | false | D2H(5) |  |
 | `crates/xlog-cuda/src/wcoj_metadata.rs` | 2 | 0 | false | D1(1), S1d(1) |  |
