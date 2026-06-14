@@ -1,13 +1,13 @@
 // =============================================================================
 // Supply Chain Analytics - Main Entry Point
 // =============================================================================
-// Demonstrates v0.3.2 module system with modular supply chain management
+// Demonstrates module imports with modular supply chain management
 //
 // Features:
 //   - use imports: Import predicates from inventory, shipping, and cost modules
 //   - Cross-module queries: Combine data from all 3 modules
-//   - UDF usage: Apply cost calculation functions
-//   - Recursive predicates: BOM explosion, shipping reachability
+//   - User-defined function usage: Apply cost calculation functions
+//   - Recursive predicates: Bill-of-materials expansion, shipping reachability
 //   - Private predicates: Internal helpers with negation
 // =============================================================================
 
@@ -28,18 +28,18 @@ use cost/calculator.
 // Calculate days of stock for each product in each warehouse
 pred inventory_days(symbol, symbol, symbol, u32, u32, u32).
 // warehouse_name, product_name, category, current_qty, daily_demand, days_remaining
-inventory_days(WarehouseName, ProductName, Category, Qty, DailyDmd, DaysRemaining) :-
-    warehouse(WarehouseId, WarehouseName, _),
-    stock(WarehouseId, ProductId, Qty),
-    product(ProductId, ProductName, Category),
-    daily_demand(ProductId, DailyDmd),
-    DaysRemaining is days_of_stock(Qty, DailyDmd).
+inventory_days(WarehouseName, ProductName, Category, Quantity, DailyDemand, DaysRemaining) :-
+    warehouse(Warehouse, WarehouseName, _),
+    stock(Warehouse, Product, Quantity),
+    product(Product, ProductName, Category),
+    daily_demand(Product, DailyDemand),
+    DaysRemaining is days_of_stock(Quantity, DailyDemand).
 
 // Reorder urgency report with priority levels
 pred reorder_report(symbol, symbol, symbol, u32, u32, u32).
 // warehouse_name, product_name, category, current_qty, days_remaining, urgency_level
-reorder_report(WarehouseName, ProductName, Category, Qty, DaysRemaining, Urgency) :-
-    inventory_days(WarehouseName, ProductName, Category, Qty, _, DaysRemaining),
+reorder_report(WarehouseName, ProductName, Category, Quantity, DaysRemaining, Urgency) :-
+    inventory_days(WarehouseName, ProductName, Category, Quantity, _, DaysRemaining),
     Urgency is reorder_urgency(DaysRemaining).
 
 // Critical inventory items (urgency level 1 or 2)
@@ -54,31 +54,31 @@ critical_inventory(WarehouseName, ProductName, DaysRemaining, Urgency) :-
 // Shipping options with full cost breakdown
 pred shipping_option(symbol, symbol, symbol, symbol, u32, u32, u32, u32).
 // origin, destination, carrier_name, service_level, base_cost, zone_surcharge, fuel_surcharge, total
-shipping_option(Origin, Dest, CarrierName, ServiceLevel, BaseCost, ZoneSurch, FuelSurch, TotalCost) :-
-    direct_route(Origin, Dest, CarrierId, _, BaseCost),
-    carrier(CarrierId, CarrierName, ServiceLevel),
-    carrier_rate(CarrierId, _, FuelSurch),
-    delivery_zone(Dest, ZoneId),
-    zone_surcharge(ZoneId, ZoneSurch),
-    TotalCost is total_cost(BaseCost, ZoneSurch, FuelSurch, cast(0, u32)).
+shipping_option(Origin, Destination, CarrierName, ServiceLevel, BaseCost, ZoneSurcharge, FuelSurcharge, TotalCost) :-
+    direct_route(Origin, Destination, Carrier, _, BaseCost),
+    carrier(Carrier, CarrierName, ServiceLevel),
+    carrier_rate(Carrier, _, FuelSurcharge),
+    delivery_zone(Destination, Zone),
+    zone_surcharge(Zone, ZoneSurcharge),
+    TotalCost is total_cost(BaseCost, ZoneSurcharge, FuelSurcharge, cast(0, u32)).
 
 // Best shipping option (lowest cost) for each route
 pred best_shipping(symbol, symbol, symbol, u32).
 // origin, destination, carrier_name, total_cost
-best_shipping(Origin, Dest, CarrierName, TotalCost) :-
-    best_carrier_for_route(Origin, Dest, CarrierId, BaseCost),
-    carrier(CarrierId, CarrierName, _),
-    delivery_zone(Dest, ZoneId),
-    zone_surcharge(ZoneId, ZoneSurch),
-    carrier_rate(CarrierId, _, FuelSurch),
-    TotalCost is total_cost(BaseCost, ZoneSurch, FuelSurch, cast(0, u32)).
+best_shipping(Origin, Destination, CarrierName, TotalCost) :-
+    best_carrier_for_route(Origin, Destination, Carrier, BaseCost),
+    carrier(Carrier, CarrierName, _),
+    delivery_zone(Destination, Zone),
+    zone_surcharge(Zone, ZoneSurcharge),
+    carrier_rate(Carrier, _, FuelSurcharge),
+    TotalCost is total_cost(BaseCost, ZoneSurcharge, FuelSurcharge, cast(0, u32)).
 
 // Fastest shipping option for each route
 pred fastest_shipping(symbol, symbol, symbol, u32).
 // origin, destination, carrier_name, transit_days
-fastest_shipping(Origin, Dest, CarrierName, Days) :-
-    fastest_carrier_for_route(Origin, Dest, CarrierId, Days),
-    carrier(CarrierId, CarrierName, _).
+fastest_shipping(Origin, Destination, CarrierName, Days) :-
+    fastest_carrier_for_route(Origin, Destination, Carrier, Days),
+    carrier(Carrier, CarrierName, _).
 
 // --- Volume Discount Analysis ---
 
@@ -99,20 +99,20 @@ bulk_order_discount(5000, 20).
 pred warehouse_summary(symbol, symbol, u64).
 // warehouse_name, region, total_value
 warehouse_summary(WarehouseName, Region, TotalValue) :-
-    warehouse(WarehouseId, WarehouseName, Region),
-    warehouse_value(WarehouseId, TotalValue).
+    warehouse(Warehouse, WarehouseName, Region),
+    warehouse_value(Warehouse, TotalValue).
 
-// --- BOM Cost Analysis ---
+// --- Bill-of-Materials Cost Analysis ---
 
 // Component cost for assembled products
 pred assembly_component_cost(symbol, symbol, u32, u32, u32).
 // assembly_product, component_name, quantity_needed, unit_cost, total_cost
-assembly_component_cost(AssemblyName, ComponentName, Qty, UnitCost, TotalCost) :-
-    product(AssemblyId, AssemblyName, _),
-    bom_exploded(AssemblyId, ComponentId, Qty),
-    product(ComponentId, ComponentName, _),
-    unit_cost(ComponentId, UnitCost),
-    TotalCost is Qty * UnitCost.
+assembly_component_cost(AssemblyName, ComponentName, Quantity, UnitCost, TotalCost) :-
+    product(Assembly, AssemblyName, _),
+    bom_exploded(Assembly, Component, Quantity),
+    product(Component, ComponentName, _),
+    unit_cost(Component, UnitCost),
+    TotalCost is Quantity * UnitCost.
 
 // Total assembly cost (sum of all components)
 pred assembly_total_cost(symbol, u64).
@@ -142,54 +142,54 @@ warehouse_connectivity(WarehouseName, count(DestName)) :-
 // Carriers available for each route
 pred route_carrier_options(symbol, symbol, u64).
 // origin, destination, carrier_count
-route_carrier_options(Origin, Dest, CarrierCount) :-
-    multi_carrier_route(Origin, Dest, CarrierCount).
+route_carrier_options(Origin, Destination, CarrierCount) :-
+    multi_carrier_route(Origin, Destination, CarrierCount).
 
 // Carrier service coverage (regions served)
 pred carrier_coverage(symbol, symbol, u64).
 // carrier_name, service_level, region_count
 carrier_coverage(CarrierName, ServiceLevel, count(Region)) :-
-    carrier(CarrierId, CarrierName, ServiceLevel),
-    carrier_serves(CarrierId, Region).
+    carrier(Carrier, CarrierName, ServiceLevel),
+    carrier_serves(Carrier, Region).
 
 // --- Product Category Analysis ---
 
 // Stock levels by category across all warehouses
 pred category_stock(symbol, u64).
 // category, total_units
-category_stock(Category, sum(Qty)) :-
-    product(ProductId, _, Category),
-    stock(_, ProductId, Qty).
+category_stock(Category, sum(Quantity)) :-
+    product(Product, _, Category),
+    stock(_, Product, Quantity).
 
 // Low stock products by category
 pred category_low_stock(symbol, symbol, symbol, u32, u32).
 // category, warehouse_name, product_name, current_qty, reorder_point
-category_low_stock(Category, WarehouseName, ProductName, Qty, ReorderPt) :-
-    product(ProductId, ProductName, Category),
-    warehouse(WarehouseId, WarehouseName, _),
-    low_stock_alert(WarehouseId, ProductId, Qty, ReorderPt).
+category_low_stock(Category, WarehouseName, ProductName, Quantity, ReorderPoint) :-
+    product(Product, ProductName, Category),
+    warehouse(Warehouse, WarehouseName, _),
+    low_stock_alert(Warehouse, Product, Quantity, ReorderPoint).
 
 // =============================================================================
 // QUERIES
 // =============================================================================
 
-// Q1: BOM explosion for PowerTower Desktop - all components needed
+// Q1: Bill-of-materials expansion for PowerTower Desktop - all components needed
 ?- bom_exploded(prod_desktop_tower, Component, Quantity).
 
 // Q2: Critical inventory alerts (urgency 1 or 2)
 ?- critical_inventory(Warehouse, Product, DaysRemaining, Urgency).
 
 // Q3: Best shipping option for each route
-?- best_shipping(Origin, Dest, Carrier, Cost).
+?- best_shipping(Origin, Destination, Carrier, Cost).
 
 // Q4: Fastest shipping option for each route
-?- fastest_shipping(Origin, Dest, Carrier, Days).
+?- fastest_shipping(Origin, Destination, Carrier, Days).
 
 // Q5: Warehouse summary with total value
 ?- warehouse_summary(Warehouse, Region, TotalValue).
 
 // Q6: Assembly cost breakdown for ProBook Laptop 15
-?- assembly_component_cost("ProBook Laptop 15", Component, Qty, UnitCost, TotalCost).
+?- assembly_component_cost("ProBook Laptop 15", Component, Quantity, UnitCost, TotalCost).
 
 // Q7: Total assembly cost for all manufactured products
 ?- assembly_total_cost(Assembly, TotalCost).
@@ -204,16 +204,16 @@ category_low_stock(Category, WarehouseName, ProductName, Qty, ReorderPt) :-
 ?- bulk_order_discount(Quantity, DiscountPct).
 
 // Q11: Low stock alerts by category
-?- category_low_stock(Category, Warehouse, Product, CurrentQty, ReorderPoint).
+?- category_low_stock(Category, Warehouse, Product, CurrentQuantity, ReorderPoint).
 
 // Q12: Carrier coverage analysis
 ?- carrier_coverage(Carrier, ServiceLevel, RegionCount).
 
 // Q13: Multi-carrier routes
-?- route_carrier_options(Origin, Dest, CarrierCount).
+?- route_carrier_options(Origin, Destination, CarrierCount).
 
 // Q14: Category-wise stock totals
 ?- category_stock(Category, TotalUnits).
 
 // Q15: Inventory days remaining report
-?- inventory_days(Warehouse, Product, Category, Qty, DailyDemand, DaysRemaining).
+?- inventory_days(Warehouse, Product, Category, Quantity, DailyDemand, DaysRemaining).

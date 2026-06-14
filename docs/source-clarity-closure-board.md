@@ -1387,11 +1387,11 @@ Hardware cache terminology such as `L1` and `L2` is allowed when it refers to GP
 | `examples/xlog/80-v032-showcase/03-game-analytics/matches/history.xlog` | 0 | 0 | true |  |  |
 | `examples/xlog/80-v032-showcase/03-game-analytics/players/profiles.xlog` | 7 | 37 | true | identifier and regional shorthand comments(7) | local variable shorthand(37) |
 | `examples/xlog/80-v032-showcase/03-game-analytics/ranking/elo.xlog` | 28 | 0 | true | Elo/Kill-death-assist/user-defined-function abbreviation comments(28) |  |
-| `examples/xlog/80-v032-showcase/04-supply-chain/README.md` | 0 | 1 | false |  | v032(1) |
-| `examples/xlog/80-v032-showcase/04-supply-chain/cost/calculator.xlog` | 0 | 0 | true |  |  |
-| `examples/xlog/80-v032-showcase/04-supply-chain/inventory/stock.xlog` | 0 | 0 | true |  |  |
-| `examples/xlog/80-v032-showcase/04-supply-chain/main.xlog` | 0 | 0 | true |  |  |
-| `examples/xlog/80-v032-showcase/04-supply-chain/shipping/routes.xlog` | 0 | 0 | true |  |  |
+| `examples/xlog/80-v032-showcase/04-supply-chain/README.md` | 33 | 1 | true | release label and supply-chain shorthand(33) | release-coded run path(1) |
+| `examples/xlog/80-v032-showcase/04-supply-chain/cost/calculator.xlog` | 6 | 13 | true | user-defined-function shorthand comments(6) | local variable shorthand(13) |
+| `examples/xlog/80-v032-showcase/04-supply-chain/inventory/stock.xlog` | 8 | 45 | true | bill-of-materials shorthand comments(8) | local variable shorthand(45) |
+| `examples/xlog/80-v032-showcase/04-supply-chain/main.xlog` | 5 | 75 | true | release/user-defined-function/bill-of-materials comments(5) | local variable shorthand(75) |
+| `examples/xlog/80-v032-showcase/04-supply-chain/shipping/routes.xlog` | 0 | 44 | true |  | local variable shorthand(44) |
 | `examples/xlog/80-v032-showcase/README.md` | 0 | 3 | false |  | v032(3) |
 | `examples/xlog/90-negative-tests/01_constraint_cycle_violation.xlog` | 0 | 0 | true |  |  |
 | `examples/xlog/90-negative-tests/02_stratification_negation_cycle.xlog` | 0 | 0 | true |  |  |

@@ -522,15 +522,15 @@ transit_time(wh_newark, wh_atlanta, carrier_estes, 3).
 pred can_ship(symbol, symbol).
 
 // Base case: direct route exists
-can_ship(Origin, Dest) :- direct_route(Origin, Dest, _, _, _).
+can_ship(Origin, Destination) :- direct_route(Origin, Destination, _, _, _).
 
 // Recursive case: can reach via intermediate hub
-can_ship(Origin, Dest) :-
+can_ship(Origin, Destination) :-
     direct_route(Origin, Intermediate, _, _, _),
-    can_ship(Intermediate, Dest),
-    Origin != Dest,
+    can_ship(Intermediate, Destination),
+    Origin != Destination,
     Intermediate != Origin,
-    Intermediate != Dest.
+    Intermediate != Destination.
 
 // =============================================================================
 // ROUTE ANALYTICS
@@ -538,18 +538,18 @@ can_ship(Origin, Dest) :-
 
 // Count routes per carrier
 pred routes_per_carrier(symbol, u64).
-routes_per_carrier(CarrierId, count(Origin)) :-
-    direct_route(Origin, _, CarrierId, _, _).
+routes_per_carrier(Carrier, count(Origin)) :-
+    direct_route(Origin, _, Carrier, _, _).
 
 // Cheapest route between locations
 pred cheapest_route(symbol, symbol, symbol, u32).
-cheapest_route(Origin, Dest, CarrierId, Cost) :-
-    direct_route(Origin, Dest, CarrierId, _, Cost).
+cheapest_route(Origin, Destination, Carrier, Cost) :-
+    direct_route(Origin, Destination, Carrier, _, Cost).
 
 // Fastest route between locations
 pred fastest_route(symbol, symbol, symbol, u32).
-fastest_route(Origin, Dest, CarrierId, Days) :-
-    transit_time(Origin, Dest, CarrierId, Days).
+fastest_route(Origin, Destination, Carrier, Days) :-
+    transit_time(Origin, Destination, Carrier, Days).
 
 // =============================================================================
 // PRIVATE PREDICATES FOR CARRIER SELECTION
@@ -557,33 +557,33 @@ fastest_route(Origin, Dest, CarrierId, Days) :-
 
 // Private helper: identify if another carrier offers a cheaper option
 pred cheaper_option(symbol, symbol, symbol, symbol).
-cheaper_option(Origin, Dest, CarrierId, CheaperCarrierId) :-
-    direct_route(Origin, Dest, CarrierId, _, Cost1),
-    direct_route(Origin, Dest, CheaperCarrierId, _, Cost2),
-    CarrierId != CheaperCarrierId,
+cheaper_option(Origin, Destination, Carrier, CheaperCarrier) :-
+    direct_route(Origin, Destination, Carrier, _, Cost1),
+    direct_route(Origin, Destination, CheaperCarrier, _, Cost2),
+    Carrier != CheaperCarrier,
     Cost2 < Cost1.
 
 // Best carrier for a route: no cheaper alternative exists
 pred best_carrier_for_route(symbol, symbol, symbol, u32).
-best_carrier_for_route(Origin, Dest, CarrierId, Cost) :-
-    direct_route(Origin, Dest, CarrierId, _, Cost),
-    not cheaper_option(Origin, Dest, CarrierId, _).
+best_carrier_for_route(Origin, Destination, Carrier, Cost) :-
+    direct_route(Origin, Destination, Carrier, _, Cost),
+    not cheaper_option(Origin, Destination, Carrier, _).
 
 // Private helper: identify if another carrier offers a faster option
 pred faster_option(symbol, symbol, symbol, symbol).
-faster_option(Origin, Dest, CarrierId, FasterCarrierId) :-
-    transit_time(Origin, Dest, CarrierId, Days1),
-    transit_time(Origin, Dest, FasterCarrierId, Days2),
-    CarrierId != FasterCarrierId,
+faster_option(Origin, Destination, Carrier, FasterCarrier) :-
+    transit_time(Origin, Destination, Carrier, Days1),
+    transit_time(Origin, Destination, FasterCarrier, Days2),
+    Carrier != FasterCarrier,
     Days2 < Days1.
 
 // Fastest carrier for a route: no faster alternative exists
 pred fastest_carrier_for_route(symbol, symbol, symbol, u32).
-fastest_carrier_for_route(Origin, Dest, CarrierId, Days) :-
-    transit_time(Origin, Dest, CarrierId, Days),
-    not faster_option(Origin, Dest, CarrierId, _).
+fastest_carrier_for_route(Origin, Destination, Carrier, Days) :-
+    transit_time(Origin, Destination, Carrier, Days),
+    not faster_option(Origin, Destination, Carrier, _).
 
 // Multi-carrier routes available
 pred multi_carrier_route(symbol, symbol, u64).
-multi_carrier_route(Origin, Dest, count(CarrierId)) :-
-    direct_route(Origin, Dest, CarrierId, _, _).
+multi_carrier_route(Origin, Destination, count(Carrier)) :-
+    direct_route(Origin, Destination, Carrier, _, _).
