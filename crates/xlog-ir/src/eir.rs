@@ -3,7 +3,7 @@
 /// Epistemic semantics mode selected for an EIR program.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EirEpistemicMode {
-    /// G91 compatibility semantics.
+    /// Gelfond-1991-style compatibility semantics, selected by `g91`.
     G91,
     /// Founded Autoepistemic Equilibrium Logic semantics.
     Faeel,
