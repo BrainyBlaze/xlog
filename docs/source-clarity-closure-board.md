@@ -1383,7 +1383,7 @@ Hardware cache terminology such as `L1` and `L2` is allowed when it refers to GP
 | `examples/xlog/80-v032-showcase/02-knowledge-graph/ontology/schema.xlog` | 0 | 0 | true |  |  |
 | `examples/xlog/80-v032-showcase/03-game-analytics/README.md` | 24 | 1 | true | release label, game-stat abbreviations, and shorthand snippet variables(24) | release-coded run path(1) |
 | `examples/xlog/80-v032-showcase/03-game-analytics/achievements/system.xlog` | 2 | 0 | true | user-defined-function abbreviation comments(2) |  |
-| `examples/xlog/80-v032-showcase/03-game-analytics/main.xlog` | 14 | 16 | false | release label and abbreviation comments(14) | P1(8), P2(8) |
+| `examples/xlog/80-v032-showcase/03-game-analytics/main.xlog` | 21 | 113 | true | release label and abbreviation comments(14), schema-comment shorthand(7) | local variable and predicate-name shorthand(113) |
 | `examples/xlog/80-v032-showcase/03-game-analytics/matches/history.xlog` | 0 | 0 | true |  |  |
 | `examples/xlog/80-v032-showcase/03-game-analytics/players/profiles.xlog` | 0 | 10 | false |  | P1(4), P3(3), P2(3) |
 | `examples/xlog/80-v032-showcase/03-game-analytics/ranking/elo.xlog` | 28 | 0 | true | Elo/Kill-death-assist/user-defined-function abbreviation comments(28) |  |
