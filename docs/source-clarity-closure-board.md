@@ -564,7 +564,7 @@ Hardware cache terminology such as `L1` and `L2` is allowed when it refers to GP
 | `crates/xlog-logic/tests/test_leader_cardinality_var_order.rs` | 0 | 0 | true | - | Replaced milestone and slice labels with leader-cardinality variable-ordering and original binary-fallback projection wording; renamed the test file accordingly. |
 | `crates/xlog-logic/tests/test_heat_aware_var_order.rs` | 0 | 0 | true | - | Replaced milestone and plan-part labels with heat-aware variable-ordering, leader-cardinality baseline, and runtime-snapshot wording; renamed the test file accordingly. |
 | `crates/xlog-logic/tests/test_kclique_promoter.rs` | 0 | 0 | true | - | Replaced milestone, phase, authorization, and internal gate labels with K-clique promoter behavior, recursive-scan, filter-rejection, and runtime histogram refresh wording; renamed the test file accordingly. |
-| `crates/xlog-logic/tests/test_w67b_cost_gate.rs` | 0 | 2 | false |  | W5.2(2) |
+| `crates/xlog-logic/tests/test_kclique_cost_gate.rs` | 0 | 0 | true | - | Replaced milestone-derived W5.2/w52 routing cert labels with skewed multiway benchmark wording; expanded dILP in the local test name and renamed the test file accordingly. |
 | `crates/xlog-logic/tests/test_w67b_dispatch_plan.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-logic/tests/test_kclique_helper_split.rs` | 0 | 0 | true | - | - |
 | `crates/xlog-neural/Cargo.toml` | 0 | 0 | true |  |  |

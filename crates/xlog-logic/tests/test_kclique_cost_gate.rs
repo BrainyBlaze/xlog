@@ -106,7 +106,7 @@ fn cost_gate_routes_incomplete_stats_to_structured_hash_default() {
 }
 
 #[test]
-fn w52_routing_decision_cert_is_36_of_36() {
+fn skewed_multiway_benchmark_routing_decision_cert_is_36_of_36() {
     const WORKLOADS: [(&str, [u32; 4], PredictedWinner); 3] = [
         ("4cycle", [50, 250, 1000, 2000], PredictedWinner::WcojPath),
         ("5clique", [10, 25, 50, 100], PredictedWinner::HashPath),
@@ -135,7 +135,7 @@ fn w52_routing_decision_cert_is_36_of_36() {
             };
             let stats = complete_shape_stats(&shape, profile);
             let predicted = plan_kclique_var_order(&shape, &stats)
-                .expect("complete W5.2 stats")
+                .expect("complete skewed multiway benchmark stats")
                 .predicted_winner;
 
             for _ in 0..3 {
@@ -148,11 +148,14 @@ fn w52_routing_decision_cert_is_36_of_36() {
     }
 
     assert_eq!(seen, 36);
-    assert_eq!(correct, 36, "W5.2 routing cert must be exact");
+    assert_eq!(
+        correct, 36,
+        "skewed multiway benchmark routing cert must be exact"
+    );
 }
 
 #[test]
-fn dilp_and_hub_skew_fixtures_keep_expected_routes() {
+fn differentiable_ilp_and_hub_skew_fixtures_keep_expected_routes() {
     let fixtures = [
         (CLIQUE5_SRC, 5u8, dense_wcoj_profile(1_250), true),
         (CLIQUE5_SRC, 5u8, hash_favorable_profile(1_600), false),
