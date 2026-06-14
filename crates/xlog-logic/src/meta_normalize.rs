@@ -231,7 +231,7 @@ impl MetaNormalizer {
                         || is_blocked_dynamic_predicate(&atom.predicate)
                     {
                         return Err(meta_error(
-                            "safe meta-predicates are not supported under negation in G085_META",
+                            "safe meta-predicates are not supported under negation in the finite meta normalization subset",
                         ));
                     }
                     out.push(BodyLiteral::Negated(self.normalize_atom_values(atom)?));
@@ -422,7 +422,7 @@ impl MetaNormalizer {
         let out_list = atom.terms[2].clone();
         if self.derived_predicates.contains(&goal.predicate) {
             return Err(meta_error(
-                "findall/3 in G085_META is limited to finite source facts; derived goals are reserved for a later aggregate-backed collection path",
+                "findall/3 is limited to finite source facts; derived goals are reserved for a later aggregate-backed collection path",
             ));
         }
 
@@ -528,7 +528,7 @@ impl MetaNormalizer {
         let pred = static_pred_name(&atom.terms[0])?;
         if self.derived_predicates.contains(&pred) {
             return Err(meta_error(
-                "maplist in G085_META is limited to finite source facts or literal empty lists",
+                "maplist is limited to finite source facts or literal empty lists",
             ));
         }
         let input_items = finite_list_items(&atom.terms[1], "maplist input")?;
@@ -871,7 +871,7 @@ impl MetaNormalizer {
             }
             Term::List(_) | Term::Cons { .. } => {
                 return Err(meta_error(
-                    "finite list terms inside term values are reserved for later G085 nodes",
+                    "finite list terms inside term values are reserved for a later term-value encoding path",
                 ))
             }
             Term::Variable(_) | Term::Anonymous => {
@@ -1085,7 +1085,7 @@ fn finite_list_items<'a>(term: &'a Term, context: &str) -> Result<&'a [Term]> {
     match term {
         Term::List(items) => Ok(items),
         _ => Err(meta_error(format!(
-            "{context} requires a finite list literal in G085_META"
+            "{context} requires a finite list literal in the safe meta subset"
         ))),
     }
 }

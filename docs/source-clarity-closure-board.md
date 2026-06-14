@@ -489,7 +489,7 @@ Hardware cache terminology such as `L1` and `L2` is allowed when it refers to GP
 | `crates/xlog-logic/src/list_normalize.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-logic/src/lower.rs` | 0 | 0 | true | - | Replaced generic multiway and language-completeness goal labels with behavior wording. |
 | `crates/xlog-logic/src/magic_sets.rs` | 0 | 0 | true |  |  |
-| `crates/xlog-logic/src/meta_normalize.rs` | 0 | 1 | false |  | G085(1) |
+| `crates/xlog-logic/src/meta_normalize.rs` | 0 | 0 | true | - | Replaced language-completeness goal diagnostics with finite meta subset wording. |
 | `crates/xlog-logic/src/module.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-logic/src/module_diagnostics.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-logic/src/optimizer.rs` | 22 | 0 | false | W2.2(18), D5(2), W3.7(1), G4(1) |  |
