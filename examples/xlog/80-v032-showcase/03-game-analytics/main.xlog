@@ -1,14 +1,14 @@
 // =============================================================================
 // Game Analytics - Main Entry Point
 // =============================================================================
-// Demonstrates v0.3.2 module system with comprehensive imports
+// Demonstrates module imports for game analytics.
 //
 // Features demonstrated:
 //   - use imports: Import predicates from 4 specialized modules
 //   - Cross-module queries: Combine player, match, achievement, and ranking data
-//   - Symbol types: Player IDs, usernames, countries, game modes
+//   - Symbol types: Player identifiers, usernames, countries, game modes
 //   - Recursive rules: Achievement prerequisites, friend-of-friend
-//   - User-Defined Functions: ELO calculations, achievement points, KDA
+//   - User-defined functions: Elo rating calculations, achievement points, kill/death/assist ratio
 //   - Aggregations: Leaderboards, statistics, distributions
 //   - Private predicates: Internal helpers hidden from other modules
 //
@@ -16,7 +16,7 @@
 //   players/profiles.xlog  - Player data, friendships, guilds
 //   matches/history.xlog   - Match results, game modes, statistics
 //   achievements/system.xlog - Achievement definitions, prerequisites, awards
-//   ranking/elo.xlog       - ELO ratings, tiers, win rates, UDFs
+//   ranking/elo.xlog       - Elo ratings, tiers, win rates, user-defined functions
 // =============================================================================
 
 // --- Module Imports ---
@@ -51,7 +51,7 @@ player_profile(PlayerId, Username, Country, Rating, Tier, AchPoints, TotalKills)
     player_achievement_points(PlayerId, AchPoints),
     total_kills(PlayerId, TotalKills).
 
-// Top players combining ELO and achievements
+// Top players combining Elo ratings and achievements
 pred elite_player(symbol, symbol, u32, u64).
 elite_player(Username, Country, Rating, AchPoints) :-
     player(PlayerId, Username, Country, active),
@@ -61,7 +61,7 @@ elite_player(Username, Country, Rating, AchPoints) :-
     player_achievement_points(PlayerId, AchPoints),
     AchPoints >= 300.
 
-// Regional leaderboard by ELO
+// Regional leaderboard by Elo rating
 pred regional_leader(symbol, symbol, symbol, u32).
 regional_leader(RegionName, Username, Country, Rating) :-
     player(PlayerId, Username, Country, active),
@@ -88,7 +88,7 @@ guild_power_ranking(GuildName, LeaderName, TotalElo, TotalAch) :-
     guild_total_elo(GuildId, TotalElo),
     guild_total_achievements(GuildId, TotalAch).
 
-// Helper: sum of ELO for guild members
+// Helper: sum of Elo ratings for guild members
 pred guild_total_elo(symbol, u64).
 guild_total_elo(GuildId, sum(Rating)) :-
     guild_member(GuildId, PlayerId),
@@ -122,12 +122,12 @@ achievement_progress(PlayerId, Username, Count, Points) :-
     player_achievement_count(PlayerId, Count),
     player_achievement_points(PlayerId, Points).
 
-// Friend network analysis with ELO comparison
+// Friend network analysis with Elo rating comparison
 // Helper constant for skill gap threshold
 pred skill_gap_threshold(u32).
 skill_gap_threshold(200).
 
-// Helper: compute ELO difference between friends
+// Helper: compute Elo rating difference between friends
 pred friend_elo_diff(symbol, symbol, symbol, symbol, u32, u32, u32).
 friend_elo_diff(User1, User2, P1, P2, Elo1, Elo2, Diff) :-
     player(P1, User1, _, active),
@@ -150,7 +150,7 @@ friend_comparison(User1, User2, Elo1, skill_gap, Diff) :-
     skill_gap_threshold(Threshold),
     Diff >= Threshold.
 
-// Players who could be introduced (friend-of-friend with similar ELO)
+// Players who could be introduced (friend-of-friend with similar Elo rating)
 pred potential_friends(symbol, symbol, u32, u32).
 potential_friends(User1, User2, Elo1, Elo2) :-
     player(P1, User1, _, active),
@@ -181,7 +181,7 @@ incomplete_chain(Username, AchName, PrereqName, Category) :-
 // QUERIES - Cross-Module Analysis
 // =============================================================================
 
-// Q1: Elite players with high ELO and achievement points
+// Q1: Elite players with high Elo ratings and achievement points
 ?- elite_player(Username, Country, Rating, AchPoints).
 
 // Q2: Regional leaderboard (Master+ players by region)
@@ -220,7 +220,7 @@ incomplete_chain(Username, AchName, PrereqName, Category) :-
 // Q13: Popular game modes
 ?- mode_popularity(ModeName, ModeId, MatchCount).
 
-// Q14: Match performance with KDA analysis
+// Q14: Match performance with kill/death/assist analysis
 ?- match_performance(PlayerId, MatchId, Kills, KdaScaled, EloRating, Tier).
 
 // Q15: Players with incomplete achievement chains
