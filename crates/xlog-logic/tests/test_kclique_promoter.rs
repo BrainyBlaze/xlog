@@ -1,12 +1,11 @@
-// crates/xlog-logic/tests/test_w32_clique_promoter.rs
-//! W3.2 — Promoter cert for `try_promote_clique_k`.
+//! K-clique promoter certification for `try_promote_clique_k`.
 //!
 //! Builds canonical K-clique bodies programmatically (left-deep
 //! sequential-join with explicit shared-variable keys) and
 //! verifies the promoter's positive + negative shape contracts.
 //!
 //! Positive (8): left-deep / right-deep / bushy × k=5 / k=6,
-//! plus K=7/K=8 Phase-2 acceptance sentinels.
+//! plus extended K=7/K=8 acceptance sentinels.
 //! Negative (8): missing-edge, self-edge, cycle-5, disconnected,
 //! constant-in-atom, reversed-atom, filter-wrapped,
 //! linear-recursive.
@@ -412,7 +411,7 @@ fn disconnected_subcomponents_do_not_promote() {
 fn clique_with_constant_in_atom_does_not_promote() {
     // Build canonical k=5 body, then wrap one atom in a Filter
     // that pins its first column to a constant. Filter wrapper
-    // is rejected outright by the promoter (per fix #5).
+    // is rejected outright by the promoter's filter-rejection contract.
     let rels = k5_rels();
     let body = build_left_deep_clique(5, &rels);
     // Wrap the body in a Filter — promoter rejects on Filter.
@@ -474,7 +473,7 @@ fn clique5_with_reversed_atom_rejected() {
 fn clique5_with_filter_wrapper_rejected() {
     // Same as the constant-in-atom test in this minimal cert
     // surface: Filter wrappers are rejected. Distinct test name
-    // pins the contract per the plan's negative-cell list.
+    // pins the negative-shape contract.
     let rels = k5_rels();
     let body = build_left_deep_clique(5, &rels);
     let filtered = RirNode::Filter {
@@ -490,9 +489,9 @@ fn clique5_with_filter_wrapper_rejected() {
 #[test]
 fn linear_recursive_clique5_promotes_for_histogram_refresh() {
     // Linear-recursive clique body: one atom resolves to a
-    // recursive RelId. The W3.2 promoter checks
-    // recursive_scan_count via the slice-4 gate; if any input
-    // RelId is in the head SCC, the body falls through.
+    // recursive RelId. The recursive-aware promoter tracks
+    // recursive_scan_count and still promotes this single-recursive-input
+    // shape so runtime histogram refresh can observe it.
     //
     // We build the clique body with rel_ids[0] = head_rel (in the
     // SCC), and pass that head_rel via a custom rel_ids map so
@@ -529,12 +528,12 @@ fn linear_recursive_clique5_promotes_for_histogram_refresh() {
     let body_after = &scc0[0].body;
     assert!(
         matches!(body_after, RirNode::MultiWayJoin { inputs, fallback, .. } if inputs.len() == 10 && !matches!(fallback.as_ref(), RirNode::Unit)),
-        "Authorization 5 requires linear-recursive clique5 bodies to promote for runtime histogram refresh"
+        "linear-recursive clique5 bodies must promote for runtime histogram refresh"
     );
 }
 
 // ============================================================
-// Phase-2 K=7/K=8 positive cells + K=9 rejection sentinel
+// Extended K=7/K=8 positive cells + K=9 rejection sentinel
 // ============================================================
 
 #[test]
@@ -561,6 +560,6 @@ fn clique9_does_not_promote() {
     let body = build_left_deep_clique(9, &rels);
     assert!(
         promote_and_check(body).is_none(),
-        "k=9 clique body must NOT promote (G_W64 only handles k <= 8)"
+        "k=9 clique body must NOT promote (k-clique promoter currently handles k <= 8)"
     );
 }
