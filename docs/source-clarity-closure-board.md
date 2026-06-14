@@ -765,7 +765,7 @@ Hardware cache terminology such as `L1` and `L2` is allowed when it refers to GP
 | `docs/whitepaper/sections/02_architecture.tex` | 9 | 0 | true | transfer shorthand(3), external Decision-DNNF compiler shorthand(1), release/runtime labels(5) |  |
 | `docs/whitepaper/sections/03_language.tex` | 0 | 0 | true |  |  |
 | `docs/whitepaper/sections/04_gpu_datalog.tex` | 3 | 0 | true | transfer shorthand(1), runtime/release labels(2) |  |
-| `docs/whitepaper/sections/05_probabilistic.tex` | 8 | 0 | false | D4(8) |  |
+| `docs/whitepaper/sections/05_probabilistic.tex` | 9 | 0 | true | external Decision-DNNF compiler shorthand(8), aggregate release label(1) |  |
 | `docs/whitepaper/sections/065_epistemic.tex` | 1 | 0 | false | G91(1) |  |
 | `docs/whitepaper/sections/06_neural_symbolic.tex` | 11 | 0 | false | D1(4), D2(4), D4(3) |  |
 | `docs/whitepaper/sections/07_interop.tex` | 0 | 0 | true |  |  |
