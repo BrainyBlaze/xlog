@@ -218,8 +218,12 @@ query(score_sum(1, 153)).
 
     let err = extract_from_source(source).expect_err("exact aggregate cap should reject 17 rows");
     let msg = err.to_string();
-    assert!(msg.contains("v0.8.5 prob_aggregate error"), "msg={}", msg);
-    assert!(msg.contains("exact aggregate domain cap"), "msg={}", msg);
+    assert!(
+        msg.contains("exact probabilistic aggregate domain cap"),
+        "msg={}",
+        msg
+    );
+    assert!(msg.contains("predicate score_sum"), "msg={}", msg);
     assert!(msg.contains("prob_engine = mc"), "msg={}", msg);
 }
 
