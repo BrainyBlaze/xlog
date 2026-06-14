@@ -1,10 +1,11 @@
-//! Approximate probabilistic inference via Monte Carlo sampling (P3).
+//! Approximate probabilistic inference via Monte Carlo sampling.
 //!
 //! This engine samples probabilistic facts / annotated disjunction decisions on the GPU and
 //! evaluates the deterministic core in each sampled world.
 //!
-//! For programs with non-monotone recursion (cycles through `not` and/or aggregates), Phase 4
-//! requires explicit P3 opt-in. The deterministic evaluation uses a bounded, cycle-aware semantics:
+//! For programs with non-monotone recursion (cycles through `not` and/or aggregates),
+//! Monte Carlo evaluation requires the user to opt into the approximate probabilistic
+//! engine. The deterministic evaluation uses a bounded, cycle-aware semantics:
 //!
 //! - If an SCC reaches a fixpoint under synchronous iteration, that fixpoint is used.
 //! - If the SCC enters a cycle, the interpretation is the intersection of all states in the cycle
@@ -111,7 +112,7 @@ impl McTimingBreakdown {
     }
 }
 
-/// Phase 4 semantics for non-monotone SCC evaluation inside MC sampling.
+/// Bounded semantics for non-monotone SCC evaluation inside MC sampling.
 pub const NONMONOTONE_SEMANTICS: &str = "Synchronous iteration per SCC; if a fixpoint is reached, use it; if a cycle is detected, use the intersection of all states in the cycle (skeptical tuples only); if the iteration budget is exceeded, use the intersection across all visited states (conservative).";
 
 #[derive(Debug, Clone)]

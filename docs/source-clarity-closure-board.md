@@ -606,7 +606,7 @@ Hardware cache terminology such as `L1` and `L2` is allowed when it refers to GP
 | `crates/xlog-prob/src/lib.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-prob/src/mc/buffers.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-prob/src/mc/evidence.rs` | 0 | 0 | true |  |  |
-| `crates/xlog-prob/src/mc/mod.rs` | 2 | 0 | false | P3(2) |  |
+| `crates/xlog-prob/src/mc/mod.rs` | 0 | 0 | true | - | Replaced P3/Phase labels with explicit Monte Carlo approximate-engine opt-in and bounded non-monotone SCC semantics wording. |
 | `crates/xlog-prob/src/mc/resident.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-prob/src/mc/results.rs` | 0 | 1 | false |  | G085(1) |
 | `crates/xlog-prob/src/neural_fast_path.rs` | 0 | 0 | true |  |  |
