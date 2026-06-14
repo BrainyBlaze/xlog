@@ -1056,7 +1056,7 @@ Hardware cache terminology such as `L1` and `L2` is allowed when it refers to GP
 | `examples/neural/03_mnist_multidigit/README.md` | 0 | 0 | true |  |  |
 | `examples/neural/03_mnist_multidigit/dataset.json` | 0 | 0 | true |  |  |
 | `examples/neural/03_mnist_multidigit/model.py` | 0 | 0 | true |  |  |
-| `examples/neural/03_mnist_multidigit/program.xlog` | 0 | 8 | false |  | D1(4), D2(4) |
+| `examples/neural/03_mnist_multidigit/program.xlog` | 0 | 8 | true |  | digit variable shorthand(8) |
 | `examples/neural/03_mnist_multidigit/train.py` | 0 | 0 | true |  |  |
 | `examples/neural/04_hwf/README.md` | 0 | 0 | true |  |  |
 | `examples/neural/04_hwf/dataset.json` | 0 | 0 | true |  |  |
