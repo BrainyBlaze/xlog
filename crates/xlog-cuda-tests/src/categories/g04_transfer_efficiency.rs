@@ -1,4 +1,4 @@
-//! Category G04: Transfer Efficiency Tests
+//! Transfer efficiency tests
 //!
 //! Tests that verify 0% CPU bottleneck by ensuring efficient data transfer
 //! between host and device. These tests verify:
@@ -14,20 +14,20 @@ use std::time::{Duration, Instant};
 
 /// Run all tests in this category.
 pub fn run_all(ctx: &TestContext) -> CategoryResult {
-    let mut results = CategoryResult::new("g04_transfer_efficiency");
+    let mut results = CategoryResult::new("transfer_efficiency");
     let start = Instant::now();
 
-    // G04.1: Transfer Size Analysis (3 tests)
+    // Transfer size analysis checks.
     results.add_result(test_transfer_weight_size(ctx));
     results.add_result(test_transfer_gradient_size(ctx));
     results.add_result(test_transfer_circuit_cached(ctx));
 
-    // G04.2: Transfer vs Compute Ratio (3 tests)
+    // Transfer-vs-compute ratio checks.
     results.add_result(test_transfer_compute_ratio_small(ctx));
     results.add_result(test_transfer_compute_ratio_large(ctx));
     results.add_result(test_transfer_dominance_check(ctx));
 
-    // G04.3: Hot Path Verification (2 tests)
+    // Hot-path verification checks.
     results.add_result(test_repeated_eval_no_reupload(ctx));
     results.add_result(test_batch_weights_efficiency(ctx));
 
@@ -36,7 +36,7 @@ pub fn run_all(ctx: &TestContext) -> CategoryResult {
 }
 
 // =============================================================================
-// G04.1: Transfer Size Analysis Tests
+// Transfer size analysis tests
 // =============================================================================
 
 /// Test 1: Weight upload is exactly 2 * num_vars * 8 bytes
@@ -396,7 +396,7 @@ fn test_transfer_circuit_cached(ctx: &TestContext) -> TestResult {
 }
 
 // =============================================================================
-// G04.2: Transfer vs Compute Ratio Tests
+// Transfer-vs-compute ratio tests
 // =============================================================================
 
 /// Test 4: For 10-var circuit, compute dominates
@@ -754,7 +754,7 @@ fn test_transfer_dominance_check(ctx: &TestContext) -> TestResult {
 }
 
 // =============================================================================
-// G04.3: Hot Path Verification Tests
+// Hot-path verification tests
 // =============================================================================
 
 /// Test 7: 100 evaluations with same circuit structure
@@ -1104,7 +1104,7 @@ mod tests {
     }
 
     #[test]
-    fn test_g04_transfer_weight_size() {
+    fn test_transfer_weight_size_wrapper() {
         if let Some(ctx) = get_test_context() {
             let result = test_transfer_weight_size(&ctx);
             assert!(
@@ -1117,7 +1117,7 @@ mod tests {
     }
 
     #[test]
-    fn test_g04_transfer_gradient_size() {
+    fn test_transfer_gradient_size_wrapper() {
         if let Some(ctx) = get_test_context() {
             let result = test_transfer_gradient_size(&ctx);
             assert!(
@@ -1130,7 +1130,7 @@ mod tests {
     }
 
     #[test]
-    fn test_g04_transfer_circuit_cached() {
+    fn test_transfer_circuit_cached_wrapper() {
         if let Some(ctx) = get_test_context() {
             let result = test_transfer_circuit_cached(&ctx);
             assert!(
@@ -1143,7 +1143,7 @@ mod tests {
     }
 
     #[test]
-    fn test_g04_transfer_compute_ratio_small() {
+    fn test_transfer_compute_ratio_small_wrapper() {
         if let Some(ctx) = get_test_context() {
             let result = test_transfer_compute_ratio_small(&ctx);
             assert!(
@@ -1156,7 +1156,7 @@ mod tests {
     }
 
     #[test]
-    fn test_g04_transfer_compute_ratio_large() {
+    fn test_transfer_compute_ratio_large_wrapper() {
         if let Some(ctx) = get_test_context() {
             let result = test_transfer_compute_ratio_large(&ctx);
             assert!(
@@ -1169,7 +1169,7 @@ mod tests {
     }
 
     #[test]
-    fn test_g04_transfer_dominance_check() {
+    fn test_transfer_dominance_check_wrapper() {
         if let Some(ctx) = get_test_context() {
             let result = test_transfer_dominance_check(&ctx);
             assert!(
@@ -1182,7 +1182,7 @@ mod tests {
     }
 
     #[test]
-    fn test_g04_repeated_eval_no_reupload() {
+    fn test_repeated_eval_no_reupload_wrapper() {
         if let Some(ctx) = get_test_context() {
             let result = test_repeated_eval_no_reupload(&ctx);
             assert!(
@@ -1195,7 +1195,7 @@ mod tests {
     }
 
     #[test]
-    fn test_g04_batch_weights_efficiency() {
+    fn test_batch_weights_efficiency_wrapper() {
         if let Some(ctx) = get_test_context() {
             let result = test_batch_weights_efficiency(&ctx);
             assert!(
