@@ -810,7 +810,7 @@ Hardware cache terminology such as `L1` and `L2` is allowed when it refers to GP
 | `examples/BFO/universal_case_reasoner/programs/epistemic/modules/selector_acceptance.xlog` | 0 | 0 | true |  |  |
 | `examples/BFO/universal_case_reasoner/programs/neural_ranker.xlog` | 0 | 0 | true |  |  |
 | `examples/BFO/universal_case_reasoner/programs/production_ranker.xlog` | 0 | 0 | true |  |  |
-| `examples/BFO/universal_case_reasoner/proposed_fixes.md` | 1 | 0 | false | D2H(1) |  |
+| `examples/BFO/universal_case_reasoner/proposed_fixes.md` | 21 | 0 | true | issue-code labels(12), release/project labels(2), transfer shorthand(2), shorthand labels(5) |  |
 | `examples/BFO/universal_case_reasoner/repro/repro_001_nn4_scoring_not_dilp.py` | 0 | 0 | true |  |  |
 | `examples/BFO/universal_case_reasoner/repro/repro_002_proof_paths_without_gradients.py` | 0 | 0 | true |  |  |
 | `examples/BFO/universal_case_reasoner/repro/repro_003_missing_rule_inventory_audit.py` | 0 | 0 | true |  |  |
