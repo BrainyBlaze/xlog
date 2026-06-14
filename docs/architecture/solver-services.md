@@ -9,7 +9,8 @@ XLOG uses SAT solving in multiple subsystems:
 - **Knowledge compilation verification** (`xlog-prob`): prove `φ ≡ C` by checking two UNSAT queries on GPU:
   - `UNSAT(φ ∧ ¬C)`
   - `UNSAT(C ∧ ¬φ)`
-- **D4-style compilation** (GPU D4): unit propagation, decomposition, and (optionally) SAT calls during compilation.
+- **Decision-DNNF-style compilation** (GPU Decision-DNNF): unit propagation,
+  decomposition, and (optionally) SAT calls during compilation.
 - **ASP/ELP-style workflows** (future): candidate model checks and brave/cautious consequence checks.
 
 The verifier must be **complete**. Heuristic solvers (CLS, local search) are allowed only as *optional accelerators*, never as the final authority.
@@ -115,8 +116,8 @@ The SAT PTX module also includes verifier helper kernels used by `xlog-solve` an
 
 ## Production Adapter For Epistemic Callers
 
-`xlog_solve::GpuSolverProductionAdapter` is the shipped (v0.9.2) GPU-native
-solver service for epistemic callers: a thin adapter over the existing
+`xlog_solve::GpuSolverProductionAdapter` is the shipped GPU-native solver
+service for epistemic callers: a thin adapter over the existing
 `GpuCdclSolver` that makes solver production-path reuse auditable. It is the
 production solver path, with the CPU oracle gated off for production metrics.
 
@@ -138,9 +139,9 @@ The adapter:
 
 This is not a separate solver engine. It does not call `SolverService`, does not
 enumerate assignments on CPU, and does not introduce an epistemic-only search
-path. As shipped in v0.9.2 it is a **bounded** surface: GPU CDCL SAT/UNSAT,
-bounded MaxSAT, and bounded SAT/MaxSAT portfolio jobs are wired and tested, but
-the surface is not full coverage of all MaxSAT, portfolio, and weighted forms.
+path. It is a **bounded** surface: GPU CDCL SAT/UNSAT, bounded MaxSAT, and
+bounded SAT/MaxSAT portfolio jobs are wired and tested, but the surface is not
+full coverage of all MaxSAT, portfolio, and weighted forms.
 Broader solver semantic integration and a dedicated Solver IR (SIR) remain
 future work.
 
@@ -155,8 +156,7 @@ XLOG also ships a CPU-side service facade for bounded semantic fixtures. It is
 not the production verifier, it is not GPU-native epistemic solving, and it does
 not dispatch epistemic solving to a GPU portfolio. This facade is an
 oracle/reference surface used for testing and fixture-scale semantics; the
-GPU-backed `GpuSolverProductionAdapter` is the production solver path in
-v0.9.2.
+GPU-backed `GpuSolverProductionAdapter` is the production solver path.
 
 `SolverService` owns a `SolveInstance` and exposes:
 
