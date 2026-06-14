@@ -851,7 +851,7 @@ Hardware cache terminology such as `L1` and `L2` is allowed when it refers to GP
 | `examples/epistemic/13c-nested-modal-chain-negated.xlog` | 9 | 0 | true | release/task labels(2), comment shorthand(7); G91 retained as allowed epistemic-mode terminology |  |
 | `examples/epistemic/13d-nested-modal-chain-faeel-unfounded.xlog` | 16 | 0 | true | release/task labels(2), emphasis shorthand and bare example-number references(14); G91 retained as allowed epistemic-mode terminology |  |
 | `examples/epistemic/13e-nested-modal-chain-g91-accepted.xlog` | 14 | 0 | true | release/task labels(2), emphasis shorthand and bare example-number references(12); G91 retained as allowed epistemic-mode terminology |  |
-| `examples/epistemic/13f-nested-modal-interior-negation-absent.xlog` | 0 | 1 | false |  | C2(1) |
+| `examples/epistemic/13f-nested-modal-interior-negation-absent.xlog` | 3 | 0 | true | release/task labels(3) |  |
 | `examples/epistemic/13f-nested-modal-interior-negation.xlog` | 0 | 3 | false |  | C2(2), S5(1) |
 | `examples/epistemic/13fw-nested-modal-interior-negation-g91-absent.xlog` | 0 | 2 | false |  | C2(1), G91(1) |
 | `examples/epistemic/13fw-nested-modal-interior-negation-g91-present.xlog` | 0 | 2 | false |  | C2(1), G91(1) |

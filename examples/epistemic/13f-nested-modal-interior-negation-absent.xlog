@@ -1,4 +1,4 @@
-// v0.9.2 ITEM C2: explicit absent-target companion for interior negation.
+// Explicit absent-target companion for interior-negation modal duality.
 // `know not possible p()` dualizes to `not possible p()`.
 // Because p() is absent, q() is derived.
 #pragma epistemic_mode = faeel
