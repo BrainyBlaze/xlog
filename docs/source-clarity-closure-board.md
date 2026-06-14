@@ -1264,7 +1264,7 @@ Hardware cache terminology such as `L1` and `L2` is allowed when it refers to GP
 | `examples/neural/baseline/deepproblog/minimal/data.py` | 0 | 0 | true |  |  |
 | `examples/neural/baseline/deepproblog/minimal/network.py` | 0 | 0 | true |  |  |
 | `examples/neural/baseline/scallop/mnist_addition.py` | 0 | 0 | true |  |  |
-| `examples/neural/tests/test_batch_parity.py` | 1 | 4 | false | L2(1) | D1(2), D2(2) |
+| `examples/neural/tests/test_batch_parity.py` | 0 | 4 | true | L2 retained as standard norm terminology | digit variable shorthand(4) |
 | `examples/prob/01-wet-conditioning.xlog` | 0 | 0 | true |  |  |
 | `examples/prob/02-annotated-disjunction.xlog` | 0 | 0 | true |  |  |
 | `examples/prob/03-recursive-reachability.xlog` | 0 | 0 | true |  |  |
