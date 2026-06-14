@@ -1,4 +1,4 @@
-// v0.9.1 EGB-07: FAEEL accepts self-supporting modal rules only when an
+// FAEEL accepts self-supporting modal rules only when an
 // independent founded support exists. founded() is supported both by base() and
 // by `possible founded()`; the independent base() foundation makes the
 // self-support founded, so FAEEL accepts it. Expect: founded with rows: 1.

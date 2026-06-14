@@ -844,7 +844,7 @@ Hardware cache terminology such as `L1` and `L2` is allowed when it refers to GP
 | `examples/epistemic/08-repeated-variable.xlog` | 0 | 0 | true |  |  |
 | `examples/epistemic/09-joint-multi-epistemic.xlog` | 0 | 0 | true |  |  |
 | `examples/epistemic/10-epistemic-constraint.xlog` | 0 | 0 | true |  |  |
-| `examples/epistemic/11-faeel-foundedness.xlog` | 0 | 0 | true |  |  |
+| `examples/epistemic/11-faeel-foundedness.xlog` | 2 | 0 | true | release/task labels(2) |  |
 | `examples/epistemic/12-bound-variable-splitting.xlog` | 0 | 0 | true |  |  |
 | `examples/epistemic/13-nested-modal-chain-collapse.xlog` | 2 | 0 | true | release/task labels(2); G91 and S5 retained as allowed epistemic/modal terminology |  |
 | `examples/epistemic/13b-nested-modal-chain-filter.xlog` | 7 | 0 | true | release/task labels(2), comment shorthand(5); G91 retained as allowed epistemic-mode terminology |  |
@@ -906,7 +906,7 @@ Hardware cache terminology such as `L1` and `L2` is allowed when it refers to GP
 | `examples/epistemic/28-determined-multicol-binding-modal.xlog` | 0 | 0 | true |  |  |
 | `examples/epistemic/29-negated-modal-over-determined-derived.xlog` | 0 | 0 | true |  |  |
 | `examples/epistemic/30-possible-binding-over-determined.xlog` | 0 | 0 | true |  |  |
-| `examples/epistemic/31-faeel-unfounded-self-support-empty-extension.xlog` | 0 | 1 | false |  | G91(1) |
+| `examples/epistemic/31-faeel-unfounded-self-support-empty-extension.xlog` | 24 | 0 | true | release/task labels, emphasis shorthand, and bare example-number references(24); G91 retained as allowed epistemic-mode terminology |  |
 | `examples/epistemic/32-g91-self-support-accepted.xlog` | 0 | 5 | false |  | G91(5) |
 | `examples/epistemic/33-negated-modal-through-recursion-wfs.xlog` | 0 | 0 | true |  |  |
 | `examples/epistemic/33a-negated-modal-through-recursion-wfs-faeel-not-know.xlog` | 0 | 0 | true |  |  |
