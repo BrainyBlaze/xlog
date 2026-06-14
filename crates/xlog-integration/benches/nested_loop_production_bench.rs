@@ -1,10 +1,9 @@
 #![allow(clippy::type_complexity)]
 
-//! W4.2 production-kernel benchmark — nested-loop vs hash on the
-//! production eligibility envelope.
+//! Nested-loop production-kernel benchmark versus hash join on the production
+//! eligibility envelope.
 //!
-//! Differs from the bench-spike at `bench-spike/w42-nested-loop`
-//! in two structural ways:
+//! Differs from the earlier nested-loop bench spike in two structural ways:
 //!
 //!   1. **Multi-col arity** — 3-col buffers (key at col 0, two
 //!      payload columns) match production traffic shape. The
@@ -28,8 +27,8 @@
 //!     or `provider.hash_join_v2` only. Same uploaded buffers
 //!     across both paths within a cell.
 //!
-//! D7 acceptance criterion #6: nested-loop must win ≥ 2× vs hash
-//! on the eligible cells.
+//! Acceptance criterion: nested-loop must win at least 2x versus hash join on
+//! the eligible cells.
 
 use std::collections::BTreeSet;
 use std::sync::Arc;
@@ -158,7 +157,7 @@ fn download_6col(buf: &CudaBuffer, prov: &CudaKernelProvider) -> Vec<[u32; 6]> {
 }
 
 // ---------------------------------------------------------------
-// Bench matrix (per W4.2 plan iter-4 Step 12).
+// Bench matrix for nested-loop production eligibility validation.
 // ---------------------------------------------------------------
 
 /// Eligible cells: nested-loop AND hash benched. Matrix covers
@@ -167,7 +166,7 @@ fn download_6col(buf: &CudaBuffer, prov: &CudaKernelProvider) -> Vec<[u32; 6]> {
 const ELIGIBLE_MATRIX: &[(u32, u32)] = &[(100, 100), (500, 500), (1000, 1000), (2000, 2000)];
 
 /// Above-threshold cells: hash only. Establishes hash's scaling
-/// baseline for the evidence README. The W4.2 dispatcher routes
+/// baseline for the evidence README. The production dispatcher routes
 /// these to hash (they exceed 4M Cartesian).
 const ABOVE_THRESHOLD_MATRIX: &[(u32, u32)] = &[
     (5000, 5000),  // 25M Cartesian
@@ -193,18 +192,18 @@ fn fixture_3col(num_left: u32, num_right: u32) -> (Vec<(u32, u32, u32)>, Vec<(u3
     (left, right)
 }
 
-fn bench_w42_production(c: &mut Criterion) {
+fn bench_nested_loop_production(c: &mut Criterion) {
     let prov_holder = match make_provider() {
         Some(p) => p,
         None => {
-            eprintln!("Skipping w42 production bench: CUDA runtime unavailable");
+            eprintln!("Skipping nested-loop production bench: CUDA runtime unavailable");
             return;
         }
     };
     let memory = Arc::clone(&prov_holder.memory);
     let prov = Arc::clone(&prov_holder.provider);
 
-    let mut group = c.benchmark_group("w42_production_nested_loop_vs_hash");
+    let mut group = c.benchmark_group("nested_loop_production_vs_hash");
 
     // Eligible cells: bench both paths after parity-checking they
     // produce identical row sets.
@@ -268,7 +267,7 @@ fn bench_w42_production(c: &mut Criterion) {
 
     // Above-threshold cells: hash only (nested-loop provider Errs
     // above the 4M Cartesian threshold). These rows establish
-    // hash's scaling baseline outside the W4.2 envelope.
+    // hash's scaling baseline outside the nested-loop eligibility envelope.
     for &(num_left, num_right) in ABOVE_THRESHOLD_MATRIX {
         let (left_rows, right_rows) = fixture_3col(num_left, num_right);
         let left_buf = upload_3col_u32(&memory, &left_rows);
@@ -305,6 +304,6 @@ criterion_group! {
         .sample_size(20)
         .measurement_time(Duration::from_secs(3))
         .warm_up_time(Duration::from_millis(500));
-    targets = bench_w42_production
+    targets = bench_nested_loop_production
 }
 criterion_main!(benches);

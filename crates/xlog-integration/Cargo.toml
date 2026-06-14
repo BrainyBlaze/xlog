@@ -39,7 +39,8 @@ name = "wcoj_4cycle_bench"
 harness = false
 
 [[bench]]
-name = "w42_production_nested_loop_bench"
+name = "nested_loop_production_bench"
+path = "benches/nested_loop_production_bench.rs"
 harness = false
 
 [[bench]]
