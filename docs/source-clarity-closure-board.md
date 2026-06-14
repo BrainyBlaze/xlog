@@ -597,7 +597,7 @@ Hardware cache terminology such as `L1` and `L2` is allowed when it refers to GP
 | `crates/xlog-prob/src/compilation/validation.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-prob/src/decision_order.rs` | 0 | 0 | true | - | Replaced bare D4 decision-order comments with Decision-DNNF compiler and GPU-native branching-heuristic wording. |
 | `crates/xlog-prob/src/epistemic.rs` | 0 | 0 | true | - | Replaced GPU D4 adapter comments with GPU-native Decision-DNNF wording and removed a stale v0.9 fixture label from the module docs. |
-| `crates/xlog-prob/src/epistemic_production.rs` | 2 | 2 | false | G91(1), G090(1) | G91(1), D4(1) |
+| `crates/xlog-prob/src/epistemic_production.rs` | 0 | 0 | true | - | Expanded G91 prose to Gelfond-1991 compatibility-mode wording while preserving public G91 semantics identifiers; replaced the G090 goal label and bare D4 backend text with production-goal and GPU-native Decision-DNNF wording. |
 | `crates/xlog-prob/src/exact.rs` | 5 | 2 | false | D4(5) | D4(2) |
 | `crates/xlog-prob/src/exact_gpu.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-prob/src/gpu.rs` | 0 | 0 | true |  |  |
