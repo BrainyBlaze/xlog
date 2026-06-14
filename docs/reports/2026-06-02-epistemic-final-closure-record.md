@@ -1,7 +1,7 @@
-# v0.9.2 Epistemic Final Closure Record
+# Epistemic Final Closure Record
 
 **Date:** 2026-06-02
-**Branch:** `v092-epistemic-release-closure`
+**Branch:** epistemic release-closure branch
 **Package version:** `0.9.2`
 **Final implementation SHA:** `f231278b`
 **Local main:** `975ab780`
@@ -11,7 +11,7 @@
 
 ## Verdict
 
-`MERGE_CANDIDATE` under the exact non-resident WFS contract below.
+Merge candidate under the exact non-resident WFS contract below.
 
 The release claim is:
 
@@ -38,7 +38,7 @@ The final release-surface review confirmed these gates on the clean final branch
 - `xlog-logic` GPT: 9/9
 - `xlog-logic` split: 44/44
 - `xlog-logic` FAEEL foundedness: 7/7
-- `xlog-logic` G91: 5/5
+- `xlog-logic` Gelfond 1991 compatibility: 5/5
 - nested modal parser tests: 4/4
 - `xlog-gpu` `logic_runner`: 16/16
 - `xlog-cli` `run_cli_tests`: 14/14
@@ -54,7 +54,7 @@ The final release-surface review confirmed these gates on the clean final branch
 - `docs/reports/2026-06-01-full-semantic-completion-supervisor-report.md`
   now points to this final closure record and no longer presents `ba34152e` as
   the final closure SHA.
-- The same report records C2 interior-negation / finite nested negation as done
+- The same report records interior-negation / finite nested negation as done
   and freshly gated.
 - `docs/language-reference.md` documents finite nested modal chains through
   `nested_modal_chain`, not the superseded `unsupported_nested_epistemic_atom`
@@ -66,5 +66,5 @@ The final release-surface review confirmed these gates on the clean final branch
 ## Remaining non-claim
 
 If the release is re-scoped to require device-resident/no-host-interaction WFS,
-this branch is not sufficient and must return to `HOLD_FOR_FIXES` for that
+this branch is not sufficient and must be held for fixes for that
 stronger residency contract.

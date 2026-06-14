@@ -745,7 +745,7 @@ Hardware cache terminology such as `L1` and `L2` is allowed when it refers to GP
 | `docs/reports/2026-05-31-mc-gpu-resident-engine-bundles-1-3.md` | 0 | 0 | true |  |  |
 | `docs/reports/2026-05-31-epistemic-completion-supervisor-report.md` | 45 | 1 | true | release/branch labels(24), executor-bundle codes(11), semantic-case labels(5), Gelfond 1991 shorthand(4), constraint gap code(1) | filename artifact(1) |
 | `docs/reports/2026-06-01-full-semantic-completion-supervisor-report.md` | 38 | 1 | true | release/branch labels(9), delivery item codes(13), Gelfond 1991 shorthand(4), modal-literal placeholders(2), modal-logic shorthand(1), fixture matrix labels(7), status labels(2) | filename artifact(1) |
-| `docs/reports/2026-06-02-v092-epistemic-final-closure-record.md` | 4 | 0 | false | v092(2), G91(1), C2(1) |  |
+| `docs/reports/2026-06-02-epistemic-final-closure-record.md` | 6 | 1 | true | release/branch labels(2), status labels(2), Gelfond 1991 shorthand(1), interior-negation item code(1) | filename artifact(1) |
 | `docs/v065-closure-board.md` | 228 | 0 | false | W2.3(12), W2.1(11), W2.4(10), W2.2(9), W2.6(8), W5.2(8) |  |
 | `docs/wcoj-architecture-guide.md` | 33 | 0 | false | S1d(8), S1c(5), S1b(4), P4(3), W4.1(3), D1(2) |  |
 | `docs/wcoj-user-guide.md` | 2 | 0 | false | G38(1), G39(1) |  |
