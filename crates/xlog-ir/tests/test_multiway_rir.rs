@@ -1,4 +1,4 @@
-//! v0.6.5 slice 1 — `RirNode::MultiWayJoin` IR variant smoke tests.
+//! `RirNode::MultiWayJoin` IR variant smoke tests.
 //!
 //! Asserts the new variant integrates with the IR's recursion
 //! helpers: `is_leaf`, `referenced_relations` (via the private
@@ -6,11 +6,9 @@
 //! fallback descent, GPU dispatch) are tested in their owning
 //! crates; this file pins only the IR-level invariants.
 //!
-//! Per the v0.6.5 slice 1 plan:
-//! `referenced_relations` recurses into `inputs` (the canonical
-//! WCOJ slot order). The `fallback` subtree references the same
-//! set by promoter invariant; we keep the canonical answer
-//! minimal.
+//! `referenced_relations` recurses into `inputs` (the canonical WCOJ slot
+//! order). The `fallback` subtree references the same set by promoter
+//! invariant; we keep the canonical answer minimal.
 
 use xlog_core::RelId;
 use xlog_ir::rir::ProjectExpr;
@@ -120,14 +118,12 @@ fn multiway_join_with_empty_inputs_collects_nothing() {
     assert!(!node.is_leaf());
 }
 
-/// v0.6.5 slice 2 (D4) — shape-agnosticism guard.
+/// Shape-agnosticism guard for four-input `MultiWayJoin` nodes.
 ///
-/// Slice 1 added `MultiWayJoin` with a triangle-only promoter, but
-/// the IR variant itself is shape-agnostic. Slice 2a (4-way) will
-/// add a 4-input promoter; this test pins the contract that
-/// `referenced_relations` on a synthesized 4-input MultiWayJoin
-/// reports four distinct relations from `inputs` alone, regardless
-/// of arity.
+/// The original `MultiWayJoin` promoter handled triangles, but the IR
+/// variant itself is shape-agnostic. Four-input promoters rely on the contract
+/// that `referenced_relations` on a synthesized 4-input MultiWayJoin reports
+/// four distinct relations from `inputs` alone, regardless of arity.
 #[test]
 fn referenced_relations_handles_4_inputs() {
     let scans = [10u32, 20, 30, 40].map(|id| RirNode::Scan { rel: RelId(id) });
