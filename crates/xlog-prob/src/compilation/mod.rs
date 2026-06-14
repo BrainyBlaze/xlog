@@ -242,7 +242,8 @@ pub fn compile_gpu_d4_and_verify_cached(
     //
     // D→H copy compile_needed to decide whether we need to compile at all.
     // If compile_needed == 0, the GPU cache already has the circuit (GPU cache hit).
-    // If compile_needed == 1, we check the disk cache before falling through to D4.
+    // If compile_needed == 1, we check the disk cache before falling through to the
+    // GPU-native Decision-DNNF compiler.
     let compile_needed_host: Vec<u32> = provider
         .device()
         .inner()
@@ -331,7 +332,7 @@ pub fn compile_gpu_d4_and_verify_cached(
 
     let d4_config = d4_config_for_smoothing(config, random_vars.count())?;
 
-    // --- D4 compile stage ---
+    // --- GPU-native Decision-DNNF compile stage ---
     #[cfg(debug_assertions)]
     eprintln!("[xlog-prob] compile_gpu_d4_and_verify_cached: compile_gpu_d4_gated");
     let t_d4 = if profiling {
@@ -362,8 +363,9 @@ pub fn compile_gpu_d4_and_verify_cached(
         }
     }
     if circuit_base.num_nodes() == 0 || circuit_base.num_levels() == 0 {
-        // Defensive: D4 returned an empty circuit (the primary GPU cache hit is handled
-        // by the compile_needed == 0 early return above; this catches degenerate CNFs).
+        // Defensive: the GPU-native Decision-DNNF compiler returned an empty circuit
+        // (the primary GPU cache hit is handled by the compile_needed == 0 early return
+        // above; this catches degenerate CNFs).
         let out_profile = if profiling { Some(profile) } else { None };
         return Ok((handle, out_profile));
     }

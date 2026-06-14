@@ -592,7 +592,7 @@ Hardware cache terminology such as `L1` and `L2` is allowed when it refers to GP
 | `crates/xlog-prob/src/compilation/gpu_pir.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-prob/src/compilation/gpu_pir_intern.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-prob/src/compilation/gpu_weights.rs` | 0 | 0 | true |  |  |
-| `crates/xlog-prob/src/compilation/mod.rs` | 3 | 0 | false | D4(3) |  |
+| `crates/xlog-prob/src/compilation/mod.rs` | 0 | 0 | true | - | Replaced bare D4 stage comments with GPU-native Decision-DNNF compiler wording; D4 remains only in established function/field identifiers. |
 | `crates/xlog-prob/src/compilation/sparse_matrix.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-prob/src/compilation/validation.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-prob/src/decision_order.rs` | 2 | 0 | false | D4(2) |  |
