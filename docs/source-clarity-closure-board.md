@@ -448,7 +448,7 @@ Hardware cache terminology such as `L1` and `L2` is allowed when it refers to GP
 | `crates/xlog-integration/tests/test_wcoj_dispatch_stream_reuse.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-integration/tests/test_wcoj_executor_wiring.rs` | 0 | 0 | true | - | - |
 | `crates/xlog-integration/tests/test_wcoj_groupby_fusion.rs` | 0 | 0 | true | - | - |
-| `crates/xlog-integration/tests/test_wcoj_groupby_fusion_recursive.rs` | 1 | 0 | false | D1(1) |  |
+| `crates/xlog-integration/tests/test_wcoj_groupby_fusion_recursive.rs` | 0 | 0 | true | - | - |
 | `crates/xlog-integration/tests/test_wcoj_record_join_result_feedback.rs` | 2 | 0 | false | W2.4(2) |  |
 | `crates/xlog-integration/tests/test_wcoj_recursive_dispatch.rs` | 24 | 1 | false | W4.1(14), P1(9), W41-13(1) | W41-13(1) |
 | `crates/xlog-integration/tests/test_wcoj_rir_shape_cert.rs` | 0 | 0 | true |  |  |
