@@ -374,7 +374,8 @@ extern "C" __global__ void wcoj_triangle_count_hg_u32(
     }
 }
 
-// D1 aggregate-fused variant of wcoj_triangle_count_hg_u32: instead of
+// Aggregate-fused triangle group-by-root count variant of
+// wcoj_triangle_count_hg_u32: instead of
 // reducing matches to one total, each match increments the counter of its
 // e_xy root row (`out_row_counts[xy_idx]`, length n_xy, zero-initialized by
 // the host). e_xy is lex-sorted by (X, Y), so per-X group counts are a
@@ -450,8 +451,8 @@ extern "C" __global__ void wcoj_triangle_groupby_root_count_hg_u32(
 
 namespace {
 
-// D1 widening helper: resolve one flattened work index to its e_xy root
-// row and, on a completed triangle, the aggregate value (Y when
+// Triangle aggregate-fusion helper: resolve one flattened work index
+// to its e_xy root row and, on a completed triangle, the aggregate value (Y when
 // `value_from_z == 0`, the matched Z otherwise). Traversal is identical to
 // `wcoj_triangle_groupby_root_count_hg_u32`. Returns false for padding /
 // out-of-range / unmatched work items.
@@ -515,7 +516,7 @@ __device__ __forceinline__ bool groupby_root_match_value_u32(
 
 }  // anonymous namespace
 
-// D1 widening: sum/min/max variants of the aggregate-fused root kernel.
+// Triangle aggregate-fused sum/min/max variants of the root kernel.
 // Each match contributes its value (Y or Z, both triangle output
 // variables) to the e_xy root row's accumulator, alongside a match
 // counter (`out_row_counts`) that downstream compaction uses to drop
@@ -903,7 +904,7 @@ extern "C" __global__ void wcoj_triangle_count_hg_u64(
     }
 }
 
-// D1 widening — u64-key sibling of
+// U64-key triangle aggregate-fused count sibling of
 // `wcoj_triangle_groupby_root_count_hg_u32`: each match increments the
 // counter of its e_xy root row. Traversal mirrors
 // `wcoj_triangle_count_hg_u64`; counters stay u32 (row counts bounded by
@@ -975,7 +976,7 @@ extern "C" __global__ void wcoj_triangle_groupby_root_count_hg_u64(
     }
 }
 
-// D1 widening — reduce per-row match counts into per-unique-root u64
+// Reduce per-row match counts into per-unique-root u64
 // totals. `group_start[g]` is the first e_xy row of unique root g
 // (ascending; the WCOJ metadata builder's prefix_sum), so a row's group is
 // found by binary search. Key-width agnostic: only row indices are read.
@@ -1003,7 +1004,7 @@ extern "C" __global__ void wcoj_groupby_root_segment_sum_counts_u32(
 
 namespace {
 
-// S1c widening helper: u64 sibling of `groupby_root_match_value_u32`.
+// U64-key triangle aggregate helper: sibling of `groupby_root_match_value_u32`.
 // Resolves one flattened work index to its e_xy root row and, on a
 // completed triangle, the aggregate value (Y when `value_from_z == 0`,
 // the matched Z otherwise). Traversal is identical to
@@ -1068,7 +1069,7 @@ __device__ __forceinline__ bool groupby_root_match_value_u64(
 
 }  // anonymous namespace
 
-// S1c widening: u64-key sum/min/max variants of the aggregate-fused root
+// U64-key triangle aggregate-fused sum/min/max variants of the root
 // kernel. Each match contributes its u64 value (Y or Z) to the e_xy root
 // row's accumulator, alongside a match counter that downstream compaction
 // uses to drop roots with no completion. Integer atomics are
@@ -1195,7 +1196,7 @@ extern "C" __global__ void wcoj_triangle_groupby_root_max_hg_u64(
     }
 }
 
-// S1c widening — reduce per-row u64 aggregate partials into per-unique-root
+// Reduce per-row u64 aggregate partials into per-unique-root
 // totals, sibling of `wcoj_groupby_root_segment_sum_counts_u32`. Rows with
 // zero matches are skipped (their partials are identities anyway); roots
 // whose entire segment is empty are compacted away downstream via the
@@ -1764,7 +1765,8 @@ extern "C" __global__ void wcoj_4cycle_count_hg_u32(
     }
 }
 
-// S1c aggregate-fused variant of wcoj_4cycle_count_hg_u32: instead of
+// Aggregate-fused 4-cycle group-by-root count variant of
+// wcoj_4cycle_count_hg_u32: instead of
 // reducing matches to per-block totals, each completed 4-cycle increments
 // the counter of its e1 root row (`out_row_counts[e1_idx]`, length n_e1,
 // zero-initialized by the host). e1 is lex-sorted by (W, X), so per-W group
@@ -1828,8 +1830,8 @@ extern "C" __global__ void wcoj_4cycle_groupby_root_count_hg_u32(
 
 namespace {
 
-// S1d helper: resolve one flattened work index to its e1 root row and, on
-// a completed 4-cycle, the aggregate value (X = e1.col1 when
+// 4-cycle aggregate helper: resolve one flattened work index to its
+// e1 root row and, on a completed 4-cycle, the aggregate value (X = e1.col1 when
 // `value_sel == 0`, the resolved Y when 1, the matched Z when 2).
 // Traversal is identical to `wcoj_4cycle_groupby_root_count_hg_u32`.
 // Returns false for padding / out-of-range / unmatched work items.
@@ -1878,7 +1880,7 @@ __device__ __forceinline__ bool groupby_root_4cycle_match_value_u32(
 
 }  // anonymous namespace
 
-// S1d: sum/min/max variants of the aggregate-fused 4-cycle root kernel.
+// 4-cycle aggregate-fused sum/min/max variants of the root kernel.
 // Each completed 4-cycle contributes its value (X, Y or Z — all 4-cycle
 // output variables) to the e1 root row's accumulator, alongside a match
 // counter (`out_row_counts`) that downstream compaction uses to drop roots
@@ -2301,7 +2303,8 @@ extern "C" __global__ void wcoj_4cycle_count_hg_u64(
     }
 }
 
-// S1d slice 2: u64-key aggregate-fused variant of wcoj_4cycle_count_hg_u64.
+// U64-key aggregate-fused 4-cycle count variant of
+// wcoj_4cycle_count_hg_u64.
 // Instead of reducing matches to per-block totals, each completed 4-cycle
 // increments the counter of its e1 root row (`out_row_counts[e1_idx]`,
 // length n_e1, zero-initialized by the host). e1 is lex-sorted by (W, X),
@@ -2532,7 +2535,7 @@ extern "C" __global__ void wcoj_layout_check_sorted_unique_u64(
 }
 
 // ===============================================================
-// W3.2 — General-arity WCOJ clique kernel (K = 5, 6).
+// General-arity WCOJ clique kernel family.
 // Single C++ template instantiated at K=5 and K=6 from the same
 // source. The ABI wrappers are template-call-only; no hand-written
 // K-specific algorithm body lives behind any wrapper.
@@ -2752,8 +2755,7 @@ __device__ __forceinline__ uint32_t wcoj_clique_metadata_leader_idx(
 // Grid-level templates — absorb thread-idx + bound checks so the
 // `extern "C"` ABI wrappers below are single-statement
 // template-calls, satisfying the locked Tier-1 source-audit
-// contract (W3.2 plan §345: "exactly one template-call statement
-// with no conditionals").
+// contract: exactly one template-call statement with no conditionals.
 // ---------------------------------------------------------------
 
 template <int K_VAL, typename T>
@@ -3188,7 +3190,8 @@ extern "C" __global__ void wcoj_clique8_materialize_hg_u64(
 }
 
 // ---------------------------------------------------------------
-// S1e — aggregate-fused variant of wcoj_clique{K}_count_hg_*:
+// Aggregate-fused K-clique group-by-root count variant of
+// wcoj_clique{K}_count_hg_*:
 // instead of reducing matches into block/thread totals, each
 // leader-edge row's K-clique completion count is accumulated into
 // `out_row_counts[row]` (length leader_count, zero-initialized by
@@ -3279,8 +3282,7 @@ extern "C" __global__ void wcoj_clique6_groupby_root_count_hg_u32(
 }
 
 // =====================================================================
-// D2 Free Join (S2 spike) — level-synchronous frontier engine
-// primitives (docs/plans/2026-06-12-d2-free-join-design.md §2).
+// GPU Free Join level-synchronous frontier engine primitives.
 //
 // A frontier is a SoA set of u32 columns; each row is one partial
 // binding plus, per not-yet-exhausted atom, a (lo, hi) trie range
@@ -3561,7 +3563,7 @@ extern "C" __global__ void fj_probe_refine_u32(
 }
 
 // ---------------------------------------------------------------
-// D2 Free Join — u64 width-class twins. Row indices, ranges, work
+// GPU Free Join u64 width-class twins. Row indices, ranges, work
 // prefixes, and group marks stay u32 (the frontier budget bounds
 // total_work below 2^32); only DATA columns (cover, probe, var) and
 // their value comparisons widen to uint64_t. The fused-probe
