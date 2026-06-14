@@ -87,38 +87,100 @@ pub(crate) enum KernelModuleSource {
     EmbeddedPortablePtx { ptx: &'static str },
 }
 
-fn resolve_module_source_with_locator(
+pub(crate) fn resolve_module_sources_with_locator(
     name: &str,
     cc: u32,
     locator: &kernel_paths::KernelArtifactLocator,
-) -> Option<KernelModuleSource> {
-    if let Some((path, is_cubin)) = locator.resolve_module_path(name, cc) {
-        return Some(KernelModuleSource::File { path, is_cubin });
-    }
+) -> Vec<KernelModuleSource> {
+    let mut sources: Vec<KernelModuleSource> = locator
+        .resolve_module_paths(name, cc)
+        .into_iter()
+        .map(|(path, is_cubin)| KernelModuleSource::File { path, is_cubin })
+        .collect();
 
-    crate::embedded_kernel_data::portable_ptx(name)
-        .map(|ptx| KernelModuleSource::EmbeddedPortablePtx { ptx })
+    let has_portable_file = sources.iter().any(|source| {
+        matches!(
+            source,
+            KernelModuleSource::File {
+                is_cubin: false,
+                ..
+            }
+        )
+    });
+    if !has_portable_file {
+        if let Some(ptx) = crate::embedded_kernel_data::portable_ptx(name) {
+            sources.push(KernelModuleSource::EmbeddedPortablePtx { ptx });
+        }
+    }
+    sources
 }
 
-fn resolve_module_source(name: &str, cc: u32) -> Option<KernelModuleSource> {
-    let locator = kernel_paths::KernelArtifactLocator::from_env();
-    resolve_module_source_with_locator(name, cc, &locator)
+#[cfg(test)]
+mod kernel_source_resolution_tests {
+    use super::{
+        kernel_paths::KernelArtifactLocator, resolve_module_sources_with_locator,
+        KernelModuleSource,
+    };
+    use std::fs;
+
+    #[test]
+    fn keeps_portable_ptx_fallback_when_cubin_exists() {
+        let root = std::env::temp_dir().join(format!(
+            "xlog-kernel-fallback-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system clock before UNIX_EPOCH")
+                .as_nanos()
+        ));
+        let kernels = root.join("kernels");
+        fs::create_dir_all(&kernels).expect("create kernels dir");
+        fs::write(kernels.join("join.sm_86.cubin"), b"cubin").expect("write cubin");
+        fs::write(kernels.join("join.portable.ptx"), b"ptx").expect("write ptx");
+        let expected_cubin = kernels.join("join.sm_86.cubin");
+        let expected_ptx = kernels.join("join.portable.ptx");
+
+        let locator = KernelArtifactLocator::new(None, Some(kernels.clone()), None);
+        let sources = resolve_module_sources_with_locator("join", 86, &locator);
+
+        assert_eq!(sources.len(), 2);
+        assert!(matches!(
+            &sources[0],
+            KernelModuleSource::File {
+                path,
+                is_cubin: true
+            } if path == &expected_cubin
+        ));
+        assert!(matches!(
+            &sources[1],
+            KernelModuleSource::File {
+                path,
+                is_cubin: false
+            } if path == &expected_ptx
+        ));
+
+        fs::remove_dir_all(root).expect("remove temp kernels");
+    }
 }
 
 /// Resolve a kernel module from sidecar artifacts or embedded portable PTX.
 ///
 /// Asserts (in debug builds) that `name` is present in the kernel manifest,
 /// catching name/order drift between the manifest and provider load blocks.
-fn load_module_source(name: &str, cc: u32) -> Result<KernelModuleSource> {
+pub(crate) fn load_module_sources(name: &str, cc: u32) -> Result<Vec<KernelModuleSource>> {
     debug_assert!(
         crate::kernel_manifest_data::KERNEL_CU_NAMES.contains(&name),
         "kernel module '{name}' is not in KERNEL_CU_NAMES manifest — update kernel_manifest_data.rs"
     );
-    resolve_module_source(name, cc).ok_or_else(|| {
-        XlogError::Kernel(format!(
+    let locator = kernel_paths::KernelArtifactLocator::from_env();
+    let sources = resolve_module_sources_with_locator(name, cc, &locator);
+    if sources.is_empty() {
+        Err(XlogError::Kernel(format!(
             "{name}: no cubin, sidecar portable PTX, or embedded portable PTX found"
-        ))
-    })
+        )))
+    } else {
+        Ok(sources)
+    }
 }
 
 #[derive(Clone)]
@@ -2932,10 +2994,14 @@ mod tests {
 
         let locator = KernelArtifactLocator::new(None, None, None);
         for name in crate::kernel_manifest_data::KERNEL_CU_NAMES {
-            let source = resolve_module_source_with_locator(name, 999, &locator)
-                .unwrap_or_else(|| panic!("{name}: expected embedded portable PTX fallback"));
+            let sources = resolve_module_sources_with_locator(name, 999, &locator);
+            assert_eq!(
+                sources.len(),
+                1,
+                "{name}: expected only embedded portable PTX fallback"
+            );
 
-            match source {
+            match &sources[0] {
                 KernelModuleSource::EmbeddedPortablePtx { ptx } => {
                     assert!(
                         ptx.contains(".entry"),

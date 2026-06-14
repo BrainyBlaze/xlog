@@ -31,34 +31,55 @@ impl CudaKernelProvider {
                 None
             };
 
-            let source = super::load_module_source(spec.cu_name, cc)?;
-            let is_cubin = matches!(source, KernelModuleSource::File { is_cubin: true, .. });
+            let sources = super::load_module_sources(spec.cu_name, cc)?;
+            let mut loaded_from_cubin = false;
+            let mut load_errors = Vec::new();
 
-            match source {
-                KernelModuleSource::File { path, .. } => {
-                    device
-                        .inner()
-                        .load_file(&path, spec.module_name, spec.kernels)
-                        .map_err(|e| {
-                            XlogError::Kernel(format!(
-                                "Failed to load {} module from {}: {}",
-                                spec.cu_name,
+            for source in sources {
+                match source {
+                    KernelModuleSource::File { path, is_cubin } => {
+                        match device
+                            .inner()
+                            .load_file(&path, spec.module_name, spec.kernels)
+                        {
+                            Ok(()) => {
+                                loaded_from_cubin = is_cubin;
+                                load_errors.clear();
+                                break;
+                            }
+                            Err(e) => load_errors.push(format!(
+                                "{} from {}: {}",
+                                if is_cubin { "cubin" } else { "portable PTX" },
                                 path.display(),
                                 e
-                            ))
-                        })?;
+                            )),
+                        }
+                    }
+                    KernelModuleSource::EmbeddedPortablePtx { ptx } => {
+                        match device.inner().load_ptx(
+                            Ptx::from_src(ptx),
+                            spec.module_name,
+                            spec.kernels,
+                        ) {
+                            Ok(()) => {
+                                loaded_from_cubin = false;
+                                load_errors.clear();
+                                break;
+                            }
+                            Err(e) => {
+                                load_errors.push(format!("embedded portable PTX: {}", e));
+                            }
+                        }
+                    }
                 }
-                KernelModuleSource::EmbeddedPortablePtx { ptx } => {
-                    device
-                        .inner()
-                        .load_ptx(Ptx::from_src(ptx), spec.module_name, spec.kernels)
-                        .map_err(|e| {
-                            XlogError::Kernel(format!(
-                                "Failed to load embedded {} portable PTX: {}",
-                                spec.cu_name, e
-                            ))
-                        })?;
-                }
+            }
+            if !load_errors.is_empty() {
+                return Err(XlogError::Kernel(format!(
+                    "Failed to load {} module after {} attempt(s): {}",
+                    spec.cu_name,
+                    load_errors.len(),
+                    load_errors.join("; ")
+                )));
             }
 
             if let Some(t0) = t0 {
@@ -72,7 +93,7 @@ impl CudaKernelProvider {
                     .per_module_sec
                     .push((spec.cu_name.to_string(), elapsed));
                 profile.total_sec += elapsed;
-                if is_cubin {
+                if loaded_from_cubin {
                     profile.cubin_loaded += 1;
                 } else {
                     profile.ptx_fallback += 1;
