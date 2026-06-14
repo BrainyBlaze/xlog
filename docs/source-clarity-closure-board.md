@@ -3,8 +3,8 @@
 Scope: Git-tracked source and documentation files only. Superpowers docs, plan files, evidence directories, generated artifacts, result/output directories, build output, and other worktrees are excluded.
 
 Scanned files: 1430
-Unresolved files: 276
-Comment/prose artifact occurrences: 1786
+Unresolved files: 275
+Comment/prose artifact occurrences: 1785
 Code/identifier artifact occurrences: 686
 
 Resolved means this board found no remaining opaque task/milestone labels or external consumer names in the eligible portions of that file.
@@ -23,6 +23,7 @@ Hardware cache terminology such as `L2` is allowed when it refers to GPU level-2
 | `D1` | aggregate-fused WCOJ group-by-root aggregate fusion direction |
 | `D4` | Decision-DNNF knowledge compiler / GPU Decision-DNNF compilation |
 | `G91` | epistemic compatibility mode |
+| `M8` | native bounded exact-induction engine |
 | `M8 Phase 1` | native bounded exact-induction engine |
 | `M_INT.11` | peak VRAM gate for certification-suite and benchmark memory snapshots |
 | `C7` | compiled epistemic execution-plan/EIR JSON dump |
@@ -245,7 +246,7 @@ Hardware cache terminology such as `L2` is allowed when it refers to GPU level-2
 | `crates/xlog-cuda/kernels/groupby.cu` | 0 | 0 | true |  |  |
 | `crates/xlog-cuda/kernels/ilp.cu` | 0 | 0 | true |  |  |
 | `crates/xlog-cuda/kernels/ilp_credit.cu` | 0 | 0 | true |  |  |
-| `crates/xlog-cuda/kernels/ilp_exact.cu` | 1 | 0 | false | M8(1) |  |
+| `crates/xlog-cuda/kernels/ilp_exact.cu` | 0 | 0 | true |  |  |
 | `crates/xlog-cuda/kernels/join.cu` | 18 | 0 | false | W4.3(5), W4.2(3), W42-14(2), D2H(1), D1+D2(1), W42-15(1) |  |
 | `crates/xlog-cuda/kernels/mc_eval.cu` | 0 | 0 | true |  |  |
 | `crates/xlog-cuda/kernels/mc_resident.cu` | 0 | 0 | true |  |  |

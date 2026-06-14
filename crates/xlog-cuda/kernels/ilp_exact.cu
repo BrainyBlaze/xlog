@@ -1,6 +1,6 @@
 #include <stdint.h>
 
-// ilp_exact — M8 Phase 1 bounded exact-induction scoring kernel.
+// ilp_exact — native bounded exact-induction scoring kernel.
 //
 // For a single `induce_exact` call, score every (topology, L, R) triple in
 // one launch. Each block owns one triple (topology=blockIdx.z, L=blockIdx.x,
