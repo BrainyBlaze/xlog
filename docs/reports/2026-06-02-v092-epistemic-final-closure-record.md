@@ -51,7 +51,7 @@ The final release-surface review confirmed these gates on the clean final branch
 
 ## Release-surface reconciliation
 
-- `docs/reports/2026-06-01-v092-full-semantic-completion-supervisor-report.md`
+- `docs/reports/2026-06-01-full-semantic-completion-supervisor-report.md`
   now points to this final closure record and no longer presents `ba34152e` as
   the final closure SHA.
 - The same report records C2 interior-negation / finite nested negation as done
