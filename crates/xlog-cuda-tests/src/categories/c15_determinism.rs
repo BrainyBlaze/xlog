@@ -14,7 +14,7 @@ use xlog_cuda::{CudaBuffer, CudaKernelProvider};
 use xlog_logic::Compiler;
 use xlog_runtime::Executor;
 
-const W54_REPLAY_SOURCE: &str = r#"
+const WIDENED_FRONTIER_REPLAY_SOURCE: &str = r#"
     pred frontier_pred(u32).
     pred widened_pred(u32).
     pred frontier_edge(u32, u32).
@@ -42,41 +42,44 @@ pub fn run_all(ctx: &TestContext) -> CategoryResult {
     results.add_result(test_mc_sample_reproducibility(ctx));
     results.add_result(test_xgcf_forward_reproducibility(ctx));
     results.add_result(test_xgcf_backward_reproducibility(ctx));
-    results.add_result(test_w54_widened_frontier_replay_representative(ctx));
+    results.add_result(test_widened_frontier_replay_representative(ctx));
 
     results.set_duration(start.elapsed());
     results
 }
 
-fn w54_unary_schema() -> Schema {
+fn widened_frontier_replay_unary_schema() -> Schema {
     Schema::new(vec![("c0".to_string(), ScalarType::U32)])
 }
 
-fn w54_binary_schema() -> Schema {
+fn widened_frontier_replay_binary_schema() -> Schema {
     Schema::new(vec![
         ("c0".to_string(), ScalarType::U32),
         ("c1".to_string(), ScalarType::U32),
     ])
 }
 
-fn w54_upload_unary(provider: &CudaKernelProvider, values: &[u32]) -> Result<CudaBuffer, String> {
+fn upload_widened_frontier_replay_unary(
+    provider: &CudaKernelProvider,
+    values: &[u32],
+) -> Result<CudaBuffer, String> {
     provider
-        .create_buffer_from_u32_columns(&[values], w54_unary_schema())
+        .create_buffer_from_u32_columns(&[values], widened_frontier_replay_unary_schema())
         .map_err(|e| format!("upload unary failed: {}", e))
 }
 
-fn w54_upload_binary(
+fn upload_widened_frontier_replay_binary(
     provider: &CudaKernelProvider,
     values: &[(u32, u32)],
 ) -> Result<CudaBuffer, String> {
     let col0: Vec<u32> = values.iter().map(|(a, _)| *a).collect();
     let col1: Vec<u32> = values.iter().map(|(_, b)| *b).collect();
     provider
-        .create_buffer_from_u32_columns(&[&col0, &col1], w54_binary_schema())
+        .create_buffer_from_u32_columns(&[&col0, &col1], widened_frontier_replay_binary_schema())
         .map_err(|e| format!("upload binary failed: {}", e))
 }
 
-fn w54_download_rows(
+fn download_widened_frontier_replay_rows(
     provider: &CudaKernelProvider,
     buffer: &CudaBuffer,
 ) -> Result<Vec<Vec<u32>>, String> {
@@ -98,12 +101,12 @@ fn w54_download_rows(
     Ok(rows)
 }
 
-fn w54_run_replay(
+fn run_widened_frontier_replay(
     provider: Arc<CudaKernelProvider>,
 ) -> Result<BTreeMap<String, Vec<Vec<u32>>>, String> {
     let mut compiler = Compiler::new();
     let plan = compiler
-        .compile(W54_REPLAY_SOURCE)
+        .compile(WIDENED_FRONTIER_REPLAY_SOURCE)
         .map_err(|e| format!("compile replay failed: {}", e))?;
     let mut executor = Executor::new_with_config(
         Arc::clone(&provider),
@@ -119,13 +122,19 @@ fn w54_run_replay(
     let frontier_edge = [(2, 3), (3, 5), (4, 5)];
     executor.put_relation(
         "frontier_pred",
-        w54_upload_unary(&provider, &frontier_pred)?,
+        upload_widened_frontier_replay_unary(&provider, &frontier_pred)?,
     );
-    executor.put_relation("widened_pred", w54_upload_unary(&provider, &widened_pred)?);
-    executor.put_relation("blocked_pred", w54_upload_unary(&provider, &blocked_pred)?);
+    executor.put_relation(
+        "widened_pred",
+        upload_widened_frontier_replay_unary(&provider, &widened_pred)?,
+    );
+    executor.put_relation(
+        "blocked_pred",
+        upload_widened_frontier_replay_unary(&provider, &blocked_pred)?,
+    );
     executor.put_relation(
         "frontier_edge",
-        w54_upload_binary(&provider, &frontier_edge)?,
+        upload_widened_frontier_replay_binary(&provider, &frontier_edge)?,
     );
     executor
         .execute_plan(&plan)
@@ -137,40 +146,43 @@ fn w54_run_replay(
             .store()
             .get(name)
             .ok_or_else(|| format!("missing replay relation {}", name))?;
-        out.insert(name.to_string(), w54_download_rows(&provider, buffer)?);
+        out.insert(
+            name.to_string(),
+            download_widened_frontier_replay_rows(&provider, buffer)?,
+        );
     }
     Ok(out)
 }
 
-/// W5.4 cert hook: minimal widened-frontier replay representative is deterministic
-/// inside the CUDA certification suite.
-fn test_w54_widened_frontier_replay_representative(ctx: &TestContext) -> TestResult {
+/// Minimal widened-frontier replay representative is deterministic inside the
+/// CUDA certification suite.
+fn test_widened_frontier_replay_representative(ctx: &TestContext) -> TestResult {
     let start = Instant::now();
     let provider = match CudaKernelProvider::new(ctx.device.clone(), ctx.memory.clone()) {
         Ok(p) => Arc::new(p),
         Err(e) => {
             return TestResult::error(
-                "test_w54_widened_frontier_replay_representative",
+                "test_widened_frontier_replay_representative",
                 start.elapsed(),
                 format!("provider init failed: {}", e),
             )
         }
     };
-    let first = match w54_run_replay(Arc::clone(&provider)) {
+    let first = match run_widened_frontier_replay(Arc::clone(&provider)) {
         Ok(snapshot) => snapshot,
         Err(e) => {
             return TestResult::error(
-                "test_w54_widened_frontier_replay_representative",
+                "test_widened_frontier_replay_representative",
                 start.elapsed(),
                 e,
             )
         }
     };
-    let second = match w54_run_replay(provider) {
+    let second = match run_widened_frontier_replay(provider) {
         Ok(snapshot) => snapshot,
         Err(e) => {
             return TestResult::error(
-                "test_w54_widened_frontier_replay_representative",
+                "test_widened_frontier_replay_representative",
                 start.elapsed(),
                 e,
             )
@@ -179,7 +191,7 @@ fn test_w54_widened_frontier_replay_representative(ctx: &TestContext) -> TestRes
 
     if first != second {
         return TestResult::error(
-            "test_w54_widened_frontier_replay_representative",
+            "test_widened_frontier_replay_representative",
             start.elapsed(),
             format!(
                 "replay representative diverged: first={:?}, second={:?}",
@@ -192,14 +204,14 @@ fn test_w54_widened_frontier_replay_representative(ctx: &TestContext) -> TestRes
         || first["rollback_hit"].len() != 1
     {
         return TestResult::error(
-            "test_w54_widened_frontier_replay_representative",
+            "test_widened_frontier_replay_representative",
             start.elapsed(),
             format!("unexpected replay row counts: {:?}", first),
         );
     }
 
     TestResult::passed(
-        "test_w54_widened_frontier_replay_representative",
+        "test_widened_frontier_replay_representative",
         start.elapsed(),
     )
 }

@@ -3,8 +3,8 @@
 Scope: Git-tracked source and documentation files only. Superpowers docs, plan files, evidence directories, generated artifacts, result/output directories, build output, and other worktrees are excluded.
 
 Scanned files: 1430
-Unresolved files: 299
-Comment/prose artifact occurrences: 1871
+Unresolved files: 298
+Comment/prose artifact occurrences: 1870
 Code/identifier artifact occurrences: 752
 
 Resolved means this board found no remaining opaque task/milestone labels or external consumer names in the eligible portions of that file.
@@ -25,6 +25,7 @@ Technical host-transfer terminology such as `D2H`, `DTOH`, and `H2D` is allowed 
 | `v085` | legacy v0.8.5 language milestone/examples |
 | `W2.5` | WCOJ cost-model default flip to the cardinality model |
 | `G38` | GPU skew-classifier integration path |
+| `W5.4` | widened-frontier replay determinism certification |
 | task/milestone labels such as `W2.5`, `G39`, `M37-A`, `S1e`, `FRS-042`, `P0.2`, `D3` | replace with the concrete feature, gate, bug, or milestone meaning recovered from plans, boards, history, or code |
 
 ## File Board
@@ -122,7 +123,7 @@ Technical host-transfer terminology such as `D2H`, `DTOH`, and `H2D` is allowed 
 | `crates/xlog-cuda-tests/src/categories/c12_atomics.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-cuda-tests/src/categories/c13_floating_point.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-cuda-tests/src/categories/c14_integer.rs` | 0 | 0 | true |  |  |
-| `crates/xlog-cuda-tests/src/categories/c15_determinism.rs` | 1 | 0 | false | W5.4(1) |  |
+| `crates/xlog-cuda-tests/src/categories/c15_determinism.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-cuda-tests/src/categories/c16_async_pipeline.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-cuda-tests/src/categories/c17_caching.rs` | 17 | 0 | false | L2(17) |  |
 | `crates/xlog-cuda-tests/src/categories/c18_host_device.rs` | 0 | 0 | true |  |  |
