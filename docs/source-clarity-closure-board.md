@@ -1073,7 +1073,7 @@ Hardware cache terminology such as `L1` and `L2` is allowed when it refers to GP
 | `examples/neural/06_clutrr/model.py` | 0 | 0 | true |  |  |
 | `examples/neural/06_clutrr/program.xlog` | 0 | 0 | true |  |  |
 | `examples/neural/06_clutrr/train.py` | 0 | 0 | true |  |  |
-| `examples/neural/README.md` | 0 | 8 | false |  | D1(4), D2(4) |
+| `examples/neural/README.md` | 4 | 8 | true | release/milestone labels(4) | digit variable shorthand(8) |
 | `examples/neural/baseline/deepproblog/CLUTRR/__init__.py` | 0 | 0 | true |  |  |
 | `examples/neural/baseline/deepproblog/CLUTRR/architecture.py` | 0 | 0 | true |  |  |
 | `examples/neural/baseline/deepproblog/CLUTRR/clutrr.py` | 0 | 0 | true |  |  |
