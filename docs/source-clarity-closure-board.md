@@ -615,7 +615,7 @@ Hardware cache terminology such as `L1` and `L2` is allowed when it refers to GP
 | `crates/xlog-prob/src/wfs.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-prob/src/xgcf.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-prob/tests/cdcl_q1_status_simple.rs` | 0 | 0 | true |  |  |
-| `crates/xlog-prob/tests/cdcl_q2_status.rs` | 1 | 4 | false | D4(1) | D1(2), D2(2) |
+| `crates/xlog-prob/tests/cdcl_q2_status.rs` | 1 | 5 | true | Replaced the Decision-DNNF compiler shorthand comment, generated digit variable names, and local compile expectation string with descriptive wording. | D4(1) | D1(2), D2(2), d4(1) |
 | `crates/xlog-prob/tests/cnf_cross_process.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-prob/tests/cnf_determinism.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-prob/tests/common/mod.rs` | 0 | 0 | true |  |  |
