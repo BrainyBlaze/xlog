@@ -3,8 +3,8 @@
 Scope: Git-tracked source and documentation files only. Superpowers docs, plan files, evidence directories, generated artifacts, result/output directories, build output, and other worktrees are excluded.
 
 Scanned files: 1430
-Unresolved files: 292
-Comment/prose artifact occurrences: 1828
+Unresolved files: 291
+Comment/prose artifact occurrences: 1821
 Code/identifier artifact occurrences: 752
 
 Resolved means this board found no remaining opaque task/milestone labels or external consumer names in the eligible portions of that file.
@@ -44,6 +44,10 @@ Hardware cache terminology such as `L2` is allowed when it refers to GPU level-2
 | `G05` | XGCF circuit-cache GPU integration certification category |
 | `G05.1` | cache-hit GPU behavior checks |
 | `G05.2` | cache-key correctness checks |
+| `G06` | XGCF PTX kernel robustness certification category |
+| `G06.1` | circuit-size edge-case checks |
+| `G06.2` | variable-count limit checks |
+| `G06.3` | numerical-stability checks |
 | task/milestone labels such as `W2.5`, `G39`, `M37-A`, `S1e`, `FRS-042`, `P0.2`, `D3` | replace with the concrete feature, gate, bug, or milestone meaning recovered from plans, boards, history, or code |
 
 ## File Board
@@ -157,7 +161,7 @@ Hardware cache terminology such as `L2` is allowed when it refers to GPU level-2
 | `crates/xlog-cuda-tests/src/categories/g03_weight_injection.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-cuda-tests/src/categories/g04_transfer_efficiency.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-cuda-tests/src/categories/g05_circuit_cache.rs` | 0 | 0 | true |  |  |
-| `crates/xlog-cuda-tests/src/categories/g06_ptx_robustness.rs` | 7 | 0 | false | G06.1(2), G06.2(2), G06.3(2), G06(1) |  |
+| `crates/xlog-cuda-tests/src/categories/g06_ptx_robustness.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-cuda-tests/src/categories/g07_sat_cdcl.rs` | 1 | 0 | false | G07(1) |  |
 | `crates/xlog-cuda-tests/src/categories/g08_device_counts.rs` | 1 | 0 | false | G08(1) |  |
 | `crates/xlog-cuda-tests/src/categories/mod.rs` | 0 | 0 | true |  |  |
