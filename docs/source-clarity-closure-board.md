@@ -778,7 +778,7 @@ Hardware cache terminology such as `L1` and `L2` is allowed when it refers to GP
 | `examples/BFO/universal_case_reasoner/README.md` | 38 | 0 | true | branch label(1), priority/gate IDs(14), release-line labels(8), transfer shorthand(2), shorthand labels(13) |  |
 | `examples/BFO/universal_case_reasoner/REQUIREMENTS.md` | 60 | 0 | true | priority/gate IDs(32), release-line labels(6), transfer shorthand(2), shorthand labels(20) |  |
 | `examples/BFO/universal_case_reasoner/VALIDATION_PLAN.md` | 41 | 0 | true | priority/gate IDs(7), release-line labels(8), transfer shorthand(6), shorthand labels(20) | Excluded from rewrite as a validation-plan artifact outside the source/docs cleanup scope. |
-| `examples/BFO/universal_case_reasoner/WORKER_BRIEF.md` | 7 | 0 | false | v085(2), v086(2), P0(2), v080(1) |  |
+| `examples/BFO/universal_case_reasoner/WORKER_BRIEF.md` | 12 | 0 | true | branch label(1), priority labels(2), release-line labels(6), shorthand labels(3) | Excluded from rewrite as a worker/task brief outside the source/docs cleanup scope. |
 | `examples/BFO/universal_case_reasoner/XLOG_FINDINGS.md` | 0 | 0 | true |  |  |
 | `examples/BFO/universal_case_reasoner/bfo/kernel.xlog` | 0 | 0 | true |  |  |
 | `examples/BFO/universal_case_reasoner/domains/domain_inventory.json` | 0 | 0 | true |  |  |
