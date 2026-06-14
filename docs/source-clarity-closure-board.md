@@ -740,7 +740,7 @@ Hardware cache terminology such as `L1` and `L2` is allowed when it refers to GP
 | `docs/certification/2026-01-22-neural-symbolic-certification-report.md` | 108 | 1 | true | certification category codes(95), release labels(6), implementation-plan/spec labels(4), document ID(1), certification version label(1), runtime issue label(1) | filename artifact(1) |
 | `docs/certification/neural-symbolic-gpu-certification-spec.md` | 65 | 18 | true | neural-symbolic release labels(7), certification category codes(54), external-compiler labels(4) | module/filter category labels(16), external-compiler code label(1), filename artifact(1) |
 | `docs/epistemic-solver-semantics-guide.md` | 43 | 0 | true | Gelfond 1991 shorthand(15), release labels(16), transfer shorthand(5), legacy WCOJ/goal labels(3), external-compiler label(1), roadmap/splitting codes(3) |  |
-| `docs/language-reference.md` | 11 | 4 | false | G91(7), v085(2), D4(1), D2H(1) | D1(2), D2(2) |
+| `docs/language-reference.md` | 77 | 5 | true | release/version labels(56), implementation checkpoint labels(12), Gelfond 1991 shorthand(7), external-compiler label(1), transfer shorthand(1) | example digit variables(4), diagnostic release label(1) |
 | `docs/release-process.md` | 0 | 0 | true |  |  |
 | `docs/reports/2026-05-31-mc-gpu-resident-engine-bundles-1-3.md` | 0 | 0 | true |  |  |
 | `docs/reports/2026-05-31-v091-v092-epistemic-completion-supervisor-report.md` | 10 | 0 | false | v092(5), G91(4), v090(1) |  |
