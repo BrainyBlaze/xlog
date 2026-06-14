@@ -1,22 +1,16 @@
-//! xlog-induce — bounded exact-induction engine for external consumer.
+//! xlog-induce — native bounded exact-induction engine.
 //!
-//! Scores all `(left, right)` candidate pairs for the four external consumer topologies
-//! (chain, star, fanout, fanin) in a single batched GPU pass and returns the
-//! top-K per topology with full candidate metadata.
+//! Scores all `(left, right)` candidate pairs for the four supported topologies (chain,
+//! star, fanout, fanin) in a single batched GPU pass and returns the top-K per topology
+//! with full candidate metadata.
 //!
 //! Behaviorally equivalent to the `backend="python"` reference implementation
 //! in `crates/pyxlog/python/pyxlog/ilp/exact_induce.py` on bounded requests;
 //! the parity contract is locked by `python/tests/test_ilp_exact_induce.py`.
 //!
-//! M8 Phase 1 Task 3 Stage B is landing incrementally:
-//!   * Task 2 (done):  crate scaffolding, types, public entrypoint stub.
-//!   * Stage A (done): deterministic reduction + 16 unit tests locking the
-//!     comparator and diagnostics bit-for-bit against Python.
-//!   * Stage B 3B.1 (done): native request validation + trivial-dead-end
-//!     early returns.
-//!   * Stage B 3B.4 (done): engine calls the batched scoring kernel.
-//!   * Stage B 3B.5 (this change): native production dispatch uses
-//!     device-side top-K selection and only transfers compact selected rows.
+//! The native production path includes request validation, deterministic reduction,
+//! trivial-dead-end early returns, the batched scoring kernel, device-side top-K
+//! selection, and compact selected-row transfers.
 
 pub mod index;
 pub mod provenance;
@@ -91,8 +85,9 @@ pub fn induce_exact(
 
     // Extract row counts from the cached host-side metadata. The DLPack ingest
     // path (`CudaKernelProvider::from_dlpack_tensors_with_schema`) populates
-    // `cached_row_count`, so this is a pure struct read — no D2H. That's how
-    // we keep the hot-loop D2H budget flat across candidate counts.
+    // `cached_row_count`, so this is a pure struct read — no device-to-host
+    // transfer. That's how we keep the hot-loop device-to-host transfer budget
+    // flat across candidate counts.
     let pos_count = cached_rows(request.positives, "positives")?;
     let neg_count = request
         .negatives
@@ -257,7 +252,7 @@ fn cached_rows(buf: &CudaBuffer, label: &str) -> Result<u32> {
     buf.cached_row_count().ok_or_else(|| {
         XlogError::Execution(format!(
             "induce_exact: {} buffer has no cached row count \
-             (DLPack ingest path should populate it; required to avoid hot-loop D2H)",
+             (DLPack ingest path should populate it; required to avoid hot-loop device-to-host transfer)",
             label,
         ))
     })
