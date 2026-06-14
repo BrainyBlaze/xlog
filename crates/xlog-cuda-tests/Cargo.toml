@@ -28,8 +28,8 @@ path = "tests/certification_suite.rs"
 harness = true
 
 [[test]]
-name = "g38_mint11_vram"
-path = "tests/g38_mint11_vram.rs"
+name = "certification_vram_snapshot_gate"
+path = "tests/certification_vram_snapshot_gate.rs"
 harness = true
 
 [[test]]

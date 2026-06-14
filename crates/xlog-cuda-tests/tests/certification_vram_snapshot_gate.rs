@@ -1,4 +1,4 @@
-//! Goal-038 M_INT.11 CUDA memory snapshots for the certification suite.
+//! Certification-suite CUDA memory snapshots for the peak VRAM gate.
 
 use cudarc::driver::result::mem_get_info;
 use xlog_cuda_tests::harness::{CategoryResult, TestContext};
@@ -35,7 +35,7 @@ impl VramTracker {
             self.min_label = label;
         }
         println!(
-            "G38_MINT11_CERT_VRAM label={} free_bytes={} total_bytes={} delta_bytes={} gate_bytes={}",
+            "CERTIFICATION_VRAM_SNAPSHOT label={} free_bytes={} total_bytes={} delta_bytes={} gate_bytes={}",
             label,
             free,
             total,
@@ -67,11 +67,11 @@ fn run_category(
 }
 
 #[test]
-fn g38_mint11_cert_suite_vram_under_gate() {
+fn certification_suite_vram_snapshot_under_gate() {
     let ctx = match TestContext::new() {
         Ok(ctx) => ctx,
         Err(e) => {
-            eprintln!("Skipping G38 M_INT.11 cert VRAM snapshot: {e}");
+            eprintln!("Skipping certification-suite VRAM snapshot: {e}");
             return;
         }
     };
@@ -83,231 +83,231 @@ fn g38_mint11_cert_suite_vram_under_gate() {
         &ctx,
         &mut results,
         &mut tracker,
-        "C01_toolchain",
+        "toolchain_ptx_sass",
         categories::c01_toolchain::run_all,
     );
     run_category(
         &ctx,
         &mut results,
         &mut tracker,
-        "C02_launch_config",
+        "launch_configuration",
         categories::c02_launch_config::run_all,
     );
     run_category(
         &ctx,
         &mut results,
         &mut tracker,
-        "C03_pointer_bounds",
+        "pointer_indexing_bounds",
         categories::c03_pointer_bounds::run_all,
     );
     run_category(
         &ctx,
         &mut results,
         &mut tracker,
-        "C04_address_space",
+        "address_space",
         categories::c04_address_space::run_all,
     );
     run_category(
         &ctx,
         &mut results,
         &mut tracker,
-        "C05_global_memory",
+        "global_memory_hazards",
         categories::c05_global_memory::run_all,
     );
     run_category(
         &ctx,
         &mut results,
         &mut tracker,
-        "C06_shared_memory",
+        "shared_memory",
         categories::c06_shared_memory::run_all,
     );
     run_category(
         &ctx,
         &mut results,
         &mut tracker,
-        "C07_local_memory",
+        "local_memory_stack",
         categories::c07_local_memory::run_all,
     );
     run_category(
         &ctx,
         &mut results,
         &mut tracker,
-        "C08_synchronization",
+        "synchronization_ordering",
         categories::c08_synchronization::run_all,
     );
     run_category(
         &ctx,
         &mut results,
         &mut tracker,
-        "C09_warp_level",
+        "warp_level_execution",
         categories::c09_warp_level::run_all,
     );
     run_category(
         &ctx,
         &mut results,
         &mut tracker,
-        "C10_block_grid",
+        "block_grid_coordination",
         categories::c10_block_grid::run_all,
     );
     run_category(
         &ctx,
         &mut results,
         &mut tracker,
-        "C11_control_flow",
+        "control_flow_predication",
         categories::c11_control_flow::run_all,
     );
     run_category(
         &ctx,
         &mut results,
         &mut tracker,
-        "C12_atomics",
+        "atomic_operations",
         categories::c12_atomics::run_all,
     );
     run_category(
         &ctx,
         &mut results,
         &mut tracker,
-        "C13_floating_point",
+        "floating_point",
         categories::c13_floating_point::run_all,
     );
     run_category(
         &ctx,
         &mut results,
         &mut tracker,
-        "C14_integer",
+        "integer_edge_cases",
         categories::c14_integer::run_all,
     );
     run_category(
         &ctx,
         &mut results,
         &mut tracker,
-        "C15_determinism",
+        "determinism",
         categories::c15_determinism::run_all,
     );
     run_category(
         &ctx,
         &mut results,
         &mut tracker,
-        "C16_async_pipeline",
+        "async_pipeline",
         categories::c16_async_pipeline::run_all,
     );
     run_category(
         &ctx,
         &mut results,
         &mut tracker,
-        "C17_caching",
+        "caching_coherence",
         categories::c17_caching::run_all,
     );
     run_category(
         &ctx,
         &mut results,
         &mut tracker,
-        "C18_host_device",
+        "host_device_integration",
         categories::c18_host_device::run_all,
     );
     run_category(
         &ctx,
         &mut results,
         &mut tracker,
-        "C19_multi_stream",
+        "multi_stream_concurrency",
         categories::c19_multi_stream::run_all,
     );
     run_category(
         &ctx,
         &mut results,
         &mut tracker,
-        "C20_multi_gpu",
+        "multi_gpu",
         categories::c20_multi_gpu::run_all,
     );
     run_category(
         &ctx,
         &mut results,
         &mut tracker,
-        "C21_hardware",
+        "hardware_reliability",
         categories::c21_hardware::run_all,
     );
     run_category(
         &ctx,
         &mut results,
         &mut tracker,
-        "C22_algorithms",
+        "algorithm_specific",
         categories::c22_algorithms::run_all,
     );
     run_category(
         &ctx,
         &mut results,
         &mut tracker,
-        "C23_blind_spots",
+        "testing_blind_spots",
         categories::c23_blind_spots::run_all,
     );
     run_category(
         &ctx,
         &mut results,
         &mut tracker,
-        "C24_edge_matrix",
+        "edge_case_matrix",
         categories::c24_edge_matrix::run_all,
     );
     run_category(
         &ctx,
         &mut results,
         &mut tracker,
-        "C25_float_filter",
+        "float_filter",
         categories::c25_float_filter::run_all,
     );
     run_category(
         &ctx,
         &mut results,
         &mut tracker,
-        "G01_circuit_forward",
+        "circuit_forward_kernel",
         categories::g01_circuit_forward::run_all,
     );
     run_category(
         &ctx,
         &mut results,
         &mut tracker,
-        "G02_circuit_backward",
+        "circuit_backward_kernel",
         categories::g02_circuit_backward::run_all,
     );
     run_category(
         &ctx,
         &mut results,
         &mut tracker,
-        "G03_weight_injection",
+        "gpu_weight_injection",
         categories::g03_weight_injection::run_all,
     );
     run_category(
         &ctx,
         &mut results,
         &mut tracker,
-        "G04_transfer_efficiency",
+        "transfer_efficiency",
         categories::g04_transfer_efficiency::run_all,
     );
     run_category(
         &ctx,
         &mut results,
         &mut tracker,
-        "G05_circuit_cache",
+        "circuit_cache",
         categories::g05_circuit_cache::run_all,
     );
     run_category(
         &ctx,
         &mut results,
         &mut tracker,
-        "G06_ptx_robustness",
+        "ptx_robustness",
         categories::g06_ptx_robustness::run_all,
     );
     run_category(
         &ctx,
         &mut results,
         &mut tracker,
-        "G07_sat_cdcl",
+        "gpu_cdcl_sat_unsat_verifier",
         categories::g07_sat_cdcl::run_all,
     );
     run_category(
         &ctx,
         &mut results,
         &mut tracker,
-        "G08_device_counts",
+        "device_resident_row_counts",
         categories::g08_device_counts::run_all,
     );
 
@@ -315,12 +315,12 @@ fn g38_mint11_cert_suite_vram_under_gate() {
     results.print_summary();
     assert!(
         results.all_passed(),
-        "certification categories failed during M_INT.11 VRAM snapshot"
+        "certification categories failed during certification-suite VRAM snapshot"
     );
 
     let peak_delta = tracker.peak_delta_bytes();
     println!(
-        "G38_MINT11_CERT_VRAM_PEAK label={} peak_delta_bytes={} gate_bytes={} total_bytes={}",
+        "CERTIFICATION_VRAM_SNAPSHOT_PEAK label={} peak_delta_bytes={} gate_bytes={} total_bytes={}",
         tracker.min_label, peak_delta, VRAM_GATE_BYTES, tracker.total
     );
     assert!(

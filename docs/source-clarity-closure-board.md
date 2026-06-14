@@ -3,9 +3,9 @@
 Scope: Git-tracked source and documentation files only. Superpowers docs, plan files, evidence directories, generated artifacts, result/output directories, build output, and other worktrees are excluded.
 
 Scanned files: 1430
-Unresolved files: 288
+Unresolved files: 287
 Comment/prose artifact occurrences: 1816
-Code/identifier artifact occurrences: 719
+Code/identifier artifact occurrences: 718
 
 Resolved means this board found no remaining opaque task/milestone labels or external consumer names in the eligible portions of that file.
 
@@ -23,6 +23,7 @@ Hardware cache terminology such as `L2` is allowed when it refers to GPU level-2
 | `D4` | Decision-DNNF knowledge compiler / GPU Decision-DNNF compilation |
 | `G91` | epistemic compatibility mode |
 | `M8 Phase 1` | native bounded exact-induction engine |
+| `M_INT.11` | peak VRAM gate for certification-suite and benchmark memory snapshots |
 | `C7` | compiled epistemic execution-plan/EIR JSON dump |
 | `v085` | legacy v0.8.5 language milestone/examples |
 | `W2.5` | WCOJ cost-model default flip to the cardinality model |
@@ -204,8 +205,8 @@ Hardware cache terminology such as `L2` is allowed when it refers to GPU level-2
 | `crates/xlog-cuda-tests/src/properties.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-cuda-tests/tests/category_isolation.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-cuda-tests/tests/certification_suite.rs` | 0 | 0 | true |  |  |
+| `crates/xlog-cuda-tests/tests/certification_vram_snapshot_gate.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-cuda-tests/tests/count_mask_device.rs` | 0 | 0 | true |  |  |
-| `crates/xlog-cuda-tests/tests/g38_mint11_vram.rs` | 0 | 1 | false |  | G38(1) |
 | `crates/xlog-cuda-tests/tests/ilp_coo_fill_from_mask.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-cuda-tests/tests/ilp_csr_histogram.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-cuda-tests/tests/ilp_reduce_sum.rs` | 0 | 0 | true |  |  |
