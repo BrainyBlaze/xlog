@@ -26,6 +26,7 @@ mod arithmetic;
 mod filter;
 mod fj;
 mod fj_delta;
+mod fj_delta_sparse;
 mod groupby;
 mod ilp;
 mod ilp_exact;
@@ -405,6 +406,10 @@ pub mod wcoj_kernels {
     pub const FJ_DELTA_POPCOUNT: &str = "fj_delta_popcount";
     pub const FJ_DELTA_EMIT_U32: &str = "fj_delta_emit_u32";
     pub const FJ_DELTA_MAX_U32: &str = "fj_delta_max_u32";
+    pub const FJ_DELTA_SPARSE_LOAD_R: &str = "fj_delta_sparse_load_r";
+    pub const FJ_DELTA_SPARSE_INSERT_CANDIDATES: &str = "fj_delta_sparse_insert_candidates";
+    pub const FJ_DELTA_SPARSE_MARK: &str = "fj_delta_sparse_mark";
+    pub const FJ_DELTA_SPARSE_EMIT: &str = "fj_delta_sparse_emit";
 }
 
 /// Kernel function names in the Monte Carlo sampling module
