@@ -1,4 +1,4 @@
-//! Category G01: Circuit Forward Kernel Tests
+//! Circuit forward kernel tests
 //!
 //! Tests the forward evaluation kernels for XGCF circuits, covering all node types:
 //! CONST0, CONST1, LIT, AND, OR, and DECISION nodes. These tests verify correct
@@ -13,7 +13,7 @@ use std::time::Instant;
 
 /// Run all tests in this category.
 pub fn run_all(ctx: &TestContext) -> CategoryResult {
-    let mut results = CategoryResult::new("g01_circuit_forward");
+    let mut results = CategoryResult::new("circuit_forward_kernel");
     let start = Instant::now();
 
     results.add_result(test_forward_const_nodes(ctx));
@@ -628,7 +628,7 @@ mod tests {
     }
 
     #[test]
-    fn test_g01_forward_const_nodes() {
+    fn test_circuit_forward_const_nodes() {
         if let Some(ctx) = get_test_context() {
             let result = test_forward_const_nodes(&ctx);
             assert!(
@@ -640,7 +640,7 @@ mod tests {
     }
 
     #[test]
-    fn test_g01_forward_lit_nodes() {
+    fn test_circuit_forward_lit_nodes() {
         if let Some(ctx) = get_test_context() {
             let result = test_forward_lit_nodes(&ctx);
             assert!(
@@ -652,7 +652,7 @@ mod tests {
     }
 
     #[test]
-    fn test_g01_forward_and_node() {
+    fn test_circuit_forward_and_node() {
         if let Some(ctx) = get_test_context() {
             let result = test_forward_and_node(&ctx);
             assert!(
@@ -664,7 +664,7 @@ mod tests {
     }
 
     #[test]
-    fn test_g01_forward_or_node() {
+    fn test_circuit_forward_or_node() {
         if let Some(ctx) = get_test_context() {
             let result = test_forward_or_node(&ctx);
             assert!(
@@ -676,7 +676,7 @@ mod tests {
     }
 
     #[test]
-    fn test_g01_forward_decision_basic() {
+    fn test_circuit_forward_decision_basic() {
         if let Some(ctx) = get_test_context() {
             let result = test_forward_decision_basic(&ctx);
             assert!(
@@ -688,7 +688,7 @@ mod tests {
     }
 
     #[test]
-    fn test_g01_forward_decision_chain() {
+    fn test_circuit_forward_decision_chain() {
         if let Some(ctx) = get_test_context() {
             let result = test_forward_decision_chain(&ctx);
             assert!(
@@ -700,7 +700,7 @@ mod tests {
     }
 
     #[test]
-    fn test_g01_forward_multi_level() {
+    fn test_circuit_forward_multi_level() {
         if let Some(ctx) = get_test_context() {
             let result = test_forward_multi_level(&ctx);
             assert!(
@@ -712,7 +712,7 @@ mod tests {
     }
 
     #[test]
-    fn test_g01_forward_parallel_same_level() {
+    fn test_circuit_forward_parallel_same_level() {
         if let Some(ctx) = get_test_context() {
             let result = test_forward_parallel_same_level(&ctx);
             assert!(
