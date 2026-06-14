@@ -22,8 +22,8 @@
 //!     for the sanitizer/cert role because there is no `xlog`-level
 //!     pool suballocation hiding out-of-bounds access from Compute
 //!     Sanitizer; the sanitizer-visibility property itself is
-//!     **unproven** until the M1 acceptance gate runs on a
-//!     Compute-Sanitizer-supported host. A genuine raw-driver
+//!     **unproven** until the manual Compute Sanitizer acceptance
+//!     gate runs on a supported host. A genuine raw-driver
 //!     `cuMemAlloc`/`cuMemFree` backend is a separate future commit.
 //!   * `AsyncCudaResource` — `cuMemAllocAsync`/`cuMemFreeAsync`
 //!     bound to a caller-supplied stream via the stream pool;
