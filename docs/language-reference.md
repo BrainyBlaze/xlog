@@ -2312,7 +2312,7 @@ program = { SOI ~ statement* ~ EOI }
 ## See Also
 
 - [Architecture Guide](ARCHITECTURE.md) - System design and implementation details
-- [v0.8.5 Language Architecture Contract](architecture/language-v085.md) - Parser, term, probability, CLI, and v0.9.0 handoff contract
+- [Language Completeness Architecture Contract](architecture/language-completeness.md) - Parser, term, probability, CLI, and epistemic/solver handoff contract
 - [Epistemic Semantics And EIR](architecture/epistemic-semantics.md) - v0.9.x epistemic source surface, EIR boundary, and GPU runtime path
 - [Arithmetic Expressions](architecture/arithmetic-expressions.md) - Detailed `is` syntax documentation
 - [Probabilistic Tier](architecture/xlog-prob.md) - Exact and Monte Carlo inference

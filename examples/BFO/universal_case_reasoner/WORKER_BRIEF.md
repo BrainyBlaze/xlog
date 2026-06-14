@@ -13,7 +13,7 @@ separate instruction explicitly authorizes that scope.
 
 - `ROADMAP.md`
 - `docs/language-reference.md`
-- `docs/architecture/language-v085.md`
+- `docs/architecture/language-completeness.md`
 - `docs/architecture/dilp-training.md`
 - `docs/architecture/xlog-prob.md`
 - `examples/neural/*`
