@@ -1269,7 +1269,7 @@ Hardware cache terminology such as `L1` and `L2` is allowed when it refers to GP
 | `examples/prob/02-annotated-disjunction.xlog` | 0 | 0 | true |  |  |
 | `examples/prob/03-recursive-reachability.xlog` | 0 | 0 | true |  |  |
 | `examples/prob/04-recursive-mc.xlog` | 0 | 0 | true |  |  |
-| `examples/prob/README.md` | 1 | 0 | false | P3(1) |  |
+| `examples/prob/README.md` | 2 | 0 | true | phase/task labels(2) |  |
 | `examples/python/01_dlpack_reachability_torch.py` | 0 | 0 | true |  |  |
 | `examples/python/02_prob_wet_conditioning_torch.py` | 0 | 0 | true |  |  |
 | `examples/python/03_prob_mc_nonmonotone_torch.py` | 0 | 0 | true |  |  |
