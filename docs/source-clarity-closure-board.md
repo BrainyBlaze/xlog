@@ -621,7 +621,7 @@ Hardware cache terminology such as `L1` and `L2` is allowed when it refers to GP
 | `crates/xlog-prob/tests/common/mod.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-prob/tests/disk_cache_cross_process.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-prob/tests/epistemic_prob.rs` | 0 | 0 | true |  |  |
-| `crates/xlog-prob/tests/epistemic_prob_gpu_accepted_evidence.rs` | 0 | 10 | false |  | G91(10) |
+| `crates/xlog-prob/tests/epistemic_prob_gpu_accepted_evidence.rs` | 0 | 0 | true | - | G91 is the public Gelfond-1991 compatibility mode under test, not a task code. |
 | `crates/xlog-prob/tests/epistemic_prob_production_reuse.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-prob/tests/exact_ddnnf.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-prob/tests/exact_ddnnf_gpu_grads.rs` | 0 | 0 | true |  |  |
