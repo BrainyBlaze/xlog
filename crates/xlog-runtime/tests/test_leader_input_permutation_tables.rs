@@ -1,7 +1,7 @@
-// crates/xlog-runtime/tests/test_w21_part_b.rs
-//! W2.1 step 7 — Part B acceptance gate (7 tests, runtime).
+// crates/xlog-runtime/tests/test_leader_input_permutation_tables.rs
+//! Leader-input permutation table acceptance gate (7 runtime tests).
 //!
-//! Per the W2.1 plan §"Part B", these tests invoke the
+//! These tests invoke the
 //! `prepare_leader_inputs` helper directly with synthesized
 //! `VariableOrder` values and assert the **observable
 //! consequences** (pointer-identity is invalid because the helper
@@ -36,9 +36,9 @@ use xlog_runtime::Executor;
 
 // ---------------------------------------------------------------
 // Locked permutation tables — constructed by hand here (NOT
-// through xlog-logic helpers) to keep this Part B cert
+// through xlog-logic helpers) to keep this runtime slot-preparation cert
 // independent of xlog-logic. Each test cross-checks against the
-// W2.1 plan §"Permutation Tables".
+// locked permutation tables.
 // ---------------------------------------------------------------
 
 fn build_triangle_var_order(leader_idx: u8) -> VariableOrder {
@@ -140,7 +140,7 @@ fn build_cycle4_var_order(leader_idx: u8) -> VariableOrder {
 }
 
 // ---------------------------------------------------------------
-// Fixture infrastructure (mirrors the W2.2 + Part C cert pattern)
+// Fixture infrastructure for runtime-backed slot-preparation tests.
 // ---------------------------------------------------------------
 
 struct DiscardSink;
@@ -282,7 +282,7 @@ fn triangle_canonical_inputs(memory: &Arc<GpuMemoryManager>) -> [CudaBuffer; 3] 
 }
 
 #[test]
-fn part_b_triangle_e_xy_default_leader() {
+fn triangle_e_xy_default_leader_slot_permutation() {
     let Some(fix) = make_runtime_fixture() else {
         eprintln!("Skipping: CUDA runtime unavailable");
         return;
@@ -321,7 +321,7 @@ fn part_b_triangle_e_xy_default_leader() {
 }
 
 #[test]
-fn part_b_triangle_e_yz_leader() {
+fn triangle_e_yz_leader_slot_permutation() {
     let Some(fix) = make_runtime_fixture() else {
         eprintln!("Skipping: CUDA runtime unavailable");
         return;
@@ -374,7 +374,7 @@ fn part_b_triangle_e_yz_leader() {
 }
 
 #[test]
-fn part_b_triangle_e_xz_leader() {
+fn triangle_e_xz_leader_slot_permutation() {
     let Some(fix) = make_runtime_fixture() else {
         eprintln!("Skipping: CUDA runtime unavailable");
         return;
@@ -533,7 +533,7 @@ fn assert_cycle4_slot_layout(
 }
 
 #[test]
-fn part_b_cycle4_e_wx_default_leader() {
+fn cycle4_e_wx_default_leader_slot_rotation() {
     let Some(fix) = make_runtime_fixture() else {
         eprintln!("Skipping: CUDA runtime unavailable");
         return;
@@ -553,7 +553,7 @@ fn part_b_cycle4_e_wx_default_leader() {
 }
 
 #[test]
-fn part_b_cycle4_e_xy_leader() {
+fn cycle4_e_xy_leader_slot_rotation() {
     let Some(fix) = make_runtime_fixture() else {
         eprintln!("Skipping: CUDA runtime unavailable");
         return;
@@ -573,7 +573,7 @@ fn part_b_cycle4_e_xy_leader() {
 }
 
 #[test]
-fn part_b_cycle4_e_yz_leader() {
+fn cycle4_e_yz_leader_slot_rotation() {
     let Some(fix) = make_runtime_fixture() else {
         eprintln!("Skipping: CUDA runtime unavailable");
         return;
@@ -593,7 +593,7 @@ fn part_b_cycle4_e_yz_leader() {
 }
 
 #[test]
-fn part_b_cycle4_e_zw_leader() {
+fn cycle4_e_zw_leader_slot_rotation() {
     let Some(fix) = make_runtime_fixture() else {
         eprintln!("Skipping: CUDA runtime unavailable");
         return;

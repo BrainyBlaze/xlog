@@ -2658,7 +2658,7 @@ impl Executor {
     ///
     /// **Public** runtime helper. Production callers are
     /// `run_wcoj_*_pipeline_with_leader_order` (this module); runtime tests
-    /// in `crates/xlog-runtime/tests/test_w21_part_b.rs` invoke it
+    /// in `crates/xlog-runtime/tests/test_leader_input_permutation_tables.rs` invoke it
     /// directly to assert per-slot schema + content against a CPU
     /// reference. Public visibility is intentional: there is no
     /// other reasonable seam for tests to inspect rotation +
