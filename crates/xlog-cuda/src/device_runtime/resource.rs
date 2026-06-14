@@ -217,8 +217,8 @@ pub type ResourceResult<T> = std::result::Result<T, ResourceError>;
 /// Stream-ordered device memory resource. Implementations:
 ///   * [`crate::device_runtime::direct::DirectCudaResource`] —
 ///     cudarc default (non-pooled) backend; **candidate** for the
-///     sanitizer/cert role, **unproven** until the M1 manual gate
-///     runs on a Compute-Sanitizer-supported host.
+///     sanitizer/cert role, **unproven** until the manual Compute Sanitizer
+///     acceptance gate runs on a supported host.
 ///   * [`crate::device_runtime::async_resource::AsyncCudaResource`] —
 ///     stream-ordered cuMemAllocAsync/cuMemFreeAsync backend;
 ///     production default when the context supports async-alloc.
