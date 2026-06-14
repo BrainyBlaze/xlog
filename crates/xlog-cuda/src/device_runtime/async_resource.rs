@@ -12,8 +12,8 @@
 //! This backend is the production candidate. It is **not** the
 //! sanitizer/cert backend — pool/async behavior can hide byte-level
 //! out-of-bounds patterns from Compute Sanitizer; the cert role
-//! belongs to [`DirectCudaResource`] (subject to M1 confirmation on a
-//! supported host).
+//! belongs to [`DirectCudaResource`] (subject to manual Compute Sanitizer
+//! confirmation on a supported host).
 //!
 //! # Stream-ordering contract enforced here
 //!   * `allocate(.., stream, ..)` is ordered on the resolved
