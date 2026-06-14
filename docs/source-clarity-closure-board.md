@@ -412,7 +412,7 @@ Hardware cache terminology such as `L1` and `L2` is allowed when it refers to GP
 | `crates/xlog-integration/src/lib.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-integration/src/wcoj_dispatch.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-integration/tests/e2e_integration_tests.rs` | 0 | 0 | true |  |  |
-| `crates/xlog-integration/tests/executor_config_tests.rs` | 7 | 1 | false | D2H(7) | D2H(1) |
+| `crates/xlog-integration/tests/executor_config_tests.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-integration/tests/ilp_integration_tests.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-integration/tests/real_world_tests.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-integration/tests/require_cuda_guard.rs` | 0 | 0 | true |  |  |
