@@ -6,7 +6,7 @@ Programming engine that learns Datalog rules from positive/negative examples via
 ## Design Goals
 
 1. **Learn rules, not weights** — discover symbolic Datalog clauses (e.g., `reach(X,Y) :- edge(X,Z), edge(Z,Y).`) from data
-2. **GPU-resident hot loop** — no semantic column downloads in the training step loop (P0 contract)
+2. **GPU-resident hot loop** — no semantic column downloads in the training step loop
 3. **Sparse by default** — candidate-indexed soft-probs instead of materializing N³ tensors
 4. **Transactional promotion** — learned rules pass gate checks before entering the knowledge base
 5. **Auditable transfer evidence** — learned rules carry fold, held-out-domain, gate, and base-kernel checksum metadata
@@ -125,7 +125,7 @@ W (C logits) → Gumbel-Softmax(τ) → candidate_soft_probs (C,)
                                           │
                                           ▼
                               Rust builds executor mask internally
-                              (no N³ tensor materialized, no full soft-vector DTOH)
+                              (no N³ tensor materialized, no full soft-vector device-to-host transfer)
 ```
 
 - Learnable params: `C` floats (one per candidate rule)
@@ -179,7 +179,7 @@ W (N×N×N logits) → Gumbel-Softmax(τ) → 3D soft mask
    - **Typed-schema gate** — optional hard gate requiring relation type metadata (or waiver-driven manual review)
 5. All pass → `PromotionStatus.PROMOTED` with `committed_source`
 
-### v0.8.9 UCR training surface
+### Universal Case Reasoner Training Surface
 
 The Universal Case Reasoner validation work added a higher-level training entry
 point for sources that mix neural predicates and trainable symbolic clauses:
@@ -218,13 +218,13 @@ precision/recall, metadata (timestamp, schema version, candidate map hash).
 
 ## GPU Contract
 
-The training step loop obeys XLOG's P0 GPU-resident contract:
+The training step loop obeys XLOG's GPU-resident contract:
 
 - `evaluate_device()` — no host reads for semantic results
-- `batch_fact_membership_device()` — returns a CUDA bool mask via DLPack with zero semantic-loop DTOH
-- `batch_tagged_credit_device()` — returns CSR-style CUDA credit data via DLPack with zero semantic-loop DTOH
+- `batch_fact_membership_device()` — returns a CUDA bool mask via DLPack with zero semantic-loop device-to-host transfer
+- `batch_tagged_credit_device()` — returns CSR-style CUDA credit data via DLPack with zero semantic-loop device-to-host transfer
 - `batch_fact_membership()` / `batch_tagged_credit()` remain available when host materialization is desired
-- `AtomicU64` D2H counter on `CudaKernelProvider` — hard gate raises if `download_column_*` is observed during step loop
+- `AtomicU64` device-to-host counter on `CudaKernelProvider` — hard gate raises if `download_column_*` is observed during step loop
 - `host_transfer_stats()` / `reset_host_transfer_stats()` expose broader host transfer accounting for profiling
 - Legacy `set_rule_mask_sparse()` still performs a control-plane soft-probability download; the selected-candidate sparse path avoids it
 
@@ -247,7 +247,7 @@ RFC. The live references are:
 |----------|---------|
 | [`rfc-tensorized-ilp.md`](rfc-tensorized-ilp.md) | Full RFC: mathematical foundation, hardware rationale, implementation map, and resolved design decisions |
 | [`dilp-showcase-report.md`](dilp-showcase-report.md) | Validation: four-stage showcase run analysis |
-| [`ucr-xlog-diagnostics.md`](ucr-xlog-diagnostics.md) | v0.8.9 Universal Case Reasoner issue resolutions and reusable diagnostics |
+| [`ucr-xlog-diagnostics.md`](ucr-xlog-diagnostics.md) | Universal Case Reasoner issue resolutions and reusable diagnostics |
 
 ## See Also
 

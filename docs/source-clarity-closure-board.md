@@ -721,7 +721,7 @@ Hardware cache terminology such as `L1` and `L2` is allowed when it refers to GP
 | `docs/architecture/cudf-interop.md` | 0 | 0 | true |  |  |
 | `docs/architecture/device-runtime.md` | 0 | 0 | true |  |  |
 | `docs/architecture/dilp-showcase-report.md` | 0 | 0 | true |  |  |
-| `docs/architecture/dilp-training.md` | 3 | 0 | false | P0(2), D2H(1) |  |
+| `docs/architecture/dilp-training.md` | 8 | 0 | true | Expanded P0, D2H, DTOH, and versioned Universal Case Reasoner wording to GPU-resident and device-to-host descriptions. |  |
 | `docs/architecture/epistemic-semantics.md` | 10 | 0 | false | G91(9), D2H(1) |  |
 | `docs/architecture/gpu-execution.md` | 0 | 0 | true |  |  |
 | `docs/architecture/language-v085.md` | 1 | 0 | false | v085(1) |  |
