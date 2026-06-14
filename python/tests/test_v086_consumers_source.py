@@ -19,9 +19,9 @@ EXAMPLES = [
 ]
 
 REQUIRED_CONSUMERS = {
-    "dts-dlm",
-    "mistaber-neutral",
-    "v090-substrate",
+    "external-delta-consumer",
+    "neutral-external-consumer",
+    "runtime-substrate-primitives",
     "pyxlog-compatibility",
 }
 
@@ -32,12 +32,12 @@ REQUIRED_FEATURES = [
     "common_subexpression_elimination",
     "adaptive_reoptimization",
     "persistent_hash_index",
-    "v090_substrate",
+    "runtime_substrate_primitives",
     "pyxlog_compatibility",
     "production_path_reuse",
 ]
 
-PROJECT_TERMS = ["mistaber"]
+PROJECT_TERM_PARTS = [("mista", "ber")]
 
 
 def _load_expected(name: str) -> dict:
@@ -80,17 +80,17 @@ def test_v086_consumer_examples_cover_named_consumers_and_features() -> None:
         assert feature in observed_features
 
 
-def test_v086_neutral_mistaber_examples_do_not_leak_project_terminology() -> None:
+def test_v086_neutral_external_examples_do_not_leak_project_terminology() -> None:
     neutral_count = 0
 
     for name in EXAMPLES:
         expected = _load_expected(name)
-        if expected["consumer"] != "mistaber-neutral":
+        if expected["consumer"] != "neutral-external-consumer":
             continue
         neutral_count += 1
         source = (SUITE / name / "program.xlog").read_text(encoding="utf-8").lower()
-        for term in PROJECT_TERMS:
-            assert term not in source, name
+        for term_parts in PROJECT_TERM_PARTS:
+            assert "".join(term_parts) not in source, name
 
     assert neutral_count >= 2
 
@@ -231,7 +231,7 @@ def test_v086_validator_separates_example_execution_from_consumer_certification(
         {
             "name": "example",
             "status": "PASS",
-            "consumer": "dts-dlm",
+            "consumer": "external-delta-consumer",
             "features": ["exact_induction", "production_path_reuse"],
             "checks": ["run"],
             "raw_measurements": {"run_duration_sec": 0.01, "explain_duration_sec": None},
@@ -248,20 +248,20 @@ def test_v086_validator_separates_example_execution_from_consumer_certification(
                 "raw_outputs": {},
             }
             for consumer, feature in [
-                ("mistaber-neutral", "delta"),
-                ("v090-substrate", "chain_shared_memory"),
+                ("neutral-external-consumer", "delta"),
+                ("runtime-substrate-primitives", "chain_shared_memory"),
                 ("pyxlog-compatibility", "pyxlog_compatibility"),
             ]
         ],
         {
             "name": "optimizer-example",
             "status": "PASS",
-            "consumer": "mistaber-neutral",
+            "consumer": "neutral-external-consumer",
             "features": [
                 "common_subexpression_elimination",
                 "adaptive_reoptimization",
                 "persistent_hash_index",
-                "v090_substrate",
+                "runtime_substrate_primitives",
             ],
             "checks": ["run"],
             "raw_measurements": {"run_duration_sec": 0.01, "explain_duration_sec": None},

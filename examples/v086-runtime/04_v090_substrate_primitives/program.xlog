@@ -1,4 +1,4 @@
-// v0.9.0 substrate fixture over existing v0.8.6 runtime primitives.
+// Runtime substrate fixture over existing runtime primitives.
 
 pred epistemic_world(id: u32).
 pred solver_edge(src: u32, dst: u32).

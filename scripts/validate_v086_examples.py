@@ -32,14 +32,14 @@ REQUIRED_FEATURES = [
     "common_subexpression_elimination",
     "adaptive_reoptimization",
     "persistent_hash_index",
-    "v090_substrate",
+    "runtime_substrate_primitives",
     "pyxlog_compatibility",
     "production_path_reuse",
 ]
 REQUIRED_CONSUMERS = {
-    "dts-dlm",
-    "mistaber-neutral",
-    "v090-substrate",
+    "external-delta-consumer",
+    "neutral-external-consumer",
+    "runtime-substrate-primitives",
     "pyxlog-compatibility",
 }
 FEATURE_EVIDENCE = {
@@ -135,13 +135,13 @@ def _consumer_behavior_probes(
             and delta.get("hot_path_dtoh_calls") == 0
             and delta.get("final_output_transfer_excluded") is True,
             features=["delta"],
-            consumers=["dts-dlm", "pyxlog-compatibility"],
+            consumers=["external-delta-consumer", "pyxlog-compatibility"],
             proof="device-side relation delta coalescing fixture records reduced recomputes and zero hot-path DTOH",
             evidence=[feature_measurements["delta"]["path"]],
             raw={
                 "recompute_call_reduction_ratio": delta.get("recompute_call_reduction_ratio"),
                 "hot_path_dtoh_calls": delta.get("hot_path_dtoh_calls"),
-                "examples": examples_by_consumer["dts-dlm"]
+                "examples": examples_by_consumer["external-delta-consumer"]
                 + examples_by_consumer["pyxlog-compatibility"],
             },
         ),
@@ -151,7 +151,7 @@ def _consumer_behavior_probes(
             and _all_exact_parity(exact, "u32")
             and _all_exact_parity(exact, "symbol"),
             features=["exact_induction"],
-            consumers=["dts-dlm", "v090-substrate"],
+            consumers=["external-delta-consumer", "runtime-substrate-primitives"],
             proof="native exact-induction typed provider tests pass for U32 and Symbol pair buffers with parity",
             evidence=[feature_measurements["exact_induction"]["path"]],
             raw={
@@ -159,8 +159,8 @@ def _consumer_behavior_probes(
                 "core_dlpack_compatibility_tests_passed": exact.get(
                     "core_dlpack_compatibility_tests_passed"
                 ),
-                "examples": examples_by_consumer["dts-dlm"]
-                + examples_by_consumer["v090-substrate"],
+                "examples": examples_by_consumer["external-delta-consumer"]
+                + examples_by_consumer["runtime-substrate-primitives"],
             },
         ),
         "chain_shared_memory": _probe(
@@ -168,14 +168,14 @@ def _consumer_behavior_probes(
             and chain_hot.get("speedup_ratio", 0.0) > 1.0
             and chain.get("transfer_budget", {}).get("added_dtoh_calls") == 0,
             features=["chain_shared_memory"],
-            consumers=["v090-substrate"],
+            consumers=["runtime-substrate-primitives"],
             proof="chain-topology shared-memory scorer records parity, speedup, and no added DTOH",
             evidence=[feature_measurements["chain_shared_memory"]["path"]],
             raw={
                 "speedup_ratio": chain_hot.get("speedup_ratio"),
                 "parity": chain_hot.get("parity"),
                 "added_dtoh_calls": chain.get("transfer_budget", {}).get("added_dtoh_calls"),
-                "examples": examples_by_consumer["v090-substrate"],
+                "examples": examples_by_consumer["runtime-substrate-primitives"],
             },
         ),
         "common_subexpression_elimination": _probe(
@@ -184,7 +184,11 @@ def _consumer_behavior_probes(
             and cse_deterministic.get("added_dtoh_calls") == 0
             and all(cse.get("unsafe_rejections", {}).values()),
             features=["common_subexpression_elimination"],
-            consumers=["dts-dlm", "mistaber-neutral", "v090-substrate"],
+            consumers=[
+                "external-delta-consumer",
+                "neutral-external-consumer",
+                "runtime-substrate-primitives",
+            ],
             proof="runtime CSE duplicate-subplan fixture records parity, duplicate-work reduction, unsafe-boundary rejection, and zero added DTOH",
             evidence=[feature_measurements["common_subexpression_elimination"]["path"]],
             raw={
@@ -193,9 +197,9 @@ def _consumer_behavior_probes(
                 ),
                 "output_parity": cse_deterministic.get("output_parity"),
                 "added_dtoh_calls": cse_deterministic.get("added_dtoh_calls"),
-                "examples": examples_by_consumer["dts-dlm"]
-                + examples_by_consumer["mistaber-neutral"]
-                + examples_by_consumer["v090-substrate"],
+                "examples": examples_by_consumer["external-delta-consumer"]
+                + examples_by_consumer["neutral-external-consumer"]
+                + examples_by_consumer["runtime-substrate-primitives"],
             },
         ),
         "adaptive_reoptimization": _probe(
@@ -204,7 +208,11 @@ def _consumer_behavior_probes(
             and adaptive_deterministic.get("decision_replays", 0) >= 100
             and adaptive.get("rollback_fixture", {}).get("rolled_back", 0) >= 1,
             features=["adaptive_reoptimization"],
-            consumers=["dts-dlm", "mistaber-neutral", "v090-substrate"],
+            consumers=[
+                "external-delta-consumer",
+                "neutral-external-consumer",
+                "runtime-substrate-primitives",
+            ],
             proof="adaptive reoptimization fixture records adoption, deterministic replay, rollback, and zero data-plane DTOH",
             evidence=[feature_measurements["adaptive_reoptimization"]["path"]],
             raw={
@@ -212,9 +220,9 @@ def _consumer_behavior_probes(
                 "decision_replays": adaptive_deterministic.get("decision_replays"),
                 "data_plane_dtoh_calls": adaptive_deterministic.get("data_plane_dtoh_calls"),
                 "rolled_back": adaptive.get("rollback_fixture", {}).get("rolled_back"),
-                "examples": examples_by_consumer["dts-dlm"]
-                + examples_by_consumer["mistaber-neutral"]
-                + examples_by_consumer["v090-substrate"],
+                "examples": examples_by_consumer["external-delta-consumer"]
+                + examples_by_consumer["neutral-external-consumer"]
+                + examples_by_consumer["runtime-substrate-primitives"],
             },
         ),
         "persistent_hash_index": _probe(
@@ -224,7 +232,12 @@ def _consumer_behavior_probes(
             and persistent_repeated.get("builds", 0) >= 1
             and persistent_repeated.get("hits", 0) >= 1,
             features=["persistent_hash_index"],
-            consumers=["dts-dlm", "mistaber-neutral", "v090-substrate", "pyxlog-compatibility"],
+            consumers=[
+                "external-delta-consumer",
+                "neutral-external-consumer",
+                "runtime-substrate-primitives",
+                "pyxlog-compatibility",
+            ],
             proof="persistent hash-index runtime fixture records >=1.5x speedup, repeated-session build/hit, and zero tracked transfers",
             evidence=[
                 feature_measurements["persistent_hash_index"]["path"],
@@ -238,19 +251,19 @@ def _consumer_behavior_probes(
                 "pyxlog_session_reuse_status": compatibility_gates.get(
                     "pyxlog_persistent_index_session_reuse", {}
                 ).get("status"),
-                "examples": examples_by_consumer["dts-dlm"]
-                + examples_by_consumer["mistaber-neutral"]
-                + examples_by_consumer["v090-substrate"]
+                "examples": examples_by_consumer["external-delta-consumer"]
+                + examples_by_consumer["neutral-external-consumer"]
+                + examples_by_consumer["runtime-substrate-primitives"]
                 + examples_by_consumer["pyxlog-compatibility"],
             },
         ),
-        "v090_substrate": _probe(
-            status=bool(examples_by_consumer["v090-substrate"]),
-            features=["v090_substrate"],
-            consumers=["v090-substrate"],
-            proof="v0.9.0 substrate example executes through xlog-cli and maps to exact/index/CSE/adaptive primitive behavior probes",
-            evidence=["examples/v086-runtime/04_v090_substrate_primitives/program.xlog"],
-            raw={"examples": examples_by_consumer["v090-substrate"]},
+        "runtime_substrate_primitives": _probe(
+            status=bool(examples_by_consumer["runtime-substrate-primitives"]),
+            features=["runtime_substrate_primitives"],
+            consumers=["runtime-substrate-primitives"],
+            proof="runtime substrate primitive example executes through xlog-cli and maps to exact/index/CSE/adaptive primitive behavior probes",
+            evidence=["runtime substrate primitive example program"],
+            raw={"examples": examples_by_consumer["runtime-substrate-primitives"]},
         ),
         "pyxlog_compatibility": _probe(
             status=compatibility_gates.get("v080_examples", {}).get("status") == "PASS"
@@ -461,7 +474,7 @@ def _load_example_result(example: str, args: argparse.Namespace) -> dict[str, An
         expected.get("source_required_substrings", []),
         f"{example} program.xlog",
     )
-    if expected.get("consumer") == "mistaber-neutral":
+    if expected.get("consumer") == "neutral-external-consumer":
         _require("mistaber" not in source.lower(), f"{example} leaks project terminology")
 
     program_arg = str(program.relative_to(ROOT))

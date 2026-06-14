@@ -1,12 +1,12 @@
 {
-  "consumer": "v090-substrate",
+  "consumer": "runtime-substrate-primitives",
   "features": [
     "exact_induction",
     "chain_shared_memory",
     "common_subexpression_elimination",
     "adaptive_reoptimization",
     "persistent_hash_index",
-    "v090_substrate",
+    "runtime_substrate_primitives",
     "pyxlog_compatibility",
     "production_path_reuse"
   ],

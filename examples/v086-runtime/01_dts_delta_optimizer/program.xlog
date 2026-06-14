@@ -1,22 +1,22 @@
 // external consumer-shaped delta, exact-pair, and optimizer fixture.
 
-pred wmir_committed(stage: u32, item: u32).
-pred wmir_delta_insert(batch: u32, item: u32).
-pred wmir_delta_delete(batch: u32, item: u32).
+pred committed_item(stage: u32, item: u32).
+pred delta_insert(batch: u32, item: u32).
+pred delta_delete(batch: u32, item: u32).
 pred exact_pair(src: u32, dst: u32).
 pred join_heat(src: u32, dst: u32).
-pred active_wmir(item: u32).
-pred dts_candidate(src: u32, dst: u32).
-pred dts_priority(src: u32, dst: u32).
+pred active_item(item: u32).
+pred consumer_candidate(src: u32, dst: u32).
+pred consumer_priority(src: u32, dst: u32).
 pred committed_count(stage: u32, count: u64).
 
-wmir_committed(4, 101).
-wmir_committed(4, 102).
-wmir_committed(4, 103).
+committed_item(4, 101).
+committed_item(4, 102).
+committed_item(4, 103).
 
-wmir_delta_insert(37, 104).
-wmir_delta_insert(37, 105).
-wmir_delta_delete(37, 102).
+delta_insert(37, 104).
+delta_insert(37, 105).
+delta_delete(37, 102).
 
 exact_pair(101, 201).
 exact_pair(104, 204).
@@ -24,12 +24,12 @@ exact_pair(105, 205).
 join_heat(101, 201).
 join_heat(104, 204).
 
-active_wmir(I) :- wmir_committed(4, I), not wmir_delta_delete(37, I).
-active_wmir(I) :- wmir_delta_insert(37, I), not wmir_delta_delete(37, I).
-dts_candidate(S, D) :- active_wmir(S), exact_pair(S, D).
-dts_priority(S, D) :- active_wmir(S), exact_pair(S, D), join_heat(S, D).
-committed_count(4, count(I)) :- active_wmir(I).
+active_item(I) :- committed_item(4, I), not delta_delete(37, I).
+active_item(I) :- delta_insert(37, I), not delta_delete(37, I).
+consumer_candidate(S, D) :- active_item(S), exact_pair(S, D).
+consumer_priority(S, D) :- active_item(S), exact_pair(S, D), join_heat(S, D).
+committed_count(4, count(I)) :- active_item(I).
 
-?- dts_candidate(S, D).
-?- dts_priority(S, D).
+?- consumer_candidate(S, D).
+?- consumer_priority(S, D).
 ?- committed_count(Stage, N).

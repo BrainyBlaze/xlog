@@ -1,5 +1,5 @@
 {
-  "consumer": "mistaber-neutral",
+  "consumer": "neutral-external-consumer",
   "features": [
     "common_subexpression_elimination",
     "persistent_hash_index",

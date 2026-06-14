@@ -1,5 +1,5 @@
 {
-  "consumer": "mistaber-neutral",
+  "consumer": "neutral-external-consumer",
   "features": [
     "adaptive_reoptimization",
     "common_subexpression_elimination",
