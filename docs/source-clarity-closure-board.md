@@ -1406,7 +1406,7 @@ Hardware cache terminology such as `L1` and `L2` is allowed when it refers to GP
 | `python/examples/ilp_showcase.py` | 0 | 0 | true |  |  |
 | `python/pyproject.toml` | 0 | 0 | true |  |  |
 | `python/tests/conftest.py` | 0 | 0 | true |  |  |
-| `python/tests/fixtures/dts_m34_frozen_inputs.json` | 0 | 12 | false |  | W0P(8), W1P(4) |
+| `python/tests/fixtures/external_consumer_frozen_inputs.json` | 0 | 33 | true |  | external-consumer and task labels; opaque relation and witness variable names(33) |
 | `python/tests/fixtures/manifest_sample.txt` | 0 | 0 | true |  |  |
 | `python/tests/neural_test_env.py` | 0 | 0 | true |  |  |
 | `python/tests/test_arrow_device_import.py` | 0 | 0 | true |  |  |
@@ -1455,7 +1455,7 @@ Hardware cache terminology such as `L1` and `L2` is allowed when it refers to GP
 | `python/tests/test_ilp_types.py` | 0 | 0 | true |  |  |
 | `python/tests/test_kernel_packaging_layout.py` | 0 | 0 | true |  |  |
 | `python/tests/test_label_mapping.py` | 0 | 0 | true |  |  |
-| `python/tests/test_logic_dts_frozen_replay_determinism.py` | 0 | 0 | true |  |  |
+| `python/tests/test_logic_external_consumer_frozen_replay_determinism.py` | 0 | 9 | true |  | external-consumer and task labels in env, path, and test naming(9) |
 | `python/tests/test_logic_recursive_support_gpu.py` | 0 | 85 | false |  | B0(30), B1(25), B2(20), B3(10) |
 | `python/tests/test_logic_relation_store.py` | 0 | 0 | true |  |  |
 | `python/tests/test_loss.py` | 0 | 0 | true |  |  |

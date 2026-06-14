@@ -18,13 +18,8 @@ from conftest import skip_unless_pyxlog_cuda
 skip_unless_pyxlog_cuda()
 
 
-FROZEN_ROOT = Path(
-    os.environ.get(
-        "XLOG_DTS_FROZEN_ROOT",
-        "/home/dev/projects/dts-dlm/out/m34-strata/2026-04-26-m34-sweep",
-    )
-)
-FALLBACK_BUNDLE = Path(__file__).parent / "fixtures" / "dts_m34_frozen_inputs.json"
+FROZEN_ROOT = os.environ.get("XLOG_EXTERNAL_CONSUMER_FROZEN_ROOT")
+FALLBACK_BUNDLE = Path(__file__).parent / "fixtures" / "external_consumer_frozen_inputs.json"
 
 REPLAY_CODE = r"""
 import hashlib
@@ -73,10 +68,16 @@ print(repr(fingerprints))
 
 
 @pytest.mark.parametrize("call_id", [28, 29, 30, 31])
-def test_dts_frozen_logic_replay_is_deterministic_across_subprocesses(call_id: int):
-    bundle = FROZEN_ROOT / f"stratum_call_{call_id}" / "frozen_inputs.json"
-    if not bundle.exists():
-        bundle = FALLBACK_BUNDLE
+def test_external_consumer_frozen_logic_replay_is_deterministic_across_subprocesses(
+    call_id: int,
+):
+    bundle = FALLBACK_BUNDLE
+    if FROZEN_ROOT:
+        external_bundle = (
+            Path(FROZEN_ROOT) / f"stratum_call_{call_id}" / "frozen_inputs.json"
+        )
+        if external_bundle.exists():
+            bundle = external_bundle
     if not bundle.exists():
         pytest.skip(f"external consumer frozen replay bundle is not available: {bundle}")
 
@@ -94,7 +95,7 @@ def test_dts_frozen_logic_replay_is_deterministic_across_subprocesses(call_id: i
         if expected is None:
             expected = current
         assert current == expected, (
-            f"stratum_call_{call_id} replay {replay_idx} diverged:\n"
+            f"external call {call_id} replay {replay_idx} diverged:\n"
             f"expected={expected}\n"
             f"actual={current}"
         )
