@@ -509,7 +509,7 @@ Hardware cache terminology such as `L1` and `L2` is allowed when it refers to GP
 | `crates/xlog-logic/tests/integration/module_udf.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-logic/tests/integration/symbol_module.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-logic/tests/integration/symbol_udf.rs` | 0 | 0 | true |  |  |
-| `crates/xlog-logic/tests/integration_tests.rs` | 1 | 0 | false | M1(1) |  |
+| `crates/xlog-logic/tests/integration_tests.rs` | 0 | 0 | true | - | Replaced learnable-rule test task labels with explicit parser, IR relation coverage, optimizer, and head-validation regression wording. |
 | `crates/xlog-logic/tests/logic/aggregates.xlog` | 0 | 0 | true |  |  |
 | `crates/xlog-logic/tests/logic/learnable.xlog` | 0 | 0 | true |  |  |
 | `crates/xlog-logic/tests/logic/stratified.xlog` | 0 | 0 | true |  |  |
