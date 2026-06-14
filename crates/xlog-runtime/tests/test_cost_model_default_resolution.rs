@@ -39,18 +39,18 @@ fn with_cost_model_env<R>(f: impl FnOnce() -> R) -> R {
 }
 
 #[test]
-fn test_w25_default_flip_cardinality_is_default() {
+fn runtime_config_cardinality_is_default_cost_model() {
     with_cost_model_env(|| {
         assert_eq!(
             RuntimeConfig::default().resolved_wcoj_cost_model(),
             CostModelKind::Cardinality,
-            "bare RuntimeConfig must select Cardinality after W2.5"
+            "bare RuntimeConfig must select Cardinality by default"
         );
     });
 }
 
 #[test]
-fn test_w25_default_flip_env_skew_opt_out_preserved() {
+fn runtime_config_env_skew_opt_out_preserved() {
     with_cost_model_env(|| {
         unsafe {
             std::env::set_var("XLOG_WCOJ_COST_MODEL", "skew");
@@ -64,7 +64,7 @@ fn test_w25_default_flip_env_skew_opt_out_preserved() {
 }
 
 #[test]
-fn test_w25_default_flip_config_override_beats_env() {
+fn runtime_config_override_beats_env_cost_model() {
     with_cost_model_env(|| {
         unsafe {
             std::env::set_var("XLOG_WCOJ_COST_MODEL", "skew");

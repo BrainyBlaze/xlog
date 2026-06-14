@@ -227,7 +227,7 @@ mod tests {
     }
 
     #[test]
-    fn test_w25_default_flip_factory_uses_cardinality_default() {
+    fn factory_uses_cardinality_default_cost_model() {
         with_cost_model_env(|| {
             let stats = stats_with_cards(&[1_000, 1_000, 1_000]);
             let slots = [RelId(0), RelId(1), RelId(2)];
@@ -241,7 +241,7 @@ mod tests {
     }
 
     #[test]
-    fn test_w25_default_flip_factory_honors_env_skew_opt_out() {
+    fn factory_honors_env_skew_opt_out() {
         with_cost_model_env(|| {
             unsafe {
                 std::env::set_var("XLOG_WCOJ_COST_MODEL", "skew");

@@ -671,7 +671,7 @@ Hardware cache terminology such as `L1` and `L2` is allowed when it refers to GP
 | `crates/xlog-runtime/src/executor/node_dispatch.rs` | 12 | 0 | true | Replaced nested-loop dispatch, aggregate-fusion, fallback, and ILP tensor-mask milestone comments with behavior-based wording. |  |
 | `crates/xlog-runtime/src/executor/recursive.rs` | 16 | 0 | true | Replaced recursive stats trace, recursive WCOJ, Free Join, paper shorthand, and k-clique milestone comments with behavior-based wording. |  |
 | `crates/xlog-runtime/src/executor/rewrite.rs` | 18 | 1 | true | Replaced occurrence-rewrite, input/fallback symmetry, shape-agnosticism, and release/slice milestone comments; renamed milestone-labeled test module. |  |
-| `crates/xlog-runtime/src/executor/wcoj_cost_model.rs` | 0 | 0 | true |  |  |
+| `crates/xlog-runtime/src/executor/wcoj_cost_model.rs` | 0 | 2 | true |  | Replaced W2.5-coded unit test names with cardinality-default and env opt-out behavior names. |
 | `crates/xlog-runtime/src/executor/wcoj_dispatch.rs` | 98 | 6 | true | Replaced WCOJ dispatch, feedback, Free Join, aggregate-fusion, chain, K-clique, matcher, release/slice, and sibling-task labels with behavior-based wording; renamed milestone-labeled pipeline and matcher-test identifiers. |  |
 | `crates/xlog-runtime/src/executor/wcoj_phase_timing.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-runtime/src/ilp_registry.rs` | 0 | 0 | true |  |  |
@@ -684,7 +684,7 @@ Hardware cache terminology such as `L1` and `L2` is allowed when it refers to GP
 | `crates/xlog-runtime/tests/test_epistemic_production_reuse_audit.rs` | 0 | 1 | true |  | Expanded assertion text from `D2H` to `device-to-host`; retained runtime transfer API field names. |
 | `crates/xlog-runtime/tests/test_leader_input_permutation_tables.rs` | 6 | 7 | true | Replaced W2.1/W2.2 and Part B/Part C plan labels with runtime slot-preparation and permutation-table descriptions. | Renamed milestone-coded file and `part_b_*` tests to leader-input permutation and rotation names. |
 | `crates/xlog-runtime/tests/recursive_stats_trace.rs` | 20 | 6 | true | Renamed the legacy milestone test file and replaced recursive-stats, multi-recursive dispatch, semi-naive occurrence, and dispatch-certified fixture prose/variables with behavior-based wording. | W2.3(8), W4.1(7), P1(5) | W2.3(6) |
-| `crates/xlog-runtime/tests/test_w25_default_flip.rs` | 0 | 1 | false |  | W2.5(1) |
+| `crates/xlog-runtime/tests/test_cost_model_default_resolution.rs` | 0 | 4 | true |  | Renamed W2.5-coded file/tests and expanded the assertion text to the cardinality default behavior. |
 | `crates/xlog-solve/Cargo.toml` | 0 | 0 | true |  |  |
 | `crates/xlog-solve/benches/solver_bench.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-solve/examples/real_world.rs` | 0 | 0 | true |  |  |
