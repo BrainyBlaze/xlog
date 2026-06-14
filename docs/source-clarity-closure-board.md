@@ -407,7 +407,7 @@ Hardware cache terminology such as `L1` and `L2` is allowed when it refers to GP
 | `crates/xlog-integration/benches/wcoj_histogram_guided_superhub.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-integration/benches/wcoj_w37_helper_split.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-integration/benches/wcoj_w38_stream_mux.rs` | 0 | 0 | true |  |  |
-| `crates/xlog-integration/src/bin/wcoj_phase_report.rs` | 2 | 2 | false | B1(2) | B1(2) |
+| `crates/xlog-integration/src/bin/wcoj_phase_report.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-integration/src/bin/xlog_run.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-integration/src/lib.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-integration/src/wcoj_dispatch.rs` | 0 | 0 | true |  |  |
