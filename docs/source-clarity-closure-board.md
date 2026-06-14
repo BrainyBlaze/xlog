@@ -553,7 +553,7 @@ Hardware cache terminology such as `L1` and `L2` is allowed when it refers to GP
 | `crates/xlog-logic/tests/test_hypergraph_scc.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-logic/tests/test_hypergraph_scc_inference.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-logic/tests/test_hypergraph_typed.rs` | 0 | 0 | true |  |  |
-| `crates/xlog-logic/tests/test_promote_multiway.rs` | 1 | 0 | false | D2(1) |  |
+| `crates/xlog-logic/tests/test_promote_multiway.rs` | 0 | 0 | true | - | Replaced release/slice and D2 labels with compiler-pipeline, dedicated multiway dispatch, and general Free Join wording. |
 | `crates/xlog-logic/tests/test_v085_approx_pragmas.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-logic/tests/test_v085_incremental_parse.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-logic/tests/test_v085_lists.rs` | 0 | 3 | false |  | v085(3) |
