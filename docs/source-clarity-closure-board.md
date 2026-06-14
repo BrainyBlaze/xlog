@@ -1284,7 +1284,7 @@ Hardware cache terminology such as `L1` and `L2` is allowed when it refers to GP
 | `examples/v080-dts/04_native_exact_induction/run.py` | 0 | 0 | true |  |  |
 | `examples/v080-dts/05_probabilistic_async_diagnostics/program.xlog` | 0 | 0 | true |  |  |
 | `examples/v080-dts/05_probabilistic_async_diagnostics/run.py` | 0 | 0 | true |  |  |
-| `examples/v080-dts/README.md` | 2 | 1 | false | M37-A+B(1), G080(1) | v080(1) |
+| `examples/v080-dts/README.md` | 9 | 3 | true | release labels, task/gate labels, external-consumer path labels, and phase shorthand(9) | release validator/evidence path labels(3) |
 | `examples/language-completeness/aggregate_lifting/count_lift.xlog` | 0 | 0 | true |  |  |
 | `examples/language-completeness/approx/aggregate_mc.xlog` | 0 | 0 | true |  |  |
 | `examples/language-completeness/lists/cons_patterns.xlog` | 0 | 0 | true |  |  |
