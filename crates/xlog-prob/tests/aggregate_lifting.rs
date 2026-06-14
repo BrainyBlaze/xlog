@@ -150,8 +150,12 @@ query(out_degree(1, 65)).
 
     let err = extract_from_source(&source).expect_err("count lift cap should reject 65 rows");
     let msg = err.to_string();
-    assert!(msg.contains("v0.8.5 agg_lift error"), "msg={}", msg);
-    assert!(msg.contains("count lift finite domain cap"), "msg={}", msg);
+    assert!(
+        msg.contains("count aggregate lifting finite domain cap"),
+        "msg={}",
+        msg
+    );
+    assert!(msg.contains("predicate out_degree"), "msg={}", msg);
     assert!(msg.contains("65 uncertain rows > cap 64"), "msg={}", msg);
 }
 
