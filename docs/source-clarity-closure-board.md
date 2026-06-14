@@ -737,7 +737,7 @@ Hardware cache terminology such as `L1` and `L2` is allowed when it refers to GP
 | `docs/architecture/xlog-prob.md` | 32 | 0 | true | Decision-DNNF shorthand(13), release/date labels(9), phase labels(3), transfer shorthand(4), K1(1), P3(1), v085 evidence label(1) | Expanded Decision-DNNF, Monte Carlo, production-gate, phase/status, and transfer wording. |
 | `docs/certification/2026-01-12-cuda-certification-results.md` | 89 | 0 | true | certification category codes(84), bug codes(4), implementation-version label(1) | Replaced category, bug, range, performance, and implementation-version codes with descriptive certification wording. |
 | `docs/certification/2026-01-14-cuda-certification-results.md` | 85 | 0 | true | certification category codes(85) | Replaced category, range, performance, and longest-category codes with descriptive certification wording. |
-| `docs/certification/2026-01-22-v0.4.0-alpha-certification-report.md` | 73 | 0 | false | G01-G06(8), C01-C25(6), G04(6), G01(4), G02(4), G03(4) |  |
+| `docs/certification/2026-01-22-neural-symbolic-certification-report.md` | 108 | 1 | true | certification category codes(95), release labels(6), implementation-plan/spec labels(4), document ID(1), certification version label(1), runtime issue label(1) | filename artifact(1) |
 | `docs/certification/v0.4.0-alpha-certification-spec.md` | 48 | 3 | false | G01-G06(6), C01-C25(4), D4(4), G01(3), G02(3), G03(3) | G01(1), G02(1), D4(1) |
 | `docs/epistemic-solver-semantics-guide.md` | 21 | 0 | false | G91(15), D2H(5), D4(1) |  |
 | `docs/language-reference.md` | 11 | 4 | false | G91(7), v085(2), D4(1), D2H(1) | D1(2), D2(2) |

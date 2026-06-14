@@ -1,19 +1,19 @@
-# XLOG v0.4.0-alpha Certification Report (Milestone / Unreleased)
+# XLOG Neural-Symbolic Certification Report
 
-**Milestone target:** v0.4.0-alpha — Neural-Symbolic Integration (**unreleased; not tagged**)
+**Certification target:** Neural-Symbolic Integration (**unreleased; not tagged**)
 **Date:** January 22, 2026
-**Certification Suite:** CUDA Kernel Certification (C01-C25 + G01-G06)
+**Certification Suite:** CUDA Kernel Certification (CUDA infrastructure categories plus GPU neural-symbolic categories)
 **Status:** ✅ **PASS** — 200/200 tests passed (100.0%) for this snapshot
 
 ---
 
 ## Executive Summary
 
-This document records an internal certification snapshot for the neural-symbolic milestone work that was originally
-targeted as `v0.4.0-alpha`. It is **not** a tagged release: the latest tagged release remains `v0.3.2`.
+This document records an internal certification snapshot for neural-symbolic
+milestone work. It is **not** a tagged release.
 
 At the time of this run, the GPU certification suite passed with **200/200 tests**, and introduced 50 new GPU-focused
-tests (G01-G06) that verify:
+tests for GPU neural-symbolic behavior that verify:
 
 ✅ **Circuit evaluation kernels** (`xgcf_forward_level`, `xgcf_backward_level_*`) produce correct results
 ✅ **Gradient computation** matches numerical differentiation within 1e-6 tolerance
@@ -21,9 +21,10 @@ tests (G01-G06) that verify:
 ✅ **Circuit caching** provides >10x speedup with bit-identical results
 ✅ **PTX kernel robustness** handles edge cases, large circuits (100K nodes), and numerical extremes
 
-All 150 existing CUDA tests (C01-C25) continue to pass, ensuring no regressions in core GPU functionality.
+All 150 existing CUDA infrastructure tests continue to pass, ensuring no
+regressions in core GPU functionality.
 
-**Current HEAD note:** The certification suite has since been extended (e.g., SAT/CDCL + device-count categories).
+**Current main note:** The certification suite has since been extended (e.g., SAT/CDCL + device-count categories).
 For the latest certification status on `main`, see `docs/architecture/cuda-certification.md` and
 `docs/VALIDATION_REPORT.md`.
 
@@ -51,46 +52,46 @@ Pass Rate:     100.0%
 
 | Category | Tests | Passed | Failed | Skipped | Duration | Status |
 |----------|-------|--------|--------|---------|----------|--------|
-| **Existing Suite (C01-C25)** |
-| C01: Toolchain | 5 | 5 | 0 | 0 | 0.01s | ✅ PASS |
-| C02: Launch Config | 8 | 8 | 0 | 0 | 0.17s | ✅ PASS |
-| C03: Pointer Bounds | 8 | 8 | 0 | 0 | 0.13s | ✅ PASS |
-| C04: Address Space | 5 | 5 | 0 | 0 | 0.01s | ✅ PASS |
-| C05: Global Memory | 5 | 5 | 0 | 0 | 0.08s | ✅ PASS |
-| C06: Shared Memory | 5 | 5 | 0 | 0 | 0.05s | ✅ PASS |
-| C07: Local Memory | 5 | 5 | 0 | 0 | 0.43s | ✅ PASS |
-| C08: Synchronization | 5 | 5 | 0 | 0 | 0.01s | ✅ PASS |
-| C09: Warp Level | 5 | 5 | 0 | 0 | 0.04s | ✅ PASS |
-| C10: Block Grid | 5 | 5 | 0 | 0 | 0.24s | ✅ PASS |
-| C11: Control Flow | 7 | 7 | 0 | 0 | 0.06s | ✅ PASS |
-| C12: Atomics | 5 | 5 | 0 | 0 | 0.12s | ✅ PASS |
-| C13: Floating Point | 6 | 6 | 0 | 0 | 0.01s | ✅ PASS |
-| C14: Integer | 5 | 5 | 0 | 0 | 0.01s | ✅ PASS |
-| C15: Determinism | 8 | 8 | 0 | 0 | 0.10s | ✅ PASS |
-| C16: Async Pipeline | 5 | 5 | 0 | 0 | 0.64s | ✅ PASS |
-| C17: Caching | 5 | 5 | 0 | 0 | 0.17s | ✅ PASS |
-| C18: Host Device | 5 | 5 | 0 | 0 | 1.46s | ✅ PASS |
-| C19: Multi Stream | 5 | 5 | 0 | 0 | 0.14s | ✅ PASS |
-| C20: Multi GPU | 5 | 5 | 0 | 0 | 0.03s | ✅ PASS |
-| C21: Hardware | 5 | 5 | 0 | 0 | 9.59s | ✅ PASS |
-| C22: Algorithms | 13 | 13 | 0 | 0 | 0.05s | ✅ PASS |
-| C23: Blind Spots | 5 | 5 | 0 | 0 | 0.12s | ✅ PASS |
-| C24: Edge Matrix | 5 | 5 | 0 | 0 | 0.15s | ✅ PASS |
-| C25: Float Filter | 10 | 10 | 0 | 0 | 0.02s | ✅ PASS |
-| **New GPU Categories (G01-G06)** |
-| G01: Circuit Forward | 8 | 8 | 0 | 0 | 0.03s | ✅ PASS |
-| G02: Circuit Backward | 12 | 12 | 0 | 0 | 0.08s | ✅ PASS |
-| G03: Weight Injection | 6 | 6 | 0 | 0 | 0.05s | ✅ PASS |
-| G04: Transfer Efficiency | 8 | 8 | 0 | 0 | 0.29s | ✅ PASS |
-| G05: Circuit Cache | 6 | 6 | 0 | 0 | 0.02s | ✅ PASS |
-| G06: PTX Robustness | 10 | 10 | 0 | 0 | 0.01s | ✅ PASS |
+| **Existing CUDA infrastructure suite** |
+| Toolchain | 5 | 5 | 0 | 0 | 0.01s | ✅ PASS |
+| Launch Config | 8 | 8 | 0 | 0 | 0.17s | ✅ PASS |
+| Pointer Bounds | 8 | 8 | 0 | 0 | 0.13s | ✅ PASS |
+| Address Space | 5 | 5 | 0 | 0 | 0.01s | ✅ PASS |
+| Global Memory | 5 | 5 | 0 | 0 | 0.08s | ✅ PASS |
+| Shared Memory | 5 | 5 | 0 | 0 | 0.05s | ✅ PASS |
+| Local Memory | 5 | 5 | 0 | 0 | 0.43s | ✅ PASS |
+| Synchronization | 5 | 5 | 0 | 0 | 0.01s | ✅ PASS |
+| Warp Level | 5 | 5 | 0 | 0 | 0.04s | ✅ PASS |
+| Block Grid | 5 | 5 | 0 | 0 | 0.24s | ✅ PASS |
+| Control Flow | 7 | 7 | 0 | 0 | 0.06s | ✅ PASS |
+| Atomics | 5 | 5 | 0 | 0 | 0.12s | ✅ PASS |
+| Floating Point | 6 | 6 | 0 | 0 | 0.01s | ✅ PASS |
+| Integer | 5 | 5 | 0 | 0 | 0.01s | ✅ PASS |
+| Determinism | 8 | 8 | 0 | 0 | 0.10s | ✅ PASS |
+| Async Pipeline | 5 | 5 | 0 | 0 | 0.64s | ✅ PASS |
+| Caching | 5 | 5 | 0 | 0 | 0.17s | ✅ PASS |
+| Host Device | 5 | 5 | 0 | 0 | 1.46s | ✅ PASS |
+| Multi Stream | 5 | 5 | 0 | 0 | 0.14s | ✅ PASS |
+| Multi GPU | 5 | 5 | 0 | 0 | 0.03s | ✅ PASS |
+| Hardware | 5 | 5 | 0 | 0 | 9.59s | ✅ PASS |
+| Algorithms | 13 | 13 | 0 | 0 | 0.05s | ✅ PASS |
+| Blind Spots | 5 | 5 | 0 | 0 | 0.12s | ✅ PASS |
+| Edge Matrix | 5 | 5 | 0 | 0 | 0.15s | ✅ PASS |
+| Float Filter | 10 | 10 | 0 | 0 | 0.02s | ✅ PASS |
+| **GPU neural-symbolic categories** |
+| Circuit Forward | 8 | 8 | 0 | 0 | 0.03s | ✅ PASS |
+| Circuit Backward | 12 | 12 | 0 | 0 | 0.08s | ✅ PASS |
+| Weight Injection | 6 | 6 | 0 | 0 | 0.05s | ✅ PASS |
+| Transfer Efficiency | 8 | 8 | 0 | 0 | 0.29s | ✅ PASS |
+| Circuit Cache | 6 | 6 | 0 | 0 | 0.02s | ✅ PASS |
+| PTX Robustness | 10 | 10 | 0 | 0 | 0.01s | ✅ PASS |
 | **Total** | **200** | **200** | **0** | **0** | **14.33s** | ✅ **PASS** |
 
 ---
 
 ## Detailed Category Analysis
 
-### G01: Circuit Forward Kernel Correctness (8/8 PASSED)
+### Circuit Forward Kernel Correctness (8/8 PASSED)
 
 **Purpose:** Validates `xgcf_forward_level` PTX kernel produces correct log-space weighted model count (WMC) values.
 
@@ -111,7 +112,7 @@ Pass Rate:     100.0%
 
 ---
 
-### G02: Circuit Backward Kernels Correctness (12/12 PASSED)
+### Circuit Backward Kernels Correctness (12/12 PASSED)
 
 **Purpose:** Validates `xgcf_backward_level_*` kernels compute exact gradients for neural network training.
 
@@ -136,7 +137,7 @@ Pass Rate:     100.0%
 
 ---
 
-### G03: Weight Injection Memory Patterns (6/6 PASSED)
+### Weight Injection Memory Patterns (6/6 PASSED)
 
 **Purpose:** Validates GPU weight buffer management for neural network integration.
 
@@ -155,7 +156,7 @@ Pass Rate:     100.0%
 
 ---
 
-### G04: Transfer Efficiency - 0% CPU Bottleneck (8/8 PASSED)
+### Transfer Efficiency - 0% CPU Bottleneck (8/8 PASSED)
 
 **Purpose:** Validates GPU operations dominate training loops with minimal CPU-GPU transfer overhead.
 
@@ -178,7 +179,7 @@ Pass Rate:     100.0%
 
 ---
 
-### G05: Circuit Cache GPU Integration (6/6 PASSED)
+### Circuit Cache GPU Integration (6/6 PASSED)
 
 **Purpose:** Validates GpuXgcf reuse and D4 elimination for cached queries.
 
@@ -197,7 +198,7 @@ Pass Rate:     100.0%
 
 ---
 
-### G06: PTX Kernel Robustness (10/10 PASSED)
+### PTX Kernel Robustness (10/10 PASSED)
 
 **Purpose:** Validates `circuit.ptx` handles edge cases, large circuits, and numerical extremes.
 
@@ -226,15 +227,15 @@ Pass Rate:     100.0%
 
 | Category | Spec Tests | Impl Tests | Match |
 |----------|------------|------------|-------|
-| G01: Circuit Forward | 8 | 8 | ✅ |
-| G02: Circuit Backward | 12 | 12 | ✅ |
-| G03: Weight Injection | 6 | 6 | ✅ |
-| G04: Transfer Efficiency | 8 | 8 | ✅ |
-| G05: Circuit Cache | 6 | 6 | ✅ |
-| G06: PTX Robustness | 10 | 10 | ✅ |
+| Circuit Forward | 8 | 8 | ✅ |
+| Circuit Backward | 12 | 12 | ✅ |
+| Weight Injection | 6 | 6 | ✅ |
+| Transfer Efficiency | 8 | 8 | ✅ |
+| Circuit Cache | 6 | 6 | ✅ |
+| PTX Robustness | 10 | 10 | ✅ |
 | **Total** | **50** | **50** | ✅ **100%** |
 
-### Test Name Verification (G01-G06)
+### Test Name Verification
 
 All 50 test names match specification requirements. See appendix for complete test mapping.
 
@@ -254,11 +255,11 @@ All 50 test names match specification requirements. See appendix for complete te
 
 | Category Group | Tests | Duration | Avg per Test |
 |----------------|-------|----------|--------------|
-| C01-C25 (Existing) | 150 | 13.87s | 92.5ms |
-| G01-G06 (New) | 50 | 0.48s | 9.6ms |
+| Existing CUDA infrastructure suite | 150 | 13.87s | 92.5ms |
+| GPU neural-symbolic categories | 50 | 0.48s | 9.6ms |
 | **Total** | **200** | **14.35s** | **71.8ms** |
 
-**Observation:** New GPU tests (G01-G06) execute significantly faster than legacy suite average, demonstrating efficient test design and GPU utilization.
+**Observation:** GPU neural-symbolic tests execute significantly faster than the legacy suite average, demonstrating efficient test design and GPU utilization.
 
 ### GPU Resource Utilization
 
@@ -271,14 +272,14 @@ All 50 test names match specification requirements. See appendix for complete te
 
 ## Issues Resolved During Certification
 
-### Issue #1: G04 Timing Tolerance
+### Transfer Efficiency Timing Tolerance
 
 **Test:** `test_repeated_eval_no_reupload`
 **Initial Failure:** 15.3x ratio exceeded 15.0x threshold
 **Root Cause:** System load variance affecting timing measurements
 **Resolution:** Increased tolerance from 15.0x to 20.0x
 **Rationale:** Still catches quadratic behavior (~100x) while allowing variance
-**Commit:** `89748388` - "fix(cert): increase G04 repeated eval tolerance for system variance"
+**Commit:** `89748388` - "fix(cert): increase repeated eval tolerance for system variance"
 
 **Validation:** After fix, test passes consistently. Actual ratio (15.3x) confirms linear scaling, not quadratic (would be ~100x).
 
@@ -286,17 +287,17 @@ All 50 test names match specification requirements. See appendix for complete te
 
 ## Regression Testing
 
-All 150 existing CUDA tests (C01-C25) continue to pass with no regressions:
+All 150 existing CUDA infrastructure tests continue to pass with no regressions:
 
-✅ C01-C04: Toolchain, launch configs, memory addressing
-✅ C05-C07: Global, shared, and local memory operations
-✅ C08-C12: Synchronization, warps, blocks, control flow, atomics
-✅ C13-C14: Floating point and integer arithmetic
-✅ C15-C17: Determinism, async pipeline, caching
-✅ C18-C20: Host-device transfer, multi-stream, multi-GPU
-✅ C21-C25: Hardware features, algorithms, edge cases
+✅ Toolchain, launch configuration, and memory addressing
+✅ Global, shared, and local memory operations
+✅ Synchronization, warps, blocks, control flow, and atomics
+✅ Floating point and integer arithmetic
+✅ Determinism, async pipeline, and caching
+✅ Host-device transfer, multi-stream, and multi-GPU behavior
+✅ Hardware features, algorithms, and edge cases
 
-**Conclusion:** Neural-symbolic integration (G01-G06) does not impact core CUDA functionality.
+**Conclusion:** Neural-symbolic integration does not impact core CUDA functionality.
 
 ---
 
@@ -345,8 +346,8 @@ All Rust unit tests and integration tests pass across:
 ### Certification Criteria
 
 ✅ All 200 tests pass (100.0% pass rate)
-✅ No regressions in existing C01-C25 tests
-✅ All G01-G06 tests match specification
+✅ No regressions in existing CUDA infrastructure tests
+✅ All GPU neural-symbolic tests match specification
 ✅ Numerical accuracy verified (1e-6 gradients, 1e-10 log-space)
 ✅ Performance requirements met (0% CPU bottleneck, >10x cache speedup)
 ✅ Edge cases validated (100K nodes, 65K variables, extreme values)
@@ -367,7 +368,7 @@ The neural-symbolic integration layer meets all functional, performance, and qua
 
 ## Appendix A: Complete Test Mapping
 
-### G01: Circuit Forward (8 tests)
+### Circuit Forward (8 tests)
 
 | Spec Test Name | Implementation | Status |
 |----------------|----------------|--------|
@@ -380,7 +381,7 @@ The neural-symbolic integration layer meets all functional, performance, and qua
 | test_forward_multi_level | ✅ Implemented | PASS |
 | test_forward_parallel_same_level | ✅ Implemented | PASS |
 
-### G02: Circuit Backward (12 tests)
+### Circuit Backward (12 tests)
 
 | Spec Test Name | Implementation | Status |
 |----------------|----------------|--------|
@@ -397,7 +398,7 @@ The neural-symbolic integration layer meets all functional, performance, and qua
 | test_backward_gradient_stability | ✅ Implemented | PASS |
 | test_backward_log_space_accuracy | ✅ Implemented | PASS |
 
-### G03: Weight Injection (6 tests)
+### Weight Injection (6 tests)
 
 | Spec Test Name | Implementation | Status |
 |----------------|----------------|--------|
@@ -408,7 +409,7 @@ The neural-symbolic integration layer meets all functional, performance, and qua
 | test_weight_uniform_distribution | ✅ Implemented | PASS |
 | test_weight_sparse_nonzero | ✅ Implemented | PASS |
 
-### G04: Transfer Efficiency (8 tests)
+### Transfer Efficiency (8 tests)
 
 | Spec Test Name | Implementation | Status |
 |----------------|----------------|--------|
@@ -421,7 +422,7 @@ The neural-symbolic integration layer meets all functional, performance, and qua
 | test_repeated_eval_no_reupload | ✅ Implemented | PASS |
 | test_batch_weights_efficiency | ✅ Implemented | PASS |
 
-### G05: Circuit Cache (6 tests)
+### Circuit Cache (6 tests)
 
 | Spec Test Name | Implementation | Status |
 |----------------|----------------|--------|
@@ -432,7 +433,7 @@ The neural-symbolic integration layer meets all functional, performance, and qua
 | test_cache_correctness | ✅ Implemented | PASS |
 | test_cache_distinct_results | ✅ Implemented | PASS |
 
-### G06: PTX Robustness (10 tests)
+### PTX Robustness (10 tests)
 
 | Spec Test Name | Implementation | Status |
 |----------------|----------------|--------|
@@ -452,12 +453,12 @@ The neural-symbolic integration layer meets all functional, performance, and qua
 ## Appendix B: File Locations
 
 **Certification Test Implementation:**
-- `crates/xlog-cuda-tests/src/categories/g01_circuit_forward.rs` (344 lines)
-- `crates/xlog-cuda-tests/src/categories/g02_circuit_backward.rs` (826 lines)
-- `crates/xlog-cuda-tests/src/categories/g03_weight_injection.rs` (426 lines)
-- `crates/xlog-cuda-tests/src/categories/g04_transfer_efficiency.rs` (834 lines)
-- `crates/xlog-cuda-tests/src/categories/g05_circuit_cache.rs` (397 lines)
-- `crates/xlog-cuda-tests/src/categories/g06_ptx_robustness.rs` (606 lines)
+- Circuit forward category implementation
+- Circuit backward category implementation
+- Weight injection category implementation
+- Transfer efficiency category implementation
+- Circuit cache category implementation
+- PTX robustness category implementation
 
 **Test Harness:**
 - `crates/xlog-cuda-tests/src/harness/xgcf.rs` — Circuit generators and utilities
@@ -466,21 +467,21 @@ The neural-symbolic integration layer meets all functional, performance, and qua
 - `crates/xlog-cuda-tests/tests/certification_suite.rs` — Full suite runner
 
 **Specification:**
-- `docs/certification/v0.4.0-alpha-certification-spec.md` — Test requirements
+- Neural-symbolic certification specification — Test requirements
 
 **Implementation Plan:**
-- `docs/plans/2026-01-22-g01-g06-gpu-certification.md` — Development plan
+- Historical development plan — Development plan
 
 ---
 
 ## Document Control
 
-**Document ID:** CERT-v0.4.0-alpha-2026-01-22
+**Document ID:** neural-symbolic-certification-2026-01-22
 **Version:** 1.0
 **Status:** Final
 **Prepared By:** XLOG Certification Suite
 **Review Date:** January 22, 2026
-**Next Review:** v0.4.0-beta release
+**Next Review:** next neural-symbolic release review
 
 ---
 
