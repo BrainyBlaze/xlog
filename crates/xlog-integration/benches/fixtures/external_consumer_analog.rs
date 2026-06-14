@@ -2,10 +2,10 @@ use std::collections::BTreeSet;
 
 use super::TriangleFixture;
 
-const DTS_CODEBOOK_SIZE: u32 = 1024;
+const EXTERNAL_CONSUMER_CODEBOOK_SIZE: u32 = 1024;
 
 fn codebook_id(seed: u32) -> u32 {
-    seed % DTS_CODEBOOK_SIZE
+    seed % EXTERNAL_CONSUMER_CODEBOOK_SIZE
 }
 
 fn insert_pair(rows: &mut BTreeSet<(u32, u32)>, a: u32, b: u32) {
@@ -16,7 +16,7 @@ fn sorted_pairs(rows: BTreeSet<(u32, u32)>) -> Vec<(u32, u32)> {
     rows.into_iter().collect()
 }
 
-pub fn dts_dlm_analog(scale: u32) -> TriangleFixture {
+pub fn external_consumer_analog(scale: u32) -> TriangleFixture {
     let scale = scale.max(32);
     let hot_middle = (scale / 16).clamp(16, 64);
     let output_band = (scale / 16).clamp(32, 64);
@@ -43,10 +43,10 @@ pub fn dts_dlm_analog(scale: u32) -> TriangleFixture {
     }
 
     TriangleFixture {
-        name: "dts_dlm_analog",
+        name: "external_consumer_analog",
         recursive: true,
         bundle_path_status:
-            "g1_metadata=PASS g2_branch=GRACEFUL g3_branch=GRACEFUL g4_helper_split=PASS g5_stream_mux=PASS g_w63_chain_promoter=PASS g_w66_cuda_graph=PASS invoked=7/7",
+            "metadata=PASS first_branch=GRACEFUL second_branch=GRACEFUL helper_split=PASS stream_multiplexing=PASS chain_promoter=PASS cuda_graph=PASS invoked=7/7",
         e_xy: sorted_pairs(xy),
         e_yz: sorted_pairs(yz),
         e_xz: sorted_pairs(xz),

@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 
-//! W39 — external consumer analog fixture: registration metadata AND real execution.
+//! External consumer analog fixture: registration metadata AND real execution.
 //!
 //! The original test only asserted that `bundle_path_status` (a hardcoded
 //! `&'static str` on the fixture) contained "PASS" markers — a metadata
@@ -180,55 +180,63 @@ fn brute_force_triangles(
 }
 
 #[test]
-fn dts_dlm_analog_fixture_is_registered_with_paper_class_harness() {
+fn external_consumer_analog_fixture_is_registered_with_paper_class_harness() {
     let fixtures = paper_class::paper_class_fixtures(128);
     assert_eq!(
         fixtures.len(),
         4,
-        "G_W39_DTSDLM extends the three paper-class fixtures with one external consumer analog"
+        "fixture registry extends the three paper-class fixtures with one external consumer analog"
     );
 
-    let dts = fixtures
+    let external_consumer = fixtures
         .iter()
-        .find(|fixture| fixture.name == "dts_dlm_analog")
-        .expect("dts_dlm_analog fixture is registered");
+        .find(|fixture| fixture.name == "external_consumer_analog")
+        .expect("external_consumer_analog fixture is registered");
 
     assert!(
-        dts.recursive,
-        "external consumer analog must exercise recursive Stage-4 set maintenance"
+        external_consumer.recursive,
+        "external consumer analog must exercise recursive set maintenance"
     );
     assert!(
-        !dts.e_xy.is_empty() && !dts.e_yz.is_empty() && !dts.e_xz.is_empty(),
+        !external_consumer.e_xy.is_empty()
+            && !external_consumer.e_yz.is_empty()
+            && !external_consumer.e_xz.is_empty(),
         "external consumer analog must populate every relation in the triangle harness"
     );
     assert!(
-        dts.e_yz.len() >= dts.e_xy.len(),
-        "middle-key fanout should model external consumer's chain-2 support expansion"
+        external_consumer.e_yz.len() >= external_consumer.e_xy.len(),
+        "middle-key fanout should model external consumer two-hop support expansion"
     );
     // Registration metadata only — `bundle_path_status` is a hardcoded
     // fixture label, NOT execution evidence. Behavioral coverage is locked
-    // by `dts_dlm_analog_fixture_executes_with_oracle_parity` below.
+    // by `external_consumer_analog_fixture_executes_with_oracle_parity` below.
     assert!(
-        dts.bundle_path_status.contains("g_w66_cuda_graph=PASS")
-            && dts.bundle_path_status.contains("invoked=7/7"),
+        external_consumer
+            .bundle_path_status
+            .contains("cuda_graph=PASS")
+            && external_consumer.bundle_path_status.contains("invoked=7/7"),
         "external consumer analog registration metadata must keep its bundle-path label"
     );
 }
 
 #[test]
-fn dts_dlm_analog_fixture_executes_with_oracle_parity() {
+fn external_consumer_analog_fixture_executes_with_oracle_parity() {
     let Some(fix) = make_runtime_fixture() else {
         eprintln!("Skipping: CUDA runtime unavailable");
         return;
     };
 
     let fixtures = paper_class::paper_class_fixtures(128);
-    let dts = fixtures
+    let external_consumer = fixtures
         .iter()
-        .find(|fixture| fixture.name == "dts_dlm_analog")
-        .expect("dts_dlm_analog fixture is registered");
+        .find(|fixture| fixture.name == "external_consumer_analog")
+        .expect("external_consumer_analog fixture is registered");
 
-    let expected = brute_force_triangles(&dts.e_xy, &dts.e_yz, &dts.e_xz);
+    let expected = brute_force_triangles(
+        &external_consumer.e_xy,
+        &external_consumer.e_yz,
+        &external_consumer.e_xz,
+    );
     assert!(
         !expected.is_empty(),
         "external consumer analog must contain at least one triangle or the workload is vacuous"
@@ -237,13 +245,23 @@ fn dts_dlm_analog_fixture_executes_with_oracle_parity() {
     let source = "tri(X, Y, Z) :- e_xy(X, Y), e_yz(Y, Z), e_xz(X, Z).";
     let mut compiler = Compiler::new();
     let plan = compiler.compile(source).expect("compile triangle rule");
-    let mut executor = Executor::new_with_config(Arc::clone(&fix.provider), RuntimeConfig::default());
+    let mut executor =
+        Executor::new_with_config(Arc::clone(&fix.provider), RuntimeConfig::default());
     for (name, rel_id) in compiler.rel_ids() {
         executor.register_relation(*rel_id, name);
     }
-    executor.put_relation("e_xy", upload_binary_u32(&fix.memory, &dts.e_xy));
-    executor.put_relation("e_yz", upload_binary_u32(&fix.memory, &dts.e_yz));
-    executor.put_relation("e_xz", upload_binary_u32(&fix.memory, &dts.e_xz));
+    executor.put_relation(
+        "e_xy",
+        upload_binary_u32(&fix.memory, &external_consumer.e_xy),
+    );
+    executor.put_relation(
+        "e_yz",
+        upload_binary_u32(&fix.memory, &external_consumer.e_yz),
+    );
+    executor.put_relation(
+        "e_xz",
+        upload_binary_u32(&fix.memory, &external_consumer.e_xz),
+    );
     executor.execute_plan(&plan).expect("execute triangle plan");
 
     let tri = executor

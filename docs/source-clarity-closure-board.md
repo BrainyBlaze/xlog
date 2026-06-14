@@ -396,7 +396,7 @@ Hardware cache terminology such as `L1` and `L2` is allowed when it refers to GP
 | `crates/xlog-induce/src/validate.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-induce/tests/rule_induction_provenance.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-integration/Cargo.toml` | 0 | 0 | true |  |  |
-| `crates/xlog-integration/benches/fixtures/dts_dlm_analog.rs` | 0 | 0 | true |  |  |
+| `crates/xlog-integration/benches/fixtures/external_consumer_analog.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-integration/benches/fixtures/paper_class.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-integration/benches/nested_loop_production_bench.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-integration/benches/sort_merge_production_bench.rs` | 0 | 0 | true |  |  |
@@ -420,12 +420,12 @@ Hardware cache terminology such as `L1` and `L2` is allowed when it refers to GP
 | `crates/xlog-integration/tests/test_cross_mode_determinism.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-integration/tests/test_epistemic_gpu_wcoj_execution.rs` | 0 | 0 | true |  | G91 retained as documented epistemic compatibility mode. |
 | `crates/xlog-integration/tests/test_free_join_e2e.rs` | 0 | 0 | true |  |  |
-| `crates/xlog-integration/tests/test_m37a_surface_preservation.rs` | 0 | 2 | false |  | M37A(2) |
+| `crates/xlog-integration/tests/test_external_consumer_surface_preservation.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-integration/tests/test_multiway_walker_contract.rs` | 16 | 5 | false | C2(4), C5(4), C1(3), C3(2), C4(2), D2(1) | C1(1), C2(1), C3(1), C4(1), C5(1) |
 | `crates/xlog-integration/tests/test_selectivity_pass_reordering.rs` | 15 | 4 | false | W2.2(13), W2.1(2) | W2.2(4) |
 | `crates/xlog-integration/tests/test_w21_variable_ordering.rs` | 5 | 2 | false | W2.1(4), W2.2(1) | W2.1(2) |
 | `crates/xlog-integration/tests/test_w26_heat_selectivity.rs` | 13 | 2 | false | W2.6(8), W2.4(4), W2.1(1) | W2.5(2) |
-| `crates/xlog-integration/tests/test_w39_dts_dlm_analog_fixture.rs` | 1 | 0 | false | W39(1) |  |
+| `crates/xlog-integration/tests/test_external_consumer_analog_fixture.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-integration/tests/test_w42_nested_loop_dispatch.rs` | 32 | 7 | false | W4.2(18), W2.4(3), W4.3(3), D1(3), D5(3), W42-6(1) | W4.2(6), W2.4(1) |
 | `crates/xlog-integration/tests/test_w43_sort_merge_dispatch.rs` | 19 | 12 | false | W43-14(6), W4.3(4), W43-4(3), D7(1), D2(1), W43-2(1) | G1(6), G2(6) |
 | `crates/xlog-integration/tests/test_w51_deep_recursive_wcoj_cert.rs` | 1 | 6 | false | W5.1(1) | W5.1(3), D5(2), D2(1) |

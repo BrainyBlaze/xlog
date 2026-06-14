@@ -158,7 +158,7 @@ fn sorted_triples(provider: &CudaKernelProvider, buffer: &CudaBuffer) -> Vec<(u3
     rows
 }
 
-struct DtsTriangleExecution {
+struct ExternalConsumerTriangleExecution {
     rows: Vec<(u32, u32, u32)>,
     wcoj_dispatches: u64,
     dtoh_calls_before_result_download: u64,
@@ -166,11 +166,11 @@ struct DtsTriangleExecution {
     d2h_count_before_result_download: u64,
 }
 
-fn run_dts_triangle_fixture(
+fn run_external_consumer_triangle_fixture(
     provider: Arc<CudaKernelProvider>,
     fixture: &paper_class::TriangleFixture,
     config: RuntimeConfig,
-) -> Result<DtsTriangleExecution> {
+) -> Result<ExternalConsumerTriangleExecution> {
     let mut compiler = Compiler::new();
     let plan = compiler.compile(
         r#"
@@ -201,7 +201,7 @@ fn run_dts_triangle_fixture(
         executor.store().get("tri").expect("tri relation"),
     );
 
-    Ok(DtsTriangleExecution {
+    Ok(ExternalConsumerTriangleExecution {
         rows,
         wcoj_dispatches,
         dtoh_calls_before_result_download: transfer_stats.dtoh_calls,
@@ -211,17 +211,17 @@ fn run_dts_triangle_fixture(
 }
 
 #[test]
-fn m37a_logic_session_delta_runtime_preserves_dts_surface_values() -> Result<()> {
+fn logic_session_delta_runtime_preserves_external_consumer_surface_values() -> Result<()> {
     let Some(provider) = test_provider() else {
-        eprintln!("Skipping M37A external consumer surface preservation: CUDA unavailable");
+        eprintln!("Skipping external consumer surface preservation: CUDA unavailable");
         return Ok(());
     };
 
     let source = r#"
-        pred wmir_committed(u32).
+        pred committed_input(u32).
         pred tensor_support(u32).
 
-        tensor_support(X) :- wmir_committed(X).
+        tensor_support(X) :- committed_input(X).
 
         ?- tensor_support(X).
     "#;
@@ -238,15 +238,15 @@ fn m37a_logic_session_delta_runtime_preserves_dts_surface_values() -> Result<()>
         &mut session_cache,
         vec![
             (
-                "wmir_committed".to_string(),
+                "committed_input".to_string(),
                 RelationDelta::new(Some(u32_buffer(&provider, &[1, 2, 3])), None),
             ),
             (
-                "wmir_committed".to_string(),
+                "committed_input".to_string(),
                 RelationDelta::new(None, Some(u32_buffer(&provider, &[2]))),
             ),
             (
-                "wmir_committed".to_string(),
+                "committed_input".to_string(),
                 RelationDelta::new(Some(u32_buffer(&provider, &[4])), None),
             ),
         ],
@@ -273,7 +273,7 @@ fn m37a_logic_session_delta_runtime_preserves_dts_surface_values() -> Result<()>
     let session_rows = sorted_query_rows(&provider, &session_result);
 
     let mut replacement_store = program.create_relation_store(provider.clone())?;
-    replacement_store.put("wmir_committed", u32_buffer(&provider, &[1, 3, 4]));
+    replacement_store.put("committed_input", u32_buffer(&provider, &[1, 3, 4]));
     let replacement_result =
         program.evaluate_with_relation_store(provider.clone(), &replacement_store, false)?;
     let replacement_rows = sorted_query_rows(&provider, &replacement_result);
@@ -293,9 +293,9 @@ fn m37a_logic_session_delta_runtime_preserves_dts_surface_values() -> Result<()>
 }
 
 #[test]
-fn m37a_dts_dlm_analog_fixture_runs_through_wcoj_runtime_path() -> Result<()> {
+fn external_consumer_analog_fixture_runs_through_wcoj_runtime_path() -> Result<()> {
     let Some(provider) = test_runtime_provider() else {
-        eprintln!("Skipping M37A external consumer WCOJ surface preservation: CUDA unavailable");
+        eprintln!("Skipping external consumer WCOJ surface preservation: CUDA unavailable");
         return Ok(());
     };
 
@@ -304,29 +304,29 @@ fn m37a_dts_dlm_analog_fixture_runs_through_wcoj_runtime_path() -> Result<()> {
         fixtures.len(),
         paper_class::paper_class_expected_fixture_count()
     );
-    let dts = fixtures
+    let external_consumer = fixtures
         .iter()
-        .find(|fixture| fixture.name == "dts_dlm_analog")
-        .expect("dts_dlm_analog fixture is registered");
+        .find(|fixture| fixture.name == "external_consumer_analog")
+        .expect("external_consumer_analog fixture is registered");
 
-    assert!(dts.recursive);
-    assert!(dts.total_rows() > 0);
-    assert!(!dts.e_xy.is_empty());
-    assert!(!dts.e_yz.is_empty());
-    assert!(!dts.e_xz.is_empty());
-    assert!(dts.e_yz.len() >= dts.e_xy.len());
+    assert!(external_consumer.recursive);
+    assert!(external_consumer.total_rows() > 0);
+    assert!(!external_consumer.e_xy.is_empty());
+    assert!(!external_consumer.e_yz.is_empty());
+    assert!(!external_consumer.e_xz.is_empty());
+    assert!(external_consumer.e_yz.len() >= external_consumer.e_xy.len());
 
-    let binary = run_dts_triangle_fixture(
+    let binary = run_external_consumer_triangle_fixture(
         provider.clone(),
-        dts,
+        external_consumer,
         RuntimeConfig::default().with_wcoj_triangle_dispatch(Some(false)),
     )?;
     assert_eq!(binary.wcoj_dispatches, 0);
     assert!(!binary.rows.is_empty());
 
-    let wcoj = run_dts_triangle_fixture(
+    let wcoj = run_external_consumer_triangle_fixture(
         provider,
-        dts,
+        external_consumer,
         RuntimeConfig::default().with_wcoj_triangle_dispatch(Some(true)),
     )?;
     assert!(
