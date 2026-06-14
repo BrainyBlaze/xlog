@@ -1,102 +1,91 @@
 # Knowledge Graph Example
 
-Scientific ontology and research network demonstrating XLOG's capabilities for semantic reasoning and graph analytics.
+Movie ontology and analytics example demonstrating XLOG's semantic reasoning
+and graph-analytics capabilities.
 
 ## Domain Model
 
-This example models a scientific research ecosystem with:
+This example models a movie-domain knowledge graph with:
 
-- **Entities**: Researchers, institutions, publications, concepts
-- **Type Hierarchy**: Ontology classes with inheritance (Thing → Agent → Person → Researcher)
-- **Relations**: Authorship, citations, topics, co-authorship
-- **Analytics**: Citation counts, publication metrics, semantic inference
+- **Entities**: Movies, people, genres, studios, awards, and ontology concepts
+- **Type hierarchy**: Ontology classes with recursive inheritance from `thing`
+- **Relations**: Directing, acting, genres, studios, awards, and nominations
+- **Analytics**: Rating tiers, return on investment, filmography counts,
+  collaboration pairs, and decade-level summaries
 
 ## Features Demonstrated
 
 | Feature | Usage |
 |---------|-------|
-| **symbol type** | Entity IDs, labels, concept names |
-| **Recursive rules** | Type inheritance (`is_a`), citation chains (`cites_transitively`) |
-| **count aggregation** | Citation counts, publication counts per researcher |
-| **Comparisons** | Filtering prolific authors (Count >= 3), deep citations (Depth > 1) |
-| **Arithmetic** | Citation depth tracking |
+| **symbol type** | Entity identifiers, labels, concept names |
+| **Recursive rules** | Type inheritance through `is_subclass` |
+| **count aggregation** | Filmography counts, genre counts, studio counts |
+| **sum and average aggregation** | Box-office totals and rating summaries |
+| **Comparisons** | Filtering high-return movies, acclaimed movies, and major studios |
+| **Arithmetic** | Decade calculation, productivity scores, return on investment |
 
 ## Key Predicates
 
 ### Base Data
+
 ```xlog
-pred entity(symbol, symbol).           // entity_id, entity_type
-pred subclass_of(symbol, symbol).      // child_type, parent_type
-pred researcher(symbol, symbol, symbol). // id, name, institution
-pred publication(symbol, symbol, u32). // id, title, year
-pred cites(symbol, symbol).            // citing_pub, cited_pub
+pred entity_type(symbol, symbol).       // entity, direct ontology type
+pred movie(symbol, symbol, u32, u32, u32, u32).
+pred person(symbol, symbol, u32, symbol).
+pred studio(symbol, symbol, u32).
+pred directed(symbol, symbol).          // director, movie
+pred acted_in(symbol, symbol).          // actor, movie
 ```
 
 ### Derived Relations
+
 ```xlog
-// Type hierarchy (transitive closure)
-pred is_a(symbol, symbol).
-is_a(Child, Parent) :- subclass_of(Child, Parent).
-is_a(Child, Ancestor) :-
+// Type hierarchy traversal.
+pred is_subclass(symbol, symbol).
+is_subclass(Child, Parent) :- subclass_of(Child, Parent).
+is_subclass(Child, Ancestor) :-
     subclass_of(Child, Parent),
-    is_a(Parent, Ancestor).
+    is_subclass(Parent, Ancestor).
 
-// Citation analysis
-pred citation_count(symbol, u64).
-citation_count(Pub, count(Citing)) :- cites(Citing, Pub).
+// Movie return on investment.
+pred movie_roi(symbol, symbol, u32).
+movie_roi(Movie, Title, ReturnOnInvestment) :-
+    movie(Movie, Title, _, _, Budget, BoxOffice),
+    ReturnOnInvestment is roi_pct(BoxOffice, Budget).
 
-// Multi-hop citations
-pred cites_transitively(symbol, symbol, u32).
-cites_transitively(A, B, 1) :- cites(A, B).
-cites_transitively(A, C, Depth) :-
-    cites(A, B),
-    cites_transitively(B, C, PrevDepth),
-    Depth is PrevDepth + cast(1, u32).
+// Director filmography counts.
+pred director_movie_count(symbol, symbol, u64).
+director_movie_count(Director, Name, Count) :-
+    person(Director, Name, _, _),
+    entity_type(Director, director),
+    director_movie_count_raw(Director, Count).
 ```
 
 ## Queries
 
-1. **Type hierarchy**: All types that inherit from 'thing'
-2. **Prolific authors**: Researchers with 3+ publications
-3. **Citation counts**: Per-publication citation statistics
-4. **Deep citations**: Multi-hop citation chains (depth > 1)
-5. **Co-authorship**: Researcher collaboration network
-6. **Major institutions**: Institutions with 5+ publications
-7. **Related concepts**: Strongly related concept pairs
+1. **Type hierarchy**: Direct and inherited ontology classes
+2. **Movie analytics**: Decades, rating tiers, box-office classes, and return
+   on investment
+3. **Director analytics**: Filmography counts, career spans, productivity, and
+   box-office totals
+4. **Actor analytics**: Age-at-release, career spans, and productivity
+5. **Genre and studio analytics**: Counts, ratings, box-office totals, and
+   awards
+6. **Collaboration analytics**: Director-actor collaborations and repeated
+   collaborations
+7. **Entity type inference**: Direct and inherited entity classifications
 
 ## Running
 
+From this example directory:
+
 ```bash
-cargo run --release -- run examples/xlog/80-v032-showcase/02-knowledge-graph/main.xlog
-```
-
-## Sample Output
-
-```
-__xlog_query_0 (Types inheriting from thing)
-+------------------+
-| col_0            |
-+------------------+
-| agent            |
-| creative_work    |
-| person           |
-| researcher       |
-| publication      |
-| ...              |
-+------------------+
-
-__xlog_query_1 (Prolific authors)
-+----------------+-------+-------+
-| col_0          | col_1 | col_2 |
-+----------------+-------+-------+
-| Alice Chen     | mit   | 3     |
-| Carol Williams | mit   | 3     |
-+----------------+-------+-------+
+cargo run -p xlog-cli -- run main.xlog
 ```
 
 ## Data Statistics
 
-- 8 researchers across 4 institutions
-- 10 publications with citation network
-- 8 research concepts with similarity scores
-- 16 ontology classes in type hierarchy
+- 35 movies with rating, budget, and box-office metadata
+- 30 people across actor and director roles
+- 12 genres and 8 studios
+- Multi-level ontology for movies, people, concepts, organizations, and awards

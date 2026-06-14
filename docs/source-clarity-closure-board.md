@@ -1376,10 +1376,10 @@ Hardware cache terminology such as `L1` and `L2` is allowed when it refers to GP
 | `examples/xlog/80-v032-showcase/01-enterprise/hr/employees.xlog` | 0 | 0 | true |  |  |
 | `examples/xlog/80-v032-showcase/01-enterprise/main.xlog` | 0 | 0 | true |  |  |
 | `examples/xlog/80-v032-showcase/01-enterprise/org/hierarchy.xlog` | 0 | 0 | true |  |  |
-| `examples/xlog/80-v032-showcase/02-knowledge-graph/README.md` | 0 | 1 | false |  | v032(1) |
+| `examples/xlog/80-v032-showcase/02-knowledge-graph/README.md` | 40 | 1 | true | stale research-publication wording and abbreviations(40) | release-coded run path(1) |
 | `examples/xlog/80-v032-showcase/02-knowledge-graph/entities/movies.xlog` | 0 | 0 | true |  |  |
-| `examples/xlog/80-v032-showcase/02-knowledge-graph/inference/reasoning.xlog` | 0 | 0 | true |  |  |
-| `examples/xlog/80-v032-showcase/02-knowledge-graph/main.xlog` | 0 | 0 | true |  |  |
+| `examples/xlog/80-v032-showcase/02-knowledge-graph/inference/reasoning.xlog` | 9 | 0 | true | user-defined-function abbreviation comments(9) |  |
+| `examples/xlog/80-v032-showcase/02-knowledge-graph/main.xlog` | 4 | 0 | true | release label and abbreviation comments(4) |  |
 | `examples/xlog/80-v032-showcase/02-knowledge-graph/ontology/schema.xlog` | 0 | 0 | true |  |  |
 | `examples/xlog/80-v032-showcase/03-game-analytics/README.md` | 0 | 1 | false |  | v032(1) |
 | `examples/xlog/80-v032-showcase/03-game-analytics/achievements/system.xlog` | 0 | 0 | true |  |  |
