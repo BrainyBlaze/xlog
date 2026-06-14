@@ -747,7 +747,7 @@ Hardware cache terminology such as `L1` and `L2` is allowed when it refers to GP
 | `docs/reports/2026-06-01-full-semantic-completion-supervisor-report.md` | 38 | 1 | true | release/branch labels(9), delivery item codes(13), Gelfond 1991 shorthand(4), modal-literal placeholders(2), modal-logic shorthand(1), fixture matrix labels(7), status labels(2) | filename artifact(1) |
 | `docs/reports/2026-06-02-epistemic-final-closure-record.md` | 6 | 1 | true | release/branch labels(2), status labels(2), Gelfond 1991 shorthand(1), interior-negation item code(1) | filename artifact(1) |
 | `docs/v065-closure-board.md` | 228 | 0 | true | legacy closure-board task/release/provenance codes(228) | Excluded from rewrite as a historical closure/evidence artifact; task scope excludes plans/evidence artifacts. |
-| `docs/wcoj-architecture-guide.md` | 33 | 0 | false | S1d(8), S1c(5), S1b(4), P4(3), W4.1(3), D1(2) |  |
+| `docs/wcoj-architecture-guide.md` | 73 | 0 | true | integration phase labels(14), aggregate-fusion slice labels(19), goal/work-package labels(26), recursive-contract labels(5), WCOJ task labels(6), approval/profiler/authorization labels(3) |  |
 | `docs/wcoj-user-guide.md` | 2 | 0 | false | G38(1), G39(1) |  |
 | `docs/whitepaper/Makefile` | 0 | 0 | true |  |  |
 | `docs/whitepaper/README.md` | 0 | 0 | true |  |  |
