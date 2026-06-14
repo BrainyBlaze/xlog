@@ -769,7 +769,7 @@ Hardware cache terminology such as `L1` and `L2` is allowed when it refers to GP
 | `docs/whitepaper/sections/065_epistemic.tex` | 3 | 0 | true | Gelfond 1991 shorthand(1), epistemic release-line labels(2) |  |
 | `docs/whitepaper/sections/06_neural_symbolic.tex` | 28 | 0 | true | digit variable shorthand(8), Decision-DNNF compiler shorthand(3), release labels(5), evidence-run labels(8), beta/schema labels(4) |  |
 | `docs/whitepaper/sections/07_interop.tex` | 0 | 0 | true |  |  |
-| `docs/whitepaper/sections/08_evaluation.tex` | 12 | 0 | false | v086(2), D4(2), C01(2), C25(2), G01(2), G08(2) |  |
+| `docs/whitepaper/sections/08_evaluation.tex` | 27 | 0 | true | runtime/release labels(6), Decision-DNNF compiler shorthand(2), certification category codes(8), evidence-run labels(7), WCOJ evidence path goal/work/external-consumer labels(3), beta status label(1) |  |
 | `docs/whitepaper/sections/09_related_work.tex` | 1 | 0 | false | D4(1) |  |
 | `docs/whitepaper/sections/10_limitations.tex` | 1 | 0 | false | G91(1) |  |
 | `docs/whitepaper/sections/A_performance_contract.tex` | 0 | 0 | true |  |  |
