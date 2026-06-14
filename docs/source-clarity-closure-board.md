@@ -611,7 +611,7 @@ Hardware cache terminology such as `L1` and `L2` is allowed when it refers to GP
 | `crates/xlog-prob/src/mc/results.rs` | 0 | 2 | true | Replaced historical language-completeness gate helper plus stale release/gate diagnostics with host Monte Carlo high-level-term lowering/materialization wording. | G085/v085(1), v0.8.5(1) |
 | `crates/xlog-prob/src/neural_fast_path.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-prob/src/pir.rs` | 0 | 0 | true |  |  |
-| `crates/xlog-prob/src/provenance.rs` | 4 | 1 | false | P1(2), P2(2) | G085(1) |
+| `crates/xlog-prob/src/provenance.rs` | 4 | 37 | true | Replaced proof-placeholder comments with explicit proof names; replaced legacy language milestone helper names and stale release/gate diagnostics with provenance high-level-term, univ-normalization, count-lift, and exact probabilistic aggregate wording. | P1(2), P2(2) | G085/v085(30), v0.8.5(5), agg_lift(1), prob_aggregate(1) |
 | `crates/xlog-prob/src/wfs.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-prob/src/xgcf.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-prob/tests/cdcl_q1_status_simple.rs` | 0 | 0 | true |  |  |
