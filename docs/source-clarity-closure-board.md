@@ -466,7 +466,7 @@ Hardware cache terminology such as `L1` and `L2` is allowed when it refers to GP
 | `crates/xlog-logic/Cargo.toml` | 0 | 0 | true |  |  |
 | `crates/xlog-logic/examples/optimizer_demo.rs` | 0 | 0 | true | - | - |
 | `crates/xlog-logic/src/ast.rs` | 0 | 0 | true | - | G91 is a public Gelfond-1991-style epistemic semantics name, not a task code. |
-| `crates/xlog-logic/src/compile.rs` | 12 | 1 | false | W2.1(8), W2.2(3), W63(1) | W63(1) |
+| `crates/xlog-logic/src/compile.rs` | 0 | 0 | true | - | - |
 | `crates/xlog-logic/src/compiler_config.rs` | 11 | 0 | false | W2.1(7), W2.2(3), W2.6(1) |  |
 | `crates/xlog-logic/src/diagnostics.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-logic/src/eir.rs` | 0 | 2 | false |  | G91(2) |
