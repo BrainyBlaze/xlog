@@ -717,7 +717,7 @@ Hardware cache terminology such as `L1` and `L2` is allowed when it refers to GP
 | `docs/architecture/arithmetic-expressions.md` | 0 | 0 | true |  |  |
 | `docs/architecture/bounded-exact-induction.md` | 23 | 3 | true | Expanded transfer shorthand, external-consumer milestone labels, versioned evidence labels, and certification-code labels to device-to-host/device-to-device, external-consumer phase, current feature, and numbered-category wording. | Replaced code-block D2H/D2D/H2D transfer labels with descriptive transfer directions while preserving exact API names where needed. |
 | `docs/architecture/cli-reference.md` | 4 | 0 | true | Replaced versioned command-contract and diagnostics-note labels with current CLI surface and generated-rule diagnostics wording. |  |
-| `docs/architecture/cuda-certification.md` | 51 | 2 | false | G01-G08(4), C01(4), C01-C25(3), C01-C08(1), C02(1), C03(1) | C01-C25(1), G01-G08(1) |
+| `docs/architecture/cuda-certification.md` | 51 | 2 | true | Expanded C/G certification category codes and external-consumer milestone wording to core category, GPU-tier category, toolchain category, and external-consumer scorer descriptions. | Replaced code-block C/G category ranges with descriptive category wording while preserving exact source filenames. |
 | `docs/architecture/cudf-interop.md` | 0 | 0 | true |  |  |
 | `docs/architecture/device-runtime.md` | 0 | 0 | true |  |  |
 | `docs/architecture/dilp-showcase-report.md` | 0 | 0 | true |  |  |
