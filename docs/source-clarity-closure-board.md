@@ -771,7 +771,7 @@ Hardware cache terminology such as `L1` and `L2` is allowed when it refers to GP
 | `docs/whitepaper/sections/07_interop.tex` | 0 | 0 | true |  |  |
 | `docs/whitepaper/sections/08_evaluation.tex` | 27 | 0 | true | runtime/release labels(6), Decision-DNNF compiler shorthand(2), certification category codes(8), evidence-run labels(7), WCOJ evidence path goal/work/external-consumer labels(3), beta status label(1) |  |
 | `docs/whitepaper/sections/09_related_work.tex` | 5 | 0 | true | user-defined-function shorthand(1), external Decision-DNNF compiler shorthand(1), evidence-run labels(2), stage label(1) |  |
-| `docs/whitepaper/sections/10_limitations.tex` | 1 | 0 | false | G91(1) |  |
+| `docs/whitepaper/sections/10_limitations.tex` | 13 | 0 | true | release-line labels(8), beta status labels(2), shorthand labels(3) |  |
 | `docs/whitepaper/sections/A_performance_contract.tex` | 0 | 0 | true |  |  |
 | `examples/BFO/universal_case_reasoner/GOALS.md` | 5 | 0 | false | G1(1), G2(1), G3(1), G4(1), G5(1) |  |
 | `examples/BFO/universal_case_reasoner/GQM.md` | 2 | 0 | false | D2H(1), P0(1) |  |
