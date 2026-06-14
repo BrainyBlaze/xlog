@@ -568,7 +568,7 @@ Hardware cache terminology such as `L1` and `L2` is allowed when it refers to GP
 | `crates/xlog-logic/tests/test_w67b_dispatch_plan.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-logic/tests/test_kclique_helper_split.rs` | 0 | 0 | true | - | - |
 | `crates/xlog-neural/Cargo.toml` | 0 | 0 | true |  |  |
-| `crates/xlog-neural/src/batch.rs` | 4 | 0 | false | D1(2), D2(2) |  |
+| `crates/xlog-neural/src/batch.rs` | 0 | 0 | true | - | Replaced abbreviated digit variables in the neural batching doc example with descriptive left/right digit names. |
 | `crates/xlog-neural/src/bridge.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-neural/src/handle.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-neural/src/lib.rs` | 0 | 0 | true |  |  |
