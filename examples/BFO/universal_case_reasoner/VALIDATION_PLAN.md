@@ -256,7 +256,7 @@ Checks:
   shift, cybersecurity intrusion, manufacturing equipment/fault, PHM fault, and
   root-cause AIOps benchmark families.
 - Until those adapters exist, `public_benchmark_report` must be fail-closed with
-  `external_sota_claim: false`, explicit blockers, and the missing required
+  `external_state_of_the_art_claim: false`, explicit blockers, and the missing required
   families listed.
 
 ## XLOG Findings Output

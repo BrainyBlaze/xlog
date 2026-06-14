@@ -1338,7 +1338,7 @@ def _external_root_truth(
         "external_root_cause_text_hash": _field_hash(root_text),
         "root_label": root_label,
         "ordinary_label_mapping": False,
-        "canonicalization": "frozen_external_rca_catalog",
+        "canonicalization": "frozen_external_root_cause_analysis_catalog",
         "canonical_catalog_entry": canonical["catalog_entry"],
         "canonical_root_text": canonical["root_text"],
     }
@@ -1603,14 +1603,14 @@ def _load_huggingface_cases(
                             config.get("unseen_dataset_family", False)
                         ),
                     },
-                    "root_label_source": "huggingface_external_rca",
+                    "root_label_source": "huggingface_external_root_cause_analysis",
                     "root_truth": root_truth,
                     "intervention_truth": intervention_truth,
                     "candidate_generation": {
-                        "mode": "frozen_external_rca_candidate_catalog",
+                        "mode": "frozen_external_root_cause_analysis_candidate_catalog",
                         "label_injected": False,
                         "candidate_count": len(candidates),
-                        "source": "frozen_external_rca_catalog",
+                        "source": "frozen_external_root_cause_analysis_catalog",
                         "uses_heldout_test_truth": False,
                         "constructed_before_heldout_labels": True,
                         "candidate_source_scope": "domain_static_catalog",
@@ -2634,21 +2634,21 @@ def _computed_metrics_from_records(
 def _public_benchmark_report() -> dict[str, Any]:
     return {
         "status": "FAIL",
-        "external_sota_claim": False,
-        "runner": "MISSING_PUBLIC_SOTA_RUNNER",
+        "external_state_of_the_art_claim": False,
+        "runner": "MISSING_PUBLIC_STATE_OF_THE_ART_RUNNER",
         "covered_public_benchmark_families": [],
         "required_public_benchmark_families": sorted(REQUIRED_PUBLIC_BENCHMARK_FAMILIES),
         "missing_public_benchmark_families": sorted(REQUIRED_PUBLIC_BENCHMARK_FAMILIES),
         "protocol_hashes": {},
         "baseline_citations": {},
         "blockers": [
-            "MISSING_PUBLIC_SOTA_RUNNER",
-            "PUBLIC-SOTA-FAMILY-COVERAGE",
-            "PUBLIC-SOTA-UNMET",
+            "MISSING_PUBLIC_STATE_OF_THE_ART_RUNNER",
+            "PUBLIC_STATE_OF_THE_ART_FAMILY_COVERAGE",
+            "PUBLIC_STATE_OF_THE_ART_UNMET",
         ],
         "claim_boundary": (
-            "Local production/generalization/DILP evidence is not an external SOTA claim; "
-            "public benchmark adapters and protocols are required before external SOTA is claimed."
+            "Local production/generalization/differentiable ILP evidence is not an external state-of-the-art claim; "
+            "public benchmark adapters and protocols are required before external state-of-the-art performance is claimed."
         ),
     }
 
@@ -3349,16 +3349,16 @@ def _build_generalization_evidence(
 
     blockers: list[str] = []
     if any(count < 100 for count in case_count_by_domain.values()):
-        blockers.append("GEN-002")
+        blockers.append("minimum_heldout_domain_size_unmet")
     if (
         macro_f1 < GENERALIZATION_THRESHOLDS["macro_f1"]
         or min_domain_f1 < GENERALIZATION_THRESHOLDS["min_domain_f1"]
     ):
-        blockers.append("GEN-003")
+        blockers.append("macro_transfer_threshold_unmet")
     if not unseen_dataset_transfer["passed"]:
-        blockers.append("GEN-006")
+        blockers.append("unseen_dataset_transfer_missing")
     if not baseline_uplift["beats_strongest_baseline"]:
-        blockers.append("GEN-007")
+        blockers.append("strong_baseline_uplift_unmet")
     variant_macro_f1 = {
         variant: _macro_f1_from_records(
             [
@@ -3376,7 +3376,7 @@ def _build_generalization_evidence(
         if variant != "clean"
     )
     if not adversarial_passed:
-        blockers.append("GEN-009")
+        blockers.append("adversarial_domain_shift_unmet")
     nn4_query_count = sum(
         int(evidence.get("nn4_query_count", 0))
         for evidence in ranker_evidence_by_domain.values()
@@ -3419,7 +3419,7 @@ def _build_generalization_evidence(
         "by_domain": ranker_evidence_by_domain,
     }
     if not ranker_evidence_by_domain:
-        blockers.append("GEN-005")
+        blockers.append("frozen_model_or_ranker_missing")
     report = {
         "status": "PASS" if not blockers else "FAIL",
         "claim_scope": (
@@ -3650,7 +3650,7 @@ out(X) :- left(X), right(X).
     return pyxlog.LogicProgram.compile(source, device=0, memory_mb=512).session()
 
 
-def _run_v080_runtime_session_probe() -> dict[str, Any]:
+def _run_runtime_session_reuse_probe() -> dict[str, Any]:
     delta_session = _simple_join_session()
     delta_session.put_relation("left", [_cuda_i32([1, 2, 3])])
     delta_session.put_relation("right", [_cuda_i32([1, 2, 4])])
@@ -3694,7 +3694,7 @@ def _run_v080_runtime_session_probe() -> dict[str, Any]:
     }
 
 
-def _run_v085_language_contract_probe() -> dict[str, Any]:
+def _run_language_contract_reuse_probe() -> dict[str, Any]:
     summary_path = REPO_ROOT / "docs/evidence/2026-05-19-v085-examples/validation_summary.json"
     script_path = REPO_ROOT / "scripts/validate_v085_examples.py"
     showcase_path = REPO_ROOT / "examples/language-completeness/showcase"
@@ -3739,7 +3739,7 @@ def _run_v085_language_contract_probe() -> dict[str, Any]:
     }
 
 
-def _run_v086_runtime_optimizer_probe() -> dict[str, Any]:
+def _run_runtime_optimizer_reuse_probe() -> dict[str, Any]:
     session = _simple_join_session()
     values = torch.arange(2500, device="cuda", dtype=torch.int32)
     session.put_relation("left", [values])
@@ -3791,15 +3791,18 @@ def _run_v086_runtime_optimizer_probe() -> dict[str, Any]:
 
 
 def _run_bundle_reuse_probe() -> dict[str, Any]:
-    v080 = _run_v080_runtime_session_probe()
-    v085 = _run_v085_language_contract_probe()
-    v086 = _run_v086_runtime_optimizer_probe()
-    status = all(item.get("status") == "PASS" for item in [v080, v085, v086])
+    runtime_session = _run_runtime_session_reuse_probe()
+    language_contract = _run_language_contract_reuse_probe()
+    runtime_optimizer = _run_runtime_optimizer_reuse_probe()
+    status = all(
+        item.get("status") == "PASS"
+        for item in [runtime_session, language_contract, runtime_optimizer]
+    )
     return {
         "status": "PASS" if status else "FAIL",
-        "v080_runtime_session": v080,
-        "v085_language_contract": v085,
-        "v086_runtime_optimizer": v086,
+        "runtime_session_reuse": runtime_session,
+        "language_contract_reuse": language_contract,
+        "runtime_optimizer_reuse": runtime_optimizer,
     }
 
 

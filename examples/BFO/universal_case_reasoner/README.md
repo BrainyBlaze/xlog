@@ -114,7 +114,7 @@ This directory contains:
   the robust generalization gate set before making a robust-generalization claim.
 - `public_benchmark_report` that either records runnable public benchmark
   coverage for every required family before any external state-of-the-art claim, or
-  fail-closes with `external_sota_claim: false` and exact missing-family
+  fail-closes with `external_state_of_the_art_claim: false` and exact missing-family
   blockers.
 - Separate `showcase_metrics`, `generalization_report`, `dilp_report`, and
   `public_benchmark_report` namespaces; baseline uplift claims must come from

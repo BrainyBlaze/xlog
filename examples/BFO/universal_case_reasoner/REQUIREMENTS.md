@@ -125,7 +125,7 @@ evidence bundle that excludes a production domain from the aggregate.
   baseline citations are present, and the public benchmark report status is
   `PASS`.
 - If public benchmark adapters are not yet implemented, the report must mark
-  `external_sota_claim: false`, include fail-closed blockers, and leave covered
+  `external_state_of_the_art_claim: false`, include fail-closed blockers, and leave covered
   public benchmark families empty or partial. This can preserve a local
   production/generalization claim, but it is not an external state-of-the-art claim.
 - Required public benchmark families: AI-operations root-cause analysis, clinical diagnosis,

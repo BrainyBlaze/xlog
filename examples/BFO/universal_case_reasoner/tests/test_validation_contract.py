@@ -209,7 +209,7 @@ def _computed_production_evidence_fixture(path: Path) -> None:
         },
         "bundle_reuse": {
             "status": "PASS",
-            "v080_runtime_session": {
+            "runtime_session_reuse": {
                 "status": "PASS",
                 "logic_program_compile": True,
                 "session_evaluate": True,
@@ -221,7 +221,7 @@ def _computed_production_evidence_fixture(path: Path) -> None:
                     "htod_bytes": 0,
                 },
             },
-            "v085_language_contract": {
+            "language_contract_reuse": {
                 "status": "PASS",
                 "feature_count": 15,
                 "reused_artifacts": [
@@ -229,7 +229,7 @@ def _computed_production_evidence_fixture(path: Path) -> None:
                     "examples/language-completeness/showcase",
                 ],
             },
-            "v086_runtime_optimizer": {
+            "runtime_optimizer_reuse": {
                 "status": "PASS",
                 "apply_relation_delta_batch": True,
                 "join_index_cache_stats": {
@@ -413,7 +413,7 @@ def _verified_production_evidence_fixture(path: Path) -> None:
         ),
         "bundle_reuse": {
             "status": "PASS",
-            "v080_runtime_session": {
+            "runtime_session_reuse": {
                 "status": "PASS",
                 "logic_program_compile": True,
                 "session_evaluate": True,
@@ -425,7 +425,7 @@ def _verified_production_evidence_fixture(path: Path) -> None:
                     "htod_bytes": 0,
                 },
             },
-            "v085_language_contract": {
+            "language_contract_reuse": {
                 "status": "PASS",
                 "feature_count": 15,
                 "reused_artifacts": [
@@ -433,7 +433,7 @@ def _verified_production_evidence_fixture(path: Path) -> None:
                     "examples/language-completeness/showcase",
                 ],
             },
-            "v086_runtime_optimizer": {
+            "runtime_optimizer_reuse": {
                 "status": "PASS",
                 "apply_relation_delta_batch": True,
                 "join_index_cache_stats": {
@@ -1105,40 +1105,40 @@ def test_public_benchmark_assessment_requires_explicit_nonclaim_or_coverage() ->
 
     missing = validator._public_benchmark_assessment({})
     assert missing["passed"] is False
-    assert "PUBLIC-SOTA-REPORT-MISSING" in missing["blockers"]
+    assert "PUBLIC_STATE_OF_THE_ART_REPORT_MISSING" in missing["blockers"]
 
     nonclaim = validator._public_benchmark_assessment(
         {
             "public_benchmark_report": {
                 "status": "FAIL",
-                "external_sota_claim": False,
-                "runner": "MISSING_PUBLIC_SOTA_RUNNER",
+                "external_state_of_the_art_claim": False,
+                "runner": "MISSING_PUBLIC_STATE_OF_THE_ART_RUNNER",
                 "covered_public_benchmark_families": [],
                 "blockers": [
-                    "MISSING_PUBLIC_SOTA_RUNNER",
-                    "PUBLIC-SOTA-FAMILY-COVERAGE",
-                    "PUBLIC-SOTA-UNMET",
+                    "MISSING_PUBLIC_STATE_OF_THE_ART_RUNNER",
+                    "PUBLIC_STATE_OF_THE_ART_FAMILY_COVERAGE",
+                    "PUBLIC_STATE_OF_THE_ART_UNMET",
                 ],
             }
         }
     )
     assert nonclaim["passed"] is True
-    assert nonclaim["external_sota_claim"] is False
+    assert nonclaim["external_state_of_the_art_claim"] is False
     assert nonclaim["missing_public_benchmark_families"]
 
     unsupported_claim = validator._public_benchmark_assessment(
         {
             "public_benchmark_report": {
                 "status": "PASS",
-                "external_sota_claim": True,
-                "runner": "MISSING_PUBLIC_SOTA_RUNNER",
+                "external_state_of_the_art_claim": True,
+                "runner": "MISSING_PUBLIC_STATE_OF_THE_ART_RUNNER",
                 "covered_public_benchmark_families": [],
                 "blockers": [],
             }
         }
     )
     assert unsupported_claim["passed"] is False
-    assert "PUBLIC-SOTA-FAMILY-COVERAGE" in unsupported_claim["blockers"]
+    assert "PUBLIC_STATE_OF_THE_ART_FAMILY_COVERAGE" in unsupported_claim["blockers"]
 
 
 def test_validator_requires_heldout_scoring_through_xlog_nn4() -> None:

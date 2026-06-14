@@ -878,11 +878,11 @@ def _public_benchmark_assessment(production_transfer: dict[str, Any]) -> dict[st
         return {
             "passed": False,
             "status": "MISSING",
-            "external_sota_claim": None,
+            "external_state_of_the_art_claim": None,
             "covered_public_benchmark_families": [],
             "required_public_benchmark_families": sorted(REQUIRED_PUBLIC_BENCHMARK_FAMILIES),
             "missing_public_benchmark_families": sorted(REQUIRED_PUBLIC_BENCHMARK_FAMILIES),
-            "blockers": ["PUBLIC-SOTA-REPORT-MISSING"],
+            "blockers": ["PUBLIC_STATE_OF_THE_ART_REPORT_MISSING"],
             "claim_boundary": "public benchmark report is required for honest claim scope",
         }
 
@@ -894,35 +894,35 @@ def _public_benchmark_assessment(production_transfer: dict[str, Any]) -> dict[st
     missing_families = sorted(REQUIRED_PUBLIC_BENCHMARK_FAMILIES - covered)
     blockers = [str(blocker) for blocker in report.get("blockers") or [] if str(blocker)]
     status = str(report.get("status", "")).upper()
-    external_sota_claim = report.get("external_sota_claim")
+    external_state_of_the_art_claim = report.get("external_state_of_the_art_claim")
     runner = str(report.get("runner") or "")
 
-    if external_sota_claim is True:
+    if external_state_of_the_art_claim is True:
         if status != "PASS":
-            blockers.append("PUBLIC-SOTA-STATUS-NOT-PASS")
-        if runner == "MISSING_PUBLIC_SOTA_RUNNER" or not runner:
-            blockers.append("MISSING_PUBLIC_SOTA_RUNNER")
+            blockers.append("PUBLIC_STATE_OF_THE_ART_STATUS_NOT_PASS")
+        if runner == "MISSING_PUBLIC_STATE_OF_THE_ART_RUNNER" or not runner:
+            blockers.append("MISSING_PUBLIC_STATE_OF_THE_ART_RUNNER")
         if missing_families:
-            blockers.append("PUBLIC-SOTA-FAMILY-COVERAGE")
+            blockers.append("PUBLIC_STATE_OF_THE_ART_FAMILY_COVERAGE")
         passed = not blockers and not missing_families
-        claim_boundary = "external SOTA claimed"
-    elif external_sota_claim is False:
+        claim_boundary = "external state-of-the-art performance claimed"
+    elif external_state_of_the_art_claim is False:
         if status not in {"FAIL", "BLOCKED", "NOT_CLAIMED"}:
-            blockers.append("PUBLIC-SOTA-NONCLAIM-STATUS-MISSING")
+            blockers.append("PUBLIC_STATE_OF_THE_ART_NONCLAIM_STATUS_MISSING")
         if not blockers:
-            blockers.append("PUBLIC-SOTA-NONCLAIM-BLOCKERS-MISSING")
+            blockers.append("PUBLIC_STATE_OF_THE_ART_NONCLAIM_BLOCKERS_MISSING")
         passed = status in {"FAIL", "BLOCKED", "NOT_CLAIMED"} and bool(blockers)
-        claim_boundary = "external SOTA not claimed"
+        claim_boundary = "external state-of-the-art performance not claimed"
     else:
-        blockers.append("PUBLIC-SOTA-CLAIM-BOUNDARY-MISSING")
+        blockers.append("PUBLIC_STATE_OF_THE_ART_CLAIM_BOUNDARY_MISSING")
         passed = False
-        claim_boundary = "external SOTA claim boundary missing"
+        claim_boundary = "external state-of-the-art claim boundary missing"
 
     blockers = sorted(set(blockers))
     return {
         "passed": passed,
         "status": status or "UNKNOWN",
-        "external_sota_claim": external_sota_claim,
+        "external_state_of_the_art_claim": external_state_of_the_art_claim,
         "runner": runner,
         "covered_public_benchmark_families": sorted(covered),
         "required_public_benchmark_families": sorted(REQUIRED_PUBLIC_BENCHMARK_FAMILIES),
@@ -1509,7 +1509,7 @@ def _source_provenance_passed(production_transfer: dict[str, Any]) -> bool:
             return False
         if not isinstance(intervention_truth, dict) or not isinstance(candidate_generation, dict):
             return False
-        if record.get("root_label_source") != "huggingface_external_rca":
+        if record.get("root_label_source") != "huggingface_external_root_cause_analysis":
             return False
         if not str(root_truth.get("source_type", "")).startswith("huggingface_"):
             return False
@@ -1725,30 +1725,30 @@ def _bundle_reuse_passed(production_transfer: dict[str, Any]) -> bool:
     if not isinstance(bundle, dict) or bundle.get("status") != "PASS":
         return False
 
-    v080 = bundle.get("v080_runtime_session") or {}
-    v085 = bundle.get("v085_language_contract") or {}
-    v086 = bundle.get("v086_runtime_optimizer") or {}
-    v080_transfer = v080.get("hot_loop_transfer_stats") or {}
-    v086_transfer = v086.get("hot_loop_transfer_stats") or {}
-    cache_stats = v086.get("join_index_cache_stats") or {}
-    reused_v085 = set(v085.get("reused_artifacts") or [])
+    runtime_session = bundle.get("runtime_session_reuse") or {}
+    language_contract = bundle.get("language_contract_reuse") or {}
+    runtime_optimizer = bundle.get("runtime_optimizer_reuse") or {}
+    runtime_session_transfer = runtime_session.get("hot_loop_transfer_stats") or {}
+    runtime_optimizer_transfer = runtime_optimizer.get("hot_loop_transfer_stats") or {}
+    cache_stats = runtime_optimizer.get("join_index_cache_stats") or {}
+    reused_language_contract = set(language_contract.get("reused_artifacts") or [])
 
     return (
-        v080.get("status") == "PASS"
-        and v080.get("logic_program_compile") is True
-        and v080.get("session_evaluate") is True
-        and float(v080.get("relation_delta_equivalence_pct", 0.0)) >= 100.0
-        and all(int(v080_transfer.get(key, -1)) == 0 for key in ["dtoh_calls", "htod_calls", "dtoh_bytes", "htod_bytes"])
-        and v085.get("status") == "PASS"
-        and int(v085.get("feature_count", 0)) >= 10
-        and "examples/language-completeness/showcase" in reused_v085
-        and v086.get("status") == "PASS"
-        and v086.get("apply_relation_delta_batch") is True
+        runtime_session.get("status") == "PASS"
+        and runtime_session.get("logic_program_compile") is True
+        and runtime_session.get("session_evaluate") is True
+        and float(runtime_session.get("relation_delta_equivalence_pct", 0.0)) >= 100.0
+        and all(int(runtime_session_transfer.get(key, -1)) == 0 for key in ["dtoh_calls", "htod_calls", "dtoh_bytes", "htod_bytes"])
+        and language_contract.get("status") == "PASS"
+        and int(language_contract.get("feature_count", 0)) >= 10
+        and "examples/language-completeness/showcase" in reused_language_contract
+        and runtime_optimizer.get("status") == "PASS"
+        and runtime_optimizer.get("apply_relation_delta_batch") is True
         and int(cache_stats.get("builds", 0)) >= 1
         and int(cache_stats.get("hits", 0)) >= 1
-        and int(v086.get("relation_callback_events", 0)) >= 2
-        and v086.get("callback_payload_has_tensors") is False
-        and all(int(v086_transfer.get(key, -1)) == 0 for key in ["dtoh_calls", "htod_calls", "dtoh_bytes", "htod_bytes"])
+        and int(runtime_optimizer.get("relation_callback_events", 0)) >= 2
+        and runtime_optimizer.get("callback_payload_has_tensors") is False
+        and all(int(runtime_optimizer_transfer.get(key, -1)) == 0 for key in ["dtoh_calls", "htod_calls", "dtoh_bytes", "htod_bytes"])
     )
 
 

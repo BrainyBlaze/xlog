@@ -820,7 +820,7 @@ Hardware cache terminology such as `L1` and `L2` is allowed when it refers to GP
 | `examples/BFO/universal_case_reasoner/tests/test_ablation_smoke.py` | 0 | 0 | true |  |  |
 | `examples/BFO/universal_case_reasoner/tests/test_bfo_fixture_smoke.py` | 0 | 0 | true |  |  |
 | `examples/BFO/universal_case_reasoner/tests/test_neural_smoke.py` | 0 | 0 | true |  |  |
-| `examples/BFO/universal_case_reasoner/tests/test_production_transfer.py` | 0 | 9 | false |  | v086(8), v085(1) |
+| `examples/BFO/universal_case_reasoner/tests/test_production_transfer.py` | 0 | 29 | true |  | release/bundle labels(16), generalization blocker codes(6), public benchmark shorthand labels(4), root-cause-analysis shorthand labels(2), differentiable ILP shorthand(1) |
 | `examples/BFO/universal_case_reasoner/tests/test_runtime_contract_smoke.py` | 0 | 0 | true |  |  |
 | `examples/BFO/universal_case_reasoner/tests/test_validation_contract.py` | 0 | 4 | false |  | v085(2), P0(2) |
 | `examples/BFO/universal_case_reasoner/tests/test_xlog_findings_artifacts.py` | 0 | 0 | true |  |  |
