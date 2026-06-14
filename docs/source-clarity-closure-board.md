@@ -672,7 +672,7 @@ Hardware cache terminology such as `L1` and `L2` is allowed when it refers to GP
 | `crates/xlog-runtime/src/executor/recursive.rs` | 16 | 0 | true | Replaced recursive stats trace, recursive WCOJ, Free Join, paper shorthand, and k-clique milestone comments with behavior-based wording. |  |
 | `crates/xlog-runtime/src/executor/rewrite.rs` | 18 | 1 | true | Replaced occurrence-rewrite, input/fallback symmetry, shape-agnosticism, and release/slice milestone comments; renamed milestone-labeled test module. |  |
 | `crates/xlog-runtime/src/executor/wcoj_cost_model.rs` | 0 | 0 | true |  |  |
-| `crates/xlog-runtime/src/executor/wcoj_dispatch.rs` | 98 | 3 | false | W2.1(18), W2.6(15), W2.2(11), W2.4(10), W3.2(9), W6.4(8) | W2.2(2), W2.1(1) |
+| `crates/xlog-runtime/src/executor/wcoj_dispatch.rs` | 98 | 6 | true | Replaced WCOJ dispatch, feedback, Free Join, aggregate-fusion, chain, K-clique, matcher, release/slice, and sibling-task labels with behavior-based wording; renamed milestone-labeled pipeline and matcher-test identifiers. |  |
 | `crates/xlog-runtime/src/executor/wcoj_phase_timing.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-runtime/src/ilp_registry.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-runtime/src/lib.rs` | 0 | 0 | true |  |  |

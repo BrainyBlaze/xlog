@@ -1,4 +1,4 @@
-//! v0.6.2 WCOJ triangle dispatch — runtime hook.
+//! WCOJ triangle dispatch runtime hook.
 //!
 //! Wires the GPU WCOJ kernels into the executor's per-rule loop.
 //! Production callers leave `RuntimeConfig::default()` and use
@@ -13,14 +13,14 @@
 //!      `Mode::Off` cells and any test that wants binary-join.
 //!   3. **Default**: stats-backed dispatch model.
 //!
-//! ## Recognized RIR shape (v0.6.5)
+//! ## Recognized RIR Shape
 //!
 //! The hook now consumes [`RirNode::MultiWayJoin`], produced by
 //! [`xlog_logic::promote::promote_multiway`] after the optimizer
 //! pass in [`xlog_logic::Compiler::compile_program_with_stats_snapshot`].
 //! The promoter rewrites the canonical lowered+optimized triangle
 //! tree to a `MultiWayJoin` whose structure encodes the same
-//! semantic invariants as the v0.6.2 strict tree-pattern matcher:
+//! semantic invariants as the earlier strict tree-pattern matcher:
 //!
 //! * `inputs` is a 3-element vec of `Scan` nodes in WCOJ slot
 //!   order `[xy, yz, xz]`.
@@ -45,7 +45,7 @@
 //!
 //! ## Failure handling
 //!
-//! Per slice spec: "failure in helper must not corrupt store
+//! Per dispatch contract: "failure in helper must not corrupt store
 //! state." If the WCOJ pipeline (layout construction or kernel
 //! launch) returns an error, the hook converts it to `Ok(None)`
 //! and the caller falls back to the existing path. The store is
@@ -55,23 +55,23 @@
 //!
 //! ## Hook surface
 //!
-//! The dispatcher exposes two entry points per shape (slice 4):
+//! The dispatcher exposes two entry points per shape:
 //!
 //! * `try_dispatch_wcoj_*(rule)` — keyed on `&CompiledRule`,
 //!   used by the non-recursive arm in `execute_stratum_impl`.
 //! * `try_dispatch_wcoj_*_on_body(body)` — keyed on `&RirNode`,
 //!   used by the recursive arm via
 //!   `Executor::execute_wcoj_or_fallback_node` on both seeding
-//!   and per-variant evaluation. The slice 4 promoter gates
-//!   recursive bodies on per-rule recursive-Scan count (≤ 1
-//!   promotes; ≥ 2 stays binary-join — see slice 4.2 deferral).
+//!   and per-variant evaluation. The promoter gates recursive bodies
+//!   by per-rule recursive-scan count: a single recursive scan can
+//!   promote, while two or more stay on the binary-join path.
 //!
-//! ## Out of scope (per slice spec)
+//! ## Out of Scope
 //!
-//! * Cost model — slice 5.
+//! * Additional cost-model expansion.
 //! * Mixed-width admission (a triangle with both U32 and U64
 //!   slots stays on the binary-join path).
-//! * Multi-recursive WCOJ (≥ 2 in-SCC body Scans) — slice 4.2.
+//! * Multi-recursive WCOJ with two or more in-SCC body scans.
 
 use std::collections::HashSet;
 
@@ -139,7 +139,7 @@ pub(super) fn wcoj_adaptive_enabled(config_override: Option<bool>) -> bool {
     config_override.unwrap_or(true)
 }
 
-/// D1 kill switch for the aggregate-fused group-by-root count dispatch.
+/// Kill switch for the aggregate-fused group-by-root count dispatch.
 /// Default ON (fusion enabled); set to `1`/`true` to force every
 /// GroupBy-over-triangle through the materialize+groupby path.
 pub const ENV_DISABLE_WCOJ_GROUPBY_FUSION: &str = "XLOG_DISABLE_WCOJ_GROUPBY_FUSION";
@@ -150,7 +150,7 @@ pub(super) fn wcoj_groupby_fusion_disabled() -> bool {
         .unwrap_or(false)
 }
 
-/// D2 kill switch for the generalized Free Join dispatch. Default ON
+/// Kill switch for the generalized Free Join dispatch. Default ON
 /// (dispatch enabled); set to `1`/`true` to force every general
 /// multiway body through the embedded binary fallback.
 pub const ENV_DISABLE_FREE_JOIN: &str = "XLOG_DISABLE_FREE_JOIN";
@@ -205,7 +205,7 @@ pub(super) fn chain_dispatch_enabled() -> bool {
 }
 
 // -----------------------------------------------------------------
-// v0.6.5 slice 2 — 4-cycle dispatch gates.
+// 4-cycle dispatch gates.
 //
 // Width-neutral env naming: `XLOG_USE_WCOJ_4CYCLE` controls the
 // force gate across u32 / u64 / Symbol. Triangle's `_U32` suffix is
@@ -213,13 +213,13 @@ pub(super) fn chain_dispatch_enabled() -> bool {
 //
 // Adaptive resolution differs from triangle: 4-cycle is **opt-in by
 // default**. Unset env + `None` config → `false`. Default-on is
-// gated on bench evidence and lives in a separate follow-up slice.
+// gated on bench evidence and lives in a separate follow-up decision.
 // -----------------------------------------------------------------
 
 /// Force-gate env. `"1"` / case-insensitive `"true"` → ON.
 pub const ENV_USE_WCOJ_4CYCLE: &str = "XLOG_USE_WCOJ_4CYCLE";
 
-/// Adaptive opt-in env. Default off (slice 2 ships explicit-only).
+/// Adaptive opt-in env. Default off for explicit-only dispatch.
 pub const ENV_USE_WCOJ_4CYCLE_ADAPTIVE: &str = "XLOG_USE_WCOJ_4CYCLE_ADAPTIVE";
 
 /// Kill switch env.
@@ -327,12 +327,12 @@ pub(super) struct TriangleRirMatch {
 /// WCOJ slot order on a successful match; `None` for any deviation.
 ///
 /// The match is intentionally strict over `inputs`, `slot_vars`,
-/// AND `output_columns`. v0.6.5 slice 1 only certifies the
+/// AND `output_columns`. The current triangle matcher certifies the
 /// canonical (X, Y, Z) emit order; rotated head projections,
 /// non-Scan inputs, or non-canonical variable classes decline
 /// dispatch and the caller takes the embedded `fallback` path.
 ///
-/// Future slices generalize the matcher in tandem with kernel
+/// Future matcher work must generalize in tandem with kernel
 /// generalization (4-way, n-way) — never one without the other.
 pub(super) fn match_multiway_triangle(body: &RirNode) -> Option<TriangleRirMatch> {
     let RirNode::MultiWayJoin {
@@ -393,7 +393,7 @@ fn slot_vars_match_canonical_triangle(slot_vars: &[Vec<Option<u32>>]) -> bool {
 /// `(X, Y, Z)` order; the project columns describe the
 /// binary-join-intermediate layout the head extracts from.
 ///
-/// W2.2 — accepted layouts:
+/// Accepted triangle output-column layouts:
 ///   * `[Column(0), Column(1), Column(3)]` — Y-shared /
 ///     X-shared inner pair (binary intermediate cols
 ///     [X, Y, Y, Z, X, Z] / [X, Y, X, Z, Y, Z]).
@@ -412,10 +412,9 @@ fn output_columns_match_canonical_triangle(cols: &[ProjectExpr]) -> bool {
 }
 
 // -----------------------------------------------------------------
-// v0.6.5 slice 2 — 4-cycle matcher.
+// 4-cycle matcher.
 //
-// Mirrors the triangle matcher with shape-locked qualifier per the
-// slice 2 walker contract.
+// Mirrors the triangle matcher with a shape-locked qualifier.
 // -----------------------------------------------------------------
 
 /// Four rel IDs extracted from a matched 4-cycle RIR.
@@ -431,7 +430,7 @@ pub(super) struct FourCycleRirMatch {
 /// slot order on a successful match; `None` for any deviation.
 ///
 /// The match is intentionally strict over `inputs`, `slot_vars`,
-/// AND `output_columns`. v0.6.5 slice 2 only certifies the
+/// AND `output_columns`. The current 4-cycle matcher certifies the
 /// canonical (W, X, Y, Z) emit order.
 pub(super) fn match_multiway_4cycle(body: &RirNode) -> Option<FourCycleRirMatch> {
     let RirNode::MultiWayJoin {
@@ -497,7 +496,7 @@ fn slot_vars_match_canonical_4cycle(slot_vars: &[Vec<Option<u32>>]) -> bool {
 
 /// Confirm `output_columns` is the certified `(W, X, Y, Z)` emit
 /// order. The GPU kernel writes quads in this order.
-/// W2.2 — 4-cycle accepted output_column layouts:
+/// Accepted 4-cycle output-column layouts:
 ///   * `[Column(0), Column(1), Column(3), Column(5)]` —
 ///     Default grouping `(WX⋈XY) + (YZ⋈ZW)`.
 ///   * `[Column(5), Column(0), Column(1), Column(3)]` — Alt
@@ -517,8 +516,8 @@ fn output_columns_match_canonical_4cycle(cols: &[ProjectExpr]) -> bool {
 }
 
 /// Extract the `RelId` from a leaf `Scan` node, or `None` for
-/// any non-Scan child. v0.6.5 slice 1 only admits Scan leaves;
-/// future slices may admit `Filter { Scan }` or projected
+/// any non-Scan child. The current matcher only admits Scan leaves;
+/// future matcher work may admit `Filter { Scan }` or projected
 /// scans, but always in tandem with kernel support.
 fn scan_rel(node: &RirNode) -> Option<RelId> {
     match node {
@@ -571,14 +570,14 @@ fn scalar_wcoj_width(ty: xlog_core::ScalarType) -> Option<WcojKeyWidth> {
     }
 }
 
-/// W2.1: convert `kernel_output_cols` (a `Vec<ProjectExpr>`) into
+/// Convert `kernel_output_cols` (a `Vec<ProjectExpr>`) into
 /// the `Vec<usize>` permutation that
 /// `wcoj_project_output_columns_recorded` consumes. Triangle and
 /// 4-cycle kernel_output_cols entries are always
 /// `ProjectExpr::Column(_)` per the locked permutation tables in
 /// `xlog_logic::wcoj_var_ordering`; anything else is a planner bug.
-/// W2.6 step 5 — derive the slot-0 ⋈ slot-1 feedback pair AND
-/// the underlying-relation key columns from `var_order`.
+/// Derive the slot-0 joined-with slot-1 feedback pair and the
+/// underlying-relation key columns from `var_order`.
 ///
 /// Returns `(rel_a, rel_b, left_keys, right_keys)` where keys
 /// are NATIVE (pre-swap) column indices on the underlying
@@ -588,7 +587,7 @@ fn scalar_wcoj_width(ty: xlog_core::ScalarType) -> Option<WcojKeyWidth> {
 /// invariant `slot0.col1 ≡ slot1.col0` holds for the views
 /// but maps to native key index 1 on BOTH sides.
 ///
-/// **Locked rotated-feedback table** (W2.6 plan §"Step 5"):
+/// **Rotated-feedback table**:
 ///
 /// | Shape    | Leader            | (rel_a, rel_b)      | (left_keys, right_keys) |
 /// |----------|-------------------|---------------------|-------------------------|
@@ -606,7 +605,7 @@ fn feedback_pair_from_var_order(
         return None;
     }
     let Some(vo) = var_order else {
-        // Default config / no rotation — bit-identical W2.4
+        // Default config / no rotation: canonical feedback
         // behavior: canonical (slot_rels[0], slot_rels[1]) with
         // keys [1] / [0].
         return Some((slot_rels[0], slot_rels[1], vec![1], vec![0]));
@@ -614,7 +613,7 @@ fn feedback_pair_from_var_order(
     let leader_idx = vo.leader_idx as usize;
     match slot_rels.len() {
         3 => {
-            // Triangle: locked table per W2.6 plan §"Step 5".
+            // Triangle rotated-feedback table.
             match leader_idx {
                 0 => Some((slot_rels[0], slot_rels[1], vec![1], vec![0])),
                 1 => {
@@ -658,7 +657,7 @@ fn perm_indices_from_kernel_output_cols(cols: &[ProjectExpr]) -> Result<Vec<usiz
             other => {
                 return Err(xlog_core::XlogError::Kernel(format!(
                     "perm_indices_from_kernel_output_cols: \
-                     W2.1 kernel_output_cols must be ProjectExpr::Column(_), got {:?}",
+                     kernel_output_cols must be ProjectExpr::Column(_), got {:?}",
                     other
                 )));
             }
@@ -667,10 +666,10 @@ fn perm_indices_from_kernel_output_cols(cols: &[ProjectExpr]) -> Result<Vec<usiz
     Ok(out)
 }
 
-/// W2.1: build the canonical triangle head schema `(X, Y, Z)`
+/// Build the canonical triangle head schema `(X, Y, Z)`
 /// from the canonical promoter inputs. Used as the
 /// `head_schema` argument to
-/// `wcoj_project_output_columns_recorded` on the W2.1 path.
+/// `wcoj_project_output_columns_recorded` on the leader-ordered path.
 fn build_triangle_head_schema(buf_xy: &CudaBuffer, buf_yz: &CudaBuffer) -> Result<Schema> {
     let x_type = buf_xy.schema.column_type(0).ok_or_else(|| {
         xlog_core::XlogError::Kernel("build_triangle_head_schema: e_xy.col0 type missing".into())
@@ -706,7 +705,7 @@ fn build_triangle_head_schema(buf_xy: &CudaBuffer, buf_yz: &CudaBuffer) -> Resul
     .map_err(xlog_core::XlogError::Kernel)
 }
 
-/// W2.1: build the canonical 4-cycle head schema
+/// Build the canonical 4-cycle head schema
 /// `(W, X, Y, Z)` from the canonical promoter inputs.
 fn build_4cycle_head_schema(
     buf_e1: &CudaBuffer,
@@ -778,12 +777,12 @@ impl Executor {
         &mut self,
         rule: &CompiledRule,
     ) -> Result<Option<CudaBuffer>> {
-        // Slice 4: body-keyed entry. Rule-keyed callers stay
+        // Body-keyed entry. Rule-keyed callers stay
         // byte-identical via this thin wrapper.
         self.try_dispatch_wcoj_triangle_on_body(&rule.body)
     }
 
-    /// W2.4 — read the WCOJ output buffer's logical row count.
+    /// Read the WCOJ output buffer's logical row count.
     /// Returns `None` when the cache isn't populated. **Never
     /// returns `Some(0)` for an unknown row count** — only for
     /// an observed-empty output. The distinction matters for
@@ -795,21 +794,19 @@ impl Executor {
         buf.cached_row_count().map(u64::from)
     }
 
-    /// W2.4 + W2.6 — wire successful WCOJ dispatches back into
+    /// Wire successful WCOJ dispatches back into
     /// `StatsManager` so the cardinality cost model's future
     /// `binary_est` reads reflect observed selectivity.
     ///
-    /// **W2.6 routing**: the `(rel_a, rel_b, left_keys, right_keys)`
+    /// **Leader-aware routing**: the `(rel_a, rel_b, left_keys, right_keys)`
     /// quadruple is derived from the dispatched plan's
     /// `var_order` via `feedback_pair_from_var_order`, NOT
     /// hardcoded:
     ///
     /// * `var_order = None` (default config): returns the
-    ///   pre-W2.6 W2.4 pair — `(slot_rels[0], slot_rels[1])`
-    ///   with keys `[1] / [0]`. Bit-identical to slice 1-5 +
-    ///   W2.4.
-    /// * `var_order = Some(_)` (W2.1 LeaderCardinality or W2.6
-    ///   HeatAware non-default leader): returns the rotated
+    ///   canonical feedback pair, `(slot_rels[0], slot_rels[1])`
+    ///   with keys `[1] / [0]`.
+    /// * `var_order = Some(_)` (non-default leader): returns the rotated
     ///   pair from the locked feedback table — triangle
     ///   non-default leaders use rotated `(slot_rels[0],
     ///   slot_rels[1])` with keys `[1] / [1]` (Z-shared edges
@@ -821,7 +818,7 @@ impl Executor {
     /// default-leader pair — but on a non-default-leader run
     /// the dispatched layout's actual edge is what we observe,
     /// and that's what gets recorded under the rotated key.
-    /// The W2.1 + W2.6 cost models look up rotated edges
+    /// The leader-aware cost models look up rotated edges
     /// correspondingly; the writer ↔ reader pair stays
     /// coherent under each leader topology.
     ///
@@ -834,8 +831,7 @@ impl Executor {
     ///     leader rotation isn't in the locked feedback table
     ///     (conservative; never write under uncertainty).
     ///   * Any of `(rel_a, rel_b)` has missing or zero
-    ///     cardinality — `populated_cards` analog from slice 5;
-    ///     unknown inputs would compute a meaningless
+    ///     cardinality; unknown inputs would compute a meaningless
     ///     `input_card_product`.
     ///
     /// Recording an observed-empty output (`Some(0)`) IS
@@ -862,11 +858,10 @@ impl Executor {
         let Some(out_rows) = output_rows else {
             return;
         };
-        // W2.6: derive the (slot 0, slot 1) feedback pair AND
-        // the underlying-relation key columns from `var_order`.
+        // Derive the (slot 0, slot 1) feedback pair and the
+        // underlying-relation key columns from `var_order`.
         // For `var_order = None` (default config), this returns
-        // the canonical W2.4 pair + keys [1]/[0] — bit-identical
-        // to pre-W2.6 behavior. For Some(_), the pair may be
+        // the canonical pair + keys [1]/[0]. For Some(_), the pair may be
         // rotated (triangle non-default leaders use rotated pair
         // + [1]/[1] keys; 4-cycle is rotation-only [1]/[0]).
         let Some((rel_a, rel_b, left_keys, right_keys)) =
@@ -894,11 +889,11 @@ impl Executor {
             .record_join_result(rel_a, rel_b, left_keys, right_keys, input_rows, out_rows);
     }
 
-    /// Slice 4 entry point — same gate / pattern-match / dispatch
+    /// Body-keyed entry point: same gate / pattern-match / dispatch
     /// logic as `try_dispatch_wcoj_triangle`, keyed on `body`
     /// rather than `&CompiledRule`. The recursive engine calls
     /// this on the rewritten variant body (one Scan's RelId
-    /// swapped to a delta RelId); the slice 1–3 wrapper above
+    /// swapped to a delta RelId); the rule-keyed wrapper above
     /// preserves the rule-keyed surface for non-recursive callers.
     pub(super) fn try_dispatch_wcoj_triangle_on_body(
         &mut self,
@@ -1027,16 +1022,15 @@ impl Executor {
             }
         }
 
-        // W2.1: extract var_order from the matched MultiWayJoin
-        // body. None preserves slice 1/2/W2.2 default-leader
-        // dispatch bit-identically.
+        // Extract var_order from the matched MultiWayJoin body. None preserves
+        // default-leader dispatch bit-identically.
         let var_order_opt: Option<&VariableOrder> = match body {
             RirNode::MultiWayJoin { var_order, .. } => var_order.as_ref(),
             _ => None,
         };
 
         // 7. Run layout + triangle. Convert any kernel error to
-        // silent fallback per slice spec ("failure must not
+        // silent fallback per dispatch contract ("failure must not
         // corrupt store state"). The WCOJ helpers don't write
         // to the store, so an error here only loses the work
         // we just did — the binary-join path picks it up.
@@ -1054,18 +1048,16 @@ impl Executor {
         );
         match dispatch_result {
             Ok(buf) => {
-                // W2.4 + W2.6 — record observed selectivity into
+                // Record observed selectivity into
                 // StatsManager for the cardinality cost model.
                 // The (rel_a, rel_b, left_keys, right_keys) pair
                 // is derived from `var_order_opt` via
                 // `feedback_pair_from_var_order`:
                 //   * `var_order = None` (default config) →
                 //     canonical `(rel_xy, rel_yz)` keys
-                //     `[1]/[0]`. Bit-identical to slice 1-5 +
-                //     W2.4.
-                //   * `var_order = Some(_)` (W2.1 / W2.6
-                //     non-default leader) → rotated pair per
-                //     the locked W2.6 step-5 feedback table.
+                //     `[1]/[0]`.
+                //   * `var_order = Some(_)` (non-default leader) →
+                //     rotated pair per the feedback table.
                 //     Triangle non-default leaders use rotated
                 //     `(slot_rels[0], slot_rels[1])` with keys
                 //     `[1]/[1]` (Z-shared edges in canonical
@@ -1123,13 +1115,13 @@ impl Executor {
         var_order: Option<&VariableOrder>,
         #[cfg(feature = "wcoj-phase-timing")] layout_times_ms: &mut [f32; 3],
     ) -> Result<CudaBuffer> {
-        // W2.1: when the cost model selected a non-default leader,
+        // When the cost model selected a non-default leader,
         // run the rotated/swapped path. Layout helper sees the
         // (possibly col-swapped) leader-rotated inputs; kernel
         // emits in (a, b, c) order; final projection helper remaps
         // to the canonical (X, Y, Z) head order.
         if let Some(vo) = var_order {
-            return self.run_wcoj_triangle_pipeline_w21(
+            return self.run_wcoj_triangle_pipeline_with_leader_order(
                 buf_xy,
                 buf_yz,
                 buf_xz,
@@ -1243,8 +1235,8 @@ impl Executor {
         }
     }
 
-    /// W2.1 — pipeline for non-default leaders. Uses the locked
-    /// permutation tables on `var_order` to:
+    /// Pipeline for non-default leaders. Uses the permutation tables on
+    /// `var_order` to:
     /// 1. Rotate canonical inputs `[buf_xy, buf_yz, buf_xz]` so the
     ///    leader sits at slot 0.
     /// 2. Apply col-swap (via `wcoj_project_2col_swap_recorded`) to
@@ -1259,10 +1251,10 @@ impl Executor {
     ///    kernel-direct output into the canonical head order
     ///    `(X, Y, Z)`.
     ///
-    /// Phase timing is intentionally NOT instrumented on this
-    /// path — perf validation of the W2.1 threshold is W5.2 work
-    /// (per the W2.1 plan §"Risk & Open Questions / Q1").
-    fn run_wcoj_triangle_pipeline_w21(
+    /// Phase timing is intentionally NOT instrumented on this path; performance
+    /// validation for the non-default leader threshold is handled by benchmark
+    /// evidence outside this helper.
+    fn run_wcoj_triangle_pipeline_with_leader_order(
         &self,
         buf_xy: &CudaBuffer,
         buf_yz: &CudaBuffer,
@@ -1275,7 +1267,7 @@ impl Executor {
         let slot_inputs = self.prepare_leader_inputs(&canonical, var_order, launch_stream)?;
         if slot_inputs.len() != 3 {
             return Err(xlog_core::XlogError::Kernel(
-                "run_wcoj_triangle_pipeline_w21: prepare_leader_inputs must return 3 slots"
+                "run_wcoj_triangle_pipeline_with_leader_order: prepare_leader_inputs must return 3 slots"
                     .to_string(),
             ));
         }
@@ -1351,13 +1343,13 @@ impl Executor {
         self.wcoj_error_decline_count
     }
 
-    /// D2 — count of times the generalized Free Join dispatch produced
+    /// Count of times the generalized Free Join dispatch produced
     /// the installed result (vs. the embedded binary fallback).
     pub fn free_join_dispatch_count(&self) -> u64 {
         self.free_join_dispatch_count
     }
 
-    /// D2 — dispatch a general `MultiWayJoin` (any shape WITHOUT a
+    /// Dispatch a general `MultiWayJoin` (any shape WITHOUT a
     /// dedicated kernel) through the Free Join frontier engine. Runs
     /// after the triangle/4-cycle/k-clique dispatchers in
     /// `execute_wcoj_or_fallback_node`, and accepts ONLY nodes
@@ -1553,10 +1545,10 @@ impl Executor {
         }
     }
 
-    /// D2 §2.4 — factorized Free Join count-by-root: fused dispatch
+    /// Factorized Free Join count-by-root: fused dispatch
     /// for `count` aggregates over FreeJoin-marked general multiway
-    /// bodies. The plan is derived like
-    /// [`Self::try_dispatch_free_join`], with one §2.4 refinement:
+    /// bodies. The plan is derived like [`Self::try_dispatch_free_join`],
+    /// with one refinement:
     /// trailing cover variables PRIVATE to their atom (single global
     /// occurrence, not the group key) are left unconsumed — the
     /// engine multiplies their live trie-range lengths instead of
@@ -1661,7 +1653,7 @@ impl Executor {
                 occurrences[v] += 1;
             }
         }
-        // binary2fj with §2.4 trailing-private pruning.
+        // binary2fj with trailing-private pruning.
         let mut bound_at: Vec<Option<usize>> = vec![None; num_vars];
         let mut nodes: Vec<FjNode> = Vec::new();
         for (i, vars) in atom_vars.iter().enumerate() {
@@ -1750,14 +1742,14 @@ impl Executor {
         }
     }
 
-    /// D1 — count of times the fused group-by-root count hook produced a
+    /// Count of times the fused group-by-root count hook produced a
     /// result and the executor installed it (vs. silently falling back to
     /// the materialize+groupby path with the same answer).
     pub fn wcoj_groupby_fusion_dispatch_count(&self) -> u64 {
         self.wcoj_groupby_fusion_dispatch_count
     }
 
-    /// D1 aggregate-fused WCOJ: dispatch
+    /// Aggregate-fused WCOJ: dispatch
     /// `GroupBy { Project { MultiWayJoin(triangle) }, key_cols: [0],
     /// aggs: [(_, Count | Sum | Min | Max)] }` through the fused
     /// group-by-root kernels, which never materialize the triangle rows.
@@ -1825,8 +1817,8 @@ impl Executor {
             }
         };
         let Some(matched) = match_multiway_triangle(multiway) else {
-            // S1c/S1d: 4-cycle sibling of the triangle fusion (count +
-            // sum/min/max). The 4-cycle root is output column 0 by
+            // 4-cycle sibling of the triangle fusion (count + sum/min/max).
+            // The 4-cycle root is output column 0 by
             // construction, so gate on the key here like the triangle.
             if key_is_col0 {
                 if let Some(buf) =
@@ -1835,7 +1827,7 @@ impl Executor {
                     return Ok(Some(buf));
                 }
             }
-            // S1e: K-clique (K = 5, 6) count sibling. The clique root is
+            // K-clique (K = 5, 6) count sibling. The clique root is
             // plan-dependent, so the helper validates the group key against
             // the planned root itself instead of key_is_col0. Count-only
             // (no fused clique sum/min/max kernels).
@@ -1847,7 +1839,7 @@ impl Executor {
             {
                 return Ok(Some(buf));
             }
-            // D2 §2.4 — factorized Free Join count-by-root for
+            // Factorized Free Join count-by-root for
             // FreeJoin-marked general multiway bodies (any shape the
             // dedicated fused kernels above declined).
             return self.try_dispatch_free_join_count(multiway, columns);
@@ -1963,7 +1955,7 @@ impl Executor {
                     launch_stream,
                 )
             }
-            // S1c widening: u64-key sum/min/max through the u64 fused
+            // U64-key sum/min/max through the u64 fused
             // kernels (value columns are uniform U64 by classification).
             (Some(value), WcojKeyWidth::EightByte) => {
                 self.provider.wcoj_triangle_groupby_root_agg_u64_recorded(
@@ -1988,7 +1980,7 @@ impl Executor {
         }
     }
 
-    /// S1c/S1d aggregate-fused WCOJ, 4-cycle: dispatch the inner
+    /// Aggregate-fused WCOJ, 4-cycle: dispatch the inner
     /// `MultiWayJoin(4-cycle)` of a count/sum/min/max-by-root aggregate
     /// through the fused group-by-root kernels, which never materialize
     /// the 4-cycle rows. Both accepted `output_columns` layouts place the
@@ -1997,7 +1989,7 @@ impl Executor {
     /// key to W — the soundness condition for one-pass aggregate
     /// propagation.
     ///
-    /// Gating decision (documented per the S1c brief): the fused path
+    /// Gating decision: the fused path
     /// mirrors the triangle fusion — enabled by default behind the shared
     /// `XLOG_DISABLE_WCOJ_GROUPBY_FUSION` kill switch (checked by the
     /// caller). The `XLOG_USE_WCOJ_4CYCLE*` gates govern only the
@@ -2006,7 +1998,7 @@ impl Executor {
     /// because a declined or kill-switched fusion falls back to that
     /// independently-gated path (default: embedded binary fallback).
     ///
-    /// S1d value-column mapping (same rules as the triangle): for
+    /// Value-column mapping (same rules as the triangle): for
     /// Sum/Min/Max the aggregate value must map to a 4-cycle output
     /// variable the kernel can read during traversal — X (col 1, from
     /// e1.col1), Y (col 2, from e2.col1) or Z (col 3, from e3.col1) —
@@ -2134,7 +2126,7 @@ impl Executor {
                     launch_stream,
                 )
             }
-            // S1d slice 2: u64-key count through the metadata-driven
+            // U64-key count through the metadata-driven
             // segment reduction (the recorded groupby is U32/Symbol-key
             // only).
             (None, WcojKeyWidth::EightByte) => {
@@ -2171,7 +2163,7 @@ impl Executor {
         }
     }
 
-    /// v0.6.5 slice 2 — count of times the WCOJ 4-cycle hook
+    /// Count of times the WCOJ 4-cycle hook
     /// produced a result and the executor installed it. Tracked
     /// separately from triangle so tests can pin which shape
     /// dispatched.
@@ -2185,10 +2177,10 @@ impl Executor {
         self.chain_dispatch_count
     }
 
-    /// W4.2 — count of times `execute_join` routed an inner-join
+    /// Count of times `execute_join` routed an inner-join
     /// to the nested-loop provider entry point because the
     /// eligibility predicate + Cartesian-product threshold both
-    /// held. Tests use this counter to assert that the W4.2 path
+    /// held. Tests use this counter to assert that the nested-loop path
     /// actually fired vs. silently falling back to hash with the
     /// same answer.
     pub fn nested_loop_dispatch_count(&self) -> u64 {
@@ -2199,8 +2191,8 @@ impl Executor {
     /// `ChainJoin` emitted by the promoter.
     ///
     /// Route order:
-    ///   1. sorted eligible U32/Symbol inputs -> W4.3 sort-merge
-    ///   2. threshold eligible U32/Symbol inputs -> W4.2 nested loop
+    ///   1. sorted eligible U32/Symbol inputs -> sort-merge
+    ///   2. threshold eligible U32/Symbol inputs -> nested loop
     ///   3. otherwise -> existing hash_join_v2 provider path
     ///
     /// The final projection uses the captured `output_columns`, so
@@ -2333,7 +2325,7 @@ impl Executor {
         Ok(Some(projected))
     }
 
-    /// v0.6.5 slice 2 — try to dispatch a non-recursive rule
+    /// Try to dispatch a non-recursive rule
     /// through the GPU 4-cycle WCOJ kernel.
     ///
     /// Decision tree (highest → lowest):
@@ -2352,12 +2344,12 @@ impl Executor {
         &mut self,
         rule: &CompiledRule,
     ) -> Result<Option<CudaBuffer>> {
-        // Slice 4: body-keyed entry. Rule-keyed callers stay
+        // Body-keyed entry. Rule-keyed callers stay
         // byte-identical via this thin wrapper.
         self.try_dispatch_wcoj_4cycle_on_body(&rule.body)
     }
 
-    /// Slice 4 entry point — same gate / pattern-match / dispatch
+    /// Body-keyed entry point: same gate / pattern-match / dispatch
     /// logic as `try_dispatch_wcoj_4cycle`, keyed on `body` rather
     /// than `&CompiledRule`. See
     /// `try_dispatch_wcoj_triangle_on_body` for the rationale.
@@ -2440,7 +2432,7 @@ impl Executor {
         };
 
         // 6. Resolve the cached WCOJ launch stream (shared with
-        // triangle dispatch — slice 2's stream rename made this
+        // triangle dispatch; the stream resolver is now
         // shape-agnostic).
         if self.provider.memory().runtime().is_none() {
             return Ok(None);
@@ -2453,7 +2445,7 @@ impl Executor {
         // 7. Stats-backed mode: route the decision through
         // the cardinality WCOJ cost model.
         if mode == DispatchMode::CostModel {
-            // Slice 5: factory selects per RuntimeConfig precedence.
+            // Factory selects per RuntimeConfig precedence.
             let model = super::wcoj_cost_model::build_wcoj_cost_model(&self.config);
             let slot_rels = [
                 matched.rel_e1,
@@ -2473,8 +2465,8 @@ impl Executor {
             }
         }
 
-        // W2.1: extract var_order. None preserves slice 2/W2.2
-        // default-leader dispatch bit-identically.
+        // Extract var_order. None preserves default-leader dispatch
+        // bit-identically.
         let var_order_opt: Option<&VariableOrder> = match body {
             RirNode::MultiWayJoin { var_order, .. } => var_order.as_ref(),
             _ => None,
@@ -2493,17 +2485,15 @@ impl Executor {
         );
         match dispatch_result {
             Ok(buf) => {
-                // W2.4 + W2.6 — record observed selectivity.
+                // Record observed selectivity.
                 // The (rel_a, rel_b, left_keys, right_keys)
                 // pair is derived from `var_order_opt` via
                 // `feedback_pair_from_var_order`:
                 //   * `var_order = None` (default config) →
                 //     canonical `(rel_e1, rel_e2)` keys
-                //     `[1]/[0]`. Bit-identical to slice 1-5 +
-                //     W2.4.
-                //   * `var_order = Some(_)` (W2.1 / W2.6
-                //     non-default leader) → rotated pair from
-                //     the locked feedback table. 4-cycle is
+                //     `[1]/[0]`.
+                //   * `var_order = Some(_)` (non-default leader) →
+                //     rotated pair from the feedback table. 4-cycle is
                 //     rotation-only (every cycle edge is
                 //     `[1]/[0]` in canonical layout), so the
                 //     keys stay `[1]/[0]` while the pair
@@ -2536,7 +2526,7 @@ impl Executor {
         var_order: Option<&VariableOrder>,
     ) -> Result<CudaBuffer> {
         if let Some(vo) = var_order {
-            return self.run_wcoj_4cycle_pipeline_w21(
+            return self.run_wcoj_4cycle_pipeline_with_leader_order(
                 buf_e1,
                 buf_e2,
                 buf_e3,
@@ -2592,13 +2582,13 @@ impl Executor {
         }
     }
 
-    /// W2.1 — pipeline for non-default 4-cycle leaders. All
+    /// Pipeline for non-default 4-cycle leaders. All
     /// 4-cycle leaders are rotation-only (no col-swap entries
     /// in `lookup_perms`); kernel emits in `(a, b, c, d)` order
     /// per the rotated leader; final projection helper remaps
     /// to canonical `(W, X, Y, Z)` head order.
     #[allow(clippy::too_many_arguments)]
-    fn run_wcoj_4cycle_pipeline_w21(
+    fn run_wcoj_4cycle_pipeline_with_leader_order(
         &self,
         buf_e1: &CudaBuffer,
         buf_e2: &CudaBuffer,
@@ -2612,7 +2602,7 @@ impl Executor {
         let slot_inputs = self.prepare_leader_inputs(&canonical, var_order, launch_stream)?;
         if slot_inputs.len() != 4 {
             return Err(xlog_core::XlogError::Kernel(
-                "run_wcoj_4cycle_pipeline_w21: prepare_leader_inputs must return 4 slots"
+                "run_wcoj_4cycle_pipeline_with_leader_order: prepare_leader_inputs must return 4 slots"
                     .to_string(),
             ));
         }
@@ -2663,13 +2653,12 @@ impl Executor {
         )
     }
 
-    /// W2.1 — produce **owned, materialized** kernel slot inputs
+    /// Produce **owned, materialized** kernel slot inputs
     /// from a canonical-order input array and a `VariableOrder`.
     ///
     /// **Public** runtime helper. Production callers are
-    /// `run_wcoj_*_pipeline_w21` (this module); the W2.1 plan
-    /// §"Part B" runtime tests in
-    /// `crates/xlog-runtime/tests/test_w21_part_b.rs` invoke it
+    /// `run_wcoj_*_pipeline_with_leader_order` (this module); runtime tests
+    /// in `crates/xlog-runtime/tests/test_w21_part_b.rs` invoke it
     /// directly to assert per-slot schema + content against a CPU
     /// reference. Public visibility is intentional: there is no
     /// other reasonable seam for tests to inspect rotation +
@@ -2749,9 +2738,8 @@ impl Executor {
         // swap (when swap_cols) or single swap-twice (when not).
         //
         // Cost: one extra DtoD copy per slot vs. the previous
-        // inline-references implementation. The W2.1 path is opt-in
-        // and the DtoD overhead is small relative to the layout +
-        // kernel cost; perf validation is W5.2 anyway.
+        // inline-references implementation. The leader-ordered path is opt-in,
+        // and the DtoD overhead is small relative to the layout + kernel cost.
         let mut slots: Vec<CudaBuffer> = Vec::with_capacity(n);
         // Slot 0 = leader, no swap.
         slots.push(self.clone_buffer_via_swap(canonical[leader_idx], launch_stream)?);
@@ -2791,7 +2779,7 @@ impl Executor {
     /// [`xlog_cuda::CudaKernelProvider::recorded_op_stream`]
     /// (provider/mod.rs).
     ///
-    /// **Shared across WCOJ shapes** (v0.6.5 slice 2): triangle
+    /// **Shared across WCOJ shapes**: triangle
     /// and 4-cycle dispatch both go through this resolver and
     /// reuse the same stream. Renamed from
     /// `wcoj_triangle_stream_or_init` when 4-cycle dispatch
@@ -2813,19 +2801,19 @@ impl Executor {
 }
 
 // ===============================================================
-// W3.2/W6.4 — K-clique dispatch (k = 5..8).
+// K-clique dispatch (k = 5..8).
 //
 // Default-dispatch on shape match. No force / kill / adaptive
-// knobs (those are out of scope for W3.2 per the locked plan).
+// knobs.
 // Silent fallback to MultiWayJoin.fallback on dispatcher decline
 // or kernel error.
 //
-// Counter accessors are public (per fix #6) so xlog-integration
+// Counter accessors are public so xlog-integration
 // certs can assert across the crate boundary.
 // ===============================================================
 
 impl Executor {
-    /// W3.2 — Number of times the WCOJ k=5-clique hook produced a
+    /// Number of times the WCOJ k=5-clique hook produced a
     /// result and the executor installed it. Counter does NOT
     /// advance on dispatcher decline / kernel-launch failure
     /// (silent fallback to `MultiWayJoin.fallback`).
@@ -2833,40 +2821,40 @@ impl Executor {
         self.wcoj_clique5_dispatch_count
     }
 
-    /// W3.2 — Number of times the WCOJ k=6-clique hook produced
+    /// Number of times the WCOJ k=6-clique hook produced
     /// a result. Same observability contract as
     /// `wcoj_clique5_dispatch_count`.
     pub fn wcoj_clique6_dispatch_count(&self) -> u64 {
         self.wcoj_clique6_dispatch_count
     }
 
-    /// W6.4 — Number of times the WCOJ k=7-clique hook produced
+    /// Number of times the WCOJ k=7-clique hook produced
     /// a result. Same observability contract as
     /// `wcoj_clique5_dispatch_count`.
     pub fn wcoj_clique7_dispatch_count(&self) -> u64 {
         self.wcoj_clique7_dispatch_count
     }
 
-    /// W6.4 — Number of times the WCOJ k=8-clique hook produced
+    /// Number of times the WCOJ k=8-clique hook produced
     /// a result. Same observability contract as
     /// `wcoj_clique5_dispatch_count`.
     pub fn wcoj_clique8_dispatch_count(&self) -> u64 {
         self.wcoj_clique8_dispatch_count
     }
 
-    /// Authorization 5 G_HIST_KC — number of recursive Merge
+    /// Number of recursive merge
     /// boundaries where K-clique metadata was marked for refresh.
     pub fn kclique_histogram_refresh_count(&self) -> u64 {
         self.kclique_histogram_refresh_count
     }
 
-    /// Authorization 5 G_HIST_KC — cumulative refresh accounting
+    /// Cumulative recursive K-clique metadata refresh accounting
     /// time in nanoseconds.
     pub fn kclique_histogram_refresh_nanos(&self) -> u128 {
         self.kclique_histogram_refresh_nanos
     }
 
-    /// W3.2 — Try k=5-clique dispatch. Wrapper for rule-keyed
+    /// Try k=5-clique dispatch. Wrapper for rule-keyed
     /// callers (recursive engine + non-recursive scc).
     pub(super) fn try_dispatch_wcoj_clique5(
         &mut self,
@@ -2875,7 +2863,7 @@ impl Executor {
         self.try_dispatch_wcoj_clique5_on_body(&rule.body)
     }
 
-    /// W3.2 — Try k=6-clique dispatch.
+    /// Try k=6-clique dispatch.
     pub(super) fn try_dispatch_wcoj_clique6(
         &mut self,
         rule: &CompiledRule,
@@ -2883,7 +2871,7 @@ impl Executor {
         self.try_dispatch_wcoj_clique6_on_body(&rule.body)
     }
 
-    /// W6.4 — Try k=7-clique dispatch.
+    /// Try k=7-clique dispatch.
     pub(super) fn try_dispatch_wcoj_clique7(
         &mut self,
         rule: &CompiledRule,
@@ -2891,7 +2879,7 @@ impl Executor {
         self.try_dispatch_wcoj_clique7_on_body(&rule.body)
     }
 
-    /// W6.4 — Try k=8-clique dispatch.
+    /// Try k=8-clique dispatch.
     pub(super) fn try_dispatch_wcoj_clique8(
         &mut self,
         rule: &CompiledRule,
@@ -2899,7 +2887,7 @@ impl Executor {
         self.try_dispatch_wcoj_clique8_on_body(&rule.body)
     }
 
-    /// W3.2 — Body-keyed k=5-clique dispatch.
+    /// Body-keyed k=5-clique dispatch.
     pub(super) fn try_dispatch_wcoj_clique5_on_body(
         &mut self,
         body: &RirNode,
@@ -2907,7 +2895,7 @@ impl Executor {
         self.try_dispatch_wcoj_clique_k_on_body(body, 5)
     }
 
-    /// W3.2 — Body-keyed k=6-clique dispatch.
+    /// Body-keyed k=6-clique dispatch.
     pub(super) fn try_dispatch_wcoj_clique6_on_body(
         &mut self,
         body: &RirNode,
@@ -2915,7 +2903,7 @@ impl Executor {
         self.try_dispatch_wcoj_clique_k_on_body(body, 6)
     }
 
-    /// W6.4 — Body-keyed k=7-clique dispatch.
+    /// Body-keyed k=7-clique dispatch.
     pub(super) fn try_dispatch_wcoj_clique7_on_body(
         &mut self,
         body: &RirNode,
@@ -2923,7 +2911,7 @@ impl Executor {
         self.try_dispatch_wcoj_clique_k_on_body(body, 7)
     }
 
-    /// W6.4 — Body-keyed k=8-clique dispatch.
+    /// Body-keyed k=8-clique dispatch.
     pub(super) fn try_dispatch_wcoj_clique8_on_body(
         &mut self,
         body: &RirNode,
@@ -2931,7 +2919,7 @@ impl Executor {
         self.try_dispatch_wcoj_clique_k_on_body(body, 8)
     }
 
-    /// W3.2/W6.4 — Generic K-clique dispatch shared by k=5..8
+    /// Generic K-clique dispatch shared by k=5..8
     /// entries. Returns `Ok(Some(buffer))` on dispatch;
     /// `Ok(None)` on decline / fallback.
     fn try_dispatch_wcoj_clique_k_on_body(
@@ -3174,7 +3162,7 @@ impl Executor {
     /// physical slots through the generic layout-sort helper and the
     /// remaining 2-column slots through the narrower WCOJ layout entry
     /// (which preserves correctness and can take the sorted-unique fast
-    /// path). Shared by the unfused K-clique dispatch and the S1e fused
+    /// path). Shared by the unfused K-clique dispatch and the fused
     /// count-by-root dispatch; callers wrap errors through
     /// [`wcoj_decline_on_error`].
     fn orient_and_layout_kclique_edges(
@@ -3216,7 +3204,7 @@ impl Executor {
         Ok(laid_out)
     }
 
-    /// S1e aggregate-fused WCOJ, K-clique count (K = 5, 6; 4-byte keys):
+    /// Aggregate-fused WCOJ, K-clique count (K = 5, 6; 4-byte keys):
     /// dispatch the inner `MultiWayJoin(K-clique)` of a count-by-root
     /// aggregate through the fused group-by-root kernel, which never
     /// materializes the clique rows.
@@ -3640,12 +3628,12 @@ mod tests {
         assert!(match_multiway_triangle(&node).is_none());
     }
 
-    /// W2.2: triangle with Z-shared output_columns layout
+    /// Triangle with Z-shared output_columns layout
     /// `[Column(0), Column(2), Column(3)]` must match. The
-    /// matcher's output-column relaxation in W2.2 accepts both
+    /// matcher's output-column relaxation accepts both
     /// `[0, 1, 3]` (Y/X-shared) and `[0, 2, 3]` (Z-shared).
     #[test]
-    fn match_accepts_w22_z_shared_triangle_output_columns() {
+    fn match_accepts_z_shared_triangle_output_columns() {
         let mut node = canonical_multiway();
         if let RirNode::MultiWayJoin { output_columns, .. } = &mut node {
             *output_columns = vec![
@@ -3655,16 +3643,16 @@ mod tests {
             ];
         }
         let m = match_multiway_triangle(&node)
-            .expect("W2.2 matcher must accept the Z-shared output-column layout");
+            .expect("matcher must accept the Z-shared output-column layout");
         assert_eq!(m.rel_xy, RelId(1));
         assert_eq!(m.rel_yz, RelId(2));
         assert_eq!(m.rel_xz, RelId(3));
     }
 
-    /// W2.2: triangle output_columns `[Column(0), Column(3), Column(3)]`
+    /// Triangle output_columns `[Column(0), Column(3), Column(3)]`
     /// MUST be rejected — second col must be 1 or 2, not 3.
     #[test]
-    fn match_rejects_invalid_w22_triangle_output_columns() {
+    fn match_rejects_invalid_triangle_output_columns() {
         let mut node = canonical_multiway();
         if let RirNode::MultiWayJoin { output_columns, .. } = &mut node {
             *output_columns = vec![
@@ -3852,7 +3840,7 @@ mod tests {
     }
 
     // -------------------------------------------------------------
-    // v0.6.5 slice 2 — 4-cycle env-resolver + matcher tests.
+    // 4-cycle env-resolver + matcher tests.
     // -------------------------------------------------------------
 
     use super::{
@@ -3931,9 +3919,9 @@ mod tests {
         });
     }
 
-    /// **Locks the slice 2 contract**: 4-cycle adaptive opt-in
+    /// **Locks the 4-cycle adaptive contract**: adaptive opt-in
     /// defaults OFF, unlike triangle's default-on. If a future
-    /// slice flips this, that change must update this test
+    /// default flips, that change must update this test
     /// explicitly with bench evidence.
     #[test]
     fn adaptive_4cycle_resolver_defaults_off_when_env_unset() {
@@ -4047,12 +4035,12 @@ mod tests {
         assert!(match_multiway_4cycle(&node).is_none());
     }
 
-    /// W2.2: 4-cycle Alt-grouping output_columns
+    /// 4-cycle Alt-grouping output_columns
     /// `[Column(5), Column(0), Column(1), Column(3)]` must
-    /// match. The W2.2 matcher relaxation accepts both
+    /// match. The matcher relaxation accepts both
     /// Default `[0, 1, 3, 5]` and Alt `[5, 0, 1, 3]`.
     #[test]
-    fn match_4cycle_accepts_w22_alt_grouping_output_columns() {
+    fn match_4cycle_accepts_alt_grouping_output_columns() {
         let mut node = canonical_4cycle_multiway();
         if let RirNode::MultiWayJoin { output_columns, .. } = &mut node {
             *output_columns = vec![
@@ -4063,21 +4051,21 @@ mod tests {
             ];
         }
         let m = match_multiway_4cycle(&node)
-            .expect("W2.2 matcher must accept the Alt-grouping output-column layout");
+            .expect("matcher must accept the Alt-grouping output-column layout");
         // RelIds preserved positionally from the body's
         // MultiWayJoin.inputs (which are in canonical
-        // semantic order [WX, XY, YZ, ZW] per W2.2 step 2a).
+        // semantic order [WX, XY, YZ, ZW]).
         assert_eq!(m.rel_e1, RelId(1));
         assert_eq!(m.rel_e2, RelId(2));
         assert_eq!(m.rel_e3, RelId(3));
         assert_eq!(m.rel_e4, RelId(4));
     }
 
-    /// W2.2: 4-cycle output_columns `[1, 0, 3, 5]` (only swap
+    /// 4-cycle output_columns `[1, 0, 3, 5]` (only swap
     /// of cols 0 and 1 vs Default) must STILL be rejected —
     /// it's neither Default nor Alt.
     #[test]
-    fn match_4cycle_rejects_invalid_w22_output_columns() {
+    fn match_4cycle_rejects_invalid_output_columns() {
         let mut node = canonical_4cycle_multiway();
         if let RirNode::MultiWayJoin { output_columns, .. } = &mut node {
             *output_columns = vec![
