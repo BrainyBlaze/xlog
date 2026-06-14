@@ -731,7 +731,7 @@ Hardware cache terminology such as `L1` and `L2` is allowed when it refers to GP
 | `docs/architecture/python-bindings.md` | 34 | 4 | true | release labels(16), diagnostics doc path labels(6), external-consumer names(6), DTOH(4), P2b(1), M37-A+B(1) | D1(2), D2(2) |
 | `docs/architecture/query-optimizer.md` | 11 | 0 | true | release labels(6), runtime evidence codes(2), version-coded fixture path labels(2), D2H(1) | Replaced version/evidence-node labels with production runtime, exact-induction evidence, substrate handoff, and device-to-host wording. |
 | `docs/architecture/recorded-launch-migration.md` | 0 | 0 | true |  |  |
-| `docs/architecture/rfc-tensorized-ilp.md` | 17 | 1 | false | D2H(9), M1(1), M2(1), M3(1), M4(1), M5(1) | D2H(1) |
+| `docs/architecture/rfc-tensorized-ilp.md` | 99 | 3 | true | draft/release labels(81), validation milestone labels(8), D2H(10), Wave labels(3) | D2H/draft labels in code-block comments(3) |
 | `docs/architecture/solver-services.md` | 2 | 0 | false | D4(2) |  |
 | `docs/architecture/external-consumer-diagnostics.md` | 14 | 1 | true | external-consumer names(7), tracking IDs(6), release label(1), filename artifact(1) | Renamed file and replaced consumer-specific issue codes with reusable diagnostic surface descriptions. |
 | `docs/architecture/xlog-prob.md` | 15 | 0 | false | D4(13), P3(1), v085(1) |  |
