@@ -100,7 +100,7 @@ fn upload_i64(
 }
 
 #[test]
-fn w66_recursive_union_does_not_rededup_union_output() {
+fn recursive_union_does_not_rededup_union_output() {
     let Some(provider) = provider() else {
         eprintln!("CUDA unavailable; skipping");
         return;
@@ -115,16 +115,16 @@ pred support_2(i64, i64, i64, i64, i64, i64, i64, i64, i64, i64).
 
 usable(P, A0, A1) :- wmir_committed(P, A0, A1).
 
-support_2(Head, V0, V1, RId, W0P, V0, V2, W1P, V2, V1) :-
+support_2(Head, V0, V1, RId, Body0Pred, V0, V2, Body1Pred, V2, V1) :-
     wmir_len_2(RId),
-    wmir_body_0(RId, Head, W0P),
-    usable(W0P, V0, V2),
-    wmir_body_1(RId, Head, W1P),
-    usable(W1P, V2, V1).
+    wmir_body_0(RId, Head, Body0Pred),
+    usable(Body0Pred, V0, V2),
+    wmir_body_1(RId, Head, Body1Pred),
+    usable(Body1Pred, V2, V1).
 
 usable(Head, A0, A1) :- support_2(Head, A0, A1, _, _, _, _, _, _, _).
 
-?- support_2(H, A0, A1, R, W0P, W0A0, W0A1, W1P, W1A0, W1A1).
+?- support_2(H, A0, A1, R, Body0Pred, Body0Arg0, Body0Arg1, Body1Pred, Body1Arg0, Body1Arg1).
 ?- usable(P, A0, A1).
 "#;
     let program = LogicProgram::compile(source).expect("compile");
