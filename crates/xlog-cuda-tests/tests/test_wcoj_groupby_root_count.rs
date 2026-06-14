@@ -1,4 +1,4 @@
-//! D1 aggregate-fused WCOJ: group-by-root count over the triangle shape.
+//! Aggregate-fused WCOJ: group-by-root count over the triangle shape.
 //!
 //! Contract under test: `wcoj_triangle_groupby_root_count_u32_recorded`
 //! computes, for `q(X, count) :- e_xy(X,Y), e_yz(Y,Z), e_xz(X,Z)` grouped by
@@ -131,24 +131,28 @@ fn download_column_bytes(
         panic!("column must be owned");
     };
     unsafe {
-        let res = sys::cuMemcpyDtoH_v2(
-            bytes.as_mut_ptr() as *mut _,
-            *c.device_ptr(),
-            bytes.len(),
-        );
+        let res = sys::cuMemcpyDtoH_v2(bytes.as_mut_ptr() as *mut _, *c.device_ptr(), bytes.len());
         assert_eq!(res, sys::cudaError_enum::CUDA_SUCCESS, "dtoh column copy");
     }
     bytes
 }
 
-fn download_u32_column(memory: &Arc<GpuMemoryManager>, buffer: &CudaBuffer, col: usize) -> Vec<u32> {
+fn download_u32_column(
+    memory: &Arc<GpuMemoryManager>,
+    buffer: &CudaBuffer,
+    col: usize,
+) -> Vec<u32> {
     download_column_bytes(memory, buffer, col, 4)
         .chunks_exact(4)
         .map(|c| u32::from_le_bytes(c.try_into().unwrap()))
         .collect()
 }
 
-fn download_u64_column(memory: &Arc<GpuMemoryManager>, buffer: &CudaBuffer, col: usize) -> Vec<u64> {
+fn download_u64_column(
+    memory: &Arc<GpuMemoryManager>,
+    buffer: &CudaBuffer,
+    col: usize,
+) -> Vec<u64> {
     download_column_bytes(memory, buffer, col, 8)
         .chunks_exact(8)
         .map(|c| u64::from_le_bytes(c.try_into().unwrap()))
@@ -196,7 +200,12 @@ fn sorted_unique(rows: impl IntoIterator<Item = (u32, u32)>) -> Vec<(u32, u32)> 
 }
 
 /// Unfused production baseline: materialize triangles, then groupby count.
-fn baseline_group_counts(fix: &Fixture, e_xy: &CudaBuffer, e_yz: &CudaBuffer, e_xz: &CudaBuffer) -> Vec<(u32, u64)> {
+fn baseline_group_counts(
+    fix: &Fixture,
+    e_xy: &CudaBuffer,
+    e_yz: &CudaBuffer,
+    e_xz: &CudaBuffer,
+) -> Vec<(u32, u64)> {
     let stream = fix.pool.acquire().expect("stream");
     let tri = fix
         .provider
@@ -209,7 +218,12 @@ fn baseline_group_counts(fix: &Fixture, e_xy: &CudaBuffer, e_yz: &CudaBuffer, e_
     download_group_counts(&fix.memory, &grouped)
 }
 
-fn run_case(name: &str, e_xy_rows: &[(u32, u32)], e_yz_rows: &[(u32, u32)], e_xz_rows: &[(u32, u32)]) {
+fn run_case(
+    name: &str,
+    e_xy_rows: &[(u32, u32)],
+    e_yz_rows: &[(u32, u32)],
+    e_xz_rows: &[(u32, u32)],
+) {
     let Some(fix) = make_fixture() else {
         eprintln!("skipping {name}: no CUDA device");
         return;
@@ -292,17 +306,18 @@ fn groupby_root_count_matches_oracle_skewed_hub() {
     run_case("skewed_hub", &e_xy, &e_yz, &e_xz);
 }
 
-/// S1 measurement (research-plan gate: fused >= 5x on skewed fixtures,
-/// <= 1.1x regression on small uniform). Run explicitly:
+/// Aggregate-fused WCOJ triangle count measurement (research-plan gate:
+/// fused >= 5x on skewed fixtures, <= 1.1x regression on small uniform).
+/// Run explicitly:
 /// `cargo test -p xlog-cuda-tests --test test_wcoj_groupby_root_count \
 ///    --release -- --ignored --nocapture`
 /// Asserts parity; timing ratios are PRINTED and recorded as evidence, not
 /// asserted (wall-clock assertions are machine-dependent).
 #[test]
-#[ignore = "S1 measurement: run explicitly with --ignored --nocapture"]
-fn s1_measurement_fused_vs_unfused() {
+#[ignore = "aggregate-fused WCOJ triangle count measurement: run explicitly with --ignored --nocapture"]
+fn wcoj_triangle_groupby_root_count_measurement_fused_vs_unfused() {
     let Some(fix) = make_fixture() else {
-        eprintln!("skipping s1_measurement: no CUDA device");
+        eprintln!("skipping aggregate-fused WCOJ triangle count measurement: no CUDA device");
         return;
     };
 
@@ -326,7 +341,11 @@ fn s1_measurement_fused_vs_unfused() {
             e_yz.push((b, c));
             e_xz.push((a, c));
         }
-        (sorted_unique(e_xy), sorted_unique(e_yz), sorted_unique(e_xz))
+        (
+            sorted_unique(e_xy),
+            sorted_unique(e_yz),
+            sorted_unique(e_xz),
+        )
     };
 
     let small_uniform = {
@@ -339,7 +358,11 @@ fn s1_measurement_fused_vs_unfused() {
             e_yz.push((b, c));
             e_xz.push((a, c));
         }
-        (sorted_unique(e_xy), sorted_unique(e_yz), sorted_unique(e_xz))
+        (
+            sorted_unique(e_xy),
+            sorted_unique(e_yz),
+            sorted_unique(e_xz),
+        )
     };
 
     let cases: Vec<(&str, (Vec<(u32, u32)>, Vec<(u32, u32)>, Vec<(u32, u32)>))> = vec![
@@ -418,8 +441,8 @@ fn s1_measurement_fused_vs_unfused() {
         let med_unfused = unfused_ms[REPS / 2];
         let med_fused = fused_ms[REPS / 2];
         println!(
-            "S1 {name}: unfused median {med_unfused:.3} ms, fused median {med_fused:.3} ms, \
-             speedup {:.2}x (n_xy={}, n_yz={}, n_xz={})",
+            "aggregate-fused WCOJ triangle count {name}: unfused median {med_unfused:.3} ms, \
+             fused median {med_fused:.3} ms, speedup {:.2}x (n_xy={}, n_yz={}, n_xz={})",
             med_unfused / med_fused,
             e_xy_rows.len(),
             e_yz_rows.len(),
@@ -429,7 +452,7 @@ fn s1_measurement_fused_vs_unfused() {
 }
 
 // =====================================================================
-// D1 widening — u64-key variant of the fused count path.
+// u64-key variant of the aggregate-fused WCOJ triangle count path.
 // =====================================================================
 
 fn upload_binary_u64(memory: &Arc<GpuMemoryManager>, rows: &[(u64, u64)]) -> CudaBuffer {
@@ -605,15 +628,17 @@ fn groupby_root_count_u64_matches_oracle_skewed_hub() {
     run_case_u64("u64_skewed_hub", &e_xy, &e_yz, &e_xz);
 }
 
-/// S1b measurement, u64-key count (agg-widening gate: fused >= 3x vs
-/// unfused on skewed fixtures). Run explicitly:
+/// u64-key aggregate-fused WCOJ triangle count measurement (widening gate:
+/// fused >= 3x vs unfused on skewed fixtures). Run explicitly:
 /// `cargo test -p xlog-cuda-tests --test test_wcoj_groupby_root_count \
 ///    --release -- --ignored --nocapture`
 #[test]
-#[ignore = "S1b measurement: run explicitly with --ignored --nocapture"]
-fn s1b_measurement_u64_count_fused_vs_unfused() {
+#[ignore = "u64-key aggregate-fused WCOJ triangle count measurement: run explicitly with --ignored --nocapture"]
+fn wcoj_triangle_groupby_root_count_u64_measurement_fused_vs_unfused() {
     let Some(fix) = make_fixture() else {
-        eprintln!("skipping s1b_measurement_u64: no CUDA device");
+        eprintln!(
+            "skipping u64-key aggregate-fused WCOJ triangle count measurement: no CUDA device"
+        );
         return;
     };
 
@@ -728,8 +753,8 @@ fn s1b_measurement_u64_count_fused_vs_unfused() {
         let med_unfused = unfused_ms[REPS / 2];
         let med_fused = fused_ms[REPS / 2];
         println!(
-            "S1b {name}: unfused median {med_unfused:.3} ms, fused median {med_fused:.3} ms, \
-             speedup {:.2}x (n_xy={}, n_yz={}, n_xz={})",
+            "u64-key aggregate-fused WCOJ triangle count {name}: unfused median {med_unfused:.3} ms, \
+             fused median {med_fused:.3} ms, speedup {:.2}x (n_xy={}, n_yz={}, n_xz={})",
             med_unfused / med_fused,
             e_xy_rows.len(),
             e_yz_rows.len(),
@@ -807,7 +832,18 @@ fn groupby_root_count_layout_normalizes_unsorted_inputs() {
     // (wcoj_layout_u32_recorded); the fused entries must give the same
     // guarantee instead of trusting store-buffer sortedness. Unsorted,
     // duplicated uploads must still produce oracle-correct counts.
-    let e_xy_raw = vec![(5u32, 6u32), (1, 3), (1, 2), (2, 3), (1, 3), (5, 7), (1, 4), (2, 4), (3, 4), (6, 7)];
+    let e_xy_raw = vec![
+        (5u32, 6u32),
+        (1, 3),
+        (1, 2),
+        (2, 3),
+        (1, 3),
+        (5, 7),
+        (1, 4),
+        (2, 4),
+        (3, 4),
+        (6, 7),
+    ];
     let e_yz_raw = vec![(3u32, 4u32), (2, 4), (2, 3), (6, 7), (2, 3)];
     let e_xz_raw = vec![(2u32, 4u32), (1, 4), (1, 3), (3, 4), (5, 7), (1, 3)];
 
@@ -836,5 +872,8 @@ fn groupby_root_count_layout_normalizes_unsorted_inputs() {
         )
         .expect("fused groupby-root count on unsorted inputs");
     let fused = download_group_counts(&fix.memory, &fused);
-    assert_eq!(fused, expected, "unsorted+duplicated inputs must be layout-normalized");
+    assert_eq!(
+        fused, expected,
+        "unsorted+duplicated inputs must be layout-normalized"
+    );
 }

@@ -3,9 +3,9 @@
 Scope: Git-tracked source and documentation files only. Superpowers docs, plan files, evidence directories, generated artifacts, result/output directories, build output, and other worktrees are excluded.
 
 Scanned files: 1430
-Unresolved files: 281
-Comment/prose artifact occurrences: 1798
-Code/identifier artifact occurrences: 690
+Unresolved files: 280
+Comment/prose artifact occurrences: 1794
+Code/identifier artifact occurrences: 686
 
 Resolved means this board found no remaining opaque task/milestone labels or external consumer names in the eligible portions of that file.
 
@@ -29,8 +29,9 @@ Hardware cache terminology such as `L2` is allowed when it refers to GPU level-2
 | `v085` | legacy v0.8.5 language milestone/examples |
 | `W2.5` | WCOJ cost-model default flip to the cardinality model |
 | `D2` | GPU Free Join level-synchronous factorized join execution |
+| `S1` | aggregate-fused WCOJ triangle group-by-root count measurement gate |
 | `S2` | provider-level Free Join frontier-engine spike and measurement gates |
-| `S1b` | aggregate-fused WCOJ triangle aggregate widening gate |
+| `S1b` | aggregate-fused WCOJ triangle aggregate and u64-key count widening gate |
 | `S1c` | aggregate-fused WCOJ 4-cycle group-by-root count fusion and u64-key triangle aggregate widening |
 | `S1d` | aggregate-fused WCOJ 4-cycle group-by-root sum/min/max variants and recorded-groupby U64 value-column min/max widening |
 | `S1e` | aggregate-fused WCOJ K-clique group-by-root count fusion |
@@ -226,7 +227,7 @@ Hardware cache terminology such as `L2` is allowed when it refers to GPU level-2
 | `crates/xlog-cuda-tests/tests/test_wcoj_4cycle_groupby_root_count.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-cuda-tests/tests/test_wcoj_clique_groupby_root_count.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-cuda-tests/tests/test_wcoj_groupby_root_agg.rs` | 0 | 0 | true |  |  |
-| `crates/xlog-cuda-tests/tests/test_wcoj_groupby_root_count.rs` | 4 | 4 | false | D1(2), S1(1), S1b(1) | S1(2), S1b(2) |
+| `crates/xlog-cuda-tests/tests/test_wcoj_groupby_root_count.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-cuda-tests/tests/test_wcoj_metadata.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-cuda/Cargo.toml` | 0 | 0 | true |  |  |
 | `crates/xlog-cuda/build.rs` | 0 | 0 | true |  |  |
