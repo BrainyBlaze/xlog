@@ -64,9 +64,9 @@ pub const KERNEL_MODULES: &[KernelModuleSpec] = &[
             "hash_join_semi",
             "hash_join_anti",
             "init_hash_table",
-            // W4.2 nested-loop inner join (emit-pairs design).
+            // Nested-loop inner join production operator (emit-pairs design).
             "nested_loop_join_inner_u32_1key_pairs",
-            // W4.3 sort-merge inner join (emit-pairs design,
+            // Sort-merge inner join provider-level operator (emit-pairs design,
             // caller-asserted pre-sorted inputs).
             "sort_merge_join_inner_u32_1key_pairs",
         ],
@@ -141,9 +141,8 @@ pub const KERNEL_MODULES: &[KernelModuleSpec] = &[
             "gather_keys_i64_hi_u32",
             "gather_keys_f64_lo_u32",
             "gather_keys_f64_hi_u32",
-            // W4.3 sortedness-detection kernel (used by the
-            // dispatch-site eligibility check before invoking
-            // the sort-merge join).
+            // Sort-merge sortedness-detection kernel used by provider-level
+            // callers before invoking the sort-merge join.
             "check_ascending_sorted_u32",
         ],
     },
@@ -530,9 +529,9 @@ pub const KERNEL_MODULES: &[KernelModuleSpec] = &[
             "wcoj_4cycle_count_hg_u64",
             "wcoj_4cycle_groupby_root_count_hg_u64",
             "wcoj_4cycle_materialize_hg_u64",
-            // W3.2/W6.4 — General-arity clique kernel (k=5..8 from
-            // single C++ template; ABI wrappers below are
-            // template-call-only per Tier-1 source-audit).
+            // General-arity WCOJ clique kernel family (k=5..8 from
+            // a single C++ template; ABI wrappers below are
+            // template-call-only for source-auditability).
             "wcoj_clique5_count_hg_u32",
             "wcoj_clique5_materialize_hg_u32",
             "wcoj_clique5_count_hg_u64",
@@ -549,22 +548,21 @@ pub const KERNEL_MODULES: &[KernelModuleSpec] = &[
             "wcoj_clique8_materialize_hg_u32",
             "wcoj_clique8_count_hg_u64",
             "wcoj_clique8_materialize_hg_u64",
-            // S1e — aggregate-fused K-clique count-by-root (u32
+            // Aggregate-fused K-clique group-by-root count kernels (u32
             // width-class, K=5/6).
             "wcoj_clique5_groupby_root_count_hg_u32",
             "wcoj_clique6_groupby_root_count_hg_u32",
-            // D2 S2 spike — Free Join level-synchronous frontier
-            // engine primitives.
+            // GPU Free Join level-synchronous frontier engine primitives.
             "fj_expand_work_prefix_u32",
             "fj_expand_count_u32",
             "fj_expand_emit_u32",
             "fj_probe_refine_u32",
-            // Phase C — u64 width-class twins (work prefix is
+            // u64 width-class twins (work prefix is
             // width-agnostic and shared).
             "fj_expand_count_u64",
             "fj_expand_emit_u64",
             "fj_probe_refine_u64",
-            // Phase C — factorized count epilogue (width-agnostic).
+            // Factorized count epilogue (width-agnostic).
             "fj_count_multiplicity",
         ],
     },
