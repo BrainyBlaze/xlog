@@ -342,9 +342,9 @@ pub struct EpistemicGpuFinalResultTransferTrace {
     pub final_output_payload_bytes: u64,
     /// Device row-count metadata reads used for this accounting.
     pub row_count_device_reads: u32,
-    /// Data-plane D2H calls issued by accepted execution. Execution returns a device buffer, so this is zero.
+    /// Data-plane device-to-host calls issued by accepted execution. Execution returns a device buffer, so this is zero.
     pub tracked_data_plane_dtoh_calls: u64,
-    /// Data-plane D2H bytes issued by accepted execution. Execution returns a device buffer, so this is zero.
+    /// Data-plane device-to-host bytes issued by accepted execution. Execution returns a device buffer, so this is zero.
     pub tracked_data_plane_dtoh_bytes: u64,
 }
 
@@ -461,7 +461,7 @@ pub struct EpistemicGpuSemanticTrace {
     /// `rejected_candidate_indices`. `Some(idx)` when an integrity constraint
     /// (reason code 6) rejected the candidate, where `idx` is the firing
     /// constraint's declaration-order index; `None` for every other rejection
-    /// reason. Surfaces EGB-04.K2 constraint-specific rejection detail.
+    /// reason. Surfaces constraint-specific rejection detail.
     pub constraint_violation_indices: Vec<Option<u32>>,
     /// Bounded metadata reads from the device rejection buffer after the hot path.
     pub rejection_reason_device_reads: u32,
@@ -1067,7 +1067,7 @@ impl EpistemicGpuTransferBudgetTrace {
     }
 
     /// Build a hot-path transfer trace while distinguishing bounded launch
-    /// metadata H2D from data-plane transfers.
+    /// metadata host-to-device transfers from data-plane transfers.
     pub fn from_host_transfer_stats_with_launch_metadata(
         candidate_count: usize,
         before: HostTransferStats,
@@ -1968,7 +1968,7 @@ pub struct EpistemicGpuRuntimePreflight {
     pub wcoj_triangle_route_count: usize,
     /// Number of 4-cycle WCOJ routes reused from the production runtime.
     pub wcoj_4cycle_route_count: usize,
-    /// D2 — generic Free Join multiway routes: `plan: None` nodes
+    /// Generic Free Join multiway routes: `plan: None` nodes
     /// matching no dedicated kernel shape. Opportunistic by contract —
     /// the dispatcher may structurally decline to the embedded binary
     /// fallback (non-prefix bound columns, non-u32 inputs, …), so these
@@ -2022,7 +2022,7 @@ pub struct EpistemicGpuRuntimePreflight {
 }
 
 impl EpistemicGpuRuntimePreflight {
-    /// Whether this accepted execution used G91 compatibility semantics.
+    /// Whether this accepted execution used Gelfond-1991 (G91) compatibility semantics.
     pub fn is_g91_mode(&self) -> bool {
         matches!(self.epistemic_mode, EirEpistemicMode::G91)
     }
@@ -2340,7 +2340,7 @@ pub struct EpistemicGpuRuntimeCounters {
     pub wcoj_clique7_dispatch_count: u64,
     /// Successful K=8 clique WCOJ dispatches installed by the executor.
     pub wcoj_clique8_dispatch_count: u64,
-    /// D2 — successful generic Free Join dispatches installed by the
+    /// Successful generic Free Join dispatches installed by the
     /// executor. Observability only: free-join routes carry no hard
     /// dispatch obligation (structural declines execute the embedded
     /// binary fallback by contract), so this counter never gates
@@ -2865,15 +2865,15 @@ pub struct EpistemicGpuBatchExecutionTrace {
     pub cpu_solver_search_fallbacks: u64,
     /// CPU probability recomputations observed across component preflight traces.
     pub cpu_probability_recomputations: u64,
-    /// Hot-path D2H calls tracked across all components.
+    /// Hot-path device-to-host calls tracked across all components.
     pub tracked_dtoh_calls: u64,
-    /// Hot-path data-plane H2D calls tracked across all components.
+    /// Hot-path data-plane host-to-device calls tracked across all components.
     pub tracked_htod_calls: u64,
-    /// Hot-path aggregate H2D calls tracked across all components.
+    /// Hot-path aggregate host-to-device calls tracked across all components.
     pub tracked_aggregate_htod_calls: u64,
-    /// Hot-path launch-metadata H2D calls tracked across all components.
+    /// Hot-path launch-metadata host-to-device calls tracked across all components.
     pub tracked_launch_metadata_htod_calls: u64,
-    /// Hot-path data-plane H2D calls tracked across all components.
+    /// Hot-path data-plane host-to-device calls tracked across all components.
     pub tracked_data_plane_htod_calls: u64,
     /// Per-candidate host round trips tracked across all components.
     pub per_candidate_host_round_trips: u64,
@@ -2883,9 +2883,9 @@ pub struct EpistemicGpuBatchExecutionTrace {
     pub final_output_payload_bytes: u64,
     /// Device row-count metadata reads used for component final-result accounting.
     pub final_result_row_count_device_reads: u32,
-    /// Post-hot-path final-result data-plane D2H calls across all components.
+    /// Post-hot-path final-result data-plane device-to-host calls across all components.
     pub final_result_data_plane_dtoh_calls: u64,
-    /// Post-hot-path final-result data-plane D2H bytes across all components.
+    /// Post-hot-path final-result data-plane device-to-host bytes across all components.
     pub final_result_data_plane_dtoh_bytes: u64,
     /// Reduced integrity-constraint relations checked across all components.
     pub checked_constraint_relations: usize,
@@ -3216,7 +3216,7 @@ impl EpistemicGpuRuntimeWcojCertification {
         let wcoj_routed_reduction_count = preflight
             .multiway_reduction_count
             .checked_sub(preflight.planned_hash_route_count)
-            // D2 — generic Free Join routes are opportunistic by
+            // Generic Free Join routes are opportunistic by
             // contract (structural decline executes the embedded
             // binary fallback), so they never form part of the hard
             // dedicated-WCOJ dispatch obligation.
@@ -5098,7 +5098,7 @@ impl Executor {
         // candidate rejected by reason codes 1-5 (or accepted) must read back as
         // the sentinel, never a spurious `Some(0)`. The upload rides the
         // launch-metadata channel (like the CSR buffers below), so it adds no
-        // tracked data-plane HTOD and keeps `host_write_ops` at zero.
+        // tracked data-plane host-to-device transfer and keeps `host_write_ops` at zero.
         if candidate_count > workspace.layout.rejection_reason_slots {
             return Err(XlogError::ResourceExhausted {
                 context: "epistemic GPU constraint-violation index workspace".to_string(),
@@ -6582,7 +6582,7 @@ fn summarize_runtime_routes(node: &RirNode, routes: &mut RuntimeRouteSummary) {
                         }
                     }
                 }
-                // D2 — generic Free Join route: provenance variant set
+                // Generic Free Join route: provenance variant set
                 // only by the general multiway promoter. Opportunistic
                 // — the dispatcher's structural decline executes the
                 // embedded binary fallback, so no hard dispatch

@@ -664,7 +664,7 @@ Hardware cache terminology such as `L1` and `L2` is allowed when it refers to GP
 | `crates/xlog-prob/tests/prob_aggregates.rs` | 0 | 1 | true | Renamed the legacy milestone test file and replaced stale probabilistic aggregate diagnostic assertions with current exact aggregate wording. | v085(1) |
 | `crates/xlog-runtime/Cargo.toml` | 4 | 0 | true | Replaced recursive-stats trace milestone comments and test target metadata with behavior-based wording. | W2.3(4) |
 | `crates/xlog-runtime/src/executor/delta.rs` | 0 | 0 | true |  |  |
-| `crates/xlog-runtime/src/executor/epistemic_workspace.rs` | 10 | 1 | false | D2H(5), D2(4), G91(1) | G91(1) |
+| `crates/xlog-runtime/src/executor/epistemic_workspace.rs` | 10 | 1 | true | Removed generic Free Join milestone labels, expanded transfer-direction prose, and replaced the constraint-rejection task label with behavior wording. | G91(1) allowed as public Gelfond-1991 compatibility semantics. |
 | `crates/xlog-runtime/src/executor/expression.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-runtime/src/executor/join_cache.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-runtime/src/executor/mod.rs` | 16 | 0 | false | W2.3(5), D2H(3), W3.2(2), W6.4(2), W4.2(2), D1(1) |  |
