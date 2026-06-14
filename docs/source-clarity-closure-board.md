@@ -452,7 +452,7 @@ Hardware cache terminology such as `L1` and `L2` is allowed when it refers to GP
 | `crates/xlog-integration/tests/test_wcoj_record_join_result_feedback.rs` | 0 | 0 | true | - | - |
 | `crates/xlog-integration/tests/test_wcoj_recursive_dispatch.rs` | 0 | 0 | true | - | - |
 | `crates/xlog-integration/tests/test_wcoj_rir_shape_cert.rs` | 0 | 0 | true |  |  |
-| `crates/xlog-integration/tests/test_widened_frontier_replay.rs` | 1 | 0 | false | W5.4(1) |  |
+| `crates/xlog-integration/tests/test_widened_frontier_replay.rs` | 0 | 0 | true | - | - |
 | `crates/xlog-ir/Cargo.toml` | 0 | 0 | true |  |  |
 | `crates/xlog-ir/src/eir.rs` | 1 | 1 | false | G91(1) | G91(1) |
 | `crates/xlog-ir/src/epistemic_plan.rs` | 0 | 0 | true |  |  |
