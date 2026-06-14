@@ -538,7 +538,7 @@ Hardware cache terminology such as `L1` and `L2` is allowed when it refers to GP
 | `crates/xlog-logic/tests/test_epistemic_faeel.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-logic/tests/test_epistemic_faeel_foundedness.rs` | 0 | 0 | true | - | G91 is the public Gelfond-1991 compatibility mode; replaced foundedness release, item, pilot, and section-code labels with behavior wording. |
 | `crates/xlog-logic/tests/test_epistemic_g91.rs` | 0 | 0 | true | - | G91 is the public Gelfond-1991 compatibility mode under test; removed release and bundle labels from the FAEEL-vs-G91 comment. |
-| `crates/xlog-logic/tests/test_epistemic_gpt.rs` | 0 | 1 | false |  | G91(1) |
+| `crates/xlog-logic/tests/test_epistemic_gpt.rs` | 0 | 0 | true | - | G91 is the public Gelfond-1991 compatibility mode used by the GPT compatibility-mode test. |
 | `crates/xlog-logic/tests/test_epistemic_gpu_plan.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-logic/tests/test_epistemic_split.rs` | 9 | 5 | false | G91(8), S5(1) | G91(5) |
 | `crates/xlog-logic/tests/test_epistemic_world_view.rs` | 0 | 0 | true |  |  |
