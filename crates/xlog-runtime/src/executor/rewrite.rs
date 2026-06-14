@@ -253,9 +253,9 @@ impl Executor {
                     base, recursive, ..
                 } => contains_non_monotonic_ops(base) || contains_non_monotonic_ops(recursive),
                 RirNode::TensorMaskedJoin { .. } => false,
-                // v0.6.5: walk the fallback. The promoter only wraps
-                // already-monotonic triangle subtrees in v1, but the
-                // fallback is the load-bearing source of truth.
+                // Walk the fallback. The promoter only wraps already-monotonic
+                // multiway subtrees, but the fallback is the load-bearing
+                // source of truth.
                 RirNode::MultiWayJoin { fallback, .. } | RirNode::ChainJoin { fallback, .. } => {
                     contains_non_monotonic_ops(fallback)
                 }
@@ -400,8 +400,8 @@ impl Executor {
                     out.push(*rel_id);
                 }
             }
-            // v0.6.5: collect from `inputs` only — the fallback subtree
-            // references the same set by promoter invariant.
+            // Collect from `inputs` only; the fallback subtree references the
+            // same set by promoter invariant.
             RirNode::MultiWayJoin { inputs, .. } => {
                 for input in inputs {
                     Self::collect_scan_rels(input, out);
@@ -433,14 +433,13 @@ impl Executor {
             RirNode::Scan { rel } => {
                 if *rel == target {
                     if *remaining == 0 {
-                        // W4.1 (paper P1): replace exactly one occurrence
-                        // per `rewrite_scan_nth` call, then mark this walk
-                        // "done" via the `usize::MAX` sentinel so subsequent
-                        // matches in the same walk do NOT replace again.
-                        // Without this, a body with 2+ same-predicate
-                        // recursive Scans would have ALL occurrences after
-                        // `nth` overwritten when the caller intended only
-                        // the `nth`-th to be substituted.
+                        // Replace exactly one occurrence per `rewrite_scan_nth`
+                        // call, then mark this walk "done" via the
+                        // `usize::MAX` sentinel so subsequent matches in the
+                        // same walk do NOT replace again. Without this, a body
+                        // with 2+ same-predicate recursive Scans would have
+                        // ALL occurrences after `nth` overwritten when the
+                        // caller intended only the `nth`-th to be substituted.
                         *remaining = usize::MAX;
                         return (RirNode::Scan { rel: replacement }, true);
                     }
@@ -646,16 +645,15 @@ impl Executor {
                     replaced_left || replaced_right || fallback_replaced,
                 )
             }
-            // W4.1 (paper P1): rewrite `inputs` and `fallback` with
-            // SEPARATE `remaining` counter copies — both views are the
-            // same logical body, so each must independently target the
-            // N-th occurrence. Sharing one counter across the two walks
-            // contaminated the fallback's count by the inputs' consumed
-            // matches, which produced wrong-occurrence substitutions on
-            // self-recursive bodies. The outer caller's `remaining` is
-            // updated to whatever the inputs walk consumed, so siblings
-            // of this MultiWayJoin (rare; typically wrapped in Project)
-            // see consistent counting.
+            // Rewrite `inputs` and `fallback` with SEPARATE `remaining`
+            // counter copies. Both views are the same logical body, so each
+            // must independently target the N-th occurrence. Sharing one
+            // counter across the two walks contaminated the fallback's count
+            // by the inputs' consumed matches, which produced
+            // wrong-occurrence substitutions on self-recursive bodies. The
+            // outer caller's `remaining` is updated to whatever the inputs
+            // walk consumed, so siblings of this MultiWayJoin (rare; typically
+            // wrapped in Project) see consistent counting.
             RirNode::MultiWayJoin {
                 inputs,
                 slot_vars,
@@ -713,11 +711,11 @@ impl Executor {
 
 #[cfg(test)]
 mod multiway_walker_tests {
-    //! v0.6.5 slice 1: walker arm coverage for `MultiWayJoin` in the
-    //! rewrite module. `contains_non_monotonic_ops` is a nested `fn`
-    //! inside an `Executor` method and is not directly callable; its
-    //! arm is exercised through integration tests in step 5. The two
-    //! `pub(crate)` walkers below are testable in isolation.
+    //! Walker arm coverage for `MultiWayJoin` in the rewrite module.
+    //! `contains_non_monotonic_ops` is a nested `fn` inside an `Executor`
+    //! method and is not directly callable; its arm is exercised through
+    //! integration tests. The two `pub(crate)` walkers below are testable in
+    //! isolation.
 
     use super::*;
     use xlog_ir::rir::ProjectExpr;
@@ -779,12 +777,11 @@ mod multiway_walker_tests {
         assert!(out.contains(&RelId(30)));
     }
 
-    /// W4.1 (paper P1) input/fallback symmetric semantic: `RelId(10)`
-    /// appears once in `inputs[0]` AND once inside `fallback` (the
-    /// outer join's leftmost leaf). Both copies are the 0-th
-    /// occurrence in their respective walks. Per the paper-P1
-    /// contract that inputs and fallback are two views of the same
-    /// logical body, `occ=0` substitutes BOTH copies.
+    /// Input/fallback symmetric rewrite semantic: `RelId(10)` appears once in
+    /// `inputs[0]` AND once inside `fallback` (the outer join's leftmost leaf).
+    /// Both copies are the 0-th occurrence in their respective walks. Because
+    /// inputs and fallback are two views of the same logical body, `occ=0`
+    /// substitutes BOTH copies.
     ///
     /// `occ=1` returns `None` because `RelId(10)` has only ONE
     /// occurrence per view; there is no 2nd occurrence to substitute.
@@ -835,14 +832,14 @@ mod multiway_walker_tests {
         );
     }
 
-    /// v0.6.5 slice 2 (D4) — shape-agnosticism guard.
+    /// MultiWayJoin shape-agnosticism guard.
     ///
-    /// Slice 1's promoter is triangle-only; future slices will add
-    /// 4-input shapes. The walker arms in `collect_scan_rels` and
-    /// `rewrite_scan_nth_impl` must NOT hard-code `inputs.len() ==
-    /// 3`. Synthesize a 4-input `MultiWayJoin` directly and exercise
-    /// the walker. This test does NOT execute the IR through the
-    /// runtime — it only pins the walker's contract.
+    /// The earliest promoter path was triangle-only; later paths add 4-input
+    /// shapes. The walker arms in `collect_scan_rels` and
+    /// `rewrite_scan_nth_impl` must NOT hard-code `inputs.len() == 3`.
+    /// Synthesize a 4-input `MultiWayJoin` directly and exercise the walker.
+    /// This test does NOT execute the IR through the runtime; it only pins the
+    /// walker's contract.
     fn fourway_multiway(a: RelId, b: RelId, c: RelId, d: RelId) -> RirNode {
         // Synthetic 4-cycle slot_vars [[A,B],[B,C],[C,D],[A,D]] with
         // a stub fallback whose Scan leaves repeat each rel once.
@@ -918,12 +915,11 @@ mod multiway_walker_tests {
         }
     }
 
-    /// W4.1 (paper P1) input/fallback symmetric semantic for the
-    /// 4-input shape: `RelId(40)` appears once in `inputs[3]` AND
-    /// once inside `fallback` (the outer join's right scan). Both
-    /// copies are the 0-th occurrence in their respective walks; per
-    /// the paper-P1 input/fallback symmetric contract, `occ=0`
-    /// substitutes BOTH copies.
+    /// Input/fallback symmetric rewrite semantic for the 4-input shape:
+    /// `RelId(40)` appears once in `inputs[3]` AND once inside `fallback` (the
+    /// outer join's right scan). Both copies are the 0-th occurrence in their
+    /// respective walks; the input/fallback symmetry contract makes `occ=0`
+    /// substitute BOTH copies.
     ///
     /// `occ=1` returns `None` because `RelId(40)` has only ONE
     /// occurrence per view.
@@ -1006,11 +1002,10 @@ mod multiway_walker_tests {
 }
 
 #[cfg(test)]
-mod w41_rewrite_scan_nth_occurrence_identity_tests {
-    //! W4.1 (paper P1) — `rewrite_scan_nth` occurrence-identity
-    //! preservation. The Step-6 fix at `rewrite.rs:Scan case` (sentinel
-    //! post-replacement) and `:MultiWayJoin arm` (separate `remaining`
-    //! counters for inputs vs fallback) ensures:
+mod rewrite_scan_nth_occurrence_identity_tests {
+    //! `rewrite_scan_nth` occurrence-identity preservation. The scan-case
+    //! sentinel after replacement and the `MultiWayJoin` arm's separate
+    //! `remaining` counters for inputs vs fallback ensure:
     //!
     //! 1. For a body with N same-predicate occurrences, calling
     //!    `rewrite_scan_nth(body, target, occ=k, replacement)` substitutes
@@ -1021,7 +1016,7 @@ mod w41_rewrite_scan_nth_occurrence_identity_tests {
     //!    in inputs AND in fallback (both views share the same logical
     //!    body; both must reflect the same logical rewrite).
     //!
-    //! Pre-W4.1 behavior bugs (now fixed):
+    //! Fixed behavior bugs:
     //! - Scan case early-returned on match without decrementing
     //!   `remaining`, so subsequent matches in the same walk would also
     //!   replace at remaining==0.
@@ -1029,9 +1024,9 @@ mod w41_rewrite_scan_nth_occurrence_identity_tests {
     //!   and the subsequent fallback walk; the fallback walk's counter
     //!   was contaminated by inputs' consumption.
     //!
-    //! Both bugs latent on distinct-recursive-predicate fixtures (slice 4
-    //! single-rec, MULTIREC_TRIANGLE with r1+r2 distinct); manifest on
-    //! same-predicate self-recursive bodies admitted by W4.1 Step 5.
+    //! Both bugs were latent on distinct-recursive-predicate fixtures and
+    //! manifest on same-predicate self-recursive bodies with multiple target
+    //! occurrences.
 
     use super::*;
     use xlog_ir::rir::ProjectExpr;
@@ -1200,7 +1195,7 @@ mod w41_rewrite_scan_nth_occurrence_identity_tests {
         assert!(matches!(left.as_ref(), RirNode::Scan { rel } if *rel == delta));
     }
 
-    /// Pre-W4.1 bug pin: with 3 occurrences of `target` in `inputs`
+    /// Regression pin: with 3 occurrences of `target` in `inputs`
     /// and 3 in `fallback`, the sentinel/separate-counter fix BOTH
     /// applied makes occ=k substitute the k-th occurrence in
     /// **inputs walk order** AND the k-th occurrence in **fallback
@@ -1257,10 +1252,10 @@ mod w41_rewrite_scan_nth_occurrence_identity_tests {
         }
     }
 
-    /// Pre-W4.1 bug pin: occ=0 of a target appearing in input[0] AND
+    /// Regression pin: occ=0 of a target appearing in input[0] AND
     /// in fallback's leftmost leaf substitutes BOTH copies (input/
-    /// fallback symmetry). Locks paper-P1's "logical body shared
-    /// between inputs and fallback" semantic.
+    /// fallback symmetry). Locks the "logical body shared between inputs and
+    /// fallback" semantic.
     ///
     /// This test asserts the EXACT post-rewrite shape (input[0]
     /// becomes replacement; the rest of the inputs+fallback structure

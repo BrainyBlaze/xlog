@@ -670,7 +670,7 @@ Hardware cache terminology such as `L1` and `L2` is allowed when it refers to GP
 | `crates/xlog-runtime/src/executor/mod.rs` | 16 | 0 | true | Replaced runtime counter, recursive stats trace, ILP accessor, release-label, and authorization-label comments with behavior-based wording. |  |
 | `crates/xlog-runtime/src/executor/node_dispatch.rs` | 12 | 0 | true | Replaced nested-loop dispatch, aggregate-fusion, fallback, and ILP tensor-mask milestone comments with behavior-based wording. |  |
 | `crates/xlog-runtime/src/executor/recursive.rs` | 16 | 0 | true | Replaced recursive stats trace, recursive WCOJ, Free Join, paper shorthand, and k-clique milestone comments with behavior-based wording. |  |
-| `crates/xlog-runtime/src/executor/rewrite.rs` | 18 | 0 | false | W4.1(9), P1(8), D4(1) |  |
+| `crates/xlog-runtime/src/executor/rewrite.rs` | 18 | 1 | true | Replaced occurrence-rewrite, input/fallback symmetry, shape-agnosticism, and release/slice milestone comments; renamed milestone-labeled test module. |  |
 | `crates/xlog-runtime/src/executor/wcoj_cost_model.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-runtime/src/executor/wcoj_dispatch.rs` | 98 | 3 | false | W2.1(18), W2.6(15), W2.2(11), W2.4(10), W3.2(9), W6.4(8) | W2.2(2), W2.1(1) |
 | `crates/xlog-runtime/src/executor/wcoj_phase_timing.rs` | 0 | 0 | true |  |  |
