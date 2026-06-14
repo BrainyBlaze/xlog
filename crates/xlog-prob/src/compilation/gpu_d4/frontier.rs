@@ -1,4 +1,4 @@
-//! Frontier expansion for GPU D4 compilation.
+//! Frontier expansion for GPU-native Decision-DNNF knowledge compilation.
 
 use std::ffi::c_void;
 
@@ -14,7 +14,7 @@ use super::{
 };
 
 // ---------------------------------------------------------------------------
-// Frontier work queues (Phase 1) - device-resident BFS expansion
+// Frontier work queues for device-resident breadth-first expansion
 // ---------------------------------------------------------------------------
 
 /// Must match `struct D4WorkItem` in `kernels/d4.cu`.
@@ -104,7 +104,7 @@ impl GpuFrontierDense {
 
 /// Build a BFS frontier using compressed bitsets (default).
 ///
-/// This is an internal building block for Phase 1 GPU D4 compilation.
+/// This is an internal building block for GPU-native Decision-DNNF frontier expansion.
 pub(crate) fn build_frontier_bitset(
     cnf: &GpuCnf,
     provider: &CudaKernelProvider,

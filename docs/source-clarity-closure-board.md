@@ -587,7 +587,7 @@ Hardware cache terminology such as `L1` and `L2` is allowed when it refers to GP
 | `crates/xlog-prob/src/compilation/gpu_cache.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-prob/src/compilation/gpu_cnf.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-prob/src/compilation/gpu_d4/build.rs` | 0 | 0 | true |  |  |
-| `crates/xlog-prob/src/compilation/gpu_d4/frontier.rs` | 2 | 0 | false | D4(2) |  |
+| `crates/xlog-prob/src/compilation/gpu_d4/frontier.rs` | 0 | 0 | true | - | Replaced prose GPU D4 and Phase 1 labels with GPU-native Decision-DNNF frontier-expansion wording; D4 remains only in ABI/kernel identifiers. |
 | `crates/xlog-prob/src/compilation/gpu_d4/mod.rs` | 2 | 0 | false | D4(2) |  |
 | `crates/xlog-prob/src/compilation/gpu_pir.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-prob/src/compilation/gpu_pir_intern.rs` | 0 | 0 | true |  |  |
