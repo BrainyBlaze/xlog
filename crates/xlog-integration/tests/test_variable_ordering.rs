@@ -1,22 +1,22 @@
-// crates/xlog-integration/tests/test_w21_variable_ordering.rs
-//! W2.1 step 7 — Part C, D, E acceptance gate (11 tests).
+// crates/xlog-integration/tests/test_variable_ordering.rs
+//! Variable-ordering acceptance coverage for WCOJ dispatch.
 //!
 //! End-to-end + IR-level acceptance for the variable-ordering
 //! cost model:
 //!
-//! * Part C (7) — end-to-end row-set parity. Each test compiles
+//! * End-to-end row-set parity. Each test compiles
 //!   a triangle/4-cycle fixture with stats favoring a target
 //!   leader, runs both with force-WCOJ + LeaderCardinality and
 //!   force-binary-join, and asserts:
 //!     - WCOJ dispatch counter ≥ 1 (kernel actually ran).
-//!     - WCOJ row set equals the binary-join reference (W2.1
+//!     - WCOJ row set equals the binary-join reference (variable-ordering
 //!       reordering preserves rule semantics).
 //!
-//! * Part D (2) — stats-driven divergence. Same source, two
+//! * Stats-driven divergence. Same source, two
 //!   distinct stats snapshots → different `var_order.leader_idx`
 //!   on the compiled plans.
 //!
-//! * Part E (2) — threshold gate cert. Ratio at 0.6 (above 0.5)
+//! * Threshold gate coverage. Ratio at 0.6 (above 0.5)
 //!   leaves `var_order = None`; ratio at 0.3 fires.
 
 use std::collections::BTreeMap;
@@ -38,7 +38,7 @@ use xlog_runtime::Executor;
 use xlog_stats::{RelationStats, StatsSnapshot};
 
 // ---------------------------------------------------------------
-// Fixture infrastructure (mirrors W2.2 cert conventions).
+// Fixture infrastructure used by selectivity and variable-ordering certs.
 // ---------------------------------------------------------------
 
 struct DiscardSink;
@@ -277,7 +277,7 @@ fn make_snapshot(seeded: &[(&str, u64)]) -> StatsSnapshot {
     }
 }
 
-fn run_w21(
+fn run_variable_ordering(
     fix: &RuntimeBackedFixture,
     runtime_config: RuntimeConfig,
     source: &str,
@@ -315,7 +315,7 @@ fn no_wcoj_cfg() -> RuntimeConfig {
     c
 }
 
-fn w21_compiler_config(kind: WcojVarOrderingKind) -> CompilerConfig {
+fn variable_ordering_compiler_config(kind: WcojVarOrderingKind) -> CompilerConfig {
     CompilerConfig {
         wcoj_variable_ordering: kind,
         ..CompilerConfig::default()
@@ -347,182 +347,182 @@ fn first_var_order(plan: &xlog_ir::ExecutionPlan) -> Option<VariableOrder> {
 }
 
 // ===============================================================
-// Part C — End-to-end row-set parity (7 tests).
+// End-to-end row-set parity.
 //
 // For each leader, run two compiles:
 //   * WCOJ ON  + LeaderCardinality config — kernel rotation path.
 //   * WCOJ OFF + Disabled config — binary-join reference.
-// Assert dispatch counter ≥ 1 (W2.1 path actually ran) and the
-// WCOJ row set equals the binary reference.
+// Assert dispatch counter ≥ 1 and the WCOJ row set equals the
+// binary reference.
 // ===============================================================
 
-fn assert_triangle_w21_matches_binary_reference(
+fn assert_triangle_variable_ordering_matches_binary_reference(
     fix: &RuntimeBackedFixture,
     snapshot: &StatsSnapshot,
 ) {
     let inputs = triangle_inputs();
 
     // Reference: binary-join.
-    let exec_ref = run_w21(
+    let exec_ref = run_variable_ordering(
         fix,
         no_wcoj_cfg(),
         TRIANGLE_SRC,
         &inputs,
         snapshot,
-        &w21_compiler_config(WcojVarOrderingKind::Disabled),
+        &variable_ordering_compiler_config(WcojVarOrderingKind::Disabled),
     );
     let ref_rows = match exec_ref.store().get("tri") {
         Some(buf) => download_triples(buf),
         None => Vec::new(),
     };
 
-    // W2.1 path: force-WCOJ + LeaderCardinality.
-    let exec_w21 = run_w21(
+    // Variable-ordering path: force-WCOJ + LeaderCardinality.
+    let exec_variable_ordering = run_variable_ordering(
         fix,
         force_wcoj_cfg(),
         TRIANGLE_SRC,
         &inputs,
         snapshot,
-        &w21_compiler_config(WcojVarOrderingKind::LeaderCardinality),
+        &variable_ordering_compiler_config(WcojVarOrderingKind::LeaderCardinality),
     );
     assert!(
-        exec_w21.wcoj_triangle_dispatch_count() >= 1,
+        exec_variable_ordering.wcoj_triangle_dispatch_count() >= 1,
         "WCOJ triangle dispatch must have fired ≥ 1 times"
     );
-    let w21_rows = match exec_w21.store().get("tri") {
+    let variable_ordering_rows = match exec_variable_ordering.store().get("tri") {
         Some(buf) => download_triples(buf),
         None => Vec::new(),
     };
     assert_eq!(
-        w21_rows, ref_rows,
-        "W2.1 triangle row set must match binary-join reference"
+        variable_ordering_rows, ref_rows,
+        "variable-ordering triangle row set must match binary-join reference"
     );
 }
 
 #[test]
-fn part_c_triangle_default_leader_e_xy() {
+fn triangle_default_leader_e_xy_preserves_binary_reference() {
     let Some(fix) = make_runtime_fixture() else {
         eprintln!("Skipping: CUDA runtime unavailable");
         return;
     };
     // Default leader is already e1 (e_xy). With LeaderCardinality
-    // config, cost model returns None — slice 1 path runs. Row
-    // set must still match binary-join reference.
+    // config, cost model returns None, so the canonical path runs.
+    // Row set must still match binary-join reference.
     let snap = make_snapshot(&[("e1", 100), ("e2", 1000), ("e3", 1000)]);
-    assert_triangle_w21_matches_binary_reference(&fix, &snap);
+    assert_triangle_variable_ordering_matches_binary_reference(&fix, &snap);
 }
 
 #[test]
-fn part_c_triangle_leader_e_yz() {
+fn triangle_leader_e_yz_preserves_binary_reference() {
     let Some(fix) = make_runtime_fixture() else {
         eprintln!("Skipping: CUDA runtime unavailable");
         return;
     };
     let snap = make_snapshot(&[("e1", 1000), ("e2", 50), ("e3", 1000)]);
-    assert_triangle_w21_matches_binary_reference(&fix, &snap);
+    assert_triangle_variable_ordering_matches_binary_reference(&fix, &snap);
 }
 
 #[test]
-fn part_c_triangle_leader_e_xz() {
+fn triangle_leader_e_xz_preserves_binary_reference() {
     let Some(fix) = make_runtime_fixture() else {
         eprintln!("Skipping: CUDA runtime unavailable");
         return;
     };
     let snap = make_snapshot(&[("e1", 1000), ("e2", 1000), ("e3", 50)]);
-    assert_triangle_w21_matches_binary_reference(&fix, &snap);
+    assert_triangle_variable_ordering_matches_binary_reference(&fix, &snap);
 }
 
-fn assert_cycle4_w21_matches_binary_reference(
+fn assert_cycle4_variable_ordering_matches_binary_reference(
     fix: &RuntimeBackedFixture,
     snapshot: &StatsSnapshot,
 ) {
     let inputs = cycle4_inputs();
-    let exec_ref = run_w21(
+    let exec_ref = run_variable_ordering(
         fix,
         no_wcoj_cfg(),
         CYCLE4_SRC,
         &inputs,
         snapshot,
-        &w21_compiler_config(WcojVarOrderingKind::Disabled),
+        &variable_ordering_compiler_config(WcojVarOrderingKind::Disabled),
     );
     let ref_rows = match exec_ref.store().get("cyc") {
         Some(buf) => download_quads(buf),
         None => Vec::new(),
     };
-    let exec_w21 = run_w21(
+    let exec_variable_ordering = run_variable_ordering(
         fix,
         force_wcoj_cfg(),
         CYCLE4_SRC,
         &inputs,
         snapshot,
-        &w21_compiler_config(WcojVarOrderingKind::LeaderCardinality),
+        &variable_ordering_compiler_config(WcojVarOrderingKind::LeaderCardinality),
     );
     assert!(
-        exec_w21.wcoj_4cycle_dispatch_count() >= 1,
+        exec_variable_ordering.wcoj_4cycle_dispatch_count() >= 1,
         "WCOJ 4-cycle dispatch must have fired ≥ 1 times"
     );
-    let w21_rows = match exec_w21.store().get("cyc") {
+    let variable_ordering_rows = match exec_variable_ordering.store().get("cyc") {
         Some(buf) => download_quads(buf),
         None => Vec::new(),
     };
     assert_eq!(
-        w21_rows, ref_rows,
-        "W2.1 4-cycle row set must match binary-join reference"
+        variable_ordering_rows, ref_rows,
+        "variable-ordering 4-cycle row set must match binary-join reference"
     );
 }
 
 #[test]
-fn part_c_cycle4_default_leader_e_wx() {
+fn cycle4_default_leader_e_wx_preserves_binary_reference() {
     let Some(fix) = make_runtime_fixture() else {
         eprintln!("Skipping: CUDA runtime unavailable");
         return;
     };
     let snap = make_snapshot(&[("e1", 100), ("e2", 1000), ("e3", 1000), ("e4", 1000)]);
-    assert_cycle4_w21_matches_binary_reference(&fix, &snap);
+    assert_cycle4_variable_ordering_matches_binary_reference(&fix, &snap);
 }
 
 #[test]
-fn part_c_cycle4_leader_e_xy() {
+fn cycle4_leader_e_xy_preserves_binary_reference() {
     let Some(fix) = make_runtime_fixture() else {
         eprintln!("Skipping: CUDA runtime unavailable");
         return;
     };
     let snap = make_snapshot(&[("e1", 1000), ("e2", 50), ("e3", 1000), ("e4", 1000)]);
-    assert_cycle4_w21_matches_binary_reference(&fix, &snap);
+    assert_cycle4_variable_ordering_matches_binary_reference(&fix, &snap);
 }
 
 #[test]
-fn part_c_cycle4_leader_e_yz() {
+fn cycle4_leader_e_yz_preserves_binary_reference() {
     let Some(fix) = make_runtime_fixture() else {
         eprintln!("Skipping: CUDA runtime unavailable");
         return;
     };
     let snap = make_snapshot(&[("e1", 1000), ("e2", 1000), ("e3", 50), ("e4", 1000)]);
-    assert_cycle4_w21_matches_binary_reference(&fix, &snap);
+    assert_cycle4_variable_ordering_matches_binary_reference(&fix, &snap);
 }
 
 #[test]
-fn part_c_cycle4_leader_e_zw() {
+fn cycle4_leader_e_zw_preserves_binary_reference() {
     let Some(fix) = make_runtime_fixture() else {
         eprintln!("Skipping: CUDA runtime unavailable");
         return;
     };
     let snap = make_snapshot(&[("e1", 1000), ("e2", 1000), ("e3", 1000), ("e4", 50)]);
-    assert_cycle4_w21_matches_binary_reference(&fix, &snap);
+    assert_cycle4_variable_ordering_matches_binary_reference(&fix, &snap);
 }
 
 // ===============================================================
-// Part D — Stats-driven divergence (2 tests). Two snapshots
+// Stats-driven divergence. Two snapshots
 // favoring different leaders → different `var_order.leader_idx`.
 // ===============================================================
 
 #[test]
-fn part_d_triangle_two_snapshots_produce_different_leader_idx() {
+fn triangle_two_snapshots_produce_different_leader_idx() {
     let snap_a = make_snapshot(&[("e1", 1000), ("e2", 50), ("e3", 1000)]);
     let snap_b = make_snapshot(&[("e1", 1000), ("e2", 1000), ("e3", 50)]);
     let mut compiler_a = Compiler::new();
     let mut compiler_b = Compiler::new();
-    let cfg = w21_compiler_config(WcojVarOrderingKind::LeaderCardinality);
+    let cfg = variable_ordering_compiler_config(WcojVarOrderingKind::LeaderCardinality);
     let plan_a = compiler_a
         .compile_with_config_and_stats_snapshot(TRIANGLE_SRC, &cfg, Some(&snap_a))
         .expect("compile a");
@@ -538,12 +538,12 @@ fn part_d_triangle_two_snapshots_produce_different_leader_idx() {
 }
 
 #[test]
-fn part_d_cycle4_two_snapshots_produce_different_leader_idx() {
+fn cycle4_two_snapshots_produce_different_leader_idx() {
     let snap_a = make_snapshot(&[("e1", 1000), ("e2", 50), ("e3", 1000), ("e4", 1000)]);
     let snap_b = make_snapshot(&[("e1", 1000), ("e2", 1000), ("e3", 1000), ("e4", 50)]);
     let mut compiler_a = Compiler::new();
     let mut compiler_b = Compiler::new();
-    let cfg = w21_compiler_config(WcojVarOrderingKind::LeaderCardinality);
+    let cfg = variable_ordering_compiler_config(WcojVarOrderingKind::LeaderCardinality);
     let plan_a = compiler_a
         .compile_with_config_and_stats_snapshot(CYCLE4_SRC, &cfg, Some(&snap_a))
         .expect("compile a");
@@ -556,18 +556,18 @@ fn part_d_cycle4_two_snapshots_produce_different_leader_idx() {
 }
 
 // ===============================================================
-// Part E — Threshold gate cert (2 tests). Pin the 0.5 ratio
+// Threshold gate coverage. Pin the 0.5 ratio
 // boundary policy. Marginal cases above 0.5 must NOT trigger
 // var_order; clear wins below 0.5 must trigger.
 // ===============================================================
 
 #[test]
-fn part_e_marginal_leader_cardinality_does_not_trigger_var_order() {
+fn marginal_leader_cardinality_does_not_trigger_var_order() {
     // ratio = 600 / 1000 = 0.6 → above threshold → None.
     // Triangle, e_yz candidate.
     let snap = make_snapshot(&[("e1", 1000), ("e2", 600), ("e3", 1000)]);
     let mut compiler = Compiler::new();
-    let cfg = w21_compiler_config(WcojVarOrderingKind::LeaderCardinality);
+    let cfg = variable_ordering_compiler_config(WcojVarOrderingKind::LeaderCardinality);
     let plan = compiler
         .compile_with_config_and_stats_snapshot(TRIANGLE_SRC, &cfg, Some(&snap))
         .expect("compile");
@@ -580,12 +580,12 @@ fn part_e_marginal_leader_cardinality_does_not_trigger_var_order() {
 }
 
 #[test]
-fn part_e_clear_win_leader_cardinality_triggers_var_order() {
+fn clear_win_leader_cardinality_triggers_var_order() {
     // ratio = 300 / 1000 = 0.3 → at or below threshold → Some.
     // Triangle, e_yz leader (canonical idx 1).
     let snap = make_snapshot(&[("e1", 1000), ("e2", 300), ("e3", 1000)]);
     let mut compiler = Compiler::new();
-    let cfg = w21_compiler_config(WcojVarOrderingKind::LeaderCardinality);
+    let cfg = variable_ordering_compiler_config(WcojVarOrderingKind::LeaderCardinality);
     let plan = compiler
         .compile_with_config_and_stats_snapshot(TRIANGLE_SRC, &cfg, Some(&snap))
         .expect("compile");
