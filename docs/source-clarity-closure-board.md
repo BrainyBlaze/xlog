@@ -422,7 +422,7 @@ Hardware cache terminology such as `L1` and `L2` is allowed when it refers to GP
 | `crates/xlog-integration/tests/test_free_join_e2e.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-integration/tests/test_external_consumer_surface_preservation.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-integration/tests/test_multiway_walker_contract.rs` | 0 | 0 | true |  |  |
-| `crates/xlog-integration/tests/test_selectivity_pass_reordering.rs` | 15 | 4 | false | W2.2(13), W2.1(2) | W2.2(4) |
+| `crates/xlog-integration/tests/test_selectivity_pass_reordering.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-integration/tests/test_w21_variable_ordering.rs` | 5 | 2 | false | W2.1(4), W2.2(1) | W2.1(2) |
 | `crates/xlog-integration/tests/test_w26_heat_selectivity.rs` | 13 | 2 | false | W2.6(8), W2.4(4), W2.1(1) | W2.5(2) |
 | `crates/xlog-integration/tests/test_external_consumer_analog_fixture.rs` | 0 | 0 | true |  |  |

@@ -1,23 +1,20 @@
 // crates/xlog-integration/tests/test_selectivity_pass_reordering.rs
-//! v0.6.5 W2.2 integration cert — selectivity-driven join
-//! reordering preserves both (Part B) row-set semantics and
-//! (Part C) WCOJ dispatch correctness on **non-default
-//! reordered** bodies (triangle + 4-cycle).
+//! Selectivity-driven join reordering preserves row-set semantics and
+//! WCOJ dispatch correctness on **non-default reordered** bodies
+//! (triangle + 4-cycle).
 //!
 //! ## Coverage
 //!
-//!   * Part B triangle — `compile_with_stats_snapshot` with
+//!   * Triangle row-set parity — `compile_with_stats_snapshot` with
 //!     two distinct snapshots → IDENTICAL row sets.
-//!   * Part B 4-cycle counterpart.
-//!   * Part C triangle — synthesized post-selectivity X-shared
+//!   * Four-cycle row-set parity counterpart.
+//!   * Triangle WCOJ dispatch — synthesized post-selectivity X-shared
 //!     body fed through `promote_multiway` + executor under
 //!     force-WCOJ. Counter ≥ 1 AND row set equals binary
-//!     reference. Uses synthesized plan per W2.2 plan's
-//!     fallback ("If compile_with_stats_snapshot currently
-//!     drives the optimizer into right-deep output, … build
-//!     the integration cert from a synthesized post-selectivity
-//!     plan").
-//!   * Part C 4-cycle counterpart on the alt grouping
+//!     reference. Uses a synthesized post-selectivity plan when
+//!     compile-time optimization still produces a right-deep output
+//!     shape.
+//!   * Four-cycle WCOJ dispatch counterpart on the alt grouping
 //!     `(e_xy⋈e_yz on Y) + (e_zw⋈e_wx on W)`.
 
 use std::collections::BTreeMap;
@@ -259,7 +256,7 @@ fn cycle4_inputs() -> BTreeMap<&'static str, Vec<(u32, u32)>> {
 }
 
 /// Build a `StatsSnapshot` keyed by predicate name. Used by
-/// Part B to inject distinct stats into the compile-time
+/// Row-set parity tests to inject distinct stats into the compile-time
 /// `selectivity_pass` invocation.
 fn make_snapshot(seeded: &[(&str, u64)]) -> StatsSnapshot {
     let relations: Vec<RelationStats> = seeded
@@ -311,7 +308,7 @@ fn run_program(
 }
 
 // ---------------------------------------------------------------
-// Part B — row-set parity across two stats snapshots
+// Row-set parity across two stats snapshots.
 // ---------------------------------------------------------------
 
 #[test]
@@ -358,29 +355,27 @@ fn selectivity_pass_triangle_two_snapshots_produce_same_row_set() {
 }
 
 // ---------------------------------------------------------------
-// Part C — force-WCOJ dispatch on reordered + canonical bodies
+// Force-WCOJ dispatch on reordered and canonical bodies.
 // ---------------------------------------------------------------
 //
 // Two pairs of tests, four total:
 //
 //   * **Synthesized post-selectivity** (`*_synthesized_*_dispatches_wcoj`)
-//     — close the approved W2.2 acceptance gate for non-default
-//     reordered bodies. Hand-build the alt-shape lowered RIR
+//     — cover non-default reordered bodies. Hand-build the
+//     alt-shape lowered RIR
 //     (X-shared triangle / Alt-grouping 4-cycle), feed through
-//     `xlog_logic::promote::promote_multiway` (W2.2 step 2a
-//     extension), execute with force-WCOJ. Counter ≥ 1 AND
-//     row set equals binary-join reference. This is the W2.2
-//     plan's explicit fallback path: "If
-//     compile_with_stats_snapshot currently drives the
-//     optimizer into right-deep output, … build the
-//     integration cert from a synthesized post-selectivity
-//     plan."
+//     `xlog_logic::promote::promote_multiway`, execute with
+//     force-WCOJ. Counter ≥ 1 AND
+//     row set equals binary-join reference. This is the explicit
+//     fallback path for optimizer states where
+//     `compile_with_stats_snapshot` still drives the optimizer into
+//     right-deep output.
 //
 //   * **Canonical regression** (`*_do_not_break_canonical_*`)
 //     — empty-stats path so the optimizer produces canonical
 //     left-deep / bushy. Force-WCOJ + counter ≥ 1 + row-set
-//     match. Guards against W2.2 changes regressing the slice
-//     1 / slice 2 dispatch path.
+//     match. Guards against selectivity-reordering changes regressing
+//     the canonical dispatch path.
 
 #[test]
 fn selectivity_pass_changes_do_not_break_canonical_triangle_dispatch() {
@@ -405,10 +400,8 @@ fn selectivity_pass_changes_do_not_break_canonical_triangle_dispatch() {
         "binary-join reference should produce at least one tri row"
     );
 
-    // Force-WCOJ. Empty snapshot → optimizer + W2.2
-    // selectivity_pass leave canonical left-deep. Slice 1
-    // promoter (with W2.2 extension) emits MultiWayJoin.
-    // Force gate dispatches.
+    // Force-WCOJ. Empty snapshot leaves the canonical left-deep shape;
+    // the promoter emits MultiWayJoin and the force gate dispatches.
     let exec_on = run_program(
         Arc::clone(&fix.provider),
         &fix.memory,
@@ -419,14 +412,14 @@ fn selectivity_pass_changes_do_not_break_canonical_triangle_dispatch() {
     );
     assert!(
         exec_on.wcoj_triangle_dispatch_count() >= 1,
-        "force-WCOJ on canonical triangle must still dispatch after W2.2 changes; \
+        "force-WCOJ on canonical triangle must still dispatch after selectivity-reordering changes; \
          got counter {}",
         exec_on.wcoj_triangle_dispatch_count()
     );
     let dispatched_rows = download_triples(exec_on.store().get("tri").expect("tri"));
     assert_eq!(
         dispatched_rows, reference_rows,
-        "WCOJ output must equal the binary-join reference after W2.2 changes"
+        "WCOJ output must equal the binary-join reference after selectivity-reordering changes"
     );
 }
 
@@ -462,19 +455,19 @@ fn selectivity_pass_changes_do_not_break_canonical_4cycle_dispatch() {
     );
     assert!(
         exec_on.wcoj_4cycle_dispatch_count() >= 1,
-        "force-WCOJ on canonical 4-cycle must still dispatch after W2.2 changes; \
+        "force-WCOJ on canonical 4-cycle must still dispatch after selectivity-reordering changes; \
          got counter {}",
         exec_on.wcoj_4cycle_dispatch_count()
     );
     let dispatched_rows = download_quads(exec_on.store().get("cyc").expect("cyc"));
     assert_eq!(
         dispatched_rows, reference_rows,
-        "4-cycle WCOJ output must equal the binary-join reference after W2.2 changes"
+        "4-cycle WCOJ output must equal the binary-join reference after selectivity-reordering changes"
     );
 }
 
 // ---------------------------------------------------------------
-// Part B 4-cycle — row-set parity across two stats snapshots
+// Four-cycle row-set parity across two stats snapshots.
 // ---------------------------------------------------------------
 
 #[test]
@@ -523,7 +516,7 @@ fn selectivity_pass_4cycle_two_snapshots_produce_same_row_set() {
 }
 
 // ---------------------------------------------------------------
-// Part C — force-WCOJ on synthesized post-selectivity bodies
+// Force-WCOJ on synthesized post-selectivity bodies.
 // ---------------------------------------------------------------
 //
 // The integration tests below build a SYNTHESIZED
@@ -534,15 +527,15 @@ fn selectivity_pass_4cycle_two_snapshots_produce_same_row_set() {
 //   2. Replacing the rule body with a hand-crafted alt-shape
 //      lowered RIR using the same RelIds.
 //   3. Re-running `xlog_logic::promote::promote_multiway` with
-//      the W2.2 step 2a extension — alt-shape body promotes
-//      to MultiWayJoin with semantic-order inputs.
+//      the multiway promoter — alt-shape body promotes to
+//      MultiWayJoin with semantic-order inputs.
 //   4. Running the executor with force-WCOJ.
 //   5. Asserting counter ≥ 1 + row set equals binary-join
 //      reference (gate-off canonical compile).
 //
 // This is the "synthesized post-selectivity plan" path
-// permitted by the W2.2 plan when the optimizer's right-deep
-// output blocks pure compile-then-execute.
+// used when the optimizer's right-deep output blocks pure
+// compile-then-execute coverage.
 
 /// Build an X-shared lowered triangle body.
 /// inner = (e1 ⋈ e3) on X with keys [0]/[0]
@@ -642,14 +635,13 @@ fn run_synth_post_selectivity(
         }
     }
     assert!(replaced, "no rule with head {head_pred} found");
-    // Re-promote with the W2.2 extension. The hand-built
-    // body's alt shape goes through the variable-graph
-    // promoter and becomes a canonical MultiWayJoin.
+    // Re-promote after substituting the hand-built body. The
+    // body's alt shape goes through the variable-graph promoter
+    // and becomes a canonical MultiWayJoin.
     //
-    // W2.1: signature widened to `(plan, rel_ids, stats, config)`.
-    // Pass empty stats + default config so this W2.2 cert continues
-    // to exercise the legacy slice 1/2/W2.2 dispatch (no W2.1 var
-    // ordering activated; row sets remain bit-identical).
+    // Pass empty stats + default config so this cert continues to
+    // exercise the legacy MultiWayJoin dispatch path without
+    // variable-ordering changes; row sets remain bit-identical.
     xlog_logic::promote::promote_multiway(
         &mut plan,
         compiler.rel_ids(),
