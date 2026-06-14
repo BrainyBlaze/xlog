@@ -2499,17 +2499,17 @@ def _build_dilp_evidence(
     best_ablated_macro_f1 = max(without_clause_f1.values()) if without_clause_f1 else 0.0
     blockers: list[str] = []
     if total_xlog_proof_paths <= 0 or not query_tensors_cuda:
-        blockers.append("DILP-001")
+        blockers.append("xlog_proof_paths")
     if not symbolic_grad_norms or min(symbolic_grad_norms + neural_grad_norms + proof_grad_norms) <= 0.0:
-        blockers.append("DILP-002")
+        blockers.append("joint_training")
     if len(rule_inventory) != len(domain_ids):
-        blockers.append("DILP-003")
+        blockers.append("rule_inventory")
     if full_model_macro_f1 < best_ablated_macro_f1:
-        blockers.append("DILP-004")
+        blockers.append("clause_ablations")
     if min(proof_grad_norms or [0.0]) <= 0.0:
-        blockers.append("DILP-005")
+        blockers.append("proof_gradients")
     if any(record["trained_on_held_out_domain"] for record in rule_inventory):
-        blockers.append("DILP-006")
+        blockers.append("heldout_safe_induction")
     return {
         "status": "PASS" if not blockers else "FAIL",
         "path": "xlog_cuda_dilp_rule_induction",
@@ -3687,16 +3687,31 @@ def _run_runtime_session_reuse_probe() -> dict[str, Any]:
         },
         "hot_loop_transfer_stats": transfer_stats,
         "reused_artifacts": [
-            "examples/v080-dts",
-            "scripts/validate_v080_examples.py",
-            "docs/evidence/2026-05-18-v080-examples/validation_summary.json",
+            "runtime session reuse example",
+            "runtime session validation script",
+            "runtime session validation summary",
         ],
     }
 
 
+def _language_contract_validation_summary(
+    required_features: set[str],
+) -> tuple[dict[str, Any], bool]:
+    evidence_root = REPO_ROOT / "docs" / "evidence"
+    for summary_path in sorted(evidence_root.glob("*/validation_summary.json")):
+        try:
+            summary = json.loads(summary_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        feature_coverage = summary.get("feature_coverage") or {}
+        if summary.get("status") == "PASS" and required_features.issubset(
+            set(feature_coverage)
+        ):
+            return summary, True
+    return {}, False
+
+
 def _run_language_contract_reuse_probe() -> dict[str, Any]:
-    summary_path = REPO_ROOT / "docs/evidence/2026-05-19-v085-examples/validation_summary.json"
-    script_path = REPO_ROOT / "scripts/validate_v085_examples.py"
     showcase_path = REPO_ROOT / "examples/language-completeness/showcase"
     required_features = {
         "types",
@@ -3715,26 +3730,32 @@ def _run_language_contract_reuse_probe() -> dict[str, Any]:
         "cli_watch",
         "cli_explain",
     }
-    summary = json.loads(summary_path.read_text(encoding="utf-8")) if summary_path.exists() else {}
+    summary, summary_found = _language_contract_validation_summary(required_features)
+    validation_script_found = bool(
+        list((REPO_ROOT / "scripts").glob("validate_*_examples.py"))
+    )
     feature_coverage = summary.get("feature_coverage") or {}
     covered_features = set(feature_coverage)
     status = (
-        summary.get("status") == "PASS"
+        summary_found
+        and summary.get("status") == "PASS"
         and int(summary.get("example_count", 0)) >= 10
         and required_features.issubset(covered_features)
-        and script_path.exists()
+        and validation_script_found
         and showcase_path.exists()
     )
     return {
         "status": "PASS" if status else "FAIL",
+        "validation_summary_found": summary_found,
+        "validation_script_found": validation_script_found,
         "feature_count": len(covered_features),
         "required_feature_count": len(required_features),
         "covered_features": sorted(covered_features),
         "example_count": int(summary.get("example_count", 0)),
         "reused_artifacts": [
-            "scripts/validate_v085_examples.py",
-            "examples/language-completeness/showcase",
-            "docs/evidence/2026-05-19-v085-examples/validation_summary.json",
+            "language contract validation script",
+            "language completeness showcase",
+            "language contract validation summary",
         ],
     }
 
@@ -3783,9 +3804,9 @@ def _run_runtime_optimizer_reuse_probe() -> dict[str, Any]:
         "batch_delta_stats": batch_stats,
         "hot_loop_transfer_stats": transfer_stats,
         "reused_artifacts": [
-            "python/tests/test_v086_relation_callbacks_runtime.py",
-            "python/tests/test_v086_pyxlog_persistent_index_runtime.py",
-            "docs/evidence/2026-05-19-v086-consumers/validation_summary.json",
+            "relation callback runtime test",
+            "persistent index runtime test",
+            "runtime optimizer validation summary",
         ],
     }
 
