@@ -530,7 +530,7 @@ Hardware cache terminology such as `L1` and `L2` is allowed when it refers to GP
 | `crates/xlog-logic/tests/modules/visibility/main.xlog` | 0 | 0 | true |  |  |
 | `crates/xlog-logic/tests/optimizer_integration.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-logic/tests/optimizer_real_world.rs` | 0 | 0 | true |  |  |
-| `crates/xlog-logic/tests/parse_neural.rs` | 0 | 4 | false |  | D1(2), D2(2) |
+| `crates/xlog-logic/tests/parse_neural.rs` | 0 | 0 | true | - | Replaced terse neural-addition digit variables with `LeftDigit` and `RightDigit` in the parser fixture. |
 | `crates/xlog-logic/tests/symbol_integration_test.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-logic/tests/test_epistemic_eir.rs` | 1 | 1 | false | S5(1) | G91(1) |
 | `crates/xlog-logic/tests/test_epistemic_examples.rs` | 0 | 1 | false |  | G91(1) |
