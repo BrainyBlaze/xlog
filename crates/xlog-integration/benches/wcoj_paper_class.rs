@@ -1,4 +1,4 @@
-//! W3.9 paper-class WCOJ harness.
+//! Paper-class WCOJ benchmark harness.
 
 mod fixtures {
     pub mod paper_class;
@@ -96,7 +96,7 @@ struct CudaMemInfoTracker {
 
 impl CudaMemInfoTracker {
     fn new() -> Self {
-        let (free, total) = mem_get_info().expect("cudaMemGetInfo before W39 fixture");
+        let (free, total) = mem_get_info().expect("cudaMemGetInfo before paper-class fixture");
         Self {
             baseline_free: free as u64,
             total: total as u64,
@@ -296,7 +296,7 @@ fn assert_row_equality(prov: &Provider, fixture: &TriangleFixture) -> usize {
     let wcoj_rows = download_triples(&wcoj, prov, [0, 1, 2]);
     assert_eq!(hash_rows, wcoj_rows, "[{}] row-set equality", fixture.name);
     eprintln!(
-        "W39_ROW_EQUALITY {} PASS rows={}",
+        "PAPER_CLASS_ROW_EQUALITY {} PASS rows={}",
         fixture.name,
         hash_rows.len()
     );
@@ -375,7 +375,7 @@ fn direct_samples(fixture: &TriangleFixture, use_wcoj: bool) -> Vec<Duration> {
 
 fn direct_trials(fixture: &TriangleFixture) -> (f64, f64, f64, f64, f64) {
     eprintln!(
-        "W39_DIRECT_CONFIG {} trials={DIRECT_TRIALS} hash_inner_iters={HASH_DIRECT_INNER_ITERS} wcoj_inner_iters={WCOJ_DIRECT_INNER_ITERS} warmup_windows={DIRECT_WARMUP_WINDOWS}",
+        "PAPER_CLASS_DIRECT_CONFIG {} trials={DIRECT_TRIALS} hash_inner_iters={HASH_DIRECT_INNER_ITERS} wcoj_inner_iters={WCOJ_DIRECT_INNER_ITERS} warmup_windows={DIRECT_WARMUP_WINDOWS}",
         fixture.name
     );
     let hash = direct_samples(fixture, false);
@@ -384,7 +384,7 @@ fn direct_trials(fixture: &TriangleFixture) -> (f64, f64, f64, f64, f64) {
         let h = hash[trial];
         let w = wcoj[trial];
         eprintln!(
-            "W39_DIRECT_SAMPLE {} trial={} hash_ns={} wcoj_ns={}",
+            "PAPER_CLASS_DIRECT_SAMPLE {} trial={} hash_ns={} wcoj_ns={}",
             fixture.name,
             trial + 1,
             h.as_nanos(),
@@ -399,7 +399,7 @@ fn direct_trials(fixture: &TriangleFixture) -> (f64, f64, f64, f64, f64) {
 
 fn report_bundle_paths(fixture: &TriangleFixture) {
     eprintln!(
-        "W39_BUNDLE_PATH {} {}",
+        "PAPER_CLASS_BUNDLE_PATH {} {}",
         fixture.name, fixture.bundle_path_status
     );
 }
@@ -413,16 +413,16 @@ fn bench_fixture(
     report_bundle_paths(fixture);
     let (hash_mean, wcoj_mean, ratio, hash_cv, wcoj_cv) = direct_trials(fixture);
     eprintln!(
-        "W39_DIRECT_RESULT {} hash_mean_ns={hash_mean:.3} wcoj_mean_ns={wcoj_mean:.3} ratio={ratio:.6} hash_cv={hash_cv:.6} wcoj_cv={wcoj_cv:.6}",
+        "PAPER_CLASS_DIRECT_RESULT {} hash_mean_ns={hash_mean:.3} wcoj_mean_ns={wcoj_mean:.3} ratio={ratio:.6} hash_cv={hash_cv:.6} wcoj_cv={wcoj_cv:.6}",
         fixture.name
     );
     eprintln!(
-        "W39_PEAK_VRAM {} bytes={} gate_bytes={VRAM_GATE_BYTES}",
+        "PAPER_CLASS_PEAK_VRAM {} bytes={} gate_bytes={VRAM_GATE_BYTES}",
         fixture.name,
         prov.peak.peak_bytes()
     );
     eprintln!(
-        "W39_CUDA_MEM_GET_INFO {} peak_delta_bytes={} gate_bytes={} total_bytes={}",
+        "PAPER_CLASS_CUDA_MEM_GET_INFO {} peak_delta_bytes={} gate_bytes={} total_bytes={}",
         fixture.name,
         prov.mem_info.peak_delta_bytes(),
         VRAM_GATE_BYTES,
@@ -430,7 +430,7 @@ fn bench_fixture(
     );
     if fixture.recursive {
         eprintln!(
-            "W39_RECURSIVE_VRAM_GROWTH {} growth=0.000000 gate=0.010000",
+            "PAPER_CLASS_RECURSIVE_VRAM_GROWTH {} growth=0.000000 gate=0.010000",
             fixture.name
         );
     }
@@ -454,16 +454,16 @@ fn bench_fixture(
             total
         })
     });
-    eprintln!("W39_MEASURED_CELL {} rows={rows}", fixture.name);
+    eprintln!("PAPER_CLASS_MEASURED_CELL {} rows={rows}", fixture.name);
     ratio
 }
 
-fn bench_w39_paper_class(c: &mut Criterion) {
+fn bench_paper_class_wcoj(c: &mut Criterion) {
     let fixtures = paper_class_fixtures(SCALE);
     assert_eq!(
         fixtures.len(),
         paper_class_expected_fixture_count(),
-        "W39 fixture registry count must match registered fixture modules"
+        "paper-class fixture registry count must match registered fixture modules"
     );
     let mut group = c.benchmark_group("wcoj_paper_class");
     group.sample_size(10);
@@ -476,13 +476,13 @@ fn bench_w39_paper_class(c: &mut Criterion) {
         product *= bench_fixture(&mut group, &prov, fixture).max(f64::MIN_POSITIVE);
     }
     let geomean = product.powf(1.0 / fixtures.len() as f64);
-    eprintln!("W39_GEOMEAN ratio={geomean:.6} gate=5.000000 stretch=10.000000");
+    eprintln!("PAPER_CLASS_GEOMEAN ratio={geomean:.6} gate=5.000000 stretch=10.000000");
     group.finish();
 }
 
 criterion_group! {
     name = wcoj_paper_class;
     config = Criterion::default();
-    targets = bench_w39_paper_class
+    targets = bench_paper_class_wcoj
 }
 criterion_main!(wcoj_paper_class);
