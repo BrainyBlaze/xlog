@@ -493,7 +493,7 @@ Hardware cache terminology such as `L1` and `L2` is allowed when it refers to GP
 | `crates/xlog-logic/src/module.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-logic/src/module_diagnostics.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-logic/src/optimizer.rs` | 0 | 0 | true | - | Replaced optimizer task labels with selectivity, helper-splitting, and shape-agnostic fallback wording. |
-| `crates/xlog-logic/src/optimizer/stream_schedule_pass.rs` | 3 | 0 | false | W3.8(3) |  |
+| `crates/xlog-logic/src/optimizer/stream_schedule_pass.rs` | 0 | 0 | true | - | Replaced stream-scheduling task labels with phase and occupancy wording. |
 | `crates/xlog-logic/src/parser.rs` | 3 | 1 | false | S5(2), G91(1) | G91(1) |
 | `crates/xlog-logic/src/promote.rs` | 59 | 0 | false | W2.2(12), W4.1(10), P1(7), D2(6), W3.2(6), W2.6(5) |  |
 | `crates/xlog-logic/src/proof_trace.rs` | 0 | 0 | true |  |  |
