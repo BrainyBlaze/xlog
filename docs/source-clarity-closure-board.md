@@ -775,7 +775,7 @@ Hardware cache terminology such as `L1` and `L2` is allowed when it refers to GP
 | `docs/whitepaper/sections/A_performance_contract.tex` | 0 | 0 | true |  |  |
 | `examples/BFO/universal_case_reasoner/GOALS.md` | 5 | 0 | true | G1(1), G2(1), G3(1), G4(1), G5(1) | Excluded from rewrite as a goal/planning artifact outside the source/docs cleanup scope. |
 | `examples/BFO/universal_case_reasoner/GQM.md` | 8 | 0 | true | transfer shorthand(2), priority label(1), release-line labels(5) | Excluded from rewrite as a GQM planning artifact outside the source/docs cleanup scope. |
-| `examples/BFO/universal_case_reasoner/README.md` | 4 | 0 | false | P0(3), D2H(1) |  |
+| `examples/BFO/universal_case_reasoner/README.md` | 38 | 0 | true | branch label(1), priority/gate IDs(14), release-line labels(8), transfer shorthand(2), shorthand labels(13) |  |
 | `examples/BFO/universal_case_reasoner/REQUIREMENTS.md` | 4 | 0 | false | P0(3), D2H(1) |  |
 | `examples/BFO/universal_case_reasoner/VALIDATION_PLAN.md` | 8 | 0 | false | P0(3), D2H(3), v080(1), v085(1) |  |
 | `examples/BFO/universal_case_reasoner/WORKER_BRIEF.md` | 7 | 0 | false | v085(2), v086(2), P0(2), v080(1) |  |
