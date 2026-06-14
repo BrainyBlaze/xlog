@@ -1,5 +1,5 @@
-//! D1 widening — aggregate-fused WCOJ: group-by-root sum/min/max over the
-//! triangle shape (u32 value columns).
+//! Aggregate-fused WCOJ: group-by-root sum/min/max over the triangle shape
+//! (u32 value columns).
 //!
 //! Contract under test: `wcoj_triangle_groupby_root_agg_u32_recorded`
 //! computes, for `q(X, agg(V)) :- e_xy(X,Y), e_yz(Y,Z), e_xz(X,Z)` with
@@ -139,14 +139,22 @@ fn download_column_bytes(
     bytes
 }
 
-fn download_u32_column(memory: &Arc<GpuMemoryManager>, buffer: &CudaBuffer, col: usize) -> Vec<u32> {
+fn download_u32_column(
+    memory: &Arc<GpuMemoryManager>,
+    buffer: &CudaBuffer,
+    col: usize,
+) -> Vec<u32> {
     download_column_bytes(memory, buffer, col, 4)
         .chunks_exact(4)
         .map(|c| u32::from_le_bytes(c.try_into().unwrap()))
         .collect()
 }
 
-fn download_u64_column(memory: &Arc<GpuMemoryManager>, buffer: &CudaBuffer, col: usize) -> Vec<u64> {
+fn download_u64_column(
+    memory: &Arc<GpuMemoryManager>,
+    buffer: &CudaBuffer,
+    col: usize,
+) -> Vec<u64> {
     download_column_bytes(memory, buffer, col, 8)
         .chunks_exact(8)
         .map(|c| u64::from_le_bytes(c.try_into().unwrap()))
@@ -509,17 +517,17 @@ fn groupby_root_agg_sum_zero_valued_groups_are_present() {
     );
 }
 
-/// S1b measurement (agg-widening gate: fused >= 3x vs unfused on skewed
-/// fixtures). Run explicitly:
+/// Aggregate-fused WCOJ triangle aggregate measurement (widening gate:
+/// fused >= 3x vs unfused on skewed fixtures). Run explicitly:
 /// `cargo test -p xlog-cuda-tests --test test_wcoj_groupby_root_agg \
 ///    --release -- --ignored --nocapture`
 /// Asserts parity; timing ratios are PRINTED and recorded as evidence, not
 /// asserted (wall-clock assertions are machine-dependent).
 #[test]
-#[ignore = "S1b measurement: run explicitly with --ignored --nocapture"]
-fn s1b_measurement_agg_fused_vs_unfused() {
+#[ignore = "aggregate-fused WCOJ triangle aggregate measurement: run explicitly with --ignored --nocapture"]
+fn wcoj_triangle_groupby_root_agg_measurement_fused_vs_unfused() {
     let Some(fix) = make_fixture() else {
-        eprintln!("skipping s1b_measurement: no CUDA device");
+        eprintln!("skipping aggregate-fused WCOJ triangle aggregate measurement: no CUDA device");
         return;
     };
 
@@ -543,10 +551,18 @@ fn s1b_measurement_agg_fused_vs_unfused() {
             e_yz.push((b, c));
             e_xz.push((a, c));
         }
-        (sorted_unique(e_xy), sorted_unique(e_yz), sorted_unique(e_xz))
+        (
+            sorted_unique(e_xy),
+            sorted_unique(e_yz),
+            sorted_unique(e_xz),
+        )
     };
 
-    let cases: Vec<(&str, AggOp, (Vec<(u32, u32)>, Vec<(u32, u32)>, Vec<(u32, u32)>))> = vec![
+    let cases: Vec<(
+        &str,
+        AggOp,
+        (Vec<(u32, u32)>, Vec<(u32, u32)>, Vec<(u32, u32)>),
+    )> = vec![
         ("sum_z_hub_10k_z16", AggOp::Sum, hub(10_000, 16)),
         ("sum_z_hub_50k_z16", AggOp::Sum, hub(50_000, 16)),
         ("min_z_hub_10k_z16", AggOp::Min, hub(10_000, 16)),
@@ -642,8 +658,8 @@ fn s1b_measurement_agg_fused_vs_unfused() {
         let med_unfused = unfused_ms[REPS / 2];
         let med_fused = fused_ms[REPS / 2];
         println!(
-            "S1b {name}: unfused median {med_unfused:.3} ms, fused median {med_fused:.3} ms, \
-             speedup {:.2}x (n_xy={}, n_yz={}, n_xz={})",
+            "aggregate-fused WCOJ triangle aggregate {name}: unfused median {med_unfused:.3} ms, \
+             fused median {med_fused:.3} ms, speedup {:.2}x (n_xy={}, n_yz={}, n_xz={})",
             med_unfused / med_fused,
             e_xy_rows.len(),
             e_yz_rows.len(),
@@ -702,18 +718,15 @@ fn groupby_recorded_sum_u64_values_matches_host() {
         .expect("recorded groupby sum over u64 values");
     assert_eq!(
         download_groups_u64(&fix.memory, &grouped),
-        vec![
-            (1u32, 5_000_000_007u64),
-            (2, u32::MAX as u64 + 2),
-            (3, 0)
-        ],
+        vec![(1u32, 5_000_000_007u64), (2, u32::MAX as u64 + 2), (3, 0)],
     );
 }
 
-/// S1d slice 3 — the recorded groupby must accept U64 value columns for
-/// Min/Max (previously only the legacy path was widened) and produce
-/// exactly the legacy path's rows, so u32-keyed pipelines that carry u64
-/// values can use the recorded discipline end to end.
+/// Recorded-groupby U64 value-column widening: the recorded groupby must
+/// accept U64 value columns for Min/Max (previously only the legacy path
+/// was widened) and produce exactly the legacy path's rows, so u32-keyed
+/// pipelines that carry u64 values can use the recorded discipline end to
+/// end.
 #[test]
 fn groupby_recorded_min_max_u64_values_matches_host_and_legacy() {
     let Some(fix) = make_fixture() else {
@@ -796,7 +809,7 @@ fn groupby_recorded_min_max_u64_values_matches_host_and_legacy() {
 }
 
 // =====================================================================
-// S1c widening — u64-key sum/min/max.
+// u64-key triangle sum/min/max widening.
 // =====================================================================
 
 fn upload_binary_u64(memory: &Arc<GpuMemoryManager>, rows: &[(u64, u64)]) -> CudaBuffer {
@@ -834,10 +847,7 @@ fn upload_binary_u64(memory: &Arc<GpuMemoryManager>, rows: &[(u64, u64)]) -> Cud
 }
 
 /// Sorted (X, agg) pairs from a 2-column (U64 key, U64 agg) buffer.
-fn download_groups_u64_u64(
-    memory: &Arc<GpuMemoryManager>,
-    buffer: &CudaBuffer,
-) -> Vec<(u64, u64)> {
+fn download_groups_u64_u64(memory: &Arc<GpuMemoryManager>, buffer: &CudaBuffer) -> Vec<(u64, u64)> {
     let keys = download_u64_column(memory, buffer, 0);
     let aggs = download_u64_column(memory, buffer, 1);
     assert_eq!(keys.len(), aggs.len());
@@ -952,14 +962,10 @@ fn oracle_agg_u64(
                 *out.entry(t.0).or_default() = out.get(&t.0).copied().unwrap_or(0).wrapping_add(v)
             }
             AggOp::Min => {
-                out.entry(t.0)
-                    .and_modify(|m| *m = (*m).min(v))
-                    .or_insert(v);
+                out.entry(t.0).and_modify(|m| *m = (*m).min(v)).or_insert(v);
             }
             AggOp::Max => {
-                out.entry(t.0)
-                    .and_modify(|m| *m = (*m).max(v))
-                    .or_insert(v);
+                out.entry(t.0).and_modify(|m| *m = (*m).max(v)).or_insert(v);
             }
             other => panic!("unsupported oracle agg {other:?}"),
         }
@@ -1125,15 +1131,15 @@ fn groupby_root_agg_u64_empty_intersection_roots_are_absent() {
     }
 }
 
-/// S1c measurement, u64-key sum/min/max (gate: fused >= 3x vs unfused on a
-/// skewed fixture). Run explicitly:
+/// u64-key triangle aggregate measurement (gate: fused >= 3x vs unfused on
+/// a skewed fixture). Run explicitly:
 /// `cargo test -p xlog-cuda-tests --test test_wcoj_groupby_root_agg \
 ///    --release -- --ignored --nocapture`
 #[test]
-#[ignore = "S1c measurement: run explicitly with --ignored --nocapture"]
-fn s1c_measurement_u64_agg_fused_vs_unfused() {
+#[ignore = "u64-key triangle aggregate measurement: run explicitly with --ignored --nocapture"]
+fn wcoj_triangle_groupby_root_agg_u64_measurement_fused_vs_unfused() {
     let Some(fix) = make_fixture() else {
-        eprintln!("skipping s1c_measurement_u64_agg: no CUDA device");
+        eprintln!("skipping u64-key triangle aggregate measurement: no CUDA device");
         return;
     };
 
@@ -1250,8 +1256,9 @@ fn s1c_measurement_u64_agg_fused_vs_unfused() {
         let med_unfused = unfused_ms[REPS / 2];
         let med_fused = fused_ms[REPS / 2];
         println!(
-            "S1c u64_hub_10k_z16 {agg:?}(Z): unfused median {med_unfused:.3} ms, fused median \
-             {med_fused:.3} ms, speedup {:.2}x (n_xy={}, n_yz={}, n_xz={})",
+            "u64-key aggregate-fused WCOJ triangle hub_10k_z16 {agg:?}(Z): unfused median \
+             {med_unfused:.3} ms, fused median {med_fused:.3} ms, speedup {:.2}x \
+             (n_xy={}, n_yz={}, n_xz={})",
             med_unfused / med_fused,
             e_xy_rows.len(),
             e_yz_rows.len(),

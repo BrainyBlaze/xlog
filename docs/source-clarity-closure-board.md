@@ -3,9 +3,9 @@
 Scope: Git-tracked source and documentation files only. Superpowers docs, plan files, evidence directories, generated artifacts, result/output directories, build output, and other worktrees are excluded.
 
 Scanned files: 1430
-Unresolved files: 282
-Comment/prose artifact occurrences: 1803
-Code/identifier artifact occurrences: 694
+Unresolved files: 281
+Comment/prose artifact occurrences: 1798
+Code/identifier artifact occurrences: 690
 
 Resolved means this board found no remaining opaque task/milestone labels or external consumer names in the eligible portions of that file.
 
@@ -20,6 +20,7 @@ Hardware cache terminology such as `L2` is allowed when it refers to GPU level-2
 | Artifact | Meaning used during cleanup |
 |---|---|
 | `DTS` / `DTS-DLM` | external consumer |
+| `D1` | aggregate-fused WCOJ group-by-root aggregate fusion direction |
 | `D4` | Decision-DNNF knowledge compiler / GPU Decision-DNNF compilation |
 | `G91` | epistemic compatibility mode |
 | `M8 Phase 1` | native bounded exact-induction engine |
@@ -29,8 +30,9 @@ Hardware cache terminology such as `L2` is allowed when it refers to GPU level-2
 | `W2.5` | WCOJ cost-model default flip to the cardinality model |
 | `D2` | GPU Free Join level-synchronous factorized join execution |
 | `S2` | provider-level Free Join frontier-engine spike and measurement gates |
-| `S1c` | aggregate-fused WCOJ 4-cycle group-by-root count fusion |
-| `S1d` | aggregate-fused WCOJ 4-cycle group-by-root sum/min/max variants |
+| `S1b` | aggregate-fused WCOJ triangle aggregate widening gate |
+| `S1c` | aggregate-fused WCOJ 4-cycle group-by-root count fusion and u64-key triangle aggregate widening |
+| `S1d` | aggregate-fused WCOJ 4-cycle group-by-root sum/min/max variants and recorded-groupby U64 value-column min/max widening |
 | `S1e` | aggregate-fused WCOJ K-clique group-by-root count fusion |
 | `W5.2` | hub-skewed WCOJ triangle benchmark fixture |
 | `G38` | GPU skew-classifier integration path |
@@ -223,7 +225,7 @@ Hardware cache terminology such as `L2` is allowed when it refers to GPU level-2
 | `crates/xlog-cuda-tests/tests/test_wcoj_4cycle_groupby_root_agg.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-cuda-tests/tests/test_wcoj_4cycle_groupby_root_count.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-cuda-tests/tests/test_wcoj_clique_groupby_root_count.rs` | 0 | 0 | true |  |  |
-| `crates/xlog-cuda-tests/tests/test_wcoj_groupby_root_agg.rs` | 5 | 4 | false | S1c(2), D1(1), S1b(1), S1d(1) | S1b(2), S1c(2) |
+| `crates/xlog-cuda-tests/tests/test_wcoj_groupby_root_agg.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-cuda-tests/tests/test_wcoj_groupby_root_count.rs` | 4 | 4 | false | D1(2), S1(1), S1b(1) | S1(2), S1b(2) |
 | `crates/xlog-cuda-tests/tests/test_wcoj_metadata.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-cuda/Cargo.toml` | 0 | 0 | true |  |  |
