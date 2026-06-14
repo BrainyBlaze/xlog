@@ -67,9 +67,9 @@ struct RunArgs {
     module_path: Vec<PathBuf>,
     /// Dump the compiled epistemic execution plan (EIR-derived GPU plan, world-view
     /// integrity constraints, and CPU-fallback counters) as JSON to this path.
-    /// No-op for ordinary (non-epistemic) programs. This is the C7 epistemic-plan
-    /// dump surface: it exposes accepted `know`/`possible` literals and lets a
-    /// caller assert `cpu_fallback == 0` off a real GPU run.
+    /// No-op for ordinary (non-epistemic) programs. This compiled
+    /// epistemic-plan/EIR JSON dump exposes accepted `know`/`possible` literals
+    /// and lets a caller assert `cpu_fallback == 0` off a real GPU run.
     #[arg(long)]
     epistemic_plan_json: Option<PathBuf>,
 }
@@ -1482,8 +1482,8 @@ fn run_deterministic(args: RunArgs) -> Result<()> {
 
     let result = program.evaluate_with_options(provider.clone(), inputs, args.stats)?;
 
-    // C7: dump the compiled epistemic execution plan (after a successful GPU run, so
-    // the dump corresponds to a real accepted hot-path execution).
+    // Dump the compiled epistemic execution plan after a successful GPU run, so
+    // the JSON corresponds to a real accepted hot-path execution.
     if let Some(plan_path) = &args.epistemic_plan_json {
         match program.epistemic_plan_json() {
             Some(json) => {
