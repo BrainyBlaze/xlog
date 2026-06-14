@@ -667,7 +667,7 @@ Hardware cache terminology such as `L1` and `L2` is allowed when it refers to GP
 | `crates/xlog-runtime/src/executor/epistemic_workspace.rs` | 10 | 1 | true | Removed generic Free Join milestone labels, expanded transfer-direction prose, and replaced the constraint-rejection task label with behavior wording. | G91(1) allowed as public Gelfond-1991 compatibility semantics. |
 | `crates/xlog-runtime/src/executor/expression.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-runtime/src/executor/join_cache.rs` | 0 | 0 | true |  |  |
-| `crates/xlog-runtime/src/executor/mod.rs` | 16 | 0 | false | W2.3(5), D2H(3), W3.2(2), W6.4(2), W4.2(2), D1(1) |  |
+| `crates/xlog-runtime/src/executor/mod.rs` | 16 | 0 | true | Replaced runtime counter, recursive stats trace, ILP accessor, release-label, and authorization-label comments with behavior-based wording. |  |
 | `crates/xlog-runtime/src/executor/node_dispatch.rs` | 12 | 0 | false | W4.2(8), D1(2), D2H(1), W42-15(1) |  |
 | `crates/xlog-runtime/src/executor/recursive.rs` | 16 | 0 | false | W2.3(9), W4.1(2), D2(2), P1(1), W3.2(1), W6.4(1) |  |
 | `crates/xlog-runtime/src/executor/rewrite.rs` | 18 | 0 | false | W4.1(9), P1(8), D4(1) |  |
