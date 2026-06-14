@@ -442,7 +442,7 @@ Hardware cache terminology such as `L1` and `L2` is allowed when it refers to GP
 | `crates/xlog-integration/tests/test_wcoj_adaptive_default_on.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-integration/tests/test_wcoj_adaptive_dispatch.rs` | 0 | 0 | true | - | - |
 | `crates/xlog-integration/tests/test_wcoj_cardinality_cost_model.rs` | 0 | 0 | true |  |  |
-| `crates/xlog-integration/tests/test_wcoj_clique_dispatch.rs` | 10 | 0 | false | W3.2(5), D8(3), W6.4(1), W3.1(1) |  |
+| `crates/xlog-integration/tests/test_wcoj_clique_dispatch.rs` | 0 | 0 | true | - | - |
 | `crates/xlog-integration/tests/test_wcoj_clique_groupby_fusion.rs` | 3 | 0 | false | D2(2), S1e(1) |  |
 | `crates/xlog-integration/tests/test_wcoj_dispatch.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-integration/tests/test_wcoj_dispatch_stream_reuse.rs` | 0 | 0 | true |  |  |
@@ -566,7 +566,7 @@ Hardware cache terminology such as `L1` and `L2` is allowed when it refers to GP
 | `crates/xlog-logic/tests/test_w32_clique_promoter.rs` | 2 | 0 | false | W3.2(2) |  |
 | `crates/xlog-logic/tests/test_w67b_cost_gate.rs` | 0 | 2 | false |  | W5.2(2) |
 | `crates/xlog-logic/tests/test_w67b_dispatch_plan.rs` | 0 | 0 | true |  |  |
-| `crates/xlog-logic/tests/test_w67b_help_kc.rs` | 0 | 0 | true |  |  |
+| `crates/xlog-logic/tests/test_kclique_helper_split.rs` | 0 | 0 | true | - | - |
 | `crates/xlog-neural/Cargo.toml` | 0 | 0 | true |  |  |
 | `crates/xlog-neural/src/batch.rs` | 4 | 0 | false | D1(2), D2(2) |  |
 | `crates/xlog-neural/src/bridge.rs` | 0 | 0 | true |  |  |

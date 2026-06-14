@@ -257,7 +257,7 @@ impl Lowerer {
     }
 
     pub(crate) fn create_helper_relation(&mut self, schema: Schema) -> (String, RelId) {
-        let name = format!("__w37_helper_{}", self.next_rel_id);
+        let name = format!("__kclique_helper_{}", self.next_rel_id);
         let rel_id = self.get_or_create_rel_id(&name);
         self.schemas.insert(name.clone(), schema);
         (name, rel_id)

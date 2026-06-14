@@ -44,8 +44,11 @@ fn buried_skew_k5_compile_creates_helper_relation_and_outer_kclique_uses_it() {
     let helper = compiler
         .rel_ids()
         .iter()
-        .find_map(|(name, rel)| name.starts_with("__w37_helper_").then_some((name, *rel)))
-        .expect("G_HELP_KC must allocate one helper relation");
+        .find_map(|(name, rel)| {
+            name.starts_with("__kclique_helper_")
+                .then_some((name, *rel))
+        })
+        .expect("K-clique helper split must allocate one helper relation");
 
     assert_eq!(
         plan.rules_by_scc
@@ -95,7 +98,7 @@ fn uniform_k5_compile_keeps_helper_split_empty_and_allocates_no_helper() {
         !compiler
             .rel_ids()
             .keys()
-            .any(|name| name.starts_with("__w37_helper_")),
+            .any(|name| name.starts_with("__kclique_helper_")),
         "uniform K5 must not allocate helper relations"
     );
     let outer = plan

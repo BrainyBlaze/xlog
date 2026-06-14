@@ -245,7 +245,7 @@ fn accepted_gpu_execution_dispatches_kclique_wcoj_reduction_through_runtime_path
             upload_binary_u32(&fixture.memory, &complete_k5_edges, "src", "dst"),
         );
     }
-    executor.register_relation(RelId(99), "__w37_helper_99");
+    executor.register_relation(RelId(99), "__kclique_helper_99");
 
     let result = executor
         .execute_epistemic_gpu_execution(
@@ -7200,7 +7200,7 @@ fn executable_with_kclique_wcoj_plan() -> EpistemicExecutablePlan {
     EpistemicExecutablePlan {
         gpu_plan,
         relation_ids: std::collections::BTreeMap::from([(
-            "__w37_helper_99".to_string(),
+            "__kclique_helper_99".to_string(),
             xlog_core::RelId(99),
         )]),
         reduced_runtime_plan: runtime_plan_with_kclique_wcoj(),
@@ -7250,7 +7250,7 @@ fn executable_with_live_kclique_wcoj_literal() -> EpistemicExecutablePlan {
     EpistemicExecutablePlan {
         gpu_plan,
         relation_ids: std::collections::BTreeMap::from([(
-            "__w37_helper_99".to_string(),
+            "__kclique_helper_99".to_string(),
             xlog_core::RelId(99),
         )]),
         reduced_runtime_plan: runtime_plan_with_live_kclique_wcoj(),
@@ -7293,7 +7293,7 @@ fn executable_with_kclique_helper_scan_outside_wcoj_plan() -> EpistemicExecutabl
     EpistemicExecutablePlan {
         gpu_plan,
         relation_ids: std::collections::BTreeMap::from([(
-            "__w37_helper_99".to_string(),
+            "__kclique_helper_99".to_string(),
             xlog_core::RelId(99),
         )]),
         reduced_runtime_plan: runtime_plan_with_helper_scan_outside_wcoj(),
@@ -7316,7 +7316,7 @@ fn executable_with_kclique_empty_edge_permutation_plan() -> EpistemicExecutableP
     EpistemicExecutablePlan {
         gpu_plan,
         relation_ids: std::collections::BTreeMap::from([(
-            "__w37_helper_99".to_string(),
+            "__kclique_helper_99".to_string(),
             xlog_core::RelId(99),
         )]),
         reduced_runtime_plan: runtime_plan_with_empty_edge_permutation_kclique_wcoj(),
@@ -7414,7 +7414,7 @@ fn executable_with_live_v070_4cycle_wcoj_literal_with_plan(
 fn runtime_plan_with_kclique_wcoj() -> ExecutionPlan {
     let mut plan = ExecutionPlan::new(vec![Scc {
         id: 0,
-        predicates: vec!["__w37_helper_99".to_string(), "clique5".to_string()],
+        predicates: vec!["__kclique_helper_99".to_string(), "clique5".to_string()],
         is_recursive: false,
     }]);
     let mut inputs: Vec<_> = (1..=10)
@@ -7427,7 +7427,7 @@ fn runtime_plan_with_kclique_wcoj() -> ExecutionPlan {
     };
     plan.rules_by_scc = vec![vec![
         CompiledRule {
-            head: "__w37_helper_99".to_string(),
+            head: "__kclique_helper_99".to_string(),
             body: RirNode::Scan {
                 rel: xlog_core::RelId(2),
             },
@@ -7617,7 +7617,7 @@ fn runtime_plan_with_helper_scan_outside_wcoj() -> ExecutionPlan {
     let mut plan = ExecutionPlan::new(vec![Scc {
         id: 0,
         predicates: vec![
-            "__w37_helper_99".to_string(),
+            "__kclique_helper_99".to_string(),
             "helper_probe".to_string(),
             "clique5".to_string(),
         ],
@@ -7625,7 +7625,7 @@ fn runtime_plan_with_helper_scan_outside_wcoj() -> ExecutionPlan {
     }]);
     plan.rules_by_scc = vec![vec![
         CompiledRule {
-            head: "__w37_helper_99".to_string(),
+            head: "__kclique_helper_99".to_string(),
             body: RirNode::Scan {
                 rel: xlog_core::RelId(2),
             },
@@ -7702,7 +7702,7 @@ fn runtime_plan_with_scan_rule_execution() -> ExecutionPlan {
 fn runtime_plan_with_empty_edge_permutation_kclique_wcoj() -> ExecutionPlan {
     let mut plan = ExecutionPlan::new(vec![Scc {
         id: 0,
-        predicates: vec!["__w37_helper_99".to_string(), "clique5".to_string()],
+        predicates: vec!["__kclique_helper_99".to_string(), "clique5".to_string()],
         is_recursive: false,
     }]);
     let mut inputs: Vec<_> = (1..=10)
@@ -7715,7 +7715,7 @@ fn runtime_plan_with_empty_edge_permutation_kclique_wcoj() -> ExecutionPlan {
     };
     plan.rules_by_scc = vec![vec![
         CompiledRule {
-            head: "__w37_helper_99".to_string(),
+            head: "__kclique_helper_99".to_string(),
             body: RirNode::Scan {
                 rel: xlog_core::RelId(2),
             },

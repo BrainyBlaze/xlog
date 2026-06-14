@@ -2089,7 +2089,7 @@ impl EpistemicGpuRuntimePreflight {
             {
                 reduced_constraint_relation_names.push(rule.head.as_str());
             }
-            if rule.head.starts_with("__w37_helper_") {
+            if rule.head.starts_with("__kclique_helper_") {
                 helper_relation_rule_count += 1;
             }
             helper_relation_scan_count +=
@@ -6634,7 +6634,7 @@ fn helper_relation_ids(executable: &EpistemicExecutablePlan) -> BTreeSet<RelId> 
     executable
         .relation_ids
         .iter()
-        .filter_map(|(name, rel)| name.starts_with("__w37_helper_").then_some(*rel))
+        .filter_map(|(name, rel)| name.starts_with("__kclique_helper_").then_some(*rel))
         .collect()
 }
 

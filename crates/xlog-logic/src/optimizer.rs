@@ -1434,7 +1434,7 @@ pub mod helper_split_pass {
         specs
     }
 
-    /// Authorization 5 G_HELP_KC entry for K-clique plans that
+    /// Authorization 5 K-clique helper split entry for K-clique plans that
     /// already carry planner-produced `HelperSplitSpec`s. The pass
     /// reuses the Phase-1 G4 helper-relation lifecycle: emit a helper
     /// rule before the consumer rule, allocate a compiler-owned helper
@@ -2215,22 +2215,22 @@ mod helper_split_pass_tests {
         let schemas = schemas();
         let stats = stats_for_de(1);
         let specs = helper_split_pass::run(&mut plan, &schemas, &stats, |_| {
-            ("__w37_helper_6".to_string(), RelId(6))
+            ("__kclique_helper_6".to_string(), RelId(6))
         });
 
         assert_eq!(specs.len(), 1);
-        assert_eq!(specs[0].name, "__w37_helper_6");
+        assert_eq!(specs[0].name, "__kclique_helper_6");
         assert_eq!(specs[0].rel_id, RelId(6));
         assert_eq!(specs[0].schema, helper_schema());
         assert_eq!(specs[0].source_rels, [RelId(3), RelId(4)]);
         assert_eq!(plan.rules_by_scc[0].len(), 2);
-        assert_eq!(plan.rules_by_scc[0][0].head, "__w37_helper_6");
+        assert_eq!(plan.rules_by_scc[0][0].head, "__kclique_helper_6");
         assert_eq!(plan.rules_by_scc[0][1].head, "out");
         assert!(contains_scan(&plan.rules_by_scc[0][1].body, RelId(6)));
         assert!(plan.sccs[0]
             .predicates
             .iter()
-            .any(|predicate| predicate == "__w37_helper_6"));
+            .any(|predicate| predicate == "__kclique_helper_6"));
     }
 
     #[test]
@@ -2239,7 +2239,7 @@ mod helper_split_pass_tests {
         let schemas = schemas();
         let stats = stats_for_de(8192);
         let specs = helper_split_pass::run(&mut plan, &schemas, &stats, |_| {
-            ("__w37_helper_6".to_string(), RelId(6))
+            ("__kclique_helper_6".to_string(), RelId(6))
         });
 
         assert!(specs.is_empty());

@@ -163,7 +163,7 @@ fn uniform_heat_keeps_helper_split_specs_empty() {
 
     assert!(
         plan.helper_split_specs.is_empty(),
-        "uniform heat must preserve the pre-G_HELP_KC empty helper spec behavior"
+        "uniform heat must preserve the pre-helper-split empty helper spec behavior"
     );
 }
 

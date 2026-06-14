@@ -995,7 +995,7 @@ mod tests {
             .rel_ids()
             .iter()
             .find_map(|(name, rel)| {
-                name.starts_with("__w37_helper_")
+                name.starts_with("__kclique_helper_")
                     .then_some((name.clone(), *rel))
             })
             .expect("helper relation allocated");
@@ -1039,7 +1039,7 @@ mod tests {
         assert!(!compiler
             .rel_ids()
             .keys()
-            .any(|name| name.starts_with("__w37_helper_")));
+            .any(|name| name.starts_with("__kclique_helper_")));
         let out_rules = plan
             .rules_by_scc
             .iter()
