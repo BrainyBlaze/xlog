@@ -3,8 +3,8 @@
 Scope: Git-tracked source and documentation files only. Superpowers docs, plan files, evidence directories, generated artifacts, result/output directories, build output, and other worktrees are excluded.
 
 Scanned files: 1430
-Unresolved files: 273
-Comment/prose artifact occurrences: 1765
+Unresolved files: 272
+Comment/prose artifact occurrences: 1761
 Code/identifier artifact occurrences: 686
 
 Resolved means this board found no remaining opaque task/milestone labels or external consumer names in the eligible portions of that file.
@@ -33,6 +33,7 @@ Hardware cache terminology such as `L1` and `L2` is allowed when it refers to GP
 | `W4.3` | sort-merge inner join provider-level operator for pre-sorted single-key inputs |
 | `W42-14` | single-key join column byte-length validation before kernel launch |
 | `W42-15` | checked Cartesian-product capacity guard before nested-loop join allocation |
+| `W43-4` | empty and single-row fast path for sort-merge sortedness detection |
 | `W43-14` | sort-merge join operator-only scope after benchmark rejection of executor dispatch |
 | `D2` | GPU Free Join level-synchronous factorized join execution |
 | `L1` | GPU level-1 cache |
@@ -263,7 +264,7 @@ Hardware cache terminology such as `L1` and `L2` is allowed when it refers to GP
 | `crates/xlog-cuda/kernels/sat.cu` | 0 | 0 | true |  |  |
 | `crates/xlog-cuda/kernels/scan.cu` | 0 | 0 | true |  |  |
 | `crates/xlog-cuda/kernels/set_ops.cu` | 0 | 0 | true |  |  |
-| `crates/xlog-cuda/kernels/sort.cu` | 4 | 0 | false | W4.3(2), D1(1), W43-4(1) |  |
+| `crates/xlog-cuda/kernels/sort.cu` | 0 | 0 | true |  |  |
 | `crates/xlog-cuda/kernels/totalorder.cuh` | 0 | 0 | true |  |  |
 | `crates/xlog-cuda/kernels/wcoj.cu` | 18 | 0 | false | D1(5), S1c(4), S1d(3), W3.2(2), D2(2), S1e(1) |  |
 | `crates/xlog-cuda/kernels/weights.cu` | 0 | 0 | true |  |  |
