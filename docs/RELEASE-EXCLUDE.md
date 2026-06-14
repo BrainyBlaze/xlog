@@ -17,7 +17,7 @@ Status as of: v0.8.6 (2026-05).
 | `docs/superpowers/plans/` | 4 | Implementation plans for release/tooling prep | Internal process artifacts; not user-facing |
 | `docs/plans/` | ~88 | supervisor-goal-NNN, *-closure-proposal, *-plan, design docs | Goal-driven development infrastructure; development history, not reference |
 | `docs/evidence/` | ~159 (72 dirs) | Dated acceptance evidence (README + measurements.json per slice) | Internal acceptance-gate audits; consumed by release tooling, not consumers |
-| `docs/v065-closure-board.md` | 1 | v0.7.0 release closure board | Internal release-tracking infrastructure |
+| `docs/v065-closure-board.md` | 1 | Legacy release closure board (the filename uses the old release-board shorthand) | Internal release-tracking infrastructure |
 
 ## Archive candidates (historical, superseded)
 
