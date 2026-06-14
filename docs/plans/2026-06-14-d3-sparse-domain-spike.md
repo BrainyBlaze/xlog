@@ -150,3 +150,21 @@ cannot bridge a witness-vs-distinct gap that can be arbitrarily large on other s
 the table to that) or an on-GPU growth/rehash scheme — so the table is sized to
 `|R| + distinct_novel`, not to witness count. Only then can sparse meet the peak gate that
 is D3's core value.
+
+## 8. Distinct-aware sizing — S4-sparse gate now PASSES (2026-06-14)
+
+The §7 FAIL was the witness-sized table. Fix: a Phase 1b estimator pass hashes candidate
+keys into a fixed 8 MiB bitmap, popcounts it for a distinct-candidate estimate, and the
+table is sized to `2×(|R| + distinct×1.5)` instead of `2×(|R| + total_work)`. Inserts are
+overflow-safe (bounded probe → flag → legacy decline), so an under-sizing estimate can never
+emit a partial set. HEAD `13bd7702`, evidence `runpod-s4-sparse-distinct-sized-PASS.log`.
+
+| gate | factorized | legacy | peak | wall-clock |
+|---|---|---|---|---|
+| single-step hub (16.78M witnesses → 262144 novel) | 2.4 ms / **16.8 MiB** | 126.5 ms / 836.8 MiB | **49.86×** | 0.019× |
+| full-fixpoint S4 (domain ~2.09M, dispatch=4) | 58.6 ms / **20.0 MiB** | 366.3 ms / 293.0 MiB | **14.63×** | 0.160× (6.2× faster) |
+
+The parked gate flipped from 1.43× WORSE peak to 14.63× BETTER (table 420 MiB → 20 MiB),
+while staying 6× faster. Row-set parity holds (262144). **Decision: sparse route PASSES
+its gate → merge-eligible.** D3 now covers both dense (bitvector ≤ 2¹⁴) and sparse
+(hash set above) domains; over-budget/over-estimate cases still decline to legacy.
