@@ -1,5 +1,5 @@
-// crates/xlog-integration/tests/test_w51_deep_recursive_wcoj_cert.rs
-//! W5.1 deep-recursive WCOJ certification.
+// crates/xlog-integration/tests/test_deep_recursive_wcoj.rs
+//! Deep-recursive WCOJ dispatch and output parity.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -241,7 +241,7 @@ fn deep_recursive_triangle_dispatches_exact_count_and_matches_cpu_oracle() {
     let expected = BTreeSet::from([(1, 2, 3), (1, 3, 4), (1, 4, 5), (1, 5, 6)]);
     assert_eq!(
         cpu_rows, expected,
-        "host fixpoint oracle must match the locked D5 chain"
+        "host fixpoint oracle must match the locked recursive triangle chain"
     );
     assert!(
         !cpu_rows.is_empty(),
@@ -266,32 +266,32 @@ fn deep_recursive_triangle_dispatches_exact_count_and_matches_cpu_oracle() {
     let fourcycle_counter = executor.wcoj_4cycle_dispatch_count();
     let clique5_counter = executor.wcoj_clique5_dispatch_count();
     let clique6_counter = executor.wcoj_clique6_dispatch_count();
-    eprintln!("Deep-recursive W5.1 measured wcoj_triangle_dispatch_count={triangle_counter}");
+    eprintln!("Deep-recursive WCOJ measured wcoj_triangle_dispatch_count={triangle_counter}");
     eprintln!(
-        "Deep-recursive W5.1 measured wcoj_4cycle_dispatch_count={fourcycle_counter}, \
+        "Deep-recursive WCOJ measured wcoj_4cycle_dispatch_count={fourcycle_counter}, \
          wcoj_clique5_dispatch_count={clique5_counter}, \
          wcoj_clique6_dispatch_count={clique6_counter}"
     );
     assert_eq!(
         triangle_counter, 6,
-        "deep-recursive WCOJ cert must match the D2/D5 locked counter"
+        "deep-recursive WCOJ test must match the locked triangle dispatch counter"
     );
     assert_eq!(
         fourcycle_counter, 0,
-        "deep-recursive WCOJ cert must not dispatch the 4-cycle path"
+        "deep-recursive WCOJ test must not dispatch the 4-cycle path"
     );
     assert_eq!(
         clique5_counter, 0,
-        "deep-recursive WCOJ cert must not dispatch the clique5 path"
+        "deep-recursive WCOJ test must not dispatch the clique5 path"
     );
     assert_eq!(
         clique6_counter, 0,
-        "deep-recursive WCOJ cert must not dispatch the clique6 path"
+        "deep-recursive WCOJ test must not dispatch the clique6 path"
     );
 
     let gpu_rows = download_triples(executor.store().get("tri").expect("tri"));
     eprintln!(
-        "Deep-recursive W5.1 measured row_set_size={}",
+        "Deep-recursive WCOJ measured row_set_size={}",
         gpu_rows.len()
     );
     assert_eq!(
