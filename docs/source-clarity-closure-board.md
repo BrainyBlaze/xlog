@@ -3,9 +3,9 @@
 Scope: Git-tracked source and documentation files only. Superpowers docs, plan files, evidence directories, generated artifacts, result/output directories, build output, and other worktrees are excluded.
 
 Scanned files: 1430
-Unresolved files: 302
+Unresolved files: 301
 Comment/prose artifact occurrences: 1889
-Code/identifier artifact occurrences: 758
+Code/identifier artifact occurrences: 757
 
 Resolved means this board found no remaining opaque task/milestone labels or external consumer names in the eligible portions of that file.
 
@@ -22,6 +22,7 @@ Technical host-transfer terminology such as `D2H`, `DTOH`, and `H2D` is allowed 
 | `G91` | epistemic compatibility mode |
 | `M8 Phase 1` | native bounded exact-induction engine |
 | `C7` | compiled epistemic execution-plan/EIR JSON dump |
+| `v085` | legacy v0.8.5 language milestone/examples |
 | task/milestone labels such as `W2.5`, `G39`, `M37-A`, `S1e`, `FRS-042`, `P0.2`, `D3` | replace with the concrete feature, gate, bug, or milestone meaning recovered from plans, boards, history, or code |
 
 ## File Board
@@ -92,7 +93,7 @@ Technical host-transfer terminology such as `D2H`, `DTOH`, and `H2D` is allowed 
 | `crates/xlog-cli/Cargo.toml` | 0 | 0 | true |  |  |
 | `crates/xlog-cli/src/bin/xlog-epistemic-evidence.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-cli/src/main.rs` | 0 | 0 | true |  |  |
-| `crates/xlog-cli/tests/explain_cli_tests.rs` | 0 | 1 | false |  | v085(1) |
+| `crates/xlog-cli/tests/explain_cli_tests.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-cli/tests/generated_rule_diagnostics.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-cli/tests/interactive_cli_tests.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-cli/tests/prob_cli_tests.rs` | 0 | 0 | true |  |  |

@@ -1,13 +1,31 @@
 use assert_cmd::cargo::cargo_bin_cmd;
-use std::path::Path;
 
 #[test]
 fn test_xlog_explain_magic_sets_text() {
-    let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .ancestors()
-        .nth(2)
-        .expect("workspace root");
-    let program = repo_root.join("examples/v085-language/magic_sets/reach_bound.xlog");
+    let program = std::env::temp_dir().join(format!(
+        "xlog_magic_sets_explain_{}.xlog",
+        std::process::id()
+    ));
+    std::fs::write(
+        &program,
+        r#"
+#pragma magic_sets = on
+
+pred edge(src: u32, dst: u32).
+pred reach(src: u32, dst: u32).
+
+edge(1, 2).
+edge(2, 3).
+edge(10, 11).
+edge(11, 12).
+
+reach(X, Y) :- edge(X, Y).
+reach(X, Z) :- reach(X, Y), edge(Y, Z).
+
+?- reach(1, Y).
+"#,
+    )
+    .expect("write magic sets explain fixture");
 
     let output = cargo_bin_cmd!("xlog")
         .args(["explain", program.to_str().expect("valid path")])
