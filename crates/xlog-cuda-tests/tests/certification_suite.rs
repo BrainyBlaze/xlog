@@ -2,7 +2,7 @@
 //!
 //! Run with: cargo test -p xlog-cuda-tests --test certification_suite --release -- --nocapture
 //!
-//! Expected runtime: seconds to minutes (GPU-dependent; dominated by C21 hardware stress tests)
+//! Expected runtime: seconds to minutes (GPU-dependent; dominated by hardware reliability stress tests)
 
 use xlog_cuda_tests::categories;
 use xlog_cuda_tests::harness::TestContext;
@@ -126,136 +126,136 @@ fn run_full_certification() {
     // after stream completion. No-op on the legacy backend.
     let reap = || ctx.reap_pending();
 
-    // Run all 33 categories sequentially (C01-C25 + G01-G08)
-    println!("Running C01: Toolchain...");
+    // Run all 33 categories sequentially across core CUDA infrastructure and GPU-specific coverage.
+    println!("Running toolchain/PTX/SASS validation...");
     results.add_category(categories::c01_toolchain::run_all(&ctx));
     reap();
 
-    println!("Running C02: Launch Config...");
+    println!("Running launch-configuration validation...");
     results.add_category(categories::c02_launch_config::run_all(&ctx));
     reap();
 
-    println!("Running C03: Pointer Bounds...");
+    println!("Running pointer, indexing, and bounds validation...");
     results.add_category(categories::c03_pointer_bounds::run_all(&ctx));
     reap();
 
-    println!("Running C04: Address Space...");
+    println!("Running address-space validation...");
     results.add_category(categories::c04_address_space::run_all(&ctx));
     reap();
 
-    println!("Running C05: Global Memory...");
+    println!("Running global-memory hazard validation...");
     results.add_category(categories::c05_global_memory::run_all(&ctx));
     reap();
 
-    println!("Running C06: Shared Memory...");
+    println!("Running shared-memory validation...");
     results.add_category(categories::c06_shared_memory::run_all(&ctx));
     reap();
 
-    println!("Running C07: Local Memory...");
+    println!("Running local-memory and stack validation...");
     results.add_category(categories::c07_local_memory::run_all(&ctx));
     reap();
 
-    println!("Running C08: Synchronization...");
+    println!("Running synchronization and ordering validation...");
     results.add_category(categories::c08_synchronization::run_all(&ctx));
     reap();
 
-    println!("Running C09: Warp Level...");
+    println!("Running warp-level execution validation...");
     results.add_category(categories::c09_warp_level::run_all(&ctx));
     reap();
 
-    println!("Running C10: Block Grid...");
+    println!("Running block/grid coordination validation...");
     results.add_category(categories::c10_block_grid::run_all(&ctx));
     reap();
 
-    println!("Running C11: Control Flow...");
+    println!("Running control-flow and predication validation...");
     results.add_category(categories::c11_control_flow::run_all(&ctx));
     reap();
 
-    println!("Running C12: Atomics...");
+    println!("Running atomic-operation validation...");
     results.add_category(categories::c12_atomics::run_all(&ctx));
     reap();
 
-    println!("Running C13: Floating Point...");
+    println!("Running floating-point validation...");
     results.add_category(categories::c13_floating_point::run_all(&ctx));
     reap();
 
-    println!("Running C14: Integer...");
+    println!("Running integer edge-case validation...");
     results.add_category(categories::c14_integer::run_all(&ctx));
     reap();
 
-    println!("Running C15: Determinism...");
+    println!("Running determinism validation...");
     results.add_category(categories::c15_determinism::run_all(&ctx));
     reap();
 
-    println!("Running C16: Async Pipeline...");
+    println!("Running async-pipeline validation...");
     results.add_category(categories::c16_async_pipeline::run_all(&ctx));
     reap();
 
-    println!("Running C17: Caching...");
+    println!("Running caching and coherence validation...");
     results.add_category(categories::c17_caching::run_all(&ctx));
     reap();
 
-    println!("Running C18: Host Device...");
+    println!("Running host-device integration validation...");
     results.add_category(categories::c18_host_device::run_all(&ctx));
     reap();
 
-    println!("Running C19: Multi Stream...");
+    println!("Running multi-stream concurrency validation...");
     results.add_category(categories::c19_multi_stream::run_all(&ctx));
     reap();
 
-    println!("Running C20: Multi GPU...");
+    println!("Running multi-GPU validation...");
     results.add_category(categories::c20_multi_gpu::run_all(&ctx));
     reap();
 
-    println!("Running C21: Hardware...");
+    println!("Running hardware-reliability validation...");
     results.add_category(categories::c21_hardware::run_all(&ctx));
     reap();
 
-    println!("Running C22: Algorithms...");
+    println!("Running algorithm-specific validation...");
     results.add_category(categories::c22_algorithms::run_all(&ctx));
     reap();
 
-    println!("Running C23: Blind Spots...");
+    println!("Running testing blind-spot validation...");
     results.add_category(categories::c23_blind_spots::run_all(&ctx));
     reap();
 
-    println!("Running C24: Edge Matrix...");
+    println!("Running edge-case matrix validation...");
     results.add_category(categories::c24_edge_matrix::run_all(&ctx));
     reap();
 
-    println!("Running C25: Float Filter...");
+    println!("Running float-filter validation...");
     results.add_category(categories::c25_float_filter::run_all(&ctx));
     reap();
 
-    println!("Running G01: Circuit Forward...");
+    println!("Running circuit forward-kernel validation...");
     results.add_category(categories::g01_circuit_forward::run_all(&ctx));
     reap();
 
-    println!("Running G02: Circuit Backward...");
+    println!("Running circuit backward-kernel validation...");
     results.add_category(categories::g02_circuit_backward::run_all(&ctx));
     reap();
 
-    println!("Running G03: Weight Injection...");
+    println!("Running GPU weight-injection validation...");
     results.add_category(categories::g03_weight_injection::run_all(&ctx));
     reap();
 
-    println!("Running G04: Transfer Efficiency...");
+    println!("Running transfer-efficiency validation...");
     results.add_category(categories::g04_transfer_efficiency::run_all(&ctx));
     reap();
 
-    println!("Running G05: Circuit Cache...");
+    println!("Running circuit-cache validation...");
     results.add_category(categories::g05_circuit_cache::run_all(&ctx));
     reap();
 
-    println!("Running G06: PTX Robustness...");
+    println!("Running PTX robustness validation...");
     results.add_category(categories::g06_ptx_robustness::run_all(&ctx));
     reap();
 
-    println!("Running G07: SAT/CDCL...");
+    println!("Running GPU CDCL SAT/UNSAT verifier validation...");
     results.add_category(categories::g07_sat_cdcl::run_all(&ctx));
     reap();
 
-    println!("Running G08: Device Counts...");
+    println!("Running device-resident row-count validation...");
     results.add_category(categories::g08_device_counts::run_all(&ctx));
     reap();
 

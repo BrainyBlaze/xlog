@@ -3,9 +3,9 @@
 Scope: Git-tracked source and documentation files only. Superpowers docs, plan files, evidence directories, generated artifacts, result/output directories, build output, and other worktrees are excluded.
 
 Scanned files: 1430
-Unresolved files: 289
-Comment/prose artifact occurrences: 1819
-Code/identifier artifact occurrences: 752
+Unresolved files: 288
+Comment/prose artifact occurrences: 1816
+Code/identifier artifact occurrences: 719
 
 Resolved means this board found no remaining opaque task/milestone labels or external consumer names in the eligible portions of that file.
 
@@ -50,6 +50,33 @@ Hardware cache terminology such as `L2` is allowed when it refers to GPU level-2
 | `G06.3` | numerical-stability checks |
 | `G07` | GPU CDCL SAT/UNSAT verifier certification category |
 | `G08` | device-resident row-count invariant certification category |
+| `C01-C25` | core CUDA infrastructure certification categories |
+| `G01-G08` | GPU-tier probabilistic, neural, and solver certification categories |
+| `C01` | toolchain/PTX/SASS validation category |
+| `C02` | launch-configuration validation category |
+| `C03` | pointer, indexing, and bounds validation category |
+| `C04` | address-space validation category |
+| `C05` | global-memory hazard validation category |
+| `C06` | shared-memory validation category |
+| `C07` | local-memory and stack validation category |
+| `C08` | synchronization and ordering validation category |
+| `C09` | warp-level execution validation category |
+| `C10` | block/grid coordination validation category |
+| `C11` | control-flow and predication validation category |
+| `C12` | atomic-operation validation category |
+| `C13` | floating-point validation category |
+| `C14` | integer edge-case validation category |
+| `C15` | determinism validation category |
+| `C16` | async-pipeline validation category |
+| `C17` | caching and coherence validation category |
+| `C18` | host-device integration validation category |
+| `C19` | multi-stream concurrency validation category |
+| `C20` | multi-GPU validation category |
+| `C21` | hardware-reliability validation category |
+| `C22` | algorithm-specific validation category |
+| `C23` | testing blind-spot validation category |
+| `C24` | edge-case matrix validation category |
+| `C25` | float-filter validation category |
 | task/milestone labels such as `W2.5`, `G39`, `M37-A`, `S1e`, `FRS-042`, `P0.2`, `D3` | replace with the concrete feature, gate, bug, or milestone meaning recovered from plans, boards, history, or code |
 
 ## File Board
@@ -176,7 +203,7 @@ Hardware cache terminology such as `L2` is allowed when it refers to GPU level-2
 | `crates/xlog-cuda-tests/src/lib.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-cuda-tests/src/properties.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-cuda-tests/tests/category_isolation.rs` | 0 | 0 | true |  |  |
-| `crates/xlog-cuda-tests/tests/certification_suite.rs` | 3 | 33 | false | C21(1), C01-C25(1), G01-G08(1) | C01(1), C02(1), C03(1), C04(1), C05(1), C06(1) |
+| `crates/xlog-cuda-tests/tests/certification_suite.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-cuda-tests/tests/count_mask_device.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-cuda-tests/tests/g38_mint11_vram.rs` | 0 | 1 | false |  | G38(1) |
 | `crates/xlog-cuda-tests/tests/ilp_coo_fill_from_mask.rs` | 0 | 0 | true |  |  |
