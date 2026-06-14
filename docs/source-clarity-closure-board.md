@@ -711,7 +711,7 @@ Hardware cache terminology such as `L1` and `L2` is allowed when it refers to GP
 | `crates/xlog-stats/src/manager.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-stats/src/stats.rs` | 0 | 0 | true |  |  |
 | `docs/ARCHITECTURE.md` | 25 | 0 | true | Expanded G91, P-tier, E-tier, D4, version, and external-consumer labels into Gelfond 1991, named inference tiers, Decision-DNNF, current-surface, and external-consumer wording. | Replaced code-block D1/D2 example variables and M8/D4-style labels with descriptive names. |
-| `docs/BENCHMARKS.md` | 1 | 0 | false | D4(1) |  |
+| `docs/BENCHMARKS.md` | 5 | 0 | true | Expanded D4/d4 and versioned release labels to Decision-DNNF and current benchmark-surface wording; removed stale versioned scope link. |  |
 | `docs/RELEASE-EXCLUDE.md` | 1 | 0 | false | v065(1) |  |
 | `docs/architecture/adaptive-indexing.md` | 0 | 0 | true |  |  |
 | `docs/architecture/arithmetic-expressions.md` | 0 | 0 | true |  |  |

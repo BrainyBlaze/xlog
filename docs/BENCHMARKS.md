@@ -20,7 +20,7 @@ This document describes XLOG's performance benchmarking suite, methodology, and 
 
 - CUDA-capable NVIDIA GPU (compute capability 7.0+; development device: RTX PRO 3000 Blackwell, SM120)
 - CUDA Toolkit 13.x
-- D4 knowledge compiler (for exact inference benchmarks)
+- Decision-DNNF knowledge compiler (for exact inference benchmarks that use external compilation)
 - Sufficient GPU memory (4GB minimum, 12GB recommended for neural-symbolic training)
 
 ### Quick Start
@@ -135,7 +135,7 @@ WCOJ_BENCH_FULL=1 cargo bench -p xlog-integration --bench wcoj_triangle_bench
 - Timed region = `Executor::execute_plan` only. Driven via `b.iter_custom(...)` so the per-iteration loop is owned by the harness. Each cell builds ONE long-lived `Executor`; `put_relation` uploads + `store.remove("tri")` cleanup live OUTSIDE the timed region. The long-lived Executor is required so the executor's cached `wcoj_triangle_stream` (`OnceLock<StreamId>`) is acquired exactly once per cell and reused — a fresh Executor per iteration would drain the runtime's `StreamPool` (cap 16, grow-only) past iteration 16.
 - Each `(width, fixture, size)` cell pre-runs an untimed correctness check: `gate=Some(false)` (binary-join) and `gate=Some(true)` (WCOJ) must produce identical row sets (host-side dedup of fixtures aligns the two paths to set semantics). Counter delta is also asserted *inside* `iter_custom`: gate=true must increment by `iters` over the loop, gate=false must increment by 0 — a silent fallback anywhere in the hot loop fails the bench.
 - Bench-only: the `StreamPool` cap is bumped to 1024 in `make_provider` (production default 16). The bench has many short-lived correctness-check executors that each acquire one stream; production runs at 16 because each long-lived process has one provider with one cached stream.
-- Baseline numbers, adaptive default-on acceptance, phase-timing evidence, and the post-layout-fast-path results are indexed in `docs/evidence/2026-05-01-wcoj-bench-baseline/`. Default-on adaptive WCOJ for eligible non-recursive triangle rules landed in v0.6.2, with `XLOG_DISABLE_WCOJ_TRIANGLE=1` as the hard kill switch; v0.7.0 generalized the WCOJ subsystem beyond triangles (cost-aware planning, recursive/SCC integration, K-clique coverage) — see `docs/wcoj-architecture-guide.md`.
+- Baseline numbers, adaptive default-on acceptance, phase-timing evidence, and the post-layout-fast-path results are indexed in `docs/evidence/2026-05-01-wcoj-bench-baseline/`. Default-on adaptive WCOJ for eligible non-recursive triangle rules ships with `XLOG_DISABLE_WCOJ_TRIANGLE=1` as the hard kill switch; the WCOJ subsystem now covers triangles, cost-aware planning, recursive/SCC integration, and K-clique coverage — see `docs/wcoj-architecture-guide.md`.
 
 ### Probabilistic Benchmarks (`xlog-prob`)
 
@@ -279,14 +279,14 @@ Throughput on desktop-class GPUs (e.g. RTX 4090, RTX 5090) will differ due to hi
 | 100K samples, 100 vars | >10M worlds/sec | Throughput mode |
 | 10K samples, 500 vars | >5M worlds/sec | Complexity mode |
 
-### Neural-Symbolic Training (v0.4.0-alpha)
+### Neural-Symbolic Training
 
 Measured on development hardware with `01_minimal` (MNIST addition, 512 images, 5 epochs, batch_size=64).
 
 | Metric | Value | Notes |
 |--------|-------|-------|
 | `PTX JIT \(cold\)` | 0.02 s | Cubin loading (1750x speedup from ~35s) |
-| `first_epoch_sec` | ~75 s | Cold-start (d4 compile + verify), warm-starts drop to 0.26s |
+| `first_epoch_sec` | ~75 s | Cold-start (Decision-DNNF compile + verify), warm-starts drop to 0.26s |
 | `steady_epoch_sec_mean` | ~0.25 s | Epochs 2-5 after warmup (Batched evaluation) |
 | `per_query_ms` | ~1.0 ms | Per-query forward+backward through circuit |
 | Cache speedup | 2.74x | Circuit caching vs no caching (95% CI: [2.29, 3.18]) |
@@ -460,4 +460,3 @@ criterion = "0.5"
 
 - [Architecture](ARCHITECTURE.md) - System design
 - [Roadmap](ROADMAP.md) - Development plans
-- [v0.3.x Scope](plans/v0.3.x-scope.md) - Current release scope
