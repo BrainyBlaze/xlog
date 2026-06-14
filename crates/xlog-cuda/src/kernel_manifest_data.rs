@@ -575,6 +575,7 @@ pub const KERNEL_MODULES: &[KernelModuleSpec] = &[
             "fj_delta_emit_u32",
             "fj_delta_max_u32",
             // D3 sparse-domain spike — hash-set novel pipeline.
+            "fj_delta_sparse_estimate",
             "fj_delta_sparse_load_r",
             "fj_delta_sparse_insert_candidates",
             "fj_delta_sparse_mark",

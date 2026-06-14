@@ -3961,13 +3961,20 @@ __device__ __forceinline__ unsigned long long fj_sparse_pack(uint32_t x, uint32_
 // Insert one key (stored = key+1) into the table by linear probing.
 // Returns the slot it occupies (existing or newly claimed). Sets
 // *inserted_new = 1 iff this call claimed an empty slot.
+// Linear-probe insert with a bounded probe budget. Returns the slot
+// (existing or freshly claimed), or UINT32_MAX if the probe budget is
+// exhausted (table too full — the distinct estimate under-sized it);
+// the caller raises an overflow flag and declines to the legacy path.
 __device__ __forceinline__ uint32_t fj_sparse_put(
     unsigned long long* __restrict__ table,
     uint32_t mask,
     unsigned long long stored,
     int* inserted_new) {
     uint32_t slot = (uint32_t)((stored * 0x9E3779B97F4A7C15ull) >> 40) & mask;
-    for (;;) {
+    // Probe budget: the whole table in the worst case. Open addressing
+    // at load factor <= 0.5 resolves in O(1) expected; the bound is a
+    // safety backstop against an under-sized table (no infinite loop).
+    for (uint32_t probe = 0; probe <= mask; ++probe) {
         unsigned long long cur = table[slot];
         if (cur == stored) {
             *inserted_new = 0;
@@ -3986,29 +3993,66 @@ __device__ __forceinline__ uint32_t fj_sparse_put(
         }
         slot = (slot + 1u) & mask;
     }
+    *inserted_new = 0;
+    return 0xFFFFFFFFu;
 }
 
-// Load the stable relation R into the table, marking is_r.
+// Sizing pass: hash each candidate key into a fixed estimator bitmap
+// (atomicOr); the host popcounts it to approximate the number of
+// DISTINCT candidate keys, so the real table is sized to
+// |R| + distinct (not to the witness count). Collisions undercount
+// slightly — the host adds margin and the overflow-safe insert is the
+// backstop. est_mask = est_words*32 - 1 (power of two).
+extern "C" __global__ void fj_delta_sparse_estimate(
+    const uint32_t* __restrict__ delta_x,
+    uint32_t n_delta,
+    const uint32_t* __restrict__ range_lo,
+    const uint32_t* __restrict__ work_prefix,
+    uint32_t total_work,
+    const uint32_t* __restrict__ edge_z,
+    uint32_t* __restrict__ est_bitmap,
+    uint32_t est_bit_mask) {
+    uint32_t w = blockIdx.x * blockDim.x + threadIdx.x;
+    if (w >= total_work) {
+        return;
+    }
+    uint32_t r = upper_bound_u32(work_prefix, n_delta + 1, w) - 1u;
+    uint32_t k = w - work_prefix[r];
+    uint32_t x = delta_x[r];
+    uint32_t z = edge_z[range_lo[r] + k];
+    unsigned long long key = fj_sparse_pack(x, z);
+    uint32_t h = (uint32_t)((key * 0x9E3779B97F4A7C15ull) >> 32) & est_bit_mask;
+    atomicOr(&est_bitmap[h >> 5], 1u << (h & 31u));
+}
+
+// Load the stable relation R into the table, marking is_r. Raises
+// *overflow if any insert exhausts its probe budget.
 extern "C" __global__ void fj_delta_sparse_load_r(
     const uint32_t* __restrict__ r_x,
     const uint32_t* __restrict__ r_z,
     uint32_t n_r,
     unsigned long long* __restrict__ table,
     uint8_t* __restrict__ is_r,
-    uint32_t mask) {
+    uint32_t mask,
+    uint32_t* __restrict__ overflow) {
     uint32_t i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= n_r) {
         return;
     }
     int newit = 0;
     uint32_t slot = fj_sparse_put(table, mask, fj_sparse_pack(r_x[i], r_z[i]), &newit);
+    if (slot == 0xFFFFFFFFu) {
+        atomicExch(overflow, 1u);
+        return;
+    }
     is_r[slot] = 1;
 }
 
 // Insert candidates (delta row x crossed with the edge[y] range) into
 // the table. Duplicate witnesses and rediscoveries collapse at the
 // slot; only slots that are claimed fresh AND not flagged is_r are
-// novel (resolved by the emit scan).
+// novel (resolved by the emit scan). Raises *overflow on probe-budget
+// exhaustion.
 extern "C" __global__ void fj_delta_sparse_insert_candidates(
     const uint32_t* __restrict__ delta_x,
     uint32_t n_delta,
@@ -4017,7 +4061,8 @@ extern "C" __global__ void fj_delta_sparse_insert_candidates(
     uint32_t total_work,
     const uint32_t* __restrict__ edge_z,
     unsigned long long* __restrict__ table,
-    uint32_t mask) {
+    uint32_t mask,
+    uint32_t* __restrict__ overflow) {
     uint32_t w = blockIdx.x * blockDim.x + threadIdx.x;
     if (w >= total_work) {
         return;
@@ -4027,7 +4072,10 @@ extern "C" __global__ void fj_delta_sparse_insert_candidates(
     uint32_t x = delta_x[r];
     uint32_t z = edge_z[range_lo[r] + k];
     int newit = 0;
-    fj_sparse_put(table, mask, fj_sparse_pack(x, z), &newit);
+    uint32_t slot = fj_sparse_put(table, mask, fj_sparse_pack(x, z), &newit);
+    if (slot == 0xFFFFFFFFu) {
+        atomicExch(overflow, 1u);
+    }
 }
 
 // Per-slot novelty mask: 1 iff occupied (key != 0) and NOT from R.

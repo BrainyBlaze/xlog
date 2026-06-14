@@ -406,6 +406,7 @@ pub mod wcoj_kernels {
     pub const FJ_DELTA_POPCOUNT: &str = "fj_delta_popcount";
     pub const FJ_DELTA_EMIT_U32: &str = "fj_delta_emit_u32";
     pub const FJ_DELTA_MAX_U32: &str = "fj_delta_max_u32";
+    pub const FJ_DELTA_SPARSE_ESTIMATE: &str = "fj_delta_sparse_estimate";
     pub const FJ_DELTA_SPARSE_LOAD_R: &str = "fj_delta_sparse_load_r";
     pub const FJ_DELTA_SPARSE_INSERT_CANDIDATES: &str = "fj_delta_sparse_insert_candidates";
     pub const FJ_DELTA_SPARSE_MARK: &str = "fj_delta_sparse_mark";

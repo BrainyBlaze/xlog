@@ -11,11 +11,14 @@
 //! there is no `domain²` term. Output is unordered (slot scan);
 //! callers needing lex order sort downstream (`union_gpu` does).
 //!
-//! Spike only — NOT wired into executor dispatch. Table capacity is a
-//! conservative upper bound (`2×(|R| + candidate work)`); if that
-//! exceeds the memory budget the call fails closed. Whether this beats
-//! the legacy hash-join → diff path on a sparse delta-blowup workload
-//! is exactly what the bench gate measures.
+//! Wired into the executor's domain-based router (sparse route above
+//! the dense cap). Table capacity is `2×(|R| + distinct-candidate
+//! estimate)`, where the estimate comes from a fixed 8 MiB estimator
+//! bitmap (Phase 1b) — sized to DISTINCT keys, not the witness count,
+//! so a witness-blowup workload does not over-provision the table.
+//! Over the caller's `max_table_bytes` → `Ok(None)` (legacy fallback);
+//! an estimate that under-sizes the table is caught by the
+//! overflow-safe insert, which also declines to legacy.
 
 use xlog_core::{Result, ScalarType, XlogError};
 
@@ -176,12 +179,110 @@ impl CudaKernelProvider {
         }
         let total_work = total_work as u32;
 
-        // ---- Table sizing: power-of-two capacity ≥ 2×(distinct upper
-        // bound). Distinct keys ≤ n_r + total_work (each candidate is
-        // one key); load factor ≤ 0.5. This is conservative — for a
-        // witness-blowup workload it over-provisions, which is exactly
-        // the cost the gate measures.
-        let upper = u64::from(n_r) + u64::from(total_work);
+        // ---- Phase 1b: distinct-candidate estimate. Hash every
+        // candidate key into a fixed 8 MiB estimator bitmap (2²⁶ bits)
+        // and popcount it: that approximates the number of DISTINCT
+        // (x,z) candidates, which (with |R|) sizes the real table —
+        // sizing to the witness count `total_work` instead would
+        // over-provision by the multiplicity factor (the parked S4
+        // peak regression). Collisions undercount slightly; the host
+        // adds margin and the overflow-safe insert is the backstop.
+        const EST_BITS: u32 = 1 << 26;
+        const EST_WORDS: u32 = EST_BITS / 32;
+        let est_bit_mask = EST_BITS - 1;
+        let mut est = self.memory().alloc::<u32>(EST_WORDS as usize)?;
+        self.device()
+            .inner()
+            .memset_zeros(&mut est)
+            .map_err(|e| XlogError::Kernel(format!("{ctx}: zero estimator: {e}")))?;
+        let mut est_counts = self.memory().alloc::<u32>(EST_WORDS as usize + 1)?;
+        {
+            let mut rec = LaunchRecorder::new_strict(launch_stream);
+            rec.read_column(delta_x);
+            rec.read_column(edge_z);
+            rec.read(&range_lo);
+            rec.read(&wp);
+            rec.read_write(&est);
+            rec.write(&est_counts);
+            rec.preflight(runtime)
+                .map_err(|e| XlogError::Kernel(format!("{ctx}: estimate preflight: {e}")))?;
+            let delta_x_v = self.column_as_u32_view(delta_x, n_delta as usize)?;
+            let edge_z_v = self.column_as_u32_view(edge_z, n_edge as usize)?;
+            let estimate = self
+                .device()
+                .inner()
+                .get_func(WCOJ_MODULE, wcoj_kernels::FJ_DELTA_SPARSE_ESTIMATE)
+                .ok_or_else(|| {
+                    XlogError::Kernel("fj_delta_sparse_estimate not found".to_string())
+                })?;
+            let grid = total_work.div_ceil(BLOCK_SIZE);
+            // SAFETY: fj_delta_sparse_estimate(delta_x, n_delta, range_lo,
+            // wp, total_work, edge_z, est_bitmap, est_bit_mask).
+            unsafe {
+                estimate
+                    .clone()
+                    .launch_on_stream(
+                        &cu_stream,
+                        LaunchConfig {
+                            grid_dim: (grid, 1, 1),
+                            block_dim: (BLOCK_SIZE, 1, 1),
+                            shared_mem_bytes: 0,
+                        },
+                        (&delta_x_v, n_delta, &range_lo, &wp, total_work, &edge_z_v, &mut est, est_bit_mask),
+                    )
+                    .map_err(|e| {
+                        XlogError::Kernel(format!("fj_delta_sparse_estimate launch: {e}"))
+                    })?;
+            }
+            // popcount the estimator (reuses the dense popcount kernel)
+            // → exclusive scan → total set bits at [EST_WORDS].
+            let popcount = self
+                .device()
+                .inner()
+                .get_func(WCOJ_MODULE, wcoj_kernels::FJ_DELTA_POPCOUNT)
+                .ok_or_else(|| XlogError::Kernel("fj_delta_popcount not found".to_string()))?;
+            let pgrid = EST_WORDS.div_ceil(BLOCK_SIZE);
+            // SAFETY: fj_delta_popcount(bitmap, n_words, counts).
+            unsafe {
+                popcount
+                    .clone()
+                    .launch_on_stream(
+                        &cu_stream,
+                        LaunchConfig {
+                            grid_dim: (pgrid, 1, 1),
+                            block_dim: (BLOCK_SIZE, 1, 1),
+                            shared_mem_bytes: 0,
+                        },
+                        (&est, EST_WORDS, &mut est_counts),
+                    )
+                    .map_err(|e| XlogError::Kernel(format!("estimator popcount launch: {e}")))?;
+            }
+            self.multiblock_scan_u32_inplace_on_stream(
+                &mut est_counts,
+                EST_WORDS + 1,
+                &cu_stream,
+                launch_stream,
+                runtime,
+            )?;
+            rec.commit(runtime)
+                .map_err(|e| XlogError::Kernel(format!("{ctx}: estimate commit: {e}")))?;
+        }
+        cu_stream
+            .synchronize()
+            .map_err(|e| XlogError::Kernel(format!("{ctx}: estimate sync: {e}")))?;
+        let distinct_est = self.dtoh_scalar_untracked::<u32>(&est_counts, EST_WORDS as usize)?;
+        // Free the estimator + its scan before sizing the real table so
+        // they don't inflate peak (they are sizing scaffolding only).
+        drop(est);
+        drop(est_counts);
+
+        // ---- Table sizing: power-of-two capacity ≥ 2×(|R| + distinct
+        // estimate × margin). Margin 3/2 absorbs estimator-collision
+        // undercount; load factor ≤ 0.5. Sized to DISTINCT keys, not
+        // the witness count — this is the fix for the parked S4 peak
+        // regression. The overflow-safe insert backstops a bad estimate.
+        let est_margined = (u64::from(distinct_est) * 3) / 2;
+        let upper = u64::from(n_r) + est_margined + 1;
         let want = upper
             .checked_mul(2)
             .ok_or_else(|| XlogError::Kernel(format!("{ctx}: table size overflow")))?;
@@ -219,6 +320,11 @@ impl CudaKernelProvider {
             .inner()
             .memset_zeros(&mut is_r)
             .map_err(|e| XlogError::Kernel(format!("{ctx}: zero is_r: {e}")))?;
+        let mut overflow = self.memory().alloc::<u32>(1)?;
+        self.device()
+            .inner()
+            .memset_zeros(&mut overflow)
+            .map_err(|e| XlogError::Kernel(format!("{ctx}: zero overflow: {e}")))?;
 
         // ---- Phase 2: load R (marks is_r), then insert candidates.
         {
@@ -229,6 +335,7 @@ impl CudaKernelProvider {
             rec.read(&wp);
             rec.read_write(&table);
             rec.read_write(&is_r);
+            rec.write(&overflow);
             if n_r > 0 {
                 rec.read_column(r_x);
                 rec.read_column(r_z);
@@ -247,7 +354,7 @@ impl CudaKernelProvider {
                         XlogError::Kernel("fj_delta_sparse_load_r not found".to_string())
                     })?;
                 let grid = n_r.div_ceil(BLOCK_SIZE);
-                // SAFETY: fj_delta_sparse_load_r(r_x, r_z, n_r, table, is_r, mask).
+                // SAFETY: fj_delta_sparse_load_r(r_x, r_z, n_r, table, is_r, mask, overflow).
                 unsafe {
                     load_r
                         .clone()
@@ -258,7 +365,7 @@ impl CudaKernelProvider {
                                 block_dim: (BLOCK_SIZE, 1, 1),
                                 shared_mem_bytes: 0,
                             },
-                            (&r_x_v, &r_z_v, n_r, &mut table, &mut is_r, mask),
+                            (&r_x_v, &r_z_v, n_r, &mut table, &mut is_r, mask, &mut overflow),
                         )
                         .map_err(|e| {
                             XlogError::Kernel(format!("fj_delta_sparse_load_r launch: {e}"))
@@ -277,7 +384,7 @@ impl CudaKernelProvider {
                 })?;
             let grid = total_work.div_ceil(BLOCK_SIZE);
             // SAFETY: fj_delta_sparse_insert_candidates(delta_x, n_delta,
-            // range_lo, wp, total_work, edge_z, table, mask).
+            // range_lo, wp, total_work, edge_z, table, mask, overflow).
             unsafe {
                 insert
                     .clone()
@@ -288,7 +395,7 @@ impl CudaKernelProvider {
                             block_dim: (BLOCK_SIZE, 1, 1),
                             shared_mem_bytes: 0,
                         },
-                        (&delta_x_v, n_delta, &range_lo, &wp, total_work, &edge_z_v, &mut table, mask),
+                        (&delta_x_v, n_delta, &range_lo, &wp, total_work, &edge_z_v, &mut table, mask, &mut overflow),
                     )
                     .map_err(|e| {
                         XlogError::Kernel(format!("fj_delta_sparse_insert_candidates launch: {e}"))
@@ -300,6 +407,14 @@ impl CudaKernelProvider {
         cu_stream
             .synchronize()
             .map_err(|e| XlogError::Kernel(format!("{ctx}: insert sync: {e}")))?;
+
+        // Overflow backstop: if the distinct estimate under-sized the
+        // table and an insert exhausted its probe budget, the table may
+        // hold partial results — decline to the legacy path rather than
+        // emit a wrong (incomplete) novel set.
+        if self.dtoh_scalar_untracked::<u32>(&overflow, 0)? != 0 {
+            return Ok(None);
+        }
 
         // ---- Phase 3: mark novel slots → scan → emit.
         let mut counts = self.memory().alloc::<u32>(cap as usize + 1)?;
