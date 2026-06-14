@@ -600,15 +600,15 @@ impl Optimizer {
             RirNode::Distinct { input, .. } => self.estimate_width(input),
             RirNode::Diff { left, .. } => self.estimate_width(left),
             RirNode::Fixpoint { base, .. } => self.estimate_width(base),
-            // RD-27: Optimizer schemas are HashMap<RelId, Schema>.
+            // TensorMaskedJoin schemas are keyed by RelId.
             // Use head_rel_id (not head_rel_name) for lookup.
             RirNode::TensorMaskedJoin { head_rel_id, .. } => self
                 .schemas
                 .get(head_rel_id)
                 .map(|s| s.arity())
                 .unwrap_or(2),
-            // v0.6.5: `MultiWayJoin` post-promoter only — width equals
-            // the head projection arity, mirroring the Project arm.
+            // MultiWayJoin is produced after promotion; width equals the
+            // head projection arity, mirroring the Project arm.
             RirNode::MultiWayJoin { output_columns, .. } => output_columns.len(),
         }
     }
@@ -881,10 +881,10 @@ impl Optimizer {
                 gpu_mem: *max_active_rules as u64 * 1024,
                 transfers: 1,
             },
-            // v0.6.5: `MultiWayJoin` cost is the sum of input scan costs.
-            // Heuristic only — the post-promoter dispatch decides whether
-            // to run the WCOJ kernel or fall back; cost-model integration
-            // for the multiway operator itself is later-slice work.
+            // MultiWayJoin heuristic cost is the sum of input scan costs.
+            // Post-promoter dispatch decides whether to run the WCOJ kernel
+            // or fall back; full multiway cost-model integration is separate
+            // planner work.
             RirNode::MultiWayJoin { inputs, .. } => {
                 let mut total = PlanCost::default();
                 for inp in inputs {
@@ -1210,11 +1210,11 @@ impl Optimizer {
                     self.find_column_relation(right, col_idx - left_width)
                 }
             }
-            // v0.6.5: per slice 1 guardrail — return None for
-            // `MultiWayJoin`. The promoter runs after the optimizer,
-            // so this arm is unreachable in production. A half-mapped
-            // implementation that walked `inputs` via `slot_vars` would
-            // be more dangerous than `None` for this slice.
+            // MultiWayJoin has no stable column-to-input mapping here.
+            // The promoter runs after the optimizer, so this arm is
+            // unreachable in production. A half-mapped implementation that
+            // walked `inputs` via `slot_vars` would be more dangerous than
+            // returning None for this optimizer fallback.
             RirNode::MultiWayJoin { .. } => None,
             _ => None, // Complex cases: give up
         }
@@ -1238,10 +1238,11 @@ impl Optimizer {
     }
 }
 
-// v0.6.5 slice 3 — selectivity-aware optimizer pass.
+// Selectivity-aware optimizer pass.
 //
-// No-op by default. Slice 3 lays the seam; slices 4 / 5 may add real
-// reordering logic that consults `stats` to pick join orderings on selectivity.
+// No-op by default for unrecognized shapes. This pass owns the
+// selectivity-driven join reordering hook; broader planner work may add
+// reordering logic that consults `stats` for more shapes.
 //
 // Walks `plan.rules_by_scc[*].body` and rewrites nodes in place. The default
 // no-op preserves every existing plan tree byte-for-byte. Tests assert
@@ -1250,8 +1251,8 @@ impl Optimizer {
 // Compile-pipeline ordering: runs between `Optimizer::optimize` and
 // `xlog_logic::promote::promote_multiway`.
 pub mod selectivity_pass {
-    //! v0.6.5 W2.2 — selectivity-driven join reordering for
-    //! canonical lowered triangle and 4-cycle bodies.
+    //! Selectivity-driven join reordering for canonical lowered triangle and
+    //! 4-cycle bodies.
     //!
     //! ## Behavior
     //!
@@ -1285,25 +1286,23 @@ pub mod selectivity_pass {
     //! making the chosen pairing uninformative. **This is an
     //! accepted trade-off**: row-set parity holds regardless of
     //! selectivity quality (the rewrite preserves semantics);
-    //! the integration certs gate on row-set + WCOJ-dispatch
+    //! the integration checks gate on row-set + WCOJ-dispatch
     //! correctness, not on optimal pair choice.
     //!
     //! ## Promoter coordination
     //!
-    //! The slice 1 / slice 2 promoters were extended in W2.2
-    //! step 2a to accept the canonical *semantic* shape with
-    //! any valid key combination — they emit
-    //! `MultiWayJoin.inputs` and `slot_vars` in canonical
-    //! semantic order regardless of the body's positional
-    //! layout. Reordered bodies therefore still promote and
-    //! still dispatch the WCOJ kernel correctly.
+    //! The triangle and 4-cycle promoters accept the canonical *semantic*
+    //! shape with any valid key combination; they emit `MultiWayJoin.inputs`
+    //! and `slot_vars` in canonical semantic order regardless of the body's
+    //! positional layout. Reordered bodies therefore still promote and still
+    //! dispatch the WCOJ kernel correctly.
     use std::collections::HashMap;
     use xlog_core::RelId;
     use xlog_ir::ExecutionPlan;
     use xlog_stats::StatsManager;
 
-    /// W2.2: selectivity-driven join reordering for canonical
-    /// triangle + 4-cycle bodies. See module-level doc.
+    /// Selectivity-driven join reordering for canonical triangle and 4-cycle
+    /// bodies. See module-level doc.
     ///
     /// `rel_ids` is the predicate-name → RelId map used to
     /// resolve body Scans against `StatsManager` lookups.
@@ -1332,7 +1331,7 @@ pub mod selectivity_pass {
     }
 }
 
-/// W3.7 AOT helper-relation splitting for deep joins with buried skew.
+/// Ahead-of-time helper-relation splitting for deep joins with buried skew.
 pub mod helper_split_pass {
     use std::collections::{HashMap, HashSet};
 
@@ -1434,11 +1433,11 @@ pub mod helper_split_pass {
         specs
     }
 
-    /// Authorization 5 K-clique helper split entry for K-clique plans that
-    /// already carry planner-produced `HelperSplitSpec`s. The pass
-    /// reuses the Phase-1 G4 helper-relation lifecycle: emit a helper
-    /// rule before the consumer rule, allocate a compiler-owned helper
-    /// relation, and rewrite the consumer to scan that helper.
+    /// K-clique helper split entry for K-clique plans that already carry
+    /// planner-produced `HelperSplitSpec`s. The pass reuses the compiler-owned
+    /// helper-relation lifecycle: emit a helper rule before the consumer rule,
+    /// allocate a compiler-owned helper relation, and rewrite the consumer to
+    /// scan that helper.
     pub fn run_kclique_specs<F>(
         plan: &mut ExecutionPlan,
         schemas: &HashMap<RelId, Schema>,
@@ -2248,9 +2247,8 @@ mod helper_split_pass_tests {
     }
 }
 
-/// W2.2 — selectivity-driven body rewriters for triangle and
-/// 4-cycle canonical lowered shapes. `pub(super)` so
-/// `selectivity_pass::run` can dispatch into them.
+/// Selectivity-driven body rewriters for triangle and 4-cycle canonical lowered
+/// shapes. `pub(super)` so `selectivity_pass::run` can dispatch into them.
 mod reorder {
     use std::collections::HashMap;
     use xlog_core::RelId;
@@ -2888,7 +2886,7 @@ mod selectivity_pass_tests {
     }
 
     // ---------------------------------------------------------
-    // W2.2 — selectivity-driven reordering tests
+    // Selectivity-driven reordering tests
     // ---------------------------------------------------------
 
     use xlog_core::RelId;
@@ -2899,8 +2897,8 @@ mod selectivity_pass_tests {
     /// Build a hand-crafted canonical lowered triangle plan
     /// with three Scans at RelId(1), RelId(2), RelId(3) for
     /// (e_xy, e_yz, e_xz). Bypasses the optimizer entirely so
-    /// the W2.2 cert is a clean stats-→-pair-choice
-    /// observation, not a confounded test of optimizer + W2.2.
+    /// the reordering check is a clean stats-→-pair-choice
+    /// observation, not a confounded test of optimizer plus the rewriter.
     ///
     /// Default canonical shape (Y-shared inner): inner keys
     /// `[1]/[0]`, outer keys `[0,3]/[0,1]`, project `[0,1,3]`.
@@ -2957,8 +2955,8 @@ mod selectivity_pass_tests {
     }
 
     /// Inspect the (left RelId, right RelId) of the inner Join
-    /// in a canonical lowered triangle body. Used by W2.2
-    /// reordering certs.
+    /// in a canonical lowered triangle body. Used by selectivity reordering
+    /// checks.
     ///
     /// After `compile()` the body is a `MultiWayJoin` whose
     /// `fallback` field holds the post-selectivity-pass
@@ -2995,7 +2993,7 @@ mod selectivity_pass_tests {
         Some((*rel_l, *rel_r))
     }
 
-    /// W2.2 — snapshot 1: cards favor `(e1, e2)` Y-shared inner.
+    /// Snapshot 1: cards favor `(e1, e2)` Y-shared inner.
     /// Triangle rule: `tri(X, Y, Z) :- e1(X, Y), e2(Y, Z), e3(X, Z)`.
     /// To make Y-shared smallest, give e1 + e2 small cards and
     /// e3 a large card so all pair products are dominated by
@@ -3016,7 +3014,7 @@ mod selectivity_pass_tests {
         );
     }
 
-    /// W2.2 — snapshot 2: cards favor `(e1, e3)` X-shared inner.
+    /// Snapshot 2: cards favor `(e1, e3)` X-shared inner.
     /// e1 + e3 small, e2 large.
     #[test]
     fn selectivity_pass_picks_x_shared_inner_when_e1_e3_smallest() {
@@ -3033,7 +3031,7 @@ mod selectivity_pass_tests {
         );
     }
 
-    /// W2.2 — snapshot 3: cards favor `(e2, e3)` Z-shared inner.
+    /// Snapshot 3: cards favor `(e2, e3)` Z-shared inner.
     /// e2 + e3 small, e1 large.
     #[test]
     fn selectivity_pass_picks_z_shared_inner_when_e2_e3_smallest() {
@@ -3050,7 +3048,7 @@ mod selectivity_pass_tests {
         );
     }
 
-    /// W2.2 — two snapshots produce different inner pairs. Pins
+    /// Two snapshots produce different inner pairs. Pins
     /// "stats drive the order, not deterministic
     /// canonicalization." Deterministic canonicalization that
     /// ignores stats CANNOT pass this gate.
@@ -3083,7 +3081,7 @@ mod selectivity_pass_tests {
         );
     }
 
-    /// W2.2 — fallback edge case: relation cards present but no
+    /// Fallback edge case: relation cards present but no
     /// column statistics. The 10% default fallback inside
     /// `estimate_join_cardinality` means all three pair
     /// estimates collapse to roughly the same ratio. The pass
@@ -3102,7 +3100,7 @@ mod selectivity_pass_tests {
     }
 
     // ---------------------------------------------------------
-    // W2.2 — 4-cycle compile-time reordering tests
+    // 4-cycle compile-time reordering tests
     // ---------------------------------------------------------
 
     /// Build a hand-crafted canonical lowered 4-cycle plan
@@ -3221,7 +3219,7 @@ mod selectivity_pass_tests {
         Some((*r_ll, *r_lr, *r_rl, *r_rr))
     }
 
-    /// W2.2 — 4-cycle: cards favor Default grouping
+    /// 4-cycle: cards favor Default grouping
     /// `(e_wx⋈e_xy on X) + (e_yz⋈e_zw on Z)`. Default cost is
     /// `est(WX⋈XY)+est(YZ⋈ZW) = 0.1*c1*c2 + 0.1*c3*c4`.
     /// Alt cost is `0.1*c2*c3 + 0.1*c4*c1`. Default smaller
@@ -3256,7 +3254,7 @@ mod selectivity_pass_tests {
         );
     }
 
-    /// W2.2 — 4-cycle: cards favor Alt grouping
+    /// 4-cycle: cards favor Alt grouping
     /// `(e_xy⋈e_yz on Y) + (e_zw⋈e_wx on W)`. Alt smaller when
     /// `c2*c3 + c4*c1 < c1*c2 + c3*c4`. Use
     /// (c1=10_000, c2=10, c3=10, c4=10_000):
@@ -3282,7 +3280,7 @@ mod selectivity_pass_tests {
         );
     }
 
-    /// W2.2 — same plan, two stats snapshots → two different
+    /// Same plan, two stats snapshots → two different
     /// 4-cycle groupings. Pins "stats drive the choice" for
     /// 4-cycle.
     #[test]
@@ -3305,7 +3303,7 @@ mod selectivity_pass_tests {
         );
     }
 
-    /// W2.2 — 4-cycle missing-stats safety floor: any unseeded
+    /// 4-cycle missing-stats safety floor: any unseeded
     /// relation → body unchanged.
     #[test]
     fn selectivity_pass_4cycle_skips_when_card_missing() {
@@ -4078,21 +4076,21 @@ mod tests {
         }
     }
 
-    /// v0.6.5 slice 1: optimizer arms for `MultiWayJoin`.
+    /// Optimizer fallback arms for `MultiWayJoin`.
     ///
     /// The promoter runs after `Optimizer::optimize` in `Compiler`, so
     /// these arms are unreachable in production. They exist for compile
     /// safety and to pin the documented semantics: `optimize` returns
     /// the node unchanged, `estimate_width` reports the head arity from
     /// `output_columns`, `estimate_cost` is the sum of input costs, and
-    /// `find_column_relation` returns `None` (per slice 1 guardrail).
+    /// `find_column_relation` returns `None` under the optimizer fallback.
     ///
-    /// v0.6.5 slice 2 (D5) extends each test below to also exercise a
-    /// synthesized 4-input `MultiWayJoin` via [`build_4input_multiway`].
+    /// Shape-agnostic coverage extends each test below to also exercise a
+    /// synthesized four-input `MultiWayJoin` via [`build_4input_multiway`].
     /// This pins shape-agnosticism: the arms must NOT hard-code
-    /// `inputs.len() == 3` or `output_columns.len() == 3`. Slice 2a
-    /// (4-way) will produce real 4-input bodies through the promoter;
-    /// these tests are the load-bearing guard against silent regression.
+    /// `inputs.len() == 3` or `output_columns.len() == 3`. The four-way
+    /// promoter path produces real four-input bodies; these tests are the
+    /// load-bearing guard against silent regression.
     fn build_canonical_triangle_multiway() -> RirNode {
         let scan_xy = RirNode::Scan { rel: RelId(1) };
         let scan_yz = RirNode::Scan { rel: RelId(2) };
@@ -4137,10 +4135,10 @@ mod tests {
         }
     }
 
-    /// v0.6.5 slice 2 (D5): synthesized 4-input `MultiWayJoin` for
-    /// shape-agnosticism testing. Slice 1's promoter is triangle-only,
-    /// so this shape never reaches `Optimizer` through the production
-    /// pipeline; the tests below exercise the optimizer arms directly.
+    /// Synthesized four-input `MultiWayJoin` for shape-agnosticism testing.
+    /// The original promoter shape is triangle-only, so this shape never
+    /// reaches `Optimizer` through the production pipeline; the tests below
+    /// exercise the optimizer arms directly.
     ///
     /// Inputs reuse `RelId(1, 2, 3, 1)` — RelId(1) repeats — so the
     /// stats manager registered in `make_stats_manager` covers all
@@ -4251,12 +4249,10 @@ mod tests {
     #[test]
     fn find_column_relation_returns_none_for_multiway() {
         let optimizer = Optimizer::new(make_stats_manager());
-        // Per slice 1 guardrail: no column-to-input mapping in this
-        // slice. Half-mapped is more dangerous than None. The arm
-        // must return None regardless of arity — slice 2 strengthens
-        // this to also check the 4-input synthesized shape so a
-        // future "let's just return inputs[col_idx % len]" patch
-        // gets caught.
+        // Optimizer fallback guardrail: no column-to-input mapping is exposed
+        // here. Half-mapped is more dangerous than None. The arm must return
+        // None regardless of arity; the synthesized four-input shape catches a
+        // future "let's just return inputs[col_idx % len]" patch.
         for node in [build_canonical_triangle_multiway(), build_4input_multiway()] {
             for col in 0..node.referenced_relations().len() {
                 assert!(
