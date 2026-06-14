@@ -1,13 +1,13 @@
 // crates/xlog-cuda/tests/test_wcoj_layout_fast_path.rs
-//! v0.6.2 — WCOJ layout fast-path correctness tests.
+//! WCOJ layout fast-path correctness tests.
 //!
 //! `wcoj_layout_u32_recorded` / `wcoj_layout_u64_recorded` gain
 //! a proof-based pre-check: if the input is already lex-sorted
 //! and full-row unique, skip `dedup_full_row_recorded` (sort +
 //! mark-unique + compact) and emit a recorded device-side
-//! clone. Phase report at v0.6.2 showed layout to be 91-97%
-//! of WCOJ adaptive dispatch wall time on the bench's host-
-//! deduped fixtures; this slice targets that overhead.
+//! clone. Phase-timing evidence showed layout to be 91-97%
+//! of WCOJ adaptive dispatch wall time on host-deduped
+//! fixtures; these tests target that overhead.
 //!
 //! No caching, no buffer fingerprint — purely proof-based per
 //! invocation. Failures fall through silently to the existing
@@ -469,7 +469,7 @@ fn compacted_buffer_checks_only_logical_rows() {
 
 // =================================================================
 // n==0 preserves existing empty-buffer semantics. NO fast-path
-// counter increment (the zero-row early-out predates this slice).
+// counter increment (the zero-row early-out predates this fast path).
 // =================================================================
 
 #[test]
