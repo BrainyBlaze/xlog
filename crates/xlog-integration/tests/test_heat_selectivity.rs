@@ -1,21 +1,18 @@
-//! W2.6 step 7 Parts C/D/E — real-runtime end-to-end certs
-//! locking the heat-aware leader selection contract.
+//! Real-runtime end-to-end coverage for the heat-aware leader selection
+//! contract.
 //!
-//! * Part C (3 tests): real runtime-observed signals
+//! * Real runtime-observed signals
 //!   (`record_join_result` selectivity + `record_access` heat)
 //!   captured via `Executor::stats_snapshot()` drive a HeatAware
 //!   leader change vs the LeaderCardinality baseline on the same
 //!   snapshot. Row-set parity vs binary-join reference holds.
-//! * Part D (2 tests): default `CompilerConfig::default()` preserves
-//!   row-set parity under the cardinality runtime default; W2.4
-//!   feedback's canonical `(slot_rels[0],
+//! * Default `CompilerConfig::default()` preserves row-set parity
+//!   under the cardinality runtime default; feedback's canonical `(slot_rels[0],
 //!   slot_rels[1])` pair with `[1]/[0]` keys is preserved when
 //!   `var_order = None`.
-//! * Part E (1 test): when HeatAware emits a non-default leader
-//!   on triangle (idx 2), W2.6's `feedback_pair_from_var_order`
-//!   reroute records selectivity on the **rotated** pair
-//!   (canonicalized) with `[1]/[1]` keys — proving the W2.6
-//!   step-5 contract end-to-end.
+//! * When HeatAware emits a non-default triangle leader (idx 2),
+//!   `feedback_pair_from_var_order` records selectivity on the
+//!   **rotated** pair (canonicalized) with `[1]/[1]` keys.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -36,7 +33,7 @@ use xlog_runtime::Executor;
 use xlog_stats::{JoinSelectivity, RelationStats, StatsSnapshot};
 
 // ---------------------------------------------------------------
-// CUDA fixture (mirror of W2.4 `test_wcoj_record_join_result_feedback`)
+// CUDA fixture mirroring the WCOJ join-result feedback tests.
 // ---------------------------------------------------------------
 
 struct DiscardSink;
@@ -261,7 +258,7 @@ fn canonical_pair(a: RelId, b: RelId) -> (RelId, RelId) {
 }
 
 // ---------------------------------------------------------------
-// Triangle non-recursive fixture (Part C.1, D.2, E.1)
+// Triangle non-recursive fixture.
 // ---------------------------------------------------------------
 
 const TRI_NONREC_SRC: &str = r#"
@@ -280,7 +277,7 @@ fn tri_nonrec_inputs() -> BTreeMap<&'static str, Vec<(u32, u32)>> {
 }
 
 // ---------------------------------------------------------------
-// 4-cycle non-recursive fixture (Part C.3)
+// 4-cycle non-recursive fixture.
 // ---------------------------------------------------------------
 
 const CYC4_NONREC_SRC: &str = r#"
@@ -300,7 +297,7 @@ fn cyc4_nonrec_inputs() -> BTreeMap<&'static str, Vec<(u32, u32)>> {
 }
 
 // ---------------------------------------------------------------
-// Slice-4 anchor (Part D.1) — copied from
+// Linear-recursive triangle anchor copied from
 // `test_wcoj_recursive_dispatch::LINEAR_REC_TRIANGLE`.
 // ---------------------------------------------------------------
 
@@ -328,7 +325,7 @@ fn linear_rec_triangle_inputs() -> BTreeMap<&'static str, Vec<(u32, u32)>> {
 // ---------------------------------------------------------------
 
 /// Build executor, register predicates from the compiler, upload
-/// EDBs, and seed cardinalities (W2.4 missing-cards safety floor
+/// EDBs, and seed cardinalities. The missing-cards safety floor
 /// requires explicit `update_cardinality` for `record_join_result`
 /// to fire — `put_relation` alone does NOT seed `StatsManager`).
 fn build_executor(
@@ -357,7 +354,7 @@ fn build_executor(
 }
 
 // ===============================================================
-// Part C.1 — Real selectivity drives leader for triangle
+// Real selectivity drives leader for triangle.
 // ===============================================================
 
 #[test]
@@ -369,7 +366,7 @@ fn triangle_real_observed_selectivity_drives_heat_aware_leader_to_idx_2() {
 
     // Phase 1: warm-up under default config + force-WCOJ-on.
     // 4 sequential execute_plan calls feed `record_join_result`
-    // 4× via the W2.4 EMA path. Cards equal at 5 (no recursion).
+    // 4× via the join-feedback EMA path. Cards equal at 5 (no recursion).
     let mut compiler = Compiler::new();
     let cfg_default = CompilerConfig::default();
     let plan_default = compiler
@@ -378,8 +375,8 @@ fn triangle_real_observed_selectivity_drives_heat_aware_leader_to_idx_2() {
 
     let inputs = tri_nonrec_inputs();
     // Seed card=5 to match plan iteration 7 — actual EDB size.
-    // Slice-1 promoter's right-deep normalizer (W2.6) handles
-    // the lowerer's bushy DP choice of right-deep trees at this
+    // The promoter's right-deep normalizer handles the lowerer's
+    // bushy dynamic-programming choice of right-deep trees at this
     // small scale.
     let mut seeded = BTreeMap::new();
     seeded.insert("e1", 5u64);
@@ -460,7 +457,7 @@ fn triangle_real_observed_selectivity_drives_heat_aware_leader_to_idx_2() {
     );
 
     // Phase 4: same snapshot under LeaderCardinality → None
-    // (cards equal, W2.1 short-circuits). This proves the leader
+    // (cards equal, cardinality-only ordering short-circuits). This proves the leader
     // change is selectivity-driven, NOT cardinality-driven.
     let mut compiler_card = Compiler::new();
     let cfg_card = CompilerConfig {
@@ -513,7 +510,7 @@ fn triangle_real_observed_selectivity_drives_heat_aware_leader_to_idx_2() {
 }
 
 // ===============================================================
-// Part C.2 — Real heat drives leader for triangle
+// Real heat drives leader for triangle.
 // ===============================================================
 
 /// Heater-only source — `dummy_e1` projects e1, no tri rule.
@@ -698,7 +695,7 @@ fn triangle_real_observed_heat_drives_heat_aware_leader_to_idx_1() {
 }
 
 // ===============================================================
-// Part C.4 — Real heat drives leader; non-zero cold-baseline
+// Real heat drives leader with a non-zero cold baseline.
 // ===============================================================
 //
 // Plan iteration 7 originally specified Phase A with combined
@@ -893,7 +890,7 @@ fn triangle_real_observed_heat_with_baseline_drives_heat_aware_leader_to_idx_1()
 }
 
 // ===============================================================
-// Part C.3 — Real selectivity drives leader for 4-cycle
+// Real selectivity drives leader for 4-cycle.
 // ===============================================================
 
 #[test]
@@ -1046,7 +1043,7 @@ fn cycle4_real_observed_selectivity_drives_heat_aware_leader_to_idx_2() {
 }
 
 // ===============================================================
-// Part D.1 — default compiler config row parity under stats mode
+// Default compiler config row parity under stats mode.
 // ===============================================================
 
 #[test]
@@ -1110,16 +1107,16 @@ fn default_compiler_config_preserves_rows_under_stats_mode() {
     assert_eq!(
         executor_def.wcoj_triangle_dispatch_count(),
         0,
-        "bare W2.5 default must keep the binary path on this small-cardinality fixture"
+        "bare cardinality-aware default must keep the binary path on this small-cardinality fixture"
     );
     assert_eq!(
         rows_def, rows_ref,
-        "bare W2.5 default row set must match binary-join reference"
+        "bare cardinality-aware default row set must match binary-join reference"
     );
 }
 
 // ===============================================================
-// Part D.2 — var_order=None pair unchanged (pre-W2.6 baseline)
+// var_order=None pair unchanged.
 // ===============================================================
 
 #[test]
@@ -1184,13 +1181,13 @@ fn record_wcoj_feedback_var_order_none_pair_unchanged() {
 }
 
 // ===============================================================
-// Part E.1 — var_order=Some rotated-feedback cert
+// var_order=Some rotated-feedback coverage.
 // ===============================================================
 
 /// Build a hand-built triangle snapshot with HEAT-only bias that
 /// pushes HeatAware leader to idx 2. `join_selectivities` is left
-/// empty so the post-execution cert can prove the rotated entry
-/// was created by W2.6's `feedback_pair_from_var_order` reroute,
+/// empty so the post-execution check can prove the rotated entry
+/// was created by the `feedback_pair_from_var_order` reroute,
 /// not pre-existing.
 fn make_triangle_heat_idx2_snapshot() -> StatsSnapshot {
     // RelIds 0,1,2 map to e1,e2,e3 via rel_names. The compiler
@@ -1264,7 +1261,7 @@ fn heat_aware_rotated_leader_records_feedback_on_rotated_pair() {
     );
 
     // Phase 3: execute — exactly one WCOJ dispatch fires
-    // record_wcoj_feedback, which through W2.6's rerouting
+    // record_wcoj_feedback, which through var-order-aware rerouting
     // records on the rotated (slot_rels[0], slot_rels[1]) pair.
     let _ = executor.execute_plan(&plan_heat).expect("execute_plan");
     assert_eq!(executor.wcoj_triangle_dispatch_count(), 1);
@@ -1303,16 +1300,16 @@ fn heat_aware_rotated_leader_records_feedback_on_rotated_pair() {
         entry.right_keys
     );
 
-    // Pre-W2.6 canonical pair must NOT have an entry.
+    // The canonical pre-rotation pair must NOT have an entry.
     let canon_xy_yz = canonical_pair(rel_xy, rel_yz);
-    let pre_w26 = snap_post
+    let pre_rotation_entry = snap_post
         .join_selectivities
         .iter()
         .find(|js| (js.left_rel, js.right_rel) == canon_xy_yz);
     assert!(
-        pre_w26.is_none(),
+        pre_rotation_entry.is_none(),
         "canonical (rel_xy, rel_yz) pair must NOT exist when leader rotates to idx 2; \
          found {:?}",
-        pre_w26
+        pre_rotation_entry
     );
 }
