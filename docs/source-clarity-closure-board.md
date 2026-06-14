@@ -3,9 +3,9 @@
 Scope: Git-tracked source and documentation files only. Superpowers docs, plan files, evidence directories, generated artifacts, result/output directories, build output, and other worktrees are excluded.
 
 Scanned files: 1430
-Unresolved files: 301
-Comment/prose artifact occurrences: 1889
-Code/identifier artifact occurrences: 757
+Unresolved files: 300
+Comment/prose artifact occurrences: 1877
+Code/identifier artifact occurrences: 752
 
 Resolved means this board found no remaining opaque task/milestone labels or external consumer names in the eligible portions of that file.
 
@@ -97,7 +97,7 @@ Technical host-transfer terminology such as `D2H`, `DTOH`, and `H2D` is allowed 
 | `crates/xlog-cli/tests/generated_rule_diagnostics.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-cli/tests/interactive_cli_tests.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-cli/tests/prob_cli_tests.rs` | 0 | 0 | true |  |  |
-| `crates/xlog-cli/tests/run_cli_tests.rs` | 12 | 5 | false | G91(10), S5(1), C2(1) | G91(5) |
+| `crates/xlog-cli/tests/run_cli_tests.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-core/Cargo.toml` | 0 | 0 | true |  |  |
 | `crates/xlog-core/src/config.rs` | 6 | 0 | false | D2H(3), W2.5(2), G38(1) |  |
 | `crates/xlog-core/src/error.rs` | 0 | 0 | true |  |  |
