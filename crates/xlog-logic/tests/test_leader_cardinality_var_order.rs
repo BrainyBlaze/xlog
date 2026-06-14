@@ -1,13 +1,13 @@
-//! W2.1 step 7 — Part A acceptance gate (10 tests).
+//! Leader-cardinality variable-ordering acceptance gate (10 tests).
 //!
 //! Compile-time leader-decision tests. Each test:
 //! 1. Compiles a triangle/4-cycle source with a crafted
 //!    `StatsSnapshot` via
 //!    `Compiler::compile_with_config_and_stats_snapshot`.
 //! 2. Asserts the resulting `RirNode::MultiWayJoin.var_order`
-//!    matches the locked permutation table from the W2.1 plan.
+//!    matches the leader-cardinality permutation table.
 //! 3. Asserts `MultiWayJoin.output_columns` is unchanged from the
-//!    binary-fallback projection — slice 1/2/W2.2 binary-fallback
+//!    binary-fallback projection so existing binary-fallback
 //!    consumers continue to read it directly.
 //!
 //! Coverage:
@@ -58,7 +58,7 @@ fn make_snapshot(seeded: &[(&str, u64)]) -> StatsSnapshot {
 }
 
 /// Walk the post-compile plan and return the first
-/// `RirNode::MultiWayJoin` (W2.1 fixtures emit exactly one per
+/// `RirNode::MultiWayJoin` (these fixtures emit exactly one per
 /// rule). Returns the var_order + output_columns directly so each
 /// test can assert on both.
 fn first_multiway(plan: &xlog_ir::ExecutionPlan) -> (Option<VariableOrder>, Vec<ProjectExpr>) {
@@ -108,7 +108,7 @@ e4(7, 1). e4(8, 3).
 result(W, X, Y, Z) :- e1(W, X), e2(X, Y), e3(Y, Z), e4(Z, W).
 ";
 
-fn compile_w21(
+fn compile_with_var_ordering_config(
     source: &str,
     snapshot: &StatsSnapshot,
     kind: WcojVarOrderingKind,
@@ -131,16 +131,20 @@ fn compile_w21(
 fn triangle_picks_e_xy_default_when_e_xy_smallest() {
     // e1 (e_xy) is smallest. Cost model returns None because the
     // default leader is already optimal — Var Order stays None,
-    // bit-identical to slice 1.
+    // bit-identical to the original binary-fallback path.
     let snap = make_snapshot(&[("e1", 100), ("e2", 1000), ("e3", 1000)]);
-    let plan = compile_w21(TRIANGLE_SRC, &snap, WcojVarOrderingKind::LeaderCardinality);
+    let plan = compile_with_var_ordering_config(
+        TRIANGLE_SRC,
+        &snap,
+        WcojVarOrderingKind::LeaderCardinality,
+    );
     let (var_order, output_columns) = first_multiway(&plan);
     assert!(
         var_order.is_none(),
         "default leader case should leave var_order = None, got {:?}",
         var_order
     );
-    // Slice 1 binary-fallback projection is unchanged.
+    // Original binary-fallback projection is unchanged.
     assert_eq!(
         output_columns,
         vec![
@@ -148,14 +152,18 @@ fn triangle_picks_e_xy_default_when_e_xy_smallest() {
             ProjectExpr::Column(1),
             ProjectExpr::Column(3),
         ],
-        "MultiWayJoin.output_columns must remain the slice 1 binary-fallback projection"
+        "MultiWayJoin.output_columns must remain the original binary-fallback projection"
     );
 }
 
 #[test]
 fn triangle_picks_e_yz_when_e_yz_smallest() {
     let snap = make_snapshot(&[("e1", 1000), ("e2", 50), ("e3", 1000)]);
-    let plan = compile_w21(TRIANGLE_SRC, &snap, WcojVarOrderingKind::LeaderCardinality);
+    let plan = compile_with_var_ordering_config(
+        TRIANGLE_SRC,
+        &snap,
+        WcojVarOrderingKind::LeaderCardinality,
+    );
     let (var_order, output_columns) = first_multiway(&plan);
     let vo = var_order.expect("triangle e_yz fixture must set var_order");
     assert_eq!(vo.leader_idx, 1, "e_yz leader is canonical idx 1");
@@ -171,9 +179,8 @@ fn triangle_picks_e_yz_when_e_yz_smallest() {
     // Both lookup_perms swap_cols == true for e_yz leader.
     assert_eq!(vo.lookup_perms.len(), 2);
     assert!(vo.lookup_perms.iter().all(|p| p.swap_cols));
-    // MultiWayJoin.output_columns stays as the slice 1
-    // binary-fallback projection — slice 1/2 matchers continue
-    // reading it directly.
+    // MultiWayJoin.output_columns stays as the original
+    // binary-fallback projection; existing matchers continue reading it directly.
     assert_eq!(
         output_columns,
         vec![
@@ -187,7 +194,11 @@ fn triangle_picks_e_yz_when_e_yz_smallest() {
 #[test]
 fn triangle_picks_e_xz_when_e_xz_smallest() {
     let snap = make_snapshot(&[("e1", 1000), ("e2", 1000), ("e3", 50)]);
-    let plan = compile_w21(TRIANGLE_SRC, &snap, WcojVarOrderingKind::LeaderCardinality);
+    let plan = compile_with_var_ordering_config(
+        TRIANGLE_SRC,
+        &snap,
+        WcojVarOrderingKind::LeaderCardinality,
+    );
     let (var_order, output_columns) = first_multiway(&plan);
     let vo = var_order.expect("triangle e_xz fixture must set var_order");
     assert_eq!(vo.leader_idx, 2, "e_xz leader is canonical idx 2");
@@ -221,7 +232,8 @@ fn triangle_picks_e_xz_when_e_xz_smallest() {
 #[test]
 fn cycle4_picks_e_wx_default_when_e_wx_smallest() {
     let snap = make_snapshot(&[("e1", 100), ("e2", 1000), ("e3", 1000), ("e4", 1000)]);
-    let plan = compile_w21(CYCLE4_SRC, &snap, WcojVarOrderingKind::LeaderCardinality);
+    let plan =
+        compile_with_var_ordering_config(CYCLE4_SRC, &snap, WcojVarOrderingKind::LeaderCardinality);
     let (var_order, _) = first_multiway(&plan);
     assert!(
         var_order.is_none(),
@@ -232,7 +244,8 @@ fn cycle4_picks_e_wx_default_when_e_wx_smallest() {
 #[test]
 fn cycle4_picks_e_xy_when_e_xy_smallest() {
     let snap = make_snapshot(&[("e1", 1000), ("e2", 50), ("e3", 1000), ("e4", 1000)]);
-    let plan = compile_w21(CYCLE4_SRC, &snap, WcojVarOrderingKind::LeaderCardinality);
+    let plan =
+        compile_with_var_ordering_config(CYCLE4_SRC, &snap, WcojVarOrderingKind::LeaderCardinality);
     let (var_order, _) = first_multiway(&plan);
     let vo = var_order.expect("4-cycle e_xy fixture must set var_order");
     assert_eq!(vo.leader_idx, 1);
@@ -253,7 +266,8 @@ fn cycle4_picks_e_xy_when_e_xy_smallest() {
 #[test]
 fn cycle4_picks_e_yz_when_e_yz_smallest() {
     let snap = make_snapshot(&[("e1", 1000), ("e2", 1000), ("e3", 50), ("e4", 1000)]);
-    let plan = compile_w21(CYCLE4_SRC, &snap, WcojVarOrderingKind::LeaderCardinality);
+    let plan =
+        compile_with_var_ordering_config(CYCLE4_SRC, &snap, WcojVarOrderingKind::LeaderCardinality);
     let (var_order, _) = first_multiway(&plan);
     let vo = var_order.expect("4-cycle e_yz fixture must set var_order");
     assert_eq!(vo.leader_idx, 2);
@@ -272,7 +286,8 @@ fn cycle4_picks_e_yz_when_e_yz_smallest() {
 #[test]
 fn cycle4_picks_e_zw_when_e_zw_smallest() {
     let snap = make_snapshot(&[("e1", 1000), ("e2", 1000), ("e3", 1000), ("e4", 50)]);
-    let plan = compile_w21(CYCLE4_SRC, &snap, WcojVarOrderingKind::LeaderCardinality);
+    let plan =
+        compile_with_var_ordering_config(CYCLE4_SRC, &snap, WcojVarOrderingKind::LeaderCardinality);
     let (var_order, _) = first_multiway(&plan);
     let vo = var_order.expect("4-cycle e_zw fixture must set var_order");
     assert_eq!(vo.leader_idx, 3);
@@ -292,8 +307,8 @@ fn cycle4_picks_e_zw_when_e_zw_smallest() {
 // Default-leader-already-min short-circuit (1 test, single
 // fixture covers both triangle + 4-cycle).
 //
-// NOTE: the W2.1 plan §"Part A" originally framed this test as
-// "missing-stats safety floor". The actual missing-stats
+// NOTE: the original variable-ordering plan framed this test as a
+// missing-stats safety floor. The actual missing-stats
 // safety-floor semantics (`card_of` returning None on zero card)
 // is exercised at the unit-test level by
 // `wcoj_var_ordering::tests::missing_stats_returns_none_safety_floor`.
@@ -307,16 +322,24 @@ fn default_leader_already_min_returns_none_for_both_shapes() {
     // Every input has the SAME card. Then argmin is canonical
     // idx 0 (default leader; ties resolve to the first index),
     // which the cost model short-circuits to None ("no reorder
-    // needed"). Bit-identical to slice 1/2/W2.2.
+    // needed"). Bit-identical to the original binary-fallback path.
     let snap = make_snapshot(&[("e1", 100), ("e2", 100), ("e3", 100)]);
-    let triangle_plan = compile_w21(TRIANGLE_SRC, &snap, WcojVarOrderingKind::LeaderCardinality);
+    let triangle_plan = compile_with_var_ordering_config(
+        TRIANGLE_SRC,
+        &snap,
+        WcojVarOrderingKind::LeaderCardinality,
+    );
     let (triangle_vo, _) = first_multiway(&triangle_plan);
     assert!(
         triangle_vo.is_none(),
         "uniform-stats triangle must produce var_order = None (default leader optimal)"
     );
     let snap4 = make_snapshot(&[("e1", 100), ("e2", 100), ("e3", 100), ("e4", 100)]);
-    let cycle4_plan = compile_w21(CYCLE4_SRC, &snap4, WcojVarOrderingKind::LeaderCardinality);
+    let cycle4_plan = compile_with_var_ordering_config(
+        CYCLE4_SRC,
+        &snap4,
+        WcojVarOrderingKind::LeaderCardinality,
+    );
     let (cycle4_vo, _) = first_multiway(&cycle4_plan);
     assert!(
         cycle4_vo.is_none(),
@@ -326,7 +349,7 @@ fn default_leader_already_min_returns_none_for_both_shapes() {
 
 // ===============================================================
 // Activation contract (2 tests): same stats, default vs
-// LeaderCardinality. The only diff between the two test cases is
+// LeaderCardinality. The only difference between the two test cases is
 // `WcojVarOrderingKind`.
 // ===============================================================
 
@@ -336,7 +359,7 @@ fn default_config_leaves_var_order_none_even_with_triggering_stats() {
     // threshold). With Disabled config, the cost model
     // short-circuits and var_order stays None.
     let snap = make_snapshot(&[("e1", 1000), ("e2", 50), ("e3", 1000)]);
-    let plan = compile_w21(TRIANGLE_SRC, &snap, WcojVarOrderingKind::Disabled);
+    let plan = compile_with_var_ordering_config(TRIANGLE_SRC, &snap, WcojVarOrderingKind::Disabled);
     let (var_order, _) = first_multiway(&plan);
     assert!(
         var_order.is_none(),
@@ -349,7 +372,11 @@ fn leader_cardinality_config_sets_var_order_some_with_same_stats() {
     // Same stats as the previous test, only WcojVarOrderingKind
     // differs.
     let snap = make_snapshot(&[("e1", 1000), ("e2", 50), ("e3", 1000)]);
-    let plan = compile_w21(TRIANGLE_SRC, &snap, WcojVarOrderingKind::LeaderCardinality);
+    let plan = compile_with_var_ordering_config(
+        TRIANGLE_SRC,
+        &snap,
+        WcojVarOrderingKind::LeaderCardinality,
+    );
     let (var_order, _) = first_multiway(&plan);
     let vo = var_order.expect("LeaderCardinality must set var_order on triggering stats");
     assert_eq!(vo.leader_idx, 1, "stats favor e_yz (canonical idx 1)");
