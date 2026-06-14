@@ -727,7 +727,7 @@ Hardware cache terminology such as `L1` and `L2` is allowed when it refers to GP
 | `docs/architecture/language-completeness.md` | 33 | 1 | true | release labels(13), G085 feature codes(19), branch/file naming artifact(1) | Renamed file and replaced release/milestone labels with language-completeness feature-area prose. |
 | `docs/architecture/living-world-diagnostics-v087.md` | 0 | 0 | true |  |  |
 | `docs/architecture/lwm-diagnostics-provenance.md` | 0 | 0 | true |  |  |
-| `docs/architecture/multi-gpu-join.md` | 2 | 0 | false | P2P(2) |  |
+| `docs/architecture/multi-gpu-join.md` | 4 | 0 | true | release labels(2), P2P(2) | Replaced release-target labels with design/current-roadmap wording and expanded peer-to-peer copy terminology. |
 | `docs/architecture/python-bindings.md` | 5 | 4 | false | v087(3), P2b(1), M37-A+B(1) | D1(2), D2(2) |
 | `docs/architecture/query-optimizer.md` | 2 | 0 | false | D2H(1), v086(1) |  |
 | `docs/architecture/recorded-launch-migration.md` | 0 | 0 | true |  |  |
