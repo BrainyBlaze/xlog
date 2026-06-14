@@ -402,7 +402,7 @@ impl LogicProgram {
                 schemas: compiler.schemas().clone(),
                 rel_ids: compiler.rel_ids().clone(),
                 epistemic_provenance: Some(EpistemicProvenance {
-                    reduction: "case_a_recursive",
+                    reduction: "ordinary_recursive_modal_reduction",
                     literals: provenance_literals,
                 }),
             });

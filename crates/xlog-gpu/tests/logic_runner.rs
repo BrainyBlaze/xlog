@@ -127,9 +127,9 @@ fn test_logic_program_runs_with_gpu_inputs() -> Result<()> {
     Ok(())
 }
 
-/// v0.9.2 ITEM A: a Case-B recursive epistemic program (positive `know` over a
-/// relation that CO-EVOLVES with the recursion) EXECUTES to its FAEEL founded least
-/// fixpoint on the production runtime path, NOT a rejection.
+/// Co-evolving recursive epistemic fixpoint: a positive `know` over a relation that
+/// evolves with the recursion executes to its FAEEL founded least fixpoint on the
+/// production runtime path, not a rejection.
 ///
 /// The modal feeds a NON-MIRROR relation `trust`, so the modal gate is load-bearing:
 ///   reach(X,Y) :- seed(X,Y).               -- founding base
@@ -144,7 +144,7 @@ fn test_logic_program_runs_with_gpu_inputs() -> Result<()> {
 /// would add via trust(3,1)) is absent -- foundedness is load-bearing. This founded
 /// result differs from BOTH base-only {(1,2)} and ungated {(1,1),(1,2),(1,3)}.
 #[test]
-fn test_case_b_recursive_epistemic_fixpoint_founded_tuples() -> Result<()> {
+fn test_coevolving_recursive_epistemic_fixpoint_founded_tuples() -> Result<()> {
     let Some(provider) = create_test_provider() else {
         eprintln!("Skipping: no CUDA device");
         return Ok(());
@@ -170,32 +170,33 @@ fn test_case_b_recursive_epistemic_fixpoint_founded_tuples() -> Result<()> {
 
     let program = xlog_gpu::logic::LogicProgram::compile(source)?;
 
-    // NON-VACUOUS dispatch proof: the Case-B program must compile to the ORDINARY
-    // recursive plan (modal resolved into the SCC), NOT the single-pass epistemic plan.
+    // NON-VACUOUS dispatch proof: the co-evolving recursive program must compile to
+    // the ORDINARY recursive plan (modal resolved into the SCC), NOT the single-pass
+    // epistemic plan.
     // This matters because the epistemic CPU-fallback counters (cpu_candidate_enumerations,
     // cpu_world_view_validations, cpu_fallbacks) exist ONLY on the single-pass epistemic
     // execution path; the ordinary semi-naive engine has no epistemic CPU code to count,
-    // so it is CPU-fallback-free BY CONSTRUCTION. The provenance reduction tag
-    // ("case_a_recursive") is the discriminating, non-vacuous proof of WHICH path ran:
-    // a regression that rerouted Case-B through the single-pass planner (and could then
-    // incur epistemic CPU fallbacks) would change this tag and FAIL here.
+    // so it is CPU-fallback-free BY CONSTRUCTION. The reduction tag is the
+    // discriminating, non-vacuous proof of WHICH path ran: a regression that rerouted
+    // the co-evolving program through the single-pass planner (and could then incur
+    // epistemic CPU fallbacks) would change this tag and FAIL here.
     let plan_json = program
         .epistemic_plan_json()
-        .expect("Case-B epistemic program must carry a provenance summary");
+        .expect("co-evolving recursive epistemic program must carry a provenance summary");
     assert!(
-        plan_json.contains("\"reduction\":\"case_a_recursive\""),
-        "Case-B must route through the ORDINARY recursive reduction (no single-pass \
+        plan_json.contains("\"reduction\":\"ordinary_recursive_modal_reduction\""),
+        "co-evolving recursive fixpoint must route through the ORDINARY recursive reduction (no single-pass \
          epistemic CPU-fallback surface), got: {plan_json}"
     );
     assert!(
         plan_json.contains("\"plan_kind\":\"epistemic_reduced_ordinary\""),
-        "Case-B plan kind must be the reduced-ordinary engine, got: {plan_json}"
+        "co-evolving recursive fixpoint plan kind must be the reduced-ordinary engine, got: {plan_json}"
     );
     // The reduced-ordinary plan carries NO epistemic GPU candidate-enumeration units
     // (those would be the CPU-fallback-bearing surface); the units list is empty.
     assert!(
         plan_json.contains("\"units\":[]"),
-        "reduced-ordinary Case-B plan carries no epistemic candidate-enumeration units: \
+        "reduced-ordinary recursive modal plan carries no epistemic candidate-enumeration units: \
          {plan_json}"
     );
 
@@ -217,8 +218,8 @@ fn test_case_b_recursive_epistemic_fixpoint_founded_tuples() -> Result<()> {
     Ok(())
 }
 
-/// v0.9.2 ITEM A MUTATION PROBE: neutralizing the founded modal gate FLIPS the result,
-/// proving the co-evolution + foundedness are load-bearing (not cosmetic).
+/// Ungated mutation probe: neutralizing the founded modal gate flips the result,
+/// proving the co-evolution and foundedness are load-bearing, not cosmetic.
 ///
 /// The accepted program above gates `trust` behind `know reach(...)`; foundedness then
 /// excludes the unfounded `trust(3,1)`. Here the SAME program is mutated to UNGATE the
@@ -228,7 +229,7 @@ fn test_case_b_recursive_epistemic_fixpoint_founded_tuples() -> Result<()> {
 /// founded fixpoint that returned this set would be a soundness violation; the accepted
 /// path must NOT.
 #[test]
-fn test_case_b_ungated_mutation_flips_founded_result() -> Result<()> {
+fn test_coevolving_recursive_ungated_mutation_flips_founded_result() -> Result<()> {
     let Some(provider) = create_test_provider() else {
         eprintln!("Skipping: no CUDA device");
         return Ok(());
@@ -274,22 +275,21 @@ fn test_case_b_ungated_mutation_flips_founded_result() -> Result<()> {
     Ok(())
 }
 
-/// v0.9.2 WALL A1: a NEGATED modal `not know reach` over a GENUINELY RECURSIVE
-/// relation that sits in a strictly LOWER stratum than the negating head EXECUTES on
-/// the GPU production path as ordinary stratified negation -- with EXACT tuples and
-/// ZERO CPU fallback.
+/// Stratified negated modal over a recursive relation: `not know reach` sits above
+/// the recursive `reach` stratum and executes on the GPU production path as ordinary
+/// stratified negation, with exact tuples and zero CPU fallback.
 ///
 /// This is the canonical "negated modal literal in a recursive epistemic program"
-/// the WALL names. It is admissible because the negation is STRATIFIED: `reach`
+/// this fixture covers. It is admissible because the negation is STRATIFIED: `reach`
 /// (recursive transitive closure of `know link`) never depends on the negating
 /// `unreachable`, so the reduced ordinary program (`not know reach` -> `not reach`,
 /// `know link` -> `link`) has NO cycle through negation. The semi-naive engine
 /// completes the recursive `reach` fixpoint, THEN anti-joins it.
 ///
-/// NON-VACUOUS dispatch + zero-CPU-fallback proof (same convention as the Case-B
-/// test above): the program routes through the ORDINARY recursive reduction
-/// ("case_a_recursive" / "epistemic_reduced_ordinary"), which has NO epistemic CPU
-/// code surface at all -- the epistemic CPU-fallback counters
+/// NON-VACUOUS dispatch + zero-CPU-fallback proof (same convention as the co-evolving
+/// recursive test above): the program routes through the ORDINARY recursive reduction
+/// (`epistemic_reduced_ordinary`), which has NO epistemic CPU code surface at all
+/// -- the epistemic CPU-fallback counters
 /// (cpu_candidate_enumerations, cpu_world_view_validations, cpu_fallbacks) exist
 /// ONLY on the single-pass epistemic path, so the ordinary engine is
 /// CPU-fallback-free BY CONSTRUCTION. The "units":[] assertion proves no epistemic
@@ -301,7 +301,7 @@ fn test_case_b_ungated_mutation_flips_founded_result() -> Result<()> {
 /// {(1,2),(2,3),(1,3)}; unreachable = node x node MINUS reach =
 /// {(1,1),(2,1),(2,2),(3,1),(3,2),(3,3)} (6 pairs).
 #[test]
-fn test_wall_a1_negated_modal_over_recursive_stratified_executes_exact() -> Result<()> {
+fn test_stratified_negated_modal_over_recursive_relation_executes_exact() -> Result<()> {
     let Some(provider) = create_test_provider() else {
         eprintln!("Skipping: no CUDA device");
         return Ok(());
@@ -330,7 +330,7 @@ fn test_wall_a1_negated_modal_over_recursive_stratified_executes_exact() -> Resu
         .epistemic_plan_json()
         .expect("stratified negated-modal recursion must carry a provenance summary");
     assert!(
-        plan_json.contains("\"reduction\":\"case_a_recursive\""),
+        plan_json.contains("\"reduction\":\"ordinary_recursive_modal_reduction\""),
         "stratified negated-modal recursion must route through the ORDINARY recursive \
          reduction (no single-pass epistemic CPU-fallback surface), got: {plan_json}"
     );
@@ -360,12 +360,12 @@ fn test_wall_a1_negated_modal_over_recursive_stratified_executes_exact() -> Resu
     Ok(())
 }
 
-/// v0.9.2 WALL A1 WFS: a NEGATED modal over a co-evolving recursive target whose
-/// reduced ordinary program has a cycle through negation must route to the GPU-native
-/// WFS alternating-fixpoint plan, not host WFS or the ordinary stratified path.
+/// Cyclic negated modal recursion: a negated modal over a co-evolving recursive target
+/// whose reduced ordinary program has a cycle through negation must route to the
+/// GPU-native WFS alternating-fixpoint plan, not host WFS or the ordinary stratified path.
 ///
 /// Matrix coverage:
-///   mode {FAEEL,G91}
+///   mode {FAEEL, G91}
 ///   x modal form {not know,not possible}
 ///   x seed state {present,absent}
 ///   x ordinary EDB negation {absent,present-in-SCC}.
@@ -420,7 +420,7 @@ fn wfs_cycle_source(
 }
 
 #[test]
-fn test_wall_a1_wfs_plan_kind_matrix_compiles_without_cuda() -> Result<()> {
+fn test_cyclic_negated_modal_wfs_plan_kind_matrix_compiles_without_cuda() -> Result<()> {
     for (mode, modal, seed_present, include_edb_negation) in [
         ("faeel", "not know", true, false),
         ("faeel", "not know", false, false),
@@ -486,7 +486,7 @@ fn test_wall_a1_wfs_plan_kind_matrix_compiles_without_cuda() -> Result<()> {
 }
 
 #[test]
-fn test_wall_a1_wfs_plan_clamps_zero_iteration_bound_without_cuda() -> Result<()> {
+fn test_cyclic_negated_modal_wfs_plan_clamps_zero_iteration_bound_without_cuda() -> Result<()> {
     let source = r#"
         #pragma epistemic_mode = faeel
         #pragma max_recursion_depth = 0
@@ -539,7 +539,8 @@ fn test_wall_a1_wfs_plan_clamps_zero_iteration_bound_without_cuda() -> Result<()
 }
 
 #[test]
-fn test_wall_a1_wfs_plan_exposes_multiple_fixed_relation_maps_without_cuda() -> Result<()> {
+fn test_cyclic_negated_modal_wfs_plan_exposes_multiple_fixed_relation_maps_without_cuda(
+) -> Result<()> {
     let source = r#"
         #pragma epistemic_mode = faeel
         pred vertex(u32).
@@ -602,7 +603,7 @@ fn test_wall_a1_wfs_plan_exposes_multiple_fixed_relation_maps_without_cuda() -> 
 }
 
 #[test]
-fn test_wall_a1_wfs_plan_exposes_fixed_relation_for_ordinary_edb_negation_without_cuda(
+fn test_cyclic_negated_modal_wfs_plan_exposes_fixed_relation_for_ordinary_edb_negation_without_cuda(
 ) -> Result<()> {
     let source = r#"
         #pragma epistemic_mode = faeel
@@ -657,7 +658,7 @@ fn test_wall_a1_wfs_plan_exposes_fixed_relation_for_ordinary_edb_negation_withou
 }
 
 #[test]
-fn test_wall_a1_negated_modal_cycle_routes_to_gpu_wfs_matrix() -> Result<()> {
+fn test_cyclic_negated_modal_cycle_routes_to_gpu_wfs_matrix() -> Result<()> {
     let Some(provider) = create_test_provider() else {
         eprintln!("Skipping: no CUDA device");
         return Ok(());
@@ -741,11 +742,11 @@ fn test_wall_a1_negated_modal_cycle_routes_to_gpu_wfs_matrix() -> Result<()> {
     Ok(())
 }
 
-/// v0.9.2 WALL A1 WFS anti-collision guard: user predicates may legally have names
-/// near the internal WFS fixed relations. Source-level predicates cannot start with
-/// `__` under the language grammar, so this fixture uses legal near-collision names
-/// and verifies the compiler keeps its private fixed names in the internal namespace
-/// instead of reading user-owned relations.
+/// WFS fixed-relation anti-collision guard: user predicates may legally have names near
+/// the internal WFS fixed relations. Source-level predicates cannot start with `__`
+/// under the language grammar, so this fixture uses legal near-collision names and
+/// verifies the compiler keeps its private fixed names in the internal namespace instead
+/// of reading user-owned relations.
 ///
 /// The user-owned `wfs_upper_reach` / `wfs_lower_reach` predicates below derive
 /// every vertex pair. If the WFS transform accidentally reused those names as its
@@ -753,7 +754,7 @@ fn test_wall_a1_negated_modal_cycle_routes_to_gpu_wfs_matrix() -> Result<()> {
 /// wrong relation and the WFS result would change. The correct GPU WFS answer remains
 /// exactly reach = {(1,2)}.
 #[test]
-fn test_wall_a1_wfs_fixed_relation_names_avoid_user_collisions() -> Result<()> {
+fn test_cyclic_negated_modal_wfs_fixed_relation_names_avoid_user_collisions() -> Result<()> {
     let Some(provider) = create_test_provider() else {
         eprintln!("Skipping: no CUDA device");
         return Ok(());
@@ -824,9 +825,9 @@ fn test_wall_a1_wfs_fixed_relation_names_avoid_user_collisions() -> Result<()> {
     Ok(())
 }
 
-/// v0.9.2 WALL A1 MUTATION PROBE: dropping the RECURSIVE second `reach` rule (so the
-/// modal target is base-only, NOT a transitive closure) FLIPS the anti-join result,
-/// proving the recursion INSIDE the negated modal gate is load-bearing.
+/// Stratified negated-modal mutation probe: dropping the RECURSIVE second `reach` rule
+/// (so the modal target is base-only, NOT a transitive closure) flips the anti-join
+/// result, proving the recursion inside the negated modal gate is load-bearing.
 ///
 /// The accepted program's `reach` is the transitive closure {(1,2),(2,3),(1,3)}; the
 /// transitive pair (1,3) is reachable, so `unreachable` EXCLUDES (1,3). Here the
@@ -834,7 +835,7 @@ fn test_wall_a1_wfs_fixed_relation_names_avoid_user_collisions() -> Result<()> {
 /// longer reachable -> `unreachable` now INCLUDES (1,3). The presence of (1,3) is the
 /// FLIP the recursive closure (computed before the anti-join) prevents.
 #[test]
-fn test_wall_a1_drop_recursion_flips_anti_join_result() -> Result<()> {
+fn test_stratified_negated_modal_drop_recursion_flips_anti_join_result() -> Result<()> {
     let Some(provider) = create_test_provider() else {
         eprintln!("Skipping: no CUDA device");
         return Ok(());
@@ -881,10 +882,10 @@ fn test_wall_a1_drop_recursion_flips_anti_join_result() -> Result<()> {
     Ok(())
 }
 
-/// v0.9.2 ITEM F (derived-head coupling — SPLIT-VS-UNSPLIT EQUIVALENCE): a
-/// cross-component modal coupling over an epistemically-DETERMINED derived head is
-/// SOLVED in production by STRATIFICATION, and the stratified joint result equals
-/// the per-stratum INDEPENDENT reference EXACTLY.
+/// Derived-head modal coupling, split-vs-unsplit equivalence: a cross-component modal
+/// coupling over an epistemically-determined derived head is solved in production by
+/// stratification, and the stratified joint result equals the per-stratum independent
+/// reference exactly.
 ///
 /// Program (`b` gates `know a`; `a` gates `know base`; `base` invariant):
 ///   base = {2,3}, src = {1,2}, src2 = {1,2,3}
@@ -998,9 +999,9 @@ fn test_derived_head_coupling_stratified_equals_per_stratum_reference() -> Resul
     Ok(())
 }
 
-/// v0.9.2 ITEM F (derived-head coupling — MUTATION PROBE): neutralizing the modal
-/// gate on the determined head FLIPS the result, proving the stratified gating is
-/// load-bearing (not cosmetic).
+/// Derived-head modal coupling mutation probe: neutralizing the modal gate on the
+/// determined head flips the result, proving the stratified gating is load-bearing, not
+/// cosmetic.
 ///
 /// The accepted program gates `b` behind `know a` (and `a` behind `know base`).
 /// Here the SAME shape is mutated to UNGATE the modals (every `know` dropped, so `b`
@@ -1038,13 +1039,13 @@ fn test_derived_head_coupling_ungated_mutation_flips_result() -> Result<()> {
     Ok(())
 }
 
-/// v0.9.2 ITEM F (derived-head coupling — TRUE-UNSAFETY WALL): a GENUINELY-CYCLIC
-/// modal coupling (`a :- know b. b :- know a.`) has NO founded stratum order — the
-/// modal truth of each head depends on the other's accepted world view, a circular
-/// modality. It is correctly REJECTED end-to-end through the full production
-/// dispatch (stratification yields no stratum order, Case-A does not apply, and the
-/// split layer fails closed with a precise diagnostic naming both coupled heads).
-/// This is the honest wall the item permits — it must NOT be silently accepted.
+/// True cyclic modal coupling rejection: a genuinely cyclic modal coupling
+/// (`a :- know b. b :- know a.`) has no founded stratum order; the modal truth of each
+/// head depends on the other's accepted world view, a circular modality. It is correctly
+/// rejected end-to-end through the full production dispatch (stratification yields no
+/// stratum order, the ordinary recursive modal reduction does not apply, and the split
+/// layer fails closed with a precise diagnostic naming both coupled heads). This is the
+/// rejection boundary; it must not be silently accepted.
 #[test]
 fn test_true_cyclic_modal_coupling_rejected_end_to_end() -> Result<()> {
     if create_test_provider().is_none() {

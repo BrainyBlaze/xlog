@@ -381,7 +381,7 @@ Hardware cache terminology such as `L1` and `L2` is allowed when it refers to GP
 | `crates/xlog-gpu/src/lib.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-gpu/src/logic.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-gpu/tests/biokg_streaming_relation_loader.rs` | 0 | 0 | true |  |  |
-| `crates/xlog-gpu/tests/logic_runner.rs` | 1 | 0 | false | G91(1) |  |
+| `crates/xlog-gpu/tests/logic_runner.rs` | 0 | 0 | true |  | G91 retained as documented epistemic compatibility mode. |
 | `crates/xlog-gpu/tests/relation_delta_planner_telemetry.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-gpu/tests/v032_gpu_certification.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-gpu/tests/v085_lists.rs` | 0 | 0 | true |  |  |
