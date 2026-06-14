@@ -5,7 +5,7 @@ GPU-native path for enumerating all `(left, right)` candidate pairs across four
 fixed 2-body Datalog rule templates and returning top-K per template with full
 structured metadata.
 
-Introduced for external consumer's M8 Phase 1 as the production replacement for
+Introduced for an external consumer's first production integration phase as the replacement for
 `pyxlog.ilp.induce_exact(backend="python")`, whose host-orchestrated
 `set_rule_mask`/`evaluate`/`batch_fact_membership_device` loop is documented as a
 throwaway prototype.
@@ -18,16 +18,16 @@ throwaway prototype.
 - **pyxlog bridge:** `crates/pyxlog/src/ilp_exact.rs` +
   `crates/pyxlog/python/pyxlog/ilp/exact_induce.py`
 - **Parity tests:** `python/tests/test_ilp_exact_induce.py`
-- **Internal kernel design note:** `docs/plans/2026-04-17-m8-ilp-exact-kernel-design.md`
+- **Internal kernel design note:** launch geometry, data layout, and transfer-accounting design note
 - **Related:** [Differentiable ILP (dILP)](../ROADMAP.md) — the gradient-trained
   counterpart; this engine is exact / bounded and does not use learnable masks.
 
 ## Design Goals
 
-1. **Zero host marshalling in the scoring loop.** Setup H2D/D2D uploads are
+1. **Zero host marshalling in the scoring loop.** Setup host-to-device and device-to-device uploads are
    permitted but constant-size; the `(topology, L, R)` sweep itself performs
    no host/device round trips. The production `ilp_exact_score_topk` path
-   reduces on device and the tracked D2H counter on `CudaKernelProvider`
+   reduces on device and the tracked device-to-host counter on `CudaKernelProvider`
    ticks exactly **once per `induce_exact` call** for the compact selected-row
    export, independent of candidate count.
 2. **Per-topology semantic isolation.** Each `(topology, L, R)` triple is
@@ -77,9 +77,9 @@ xlog_induce::induce_exact(provider, &request)  (crates/xlog-induce/src/lib.rs)
     ▼
 CudaKernelProvider::ilp_exact_score_topk(...)  (crates/xlog-cuda/src/provider/ilp_exact.rs)
     │
-    ├── Setup (not D2H-counted):
-    │     - D2D concat candidate arg0/arg1 columns
-    │     - H2D upload cand_offsets (small prefix-sum array)
+    ├── Setup (not counted as device-to-host transfer):
+    │     - device-to-device concat candidate arg0/arg1 columns
+    │     - host-to-device upload cand_offsets (small prefix-sum array)
     │     - Alloc output pos_covered/neg_covered arrays
     │
     ├── Launch typed kernel  (kernels/ilp_exact.cu)
@@ -92,7 +92,7 @@ CudaKernelProvider::ilp_exact_score_topk(...)  (crates/xlog-cuda/src/provider/il
     │
     ├── Device top-K selection over pos_covered / neg_covered
     │
-    └── Download (1 D2H, tracked):
+    └── Download (1 tracked device-to-host transfer):
           compact selected top-K rows as u32 field tuples
     │
     ▼
@@ -128,8 +128,8 @@ three topologies — microseconds per block in practice.
 
 | Buffer | Type / length | Contents |
 |---|---|---|
-| `cand_arg0`, `cand_arg1` | `u64` or `u32` × total_rows | Concatenated (D2D-copied) arg0 / arg1 columns of all candidate relations |
-| `cand_offsets` | `u32` × (C+1) | Exclusive prefix-sum of candidate row counts; H2D uploaded once per call |
+| `cand_arg0`, `cand_arg1` | `u64` or `u32` × total_rows | Concatenated device-to-device-copied arg0 / arg1 columns of all candidate relations |
+| `cand_offsets` | `u32` × (C+1) | Exclusive prefix-sum of candidate row counts; host-to-device uploaded once per call |
 | `pos_arg0`, `pos_arg1` | `u64` or `u32` × num_pos | Device-resident positive query pairs (DLPack-imported from the caller's torch tensors) |
 | `neg_arg0`, `neg_arg1` | `u64` or `u32` × num_neg | Same for negatives. When the caller passes no negatives, the engine materializes a zero-row pair buffer with the positive pair type so the kernel signature stays uniform. |
 | `pos_covered`, `neg_covered` | `u32` × (4·C·C) | Output count arrays; kernel writes each slot exactly once. |
@@ -170,13 +170,13 @@ The Python prototype gained an opt-in `strict_per_topology: bool = False`
 parameter that zeroes the three "other" topology masks before each
 topology's inner loop, yielding the same per-topology-isolated scoring
 that the kernel produces by construction. **Default is `False`** for
-backward compatibility with external consumer Phase 0 callers that are calibrated
+backward compatibility with external-consumer prototype callers that are calibrated
 against the historical prototype numbers. The parity test sets
 `strict_per_topology=True` explicitly to match the kernel.
 
-## D2H Budget
+## Device-to-Host Transfer Budget
 
-The kernel is designed around the xlog-native D2H transfer counter
+The kernel is designed around the xlog-native device-to-host transfer counter
 (`CudaKernelProvider::d2h_transfer_count`, exposed to Python as
 `prog.d2h_transfer_count()`).
 
@@ -185,9 +185,9 @@ The kernel is designed around the xlog-native D2H transfer counter
   parity test `test_induce_exact_native_does_not_scale_d2h_with_candidate_pairs`
   enforces `large.d2h_transfer_count ≤ small.d2h_transfer_count + 2`,
   which passes trivially.
-- Setup H2D (`cand_offsets`) and D2D (candidate column concatenation)
-  are not D2H-counted.
-- Setup reads that would otherwise require a D2H (e.g. relation row
+- Setup host-to-device (`cand_offsets`) and device-to-device (candidate column concatenation)
+  are not counted as device-to-host transfers.
+- Setup reads that would otherwise require a device-to-host transfer (e.g. relation row
   counts) go through the host-side `CudaBuffer::cached_row_count()`
   cache. This is a load-bearing invariant — see the next section.
 
@@ -199,7 +199,7 @@ deep-copied via `CudaKernelProvider::clone_buffer` on insertion
 `executor.put_relation`). The previous `clone_buffer` implementation
 built the clone via `CudaBuffer::from_columns`, which does **not**
 populate the host-side `cached_row_count`. Downstream consumers that
-needed the row count were forced to either D2H-read `num_rows_device()`
+  needed the row count were forced to either read `num_rows_device()` from device to host
 or trust the (misleading) `num_rows()` capacity accessor.
 
 `clone_buffer` now calls `set_cached_row_count_if_unset(source.cached_row_count())`
@@ -274,7 +274,7 @@ pub struct ExactInductionResult {
 
 ## Generated Rule Provenance
 
-v0.8.7 adds audit records for generated/mined rules in
+Generated-rule provenance adds audit records for generated/mined rules in
 `crates/xlog-induce/src/provenance.rs`. The scorer still returns
 `ExactInductionResult`; provenance is the companion layer for callers that
 promote a candidate into a generated rule and need to retain why it was selected.
@@ -335,13 +335,12 @@ Returns an `ExactInductionResult` dataclass with `candidates: list[ScoredCandida
   CUDA device is present.
 - **Python parity test** (`python -m pytest python/tests/test_ilp_exact_induce.py`):
   `test_induce_exact_native_matches_python_reference` and
-  `test_induce_exact_native_does_not_scale_d2h_with_candidate_pairs`.
+  the native-vs-Python host-transfer budget parity test.
   Uses `strict_per_topology=True` against the Python reference so both
   backends compute clean per-topology coverage.
-- **v0.8.6 typed parity tests**
-  (`python -m pytest python/tests/test_v086_exact_types_runtime.py`):
+- **Typed parity tests**:
   `U32` and `Symbol` fixtures match the Python reference, preserve relation
-  type annotations, keep D2H at exactly two count-array transfers, and reject
+  type annotations, keep device-to-host transfer accounting at exactly two count-array transfers, and reject
   mixed logical pair types.
 
 ## Type Dispatch And Packaging Policy
@@ -366,7 +365,7 @@ Returns an `ExactInductionResult` dataclass with `candidates: list[ScoredCandida
 
 ## Profile-Gated Chain Shared Memory
 
-The v0.8.6 G086_CHAIN_SMEM node adds an A/B-controlled chain scorer that tiles
+The profile-gated chain shared-memory scorer adds an A/B-controlled chain scorer that tiles
 left-relation rows into dynamic shared memory for the strict chain topology.
 It is enabled by default only for candidate relations with at least
 `XLOG_ILP_EXACT_CHAIN_SMEM_MIN_ROWS` rows, defaulting to `256`, and can be
@@ -379,20 +378,18 @@ The optimization preserves the public exact-induction contract:
 - median runtime improves by more than `1.2x` on the certified chain-hot
   fixture;
 - small fixtures do not regress by more than five percent;
-- the D2H budget remains the same two count-array transfers used by the
+- the device-to-host transfer budget remains the same two count-array transfers used by the
   baseline native exact-induction path.
 
-Evidence: `docs/evidence/2026-05-19-v086-chain-smem/`.
+Evidence lives in the chain shared-memory evidence bundle.
 
 ## See Also
 
-- `docs/plans/2026-04-17-m8-ilp-exact-kernel-design.md` — the original
-  internal kernel design note (launch geometry, data layout, D2H accounting).
+- Original internal kernel design note — launch geometry, data layout, and device-to-host accounting.
 - `docs/architecture/cuda-certification.md` — CUDA certification suite
-  (C01–C25 + G01–G08); `ilp_exact` is not yet in the formal certification
+  with numbered certification categories; `ilp_exact` is not yet in the formal certification
   registry because its PTX is not committed (see above).
-- `docs/architecture/living-world-diagnostics-v087.md` — v0.8.7 provenance
+- Living-world diagnostics architecture note — generated-rule provenance
   and diagnostics surfaces for generated rules, source rules, proof traces,
   deltas, temporal metadata, and neural hot loops.
-- `ROADMAP.md` → "Bounded Exact Induction (`xlog-induce`) — external consumer M8
-  Phase 1" — milestone-level status, planned external consumer-side integration.
+- `ROADMAP.md` → "Bounded Exact Induction (`xlog-induce`)" — current status and planned external-consumer-side integration.

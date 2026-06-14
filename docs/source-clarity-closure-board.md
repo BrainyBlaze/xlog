@@ -715,7 +715,7 @@ Hardware cache terminology such as `L1` and `L2` is allowed when it refers to GP
 | `docs/RELEASE-EXCLUDE.md` | 1 | 0 | true | Explained the literal `docs/v065-closure-board.md` path as the legacy release closure board while preserving the packaging manifest path. |  |
 | `docs/architecture/adaptive-indexing.md` | 0 | 0 | true |  |  |
 | `docs/architecture/arithmetic-expressions.md` | 0 | 0 | true |  |  |
-| `docs/architecture/bounded-exact-induction.md` | 20 | 3 | false | D2H(9), D2D(3), M8(2), v086(1), C01(1), C25(1) | D2H(2), D2D(1) |
+| `docs/architecture/bounded-exact-induction.md` | 23 | 3 | true | Expanded transfer shorthand, external-consumer milestone labels, versioned evidence labels, and certification-code labels to device-to-host/device-to-device, external-consumer phase, current feature, and numbered-category wording. | Replaced code-block D2H/D2D/H2D transfer labels with descriptive transfer directions while preserving exact API names where needed. |
 | `docs/architecture/cli-reference.md` | 2 | 0 | false | v087(2) |  |
 | `docs/architecture/cuda-certification.md` | 51 | 2 | false | G01-G08(4), C01(4), C01-C25(3), C01-C08(1), C02(1), C03(1) | C01-C25(1), G01-G08(1) |
 | `docs/architecture/cudf-interop.md` | 0 | 0 | true |  |  |
