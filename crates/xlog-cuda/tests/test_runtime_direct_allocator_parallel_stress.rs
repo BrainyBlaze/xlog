@@ -1,5 +1,6 @@
-// crates/xlog-cuda/tests/test_runtime_a1_parallel_stress.rs
-//! Acceptance gate **A1** for the v0.6 device-runtime allocator.
+// crates/xlog-cuda/tests/test_runtime_direct_allocator_parallel_stress.rs
+//! Regression coverage for the v0.6 device-runtime allocator's
+//! direct-backend parallel allocation stress contract.
 //!
 //! Per the locked acceptance criteria: 8–16 host threads each
 //! repeatedly allocate device blocks of varied sizes via
@@ -14,11 +15,13 @@
 //! `cuMemFree` are device-wide and not stream-ordered, so parallel
 //! callers should not see overlapping allocations or corrupted
 //! bookkeeping. A failure indicates a real bug in the direct backend
-//! or the singleton — stop and debug, do not advance to A2.
+//! or the singleton — stop and debug before proceeding to the
+//! stream-ordered async-backend checks.
 //!
-//! A1 is a sanity gate for the singleton + resource layer, not a
+//! This is a sanity check for the singleton + resource layer, not a
 //! demonstration of stream-ordered correctness. The async-backend
-//! contract is A2's job.
+//! stream-ordering contract is covered by the dedicated
+//! stream-ordered allocation lifetime tests.
 //!
 //! The byte-pattern check goes through `cuMemcpyHtoD_v2` /
 //! `cuMemcpyDtoH_v2` on the raw `DeviceBlock::ptr`. This is the
@@ -84,11 +87,14 @@ unsafe fn dtoh(ptr: u64, host: &mut [u8]) {
 }
 
 #[test]
-fn a1_parallel_stress_alloc_write_verify_dealloc() {
+fn direct_allocator_parallel_stress_alloc_write_verify_dealloc() {
     let runtime = match XlogDeviceRuntime::try_get(0) {
         Ok(rt) => rt,
         Err(err) => {
-            eprintln!("Skipping A1: CUDA runtime unavailable: {}", err);
+            eprintln!(
+                "Skipping direct allocator parallel stress: CUDA runtime unavailable: {}",
+                err
+            );
             return;
         }
     };
@@ -111,10 +117,10 @@ fn a1_parallel_stress_alloc_write_verify_dealloc() {
             // Per-thread tag pool: tags must be 'static; pre-pick
             // from a small const set indexed by thread.
             let tag = match thread_idx % 4 {
-                0 => AllocTag("a1-thread-0"),
-                1 => AllocTag("a1-thread-1"),
-                2 => AllocTag("a1-thread-2"),
-                _ => AllocTag("a1-thread-other"),
+                0 => AllocTag("direct-thread-0"),
+                1 => AllocTag("direct-thread-1"),
+                2 => AllocTag("direct-thread-2"),
+                _ => AllocTag("direct-thread-other"),
             };
 
             for iter in 0..ITERATIONS_PER_THREAD {
@@ -161,7 +167,7 @@ fn a1_parallel_stress_alloc_write_verify_dealloc() {
 
     for (i, h) in handles.into_iter().enumerate() {
         h.join()
-            .unwrap_or_else(|_| panic!("A1 thread {} panicked", i));
+            .unwrap_or_else(|_| panic!("direct allocator stress thread {} panicked", i));
     }
 
     let after = runtime.bytes_outstanding();

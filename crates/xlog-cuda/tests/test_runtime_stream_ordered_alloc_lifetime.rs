@@ -1,5 +1,6 @@
-// crates/xlog-cuda/tests/test_runtime_a2_stream_lifetime.rs
-//! Acceptance gate **A2** for the v0.6 device-runtime allocator.
+// crates/xlog-cuda/tests/test_runtime_stream_ordered_alloc_lifetime.rs
+//! Regression coverage for the v0.6 device-runtime allocator's
+//! stream-ordered allocation/free/reuse contract.
 //!
 //! Encodes the **stream-ordered alloc/free/reuse contract** that the
 //! async backend (`AsyncCudaResource`) is required to honor:
@@ -41,19 +42,19 @@
 //!
 //! What this test does **not** prove:
 //!
-//!   * Cross-stream reuse safety. A block allocated on S1 and used
-//!     by a kernel on S2 still requires explicit event/sync from the
-//!     caller before deallocation. That contract is documented but
-//!     not yet exercised here — separate test once we have a kernel
-//!     to launch on the second stream.
+//!   * Cross-stream reuse safety. A block allocated on one stream and used
+//!     by a kernel on another stream still requires explicit event/sync from
+//!     the caller before deallocation. That contract is documented but not
+//!     yet exercised here — separate test once we have a kernel to launch on
+//!     the second stream.
 //!   * Behavior when the CUDA context lacks async-alloc support
 //!     (`has_async_alloc == false`). cudarc falls back to synchronous
 //!     `cuMemAlloc`/`cuMemFree` in that case, and this test will
 //!     still pass by serialization rather than by stream ordering —
-//!     A2 is necessary but not sufficient for production async-alloc
-//!     correctness on hosts without async-alloc support. M1
-//!     (Compute-Sanitizer) is the manual gate that catches that
-//!     class of regression.
+//!     this same-stream test is necessary but not sufficient for
+//!     production async-alloc correctness on hosts without async-alloc
+//!     support. Manual Compute Sanitizer validation catches that class
+//!     of regression.
 
 use std::sync::Arc;
 
@@ -100,9 +101,9 @@ unsafe fn dtoh_sync(dst: &mut [u8], src: u64) {
 }
 
 #[test]
-fn a2_alloc_write_free_realloc_no_host_sync_between_phases() {
+fn stream_ordered_alloc_write_free_realloc_no_host_sync_between_phases() {
     let Some((device, pool)) = try_setup() else {
-        eprintln!("Skipping A2: CUDA runtime unavailable");
+        eprintln!("Skipping stream-ordered allocation lifetime test: CUDA runtime unavailable");
         return;
     };
     let resource = AsyncCudaResource::new(Arc::clone(&device), 0, Arc::clone(&pool));
@@ -113,7 +114,10 @@ fn a2_alloc_write_free_realloc_no_host_sync_between_phases() {
     let stream_id = match pool.acquire() {
         Ok(id) => id,
         Err(e) => {
-            eprintln!("Skipping A2: StreamPool::acquire failed: {}", e);
+            eprintln!(
+                "Skipping stream-ordered allocation lifetime test: StreamPool::acquire failed: {}",
+                e
+            );
             return;
         }
     };
@@ -125,7 +129,7 @@ fn a2_alloc_write_free_realloc_no_host_sync_between_phases() {
 
     // Phase 1: allocate A on the non-default stream.
     let block_a = resource
-        .allocate(BYTES, stream_id, AllocTag("a2-A"))
+        .allocate(BYTES, stream_id, AllocTag("stream-order-A"))
         .expect("alloc A");
     assert_eq!(block_a.alloc_stream, stream_id);
     assert_eq!(block_a.bytes, BYTES);
@@ -155,7 +159,7 @@ fn a2_alloc_write_free_realloc_no_host_sync_between_phases() {
     // the same byte address as A; if so, reuse must be ordered
     // strictly after the queued free.
     let block_b = resource
-        .allocate(BYTES, stream_id, AllocTag("a2-B"))
+        .allocate(BYTES, stream_id, AllocTag("stream-order-B"))
         .expect("alloc B");
     assert_eq!(block_b.alloc_stream, stream_id);
     assert_eq!(block_b.bytes, BYTES);
@@ -191,7 +195,7 @@ fn a2_alloc_write_free_realloc_no_host_sync_between_phases() {
 }
 
 #[test]
-fn a2_repeated_alloc_free_realloc_on_same_stream_stays_stream_ordered() {
+fn repeated_alloc_free_realloc_on_same_stream_stays_stream_ordered() {
     // Tighter version of the above: alternate alloc/queue-write/free
     // many times on a single stream without intervening host sync.
     // Each iteration's pattern is unique; the final readback after a
@@ -205,7 +209,7 @@ fn a2_repeated_alloc_free_realloc_on_same_stream_stays_stream_ordered() {
         Ok(id) => id,
         Err(e) => {
             eprintln!(
-                "Skipping A2 reuse stress: StreamPool::acquire failed: {}",
+                "Skipping stream-ordered allocation reuse stress: StreamPool::acquire failed: {}",
                 e
             );
             return;
@@ -221,7 +225,7 @@ fn a2_repeated_alloc_free_realloc_on_same_stream_stays_stream_ordered() {
     // after the loop but before the final dealloc — this proves the
     // last write survived all the prior alloc/free churn.
     let mut current = resource
-        .allocate(BYTES, stream_id, AllocTag("a2-stress-init"))
+        .allocate(BYTES, stream_id, AllocTag("stream-order-stress-init"))
         .expect("initial alloc");
 
     let mut last_pattern = vec![0u8; BYTES];
@@ -245,7 +249,7 @@ fn a2_repeated_alloc_free_realloc_on_same_stream_stays_stream_ordered() {
         // Both operations are stream-ordered on `stream_id`.
         resource.deallocate(current).expect("dealloc mid-loop");
         current = resource
-            .allocate(BYTES, stream_id, AllocTag("a2-stress-iter"))
+            .allocate(BYTES, stream_id, AllocTag("stream-order-stress-iter"))
             .expect("alloc mid-loop");
     }
 

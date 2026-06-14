@@ -24,8 +24,8 @@
 //!     work on a different stream before deallocation.
 //!   * Reuse of the underlying byte address by a future `allocate` is
 //!     ordered after the previous deallocate by the CUDA driver's
-//!     stream-ordered memory allocator semantics. A2 encodes this
-//!     as a regression test.
+//!     stream-ordered memory allocator semantics. The stream-ordered
+//!     allocation lifetime regression test encodes this.
 //!
 //! # `bytes_outstanding` and pending-free accounting
 //!
@@ -59,8 +59,8 @@
 //! transient driver error mid-reap would lose track of pending
 //! bytes forever — the drained map would be gone, `pending_bytes`
 //! would still count them, but no stream id would be queued for
-//! a future reap. Production callers (`GlobalDeviceBudget`, A2's
-//! final assertions) thus see consistent
+//! a future reap. Production callers (`GlobalDeviceBudget`, the
+//! stream-ordered allocation lifetime tests' final assertions) thus see consistent
 //! `bytes_outstanding()` even on transient sync failures.
 
 use std::collections::HashMap;

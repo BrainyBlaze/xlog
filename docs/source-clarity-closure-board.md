@@ -350,10 +350,10 @@ Hardware cache terminology such as `L1` and `L2` is allowed when it refers to GP
 | `crates/xlog-cuda/tests/test_provider_launch_recorder.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-cuda/tests/test_provider_runtime_routing.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-cuda/tests/test_provider_with_runtime.rs` | 0 | 0 | true |  |  |
-| `crates/xlog-cuda/tests/test_runtime_a1_parallel_stress.rs` | 0 | 0 | true |  |  |
-| `crates/xlog-cuda/tests/test_runtime_a2_stream_lifetime.rs` | 3 | 0 | false | S1(1), S2(1), M1(1) |  |
-| `crates/xlog-cuda/tests/test_runtime_a2_via_runtime.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-cuda/tests/test_runtime_cross_stream_use_after_free.rs` | 0 | 0 | true |  |  |
+| `crates/xlog-cuda/tests/test_runtime_direct_allocator_parallel_stress.rs` | 0 | 0 | true |  |  |
+| `crates/xlog-cuda/tests/test_runtime_stream_ordered_alloc_facade.rs` | 0 | 0 | true |  |  |
+| `crates/xlog-cuda/tests/test_runtime_stream_ordered_alloc_lifetime.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-cuda/tests/test_setup_provider_with_runtime.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-cuda/tests/test_sort_dedup_u64.rs` | 1 | 0 | false | D2H(1) |  |
 | `crates/xlog-cuda/tests/test_w33_hg_metadata_storage.rs` | 0 | 0 | true |  |  |

@@ -1,8 +1,9 @@
-// crates/xlog-cuda/tests/test_runtime_a2_via_runtime.rs
-//! A2 variant exercised through the [`XlogDeviceRuntime`] facade
-//! rather than against an `AsyncCudaResource` directly.
+// crates/xlog-cuda/tests/test_runtime_stream_ordered_alloc_facade.rs
+//! Stream-ordered allocation/free/reuse coverage through the
+//! [`XlogDeviceRuntime`] facade rather than against an
+//! `AsyncCudaResource` directly.
 //!
-//! The original `test_runtime_a2_stream_lifetime.rs` constructs an
+//! The direct-resource stream-ordered allocation lifetime test constructs an
 //! `AsyncCudaResource` and calls its trait methods directly. That
 //! proves the resource itself honors the stream-ordered contract,
 //! but it bypasses the runtime — so it would not catch a regression
@@ -14,11 +15,11 @@
 //!
 //! This test composes a runtime via
 //! [`XlogDeviceRuntime::with_resource`] using `AsyncCudaResource`
-//! as the active backend, then re-runs the A2 contract through the
-//! runtime's public API. It is **not** the singleton — that path
-//! still uses the cudarc default (non-pooled) backend.
+//! as the active backend, then re-runs the stream-ordered allocation/free/reuse
+//! contract through the runtime's public API. It is **not** the singleton —
+//! that path still uses the cudarc default (non-pooled) backend.
 //!
-//! Same shape as A2:
+//! Same shape as the direct-resource stream-ordered allocation lifetime test:
 //!
 //!   1. `runtime.allocate` block A on a non-default stream.
 //!   2. Async HtoD pattern_a (no host sync).
@@ -67,9 +68,9 @@ unsafe fn dtoh_sync(dst: &mut [u8], src: u64) {
 }
 
 #[test]
-fn a2_stream_ordered_alloc_free_reuse_through_runtime_facade() {
+fn stream_ordered_alloc_free_reuse_through_runtime_facade() {
     let Some(device) = CudaDevice::new(0).ok().map(Arc::new) else {
-        eprintln!("Skipping A2-via-runtime: CUDA runtime unavailable");
+        eprintln!("Skipping stream-ordered runtime-facade test: CUDA runtime unavailable");
         return;
     };
     let pool = Arc::new(StreamPool::with_defaults(Arc::clone(&device)));
@@ -84,7 +85,10 @@ fn a2_stream_ordered_alloc_free_reuse_through_runtime_facade() {
     let stream_id = match pool.acquire() {
         Ok(id) => id,
         Err(e) => {
-            eprintln!("Skipping A2-via-runtime: StreamPool::acquire failed: {}", e);
+            eprintln!(
+                "Skipping stream-ordered runtime-facade test: StreamPool::acquire failed: {}",
+                e
+            );
             return;
         }
     };
@@ -96,7 +100,7 @@ fn a2_stream_ordered_alloc_free_reuse_through_runtime_facade() {
 
     // Phase 1: allocate A through the runtime.
     let block_a = runtime
-        .allocate(BYTES, stream_id, AllocTag("a2-runtime-A"))
+        .allocate(BYTES, stream_id, AllocTag("stream-order-runtime-A"))
         .expect("runtime.allocate A");
     assert_eq!(block_a.alloc_stream, stream_id);
     assert_eq!(block_a.bytes, BYTES);
@@ -119,7 +123,7 @@ fn a2_stream_ordered_alloc_free_reuse_through_runtime_facade() {
 
     // Phase 4: allocate B on the same stream through the runtime.
     let block_b = runtime
-        .allocate(BYTES, stream_id, AllocTag("a2-runtime-B"))
+        .allocate(BYTES, stream_id, AllocTag("stream-order-runtime-B"))
         .expect("runtime.allocate B");
     assert_eq!(block_b.alloc_stream, stream_id);
 
