@@ -660,7 +660,7 @@ Hardware cache terminology such as `L1` and `L2` is allowed when it refers to GP
 | `crates/xlog-prob/tests/template_addition_cnf_valid.rs` | 0 | 4 | true | Replaced generated addition digit variables with descriptive left/right digit names. | D1(2), D2(2) |
 | `crates/xlog-prob/tests/test_provenance_primitives.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-prob/tests/aggregate_lifting.rs` | 0 | 2 | true | Renamed the legacy milestone test file and replaced the stale aggregate-lift diagnostic assertion with current count aggregate lifting wording. | v085(2) |
-| `crates/xlog-prob/tests/test_v085_approx.rs` | 0 | 1 | false |  | v085(1) |
+| `crates/xlog-prob/tests/mc_approx.rs` | 0 | 1 | true | Renamed the legacy milestone test file to describe Monte Carlo approximate-inference coverage. | v085(1) |
 | `crates/xlog-prob/tests/test_v085_prob_aggregates.rs` | 0 | 1 | false |  | v085(1) |
 | `crates/xlog-runtime/Cargo.toml` | 4 | 0 | false | W2.3(4) |  |
 | `crates/xlog-runtime/src/executor/delta.rs` | 0 | 0 | true |  |  |
