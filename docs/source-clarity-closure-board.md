@@ -699,7 +699,7 @@ Hardware cache terminology such as `L1` and `L2` is allowed when it refers to GP
 | `crates/xlog-solve/tests/gpu_cdcl_tests.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-solve/tests/gpu_cdcl_workspace.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-solve/tests/gpu_cnf_tests.rs` | 0 | 0 | true |  |  |
-| `crates/xlog-solve/tests/gpu_solver_accepted_evidence.rs` | 0 | 9 | false |  | G91(9) |
+| `crates/xlog-solve/tests/gpu_solver_accepted_evidence.rs` | 0 | 9 | true |  | Expanded G91-coded test/helper names and assertion strings to Gelfond-1991 compatibility wording; kept public pragma, enum, and trace-field API names. |
 | `crates/xlog-solve/tests/gpu_solver_production_reuse.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-solve/tests/integration_test.rs` | 3 | 0 | false | P0(1), P1(1), P2(1) |  |
 | `crates/xlog-solve/tests/no_dtoh_in_gpu_cdcl.rs` | 0 | 0 | true |  |  |
