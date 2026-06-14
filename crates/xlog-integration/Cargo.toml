@@ -54,7 +54,8 @@ path = "benches/skewed_multiway_bench.rs"
 harness = false
 
 [[bench]]
-name = "wcoj_w33_superhub"
+name = "wcoj_histogram_guided_superhub"
+path = "benches/wcoj_histogram_guided_superhub.rs"
 harness = false
 
 [[bench]]

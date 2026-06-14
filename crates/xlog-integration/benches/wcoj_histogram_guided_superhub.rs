@@ -1,7 +1,7 @@
-//! W3.3 HG block-slice production benchmark.
+//! Histogram-guided block-slice production benchmark.
 //!
-//! Measures the paper-aligned HG triangle path with a precomputed
-//! work plan against the public provider route on identical u32
+//! Measures the paper-aligned histogram-guided triangle path with a
+//! precomputed work plan against the public provider route on identical u32
 //! fixtures. Row equality is asserted before any timing sample is
 //! accepted.
 
@@ -197,7 +197,7 @@ struct LayoutFixture {
     xy: CudaBuffer,
     yz: CudaBuffer,
     xz: CudaBuffer,
-    hg_plan: WcojTriangleHgWorkPlanU32,
+    histogram_guided_plan: WcojTriangleHgWorkPlanU32,
     total_rows: u64,
 }
 
@@ -223,15 +223,15 @@ fn layout_fixture(fix: &ProviderFixture, input: &UploadedFixture) -> LayoutFixtu
         .provider
         .wcoj_layout_u32_recorded(&input.e3, fix.launch_stream)
         .expect("layout xz");
-    let hg_plan = fix
+    let histogram_guided_plan = fix
         .provider
         .wcoj_triangle_hg_work_plan_u32_recorded(&xy, &yz, &xz, BLOCK_WORK_UNIT, fix.launch_stream)
-        .expect("HG work plan");
+        .expect("histogram-guided work plan");
     LayoutFixture {
         xy,
         yz,
         xz,
-        hg_plan,
+        histogram_guided_plan,
         total_rows: input.total_rows,
     }
 }
@@ -254,16 +254,16 @@ fn run_public_provider_route(fix: &ProviderFixture, input: &UploadedFixture) -> 
         .expect("public provider triangle")
 }
 
-fn run_hg(fix: &ProviderFixture, input: &LayoutFixture) -> CudaBuffer {
+fn run_histogram_guided(fix: &ProviderFixture, input: &LayoutFixture) -> CudaBuffer {
     fix.provider
         .wcoj_triangle_hg_u32_with_plan_recorded(
             &input.xy,
             &input.yz,
             &input.xz,
-            &input.hg_plan,
+            &input.histogram_guided_plan,
             fix.launch_stream,
         )
-        .expect("HG triangle")
+        .expect("histogram-guided triangle")
 }
 
 fn sync_launch_stream(fix: &ProviderFixture) {
@@ -323,14 +323,17 @@ fn assert_row_equality(
     label: &str,
 ) -> usize {
     let baseline = run_public_provider_route(fix, uploaded);
-    let hg = run_hg(fix, layout);
+    let histogram_guided = run_histogram_guided(fix, layout);
     let baseline_rows = download_triples(&baseline);
-    let hg_rows = download_triples(&hg);
+    let histogram_guided_rows = download_triples(&histogram_guided);
     assert_eq!(
-        baseline_rows, hg_rows,
-        "[{label}] HG output diverged from public provider output"
+        baseline_rows, histogram_guided_rows,
+        "[{label}] histogram-guided output diverged from public provider output"
     );
-    eprintln!("W33_ROW_EQUALITY {label} PASS rows={}", baseline_rows.len());
+    eprintln!(
+        "WCOJ_HISTOGRAM_GUIDED_ROW_EQUALITY {label} PASS rows={}",
+        baseline_rows.len()
+    );
     baseline_rows.len()
 }
 
@@ -347,13 +350,13 @@ fn measure_baseline_with_pairing(
         sync_launch_stream(fix);
         measured += start.elapsed();
         drop(result);
-        let _ = run_hg(fix, layout);
+        let _ = run_histogram_guided(fix, layout);
         sync_launch_stream(fix);
     }
     measured
 }
 
-fn measure_hg_with_pairing(
+fn measure_histogram_guided_with_pairing(
     fix: &ProviderFixture,
     uploaded: &UploadedFixture,
     layout: &LayoutFixture,
@@ -364,7 +367,7 @@ fn measure_hg_with_pairing(
         let _ = run_public_provider_route(fix, uploaded);
         sync_launch_stream(fix);
         let start = Instant::now();
-        let result = run_hg(fix, layout);
+        let result = run_histogram_guided(fix, layout);
         sync_launch_stream(fix);
         measured += start.elapsed();
         drop(result);
@@ -383,11 +386,11 @@ fn bench_fixture(
     let layout = layout_fixture(fix, &uploaded);
     let row_count = assert_row_equality(fix, &uploaded, &layout, label);
     eprintln!(
-        "W33_INPUT_ROWS {label} total_input_rows={} total_work={} block_work_unit={BLOCK_WORK_UNIT}",
-        layout.total_rows, layout.hg_plan.total_work
+        "WCOJ_HISTOGRAM_GUIDED_INPUT_ROWS {label} total_input_rows={} total_work={} block_work_unit={BLOCK_WORK_UNIT}",
+        layout.total_rows, layout.histogram_guided_plan.total_work
     );
 
-    let mut group = c.benchmark_group("wcoj_w33_superhub");
+    let mut group = c.benchmark_group("wcoj_histogram_guided_superhub");
     group.sample_size(200);
     group.throughput(Throughput::Elements(layout.total_rows));
 
@@ -396,17 +399,23 @@ fn bench_fixture(
         &(),
         |b, _| b.iter_custom(|iters| measure_baseline_with_pairing(fix, &uploaded, &layout, iters)),
     );
-    group.bench_with_input(BenchmarkId::new("hg_block_slice", label), &(), |b, _| {
-        b.iter_custom(|iters| measure_hg_with_pairing(fix, &uploaded, &layout, iters))
-    });
+    group.bench_with_input(
+        BenchmarkId::new("histogram_guided_block_slice", label),
+        &(),
+        |b, _| {
+            b.iter_custom(|iters| {
+                measure_histogram_guided_with_pairing(fix, &uploaded, &layout, iters)
+            })
+        },
+    );
     group.finish();
 
-    eprintln!("W33_MEASURED_CELL {label} rows={row_count}");
+    eprintln!("WCOJ_HISTOGRAM_GUIDED_MEASURED_CELL {label} rows={row_count}");
 }
 
-fn bench_w33_superhub(c: &mut Criterion) {
+fn bench_histogram_guided_superhub(c: &mut Criterion) {
     let Some(fix) = make_provider(8 * 1024) else {
-        eprintln!("Skipping wcoj_w33_superhub: No CUDA device");
+        eprintln!("Skipping wcoj_histogram_guided_superhub: No CUDA device");
         return;
     };
     bench_fixture(c, &fix, "uniform-50K", make_uniform);
@@ -414,8 +423,8 @@ fn bench_w33_superhub(c: &mut Criterion) {
 }
 
 criterion_group! {
-    name = wcoj_w33_superhub;
+    name = wcoj_histogram_guided_superhub;
     config = Criterion::default();
-    targets = bench_w33_superhub
+    targets = bench_histogram_guided_superhub
 }
-criterion_main!(wcoj_w33_superhub);
+criterion_main!(wcoj_histogram_guided_superhub);
