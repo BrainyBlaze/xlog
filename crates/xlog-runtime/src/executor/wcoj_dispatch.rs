@@ -185,6 +185,17 @@ fn factorized_delta_max_domain() -> u32 {
         .min(xlog_cuda::provider::FJ_DELTA_MAX_DOMAIN)
 }
 
+/// Byte ceiling for the sparse route's conservative hash table; over it
+/// the sparse entry declines to the legacy path. Defaults to half the
+/// device budget; `XLOG_FACTORIZED_DELTA_MAX_TABLE_BYTES` overrides it
+/// (tuning + tests forcing the decline boundary).
+fn factorized_delta_max_table_bytes(budget_bytes: u64) -> u64 {
+    std::env::var("XLOG_FACTORIZED_DELTA_MAX_TABLE_BYTES")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(budget_bytes / 2)
+}
+
 /// Per-iteration work-floor divisor: dispatch only when the estimated
 /// candidate work is at least `n_words / divisor`, protecting sparse /
 /// long-chain fixpoints from the bitmap popcount+scan floor.
@@ -1564,6 +1575,13 @@ impl Executor {
         // relation, or the static side — exactly the iteration-1
         // sets). The in-kernel bounds check stays as the fail-closed
         // backstop.
+        // Domain bound (max id + 1), computed once per (head, static)
+        // per fixpoint (induction: every derived id comes from the
+        // seeded delta, the stable head relation, or the static side).
+        // `None` only when an id is u32::MAX — neither the dense
+        // bitvector (domain overflow) nor the sparse hash set (the
+        // forbidden (MAX,MAX) key) can pack it, so decline for the
+        // whole fixpoint.
         let domain_key = (head_pred.to_string(), static_rel);
         let domain = match ctx.domain_by_key.get(&domain_key) {
             Some(Some(d)) => *d,
@@ -1586,8 +1604,7 @@ impl Executor {
                         );
                     }
                 };
-                let cap = factorized_delta_max_domain();
-                let decided = if max_id >= cap { None } else { Some(max_id + 1) };
+                let decided = if max_id == u32::MAX { None } else { Some(max_id + 1) };
                 ctx.domain_by_key.insert(domain_key, decided);
                 match decided {
                     Some(d) => d,
@@ -1596,19 +1613,25 @@ impl Executor {
             }
         };
 
-        // Per-iteration work floor: the bitmap pipeline pays a
-        // popcount+scan floor over n_words = domain * ceil(domain/32)
-        // words; tiny deltas (sparse / long-chain fixpoints) fall back
-        // to the legacy path for this iteration only.
         let n_delta = u64::from(self.buffer_row_count(delta_buf)?);
         let n_static = u64::from(self.buffer_row_count(static_buf)?);
         if n_delta == 0 || n_static == 0 {
             return Ok(None);
         }
-        let n_words = u64::from(domain.div_ceil(32)) * u64::from(domain);
-        let work_est = n_delta.saturating_mul((n_static / u64::from(domain)).max(1));
-        if work_est < n_words / factorized_delta_work_divisor() {
-            return Ok(None);
+
+        // Route: dense characteristic-bitvector when the domain fits
+        // the cap (default 2¹⁴, env up to 2¹⁶); sparse hash set
+        // otherwise. The bitvector's popcount+scan floor over
+        // n_words = domain·⌈domain/32⌉ is a domain² term, so it gates
+        // ONLY the dense route — applying it to a large-domain sparse
+        // step would spuriously bail every iteration.
+        let dense = domain <= factorized_delta_max_domain();
+        if dense {
+            let n_words = u64::from(domain.div_ceil(32)) * u64::from(domain);
+            let work_est = n_delta.saturating_mul((n_static / u64::from(domain)).max(1));
+            if work_est < n_words / factorized_delta_work_divisor() {
+                return Ok(None);
+            }
         }
 
         // Static side key-first layout. EDB statics are normalized
@@ -1661,24 +1684,50 @@ impl Executor {
             r_carry,
             r_value,
         };
-        let outcome = self.provider.fj_delta_novel_u32_recorded(
-            delta_buf,
-            static_norm,
-            full_buf,
-            cols,
-            domain,
-            launch_stream,
-        );
-        match outcome {
-            Ok(novel) => {
-                self.factorized_delta_dispatch_count += 1;
-                Ok(Some(novel))
+        if dense {
+            match self.provider.fj_delta_novel_u32_recorded(
+                delta_buf,
+                static_norm,
+                full_buf,
+                cols,
+                domain,
+                launch_stream,
+            ) {
+                Ok(novel) => {
+                    self.factorized_delta_dispatch_count += 1;
+                    Ok(Some(novel))
+                }
+                Err(err) => wcoj_decline_on_error(
+                    &mut self.wcoj_error_decline_count,
+                    "factorized-delta",
+                    err,
+                ),
             }
-            Err(err) => wcoj_decline_on_error(
-                &mut self.wcoj_error_decline_count,
-                "factorized-delta",
-                err,
-            ),
+        } else {
+            // Sparse route: cap the conservative hash table at half the
+            // device budget; over that, the entry returns Ok(None) and
+            // we fall back to the legacy hash-join → diff path.
+            let max_table_bytes =
+                factorized_delta_max_table_bytes(self.provider.memory().budget().device_bytes);
+            match self.provider.fj_delta_sparse_novel_u32_recorded(
+                delta_buf,
+                static_norm,
+                full_buf,
+                cols,
+                max_table_bytes,
+                launch_stream,
+            ) {
+                Ok(Some(novel)) => {
+                    self.factorized_delta_dispatch_count += 1;
+                    Ok(Some(novel))
+                }
+                Ok(None) => Ok(None),
+                Err(err) => wcoj_decline_on_error(
+                    &mut self.wcoj_error_decline_count,
+                    "factorized-delta",
+                    err,
+                ),
+            }
         }
     }
 

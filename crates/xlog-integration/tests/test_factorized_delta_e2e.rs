@@ -430,30 +430,40 @@ fn three_atom_recursive_body_declines_silently() {
     );
 }
 
+const MAX_TABLE_BYTES: &str = "XLOG_FACTORIZED_DELTA_MAX_TABLE_BYTES";
+
 #[test]
-fn domain_over_cap_declines_silently() {
+fn sparse_table_over_budget_declines_to_legacy() {
     let _guard = env_lock();
     std::env::remove_var(KILL_SWITCH);
+    // Pin the sparse table ceiling to a tiny value so the route's
+    // conservative table cannot fit: the dispatcher must decline to the
+    // legacy path (counter 0) and still produce the exact closure.
+    // Domain ~2^15 > the dense cap, so dense never applies — this
+    // isolates the sparse budget-decline boundary.
+    std::env::set_var(MAX_TABLE_BYTES, "256");
     let Some(fix) = make_fixture() else {
-        eprintln!("skipping domain decline: no CUDA device");
+        std::env::remove_var(MAX_TABLE_BYTES);
+        eprintln!("skipping sparse budget decline: no CUDA device");
         return;
     };
-    // Ids above the default 2^14 dispatch cap (but far below u32) —
-    // the dense-domain gate must decline for the whole fixpoint.
-    const BASE: u32 = 1 << 15;
-    let edges: Vec<(u32, u32)> = vec![(BASE, BASE + 1), (BASE + 1, BASE + 2), (BASE + 2, BASE)];
+    let edges = large_id_tc_edges();
     let source = "pred edge(u32, u32).\n\
                   pred q(u32, u32).\n\
                   q(X, Y) :- edge(X, Y).\n\
                   q(X, Z) :- q(X, Y), edge(Y, Z).";
     let executor = run_program(&fix, source, upload_binary_u32(&fix.memory, &edges));
+    let declined = executor.factorized_delta_dispatch_count();
+    let on_rows = download_row_set_u32(&fix.memory, executor.store().get("q").expect("q"));
+    std::env::remove_var(MAX_TABLE_BYTES);
+
     assert_eq!(
-        executor.factorized_delta_dispatch_count(),
-        0,
-        "domain over the cap must decline the factorized path"
+        declined, 0,
+        "a sparse table over the byte ceiling must decline to the legacy path"
     );
-    let rows = download_row_set_u32(&fix.memory, executor.store().get("q").expect("q"));
-    assert_eq!(rows.len(), 9, "closure must still be exact via the legacy path");
+    let expected = oracle_tc(&edges);
+    assert_eq!(on_rows, expected, "decline path must still match the oracle closure");
+    assert!(!on_rows.is_empty(), "fixture must produce a non-empty closure");
 }
 
 // ---------------------------------------------------------------------------
@@ -615,4 +625,120 @@ fn s4_bench_dense_block_cycle() {
 fn s4_bench_sparse_long_chain() {
     let edges: Vec<(u32, u32)> = (0..1500u32).map(|i| (i, i + 1)).collect();
     bench_guard("sparse-chain", &edges, 512 * 1024 * 1024, false);
+}
+
+// ---------------------------------------------------------------------------
+// D3 sparse-domain route (Phase: production integration). When the
+// domain exceeds the dense cap (default 2^14), the dispatcher routes
+// the factorized delta through the hash-set path instead of declining.
+
+/// TC over a large-id graph: ids are the irregular fixture shifted into
+/// a band starting at 2^15, so the domain exceeds the dense cap and the
+/// factorized delta can only fire via the sparse route.
+fn large_id_tc_edges() -> Vec<(u32, u32)> {
+    const BASE: u32 = 1 << 15;
+    irregular_edges()
+        .into_iter()
+        .map(|(a, b)| (BASE + a, BASE + b))
+        .collect()
+}
+
+#[test]
+fn large_id_tc_fires_via_sparse_route_with_kill_switch_parity() {
+    let edges = large_id_tc_edges();
+    let expected = oracle_tc(&edges);
+    // Domain ~2^15 > dense cap 2^14 ⇒ any factorized dispatch is the
+    // sparse route. assert_fires_with_parity checks counter>=1 ON,
+    // counter==0 kill-switched, and row-set parity + oracle.
+    assert_fires_with_parity(
+        "pred edge(u32, u32).\n\
+         pred q(u32, u32).\n\
+         q(X, Y) :- edge(X, Y).\n\
+         q(X, Z) :- q(X, Y), edge(Y, Z).",
+        &edges,
+        Some(&expected),
+    );
+}
+
+/// Large-domain block-cycle: the dense block-cycle remapped by a stride
+/// so the id domain spreads past 2^16 (dense bitvector infeasible),
+/// preserving the per-iteration witness blowup. Routes sparse.
+fn sparse_blowup_edges(k: u32, b: u32, stride: u32) -> Vec<(u32, u32)> {
+    block_cycle_edges(k, b)
+        .into_iter()
+        .map(|(a, c)| (a * stride, c * stride))
+        .collect()
+}
+
+/// Full-fixpoint S4-equivalent bench for the sparse route: production
+/// executor ON vs kill-switched, interleaved per rep (the S4
+/// methodology). Dense bitvector is infeasible at this domain, so the
+/// comparison is sparse-hash-set vs legacy hash-join → diff.
+#[test]
+#[ignore = "S4-sparse bench guard — run on RunPod, never locally"]
+fn s4_bench_sparse_domain_blowup() {
+    // block-cycle k=4 b=128 (=512 nodes, |TC|=262144) remapped by
+    // stride 4096 ⇒ ids up to ~2.09M, domain ≫ 2^16. Witness blowup
+    // preserved (b duplicate witnesses per novel pair).
+    let edges = sparse_blowup_edges(4, 128, 4096);
+    let n = 4u32 * 128;
+    let expected_rows = (n as usize) * (n as usize);
+    let _guard = env_lock();
+    if make_fixture_with_budget(12 << 30).is_none() {
+        eprintln!("skipping: no CUDA device");
+        return;
+    }
+    let budget = 12u64 << 30;
+    eprintln!(
+        "S4-sparse fixture: nodes={n} |E|={} stride=4096 expected|TC|={expected_rows}",
+        edges.len()
+    );
+
+    const REPS: usize = 3;
+    let mut off_ms = Vec::new();
+    let mut off_peak = Vec::new();
+    let mut on_ms = Vec::new();
+    let mut on_peak = Vec::new();
+    let mut on_dispatch = 0u64;
+    let mut on_rows = 0usize;
+    let mut off_rows = 0usize;
+
+    let _ = engine_run(&edges, budget, false);
+    let _ = engine_run(&edges, budget, true);
+    for rep in 0..REPS {
+        let (o_dt, o_pk, _, o_r) = engine_run(&edges, budget, false);
+        let (n_dt, n_pk, disp, n_r) = engine_run(&edges, budget, true);
+        off_ms.push(o_dt);
+        off_peak.push(o_pk as f64);
+        on_ms.push(n_dt);
+        on_peak.push(n_pk as f64);
+        on_dispatch = disp;
+        off_rows = o_r;
+        on_rows = n_r;
+        eprintln!(
+            "S4-sparse rep {rep}: legacy {o_dt:.1} ms / {:.1} MiB ; factorized {n_dt:.1} ms / {:.1} MiB (dispatch={disp})",
+            o_pk as f64 / (1024.0 * 1024.0),
+            n_pk as f64 / (1024.0 * 1024.0),
+        );
+    }
+    std::env::remove_var(KILL_SWITCH);
+
+    assert_eq!(on_rows, expected_rows, "sparse-route TC row count");
+    assert_eq!(off_rows, expected_rows, "legacy TC row count");
+    assert!(on_dispatch >= 1, "sparse route must fire (domain > dense cap)");
+
+    let om = median(&mut off_ms);
+    let opk = median(&mut off_peak);
+    let nm = median(&mut on_ms);
+    let npk = median(&mut on_peak);
+    eprintln!(
+        "S4-sparse bench: rows={on_rows} dispatch={on_dispatch} | legacy {om:.1} ms / {:.1} MiB ; \
+         factorized {nm:.1} ms / {:.1} MiB | peak {:.2}x  wall-clock {:.3}x  (gate: peak<1.0x at wall<=1.2x)",
+        opk / (1024.0 * 1024.0),
+        npk / (1024.0 * 1024.0),
+        opk / npk.max(1.0),
+        nm / om.max(1.0),
+    );
+    assert!(npk < opk, "sparse route must cut peak vs legacy");
+    assert!(nm <= om * 1.2, "sparse route must not regress wall-clock beyond 1.2x");
 }

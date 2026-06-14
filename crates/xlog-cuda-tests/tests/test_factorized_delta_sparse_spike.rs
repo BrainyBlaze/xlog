@@ -184,9 +184,11 @@ fn sparse_novel_step_matches_oracle_large_ids() {
             &edge_norm,
             &upload(&fix.memory, &full_r),
             FjDeltaCols::CANONICAL,
+            0,
             StreamId::DEFAULT,
         )
-        .expect("sparse novel step");
+        .expect("sparse novel step")
+        .expect("not budget-declined");
     assert_eq!(download_set(&fix.memory, &novel), expected);
 }
 
@@ -204,9 +206,11 @@ fn sparse_novel_empty_and_saturated() {
             &edge_norm,
             &upload(&fix.memory, &[(1, 2)]),
             FjDeltaCols::CANONICAL,
+            0,
             StreamId::DEFAULT,
         )
-        .expect("empty delta");
+        .expect("empty delta")
+        .expect("not budget-declined");
     assert_eq!(rows_of(&fix.memory, &n0), 0);
 
     let n1 = fix
@@ -216,9 +220,11 @@ fn sparse_novel_empty_and_saturated() {
             &edge_norm,
             &upload(&fix.memory, &[(0, 2)]),
             FjDeltaCols::CANONICAL,
+            0,
             StreamId::DEFAULT,
         )
-        .expect("saturated");
+        .expect("saturated")
+        .expect("not budget-declined");
     assert_eq!(rows_of(&fix.memory, &n1), 0);
 }
 
@@ -242,9 +248,11 @@ fn sparse_matches_dense_on_small_fixture() {
             &edge_norm,
             &upload(&fix.memory, &full_r),
             FjDeltaCols::CANONICAL,
+            0,
             StreamId::DEFAULT,
         )
-        .expect("sparse");
+        .expect("sparse")
+        .expect("not budget-declined");
     let dense = fix
         .provider
         .fj_delta_novel_u32_recorded(
@@ -335,6 +343,7 @@ fn sparse_gate_hub_blowup() {
         &edge_norm,
         &upload(&fix.memory, &empty_r),
         FjDeltaCols::CANONICAL,
+        0,
         StreamId::DEFAULT,
     );
 
@@ -351,9 +360,11 @@ fn sparse_gate_hub_blowup() {
                 &edge_norm,
                 &r_buf,
                 FjDeltaCols::CANONICAL,
+                0,
                 StreamId::DEFAULT,
             )
-            .expect("sparse novel");
+            .expect("sparse novel")
+            .expect("not budget-declined");
         let sdt = t0.elapsed().as_secs_f64() * 1000.0;
         let sp = fix.memory.peak_bytes();
         sparse_rows = rows_of(&fix.memory, &novel);

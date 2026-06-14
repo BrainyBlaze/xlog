@@ -53,14 +53,22 @@ impl CudaKernelProvider {
     /// factorized semi-naive delta step over a hash set, with no domain
     /// cap. Forbids the single key `(u32::MAX, u32::MAX)` (its packed
     /// `key+1` overflows the empty sentinel) — fails closed if present.
+    ///
+    /// Returns `Ok(None)` when the conservative hash-table capacity
+    /// (`2×(|R| + candidate work)`, rounded to a power of two) would
+    /// exceed `max_table_bytes` — a clean route-decline signal so the
+    /// caller can fall back to the legacy path rather than blow the
+    /// memory budget. `max_table_bytes == 0` disables the guard (used
+    /// by the standalone spike/parity tests).
     pub fn fj_delta_sparse_novel_u32_recorded(
         &self,
         delta: &CudaBuffer,
         edge: &CudaBuffer,
         full_r: &CudaBuffer,
         cols: FjDeltaCols,
+        max_table_bytes: u64,
         launch_stream: StreamId,
-    ) -> Result<CudaBuffer> {
+    ) -> Result<Option<CudaBuffer>> {
         let ctx = "fj_delta_sparse_novel_u32_recorded";
         let runtime = self.memory().runtime().ok_or_else(|| {
             XlogError::Kernel(format!(
@@ -93,7 +101,7 @@ impl CudaKernelProvider {
 
         let out_schema = full_r.schema().clone();
         if n_delta == 0 || n_edge == 0 {
-            return self.create_empty_buffer(out_schema);
+            return Ok(Some(self.create_empty_buffer(out_schema)?));
         }
 
         let delta_x = delta.column(cols.delta_carry).ok_or_else(|| {
@@ -159,7 +167,7 @@ impl CudaKernelProvider {
             .map_err(|e| XlogError::Kernel(format!("{ctx}: range sync: {e}")))?;
         let total_work = u64::from(self.dtoh_scalar_untracked::<u32>(&wp, n_delta as usize)?);
         if total_work == 0 {
-            return self.create_empty_buffer(out_schema);
+            return Ok(Some(self.create_empty_buffer(out_schema)?));
         }
         if total_work > u64::from(u32::MAX - 1) {
             return Err(XlogError::Kernel(format!(
@@ -186,6 +194,17 @@ impl CudaKernelProvider {
                 "{ctx}: hash table capacity {cap} exceeds u32 slot space (workload too large \
                  for the spike's single-table sizing)"
             )));
+        }
+        // Route-decline guard: the table (u64 keys + u8 is_r) plus the
+        // scan counts (u32, cap+1) must fit the caller's budget; over
+        // budget → decline so the caller uses the legacy path.
+        if max_table_bytes != 0 {
+            let table_bytes = u64::from(cap)
+                .saturating_mul(8 + 1 + 4)
+                .saturating_add(4);
+            if table_bytes > max_table_bytes {
+                return Ok(None);
+            }
         }
         let cap = cap as u32;
         let mask = cap - 1;
@@ -320,7 +339,7 @@ impl CudaKernelProvider {
             .map_err(|e| XlogError::Kernel(format!("{ctx}: mark sync: {e}")))?;
         let total_novel = self.dtoh_scalar_untracked::<u32>(&counts, cap as usize)?;
         if total_novel == 0 {
-            return self.create_empty_buffer(out_schema);
+            return Ok(Some(self.create_empty_buffer(out_schema)?));
         }
 
         let out_x = self.memory().alloc::<u32>(total_novel as usize)?;
@@ -373,12 +392,12 @@ impl CudaKernelProvider {
         } else {
             vec![out_z.into_bytes().into(), out_x.into_bytes().into()]
         };
-        Ok(CudaBuffer::from_columns_with_host_count(
+        Ok(Some(CudaBuffer::from_columns_with_host_count(
             columns,
             u64::from(total_novel),
             d_nr,
             out_schema,
             total_novel,
-        ))
+        )))
     }
 }
