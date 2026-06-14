@@ -446,7 +446,7 @@ pub enum ProbCache {
 /// Epistemic semantics mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EpistemicMode {
-    /// G91 compatibility semantics.
+    /// Gelfond-1991-style compatibility semantics, selected by `g91`.
     G91,
     /// Founded Autoepistemic Equilibrium Logic.
     Faeel,
