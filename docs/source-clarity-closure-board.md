@@ -580,7 +580,7 @@ Hardware cache terminology such as `L1` and `L2` is allowed when it refers to GP
 | `crates/xlog-neural/tests/tensor_source_test.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-neural/tests/test_error_conversion.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-prob/Cargo.toml` | 0 | 0 | true |  |  |
-| `crates/xlog-prob/benches/prob_bench.rs` | 1 | 0 | false | D4(1) |  |
+| `crates/xlog-prob/benches/prob_bench.rs` | 0 | 0 | true | - | Replaced the bare D4 compiler note with exact-inference Decision-DNNF knowledge compiler wording. |
 | `crates/xlog-prob/src/aggregates.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-prob/src/cnf.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-prob/src/compilation/disk_cache.rs` | 0 | 0 | true |  |  |
