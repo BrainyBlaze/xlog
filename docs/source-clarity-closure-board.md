@@ -366,7 +366,7 @@ Hardware cache terminology such as `L1` and `L2` is allowed when it refers to GP
 | `crates/xlog-cuda/tests/test_wcoj_layout_fast_path.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-cuda/tests/test_wcoj_layout_sort_roundtrip.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-cuda/tests/test_wcoj_layout_sort_u32.rs` | 0 | 0 | true |  |  |
-| `crates/xlog-cuda/tests/test_wcoj_layout_sort_u64.rs` | 1 | 0 | false | W3.1(1) |  |
+| `crates/xlog-cuda/tests/test_wcoj_layout_sort_u64.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-cuda/tests/test_wcoj_layout_u32.rs` | 1 | 0 | false | D2H(1) |  |
 | `crates/xlog-cuda/tests/test_wcoj_layout_u64.rs` | 1 | 0 | false | D2H(1) |  |
 | `crates/xlog-cuda/tests/test_wcoj_plan_provider_cert.rs` | 0 | 0 | true |  |  |

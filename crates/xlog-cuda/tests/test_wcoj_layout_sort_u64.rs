@@ -1,6 +1,6 @@
 // crates/xlog-cuda/tests/test_wcoj_layout_sort_u64.rs
-//! W3.1 — width-class validation tests for the new generic
-//! 8-byte-class entry point
+//! Width-class validation tests for the generic 8-byte-class
+//! WCOJ layout-sort entry point
 //! `CudaKernelProvider::wcoj_layout_sort_u64_recorded`.
 //!
 //! Mirror of `test_wcoj_layout_sort_u32.rs` at the 8-byte
