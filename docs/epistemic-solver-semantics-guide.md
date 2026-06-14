@@ -1,14 +1,14 @@
-# v0.9.2 Epistemic And Solver Semantics Guide
+# Epistemic and Solver Semantics Guide
 
 2026-06-02 status note: this guide describes the epistemic and solver semantics
-shipped in the released v0.9.2 build. Accepted epistemic programs route through
+shipped in the released build. Accepted epistemic programs route through
 `xlog run` via EIR → GPU-executable plan and execute Generate-Propagate-Test on
 the GPU. The production acceptance evidence covers GPU/WCOJ execution, nonzero
 tuple-key membership, solver production reuse, probabilistic production reuse,
-and v0.8 compatibility.
+and legacy compatibility.
 
 This guide describes the semantic layer and the GPU runtime/production-reuse
-behavior implemented in v0.9.2. The fixtures and CPU oracles referenced
+behavior implemented in the released build. The fixtures and CPU oracles referenced
 throughout are the test/reference surface; the shipped evidence is the
 production GPU path.
 
@@ -118,7 +118,7 @@ validation staging, and accepted-candidate, final-result flag, and
 membership-gated final tuple materialization-staging kernel launches. It also
 snapshots provider
 host-transfer counters around the hot path and records
-`EpistemicGpuTransferBudgetTrace`, which rejects tracked data-plane H2D/D2H
+`EpistemicGpuTransferBudgetTrace`, which rejects tracked data-plane host-to-device/device-to-host
 deltas instead of resetting shared telemetry. Tuple-source staging is GPU-backed
 over existing relation buffers with row-scoped ground-key comparison through
 specialized arity-one/two/three kernels and a generic arity-N kernel, plus
@@ -137,11 +137,11 @@ described below.
 
 ## GPU And WCOJ Scope
 
-The shipped v0.9.2 execution path is GPU-native for the supported surface and
+The shipped execution path is GPU-native for the supported surface and
 exercises the production GPU/WCOJ stack:
 
 - WCOJ planner eligibility and runtime dispatch are observed for an accepted
-  v0.7.0 4-cycle `MultiWayJoin` reduction, and layout, skew-aware scheduling,
+  existing 4-cycle `MultiWayJoin` reduction, and layout, skew-aware scheduling,
   helper-splitting specs, helper relation rewrites, and runtime histogram
   metadata are observed for accepted K5/K6/K7/K8 epistemic reductions.
 - Candidate generation, propagation staging, candidate-buffer validation,
@@ -155,7 +155,7 @@ exercises the production GPU/WCOJ stack:
   negated `not know`/`not possible` multi-membership, same-rule all-operator
   multi-membership, missing-required rejection, split
   possible-vs-not-known, split binary `possible`/`not possible`, split
-  all-binary-operator, G91 self-support, and independently founded FAEEL
+  all-binary-operator, Gelfond 1991 compatibility self-support, and independently founded FAEEL
   fixtures compare bounded GPU traces against semantic or GPT oracles.
 - Solver SAT/UNSAT, lifecycle, split-batch learned-clause, MaxSAT,
   weighted MaxSAT encoding, scheduler, and portfolio paths route accepted GPU evidence into existing
@@ -175,34 +175,34 @@ lowering, runtime, and WCOJ infrastructure where eligible.
 
 ## Prior Goal Reuse
 
-The v0.9.2 epistemic runtime reuses prior infrastructure only at the boundaries
+The released epistemic runtime reuses prior infrastructure only at the boundaries
 the runtime actually touches:
 
-- v0.7.0: reuse the general WCOJ architecture and runtime expansion, including
+- Existing WCOJ runtime: reuse the general WCOJ architecture and runtime expansion, including
   first-class `RirNode::MultiWayJoin`, deterministic 4-cycle dispatch,
   recursive/SCC support, and variable-ordering/cost surfaces.
-- Goal 038-B: reuse the production K-clique WCOJ path: `MultiwayPlan`,
+- K-clique WCOJ implementation: reuse the production K-clique WCOJ path: `MultiwayPlan`,
   `KCliqueVariableOrder`, sorted-layout requirements, runtime histogram
   metadata count/timing, cost-gated hash routing, skew scheduling, and
   helper-splitting specs.
-- Goal 039: reuse the existing production substrate for chain dispatch, K7/K8
+- Chain-dispatch and replay infrastructure: reuse the existing production substrate for chain dispatch, K7/K8
   templates, sort labels, DLPack/zero-transfer discipline, CUDA Graphs, and external consumer
   replay certification only when the epistemic runtime path actually invokes
   those surfaces.
 
-The epistemic runtime consumes v0.7.0 `MultiWayJoin` metadata plus 38-B
+The epistemic runtime consumes existing `MultiWayJoin` metadata plus K-clique
 route metadata and fails closed when a WCOJ-required non-hash `MultiWayJoin` or
 K-clique reduction lacks production counter deltas. It certifies accepted
-v0.7.0 4-cycle plus K5, K6, K7, and K8 WCOJ dispatch through production runtime
-counters. The v0.7.0 trace records `certified_multiway_reductions`; the K5/K6
+4-cycle plus K5, K6, K7, and K8 WCOJ dispatch through production runtime
+counters. The general WCOJ trace records `certified_multiway_reductions`; the K5/K6
 dispatch traces include edge-permutation, stream-group scheduling,
 skew-scheduled helper, sorted-layout, and helper-split counts; K6 also carries
 runtime histogram metadata-build timing, while K7/K8 record K-clique max-arity
 plus full edge-permutation and stream-group metadata through runtime preflight.
 Broader examples outside the current supported surface remain future scope.
 
-The reduced-runtime-plan contract reuses the v0.7.0 general WCOJ surfaces and
-the Goal-038-B WCOJ surfaces. Non-K-clique epistemic reductions must pass
+The reduced-runtime-plan contract reuses the general WCOJ surfaces and
+the K-clique WCOJ surfaces. Non-K-clique epistemic reductions must pass
 through `RirNode::MultiWayJoin` and the existing production dispatch counters;
 K-clique epistemic reductions must pass through `MultiwayPlan`,
 `KCliqueVariableOrder`, sorted-layout requirements, and helper-splitting specs
@@ -216,7 +216,7 @@ Future work broadens the shipped surface:
 - broader EIR runtime dispatch into executable GPU plans beyond the supported
   surface;
 - WCOJ planner eligibility, layout construction, skew scheduling, and helper
-  splitting beyond the current v0.7.0 4-cycle and K-clique coverage;
+  splitting beyond the current 4-cycle and K-clique coverage;
 - broader GPU-native SAT/MaxSAT/portfolio solving and probabilistic-epistemic
   evidence coverage (the current adapters are real but bounded);
 - a device-resident, no-host-interaction WFS path (the shipped GPU-backed WFS is
@@ -260,9 +260,9 @@ parity and duality before GPU execution: `know possible p()` becomes
 through `xlog_logic::build_eir`, which preserves epistemic literals as
 `EirBodyLiteral::Epistemic`.
 
-## G91 Compatibility
+## Gelfond 1991 Compatibility
 
-G91 is selected explicitly with:
+Gelfond 1991 compatibility mode is selected explicitly with:
 
 ```xlog
 #pragma epistemic_mode = g91
@@ -271,7 +271,8 @@ accepted() :- possible fact().
 
 In the bounded semantic evaluator, `possible p/arity` succeeds when `p/arity` is
 either known or compatibility-possible. Non-epistemic programs remain isolated:
-the same non-epistemic source lowers to the same RIR under default mode and G91.
+the same non-epistemic source lowers to the same RIR under default mode and
+Gelfond 1991 compatibility mode.
 
 GPU runtime coverage includes
 `test_epistemic_gpu_wcoj_execution::g91_self_supported_possible_reaches_gpu_runtime_path`.
@@ -279,8 +280,8 @@ That test runs explicit `#pragma epistemic_mode = g91` with
 `p() :- possible p().`, loads the reduced nullary fact through the existing
 relation-buffer path, validates stable tuple-source membership, accepts one
 world view, materializes `p()`, and records zero CPU candidate/world-view
-fallback counters. This is a bounded G91 runtime slice; broader G91 coverage
-remains future work.
+fallback counters. This is a bounded Gelfond 1991 compatibility runtime slice;
+broader compatibility coverage remains future work.
 
 ## FAEEL Default
 
@@ -304,7 +305,7 @@ only with explicit `#pragma epistemic_mode = g91`.
 
 `run_generate_propagate_test` executes a bounded three-phase reference pipeline
 under the default FAEEL semantics. `run_generate_propagate_test_with_mode` uses the same
-pipeline with an explicit semantics mode, including G91 compatibility checks:
+pipeline with an explicit semantics mode, including Gelfond 1991 compatibility checks:
 
 - generate: accept an explicit candidate list and enforce `max_candidates`;
 - propagate: prune immediate known/rejected contradictions;
@@ -325,7 +326,7 @@ accepted/rejected candidate indices, and rejection-reason counts with zero CPU
 candidate enumeration and zero CPU world-view validation counters.
 `EpistemicGpuRejectionReason` decodes nonzero device rejection codes so bounded
 GPU traces can be compared with the GPT oracle's phase counts,
-accepted/rejected candidate indices, and typed rejection expectations. The G91
+accepted/rejected candidate indices, and typed rejection expectations. The Gelfond 1991 compatibility
 self-supported `possible p()` runtime fixture uses the mode-aware oracle for
 generated, propagated, tested, accepted, rejected, and candidate-index parity.
 The independently founded FAEEL self-`possible p()` runtime fixture uses the
@@ -343,7 +344,7 @@ row filters, the negated mixed fixture records one `not know` operator, one
 `not possible` operator, and two negated row filters, and the all-operator
 fixture records one operator from each epistemic family plus four row filters
 with two negated filters. These fixtures keep zero CPU candidate/world-view
-fallback counters and zero tracked hot-path D2H calls.
+fallback counters and zero tracked hot-path device-to-host calls.
 The unary nonzero-arity `possible edge(X)`, `not possible edge(X)`, and
 `not know edge(X)` fixtures, plus the binary `not know edge(X, Y)` fixture,
 compare the same trace and candidate-index fields against bounded GPT oracles;
@@ -353,12 +354,13 @@ The quaternary `know fact4(A, B, C, D)` fixture exercises the generic arity-N
 bound-output tuple-key path and compares the same trace and candidate-index
 fields against a bounded GPT oracle.
 This is the shipped, tested behavior for the bounded supported surface; full
-semantic parity across every G91/FAEEL/GPT/splitting case remains future work.
+semantic parity across every Gelfond 1991 compatibility, FAEEL, Generate-Propagate-Test,
+and splitting case remains future work.
 
 ## Epistemic Splitting
 
 `split_epistemic_program` builds deterministic components from source rules. As
-of v0.9.1 (EGB-06) it no longer rejects a rule that couples more than one distinct
+of the current splitting implementation it no longer rejects a rule that couples more than one distinct
 epistemic body predicate: such a rule's modal predicates are unioned into a single
 component solved jointly as a full modal conjunction over the candidate world view.
 For accepted split fixtures, `recomposed_rule_indices()` must recover the original
@@ -370,7 +372,7 @@ the multi-membership `know edge(X)`/`know color(X)` fixture in a mixed program w
 components (per-rule joint semantics verified on device: `both_known={1}`,
 `safe_alt={2}`). Same-name multi-arity coupling now disambiguates by
 arity-qualified tuple sources (`p/1`, `p/2`) and is exercised by the production
-`xlog run` base example plus the committed `42a*`/`42b*` exhaustive matrix.
+`xlog run` base example plus the committed exhaustive same-name multi-arity matrix.
 Genuinely cyclic modal coupling with no founded or WFS evaluation order still
 fails closed with a typed diagnostic rather than being solved.
 
@@ -401,7 +403,7 @@ The all-binary-operator split fixture extends this to four independent
 components over the same `pair/2` input, covering `know`, `possible`,
 `not possible`, and `not know` together with per-component GPT oracle
 trace/candidate-index parity, row-filter polarity counts, one aggregate counter
-for each operator, zero CPU recomposition, zero fallback, zero tracked D2H, and
+for each operator, zero CPU recomposition, zero fallback, zero tracked device-to-host calls, and
 zero per-candidate host round trips.
 It also includes the existing world-view distinction between
 absent `possible` and true `not know`: split `possible edge(X)` and
@@ -443,7 +445,7 @@ workspace-reuse counters without CPU search.
 `GpuSolverProductionBatchExecutionEvidence` from
 `execute_epistemic_gpu_execution_batch_with_trace`, validates aggregate
 `EpistemicGpuBatchExecutionResult` evidence for zero CPU recomposition, zero
-CPU candidate/world-view fallback, zero tracked D2H, and zero per-candidate host
+CPU candidate/world-view fallback, zero tracked device-to-host calls, and zero per-candidate host
 round trips, then dispatches each accepted component through the existing
 multi-candidate GPU CDCL lifecycle path. The trace records
 `accepted_gpu_batch_candidate_evidence_consumed` and
@@ -539,7 +541,7 @@ the existing multi-candidate portfolio path. It records the split-batch
 candidate/component counters together with doubled SAT/MaxSAT/UNKNOWN/TIMEOUT
 portfolio counters and zero CPU search.
 Accepted GPU candidate evidence also preserves the runtime epistemic mode;
-`GpuSolverProductionTrace` counts G91 and default FAEEL candidate evidence
+`GpuSolverProductionTrace` counts Gelfond 1991 compatibility and default FAEEL candidate evidence
 separately when either mode gates solver production work.
 The same trace records accepted operator-family evidence counters for `know`,
 `possible`, `not possible`, and `not know` when accepted runtime evidence gates
@@ -580,7 +582,7 @@ pruning of UNSAT MaxSAT search candidates for one, two, and split-batch accepted
 records, and bounded weighted soft-clause selection encoding for one and two
 accepted evidence records, plus two-record and split-batch heterogeneous MaxSAT schedulers
 over candidate-set, search-prune, encoded-search, UNKNOWN, and TIMEOUT jobs and
-two-record status-aware portfolio dispatch, with G91/default FAEEL mode-specific
+two-record status-aware portfolio dispatch, with Gelfond 1991 compatibility/default FAEEL mode-specific
 and operator-family accepted-evidence trace counters plus ternary and quaternary
 nonzero-arity SAT evidence counters. The MaxSAT/portfolio/scheduler surface is
 real and bounded; broadening the solver portfolio remains ongoing work, and a
@@ -632,7 +634,7 @@ cargo test -p xlog-solve --test solver_service_semantics
   evidence;
 - epistemic assumptions become fixture evidence literals such as
   `know:rain/0=true`;
-- GPU-D4/XGCF supports fixture-level incremental evidence updates without
+- GPU exact-compilation/XGCF supports fixture-level incremental evidence updates without
   changing the circuit fingerprint, including replacing stale active evidence
   when an accepted assumption changes;
 - generic Decision-DNNF text, c2d, and miniC2D adapter contracts are
@@ -651,7 +653,7 @@ probability recomputation counters in `EpistemicProbProductionTrace`.
 GPU model-membership/world-view/final-result/final-tuple kernel traces, zero
 hot-path transfers, and non-empty final device output are proven. That accepted
 evidence preserves the runtime epistemic mode so the production trace can count
-G91 and default FAEEL evidence consumptions separately.
+Gelfond 1991 compatibility and default FAEEL evidence consumptions separately.
 `compile_and_evaluate_source_with_gpu_execution_result` and
 `compile_and_evaluate_program_with_gpu_execution_result` consume the same
 accepted runtime evidence once before compiling through `ExactDdnnfProgram` and
@@ -671,7 +673,7 @@ source counters.
 `compile_and_evaluate_program_for_gpu_batch_execution_result` consume
 `EpistemicProbGpuBatchExecutionEvidence` from accepted split execution,
 validate aggregate zero CPU recomposition, zero CPU candidate/world-view
-fallback, zero tracked D2H, and zero per-candidate host round trips, then route
+fallback, zero tracked device-to-host calls, and zero per-candidate host round trips, then route
 each accepted component through the same source or parsed-program
 compile/evaluate exact path. The trace records batch and component evidence
 counters before source/program compile, exact-query, and end-to-end counters
@@ -761,7 +763,7 @@ all-binary split-batch source/program PIR-CNF plus already-compiled exact
 query/gradient evaluation, and two-record parsed-program-conditioned query
 cases, including true `know`, true `possible`, false `possible`/`not possible`,
 and false `know`/`not know` operator-result
-conditioning, accepted G91/default FAEEL mode-specific trace counters,
+conditioning, accepted Gelfond 1991 compatibility/default FAEEL mode-specific trace counters,
 source/program-specific exact-query counters,
 source/program-specific conditioned gradient counters,
 source/program-specific conditioned evidence counters,
@@ -798,7 +800,7 @@ The example sources live in `examples/epistemic/`:
 | Example | Path | Covered behavior |
 |---|---|---|
 | EIR boundary | `examples/epistemic/01-eir-boundary.xlog` | explicit EIR epistemic literal |
-| G91 compatibility | `examples/epistemic/02-g91-compatibility.xlog` | possible-only support under G91 |
+| Gelfond 1991 compatibility | `examples/epistemic/02-g91-compatibility.xlog` | possible-only support under Gelfond 1991 compatibility |
 | FAEEL default | `examples/epistemic/03-faeel-default.xlog` | founded known candidate |
 | Generate-Propagate-Test | `examples/epistemic/04-gpt-candidate-filter.xlog` | candidate trace counts |
 | Splitting | `examples/epistemic/05-splitting.xlog` | deterministic component recomposition |
@@ -830,13 +832,13 @@ cargo check -p pyxlog
 ```
 
 These commands validate the bounded semantic reference, GPU runtime tests, and
-solver/probability production-adapter paths, alongside the GPU/WCOJ and v0.8
+solver/probability production-adapter paths, alongside the GPU/WCOJ and legacy
 compatibility coverage. Any future code/runtime change should rerun the relevant
 focused tests plus the integration and compatibility suites.
 
 ## Roadmap Status
 
-`ROADMAP.md` marks the v0.9.2 epistemic and solver rows DONE. The A3
-same-process multi-executor CUDA primary-context item is tracked separately as
+`ROADMAP.md` marks the epistemic and solver rows done. The same-process
+multi-executor CUDA primary-context item is tracked separately as
 future work, as is the device-resident no-host-interaction WFS path and the
 planned Solver IR (SIR).
