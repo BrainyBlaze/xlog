@@ -1,12 +1,12 @@
-//! W2.6 step 7 Part B — compile-time leader divergence via
+//! Heat-aware variable-ordering compile-time leader divergence via
 //! hand-built `StatsSnapshot`. 4 tests: 2 shapes (triangle +
 //! 4-cycle) × 2 signal types (heat-bias + selectivity-bias).
 //! Hand-built snapshots pin EXACT heat / selectivity / cardinality
 //! values reaching the compile-time cost model — sidesteps EMA
 //! smoothing so the locked formula's leader decision is
-//! deterministic. Part C exercises the runtime → snapshot capture
-//! path end-to-end; Part B exercises the snapshot → cost-model
-//! half independently.
+//! deterministic. Runtime integration tests exercise the runtime →
+//! snapshot capture path end-to-end; this file exercises the
+//! snapshot → cost-model half independently.
 
 use xlog_core::RelId;
 use xlog_ir::rir::VariableOrder;
@@ -146,8 +146,9 @@ fn triangle_heat_bias_heat_aware_picks_non_default_leader_card_eq_returns_none()
     let vo_heat = first_var_order(&plan_heat).expect("HeatAware must set var_order");
     assert_eq!(vo_heat.leader_idx, 1);
 
-    // Same snapshot under LeaderCardinality: cards equal → W2.1
-    // short-circuits with argmin == 0 → returns None.
+    // Same snapshot under LeaderCardinality: cards equal, so the
+    // leader-cardinality model short-circuits with argmin == 0 and
+    // returns None.
     let plan_card = compile_with(TRIANGLE_SRC, &snap, WcojVarOrderingKind::LeaderCardinality);
     let vo_card = first_var_order(&plan_card);
     assert!(

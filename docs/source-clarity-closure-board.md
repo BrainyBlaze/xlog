@@ -562,7 +562,7 @@ Hardware cache terminology such as `L1` and `L2` is allowed when it refers to GP
 | `crates/xlog-logic/tests/test_v085_naf.rs` | 0 | 0 | true | - | Replaced the version-coded negation diagnostic assertion and example path with negation-safety and language-completeness wording. |
 | `crates/xlog-logic/tests/test_v085_types.rs` | 0 | 0 | true | - | Replaced version-coded type/term test names and diagnostics with language-completeness and extended-term wording. |
 | `crates/xlog-logic/tests/test_leader_cardinality_var_order.rs` | 0 | 0 | true | - | Replaced milestone and slice labels with leader-cardinality variable-ordering and original binary-fallback projection wording; renamed the test file accordingly. |
-| `crates/xlog-logic/tests/test_w26_part_b.rs` | 2 | 0 | false | W2.6(1), W2.1(1) |  |
+| `crates/xlog-logic/tests/test_heat_aware_var_order.rs` | 0 | 0 | true | - | Replaced milestone and plan-part labels with heat-aware variable-ordering, leader-cardinality baseline, and runtime-snapshot wording; renamed the test file accordingly. |
 | `crates/xlog-logic/tests/test_w32_clique_promoter.rs` | 2 | 0 | false | W3.2(2) |  |
 | `crates/xlog-logic/tests/test_w67b_cost_gate.rs` | 0 | 2 | false |  | W5.2(2) |
 | `crates/xlog-logic/tests/test_w67b_dispatch_plan.rs` | 0 | 0 | true |  |  |
