@@ -51,7 +51,7 @@ macro_rules! checked_solver_report_counter_add {
     }};
 }
 
-/// Production capability status for solver paths required by v0.9.
+/// Production capability status for solver paths required by production metric gates.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GpuSolverProductionCapabilityStatus {
     /// Existing GPU-native production path is available.
@@ -104,7 +104,7 @@ pub struct GpuSolverAcceptedCandidateState {
     pub solver_required_capabilities: u64,
     /// Solver statuses that must cross the accepted semantic boundary distinctly.
     pub solver_required_statuses: u64,
-    /// Whether the accepted evidence came from G91 mode.
+    /// Whether the accepted evidence came from Gelfond-1991 compatibility mode.
     pub g91_mode: bool,
     /// Whether the accepted evidence came from FAEEL mode.
     pub faeel_mode: bool,
@@ -541,7 +541,7 @@ pub struct GpuSolverProductionTrace {
     pub accepted_gpu_batch_candidate_evidence_consumed: u64,
     /// Number of accepted split/batch GPU epistemic component evidence records consumed.
     pub accepted_gpu_batch_candidate_component_evidence_consumed: u64,
-    /// Number of accepted G91 GPU epistemic candidate evidence records consumed.
+    /// Number of accepted Gelfond-1991 compatibility GPU epistemic candidate evidence records consumed.
     pub accepted_g91_gpu_candidate_evidence_consumed: u64,
     /// Number of accepted FAEEL GPU epistemic candidate evidence records consumed.
     pub accepted_faeel_gpu_candidate_evidence_consumed: u64,
@@ -609,17 +609,17 @@ pub struct GpuSolverProductionTrace {
     pub gpu_maxsat_frontier_certified_candidate_solves: u64,
     /// Number of weighted MaxSAT selections encoded into GPU CNF candidates.
     pub gpu_maxsat_candidate_encodes: u64,
-    /// Data-plane H2D calls used while uploading encoded MaxSAT CNF candidates.
+    /// Data-plane host-to-device calls used while uploading encoded MaxSAT CNF candidates.
     pub gpu_maxsat_candidate_cnf_data_plane_htod_calls: u64,
-    /// Data-plane H2D bytes used while uploading encoded MaxSAT CNF candidates.
+    /// Data-plane host-to-device bytes used while uploading encoded MaxSAT CNF candidates.
     pub gpu_maxsat_candidate_cnf_data_plane_htod_bytes: u64,
-    /// Data-plane D2H calls observed while uploading encoded MaxSAT CNF candidates.
+    /// Data-plane device-to-host calls observed while uploading encoded MaxSAT CNF candidates.
     pub gpu_maxsat_candidate_cnf_data_plane_dtoh_calls: u64,
-    /// Data-plane D2H bytes observed while uploading encoded MaxSAT CNF candidates.
+    /// Data-plane device-to-host bytes observed while uploading encoded MaxSAT CNF candidates.
     pub gpu_maxsat_candidate_cnf_data_plane_dtoh_bytes: u64,
-    /// Launch-metadata H2D calls used while uploading encoded MaxSAT CNF candidates.
+    /// Launch-metadata host-to-device calls used while uploading encoded MaxSAT CNF candidates.
     pub gpu_maxsat_candidate_cnf_launch_metadata_htod_calls: u64,
-    /// Launch-metadata H2D bytes used while uploading encoded MaxSAT CNF candidates.
+    /// Launch-metadata host-to-device bytes used while uploading encoded MaxSAT CNF candidates.
     pub gpu_maxsat_candidate_cnf_launch_metadata_htod_bytes: u64,
     /// Number of upper-bound frontier candidates derived before GPU CDCL verification.
     pub gpu_maxsat_frontier_completion_candidate_encodes: u64,
@@ -814,7 +814,7 @@ impl GpuSolverProductionTrace {
             return Err(XlogError::UnsupportedEpistemicConstruct {
                 construct: "GPU solver production metric gate".to_string(),
                 context: format!(
-                    "encoded MaxSAT candidate CNF upload bytes require matching H2D calls, \
+                    "encoded MaxSAT candidate CNF upload bytes require matching host-to-device calls, \
                      got data_plane_calls={} data_plane_bytes={} launch_metadata_calls={} \
                      launch_metadata_bytes={}",
                     self.gpu_maxsat_candidate_cnf_data_plane_htod_calls,
@@ -832,7 +832,7 @@ impl GpuSolverProductionTrace {
             return Err(XlogError::UnsupportedEpistemicConstruct {
                 construct: "GPU solver production metric gate".to_string(),
                 context: format!(
-                    "encoded MaxSAT candidate CNF upload calls require matching H2D bytes, \
+                    "encoded MaxSAT candidate CNF upload calls require matching host-to-device bytes, \
                      got data_plane_calls={} data_plane_bytes={} launch_metadata_calls={} \
                      launch_metadata_bytes={}",
                     self.gpu_maxsat_candidate_cnf_data_plane_htod_calls,
@@ -1059,7 +1059,7 @@ impl GpuSolverProductionTrace {
                 return Err(XlogError::UnsupportedEpistemicConstruct {
                     construct: "GPU solver production metric gate".to_string(),
                     context: format!(
-                        "accepted GPU solver evidence requires the v0.9 production \
+                        "accepted GPU solver evidence requires the production \
                          capability/status contract, got evidence={} capabilities={} statuses={}",
                         self.accepted_gpu_candidate_evidence_consumed,
                         self.accepted_solver_required_capabilities_consumed,
@@ -1130,7 +1130,7 @@ impl GpuSolverProductionTrace {
         Ok(())
     }
 
-    /// Require that this trace is eligible for v0.9 production solver metrics.
+    /// Require that this trace is eligible for production solver metrics.
     ///
     /// This is an accepted-path containment gate, not a release-close claim:
     /// the CPU semantic-oracle facade may still exist for fixtures, but it
@@ -1308,16 +1308,18 @@ impl GpuSolverProductionTrace {
                     .checked_mul(2)
                     .ok_or_else(|| XlogError::UnsupportedEpistemicConstruct {
                         construct: "GPU solver production metric gate".to_string(),
-                        context: "MaxSAT candidate data-plane H2D call budget overflowed"
-                            .to_string(),
+                        context:
+                            "MaxSAT candidate data-plane host-to-device call budget overflowed"
+                                .to_string(),
                     })?;
                 let max_launch_metadata_htod_calls = self
                     .gpu_maxsat_candidate_encodes
                     .checked_mul(3)
                     .ok_or_else(|| XlogError::UnsupportedEpistemicConstruct {
                         construct: "GPU solver production metric gate".to_string(),
-                        context: "MaxSAT candidate launch-metadata H2D call budget overflowed"
-                            .to_string(),
+                        context:
+                            "MaxSAT candidate launch-metadata host-to-device call budget overflowed"
+                                .to_string(),
                     })?;
                 if self.gpu_maxsat_candidate_cnf_data_plane_htod_calls > max_data_plane_htod_calls
                     || self.gpu_maxsat_candidate_cnf_launch_metadata_htod_calls
@@ -1326,7 +1328,7 @@ impl GpuSolverProductionTrace {
                     return Err(XlogError::UnsupportedEpistemicConstruct {
                         construct: "GPU solver production metric gate".to_string(),
                         context: format!(
-                            "encoded MaxSAT candidate CNF uploads exceeded bounded H2D call budget, \
+                            "encoded MaxSAT candidate CNF uploads exceeded bounded host-to-device call budget, \
                              encodes={} data_plane_calls={}/{} launch_metadata_calls={}/{}",
                             self.gpu_maxsat_candidate_encodes,
                             self.gpu_maxsat_candidate_cnf_data_plane_htod_calls,
@@ -1343,7 +1345,7 @@ impl GpuSolverProductionTrace {
                     return Err(XlogError::UnsupportedEpistemicConstruct {
                         construct: "GPU solver production metric gate".to_string(),
                         context: format!(
-                            "encoded MaxSAT candidate CNF uploads must not perform data-plane D2H \
+                            "encoded MaxSAT candidate CNF uploads must not perform data-plane device-to-host \
                              transfers, got calls={} bytes={}",
                             self.gpu_maxsat_candidate_cnf_data_plane_dtoh_calls,
                             self.gpu_maxsat_candidate_cnf_data_plane_dtoh_bytes
@@ -2435,7 +2437,7 @@ impl GpuSolverProductionAdapter {
     ///
     /// The batch evidence must prove every split component ran through the
     /// single-plan GPU runtime path with zero aggregate CPU recomposition,
-    /// candidate/world-view fallback, tracked hot-path D2H, and per-candidate
+    /// candidate/world-view fallback, tracked hot-path device-to-host transfer, and per-candidate
     /// host round trips, plus aggregate CUDA-event timing.
     pub fn solve_assumption_lifecycle_with_gpu_batch_execution_result(
         &mut self,
@@ -5124,7 +5126,7 @@ fn require_accepted_gpu_solver_evidence(
         return Err(XlogError::UnsupportedEpistemicConstruct {
             construct: "accepted GPU solver candidate evidence".to_string(),
             context: format!(
-                "solver evidence requires the v0.9 production capability/status contract, got \
+                "solver evidence requires the production capability/status contract, got \
                  capabilities={} statuses={}",
                 result.prepared.preflight.solver_required_capability_count,
                 result.prepared.preflight.solver_required_status_count

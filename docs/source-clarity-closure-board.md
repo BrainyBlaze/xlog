@@ -692,7 +692,7 @@ Hardware cache terminology such as `L1` and `L2` is allowed when it refers to GP
 | `crates/xlog-solve/src/gpu_cnf.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-solve/src/instance.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-solve/src/lib.rs` | 0 | 0 | true |  |  |
-| `crates/xlog-solve/src/production.rs` | 5 | 1 | false | D2H(3), G91(2) | D2H(1) |
+| `crates/xlog-solve/src/production.rs` | 11 | 8 | true | Expanded G91, D2H, H2D, and release-version comments to Gelfond-1991 compatibility, device-to-host/host-to-device, and production metric wording. | Expanded D2H, H2D, and release-version assertion text to production contract wording. |
 | `crates/xlog-solve/src/proof.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-solve/src/service.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-solve/src/solver.rs` | 0 | 0 | true |  |  |
