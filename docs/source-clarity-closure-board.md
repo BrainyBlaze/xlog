@@ -1046,7 +1046,7 @@ Hardware cache terminology such as `L1` and `L2` is allowed when it refers to GP
 | `examples/epistemic/44a-single-modal-truth-table-g91-possible-present.xlog` | 0 | 0 | true |  |  |
 | `examples/epistemic/README.md` | 120 | 0 | true | release/task labels, historical bundle/case codes, emphasis shorthand, and bare example references(120); G91, FAEEL, EIR, WFS, S5, EDB, GPU, and CPU retained as allowed XLOG/domain terminology |  |
 | `examples/neural/01_minimal/dataset.json` | 0 | 0 | true |  |  |
-| `examples/neural/01_minimal/minimal.xlog` | 0 | 4 | false |  | D1(2), D2(2) |
+| `examples/neural/01_minimal/minimal.xlog` | 4 | 4 | true | digit variable shorthand(4) | digit variable shorthand(4) |
 | `examples/neural/01_minimal/train.py` | 4 | 4 | false | D1(2), D2(2) | D1(2), D2(2) |
 | `examples/neural/02_coins/README.md` | 0 | 0 | true |  |  |
 | `examples/neural/02_coins/dataset.json` | 0 | 0 | true |  |  |

@@ -33,9 +33,12 @@ nn(mnist_net, [X], Y, [0,1,2,3,4,5,6,7,8,9]) :: digit(X, Y).
 // The sum of two digits at indices X and Y is Z.
 //
 // This uses probabilistic inference:
-// P(addition(0, 1, 7)) = sum over all (d1, d2) where d1 + d2 = 7 of:
-//                        P(digit(0, d1)) * P(digit(1, d2))
+// P(addition(0, 1, 7)) = sum over all digit pairs whose sum is 7 of:
+//                        P(digit(0, left_digit)) * P(digit(1, right_digit))
 //
-// For example, with d1=3, d2=4:
+// For example, with left_digit=3 and right_digit=4:
 // P(addition(0, 1, 7)) includes P(digit(0, 3)) * P(digit(1, 4))
-addition(X, Y, Z) :- digit(X, D1), digit(Y, D2), Z is D1 + D2.
+addition(X, Y, Z) :-
+    digit(X, LeftDigit),
+    digit(Y, RightDigit),
+    Z is LeftDigit + RightDigit.
