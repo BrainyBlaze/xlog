@@ -3,8 +3,8 @@
 Scope: Git-tracked source and documentation files only. Superpowers docs, plan files, evidence directories, generated artifacts, result/output directories, build output, and other worktrees are excluded.
 
 Scanned files: 1430
-Unresolved files: 300
-Comment/prose artifact occurrences: 1877
+Unresolved files: 299
+Comment/prose artifact occurrences: 1871
 Code/identifier artifact occurrences: 752
 
 Resolved means this board found no remaining opaque task/milestone labels or external consumer names in the eligible portions of that file.
@@ -23,6 +23,8 @@ Technical host-transfer terminology such as `D2H`, `DTOH`, and `H2D` is allowed 
 | `M8 Phase 1` | native bounded exact-induction engine |
 | `C7` | compiled epistemic execution-plan/EIR JSON dump |
 | `v085` | legacy v0.8.5 language milestone/examples |
+| `W2.5` | WCOJ cost-model default flip to the cardinality model |
+| `G38` | GPU skew-classifier integration path |
 | task/milestone labels such as `W2.5`, `G39`, `M37-A`, `S1e`, `FRS-042`, `P0.2`, `D3` | replace with the concrete feature, gate, bug, or milestone meaning recovered from plans, boards, history, or code |
 
 ## File Board
@@ -99,7 +101,7 @@ Technical host-transfer terminology such as `D2H`, `DTOH`, and `H2D` is allowed 
 | `crates/xlog-cli/tests/prob_cli_tests.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-cli/tests/run_cli_tests.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-core/Cargo.toml` | 0 | 0 | true |  |  |
-| `crates/xlog-core/src/config.rs` | 6 | 0 | false | D2H(3), W2.5(2), G38(1) |  |
+| `crates/xlog-core/src/config.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-core/src/error.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-core/src/lib.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-core/src/symbol.rs` | 0 | 0 | true |  |  |
