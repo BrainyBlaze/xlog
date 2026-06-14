@@ -1,9 +1,9 @@
 //! CUDA Graph RAII helpers for production graph capture/replay.
 //!
-//! This module intentionally stays close to the CUDA driver API. W66's CSM
-//! path needs explicit graph lifetime ownership and node inventory before it can
-//! safely update graph-exec parameters for runtime pointers and capacity
-//! classes.
+//! This module intentionally stays close to the CUDA driver API. The bounded
+//! CSM CUDA Graph path needs explicit graph lifetime ownership and node
+//! inventory before it can safely update graph-exec parameters for runtime
+//! pointers and capacity classes.
 
 use std::{mem, ptr};
 
@@ -201,8 +201,8 @@ impl CapturedCudaGraph {
         }
     }
 
-    /// Number of nodes in the captured graph. Used by W66 cache-key and node
-    /// inventory certs to prove topology stability.
+    /// Number of nodes in the captured graph. Used by bounded CSM CUDA Graph
+    /// cache-key and node-inventory certs to prove topology stability.
     pub fn node_count(&self) -> Result<usize> {
         let mut count = 0usize;
         unsafe {
