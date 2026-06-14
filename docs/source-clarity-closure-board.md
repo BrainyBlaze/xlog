@@ -748,7 +748,7 @@ Hardware cache terminology such as `L1` and `L2` is allowed when it refers to GP
 | `docs/reports/2026-06-02-epistemic-final-closure-record.md` | 6 | 1 | true | release/branch labels(2), status labels(2), Gelfond 1991 shorthand(1), interior-negation item code(1) | filename artifact(1) |
 | `docs/v065-closure-board.md` | 228 | 0 | true | legacy closure-board task/release/provenance codes(228) | Excluded from rewrite as a historical closure/evidence artifact; task scope excludes plans/evidence artifacts. |
 | `docs/wcoj-architecture-guide.md` | 73 | 0 | true | integration phase labels(14), aggregate-fusion slice labels(19), goal/work-package labels(26), recursive-contract labels(5), WCOJ task labels(6), approval/profiler/authorization labels(3) |  |
-| `docs/wcoj-user-guide.md` | 2 | 0 | false | G38(1), G39(1) |  |
+| `docs/wcoj-user-guide.md` | 10 | 1 | true | goal/work-package labels(5), integration phase labels(3), skew-classifier path labels(2) | flowchart integration phase label(1) |
 | `docs/whitepaper/Makefile` | 0 | 0 | true |  |  |
 | `docs/whitepaper/README.md` | 0 | 0 | true |  |  |
 | `docs/whitepaper/examples/01_hello.xlog` | 0 | 0 | true |  |  |
