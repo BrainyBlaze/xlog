@@ -1,4 +1,4 @@
-"""Tests for P2a term embedding registration and forward_embedding API."""
+"""Tests for term embedding registration and forward_embedding API."""
 
 import pytest
 import torch
@@ -6,11 +6,11 @@ import pyxlog
 
 
 EMBEDDING_SOURCE = """
-    nn(entity_embed, [X], E) :: embed(X, E).
+    nn(entity_embed, [Entity], EmbeddingVector) :: embed(Entity, EmbeddingVector).
 """
 
 CLASSIFICATION_SOURCE = """
-    nn(classifier, [X], Y, [0, 1, 2]) :: classify(X, Y).
+    nn(classifier, [Item], ClassLabel, [0, 1, 2]) :: classify(Item, ClassLabel).
 """
 
 
@@ -20,8 +20,8 @@ class TestRegisterEmbeddingNnEmbedding:
     def test_forward_embedding_shape_and_values(self):
         program = pyxlog.Program.compile(EMBEDDING_SOURCE)
 
-        vocab_size, dim = 10, 8
-        embedding = torch.nn.Embedding(vocab_size, dim)
+        vocabulary_size, embedding_dimension = 10, 8
+        embedding = torch.nn.Embedding(vocabulary_size, embedding_dimension)
 
         program.register_embedding("entity_embed", embedding, trainable=True)
 
@@ -29,7 +29,7 @@ class TestRegisterEmbeddingNnEmbedding:
         result = program.forward_embedding("entity_embed", [0, 3, 7])
 
         assert isinstance(result, torch.Tensor)
-        assert result.shape == (3, dim)
+        assert result.shape == (3, embedding_dimension)
 
         # Verify values match direct nn.Embedding call
         expected = embedding(torch.tensor([0, 3, 7]))
@@ -62,17 +62,17 @@ class TestRegisterEmbeddingFrozenTensor:
 class TestCrossRegistrationErrors:
     """Test 3: cross-registration errors in both directions."""
 
-    def test_embedding_decl_reject_register_network(self):
+    def test_embedding_declaration_reject_register_network(self):
         """Embedding declaration + register_network -> error."""
         program = pyxlog.Program.compile(EMBEDDING_SOURCE)
 
-        net = torch.nn.Embedding(10, 8)
-        optimizer = torch.optim.Adam(net.parameters())
+        embedding_model = torch.nn.Embedding(10, 8)
+        optimizer = torch.optim.Adam(embedding_model.parameters())
 
         with pytest.raises(ValueError, match="is an embedding.*register_embedding"):
-            program.register_network("entity_embed", net, optimizer)
+            program.register_network("entity_embed", embedding_model, optimizer)
 
-    def test_classification_decl_reject_register_embedding(self):
+    def test_classification_declaration_reject_register_embedding(self):
         """Classification declaration + register_embedding -> error."""
         program = pyxlog.Program.compile(CLASSIFICATION_SOURCE)
 
@@ -125,7 +125,7 @@ class TestFrozenOutputNonTrainable:
         assert not result.requires_grad
 
     def test_requires_grad_tensor_detached_on_register(self):
-        """Raw tensor with requires_grad=True is detached — output has no grad."""
+        """Raw tensor with requires_grad=True is detached; output has no gradient."""
         program = pyxlog.Program.compile(EMBEDDING_SOURCE)
 
         weights = torch.randn(10, 8, requires_grad=True)
@@ -142,6 +142,6 @@ class TestMixedFormRejection:
         """Same network name as both embedding and classification -> compile error."""
         with pytest.raises(ValueError, match="declared as both classification and embedding"):
             pyxlog.Program.compile("""
-                nn(shared, [X], E) :: embed(X, E).
-                nn(shared, [X], Y, [0, 1]) :: classify(X, Y).
+                nn(shared, [Entity], EmbeddingVector) :: embed(Entity, EmbeddingVector).
+                nn(shared, [Item], ClassLabel, [0, 1]) :: classify(Item, ClassLabel).
             """)

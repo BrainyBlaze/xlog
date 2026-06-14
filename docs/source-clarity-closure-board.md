@@ -1416,7 +1416,7 @@ Hardware cache terminology such as `L1` and `L2` is allowed when it refers to GP
 | `python/tests/test_circuit_cache.py` | 1 | 35 | true | Decision-DNNF compiler shorthand(1) | shorthand digit, sum, class-count, input-dimension, layer, loss, and query names(35) |
 | `python/tests/test_coins.py` | 0 | 0 | true |  |  |
 | `python/tests/test_dataset_manifest.py` | 0 | 0 | true |  |  |
-| `python/tests/test_embeddings.py` | 0 | 1 | false |  | P2a(1) |
+| `python/tests/test_embeddings.py` | 2 | 26 | true | task label and gradient shorthand(2) | shorthand embedded variables, vocabulary, dimension, declaration, network, and API-adjacent names(26) |
 | `python/tests/test_example_02_coins.py` | 0 | 0 | true |  |  |
 | `python/tests/test_example_03_mnist_multidigit.py` | 0 | 0 | true |  |  |
 | `python/tests/test_example_04_hwf.py` | 0 | 0 | true |  |  |
