@@ -387,7 +387,7 @@ Hardware cache terminology such as `L1` and `L2` is allowed when it refers to GP
 | `crates/xlog-gpu/tests/v085_lists.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-gpu/tests/v085_meta.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-induce/Cargo.toml` | 0 | 0 | true |  |  |
-| `crates/xlog-induce/src/index.rs` | 1 | 0 | false | M8(1) |  |
+| `crates/xlog-induce/src/index.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-induce/src/lib.rs` | 3 | 1 | false | D2H(2), M8(1) | D2H(1) |
 | `crates/xlog-induce/src/provenance.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-induce/src/reduce.rs` | 0 | 0 | true |  |  |
