@@ -88,6 +88,33 @@ deleted + confirmed.
   dense bitvector remains the only factorized win and sparse stays on the legacy path
   (the honest Phase B boundary). No production wiring without a PASS.
 
-## 6. Evidence
+## 6. Evidence — PASS (2026-06-14)
 
-(to be filled after the RunPod run)
+RunPod RTX A4000, HEAD `1ff552dc`, evidence `docs/evidence/2026-06-14-sparse-domain-spike/`.
+Hub-blowup fixture (512 sources × 64 hubs × 512 sink = 16.78M witnesses → 262,144 distinct
+novel over a ~2²² domain; dense bitvector would need 2⁴⁴/8 bytes — infeasible):
+
+| | wall-clock | peak | rows |
+|---|---|---|---|
+| sparse hash-set | **6.7 ms** | **418.8 MiB** | 262,144 |
+| legacy hash_join+project+dedup | 123.6 ms | 836.8 MiB | 262,144 |
+| ratio | **0.054×** (18× faster) | **2.00× reduction** | parity ✓ |
+
+PASS on both gate bars (peak < legacy at target ≥2×; wall-clock ≤1.2×). The over-provisioned
+table (2²⁵ slots ≈ 428 MiB) still beats legacy 2× on peak because legacy materializes the
+16.78M witness rows **plus** the join hash table **plus** dedup sort scratch (together
+> the over-sized table), and the hash set does no sort. The earlier worry that
+over-provisioning would lose on peak was refuted by measurement.
+
+Local parity: large-id (2²⁰, over the dense 2¹⁶ cap), empty/saturated, and sparse-vs-dense
+cross-parity all green.
+
+**Scope / honesty**: this is a single-step spike (R empty, one semi-naive iteration) measured
+in isolation — the sparse analogue of the dense S3 spike, NOT production integration. The
+table is sized to a conservative `2×(|R|+candidate work)` upper bound with a fail-closed
+guard; a production sparse path would want distinct-count-aware sizing (2-pass or growth) so
+the table does not exceed budget on workloads where `total_work` is enormous. **Decision**:
+spike PASS → sparse factorization is viable; branch preserved unmerged as spike evidence.
+Next phase (separate plan): production integration — a domain-based router selecting
+dense-bitvector vs sparse-hash-set vs legacy inside `try_dispatch_factorized_delta`, then a
+full-fixpoint S4-equivalent bench before any merge.
