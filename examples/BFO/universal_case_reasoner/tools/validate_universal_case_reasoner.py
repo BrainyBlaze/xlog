@@ -20,7 +20,6 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_OUTPUT = ROOT / "validation_summary.json"
-EXPECTED_BRANCH = "feat/bfo-universal-case-reasoner"
 EXPECTED_HF_SOURCE_CONTRACTS = {
     "clinical_deterioration": [
         {
@@ -1741,7 +1740,7 @@ def _bundle_reuse_passed(production_transfer: dict[str, Any]) -> bool:
         and all(int(runtime_session_transfer.get(key, -1)) == 0 for key in ["dtoh_calls", "htod_calls", "dtoh_bytes", "htod_bytes"])
         and language_contract.get("status") == "PASS"
         and int(language_contract.get("feature_count", 0)) >= 10
-        and "examples/language-completeness/showcase" in reused_language_contract
+        and "language completeness showcase" in reused_language_contract
         and runtime_optimizer.get("status") == "PASS"
         and runtime_optimizer.get("apply_relation_delta_batch") is True
         and int(cache_stats.get("builds", 0)) >= 1
@@ -2357,7 +2356,6 @@ def _summary(args: argparse.Namespace, elapsed_sec: float) -> dict[str, Any]:
         "strict": bool(args.strict),
         "gpu_required": bool(args.gpu_required),
         "branch": _run_git(["branch", "--show-current"]),
-        "expected_branch": EXPECTED_BRANCH,
         "git_sha": _run_git(["rev-parse", "HEAD"]),
         "commands": [
             {

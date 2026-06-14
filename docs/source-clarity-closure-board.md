@@ -829,7 +829,7 @@ Hardware cache terminology such as `L1` and `L2` is allowed when it refers to GP
 | `examples/BFO/universal_case_reasoner/tools/run_neural_smoke.py` | 0 | 0 | true |  |  |
 | `examples/BFO/universal_case_reasoner/tools/run_production_transfer.py` | 0 | 16 | true |  | release-line labels(10), differentiable inductive logic gate labels(6) |
 | `examples/BFO/universal_case_reasoner/tools/run_runtime_contract_smoke.py` | 0 | 0 | true |  |  |
-| `examples/BFO/universal_case_reasoner/tools/validate_universal_case_reasoner.py` | 0 | 26 | false |  | v086(7), v080(6), P0(6), v085(5), D2H(2) |
+| `examples/BFO/universal_case_reasoner/tools/validate_universal_case_reasoner.py` | 0 | 28 | true |  | priority schema/release-line/transfer shorthand labels(26), stale branch label(1), stale language showcase path(1) |
 | `examples/BFO/universal_case_reasoner/validate.sh` | 0 | 0 | true |  |  |
 | `examples/BFO/universal_case_reasoner/validation_summary.json` | 0 | 17 | false |  | P0(5), v080(4), v085(4), v086(2), D2H(2) |
 | `examples/BFO/universal_case_reasoner/xlog_issue_ledger.json` | 0 | 3 | false |  | D2H(3) |
