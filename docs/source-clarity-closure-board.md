@@ -1412,7 +1412,7 @@ Hardware cache terminology such as `L1` and `L2` is allowed when it refers to GP
 | `python/tests/test_arrow_device_import.py` | 0 | 0 | true |  |  |
 | `python/tests/test_backward.py` | 0 | 0 | true |  |  |
 | `python/tests/test_batch_eval.py` | 1 | 33 | true | shorthand sum result in comment(1) | shorthand digit, token, value, tag, number, and sum variables(33) |
-| `python/tests/test_batched_forward.py` | 0 | 4 | false |  | D1(2), D2(2) |
+| `python/tests/test_batched_forward.py` | 0 | 14 | true |  | shorthand digit, sum, output-dimension, optimizer, and layer names(14) |
 | `python/tests/test_circuit_cache.py` | 0 | 5 | false |  | D1(2), D2(2), D4(1) |
 | `python/tests/test_coins.py` | 0 | 0 | true |  |  |
 | `python/tests/test_dataset_manifest.py` | 0 | 0 | true |  |  |
