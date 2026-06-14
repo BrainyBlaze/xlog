@@ -57,12 +57,12 @@ impl CudaKernelProvider {
     /// cap. Forbids the single key `(u32::MAX, u32::MAX)` (its packed
     /// `key+1` overflows the empty sentinel) — fails closed if present.
     ///
-    /// Returns `Ok(None)` when the conservative hash-table capacity
-    /// (`2×(|R| + candidate work)`, rounded to a power of two) would
-    /// exceed `max_table_bytes` — a clean route-decline signal so the
-    /// caller can fall back to the legacy path rather than blow the
-    /// memory budget. `max_table_bytes == 0` disables the guard (used
-    /// by the standalone spike/parity tests).
+    /// Returns `Ok(None)` when the distinct-sized hash table
+    /// (`2×(|R| + distinct-candidate estimate)`, power of two) would
+    /// exceed `max_table_bytes`, or when an insert overflows an
+    /// under-sized table — both are clean route-declines so the caller
+    /// falls back to the legacy path. `max_table_bytes == 0` disables
+    /// the budget guard (standalone spike/parity tests).
     pub fn fj_delta_sparse_novel_u32_recorded(
         &self,
         delta: &CudaBuffer,
