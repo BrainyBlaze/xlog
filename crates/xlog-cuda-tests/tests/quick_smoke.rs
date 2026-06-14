@@ -5,12 +5,12 @@
 //! Expected runtime: sub-second to seconds (GPU-dependent)
 //!
 //! This runs a subset of key tests for quick validation:
-//! - c01_toolchain: infrastructure check
-//! - c02_launch_config: basic operations
-//! - c04_address_space: type coverage
-//! - c08_synchronization: correctness
-//! - c11_control_flow: filter operations
-//! - c15_determinism: reproducibility
+//! - toolchain/PTX/SASS validation: infrastructure check
+//! - launch-configuration validation: basic operations
+//! - address-space validation: type coverage
+//! - synchronization and ordering validation: correctness
+//! - control-flow and predication validation: filter operations
+//! - determinism validation: reproducibility
 
 use xlog_cuda_tests::categories;
 use xlog_cuda_tests::harness::TestContext;
@@ -44,22 +44,22 @@ fn run_quick_smoke() {
     let mut results = CertificationResults::new();
 
     // Run subset of key categories for quick validation
-    println!("Running C01: Toolchain (infrastructure check)...");
+    println!("Running toolchain/PTX/SASS validation (infrastructure check)...");
     results.add_category(categories::c01_toolchain::run_all(&ctx));
 
-    println!("Running C02: Launch Config (basic operations)...");
+    println!("Running launch-configuration validation (basic operations)...");
     results.add_category(categories::c02_launch_config::run_all(&ctx));
 
-    println!("Running C04: Address Space (type coverage)...");
+    println!("Running address-space validation (type coverage)...");
     results.add_category(categories::c04_address_space::run_all(&ctx));
 
-    println!("Running C08: Synchronization (correctness)...");
+    println!("Running synchronization and ordering validation (correctness)...");
     results.add_category(categories::c08_synchronization::run_all(&ctx));
 
-    println!("Running C11: Control Flow (filter operations)...");
+    println!("Running control-flow and predication validation (filter operations)...");
     results.add_category(categories::c11_control_flow::run_all(&ctx));
 
-    println!("Running C15: Determinism (reproducibility)...");
+    println!("Running determinism validation (reproducibility)...");
     results.add_category(categories::c15_determinism::run_all(&ctx));
 
     // Finalize and print results
