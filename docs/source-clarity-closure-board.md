@@ -500,7 +500,7 @@ Hardware cache terminology such as `L1` and `L2` is allowed when it refers to GP
 | `crates/xlog-logic/src/resolver.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-logic/src/stratify.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-logic/src/typeinfer.rs` | 0 | 0 | true |  |  |
-| `crates/xlog-logic/src/wcoj_var_ordering.rs` | 17 | 0 | false | W2.1(9), W2.6(6), W2.2(1), W2.4(1) |  |
+| `crates/xlog-logic/src/wcoj_var_ordering.rs` | 0 | 0 | true | - | Replaced variable-ordering task labels with leader-cardinality, heat-aware, join-result feedback, default dispatch, and canonical permutation wording. |
 | `crates/xlog-logic/tests/differentiable_proof_trace.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-logic/tests/function_integration_tests.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-logic/tests/function_parse_tests.rs` | 0 | 0 | true |  |  |
