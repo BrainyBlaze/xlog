@@ -15,6 +15,26 @@ pub(super) struct WcojDispatchCtx<'a> {
 pub(super) trait WcojCostModel: Send + Sync {
     fn should_dispatch_triangle(&self, ctx: &WcojDispatchCtx) -> bool;
     fn should_dispatch_4cycle(&self, ctx: &WcojDispatchCtx) -> bool;
+
+    /// Fail-OPEN loss-region veto for the general factorized routes
+    /// (D1 aggregate-fused WCOJ over a triangle; D2 Free Join). Returns
+    /// `true` ONLY when the model has full cardinality stats for every
+    /// slot relation AND the largest one is below the WCOJ-worthwhile
+    /// threshold — i.e. the join is provably small, no intermediate can
+    /// blow up, and the binary fallback wins (the measured 1.7–2.0×
+    /// cost-of-generality region for Free Join, and the small-triangle
+    /// region the base triangle cost model already declines).
+    ///
+    /// Deliberately conservative: stats absent for ANY slot, or ANY slot
+    /// large → `false` (no veto). This NEVER vetoes a case with a large
+    /// input (where factorized can win on a large avoided intermediate)
+    /// and NEVER vetoes when stats are unavailable (e.g. recursive deltas
+    /// on early iterations) — so every measured D1/D2 gate win is
+    /// preserved exactly; the veto only removes provably-small losses.
+    fn factorized_loss_veto(&self, ctx: &WcojDispatchCtx) -> bool {
+        let _ = ctx;
+        false
+    }
 }
 
 pub(super) const MIN_CARDINALITY_BINARY_INTERMEDIATE: u64 = 4_096;
@@ -94,6 +114,20 @@ impl WcojCostModel for CardinalityAwareCostModel {
             ctx.stats
                 .estimate_join_cardinality(ctx.slot_rels[0], ctx.slot_rels[1], &[1], &[0]);
         self.decide_from_cardinality(binary_est)
+    }
+
+    fn factorized_loss_veto(&self, ctx: &WcojDispatchCtx) -> bool {
+        // Fail-open: need every slot's cardinality to make any claim.
+        let cards = match self.populated_cards(ctx) {
+            Some(c) => c,
+            None => return false,
+        };
+        // Veto only when the LARGEST input is below the WCOJ-worthwhile
+        // threshold: then every join intermediate is bounded small, the
+        // binary plan is cheap, and the factorized route's overhead is
+        // not justified. Any large input → no veto (factorized may win
+        // on the avoided large intermediate).
+        cards.iter().copied().max().unwrap_or(0) < self.min_binary_intermediate
     }
 }
 
@@ -238,6 +272,82 @@ mod tests {
                 "bare default must use CardinalityAwareCostModel"
             );
         });
+    }
+
+    #[test]
+    fn factorized_veto_fires_when_all_inputs_small() {
+        // All slot cardinalities below the WCOJ-worthwhile threshold →
+        // provably-small join → veto (use the binary fallback).
+        let stats = stats_with_cards(&[50, 50, 50]);
+        let slots = [RelId(0), RelId(1), RelId(2)];
+        let ctx = triangle_ctx(&stats, &slots);
+        let m = CardinalityAwareCostModel::default();
+        assert!(m.factorized_loss_veto(&ctx));
+    }
+
+    #[test]
+    fn factorized_veto_declines_when_any_input_large() {
+        // A large input means an intermediate could blow up → factorized
+        // may win → never veto (fail-open on the win side).
+        let stats = stats_with_cards(&[50, MIN_CARDINALITY_BINARY_INTERMEDIATE, 50]);
+        let slots = [RelId(0), RelId(1), RelId(2)];
+        let ctx = triangle_ctx(&stats, &slots);
+        let m = CardinalityAwareCostModel::default();
+        assert!(!m.factorized_loss_veto(&ctx));
+    }
+
+    #[test]
+    fn factorized_veto_fail_open_when_any_stat_missing() {
+        // Missing cardinality for any slot → cannot prove small → no veto
+        // (preserves measured wins where stats are unavailable, e.g.
+        // recursive deltas on early iterations).
+        let mut stats = StatsManager::new();
+        stats.register_relation(RelId(0));
+        stats.update_cardinality(RelId(0), 50);
+        stats.register_relation(RelId(1));
+        stats.update_cardinality(RelId(1), 50);
+        // RelId(2) has no cardinality.
+        let slots = [RelId(0), RelId(1), RelId(2)];
+        let ctx = triangle_ctx(&stats, &slots);
+        let m = CardinalityAwareCostModel::default();
+        assert!(!m.factorized_loss_veto(&ctx));
+    }
+
+    #[test]
+    fn factorized_veto_general_arity_free_join_shape() {
+        // The veto is arity-agnostic (Free Join bodies are >=3 inputs).
+        let stats = stats_with_cards(&[10, 10, 10, 10, 10]);
+        let slots = [RelId(0), RelId(1), RelId(2), RelId(3), RelId(4)];
+        let ctx = WcojDispatchCtx {
+            stats: &stats,
+            launch_stream: StreamId::DEFAULT,
+            width: WcojKeyWidth::FourByte,
+            slot_rels: &slots,
+        };
+        let m = CardinalityAwareCostModel::default();
+        assert!(m.factorized_loss_veto(&ctx), "all-small >=3-input body must veto");
+
+        let stats_big = stats_with_cards(&[10, 10, 2_000_000, 10, 10]);
+        let ctx_big = WcojDispatchCtx {
+            stats: &stats_big,
+            launch_stream: StreamId::DEFAULT,
+            width: WcojKeyWidth::FourByte,
+            slot_rels: &slots,
+        };
+        assert!(
+            !m.factorized_loss_veto(&ctx_big),
+            "a large input must NOT veto (factorized may win)"
+        );
+    }
+
+    #[test]
+    fn factorized_veto_skew_classifier_never_vetoes() {
+        // The stub skew model must never veto (default trait impl → false).
+        let stats = stats_with_cards(&[10, 10, 10]);
+        let slots = [RelId(0), RelId(1), RelId(2)];
+        let ctx = triangle_ctx(&stats, &slots);
+        let m = SkewClassifierCostModel;
+        assert!(!m.factorized_loss_veto(&ctx));
     }
 
     #[test]

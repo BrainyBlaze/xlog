@@ -1810,6 +1810,36 @@ impl Executor {
         if !all_u32 && !all_u64 {
             return Ok(None);
         }
+        // Fail-open cost-model loss veto: decline Free Join to the binary
+        // fallback only when the cost model has full stats AND the join
+        // is provably small (largest input below the WCOJ-worthwhile
+        // threshold), the measured 1.7–2.0× cost-of-generality region.
+        // Stats absent / any large input → FJ proceeds (every measured
+        // win preserved). Inputs are all Scans (checked above).
+        {
+            let slot_rels: Vec<RelId> = inputs
+                .iter()
+                .filter_map(|i| match i {
+                    RirNode::Scan { rel } => Some(*rel),
+                    _ => None,
+                })
+                .collect();
+            let model = super::wcoj_cost_model::build_wcoj_cost_model(&self.config);
+            let width = if all_u32 {
+                WcojKeyWidth::FourByte
+            } else {
+                WcojKeyWidth::EightByte
+            };
+            let ctx = super::wcoj_cost_model::WcojDispatchCtx {
+                stats: &self.stats,
+                launch_stream: StreamId::DEFAULT,
+                width,
+                slot_rels: &slot_rels,
+            };
+            if model.factorized_loss_veto(&ctx) {
+                return Ok(None);
+            }
+        }
         // Dense variable ids: remap slot_vars' class ids to 0..n.
         let mut class_to_var: Vec<u32> = Vec::new();
         let mut dense = |class: u32| -> usize {
@@ -2293,6 +2323,27 @@ impl Executor {
             }
             _ => return Ok(None),
         };
+        // Fail-open cost-model loss veto: decline the FUSED triangle
+        // aggregate to the unfused materialize+groupby only when the cost
+        // model has stats AND the triangle is provably small — the
+        // small-case the base triangle cost model already declines, which
+        // the fused path otherwise bypasses. Fail-open: stats absent / any
+        // large input → fuse (every measured S1 win preserved). The rarer
+        // fused 4-cycle/K-clique sub-paths inherit their base shapes'
+        // gating posture and are not separately vetoed here.
+        {
+            let slot_rels = [matched.rel_xy, matched.rel_yz, matched.rel_xz];
+            let model = super::wcoj_cost_model::build_wcoj_cost_model(&self.config);
+            let ctx = super::wcoj_cost_model::WcojDispatchCtx {
+                stats: &self.stats,
+                launch_stream: StreamId::DEFAULT,
+                width,
+                slot_rels: &slot_rels,
+            };
+            if model.factorized_loss_veto(&ctx) {
+                return Ok(None);
+            }
+        }
         // Sum/Min/Max are arithmetic: on the 4-byte path the columns
         // supplying the value must be plain U32 (Symbol ids are not
         // summable/orderable data — and the unfused groupby rejects Symbol
