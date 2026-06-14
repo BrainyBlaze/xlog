@@ -107,10 +107,10 @@ fn first_eir_epistemic(src: &str) -> (EirEpistemicOp, bool, String) {
     panic!("no epistemic literal in EIR for {src:?}");
 }
 
-/// v0.9.2 ITEM C: a bare modal CHAIN (`know possible p`) is NOT rejected — it
-/// collapses via the KD45/S5 equivalence to its innermost (atom-adjacent)
-/// operator and normalizes into an ordinary single-level epistemic literal in
-/// the EIR. `know possible edge` -> `possible edge`.
+/// A bare modal CHAIN (`know possible p`) is NOT rejected — it collapses via
+/// the KD45/S5 equivalence to its innermost (atom-adjacent) operator and
+/// normalizes into an ordinary single-level epistemic literal in the EIR.
+/// `know possible edge` -> `possible edge`.
 #[test]
 fn nested_epistemic_chain_collapses_to_inner_operator_in_eir() {
     assert_eq!(

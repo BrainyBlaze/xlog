@@ -532,7 +532,7 @@ Hardware cache terminology such as `L1` and `L2` is allowed when it refers to GP
 | `crates/xlog-logic/tests/optimizer_real_world.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-logic/tests/parse_neural.rs` | 0 | 0 | true | - | Replaced terse neural-addition digit variables with `LeftDigit` and `RightDigit` in the parser fixture. |
 | `crates/xlog-logic/tests/symbol_integration_test.rs` | 0 | 0 | true |  |  |
-| `crates/xlog-logic/tests/test_epistemic_eir.rs` | 1 | 1 | false | S5(1) | G91(1) |
+| `crates/xlog-logic/tests/test_epistemic_eir.rs` | 0 | 0 | true | - | S5 is modal-logic terminology and G91 is the public Gelfond-1991 compatibility mode; removed the release item label from the modal-chain comment. |
 | `crates/xlog-logic/tests/test_epistemic_examples.rs` | 0 | 1 | false |  | G91(1) |
 | `crates/xlog-logic/tests/test_epistemic_executable_plan.rs` | 2 | 3 | false | G91(2) | G91(3) |
 | `crates/xlog-logic/tests/test_epistemic_faeel.rs` | 0 | 0 | true |  |  |
