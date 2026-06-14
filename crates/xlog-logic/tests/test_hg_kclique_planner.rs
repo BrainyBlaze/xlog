@@ -17,7 +17,7 @@ struct FixtureProfile {
 }
 
 #[derive(Debug, Clone, Copy)]
-struct W52Cell {
+struct SkewedMultiwayBenchCell {
     workload: &'static str,
     size: u32,
     path: &'static str,
@@ -91,10 +91,10 @@ fn k7_k8_extension_uses_template_path_only() {
 }
 
 #[test]
-fn w52_baseline_prediction_precision_is_36_of_36() {
+fn skewed_multiway_benchmark_prediction_precision_is_36_of_36() {
     let mut correct = 0;
     let mut mismatches = Vec::new();
-    let cells = w52_cells();
+    let cells = skewed_multiway_benchmark_cells();
 
     for (idx, cell) in cells.iter().enumerate() {
         let label = format!("{}:{}:{}", cell.workload, cell.size, cell.path);
@@ -119,7 +119,7 @@ fn w52_baseline_prediction_precision_is_36_of_36() {
     assert_eq!(cells.len(), 36);
     assert!(
         correct >= 33,
-        "W5.2 prediction precision {correct}/36 below 33/36: {mismatches:?}"
+        "skewed multiway benchmark prediction precision {correct}/36 below 33/36: {mismatches:?}"
     );
     assert_eq!(
         correct, 36,
@@ -307,7 +307,7 @@ fn hash_favorable_profile(rows: u64) -> FixtureProfile {
     }
 }
 
-fn w52_cells() -> Vec<W52Cell> {
+fn skewed_multiway_benchmark_cells() -> Vec<SkewedMultiwayBenchCell> {
     const PATHS: [&str; 3] = ["run1", "run2", "run3"];
     const WORKLOADS: [(&str, [u32; 4], ShapeKind, PredictedWinner); 3] = [
         (
@@ -337,10 +337,10 @@ fn w52_cells() -> Vec<W52Cell> {
                 "4cycle" => dense_wcoj_profile(u64::from(size) * 8),
                 "5clique" => hash_favorable_profile(u64::from(size) * 64),
                 "pivot5" => hash_favorable_profile(u64::from(size) * 96),
-                _ => unreachable!("fixed W5.2 workload table"),
+                _ => unreachable!("fixed skewed multiway benchmark workload table"),
             };
             for path in PATHS {
-                cells.push(W52Cell {
+                cells.push(SkewedMultiwayBenchCell {
                     workload,
                     size,
                     path,
@@ -352,6 +352,10 @@ fn w52_cells() -> Vec<W52Cell> {
         }
     }
 
-    assert_eq!(cells.len(), 36, "W5.2 baseline evidence row count");
+    assert_eq!(
+        cells.len(),
+        36,
+        "skewed multiway benchmark baseline evidence row count"
+    );
     cells
 }

@@ -543,7 +543,7 @@ Hardware cache terminology such as `L1` and `L2` is allowed when it refers to GP
 | `crates/xlog-logic/tests/test_epistemic_split.rs` | 0 | 0 | true | - | G91 is the public Gelfond-1991 compatibility mode and S5 is modal-logic terminology; replaced split/stratified execution release, item, bundle, task, section-code, and pilot labels with behavior wording. |
 | `crates/xlog-logic/tests/test_epistemic_world_view.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-logic/tests/test_hg_eligibility_executor_context.rs` | 0 | 0 | true |  |  |
-| `crates/xlog-logic/tests/test_hg_kclique_planner.rs` | 0 | 3 | false |  | W5.2(3) |
+| `crates/xlog-logic/tests/test_hg_kclique_planner.rs` | 0 | 0 | true | - | Replaced the milestone-derived W5.2/W52 benchmark fixture names and assertion text with skewed multiway benchmark wording. |
 | `crates/xlog-logic/tests/test_hypergraph_certification.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-logic/tests/test_hypergraph_fixpoint.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-logic/tests/test_hypergraph_plan.rs` | 0 | 0 | true |  |  |
