@@ -1,4 +1,4 @@
-//! S1c — aggregate-fused WCOJ: group-by-root count over the 4-cycle shape.
+//! Aggregate-fused WCOJ: group-by-root count over the 4-cycle shape.
 //!
 //! Contract under test: `wcoj_4cycle_groupby_root_count_u32_recorded`
 //! computes, for `deg(W, count(V)) :- e1(W,X), e2(X,Y), e3(Y,Z), e4(Z,W)`
@@ -137,14 +137,22 @@ fn download_column_bytes(
     bytes
 }
 
-fn download_u32_column(memory: &Arc<GpuMemoryManager>, buffer: &CudaBuffer, col: usize) -> Vec<u32> {
+fn download_u32_column(
+    memory: &Arc<GpuMemoryManager>,
+    buffer: &CudaBuffer,
+    col: usize,
+) -> Vec<u32> {
     download_column_bytes(memory, buffer, col, 4)
         .chunks_exact(4)
         .map(|c| u32::from_le_bytes(c.try_into().unwrap()))
         .collect()
 }
 
-fn download_u64_column(memory: &Arc<GpuMemoryManager>, buffer: &CudaBuffer, col: usize) -> Vec<u64> {
+fn download_u64_column(
+    memory: &Arc<GpuMemoryManager>,
+    buffer: &CudaBuffer,
+    col: usize,
+) -> Vec<u64> {
     download_column_bytes(memory, buffer, col, 8)
         .chunks_exact(8)
         .map(|c| u64::from_le_bytes(c.try_into().unwrap()))
@@ -342,17 +350,17 @@ fn cycle4_groupby_root_count_empty_intersection_roots_are_absent() {
     assert_eq!(fused, vec![(1u32, 1u64)], "only W=1 closes a 4-cycle");
 }
 
-/// S1c measurement (gate: fused >= 3x vs unfused on the skewed 4-cycle
+/// Aggregate-fused WCOJ 4-cycle count measurement (gate: fused >= 3x vs unfused on the skewed 4-cycle
 /// fixtures). Run explicitly:
 /// `cargo test -p xlog-cuda-tests --test test_wcoj_4cycle_groupby_root_count \
 ///    --release -- --ignored --nocapture`
 /// Asserts parity; timing ratios are PRINTED and recorded as evidence, not
 /// asserted (wall-clock assertions are machine-dependent).
 #[test]
-#[ignore = "S1c measurement: run explicitly with --ignored --nocapture"]
-fn s1c_measurement_4cycle_count_fused_vs_unfused() {
+#[ignore = "aggregate-fused WCOJ count measurement: run explicitly with --ignored --nocapture"]
+fn wcoj_4cycle_groupby_root_count_measurement_fused_vs_unfused() {
     let Some(fix) = make_fixture() else {
-        eprintln!("skipping s1c_measurement: no CUDA device");
+        eprintln!("skipping aggregate-fused WCOJ count measurement: no CUDA device");
         return;
     };
 
@@ -380,12 +388,7 @@ fn s1c_measurement_4cycle_count_fused_vs_unfused() {
         }
         // Uniform background so the group column is not a single value.
         for i in 0..1000u32 {
-            let (a, b, c, d) = (
-                3_000_000 + i,
-                4_000_000 + i,
-                5_000_000 + i,
-                6_000_000 + i,
-            );
+            let (a, b, c, d) = (3_000_000 + i, 4_000_000 + i, 5_000_000 + i, 6_000_000 + i);
             e1.push((a, b));
             e2.push((b, c));
             e3.push((c, d));
@@ -400,8 +403,10 @@ fn s1c_measurement_4cycle_count_fused_vs_unfused() {
     };
 
     type Rows = Vec<(u32, u32)>;
-    let cases: Vec<(&str, (Rows, Rows, Rows, Rows))> =
-        vec![("cycle4_hub_5k", hub(5_000)), ("cycle4_hub_10k", hub(10_000))];
+    let cases: Vec<(&str, (Rows, Rows, Rows, Rows))> = vec![
+        ("cycle4_hub_5k", hub(5_000)),
+        ("cycle4_hub_10k", hub(10_000)),
+    ];
 
     const REPS: usize = 5;
     for (name, (e1_rows, e2_rows, e3_rows, e4_rows)) in &cases {
@@ -477,7 +482,7 @@ fn s1c_measurement_4cycle_count_fused_vs_unfused() {
         let med_unfused = unfused_ms[REPS / 2];
         let med_fused = fused_ms[REPS / 2];
         println!(
-            "S1c {name}: unfused median {med_unfused:.3} ms, fused median {med_fused:.3} ms, \
+            "aggregate-fused WCOJ 4-cycle count {name}: unfused median {med_unfused:.3} ms, fused median {med_fused:.3} ms, \
              speedup {:.2}x (n_e1={}, n_e2={}, n_e3={}, n_e4={})",
             med_unfused / med_fused,
             e1_rows.len(),
@@ -489,7 +494,7 @@ fn s1c_measurement_4cycle_count_fused_vs_unfused() {
 }
 
 // =====================================================================
-// S1d slice 2 — u64-key 4-cycle count fusion.
+// u64-key 4-cycle count-fusion extension.
 // =====================================================================
 
 fn upload_binary_u64(memory: &Arc<GpuMemoryManager>, rows: &[(u64, u64)]) -> CudaBuffer {
@@ -667,7 +672,12 @@ fn cycle4_groupby_root_count_u64_matches_oracle_skewed_hub() {
         e4.push((B + z, B));
     }
     for i in 0..200u64 {
-        let (a, b, c, d) = (B + 10_000 + i, B + 20_000 + i, B + 30_000 + i, B + 40_000 + i);
+        let (a, b, c, d) = (
+            B + 10_000 + i,
+            B + 20_000 + i,
+            B + 30_000 + i,
+            B + 40_000 + i,
+        );
         e1.push((a, b));
         e2.push((b, c));
         e3.push((c, d));
@@ -715,15 +725,15 @@ fn cycle4_groupby_root_count_u64_empty_intersection_roots_are_absent() {
     assert_eq!(fused, vec![(B + 1, 1u64)], "only W=B+1 closes a 4-cycle");
 }
 
-/// S1d measurement, u64-key 4-cycle count (gate: fused >= 3x vs unfused on
+/// u64-key 4-cycle count measurement (gate: fused >= 3x vs unfused on
 /// the skewed 4-cycle fixture). Run explicitly:
 /// `cargo test -p xlog-cuda-tests --test test_wcoj_4cycle_groupby_root_count \
-///    --release -- --ignored s1d_measurement_4cycle_count_u64 --nocapture`
+///    --release -- --ignored wcoj_4cycle_groupby_root_count_u64_measurement_fused_vs_unfused --nocapture`
 #[test]
-#[ignore = "S1d measurement: run explicitly with --ignored --nocapture"]
-fn s1d_measurement_4cycle_count_u64_fused_vs_unfused() {
+#[ignore = "u64-key 4-cycle count measurement: run explicitly with --ignored --nocapture"]
+fn wcoj_4cycle_groupby_root_count_u64_measurement_fused_vs_unfused() {
     let Some(fix) = make_fixture() else {
-        eprintln!("skipping s1d_measurement_u64: no CUDA device");
+        eprintln!("skipping u64-key 4-cycle count measurement: no CUDA device");
         return;
     };
 
@@ -859,7 +869,7 @@ fn s1d_measurement_4cycle_count_u64_fused_vs_unfused() {
     let med_unfused = unfused_ms[REPS / 2];
     let med_fused = fused_ms[REPS / 2];
     println!(
-        "S1d cycle4_u64_hub_10k count: unfused median {med_unfused:.3} ms, fused median \
+        "u64-key aggregate-fused WCOJ 4-cycle hub_10k count: unfused median {med_unfused:.3} ms, fused median \
          {med_fused:.3} ms, speedup {:.2}x (n_e1={}, n_e2={}, n_e3={}, n_e4={})",
         med_unfused / med_fused,
         e1_rows.len(),
