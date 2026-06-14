@@ -417,7 +417,7 @@ Hardware cache terminology such as `L1` and `L2` is allowed when it refers to GP
 | `crates/xlog-integration/tests/real_world_tests.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-integration/tests/require_cuda_guard.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-integration/tests/test_a3_a4_stress.rs` | 0 | 0 | true |  |  |
-| `crates/xlog-integration/tests/test_cross_mode_determinism.rs` | 1 | 0 | false | W5.3(1) |  |
+| `crates/xlog-integration/tests/test_cross_mode_determinism.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-integration/tests/test_epistemic_gpu_wcoj_execution.rs` | 1 | 23 | false | G91(1) | G91(20), G38-B(3) |
 | `crates/xlog-integration/tests/test_free_join_e2e.rs` | 2 | 0 | false | D2(2) |  |
 | `crates/xlog-integration/tests/test_m37a_surface_preservation.rs` | 0 | 2 | false |  | M37A(2) |

@@ -1,7 +1,7 @@
 #![allow(clippy::arc_with_non_send_sync)]
 
-//! G_W53 / W5.3: one harness for WCOJ, binary-join fallback, recursive,
-//! and dynamic-rule-injection determinism on a shared fixture.
+//! Cross-mode determinism harness for WCOJ, binary-join fallback, recursive,
+//! and dynamic-rule-injection execution on a shared fixture.
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -51,23 +51,23 @@ const RECURSIVE_TRIANGLE_SOURCE: &str = r#"
     path(X, Z) :- path(X, Y), e1(Y, Z).
 "#;
 
-const DYNAMIC_R1_SOURCE: &str = r#"
+const DYNAMIC_BASE_RULE_SOURCE: &str = r#"
     pred e1(u32, u32).
     pred learned(u32, u32).
 
     learned(X, Y) :- e1(X, Y).
 "#;
 
-const DYNAMIC_R2: &str = "learned(X, Z) :- learned(X, Y), e1(Y, Z).";
+const DYNAMIC_TRANSITIVE_RULE: &str = "learned(X, Z) :- learned(X, Y), e1(Y, Z).";
 
-const STAGE5_R1_SOURCE: &str = r#"
+const TRAINING_ROLLBACK_BASE_SOURCE: &str = r#"
     pred e1(u32, u32).
     pred arm_d_path(u32, u32).
 
     arm_d_path(X, Y) :- e1(X, Y).
 "#;
 
-const STAGE5_DISCOVERED_RULE: &str = "arm_d_path(X, Z) :- arm_d_path(X, Y), e1(Y, Z).";
+const TRAINING_ROLLBACK_DISCOVERED_RULE: &str = "arm_d_path(X, Z) :- arm_d_path(X, Y), e1(Y, Z).";
 
 struct DiscardSink;
 
@@ -103,7 +103,7 @@ struct CompiledFixture {
     rel_ids: HashMap<String, RelId>,
 }
 
-struct StrictTrainResultMock {
+struct SimulatedTrainResult {
     discovered_rule: &'static str,
 }
 
@@ -354,18 +354,18 @@ fn dynamic_injection_snapshot(
         .expect("learned after");
     assert!(
         after.len() > before.len(),
-        "dynamic R2 injection must expand learned rows"
+        "dynamic transitive-rule injection must expand learned rows"
     );
     InjectionSnapshot { before, after }
 }
 
-fn train_on_compiled_relations_simulator() -> StrictTrainResultMock {
-    StrictTrainResultMock {
-        discovered_rule: STAGE5_DISCOVERED_RULE,
+fn train_on_compiled_relations_simulator() -> SimulatedTrainResult {
+    SimulatedTrainResult {
+        discovered_rule: TRAINING_ROLLBACK_DISCOVERED_RULE,
     }
 }
 
-fn stage5_rollback_snapshot(
+fn training_rollback_snapshot(
     fixture: &RuntimeFixture,
     inputs: &BTreeMap<&str, Vec<(u32, u32)>>,
     before_program: &CompiledFixture,
@@ -388,7 +388,7 @@ fn stage5_rollback_snapshot(
         .expect("arm_d_path after");
     assert!(
         after.len() > before.len(),
-        "Stage 5 discovered rule must expand arm_d_path rows"
+        "simulated training-discovered rule must expand arm_d_path rows"
     );
     InjectionSnapshot { before, after }
 }
@@ -397,7 +397,7 @@ fn stage5_rollback_snapshot(
 fn cross_mode_wcoj_binary_recursive_outputs_are_bit_exact_100x() {
     with_deterministic_env(|| {
         let Some(fixture) = make_runtime_fixture() else {
-            eprintln!("Skipping G_W53 cross-mode determinism: CUDA runtime unavailable");
+            eprintln!("Skipping cross-mode determinism: CUDA runtime unavailable");
             return;
         };
         let inputs = shared_inputs();
@@ -475,7 +475,7 @@ fn cross_mode_wcoj_binary_recursive_outputs_are_bit_exact_100x() {
         }
 
         println!(
-            "G_W53_CROSS_MODE fixed_seed={FIXED_SEED} iterations={ITERATIONS} \
+            "CROSS_MODE_DETERMINISM fixed_seed={FIXED_SEED} iterations={ITERATIONS} \
              wcoj_dispatches={} binary_dispatches={} recursive_dispatches={} \
              tri_rows={} chain_rows={} path_rows={}",
             wcoj.wcoj_triangle_dispatches,
@@ -489,26 +489,33 @@ fn cross_mode_wcoj_binary_recursive_outputs_are_bit_exact_100x() {
 }
 
 #[test]
-fn dynamic_injection_and_stage5_rollback_are_bit_exact_100x() {
+fn dynamic_injection_and_training_rollback_are_bit_exact_100x() {
     with_deterministic_env(|| {
         let Some(fixture) = make_runtime_fixture() else {
-            eprintln!("Skipping G_W53 injection determinism: CUDA runtime unavailable");
+            eprintln!("Skipping injection determinism: CUDA runtime unavailable");
             return;
         };
         let inputs = shared_inputs();
-        let dynamic_before = compile_source(DYNAMIC_R1_SOURCE);
-        let dynamic_after_source = source_with_injected_rule(DYNAMIC_R1_SOURCE, DYNAMIC_R2);
+        let dynamic_before = compile_source(DYNAMIC_BASE_RULE_SOURCE);
+        let dynamic_after_source =
+            source_with_injected_rule(DYNAMIC_BASE_RULE_SOURCE, DYNAMIC_TRANSITIVE_RULE);
         let dynamic_after = compile_source(&dynamic_after_source);
-        let stage5_before = compile_source(STAGE5_R1_SOURCE);
+        let training_rollback_before = compile_source(TRAINING_ROLLBACK_BASE_SOURCE);
         let strict_train_result = train_on_compiled_relations_simulator();
-        let stage5_after_source =
-            source_with_injected_rule(STAGE5_R1_SOURCE, strict_train_result.discovered_rule);
-        let stage5_after = compile_source(&stage5_after_source);
+        let training_rollback_after_source = source_with_injected_rule(
+            TRAINING_ROLLBACK_BASE_SOURCE,
+            strict_train_result.discovered_rule,
+        );
+        let training_rollback_after = compile_source(&training_rollback_after_source);
 
         let expected_dynamic =
             dynamic_injection_snapshot(&fixture, &inputs, &dynamic_before, &dynamic_after);
-        let expected_stage5 =
-            stage5_rollback_snapshot(&fixture, &inputs, &stage5_before, &stage5_after);
+        let expected_training_rollback = training_rollback_snapshot(
+            &fixture,
+            &inputs,
+            &training_rollback_before,
+            &training_rollback_after,
+        );
 
         for iter in 0..ITERATIONS {
             let dynamic =
@@ -518,21 +525,26 @@ fn dynamic_injection_and_stage5_rollback_are_bit_exact_100x() {
                 "dynamic-rule-injection run {iter} diverged"
             );
 
-            let stage5 = stage5_rollback_snapshot(&fixture, &inputs, &stage5_before, &stage5_after);
+            let training_rollback = training_rollback_snapshot(
+                &fixture,
+                &inputs,
+                &training_rollback_before,
+                &training_rollback_after,
+            );
             assert_eq!(
-                stage5, expected_stage5,
-                "Stage 5 rollback injection run {iter} diverged"
+                training_rollback, expected_training_rollback,
+                "training rollback injection run {iter} diverged"
             );
         }
 
         println!(
-            "G_W53_INJECTION fixed_seed={FIXED_SEED} iterations={ITERATIONS} \
+            "DYNAMIC_INJECTION_DETERMINISM fixed_seed={FIXED_SEED} iterations={ITERATIONS} \
              dynamic_before_rows={} dynamic_after_rows={} \
-             stage5_before_rows={} stage5_after_rows={}",
+             training_rollback_before_rows={} training_rollback_after_rows={}",
             expected_dynamic.before.len(),
             expected_dynamic.after.len(),
-            expected_stage5.before.len(),
-            expected_stage5.after.len()
+            expected_training_rollback.before.len(),
+            expected_training_rollback.after.len()
         );
     });
 }
