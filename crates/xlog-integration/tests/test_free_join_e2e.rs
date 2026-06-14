@@ -1,4 +1,4 @@
-//! D2 Free Join — end-to-end executor wiring.
+//! Free Join end-to-end executor wiring.
 //!
 //! A general >=3-atom inner-join body with no dedicated kernel must
 //! compile (general multiway promoter emits `MultiWayJoin` with
@@ -148,7 +148,9 @@ fn download_row_set(memory: &Arc<GpuMemoryManager>, buffer: &CudaBuffer) -> Vec<
         .map(|c| download_column_u32(memory, buffer, c))
         .collect();
     let n = cols.first().map_or(0, Vec::len);
-    let mut rows: Vec<Vec<u32>> = (0..n).map(|r| cols.iter().map(|c| c[r]).collect()).collect();
+    let mut rows: Vec<Vec<u32>> = (0..n)
+        .map(|r| cols.iter().map(|c| c[r]).collect())
+        .collect();
     rows.sort();
     rows.dedup();
     rows
@@ -183,7 +185,9 @@ fn run_program(
 static ENV_LOCK: Mutex<()> = Mutex::new(());
 
 fn env_lock() -> MutexGuard<'static, ()> {
-    ENV_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 /// 4-atom chain: no dedicated kernel, every shared variable is a
@@ -194,7 +198,10 @@ fn chain_inputs() -> BTreeMap<&'static str, Vec<(u32, u32)>> {
     let mut inputs: BTreeMap<&str, Vec<(u32, u32)>> = BTreeMap::new();
     inputs.insert("r", vec![(1, 10), (2, 20), (3, 30)]);
     inputs.insert("s", vec![(10, 100), (10, 101), (20, 200)]);
-    inputs.insert("t", vec![(100, 1000), (101, 1000), (200, 2000), (200, 2001)]);
+    inputs.insert(
+        "t",
+        vec![(100, 1000), (101, 1000), (200, 2000), (200, 2001)],
+    );
     inputs.insert("u", vec![(1000, 7), (2000, 8), (2001, 8), (1000, 9)]);
     inputs
 }
@@ -251,12 +258,11 @@ fn free_join_declines_dedicated_triangle_shape() {
 
     let source = "q(X, Y, Z) :- e1(X, Y), e2(Y, Z), e3(X, Z).";
     let (rows, fj_count) = run_program(&fix, source, &inputs);
+    assert_eq!(rows, vec![vec![1, 2, 3], vec![1, 2, 4]], "triangle row set");
     assert_eq!(
-        rows,
-        vec![vec![1, 2, 3], vec![1, 2, 4]],
-        "triangle row set"
+        fj_count, 0,
+        "dedicated triangle must not route through Free Join"
     );
-    assert_eq!(fj_count, 0, "dedicated triangle must not route through Free Join");
 }
 
 /// Non-prefix decline: X is shared between r and s but sits at column 1
@@ -424,7 +430,9 @@ fn download_row_set_u64(memory: &Arc<GpuMemoryManager>, buffer: &CudaBuffer) -> 
         .map(|c| download_column_u64(memory, buffer, c))
         .collect();
     let n = cols.first().map_or(0, Vec::len);
-    let mut rows: Vec<Vec<u64>> = (0..n).map(|r| cols.iter().map(|c| c[r]).collect()).collect();
+    let mut rows: Vec<Vec<u64>> = (0..n)
+        .map(|r| cols.iter().map(|c| c[r]).collect())
+        .collect();
     rows.sort();
     rows.dedup();
     rows
@@ -479,7 +487,10 @@ fn free_join_fires_on_u64_chain_with_kill_switch_parity() {
 
     let (fused, fused_count) = run(&fix);
     assert_eq!(fused, expected, "u64 Free Join path row set");
-    assert_eq!(fused_count, 1, "u64 Free Join dispatch must fire exactly once");
+    assert_eq!(
+        fused_count, 1,
+        "u64 Free Join dispatch must fire exactly once"
+    );
 
     // SAFETY: single-threaded phase of this test; restored below.
     unsafe {
@@ -493,7 +504,7 @@ fn free_join_fires_on_u64_chain_with_kill_switch_parity() {
     assert_eq!(unfused_count, 0, "kill switch must keep the counter at 0");
 }
 
-/// D2 §2.4 — fused factorized count-by-root over a general body: a
+/// Fused factorized count-by-root over a general Free Join body: a
 /// count aggregate over the 4-atom chain must dispatch the Free Join
 /// count engine (both the fused-groupby counter AND the Free Join
 /// counter fire), with row parity against BOTH kill switches
