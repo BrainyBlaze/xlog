@@ -11,7 +11,7 @@ use xlog_logic::{parse_program, BodyLiteral};
 
 #[test]
 fn positive_modal_over_co_evolving_relation_is_accepted_case_b() {
-    // v0.9.2 ITEM A: recursion whose POSITIVE modal `know derived_edge(...)` ranges
+    // Positive recursive modal case: recursion whose POSITIVE modal `know derived_edge(...)` ranges
     // over a NON-INVARIANT relation that CO-EVOLVES with the recursion (`derived_edge`
     // depends on the recursive `reach`) is an admissible Case-B program: modal truth and
     // ordinary derivation co-evolve to a FOUNDED least fixpoint. The positive modal is
@@ -67,7 +67,7 @@ fn positive_modal_over_co_evolving_relation_is_accepted_case_b() {
 
 #[test]
 fn negated_modal_over_invariant_in_recursion_is_accepted_case_a() {
-    // K3: a NEGATED modal `not know edge(...)` over the INVARIANT EDB relation
+    // Negated invariant modal case: a NEGATED modal `not know edge(...)` over the INVARIANT EDB relation
     // `edge` in a recursion-participating rule equals ordinary `not edge(...)` (the
     // accepted world view agrees with `edge` on an invariant relation, so the gated
     // complement IS `not edge`). This is cleanly reducible to ordinary negation
@@ -113,7 +113,7 @@ fn negated_modal_over_invariant_in_recursion_is_accepted_case_a() {
 
 #[test]
 fn negated_modal_over_stratified_non_invariant_in_recursion_is_accepted_case_b() {
-    // v0.9.2 WALL A1: a NEGATED modal over a NON-invariant (epistemic-derived)
+    // Stratified negated non-invariant modal case: a NEGATED modal over a NON-invariant (epistemic-derived)
     // relation in a recursion-participating program is ADMISSIBLE when the negation is
     // STRATIFIED -- i.e. the reduced ordinary program (`not know choice` -> `not
     // choice`) has NO cycle through negation. `choice` is epistemic-defined (hence
@@ -172,7 +172,7 @@ fn negated_modal_over_stratified_non_invariant_in_recursion_is_accepted_case_b()
 
 #[test]
 fn negated_modal_through_recursion_cycle_classifies_as_gpu_wfs_case_b() {
-    // v0.9.2 A1: a NEGATED modal whose target CYCLES through recursion via negation
+    // Recursion-through-negation modal case: a NEGATED modal whose target CYCLES through recursion via negation
     // is admitted as Case B. The high-level runtime detects the non-monotone reduced
     // SCC and delegates it to GPU-backed WFS instead of host WFS.
     let program = parse_program(
@@ -205,7 +205,7 @@ fn negated_modal_through_recursion_cycle_classifies_as_gpu_wfs_case_b() {
 
 #[test]
 fn recursive_epistemic_program_with_epistemic_constraint_fails_closed() {
-    // v0.9.2 WALL A1 SOUNDNESS GUARD: a recursive epistemic program that ALSO carries an
+    // Recursive epistemic constraint soundness guard: a recursive epistemic program that ALSO carries an
     // epistemic integrity constraint (`:- know flagged(X)`) must FAIL CLOSED. Recursive
     // epistemic programs route through the PURE ordinary semi-naive engine, which does
     // NOT run the world-view constraint kernel, and the recursive reduction DROPS modal
@@ -213,8 +213,8 @@ fn recursive_epistemic_program_with_epistemic_constraint_fails_closed() {
     // forbids -- an UNSOUND admission, worse than a rejection. The otherwise-admissible
     // stratified negated-modal recursion (accepted in
     // `negated_modal_over_recursive_lower_stratum_is_accepted_case_b`) must NOT be
-    // admitted once an epistemic constraint co-occurs. (Non-recursive epistemic-constraint
-    // programs -- examples 10/34/35/36 -- classify NonRecursive and are unaffected.)
+    // admitted once an epistemic constraint co-occurs. Non-recursive epistemic-constraint
+    // programs classify NonRecursive and are unaffected.
     let program = parse_program(
         r#"
         #pragma epistemic_mode = faeel
@@ -249,7 +249,7 @@ fn recursive_epistemic_program_with_epistemic_constraint_fails_closed() {
 
 #[test]
 fn standalone_negated_variable_keyed_constraint_is_unbound_safety_error() {
-    // v0.9.2 E2: `:- not know p(X).` has X appearing ONLY under negation, with no
+    // Negated-only variable safety: `:- not know p(X).` has X appearing ONLY under negation, with no
     // positive literal binding it -> X is NOT range-restricted. This is the SAME unsafe
     // shape ordinary Datalog rejects (`:- not r(X).` -> "unbound variable ... in negated
     // atom"). The SOUND answer is that safety error, NOT a misleading "negated
@@ -283,7 +283,7 @@ fn standalone_negated_variable_keyed_constraint_is_unbound_safety_error() {
 
 #[test]
 fn recursion_with_positive_non_invariant_modal_in_unrelated_rule_is_accepted_case_b() {
-    // v0.9.2 ITEM A: a FAEEL program with ordinary recursion (`reach`) AND a POSITIVE
+    // Positive non-invariant modal with ordinary recursion: a FAEEL program with ordinary recursion (`reach`) AND a POSITIVE
     // `possible choice(X)` over the epistemic-defined (non-invariant) `choice` is an
     // admissible Case-B program. The positive modal is resolved to a positive ordinary
     // atom and the whole program runs as a founded least fixpoint -- `choice` is itself
@@ -329,7 +329,7 @@ fn recursion_with_positive_non_invariant_modal_in_unrelated_rule_is_accepted_cas
 
 #[test]
 fn negated_modal_over_recursive_lower_stratum_is_accepted_case_b() {
-    // v0.9.2 WALL A1 (the canonical recursive witness): `not know reach` where `reach`
+    // Canonical stratified recursive witness: `not know reach` where `reach`
     // is a genuinely RECURSIVE transitive closure that sits in a strictly LOWER stratum
     // than the negating head `unreachable`. `reach` is non-invariant (recursive), so the
     // pre-A1 classifier rejected it; but the negation is STRATIFIED (`reach` never
@@ -382,7 +382,7 @@ fn negated_modal_over_recursive_lower_stratum_is_accepted_case_b() {
 
 #[test]
 fn negated_stratified_modal_with_g91_possible_cycle_is_accepted_case_b() {
-    // v0.9.2 ITEM A/G91 + A1: a program that contains BOTH a stratified negated
+    // Stratified negated modal plus G91 possible recursion: a program that contains BOTH a stratified negated
     // modal (admissible in isolation) AND a G91 `possible` over a co-evolving target
     // (the compatibility self-support assumption) is still an admissible Case-B
     // recursive epistemic program. This guards against regressing to the old
@@ -436,7 +436,7 @@ fn negated_stratified_modal_with_g91_possible_cycle_is_accepted_case_b() {
 
 #[test]
 fn g91_possible_over_co_evolving_relation_is_accepted_as_self_supporting_case_b() {
-    // v0.9.2 ITEM A/G91: under G91 a positive `possible` modal over a relation that
+    // Under G91, a positive `possible` modal over a relation that
     // CO-EVOLVES with recursion is the compatibility self-support assumption. The
     // recursive path admits it as Case B and the reduction drops that non-invariant
     // positive `possible` conjunct to a tautology instead of resolving it to the FAEEL
@@ -539,7 +539,7 @@ fn case_a_recursive_epistemic_program_is_accepted_and_reduced() {
 
 #[test]
 fn modal_self_support_is_not_treated_as_ordinary_recursion() {
-    // EGB-07: self-support THROUGH a modal literal (`founded() :- possible founded().`)
+    // Modal self-support through a modal literal (`founded() :- possible founded().`)
     // is not ordinary recursion and is handled by FAEEL foundedness; with an
     // independent founded support it must NOT be rejected by the recursion guard.
     let program = parse_program(
@@ -558,10 +558,10 @@ fn modal_self_support_is_not_treated_as_ordinary_recursion() {
 
 #[test]
 fn bare_modal_self_support_stays_non_recursive_not_case_b() {
-    // v0.9.2 ITEM A regression: a bare modal self-support (`p() :- know p()` /
+    // Bare modal self-support regression: a bare modal self-support (`p() :- know p()` /
     // `p() :- possible p()`) has NO ordinary recursion edge -- the only self-dependency
     // is through the modal literal, which contributes no recursion edge. It must stay
-    // `NonRecursive` (handled by item B's single-pass founded-extension path: rows:0
+    // `NonRecursive` (handled by the single-pass founded-extension path: rows:0
     // FAEEL / rows:1 G91) and NEVER be rerouted into Case-B by the relaxation.
     for source in ["p() :- know p().", "p() :- possible p()."] {
         let program = parse_program(source).unwrap();
@@ -869,7 +869,7 @@ fn shared_modal_inputs_coalesce_epistemic_split_components() {
 
 #[test]
 fn cross_component_modal_coupling_is_solved_jointly_in_one_component() {
-    // EGB-06: a rule coupling more than one DISTINCT epistemic body predicate is
+    // Cross-component modal coupling: a rule coupling more than one DISTINCT epistemic body predicate is
     // no longer rejected by the split layer. The dependency graph unions all such
     // modal predicates into a single component that the unsplit joint path solves
     // as a full modal conjunction over the candidate world view.
@@ -886,7 +886,7 @@ fn cross_component_modal_coupling_is_solved_jointly_in_one_component() {
 
 #[test]
 fn safe_cross_arity_modal_coupling_splits_into_one_joint_component() {
-    // EGB-06: cross-arity coupling of the same predicate (p/1 + p/2) is a valid
+    // Cross-arity coupling of the same predicate (p/1 + p/2) is a valid
     // joint condition when the shared variable is safely bound by a relational
     // body atom; the two arities materialize as distinct relations and the rule
     // is jointly solved in a single component.
@@ -911,7 +911,7 @@ fn safe_cross_arity_modal_coupling_splits_into_one_joint_component() {
 
 #[test]
 fn cross_arity_modal_coupling_over_invariant_relations_resolves_soundly() {
-    // v0.9.2 sound consequence of the invariant-resolve: a head variable bound ONLY by
+    // Invariant-resolution consequence: a head variable bound ONLY by
     // positive modal literals (`X` appears only in `know p(X)` / `possible link(X,Y)`)
     // is now SAFELY range-restricted when those modals range over INVARIANT relations,
     // because for an invariant relation `R` the modal `know R`/`possible R` ranges
@@ -973,7 +973,7 @@ fn cross_arity_modal_coupling_over_invariant_relations_resolves_soundly() {
     .unwrap();
     // `r` is epistemic-derived (defined by `know q`), so it is NOT invariant; the modal
     // `possible r(X)` does not resolve and `a` would be unsafe -- BUT this is a chained
-    // modal-over-determined-head shape, which the STRATIFIED path owns (Task 2). The
+    // modal-over-determined-head shape, which the STRATIFIED path owns. The
     // split path here is exercised only to confirm the unsound *unstratified* compile
     // does not silently accept: a non-invariant modal target never becomes a positive
     // binding atom in the reduced program.
@@ -996,7 +996,7 @@ fn cross_arity_modal_coupling_over_invariant_relations_resolves_soundly() {
 
 #[test]
 fn nested_modal_chain_in_joint_coupling_rule_collapses_then_couples() {
-    // v0.9.2 ITEM C: a bare nested-modal CHAIN inside a multi-epistemic-predicate
+    // Nested modal-chain normalization: a bare nested-modal CHAIN inside a multi-epistemic-predicate
     // coupling rule is no longer rejected — it collapses (KD45/S5) to its innermost
     // operator at parse time and then participates in ordinary coupling. Here
     // `possible know q(X)` collapses to `know q(X)`, leaving a rule with two
@@ -1029,7 +1029,7 @@ fn nested_modal_chain_in_joint_coupling_rule_collapses_then_couples() {
     );
 }
 
-// --- EGB-05 K2 coverage / K3 diagnostics / source-order stability pilots ---
+// --- Merge-reason coverage, diagnostics, and source-order stability ---
 
 #[test]
 fn independent_split_components_carry_no_merge_reasons() {
@@ -1258,7 +1258,7 @@ fn executable_recomposition_covers_only_executed_epistemic_components() {
     assert_eq!(exec.planned_recomposed_rule_indices(), vec![0, 1]);
 }
 
-// --- v0.9.2 Bundle 3: cross-component epistemic coupling ---
+// --- Cross-component epistemic coupling ---
 
 #[test]
 fn modal_over_epistemic_derived_head_coalesces_then_fails_closed_at_joint_compile() {
@@ -1274,7 +1274,7 @@ fn modal_over_epistemic_derived_head_coalesces_then_fails_closed_at_joint_compil
     // diagnostic naming the coupled predicates AND the merge reason -- NOT the
     // misleading "independent epistemic outputs" message.
     //
-    // NOTE (v0.9.2 ITEM F): the full `xlog run` path does NOT route this shape
+    // NOTE: the full `xlog run` path does NOT route this shape
     // through the split layer. Because `a`'s modal (`know p`) ranges over the
     // INVARIANT base `p`, `a` is epistemically DETERMINED, so STRATIFIED execution
     // intercepts the coupling FIRST: it materializes the gated `a` as a lower
@@ -1329,7 +1329,7 @@ fn modal_over_epistemic_derived_head_coalesces_then_fails_closed_at_joint_compil
 
 #[test]
 fn shared_modal_two_head_coupling_is_joint_solved_multi_output() {
-    // K1/K2/K3: two rules that share a BASE modal predicate (`q/1`) coalesce into
+    // Shared-modal multi-head case: two rules that share a BASE modal predicate (`q/1`) coalesce into
     // one component carrying two epistemic output heads (`a`, `b`). Because `q` is
     // a base/invariant relation (NOT an epistemic-derived head of the component),
     // the accepted world-view set over `q` is determined independently of which
@@ -1381,13 +1381,13 @@ fn shared_modal_two_head_coupling_is_joint_solved_multi_output() {
         ["a", "b"].into_iter().collect(),
         "joint component must materialize both coupled heads, got {heads:?}"
     );
-    // K3: recomposition covers each source rule exactly once.
+    // Recomposition covers each source rule exactly once.
     assert_eq!(exec.recomposed_rule_indices(), vec![0, 1]);
 }
 
 #[test]
 fn augmented_multi_head_shared_modal_coupling_joint_solves_with_per_head_projection() {
-    // K4 (v0.9.2 SCOPE-LIMIT CLOSED): a coalesced multi-head component whose
+    // Augmented multi-head coupling: a coalesced multi-head component whose
     // epistemic rules need OUTPUT PROJECTION (a modal-literal variable not in the
     // head, e.g. `know edge(X, Y)` with head `a(X)`) is now JOINT-SOLVED via per-head
     // augmented projection. Each head is materialized from ITS OWN reduced relation
@@ -1447,13 +1447,13 @@ fn augmented_multi_head_shared_modal_coupling_joint_solves_with_per_head_project
         .collect();
     assert_eq!(arity_by_head.get("a"), Some(&1));
     assert_eq!(arity_by_head.get("b"), Some(&1));
-    // K3: recomposition covers each source rule exactly once.
+    // Recomposition covers each source rule exactly once.
     assert_eq!(exec.recomposed_rule_indices(), vec![0, 1]);
 }
 
 #[test]
 fn modal_over_transitively_epistemic_derived_predicate_fails_closed_at_split_layer() {
-    // K4: a modal literal ranging over an ORDINARY-derived predicate `r` that
+    // Transitively derived modal target: a modal literal ranging over an ORDINARY-derived predicate `r` that
     // TRANSITIVELY depends on an epistemic-derived head (`r :- a`, `a :- know p`)
     // is a nested/stratified epistemic dependency. `know r` cannot be evaluated by
     // one shared accepted world view because `r`'s extension depends on the world
@@ -1463,10 +1463,10 @@ fn modal_over_transitively_epistemic_derived_predicate_fails_closed_at_split_lay
     // misses.
     //
     // NOTE: the full `xlog run` path does NOT route this shape through the split layer:
-    // v0.9.2 STRATIFIED execution intercepts it first (the transitive determined-closure
+    // stratified execution intercepts it first (the transitive determined-closure
     // marks the ordinary `r` determined, materializes gated `a` as a lower stratum,
     // computes `r :- a` over the materialized base, and gates `know r` against the base
-    // `r`). See example 24 (`24-transitive-determined-modal-stratified.xlog`) and the
+    // `r`). See the transitive-determined modal example and the
     // CLI test `test_xlog_run_transitive_determined_modal_stratifies_accepted`. This test
     // pins the SPLIT-LAYER fail-closed contract that the stratified path relies on as its
     // sound fallback for any shape stratification declines.
@@ -1523,7 +1523,7 @@ fn modal_over_transitively_epistemic_derived_predicate_fails_closed_at_split_lay
 
 #[test]
 fn ordinary_consumer_of_epistemic_head_is_accepted_safe_coupling() {
-    // SAFE coupling (the task's named EGB-05 case): component B's ORDINARY body
+    // SAFE coupling: component B's ORDINARY body
     // consumes component A's epistemic head (`b() :- a()` where `a() :- know p()`).
     // This is a real derived dependency that must coalesce, but it has exactly ONE
     // epistemic output head (`a`), so it is NOT cross-component modal coupling: the
@@ -1550,7 +1550,7 @@ fn ordinary_consumer_of_epistemic_head_is_accepted_safe_coupling() {
 
 #[test]
 fn shared_extensional_inputs_do_not_force_false_cross_component_coalesce() {
-    // K5: two epistemic components that share ONLY an EDB input (`node`) must stay
+    // Shared extensional input case: two epistemic components that share ONLY an EDB input (`node`) must stay
     // independent -- the shared extensional input must not force a false coalesce.
     // Each component keeps exactly one epistemic output head, so both compile
     // through the split path as independent components.
@@ -1592,12 +1592,12 @@ fn compiled_rule_count(plan: &ExecutionPlan) -> usize {
     plan.rules_by_scc.iter().map(Vec::len).sum()
 }
 
-// --- v0.9.2 stratified epistemic execution: chained coupling over a
+// --- Stratified epistemic execution: chained coupling over a
 // DETERMINED epistemic-derived head ---
 
 #[test]
 fn chained_modal_over_determined_epistemic_head_plans_stratified() {
-    // K1: `b :- know a` where `a :- know p` and `p` is an EDB/invariant relation.
+    // Determined epistemic-head chain: `b :- know a` where `a :- know p` and `p` is an EDB/invariant relation.
     // `a` is epistemically DETERMINED (its modal gates only over invariant `p`),
     // so its gated extension IS its truth and can be materialized as a base
     // relation. `b`'s modal `know a` then gates against that materialized relation.
@@ -1643,7 +1643,7 @@ fn chained_modal_over_determined_epistemic_head_plans_stratified() {
 
 #[test]
 fn modal_over_transitively_determined_ordinary_head_plans_stratified() {
-    // v0.9.2 Task 2: `b :- know r` where `r :- a` (ordinary) and `a :- know p` (`p`
+    // Transitively determined ordinary-head case: `b :- know r` where `r :- a` (ordinary) and `a :- know p` (`p`
     // EDB). The transitive determined-closure marks the ORDINARY `r` determined (its
     // sole rule ranges only over the determined `a`), so `know r` stratifies: `a` is a
     // lower stratum, and `b`'s stratum sits ABOVE `a` (routed through `r`'s epistemic
@@ -1714,7 +1714,7 @@ fn modal_over_transitively_determined_ordinary_head_plans_stratified() {
 
 #[test]
 fn shared_base_modal_does_not_trigger_stratification() {
-    // K4 non-regression: example-18 shape. Two heads share a BASE modal `q` (EDB).
+    // Shared-base-modal non-regression: two heads share a BASE modal `q` (EDB).
     // `q` is NOT an epistemic-derived head, so NO modal ranges over a determined
     // epistemic head -> stratified planning returns None and the existing joint
     // path keeps ownership (-> known={1,2}, maybe={2}).
