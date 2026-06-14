@@ -3,8 +3,8 @@
 Scope: Git-tracked source and documentation files only. Superpowers docs, plan files, evidence directories, generated artifacts, result/output directories, build output, and other worktrees are excluded.
 
 Scanned files: 1430
-Unresolved files: 262
-Comment/prose artifact occurrences: 1713
+Unresolved files: 261
+Comment/prose artifact occurrences: 1712
 Code/identifier artifact occurrences: 686
 
 Resolved means this board found no remaining opaque task/milestone labels or external consumer names in the eligible portions of that file.
@@ -296,7 +296,7 @@ Hardware cache terminology such as `L1` and `L2` is allowed when it refers to GP
 | `crates/xlog-cuda/src/provider/filter.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-cuda/src/provider/fj.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-cuda/src/provider/groupby.rs` | 0 | 0 | true |  |  |
-| `crates/xlog-cuda/src/provider/ilp.rs` | 1 | 0 | false | D2H(1) |  |
+| `crates/xlog-cuda/src/provider/ilp.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-cuda/src/provider/ilp_exact.rs` | 7 | 0 | false | D2H(4), D2D(2), M8(1) |  |
 | `crates/xlog-cuda/src/provider/io.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-cuda/src/provider/kernel_loading.rs` | 0 | 0 | true |  |  |
