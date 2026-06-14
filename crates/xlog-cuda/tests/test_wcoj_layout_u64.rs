@@ -1,17 +1,18 @@
 // crates/xlog-cuda/tests/test_wcoj_layout_u64.rs
-//! Tests for the v0.6.2 GPU WCOJ sorted-layout construction —
-//! u64 variant.
+//! Tests for the GPU WCOJ sorted-layout construction path for
+//! u64 inputs.
 //!
 //! Locks the provider entry
 //! `CudaKernelProvider::wcoj_layout_u64_recorded(input, launch_stream)`
 //! against the same contract as the u32 path, widened to 64-bit
 //! keys. Internally delegates to `dedup_full_row_recorded` (which
-//! gained U64 admission in commit 1).
+//! accepts U64 rows).
 //!
-//! Hard scope (commit 2 of 3):
-//!   * Layout-only — feeds into `wcoj_triangle_u64_recorded`
-//!     for the integration test below.
-//!   * No AST/RIR dispatch (commit 3).
+//! Coverage scope:
+//!   * Layout construction plus `wcoj_triangle_u64_recorded`
+//!     integration below.
+//!   * AST/RIR dispatch is covered by dispatcher integration tests,
+//!     not this provider-layout test.
 
 use std::collections::BTreeSet;
 use std::sync::Arc;
@@ -353,7 +354,7 @@ fn wcoj_layout_u64_legacy_manager_rejected() {
 fn wcoj_layout_then_triangle_u64_matches_cpu_oracle() {
     // Feed three unsorted U64 fixtures through layout construction
     // into wcoj_triangle_u64_recorded and verify the row set
-    // matches the CPU oracle. End-to-end provider pipeline cert.
+    // matches the CPU oracle. End-to-end provider pipeline coverage.
     let Some(fix) = make_runtime_fixture() else {
         eprintln!("Skipping: CUDA runtime unavailable");
         return;
