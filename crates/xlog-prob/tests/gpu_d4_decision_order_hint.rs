@@ -1,8 +1,8 @@
-//! D4 decision-order hint: probability parity + frontier/compile-time measurement.
+//! Decision-DNNF decision-order hint: probability parity + frontier/compile-time measurement.
 //!
 //! The hint is host-side only: it renumbers leaf/choice variables from
 //! provenance structure before CNF encoding, steering the deterministic
-//! var-id tie-breaks of the (unchanged) D4 CUDA branching heuristic.
+//! var-id tie-breaks of the unchanged GPU-native Decision-DNNF branching heuristic.
 
 #![cfg(feature = "host-io")]
 
@@ -96,13 +96,13 @@ fn eval_formula(
 struct Measurement {
     prob: f64,
     frontier_items: u32,
-    d4_compile_sec: f64,
+    decision_ddnnf_compile_sec: f64,
     verify_sec: f64,
     compile_wall_sec: f64,
 }
 
 fn compile_and_measure(source: &str, hint: bool, cache_dir: &std::path::Path) -> Measurement {
-    // Fresh disk-cache dir per compile so every round is a real D4 compile.
+    // Fresh disk-cache dir per compile so every round is a real Decision-DNNF compile.
     std::env::set_var("XLOG_CIRCUIT_CACHE_DIR", cache_dir);
     let mut config = GpuConfig::default();
     config.memory_bytes = 1 << 30;
@@ -117,7 +117,7 @@ fn compile_and_measure(source: &str, hint: bool, cache_dir: &std::path::Path) ->
         .clone();
     assert!(
         !profile.gpu_cache_hit && !profile.disk_cache_hit,
-        "measurement requires a real D4 compile (hint={hint}): {profile:?}"
+        "measurement requires a real Decision-DNNF compile (hint={hint}): {profile:?}"
     );
     let result = compiled.evaluate().expect("evaluate join-heavy program");
     let prob = result
@@ -129,14 +129,14 @@ fn compile_and_measure(source: &str, hint: bool, cache_dir: &std::path::Path) ->
     Measurement {
         prob,
         frontier_items: profile.frontier_items,
-        d4_compile_sec: profile.d4_compile_sec,
+        decision_ddnnf_compile_sec: profile.d4_compile_sec,
         verify_sec: profile.verify_sec,
         compile_wall_sec,
     }
 }
 
 // Note: a larger 19-fact 4-layer variant of this fixture was probed for
-// evidence and hard-fails D4 Phase-1 compilation in BOTH hint modes
+// evidence and hard-fails Decision-DNNF frontier compilation in BOTH hint modes
 // (device-side trap, CUDA_ERROR_LAUNCH_FAILED, at 1 GB and 8 GB budgets) —
 // recorded in docs/evidence/2026-06-11-d4-structure-hints/README.md. The
 // committed measurement therefore uses the largest fixture the current
@@ -152,7 +152,7 @@ fn decision_order_hint_preserves_probabilities_and_reports_frontier() {
     // Isolate the disk cache and enable per-stage profiling. This test is the
     // only test in this binary, so process-global env mutation is safe.
     let base_dir = std::env::temp_dir().join(format!(
-        "xlog-d4-hint-test-{}-{}",
+        "xlog-decision-ddnnf-hint-test-{}-{}",
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -186,10 +186,14 @@ fn decision_order_hint_preserves_probabilities_and_reports_frontier() {
                 m.prob
             );
             eprintln!(
-                "d4 decision-order hint measurement: round={round} hint={hint} \
-                 frontier_items={} d4_compile_sec={:.4} verify_sec={:.4} \
+                "Decision-DNNF decision-order hint measurement: round={round} hint={hint} \
+                 frontier_items={} decision_ddnnf_compile_sec={:.4} verify_sec={:.4} \
                  compile_wall_sec={:.2} prob={:.12}",
-                m.frontier_items, m.d4_compile_sec, m.verify_sec, m.compile_wall_sec, m.prob
+                m.frontier_items,
+                m.decision_ddnnf_compile_sec,
+                m.verify_sec,
+                m.compile_wall_sec,
+                m.prob
             );
             if hint {
                 on_runs.push(m);
@@ -203,13 +207,23 @@ fn decision_order_hint_preserves_probabilities_and_reports_frontier() {
         runs.sort_by(|a, b| a.partial_cmp(b).unwrap());
         runs[runs.len() / 2]
     };
-    let med_d4_off = median(&mut off_runs.iter().map(|m| m.d4_compile_sec).collect());
-    let med_d4_on = median(&mut on_runs.iter().map(|m| m.d4_compile_sec).collect());
+    let med_decision_ddnnf_off = median(
+        &mut off_runs
+            .iter()
+            .map(|m| m.decision_ddnnf_compile_sec)
+            .collect(),
+    );
+    let med_decision_ddnnf_on = median(
+        &mut on_runs
+            .iter()
+            .map(|m| m.decision_ddnnf_compile_sec)
+            .collect(),
+    );
     let med_verify_off = median(&mut off_runs.iter().map(|m| m.verify_sec).collect());
     let med_verify_on = median(&mut on_runs.iter().map(|m| m.verify_sec).collect());
     eprintln!(
-        "d4 decision-order hint medians: frontier_items off={} on={}, \
-         d4_compile_sec off={med_d4_off:.4} on={med_d4_on:.4}, \
+        "Decision-DNNF decision-order hint medians: frontier_items off={} on={}, \
+         decision_ddnnf_compile_sec off={med_decision_ddnnf_off:.4} on={med_decision_ddnnf_on:.4}, \
          verify_sec off={med_verify_off:.4} on={med_verify_on:.4}, oracle={oracle:.12}",
         off_runs[0].frontier_items, on_runs[0].frontier_items,
     );

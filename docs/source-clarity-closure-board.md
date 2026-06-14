@@ -632,7 +632,7 @@ Hardware cache terminology such as `L1` and `L2` is allowed when it refers to GP
 | `crates/xlog-prob/tests/gpu_cnf.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-prob/tests/gpu_cnf_hash.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-prob/tests/gpu_d4_compile_and_verify.rs` | 0 | 0 | true |  |  |
-| `crates/xlog-prob/tests/gpu_d4_decision_order_hint.rs` | 4 | 1 | false | D4(4) | D4(1) |
+| `crates/xlog-prob/tests/gpu_d4_decision_order_hint.rs` | 0 | 0 | true | Replaced local D4 shorthand with Decision-DNNF wording; retained the existing profile field and historical evidence path. | - |
 | `crates/xlog-prob/tests/gpu_d4_validate_cnf.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-prob/tests/gpu_d4_var_presence.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-prob/tests/gpu_equivalence_padded_phi.rs` | 0 | 0 | true |  |  |
