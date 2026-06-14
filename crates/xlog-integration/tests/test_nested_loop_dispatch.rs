@@ -1,17 +1,13 @@
-// crates/xlog-integration/tests/test_w42_nested_loop_dispatch.rs
+// crates/xlog-integration/tests/test_nested_loop_dispatch.rs
 #![allow(clippy::doc_lazy_continuation)]
 
-//! W4.2 dispatch + parity certs.
+//! Nested-loop dispatch and parity coverage.
 //!
-//! Cert A — small × small dispatch routes through the W4.2
+//! Small × small dispatch routes through the
 //! `nested_loop_join_v2_inner_u32_1key` provider entry point,
 //! produces a row-set bit-identical to `hash_join_v2`'s reference
 //! output, AND wires `record_join_result` feedback into
-//! `StatsManager` (the same contract the W2.4 cert pins for the
-//! WCOJ path).
-//!
-//! Subsequent certs (B / C / C' / E) will land in follow-up
-//! commits per the W4.2 plan iteration-4 Steps 7 / 8 / 10.
+//! `StatsManager`, matching the shared join-feedback contract.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -30,7 +26,7 @@ use xlog_logic::Compiler;
 use xlog_runtime::Executor;
 
 // ---------------------------------------------------------------
-// Fixture helpers (mirrors W2.4 cert pattern at
+// Fixture helpers mirror the join-feedback test pattern at
 // crates/xlog-integration/tests/test_wcoj_record_join_result_feedback.rs).
 // ---------------------------------------------------------------
 
@@ -221,8 +217,7 @@ fn download_quads(buf: &CudaBuffer) -> Vec<(u32, u32, u32, u32)> {
 }
 
 // ---------------------------------------------------------------
-// Cert A — small×small dispatches nested-loop, matches hash, and
-// records join feedback.
+// Small×small dispatches nested-loop, matches hash, and records join feedback.
 // ---------------------------------------------------------------
 
 /// Datalog program with a single inner binary join. The lowerer
@@ -233,7 +228,7 @@ fn download_quads(buf: &CudaBuffer) -> Vec<(u32, u32, u32, u32)> {
 ///   * U32 key type on each side.
 /// Combined with row counts in the eligibility envelope (100×100
 /// = 10_000 ≤ NESTED_LOOP_TOTAL_THRESHOLD = 4_000_000), this
-/// routes through the W4.2 nested-loop provider entry point.
+/// routes through the nested-loop provider entry point.
 const SMALL_INNER_JOIN_PROGRAM: &str = r#"
     pred left_rel(u32, u32).
     pred right_rel(u32, u32).
@@ -250,13 +245,13 @@ fn small_small_dispatches_nested_loop_and_matches_hash() {
 
     // Fixture: 100 unique-keyed rows on each side. Keys are
     // **deterministically unsorted** via rotate-halves
-    // (`[50..100, 0..50)`) so W4.3's sort-merge dispatch
+    // (`[50..100, 0..50)`) so sort-merge dispatch
     // detection returns `Ok(false)` and falls through, leaving
-    // W4.2 nested-loop directly certified by this test. All 100
+    // nested-loop directly certified by this test. All 100
     // keys still match (key-set on each side is `[0..100)`,
     // identical to a sorted fixture); 100 join output rows;
     // 100×100 = 10_000 Cartesian ≤ 4_000_000 threshold →
-    // eligible for W4.2 dispatch.
+    // eligible for nested-loop dispatch.
     //
     // The single descending step at index 49→50 (`99 > 0`) is
     // sufficient to fail `check_ascending_sorted_u32`'s
@@ -269,7 +264,7 @@ fn small_small_dispatches_nested_loop_and_matches_hash() {
     // -----------------------------------------------------------
     // Reference row set: direct provider call to hash_join_v2 on
     // the same uploaded buffers. Bypasses the executor's dispatch
-    // path so it cannot be confused with the W4.2 path. Output
+    // path so it cannot be confused with the nested-loop path. Output
     // schema is [left_k, left_p, right_k, right_p] via
     // `combine_schemas`.
     // -----------------------------------------------------------
@@ -294,7 +289,8 @@ fn small_small_dispatches_nested_loop_and_matches_hash() {
     );
 
     // -----------------------------------------------------------
-    // Dispatched run: Executor::execute_plan goes through the W4.2
+    // Dispatched run: Executor::execute_plan goes through the
+    // nested-loop
     // dispatch wiring at execute_join. Build a fresh executor so
     // the dispatch counter starts at 0.
     // -----------------------------------------------------------
@@ -317,8 +313,8 @@ fn small_small_dispatches_nested_loop_and_matches_hash() {
         executor.put_relation(name, buf);
     }
 
-    // Pre-execute invariants (no `wcoj_*` references per the W4.2
-    // plan iter-4 F-W42-6 — wcoj counters are unrelated):
+    // Pre-execute invariants: WCOJ counters are unrelated to this
+    // nested-loop dispatch test.
     assert_eq!(
         executor.nested_loop_dispatch_count(),
         0,
@@ -337,16 +333,15 @@ fn small_small_dispatches_nested_loop_and_matches_hash() {
 
     // -----------------------------------------------------------
     // Post-execute assertions:
-    //   1. Dispatch counter incremented (proves W4.2 path fired).
+    //   1. Dispatch counter incremented (proves nested-loop path fired).
     //   2. record_join_result feedback was wired into stats
-    //      (proves the Step-5 patch routes through the shared
-    //      record_join_result block — directly addresses the bug
-    //      that motivated the patch).
+    //      (proves dispatch routes through the shared
+    //      record_join_result block).
     //   3. Row-set parity vs hash reference (proves correctness).
     // -----------------------------------------------------------
     assert!(
         executor.nested_loop_dispatch_count() >= 1,
-        "W4.2 nested-loop dispatch must have fired at least once; got counter {}",
+        "nested-loop dispatch must have fired at least once; got counter {}",
         executor.nested_loop_dispatch_count()
     );
 
@@ -355,7 +350,7 @@ fn small_small_dispatches_nested_loop_and_matches_hash() {
             .stats()
             .get_join_selectivity(left_rel, right_rel)
             .is_some(),
-        "record_join_result must have been called for the W4.2-dispatched join \
+        "record_join_result must have been called for the nested-loop dispatched join \
          (left_rel={:?}, right_rel={:?}); selectivity should transition None → Some",
         left_rel,
         right_rel
@@ -370,20 +365,19 @@ fn small_small_dispatches_nested_loop_and_matches_hash() {
     assert_eq!(
         dispatched_set.len(),
         100,
-        "W4.2-dispatched result should produce exactly 100 matched rows; got {}",
+        "nested-loop dispatched result should produce exactly 100 matched rows; got {}",
         dispatched_set.len()
     );
     assert_eq!(
         dispatched_set, reference_set,
-        "W4.2 nested-loop row set must equal the hash_join_v2 reference"
+        "nested-loop row set must equal the hash_join_v2 reference"
     );
 }
 
 // ---------------------------------------------------------------
-// Cert B — large × small Cartesian product falls back to hash.
+// Large × small Cartesian product falls back to hash.
 //
-// Per W4.2 plan iter-4 F-W42-3: matches the board's "large × small
-// picks hash" acceptance line. Asymmetric `L=50_000, R=100` →
+// Asymmetric `L=50_000, R=100` →
 // Cartesian = 5_000_000 > NESTED_LOOP_TOTAL_THRESHOLD = 4_000_000
 // → ineligible. The eligibility predicate's individual checks
 // (Inner, 1-key, U32, type equality) ALL pass; only the
@@ -429,7 +423,7 @@ fn large_times_small_falls_back_to_hash_above_threshold() {
     );
 
     // Dispatched run: Executor::execute_plan must route through
-    // hash because the threshold predicate refuses the W4.2
+    // hash because the threshold predicate refuses the nested-loop
     // dispatch.
     let mut compiler = Compiler::new();
     let plan = compiler.compile(SMALL_INNER_JOIN_PROGRAM).expect("compile");
@@ -462,14 +456,13 @@ fn large_times_small_falls_back_to_hash_above_threshold() {
     // Assertions:
     //   1. **Load-bearing**: `nested_loop_dispatch_count() == 0`
     //      — the eligibility predicate refused to dispatch
-    //      W4.2 because the Cartesian product (5M) exceeds the
+    //      nested-loop because the Cartesian product (5M) exceeds the
     //      threshold (4M). Strict equality, NOT `<= some bound`.
     //   2. Row-set parity vs hash reference (correctness witness
     //      for the hash fallback path).
     //   3. `record_join_result` feedback wired even on the hash
-    //      fallback path (drop-in contract: the existing W2.4
-    //      contract holds regardless of which dispatch path
-    //      execute_join chose).
+    //      fallback path; the shared join-feedback contract holds
+    //      regardless of which dispatch path execute_join chose.
     // -----------------------------------------------------------
     assert_eq!(
         executor.nested_loop_dispatch_count(),
@@ -502,14 +495,13 @@ fn large_times_small_falls_back_to_hash_above_threshold() {
             .get_join_selectivity(left_rel, right_rel)
             .is_some(),
         "record_join_result must fire on the hash fallback path too \
-         (the W4.2 Step-5 patch routed all three dispatch paths through \
-          the shared feedback block); pre-execute None → post-execute \
-          Some(_) is the W2.4 contract that W4.2 must preserve"
+         (all three dispatch paths route through the shared feedback block); \
+         pre-execute None → post-execute Some(_) is the join-feedback contract"
     );
 }
 
 // ---------------------------------------------------------------
-// Helpers for Certs C and C' (manual RirNode construction).
+// Helpers for manual RirNode construction.
 // ---------------------------------------------------------------
 
 /// Download a 2-col U32 buffer (used for Semi-join output, which
@@ -579,10 +571,9 @@ fn build_executor_with_two_relations(
 }
 
 // ---------------------------------------------------------------
-// Cert C — multi-col composite key inner join falls back to hash.
+// Multi-col composite key inner join falls back to hash.
 //
-// Per W4.2 plan iter-4 D1 + D5: the eligibility predicate's
-// `left_keys.len() != 1 || right_keys.len() != 1` check rejects
+// The eligibility predicate's `left_keys.len() != 1 || right_keys.len() != 1` check rejects
 // composite-key joins regardless of size. Fixture is small
 // (100 × 100 = 10K, well below the 4M threshold) so SIZE is
 // NOT the disqualifying property — only the key arity is. This
@@ -662,11 +653,10 @@ fn multi_col_key_falls_back_to_hash() {
 }
 
 // ---------------------------------------------------------------
-// Cert C' — Semi-join falls back to hash, semi-join row-set
+// Semi-join falls back to hash, semi-join row-set
 // semantics preserved.
 //
-// Per W4.2 plan iter-4 D1 + D5: the eligibility predicate's
-// `join_type == JoinType::Inner` check rejects Semi/Anti/LeftOuter
+// The eligibility predicate's `join_type == JoinType::Inner` check rejects Semi/Anti/LeftOuter
 // regardless of size + key shape. Fixture is small (100 × 50 =
 // 5K, well below threshold) and uses 1-key U32 — only the
 // non-Inner join type disqualifies.
@@ -747,11 +737,11 @@ fn semi_join_falls_back_to_hash() {
 }
 
 // ---------------------------------------------------------------
-// Cert E — Symbol-typed key dispatches nested-loop.
+// Symbol-typed key dispatches nested-loop.
 //
-// Per W4.2 plan iter-4 D1 + D5: the eligibility predicate's
-// admitted-set check is `matches!(lt, Some(U32) | Some(Symbol))`.
-// Cert A exercised the U32 branch; Cert E covers the Symbol
+// The eligibility predicate's admitted-set check is
+// `matches!(lt, Some(U32) | Some(Symbol))`.
+// The small U32 fixture exercises the U32 branch; this test covers the Symbol
 // branch. Symbol is byte-identical to U32 at the kernel level
 // (both are 4-byte unsigned), so the same kernel applies — only
 // the schema-level type declaration differs.
@@ -813,18 +803,17 @@ fn symbol_typed_key_dispatches_nested_loop() {
 
     // Fixture: 100 rows each side, arity 2 (Symbol key + U32
     // payload). Keys are **deterministically unsorted** via
-    // rotate-halves (`[50..100, 0..50)`) so W4.3's sort-merge
+    // rotate-halves (`[50..100, 0..50)`) so sort-merge
     // dispatch detection returns `Ok(false)` and falls through,
-    // leaving W4.2 nested-loop directly certified by this test
-    // even after W4.3 introduces the precedence change.
+    // leaving nested-loop directly certified by this test even when
+    // sort-merge precedence is enabled.
     // All 100 keys still match (key-set on each side is
     // `[0..100)`, identical to a sorted fixture); 100 × 100 =
     // 10_000 ≪ 4_000_000 threshold → eligible. Inner + 1-key +
     // matching Symbol type → eligibility predicate accepts.
     //
-    // Same rotate-halves pattern as Cert A's U32 fixture — the
-    // unsorted-key invariant is uniform across W4.2 positive
-    // dispatch certs.
+    // Same rotate-halves pattern as the U32 fixture — the
+    // unsorted-key invariant is uniform across positive dispatch tests.
     let left_keys: Vec<u32> = (50..100u32).chain(0..50u32).collect();
     let right_keys: Vec<u32> = (50..100u32).chain(0..50u32).collect();
     let left_rows: Vec<(u32, u32)> = left_keys.iter().map(|&k| (k, 1000 + k)).collect();
