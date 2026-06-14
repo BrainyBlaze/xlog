@@ -656,6 +656,16 @@ class McDeviceEvalResult:
     nonmonotone_cycles: int
     nonmonotone_iteration_limit_hits: int
     sampling_method: str
+    resident_no_host_certified: bool
+    resident_no_host_policy_result: str
+    resident_no_host_tracked_dtoh_calls: int
+    resident_no_host_tracked_htod_calls: int
+    resident_no_host_host_loop_iterations: int
+    resident_no_host_per_sample_host_launches: int
+    resident_no_host_untracked_metadata_reads: int
+    resident_no_host_engine_launches: int
+    resident_no_host_host_fixpoint_iterations: int
+    resident_no_host_per_operator_host_allocations: int
 
 class DifferentiableProofTraceMap:
     """XLOG differentiable proof traces keyed by stable proof ids."""

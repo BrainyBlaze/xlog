@@ -286,6 +286,8 @@ pub struct McDeviceResult {
     /// engine's measured region (zero). The authoritative no-host contract is
     /// [`McNoHostStats`] on [`McResidentResult`]; see [`McHotLoopTransfers`].
     pub hot_loop_transfers: McHotLoopTransfers,
+    /// Authoritative no-host counters for the resident engine measured region.
+    pub no_host: McNoHostStats,
 }
 
 #[derive(Debug, Clone)]
@@ -702,6 +704,7 @@ impl McProgram {
         // returns device-resident counts. Programs outside the supported bounded
         // fragment fail closed (typed `ResidentRejection`).
         let r = self.evaluate_resident_with_provider(cfg, provider)?;
+        let no_host = r.no_host;
         Ok(McDeviceResult {
             query_counts: r.query_counts,
             evidence_count: r.evidence_count,
@@ -719,11 +722,12 @@ impl McProgram {
             // engine's tracked transfers (zero). Richer no-host evidence (untracked
             // reads, fixpoint/alloc counts) lives in `McResidentResult::no_host`.
             hot_loop_transfers: McHotLoopTransfers {
-                htod_calls: r.no_host.tracked_htod_calls,
-                dtoh_calls: r.no_host.tracked_dtoh_calls,
+                htod_calls: no_host.tracked_htod_calls,
+                dtoh_calls: no_host.tracked_dtoh_calls,
                 htod_bytes: 0,
                 dtoh_bytes: 0,
             },
+            no_host,
         })
     }
 
