@@ -10,16 +10,17 @@ The `pyxlog` Python module provides:
 - Probabilistic inference via `Program`
 - Term embedding registration and lookup via `register_embedding` / `forward_embedding`
 - Differentiable ILP training via `pyxlog.ilp` (rule learning from examples)
-- v0.8.9 UCR diagnostics for learned-rule inventories, CUDA hot-loop audits, and grouped transfer metrics
+- Reusable external-consumer diagnostics for learned-rule inventories, CUDA
+  hot-loop audits, and grouped transfer metrics
 - Zero-copy GPU tensor exchange via DLPack (primary interop boundary)
 - Optional experimental Arrow C Device interop (feature-gated)
-- v0.8.7 diagnostics for rule provenance, proof traces, relation delta debug,
+- Living-world diagnostics for rule provenance, proof traces, relation delta debug,
   temporal relation metadata, and neural hot-loop audits
 
 Host-read convenience outputs (probabilities, gradients, confidence intervals) are behind a `host-io`
-Cargo feature so GPU-native call sites can enforce a "no DTOH for results" contract.
-For the full v0.8.7 diagnostics map, see
-[`living-world-diagnostics-v087.md`](living-world-diagnostics-v087.md).
+Cargo feature so GPU-native call sites can enforce a "no device-to-host result
+transfer" contract. For the full living-world diagnostics map, see
+[`living-world-diagnostics.md`](living-world-diagnostics.md).
 
 ## Installation
 
@@ -205,7 +206,7 @@ debug = session.apply_relation_delta_debug(
 The delta stats dictionary contains `changed_relations`, `insert_rows`,
 `delete_rows`, `affected_sccs`, `recomputed_sccs`, `incremental_sccs`,
 `input_delta_count`, `coalesced_insert_rows`, `coalesced_delete_rows`, and
-`canceled_rows`. v0.8.7 delta debug output also includes
+`canceled_rows`. Delta debug output also includes
 `changed_relation_names`, `equivalent_to_full_recompute`, `debug_trace`, and
 nested `planner_telemetry`. Planner telemetry reports `cache_reused`,
 `fallback_decision`, affected/recomputed/incremental SCC counts,
@@ -252,7 +253,7 @@ metadata-only dictionary with `relation`, `generation`, `input_delta_count`,
 Callbacks are invoked synchronously while the pyxlog method holds the Python
 GIL. Registration order is callback order, and relation events are emitted in
 the caller's update order after duplicate relation names are coalesced. The
-G086_NOTIFY ordering fixture records 100 replays with identical callback
+relation-callback ordering fixture records 100 replays with identical callback
 sequences. Callback payload construction does not export DLPack tensors or
 download relation data-plane rows; use explicit `evaluate()` or
 `export_relation()` when row materialization is actually requested.
@@ -345,7 +346,7 @@ class RelationEvidence:
 `accepted_count`, `rejected_count`, `output_path`, `output_hash`, and
 `decision_counts` fields.
 
-#### v0.8.0 Runtime Controls And Diagnostics
+#### Runtime Controls And Diagnostics
 
 Long-running external consumer callers can submit logic or probabilistic evaluations to a
 background Python worker with `evaluate_async(...)`. The returned
@@ -531,7 +532,7 @@ These helpers exist to bridge between DLPack columns and Arrow's C Device interf
 copies. This is experimental and currently rejects nulls; import does not yet support bit-packed
 `Bool`.
 
-## Term Embeddings (v0.5.0)
+## Term Embeddings
 
 The `register_embedding` / `forward_embedding` API enables explicit PyTorch-side embedding training
 through the logic program. Embedding predicates use the label-free `nn/3` declaration form.
@@ -573,8 +574,10 @@ vectors = program.forward_embedding("entity_embed", [0, 5, 42])
 - `trainable=True` requires `nn.Embedding`; raw `torch.Tensor` with `trainable=True` raises `ValueError`
 - Raw tensors with `requires_grad=True` are detached at registration (frozen contract enforced)
 - Integer IDs only (symbol/string lookup keys deferred)
-- Optimizer ownership is user-managed (P2b APIs do not cover embeddings)
-- Inference through rules (dot/cosine evaluation, grounded query API) deferred to v0.5.1+
+- Optimizer ownership is user-managed; classification-network optimizer helpers
+  do not cover embeddings
+- Inference through rules (dot/cosine evaluation, grounded query API) is
+  deferred to future embedding-rule integration
 
 ---
 
@@ -597,11 +600,11 @@ batch_t = program.nll_loss_batch_tensor(queries)
 avg_loss = program.evaluate_loss(queries)
 ```
 
-### v0.8.0 external consumer Bridge Helpers
+### External Consumer Bridge Helpers
 
-M37-A+B bridge training keeps Belnap pro/contra/quarantine semantics in the
-Python/ML layer. Stage-4 structural kernels remain oblivious to those channels.
-The helper surfaces operate on PyTorch tensors and preserve autograd unless the
+External bridge training keeps Belnap pro/contra/quarantine semantics in the
+Python/ML layer. Structural kernels remain oblivious to those channels. The
+helper surfaces operate on PyTorch tensors and preserve autograd unless the
 caller explicitly detaches inputs.
 
 ```python
@@ -753,9 +756,9 @@ promotion.committed_source # str | None
 promotion.rule_inventory  # RuleInventory | None
 ```
 
-### v0.8.9 UCR Diagnostics
+### External Consumer Diagnostics
 
-The BFO Universal Case Reasoner work adds reusable pyxlog helpers for the audit
+External consumer validation work adds reusable pyxlog helpers for the audit
 surface that used to live in example validators:
 
 ```python
@@ -793,7 +796,7 @@ records those values with selected and rejected clauses, scores, and gate
 outcomes.
 
 For the full architecture map, see
-[`ucr-xlog-diagnostics.md`](ucr-xlog-diagnostics.md).
+[`external-consumer-diagnostics.md`](external-consumer-diagnostics.md).
 
 ### Device Query APIs
 
@@ -827,7 +830,7 @@ Contract notes:
 - `batch_fact_membership_device()` returns a DLPack bool tensor on CUDA
 - `batch_tagged_credit_device()` returns CSR-style device outputs:
   `fact_row_offsets`, `entry_indices`, `entry_i`, `entry_j`, `entry_k`
-- The device query path avoids semantic-loop DTOH transfers; inspect
+- The device query path avoids semantic-loop device-to-host transfers; inspect
   `host_transfer_stats()` / `reset_host_transfer_stats()` when enforcing that contract in tests
 - Unsigned metadata/count tensors are exported as DLPack `int32` for broad framework compatibility
 
@@ -878,14 +881,14 @@ and `.cubin` files are packaged build artifacts, not checked-in source files.
   is the preferred hot-loop path. Python/Torch performs ranking on CUDA, then Rust consumes only
   the selected subset and preserves that order as the sparse active-rule list.
 
-The selected-candidate path is the one to prefer when enforcing zero provider-side DTOH during
-mask setup.
+The selected-candidate path is the one to prefer when enforcing zero
+provider-side device-to-host transfer during mask setup.
 
 ### GPU-Native Contract
 
 For Python consumers that need an auditable GPU-native ILP hot loop, the intended contract is:
 
-- Zero provider-tracked semantic-loop DTOH:
+- Zero provider-tracked semantic-loop device-to-host transfer:
   `set_rule_mask_sparse_selected(...)`,
   `batch_fact_membership_device(...)`,
   `batch_tagged_credit_device(...)`,
@@ -1060,13 +1063,13 @@ except RuntimeError as e:
 import torch
 import pyxlog
 
-# Neural-symbolic training loop (v0.4.0-alpha):
+# Neural-symbolic training loop:
 # - neural predicate outputs (CUDA tensors) are imported via DLPack
 # - XLOG computes NLL gradients on GPU and calls output.backward(grad) internally
 
 source = """
 nn(mnist_net, [X], Y, [0,1,2,3,4,5,6,7,8,9]) :: digit(X, Y).
-addition(X, Y, Z) :- digit(X, D1), digit(Y, D2), Z is D1 + D2.
+addition(X, Y, Z) :- digit(X, LeftDigit), digit(Y, RightDigit), Z is LeftDigit + RightDigit.
 """
 program = pyxlog.Program.compile(source, prob_engine="exact_ddnnf")
 
@@ -1106,20 +1109,19 @@ for batch in data_loader:
 Current limitations:
 - Linux x86_64 + CUDA only
 - Published PyPI wheels follow tagged releases and may lag the current `main` branch workspace version
-- v0.8.0 async evaluation and per-call memory APIs require this workspace build
-  until the next tagged wheel is published
-- v0.8.7/v0.8.9 diagnostics APIs require this workspace build until the next
-  tagged wheel is published
+- Async evaluation, per-call memory APIs, and diagnostics APIs require this
+  workspace build until the next tagged wheel publishes those surfaces
 - Pure-Python helper modules can import without `pyxlog._native`, but
   native-backed compile/evaluate APIs still require the PyO3 extension
 
 ## See Also
 
-- [v0.8.7 Living-World Diagnostics](living-world-diagnostics-v087.md) — Rule
+- [Living-World Diagnostics](living-world-diagnostics.md) — Rule
   provenance, proof traces, delta debug, temporal metadata, and nn/4 hot-loop
   audit surface
 - [dILP Training Architecture](dilp-training.md) — System design, mask backends, promotion pipeline
-- [Universal Case Reasoner Diagnostics](ucr-xlog-diagnostics.md) — v0.8.9 reusable UCR audit surfaces
+- [External Consumer Diagnostics](external-consumer-diagnostics.md) — reusable
+  audit surfaces for external-consumer validation
 - [Data Interoperability](cudf-interop.md) — DLPack and Arrow details
 - [Probabilistic Tier](xlog-prob.md) — Inference engine details
 - [CLI Reference](cli-reference.md) — Command-line alternative

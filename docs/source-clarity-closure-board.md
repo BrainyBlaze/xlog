@@ -721,19 +721,19 @@ Hardware cache terminology such as `L1` and `L2` is allowed when it refers to GP
 | `docs/architecture/cudf-interop.md` | 0 | 0 | true |  |  |
 | `docs/architecture/device-runtime.md` | 0 | 0 | true |  |  |
 | `docs/architecture/dilp-showcase-report.md` | 0 | 0 | true |  |  |
-| `docs/architecture/dilp-training.md` | 8 | 0 | true | Expanded P0, D2H, DTOH, and versioned Universal Case Reasoner wording to GPU-resident and device-to-host descriptions. |  |
+| `docs/architecture/dilp-training.md` | 15 | 0 | true | Expanded P0, D2H, DTOH, versioned, and external-consumer diagnostics wording to GPU-resident, device-to-host, and external-consumer descriptions. |  |
 | `docs/architecture/epistemic-semantics.md` | 32 | 0 | true | G91/g91(13), release labels(11), goal labels(3), EGB tags(2), H2D/D2H(2), task-coded helper prefix(1) | Clarified Gelfond 1991 compatibility prose, production WCOJ reuse, accepted runtime surface, and transfer direction wording. |
 | `docs/architecture/gpu-execution.md` | 0 | 0 | true |  |  |
 | `docs/architecture/language-completeness.md` | 33 | 1 | true | release labels(13), G085 feature codes(19), branch/file naming artifact(1) | Renamed file and replaced release/milestone labels with language-completeness feature-area prose. |
-| `docs/architecture/living-world-diagnostics-v087.md` | 0 | 0 | true |  |  |
+| `docs/architecture/living-world-diagnostics.md` | 26 | 1 | true | release labels(3), scoped test labels(4), tracking IDs(17), external-consumer label(1), filename artifact(1) | Renamed file and replaced tracking IDs with descriptive diagnostic surfaces and verification areas. |
 | `docs/architecture/lwm-diagnostics-provenance.md` | 0 | 0 | true |  |  |
 | `docs/architecture/multi-gpu-join.md` | 4 | 0 | true | release labels(2), P2P(2) | Replaced release-target labels with design/current-roadmap wording and expanded peer-to-peer copy terminology. |
-| `docs/architecture/python-bindings.md` | 5 | 4 | false | v087(3), P2b(1), M37-A+B(1) | D1(2), D2(2) |
+| `docs/architecture/python-bindings.md` | 34 | 4 | true | release labels(16), diagnostics doc path labels(6), external-consumer names(6), DTOH(4), P2b(1), M37-A+B(1) | D1(2), D2(2) |
 | `docs/architecture/query-optimizer.md` | 2 | 0 | false | D2H(1), v086(1) |  |
 | `docs/architecture/recorded-launch-migration.md` | 0 | 0 | true |  |  |
 | `docs/architecture/rfc-tensorized-ilp.md` | 17 | 1 | false | D2H(9), M1(1), M2(1), M3(1), M4(1), M5(1) | D2H(1) |
 | `docs/architecture/solver-services.md` | 2 | 0 | false | D4(2) |  |
-| `docs/architecture/ucr-xlog-diagnostics.md` | 0 | 0 | true |  |  |
+| `docs/architecture/external-consumer-diagnostics.md` | 14 | 1 | true | external-consumer names(7), tracking IDs(6), release label(1), filename artifact(1) | Renamed file and replaced consumer-specific issue codes with reusable diagnostic surface descriptions. |
 | `docs/architecture/xlog-prob.md` | 15 | 0 | false | D4(13), P3(1), v085(1) |  |
 | `docs/certification/2026-01-12-cuda-certification-results.md` | 79 | 0 | false | C21(4), C01(3), C02(3), C03(3), C04(3), C05(3) |  |
 | `docs/certification/2026-01-14-cuda-certification-results.md` | 80 | 0 | false | C21(4), C01(3), C02(3), C03(3), C04(3), C05(3) |  |

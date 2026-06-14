@@ -1,27 +1,28 @@
-# Universal Case Reasoner Diagnostics
+# External Consumer Diagnostics
 
-This document records the v0.8.9 XLOG changes made after the BFO Universal Case
-Reasoner stress test. The example exposed six reusable gaps that should belong
-to XLOG or pyxlog rather than one project-specific validator.
+This document records reusable XLOG changes made after an external-consumer
+stress test. The example exposed six reusable gaps that should belong to XLOG or
+pyxlog rather than one project-specific validator.
 
 The reusable surface now covers joint neural/symbolic training, differentiable
 proof traces, learned-rule inventories, CUDA host-transfer audits, module
-boundary diagnostics, and grouped transfer metrics. The BFO example remains
-responsible only for domain semantics, evidence files, and scientific thresholds.
+boundary diagnostics, and grouped transfer metrics. The external-consumer
+example remains responsible only for domain semantics, evidence files, and
+scientific thresholds.
 
 ## Issue Map
 
 | Finding | Upstream owner | Runtime surface | Regression |
 | --- | --- | --- | --- |
-| `UCR-XLOG-001` | `pyxlog.ilp` | `train_neurosymbolic_program(...)` trains `nn/4` outputs and symbolic rule weights from one source through the real engine (native parse + GPU circuit evaluation via `forward_backward`) | `python/tests/test_nn4_dilp_training_surface.py` |
-| `UCR-XLOG-002` | `xlog-logic` | `DifferentiableProofTraceMap` exports stable proof IDs, support atoms, clause weights, and gradients | `crates/xlog-logic/tests/differentiable_proof_trace.rs` |
-| `UCR-XLOG-003` | `pyxlog.ilp` | `RuleInventory` and `PromotionResult.rule_inventory` record selected/rejected clauses, folds, held-out domains, and kernel checksums | `python/tests/test_ilp_rule_inventory.py` |
-| `UCR-XLOG-004` | `pyxlog` | `CudaExecutionAudit` fails closed on tensor host materialization, scalar extraction, score-row downloads, or recorded transfers | `python/tests/test_nn4_cuda_no_host_transfer_contract.py` |
-| `UCR-XLOG-005` | `xlog-logic` | `diagnose_module_boundaries(...)` checks frozen kernels, adapter-only facts, held-out modules, and candidate provenance | `crates/xlog-logic/tests/module_boundary_diagnostics.rs` |
-| `UCR-XLOG-006` | `pyxlog` | `compute_transfer_diagnostics(...)` recomputes grouped F1, bootstrap intervals, baseline uplift, paired tests, and missing groups | `python/tests/test_transfer_metric_diagnostics.py` |
+| Joint neural-symbolic training | `pyxlog.ilp` | `train_neurosymbolic_program(...)` trains `nn/4` outputs and symbolic rule weights from one source through the real engine (native parse + GPU circuit evaluation via `forward_backward`) | `python/tests/test_nn4_dilp_training_surface.py` |
+| Differentiable proof traces | `xlog-logic` | `DifferentiableProofTraceMap` exports stable proof IDs, support atoms, clause weights, and gradients | `crates/xlog-logic/tests/differentiable_proof_trace.rs` |
+| Learned-rule inventories | `pyxlog.ilp` | `RuleInventory` and `PromotionResult.rule_inventory` record selected/rejected clauses, folds, held-out domains, and kernel checksums | `python/tests/test_ilp_rule_inventory.py` |
+| CUDA host-transfer audits | `pyxlog` | `CudaExecutionAudit` fails closed on tensor host materialization, scalar extraction, score-row downloads, or recorded transfers | `python/tests/test_nn4_cuda_no_host_transfer_contract.py` |
+| Module-boundary diagnostics | `xlog-logic` | `diagnose_module_boundaries(...)` checks frozen kernels, adapter-only facts, held-out modules, and candidate provenance | `crates/xlog-logic/tests/module_boundary_diagnostics.rs` |
+| Grouped transfer metrics | `pyxlog` | `compute_transfer_diagnostics(...)` recomputes grouped F1, bootstrap intervals, baseline uplift, paired tests, and missing groups | `python/tests/test_transfer_metric_diagnostics.py` |
 
-The machine-readable ledger and minimal reproducers live under
-`examples/BFO/universal_case_reasoner/`.
+The machine-readable ledger and minimal reproducers live in the external
+consumer example package.
 
 ## Core XLOG Additions
 
@@ -82,11 +83,10 @@ extension is not available.
 
 ## Example And Packaging Scope
 
-`examples/BFO/universal_case_reasoner/` contains the BFO UCR validation package:
-requirements, goals, validation plan, source programs, evidence JSON, minimal
-reproducers, project-specific tests, and the resolved `xlog_issue_ledger.json`.
-Those files document the domain-specific behavior that remains outside core
-XLOG.
+The external consumer example package contains requirements, goals, validation
+plan, source programs, evidence JSON, minimal reproducers, project-specific
+tests, and the resolved `xlog_issue_ledger.json`. Those files document the
+domain-specific behavior that remains outside core XLOG.
 
 The pyxlog kernel staging script now builds the release pyxlog target before it
 resolves the release `OUT_DIR`. This prevents stale release kernel artifacts from

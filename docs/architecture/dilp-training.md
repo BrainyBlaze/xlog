@@ -179,10 +179,10 @@ W (N×N×N logits) → Gumbel-Softmax(τ) → 3D soft mask
    - **Typed-schema gate** — optional hard gate requiring relation type metadata (or waiver-driven manual review)
 5. All pass → `PromotionStatus.PROMOTED` with `committed_source`
 
-### Universal Case Reasoner Training Surface
+### External Consumer Training Surface
 
-The Universal Case Reasoner validation work added a higher-level training entry
-point for sources that mix neural predicates and trainable symbolic clauses:
+External consumer validation work added a higher-level training entry point for
+sources that mix neural predicates and trainable symbolic clauses:
 
 ```python
 from pyxlog.ilp.neurosymbolic import NeuroSymbolicTrainingConfig, train_neurosymbolic_program
@@ -247,12 +247,12 @@ RFC. The live references are:
 |----------|---------|
 | [`rfc-tensorized-ilp.md`](rfc-tensorized-ilp.md) | Full RFC: mathematical foundation, hardware rationale, implementation map, and resolved design decisions |
 | [`dilp-showcase-report.md`](dilp-showcase-report.md) | Validation: four-stage showcase run analysis |
-| [`ucr-xlog-diagnostics.md`](ucr-xlog-diagnostics.md) | Universal Case Reasoner issue resolutions and reusable diagnostics |
+| [`external-consumer-diagnostics.md`](external-consumer-diagnostics.md) | External-consumer issue resolutions and reusable diagnostics |
 
 ## See Also
 
 - [Python Bindings — ILP Training API](python-bindings.md#ilp-training-dilp-beta) — user-facing API reference
-- [Universal Case Reasoner Diagnostics](ucr-xlog-diagnostics.md) — proof traces, rule inventories, runtime audits, and transfer metrics
+- [External Consumer Diagnostics](external-consumer-diagnostics.md) — proof traces, rule inventories, runtime audits, and transfer metrics
 - [GPU Execution](gpu-execution.md) — mask DAG evaluation, stream compaction
 - [Probabilistic Tier](xlog-prob.md) — XGCF circuits, provenance (shared infrastructure)
 - [Data Interoperability](cudf-interop.md) — DLPack details

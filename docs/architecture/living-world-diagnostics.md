@@ -1,9 +1,9 @@
-# v0.8.7 Living-World Diagnostics Architecture
+# Living-World Diagnostics Architecture
 
-v0.8.7 adds the audit surfaces needed to explain living-world logic workloads:
-generated rules, source rules, query proofs, biomedical graph ingestion,
-relation deltas, validation staging, relation evidence, and neural hot-loop
-runtime state can now be inspected through stable Rust, CLI, and pyxlog APIs.
+The living-world diagnostics surface explains generated rules, source rules,
+query proofs, biomedical graph ingestion, relation deltas, validation staging,
+relation evidence, and neural hot-loop runtime state through stable Rust, CLI,
+and pyxlog APIs.
 
 The design goal is observability without changing the production data path. The
 new diagnostics describe rule and relation metadata, hashes, counters, and
@@ -14,18 +14,18 @@ caller already selected a host-readable API.
 
 | Workload gap | Surface | Primary implementation | Public API |
 |---|---|---|---|
-| XLOG-LWM-001 induced-rule audit | Generated rule provenance | `crates/xlog-induce/src/provenance.rs` | `InducedRuleProvenance`, `InductionProvenanceRegistry` |
-| XLOG-LWM-002 rule origin audit | Source/generated rule provenance | `crates/xlog-logic/src/diagnostics.rs` | `xlog explain`, `CompiledLogicProgram.rule_provenance()`, `LogicRelationSession.rule_provenance()`, `CompiledProgram.rule_provenance()` |
-| XLOG-LWM-003 delta replay audit | Relation delta debug summaries | `crates/xlog-gpu/src/logic.rs`, `crates/pyxlog/src/logic.rs` | `LogicRelationSession.apply_relation_delta_debug(...)`, `delta_stats()` |
-| XLOG-LWM-004 temporal/source audit | Temporal relation metadata | `crates/pyxlog/python/pyxlog/__init__.py` | `LogicRelationSession.put_temporal_relation(...)`, `temporal_provenance(...)` |
-| XLOG-LWM-005 query proof audit | Direct query proof traces | `crates/xlog-logic/src/diagnostics.rs` | `xlog explain`, `proof_traces()` on deterministic and probabilistic pyxlog programs |
-| XLOG-LWM-006 neural hot-loop audit | Unified nn/4 diagnostics | `crates/pyxlog/src/program.rs` | `CompiledProgram.neural_hot_loop_diagnostics()` |
-| XLOG-BIOKG-001 graph ingestion audit | Native streamed biomedical graph rows | `crates/xlog-gpu/src/biokg.rs` | `StreamingGraphRelationLoader`, `GraphInputFormat` |
-| XLOG-GENRULE-002 generated-rule row audit | Accepted/rejected row decisions | `crates/xlog-cli/src/main.rs` | `xlog explain --format json` `generated_rule_diagnostics` |
-| XLOG-PYXLOG-003 relation evidence audit | Session and relation provenance APIs | `crates/pyxlog/python/pyxlog/__init__.py` | `put_relation_with_provenance(...)`, `evidence(...)`, `RelationEvidence.provenance()` |
-| XLOG-NN4-004 nn/4 lineage audit | Checkpoint/split/calibration/influence metadata | `crates/pyxlog/python/pyxlog/__init__.py` | `register_network(...checkpoint_hash=...)`, `nn4_lineage()`, `record_nn4_influence(...)` |
-| XLOG-DELTA-005 delta planner audit | Cache/fallback/speedup telemetry | `crates/xlog-gpu/src/logic.rs`, `crates/pyxlog/src/logic.rs` | `DeltaPlannerTelemetry`, `delta_stats()["planner_telemetry"]` |
-| XLOG-REPRO-006 validation staging audit | Promote-only-on-PASS evidence staging | `scripts/validation_staging.py` | `ValidationStagingRun` |
+| Induced-rule audit | Generated rule provenance | `crates/xlog-induce/src/provenance.rs` | `InducedRuleProvenance`, `InductionProvenanceRegistry` |
+| Rule origin audit | Source/generated rule provenance | `crates/xlog-logic/src/diagnostics.rs` | `xlog explain`, `CompiledLogicProgram.rule_provenance()`, `LogicRelationSession.rule_provenance()`, `CompiledProgram.rule_provenance()` |
+| Delta replay audit | Relation delta debug summaries | `crates/xlog-gpu/src/logic.rs`, `crates/pyxlog/src/logic.rs` | `LogicRelationSession.apply_relation_delta_debug(...)`, `delta_stats()` |
+| Temporal/source audit | Temporal relation metadata | `crates/pyxlog/python/pyxlog/__init__.py` | `LogicRelationSession.put_temporal_relation(...)`, `temporal_provenance(...)` |
+| Query proof audit | Direct query proof traces | `crates/xlog-logic/src/diagnostics.rs` | `xlog explain`, `proof_traces()` on deterministic and probabilistic pyxlog programs |
+| Neural hot-loop audit | Unified nn/4 diagnostics | `crates/pyxlog/src/program.rs` | `CompiledProgram.neural_hot_loop_diagnostics()` |
+| Biomedical graph ingestion audit | Native streamed biomedical graph rows | `crates/xlog-gpu/src/biokg.rs` | `StreamingGraphRelationLoader`, `GraphInputFormat` |
+| Generated-rule row audit | Accepted/rejected row decisions | `crates/xlog-cli/src/main.rs` | `xlog explain --format json` `generated_rule_diagnostics` |
+| Relation evidence audit | Session and relation provenance APIs | `crates/pyxlog/python/pyxlog/__init__.py` | `put_relation_with_provenance(...)`, `evidence(...)`, `RelationEvidence.provenance()` |
+| Neural lineage audit | Checkpoint/split/calibration/influence metadata | `crates/pyxlog/python/pyxlog/__init__.py` | `register_network(...checkpoint_hash=...)`, `nn4_lineage()`, `record_nn4_influence(...)` |
+| Delta planner audit | Cache/fallback/speedup telemetry | `crates/xlog-gpu/src/logic.rs`, `crates/pyxlog/src/logic.rs` | `DeltaPlannerTelemetry`, `delta_stats()["planner_telemetry"]` |
+| Validation staging audit | Promote-only-on-PASS evidence staging | `scripts/validation_staging.py` | `ValidationStagingRun` |
 
 ## Rule And Proof Diagnostics
 
@@ -72,10 +72,10 @@ For generated-rule candidates, JSON output also emits
 - `threshold_comparisons` with left/right values and pass/fail status
 - `aggregate_inputs`
 
-This is the XLOG-GENRULE-002 surface for explaining both accepted generated-rule
+This generated-rule diagnostic surface explains both accepted generated-rule
 rows and rejected rows whose predicates or threshold checks failed.
 Generated-rule diagnostics cover inline generated facts and external candidate
-relations. For external inputs such as the BFO generated Hugging Face program,
+relations. For external inputs such as an external generated program,
 `xlog explain --format json` resolves `xlog_hypothesis_execution.json`, reads
 `relation_input_columns` plus `relation_input_path`, binds those rows to the
 candidate input atom, and computes threshold decisions inside the CLI report
@@ -121,15 +121,15 @@ audit layer for selected generated rules and their alternatives.
 
 ## Biomedical Graph Streaming
 
-`xlog_gpu::biokg` provides the XLOG-BIOKG-001 native ingestion surface for
-large typed biomedical graph streams:
+`xlog_gpu::biokg` provides the native ingestion surface for large typed
+biomedical graph streams:
 
 ```rust
 use xlog_gpu::biokg::{GraphInputFormat, StreamingGraphRelationLoader};
 
 let report = StreamingGraphRelationLoader::new(GraphInputFormat::Jsonl)
     .with_chunk_rows(100_000)
-    .load_path_with_sink("primekg_edges.jsonl", |edge| {
+    .load_path_with_sink("graph_edges.jsonl", |edge| {
         // Stream `edge.subject`, `edge.predicate`, `edge.object`, `edge.split`,
         // and `edge.row_hash` into the caller's relation builder.
     })?;
@@ -187,7 +187,7 @@ full evaluation.
 
 Relation callbacks receive the same changed-relation names and debug trace inside
 their metadata payload. The callback path remains metadata-only.
-The nested `planner_telemetry` dictionary is the XLOG-DELTA-005 surface: it
+The nested `planner_telemetry` dictionary is the delta planner audit surface: it
 reports affected SCCs, cache reuse, fallback decision, estimated/measured delta
 speedup when available, and planner advice for incremental-vs-full recompute
 tradeoffs.
@@ -202,7 +202,7 @@ session.put_temporal_relation(
     "events",
     [event_id, timestamp],
     timestamp_column="ts",
-    dataset_id="bfo-lwm",
+    dataset_id="external-stream",
     row_hashes=["..."],
     field_hashes={"ts": ["..."]},
     uncertainty={"kind": "interval"},
@@ -217,7 +217,7 @@ name returns only that relation's metadata. The store is session-local and
 in-memory; it is an audit companion for the relation store, not a persistence
 format.
 
-The general XLOG-PYXLOG-003 evidence API is separate from temporal metadata:
+The general pyxlog evidence API is separate from temporal metadata:
 
 ```python
 session.put_relation_with_provenance(
@@ -255,7 +255,7 @@ When the runtime cannot provide a separate control-plane or scalar-sync counter,
 the value is `None` and the matching status field explains that the counter is
 unavailable. Unsupported probes must not be reported as fake zeroes.
 
-The XLOG-NN4-004 lineage companion is exposed by the top-level pyxlog wrapper:
+The nn/4 lineage companion is exposed by the top-level pyxlog wrapper:
 
 ```python
 program.register_network(
@@ -285,9 +285,9 @@ hot-loop counters.
 
 ## Validation Staging
 
-`scripts.validation_staging.ValidationStagingRun` is the XLOG-REPRO-006
-repo-level staging helper for long-running evidence jobs. Writers put summaries
-and artifacts under a fresh staging directory; `promote_if_pass({"status":
+`scripts.validation_staging.ValidationStagingRun` is the repo-level staging
+helper for long-running evidence jobs. Writers put summaries and artifacts under
+a fresh staging directory; `promote_if_pass({"status":
 "PASS"})` copies staged artifacts into the canonical evidence directory. Failed
 or canceled runs append `validation_events.jsonl` records and leave canonical
 evidence untouched.
@@ -300,24 +300,16 @@ run.promote_if_pass({"status": "PASS"})
 
 ## Verification
 
-The scoped v0.8.7 diagnostics checks are:
+The diagnostics verification checks cover:
 
-```bash
-pytest -q python/tests/test_v080_delta_source.py \
-  python/tests/test_v086_delta_coalescing.py \
-  python/tests/test_v086_relation_callbacks.py \
-  python/tests/test_v087_lwm_source.py \
-  python/tests/test_pyxlog_evidence_api.py \
-  python/tests/test_nn4_training_lineage.py \
-  python/tests/test_validation_staging.py
-cargo test -p xlog-cli --test explain_cli_tests
-cargo test -p xlog-cli --test generated_rule_diagnostics
-cargo test -p xlog-gpu --test biokg_streaming_relation_loader \
-  --test relation_delta_planner_telemetry
-cargo test -p xlog-induce
-cargo check -p pyxlog --features extension-module,host-io
-git diff --check
-```
+- Python source tests for delta source behavior, delta coalescing, relation
+  callbacks, living-world source diagnostics, pyxlog evidence APIs, nn/4
+  training lineage, and validation staging;
+- CLI tests for explain output and generated-rule diagnostics;
+- GPU tests for biomedical graph streaming and relation-delta planner telemetry;
+- xlog-induce tests;
+- pyxlog extension-crate checks with `extension-module,host-io`;
+- git whitespace checks.
 
 `cargo test -p pyxlog --lib` is not the gate for this cdylib extension crate in
 this workspace because direct Rust test linking does not provide the Python
