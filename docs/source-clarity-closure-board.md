@@ -743,7 +743,7 @@ Hardware cache terminology such as `L1` and `L2` is allowed when it refers to GP
 | `docs/language-reference.md` | 77 | 5 | true | release/version labels(56), implementation checkpoint labels(12), Gelfond 1991 shorthand(7), external-compiler label(1), transfer shorthand(1) | example digit variables(4), diagnostic release label(1) |
 | `docs/release-process.md` | 0 | 0 | true |  |  |
 | `docs/reports/2026-05-31-mc-gpu-resident-engine-bundles-1-3.md` | 0 | 0 | true |  |  |
-| `docs/reports/2026-05-31-v091-v092-epistemic-completion-supervisor-report.md` | 10 | 0 | false | v092(5), G91(4), v090(1) |  |
+| `docs/reports/2026-05-31-epistemic-completion-supervisor-report.md` | 45 | 1 | true | release/branch labels(24), executor-bundle codes(11), semantic-case labels(5), Gelfond 1991 shorthand(4), constraint gap code(1) | filename artifact(1) |
 | `docs/reports/2026-06-01-v092-full-semantic-completion-supervisor-report.md` | 12 | 0 | false | v092(4), G91(4), L1(2), S5(1), C2(1) |  |
 | `docs/reports/2026-06-02-v092-epistemic-final-closure-record.md` | 4 | 0 | false | v092(2), G91(1), C2(1) |  |
 | `docs/v065-closure-board.md` | 228 | 0 | false | W2.3(12), W2.1(11), W2.4(10), W2.2(9), W2.6(8), W5.2(8) |  |
