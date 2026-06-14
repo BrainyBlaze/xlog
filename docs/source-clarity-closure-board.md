@@ -1326,7 +1326,7 @@ Hardware cache terminology such as `L1` and `L2` is allowed when it refers to GP
 | `examples/language-completeness/showcase/10_scientific_incremental/README.md` | 0 | 0 | true |  |  |
 | `examples/language-completeness/showcase/10_scientific_incremental/expected.json` | 0 | 0 | true |  |  |
 | `examples/language-completeness/showcase/10_scientific_incremental/program.xlog` | 0 | 0 | true |  |  |
-| `examples/language-completeness/showcase/README.md` | 1 | 0 | false | v085(1) |  |
+| `examples/language-completeness/showcase/README.md` | 4 | 1 | true | release/suite/sub-goal labels(4) | release-specific validator path label(1) |
 | `examples/v086-runtime/01_dts_delta_optimizer/README.md` | 0 | 0 | true |  |  |
 | `examples/v086-runtime/01_dts_delta_optimizer/expected.json` | 0 | 0 | true |  |  |
 | `examples/v086-runtime/01_dts_delta_optimizer/program.xlog` | 0 | 0 | true |  |  |
