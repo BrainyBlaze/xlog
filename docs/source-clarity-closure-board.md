@@ -3,9 +3,9 @@
 Scope: Git-tracked source and documentation files only. Superpowers docs, plan files, evidence directories, generated artifacts, result/output directories, build output, and other worktrees are excluded.
 
 Scanned files: 1430
-Unresolved files: 251
-Comment/prose artifact occurrences: 1558
-Code/identifier artifact occurrences: 685
+Unresolved files: 250
+Comment/prose artifact occurrences: 1557
+Code/identifier artifact occurrences: 683
 
 Resolved means this board found no remaining opaque task/milestone labels or external consumer names in the eligible portions of that file.
 
@@ -318,7 +318,7 @@ Hardware cache terminology such as `L1` and `L2` is allowed when it refers to GP
 | `crates/xlog-cuda/tests/build_script_tests.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-cuda/tests/common/mod.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-cuda/tests/compact_device_count.rs` | 0 | 0 | true |  |  |
-| `crates/xlog-cuda/tests/d4_provider_tests.rs` | 1 | 2 | false | D4(1) | D4(2) |
+| `crates/xlog-cuda/tests/decision_dnnf_provider_tests.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-cuda/tests/device_row_counts.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-cuda/tests/device_runtime_singleton.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-cuda/tests/dlpack_tests.rs` | 0 | 0 | true |  |  |
