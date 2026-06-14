@@ -3,15 +3,15 @@
 Scope: Git-tracked source and documentation files only. Superpowers docs, plan files, evidence directories, generated artifacts, result/output directories, build output, and other worktrees are excluded.
 
 Scanned files: 1430
-Unresolved files: 261
-Comment/prose artifact occurrences: 1712
+Unresolved files: 260
+Comment/prose artifact occurrences: 1705
 Code/identifier artifact occurrences: 686
 
 Resolved means this board found no remaining opaque task/milestone labels or external consumer names in the eligible portions of that file.
 
 Stable links to excluded plan/evidence artifact paths are not counted as source-code shorthand; their filenames remain unchanged to avoid breaking historical references.
 
-Technical host-transfer terminology such as `D2H`, `DTOH`, and `H2D` is allowed when it refers to device-to-host or host-to-device transfer behavior.
+Technical transfer terminology such as `D2H`, `DTOH`, `H2D`, and `D2D` is allowed when it refers to device-to-host, host-to-device, or device-to-device transfer behavior.
 
 Hardware cache terminology such as `L1` and `L2` is allowed when it refers to GPU level-1 or level-2 cache behavior.
 
@@ -297,7 +297,7 @@ Hardware cache terminology such as `L1` and `L2` is allowed when it refers to GP
 | `crates/xlog-cuda/src/provider/fj.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-cuda/src/provider/groupby.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-cuda/src/provider/ilp.rs` | 0 | 0 | true |  |  |
-| `crates/xlog-cuda/src/provider/ilp_exact.rs` | 7 | 0 | false | D2H(4), D2D(2), M8(1) |  |
+| `crates/xlog-cuda/src/provider/ilp_exact.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-cuda/src/provider/io.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-cuda/src/provider/kernel_loading.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-cuda/src/provider/kernel_paths.rs` | 0 | 0 | true |  |  |
