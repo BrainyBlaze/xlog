@@ -3,9 +3,9 @@
 Scope: Git-tracked source and documentation files only. Superpowers docs, plan files, evidence directories, generated artifacts, result/output directories, build output, and other worktrees are excluded.
 
 Scanned files: 1430
-Unresolved files: 285
-Comment/prose artifact occurrences: 1811
-Code/identifier artifact occurrences: 702
+Unresolved files: 284
+Comment/prose artifact occurrences: 1809
+Code/identifier artifact occurrences: 700
 
 Resolved means this board found no remaining opaque task/milestone labels or external consumer names in the eligible portions of that file.
 
@@ -29,6 +29,7 @@ Hardware cache terminology such as `L2` is allowed when it refers to GPU level-2
 | `W2.5` | WCOJ cost-model default flip to the cardinality model |
 | `D2` | GPU Free Join level-synchronous factorized join execution |
 | `S2` | provider-level Free Join frontier-engine spike and measurement gates |
+| `S1d` | aggregate-fused WCOJ 4-cycle group-by-root sum/min/max variants |
 | `W5.2` | hub-skewed WCOJ triangle benchmark fixture |
 | `G38` | GPU skew-classifier integration path |
 | `W5.4` | widened-frontier replay determinism certification |
@@ -217,7 +218,7 @@ Hardware cache terminology such as `L2` is allowed when it refers to GPU level-2
 | `crates/xlog-cuda-tests/tests/quick_smoke.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-cuda-tests/tests/require_cuda_guard.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-cuda-tests/tests/test_free_join_spike.rs` | 0 | 0 | true |  |  |
-| `crates/xlog-cuda-tests/tests/test_wcoj_4cycle_groupby_root_agg.rs` | 2 | 2 | false | S1d(2) | S1d(2) |
+| `crates/xlog-cuda-tests/tests/test_wcoj_4cycle_groupby_root_agg.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-cuda-tests/tests/test_wcoj_4cycle_groupby_root_count.rs` | 4 | 4 | false | S1c(2), S1d(2) | S1c(2), S1d(2) |
 | `crates/xlog-cuda-tests/tests/test_wcoj_clique_groupby_root_count.rs` | 2 | 2 | false | S1e(2) | S1e(2) |
 | `crates/xlog-cuda-tests/tests/test_wcoj_groupby_root_agg.rs` | 5 | 4 | false | S1c(2), D1(1), S1b(1), S1d(1) | S1b(2), S1c(2) |
