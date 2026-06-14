@@ -5,7 +5,7 @@ validation surface for `examples/BFO/universal_case_reasoner/`. It is
 deliberately fail-closed: an unsupported or missing production capability is a
 `FAIL` blocker in `validation_summary.json`, not a reason to weaken the target.
 
-## P0 Hard Gates
+## Production-Blocking Gates
 
 Authoritative command:
 
@@ -14,7 +14,7 @@ Authoritative command:
 ```
 
 Validation must record the command line, git branch, git SHA, runtime details,
-P0 gate status, GQM metrics, raw evidence paths, explanation paths, and exact
+Production-blocking gate status, GQM metrics, raw evidence paths, explanation paths, and exact
 blockers. `validate.sh` delegates to `tools/validate_universal_case_reasoner.py`
 and writes `validation_summary.json` by default.
 
@@ -239,7 +239,7 @@ Checks:
 - Hardware and CUDA/PyTorch/XLOG runtime details.
 - Commands executed.
 - Metric values for every GQM question.
-- PASS/FAIL for every P0 gate.
+- PASS/FAIL for every production-blocking gate.
 - Raw output paths.
 - Explanation paths.
 - Failure/blocker descriptions with exact requirement IDs.

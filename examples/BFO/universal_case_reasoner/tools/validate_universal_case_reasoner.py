@@ -72,16 +72,16 @@ FORBIDDEN_LABEL_MAPPING_DATASETS = {
     "BFDS-Project/Bearing-Fault-Diagnosis-System",
 }
 GENERALIZATION_REQUIREMENTS = {
-    "GEN-001": "Leave-one-domain-out evaluation covers every production domain.",
-    "GEN-002": "Every held-out domain has at least 100 real Hugging Face cases with row and field hashes.",
-    "GEN-003": "Macro held-out root-cause F1 is >= 0.90 and every domain F1 is >= 0.85.",
-    "GEN-004": "Held-out candidate spaces are not constructed from held-out test RCA/root/intervention labels.",
-    "GEN-005": "BFO rules, learned rules, neural architecture, thresholds, aliases, and scoring weights are frozen before held-out evaluation.",
-    "GEN-006": "At least one held-out evaluation uses an unseen dataset family.",
-    "GEN-007": "Strong baselines cover neural-only, symbolic-only, domain-specific classifier, retrieval/RAG nearest-neighbor, majority/prior, and neuro-symbolic methods.",
-    "GEN-008": "Bootstrap confidence intervals and paired significance tests are reported.",
-    "GEN-009": "Adversarial domain-shift variants are evaluated.",
-    "GEN-010": "Validator recomputes aggregate generalization metrics from raw records with no excluded domains.",
+    "leave_one_domain_out_coverage": "Leave-one-domain-out evaluation covers every production domain.",
+    "minimum_heldout_domain_size": "Every held-out domain has at least 100 real Hugging Face cases with row and field hashes.",
+    "macro_transfer_quality": "Macro held-out root-cause F1 is >= 0.90 and every domain F1 is >= 0.85.",
+    "heldout_candidate_independence": "Held-out candidate spaces are not constructed from held-out test RCA/root/intervention labels.",
+    "frozen_model_and_ranker": "BFO rules, learned rules, neural architecture, thresholds, aliases, and scoring weights are frozen before held-out evaluation.",
+    "unseen_dataset_transfer": "At least one held-out evaluation uses an unseen dataset family.",
+    "strong_baseline_uplift": "Strong baselines cover neural-only, symbolic-only, domain-specific classifier, retrieval/RAG nearest-neighbor, majority/prior, and neuro-symbolic methods.",
+    "statistical_confidence": "Bootstrap confidence intervals and paired significance tests are reported.",
+    "adversarial_domain_shift": "Adversarial domain-shift variants are evaluated.",
+    "aggregate_generalization_recompute": "Validator recomputes aggregate generalization metrics from raw records with no excluded domains.",
 }
 REQUIRED_GENERALIZATION_BASELINES = {
     "neural_only",
@@ -113,13 +113,13 @@ GENERALIZATION_THRESHOLDS = {
     "baseline_uplift_pct": 15.0,
     "adversarial_macro_f1": 0.80,
 }
-DILP_REQUIREMENTS = {
-    "DILP-001": "XLOG proof-path clauses are executed and selected for rule induction.",
-    "DILP-002": "Neural predicates and symbolic rule weights are trained jointly on CUDA.",
-    "DILP-003": "Learned rule inventories cover every leave-one-domain-out fold.",
-    "DILP-004": "Clause ablations are reported and full DILP macro F1 is >= 0.90 while matching or beating every learned-clause ablation.",
-    "DILP-005": "Proof-level gradients are present and device-resident.",
-    "DILP-006": "Rule induction is held-out safe and uses no held-out labels during training.",
+DIFFERENTIABLE_INDUCTIVE_LOGIC_REQUIREMENTS = {
+    "xlog_proof_paths": "XLOG proof-path clauses are executed and selected for rule induction.",
+    "joint_training": "Neural predicates and symbolic rule weights are trained jointly on CUDA.",
+    "rule_inventory": "Learned rule inventories cover every leave-one-domain-out fold.",
+    "clause_ablations": "Clause ablations are reported and full differentiable ILP macro F1 is >= 0.90 while matching or beating every learned-clause ablation.",
+    "proof_gradients": "Proof-level gradients are present and device-resident.",
+    "heldout_safe_induction": "Rule induction is held-out safe and uses no held-out labels during training.",
 }
 
 
@@ -1187,7 +1187,7 @@ def _generalization_assessment(production_transfer: dict[str, Any]) -> dict[str,
     uses_generalization_records = (
         record_source == "metric_inputs.generalization_prediction_records"
     )
-    gen010_passed = (
+    aggregate_generalization_recompute_passed = (
         uses_generalization_records
         and bool(domains)
         and not missing_domains
@@ -1196,19 +1196,19 @@ def _generalization_assessment(production_transfer: dict[str, Any]) -> dict[str,
     )
 
     gates = {
-        "GEN-001": {
+        "leave_one_domain_out_coverage": {
             "passed": bool(domains) and not missing_domains and bool(evaluated_domains),
             "evaluated_domains": sorted(evaluated_domains),
             "required_domains": sorted(domains),
             "missing_domains": missing_domains,
         },
-        "GEN-002": {
+        "minimum_heldout_domain_size": {
             "passed": min_case_requirement_passed,
             "case_count_by_domain": case_count_by_domain,
             "hash_coverage_by_domain": hash_coverage_by_domain,
             "minimum_required_per_domain": 100,
         },
-        "GEN-003": {
+        "macro_transfer_quality": {
             "passed": bool(domains)
             and not missing_domains
             and macro_f1 >= GENERALIZATION_THRESHOLDS["macro_f1"]
@@ -1218,7 +1218,7 @@ def _generalization_assessment(production_transfer: dict[str, Any]) -> dict[str,
             "f1_by_domain": f1_by_domain,
             "metric": "standard_multiclass_macro_f1",
         },
-        "GEN-004": {
+        "heldout_candidate_independence": {
             "passed": candidate_independence_passed,
             "record_source": record_source,
             "required_candidate_generation_flags": {
@@ -1226,18 +1226,18 @@ def _generalization_assessment(production_transfer: dict[str, Any]) -> dict[str,
                 "constructed_before_heldout_labels": True,
             },
         },
-        "GEN-005": {
+        "frozen_model_and_ranker": {
             "passed": frozen_passed and ranker_passed,
             "frozen_model_rules": frozen,
             "neural_ranker": ranker,
             "required_frozen_keys": frozen_keys,
         },
-        "GEN-006": {
+        "unseen_dataset_transfer": {
             "passed": unseen_passed,
             "unseen_dataset_transfer": unseen,
             "raw_unseen_record_count": len(unseen_records),
         },
-        "GEN-007": {
+        "strong_baseline_uplift": {
             "passed": baseline_uplift_passed,
             "baseline_methods": sorted(baseline_methods),
             "required_baselines": sorted(REQUIRED_GENERALIZATION_BASELINES),
@@ -1249,12 +1249,12 @@ def _generalization_assessment(production_transfer: dict[str, Any]) -> dict[str,
                 "baseline_uplift_pct"
             ],
         },
-        "GEN-008": {
+        "statistical_confidence": {
             "passed": confidence_passed,
             "statistical_confidence": confidence,
             "required_domains": sorted(domains),
         },
-        "GEN-009": {
+        "adversarial_domain_shift": {
             "passed": adversarial_passed,
             "variants": sorted(adversarial_variants),
             "required_variants": sorted(REQUIRED_ADVERSARIAL_VARIANTS),
@@ -1262,8 +1262,8 @@ def _generalization_assessment(production_transfer: dict[str, Any]) -> dict[str,
             "macro_f1_by_variant": variant_macro_f1,
             "minimum_macro_f1": GENERALIZATION_THRESHOLDS["adversarial_macro_f1"],
         },
-        "GEN-010": {
-            "passed": gen010_passed,
+        "aggregate_generalization_recompute": {
+            "passed": aggregate_generalization_recompute_passed,
             "record_source": record_source,
             "uses_generalization_prediction_records": uses_generalization_records,
             "missing_domains": missing_domains,
@@ -1296,7 +1296,7 @@ def _generalization_assessment(production_transfer: dict[str, Any]) -> dict[str,
     }
 
 
-def _dilp_assessment(production_transfer: dict[str, Any]) -> dict[str, Any]:
+def _differentiable_inductive_logic_assessment(production_transfer: dict[str, Any]) -> dict[str, Any]:
     report = production_transfer.get("dilp_report")
     report = report if isinstance(report, dict) else {}
     metric_inputs = production_transfer.get("metric_inputs")
@@ -1403,24 +1403,24 @@ def _dilp_assessment(production_transfer: dict[str, Any]) -> dict[str, Any]:
         )
     )
     gates = {
-        "DILP-001": {
+        "xlog_proof_paths": {
             "passed": proof_path_passed,
             "program": report.get("program"),
             "xlog_proof_path_queries": report.get("xlog_proof_path_queries"),
             "xlog_proof_tensors_cuda": report.get("xlog_proof_tensors_cuda"),
             "prediction_record_count": len(records),
         },
-        "DILP-002": {
+        "joint_training": {
             "passed": joint_passed,
             "joint_training": joint,
         },
-        "DILP-003": {
+        "rule_inventory": {
             "passed": inventory_passed,
             "required_domains": sorted(domains),
             "inventory_domains": sorted(inventory_domains),
             "inventory_count": len(inventory),
         },
-        "DILP-004": {
+        "clause_ablations": {
             "passed": ablation_passed,
             "recomputed_full_model_macro_f1": recomputed_full_f1,
             "reported_full_model_macro_f1": reported_full_f1,
@@ -1428,12 +1428,12 @@ def _dilp_assessment(production_transfer: dict[str, Any]) -> dict[str, Any]:
             "minimum_full_model_macro_f1": GENERALIZATION_THRESHOLDS["macro_f1"],
             "without_clause_f1": without_clause,
         },
-        "DILP-005": {
+        "proof_gradients": {
             "passed": proof_gradient_passed,
             "proof_path_tensor_device": joint.get("proof_path_tensor_device"),
             "proof_path_gradient_norm": joint.get("proof_path_gradient_norm"),
         },
-        "DILP-006": {
+        "heldout_safe_induction": {
             "passed": heldout_safe_passed,
             "heldout_safe_rule_induction": heldout_safe,
             "prediction_domains": sorted(prediction_domains),
@@ -1759,10 +1759,10 @@ def _production_transfer_passed(production_transfer: dict[str, Any]) -> bool:
     neural = production_transfer.get("neural") or {}
     computed = production_transfer.get("computed_metrics") or {}
     generalization = _generalization_assessment(production_transfer)
-    dilp = _dilp_assessment(production_transfer)
+    differentiable_inductive_logic = _differentiable_inductive_logic_assessment(production_transfer)
     gen_gates = generalization.get("gates") or {}
     gen_uplift = (
-        (gen_gates.get("GEN-007") or {})
+        (gen_gates.get("strong_baseline_uplift") or {})
         .get("baseline_uplift", {})
     )
     return (
@@ -1774,7 +1774,7 @@ def _production_transfer_passed(production_transfer: dict[str, Any]) -> bool:
         and _integrated_evaluator_passed(production_transfer)
         and _explanation_records_passed(production_transfer)
         and _bundle_reuse_passed(production_transfer)
-        and dilp.get("status") == "PASS"
+        and differentiable_inductive_logic.get("status") == "PASS"
         and int(production_transfer.get("domain_count", 0)) >= 5
         and production_transfer.get("held_out_domain")
         and production_transfer.get("core_rule_edits_per_domain") == 0
@@ -1793,7 +1793,7 @@ def _production_transfer_passed(production_transfer: dict[str, Any]) -> bool:
         and float(computed.get("held_out_root_cause_f1", 0.0)) >= 0.90
         and float(computed.get("accepted_intervention_precision", 0.0)) >= 0.95
         and float(computed.get("explanations_complete_pct", 0.0)) >= 100.0
-        and bool((gen_gates.get("GEN-007") or {}).get("passed"))
+        and bool((gen_gates.get("strong_baseline_uplift") or {}).get("passed"))
         and gen_uplift.get("beats_strongest_baseline") is True
         and float(gen_uplift.get("relative_uplift_over_best_baseline_pct", 0.0)) >= 15.0
     )
@@ -1957,8 +1957,8 @@ def _build_gates(
     transfer_stats = runtime_contract.get("hot_loop_transfer_stats") or {}
     runtime_contract_passed = runtime_contract.get("status") == "PASS"
     gen_gates = generalization.get("gates") or {}
-    dilp = _dilp_assessment(production_transfer)
-    dilp_gates = dilp.get("gates") or {}
+    differentiable_inductive_logic = _differentiable_inductive_logic_assessment(production_transfer)
+    differentiable_inductive_logic_gates = differentiable_inductive_logic.get("gates") or {}
     public_benchmark = _public_benchmark_assessment(production_transfer)
     showcase_metrics = computed.get("showcase_metrics") or {}
     zero_hot_loop_transfers = runtime_contract_passed and all(
@@ -1968,31 +1968,31 @@ def _build_gates(
     gates = [
         _gate(
             strict and gpu_required,
-            "P0-HARD-001",
+            "authoritative_validation_command",
             "`./validate.sh --strict --gpu-required` is the authoritative gate.",
             f"strict={strict}, gpu_required={gpu_required}",
         ),
         _gate(
             (not gpu_required) or bool(runtime["torch"]["cuda_available"]),
-            "P0-HARD-002",
+            "cuda_required",
             "CUDA is mandatory when `--gpu-required` is set.",
             json.dumps(runtime["torch"], sort_keys=True),
         ),
         _gate(
             bool(runtime["torch"]["available"]),
-            "P0-HARD-003",
+            "pytorch_available",
             "PyTorch is mandatory.",
             json.dumps(runtime["torch"], sort_keys=True),
         ),
         _gate(
             bool(runtime["pyxlog"]["available"]),
-            "P0-HARD-004",
+            "pyxlog_available",
             "`pyxlog` is mandatory.",
             json.dumps(runtime["pyxlog"], sort_keys=True),
         ),
         _gate(
             neural_passed,
-            "P0-HARD-005",
+            "real_cuda_neural_bridge",
             "A real CUDA PyTorch model must be registered and invoked through XLOG `nn/4`.",
             json.dumps(
                 {
@@ -2009,7 +2009,7 @@ def _build_gates(
         ),
         _gate(
             shipped_xlog_programs.get("status") == "PASS",
-            "XLOG-001",
+            "shipped_xlog_programs_run",
             "Every shipped XLOG program in `programs/` runs through `xlog-cli run`.",
             json.dumps(shipped_xlog_programs, sort_keys=True),
         ),
@@ -2017,7 +2017,7 @@ def _build_gates(
             bool(kernel["exists"])
             and kernel["bfo_category_count"] >= 12
             and kernel["bfo_relation_family_count"] >= 8,
-            "BFO-CONF-001",
+            "bfo_kernel_coverage",
             "BFO kernel declares at least 12 upper categories and 8 relation families.",
             json.dumps(kernel, sort_keys=True),
         ),
@@ -2026,20 +2026,20 @@ def _build_gates(
             and domains["domain_count"] >= 5
             and bool(domains["all_classes_mapped"])
             and domains["domains_with_required_fixtures"] >= 5,
-            "DOMAIN-001",
+            "domain_inventory_coverage",
             "At least five domains exist and every domain class maps to BFO with required fixture families.",
             json.dumps(domains, sort_keys=True),
         ),
         _gate(
             domains["max_adapter_core_rule_ratio"] is not None
             and domains["max_adapter_core_rule_ratio"] <= 0.25,
-            "BFO-CONF-002",
+            "thin_domain_adapters",
             "Adapter/core rule ratio is <= 0.25 per domain.",
             json.dumps({"max_adapter_core_rule_ratio": domains["max_adapter_core_rule_ratio"]}, sort_keys=True),
         ),
         _gate(
             invalid_cross_domain_passed,
-            "BFO-CONF-003",
+            "invalid_cross_domain_rejection",
             "100% of invalid cross-domain fixtures are rejected or inconsistent.",
             json.dumps(
                 {
@@ -2058,13 +2058,13 @@ def _build_gates(
         ),
         _gate(
             bool(domains["holdout_domain"]),
-            "TRANSFER-001",
+            "heldout_domain_exists",
             "At least one domain is held out during rule evolution.",
             json.dumps({"holdout_domain": domains["holdout_domain"]}, sort_keys=True),
         ),
         _gate(
             production_transfer_passed,
-            "TRANSFER-002",
+            "heldout_root_cause_quality",
             "Held-out root-cause F1 is >= 0.90.",
             json.dumps(
                 {
@@ -2084,7 +2084,7 @@ def _build_gates(
         ),
         _gate(
             production_transfer_passed,
-            "TRANSFER-003",
+            "accepted_intervention_precision",
             "Accepted intervention precision is >= 0.95.",
             json.dumps(
                 {
@@ -2103,7 +2103,7 @@ def _build_gates(
         ),
         _gate(
             production_transfer_passed,
-            "NEURAL-002",
+            "neuro_symbolic_baseline_uplift",
             "Neuro-symbolic uplift is >= 15% over the strongest baseline.",
             json.dumps(
                 {
@@ -2115,7 +2115,7 @@ def _build_gates(
                     ),
                     "showcase_strongest_baseline": showcase_metrics.get("strongest_baseline"),
                     "generalization_baseline_uplift": (
-                        (gen_gates.get("GEN-007") or {}).get("baseline_uplift")
+                        (gen_gates.get("strong_baseline_uplift") or {}).get("baseline_uplift")
                     ),
                     "output": production_transfer.get("output"),
                     "evidence": production_transfer.get("evidence"),
@@ -2136,23 +2136,23 @@ def _build_gates(
         ],
         *[
             _gate(
-                bool((dilp_gates.get(requirement_id) or {}).get("passed")),
+                bool((differentiable_inductive_logic_gates.get(requirement_id) or {}).get("passed")),
                 requirement_id,
                 description,
-                json.dumps(dilp_gates.get(requirement_id) or {}, sort_keys=True),
+                json.dumps(differentiable_inductive_logic_gates.get(requirement_id) or {}, sort_keys=True),
             )
-            for requirement_id, description in DILP_REQUIREMENTS.items()
+            for requirement_id, description in DIFFERENTIABLE_INDUCTIVE_LOGIC_REQUIREMENTS.items()
         ],
         _gate(
             public_benchmark["passed"],
-            "PUBLIC-SOTA-001",
-            "Public benchmark state is explicit; external SOTA claims require required-family coverage.",
+            "public_benchmark_claim_coverage",
+            "Public benchmark state is explicit; external state-of-the-art claims require required-family coverage.",
             json.dumps(public_benchmark, sort_keys=True),
         ),
         _gate(
             bundle_reuse_passed,
-            "BUNDLE-001",
-            "The production transfer runner reuses the merged v0.8.0/v0.8.5/v0.8.6 bundle through executable probes.",
+            "merged_runtime_bundle_reuse",
+            "The production transfer runner reuses the merged runtime, language-contract, and optimizer bundle through executable probes.",
             json.dumps(
                 {
                     "bundle_reuse": production_transfer.get("bundle_reuse"),
@@ -2164,7 +2164,7 @@ def _build_gates(
         ),
         _gate(
             promoted_rule_quality_passed,
-            "TRANSFER-004",
+            "promoted_rule_quality",
             "Promoted rule quality on non-held-out domains meets precision/recall/F1 thresholds without mutating the BFO kernel.",
             json.dumps(
                 {
@@ -2178,8 +2178,8 @@ def _build_gates(
         ),
         _gate(
             zero_hot_loop_transfers,
-            "DEVICE-001",
-            "Hot-loop data-plane D2H/H2D transfers after initial load are 0.",
+            "device_resident_hot_loop",
+            "Hot-loop data-plane device-to-host and host-to-device transfers after initial load are 0.",
             json.dumps(
                 {
                     "hot_loop_transfer_stats": transfer_stats,
@@ -2191,7 +2191,7 @@ def _build_gates(
         ),
         _gate(
             control_plane_passed,
-            "DEVICE-002",
+            "control_plane_metadata_budget",
             "Control-plane metadata per hot iteration is <= 4096 bytes.",
             json.dumps(
                 {
@@ -2205,7 +2205,7 @@ def _build_gates(
         ),
         _gate(
             production_scale_passed,
-            "PERF-001",
+            "production_scale_latency",
             "Production scale and p95 latency requirements are met.",
             json.dumps(
                 {
@@ -2218,7 +2218,7 @@ def _build_gates(
         ),
         _gate(
             production_soak_passed,
-            "PERF-002",
+            "production_soak_stability",
             "Soak run is >=30 minutes with GPU memory drift <=2%.",
             json.dumps(
                 {
@@ -2275,7 +2275,7 @@ def _gqm_metrics(
     computed = production_transfer.get("computed_metrics") or {}
     generalization = _generalization_assessment(production_transfer)
     gen_uplift = (
-        ((generalization.get("gates") or {}).get("GEN-007") or {}).get(
+        ((generalization.get("gates") or {}).get("strong_baseline_uplift") or {}).get(
             "baseline_uplift",
             {},
         )
@@ -2292,9 +2292,9 @@ def _gqm_metrics(
         _metric("Q5", "Does root-cause inference transfer?", "Held-out domain root-cause F1", ">= 0.90", computed.get("held_out_root_cause_f1") if production_transfer_passed else None, "PASS" if production_transfer_passed and float(computed.get("held_out_root_cause_f1", 0.0)) >= 0.90 else "FAIL", str(production_transfer.get("output") or "production held-out transfer evidence missing")),
         _metric("Q6", "Are interventions useful?", "Accepted intervention precision", ">= 0.95", computed.get("accepted_intervention_precision") if production_transfer_passed else None, "PASS" if production_transfer_passed and float(computed.get("accepted_intervention_precision", 0.0)) >= 0.95 else "FAIL", str(production_transfer.get("output") or "production intervention evidence missing")),
         _metric("Q7", "Are explanations complete?", "Top-level claims with BFO explanation", "100%", computed.get("explanations_complete_pct") if production_transfer_passed else None, "PASS" if production_transfer_passed and float(computed.get("explanations_complete_pct", 0.0)) >= 100.0 else "FAIL", str(production_transfer.get("output") or "production explanation evidence missing")),
-        _metric("Q8", "Does neuro-symbolic beat baselines?", "GEN relative uplift over best baseline", ">= 15%", gen_uplift.get("relative_uplift_over_best_baseline_pct") if production_transfer_passed else None, "PASS" if production_transfer_passed and gen_uplift.get("beats_strongest_baseline") is True and float(gen_uplift.get("relative_uplift_over_best_baseline_pct", 0.0)) >= 15.0 else "FAIL", str(production_transfer.get("output") or "production ablations missing")),
+        _metric("Q8", "Does neuro-symbolic beat baselines?", "Generalization relative uplift over best baseline", ">= 15%", gen_uplift.get("relative_uplift_over_best_baseline_pct") if production_transfer_passed else None, "PASS" if production_transfer_passed and gen_uplift.get("beats_strongest_baseline") is True and float(gen_uplift.get("relative_uplift_over_best_baseline_pct", 0.0)) >= 15.0 else "FAIL", str(production_transfer.get("output") or "production ablations missing")),
         _metric("Q9", "Is online adaptation exact?", "Delta output equals full recompute", "100%", runtime_contract.get("delta_output_equals_full_recompute_pct") if runtime_contract_passed else None, "PASS" if runtime_contract_passed and float(runtime_contract.get("delta_output_equals_full_recompute_pct", 0.0)) >= 100.0 else "FAIL", str(runtime_contract.get("output") or "delta validation not implemented")),
-        _metric("Q10", "Is the hot path device-resident?", "D2H/H2D transfers after initial load", "0", 0 if runtime_contract_passed and zero_hot_loop_transfer_count == 0 else None, "PASS" if runtime_contract_passed and zero_hot_loop_transfer_count == 0 else "FAIL", str(runtime_contract.get("output") or "transfer counters not captured")),
+        _metric("Q10", "Is the hot path device-resident?", "Device-to-host and host-to-device transfers after initial load", "0", 0 if runtime_contract_passed and zero_hot_loop_transfer_count == 0 else None, "PASS" if runtime_contract_passed and zero_hot_loop_transfer_count == 0 else "FAIL", str(runtime_contract.get("output") or "transfer counters not captured")),
         _metric("Q11", "Is the result deterministic?", "Fixed-seed byte-identical runs", "5/5", f"{determinism.get('matching_runs')}/{determinism.get('runs')}" if runtime_contract_passed else None, "PASS" if runtime_contract_passed and determinism.get("byte_identical") is True and determinism.get("matching_runs") == 5 and determinism.get("runs") == 5 else "FAIL", str(runtime_contract.get("output") or "five-run determinism not implemented")),
         _metric("Q12", "Is performance production-grade?", "p95 core query latency", "<= 50 ms", (production_transfer.get("scale_profile") or {}).get("p95_core_indexed_query_latency_ms") if production_scale_passed else None, "PASS" if production_scale_passed else "FAIL", str(production_transfer.get("output") or "production profile missing")),
     ]
@@ -2311,7 +2311,7 @@ def _summary(args: argparse.Namespace, elapsed_sec: float) -> dict[str, Any]:
     shipped_xlog_programs = _run_shipped_xlog_programs(args.strict)
     production_transfer = _load_production_transfer_evidence(args.production_transfer)
     generalization = _generalization_assessment(production_transfer)
-    dilp = _dilp_assessment(production_transfer)
+    differentiable_inductive_logic = _differentiable_inductive_logic_assessment(production_transfer)
     public_benchmark = _public_benchmark_assessment(production_transfer)
     gates = _build_gates(
         strict=args.strict,
@@ -2377,12 +2377,12 @@ def _summary(args: argparse.Namespace, elapsed_sec: float) -> dict[str, Any]:
             "shipped_xlog_programs": shipped_xlog_programs,
             "production_transfer": production_transfer,
             "generalization_assessment": generalization,
-            "dilp_assessment": dilp,
+            "differentiable_inductive_logic_assessment": differentiable_inductive_logic,
             "public_benchmark_assessment": public_benchmark,
             "validation_plan": str(ROOT / "VALIDATION_PLAN.md"),
         },
         "gqm_metrics": metrics,
-        "p0_gates": gate_payload,
+        "production_blocking_gates": gate_payload,
         "raw_output_paths": [
             path
             for path in [
@@ -2417,7 +2417,7 @@ def _summary(args: argparse.Namespace, elapsed_sec: float) -> dict[str, Any]:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--strict", action="store_true", help="Enable strict production gate behavior.")
-    parser.add_argument("--gpu-required", action="store_true", help="Treat missing CUDA as a P0 failure.")
+    parser.add_argument("--gpu-required", action="store_true", help="Treat missing CUDA as a production-blocking failure.")
     parser.add_argument(
         "--production-transfer",
         type=Path,
