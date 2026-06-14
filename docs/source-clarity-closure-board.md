@@ -341,7 +341,7 @@ Hardware cache terminology such as `L1` and `L2` is allowed when it refers to GP
 | `crates/xlog-cuda/tests/test_budget_via_runtime.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-cuda/tests/test_compute_ranks_tail_block_oob.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-cuda/tests/test_csm_env_dispatch.rs` | 0 | 0 | true |  |  |
-| `crates/xlog-cuda/tests/test_d2h_counter.rs` | 1 | 0 | false | D2H(1) |  |
+| `crates/xlog-cuda/tests/test_d2h_counter.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-cuda/tests/test_deterministic_d2h_gate.rs` | 3 | 0 | false | D2H(3) |  |
 | `crates/xlog-cuda/tests/test_full_row_set_algebra.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-cuda/tests/test_logging_via_runtime.rs` | 0 | 0 | true |  |  |
