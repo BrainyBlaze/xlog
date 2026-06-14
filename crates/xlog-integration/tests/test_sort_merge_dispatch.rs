@@ -1,36 +1,34 @@
-// crates/xlog-integration/tests/test_w43_sort_merge_dispatch.rs
-//! W4.3 sort-merge join — operator-level provider parity certs.
+// crates/xlog-integration/tests/test_sort_merge_dispatch.rs
+//! Sort-merge join — operator-level provider parity tests.
 //!
-//! Per F-W43-14 (iteration 6): the W4.3 sort-merge operator is
-//! implemented at the provider layer (`provider.sort_merge_join_v2_inner_u32_1key`)
-//! but is NOT wired into the executor's dispatch decision tree.
-//! The Step 12 production bench rejected the iteration-1 design
-//! hypotheses: D7 #8 (≥ 2× vs hash) FAILED on every cell;
-//! D2 precedence (sort-merge > nested-loop) FAILED on every
-//! overlap cell (nested-loop wins 1.25×–2.46× across the
-//! shared eligibility envelope). Per F-W43-2's anticipated
-//! amendment path, iteration 6 unwires the executor dispatch
-//! and rewrites the W4.3 cert suite at the provider/operator
-//! layer.
+//! The sort-merge operator is implemented at the provider layer
+//! (`provider.sort_merge_join_v2_inner_u32_1key`) but is NOT wired
+//! into the executor's dispatch decision tree. The production
+//! benchmark rejected the original executor-dispatch assumptions:
+//! sort-merge did not win by at least 2× against hash join on any
+//! tested cell, and nested-loop join won by 1.25×–2.46× across the
+//! shared sort-merge/nested-loop eligibility envelope. The resulting
+//! rewrite removed executor dispatch and kept this suite at the
+//! provider/operator layer.
 //!
-//! The four certs in this file (A, E, F, G) verify the operator
+//! The four tests in this file verify the operator
 //! surface directly via `provider.sort_merge_join_v2_inner_u32_1key`
 //! and `provider.is_sorted_ascending_u32`:
-//!   * Cert A — sorted 100-row 1-key U32 fixture parity vs hash.
-//!   * Cert E — sorted Symbol-typed parity vs hash.
-//!   * Cert F — duplicate-key 250 × 4 → 4000 output rows + tuple
+//!   * Sorted 100-row 1-key U32 fixture parity vs hash.
+//!   * Sorted Symbol-typed parity vs hash.
+//!   * Duplicate-key 250 × 4 → 4000 output rows + tuple
 //!     distinctness + parity vs hash (run-length emit path).
-//!   * Cert G — empty-input layered short-circuit per F-W43-4
+//!   * Empty-input layered short-circuit
 //!     (sortedness probe `n < 2 → Ok(true)` + operator empty
 //!     fast path + parity vs hash empty fast path).
 //!
-//! The iteration-1–5 dispatch-shape certs (B unsorted-fall-back,
-//! C above-threshold, D multi-col, D' Semi) are RETIRED:
-//! superseded by F-W43-14, since asserting `sort_merge_dispatch_count == 0`
-//! on fall-through fixtures is vacuous in the absence of an
-//! executor dispatch path. The W4.2 cert suite at
-//! `test_w42_nested_loop_dispatch.rs` already covers the same
-//! fixture shapes for the production-routing guard.
+//! Earlier dispatch-shape tests for unsorted fall-through,
+//! above-threshold joins, multi-column joins, and semi joins are
+//! retired: asserting `sort_merge_dispatch_count == 0` on fall-through
+//! fixtures is vacuous in the absence of an executor dispatch path.
+//! The nested-loop dispatch suite at `test_nested_loop_dispatch.rs`
+//! already covers the same fixture shapes for the production-routing
+//! guard.
 
 use std::collections::BTreeSet;
 use std::sync::Arc;
@@ -219,14 +217,14 @@ fn download_quads(buf: &CudaBuffer) -> Vec<(u32, u32, u32, u32)> {
 }
 
 // ---------------------------------------------------------------
-// Cert A — sorted-key operator parity (operator-level rewrite per F-W43-14).
+// Sorted-key operator parity.
 //
 // `provider.sort_merge_join_v2_inner_u32_1key` on a sorted
 // 100-row 1-key U32 fixture produces row-set parity vs
 // `provider.hash_join_v2 Inner`. Pure operator parity — no
 // executor, no dispatch counter, no selectivity feedback (those
-// were iteration-1 dispatch-shape concerns superseded by
-// F-W43-14).
+// were original executor-dispatch concerns superseded by the
+// provider-only rewrite).
 // ---------------------------------------------------------------
 
 #[test]
@@ -256,7 +254,7 @@ fn sort_merge_operator_parity_sorted_unique_u32() {
         "hash reference should produce exactly 100 matched rows"
     );
 
-    // W4.3 sort-merge operator (4-col [lk, lp, rk, rp]).
+    // Sort-merge operator (4-col [lk, lp, rk, rp]).
     let sm_buf = fix
         .provider
         .sort_merge_join_v2_inner_u32_1key(&left_buf, &right_buf, 0, 0)
@@ -275,9 +273,9 @@ fn sort_merge_operator_parity_sorted_unique_u32() {
 }
 
 // ---------------------------------------------------------------
-// Cert E — Symbol-typed operator parity (operator-level rewrite per F-W43-14).
+// Symbol-typed operator parity.
 //
-// Same shape as Cert A but with `ScalarType::Symbol` on the key
+// Same shape as the sorted-key parity test but with `ScalarType::Symbol` on the key
 // column. Symbol is byte-identical to U32 at the kernel level,
 // so the same operator applies.
 // ---------------------------------------------------------------
@@ -315,13 +313,13 @@ fn sort_merge_operator_parity_sorted_unique_symbol() {
 }
 
 // ---------------------------------------------------------------
-// Cert F — duplicate-key operator parity (run-length emit path).
+// Duplicate-key operator parity (run-length emit path).
 //
 // 250 unique keys × 4 dups each side → 1000 rows each side →
 // 4000 output rows (250 keys × 4×4 per-key matches). Mirrors
-// the spike's regime (b). Exercises the kernel's per-thread
+// the duplicate-heavy benchmark shape. Exercises the kernel's per-thread
 // `lower_bound`/`upper_bound` run-length emit path that the
-// unique-key Cert A does not cover.
+// unique-key parity test does not cover.
 // ---------------------------------------------------------------
 
 #[test]
@@ -380,12 +378,10 @@ fn sort_merge_operator_parity_duplicate_key() {
 }
 
 // ---------------------------------------------------------------
-// Cert G — empty-input layered short-circuit (per F-W43-4 +
-// F-W43-14 operator-level rewrite).
+// Empty-input layered short-circuit.
 //
 // Two subcases (`num_left == 0`, `num_right == 0`). Each verifies
-// the F-W43-4 layered short-circuit contract end-to-end at the
-// provider layer:
+// the layered short-circuit contract end-to-end at the provider layer:
 //   1. `provider.is_sorted_ascending_u32` returns `Ok(true)` on
 //      `n == 0` via its `n < 2` internal short-circuit (BEFORE
 //      allocation/launch — the kernel grid `(0+255)/256 = 0`
@@ -405,7 +401,7 @@ fn sort_merge_operator_empty_input_layered_short_circuit() {
     };
 
     // ===========================================================
-    // Subcase G1: empty L, populated sorted R.
+    // Subcase: empty L, populated sorted R.
     // ===========================================================
     {
         let left_rows: Vec<(u32, u32)> = Vec::new();
@@ -425,36 +421,39 @@ fn sort_merge_operator_empty_input_layered_short_circuit() {
             .expect("is_sorted_ascending_u32 must not error on sorted R");
         assert!(
             left_sorted,
-            "G1 layer 1: empty L must short-circuit to Ok(true) (n < 2 fast path)"
+            "empty-left layer 1: empty L must short-circuit to Ok(true) (n < 2 fast path)"
         );
-        assert!(right_sorted, "G1 layer 1: sorted R must return Ok(true)");
+        assert!(
+            right_sorted,
+            "empty-left layer 1: sorted R must return Ok(true)"
+        );
 
         // Layer 2 + 3: operator empty fast path + parity.
         let sm_buf = fix
             .provider
             .sort_merge_join_v2_inner_u32_1key(&left_buf, &right_buf, 0, 0)
-            .expect("G1 layer 2: sort-merge operator must not crash on empty L");
+            .expect("empty-left layer 2: sort-merge operator must not crash on empty L");
         let sm_set: BTreeSet<(u32, u32, u32, u32)> = download_quads(&sm_buf).into_iter().collect();
         assert!(
             sm_set.is_empty(),
-            "G1 layer 2: sort-merge operator must produce empty output on empty L"
+            "empty-left layer 2: sort-merge operator must produce empty output on empty L"
         );
 
         let hash_buf = fix
             .provider
             .hash_join_v2(&left_buf, &right_buf, &[0], &[0], JoinType::Inner)
-            .expect("G1 layer 3: hash reference on empty L");
+            .expect("empty-left layer 3: hash reference on empty L");
         let hash_set: BTreeSet<(u32, u32, u32, u32)> =
             download_quads(&hash_buf).into_iter().collect();
         assert!(hash_set.is_empty());
         assert_eq!(
             sm_set, hash_set,
-            "G1 layer 3: sort-merge row set must equal hash empty-fast-path output (both empty)"
+            "empty-left layer 3: sort-merge row set must equal hash empty-fast-path output (both empty)"
         );
     }
 
     // ===========================================================
-    // Subcase G2: populated sorted L, empty R.
+    // Subcase: populated sorted L, empty R.
     // ===========================================================
     {
         let left_rows: Vec<(u32, u32)> = (0..50u32).map(|i| (i, 1000 + i)).collect();
@@ -470,32 +469,35 @@ fn sort_merge_operator_empty_input_layered_short_circuit() {
             .provider
             .is_sorted_ascending_u32(&right_buf, 0)
             .expect("is_sorted_ascending_u32 must not error on empty R");
-        assert!(left_sorted, "G2 layer 1: sorted L must return Ok(true)");
+        assert!(
+            left_sorted,
+            "empty-right layer 1: sorted L must return Ok(true)"
+        );
         assert!(
             right_sorted,
-            "G2 layer 1: empty R must short-circuit to Ok(true) (n < 2 fast path)"
+            "empty-right layer 1: empty R must short-circuit to Ok(true) (n < 2 fast path)"
         );
 
         let sm_buf = fix
             .provider
             .sort_merge_join_v2_inner_u32_1key(&left_buf, &right_buf, 0, 0)
-            .expect("G2 layer 2: sort-merge operator must not crash on empty R");
+            .expect("empty-right layer 2: sort-merge operator must not crash on empty R");
         let sm_set: BTreeSet<(u32, u32, u32, u32)> = download_quads(&sm_buf).into_iter().collect();
         assert!(
             sm_set.is_empty(),
-            "G2 layer 2: sort-merge operator must produce empty output on empty R"
+            "empty-right layer 2: sort-merge operator must produce empty output on empty R"
         );
 
         let hash_buf = fix
             .provider
             .hash_join_v2(&left_buf, &right_buf, &[0], &[0], JoinType::Inner)
-            .expect("G2 layer 3: hash reference on empty R");
+            .expect("empty-right layer 3: hash reference on empty R");
         let hash_set: BTreeSet<(u32, u32, u32, u32)> =
             download_quads(&hash_buf).into_iter().collect();
         assert!(hash_set.is_empty());
         assert_eq!(
             sm_set, hash_set,
-            "G2 layer 3: sort-merge row set must equal hash empty-fast-path output (both empty)"
+            "empty-right layer 3: sort-merge row set must equal hash empty-fast-path output (both empty)"
         );
     }
 }
