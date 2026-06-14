@@ -12,7 +12,7 @@ use xlog_cuda::memory::CudaBuffer;
 use xlog_cuda::{CudaDevice, CudaKernelProvider, GpuMemoryManager};
 
 const DEVICE_BUDGET_BYTES: u64 = 64 * 1024 * 1024;
-const W52_PILOT_VRAM_GATE_BYTES: u64 = 512 * 1024 * 1024;
+const KCLIQUE_PILOT_VRAM_GATE_BYTES: u64 = 512 * 1024 * 1024;
 const CLIQUE5_EDGE_NAMES: [(&str, &str); 10] = [
     ("v0", "v1"),
     ("v0", "v2"),
@@ -187,13 +187,13 @@ fn expected_diagonal_k5_rows(n: u32) -> BTreeSet<Vec<u32>> {
 }
 
 #[test]
-fn w52_kclique_pilot_records_measured_elapsed_and_vram_delta() {
+fn kclique_pilot_records_measured_elapsed_and_vram_delta() {
     let Some(prov) = make_provider() else {
-        eprintln!("Skipping W5.2 measurement pilot: CUDA runtime unavailable");
+        eprintln!("Skipping K-clique measurement pilot: CUDA runtime unavailable");
         return;
     };
     let Ok((free_before, total_before)) = mem_get_info() else {
-        eprintln!("Skipping W5.2 measurement pilot: CUDA mem_get_info unavailable");
+        eprintln!("Skipping K-clique measurement pilot: CUDA mem_get_info unavailable");
         return;
     };
 
@@ -206,32 +206,34 @@ fn w52_kclique_pilot_records_measured_elapsed_and_vram_delta() {
     let out = gpu_wcoj_clique5_path(&prov, &inputs);
     let elapsed = start.elapsed();
     let Ok((free_after, total_after)) = mem_get_info() else {
-        eprintln!("Skipping W5.2 measurement pilot: CUDA mem_get_info unavailable after launch");
+        eprintln!(
+            "Skipping K-clique measurement pilot: CUDA mem_get_info unavailable after launch"
+        );
         return;
     };
 
     assert!(
         elapsed > Duration::ZERO,
-        "W5.2 pilot must report a measured elapsed duration"
+        "K-clique pilot must report a measured elapsed duration"
     );
     assert_eq!(
         total_before, total_after,
-        "CUDA total memory should be stable across the W5.2 pilot"
+        "CUDA total memory should be stable across the K-clique pilot"
     );
     let vram_delta = (free_before as u64).saturating_sub(free_after as u64);
     assert!(
-        vram_delta <= W52_PILOT_VRAM_GATE_BYTES,
-        "W5.2 pilot VRAM delta {vram_delta} exceeds gate {W52_PILOT_VRAM_GATE_BYTES}"
+        vram_delta <= KCLIQUE_PILOT_VRAM_GATE_BYTES,
+        "K-clique pilot VRAM delta {vram_delta} exceeds gate {KCLIQUE_PILOT_VRAM_GATE_BYTES}"
     );
 
     let observed = download_u32_rows(&out, &prov.provider, 5);
     assert_eq!(observed, expected_diagonal_k5_rows(n));
     assert!(
         prov.provider.kclique_metadata_build_count() >= 1,
-        "W5.2 K-clique pilot must build K-clique metadata"
+        "K-clique pilot must build K-clique metadata"
     );
     eprintln!(
-        "W52_MEASUREMENT_PILOT workload=5clique N={n} elapsed_nanos={} vram_delta_bytes={} total_bytes={} metadata_build_count={} metadata_build_nanos={}",
+        "KCLIQUE_MEASUREMENT_PILOT workload=5clique N={n} elapsed_nanos={} vram_delta_bytes={} total_bytes={} metadata_build_count={} metadata_build_nanos={}",
         elapsed.as_nanos(),
         vram_delta,
         total_after as u64,

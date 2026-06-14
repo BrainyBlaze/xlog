@@ -431,7 +431,7 @@ Hardware cache terminology such as `L1` and `L2` is allowed when it refers to GP
 | `crates/xlog-integration/tests/test_deep_recursive_wcoj.rs` | 0 | 0 | true | - | - |
 | `crates/xlog-integration/tests/test_same_generation_gpu.rs` | 0 | 0 | true | - | - |
 | `crates/xlog-integration/tests/test_skewed_multiway_gpu.rs` | 0 | 0 | true | - | - |
-| `crates/xlog-integration/tests/test_w52_measurement_pilot.rs` | 0 | 7 | false |  | W5.2(7) |
+| `crates/xlog-integration/tests/test_kclique_measurement_pilot.rs` | 0 | 0 | true | - | - |
 | `crates/xlog-integration/tests/test_w63_chain_promoter_spike.rs` | 0 | 5 | false |  | W63(5) |
 | `crates/xlog-integration/tests/test_w65_sort_label.rs` | 0 | 23 | false |  | W0P(14), W65(5), W1P(4) |
 | `crates/xlog-integration/tests/test_w66_recursive_setop_profile.rs` | 0 | 8 | false |  | W0P(4), W1P(4) |
