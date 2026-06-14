@@ -907,7 +907,7 @@ Hardware cache terminology such as `L1` and `L2` is allowed when it refers to GP
 | `examples/epistemic/29-negated-modal-over-determined-derived.xlog` | 0 | 0 | true |  |  |
 | `examples/epistemic/30-possible-binding-over-determined.xlog` | 0 | 0 | true |  |  |
 | `examples/epistemic/31-faeel-unfounded-self-support-empty-extension.xlog` | 24 | 0 | true | release/task labels, emphasis shorthand, and bare example-number references(24); G91 retained as allowed epistemic-mode terminology |  |
-| `examples/epistemic/32-g91-self-support-accepted.xlog` | 0 | 5 | false |  | G91(5) |
+| `examples/epistemic/32-g91-self-support-accepted.xlog` | 14 | 0 | true | release/task labels(2), emphasis shorthand and bare example-number references(12); G91 retained as allowed epistemic-mode terminology |  |
 | `examples/epistemic/33-negated-modal-through-recursion-wfs.xlog` | 0 | 0 | true |  |  |
 | `examples/epistemic/33a-negated-modal-through-recursion-wfs-faeel-not-know.xlog` | 0 | 0 | true |  |  |
 | `examples/epistemic/33a-negated-modal-through-recursion-wfs-faeel-not-possible.xlog` | 0 | 0 | true |  |  |
