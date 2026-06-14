@@ -1392,7 +1392,7 @@ Hardware cache terminology such as `L1` and `L2` is allowed when it refers to GP
 | `examples/xlog/80-v032-showcase/04-supply-chain/inventory/stock.xlog` | 8 | 45 | true | bill-of-materials shorthand comments(8) | local variable shorthand(45) |
 | `examples/xlog/80-v032-showcase/04-supply-chain/main.xlog` | 5 | 75 | true | release/user-defined-function/bill-of-materials comments(5) | local variable shorthand(75) |
 | `examples/xlog/80-v032-showcase/04-supply-chain/shipping/routes.xlog` | 0 | 44 | true |  | local variable shorthand(44) |
-| `examples/xlog/80-v032-showcase/README.md` | 0 | 3 | false |  | v032(3) |
+| `examples/xlog/80-v032-showcase/README.md` | 57 | 3 | true | release labels, stale-domain snippets, and shorthand terms(57) | release-coded run paths(3) |
 | `examples/xlog/90-negative-tests/01_constraint_cycle_violation.xlog` | 0 | 0 | true |  |  |
 | `examples/xlog/90-negative-tests/02_stratification_negation_cycle.xlog` | 0 | 0 | true |  |  |
 | `examples/xlog/90-negative-tests/03_arithmetic_type_mismatch.xlog` | 0 | 0 | true |  |  |
