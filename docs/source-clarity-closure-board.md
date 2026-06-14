@@ -379,7 +379,7 @@ Hardware cache terminology such as `L1` and `L2` is allowed when it refers to GP
 | `crates/xlog-gpu/benches/logic_bench.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-gpu/src/biokg.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-gpu/src/lib.rs` | 0 | 0 | true |  |  |
-| `crates/xlog-gpu/src/logic.rs` | 7 | 1 | false | C7(4), L1(2), L2(1) | G91(1) |
+| `crates/xlog-gpu/src/logic.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-gpu/tests/biokg_streaming_relation_loader.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-gpu/tests/logic_runner.rs` | 1 | 0 | false | G91(1) |  |
 | `crates/xlog-gpu/tests/relation_delta_planner_telemetry.rs` | 0 | 0 | true |  |  |
