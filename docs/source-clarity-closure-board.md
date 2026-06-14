@@ -1027,7 +1027,7 @@ Hardware cache terminology such as `L1` and `L2` is allowed when it refers to GP
 | `examples/epistemic/42b-same-name-multi-arity-cross-61-not-possible-present--not-possible-absent.xlog` | 0 | 0 | true |  |  |
 | `examples/epistemic/42b-same-name-multi-arity-cross-62-not-possible-absent--not-possible-present.xlog` | 0 | 0 | true |  |  |
 | `examples/epistemic/42b-same-name-multi-arity-cross-63-not-possible-absent--not-possible-absent.xlog` | 0 | 0 | true |  |  |
-| `examples/epistemic/43-g91-possible-recursion-self-support.xlog` | 0 | 1 | false |  | G91(1) |
+| `examples/epistemic/43-g91-possible-recursion-self-support.xlog` | 0 | 0 | true | G91 retained as allowed epistemic-mode terminology |  |
 | `examples/epistemic/44a-single-modal-truth-table-faeel-know-absent.xlog` | 0 | 0 | true |  |  |
 | `examples/epistemic/44a-single-modal-truth-table-faeel-know-present.xlog` | 0 | 0 | true |  |  |
 | `examples/epistemic/44a-single-modal-truth-table-faeel-not-know-absent.xlog` | 0 | 0 | true |  |  |
