@@ -1,4 +1,4 @@
-//! Category G07: SAT/CDCL GPU verifier tests
+//! GPU CDCL SAT/UNSAT verifier tests
 //!
 //! Validates the GPU-resident CDCL solver on deterministic, small CNFs
 //! covering SAT, UNSAT, propagation, and proof checking paths.
@@ -13,7 +13,7 @@ use xlog_solve::{Clause, GpuCdclConfig, GpuCdclSolver, GpuCnf, Literal, SolveIns
 /// Run all tests in this category.
 pub fn run_all(ctx: &TestContext) -> CategoryResult {
     let start = Instant::now();
-    let mut results = CategoryResult::new("g07_sat_cdcl");
+    let mut results = CategoryResult::new("gpu_cdcl_sat_unsat_verifier");
 
     let provider = match CudaKernelProvider::new(ctx.device.clone(), ctx.memory.clone()) {
         Ok(p) => Arc::new(p),
