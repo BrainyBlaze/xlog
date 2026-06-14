@@ -1,4 +1,4 @@
-//! D2 Phase A — S2 spike: provider-level GPU Free Join frontier engine.
+//! Provider-level GPU Free Join frontier-engine coverage.
 //!
 //! Contract under test: `free_join_execute_u32_recorded` executes a
 //! hand-built Free Join plan (design doc
@@ -9,7 +9,7 @@
 //! join's projected row set, checked against host brute-force oracles
 //! on every fixture.
 //!
-//! Measurement tests (`#[ignore]`) implement the S2 gates:
+//! Measurement tests (`#[ignore]`) implement the Free Join spike gates:
 //!   * blowup chain — >= 2x vs the production binary hash-join path;
 //!   * hub triangle — <= 1.2x vs the dedicated triangle WCOJ kernel.
 
@@ -151,10 +151,7 @@ fn download_u32_column(
 }
 
 /// Download all columns of a result buffer as a sorted set of rows.
-fn download_rows_sorted(
-    memory: &Arc<GpuMemoryManager>,
-    buffer: &CudaBuffer,
-) -> Vec<Vec<u32>> {
+fn download_rows_sorted(memory: &Arc<GpuMemoryManager>, buffer: &CudaBuffer) -> Vec<Vec<u32>> {
     let arity = buffer.arity();
     let cols: Vec<Vec<u32>> = (0..arity)
         .map(|c| download_u32_column(memory, buffer, c))
@@ -482,9 +479,9 @@ fn fj_triangle_matches_oracle_and_dedicated_kernel() {
 
 #[test]
 fn fj_layout_normalizes_unsorted_inputs() {
-    // §2.3: all inputs layout-normalized per dispatch (31b0ccf0
-    // contract). Unsorted, duplicated uploads must produce the same
-    // row set as their sorted+deduped form.
+    // All inputs layout-normalized per dispatch. Unsorted,
+    // duplicated uploads must produce the same row set as their
+    // sorted+deduped form.
     let Some(fix) = make_fixture() else {
         eprintln!("skipping fj_layout_normalize: no CUDA device");
         return;
@@ -573,7 +570,7 @@ fn fj_rejects_unbound_probe_vars() {
 }
 
 // =====================================================================
-// S2 measurement (gates from design doc §4). Run explicitly:
+// Free Join measurement gates from the design doc. Run explicitly:
 // `cargo test -p xlog-cuda-tests --test test_free_join_spike --release \
 //    -- --ignored --nocapture`
 // =====================================================================
@@ -624,16 +621,16 @@ fn median(samples: &mut [f64]) -> f64 {
 }
 
 #[test]
-#[ignore = "S2 measurement: run explicitly with --ignored --nocapture"]
-fn s2_measurement_blowup_chain_vs_binary() {
+#[ignore = "Free Join measurement: run explicitly with --ignored --nocapture"]
+fn free_join_measurement_blowup_chain_vs_binary() {
     let Some(fix) = make_fixture_with_budget(2 * 1024 * 1024 * 1024) else {
-        eprintln!("skipping s2 blowup: no CUDA device");
+        eprintln!("skipping Free Join blowup measurement: no CUDA device");
         return;
     };
     let (r, s, t, u) = blowup_chain_fixture();
     let expected = oracle_chain(&r, &s, &t, &u);
     println!(
-        "S2 blowup fixture: |R|={} |S|={} |T|={} |U|={} |Q|={}",
+        "Free Join blowup fixture: |R|={} |S|={} |T|={} |U|={} |Q|={}",
         r.len(),
         s.len(),
         t.len(),
@@ -747,7 +744,7 @@ fn s2_measurement_blowup_chain_vs_binary() {
     let med_fj = median(&mut fj_ms);
     let med_fj_nat = median(&mut fj_nat_ms);
     println!(
-        "S2 blowup chain: binary median {med_binary:.3} ms, free-join (u_cover) median \
+        "Free Join blowup chain: binary median {med_binary:.3} ms, free-join (u_cover) median \
          {med_fj:.3} ms, free-join (natural) median {med_fj_nat:.3} ms, speedup (u_cover) \
          {:.2}x, speedup (natural) {:.2}x [gate: >= 2x]",
         med_binary / med_fj,
@@ -756,13 +753,13 @@ fn s2_measurement_blowup_chain_vs_binary() {
 }
 
 #[test]
-#[ignore = "S2 measurement: run explicitly with --ignored --nocapture"]
-fn s2_measurement_triangle_vs_dedicated_kernel() {
+#[ignore = "Free Join measurement: run explicitly with --ignored --nocapture"]
+fn free_join_measurement_triangle_vs_dedicated_kernel() {
     let Some(fix) = make_fixture() else {
-        eprintln!("skipping s2 triangle: no CUDA device");
+        eprintln!("skipping Free Join triangle measurement: no CUDA device");
         return;
     };
-    // W5.2-style hub triangle: x=0 fans into 10k y values, each y
+    // Hub-skewed triangle benchmark fixture: x=0 fans into 10k y values, each y
     // reaches 16 z values, hub closes through 16 x-z edges; plus a
     // 1000-row uniform background.
     let mut e_xy = Vec::new();
@@ -865,7 +862,7 @@ fn s2_measurement_triangle_vs_dedicated_kernel() {
     let med_dedicated = median(&mut dedicated_ms);
     let med_fj = median(&mut fj_ms);
     println!(
-        "S2 hub triangle: dedicated median {med_dedicated:.3} ms, free-join median \
+        "Free Join hub triangle: dedicated median {med_dedicated:.3} ms, free-join median \
          {med_fj:.3} ms, ratio {:.2}x of dedicated [gate: <= 1.2x] \
          (n_xy={}, n_yz={}, n_xz={}, |Q|={})",
         med_fj / med_dedicated,
@@ -883,10 +880,10 @@ fn s2_measurement_triangle_vs_dedicated_kernel() {
 /// way (design §3); this measurement informs the gate interpretation,
 /// it does not replace the gate.
 #[test]
-#[ignore = "S2 scale measurement: run explicitly with --ignored --nocapture"]
-fn s2_measurement_triangle_at_scale() {
+#[ignore = "Free Join scale measurement: run explicitly with --ignored --nocapture"]
+fn free_join_measurement_triangle_at_scale() {
     let Some(fix) = make_fixture() else {
-        eprintln!("skipping s2 triangle scale: no CUDA device");
+        eprintln!("skipping Free Join triangle scale measurement: no CUDA device");
         return;
     };
     let mut e_xy = Vec::new();
@@ -982,7 +979,7 @@ fn s2_measurement_triangle_at_scale() {
     let med_dedicated = median(&mut dedicated_ms);
     let med_fj = median(&mut fj_ms);
     println!(
-        "S2 hub triangle AT SCALE: dedicated median {med_dedicated:.3} ms, free-join \
+        "Free Join hub triangle at scale: dedicated median {med_dedicated:.3} ms, free-join \
          median {med_fj:.3} ms, ratio {:.2}x of dedicated [informative] \
          (n_xy={}, n_yz={}, n_xz={}, |Q|={})",
         med_fj / med_dedicated,
@@ -994,7 +991,7 @@ fn s2_measurement_triangle_at_scale() {
 }
 
 // =====================================================================
-// u64 width-class parity (Phase C)
+// u64 width-class parity
 // =====================================================================
 
 fn upload_binary_u64(memory: &Arc<GpuMemoryManager>, rows: &[(u64, u64)]) -> CudaBuffer {
@@ -1054,10 +1051,7 @@ fn download_u64_column(
         .collect()
 }
 
-fn download_rows_sorted_u64(
-    memory: &Arc<GpuMemoryManager>,
-    buffer: &CudaBuffer,
-) -> Vec<Vec<u64>> {
+fn download_rows_sorted_u64(memory: &Arc<GpuMemoryManager>, buffer: &CudaBuffer) -> Vec<Vec<u64>> {
     let arity = buffer.arity();
     let cols: Vec<Vec<u64>> = (0..arity)
         .map(|c| download_u64_column(memory, buffer, c))
@@ -1103,11 +1097,7 @@ fn oracle_chain_u64(
     out.into_iter().collect()
 }
 
-fn oracle_triangle_u64(
-    r: &[(u64, u64)],
-    s: &[(u64, u64)],
-    t: &[(u64, u64)],
-) -> Vec<Vec<u64>> {
+fn oracle_triangle_u64(r: &[(u64, u64)], s: &[(u64, u64)], t: &[(u64, u64)]) -> Vec<Vec<u64>> {
     let mut out: BTreeSet<Vec<u64>> = BTreeSet::new();
     for &(x, y) in r {
         for &(sy, z) in s {
@@ -1138,29 +1128,18 @@ fn fj_chain_u64_matches_oracle() {
     // are truncation decoys. Genuine high-bit matches go through
     // 7 + HI and 20 + 3*HI.
     let r = sorted_unique_u64([(1, 5), (2, 7 + HI), (9 + HI, 99)]);
-    let s = sorted_unique_u64([
-        (5, 10),
-        (5 + HI, 666),
-        (7 + HI, 20 + 3 * HI),
-        (7, 667),
-    ]);
-    let t = sorted_unique_u64([
-        (10, 30),
-        (10 + HI, 668),
-        (20 + 3 * HI, 31 + HI),
-        (20, 669),
-    ]);
+    let s = sorted_unique_u64([(5, 10), (5 + HI, 666), (7 + HI, 20 + 3 * HI), (7, 667)]);
+    let t = sorted_unique_u64([(10, 30), (10 + HI, 668), (20 + 3 * HI, 31 + HI), (20, 669)]);
     let u = sorted_unique_u64([(30, 8), (31 + HI, 9 + 5 * HI), (31, 670), (70, 70)]);
     let expected = oracle_chain_u64(&r, &s, &t, &u);
     assert!(!expected.is_empty(), "fixture must produce rows");
     // The decoys must actually exercise truncation: a u32-truncated
     // oracle would produce MORE rows.
-    let truncate =
-        |rows: &[(u64, u64)]| -> Vec<(u64, u64)> {
-            rows.iter()
-                .map(|&(a, b)| (a & 0xFFFF_FFFF, b & 0xFFFF_FFFF))
-                .collect()
-        };
+    let truncate = |rows: &[(u64, u64)]| -> Vec<(u64, u64)> {
+        rows.iter()
+            .map(|&(a, b)| (a & 0xFFFF_FFFF, b & 0xFFFF_FFFF))
+            .collect()
+    };
     let truncated = oracle_chain_u64(&truncate(&r), &truncate(&s), &truncate(&t), &truncate(&u));
     assert!(
         truncated.len() > expected.len(),
@@ -1223,7 +1202,7 @@ fn fj_triangle_u64_matches_oracle() {
 }
 
 // =====================================================================
-// §2.4 factorized count-by-root parity (Phase C)
+// Factorized count-by-root parity
 // =====================================================================
 
 /// Chain count plan with U's trailing column UNCONSUMED: node 2's
@@ -1265,7 +1244,6 @@ fn count_by_root_u32(rows: &[Vec<u32>]) -> Vec<(u32, u64)> {
     }
     m.into_iter().collect()
 }
-
 
 #[test]
 fn fj_count_by_root_matches_oracle() {
@@ -1372,17 +1350,17 @@ fn count_gate_fixture() -> (
 }
 
 #[test]
-#[ignore = "S2 measurement: run explicitly with --ignored --nocapture"]
-fn s2_measurement_count_fusion_gate() {
+#[ignore = "Free Join measurement: run explicitly with --ignored --nocapture"]
+fn free_join_measurement_count_fusion_gate() {
     use xlog_core::AggOp;
 
     let Some(fix) = make_fixture_with_budget(2 * 1024 * 1024 * 1024) else {
-        eprintln!("skipping s2 count gate: no CUDA device");
+        eprintln!("skipping Free Join count gate: no CUDA device");
         return;
     };
     let (r, s, t, u) = count_gate_fixture();
     println!(
-        "S2 count-gate fixture: |r|={} |s|={} |t|={} |u|={}",
+        "Free Join count-gate fixture: |r|={} |s|={} |t|={} |u|={}",
         r.len(),
         s.len(),
         t.len(),
@@ -1479,7 +1457,7 @@ fn s2_measurement_count_fusion_gate() {
     let med_binary = median(&mut binary_ms);
     let med_fused = median(&mut fused_ms);
     println!(
-        "S2 count-fusion gate: binary+groupby median {med_binary:.3} ms, fused factorized \
+        "Free Join count-fusion gate: binary+groupby median {med_binary:.3} ms, fused factorized \
          count median {med_fused:.3} ms, speedup {:.2}x [gate: >= 3x]",
         med_binary / med_fused,
     );

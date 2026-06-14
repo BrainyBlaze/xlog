@@ -3,9 +3,9 @@
 Scope: Git-tracked source and documentation files only. Superpowers docs, plan files, evidence directories, generated artifacts, result/output directories, build output, and other worktrees are excluded.
 
 Scanned files: 1430
-Unresolved files: 286
-Comment/prose artifact occurrences: 1816
-Code/identifier artifact occurrences: 712
+Unresolved files: 285
+Comment/prose artifact occurrences: 1811
+Code/identifier artifact occurrences: 702
 
 Resolved means this board found no remaining opaque task/milestone labels or external consumer names in the eligible portions of that file.
 
@@ -27,6 +27,9 @@ Hardware cache terminology such as `L2` is allowed when it refers to GPU level-2
 | `C7` | compiled epistemic execution-plan/EIR JSON dump |
 | `v085` | legacy v0.8.5 language milestone/examples |
 | `W2.5` | WCOJ cost-model default flip to the cardinality model |
+| `D2` | GPU Free Join level-synchronous factorized join execution |
+| `S2` | provider-level Free Join frontier-engine spike and measurement gates |
+| `W5.2` | hub-skewed WCOJ triangle benchmark fixture |
 | `G38` | GPU skew-classifier integration path |
 | `W5.4` | widened-frontier replay determinism certification |
 | `L2` | GPU level-2 cache |
@@ -213,7 +216,7 @@ Hardware cache terminology such as `L2` is allowed when it refers to GPU level-2
 | `crates/xlog-cuda-tests/tests/properties.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-cuda-tests/tests/quick_smoke.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-cuda-tests/tests/require_cuda_guard.rs` | 0 | 0 | true |  |  |
-| `crates/xlog-cuda-tests/tests/test_free_join_spike.rs` | 5 | 10 | false | S2(3), D2(1), W5.2(1) | S2(10) |
+| `crates/xlog-cuda-tests/tests/test_free_join_spike.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-cuda-tests/tests/test_wcoj_4cycle_groupby_root_agg.rs` | 2 | 2 | false | S1d(2) | S1d(2) |
 | `crates/xlog-cuda-tests/tests/test_wcoj_4cycle_groupby_root_count.rs` | 4 | 4 | false | S1c(2), S1d(2) | S1c(2), S1d(2) |
 | `crates/xlog-cuda-tests/tests/test_wcoj_clique_groupby_root_count.rs` | 2 | 2 | false | S1e(2) | S1e(2) |
