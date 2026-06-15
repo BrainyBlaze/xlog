@@ -1122,6 +1122,9 @@ impl CompiledProgram {
             .clone();
         let pred_name = atom.predicate.clone();
 
+        // Per-example boolean truth of each Stage-A gate at this query's key.
+        let gate_truths = self.evaluate_gate_truths(&signature, atom)?;
+
         let input_indices: Vec<usize> = signature
             .groups()
             .iter()
@@ -1246,7 +1249,7 @@ impl CompiledProgram {
             .into_iter()
             .map(|v| v.ok_or_else(|| PyRuntimeError::new_err("Missing grad tensor")))
             .collect::<PyResult<_>>()?;
-        let prob_bufs: Vec<xlog_cuda::CudaBuffer> = prob_bufs
+        let mut prob_bufs: Vec<xlog_cuda::CudaBuffer> = prob_bufs
             .into_iter()
             .map(|v| v.ok_or_else(|| PyRuntimeError::new_err("Missing prob buffer")))
             .collect::<PyResult<_>>()?;
@@ -1254,6 +1257,39 @@ impl CompiledProgram {
             .into_iter()
             .map(|v| v.ok_or_else(|| PyRuntimeError::new_err("Missing grad buffer")))
             .collect::<PyResult<_>>()?;
+
+        // Stage-A gate leaves: append one fixed (no-grad) buffer per gate,
+        // carrying the per-example boolean truth, matching the gate slots in
+        // compile_circuit_for_template (keeps probs.len() == num_groups). They
+        // are filled into the circuit weights but never backpropagated (no
+        // network owns them), so the gate stays constant and gets no gradient.
+        // The source tensors are kept alive until after the GPU kernel runs.
+        let mut _gate_keepalive: Vec<PyObject> = Vec::with_capacity(gate_truths.len() * 2);
+        for truth in &gate_truths {
+            let kwargs = PyDict::new(py);
+            kwargs.set_item("dtype", torch.getattr("float32")?)?;
+            kwargs.set_item("device", "cuda")?;
+            let prob_t = torch
+                .call_method("tensor", (vec![*truth],), Some(&kwargs))?
+                .call_method0("contiguous")?;
+            let prob_managed = dlpack_from_py(&prob_t)?;
+            let prob_buf = self
+                .output_provider
+                .from_dlpack_tensors_with_schema(schema_f32.clone(), vec![prob_managed])
+                .map_err(|e| types::gpu_err("Gate DLPack import failed", e))?;
+            let grad_t = torch
+                .call_method("zeros", (vec![1i64],), Some(&kwargs))?
+                .call_method0("contiguous")?;
+            let grad_managed = dlpack_from_py(&grad_t)?;
+            let grad_buf = self
+                .output_provider
+                .from_dlpack_tensors_with_schema(schema_f32.clone(), vec![grad_managed])
+                .map_err(|e| types::gpu_err("Gate DLPack import failed", e))?;
+            prob_bufs.push(prob_buf);
+            grad_bufs.push(grad_buf);
+            _gate_keepalive.push(prob_t.unbind());
+            _gate_keepalive.push(grad_t.unbind());
+        }
 
         // Ensure template circuit is available (compile-once per shape).
         let cache_key =
@@ -1983,6 +2019,59 @@ impl CompiledProgram {
                 .any(|ad| ad.choices.iter().any(|c| c.atom.predicate == predicate))
     }
 
+    /// Per-example boolean truth (1.0/0.0) of each Stage-A gate for a ground
+    /// query atom. The query's ground terms are substituted into the rule head
+    /// to bind the gate variables, then membership is checked against the
+    /// program's facts. Order matches `signature.gates()` (and the gate slots).
+    fn evaluate_gate_truths(
+        &self,
+        signature: &QuerySignature,
+        query_atom: &Atom,
+    ) -> PyResult<Vec<f32>> {
+        let gates = signature.gates();
+        if gates.is_empty() {
+            return Ok(Vec::new());
+        }
+        let rule = self.find_query_rule(&query_atom.predicate, query_atom.terms.len())?;
+        let mut subst: StdHashMap<&str, &Term> = StdHashMap::new();
+        for (pos, head_term) in rule.head.terms.iter().enumerate() {
+            if let Term::Variable(name) = head_term {
+                if let Some(query_term) = query_atom.terms.get(pos) {
+                    subst.insert(name.as_str(), query_term);
+                }
+            }
+        }
+        let mut truths = Vec::with_capacity(gates.len());
+        for gate in gates {
+            let ground_terms: Vec<Term> = gate
+                .atom
+                .terms
+                .iter()
+                .map(|term| match term {
+                    Term::Variable(name) => subst
+                        .get(name.as_str())
+                        .map(|t| (*t).clone())
+                        .unwrap_or_else(|| term.clone()),
+                    other => other.clone(),
+                })
+                .collect();
+            let holds = self.ground_atom_holds(&gate.atom.predicate, &ground_terms);
+            truths.push(if holds { 1.0 } else { 0.0 });
+        }
+        Ok(truths)
+    }
+
+    /// Whether a ground atom holds as an EDB fact (empty-body rule) in the
+    /// program. Stage-A gates are deterministic relations; derived (rule-headed)
+    /// gates are out of scope here.
+    fn ground_atom_holds(&self, predicate: &str, terms: &[Term]) -> bool {
+        self.ast.rules.iter().any(|rule| {
+            rule.body.is_empty()
+                && rule.head.predicate == predicate
+                && rule.head.terms.as_slice() == terms
+        })
+    }
+
     fn find_query_rule(&self, pred_name: &str, arity: usize) -> PyResult<&Rule> {
         let mut matches = 0usize;
         let mut found: Option<&Rule> = None;
@@ -2095,6 +2184,59 @@ impl CompiledProgram {
             template_program
                 .annotated_disjunctions
                 .push(xlog_logic::ast::AnnotatedDisjunction { choices });
+        }
+
+        // Stage-A gates: emit one fixed (single-choice) leaf per gate, grounded
+        // at the same placeholder constants as the query so the compiled circuit
+        // conjoins `neural ∧ guard ∧ gate`. The leaf's per-example truth weight
+        // (1.0/0.0) is injected in the forward pass (Task 5). Gate leaves are
+        // emitted AFTER the neural disjunctions so their circuit random vars sort
+        // after the neural slots (see compile_circuit_for_template).
+        let head_var_pos: StdHashMap<&str, usize> = template_rule
+            .head
+            .terms
+            .iter()
+            .enumerate()
+            .filter_map(|(pos, term)| match term {
+                Term::Variable(name) => Some((name.as_str(), pos)),
+                _ => None,
+            })
+            .collect();
+        for gate in signature.gates() {
+            let mut terms = Vec::with_capacity(gate.atom.terms.len());
+            for term in &gate.atom.terms {
+                match term {
+                    Term::Variable(name) => {
+                        let head_pos = head_var_pos.get(name.as_str()).ok_or_else(|| {
+                            PyValueError::new_err(format!(
+                                "Gate relation '{}' variable '{}' is not a head variable; \
+                                 only head-bound gates are supported (Stage A)",
+                                gate.atom.predicate, name
+                            ))
+                        })?;
+                        let placeholder = head_to_group.get(head_pos).ok_or_else(|| {
+                            PyValueError::new_err(format!(
+                                "Gate relation '{}' variable '{}' maps to head position {} which \
+                                 is not consumed by a neural input (Stage A limitation)",
+                                gate.atom.predicate, name, head_pos
+                            ))
+                        })?;
+                        terms.push(Term::Integer(*placeholder as i64));
+                    }
+                    other => terms.push(other.clone()),
+                }
+            }
+            template_program
+                .annotated_disjunctions
+                .push(xlog_logic::ast::AnnotatedDisjunction {
+                    choices: vec![xlog_logic::ast::ProbFact {
+                        prob: 0.5,
+                        atom: Atom {
+                            predicate: gate.atom.predicate.clone(),
+                            terms,
+                        },
+                    }],
+                });
         }
 
         template_program.rules.push(template_rule.clone());
@@ -2380,17 +2522,21 @@ impl CompiledProgram {
                 .map(|g| g.info.labels.as_ref().map(|l| l.len()).unwrap_or(0))
                 .collect();
 
-            let expected_total: usize = group_label_counts.iter().sum();
+            // Each Stage-A gate adds exactly one fixed circuit random var,
+            // emitted after the neural disjunctions (see generate_template_ast).
+            let num_gates = signature.gates().len();
+            let expected_total: usize = group_label_counts.iter().sum::<usize>() + num_gates;
             if random_vars.len() != expected_total {
                 return Err(PyRuntimeError::new_err(format!(
-                    "Template compilation produced {} random vars, expected {} (groups: {:?})",
+                    "Template compilation produced {} random vars, expected {} (groups: {:?}, gates: {})",
                     random_vars.len(),
                     expected_total,
-                    group_label_counts
+                    group_label_counts,
+                    num_gates
                 )));
             }
 
-            let mut slot_groups = Vec::with_capacity(group_label_counts.len());
+            let mut slot_groups = Vec::with_capacity(group_label_counts.len() + num_gates);
             let mut offset = 0usize;
             for count in group_label_counts.iter() {
                 let end = offset + *count;
@@ -2398,6 +2544,18 @@ impl CompiledProgram {
                     return Err(PyRuntimeError::new_err(format!(
                         "Template compilation random vars exhausted at offset {} count {}",
                         offset, count
+                    )));
+                }
+                slot_groups.push(random_vars[offset..end].to_vec());
+                offset = end;
+            }
+            // Gate slots: one random var each, in signature.gates() order.
+            for _ in 0..num_gates {
+                let end = offset + 1;
+                if end > random_vars.len() {
+                    return Err(PyRuntimeError::new_err(format!(
+                        "Template compilation random vars exhausted for gate slot at offset {}",
+                        offset
                     )));
                 }
                 slot_groups.push(random_vars[offset..end].to_vec());
