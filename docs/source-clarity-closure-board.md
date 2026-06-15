@@ -1431,7 +1431,7 @@ Hardware cache terminology such as `L1` and `L2` is allowed when it refers to GP
 | `python/tests/test_ilp_beta_gate.py` | 0 | 0 | true |  |  |
 | `python/tests/test_ilp_candidates.py` | 0 | 0 | true |  |  |
 | `python/tests/test_ilp_credit_gpu.py` | 8 | 10 | true | device-to-host shorthand and task section labels(8) | device-to-host shorthand in names/messages(10) |
-| `python/tests/test_ilp_d2h_gate.py` | 1 | 3 | false | D2H(1) | D2H(3) |
+| `python/tests/test_ilp_device_to_host_gate.py` | 7 | 11 | true | device-to-host shorthand in docstrings and comments(7) | device-to-host shorthand in path and test names(11) |
 | `python/tests/test_ilp_device_queries.py` | 0 | 0 | true |  |  |
 | `python/tests/test_ilp_entropy.py` | 0 | 0 | true |  |  |
 | `python/tests/test_ilp_exact_induce.py` | 1 | 6 | false | D2H(1) | D2H(5), M8(1) |

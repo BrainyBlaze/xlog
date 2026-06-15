@@ -1,5 +1,5 @@
-# python/tests/test_ilp_d2h_gate.py
-"""Tests for D2H transfer counter exposed via PyO3."""
+# python/tests/test_ilp_device_to_host_gate.py
+"""Tests for the device-to-host transfer counter exposed via PyO3."""
 from pathlib import Path
 
 import pytest
@@ -35,7 +35,7 @@ def _compile_reach_prog_with_active_mask():
     return prog
 
 
-def test_d2h_counter_accessible():
+def test_device_to_host_counter_accessible():
     prog = pyxlog.IlpProgramFactory.compile(
         REACH_SOURCE, device=0, memory_mb=64,
     )
@@ -52,11 +52,11 @@ def test_compiled_ilp_program_does_not_expose_public_read_device_helpers():
     assert not hasattr(prog, "set_rule_mask_sparse_selected_device_trusted")
 
 
-def test_d2h_counter_reset():
+def test_device_to_host_counter_reset():
     prog = pyxlog.IlpProgramFactory.compile(
         REACH_SOURCE, device=0, memory_mb=64,
     )
-    # fact_exists triggers D2H transfers
+    # fact_exists triggers device-to-host transfers.
     prog.evaluate()
     prog.fact_exists("edge", [1, 2])
     assert prog.d2h_transfer_count() > 0
@@ -65,7 +65,7 @@ def test_d2h_counter_reset():
     assert prog.d2h_transfer_count() == 0
 
 
-def test_strict_zero_dtoh_rejects_host_sparse_selected_api():
+def test_strict_zero_device_to_host_rejects_host_sparse_selected_api():
     prog = pyxlog.IlpProgramFactory.compile(
         REACH_SOURCE, device=0, memory_mb=64,
     )
@@ -98,7 +98,7 @@ def test_batch_fact_membership_empty_facts():
     assert mask == []
 
 
-def test_batch_fact_membership_no_d2h_columns():
+def test_batch_fact_membership_no_device_to_host_columns():
     """batch_fact_membership must NOT use download_column_*."""
     prog = pyxlog.IlpProgramFactory.compile(
         REACH_SOURCE, device=0, memory_mb=64,
@@ -145,7 +145,7 @@ def test_batch_tagged_credit_basic():
     assert credits[2] == []
 
 
-def test_batch_tagged_credit_no_d2h_columns():
+def test_batch_tagged_credit_no_device_to_host_columns():
     """batch_tagged_credit must NOT use download_column_*."""
     prog = pyxlog.IlpProgramFactory.compile(
         REACH_SOURCE, device=0, memory_mb=64,
@@ -173,7 +173,7 @@ def test_batch_tagged_credit_no_d2h_columns():
 from pyxlog.ilp import train_only, TrainConfig
 
 
-def test_zero_d2h_in_training_step_loop():
+def test_zero_device_to_host_in_training_step_loop():
     """The training step loop must have zero download_column_* calls."""
     config = TrainConfig(
         step_budget_per_attempt=20, max_attempts=1,
@@ -189,8 +189,8 @@ def test_zero_d2h_in_training_step_loop():
     assert result.total_steps > 0
 
 
-def test_full_training_zero_d2h_gate():
-    """Full training run must complete without D2H gate violation."""
+def test_full_training_zero_device_to_host_gate():
+    """Full training run must complete without device-to-host gate violation."""
     source = """
         edge(1, 2). edge(2, 3). edge(3, 4). edge(4, 5). edge(5, 6).
         learnable(W_reach) :: reach(X, Y) :- b1(X, Z), b2(Z, Y).
@@ -207,7 +207,7 @@ def test_full_training_zero_d2h_gate():
         negatives=[],
         config=config,
     )
-    # If we got here without IlpTrainingError("d2h_gate_violation"),
+    # If we got here without a device-to-host gate violation,
     # the hard gate passed.
     strict_result_type = getattr(ilp, "StrictTrainResult", None)
     strict_artifact_type = getattr(ilp, "StrictLearnedArtifact", None)
@@ -232,7 +232,7 @@ def test_full_training_zero_d2h_gate():
     assert "edge" in compat_artifact.discovered_rule
 
 
-def test_compiled_relation_training_zero_d2h_gate():
+def test_compiled_relation_training_zero_device_to_host_gate():
     train_on_compiled_relations = getattr(ilp, "train_on_compiled_relations", None)
     assert train_on_compiled_relations is not None, (
         "pyxlog.ilp.train_on_compiled_relations must be exported for strict relation-native training"
@@ -344,8 +344,8 @@ def test_compiled_relation_training_strict_hot_loop_forbids_cuda_scalar_material
     assert result.compat_materialized is False
 
 
-def test_d2h_gate_with_negatives():
-    """D2H gate holds even with negative examples."""
+def test_device_to_host_gate_with_negatives():
+    """Device-to-host gate holds even with negative examples."""
     source = """
         parent(1, 2). parent(2, 3). parent(3, 4). parent(4, 5).
         gender(1, 0). gender(2, 1). gender(3, 0). gender(4, 1).
@@ -363,7 +363,7 @@ def test_d2h_gate_with_negatives():
         negatives=[("grandparent", [1, 2]), ("grandparent", [3, 1])],
         config=config,
     )
-    # No d2h_gate_violation raised
+    # No device-to-host gate violation was raised.
     strict_result_type = getattr(ilp, "StrictTrainResult", None)
     strict_artifact_type = getattr(ilp, "StrictLearnedArtifact", None)
     assert strict_result_type is not None
@@ -428,7 +428,7 @@ def test_ilp_registry_routes_row_count_reads_through_provider_api():
         ),
     ],
 )
-def test_strict_zero_dtoh_rejects_host_semantic_runtime_apis(label, invoker):
+def test_strict_zero_device_to_host_rejects_host_semantic_runtime_apis(label, invoker):
     prog = _compile_reach_prog_with_active_mask()
     prog.set_strict_zero_dtoh(True)
 

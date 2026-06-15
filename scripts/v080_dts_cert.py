@@ -250,7 +250,7 @@ def build_manifest(repo_root: Path) -> dict:
         "fixture": "external consumer fixed pyxlog session replay",
         "replays": 100,
         "bit_exact_replays": 100,
-        "source_guard": "python/tests/test_logic_dts_frozen_replay_determinism.py",
+                "source_guard": "python/tests/test_logic_external_consumer_frozen_replay_determinism.py",
     }
     if runtime_payload is not None:
         hot_path_host_transfers = runtime_payload[
@@ -276,7 +276,7 @@ def build_manifest(repo_root: Path) -> dict:
         "hot_path_evidence": {
             "scope": "certified external consumer pyxlog session hot path",
             "source_guards": [
-                "python/tests/test_ilp_d2h_gate.py::test_host_transfer_stats_methods_accessible",
+                "python/tests/test_ilp_device_to_host_gate.py::test_host_transfer_stats_methods_accessible",
                 "crates/xlog-integration/tests/test_m37a_surface_preservation.rs",
             ],
         },
