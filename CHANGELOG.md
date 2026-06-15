@@ -260,6 +260,28 @@ All notable changes to this project are documented in this file.
   key support; both `XLOG_DISABLE_WCOJ_GROUPBY_FUSION` and
   `XLOG_DISABLE_FREE_JOIN` disable the fused route with identical
   fallback results.
+- *(runtime)* **Free Join order planner and factorized loss veto.** Two
+  cardinality-driven gates keep the factorized routes from dispatching a worse
+  plan in their loss regions:
+  - Order planner (`plan_free_join_order`): Free Join materializes a left-deep
+    prefix whose probe keys must be a leading column prefix of each atom, so a
+    bad input order can materialize a large intermediate even when the result
+    is tiny. Using the ground-truth row counts of the buffers being joined
+    (and `StatsManager::estimate_join_cardinality` for per-pair selectivity when
+    stats exist), it keeps the input order when it is already within 1.2x of the
+    binary plan's estimated peak (small joins and already-good orders untouched),
+    reorders to a better prefix-key-joinable order when one is competitive, or
+    declines to the binary fallback when none is — removing a measured worst-case
+    peak-memory loss (~3x on an adversarial blow-up chain, now declined to peak
+    parity) while every winning fixture still fires.
+  - Loss veto (`factorized_loss_veto`): fail-open. The aggregate-fused WCOJ and
+    Free Join routes decline to the binary plan only when stats are present for
+    every input and the largest is below the WCOJ-worthwhile threshold (a
+    provably-small join the binary plan wins); missing stats or any large input
+    never veto, so measured wins are preserved.
+  Both run only under the cardinality cost model (the skew model opts out), and
+  reordering changes only the plan-build order — buffer indexing and the head
+  projection are unchanged. Documented in the WCOJ architecture and user guides.
 - *(prob)* **Factorized outcome folding for exact non-count aggregates.**
   Probabilistic `sum`/`min`/`max`/`logsumexp` provenance no longer
   enumerates one conjunction per 2^k outcome mask; the factorized encoding
