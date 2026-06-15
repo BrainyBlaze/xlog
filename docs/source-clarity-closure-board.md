@@ -1327,22 +1327,22 @@ Hardware cache terminology such as `L1` and `L2` is allowed when it refers to GP
 | `examples/language-completeness/showcase/10_scientific_incremental/expected.json` | 0 | 0 | true |  |  |
 | `examples/language-completeness/showcase/10_scientific_incremental/program.xlog` | 1 | 0 | true | release-coded language-feature comment(1) |  |
 | `examples/language-completeness/showcase/README.md` | 4 | 1 | true | release/suite/sub-goal labels(4) | release-specific validator path label(1) |
-| `examples/v086-runtime/01_dts_delta_optimizer/README.md` | 1 | 0 | true | release label(1) |  |
-| `examples/v086-runtime/01_dts_delta_optimizer/expected.json` | 0 | 8 | true |  | external consumer and predicate-name artifacts(8) |
-| `examples/v086-runtime/01_dts_delta_optimizer/program.xlog` | 0 | 25 | true |  | external consumer predicate-name artifacts(25) |
-| `examples/v086-runtime/02_neutral_material_flow/README.md` | 0 | 0 | true |  |  |
-| `examples/v086-runtime/02_neutral_material_flow/expected.json` | 0 | 1 | true |  | external consumer name(1) |
-| `examples/v086-runtime/02_neutral_material_flow/program.xlog` | 0 | 0 | true |  |  |
-| `examples/v086-runtime/03_neutral_signal_diagnostics/README.md` | 0 | 0 | true |  |  |
-| `examples/v086-runtime/03_neutral_signal_diagnostics/expected.json` | 0 | 1 | true |  | external consumer name(1) |
-| `examples/v086-runtime/03_neutral_signal_diagnostics/program.xlog` | 0 | 0 | true |  |  |
-| `examples/v086-runtime/04_v090_substrate_primitives/README.md` | 2 | 0 | true | release labels(2) |  |
-| `examples/v086-runtime/04_v090_substrate_primitives/expected.json` | 0 | 2 | true |  | release substrate contract labels(2) |
-| `examples/v086-runtime/04_v090_substrate_primitives/program.xlog` | 2 | 0 | true | release labels(2) |  |
-| `examples/v086-runtime/05_pyxlog_session_compatibility/README.md` | 1 | 0 | true | release label(1) |  |
-| `examples/v086-runtime/05_pyxlog_session_compatibility/expected.json` | 0 | 0 | true |  |  |
-| `examples/v086-runtime/05_pyxlog_session_compatibility/program.xlog` | 0 | 0 | true |  |  |
-| `examples/v086-runtime/README.md` | 6 | 1 | true | release labels and external-consumer name(6) | release-coded validator path(1) |
+| `examples/runtime-consumers/01_external_delta_optimizer/README.md` | 1 | 0 | true | release label(1) |  |
+| `examples/runtime-consumers/01_external_delta_optimizer/expected.json` | 0 | 8 | true |  | external consumer and predicate-name artifacts(8) |
+| `examples/runtime-consumers/01_external_delta_optimizer/program.xlog` | 0 | 25 | true |  | external consumer predicate-name artifacts(25) |
+| `examples/runtime-consumers/02_neutral_material_flow/README.md` | 0 | 0 | true |  |  |
+| `examples/runtime-consumers/02_neutral_material_flow/expected.json` | 0 | 1 | true |  | external consumer name(1) |
+| `examples/runtime-consumers/02_neutral_material_flow/program.xlog` | 0 | 0 | true |  |  |
+| `examples/runtime-consumers/03_neutral_signal_diagnostics/README.md` | 0 | 0 | true |  |  |
+| `examples/runtime-consumers/03_neutral_signal_diagnostics/expected.json` | 0 | 1 | true |  | external consumer name(1) |
+| `examples/runtime-consumers/03_neutral_signal_diagnostics/program.xlog` | 0 | 0 | true |  |  |
+| `examples/runtime-consumers/04_runtime_substrate_primitives/README.md` | 2 | 0 | true | release labels(2) |  |
+| `examples/runtime-consumers/04_runtime_substrate_primitives/expected.json` | 0 | 2 | true |  | release substrate contract labels(2) |
+| `examples/runtime-consumers/04_runtime_substrate_primitives/program.xlog` | 2 | 0 | true | release labels(2) |  |
+| `examples/runtime-consumers/05_pyxlog_session_compatibility/README.md` | 1 | 0 | true | release label(1) |  |
+| `examples/runtime-consumers/05_pyxlog_session_compatibility/expected.json` | 0 | 0 | true |  |  |
+| `examples/runtime-consumers/05_pyxlog_session_compatibility/program.xlog` | 0 | 0 | true |  |  |
+| `examples/runtime-consumers/README.md` | 6 | 1 | true | release labels and external-consumer name(6) | release-coded validator path(1) |
 | `examples/xlog/00-basics/01_tc_reachability.xlog` | 0 | 0 | true |  |  |
 | `examples/xlog/00-basics/02_stratified_isolated.xlog` | 0 | 0 | true |  |  |
 | `examples/xlog/00-basics/03_constraints_acyclic.xlog` | 0 | 0 | true |  |  |
@@ -1488,13 +1488,13 @@ Hardware cache terminology such as `L1` and `L2` is allowed when it refers to GP
 | `python/tests/test_adaptive_reoptimization_source.py` | 0 | 7 | true |  | release-coded test, evidence, and metric labels(7) |
 | `python/tests/test_chain_shared_memory_profile_source.py` | 0 | 9 | true |  | release-coded test, script, evidence, phase, and metric labels plus shared-memory shorthand(9) |
 | `python/tests/test_chain_shared_memory_source.py` | 0 | 8 | true |  | release-coded test, evidence, metric labels, and shared-memory shorthand in guard names(8) |
-| `python/tests/test_v086_consumers_source.py` | 0 | 27 | false |  | release-coded file/test labels(27) |
+| `python/tests/test_runtime_consumers_source.py` | 0 | 34 | true |  | release-coded suite, test, validator, evidence, compatibility, and consumer labels(34) |
 | `python/tests/test_v086_cse_source.py` | 0 | 1 | false |  | v086(1) |
 | `python/tests/test_v086_delta_coalescing.py` | 0 | 2 | false |  | v086(2) |
 | `python/tests/test_v086_exact_types_runtime.py` | 0 | 0 | true |  |  |
 | `python/tests/test_v086_exact_types_source.py` | 0 | 1 | false |  | v086(1) |
 | `python/tests/test_v086_persistent_hash_index_source.py` | 0 | 1 | false |  | v086(1) |
-| `python/tests/test_v086_pyxlog_persistent_index_runtime.py` | 0 | 0 | true |  |  |
+| `python/tests/test_pyxlog_persistent_index_runtime.py` | 0 | 1 | true |  | release-coded runtime test path(1) |
 | `python/tests/test_v086_relation_callbacks.py` | 0 | 2 | false |  | v086(2) |
 | `python/tests/test_v086_relation_callbacks_runtime.py` | 0 | 0 | true |  |  |
 | `python/tests/test_v087_lwm_source.py` | 0 | 0 | true |  |  |
@@ -1531,7 +1531,7 @@ Hardware cache terminology such as `L1` and `L2` is allowed when it refers to GP
 | `scripts/validate_release_gpu.sh` | 0 | 0 | true |  |  |
 | `scripts/validate_external_consumer_examples.py` | 0 | 5 | true |  | release-coded validator, suite, evidence, and output labels(5) |
 | `scripts/validate_language_examples.py` | 0 | 4 | true |  | release-coded validator, evidence, and suite labels(4) |
-| `scripts/validate_v086_examples.py` | 0 | 57 | false |  | release-coded validator/path labels(57) |
+| `scripts/validate_runtime_consumers.py` | 0 | 78 | true |  | release-coded validator, suite, evidence, compatibility, and feature-evidence labels(78) |
 | `scripts/validation_staging.py` | 0 | 0 | true |  |  |
 | `scripts/xlog_doctor.py` | 0 | 0 | true |  |  |
 | `tools/exdev-shim/build.sh` | 0 | 0 | true |  |  |

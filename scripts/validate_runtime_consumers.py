@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate the v0.8.6 runtime consumer certification examples."""
+"""Validate runtime consumer certification examples."""
 
 from __future__ import annotations
 
@@ -15,14 +15,14 @@ from typing import Any
 
 
 ROOT = Path(__file__).resolve().parents[1]
-EXAMPLE_ROOT = ROOT / "examples" / "v086-runtime"
-DEFAULT_OUTPUT = ROOT / "docs" / "evidence" / "2026-05-19-v086-consumers" / "validation_summary.json"
-DEFAULT_EVIDENCE = ROOT / "docs" / "evidence" / "2026-05-19-v086-consumers"
+EXAMPLE_ROOT = ROOT / "examples" / "runtime-consumers"
+DEFAULT_OUTPUT = ROOT / "docs" / "evidence" / "runtime-consumers" / "validation_summary.json"
+DEFAULT_EVIDENCE = ROOT / "docs" / "evidence" / "runtime-consumers"
 EXAMPLES = [
-    "01_dts_delta_optimizer",
+    "01_external_delta_optimizer",
     "02_neutral_material_flow",
     "03_neutral_signal_diagnostics",
-    "04_v090_substrate_primitives",
+    "04_runtime_substrate_primitives",
     "05_pyxlog_session_compatibility",
 ]
 REQUIRED_FEATURES = [
@@ -42,15 +42,49 @@ REQUIRED_CONSUMERS = {
     "runtime-substrate-primitives",
     "pyxlog-compatibility",
 }
-FEATURE_EVIDENCE = {
-    "delta": ROOT / "docs/evidence/2026-05-19-v086-delta-coalesce/measurements.json",
-    "exact_induction": ROOT / "docs/evidence/2026-05-19-v086-exact-types/measurements.json",
-    "chain_shared_memory": ROOT / "docs/evidence/2026-05-19-v086-chain-smem/measurements.json",
-    "common_subexpression_elimination": ROOT / "docs/evidence/2026-05-19-v086-cse/measurements.json",
-    "adaptive_reoptimization": ROOT / "docs/evidence/2026-05-19-v086-adaptive-reoptimization/measurements.json",
-    "persistent_hash_index": ROOT / "docs/evidence/2026-05-19-v086-persistent-hash-index/measurements.json",
-}
 KERNEL_ARTIFACT_SUFFIXES = (".cubin", ".portable.ptx")
+
+
+def _find_measurement_file(feature: str) -> Path:
+    def matches_feature(measurements: dict[str, Any]) -> bool:
+        if feature == "delta":
+            return "recompute_call_reduction_ratio" in measurements
+        if feature == "exact_induction":
+            return "provider_typed_tests_passed" in measurements and "symbol" in measurements
+        if feature == "chain_shared_memory":
+            return measurements.get("chain_hot", {}).get("parity") is True
+        if feature == "common_subexpression_elimination":
+            return "unsafe_rejections" in measurements and "deterministic_fixture" in measurements
+        if feature == "adaptive_reoptimization":
+            return "rollback_fixture" in measurements and "deterministic_fixture" in measurements
+        if feature == "persistent_hash_index":
+            return "performance_fixture" in measurements and "repeated_session_fixture" in measurements
+        return False
+
+    matches = []
+    for path in sorted((ROOT / "docs" / "evidence").iterdir()):
+        measurements_path = path / "measurements.json"
+        if not measurements_path.exists():
+            continue
+        measurements = json.loads(measurements_path.read_text(encoding="utf-8"))
+        if matches_feature(measurements):
+            matches.append(measurements_path)
+    if len(matches) != 1:
+        raise RuntimeError(f"Expected one measurements file for {feature}, found {matches}")
+    return matches[0]
+
+
+FEATURE_EVIDENCE = {
+    feature: _find_measurement_file(feature)
+    for feature in [
+        "delta",
+        "exact_induction",
+        "chain_shared_memory",
+        "common_subexpression_elimination",
+        "adaptive_reoptimization",
+        "persistent_hash_index",
+    ]
+}
 
 
 def _probe(
@@ -241,7 +275,7 @@ def _consumer_behavior_probes(
             proof="persistent hash-index runtime fixture records >=1.5x speedup, repeated-session build/hit, and zero tracked transfers",
             evidence=[
                 feature_measurements["persistent_hash_index"]["path"],
-                "python/tests/test_v086_pyxlog_persistent_index_runtime.py",
+                "python/tests/test_pyxlog_persistent_index_runtime.py",
             ],
             raw={
                 "speedup_ratio": persistent_perf.get("speedup_ratio"),
@@ -266,9 +300,9 @@ def _consumer_behavior_probes(
             raw={"examples": examples_by_consumer["runtime-substrate-primitives"]},
         ),
         "pyxlog_compatibility": _probe(
-            status=compatibility_gates.get("v080_examples", {}).get("status") == "PASS"
-            and compatibility_gates.get("v085_examples", {}).get("status") == "PASS"
-            and compatibility_gates.get("v080_v085_source_guards", {}).get("status") == "PASS"
+            status=compatibility_gates.get("external_consumer_examples", {}).get("status") == "PASS"
+            and compatibility_gates.get("language_examples", {}).get("status") == "PASS"
+            and compatibility_gates.get("example_source_guards", {}).get("status") == "PASS"
             and compatibility_gates.get("pyxlog_persistent_index_session_reuse", {}).get(
                 "status"
             )
@@ -279,7 +313,7 @@ def _consumer_behavior_probes(
             evidence=[
                 "scripts/validate_external_consumer_examples.py",
                 "scripts/validate_language_examples.py",
-                "python/tests/test_v086_pyxlog_persistent_index_runtime.py",
+                "python/tests/test_pyxlog_persistent_index_runtime.py",
             ],
             raw={"examples": examples_by_consumer["pyxlog-compatibility"]},
         ),
@@ -289,7 +323,7 @@ def _consumer_behavior_probes(
             features=["production_path_reuse"],
             consumers=sorted(REQUIRED_CONSUMERS),
             proof="validator runs examples through xlog-cli run/explain and audits reused subsystems without private helper engines",
-            evidence=["scripts/validate_v086_examples.py"],
+            evidence=["scripts/validate_runtime_consumers.py"],
             raw={
                 "private_hooks_used": production_path_reuse.get("private_hooks_used"),
                 "fixture_only_bypass": production_path_reuse.get("fixture_only_bypass"),
@@ -671,7 +705,7 @@ def _feature_measurements() -> dict[str, Any]:
             "path": str(path.relative_to(ROOT)),
             "raw": payload,
         }
-    _require(not missing, f"Missing v0.8.6 feature evidence: {missing}")
+    _require(not missing, f"Missing runtime feature evidence: {missing}")
     return measurements
 
 
@@ -738,7 +772,7 @@ def _run_pyxlog_persistent_index_probe(
             "-m",
             "pytest",
             "-q",
-            "python/tests/test_v086_pyxlog_persistent_index_runtime.py",
+            "python/tests/test_pyxlog_persistent_index_runtime.py",
         ],
         timeout=args.compat_timeout,
         env=env,
@@ -759,32 +793,35 @@ def _run_pyxlog_persistent_index_probe(
 
 def _compatibility_gates(args: argparse.Namespace, evidence_dir: Path) -> dict[str, Any]:
     pyxlog_env = _prepare_local_pyxlog_env(args)
-    v080 = _run_existing_validator(
+    external_consumer = _run_existing_validator(
         args,
         "scripts/validate_external_consumer_examples.py",
-        evidence_dir / "compat_v080_validation_summary.json",
+        evidence_dir / "compat_external_consumer_examples_validation_summary.json",
         pyxlog_env,
     )
-    v085 = _run_existing_validator(
+    language = _run_existing_validator(
         args,
         "scripts/validate_language_examples.py",
-        evidence_dir / "compat_v085_validation_summary.json",
+        evidence_dir / "compat_language_examples_validation_summary.json",
         pyxlog_env,
     )
     guards = _run_source_guard(args)
     pyxlog_persistent = _run_pyxlog_persistent_index_probe(args, pyxlog_env)
-    _require(v080["status"] == "PASS", f"v0.8.0 validator did not pass: {v080}")
-    _require(v085["status"] == "PASS", f"v0.8.5 validator did not pass: {v085}")
+    _require(
+        external_consumer["status"] == "PASS",
+        f"external consumer validator did not pass: {external_consumer}",
+    )
+    _require(language["status"] == "PASS", f"language validator did not pass: {language}")
     return {
-        "v080_examples": v080,
-        "v085_examples": v085,
-        "v080_v085_source_guards": guards,
+        "external_consumer_examples": external_consumer,
+        "language_examples": language,
+        "example_source_guards": guards,
         "pyxlog_persistent_index_session_reuse": pyxlog_persistent,
     }
 
 
 def _production_path_reuse() -> dict[str, Any]:
-    validator = (ROOT / "scripts/validate_v086_examples.py").read_text(encoding="utf-8")
+    validator = (ROOT / "scripts/validate_runtime_consumers.py").read_text(encoding="utf-8")
     checked_programs = [
         str((EXAMPLE_ROOT / example / "program.xlog").relative_to(ROOT)) for example in EXAMPLES
     ]
@@ -822,7 +859,7 @@ def _reuse_audit() -> dict[str, Any]:
             "xlog-runtime production executor/provider dispatch",
             "external consumer example validator",
             "language showcase validator",
-            "committed v0.8.6 feature evidence",
+            "committed runtime feature evidence",
         ],
         "evidence_paths": evidence_paths,
     }
@@ -864,7 +901,7 @@ def _aggregate(
     certification_status = "PASS" if not consumer_proof_gaps else "BLOCKED"
 
     return {
-        "suite": "G086_CONSUMERS",
+        "suite": "runtime_consumers",
         "status": "PASS" if certification_status == "PASS" else "BLOCKED",
         "example_execution_status": "PASS",
         "consumer_certification_status": certification_status,
