@@ -1495,8 +1495,8 @@ Hardware cache terminology such as `L1` and `L2` is allowed when it refers to GP
 | `python/tests/test_exact_types_source.py` | 0 | 7 | true |  | release-coded source, evidence, metric, and runtime-test labels(7) |
 | `python/tests/test_persistent_hash_index_source.py` | 0 | 10 | true |  | release-coded source, evidence, and metric labels(10) |
 | `python/tests/test_pyxlog_persistent_index_runtime.py` | 0 | 1 | true |  | release-coded runtime test path(1) |
-| `python/tests/test_v086_relation_callbacks.py` | 0 | 2 | false |  | v086(2) |
-| `python/tests/test_v086_relation_callbacks_runtime.py` | 0 | 0 | true |  |  |
+| `python/tests/test_relation_callbacks.py` | 0 | 14 | true |  | release-coded source, evidence, metric labels, and external-consumer fixture name(14) |
+| `python/tests/test_relation_callbacks_runtime.py` | 0 | 13 | true |  | release-coded runtime path, skip text, and external-consumer fixture name(13) |
 | `python/tests/test_v087_lwm_source.py` | 0 | 0 | true |  |  |
 | `python/tests/test_v088_lwm_source.py` | 0 | 0 | true |  |  |
 | `python/tests/test_validate_examples_cli.py` | 0 | 0 | true |  |  |

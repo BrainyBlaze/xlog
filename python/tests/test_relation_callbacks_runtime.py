@@ -9,9 +9,9 @@ skip_unless_pyxlog_cuda()
 
 
 SOURCE = """
-pred wmir_committed(i32).
+pred external_consumer_commit(i32).
 pred out(i32).
-out(X) :- wmir_committed(X).
+out(X) :- external_consumer_commit(X).
 ?- out(X).
 """
 
@@ -20,7 +20,7 @@ def _session():
     program = pyxlog.LogicProgram.compile(SOURCE, device=0, memory_mb=256)
     session = program.session()
     if not hasattr(session, "register_relation_callback"):
-        pytest.skip("installed pyxlog does not expose v0.8.6 relation callbacks")
+        pytest.skip("installed pyxlog does not expose relation callbacks")
     return session
 
 
@@ -33,12 +33,12 @@ def test_relation_callbacks_fire_after_success_skip_failed_delta_and_unregister(
     events = []
     callback_id = session.register_relation_callback(events.append)
 
-    stats = session.apply_relation_delta("wmir_committed", insert_columns=[_col([1, 2])])
+    stats = session.apply_relation_delta("external_consumer_commit", insert_columns=[_col([1, 2])])
 
     assert stats["insert_rows"] == 2
     assert len(events) == 1
     payload = events[0]
-    assert payload["relation"] == "wmir_committed"
+    assert payload["relation"] == "external_consumer_commit"
     assert payload["generation"] == 1
     assert payload["insert_rows"] == 2
     assert payload["delete_rows"] == 0
@@ -54,7 +54,7 @@ def test_relation_callbacks_fire_after_success_skip_failed_delta_and_unregister(
 
     assert session.unregister_relation_callback(callback_id) is True
     assert session.unregister_relation_callback(callback_id) is False
-    session.apply_relation_delta("wmir_committed", insert_columns=[_col([4])])
+    session.apply_relation_delta("external_consumer_commit", insert_columns=[_col([4])])
     assert len(events) == 1
 
 
@@ -76,12 +76,12 @@ def test_relation_callback_ordering_is_deterministic_across_100_replays():
             )
         )
 
-        session.apply_relation_delta("wmir_committed", insert_columns=[_col([1, 2])])
-        session.apply_relation_delta("wmir_committed", delete_columns=[_col([2])])
+        session.apply_relation_delta("external_consumer_commit", insert_columns=[_col([1, 2])])
+        session.apply_relation_delta("external_consumer_commit", delete_columns=[_col([2])])
         session.apply_relation_delta_batch(
             [
-                {"name": "wmir_committed", "insert_columns": [_col([3, 4])]},
-                {"name": "wmir_committed", "delete_columns": [_col([3])]},
+                {"name": "external_consumer_commit", "insert_columns": [_col([3, 4])]},
+                {"name": "external_consumer_commit", "delete_columns": [_col([3])]},
             ]
         )
 
@@ -98,8 +98,8 @@ def test_callback_disabled_path_has_zero_callback_transfer_stats():
     session.reset_host_transfer_stats()
     session.apply_relation_delta_batch(
         [
-            {"name": "wmir_committed", "insert_columns": [_col([1, 2])]},
-            {"name": "wmir_committed", "delete_columns": [_col([2])]},
+            {"name": "external_consumer_commit", "insert_columns": [_col([1, 2])]},
+            {"name": "external_consumer_commit", "delete_columns": [_col([2])]},
         ]
     )
     transfer_stats = session.host_transfer_stats()

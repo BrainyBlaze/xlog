@@ -1,10 +1,36 @@
+import json
 from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[2]
 
 
-def test_v086_relation_callback_api_is_exposed_in_stubs_docs_and_rust() -> None:
+def relation_callback_evidence_dir() -> Path:
+    matches = []
+    for path in sorted((ROOT / "docs" / "evidence").iterdir()):
+        measurements_path = path / "measurements.json"
+        if not measurements_path.exists() or not (path / "README.md").exists():
+            continue
+        measurements = json.loads(measurements_path.read_text(encoding="utf-8"))
+        if (
+            measurements.get("runtime_tests_passed") == 3
+            and measurements.get("determinism_replays") == 100
+            and measurements.get("deterministic_callback_sequence") is True
+            and measurements.get("failed_delta_callback_count_unchanged") is True
+            and measurements.get("unregister_removed_callback") is True
+            and measurements.get("payload_metadata_only") is True
+            and measurements.get("callback_disabled_dtoh_bytes") == 0
+            and measurements.get("callback_disabled_dtoh_calls") == 0
+        ):
+            matches.append(path)
+    assert len(matches) == 1
+    return matches[0]
+
+
+EVIDENCE_DIR = relation_callback_evidence_dir()
+
+
+def test_relation_callback_api_is_exposed_in_stubs_docs_and_rust() -> None:
     native_stub = (ROOT / "crates/pyxlog/python/pyxlog/_native.pyi").read_text()
     docs = (ROOT / "docs/architecture/python-bindings.md").read_text()
     logic_rs = (ROOT / "crates/pyxlog/src/logic.rs").read_text()
@@ -27,7 +53,7 @@ def test_v086_relation_callback_api_is_exposed_in_stubs_docs_and_rust() -> None:
     assert "relation_generations" in lib_rs
 
 
-def test_v086_relation_callback_payload_is_metadata_only_and_post_commit() -> None:
+def test_relation_callback_payload_is_metadata_only_and_post_commit() -> None:
     logic_rs = (ROOT / "crates/pyxlog/src/logic.rs").read_text()
     callback_start = logic_rs.index("fn fire_relation_callbacks")
     callback_end = logic_rs.index("fn optional_delta_columns", callback_start)
@@ -71,7 +97,7 @@ def test_v086_relation_callback_payload_is_metadata_only_and_post_commit() -> No
     )
 
 
-def test_v086_relation_callback_ordering_and_unregister_are_source_auditable() -> None:
+def test_relation_callback_ordering_and_unregister_are_source_auditable() -> None:
     logic_rs = (ROOT / "crates/pyxlog/src/logic.rs").read_text()
     docs = (ROOT / "docs/architecture/python-bindings.md").read_text()
 
@@ -82,21 +108,21 @@ def test_v086_relation_callback_ordering_and_unregister_are_source_auditable() -
     assert "GIL" in docs
 
 
-def test_v086_relation_callbacks_have_certified_evidence() -> None:
-    evidence = ROOT / "docs/evidence/2026-05-19-v086-notify/README.md"
-    measurements = ROOT / "docs/evidence/2026-05-19-v086-notify/measurements.json"
+def test_relation_callbacks_have_certified_evidence() -> None:
+    evidence = EVIDENCE_DIR / "README.md"
+    measurements = EVIDENCE_DIR / "measurements.json"
 
     assert evidence.exists()
     assert measurements.exists()
 
     text = evidence.read_text()
     for needle in [
-        "M086_NOTIFY.1",
-        "M086_NOTIFY.2",
-        "M086_NOTIFY.3",
-        "M086_NOTIFY.4",
-        "M086_NOTIFY.5",
-        "M086_NOTIFY.6",
-        "wmir_committed",
+        "Opt-In Relation-Change Callbacks",
+        "callbacks fire only after successful delta commits",
+        "payloads contain metadata summaries",
+        "nested",
+        "deterministic across 100 runtime replays",
+        "zero relation data-plane D2H transfers",
+        "callback-disabled overhead within 2 percent",
     ]:
         assert needle in text
