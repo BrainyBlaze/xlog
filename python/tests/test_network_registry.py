@@ -104,22 +104,25 @@ class TestNetworkRegistration:
     def test_register_multiple_networks(self):
         """Test registering multiple networks."""
         program = pyxlog.Program.compile("""
-            nn(net1, [X], Y1, [0,1,2,3,4,5,6,7,8,9]) :: digit1(X, Y1).
-            nn(net2, [X], Y2, [0,1,2,3,4,5,6,7,8,9]) :: digit2(X, Y2).
-            addition(X, Y, Z) :- digit1(X, D1), digit2(Y, D2), Z is D1 + D2.
+            nn(first_digit_net, [FirstInput], FirstDigitLabel, [0,1,2,3,4,5,6,7,8,9]) :: first_digit(FirstInput, FirstDigitLabel).
+            nn(second_digit_net, [SecondInput], SecondDigitLabel, [0,1,2,3,4,5,6,7,8,9]) :: second_digit(SecondInput, SecondDigitLabel).
+            addition(FirstInput, SecondInput, Sum) :-
+                first_digit(FirstInput, FirstDigitValue),
+                second_digit(SecondInput, SecondDigitValue),
+                Sum is FirstDigitValue + SecondDigitValue.
         """)
 
-        net1 = SimpleNet()
-        net2 = SimpleNet()
-        opt1 = torch.optim.Adam(net1.parameters())
-        opt2 = torch.optim.Adam(net2.parameters())
+        first_network = SimpleNet()
+        second_network = SimpleNet()
+        first_optimizer = torch.optim.Adam(first_network.parameters())
+        second_optimizer = torch.optim.Adam(second_network.parameters())
 
-        program.register_network("net1", net1, opt1)
-        program.register_network("net2", net2, opt2)
+        program.register_network("first_digit_net", first_network, first_optimizer)
+        program.register_network("second_digit_net", second_network, second_optimizer)
 
         names = program.network_names()
-        assert "net1" in names
-        assert "net2" in names
+        assert "first_digit_net" in names
+        assert "second_digit_net" in names
         assert len(names) == 2
 
     def test_declared_network_names(self):
@@ -204,7 +207,7 @@ class TestNetworkRegistrationEdgeCases:
     def test_network_with_multiple_inputs(self):
         """Test network with multiple input variables."""
         program = pyxlog.Program.compile("""
-            nn(multi_net, [X, Y, Z], Out, [0,1,2]) :: classify(X, Y, Z, Out).
+            nn(multi_net, [FirstInput, SecondInput, ThirdInput], OutputLabel, [0,1,2]) :: classify(FirstInput, SecondInput, ThirdInput, OutputLabel).
         """)
 
         # Network that takes 3 inputs
@@ -213,8 +216,11 @@ class TestNetworkRegistrationEdgeCases:
                 super().__init__()
                 self.fc = torch.nn.Linear(30, 3)
 
-            def forward(self, x, y, z):
-                combined = torch.cat([x, y, z], dim=-1)
+            def forward(self, first_input, second_input, third_input):
+                combined = torch.cat(
+                    [first_input, second_input, third_input],
+                    dim=-1,
+                )
                 return torch.softmax(self.fc(combined), dim=-1)
 
         net = MultiInputNet()

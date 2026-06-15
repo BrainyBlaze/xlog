@@ -1465,7 +1465,7 @@ Hardware cache terminology such as `L1` and `L2` is allowed when it refers to GP
 | `python/tests/test_minimal_example_summary.py` | 0 | 0 | true |  |  |
 | `python/tests/test_multi_network.py` | 0 | 0 | true |  |  |
 | `python/tests/test_negation.py` | 0 | 0 | true |  |  |
-| `python/tests/test_network_registry.py` | 0 | 4 | false |  | D1(2), D2(2) |
+| `python/tests/test_network_registry.py` | 0 | 42 | true |  | digit, output, network, optimizer, and multi-input shorthand names(42) |
 | `python/tests/test_neural_accuracy_gates.py` | 0 | 0 | true |  |  |
 | `python/tests/test_neural_registry.py` | 0 | 0 | true |  |  |
 | `python/tests/test_nn4_cuda_no_host_transfer_contract.py` | 0 | 0 | true |  |  |
