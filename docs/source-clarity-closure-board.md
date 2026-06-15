@@ -4,7 +4,7 @@ Scope: Git-tracked source and documentation files only. Superpowers docs, plan f
 
 Scanned files: 1430
 Unresolved files: 0
-Comment/prose artifact occurrences: 2456
+Comment/prose artifact occurrences: 2458
 Code/identifier artifact occurrences: 1579
 
 Resolved means this board found no remaining opaque task/milestone labels or external consumer names in the eligible portions of that file.
@@ -124,7 +124,7 @@ Hardware cache terminology such as `L1` and `L2` is allowed when it refers to GP
 | `.github/workflows/python-publish.yml` | 0 | 0 | true |  |  |
 | `.github/workflows/release-plz.yml` | 0 | 0 | true |  |  |
 | `AGENTS.md` | 0 | 0 | true |  |  |
-| `CHANGELOG.md` | 0 | 0 | true |  |  |
+| `CHANGELOG.md` | 2 | 0 | true | internal v0.8.5 evidence and integration gate labels(2) |  |
 | `CLAUDE.md` | 0 | 0 | true |  |  |
 | `CODE_OF_CONDUCT.md` | 0 | 0 | true |  |  |
 | `CONTRIBUTING.md` | 0 | 0 | true |  |  |

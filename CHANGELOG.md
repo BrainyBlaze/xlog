@@ -1749,7 +1749,7 @@ the v0.8.0 external consumer runtime compatibility surface.
   probabilistic aggregate semantics, aggregate lifting, approximate inference
   configuration, incremental parsing, and `xlog explain` / `xlog repl` /
   `xlog watch` boundaries. The implementation remains tracked by the
-  corresponding `G085_*` evidence gates.
+  corresponding language-completeness evidence gates.
 - Added `docs/architecture/language-v0.8.5.md` as the parser, term, probability,
   CLI, and v0.9.0 handoff contract for the v0.8.5 branch.
 - Added finite list normalization for `list<T>` columns, list literals, safe
@@ -1799,7 +1799,7 @@ the v0.8.0 external consumer runtime compatibility surface.
 
 ### Migration Notes
 
-- Existing v0.8.0 programs remain compatible. The G085_INT gate revalidated
+- Existing v0.8.0 programs remain compatible. The integration gate revalidated
   the v0.8.0 external consumer example/source guards and strict deterministic D2H runtime
   paths.
 - New finite list/meta features intentionally reject non-finite, dynamic, or
