@@ -1444,7 +1444,7 @@ Hardware cache terminology such as `L1` and `L2` is allowed when it refers to GP
 | `python/tests/test_ilp_promoter.py` | 0 | 0 | true |  |  |
 | `python/tests/test_ilp_recursive.py` | 0 | 0 | true |  |  |
 | `python/tests/test_ilp_reliability.py` | 0 | 0 | true |  |  |
-| `python/tests/test_ilp_reset.py` | 0 | 2 | false |  | D2H(2) |
+| `python/tests/test_ilp_reset.py` | 1 | 2 | true | device-to-host shorthand in docstring(1) | device-to-host shorthand in test name and assertion message(2) |
 | `python/tests/test_ilp_robustness.py` | 0 | 0 | true |  |  |
 | `python/tests/test_ilp_rule_inventory.py` | 0 | 0 | true |  |  |
 | `python/tests/test_ilp_showcase.py` | 0 | 0 | true |  |  |
