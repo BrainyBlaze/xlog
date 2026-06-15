@@ -1,31 +1,31 @@
 #!/usr/bin/env python
-"""Repro harness for external consumer P0.1/P0.2: session buffer-cap faults.
+"""Repro harness for external-consumer session buffer-cap faults.
 
 Mirrors the consumer usage shape recorded in
-dts-dlm docs/upstream/fixtures/put-schedule.md:
+the external consumer put schedule:
 
-  compile fusion-3mod.xlog (3 modules, 14 queries, count aggregates)
+  compile the external session workload (3 modules, 14 queries, count aggregates)
   loop N times:
-      put 7 WMIR relations (wmir_fact growing 64 -> ~2900 rows)
+      put 7 fixture relations (fact relation growing 64 -> ~2900 rows)
       put fusion_contested_input / value_contrariety_input (0-3 rows)
       evaluate()
       read every query result
 
 Arms:
   --mode persistent   one session for the whole loop (no rotation).
-                      Expected to hit the loud P0.2 fault:
+                      Expected to hit the loud persistent-session fault:
                       "compact_buffer_by_device_mask_device_count:
                        mask len N > row cap M"
   --mode rotate       fresh session per evaluate + replay of all puts
                       (the consumer's workaround). Hunts the
-                      nondeterministic P0.1 CUDA_ERROR_ILLEGAL_ADDRESS.
+                      nondeterministic rotate-mode CUDA_ERROR_ILLEGAL_ADDRESS.
 
-Garbage-key detection (P0.4): every exported key column is checked
-against the generated id domain; out-of-domain values are reported.
+Out-of-domain exported-key detection: every exported key column is checked
+against the generated id domain; invalid values are reported.
 
 Usage:
-  .venv/bin/python scripts/repro/dts_dlm_p0_session_fuzz.py \
-      --fixture /home/dev/projects/dts-dlm/docs/upstream/fixtures/fusion-3mod.xlog \
+  .venv/bin/python scripts/repro/external_consumer_session_fuzz.py \
+      --fixture /path/to/external-consumer/fixtures/session-workload.xlog \
       --mode persistent --iters 60
 """
 
@@ -41,7 +41,7 @@ TORCH_UINT32 = getattr(torch, "uint32", torch.int32)
 
 DEVICE = "cuda"
 
-# Domain bounds used both for generation and P0.4 out-of-domain checks.
+# Domain bounds used both for generation and out-of-domain exported-key checks.
 CLAIM_PRED_BASE = 5_000_000
 N_PREDS = 40
 N_SUBJECTS = 25
@@ -52,10 +52,10 @@ def col(data, dtype):
     return torch.tensor(data, device=DEVICE, dtype=dtype)
 
 
-def make_wmir_relations(n_facts: int, seed: int) -> dict[str, list]:
-    """Generate the 7 WMIR relations + 2 fusion inputs for n_facts rows.
+def make_external_consumer_fixture_relations(n_facts: int, seed: int) -> dict[str, list]:
+    """Generate the 7 fixture relations + 2 auxiliary inputs for n_facts rows.
 
-    Shapes follow put-schedule.md; values are arranged so the fusion
+    Shapes follow the external put schedule; values are arranged so the
     census queries produce non-empty, growing outputs:
       - claim preds (P >= 5_000_000) in (P, A0) groups of growing size
       - Pro >= 0.5 so belnap_supported holds
@@ -75,7 +75,7 @@ def make_wmir_relations(n_facts: int, seed: int) -> dict[str, list]:
     pro = [0.9] * n_facts
     contra = [0.01 if i % 3 else 0.06 for i in ids]
 
-    wmir_fact = [
+    fixture_fact = [
         col(ids, torch.int64),                      # F
         col(pred, torch.int64),                     # P
         col(subj, torch.int64),                     # A0 (subject)
@@ -91,7 +91,7 @@ def make_wmir_relations(n_facts: int, seed: int) -> dict[str, list]:
     ]
 
     # ~240-row-scale evidence: one row per fact (grows with facts).
-    wmir_evidence = [
+    fixture_evidence = [
         col(ids, torch.int64),                      # E
         col(ids, torch.int64),                      # F
         col([0] * n_facts, TORCH_UINT32),           # Modality
@@ -110,7 +110,7 @@ def make_wmir_relations(n_facts: int, seed: int) -> dict[str, list]:
     e_ids = list(range(n_edges))
     e_fact = [(i * 7) % n_facts for i in e_ids]
     e_premise = [(i * 3) % n_facts for i in e_ids]
-    wmir_justification_edge = [
+    fixture_justification_edge = [
         col(e_ids, torch.int64),                    # J
         col(e_fact, torch.int64),                   # F
         col([(i % 6) for i in e_ids], torch.int64), # Rule
@@ -119,20 +119,20 @@ def make_wmir_relations(n_facts: int, seed: int) -> dict[str, list]:
         col([0] * n_edges, torch.int64),            # Group
     ]
 
-    wmir_rule = [
+    fixture_rule = [
         col(list(range(6)), torch.int64),
         col([0] * 6, torch.int64),
         col([0] * 6, TORCH_UINT32),
         col([0.5] * 6, torch.float32),
         col([0] * 6, TORCH_UINT32),
     ]
-    wmir_rule_body = [
+    fixture_rule_body = [
         col(list(range(12)), torch.int64),
         col([i % 3 for i in range(12)], torch.int32),
         col([i % 6 for i in range(12)], torch.int64),
         col([0] * 12, TORCH_UINT32),
     ]
-    wmir_rule_binding = [
+    fixture_rule_binding = [
         col(list(range(36)), torch.int64),
         col([0] * 36, TORCH_UINT32),
         col([i % 4 for i in range(36)], torch.int32),
@@ -140,7 +140,7 @@ def make_wmir_relations(n_facts: int, seed: int) -> dict[str, list]:
         col([0] * 36, torch.int32),
     ]
     n_viol = int(torch.randint(0, 11, (1,), generator=g).item())
-    wmir_violation = [
+    fixture_violation = [
         col(list(range(n_viol)), torch.int64),
         col([(i * 11) % max(1, n_facts) for i in range(n_viol)], torch.int64),
         col([0] * n_viol, TORCH_UINT32),
@@ -159,21 +159,22 @@ def make_wmir_relations(n_facts: int, seed: int) -> dict[str, list]:
         col([p[1] for p in vc_pairs], torch.int64),
     ]
 
+    # Exact relation keys are required by the external workload schema.
     return {
-        "wmir_fact": wmir_fact,
-        "wmir_evidence": wmir_evidence,
-        "wmir_justification_edge": wmir_justification_edge,
-        "wmir_rule": wmir_rule,
-        "wmir_rule_body": wmir_rule_body,
-        "wmir_rule_binding": wmir_rule_binding,
-        "wmir_violation": wmir_violation,
+        "wmir_fact": fixture_fact,
+        "wmir_evidence": fixture_evidence,
+        "wmir_justification_edge": fixture_justification_edge,
+        "wmir_rule": fixture_rule,
+        "wmir_rule_body": fixture_rule_body,
+        "wmir_rule_binding": fixture_rule_binding,
+        "wmir_violation": fixture_violation,
         "fusion_contested_input": fusion_contested_input,
         "value_contrariety_input": value_contrariety_input,
     }
 
 
-def check_garbage_keys(qr, n_facts: int) -> list[str]:
-    """P0.4 detection: key columns must stay inside the generated domain."""
+def check_out_of_domain_keys(qr, n_facts: int) -> list[str]:
+    """Detect exported key columns outside the generated domain."""
     problems = []
     for name, capsule in zip(qr.columns, qr.tensors):
         try:
@@ -222,7 +223,7 @@ def run(args) -> int:
     keepalive: list = []
     for it in range(args.iters):
         n_facts = min(fact_hi, fact_lo + it * step)
-        rels = make_wmir_relations(n_facts, seed=args.seed + it)
+        rels = make_external_consumer_fixture_relations(n_facts, seed=args.seed + it)
         if args.keepalive:
             keepalive.append(rels)
 
@@ -255,12 +256,12 @@ def run(args) -> int:
         # Query results come back positionally (__xlog_query_N) in source
         # order; the census query contrariety_candidate_pair is index 11.
         counts = {i: qr.num_rows for i, qr in enumerate(result.queries)}
-        garbage: list[str] = []
+        out_of_domain_keys: list[str] = []
         for qr in result.queries:
-            garbage += check_garbage_keys(qr, n_facts)
-        if garbage:
-            print(f"\nP0.4 GARBAGE KEYS iter={it} n_facts={n_facts}:")
-            for p in garbage:
+            out_of_domain_keys += check_out_of_domain_keys(qr, n_facts)
+        if out_of_domain_keys:
+            print(f"\nOUT-OF-DOMAIN KEYS iter={it} n_facts={n_facts}:")
+            for p in out_of_domain_keys:
                 print(f"  {p}")
             return 2
 
@@ -274,7 +275,7 @@ def run(args) -> int:
             )
         prev_counts = counts
 
-    print("clean: no strike, no garbage keys")
+    print("clean: no strike, no out-of-domain keys")
     return 0
 
 

@@ -1516,7 +1516,7 @@ Hardware cache terminology such as `L1` and `L2` is allowed when it refers to GP
 | `scripts/neural_training.py` | 0 | 0 | true |  |  |
 | `scripts/package_cli_release.sh` | 0 | 0 | true |  |  |
 | `scripts/preflight_release_publish.sh` | 0 | 0 | true |  |  |
-| `scripts/repro/dts_dlm_p0_session_fuzz.py` | 1 | 6 | false | P0.4(1) | P0.1(2), P0.2(2), P0.4(2) |
+| `scripts/repro/external_consumer_session_fuzz.py` | 8 | 13 | true | release/bug-code and external-consumer labels in harness docstring/comments(8) | release/bug-code script path, external-consumer helper/variables, and out-of-domain-key shorthand(13) |
 | `scripts/run_prob_examples.py` | 0 | 0 | true |  |  |
 | `scripts/run_xlog_examples.sh` | 0 | 0 | true |  |  |
 | `scripts/rustc-wrapper.sh` | 0 | 0 | true |  |  |
