@@ -1485,7 +1485,7 @@ Hardware cache terminology such as `L1` and `L2` is allowed when it refers to GP
 | `python/tests/test_external_consumer_examples_source.py` | 0 | 6 | true |  | release-coded test, suite, validator, and evidence names(6) |
 | `python/tests/test_v080_pyapi_source.py` | 0 | 0 | true |  |  |
 | `python/tests/test_language_examples_source.py` | 0 | 8 | true |  | release-coded test, validator, evidence, and suite names(8) |
-| `python/tests/test_v086_adaptive_reoptimization_source.py` | 0 | 1 | false |  | v086(1) |
+| `python/tests/test_adaptive_reoptimization_source.py` | 0 | 7 | true |  | release-coded test, evidence, and metric labels(7) |
 | `python/tests/test_v086_chain_smem_profile_source.py` | 0 | 1 | false |  | v086(1) |
 | `python/tests/test_v086_chain_smem_source.py` | 0 | 1 | false |  | v086(1) |
 | `python/tests/test_v086_consumers_source.py` | 0 | 27 | false |  | release-coded file/test labels(27) |
