@@ -1480,7 +1480,7 @@ Hardware cache terminology such as `L1` and `L2` is allowed when it refers to GP
 | `python/tests/test_typed_batch_upload.py` | 0 | 0 | true |  |  |
 | `python/tests/test_bridge_source.py` | 0 | 13 | true |  | release-coded path/function names, evidence path strings, and bridge milestone codes(13) |
 | `python/tests/test_delta_source.py` | 0 | 12 | true |  | release-coded path/function names, evidence path strings, delta milestone codes, and opaque fixture name(12) |
-| `python/tests/test_v080_dts_cert.py` | 0 | 1 | false |  | v080(1) |
+| `python/tests/test_external_consumer_cert.py` | 0 | 9 | true |  | release-coded and external-consumer path, import, and test names(9) |
 | `python/tests/test_v080_exact_source.py` | 0 | 1 | false |  | v080(1) |
 | `python/tests/test_v080_examples_source.py` | 0 | 2 | false |  | v080(2) |
 | `python/tests/test_v080_pyapi_source.py` | 0 | 0 | true |  |  |
@@ -1524,7 +1524,7 @@ Hardware cache terminology such as `L1` and `L2` is allowed when it refers to GP
 | `scripts/stage_pyxlog_kernels.sh` | 0 | 0 | true |  |  |
 | `scripts/track_a_runner.py` | 0 | 0 | true |  |  |
 | `scripts/track_b_runner.py` | 0 | 0 | true |  |  |
-| `scripts/v080_dts_cert.py` | 0 | 1 | false |  | v080(1) |
+| `scripts/external_consumer_cert.py` | 1 | 6 | true | release label in module docstring(1) | release-coded/external-consumer path and manifest labels(6) |
 | `scripts/v080_pyxlog_runtime_probe.py` | 0 | 0 | true |  |  |
 | `scripts/validate_examples.py` | 0 | 0 | true |  |  |
 | `scripts/validate_package_metadata.py` | 0 | 0 | true |  |  |

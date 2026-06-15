@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate and verify the v0.8.0 external consumer pyxlog certification manifest."""
+"""Generate and verify the external consumer pyxlog certification manifest."""
 
 from __future__ import annotations
 
@@ -219,7 +219,17 @@ def _graph_telemetry(repo_root: Path, symbol_entries: Iterable[dict]) -> dict:
 
 
 def _runtime_probe(repo_root: Path) -> dict | None:
-    path = repo_root / "docs/evidence/2026-05-18-v080-cert/runtime_probe.json"
+    evidence_root = repo_root / "docs/evidence"
+    path = next(
+        (
+            candidate / "runtime_probe.json"
+            for candidate in sorted(evidence_root.glob("*-cert"))
+            if (candidate / "runtime_probe.json").exists()
+        ),
+        None,
+    )
+    if path is None:
+        return None
     if not path.exists():
         return None
     payload = json.loads(path.read_text(encoding="utf-8"))
@@ -250,7 +260,7 @@ def build_manifest(repo_root: Path) -> dict:
         "fixture": "external consumer fixed pyxlog session replay",
         "replays": 100,
         "bit_exact_replays": 100,
-                "source_guard": "python/tests/test_logic_external_consumer_frozen_replay_determinism.py",
+        "source_guard": "python/tests/test_logic_external_consumer_frozen_replay_determinism.py",
     }
     if runtime_payload is not None:
         hot_path_host_transfers = runtime_payload[
@@ -258,7 +268,7 @@ def build_manifest(repo_root: Path) -> dict:
         ]
         determinism.update(
             {
-                "fixture": "v0.8.0 branch-local LogicRelationSession replay",
+                "fixture": "branch-local LogicRelationSession replay",
                 "replays": runtime_payload["replays"],
                 "bit_exact_replays": runtime_payload["bit_exact_replays"],
                 "fingerprint": runtime_payload["fingerprint"],
@@ -268,7 +278,7 @@ def build_manifest(repo_root: Path) -> dict:
 
     manifest = {
         "schema_version": 1,
-        "goal": "G080_CERT",
+        "goal": "external_consumer_certification",
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "repo_head": _git_head(repo_root),
         "required_symbols": symbol_entries,
@@ -277,7 +287,7 @@ def build_manifest(repo_root: Path) -> dict:
             "scope": "certified external consumer pyxlog session hot path",
             "source_guards": [
                 "python/tests/test_ilp_device_to_host_gate.py::test_host_transfer_stats_methods_accessible",
-                "crates/xlog-integration/tests/test_m37a_surface_preservation.rs",
+                "crates/xlog-integration/tests/test_external_consumer_surface_preservation.rs",
             ],
         },
         "determinism": determinism,

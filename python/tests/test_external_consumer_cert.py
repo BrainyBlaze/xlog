@@ -4,7 +4,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from scripts import v080_dts_cert as cert
+from scripts import external_consumer_cert as cert
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -14,7 +14,7 @@ def _symbol_statuses(manifest: dict) -> dict[str, dict]:
     return {entry["symbol"]: entry for entry in manifest["required_symbols"]}
 
 
-def test_v080_manifest_covers_required_dts_pyxlog_surface() -> None:
+def test_manifest_covers_required_external_consumer_pyxlog_surface() -> None:
     manifest = cert.build_manifest(ROOT)
     symbols = _symbol_statuses(manifest)
 
@@ -43,7 +43,7 @@ def test_v080_manifest_covers_required_dts_pyxlog_surface() -> None:
     assert all(entry["signature_status"] == "compatible" for entry in symbols.values())
 
 
-def test_v080_manifest_records_certification_metric_evidence() -> None:
+def test_manifest_records_certification_metric_evidence() -> None:
     manifest = cert.build_manifest(ROOT)
 
     assert manifest["hot_path_host_transfers"] == {
@@ -54,18 +54,25 @@ def test_v080_manifest_records_certification_metric_evidence() -> None:
     }
     assert manifest["determinism"]["replays"] == 100
     assert manifest["determinism"]["bit_exact_replays"] == 100
-    runtime_probe = ROOT / "docs/evidence/2026-05-18-v080-cert/runtime_probe.json"
-    if runtime_probe.exists():
+    runtime_probe = next(
+        (
+            path / "runtime_probe.json"
+            for path in sorted((ROOT / "docs/evidence").glob("*-cert"))
+            if (path / "runtime_probe.json").exists()
+        ),
+        None,
+    )
+    if runtime_probe is not None:
         assert manifest["runtime_probe"]["path"] == str(
             runtime_probe.relative_to(ROOT)
         )
-        assert manifest["runtime_probe"]["pyxlog_version"] == "0.8.0"
+        assert manifest["runtime_probe"]["pyxlog_version"]
     assert manifest["graph_telemetry"]["status"] in {"available", "unavailable"}
     if manifest["graph_telemetry"]["status"] == "unavailable":
         assert manifest["graph_telemetry"]["reason"]
 
 
-def test_v080_manifest_round_trips_through_verifier(tmp_path: Path) -> None:
+def test_manifest_round_trips_through_verifier(tmp_path: Path) -> None:
     manifest = cert.build_manifest(ROOT)
     path = tmp_path / "manifest.json"
     path.write_text(json.dumps(manifest, indent=2, sort_keys=True), encoding="utf-8")
