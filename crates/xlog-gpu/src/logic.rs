@@ -3075,15 +3075,15 @@ mod v086_delta_coalesce_tests {
 
         let batch = vec![
             (
-                "wmir_committed".to_string(),
+                "external_consumer_commit".to_string(),
                 RelationDelta::new(Some(test_buffer(&provider, &[7, 8])), None),
             ),
             (
-                "wmir_committed".to_string(),
+                "external_consumer_commit".to_string(),
                 RelationDelta::new(None, Some(test_buffer(&provider, &[8]))),
             ),
             (
-                "wmir_committed".to_string(),
+                "external_consumer_commit".to_string(),
                 RelationDelta::new(Some(test_buffer(&provider, &[9])), None),
             ),
         ];
@@ -3092,7 +3092,7 @@ mod v086_delta_coalesce_tests {
             .expect("coalesce relation delta batch");
         let delta = report
             .deltas
-            .get("wmir_committed")
+            .get("external_consumer_commit")
             .expect("coalesced relation");
         let insert = delta.insert.as_ref().expect("coalesced insert");
         assert_eq!(read_u32(&provider, insert), vec![7, 9]);
@@ -3112,10 +3112,10 @@ mod v086_delta_coalesce_tests {
         };
 
         let source = r#"
-            pred wmir_committed(u32).
+            pred external_consumer_commit(u32).
             pred out(u32).
 
-            out(X) :- wmir_committed(X).
+            out(X) :- external_consumer_commit(X).
 
             ?- out(X).
         "#;
@@ -3131,15 +3131,15 @@ mod v086_delta_coalesce_tests {
             &mut coalesced_cache,
             vec![
                 (
-                    "wmir_committed".to_string(),
+                    "external_consumer_commit".to_string(),
                     RelationDelta::new(Some(test_buffer(&provider, &[1, 2, 3])), None),
                 ),
                 (
-                    "wmir_committed".to_string(),
+                    "external_consumer_commit".to_string(),
                     RelationDelta::new(None, Some(test_buffer(&provider, &[2]))),
                 ),
                 (
-                    "wmir_committed".to_string(),
+                    "external_consumer_commit".to_string(),
                     RelationDelta::new(Some(test_buffer(&provider, &[4])), None),
                 ),
             ],
@@ -3176,7 +3176,7 @@ mod v086_delta_coalesce_tests {
                 provider.clone(),
                 &mut sequential_store,
                 &mut sequential_cache,
-                HashMap::from([("wmir_committed".to_string(), delta)]),
+                HashMap::from([("external_consumer_commit".to_string(), delta)]),
             )?;
         }
         let sequential = program.evaluate_cached_relation_store(
@@ -3188,7 +3188,7 @@ mod v086_delta_coalesce_tests {
         let sequential_rows = sorted_query_rows(&provider, &sequential);
 
         let mut replacement_store = program.create_relation_store(provider.clone())?;
-        replacement_store.put("wmir_committed", test_buffer(&provider, &[1, 3, 4]));
+        replacement_store.put("external_consumer_commit", test_buffer(&provider, &[1, 3, 4]));
         let replacement =
             program.evaluate_with_relation_store(provider.clone(), &replacement_store, false)?;
         let replacement_rows = sorted_query_rows(&provider, &replacement);
