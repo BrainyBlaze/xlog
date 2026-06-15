@@ -6,7 +6,7 @@ ROOT = Path(__file__).resolve().parents[2]
 
 EXAMPLES = [
     "01_async_streaming_reachability",
-    "02_wmir_relation_deltas",
+    "02_relation_deltas",
     "03_neural_bridge_topk_belnap",
     "04_native_exact_induction",
     "05_probabilistic_async_diagnostics",

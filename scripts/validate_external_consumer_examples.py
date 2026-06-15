@@ -20,7 +20,7 @@ DEFAULT_OUTPUT = (
 )
 EXAMPLES = [
     "01_async_streaming_reachability",
-    "02_wmir_relation_deltas",
+    "02_relation_deltas",
     "03_neural_bridge_topk_belnap",
     "04_native_exact_induction",
     "05_probabilistic_async_diagnostics",
@@ -100,10 +100,10 @@ def _aggregate(results: list[dict[str, Any]]) -> dict[str, Any]:
                 "streaming_chunk_counts"
             ],
         },
-        "relation_delta_equivalence": by_name["02_wmir_relation_deltas"][
+        "relation_delta_equivalence": by_name["02_relation_deltas"][
             "relation_delta_equivalence"
         ],
-        "relation_delta_row_counts": by_name["02_wmir_relation_deltas"][
+        "relation_delta_row_counts": by_name["02_relation_deltas"][
             "relation_delta_row_counts"
         ],
         "deterministic_topk_selected_labels": by_name["03_neural_bridge_topk_belnap"][

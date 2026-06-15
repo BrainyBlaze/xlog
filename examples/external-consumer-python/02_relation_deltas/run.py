@@ -27,7 +27,7 @@ def _cols(pairs: list[tuple[int, int]]) -> list[torch.Tensor]:
 
 def _full_replacement_rows(program: object, pairs: list[tuple[int, int]]) -> list[list[int]]:
     session = program.session()
-    session.put_relation("wmir_committed", _cols(pairs))
+    session.put_relation("external_consumer_commit", _cols(pairs))
     return _rows(session.evaluate())
 
 
@@ -40,21 +40,21 @@ def main() -> int:
     session = program.session()
 
     initial_edges = [(1, 2), (2, 3)]
-    session.put_relation("wmir_committed", _cols(initial_edges))
+    session.put_relation("external_consumer_commit", _cols(initial_edges))
     initial_rows = _rows(session.evaluate())
 
     insert_edges = [(3, 4)]
-    insert_stats = session.insert_relation("wmir_committed", _cols(insert_edges))
+    insert_stats = session.insert_relation("external_consumer_commit", _cols(insert_edges))
     after_insert_rows = _rows(session.evaluate())
     full_after_insert_rows = _full_replacement_rows(program, initial_edges + insert_edges)
 
     delete_edges = [(2, 3)]
-    delete_stats = session.delete_relation("wmir_committed", _cols(delete_edges))
+    delete_stats = session.delete_relation("external_consumer_commit", _cols(delete_edges))
     after_delete_rows = _rows(session.evaluate())
     full_after_delete_rows = _full_replacement_rows(program, [(1, 2), (3, 4)])
 
     mixed_stats = session.apply_relation_delta(
-        "wmir_committed",
+        "external_consumer_commit",
         insert_columns=_cols([(2, 4)]),
         delete_columns=_cols([(1, 2)]),
     )
@@ -70,7 +70,7 @@ def main() -> int:
         raise AssertionError(equivalence)
 
     summary = {
-        "example": "02_wmir_relation_deltas",
+        "example": "02_relation_deltas",
         "status": "PASS",
         "relation_delta_equivalence": equivalence,
         "relation_delta_row_counts": {

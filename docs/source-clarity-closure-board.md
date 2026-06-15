@@ -5,7 +5,7 @@ Scope: Git-tracked source and documentation files only. Superpowers docs, plan f
 Scanned files: 1430
 Unresolved files: 0
 Comment/prose artifact occurrences: 2459
-Code/identifier artifact occurrences: 1631
+Code/identifier artifact occurrences: 1647
 
 Resolved means this board found no remaining opaque task/milestone labels or external consumer names in the eligible portions of that file.
 
@@ -1276,15 +1276,15 @@ Hardware cache terminology such as `L1` and `L2` is allowed when it refers to GP
 | `examples/python/README.md` | 0 | 0 | true |  |  |
 | `examples/external-consumer-python/01_async_streaming_reachability/program.xlog` | 0 | 0 | true |  |  |
 | `examples/external-consumer-python/01_async_streaming_reachability/run.py` | 0 | 1 | true |  | release-coded CUDA requirement message(1) |
-| `examples/external-consumer-python/02_wmir_relation_deltas/program.xlog` | 0 | 0 | true |  |  |
-| `examples/external-consumer-python/02_wmir_relation_deltas/run.py` | 0 | 1 | true |  | release-coded CUDA requirement message(1) |
+| `examples/external-consumer-python/02_relation_deltas/program.xlog` | 0 | 5 | true |  | external-consumer fixture relation names(5) |
+| `examples/external-consumer-python/02_relation_deltas/run.py` | 0 | 7 | true |  | release-coded CUDA requirement message plus external-consumer relation/example names(7) |
 | `examples/external-consumer-python/03_neural_bridge_topk_belnap/program.xlog` | 0 | 0 | true |  |  |
 | `examples/external-consumer-python/03_neural_bridge_topk_belnap/run.py` | 0 | 1 | true |  | release-coded CUDA requirement message(1) |
 | `examples/external-consumer-python/04_native_exact_induction/program.xlog` | 0 | 0 | true |  |  |
 | `examples/external-consumer-python/04_native_exact_induction/run.py` | 0 | 1 | true |  | release-coded CUDA requirement message(1) |
 | `examples/external-consumer-python/05_probabilistic_async_diagnostics/program.xlog` | 0 | 0 | true |  |  |
 | `examples/external-consumer-python/05_probabilistic_async_diagnostics/run.py` | 0 | 1 | true |  | release-coded CUDA requirement message(1) |
-| `examples/external-consumer-python/README.md` | 9 | 3 | true | release labels, task/gate labels, external-consumer path labels, and phase shorthand(9) | release validator/evidence path labels(3) |
+| `examples/external-consumer-python/README.md` | 9 | 4 | true | release labels, task/gate labels, external-consumer path labels, and phase shorthand(9) | release validator/evidence path labels and external-consumer example directory name(4) |
 | `examples/language-completeness/aggregate_lifting/count_lift.xlog` | 0 | 0 | true |  |  |
 | `examples/language-completeness/approx/aggregate_mc.xlog` | 0 | 0 | true |  |  |
 | `examples/language-completeness/lists/cons_patterns.xlog` | 0 | 0 | true |  |  |
@@ -1482,7 +1482,7 @@ Hardware cache terminology such as `L1` and `L2` is allowed when it refers to GP
 | `python/tests/test_delta_source.py` | 0 | 12 | true |  | release-coded path/function names, evidence path strings, delta milestone codes, and opaque fixture name(12) |
 | `python/tests/test_external_consumer_cert.py` | 0 | 9 | true |  | release-coded and external-consumer path, import, and test names(9) |
 | `python/tests/test_exact_source.py` | 0 | 8 | true |  | release-coded test/evidence names and external consumer literals(8) |
-| `python/tests/test_external_consumer_examples_source.py` | 0 | 6 | true |  | release-coded test, suite, validator, and evidence names(6) |
+| `python/tests/test_external_consumer_examples_source.py` | 0 | 7 | true |  | release-coded test, suite, validator, evidence, and example directory names(7) |
 | `python/tests/test_v080_pyapi_source.py` | 0 | 0 | true |  |  |
 | `python/tests/test_language_examples_source.py` | 0 | 8 | true |  | release-coded test, validator, evidence, and suite names(8) |
 | `python/tests/test_adaptive_reoptimization_source.py` | 0 | 7 | true |  | release-coded test, evidence, and metric labels(7) |
@@ -1529,7 +1529,7 @@ Hardware cache terminology such as `L1` and `L2` is allowed when it refers to GP
 | `scripts/validate_examples.py` | 0 | 0 | true |  |  |
 | `scripts/validate_package_metadata.py` | 0 | 0 | true |  |  |
 | `scripts/validate_release_gpu.sh` | 0 | 0 | true |  |  |
-| `scripts/validate_external_consumer_examples.py` | 0 | 5 | true |  | release-coded validator, suite, evidence, and output labels(5) |
+| `scripts/validate_external_consumer_examples.py` | 0 | 8 | true |  | release-coded validator, suite, evidence, output, and example directory labels(8) |
 | `scripts/validate_language_examples.py` | 0 | 4 | true |  | release-coded validator, evidence, and suite labels(4) |
 | `scripts/validate_runtime_consumers.py` | 0 | 78 | true |  | release-coded validator, suite, evidence, compatibility, and feature-evidence labels(78) |
 | `scripts/validation_staging.py` | 0 | 0 | true |  |  |
