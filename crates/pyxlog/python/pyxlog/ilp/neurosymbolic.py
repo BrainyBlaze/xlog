@@ -69,6 +69,11 @@ class NeuroSymbolicTrainingResult:
     query_probabilities: list[float]
     engine: str
     proof_trace_map: Any
+    # Provider device->host transfer counters observed across the training hot
+    # loop (e.g. {"dtoh_calls": N, "dtoh_bytes": M}). The device-resident step
+    # introduces no provider downloads, so these stay at their reset baseline;
+    # surfaced so a caller can assert the no-host property of the training path.
+    training_host_transfer_stats: Any = None
 
 
 def train_neurosymbolic_program(
@@ -131,26 +136,38 @@ def train_neurosymbolic_program(
     neural_grads: dict[str, float] = {name: 0.0 for name in modules}
     symbolic_grads: dict[str, float] = {rule.id: 0.0 for rule in rules}
 
+    # Zero-host training hot loop. Every example's supervised circuit is
+    # evaluated in one device-resident batched pass per step (grouped by target
+    # and circuit template), so a step costs a single host sync for the summed
+    # loss rather than one per query. Looping the scalar forward_backward
+    # instead host-syncs on every query (.item()), which leaves the GPU idle
+    # between syncs and makes training CPU-bound. Reset/read the provider's
+    # device->host counter around the loop so the no-host property is observable.
+    program.reset_host_transfer_stats()
     for _step in range(config.steps):
         program.zero_grad()
-        step_loss = 0.0
-        for query, target in zip(queries, targets):
-            step_loss += program.forward_backward(query, target)
-        for name, module in modules.items():
-            neural_grads[name] = float(
-                sum(
-                    param.grad.detach().abs().sum().item()
-                    for param in module.parameters()
-                    if param.grad is not None
-                )
-            )
-        for rule in rules:
-            grad = guard_modules[rule.id].logit.grad
-            symbolic_grads[rule.id] = (
-                float(grad.detach().abs().item()) if grad is not None else 0.0
-            )
+        step_loss = program.forward_backward_grouped(queries, targets)
         program.optimizer_step()
         losses.append(step_loss / len(targets))
+    host_transfer_stats = program.host_transfer_stats()
+
+    # Final gradient magnitudes, read once after training. These are per
+    # parameter, not per query, so they stay out of the hot loop; optimizer_step
+    # does not clear gradients (only zero_grad does), so after the last step they
+    # still reflect the final backward pass.
+    for name, module in modules.items():
+        neural_grads[name] = float(
+            sum(
+                param.grad.detach().abs().sum().item()
+                for param in module.parameters()
+                if param.grad is not None
+            )
+        )
+    for rule in rules:
+        grad = guard_modules[rule.id].logit.grad
+        symbolic_grads[rule.id] = (
+            float(grad.detach().abs().item()) if grad is not None else 0.0
+        )
 
     # Final evaluation pass: query probabilities from the trained circuit.
     program.zero_grad()
@@ -198,6 +215,7 @@ def train_neurosymbolic_program(
         query_probabilities=query_probabilities,
         engine=_ENGINE_NAME,
         proof_trace_map=proof_trace_map,
+        training_host_transfer_stats=host_transfer_stats,
     )
 
 

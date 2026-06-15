@@ -46,6 +46,30 @@ fn const_key(term: &Term) -> Option<ConstKey> {
     }
 }
 
+/// Accumulate one producing call's loss into a running device-resident total
+/// via in-place add. The backward pass already ran inside the producing call,
+/// so the loss is detached before accumulation; it is cast to f64 so f32
+/// (direct) and f64 (batched) losses accumulate in a single dtype. No host
+/// sync happens here — the total is read back once by the caller.
+fn accumulate_device_loss(
+    py: Python<'_>,
+    total: Option<PyObject>,
+    loss: PyObject,
+) -> PyResult<PyObject> {
+    let detached = loss
+        .bind(py)
+        .call_method0("detach")?
+        .call_method0("double")?
+        .unbind();
+    Ok(match total {
+        None => detached,
+        Some(acc) => {
+            acc.bind(py).call_method1("add_", (detached.bind(py),))?;
+            acc
+        }
+    })
+}
+
 fn apply_network_output_mode(
     py: Python<'_>,
     values: &Bound<'_, PyAny>,
@@ -634,6 +658,113 @@ impl CompiledProgram {
         expected: bool,
     ) -> PyResult<PyObject> {
         self.forward_backward_tensor_internal(py, query, expected)
+    }
+
+    /// GPU-resident batched forward-backward over many queries with PER-QUERY
+    /// `expected` labels, accumulating loss on device with a SINGLE host sync.
+    ///
+    /// The scalar [`forward_backward`] reads the loss back with `.item()` on
+    /// every call, so a training step that loops it over N queries pays N host
+    /// syncs and goes CPU-bound — the GPU sits idle between syncs. This method
+    /// keeps the whole step device-resident: queries are partitioned by
+    /// hard-filter eligibility and grouped by `(expected, circuit template)` so
+    /// each group runs as one batched circuit pass, the losses accumulate on
+    /// device, and exactly one `.item()` reads the summed loss back — one host
+    /// sync per call regardless of N.
+    ///
+    /// Mixed positive/negative supervision is supported via the per-query
+    /// `expected` vector; the existing batched epoch path fixes `expected=true`
+    /// for every query and so cannot express it. Hard-filter gating is preserved
+    /// exactly as in the scalar path: an ineligible query contributes a constant
+    /// loss with no neural forward and no gradient (gradient isolation).
+    ///
+    /// Call `zero_grad()` before and `optimizer_step()` after, like
+    /// `forward_backward`. Returns the summed NLL loss over all queries.
+    #[pyo3(signature = (queries, expected))]
+    fn forward_backward_grouped(
+        &mut self,
+        py: Python<'_>,
+        queries: Vec<String>,
+        expected: Vec<bool>,
+    ) -> PyResult<f64> {
+        if queries.len() != expected.len() {
+            return Err(PyValueError::new_err(format!(
+                "forward_backward_grouped: {} queries but {} expected labels",
+                queries.len(),
+                expected.len()
+            )));
+        }
+        if queries.is_empty() {
+            return Ok(0.0);
+        }
+
+        // Eligible complex queries grouped by (expected, circuit template) so
+        // each group runs as one batched circuit pass; insertion-ordered for
+        // deterministic gradient accumulation.
+        let mut group_order: Vec<(bool, String)> = Vec::new();
+        let mut groups: StdHashMap<(bool, String), Vec<Atom>> = StdHashMap::new();
+
+        // Eligible (batched + direct) losses accumulate on device; ineligible
+        // queries contribute a host-side constant that carries no gradient, so
+        // it never enters the device path (and never costs a sync).
+        let mut device_loss: Option<PyObject> = None;
+        let mut host_const_loss: f64 = 0.0;
+
+        for (query, &exp) in queries.iter().zip(expected.iter()) {
+            match self.try_parse_direct_neural_query(query) {
+                Ok((predicate, network_name, input_idx, target_label)) => {
+                    let loss = self.forward_backward_direct_tensor(
+                        py,
+                        &predicate,
+                        &network_name,
+                        input_idx,
+                        &target_label,
+                        exp,
+                    )?;
+                    device_loss = Some(accumulate_device_loss(py, device_loss, loss)?);
+                }
+                Err(_) => {
+                    let atom = self.parse_query_atom(query)?;
+                    let signature = self
+                        .get_or_build_query_signature(&atom.predicate, atom.terms.len())?
+                        .clone();
+                    // Same short-circuit as forward_backward_complex_tensor: an
+                    // ineligible query is probability 0 with no neural forward,
+                    // so no gradient flows through it. The constant matches
+                    // zero_probability_loss(py, exp) exactly.
+                    if !signature.hard_filters().is_empty()
+                        && !self.hard_filters_satisfied(&atom, signature.hard_filters())?
+                    {
+                        host_const_loss += if exp { -(types::NLL_EPSILON.ln()) } else { 0.0 };
+                        continue;
+                    }
+                    let key = self.generate_cache_key_for_signature(
+                        &signature,
+                        &atom.predicate,
+                        atom.terms.len(),
+                    );
+                    let group_key = (exp, key);
+                    if !groups.contains_key(&group_key) {
+                        group_order.push(group_key.clone());
+                    }
+                    groups.entry(group_key).or_default().push(atom);
+                }
+            }
+        }
+
+        // One batched circuit pass per (expected, template) group.
+        for group_key in &group_order {
+            let atoms = groups.remove(group_key).expect("group populated above");
+            let loss = self.forward_backward_batch_complex_tensor(py, &atoms, group_key.0)?;
+            device_loss = Some(accumulate_device_loss(py, device_loss, loss)?);
+        }
+
+        // Single host sync: read the device-accumulated loss back once.
+        let device_total: f64 = match device_loss {
+            Some(t) => t.bind(py).call_method0("item")?.extract()?,
+            None => 0.0,
+        };
+        Ok(device_total + host_const_loss)
     }
 
     /// Belnap-aware dual-channel loss terms for bridge training.

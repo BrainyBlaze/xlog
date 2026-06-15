@@ -17,6 +17,10 @@ torch = pytest.importorskip("torch")
 
 from pyxlog.ilp.neurosymbolic import (  # noqa: E402
     NeuroSymbolicTrainingConfig,
+    _collect_examples,
+    _desugar_source,
+    _make_rule_weight_module,
+    _TENSOR_SOURCE_NAME,
     train_neurosymbolic_program,
 )
 
@@ -111,3 +115,81 @@ def test_derived_hard_condition_fails_loud_not_silent() -> None:
             examples=_examples(),
             config=NeuroSymbolicTrainingConfig(steps=1, learning_rate=0.1),
         )
+
+
+def _build_mixed_program():
+    """Compile MIXED_BODY_SOURCE and register its networks exactly as the
+    wrapper does, returning (program, root_net, queries, expected). lr=0 so the
+    program is a fixed point we can evaluate twice without weights drifting."""
+    import pyxlog
+
+    program_source, rules, train_head, _objective = _desugar_source(MIXED_BODY_SOURCE)
+    inputs, targets = _collect_examples(_examples())
+
+    program = pyxlog.Program.compile(program_source, device=0, memory_mb=4096)
+    root_net = _root_net().cuda()
+    program.register_network(
+        "root_net", root_net, torch.optim.SGD(root_net.parameters(), lr=0.0)
+    )
+    for rule in rules:
+        guard = _make_rule_weight_module(rule.initial_weight).cuda()
+        program.register_network(
+            rule.guard_network, guard, torch.optim.SGD(guard.parameters(), lr=0.0)
+        )
+    program.add_tensor_source(_TENSOR_SOURCE_NAME, inputs.cuda())
+
+    queries = [f"{train_head}({i})" for i in range(len(targets))]
+    return program, root_net, queries, list(targets)
+
+
+def _abs_grad_sum(module) -> float:
+    return float(
+        sum(
+            p.grad.detach().abs().sum().item()
+            for p in module.parameters()
+            if p.grad is not None
+        )
+    )
+
+
+@requires_cuda
+def test_grouped_matches_scalar_forward_backward() -> None:
+    """forward_backward_grouped (the device-resident batched path) must be
+    numerically identical to looping the scalar forward_backward over the same
+    queries: same summed loss AND same accumulated gradients. This pins that the
+    zero-host reroute changed performance, not training semantics."""
+    # Batched/grouped path on a fresh program.
+    prog_g, net_g, queries, expected = _build_mixed_program()
+    prog_g.zero_grad()
+    loss_grouped = prog_g.forward_backward_grouped(queries, expected)
+    grad_grouped = _abs_grad_sum(net_g)
+
+    # Scalar per-query loop on an identical fresh program (same fixed weights).
+    prog_s, net_s, queries_s, expected_s = _build_mixed_program()
+    prog_s.zero_grad()
+    loss_scalar = sum(
+        prog_s.forward_backward(q, t) for q, t in zip(queries_s, expected_s)
+    )
+    grad_scalar = _abs_grad_sum(net_s)
+
+    assert loss_grouped == pytest.approx(loss_scalar, rel=1e-5, abs=1e-6)
+    assert grad_grouped == pytest.approx(grad_scalar, rel=1e-4, abs=1e-6)
+    # Gradient must be non-trivial (eligible cases drive it); a zero on both
+    # sides would make the equality vacuous.
+    assert grad_scalar > 0.0
+
+
+@requires_cuda
+def test_training_reports_host_transfer_stats() -> None:
+    """The rerouted training hot loop surfaces the provider device->host counter
+    so the no-host property is observable. The device-resident step introduces
+    no provider downloads, so dtoh_calls stays at its reset baseline of 0."""
+    result = train_neurosymbolic_program(
+        MIXED_BODY_SOURCE,
+        networks={"root_net": _root_net()},
+        examples=_examples(),
+        config=NeuroSymbolicTrainingConfig(steps=3, learning_rate=0.2),
+    )
+    stats = result.training_host_transfer_stats
+    assert stats is not None
+    assert stats["dtoh_calls"] == 0
