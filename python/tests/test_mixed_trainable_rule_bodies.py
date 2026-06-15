@@ -117,6 +117,53 @@ def test_derived_hard_condition_fails_loud_not_silent() -> None:
         )
 
 
+def test_optimizer_config_defaults_to_adam_and_is_selectable() -> None:
+    """The training optimizer is configurable and defaults to Adam (SGD stalls on
+    the multiplicative-loss plateau; see the separation test)."""
+    from pyxlog.ilp.neurosymbolic import _make_optimizer
+
+    assert NeuroSymbolicTrainingConfig().optimizer == "adam"
+    params = [torch.zeros(1, requires_grad=True)]
+    assert type(_make_optimizer("adam", params, 0.1)).__name__ == "Adam"
+    assert type(_make_optimizer("sgd", params, 0.1)).__name__ == "SGD"
+    with pytest.raises(ValueError, match="(?i)optimizer"):
+        _make_optimizer("rmsprop", params, 0.1)
+
+
+@requires_cuda
+def test_default_adam_separates_linearly_separable_classes() -> None:
+    """With the Adam default the training surface escapes the plateau and actually
+    LEARNS: a cleanly linearly separable signal (positives low feature, negatives
+    high) trains so every positive ranks well above every negative. Plain SGD
+    stalled at the uniform-output floor on this exact problem (~1/10 inits); Adam
+    separates (~8/10). This pins that the default optimizer makes the surface
+    trainable, not just gradient-flowing."""
+    torch.manual_seed(1)
+    source = """
+        nn(root_net, [Case], Label, [negative, positive]) :: neural_root(Case, Label).
+        trainable_rule(rule_sep, weight=0.0) :: root_case(Case) :- neural_root(Case, positive).
+        train(root_case, binary_cross_entropy).
+    """
+    net = torch.nn.Sequential(torch.nn.Linear(1, 2, bias=True), torch.nn.Softmax(dim=-1))
+    examples = [
+        {
+            "inputs": torch.tensor(
+                [[0.0], [1.0], [2.0], [10.0], [11.0], [12.0]], dtype=torch.float32
+            ),
+            "targets": torch.tensor([1.0, 1.0, 1.0, 0.0, 0.0, 0.0], dtype=torch.float32),
+        }
+    ]
+    result = train_neurosymbolic_program(
+        source,
+        networks={"root_net": net},
+        examples=examples,
+        config=NeuroSymbolicTrainingConfig(steps=400, learning_rate=0.1),
+    )
+    probs = result.query_probabilities
+    # Clean separation with a wide margin (positives ~1, negatives ~0).
+    assert min(probs[:3]) > max(probs[3:]) + 0.5
+
+
 def _build_mixed_program():
     """Compile MIXED_BODY_SOURCE and register its networks exactly as the
     wrapper does, returning (program, root_net, queries, expected). lr=0 so the
