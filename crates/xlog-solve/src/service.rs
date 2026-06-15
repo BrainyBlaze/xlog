@@ -169,7 +169,7 @@ impl SolverService {
     /// Report that the semantic-oracle facade is not the GPU portfolio path.
     pub fn gpu_portfolio_status(&self) -> SolverPortfolioStatus {
         SolverPortfolioStatus::Deferred {
-            reason: "GPU portfolio solving is not implemented in the semantic-oracle facade and blocks G090_SOLVER closure",
+            reason: "GPU portfolio solving is not implemented in the semantic-oracle facade and blocks solver-service integration closure",
         }
     }
 

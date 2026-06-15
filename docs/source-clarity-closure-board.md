@@ -5,7 +5,7 @@ Scope: Git-tracked source and documentation files only. Superpowers docs, plan f
 Scanned files: 1430
 Unresolved files: 0
 Comment/prose artifact occurrences: 2458
-Code/identifier artifact occurrences: 1579
+Code/identifier artifact occurrences: 1581
 
 Resolved means this board found no remaining opaque task/milestone labels or external consumer names in the eligible portions of that file.
 
@@ -694,7 +694,7 @@ Hardware cache terminology such as `L1` and `L2` is allowed when it refers to GP
 | `crates/xlog-solve/src/lib.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-solve/src/production.rs` | 11 | 8 | true | Expanded G91, D2H, H2D, and release-version comments to Gelfond-1991 compatibility, device-to-host/host-to-device, and production metric wording. | Expanded D2H, H2D, and release-version assertion text to production contract wording. |
 | `crates/xlog-solve/src/proof.rs` | 0 | 0 | true |  |  |
-| `crates/xlog-solve/src/service.rs` | 0 | 0 | true |  |  |
+| `crates/xlog-solve/src/service.rs` | 0 | 1 | true |  | solver-service integration closure label in user-facing blocker string(1) |
 | `crates/xlog-solve/src/solver.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-solve/tests/gpu_cdcl_tests.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-solve/tests/gpu_cdcl_workspace.rs` | 0 | 0 | true |  |  |
@@ -704,7 +704,7 @@ Hardware cache terminology such as `L1` and `L2` is allowed when it refers to GP
 | `crates/xlog-solve/tests/integration_test.rs` | 3 | 0 | true | Expanded P0/P1/P2 pigeonhole comments to pigeon-number descriptions. |  |
 | `crates/xlog-solve/tests/no_dtoh_in_gpu_cdcl.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-solve/tests/real_world_tests.rs` | 0 | 0 | true |  |  |
-| `crates/xlog-solve/tests/solver_service_semantics.rs` | 0 | 0 | true |  |  |
+| `crates/xlog-solve/tests/solver_service_semantics.rs` | 0 | 1 | true |  | solver-service integration closure label in expected blocker string(1) |
 | `crates/xlog-stats/Cargo.toml` | 0 | 0 | true |  |  |
 | `crates/xlog-stats/benches/stats_bench.rs` | 0 | 0 | true |  |  |
 | `crates/xlog-stats/src/lib.rs` | 0 | 0 | true |  |  |
