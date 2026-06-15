@@ -1434,7 +1434,7 @@ Hardware cache terminology such as `L1` and `L2` is allowed when it refers to GP
 | `python/tests/test_ilp_device_to_host_gate.py` | 7 | 11 | true | device-to-host shorthand in docstrings and comments(7) | device-to-host shorthand in path and test names(11) |
 | `python/tests/test_ilp_device_queries.py` | 0 | 0 | true |  |  |
 | `python/tests/test_ilp_entropy.py` | 0 | 0 | true |  |  |
-| `python/tests/test_ilp_exact_induce.py` | 1 | 6 | false | D2H(1) | D2H(5), M8(1) |
+| `python/tests/test_ilp_exact_induce.py` | 8 | 67 | true | milestone label, device-to-host shorthand, and tuple-field shorthand(8) | device-to-host shorthand and local request/result variable shorthands(67) |
 | `python/tests/test_ilp_exact_induce_default_dispatch.py` | 0 | 0 | true |  |  |
 | `python/tests/test_ilp_ga_reliability.py` | 0 | 0 | true |  |  |
 | `python/tests/test_ilp_hard_negatives.py` | 0 | 0 | true |  |  |
