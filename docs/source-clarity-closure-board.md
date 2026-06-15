@@ -1474,7 +1474,7 @@ Hardware cache terminology such as `L1` and `L2` is allowed when it refers to GP
 | `python/tests/test_preflight_release_publish_cli.py` | 0 | 0 | true |  |  |
 | `python/tests/test_pyxlog_evidence_api.py` | 0 | 0 | true |  |  |
 | `python/tests/test_tensor_source.py` | 8 | 30 | true | image-shape shorthand in comments(8) | digit, word, tag, embedding, class, and input variable shorthands(30) |
-| `python/tests/test_train_model_tensor.py` | 2 | 12 | false | D4(2) | D1(6), D2(6) |
+| `python/tests/test_train_model_tensor.py` | 5 | 12 | true | Decision-DNNF shorthand and section-code comments(5) | digit variable shorthands(12) |
 | `python/tests/test_training.py` | 0 | 0 | true |  |  |
 | `python/tests/test_transfer_metric_diagnostics.py` | 0 | 0 | true |  |  |
 | `python/tests/test_typed_batch_upload.py` | 0 | 0 | true |  |  |
