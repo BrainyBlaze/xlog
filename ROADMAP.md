@@ -2085,6 +2085,44 @@ fail-closed:
 - [x] FAEEL-unfounded self-support (`p() :- possible p()`) executes to the defined
       empty extension, while explicit G91 accepts the same self-supporting program.
 
+## main after v0.9.2 - Factorized WCOJ Execution Pack
+
+Completed on main, unreleased. A set of factorized GPU join routes that avoid
+materializing witness-multiplied intermediates, each gated to fire only where it
+wins and falling back to the binary plan otherwise. Design and measured gate
+evidence live under `docs/plans/2026-06-*`.
+
+- [x] Aggregate-fused WCOJ: count/sum/min/max-by-root over triangle bodies
+      evaluated as a fused aggregate (no materialized join rows). Kill switch
+      `XLOG_DISABLE_WCOJ_GROUPBY_FUSION`.
+- [x] GPU Free Join for general multiway bodies: inner-join bodies of three or
+      more scans route through a Free Join frontier engine instead of a binary
+      chain. Kill switch `XLOG_DISABLE_FREE_JOIN`; counter
+      `Executor::free_join_dispatch_count`.
+- [x] Factorized recursive deltas: transitive-closure-shaped semi-naive delta
+      steps evaluate a novel-set over a dense-domain bitvector (with a
+      distinct-aware sparse route above the dense cap) instead of materializing
+      and diffing the witness-multiplied join. Measured up to 41x peak-memory
+      reduction with row-set parity; a per-iteration work floor bails to the
+      legacy path on unfavorable fixpoints. Kill switch
+      `XLOG_DISABLE_FACTORIZED_DELTA`; cap `XLOG_FACTORIZED_DELTA_MAX_DOMAIN`.
+- [x] Free Join order planner: a prefix-key-joinable, cardinality-greedy order
+      planner at Free Join dispatch that keeps the input order when it is
+      already within 1.2x of the binary plan's estimated peak, reorders to a
+      better order when one exists, or declines to the binary fallback when none
+      is competitive — removing a measured worst-case peak-memory loss on
+      adversarial chains while leaving every winning case untouched.
+- [x] Cost-model loss veto: fail-open decline of the factorized routes to the
+      binary plan on provably-small joins (stats present and every input below
+      the worthwhile threshold); never vetoes when stats are missing or any
+      input is large, so measured wins are preserved.
+- [x] Consumer observability: pyxlog `wcoj_dispatch_stats()` exposes the
+      Free Join, aggregate-fusion, factorized-delta, and error-decline counters.
+- Parked (verified negative): factorized provenance into the d-DNNF path. The
+  dominant exact-inference cost is CDCL verification (treewidth-exponential),
+  not the compile frontier, so factorized provenance does not address it.
+  Evidence retained under `docs/plans/2026-06-*`.
+
 ## v0.9.3 - Consumer Runtime Pack (external consumer-driven; ordering pending maintainer decision)
 
 Sourced from the external consumer consolidated requirements package
