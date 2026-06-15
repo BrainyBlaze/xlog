@@ -1489,7 +1489,7 @@ Hardware cache terminology such as `L1` and `L2` is allowed when it refers to GP
 | `python/tests/test_chain_shared_memory_profile_source.py` | 0 | 9 | true |  | release-coded test, script, evidence, phase, and metric labels plus shared-memory shorthand(9) |
 | `python/tests/test_chain_shared_memory_source.py` | 0 | 8 | true |  | release-coded test, evidence, metric labels, and shared-memory shorthand in guard names(8) |
 | `python/tests/test_runtime_consumers_source.py` | 0 | 34 | true |  | release-coded suite, test, validator, evidence, compatibility, and consumer labels(34) |
-| `python/tests/test_v086_cse_source.py` | 0 | 1 | false |  | v086(1) |
+| `python/tests/test_common_subexpression_elimination_source.py` | 0 | 7 | true |  | release-coded test, evidence, and metric labels plus CSE shorthand in guard names(7) |
 | `python/tests/test_v086_delta_coalescing.py` | 0 | 2 | false |  | v086(2) |
 | `python/tests/test_v086_exact_types_runtime.py` | 0 | 0 | true |  |  |
 | `python/tests/test_v086_exact_types_source.py` | 0 | 1 | false |  | v086(1) |

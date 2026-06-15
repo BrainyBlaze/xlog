@@ -5,14 +5,35 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[2]
-EVIDENCE_DIR = ROOT / "docs" / "evidence" / "2026-05-19-v086-cse"
+
+
+def common_subexpression_elimination_evidence_dir() -> Path:
+    matches = []
+    for path in sorted((ROOT / "docs" / "evidence").iterdir()):
+        measurements_path = path / "measurements.json"
+        if not measurements_path.exists() or not (path / "README.md").exists():
+            continue
+        measurements = json.loads(measurements_path.read_text(encoding="utf-8"))
+        deterministic_fixture = measurements.get("deterministic_fixture", {})
+        if (
+            deterministic_fixture.get("output_parity") is True
+            and deterministic_fixture.get("duplicate_subplan_reduction_percent", 0.0)
+            >= 30.0
+            and "unsafe_rejections" in measurements
+        ):
+            matches.append(path)
+    assert len(matches) == 1
+    return matches[0]
+
+
+EVIDENCE_DIR = common_subexpression_elimination_evidence_dir()
 
 
 def read(path: str) -> str:
     return (ROOT / path).read_text(encoding="utf-8")
 
 
-def test_v086_cse_runtime_uses_existing_executor_path() -> None:
+def test_common_subexpression_elimination_runtime_uses_existing_executor_path() -> None:
     config = read("crates/xlog-core/src/config.rs")
     executor = read("crates/xlog-runtime/src/executor/mod.rs")
     dispatch = read("crates/xlog-runtime/src/executor/node_dispatch.rs")
@@ -32,13 +53,13 @@ def test_v086_cse_runtime_uses_existing_executor_path() -> None:
     assert "Common Subexpression Elimination" in optimizer_doc
 
 
-def test_v086_cse_evidence_is_present() -> None:
+def test_common_subexpression_elimination_evidence_is_present() -> None:
     readme = (EVIDENCE_DIR / "README.md").read_text(encoding="utf-8")
     measurements = json.loads((EVIDENCE_DIR / "measurements.json").read_text(encoding="utf-8"))
 
-    assert "G086_CSE" in readme
-    assert "M086_CSE.1" in readme
-    assert "M086_CSE.6" in readme
+    assert "Common Subexpression Elimination" in readme
+    assert "duplicate inner join" in readme
+    assert "Unsafe rejection classes observed" in readme
     assert measurements["deterministic_fixture"]["output_parity"] is True
     assert measurements["deterministic_fixture"]["duplicate_subplan_reduction_percent"] >= 30.0
     assert measurements["deterministic_fixture"]["added_dtoh_calls"] == 0
