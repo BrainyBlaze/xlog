@@ -180,10 +180,12 @@ def test_grouped_matches_scalar_forward_backward() -> None:
 
 
 @requires_cuda
-def test_training_reports_host_transfer_stats() -> None:
-    """The rerouted training hot loop surfaces the provider device->host counter
-    so the no-host property is observable. The device-resident step introduces
-    no provider downloads, so dtoh_calls stays at its reset baseline of 0."""
+def test_training_loop_has_no_tracked_host_transfers() -> None:
+    """The warm training loop must perform NO tracked device<->host transfers in
+    either direction. After the one-time cache warm-up, every step runs
+    device-resident: no downloads (loss accumulates on device) and no uploads
+    (query-var metadata is cached on device). dtoh AND htod, calls AND bytes,
+    all stay at their reset baseline of 0 across the measured loop."""
     result = train_neurosymbolic_program(
         MIXED_BODY_SOURCE,
         networks={"root_net": _root_net()},
@@ -193,3 +195,6 @@ def test_training_reports_host_transfer_stats() -> None:
     stats = result.training_host_transfer_stats
     assert stats is not None
     assert stats["dtoh_calls"] == 0
+    assert stats["dtoh_bytes"] == 0
+    assert stats["htod_calls"] == 0
+    assert stats["htod_bytes"] == 0

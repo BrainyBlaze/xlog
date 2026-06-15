@@ -136,13 +136,21 @@ def train_neurosymbolic_program(
     neural_grads: dict[str, float] = {name: 0.0 for name in modules}
     symbolic_grads: dict[str, float] = {rule.id: 0.0 for rule in rules}
 
+    # Warm the device-side caches (circuit template + batched query-var
+    # metadata) once with a throwaway forward-backward over the real queries.
+    # The bounded one-time metadata uploads happen here, BEFORE the measured
+    # region; the warm-up gradients are cleared by the first step's zero_grad.
+    program.zero_grad()
+    program.forward_backward_grouped(queries, targets)
+
     # Zero-host training hot loop. Every example's supervised circuit is
     # evaluated in one device-resident batched pass per step (grouped by target
     # and circuit template), so a step costs a single host sync for the summed
     # loss rather than one per query. Looping the scalar forward_backward
     # instead host-syncs on every query (.item()), which leaves the GPU idle
     # between syncs and makes training CPU-bound. Reset/read the provider's
-    # device->host counter around the loop so the no-host property is observable.
+    # host-transfer counters around the warm loop so the no-host property
+    # (no tracked device<->host transfers in either direction) is observable.
     program.reset_host_transfer_stats()
     for _step in range(config.steps):
         program.zero_grad()

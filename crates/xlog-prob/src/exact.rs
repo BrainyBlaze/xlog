@@ -1,7 +1,7 @@
 //! Exact probabilistic inference via GPU-native Decision-DNNF knowledge compilation
 //! and weighted model counting.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 use cudarc::driver::LaunchConfig;
@@ -93,6 +93,10 @@ struct GpuExactState {
     provider: Arc<CudaKernelProvider>,
     cache: Mutex<GpuCircuitCache>,
     handle: GpuCircuitCacheHandle,
+    /// Device-resident batched query-var metadata, keyed by the host vector of
+    /// CNF query vars. Lets a warm training loop reuse a single upload instead
+    /// of re-uploading (a tracked htod) on every batched force call.
+    query_var_batch_cache: Mutex<HashMap<Vec<u32>, Arc<TrackedCudaSlice<u32>>>>,
 }
 
 /// GPU device selection and memory budget for probabilistic inference.
@@ -133,6 +137,7 @@ impl GpuExactState {
             provider,
             cache: Mutex::new(cache),
             handle,
+            query_var_batch_cache: Mutex::new(HashMap::new()),
         })
     }
 
@@ -142,6 +147,30 @@ impl GpuExactState {
 
     fn handle(&self) -> &GpuCircuitCacheHandle {
         &self.handle
+    }
+
+    /// Device-resident batched query vars for `query_vars_host`, uploading once
+    /// and reusing the cached slice on repeat calls with the same vars. The
+    /// upload is a tracked htod; caching it keeps a warm training loop free of
+    /// per-step host transfers.
+    fn cached_query_var_batch(
+        &self,
+        query_vars_host: Vec<u32>,
+    ) -> Result<Arc<TrackedCudaSlice<u32>>> {
+        let mut cache = self
+            .query_var_batch_cache
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(cached) = cache.get(&query_vars_host) {
+            return Ok(Arc::clone(cached));
+        }
+        let mut query_vars = self.provider.memory().alloc::<u32>(query_vars_host.len())?;
+        self.provider
+            .htod_sync_copy_into_tracked(&query_vars_host, &mut query_vars)
+            .map_err(|e| XlogError::Kernel(format!("Failed to upload batched query vars: {}", e)))?;
+        let query_vars = Arc::new(query_vars);
+        cache.insert(query_vars_host, Arc::clone(&query_vars));
+        Ok(query_vars)
     }
 }
 
@@ -611,7 +640,6 @@ impl ExactDdnnfProgram {
         let mut base_roots = state.provider.memory().alloc::<f64>(batch)?;
         let mut query_roots = state.provider.memory().alloc::<f64>(batch)?;
         let mut losses = state.provider.memory().alloc::<f64>(batch)?;
-        let mut query_vars = state.provider.memory().alloc::<u32>(batch)?;
         let mut force_saved = state.provider.memory().alloc::<f64>(batch)?;
 
         let mut query_vars_host: Vec<u32> = Vec::with_capacity(batch);
@@ -789,12 +817,9 @@ impl ExactDdnnfProgram {
             }
         }
 
-        state
-            .provider
-            .htod_sync_copy_into_tracked(&query_vars_host, &mut query_vars)
-            .map_err(|e| {
-                XlogError::Kernel(format!("Failed to upload batched query vars: {}", e))
-            })?;
+        // Reuse the device-resident query-var batch (uploaded once and cached),
+        // so a warm training loop performs no per-step tracked host transfer here.
+        let query_vars = state.cached_query_var_batch(query_vars_host)?;
         let force_grid = checked_launch_grid_u32("gpu exact batched query force", batch_u32, 256)?;
         if force_grid != 0 {
             if expected_true {
@@ -807,7 +832,7 @@ impl ExactDdnnfProgram {
                             shared_mem_bytes: 0,
                         },
                         (
-                            &query_vars,
+                            query_vars.as_ref(),
                             batch_u32,
                             self.max_var,
                             var_stride,
@@ -832,7 +857,7 @@ impl ExactDdnnfProgram {
                             shared_mem_bytes: 0,
                         },
                         (
-                            &query_vars,
+                            query_vars.as_ref(),
                             batch_u32,
                             self.max_var,
                             var_stride,
