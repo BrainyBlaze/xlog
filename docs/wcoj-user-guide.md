@@ -76,6 +76,11 @@ WCOJ routes are certified by shape, type, and runtime validation.
 
 Hard fallback reasons include:
 
+- Free Join order planner declines a large bad-order body. Free Join cannot
+  reorder a chain to start from a selective tail, so on a large join whose only
+  prefix-key-joinable order would materialize a much larger intermediate than
+  the binary plan, the planner declines to the binary fallback rather than
+  dispatch the loss. Small joins and competitively-ordered bodies are unaffected.
 - Ground facts, negation, aggregation boundaries, `is` expressions, or too few
   positive atoms.
 - Unsupported join-key types. WCOJ join keys are `U32`, `U64`, and `Symbol`.
@@ -123,6 +128,10 @@ builders. Production services should set them once at process startup.
 | `XLOG_DISABLE_WCOJ_4CYCLE` | `1`/`true` disables | 4-cycle kill switch | Beats force and adaptive. |
 | `XLOG_WCOJ_COST_MODEL` | `cardinality`, `skew`, `skewclassifier` | Runtime cost model | Selects `CostModelKind`. Invalid non-empty values resolve to `SkewClassifier`. Unset defaults to `Cardinality`. |
 | `XLOG_WCOJ_BLOCK_WORK_UNIT` | integer `1..8192` | HG block-slice work unit | Default `1024`. Invalid values fall back to default with a warning. |
+| `XLOG_DISABLE_FREE_JOIN` | `1`/`true` disables | Free Join kill switch | Forces general multiway bodies through the binary fallback instead of the Free Join engine. |
+| `XLOG_DISABLE_WCOJ_GROUPBY_FUSION` | `1`/`true` disables | Aggregate-fused WCOJ kill switch | Forces count/sum/min/max-by-root over a triangle body to materialize then group, instead of the fused aggregate. |
+| `XLOG_DISABLE_FACTORIZED_DELTA` | `1`/`true` disables | Factorized recursive-delta kill switch | Forces every semi-naive delta step through the legacy hash-join → diff path. |
+| `XLOG_FACTORIZED_DELTA_MAX_DOMAIN` | integer | Factorized-delta dense-domain cap | Largest dense domain the bitvector delta route accepts (default `2^14`, hard bound `2^16`); above it the sparse route or legacy path runs. |
 
 Current branch caveat: triangle adaptive and triangle hard-disable are runtime
 config builders, not env resolvers. Use

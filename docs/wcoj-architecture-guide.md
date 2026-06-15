@@ -459,6 +459,27 @@ cardinality-aware model reads relation stats and estimates the first binary
 intermediate through `StatsManager::estimate_join_cardinality`. If the
 estimate is large enough, runtime dispatch is allowed to fire.
 
+The cardinality-aware model also keeps the factorized routes (aggregate-fused
+WCOJ and Free Join) out of their loss regions:
+
+- **Factorized loss veto** (`factorized_loss_veto`). Fail-OPEN: it declines a
+  factorized route to the binary fallback only when stats are present for every
+  input AND the largest input is below the WCOJ-worthwhile threshold — a
+  provably-small join the binary plan wins. Missing stats for any input, or any
+  large input, means no veto, so every measured win is preserved.
+- **Free Join order planner** (`plan_free_join_order`). Free Join materializes a
+  left-deep prefix whose probe keys must be a leading column prefix of each
+  atom, so it cannot reorder a chain to start from a selective tail the way the
+  binary plan can — a bad input order can materialize a large intermediate even
+  when the result is tiny. The planner is a safety net over the input order:
+  using the ground-truth row counts of the buffers being joined (and
+  `estimate_join_cardinality` for per-pair selectivity when stats exist), it
+  keeps the traversal order when it is already within 1.2× of the unconstrained
+  binary plan's estimated peak (so small joins and already-good orders are
+  byte-for-byte untouched), reorders to a better prefix-key-joinable order when
+  one is competitive, or declines to the binary fallback when none is. It runs
+  only under the cardinality cost model (the skew model opts out).
+
 The compile-time variable-ordering model lives in
 `crates/xlog-logic/src/wcoj_var_ordering.rs`. The trait is named
 `WcojVariableOrderingModel`. The cardinality leader-selection work introduced `LeaderCardinalityModel`, which
