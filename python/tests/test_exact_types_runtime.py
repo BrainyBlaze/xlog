@@ -1,4 +1,4 @@
-"""G086_EXACT_TYPES runtime parity for native exact induction."""
+"""Runtime parity for typed native exact induction."""
 
 from __future__ import annotations
 

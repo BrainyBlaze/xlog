@@ -1,10 +1,30 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[2]
-EVIDENCE_DIR = ROOT / "docs" / "evidence" / "2026-05-19-v086-exact-types"
+
+
+def exact_types_evidence_dir() -> Path:
+    matches = []
+    for path in sorted((ROOT / "docs" / "evidence").iterdir()):
+        measurements_path = path / "measurements.json"
+        if not measurements_path.exists() or not (path / "README.md").exists():
+            continue
+        measurements = json.loads(measurements_path.read_text(encoding="utf-8"))
+        if (
+            measurements.get("provider_typed_tests_passed") == 7
+            and measurements.get("core_dlpack_compatibility_tests_passed") == 1
+            and "symbol" in measurements
+        ):
+            matches.append(path)
+    assert len(matches) == 1
+    return matches[0]
+
+
+EVIDENCE_DIR = exact_types_evidence_dir()
 
 
 def read(path: str) -> str:
@@ -51,12 +71,11 @@ def test_exact_type_dispatch_preserves_symbol_schema_at_dlpack_boundary() -> Non
 
 def test_exact_type_dispatch_evidence_is_present() -> None:
     readme = (EVIDENCE_DIR / "README.md").read_text(encoding="utf-8")
-    measurements = (EVIDENCE_DIR / "measurements.json").read_text(encoding="utf-8")
+    measurements = json.loads((EVIDENCE_DIR / "measurements.json").read_text(encoding="utf-8"))
 
-    assert "G086_EXACT_TYPES" in readme
-    assert "M086_EXACT_TYPES.1" in readme
-    assert "M086_EXACT_TYPES.2" in readme
-    assert "M086_EXACT_TYPES.6" in readme
-    assert '"u32"' in measurements
-    assert '"symbol"' in measurements
-    assert '"dtoh_calls": 2' in measurements
+    assert "Native Exact-Induction U32/Symbol Dispatch" in readme
+    assert "schema identity is preserved" in readme
+    assert "count-array" in readme
+    assert measurements["u32"]["3"]["parity"] is True
+    assert measurements["symbol"]["3"]["parity"] is True
+    assert measurements["u32"]["3"]["dtoh_calls"] == 2
