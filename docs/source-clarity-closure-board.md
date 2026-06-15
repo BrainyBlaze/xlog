@@ -1456,7 +1456,7 @@ Hardware cache terminology such as `L1` and `L2` is allowed when it refers to GP
 | `python/tests/test_kernel_packaging_layout.py` | 0 | 0 | true |  |  |
 | `python/tests/test_label_mapping.py` | 0 | 0 | true |  |  |
 | `python/tests/test_logic_external_consumer_frozen_replay_determinism.py` | 0 | 9 | true |  | external-consumer and task labels in env, path, and test naming(9) |
-| `python/tests/test_logic_recursive_support_gpu.py` | 0 | 85 | false |  | B0(30), B1(25), B2(20), B3(10) |
+| `python/tests/test_logic_recursive_support_gpu.py` | 1 | 161 | true | midpoint variable shorthand in comment(1) | body-predicate variables, midpoint variable, and opaque relation names(161) |
 | `python/tests/test_logic_relation_store.py` | 0 | 0 | true |  |  |
 | `python/tests/test_loss.py` | 0 | 0 | true |  |  |
 | `python/tests/test_mc_device_results.py` | 0 | 0 | true |  |  |
