@@ -59,6 +59,7 @@ impl LogicSessionRuntime {
     pub fn wcoj_dispatch_stats(&self) -> WcojDispatchStats {
         WcojDispatchStats {
             free_join_dispatch_count: self.executor.free_join_dispatch_count(),
+            factorized_delta_dispatch_count: self.executor.factorized_delta_dispatch_count(),
             wcoj_groupby_fusion_dispatch_count: self.executor.wcoj_groupby_fusion_dispatch_count(),
             wcoj_error_decline_count: self.executor.wcoj_error_decline_count(),
         }
@@ -71,6 +72,9 @@ impl LogicSessionRuntime {
 pub struct WcojDispatchStats {
     /// Free Join dispatches taken through the multiway plan.
     pub free_join_dispatch_count: u64,
+    /// Factorized recursive-delta (D3) dispatches taken in the semi-naive
+    /// fixpoint (dense bitvector or sparse hash-set route).
+    pub factorized_delta_dispatch_count: u64,
     /// Aggregate-fused group-by-root dispatches (no materialized join rows).
     pub wcoj_groupby_fusion_dispatch_count: u64,
     /// WCOJ pipeline errors that declined to the binary-join fallback.
