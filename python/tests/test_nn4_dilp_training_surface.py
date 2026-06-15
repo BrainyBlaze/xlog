@@ -176,24 +176,35 @@ def test_real_parser_rejects_invalid_xlog() -> None:
     assert "trainable_rule" not in str(excinfo.value)
 
 
-def test_unsupported_body_relation_fails_closed() -> None:
-    """Non-neural body relations are an engine template limitation: typed error,
-    never a silently-zero probability."""
+def test_gate_relation_zeroes_ineligible_examples() -> None:
+    """A deterministic relation sharing only the head variable acts as a per-example
+    gate: P(head(i)) = p_net(i)[positive] * sigmoid(w) for eligible i, exactly 0 otherwise."""
+    network = _root_net()
+    w0 = 0.7
     source = """
         nn(root_net, [Case], Label, [negative, positive]) :: neural_root(Case, Label).
         allowed(0).
         allowed(1).
-        trainable_rule(rule_mixed, weight=0.0) :: root_case(Case) :-
+        trainable_rule(rule_mixed, weight=0.7) :: root_case(Case) :-
             neural_root(Case, positive), allowed(Case).
         train(root_case, binary_cross_entropy).
     """
-    with pytest.raises(Exception, match="(?i)neural"):
-        train_neurosymbolic_program(
-            source,
-            networks={"root_net": _root_net()},
-            examples=_examples(),
-            config=NeuroSymbolicTrainingConfig(steps=1, learning_rate=0.1),
-        )
+    result = train_neurosymbolic_program(
+        source,
+        networks={"root_net": network},
+        examples=_examples(),                      # rows 0..3; allowed only for 0,1
+        config=NeuroSymbolicTrainingConfig(steps=1, learning_rate=0.0),
+    )
+
+    inputs = _examples()[0]["inputs"]
+    with torch.no_grad():
+        p_pos = network(inputs.cuda().reshape(-1, 1))[:, 1].cpu()
+    p_guard = 1.0 / (1.0 + math.exp(-w0))
+
+    assert result.query_probabilities[0] == pytest.approx(float(p_pos[0]) * p_guard, abs=1e-5)
+    assert result.query_probabilities[1] == pytest.approx(float(p_pos[1]) * p_guard, abs=1e-5)
+    assert result.query_probabilities[2] == pytest.approx(0.0, abs=1e-6)
+    assert result.query_probabilities[3] == pytest.approx(0.0, abs=1e-6)
 
 
 def test_missing_network_validated_against_real_declarations() -> None:
