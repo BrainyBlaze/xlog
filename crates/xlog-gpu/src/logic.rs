@@ -72,7 +72,7 @@ impl LogicSessionRuntime {
 pub struct WcojDispatchStats {
     /// Free Join dispatches taken through the multiway plan.
     pub free_join_dispatch_count: u64,
-    /// Factorized recursive-delta (D3) dispatches taken in the semi-naive
+    /// Factorized recursive-delta dispatches taken in the semi-naive
     /// fixpoint (dense bitvector or sparse hash-set route).
     pub factorized_delta_dispatch_count: u64,
     /// Aggregate-fused group-by-root dispatches (no materialized join rows).

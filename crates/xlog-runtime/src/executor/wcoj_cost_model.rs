@@ -12,19 +12,20 @@ pub(super) struct WcojDispatchCtx<'a> {
     pub slot_rels: &'a [RelId],
 }
 
-/// Tier-1.5 — Free-Join atom processing-order decision (decline-or-reorder).
+/// Free-Join atom processing-order decision (decline-or-reorder).
 ///
-/// The FJ engine materializes a left-deep prefix; because each probe's keys
-/// must be a leading *column* prefix of its atom, FJ cannot reorder a chain
-/// to start from a selective tail the way the binary fallback can. On an
-/// adversarial chain this forces a large intermediate even when the result
-/// is tiny (the decider's measured 3.07× peak loss). This decision lets the
-/// dispatcher rescue or decline that case.
+/// The Free Join engine materializes a left-deep prefix; because each probe's
+/// keys must be a leading *column* prefix of its atom, it cannot reorder a
+/// chain to start from a selective tail the way the binary fallback can. On an
+/// adversarial chain this forces a large intermediate even when the result is
+/// tiny (a measured worst case is roughly a 3x peak-memory loss vs binary).
+/// This decision lets the dispatcher rescue or decline that case.
 pub(super) enum FjOrderDecision {
     /// Keep the default traversal order. Returned whenever the current order
     /// is already estimated within tolerance of the binary plan (so every
-    /// winning fixture is untouched) or the planner is inactive — identical
-    /// to pre-Tier-1.5 behavior (fail-OPEN).
+    /// winning fixture is untouched) or the planner is inactive — i.e. the
+    /// dispatch behaves exactly as it did before the order planner existed
+    /// (fail-OPEN).
     KeepDefault,
     /// Dispatch Free Join with this atom processing order (original input
     /// indices). Prefix-key-joinable by construction.
@@ -35,10 +36,10 @@ pub(super) enum FjOrderDecision {
     Decline,
 }
 
-/// FJ is reordered/declined only when the current order's estimated peak
-/// exceeds the binary plan's by more than this ratio (6/5 = 1.2×). Integer
-/// math (`5·a ≤ 6·b` ⇔ `a ≤ 1.2·b`) avoids float comparison. Mirrors the
-/// strengthened `d2_skew_order_decider` acceptance gate.
+/// Free Join is reordered/declined only when the current order's estimated
+/// peak exceeds the binary plan's by more than this ratio (6/5 = 1.2×).
+/// Integer math (`5·a ≤ 6·b` ⇔ `a ≤ 1.2·b`) avoids float comparison. Mirrors
+/// the adversarial-chain peak-memory acceptance test in the integration suite.
 const FJ_PEAK_TOLERANCE_NUM: u128 = 6;
 const FJ_PEAK_TOLERANCE_DEN: u128 = 5;
 
@@ -58,7 +59,7 @@ pub(super) trait WcojCostModel: Send + Sync {
     fn should_dispatch_4cycle(&self, ctx: &WcojDispatchCtx) -> bool;
 
     /// Fail-OPEN loss-region veto for the general factorized routes
-    /// (D1 aggregate-fused WCOJ over a triangle; D2 Free Join). Returns
+    /// (aggregate-fused WCOJ over a triangle; Free Join). Returns
     /// `true` ONLY when the model has full cardinality stats for every
     /// slot relation AND the largest one is below the WCOJ-worthwhile
     /// threshold — i.e. the join is provably small, no intermediate can
@@ -70,14 +71,14 @@ pub(super) trait WcojCostModel: Send + Sync {
     /// large → `false` (no veto). This NEVER vetoes a case with a large
     /// input (where factorized can win on a large avoided intermediate)
     /// and NEVER vetoes when stats are unavailable (e.g. recursive deltas
-    /// on early iterations) — so every measured D1/D2 gate win is
+    /// on early iterations) — so every measured factorized gate win is
     /// preserved exactly; the veto only removes provably-small losses.
     fn factorized_loss_veto(&self, ctx: &WcojDispatchCtx) -> bool {
         let _ = ctx;
         false
     }
 
-    /// Tier-1.5 FJ order planner (decline-or-reorder). Acts only as a safety
+    /// Free Join order planner (decline-or-reorder). Acts only as a safety
     /// net: when the current traversal order is already estimated within
     /// tolerance of the binary plan it returns [`FjOrderDecision::KeepDefault`]
     /// (every winning fixture untouched); only when the current order is
@@ -225,7 +226,7 @@ impl WcojCostModel for CardinalityAwareCostModel {
         match eval_order_peak(ctx, atom_vars, cards, &traversal, true) {
             Some(default_peak) => {
                 // Absolute floor: a small intermediate is cheap regardless of
-                // order — never intervene (the Tier-1 veto's small-join
+                // order — never intervene (the loss veto's small-join
                 // territory; FJ fires exactly as before). Only LARGE
                 // intermediates can carry the order-loss the planner removes.
                 // Also avoids spurious declines from ratio noise on tiny cards.
@@ -264,7 +265,7 @@ pub(super) fn build_wcoj_cost_model(config: &RuntimeConfig) -> Box<dyn WcojCostM
 }
 
 // ---------------------------------------------------------------------------
-// Tier-1.5 FJ order-planning helpers (decline-or-reorder).
+// Free Join order-planning helpers (decline-or-reorder).
 //
 // A left-deep prefix model: starting from a leader relation, atoms are added
 // one at a time; the running intermediate size is multiplied by the per-tuple
@@ -273,7 +274,7 @@ pub(super) fn build_wcoj_cost_model(config: &RuntimeConfig) -> Box<dyn WcojCostM
 // atom's already-bound vars form a leading COLUMN prefix (so it can be probed
 // as a key); `constrained = false` is the binary fallback's freedom to join on
 // any shared key. The constrained/unconstrained peak gap is exactly the
-// order-loss the decider measured.
+// order-loss the adversarial-chain test measures.
 // ---------------------------------------------------------------------------
 
 /// Best (lowest estimated peak) order over all leaders. Returns `(order,
@@ -431,7 +432,7 @@ fn shared_keys(p_vars: &[usize], a_vars: &[usize]) -> (Vec<usize>, Vec<usize>) {
 /// Pairwise join-cardinality estimate. Prefers the authoritative
 /// `StatsManager::estimate_join_cardinality` over the ACTUAL key columns when
 /// both relations have populated stats (cached selectivity / column distinct
-/// estimates then refine it, per @dts-dlm-main); otherwise applies the same
+/// estimates then refine it); otherwise applies the same
 /// default model (10% selectivity) over the ground-truth buffer cardinalities,
 /// so statless single-rule joins (where scans never populate StatsManager) are
 /// still planned.
@@ -689,7 +690,7 @@ mod tests {
         });
     }
 
-    // -- Tier-1.5 FJ order planner -----------------------------------------
+    // -- Free Join order planner ------------------------------------------
 
     fn nway_ctx<'a>(stats: &'a StatsManager, slot_rels: &'a [RelId]) -> WcojDispatchCtx<'a> {
         WcojDispatchCtx {
@@ -709,7 +710,7 @@ mod tests {
     /// prefix), while the binary plan can start from the 1-row tail. The
     /// planner must DECLINE.
     #[test]
-    fn test_tier15_chain_declines() {
+    fn order_planner_declines_unreorderable_blowup_chain() {
         let cards = [100u64, 100, 10_000, 1];
         let stats = stats_with_cards(&cards); // populated, but no cached selectivity
         let rels = slots(4);
@@ -732,7 +733,7 @@ mod tests {
     /// The planner must KEEP the default order (FJ fires as before) — the
     /// order-loss only matters for large intermediates.
     #[test]
-    fn test_tier15_small_chain_keeps_default() {
+    fn order_planner_keeps_default_for_small_chain() {
         let cards = [3u64, 3, 2];
         let stats = stats_with_cards(&cards);
         let rels = slots(3);
@@ -752,7 +753,7 @@ mod tests {
     /// worse than binary — the planner keeps the default order (winner
     /// untouched).
     #[test]
-    fn test_tier15_triangle_keeps_default() {
+    fn order_planner_keeps_default_for_triangle() {
         let cards = [100u64, 100, 100];
         let stats = stats_with_cards(&cards);
         let rels = slots(3);
@@ -773,7 +774,7 @@ mod tests {
     /// both prefix-key-joinable AND competitive — the planner must REORDER to
     /// a non-identity valid permutation.
     #[test]
-    fn test_tier15_cycle4_reorders() {
+    fn order_planner_reorders_alternating_cycle() {
         let cards = [10_000u64, 1, 10_000, 1];
         let stats = stats_with_cards(&cards);
         let rels = slots(4);
@@ -799,7 +800,7 @@ mod tests {
     /// The SkewClassifier opt-out disables the planner entirely (default trait
     /// impl → KeepDefault), even on the adversarial chain.
     #[test]
-    fn test_tier15_skew_model_never_plans() {
+    fn order_planner_disabled_under_skew_model() {
         let cards = [100u64, 100, 10_000, 1];
         let stats = stats_with_cards(&cards);
         let rels = slots(4);

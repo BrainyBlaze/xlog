@@ -1,11 +1,11 @@
-//! P0.3 calibration support — emit the GpuCnf var_cap / clause_cap (the
-//! upper bounds @xlog-claude's pre-launch verify-size bound keys on) for
-//! the dense correlated reachability programs at the D4-verify explosion
-//! boundary (n=5 ok, n=6 = 47s but completes, n=7 = CUDA launch-fail in
-//! D4 compile). Reads the caps right after CNF ENCODING — before the D4
+//! Verify-size guard calibration support — emit the GpuCnf var_cap /
+//! clause_cap (the upper bounds a pre-launch verify-size guard keys on) for
+//! the dense correlated reachability programs at the d-DNNF-verify explosion
+//! boundary (n=5 ok, n=6 = 47s but completes, n=7 = CUDA launch-fail in the
+//! d-DNNF compile). Reads the caps right after CNF ENCODING — before the
 //! compile that crashes at n=7 — so the n=7 caps are measurable without
-//! poisoning the CUDA context. Functional (no D4 compile, no perf
-//! timing); local-safe. RunPod-only rule does not apply (no compile/eval).
+//! poisoning the CUDA context. Functional (no d-DNNF compile, no perf
+//! timing); local-safe. Remote-GPU-only rule does not apply (no compile/eval).
 
 #![cfg(feature = "host-io")]
 
@@ -47,7 +47,7 @@ fn d4_verify_calibration_caps() {
         eprintln!("skipping: no CUDA device");
         return;
     };
-    eprintln!("[P0.3 calibration] GpuCnf (var_cap, clause_cap) at the dense-correlated D4-verify boundary:");
+    eprintln!("[verify-size calibration] GpuCnf (var_cap, clause_cap) at the dense-correlated d-DNNF-verify boundary:");
     for n in [5u32, 6, 7, 8] {
         let src = dense_correlated_source(n);
         let prov = match extract_from_source(&src) {
@@ -92,5 +92,5 @@ fn d4_verify_calibration_caps() {
             Err(e) => eprintln!("  n={n}: encode_cnf_gpu failed: {e}"),
         }
     }
-    eprintln!("[P0.3 calibration] n=6 is the 'completes at 47s' upper-anchor; n=7 is the launch-fail point. @xlog-claude sets the verify size default between the largest known-good (cert max var_cap=15, a floor) and the n=7 cap.");
+    eprintln!("[verify-size calibration] n=6 is the 'completes at 47s' upper-anchor; n=7 is the launch-fail point. The verify-size default sits between the largest known-good (cert max var_cap=15, a floor) and the n=7 cap.");
 }

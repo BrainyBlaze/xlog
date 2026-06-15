@@ -161,7 +161,7 @@ pub(super) fn free_join_disabled() -> bool {
         .unwrap_or(false)
 }
 
-/// D3 kill switch for the factorized recursive-delta dispatch. Default
+/// Kill switch for the factorized recursive-delta dispatch. Default
 /// ON (dispatch enabled); set to `1`/`true` to force every recursive
 /// delta step through the legacy hash-join -> diff path.
 pub const ENV_DISABLE_FACTORIZED_DELTA: &str = "XLOG_DISABLE_FACTORIZED_DELTA";
@@ -1853,10 +1853,11 @@ impl Executor {
             atom_vars.push(vars);
         }
         let num_vars = class_to_var.len();
-        // Tier-1.5 prefix-key-joinable order planner (decline-or-reorder).
-        // FJ's probe-key rule forces a left-deep prefix in COLUMN order, so a
-        // bad atom order can materialize a large intermediate even when the
-        // result is tiny (the decider's 3.07× peak loss). The planner is a
+        // Prefix-key-joinable order planner (decline-or-reorder).
+        // Free Join's probe-key rule forces a left-deep prefix in COLUMN
+        // order, so a bad atom order can materialize a large intermediate even
+        // when the result is tiny (a measured worst case is ~3x peak vs
+        // binary). The planner is a
         // safety net: it keeps the traversal order when it is already
         // competitive with the binary plan (every winning fixture untouched),
         // reorders to a better prefix-key-joinable order when one exists, or
@@ -2352,7 +2353,8 @@ impl Executor {
         // model has stats AND the triangle is provably small — the
         // small-case the base triangle cost model already declines, which
         // the fused path otherwise bypasses. Fail-open: stats absent / any
-        // large input → fuse (every measured S1 win preserved). The rarer
+        // large input → fuse (every measured fused-aggregate win preserved).
+        // The rarer
         // fused 4-cycle/K-clique sub-paths inherit their base shapes'
         // gating posture and are not separately vetoed here.
         {
