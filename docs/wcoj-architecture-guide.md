@@ -630,7 +630,7 @@ The CUDA Graphs work builds on the current recorded-launch discipline, which is 
 in the sense that WCOJ launches are grouped, stream-resolved, and strict about
 allocator lifetime. That is not the same as graph capture.
 
-The CUDA Graphs architecture should capture stable Stage-4 hot-loop launch
+The CUDA Graphs architecture should capture stable consumer hot-loop launch
 sequences only after the involved kernels, allocations, and stream fences have
 fixed shapes for a replay window. The graph path must preserve the same
 fallback behavior: if a shape is not capturable or a graph update fails, the
