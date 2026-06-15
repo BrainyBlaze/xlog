@@ -102,6 +102,34 @@ assertion when a hard zero is wanted.
 treat the parallel fixed-slot signature above as the source of truth, superseding the
 "shape-only" Rust blocks below.
 
+### Implementation note (Tasks 4-5, recorded 2026-06-15)
+
+Stage A shipped GREEN (`test_gate_relation_zeroes_ineligible_examples` passes; full
+`test_nn4_dilp_training_surface.py` = 10/10 on RTX 4090). The implementation chose the
+*pragmatic* variant over the spike's recommended parallel `fixed_slots` set, to avoid
+re-cutting the `exact.rs` kernel signature on the working neural path:
+
+- A gate is emitted as a **single-choice annotated disjunction** in `generate_template_ast`,
+  grounded at the same head placeholder as the query, AFTER the neural disjunctions.
+- `compile_circuit_for_template` appends **one 1-var slot per gate** to the existing
+  `GpuWeightSlots` (gates are extra "groups", so `probs.len() == num_groups` still holds).
+- `forward_backward_complex_tensor` appends a fixed 1.0/0.0 prob buffer per gate (truth
+  from `evaluate_gate_truths` — substitutes the query's ground terms into the rule head and
+  checks EDB-fact membership). Gate buffers are **filled but never backpropagated** (no
+  network owns them), so the gate stays constant and receives no gradient — Task 6's
+  grad-isolation assertions hold because gate predicates never enter the Python grad dicts.
+
+Consequences vs. the parallel-set design:
+- Gated-out probability is `~min_p` (≈1e-12), not a hard zero — covered by the test's
+  `abs=1e-6`. If a hard zero is ever required, switch to the `force_query_var_false` path
+  noted above.
+- A gate gradient is computed then discarded (negligible cost) rather than structurally
+  skipped. Isolation is behavioural (no grad sink consumed), not structural.
+- Scope handled: head-bound EDB-fact gates (the flagship Stage-A pattern). Out of scope:
+  gates over derived relations, anonymous-`_` gates, and the batched forward path
+  (`forward_backward_batch_complex_tensor`) — gated batch queries fail closed on the
+  `num_groups` invariant rather than silently miscomputing.
+
 ---
 
 ## Background: the exact failing point (verified)
