@@ -1,6 +1,6 @@
 use xlog_core::ScalarType;
 use xlog_logic::ast::{BodyLiteral, Term, TypeRef};
-use xlog_logic::{normalize_v085_lists, parse_program, Compiler};
+use xlog_logic::{normalize_list_builtins, parse_program, Compiler};
 
 fn fact_rows(program: &xlog_logic::Program, pred: &str) -> Vec<Vec<Term>> {
     program
@@ -128,7 +128,7 @@ fn normalizes_lists_to_helper_facts_and_removes_builtin_atoms() {
     "#;
 
     let program = parse_program(src).expect("parse");
-    let normalized = normalize_v085_lists(&program).expect("normalize");
+    let normalized = normalize_list_builtins(&program).expect("normalize");
 
     let body_preds = body_predicates(&normalized);
     for builtin in [
@@ -237,7 +237,7 @@ fn list_builtins_have_relational_oracle_fixtures() {
     for (label, src, expected_helper) in fixtures {
         let program = parse_program(src).unwrap_or_else(|err| panic!("{label}: parse: {err}"));
         let normalized =
-            normalize_v085_lists(&program).unwrap_or_else(|err| panic!("{label}: {err}"));
+            normalize_list_builtins(&program).unwrap_or_else(|err| panic!("{label}: {err}"));
         let body_preds = body_predicates(&normalized);
         assert!(
             body_preds.iter().any(|pred| pred == expected_helper),
@@ -330,9 +330,9 @@ fn committed_list_examples_compile() {
         .canonicalize()
         .expect("repo root");
     for path in [
-        "examples/v085-language/lists/membership.xlog",
-        "examples/v085-language/lists/transforms.xlog",
-        "examples/v085-language/lists/cons_patterns.xlog",
+        "examples/language-completeness/lists/membership.xlog",
+        "examples/language-completeness/lists/transforms.xlog",
+        "examples/language-completeness/lists/cons_patterns.xlog",
     ] {
         let full_path = repo_root.join(path);
         let src = std::fs::read_to_string(&full_path)

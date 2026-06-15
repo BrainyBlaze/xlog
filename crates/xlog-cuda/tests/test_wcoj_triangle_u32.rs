@@ -1,5 +1,5 @@
 // crates/xlog-cuda/tests/test_wcoj_triangle_u32.rs
-//! Tests for the v0.6.2 GPU 3-way WCOJ triangle kernel (u32, slice 1).
+//! Tests for the GPU 3-way WCOJ triangle kernel for u32 inputs.
 //!
 //! Locks the provider-only entry
 //! `CudaKernelProvider::wcoj_triangle_u32_recorded(e_xy, e_yz, e_xz, launch_stream)`
@@ -9,12 +9,12 @@
 //!   tri(X, Y, Z) :- e1(X, Y), e2(Y, Z), e3(X, Z)
 //!
 //! Inputs (caller-supplied — no physical layout construction in
-//! this slice):
+//! this provider-only test):
 //!   * e_xy: 2-column u32 CudaBuffer, sorted+deduped by (X, Y)
 //!   * e_yz: 2-column u32 CudaBuffer, sorted+deduped by (Y, Z)
 //!   * e_xz: 2-column u32 CudaBuffer, sorted+deduped by (X, Z)
 //!
-//! Hard boundaries (per slice spec):
+//! Execution boundaries:
 //!   * U32 only, two-column relations only.
 //!   * Count → scan → materialize, deterministic output sorted (X, Y, Z).
 //!   * Strict `LaunchRecorder` discipline: every input read,
@@ -489,9 +489,9 @@ fn wcoj_triangle_u32_legacy_manager_rejected() {
 
 #[test]
 fn wcoj_triangle_u32_no_count_vector_d2h_under_strict_gate() {
-    // Locks the device-scan slice contract: with the strict
+    // Locks the device-scan transfer contract: with the strict
     // deterministic-D2H gate enabled, `wcoj_triangle_u32_recorded`
-    // must succeed and trip zero violations. The v1 (host scan)
+    // must succeed and trip zero violations. The previous host-scan
     // path used a raw `cuMemcpyDtoH_v2` over the count vector
     // that bypassed the gate's chokepoints. The device-scan path
     // replaces that with a recorded on-stream prefix-sum +
@@ -538,7 +538,7 @@ fn wcoj_triangle_u32_no_count_vector_d2h_under_strict_gate() {
 
     let buf = result.expect(
         "wcoj_triangle_u32_recorded must succeed under strict deterministic-D2H gate \
-         (the count-vector D2H from v1 is gone)",
+         (the previous count-vector D2H path is gone)",
     );
     assert_eq!(buf.num_rows() as usize, 5, "expected 5 triangles");
     let violations = fix.provider.deterministic_d2h_violation_count();

@@ -33,7 +33,7 @@ const XLOG_TY_F32: u8 = 4;
 const XLOG_TY_F64: u8 = 5;
 const XLOG_TY_BOOL: u8 = 6;
 const XLOG_TY_SYMBOL: u8 = 7;
-const W66_SMALL_FULL_ROW_SORT_MAX_ROWS: usize = 1024;
+const SMALL_FULL_ROW_SORT_MAX_ROWS: usize = 1024;
 
 #[inline]
 fn scalar_type_code_dedup(ty: ScalarType) -> u8 {
@@ -801,7 +801,7 @@ impl super::CudaKernelProvider {
         let concat = self.concat_buffers_gpu(a, b)?;
         if Self::use_csm_cuda_graph_env()
             && schema.arity() > 1
-            && a_rows.saturating_add(b_rows) <= W66_SMALL_FULL_ROW_SORT_MAX_ROWS
+            && a_rows.saturating_add(b_rows) <= SMALL_FULL_ROW_SORT_MAX_ROWS
         {
             return self.dedup_full_row_deterministic(&concat);
         }
@@ -1168,7 +1168,7 @@ impl super::CudaKernelProvider {
     ///   * `+0.0` and `-0.0` are distinct.
     ///   * Two NaNs collapse iff bit-identical.
     ///
-    /// Routing today (post-PR 2):
+    /// Routing today:
     ///   * `dedup(input, &all_cols)` with `arity > 1` routes to the
     ///     full-row pipeline (same semantics as this method).
     ///   * `dedup(input, &[0])` with `arity == 1` keeps the legacy
@@ -1185,7 +1185,7 @@ impl super::CudaKernelProvider {
     /// must call `dedup_full_row` directly.
     pub fn dedup_full_row(&self, input: &CudaBuffer) -> Result<CudaBuffer> {
         // Env-gated recorded dispatch. `dedup_full_row_recorded`
-        // (slice #5) requires every column to be U32 / Symbol;
+        // requires every column to be U32 / Symbol;
         // mixed-type schemas fall through to the legacy path.
         if Self::use_recorded_dedup_env() && input.num_rows() > 1 && input.arity() > 0 {
             if let Some(launch_stream) = self.recorded_op_stream_or_init() {
@@ -1300,7 +1300,7 @@ impl super::CudaKernelProvider {
         // Step 1: typed multi-column sort. Float columns use total-order
         // normalization; signed integers use sign-flipped unsigned compare.
         let sorted =
-            if Self::use_csm_cuda_graph_env() && row_count <= W66_SMALL_FULL_ROW_SORT_MAX_ROWS {
+            if Self::use_csm_cuda_graph_env() && row_count <= SMALL_FULL_ROW_SORT_MAX_ROWS {
                 self.small_sort_full_row_deterministic(input, row_count)?
             } else {
                 let all_cols: Vec<usize> = (0..arity).collect();
@@ -1392,10 +1392,10 @@ impl super::CudaKernelProvider {
         input: &CudaBuffer,
         row_count: usize,
     ) -> Result<CudaBuffer> {
-        if row_count > W66_SMALL_FULL_ROW_SORT_MAX_ROWS {
+        if row_count > SMALL_FULL_ROW_SORT_MAX_ROWS {
             return Err(XlogError::Kernel(format!(
                 "small full-row sort supports at most {} rows, got {}",
-                W66_SMALL_FULL_ROW_SORT_MAX_ROWS, row_count
+                SMALL_FULL_ROW_SORT_MAX_ROWS, row_count
             )));
         }
         if row_count == 0 {
@@ -1470,7 +1470,7 @@ impl super::CudaKernelProvider {
             })?;
         let cfg = LaunchConfig {
             grid_dim: (1, 1, 1),
-            block_dim: (W66_SMALL_FULL_ROW_SORT_MAX_ROWS as u32, 1, 1),
+            block_dim: (SMALL_FULL_ROW_SORT_MAX_ROWS as u32, 1, 1),
             shared_mem_bytes: 0,
         };
 
@@ -1591,7 +1591,7 @@ impl super::CudaKernelProvider {
     /// - Download/upload or kernel execution fails
     pub fn sort(&self, input: &CudaBuffer, key_cols: &[usize]) -> Result<CudaBuffer> {
         // Env-gated recorded dispatch. Eligibility check
-        // mirrors `sort_recorded`'s validation (slice #5):
+        // mirrors `sort_recorded`'s validation:
         // U32 / Symbol key columns only. Other types fall
         // through to the legacy multi-type path.
         if Self::use_recorded_sort_env() && !key_cols.is_empty() && input.num_rows() > 0 {
@@ -2696,12 +2696,12 @@ impl super::CudaKernelProvider {
         }
     }
 
-    /// W4.2 nested-loop inner join (emit-pairs design).
+    /// Nested-loop inner join (emit-pairs design).
     ///
     /// Drop-in compatible with `hash_join_v2(_, _, &[left_key],
     /// &[right_key], JoinType::Inner)`: same input types, same
     /// output schema (`combine_schemas(left, right)`), same row
-    /// set. Caller (the executor's dispatch site, Step 5) is
+    /// set. Caller (the executor's dispatch site) is
     /// responsible for choosing between `hash_join_v2` and this
     /// fn based on the eligibility predicate + threshold check;
     /// this fn validates the same contract fail-closed and
@@ -2789,8 +2789,8 @@ impl super::CudaKernelProvider {
         let right_col = right.column(right_key).ok_or_else(|| {
             XlogError::Kernel(format!("nested_loop: right.column({})", right_key))
         })?;
-        // Byte-length lower-bound check (per F-W42-14, corrected
-        // to ≥-semantic). The codebase convention is that
+        // Byte-length lower-bound check (corrected to lower-bound
+        // semantics). The codebase convention is that
         // `CudaColumn::num_bytes()` reports the ALLOCATION size,
         // which can exceed `num_rows * sizeof(T)` when the buffer
         // has spare capacity (row_cap > num_rows). The check
@@ -2801,7 +2801,7 @@ impl super::CudaKernelProvider {
         // failure case). Strict equality would falsely reject
         // any normal buffer with spare allocation — surfaced as
         // a regression in `test_simple_join` and
-        // `test_transitive_closure` after the Step-5 dispatch
+        // `test_transitive_closure` after the executor dispatch
         // wiring routed those joins through this path.
         let required_left_bytes = num_left
             .checked_mul(4)
@@ -2931,32 +2931,29 @@ impl super::CudaKernelProvider {
         self.buffer_from_columns(result_columns, output_rows as u64, combined_schema)
     }
 
-    /// W4.3 sortedness-detection wrapper. Returns `Ok(true)` iff
+    /// Sort-merge sortedness-detection wrapper. Returns `Ok(true)` iff
     /// the column at `key_col` of `buf` is sorted ascending
     /// (`keys[i] <= keys[i+1]` for all i in `[0, num_rows-1)`),
     /// `Ok(false)` if a violation is detected, `Err(_)` on
     /// kernel-launch / D2H failure.
     ///
-    /// **Empty / single-row fast path** (per W4.3 plan iter-4 D1
-    /// + F-W43-4): `n < 2` returns `Ok(true)` BEFORE allocation
+    /// **Empty / single-row fast path**: `n < 2` returns `Ok(true)` BEFORE allocation
     ///   or kernel launch. The detection kernel's grid `(n + 255)
     ///   / 256` is undefined for `n == 0`; single-row sequences
     ///   are trivially sorted. This is the load-bearing
-    ///   invariant Cert G's empty-input subcases verify.
+    ///   invariant the empty-input sortedness checks verify.
     ///
     /// Validation:
     ///   * Key column index within arity bounds.
     ///   * Key column type is `U32` or `Symbol`
     ///     (byte-identical at the kernel level).
     ///   * Key column allocation `>= num_rows * 4` bytes
-    ///     (mirrors W4.2 F-W42-14 byte-length lower-bound idiom).
+    ///     (mirrors the nested-loop byte-length lower-bound idiom).
     ///
-    /// **Caller surface (per W4.3 plan iter-6 F-W43-14)**: this
-    /// fn has NO executor-dispatch caller after iteration-6
-    /// unwiring — its only callers are operator-level certs
-    /// (Cert G's empty-input subcases) and the Step 12
-    /// production bench (sort-merge-with-detection Path 1
-    /// timing). The provider returns the honest `Result<bool>`
+    /// **Caller surface**: this fn has no executor-dispatch caller after
+    /// benchmark-backed unwiring. Its only callers are operator-level tests
+    /// and the production sort-merge benchmark
+    /// (sort-merge-with-detection timing). The provider returns the honest `Result<bool>`
     /// — the kernel can fail (allocation, launch, D2H), and
     /// `Err(_)` is preserved so callers can log or surface it
     /// at their abstraction level. There is no fail-closed
@@ -2964,7 +2961,7 @@ impl super::CudaKernelProvider {
     /// `matches!(_, Ok(true))`; after the dispatch site was unwired,
     /// any later caller must decide its own Err-handling policy.
     pub fn is_sorted_ascending_u32(&self, buf: &CudaBuffer, key_col: usize) -> Result<bool> {
-        // Empty / single-row fast path (per F-W43-4).
+        // Empty / single-row fast path.
         let n = self.device_row_count(buf)?;
         if n < 2 {
             return Ok(true);
@@ -3049,32 +3046,27 @@ impl super::CudaKernelProvider {
         Ok(result == 1)
     }
 
-    /// W4.3 sort-merge inner join (caller-asserted pre-sorted
+    /// Sort-merge inner join (caller-asserted pre-sorted
     /// inputs). Drop-in compatible with `hash_join_v2(_, _,
     /// &[left_key], &[right_key], JoinType::Inner)`: same
     /// input types, same output schema
     /// (`combine_schemas(left, right)`), same row set.
     ///
-    /// **Caller surface (per W4.3 plan iter-6 F-W43-14)**: this
-    /// fn has NO executor-dispatch caller after iteration-6
-    /// unwiring. Step 12 production evidence rejected D2 precedence
-    /// and D7 #8 for the iteration-1–5 dispatch site at
-    /// `execute_join`; this fn remains graduated operator work for
-    /// direct provider callers and certs.
-    /// Current callers: operator-level certs in
+    /// **Caller surface**: this fn has no executor-dispatch caller after
+    /// benchmark-backed unwiring. Production benchmark evidence rejected
+    /// default executor precedence for sort-merge at `execute_join`; this fn
+    /// remains graduated operator work for direct provider callers and tests.
+    /// Current callers: operator-level provider parity tests in
     /// `crates/xlog-integration/tests/test_w43_sort_merge_dispatch.rs`
-    /// (Cert A/E/F/G provider parity tests) and the Step 12
-    /// production bench at
-    /// `crates/xlog-integration/benches/w43_production_sort_merge_bench.rs`
+    /// and the production sort-merge benchmark at
+    /// `crates/xlog-integration/benches/sort_merge_production_bench.rs`
     /// (sort-merge-with-detection Path 1 timing).
     ///
     /// **Caller contract**: both inputs are pre-sorted ascending
     /// by their respective key column. The kernel does NOT
     /// detect or enforce sortedness; callers may pre-check via
     /// `is_sorted_ascending_u32`. On unsorted inputs the row-set
-    /// output is undefined (operator-level UB per iter-6 D4 —
-    /// the iteration-1–5 dispatch-site fall-back path no longer
-    /// exists).
+    /// output is undefined; the dispatch-site fallback path no longer exists.
     ///
     /// # Eligibility (validated inside; `Err` on violation)
     ///
@@ -3082,19 +3074,18 @@ impl super::CudaKernelProvider {
     /// * Left and right key columns share the same `ScalarType`,
     ///   and that shared type is `U32` or `Symbol`.
     /// * Each key column's allocation is at least `num_rows * 4`
-    ///   bytes (lower-bound check, mirrors W4.2 F-W42-14).
+    ///   bytes (lower-bound check, mirrors the nested-loop byte-length guard).
     /// * `num_left * num_right <= NESTED_LOOP_TOTAL_THRESHOLD`
-    ///   (shared with W4.2 nested-loop per W4.3 D3; computed via
+    ///   (shared with the nested-loop operator; computed via
     ///   `checked_mul`; release-mode wrapping multiply is
     ///   forbidden).
     ///
     /// # Implementation outline
     ///
-    /// Mirrors `nested_loop_join_v2_inner_u32_1key` literal
-    /// idioms verbatim per W4.2 F-W42-13/14/15/16/17 (empty
-    /// fast path with no `?`, byte-length lower-bound `<`
-    /// check, `checked_mul` for threshold, `as u64` for
-    /// `row_cap`, variant-agnostic `&CudaColumn` launch).
+    /// Mirrors `nested_loop_join_v2_inner_u32_1key` implementation idioms:
+    /// empty fast path with no `?`, byte-length lower-bound `<` check,
+    /// `checked_mul` for threshold, `as u64` for `row_cap`, and
+    /// variant-agnostic `&CudaColumn` launch.
     ///
     /// 1. Read logical row counts via `device_row_count` (NOT
     ///    `row_cap`).
@@ -3108,8 +3099,7 @@ impl super::CudaKernelProvider {
     ///    `num_left * num_right` (bounded at 32 MB total under
     ///    the shared threshold).
     /// 5. Launch `sort_merge_join_inner_u32_1key_pairs` with
-    ///    `&CudaColumn` key pointers (variant-agnostic per
-    ///    W4.2 F-W42-11).
+    ///    `&CudaColumn` key pointers (variant-agnostic).
     /// 6. D2H the output count.
     /// 7. Materialize via `gather_buffer_by_indices` for both
     ///    sides + concatenate columns.
@@ -3237,8 +3227,8 @@ impl super::CudaKernelProvider {
         //     uint32_t* output_left_idx, uint32_t* output_right_idx,
         //     uint32_t* output_count, uint32_t output_capacity)
         // Byte length validated above; sortedness is a caller-
-        // supplied invariant (per iter-6 D4 — no dispatch-site
-        // pre-check exists after F-W43-14 unwiring); counts fit
+        // supplied invariant; no dispatch-site pre-check exists after
+        // the executor unwiring. Counts fit
         // in u32 by caller-supplied input-size bound; allocations
         // sized to upper_bound; counter pre-zeroed.
         unsafe {
@@ -3287,9 +3277,9 @@ impl super::CudaKernelProvider {
 
     /// Sorted-chain variant of [`Self::sort_merge_join_v2_inner_u32_1key`].
     ///
-    /// The W4.3 operator is product-thresholded because it allocates
-    /// `|left| * |right|` candidate pairs. W6.3 chain routing uses this
-    /// bounded variant only for sorted large inputs where the expected
+    /// The sort-merge operator is product-thresholded because it allocates
+    /// `|left| * |right|` candidate pairs. Chain routing uses this bounded
+    /// variant only for sorted large inputs where the expected
     /// fanout is one-to-one; capacity is caller supplied and the kernel's
     /// logical output counter is checked after launch. If duplicates make
     /// the true output exceed `output_capacity`, this returns an error so
@@ -6058,10 +6048,10 @@ impl super::CudaKernelProvider {
         Ok(indices.into_iter().map(|(_, i, j, k)| (i, j, k)).collect())
     }
 
-    // ============== Recorded sort + dedup_full_row (v0.6 slice #5) ==============
+    // ============== Recorded sort + dedup_full_row ==============
     //
     // Strict-recorder, launch_stream-routed siblings of `sort` and
-    // `dedup_full_row`. Scope-narrow per the slice directive:
+    // `dedup_full_row`. Scope is intentionally narrow:
     //   * `sort_recorded` accepts only u32 / Symbol key columns; other key
     //     types return XlogError::Kernel
     //     before any kernel work is queued.
@@ -6071,7 +6061,7 @@ impl super::CudaKernelProvider {
     //
     // No legacy default-routed code is touched. Existing callers are
     // unchanged. Runtime/provider opt-in wiring is NOT included in this
-    // slice — callers that want recorded sort/dedup must invoke the
+    // path — callers that want recorded sort/dedup must invoke the
     // recorded methods directly with a launch_stream.
 
     /// Stream-aware variant of
@@ -6770,17 +6760,17 @@ impl super::CudaKernelProvider {
         self.compact_buffer_by_device_mask_counted_recorded(&sorted, &d_unique_mask, launch_stream)
     }
 
-    // ============== Recorded hash join — slice #7A: inner only ==============
+    // ============== Recorded hash join: inner only ==============
     //
     // Strict-recorder, launch_stream-routed sibling of
     // `hash_join_inner_v2`. Composes the existing recorded
-    // pack helper (slice #6, `pack_keys_gpu_on_stream`) with
+    // pack helper (`pack_keys_gpu_on_stream`) with
     // two new on-stream helpers — `build_hash_table_v2_on_stream`
     // and `gather_buffer_by_indices_on_stream` — and runs the
     // probe kernel + count + materialize chain entirely on
     // launch_stream. Existing `hash_join_v2_*` callers keep
     // their bit-for-bit semantics; runtime/planner wiring is
-    // NOT in this slice.
+    // not part of this provider helper.
     //
     // Scope:
     //   * `JoinType::Inner` only. Semi/Anti/LeftOuter and the
@@ -7571,7 +7561,7 @@ impl super::CudaKernelProvider {
     }
 
     /// Strict-recorder, deterministic-ordering Inner hash
-    /// join (binary-join retake, sub-slice #1).
+    /// join using the deterministic binary-join path.
     ///
     /// Algorithm: count → exclusive scan → device-resident
     /// total → host scalar read → materialize with
@@ -7593,14 +7583,12 @@ impl super::CudaKernelProvider {
     /// `hash_join_probe_v2_materialize`,
     /// `hash_join_total_from_scan`. LeftOuter / Semi / Anti
     /// / indexed variants from the prototype are
-    /// intentionally NOT migrated in this slice.
+    /// intentionally not migrated here.
     ///
-    /// Reuses every recorded helper from prior slices:
-    /// `pack_keys_gpu_on_stream` (slice #6),
-    /// `build_hash_table_v2_on_stream` (slice #7A),
-    /// `multiblock_scan_u32_inplace_on_stream` (slice #4),
-    /// `gather_buffer_by_indices_on_stream` (slice #7A).
-    /// Inherits the slice-8 / `f0942448` compact / pack
+    /// Reuses the recorded helpers `pack_keys_gpu_on_stream`,
+    /// `build_hash_table_v2_on_stream`,
+    /// `multiblock_scan_u32_inplace_on_stream`, and
+    /// `gather_buffer_by_indices_on_stream`. Inherits the compact / pack
     /// fixes via composition.
     pub fn hash_join_inner_v2_count_scan_materialize_recorded(
         &self,
@@ -7924,7 +7912,7 @@ impl super::CudaKernelProvider {
         // `requested < total`, the kernel suppresses writes
         // past `output_capacity` and raises d_overflow — a
         // separate metadata flag the caller can inspect via
-        // a future helper. (For this slice we trust the
+        // a future helper. For now, this path trusts the
         // tail of the result is the deterministic "last
         // requested" rows.)
         let d_output_left = self.memory.alloc::<u32>(output_capacity as usize)?;
@@ -8608,7 +8596,7 @@ impl super::CudaKernelProvider {
         }
     }
 
-    /// Non-indexed LeftOuter CSM (binary-join retake sub-slice 3).
+    /// Non-indexed LeftOuter CSM using the deterministic binary-join path.
     ///
     /// Deterministic count → scan → materialize chain producing
     /// MATCHED `(left_idx, right_idx)` pairs first (Inner CSM
@@ -8620,7 +8608,7 @@ impl super::CudaKernelProvider {
     /// matching the legacy `hash_join_left_outer_v2_recorded`
     /// row-ordering invariant downstream consumers depend on.
     ///
-    /// This slice does NOT adopt the archived prototype's
+    /// This path does not adopt the archived prototype's
     /// `hash_join_left_outer_count_per_row` /
     /// `hash_join_left_outer_materialize` design — those
     /// kernels interleave matched and null-sentinel rows by
@@ -9325,7 +9313,7 @@ impl super::CudaKernelProvider {
         ))
     }
 
-    /// Indexed-Inner CSM (binary-join retake sub-slice 2).
+    /// Indexed-Inner CSM using the deterministic binary-join path.
     ///
     /// Same deterministic count→scan→materialize algorithm as
     /// [`Self::hash_join_inner_v2_count_scan_materialize_recorded`]
@@ -9334,14 +9322,14 @@ impl super::CudaKernelProvider {
     /// `index.packed_keys` and `&index.table`. Only the probe
     /// (left) side is packed on `launch_stream`.
     ///
-    /// Reuses the three CSM kernels migrated in sub-slice 1
+    /// Reuses the three CSM kernels from the non-indexed inner path
     /// (`hash_join_probe_v2_count_per_row`,
     /// `hash_join_probe_v2_materialize`,
     /// `hash_join_total_from_scan`) — no new kernel additions.
     /// Composes `pack_keys_gpu_on_stream`,
     /// `multiblock_scan_u32_inplace_on_stream`, and
     /// `gather_buffer_by_indices_on_stream` unchanged from
-    /// prior slices.
+    /// recorded helper paths.
     ///
     /// Index buffers (packed_keys + 4 table buckets) are
     /// owned by the caller and recorded as reads on
@@ -9787,7 +9775,7 @@ impl super::CudaKernelProvider {
         self.buffer_from_columns(result_columns, output_capacity as u64, combined_schema)
     }
 
-    /// Indexed LeftOuter CSM (binary-join retake sub-slice 4).
+    /// Indexed LeftOuter CSM using the indexed deterministic binary-join path.
     ///
     /// Combines the indexed-Inner CSM Phases A+B (probe-only
     /// pack on `launch_stream`; cached
@@ -9803,7 +9791,7 @@ impl super::CudaKernelProvider {
     ///
     /// No new kernels — reuses the four already-migrated CSM
     /// kernels plus `hash_join_csm_unmatched_mask` from
-    /// sub-slice 3.
+    /// the non-indexed LeftOuter CSM path.
     ///
     /// # Errors
     ///   * Manager not runtime-backed.
@@ -10630,12 +10618,12 @@ impl super::CudaKernelProvider {
         }
     }
 
-    /// Strict-recorder LeftOuter hash join (slice #7C).
+    /// Strict-recorder LeftOuter hash join.
     ///
     /// Mirrors the legacy `hash_join_left_outer_impl` chain on
     /// `launch_stream`:
     ///   1. pack keys both sides + build hash table on stream
-    ///      (via the slice #6 + #7A helpers).
+    ///      (via the recorded pack and hash-table helpers).
     ///   2. SEMI kernel → `d_has_match` mask.
     ///   3. PROBE count + materialize → inner-join indices.
     ///   4. `mask_not` → `d_no_match`; recorded compact tail
@@ -11347,7 +11335,7 @@ impl super::CudaKernelProvider {
         ))
     }
 
-    /// Strict-recorder Semi/Anti hash join (slice #7B).
+    /// Strict-recorder Semi/Anti hash join.
     /// Single helper parametrized by `anti`: both share the
     /// kernel-arg shape and chain — pack keys for both sides,
     /// build the hash table, run the `hash_join_semi` /
@@ -11536,7 +11524,7 @@ impl super::CudaKernelProvider {
         self.compact_buffer_by_device_mask_counted_recorded(left, &d_mask, launch_stream)
     }
 
-    // ============== Recorded indexed hash join — slice #7D ==============
+    // ============== Recorded indexed hash join ==============
     //
     // Strict-recorder, launch_stream-routed sibling of
     // `hash_join_v2_with_index`. Covers Inner, Semi, Anti, and
@@ -11544,7 +11532,7 @@ impl super::CudaKernelProvider {
     // packed keys + hash table come from the cached
     // `JoinIndexV2`; the probe (left) side is packed on
     // launch_stream via `pack_keys_gpu_on_stream`. Recorded
-    // gather / compact / mask_not helpers from earlier slices
+    // gather / compact / mask_not helpers from earlier recorded paths
     // are reused unchanged.
     //
     // Existing legacy `hash_join_v2_with_index*` paths are

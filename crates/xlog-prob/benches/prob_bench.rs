@@ -11,7 +11,7 @@
 //! - Exact inference via Decision-DNNF (circuits/sec, variables/circuit)
 //! - Monte Carlo inference (samples/sec, worlds/sec)
 //!
-//! Note: These benchmarks require a CUDA-capable GPU and the D4 compiler for exact inference.
+//! Note: These benchmarks require a CUDA-capable GPU and the exact-inference Decision-DNNF knowledge compiler.
 
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 

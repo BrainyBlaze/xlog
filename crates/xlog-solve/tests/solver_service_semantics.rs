@@ -59,7 +59,7 @@ fn cpu_fixture_reports_gpu_portfolio_as_unimplemented_blocker() {
     assert_eq!(
         service.gpu_portfolio_status(),
         SolverPortfolioStatus::Deferred {
-            reason: "GPU portfolio solving is not implemented in the semantic-oracle facade and blocks G090_SOLVER closure",
+            reason: "GPU portfolio solving is not implemented in the semantic-oracle facade and blocks solver-service integration closure",
         }
     );
 }

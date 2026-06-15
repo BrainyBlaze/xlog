@@ -1,4 +1,4 @@
-//! Category G05: Circuit Cache GPU Integration Tests
+//! Circuit cache GPU integration tests
 //!
 //! Tests circuit caching behavior on GPU, verifying that:
 //! 1. Repeated evaluations of the same circuit structure reuse GPU structures
@@ -13,15 +13,15 @@ use std::time::{Duration, Instant};
 
 /// Run all tests in this category.
 pub fn run_all(ctx: &TestContext) -> CategoryResult {
-    let mut results = CategoryResult::new("g05_circuit_cache");
+    let mut results = CategoryResult::new("circuit_cache_gpu_integration");
     let start = Instant::now();
 
-    // G05.1: Cache Hit GPU Behavior (3 tests)
+    // Cache-hit GPU behavior checks.
     results.add_result(test_cache_hit_reuse(ctx));
     results.add_result(test_cache_hit_speedup(ctx));
     results.add_result(test_cache_distinct_results(ctx));
 
-    // G05.2: Cache Key Correctness (3 tests)
+    // Cache-key correctness checks.
     results.add_result(test_cache_key_same_structure(ctx));
     results.add_result(test_cache_different_circuits(ctx));
     results.add_result(test_cache_correctness(ctx));
@@ -31,7 +31,7 @@ pub fn run_all(ctx: &TestContext) -> CategoryResult {
 }
 
 // =============================================================================
-// G05.1: Cache Hit GPU Behavior Tests
+// Cache-hit GPU behavior tests
 // =============================================================================
 
 /// Test 1: Same circuit spec evaluated twice uses cached GPU structures
@@ -348,7 +348,7 @@ fn test_cache_distinct_results(ctx: &TestContext) -> TestResult {
 }
 
 // =============================================================================
-// G05.2: Cache Key Correctness Tests
+// Cache-key correctness tests
 // =============================================================================
 
 /// Test 4: Same structure circuits produce same results
@@ -733,7 +733,7 @@ mod tests {
     }
 
     #[test]
-    fn test_g05_cache_hit_reuse() {
+    fn test_cache_hit_reuse_wrapper() {
         if let Some(ctx) = get_test_context() {
             let result = test_cache_hit_reuse(&ctx);
             assert!(
@@ -746,7 +746,7 @@ mod tests {
     }
 
     #[test]
-    fn test_g05_cache_hit_speedup() {
+    fn test_cache_hit_speedup_wrapper() {
         if let Some(ctx) = get_test_context() {
             let result = test_cache_hit_speedup(&ctx);
             assert!(
@@ -759,7 +759,7 @@ mod tests {
     }
 
     #[test]
-    fn test_g05_cache_distinct_results() {
+    fn test_cache_distinct_results_wrapper() {
         if let Some(ctx) = get_test_context() {
             let result = test_cache_distinct_results(&ctx);
             assert!(
@@ -772,7 +772,7 @@ mod tests {
     }
 
     #[test]
-    fn test_g05_cache_key_same_structure() {
+    fn test_cache_key_same_structure_wrapper() {
         if let Some(ctx) = get_test_context() {
             let result = test_cache_key_same_structure(&ctx);
             assert!(
@@ -785,7 +785,7 @@ mod tests {
     }
 
     #[test]
-    fn test_g05_cache_different_circuits() {
+    fn test_cache_different_circuits_wrapper() {
         if let Some(ctx) = get_test_context() {
             let result = test_cache_different_circuits(&ctx);
             assert!(
@@ -798,7 +798,7 @@ mod tests {
     }
 
     #[test]
-    fn test_g05_cache_correctness() {
+    fn test_cache_correctness_wrapper() {
         if let Some(ctx) = get_test_context() {
             let result = test_cache_correctness(&ctx);
             assert!(

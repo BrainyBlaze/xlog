@@ -135,7 +135,7 @@ fn wcoj_eligible_epistemic_reduction_reaches_multiway_runtime_plan() {
 }
 
 #[test]
-fn epistemic_kclique_reduction_reuses_38b_planner_layout_and_helper_split_surface() {
+fn epistemic_kclique_reduction_reuses_planner_layout_and_helper_split_surface() {
     let program = parse_program(EPISTEMIC_K5_SRC).unwrap();
     let rel_ids = rel_ids_for_reduced_k5();
     let snapshot = k5_stats(&rel_ids, Some((3, 5.0)));
@@ -206,14 +206,14 @@ fn faeel_gpu_execution_excludes_unfounded_self_support_from_founded_base() {
 /// coupling boundary IDENTICALLY in FAEEL and G91.
 ///
 /// A modal cycle (e.g. `p :- possible q. q :- possible p`) is mathematically empty
-/// under FAEEL, but its empty extension is NOT delivered by ITEM B: the cycle couples
-/// 2+ epistemic output heads through nested modality, so it is routed to split
-/// execution and fails closed at `cross-component epistemic coupling` BEFORE any
-/// foundedness/world-view reasoning. This boundary is orthogonal to foundedness and
-/// mode-independent — G91 hits the EXACT same rejection — so the founded-extension work
-/// is leak-neutral here: the (wrong) stripped-to-true reduced base never executes.
-/// Delivering these as empty requires nested-modality support, outside ITEM B's
-/// single-head scope.
+/// under FAEEL, but its empty extension is NOT delivered by the single-head
+/// founded-extension path: the cycle couples 2+ epistemic output heads through
+/// nested modality, so it is routed to split execution and fails closed at
+/// `cross-component epistemic coupling` BEFORE any foundedness/world-view reasoning.
+/// This boundary is orthogonal to foundedness and mode-independent — G91 hits the
+/// EXACT same rejection — so the founded-extension work is leak-neutral here: the
+/// (wrong) stripped-to-true reduced base never executes. Delivering these as empty
+/// requires nested-modality support, outside the single-head scope.
 fn assert_multi_head_modal_cycle_fails_closed_both_modes(body: &str) {
     for (mode, prefix) in [("FAEEL", ""), ("G91", "#pragma epistemic_mode = g91\n")] {
         let src = format!("{prefix}{body}");
@@ -288,12 +288,12 @@ fn faeel_gpu_execution_allows_longer_possible_cycle_with_independent_support() {
 
 #[test]
 fn epistemic_constraint_reaches_typed_gpu_boundary() {
-    // EGB-04: an epistemic integrity constraint is no longer rejected at the GPU
-    // boundary. It is lowered first-class as a world-view constraint whose body
-    // literal is an `EpistemicGpuPlan::epistemic_literals` entry, and the
-    // constraint plan records which literal forms the body conjunction. It must
-    // NOT be rewritten into an ordinary RIR constraint (no `__xlog_constraint_*`
-    // relation), and it must not be silently erased.
+    // Epistemic integrity constraints are no longer rejected at the GPU boundary.
+    // They are lowered first-class as world-view constraints whose body literals
+    // are `EpistemicGpuPlan::epistemic_literals` entries, and the constraint plan
+    // records which literal forms the body conjunction. They must NOT be rewritten
+    // into ordinary RIR constraints (no `__xlog_constraint_*` relation), and they
+    // must not be silently erased.
     let program = parse_program(
         r#"
         accepted() :- know fact().
@@ -321,7 +321,7 @@ fn epistemic_constraint_reaches_typed_gpu_boundary() {
 
     // No ordinary-RIR constraint rewrite: the reduced runtime plan must not
     // contain a compiler-generated `__xlog_constraint_*` relation for the
-    // epistemic constraint (lock #2/#3, EGB04.K3).
+    // epistemic constraint.
     assert!(
         !executable
             .relation_ids
@@ -335,16 +335,17 @@ fn epistemic_constraint_reaches_typed_gpu_boundary() {
 
 #[test]
 fn epistemic_gpu_execution_resolves_modal_only_bound_output_over_invariant_relation() {
-    // v0.9.2 SCOPE-LIMIT CLOSED (a sound consequence of the augmented-projection
-    // invariant-resolve): a single epistemic head whose ONLY binder of an output
-    // variable is a POSITIVE modal over an INVARIANT relation is now ACCEPTED, not
-    // fail-closed. For an invariant relation `q`, `possible q(X)` ranges exactly over
-    // `q`'s extension (`possible q == know q == q`), so `p(X) :- possible q(X)` is the
-    // well-defined `p = q`. The reduction resolves the positive-invariant modal into a
-    // positive ordinary atom that range-restricts `X`, and the GPU EGB-02 filter
-    // re-gates against the accepted world view. (Contrast the self-supported
-    // `p() :- possible p()` case, where the target is NOT invariant, so the resolve
-    // never fires and the FAEEL foundedness guard keeps it fail-closed.)
+    // Modal-only-bound output over an invariant relation is accepted: a single
+    // epistemic head whose ONLY binder of an output variable is a POSITIVE modal
+    // over an INVARIANT relation is no longer fail-closed. For an invariant
+    // relation `q`, `possible q(X)` ranges exactly over `q`'s extension
+    // (`possible q == know q == q`), so `p(X) :- possible q(X)` is the
+    // well-defined `p = q`. The reduction resolves the positive-invariant modal
+    // into a positive ordinary atom that range-restricts `X`, and the GPU
+    // tuple-membership filter re-gates against the accepted world view. (Contrast
+    // the self-supported `p() :- possible p()` case, where the target is NOT
+    // invariant, so the resolve never fires and the FAEEL foundedness guard keeps
+    // it fail-closed.)
     let program = parse_program(
         r#"
         pred p(u32).

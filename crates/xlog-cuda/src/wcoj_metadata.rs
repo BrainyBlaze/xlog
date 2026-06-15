@@ -45,7 +45,8 @@ pub struct WcojRelationMetadata<K: DeviceRepr> {
     pub row_count: u32,
 }
 
-/// D1 widening — which triangle output variable supplies the aggregate
+/// Aggregate-fused triangle group-by-root sum/min/max selector: which
+/// triangle output variable supplies the aggregate
 /// value for the fused group-by-root sum/min/max kernels. The group key is
 /// always the variable-order root X; the value must itself be a triangle
 /// output variable (Y or Z) so the kernel can read it during traversal.
@@ -57,7 +58,8 @@ pub enum WcojRootAggValue {
     Z,
 }
 
-/// S1d — which 4-cycle output variable supplies the aggregate value for
+/// Aggregate-fused 4-cycle group-by-root sum/min/max selector: which
+/// 4-cycle output variable supplies the aggregate value for
 /// the fused group-by-root sum/min/max kernels. The group key is always
 /// the variable-order root W; the value must itself be a 4-cycle output
 /// variable (X, Y or Z) so the kernel can read it during traversal.

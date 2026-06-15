@@ -59,9 +59,7 @@ impl LogicSessionRuntime {
     pub fn wcoj_dispatch_stats(&self) -> WcojDispatchStats {
         WcojDispatchStats {
             free_join_dispatch_count: self.executor.free_join_dispatch_count(),
-            wcoj_groupby_fusion_dispatch_count: self
-                .executor
-                .wcoj_groupby_fusion_dispatch_count(),
+            wcoj_groupby_fusion_dispatch_count: self.executor.wcoj_groupby_fusion_dispatch_count(),
             wcoj_error_decline_count: self.executor.wcoj_error_decline_count(),
         }
     }
@@ -215,7 +213,7 @@ struct PendingRelationDelta {
 /// Lower strata are executed first; their GATED head outputs are written into the
 /// relation store as base relations BEFORE higher strata run, so a higher
 /// stratum's `know`/`possible` over a lower head gates against the materialized
-/// (now-base) relation through the existing EGB-02 membership filter.
+/// (now-base) relation through the existing tuple-key membership filter.
 #[derive(Clone)]
 struct StratumExecutable {
     /// The stratum's GPU plan: single-head or joint multi-head split. The gated
@@ -273,7 +271,7 @@ struct WfsGpuOrdinaryPlan {
 /// Compile-time epistemic provenance, retained even when the executable plan is
 /// `Ordinary` (e.g. a Case-A recursive epistemic fixpoint whose modal literals were
 /// resolved into invariant joins). This carries the source's epistemic literals so
-/// the C7 plan dump can emit a stable id for a recursive epistemic fixpoint that no
+/// the epistemic plan dump can emit a stable id for a recursive epistemic fixpoint that no
 /// longer carries an epistemic GPU plan.
 #[derive(Clone)]
 struct EpistemicProvenance {
@@ -321,7 +319,7 @@ impl LogicProgram {
     fn compile_epistemic_program(normalized: Program) -> Result<Self> {
         // Capture epistemic provenance up front: the source-EIR modal literals are
         // retained even when a Case-A recursive reduction lowers the program to an
-        // Ordinary executable plan, so the C7 plan dump can still emit a stable id
+        // Ordinary executable plan, so the epistemic plan dump can still emit a stable id
         // for a recursive epistemic fixpoint.
         let provenance_literals = collect_eir_epistemic_literals(&normalized);
         // Stratified epistemic execution FIRST: a modal literal ranges over an
@@ -331,7 +329,7 @@ impl LogicProgram {
         // each is compiled through the existing epistemic OR Case-A ordinary path,
         // and at runtime each lower stratum's GATED head is materialized into the
         // store as a base relation before the higher stratum gates against it (via
-        // the existing EGB-02 membership filter or — once the head is a materialized
+        // the existing tuple-key membership filter or — once the head is a materialized
         // base relation — Case-A resolve-into-body; either way NO double-gating
         // against a still-modal relation). Example 18's shared BASE modal `q` (EDB,
         // not a determined derived head) returns `None` here and falls through to
@@ -404,7 +402,7 @@ impl LogicProgram {
                 schemas: compiler.schemas().clone(),
                 rel_ids: compiler.rel_ids().clone(),
                 epistemic_provenance: Some(EpistemicProvenance {
-                    reduction: "case_a_recursive",
+                    reduction: "ordinary_recursive_modal_reduction",
                     literals: provenance_literals,
                 }),
             });
@@ -510,7 +508,7 @@ impl LogicProgram {
     /// phases/kernels, world-view integrity constraints, reduced-program head
     /// summaries, the forbidden CPU-fallback counters (which must all be zero on
     /// the accepted GPU hot path), and a deterministic plan id (a stable hash of
-    /// the canonical summary). This is the C7 epistemic-plan/EIR dump surface:
+    /// the canonical summary). This is the epistemic-plan/EIR dump surface:
     /// it lets an external caller (pyxlog or CLI consumer) read the accepted
     /// world-view structure and assert `cpu_fallback == 0` off a real run.
     pub fn epistemic_plan_json(&self) -> Option<String> {
@@ -1405,7 +1403,7 @@ impl LogicProgram {
                 // Execute strata in topological order on the SAME executor. After
                 // each stratum, write its GATED head output(s) into the store as
                 // base relations so the NEXT stratum's `know`/`possible` over a
-                // lower head reads the gated extension through the existing EGB-02
+                // lower head reads the gated extension through the existing tuple-key
                 // membership filter (or, once the head is a materialized base
                 // relation, Case-A resolve-into-body) — never double-gating against
                 // a still-modal relation.
@@ -1603,8 +1601,8 @@ fn normalize_program(program: Program) -> Result<Program> {
     let max_recursion = program.directives.max_recursion_depth.unwrap_or(100);
     let expanded = xlog_logic::expand_program_functions(&program, max_recursion)
         .map_err(|e| XlogError::Compilation(e.to_string()))?;
-    let normalized = xlog_logic::normalize_v085_meta(&expanded)?;
-    let listed = xlog_logic::normalize_v085_lists(&normalized)?;
+    let normalized = xlog_logic::normalize_meta_builtins(&expanded)?;
+    let listed = xlog_logic::normalize_list_builtins(&normalized)?;
     Ok(desugar_shared_variable_epistemic_constraints(listed))
 }
 
@@ -1871,15 +1869,16 @@ fn infer_term_type(term: &Term) -> ScalarType {
     }
 }
 
-/// E1: desugar a SHARED-VARIABLE epistemic constraint — a constraint with at least one
+/// Desugar a shared-variable epistemic constraint — a constraint with at least one
 /// epistemic literal and a variable appearing in more than one term position across the body
 /// (the join `:- know p(X), possible q(X).`, the diagonal `:- know p(X, X).`, or the
 /// negated-difference `:- q(X), not know p(X).`) — into an ordinary extraction rule plus a
 /// single-occurrence modal over it:
 ///
 /// ```text
-///   :- L1, L2, ..., Ln.   ==>   __epi_join_N(Vars) :- ord(L1), ..., ord(Ln).
-///                               :- know __epi_join_N(Vars).
+///   :- BodyLit1, BodyLit2, ..., BodyLitN.
+///        ==> __epi_join_N(Vars) :- ord(BodyLit1), ..., ord(BodyLitN).
+///            :- know __epi_join_N(Vars).
 /// ```
 ///
 /// where `ord` ordinary-izes each modal literal (`know/possible r(..)` -> `r(..)`,
@@ -1895,7 +1894,7 @@ fn infer_term_type(term: &Term) -> ScalarType {
 /// Guarded to non-modal-derived targets (where the `know == possible == ordinary`
 /// equivalence holds); a constraint with a modal-derived target is left unchanged and falls
 /// through to the core compiler's existing shared-variable rejection. Single-occurrence
-/// variable-keyed (item E), distinct-variable multi-literal, and ground constraints have no
+/// variable-keyed modal, distinct-variable multi-literal, and ground constraints have no
 /// repeated variable and are likewise untouched.
 fn desugar_shared_variable_epistemic_constraints(mut program: Program) -> Program {
     // A predicate defined by any rule carrying an epistemic body literal is "modal-derived":
@@ -2734,7 +2733,7 @@ fn format_constraint(body: &[BodyLiteral]) -> String {
 }
 
 // --------------------------------------------------------------------------- //
-// C7 epistemic-plan / EIR JSON dump
+// Epistemic-plan / EIR JSON dump
 // --------------------------------------------------------------------------- //
 
 fn json_escape(s: &str) -> String {
@@ -3076,15 +3075,15 @@ mod v086_delta_coalesce_tests {
 
         let batch = vec![
             (
-                "wmir_committed".to_string(),
+                "external_consumer_commit".to_string(),
                 RelationDelta::new(Some(test_buffer(&provider, &[7, 8])), None),
             ),
             (
-                "wmir_committed".to_string(),
+                "external_consumer_commit".to_string(),
                 RelationDelta::new(None, Some(test_buffer(&provider, &[8]))),
             ),
             (
-                "wmir_committed".to_string(),
+                "external_consumer_commit".to_string(),
                 RelationDelta::new(Some(test_buffer(&provider, &[9])), None),
             ),
         ];
@@ -3093,7 +3092,7 @@ mod v086_delta_coalesce_tests {
             .expect("coalesce relation delta batch");
         let delta = report
             .deltas
-            .get("wmir_committed")
+            .get("external_consumer_commit")
             .expect("coalesced relation");
         let insert = delta.insert.as_ref().expect("coalesced insert");
         assert_eq!(read_u32(&provider, insert), vec![7, 9]);
@@ -3113,10 +3112,10 @@ mod v086_delta_coalesce_tests {
         };
 
         let source = r#"
-            pred wmir_committed(u32).
+            pred external_consumer_commit(u32).
             pred out(u32).
 
-            out(X) :- wmir_committed(X).
+            out(X) :- external_consumer_commit(X).
 
             ?- out(X).
         "#;
@@ -3132,15 +3131,15 @@ mod v086_delta_coalesce_tests {
             &mut coalesced_cache,
             vec![
                 (
-                    "wmir_committed".to_string(),
+                    "external_consumer_commit".to_string(),
                     RelationDelta::new(Some(test_buffer(&provider, &[1, 2, 3])), None),
                 ),
                 (
-                    "wmir_committed".to_string(),
+                    "external_consumer_commit".to_string(),
                     RelationDelta::new(None, Some(test_buffer(&provider, &[2]))),
                 ),
                 (
-                    "wmir_committed".to_string(),
+                    "external_consumer_commit".to_string(),
                     RelationDelta::new(Some(test_buffer(&provider, &[4])), None),
                 ),
             ],
@@ -3177,7 +3176,7 @@ mod v086_delta_coalesce_tests {
                 provider.clone(),
                 &mut sequential_store,
                 &mut sequential_cache,
-                HashMap::from([("wmir_committed".to_string(), delta)]),
+                HashMap::from([("external_consumer_commit".to_string(), delta)]),
             )?;
         }
         let sequential = program.evaluate_cached_relation_store(
@@ -3189,7 +3188,7 @@ mod v086_delta_coalesce_tests {
         let sequential_rows = sorted_query_rows(&provider, &sequential);
 
         let mut replacement_store = program.create_relation_store(provider.clone())?;
-        replacement_store.put("wmir_committed", test_buffer(&provider, &[1, 3, 4]));
+        replacement_store.put("external_consumer_commit", test_buffer(&provider, &[1, 3, 4]));
         let replacement =
             program.evaluate_with_relation_store(provider.clone(), &replacement_store, false)?;
         let replacement_rows = sorted_query_rows(&provider, &replacement);

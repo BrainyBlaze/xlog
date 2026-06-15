@@ -42,7 +42,7 @@ The WCOJ subsystem (\Cref{sec:datalog}) is measured against the binary-join base
 
 \begin{table}[htbp]
   \centering
-  \caption{WCOJ vs.\ binary-join speedup on paper-scale fixtures (4.19M input rows each). Source: \texttt{docs/evidence/2026-05-18-g39-w39-dts-dlm-analog/}.}
+  \caption{WCOJ vs.\ binary-join speedup on paper-scale fixtures (4.19M input rows each). Source: checked-in WCOJ ablation evidence.}
   \label{tab:wcoj}
   \small
   \begin{tabular}{@{}lr@{}}
@@ -63,7 +63,7 @@ These are single-system measurements of xlog's own WCOJ path against its own bin
 
 \subsubsection{Runtime Optimization Layer}
 
-The v0.8.6 runtime optimizations (\Cref{sec:datalog}) are measured on dedicated repeated-session fixtures. The persistent hash-index manager records a $3.21\times$ speedup on a build-heavy repeated-session semi-join (cached median $0.079$\,s vs.\ uncached $0.255$\,s) against a $1.5\times$ target, with zero tracked device-to-host or host-to-device transfers (\texttt{docs/evidence/2026-05-19-v086-persistent-hash-index/}). The profile-gated shared-memory chain scorer records a $5.58\times$ speedup on a chain-hot fixture, with a bounded ${-}1.3\%$ regression on the small-input control (\texttt{docs/evidence/2026-05-19-v086-chain-smem/}). Common-subexpression elimination and adaptive re-optimization are validated for output equivalence and duplicate-work reduction with no added data-plane transfers, but are reported here as correctness-gated optimizations rather than headline speedups.
+The runtime optimization layer (\Cref{sec:datalog}) is measured on dedicated repeated-session fixtures. The persistent hash-index manager records a $3.21\times$ speedup on a build-heavy repeated-session semi-join (cached median $0.079$\,s vs.\ uncached $0.255$\,s) against a $1.5\times$ target, with zero tracked device-to-host or host-to-device transfers in the checked-in persistent-index evidence. The profile-gated shared-memory chain scorer records a $5.58\times$ speedup on a chain-hot fixture, with a bounded ${-}1.3\%$ regression on the small-input control in the checked-in chain-scoring evidence. Common-subexpression elimination and adaptive re-optimization are validated for output equivalence and duplicate-work reduction with no added data-plane transfers, but are reported here as correctness-gated optimizations rather than headline speedups.
 
 \subsubsection{Probabilistic Subsystem}
 
@@ -71,7 +71,7 @@ The probabilistic engine supports exact inference via Decision-DNNF knowledge co
 
 \subsubsection{Neural-Symbolic Subsystem}
 
-Neural-symbolic training is measured on the \texttt{01\_minimal} benchmark (MNIST single-digit addition, 512 training images, 5 epochs, batch size 64). The timing summary below uses the latest checked-in post-fix comparison artifact on current \texttt{main}; the cache-ablation study remains a separate 3-epoch measurement of the compilation-cache effect.
+Neural-symbolic training is measured on the \texttt{01\_minimal} benchmark (MNIST single-digit addition, 512 training images, 5 epochs, batch size 64). The timing summary below uses the checked-in neural comparison artifact; the cache-ablation study remains a separate 3-epoch measurement of the compilation-cache effect.
 
 \begin{table}[htbp]
   \centering
@@ -83,10 +83,10 @@ Neural-symbolic training is measured on the \texttt{01\_minimal} benchmark (MNIS
     \textbf{Metric} & \textbf{Value} & \textbf{Source} \\
     \midrule
     PTX JIT cold start & $0.02$\,s & Cubin-first module loading target from \texttt{docs/BENCHMARKS.md} \\
-    First epoch (cold) & $71.654$\,s & Track B comparison, mean over 3 seeds \\
-    Steady-state epoch (warm) & $0.248$\,s & Track B comparison, mean epochs 2--5 \\
-    Total training (5 epochs) & $72.645$\,s & Track B comparison, mean over 3 seeds \\
-    Per-query cost & $0.97$\,ms & Track B comparison, mean forward+backward query cost \\
+    First epoch (cold) & $71.654$\,s & checked-in neural comparison, mean over 3 seeds \\
+    Steady-state epoch (warm) & $0.248$\,s & checked-in neural comparison, mean epochs 2--5 \\
+    Total training (5 epochs) & $72.645$\,s & checked-in neural comparison, mean over 3 seeds \\
+    Per-query cost & $0.97$\,ms & checked-in neural comparison, mean forward+backward query cost \\
     Circuit cache speedup & $2.74\times$ & Cache ablation artifact, 95\% CI: $[2.29, 3.18]$ \\
     \bottomrule
   \end{tabularx}
@@ -94,7 +94,7 @@ Neural-symbolic training is measured on the \texttt{01\_minimal} benchmark (MNIS
 
 The cache ablation study compared circuit-cached vs.\ uncached training over 3 seeds and 3 epochs each. Mean training time dropped from $242.9$\,s (uncached) to $88.9$\,s (cached), yielding the $2.74\times$ speedup reported in \Cref{sec:prob} (\texttt{examples/neural/results/evidence/cache\_ablation\_20260218.json}).
 
-\textbf{DeepProbLog baseline.} The checked-in DeepProbLog comparison artifact is partial and protocol-mismatched, so it should be read as a qualitative baseline note rather than a clean head-to-head measurement. In \texttt{examples/neural/results/track\_a/20260216T145409Z\_track\_a\_dev/comparisons/mnist\_vs\_deepproblog.json}, the strict full-train DeepProbLog configuration (2 epochs, batch size 2048) reached held-out addition accuracy of 23.24\% after 2:31:07, while a smaller limited run was manually aborted after 60 minutes. The same artifact reports XLOG training loss rather than held-out accuracy and marks one XLOG seed incomplete, so direct quantitative comparison remains premature.
+\textbf{DeepProbLog baseline.} The checked-in DeepProbLog comparison artifact is partial and protocol-mismatched, so it should be read as a qualitative baseline note rather than a clean head-to-head measurement. The strict full-train DeepProbLog configuration (2 epochs, batch size 2048) reached held-out addition accuracy of 23.24\% after 2:31:07, while a smaller limited run was manually aborted after 60 minutes. The same artifact reports XLOG training loss rather than held-out accuracy and marks one XLOG seed incomplete, so direct quantitative comparison remains premature.
 
 \textbf{GA-based ILP.} The genetic algorithm reliability gate (\texttt{test\_ga\_reliability\_50}) achieved a $3.25\times$ wall-clock reduction from 1447\,s to 445.30\,s by reducing redundant attempts, with identical statistical quality: 200/200 success rate and Clopper--Pearson lower-95 CI $= 0.981725$ (\texttt{docs/evidence/2026-03-05-ga-runtime-closure/sweep-results.md}).
 
@@ -113,10 +113,10 @@ The cache ablation study compared circuit-cached vs.\ uncached training over 3 s
     \midrule
     Symbolic execution & CPU (SWI-Prolog) & CPU (tabling) & GPU (HISA) & GPU (semi-naive fixpoint) \\
     Probabilistic inference & Exact (PySDD, CPU) & Exact + approx (CPU) & None & Exact (d-DNNF, GPU) + MC (GPU) \\
-    Knowledge compilation & PySDD (CPU) & d-DNNF via c2d/D4 (CPU) & None & D4 compile + GPU circuit eval \\
+    Knowledge compilation & PySDD (CPU) & d-DNNF via external Decision-DNNF compilers (CPU) & None & external Decision-DNNF compile + GPU circuit eval \\
     Neural integration & PyTorch + Prolog bridge & None & None & Zero-copy DLPack, fused backward \\
     Zero-copy ML interop & No (CPU--GPU transfers) & No & No & Yes (DLPack, device-resident tensors) \\
-    Differentiable ILP & Via TP-operator (CPU) & No & No & GPU-resident credit/loss path (beta) \\
+    Differentiable ILP & Via TP-operator (CPU) & No & No & GPU-resident credit/loss path with evolving API \\
     \bottomrule
   \end{tabularx}
 \end{table*}
@@ -127,11 +127,11 @@ The cache ablation study compared circuit-cached vs.\ uncached training over 3 s
 
 \subsection{CUDA Certification}
 
-The CUDA kernel certification suite (\texttt{crates/xlog-cuda-tests/}) provides systematic coverage of all GPU kernel operations. On current \texttt{main}, the statistics in \Cref{tab:cuda-cert} hold.
+The CUDA kernel certification suite (\texttt{crates/xlog-cuda-tests/}) provides systematic coverage of all GPU kernel operations. In the May 2026 checked-in state, the statistics in \Cref{tab:cuda-cert} hold.
 
 \begin{table}[htbp]
   \centering
-  \caption{CUDA certification suite statistics (current \texttt{main}, May 2026).}
+  \caption{CUDA certification suite statistics (May 2026 checked-in state).}
   \label{tab:cuda-cert}
   \small
   \begin{tabular}{@{}ll@{}}
@@ -139,11 +139,11 @@ The CUDA kernel certification suite (\texttt{crates/xlog-cuda-tests/}) provides 
     \textbf{Metric} & \textbf{Value} \\
     \midrule
     Total tests             & 207 \\
-    Categories              & 33 (C01--C25 infrastructure + G01--G08 GPU-specific) \\
-    Latest full certification & 100\% (207/207) \\
+    Categories              & 33 (25 CUDA infrastructure + 8 GPU-specific) \\
+    Recorded full certification & 100\% (207/207) \\
     Kernel modules covered  & 22 \\
     \bottomrule
   \end{tabular}
 \end{table}
 
-The 25 infrastructure categories (C01--C25) cover toolchain validation, launch configuration, pointer bounds, memory spaces (global, shared, local), synchronization, warp-level operations, control flow divergence, atomics, floating-point semantics, integer operations, determinism, async pipelines, caching, host-device transfer, multi-stream execution, multi-GPU, hardware stress, algorithmic correctness, blind spots, edge matrices, and float filter semantics (\texttt{docs/certification/2026-01-22-v0.4.0-alpha-certification-report.md}). The 8 GPU-specific categories (G01--G08) validate circuit forward evaluation, circuit backward (gradient) kernels, weight injection, transfer efficiency, circuit caching, PTX robustness, SAT/CDCL solving, and device-count invariants (\texttt{docs/architecture/cuda-certification.md}). The 22 covered runtime kernel modules correspond to the staged runtime CUDA kernel set plus the build-time ILP-family modules documented in the certification architecture notes. Because the public repository does not rely on hosted GPUs, the full certification suite is exercised through GPU-backed local release validation (\texttt{scripts/validate\_release\_gpu.sh --mode release}) and the manual self-hosted \texttt{cuda-ci} workflow; the always-on push/PR CI remains non-GPU and covers formatting, shell/workflow linting, package metadata, and no-GPU build checks.
+The 25 CUDA infrastructure categories cover toolchain validation, launch configuration, pointer bounds, memory spaces (global, shared, local), synchronization, warp-level operations, control flow divergence, atomics, floating-point semantics, integer operations, determinism, async pipelines, caching, host-device transfer, multi-stream execution, multi-GPU, hardware stress, algorithmic correctness, blind spots, edge matrices, and float filter semantics (\texttt{docs/certification/2026-01-22-neural-symbolic-certification-report.md}). The 8 GPU-specific categories validate circuit forward evaluation, circuit backward (gradient) kernels, weight injection, transfer efficiency, circuit caching, PTX robustness, SAT/CDCL solving, and device-count invariants (\texttt{docs/architecture/cuda-certification.md}). The 22 covered runtime kernel modules correspond to the staged runtime CUDA kernel set plus the build-time ILP-family modules documented in the certification architecture notes. Because the public repository does not rely on hosted GPUs, the full certification suite is exercised through GPU-backed local release validation (\texttt{scripts/validate\_release\_gpu.sh --mode release}) and the manual self-hosted \texttt{cuda-ci} workflow; the always-on push/PR CI remains non-GPU and covers formatting, shell/workflow linting, package metadata, and no-GPU build checks.

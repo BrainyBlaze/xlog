@@ -52,7 +52,9 @@ fn template_source_addition(num_labels: usize) -> String {
         source.push_str(".\n");
     }
 
-    source.push_str("addition(X, Y, Z) :- digit(X, D1), digit(Y, D2), Z is D1 + D2.\n");
+    source.push_str(
+        "addition(X, Y, Z) :- digit(X, LeftDigit), digit(Y, RightDigit), Z is LeftDigit + RightDigit.\n",
+    );
 
     let max_sum = 2usize * (num_labels.saturating_sub(1));
     for sum in 0..=max_sum {

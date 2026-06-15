@@ -1,4 +1,4 @@
-// v0.9.2 ITEM C: NESTED MODAL OPERATORS execute via sound chain-collapse.
+// Nested modal operators execute via sound chain-collapse.
 //
 // A modal CHAIN (a sequence of know/possible operators over an atom) collapses
 // to a single epistemic literal under the autoepistemic modal axioms XLOG's

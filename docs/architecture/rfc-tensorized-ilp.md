@@ -1,23 +1,34 @@
 # RFC: Tensorized Differentiable ILP in XLOG
 
-> **Implementation status:** The design in this RFC is **shipped** (since v0.5.0; current as of v0.8.6). See `docs/architecture/dilp-training.md` for the current architecture and `docs/architecture/dilp-showcase-report.md` for validation. This document is retained as the design reference that motivates and records the resolved decisions (RD-1 through RD-27).
+> **Implementation status:** The design in this RFC is **shipped**. See
+> `docs/architecture/dilp-training.md` for the current architecture and
+> `docs/architecture/dilp-showcase-report.md` for validation. This document is
+> retained as the design reference that motivates and records the resolved
+> decisions.
 >
 > **Entry points:** Python trainer at `crates/pyxlog/python/pyxlog/ilp/trainer.py` (`train_only`, `train_and_promote`). Rust registry at `crates/xlog-runtime/src/ilp_registry.rs`. GPU kernels at `kernels/ilp.cu`, `kernels/ilp_credit.cu`.
 
-**Status:** Design reference (v5, implemented in v0.5.0; current as of v0.8.6)
+**Status:** Implemented design reference
 **Date:** 2026-03-05
-**Supersedes:** earlier RFC drafts v1–v4.4
+**Supersedes:** earlier RFC drafts
 
-### v5 Changes (2026-03-05)
+### Implemented Behavior Reconciliation (2026-03-05)
 
-This revision reconciles RFC text with implemented behavior post-v0.4.0-GA:
+This revision reconciles RFC text with implemented behavior after general
+availability:
 
-- **RD-6 updated**: Per-(i,j) argmax replaced by global 1D Gumbel-softmax/top-k over sparse candidate list. Reflects actual `SparseMaskBackend` semantics.
-- **Performance target scoped**: Zero host round-trip target now applies to the loss/grad compute path (`compute_ilp_loss_grad_gpu`). Witness/convergence checks (`batch_fact_membership`) still perform bounded D2H reads; these are outside the inner gradient step.
-- **RD-17 updated**: `IlpTagEntry` retains `buffer: Option<CudaBuffer>` for batch credit queries. The no-buffer constraint is removed.
+- **Active-rule cardinality decision updated**: Per-(i,j) argmax replaced by
+  global 1D Gumbel-softmax/top-k over sparse candidate list. Reflects actual
+  `SparseMaskBackend` semantics.
+- **Performance target scoped**: Zero host round-trip target now applies to the loss/grad compute path (`compute_ilp_loss_grad_gpu`). Witness/convergence checks (`batch_fact_membership`) still perform bounded device-to-host reads; these are outside the inner gradient step.
+- **Tag-entry storage decision updated**: `IlpTagEntry` retains
+  `buffer: Option<CudaBuffer>` for batch credit queries. The no-buffer
+  constraint is removed.
 - **Benchmark gates updated**: Phase 5 acceptance tests now use reach/grandparent/colleague/plus2 (4 stages x 5 seeds = 20/20 reliability gate), replacing the original Predecessor/Even-Odd/Ancestor set.
 - **TIIPS phase**: Remains optional and unimplemented. No change in status.
-- **GPU-resident loss path**: New §4.8 documents `compute_ilp_loss_grad_gpu` with zero-D2H guarantee (non-chunked), strict mode gate, and COO memory cap.
+- **GPU-resident loss path**: New §4.8 documents
+  `compute_ilp_loss_grad_gpu` with a zero device-to-host transfer guarantee
+  (non-chunked), strict mode gate, and COO memory cap.
 
 ---
 
@@ -36,11 +47,13 @@ inductive gradient descent plateaus.
 ### Performance Target
 
 The GPU loss/gradient compute path (`compute_ilp_loss_grad_gpu`) must
-complete without host round-trips (zero D2H) in the non-chunked path.
+complete without host round-trips (zero device-to-host transfers) in the
+non-chunked path.
 Mask application and evaluation run on-device. Witness/convergence checks
-(`batch_fact_membership`) perform bounded D2H reads (bool mask bytes) and
+(`batch_fact_membership`) perform bounded device-to-host reads (bool mask bytes) and
 are outside the inner gradient step. The chunked COO fallback (activated
-when COO allocation exceeds `coo_memory_cap`) uses bounded D2H by design;
+when COO allocation exceeds `coo_memory_cap`) uses bounded device-to-host
+transfers by design;
 `set_strict_zero_dtoh(True)` rejects this fallback for CI gates.
 
 ---
@@ -73,13 +86,13 @@ is not involved. See §3.
 ### RD-6: Cardinality of Active Rules
 
 ~~Per-(i,j) argmax selects one k, producing at most N^2 active rules.~~
-**(v5):** `SparseMaskBackend` uses 1D candidate logits with global
+`SparseMaskBackend` uses 1D candidate logits with global
 Gumbel-softmax and top-k selection over a flat candidate list, producing
 at most `budget` active rules (default: `max_active_rules`). The per-(i,j)
-argmax semantics from v4 are superseded. `DenseMaskBackend` (debug fallback)
+argmax semantics from the dense-tensor draft are superseded. `DenseMaskBackend` (debug fallback)
 retains the N^3 dense path for parity testing.
 
-### RD-7–RD-11: (Unchanged from v3)
+### RD-7–RD-11: (unchanged from the prior draft)
 
 See prior versions for full text of notation, hardware scope, stratum
 placement, pyxlog integration target, and rule commit mechanism.
@@ -106,9 +119,9 @@ and `learnable_source` separately. `commit_induced_rule()` appends to
 `Executor::new(provider: Arc<CudaKernelProvider>) -> Self`. No RuntimeConfig
 argument (it defaults internally).
 
-### RD-15: Relation Setup Before Execution (v4 — was Blocker #5)
+### RD-15: Relation Setup Before Execution
 
-RFC v3 called `executor.execute_plan()` without prior relation registration
+Earlier RFC draft called `executor.execute_plan()` without prior relation registration
 or schema seeding. The actual working pattern (from `xlog-gpu/logic.rs:112-137`)
 requires three setup steps before execution:
 
@@ -120,7 +133,7 @@ requires three setup steps before execution:
 Then `executor.execute_plan(&plan)` succeeds because all relations have
 registered names and seeded schemas.
 
-### RD-16: DLPack 3D Tensor Incompatibility (v4 — was Blocker #2)
+### RD-16: DLPack 3D Tensor Incompatibility
 
 `from_dlpack_tensors()` enforces `ndim == 1` (dlpack.rs:221). A 3D PyTorch
 tensor cannot be imported directly. **Resolution:** Python flattens the mask
@@ -129,7 +142,7 @@ stores `schema_size` N so the flat N^3-element buffer is interpreted as
 N×N×N by the extraction kernel (which already indexes as
 `i = idx/(N*N), j = (idx/N)%N, k = idx%N`).
 
-### RD-17: CudaBuffer Is Not Clone (v4 — was Blocker #4)
+### RD-17: CudaBuffer Is Not Clone
 
 `CudaBuffer` does not implement `Clone`. Tagged results cannot store clones.
 **Resolution:** `IlpTagEntry` stores only metadata `(i, j, k, num_rows)`.
@@ -138,7 +151,7 @@ executor's store for the head relation and uses the new
 `download_and_check_membership()` helper (which uses existing
 `download_column_u32()`/`download_column_i64()` methods).
 
-### RD-18: `contains_tuple` Does Not Exist (v4 — was Blocker #3)
+### RD-18: `contains_tuple` Does Not Exist
 
 No such method exists on `CudaKernelProvider`. **Resolution:** Implement
 `contains_tuple_host()` as a new method on `CompiledIlpProgram` that
@@ -146,9 +159,9 @@ downloads the relevant columns via existing `download_column_*` helpers
 and checks membership on the host. For small result sets (typical in ILP),
 this is negligible. The API boundary is in pyxlog, not in xlog-cuda.
 
-### RD-19: Provider Wrapper API Corrections (v4 — was Blocker #1)
+### RD-19: Provider Wrapper API Corrections
 
-RFC v3 used `column(0)?`, `.to_host()`, `.slice()` on `TrackedCudaSlice`.
+Earlier RFC draft used `column(0)?`, `.to_host()`, `.slice()` on `TrackedCudaSlice`.
 These do not exist. The actual patterns:
 - `memory.alloc::<T>(len)` returns `TrackedCudaSlice<T>`
 - Host copy: `device.inner().dtoh_sync_copy_into(&slice, &mut host_vec)`
@@ -157,7 +170,7 @@ These do not exist. The actual patterns:
 
 The extraction kernel wrapper is rewritten using only these actual APIs.
 
-### RD-20: Exhaustive RirNode Match Sites (v4 — was High #7)
+### RD-20: Exhaustive RirNode Match Sites
 
 Adding `TensorMaskedJoin` to `RirNode` requires arms in **all** exhaustive
 matches. The complete list:
@@ -237,15 +250,15 @@ W (requires_grad=True)
        → dL/dM_soft → dL/dW (via Gumbel-Softmax chain rule)
 ```
 
-### RD-21: Missed-Positive Penalty Must Be Differentiable (v4 — was Medium #10)
+### RD-21: Missed-Positive Penalty Must Be Differentiable
 
-RFC v3 used `loss += 10.0` for missed positives, which is constant w.r.t. W
-and produces no gradient. The v4 fix uses a differentiable penalty that
+Earlier RFC draft used `loss += 10.0` for missed positives, which is constant w.r.t. W
+and produces no gradient. The corrected design uses a differentiable penalty that
 pushes M_soft towards the target relation k for all active (i,j) pairs.
 This creates gradient signal that encourages the mask to route some (i,j)
 pair towards the correct head relation.
 
-### RD-22: Device Row Count Is Private (v4.1 — v4 finding #1)
+### RD-22: Device Row Count Is Private
 
 `CudaKernelProvider::device_row_count()` is `fn` (not `pub fn`) at
 provider/mod.rs (private method). New ILP code cannot call it directly. The fix is a
@@ -256,26 +269,26 @@ like `download_column::<T>()` call `device_row_count` internally, so they still
 work; this helper is only needed where we need the count without downloading
 column data.
 
-### RD-23: `try_slice` Returns `Option`, Not `Result` (v4.1 — v4 finding #2)
+### RD-23: `try_slice` Returns `Option`, Not `Result`
 
 In cudarc 0.19, `TrackedCudaSlice::try_slice(range)` returns
 `Option<CudaView<T>>`, not `Result`. All `.map_err()` calls on `try_slice`
 must use `.ok_or_else()` instead.
 
-### RD-24: Per-Fact Credit Must Be Per-Join, Not Per-Relation (v4.1 — v4 finding #4)
+### RD-24: Per-Fact Credit Must Be Per-Join, Not Per-Relation
 
-RFC v4's `tagged_entries_containing_fact` checked if a fact exists in the
+Earlier RFC draft's `tagged_entries_containing_fact` checked if a fact exists in the
 final relation, then credited ALL (i,j,k) entries targeting k — collapsing
-to relation-level granularity. The v4.1 fix re-executes each candidate
+to relation-level granularity. The corrected design re-executes each candidate
 join (`hash_join_v2` on rel_i ⋈ rel_j`) and checks per-fact membership
 in each individual join result. `hash_join_v2` takes `&self` on provider
 (line 7147), so this is safe to call from `CompiledIlpProgram`. The
 re-execution cost is negligible for ILP's typical scale (few active rules,
 small relations).
 
-### RD-25: `fact_exists` Must Be Schema-Aware (v4.1 — v4 finding #5)
+### RD-25: `fact_exists` Must Be Schema-Aware
 
-RFC v4 hardcoded `download_column_i64` for all columns. Non-i64 relations
+Earlier RFC draft hardcoded `download_column_i64` for all columns. Non-i64 relations
 (e.g., u32 symbol IDs) would fail. The fix dispatches on
 `buf.schema().column_type(col_idx)` (types.rs:130) to the appropriate
 `download_column_*` variant, then widens each value to i64 for uniform
@@ -283,7 +296,7 @@ comparison. This works losslessly for U32, I32, Symbol, Bool. U64 truncate-casts
 to i64 (safe for typical Datalog symbol IDs). f32/f64 columns are
 rejected with an error (ILP fact comparison is integer-only).
 
-### RD-26: Base Facts Must Be Explicitly Loaded (v4.2 — v4.1 finding #4)
+### RD-26: Base Facts Must Be Explicitly Loaded
 
 `execute_plan()` does NOT load ground facts into the store. Facts are
 lowered to `Scan` nodes that read from the store (lower.rs:331,
@@ -295,21 +308,21 @@ serializes terms to column bytes via `push_term_bytes`, uploads via
 `provider.union()`. This applies to `compile()`, `evaluate()`, and
 `commit_induced_rule()`.
 
-### RD-27: Optimizer Schemas Keyed by RelId (v4.2 — v4.1 finding #1)
+### RD-27: Optimizer Schemas Keyed by RelId
 
 `Optimizer.schemas` is `HashMap<RelId, Schema>` (optimizer.rs:167), not
 `HashMap<String, Schema>`. The `TensorMaskedJoin` node carries both
 `head_rel_name: String` (for executor store lookups) and
 `head_rel_id: RelId` (for optimizer schema lookups).
 
-### RD-28: `extract_tmj_keys` Must Match Actual IR Shapes (v4.2 — v4.1 finding #3)
+### RD-28: `extract_tmj_keys` Must Match Actual IR Shapes
 
 `ExecutionPlan` has no `.nodes()` method. Access rules via
 `plan.rules_by_scc: Vec<Vec<CompiledRule>>` where each `CompiledRule.body`
 is a `RirNode`. `RirNode::Fixpoint` has `base`/`recursive` fields (not
 `body`). `RirNode::Union` has `inputs: Vec<RirNode>` (not `left`/`right`).
 
-### RD-29: `Program` Type Collision in pyxlog (v4.3 — v4.2 finding #1)
+### RD-29: `Program` Type Collision in pyxlog
 
 `Program` is already the `#[pyclass]` PyO3 struct at pyxlog/lib.rs:433.
 The AST type `xlog_logic::ast::Program` is NOT imported in pyxlog (lib.rs:18
@@ -317,7 +330,7 @@ lists `Atom, BodyLiteral, ProbEngine, Rule, Term` but not `Program`).
 Fix: `use xlog_logic::ast::Program as AstProgram;` in pyxlog. All ILP
 code uses `AstProgram` for AST references.
 
-### RD-30: Lowering Must Use `get_or_create_rel_id` (v4.3 — v4.2 findings #2+#3)
+### RD-30: Lowering Must Use `get_or_create_rel_id`
 
 `lower.rs` uses `xlog_core::Result`/`XlogError` (lower.rs:15), not `anyhow`.
 Additionally, `rel_ids` are allocated lazily from body scans/facts
@@ -325,7 +338,7 @@ Additionally, `rel_ids` are allocated lazily from body scans/facts
 `get_or_create_rel_id(&name)` (lower.rs:97) allocates if missing,
 returning a valid `RelId` without errors.
 
-### RD-31: `push_term_bytes` Duplication (v4.3 — v4.2 finding #4)
+### RD-31: `push_term_bytes` Duplication
 
 `push_term_bytes` is private in `xlog-gpu/logic.rs:282`. It is already
 duplicated in `xlog-logic/examples/xlog_run.rs:99` (~40 lines). The ILP
@@ -333,41 +346,41 @@ implementation duplicates it in `pyxlog/src/lib.rs`. The function depends
 only on `xlog_core::ScalarType` and `xlog_logic::ast::Term` (no
 xlog-gpu-specific deps), so the duplication is safe and self-contained.
 
-### RD-32: Learnable Rules Must Be Wired into `lower_program` (v4.4 — v4.3 finding #1)
+### RD-32: Learnable Rules Must Be Wired into `lower_program`
 
 `lower_program` (lower.rs:321–368) iterates `program.proper_rules()` and
 `program.facts()` only. Learnable rules live in `program.learnable_rules`
 and require an explicit loop calling `lower_learnable_rule`, placed after
 proper-rule lowering so body-relation RelIds are already allocated.
 
-### RD-33: Parser Must Use `build_head`, Not `build_atom` (v4.4 — v4.3 finding #2)
+### RD-33: Parser Must Use `build_head`, Not `build_atom`
 
 The grammar production `learnable_rule` uses `head` (grammar.pest:81),
 which expects `head_term_list`. `build_atom` (parser.rs:727) expects
 `term_list` and will fail on `head` pairs. `build_head` (parser.rs:652)
 is the correct parser function.
 
-### RD-34: Learnable Body Shape Validation (v4.4 — v4.3 finding #3)
+### RD-34: Learnable Body Shape Validation
 
 The grammar allows negation, comparisons, is-exprs, and arbitrary body
 arity (grammar.pest:75). Learnable templates require exactly two positive
 atoms. `lower_learnable_rule` must validate this before indexing
 `rule.body[0]`/`rule.body[1]`, returning `XlogError::Compilation` on violation.
 
-### RD-35: Executor Accessor Methods for ILP State (v4.4 — v4.3 finding #4)
+### RD-35: Executor Accessor Methods for ILP State
 
 `ilp_registry_mut()` and `ilp_last_result()` are called by
 `CompiledIlpProgram` in pyxlog but were never defined on `Executor`.
 Added as trivial accessor methods in the executor changes section.
 
-### RD-36: Deterministic `rel_index` Ordering (v4.4 — v4.3 finding #5)
+### RD-36: Deterministic `rel_index` Ordering
 
 `rel_index` is built from `HashMap::iter()` which has nondeterministic
 ordering. Must sort by `RelId` (`.sort_by_key(|(id, _)| id.0)`) so tensor
 dimension → relation mapping is stable across recompiles. Applied in both
 `lower_learnable_rule` and the pyxlog `compile()` path.
 
-### RD-37: Fail Hard on Missing Head Schema (v4.4 — v4.3 finding #6)
+### RD-37: Fail Hard on Missing Head Schema
 
 The `Schema::new(vec![])` fallback silently produces a 0-column buffer
 that corrupts the store when `execute_non_recursive_scc` writes it back.
@@ -519,7 +532,7 @@ RirNode::TensorMaskedJoin { max_active_rules, .. } => PlanCost {
     rows: *max_active_rules as u64,
     cpu_cost: *max_active_rules as f64 * 100.0, // hash-join per rule
     gpu_mem: *max_active_rules as u64 * 1024,   // join buffers
-    transfers: 1,                                // mask D2H for indices
+    transfers: 1,                                // mask device-to-host for indices
 },
 ```
 
@@ -699,7 +712,7 @@ pub struct IlpMask {
 }
 
 /// Tag metadata from TensorMaskedJoin execution.
-/// (v5) IlpTagEntry retains buffer for batch credit queries (RD-17 relaxed).
+/// Current IlpTagEntry retains buffer for batch credit queries (RD-17 relaxed).
 pub struct IlpTaggedResult {
     pub entries: Vec<IlpTagEntry>,
 }
@@ -822,7 +835,7 @@ pub const KERNEL_CU_NAMES: &[&str] = &[
 ];
 ```
 
-**File: `crates/xlog-cuda/src/provider/mod.rs`** (post-Wave-2: kernel constants remain in mod.rs)
+**File: `crates/xlog-cuda/src/provider/mod.rs`** (kernel constants remain in mod.rs)
 
 ```rust
 // Update assertion
@@ -866,7 +879,7 @@ Add load_ptx block (follows exact pattern of all other module blocks):
 
 #### 4.7 Provider Wrapper
 
-**File: `crates/xlog-cuda/src/provider/ilp.rs`** (post-Wave-2: ILP methods in ilp.rs submodule)
+**File: `crates/xlog-cuda/src/provider/ilp.rs`** (ILP methods live in the provider submodule)
 
 Uses actual APIs only (RD-19): `memory.alloc()`, `htod_sync_copy_into`,
 `dtoh_sync_copy_into`, `device.inner().get_func()`.
@@ -1012,7 +1025,7 @@ fn execute_tensor_masked_join(
     // the head relation's schema (not Schema::new(vec![])) to prevent
     // schema corruption when execute_non_recursive_scc stores the result.
     // The head schema comes from the pre-seeded store via head_rel_name,
-    // NOT from rel_index.first() which may not match the head (RD-12 v4.1).
+    // NOT from rel_index.first() which may not match the head (RD-12).
     let ilp_mask = match self.ilp_registry.get_mask(mask_name) {
         Some(mask) => mask,
         None => {
@@ -1720,9 +1733,9 @@ pub fn extract_relation_state(
 
 ---
 
-#### 4.11 GPU-Resident Loss/Gradient Path (v5)
+#### 4.11 GPU-Resident Loss/Gradient Path
 
-**(Added v5.)** `compute_ilp_loss_grad_gpu` is a single Rust/CUDA call that
+`compute_ilp_loss_grad_gpu` is a single Rust/CUDA call that
 replaces the Python-side `_compute_loss_from_candidates()` loop.
 
 **Pipeline:**
@@ -1746,9 +1759,9 @@ Python trainer
 - `ilp_reduce_sum_f32` / `ilp_reduce_sum_f64` (`kernels/ilp.cu`): Block-level sum reduction
 - Forward/backward credit kernels (`kernels/ilp_credit.cu`): f32/f64 variants
 
-**D2H transfer guarantee:**
-- Non-chunked path: zero D2H transfers (strict byte-level accounting via `host_transfer_stats()`)
-- Chunked fallback (COO exceeds `coo_memory_cap`): bounded D2H per chunk, merge on host
+**device-to-host transfer guarantee:**
+- Non-chunked path: zero device-to-host transfers (strict byte-level accounting via `host_transfer_stats()`)
+- Chunked fallback (COO exceeds `coo_memory_cap`): bounded device-to-host per chunk, merge on host
 - `set_strict_zero_dtoh(True)`: raises instead of falling back to chunked path
 
 **Python API:**
@@ -1816,7 +1829,7 @@ grad = torch.from_dlpack(grad_dl)               # Zero-copy device tensor
 
 ### 5.5 Phase 5 Tests: End-to-End ILP Benchmarks
 
-**(v5):** Benchmark gate set updated to match implemented reliability suite.
+The benchmark gate set matches the implemented reliability suite.
 
 | Test | Benchmark | Source | Pass Criterion |
 |------|-----------|--------|----------------|
@@ -1834,14 +1847,14 @@ grad = torch.from_dlpack(grad_dl)               # Zero-copy device tensor
 
 | Milestone | Tests | Gate |
 |-----------|-------|------|
-| **M1: Syntax** | T1.1-T1.9 | All pass |
-| **M2: Bridge** | T2.1-T2.5 | All pass |
-| **M3: Executor** | T3.1-T3.10 | All pass |
-| **M4: Gradients** | T4.1-T4.5 | All pass |
-| **M5: ILP Basic** | T5.1-T5.2 | Converge |
-| **M6: ILP Complete** | T5.1-T5.6 | All pass |
-| **M7: GPU Loss** | 16/16 credit tests + strict D2H gate | All pass |
-| **M8: Reliability** | 4 stages x 5 seeds (beta) / 50 seeds (GA) | 20/20 / 200/200 |
+| **Syntax validation** | T1.1-T1.9 | All pass |
+| **DLPack bridge validation** | T2.1-T2.5 | All pass |
+| **Executor integration validation** | T3.1-T3.10 | All pass |
+| **Gradient-flow validation** | T4.1-T4.5 | All pass |
+| **Basic ILP convergence validation** | T5.1-T5.2 | Converge |
+| **Complete ILP validation** | T5.1-T5.6 | All pass |
+| **GPU loss validation** | 16/16 credit tests + strict device-to-host transfer gate | All pass |
+| **Reliability validation** | 4 stages x 5 seeds (beta) / 50 seeds (GA) | 20/20 / 200/200 |
 
 ---
 
@@ -1915,9 +1928,9 @@ path shared by neural predicates. Flattening in Python is trivial
 
 ## 9. Changelog
 
-### v4.3 → v4.4
+### Learnable-Rule Wiring Corrections
 
-| # | v4.3 Finding | Fix |
+| # | Finding | Fix |
 |---|-------------|-----|
 | 1 | `lower_learnable_rule` defined but never called from `lower_program` — learnable rules never emitted (Blocker) | RD-32: Explicit loop over `program.learnable_rules` before `builder.build()`, after proper rules |
 | 2 | `build_learnable_rule` uses `build_atom` but grammar produces `head` pair (Blocker) | RD-33: Changed to `build_head` (parser.rs:652), which handles `head_term_list` |
@@ -1926,37 +1939,37 @@ path shared by neural predicates. Flattening in Python is trivial
 | 5 | `rel_index` built from `HashMap::iter()` — nondeterministic tensor dimension mapping (Medium) | RD-36: `.sort_by_key(\|(id, _)\| id.0)` in both `lower_learnable_rule` and pyxlog `compile()` |
 | 6 | `Schema::new(vec![])` fallback silently produces 0-column buffer (Medium) | RD-37: Both paths now `ok_or_else` → `XlogError::Execution` with diagnostic message |
 
-### v4.2 → v4.3
+### pyxlog Type And Lowering Corrections
 
-| # | v4.2 Finding | Fix |
+| # | Finding | Fix |
 |---|-------------|-----|
 | 1 | `Program` type collision — pyxlog already has `#[pyclass] pub struct Program` (Blocker) | RD-29: `use xlog_logic::ast::Program as AstProgram;` — all ILP code uses `AstProgram` |
 | 2 | `anyhow!` in lowering — lower.rs uses `xlog_core::Result`/`XlogError`, not anyhow (Blocker) | RD-30: Removed `anyhow!`; uses `get_or_create_rel_id` which never errors |
 | 3 | `head_rel_id` lookup can fail for head-only predicates not yet in `rel_ids` (Blocker) | RD-30: `self.get_or_create_rel_id(&head_rel_name)` (lower.rs:97) allocates lazily |
 | 4 | `push_term_bytes` resolution left as open choice (High) | RD-31: Deterministic — duplicate in pyxlog/lib.rs (~40 lines, already duplicated in xlog-logic/examples) |
 
-### v4.1 → v4.2
+### Fact Loading And IR Shape Corrections
 
-| # | v4.1 Finding | Fix |
+| # | Finding | Fix |
 |---|-------------|-----|
 | 1 | `estimate_width` uses `self.schemas.get(head_rel_name)` but optimizer schemas keyed by `RelId` (Blocker) | RD-27: Added `head_rel_id: RelId` to `TensorMaskedJoin`; `estimate_width` uses `self.schemas.get(head_rel_id)` |
 | 2 | `ScalarType::U8` does not exist in `xlog-core` (Blocker) | Removed `ScalarType::U8` branch; Bool uses `download_column_bool` → `if v { 1i64 } else { 0i64 }` |
 | 3 | `extract_tmj_keys` uses wrong shapes: `Fixpoint { body }`, `Union { left, right }`, `plan.nodes()` (Blocker) | RD-28: Fixpoint→`base`/`recursive`, Union→`inputs`, plan→`rules_by_scc.iter().flatten().body`; full recursive walk of all node types |
 | 4 | Base facts never loaded — `execute_plan` doesn't populate store from AST facts (Blocker) | RD-26: `load_facts_into_store()` helper mirrors `logic.rs:171-221`; called in `compile()`, `evaluate()`, `commit_induced_rule()`. `AstProgram` stored on `CompiledIlpProgram`. |
 
-### v4 → v4.1
+### Device API And Credit Granularity Corrections
 
-| # | v4 Finding | Fix |
+| # | Finding | Fix |
 |---|-----------|-----|
 | 1 | `device_row_count` is private (`fn` not `pub fn`) in `provider/mod.rs` (Blocker) | RD-22: `read_device_row_count` helper inlines same pattern using public APIs (`provider.device()`, `buffer.num_rows_device()`, `dtoh_sync_copy_into`) |
 | 2 | `try_slice` returns `Option`, not `Result` — `.map_err()` won't compile (Blocker) | RD-23: All `.try_slice()` calls changed from `.map_err()` to `.ok_or_else()` |
 | 3 | RD-12 schema fallback uses `rel_index.first()` which may not match head (High) | Added `head_rel_name: String` field to `TensorMaskedJoin`; all schema lookups (no-mask path, return path, `estimate_width`) now use `head_rel_name` instead of `rel_index.first()` |
 | 4 | Per-fact credit regressed to relation-level — credits ALL entries targeting k (High) | RD-24: `tagged_entries_containing_fact` re-executes `hash_join_v2` per candidate entry and checks per-fact membership individually |
-| 5 | `fact_exists` hardcodes `download_column_i64` — non-i64 relations fail (Medium) | RD-25: Schema-aware dispatch via `buf.schema().column_type()` → `download_column::<T>()` (turbofish generics post-Wave-2) with i64 widening |
+| 5 | `fact_exists` hardcodes `download_column_i64` — non-i64 relations fail (Medium) | RD-25: Schema-aware dispatch via `buf.schema().column_type()` → `download_column::<T>()` with i64 widening |
 
-### v3 → v4
+### Provider And DLPack Corrections
 
-| # | v3 Finding | Fix |
+| # | Finding | Fix |
 |---|-----------|-----|
 | 1 | Provider uses `column(0)?`, `.to_host()`, `.slice()` (Blocker) | RD-19: Rewritten with `memory.alloc`, `dtoh_sync_copy_into`, `column_bytes_view`, `try_slice` |
 | 2 | DLPack ndim==1 blocks 3D tensors (Blocker) | RD-16: Python flattens to 1D before DLPack export |
@@ -1969,9 +1982,9 @@ path shared by neural predicates. Flattening in Python is trivial
 | 9 | API drift: `make_provider`, `DlpackTable::new` (Medium) | Fixed: `provider_from_config`, `provider.to_dlpack_table()` |
 | 10 | Missed-positive `loss += 10.0` has no gradient (Medium) | RD-21: Differentiable penalty using `M_soft[:,:,k_idx].sum()` |
 
-### v2 → v3
+### Earlier Draft Notes
 
-(See v3 document for that changelog.)
+See the earlier draft document for that changelog.
 
 ---
 

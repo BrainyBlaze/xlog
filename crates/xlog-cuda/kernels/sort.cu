@@ -448,7 +448,7 @@ extern "C" __global__ void gather_keys_f64_hi_u32(
 }
 
 // ===============================================================
-// W4.3 — Detect ascending-sorted U32 key column.
+// Detect ascending-sorted U32 key column for the sort-merge operator.
 //
 // Each thread checks one adjacent pair `(keys[tid], keys[tid+1])`.
 // On `keys[tid] > keys[tid+1]` (a violation), atomically writes
@@ -462,8 +462,9 @@ extern "C" __global__ void gather_keys_f64_hi_u32(
 //   * Returns "sorted ascending" semantics: keys[i] <= keys[i+1]
 //     for all i in [0, num_rows-1). Duplicates are admitted —
 //     sort-merge handles run-length matching downstream.
-//   * Caller MUST short-circuit `num_rows < 2` BEFORE launch
-//     (per W4.3 plan iter-4 D1 + F-W43-4): the kernel grid
+//   * Caller MUST short-circuit `num_rows < 2` BEFORE launch:
+//     the provider fast path returns sorted for empty or single-row
+//     inputs because the kernel grid
 //     `(num_rows + 255) / 256` is undefined for num_rows == 0,
 //     and a single-row sequence is trivially sorted (no
 //     adjacent pair to check). The provider fn

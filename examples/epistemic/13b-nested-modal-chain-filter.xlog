@@ -1,17 +1,18 @@
-// v0.9.2 ITEM C: a NESTED modal CHAIN as a per-row FILTER, load-bearing.
+// Nested modal chains can act as row filters; this fixture proves the filter is load-bearing.
 //
 // `know know reachable(X)` is a 2-deep chain. It collapses (KK == K, axiom 4) to
-// `know reachable(X)`. `reachable` is an EDB relation (DETERMINED), so over it
-// `know R == R`. The modal therefore gates the `node` domain by `reachable`
-// membership:
+// `know reachable(X)`. `reachable` is an input fact relation whose truth is
+// already determined, so over it `know R == R`. The modal therefore gates the
+// `node` domain by `reachable` membership:
 //   gated(X) :- node(X), know know reachable(X).
 //            == gated(X) :- node(X), know reachable(X).
 //            == gated(X) :- node(X), reachable(X).
 //
 // Data: node = {1, 2, 3}, reachable = {1, 3}.
-// The gate is LOAD-BEARING: gated = node intersect reachable = {1, 3}
+// The gate is load-bearing: gated = node intersect reachable = {1, 3}
 // (node 2 is dropped). Ungated `node` would be {1, 2, 3}, so the chain materially
-// filters. PER-MODE: identical in FAEEL and G91 (determined EDB target).
+// filters. In both epistemic modes, FAEEL and G91, the result is identical
+// because `reachable` is a determined input relation.
 //
 // Expect: gated = {1, 3} (rows: 2); node 2 absent.
 

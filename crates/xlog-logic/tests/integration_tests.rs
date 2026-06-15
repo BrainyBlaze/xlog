@@ -323,10 +323,10 @@ fn test_learnable_rule_body_validation() {
 }
 
 // =============================================================================
-// M1 Gap Tests — Syntax & IR
+// Learnable-rule syntax and IR regression tests
 // =============================================================================
 
-// T1.2: Parse failure on malformed learnable rule
+// Malformed learnable rules fail parsing.
 #[test]
 fn test_parse_learnable_malformed_fails() {
     // Missing mask name
@@ -338,7 +338,7 @@ fn test_parse_learnable_malformed_fails() {
     assert!(parse_program(input2).is_err());
 }
 
-// T1.4: referenced_relations() includes all rel_index entries
+// referenced_relations() includes all rel_index entries.
 #[test]
 fn test_tmj_referenced_relations_complete() {
     let input = r#"
@@ -365,7 +365,7 @@ fn test_tmj_referenced_relations_complete() {
     panic!("No TensorMaskedJoin found in compiled plan");
 }
 
-// T1.8: Optimizer handles TensorMaskedJoin without panic
+// Optimizer handles TensorMaskedJoin without panic.
 #[test]
 fn test_optimizer_handles_tmj() {
     let input = r#"
@@ -384,7 +384,7 @@ fn test_optimizer_handles_tmj() {
     );
 }
 
-// T2: Learnable head validation — unbound variable must fail
+// Learnable head validation: unbound variable must fail.
 #[test]
 fn test_learnable_head_unbound_variable_fails() {
     let input = r#"
@@ -402,7 +402,7 @@ fn test_learnable_head_unbound_variable_fails() {
     );
 }
 
-// T2: Learnable head validation — constant in head must fail
+// Learnable head validation: constant in head must fail.
 #[test]
 fn test_learnable_head_constant_fails() {
     let input = r#"

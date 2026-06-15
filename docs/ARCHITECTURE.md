@@ -87,7 +87,7 @@ XLOG is a unified platform spanning four closely-related reasoning paradigms:
 |-----------|---------|---------------------|
 | **xlog-logic** | Deterministic Datalog-style recursion and stratified negation | GPUlog (HISA indexing), VFLog (columnar GPU Datalog) |
 | **xlog-prob** | Probabilistic + differentiable reasoning | ProbLog knowledge compilation (d-DNNF/SDD/BDD), WMC |
-| **EIR/GPU epistemic** | Accepted v0.9.x epistemic execution surface with explicit EIR, FAEEL default semantics, G91 compatibility mode, split/joint planning, and GPU-backed runtime paths | eclingo (G91 context), FAEEL founded world views |
+| **EIR/GPU epistemic** | Accepted epistemic execution surface with explicit EIR, FAEEL default semantics, Gelfond 1991 compatibility mode, split/joint planning, and GPU-backed runtime paths | eclingo (Gelfond 1991 context), FAEEL founded world views |
 | **xlog-solve** | SAT/MaxSAT solver services (GPU CDCL verifier + CLS) | Deterministic CDCL (watched literals + 1-UIP + on-GPU model/proof validation), FastFourierSAT-inspired CLS |
 
 ### Intermediate Representations
@@ -126,7 +126,7 @@ Source Code
 |----|---------|----------------|
 | **RIR** | Relational operations for deterministic logic | `Unit` (identity), `Scan`, `Filter`, `Project`, `Join`, `GroupBy`, `Union`, `Distinct`, `Diff`, `Fixpoint`, `TensorMaskedJoin` |
 | **PIR** | Provenance tracking for probabilistic inference | `PIR_Lit`, `PIR_NegLit`, `PIR_And`, `PIR_Or`, `PIR_Decision` — weighted Boolean formula / circuit terms |
-| **EIR** | Epistemic reasoning structures for the accepted v0.9.x surface | epistemic literals/modes, executable plans, split plans, world-view candidates, GPU runtime traces |
+| **EIR** | Epistemic reasoning structures for the accepted GPU-backed surface | epistemic literals/modes, executable plans, split plans, world-view candidates, GPU runtime traces |
 | **SIR** | Boolean satisfiability and optimization | `SIR_CNF`, `SIR_Cardinality`, `SIR_Weights`, `SIR_Objective`, `SIR_ProofPolicy` |
 | **XGCF** | GPU-evaluable circuit format | Levelized DAG with `node_type[]`, `value[]`, `adj[]` for forward/backward evaluation |
 
@@ -162,9 +162,9 @@ XLOG implements **ProbLog-style distribution semantics**:
 
 | Tier | Name | Description | Requirements |
 |------|------|-------------|--------------|
-| **P1** | Exact (circuit-evaluable) | Programs compiled into decomposable circuits evaluated exactly on GPU | Compilation succeeds; positive rule bodies only |
-| **P2** | Exact (restricted structure) | Acyclic probabilistic dependencies or bounded-treewidth fragments | Structural restrictions satisfied |
-| **P3** | Approximate | Monte Carlo sampling with GPU-parallel estimators and calibrated uncertainty | Any program; results include confidence intervals |
+| **Exact circuit tier** | Exact (circuit-evaluable) | Programs compiled into decomposable circuits evaluated exactly on GPU | Compilation succeeds; positive rule bodies only |
+| **Exact structural tier** | Exact (restricted structure) | Acyclic probabilistic dependencies or bounded-treewidth fragments | Structural restrictions satisfied |
+| **Approximate sampling tier** | Approximate | Monte Carlo sampling with GPU-parallel estimators and calibrated uncertainty | Any program; results include confidence intervals |
 
 **Circuit evaluation** uses log-space arithmetic for numerical stability:
 - **LIT node**: `v = log(w_lit)` with evidence masking
@@ -178,15 +178,15 @@ XLOG implements **ProbLog-style distribution semantics**:
 - OR: `adj[child_j] += adj[parent] * exp(v_child_j - v_parent)` (softmax weights)
 - Gradients flow back to neural predicates via PyTorch custom autograd
 
-#### Epistemic Logic (EIR/GPU, v0.9.x accepted surface)
+#### Epistemic Logic (EIR/GPU Accepted Surface)
 
 XLOG implements an accepted **epistemic logic programming** surface with world
 views through explicit EIR and GPU-backed execution paths:
 
 - **Modal operators**: `know atom(...)`, `possible atom(...)`, `not know atom(...)`, `not possible atom(...)`, and finite nested modal chains normalized by parity/duality.
 - **Default semantics**: FAEEL-style founded world views, including foundedness gates for self-support.
-- **Compatibility mode**: Gelfond 1991 (G91) semantics for explicit interoperability, including accepted self-supported `possible` cases in G91 mode.
-- **Execution surface**: EIR-derived candidate generation, value-level tuple-key membership, safe split/joint solving, same-name multi-arity disambiguation, determined-head stratification, and GPU-backed runtime/WCOJ dispatch for accepted v0.9.x programs.
+- **Compatibility mode**: Gelfond 1991 semantics for explicit interoperability, including accepted self-supported `possible` cases in compatibility mode.
+- **Execution surface**: EIR-derived candidate generation, value-level tuple-key membership, safe split/joint solving, same-name multi-arity disambiguation, determined-head stratification, and GPU-backed runtime/WCOJ dispatch for accepted epistemic programs.
 
 **Complexity**: World view existence is **Σ_P^3-complete**, requiring careful engineering.
 
@@ -194,9 +194,9 @@ views through explicit EIR and GPU-backed execution paths:
 
 | Tier | Name | Description | Feasibility Bounds |
 |------|------|-------------|--------------------|
-| **E1** | Exact (structural) | Epistemically stratified programs or successful splitting | `k ≤ 24` epistemic atoms per component |
-| **E2** | Exact (bounded enumeration) | Bounded candidate enumeration with propagation | `k ≤ 16` or `|candidates| ≤ 50,000` after propagation |
-| **E3** | Approximate | Sampling-based world-view approximation | Any program; explicit `UNKNOWN/approx` labeling |
+| **Exact structural tier** | Exact (structural) | Epistemically stratified programs or successful splitting | `k <= 24` epistemic atoms per component |
+| **Exact bounded-enumeration tier** | Exact (bounded enumeration) | Bounded candidate enumeration with propagation | `k <= 16` or `|candidates| <= 50,000` after propagation |
+| **Approximate sampling tier** | Approximate | Sampling-based world-view approximation | Any program; explicit `UNKNOWN/approx` labeling |
 
 **Core algorithm**: Generate–Propagate–Test
 1. **Normalize and split**: Apply epistemic splitting to decompose into components
@@ -243,7 +243,7 @@ PIR (Provenance IR)
      │ Optional GPU preprocessing (simplification)
      ▼
 ┌─────────┐
-│ GPU D4  │  Decision-DNNF compiler (GPU-native)
+│GPU d-DNNF│ Decision-DNNF compiler (GPU-native)
 └────┬────┘
      │
      ▼
@@ -281,9 +281,9 @@ XLOG builds on established research in GPU-accelerated databases and probabilist
 | **[VFLog](https://arxiv.org/abs/2501.13051)** | Column-oriented GPU Datalog runtime. Demonstrates 200× gains over CPU column engines. |
 | **[mnmgDatalog](https://hpcrl.github.io/ICS2025-webpage/program/Proceedings_ICS25/ics25-71.pdf)** | Multi-node multi-GPU Datalog. Radix-hash partitioning, GPU-aware all-to-all. |
 | **[ProbLog](https://dtai.cs.kuleuven.be/problog/)** | Knowledge compilation approach to probabilistic logic. Compile-once evaluate-many pattern. |
-| **Neural-symbolic AI** | Neural predicates integrated with probabilistic logic. End-to-end differentiable inference. Implemented in v0.4.0-alpha. |
+| **Neural-symbolic AI** | Neural predicates integrated with probabilistic logic. End-to-end differentiable inference. |
 | **[D4](https://www.ijcai.org/proceedings/2017/0093.pdf)** | State-of-the-art Decision-DNNF compiler for weighted model counting. |
-| **[eclingo](https://arxiv.org/abs/2008.02018)** | Epistemic logic solver implementing G91 semantics via guess-and-check. |
+| **[eclingo](https://arxiv.org/abs/2008.02018)** | Epistemic logic solver implementing Gelfond 1991 semantics via guess-and-check. |
 | **[FAEEL](https://arxiv.org/abs/1907.09247)** | Founded Autoepistemic Equilibrium Logic. Avoids self-supported world views. |
 | **[FastFourierSAT](https://arxiv.org/abs/2308.15020)** | Massively parallel continuous local search for GPU SAT solving. |
 | **[ParaFROST](https://link.springer.com/article/10.1007/s10703-023-00432-z)** | Certified GPU-accelerated SAT inprocessing with proof generation. |
@@ -296,7 +296,7 @@ XLOG builds on established research in GPU-accelerated databases and probabilist
                                               ┌──> RIR ──> Deterministic executor  (xlog-runtime)
                                               │             (semi-naive fixpoint on GPU)
    xlog source ──> Parser ──> Stratifier ──┤
-                                              │──> PIR ──> CNF ──> D4 ──> XGCF
+                                              │──> PIR ──> CNF ──> Decision-DNNF compiler ──> XGCF
                                               │             (probabilistic inference; xlog-prob)
                                               │
                                               │──> Solver IR (planned) ──> GPU CDCL
@@ -335,10 +335,10 @@ xlog/
 │   ├── xlog-cuda/       # CUDA provider, memory management, interop (Arrow IPC/C Data, DLPack)
 │   ├── xlog-stats/      # Runtime statistics (optimizer feedback + adaptive indexing)
 │   ├── xlog-prob/       # Probabilistic tier (exact inference + Monte Carlo)
-│   ├── xlog-neural/     # Neural-symbolic integration (v0.4.0-alpha)
+│   ├── xlog-neural/     # Neural-symbolic integration
 │   ├── xlog-solve/      # Solver services (SAT/MaxSAT)
 │   ├── xlog-gpu/        # High-level GPU API (Rust)
-│   ├── xlog-induce/     # Bounded exact-induction engine (DTS M8 Phase 1)
+│   ├── xlog-induce/     # Bounded exact-induction engine for an external consumer
 │   ├── xlog-cli/        # CLI binary (deterministic + probabilistic execution)
 │   ├── pyxlog/     # Python module (PyO3 + DLPack + training API)
 │   └── xlog-cuda-tests/ # CUDA/PTX certification suite (not published)
@@ -347,7 +347,7 @@ xlog/
 │   └── neural/          # Neural-symbolic training examples
 ```
 
-XLOG no longer vendors a CPU knowledge compiler binary (D4/Boost); the exact inference path is GPU-native.
+XLOG no longer vendors a CPU knowledge compiler binary; the exact inference path is GPU-native.
 
 ### Dependency Graph
 
@@ -377,7 +377,7 @@ Tier 4:         pyxlog ────────────> 9 crates (integrati
 **Wave 1 changes** (2026-03-10): removed `xlog-logic → xlog-runtime` (moved to dev-deps),
 removed `xlog-stats → xlog-cuda` (was unused), added `xlog-neural → xlog-core`.
 
-**v0.9.2 epistemic WFS boundary:** `xlog-gpu` intentionally has no `xlog-prob`
+**Epistemic WFS boundary:** `xlog-gpu` intentionally has no `xlog-prob`
 dependency. Accepted cyclic negated-modal WFS execution must route through the
 GPU-backed WFS plan in `xlog-gpu`; the host `HashMap`/`HashSet` WFS implementation
 in `xlog-prob` remains a probabilistic/provenance subsystem and is not an accepted
@@ -395,8 +395,8 @@ and metadata row-count reads may still participate in WFS convergence.
 | `xlog-runtime` | `Executor`, versioned `RelationStore`, profiling, incremental maintenance, adaptive join index cache |
 | `xlog-cuda` | `CudaKernelProvider`, `GpuMemoryManager`, `CudaBuffer`/`CudaColumn`, PTX embedding, Arrow IPC/C Data + DLPack interop |
 | `xlog-stats` | `StatsManager` + `StatsSnapshot` (compiler feedback + runtime tracking) |
-| `xlog-prob` | Probabilistic tier: provenance → CNF → GPU D4 → XGCF; exact inference + Monte Carlo sampling + circuit caching; includes GPU-native PIR→CNF encoder and GPU D4/CDCL compilation utilities |
-| `xlog-neural` | Neural-symbolic integration: `NetworkRegistry`, `NetworkHandle`, `TensorSourceRegistry`, `NeuralBridge` (v0.4.0-alpha) |
+| `xlog-prob` | Probabilistic tier: provenance → CNF → GPU Decision-DNNF compiler → XGCF; exact inference + Monte Carlo sampling + circuit caching; includes GPU-native PIR→CNF encoder and GPU Decision-DNNF/CDCL compilation utilities |
+| `xlog-neural` | Neural-symbolic integration: `NetworkRegistry`, `NetworkHandle`, `TensorSourceRegistry`, `NeuralBridge` |
 | `xlog-solve` | Solver services: GPU CDCL verifier (complete SAT/UNSAT, on-GPU validation) + CLS SAT/MaxSAT (heuristic) |
 | `xlog-gpu` | High-level GPU API: deterministic execution + input/output buffers for integration layers |
 | `xlog-induce` | Bounded exact-induction engine — scores all `(left, right)` candidate pairs across four fixed 2-body topologies (chain/star/fanout/fanin) in one batched GPU pass via `ilp_exact` kernel; top-K per topology with structured candidate metadata. See [architecture/bounded-exact-induction.md](architecture/bounded-exact-induction.md) |
@@ -420,7 +420,7 @@ pub enum ScalarType {
 }
 ```
 
-**Note**: `Symbol` values are stored as `u32` IDs that map bidirectionally to strings via a global string table. As of v0.3.2, symbols are **reversible** — the original string can be recovered for display in query output.
+**Note**: `Symbol` values are stored as `u32` IDs that map bidirectionally to strings via a global string table. Symbols are **reversible**: the original string can be recovered for display in query output.
 
 ### Schema
 
@@ -908,9 +908,9 @@ impl GpuMemoryManager {
 }
 ```
 
-### v0.6 Device Runtime + Recorded Launch Discipline
+### Device Runtime + Recorded Launch Discipline
 
-The v0.6 runtime adds an opt-in stack atop the
+The device runtime adds an opt-in stack atop the
 `GpuMemoryManager` shown above:
 `AsyncCudaResource → LoggingResource → GlobalDeviceBudget →
 XlogDeviceRuntime + StreamPool`. It tracks per-allocation
@@ -1116,10 +1116,10 @@ print(prob)
 # Optional host read for a single scalar:
 print(float(prob[0].item()))
 
-# Neural-symbolic training (v0.4.0-alpha)
+# Neural-symbolic training
 program = pyxlog.Program.compile("""
     nn(mnist_net, [X], Y, [0,1,2,3,4,5,6,7,8,9]) :: digit(X, Y).
-    addition(X, Y, Z) :- digit(X, D1), digit(Y, D2), Z is D1 + D2.
+    addition(X, Y, Z) :- digit(X, DigitX), digit(Y, DigitY), Z is DigitX + DigitY.
 """)
 
 # Register PyTorch network
@@ -1341,7 +1341,7 @@ cargo test -p xlog-cuda-tests --test certification_suite --release -- --nocaptur
 | [GPU Execution](architecture/gpu-execution.md) | GPU-resident filter, groupby, and arithmetic evaluation |
 | [Query Optimizer](architecture/query-optimizer.md) | Cost-based join ordering, predicate pushdown, statistics |
 | [Arithmetic Expressions](architecture/arithmetic-expressions.md) | `is` syntax, type inference, GPU evaluation |
-| [Probabilistic Tier](architecture/xlog-prob.md) | Exact inference (D4/XGCF) and Monte Carlo sampling |
+| [Probabilistic Tier](architecture/xlog-prob.md) | Exact inference (Decision-DNNF/XGCF) and Monte Carlo sampling |
 | [dILP Training](architecture/dilp-training.md) | Differentiable ILP trainer architecture and the RFC-backed execution model |
 | [Solver Services](architecture/solver-services.md) | GPU CDCL verifier (zero host reads) + CLS SAT/MaxSAT services |
 | [Adaptive Indexing](architecture/adaptive-indexing.md) | HISA-based heat tracking and index selection |

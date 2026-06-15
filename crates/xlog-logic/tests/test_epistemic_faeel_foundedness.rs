@@ -1,5 +1,4 @@
-//! EGB-07 / v0.9.2 ITEM B: FAEEL founded-model EXTENSION over the production GPU
-//! lowering path.
+//! FAEEL founded-model extension over the production GPU lowering path.
 //!
 //! Under default FAEEL, an atom/tuple supported ONLY by circular modal self-support
 //! (`possible p`/`know p` with no independent founded derivation) is NOT in the founded
@@ -7,7 +6,7 @@
 //! it is executed (the program plans and compiles, then materializes the founded
 //! extension on the GPU runtime), NOT rejected with an unsupported-construct error.
 //!
-//! These pilots run through `plan_epistemic_gpu_execution` /
+//! These tests run through `plan_epistemic_gpu_execution` /
 //! `compile_epistemic_gpu_execution` (the accepted-execution boundary) and inspect the
 //! reduced ordinary base produced by `reduce_epistemic_program_to_ordinary`, which is
 //! the structural foundedness DECISION boundary: an unfounded circular self-support
@@ -69,7 +68,7 @@ fn accepts(src: &str) {
         .unwrap_or_else(|e| panic!("expected FAEEL compile acceptance for:\n{src}\ngot: {e}"));
 }
 
-// === K1: zero-arity foundedness ===
+// === Zero-arity foundedness ===
 
 #[test]
 fn k1_faeel_unfounded_zero_arity_self_support_is_dropped_from_founded_base() {
@@ -104,7 +103,7 @@ fn k1_faeel_accepts_zero_arity_self_support_with_independent_foundation() {
     );
 }
 
-// === K2: nonzero-arity foundedness per tuple key ===
+// === Nonzero-arity foundedness per tuple key ===
 
 #[test]
 fn k2_faeel_accepts_nonzero_self_support_when_support_subsumes_modal_domain() {

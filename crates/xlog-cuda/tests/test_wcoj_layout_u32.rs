@@ -1,6 +1,6 @@
 // crates/xlog-cuda/tests/test_wcoj_layout_u32.rs
-//! Tests for the v0.6.2 GPU WCOJ sorted-layout construction
-//! kernel (u32, slice 1).
+//! Tests for the GPU WCOJ sorted-layout construction path for
+//! u32 inputs.
 //!
 //! Locks the provider entry
 //! `CudaKernelProvider::wcoj_layout_u32_recorded(input, launch_stream)`

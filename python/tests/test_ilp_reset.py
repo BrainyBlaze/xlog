@@ -126,12 +126,14 @@ def test_reset_no_state_leak_across_masks():
     )
 
 
-def test_reset_d2h_counter_cleared():
-    """D2H transfer counter must be zero after reset."""
+def test_reset_device_to_host_counter_cleared():
+    """Device-to-host transfer counter must be zero after reset."""
     prog = _compile()
     prog.reset_d2h_transfer_count()
     prog.reset_runtime()
-    assert prog.d2h_transfer_count() == 0, "D2H counter should be 0 after reset"
+    assert prog.d2h_transfer_count() == 0, (
+        "Device-to-host counter should be 0 after reset"
+    )
 
 
 from pyxlog.ilp import TrainConfig, train_only

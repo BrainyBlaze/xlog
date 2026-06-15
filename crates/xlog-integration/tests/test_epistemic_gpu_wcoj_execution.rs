@@ -887,7 +887,7 @@ fn accepted_epistemic_k5_execution_certifies_production_wcoj_dispatch() {
     assert_eq!(result.prepared.preflight.kclique_stream_group_count, 1);
     assert_eq!(
         result.prepared.preflight.kclique_skew_scheduled_plan_count, 1,
-        "accepted K5 must carry G38-B buried-skew helper scheduling"
+        "accepted K5 must carry buried-skew helper scheduling"
     );
     assert_eq!(result.prepared.preflight.sorted_layout_requirement_count, 1);
     assert_eq!(result.prepared.preflight.helper_split_spec_count, 1);
@@ -939,7 +939,7 @@ fn accepted_epistemic_k5_execution_certifies_production_wcoj_dispatch() {
 }
 
 #[test]
-fn accepted_epistemic_k6_execution_certifies_g38b_helper_histogram_path() {
+fn accepted_epistemic_k6_execution_certifies_helper_histogram_path() {
     let Some(fix) = make_runtime_backed_fixture() else {
         eprintln!("Skipping: CUDA runtime unavailable");
         return;
@@ -985,7 +985,7 @@ fn accepted_epistemic_k6_execution_certifies_g38b_helper_histogram_path() {
     assert_eq!(result.prepared.preflight.kclique_stream_group_count, 1);
     assert_eq!(
         result.prepared.preflight.kclique_skew_scheduled_plan_count, 1,
-        "accepted K6 must carry G38-B buried-skew helper scheduling"
+        "accepted K6 must carry buried-skew helper scheduling"
     );
     assert!(
         result.prepared.preflight.sorted_layout_requirement_count >= 1,
@@ -993,7 +993,7 @@ fn accepted_epistemic_k6_execution_certifies_g38b_helper_histogram_path() {
     );
     assert!(
         result.prepared.preflight.helper_split_spec_count >= 1,
-        "accepted K6 must carry G38-B helper-split specs for buried skew"
+        "accepted K6 must carry helper-split specs for buried skew"
     );
     assert!(
         result.prepared.preflight.helper_relation_rule_count >= 1,

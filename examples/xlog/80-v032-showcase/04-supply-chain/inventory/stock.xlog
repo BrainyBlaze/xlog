@@ -7,7 +7,7 @@
 //   - 50+ products across multiple categories
 //   - Multi-warehouse inventory tracking
 //   - Daily demand and reorder point management
-//   - Bill of Materials (BOM) for manufactured products
+//   - Bill of materials for manufactured products
 // =============================================================================
 
 // --- Core Predicates ---
@@ -729,22 +729,22 @@ stock(wh_newark, prod_bubble_wrap, 132).
 stock(wh_newark, prod_peanuts_foam, 85).
 
 // =============================================================================
-// BILL OF MATERIALS (BOM)
+// BILL OF MATERIALS
 // =============================================================================
 
-// ProBook Laptop 15 BOM
+// ProBook Laptop 15 bill of materials
 bom(prod_laptop_pro, prod_cpu_i7, 1).
 bom(prod_laptop_pro, prod_ram_16gb, 2).
 bom(prod_laptop_pro, prod_ssd_1tb, 1).
 bom(prod_laptop_pro, prod_monitor_27, 1).
 bom(prod_laptop_pro, prod_keyboard_mech, 1).
 
-// AirBook Laptop 13 BOM
+// AirBook Laptop 13 bill of materials
 bom(prod_laptop_air, prod_cpu_ryzen7, 1).
 bom(prod_laptop_air, prod_ram_16gb, 1).
 bom(prod_laptop_air, prod_ssd_512, 1).
 
-// PowerTower Desktop BOM
+// PowerTower Desktop bill of materials
 bom(prod_desktop_tower, prod_cpu_i9, 1).
 bom(prod_desktop_tower, prod_gpu_rtx4090, 1).
 bom(prod_desktop_tower, prod_ram_32gb, 4).
@@ -753,25 +753,25 @@ bom(prod_desktop_tower, prod_psu_850w, 1).
 bom(prod_desktop_tower, prod_motherboard_intel, 1).
 bom(prod_desktop_tower, prod_case_mid, 1).
 
-// Motherboard sub-components (for recursive BOM)
+// Motherboard sub-components (for recursive bill-of-materials expansion)
 bom(prod_motherboard_intel, prod_cpu_i7, 1).
 bom(prod_motherboard_amd, prod_cpu_ryzen7, 1).
 
 // =============================================================================
-// RECURSIVE BOM EXPLOSION
+// RECURSIVE BILL-OF-MATERIALS EXPANSION
 // =============================================================================
 
-// Exploded BOM: product, component, total_quantity
+// Expanded bill of materials: product, component, total quantity
 pred bom_exploded(symbol, symbol, u32).
 
 // Base case: direct components
-bom_exploded(Product, Component, Qty) :- bom(Product, Component, Qty).
+bom_exploded(Product, Component, Quantity) :- bom(Product, Component, Quantity).
 
 // Recursive case: sub-components of components
-bom_exploded(Product, SubComponent, TotalQty) :-
-    bom(Product, Component, ParentQty),
-    bom_exploded(Component, SubComponent, ChildQty),
-    TotalQty is ParentQty * ChildQty.
+bom_exploded(Product, SubComponent, TotalQuantity) :-
+    bom(Product, Component, ParentQuantity),
+    bom_exploded(Component, SubComponent, ChildQuantity),
+    TotalQuantity is ParentQuantity * ChildQuantity.
 
 // =============================================================================
 // INVENTORY ANALYTICS
@@ -779,32 +779,32 @@ bom_exploded(Product, SubComponent, TotalQty) :-
 
 // Total stock per product across all warehouses
 pred total_stock(symbol, u64).
-total_stock(ProductId, sum(Qty)) :- stock(_, ProductId, Qty).
+total_stock(Product, sum(Quantity)) :- stock(_, Product, Quantity).
 
 // Inventory value per warehouse
 pred warehouse_value(symbol, u64).
-warehouse_value(WarehouseId, sum(Value)) :-
-    stock(WarehouseId, ProductId, Qty),
-    unit_cost(ProductId, Cost),
-    Value is Qty * Cost.
+warehouse_value(Warehouse, sum(Value)) :-
+    stock(Warehouse, Product, Quantity),
+    unit_cost(Product, Cost),
+    Value is Quantity * Cost.
 
 // Low stock alert: product below reorder point at a warehouse
 pred low_stock_alert(symbol, symbol, u32, u32).
-low_stock_alert(WarehouseId, ProductId, CurrentQty, ReorderPt) :-
-    stock(WarehouseId, ProductId, CurrentQty),
-    reorder_point(ProductId, ReorderPt),
-    CurrentQty < ReorderPt.
+low_stock_alert(Warehouse, Product, CurrentQuantity, ReorderPoint) :-
+    stock(Warehouse, Product, CurrentQuantity),
+    reorder_point(Product, ReorderPoint),
+    CurrentQuantity < ReorderPoint.
 
 // Helper: compute 2-day threshold from daily demand
 pred two_day_threshold(symbol, u32, u32).
-two_day_threshold(ProductId, DailyDmd, Threshold) :-
-    daily_demand(ProductId, DailyDmd),
-    DailyDmd > 0,
-    Threshold is DailyDmd * cast(2, u32).
+two_day_threshold(Product, DailyDemand, Threshold) :-
+    daily_demand(Product, DailyDemand),
+    DailyDemand > 0,
+    Threshold is DailyDemand * cast(2, u32).
 
 // Critical stock: less than 2 days of stock
 pred critical_stock(symbol, symbol, u32, u32).
-critical_stock(WarehouseId, ProductId, CurrentQty, DailyDmd) :-
-    stock(WarehouseId, ProductId, CurrentQty),
-    two_day_threshold(ProductId, DailyDmd, Threshold),
-    CurrentQty < Threshold.
+critical_stock(Warehouse, Product, CurrentQuantity, DailyDemand) :-
+    stock(Warehouse, Product, CurrentQuantity),
+    two_day_threshold(Product, DailyDemand, Threshold),
+    CurrentQuantity < Threshold.

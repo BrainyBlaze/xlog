@@ -136,10 +136,13 @@ class TestBatchedProgramStructure:
         """Test the MNIST addition program structure."""
         program = pyxlog.Program.compile("""
             nn(digit_net, [X], Y, [0,1,2,3,4,5,6,7,8,9]) :: digit(X, Y).
-            addition(X, Y, Z) :- digit(X, D1), digit(Y, D2), Z is D1 + D2.
+            addition(FirstImage, SecondImage, Sum) :-
+                digit(FirstImage, FirstDigitValue),
+                digit(SecondImage, SecondDigitValue),
+                Sum is FirstDigitValue + SecondDigitValue.
         """)
 
-        # This program would call digit_net twice for addition(a, b, Z)
+        # This program would call digit_net twice for addition(a, b, Sum)
         # Batching groups both calls into single forward pass
         assert "digit_net" in program.declared_network_names()
 
@@ -147,9 +150,11 @@ class TestBatchedProgramStructure:
         """Test multi-digit number recognition program."""
         program = pyxlog.Program.compile("""
             nn(digit_net, [X], Y, [0,1,2,3,4,5,6,7,8,9]) :: digit(X, Y).
-            number(D1, D2, D3, N) :-
-                digit(D1, V1), digit(D2, V2), digit(D3, V3),
-                N is V1 * 100 + V2 * 10 + V3.
+            number(FirstDigitInput, SecondDigitInput, ThirdDigitInput, NumberValue) :-
+                digit(FirstDigitInput, FirstDigitValue),
+                digit(SecondDigitInput, SecondDigitValue),
+                digit(ThirdDigitInput, ThirdDigitValue),
+                NumberValue is FirstDigitValue * 100 + SecondDigitValue * 10 + ThirdDigitValue.
         """)
 
         # This would need 3 digit classifications - perfect for batching
@@ -158,11 +163,13 @@ class TestBatchedProgramStructure:
     def test_sequence_labeling_structure(self):
         """Test sequence labeling program structure."""
         program = pyxlog.Program.compile("""
-            nn(tagger, [W], T, [noun, verb, adj]) :: tag(W, T).
-            valid_sequence(W1, W2, W3) :-
-                tag(W1, T1), tag(W2, T2), tag(W3, T3),
-                valid_transition(T1, T2),
-                valid_transition(T2, T3).
+            nn(tagger, [Token], TokenTag, [noun, verb, adj]) :: tag(Token, TokenTag).
+            valid_sequence(FirstToken, SecondToken, ThirdToken) :-
+                tag(FirstToken, FirstTokenTag),
+                tag(SecondToken, SecondTokenTag),
+                tag(ThirdToken, ThirdTokenTag),
+                valid_transition(FirstTokenTag, SecondTokenTag),
+                valid_transition(SecondTokenTag, ThirdTokenTag).
             valid_transition(noun, verb).
             valid_transition(verb, noun).
             valid_transition(adj, noun).

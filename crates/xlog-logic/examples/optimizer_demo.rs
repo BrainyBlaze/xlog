@@ -608,9 +608,9 @@ fn demo_graph_analytics() {
         // Triangle detection pattern
         // ============================================
         triangle(A, B, C) :-
-            edge(A, B, W1),
-            edge(B, C, W2),
-            edge(C, A, W3),
+            edge(A, B, WeightAB),
+            edge(B, C, WeightBC),
+            edge(C, A, WeightCA),
             A < B, B < C.
     "#;
 
@@ -860,10 +860,10 @@ fn demo_business_intelligence() {
         // ============================================
         // Product affinity (frequently bought together)
         // ============================================
-        same_customer_products(P1, P2) :-
-            fact_sales(S1, P1, C, St1, D1, Q1, A1),
-            fact_sales(S2, P2, C, St2, D2, Q2, A2),
-            P1 < P2.
+        same_customer_products(ProductA, ProductB) :-
+            fact_sales(SaleA, ProductA, Customer, StoreA, DateA, QuantityA, AmountA),
+            fact_sales(SaleB, ProductB, Customer, StoreB, DateB, QuantityB, AmountB),
+            ProductA < ProductB.
     "#;
 
     println!("\nCompiling business intelligence program...");

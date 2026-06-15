@@ -1,17 +1,17 @@
 # XLOG Language Reference
 
-> **Release context:** XLOG `v0.9.2`
-> **Language coverage:** Core v0.8.0 language, the v0.8.5 language-completeness contract, the v0.9.0 epistemic solver surface, the v0.9.1 epistemic executor completion (EIR-derived candidate enumeration, value-level modal membership, per-tuple-key FAEEL foundedness, ground epistemic constraints, safe split, and joint multi-epistemic solving), and the v0.9.2 semantic completion (mixed global+per-row modal gates compose conjunctively; finite nested modal chains normalize by parity/duality; same-name multi-arity disambiguates by arity-qualified tuple sources; recursive execution covers Case-A/determined stratification, positive Case-B/G91 recursion, stratified negated modals, and cyclic negated modals through the `xlog-gpu` GPU-backed WFS plan without the old `xlog_prob` host-WFS solver; only genuinely unbounded, unsafe, or unfounded modal cycles remain fail-closed)
+> **Release context:** Current released language surface
+> **Language coverage:** Core language, the language-completeness contract, the epistemic solver surface, epistemic executor completion (EIR-derived candidate enumeration, value-level modal membership, per-tuple-key FAEEL foundedness, ground epistemic constraints, safe split, and joint multi-epistemic solving), and semantic completion (mixed global+per-row modal gates compose conjunctively; finite nested modal chains normalize by parity/duality; same-name multi-arity disambiguates by arity-qualified tuple sources; recursive execution covers determined stratification, positive Gelfond 1991 compatibility recursion, stratified negated modals, and cyclic negated modals through the `xlog-gpu` GPU-backed WFS plan without the old `xlog_prob` host-WFS solver; only genuinely unbounded, unsafe, or unfounded modal cycles remain fail-closed)
 > **Last Updated:** June 2026
 
 This document provides a comprehensive reference for the XLOG language,
 covering all syntax, semantics, and features of XLOG as a GPU-native logic
 programming language.
 
-The v0.8.5 additions remain the language-completeness contract for finite
+The language-completeness additions define the contract for finite
 terms, lists, safe meta-predicates, deterministic negation, magic sets,
 probabilistic aggregates, approximate inference, and CLI inspectability.
-The v0.9.x line adds the accepted epistemic source surface: `know`, `possible`,
+The epistemic source surface adds `know`, `possible`,
 `not know`, `not possible`, and `#pragma epistemic_mode = faeel|g91`.
 Accepted epistemic programs route through the high-level EIR and GPU epistemic
 runtime; unsupported forms must fail with typed diagnostics rather than
@@ -24,7 +24,7 @@ silently falling back to CPU evaluation.
 1. [Overview](#overview)
 2. [Basic Syntax](#basic-syntax)
 3. [Data Types](#data-types)
-4. [v0.8.5 Language Contract](#v085-language-contract)
+4. [Language Completeness Contract](#language-completeness-contract)
 5. [Predicates and Declarations](#predicates-and-declarations)
 6. [Facts](#facts)
 7. [Rules](#rules)
@@ -66,8 +66,8 @@ logic programs into backend-specific GPU execution paths. It supports:
 - **Aggregations**: `count`, `sum`, `min`, `max`, and `logsumexp`
 - **Probabilistic reasoning**: Probabilistic facts, annotated disjunctions, evidence, and queries
 - **Epistemic reasoning**: `know`/`possible` modal body literals, FAEEL default
-  semantics, and G91 compatibility mode through explicit EIR/GPU execution paths
-- **v0.8.5 language contract**: Finite lists, safe meta-predicates, explicit
+  semantics, and Gelfond 1991 compatibility mode through explicit EIR/GPU execution paths
+- **Language-completeness contract**: Finite lists, safe meta-predicates, explicit
   negation contracts, magic-set planning, probabilistic aggregate semantics,
   approximate inference configuration, incremental parsing, and CLI
   inspectability
@@ -199,28 +199,28 @@ temperature(1, 22).           // Error: 22 inferred as i64, not f64
 temperature(1, cast(22, f64)). // Correct: explicit cast
 ```
 
-### v0.8.5 Type Forms
+### Language-Completeness Type Forms
 
-v0.8.5 extends the type model with finite language-level terms that must lower
+The language-completeness contract extends the type model with finite language-level terms that must lower
 to typed relation layouts before execution:
 
 | Type form | Meaning | Execution status |
 |-----------|---------|------------------|
-| `domain name: type` | Named alias for an existing scalar type | Existing source form; v0.8.5 requires alias preservation in diagnostics and schema metadata |
-| `column: type` | Named predicate column | v0.8.5 contract; named predicate columns are accepted and preserved in schema metadata |
-| `list<T>` | Finite homogeneous list of `T` | v0.8.5 contract; accepted lists lower to helper relations, not CPU term heaps |
-| `term` | Finite ground term value | v0.8.5 contract; only finite, typed terms are accepted |
-| `compound` | Finite compound term with functor and arity | v0.8.5 contract; unsupported recursive or open compounds are rejected |
-| `predref` | Static predicate reference for `maplist` and related meta use | v0.8.5 contract; runtime-variable predicate names are rejected |
+| `domain name: type` | Named alias for an existing scalar type | Existing source form; the contract requires alias preservation in diagnostics and schema metadata |
+| `column: type` | Named predicate column | Named predicate columns are accepted and preserved in schema metadata |
+| `list<T>` | Finite homogeneous list of `T` | Accepted lists lower to helper relations, not CPU term heaps |
+| `term` | Finite ground term value | Only finite, typed terms are accepted |
+| `compound` | Finite compound term with functor and arity | Unsupported recursive or open compounds are rejected |
+| `predref` | Static predicate reference for `maplist` and related meta use | Runtime-variable predicate names are rejected |
 
 Unsupported type forms must fail during parsing or semantic analysis before
 runtime execution starts.
 
 ---
 
-## v0.8.5 Language Contract
+## Language Completeness Contract
 
-v0.8.5 is a language-surface expansion over the v0.8.0 runtime. New syntax is
+The language-completeness contract is a language-surface expansion over the core runtime. New syntax is
 accepted only when it can be normalized into the existing typed AST, RIR,
 probabilistic IR, optimizer, runtime, WCOJ, and CLI paths.
 
@@ -234,7 +234,7 @@ probabilistic IR, optimizer, runtime, WCOJ, and CLI paths.
 | Runtime, epistemic, and probability engines | Execute accepted relational, epistemic, aggregate, exact, and MC work through production GPU-capable paths |
 | CLI | Orchestrate commands, format diagnostics, and transfer only requested final results |
 
-Accepted v0.8.5 and v0.9 epistemic features must not execute by constructing
+Accepted language-completeness and epistemic features must not execute by constructing
 an arbitrary CPU Prolog term heap, running dynamic CPU predicate calls, or
 using a hidden CPU-only fallback for a GPU-claimed path.
 
@@ -250,14 +250,14 @@ using a hidden CPU-only fallback for a GPU-claimed path.
 | Probabilistic aggregates | Aggregate heads and aggregate outputs in `query`/`evidence` | Finite aggregate outcomes in exact and MC inference | `query(out_degree(1, 2)).` over probabilistic `edge` facts | Exact aggregate domains over cap, unsupported numeric operator/domain pairs | Exact provenance/PIR or MC sampling plus deterministic aggregate execution |
 | Aggregate lifting | Finite-domain aggregate metadata and caps | Use lifted compact-domain computation when identical to finite exact enumeration | Small count/sum domains avoid naive enumeration | Domain cap exceeded, non-finite domains, unsupported floating tolerance | Probabilistic aggregate planner and exact/MC engines |
 | Approximate inference | `#pragma prob_engine = mc`, samples, seed, confidence, method | MC estimates are reproducible under fixed seed and report uncertainty | `#pragma prob_samples = 10000` with `query(rain).` | Invalid confidence ranges, unsupported methods, hidden default override ambiguity | Existing MC engine with documented source/CLI precedence |
-| Epistemic literals | `know atom(...)`, `possible atom(...)`, `not know atom(...)`, `not possible atom(...)`, finite nested modal chains, `#pragma epistemic_mode = faeel\|g91` | Modal literals are preserved in EIR; v0.9.2 derives candidate worlds from EIR, checks value-level tuple-key membership, normalizes finite nested chains by parity/duality, solves same-name multi-arity by arity-qualified tuple sources, supports determined-head stratification, positive Case-B/G91 recursion, stratified negated-modal recursion, and cyclic negated-modal recursion through the `xlog-gpu` GPU-backed WFS plan without the old `xlog_prob` host-WFS solver. This is not a device-resident/no-host-interaction WFS residency claim; host orchestration and metadata convergence reads may still occur. | `accepted() :- know fact().` | Direct raw RIR lowering, genuinely unbounded/untyped modal tuple keys, unsafe unbound negated epistemic variables, CPU-only world-view scans, and genuine modal cycles without a founded order | Parser/AST -> EIR -> epistemic GPU executable plans, reduced ordinary plans, or GPU-backed WFS alternating-fixpoint plans through high-level `xlog run` dispatch |
+| Epistemic literals | `know atom(...)`, `possible atom(...)`, `not know atom(...)`, `not possible atom(...)`, finite nested modal chains, `#pragma epistemic_mode = faeel\|g91` | Modal literals are preserved in EIR; the epistemic executor derives candidate worlds from EIR, checks value-level tuple-key membership, normalizes finite nested chains by parity/duality, solves same-name multi-arity by arity-qualified tuple sources, supports determined-head stratification, positive Gelfond 1991 compatibility recursion, stratified negated-modal recursion, and cyclic negated-modal recursion through the `xlog-gpu` GPU-backed WFS plan without the old `xlog_prob` host-WFS solver. This is not a device-resident/no-host-interaction WFS residency claim; host orchestration and metadata convergence reads may still occur. | `accepted() :- know fact().` | Direct raw RIR lowering, genuinely unbounded/untyped modal tuple keys, unsafe unbound negated epistemic variables, CPU-only world-view scans, and genuine modal cycles without a founded order | Parser/AST -> EIR -> epistemic GPU executable plans, reduced ordinary plans, or GPU-backed WFS alternating-fixpoint plans through high-level `xlog run` dispatch |
 | CLI explain | `xlog explain --format text|json|dot file.xlog` | Show parse, strata, RIR, optimized RIR, magic-set, WCOJ, and probability sections when applicable | `xlog explain --format json reach.xlog` | Unknown output formats or unavailable sections without a typed reason | CLI orchestration plus compiler/explain APIs |
 | CLI REPL | `xlog repl` | Interactive multiline fact/rule/query session using parser cache | Add facts, then query relation state | GPU execution before a command requests it, unsupported mutation semantics | CLI session cache plus normal compile/run on submitted programs |
 | CLI watch | `xlog watch file.xlog` | Rerun or re-explain changed files with debounce and typed diagnostics | Edit a rule and see updated diagnostics/output | Silent stale cache reuse after file/module change | CLI file watcher plus parser/session cache and normal commands |
 
 ### Diagnostic Contract
 
-Unsupported v0.8.5 and v0.9 epistemic forms must report:
+Unsupported language-completeness and epistemic forms must report:
 
 - the feature area, such as `list`, `meta`, `naf`, `magic_sets`,
   `prob_aggregate`, or `epistemic`;
@@ -271,7 +271,7 @@ Diagnostic examples:
 ```text
 list error at program.xlog:12: unbounded append/3 generation is unsupported; bind at least two list arguments or add a finite split mode.
 meta error at program.xlog:8: maplist predicate argument must be a static predref; replace runtime variable P with a named predicate.
-v0.8.5 naf error: unbound variable Y in negated atom edge/2; bind it before not with a positive atom or deterministic is expression, or use '_' for existential positions.
+negation safety error: unbound variable Y in negated atom edge/2; bind it before not with a positive atom or deterministic is expression, or use '_' for existential positions.
 magic_sets declined at program.xlog:21: recursive query crosses an aggregate boundary; run with #pragma magic_sets = off or isolate the aggregate.
 prob_aggregate error at program.xlog:17: exact aggregate domain exceeds cap 1024; add a finite cap or use prob_engine = mc.
 epistemic error at program.xlog:9: unbounded modal tuple key [H|T] has no finite GPU key-column set; use a fixed-arity typed list or bind the tail to a finite relation.
@@ -279,14 +279,14 @@ epistemic error at program.xlog:9: unbounded modal tuple key [H|T] has no finite
 
 ### Source-Audit Status
 
-The historic `G085_DOCREF` checkpoint is retained by the v0.8.5 rows above.
+The historic documentation-reference checkpoint is retained by the language-completeness rows above.
 Current source accepts the epistemic literals and `epistemic_mode` pragma listed
-here and routes accepted epistemic examples through `xlog run`. The v0.9.1
-epistemic executor adds EIR-derived candidate enumeration, value-level modal
+here and routes accepted epistemic examples through `xlog run`. The epistemic
+executor adds EIR-derived candidate enumeration, value-level modal
 membership, per-tuple-key FAEEL foundedness, ground and variable-keyed epistemic
 integrity constraints, safe split equivalence, same-name multi-arity
 disambiguation, finite nested-chain normalization, determined-head
-stratification, positive Case-B/G91 recursion, stratified negated-modal
+stratification, positive Gelfond 1991 compatibility recursion, stratified negated-modal
 recursion, and cyclic negated-modal recursion through the `xlog-gpu`
 GPU-backed WFS plan without the old `xlog_prob` host-WFS solver.
 The remaining unsupported epistemic boundaries are
@@ -685,7 +685,7 @@ p(X) :- q(X), not p(X).
 ```
 
 XLOG detects unstratifiable deterministic programs at compile time and reports
-a `v0.8.5 naf error`. Low-level stratification analysis still reports the
+a `negation safety error`. Low-level stratification analysis still reports the
 underlying dependency cycle for callers that use it directly.
 
 ### Domain Safety
@@ -817,11 +817,11 @@ score(X, logsumexp(Y)) :- obs(X, Y).
 
 ## Lists
 
-v0.8.5 defines finite list syntax and list built-ins. Lists are accepted only
+The language-completeness contract defines finite list syntax and list built-ins. Lists are accepted only
 when they are finite and typed; accepted programs lower to relation layouts and
 normal GPU-capable execution paths.
 
-Implementation status after `G085_META`: scalar, symbol, nested finite list,
+Current finite-list implementation status: scalar, symbol, nested finite list,
 and finite meta term IDs are normalized to `u64` list identifiers plus
 `__xlog_list_*` helper relations. `list<T>` predicate columns lower to scalar
 list-id columns while helper relations carry length, item, cons, append, sort,
@@ -885,7 +885,7 @@ path_len(Name, N) :- path(Name, Steps), length(Steps, N).
 
 ### Unsupported Forms
 
-The following forms are outside the v0.8.5 contract:
+The following forms are outside the finite-list contract:
 
 - unbounded list generation, such as asking `append(A, B, [1,2,3])` to
   enumerate every split unless a finite split mode is explicitly implemented;
@@ -898,11 +898,11 @@ The following forms are outside the v0.8.5 contract:
 
 ## Safe Meta-Predicates
 
-v0.8.5 safe meta-predicates provide finite term inspection and static
+Safe meta-predicates provide finite term inspection and static
 predicate mapping. They do not introduce an unrestricted Prolog dynamic
 database or unrestricted `call/N`.
 
-Implementation status after `G085_META`: accepted safe meta forms normalize
+Current safe-meta implementation status: accepted safe meta forms normalize
 before stratification and lowering into ordinary helper relations such as
 `__xlog_meta_functor`, `__xlog_meta_univ`, `__xlog_meta_findall_*`, and
 `__xlog_meta_maplist_*`. Finite `term`, `compound`, and `predref` predicate
@@ -947,7 +947,7 @@ all_positive(1) :- maplist(positive, [1, 2, 3]).
 - `assert`, `retract`, dynamic database mutation, or IO predicates;
 - `findall` over derived goals or goals with variables that are neither bound
   before `findall` nor collected by the template;
-- non-literal `maplist` inputs in the current `G085_META` subset;
+- non-literal `maplist` inputs in the current safe-meta subset;
 - constructing recursive or open compound terms with `=..`;
 - higher-arity `maplist` unless explicitly implemented and tested.
 
@@ -957,7 +957,7 @@ all_positive(1) :- maplist(positive, [1, 2, 3]).
 
 Magic-set rewriting specializes bound deterministic recursive queries by adding
 derived magic predicates and adorned rules before optimization. The accepted
-`G085_MAGIC` subset is a source-level rewrite over positive recursive rules
+accepted magic-set subset is a source-level rewrite over positive recursive rules
 that can be proven query-equivalent under the supported left-to-right SIPS.
 
 ### Configuration
@@ -970,7 +970,7 @@ that can be proven query-equivalent under the supported left-to-right SIPS.
 
 `auto` lets the compiler apply the rewrite only when it can prove that the
 transformed program preserves query output. `on` requests the rewrite and fails
-with a typed `v0.8.5 magic_sets error` if the compiler cannot safely apply it.
+with a typed `magic_sets error` if the compiler cannot safely apply it.
 `off` disables the rewrite.
 
 ### Example
@@ -1010,7 +1010,7 @@ with a typed diagnostic for:
 - unbound recursive calls under the supported SIPS;
 - rules with negation, aggregation, comparison, `is`, or unnormalized univ in
   the recursive target;
-- recursive rules that cross v0.8.5 list/meta helper predicates;
+- recursive rules that cross language-completeness list/meta helper predicates;
 - mutual-recursive SCCs in the current subset;
 - probabilistic profiles, which remain governed by the probabilistic engine.
 
@@ -1244,7 +1244,7 @@ Symbols can be compared for equality:
 same_status(X, Y) :- item(X, S), item(Y, S), X != Y.
 ```
 
-### Reversible Symbols (v0.3.2)
+### Reversible Symbols
 
 Symbols are **reversible**: the original string value is preserved and
 displayed in query output. Symbols are stored internally as `u32` IDs with a
@@ -1366,7 +1366,7 @@ XLOG supports two inference engines:
 
 | Engine | Flag | Description |
 |--------|------|-------------|
-| **Exact** | `--prob-engine exact_ddnnf` | Knowledge compilation via D4; exact probabilities |
+| **Exact** | `--prob-engine exact_ddnnf` | Knowledge compilation via Decision-DNNF; exact probabilities |
 | **Monte Carlo** | `--prob-engine mc` | Sampling-based; approximate with confidence intervals |
 
 **Exact inference** supports:
@@ -1379,19 +1379,19 @@ XLOG supports two inference engines:
   finite domain cap is respected
 - **Gradients**: Correct gradient flow through negated literals
 
-**Probabilistic aggregates in v0.8.5:** finite `count`, `sum`, `min`, `max`,
+**Probabilistic aggregates in the language-completeness contract:** finite `count`, `sum`, `min`, `max`,
 and `logsumexp` aggregate programs are supported for exact and MC inference in
-the finite `G085_PROB_AGG` subset. Exact mode enumerates finite aggregate
+the finite probabilistic-aggregate subset. Exact mode enumerates finite aggregate
 outcomes into provenance/PIR formulas, so `query` and `evidence` may reference
 aggregate output tuples. Exact enumeration is capped at 16 uncertain
 contributing rows per group; cap excess fails with a typed
-`v0.8.5 prob_aggregate error` that recommends MC or reducing the finite domain.
+`prob_aggregate error` that recommends MC or reducing the finite domain.
 
 **Monte Carlo** supports probabilistic rules and non-monotone recursion.
 The production MC path is the GPU-resident megakernel engine, which rejects
 negation, aggregates, and other unbounded constructs with a typed
 `ResidentRejection`. Programs in that fragment (including non-monotone
-recursion and v0.8.5 probabilistic aggregates under MC) require an explicit
+recursion and language-completeness probabilistic aggregates under MC) require an explicit
 opt-in to the **labeled CPU oracle** — `--allow-cpu-oracle` on the CLI,
 `allow_cpu_oracle=True` in Python, `McEvalConfig::allow_cpu_oracle_fallback`
 in Rust — and their results carry `mc_engine = "cpu-oracle"`. Without the
@@ -1429,12 +1429,12 @@ semantically identical to finite exact enumeration. Explain output must report
 the detected finite domain, cap, operator, and whether lifting fired, declined,
 or fell back to supported exact enumeration.
 
-In the `G085_AGG_LIFT` subset, finite probabilistic `count` aggregate heads use
+In the aggregate-lifting subset, finite probabilistic `count` aggregate heads use
 exact cardinality dynamic programming when every aggregate expression in the
 head is `count(...)`. The lift constructs formulas for exactly `k` contributing
 rows over the same row-presence formulas used by finite enumeration, so it does
 not change exact semantics. The count lift accepts up to 64 uncertain rows per
-group; larger count domains fail closed with a typed `v0.8.5 agg_lift error`.
+group; larger count domains fail closed with a typed `agg_lift error`.
 
 `sum`, `min`, `max`, and `logsumexp` remain on exact finite outcome enumeration
 in this subset. Their explain entries report `fallback_exact_enumeration` with a
@@ -1443,7 +1443,7 @@ cap. `xlog explain --format json` emits an `aggregate_lifting` array containing
 the predicate, group key, operator, finite-domain source, domain size, cap,
 status, reason, naive outcome count, and dynamic-programming state count.
 
-### Monte Carlo Sampling Methods (v0.5.0)
+### Monte Carlo Sampling Methods
 
 The Monte Carlo engine supports two sampling methods:
 
@@ -1524,7 +1524,7 @@ query(p).  // P(p) ≈ 0.5 ± CI
 
 ## Epistemic Logic
 
-*Introduced in v0.9.0; executor completed through v0.9.2.*
+Epistemic logic is part of the accepted source surface.
 
 Epistemic logic adds modal body literals for bounded knowledge and possibility
 reasoning. Modal literals are valid in rule bodies and use the same atom syntax
@@ -1541,7 +1541,7 @@ as ordinary predicates.
 
 Finite nested modal chains such as `know possible fact()`,
 `not know possible fact()`, and `know not possible fact()` are accepted program
-forms. The parser normalizes them to a single epistemic literal by the v0.9.2
+forms. The parser normalizes them to a single epistemic literal by the semantic
 parity/duality rules: the operator adjacent to the atom determines the modal
 operator, while leading/interior/atom-adjacent `not` tokens dualize or negate
 the resulting literal according to their position.
@@ -1554,7 +1554,7 @@ the resulting literal according to their position.
 ```
 
 `faeel` is the default epistemic mode when no pragma is present. `g91` is an
-explicit compatibility mode for programs that need G91 possibility behavior.
+explicit compatibility mode for programs that need Gelfond 1991 possibility behavior.
 
 ### Runtime Boundary
 
@@ -1577,7 +1577,7 @@ fact().
 accepted() :- know fact().
 ```
 
-G91 compatibility:
+Gelfond 1991 compatibility:
 
 ```xlog
 #pragma epistemic_mode = g91
@@ -1642,7 +1642,7 @@ report uncertainty, sample counts, evidence handling, and sampling method.
 CLI flags override source pragmas when both are provided; the effective
 configuration must be visible in CLI output and explain JSON.
 
-In the `G085_APPROX` subset, `xlog prob` uses source `#pragma prob_engine = mc`
+In the approximate-inference subset, `xlog prob` uses source `#pragma prob_engine = mc`
 when `--prob-engine` is not supplied. CLI flags override source pragmas
 field-by-field: `--samples`, `--seed`, `--confidence`, `--prob-method`, and
 `--prob-max-nonmonotone-iterations` replace only their matching source values.
@@ -1668,10 +1668,9 @@ fail before sampling begins.
 
 ## Neural Predicates
 
-*Introduced in v0.5.0.*
-
 Neural predicate declarations embed a neural network directly into an XLOG
 program as a first-class predicate.
+
 
 ### Declaration Forms
 
@@ -1708,7 +1707,7 @@ embedding APIs.
 
 ```xlog
 nn(mnist_net, [X], Y, [0,1,2,3,4,5,6,7,8,9]) :: digit(X, Y).
-addition(X, Y, Z) :- digit(X, D1), digit(Y, D2), Z is D1 + D2.
+addition(X, Y, Z) :- digit(X, LeftDigit), digit(Y, RightDigit), Z is LeftDigit + RightDigit.
 ```
 
 Python side:
@@ -1742,8 +1741,6 @@ across both forms is rejected.
 ---
 
 ## Learnable Rules
-
-*Introduced in v0.5.0.*
 
 Learnable rules are the source-level surface for differentiable ILP. A rule is
 gated by a named mask tensor:
@@ -1782,8 +1779,6 @@ learnable(W_col) :: colleague(X, Y)   :- bL(X, Z), bR(Y, Z).
 
 ## Term Embeddings
 
-*Introduced in v0.5.0.*
-
 Term embeddings associate dense vectors with discrete logic terms.
 
 ### `register_embedding()`
@@ -1814,8 +1809,6 @@ lookup are supported. Rule-level embedding inference remains deferred.
 
 ## GPU ILP Configuration
 
-*Introduced in v0.5.0.*
-
 The GPU-resident ILP path exposes runtime configuration and telemetry through
 Python.
 
@@ -1832,7 +1825,7 @@ The older `coo_memory_cap` naming is deprecated.
 
 ### `host_transfer_stats()`
 
-Training APIs expose transfer telemetry so strict zero-D2H workflows can verify
+Training APIs expose transfer telemetry so strict zero device-to-host workflows can verify
 that the hot path stayed device-resident:
 
 ```python
@@ -1848,8 +1841,8 @@ Pragmas configure compiler and runtime behavior.
 
 The current source grammar accepts `prob_engine`, `prob_cache`,
 `epistemic_mode`, `max_recursion_depth`, `magic_sets`, and the MC configuration
-pragmas below. The v0.8.5 rows remain contract-backed where they depend on
-`G085_*` nodes; the v0.9.0 epistemic mode pragma is accepted for the epistemic
+pragmas below. The language-completeness rows remain contract-backed where they depend on
+finite-list, safe-meta, magic-set, probability, and CLI nodes; the epistemic mode pragma is accepted for the epistemic
 solver surface.
 
 ### Syntax
@@ -1864,7 +1857,7 @@ solver surface.
 |--------|--------|-------------|
 | `prob_engine` | `exact_ddnnf`, `mc` | Select probabilistic inference engine |
 | `prob_cache` | `on`, `off` | Enable/disable probability caching |
-| `epistemic_mode` | `faeel`, `g91` | Select FAEEL default or G91 compatibility epistemic semantics |
+| `epistemic_mode` | `faeel`, `g91` | Select FAEEL default or Gelfond 1991 compatibility epistemic semantics |
 | `max_recursion_depth` | integer | Maximum recursion iterations |
 | `magic_sets` | `auto`, `on`, `off` | Control bound-recursive magic-set rewriting |
 | `prob_samples` | integer | Monte Carlo sample count |
@@ -1902,7 +1895,7 @@ solver surface.
 
 ## CLI Developer Experience
 
-v0.8.5 adds developer-experience commands that make the language inspectable
+Developer-experience commands make the language inspectable
 and interactive without changing the runtime execution contract.
 
 ### `xlog explain`
@@ -1911,7 +1904,7 @@ and interactive without changing the runtime execution contract.
 xlog explain [--format text|json|dot] <FILE>
 ```
 
-The `G085_CLI` subset of explain reports deterministic parse, AST,
+The CLI explain subset reports deterministic parse, AST,
 stratification, RIR, optimizer, WCOJ, magic-set, and probability sections
 without requiring GPU execution. JSON output is deterministic for fixed input.
 
@@ -1950,7 +1943,7 @@ xlog repl [--module-path DIR[:DIR...]]
 The REPL accepts multiline facts, rules, declarations, pragmas, and queries.
 It shares the incremental parser/session cache and does not require GPU access
 until the user submits a command that needs execution.
-The `G085_CLI` smoke implementation reads a multiline stdin session, preserves
+The CLI smoke implementation reads a multiline stdin session, preserves
 the accumulated parser state, and reports statement/rule/query counts.
 
 ### `xlog watch`
@@ -1963,7 +1956,7 @@ Watch mode reruns compilation, execution, or explanation after file changes.
 It must debounce rapid writes, invalidate changed statements and dependent
 module state, and display typed diagnostics without reusing stale parse
 results.
-The `G085_CLI` smoke implementation supports `--once`, `--explain`, and
+The CLI smoke implementation supports `--once`, `--explain`, and
 `--debounce-ms`, using the shared parser session before any execution path.
 
 Unsupported REPL/watch mutation semantics, such as dynamic `assert` or
@@ -2060,8 +2053,9 @@ Block comments (`/* ... */`) are **not supported**.
 
 ## Complete Grammar Reference
 
-The following is a summary of the current XLOG grammar plus the v0.8.5 contract
-extensions and v0.9.x epistemic source surface in PEG-style notation.
+The following is a summary of the current XLOG grammar plus the
+language-completeness extensions and epistemic source surface in PEG-style
+notation.
 
 ### Lexical Elements
 
@@ -2086,7 +2080,7 @@ type_spec = { "u32" | "u64" | "i32" | "i64" | "f32" | "f64" | "bool" | "symbol" 
 type_list = { type_spec ~ ("," ~ type_spec)* }
 ```
 
-v0.8.5 contract:
+Language-completeness contract:
 
 ```pest
 type_spec = {
@@ -2113,7 +2107,7 @@ term_list = { term ~ ("," ~ term)* }
 atom = { ident ~ "(" ~ term_list? ~ ")" }
 ```
 
-v0.8.5 contract:
+Language-completeness contract:
 
 ```pest
 list_literal = { "[" ~ (term ~ ("," ~ term)*)? ~ "]" }
@@ -2312,8 +2306,8 @@ program = { SOI ~ statement* ~ EOI }
 ## See Also
 
 - [Architecture Guide](ARCHITECTURE.md) - System design and implementation details
-- [v0.8.5 Language Architecture Contract](architecture/language-v085.md) - Parser, term, probability, CLI, and v0.9.0 handoff contract
-- [Epistemic Semantics And EIR](architecture/epistemic-semantics.md) - v0.9.x epistemic source surface, EIR boundary, and GPU runtime path
+- [Language Completeness Architecture Contract](architecture/language-completeness.md) - Parser, term, probability, CLI, and epistemic/solver handoff contract
+- [Epistemic Semantics And EIR](architecture/epistemic-semantics.md) - Epistemic source surface, EIR boundary, and GPU runtime path
 - [Arithmetic Expressions](architecture/arithmetic-expressions.md) - Detailed `is` syntax documentation
 - [Probabilistic Tier](architecture/xlog-prob.md) - Exact and Monte Carlo inference
 - [GPU Execution](architecture/gpu-execution.md) - GPU-resident evaluation details

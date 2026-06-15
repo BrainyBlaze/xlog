@@ -1,4 +1,4 @@
-//! Category G06: PTX Kernel Robustness Tests
+//! PTX kernel robustness tests
 //!
 //! Tests the robustness of PTX kernels under various edge conditions:
 //! - Circuit size edge cases (single node, single level, deep circuits, large circuits)
@@ -13,21 +13,21 @@ use std::time::Instant;
 
 /// Run all tests in this category.
 pub fn run_all(ctx: &TestContext) -> CategoryResult {
-    let mut results = CategoryResult::new("g06_ptx_robustness");
+    let mut results = CategoryResult::new("ptx_kernel_robustness");
     let start = Instant::now();
 
-    // G06.1: Circuit Size Edge Cases (4 tests)
+    // Circuit size edge-case checks (4 tests)
     results.add_result(test_kernel_single_node(ctx));
     results.add_result(test_kernel_single_level(ctx));
     results.add_result(test_kernel_deep_circuit(ctx));
     results.add_result(test_kernel_large_circuit(ctx));
 
-    // G06.2: Variable Count Limits (3 tests)
+    // Variable count limit checks (3 tests)
     results.add_result(test_kernel_max_variables(ctx));
     results.add_result(test_kernel_sparse_variables(ctx));
     results.add_result(test_kernel_many_literals(ctx));
 
-    // G06.3: Numerical Stability (3 tests)
+    // Numerical stability checks (3 tests)
     results.add_result(test_kernel_log_underflow(ctx));
     results.add_result(test_kernel_logsumexp_stability(ctx));
     results.add_result(test_kernel_determinism(ctx));
@@ -37,7 +37,7 @@ pub fn run_all(ctx: &TestContext) -> CategoryResult {
 }
 
 // =============================================================================
-// G06.1: Circuit Size Edge Cases (4 tests)
+// Circuit size edge-case checks (4 tests)
 // =============================================================================
 
 /// Test 1: Single-node circuit (just CONST1)
@@ -345,7 +345,7 @@ fn test_kernel_large_circuit(ctx: &TestContext) -> TestResult {
 }
 
 // =============================================================================
-// G06.2: Variable Count Limits (3 tests)
+// Variable count limit checks (3 tests)
 // =============================================================================
 
 /// Test 5: Circuit with 1000 variables
@@ -700,7 +700,7 @@ fn test_kernel_many_literals(ctx: &TestContext) -> TestResult {
 }
 
 // =============================================================================
-// G06.3: Numerical Stability (3 tests)
+// Numerical stability checks (3 tests)
 // =============================================================================
 
 /// Test 8: Log underflow handling
@@ -1092,7 +1092,7 @@ mod tests {
     }
 
     #[test]
-    fn test_g06_kernel_single_node() {
+    fn test_ptx_kernel_robustness_single_node() {
         if let Some(ctx) = get_test_context() {
             let result = test_kernel_single_node(&ctx);
             assert!(
@@ -1104,7 +1104,7 @@ mod tests {
     }
 
     #[test]
-    fn test_g06_kernel_single_level() {
+    fn test_ptx_kernel_robustness_single_level() {
         if let Some(ctx) = get_test_context() {
             let result = test_kernel_single_level(&ctx);
             assert!(
@@ -1116,7 +1116,7 @@ mod tests {
     }
 
     #[test]
-    fn test_g06_kernel_deep_circuit() {
+    fn test_ptx_kernel_robustness_deep_circuit() {
         if let Some(ctx) = get_test_context() {
             let result = test_kernel_deep_circuit(&ctx);
             assert!(
@@ -1128,7 +1128,7 @@ mod tests {
     }
 
     #[test]
-    fn test_g06_kernel_large_circuit() {
+    fn test_ptx_kernel_robustness_large_circuit() {
         if let Some(ctx) = get_test_context() {
             let result = test_kernel_large_circuit(&ctx);
             assert!(
@@ -1140,7 +1140,7 @@ mod tests {
     }
 
     #[test]
-    fn test_g06_kernel_max_variables() {
+    fn test_ptx_kernel_robustness_max_variables() {
         if let Some(ctx) = get_test_context() {
             let result = test_kernel_max_variables(&ctx);
             assert!(
@@ -1152,7 +1152,7 @@ mod tests {
     }
 
     #[test]
-    fn test_g06_kernel_sparse_variables() {
+    fn test_ptx_kernel_robustness_sparse_variables() {
         if let Some(ctx) = get_test_context() {
             let result = test_kernel_sparse_variables(&ctx);
             assert!(
@@ -1164,7 +1164,7 @@ mod tests {
     }
 
     #[test]
-    fn test_g06_kernel_many_literals() {
+    fn test_ptx_kernel_robustness_many_literals() {
         if let Some(ctx) = get_test_context() {
             let result = test_kernel_many_literals(&ctx);
             assert!(
@@ -1176,7 +1176,7 @@ mod tests {
     }
 
     #[test]
-    fn test_g06_kernel_log_underflow() {
+    fn test_ptx_kernel_robustness_log_underflow() {
         if let Some(ctx) = get_test_context() {
             let result = test_kernel_log_underflow(&ctx);
             assert!(
@@ -1188,7 +1188,7 @@ mod tests {
     }
 
     #[test]
-    fn test_g06_kernel_logsumexp_stability() {
+    fn test_ptx_kernel_robustness_logsumexp_stability() {
         if let Some(ctx) = get_test_context() {
             let result = test_kernel_logsumexp_stability(&ctx);
             assert!(
@@ -1200,7 +1200,7 @@ mod tests {
     }
 
     #[test]
-    fn test_g06_kernel_determinism() {
+    fn test_ptx_kernel_robustness_determinism() {
         if let Some(ctx) = get_test_context() {
             let result = test_kernel_determinism(&ctx);
             assert!(

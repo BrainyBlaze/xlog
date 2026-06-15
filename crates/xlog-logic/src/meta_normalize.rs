@@ -1,4 +1,4 @@
-//! Safe meta-predicate normalization for the v0.8.5 language surface.
+//! Safe meta-predicate normalization for the language-completeness surface.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
@@ -11,12 +11,12 @@ use crate::ast::{
 
 const TERM_ID_TYPE: ScalarType = ScalarType::U64;
 
-/// Normalize safe v0.8.5 meta-predicates into finite helper relations.
+/// Normalize safe meta-predicates into finite helper relations.
 ///
 /// Accepted forms are static and finite. Runtime-variable predicate names,
 /// dynamic database mutation, unrestricted calls, and non-finite collection are
 /// rejected before lowering.
-pub fn normalize_v085_meta(program: &Program) -> Result<Program> {
+pub fn normalize_meta_builtins(program: &Program) -> Result<Program> {
     let mut normalizer = MetaNormalizer::new(program)?;
     normalizer.normalize_program(program)
 }
@@ -231,7 +231,7 @@ impl MetaNormalizer {
                         || is_blocked_dynamic_predicate(&atom.predicate)
                     {
                         return Err(meta_error(
-                            "safe meta-predicates are not supported under negation in G085_META",
+                            "safe meta-predicates are not supported under negation in the finite meta normalization subset",
                         ));
                     }
                     out.push(BodyLiteral::Negated(self.normalize_atom_values(atom)?));
@@ -422,7 +422,7 @@ impl MetaNormalizer {
         let out_list = atom.terms[2].clone();
         if self.derived_predicates.contains(&goal.predicate) {
             return Err(meta_error(
-                "findall/3 in G085_META is limited to finite source facts; derived goals are reserved for a later aggregate-backed collection path",
+                "findall/3 is limited to finite source facts; derived goals are reserved for a later aggregate-backed collection path",
             ));
         }
 
@@ -528,7 +528,7 @@ impl MetaNormalizer {
         let pred = static_pred_name(&atom.terms[0])?;
         if self.derived_predicates.contains(&pred) {
             return Err(meta_error(
-                "maplist in G085_META is limited to finite source facts or literal empty lists",
+                "maplist is limited to finite source facts or literal empty lists",
             ));
         }
         let input_items = finite_list_items(&atom.terms[1], "maplist input")?;
@@ -871,7 +871,7 @@ impl MetaNormalizer {
             }
             Term::List(_) | Term::Cons { .. } => {
                 return Err(meta_error(
-                    "finite list terms inside term values are reserved for later G085 nodes",
+                    "finite list terms inside term values are reserved for a later term-value encoding path",
                 ))
             }
             Term::Variable(_) | Term::Anonymous => {
@@ -1085,7 +1085,7 @@ fn finite_list_items<'a>(term: &'a Term, context: &str) -> Result<&'a [Term]> {
     match term {
         Term::List(items) => Ok(items),
         _ => Err(meta_error(format!(
-            "{context} requires a finite list literal in G085_META"
+            "{context} requires a finite list literal in the safe meta subset"
         ))),
     }
 }
@@ -1214,9 +1214,9 @@ fn is_blocked_dynamic_predicate(name: &str) -> bool {
 
 fn dynamic_predicate_error(name: &str) -> XlogError {
     match name {
-        "call" => meta_error("dynamic call/N is outside the v0.8.5 safe meta subset"),
+        "call" => meta_error("dynamic call/N is outside the safe meta subset"),
         "assert" | "asserta" | "assertz" | "retract" => {
-            meta_error("dynamic database mutation is outside the v0.8.5 safe meta subset")
+            meta_error("dynamic database mutation is outside the safe meta subset")
         }
         _ => meta_error("unsupported dynamic meta predicate"),
     }
@@ -1239,5 +1239,5 @@ fn fail_pred() -> &'static str {
 }
 
 fn meta_error(message: impl Into<String>) -> XlogError {
-    XlogError::Compilation(format!("v0.8.5 meta error: {}", message.into()))
+    XlogError::Compilation(format!("meta normalization error: {}", message.into()))
 }

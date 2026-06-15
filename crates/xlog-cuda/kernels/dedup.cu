@@ -457,8 +457,8 @@ __device__ __forceinline__ int32_t xlog_small_sort_cmp_index(
 
 // Sort a small full-row relation by typed lexicographic order and return the
 // row permutation. This is intentionally capped at 1024 rows: it replaces the
-// many-launch radix multi-column path for W66's small recursive set-maintenance
-// buffers without changing large-relation behavior.
+// many-launch radix multi-column path for graph-mode small recursive
+// set-maintenance buffers without changing large-relation behavior.
 extern "C" __global__ void small_sort_full_row_indices_typed(
     const uint64_t* __restrict__ col_ptrs,
     const uint32_t* __restrict__ col_sizes,

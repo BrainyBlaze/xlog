@@ -1,8 +1,8 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use xlog_logic::{
-    parse_program, rewrite_v085_magic_sets, Atom, BodyLiteral, Compiler, MagicSetStatus,
-    MagicSetsMode, Program, Term,
+    parse_program, rewrite_magic_sets, Atom, BodyLiteral, Compiler, MagicSetStatus, MagicSetsMode,
+    Program, Term,
 };
 
 #[test]
@@ -35,7 +35,7 @@ fn rewrites_bound_recursive_query_to_magic_predicates() {
     )
     .expect("parse");
 
-    let rewritten = rewrite_v085_magic_sets(&program).expect("rewrite");
+    let rewritten = rewrite_magic_sets(&program).expect("rewrite");
     assert_eq!(rewritten.report.status, MagicSetStatus::Applied);
     assert_eq!(
         rewritten.report.generated_predicates,
@@ -78,7 +78,7 @@ fn magic_rewrite_preserves_query_output_and_reduces_recursive_rows() {
     )
     .expect("parse");
 
-    let rewritten = rewrite_v085_magic_sets(&program).expect("rewrite");
+    let rewritten = rewrite_magic_sets(&program).expect("rewrite");
     let original_relations = evaluate_positive_i64(&program);
     let rewritten_relations = evaluate_positive_i64(&rewritten.program);
 
@@ -117,7 +117,7 @@ fn declines_unsafe_magic_interactions_with_typed_diagnostics() {
     )
     .expect("parse auto");
 
-    let rewritten = rewrite_v085_magic_sets(&auto).expect("auto decline should not fail");
+    let rewritten = rewrite_magic_sets(&auto).expect("auto decline should not fail");
     assert_eq!(rewritten.report.status, MagicSetStatus::Declined);
     assert!(rewritten
         .report
@@ -166,7 +166,7 @@ fn committed_magic_sets_example_compiles() {
         .join("../..")
         .canonicalize()
         .expect("repo root");
-    let path = "examples/v085-language/magic_sets/reach_bound.xlog";
+    let path = "examples/language-completeness/magic_sets/reach_bound.xlog";
     let full_path = repo_root.join(path);
     let src = std::fs::read_to_string(&full_path)
         .unwrap_or_else(|err| panic!("failed to read {}: {err}", full_path.display()));

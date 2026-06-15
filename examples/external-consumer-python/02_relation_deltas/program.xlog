@@ -1,0 +1,7 @@
+pred external_consumer_commit(i32, i32).
+pred external_consumer_reachable(i32, i32).
+
+external_consumer_reachable(X, Y) :- external_consumer_commit(X, Y).
+external_consumer_reachable(X, Z) :- external_consumer_reachable(X, Y), external_consumer_commit(Y, Z).
+
+?- external_consumer_reachable(X, Y).

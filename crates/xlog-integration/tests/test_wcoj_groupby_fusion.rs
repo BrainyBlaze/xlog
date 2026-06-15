@@ -1,4 +1,4 @@
-//! D1 aggregate-fused WCOJ — end-to-end executor wiring.
+//! Aggregate-fused WCOJ groupby: end-to-end executor wiring.
 //!
 //! A count/sum/min/max-aggregate head over a triangle body must compile
 //! (promoter descends the aggregate wrapper), dispatch the fused
@@ -207,7 +207,9 @@ fn download_groups_u32(memory: &Arc<GpuMemoryManager>, buffer: &CudaBuffer) -> V
 static ENV_LOCK: Mutex<()> = Mutex::new(());
 
 fn env_lock() -> MutexGuard<'static, ()> {
-    ENV_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 /// Shared triangle fixture: K4 on {1..4} plus a disjoint triangle {5,6,7}.
@@ -811,8 +813,7 @@ fn groupby_fusion_4cycle_count_fires_end_to_end_with_parity() {
     let expected = vec![(1u32, 3u64), (2, 2)];
 
     // Phase 1: fused 4-cycle count path fires and is correct.
-    let (fused_rows, fused_count) =
-        run_agg_program(&fix, source, &inputs, download_group_counts);
+    let (fused_rows, fused_count) = run_agg_program(&fix, source, &inputs, download_group_counts);
     assert_eq!(fused_rows, expected, "fused 4-cycle count row set");
     assert_eq!(
         fused_count, 1,
@@ -833,7 +834,7 @@ fn groupby_fusion_4cycle_count_fires_end_to_end_with_parity() {
     assert_eq!(unfused_count, 0, "kill switch must keep the counter at 0");
 }
 
-/// S1d fused-vs-kill-switch phases for one u64-valued 4-cycle aggregate
+/// Fused-vs-kill-switch phases for one u64-valued 4-cycle aggregate
 /// source (sum).
 fn assert_4cycle_fusion_parity_u64(fix: &Fixture, source: &str, expected: &[(u32, u64)]) {
     let _guard = env_lock();
@@ -854,7 +855,7 @@ fn assert_4cycle_fusion_parity_u64(fix: &Fixture, source: &str, expected: &[(u32
     assert_eq!(unfused_count, 0, "kill switch must keep the counter at 0");
 }
 
-/// S1d fused-vs-kill-switch phases for one u32-valued 4-cycle aggregate
+/// Fused-vs-kill-switch phases for one u32-valued 4-cycle aggregate
 /// source (min/max).
 fn assert_4cycle_fusion_parity_u32(fix: &Fixture, source: &str, expected: &[(u32, u32)]) {
     let _guard = env_lock();
@@ -931,7 +932,7 @@ fn groupby_fusion_4cycle_max_y_fires_end_to_end_with_parity() {
     );
 }
 
-/// S1d Symbol lock, 4-cycle sibling of
+/// Symbol-valued 4-cycle lock, sibling of
 /// `groupby_fusion_symbol_valued_min_declines_and_unfused_rejects`: min
 /// over Symbol VALUES on a 4-cycle body must DECLINE fused (counter == 0)
 /// and fail through the same unfused value-type rejection in fused-enabled
@@ -976,7 +977,7 @@ fn groupby_fusion_4cycle_symbol_valued_min_declines_and_unfused_rejects() {
     );
 }
 
-/// S1d slice 2 — u64-key 4-cycle count fusion: same 4-cycle fixture
+/// U64-key 4-cycle count fusion: same 4-cycle fixture
 /// shifted above 2^33 so width truncation visibly fails.
 #[test]
 fn groupby_fusion_4cycle_count_u64_fires_end_to_end_with_parity() {

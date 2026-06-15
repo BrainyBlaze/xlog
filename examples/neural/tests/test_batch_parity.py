@@ -32,7 +32,10 @@ class SmallNet(nn.Module):
 def make_program():
     return pyxlog.Program.compile("""
         nn(mnist_net, [X], Y, [0,1,2,3,4,5,6,7,8,9]) :: digit(X, Y).
-        addition(X, Y, Z) :- digit(X, D1), digit(Y, D2), Z is D1 + D2.
+        addition(X, Y, Z) :-
+            digit(X, LeftDigit),
+            digit(Y, RightDigit),
+            Z is LeftDigit + RightDigit.
     """)
 
 

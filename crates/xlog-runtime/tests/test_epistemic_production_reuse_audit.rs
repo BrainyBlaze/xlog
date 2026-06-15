@@ -157,7 +157,9 @@ fn hot_path_transfer_budget_allows_launch_metadata_but_rejects_data_plane_transf
         host_transfer_stats(0, 0, 0, 0),
         host_transfer_stats(4, 0, 1, 0),
     )
-    .expect_err("data-plane D2H inside the hot path must fail production reuse gates");
+    .expect_err(
+        "data-plane device-to-host transfer inside the hot path must fail production reuse gates",
+    );
     assert!(format!("{err}").contains("tracked host transfer in GPU hot path"));
 }
 

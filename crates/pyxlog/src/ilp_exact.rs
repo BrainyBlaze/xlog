@@ -1,21 +1,21 @@
-//! pyxlog bridge for the M8 Phase 1 native exact-induction engine.
+//! pyxlog bridge for the native bounded exact-induction engine.
 //!
 //! Deliberately separate from `crates/pyxlog/src/ilp.rs` (already ~2.7k LOC)
-//! so the Phase 1 binding seam has its own testable surface. Converts the
-//! Python-visible `induce_exact_native(...)` call into an
+//! so the native exact-induction binding seam has its own testable surface.
+//! Converts the Python-visible `induce_exact_native(...)` call into an
 //! [`xlog_induce::InduceExactRequest`] and maps the result back to a
 //! `dict`-shaped `PyObject` that the Python wrapper
 //! (`crates/pyxlog/python/pyxlog/ilp/exact_induce.py`) packages into
 //! `ExactInductionResult` / `ScoredCandidate` dataclass instances.
 //!
-//! Task progression:
-//!   * Task 2:  raised `PyNotImplementedError`.
-//!   * Task 3B.2: real name-to-`RelId` resolution, DLPack-backed
-//!     positive/negative buffer construction, engine call, and
+//! Implementation history:
+//!   * The initial bridge raised `PyNotImplementedError`.
+//!   * The first native path added name-to-`RelId` resolution, DLPack-backed
+//!     positive/negative buffer construction, the engine call, and a
 //!     dict-shaped return.
-//!   * Task 3B.4: the batched scoring kernel is wired through
-//!     `CudaKernelProvider::ilp_exact_score`; native parity is
-//!     locked by `python/tests/test_ilp_exact_induce.py`.
+//!   * The batched scoring kernel is wired through
+//!     `CudaKernelProvider::ilp_exact_score`; native parity is locked by
+//!     `python/tests/test_ilp_exact_induce.py`.
 
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
@@ -138,7 +138,7 @@ impl CompiledIlpProgram {
         // NOTE: Declared-but-unloaded candidates are silently dropped here.
         // The Python reference would score them as zero-coverage (empty fact
         // set). The test suite always loads facts for every candidate, so
-        // this divergence is not observable today — 3B.5 parity will confirm.
+        // this divergence is not observable in the native parity test suite.
         let store = self.executor.store();
         let candidates_with_bufs: Vec<(RelId, &CudaBuffer)> = filtered_candidates
             .iter()

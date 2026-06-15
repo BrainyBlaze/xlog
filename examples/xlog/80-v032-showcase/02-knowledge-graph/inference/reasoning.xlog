@@ -1,10 +1,10 @@
 // =============================================================================
-// Knowledge Graph Inference - UDFs and Derived Reasoning
+// Knowledge Graph Inference - User-Defined Functions and Derived Reasoning
 // =============================================================================
 // Contains user-defined functions and derived predicates for movie analytics.
 //
 // Features:
-//   - 6+ UDFs with arithmetic and conditionals
+//   - 6+ user-defined functions with arithmetic and conditionals
 //   - Private predicates for internal helpers
 //   - Derived analytics rules
 //   - Aggregation-based statistics
@@ -15,14 +15,14 @@ use ontology/schema.
 use entities/movies.
 
 // =============================================================================
-// USER-DEFINED FUNCTIONS (6 required UDFs)
+// USER-DEFINED FUNCTIONS
 // =============================================================================
 
-// UDF 1: Calculate the decade of a given year
+// User-defined function 1: Calculate the decade of a given year
 // Example: decade(1994) = 1990, decade(2023) = 2020
 func decade(Year) = (Year / cast(10, u32)) * cast(10, u32).
 
-// UDF 2: Categorize rating into tiers (1=excellent, 2=good, 3=average, 4=poor)
+// User-defined function 2: Categorize rating into tiers (1=excellent, 2=good, 3=average, 4=poor)
 // Rating scale: 0-100
 func rating_category(Rating) =
     if Rating >= cast(85, u32) then cast(1, u32)
@@ -30,21 +30,21 @@ func rating_category(Rating) =
     else if Rating >= cast(60, u32) then cast(3, u32)
     else cast(4, u32).
 
-// UDF 3: Calculate return on investment percentage
+// User-defined function 3: Calculate return on investment percentage
 // ROI = (BoxOffice / Budget) * 100
 func roi_pct(BoxOffice, Budget) =
     if Budget > cast(0, u32) then (BoxOffice * cast(100, u32)) / Budget
     else cast(0, u32).
 
-// UDF 4: Calculate person's age at time of movie release
+// User-defined function 4: Calculate person's age at time of movie release
 // Simple subtraction of birth year from release year
 func age_at_release(BirthYear, ReleaseYear) = ReleaseYear - BirthYear.
 
-// UDF 5: Calculate career span in years (inclusive)
+// User-defined function 5: Calculate career span in years (inclusive)
 // For a person active from 1990 to 2023, span is 34 years
 func career_span(FirstYear, LastYear) = LastYear - FirstYear + cast(1, u32).
 
-// UDF 6: Calculate productivity (movies per decade)
+// User-defined function 6: Calculate productivity (movies per decade)
 // Scaled by 10 to avoid fractions
 func productivity(MovieCount, CareerYears) =
     if CareerYears > cast(0, u32) then (MovieCount * cast(10, u32)) / CareerYears

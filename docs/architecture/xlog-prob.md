@@ -1,8 +1,8 @@
-# `xlog-prob` Architecture (Phase 4)
+# `xlog-prob` Architecture
 
 `xlog-prob` is XLOG’s probabilistic reasoning tier. It consumes a probabilistic `.xlog` program (probabilistic facts, annotated disjunctions, evidence, and probabilistic queries) and evaluates query probabilities either:
 
-- **Exactly** via GPU-native knowledge compilation (`prob_engine=exact_ddnnf`): PIR → GPU CNF → GPU D4 compiler → XGCF circuit → GPU weighted model counting + gradients.
+- **Exactly** via GPU-native knowledge compilation (`prob_engine=exact_ddnnf`): PIR → GPU CNF → GPU Decision-DNNF compiler → XGCF circuit → GPU weighted model counting + gradients.
 - **Approximately** via Monte Carlo sampling (`prob_engine=mc`): GPU sampling of probabilistic leaves + deterministic evaluation per sampled world, with uncertainty reporting.
 
 This document explains the implementation as it exists in the repository and points to concrete entry points in the codebase.
@@ -20,7 +20,7 @@ This document explains the implementation as it exists in the repository and poi
 - `crates/xlog-prob/src/compilation/gpu_pir.rs`: GPU PIR graph layout (device-resident SoA)
 - `crates/xlog-prob/src/compilation/gpu_pir_intern.rs`: GPU PIR interner (deterministic, memory-bounded)
 - `crates/xlog-prob/src/compilation/gpu_cnf.rs`: GPU PIR→CNF encoder (`encode_cnf_gpu`)
-- `crates/xlog-prob/src/kc/ddnnf.rs`: Decision-DNNF parser (tests/fixtures only; no CPU D4 compilation)
+- `crates/xlog-prob/src/kc/ddnnf.rs`: Decision-DNNF parser (tests/fixtures only; no CPU Decision-DNNF compilation)
 - `crates/xlog-prob/src/xgcf.rs`: XGCF (GPU circuit format) construction
 - `crates/xlog-prob/src/gpu.rs`: GPU upload + evaluation glue (`GpuXgcf`)
 - `crates/xlog-prob/src/neural_fast_path.rs`: GPU neural fast-path slot mapping + AD-chain glue
@@ -30,7 +30,7 @@ This document explains the implementation as it exists in the repository and poi
 - `kernels/circuit.cu` / `kernels/circuit.ptx`: forward + backward kernels for XGCF circuits
 - `kernels/cache.cu` / `kernels/cache.ptx`: CNF hashing + cache lookup/insert + cache store helpers
 - `kernels/cnf.cu` / `kernels/cnf.ptx`: GPU PIR→CNF encoding kernels (`xlog_cnf`)
-- `kernels/d4.cu` / `kernels/d4.ptx`: GPU D4 compilation kernels (frontier expansion, smoothing, build)
+- `kernels/d4.cu` / `kernels/d4.ptx`: GPU Decision-DNNF compilation kernels (frontier expansion, smoothing, build)
 - `kernels/mc_sample.cu` / `kernels/mc_sample.ptx`: Bernoulli sampling kernel used by `mc`
 - `kernels/sat.cu` / `kernels/sat.ptx`: GPU CDCL verifier + GPU-native equivalence query construction helpers
 - `kernels/neural.cu` / `kernels/neural.ptx`: neural fast-path AD weight fill + chain-rule gradient scatter (`xlog_neural`)
@@ -73,7 +73,7 @@ Supported constructs:
 
 If a program uses aggregation, use `prob_engine=mc`.
 
-### `prob_engine=mc` (approximate / P3)
+### `prob_engine=mc` (approximate Monte Carlo)
 
 **Primary goal:** provide a robust, explicit escape hatch for:
 - non-monotone recursion (cycles through `not` and/or aggregates), and
@@ -83,7 +83,7 @@ If a program uses aggregation, use `prob_engine=mc`.
 
 **Non-monotone SCC semantics:** `xlog_prob::mc::NONMONOTONE_SEMANTICS` (also surfaced to Python results).
 
-**Engine split + fail-closed contract (2026-06-10):** the production MC path
+**Engine split + fail-closed contract:** the production MC path
 is the GPU-resident megakernel engine, which **rejects** negation, aggregates,
 and other unbounded constructs with a typed `ResidentRejection`. Programs in
 that fragment do NOT run on the GPU: `McProgram::evaluate` fails closed with
@@ -93,13 +93,12 @@ the rejection unless the caller explicitly sets
 evaluates the program and the result is labeled `McResult::engine =
 McEngine::CpuOracle` (`mc_engine: "cpu-oracle"` in CLI JSON / Python
 metadata). CPU-oracle results are never valid GPU-native or zero-host
-evidence. Before 2026-06-10 this fallback was silent and unlabeled; the
-v0.8.5 MC-aggregate evidence was corrected accordingly
-(`docs/evidence/2026-05-19-v085-prob-aggregates/README.md`).
+evidence. Earlier fallback behavior was silent and unlabeled; the MC-aggregate
+evidence was corrected accordingly.
 
-## v0.9 Epistemic Integration Contract
+## Epistemic Integration Contract
 
-The v0.9 epistemic work treats accepted world views as the only valid source of
+The epistemic integration contract treats accepted world views as the only valid source of
 epistemic probabilistic evidence. Raw generated guesses must not bypass
 world-view validation and enter the PIR or circuit layers as hidden rewrites. The
 bounded fixture API lives in `xlog_prob::epistemic` and documents the current
@@ -110,7 +109,7 @@ contract:
   `EpistemicWorldView`; callers use it after semantic validation has already
   accepted the world view.
 - `EpistemicCircuit` keeps a compiled circuit fingerprint, active epistemic evidence, and deterministic query probability for fixture-scale integration tests.
-- `KnowledgeCompilerAdapter::gpu_d4()` represents the existing GPU-D4/XGCF path and supports incremental evidence updates.
+- `KnowledgeCompilerAdapter::gpu_d4()` represents the existing GPU Decision-DNNF/XGCF path and supports incremental evidence updates.
 - `KnowledgeCompilerAdapter::external_ddnnf_text(...)` records an alternative external Decision-DNNF text adapter design. It consumes DIMACS CNF and emits Decision-DNNF text, but is explicitly `DesignOnly` in this slice.
 - `conditional_probability_from_logs` normalizes `log P(Q and E)` and `log P(E)` with `EPISTEMIC_PROBABILITY_TOLERANCE = 1e-12`, clamping only values within that documented tolerance.
 
@@ -127,7 +126,7 @@ GPU-native exact/provenance path. Its trace reports GPU exact compiles,
 accepted-evidence consumption, optional GPU gradient evaluations, and hard-zero
 CPU-only probability recomputation and fixture-circuit counters.
 
-The corrected v0.9.0 release gate is stricter: accepted world-view evidence must
+The corrected production gate is stricter: accepted world-view evidence must
 flow into the existing GPU-native exact/provenance path without CPU-only
 probability recomputation in the accepted execution path. The current
 `xlog_prob::epistemic` fixtures do not by themselves close that gate, and the
@@ -146,7 +145,7 @@ are wired through it end to end.
    - annotated disjunctions become a chain of Bernoulli decision variables (`choice_probs`)
    - derived tuples map to PIR formulas (`tuple_formulas`)
 3. **GPU PIR → CNF** (`encode_cnf_gpu`, `crates/xlog-prob/src/compilation/gpu_cnf.rs`) with a device-resident var map.
-4. **GPU D4 compile + verify**: CNF → device-resident XGCF with cache storage
+4. **GPU Decision-DNNF compile + verify**: CNF → device-resident XGCF with cache storage
    (`compile_gpu_d4_and_verify_cached`, `crates/xlog-prob/src/compilation/` + `kernels/d4.ptx` + `kernels/sat.ptx`).
 5. **GPU evaluation** via cache-aware kernels (`crates/xlog-prob/src/compilation/gpu_cache.rs` + `kernels/circuit.ptx`):
    - forward pass computes `log WMC(...)` in log-space
@@ -164,15 +163,15 @@ This is implemented in `crates/xlog-prob/src/exact.rs` (`ExactDdnnfProgram::eval
 
 ### GPU state and caching
 
-`ExactDdnnfProgram` compiles CNF on the GPU, invokes GPU D4 + GPU CDCL verification, and stores the resulting circuit in a
+`ExactDdnnfProgram` compiles CNF on the GPU, invokes GPU Decision-DNNF + GPU CDCL verification, and stores the resulting circuit in a
 device-resident `GpuCircuitCache`. The program holds a cache handle and CUDA provider in `GpuExactState`; evaluations reuse
-the cached slot and run cache-aware XGCF kernels with no CPU D4 invocation and no CNF/DDNNF host materialization.
+the cached slot and run cache-aware XGCF kernels with no CPU Decision-DNNF invocation and no CNF/DDNNF host materialization.
 
 ### Orchestration boundary (honest residency statement)
 
 XGCF forward evaluation launches one kernel **per circuit level** from a host
 loop (`eval_log_wmc_device_inplace`, `crates/xlog-prob/src/gpu.rs`). On the
-GPU-D4-native path the loop reads no per-level data back from the device
+GPU Decision-DNNF-native path the loop reads no per-level data back from the device
 (level sizing uses device-resident arrays; the host-side `level_offsets`
 mirror is populated only for host-uploaded circuits), and results stay on
 device until the caller downloads O(1) scalars (logZ, per-query gradients)
@@ -181,25 +180,25 @@ therefore **GPU-accelerated with host-orchestrated level launches**, not a
 single-launch device-resident engine — do not cite it under the MC engine's
 no-host-interaction measured contract.
 
-### CPU D4/DDNNF compilation (removed)
+### CPU Decision-DNNF compilation (removed)
 
-The repository no longer includes a CPU D4/DDNNF compilation pipeline:
-- No vendored D4 snapshot.
+The repository no longer includes a CPU Decision-DNNF compilation pipeline:
+- No vendored Decision-DNNF compiler snapshot.
 - No shell-out to an external `d4` binary.
 
 Decision-DNNF parsing (`crates/xlog-prob/src/kc/ddnnf.rs`) remains available for tests/fixtures only; production exact
 inference uses the GPU-native compiler + verifier and device-resident circuits.
 
 The GPU-native encoder (`encode_cnf_gpu`) in `crates/xlog-prob/src/compilation/gpu_cnf.rs` produces a device-resident
-`GpuCnf` for the GPU D4/CDCL pipeline and is now wired into `ExactDdnnfProgram` via
+`GpuCnf` for the GPU Decision-DNNF/CDCL pipeline and is now wired into `ExactDdnnfProgram` via
 `compile_gpu_d4_and_verify_cached` with a device-resident `GpuCircuitCache`.
 
 ---
 
-## GPU-Native Compilation + Verification (v0.5.0 foundation)
+## GPU-Native Compilation + Verification
 
 XLOG’s target architecture is a **100% GPU-native** compilation + verification
-path (GPU D4 + GPU CDCL verifier) with **zero data-plane host transfers**. This
+path (GPU Decision-DNNF + GPU CDCL verifier) with **zero data-plane host transfers**. This
 path is integrated into `ExactDdnnfProgram` and described in the whitepaper's
 probabilistic and solver sections:
 
@@ -216,10 +215,10 @@ probabilistic and solver sections:
 This verifier module is used by GPU-native compilation utilities in `crates/xlog-prob/src/compilation/` and now powers
 the default `ExactDdnnfProgram` pipeline with a device-resident `GpuCircuitCache`.
 
-**Phase 3 status:** GPU PIR→CNF encoding is implemented and tested via `encode_cnf_gpu` + `kernels/cnf.cu` with
+**GPU PIR-to-CNF status:** GPU PIR→CNF encoding is implemented and tested via `encode_cnf_gpu` + `kernels/cnf.cu` with
 device-resident counts and CSR emission; equivalence tests live in `crates/xlog-prob/tests/gpu_cnf.rs`.
 
-**Phase 4 status:** Cache + integration is implemented: GPU-resident cache (`gpu_cache.rs` + `kernels/cache.cu`),
+**Cache integration status:** Cache + integration is implemented: GPU-resident cache (`gpu_cache.rs` + `kernels/cache.cu`),
 cache-aware XGCF evaluation, GPU-only exact compilation (`compile_gpu_d4_and_verify_cached`), and guardrails enforcing
 no device→host reads in the cache path.
 
@@ -280,16 +279,17 @@ arena budget fail closed before device allocation with
 `XlogError::ResourceExhausted` (`resident_resource_budget`, `bound_bytes`,
 `budget_bytes`); there is no CPU or host-sizing fallback.
 
-#### No host interaction in the measured region (K1) — distinct from `a894aab4`
+#### No host interaction in the measured region
 
-The predecessor commit `a894aab4` ("zero tracked hot loop") only removed *tracked
-data-plane* HtoD/DtoH from a host loop that **still orchestrated per sample**: a
+The predecessor no-host-loop implementation only removed *tracked data-plane*
+host-to-device/device-to-host transfers from a host loop that **still
+orchestrated per sample**: a
 Rust `for sample_idx` loop, per-sample kernel launches, and per-sample untracked
 `dtoh_scalar_untracked` row-count reads. That is **not** the guarantee here.
 
 The resident engine's measured region is a single megakernel launch (+ one
-post-launch sync). It has **zero host interaction**: 0 tracked HtoD, 0 tracked
-DtoH, **0 untracked metadata reads** (`dtoh_scalar_untracked` is never called
+post-launch sync). It has **zero host interaction**: 0 tracked host-to-device, 0
+tracked device-to-host, **0 untracked metadata reads** (`dtoh_scalar_untracked` is never called
 in-region — a dedicated `untracked_metadata_dtoh_count` provider counter proves
 it), 0 host loop iterations, 0 per-sample host launches. This is measured via
 `McNoHostStats` (snapshots around the launch) and proven **constant across
@@ -406,7 +406,7 @@ extraction — no new passes or post-hoc reconstruction.
 
 - `ChoiceSource` — captures explicit annotated-disjunction heads (with probabilities), the
   Bernoulli decision stage index (`choice_index`), and an optional AD identity (`source_id`,
-  `None` in v1).
+  `None` in the initial API).
 
 ### New fields on `Provenance`
 
@@ -429,7 +429,7 @@ pub use pir::{ChoiceVarId, LeafId, PirGraph, PirNode, PirNodeId};
 pub use provenance::{ChoiceSource, GroundAtom, Provenance, Value};
 ```
 
-The provenance API shipped after the v0.5.0 release cut; use `CHANGELOG.md` and
+The provenance API shipped after the initial release cut; use `CHANGELOG.md` and
 the crate-level API docs as the authoritative references.
 
 ---

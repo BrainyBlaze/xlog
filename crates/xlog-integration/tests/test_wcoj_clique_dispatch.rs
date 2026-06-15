@@ -1,5 +1,5 @@
 // crates/xlog-integration/tests/test_wcoj_clique_dispatch.rs
-//! W3.2/W6.4 — Runtime dispatch certs for k=5..k=8 clique WCOJ.
+//! Runtime dispatch tests for k=5..k=8 clique WCOJ.
 //!
 //! Counter/parity cells:
 //!   1. clique5 counter advances + row set matches MultiWayJoin.fallback.
@@ -18,13 +18,13 @@
 //! equals the body that would result from `MultiWayJoin.fallback`
 //! (built via a test-only RIR rewrite helper that substitutes
 //! MultiWayJoin nodes with their fallback field). NO new
-//! force/kill/adaptive runtime knobs (per W3.2 D8 lock).
+//! force/kill/adaptive runtime knobs.
 //!
 //! Tests 3 + 4 engineer an internal dispatcher decline by
 //! uploading ONE of the clique's edge buffers with a
 //! [`xlog_core::ScalarType::I64`] schema (8-byte signed integer
 //! — outside both FourByte (`U32`/`Symbol`) and EightByte (`U64`)
-//! width-classes — per plan §279-301 + §568-581). The promoter
+//! width-classes). The promoter
 //! still validates structure and emits `MultiWayJoin`; the
 //! dispatcher's per-edge width-class check (via
 //! `wcoj_layout_sort_u32_recorded`) rejects the I64 column,
@@ -150,8 +150,7 @@ fn upload_binary_u32(memory: &Arc<GpuMemoryManager>, rows: &[(u32, u32)]) -> Cud
 /// width-classes, so the dispatcher's
 /// `wcoj_layout_sort_u32_recorded` per-edge check rejects with
 /// `Err`, and the dispatcher silently returns `Ok(None)` — which
-/// is the contract this test file pins (plan §279-301 +
-/// §568-581).
+/// is the contract this test file pins.
 fn upload_binary_i64(memory: &Arc<GpuMemoryManager>, rows: &[(u32, u32)]) -> CudaBuffer {
     let n = rows.len() as u32;
     let bpc = (n as usize).max(1) * 8;
@@ -274,8 +273,7 @@ fn k_clique_inputs(k: usize) -> BTreeMap<String, Vec<(u32, u32)>> {
 /// Test-only RIR rewrite helper: walk the plan tree, detect
 /// `RirNode::MultiWayJoin` nodes, and substitute each with its
 /// `fallback` field. Used to build the binary-join reference
-/// row set without introducing new force/kill/adaptive knobs
-/// (per W3.2 D8 lock).
+/// row set without introducing new force/kill/adaptive knobs.
 fn replace_multiway_with_fallback(mut plan: ExecutionPlan) -> ExecutionPlan {
     fn rewrite(node: &RirNode) -> RirNode {
         match node {
@@ -326,9 +324,9 @@ fn replace_multiway_with_fallback(mut plan: ExecutionPlan) -> ExecutionPlan {
 /// Walk `plan.rules_by_scc` → `CompiledRule.body` and return
 /// true iff at least one `RirNode::MultiWayJoin` node has
 /// `inputs.len() == arity`. Used by the dispatcher-decline
-/// tests to assert (per plan §290-291) that promotion actually
-/// emitted a MultiWayJoin at the expected `C(k, 2)` shape — so
-/// if W3.2's `try_promote_clique_k` regresses, the tests fail
+/// tests to assert that promotion actually emitted a MultiWayJoin
+/// at the expected `C(k, 2)` shape — so if the clique promoter
+/// regresses, the tests fail
 /// loudly rather than passing on incidental empty outputs.
 fn plan_contains_multiway_with_arity(plan: &ExecutionPlan, arity: usize) -> bool {
     fn walk(node: &RirNode, target: usize) -> bool {
@@ -483,7 +481,7 @@ fn run_counter_advance_test(
     //    MultiWayJoin nodes with their fallback bodies, then
     //    run on a fresh executor with the same inputs. This
     //    exercises the binary-join path without any new
-    //    force/kill/adaptive knobs (per W3.2 D8 lock).
+    //    force/kill/adaptive knobs.
     let mut compiler_ref = Compiler::new();
     let plan_ref = compiler_ref
         .compile_with_stats_snapshot(src, Some(&snapshot))
@@ -574,7 +572,7 @@ fn helper_split_k5_matches_direct_kclique_and_refreshes_metadata() {
     let helpers: Vec<_> = helper_compiler
         .rel_ids()
         .iter()
-        .filter(|(name, _)| name.starts_with("__w37_helper_"))
+        .filter(|(name, _)| name.starts_with("__kclique_helper_"))
         .map(|(name, rel)| (name.clone(), *rel))
         .collect();
     assert_eq!(
@@ -617,7 +615,7 @@ fn helper_split_k5_matches_direct_kclique_and_refreshes_metadata() {
         !direct_compiler
             .rel_ids()
             .keys()
-            .any(|name| name.starts_with("__w37_helper_")),
+            .any(|name| name.starts_with("__kclique_helper_")),
         "uniform K5 reference must keep the direct K-clique path"
     );
     let mut direct_executor =
@@ -652,7 +650,7 @@ fn helper_split_k5_matches_direct_kclique_and_refreshes_metadata() {
         "post-split helper K5 path must build K-clique metadata"
     );
     eprintln!(
-        "M_HELP_KC helper K5: helper_relations={} dispatch_count={} metadata_build_count={} metadata_build_nanos={} rows={}",
+        "KCLIQUE_HELPER_SPLIT helper K5: helper_relations={} dispatch_count={} metadata_build_count={} metadata_build_nanos={} rows={}",
         helpers.len(),
         helper_executor.wcoj_clique5_dispatch_count(),
         metadata_build_count,
@@ -808,7 +806,7 @@ fn recursive_k5_refreshes_histogram_metadata_and_matches_fallback() {
     );
     let metadata_ratio = metadata_build_nanos as f64 / (dispatch_wall.as_nanos() as f64).max(1.0);
     eprintln!(
-        "M_HIST_KC recursive K5: dispatch_count={} refresh_count={} metadata_build_count={} metadata_build_nanos={} wall_nanos={} metadata_ratio={:.6}",
+        "KCLIQUE_HISTOGRAM_REFRESH recursive K5: dispatch_count={} refresh_count={} metadata_build_count={} metadata_build_nanos={} wall_nanos={} metadata_ratio={:.6}",
         dispatched.wcoj_clique5_dispatch_count(),
         dispatched.kclique_histogram_refresh_count(),
         metadata_build_count,
@@ -878,15 +876,15 @@ fn clique8_dispatch_counter_advances_and_row_set_matches_fallback_body() {
     });
 }
 
-/// Run a clique-K dispatcher-decline test under the plan-locked
-/// malformed-schema contract (plan §279-301 + §568-581):
+/// Run a clique-K dispatcher-decline test under the malformed-schema
+/// contract:
 ///
 /// One of the K*(K-1)/2 edge buffers is uploaded with a
 /// `ScalarType::I64` schema (8-byte signed integer — outside
 /// both the FourByte (`U32`/`Symbol`) and EightByte (`U64`)
 /// width-classes). The promoter validates structure independently
 /// of edge schemas and emits a `MultiWayJoin`. The dispatcher
-/// then layout-sorts each edge through W3.1's
+/// then layout-sorts each edge through
 /// `wcoj_layout_sort_u32_recorded`, which rejects the I64 column
 /// with `Err`, and the dispatcher silently returns `Ok(None)` —
 /// the documented decline path.

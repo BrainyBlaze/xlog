@@ -1,5 +1,4 @@
-//! S1d — aggregate-fused WCOJ: group-by-root sum/min/max over the 4-cycle
-//! shape.
+//! Aggregate-fused WCOJ: group-by-root sum/min/max over the 4-cycle shape.
 //!
 //! Contract under test: `wcoj_4cycle_groupby_root_agg_u32_recorded`
 //! computes, for `q(W, agg(V)) :- e1(W,X), e2(X,Y), e3(Y,Z), e4(Z,W)` with
@@ -139,14 +138,22 @@ fn download_column_bytes(
     bytes
 }
 
-fn download_u32_column(memory: &Arc<GpuMemoryManager>, buffer: &CudaBuffer, col: usize) -> Vec<u32> {
+fn download_u32_column(
+    memory: &Arc<GpuMemoryManager>,
+    buffer: &CudaBuffer,
+    col: usize,
+) -> Vec<u32> {
     download_column_bytes(memory, buffer, col, 4)
         .chunks_exact(4)
         .map(|c| u32::from_le_bytes(c.try_into().unwrap()))
         .collect()
 }
 
-fn download_u64_column(memory: &Arc<GpuMemoryManager>, buffer: &CudaBuffer, col: usize) -> Vec<u64> {
+fn download_u64_column(
+    memory: &Arc<GpuMemoryManager>,
+    buffer: &CudaBuffer,
+    col: usize,
+) -> Vec<u64> {
     download_column_bytes(memory, buffer, col, 8)
         .chunks_exact(8)
         .map(|c| u64::from_le_bytes(c.try_into().unwrap()))
@@ -633,17 +640,17 @@ fn cycle4_groupby_root_agg_rejects_symbol_value_columns() {
     }
 }
 
-/// S1d measurement (gate: fused >= 3x vs unfused on the skewed 4-cycle
+/// Aggregate-fused WCOJ 4-cycle measurement (gate: fused >= 3x vs unfused on the skewed 4-cycle
 /// fixtures, per aggregate). Run explicitly:
 /// `cargo test -p xlog-cuda-tests --test test_wcoj_4cycle_groupby_root_agg \
 ///    --release -- --ignored --nocapture`
 /// Asserts parity; timing ratios are PRINTED and recorded as evidence, not
 /// asserted (wall-clock assertions are machine-dependent).
 #[test]
-#[ignore = "S1d measurement: run explicitly with --ignored --nocapture"]
-fn s1d_measurement_4cycle_agg_fused_vs_unfused() {
+#[ignore = "aggregate-fused WCOJ measurement: run explicitly with --ignored --nocapture"]
+fn wcoj_4cycle_groupby_root_agg_measurement_fused_vs_unfused() {
     let Some(fix) = make_fixture() else {
-        eprintln!("skipping s1d_measurement: no CUDA device");
+        eprintln!("skipping aggregate-fused WCOJ 4-cycle measurement: no CUDA device");
         return;
     };
 
@@ -671,12 +678,7 @@ fn s1d_measurement_4cycle_agg_fused_vs_unfused() {
         }
         // Uniform background so the group column is not a single value.
         for i in 0..1000u32 {
-            let (a, b, c, d) = (
-                3_000_000 + i,
-                4_000_000 + i,
-                5_000_000 + i,
-                6_000_000 + i,
-            );
+            let (a, b, c, d) = (3_000_000 + i, 4_000_000 + i, 5_000_000 + i, 6_000_000 + i);
             e1.push((a, b));
             e2.push((b, c));
             e3.push((c, d));
@@ -758,7 +760,7 @@ fn s1d_measurement_4cycle_agg_fused_vs_unfused() {
         let med_unfused = unfused_ms[REPS / 2];
         let med_fused = fused_ms[REPS / 2];
         println!(
-            "S1d cycle4_hub_10k {agg:?}(Z): unfused median {med_unfused:.3} ms, fused median \
+            "aggregate-fused WCOJ 4-cycle hub_10k {agg:?}(Z): unfused median {med_unfused:.3} ms, fused median \
              {med_fused:.3} ms, speedup {:.2}x (n_e1={}, n_e2={}, n_e3={}, n_e4={})",
             med_unfused / med_fused,
             e1_rows.len(),

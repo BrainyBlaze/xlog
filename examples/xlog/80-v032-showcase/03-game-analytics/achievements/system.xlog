@@ -1,7 +1,7 @@
 // =============================================================================
 // Achievement System Module
 // =============================================================================
-// Demonstrates: Recursive prerequisite chains, UDFs for points calculation
+// Demonstrates: Recursive prerequisite chains, user-defined functions for points calculation
 // Contains: 25 achievements with complex prerequisite relationships
 // =============================================================================
 
@@ -23,7 +23,7 @@ rare_rarity(3).
 common_rarity(4).
 
 // =============================================================================
-// USER-DEFINED FUNCTIONS (UDFs)
+// USER-DEFINED FUNCTIONS
 // =============================================================================
 
 // Achievement points based on rarity

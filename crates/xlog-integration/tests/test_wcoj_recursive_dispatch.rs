@@ -1,14 +1,15 @@
 // crates/xlog-integration/tests/test_wcoj_recursive_dispatch.rs
 #![allow(clippy::doc_lazy_continuation)]
 
-//! v0.6.5 slice 4 + W4.1 — recursive-SCC WCOJ dispatch certification.
+//! Recursive-SCC WCOJ dispatch coverage.
 //!
 //! Locks the contract for `Executor::execute_wcoj_or_fallback_node`
 //! at both the seeding pass and the per-variant evaluation in
-//! `execute_recursive_scc`. After slice 4 + W4.1:
+//! `execute_recursive_scc`. The coverage locks these paths:
 //!
 //!   * A **stable triangle** (zero recursive Scans in body) inside
-//!     a recursive SCC is promoted by the slice 4 promoter and
+//!     a recursive SCC is promoted by the stable-rule recursive
+//!     WCOJ path and
 //!     dispatched on the seeding pass — counter == 1.
 //!   * A **stable 4-cycle** in a recursive SCC behaves the same
 //!     for the 4-cycle counter.
@@ -20,15 +21,17 @@
 //!     fixed-point convergence + delta correctness are both
 //!     verified.
 //!   * A **multi-recursive triangle / 4-cycle** (≥ 2 in-SCC body
-//!     Scans, distinct recursive predicates) IS promoted by W4.1
-//!     (paper P1, arXiv:2604.20073 — semi-naïve evaluation
-//!     reasons over body-clause occurrences). Seeding dispatches
+//!     Scans, distinct recursive predicates) IS promoted by the
+//!     occurrence-aware recursive WCOJ path (arXiv:2604.20073:
+//!     semi-naïve evaluation reasons over body-clause
+//!     occurrences). Seeding dispatches
 //!     once; iter 1 dispatches one variant per recursive
 //!     occurrence with a non-empty delta. Counter `>= 2`. Final
 //!     row set matches the binary-join reference.
-//!   * A **same-predicate self-recursive triangle** (paper P1
-//!     positive cert) — body `tri(X,Y,Z) :- p(X,Y), p(Y,Z), q(X,Z)`
-//!     with `p` appearing twice — dispatches via the W4.1
+//!   * A **same-predicate self-recursive triangle** (the positive
+//!     same-predicate occurrence regression) — body
+//!     `tri(X,Y,Z) :- p(X,Y), p(Y,Z), q(X,Z)` with `p` appearing
+//!     twice — dispatches via the
 //!     `rewrite_scan_nth` occurrence-identity fix. Counter `>= 2`.
 //!     Row-set parity vs binary-join reference.
 //!
@@ -296,8 +299,9 @@ fn run_program_with_cards(
 
 /// A recursive program where the triangle rule's body uses only
 /// extensional relations (e1/e2/e3) — count of in-SCC Scans is 0.
-/// Slice 4 promotes it; the seeding pass dispatches WCOJ exactly
-/// once. The `echo`+feedback rules force `tri` into a recursive
+/// The stable-rule recursive WCOJ path promotes it; the seeding
+/// pass dispatches WCOJ exactly once. The `echo`+feedback rules
+/// force `tri` into a recursive
 /// SCC ({tri, echo}) without adding any in-SCC body atoms.
 ///
 /// Explicit `pred` declarations anchor U32 schemas across all
@@ -306,7 +310,7 @@ fn run_program_with_cards(
 /// Inline facts would also work for typing, but they perturb
 /// the optimizer's cardinality estimates and can flip the
 /// canonical triangle shape from left-deep to right-deep —
-/// which the slice 1 promoter doesn't recognize.
+/// which the non-recursive triangle promoter doesn't recognize.
 const STABLE_TRIANGLE_RECURSIVE: &str = r#"
     pred e1(u32, u32).
     pred e2(u32, u32).
@@ -367,7 +371,7 @@ fn stable_triangle_in_recursive_scc_dispatches_wcoj_on_seeding() {
     );
 
     // Bare default now uses CardinalityAwareCostModel only. Seed runtime
-    // cards to preserve the slice-4 seeding-pass dispatch count.
+    // cards to preserve the stable-rule seeding-pass dispatch count.
     let seeded_cards = BTreeMap::from([("e1", 100_000), ("e2", 100_000), ("e3", 100_000)]);
     let default_exec = run_program_with_cards(
         Arc::clone(&fix.provider),
@@ -390,7 +394,7 @@ fn stable_triangle_in_recursive_scc_dispatches_wcoj_on_seeding() {
         "bare-default WCOJ dispatch in recursive arm must produce the same row set as binary-join"
     );
 
-    // Gate on: slice 4 promotes the stable rule → dispatch on
+    // Gate on: stable-rule recursive promotion handles the rule → dispatch on
     // seeding pass. Counter == 1 (rule 1 only; the echo + copy
     // rules don't match a WCOJ shape).
     let dispatched = run_program(
@@ -488,13 +492,13 @@ fn stable_4cycle_in_recursive_scc_dispatches_wcoj_on_seeding() {
 
 // ---------------------------------------------------------------
 // Multi-recursive triangle: WCOJ dispatched (seeding + variants),
-// binary-join parity (W4.1 paper P1).
+// occurrence-semantics binary-join parity.
 // ---------------------------------------------------------------
 
-/// W4.1 multi-recursive triangle. Two of the three body Scans
+/// Multi-recursive triangle. Two of the three body Scans
 /// (`r1`, `r2`) are recursive — they receive feedback from `tri`.
-/// The third (`r3`) is extensional. Per paper P1 (semi-naive
-/// occurrence semantics), the W4.1 promoter admits this body
+/// The third (`r3`) is extensional. Under semi-naive occurrence
+/// semantics, the occurrence-aware recursive promoter admits this body
 /// because the recursive Scans target DISTINCT predicates — the
 /// variant-construction loop in `recursive.rs:455-540` builds one
 /// variant per recursive occurrence with a non-empty delta and
@@ -613,7 +617,8 @@ fn multirec_triangle_dispatches_wcoj_and_matches_binary_join() {
         reference_rows.len()
     );
 
-    // Gate on: W4.1 promoter admits the multi-recursive triangle.
+    // Gate on: the occurrence-aware recursive promoter admits the
+    // multi-recursive triangle.
     // Seeding fires WCOJ once on the full body. Iter 1 fires one
     // variant per recursive predicate with a non-empty delta — for
     // this fixture, both `r1_init` and `r2_init` are non-empty, so
@@ -647,8 +652,8 @@ fn multirec_triangle_dispatches_wcoj_and_matches_binary_join() {
 
 /// Linear-recursive triangle. Body has exactly ONE in-SCC Scan
 /// (`e1`, fed back from `tri` via the second `e1` rule). The
-/// other two body atoms (`e2`, `e3`) are extensional. Slice 4
-/// promoter gate: count == 1 → promote.
+/// other two body atoms (`e2`, `e3`) are extensional. The
+/// single-recursive promoter gate sees count == 1 → promote.
 ///
 /// Recursive dynamics:
 ///   1. Seeding pass: triangle rule joins `e1_seed` ⋈ e2 ⋈ e3 →
@@ -716,7 +721,8 @@ fn linear_recursive_triangle_dispatches_on_seeding_and_per_variant() {
         reference_rows.len()
     );
 
-    // Gate on: slice 4 promotes the linear-recursive triangle.
+    // Gate on: the single-recursive promoter handles the
+    // linear-recursive triangle.
     // Seeding fires WCOJ once. Each iteration with a non-empty
     // `e1_delta` fires WCOJ on the rewritten variant body. The
     // counter must strictly exceed the seeding-only case.
@@ -745,8 +751,8 @@ fn linear_recursive_triangle_dispatches_on_seeding_and_per_variant() {
 // ---------------------------------------------------------------
 
 /// Linear-recursive 4-cycle. `e1` is recursive (fed back from
-/// `cyc(Y, W, X, Z)`); `e2/e3/e4` are extensional. Slice 4
-/// promoter sees count == 1 → promote. Same seeding +
+/// `cyc(Y, W, X, Z)`); `e2/e3/e4` are extensional. The
+/// single-recursive promoter sees count == 1 → promote. Same seeding +
 /// per-variant dispatch contract as the triangle case above.
 const LINEAR_REC_4CYCLE: &str = r#"
     pred e1_seed(u32, u32).
@@ -824,19 +830,19 @@ fn linear_recursive_4cycle_dispatches_on_seeding_and_per_variant() {
 
 // ---------------------------------------------------------------
 // Multi-recursive 4-cycle: WCOJ dispatched (seeding + variants),
-// binary-join parity (W4.1 paper P1).
+// occurrence-semantics binary-join parity.
 // ---------------------------------------------------------------
 
-/// W4.1 multi-recursive 4-cycle. Two of the four body Scans
+/// Multi-recursive 4-cycle. Two of the four body Scans
 /// (`r1`, `r2`) are recursive — they receive feedback from `cyc`
 /// via SHIFTED projections so iter 1 produces non-empty deltas
 /// for BOTH:
 ///   * `r1(W, X) :- cyc(Y, W, X, Z)` — extracts cyc cols 1,2.
 ///   * `r2(A, B) :- cyc(W, X, A, B)` — extracts cyc cols 2,3.
-/// The other two atoms (`r3`, `r4`) are extensional. Per paper
-/// P1 (semi-naive occurrence semantics), the W4.1 promoter
-/// admits this body because the recursive Scans target DISTINCT
-/// predicates — the variant-construction loop in
+/// The other two atoms (`r3`, `r4`) are extensional. Under
+/// semi-naive occurrence semantics, the occurrence-aware recursive
+/// promoter admits this body because the recursive Scans target
+/// DISTINCT predicates — the variant-construction loop in
 /// `recursive.rs:455-540` builds one variant per recursive
 /// occurrence with a non-empty delta and dispatches WCOJ on each.
 ///
@@ -908,7 +914,8 @@ fn multirec_4cycle_dispatches_wcoj_and_matches_binary_join() {
         reference_rows.len()
     );
 
-    // Gate on: W4.1 promoter admits the multi-recursive 4-cycle.
+    // Gate on: the occurrence-aware recursive promoter admits the
+    // multi-recursive 4-cycle.
     // Seeding fires WCOJ once on the full body. Iter 1 fires one
     // variant per recursive predicate with a non-empty delta —
     // for this fixture, both r1's and r2's shifted projections
@@ -937,23 +944,22 @@ fn multirec_4cycle_dispatches_wcoj_and_matches_binary_join() {
 }
 
 // ---------------------------------------------------------------
-// Self-recursive triangle (same-predicate, paper P1 lock):
+// Self-recursive triangle (same-predicate occurrence lock):
 // WCOJ dispatched (seeding + variants), binary-join parity.
 // ---------------------------------------------------------------
 
-/// W4.1 self-recursive triangle. Rule 3's body has TWO `p` Scans
-/// (same predicate, two distinct occurrences). Per paper P1
-/// (semi-naïve evaluation reasons over body-clause OCCURRENCES,
-/// not predicate names), this body must be admitted by the
-/// promoter — every occurrence is a valid Δ-binding site, and
-/// each occurrence yields its own per-iteration variant.
+/// Self-recursive triangle. Rule 3's body has TWO `p` Scans
+/// (same predicate, two distinct occurrences). Under semi-naïve
+/// evaluation semantics, body-clause OCCURRENCES, not predicate
+/// names, are the valid delta-binding sites, so each occurrence
+/// yields its own per-iteration variant.
 ///
-/// This is the strict test of Step 6's `rewrite_scan_nth` fix:
+/// This strictly tests the `rewrite_scan_nth` occurrence-identity fix:
 /// with two same-predicate occurrences, the rewrite walker must
 /// stop after replacing the k-th occurrence (not continue and
 /// replace the (k+1)-th too) and the inputs/fallback views must
-/// be walked symmetrically. Distinct-predicate certs (multirec
-/// triangle / 4-cycle) cannot detect a pre-Step-6 walker
+/// be walked symmetrically. Distinct-predicate regressions
+/// (multirec triangle / 4-cycle) cannot detect an older walker
 /// regression because the second predicate has a different RelId
 /// and does not match.
 ///
@@ -980,7 +986,7 @@ const SELFREC_TRIANGLE: &str = r#"
 "#;
 
 fn selfrec_triangle_inputs() -> BTreeMap<&'static str, Vec<(u32, u32)>> {
-    // F-W41-13 pinned fixture:
+    // Pinned same-predicate occurrence fixture:
     //   p_init = {(1,2),(2,3)} → seeding rule 1 populates p.
     //   q      = {(1,3)}.
     //   Reference tri = {(1,2,3)} non-empty. Iteration 1's two
@@ -1005,7 +1011,7 @@ fn selfrec_triangle_dispatches_wcoj_and_matches_binary_join() {
     // promoted to MultiWayJoin (compile-time) but execution uses
     // the fallback path; rewrite_scan_nth still operates on the
     // MultiWayJoin to build per-occurrence variants, so the same
-    // Step-6 occurrence-identity contract applies under gate=off.
+    // same occurrence-identity contract applies under gate=off.
     let reference = run_program(
         Arc::clone(&fix.provider),
         &fix.memory,
@@ -1022,13 +1028,13 @@ fn selfrec_triangle_dispatches_wcoj_and_matches_binary_join() {
     assert_eq!(
         reference_rows,
         vec![(1, 2, 3)],
-        "F-W41-13 pinned reference: tri must equal {{(1,2,3)}}; got {:?}",
+        "pinned same-predicate reference: tri must equal {{(1,2,3)}}; got {:?}",
         reference_rows
     );
 
-    // Gate on: W4.1 promoter admits the same-predicate
-    // self-recursive triangle (paper P1). Step 6's
-    // `rewrite_scan_nth` fix preserves occurrence identity for
+    // Gate on: the occurrence-aware recursive promoter admits the
+    // same-predicate self-recursive triangle. The `rewrite_scan_nth`
+    // fix preserves occurrence identity for
     // both `p` Scans across the inputs and fallback views, so
     // each variant rewrites exactly one `p` occurrence to
     // `delta_p` and dispatches WCOJ. Total counter `>= 2`.

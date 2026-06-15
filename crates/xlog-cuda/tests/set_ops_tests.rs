@@ -181,7 +181,7 @@ fn test_union_gpu_basic() {
 }
 
 #[test]
-fn w66_graph_mode_small_i64_full_row_set_ops_match_baseline_and_use_small_sort() {
+fn bounded_cuda_graph_small_i64_full_row_set_ops_match_baseline_and_use_small_sort() {
     let Some(provider) = setup_provider() else {
         eprintln!("Skipping: no CUDA device");
         return;
@@ -214,7 +214,7 @@ fn w66_graph_mode_small_i64_full_row_set_ops_match_baseline_and_use_small_sort()
     assert!(
         after >= before + 3,
         "graph-mode union+diff should route small full-row set maintenance \
-         through the W66 small-sort path; before={before} after={after}"
+         through the bounded CUDA Graph small-sort path; before={before} after={after}"
     );
 }
 

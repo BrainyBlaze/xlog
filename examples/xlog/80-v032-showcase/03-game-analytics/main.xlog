@@ -1,14 +1,14 @@
 // =============================================================================
 // Game Analytics - Main Entry Point
 // =============================================================================
-// Demonstrates v0.3.2 module system with comprehensive imports
+// Demonstrates module imports for game analytics.
 //
 // Features demonstrated:
 //   - use imports: Import predicates from 4 specialized modules
 //   - Cross-module queries: Combine player, match, achievement, and ranking data
-//   - Symbol types: Player IDs, usernames, countries, game modes
+//   - Symbol types: Player identifiers, usernames, countries, game modes
 //   - Recursive rules: Achievement prerequisites, friend-of-friend
-//   - User-Defined Functions: ELO calculations, achievement points, KDA
+//   - User-defined functions: Elo rating calculations, achievement points, kill/death/assist ratio
 //   - Aggregations: Leaderboards, statistics, distributions
 //   - Private predicates: Internal helpers hidden from other modules
 //
@@ -16,7 +16,7 @@
 //   players/profiles.xlog  - Player data, friendships, guilds
 //   matches/history.xlog   - Match results, game modes, statistics
 //   achievements/system.xlog - Achievement definitions, prerequisites, awards
-//   ranking/elo.xlog       - ELO ratings, tiers, win rates, UDFs
+//   ranking/elo.xlog       - Elo ratings, tiers, win rates, user-defined functions
 // =============================================================================
 
 // --- Module Imports ---
@@ -43,146 +43,146 @@ top_player_threshold(2200).
 
 // Comprehensive player profile combining all modules
 pred player_profile(symbol, symbol, symbol, u32, u32, u64, u64).
-// player_id, username, country, elo_rating, tier, achievement_points, total_kills
-player_profile(PlayerId, Username, Country, Rating, Tier, AchPoints, TotalKills) :-
-    player(PlayerId, Username, Country, active),
-    player_elo(PlayerId, Rating),
-    player_calculated_tier(PlayerId, Tier),
-    player_achievement_points(PlayerId, AchPoints),
-    total_kills(PlayerId, TotalKills).
+// player, username, country, Elo rating, tier, achievement points, total kills
+player_profile(Player, Username, Country, Rating, Tier, AchievementPoints, TotalKills) :-
+    player(Player, Username, Country, active),
+    player_elo(Player, Rating),
+    player_calculated_tier(Player, Tier),
+    player_achievement_points(Player, AchievementPoints),
+    total_kills(Player, TotalKills).
 
-// Top players combining ELO and achievements
+// Top players combining Elo ratings and achievements
 pred elite_player(symbol, symbol, u32, u64).
-elite_player(Username, Country, Rating, AchPoints) :-
-    player(PlayerId, Username, Country, active),
-    player_elo(PlayerId, Rating),
+elite_player(Username, Country, Rating, AchievementPoints) :-
+    player(Player, Username, Country, active),
+    player_elo(Player, Rating),
     top_player_threshold(Threshold),
     Rating >= Threshold,
-    player_achievement_points(PlayerId, AchPoints),
-    AchPoints >= 300.
+    player_achievement_points(Player, AchievementPoints),
+    AchievementPoints >= 300.
 
-// Regional leaderboard by ELO
+// Regional leaderboard by Elo rating
 pred regional_leader(symbol, symbol, symbol, u32).
 regional_leader(RegionName, Username, Country, Rating) :-
-    player(PlayerId, Username, Country, active),
-    player_region(PlayerId, RegionId),
-    region(RegionId, RegionName),
-    player_elo(PlayerId, Rating),
+    player(Player, Username, Country, active),
+    player_region(Player, Region),
+    region(Region, RegionName),
+    player_elo(Player, Rating),
     Rating >= 2000.
 
 // Match performance analysis
 pred match_performance(symbol, symbol, u32, u32, u32, u32).
-// player_id, match_id, kills, kda_scaled, elo_rating, tier
-match_performance(PlayerId, MatchId, Kills, KdaScaled, Rating, Tier) :-
-    match_result(MatchId, PlayerId, Kills, Deaths, Assists),
-    player_elo(PlayerId, Rating),
-    player_calculated_tier(PlayerId, Tier),
-    KdaScaled is kda_ratio(Kills, Deaths, Assists).
+// player, match, kills, scaled kill/death/assist ratio, Elo rating, tier
+match_performance(Player, Match, Kills, KillDeathAssistScaled, Rating, Tier) :-
+    match_result(Match, Player, Kills, Deaths, Assists),
+    player_elo(Player, Rating),
+    player_calculated_tier(Player, Tier),
+    KillDeathAssistScaled is kda_ratio(Kills, Deaths, Assists).
 
 // Guild power ranking (combines player stats)
 pred guild_power_ranking(symbol, symbol, u64, u64).
-// guild_name, leader_username, total_elo, total_achievements
-guild_power_ranking(GuildName, LeaderName, TotalElo, TotalAch) :-
-    guild(GuildId, GuildName, LeaderId),
-    player(LeaderId, LeaderName, _, _),
-    guild_total_elo(GuildId, TotalElo),
-    guild_total_achievements(GuildId, TotalAch).
+// guild name, leader username, total Elo rating, completed achievement members
+guild_power_ranking(GuildName, LeaderName, TotalEloRating, CompletedAchievementMembers) :-
+    guild(Guild, GuildName, Leader),
+    player(Leader, LeaderName, _, _),
+    guild_total_elo_rating(Guild, TotalEloRating),
+    guild_total_achievements(Guild, CompletedAchievementMembers).
 
-// Helper: sum of ELO for guild members
-pred guild_total_elo(symbol, u64).
-guild_total_elo(GuildId, sum(Rating)) :-
-    guild_member(GuildId, PlayerId),
-    player_elo(PlayerId, Rating).
+// Helper: sum of Elo ratings for guild members
+pred guild_total_elo_rating(symbol, u64).
+guild_total_elo_rating(Guild, sum(Rating)) :-
+    guild_member(Guild, Player),
+    player_elo(Player, Rating).
 
 // Helper: sum of achievement points for guild members
 // Note: player_achievement_points returns u64, so this should use u64 input
 // But sum currently requires u32, so we need a workaround
 // For now, just count achievements per guild instead
 pred guild_total_achievements(symbol, u64).
-guild_total_achievements(GuildId, count(PlayerId)) :-
-    guild_member(GuildId, PlayerId),
-    player_achievement_points(PlayerId, _).
+guild_total_achievements(Guild, count(Player)) :-
+    guild_member(Guild, Player),
+    player_achievement_points(Player, _).
 
 // Top fraggers by region with ranking context
 pred top_fragger_by_region(symbol, symbol, u64, u32, u32).
 top_fragger_by_region(RegionName, Username, TotalKills, Rating, WinRate) :-
-    player(PlayerId, Username, _, active),
-    player_region(PlayerId, RegionId),
-    region(RegionId, RegionName),
-    total_kills(PlayerId, TotalKills),
-    player_elo(PlayerId, Rating),
-    player_win_rate(PlayerId, WinRate),
+    player(Player, Username, _, active),
+    player_region(Player, Region),
+    region(Region, RegionName),
+    total_kills(Player, TotalKills),
+    player_elo(Player, Rating),
+    player_win_rate(Player, WinRate),
     TotalKills >= 100.
 
 // Achievement progress with prerequisite analysis
 pred achievement_progress(symbol, symbol, u64, u64).
-// player_id, username, completed_count, total_points
-achievement_progress(PlayerId, Username, Count, Points) :-
-    player(PlayerId, Username, _, active),
-    player_achievement_count(PlayerId, Count),
-    player_achievement_points(PlayerId, Points).
+// player, username, completed count, total points
+achievement_progress(Player, Username, Count, Points) :-
+    player(Player, Username, _, active),
+    player_achievement_count(Player, Count),
+    player_achievement_points(Player, Points).
 
-// Friend network analysis with ELO comparison
+// Friend network analysis with Elo rating comparison
 // Helper constant for skill gap threshold
 pred skill_gap_threshold(u32).
 skill_gap_threshold(200).
 
-// Helper: compute ELO difference between friends
-pred friend_elo_diff(symbol, symbol, symbol, symbol, u32, u32, u32).
-friend_elo_diff(User1, User2, P1, P2, Elo1, Elo2, Diff) :-
-    player(P1, User1, _, active),
-    player(P2, User2, _, active),
-    friend(P1, P2),
-    player_elo(P1, Elo1),
-    player_elo(P2, Elo2),
-    Elo1 >= Elo2,
-    Diff is Elo1 - Elo2.
+// Helper: compute Elo rating difference between friends
+pred friend_elo_rating_difference(symbol, symbol, symbol, symbol, u32, u32, u32).
+friend_elo_rating_difference(FirstUsername, SecondUsername, FirstPlayer, SecondPlayer, FirstEloRating, SecondEloRating, RatingDifference) :-
+    player(FirstPlayer, FirstUsername, _, active),
+    player(SecondPlayer, SecondUsername, _, active),
+    friend(FirstPlayer, SecondPlayer),
+    player_elo(FirstPlayer, FirstEloRating),
+    player_elo(SecondPlayer, SecondEloRating),
+    FirstEloRating >= SecondEloRating,
+    RatingDifference is FirstEloRating - SecondEloRating.
 
 pred friend_comparison(symbol, symbol, u32, symbol, u32).
-// player1_username, player2_username, player1_elo, friend_type, elo_diff
-friend_comparison(User1, User2, Elo1, close_match, Diff) :-
-    friend_elo_diff(User1, User2, _, _, Elo1, _, Diff),
+// first username, second username, first Elo rating, friend type, Elo rating difference
+friend_comparison(FirstUsername, SecondUsername, FirstEloRating, close_match, RatingDifference) :-
+    friend_elo_rating_difference(FirstUsername, SecondUsername, _, _, FirstEloRating, _, RatingDifference),
     skill_gap_threshold(Threshold),
-    Diff < Threshold.
+    RatingDifference < Threshold.
 
-friend_comparison(User1, User2, Elo1, skill_gap, Diff) :-
-    friend_elo_diff(User1, User2, _, _, Elo1, _, Diff),
+friend_comparison(FirstUsername, SecondUsername, FirstEloRating, skill_gap, RatingDifference) :-
+    friend_elo_rating_difference(FirstUsername, SecondUsername, _, _, FirstEloRating, _, RatingDifference),
     skill_gap_threshold(Threshold),
-    Diff >= Threshold.
+    RatingDifference >= Threshold.
 
-// Players who could be introduced (friend-of-friend with similar ELO)
+// Players who could be introduced (friend-of-friend with similar Elo rating)
 pred potential_friends(symbol, symbol, u32, u32).
-potential_friends(User1, User2, Elo1, Elo2) :-
-    player(P1, User1, _, active),
-    player(P2, User2, _, active),
-    friend_of_friend(P1, P2),
-    not friend(P1, P2),
-    player_elo(P1, Elo1),
-    player_elo(P2, Elo2).
+potential_friends(FirstUsername, SecondUsername, FirstEloRating, SecondEloRating) :-
+    player(FirstPlayer, FirstUsername, _, active),
+    player(SecondPlayer, SecondUsername, _, active),
+    friend_of_friend(FirstPlayer, SecondPlayer),
+    not friend(FirstPlayer, SecondPlayer),
+    player_elo(FirstPlayer, FirstEloRating),
+    player_elo(SecondPlayer, SecondEloRating).
 
 // Match mode popularity
 pred mode_popularity(symbol, symbol, u64).
-mode_popularity(ModeName, ModeId, Count) :-
-    game_mode(ModeId, ModeName),
-    mode_match_count(ModeId, Count).
+mode_popularity(ModeName, Mode, Count) :-
+    game_mode(Mode, ModeName),
+    mode_match_count(Mode, Count).
 
 // Players missing achievement prerequisites
 pred incomplete_chain(symbol, symbol, symbol, symbol).
-incomplete_chain(Username, AchName, PrereqName, Category) :-
-    player(PlayerId, Username, _, active),
-    player_achievement(PlayerId, AchId),
-    achievement(AchId, AchName, _),
-    all_prerequisites(AchId, PrereqId),
-    not player_achievement(PlayerId, PrereqId),
-    achievement(PrereqId, PrereqName, _),
-    achievement_category(PrereqId, Category).
+incomplete_chain(Username, AchievementName, PrerequisiteName, Category) :-
+    player(Player, Username, _, active),
+    player_achievement(Player, Achievement),
+    achievement(Achievement, AchievementName, _),
+    all_prerequisites(Achievement, Prerequisite),
+    not player_achievement(Player, Prerequisite),
+    achievement(Prerequisite, PrerequisiteName, _),
+    achievement_category(Prerequisite, Category).
 
 // =============================================================================
 // QUERIES - Cross-Module Analysis
 // =============================================================================
 
-// Q1: Elite players with high ELO and achievement points
-?- elite_player(Username, Country, Rating, AchPoints).
+// Q1: Elite players with high Elo ratings and achievement points
+?- elite_player(Username, Country, Rating, AchievementPoints).
 
 // Q2: Regional leaderboard (Master+ players by region)
 ?- regional_leader(Region, Username, Country, Rating).
@@ -191,37 +191,37 @@ incomplete_chain(Username, AchName, PrereqName, Category) :-
 ?- top_fragger_by_region(Region, Username, TotalKills, Rating, WinRate).
 
 // Q4: Guild power rankings
-?- guild_power_ranking(GuildName, Leader, TotalElo, TotalAchievements).
+?- guild_power_ranking(GuildName, Leader, TotalEloRating, TotalAchievements).
 
 // Q5: Grandmaster players
-?- grandmaster_player(PlayerId, Rating).
+?- grandmaster_player(Player, Rating).
 
 // Q6: Player tier distribution
 ?- tier_distribution(Tier, PlayerCount).
 
 // Q7: High win rate players (60%+)
-?- high_win_rate_player(PlayerId, WinRate, Elo).
+?- high_win_rate_player(Player, WinRate, Elo).
 
 // Q8: Achievement progress by player
-?- achievement_progress(PlayerId, Username, AchievementCount, TotalPoints).
+?- achievement_progress(Player, Username, AchievementCount, TotalPoints).
 
 // Q9: Legendary achievement holders
-?- legendary_holder(PlayerId, AchievementName).
+?- legendary_holder(Player, AchievementName).
 
 // Q10: All prerequisites for the Perfectionist achievement (recursive)
-?- all_prerequisites(a025, PrereqId).
+?- all_prerequisites(a025, Prerequisite).
 
 // Q11: Friend network analysis
-?- friend_comparison(User1, User2, Elo1, FriendType, EloDiff).
+?- friend_comparison(FirstUsername, SecondUsername, FirstEloRating, FriendType, EloRatingDifference).
 
 // Q12: Potential friend introductions (friends-of-friends)
-?- potential_friends(User1, User2, Elo1, Elo2).
+?- potential_friends(FirstUsername, SecondUsername, FirstEloRating, SecondEloRating).
 
 // Q13: Popular game modes
-?- mode_popularity(ModeName, ModeId, MatchCount).
+?- mode_popularity(ModeName, Mode, MatchCount).
 
-// Q14: Match performance with KDA analysis
-?- match_performance(PlayerId, MatchId, Kills, KdaScaled, EloRating, Tier).
+// Q14: Match performance with kill/death/assist analysis
+?- match_performance(Player, Match, Kills, KillDeathAssistScaled, EloRating, Tier).
 
 // Q15: Players with incomplete achievement chains
 ?- incomplete_chain(Username, Achievement, MissingPrereq, Category).

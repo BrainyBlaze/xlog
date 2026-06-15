@@ -1,16 +1,16 @@
 // crates/xlog-cuda/tests/test_wcoj_4cycle_layout.rs
-//! v0.6.5 slice 2 — layout reuse smoke for 4-cycle.
+//! WCOJ 4-cycle layout reuse coverage.
 //!
 //! `wcoj_layout_u32_recorded` and `wcoj_layout_u64_recorded` were
-//! introduced in v0.6.2 to produce sorted+deduped 2-column buffers
-//! for WCOJ kernel consumption. Their contract is shape-agnostic:
+//! used to produce sorted+deduped 2-column buffers for WCOJ kernel
+//! consumption. Their contract is shape-agnostic:
 //! they sort lex `(col0, col1)` and dedup, regardless of which
 //! kernel downstream consumes the result.
 //!
 //! This test pins that contract for 4-cycle: feed unsorted+duplicate
 //! 2-column u32 inputs through the layout helper, then through the
 //! 4-cycle u32 dispatch, and assert correct row sets. No new layout
-//! kernel is required — slice 2 reuses the existing helpers
+//! kernel is required because this path reuses the existing helpers
 //! verbatim.
 
 use std::collections::BTreeSet;
@@ -189,7 +189,7 @@ fn wcoj_layout_then_4cycle_u32_handles_unsorted_dedup_inputs() {
     // (the 6 raw rows contain 2 duplicates). `num_rows()` is the
     // allocation cap; the post-dedup logical count lives in the
     // device-resident `d_num_rows` slot, accessed via the cached
-    // host count when available or a 4-byte D2H. The 4-cycle
+    // host count when available or a 4-byte device-to-host copy. The 4-cycle
     // kernel reads this internally; here we just sanity-check.
     let logical_rows = |buf: &CudaBuffer| -> u32 {
         match buf.cached_row_count() {

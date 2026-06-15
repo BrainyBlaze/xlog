@@ -21,7 +21,7 @@
 
 ## Complete Test Case Descriptions
 
-### C01: Toolchain (5 tests)
+### Toolchain (5 tests)
 
 Tests PTX compilation, JIT behavior, and kernel function resolution.
 
@@ -33,7 +33,7 @@ Tests PTX compilation, JIT behavior, and kernel function resolution.
 | `test_ptx_module_attributes` | Verifies PTX module attributes and metadata are correctly set. |
 | `test_repeated_jit_compilation` | Tests JIT cache behavior under repeated kernel execution to ensure no memory leaks or compilation errors. |
 
-### C02: Launch Config (8 tests)
+### Launch Config (8 tests)
 
 Tests kernel launch configuration edge cases across various data sizes.
 
@@ -48,7 +48,7 @@ Tests kernel launch configuration edge cases across various data sizes.
 | `max_practical_size` | Tests maximum practical size within memory budget to verify scalability limits. |
 | `test_mc_sample_edge_sizes` | Validates MC sampler kernel launch across edge `(num_vars, num_samples)` sizes (0/1/warp/block boundaries) and checks output shape + bit validity. |
 
-### C03: Pointer Bounds (8 tests)
+### Pointer Bounds (8 tests)
 
 Tests pointer arithmetic, indexing, and boundary conditions.
 
@@ -63,7 +63,7 @@ Tests pointer arithmetic, indexing, and boundary conditions.
 | `test_boundary_indices` | Tests correctness when selecting first and last elements via filter. |
 | `test_multi_column_strides` | Tests multi-column buffer operations with different column strides. |
 
-### C04: Address Space (5 tests)
+### Address Space (5 tests)
 
 Tests global memory correctness with various data types.
 
@@ -75,7 +75,7 @@ Tests global memory correctness with various data types.
 | `test_global_f64_correctness` | Tests F64 values including special floats (NaN, Inf, subnormals), verifying IEEE 754 handling. |
 | `test_multi_buffer_isolation` | Creates multiple independent buffers and verifies operations don't corrupt neighboring memory. |
 
-### C05: Global Memory (5 tests)
+### Global Memory (5 tests)
 
 Tests global memory access patterns and potential hazards.
 
@@ -87,7 +87,7 @@ Tests global memory access patterns and potential hazards.
 | `test_repeated_access` | Tests repeated read/write operations on the same buffer locations. |
 | `test_buffer_reuse` | Tests buffer reuse across multiple operations without corruption. |
 
-### C06: Shared Memory (5 tests)
+### Shared Memory (5 tests)
 
 Tests operations that use shared memory internally.
 
@@ -99,7 +99,7 @@ Tests operations that use shared memory internally.
 | `test_block_boundary_shared_mem` | Tests shared memory usage at block boundaries where data spans blocks. |
 | `test_shared_mem_size_limits` | Tests operations near shared memory size limits (48KB typical). |
 
-### C07: Local Memory (5 tests)
+### Local Memory (5 tests)
 
 Tests operations that may use local memory (register spilling).
 
@@ -111,7 +111,7 @@ Tests operations that may use local memory (register spilling).
 | `test_complex_filter_chains` | Tests complex filter chains with multiple predicates. |
 | `test_local_memory_stress` | Stress test designed to force local memory usage. |
 
-### C08: Synchronization (5 tests)
+### Synchronization (5 tests)
 
 Tests synchronization primitives and memory ordering.
 
@@ -123,7 +123,7 @@ Tests synchronization primitives and memory ordering.
 | `test_dedup_atomic_marking` | Tests dedup atomic marking for duplicate detection. |
 | `test_concurrent_operations` | Tests concurrent operations on different buffers for isolation. |
 
-### C09: Warp Level (5 tests)
+### Warp Level (5 tests)
 
 Tests warp-level programming (32 thread groups).
 
@@ -135,7 +135,7 @@ Tests warp-level programming (32 thread groups).
 | `test_warp_uniform_patterns` | Tests data patterns where all warp threads take same path (uniform). |
 | `test_multi_warp_coordination` | Tests coordination between multiple warps within a block. |
 
-### C10: Block/Grid (5 tests)
+### Block/Grid (5 tests)
 
 Tests cross-block and grid-level behavior.
 
@@ -147,7 +147,7 @@ Tests cross-block and grid-level behavior.
 | `test_grid_stride_correctness` | Tests large data requiring grid-stride loops for full coverage. |
 | `test_cross_block_data_patterns` | Tests data patterns that require cross-block data movement (e.g., global sort). |
 
-### C11: Control Flow (7 tests)
+### Control Flow (7 tests)
 
 Tests conditional execution patterns.
 
@@ -161,7 +161,7 @@ Tests conditional execution patterns.
 | `test_alternating_predicate` | Filter with alternating 1,0,1,0 pattern - maximum thread divergence. |
 | `test_random_predicate_distribution` | Filter with random predicate using deterministic seed for reproducibility. |
 
-### C12: Atomics (5 tests)
+### Atomics (5 tests)
 
 Tests atomic operation correctness.
 
@@ -173,7 +173,7 @@ Tests atomic operation correctness.
 | `test_atomic_counting` | Tests atomic counters used in filter compaction. |
 | `test_concurrent_atomic_updates` | Tests concurrent atomic updates from multiple thread blocks. |
 
-### C13: Floating Point (6 tests)
+### Floating Point (6 tests)
 
 Tests floating-point special values and precision.
 
@@ -186,7 +186,7 @@ Tests floating-point special values and precision.
 | `test_f64_precision_extremes` | Tests f64::MIN_POSITIVE, f64::MAX, and values near precision limits. |
 | `test_f64_sort_ordering` | Tests complete f64 sort ordering including all special values in single sort. |
 
-### C14: Integer (5 tests)
+### Integer (5 tests)
 
 Tests integer boundary conditions.
 
@@ -198,7 +198,7 @@ Tests integer boundary conditions.
 | `test_i64_signed_comparison` | Tests that signed comparison is used for i64 (not bitwise). -1 should sort before 0. |
 | `test_integer_wraparound_keys` | Tests keys near wraparound boundaries to catch overflow bugs. |
 
-### C15: Determinism (8 tests)
+### Determinism (8 tests)
 
 Tests reproducibility across multiple executions.
 
@@ -213,7 +213,7 @@ Tests reproducibility across multiple executions.
 | `test_xgcf_forward_reproducibility` | Verifies the XGCF forward kernels produce identical values across repeated runs. |
 | `test_xgcf_backward_reproducibility` | Verifies the XGCF backward kernels (adjoints + decision grads) are deterministic across repeated runs. |
 
-### C16: Async Pipeline (5 tests)
+### Async Pipeline (5 tests)
 
 Tests async execution patterns.
 
@@ -225,7 +225,7 @@ Tests async execution patterns.
 | `test_error_propagation` | Tests that errors from one operation are properly propagated. |
 | `test_large_batch_operations` | Tests large batch of operations with significant total memory. |
 
-### C17: Caching (5 tests)
+### Caching (5 tests)
 
 Tests cache behavior and coherence.
 
@@ -237,7 +237,7 @@ Tests cache behavior and coherence.
 | `test_memory_locality` | Tests operations with good memory locality vs poor locality. |
 | `test_l2_cache_effects` | Tests data sizes around L2 cache capacity to observe cache effects. |
 
-### C18: Host/Device (5 tests)
+### Host/Device (5 tests)
 
 Tests host-device data transfer and coordination.
 
@@ -249,7 +249,7 @@ Tests host-device data transfer and coordination.
 | `test_memory_lifecycle` | Tests proper memory allocation and deallocation lifecycle. |
 | `test_memory_budget_limits` | Tests behavior when approaching memory budget limits. |
 
-### C19: Multi-Stream (5 tests)
+### Multi-Stream (5 tests)
 
 Tests concurrent stream operations (simulated via sequential).
 
@@ -261,7 +261,7 @@ Tests concurrent stream operations (simulated via sequential).
 | `test_batch_completion` | Tests batch completion semantics - all operations complete before verification. |
 | `test_dependency_chain` | Tests operation chains with dependencies: A → B → C. |
 
-### C20: Multi-GPU (5 tests)
+### Multi-GPU (5 tests)
 
 Tests multi-GPU scenarios.
 
@@ -273,7 +273,7 @@ Tests multi-GPU scenarios.
 | `test_primary_device_operations` | Tests operations on primary device work correctly. |
 | `test_device_capability_query` | Tests querying device capabilities (compute capability, memory, etc.). |
 
-### C21: Hardware (5 tests)
+### Hardware (5 tests)
 
 Tests hardware reliability and error handling.
 
@@ -285,7 +285,7 @@ Tests hardware reliability and error handling.
 | `test_memory_pressure` | Tests behavior under memory pressure (near budget limit). |
 | `test_sustained_operation` | Tests sustained operation over extended period (~10 seconds) for stability. |
 
-### C22: Algorithms (13 tests)
+### Algorithms (13 tests)
 
 Tests specific algorithm edge cases.
 
@@ -305,7 +305,7 @@ Tests specific algorithm edge cases.
 | `test_xgcf_forward_tiny_matches_expected` | Runs a tiny XGCF circuit forward pass and verifies values match expected CPU results. |
 | `test_xgcf_backward_tiny_matches_expected` | Runs a tiny XGCF circuit backward pass and verifies adjoints + decision grads match expected CPU results. |
 
-### C23: Blind Spots (5 tests)
+### Blind Spots (5 tests)
 
 Tests commonly overlooked edge cases.
 
@@ -317,7 +317,7 @@ Tests commonly overlooked edge cases.
 | `test_alternating_patterns` | Tests data with alternating high/low patterns that stress comparison. |
 | `test_empty_and_single` | Comprehensive empty (0) and single (1) element tests across all operations. |
 
-### C24: Edge Matrix (5 tests)
+### Edge Matrix (5 tests)
 
 Cross-product testing of Size × Distribution × Type.
 
@@ -335,30 +335,30 @@ Cross-product testing of Size × Distribution × Type.
 
 | Category | Tests | Duration | Status |
 |----------|-------|----------|--------|
-| C01 Toolchain | 5/5 | 0.01s | PASS |
-| C02 Launch Config | 8/8 | 0.14s | PASS |
-| C03 Pointer Bounds | 8/8 | 0.02s | PASS |
-| C04 Address Space | 5/5 | 0.00s | PASS |
-| C05 Global Memory | 5/5 | 0.08s | PASS |
-| C06 Shared Memory | 5/5 | 0.03s | PASS |
-| C07 Local Memory | 5/5 | 0.15s | PASS |
-| C08 Synchronization | 5/5 | 0.01s | PASS |
-| C09 Warp Level | 5/5 | 0.04s | PASS |
-| C10 Block Grid | 5/5 | 0.23s | PASS |
-| C11 Control Flow | 7/7 | 0.01s | PASS |
-| C12 Atomics | 5/5 | 0.02s | PASS |
-| C13 Floating Point | 6/6 | 0.01s | PASS |
-| C14 Integer | 5/5 | 0.00s | PASS |
-| C15 Determinism | 8/8 | 0.01s | PASS |
-| C16 Async Pipeline | 5/5 | 0.13s | PASS |
-| C17 Caching | 5/5 | 0.12s | PASS |
-| C18 Host Device | 5/5 | 0.95s | PASS |
-| C19 Multi Stream | 5/5 | 0.06s | PASS |
-| C20 Multi GPU | 5/5 | 0.02s | PASS |
-| C21 Hardware | 5/5 | 9.50s | PASS |
-| C22 Algorithms | 13/13 | 0.01s | PASS |
-| C23 Blind Spots | 5/5 | 0.03s | PASS |
-| C24 Edge Matrix | 5/5 | 0.08s | PASS |
+| Toolchain | 5/5 | 0.01s | PASS |
+| Launch Config | 8/8 | 0.14s | PASS |
+| Pointer Bounds | 8/8 | 0.02s | PASS |
+| Address Space | 5/5 | 0.00s | PASS |
+| Global Memory | 5/5 | 0.08s | PASS |
+| Shared Memory | 5/5 | 0.03s | PASS |
+| Local Memory | 5/5 | 0.15s | PASS |
+| Synchronization | 5/5 | 0.01s | PASS |
+| Warp Level | 5/5 | 0.04s | PASS |
+| Block Grid | 5/5 | 0.23s | PASS |
+| Control Flow | 7/7 | 0.01s | PASS |
+| Atomics | 5/5 | 0.02s | PASS |
+| Floating Point | 6/6 | 0.01s | PASS |
+| Integer | 5/5 | 0.00s | PASS |
+| Determinism | 8/8 | 0.01s | PASS |
+| Async Pipeline | 5/5 | 0.13s | PASS |
+| Caching | 5/5 | 0.12s | PASS |
+| Host Device | 5/5 | 0.95s | PASS |
+| Multi Stream | 5/5 | 0.06s | PASS |
+| Multi GPU | 5/5 | 0.02s | PASS |
+| Hardware | 5/5 | 9.50s | PASS |
+| Algorithms | 13/13 | 0.01s | PASS |
+| Blind Spots | 5/5 | 0.03s | PASS |
+| Edge Matrix | 5/5 | 0.08s | PASS |
 
 ---
 
@@ -366,12 +366,12 @@ Cross-product testing of Size × Distribution × Type.
 
 | Domain | Categories | Tests |
 |--------|------------|-------|
-| Infrastructure | C01-C02 | 13 |
-| Memory Hierarchy | C03-C08 | 33 |
-| Execution Model | C09-C12 | 22 |
-| Numeric Correctness | C13-C16 | 24 |
-| System Integration | C17-C21 | 25 |
-| Algorithms & Edge Cases | C22-C24 | 23 |
+| Infrastructure | Toolchain and launch configuration | 13 |
+| Memory Hierarchy | Pointer bounds, address space, global memory, shared memory, local memory, and synchronization | 33 |
+| Execution Model | Warp-level behavior, block/grid behavior, control flow, and atomics | 22 |
+| Numeric Correctness | Floating point, integer, determinism, and async pipeline behavior | 24 |
+| System Integration | Caching, host/device transfer, multi-stream, multi-GPU, and hardware behavior | 25 |
+| Algorithms & Edge Cases | Algorithms, blind spots, and edge matrix coverage | 23 |
 
 ---
 
@@ -379,11 +379,11 @@ Cross-product testing of Size × Distribution × Type.
 
 | Duration Bucket | Categories |
 |-----------------|------------|
-| <0.1s | C01, C03, C04, C05, C06, C08, C09, C11, C12, C13, C14, C15, C19, C20, C22, C23, C24 |
-| 0.1s-1s | C02, C07, C10, C16, C17, C18 |
-| >5s | C21 (hardware stress tests) |
+| <0.1s | Toolchain, pointer-bounds, address-space, global-memory, shared-memory, synchronization, warp-level, control-flow, atomics, floating-point, integer, determinism, multi-stream, multi-GPU, algorithm, blind-spot, and edge-matrix categories |
+| 0.1s-1s | Launch-configuration, local-memory, block/grid, async-pipeline, caching, and host/device categories |
+| >5s | Hardware stress tests |
 
-**Longest Category:** C21 Hardware (9.50s) - Expected for stress tests
+**Longest Category:** Hardware (9.50s) - Expected for stress tests
 
 ---
 

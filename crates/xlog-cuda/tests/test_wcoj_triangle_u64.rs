@@ -3,7 +3,7 @@
 //!
 //! Locks the provider entry
 //! `CudaKernelProvider::wcoj_triangle_u64_recorded(e_xy, e_yz, e_xz, launch_stream)`
-//! against the same SRDatalog HG block-slice contract as the u32 path.
+//! against the same provider triangle contract as the u32 path.
 
 use std::collections::BTreeSet;
 use std::sync::Arc;

@@ -1,4 +1,4 @@
-//! D1 aggregate-fused WCOJ over recursive-stratum inputs.
+//! Aggregate-fused WCOJ over recursive-stratum inputs.
 //!
 //! The legal fragment: a NON-recursive aggregate rule in a later stratum
 //! whose triangle body reads predicates computed by an earlier recursive

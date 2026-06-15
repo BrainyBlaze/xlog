@@ -1,4 +1,4 @@
-//! Magic-set rewriting for the v0.8.5 deterministic language subset.
+//! Magic-set rewriting for the deterministic language-completeness subset.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 
@@ -52,8 +52,8 @@ struct Seed {
     terms: Vec<Term>,
 }
 
-/// Rewrite supported v0.8.5 bound recursive queries with magic predicates.
-pub fn rewrite_v085_magic_sets(program: &Program) -> Result<MagicSetRewrite> {
+/// Rewrite supported bound recursive queries with magic predicates.
+pub fn rewrite_magic_sets(program: &Program) -> Result<MagicSetRewrite> {
     let mode = program.directives.magic_sets;
     if mode.is_none() || mode == Some(MagicSetsMode::Off) {
         return Ok(with_status(program, MagicSetStatus::Disabled));
@@ -144,7 +144,7 @@ fn decline_or_error(
 }
 
 fn magic_error(message: impl Into<String>) -> XlogError {
-    XlogError::Compilation(format!("v0.8.5 magic_sets error: {}", message.into()))
+    XlogError::Compilation(format!("magic_sets error: {}", message.into()))
 }
 
 fn collect_query_seeds(program: &Program, recursive: &HashSet<String>) -> Vec<Seed> {

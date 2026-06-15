@@ -94,10 +94,10 @@ def test_public_benchmark_report_is_explicit_nonclaim_until_adapters_exist() -> 
     report = runner._public_benchmark_report()
 
     assert report["status"] == "FAIL"
-    assert report["external_sota_claim"] is False
+    assert report["external_state_of_the_art_claim"] is False
     assert report["covered_public_benchmark_families"] == []
     assert report["missing_public_benchmark_families"]
-    assert "MISSING_PUBLIC_SOTA_RUNNER" in report["blockers"]
+    assert "MISSING_PUBLIC_STATE_OF_THE_ART_RUNNER" in report["blockers"]
 
 
 def test_artifact_provenance_records_current_git_sha() -> None:
@@ -290,7 +290,7 @@ def test_generalization_evidence_uses_cuda_xlog_nn4_ranker() -> None:
 
 def test_dilp_evidence_learns_xlog_proof_clauses_without_heldout_labels() -> None:
     if not torch.cuda.is_available():
-        pytest.skip("CUDA required for DILP evidence")
+        pytest.skip("CUDA required for differentiable ILP evidence")
     runner = _runner_module()
     inventory = runner._load_inventory()
     domains = [domain["id"] for domain in inventory["domains"]]
@@ -356,19 +356,23 @@ def test_cuda_generalization_seed_is_isolated_from_showcase_transfer_training() 
     aggregate = evidence["report"]["aggregate"]
     assert aggregate["macro_held_out_root_cause_f1"] >= 0.90
     assert aggregate["min_domain_root_cause_f1"] >= 0.85
-    assert "GEN-003" not in evidence["report"]["blockers"]
+    assert "macro_transfer_threshold_unmet" not in evidence["report"]["blockers"]
     assert evidence["report"]["frozen_model_rules"][
         "generalization_seed_isolated_from_showcase_transfer"
     ] is True
 
 
-def test_generalization_clean_transfer_uses_canonical_external_rca_labels() -> None:
+def test_generalization_clean_transfer_uses_canonical_external_root_cause_analysis_labels() -> None:
     runner = _runner_module()
     inventory = runner._load_inventory()
     domains = [domain["id"] for domain in inventory["domains"]]
     cases, _sources = runner._load_huggingface_cases(inventory, rows_per_domain=100)
 
-    assert all(case["root_truth"]["canonicalization"] == "frozen_external_rca_catalog" for case in cases)
+    assert all(
+        case["root_truth"]["canonicalization"]
+        == "frozen_external_root_cause_analysis_catalog"
+        for case in cases
+    )
     evidence = runner._build_generalization_evidence(
         domain_ids=domains,
         cases=cases,
@@ -378,7 +382,7 @@ def test_generalization_clean_transfer_uses_canonical_external_rca_labels() -> N
 
     assert aggregate["macro_held_out_root_cause_f1"] >= 0.90
     assert aggregate["min_domain_root_cause_f1"] >= 0.85
-    assert "GEN-003" not in evidence["report"]["blockers"]
+    assert "macro_transfer_threshold_unmet" not in evidence["report"]["blockers"]
     assert evidence["report"]["baseline_uplift"]["beats_strongest_baseline"] is True
     assert evidence["report"]["adversarial_domain_shift"]["passed"] is True
 
@@ -430,8 +434,8 @@ def test_generalization_report_passes_unseen_dataset_transfer_from_raw_records()
     report = evidence["report"]
     assert report["unseen_dataset_transfer"]["passed"] is True
     assert report["unseen_dataset_transfer"]["record_count"] >= 1
-    assert "GEN-002" not in report["blockers"]
-    assert "GEN-006" not in report["blockers"]
+    assert "minimum_heldout_domain_size_unmet" not in report["blockers"]
+    assert "unseen_dataset_transfer_missing" not in report["blockers"]
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required for production transfer")
@@ -485,7 +489,10 @@ def test_production_transfer_runner_reports_transfer_scale_and_soak_contract(
         "partial leave-one-domain-out generalization evidence"
     )
     assert payload["generalization_report"]["excluded_domains"] == []
-    assert {"GEN-002", "GEN-006"} <= set(payload["generalization_report"]["blockers"])
+    assert {
+        "minimum_heldout_domain_size_unmet",
+        "unseen_dataset_transfer_missing",
+    } <= set(payload["generalization_report"]["blockers"])
     generalization_records = payload["metric_inputs"]["generalization_prediction_records"]
     assert {record["held_out_domain"] for record in generalization_records} == set(
         payload["domain_ids"]
@@ -555,23 +562,23 @@ def test_production_transfer_runner_reports_transfer_scale_and_soak_contract(
     )
     bundle_reuse = payload["bundle_reuse"]
     assert bundle_reuse["status"] == "PASS"
-    assert bundle_reuse["v080_runtime_session"]["status"] == "PASS"
-    assert bundle_reuse["v080_runtime_session"]["logic_program_compile"] is True
-    assert bundle_reuse["v080_runtime_session"]["session_evaluate"] is True
-    assert bundle_reuse["v080_runtime_session"]["relation_delta_equivalence_pct"] == 100.0
-    assert bundle_reuse["v085_language_contract"]["status"] == "PASS"
-    assert bundle_reuse["v085_language_contract"]["feature_count"] >= 10
-    assert "examples/v085-language/showcase" in bundle_reuse["v085_language_contract"][
+    assert bundle_reuse["runtime_session_reuse"]["status"] == "PASS"
+    assert bundle_reuse["runtime_session_reuse"]["logic_program_compile"] is True
+    assert bundle_reuse["runtime_session_reuse"]["session_evaluate"] is True
+    assert bundle_reuse["runtime_session_reuse"]["relation_delta_equivalence_pct"] == 100.0
+    assert bundle_reuse["language_contract_reuse"]["status"] == "PASS"
+    assert bundle_reuse["language_contract_reuse"]["feature_count"] >= 10
+    assert "language completeness showcase" in bundle_reuse["language_contract_reuse"][
         "reused_artifacts"
     ]
-    v086 = bundle_reuse["v086_runtime_optimizer"]
-    assert v086["status"] == "PASS"
-    assert v086["apply_relation_delta_batch"] is True
-    assert v086["join_index_cache_stats"]["builds"] >= 1
-    assert v086["join_index_cache_stats"]["hits"] >= 1
-    assert v086["relation_callback_events"] >= 2
-    assert v086["callback_payload_has_tensors"] is False
-    assert v086["hot_loop_transfer_stats"] == {
+    runtime_optimizer = bundle_reuse["runtime_optimizer_reuse"]
+    assert runtime_optimizer["status"] == "PASS"
+    assert runtime_optimizer["apply_relation_delta_batch"] is True
+    assert runtime_optimizer["join_index_cache_stats"]["builds"] >= 1
+    assert runtime_optimizer["join_index_cache_stats"]["hits"] >= 1
+    assert runtime_optimizer["relation_callback_events"] >= 2
+    assert runtime_optimizer["callback_payload_has_tensors"] is False
+    assert runtime_optimizer["hot_loop_transfer_stats"] == {
         "dtoh_calls": 0,
         "htod_calls": 0,
         "dtoh_bytes": 0,
@@ -582,7 +589,9 @@ def test_production_transfer_runner_reports_transfer_scale_and_soak_contract(
     assert {record["domain_id"] for record in records} == set(payload["domain_ids"])
     assert all(record["source"]["source_type"] == "huggingface" for record in records)
     assert all(
-        record.get("root_label_source") == "huggingface_external_rca" for record in records
+        record.get("root_label_source")
+        == "huggingface_external_root_cause_analysis"
+        for record in records
     )
     assert all(
         record.get("root_truth", {}).get("source_type", "").startswith("huggingface_")
@@ -653,10 +662,10 @@ def test_production_transfer_runner_reports_transfer_scale_and_soak_contract(
     assert payload["computed_metrics"]["promoted_rule_quality"]["f1"] >= 0.965
     public_benchmark = payload["public_benchmark_report"]
     assert public_benchmark["status"] == "FAIL"
-    assert public_benchmark["external_sota_claim"] is False
+    assert public_benchmark["external_state_of_the_art_claim"] is False
     assert public_benchmark["covered_public_benchmark_families"] == []
     assert public_benchmark["missing_public_benchmark_families"]
-    assert "MISSING_PUBLIC_SOTA_RUNNER" in public_benchmark["blockers"]
+    assert "MISSING_PUBLIC_STATE_OF_THE_ART_RUNNER" in public_benchmark["blockers"]
     assert "baseline_metrics" not in payload
     assert "strongest_baseline" not in payload
     assert "relative_uplift_over_best_baseline_pct" not in payload

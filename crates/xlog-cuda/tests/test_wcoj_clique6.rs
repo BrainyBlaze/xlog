@@ -1,12 +1,12 @@
 // crates/xlog-cuda/tests/test_wcoj_clique6.rs
-//! W3.2 — k=6 clique provider × width-class round-trip certs.
+//! K=6 clique provider width-class round-trip coverage.
 //!
-//! 3 cells: u32 / u64 / Symbol. Each:
+//! 3 width classes: u32 / u64 / Symbol. Each test:
 //!   1. Build a small clique fixture (≤ 6 vertices).
-//!   2. Upload each of the 10 edges to a CudaBuffer.
-//!   3. Layout-sort+dedup each via W3.1's wcoj_layout_sort_*_recorded
-//!      (the runtime dispatcher's pre-condition contract; certs
-//!      satisfy it explicitly).
+//!   2. Upload each of the 15 edges to a CudaBuffer.
+//!   3. Layout-sort+dedup each via `wcoj_layout_sort_*_recorded`
+//!      (the runtime dispatcher's pre-condition contract; this test
+//!      satisfies it explicitly).
 //!   4. Call provider entry on the laid-out edges.
 //!   5. Download output, compare against `cpu_clique6_reference`
 //!      brute-force oracle (set equality modulo row order).
@@ -77,8 +77,7 @@ fn make_runtime_fixture() -> Option<RuntimeFixture> {
 
 /// Brute-force CPU oracle for K-clique enumeration. Generic over
 /// the cell type T (u32 / u64). Edges in canonical lex (i, j)
-/// order: (0,1), (0,2), (0,3), (0,4), (1,2), (1,3), (1,4),
-/// (2,3), (2,4), (3,4) — 10 edges for K=6; 15 for K=6.
+/// order: (0,1), (0,2), (0,3), ...; K=6 has 15 edges.
 fn cpu_clique_reference<T, const K: usize>(edges: &[Vec<(T, T)>]) -> Vec<[T; K]>
 where
     T: Copy + Ord + std::hash::Hash,
@@ -208,8 +207,8 @@ fn upload_2col_u64(memory: &Arc<GpuMemoryManager>, rows: &[(u64, u64)]) -> CudaB
     )
 }
 
-/// Build a complete K_5 fixture on a 5-vertex set
-/// `{1, 2, 3, 4, 5}`. Returns the 10 host-side edge lists in
+/// Build a complete K_6 fixture on a 6-vertex set
+/// `{1, 2, 3, 4, 5, 6}`. Returns the 15 host-side edge lists in
 /// canonical lex (i, j) order. Vertex i in the canonical
 /// numbering corresponds to host value `i + 1`.
 fn k6_fixture_u32() -> Vec<Vec<(u32, u32)>> {
@@ -456,5 +455,8 @@ fn clique6_u32_metadata_path_is_bit_exact_for_100_runs() {
         }
         pass_count += 1;
     }
-    assert_eq!(pass_count, 100, "M_HIST_KC.4 K6 raw pass count");
+    assert_eq!(
+        pass_count, 100,
+        "K6 metadata path must be bit-exact across 100 runs"
+    );
 }

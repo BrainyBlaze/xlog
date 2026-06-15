@@ -70,7 +70,7 @@ impl super::CudaKernelProvider {
         aggs: &[(usize, AggOp)],
     ) -> Result<CudaBuffer> {
         // Env-gated recorded dispatch. `groupby_multi_agg_recorded`
-        // (slice #6) is narrow to U32 / Symbol keys + Count /
+        // is narrow to U32 / Symbol keys + Count /
         // Sum / Min / Max aggs + ≤4 key columns. Mismatch
         // (any other key type, LogSumExp, or >4 keys) falls
         // through to the legacy path.
@@ -147,7 +147,7 @@ impl super::CudaKernelProvider {
                 .ok_or_else(|| XlogError::Kernel("Value column has no type".to_string()))?;
             match agg_op {
                 AggOp::Count => {}
-                // S1c widening: U64 values reduce through the u64-value
+                // U64 value-column widening: values reduce through the u64-value
                 // kernels (the legacy groupby is the unfused baseline for
                 // u64-key WCOJ relations, whose value columns are U64).
                 AggOp::Sum | AggOp::Min | AggOp::Max => {
@@ -366,7 +366,7 @@ impl super::CudaKernelProvider {
                         XlogError::Kernel(format!("Failed to zero sum output: {}", e))
                     })?;
 
-                    // S1c widening: U64 value columns reduce through the
+                    // U64 value-column widening: value columns reduce through the
                     // u64-value sum kernel (same u64 accumulator).
                     if value_ty == ScalarType::U64 {
                         let values_view = self.column_as_u64_view(values, num_rows as usize)?;
@@ -406,7 +406,7 @@ impl super::CudaKernelProvider {
                         XlogError::Kernel("Value column has no type".to_string())
                     })?;
                     if value_ty == ScalarType::U64 {
-                        // S1c widening: u64-value min (output U64,
+                        // U64 value-column min path (output U64,
                         // identity u64::MAX).
                         let values_view = self.column_as_u64_view(values, num_rows as usize)?;
                         let output_bytes = row_cap_usize
@@ -493,7 +493,7 @@ impl super::CudaKernelProvider {
                         XlogError::Kernel("Value column has no type".to_string())
                     })?;
                     if value_ty == ScalarType::U64 {
-                        // S1c widening: u64-value max (output U64,
+                        // U64 value-column max path (output U64,
                         // identity 0).
                         let values_view = self.column_as_u64_view(values, num_rows as usize)?;
                         let output_bytes = row_cap_usize
@@ -798,7 +798,7 @@ impl super::CudaKernelProvider {
             let agg_type = match agg_op {
                 AggOp::Count => ScalarType::U64,
                 AggOp::Sum => ScalarType::U64,
-                // S1c widening: min/max preserve the value column's width
+                // Value-width preserving min/max: preserve the value column's width
                 // (U64 values reduce to U64; everything else stays U32).
                 AggOp::Min | AggOp::Max => {
                     match input.columns.get(value_col).map(|(_, ty)| *ty) {
@@ -818,7 +818,7 @@ impl super::CudaKernelProvider {
     }
 
     // ======================================================================
-    // Recorded GroupBy (v0.6 slice #6, provider-level only)
+    // Recorded GroupBy provider-level path
     //
     // Strict-recorder, launch_stream-routed sibling of `groupby_multi_agg`.
     // Scope-narrow per the slice directive:
@@ -1020,12 +1020,12 @@ impl super::CudaKernelProvider {
     ///   gather/unpack — every kernel runs on the caller-supplied
     ///   `launch_stream` via `launch_on_stream`. Composition with
     ///   existing recorded primitives:
-    ///   * `sort_recorded` (slice #5) does the typed multi-column
+    ///   * `sort_recorded` does the typed multi-column
     ///     sort and commits its own LaunchRecorder.
-    ///   * `pack_keys_gpu_on_stream` (this slice) runs the fused
+    ///   * `pack_keys_gpu_on_stream` runs the fused
     ///     pack+hash kernel on launch_stream and records its
     ///     buffers directly via `record_block_use`.
-    ///   * `multiblock_scan_u32_inplace_on_stream` (slice #4)
+    ///   * `multiblock_scan_u32_inplace_on_stream`
     ///     drives the boundary-position scan tail.
     ///   * The groupby-specific chain has its own LaunchRecorder
     ///     for the boundary mask, group ids, group_first
@@ -1133,7 +1133,7 @@ impl super::CudaKernelProvider {
             match agg_op {
                 AggOp::Count => {}
                 AggOp::Sum => {
-                    // D1 widening: U64 values reduce through the u64-value
+                    // Recorded groupby U64 value-column sum path: values reduce through the u64-value
                     // sum kernel (same u64 accumulator as the U32 path).
                     if !matches!(value_ty, ScalarType::U32 | ScalarType::U64) {
                         return Err(XlogError::Kernel(format!(
@@ -1143,7 +1143,7 @@ impl super::CudaKernelProvider {
                     }
                 }
                 AggOp::Min | AggOp::Max => {
-                    // S1d widening: U64 values reduce through the
+                    // Recorded groupby U64 value-column min/max path: values reduce through the
                     // u64-value min/max kernels (result preserves the
                     // value width, mirroring the legacy path).
                     if !matches!(value_ty, ScalarType::U32 | ScalarType::U64) {
@@ -1156,7 +1156,7 @@ impl super::CudaKernelProvider {
                 AggOp::LogSumExp => {
                     return Err(XlogError::Kernel(
                         "groupby_multi_agg_recorded: LogSumExp not yet supported in the \
-                         recorded path (multi-kernel chain deferred to a future slice)"
+                        recorded path (multi-kernel chain deferred to a future implementation)"
                             .to_string(),
                     ));
                 }
@@ -1215,7 +1215,7 @@ impl super::CudaKernelProvider {
         for &(value_col, agg_op) in aggs {
             let elem_size = match agg_op {
                 AggOp::Count | AggOp::Sum => std::mem::size_of::<u64>(),
-                // S1d widening: min/max preserve the value column's width.
+                // Value-width preserving min/max: preserve the value column's width.
                 AggOp::Min | AggOp::Max => {
                     match sorted.schema().column_type(value_col) {
                         Some(ScalarType::U64) => std::mem::size_of::<u64>(),
@@ -1499,7 +1499,7 @@ impl super::CudaKernelProvider {
                     })?;
                     let fill_config = LaunchConfig::for_num_elems(row_cap_u32);
                     if value_ty == ScalarType::U64 {
-                        // S1d widening: u64-value min (output U64,
+                        // U64 value-column min path (output U64,
                         // identity u64::MAX).
                         let fill_fn = device
                             .get_func(ARITH_MODULE, arith_kernels::ARITH_FILL_CONST_U64)
@@ -1582,7 +1582,7 @@ impl super::CudaKernelProvider {
                         XlogError::Kernel("Value column has no type".to_string())
                     })?;
                     if value_ty == ScalarType::U64 {
-                        // S1d widening: u64-value max (output U64,
+                        // U64 value-column max path (output U64,
                         // identity 0).
                         let values_view = self.column_as_u64_view(values, row_cap_usize)?;
                         let max_func = device

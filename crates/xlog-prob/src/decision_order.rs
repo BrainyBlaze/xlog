@@ -1,6 +1,6 @@
-//! Host-side D4 decision-order hint derived from provenance structure.
+//! Host-side Decision-DNNF compiler decision-order hint derived from provenance structure.
 //!
-//! The GPU D4 branching heuristic (smallest open clause, tie-broken by clause
+//! The GPU-native Decision-DNNF branching heuristic (smallest open clause, tie-broken by clause
 //! id, then by minimum variable id within the clause) is deterministic and
 //! lives in the CUDA kernels; it takes no priority input. This pass steers
 //! the variable-id tie-break from the host instead: leaf and choice variables

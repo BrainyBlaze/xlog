@@ -84,7 +84,7 @@ pub enum ProjectExpr {
     Computed(Expr, ScalarType),
 }
 
-/// Per-lookup-input permutation for W2.1 variable-ordering.
+/// Per-lookup-input permutation for adaptive variable ordering.
 ///
 /// When a non-default leader is chosen, the dispatcher rotates kernel
 /// inputs and may swap the two columns of selected lookup atoms (triangle
@@ -105,7 +105,7 @@ pub struct LookupPerm {
     pub swap_cols: bool,
 }
 
-/// Maximum K supported by the 38-B K-clique variable-order plan.
+/// Maximum K supported by the K-clique variable-order plan.
 pub const K_CLIQUE_MAX_K: usize = 8;
 
 /// Maximum edge count for K=8 complete binary-edge clique, C(8, 2).
@@ -226,7 +226,7 @@ pub enum MultiwayPlan {
         /// Cost evidence that made the route auditable.
         planner_evidence: CostPredictionRecord,
     },
-    /// D2 — generic Free Join route emitted ONLY by the general
+    /// Generic Free Join route emitted ONLY by the general
     /// multiway promoter. Provenance contract: `inputs` are the
     /// fallback body's Scan leaves in left-to-right traversal order,
     /// so `output_columns` (which carries the fallback projection, as
@@ -240,10 +240,10 @@ pub enum MultiwayPlan {
 
 /// Variable-ordering decision attached to a `MultiWayJoin`.
 ///
-/// `None` on the parent variant preserves slice 1/2/4/W2.2 dispatch
-/// behavior bit-identically (default leader, no col-swap, no kernel
-/// projection — `output_columns` carries the binary-fallback projection
-/// as before).
+/// `None` on the parent variant preserves legacy triangle, 4-cycle, and
+/// recursive dispatch behavior bit-identically (default leader, no col-swap,
+/// no kernel projection — `output_columns` carries the binary-fallback
+/// projection as before).
 ///
 /// When `Some`, the dispatcher consumes `leader_idx` to rotate the
 /// kernel `inputs`, applies any `lookup_perms` col-swaps, and
@@ -260,8 +260,9 @@ pub struct VariableOrder {
     pub lookup_perms: Vec<LookupPerm>,
     /// Permutation applied to the kernel-direct output buffer to
     /// produce head-ordered columns. For default leader this would be
-    /// identity but the field is omitted (`var_order = None`) — slice
-    /// 1/2 keeps using `MultiWayJoin::output_columns` directly.
+    /// identity but the field is omitted (`var_order = None`) — the legacy
+    /// triangle/4-cycle path keeps using `MultiWayJoin::output_columns`
+    /// directly.
     pub kernel_output_cols: Vec<ProjectExpr>,
     /// Full K-clique variable-order plan for K=5..K=8. `None`
     /// preserves the legacy triangle/4-cycle leader-permutation path.
@@ -379,16 +380,16 @@ pub enum RirNode {
         join_type: JoinType,
     },
 
-    /// Production W6.3 two-atom chain join:
+    /// Production two-atom chain join:
     /// `head(...) :- left(..., Z, ...), right(..., Z, ...)`.
     ///
     /// The executor MAY dispatch this node through a specialized
     /// physical route. On dispatch decline, it must execute `fallback`,
     /// the IR-equivalent binary join captured at promotion time.
     ChainJoin {
-        /// Left relation input. The W6.3 promoter emits a Scan.
+        /// Left relation input. The chain-join promoter emits a Scan.
         left: Box<RirNode>,
-        /// Right relation input. The W6.3 promoter emits a Scan.
+        /// Right relation input. The chain-join promoter emits a Scan.
         right: Box<RirNode>,
         /// Join key column in `left`.
         left_key: usize,
@@ -455,8 +456,8 @@ pub enum RirNode {
     /// executing `fallback` produces the same row set as a successful
     /// specialized dispatch.
     ///
-    /// v0.6.5 slice 1 only emits this for the certified triangle shape;
-    /// 4-way and general-arity admission land in later slices.
+    /// The original promoter emitted this for the triangle shape; later
+    /// promoters also use it for 4-cycle and general-arity joins.
     ///
     /// # Walker contract
     ///
@@ -468,10 +469,10 @@ pub enum RirNode {
     /// `match_multiway_triangle`, `try_promote_triangle`) may lock to
     /// a specific shape.
     MultiWayJoin {
-        /// Input scans, in physical-plan slot order. For the v0.6.5
-        /// initial promoter, this is exactly `[Scan(rel_xy), Scan(rel_yz),
+        /// Input scans, in physical-plan slot order. For the original
+        /// triangle promoter, this is exactly `[Scan(rel_xy), Scan(rel_yz),
         /// Scan(rel_xz)]` for a recognized triangle. Each input MUST be
-        /// `RirNode::Scan { rel }` in v1.
+        /// `RirNode::Scan { rel }`.
         inputs: Vec<RirNode>,
         /// Per-slot, per-column variable-class id. Same id across slots →
         /// join on that variable. For the canonical triangle this is
@@ -493,17 +494,18 @@ pub enum RirNode {
         /// cost-gated hash routes are positive plans, not promoter
         /// inability to handle the shape.
         plan: Option<MultiwayPlan>,
-        /// Optional W2.1 variable-ordering decision.
+        /// Optional adaptive variable-ordering decision.
         ///
-        /// `None` preserves slice 1/2/4/W2.2 behavior bit-identically:
-        /// dispatcher uses default leader, no col-swap, post-kernel
-        /// projection is the existing `output_columns`.
+        /// `None` preserves legacy triangle, 4-cycle, and recursive dispatch
+        /// behavior bit-identically: dispatcher uses default leader, no
+        /// col-swap, post-kernel projection is the existing `output_columns`.
         ///
         /// `Some(VariableOrder)` instructs the dispatcher to rotate
         /// kernel inputs to put `leader_idx` at slot 0, apply
         /// `lookup_perms` col-swaps, and post-project via
         /// `kernel_output_cols`. `output_columns` is NOT consulted on
-        /// the W2.1 path; binary-fallback consumers still read it.
+        /// the adaptive variable-ordering path; binary-fallback consumers
+        /// still read it.
         var_order: Option<VariableOrder>,
     },
 
@@ -519,13 +521,13 @@ pub enum RirNode {
         /// Right-side join key columns within the body schema.
         right_keys: Vec<usize>,
         /// Mapping from tensor dimension index → (RelId, relation name).
-        /// Sorted by RelId for deterministic ordering (RD-36).
+        /// Sorted by RelId for deterministic ordering.
         rel_index: Vec<(RelId, String)>,
-        /// Head relation name (for store lookup in executor, RD-12).
+        /// Head relation name for store lookup in the executor.
         head_rel_name: String,
-        /// Head relation ID (for optimizer schema lookup, keyed by RelId, RD-27).
+        /// Head relation ID for optimizer schema lookup, keyed by RelId.
         head_rel_id: RelId,
-        /// Maximum active rules to process (budget cap, RD-6).
+        /// Maximum active rules to process as a budget cap.
         max_active_rules: usize,
         /// Column indices from the join result to project into the head schema.
         /// Maps head column `i` to join result column `head_projection[i]`.

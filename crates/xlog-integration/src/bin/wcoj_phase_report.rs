@@ -6,7 +6,8 @@
 //! `Instant` for classifier + 3 layouts + wall-clock), prints a
 //! markdown table, then applies the locked decision rule:
 //!
-//!   * triangle_materialize_ms / wall ≥ 0.50 → B1 with count ≥ 4
+//!   * triangle_materialize_ms / wall ≥ 0.50 → heavy-row materialization
+//!     offload with count threshold ≥ 4
 //!   * triangle_count_ms + scan + total ≥ 0.50 * wall → schedule
 //!     count/materialize work
 //!   * layout_total + classifier + residual ≥ 0.50 * wall →
@@ -432,8 +433,8 @@ fn measure_recursive_k5_histogram_refresh(fix: &Fix) -> KCliqueHistogramReport {
 
 #[derive(Debug, Clone, Copy)]
 enum Verdict {
-    /// triangle_materialize_ms / wall ≥ 0.50 → B1.
-    B1Warranted,
+    /// triangle_materialize_ms / wall ≥ 0.50 → heavy-row materialization offload.
+    HeavyRowMaterializationWarranted,
     /// count + scan + total ≥ 0.50 * wall → scheduler.
     SchedulerWarranted,
     /// layout + classifier + residual ≥ 0.50 * wall → pipeline overhead.
@@ -452,7 +453,7 @@ fn classify(c: &CellMedians) -> Verdict {
     let pipe_share = (c.layout_total_ms + c.classifier_ms + c.residual_overhead_ms) / wall;
 
     if mat_share >= 0.50 {
-        Verdict::B1Warranted
+        Verdict::HeavyRowMaterializationWarranted
     } else if csm_share >= 0.50 {
         Verdict::SchedulerWarranted
     } else if pipe_share >= 0.50 {
@@ -550,7 +551,7 @@ fn print_kclique_histogram_refresh_report(c: &KCliqueHistogramReport) {
 
     println!("## K-clique Histogram Refresh");
     println!();
-    println!("Synthetic recursive K=5 fixture for Goal-038-B G_HIST_KC S_HIST_KC.7.");
+    println!("Synthetic recursive K=5 fixture measuring runtime histogram refresh overhead.");
     println!();
     println!("| bucket | raw | ns | ns/call | % wall |");
     println!("|---|---:|---:|---:|---:|");
@@ -584,7 +585,7 @@ fn print_kclique_histogram_refresh_report(c: &KCliqueHistogramReport) {
 fn main() {
     println!("# WCOJ Phase Timing Report\n");
     println!(
-        "Decision rule (locked): if any cell shows ≥50% wall in **materialize**, B1 is warranted (count ≥ 4, dual-grid). If ≥50% in count+scan+total, design count/materialize scheduling instead. If ≥50% in layout+classifier+residual, optimize pipeline overhead before kernel scheduling.\n"
+        "Decision rule (locked): if any cell shows ≥50% wall in **materialize**, heavy-row materialization offload is warranted (count threshold ≥ 4, dual-grid). If ≥50% in count+scan+total, design count/materialize scheduling instead. If ≥50% in layout+classifier+residual, optimize pipeline overhead before kernel scheduling.\n"
     );
     println!(
         "Each cell runs {ITERS} iterations on a single Executor (default-on adaptive); first {WARMUP} discarded as warmup. Median is reported per bucket.\n"
@@ -623,6 +624,6 @@ fn main() {
     }
     println!();
     println!(
-        "If majority verdict is `B1Warranted`, proceed with B1 (count ≥ 4, dual-grid deterministic materialization). If `SchedulerWarranted`, design count/materialize work scheduling. If `PipelineOverheadWarranted`, optimize launch/alloc/dispatch overhead. `Inconclusive` means no single bucket clears 50% — split investment or measure more sizes."
+        "If majority verdict is `HeavyRowMaterializationWarranted`, proceed with heavy-row materialization offload (count threshold ≥ 4, dual-grid deterministic materialization). If `SchedulerWarranted`, design count/materialize work scheduling. If `PipelineOverheadWarranted`, optimize launch/alloc/dispatch overhead. `Inconclusive` means no single bucket clears 50% — split investment or measure more sizes."
     );
 }

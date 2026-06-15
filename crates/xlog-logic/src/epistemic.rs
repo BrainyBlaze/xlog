@@ -1275,10 +1275,10 @@ pub fn compile_epistemic_gpu_execution(program: &Program) -> Result<EpistemicExe
 
 /// Compile an epistemic program with an optional production statistics snapshot.
 ///
-/// This preserves the W2.x/W38-B planner contract for reduced ordinary bodies:
-/// cardinality, selectivity, heat, prefix-degree, sorted-layout, and
-/// helper-splitting decisions are owned by the existing production compiler
-/// pipeline rather than by an epistemic side planner.
+/// This preserves the reduced ordinary-body planner contract: cardinality,
+/// selectivity, access heat, prefix-degree, sorted-layout, and helper-splitting
+/// decisions are owned by the existing production compiler pipeline rather than
+/// by an epistemic side planner.
 pub fn compile_epistemic_gpu_execution_with_stats_snapshot(
     program: &Program,
     stats_snapshot: Option<&StatsSnapshot>,
@@ -1706,7 +1706,7 @@ fn faeel_unfounded_self_support_rule_indices(program: &Program) -> Vec<usize> {
 /// Return the ordinary runtime program produced after epistemic GPU planning.
 ///
 /// Epistemic literals are removed only for the reduced production runtime
-/// dispatch; callers must still plan and certify the explicit epistemic GPU
+/// dispatch; callers must still plan and validate the explicit epistemic GPU
 /// contract before using this reduced program.
 ///
 /// The augmenting positive-modal resolve is gated on INVARIANT targets only (see the
@@ -2402,7 +2402,7 @@ pub struct EpistemicSplitExecutableComponent {
 /// Executable split plan whose components reuse the normal epistemic GPU lowering.
 #[derive(Debug, Clone)]
 pub struct EpistemicSplitExecutablePlan {
-    /// Original bounded split certificate.
+    /// Original bounded split plan.
     pub split_plan: EpistemicSplitPlan,
     /// Epistemic components compiled into GPU executable subplans.
     pub components: Vec<EpistemicSplitExecutableComponent>,

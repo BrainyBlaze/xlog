@@ -1,4 +1,5 @@
-//! Exact probabilistic inference via Decision-DNNF (D4) + weighted model counting.
+//! Exact probabilistic inference via GPU-native Decision-DNNF knowledge compilation
+//! and weighted model counting.
 
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
@@ -104,11 +105,11 @@ pub struct GpuConfig {
     pub device_ordinal: usize,
     /// Device memory budget in bytes (clamped to available memory at runtime).
     pub memory_bytes: u64,
-    /// Host-side D4 decision-order hint: renumber leaf/choice variables by
-    /// descending structural fanout in the provenance DAG before CNF encoding,
-    /// steering the deterministic variable-id tie-breaks of the (unchanged)
-    /// GPU D4 branching heuristic. Query probabilities are unaffected; only
-    /// compile-time search shape can differ.
+    /// Host-side Decision-DNNF compiler decision-order hint: renumber leaf/choice
+    /// variables by descending structural fanout in the provenance DAG before CNF
+    /// encoding, steering the deterministic variable-id tie-breaks of the
+    /// (unchanged) GPU-native Decision-DNNF branching heuristic. Query probabilities
+    /// are unaffected; only compile-time search shape can differ.
     pub decision_order_hint: bool,
 }
 
@@ -1253,7 +1254,7 @@ impl ExactDdnnfProgram {
                 return Err(XlogError::UnsupportedEpistemicConstruct {
                     construct: "GPU exact gradient evaluation".to_string(),
                     context: "GPU count-lift exact backend does not expose gradient evaluation; \
-                              gradient production paths require a compiled GPU D4 exact backend"
+                              gradient production paths require a compiled GPU-native Decision-DNNF exact backend"
                         .to_string(),
                 });
             }
@@ -1962,7 +1963,8 @@ pub(crate) fn default_compile_config(
     cnf: &xlog_solve::GpuCnf,
     memory_bytes: u64,
 ) -> Result<GpuCompileConfig> {
-    // Must match the default GPU D4 configuration expected by the Python training paths.
+    // Must match the default GPU-native Decision-DNNF compiler configuration expected
+    // by the Python training paths.
     // Sizing is conservative and strictly bounded by `GpuCompileConfig::{smooth_node_cap,smooth_edge_cap}`.
     let frontier_depth: u16 = 6;
 
@@ -1980,15 +1982,16 @@ pub(crate) fn default_compile_config(
         })?
     {
         return Err(XlogError::Compilation(format!(
-            "memory budget {} cannot hold the minimum GPU D4 frontier allocation",
+            "memory budget {} cannot hold the minimum GPU-native Decision-DNNF frontier allocation",
             memory_bytes
         )));
     }
     let max_items_by_trail = memory_bytes / denom;
     let max_frontier_items = max_items_by_trail.min(4096).min(u64::from(u32::MAX)) as u32;
 
-    // The Phase 1 D4 compiler emits one leaf circuit per frontier item; caps must scale with the
-    // maximum frontier size (up to 2^frontier_depth, bounded by max_frontier_items).
+    // The GPU-native Decision-DNNF compiler emits one leaf circuit per frontier item;
+    // caps must scale with the maximum frontier size (up to 2^frontier_depth,
+    // bounded by max_frontier_items).
     let frontier_cap_factor = (1u64
         .checked_shl(frontier_depth as u32)
         .unwrap_or(u64::from(u32::MAX)))
@@ -2004,7 +2007,7 @@ pub(crate) fn default_compile_config(
         .ok_or_else(|| XlogError::Compilation("smooth_node_cap overflow".to_string()))?;
 
     // Edge capacity scales with node capacity; AND/OR fanout grows edges but stays within a small
-    // multiple of nodes for the compiler's Phase 1 emission patterns.
+    // multiple of nodes for the compiler's frontier emission patterns.
     let mut smooth_edge_cap = smooth_node_cap
         .checked_mul(2)
         .ok_or_else(|| XlogError::Compilation("smooth_edge_cap overflow".to_string()))?;

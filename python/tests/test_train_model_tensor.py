@@ -39,7 +39,7 @@ class MNISTSimpleNet(torch.nn.Module):  # type: ignore[name-defined]
 
 
 # ---------------------------------------------------------------------------
-# 4a. Parity test -- same losses from scalar and tensor paths (tolerance 1e-5)
+# Parity: same losses from scalar and tensor paths (tolerance 1e-5)
 # ---------------------------------------------------------------------------
 
 
@@ -193,7 +193,7 @@ class TestTrainModelTensorParity:
 
 
 # ---------------------------------------------------------------------------
-# 4b. .item() call count guard -- tensor path calls .item() once per batch
+# .item() call count guard: tensor path calls .item() once per batch
 # ---------------------------------------------------------------------------
 
 
@@ -264,7 +264,7 @@ class TestItemCallCount:
 
 
 # ---------------------------------------------------------------------------
-# 4c. Cache reuse across tensor training
+# Cache reuse across tensor training
 # ---------------------------------------------------------------------------
 
 
@@ -276,7 +276,10 @@ class TestTensorTrainingCacheReuse:
         """Tensor training with addition queries should complete and produce valid losses."""
         source = """
 nn(mnist_net, [X], Y, [0,1,2,3,4,5,6,7,8,9]) :: digit(X, Y).
-addition(X, Y, Z) :- digit(X, D1), digit(Y, D2), Z is D1 + D2.
+addition(FirstImage, SecondImage, Sum) :-
+    digit(FirstImage, FirstDigitValue),
+    digit(SecondImage, SecondDigitValue),
+    Sum is FirstDigitValue + SecondDigitValue.
 """
         program = pyxlog.Program.compile(source)
 
@@ -315,7 +318,10 @@ addition(X, Y, Z) :- digit(X, D1), digit(Y, D2), Z is D1 + D2.
         """Second epoch should be faster due to circuit cache hits."""
         source = """
 nn(mnist_net, [X], Y, [0,1,2,3,4,5,6,7,8,9]) :: digit(X, Y).
-addition(X, Y, Z) :- digit(X, D1), digit(Y, D2), Z is D1 + D2.
+addition(FirstImage, SecondImage, Sum) :-
+    digit(FirstImage, FirstDigitValue),
+    digit(SecondImage, SecondDigitValue),
+    Sum is FirstDigitValue + SecondDigitValue.
 """
         program = pyxlog.Program.compile(source)
 
@@ -331,12 +337,12 @@ addition(X, Y, Z) :- digit(X, D1), digit(Y, D2), Z is D1 + D2.
             f"addition({i}, {i+1}, {(i * 2 + 1) % 19})" for i in range(8)
         ]
 
-        # Epoch 1: includes D4 circuit compilation (cache misses)
+        # Epoch 1: includes Decision-DNNF circuit compilation cache misses.
         t0 = time.time()
         stats1 = program.train_epoch_tensor(queries, batch_size=4)
         time_epoch1 = time.time() - t0
 
-        # Epoch 2: all cache hits (no D4 compilation)
+        # Epoch 2: all cache hits, with no Decision-DNNF compilation.
         t0 = time.time()
         stats2 = program.train_epoch_tensor(queries, batch_size=4)
         time_epoch2 = time.time() - t0
@@ -355,7 +361,10 @@ addition(X, Y, Z) :- digit(X, D1), digit(Y, D2), Z is D1 + D2.
         """Clearing the circuit cache should force recompilation on next epoch."""
         source = """
 nn(mnist_net, [X], Y, [0,1,2,3,4,5,6,7,8,9]) :: digit(X, Y).
-addition(X, Y, Z) :- digit(X, D1), digit(Y, D2), Z is D1 + D2.
+addition(FirstImage, SecondImage, Sum) :-
+    digit(FirstImage, FirstDigitValue),
+    digit(SecondImage, SecondDigitValue),
+    Sum is FirstDigitValue + SecondDigitValue.
 """
         program = pyxlog.Program.compile(source)
 

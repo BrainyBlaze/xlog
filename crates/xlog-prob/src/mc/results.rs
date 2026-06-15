@@ -32,9 +32,9 @@ use xlog_logic::ast::Program;
 #[cfg(feature = "host-io")]
 use crate::aggregates::AggState;
 #[cfg(feature = "host-io")]
-fn v085_mc_result_term_error(context: &str, kind: &str) -> XlogError {
+fn unsupported_mc_result_term_error(context: &str, kind: &str) -> XlogError {
     XlogError::Compilation(format!(
-        "v0.8.5 term form '{}' is parsed but not supported in MC result {} before its G085 implementation node",
+        "high-level term form '{}' is parsed but not supported in host Monte Carlo result {} until a lowering/materialization path exists",
         kind, context
     ))
 }
@@ -489,7 +489,7 @@ fn eval_rule(
             }
             BodyLiteral::Univ(_) => {
                 return Err(XlogError::Compilation(
-                    "v0.8.5 meta error: univ literal was not normalized before MC result materialization"
+                    "univ literal was not normalized before host Monte Carlo result materialization"
                         .to_string(),
                 ));
             }
@@ -596,12 +596,14 @@ fn atom_matches_bound(
                     "Aggregate not allowed in body atom".to_string(),
                 ));
             }
-            Term::List(_) => return Err(v085_mc_result_term_error("matching", "list")),
-            Term::Cons { .. } => return Err(v085_mc_result_term_error("matching", "cons")),
+            Term::List(_) => return Err(unsupported_mc_result_term_error("matching", "list")),
+            Term::Cons { .. } => return Err(unsupported_mc_result_term_error("matching", "cons")),
             Term::Compound { .. } => {
-                return Err(v085_mc_result_term_error("matching", "compound"));
+                return Err(unsupported_mc_result_term_error("matching", "compound"));
             }
-            Term::PredRef(_) => return Err(v085_mc_result_term_error("matching", "predref")),
+            Term::PredRef(_) => {
+                return Err(unsupported_mc_result_term_error("matching", "predref"))
+            }
         }
     }
     Ok(true)
@@ -639,25 +641,25 @@ fn materialize_head_non_aggregate(
                 ));
             }
             Term::List(_) => {
-                return Err(v085_mc_result_term_error(
+                return Err(unsupported_mc_result_term_error(
                     "non-aggregate head materialization",
                     "list",
                 ));
             }
             Term::Cons { .. } => {
-                return Err(v085_mc_result_term_error(
+                return Err(unsupported_mc_result_term_error(
                     "non-aggregate head materialization",
                     "cons",
                 ));
             }
             Term::Compound { .. } => {
-                return Err(v085_mc_result_term_error(
+                return Err(unsupported_mc_result_term_error(
                     "non-aggregate head materialization",
                     "compound",
                 ));
             }
             Term::PredRef(_) => {
-                return Err(v085_mc_result_term_error(
+                return Err(unsupported_mc_result_term_error(
                     "non-aggregate head materialization",
                     "predref",
                 ));
@@ -706,19 +708,25 @@ fn eval_aggregate_head(
             }
             Term::Integer(_) | Term::Float(_) | Term::String(_) | Term::Symbol(_) => {}
             Term::List(_) => {
-                return Err(v085_mc_result_term_error("aggregate head planning", "list"));
+                return Err(unsupported_mc_result_term_error(
+                    "aggregate head planning",
+                    "list",
+                ));
             }
             Term::Cons { .. } => {
-                return Err(v085_mc_result_term_error("aggregate head planning", "cons"));
+                return Err(unsupported_mc_result_term_error(
+                    "aggregate head planning",
+                    "cons",
+                ));
             }
             Term::Compound { .. } => {
-                return Err(v085_mc_result_term_error(
+                return Err(unsupported_mc_result_term_error(
                     "aggregate head planning",
                     "compound",
                 ));
             }
             Term::PredRef(_) => {
-                return Err(v085_mc_result_term_error(
+                return Err(unsupported_mc_result_term_error(
                     "aggregate head planning",
                     "predref",
                 ));
@@ -781,25 +789,25 @@ fn eval_aggregate_head(
                 }
                 Term::Anonymous => unreachable!(),
                 Term::List(_) => {
-                    return Err(v085_mc_result_term_error(
+                    return Err(unsupported_mc_result_term_error(
                         "aggregate head materialization",
                         "list",
                     ));
                 }
                 Term::Cons { .. } => {
-                    return Err(v085_mc_result_term_error(
+                    return Err(unsupported_mc_result_term_error(
                         "aggregate head materialization",
                         "cons",
                     ));
                 }
                 Term::Compound { .. } => {
-                    return Err(v085_mc_result_term_error(
+                    return Err(unsupported_mc_result_term_error(
                         "aggregate head materialization",
                         "compound",
                     ));
                 }
                 Term::PredRef(_) => {
-                    return Err(v085_mc_result_term_error(
+                    return Err(unsupported_mc_result_term_error(
                         "aggregate head materialization",
                         "predref",
                     ));

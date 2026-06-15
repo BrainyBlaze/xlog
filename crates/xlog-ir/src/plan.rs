@@ -48,7 +48,7 @@ pub struct ExecutionPlan {
     pub est_memory_peak: u64,
     /// Relation arities known at lowering time (every predicate the
     /// lowerer assigned a RelId). Consumed by shape promoters that
-    /// must size Scan leaves without schema access (D2 general
+    /// must size Scan leaves without schema access (general Free Join
     /// multiway promotion).
     pub rel_arities: std::collections::HashMap<RelId, usize>,
 }

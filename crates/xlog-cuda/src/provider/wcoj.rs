@@ -205,16 +205,15 @@ impl CudaKernelProvider {
         self.dedup_full_row_recorded(input, launch_stream)
     }
 
-    /// W3.1 — generic full-row sort+dedup for relations of any
+    /// Generic full-row WCOJ layout sort+dedup for relations of any
     /// arity ≥ 2 in the 4-byte width-class (`U32`, `Symbol`,
     /// mixable within the class).
     ///
-    /// **Design (per W3.1 plan iteration 6, D1)**: this is a NEW
-    /// entry point. The existing arity-2
+    /// **Design**: this entry point leaves the existing arity-2
     /// [`Self::wcoj_layout_u32_recorded`] is **unchanged** for
     /// the triangle / 4-cycle / project-then-layout callers — it
-    /// retains its arity-2-specific fast-path branch. W3.1's
-    /// generic surface delegates straight to
+    /// retains its arity-2-specific fast-path branch. This generic
+    /// surface delegates straight to
     /// [`Self::dedup_full_row_recorded`] for any arity ≥ 2.
     ///
     /// **Validation order** (`runtime → arity ≥ 2 → per-column
@@ -235,7 +234,8 @@ impl CudaKernelProvider {
     /// empty-buffer semantics.
     ///
     /// **Composition**: `dedup_full_row_recorded` only — there
-    /// is no fast-path branch for arity ≥ 3 in W3.1 (the
+    /// is no fast-path branch for arity ≥ 3 in this generic
+    /// full-row layout-sort accessor (the
     /// existing arity-2 fast-path stays untouched and reachable
     /// only via `wcoj_layout_u32_recorded`).
     ///
@@ -436,14 +436,13 @@ impl CudaKernelProvider {
         self.dedup_full_row_recorded(input, launch_stream)
     }
 
-    /// W3.1 — generic full-row sort+dedup for relations of any
+    /// Generic full-row WCOJ layout sort+dedup for relations of any
     /// arity ≥ 2 in the 8-byte width-class (`U64` only).
     ///
-    /// **Design (per W3.1 plan iteration 6, D1)**: NEW entry
-    /// point. The existing arity-2
+    /// **Design**: this entry point leaves the existing arity-2
     /// [`Self::wcoj_layout_u64_recorded`] is **unchanged** for
     /// the existing 2-column callers — it retains its
-    /// arity-2-specific fast-path branch. W3.1's generic surface
+    /// arity-2-specific fast-path branch. This generic surface
     /// delegates straight to [`Self::dedup_full_row_recorded`]
     /// for any arity ≥ 2.
     ///
@@ -1018,7 +1017,7 @@ impl CudaKernelProvider {
 }
 
 // ===============================================================
-// W3.2/W6.4 — General-arity clique WCOJ (k = 5..8) provider.
+// General-arity clique WCOJ provider for K=5..8.
 //
 // Thin public methods (k=5..8 × u32/u64) delegate to a
 // single generic helper `wcoj_clique_recorded_inner`. Width-class
@@ -1030,7 +1029,7 @@ impl CudaKernelProvider {
 // Each public entry assumes sorted+deduped input as a
 // pre-condition (same contract as `wcoj_triangle_u32_recorded` /
 // `wcoj_4cycle_u32_recorded`); the runtime dispatcher routes
-// every edge through W3.1's `wcoj_layout_sort_*_recorded` before
+// every edge through the generic full-row layout-sort accessors before
 // invoking these entries.
 // ===============================================================
 
@@ -1269,7 +1268,7 @@ impl CudaKernelProvider {
         )
     }
 
-    /// W3.2 — generic clique provider helper. Orchestrates count
+    /// Generic clique provider helper. Orchestrates count
     /// → scan → total → materialize for K-clique on K*(K-1)/2
     /// 2-column edges in the given width-class.
     ///
@@ -1280,8 +1279,8 @@ impl CudaKernelProvider {
     ///   * Each edge is 2-column with all columns in `width_class`.
     ///   * Each edge is lex-sorted+deduped on `(col0, col1)` —
     ///     same contract as `wcoj_triangle_*_recorded`. The
-    ///     runtime dispatcher (W3.2 step 7) routes every edge
-    ///     through W3.1's `wcoj_layout_sort_*_recorded` before
+    ///     runtime dispatcher routes every edge through the generic
+    ///     full-row layout-sort accessors before
     ///     calling here; provider does NOT layout-sort itself.
     #[allow(clippy::too_many_arguments)]
     fn wcoj_clique_recorded_inner(
@@ -1411,7 +1410,8 @@ impl CudaKernelProvider {
         if n_leader == 0 {
             return self.create_empty_buffer(out_schema);
         }
-        // Paper §5 Algorithm 1 Phase 1: Histograms maintained alongside data; refreshed during Merge per Authorization 5 (2026-05-17)
+        // Paper section 5 Algorithm 1 Phase 1: histograms are maintained
+        // alongside data and refreshed during recursive merge handling.
         let metadata_start = Instant::now();
         let leader_metadata = match width_class {
             CliqueWidthClass::FourByte => {
@@ -1873,7 +1873,7 @@ impl CudaKernelProvider {
         ))
     }
 
-    /// W3.2 — 5-clique WCOJ at 4-byte width-class.
+    /// 5-clique WCOJ at 4-byte width-class.
     ///
     /// `edges` must contain exactly **10** 2-column buffers in
     /// canonical lex `(i, j)` order (i < j): `(0,1), (0,2), (0,3),
@@ -1920,7 +1920,7 @@ impl CudaKernelProvider {
         )
     }
 
-    /// W3.2 — 5-clique WCOJ at 8-byte width-class (U64 only).
+    /// 5-clique WCOJ at 8-byte width-class (U64 only).
     pub fn wcoj_clique5_u64_recorded(
         &self,
         edges: &[&CudaBuffer; 10],
@@ -1959,7 +1959,7 @@ impl CudaKernelProvider {
         )
     }
 
-    /// W3.2 — 6-clique WCOJ at 4-byte width-class.
+    /// 6-clique WCOJ at 4-byte width-class.
     ///
     /// `edges` must contain exactly **15** 2-column buffers in
     /// canonical lex `(i, j)` order. Width-class + sort+dedup
@@ -2002,7 +2002,7 @@ impl CudaKernelProvider {
         )
     }
 
-    /// W3.2 — 6-clique WCOJ at 8-byte width-class (U64 only).
+    /// 6-clique WCOJ at 8-byte width-class (U64 only).
     pub fn wcoj_clique6_u64_recorded(
         &self,
         edges: &[&CudaBuffer; 15],
@@ -2041,7 +2041,7 @@ impl CudaKernelProvider {
         )
     }
 
-    /// W6.4 — 7-clique WCOJ at 4-byte width-class.
+    /// 7-clique WCOJ at 4-byte width-class.
     pub fn wcoj_clique7_u32_recorded(
         &self,
         edges: &[&CudaBuffer; 21],
@@ -2059,7 +2059,7 @@ impl CudaKernelProvider {
         )
     }
 
-    /// W6.4 — 7-clique WCOJ at 4-byte width-class using plan-derived launch params.
+    /// 7-clique WCOJ at 4-byte width-class using plan-derived launch params.
     pub fn wcoj_clique7_u32_recorded_planned(
         &self,
         edges: &[&CudaBuffer; 21],
@@ -2080,7 +2080,7 @@ impl CudaKernelProvider {
         )
     }
 
-    /// W6.4 — 7-clique WCOJ at 8-byte width-class (U64 only).
+    /// 7-clique WCOJ at 8-byte width-class (U64 only).
     pub fn wcoj_clique7_u64_recorded(
         &self,
         edges: &[&CudaBuffer; 21],
@@ -2098,7 +2098,7 @@ impl CudaKernelProvider {
         )
     }
 
-    /// W6.4 — 7-clique WCOJ at 8-byte width-class using plan-derived launch params.
+    /// 7-clique WCOJ at 8-byte width-class using plan-derived launch params.
     pub fn wcoj_clique7_u64_recorded_planned(
         &self,
         edges: &[&CudaBuffer; 21],
@@ -2119,7 +2119,7 @@ impl CudaKernelProvider {
         )
     }
 
-    /// W6.4 — 8-clique WCOJ at 4-byte width-class.
+    /// 8-clique WCOJ at 4-byte width-class.
     pub fn wcoj_clique8_u32_recorded(
         &self,
         edges: &[&CudaBuffer; 28],
@@ -2137,7 +2137,7 @@ impl CudaKernelProvider {
         )
     }
 
-    /// W6.4 — 8-clique WCOJ at 4-byte width-class using plan-derived launch params.
+    /// 8-clique WCOJ at 4-byte width-class using plan-derived launch params.
     pub fn wcoj_clique8_u32_recorded_planned(
         &self,
         edges: &[&CudaBuffer; 28],
@@ -2158,7 +2158,7 @@ impl CudaKernelProvider {
         )
     }
 
-    /// W6.4 — 8-clique WCOJ at 8-byte width-class (U64 only).
+    /// 8-clique WCOJ at 8-byte width-class (U64 only).
     pub fn wcoj_clique8_u64_recorded(
         &self,
         edges: &[&CudaBuffer; 28],
@@ -2176,7 +2176,7 @@ impl CudaKernelProvider {
         )
     }
 
-    /// W6.4 — 8-clique WCOJ at 8-byte width-class using plan-derived launch params.
+    /// 8-clique WCOJ at 8-byte width-class using plan-derived launch params.
     pub fn wcoj_clique8_u64_recorded_planned(
         &self,
         edges: &[&CudaBuffer; 28],
@@ -2197,7 +2197,7 @@ impl CudaKernelProvider {
         )
     }
 
-    /// S1e — aggregate-fused K-clique count-by-root (u32 width-class,
+    /// Aggregate-fused K-clique count-by-root (u32 width-class,
     /// K ∈ {5, 6}). For `q(R, count(*)) :- <complete K-clique body>`
     /// grouped by the plan's position-0 root variable, computes the
     /// (root, count) row set WITHOUT materializing the clique rows.
@@ -2541,7 +2541,7 @@ impl CudaKernelProvider {
         )
     }
 
-    /// S1e — fused 5-clique count-by-root at the 4-byte width-class,
+    /// Fused 5-clique count-by-root at the 4-byte width-class,
     /// using plan-derived launch params. See
     /// [`Self::wcoj_clique_groupby_root_count_recorded_inner`].
     pub fn wcoj_clique5_groupby_root_count_u32_recorded_planned(
@@ -2563,7 +2563,7 @@ impl CudaKernelProvider {
         )
     }
 
-    /// S1e — fused 6-clique count-by-root at the 4-byte width-class,
+    /// Fused 6-clique count-by-root at the 4-byte width-class,
     /// using plan-derived launch params. See
     /// [`Self::wcoj_clique_groupby_root_count_recorded_inner`].
     pub fn wcoj_clique6_groupby_root_count_u32_recorded_planned(

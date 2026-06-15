@@ -1,5 +1,5 @@
 // crates/xlog-integration/tests/test_wcoj_adaptive_dispatch.rs
-//! v0.6.2 commit B — adaptive WCOJ dispatch executor tests.
+//! Adaptive WCOJ dispatch executor tests.
 //!
 //! Locks the executor's contract for the new
 //! `RuntimeConfig::wcoj_triangle_dispatch_adaptive` field and the
@@ -20,11 +20,11 @@
 //!   config adaptive=Some(true/false) >
 //!   `XLOG_USE_WCOJ_TRIANGLE_ADAPTIVE=1` > off.
 //!
-//! Hard scope (commit B of 3):
+//! Scope:
 //!   * RuntimeConfig field + dispatcher branch only.
-//!   * Bench cells land in commit C.
+//!   * Bench cells are covered separately.
 //!
-//! The classifier kernel + provider entry already exist (commit A).
+//! The classifier kernel + provider entry already exist.
 //! This file tests the executor wiring.
 
 use std::collections::BTreeMap;
@@ -372,18 +372,18 @@ fn force_off_beats_adaptive_on_superhub() {
 }
 
 // =================================================================
-// Strict D2H gate cert: full adaptive dispatch under the gate
-// must produce 0 violations.
+// Strict device-to-host transfer gate check: full adaptive dispatch
+// under the gate must produce 0 violations.
 // =================================================================
 
 #[test]
-fn adaptive_dispatch_no_d2h_violations_under_strict_gate() {
-    // Adaptive flow's only D2H is the 768-byte histogram via
-    // `dtoh_small_metadata_untracked` (commit A). Under the
-    // strict deterministic-D2H gate, this must NOT trip the
-    // gate's violation counter — both for the uniform path
-    // (classifier runs but rejects) and the super-hub path
-    // (classifier runs AND the WCOJ kernel pipeline fires).
+fn adaptive_dispatch_no_device_to_host_violations_under_strict_gate() {
+    // Adaptive flow's only device-to-host transfer is the 768-byte
+    // histogram via `dtoh_small_metadata_untracked`. Under the strict
+    // deterministic device-to-host gate, this must NOT trip the gate's
+    // violation counter — both for the uniform path (classifier runs
+    // but rejects) and the super-hub path (classifier runs AND the WCOJ
+    // kernel pipeline fires).
     let Some(fix) = make_fix() else {
         eprintln!("Skipping: CUDA runtime unavailable");
         return;
@@ -405,7 +405,7 @@ fn adaptive_dispatch_no_d2h_violations_under_strict_gate() {
             "uniform classifier must reject"
         );
         // The strict gate may flag the *binary-join* path's
-        // existing data-plane D2Hs; those are not the
+        // existing data-plane device-to-host transfers; those are not the
         // classifier's responsibility. We only assert that
         // the CLASSIFIER added 0 violations vs the baseline.
         // The baseline (no classifier) would already have
@@ -436,13 +436,12 @@ fn adaptive_dispatch_no_d2h_violations_under_strict_gate() {
             "super-hub stats gate must accept"
         );
         // The full WCOJ pipeline (classifier + layout + triangle)
-        // should produce 0 strict-D2H violations: the existing
-        // wcoj_triangle_u32_no_count_vector_d2h test locks this
-        // for the WCOJ pipeline; the classifier addition must
-        // not regress it.
+        // should produce 0 strict device-to-host violations: the existing
+        // triangle no-count-vector transfer test locks this for the WCOJ
+        // pipeline; the classifier addition must not regress it.
         assert_eq!(
             v, 0,
-            "adaptive super-hub path must have 0 D2H violations under strict gate; got {v}"
+            "adaptive super-hub path must have 0 device-to-host violations under strict gate; got {v}"
         );
     }
 }

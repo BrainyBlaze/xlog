@@ -1,8 +1,8 @@
 // =============================================================================
-// ELO Ranking System Module
+// Elo Ranking System Module
 // =============================================================================
-// Demonstrates: Multiple UDFs with arithmetic and conditionals for rating calc
-// Contains: ELO ratings, tier system, and win rate calculations
+// Demonstrates: Multiple user-defined functions with arithmetic and conditionals for rating calculations
+// Contains: Elo ratings, tier system, and win rate calculations
 // =============================================================================
 
 // --- Predicate Declarations ---
@@ -15,7 +15,7 @@ pred season_record(symbol, u32, u32).          // player_id, wins, losses
 pred base_elo(u32).
 pred tier_name(u32, symbol).
 
-base_elo(1200).  // Starting ELO for new players
+base_elo(1200).  // Starting Elo rating for new players
 
 tier_name(1, grandmaster).
 tier_name(2, master).
@@ -25,10 +25,10 @@ tier_name(5, gold).
 tier_name(6, silver).
 
 // =============================================================================
-// USER-DEFINED FUNCTIONS (UDFs)
+// USER-DEFINED FUNCTIONS
 // =============================================================================
 
-// K-factor for ELO calculation based on games played
+// K-factor for Elo rating calculation based on games played
 // New players (< 30 games) get K=40, intermediate K=20, veterans K=10
 func elo_k_factor(GamesPlayed) = if GamesPlayed < cast(30, u32) then cast(40, u32) else if GamesPlayed < cast(100, u32) then cast(20, u32) else cast(10, u32).
 
@@ -45,29 +45,29 @@ func elo_expected(PlayerRating, OpponentRating) =
     else if PlayerRating > OpponentRating - cast(400, u32) then cast(15, u32)
     else cast(5, u32).
 
-// ELO change calculation (simplified)
+// Elo rating change calculation (simplified)
 // Result: 100 = win, 50 = draw, 0 = loss
 func elo_change(K, Expected, Result) = (K * (Result - Expected)) / cast(100, u32).
 
-// Tier determination from ELO rating
+// Tier determination from Elo rating
 // 2400+ = Grandmaster, 2000+ = Master, 1600+ = Diamond, 1200+ = Platinum, 800+ = Gold, else Silver
 func tier_from_elo(Rating) = if Rating >= cast(2400, u32) then cast(1, u32) else if Rating >= cast(2000, u32) then cast(2, u32) else if Rating >= cast(1600, u32) then cast(3, u32) else if Rating >= cast(1200, u32) then cast(4, u32) else if Rating >= cast(800, u32) then cast(5, u32) else cast(6, u32).
 
 // Win rate calculation (returns percentage)
 func win_rate(Wins, Total) = (Wins * cast(100, u32)) / Total.
 
-// KDA ratio calculation (scaled by 100 for integer precision)
+// Kill/death/assist ratio calculation (scaled by 100 for integer precision)
 // if Deaths = 0, treat as 1 death for calculation
 func kda_ratio(Kills, Deaths, Assists) = if Deaths > cast(0, u32) then (Kills + Assists) * cast(100, u32) / Deaths else (Kills + Assists) * cast(100, u32).
 
 // Rating adjustment for streaks
 func streak_bonus(ConsecutiveWins) = if ConsecutiveWins >= cast(10, u32) then cast(50, u32) else if ConsecutiveWins >= cast(5, u32) then cast(25, u32) else if ConsecutiveWins >= cast(3, u32) then cast(10, u32) else cast(0, u32).
 
-// Performance multiplier based on KDA
+// Performance multiplier based on kill/death/assist ratio
 func performance_multiplier(KdaScaled) = if KdaScaled >= cast(500, u32) then cast(150, u32) else if KdaScaled >= cast(300, u32) then cast(125, u32) else if KdaScaled >= cast(200, u32) then cast(110, u32) else if KdaScaled >= cast(100, u32) then cast(100, u32) else cast(90, u32).
 
 // =============================================================================
-// PLAYER ELO RATINGS (55 players)
+// Player Elo rating facts (55 players)
 // =============================================================================
 
 // Top tier players (Grandmaster 2400+)
@@ -209,87 +209,87 @@ season_record(p015, 50, 150).
 season_record(p045, 48, 142).
 
 // =============================================================================
-// ELO HISTORY (sample history entries - 60 entries)
+// Elo rating history (sample history entries - 60 entries)
 // =============================================================================
 
-// Player p001 ELO progression
+// Player p001 Elo rating progression
 elo_history(p001, m001, 2420, 2435).
 elo_history(p001, m006, 2435, 2450).
 elo_history(p001, m015, 2400, 2420).
 elo_history(p001, m020, 2380, 2400).
 elo_history(p001, m031, 2360, 2380).
 
-// Player p002 ELO progression
+// Player p002 Elo rating progression
 elo_history(p002, m004, 2200, 2220).
 elo_history(p002, m008, 2180, 2200).
 elo_history(p002, m012, 2160, 2180).
 elo_history(p002, m023, 2220, 2240).
 elo_history(p002, m039, 2230, 2240).
 
-// Player p005 ELO progression
+// Player p005 Elo rating progression
 elo_history(p005, m001, 2500, 2510).
 elo_history(p005, m018, 2490, 2500).
 elo_history(p005, m025, 2480, 2510).
 elo_history(p005, m033, 2510, 2520).
 elo_history(p005, m055, 2505, 2520).
 
-// Player p016 ELO progression
+// Player p016 Elo rating progression
 elo_history(p016, m002, 2360, 2370).
 elo_history(p016, m004, 2350, 2360).
 elo_history(p016, m020, 2370, 2380).
 elo_history(p016, m047, 2365, 2380).
 elo_history(p016, m073, 2370, 2380).
 
-// Player p031 ELO progression
+// Player p031 Elo rating progression
 elo_history(p031, m003, 2620, 2635).
 elo_history(p031, m010, 2600, 2620).
 elo_history(p031, m011, 2635, 2650).
 elo_history(p031, m027, 2640, 2650).
 elo_history(p031, m051, 2645, 2650).
 
-// Player p032 ELO progression
+// Player p032 Elo rating progression
 elo_history(p032, m010, 2450, 2465).
 elo_history(p032, m012, 2440, 2450).
 elo_history(p032, m035, 2465, 2475).
 elo_history(p032, m043, 2470, 2480).
 elo_history(p032, m077, 2475, 2480).
 
-// Player p033 ELO progression
+// Player p033 Elo rating progression
 elo_history(p033, m006, 2560, 2570).
 elo_history(p033, m015, 2550, 2560).
 elo_history(p033, m031, 2570, 2580).
 elo_history(p033, m055, 2575, 2580).
 elo_history(p033, m089, 2570, 2580).
 
-// Player p008 ELO progression
+// Player p008 Elo rating progression
 elo_history(p008, m001, 2290, 2305).
 elo_history(p008, m010, 2280, 2290).
 elo_history(p008, m036, 2305, 2315).
 elo_history(p008, m060, 2310, 2320).
 elo_history(p008, m097, 2315, 2320).
 
-// Player p025 ELO progression
+// Player p025 Elo rating progression
 elo_history(p025, m002, 2100, 2110).
 elo_history(p025, m019, 2095, 2110).
 elo_history(p025, m043, 2108, 2115).
 elo_history(p025, m077, 2115, 2120).
 elo_history(p025, m092, 2118, 2120).
 
-// Player p051 ELO progression
+// Player p051 Elo rating progression
 elo_history(p051, m020, 2150, 2165).
 elo_history(p051, m033, 2160, 2170).
 elo_history(p051, m044, 2165, 2175).
 elo_history(p051, m066, 2170, 2180).
 elo_history(p051, m093, 2175, 2180).
 
-// Player p044 ELO progression
+// Player p044 Elo rating progression
 elo_history(p044, m006, 2250, 2265).
 elo_history(p044, m015, 2240, 2255).
 elo_history(p044, m036, 2265, 2275).
 elo_history(p044, m049, 2270, 2280).
 elo_history(p044, m099, 2278, 2280).
 
-// Player p043 ELO progression
+// Player p043 Elo rating progression
 elo_history(p043, m018, 2060, 2070).
 elo_history(p043, m025, 2055, 2065).
 elo_history(p043, m041, 2065, 2075).
@@ -300,7 +300,7 @@ elo_history(p043, m097, 2078, 2080).
 // DERIVED PREDICATES
 // =============================================================================
 
-// Assign tier based on ELO rating
+// Assign tier based on Elo rating
 pred player_calculated_tier(symbol, u32).
 player_calculated_tier(PlayerId, Tier) :-
     player_elo(PlayerId, Rating),
@@ -326,13 +326,13 @@ player_k_factor(PlayerId, K) :-
     Games is Wins + Losses,
     K is elo_k_factor(Games).
 
-// Top ranked players (2400+ ELO)
+// Top ranked players (2400+ Elo rating)
 pred grandmaster_player(symbol, u32).
 grandmaster_player(PlayerId, Rating) :-
     player_elo(PlayerId, Rating),
     Rating >= 2400.
 
-// Master players (2000-2399 ELO)
+// Master players (2000-2399 Elo rating)
 pred master_player(symbol, u32).
 master_player(PlayerId, Rating) :-
     player_elo(PlayerId, Rating),
@@ -346,7 +346,7 @@ high_win_rate_player(PlayerId, Rate, Elo) :-
     Rate >= 60,
     player_elo(PlayerId, Elo).
 
-// ELO gain in history (positive change)
+// Elo rating gain in history (positive change)
 pred elo_gain(symbol, symbol, u32).
 elo_gain(PlayerId, MatchId, Gain) :-
     elo_history(PlayerId, MatchId, Before, After),

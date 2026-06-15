@@ -1,16 +1,16 @@
-//! W2.1 — Owned, recorded helpers for column projection on
-//! `CudaBuffer`s.
+//! Owned, recorded helpers for WCOJ variable-ordering column
+//! projection on `CudaBuffer`s.
 //!
 //! Two helpers, both with the same shape:
 //!
 //! * [`CudaKernelProvider::wcoj_project_2col_swap_recorded`] —
-//!   2-col-only swap helper used by the W2.1 dispatcher when
+//!   2-col-only swap helper used by the variable-ordering dispatcher when
 //!   triangle non-default leaders need a `(col1, col0)` rotated
 //!   lookup atom before [`CudaKernelProvider::wcoj_layout_u32_recorded`]
 //!   can sort it.
 //!
 //! * [`CudaKernelProvider::wcoj_project_output_columns_recorded`] —
-//!   N-col arbitrary-permutation helper that the W2.1 dispatcher
+//!   N-col arbitrary-permutation helper that the variable-ordering dispatcher
 //!   applies to the kernel-direct output buffer to remap kernel
 //!   columns into the rule's head order.
 //!
@@ -45,11 +45,11 @@ use crate::CudaBuffer;
 use super::CudaKernelProvider;
 
 impl CudaKernelProvider {
-    /// W2.1: produce an owned 2-col `CudaBuffer` whose columns are
+    /// Produce an owned 2-col `CudaBuffer` whose columns are
     /// `[src.col(1), src.col(0)]`. See module docs for the full
     /// recorded / failure-drain contract.
     ///
-    /// Used by the W2.1 dispatcher when a triangle non-default
+    /// Used by the variable-ordering dispatcher when a triangle non-default
     /// leader requires a col-swap before
     /// [`Self::wcoj_layout_u32_recorded`] sorts the result. The
     /// 4-cycle path is rotation-only and never invokes this
@@ -222,7 +222,7 @@ impl CudaKernelProvider {
         Ok(buf)
     }
 
-    /// W2.1: produce an owned N-col `CudaBuffer` with columns
+    /// Produce an owned N-col `CudaBuffer` with columns
     /// reordered per `perm` and the schema replaced with
     /// `head_schema`.
     ///

@@ -1,5 +1,4 @@
-//! D2 — GPU Free Join (S2 spike): level-synchronous factorized join
-//! execution at the provider level.
+//! GPU Free Join provider: level-synchronous factorized join execution.
 //!
 //! Design: `docs/plans/2026-06-12-d2-free-join-design.md`. The paper's
 //! (Wang/Willsey/Suciu, SIGMOD 2023) depth-first recursion over lazy
@@ -19,7 +18,7 @@
 //!     existing mask + scan + gather kernels).
 //!
 //! Invariants (§2.3, non-negotiable):
-//!   * all inputs layout-normalized per dispatch (31b0ccf0 contract);
+//!   * all inputs layout-normalized per dispatch;
 //!   * no atomics in any emit path — output positions come from
 //!     exclusive scans, so output order is deterministic (parent-row
 //!     order × lex order of the plan's variable sequence);
@@ -32,7 +31,7 @@
 //!     totals, compaction counts); recorded launches throughout.
 //!
 //! Width classes: u32/Symbol (`free_join_execute_u32_recorded`) and
-//! u64 (`free_join_execute_u64_recorded`, Phase C) share one
+//! u64 (`free_join_execute_u64_recorded`) share one
 //! width-parameterized pipeline — frontier VAR columns carry
 //! width-sized data values while RANGE columns are u32 row indices in
 //! every width class (the staging/compaction/projection helpers are
@@ -76,9 +75,9 @@ pub struct FjNode {
     pub probes: Vec<FjSubAtom>,
 }
 
-/// A host-side Free Join plan over `inputs` (design §3). Phase A: the
-/// plan is hand-built by the caller; planner construction (binary2fj)
-/// is Phase B.
+/// A host-side Free Join plan over `inputs` (design §3). Callers hand-build
+/// the plan today; planner construction from binary joins (`binary2fj`) is a
+/// downstream integration surface.
 #[derive(Debug, Clone)]
 pub struct FjPlan {
     /// Number of distinct join variables (ids `0..num_vars`).
@@ -350,8 +349,8 @@ impl CudaKernelProvider {
         )
     }
 
-    /// u64 width-class twin of [`Self::free_join_execute_u32_recorded`]
-    /// (Phase C): identical pipeline, contract, and invariants; every
+    /// u64 width-class twin of [`Self::free_join_execute_u32_recorded`]:
+    /// identical pipeline, contract, and invariants; every
     /// input column must be `U64` and the output columns are `U64`.
     pub fn free_join_execute_u64_recorded(
         &self,
@@ -370,7 +369,7 @@ impl CudaKernelProvider {
     }
 
     /// Design §2.4 factorized count-by-root over the Free Join
-    /// frontier (Phase C): runs the same pipeline but reduces to
+    /// frontier: runs the same pipeline but reduces to
     /// `(group, count)` instead of materializing rows. The plan's
     /// `output_vars` must be exactly `[group_var]`; atoms may be
     /// PARTIALLY consumed — each surviving frontier row contributes
@@ -420,10 +419,10 @@ impl CudaKernelProvider {
         let arities: Vec<usize> = inputs.iter().map(|b| b.arity()).collect();
         let bind_order = validate_plan(plan, &arities, mode, ctx)?;
 
-        // Layout-normalize every input per dispatch (31b0ccf0
-        // contract). Arity-2 inputs go through the triangle-grade
+        // Layout-normalize every input per dispatch. Arity-2 inputs
+        // go through the triangle-grade
         // entry (it has the sorted+unique recorded fast-path);
-        // wider inputs use the generic W3.1 sort+dedup entry.
+        // wider inputs use the generic full-row WCOJ sort+dedup entry.
         let mut norm: Vec<CudaBuffer> = Vec::with_capacity(inputs.len());
         for input in inputs {
             let normalized = match (width, input.arity()) {

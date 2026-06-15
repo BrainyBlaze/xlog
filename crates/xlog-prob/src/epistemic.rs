@@ -1,4 +1,4 @@
-//! Bounded epistemic/probabilistic integration helpers for v0.9 fixtures.
+//! Bounded epistemic/probabilistic integration helpers.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -199,7 +199,7 @@ impl EpistemicAssumption {
 /// Knowledge compiler adapter kind.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CompilerAdapterKind {
-    /// Existing GPU D4/XGCF compiler.
+    /// Existing GPU-native Decision-DNNF to XGCF compiler.
     GpuD4,
     /// Alternative external Decision-DNNF text adapter.
     ExternalDdnnfText,
@@ -253,7 +253,7 @@ pub struct KnowledgeCompilerAdapter {
 }
 
 impl KnowledgeCompilerAdapter {
-    /// Return the existing GPU-D4 adapter.
+    /// Return the existing GPU-native Decision-DNNF adapter.
     pub fn gpu_d4() -> Self {
         Self {
             name: "gpu-d4".to_string(),

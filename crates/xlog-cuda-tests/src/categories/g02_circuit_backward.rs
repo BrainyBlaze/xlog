@@ -1,4 +1,4 @@
-//! Category G02: Circuit Backward Kernel Tests
+//! Circuit backward kernel tests
 //!
 //! Tests the backward evaluation kernels for XGCF circuits, covering adjoint propagation,
 //! gradient accumulation, and numerical verification. These tests verify correct gradient
@@ -14,22 +14,22 @@ use std::time::Instant;
 
 /// Run all tests in this category.
 pub fn run_all(ctx: &TestContext) -> CategoryResult {
-    let mut results = CategoryResult::new("g02_circuit_backward");
+    let mut results = CategoryResult::new("circuit_backward_kernel");
     let start = Instant::now();
 
-    // G02.1: Adjoint Propagation (4 tests)
+    // Adjoint propagation checks.
     results.add_result(test_backward_root_adjoint(ctx));
     results.add_result(test_backward_and_propagate(ctx));
     results.add_result(test_backward_or_propagate(ctx));
     results.add_result(test_backward_decision_propagate(ctx));
 
-    // G02.2: Gradient Accumulation (4 tests)
+    // Gradient accumulation checks.
     results.add_result(test_backward_lit_grad(ctx));
     results.add_result(test_backward_decision_grad(ctx));
     results.add_result(test_backward_gradient_accumulation(ctx));
     results.add_result(test_backward_negative_lit_grad(ctx));
 
-    // G02.3: Numerical Verification (4 tests)
+    // Numerical verification checks.
     results.add_result(test_backward_vs_numerical_diff(ctx));
     results.add_result(test_backward_chain_rule(ctx));
     results.add_result(test_backward_gradient_stability(ctx));
@@ -40,7 +40,7 @@ pub fn run_all(ctx: &TestContext) -> CategoryResult {
 }
 
 // =============================================================================
-// G02.1: Adjoint Propagation Tests
+// Adjoint propagation tests
 // =============================================================================
 
 /// Test 1: Verify root adjoint is initialized to 1.0
@@ -343,7 +343,7 @@ fn test_backward_decision_propagate(ctx: &TestContext) -> TestResult {
 }
 
 // =============================================================================
-// G02.2: Gradient Accumulation Tests
+// Gradient accumulation tests
 // =============================================================================
 
 /// Test 5: Positive literal gradient contribution
@@ -673,7 +673,7 @@ fn test_backward_negative_lit_grad(ctx: &TestContext) -> TestResult {
 }
 
 // =============================================================================
-// G02.3: Numerical Verification Tests
+// Numerical verification tests
 // =============================================================================
 
 /// Test 9: Compare GPU gradients vs finite differences
@@ -1115,7 +1115,7 @@ mod tests {
     }
 
     #[test]
-    fn test_g02_backward_root_adjoint() {
+    fn test_circuit_backward_root_adjoint() {
         if let Some(ctx) = get_test_context() {
             let result = test_backward_root_adjoint(&ctx);
             assert!(
@@ -1127,7 +1127,7 @@ mod tests {
     }
 
     #[test]
-    fn test_g02_backward_and_propagate() {
+    fn test_circuit_backward_and_propagate() {
         if let Some(ctx) = get_test_context() {
             let result = test_backward_and_propagate(&ctx);
             assert!(
@@ -1139,7 +1139,7 @@ mod tests {
     }
 
     #[test]
-    fn test_g02_backward_or_propagate() {
+    fn test_circuit_backward_or_propagate() {
         if let Some(ctx) = get_test_context() {
             let result = test_backward_or_propagate(&ctx);
             assert!(
@@ -1151,7 +1151,7 @@ mod tests {
     }
 
     #[test]
-    fn test_g02_backward_decision_propagate() {
+    fn test_circuit_backward_decision_propagate() {
         if let Some(ctx) = get_test_context() {
             let result = test_backward_decision_propagate(&ctx);
             assert!(
@@ -1163,7 +1163,7 @@ mod tests {
     }
 
     #[test]
-    fn test_g02_backward_lit_grad() {
+    fn test_circuit_backward_lit_grad() {
         if let Some(ctx) = get_test_context() {
             let result = test_backward_lit_grad(&ctx);
             assert!(
@@ -1175,7 +1175,7 @@ mod tests {
     }
 
     #[test]
-    fn test_g02_backward_decision_grad() {
+    fn test_circuit_backward_decision_grad() {
         if let Some(ctx) = get_test_context() {
             let result = test_backward_decision_grad(&ctx);
             assert!(
@@ -1187,7 +1187,7 @@ mod tests {
     }
 
     #[test]
-    fn test_g02_backward_gradient_accumulation() {
+    fn test_circuit_backward_gradient_accumulation() {
         if let Some(ctx) = get_test_context() {
             let result = test_backward_gradient_accumulation(&ctx);
             assert!(
@@ -1199,7 +1199,7 @@ mod tests {
     }
 
     #[test]
-    fn test_g02_backward_negative_lit_grad() {
+    fn test_circuit_backward_negative_lit_grad() {
         if let Some(ctx) = get_test_context() {
             let result = test_backward_negative_lit_grad(&ctx);
             assert!(
@@ -1211,7 +1211,7 @@ mod tests {
     }
 
     #[test]
-    fn test_g02_backward_vs_numerical_diff() {
+    fn test_circuit_backward_vs_numerical_diff() {
         if let Some(ctx) = get_test_context() {
             let result = test_backward_vs_numerical_diff(&ctx);
             assert!(
@@ -1223,7 +1223,7 @@ mod tests {
     }
 
     #[test]
-    fn test_g02_backward_chain_rule() {
+    fn test_circuit_backward_chain_rule() {
         if let Some(ctx) = get_test_context() {
             let result = test_backward_chain_rule(&ctx);
             assert!(
@@ -1235,7 +1235,7 @@ mod tests {
     }
 
     #[test]
-    fn test_g02_backward_gradient_stability() {
+    fn test_circuit_backward_gradient_stability() {
         if let Some(ctx) = get_test_context() {
             let result = test_backward_gradient_stability(&ctx);
             assert!(
@@ -1247,7 +1247,7 @@ mod tests {
     }
 
     #[test]
-    fn test_g02_backward_log_space_accuracy() {
+    fn test_circuit_backward_log_space_accuracy() {
         if let Some(ctx) = get_test_context() {
             let result = test_backward_log_space_accuracy(&ctx);
             assert!(

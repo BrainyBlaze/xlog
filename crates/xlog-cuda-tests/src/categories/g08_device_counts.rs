@@ -1,4 +1,4 @@
-//! Category G08: Device count integrity tests.
+//! Device-resident row-count integrity tests.
 //!
 //! Validates device-resident row counts for compaction and groupby outputs.
 
@@ -10,7 +10,7 @@ use xlog_cuda::CudaBuffer;
 /// Run all tests in this category.
 pub fn run_all(ctx: &TestContext) -> CategoryResult {
     let start = Instant::now();
-    let mut results = CategoryResult::new("g08_device_counts");
+    let mut results = CategoryResult::new("device_resident_row_count_integrity");
 
     results.add_result(test_device_compact_count(ctx));
     results.add_result(test_groupby_device_count_sum(ctx));

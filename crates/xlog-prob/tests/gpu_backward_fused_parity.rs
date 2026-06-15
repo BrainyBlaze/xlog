@@ -86,7 +86,7 @@ fn build_test_circuit() -> Xgcf {
         decision_child_false: vec![0, 0, 0, 0, 0, 0, 0], // false→node 0 (Const0)
         decision_child_true: vec![0, 0, 0, 0, 0, 0, 5],  // true→node 5 (Or)
         roots: vec![6],
-        // 4 levels: [0,1,2,3 at L0], [4 at L1], [5 at L2], [6 at L3]
+        // 4 levels: [0,1,2,3 at level 0], [4 at level 1], [5 at level 2], [6 at level 3]
         level_offsets: vec![0, 4, 5, 6, 7],
         level_nodes: vec![0, 1, 2, 3, 4, 5, 6],
     }

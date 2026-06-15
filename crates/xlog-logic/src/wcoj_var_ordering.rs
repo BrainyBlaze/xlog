@@ -1,4 +1,4 @@
-//! W2.1 — Variable-ordering cost model for WCOJ dispatch.
+//! Variable-ordering cost model for WCOJ dispatch.
 //!
 //! The trait [`WcojVariableOrderingModel`] picks the kernel **leader
 //! slot** (slot 0) for triangle and 4-cycle WCOJ shapes. The leader
@@ -10,17 +10,17 @@
 //! `min_card / default_leader_card ≤
 //! config.effective_wcoj_var_ordering_threshold()`. Marginal
 //! cases (above threshold) return `None` so the promoter leaves
-//! `var_order = None` and slice 1/2/4/W2.2 dispatch behavior is
+//! `var_order = None` and default WCOJ dispatch behavior is
 //! preserved.
 //!
 //! The trait returns only the **leader index** in the promoter's
 //! canonical input order — the promoter is responsible for building
-//! the full [`xlog_ir::rir::VariableOrder`] using the locked
+//! the full [`xlog_ir::rir::VariableOrder`] using the canonical
 //! permutation tables (because computing `kernel_output_cols`
 //! requires the rule's head-variable order, which only the promoter
 //! has).
 //!
-//! # Locked permutation tables (W2.1 plan §"Permutation Tables")
+//! # Canonical permutation tables
 //!
 //! Triangle (canonical inputs `[e_xy, e_yz, e_xz]`, vars `{X, Y, Z}`):
 //!
@@ -73,8 +73,8 @@ pub fn wcoj_cost_gate_predicts_wcoj(wcoj_cost: f64, hash_cost: f64) -> bool {
 ///
 /// Implementations look at relation cardinalities (or other stats)
 /// and decide whether a non-default leader is worth selecting. They
-/// return `None` to mean "leave default leader" (i.e., slice 1/2
-/// behavior).
+/// return `None` to mean "leave default leader" and preserve the
+/// no-reorder behavior.
 pub trait WcojVariableOrderingModel {
     /// Pick a leader for the triangle WCOJ shape.
     ///
@@ -159,7 +159,8 @@ impl LeaderCardinalityModel {
         let (min_idx, min_card) = Self::argmin_card(&rel_ids, stats)?;
         // Default leader is index 0 (e_xy / e_wx). If the argmin IS
         // index 0, no reordering would happen — return None to keep
-        // the IR `var_order = None` (bit-identical to slice 1/2).
+        // the IR `var_order = None` (bit-identical to the default
+        // no-reorder behavior).
         if min_idx == 0 {
             return None;
         }
@@ -198,17 +199,17 @@ impl WcojVariableOrderingModel for LeaderCardinalityModel {
 }
 
 // ---------------------------------------------------------------
-// W2.6 — HeatAwareLeaderModel
+// HeatAwareLeaderModel
 // ---------------------------------------------------------------
 
-/// W2.6 cost model: combines cardinality, access heat, and observed
-/// join selectivity into a composite score per the locked plan
-/// formula. Higher score = more expensive to iterate over → demote
-/// from the leader (slot 0). The model picks `argmin(score)` as
-/// leader, gated by the same `effective_wcoj_var_ordering_threshold`
-/// as W2.1.
+/// Heat-aware cost model: combines cardinality, access heat, and
+/// observed join selectivity into a fixed composite score formula.
+/// Higher score = more expensive to iterate over → demote from the
+/// leader (slot 0). The model picks `argmin(score)` as leader, gated
+/// by the same `effective_wcoj_var_ordering_threshold` as the
+/// leader-cardinality model.
 ///
-/// **Locked formula** (W2.6 plan §"Composite score"):
+/// **Composite score formula**:
 /// ```text
 /// score(rel) = cardinality(rel)
 ///            * (1.0 + 4.0 * heat(rel))
@@ -219,22 +220,22 @@ impl WcojVariableOrderingModel for LeaderCardinalityModel {
 /// * `heat` from `RelationStats.heat: f32` (EMA written by
 ///   `record_access` at `node_dispatch.rs:26`).
 /// * `observed_sel_or_one(e)` from
-///   `StatsManager::get_join_selectivity(rel_a, rel_b)` (W2.4
-///   output via `record_join_result`, EMA-smoothed).
+///   `StatsManager::get_join_selectivity(rel_a, rel_b)` (join-result
+///   feedback via `record_join_result`, EMA-smoothed).
 ///   **Key-validation**: only consume a cached `JoinSelectivity`
 ///   when its `(left_keys, right_keys)` match the candidate edge
 ///   keys after `StatsManager::canonical_join_key` swap. On
 ///   mismatch, default to `1.0` (no observed filter assumption).
 ///
-/// **Heat weight 4.0** locked: with W2.1 default threshold 0.5,
-/// gate fires when `min/default ≤ 0.5`. With cards equal +
-/// `heat = h` on the hot rel, ratio = `1 / (1 + 4h)`. For
-/// `1 + 4h ≥ 2.0` → `h ≥ 0.25` (~3 `record_access` calls).
+/// **Heat weight 4.0**: with default threshold 0.5, gate fires when
+/// `min/default ≤ 0.5`. With cards equal + `heat = h` on the hot
+/// rel, ratio = `1 / (1 + 4h)`. For `1 + 4h ≥ 2.0` → `h ≥ 0.25`
+/// (~3 `record_access` calls).
 #[derive(Debug, Clone, Copy, Default)]
 pub struct HeatAwareLeaderModel;
 
 impl HeatAwareLeaderModel {
-    /// Locked heat weight (W2.6 plan §"Composite score").
+    /// Heat weight used by the composite score formula.
     pub const HEAT_WEIGHT: f32 = 4.0;
 
     /// Default selectivity for an edge with no observed
@@ -304,13 +305,13 @@ impl HeatAwareLeaderModel {
         }
     }
 
-    /// Compute the locked composite score for a single rel.
+    /// Compute the composite score for a single rel.
     ///
     /// `incident_edges` is a slice of `(other_rel,
     /// candidate_left_keys, candidate_right_keys)` for each edge
     /// containing `rel`. The model derives this from the canonical
     /// kernel topology (triangle: 3 edges, 4-cycle: 4 edges); the
-    /// key columns come from the locked permutation tables.
+    /// key columns come from the canonical permutation tables.
     fn composite_score(
         rel: RelId,
         card: u64,
@@ -375,13 +376,13 @@ impl WcojVariableOrderingModel for HeatAwareLeaderModel {
         config: &CompilerConfig,
     ) -> Option<u8> {
         // Triangle canonical edges: {(0,1), (1,2), (0,2)} —
-        // each rel ∈ 2 edges. Edge keys per W2.1 locked
+        // each rel ∈ 2 edges. Edge keys follow the canonical
         // permutation tables: every triangle edge joins on
         // [1]/[0] in the **canonical** layout (no swaps in the
         // canonical default-leader topology). The HeatAware
         // model's selectivity lookup uses these canonical-layout
-        // keys; non-default-leader rotated keys (W2.6 step 5
-        // table) are only relevant on the FEEDBACK side.
+        // keys; non-default-leader rotated keys are only relevant
+        // on the FEEDBACK side.
         let cards: [u64; 3] = match (
             Self::card_of(stats, rel_ids[0]),
             Self::card_of(stats, rel_ids[1]),
@@ -469,14 +470,14 @@ impl WcojVariableOrderingModel for HeatAwareLeaderModel {
     }
 }
 
-/// Promoter helper: triangle locked permutation table.
+/// Promoter helper: triangle canonical permutation table.
 ///
 /// Returns `lookup_perms` (the 2 non-leader slot entries) for the
 /// given `leader_idx ∈ [0, 3)`. The promoter combines this with its
 /// own knowledge of the rule head to produce
 /// `kernel_output_cols`.
 ///
-/// **Locked semantics** per W2.1 plan §"Permutation Tables":
+/// **Canonical semantics**:
 /// * 0 (e_xy default) — slots `[e_yz, e_xz]`, no col-swaps.
 /// * 1 (e_yz)         — slots `[e_xz↔, e_xy↔]`, both col-swapped.
 /// * 2 (e_xz)         — slots `[e_yz↔, e_xy]`, e_yz col-swapped only.
@@ -519,12 +520,12 @@ pub fn triangle_lookup_perms(leader_idx: u8) -> Vec<LookupPerm> {
     }
 }
 
-/// Promoter helper: triangle locked head-projection table.
+/// Promoter helper: triangle canonical head-projection table.
 ///
 /// Maps the kernel-direct output (in leader's `(a, b, c)` order)
 /// back to the canonical head order `(X, Y, Z)`.
 ///
-/// **Locked semantics** per W2.1 plan §"Permutation Tables":
+/// **Canonical semantics**:
 /// * 0 (e_xy default) — identity `[Column(0), Column(1), Column(2)]`.
 /// * 1 (e_yz)         — `[Column(2), Column(0), Column(1)]`
 ///   because kernel-direct = `(Y, Z, X)`.
@@ -551,7 +552,7 @@ pub fn triangle_kernel_output_cols(leader_idx: u8) -> Vec<ProjectExpr> {
     }
 }
 
-/// Promoter helper: 4-cycle locked head-projection table.
+/// Promoter helper: 4-cycle canonical head-projection table.
 ///
 /// Maps the kernel-direct output (in leader's rotated cycle order)
 /// back to the canonical head order `(W, X, Y, Z)`. All 4 entries
@@ -609,7 +610,7 @@ pub fn build_cycle4_var_order(leader_idx: u8) -> VariableOrder {
     )
 }
 
-/// Promoter helper: 4-cycle locked permutation table.
+/// Promoter helper: 4-cycle canonical permutation table.
 ///
 /// All 4 leaders are rotation-only — no col-swaps. `lookup_perms`
 /// rotates the input list so the leader is at slot 0 and subsequent
@@ -631,9 +632,9 @@ pub fn cycle4_lookup_perms(leader_idx: u8) -> Vec<LookupPerm> {
 
 #[cfg(test)]
 mod tests {
-    //! W2.1 step 3 unit tests for the cost-model trait + default
-    //! impl + locked permutation tables. End-to-end leader-pick
-    //! tests live in W2.1 step 7 Part A.
+    //! Unit tests for the cost-model trait, default implementation,
+    //! and canonical permutation tables. End-to-end leader-pick tests
+    //! live alongside the leader-pick integration coverage.
     use super::*;
     use xlog_core::RelId;
 
@@ -805,7 +806,7 @@ mod tests {
     }
 
     // ===============================================================
-    // W2.6 step 7 Part A — HeatAwareLeaderModel composite-score certs
+    // HeatAwareLeaderModel composite-score tests
     // ===============================================================
 
     /// Build stats with cards + per-rel heat values (heat injected
@@ -836,7 +837,7 @@ mod tests {
     fn heat_aware_leader_picks_cold_when_hot_relation_at_default_idx() {
         // Triangle. Cards equal at 100. Hot rel at idx 0 (default
         // leader): heat = 0.5. Other rels heat = 0.
-        // Expected scores (per locked formula HEAT_WEIGHT = 4):
+        // Expected scores (per HEAT_WEIGHT = 4 formula):
         //   idx0: 100 * (1+4*0.5) * 2 = 100 * 3 * 2 = 600
         //   idx1: 100 * 1 * 2 = 200
         //   idx2: 100 * 1 * 2 = 200
