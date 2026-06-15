@@ -5,7 +5,7 @@ Scope: Git-tracked source and documentation files only. Superpowers docs, plan f
 Scanned files: 1430
 Unresolved files: 0
 Comment/prose artifact occurrences: 2456
-Code/identifier artifact occurrences: 1571
+Code/identifier artifact occurrences: 1579
 
 Resolved means this board found no remaining opaque task/milestone labels or external consumer names in the eligible portions of that file.
 
@@ -1402,7 +1402,7 @@ Hardware cache terminology such as `L1` and `L2` is allowed when it refers to GP
 | `fuzz/fuzz_targets/fuzz_parser.rs` | 0 | 0 | true |  |  |
 | `fuzz/fuzz_targets/fuzz_type_inference.rs` | 0 | 0 | true |  |  |
 | `python/examples/external_consumer_exact_induce_parity.py` | 1 | 1 | true | task/milestone label(1) | external-consumer filename(1) |
-| `python/examples/dts_fit_benchmark.py` | 0 | 0 | true |  |  |
+| `python/examples/external_consumer_fit_benchmark.py` | 0 | 8 | true |  | external-consumer benchmark filename, helper names, usage string, and output path(8) |
 | `python/examples/ilp_showcase.py` | 0 | 0 | true |  |  |
 | `python/pyproject.toml` | 0 | 0 | true |  |  |
 | `python/tests/conftest.py` | 0 | 0 | true |  |  |

@@ -8,7 +8,7 @@ Reproduces the exact workload an external consumer sends to xlog's train_on_comp
 - Deterministic vs non-deterministic comparison
 
 Usage:
-    .venv/bin/python python/examples/dts_fit_benchmark.py
+    .venv/bin/python python/examples/external_consumer_fit_benchmark.py
 
 Outputs structured JSON to stdout for CI gating.
 """
@@ -61,7 +61,7 @@ class BenchmarkResult:
         }
 
 
-def build_dts_program(pred_ids: list[int], target_name: str) -> str:
+def build_external_consumer_program(pred_ids: list[int], target_name: str) -> str:
     """Build an external consumer-shaped Datalog program with four learnable topology masks."""
     lines = []
     for pid in pred_ids:
@@ -74,7 +74,7 @@ def build_dts_program(pred_ids: list[int], target_name: str) -> str:
     return "\n".join(lines) + "\n"
 
 
-def generate_dts_facts(
+def generate_external_consumer_facts(
     n_preds: int,
     n_pos: int,
     n_neg: int,
@@ -190,11 +190,11 @@ def run_benchmark(
     from pyxlog.ilp.trainer import train_on_compiled_relations
     from pyxlog.ilp.types import TrainConfig
 
-    pred_ids, target_pid, positive_facts, negative_facts = generate_dts_facts(
+    pred_ids, target_pid, positive_facts, negative_facts = generate_external_consumer_facts(
         n_preds, n_pos, n_neg, seed=seed,
     )
     target_name = f"p_{target_pid}"
-    source = build_dts_program(pred_ids, target_name)
+    source = build_external_consumer_program(pred_ids, target_name)
 
     mask_names = [
         f"W_chain_{target_name}",
@@ -308,9 +308,9 @@ def main():
               f"{s['unique_fingerprints']:>5}/10 {'YES' if s['is_deterministic'] else 'NO':>5}")
 
     # Write JSON
-    with open("/tmp/dts_fit_benchmark.json", "w") as f:
+    with open("/tmp/external_consumer_fit_benchmark.json", "w") as f:
         json.dump(results, f, indent=2)
-    print(f"\nResults saved to /tmp/dts_fit_benchmark.json")
+    print(f"\nResults saved to /tmp/external_consumer_fit_benchmark.json")
 
 
 if __name__ == "__main__":
