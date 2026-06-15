@@ -275,10 +275,10 @@ def _consumer_behavior_probes(
             == "PASS",
             features=["pyxlog_compatibility"],
             consumers=["pyxlog-compatibility"],
-            proof="public v0.8.0/v0.8.5 pyxlog validators and v0.8.6 session persistent-index probe pass against the staged local package",
+            proof="public pyxlog compatibility validators and session persistent-index probe pass against the staged local package",
             evidence=[
                 "scripts/validate_external_consumer_examples.py",
-                "scripts/validate_v085_examples.py",
+                "scripts/validate_language_examples.py",
                 "python/tests/test_v086_pyxlog_persistent_index_runtime.py",
             ],
             raw={"examples": examples_by_consumer["pyxlog-compatibility"]},
@@ -710,13 +710,13 @@ def _run_source_guard(args: argparse.Namespace) -> dict[str, Any]:
             "pytest",
             "-q",
             "python/tests/test_external_consumer_examples_source.py",
-            "python/tests/test_v085_examples_source.py",
+            "python/tests/test_language_examples_source.py",
         ],
         timeout=args.compat_timeout,
     )
     if raw["returncode"] != 0:
         raise SystemExit(
-            f"v0.8.0/v0.8.5 source guards failed with exit {raw['returncode']}\n"
+            f"external consumer/language source guards failed with exit {raw['returncode']}\n"
             f"STDOUT:\n{raw['stdout']}\nSTDERR:\n{raw['stderr']}"
         )
     return {
@@ -767,7 +767,7 @@ def _compatibility_gates(args: argparse.Namespace, evidence_dir: Path) -> dict[s
     )
     v085 = _run_existing_validator(
         args,
-        "scripts/validate_v085_examples.py",
+        "scripts/validate_language_examples.py",
         evidence_dir / "compat_v085_validation_summary.json",
         pyxlog_env,
     )
@@ -793,9 +793,9 @@ def _production_path_reuse() -> dict[str, Any]:
         "examples_run_through": "cargo run -q -p xlog-cli -- run/explain",
         "validator_reuses": [
             "scripts/validate_external_consumer_examples.py",
-            "scripts/validate_v085_examples.py",
+            "scripts/validate_language_examples.py",
             "python/tests/test_external_consumer_examples_source.py",
-            "python/tests/test_v085_examples_source.py",
+            "python/tests/test_language_examples_source.py",
         ],
         "private_hooks_used": False,
         "fixture_only_bypass": False,
@@ -804,7 +804,7 @@ def _production_path_reuse() -> dict[str, Any]:
             needle in validator
             for needle in [
                 "validate_external_consumer_examples.py",
-                "validate_v085_examples.py",
+                "validate_language_examples.py",
                 "cargo",
                 "xlog-cli",
             ]
@@ -821,7 +821,7 @@ def _reuse_audit() -> dict[str, Any]:
             "xlog-cli parser and explain pipeline",
             "xlog-runtime production executor/provider dispatch",
             "external consumer example validator",
-            "v0.8.5 language showcase validator",
+            "language showcase validator",
             "committed v0.8.6 feature evidence",
         ],
         "evidence_paths": evidence_paths,

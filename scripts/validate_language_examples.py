@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate the v0.8.5 language showcase examples."""
+"""Validate the language completeness showcase examples."""
 
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
 EXAMPLE_ROOT = ROOT / "examples" / "language-completeness" / "showcase"
-DEFAULT_OUTPUT = ROOT / "docs" / "evidence" / "2026-05-19-v085-examples" / "validation_summary.json"
+DEFAULT_OUTPUT = ROOT / "docs" / "evidence" / "language-examples" / "validation_summary.json"
 EXAMPLES = [
     "01_list_typed_relation",
     "02_findall_aggregate",
@@ -351,7 +351,7 @@ def _aggregate(results: list[dict[str, Any]]) -> dict[str, Any]:
     _require(interaction_count >= 5, f"Expected at least 5 interactions, got {interaction_count}")
 
     return {
-        "suite": "G085_EXAMPLES",
+        "suite": "language_examples",
         "status": "PASS",
         "example_count": len(results),
         "required_example_count": 10,

@@ -1305,7 +1305,7 @@ Hardware cache terminology such as `L1` and `L2` is allowed when it refers to GP
 | `examples/language-completeness/showcase/03_maplist_static_predref/README.md` | 0 | 0 | true |  |  |
 | `examples/language-completeness/showcase/03_maplist_static_predref/expected.json` | 0 | 0 | true |  |  |
 | `examples/language-completeness/showcase/03_maplist_static_predref/program.xlog` | 0 | 0 | true |  |  |
-| `examples/language-completeness/showcase/04_magic_reach_explain/README.md` | 0 | 0 | true |  |  |
+| `examples/language-completeness/showcase/04_magic_reach_explain/README.md` | 1 | 0 | true | release-coded language-feature label(1) |  |
 | `examples/language-completeness/showcase/04_magic_reach_explain/expected.json` | 0 | 0 | true |  |  |
 | `examples/language-completeness/showcase/04_magic_reach_explain/program.xlog` | 0 | 0 | true |  |  |
 | `examples/language-completeness/showcase/05_prob_aggregate_exact/README.md` | 0 | 0 | true |  |  |
@@ -1325,7 +1325,7 @@ Hardware cache terminology such as `L1` and `L2` is allowed when it refers to GP
 | `examples/language-completeness/showcase/09_repl_watch_explain/program.xlog` | 0 | 0 | true |  |  |
 | `examples/language-completeness/showcase/10_scientific_incremental/README.md` | 0 | 0 | true |  |  |
 | `examples/language-completeness/showcase/10_scientific_incremental/expected.json` | 0 | 0 | true |  |  |
-| `examples/language-completeness/showcase/10_scientific_incremental/program.xlog` | 0 | 0 | true |  |  |
+| `examples/language-completeness/showcase/10_scientific_incremental/program.xlog` | 1 | 0 | true | release-coded language-feature comment(1) |  |
 | `examples/language-completeness/showcase/README.md` | 4 | 1 | true | release/suite/sub-goal labels(4) | release-specific validator path label(1) |
 | `examples/v086-runtime/01_dts_delta_optimizer/README.md` | 1 | 0 | true | release label(1) |  |
 | `examples/v086-runtime/01_dts_delta_optimizer/expected.json` | 0 | 8 | true |  | external consumer and predicate-name artifacts(8) |
@@ -1484,7 +1484,7 @@ Hardware cache terminology such as `L1` and `L2` is allowed when it refers to GP
 | `python/tests/test_exact_source.py` | 0 | 8 | true |  | release-coded test/evidence names and external consumer literals(8) |
 | `python/tests/test_external_consumer_examples_source.py` | 0 | 6 | true |  | release-coded test, suite, validator, and evidence names(6) |
 | `python/tests/test_v080_pyapi_source.py` | 0 | 0 | true |  |  |
-| `python/tests/test_v085_examples_source.py` | 0 | 4 | false |  | v085(4) |
+| `python/tests/test_language_examples_source.py` | 0 | 8 | true |  | release-coded test, validator, evidence, and suite names(8) |
 | `python/tests/test_v086_adaptive_reoptimization_source.py` | 0 | 1 | false |  | v086(1) |
 | `python/tests/test_v086_chain_smem_profile_source.py` | 0 | 1 | false |  | v086(1) |
 | `python/tests/test_v086_chain_smem_source.py` | 0 | 1 | false |  | v086(1) |
@@ -1530,7 +1530,7 @@ Hardware cache terminology such as `L1` and `L2` is allowed when it refers to GP
 | `scripts/validate_package_metadata.py` | 0 | 0 | true |  |  |
 | `scripts/validate_release_gpu.sh` | 0 | 0 | true |  |  |
 | `scripts/validate_external_consumer_examples.py` | 0 | 5 | true |  | release-coded validator, suite, evidence, and output labels(5) |
-| `scripts/validate_v085_examples.py` | 0 | 2 | false |  | v085(2) |
+| `scripts/validate_language_examples.py` | 0 | 4 | true |  | release-coded validator, evidence, and suite labels(4) |
 | `scripts/validate_v086_examples.py` | 0 | 57 | false |  | release-coded validator/path labels(57) |
 | `scripts/validation_staging.py` | 0 | 0 | true |  |  |
 | `scripts/xlog_doctor.py` | 0 | 0 | true |  |  |

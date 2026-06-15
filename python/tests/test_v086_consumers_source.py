@@ -103,7 +103,7 @@ def test_v086_consumer_validator_reuses_existing_compatibility_gates() -> None:
     for needle in [
         "G086_CONSUMERS",
         "validate_external_consumer_examples.py",
-        "validate_v085_examples.py",
+        "validate_language_examples.py",
         "feature_coverage",
         "raw_measurements",
         "compatibility_gates",

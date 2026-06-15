@@ -36,7 +36,24 @@ REQUIRED_FEATURES = [
 ]
 
 
-def test_v085_examples_layout_is_committed() -> None:
+def language_examples_evidence_dir() -> Path:
+    matches = []
+    for path in sorted((ROOT / "docs" / "evidence").glob("*-examples")):
+        summary_path = path / "validation_summary.json"
+        if not summary_path.exists() or not (path / "README.md").exists():
+            continue
+        summary = json.loads(summary_path.read_text(encoding="utf-8"))
+        if (
+            summary.get("example_count") == len(EXAMPLES)
+            and summary.get("interaction_count") == len(EXAMPLES)
+            and set(REQUIRED_FEATURES).issubset(summary.get("feature_coverage", {}))
+        ):
+            matches.append(path)
+    assert len(matches) == 1
+    return matches[0]
+
+
+def test_language_examples_layout_is_committed() -> None:
     suite = ROOT / "examples/language-completeness/showcase"
 
     assert (suite / "README.md").exists()
@@ -47,7 +64,7 @@ def test_v085_examples_layout_is_committed() -> None:
         assert (example / "README.md").exists(), name
 
 
-def test_v085_examples_expected_contracts_include_semantic_execution() -> None:
+def test_language_examples_expected_contracts_include_semantic_execution() -> None:
     suite = ROOT / "examples/language-completeness/showcase"
 
     for name in EXAMPLES:
@@ -56,7 +73,7 @@ def test_v085_examples_expected_contracts_include_semantic_execution() -> None:
         assert any(key in checks for key in ["run", "prob_json"]), name
 
 
-def test_v085_showcase_run_checks_do_not_accept_raw_kernel_schema_errors() -> None:
+def test_language_showcase_run_checks_do_not_accept_raw_kernel_schema_errors() -> None:
     suite = ROOT / "examples/language-completeness/showcase"
     raw_schema_error = " ".join(["Union requires compatible", "schemas"])
 
@@ -70,9 +87,9 @@ def test_v085_showcase_run_checks_do_not_accept_raw_kernel_schema_errors() -> No
         assert raw_schema_error not in combined_needles, name
 
 
-def test_v085_examples_validator_and_evidence_contract_is_committed() -> None:
-    validator = ROOT / "scripts/validate_v085_examples.py"
-    evidence = ROOT / "docs/evidence/2026-05-19-v085-examples"
+def test_language_examples_validator_and_evidence_contract_is_committed() -> None:
+    validator = ROOT / "scripts/validate_language_examples.py"
+    evidence = language_examples_evidence_dir()
 
     assert validator.exists()
     assert (evidence / "README.md").exists()
@@ -80,7 +97,7 @@ def test_v085_examples_validator_and_evidence_contract_is_committed() -> None:
 
     source = validator.read_text(encoding="utf-8")
     for needle in [
-        "G085_EXAMPLES",
+        "language_examples",
         "feature_coverage",
         "interaction_count",
         "raw_outputs",

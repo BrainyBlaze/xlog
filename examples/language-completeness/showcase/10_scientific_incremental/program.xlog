@@ -1,4 +1,4 @@
-// Scientific incremental-reasoning fixture using v0.8.5 language features.
+// Scientific incremental-reasoning fixture using language completeness features.
 
 pred sensor(id: u32).
 pred reading(sensor: u32, value: u32).
