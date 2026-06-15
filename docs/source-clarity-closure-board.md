@@ -1493,7 +1493,7 @@ Hardware cache terminology such as `L1` and `L2` is allowed when it refers to GP
 | `python/tests/test_delta_coalescing.py` | 0 | 10 | true |  | release-coded test, evidence, metric, and opaque fixture labels(10) |
 | `python/tests/test_exact_types_runtime.py` | 1 | 1 | true | release-coded runtime docstring(1) | release-coded runtime test path(1) |
 | `python/tests/test_exact_types_source.py` | 0 | 7 | true |  | release-coded source, evidence, metric, and runtime-test labels(7) |
-| `python/tests/test_v086_persistent_hash_index_source.py` | 0 | 1 | false |  | v086(1) |
+| `python/tests/test_persistent_hash_index_source.py` | 0 | 10 | true |  | release-coded source, evidence, and metric labels(10) |
 | `python/tests/test_pyxlog_persistent_index_runtime.py` | 0 | 1 | true |  | release-coded runtime test path(1) |
 | `python/tests/test_v086_relation_callbacks.py` | 0 | 2 | false |  | v086(2) |
 | `python/tests/test_v086_relation_callbacks_runtime.py` | 0 | 0 | true |  |  |

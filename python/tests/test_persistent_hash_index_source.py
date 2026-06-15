@@ -5,14 +5,46 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[2]
-EVIDENCE_DIR = ROOT / "docs" / "evidence" / "2026-05-19-v086-persistent-hash-index"
+
+
+def persistent_hash_index_evidence_dir() -> Path:
+    matches = []
+    for path in sorted((ROOT / "docs" / "evidence").iterdir()):
+        measurements_path = path / "measurements.json"
+        if not measurements_path.exists() or not (path / "README.md").exists():
+            continue
+        measurements = json.loads(measurements_path.read_text(encoding="utf-8"))
+        repeated = measurements.get("repeated_session_fixture", {})
+        performance = measurements.get("performance_fixture", {})
+        transfer_budget = performance.get("transfer_budget", {})
+        if (
+            measurements.get("manager_key", {}).get("includes_relation_id") is True
+            and measurements.get("invalidation_fixture", {}).get("entries_after_mutation") == 0
+            and measurements.get("budget_fixture", {}).get("evictions") == 1
+            and measurements.get("background_fixture", {}).get("background_build_requests") == 1
+            and measurements.get("background_fixture", {}).get("background_builds_deferred") == 1
+            and repeated.get("builds") == 1
+            and repeated.get("hits", 0) >= 1
+            and repeated.get("tracked_dtoh_calls") == 0
+            and repeated.get("tracked_htod_calls") == 0
+            and performance.get("speedup_ratio", 0) >= performance.get("target_speedup_ratio", 1.5)
+            and transfer_budget.get("cached_tracked_dtoh_calls") == 0
+            and transfer_budget.get("cached_tracked_htod_calls") == 0
+            and measurements.get("performance_or_blocker", {}).get("speedup_gate_claimed") is True
+        ):
+            matches.append(path)
+    assert len(matches) == 1
+    return matches[0]
+
+
+EVIDENCE_DIR = persistent_hash_index_evidence_dir()
 
 
 def read(path: str) -> str:
     return (ROOT / path).read_text(encoding="utf-8")
 
 
-def test_v086_persistent_hash_index_extends_existing_cache_path() -> None:
+def test_persistent_hash_index_extends_existing_cache_path() -> None:
     config = read("crates/xlog-core/src/config.rs")
     cache = read("crates/xlog-runtime/src/executor/join_cache.rs")
     executor = read("crates/xlog-runtime/src/executor/mod.rs")
@@ -35,7 +67,7 @@ def test_v086_persistent_hash_index_extends_existing_cache_path() -> None:
     assert "Persistent Hash Index Manager" in docs
 
 
-def test_v086_persistent_hash_index_background_builds_use_recorded_provider_path() -> None:
+def test_persistent_hash_index_background_builds_use_recorded_provider_path() -> None:
     cache = read("crates/xlog-runtime/src/executor/join_cache.rs")
     dispatch = read("crates/xlog-runtime/src/executor/node_dispatch.rs")
     provider = read("crates/xlog-cuda/src/provider/relational.rs")
@@ -49,13 +81,13 @@ def test_v086_persistent_hash_index_background_builds_use_recorded_provider_path
     assert "build_hash_table_v2_on_stream" in provider
 
 
-def test_v086_persistent_hash_index_evidence_is_present() -> None:
+def test_persistent_hash_index_evidence_is_present() -> None:
     readme = (EVIDENCE_DIR / "README.md").read_text(encoding="utf-8")
     measurements = json.loads((EVIDENCE_DIR / "measurements.json").read_text(encoding="utf-8"))
 
-    assert "G086_INDEX" in readme
-    assert "M086_INDEX.1" in readme
-    assert "M086_INDEX.6" in readme
+    assert "Persistent Hash Index Manager" in readme
+    assert "manager API" in readme
+    assert "transfer budget" in readme
     assert measurements["repeated_session_fixture"]["builds"] == 1
     assert measurements["repeated_session_fixture"]["hits"] >= 1
     assert measurements["repeated_session_fixture"]["tracked_dtoh_calls"] == 0
@@ -66,7 +98,7 @@ def test_v086_persistent_hash_index_evidence_is_present() -> None:
     assert measurements["background_fixture"]["background_builds_deferred"] == 1
 
 
-def test_v086_persistent_hash_index_records_required_speedup_fixture() -> None:
+def test_persistent_hash_index_records_required_speedup_fixture() -> None:
     measurements = json.loads((EVIDENCE_DIR / "measurements.json").read_text(encoding="utf-8"))
 
     performance = measurements["performance_fixture"]
@@ -78,7 +110,7 @@ def test_v086_persistent_hash_index_records_required_speedup_fixture() -> None:
     assert performance["transfer_budget"]["cached_tracked_htod_calls"] == 0
 
 
-def test_v086_persistent_hash_index_pyxlog_session_reuse_is_exposed() -> None:
+def test_persistent_hash_index_pyxlog_session_reuse_is_exposed() -> None:
     pyxlog_logic = read("crates/pyxlog/src/logic.rs")
     pyxlog_lib = read("crates/pyxlog/src/lib.rs")
     gpu_logic = read("crates/xlog-gpu/src/logic.rs")
