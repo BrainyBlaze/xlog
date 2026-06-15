@@ -4,7 +4,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 
 
-def test_v080_bridge_public_surface_is_stubbed_and_documented() -> None:
+def test_bridge_public_surface_is_stubbed_and_documented() -> None:
     native_stub = (ROOT / "crates/pyxlog/python/pyxlog/_native.pyi").read_text()
     docs = (ROOT / "docs/architecture/python-bindings.md").read_text()
 
@@ -20,7 +20,7 @@ def test_v080_bridge_public_surface_is_stubbed_and_documented() -> None:
         assert needle.split("(")[0].removeprefix("def ") in docs
 
 
-def test_v080_bridge_native_helpers_keep_semantics_in_python_ml_layer() -> None:
+def test_bridge_native_helpers_keep_semantics_in_python_ml_layer() -> None:
     neural_rs = (ROOT / "crates/pyxlog/src/neural.rs").read_text()
     lib_rs = (ROOT / "crates/pyxlog/src/lib.rs").read_text()
     stage4_sources = [
@@ -45,7 +45,7 @@ def test_v080_bridge_native_helpers_keep_semantics_in_python_ml_layer() -> None:
         assert "contra_penalty" not in source
 
 
-def test_v080_bridge_reuses_registered_network_output_modes() -> None:
+def test_bridge_reuses_registered_network_output_modes() -> None:
     neural_rs = (ROOT / "crates/pyxlog/src/neural.rs").read_text()
 
     assert "NetworkHandle" in neural_rs
@@ -66,21 +66,27 @@ def test_v080_bridge_reuses_registered_network_output_modes() -> None:
         assert "apply_network_output_mode(py" in body
 
 
-def test_v080_bridge_has_evidence_package() -> None:
-    evidence = ROOT / "docs/evidence/2026-05-18-v080-bridge/README.md"
-    probe = ROOT / "docs/evidence/2026-05-18-v080-bridge/runtime_probe.json"
+def test_bridge_has_evidence_package() -> None:
+    evidence_root = ROOT / "docs/evidence"
+    evidence = next(
+        path / "README.md"
+        for path in sorted(evidence_root.glob("*-bridge"))
+        if (path / "README.md").exists()
+        and "LearnedBridge" in (path / "README.md").read_text()
+    )
+    probe = evidence.parent / "runtime_probe.json"
 
     assert evidence.exists()
     assert probe.exists()
 
     text = evidence.read_text()
     for needle in [
-        "M080_BRIDGE.1",
-        "M080_BRIDGE.2",
-        "M080_BRIDGE.3",
-        "M080_BRIDGE.4",
-        "M080_BRIDGE.5",
-        "M080_BRIDGE.6",
+        "gradient smoke",
+        "LearnedBridge-shaped",
+        "Belnap helper",
+        "deterministic top-k",
+        "neural cache telemetry",
+        "repeated-query speedup",
         "LearnedBridge",
     ]:
         assert needle in text
