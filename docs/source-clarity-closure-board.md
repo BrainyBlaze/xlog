@@ -1486,8 +1486,8 @@ Hardware cache terminology such as `L1` and `L2` is allowed when it refers to GP
 | `python/tests/test_v080_pyapi_source.py` | 0 | 0 | true |  |  |
 | `python/tests/test_language_examples_source.py` | 0 | 8 | true |  | release-coded test, validator, evidence, and suite names(8) |
 | `python/tests/test_adaptive_reoptimization_source.py` | 0 | 7 | true |  | release-coded test, evidence, and metric labels(7) |
-| `python/tests/test_v086_chain_smem_profile_source.py` | 0 | 1 | false |  | v086(1) |
-| `python/tests/test_v086_chain_smem_source.py` | 0 | 1 | false |  | v086(1) |
+| `python/tests/test_chain_shared_memory_profile_source.py` | 0 | 9 | true |  | release-coded test, script, evidence, phase, and metric labels plus shared-memory shorthand(9) |
+| `python/tests/test_chain_shared_memory_source.py` | 0 | 8 | true |  | release-coded test, evidence, metric labels, and shared-memory shorthand in guard names(8) |
 | `python/tests/test_v086_consumers_source.py` | 0 | 27 | false |  | release-coded file/test labels(27) |
 | `python/tests/test_v086_cse_source.py` | 0 | 1 | false |  | v086(1) |
 | `python/tests/test_v086_delta_coalescing.py` | 0 | 2 | false |  | v086(2) |
@@ -1511,7 +1511,7 @@ Hardware cache terminology such as `L1` and `L2` is allowed when it refers to GP
 | `scripts/collect_track_a_results.sh` | 0 | 0 | true |  |  |
 | `scripts/install_pyxlog_for_python.py` | 0 | 0 | true |  |  |
 | `scripts/install_rust_toolchain.sh` | 0 | 0 | true |  |  |
-| `scripts/measure_v086_chain_smem.py` | 0 | 0 | true |  |  |
+| `scripts/measure_chain_shared_memory_profile.py` | 2 | 20 | true | release-coded docstring and query-argument shorthand comment(2) | release-coded script name and local shared-memory shorthand names(20) |
 | `scripts/neural_datasets.py` | 0 | 0 | true |  |  |
 | `scripts/neural_training.py` | 0 | 0 | true |  |  |
 | `scripts/package_cli_release.sh` | 0 | 0 | true |  |  |

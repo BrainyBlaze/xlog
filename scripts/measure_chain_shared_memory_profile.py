@@ -1,9 +1,9 @@
-"""Measure the G086_CHAIN_SMEM exact-induction profile trigger.
+"""Measure the chain-topology shared-memory exact-induction profile trigger.
 
-The fixture is synthetic but certified against the v0.8.6 goal: it routes
-through pyxlog's native exact-induction API and shapes candidate rows so the
-chain topology performs its O(|L| * |R|) scan while the other topologies stay
-linear. The script prints JSON only; evidence files are maintained separately.
+The fixture routes through pyxlog's native exact-induction API and shapes
+candidate rows so the chain topology performs its O(|L| * |R|) scan while the
+other topologies stay linear. The script prints JSON only; evidence files are
+maintained separately.
 """
 
 from __future__ import annotations
@@ -38,9 +38,9 @@ def tensor(values: list[int]) -> torch.Tensor:
 def build_request(rows: int, queries: int):
     prog = pyxlog.IlpProgramFactory.compile(SOURCE, device=0, memory_mb=256)
 
-    # qx=1 appears in every left row. qy matches only the final right row,
-    # forcing the chain predicate to scan the full right relation before
-    # finding coverage for each positive query.
+    # The first query argument appears in every left row. The second query
+    # argument matches only the final right row, forcing the chain predicate to
+    # scan the full right relation before finding coverage for each positive query.
     left_arg0 = [1] * rows
     left_arg1 = list(range(10_000, 10_000 + rows))
     right_arg0 = list(range(10_000, 10_000 + rows))
@@ -62,7 +62,7 @@ def build_request(rows: int, queries: int):
     return prog, kwargs
 
 
-ENV_CHAIN_SMEM = "XLOG_ILP_EXACT_CHAIN_SMEM"
+CHAIN_SHARED_MEMORY_ENV = "XLOG_ILP_EXACT_CHAIN_SMEM"
 
 
 def measure(
@@ -71,10 +71,10 @@ def measure(
     iterations: int,
     warmup: int,
     *,
-    chain_smem: bool,
+    chain_shared_memory_enabled: bool,
 ) -> dict[str, Any]:
-    previous = os.environ.get(ENV_CHAIN_SMEM)
-    os.environ[ENV_CHAIN_SMEM] = "1" if chain_smem else "0"
+    previous = os.environ.get(CHAIN_SHARED_MEMORY_ENV)
+    os.environ[CHAIN_SHARED_MEMORY_ENV] = "1" if chain_shared_memory_enabled else "0"
     prog, kwargs = build_request(rows, queries)
     try:
         for _ in range(warmup):
@@ -112,9 +112,9 @@ def measure(
             samples.append(elapsed)
     finally:
         if previous is None:
-            os.environ.pop(ENV_CHAIN_SMEM, None)
+            os.environ.pop(CHAIN_SHARED_MEMORY_ENV, None)
         else:
-            os.environ[ENV_CHAIN_SMEM] = previous
+            os.environ[CHAIN_SHARED_MEMORY_ENV] = previous
 
     return {
         "rows_per_candidate": rows,
@@ -126,7 +126,7 @@ def measure(
         "min_seconds": min(samples),
         "max_seconds": max(samples),
         "dtoh_calls": 2,
-        "chain_smem": chain_smem,
+        "chain_shared_memory_enabled": chain_shared_memory_enabled,
         "result_signature": last_signature,
     }
 
@@ -149,55 +149,56 @@ def main() -> int:
         args.small_queries,
         args.iterations,
         args.warmup,
-        chain_smem=False,
+        chain_shared_memory_enabled=False,
     )
-    small_smem = measure(
+    small_shared_memory = measure(
         args.small_rows,
         args.small_queries,
         args.iterations,
         args.warmup,
-        chain_smem=True,
+        chain_shared_memory_enabled=True,
     )
     chain_hot_baseline = measure(
         args.hot_rows,
         args.hot_queries,
         args.iterations,
         args.warmup,
-        chain_smem=False,
+        chain_shared_memory_enabled=False,
     )
-    chain_hot_smem = measure(
+    chain_hot_shared_memory = measure(
         args.hot_rows,
         args.hot_queries,
         args.iterations,
         args.warmup,
-        chain_smem=True,
+        chain_shared_memory_enabled=True,
     )
     hot_speedup = (
-        chain_hot_baseline["median_seconds"] / chain_hot_smem["median_seconds"]
+        chain_hot_baseline["median_seconds"] / chain_hot_shared_memory["median_seconds"]
     )
     small_regression = (
-        (small_smem["median_seconds"] - small_baseline["median_seconds"])
+        (small_shared_memory["median_seconds"] - small_baseline["median_seconds"])
         / small_baseline["median_seconds"]
         * 100.0
     )
     payload = {
         "small": {
             "baseline": small_baseline,
-            "chain_smem": small_smem,
-            "parity": small_baseline["result_signature"] == small_smem["result_signature"],
+            "chain_shared_memory": small_shared_memory,
+            "parity": small_baseline["result_signature"]
+            == small_shared_memory["result_signature"],
             "regression_percent": small_regression,
         },
         "chain_hot": {
             "baseline": chain_hot_baseline,
-            "chain_smem": chain_hot_smem,
+            "chain_shared_memory": chain_hot_shared_memory,
             "parity": chain_hot_baseline["result_signature"]
-            == chain_hot_smem["result_signature"],
+            == chain_hot_shared_memory["result_signature"],
             "speedup_ratio": hot_speedup,
         },
         "transfer_budget": {
             "baseline_dtoh_calls": chain_hot_baseline["dtoh_calls"],
-            "chain_smem_dtoh_calls": chain_hot_smem["dtoh_calls"],
-            "added_dtoh_calls": chain_hot_smem["dtoh_calls"]
+            "chain_shared_memory_dtoh_calls": chain_hot_shared_memory["dtoh_calls"],
+            "added_dtoh_calls": chain_hot_shared_memory["dtoh_calls"]
             - chain_hot_baseline["dtoh_calls"],
         },
         "fallback": {
