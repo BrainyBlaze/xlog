@@ -5,7 +5,7 @@ Scope: Git-tracked source and documentation files only. Superpowers docs, plan f
 Scanned files: 1430
 Unresolved files: 0
 Comment/prose artifact occurrences: 2459
-Code/identifier artifact occurrences: 1647
+Code/identifier artifact occurrences: 1654
 
 Resolved means this board found no remaining opaque task/milestone labels or external consumer names in the eligible portions of that file.
 
@@ -1516,7 +1516,7 @@ Hardware cache terminology such as `L1` and `L2` is allowed when it refers to GP
 | `scripts/neural_training.py` | 0 | 0 | true |  |  |
 | `scripts/package_cli_release.sh` | 0 | 0 | true |  |  |
 | `scripts/preflight_release_publish.sh` | 0 | 0 | true |  |  |
-| `scripts/repro/external_consumer_session_fuzz.py` | 8 | 13 | true | release/bug-code and external-consumer labels in harness docstring/comments(8) | release/bug-code script path, external-consumer helper/variables, and out-of-domain-key shorthand(13) |
+| `scripts/repro/external_consumer_session_fuzz.py` | 8 | 20 | true | release/bug-code and external-consumer labels in harness docstring/comments(8) | release/bug-code script path, external-consumer helper/variables, schema relation keys, and out-of-domain-key shorthand(20) |
 | `scripts/run_prob_examples.py` | 0 | 0 | true |  |  |
 | `scripts/run_xlog_examples.sh` | 0 | 0 | true |  |  |
 | `scripts/rustc-wrapper.sh` | 0 | 0 | true |  |  |

@@ -159,15 +159,14 @@ def make_external_consumer_fixture_relations(n_facts: int, seed: int) -> dict[st
         col([p[1] for p in vc_pairs], torch.int64),
     ]
 
-    # Exact relation keys are required by the external workload schema.
     return {
-        "wmir_fact": fixture_fact,
-        "wmir_evidence": fixture_evidence,
-        "wmir_justification_edge": fixture_justification_edge,
-        "wmir_rule": fixture_rule,
-        "wmir_rule_body": fixture_rule_body,
-        "wmir_rule_binding": fixture_rule_binding,
-        "wmir_violation": fixture_violation,
+        "external_consumer_fact": fixture_fact,
+        "external_consumer_evidence": fixture_evidence,
+        "external_consumer_justification_edge": fixture_justification_edge,
+        "external_consumer_rule": fixture_rule,
+        "external_consumer_rule_body": fixture_rule_body,
+        "external_consumer_rule_binding": fixture_rule_binding,
+        "external_consumer_violation": fixture_violation,
         "fusion_contested_input": fusion_contested_input,
         "value_contrariety_input": value_contrariety_input,
     }
