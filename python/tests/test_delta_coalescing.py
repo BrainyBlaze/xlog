@@ -1,10 +1,28 @@
+import json
 from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[2]
 
 
-def test_v086_delta_batch_api_is_exposed_in_stubs_docs_and_rust() -> None:
+def delta_coalescing_evidence_dir() -> Path:
+    matches = []
+    for path in sorted((ROOT / "docs" / "evidence").iterdir()):
+        measurements_path = path / "measurements.json"
+        if not measurements_path.exists() or not (path / "README.md").exists():
+            continue
+        measurements = json.loads(measurements_path.read_text(encoding="utf-8"))
+        if (
+            measurements.get("recompute_call_reduction_ratio") == 3.0
+            and measurements.get("hot_path_dtoh_calls") == 0
+            and measurements.get("final_output_transfer_excluded") is True
+        ):
+            matches.append(path)
+    assert len(matches) == 1
+    return matches[0]
+
+
+def test_delta_batch_api_is_exposed_in_stubs_docs_and_rust() -> None:
     native_stub = (ROOT / "crates/pyxlog/python/pyxlog/_native.pyi").read_text()
     docs = (ROOT / "docs/architecture/python-bindings.md").read_text()
     logic_rs = (ROOT / "crates/pyxlog/src/logic.rs").read_text()
@@ -16,7 +34,7 @@ def test_v086_delta_batch_api_is_exposed_in_stubs_docs_and_rust() -> None:
     assert "coalesce_relation_delta_batch" in gpu_logic_rs
 
 
-def test_v086_delta_batch_stats_are_source_auditable() -> None:
+def test_delta_batch_stats_are_source_auditable() -> None:
     native_stub = (ROOT / "crates/pyxlog/python/pyxlog/_native.pyi").read_text()
     logic_rs = (ROOT / "crates/pyxlog/src/logic.rs").read_text()
     gpu_logic_rs = (ROOT / "crates/xlog-gpu/src/logic.rs").read_text()
@@ -32,7 +50,7 @@ def test_v086_delta_batch_stats_are_source_auditable() -> None:
         assert needle in gpu_logic_rs
 
 
-def test_v086_delta_batch_coalescing_uses_gpu_set_ops_without_host_row_materialization() -> None:
+def test_delta_batch_coalescing_uses_gpu_set_ops_without_host_row_materialization() -> None:
     gpu_logic_rs = (ROOT / "crates/xlog-gpu/src/logic.rs").read_text()
     start = gpu_logic_rs.index("fn coalesce_relation_delta_batch")
     end = gpu_logic_rs.index("fn ensure_schema_type_compatible", start)
@@ -55,21 +73,19 @@ def test_v086_delta_batch_coalescing_uses_gpu_set_ops_without_host_row_materiali
         assert forbidden not in coalesce_impl
 
 
-def test_v086_delta_batch_has_certified_evidence() -> None:
-    evidence = ROOT / "docs/evidence/2026-05-19-v086-delta-coalesce/README.md"
-    measurements = ROOT / "docs/evidence/2026-05-19-v086-delta-coalesce/measurements.json"
+def test_delta_batch_has_certified_evidence() -> None:
+    evidence_dir = delta_coalescing_evidence_dir()
+    evidence = evidence_dir / "README.md"
+    measurements = evidence_dir / "measurements.json"
 
     assert evidence.exists()
     assert measurements.exists()
 
     text = evidence.read_text()
     for needle in [
-        "M086_DELTA.1",
-        "M086_DELTA.2",
-        "M086_DELTA.3",
-        "M086_DELTA.4",
-        "M086_DELTA.5",
-        "M086_DELTA.6",
-        "wmir_committed",
+        "Device-Resident Batch Relation Delta Coalescing",
+        "insert/delete cancellation",
+        "recompute calls reduce",
+        "delta stats report",
     ]:
         assert needle in text
