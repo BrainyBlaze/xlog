@@ -207,6 +207,41 @@ def test_gate_relation_zeroes_ineligible_examples() -> None:
     assert result.query_probabilities[3] == pytest.approx(0.0, abs=1e-6)
 
 
+def test_gate_relation_batched_training_path_runs() -> None:
+    """The batched training path (`program.train_epoch`, the default
+    batch_queries=True) must honor Stage-A gate slots. The per-query path used by
+    train_neurosymbolic_program does not exercise it, so this guards against the
+    fast-path `expected N groups, got M` invariant breaking on a gated query."""
+    import pyxlog
+
+    source = """
+        nn(root_net, [Case], Label, [negative, positive]) :: neural_root(Case, Label).
+        allowed(0).
+        allowed(1).
+        root_case(Case) :- neural_root(Case, positive), allowed(Case).
+    """
+    program = pyxlog.Program.compile(source)
+    network = _root_net().cuda()
+    program.register_network(
+        "root_net", network, torch.optim.SGD(network.parameters(), lr=0.1)
+    )
+    inputs = torch.tensor([[0.0], [1.0], [2.0], [3.0]], dtype=torch.float32)
+    program.add_tensor_source("nsr_examples", inputs.cuda())
+    program.set_active_tensor_source("nsr_examples")
+
+    program.set_batch_queries(True)
+    # Mixes a gated-in (allowed(0)) and gated-out (allowed(2)) query in one batch.
+    program.zero_grad()
+    stats = program.train_epoch(
+        ["root_case(0)", "root_case(1)", "root_case(2)"], batch_size=3
+    )
+    assert stats is not None
+    # The gate is a ground fact: training must still reach the network.
+    assert any(
+        param.grad is not None for param in network.parameters()
+    )
+
+
 def test_missing_network_validated_against_real_declarations() -> None:
     with pytest.raises(ValueError, match="missing network"):
         train_neurosymbolic_program(

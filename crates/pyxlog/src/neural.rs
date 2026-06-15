@@ -1639,6 +1639,44 @@ impl CompiledProgram {
             per_query_grads.push(grads);
         }
 
+        // Stage-A gates: append one fixed (no-grad) buffer per gate to each
+        // query, in signature.gates() order, matching the gate slots in the
+        // cached circuit so each query's probs.len() == num_groups. Per-example
+        // truth is evaluated against this query's ground atom. Gate buffers are
+        // never backpropagated (absent from all_grad_tensors). The source
+        // tensors are kept alive until after both kernel paths run below.
+        let mut _gate_keepalive: Vec<PyObject> = Vec::new();
+        if !signature.gates().is_empty() {
+            for (q, atom) in atoms.iter().enumerate() {
+                let gate_truths = self.evaluate_gate_truths(&signature, atom)?;
+                for truth in &gate_truths {
+                    let kwargs = PyDict::new(py);
+                    kwargs.set_item("dtype", torch.getattr("float32")?)?;
+                    kwargs.set_item("device", "cuda")?;
+                    let prob_t = torch
+                        .call_method("tensor", (vec![*truth],), Some(&kwargs))?
+                        .call_method0("contiguous")?;
+                    let prob_managed = dlpack_from_py(&prob_t)?;
+                    let prob_buf = self
+                        .output_provider
+                        .from_dlpack_tensors_with_schema(schema_f32.clone(), vec![prob_managed])
+                        .map_err(|e| types::gpu_err("Gate DLPack import failed", e))?;
+                    let grad_t = torch
+                        .call_method("zeros", (vec![1i64],), Some(&kwargs))?
+                        .call_method0("contiguous")?;
+                    let grad_managed = dlpack_from_py(&grad_t)?;
+                    let grad_buf = self
+                        .output_provider
+                        .from_dlpack_tensors_with_schema(schema_f32.clone(), vec![grad_managed])
+                        .map_err(|e| types::gpu_err("Gate DLPack import failed", e))?;
+                    per_query_probs[q].push(prob_buf);
+                    per_query_grads[q].push(grad_buf);
+                    _gate_keepalive.push(prob_t.unbind());
+                    _gate_keepalive.push(grad_t.unbind());
+                }
+            }
+        }
+
         // -- 5. Stream sync: torch current -> default (once) -----
         if torch
             .getattr("cuda")
