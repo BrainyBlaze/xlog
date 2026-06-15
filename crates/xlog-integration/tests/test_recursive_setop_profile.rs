@@ -106,20 +106,20 @@ fn recursive_union_does_not_rededup_union_output() {
         return;
     };
     let source = r#"
-pred wmir_committed(i64, i64, i64).
-pred wmir_body_0(i64, i64, i64).
-pred wmir_body_1(i64, i64, i64).
-pred wmir_len_2(i64).
+pred external_consumer_commit(i64, i64, i64).
+pred external_consumer_body_0(i64, i64, i64).
+pred external_consumer_body_1(i64, i64, i64).
+pred external_consumer_body_len_2(i64).
 pred usable(i64, i64, i64).
 pred support_2(i64, i64, i64, i64, i64, i64, i64, i64, i64, i64).
 
-usable(P, A0, A1) :- wmir_committed(P, A0, A1).
+usable(P, A0, A1) :- external_consumer_commit(P, A0, A1).
 
 support_2(Head, V0, V1, RId, Body0Pred, V0, V2, Body1Pred, V2, V1) :-
-    wmir_len_2(RId),
-    wmir_body_0(RId, Head, Body0Pred),
+    external_consumer_body_len_2(RId),
+    external_consumer_body_0(RId, Head, Body0Pred),
     usable(Body0Pred, V0, V2),
-    wmir_body_1(RId, Head, Body1Pred),
+    external_consumer_body_1(RId, Head, Body1Pred),
     usable(Body1Pred, V2, V1).
 
 usable(Head, A0, A1) :- support_2(Head, A0, A1, _, _, _, _, _, _, _).
@@ -144,20 +144,23 @@ usable(Head, A0, A1) :- support_2(Head, A0, A1, _, _, _, _, _, _, _).
         arg1.push(200_000i64 + y as i64);
     }
     store.put(
-        "wmir_committed",
-        upload_i64(&provider, &[pred, arg0, arg1], schema3()).expect("wmir_committed"),
+        "external_consumer_commit",
+        upload_i64(&provider, &[pred, arg0, arg1], schema3())
+            .expect("external_consumer_commit"),
     );
     store.put(
-        "wmir_body_0",
-        upload_i64(&provider, &[vec![0], vec![3], vec![1]], schema3()).expect("wmir_body_0"),
+        "external_consumer_body_0",
+        upload_i64(&provider, &[vec![0], vec![3], vec![1]], schema3())
+            .expect("external_consumer_body_0"),
     );
     store.put(
-        "wmir_body_1",
-        upload_i64(&provider, &[vec![0], vec![3], vec![2]], schema3()).expect("wmir_body_1"),
+        "external_consumer_body_1",
+        upload_i64(&provider, &[vec![0], vec![3], vec![2]], schema3())
+            .expect("external_consumer_body_1"),
     );
     store.put(
-        "wmir_len_2",
-        upload_i64(&provider, &[vec![0]], schema1()).expect("wmir_len_2"),
+        "external_consumer_body_len_2",
+        upload_i64(&provider, &[vec![0]], schema1()).expect("external_consumer_body_len_2"),
     );
     let _env = EnvGuard::recursive_setop_profile();
     let result = program
