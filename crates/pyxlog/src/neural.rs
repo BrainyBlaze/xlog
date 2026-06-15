@@ -1925,6 +1925,23 @@ impl CompiledProgram {
                         }
                     }
                 }
+                // The hard condition is checked against the program's GROUND
+                // facts only; a derived relation (one defined by a rule with a
+                // body) is not materialized and would silently filter every
+                // grounding to probability 0. Fail loud instead — the join must
+                // be done upstream and supplied as ground facts.
+                let is_derived = self.ast.rules.iter().any(|r| {
+                    r.head.predicate == body_atom.predicate && !r.body.is_empty()
+                });
+                if is_derived {
+                    return Err(PyValueError::new_err(format!(
+                        "Query rule for '{}' uses derived relation '{}' as a hard condition; \
+                         hard conditions are checked against ground facts only, so a derived \
+                         relation would silently exclude every grounding. Materialize it \
+                         upstream and supply it as ground facts.",
+                        pred_name, body_atom.predicate
+                    )));
+                }
                 hard_filters.push(HardFilter {
                     relation: body_atom.predicate.clone(),
                     arg_head_positions,

@@ -86,3 +86,28 @@ def test_ordinary_relation_is_a_hard_join_not_a_probability_source() -> None:
     probs = result.query_probabilities
     assert probs[1] == pytest.approx(0.0, abs=1e-6)
     assert probs[3] == pytest.approx(0.0, abs=1e-6)
+
+
+@requires_cuda
+def test_derived_hard_condition_fails_loud_not_silent() -> None:
+    """A hard condition checked against ground facts only must reject a DERIVED
+    relation with a typed error, never silently filter every grounding to 0
+    (which would corrupt training)."""
+    source = """
+        base(0).
+        base(2).
+        pred base(i64).
+        pred contested(i64).
+        contested(X) :- base(X).
+        nn(root_net, [Case], Label, [negative, positive]) :: neural_root(Case, Label).
+        trainable_rule(rule_mixed, weight=0.0) :: root_case(Case) :-
+            neural_root(Case, positive), contested(Case).
+        train(root_case, binary_cross_entropy).
+    """
+    with pytest.raises(Exception, match="(?i)derived"):
+        train_neurosymbolic_program(
+            source,
+            networks={"root_net": _root_net()},
+            examples=_examples(),
+            config=NeuroSymbolicTrainingConfig(steps=1, learning_rate=0.1),
+        )
