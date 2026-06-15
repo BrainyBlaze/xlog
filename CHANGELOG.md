@@ -6,6 +6,19 @@ All notable changes to this project are documented in this file.
 
 ### Added
 
+- *(pyxlog)* **Mixed trainable-rule bodies: neural predicates joined with
+  ordinary relations.** A `trainable_rule` body may now join a neural predicate
+  with ordinary world relations (in addition to builtins). The ordinary
+  relations act as HARD join conditions — they gate which groundings can fire
+  but contribute no probability mass and no gradient; probability comes only
+  from the neural predicates x sigma(rule weight), and gradients flow only to
+  the network and the rule weight, never through the fact atoms. The
+  knowledge-compilation circuit covers just the neural part; the hard
+  conditions are evaluated as a pre-filter, and a query whose hard conditions
+  fail short-circuits to probability 0 before any network forward (enforcing the
+  gradient isolation). Current scope: hard conditions whose arguments are query
+  head variables; joining an ordinary relation on an existential (non-head)
+  variable still fails closed with a typed error (documented follow-up).
 - *(runtime)* **D3 — factorized recursive deltas.** Transitive-closure-shaped
   recursive rules (`q(X,Z) :- q(X,Y), edge(Y,Z)` and its left-linear /
   non-linear-self-join / swapped-head variants) now route their semi-naive

@@ -58,21 +58,47 @@ pub(crate) struct NeuralGroup {
     pub(crate) output_var: Option<String>,
 }
 
+/// An ordinary-relation body atom in a trainable-rule query treated as a HARD
+/// join condition: it gates which query groundings can fire but contributes no
+/// probability mass and no gradient. The query probability is
+/// `(hard conditions satisfiable?) x (neural prob)`; gradients flow only
+/// through the neural predicates x sigma(w), never through these fact atoms.
+#[derive(Debug, Clone)]
+pub(crate) struct HardFilter {
+    /// Ordinary relation name (must hold over the program's facts).
+    pub(crate) relation: String,
+    /// For each relation argument position, the query HEAD position whose value
+    /// it must equal. Current scope: every relation argument is a head
+    /// variable; hard conditions that join on existential (non-head) variables
+    /// are a documented follow-up.
+    pub(crate) arg_head_positions: Vec<usize>,
+}
+
 #[derive(Debug, Clone)]
 pub(crate) enum QuerySignature {
     Boolean {
         groups: Vec<NeuralGroup>,
+        hard_filters: Vec<HardFilter>,
     },
     Targeted {
         target_position: usize,
         groups: Vec<NeuralGroup>,
+        hard_filters: Vec<HardFilter>,
     },
 }
 
 impl QuerySignature {
     pub(crate) fn groups(&self) -> &[NeuralGroup] {
         match self {
-            QuerySignature::Boolean { groups } | QuerySignature::Targeted { groups, .. } => groups,
+            QuerySignature::Boolean { groups, .. }
+            | QuerySignature::Targeted { groups, .. } => groups,
+        }
+    }
+
+    pub(crate) fn hard_filters(&self) -> &[HardFilter] {
+        match self {
+            QuerySignature::Boolean { hard_filters, .. }
+            | QuerySignature::Targeted { hard_filters, .. } => hard_filters,
         }
     }
 }

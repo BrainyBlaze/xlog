@@ -18,12 +18,32 @@ use std::collections::HashMap as StdHashMap;
 use super::neural_registry::NeuralPredicateInfo;
 use super::{
     dlpack_capsule_from_tensor, dlpack_from_py, types, CachedCircuit, CompiledProgram, EpochStats,
-    InputSource, NeuralGroup, QuerySignature, TrainingHistory,
+    HardFilter, InputSource, NeuralGroup, QuerySignature, TrainingHistory,
 };
 
 /// Build the standard 1-column schema for probability values.
 fn prob_schema(scalar_type: ScalarType) -> Schema {
     Schema::new(vec![("col0".to_string(), scalar_type)])
+}
+
+/// Comparable key for a constant term, used to test hard join conditions over
+/// the program's ground facts.
+#[derive(Debug, Clone, PartialEq)]
+enum ConstKey {
+    Int(i64),
+    Sym(u32),
+    Str(String),
+    Float(u64),
+}
+
+fn const_key(term: &Term) -> Option<ConstKey> {
+    match term {
+        Term::Integer(v) => Some(ConstKey::Int(*v)),
+        Term::Symbol(s) => Some(ConstKey::Sym(*s)),
+        Term::String(s) => Some(ConstKey::Str(s.clone())),
+        Term::Float(f) => Some(ConstKey::Float(f.to_bits())),
+        _ => None,
+    }
 }
 
 fn apply_network_output_mode(
@@ -1028,6 +1048,73 @@ impl CompiledProgram {
         }
     }
 
+    /// Whether every hard join condition holds for this query's head bindings.
+    /// Each condition is an ordinary relation that must contain the tuple formed
+    /// by the query's (ground) head arguments at the recorded positions.
+    fn hard_filters_satisfied(&self, atom: &Atom, filters: &[HardFilter]) -> PyResult<bool> {
+        for filter in filters {
+            let mut key: Vec<ConstKey> = Vec::with_capacity(filter.arg_head_positions.len());
+            for &head_pos in &filter.arg_head_positions {
+                let term = atom.terms.get(head_pos).ok_or_else(|| {
+                    PyRuntimeError::new_err(format!(
+                        "hard condition references head position {} out of range for query '{}'",
+                        head_pos, atom.predicate
+                    ))
+                })?;
+                let k = const_key(term).ok_or_else(|| {
+                    PyValueError::new_err(format!(
+                        "query '{}' head argument at position {} is not a constant; \
+                         trainable-rule queries must be ground",
+                        atom.predicate, head_pos
+                    ))
+                })?;
+                key.push(k);
+            }
+            if !self.relation_has_tuple(&filter.relation, &key) {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
+    /// Whether the program's facts contain `relation(key...)`. Scans ground
+    /// facts (rules with an empty body); the relation's facts are compiled into
+    /// the program.
+    fn relation_has_tuple(&self, relation: &str, key: &[ConstKey]) -> bool {
+        for fact in self.ast.facts() {
+            if fact.head.predicate != relation || fact.head.terms.len() != key.len() {
+                continue;
+            }
+            let matches = fact
+                .head
+                .terms
+                .iter()
+                .zip(key.iter())
+                .all(|(ft, k)| const_key(ft).as_ref() == Some(k));
+            if matches {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Loss for a derived atom that is hard-false (probability 0): NLL is
+    /// `-log(eps)` when the example expects it true, else 0. Returned as a plain
+    /// constant tensor — detached from every network graph, so the backward pass
+    /// flows no gradient through a filtered-out query (gradient isolation).
+    fn zero_probability_loss(&self, py: Python<'_>, expected: bool) -> PyResult<PyObject> {
+        let loss_value = if expected {
+            -(types::NLL_EPSILON.ln())
+        } else {
+            0.0
+        };
+        let torch = py.import("torch")?;
+        let kwargs = PyDict::new(py);
+        kwargs.set_item("dtype", torch.getattr("float64")?)?;
+        let tensor = torch.call_method("tensor", (loss_value,), Some(&kwargs))?;
+        Ok(tensor.into())
+    }
+
     /// Forward-backward for a direct neural predicate query.
     ///
     /// E.g., `digit(0, 5)` - runs network on input 0, computes NLL loss for label 5.
@@ -1120,6 +1207,17 @@ impl CompiledProgram {
             .get_or_build_query_signature(&atom.predicate, atom.terms.len())?
             .clone();
         let pred_name = atom.predicate.clone();
+
+        // Hard join conditions (ordinary relations) gate which groundings can
+        // fire. If any fails for this query's head bindings, the derived atom
+        // is false: short-circuit to probability 0 with NO neural forward, so
+        // no gradient flows through the fact atoms. Evaluating before the
+        // network forward is what enforces the gradient isolation.
+        if !signature.hard_filters().is_empty()
+            && !self.hard_filters_satisfied(atom, signature.hard_filters())?
+        {
+            return self.zero_probability_loss(py, expected);
+        }
 
         let input_indices: Vec<usize> = signature
             .groups()
@@ -1769,6 +1867,8 @@ impl CompiledProgram {
         let rule = self.find_query_rule(pred_name, arity)?;
 
         let mut groups: Vec<NeuralGroup> = Vec::with_capacity(rule.body.len());
+        // Ordinary-relation body atoms collected as HARD join conditions.
+        let mut hard_filters: Vec<HardFilter> = Vec::new();
         for literal in &rule.body {
             // The query template grounds ONLY nn/4 predicates; any other
             // relational literal would silently evaluate over an empty
@@ -1795,14 +1895,41 @@ impl CompiledProgram {
             };
 
             if self.neural_registry.get(&body_atom.predicate).is_none() {
-                return Err(PyValueError::new_err(format!(
-                    "Query rule for '{}' references relation '{}/{}' which is not an nn/4 \
-                     neural predicate; the neural query template path grounds only neural \
-                     predicates, so this body literal would evaluate over an empty relation",
-                    pred_name,
-                    body_atom.predicate,
-                    body_atom.terms.len()
-                )));
+                // An ordinary relation is a HARD join condition, not a
+                // probability source. Record how its args bind to the query
+                // head positions; it gates which groundings fire but flows no
+                // gradient. Existential (non-head) join variables are a
+                // documented follow-up — reject them clearly for now.
+                let mut arg_head_positions = Vec::with_capacity(body_atom.terms.len());
+                for (i, term) in body_atom.terms.iter().enumerate() {
+                    match term {
+                        Term::Variable(name) => match Self::find_head_position(&rule.head, name) {
+                            Some(pos) => arg_head_positions.push(pos),
+                            None => {
+                                return Err(PyValueError::new_err(format!(
+                                    "Query rule for '{}' joins ordinary relation '{}' on \
+                                     existential variable '{}' (arg {}); existential-join hard \
+                                     conditions are not yet supported (follow-up). Only \
+                                     head-variable hard filters are supported today.",
+                                    pred_name, body_atom.predicate, name, i
+                                )));
+                            }
+                        },
+                        _ => {
+                            return Err(PyValueError::new_err(format!(
+                                "Query rule for '{}' hard-condition relation '{}' has a \
+                                 non-variable argument at position {}; only variables bound to \
+                                 head positions are supported",
+                                pred_name, body_atom.predicate, i
+                            )));
+                        }
+                    }
+                }
+                hard_filters.push(HardFilter {
+                    relation: body_atom.predicate.clone(),
+                    arg_head_positions,
+                });
+                continue;
             }
 
             let info = self.match_neural_decl_for_atom(body_atom)?;
@@ -1871,7 +1998,10 @@ impl CompiledProgram {
         }
 
         if arity == 0 {
-            return Ok(QuerySignature::Boolean { groups });
+            return Ok(QuerySignature::Boolean {
+                groups,
+                hard_filters,
+            });
         }
 
         let mut used_head_positions: Vec<usize> = groups
@@ -1891,7 +2021,10 @@ impl CompiledProgram {
             // Every head position is consumed by a neural input, so the query
             // atom is fully ground: supervise the truth of the derived atom
             // itself (boolean NLL with the caller's `expected` flag).
-            return Ok(QuerySignature::Boolean { groups });
+            return Ok(QuerySignature::Boolean {
+                groups,
+                hard_filters,
+            });
         }
         if target_positions.len() != 1 {
             return Err(PyValueError::new_err(format!(
@@ -1903,6 +2036,7 @@ impl CompiledProgram {
         Ok(QuerySignature::Targeted {
             target_position: target_positions[0],
             groups,
+            hard_filters,
         })
     }
 
@@ -2020,7 +2154,24 @@ impl CompiledProgram {
                 .push(xlog_logic::ast::AnnotatedDisjunction { choices });
         }
 
-        template_program.rules.push(template_rule.clone());
+        // The probabilistic circuit covers only the neural part of the body.
+        // Hard join conditions (ordinary relations) are evaluated separately as
+        // a pre-filter, so strip them from the template rule — otherwise the
+        // circuit would try to satisfy a relation that has no facts in the
+        // synthetic template program and collapse the query to empty.
+        let hard_relations: std::collections::HashSet<&str> = signature
+            .hard_filters()
+            .iter()
+            .map(|f| f.relation.as_str())
+            .collect();
+        let mut circuit_rule = template_rule.clone();
+        if !hard_relations.is_empty() {
+            circuit_rule.body.retain(|lit| match lit {
+                BodyLiteral::Positive(atom) => !hard_relations.contains(atom.predicate.as_str()),
+                _ => true,
+            });
+        }
+        template_program.rules.push(circuit_rule);
 
         match signature {
             QuerySignature::Boolean { .. } => {

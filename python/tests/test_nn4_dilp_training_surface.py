@@ -176,18 +176,20 @@ def test_real_parser_rejects_invalid_xlog() -> None:
     assert "trainable_rule" not in str(excinfo.value)
 
 
-def test_unsupported_body_relation_fails_closed() -> None:
-    """Non-neural body relations are an engine template limitation: typed error,
-    never a silently-zero probability."""
+def test_existential_join_hard_condition_fails_closed() -> None:
+    """A hard condition that joins an ordinary relation on an existential
+    (non-head) variable is not yet supported: typed error, never a
+    silently-wrong probability. Head-variable hard conditions ARE supported
+    (see test_mixed_trainable_rule_bodies.py)."""
     source = """
         nn(root_net, [Case], Label, [negative, positive]) :: neural_root(Case, Label).
-        allowed(0).
-        allowed(1).
+        link(0, 9).
+        pred link(i64, i64).
         trainable_rule(rule_mixed, weight=0.0) :: root_case(Case) :-
-            neural_root(Case, positive), allowed(Case).
+            neural_root(Case, positive), link(Case, Other).
         train(root_case, binary_cross_entropy).
     """
-    with pytest.raises(Exception, match="(?i)neural"):
+    with pytest.raises(Exception, match="(?i)existential"):
         train_neurosymbolic_program(
             source,
             networks={"root_net": _root_net()},
