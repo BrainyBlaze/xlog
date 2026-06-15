@@ -29,15 +29,15 @@ fn schema_new_assigns_non_default_sort_labels() {
 #[test]
 fn query_output_sort_labels_follow_query_variables() {
     let source = r#"
-        pred wmir_committed(i64, i64, i64).
-        pred wmir_rule(i64).
+        pred external_consumer_commit(i64, i64, i64).
+        pred external_consumer_rule(i64).
         pred support_1(i64, i64, i64, i64, i64, i64, i64).
         pred usable(i64, i64, i64).
 
         support_1(Head, A0, A1, RId, Body0Pred, Body0Arg0, Body0Arg1) :-
-            wmir_rule(RId),
-            wmir_committed(Head, A0, A1),
-            wmir_committed(Body0Pred, Body0Arg0, Body0Arg1).
+            external_consumer_rule(RId),
+            external_consumer_commit(Head, A0, A1),
+            external_consumer_commit(Body0Pred, Body0Arg0, Body0Arg1).
         usable(Head, A0, A1) :- support_1(Head, A0, A1, _, _, _, _).
 
         ?- support_1(Head, A0, A1, RId, Body0Pred, Body0Arg0, Body0Arg1).
@@ -106,26 +106,26 @@ fn external_consumer_style_support_source_emits_partial_unary_rows_by_semantics(
     };
 
     let source = r#"
-        pred wmir_committed(i64, i64, i64).
-        pred wmir_body_0(i64, i64, i64).
-        pred wmir_body_1(i64, i64, i64).
+        pred external_consumer_commit(i64, i64, i64).
+        pred external_consumer_body_0(i64, i64, i64).
+        pred external_consumer_body_1(i64, i64, i64).
         pred usable(i64, i64, i64).
         pred support_1(i64, i64, i64, i64, i64, i64, i64).
         pred support_2(i64, i64, i64, i64, i64, i64, i64, i64, i64, i64).
 
-        wmir_body_0(4, 10006, 10012).
-        wmir_body_1(4, 10006, 10012).
-        wmir_committed(10012, 10022, 10022).
+        external_consumer_body_0(4, 10006, 10012).
+        external_consumer_body_1(4, 10006, 10012).
+        external_consumer_commit(10012, 10022, 10022).
 
-        usable(P, A0, A1) :- wmir_committed(P, A0, A1).
+        usable(P, A0, A1) :- external_consumer_commit(P, A0, A1).
 
         support_1(Head, V0, V1, RId, Body0Pred, V0, V1) :-
-            wmir_body_0(RId, Head, Body0Pred), usable(Body0Pred, V0, V1).
+            external_consumer_body_0(RId, Head, Body0Pred), usable(Body0Pred, V0, V1).
 
         support_2(Head, V0, V1, RId, Body0Pred, V0, V2, Body1Pred, V2, V1) :-
-            wmir_body_0(RId, Head, Body0Pred),
+            external_consumer_body_0(RId, Head, Body0Pred),
             usable(Body0Pred, V0, V2),
-            wmir_body_1(RId, Head, Body1Pred),
+            external_consumer_body_1(RId, Head, Body1Pred),
             usable(Body1Pred, V2, V1).
 
         ?- support_1(H, A0, A1, R, Body0Pred, Body0Arg0, Body0Arg1).
@@ -150,7 +150,7 @@ fn external_consumer_style_support_source_emits_partial_unary_rows_by_semantics(
     assert_eq!(
         result.queries[0].buffer.num_rows(),
         1,
-        "Datalog semantics require support_1 to emit the partial row because the source asks for wmir_body_0-only support"
+        "Datalog semantics require support_1 to emit the partial row because the source asks for external_consumer_body_0-only support"
     );
     assert_eq!(result.queries[1].buffer.num_rows(), 1);
 }

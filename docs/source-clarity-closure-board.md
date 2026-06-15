@@ -5,7 +5,7 @@ Scope: Git-tracked source and documentation files only. Superpowers docs, plan f
 Scanned files: 1430
 Unresolved files: 0
 Comment/prose artifact occurrences: 2458
-Code/identifier artifact occurrences: 1592
+Code/identifier artifact occurrences: 1608
 
 Resolved means this board found no remaining opaque task/milestone labels or external consumer names in the eligible portions of that file.
 
@@ -433,7 +433,7 @@ Hardware cache terminology such as `L1` and `L2` is allowed when it refers to GP
 | `crates/xlog-integration/tests/test_skewed_multiway_gpu.rs` | 0 | 0 | true | - | - |
 | `crates/xlog-integration/tests/test_kclique_measurement_pilot.rs` | 0 | 0 | true | - | - |
 | `crates/xlog-integration/tests/test_chain_promoter_dispatch.rs` | 0 | 0 | true | - | - |
-| `crates/xlog-integration/tests/test_sort_labels.rs` | 0 | 0 | true | - | - |
+| `crates/xlog-integration/tests/test_sort_labels.rs` | 0 | 16 | true |  | external-consumer fixture relation names in sort-label tests(16) |
 | `crates/xlog-integration/tests/test_recursive_setop_profile.rs` | 0 | 0 | true | - | - |
 | `crates/xlog-integration/tests/test_wcoj_4cycle_adaptive_dispatch.rs` | 0 | 0 | true | - | - |
 | `crates/xlog-integration/tests/test_wcoj_4cycle_dispatch_stream_reuse.rs` | 0 | 0 | true |  |  |
