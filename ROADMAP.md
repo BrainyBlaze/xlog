@@ -1369,7 +1369,7 @@ release-certification consumer depends on them.
 ### External Consumer Release Gates
 
 - [x] Add a canonical external consumer certification pack in xlog that replays
-      the relevant Stage-4 and external-consumer bridge-training surfaces without requiring a full
+      the relevant session-evaluation and external-consumer bridge-training surfaces without requiring a full
       external consumer pilot by default. (`docs/evidence/2026-05-18-v080-cert/`)
 - [x] Gate v0.8.0 on pyxlog public-surface preservation for external consumer:
       `LogicProgram.compile`, `program.session`, `session.put_relation`,
@@ -1406,13 +1406,13 @@ release-certification consumer depends on them.
 - [x] Connect Python session deltas to runtime
       `RelationDelta` / `apply_deltas_and_recompute` so monotone
       insert-only SCCs avoid full recompute where the plan permits it.
-- [x] Add external consumer Stage-4 fixture proving delta updates produce
+- [x] Add external consumer session-update fixture proving delta updates produce
       byte-identical output to full `put_relation` replacement while
       reducing full-table re-upload work.
 
 Deferred completion scope moved to v0.8.6:
 
-- Batch update coalescing for repeated external consumer Stage-4 `wmir_committed`
+- Batch update coalescing for repeated external consumer commit-relation
   updates.
 - Change notification callbacks for session-managed relations, scoped to
   explicit Python opt-in.
@@ -1427,9 +1427,9 @@ Deferred completion scope moved to v0.8.6:
       invalidation model.
 - [x] Add top-k deterministic neural mode with fixed tie-breaking for
       seed-pinned external consumer training and replay.
-- [x] Add Belnap-aware dual-channel loss helpers for external consumer external-consumer bridge training:
+- [x] Add Belnap-aware dual-channel loss helpers for external-consumer bridge training:
       pro reward, contra penalty, quarantine penalty, and CFR-oriented
-      diagnostics. These are Python/ML helpers; Stage-4 structural
+      diagnostics. These are Python/ML helpers; session-evaluation structural
       kernels remain agnostic to Belnap pro/contra semantics.
 - [x] Add semantic loss functions required by external-consumer bridge training, then add MSE,
       semantic, and infoloss variants only where a named consumer uses
@@ -1581,7 +1581,7 @@ engines, or parallel helper paths that bypass production dispatch are blockers.
 ### Persistent Relation Maintenance Completion
 
 - [x] Add device-resident batch update coalescing for repeated external consumer
-      Stage-4 `wmir_committed` updates, with row-level insert/delete
+      commit-relation updates, with row-level insert/delete
       coalescing before recompute and byte-identical output versus sequential
       deltas.
 - [x] Add explicit opt-in change notification callbacks for
@@ -2088,7 +2088,7 @@ fail-closed:
 ## v0.9.3 - Consumer Runtime Pack (external consumer-driven; ordering pending maintainer decision)
 
 Sourced from the external consumer consolidated requirements package
-(2026-06-12, `dts-dlm docs/upstream/2026-06-12-xlog-requirements.md`;
+(2026-06-12 requirements package;
 desk `#xlog` thread `msg-20260612-112404-c782`). The highest-priority engine defects
 from that package are closed (`703a2cc2`, production-validated by the
 consumer's pure-engine validation campaign). The ordering below is the proposed

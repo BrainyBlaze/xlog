@@ -3,9 +3,9 @@
 Scope: Git-tracked source and documentation files only. Superpowers docs, plan files, evidence directories, generated artifacts, result/output directories, build output, and other worktrees are excluded.
 
 Scanned files: 1430
-Unresolved files: 249
-Comment/prose artifact occurrences: 1556
-Code/identifier artifact occurrences: 683
+Unresolved files: 0
+Comment/prose artifact occurrences: 2456
+Code/identifier artifact occurrences: 1571
 
 Resolved means this board found no remaining opaque task/milestone labels or external consumer names in the eligible portions of that file.
 
@@ -133,7 +133,7 @@ Hardware cache terminology such as `L1` and `L2` is allowed when it refers to GP
 | `LEAN-CTX.md` | 0 | 0 | true |  |  |
 | `Makefile` | 0 | 0 | true |  |  |
 | `README.md` | 0 | 0 | true |  |  |
-| `ROADMAP.md` | 0 | 0 | true |  |  |
+| `ROADMAP.md` | 6 | 2 | true | downstream project path and external-consumer phase labels(6) | external-consumer fixture relation names(2) |
 | `SECURITY.md` | 0 | 0 | true |  |  |
 | `SUPPORT.md` | 0 | 0 | true |  |  |
 | `crates/pyxlog/Cargo.toml` | 0 | 0 | true |  |  |
