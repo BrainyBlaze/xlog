@@ -1479,7 +1479,7 @@ Hardware cache terminology such as `L1` and `L2` is allowed when it refers to GP
 | `python/tests/test_transfer_metric_diagnostics.py` | 0 | 0 | true |  |  |
 | `python/tests/test_typed_batch_upload.py` | 0 | 0 | true |  |  |
 | `python/tests/test_bridge_source.py` | 0 | 13 | true |  | release-coded path/function names, evidence path strings, and bridge milestone codes(13) |
-| `python/tests/test_v080_delta_source.py` | 0 | 2 | false |  | v080(2) |
+| `python/tests/test_delta_source.py` | 0 | 12 | true |  | release-coded path/function names, evidence path strings, delta milestone codes, and opaque fixture name(12) |
 | `python/tests/test_v080_dts_cert.py` | 0 | 1 | false |  | v080(1) |
 | `python/tests/test_v080_exact_source.py` | 0 | 1 | false |  | v080(1) |
 | `python/tests/test_v080_examples_source.py` | 0 | 2 | false |  | v080(2) |
