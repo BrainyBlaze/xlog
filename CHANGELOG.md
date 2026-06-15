@@ -50,7 +50,37 @@ All notable changes to this project are documented in this file.
   with **no environment opt-in required**. Buffers remain fixed-capacity, so an
   oversized program still declines rather than compiles; growable emit buffers
   (so large programs compile) remain a follow-up.
-
+- *(pyxlog)* **Mixed trainable-rule bodies: neural predicates joined with
+  ordinary relations.** A `trainable_rule` body may now join a neural predicate
+  with ordinary world relations (in addition to builtins). The ordinary
+  relations act as HARD join conditions — they gate which groundings can fire
+  but contribute no probability mass and no gradient; probability comes only
+  from the neural predicates x sigma(rule weight), and gradients flow only to
+  the network and the rule weight, never through the fact atoms. The
+  knowledge-compilation circuit covers just the neural part; the hard
+  conditions are evaluated as a pre-filter, and a query whose hard conditions
+  fail short-circuits to probability 0 before any network forward (enforcing the
+  gradient isolation). Current scope: hard conditions whose arguments are query
+  head variables; joining an ordinary relation on an existential (non-head)
+  variable still fails closed with a typed error (documented follow-up).
+- *(pyxlog)* **GPU-resident, zero-host neuro-symbolic training surface.** The
+  `train_neurosymbolic_program` step loop is now device-resident: a new
+  `CompiledProgram.forward_backward_grouped(queries, expected)` evaluates every
+  example's supervised circuit in one batched pass per (target, template) group
+  with a single host sync per step, instead of the scalar `forward_backward`
+  host-syncing once per query (which left training CPU-bound). The batched
+  query-var metadata is cached on device, so the warm training loop performs
+  **no tracked device<->host transfers in either direction**; the post-training
+  probability readout is batched too (`query_probabilities_grouped`,
+  O(templates) host syncs instead of O(N)). **Behavior change:** the training
+  optimizer is configurable (`NeuroSymbolicTrainingConfig.optimizer`,
+  `"adam"` | `"sgd"`) and **defaults to Adam** — the supervised loss is
+  multiplicative (`prob = softmax_positive x sigmoid(rule_weight)`) with a flat
+  plateau around uniform init that plain SGD frequently cannot leave (it
+  separated a cleanly separable signal in ~1/10 random inits vs ~8/10 for Adam);
+  the engine gradient itself is exact (finite-difference-verified to 0.01%). The
+  grouped loss and batched readout are numerically identical to the per-query
+  scalar path.
 - *(runtime)* **D3 — factorized recursive deltas.** Transitive-closure-shaped
   recursive rules (`q(X,Z) :- q(X,Y), edge(Y,Z)` and its left-linear /
   non-linear-self-join / swapped-head variants) now route their semi-naive

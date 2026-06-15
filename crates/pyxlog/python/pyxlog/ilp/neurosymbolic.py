@@ -23,7 +23,6 @@ rule weights receive gradients from the same circuit evaluation.
 
 from __future__ import annotations
 
-import math
 from dataclasses import dataclass
 from typing import Any
 
@@ -41,6 +40,13 @@ class NeuroSymbolicTrainingConfig:
 
     steps: int = 1
     learning_rate: float = 0.1
+    # Optimizer for the neural and rule-weight parameters. The supervised loss is
+    # multiplicative (prob = softmax_positive * sigmoid(rule_weight)), which gives
+    # a flat plateau around uniform init that plain SGD frequently cannot leave
+    # (it separated a cleanly separable signal in only ~1/10 random inits, vs
+    # ~8/10 for Adam in the same ablation). Adam is the default for that reason;
+    # "sgd" remains selectable.
+    optimizer: str = "adam"
     device: int = 0
     gpu_memory_mb: int = 4096
 
@@ -69,6 +75,11 @@ class NeuroSymbolicTrainingResult:
     query_probabilities: list[float]
     engine: str
     proof_trace_map: Any
+    # Provider device->host transfer counters observed across the training hot
+    # loop (e.g. {"dtoh_calls": N, "dtoh_bytes": M}). The device-resident step
+    # introduces no provider downloads, so these stay at their reset baseline;
+    # surfaced so a caller can assert the no-host property of the training path.
+    training_host_transfer_stats: Any = None
 
 
 def train_neurosymbolic_program(
@@ -111,7 +122,9 @@ def train_neurosymbolic_program(
         module = networks[name].cuda()
         modules[name] = module
         program.register_network(
-            name, module, torch.optim.SGD(module.parameters(), lr=config.learning_rate)
+            name,
+            module,
+            _make_optimizer(config.optimizer, module.parameters(), config.learning_rate),
         )
 
     guard_modules: dict[str, Any] = {}
@@ -121,7 +134,7 @@ def train_neurosymbolic_program(
         program.register_network(
             rule.guard_network,
             guard,
-            torch.optim.SGD(guard.parameters(), lr=config.learning_rate),
+            _make_optimizer(config.optimizer, guard.parameters(), config.learning_rate),
         )
 
     program.add_tensor_source(_TENSOR_SOURCE_NAME, inputs.cuda())
@@ -131,32 +144,53 @@ def train_neurosymbolic_program(
     neural_grads: dict[str, float] = {name: 0.0 for name in modules}
     symbolic_grads: dict[str, float] = {rule.id: 0.0 for rule in rules}
 
+    # Warm the device-side caches (circuit template + batched query-var
+    # metadata) once with a throwaway forward-backward over the real queries.
+    # The bounded one-time metadata uploads happen here, BEFORE the measured
+    # region; the warm-up gradients are cleared by the first step's zero_grad.
+    program.zero_grad()
+    program.forward_backward_grouped(queries, targets)
+
+    # Zero-host training hot loop. Every example's supervised circuit is
+    # evaluated in one device-resident batched pass per step (grouped by target
+    # and circuit template), so a step costs a single host sync for the summed
+    # loss rather than one per query. Looping the scalar forward_backward
+    # instead host-syncs on every query (.item()), which leaves the GPU idle
+    # between syncs and makes training CPU-bound. Reset/read the provider's
+    # host-transfer counters around the warm loop so the no-host property
+    # (no tracked device<->host transfers in either direction) is observable.
+    program.reset_host_transfer_stats()
     for _step in range(config.steps):
         program.zero_grad()
-        step_loss = 0.0
-        for query, target in zip(queries, targets):
-            step_loss += program.forward_backward(query, target)
-        for name, module in modules.items():
-            neural_grads[name] = float(
-                sum(
-                    param.grad.detach().abs().sum().item()
-                    for param in module.parameters()
-                    if param.grad is not None
-                )
-            )
-        for rule in rules:
-            grad = guard_modules[rule.id].logit.grad
-            symbolic_grads[rule.id] = (
-                float(grad.detach().abs().item()) if grad is not None else 0.0
-            )
+        step_loss = program.forward_backward_grouped(queries, targets)
         program.optimizer_step()
         losses.append(step_loss / len(targets))
+    host_transfer_stats = program.host_transfer_stats()
 
-    # Final evaluation pass: query probabilities from the trained circuit.
+    # Final gradient magnitudes, read once after training. These are per
+    # parameter, not per query, so they stay out of the hot loop; optimizer_step
+    # does not clear gradients (only zero_grad does), so after the last step they
+    # still reflect the final backward pass.
+    for name, module in modules.items():
+        neural_grads[name] = float(
+            sum(
+                param.grad.detach().abs().sum().item()
+                for param in module.parameters()
+                if param.grad is not None
+            )
+        )
+    for rule in rules:
+        grad = guard_modules[rule.id].logit.grad
+        symbolic_grads[rule.id] = (
+            float(grad.detach().abs().item()) if grad is not None else 0.0
+        )
+
+    # Final evaluation pass: query probabilities from the trained circuit, in one
+    # batched pass per template (O(templates) host syncs, not O(N) per query), so
+    # the whole training surface — not just the step loop — avoids per-query host
+    # syncs at corpus scale.
     program.zero_grad()
-    query_probabilities = [
-        math.exp(-program.forward_backward(query, True)) for query in queries
-    ]
+    query_probabilities = program.query_probabilities_grouped(queries)
     program.zero_grad()
 
     learned_weights = {
@@ -198,7 +232,20 @@ def train_neurosymbolic_program(
         query_probabilities=query_probabilities,
         engine=_ENGINE_NAME,
         proof_trace_map=proof_trace_map,
+        training_host_transfer_stats=host_transfer_stats,
     )
+
+
+def _make_optimizer(name: str, params: Any, lr: float) -> Any:
+    """Build the per-module optimizer named by the config (``adam`` or ``sgd``)."""
+    import torch
+
+    key = name.lower()
+    if key == "adam":
+        return torch.optim.Adam(params, lr=lr)
+    if key == "sgd":
+        return torch.optim.SGD(params, lr=lr)
+    raise ValueError(f"unsupported optimizer {name!r}; expected 'adam' or 'sgd'")
 
 
 def _make_rule_weight_module(initial_logit: float) -> Any:

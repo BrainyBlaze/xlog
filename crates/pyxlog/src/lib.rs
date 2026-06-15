@@ -46,7 +46,7 @@ mod program;
 mod training;
 mod types;
 pub(crate) use program::{
-    CachedCircuit, CompiledProbProgram, InputSource, NeuralGroup, QuerySignature,
+    CachedCircuit, CompiledProbProgram, HardFilter, InputSource, NeuralGroup, QuerySignature,
 };
 
 const DLPACK_CAPSULE_NAME: &[u8] = b"dltensor\0";
