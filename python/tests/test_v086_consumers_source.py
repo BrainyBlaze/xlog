@@ -102,7 +102,7 @@ def test_v086_consumer_validator_reuses_existing_compatibility_gates() -> None:
     source = validator.read_text(encoding="utf-8")
     for needle in [
         "G086_CONSUMERS",
-        "validate_v080_examples.py",
+        "validate_external_consumer_examples.py",
         "validate_v085_examples.py",
         "feature_coverage",
         "raw_measurements",
@@ -158,7 +158,7 @@ def test_v086_validator_accepts_absolute_and_relative_output_paths(monkeypatch, 
     absolute_output.write_text('{"status":"PASS","example_count":5}', encoding="utf-8")
     absolute = module._run_existing_validator(
         args,
-        "scripts/validate_v080_examples.py",
+        "scripts/validate_external_consumer_examples.py",
         absolute_output,
         {},
     )
@@ -170,7 +170,7 @@ def test_v086_validator_accepts_absolute_and_relative_output_paths(monkeypatch, 
     try:
         relative = module._run_existing_validator(
             args,
-            "scripts/validate_v080_examples.py",
+            "scripts/validate_external_consumer_examples.py",
             relative_output,
             {},
         )

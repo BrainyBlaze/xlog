@@ -1842,8 +1842,8 @@ surfaces.
   tensorized ILP `U64` path, with strict-per-topology compatibility policy and
   packaging of `ilp_exact` CUDA artifacts through the normal `pyxlog/kernels`
   wheel path.
-- An external-consumer-focused example suite under `examples/v0.8.0-dts/` plus
-  `scripts/validate_v080_examples.py`, covering async/streaming runtime
+- An external-consumer-focused example suite under `examples/external-consumer-python/` plus
+  `scripts/validate_external_consumer_examples.py`, covering async/streaming runtime
   controls, relation deltas, neural bridge helpers, native exact induction, and
   probabilistic async diagnostics.
 - A machine-readable v0.8.0 certification pack under
@@ -1856,7 +1856,7 @@ surfaces.
   target `0.8.0`.
 - README and roadmap release status now identify `v0.8.0` as the current
   tagged release and route external consumer users to the Python bindings and
-  `examples/v0.8.0-dts/` suite.
+  `examples/external-consumer-python/` suite.
 - v0.9.0 is the next Epistemic/Solver Semantics train; v0.10.0 is the
   Multi-GPU / Out-of-Core train.
 

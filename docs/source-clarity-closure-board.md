@@ -1274,17 +1274,17 @@ Hardware cache terminology such as `L1` and `L2` is allowed when it refers to GP
 | `examples/python/02_prob_wet_conditioning_torch.py` | 0 | 0 | true |  |  |
 | `examples/python/03_prob_mc_nonmonotone_torch.py` | 0 | 0 | true |  |  |
 | `examples/python/README.md` | 0 | 0 | true |  |  |
-| `examples/v080-dts/01_async_streaming_reachability/program.xlog` | 0 | 0 | true |  |  |
-| `examples/v080-dts/01_async_streaming_reachability/run.py` | 0 | 0 | true |  |  |
-| `examples/v080-dts/02_wmir_relation_deltas/program.xlog` | 0 | 0 | true |  |  |
-| `examples/v080-dts/02_wmir_relation_deltas/run.py` | 0 | 0 | true |  |  |
-| `examples/v080-dts/03_neural_bridge_topk_belnap/program.xlog` | 0 | 0 | true |  |  |
-| `examples/v080-dts/03_neural_bridge_topk_belnap/run.py` | 0 | 0 | true |  |  |
-| `examples/v080-dts/04_native_exact_induction/program.xlog` | 0 | 0 | true |  |  |
-| `examples/v080-dts/04_native_exact_induction/run.py` | 0 | 0 | true |  |  |
-| `examples/v080-dts/05_probabilistic_async_diagnostics/program.xlog` | 0 | 0 | true |  |  |
-| `examples/v080-dts/05_probabilistic_async_diagnostics/run.py` | 0 | 0 | true |  |  |
-| `examples/v080-dts/README.md` | 9 | 3 | true | release labels, task/gate labels, external-consumer path labels, and phase shorthand(9) | release validator/evidence path labels(3) |
+| `examples/external-consumer-python/01_async_streaming_reachability/program.xlog` | 0 | 0 | true |  |  |
+| `examples/external-consumer-python/01_async_streaming_reachability/run.py` | 0 | 1 | true |  | release-coded CUDA requirement message(1) |
+| `examples/external-consumer-python/02_wmir_relation_deltas/program.xlog` | 0 | 0 | true |  |  |
+| `examples/external-consumer-python/02_wmir_relation_deltas/run.py` | 0 | 1 | true |  | release-coded CUDA requirement message(1) |
+| `examples/external-consumer-python/03_neural_bridge_topk_belnap/program.xlog` | 0 | 0 | true |  |  |
+| `examples/external-consumer-python/03_neural_bridge_topk_belnap/run.py` | 0 | 1 | true |  | release-coded CUDA requirement message(1) |
+| `examples/external-consumer-python/04_native_exact_induction/program.xlog` | 0 | 0 | true |  |  |
+| `examples/external-consumer-python/04_native_exact_induction/run.py` | 0 | 1 | true |  | release-coded CUDA requirement message(1) |
+| `examples/external-consumer-python/05_probabilistic_async_diagnostics/program.xlog` | 0 | 0 | true |  |  |
+| `examples/external-consumer-python/05_probabilistic_async_diagnostics/run.py` | 0 | 1 | true |  | release-coded CUDA requirement message(1) |
+| `examples/external-consumer-python/README.md` | 9 | 3 | true | release labels, task/gate labels, external-consumer path labels, and phase shorthand(9) | release validator/evidence path labels(3) |
 | `examples/language-completeness/aggregate_lifting/count_lift.xlog` | 0 | 0 | true |  |  |
 | `examples/language-completeness/approx/aggregate_mc.xlog` | 0 | 0 | true |  |  |
 | `examples/language-completeness/lists/cons_patterns.xlog` | 0 | 0 | true |  |  |
@@ -1482,7 +1482,7 @@ Hardware cache terminology such as `L1` and `L2` is allowed when it refers to GP
 | `python/tests/test_delta_source.py` | 0 | 12 | true |  | release-coded path/function names, evidence path strings, delta milestone codes, and opaque fixture name(12) |
 | `python/tests/test_external_consumer_cert.py` | 0 | 9 | true |  | release-coded and external-consumer path, import, and test names(9) |
 | `python/tests/test_exact_source.py` | 0 | 8 | true |  | release-coded test/evidence names and external consumer literals(8) |
-| `python/tests/test_v080_examples_source.py` | 0 | 2 | false |  | v080(2) |
+| `python/tests/test_external_consumer_examples_source.py` | 0 | 6 | true |  | release-coded test, suite, validator, and evidence names(6) |
 | `python/tests/test_v080_pyapi_source.py` | 0 | 0 | true |  |  |
 | `python/tests/test_v085_examples_source.py` | 0 | 4 | false |  | v085(4) |
 | `python/tests/test_v086_adaptive_reoptimization_source.py` | 0 | 1 | false |  | v086(1) |
@@ -1529,7 +1529,7 @@ Hardware cache terminology such as `L1` and `L2` is allowed when it refers to GP
 | `scripts/validate_examples.py` | 0 | 0 | true |  |  |
 | `scripts/validate_package_metadata.py` | 0 | 0 | true |  |  |
 | `scripts/validate_release_gpu.sh` | 0 | 0 | true |  |  |
-| `scripts/validate_v080_examples.py` | 0 | 2 | false |  | v080(2) |
+| `scripts/validate_external_consumer_examples.py` | 0 | 5 | true |  | release-coded validator, suite, evidence, and output labels(5) |
 | `scripts/validate_v085_examples.py` | 0 | 2 | false |  | v085(2) |
 | `scripts/validate_v086_examples.py` | 0 | 57 | false |  | release-coded validator/path labels(57) |
 | `scripts/validation_staging.py` | 0 | 0 | true |  |  |

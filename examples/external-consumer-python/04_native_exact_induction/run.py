@@ -24,7 +24,7 @@ def _candidate_tuple(candidate: object) -> tuple[object, ...]:
 
 def main() -> int:
     if not torch.cuda.is_available():
-        raise RuntimeError("CUDA is required for v0.8.0 external consumer examples")
+        raise RuntimeError("CUDA is required for external consumer examples")
 
     source = Path(__file__).with_name("program.xlog").read_text(encoding="utf-8")
     prog = pyxlog.IlpProgramFactory.compile(source, device=0, memory_mb=64)

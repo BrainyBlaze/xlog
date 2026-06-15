@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run the v0.8.0 external consumer showcase examples and write one validation summary."""
+"""Run the external consumer Python examples and write one validation summary."""
 
 from __future__ import annotations
 
@@ -14,8 +14,10 @@ from typing import Any
 
 
 ROOT = Path(__file__).resolve().parents[1]
-EXAMPLE_ROOT = ROOT / "examples" / "v080-dts"
-DEFAULT_OUTPUT = ROOT / "docs" / "evidence" / "2026-05-18-v080-examples" / "validation_summary.json"
+EXAMPLE_ROOT = ROOT / "examples" / "external-consumer-python"
+DEFAULT_OUTPUT = (
+    ROOT / "docs" / "evidence" / "external-consumer-examples" / "validation_summary.json"
+)
 EXAMPLES = [
     "01_async_streaming_reachability",
     "02_wmir_relation_deltas",
@@ -68,7 +70,7 @@ def _aggregate(results: list[dict[str, Any]]) -> dict[str, Any]:
         for name in EXAMPLES
     ]
     return {
-        "suite": "G080_EXAMPLES",
+        "suite": "external_consumer_examples",
         "status": "PASS",
         "example_count": len(results),
         "per_example": per_example,
