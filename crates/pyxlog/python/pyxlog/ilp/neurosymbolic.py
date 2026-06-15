@@ -23,7 +23,6 @@ rule weights receive gradients from the same circuit evaluation.
 
 from __future__ import annotations
 
-import math
 from dataclasses import dataclass
 from typing import Any
 
@@ -177,11 +176,12 @@ def train_neurosymbolic_program(
             float(grad.detach().abs().item()) if grad is not None else 0.0
         )
 
-    # Final evaluation pass: query probabilities from the trained circuit.
+    # Final evaluation pass: query probabilities from the trained circuit, in one
+    # batched pass per template (O(templates) host syncs, not O(N) per query), so
+    # the whole training surface — not just the step loop — avoids per-query host
+    # syncs at corpus scale.
     program.zero_grad()
-    query_probabilities = [
-        math.exp(-program.forward_backward(query, True)) for query in queries
-    ]
+    query_probabilities = program.query_probabilities_grouped(queries)
     program.zero_grad()
 
     learned_weights = {

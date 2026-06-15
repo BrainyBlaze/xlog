@@ -180,6 +180,32 @@ def test_grouped_matches_scalar_forward_backward() -> None:
 
 
 @requires_cuda
+def test_query_probabilities_grouped_matches_scalar() -> None:
+    """The batched probability readout must match the per-query scalar readout
+    (exp(-forward_backward(q, True))) for every query, including ineligible
+    (hard-filtered) ones — so the readout is numerically transparent like the
+    loss path while running O(templates) host syncs instead of O(N)."""
+    import math
+
+    prog_g, _net_g, queries, _expected = _build_mixed_program()
+    prog_g.zero_grad()
+    probs_grouped = prog_g.query_probabilities_grouped(queries)
+    prog_g.zero_grad()
+
+    prog_s, _net_s, queries_s, _expected_s = _build_mixed_program()
+    prog_s.zero_grad()
+    probs_scalar = [math.exp(-prog_s.forward_backward(q, True)) for q in queries_s]
+    prog_s.zero_grad()
+
+    assert len(probs_grouped) == len(probs_scalar)
+    for pg, ps in zip(probs_grouped, probs_scalar):
+        assert pg == pytest.approx(ps, rel=1e-5, abs=1e-9)
+    # Ineligible (hard-filtered) cases 1 and 3 stay ~0 through the batched path.
+    assert probs_grouped[1] == pytest.approx(0.0, abs=1e-6)
+    assert probs_grouped[3] == pytest.approx(0.0, abs=1e-6)
+
+
+@requires_cuda
 def test_training_loop_has_no_tracked_host_transfers() -> None:
     """The warm training loop must perform NO tracked device<->host transfers in
     either direction. After the one-time cache warm-up, every step runs

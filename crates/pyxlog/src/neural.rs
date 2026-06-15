@@ -755,8 +755,10 @@ impl CompiledProgram {
         // One batched circuit pass per (expected, template) group.
         for group_key in &group_order {
             let atoms = groups.remove(group_key).expect("group populated above");
+            // The batched pass returns per-query losses; sum them for this group.
             let loss = self.forward_backward_batch_complex_tensor(py, &atoms, group_key.0)?;
-            device_loss = Some(accumulate_device_loss(py, device_loss, loss)?);
+            let loss_sum = loss.bind(py).call_method0("sum")?.unbind();
+            device_loss = Some(accumulate_device_loss(py, device_loss, loss_sum)?);
         }
 
         // Single host sync: read the device-accumulated loss back once.
@@ -765,6 +767,81 @@ impl CompiledProgram {
             None => 0.0,
         };
         Ok(device_total + host_const_loss)
+    }
+
+    /// GPU-resident batched query probabilities (one circuit pass per template).
+    ///
+    /// Mirrors `exp(-forward_backward(query, true))` for every query but without
+    /// the per-query host sync: eligible queries are grouped by circuit template
+    /// and evaluated in one batched pass each (host syncs are O(templates), not
+    /// O(N)), and an ineligible (hard-filtered) query takes the same near-zero
+    /// probability as the scalar path. Used for the post-training probability
+    /// readout so the whole training surface — not just the step loop — avoids
+    /// per-query host syncs at corpus scale.
+    #[pyo3(signature = (queries))]
+    fn query_probabilities_grouped(
+        &mut self,
+        py: Python<'_>,
+        queries: Vec<String>,
+    ) -> PyResult<Vec<f64>> {
+        let n = queries.len();
+        // Ineligible (hard-filtered) queries take exp(-zero_probability_loss(true))
+        // = exp(-(-ln eps)) = eps, the same near-zero probability as the scalar path.
+        let mut probs = vec![types::NLL_EPSILON; n];
+        if n == 0 {
+            return Ok(probs);
+        }
+
+        // Eligible complex queries grouped by template, tracking original indices.
+        let mut group_order: Vec<String> = Vec::new();
+        let mut groups: StdHashMap<String, (Vec<Atom>, Vec<usize>)> = StdHashMap::new();
+
+        for (i, query) in queries.iter().enumerate() {
+            match self.try_parse_direct_neural_query(query) {
+                Ok(_) => {
+                    // Direct queries are not template-batched here; evaluate one.
+                    let loss = self.forward_backward(py, query, true)?;
+                    probs[i] = (-loss).exp();
+                }
+                Err(_) => {
+                    let atom = self.parse_query_atom(query)?;
+                    let signature = self
+                        .get_or_build_query_signature(&atom.predicate, atom.terms.len())?
+                        .clone();
+                    if !signature.hard_filters().is_empty()
+                        && !self.hard_filters_satisfied(&atom, signature.hard_filters())?
+                    {
+                        continue; // ineligible: keep the eps default
+                    }
+                    let key = self.generate_cache_key_for_signature(
+                        &signature,
+                        &atom.predicate,
+                        atom.terms.len(),
+                    );
+                    if !groups.contains_key(&key) {
+                        group_order.push(key.clone());
+                    }
+                    let entry = groups.entry(key).or_insert_with(|| (Vec::new(), Vec::new()));
+                    entry.0.push(atom);
+                    entry.1.push(i);
+                }
+            }
+        }
+
+        for key in &group_order {
+            let (atoms, indices) = groups.remove(key).expect("group populated above");
+            // Per-query NLL losses for the group (expected=true); prob = exp(-loss).
+            let losses = self.forward_backward_batch_complex_tensor(py, &atoms, true)?;
+            let prob_tensor = losses
+                .bind(py)
+                .call_method0("neg")?
+                .call_method0("exp")?;
+            let prob_list: Vec<f64> = prob_tensor.call_method0("tolist")?.extract()?;
+            for (j, &orig_i) in indices.iter().enumerate() {
+                probs[orig_i] = prob_list[j];
+            }
+        }
+        Ok(probs)
     }
 
     /// Belnap-aware dual-channel loss terms for bridge training.
@@ -1044,8 +1121,13 @@ impl CompiledProgram {
                 // Batch-process each complex group in insertion order.
                 for key in &complex_group_order {
                     let group = complex_groups.remove(key).unwrap();
+                    // The batched pass returns per-query losses; sum for the batch.
                     let loss = self.forward_backward_batch_complex_tensor(py, &group, true)?;
-                    let loss_val = loss.bind(py).call_method0("detach")?.unbind();
+                    let loss_val = loss
+                        .bind(py)
+                        .call_method0("sum")?
+                        .call_method0("detach")?
+                        .unbind();
                     batch_loss_tensor = Some(match batch_loss_tensor {
                         None => loss_val,
                         Some(acc) => {
@@ -1909,13 +1991,14 @@ impl CompiledProgram {
                     .column(0)
                     .map_err(|e| types::gpu_err("DLPack export failed", e))?;
                 let loss_capsule = dlpack_capsule_from_tensor(py, loss_dl)?;
-                let loss_tensor = torch.getattr("from_dlpack")?.call1((loss_capsule,))?;
-                loss_tensor.call_method0("sum")?.unbind()
+                // Per-query 1D loss tensor (length n_queries), in input order.
+                torch.getattr("from_dlpack")?.call1((loss_capsule,))?.unbind()
             }
             Err(_batch_err) => {
                 // Fallback path: preserve prior semantics if batched circuit path
-                // is unavailable for this circuit.
-                let mut accum: Option<PyObject> = None;
+                // is unavailable for this circuit. Collect per-query 1D losses and
+                // concatenate so the return shape matches the batched path.
+                let mut per_query_losses: Vec<PyObject> = Vec::with_capacity(n_queries);
                 for q in 0..n_queries {
                     let loss_dev = py
                         .allow_threads(|| {
@@ -1954,16 +2037,13 @@ impl CompiledProgram {
                         .map_err(|e| types::gpu_err("DLPack export failed", e))?;
                     let loss_capsule = dlpack_capsule_from_tensor(py, loss_dl)?;
                     let loss_tensor = torch.getattr("from_dlpack")?.call1((loss_capsule,))?;
-
-                    accum = Some(match accum {
-                        None => loss_tensor.unbind(),
-                        Some(acc) => {
-                            acc.bind(py).call_method1("add_", (loss_tensor,))?;
-                            acc
-                        }
-                    });
+                    per_query_losses.push(loss_tensor.unbind());
                 }
-                accum.ok_or_else(|| PyRuntimeError::new_err("No loss computed in batch"))?
+                if per_query_losses.is_empty() {
+                    return Err(PyRuntimeError::new_err("No loss computed in batch"));
+                }
+                let loss_list = pyo3::types::PyList::new(py, per_query_losses.iter())?;
+                torch.call_method1("cat", (loss_list,))?.unbind()
             }
         };
 
@@ -1975,7 +2055,9 @@ impl CompiledProgram {
         let grad_list = pyo3::types::PyList::new(py, all_grad_tensors.iter())?;
         autograd.call_method1("backward", (out_list, grad_list))?;
 
-        // -- 9. Return accumulated loss ------
+        // -- 9. Return per-query losses (1D, input order) ------
+        // Callers that want the scalar batch loss call `.sum()`; callers that
+        // want per-query probabilities use the per-query losses directly.
         Ok(batch_loss_tensor)
     }
 
