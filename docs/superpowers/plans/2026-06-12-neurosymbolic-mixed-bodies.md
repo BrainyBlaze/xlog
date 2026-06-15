@@ -29,6 +29,81 @@ If you are executing this plan and a Rust block does not compile as written, tha
 
 ---
 
+## Spike findings (Task 1) — recorded 2026-06-15
+
+**Environment.** Validated on an RTX 4090 (`sm_89`), CUDA 12.6 (`nvcc` 12.6.20), Rust
+1.96.0 MSVC, VS2022 (MSVC 14.42). The earlier "no CUDA on this machine" premise no
+longer holds — Task 1 ran locally on the GPU.
+
+**Build gotchas locked** (for anyone running the GPU tasks on Windows):
+- `.cargo/config.toml` pins a Linux-only `rustc-wrapper = scripts/rustc-wrapper.sh`
+  → on Windows it fails with os error 193. Override per-invocation with
+  `cargo --config <file>` where the file sets `build.rustc-wrapper = ""`.
+- `crates/xlog-cuda/build.rs` defaults `XLOG_CUBIN_ARCHS=sm_120` (Blackwell), which
+  **nvcc 12.6 cannot compile**. Set `XLOG_CUBIN_ARCHS=sm_89` for Ada/4090 (or
+  `XLOG_NO_CUBIN=1` to rely on the sm_75 portable-PTX JIT fallback). Driver 591.44
+  is newer than the toolkit, so no `XLOG_PTX_MAX_VERSION` downgrade is needed.
+- Build/test inside a `vcvars64` environment so `nvcc` finds `cl.exe`.
+
+**Step 1 — gate semantics: VALIDATED on GPU.** Throwaway test
+`crates/xlog-prob/tests/spike_mixed_body_gate.rs` (deleted after recording, per Step 5)
+compiled, via the non-template `ExactDdnnfProgram::compile_source` + `evaluate()` on
+the GPU D4→XGCF path:
+
+```
+0.6::p_net(0).  0.6::p_net(2).  0.8::guard().  allowed(0).
+root_case(C) :- p_net(C), guard(), allowed(C).
+query(root_case(0)).  query(root_case(2)).
+```
+
+Result: `P(root_case(0)) = 0.48` (= 0.6·0.8) and `P(root_case(2)) = 0` **exactly**.
+→ A *defined* deterministic relation in a mixed body is a per-key 0/1 multiplier in
+the WMC; the conjunction `prob ∧ prob ∧ gate` already compiles correctly. The
+gated-out probability is exactly 0 in the **compile** path — the `min_p`≈ε concern
+is specific to the **fast-path fixed-leaf injection**, not the compiler.
+
+**Step 2 — fixed-leaf injection point: LOCKED from source.**
+`neural_backward_nll_buffers_inner` (`exact.rs:931`) has three per-group loops under
+the hard invariant `probs.len() == out_grads.len() == slots.num_groups_usize()`
+(`exact.rs:954,961`):
+1. **fill** (`exact.rs:1005-1059`): `neural_fill_ad_chain_f32(prob_col, labels,
+   slot_vars, eps, min_p, var_log_true, var_log_false)` via `cache.var_log_weights_mut()`.
+2. **base scatter** (`exact.rs:1069-1137`): `neural_scatter_ad_chain_grads_f32(...,
+   grad_true, grad_false, 0u8, out_col)` → writes `dlogZ_base/dp` into `out_grads[g]`.
+3. **query scatter** (`exact.rs:1179-1221`): same kernel, phase `1u8`,
+   `out -= dlogZ_query/dp`. `out_grads[g]` is exactly what flows back to torch.
+
+A gate = a 1-label leaf = a `GpuWeightSlots` group (`neural_fast_path.rs:38`) with
+**one** slot CNF var. It must be **filled (loop 1) but excluded from scatter (2 & 3)**.
+
+**Decision: parallel fixed-slot set (not an `is_fixed` mask).** Extend
+`neural_backward_nll_buffers_inner` with `fixed_slots: &GpuWeightSlots` +
+`fixed_weights: &[CudaBuffer]` (1 row, value 1.0/0.0). Fill them in loop 1 (same
+kernel, `labels = 1`), allocate **no** `out_grads` buffer for them, and never enter
+loops 2 & 3. The existing `probs.len() == num_groups` invariant then applies to the
+**neural** groups only. → **Gradient isolation is structural**: a gate has no grad
+sink, so the scatter loops physically cannot write into it. This is strictly safer
+than a shared-index `is_fixed` mask, which keeps the gate in `probs`/`out_grads` and
+risks the documented grad-leak (spec §12). `GpuWeightSlots::upload(groups: &[Vec<u32>])`
+builds the fixed set directly from the gate CNF vars.
+
+**Step 3 — gradient isolation:** under the parallel-set design, zero gate gradient is
+*structural* (no `out_grads` entry; fill is forward-only). Empirical confirmation is
+Task 5/6 (needs the injection actually wired), not the spike.
+
+**Bonus — hard-zero gate without ε:** the codebase already has
+`force_query_var_false`/`force_query_var_true` (`exact.rs:1148-1158`), which force a
+CNF var's weight to a hard 0/1 around the query run. A gate-*false* leaf can reuse the
+same forcing on the gate's CNF var to get **exactly 0** instead of `min_p`≈ε —
+resolving the spec §12 risk with **no new kernel**. Prefer this to the `abs=1e-6`
+assertion when a hard zero is wanted.
+
+**Net:** the fixed-leaf approach is sound; no architectural surprise. Tasks 3–8 should
+treat the parallel fixed-slot signature above as the source of truth, superseding the
+"shape-only" Rust blocks below.
+
+---
+
 ## Background: the exact failing point (verified)
 
 1. `train_neurosymbolic_program` (`crates/pyxlog/python/pyxlog/ilp/neurosymbolic.py`) desugars each `trainable_rule(id) :: head :- body.` into a real rule guarded by a synthetic 1-param neural predicate `nsr_guard_<id>`, compiles the whole source with the **real** parser (`pyxlog.Program.compile`), and trains via `program.forward_backward(query, target)`.
