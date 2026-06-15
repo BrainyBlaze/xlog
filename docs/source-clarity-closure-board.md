@@ -4,8 +4,8 @@ Scope: Git-tracked source and documentation files only. Superpowers docs, plan f
 
 Scanned files: 1430
 Unresolved files: 0
-Comment/prose artifact occurrences: 2458
-Code/identifier artifact occurrences: 1624
+Comment/prose artifact occurrences: 2459
+Code/identifier artifact occurrences: 1631
 
 Resolved means this board found no remaining opaque task/milestone labels or external consumer names in the eligible portions of that file.
 
@@ -728,7 +728,7 @@ Hardware cache terminology such as `L1` and `L2` is allowed when it refers to GP
 | `docs/architecture/living-world-diagnostics.md` | 26 | 1 | true | release labels(3), scoped test labels(4), tracking IDs(17), external-consumer label(1), filename artifact(1) | Renamed file and replaced tracking IDs with descriptive diagnostic surfaces and verification areas. |
 | `docs/architecture/lwm-diagnostics-provenance.md` | 0 | 0 | true |  |  |
 | `docs/architecture/multi-gpu-join.md` | 4 | 0 | true | release labels(2), P2P(2) | Replaced release-target labels with design/current-roadmap wording and expanded peer-to-peer copy terminology. |
-| `docs/architecture/python-bindings.md` | 34 | 4 | true | release labels(16), diagnostics doc path labels(6), external-consumer names(6), DTOH(4), P2b(1), M37-A+B(1) | D1(2), D2(2) |
+| `docs/architecture/python-bindings.md` | 35 | 11 | true | release labels(16), diagnostics doc path labels(6), external-consumer/session-phase labels(7), DTOH(4), P2b(1), M37-A+B(1) | D1(2), D2(2), external-consumer relation examples(7) |
 | `docs/architecture/query-optimizer.md` | 11 | 0 | true | release labels(6), runtime evidence codes(2), version-coded fixture path labels(2), D2H(1) | Replaced version/evidence-node labels with production runtime, exact-induction evidence, substrate handoff, and device-to-host wording. |
 | `docs/architecture/recorded-launch-migration.md` | 0 | 0 | true |  |  |
 | `docs/architecture/rfc-tensorized-ilp.md` | 99 | 3 | true | draft/release labels(81), validation milestone labels(8), D2H(10), Wave labels(3) | D2H/draft labels in code-block comments(3) |
