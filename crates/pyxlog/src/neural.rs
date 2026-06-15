@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::collections::HashMap;
 
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
@@ -9,6 +10,7 @@ use xlog_core::{symbol, ScalarType, Schema};
 use xlog_logic::ast::ArithExpr;
 use xlog_logic::ast::{Atom, BodyLiteral, Rule, Term};
 use xlog_logic::parse_program;
+use xlog_logic::{classify_trainable_body_literal, TrainableBodyClass};
 use xlog_neural::{EmbeddingHandle, NetworkConfig, NetworkHandle, TensorMetadata};
 use xlog_prob::exact::ExactDdnnfProgram;
 use xlog_prob::neural_fast_path::{GpuWeightSlots, NeuralFastPathConfig};
@@ -18,7 +20,7 @@ use std::collections::HashMap as StdHashMap;
 use super::neural_registry::NeuralPredicateInfo;
 use super::{
     dlpack_capsule_from_tensor, dlpack_from_py, types, CachedCircuit, CompiledProgram, EpochStats,
-    InputSource, NeuralGroup, QuerySignature, TrainingHistory,
+    GateLiteral, InputSource, NeuralGroup, QuerySignature, TrainingHistory,
 };
 
 /// Build the standard 1-column schema for probability values.
@@ -1767,42 +1769,100 @@ impl CompiledProgram {
     fn build_query_signature(&self, pred_name: &str, arity: usize) -> PyResult<QuerySignature> {
         let rule = self.find_query_rule(pred_name, arity)?;
 
-        let mut groups: Vec<NeuralGroup> = Vec::with_capacity(rule.body.len());
+        // Bound variables for Stage-A gate classification: the rule head
+        // variables plus every variable appearing in a neural-predicate input
+        // position. Computed up front (order-independent) so a gate may share a
+        // neural input variable that a later body literal binds.
+        let mut bound_vars: BTreeSet<String> = BTreeSet::new();
+        for term in &rule.head.terms {
+            if let Term::Variable(name) = term {
+                bound_vars.insert(name.clone());
+            }
+        }
         for literal in &rule.body {
-            // The query template grounds ONLY nn/4 predicates; any other
-            // relational literal would silently evaluate over an empty
-            // relation and collapse the query probability. Fail closed.
-            let body_atom = match literal {
-                BodyLiteral::Positive(atom) => atom,
-                BodyLiteral::Negated(atom) => {
+            if let BodyLiteral::Positive(atom) = literal {
+                if self.neural_registry.get(&atom.predicate).is_some() {
+                    let info = self.match_neural_decl_for_atom(atom)?;
+                    for &pos in &info.input_positions {
+                        if let Some(Term::Variable(name)) = atom.terms.get(pos) {
+                            bound_vars.insert(name.clone());
+                        }
+                    }
+                }
+            }
+        }
+
+        let is_neural = |predicate: &str| self.neural_registry.get(predicate).is_some();
+
+        let mut groups: Vec<NeuralGroup> = Vec::with_capacity(rule.body.len());
+        let mut gates: Vec<GateLiteral> = Vec::new();
+        for literal in &rule.body {
+            // Stage-A relaxation: a non-neural relation that introduces no new
+            // variable is a per-example gate (fixed circuit leaf), not a
+            // fail-closed rejection. Unbound joins (Stage B), negation, and
+            // epistemics remain typed errors.
+            match classify_trainable_body_literal(literal, &bound_vars, &is_neural) {
+                // Comparisons / is-expressions / univ are grounded by the
+                // circuit compiler itself and remain supported.
+                TrainableBodyClass::Builtin => continue,
+                TrainableBodyClass::Negated => {
+                    let predicate = match literal {
+                        BodyLiteral::Negated(atom) => atom.predicate.as_str(),
+                        _ => unreachable!("classifier returns Negated only for negated literals"),
+                    };
                     return Err(PyValueError::new_err(format!(
                         "Query rule for '{}' has negated literal 'not {}(..)'; \
                          negation is not supported by the neural query template path",
-                        pred_name, atom.predicate
+                        pred_name, predicate
                     )));
                 }
-                BodyLiteral::Epistemic(_) => {
+                TrainableBodyClass::Epistemic => {
                     return Err(PyValueError::new_err(format!(
                         "Query rule for '{}' has an epistemic literal; \
                          epistemic operators are not supported by the neural query template path",
                         pred_name
                     )));
                 }
-                // Comparisons / is-expressions / univ are grounded by the
-                // circuit compiler itself and remain supported.
-                _ => continue,
-            };
-
-            if self.neural_registry.get(&body_atom.predicate).is_none() {
-                return Err(PyValueError::new_err(format!(
-                    "Query rule for '{}' references relation '{}/{}' which is not an nn/4 \
-                     neural predicate; the neural query template path grounds only neural \
-                     predicates, so this body literal would evaluate over an empty relation",
-                    pred_name,
-                    body_atom.predicate,
-                    body_atom.terms.len()
-                )));
+                TrainableBodyClass::UnboundJoin { var } => {
+                    let predicate = match literal {
+                        BodyLiteral::Positive(atom) => atom.predicate.as_str(),
+                        _ => unreachable!("classifier returns UnboundJoin only for positive literals"),
+                    };
+                    return Err(PyValueError::new_err(format!(
+                        "Query rule for '{}' relation '{}' introduces unbound join variable '{}'; \
+                         mixed-body joins (Stage B) are not yet supported (bind it via the head or \
+                         a neural input, or rename it to '_' for an existence check)",
+                        pred_name, predicate, var
+                    )));
+                }
+                TrainableBodyClass::Gate => {
+                    let body_atom = match literal {
+                        BodyLiteral::Positive(atom) => atom,
+                        _ => unreachable!("classifier returns Gate only for positive literals"),
+                    };
+                    // Fail closed on genuine typos: a Stage-A gate must name a
+                    // relation actually defined in the program. Distinct from
+                    // the Stage-B "unbound join" message above.
+                    if !self.relation_is_defined(&body_atom.predicate) {
+                        return Err(PyValueError::new_err(format!(
+                            "Query rule for '{}' references undefined relation '{}/{}'",
+                            pred_name,
+                            body_atom.predicate,
+                            body_atom.terms.len()
+                        )));
+                    }
+                    gates.push(GateLiteral {
+                        atom: body_atom.clone(),
+                    });
+                    continue;
+                }
+                TrainableBodyClass::Neural => {}
             }
+
+            let body_atom = match literal {
+                BodyLiteral::Positive(atom) => atom,
+                _ => unreachable!("classifier returns Neural only for positive literals"),
+            };
 
             let info = self.match_neural_decl_for_atom(body_atom)?;
 
@@ -1870,7 +1930,7 @@ impl CompiledProgram {
         }
 
         if arity == 0 {
-            return Ok(QuerySignature::Boolean { groups });
+            return Ok(QuerySignature::Boolean { groups, gates });
         }
 
         let mut used_head_positions: Vec<usize> = groups
@@ -1890,7 +1950,7 @@ impl CompiledProgram {
             // Every head position is consumed by a neural input, so the query
             // atom is fully ground: supervise the truth of the derived atom
             // itself (boolean NLL with the caller's `expected` flag).
-            return Ok(QuerySignature::Boolean { groups });
+            return Ok(QuerySignature::Boolean { groups, gates });
         }
         if target_positions.len() != 1 {
             return Err(PyValueError::new_err(format!(
@@ -1902,7 +1962,25 @@ impl CompiledProgram {
         Ok(QuerySignature::Targeted {
             target_position: target_positions[0],
             groups,
+            gates,
         })
+    }
+
+    /// Whether a relation is defined in the program — as a fact or rule head, a
+    /// probabilistic fact, or an annotated-disjunction choice. Used to fail
+    /// closed on a misspelled Stage-A gate relation.
+    fn relation_is_defined(&self, predicate: &str) -> bool {
+        self.ast.rules.iter().any(|r| r.head.predicate == predicate)
+            || self
+                .ast
+                .prob_facts
+                .iter()
+                .any(|f| f.atom.predicate == predicate)
+            || self
+                .ast
+                .annotated_disjunctions
+                .iter()
+                .any(|ad| ad.choices.iter().any(|c| c.atom.predicate == predicate))
     }
 
     fn find_query_rule(&self, pred_name: &str, arity: usize) -> PyResult<&Rule> {

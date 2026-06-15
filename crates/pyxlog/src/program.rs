@@ -19,6 +19,8 @@ use xlog_prob::exact::{ExactResultWithGrads, QueryProbability};
 use xlog_prob::mc::{McEvalConfig, McProgram, McSamplingMethod};
 use xlog_prob::neural_fast_path::GpuWeightSlots;
 
+use xlog_logic::ast::Atom;
+
 use super::neural_registry::NeuralPredicateInfo;
 use super::{
     dlpack_capsule_from_tensor, enforce_call_memory_limit, provider_memory_stats, types,
@@ -58,21 +60,45 @@ pub(crate) struct NeuralGroup {
     pub(crate) output_var: Option<String>,
 }
 
+/// Stage-A gate: a positive non-neural body relation whose every named variable
+/// is already bound (by the head or a neural input). It introduces no new join
+/// variable, so it is evaluated per example as a fixed, non-differentiable
+/// circuit leaf whose weight is the boolean truth of the relation at the
+/// example key. The full atom is retained so the gate's bound variable can be
+/// mapped to its head placeholder during template emission (Task 4) and its
+/// per-example truth injected (Task 5).
+#[derive(Debug, Clone)]
+pub(crate) struct GateLiteral {
+    pub(crate) atom: Atom,
+}
+
 #[derive(Debug, Clone)]
 pub(crate) enum QuerySignature {
     Boolean {
         groups: Vec<NeuralGroup>,
+        gates: Vec<GateLiteral>,
     },
     Targeted {
         target_position: usize,
         groups: Vec<NeuralGroup>,
+        gates: Vec<GateLiteral>,
     },
 }
 
 impl QuerySignature {
     pub(crate) fn groups(&self) -> &[NeuralGroup] {
         match self {
-            QuerySignature::Boolean { groups } | QuerySignature::Targeted { groups, .. } => groups,
+            QuerySignature::Boolean { groups, .. } | QuerySignature::Targeted { groups, .. } => {
+                groups
+            }
+        }
+    }
+
+    // Consumed by template emission + per-example injection (Tasks 4-5).
+    #[allow(dead_code)]
+    pub(crate) fn gates(&self) -> &[GateLiteral] {
+        match self {
+            QuerySignature::Boolean { gates, .. } | QuerySignature::Targeted { gates, .. } => gates,
         }
     }
 }
