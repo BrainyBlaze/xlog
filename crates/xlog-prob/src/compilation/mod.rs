@@ -170,6 +170,9 @@ pub fn compile_gpu_d4_and_verify(
             "cdcl_conflict_budget is not supported by the GPU CDCL verifier".to_string(),
         ));
     }
+    // Size guard BEFORE compile — the D4 compile itself can crash with a
+    // context-poisoning launch failure on a large CNF, earlier than the verify.
+    validation::check_verify_size_bound(cnf, "compile_gpu_d4_and_verify")?;
     let circuit = gpu_d4::compile_gpu_d4(cnf, provider, config)?;
     let cdcl = cdcl_config_from_compile(config)?;
     validate_equivalence_gpu(
@@ -204,6 +207,9 @@ pub fn compile_gpu_d4_and_verify_cached(
             "cdcl_conflict_budget is not supported by the GPU CDCL verifier".to_string(),
         ));
     }
+    // Size guard BEFORE compile (the D4 compile can crash earlier than
+    // the verify on a large CNF).
+    validation::check_verify_size_bound(cnf, "compile_gpu_d4_and_verify_cached")?;
 
     let profiling = warmup_profiling_enabled();
     let mut profile = CircuitCompileProfile::default();
@@ -652,7 +658,26 @@ fn cdcl_config_from_compile(config: &GpuCompileConfig) -> Result<GpuCdclConfig> 
     gpu_cdcl.max_proof_u32 = max_proof_u32;
     gpu_cdcl.restart_base = config.cdcl_restart_interval;
     gpu_cdcl.reduce_interval = reduce_interval;
+    // Fail-closed conflict budget. Treewidth-hard equivalence verifies can
+    // spin past the GPU watchdog and crash with a context-poisoning launch
+    // failure; a finite budget makes them decline (VerifyBudgetExceeded) before
+    // that. Default 0 = unlimited (no behavior change). A recommended value is a
+    // calibration follow-up (between a completing verify's conflict count and
+    // the watchdog boundary); operators opt in via XLOG_D4_VERIFY_MAX_CONFLICTS.
+    gpu_cdcl.max_conflicts = verify_max_conflicts();
     Ok(gpu_cdcl)
+}
+
+/// Per-verify conflict budget, read once from
+/// `XLOG_D4_VERIFY_MAX_CONFLICTS`. Default 0 = unlimited.
+fn verify_max_conflicts() -> u32 {
+    static BUDGET: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+    *BUDGET.get_or_init(|| {
+        std::env::var("XLOG_D4_VERIFY_MAX_CONFLICTS")
+            .ok()
+            .and_then(|v| v.trim().parse::<u32>().ok())
+            .unwrap_or(0)
+    })
 }
 
 // ---------------------------------------------------------------------------

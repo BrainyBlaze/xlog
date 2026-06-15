@@ -6,6 +6,51 @@ All notable changes to this project are documented in this file.
 
 ### Added
 
+- *(prob/solve)* **Fail-closed D4 equivalence-verify conflict budget
+  (compile/verify robustness, primary fix).** Calibration showed the verify explosion is
+  treewidth-exponential, not size-linear (onset ~654 CNF vars where legitimate
+  programs live; same var count can verify in 1s or run to a watchdog crash),
+  so a size bound is too coarse. The GPU CDCL kernel now accepts a
+  `max_conflicts` budget and bails with a new `SAT_STATUS_BUDGET_EXHAUSTED`
+  status when the search runs past it without terminating — bounding wall-clock
+  so a hard instance returns gracefully instead of running to a
+  context-poisoning `CUDA_ERROR_LAUNCH_FAILED`. A budget-exhausted verify is
+  INDETERMINATE and declines fail-closed with the typed
+  `XlogError::VerifyBudgetExceeded` (catchable Python exception), never trusted
+  as a proof. `GpuCdclConfig::max_conflicts` defaults to `0` (unlimited, no
+  behavior change); the verify path reads `XLOG_D4_VERIFY_MAX_CONFLICTS` (opt-in).
+  Recommended production default is a calibration follow-up (between a
+  completing verify's conflict count and the watchdog boundary).
+- *(prob)* **Fail-closed D4 compile size bound (compile-phase
+  guard).** The D4 *compile* itself (knowledge-compilation emit, fixed-capacity
+  buffers) can overrun and fail with a `CUDA_ERROR_LAUNCH_FAILED` that poisons
+  the primary context — *earlier* than the verify — on a CNF larger than its
+  emit caps. A poisoned context cannot be recovered in-process, so the size
+  guard runs **before** `compile_gpu_d4` (top of `compile_gpu_d4_and_verify` /
+  `_cached`): the CNF's host-side `var_cap`/`clause_cap` are checked against
+  `XLOG_D4_VERIFY_MAX_VARS` / `XLOG_D4_VERIFY_MAX_CLAUSES` and an over-bound
+  program declines with the typed `XlogError::CompileCapacityExceeded`
+  ("too big to compile", distinct from the verify-phase signal) instead of
+  reaching the crashing compile. **Defaults are unbounded** (`u32::MAX`); no
+  behavior change unless an operator opts in. A recommended production default
+  is a calibration follow-up; the in-kernel guard below now makes overflow
+  protection effective by default even when no host-side bound is configured.
+- *(prob/cuda)* **In-kernel emit-overflow guard — compile-phase protection on
+  by default.** The host-side size bound above only fires when an operator
+  configures it, but the emit kernel could still overrun its fixed-capacity
+  buffers on an unconfigured run and trap. `d4_compile_emit` previously called
+  `d4_trap()` (a PTX `trap;`) when the node/edge totals exceeded `node_cap` /
+  `edge_cap`, which poisons the CUDA primary context and kills every later
+  compile in the process. It now evaluates the same capacity check **before any
+  write, in every block**, and on overflow sets a one-word `overflow_flag` and
+  returns instead of trapping. The host reads the flag after the launch and
+  declines with the typed `XlogError::CompileCapacityExceeded` (catchable Python
+  exception) before downstream kernels run on uninitialized buffers — so an
+  oversized CNF declines cleanly and the context survives for the next query,
+  with **no environment opt-in required**. Buffers remain fixed-capacity, so an
+  oversized program still declines rather than compiles; growable emit buffers
+  (so large programs compile) remain a follow-up.
+
 - *(runtime)* **D3 — factorized recursive deltas.** Transitive-closure-shaped
   recursive rules (`q(X,Z) :- q(X,Y), edge(Y,Z)` and its left-linear /
   non-linear-self-join / swapped-head variants) now route their semi-naive

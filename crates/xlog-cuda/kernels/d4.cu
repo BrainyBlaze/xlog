@@ -1850,7 +1850,8 @@ extern "C" __global__ void d4_compile_emit(
     uint32_t* __restrict__ decision_var,
     uint32_t* __restrict__ decision_child_false,
     uint32_t* __restrict__ decision_child_true,
-    uint32_t* __restrict__ node_level
+    uint32_t* __restrict__ node_level,
+    uint32_t* __restrict__ overflow_flag // len=1; set to 1 on capacity overflow
 ) {
     if (compile_needed[0] == 0u) {
         return;
@@ -1858,6 +1859,23 @@ extern "C" __global__ void d4_compile_emit(
     uint32_t n = frontier_size[0];
     if (n > max_frontier_items) {
         d4_trap();
+    }
+
+    // Graceful capacity guard, evaluated in EVERY block before any write: if the
+    // emitted node/edge totals would exceed the fixed-capacity buffers, set the
+    // overflow flag and return rather than trapping. A trap (asm "trap;") poisons
+    // the CUDA primary context and kills every later compile in the process; the
+    // flag lets the host decline cleanly with a typed error instead.
+    {
+        uint32_t cap_last = max_frontier_items - 1u;
+        uint32_t cap_total_nodes = node_offsets[cap_last] + node_counts[cap_last];
+        uint32_t cap_total_edges = edge_offsets[cap_last] + edge_counts[cap_last];
+        if (3u + cap_total_nodes > node_cap || n + cap_total_edges > edge_cap) {
+            if (blockIdx.x == 0u && threadIdx.x == 0u) {
+                overflow_flag[0] = 1u;
+            }
+            return;
+        }
     }
 
     // Initialize reserved nodes once.
@@ -1883,13 +1901,8 @@ extern "C" __global__ void d4_compile_emit(
         uint32_t reserved_nodes = 3u;
         uint32_t reserved_edges = n;
 
-        if (reserved_nodes + total_nodes > node_cap) {
-            d4_trap();
-        }
-        if (reserved_edges + total_edges > edge_cap) {
-            d4_trap();
-        }
-
+        // Capacity already verified by the graceful guard above (overflow sets
+        // the flag and returns), so totals fit the buffers here.
         uint32_t sentinel_idx = reserved_nodes + total_nodes;
         child_offsets[sentinel_idx] = reserved_edges + total_edges;
         // Ensure the root OR degree is well-defined even when there are no leaf nodes.

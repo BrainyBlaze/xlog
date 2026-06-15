@@ -273,6 +273,13 @@ pub(super) fn compile_gpu_d4_with_gate(
     device
         .memset_zeros(&mut meta_frontier)
         .map_err(|e| XlogError::Kernel(format!("Failed to zero meta_frontier: {}", e)))?;
+    // Capacity-overflow flag: the emit kernel sets this (instead of trapping and
+    // poisoning the context) when the node/edge totals exceed the fixed-capacity
+    // emit buffers. Read after the launch to decline cleanly.
+    let mut overflow_flag = memory.alloc::<u32>(1)?;
+    device
+        .memset_zeros(&mut overflow_flag)
+        .map_err(|e| XlogError::Kernel(format!("Failed to zero overflow_flag: {}", e)))?;
     let mut emit_params: Vec<*mut c_void> = vec![
         compile_needed.as_kernel_param(),
         max_depth.as_kernel_param(),
@@ -306,6 +313,7 @@ pub(super) fn compile_gpu_d4_with_gate(
         (&decision_child_false).as_kernel_param(),
         (&decision_child_true).as_kernel_param(),
         (&node_level).as_kernel_param(),
+        (&overflow_flag).as_kernel_param(),
     ];
     #[cfg(debug_assertions)]
     eprintln!("[xlog-prob] gpu_d4: launch d4_compile_emit");
@@ -321,6 +329,23 @@ pub(super) fn compile_gpu_d4_with_gate(
         )
     }
     .map_err(|e| XlogError::Kernel(format!("d4_compile_emit failed: {}", e)))?;
+    // Fail closed on capacity overflow: the emit kernel sets this flag and
+    // returns (instead of trapping and poisoning the context) when the CNF is
+    // too large for the fixed-capacity emit buffers. Reading it here syncs the
+    // emit launch; on overflow, decline with a typed error before the downstream
+    // kernels run on uninitialized buffers.
+    let overflow_host = device
+        .dtoh_sync_copy(&overflow_flag)
+        .map_err(|e| XlogError::Kernel(format!("dtoh d4 emit overflow flag: {}", e)))?;
+    if overflow_host.first().copied().unwrap_or(0) != 0 {
+        return Err(XlogError::CompileCapacityExceeded {
+            context: "d4_compile_emit".to_string(),
+            detail: format!(
+                "knowledge-compilation emit exceeds fixed buffer capacity \
+                 (node_cap {node_cap} / edge_cap {edge_cap}); CNF too large to compile"
+            ),
+        });
+    }
     // No device synchronize after d4_compile_emit: next op is capture_meta launch
     // on same stream.
     #[cfg(debug_assertions)]
@@ -651,6 +676,7 @@ mod tests {
         let compile_emit = device
             .get_func(D4_MODULE, "d4_compile_emit")
             .expect("d4_compile_emit must exist");
+        let overflow_flag = memory.alloc::<u32>(1).expect("overflow_flag alloc");
         let mut emit_params: Vec<*mut c_void> = vec![
             (&compile_needed).as_kernel_param(),
             max_depth_u32.as_kernel_param(),
@@ -684,6 +710,7 @@ mod tests {
             (&decision_child_false).as_kernel_param(),
             (&decision_child_true).as_kernel_param(),
             (&node_level).as_kernel_param(),
+            (&overflow_flag).as_kernel_param(),
         ];
         // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
         unsafe {
@@ -944,6 +971,7 @@ mod tests {
         let compile_emit = device
             .get_func(D4_MODULE, d4_kernels::D4_COMPILE_EMIT)
             .expect("d4_compile_emit must exist");
+        let overflow_flag = memory.alloc::<u32>(1).expect("overflow_flag alloc");
         let mut emit_params: Vec<*mut c_void> = vec![
             (&compile_needed).as_kernel_param(),
             max_depth_u32.as_kernel_param(),
@@ -977,6 +1005,7 @@ mod tests {
             (&decision_child_false).as_kernel_param(),
             (&decision_child_true).as_kernel_param(),
             (&node_level).as_kernel_param(),
+            (&overflow_flag).as_kernel_param(),
         ];
         // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
         unsafe {
@@ -1228,6 +1257,7 @@ mod tests {
         let compile_emit = device
             .get_func(D4_MODULE, d4_kernels::D4_COMPILE_EMIT)
             .expect("d4_compile_emit must exist");
+        let overflow_flag = memory.alloc::<u32>(1).expect("overflow_flag alloc");
         let mut emit_params: Vec<*mut c_void> = vec![
             (&compile_needed).as_kernel_param(),
             max_depth_u32.as_kernel_param(),
@@ -1261,6 +1291,7 @@ mod tests {
             (&decision_child_false).as_kernel_param(),
             (&decision_child_true).as_kernel_param(),
             (&node_level).as_kernel_param(),
+            (&overflow_flag).as_kernel_param(),
         ];
         // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
         unsafe {
@@ -1516,6 +1547,7 @@ mod tests {
         let compile_emit = device
             .get_func(D4_MODULE, d4_kernels::D4_COMPILE_EMIT)
             .expect("d4_compile_emit must exist");
+        let overflow_flag = memory.alloc::<u32>(1).expect("overflow_flag alloc");
         let mut emit_params: Vec<*mut c_void> = vec![
             (&compile_needed).as_kernel_param(),
             max_depth_u32.as_kernel_param(),
@@ -1549,6 +1581,7 @@ mod tests {
             (&decision_child_false).as_kernel_param(),
             (&decision_child_true).as_kernel_param(),
             (&node_level).as_kernel_param(),
+            (&overflow_flag).as_kernel_param(),
         ];
         // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
         unsafe {
@@ -1812,6 +1845,7 @@ mod tests {
         let compile_emit = device
             .get_func(D4_MODULE, d4_kernels::D4_COMPILE_EMIT)
             .expect("d4_compile_emit must exist");
+        let overflow_flag = memory.alloc::<u32>(1).expect("overflow_flag alloc");
         let mut emit_params: Vec<*mut c_void> = vec![
             (&compile_needed).as_kernel_param(),
             max_depth_u32.as_kernel_param(),
@@ -1845,6 +1879,7 @@ mod tests {
             (&decision_child_false).as_kernel_param(),
             (&decision_child_true).as_kernel_param(),
             (&node_level).as_kernel_param(),
+            (&overflow_flag).as_kernel_param(),
         ];
         // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
         unsafe {
