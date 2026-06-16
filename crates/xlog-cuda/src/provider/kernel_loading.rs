@@ -33,6 +33,7 @@ impl CudaKernelProvider {
 
             let sources = super::load_module_sources(spec.cu_name, cc)?;
             let mut loaded_from_cubin = false;
+            let mut loaded = false;
             let mut load_errors = Vec::new();
 
             for source in sources {
@@ -44,6 +45,7 @@ impl CudaKernelProvider {
                         {
                             Ok(()) => {
                                 loaded_from_cubin = is_cubin;
+                                loaded = true;
                                 load_errors.clear();
                                 break;
                             }
@@ -63,6 +65,7 @@ impl CudaKernelProvider {
                         ) {
                             Ok(()) => {
                                 loaded_from_cubin = false;
+                                loaded = true;
                                 load_errors.clear();
                                 break;
                             }
@@ -73,12 +76,21 @@ impl CudaKernelProvider {
                     }
                 }
             }
-            if !load_errors.is_empty() {
-                return Err(XlogError::Kernel(format!(
-                    "Failed to load {} module after {} attempt(s): {}",
-                    spec.cu_name,
-                    load_errors.len(),
+            // Fail CLOSED: never proceed without a successfully loaded module.
+            // This covers both "every source failed" and "no source was
+            // available" (e.g. all staged artifacts skipped as stale and no
+            // embedded PTX) — the latter would otherwise silently load nothing.
+            if !loaded {
+                let detail = if load_errors.is_empty() {
+                    "no kernel artifact source available (staged artifacts skipped as stale \
+                     and no embedded portable PTX present)"
+                        .to_string()
+                } else {
                     load_errors.join("; ")
+                };
+                return Err(XlogError::Kernel(format!(
+                    "Failed to load {} module: {}",
+                    spec.cu_name, detail
                 )));
             }
 

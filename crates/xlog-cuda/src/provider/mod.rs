@@ -95,24 +95,55 @@ pub(crate) fn resolve_module_sources_with_locator(
     let mut sources: Vec<KernelModuleSource> = locator
         .resolve_module_paths(name, cc)
         .into_iter()
+        // Skip any staged cubin/PTX whose bytes diverge from what this binary
+        // was built against. A stale staged artifact (kernel signature changed
+        // but the staged copy was never refreshed) otherwise loads "fine" and
+        // then launches a mismatched kernel into an illegal address.
+        .filter(|(path, _)| !staged_artifact_is_stale(path))
         .map(|(path, is_cubin)| KernelModuleSource::File { path, is_cubin })
         .collect();
 
-    let has_portable_file = sources.iter().any(|source| {
-        matches!(
-            source,
-            KernelModuleSource::File {
-                is_cubin: false,
-                ..
-            }
-        )
-    });
-    if !has_portable_file {
-        if let Some(ptx) = crate::embedded_kernel_data::portable_ptx(name) {
-            sources.push(KernelModuleSource::EmbeddedPortablePtx { ptx });
-        }
+    // ALWAYS append the embedded portable PTX as the final fallback. It is
+    // compiled into this binary, so it can never be stale relative to the launch
+    // sites — it guarantees a signature-correct kernel even when every staged
+    // File artifact was skipped as stale or fails to load. (Previously this was
+    // suppressed whenever any portable-PTX *file* existed, which let a stale
+    // staged PTX shadow the fresh embedded one.)
+    if let Some(ptx) = crate::embedded_kernel_data::portable_ptx(name) {
+        sources.push(KernelModuleSource::EmbeddedPortablePtx { ptx });
     }
     sources
+}
+
+/// A staged cubin/PTX is "stale" when this binary embeds a canonical integrity
+/// hash for that artifact file name and the on-disk bytes do not match it — the
+/// staged artifact diverges from what this build produced. Loading such an
+/// artifact can launch a mismatched kernel into an illegal address, so it is
+/// skipped in favor of a fresh source. Artifacts with no embedded canonical
+/// hash (e.g. an arch this build did not produce) are NOT treated as stale — we
+/// can only validate what we built — nor are unreadable files (the loader
+/// surfaces the IO error).
+fn staged_artifact_is_stale(path: &std::path::Path) -> bool {
+    let Some(file_name) = path.file_name().and_then(|n| n.to_str()) else {
+        return false;
+    };
+    let Some(expected) = crate::embedded_kernel_data::canonical_artifact_hash(file_name) else {
+        return false;
+    };
+    match std::fs::read(path) {
+        Ok(bytes) => fnv1a_64(&bytes) != expected,
+        Err(_) => false,
+    }
+}
+
+/// FNV-1a 64-bit, matching the build-time hash in `crates/xlog-cuda/build.rs`.
+fn fnv1a_64(bytes: &[u8]) -> u64 {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for &byte in bytes {
+        hash ^= byte as u64;
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    hash
 }
 
 #[cfg(test)]
@@ -135,13 +166,17 @@ mod kernel_source_resolution_tests {
         ));
         let kernels = root.join("kernels");
         fs::create_dir_all(&kernels).expect("create kernels dir");
-        fs::write(kernels.join("join.sm_86.cubin"), b"cubin").expect("write cubin");
-        fs::write(kernels.join("join.portable.ptx"), b"ptx").expect("write ptx");
-        let expected_cubin = kernels.join("join.sm_86.cubin");
-        let expected_ptx = kernels.join("join.portable.ptx");
+        // Use a name this build does NOT produce, so neither file carries a
+        // canonical integrity hash (the staleness skip is exercised separately).
+        // This isolates the file-resolution precedence: cubin first, then the
+        // portable-PTX file as fallback.
+        fs::write(kernels.join("fakekernel.sm_86.cubin"), b"cubin").expect("write cubin");
+        fs::write(kernels.join("fakekernel.portable.ptx"), b"ptx").expect("write ptx");
+        let expected_cubin = kernels.join("fakekernel.sm_86.cubin");
+        let expected_ptx = kernels.join("fakekernel.portable.ptx");
 
         let locator = KernelArtifactLocator::new(None, Some(kernels.clone()), None);
-        let sources = resolve_module_sources_with_locator("join", 86, &locator);
+        let sources = resolve_module_sources_with_locator("fakekernel", 86, &locator);
 
         assert_eq!(sources.len(), 2);
         assert!(matches!(
@@ -160,6 +195,38 @@ mod kernel_source_resolution_tests {
         ));
 
         fs::remove_dir_all(root).expect("remove temp kernels");
+    }
+
+    // Locks the FNV-1a contract between build.rs (which embeds canonical
+    // artifact hashes) and the runtime (which re-hashes staged artifacts). If
+    // these two implementations ever diverge, every staged artifact would read
+    // as "stale" — so these canonical FNV-1a 64-bit vectors must hold.
+    #[test]
+    fn fnv1a_64_matches_known_vectors() {
+        assert_eq!(super::fnv1a_64(b""), 0xcbf2_9ce4_8422_2325);
+        assert_eq!(super::fnv1a_64(b"a"), 0xaf63_dc4c_8601_ec8c);
+        assert_eq!(super::fnv1a_64(b"foobar"), 0x85944171_f73967e8);
+    }
+
+    // A file whose name this build did not produce has no canonical hash, so it
+    // is conservatively NOT treated as stale (we only validate what we built).
+    // A nonexistent path is likewise not "stale" — the loader surfaces IO.
+    #[test]
+    fn staged_artifact_not_stale_without_canonical_hash() {
+        let root = std::env::temp_dir().join(format!(
+            "xlog-kernel-stale-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system clock before UNIX_EPOCH")
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).expect("create dir");
+        let unknown = root.join("definitely_not_a_real_kernel.sm_86.cubin");
+        fs::write(&unknown, b"bytes").expect("write");
+        assert!(!super::staged_artifact_is_stale(&unknown));
+        assert!(!super::staged_artifact_is_stale(&root.join("missing.portable.ptx")));
+        fs::remove_dir_all(root).expect("remove temp dir");
     }
 }
 
