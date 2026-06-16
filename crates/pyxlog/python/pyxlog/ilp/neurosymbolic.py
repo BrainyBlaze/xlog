@@ -299,11 +299,14 @@ def _train_joint_mixture(
 
     def head_prob() -> Any:
         # Noisy-OR: P(head) = 1 - prod_k (1 - eligible_k * sigmoid(w_k)).
-        one_minus = torch.ones(n, dtype=torch.float32, device=device)
-        for rule_id in candidate_ids:
-            p_k = torch.sigmoid(guard_modules[rule_id].logit)
-            one_minus = one_minus * (1.0 - masks[rule_id] * p_k)
-        return 1.0 - one_minus
+        # Grad-carrying guard sigmoids so the backward competes the candidates;
+        # the SAME _joint_noisy_or backs the held-out generalization read, so the
+        # two cannot drift.
+        p_by_rule = {
+            rule_id: torch.sigmoid(guard_modules[rule_id].logit)
+            for rule_id in candidate_ids
+        }
+        return _joint_noisy_or(masks, p_by_rule, candidate_ids, n, device)
 
     # Pure-torch differentiable loop over the guard params + static engine masks,
     # so the joint training performs no tracked device<->host transfers.
@@ -322,6 +325,129 @@ def _train_joint_mixture(
     with torch.no_grad():
         query_probabilities = head_prob().detach().cpu().tolist()
     return host_transfer_stats, query_probabilities
+
+
+def _joint_noisy_or(
+    masks: dict[str, Any],
+    p_by_rule: dict[str, Any],
+    candidate_ids: list[str],
+    n: int,
+    device: Any,
+) -> Any:
+    """Joint multi-rule noisy-OR head probability, shared by the training forward
+    and the held-out generalization read so the two compute the IDENTICAL mixture.
+
+    ``P(head_i) = 1 - prod_k (1 - mask_k[i] * p_k)`` where ``mask_k`` is candidate
+    k's relational eligibility (0/1 per binding, from the engine) and ``p_k`` its
+    guard probability. Training passes grad-carrying ``sigmoid(logit)`` tensors so
+    the backward competes the guards; the held-out read passes the detached
+    trained sigmoids. Routing both through this one function is what makes the
+    held-out generalization read honest by construction — there is no second
+    noisy-OR implementation that could silently diverge from the trained mixture.
+    """
+    import torch
+
+    one_minus = torch.ones(n, dtype=torch.float32, device=device)
+    for rule_id in candidate_ids:
+        one_minus = one_minus * (1.0 - masks[rule_id] * p_by_rule[rule_id])
+    return 1.0 - one_minus
+
+
+def _joint_mixture_probs(
+    program: Any,
+    train_head: str,
+    rule_weights: dict[str, float],
+    num_queries: int,
+    arity: int,
+) -> list[float]:
+    """Trained-guard joint noisy-OR over the engine's relational eligibility for
+    bindings ``train_head(0..num_queries-1)`` on ``program``. Pure forward: the
+    guards are fixed at ``rule_weights`` (their trained sigmoids) and only the
+    engine eligibility is read, so no training occurs."""
+    import torch
+
+    eligibility = program.joint_candidate_eligibility(train_head, arity, num_queries)
+    device = torch.device("cpu")
+    masks: dict[str, Any] = {}
+    p_by_rule: dict[str, Any] = {}
+    candidate_ids: list[str] = []
+    for guard_pred, mask in eligibility:
+        rule_id = guard_pred[len(_GUARD_PREDICATE_PREFIX) :]
+        if rule_id not in rule_weights:
+            # A defining rule whose guard was not trained (no weight supplied)
+            # cannot contribute a learned mixture term, so it is skipped.
+            continue
+        candidate_ids.append(rule_id)
+        masks[rule_id] = torch.tensor(
+            [1.0 if m else 0.0 for m in mask], dtype=torch.float32, device=device
+        )
+        p_by_rule[rule_id] = torch.tensor(
+            float(rule_weights[rule_id]), dtype=torch.float32, device=device
+        )
+    with torch.no_grad():
+        p_or = _joint_noisy_or(masks, p_by_rule, candidate_ids, num_queries, device)
+    return p_or.detach().cpu().tolist()
+
+
+def evaluate_joint_mixture(
+    source: str,
+    *,
+    rule_weights: dict[str, float],
+    num_queries: int,
+    arity: int = 1,
+    config: NeuroSymbolicTrainingConfig = NeuroSymbolicTrainingConfig(),
+) -> list[float]:
+    """Held-out generalization read for the ST-TRC Phase-1b joint mixture.
+
+    Given a program ``source`` carrying the SAME ``trainable_rule`` candidates as
+    the train run but with the HELD-OUT bindings' ground facts materialized, and
+    the guard sigmoids learned by ``train_neurosymbolic_program``
+    (``result.symbolic_rule_weights``), returns the per-query joint noisy-OR
+    ``p_or`` over the held-out bindings ``train_head(0..num_queries-1)``.
+
+    This is the faithful generalization signal: the TRAINED-guard mixture
+    evaluated on the engine's relational eligibility for the held-out split — not
+    a structural set-intersection — so a candidate that fit only the training
+    facts (a spurious correlate) yields low held-out ``p_or`` wherever its join
+    does not fire. The read reuses the exact ``_joint_noisy_or`` of the training
+    forward, so it cannot drift from the trained mixture.
+
+    Only a compiled program is needed — ``joint_candidate_eligibility`` reads
+    relational hard-filter membership, never the guard network — so no network
+    registration or example tensor source is required here.
+
+    SELECTION vs ADMISSION (load-bearing — the candidate set is the caller's via
+    ``rule_weights``): on a train-tie, every candidate whose join coincides with
+    the head on the TRAIN facts trains to an equally-high guard, so the guards
+    alone cannot discriminate the true rule from a train-perfect spurious
+    correlate. The discriminator is held-out coverage. Therefore:
+      - SELECT among train-covering candidates by held-out coverage — guard-free,
+        ``mean`` of each candidate's ``joint_candidate_eligibility`` mask over the
+        held-out positives — NOT by guard (the guards are tied).
+      - ADMIT by calling this function with ONLY the selected winner's weight
+        (``rule_weights={winner: w}``): the noisy-OR is then that one candidate's
+        held-out probability, the faithful generalization read. Passing the FULL
+        pool here is a trap — the OR is inflated wherever ANY candidate fires, so
+        a high-guard spurious coverer would mask the winner's non-generalization.
+        Pool-wide is the MIXTURE's prediction, not a single-candidate admission
+        gate.
+
+    CAVEAT: the held-out bindings' ground facts MUST be present in ``source`` for
+    each index ``0..num_queries-1``; if a binding's supporting facts are absent
+    the engine eligibility is empty (all-zero mask) and its ``p_or`` collapses to
+    0, which reads as a FALSE spurious-correlate rather than a real one. Callers
+    flattening pairs into indexed unary facts must materialize the held-out facts,
+    not only the train-split facts.
+    """
+    import pyxlog
+
+    program_source, _rules, train_head, _objective = _desugar_source(source)
+    program = pyxlog.Program.compile(
+        program_source,
+        device=config.device,
+        memory_mb=config.gpu_memory_mb,
+    )
+    return _joint_mixture_probs(program, train_head, rule_weights, num_queries, arity)
 
 
 def _make_optimizer(name: str, params: Any, lr: float) -> Any:

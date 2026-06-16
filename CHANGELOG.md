@@ -22,6 +22,24 @@ All notable changes to this project are documented in this file.
   candidates (relational joins plus a trainable guard); candidates carrying neural
   predicates beyond the guard are a documented follow-up (they require the circuit
   backward, which fuses prob→loss→gradient on-device, to be un-fused).
+- *(pyxlog)* **Held-out generalization read for the joint mixture
+  (`evaluate_joint_mixture`).** Evaluates a trained joint mixture's guards on a
+  HELD-OUT program split: given the held-out bindings' facts and the learned
+  guard sigmoids (`result.symbolic_rule_weights`), returns the per-query noisy-OR
+  `p_or` over the engine's relational eligibility for that split. It reuses the
+  exact `_joint_noisy_or` of the training forward (pinned by a test asserting the
+  read on the train split reproduces `query_probabilities`), so the generalization
+  signal cannot drift from the trained mixture. This is the faithful anti-spurious
+  signal where structural coverage is unavailable: a candidate that fit only the
+  training facts yields low held-out `p_or` wherever its join does not fire. The
+  read needs only a compiled program (eligibility is relational, never the guard
+  network), so no network registration or example tensor source is required.
+  Usage is candidate-set controlled by `rule_weights`: pass ONLY the selected
+  winner's weight for a single-candidate admission gate (the pool-wide OR is
+  inflated wherever any candidate fires, so a high-guard spurious coverer on a
+  train-tie would mask the winner's non-generalization); select among
+  train-covering candidates by guard-free held-out coverage, not by the (tied)
+  guards.
 - *(prob/solve)* **Fail-closed D4 equivalence-verify conflict budget
   (compile/verify robustness, primary fix).** Calibration showed the verify explosion is
   treewidth-exponential, not size-linear (onset ~654 CNF vars where legitimate

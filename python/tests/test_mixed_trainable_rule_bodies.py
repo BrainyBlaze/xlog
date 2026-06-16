@@ -21,6 +21,7 @@ from pyxlog.ilp.neurosymbolic import (  # noqa: E402
     _desugar_source,
     _make_rule_weight_module,
     _TENSOR_SOURCE_NAME,
+    evaluate_joint_mixture,
     train_neurosymbolic_program,
 )
 
@@ -320,3 +321,110 @@ def test_joint_multi_rule_same_head_mixture_selects_correct_candidate() -> None:
     # no tracked device<->host transfers.
     stats = result.training_host_transfer_stats
     assert stats["dtoh_calls"] == 0 and stats["htod_calls"] == 0
+
+
+@requires_cuda
+def test_evaluate_joint_mixture_matches_training_head_prob() -> None:
+    """Faithfulness pin: the held-out read evaluated over the SAME facts as the
+    train split must reproduce the training-time noisy-OR (query_probabilities)
+    to within float tolerance. This guarantees evaluate_joint_mixture is the
+    identical mixture as the trained forward — the property that makes the
+    held-out generalization read honest, not a re-derivation that could drift."""
+    examples = [
+        {
+            "inputs": torch.zeros((4, 1), dtype=torch.float32),
+            "targets": torch.tensor([1.0, 0.0, 1.0, 0.0], dtype=torch.float32),
+        }
+    ]
+    result = train_neurosymbolic_program(
+        JOINT_MIXTURE_SOURCE,
+        networks={},
+        examples=examples,
+        config=NeuroSymbolicTrainingConfig(steps=400, learning_rate=0.1),
+    )
+    probs = evaluate_joint_mixture(
+        JOINT_MIXTURE_SOURCE,
+        rule_weights=result.symbolic_rule_weights,
+        num_queries=4,
+    )
+    assert len(probs) == 4
+    for got, ref in zip(probs, result.query_probabilities):
+        assert abs(got - ref) < 1e-5
+
+
+@requires_cuda
+def test_evaluate_joint_mixture_generalizes_on_held_out_split() -> None:
+    """The held-out read is the anti-spurious generalization gate: the TRAINED
+    guard mixture, evaluated on the engine's relational eligibility for held-out
+    bindings the training never saw, must (a) stay high where the correct
+    candidate's join fires (it GENERALIZES) and (b) collapse to ~0 where no
+    candidate's facts are present (the materialization caveat: absent held-out
+    facts read as non-coverage, not a real spurious signal)."""
+    examples = [
+        {
+            "inputs": torch.zeros((4, 1), dtype=torch.float32),
+            "targets": torch.tensor([1.0, 0.0, 1.0, 0.0], dtype=torch.float32),
+        }
+    ]
+    result = train_neurosymbolic_program(
+        JOINT_MIXTURE_SOURCE,
+        networks={},
+        examples=examples,
+        config=NeuroSymbolicTrainingConfig(steps=400, learning_rate=0.1),
+    )
+    # Held-out bindings the training never saw: id 0 is covered by the correct
+    # join (supp INT refut); id 1 has NO supporting facts at all.
+    held_out_source = """
+        supp(0). refut(0).
+        pred supp(i64). pred refut(i64). pred only_a(i64). pred only_b(i64).
+        trainable_rule(cand_correct, weight=0.0) :: target(C) :- supp(C), refut(C).
+        trainable_rule(cand_a, weight=0.0) :: target(C) :- only_a(C).
+        trainable_rule(cand_b, weight=0.0) :: target(C) :- only_b(C).
+        train(target, binary_cross_entropy).
+    """
+    probs = evaluate_joint_mixture(
+        held_out_source,
+        rule_weights=result.symbolic_rule_weights,
+        num_queries=2,
+    )
+    assert len(probs) == 2
+    # id 0: trained correct candidate fires on the held-out binding -> generalizes.
+    assert probs[0] > 0.7
+    # id 1: no facts -> all candidates ineligible -> p_or ~ 0 (caveat case).
+    assert probs[1] < 1e-3
+
+
+@requires_cuda
+def test_evaluate_joint_mixture_per_candidate_read_discriminates_train_tie() -> None:
+    """Encodes the Phase-2 train-tie finding: when two candidates fit the train
+    trigger equally their guards are EQUAL (the competition cannot separate them),
+    so admission must read the SELECTED candidate's held-out probability — not the
+    pool. With equal guards, the per-candidate (single-weight) held-out read
+    discriminates: the true join covers held-out binding 0 (not 1), the spurious
+    join covers binding 1 (not 0). The pool-wide read is inflated on BOTH bindings
+    — which is exactly why the admission gate passes only the winner's weight."""
+    held_out_source = """
+        rel_a(0). rel_b(0). rel_a(1). rel_c(1).
+        pred rel_a(i64). pred rel_b(i64). pred rel_c(i64).
+        trainable_rule(cand_true, weight=0.0) :: target(C) :- rel_a(C), rel_b(C).
+        trainable_rule(cand_spur, weight=0.0) :: target(C) :- rel_a(C), rel_c(C).
+        train(target, binary_cross_entropy).
+    """
+    # Simulate the train-tie: both guards trained to the same high value.
+    tie = 0.95
+    true_read = evaluate_joint_mixture(
+        held_out_source, rule_weights={"cand_true": tie}, num_queries=2
+    )
+    spur_read = evaluate_joint_mixture(
+        held_out_source, rule_weights={"cand_spur": tie}, num_queries=2
+    )
+    pool_read = evaluate_joint_mixture(
+        held_out_source,
+        rule_weights={"cand_true": tie, "cand_spur": tie},
+        num_queries=2,
+    )
+    # Per-candidate reads discriminate despite identical guards:
+    assert true_read[0] > 0.9 and true_read[1] < 1e-3  # true covers 0, not 1
+    assert spur_read[0] < 1e-3 and spur_read[1] > 0.9  # spurious covers 1, not 0
+    # Pool-wide is inflated wherever EITHER fires -> not a single-candidate gate.
+    assert pool_read[0] > 0.9 and pool_read[1] > 0.9
