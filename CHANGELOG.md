@@ -6,6 +6,22 @@ All notable changes to this project are documented in this file.
 
 ### Added
 
+- *(pyxlog)* **Joint multi-rule same-head trainable mixture (guard-only).** A
+  query head may now be derived by MORE THAN ONE `trainable_rule` — the joint
+  soft-mixture where N candidate rules compete for mass on one head (previously
+  rejected with "expected exactly 1 matching rule"). When several trainable rules
+  derive the train head, `train_neurosymbolic_program` computes the head
+  probability as the noisy-OR over candidates of `(eligible_k × sigmoid(guard_k))`
+  and trains the per-candidate guards by BCE on the supervised head, so the
+  competition drives the correct candidate's guard up and wrong-body candidates'
+  down (a wrong body fires on rows that create false positives BCE crushes). The
+  per-candidate relational eligibility is exposed by
+  `CompiledProgram.joint_candidate_eligibility` (reusing the engine's hard-filter
+  evaluation); the differentiable mass is torch over the guard parameters, so the
+  training loop performs no tracked device<->host transfers. Scope: guard-only
+  candidates (relational joins plus a trainable guard); candidates carrying neural
+  predicates beyond the guard are a documented follow-up (they require the circuit
+  backward, which fuses prob→loss→gradient on-device, to be un-fused).
 - *(prob/solve)* **Fail-closed D4 equivalence-verify conflict budget
   (compile/verify robustness, primary fix).** Calibration showed the verify explosion is
   treewidth-exponential, not size-linear (onset ~654 CNF vars where legitimate
