@@ -36,7 +36,7 @@ structured today.
 
 ## Glossary
 
-For definitions of technical terms used throughout this document (SCC, RIR, PIR, CNF, XGCF, WMC, Decision-DNNF, DLPack, Arrow IPC, Arrow C Data Interface, Semi-Naive, HISA, etc.), see the [Glossary in ROADMAP.md](ROADMAP.md#glossary-of-terms).
+For release and version context around technical terms used throughout this document (SCC, RIR, PIR, CNF, XGCF, WMC, Decision-DNNF, DLPack, Arrow IPC, Arrow C Data Interface, Semi-Naive, HISA, etc.), see [ROADMAP.md](ROADMAP.md).
 
 ---
 

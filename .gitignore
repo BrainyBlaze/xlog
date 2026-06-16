@@ -54,6 +54,8 @@ data/
 !examples/neural/results/**/*.pt
 
 .docs/
+docs/api/generated/
+docs/ROADMAP.md
 
 # Fuzz testing artifacts
 fuzz/target/
