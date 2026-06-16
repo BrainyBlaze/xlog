@@ -1299,13 +1299,13 @@ impl super::CudaKernelProvider {
 
         // Step 1: typed multi-column sort. Float columns use total-order
         // normalization; signed integers use sign-flipped unsigned compare.
-        let sorted =
-            if Self::use_csm_cuda_graph_env() && row_count <= SMALL_FULL_ROW_SORT_MAX_ROWS {
-                self.small_sort_full_row_deterministic(input, row_count)?
-            } else {
-                let all_cols: Vec<usize> = (0..arity).collect();
-                self.sort(input, &all_cols)?
-            };
+        let sorted = if Self::use_csm_cuda_graph_env() && row_count <= SMALL_FULL_ROW_SORT_MAX_ROWS
+        {
+            self.small_sort_full_row_deterministic(input, row_count)?
+        } else {
+            let all_cols: Vec<usize> = (0..arity).collect();
+            self.sort(input, &all_cols)?
+        };
 
         // Step 2: bytewise adjacent-equality mask on the sorted buffer.
         let n = self.device_row_count(&sorted)? as u32;

@@ -103,9 +103,7 @@ enum Backing {
 /// `XLOG_DEBUG_POISON_FREE=1`, read once per process.
 fn poison_free_enabled() -> bool {
     static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ENABLED.get_or_init(|| {
-        std::env::var("XLOG_DEBUG_POISON_FREE").map(|v| v == "1") == Ok(true)
-    })
+    *ENABLED.get_or_init(|| std::env::var("XLOG_DEBUG_POISON_FREE").map(|v| v == "1") == Ok(true))
 }
 
 /// Debug probe: poison fresh legacy allocations with 0xDD so reads of
@@ -113,9 +111,7 @@ fn poison_free_enabled() -> bool {
 /// `XLOG_DEBUG_POISON_ALLOC=1`, read once per process.
 fn poison_alloc_enabled() -> bool {
     static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ENABLED.get_or_init(|| {
-        std::env::var("XLOG_DEBUG_POISON_ALLOC").map(|v| v == "1") == Ok(true)
-    })
+    *ENABLED.get_or_init(|| std::env::var("XLOG_DEBUG_POISON_ALLOC").map(|v| v == "1") == Ok(true))
 }
 
 /// Debug probe: track live legacy allocation ranges and panic if the

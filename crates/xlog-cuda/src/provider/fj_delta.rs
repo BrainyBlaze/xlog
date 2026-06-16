@@ -527,9 +527,9 @@ impl CudaKernelProvider {
                 continue;
             }
             for &idx in *col_idxs {
-                let col = buf.column(idx).ok_or_else(|| {
-                    XlogError::Kernel(format!("{ctx}: column {idx} missing"))
-                })?;
+                let col = buf
+                    .column(idx)
+                    .ok_or_else(|| XlogError::Kernel(format!("{ctx}: column {idx} missing")))?;
                 let view = self.column_as_u32_view(col, n as usize)?;
                 let mut rec = LaunchRecorder::new_strict(launch_stream);
                 rec.read_column(col);

@@ -607,8 +607,7 @@ fn blowup_chain_inputs(n: u32) -> BTreeMap<&'static str, Vec<(u32, u32)>> {
     m
 }
 
-const BLOWUP_CHAIN_SOURCE: &str =
-    "q(A, E) :- e1(A, B), e2(B, C), e3(C, D), e4(D, E).";
+const BLOWUP_CHAIN_SOURCE: &str = "q(A, E) :- e1(A, B), e2(B, C), e3(C, D), e4(D, E).";
 
 fn run_with_peak(
     fix: &Fixture,
@@ -685,5 +684,9 @@ fn free_join_adversarial_chain_stays_within_binary_peak() {
         ratio <= 1.2,
         "order gate: FJ-path peak must be within 1.2x binary (reorder-or-decline); got {ratio:.2}x with fj_count={fj_count}"
     );
-    assert_eq!(on_rows.len(), 1, "blow-up chain result must be exactly 1 row");
+    assert_eq!(
+        on_rows.len(),
+        1,
+        "blow-up chain result must be exactly 1 row"
+    );
 }

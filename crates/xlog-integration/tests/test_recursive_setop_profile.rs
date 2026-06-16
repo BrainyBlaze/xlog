@@ -145,8 +145,7 @@ usable(Head, A0, A1) :- support_2(Head, A0, A1, _, _, _, _, _, _, _).
     }
     store.put(
         "external_consumer_commit",
-        upload_i64(&provider, &[pred, arg0, arg1], schema3())
-            .expect("external_consumer_commit"),
+        upload_i64(&provider, &[pred, arg0, arg1], schema3()).expect("external_consumer_commit"),
     );
     store.put(
         "external_consumer_body_0",

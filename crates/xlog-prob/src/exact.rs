@@ -167,7 +167,9 @@ impl GpuExactState {
         let mut query_vars = self.provider.memory().alloc::<u32>(query_vars_host.len())?;
         self.provider
             .htod_sync_copy_into_tracked(&query_vars_host, &mut query_vars)
-            .map_err(|e| XlogError::Kernel(format!("Failed to upload batched query vars: {}", e)))?;
+            .map_err(|e| {
+                XlogError::Kernel(format!("Failed to upload batched query vars: {}", e))
+            })?;
         let query_vars = Arc::new(query_vars);
         cache.insert(query_vars_host, Arc::clone(&query_vars));
         Ok(query_vars)

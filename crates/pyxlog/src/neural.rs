@@ -821,7 +821,9 @@ impl CompiledProgram {
                     if !groups.contains_key(&key) {
                         group_order.push(key.clone());
                     }
-                    let entry = groups.entry(key).or_insert_with(|| (Vec::new(), Vec::new()));
+                    let entry = groups
+                        .entry(key)
+                        .or_insert_with(|| (Vec::new(), Vec::new()));
                     entry.0.push(atom);
                     entry.1.push(i);
                 }
@@ -832,10 +834,7 @@ impl CompiledProgram {
             let (atoms, indices) = groups.remove(key).expect("group populated above");
             // Per-query NLL losses for the group (expected=true); prob = exp(-loss).
             let losses = self.forward_backward_batch_complex_tensor(py, &atoms, true)?;
-            let prob_tensor = losses
-                .bind(py)
-                .call_method0("neg")?
-                .call_method0("exp")?;
+            let prob_tensor = losses.bind(py).call_method0("neg")?.call_method0("exp")?;
             let prob_list: Vec<f64> = prob_tensor.call_method0("tolist")?.extract()?;
             for (j, &orig_i) in indices.iter().enumerate() {
                 probs[orig_i] = prob_list[j];
@@ -2064,7 +2063,10 @@ impl CompiledProgram {
                     .map_err(|e| types::gpu_err("DLPack export failed", e))?;
                 let loss_capsule = dlpack_capsule_from_tensor(py, loss_dl)?;
                 // Per-query 1D loss tensor (length n_queries), in input order.
-                torch.getattr("from_dlpack")?.call1((loss_capsule,))?.unbind()
+                torch
+                    .getattr("from_dlpack")?
+                    .call1((loss_capsule,))?
+                    .unbind()
             }
             Err(_batch_err) => {
                 // Fallback path: preserve prior semantics if batched circuit path
@@ -2227,9 +2229,11 @@ impl CompiledProgram {
                 // body) is not materialized and would silently filter every
                 // grounding to probability 0. Fail loud instead — the join must
                 // be done upstream and supplied as ground facts.
-                let is_derived = self.ast.rules.iter().any(|r| {
-                    r.head.predicate == body_atom.predicate && !r.body.is_empty()
-                });
+                let is_derived = self
+                    .ast
+                    .rules
+                    .iter()
+                    .any(|r| r.head.predicate == body_atom.predicate && !r.body.is_empty());
                 if is_derived {
                     return Err(PyValueError::new_err(format!(
                         "Query rule for '{}' uses derived relation '{}' as a hard condition; \

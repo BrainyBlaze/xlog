@@ -225,7 +225,9 @@ mod kernel_source_resolution_tests {
         let unknown = root.join("definitely_not_a_real_kernel.sm_86.cubin");
         fs::write(&unknown, b"bytes").expect("write");
         assert!(!super::staged_artifact_is_stale(&unknown));
-        assert!(!super::staged_artifact_is_stale(&root.join("missing.portable.ptx")));
+        assert!(!super::staged_artifact_is_stale(
+            &root.join("missing.portable.ptx")
+        ));
         fs::remove_dir_all(root).expect("remove temp dir");
     }
 }
@@ -448,23 +450,17 @@ pub mod wcoj_kernels {
     pub const WCOJ_TRIANGLE_COUNT_HG_U32: &str = "wcoj_triangle_count_hg_u32";
     pub const WCOJ_TRIANGLE_GROUPBY_ROOT_COUNT_HG_U32: &str =
         "wcoj_triangle_groupby_root_count_hg_u32";
-    pub const WCOJ_TRIANGLE_GROUPBY_ROOT_SUM_HG_U32: &str =
-        "wcoj_triangle_groupby_root_sum_hg_u32";
-    pub const WCOJ_TRIANGLE_GROUPBY_ROOT_MIN_HG_U32: &str =
-        "wcoj_triangle_groupby_root_min_hg_u32";
-    pub const WCOJ_TRIANGLE_GROUPBY_ROOT_MAX_HG_U32: &str =
-        "wcoj_triangle_groupby_root_max_hg_u32";
+    pub const WCOJ_TRIANGLE_GROUPBY_ROOT_SUM_HG_U32: &str = "wcoj_triangle_groupby_root_sum_hg_u32";
+    pub const WCOJ_TRIANGLE_GROUPBY_ROOT_MIN_HG_U32: &str = "wcoj_triangle_groupby_root_min_hg_u32";
+    pub const WCOJ_TRIANGLE_GROUPBY_ROOT_MAX_HG_U32: &str = "wcoj_triangle_groupby_root_max_hg_u32";
     pub const WCOJ_TRIANGLE_MATERIALIZE_HG_U32: &str = "wcoj_triangle_materialize_hg_u32";
     pub const WCOJ_TRIANGLE_BUILD_HG_WORK_PLAN_U64: &str = "wcoj_triangle_build_hg_work_plan_u64";
     pub const WCOJ_TRIANGLE_COUNT_HG_U64: &str = "wcoj_triangle_count_hg_u64";
     pub const WCOJ_TRIANGLE_GROUPBY_ROOT_COUNT_HG_U64: &str =
         "wcoj_triangle_groupby_root_count_hg_u64";
-    pub const WCOJ_TRIANGLE_GROUPBY_ROOT_SUM_HG_U64: &str =
-        "wcoj_triangle_groupby_root_sum_hg_u64";
-    pub const WCOJ_TRIANGLE_GROUPBY_ROOT_MIN_HG_U64: &str =
-        "wcoj_triangle_groupby_root_min_hg_u64";
-    pub const WCOJ_TRIANGLE_GROUPBY_ROOT_MAX_HG_U64: &str =
-        "wcoj_triangle_groupby_root_max_hg_u64";
+    pub const WCOJ_TRIANGLE_GROUPBY_ROOT_SUM_HG_U64: &str = "wcoj_triangle_groupby_root_sum_hg_u64";
+    pub const WCOJ_TRIANGLE_GROUPBY_ROOT_MIN_HG_U64: &str = "wcoj_triangle_groupby_root_min_hg_u64";
+    pub const WCOJ_TRIANGLE_GROUPBY_ROOT_MAX_HG_U64: &str = "wcoj_triangle_groupby_root_max_hg_u64";
     pub const WCOJ_GROUPBY_ROOT_SEGMENT_SUM_COUNTS_U32: &str =
         "wcoj_groupby_root_segment_sum_counts_u32";
     pub const WCOJ_GROUPBY_ROOT_SEGMENT_SUM_VALUES_U64: &str =
@@ -484,8 +480,7 @@ pub mod wcoj_kernels {
     pub const WCOJ_4CYCLE_BUILD_E2_WORK_PREFIX_U32: &str = "wcoj_4cycle_build_e2_work_prefix_u32";
     pub const WCOJ_4CYCLE_BUILD_HG_WORK_PLAN_U32: &str = "wcoj_4cycle_build_hg_work_plan_u32";
     pub const WCOJ_4CYCLE_COUNT_HG_U32: &str = "wcoj_4cycle_count_hg_u32";
-    pub const WCOJ_4CYCLE_GROUPBY_ROOT_COUNT_HG_U32: &str =
-        "wcoj_4cycle_groupby_root_count_hg_u32";
+    pub const WCOJ_4CYCLE_GROUPBY_ROOT_COUNT_HG_U32: &str = "wcoj_4cycle_groupby_root_count_hg_u32";
     pub const WCOJ_4CYCLE_GROUPBY_ROOT_SUM_HG_U32: &str = "wcoj_4cycle_groupby_root_sum_hg_u32";
     pub const WCOJ_4CYCLE_GROUPBY_ROOT_MIN_HG_U32: &str = "wcoj_4cycle_groupby_root_min_hg_u32";
     pub const WCOJ_4CYCLE_GROUPBY_ROOT_MAX_HG_U32: &str = "wcoj_4cycle_groupby_root_max_hg_u32";
@@ -493,8 +488,7 @@ pub mod wcoj_kernels {
     pub const WCOJ_4CYCLE_BUILD_E2_WORK_PREFIX_U64: &str = "wcoj_4cycle_build_e2_work_prefix_u64";
     pub const WCOJ_4CYCLE_BUILD_HG_WORK_PLAN_U64: &str = "wcoj_4cycle_build_hg_work_plan_u64";
     pub const WCOJ_4CYCLE_COUNT_HG_U64: &str = "wcoj_4cycle_count_hg_u64";
-    pub const WCOJ_4CYCLE_GROUPBY_ROOT_COUNT_HG_U64: &str =
-        "wcoj_4cycle_groupby_root_count_hg_u64";
+    pub const WCOJ_4CYCLE_GROUPBY_ROOT_COUNT_HG_U64: &str = "wcoj_4cycle_groupby_root_count_hg_u64";
     pub const WCOJ_4CYCLE_MATERIALIZE_HG_U64: &str = "wcoj_4cycle_materialize_hg_u64";
     // General-arity clique kernels (k=5..8 from a single template).
     pub const WCOJ_CLIQUE5_COUNT_HG_U32: &str = "wcoj_clique5_count_hg_u32";

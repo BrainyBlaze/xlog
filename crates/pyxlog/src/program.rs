@@ -90,8 +90,9 @@ pub(crate) enum QuerySignature {
 impl QuerySignature {
     pub(crate) fn groups(&self) -> &[NeuralGroup] {
         match self {
-            QuerySignature::Boolean { groups, .. }
-            | QuerySignature::Targeted { groups, .. } => groups,
+            QuerySignature::Boolean { groups, .. } | QuerySignature::Targeted { groups, .. } => {
+                groups
+            }
         }
     }
 

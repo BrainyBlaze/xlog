@@ -1432,9 +1432,12 @@ impl Executor {
             })
         };
         let swapped = Schema::new(vec![("k".to_string(), ty(1)?), ("v".to_string(), ty(0)?)]);
-        let projected =
-            self.provider
-                .wcoj_project_output_columns_recorded(buf, &[1, 0], swapped, launch_stream)?;
+        let projected = self.provider.wcoj_project_output_columns_recorded(
+            buf,
+            &[1, 0],
+            swapped,
+            launch_stream,
+        )?;
         self.provider
             .wcoj_layout_u32_recorded(&projected, launch_stream)
     }
@@ -1593,7 +1596,11 @@ impl Executor {
                         );
                     }
                 };
-                let decided = if max_id == u32::MAX { None } else { Some(max_id + 1) };
+                let decided = if max_id == u32::MAX {
+                    None
+                } else {
+                    Some(max_id + 1)
+                };
                 ctx.domain_by_key.insert(domain_key, decided);
                 match decided {
                     Some(d) => d,
@@ -1909,10 +1916,7 @@ impl Executor {
         // the prefix-materialization order changes.
         for &i in &order {
             let vars = &atom_vars[i];
-            let split = vars
-                .iter()
-                .take_while(|v| bound_at[**v].is_some())
-                .count();
+            let split = vars.iter().take_while(|v| bound_at[**v].is_some()).count();
             if vars[split..].iter().any(|v| bound_at[*v].is_some()) {
                 // A bound variable after an unbound one: the trie order
                 // cannot consume it as a key — non-prefix body.

@@ -355,9 +355,10 @@ impl super::CudaKernelProvider {
                     agg_columns.push(output.into());
                 }
                 AggOp::Sum => {
-                    let value_ty = sorted.schema().column_type(value_col).ok_or_else(|| {
-                        XlogError::Kernel("Value column has no type".to_string())
-                    })?;
+                    let value_ty = sorted
+                        .schema()
+                        .column_type(value_col)
+                        .ok_or_else(|| XlogError::Kernel("Value column has no type".to_string()))?;
                     let output_bytes = row_cap_usize
                         .checked_mul(std::mem::size_of::<u64>())
                         .ok_or_else(|| XlogError::Kernel("Sum output size overflow".to_string()))?;
@@ -402,9 +403,10 @@ impl super::CudaKernelProvider {
                     agg_columns.push(output.into());
                 }
                 AggOp::Min => {
-                    let value_ty = sorted.schema().column_type(value_col).ok_or_else(|| {
-                        XlogError::Kernel("Value column has no type".to_string())
-                    })?;
+                    let value_ty = sorted
+                        .schema()
+                        .column_type(value_col)
+                        .ok_or_else(|| XlogError::Kernel("Value column has no type".to_string()))?;
                     if value_ty == ScalarType::U64 {
                         // U64 value-column min path (output U64,
                         // identity u64::MAX).
@@ -489,9 +491,10 @@ impl super::CudaKernelProvider {
                     }
                 }
                 AggOp::Max => {
-                    let value_ty = sorted.schema().column_type(value_col).ok_or_else(|| {
-                        XlogError::Kernel("Value column has no type".to_string())
-                    })?;
+                    let value_ty = sorted
+                        .schema()
+                        .column_type(value_col)
+                        .ok_or_else(|| XlogError::Kernel("Value column has no type".to_string()))?;
                     if value_ty == ScalarType::U64 {
                         // U64 value-column max path (output U64,
                         // identity 0).
@@ -800,12 +803,10 @@ impl super::CudaKernelProvider {
                 AggOp::Sum => ScalarType::U64,
                 // Value-width preserving min/max: preserve the value column's width
                 // (U64 values reduce to U64; everything else stays U32).
-                AggOp::Min | AggOp::Max => {
-                    match input.columns.get(value_col).map(|(_, ty)| *ty) {
-                        Some(ScalarType::U64) => ScalarType::U64,
-                        _ => ScalarType::U32,
-                    }
-                }
+                AggOp::Min | AggOp::Max => match input.columns.get(value_col).map(|(_, ty)| *ty) {
+                    Some(ScalarType::U64) => ScalarType::U64,
+                    _ => ScalarType::U32,
+                },
                 AggOp::LogSumExp => ScalarType::F64,
             };
             columns.push((agg_name, agg_type));
@@ -1216,12 +1217,10 @@ impl super::CudaKernelProvider {
             let elem_size = match agg_op {
                 AggOp::Count | AggOp::Sum => std::mem::size_of::<u64>(),
                 // Value-width preserving min/max: preserve the value column's width.
-                AggOp::Min | AggOp::Max => {
-                    match sorted.schema().column_type(value_col) {
-                        Some(ScalarType::U64) => std::mem::size_of::<u64>(),
-                        _ => std::mem::size_of::<u32>(),
-                    }
-                }
+                AggOp::Min | AggOp::Max => match sorted.schema().column_type(value_col) {
+                    Some(ScalarType::U64) => std::mem::size_of::<u64>(),
+                    _ => std::mem::size_of::<u32>(),
+                },
                 AggOp::LogSumExp => unreachable!("rejected above"),
             };
             let bytes = row_cap_usize
@@ -1452,9 +1451,10 @@ impl super::CudaKernelProvider {
                 }
                 AggOp::Sum => {
                     self.memset_zeros_u8_on_stream(output, &cu_stream)?;
-                    let value_ty = sorted.schema().column_type(*value_col).ok_or_else(|| {
-                        XlogError::Kernel("Value column has no type".to_string())
-                    })?;
+                    let value_ty = sorted
+                        .schema()
+                        .column_type(*value_col)
+                        .ok_or_else(|| XlogError::Kernel("Value column has no type".to_string()))?;
                     if value_ty == ScalarType::U64 {
                         let values_view = self.column_as_u64_view(values, row_cap_usize)?;
                         let sum_func = device
@@ -1494,9 +1494,10 @@ impl super::CudaKernelProvider {
                     }
                 }
                 AggOp::Min => {
-                    let value_ty = sorted.schema().column_type(*value_col).ok_or_else(|| {
-                        XlogError::Kernel("Value column has no type".to_string())
-                    })?;
+                    let value_ty = sorted
+                        .schema()
+                        .column_type(*value_col)
+                        .ok_or_else(|| XlogError::Kernel("Value column has no type".to_string()))?;
                     let fill_config = LaunchConfig::for_num_elems(row_cap_u32);
                     if value_ty == ScalarType::U64 {
                         // U64 value-column min path (output U64,
@@ -1578,9 +1579,10 @@ impl super::CudaKernelProvider {
                 }
                 AggOp::Max => {
                     self.memset_zeros_u8_on_stream(output, &cu_stream)?;
-                    let value_ty = sorted.schema().column_type(*value_col).ok_or_else(|| {
-                        XlogError::Kernel("Value column has no type".to_string())
-                    })?;
+                    let value_ty = sorted
+                        .schema()
+                        .column_type(*value_col)
+                        .ok_or_else(|| XlogError::Kernel("Value column has no type".to_string()))?;
                     if value_ty == ScalarType::U64 {
                         // U64 value-column max path (output U64,
                         // identity 0).

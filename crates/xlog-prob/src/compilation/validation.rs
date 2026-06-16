@@ -1022,7 +1022,13 @@ pub(crate) fn check_verify_size_bound(phi: &GpuCnf, context: &str) -> Result<()>
         );
     }
     let (var_budget, clause_budget) = verify_size_budget();
-    enforce_verify_size_bound(phi.var_cap, phi.clause_cap, var_budget, clause_budget, context)
+    enforce_verify_size_bound(
+        phi.var_cap,
+        phi.clause_cap,
+        var_budget,
+        clause_budget,
+        context,
+    )
 }
 
 pub fn validate_equivalence_gpu(

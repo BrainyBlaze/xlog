@@ -289,7 +289,8 @@ fn best_greedy_peak(
     let n = atom_vars.len();
     let mut best: Option<(Vec<usize>, u64)> = None;
     for leader in 0..n {
-        if let Some((order, peak)) = greedy_from_leader(ctx, atom_vars, cards, constrained, leader) {
+        if let Some((order, peak)) = greedy_from_leader(ctx, atom_vars, cards, constrained, leader)
+        {
             if best.as_ref().map_or(true, |(_, bp)| peak < *bp) {
                 best = Some((order, peak));
             }
@@ -371,7 +372,11 @@ fn eval_order_peak(
 /// already bound `bound`. Always requires connectivity (a shares ≥1 bound
 /// var); when `constrained`, the bound vars must additionally be a leading
 /// COLUMN prefix of `a` (FJ's probe-key rule).
-fn is_addable(a_vars: &[usize], bound: &std::collections::HashSet<usize>, constrained: bool) -> bool {
+fn is_addable(
+    a_vars: &[usize],
+    bound: &std::collections::HashSet<usize>,
+    constrained: bool,
+) -> bool {
     if !a_vars.iter().any(|v| bound.contains(v)) {
         return false; // disconnected — never a Cartesian step
     }
@@ -648,7 +653,10 @@ mod tests {
             slot_rels: &slots,
         };
         let m = CardinalityAwareCostModel::default();
-        assert!(m.factorized_loss_veto(&ctx), "all-small >=3-input body must veto");
+        assert!(
+            m.factorized_loss_veto(&ctx),
+            "all-small >=3-input body must veto"
+        );
 
         let stats_big = stats_with_cards(&[10, 10, 2_000_000, 10, 10]);
         let ctx_big = WcojDispatchCtx {

@@ -9,9 +9,9 @@ use crate::device_runtime::StreamId;
 use crate::launch::LaunchRecorder;
 use crate::memory::{CudaColumn, TrackedCudaSlice};
 use crate::wcoj_metadata::{
-    Wcoj4CycleRootAggValue, WcojCycle4HgWorkPlanU32, WcojCycle4HgWorkPlanU64,
-    WcojRelationMetadata, WcojRootAggValue, WcojTriangleHgCountPhaseU32,
-    WcojTriangleHgWorkPlanU32, WcojTriangleHgWorkPlanU64,
+    Wcoj4CycleRootAggValue, WcojCycle4HgWorkPlanU32, WcojCycle4HgWorkPlanU64, WcojRelationMetadata,
+    WcojRootAggValue, WcojTriangleHgCountPhaseU32, WcojTriangleHgWorkPlanU32,
+    WcojTriangleHgWorkPlanU64,
 };
 use crate::{AsKernelParam, CudaBuffer, LaunchAsync, LaunchConfig};
 
@@ -768,9 +768,7 @@ impl CudaKernelProvider {
                 .device()
                 .inner()
                 .get_func(WCOJ_MODULE, kernel_name)
-                .ok_or_else(|| {
-                    XlogError::Kernel(format!("{kernel_name} kernel not found"))
-                })?;
+                .ok_or_else(|| XlogError::Kernel(format!("{kernel_name} kernel not found")))?;
             let mut params: Vec<*mut c_void> = vec![
                 yz_col1.as_kernel_param(),
                 n_yz.as_kernel_param(),
@@ -3651,9 +3649,7 @@ impl CudaKernelProvider {
                 .device()
                 .inner()
                 .get_func(WCOJ_MODULE, kernel_name)
-                .ok_or_else(|| {
-                    XlogError::Kernel(format!("{kernel_name} kernel not found"))
-                })?;
+                .ok_or_else(|| XlogError::Kernel(format!("{kernel_name} kernel not found")))?;
             let mut params: Vec<*mut c_void> = vec![
                 e1_col0.as_kernel_param(),
                 e1_col1.as_kernel_param(),

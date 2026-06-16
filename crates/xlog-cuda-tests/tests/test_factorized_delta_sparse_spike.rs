@@ -79,19 +79,27 @@ fn upload(memory: &Arc<GpuMemoryManager>, rows: &[(u32, u32)]) -> CudaBuffer {
         ("c0".to_string(), ScalarType::U32),
         ("c1".to_string(), ScalarType::U32),
     ]);
-    CudaBuffer::from_columns_with_host_count(vec![col0.into(), col1.into()], n as u64, d_nr, schema, n)
+    CudaBuffer::from_columns_with_host_count(
+        vec![col0.into(), col1.into()],
+        n as u64,
+        d_nr,
+        schema,
+        n,
+    )
 }
 
 fn rows_of(memory: &Arc<GpuMemoryManager>, buf: &CudaBuffer) -> usize {
-    buf.cached_row_count().map(|n| n as usize).unwrap_or_else(|| {
-        let mut h = [0u32; 1];
-        memory
-            .device()
-            .inner()
-            .dtoh_sync_copy_into(buf.num_rows_device(), &mut h)
-            .expect("nr");
-        h[0] as usize
-    })
+    buf.cached_row_count()
+        .map(|n| n as usize)
+        .unwrap_or_else(|| {
+            let mut h = [0u32; 1];
+            memory
+                .device()
+                .inner()
+                .dtoh_sync_copy_into(buf.num_rows_device(), &mut h)
+                .expect("nr");
+            h[0] as usize
+        })
 }
 
 fn download_set(memory: &Arc<GpuMemoryManager>, buf: &CudaBuffer) -> Vec<(u32, u32)> {
@@ -105,7 +113,8 @@ fn download_set(memory: &Arc<GpuMemoryManager>, buf: &CudaBuffer) -> Vec<(u32, u
             panic!("owned");
         };
         unsafe {
-            let r = sys::cuMemcpyDtoH_v2(bytes.as_mut_ptr() as *mut _, *c.device_ptr(), bytes.len());
+            let r =
+                sys::cuMemcpyDtoH_v2(bytes.as_mut_ptr() as *mut _, *c.device_ptr(), bytes.len());
             assert_eq!(r, sys::cudaError_enum::CUDA_SUCCESS);
         }
         bytes
@@ -171,7 +180,13 @@ fn sparse_novel_step_matches_oracle_large_ids() {
     };
     const B: u32 = 1 << 20;
     let edge = large_id_edges();
-    let delta = vec![(B, B + 1), (B, B + 1), (B + 2, B), (3 * B, 5 * B), (7 * B, 7 * B)];
+    let delta = vec![
+        (B, B + 1),
+        (B, B + 1),
+        (B + 2, B),
+        (3 * B, 5 * B),
+        (7 * B, 7 * B),
+    ];
     let full_r = vec![(B, B + 2), (3 * B, 6 * B)];
     let expected = oracle_novel(&delta, &edge, &full_r);
     assert!(!expected.is_empty(), "fixture must yield novel rows");
@@ -378,7 +393,13 @@ fn sparse_gate_hub_blowup() {
         let t1 = Instant::now();
         let joined = fix
             .provider
-            .hash_join_v2(&delta_buf2, &edge_norm, &[1], &[0], xlog_cuda::JoinType::Inner)
+            .hash_join_v2(
+                &delta_buf2,
+                &edge_norm,
+                &[1],
+                &[0],
+                xlog_cuda::JoinType::Inner,
+            )
             .expect("hash join");
         // project (x, z) = columns (0, 3) then dedup.
         let proj = fix

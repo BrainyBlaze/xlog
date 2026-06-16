@@ -186,7 +186,11 @@ fn owned_col_ptr(buf: &CudaBuffer, idx: usize, ctx: &str) -> Result<u64> {
     }
 }
 
-fn find_col<'a>(cols: &'a [FrontierCol], tag: ColTag, ctx: &str) -> Result<&'a TrackedCudaSlice<u8>> {
+fn find_col<'a>(
+    cols: &'a [FrontierCol],
+    tag: ColTag,
+    ctx: &str,
+) -> Result<&'a TrackedCudaSlice<u8>> {
     cols.iter()
         .find(|(t, _)| *t == tag)
         .map(|(_, s)| s)
@@ -195,12 +199,7 @@ fn find_col<'a>(cols: &'a [FrontierCol], tag: ColTag, ctx: &str) -> Result<&'a T
 
 /// Validate the plan against the input arities. Returns the variable
 /// binding order (covers' variables in plan order).
-fn validate_plan(
-    plan: &FjPlan,
-    arities: &[usize],
-    mode: FjMode,
-    ctx: &str,
-) -> Result<Vec<usize>> {
+fn validate_plan(plan: &FjPlan, arities: &[usize], mode: FjMode, ctx: &str) -> Result<Vec<usize>> {
     if plan.nodes.is_empty() {
         return Err(XlogError::Kernel(format!("{ctx}: plan has no nodes")));
     }
@@ -783,9 +782,9 @@ impl CudaKernelProvider {
                     continue; // cover range is refined, not copied
                 }
                 let is_var = matches!(tag, ColTag::Var(_));
-                let dst = self
-                    .memory()
-                    .alloc::<u8>(if is_var { var_bytes } else { range_bytes })?;
+                let dst =
+                    self.memory()
+                        .alloc::<u8>(if is_var { var_bytes } else { range_bytes })?;
                 if is_var {
                     parent_copy_var_ptrs.push(*slice.device_ptr());
                     child_copy_var_ptrs.push(*dst.device_ptr());
@@ -1010,10 +1009,7 @@ impl CudaKernelProvider {
                             &mut params,
                         )
                         .map_err(|e| {
-                            XlogError::Kernel(format!(
-                                "{} launch failed: {e}",
-                                width.emit_kernel()
-                            ))
+                            XlogError::Kernel(format!("{} launch failed: {e}", width.emit_kernel()))
                         })?;
                 }
 
@@ -1106,17 +1102,17 @@ impl CudaKernelProvider {
             // their stale copied ranges from the child frontier.
             for pr in &fused {
                 let p = pr.input_idx;
-                child_cols.retain(|(t, _)| {
-                    !matches!(t, ColTag::RangeLo(x) | ColTag::RangeHi(x) if *x == p)
-                });
+                child_cols.retain(
+                    |(t, _)| !matches!(t, ColTag::RangeLo(x) | ColTag::RangeHi(x) if *x == p),
+                );
             }
             // Replace probed atoms' stale (copied) ranges with the
             // refined outputs; exhausted atoms drop their ranges.
             for pp in &mut probe_plans {
                 let p = pp.input_idx;
-                child_cols.retain(|(t, _)| {
-                    !matches!(t, ColTag::RangeLo(x) | ColTag::RangeHi(x) if *x == p)
-                });
+                child_cols.retain(
+                    |(t, _)| !matches!(t, ColTag::RangeLo(x) | ColTag::RangeHi(x) if *x == p),
+                );
                 if pp.keep {
                     child_cols.push((
                         ColTag::RangeLo(p),
@@ -1257,9 +1253,7 @@ impl CudaKernelProvider {
                             (&d_lo_tbl, &d_hi_tbl, n_ranges, count, &mut mult),
                         )
                         .map_err(|e| {
-                            XlogError::Kernel(format!(
-                                "fj_count_multiplicity launch failed: {e}"
-                            ))
+                            XlogError::Kernel(format!("fj_count_multiplicity launch failed: {e}"))
                         })?;
                 }
                 rec.commit(runtime).map_err(|e| {
@@ -1310,9 +1304,7 @@ impl CudaKernelProvider {
                 frontier
                     .iter()
                     .position(|(t, _)| *t == ColTag::Var(v))
-                    .ok_or_else(|| {
-                        XlogError::Kernel(format!("{ctx}: output variable {v} missing"))
-                    })
+                    .ok_or_else(|| XlogError::Kernel(format!("{ctx}: output variable {v} missing")))
             })
             .collect::<Result<_>>()?;
         let schema = Schema::new(

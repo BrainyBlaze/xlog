@@ -25,7 +25,7 @@ use cudarc::driver::sys;
 use xlog_core::{MemoryBudget, ScalarType, Schema};
 use xlog_cuda::device_runtime::{
     AsyncCudaResource, DeviceMemoryResource, GlobalDeviceBudget, LogRecord, LoggingResource,
-    LoggingSink, SinkError, StreamPool, StreamId, XlogDeviceRuntime,
+    LoggingSink, SinkError, StreamId, StreamPool, XlogDeviceRuntime,
 };
 use xlog_cuda::memory::{CudaBuffer, CudaColumn};
 use xlog_cuda::{CudaDevice, CudaKernelProvider, FjDeltaCols, GpuMemoryManager};
@@ -228,9 +228,19 @@ fn run_spike_tc(fix: &Fixture, edge_buf: &CudaBuffer, domain: u32) -> (CudaBuffe
     let mut iterations = 0u32;
     loop {
         iterations += 1;
-        assert!(iterations <= 64, "spike TC failed to converge in 64 iterations");
+        assert!(
+            iterations <= 64,
+            "spike TC failed to converge in 64 iterations"
+        );
         let novel = provider
-            .fj_delta_novel_u32_recorded(&delta, &edge_norm, &full_r, FjDeltaCols::CANONICAL, domain, StreamId::DEFAULT)
+            .fj_delta_novel_u32_recorded(
+                &delta,
+                &edge_norm,
+                &full_r,
+                FjDeltaCols::CANONICAL,
+                domain,
+                StreamId::DEFAULT,
+            )
             .expect("fj_delta_novel step");
         if buffer_rows(&fix.memory, &novel) == 0 {
             break;
@@ -288,7 +298,14 @@ fn fj_delta_step_matches_cpu_oracle() {
     let r_buf = upload_binary_u32(&fix.memory, &full_r);
     let novel = fix
         .provider
-        .fj_delta_novel_u32_recorded(&delta_buf, &edge_norm, &r_buf, FjDeltaCols::CANONICAL, 64, StreamId::DEFAULT)
+        .fj_delta_novel_u32_recorded(
+            &delta_buf,
+            &edge_norm,
+            &r_buf,
+            FjDeltaCols::CANONICAL,
+            64,
+            StreamId::DEFAULT,
+        )
         .expect("novel step");
     let got = download_row_set(&fix.memory, &novel);
     assert_eq!(got, expected, "novel step must match the CPU oracle");
@@ -342,9 +359,14 @@ fn fj_delta_out_of_domain_fails_closed() {
     let r_buf = upload_binary_u32(&fix.memory, &[(0, 2)]);
     // z = 99 >= domain 64 → the mark kernel must set the error flag
     // and the entry must fail closed instead of writing out of bounds.
-    let result = fix
-        .provider
-        .fj_delta_novel_u32_recorded(&delta_buf, &edge_norm, &r_buf, FjDeltaCols::CANONICAL, 64, StreamId::DEFAULT);
+    let result = fix.provider.fj_delta_novel_u32_recorded(
+        &delta_buf,
+        &edge_norm,
+        &r_buf,
+        FjDeltaCols::CANONICAL,
+        64,
+        StreamId::DEFAULT,
+    );
     let Err(err) = result else {
         panic!("out-of-domain id must fail closed");
     };
@@ -367,7 +389,14 @@ fn fj_delta_empty_inputs_yield_empty_novel() {
     let r_buf = upload_binary_u32(&fix.memory, &[(1, 2)]);
     let novel = fix
         .provider
-        .fj_delta_novel_u32_recorded(&empty_delta, &edge_norm, &r_buf, FjDeltaCols::CANONICAL, 8, StreamId::DEFAULT)
+        .fj_delta_novel_u32_recorded(
+            &empty_delta,
+            &edge_norm,
+            &r_buf,
+            FjDeltaCols::CANONICAL,
+            8,
+            StreamId::DEFAULT,
+        )
         .expect("empty delta step");
     assert_eq!(buffer_rows(&fix.memory, &novel), 0);
 
@@ -376,7 +405,14 @@ fn fj_delta_empty_inputs_yield_empty_novel() {
     let r_full = upload_binary_u32(&fix.memory, &[(0, 2)]);
     let novel2 = fix
         .provider
-        .fj_delta_novel_u32_recorded(&delta, &edge_norm, &r_full, FjDeltaCols::CANONICAL, 8, StreamId::DEFAULT)
+        .fj_delta_novel_u32_recorded(
+            &delta,
+            &edge_norm,
+            &r_full,
+            FjDeltaCols::CANONICAL,
+            8,
+            StreamId::DEFAULT,
+        )
         .expect("saturated step");
     assert_eq!(buffer_rows(&fix.memory, &novel2), 0);
 }

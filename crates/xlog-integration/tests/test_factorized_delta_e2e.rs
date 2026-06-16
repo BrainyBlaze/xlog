@@ -245,7 +245,9 @@ fn oracle_tc(edge: &[(u32, u32)]) -> Vec<(u32, u32)> {
 static ENV_LOCK: Mutex<()> = Mutex::new(());
 
 fn env_lock() -> MutexGuard<'static, ()> {
-    ENV_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 const KILL_SWITCH: &str = "XLOG_DISABLE_FACTORIZED_DELTA";
@@ -401,7 +403,11 @@ fn u64_tc_declines_silently() {
     );
     let rows = download_row_set_u64(&fix.memory, executor.store().get("q").expect("q"));
     // 3-cycle closure: all 9 ordered pairs.
-    assert_eq!(rows.len(), 9, "u64 TC must still be exact via the legacy path");
+    assert_eq!(
+        rows.len(),
+        9,
+        "u64 TC must still be exact via the legacy path"
+    );
 }
 
 #[test]
@@ -425,9 +431,7 @@ fn three_atom_recursive_body_declines_silently() {
         0,
         "3-atom recursive bodies must decline the factorized path"
     );
-    assert!(
-        !download_row_set_u32(&fix.memory, executor.store().get("q").expect("q")).is_empty()
-    );
+    assert!(!download_row_set_u32(&fix.memory, executor.store().get("q").expect("q")).is_empty());
 }
 
 const MAX_TABLE_BYTES: &str = "XLOG_FACTORIZED_DELTA_MAX_TABLE_BYTES";
@@ -462,8 +466,14 @@ fn sparse_table_over_budget_declines_to_legacy() {
         "a sparse table over the byte ceiling must decline to the legacy path"
     );
     let expected = oracle_tc(&edges);
-    assert_eq!(on_rows, expected, "decline path must still match the oracle closure");
-    assert!(!on_rows.is_empty(), "fixture must produce a non-empty closure");
+    assert_eq!(
+        on_rows, expected,
+        "decline path must still match the oracle closure"
+    );
+    assert!(
+        !on_rows.is_empty(),
+        "fixture must produce a non-empty closure"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -506,7 +516,11 @@ const TC_SOURCE: &str = "pred edge(u32, u32).\n\
 /// One engine run on `edges`, returning (wall_ms, peak_bytes,
 /// dispatch_count, row_count). Fresh fixture each call so the peak is
 /// attributable to this run alone.
-fn engine_run(edges: &[(u32, u32)], budget_bytes: u64, factorized_on: bool) -> (f64, u64, u64, usize) {
+fn engine_run(
+    edges: &[(u32, u32)],
+    budget_bytes: u64,
+    factorized_on: bool,
+) -> (f64, u64, u64, usize) {
     let fix = make_fixture_with_budget(budget_bytes).expect("CUDA fixture");
     if factorized_on {
         std::env::remove_var(KILL_SWITCH);
@@ -615,7 +629,12 @@ fn bench_guard(name: &str, edges: &[(u32, u32)], budget_bytes: u64, expect_dispa
 #[test]
 #[ignore = "S4 bench guard — run on RunPod, never locally"]
 fn s4_bench_dense_block_cycle() {
-    bench_guard("dense", &block_cycle_edges(4, 256), 10 * 1024 * 1024 * 1024, true);
+    bench_guard(
+        "dense",
+        &block_cycle_edges(4, 256),
+        10 * 1024 * 1024 * 1024,
+        true,
+    );
 }
 
 /// Sparse long path chain (1500 nodes) — late iterations have tiny
@@ -725,7 +744,10 @@ fn s4_bench_sparse_domain_blowup() {
 
     assert_eq!(on_rows, expected_rows, "sparse-route TC row count");
     assert_eq!(off_rows, expected_rows, "legacy TC row count");
-    assert!(on_dispatch >= 1, "sparse route must fire (domain > dense cap)");
+    assert!(
+        on_dispatch >= 1,
+        "sparse route must fire (domain > dense cap)"
+    );
 
     let om = median(&mut off_ms);
     let opk = median(&mut off_peak);
@@ -740,5 +762,8 @@ fn s4_bench_sparse_domain_blowup() {
         nm / om.max(1.0),
     );
     assert!(npk < opk, "sparse route must cut peak vs legacy");
-    assert!(nm <= om * 1.2, "sparse route must not regress wall-clock beyond 1.2x");
+    assert!(
+        nm <= om * 1.2,
+        "sparse route must not regress wall-clock beyond 1.2x"
+    );
 }

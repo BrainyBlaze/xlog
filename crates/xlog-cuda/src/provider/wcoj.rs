@@ -2307,13 +2307,12 @@ impl CudaKernelProvider {
             launch_stream,
             entry_label,
         )?;
-        let leader_work_total =
-            u32::try_from(leader_metadata.total).map_err(|_| {
-                XlogError::Kernel(format!(
-                    "{}: leader metadata total {} exceeds u32 kernel surface",
-                    entry_label, leader_metadata.total
-                ))
-            })?;
+        let leader_work_total = u32::try_from(leader_metadata.total).map_err(|_| {
+            XlogError::Kernel(format!(
+                "{}: leader metadata total {} exceeds u32 kernel surface",
+                entry_label, leader_metadata.total
+            ))
+        })?;
         if leader_work_total != n_leader {
             return Err(XlogError::Kernel(format!(
                 "{}: leader metadata total {} does not match leader row count {}",
@@ -2385,7 +2384,9 @@ impl CudaKernelProvider {
         self.device()
             .inner()
             .memset_zeros(&mut row_counts)
-            .map_err(|e| XlogError::Kernel(format!("{}: zero row counts failed: {}", entry_label, e)))?;
+            .map_err(|e| {
+                XlogError::Kernel(format!("{}: zero row counts failed: {}", entry_label, e))
+            })?;
 
         let block_work_unit = crate::wcoj_metadata::WCOJ_HG_BLOCK_WORK_UNIT_DEFAULT;
         let grid = leader_work_total.div_ceil(block_work_unit);
@@ -2416,7 +2417,10 @@ impl CudaKernelProvider {
             .inner()
             .get_func(WCOJ_MODULE, kernel_name)
             .ok_or_else(|| {
-                XlogError::Kernel(format!("{}: kernel '{}' not found", entry_label, kernel_name))
+                XlogError::Kernel(format!(
+                    "{}: kernel '{}' not found",
+                    entry_label, kernel_name
+                ))
             })?;
         // SAFETY: kernel signature
         //   wcoj_clique{K}_groupby_root_count_hg_u32(
@@ -2509,7 +2513,9 @@ impl CudaKernelProvider {
         self.device()
             .inner()
             .dtod_copy(leader.num_rows_device(), &mut d_num_rows)
-            .map_err(|e| XlogError::Kernel(format!("{}: copy row count failed: {}", entry_label, e)))?;
+            .map_err(|e| {
+                XlogError::Kernel(format!("{}: copy row count failed: {}", entry_label, e))
+            })?;
         let staging_schema = Schema::new(vec![
             ("root".to_string(), w_type),
             ("count".to_string(), ScalarType::U32),

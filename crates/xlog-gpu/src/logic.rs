@@ -3192,7 +3192,10 @@ mod v086_delta_coalesce_tests {
         let sequential_rows = sorted_query_rows(&provider, &sequential);
 
         let mut replacement_store = program.create_relation_store(provider.clone())?;
-        replacement_store.put("external_consumer_commit", test_buffer(&provider, &[1, 3, 4]));
+        replacement_store.put(
+            "external_consumer_commit",
+            test_buffer(&provider, &[1, 3, 4]),
+        );
         let replacement =
             program.evaluate_with_relation_store(provider.clone(), &replacement_store, false)?;
         let replacement_rows = sorted_query_rows(&provider, &replacement);

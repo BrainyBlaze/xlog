@@ -22,8 +22,8 @@
 
 use xlog_core::{Result, ScalarType, XlogError};
 
-use super::{wcoj_kernels, CudaKernelProvider, WCOJ_MODULE};
 use super::fj_delta::FjDeltaCols;
+use super::{wcoj_kernels, CudaKernelProvider, WCOJ_MODULE};
 use crate::device_runtime::StreamId;
 use crate::launch::LaunchRecorder;
 use crate::CudaBuffer;
@@ -161,7 +161,13 @@ impl CudaKernelProvider {
                     )
                     .map_err(|e| XlogError::Kernel(format!("fj_delta_range_u32 launch: {e}")))?;
             }
-            self.multiblock_scan_u32_inplace_on_stream(&mut wp, n_delta + 1, &cu_stream, launch_stream, runtime)?;
+            self.multiblock_scan_u32_inplace_on_stream(
+                &mut wp,
+                n_delta + 1,
+                &cu_stream,
+                launch_stream,
+                runtime,
+            )?;
             rec.commit(runtime)
                 .map_err(|e| XlogError::Kernel(format!("{ctx}: range commit: {e}")))?;
         }
@@ -228,7 +234,16 @@ impl CudaKernelProvider {
                             block_dim: (BLOCK_SIZE, 1, 1),
                             shared_mem_bytes: 0,
                         },
-                        (&delta_x_v, n_delta, &range_lo, &wp, total_work, &edge_z_v, &mut est, est_bit_mask),
+                        (
+                            &delta_x_v,
+                            n_delta,
+                            &range_lo,
+                            &wp,
+                            total_work,
+                            &edge_z_v,
+                            &mut est,
+                            est_bit_mask,
+                        ),
                     )
                     .map_err(|e| {
                         XlogError::Kernel(format!("fj_delta_sparse_estimate launch: {e}"))
@@ -300,9 +315,7 @@ impl CudaKernelProvider {
         // scan counts (u32, cap+1) must fit the caller's budget; over
         // budget → decline so the caller uses the legacy path.
         if max_table_bytes != 0 {
-            let table_bytes = u64::from(cap)
-                .saturating_mul(8 + 1 + 4)
-                .saturating_add(4);
+            let table_bytes = u64::from(cap).saturating_mul(8 + 1 + 4).saturating_add(4);
             if table_bytes > max_table_bytes {
                 return Ok(None);
             }
@@ -365,7 +378,15 @@ impl CudaKernelProvider {
                                 block_dim: (BLOCK_SIZE, 1, 1),
                                 shared_mem_bytes: 0,
                             },
-                            (&r_x_v, &r_z_v, n_r, &mut table, &mut is_r, mask, &mut overflow),
+                            (
+                                &r_x_v,
+                                &r_z_v,
+                                n_r,
+                                &mut table,
+                                &mut is_r,
+                                mask,
+                                &mut overflow,
+                            ),
                         )
                         .map_err(|e| {
                             XlogError::Kernel(format!("fj_delta_sparse_load_r launch: {e}"))
@@ -395,7 +416,17 @@ impl CudaKernelProvider {
                             block_dim: (BLOCK_SIZE, 1, 1),
                             shared_mem_bytes: 0,
                         },
-                        (&delta_x_v, n_delta, &range_lo, &wp, total_work, &edge_z_v, &mut table, mask, &mut overflow),
+                        (
+                            &delta_x_v,
+                            n_delta,
+                            &range_lo,
+                            &wp,
+                            total_work,
+                            &edge_z_v,
+                            &mut table,
+                            mask,
+                            &mut overflow,
+                        ),
                     )
                     .map_err(|e| {
                         XlogError::Kernel(format!("fj_delta_sparse_insert_candidates launch: {e}"))
@@ -445,7 +476,13 @@ impl CudaKernelProvider {
                     )
                     .map_err(|e| XlogError::Kernel(format!("fj_delta_sparse_mark launch: {e}")))?;
             }
-            self.multiblock_scan_u32_inplace_on_stream(&mut counts, cap + 1, &cu_stream, launch_stream, runtime)?;
+            self.multiblock_scan_u32_inplace_on_stream(
+                &mut counts,
+                cap + 1,
+                &cu_stream,
+                launch_stream,
+                runtime,
+            )?;
             rec.commit(runtime)
                 .map_err(|e| XlogError::Kernel(format!("{ctx}: mark commit: {e}")))?;
         }

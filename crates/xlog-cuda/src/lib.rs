@@ -36,9 +36,8 @@ pub use provider::{
     circuit_kernels, dedup_kernels, filter_kernels, groupby_kernels, ilp_kernels, join_kernels,
     pack_kernels, pir_kernels, scan_kernels, set_ops_kernels, sort_kernels, CompareOp,
     CudaKernelProvider, FjDeltaCols, FjNode, FjPlan, FjSubAtom, JoinIndexV2, JoinType,
-    CIRCUIT_MODULE,
-    DEDUP_MODULE, FILTER_MODULE, GROUPBY_MODULE, ILP_MODULE, JOIN_MODULE, PACK_MODULE, PIR_MODULE,
-    SCAN_MODULE, SET_OPS_MODULE, SORT_MODULE,
+    CIRCUIT_MODULE, DEDUP_MODULE, FILTER_MODULE, GROUPBY_MODULE, ILP_MODULE, JOIN_MODULE,
+    PACK_MODULE, PIR_MODULE, SCAN_MODULE, SET_OPS_MODULE, SORT_MODULE,
 };
 pub use wcoj_metadata::{
     HeatDist, LayoutSignature, RootMetadata, VertexId, WcojCycle4HgWorkPlanU32,
