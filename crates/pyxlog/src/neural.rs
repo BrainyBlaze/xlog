@@ -2078,7 +2078,19 @@ impl CompiledProgram {
 
     fn build_query_signature(&self, pred_name: &str, arity: usize) -> PyResult<QuerySignature> {
         let rule = self.find_query_rule(pred_name, arity)?;
+        self.build_query_signature_for_rule(rule, pred_name, arity)
+    }
 
+    /// Build the query signature from ONE specific defining rule. The single-rule
+    /// path reaches this via `build_query_signature` (after `find_query_rule`);
+    /// the multi-rule same-head path (ST-TRC Phase-1b) builds one signature per
+    /// candidate rule and OR-amalgamates them in the forward.
+    fn build_query_signature_for_rule(
+        &self,
+        rule: &Rule,
+        pred_name: &str,
+        arity: usize,
+    ) -> PyResult<QuerySignature> {
         let mut groups: Vec<NeuralGroup> = Vec::with_capacity(rule.body.len());
         // Ordinary-relation body atoms collected as HARD join conditions.
         let mut hard_filters: Vec<HardFilter> = Vec::new();
@@ -2268,6 +2280,18 @@ impl CompiledProgram {
             groups,
             hard_filters,
         })
+    }
+
+    /// All rules defining `(pred_name, arity)` — the multi-rule same-head
+    /// candidate set for the ST-TRC joint soft-mixture. The single-rule helper
+    /// `find_query_rule` enforces exactly one for the legacy path; the multi-rule
+    /// forward consumes the full set and OR-amalgamates them.
+    fn find_query_rules(&self, pred_name: &str, arity: usize) -> Vec<&Rule> {
+        self.ast
+            .rules
+            .iter()
+            .filter(|rule| rule.head.predicate == pred_name && rule.head.arity() == arity)
+            .collect()
     }
 
     fn find_query_rule(&self, pred_name: &str, arity: usize) -> PyResult<&Rule> {
