@@ -49,6 +49,37 @@ def test_docs_build_script_generates_reference_outputs() -> None:
     assert "target/doc" not in script
 
 
+def test_rust_api_page_links_to_generated_crate_roots() -> None:
+    rust_page = read("docs/api/rust.md")
+    assert "generated/rust/index.html" in rust_page
+    assert "generated/rust/pyxlog/index.html" in rust_page
+    assert "docs/api/generated/rust/index.html" in read("scripts/docs/build_docs.sh")
+
+
+def test_home_page_omits_local_generated_html_notice() -> None:
+    home = read("docs/index.md")
+    assert "Generated HTML is not committed" not in home
+    assert "make docs when Rust and Doxygen dependencies are available" not in home
+
+
+def test_internal_agent_workspace_paths_are_local_only() -> None:
+    ignored = read(".gitignore")
+    agents = read("AGENTS.md")
+    claude = read("CLAUDE.md")
+    for path in [
+        "docs/evidence",
+        "docs/plans",
+        "docs/reports",
+        "docs/superpowers",
+    ]:
+        assert f"{path}/" in ignored
+        assert path in agents
+        assert path in claude
+    for guidance in [agents, claude]:
+        assert "local-only agent workspaces" in guidance
+        assert "must not be staged, committed, or pushed" in guidance
+
+
 def test_github_docs_workflow_deploys_pages_only_from_main_docs_changes() -> None:
     workflow = read(".github/workflows/docs.yml")
     for expected in [

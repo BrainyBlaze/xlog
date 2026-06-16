@@ -1,3 +1,0 @@
-cell	path	row_equality	rows	expected_rows	p50_work_per_xy	static_bytes	syncs_per_block	direct_global_ns	direct_line6_ns	direct_speedup	direct_positive_p	direct_gate_speedup	direct_gate_p	criterion_global_ns	criterion_line6_ns	criterion_speedup	peak_vram_bytes	gate_bytes	verdict
-triangle-line6-fanout-512	line6-aligned	PASS	262144	262144	512	2092	2	309555	216020	1.432992	0.001953	1.500000	0.539062	330476	227811	1.450661	17848360	40802189312	RED_M_W35_1
-triangle-small-inner-4K	line6-fanout-guard	PASS	1219	NA	2	4096	18	309331	301882	1.024675	0.187500	0.950000	0.065430	322810	344732	0.936408	17848360	40802189312	RED_M_W35_2_PARITY

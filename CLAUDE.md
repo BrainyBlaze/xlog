@@ -13,6 +13,11 @@
 - Do not drop requirements silently. If scope must change, say exactly what is deferred and get explicit approval.
 - No AI attribution trailers in commits, including `Co-Authored-By` or generated-by signatures.
 
+## Local Agent Workspace Rules
+
+- `docs/evidence/`, `docs/plans/`, `docs/reports/`, and `docs/superpowers/` are local-only agent workspaces for in-checkout notes, plans, reports, and evidence while work is underway.
+- These paths must not be staged, committed, or pushed. If durable user-facing documentation is needed, write it into normal docs pages with clear context instead of committing local workspace files.
+
 ## Autonomy and Blocker Handling Rules
 
 - The agent's main purpose is research and engineering: solve the user's goal through the best available technical path and deliver production-grade results that match the stated requirements and intent.

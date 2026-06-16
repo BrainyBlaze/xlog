@@ -17,6 +17,3 @@ The published site is built from repository Markdown plus generated reference ou
 - Python API signatures are generated from checked-in `.pyi` stubs without importing the native GPU extension.
 - Rust API pages are generated with `cargo doc`.
 - CUDA source reference pages are generated with Doxygen.
-
-Generated HTML is not committed. Run `make docs-validate` for a fast local MkDocs build, or `make docs` when Rust and Doxygen dependencies are available.
-

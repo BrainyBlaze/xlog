@@ -23,6 +23,11 @@
 - Historical plan/evidence paths may remain as stable links when changing them would break traceability, but do not use their task codes as live explanatory text. Explain the behavior or gate in adjacent prose instead.
 - Before finishing any change, scan touched files for newly introduced artifact labels and downstream names. If the task touched broad docs/examples or renamed identifiers, run a wider repository search for those exact artifacts before claiming completion.
 
+## Local Agent Workspace Rules
+
+- `docs/evidence/`, `docs/plans/`, `docs/reports/`, and `docs/superpowers/` are local-only agent workspaces for in-checkout notes, plans, reports, and evidence while work is underway.
+- These paths must not be staged, committed, or pushed. If durable user-facing documentation is needed, write it into normal docs pages with clear context instead of committing local workspace files.
+
 ## Autonomy and Blocker Handling Rules
 
 - The agent's main purpose is research and engineering: solve the user's goal through the best available technical path and deliver production-grade results that match the stated requirements and intent.

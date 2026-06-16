@@ -1,3 +1,0 @@
-workload	unsplit_median_ns	unsplit_ci_low_ns	unsplit_ci_high_ns	hand_split_median_ns	hand_split_ci_low_ns	hand_split_ci_high_ns	speedup	row_equality	metric	verdict
-callgraph-inner-skew	35823744.556	35579077.333	36107258.800	10775657.721	10283802.951	11105042.500	3.324	PASS	M4.1	PASS
-heapalloc-inner-skew	484894425.500	481944713.000	509570383.500	10134390.645	9992178.986	10192695.408	47.849	PASS	M4.2	PASS

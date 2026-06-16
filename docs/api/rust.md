@@ -8,7 +8,7 @@ cargo doc --workspace --no-deps --locked
 
 The generated rustdoc output is published under:
 
-- [Rust workspace reference](generated/rust/index.html)
-
-If this link shows placeholder content in a local fast build, run `make docs` in an environment with the Rust and CUDA toolchains available.
-
+- [Rust workspace index](generated/rust/index.html)
+- [pyxlog crate](generated/rust/pyxlog/index.html)
+- [xlog core crate](generated/rust/xlog_core/index.html)
+- [xlog CUDA crate](generated/rust/xlog_cuda/index.html)
