@@ -844,6 +844,78 @@ impl CompiledProgram {
         Ok(probs)
     }
 
+    /// Per-candidate hard-filter eligibility for the joint multi-rule same-head
+    /// mixture (ST-TRC Phase-1b, guard-only candidates). For each rule defining
+    /// `(head_pred, arity)`, returns `(guard_predicate_name, mask)` where
+    /// `mask[i]` is whether the ground head binding `head_pred(i)` satisfies that
+    /// rule's hard join conditions (its ordinary-relation body atoms). The
+    /// differentiable noisy-OR over `(mask × guard sigmoid)` is assembled
+    /// torch-side by the caller; this exposes only the engine's relational
+    /// eligibility, so a query contributes through candidate k exactly where
+    /// candidate k's join holds — the OR-amalgamation gate.
+    ///
+    /// Guard-only candidates only: each defining rule must carry exactly the
+    /// trainable guard as its neural group (the relational joins are the hard
+    /// conditions). General multi-rule OR over candidates with neural predicates
+    /// beyond the guard requires the circuit backward and is a documented
+    /// follow-up.
+    #[pyo3(signature = (head_pred, arity, num_queries))]
+    fn joint_candidate_eligibility(
+        &self,
+        head_pred: &str,
+        arity: usize,
+        num_queries: usize,
+    ) -> PyResult<Vec<(String, Vec<bool>)>> {
+        let rules = self.find_query_rules(head_pred, arity);
+        if rules.is_empty() {
+            return Err(PyValueError::new_err(format!(
+                "No rule defines query predicate '{}' with arity {}",
+                head_pred, arity
+            )));
+        }
+        let mut out: Vec<(String, Vec<bool>)> = Vec::with_capacity(rules.len());
+        for rule in rules {
+            let signature = self.build_query_signature_for_rule(rule, head_pred, arity)?;
+            // Guard-only candidate: exactly one neural group (the guard).
+            let guard_pred = signature
+                .groups()
+                .first()
+                .map(|g| g.info.predicate.clone())
+                .ok_or_else(|| {
+                    PyValueError::new_err(format!(
+                        "Candidate rule for '{}' has no neural guard group; the joint \
+                         multi-rule mixture requires guard-only candidates (relational joins \
+                         plus a single trainable guard)",
+                        head_pred
+                    ))
+                })?;
+            let filters = signature.hard_filters();
+            let mut mask = Vec::with_capacity(num_queries);
+            for i in 0..num_queries {
+                let atom = Atom {
+                    predicate: head_pred.to_string(),
+                    terms: (0..arity.max(1))
+                        .map(|p| {
+                            if p == 0 {
+                                Term::Integer(i as i64)
+                            } else {
+                                Term::Integer(0)
+                            }
+                        })
+                        .collect(),
+                };
+                let eligible = if filters.is_empty() {
+                    true
+                } else {
+                    self.hard_filters_satisfied(&atom, filters)?
+                };
+                mask.push(eligible);
+            }
+            out.push((guard_pred, mask));
+        }
+        Ok(out)
+    }
+
     /// Belnap-aware dual-channel loss terms for bridge training.
     #[pyo3(signature = (pro, contra, quarantine, pro_reward=1.0, contra_penalty=1.0, quarantine_penalty=1.0, reduction="mean"))]
     fn belnap_loss(

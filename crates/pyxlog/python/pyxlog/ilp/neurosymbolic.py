@@ -144,54 +144,74 @@ def train_neurosymbolic_program(
     neural_grads: dict[str, float] = {name: 0.0 for name in modules}
     symbolic_grads: dict[str, float] = {rule.id: 0.0 for rule in rules}
 
-    # Warm the device-side caches (circuit template + batched query-var
-    # metadata) once with a throwaway forward-backward over the real queries.
-    # The bounded one-time metadata uploads happen here, BEFORE the measured
-    # region; the warm-up gradients are cleared by the first step's zero_grad.
-    program.zero_grad()
-    program.forward_backward_grouped(queries, targets)
-
-    # Zero-host training hot loop. Every example's supervised circuit is
-    # evaluated in one device-resident batched pass per step (grouped by target
-    # and circuit template), so a step costs a single host sync for the summed
-    # loss rather than one per query. Looping the scalar forward_backward
-    # instead host-syncs on every query (.item()), which leaves the GPU idle
-    # between syncs and makes training CPU-bound. Reset/read the provider's
-    # host-transfer counters around the warm loop so the no-host property
-    # (no tracked device<->host transfers in either direction) is observable.
-    program.reset_host_transfer_stats()
-    for _step in range(config.steps):
-        program.zero_grad()
-        step_loss = program.forward_backward_grouped(queries, targets)
-        program.optimizer_step()
-        losses.append(step_loss / len(targets))
-    host_transfer_stats = program.host_transfer_stats()
-
-    # Final gradient magnitudes, read once after training. These are per
-    # parameter, not per query, so they stay out of the hot loop; optimizer_step
-    # does not clear gradients (only zero_grad does), so after the last step they
-    # still reflect the final backward pass.
-    for name, module in modules.items():
-        neural_grads[name] = float(
-            sum(
-                param.grad.detach().abs().sum().item()
-                for param in module.parameters()
-                if param.grad is not None
+    # ST-TRC Phase-1b: when MORE THAN ONE trainable rule derives the train head,
+    # this is the joint multi-rule same-head soft-mixture — the candidates compete
+    # for mass on one head. Route to the joint noisy-OR forward; a single defining
+    # rule keeps the (faster, circuit) single-rule path below.
+    candidate_ids = [
+        rule.id
+        for rule in rules
+        if rule.head.split("(", 1)[0].strip() == train_head
+    ]
+    if len(candidate_ids) > 1:
+        host_transfer_stats, query_probabilities = _train_joint_mixture(
+            program, train_head, targets, candidate_ids, guard_modules, config, losses
+        )
+        for rule in rules:
+            grad = guard_modules[rule.id].logit.grad
+            symbolic_grads[rule.id] = (
+                float(grad.detach().abs().item()) if grad is not None else 0.0
             )
-        )
-    for rule in rules:
-        grad = guard_modules[rule.id].logit.grad
-        symbolic_grads[rule.id] = (
-            float(grad.detach().abs().item()) if grad is not None else 0.0
-        )
+    else:
+        # Warm the device-side caches (circuit template + batched query-var
+        # metadata) once with a throwaway forward-backward over the real queries.
+        # The bounded one-time metadata uploads happen here, BEFORE the measured
+        # region; the warm-up gradients are cleared by the first step's zero_grad.
+        program.zero_grad()
+        program.forward_backward_grouped(queries, targets)
 
-    # Final evaluation pass: query probabilities from the trained circuit, in one
-    # batched pass per template (O(templates) host syncs, not O(N) per query), so
-    # the whole training surface — not just the step loop — avoids per-query host
-    # syncs at corpus scale.
-    program.zero_grad()
-    query_probabilities = program.query_probabilities_grouped(queries)
-    program.zero_grad()
+        # Zero-host training hot loop. Every example's supervised circuit is
+        # evaluated in one device-resident batched pass per step (grouped by
+        # target and circuit template), so a step costs a single host sync for the
+        # summed loss rather than one per query. Looping the scalar
+        # forward_backward instead host-syncs on every query (.item()), which
+        # leaves the GPU idle between syncs and makes training CPU-bound.
+        # Reset/read the provider's host-transfer counters around the warm loop so
+        # the no-host property (no tracked device<->host transfers either
+        # direction) is observable.
+        program.reset_host_transfer_stats()
+        for _step in range(config.steps):
+            program.zero_grad()
+            step_loss = program.forward_backward_grouped(queries, targets)
+            program.optimizer_step()
+            losses.append(step_loss / len(targets))
+        host_transfer_stats = program.host_transfer_stats()
+
+        # Final gradient magnitudes, read once after training. These are per
+        # parameter, not per query, so they stay out of the hot loop;
+        # optimizer_step does not clear gradients (only zero_grad does), so after
+        # the last step they still reflect the final backward pass.
+        for name, module in modules.items():
+            neural_grads[name] = float(
+                sum(
+                    param.grad.detach().abs().sum().item()
+                    for param in module.parameters()
+                    if param.grad is not None
+                )
+            )
+        for rule in rules:
+            grad = guard_modules[rule.id].logit.grad
+            symbolic_grads[rule.id] = (
+                float(grad.detach().abs().item()) if grad is not None else 0.0
+            )
+
+        # Final evaluation pass: query probabilities from the trained circuit, in
+        # one batched pass per template (O(templates) host syncs, not O(N) per
+        # query), so the whole training surface — not just the step loop — avoids
+        # per-query host syncs at corpus scale.
+        program.zero_grad()
+        query_probabilities = program.query_probabilities_grouped(queries)
+        program.zero_grad()
 
     learned_weights = {
         rule.id: float(torch.sigmoid(guard_modules[rule.id].logit.detach()).item())
@@ -234,6 +254,74 @@ def train_neurosymbolic_program(
         proof_trace_map=proof_trace_map,
         training_host_transfer_stats=host_transfer_stats,
     )
+
+
+def _train_joint_mixture(
+    program: Any,
+    train_head: str,
+    targets: list[bool],
+    candidate_ids: list[str],
+    guard_modules: dict[str, Any],
+    config: NeuroSymbolicTrainingConfig,
+    losses: list[float],
+) -> tuple[dict[str, int], list[float]]:
+    """ST-TRC Phase-1b joint soft-mixture over guard-only same-head candidates.
+
+    N candidate rules derive the SAME head, each gated by its own guard. The head
+    probability is the noisy-OR over candidates of (engine relational eligibility
+    x guard sigmoid); BCE on the supervised head drives the per-candidate
+    competition. The relational eligibility — which head bindings each candidate's
+    join fires on — comes from the engine via ``joint_candidate_eligibility``; the
+    differentiable mass (guard sigmoids, OR, BCE) is torch over the guard params.
+    Guard-only: no neural predicate beyond the guards, so this is the faithful
+    Phase-1b mechanism with no circuit eval in the loop (the gradient to each
+    guard is identical to a circuit-routed OR for input-independent guards).
+
+    Returns ``(host_transfer_stats, query_probabilities)``.
+    """
+    import torch
+
+    n = len(targets)
+    # Engine relational eligibility per candidate: a length-n mask of which head
+    # bindings 0..n-1 satisfy that candidate's join. Static across steps.
+    eligibility = program.joint_candidate_eligibility(train_head, 1, n)
+    device = guard_modules[candidate_ids[0]].logit.device
+    masks: dict[str, Any] = {}
+    for guard_pred, mask in eligibility:
+        rule_id = guard_pred[len(_GUARD_PREDICATE_PREFIX) :]
+        masks[rule_id] = torch.tensor(
+            [1.0 if m else 0.0 for m in mask], dtype=torch.float32, device=device
+        )
+    targets_t = torch.tensor(
+        [1.0 if t else 0.0 for t in targets], dtype=torch.float32, device=device
+    )
+    eps = 1e-7
+
+    def head_prob() -> Any:
+        # Noisy-OR: P(head) = 1 - prod_k (1 - eligible_k * sigmoid(w_k)).
+        one_minus = torch.ones(n, dtype=torch.float32, device=device)
+        for rule_id in candidate_ids:
+            p_k = torch.sigmoid(guard_modules[rule_id].logit)
+            one_minus = one_minus * (1.0 - masks[rule_id] * p_k)
+        return 1.0 - one_minus
+
+    # Pure-torch differentiable loop over the guard params + static engine masks,
+    # so the joint training performs no tracked device<->host transfers.
+    program.reset_host_transfer_stats()
+    for _step in range(config.steps):
+        program.zero_grad()
+        p_or = head_prob().clamp(eps, 1.0 - eps)
+        loss = -(
+            targets_t * torch.log(p_or) + (1.0 - targets_t) * torch.log(1.0 - p_or)
+        ).mean()
+        loss.backward()
+        program.optimizer_step()
+        losses.append(float(loss.item()))
+    host_transfer_stats = dict(program.host_transfer_stats())
+
+    with torch.no_grad():
+        query_probabilities = head_prob().detach().cpu().tolist()
+    return host_transfer_stats, query_probabilities
 
 
 def _make_optimizer(name: str, params: Any, lr: float) -> Any:

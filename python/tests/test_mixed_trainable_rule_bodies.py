@@ -271,3 +271,52 @@ def test_training_loop_has_no_tracked_host_transfers() -> None:
     assert stats["dtoh_bytes"] == 0
     assert stats["htod_calls"] == 0
     assert stats["htod_bytes"] == 0
+
+
+# A single head derived by THREE trainable candidate rules (multi-rule same-head)
+# — the ST-TRC Phase-1b joint soft-mixture topology. Only the correct candidate
+# (supp ∩ refut) fires exactly on the positives {0,2}; the distractors fire on
+# wrong rows.
+JOINT_MIXTURE_SOURCE = """
+    supp(0). supp(2). supp(1). refut(0). refut(2). refut(3).
+    only_a(0). only_a(1). only_a(3). only_b(1). only_b(2). only_b(3).
+    pred supp(i64). pred refut(i64). pred only_a(i64). pred only_b(i64).
+    trainable_rule(cand_correct, weight=0.0) :: target(C) :- supp(C), refut(C).
+    trainable_rule(cand_a, weight=0.0) :: target(C) :- only_a(C).
+    trainable_rule(cand_b, weight=0.0) :: target(C) :- only_b(C).
+    train(target, binary_cross_entropy).
+"""
+
+
+@requires_cuda
+def test_joint_multi_rule_same_head_mixture_selects_correct_candidate() -> None:
+    """ST-TRC Phase-1b acceptance gate: when N trainable rules derive ONE head
+    (multi-rule same-head — previously rejected with 'expected exactly 1 matching
+    rule'), the joint noisy-OR competition must drive the CORRECT candidate's
+    guard high and ALL distractor guards low (the hard mask selects the correct
+    (i,j)). Guard-only candidates; the training loop stays zero-host."""
+    examples = [
+        {
+            "inputs": torch.zeros((4, 1), dtype=torch.float32),
+            "targets": torch.tensor([1.0, 0.0, 1.0, 0.0], dtype=torch.float32),
+        }
+    ]
+    result = train_neurosymbolic_program(
+        JOINT_MIXTURE_SOURCE,
+        networks={},
+        examples=examples,
+        config=NeuroSymbolicTrainingConfig(steps=400, learning_rate=0.1),
+    )
+    w = result.symbolic_rule_weights
+    # (1) correct guard high, ALL distractor guards low — the competition selects.
+    assert w["cand_correct"] > 0.7
+    assert w["cand_a"] < 0.3
+    assert w["cand_b"] < 0.3
+    # The joint head probability separates positives from negatives.
+    probs = result.query_probabilities
+    assert min(probs[0], probs[2]) > 0.7
+    assert max(probs[1], probs[3]) < 0.3
+    # The joint loop is pure torch over guard params + static engine masks:
+    # no tracked device<->host transfers.
+    stats = result.training_host_transfer_stats
+    assert stats["dtoh_calls"] == 0 and stats["htod_calls"] == 0
