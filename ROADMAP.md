@@ -2123,6 +2123,56 @@ evidence live under `docs/plans/2026-06-*`.
   not the compile frontier, so factorized provenance does not address it.
   Evidence retained under `docs/plans/2026-06-*`.
 
+## main after v0.9.2 - Neuro-Symbolic Trainable-Rule & ST-TRC Joint-Mixture Pack
+
+Completed on main, unreleased. The engine surface for learning logical rules by
+gradient descent (the consumer's "learn new rules, not validate a hard-coded
+base" goal). Every probability comes from the real compiled circuit or its
+faithful guard-only shortcut; no surrogate scoring path. Design and evidence
+under `docs/plans/2026-06-*`; `[Unreleased]` CHANGELOG entries carry the surface
+details.
+
+- [x] Mixed trainable-rule bodies: `trainable_rule` bodies joining `nn/k`
+      predicates with ordinary relations and builtins. Fact atoms are hard join
+      conditions; probability mass comes only from nn-predicates × σ(w);
+      gradients reach the network and the rule weight, never through fact atoms
+      (a derived hard condition fails loud, never silently filtering to 0).
+- [x] GPU-resident zero-host training step: the training hot loop evaluates each
+      step's supervised circuits in one batched device pass (grouped by target
+      and circuit template), so a step costs a single host sync rather than one
+      per query — no tracked device↔host transfers in the measured loop. The
+      optimizer is configurable (`NeuroSymbolicTrainingConfig.optimizer`,
+      default Adam; SGD stalls on the multiplicative-loss plateau).
+- [x] Joint multi-rule same-head soft-mixture (ST-TRC Phase-1b): a query head may
+      be derived by more than one `trainable_rule`; the candidates compete for
+      mass on one head as the noisy-OR over `(eligible_k × σ(guard_k))`, BCE on
+      the supervised head driving the per-candidate guard competition. Relational
+      eligibility comes from the engine (`joint_candidate_eligibility`); the
+      differentiable mass is torch over the guard parameters, so the loop stays
+      zero-host. Scope: guard-only candidates (relational joins plus a trainable
+      guard).
+- [x] Held-out generalization read (`evaluate_joint_mixture`): the trained-guard
+      noisy-OR over the engine's relational eligibility for a held-out split —
+      the faithful anti-spurious discriminator where structural coverage is
+      unavailable (a candidate that fit only the training facts yields low
+      held-out probability wherever its join does not fire). Reuses the exact
+      training-time noisy-OR (`_joint_noisy_or`), pinned by a test that the read
+      on the train split reproduces the trained probabilities. Selection among
+      train-covering candidates is guard-free held-out coverage (the guards tie
+      on a train-perfect correlate); admission reads only the selected winner.
+- Demonstration (consumer evidence, not an engine claim): the consumer
+      exercised this surface end-to-end on real WMIR state through a production
+      admission gate and reported a discovered-and-promoted novel rule with the
+      held-out gate rejecting a planted spurious correlate, honest caveats
+      intact. The "learn new rules" goal is realized as that consumer result;
+      this section records only the landed engine capability.
+- Driver-gated follow-up (no engine prerequisite for the guard-only path):
+      candidates whose bodies carry neural predicates beyond the guard need two
+      plumbing slices — a union-signature circuit forward_backward and a
+      per-candidate held-out circuit readout — and no new CUDA kernel (the fused
+      neural backward is already general over N groups). Admitted only on a
+      concrete neural-body driver. Feasibility read under `docs/plans/2026-06-*`.
+
 ## v0.9.3 - Consumer Runtime Pack (external consumer-driven; ordering pending maintainer decision)
 
 Sourced from the external consumer consolidated requirements package
@@ -2136,14 +2186,15 @@ final ordering is a maintainer decision.
 
 ### Neural-Symbolic Training
 
-- [ ] Mixed trainable-rule bodies (consumer training endgame): `trainable_rule` bodies
+- [x] Mixed trainable-rule bodies (consumer training endgame): `trainable_rule` bodies
       joining `nn/k` predicates with ordinary relations and builtins.
       Required semantics: fact atoms are hard join conditions; probability
       mass comes only from nn-predicates × σ(w); gradients flow to the
       network and w, never through fact atoms. Canonical example in the
       requirements doc (contrary_value_pair over nn_slot_competition +
-      claim_fact + F1 != F2). Consumer-verified precursor: the
-      neurosymbolic fix already trains on their side (gradient norm 0.47).
+      claim_fact + F1 != F2). Landed on main — see the "Neuro-Symbolic
+      Trainable-Rule & ST-TRC Joint-Mixture Pack" section above; it grew into the
+      full ST-TRC joint-mixture surface the consumer's training endgame needed.
 
 ### Session API and Performance
 
