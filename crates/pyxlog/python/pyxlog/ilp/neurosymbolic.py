@@ -66,6 +66,47 @@ class TrainableRuleDecl:
 
 
 @dataclass
+class NeuralBodySpec:
+    """A neural conjunct ``g_theta(phi(x)) >= tau`` attached to a candidate's body
+    (ST-TRC slice-1, the neural-bodied candidate shape).
+
+    The candidate's eligibility becomes its relational grounding mask AND the
+    straight-through-thresholded neural gate, so a head ``H(x) :- r_i(x) ^
+    [g_theta(phi(x)) >= tau]`` competes in the SAME noisy-OR mixture as a
+    guard-only relational candidate — its guard ``sigma(w_k)`` and the held-out
+    selector are unchanged; only the eligibility gains the learned gate. Gradient
+    flows to ``theta`` (and the guard), never to ``phi`` (an external entity
+    feature; detached for slice-1, backbone coupling is the downstream LoRA task).
+
+    ``features`` is the per-binding entity feature ``phi(x)`` as a fixed-width
+    tensor ``[num_queries, width]`` (the contract default is the mean-pooled
+    pre-quantization VQ-RB feature); ``width`` is fixed at head construction.
+    """
+
+    features: Any  # torch.Tensor [num_queries, width] — phi(x) per binding
+    threshold: float = 0.5  # tau_k: gate fires when sigmoid(g_theta) >= threshold
+    head_depth: int = 1  # 1 = linear->scalar; >1 inserts tanh hidden layers
+    hidden_dim: int = 16  # hidden width when head_depth > 1
+    gumbel_temperature: float = 1.0  # straight-through softening temperature
+    gumbel_noise: bool = False  # add Gumbel exploration noise during training
+    # (default off: deterministic straight-through; on: ST-Gumbel exploration)
+
+
+@dataclass
+class NeuralBodyState:
+    """The trained neural conjunct, serialized so the driver can rebuild the
+    PARAMETRIC HardenedClause (it carries ``theta`` + the phi-extraction spec and
+    re-evaluates ``g_theta`` per entity at apply time) and so the held-out read can
+    reconstruct ``g_theta`` on held-out features."""
+
+    state_dict: dict[str, Any]
+    width: int
+    threshold: float
+    head_depth: int
+    hidden_dim: int
+
+
+@dataclass
 class NeuroSymbolicTrainingResult:
     neural_parameter_grads: dict[str, float]
     symbolic_weight_grads: dict[str, float]
@@ -80,6 +121,11 @@ class NeuroSymbolicTrainingResult:
     # introduces no provider downloads, so these stay at their reset baseline;
     # surfaced so a caller can assert the no-host property of the training path.
     training_host_transfer_stats: Any = None
+    # Trained neural-body conjuncts, keyed by candidate rule id (only for
+    # neural-bodied candidates). Each NeuralBodyState carries the learned g_theta
+    # params + the phi/threshold spec so the driver can build the parametric
+    # HardenedClause and the held-out read can reconstruct the gate.
+    neural_body_state: dict[str, "NeuralBodyState"] = None
 
 
 def train_neurosymbolic_program(
@@ -88,8 +134,17 @@ def train_neurosymbolic_program(
     networks: dict[str, Any],
     examples: list[dict[str, Any]],
     config: NeuroSymbolicTrainingConfig = NeuroSymbolicTrainingConfig(),
+    neural_bodies: dict[str, "NeuralBodySpec"] | None = None,
 ) -> NeuroSymbolicTrainingResult:
-    """Jointly train neural predicates and symbolic rule weights on the engine."""
+    """Jointly train neural predicates and symbolic rule weights on the engine.
+
+    ``neural_bodies`` (ST-TRC slice-1) attaches a neural conjunct
+    ``g_theta_k(phi(x)) >= tau_k`` to a same-head candidate (keyed by its
+    ``trainable_rule`` id) for the joint multi-rule mixture: that candidate's
+    eligibility becomes its relational grounding AND the ST-thresholded gate, and
+    ``g_theta_k`` trains jointly with the guards under the same held-out selector.
+    Only meaningful in the multi-rule joint path (>1 same-head candidate).
+    """
 
     import torch
 
@@ -139,6 +194,21 @@ def train_neurosymbolic_program(
 
     program.add_tensor_source(_TENSOR_SOURCE_NAME, inputs.cuda())
 
+    # Neural-body conjuncts (slice-1): one small g_theta head per neural-bodied
+    # candidate, over its fixed-width phi(x). Trained torch-side (not a circuit
+    # predicate), so the heads carry their own optimizers stepped alongside the
+    # guards. phi width is fixed here at construction.
+    neural_bodies = neural_bodies or {}
+    neural_modules: dict[str, Any] = {}
+    neural_optims: dict[str, Any] = {}
+    for rule_id, spec in neural_bodies.items():
+        width = int(spec.features.shape[-1])
+        head = _make_neural_body_head(width, spec.head_depth, spec.hidden_dim).cuda()
+        neural_modules[rule_id] = head
+        neural_optims[rule_id] = _make_optimizer(
+            config.optimizer, head.parameters(), config.learning_rate
+        )
+
     queries = [f"{train_head}({i})" for i in range(len(targets))]
     losses: list[float] = []
     neural_grads: dict[str, float] = {name: 0.0 for name in modules}
@@ -155,13 +225,38 @@ def train_neurosymbolic_program(
     ]
     if len(candidate_ids) > 1:
         host_transfer_stats, query_probabilities = _train_joint_mixture(
-            program, train_head, targets, candidate_ids, guard_modules, config, losses
+            program,
+            train_head,
+            targets,
+            candidate_ids,
+            guard_modules,
+            config,
+            losses,
+            neural_modules=neural_modules,
+            neural_specs=neural_bodies,
+            neural_optims=neural_optims,
         )
         for rule in rules:
             grad = guard_modules[rule.id].logit.grad
             symbolic_grads[rule.id] = (
                 float(grad.detach().abs().item()) if grad is not None else 0.0
             )
+        # Neural-head gradient magnitudes, read once after training (proof the
+        # neural conjunct received gradient through the ST gate).
+        for rule_id, head in neural_modules.items():
+            neural_grads[rule_id] = float(
+                sum(
+                    param.grad.detach().abs().sum().item()
+                    for param in head.parameters()
+                    if param.grad is not None
+                )
+            )
+    elif neural_bodies:
+        raise ValueError(
+            "neural_bodies requires the multi-rule joint mixture (more than one "
+            "same-head trainable_rule candidate); a single defining rule has no "
+            "joint competition to attach a neural conjunct to"
+        )
     else:
         # Warm the device-side caches (circuit template + batched query-var
         # metadata) once with a throwaway forward-backward over the real queries.
@@ -243,6 +338,20 @@ def train_neurosymbolic_program(
         training_objective=objective,
     )
 
+    # Serialize each trained neural conjunct so the driver can rebuild the
+    # parametric HardenedClause (theta + phi/threshold spec) and the held-out read
+    # can reconstruct g_theta.
+    neural_body_state: dict[str, NeuralBodyState] = {}
+    for rule_id, head in neural_modules.items():
+        spec = neural_bodies[rule_id]
+        neural_body_state[rule_id] = NeuralBodyState(
+            state_dict={k: v.detach().cpu() for k, v in head.state_dict().items()},
+            width=int(spec.features.shape[-1]),
+            threshold=spec.threshold,
+            head_depth=spec.head_depth,
+            hidden_dim=spec.hidden_dim,
+        )
+
     return NeuroSymbolicTrainingResult(
         neural_parameter_grads=neural_grads,
         symbolic_weight_grads=symbolic_grads,
@@ -253,6 +362,7 @@ def train_neurosymbolic_program(
         engine=_ENGINE_NAME,
         proof_trace_map=proof_trace_map,
         training_host_transfer_stats=host_transfer_stats,
+        neural_body_state=neural_body_state or None,
     )
 
 
@@ -264,66 +374,105 @@ def _train_joint_mixture(
     guard_modules: dict[str, Any],
     config: NeuroSymbolicTrainingConfig,
     losses: list[float],
+    neural_modules: dict[str, Any] | None = None,
+    neural_specs: dict[str, "NeuralBodySpec"] | None = None,
+    neural_optims: dict[str, Any] | None = None,
 ) -> tuple[dict[str, int], list[float]]:
-    """ST-TRC Phase-1b joint soft-mixture over guard-only same-head candidates.
+    """ST-TRC joint soft-mixture over same-head candidates (guard-only Phase-1b,
+    or neural-bodied slice-1 when a candidate carries a neural conjunct).
 
     N candidate rules derive the SAME head, each gated by its own guard. The head
-    probability is the noisy-OR over candidates of (engine relational eligibility
-    x guard sigmoid); BCE on the supervised head drives the per-candidate
-    competition. The relational eligibility — which head bindings each candidate's
-    join fires on — comes from the engine via ``joint_candidate_eligibility``; the
-    differentiable mass (guard sigmoids, OR, BCE) is torch over the guard params.
-    Guard-only: no neural predicate beyond the guards, so this is the faithful
-    Phase-1b mechanism with no circuit eval in the loop (the gradient to each
-    guard is identical to a circuit-routed OR for input-independent guards).
+    probability is the noisy-OR over candidates of (eligible_k x guard sigmoid);
+    BCE on the supervised head drives the per-candidate competition. A candidate's
+    ``eligible_k`` is its engine relational eligibility (``joint_candidate_eligibility``,
+    static) AND — for a neural-bodied candidate — the ST-thresholded neural gate
+    ``[g_theta_k(phi_k) >= tau_k]`` (recomputed each step, gradient to theta_k).
+    The differentiable mass (guard sigmoids, neural gates, OR, BCE) is torch over
+    the guard + head params; phi is external + detached, so the loop performs no
+    tracked device<->host transfers. The hard threshold keeps the neural conjunct
+    a derivation GATE (not soft truth-mass), so it composes in the noisy-OR without
+    a circuit leaf.
 
     Returns ``(host_transfer_stats, query_probabilities)``.
     """
     import torch
 
+    neural_modules = neural_modules or {}
+    neural_specs = neural_specs or {}
+    neural_optims = neural_optims or {}
+
     n = len(targets)
     # Engine relational eligibility per candidate: a length-n mask of which head
-    # bindings 0..n-1 satisfy that candidate's join. Static across steps.
+    # bindings 0..n-1 satisfy that candidate's relational grounding. Static.
     eligibility = program.joint_candidate_eligibility(train_head, 1, n)
     device = guard_modules[candidate_ids[0]].logit.device
-    masks: dict[str, Any] = {}
+    rel_masks: dict[str, Any] = {}
     for guard_pred, mask in eligibility:
         rule_id = guard_pred[len(_GUARD_PREDICATE_PREFIX) :]
-        masks[rule_id] = torch.tensor(
+        rel_masks[rule_id] = torch.tensor(
             [1.0 if m else 0.0 for m in mask], dtype=torch.float32, device=device
         )
     targets_t = torch.tensor(
         [1.0 if t else 0.0 for t in targets], dtype=torch.float32, device=device
     )
+    # Move each neural candidate's phi(x) to device ONCE (it is static; only
+    # theta changes across steps). Detached: no backbone gradient for slice-1.
+    device_phi = {
+        rule_id: neural_specs[rule_id].features.detach().to(
+            device=device, dtype=torch.float32
+        )
+        for rule_id in neural_modules
+    }
     eps = 1e-7
 
-    def head_prob() -> Any:
+    def head_prob(training: bool) -> Any:
         # Noisy-OR: P(head) = 1 - prod_k (1 - eligible_k * sigmoid(w_k)).
-        # Grad-carrying guard sigmoids so the backward competes the candidates;
-        # the SAME _joint_noisy_or backs the held-out generalization read, so the
-        # two cannot drift.
+        # eligible_k = relational grounding mask, AND the ST neural gate for a
+        # neural-bodied candidate (recomputed each call so theta_k gets gradient
+        # and the gate tracks the current head). The SAME _joint_noisy_or backs the
+        # held-out generalization read, so training and read cannot drift.
+        masks: dict[str, Any] = {}
+        for rule_id in candidate_ids:
+            if rule_id in neural_modules:
+                spec = neural_specs[rule_id]
+                gate = _st_neural_gate(
+                    neural_modules[rule_id](device_phi[rule_id]),
+                    spec.threshold,
+                    spec.gumbel_temperature,
+                    gumbel=spec.gumbel_noise and training,
+                    training=training,
+                )
+                masks[rule_id] = rel_masks[rule_id] * gate
+            else:
+                masks[rule_id] = rel_masks[rule_id]
         p_by_rule = {
             rule_id: torch.sigmoid(guard_modules[rule_id].logit)
             for rule_id in candidate_ids
         }
         return _joint_noisy_or(masks, p_by_rule, candidate_ids, n, device)
 
-    # Pure-torch differentiable loop over the guard params + static engine masks,
-    # so the joint training performs no tracked device<->host transfers.
+    # Pure-torch differentiable loop over guard + neural-head params + static
+    # engine masks, so the joint training performs no tracked device<->host
+    # transfers. The neural-head optimizers are stepped alongside the guards'
+    # (the program owns the guard optimizers; the heads are torch-side).
     program.reset_host_transfer_stats()
     for _step in range(config.steps):
         program.zero_grad()
-        p_or = head_prob().clamp(eps, 1.0 - eps)
+        for opt in neural_optims.values():
+            opt.zero_grad()
+        p_or = head_prob(training=True).clamp(eps, 1.0 - eps)
         loss = -(
             targets_t * torch.log(p_or) + (1.0 - targets_t) * torch.log(1.0 - p_or)
         ).mean()
         loss.backward()
         program.optimizer_step()
+        for opt in neural_optims.values():
+            opt.step()
         losses.append(float(loss.item()))
     host_transfer_stats = dict(program.host_transfer_stats())
 
     with torch.no_grad():
-        query_probabilities = head_prob().detach().cpu().tolist()
+        query_probabilities = head_prob(training=False).detach().cpu().tolist()
     return host_transfer_stats, query_probabilities
 
 
@@ -359,13 +508,22 @@ def _joint_mixture_probs(
     rule_weights: dict[str, float],
     num_queries: int,
     arity: int,
+    neural_heldout: dict[str, Any] | None = None,
 ) -> list[float]:
     """Trained-guard joint noisy-OR over the engine's relational eligibility for
     bindings ``train_head(0..num_queries-1)`` on ``program``. Pure forward: the
     guards are fixed at ``rule_weights`` (their trained sigmoids) and only the
-    engine eligibility is read, so no training occurs."""
+    engine eligibility is read, so no training occurs.
+
+    For a neural-bodied candidate, ``neural_heldout[rule_id] = (NeuralBodyState,
+    held_out_features)``: its eligibility is the relational grounding mask AND the
+    HARD (deterministic, no Gumbel) ST gate of the trained ``g_theta`` over the
+    held-out features — so an overfit neural predicate fails the held-out gate
+    exactly as a spurious relational correlate fails its join, inheriting the same
+    vigilance safety net."""
     import torch
 
+    neural_heldout = neural_heldout or {}
     eligibility = program.joint_candidate_eligibility(train_head, arity, num_queries)
     device = torch.device("cpu")
     masks: dict[str, Any] = {}
@@ -378,9 +536,21 @@ def _joint_mixture_probs(
             # cannot contribute a learned mixture term, so it is skipped.
             continue
         candidate_ids.append(rule_id)
-        masks[rule_id] = torch.tensor(
+        rel = torch.tensor(
             [1.0 if m else 0.0 for m in mask], dtype=torch.float32, device=device
         )
+        if rule_id in neural_heldout:
+            state, features = neural_heldout[rule_id]
+            head = _make_neural_body_head(state.width, state.head_depth, state.hidden_dim)
+            head.load_state_dict(state.state_dict)
+            head.eval()
+            with torch.no_grad():
+                phi = features.detach().to(device=device, dtype=torch.float32)
+                gate = _st_neural_gate(
+                    head(phi), state.threshold, 1.0, gumbel=False, training=False
+                )
+            rel = rel * gate
+        masks[rule_id] = rel
         p_by_rule[rule_id] = torch.tensor(
             float(rule_weights[rule_id]), dtype=torch.float32, device=device
         )
@@ -396,8 +566,9 @@ def evaluate_joint_mixture(
     num_queries: int,
     arity: int = 1,
     config: NeuroSymbolicTrainingConfig = NeuroSymbolicTrainingConfig(),
+    neural_heldout: dict[str, Any] | None = None,
 ) -> list[float]:
-    """Held-out generalization read for the ST-TRC Phase-1b joint mixture.
+    """Held-out generalization read for the ST-TRC joint mixture.
 
     Given a program ``source`` carrying the SAME ``trainable_rule`` candidates as
     the train run but with the HELD-OUT bindings' ground facts materialized, and
@@ -438,6 +609,13 @@ def evaluate_joint_mixture(
     0, which reads as a FALSE spurious-correlate rather than a real one. Callers
     flattening pairs into indexed unary facts must materialize the held-out facts,
     not only the train-split facts.
+
+    NEURAL-BODIED candidates (slice-1): pass ``neural_heldout[rule_id] =
+    (result.neural_body_state[rule_id], held_out_features)``. That candidate's
+    held-out eligibility is its relational grounding AND the trained ``g_theta``'s
+    hard gate over the HELD-OUT entity features — so an overfit neural predicate
+    yields low held-out ``p_or`` exactly as a spurious relational correlate does;
+    the guard-free held-out selector is the same vigilance net for both.
     """
     import pyxlog
 
@@ -447,7 +625,55 @@ def evaluate_joint_mixture(
         device=config.device,
         memory_mb=config.gpu_memory_mb,
     )
-    return _joint_mixture_probs(program, train_head, rule_weights, num_queries, arity)
+    return _joint_mixture_probs(
+        program, train_head, rule_weights, num_queries, arity, neural_heldout
+    )
+
+
+def _make_neural_body_head(width: int, head_depth: int, hidden_dim: int) -> Any:
+    """The learned predicate ``g_theta`` over an entity feature vector: a small
+    head mapping ``phi(x)`` (width) to a scalar logit. ``head_depth == 1`` is a
+    single linear->scalar (the contract default, matching the guard's
+    minimalism); ``head_depth > 1`` inserts tanh hidden layers (the config knob,
+    so capacity grows without a surface re-spin)."""
+    import torch
+
+    if head_depth <= 1:
+        return torch.nn.Sequential(torch.nn.Linear(width, 1))
+    layers: list[Any] = [torch.nn.Linear(width, hidden_dim), torch.nn.Tanh()]
+    for _ in range(head_depth - 2):
+        layers.append(torch.nn.Linear(hidden_dim, hidden_dim))
+        layers.append(torch.nn.Tanh())
+    layers.append(torch.nn.Linear(hidden_dim, 1))
+    return torch.nn.Sequential(*layers)
+
+
+def _st_neural_gate(
+    logit: Any, threshold: float, temperature: float, gumbel: bool, training: bool
+) -> Any:
+    """Straight-through neural gate: the ST-Gumbel discretization ST-TRC already
+    uses for relation-selection weights, applied to ``g_theta``'s activation.
+
+    Forward is the HARD Boolean ``sigmoid(g_theta) >= tau`` (so the eligibility is
+    a hard derivation gate, not soft truth-mass — which is exactly why it composes
+    in the noisy-OR without being a WMC circuit leaf). Backward is the
+    temperature-sigmoid (optionally Gumbel-perturbed during training), so theta
+    receives gradient. Returns a length-n vector of {0,1} (forward) carrying the
+    soft gradient.
+    """
+    import torch
+
+    tau = min(max(threshold, 1e-6), 1.0 - 1e-6)
+    # gate fires when sigmoid(logit) >= tau  <=>  logit >= logit(tau).
+    tau_logit = torch.log(torch.tensor(tau / (1.0 - tau), device=logit.device))
+    centered = logit.reshape(-1) - tau_logit
+    if gumbel and training:
+        u = torch.rand_like(centered).clamp(1e-6, 1.0 - 1e-6)
+        centered = centered + (torch.log(u) - torch.log(1.0 - u))
+    soft = torch.sigmoid(centered / max(temperature, 1e-6))
+    hard = (soft >= 0.5).float()
+    # Straight-through: hard value forward, soft gradient backward.
+    return hard + (soft - soft.detach())
 
 
 def _make_optimizer(name: str, params: Any, lr: float) -> Any:

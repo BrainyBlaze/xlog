@@ -16,6 +16,7 @@ import pytest
 torch = pytest.importorskip("torch")
 
 from pyxlog.ilp.neurosymbolic import (  # noqa: E402
+    NeuralBodySpec,
     NeuroSymbolicTrainingConfig,
     _collect_examples,
     _desugar_source,
@@ -428,3 +429,94 @@ def test_evaluate_joint_mixture_per_candidate_read_discriminates_train_tie() -> 
     assert spur_read[0] < 1e-3 and spur_read[1] > 0.9  # spurious covers 1, not 0
     # Pool-wide is inflated wherever EITHER fires -> not a single-candidate gate.
     assert pool_read[0] > 0.9 and pool_read[1] > 0.9
+
+
+# ST-TRC slice-1: neural-bodied candidate. The "fragility-on-drop" anchor —
+# vase/bulb break when dropped, the steel ball does not. ALL are dropped, so the
+# relational candidate (dropped) fires on every instance and CANNOT separate +/-;
+# only a learned predicate over entity features phi(x) (fragility) separates them.
+_NEURAL_BODY_SOURCE = """
+    dropped(0). dropped(1). dropped(2).
+    pred dropped(i64). pred breaks(i64).
+    trainable_rule(cand_rel, weight=0.0) :: breaks(C) :- dropped(C).
+    trainable_rule(cand_neural, weight=0.0) :: breaks(C) :- dropped(C).
+    train(breaks, binary_cross_entropy).
+"""
+
+
+def _train_fragility(steps: int = 500):
+    # phi: vase[1,0], bulb[1,0] fragile; ball[0,1] sturdy.
+    phi = torch.tensor([[1.0, 0.0], [1.0, 0.0], [0.0, 1.0]], dtype=torch.float32)
+    examples = [
+        {
+            "inputs": torch.zeros((3, 1), dtype=torch.float32),
+            "targets": torch.tensor([1.0, 1.0, 0.0], dtype=torch.float32),
+        }
+    ]
+    return train_neurosymbolic_program(
+        _NEURAL_BODY_SOURCE,
+        networks={},
+        examples=examples,
+        config=NeuroSymbolicTrainingConfig(steps=steps, learning_rate=0.1),
+        neural_bodies={"cand_neural": NeuralBodySpec(features=phi)},
+    )
+
+
+@requires_cuda
+def test_neural_body_separates_where_relational_cannot() -> None:
+    """Necessity + sufficiency: the relational candidate (dropped) fires on every
+    dropped object and cannot separate breaking from non-breaking; the neural
+    candidate learns g_theta(phi) >= tau over fragility features and DOES separate.
+    After joint training the mixture predicts break for vase/bulb, not the ball,
+    the neural candidate is selected, and gradient reached theta."""
+    result = _train_fragility()
+    probs = result.query_probabilities
+    assert min(probs[0], probs[1]) > 0.6  # fragile -> break
+    assert probs[2] < 0.4  # sturdy ball -> no break (relational layer can't do this)
+    # the neural candidate carries the separating rule and was selected
+    assert result.symbolic_rule_weights["cand_neural"] > 0.5
+    # ST gate routed gradient to the neural head params
+    assert result.neural_parameter_grads["cand_neural"] > 0.0
+    # trained head serialized for the driver's parametric HardenedClause
+    assert result.neural_body_state is not None
+    state = result.neural_body_state["cand_neural"]
+    assert state.width == 2 and state.threshold == 0.5
+
+
+@requires_cuda
+def test_neural_body_held_out_generalizes_and_keeps_vigilance() -> None:
+    """The trained g_theta gate generalizes to held-out entities the training never
+    saw, AND keeps the held-out vigilance net: a held-out FRAGILE entity fires the
+    gate (generalizes), a held-out STURDY entity does NOT (the neural analog of the
+    spurious-correlate rejection — an overfit gate fails held-out exactly as a
+    spurious relational join does)."""
+    result = _train_fragility()
+    held_out_source = """
+        dropped(0). dropped(1).
+        pred dropped(i64). pred breaks(i64).
+        trainable_rule(cand_rel, weight=0.0) :: breaks(C) :- dropped(C).
+        trainable_rule(cand_neural, weight=0.0) :: breaks(C) :- dropped(C).
+        train(breaks, binary_cross_entropy).
+    """
+    # held-out 0 = a NEW fragile object, held-out 1 = a NEW sturdy object.
+    held_phi = torch.tensor([[1.0, 0.0], [0.0, 1.0]], dtype=torch.float32)
+    probs = evaluate_joint_mixture(
+        held_out_source,
+        rule_weights={"cand_neural": result.symbolic_rule_weights["cand_neural"]},
+        num_queries=2,
+        neural_heldout={
+            "cand_neural": (result.neural_body_state["cand_neural"], held_phi)
+        },
+    )
+    assert probs[0] > 0.6  # held-out fragile: trained gate fires -> generalizes
+    assert probs[1] < 0.4  # held-out sturdy: gate correctly does NOT fire (vigilance)
+
+
+@requires_cuda
+def test_neural_body_training_has_no_tracked_host_transfers() -> None:
+    """The neural-bodied joint loop stays zero-host: phi is uploaded once and the
+    g_theta forward + ST gate + noisy-OR are torch over device tensors, so the
+    engine performs no tracked device<->host transfers during training."""
+    result = _train_fragility(steps=50)
+    stats = result.training_host_transfer_stats
+    assert stats["dtoh_calls"] == 0 and stats["htod_calls"] == 0
