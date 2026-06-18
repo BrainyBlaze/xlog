@@ -576,7 +576,9 @@ def test_neural_body_graded_admission_read_emits_decomposed_evidence() -> None:
     assert hard[1] == pytest.approx(pq[1]["hard_head_prob"], abs=1e-5)
     # Axis-I retention: the held-out fragile out-ranks the sturdy by graded mass.
     assert pq[0]["graded_mass"] > pq[1]["graded_mass"]
+    # axis1_margin is LOGIT-space (min g_theta(pos) - max g_theta(neg)); here the
+    # fragile (label True) is query 0 and the sturdy (label False) is query 1.
     assert graded["axis1_margin"] == pytest.approx(
-        pq[0]["graded_mass"] - pq[1]["graded_mass"], abs=1e-6
+        pq[0]["g_theta"] - pq[1]["g_theta"], abs=1e-5
     )
     assert graded["axis1_margin"] > 0.0

@@ -79,10 +79,13 @@ def test_graded_admission_evidence_decomposes_and_matches_hand_computation():
         assert r["production_firing_mass"] == pytest.approx(g[i], abs=1e-5)
         assert r["label"] is labels[i]
 
-    # axis1_margin (convenience) = min graded_mass(pos) - max graded_mass(neg)
-    pos = [pq[0]["graded_mass"], pq[1]["graded_mass"]]
-    neg = [pq[2]["graded_mass"]]
-    assert out["axis1_margin"] == pytest.approx(min(pos) - max(neg), abs=1e-6)
+    # axis1_margin is the LOGIT-space margin (matches the locked rubric, whose
+    # LOW_MARGIN annotation is "< 1.0 logit"): min g_theta(pos) - max g_theta(neg).
+    pos_logits = [2.0, -1.0]  # labels[0], labels[1] are True
+    neg_logits = [3.0]  # labels[2] is False
+    assert out["axis1_margin"] == pytest.approx(
+        min(pos_logits) - max(neg_logits), abs=1e-5
+    )
 
 
 def test_graded_audit_invariant_same_structure_zero_mask_zeros_both():

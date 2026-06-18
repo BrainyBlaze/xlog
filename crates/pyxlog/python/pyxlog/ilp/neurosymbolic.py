@@ -673,11 +673,16 @@ def _graded_admission_evidence(
             }
         )
 
+    # axis1_margin: the LOGIT-space separation margin
+    # ``min g_theta(pos) - max g_theta(neg)`` — matching the locked rubric (whose
+    # LOW_MARGIN annotation is "< 1.0 logit") and probe-1's margin definition. A
+    # convenience cross-check only; the checker recomputes it from raw
+    # ``(g_theta, label)`` (anti-gaming). ``None`` when there is no neural logit.
     axis1_margin = None
-    if labels is not None and selected is not None:
-        gm = [r["graded_mass"] for r in per_query]
-        pos = [gm[i] for i in range(num_queries) if labels[i]]
-        neg = [gm[i] for i in range(num_queries) if not labels[i]]
+    sel_logit = sel.get("logit")
+    if labels is not None and sel_logit is not None:
+        pos = [float(sel_logit[i]) for i in range(num_queries) if labels[i]]
+        neg = [float(sel_logit[i]) for i in range(num_queries) if not labels[i]]
         if pos and neg:
             axis1_margin = min(pos) - max(neg)
 
