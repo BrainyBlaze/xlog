@@ -90,6 +90,10 @@ class NeuralBodySpec:
     gumbel_temperature: float = 1.0  # straight-through softening temperature
     gumbel_noise: bool = False  # add Gumbel exploration noise during training
     # (default off: deterministic straight-through; on: ST-Gumbel exploration)
+    train_within_set_norm: bool = False  # design-A (SLICE-2 / Shape-3 B): train
+    # the gate's BACKWARD via within_set_norm (offset-invariant within-set z-norm
+    # RANK) instead of the absolute per-entity sigmoid; FORWARD gate unchanged
+    # (M41). Default off: byte-identical to the absolute _st_neural_gate path.
 
 
 @dataclass
@@ -435,12 +439,12 @@ def _train_joint_mixture(
         for rule_id in candidate_ids:
             if rule_id in neural_modules:
                 spec = neural_specs[rule_id]
-                gate = _st_neural_gate(
+                gate = _neural_gate_for(
                     neural_modules[rule_id](device_phi[rule_id]),
-                    spec.threshold,
-                    spec.gumbel_temperature,
-                    gumbel=spec.gumbel_noise and training,
-                    training=training,
+                    spec,
+                    n,
+                    device,
+                    training,
                 )
                 masks[rule_id] = rel_masks[rule_id] * gate
             else:
@@ -1057,6 +1061,60 @@ def _st_neural_gate(
     hard = (soft >= 0.5).float()
     # Straight-through: hard value forward, soft gradient backward.
     return hard + (soft - soft.detach())
+
+
+def _within_set_st_gate(
+    logit: Any, threshold: float, group_id: Any, temperature: float
+) -> Any:
+    """design-A straight-through gate: the SLICE-2 / Shape-3 (B) bundle's train half.
+
+    FORWARD is the SAME hard derivation gate as ``_st_neural_gate``
+    (``sigmoid(logit) >= tau``), so the neural conjunct stays a hard gate, not
+    soft truth-mass -- the M41 fence (thinking proposes, xlog disposes) holds and
+    eval is unaffected. BACKWARD flows through ``within_set_norm(mode="train")``:
+    an offset-invariant within-set z-norm, so (when ``phi`` is un-detached) the
+    backbone receives gradient on the transferable within-set RANK rather than the
+    non-transferable absolute level that the per-entity sigmoid trains. Returns a
+    length-n vector of {0,1} (forward) carrying the within-set soft gradient.
+    """
+    import torch
+
+    tau = min(max(threshold, 1e-6), 1.0 - 1e-6)
+    # gate fires when sigmoid(logit) >= tau  <=>  logit >= logit(tau).
+    tau_logit = torch.log(torch.tensor(tau / (1.0 - tau), device=logit.device))
+    flat = logit.reshape(-1)
+    hard = (flat >= tau_logit).float()
+    soft = within_set_norm(flat, group_id, mode="train", temp=temperature)
+    # Straight-through: hard value forward, within-set z-norm gradient backward.
+    return hard + (soft - soft.detach())
+
+
+def _neural_gate_for(
+    logit: Any, spec: "NeuralBodySpec", n: int, device: Any, training: bool
+) -> Any:
+    """Select a neural-bodied candidate's gate for the joint noisy-OR forward.
+
+    design-A (``spec.train_within_set_norm``) routes the TRAINING backward through
+    the offset-invariant within-set z-norm (``_within_set_st_gate``; the train
+    comparison set is the whole candidate binding-set, per design-of-record);
+    otherwise the absolute per-entity ``_st_neural_gate``. Both share the IDENTICAL
+    hard forward gate, so the held-out read (``training=False``) and the noisy-OR
+    composition are unchanged regardless of the flag -- the M41 fence holds.
+    """
+    import torch
+
+    if spec.train_within_set_norm and training:
+        group_id = torch.zeros(n, dtype=torch.long, device=device)
+        return _within_set_st_gate(
+            logit, spec.threshold, group_id, spec.gumbel_temperature
+        )
+    return _st_neural_gate(
+        logit,
+        spec.threshold,
+        spec.gumbel_temperature,
+        gumbel=spec.gumbel_noise and training,
+        training=training,
+    )
 
 
 def _make_optimizer(name: str, params: Any, lr: float) -> Any:
