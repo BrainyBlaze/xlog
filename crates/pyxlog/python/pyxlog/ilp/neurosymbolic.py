@@ -559,6 +559,131 @@ def _joint_mixture_probs(
     return p_or.detach().cpu().tolist()
 
 
+def _graded_admission_evidence(
+    eligibility: list[Any],
+    rule_weights: dict[str, float],
+    num_queries: int,
+    neural_heldout: dict[str, Any] | None = None,
+    labels: list[bool] | None = None,
+) -> dict[str, Any]:
+    """Surface-1 Axis-I SAFE_GRADED graded admission evidence (ST-TRC slice-1).
+
+    The GRADED analog of ``_joint_mixture_probs``: instead of the HARD ST gate it
+    consumes the graded gate ``g_tilde = sigmoid((g_theta - logit(tau)))`` (the
+    canonical, temperature-1 rank-preserving graded support), and returns the
+    DECOMPOSED per-query evidence the locked two-axis rubric consumes.
+
+    Both ``hard_head_prob`` and ``graded_mass`` are the noisy-OR over the SAME
+    ``rel_mask * . * sigma(guard)`` structure — only the gate kind differs — so the
+    hard-vs-graded divergence audit isolates exactly the gate effect (a checker can
+    never compare graded head-mass against a bare neural gate and miss the
+    rel_mask/guard layers).
+
+    ``graded_mass`` is RANK-PRESERVING GRADED SUPPORT, NOT a calibrated truth
+    probability, and carries NO production-firing certification.
+    ``production_firing_mass`` is the per-entity, offset-dependent gate the rubric's
+    Axis-II reads (the quantity probe-2 showed does NOT transfer) — exposed so the
+    checker can READ firing-transfer, never to assert it passes. ``axis1_margin`` is
+    a convenience scalar; the checker recomputes Axis-I from raw per-query
+    ``(graded_mass, label, g_theta)`` (anti-gaming).
+    """
+    import math
+
+    import torch
+
+    neural_heldout = neural_heldout or {}
+    device = torch.device("cpu")
+    masks_hard: dict[str, Any] = {}
+    masks_graded: dict[str, Any] = {}
+    p_by_rule: dict[str, Any] = {}
+    candidate_ids: list[str] = []
+    per_cand: dict[str, dict[str, Any]] = {}
+    for guard_pred, mask in eligibility:
+        rule_id = guard_pred[len(_GUARD_PREDICATE_PREFIX) :]
+        if rule_id not in rule_weights:
+            continue
+        candidate_ids.append(rule_id)
+        rel = torch.tensor(
+            [1.0 if m else 0.0 for m in mask], dtype=torch.float32, device=device
+        )
+        if rule_id in neural_heldout:
+            state, features = neural_heldout[rule_id]
+            head = _make_neural_body_head(state.width, state.head_depth, state.hidden_dim)
+            head.load_state_dict(state.state_dict)
+            head.eval()
+            with torch.no_grad():
+                phi = features.detach().to(device=device, dtype=torch.float32)
+                logit = head(phi).reshape(-1)
+            tau = min(max(state.threshold, 1e-6), 1.0 - 1e-6)
+            tau_logit = math.log(tau / (1.0 - tau))
+            graded = torch.sigmoid(logit - tau_logit)  # temp-1 graded gate
+            hard = (logit >= tau_logit).float()  # hard ST gate forward
+            per_cand[rule_id] = {
+                "rel": rel, "logit": logit, "tau_logit": tau_logit,
+                "graded": graded, "hard": hard,
+            }
+            masks_hard[rule_id] = rel * hard
+            masks_graded[rule_id] = rel * graded
+        else:
+            ones = torch.ones(num_queries, dtype=torch.float32, device=device)
+            per_cand[rule_id] = {
+                "rel": rel, "logit": None, "tau_logit": None,
+                "graded": ones, "hard": ones,
+            }
+            masks_hard[rule_id] = rel
+            masks_graded[rule_id] = rel
+        p_by_rule[rule_id] = torch.tensor(
+            float(rule_weights[rule_id]), dtype=torch.float32, device=device
+        )
+
+    with torch.no_grad():
+        hard_head = _joint_noisy_or(
+            masks_hard, p_by_rule, candidate_ids, num_queries, device
+        )
+        graded_head = _joint_noisy_or(
+            masks_graded, p_by_rule, candidate_ids, num_queries, device
+        )
+
+    # The admitted candidate: the neural-bodied one if present (the single-winner
+    # admission case), else the first candidate. Its per-entity gate/logit are the
+    # decomposed scalar fields; the head probs are the noisy-OR over the pool.
+    selected = next(
+        (rid for rid in candidate_ids if rid in neural_heldout),
+        candidate_ids[0] if candidate_ids else None,
+    )
+    sel = per_cand.get(selected, {})
+    per_query: list[dict[str, Any]] = []
+    for i in range(num_queries):
+        logit_i = sel.get("logit")
+        per_query.append(
+            {
+                "query_index": i,
+                "selected_rule_id": selected,
+                "relational_mask": float(sel["rel"][i]) if selected else None,
+                "hard_gate": float(sel["hard"][i]) if selected else None,
+                "graded_gate": float(sel["graded"][i]) if selected else None,
+                "g_theta": float(logit_i[i]) if logit_i is not None else None,
+                "tau_logit": sel.get("tau_logit"),
+                "hard_head_prob": float(hard_head[i]),
+                "graded_mass": float(graded_head[i]),
+                "production_firing_mass": (
+                    float(sel["graded"][i]) if selected else None
+                ),
+                "label": (bool(labels[i]) if labels is not None else None),
+            }
+        )
+
+    axis1_margin = None
+    if labels is not None and selected is not None:
+        gm = [r["graded_mass"] for r in per_query]
+        pos = [gm[i] for i in range(num_queries) if labels[i]]
+        neg = [gm[i] for i in range(num_queries) if not labels[i]]
+        if pos and neg:
+            axis1_margin = min(pos) - max(neg)
+
+    return {"mode": "graded", "per_query": per_query, "axis1_margin": axis1_margin}
+
+
 def evaluate_joint_mixture(
     source: str,
     *,
@@ -567,7 +692,9 @@ def evaluate_joint_mixture(
     arity: int = 1,
     config: NeuroSymbolicTrainingConfig = NeuroSymbolicTrainingConfig(),
     neural_heldout: dict[str, Any] | None = None,
-) -> list[float]:
+    mode: str = "hard",
+    heldout_labels: list[bool] | None = None,
+) -> list[float] | dict[str, Any]:
     """Held-out generalization read for the ST-TRC joint mixture.
 
     Given a program ``source`` carrying the SAME ``trainable_rule`` candidates as
@@ -616,7 +743,25 @@ def evaluate_joint_mixture(
     hard gate over the HELD-OUT entity features — so an overfit neural predicate
     yields low held-out ``p_or`` exactly as a spurious relational correlate does;
     the guard-free held-out selector is the same vigilance net for both.
+
+    MODE (surface-1, ST-TRC graded admission):
+      - ``"hard"`` (default): the byte-unchanged behavior above — returns the
+        per-query hard-gate noisy-OR ``list[float]``. Production firing semantics.
+      - ``"graded"``: returns the DECOMPOSED graded admission evidence
+        (``_graded_admission_evidence``) — per-query hard_gate / hard_head_prob /
+        graded_gate / graded_mass / production_firing_mass / g_theta / tau_logit /
+        (optional) ``heldout_labels`` + a convenience ``axis1_margin``. This is the
+        Axis-I SAFE_GRADED read; graded mass is rank-preserving graded SUPPORT, NOT
+        calibrated truth, and carries NO production-firing certification. Pass
+        ``heldout_labels`` (the held-out supervision) to populate ``label`` and the
+        ``axis1_margin`` cross-check; the rubric checker recomputes Axis-I from the
+        raw per-query ``(graded_mass, label, g_theta)``.
     """
+    if mode not in ("hard", "graded"):
+        raise ValueError(
+            f"unsupported evaluate_joint_mixture mode {mode!r}; expected "
+            "'hard' or 'graded'"
+        )
     import pyxlog
 
     program_source, _rules, train_head, _objective = _desugar_source(source)
@@ -625,6 +770,13 @@ def evaluate_joint_mixture(
         device=config.device,
         memory_mb=config.gpu_memory_mb,
     )
+    if mode == "graded":
+        eligibility = program.joint_candidate_eligibility(
+            train_head, arity, num_queries
+        )
+        return _graded_admission_evidence(
+            eligibility, rule_weights, num_queries, neural_heldout, heldout_labels
+        )
     return _joint_mixture_probs(
         program, train_head, rule_weights, num_queries, arity, neural_heldout
     )

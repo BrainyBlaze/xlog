@@ -520,3 +520,63 @@ def test_neural_body_training_has_no_tracked_host_transfers() -> None:
     result = _train_fragility(steps=50)
     stats = result.training_host_transfer_stats
     assert stats["dtoh_calls"] == 0 and stats["htod_calls"] == 0
+
+
+@requires_cuda
+def test_neural_body_graded_admission_read_emits_decomposed_evidence() -> None:
+    """Surface-1 Axis-I SAFE_GRADED graded read: ``mode='graded'`` returns the
+    decomposed per-query evidence over the held-out split, and the hard default is
+    byte-unchanged. The held-out fragile (label True) carries more graded mass than
+    the sturdy (label False), so the Axis-I retention margin is positive — while
+    production firing stays the hard default (the graded read carries NO firing
+    certification; ``production_firing_mass`` is exposed only for the rubric's
+    Axis-II read)."""
+    result = _train_fragility()
+    held_out_source = """
+        dropped(0). dropped(1).
+        pred dropped(i64). pred breaks(i64).
+        trainable_rule(cand_rel, weight=0.0) :: breaks(C) :- dropped(C).
+        trainable_rule(cand_neural, weight=0.0) :: breaks(C) :- dropped(C).
+        train(breaks, binary_cross_entropy).
+    """
+    held_phi = torch.tensor([[1.0, 0.0], [0.0, 1.0]], dtype=torch.float32)  # fragile, sturdy
+    weights = {"cand_neural": result.symbolic_rule_weights["cand_neural"]}
+    neural_heldout = {"cand_neural": (result.neural_body_state["cand_neural"], held_phi)}
+
+    hard = evaluate_joint_mixture(
+        held_out_source, rule_weights=weights, num_queries=2, neural_heldout=neural_heldout
+    )
+    graded = evaluate_joint_mixture(
+        held_out_source,
+        rule_weights=weights,
+        num_queries=2,
+        neural_heldout=neural_heldout,
+        mode="graded",
+        heldout_labels=[True, False],
+    )
+
+    # hard default stays the unchanged list[float]
+    assert isinstance(hard, list) and len(hard) == 2
+    # graded mode is the decomposed evidence packet the rubric checker consumes
+    assert graded["mode"] == "graded"
+    pq = graded["per_query"]
+    assert len(pq) == 2
+    for r in pq:
+        assert r["selected_rule_id"] == "cand_neural"
+        assert set(r) >= {
+            "query_index", "selected_rule_id", "relational_mask", "hard_gate",
+            "graded_gate", "g_theta", "tau_logit", "hard_head_prob", "graded_mass",
+            "production_firing_mass", "label",
+        }
+        assert 0.0 <= r["graded_mass"] <= 1.0
+        assert 0.0 <= r["production_firing_mass"] <= 1.0
+    # AUDIT INVARIANT end-to-end: mode='hard' equals each query's hard_head_prob —
+    # both run through the SAME rel_mask * gate * sigma(guard) structure.
+    assert hard[0] == pytest.approx(pq[0]["hard_head_prob"], abs=1e-5)
+    assert hard[1] == pytest.approx(pq[1]["hard_head_prob"], abs=1e-5)
+    # Axis-I retention: the held-out fragile out-ranks the sturdy by graded mass.
+    assert pq[0]["graded_mass"] > pq[1]["graded_mass"]
+    assert graded["axis1_margin"] == pytest.approx(
+        pq[0]["graded_mass"] - pq[1]["graded_mass"], abs=1e-6
+    )
+    assert graded["axis1_margin"] > 0.0
