@@ -582,3 +582,38 @@ def test_neural_body_graded_admission_read_emits_decomposed_evidence() -> None:
         pq[0]["g_theta"] - pq[1]["g_theta"], abs=1e-5
     )
     assert graded["axis1_margin"] > 0.0
+
+
+@requires_cuda
+def test_set_relative_admission_routes_within_set_norm_and_desaturates() -> None:
+    """Public H_ctx admission path: evaluate_joint_mixture(set_relative=True) routes
+    the real within_set_norm helper, so graded_mass becomes the set-relative
+    de-saturated mass and within_set_norm is emitted per query (Axis-III schema).
+    set_relative defaults False -> surface-1 unchanged (covered elsewhere)."""
+    result = _train_fragility()
+    held_out_source = """
+        dropped(0). dropped(1).
+        pred dropped(i64). pred breaks(i64).
+        trainable_rule(cand_rel, weight=0.0) :: breaks(C) :- dropped(C).
+        trainable_rule(cand_neural, weight=0.0) :: breaks(C) :- dropped(C).
+        train(breaks, binary_cross_entropy).
+    """
+    held_phi = torch.tensor([[1.0, 0.0], [0.0, 1.0]], dtype=torch.float32)  # fragile, sturdy
+    weights = {"cand_neural": result.symbolic_rule_weights["cand_neural"]}
+    nh = {"cand_neural": (result.neural_body_state["cand_neural"], held_phi)}
+    graded = evaluate_joint_mixture(
+        held_out_source,
+        rule_weights=weights,
+        num_queries=2,
+        neural_heldout=nh,
+        mode="graded",
+        set_relative=True,
+        heldout_labels=[True, False],
+    )
+    pq = graded["per_query"]
+    wsn = [r["within_set_norm"] for r in pq]
+    assert all(w is not None for w in wsn)  # operator output emitted
+    assert abs(wsn[0] - wsn[1]) > 0.1  # de-saturated (distinct within-set mass)
+    assert wsn[0] > wsn[1]  # fragile (held-out 0) out-ranks sturdy (held-out 1)
+    assert pq[0]["graded_mass"] > pq[1]["graded_mass"]  # graded mass rank-faithful
+    assert pq[0]["g_theta"] is not None  # raw rank carrier for recompute-from-raw

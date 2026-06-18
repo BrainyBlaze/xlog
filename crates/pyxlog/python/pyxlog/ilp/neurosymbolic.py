@@ -913,6 +913,7 @@ def evaluate_joint_mixture(
     neural_heldout: dict[str, Any] | None = None,
     mode: str = "hard",
     heldout_labels: list[bool] | None = None,
+    set_relative: bool = False,
 ) -> list[float] | dict[str, Any]:
     """Held-out generalization read for the ST-TRC joint mixture.
 
@@ -996,8 +997,16 @@ def evaluate_joint_mixture(
         eligibility = program.joint_candidate_eligibility(
             train_head, arity, num_queries
         )
+        # set_relative (H_ctx admission): the de-saturating within-set normalization
+        # of g_theta over the held-out comparison set (one group). Default off ->
+        # surface-1 per-entity graded gate, byte-unchanged.
         return _graded_admission_evidence(
-            eligibility, rule_weights, num_queries, neural_heldout, heldout_labels
+            eligibility,
+            rule_weights,
+            num_queries,
+            neural_heldout,
+            heldout_labels,
+            within_set_norm_fn=(within_set_norm if set_relative else None),
         )
     return _joint_mixture_probs(
         program, train_head, rule_weights, num_queries, arity, neural_heldout
