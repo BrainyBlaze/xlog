@@ -714,6 +714,108 @@ def _graded_admission_evidence(
     return {"mode": "graded", "per_query": per_query, "axis1_margin": axis1_margin}
 
 
+def _graded_firing_evidence(
+    eligibility: list[Any],
+    rule_weights: dict[str, float],
+    neural_heldout: dict[str, Any],
+    *,
+    context_ids: list[Any],
+    firing_rule: dict[str, Any],
+    split: str = "heldout",
+    labels: list[bool] | None = None,
+    within_set_norm_fn: Any,
+) -> dict[Any, dict[str, Any]]:
+    """H_ctx Axis-III firing evidence (ST-TRC Step 2, read-side).
+
+    Emits the per-``context_id`` comparison-set the Axis-III checker consumes. The
+    within-context firing decision is RANK-based (the only property that transfers):
+    per context, the selected neural candidate's ``g_theta`` is normalized within its
+    comparison set (``within_set_norm_fn(.., mode="eval")``) and the top-k% by that
+    within-context rank FIRE — restricted to Axis-I-eligible entities (``guard 1``:
+    the hard ST gate ``g_theta >= tau_logit``; a non-admissible entity never fires).
+
+    ``production_firing_mass`` is the within-set firing mass (NOT ``sigmoid(g-tau)``,
+    the non-transferring absolute quantity); ``tau_logit`` is emitted as provenance
+    only. Raw ``g_theta`` and the ordered comparison set are emitted so the checker
+    RECOMPUTES the within-set rank / firing from raw (anti-gaming). The cardinality
+    fence (``|set| < 16`` fail-closed) and the cross-context production gate are the
+    checker's to enforce on this evidence, not this emit.
+    """
+    import math
+
+    import torch
+
+    neural_heldout = neural_heldout or {}
+    n = len(context_ids)
+
+    selected = None
+    sel: dict[str, Any] = {}
+    for guard_pred, mask in eligibility:
+        rule_id = guard_pred[len(_GUARD_PREDICATE_PREFIX) :]
+        if rule_id not in rule_weights or rule_id not in neural_heldout:
+            continue
+        selected = rule_id
+        rel = torch.tensor([1.0 if m else 0.0 for m in mask], dtype=torch.float32)
+        state, features = neural_heldout[rule_id]
+        head = _make_neural_body_head(state.width, state.head_depth, state.hidden_dim)
+        head.load_state_dict(state.state_dict)
+        head.eval()
+        with torch.no_grad():
+            logit = head(features.detach().to(dtype=torch.float32)).reshape(-1)
+        tau = min(max(state.threshold, 1e-6), 1.0 - 1e-6)
+        tau_logit = math.log(tau / (1.0 - tau))
+        admissible = (logit >= tau_logit)  # hard ST eligibility (guard 1)
+        sel = {"rel": rel, "logit": logit, "tau_logit": tau_logit, "admissible": admissible}
+        break
+    if selected is None:
+        return {}
+
+    # ordered distinct context ids -> integer group index for the within-set helper.
+    uniq = list(dict.fromkeys(context_ids))
+    cid_to_idx = {c: i for i, c in enumerate(uniq)}
+    group_id = torch.tensor([cid_to_idx[c] for c in context_ids], dtype=torch.long)
+    with torch.no_grad():
+        within = within_set_norm_fn(sel["logit"], group_id, mode="eval")
+
+    # fired: top ceil(k * |admissible-in-context|) by within-context rank, per context.
+    k = float(firing_rule.get("k", 0.5))
+    fired = [False] * n
+    for c in uniq:
+        adm_idx = [
+            i for i in range(n) if context_ids[i] == c and bool(sel["admissible"][i])
+        ]
+        if not adm_idx:
+            continue
+        adm_idx.sort(key=lambda i: float(within[i]), reverse=True)
+        n_fire = max(1, math.ceil(k * len(adm_idx)))
+        for i in adm_idx[:n_fire]:
+            fired[i] = True
+
+    out: dict[Any, dict[str, Any]] = {}
+    for c in uniq:
+        comparison_set = [
+            {
+                "x": i,
+                "label": (bool(labels[i]) if labels is not None else None),
+                "g_theta": float(sel["logit"][i]),
+                "tau_logit": sel["tau_logit"],
+                "relational_mask": float(sel["rel"][i]),
+                "axis1_admissible": bool(sel["admissible"][i]),
+                "within_set_norm": float(within[i]),
+                "production_firing_mass": float(within[i]),
+                "fired": fired[i],
+            }
+            for i in range(n)
+            if context_ids[i] == c
+        ]
+        out[c] = {
+            "comparison_set": comparison_set,
+            "firing_rule": dict(firing_rule),
+            "split": split,
+        }
+    return out
+
+
 def evaluate_joint_mixture(
     source: str,
     *,

@@ -21,6 +21,7 @@ from pyxlog.ilp.neurosymbolic import (  # noqa: E402
     NeuralBodyState,
     _GUARD_PREDICATE_PREFIX,
     _graded_admission_evidence,
+    _graded_firing_evidence,
     _make_neural_body_head,
 )
 
@@ -107,3 +108,61 @@ def test_none_norm_fn_preserves_surface1_behavior():
     for i, r in enumerate(out["per_query"]):
         assert r["graded_gate"] == pytest.approx(g[i], abs=1e-4)
         assert r["within_set_norm"] is None
+
+
+def test_firing_evidence_groups_by_context_and_fires_top_k_pct():
+    # H_ctx firing emit: comparison_set grouped by context_id; within each context
+    # the top-k% by within-context rank fires (eligibility-fenced); the emit carries
+    # raw g_theta (recompute-from-raw) and production_firing_mass = within-set mass.
+    g = [100.0, 102.0, 98.0, 200.0, 196.0, 198.0]
+    ctx = ["A", "A", "A", "B", "B", "B"]
+    labels = [True, True, False, True, False, True]
+    state, features = _saturated_state(g)
+    eligibility = [(_GUARD_PREDICATE_PREFIX + "r", [True] * 6)]
+
+    out = _graded_firing_evidence(
+        eligibility,
+        {"r": 0.9},
+        {"r": (state, features)},
+        context_ids=ctx,
+        firing_rule={"kind": "top_k_pct", "k": 0.5},
+        split="heldout",
+        labels=labels,
+        within_set_norm_fn=_within_set_rankpct_ref,
+    )
+
+    assert set(out.keys()) == {"A", "B"}
+    for cid in ("A", "B"):
+        ctx_ev = out[cid]
+        assert ctx_ev["split"] == "heldout"
+        assert ctx_ev["firing_rule"]["k"] == 0.5
+        cs = ctx_ev["comparison_set"]
+        assert len(cs) == 3
+        for e in cs:
+            assert e["axis1_admissible"] is True  # all g_theta > tau_logit 0
+            assert e["g_theta"] is not None  # raw rank carrier for recompute-from-raw
+            assert e["production_firing_mass"] == pytest.approx(e["within_set_norm"])
+        # top ceil(0.5*3)=2 by within-context rank fire; lowest g_theta does not
+        assert sum(1 for e in cs if e["fired"]) == 2
+        by_g = sorted(cs, key=lambda e: e["g_theta"])
+        assert by_g[0]["fired"] is False
+        assert by_g[1]["fired"] is True and by_g[2]["fired"] is True
+
+
+def test_firing_eligibility_fence_non_admissible_never_fires():
+    # An entity below tau (hard ST gate False) is NOT axis1-admissible and must
+    # never fire, regardless of its within-context rank (guard 1).
+    g = [5.0, 4.0, -3.0]  # third is below tau_logit 0 -> not admissible
+    ctx = ["C", "C", "C"]
+    state, features = _saturated_state(g)
+    eligibility = [(_GUARD_PREDICATE_PREFIX + "r", [True, True, True])]
+    out = _graded_firing_evidence(
+        eligibility, {"r": 0.9}, {"r": (state, features)},
+        context_ids=ctx, firing_rule={"kind": "top_k_pct", "k": 1.0},
+        split="heldout", labels=[True, True, False],
+        within_set_norm_fn=_within_set_rankpct_ref,
+    )
+    cs = {e["x"]: e for e in out["C"]["comparison_set"]}
+    assert cs[2]["axis1_admissible"] is False
+    assert cs[2]["fired"] is False  # never fires even at k=1.0
+    assert cs[0]["fired"] is True and cs[1]["fired"] is True  # admissible fire
