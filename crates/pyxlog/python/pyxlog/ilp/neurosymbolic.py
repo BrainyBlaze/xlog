@@ -502,6 +502,93 @@ def _joint_noisy_or(
     return 1.0 - one_minus
 
 
+def within_set_norm(g_theta, group_id, *, mode, temp=1.0):
+    """Within-comparison-set normalization of a head logit into a [0,1] WMC mass.
+
+    The ST-TRC H_ctx within-set reduction (Step-2 circuit substrate). Each entity's
+    raw head logit ``g_theta`` is normalized RELATIVE TO its comparison set (the
+    entities sharing its ``group_id``), de-saturating the graded gate and cancelling
+    the per-set absolute offset that does NOT transfer train->held-out. Only the
+    within-set RANK transfers (proven), and both realizations below are monotone in
+    ``g_theta`` within a group, hence RANK-IDENTICAL (a surrogate<->exact pair; only
+    the numeric mass differs):
+
+    - ``mode="train"``: z-norm then ``sigmoid(z/temp)`` -- differentiable, so the
+      gradient reaches theta. The set mean is subtracted, so an additive set-wide
+      offset (the non-transferring component) cancels EXACTLY and the bias receives
+      no gradient through this op; only the within-set rank-bearing signal drives
+      training. This is the substrate/train realization.
+    - ``mode="eval"``: within-group rank-percentile in (0,1) (tie-averaged) --
+      exact, bounded, robust to outliers; non-differentiable (read/eval realization).
+
+    The result is a length-N mass in [0,1] suitable as a noisy-OR / WMC leaf
+    (``masks_graded = rel * within_set_norm`` -> the unchanged :func:`_joint_noisy_or`).
+
+    ``group_id`` is a per-entity comparison-set index: for admission the whole
+    held-out query set is one group; for H_ctx firing the grouping comes from the
+    Step-1 ``context_id`` sidecar. Degenerate groups (``|group| <= 1`` or zero
+    within-set spread) carry no within-set signal and return the neutral ``0.5`` --
+    the cardinality fence (``n < 16`` fail-closed for firing) is a CALLER concern,
+    not this pure-math helper. The reduction is order-invariant (set statistics);
+    ordered comparison-set emission for recompute-from-raw is the read-side's job.
+    ``tau`` is NOT used here: within-set rank + the top-k% firing rule supersede the
+    ``sigmoid(g_theta - tau_logit)`` threshold (the absolute quantity that does not
+    transfer).
+    """
+    import torch
+
+    if mode not in ("train", "eval"):
+        raise ValueError(
+            f"within_set_norm mode must be 'train' or 'eval', got {mode!r}"
+        )
+    g = g_theta.reshape(-1).to(dtype=torch.float32)
+    groups = group_id.reshape(-1)
+    if g.shape[0] != groups.shape[0]:
+        raise ValueError(
+            "within_set_norm: g_theta and group_id must have equal length, got "
+            f"{g.shape[0]} vs {groups.shape[0]}"
+        )
+    n = g.shape[0]
+    neutral = torch.full_like(g, 0.5)
+    if n == 0:
+        return neutral
+
+    if mode == "train":
+        uniq, inv = torch.unique(groups, return_inverse=True)
+        ngrp = uniq.shape[0]
+        ones = torch.ones(n, dtype=torch.float32, device=g.device)
+        count = torch.zeros(ngrp, dtype=torch.float32, device=g.device).scatter_add(
+            0, inv, ones
+        )
+        gsum = torch.zeros(ngrp, dtype=torch.float32, device=g.device).scatter_add(
+            0, inv, g
+        )
+        mean_e = (gsum / count)[inv]
+        var_e = (
+            torch.zeros(ngrp, dtype=torch.float32, device=g.device).scatter_add(
+                0, inv, (g - mean_e) ** 2
+            )
+            / count
+        )[inv]
+        std_e = torch.sqrt(var_e + 1e-12)
+        count_e = count[inv]
+        mass = torch.sigmoid((g - mean_e) / (std_e * max(float(temp), 1e-6)))
+        valid = (count_e > 1.0) & (std_e > 1e-6)
+        return torch.where(valid, mass, neutral)
+
+    # mode == "eval": within-group rank-percentile in (0,1), tie-averaged. Exact,
+    # bounded, robust; non-differentiable (read-side only). O(N^2) over the small
+    # per-cell N typical of this domain.
+    same = groups.reshape(-1, 1) == groups.reshape(1, -1)
+    gi = g.reshape(-1, 1)
+    gj = g.reshape(1, -1)
+    less = ((gj < gi) & same).sum(dim=1).to(dtype=torch.float32)
+    equal = ((gj == gi) & same).sum(dim=1).to(dtype=torch.float32)
+    size = same.sum(dim=1).to(dtype=torch.float32)
+    rank_pct = (less + 0.5 * equal) / size
+    return torch.where(size > 1.0, rank_pct, neutral)
+
+
 def _joint_mixture_probs(
     program: Any,
     train_head: str,
