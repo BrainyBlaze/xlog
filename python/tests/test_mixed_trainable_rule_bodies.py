@@ -276,7 +276,7 @@ def test_training_loop_has_no_tracked_host_transfers() -> None:
 
 
 # A single head derived by THREE trainable candidate rules (multi-rule same-head)
-# — the ST-TRC Phase-1b joint soft-mixture topology. Only the correct candidate
+# — the multi-rule same-head joint soft-mixture topology. Only the correct candidate
 # (supp ∩ refut) fires exactly on the positives {0,2}; the distractors fire on
 # wrong rows.
 JOINT_MIXTURE_SOURCE = """
@@ -292,7 +292,7 @@ JOINT_MIXTURE_SOURCE = """
 
 @requires_cuda
 def test_joint_multi_rule_same_head_mixture_selects_correct_candidate() -> None:
-    """ST-TRC Phase-1b acceptance gate: when N trainable rules derive ONE head
+    """Multi-rule same-head acceptance gate: when N trainable rules derive ONE head
     (multi-rule same-head — previously rejected with 'expected exactly 1 matching
     rule'), the joint noisy-OR competition must drive the CORRECT candidate's
     guard high and ALL distractor guards low (the hard mask selects the correct
@@ -431,7 +431,7 @@ def test_evaluate_joint_mixture_per_candidate_read_discriminates_train_tie() -> 
     assert pool_read[0] > 0.9 and pool_read[1] > 0.9
 
 
-# ST-TRC slice-1: neural-bodied candidate. The "fragility-on-drop" anchor —
+# Neural-bodied candidate. The "fragility-on-drop" anchor —
 # vase/bulb break when dropped, the steel ball does not. ALL are dropped, so the
 # relational candidate (dropped) fires on every instance and CANNOT separate +/-;
 # only a learned predicate over entity features phi(x) (fragility) separates them.
@@ -524,13 +524,13 @@ def test_neural_body_training_has_no_tracked_host_transfers() -> None:
 
 @requires_cuda
 def test_neural_body_graded_admission_read_emits_decomposed_evidence() -> None:
-    """Surface-1 Axis-I SAFE_GRADED graded read: ``mode='graded'`` returns the
+    """Graded admission read (set-relative admission rank, SAFE_GRADED): ``mode='graded'`` returns the
     decomposed per-query evidence over the held-out split, and the hard default is
     byte-unchanged. The held-out fragile (label True) carries more graded mass than
-    the sturdy (label False), so the Axis-I retention margin is positive — while
+    the sturdy (label False), so the set-relative retention margin is positive — while
     production firing stays the hard default (the graded read carries NO firing
     certification; ``production_firing_mass`` is exposed only for the rubric's
-    Axis-II read)."""
+    absolute per-entity firing read)."""
     result = _train_fragility()
     held_out_source = """
         dropped(0). dropped(1).
@@ -574,7 +574,7 @@ def test_neural_body_graded_admission_read_emits_decomposed_evidence() -> None:
     # both run through the SAME rel_mask * gate * sigma(guard) structure.
     assert hard[0] == pytest.approx(pq[0]["hard_head_prob"], abs=1e-5)
     assert hard[1] == pytest.approx(pq[1]["hard_head_prob"], abs=1e-5)
-    # Axis-I retention: the held-out fragile out-ranks the sturdy by graded mass.
+    # Set-relative retention: the held-out fragile out-ranks the sturdy by graded mass.
     assert pq[0]["graded_mass"] > pq[1]["graded_mass"]
     # axis1_margin is LOGIT-space (min g_theta(pos) - max g_theta(neg)); here the
     # fragile (label True) is query 0 and the sturdy (label False) is query 1.
@@ -586,10 +586,10 @@ def test_neural_body_graded_admission_read_emits_decomposed_evidence() -> None:
 
 @requires_cuda
 def test_set_relative_admission_routes_within_set_norm_and_desaturates() -> None:
-    """Public H_ctx admission path: evaluate_joint_mixture(set_relative=True) routes
+    """Public context-relative admission path: evaluate_joint_mixture(set_relative=True) routes
     the real within_set_norm helper, so graded_mass becomes the set-relative
-    de-saturated mass and within_set_norm is emitted per query (Axis-III schema).
-    set_relative defaults False -> surface-1 unchanged (covered elsewhere)."""
+    de-saturated mass and within_set_norm is emitted per query (within-context firing schema).
+    set_relative defaults False -> graded admission read unchanged (covered elsewhere)."""
     result = _train_fragility()
     held_out_source = """
         dropped(0). dropped(1).

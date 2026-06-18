@@ -1,4 +1,4 @@
-"""Surface-1 graded admission READ (ST-TRC, Axis-I SAFE_GRADED).
+"""Graded admission read (set-relative admission-rank evidence, SAFE_GRADED).
 
 The graded read swaps the hard ST gate for the GRADED gate
 ``g_tilde = sigmoid((g_theta - logit(tau)) / temp)`` and emits the decomposed,

@@ -1,4 +1,4 @@
-"""S1 verification-gap closure: prove the pyxlog PUBLIC surface (LogicProgram.compile
+"""Verification that the pyxlog PUBLIC surface (LogicProgram.compile
 -> evaluate -> LogicQueryResult) exposes the epistemic four-valued disposition
 OUTWARD as distinct know/possible/not-know/not-possible head relations, and that a
 contested (multi-world) disposition cannot be laundered into a known head.
