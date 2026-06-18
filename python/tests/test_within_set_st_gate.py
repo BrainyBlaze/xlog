@@ -1,16 +1,16 @@
-"""Unit tests for the ST-TRC design-A train-path gate (`_within_set_st_gate`).
+"""Unit tests for the within-set rank training gate (`_within_set_st_gate`).
 
-design-A is the SLICE-2 / Shape-3 (B) bundle's train half: a sibling
-straight-through gate whose FORWARD is the same hard derivation gate as
-``_st_neural_gate`` (M41: thinking proposes, xlog disposes), but whose BACKWARD
-gradient flows through ``within_set_norm(mode="train")`` -- an offset-invariant
-within-set z-norm -- so the backbone (when phi is un-detached) learns the
-transferable within-set RANK rather than the non-transferable absolute level.
+A sibling straight-through gate whose FORWARD is the same hard derivation gate
+as ``_st_neural_gate`` (a hard Boolean gate, not soft truth-mass: thinking
+proposes, the engine disposes), but whose BACKWARD gradient flows through
+``within_set_norm(mode="train")`` -- an offset-invariant within-set z-norm -- so
+when phi carries gradient the head/backbone learn the transferable within-set
+RANK rather than the non-transferable absolute level.
 
-These validate: (1) forward byte-identical to the existing hard gate (M41
-fence), (2) backward offset-invariant (the discriminating property vs the
-absolute per-entity gate), (3) gradient is actually carried, (4) degenerate set
--> neutral, no NaN, (5) the opt-in NeuralBodySpec flag defaults OFF.
+These validate: (1) forward byte-identical to the existing hard gate, (2)
+backward offset-invariant (the discriminating property vs the absolute
+per-entity gate), (3) gradient is actually carried, (4) degenerate set ->
+neutral, no NaN, (5) the opt-in NeuralBodySpec flag defaults OFF.
 
 Pure torch (CPU); no engine/Rust/GPU.
 
@@ -30,7 +30,7 @@ from pyxlog.ilp.neurosymbolic import (
 
 def test_forward_is_hard_threshold():
     # Forward value must be the hard Boolean sigmoid(logit) >= tau (a derivation
-    # GATE, not soft truth-mass) -- the M41 fence.
+    # GATE, not soft truth-mass) -- thinking proposes, the engine disposes.
     logit = torch.tensor([-2.0, 0.5, 3.0, -0.1])
     grp = torch.zeros(4, dtype=torch.long)
     tau = 0.5
@@ -40,7 +40,7 @@ def test_forward_is_hard_threshold():
 
 
 def test_forward_matches_st_neural_gate():
-    # design-A is a drop-in on the forward: identical hard gate to the existing
+    # the within-set gate is a drop-in on the forward: identical hard gate to the existing
     # _st_neural_gate across varied logits/thresholds (so eval is unaffected).
     torch.manual_seed(0)
     for _ in range(20):
@@ -55,7 +55,7 @@ def test_forward_matches_st_neural_gate():
 def test_backward_offset_invariant():
     # The discriminating property: gradient to the logit is invariant to a
     # set-uniform shift (z-norm subtracts the set mean), whereas the absolute
-    # per-entity gate's gradient shifts. This is why design-A trains on RANK.
+    # per-entity gate's gradient shifts. This is why this gate trains on RANK.
     grp = torch.zeros(5, dtype=torch.long)
     base = torch.tensor([1.0, 4.0, 2.0, 9.0, 3.0])
     c = 7.0
@@ -100,7 +100,7 @@ def test_degenerate_set_neutral_no_nan():
 
 
 def test_spec_flag_defaults_off():
-    # Opt-in fence: design-A must be OFF by default so existing behavior
+    # Opt-in fence: the within-set training gate must be OFF by default so existing behavior
     # (the absolute _st_neural_gate train path) is byte-identical unless asked.
     spec = NeuralBodySpec(features=torch.zeros(3, 4))
     assert spec.train_within_set_norm is False
@@ -110,8 +110,8 @@ def _spec(flag):
     return NeuralBodySpec(features=torch.zeros(4, 3), train_within_set_norm=flag)
 
 
-def test_gate_selection_design_a_on_training_uses_within_set():
-    # Flag on + training -> design-A gate (whole-set group), backward identical
+def test_gate_selection_flag_on_training_uses_within_set():
+    # Flag on + training -> within-set gate (whole-set group), backward identical
     # to _within_set_st_gate over the whole candidate binding-set.
     logit = torch.tensor([1.0, 4.0, 2.0, 9.0])
     n, device = 4, logit.device
@@ -130,8 +130,8 @@ def test_gate_selection_flag_off_uses_st_neural_gate():
 
 
 def test_gate_selection_eval_uses_st_neural_gate_even_when_flag_on():
-    # design-A is a TRAIN-backward change only; at eval (training=False) the gate
-    # is the hard forward via _st_neural_gate -> read path unchanged (M41).
+    # the within-set gate is a TRAIN-backward change only; at eval (training=False) the gate
+    # is the hard forward via _st_neural_gate -> read path unchanged.
     logit = torch.tensor([1.0, 4.0, 2.0, 9.0])
     got = _neural_gate_for(logit, _spec(True), 4, logit.device, training=False)
     want = _st_neural_gate(logit, 0.5, 1.0, gumbel=False, training=False)

@@ -1,7 +1,7 @@
-"""Unit tests for the ST-TRC H_ctx within-set reduction (`within_set_norm`).
+"""Unit tests for the within-comparison-set reduction (`within_set_norm`).
 
-These validate the algorithmic claims the operator rests on (Step-2 circuit
-substrate): a [0,1] WMC-leaf mass, monotone-in-g within a comparison set,
+These validate the algorithmic claims the operator rests on (the within-set
+normalization circuit substrate): a [0,1] WMC-leaf mass, monotone-in-g within a comparison set,
 train/eval rank-identity, offset-cancellation (z-norm makes a set-wide additive
 offset vanish AND the bias receive no gradient), degenerate groups -> neutral
 0.5, and independent per-group segmentation. Pure torch (CPU); no engine/Rust.

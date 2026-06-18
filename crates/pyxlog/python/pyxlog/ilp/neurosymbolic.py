@@ -68,7 +68,7 @@ class TrainableRuleDecl:
 @dataclass
 class NeuralBodySpec:
     """A neural conjunct ``g_theta(phi(x)) >= tau`` attached to a candidate's body
-    (ST-TRC slice-1, the neural-bodied candidate shape).
+    (the neural-bodied candidate shape: a relational body plus one learned gate).
 
     The candidate's eligibility becomes its relational grounding mask AND the
     straight-through-thresholded neural gate, so a head ``H(x) :- r_i(x) ^
@@ -76,7 +76,8 @@ class NeuralBodySpec:
     guard-only relational candidate — its guard ``sigma(w_k)`` and the held-out
     selector are unchanged; only the eligibility gains the learned gate. Gradient
     flows to ``theta`` (and the guard), never to ``phi`` (an external entity
-    feature; detached for slice-1, backbone coupling is the downstream LoRA task).
+    feature; detached by default, so no gradient reaches phi -- coupling phi to a
+    trainable backbone via LoRA is a separate downstream task).
 
     ``features`` is the per-binding entity feature ``phi(x)`` as a fixed-width
     tensor ``[num_queries, width]`` (the contract default is the mean-pooled
@@ -90,10 +91,10 @@ class NeuralBodySpec:
     gumbel_temperature: float = 1.0  # straight-through softening temperature
     gumbel_noise: bool = False  # add Gumbel exploration noise during training
     # (default off: deterministic straight-through; on: ST-Gumbel exploration)
-    train_within_set_norm: bool = False  # design-A (SLICE-2 / Shape-3 B): train
-    # the gate's BACKWARD via within_set_norm (offset-invariant within-set z-norm
-    # RANK) instead of the absolute per-entity sigmoid; FORWARD gate unchanged
-    # (M41). Default off: byte-identical to the absolute _st_neural_gate path.
+    train_within_set_norm: bool = False  # when set, train the gate's BACKWARD via
+    # within_set_norm (offset-invariant within-comparison-set RANK) instead of the
+    # absolute per-entity sigmoid; the FORWARD hard gate is unchanged. Default off:
+    # byte-identical to the absolute _st_neural_gate path.
 
 
 @dataclass
@@ -142,7 +143,7 @@ def train_neurosymbolic_program(
 ) -> NeuroSymbolicTrainingResult:
     """Jointly train neural predicates and symbolic rule weights on the engine.
 
-    ``neural_bodies`` (ST-TRC slice-1) attaches a neural conjunct
+    ``neural_bodies`` attaches a neural conjunct
     ``g_theta_k(phi(x)) >= tau_k`` to a same-head candidate (keyed by its
     ``trainable_rule`` id) for the joint multi-rule mixture: that candidate's
     eligibility becomes its relational grounding AND the ST-thresholded gate, and
@@ -198,7 +199,7 @@ def train_neurosymbolic_program(
 
     program.add_tensor_source(_TENSOR_SOURCE_NAME, inputs.cuda())
 
-    # Neural-body conjuncts (slice-1): one small g_theta head per neural-bodied
+    # Neural-body conjuncts: one small g_theta head per neural-bodied
     # candidate, over its fixed-width phi(x). Trained torch-side (not a circuit
     # predicate), so the heads carry their own optimizers stepped alongside the
     # guards. phi width is fixed here at construction.
@@ -218,7 +219,7 @@ def train_neurosymbolic_program(
     neural_grads: dict[str, float] = {name: 0.0 for name in modules}
     symbolic_grads: dict[str, float] = {rule.id: 0.0 for rule in rules}
 
-    # ST-TRC Phase-1b: when MORE THAN ONE trainable rule derives the train head,
+    # Joint multi-rule path: when MORE THAN ONE trainable rule derives the train head,
     # this is the joint multi-rule same-head soft-mixture — the candidates compete
     # for mass on one head. Route to the joint noisy-OR forward; a single defining
     # rule keeps the (faster, circuit) single-rule path below.
@@ -382,8 +383,8 @@ def _train_joint_mixture(
     neural_specs: dict[str, "NeuralBodySpec"] | None = None,
     neural_optims: dict[str, Any] | None = None,
 ) -> tuple[dict[str, int], list[float]]:
-    """ST-TRC joint soft-mixture over same-head candidates (guard-only Phase-1b,
-    or neural-bodied slice-1 when a candidate carries a neural conjunct).
+    """Joint soft-mixture over same-head candidates (guard-only, or neural-bodied
+    when a candidate carries a neural conjunct).
 
     N candidate rules derive the SAME head, each gated by its own guard. The head
     probability is the noisy-OR over candidates of (eligible_k x guard sigmoid);
@@ -420,7 +421,7 @@ def _train_joint_mixture(
         [1.0 if t else 0.0 for t in targets], dtype=torch.float32, device=device
     )
     # Move each neural candidate's phi(x) to device ONCE (it is static; only
-    # theta changes across steps). Detached: no backbone gradient for slice-1.
+    # theta changes across steps). Detached: no backbone gradient by default.
     device_phi = {
         rule_id: neural_specs[rule_id].features.detach().to(
             device=device, dtype=torch.float32
@@ -509,7 +510,7 @@ def _joint_noisy_or(
 def within_set_norm(g_theta, group_id, *, mode, temp=1.0):
     """Within-comparison-set normalization of a head logit into a [0,1] WMC mass.
 
-    The ST-TRC H_ctx within-set reduction (Step-2 circuit substrate). Each entity's
+    The within-comparison-set normalization circuit substrate. Each entity's
     raw head logit ``g_theta`` is normalized RELATIVE TO its comparison set (the
     entities sharing its ``group_id``), de-saturating the graded gate and cancelling
     the per-set absolute offset that does NOT transfer train->held-out. Only the
@@ -529,8 +530,8 @@ def within_set_norm(g_theta, group_id, *, mode, temp=1.0):
     (``masks_graded = rel * within_set_norm`` -> the unchanged :func:`_joint_noisy_or`).
 
     ``group_id`` is a per-entity comparison-set index: for admission the whole
-    held-out query set is one group; for H_ctx firing the grouping comes from the
-    Step-1 ``context_id`` sidecar. Degenerate groups (``|group| <= 1`` or zero
+    held-out query set is one group; for context-relative firing the grouping comes
+    from the per-context ``context_id`` sidecar. Degenerate groups (``|group| <= 1`` or zero
     within-set spread) carry no within-set signal and return the neutral ``0.5`` --
     the cardinality fence (``n < 16`` fail-closed for firing) is a CALLER concern,
     not this pure-math helper. The reduction is order-invariant (set statistics);
@@ -658,7 +659,7 @@ def _graded_admission_evidence(
     labels: list[bool] | None = None,
     within_set_norm_fn: Any | None = None,
 ) -> dict[str, Any]:
-    """Surface-1 Axis-I SAFE_GRADED graded admission evidence (ST-TRC slice-1).
+    """Graded (de-saturated) admission evidence for the neural-bodied candidate.
 
     The GRADED analog of ``_joint_mixture_probs``: instead of the HARD ST gate it
     consumes the graded gate ``g_tilde = sigmoid((g_theta - logit(tau)))`` (the
@@ -675,13 +676,14 @@ def _graded_admission_evidence(
     probability, and carries NO production-firing certification. It is a monotone
     transform of ``g_theta`` (rank-preserving in exact arithmetic), but under a
     SATURATED head (large ``|g_theta|``) it floors to a near-constant and loses the
-    rank NUMERICALLY — so Axis-I rank (retention_auc / strict vigilance /
-    axis1_margin) is read from the raw ``g_theta`` logit, the lossless rank carrier,
-    NOT from ``graded_mass``. (The checker recomputes Axis-I from ``g_theta``.)
-    ``production_firing_mass`` is the per-entity, offset-dependent gate the rubric's
-    Axis-II reads (the quantity probe-2 showed does NOT transfer) — exposed so the
-    checker can READ firing-transfer, never to assert it passes. ``axis1_margin`` is
-    a convenience scalar; the checker recomputes Axis-I from raw per-query
+    rank NUMERICALLY — so the admission-retention rank (retention_auc / strict
+    vigilance / axis1_margin) is read from the raw ``g_theta`` logit, the lossless
+    rank carrier, NOT from ``graded_mass``. (The checker recomputes that rank from
+    ``g_theta``.) ``production_firing_mass`` is the per-entity, offset-dependent
+    gate the rubric's local per-entity transfer reads (the quantity an earlier
+    probe showed does NOT transfer) — exposed so the checker can READ
+    firing-transfer, never to assert it passes. ``axis1_margin`` is a convenience
+    scalar; the checker recomputes the retention rank from raw per-query
     ``(graded_mass, label, g_theta)`` (anti-gaming).
     """
     import math
@@ -715,7 +717,7 @@ def _graded_admission_evidence(
             tau_logit = math.log(tau / (1.0 - tau))
             hard = (logit >= tau_logit).float()  # hard ST gate forward (eligibility)
             if within_set_norm_fn is not None:
-                # H_ctx set-relative graded mass: the within-set normalization of
+                # Context-relative (set-relative) graded mass: the within-set normalization of
                 # g_theta over the comparison set (admission = one group). It
                 # de-saturates AND preserves the g_theta rank where the per-entity
                 # sigmoid floors to a near-constant. The hard ST gate above is
@@ -772,7 +774,7 @@ def _graded_admission_evidence(
                 "relational_mask": float(sel["rel"][i]) if selected else None,
                 "hard_gate": float(sel["hard"][i]) if selected else None,
                 "graded_gate": float(sel["graded"][i]) if selected else None,
-                # within_set_norm: the operator's set-relative output (H_ctx mode),
+                # within_set_norm: the operator's set-relative output (context-relative mode),
                 # None in surface-1 per-entity mode. Cross-check only — the checker
                 # recomputes the within-set rank from raw g_theta (anti-gaming).
                 "within_set_norm": (
@@ -791,7 +793,7 @@ def _graded_admission_evidence(
 
     # axis1_margin: the LOGIT-space separation margin
     # ``min g_theta(pos) - max g_theta(neg)`` — matching the locked rubric (whose
-    # LOW_MARGIN annotation is "< 1.0 logit") and probe-1's margin definition. A
+    # LOW_MARGIN annotation is "< 1.0 logit") and the separation-margin definition. A
     # convenience cross-check only; the checker recomputes it from raw
     # ``(g_theta, label)`` (anti-gaming). ``None`` when there is no neural logit.
     axis1_margin = None
@@ -816,14 +818,14 @@ def _graded_firing_evidence(
     labels: list[bool] | None = None,
     within_set_norm_fn: Any,
 ) -> dict[Any, dict[str, Any]]:
-    """H_ctx Axis-III firing evidence (ST-TRC Step 2, read-side).
+    """Within-context firing evidence (read-side).
 
-    Emits the per-``context_id`` comparison-set the Axis-III checker consumes. The
+    Emits the per-``context_id`` comparison-set the firing-evidence checker consumes. The
     within-context firing decision is RANK-based (the only property that transfers):
     per context, the selected neural candidate's ``g_theta`` is normalized within its
     comparison set (``within_set_norm_fn(.., mode="eval")``) and the top-k% by that
-    within-context rank FIRE — restricted to Axis-I-eligible entities (``guard 1``:
-    the hard ST gate ``g_theta >= tau_logit``; a non-admissible entity never fires).
+    within-context rank FIRE — restricted to admissible entities (the eligibility
+    fence: the hard ST gate ``g_theta >= tau_logit``; a non-admissible entity never fires).
 
     ``production_firing_mass`` is the within-set firing mass (NOT ``sigmoid(g-tau)``,
     the non-transferring absolute quantity); ``tau_logit`` is emitted as provenance
@@ -855,7 +857,7 @@ def _graded_firing_evidence(
             logit = head(features.detach().to(dtype=torch.float32)).reshape(-1)
         tau = min(max(state.threshold, 1e-6), 1.0 - 1e-6)
         tau_logit = math.log(tau / (1.0 - tau))
-        admissible = (logit >= tau_logit)  # hard ST eligibility (guard 1)
+        admissible = (logit >= tau_logit)  # hard ST eligibility (the eligibility fence)
         sel = {"rel": rel, "logit": logit, "tau_logit": tau_logit, "admissible": admissible}
         break
     if selected is None:
@@ -919,7 +921,7 @@ def evaluate_joint_mixture(
     heldout_labels: list[bool] | None = None,
     set_relative: bool = False,
 ) -> list[float] | dict[str, Any]:
-    """Held-out generalization read for the ST-TRC joint mixture.
+    """Held-out generalization read for the joint mixture.
 
     Given a program ``source`` carrying the SAME ``trainable_rule`` candidates as
     the train run but with the HELD-OUT bindings' ground facts materialized, and
@@ -961,28 +963,28 @@ def evaluate_joint_mixture(
     flattening pairs into indexed unary facts must materialize the held-out facts,
     not only the train-split facts.
 
-    NEURAL-BODIED candidates (slice-1): pass ``neural_heldout[rule_id] =
+    NEURAL-BODIED candidates: pass ``neural_heldout[rule_id] =
     (result.neural_body_state[rule_id], held_out_features)``. That candidate's
     held-out eligibility is its relational grounding AND the trained ``g_theta``'s
     hard gate over the HELD-OUT entity features — so an overfit neural predicate
     yields low held-out ``p_or`` exactly as a spurious relational correlate does;
     the guard-free held-out selector is the same vigilance net for both.
 
-    MODE (surface-1, ST-TRC graded admission):
+    MODE (graded admission):
       - ``"hard"`` (default): the byte-unchanged behavior above — returns the
         per-query hard-gate noisy-OR ``list[float]``. Production firing semantics.
       - ``"graded"``: returns the DECOMPOSED graded admission evidence
         (``_graded_admission_evidence``) — per-query hard_gate / hard_head_prob /
         graded_gate / graded_mass / production_firing_mass / g_theta / tau_logit /
         (optional) ``heldout_labels`` + a convenience ``axis1_margin``. This is the
-        Axis-I SAFE_GRADED read; graded_mass is the WMC-facing graded SUPPORT, NOT
-        calibrated truth, and carries NO production-firing certification. Axis-I rank
-        is read from the raw ``g_theta`` logit (the lossless rank carrier), NOT from
-        ``graded_mass`` — which saturates to a near-constant under a saturated head.
-        Pass ``heldout_labels`` (the held-out supervision) to populate ``label`` and
-        the ``axis1_margin`` cross-check; the rubric checker recomputes Axis-I
-        (retention_auc / strict vigilance / axis1_margin) from the raw per-query
-        ``(g_theta, label)``.
+        graded admission read; graded_mass is the WMC-facing graded SUPPORT, NOT
+        calibrated truth, and carries NO production-firing certification. The
+        admission-retention rank is read from the raw ``g_theta`` logit (the lossless
+        rank carrier), NOT from ``graded_mass`` — which saturates to a near-constant
+        under a saturated head. Pass ``heldout_labels`` (the held-out supervision) to
+        populate ``label`` and the ``axis1_margin`` cross-check; the rubric checker
+        recomputes the retention rank (retention_auc / strict vigilance /
+        axis1_margin) from the raw per-query ``(g_theta, label)``.
     """
     if mode not in ("hard", "graded"):
         raise ValueError(
@@ -1001,7 +1003,7 @@ def evaluate_joint_mixture(
         eligibility = program.joint_candidate_eligibility(
             train_head, arity, num_queries
         )
-        # set_relative (H_ctx admission): the de-saturating within-set normalization
+        # set_relative (context-relative admission): the de-saturating within-set normalization
         # of g_theta over the held-out comparison set (one group). Default off ->
         # surface-1 per-entity graded gate, byte-unchanged.
         return _graded_admission_evidence(
@@ -1038,8 +1040,8 @@ def _make_neural_body_head(width: int, head_depth: int, hidden_dim: int) -> Any:
 def _st_neural_gate(
     logit: Any, threshold: float, temperature: float, gumbel: bool, training: bool
 ) -> Any:
-    """Straight-through neural gate: the ST-Gumbel discretization ST-TRC already
-    uses for relation-selection weights, applied to ``g_theta``'s activation.
+    """Straight-through neural gate: the ST-Gumbel discretization already used
+    for relation-selection weights, applied to ``g_theta``'s activation.
 
     Forward is the HARD Boolean ``sigmoid(g_theta) >= tau`` (so the eligibility is
     a hard derivation gate, not soft truth-mass — which is exactly why it composes
@@ -1066,16 +1068,17 @@ def _st_neural_gate(
 def _within_set_st_gate(
     logit: Any, threshold: float, group_id: Any, temperature: float
 ) -> Any:
-    """design-A straight-through gate: the SLICE-2 / Shape-3 (B) bundle's train half.
+    """Straight-through gate whose backward trains on within-comparison-set rank.
 
     FORWARD is the SAME hard derivation gate as ``_st_neural_gate``
-    (``sigmoid(logit) >= tau``), so the neural conjunct stays a hard gate, not
-    soft truth-mass -- the M41 fence (thinking proposes, xlog disposes) holds and
-    eval is unaffected. BACKWARD flows through ``within_set_norm(mode="train")``:
-    an offset-invariant within-set z-norm, so (when ``phi`` is un-detached) the
-    backbone receives gradient on the transferable within-set RANK rather than the
-    non-transferable absolute level that the per-entity sigmoid trains. Returns a
-    length-n vector of {0,1} (forward) carrying the within-set soft gradient.
+    (``sigmoid(logit) >= tau``), so the neural conjunct stays a hard Boolean gate,
+    not soft truth-mass (thinking proposes, the engine disposes), and the held-out
+    read is unaffected. BACKWARD flows through ``within_set_norm(mode="train")`` --
+    an offset-invariant within-set z-norm -- so when ``phi`` carries gradient (its
+    backbone feature is not detached) the head/backbone receive gradient on the
+    transferable within-set RANK rather than the non-transferable absolute level
+    that the per-entity sigmoid trains. Returns a length-n vector of {0,1}
+    (forward) carrying the within-set soft gradient.
     """
     import torch
 
@@ -1094,12 +1097,12 @@ def _neural_gate_for(
 ) -> Any:
     """Select a neural-bodied candidate's gate for the joint noisy-OR forward.
 
-    design-A (``spec.train_within_set_norm``) routes the TRAINING backward through
-    the offset-invariant within-set z-norm (``_within_set_st_gate``; the train
-    comparison set is the whole candidate binding-set, per design-of-record);
-    otherwise the absolute per-entity ``_st_neural_gate``. Both share the IDENTICAL
-    hard forward gate, so the held-out read (``training=False``) and the noisy-OR
-    composition are unchanged regardless of the flag -- the M41 fence holds.
+    When ``spec.train_within_set_norm`` is set, the TRAINING backward is routed
+    through the offset-invariant within-set z-norm (``_within_set_st_gate``; the
+    train comparison set is the whole candidate binding-set); otherwise the
+    absolute per-entity ``_st_neural_gate``. Both share the IDENTICAL hard forward
+    gate, so the held-out read (``training=False``) and the noisy-OR composition
+    are unchanged regardless of the flag.
     """
     import torch
 
