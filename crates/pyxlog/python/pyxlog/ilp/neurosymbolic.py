@@ -565,6 +565,7 @@ def _graded_admission_evidence(
     num_queries: int,
     neural_heldout: dict[str, Any] | None = None,
     labels: list[bool] | None = None,
+    within_set_norm_fn: Any | None = None,
 ) -> dict[str, Any]:
     """Surface-1 Axis-I SAFE_GRADED graded admission evidence (ST-TRC slice-1).
 
@@ -621,11 +622,23 @@ def _graded_admission_evidence(
                 logit = head(phi).reshape(-1)
             tau = min(max(state.threshold, 1e-6), 1.0 - 1e-6)
             tau_logit = math.log(tau / (1.0 - tau))
-            graded = torch.sigmoid(logit - tau_logit)  # temp-1 graded gate
-            hard = (logit >= tau_logit).float()  # hard ST gate forward
+            hard = (logit >= tau_logit).float()  # hard ST gate forward (eligibility)
+            if within_set_norm_fn is not None:
+                # H_ctx set-relative graded mass: the within-set normalization of
+                # g_theta over the comparison set (admission = one group). It
+                # de-saturates AND preserves the g_theta rank where the per-entity
+                # sigmoid floors to a near-constant. The hard ST gate above is
+                # untouched (eligibility fence); only the GRADED mass is set-relative.
+                group_id = torch.zeros(num_queries, dtype=torch.long, device=device)
+                with torch.no_grad():
+                    within_set = within_set_norm_fn(logit, group_id, mode="eval")
+                graded = within_set
+            else:
+                within_set = None
+                graded = torch.sigmoid(logit - tau_logit)  # surface-1 temp-1 gate
             per_cand[rule_id] = {
                 "rel": rel, "logit": logit, "tau_logit": tau_logit,
-                "graded": graded, "hard": hard,
+                "graded": graded, "hard": hard, "within_set": within_set,
             }
             masks_hard[rule_id] = rel * hard
             masks_graded[rule_id] = rel * graded
@@ -633,7 +646,7 @@ def _graded_admission_evidence(
             ones = torch.ones(num_queries, dtype=torch.float32, device=device)
             per_cand[rule_id] = {
                 "rel": rel, "logit": None, "tau_logit": None,
-                "graded": ones, "hard": ones,
+                "graded": ones, "hard": ones, "within_set": None,
             }
             masks_hard[rule_id] = rel
             masks_graded[rule_id] = rel
@@ -657,6 +670,7 @@ def _graded_admission_evidence(
         candidate_ids[0] if candidate_ids else None,
     )
     sel = per_cand.get(selected, {})
+    sel_within = sel.get("within_set")
     per_query: list[dict[str, Any]] = []
     for i in range(num_queries):
         logit_i = sel.get("logit")
@@ -667,6 +681,12 @@ def _graded_admission_evidence(
                 "relational_mask": float(sel["rel"][i]) if selected else None,
                 "hard_gate": float(sel["hard"][i]) if selected else None,
                 "graded_gate": float(sel["graded"][i]) if selected else None,
+                # within_set_norm: the operator's set-relative output (H_ctx mode),
+                # None in surface-1 per-entity mode. Cross-check only — the checker
+                # recomputes the within-set rank from raw g_theta (anti-gaming).
+                "within_set_norm": (
+                    float(sel_within[i]) if sel_within is not None else None
+                ),
                 "g_theta": float(logit_i[i]) if logit_i is not None else None,
                 "tau_logit": sel.get("tau_logit"),
                 "hard_head_prob": float(hard_head[i]),
