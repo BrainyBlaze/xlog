@@ -570,7 +570,7 @@ def _graded_admission_evidence(
 
     The GRADED analog of ``_joint_mixture_probs``: instead of the HARD ST gate it
     consumes the graded gate ``g_tilde = sigmoid((g_theta - logit(tau)))`` (the
-    canonical, temperature-1 rank-preserving graded support), and returns the
+    canonical temperature-1 graded support — the WMC-facing mass), and returns the
     DECOMPOSED per-query evidence the locked two-axis rubric consumes.
 
     Both ``hard_head_prob`` and ``graded_mass`` are the noisy-OR over the SAME
@@ -579,8 +579,13 @@ def _graded_admission_evidence(
     never compare graded head-mass against a bare neural gate and miss the
     rel_mask/guard layers).
 
-    ``graded_mass`` is RANK-PRESERVING GRADED SUPPORT, NOT a calibrated truth
-    probability, and carries NO production-firing certification.
+    ``graded_mass`` is the WMC-facing graded SUPPORT, NOT a calibrated truth
+    probability, and carries NO production-firing certification. It is a monotone
+    transform of ``g_theta`` (rank-preserving in exact arithmetic), but under a
+    SATURATED head (large ``|g_theta|``) it floors to a near-constant and loses the
+    rank NUMERICALLY — so Axis-I rank (retention_auc / strict vigilance /
+    axis1_margin) is read from the raw ``g_theta`` logit, the lossless rank carrier,
+    NOT from ``graded_mass``. (The checker recomputes Axis-I from ``g_theta``.)
     ``production_firing_mass`` is the per-entity, offset-dependent gate the rubric's
     Axis-II reads (the quantity probe-2 showed does NOT transfer) — exposed so the
     checker can READ firing-transfer, never to assert it passes. ``axis1_margin`` is
@@ -756,11 +761,14 @@ def evaluate_joint_mixture(
         (``_graded_admission_evidence``) — per-query hard_gate / hard_head_prob /
         graded_gate / graded_mass / production_firing_mass / g_theta / tau_logit /
         (optional) ``heldout_labels`` + a convenience ``axis1_margin``. This is the
-        Axis-I SAFE_GRADED read; graded mass is rank-preserving graded SUPPORT, NOT
-        calibrated truth, and carries NO production-firing certification. Pass
-        ``heldout_labels`` (the held-out supervision) to populate ``label`` and the
-        ``axis1_margin`` cross-check; the rubric checker recomputes Axis-I from the
-        raw per-query ``(graded_mass, label, g_theta)``.
+        Axis-I SAFE_GRADED read; graded_mass is the WMC-facing graded SUPPORT, NOT
+        calibrated truth, and carries NO production-firing certification. Axis-I rank
+        is read from the raw ``g_theta`` logit (the lossless rank carrier), NOT from
+        ``graded_mass`` — which saturates to a near-constant under a saturated head.
+        Pass ``heldout_labels`` (the held-out supervision) to populate ``label`` and
+        the ``axis1_margin`` cross-check; the rubric checker recomputes Axis-I
+        (retention_auc / strict vigilance / axis1_margin) from the raw per-query
+        ``(g_theta, label)``.
     """
     if mode not in ("hard", "graded"):
         raise ValueError(
