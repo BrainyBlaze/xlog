@@ -12,12 +12,11 @@ use crate::ilp_registry::{read_device_row_count, IlpMask, IlpTagEntry, IlpTagged
 use super::join_cache::{estimate_join_index_bytes, JoinIndexKey};
 use super::Executor;
 
-/// W4.2 eligibility predicate for nested-loop join dispatch.
+/// Eligibility predicate for nested-loop join dispatch.
 ///
 /// Returns `true` iff the join shape is admissible for the
 /// `nested_loop_join_v2_inner_u32_1key` provider entry point.
-/// The predicate is intentionally narrow per the W4.2
-/// iteration-4 plan D1:
+/// The predicate is intentionally narrow for the nested-loop dispatch contract:
 ///   * `JoinType::Inner` only (Semi / Anti / LeftOuter fall back
 ///     to hash).
 ///   * Exactly one key column on each side.
@@ -32,10 +31,10 @@ use super::Executor;
 /// which fails the `matches!(...)` guard — falling back to hash
 /// without a separate bounds check.
 ///
-/// Cheap O(1) — no kernel launches, no row-count reads, no D2H.
+/// Cheap O(1): no kernel launches, no row-count reads, no device-to-host transfer.
 /// The threshold check (`num_left * num_right <=
 /// NESTED_LOOP_TOTAL_THRESHOLD`) is performed at the dispatch
-/// site (W4.2 Step 5), not in this predicate.
+/// site, not in this predicate.
 //
 fn eligible_for_nested_loop(
     left: &CudaBuffer,
@@ -219,6 +218,15 @@ impl Executor {
                 key_cols,
                 aggs,
             } => {
+                // Aggregate fusion: a count/sum/min/max-by-root over a
+                // promoted triangle dispatches the fused kernels and never
+                // materializes the join. Declines fall through to the
+                // standard materialize+groupby path below.
+                if let Some(fused) =
+                    self.try_dispatch_wcoj_groupby_root_agg(input, key_cols, aggs)?
+                {
+                    return Ok(fused);
+                }
                 let input_buf = self.execute_node(input)?;
                 let input_rows = input_buf.num_rows();
                 let start = self.profiler.start_op();
@@ -310,7 +318,7 @@ impl Executor {
                 *max_active_rules,
                 head_projection,
             ),
-            // v0.6.5 slice 1: defensive fallback descent for any
+            // Defensive fallback descent for any
             // `execute_node` caller that bypasses the WCOJ dispatch
             // hook (probabilistic eval, neural store walks, etc.).
             // The non-recursive arm in `recursive.rs` short-circuits
@@ -345,14 +353,14 @@ impl Executor {
             JoinType::LeftOuter => CudaJoinType::LeftOuter,
         };
 
-        // Output buffer — set by W4.2 nested-loop dispatch,
+        // Output buffer set by nested-loop dispatch,
         // adaptive indexing, or the hash fallback. All three
         // paths flow through the shared `record_join_result`
         // feedback block at the end of this fn.
         let mut out: Option<CudaBuffer> = None;
 
-        // W4.2 nested-loop dispatch (precedes adaptive indexing
-        // and hash fallback). On predicate + threshold pass,
+        // Nested-loop dispatch precedes adaptive indexing
+        // and hash fallback. On predicate + threshold pass,
         // route to `nested_loop_join_v2_inner_u32_1key` and
         // bump the dispatch counter; do NOT early-return —
         // leave the result in `out` so the shared feedback
@@ -360,8 +368,8 @@ impl Executor {
         //
         // Threshold check uses logical row counts via
         // `provider.device_row_count(...)` (NOT `row_cap`), with
-        // `checked_mul` fail-closed on overflow per W4.2
-        // iteration-4 F-W42-15.
+        // `checked_mul` fail-closed on overflow before comparing
+        // against the nested-loop total-row threshold.
         if eligible_for_nested_loop(left, right, left_keys, right_keys, join_type) {
             let num_left = self.provider.device_row_count(left)? as u64;
             let num_right = self.provider.device_row_count(right)? as u64;
@@ -383,7 +391,7 @@ impl Executor {
         // Adaptive indexing: opportunistically reuse cached
         // build-side hash tables when the right side is a base
         // relation scan and has become "hot" in runtime
-        // statistics. Only runs if W4.2 nested-loop didn't
+        // statistics. Only runs if nested-loop dispatch did not
         // dispatch.
         if out.is_none() && self.config.resolved_persistent_hash_indexes() {
             if let Some(build_rel) = right_rel {
@@ -490,7 +498,7 @@ impl Executor {
                     }
                 }
             }
-        } // end `if out.is_none()` (adaptive-indexing gate added by W4.2 Step 5 patch)
+        } // end adaptive-indexing gate
 
         let out = match out {
             Some(buf) => buf,
@@ -592,7 +600,7 @@ impl Executor {
         max_active_rules: usize,
         head_projection: &[usize],
     ) -> Result<CudaBuffer> {
-        // RD-12: No-op when no mask registered. Return empty buffer with
+        // No-op when no mask is registered. Return an empty buffer with
         // the head relation's schema (not Schema::new(vec![])) to prevent
         // schema corruption when execute_non_recursive_scc stores the result.
         let ilp_mask = match self.ilp_registry.get_mask(mask_name) {
@@ -601,7 +609,7 @@ impl Executor {
                 self.ilp_last_result = Some(IlpTaggedResult {
                     entries: Vec::new(),
                 });
-                // RD-37: Fail hard if head relation missing from store.
+                // Fail hard if the head relation is missing from the store.
                 let schema = self
                     .store
                     .get(head_rel_name)
@@ -657,7 +665,7 @@ impl Executor {
             // enough columns for every key index. Relations with matching
             // arity but different semantic column meanings will join without
             // error; semantic correctness of the mask is the optimizer's
-            // responsibility (RD-37).
+            // responsibility.
             let left_max_key = left_keys.iter().copied().max().unwrap_or(0);
             let right_max_key = right_keys.iter().copied().max().unwrap_or(0);
             if left_buf.arity() <= left_max_key || right_buf.arity() <= right_max_key {
@@ -698,7 +706,7 @@ impl Executor {
                 projected
             };
 
-            // RD-22: Use public helper instead of private device_row_count
+            // Use the public helper instead of the private device_row_count.
             let num_rows = read_device_row_count(&self.provider, &projected)? as u32;
 
             if num_rows > 0 {
@@ -749,7 +757,7 @@ impl Executor {
             }
         };
 
-        // 4. Phase 2: Union results by k, borrowing buffers from tag_entries
+        // Union per-rule results by head relation index, borrowing buffers from tag_entries.
         let mut bufs_by_k: HashMap<u32, Vec<&CudaBuffer>> = HashMap::new();
         for entry in &tag_entries {
             if let Some(ref buf) = entry.buffer {
@@ -789,7 +797,7 @@ impl Executor {
             }
         }
 
-        // 5. Phase 3: Store tag entries (with retained buffers)
+        // Store tag entries with retained buffers.
         self.ilp_last_result = Some(IlpTaggedResult {
             entries: tag_entries,
         });

@@ -1,0 +1,40 @@
+{
+  "consumer": "external-delta-consumer",
+  "features": [
+    "delta",
+    "exact_induction",
+    "common_subexpression_elimination",
+    "adaptive_reoptimization",
+    "persistent_hash_index",
+    "production_path_reuse"
+  ],
+  "source_required_substrings": [
+    "pred committed_item(stage: u32, item: u32)",
+    "delta_insert(37, 104)",
+    "not delta_delete(37, I)",
+    "consumer_candidate(S, D) :- active_item(S), exact_pair(S, D)",
+    "consumer_priority(S, D) :- active_item(S), exact_pair(S, D), join_heat(S, D)"
+  ],
+  "checks": {
+    "run": {
+      "returncode": 0,
+      "stdout_contains": [
+        "__xlog_query_0",
+        "| 101",
+        "| 104",
+        "| 105",
+        "__xlog_query_1",
+        "| 101",
+        "| 104",
+        "__xlog_query_2",
+        "| 4",
+        "| 4"
+      ]
+    },
+    "explain_json": {
+      "min_statements": 27,
+      "stratification_status": "ok",
+      "rir_status": "ok"
+    }
+  }
+}

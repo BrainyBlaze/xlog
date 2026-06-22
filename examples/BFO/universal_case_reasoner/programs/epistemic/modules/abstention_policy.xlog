@@ -1,0 +1,95 @@
+// Shared probabilistic abstention policy.
+//
+// The entry program owns the final epistemic decision gate. This module owns
+// world-view evidence counting, confidence calibration, threshold selection,
+// and accept/abstain candidate derivation.
+
+pred abstention_case(u32).
+pred accepted_world_view(u32, u32).
+pred rejected_world_view(u32, u32).
+pred accepted_world_view_count(u32, u64).
+pred rejected_world_view_count(u32, u64).
+pred proof_evidence_count(u32, u32, u32).
+pred proof_confidence(u32, u32, u32).
+pred abstention_threshold_policy(u32, u32, u32).
+pred abstention_threshold(u32, u32).
+pred dominated_abstention_threshold(u32, u32).
+pred selected_abstention_threshold(u32, u32).
+pred solver_probability_trace(u32, u32, u32).
+pred accept_abstention_candidate(u32, u32, u32).
+pred abstain_abstention_candidate(u32, u32, u32).
+
+accepted_world_view_count(Abstention, count(WorldView)) :-
+    accepted_world_view(Abstention, WorldView).
+
+rejected_world_view_count(Abstention, count(WorldView)) :-
+    rejected_world_view(Abstention, WorldView).
+
+proof_evidence_count(Abstention, Accepted, Rejected) :-
+    accepted_world_view_count(Abstention, Accepted64),
+    rejected_world_view_count(Abstention, Rejected64),
+    Accepted is cast(Accepted64, u32),
+    Rejected is cast(Rejected64, u32).
+
+proof_evidence_count(Abstention, Accepted, 0) :-
+    accepted_world_view_count(Abstention, Accepted64),
+    not rejected_world_view_count(Abstention, _),
+    Accepted is cast(Accepted64, u32).
+
+proof_evidence_count(Abstention, 0, Rejected) :-
+    rejected_world_view_count(Abstention, Rejected64),
+    not accepted_world_view_count(Abstention, _),
+    Rejected is cast(Rejected64, u32).
+
+proof_evidence_count(Abstention, 0, 0) :-
+    abstention_case(Abstention),
+    not accepted_world_view_count(Abstention, _),
+    not rejected_world_view_count(Abstention, _).
+
+proof_confidence(Abstention, Confidence, WorldViewCount) :-
+    proof_evidence_count(Abstention, WorldViewCount, RejectedCount),
+    RejectedCount > 0,
+    Confidence is (WorldViewCount * cast(10000, u32)) / (WorldViewCount + RejectedCount).
+
+proof_confidence(Abstention, 10000, WorldViewCount) :-
+    proof_evidence_count(Abstention, WorldViewCount, 0),
+    WorldViewCount > 0.
+
+proof_confidence(Abstention, 0, 0) :-
+    proof_evidence_count(Abstention, 0, 0).
+
+abstention_threshold_policy(Abstention, 5000, 1) :-
+    abstention_case(Abstention),
+    solver_probability_trace(Abstention, GpuCnfEncodes, GpuEvents),
+    GpuCnfEncodes > 0,
+    GpuEvents > 0.
+
+abstention_threshold(Abstention, Threshold) :-
+    abstention_threshold_policy(Abstention, Threshold, MinGpuEvents),
+    solver_probability_trace(Abstention, GpuCnfEncodes, GpuEvents),
+    GpuCnfEncodes > 0,
+    GpuEvents >= MinGpuEvents.
+
+dominated_abstention_threshold(Abstention, Threshold) :-
+    abstention_threshold(Abstention, Threshold),
+    abstention_threshold(Abstention, OtherThreshold),
+    OtherThreshold > Threshold.
+
+selected_abstention_threshold(Abstention, Threshold) :-
+    abstention_threshold(Abstention, Threshold),
+    not dominated_abstention_threshold(Abstention, Threshold).
+
+accept_abstention_candidate(Abstention, Threshold, Confidence) :-
+    proof_confidence(Abstention, Confidence, WorldViewCount),
+    selected_abstention_threshold(Abstention, Threshold),
+    solver_probability_trace(Abstention, GpuCnfEncodes, GpuEvents),
+    Confidence >= Threshold,
+    WorldViewCount > 0,
+    GpuCnfEncodes > 0,
+    GpuEvents > 0.
+
+abstain_abstention_candidate(Abstention, Threshold, Confidence) :-
+    proof_confidence(Abstention, Confidence, WorldViewCount),
+    selected_abstention_threshold(Abstention, Threshold),
+    Confidence < Threshold,
+    WorldViewCount >= 0.

@@ -4,7 +4,7 @@
 // User-defined functions for supply chain cost calculations
 //
 // Features:
-//   - 6+ UDFs with arithmetic and conditionals
+//   - 6+ user-defined functions with arithmetic and conditionals
 //   - Shipping cost calculations with surcharges
 //   - Volume discount tiers
 //   - Inventory management metrics (days of stock, reorder urgency)
@@ -12,14 +12,14 @@
 // =============================================================================
 
 // =============================================================================
-// USER-DEFINED FUNCTIONS (UDFs)
+// USER-DEFINED FUNCTIONS
 // =============================================================================
 
 // --- Shipping Cost Functions ---
 
 // Base shipping cost: weight (grams) * rate per kg (cents) / 1000
 // Returns cost in cents
-func base_shipping_cost(Weight, RatePerKg) = Weight * RatePerKg / cast(1000, u32).
+func base_shipping_cost(Weight, RatePerKilogram) = Weight * RatePerKilogram / cast(1000, u32).
 
 // Apply percentage surcharge to a base cost
 // Returns: base + (base * surcharge% / 100)
@@ -45,8 +45,8 @@ func total_cost(Base, ZoneSurcharge, FuelSurcharge, Discount) =
 
 // Calculate days of stock remaining
 // Returns 9999 if daily demand is 0 (effectively infinite)
-func days_of_stock(CurrentQty, DailyDemand) =
-    if DailyDemand > cast(0, u32) then CurrentQty / DailyDemand
+func days_of_stock(CurrentQuantity, DailyDemand) =
+    if DailyDemand > cast(0, u32) then CurrentQuantity / DailyDemand
     else cast(9999, u32).
 
 // Reorder urgency level (1 = critical, 4 = normal)
@@ -66,9 +66,9 @@ func reorder_urgency(DaysOfStock) =
 // > 50kg: heavy (tier 3)
 // > 10kg: medium (tier 2)
 // <= 10kg: light (tier 1)
-func weight_tier(WeightKg) =
-    if WeightKg > cast(50, u32) then cast(3, u32)
-    else if WeightKg > cast(10, u32) then cast(2, u32)
+func weight_tier(WeightKilograms) =
+    if WeightKilograms > cast(50, u32) then cast(3, u32)
+    else if WeightKilograms > cast(10, u32) then cast(2, u32)
     else cast(1, u32).
 
 // Dimensional weight calculation (L x W x H / 5000)
@@ -76,9 +76,9 @@ func weight_tier(WeightKg) =
 func dimensional_weight(Length, Width, Height) = Length * Width * Height / cast(5000, u32).
 
 // Billable weight: max of actual weight and dimensional weight
-func billable_weight(ActualWeight, DimWeight) =
-    if ActualWeight > DimWeight then ActualWeight
-    else DimWeight.
+func billable_weight(ActualPackageWeight, DimensionalWeight) =
+    if ActualPackageWeight > DimensionalWeight then ActualPackageWeight
+    else DimensionalWeight.
 
 // Express shipping multiplier
 // Same day: 3x
@@ -219,7 +219,7 @@ fuel_surcharge_rate(freight, 22).
 
 // NOTE: Helper predicates for cost calculations were removed as they require
 // specific input values which XLOG's datalog semantics don't support
-// Use the UDFs directly in queries instead:
+// Use the user-defined functions directly in queries instead:
 // - For upgrade cost: compute ExpressCost - StandardCost directly
 // - For cost threshold: compute OrderValue / 5 directly
 // - For cost effective check: compare (ExpressCost - StandardCost) < (OrderValue / 5)
@@ -229,6 +229,6 @@ fuel_surcharge_rate(freight, 22).
 // =============================================================================
 
 // NOTE: The following predicates were removed as they were just placeholders:
-// - landed_cost_components: use UDFs directly in queries
-// - shipping_estimate: use base_shipping_cost UDF directly
-// - volume_discount_tier: use volume_discount UDF directly
+// - landed_cost_components: use user-defined functions directly in queries
+// - shipping_estimate: use base_shipping_cost directly
+// - volume_discount_tier: use volume_discount directly

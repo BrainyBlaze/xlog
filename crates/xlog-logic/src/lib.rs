@@ -70,10 +70,10 @@ pub use expand::expand_program_functions;
 pub use incremental_parse::{
     IncrementalParseResult, ParseCacheStats, ParserSession, StatementSpan, StatementUnit,
 };
-pub use list_normalize::normalize_v085_lists;
+pub use list_normalize::normalize_list_builtins;
 pub use lower::Lowerer;
-pub use magic_sets::{rewrite_v085_magic_sets, MagicSetReport, MagicSetRewrite, MagicSetStatus};
-pub use meta_normalize::normalize_v085_meta;
+pub use magic_sets::{rewrite_magic_sets, MagicSetReport, MagicSetRewrite, MagicSetStatus};
+pub use meta_normalize::normalize_meta_builtins;
 pub use module_diagnostics::{
     diagnose_module_boundaries, CandidateSourceKind, ModuleBoundaryInput, ModuleBoundaryReport,
     ModuleDeclaration, ModuleDeclarationKind, ModuleManifest, ModuleRole, ModuleViolation,

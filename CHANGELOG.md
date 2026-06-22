@@ -4,6 +4,1431 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- *(pyxlog)* **Joint multi-rule same-head trainable mixture (guard-only).** A
+  query head may now be derived by MORE THAN ONE `trainable_rule` — the joint
+  soft-mixture where N candidate rules compete for mass on one head (previously
+  rejected with "expected exactly 1 matching rule"). When several trainable rules
+  derive the train head, `train_neurosymbolic_program` computes the head
+  probability as the noisy-OR over candidates of `(eligible_k × sigmoid(guard_k))`
+  and trains the per-candidate guards by BCE on the supervised head, so the
+  competition drives the correct candidate's guard up and wrong-body candidates'
+  down (a wrong body fires on rows that create false positives BCE crushes). The
+  per-candidate relational eligibility is exposed by
+  `CompiledProgram.joint_candidate_eligibility` (reusing the engine's hard-filter
+  evaluation); the differentiable mass is torch over the guard parameters, so the
+  training loop performs no tracked device<->host transfers. Scope: guard-only
+  candidates (relational joins plus a trainable guard); candidates carrying neural
+  predicates beyond the guard are a documented follow-up (they require the circuit
+  backward, which fuses prob→loss→gradient on-device, to be un-fused).
+- *(pyxlog)* **Held-out generalization read for the joint mixture
+  (`evaluate_joint_mixture`).** Evaluates a trained joint mixture's guards on a
+  HELD-OUT program split: given the held-out bindings' facts and the learned
+  guard sigmoids (`result.symbolic_rule_weights`), returns the per-query noisy-OR
+  `p_or` over the engine's relational eligibility for that split. It reuses the
+  exact `_joint_noisy_or` of the training forward (pinned by a test asserting the
+  read on the train split reproduces `query_probabilities`), so the generalization
+  signal cannot drift from the trained mixture. This is the faithful anti-spurious
+  signal where structural coverage is unavailable: a candidate that fit only the
+  training facts yields low held-out `p_or` wherever its join does not fire. The
+  read needs only a compiled program (eligibility is relational, never the guard
+  network), so no network registration or example tensor source is required.
+  Usage is candidate-set controlled by `rule_weights`: pass ONLY the selected
+  winner's weight for a single-candidate admission gate (the pool-wide OR is
+  inflated wherever any candidate fires, so a high-guard spurious coverer on a
+  train-tie would mask the winner's non-generalization); select among
+  train-covering candidates by guard-free held-out coverage, not by the (tied)
+  guards.
+- *(prob/solve)* **Fail-closed D4 equivalence-verify conflict budget
+  (compile/verify robustness, primary fix).** Calibration showed the verify explosion is
+  treewidth-exponential, not size-linear (onset ~654 CNF vars where legitimate
+  programs live; same var count can verify in 1s or run to a watchdog crash),
+  so a size bound is too coarse. The GPU CDCL kernel now accepts a
+  `max_conflicts` budget and bails with a new `SAT_STATUS_BUDGET_EXHAUSTED`
+  status when the search runs past it without terminating — bounding wall-clock
+  so a hard instance returns gracefully instead of running to a
+  context-poisoning `CUDA_ERROR_LAUNCH_FAILED`. A budget-exhausted verify is
+  INDETERMINATE and declines fail-closed with the typed
+  `XlogError::VerifyBudgetExceeded` (catchable Python exception), never trusted
+  as a proof. `GpuCdclConfig::max_conflicts` defaults to `0` (unlimited, no
+  behavior change); the verify path reads `XLOG_D4_VERIFY_MAX_CONFLICTS` (opt-in).
+  Recommended production default is a calibration follow-up (between a
+  completing verify's conflict count and the watchdog boundary).
+- *(prob)* **Fail-closed D4 compile size bound (compile-phase
+  guard).** The D4 *compile* itself (knowledge-compilation emit, fixed-capacity
+  buffers) can overrun and fail with a `CUDA_ERROR_LAUNCH_FAILED` that poisons
+  the primary context — *earlier* than the verify — on a CNF larger than its
+  emit caps. A poisoned context cannot be recovered in-process, so the size
+  guard runs **before** `compile_gpu_d4` (top of `compile_gpu_d4_and_verify` /
+  `_cached`): the CNF's host-side `var_cap`/`clause_cap` are checked against
+  `XLOG_D4_VERIFY_MAX_VARS` / `XLOG_D4_VERIFY_MAX_CLAUSES` and an over-bound
+  program declines with the typed `XlogError::CompileCapacityExceeded`
+  ("too big to compile", distinct from the verify-phase signal) instead of
+  reaching the crashing compile. **Defaults are unbounded** (`u32::MAX`); no
+  behavior change unless an operator opts in. A recommended production default
+  is a calibration follow-up; the in-kernel guard below now makes overflow
+  protection effective by default even when no host-side bound is configured.
+- *(prob/cuda)* **In-kernel emit-overflow guard — compile-phase protection on
+  by default.** The host-side size bound above only fires when an operator
+  configures it, but the emit kernel could still overrun its fixed-capacity
+  buffers on an unconfigured run and trap. `d4_compile_emit` previously called
+  `d4_trap()` (a PTX `trap;`) when the node/edge totals exceeded `node_cap` /
+  `edge_cap`, which poisons the CUDA primary context and kills every later
+  compile in the process. It now evaluates the same capacity check **before any
+  write, in every block**, and on overflow sets a one-word `overflow_flag` and
+  returns instead of trapping. The host reads the flag after the launch and
+  declines with the typed `XlogError::CompileCapacityExceeded` (catchable Python
+  exception) before downstream kernels run on uninitialized buffers — so an
+  oversized CNF declines cleanly and the context survives for the next query,
+  with **no environment opt-in required**. Buffers remain fixed-capacity, so an
+  oversized program still declines rather than compiles; growable emit buffers
+  (so large programs compile) remain a follow-up.
+- *(cuda)* **Kernel-artifact integrity guard — stale staged cubin/PTX
+  auto-heal, on by default.** A staged kernel artifact whose signature had
+  diverged from the current build (e.g. a kernel gained a parameter but the
+  staged copy was never refreshed) loaded "successfully" and then launched a
+  mismatched kernel into a context-poisoning `CUDA_ERROR_ILLEGAL_ADDRESS` —
+  surviving clean rebuilds because the staged copy is regenerated by a separate
+  staging step. The build now embeds a canonical FNV-1a hash for every kernel
+  artifact it produces; the loader re-hashes each staged cubin/PTX and SKIPS any
+  that diverge from this build, ALWAYS appends the embedded portable PTX as a
+  signature-fresh final fallback (so a skipped stale artifact auto-heals to it),
+  and FAILS CLOSED if no source loads (never silently runs nothing). No
+  CUDA-kernel change; dependency-free FNV-1a (build.rs ↔ runtime, known-answer
+  locked). Verified on a Blackwell sm_120 canary: a stale staged cubin
+  auto-heals (no OOB), a fresh artifact keeps the fast cubin path.
+- *(pyxlog)* **Mixed trainable-rule bodies: neural predicates joined with
+  ordinary relations.** A `trainable_rule` body may now join a neural predicate
+  with ordinary world relations (in addition to builtins). The ordinary
+  relations act as HARD join conditions — they gate which groundings can fire
+  but contribute no probability mass and no gradient; probability comes only
+  from the neural predicates x sigma(rule weight), and gradients flow only to
+  the network and the rule weight, never through the fact atoms. The
+  knowledge-compilation circuit covers just the neural part; the hard
+  conditions are evaluated as a pre-filter, and a query whose hard conditions
+  fail short-circuits to probability 0 before any network forward (enforcing the
+  gradient isolation). Current scope: hard conditions whose arguments are query
+  head variables; joining an ordinary relation on an existential (non-head)
+  variable still fails closed with a typed error (documented follow-up).
+- *(pyxlog)* **GPU-resident, zero-host neuro-symbolic training surface.** The
+  `train_neurosymbolic_program` step loop is now device-resident: a new
+  `CompiledProgram.forward_backward_grouped(queries, expected)` evaluates every
+  example's supervised circuit in one batched pass per (target, template) group
+  with a single host sync per step, instead of the scalar `forward_backward`
+  host-syncing once per query (which left training CPU-bound). The batched
+  query-var metadata is cached on device, so the warm training loop performs
+  **no tracked device<->host transfers in either direction**; the post-training
+  probability readout is batched too (`query_probabilities_grouped`,
+  O(templates) host syncs instead of O(N)). **Behavior change:** the training
+  optimizer is configurable (`NeuroSymbolicTrainingConfig.optimizer`,
+  `"adam"` | `"sgd"`) and **defaults to Adam** — the supervised loss is
+  multiplicative (`prob = softmax_positive x sigmoid(rule_weight)`) with a flat
+  plateau around uniform init that plain SGD frequently cannot leave (it
+  separated a cleanly separable signal in ~1/10 random inits vs ~8/10 for Adam);
+  the engine gradient itself is exact (finite-difference-verified to 0.01%). The
+  grouped loss and batched readout are numerically identical to the per-query
+  scalar path.
+- *(runtime)* **D3 — factorized recursive deltas.** Transitive-closure-shaped
+  recursive rules (`q(X,Z) :- q(X,Y), edge(Y,Z)` and its left-linear /
+  non-linear-self-join / swapped-head variants) now route their semi-naive
+  delta step through a factorized novel-set pipeline that evaluates
+  `novel[x] = (∪ edge[y]) \ R[x]` over a dense-domain characteristic bitvector
+  instead of materializing the witness-multiplied flat join and diffing it.
+  Measured on RunPod RTX A4000 through the production executor: **41.46× peak
+  memory reduction at 0.092× wall-clock** on a dense block-cycle TC
+  (1,048,576 result rows), with deterministic row-set parity. Gated to the
+  dense-domain regime (`XLOG_FACTORIZED_DELTA_MAX_DOMAIN`, default 2¹⁴, hard
+  bound 2¹⁶) with a per-iteration work floor that bails to the legacy path on
+  sparse/long-chain fixpoints (measured ≤1.161× there, no regression). Kill
+  switch `XLOG_DISABLE_FACTORIZED_DELTA=1`; observability via
+  `Executor::factorized_delta_dispatch_count()`. u32/Symbol arity-2 only;
+  other widths and shapes decline silently to the existing hash-join → diff
+  path. Spike (S3) and production-dispatch (S4) gate evidence under
+  `docs/evidence/2026-06-1{2,4}-s{3,4}-factorized-delta*/`.
+- *(runtime)* **D3 sparse-domain route.** Domains above the dense cap (which
+  previously declined to legacy) now route through a GPU open-addressing
+  hash-set novel-set with no `domain²` term, so transitive closure over large
+  sparse graphs is accelerated too. The table is sized to the distinct-candidate
+  count (a fixed 8 MiB estimator bitmap), not the witness count; inserts are
+  overflow-safe and decline to legacy if the estimate under-sizes or the table
+  exceeds `XLOG_FACTORIZED_DELTA_MAX_TABLE_BYTES` (default budget/2). Measured
+  on RunPod RTX A4000 through the production executor on a large-domain
+  (~2.09M) blowup TC: **14.63× peak-memory reduction at 0.160× wall-clock**
+  (6.2× faster), row-set parity. The domain-based router selects
+  dense-bitvector | sparse-hash-set | legacy; the same kill switch and counter
+  cover both factorized routes. Evidence under
+  `docs/evidence/2026-06-14-sparse-domain-spike/`.
+
+### Fixed
+
+- *(cuda)* Fused group-by-root entries now layout-normalize their inputs
+  per dispatch (sorted-fast-path when already lex-sorted+unique), matching
+  the unfused pipeline's guarantee — unsorted or duplicated input buffers
+  previously produced silently wrong (empty) fused aggregate results.
+- *(prob)* **Behavior change — MC fail-closed contract.** `McProgram::evaluate`
+  no longer falls back to the CPU oracle silently when the GPU-resident MC
+  engine rejects a program (negation, aggregates, unbounded terms). Rejected
+  programs now fail with the typed `ResidentRejection` unless the caller opts
+  in explicitly, and every `McResult` carries an engine label so CPU-oracle
+  output can never pass as GPU-native evidence.
+  - **Migration**: MC programs with negation (incl. non-monotone recursion)
+    or aggregates need `McEvalConfig::allow_cpu_oracle_fallback = true`
+    (Rust), `--allow-cpu-oracle` (CLI), or `evaluate(allow_cpu_oracle=True)`
+    (Python). Results report `mc_engine: "gpu-resident" | "cpu-oracle"` in
+    CLI JSON/arrow output and `EvalResult.mc_engine` in Python.
+  - The v0.8.5 MC-aggregate evidence was corrected accordingly: those
+    fixtures always ran on the CPU oracle, not the GPU
+    (`docs/evidence/2026-05-19-v085-prob-aggregates/README.md`).
+
+### Added
+
+- *(runtime)* **Aggregate-fused WCOJ (factorized aggregate execution).**
+  `deg(X, count(V)) :- e_xy(X,Y), e_yz(Y,Z), e_xz(X,Z)` now executes through
+  a fused group-by-root count kernel that never materializes the triangle
+  rows — all reduction work is input-sized instead of join-output-sized.
+  Measured 6.05x / 5.37x vs the materialize+groupby path on skewed hub
+  fixtures and 2.49x on small uniform
+  (`docs/evidence/2026-06-11-s1-aggregate-fused-wcoj/`). Transparent:
+  count-by-root-variable aggregates over triangle bodies fuse automatically
+  (counter `Executor::wcoj_groupby_fusion_dispatch_count`); every structural
+  mismatch falls back to the existing path with identical results; kill
+  switch `XLOG_DISABLE_WCOJ_GROUPBY_FUSION=1`. Scope: u32/Symbol keys,
+  single `count` aggregate, non-recursive triangle bodies.
+- *(cuda)* Aggregate-fused WCOJ aggregate widening: `sum`/`min`/`max` over a
+  triangle output variable (Y or Z, U32 values) and u64-key `count` now
+  dispatch through fused group-by-root kernels that never materialize the
+  triangle rows (`wcoj_triangle_groupby_root_{sum,min,max}_hg_u32`,
+  `wcoj_triangle_groupby_root_count_hg_u64`); the recorded groupby `Sum`
+  accepts U64 value columns (`groupby_sum_u64`). Structural mismatches keep
+  declining silently to materialize+groupby, and the
+  `XLOG_DISABLE_WCOJ_GROUPBY_FUSION` kill switch covers the widened paths.
+- *(cuda)* Aggregate-fused WCOJ width and shape completion:
+  - 4-cycle `count` fusion — `deg(W, count(V)) :- e1(W,X), e2(X,Y),
+    e3(Y,Z), e4(Z,W)` dispatches `wcoj_4cycle_groupby_root_count_hg_u32`
+    without materializing the 4-cycle rows (17.6x-47.6x vs
+    materialize+groupby on skewed hub fixtures, gate >= 3x). The fused
+    path shares the triangle fusion's default-on gating and kill switch;
+    the opt-in `XLOG_USE_WCOJ_4CYCLE*` gates keep governing only the
+    non-aggregate materialize dispatch.
+  - u64-key `sum`/`min`/`max` fusion —
+    `wcoj_triangle_groupby_root_{sum,min,max}_hg_u64` plus metadata-driven
+    segment reduction (30.3x-36.7x on the skewed u64 hub fixture, gate
+    >= 3x). The legacy groupby (the unfused baseline for u64-key
+    relations) was widened to u64-value `sum`/`min`/`max`
+    (`groupby_min_u64` / `groupby_max_u64`; min/max output preserves the
+    value width).
+  - Symbol semantics locked by tests: `count` over Symbol-keyed/valued
+    bodies fuses (u32-physical) and preserves the Symbol key type;
+    `sum`/`min`/`max` over Symbol values declines fused and is rejected by
+    the unfused groupby with an identical error (no silent aggregation of
+    symbol ids). Evidence:
+    `docs/evidence/2026-06-11-s1c-4cycle-width-completion/`.
+  Gate evidence: `docs/evidence/2026-06-11-s1b-agg-widening/`.
+- *(cuda)* Aggregate-fused WCOJ 4-cycle aggregate variants:
+  - 4-cycle `sum`/`min`/`max` fusion — `agg(W, op(V)) :- e1(W,X), e2(X,Y),
+    e3(Y,Z), e4(Z,W)` with `V ∈ {X, Y, Z}` (U32 values) dispatches
+    `wcoj_4cycle_groupby_root_{sum,min,max}_hg_u32` without materializing
+    the 4-cycle rows (3.3x-12.8x vs materialize+groupby on the skewed hub
+    fixture, gate >= 3x); Symbol values decline fused and are rejected by
+    the unfused groupby with an identical error.
+  - u64-key 4-cycle `count` fusion —
+    `wcoj_4cycle_groupby_root_count_hg_u64` plus the metadata-driven
+    segment reduction (16.4x-26.1x on the skewed u64 hub fixture, gate
+    >= 3x). u64-key 4-cycle `sum`/`min`/`max` stays deferred and declines.
+  - The recorded groupby accepts U64 value columns for `Min`/`Max`
+    (`groupby_min_u64`/`groupby_max_u64` on the recorded path; result
+    preserves the value width), matching the legacy path widened for the width
+    and shape completion work.
+  - Float/LogSumExp fused aggregates: design-decision note recorded in the
+    architecture guide (float atomics break the deterministic-values
+    contract; per-block deterministic tree reduction preferred over
+    fixed-point encoding). Evidence:
+    `docs/evidence/2026-06-11-s1d-4cycle-agg-variants/`.
+- *(cuda)* Aggregate-fused WCOJ K-clique count-by-root completion: K=5 and K=6
+  clique `count`-by-root fusion at the u32/Symbol width-class —
+  `q(R, count(*)) :- <complete K-clique body>` grouped by the plan's root
+  variable dispatches `wcoj_clique{5,6}_groupby_root_count_hg_u32`
+  (per-leader-edge-row atomicAdd accumulation over the planned clique
+  count traversal) without materializing the clique rows (3.01x-3.59x vs
+  the planned materialize+groupby path on skewed K=5 hub fixtures, gate
+  >= 3x). The clique root is plan-dependent (`variable_order[0]` +
+  leader-edge orientation/swaps), so the executor fuses only when the
+  group key maps to the planned root variable; non-root keys, K=7/8, and
+  u64 widths decline silently. The promoter descends aggregate wrappers
+  over clique bodies by synthesizing the head projection from the
+  variable-class tournament's topological order. Shared kill switch and
+  counter. Evidence: `docs/evidence/2026-06-11-s1e-kclique-count-fusion/`.
+- *(runtime)* Aggregate fusion over recursive-stratum inputs verified and
+  locked by tests: later-stratum count/sum aggregates whose triangle bodies
+  read semi-naive fixpoint outputs (incl. all-recursive self-joins)
+  dispatch the fused path with oracle parity — recursive merges are
+  lex-sorted+deduped by construction, satisfying the fused layout contract.
+  Aggregates *inside* recursive rules remain stratification-rejected by
+  language contract.
+- *(runtime)* **GPU Free Join for general multiway bodies.** Inner-join
+  bodies with >= 3 atoms and no dedicated kernel shape (any arity mix, any
+  join-tree shape) now promote to a generic `MultiWayJoin`
+  (`MultiwayPlan::FreeJoin`) and dispatch through a Free Join frontier
+  engine (flat sorted-range tries + level-synchronous columnar frontier,
+  identity-group fast path, fused probe filters; SIGMOD'23 Free Join
+  adapted to bulk GPU execution). Spike gate on the 4-atom blowup chain:
+  2.59x median vs the binary-join path (isolated serial runs); the dedicated
+  triangle comparison is retained as the recorded cost-of-generality bound
+  (1.73x-2.04x) and triangle/4-cycle/K-clique keep their dedicated kernels —
+  Free Join never takes a dedicated shape
+  (`docs/evidence/2026-06-12-s2-free-join-spike/`). Opportunistic by
+  contract: non-prefix bound columns, non-u32/Symbol inputs, and repeated
+  cover variables decline silently to the embedded binary fallback with
+  identical results. Counter `Executor::free_join_dispatch_count`; kill
+  switch `XLOG_DISABLE_FREE_JOIN=1`. Epistemic GPU certification classifies
+  Free Join routes as a separate opportunistic preflight bucket
+  (`free_join_route_count`) and traces dispatches without hardening them
+  into dedicated-kernel obligations.
+- *(cuda)* **Free Join u64 and factorized-count completion.** u64 width-class engine
+  (`free_join_execute_u64_recorded`): the frontier pipeline is
+  width-parameterized — VAR columns carry width-sized data while trie
+  RANGE columns stay u32 row indices in every class — with parity locked
+  by truncation-adversarial fixtures (keys colliding modulo 2^32).
+  Recursive SCCs verified end-to-end: Free Join fires on the semi-naive
+  seeding pass and on every delta-rewritten variant with exact fixpoint
+  parity under the kill switch. **Factorized count-by-root** (design
+  §2.4): `count` aggregates over FreeJoin-promoted bodies dispatch
+  `free_join_count_by_root_u32_recorded` — trailing variables private to
+  one atom are never expanded; each frontier row contributes the product
+  of its remaining live trie-range lengths (the d-representation count)
+  and the existing recorded groupby reduces `(group, multiplicity)`.
+  Count semantics match the unfused pipeline exactly (both count
+  distinct full body bindings). Measured 3.66x-3.71x vs the
+  materialize+groupby path on a skewed 4-atom fixture (7.8M-row
+  join vs 100k-row factorized frontier; RTX A4000, 3 isolated runs,
+  gate >= 3x —
+  `docs/evidence/2026-06-12-s2-free-join-spike/runpod-count-gate.log`).
+  u32/Symbol-key only, matching the recorded groupby's engine-wide
+  key support; both `XLOG_DISABLE_WCOJ_GROUPBY_FUSION` and
+  `XLOG_DISABLE_FREE_JOIN` disable the fused route with identical
+  fallback results.
+- *(runtime)* **Free Join order planner and factorized loss veto.** Two
+  cardinality-driven gates keep the factorized routes from dispatching a worse
+  plan in their loss regions:
+  - Order planner (`plan_free_join_order`): Free Join materializes a left-deep
+    prefix whose probe keys must be a leading column prefix of each atom, so a
+    bad input order can materialize a large intermediate even when the result
+    is tiny. Using the ground-truth row counts of the buffers being joined
+    (and `StatsManager::estimate_join_cardinality` for per-pair selectivity when
+    stats exist), it keeps the input order when it is already within 1.2x of the
+    binary plan's estimated peak (small joins and already-good orders untouched),
+    reorders to a better prefix-key-joinable order when one is competitive, or
+    declines to the binary fallback when none is — removing a measured worst-case
+    peak-memory loss (~3x on an adversarial blow-up chain, now declined to peak
+    parity) while every winning fixture still fires.
+  - Loss veto (`factorized_loss_veto`): fail-open. The aggregate-fused WCOJ and
+    Free Join routes decline to the binary plan only when stats are present for
+    every input and the largest is below the WCOJ-worthwhile threshold (a
+    provably-small join the binary plan wins); missing stats or any large input
+    never veto, so measured wins are preserved.
+  Both run only under the cardinality cost model (the skew model opts out), and
+  reordering changes only the plan-build order — buffer indexing and the head
+  projection are unchanged. Documented in the WCOJ architecture and user guides.
+- *(prob)* **Factorized outcome folding for exact non-count aggregates.**
+  Probabilistic `sum`/`min`/`max`/`logsumexp` provenance no longer
+  enumerates one conjunction per 2^k outcome mask; the factorized encoding
+  keeps the PIR polynomial in k (k=14 fixture: < 4096 nodes vs >= 16384
+  masks) with probability parity locked at 1e-12 against finite oracles.
+- *(prob)* Opt-in `decision_order_hint` for GPU D4 compilation
+  (default off). Measured verdict is **negative** — 0% frontier reduction,
+  independently replicated (`docs/evidence/2026-06-11-d4-structure-hints/`)
+  — kept for its `frontier_items` profiling counter and as the harness for
+  future kernel-side variable-priority work.
+- *(docs)* Factorized-hypergraph research report
+  (`docs/plans/2026-06-11-factorized-hypergraph-research.md`):
+  adversarially verified algorithm landscape (f-/d-representations, FAQ,
+  Free Join, factorized provenance), codebase asset/gap map, four ranked
+  integration directions with benchmark-spike gates; the aggregate-fused WCOJ
+  direction shipped above.
+- *(runtime)* WCOJ pipeline errors (layout/kernel failures) are now counted
+  (`Executor::wcoj_error_decline_count`) and logged when they decline to the
+  binary-join fallback; `XLOG_WCOJ_STRICT=1` propagates the error instead.
+- *(tests)* `XLOG_REQUIRE_CUDA=1` turns CUDA-init failures in the test
+  harness into hard failures so certification can never pass vacuously on a
+  CPU-only machine; `scripts/validate_release_gpu.sh` sets it and preflights
+  the GPU. Restored the external diagnostic epistemic fixture programs missing since PR #139
+  (9/15 `xlog-epistemic-evidence` tests had been red on `main`).
+- *(pyxlog)* `LogicRelationSession.wcoj_dispatch_stats()` exposes the
+  session executor's multiway dispatch telemetry
+  (`free_join_dispatch_count`, `wcoj_groupby_fusion_dispatch_count`,
+  `wcoj_error_decline_count`) so consumers can observe whether Free Join
+  and fused-aggregate paths fire on their workloads instead of inferring
+  it from kill-switch timing probes.
+
+### Documentation
+
+- BENCHMARKS.md unmeasured throughput tables are labeled as targets;
+  README states the zero-tracked-transfer data-plane contract precisely;
+  the MC engine split and the XGCF per-level host-orchestration boundary
+  are documented in the language/CLI/architecture references.
+
+## [0.9.2](https://github.com/BrainyBlaze/xlog/compare/xlog-cli-v0.5.0...xlog-cli-v0.9.2) - 2026-06-08
+
+### Added
+
+- full shared-variable epistemic constraint joins via program-level desugaring
+- diagonal modal constraint via sound program-level desugaring
+- pilot ex37 (stratified negated-modal recursion EXECUTES) + device test/mutation + reword ex33 to formal WFS bound
+- multi-literal distinct-variable epistemic constraints + README
+- *(epistemic)* epistemic plan-dump surface â xlog run --epistemic-plan-json
+- close determined-epistemic multi-column binding (determined-modal family complete)
+- close transitive determined-ordinary modal coupling via stratification
+- close augmented-projection multi-head coupling scope limit
+- cross-component epistemic joint-solving (multi-output)
+- cross-component epistemic coupling
+- recursive epistemic fixpoint support
+- mixed per-row and global modal membership
+- checkpoint epistemic solver semantics
+- add cli explain repl watch surfaces
+- add incremental parser session
+- add approximate inference pragmas
+- add aggregate lifting reports
+- add magic-set rewriting
+
+### Fixed
+
+- *(release)* drop README version sync + dynamic badges + agent release rules ([#124](https://github.com/BrainyBlaze/xlog/pull/124))
+- guard diagonal desugaring to non-modal-derived targets
+- route bound-variable multi-head epistemic programs through split
+- route epistemic examples through xlog run
+- *(release)* harden validation and gpu fallback paths
+- *(pyxlog)* install local wheels for explicit python
+- *(cuda)* embed portable PTX fallback
+- *(pyxlog)* ship kernels in wheels and document cubin path
+- *(ci)* repair main release automation ([#27](https://github.com/BrainyBlaze/xlog/pull/27))
+- *(ci)* keep README release metadata in sync ([#26](https://github.com/BrainyBlaze/xlog/pull/26))
+
+### Other
+
+- v0.9.2 whitepaper + documentation realignment ([#133](https://github.com/BrainyBlaze/xlog/pull/133))
+- Set v0.9.2 release metadata
+- Clarify v0.9.2 WFS release contract
+- Close v0.9.2 epistemic semantic gaps
+- Close v0.9.2 epistemic release
+- CLI markers for accepted chain pilots; repoint negative test to interior-negation boundary
+- variable-keyed constraint device tests + CLI goldens + mutation probe
+- CLI golden ex23 ACCEPTED + repoint negative test to unbounded cons
+- CLI accepted-fixpoint + negated-modal-floor contracts
+- FAEEL unfounded self-support → exact founded-extension semantic result
+- integrate main MC GPU-resident engine into v0.9.2 epistemic completion
+- complete determined-modal-family showcase (negated-over-derived, possible-binding, FAEEL-unfounded)
+- determined-head and negated-modal-over-invariant xlog-run pilots (examples 25,26) with anti-gaming gating checks
+- flip example 17 to accepted stratified pilot; add example 24 transitive out-of-scope negative
+- full robust validated v0.9.2 epistemic examples
+- add validated v0.9.1 epistemic executor showcase (06-11)
+- document v0.9.0 epistemic language surface
+- *(release)* align v0.9.0 package metadata
+- integrate v0.8.9 diagnostics surfaces
+- *(release)* prepare v0.8.6 tag metadata
+- *(release)* correct v0.8.5 public status
+- *(release)* prepare v0.8.0
+- mark v0.7.0 release complete
+- close purge gate
+- *(v0.6.2)* prepare roadmap changelog and version
+- *(v0.6.1)* version bump + roadmap cleanup + changelog
+- *(readme)* bump version badge + release-status line to v0.6.0
+- restore audit README framing with current release setup
+- Merge branch 'audit/v0.5.0-prerelease'
+- integrate prerelease audit docs
+- harden public release readiness
+
+## [0.9.2](https://github.com/BrainyBlaze/xlog/compare/xlog-gpu-v0.5.0...xlog-gpu-v0.9.2) - 2026-06-08
+
+### Added
+
+- full shared-variable epistemic constraint joins via program-level desugaring
+- diagonal modal constraint via sound program-level desugaring
+- pilot ex37 (stratified negated-modal recursion EXECUTES) + device test/mutation + reword ex33 to formal WFS bound
+- co-evolving modal and recursive founded least fixpoint
+- *(epistemic)* epistemic plan-dump surface â xlog run --epistemic-plan-json
+- close determined-epistemic multi-column binding (determined-modal family complete)
+- determined-head recursion and negated-modal-over-invariant recursive epistemic fixpoint
+- stratified epistemic execution wiring (materialize gated head between strata)
+- cross-component epistemic joint-solving (multi-output)
+- recursive epistemic fixpoint support
+- coalesce relation delta batches
+- add safe meta lowering
+- add finite list lowering
+- add type term foundation
+- *(pyxlog)* add v0.8.0 relation delta sessions
+- expose xlog sort-label metadata
+
+### Fixed
+
+- *(release)* drop README version sync + dynamic badges + agent release rules ([#124](https://github.com/BrainyBlaze/xlog/pull/124))
+- guard diagonal desugaring to non-modal-derived targets
+- route bound-variable multi-head epistemic programs through split
+- materialize nullary EDB facts as present (1 row)
+- route epistemic examples through xlog run
+- prove pyxlog persistent index session reuse
+- *(release)* harden validation and gpu fallback paths
+- expose query-variable sort labels at runtime
+- *(pyxlog)* install local wheels for explicit python
+- *(cuda)* embed portable PTX fallback
+- *(pyxlog)* ship kernels in wheels and document cubin path
+- *(ci)* repair main release automation ([#27](https://github.com/BrainyBlaze/xlog/pull/27))
+- *(ci)* keep README release metadata in sync ([#26](https://github.com/BrainyBlaze/xlog/pull/26))
+
+### Other
+
+- v0.9.2 whitepaper + documentation realignment ([#133](https://github.com/BrainyBlaze/xlog/pull/133))
+- Set v0.9.2 release metadata
+- Clarify v0.9.2 WFS release contract
+- Close v0.9.2 epistemic semantic gaps
+- Close v0.9.2 epistemic release
+- cargo fmt
+- derived-head coupling — stratified-vs-reference equivalence + true-cycle wall
+- device co-evolving modal-recursion case founded-fixpoint + ungated mutation probe
+- document v0.9.0 epistemic language surface
+- *(release)* align v0.9.0 package metadata
+- integrate v0.8.9 diagnostics surfaces
+- integrate v0.8.8 external world-model diagnostics into v0.8.9
+- integrate first external diagnostics into v0.8.9
+- Exercise external generated-rule diagnostics
+- Resolve remaining XLOG evidence issues
+- Add v0.8.7 external world-model diagnostics
+- *(release)* prepare v0.8.6 tag metadata
+- *(release)* correct v0.8.5 public status
+- *(release)* prepare v0.8.0
+- mark v0.7.0 release complete
+- *(v0.6.2)* prepare roadmap changelog and version
+- *(v0.6.1)* version bump + roadmap cleanup + changelog
+- *(readme)* bump version badge + release-status line to v0.6.0
+- restore audit README framing with current release setup
+- Merge branch 'audit/v0.5.0-prerelease'
+- integrate prerelease audit docs
+- harden public release readiness
+
+## [0.9.2](https://github.com/BrainyBlaze/xlog/compare/xlog-prob-v0.5.0...xlog-prob-v0.9.2) - 2026-06-08
+
+### Added
+
+- close augmented-projection multi-head coupling scope limit
+- checkpoint epistemic solver semantics
+- add approximate inference pragmas
+- add aggregate lifting reports
+- add probabilistic aggregate support
+- add safe meta lowering
+- add type term foundation
+
+### Fixed
+
+- *(release)* drop README version sync + dynamic badges + agent release rules ([#124](https://github.com/BrainyBlaze/xlog/pull/124))
+- route epistemic examples through xlog run
+- close GPU-native count-lift exact path
+- *(release)* harden validation and gpu fallback paths
+- *(pyxlog)* install local wheels for explicit python
+- *(cuda)* embed portable PTX fallback
+- *(pyxlog)* ship kernels in wheels and document cubin path
+- *(ci)* repair main release automation ([#27](https://github.com/BrainyBlaze/xlog/pull/27))
+- *(ci)* keep README release metadata in sync ([#26](https://github.com/BrainyBlaze/xlog/pull/26))
+
+### Other
+
+- v0.9.2 whitepaper + documentation realignment ([#133](https://github.com/BrainyBlaze/xlog/pull/133))
+- Set v0.9.2 release metadata
+- Close v0.9.2 epistemic release
+- integrate main MC GPU-resident engine into v0.9.2 epistemic completion
+- document v0.9.0 epistemic language surface
+- *(release)* align v0.9.0 package metadata
+- integrate v0.8.9 diagnostics surfaces
+- aggregate split batch cpu fallbacks
+- gate split batch h2d transfer
+- gate split batch incremental prob updates
+- gate accepted evidence incremental prob updates
+- centralize probabilistic batch gate
+- require single result timing gates
+- require split batch timing gates
+- tighten prob production metric gate
+- replace incremental evidence updates
+- name alternative compiler adapters
+- trace nonzero probabilistic evidence arity
+- reuse v0.8.6 bundle for v0.9.0
+- *(release)* prepare v0.8.6 tag metadata
+- *(release)* correct v0.8.5 public status
+- *(release)* prepare v0.8.0
+- mark v0.7.0 release complete
+- *(v0.6.2)* prepare roadmap changelog and version
+- *(v0.6.1)* version bump + roadmap cleanup + changelog
+- *(readme)* bump version badge + release-status line to v0.6.0
+- restore audit README framing with current release setup
+- Tighten workspace warning hygiene
+- Merge branch 'audit/v0.5.0-prerelease'
+- integrate prerelease audit docs
+- harden public release readiness
+
+## [0.9.2](https://github.com/BrainyBlaze/xlog/compare/xlog-solve-v0.5.0...xlog-solve-v0.9.2) - 2026-06-08
+
+### Added
+
+- close augmented-projection multi-head coupling scope limit
+- checkpoint epistemic solver semantics
+- gate multi-candidate solver portfolios
+- schedule gpu maxsat batches
+- schedule multi-result gpu maxsat search
+- schedule multi-result gpu maxsat encodes
+- encode weighted gpu maxsat candidates
+- prune unsat gpu maxsat candidates
+- batch accepted gpu maxsat candidates
+- reuse learned clauses across accepted gpu candidates
+- propagate gpu solver lifecycle statuses
+- cover multi-candidate gpu solver lifecycle
+- reject unsafe learned clause reuse
+- gate oracle fixtures from production metrics
+- reuse gpu learned clauses for same cnf
+- publish gpu learned clause arenas
+- propagate solver portfolio status in gpu adapter
+- gate maxsat portfolio through gpu solver adapter
+- gate solver lifecycle with accepted gpu evidence
+- gate solver workspace unsat with accepted gpu evidence
+- gate solver unsat path with accepted gpu evidence
+- gate solver sat path with accepted gpu evidence
+- report solver production capability blockers
+- add gpu solver production reuse adapter
+- add bounded solver service semantics
+
+### Fixed
+
+- *(release)* drop README version sync + dynamic badges + agent release rules ([#124](https://github.com/BrainyBlaze/xlog/pull/124))
+- route epistemic examples through xlog run
+- *(release)* harden validation and gpu fallback paths
+- *(pyxlog)* install local wheels for explicit python
+- *(cuda)* embed portable PTX fallback
+- *(pyxlog)* ship kernels in wheels and document cubin path
+- *(ci)* repair main release automation ([#27](https://github.com/BrainyBlaze/xlog/pull/27))
+- *(ci)* keep README release metadata in sync ([#26](https://github.com/BrainyBlaze/xlog/pull/26))
+
+### Other
+
+- v0.9.2 whitepaper + documentation realignment ([#133](https://github.com/BrainyBlaze/xlog/pull/133))
+- Set v0.9.2 release metadata
+- document v0.9.0 epistemic language surface
+- *(release)* align v0.9.0 package metadata
+- integrate v0.8.9 diagnostics surfaces
+- aggregate split batch cpu fallbacks
+- gate split batch h2d transfer
+- centralize solver batch gate
+- require single result timing gates
+- require split batch timing gates
+- lock production metric audit wording
+- tighten solver production metric gate
+- trace solver nonzero evidence arity
+- reuse v0.8.6 bundle for v0.9.0
+- guard maxsat scheduler prevalidation
+- guard encoded maxsat prevalidation
+- guard maxsat search prevalidation
+- guard maxsat lifecycle prevalidation
+- gate split maxsat lifecycle
+- gate solver maxsat lifecycle
+- gate split solver maxsat scheduler on batches
+- gate split solver maxsat search on batches
+- gate split solver maxsat on batches
+- gate split solver learned reuse on batches
+- gate split solver portfolio on batches
+- gate split solver lifecycle on batches
+- trace solver evidence by operator family
+- trace semantic modes through solver gates
+- mark gpu native gate blocked
+- mark v0.7.0 release complete
+- *(v0.6.2)* prepare roadmap changelog and version
+- *(v0.6.1)* version bump + roadmap cleanup + changelog
+- *(readme)* bump version badge + release-status line to v0.6.0
+- restore audit README framing with current release setup
+- Tighten workspace warning hygiene
+- Merge branch 'audit/v0.5.0-prerelease'
+- integrate prerelease audit docs
+- harden public release readiness
+
+## [0.9.2](https://github.com/BrainyBlaze/xlog/compare/xlog-runtime-v0.5.0...xlog-runtime-v0.9.2) - 2026-06-08
+
+### Added
+
+- same-name multi-arity modal coupling solved via arity-qualified tuple sources
+- variable-keyed + nested epistemic constraints (GPU world-view pruning)
+- multi-literal distinct-variable epistemic constraints + README
+- drop unfounded FAEEL self-support from reduced founded-model base
+- close determined-epistemic multi-column binding (determined-modal family complete)
+- close augmented-projection multi-head coupling scope limit
+- determined-head recursion and negated-modal-over-invariant recursive epistemic fixpoint
+- stratified epistemic execution wiring (materialize gated head between strata)
+- cross-component epistemic joint-solving (multi-output)
+- cross-component epistemic coupling
+- mixed per-row and global modal membership
+- constraint-specific rejection reasons
+- joint multi-epistemic predicate solving
+- epistemic integrity constraints
+- EIR-derived candidate-world enumeration
+- tuple-key bound-value membership
+- checkpoint epistemic solver semantics
+- compare G91 GPU traces to oracle
+- expose gpt rejected candidate indices
+- expose gpu semantic candidate indices
+- type gpu epistemic rejection reasons
+- gate probabilistic pir cnf batches
+- gate probabilistic evaluation batches
+- gate parsed probabilistic program batches
+- gate multi-candidate solver portfolios
+- add split world-view parity fixture
+- add G91 runtime parity fixture
+- certify skew-scheduled wcoj reuse
+- permit founded faeel self possible
+- require complete world-view support
+- require helper scans in wcoj plans
+- certify helper split rewrites
+- require wcoj layout evidence
+- guard faeel self support
+- trace not possible row filters
+- certify kclique stream groups
+- trace epistemic operator metrics
+- trace kclique metadata timing
+- schedule gpu maxsat batches
+- schedule multi-result gpu maxsat search
+- schedule multi-result gpu maxsat encodes
+- condition negative gpu prob evidence
+- execute split gpu components
+- encode weighted gpu maxsat candidates
+- condition gpu prob gradients
+- prune unsat gpu maxsat candidates
+- certify helper split wcoj trace metrics
+- batch conditioned gpu prob programs
+- batch conditioned gpu prob queries
+- condition accepted gpu prob programs
+- condition accepted gpu prob tuple evidence
+- batch accepted gpu maxsat candidates
+- reuse learned clauses across accepted gpu candidates
+- propagate gpu solver lifecycle statuses
+- batch accepted gpu prob execution
+- cover multi-candidate gpu solver lifecycle
+- trace gpu semantic candidate outcomes
+- honor not-know tuple membership on gpu
+- condition accepted evidence in gpu exact path
+- gate oracle fixtures from production metrics
+- account final gpu result transfers
+- reuse gpu learned clauses for same cnf
+- trace kclique arity preflight reuse
+- trace program prob knowledge compilation
+- publish gpu learned clause arenas
+- propagate solver portfolio status in gpu adapter
+- lower split components through gpu executable plans
+- gate maxsat portfolio through gpu solver adapter
+- filter final rows by all epistemic memberships
+- gate prob end-to-end exact evaluation
+- gate solver lifecycle with accepted gpu evidence
+- gate prob pir cnf with accepted gpu evidence
+- gate prob query evaluation with accepted gpu evidence
+- gate prob program compile with accepted gpu evidence
+- gate solver workspace unsat with accepted gpu evidence
+- gate prob gradient evaluation with accepted gpu evidence
+- gate solver unsat path with accepted gpu evidence
+- gate solver sat path with accepted gpu evidence
+- gate prob exact path with accepted gpu evidence
+- filter final tuples by bound membership
+- certify accepted wcoj execution
+- gate final tuples by gpu membership
+- bind tuple keys to gpu output columns
+- add generic gpu tuple membership kernel
+- add arity-three epistemic tuple key kernel
+- encode ground epistemic tuple keys for gpu matching
+- preserve epistemic tuple key terms in eir
+- stage fixed-arity epistemic tuple sources on gpu
+- populate arity-zero epistemic membership from tuple sources
+- bind epistemic literals to tuple membership sources
+- fail closed on row-count epistemic membership
+- materialize epistemic final tuples on gpu
+- enforce epistemic wcoj runtime certification
+- gate epistemic model membership on gpu output
+- trace epistemic gpu transfer budget
+- materialize epistemic final result flags on gpu
+- validate epistemic world views on gpu
+- stage epistemic model membership on gpu
+- trace epistemic gpu staging timings
+- stage epistemic materialization on gpu
+- validate staged epistemic candidates on gpu
+- stage epistemic propagation on gpu
+- add gpu candidate generation kernel
+- reset epistemic gpu workspace on device
+- trace epistemic reduced runtime execution
+- gate epistemic wcoj evidence on counters
+- add epistemic runtime preflight
+- add epistemic gpu workspace contract
+- close CUDA Graph-mode set maintenance
+- bind delta variants as WCOJ leaders
+- remove adaptive skew classifier surface
+- route variable-ordering cost model u32 triangle through HG
+- route u32 triangle dispatch through HG pipeline
+- production kernel fusion (layout+count) with threshold dispatch + auto-disable + cert grid
+- wire sort-merge dispatch + counter at execute_join + de-overlap nested-loop dispatch cert fixtures for dispatch precedence
+- add eligible_for_sort_merge predicate
+- wire nested-loop dispatch + counter at execute_join
+- add eligible_for_nested_loop predicate
+- *(runtime)* K=5 and K=6 clique WCOJ dispatcher + counters
+- HeatAwareLeaderModel plus variable-order-aware join-result feedback
+- *(runtime)* per-iteration stats integration for recursive SCC
+- *(runtime)* dispatcher reroute on var_order — variable-ordering cost model leader rotation + post-kernel projection
+- *(ir)* VariableOrder + LookupPerm types + MultiWayJoin.var_order field
+- *(runtime)* record_join_result feedback from successful WCOJ dispatch
+- *(runtime)* dispatch sites use build_wcoj_cost_model factory
+- *(runtime)* CardinalityAwareCostModel with delegate-on-missing-stats
+- *(runtime)* execute_wcoj_or_fallback_node hooks recursive arm
+- *(runtime)* try_dispatch_wcoj_*_on_body entry points
+- *(runtime)* migrate adaptive dispatch to WcojCostModel seam
+- *(runtime)* WcojCostModel + SkewScoreSource cost-model seam
+- *(cuda+runtime)* 4-cycle skew classifier + adaptive opt-in
+- *(runtime)* wire 4-cycle dispatch + executor wiring cert
+- *(runtime)* match_multiway_4cycle + try_dispatch_wcoj_4cycle force gate
+- *(runtime)* replace triangle-tree matcher with MultiWayJoin
+- *(workspace)* cross-crate MultiWayJoin walker arms
+- *(runtime)* default-on adaptive WCOJ + hard kill switch (v0.6.2)
+- *(runtime)* adaptive WCOJ dispatch + classifier branch (v0.6.2 A2-lite commit B)
+- *(dispatch)* WCOJ width-aware AST/RIR dispatch (v0.6.2)
+- *(cuda)* WCOJ Symbol key support (v0.6.2)
+- *(runtime)* env-gated WCOJ triangle executor wiring (v0.6.2)
+- *(runtime)* add strict deterministic D2H guard (v0.5.5) ([#49](https://github.com/BrainyBlaze/xlog/pull/49))
+
+### Fixed
+
+- *(release)* drop README version sync + dynamic badges + agent release rules ([#124](https://github.com/BrainyBlaze/xlog/pull/124))
+- standalone negated-variable-keyed constraint is a NAF safety error, not 'unimplemented'
+- route epistemic examples through xlog run
+- fail closed nonzero faeel self support
+- certify v0.7.0 multiway wcoj reuse
+- require tuple-source proof before validation
+- *(release)* harden validation and gpu fallback paths
+- integrate K7 K8 planned clique metadata
+- restore cost-model default-flip cert
+- route nested-loop dispatch through shared record_join_result feedback
+- preserve occurrence identity in rewrite_scan_nth
+- tighten Tier-1 wrapper contract + revert recursive helper extension
+- cargo fmt + correct prepare_leader_inputs visibility doc
+- cargo fmt, evidence count, extract prepare_leader_inputs + real helper extraction
+- address selectivity-driven join reordering review patches — duplicate attr, stale comment, evidence count, matcher tests
+- *(runtime)* harden WCOJ phase timing diagnostics
+- *(runtime)* cache WCOJ launch stream on Executor (v0.6.2)
+- *(logic)* restore deterministic recursive set evaluation
+- *(pyxlog)* install local wheels for explicit python
+- *(cuda)* embed portable PTX fallback
+- *(pyxlog)* ship kernels in wheels and document cubin path
+- *(ci)* repair main release automation ([#27](https://github.com/BrainyBlaze/xlog/pull/27))
+- *(ci)* keep README release metadata in sync ([#26](https://github.com/BrainyBlaze/xlog/pull/26))
+
+### Other
+
+- v0.9.2 whitepaper + documentation realignment ([#133](https://github.com/BrainyBlaze/xlog/pull/133))
+- Set v0.9.2 release metadata
+- device test — nested-modal chain collapses, executes, zero CPU fallback
+- rustfmt multi-arity device test upload helper
+- variable-keyed constraint device tests + CLI goldens + mutation probe
+- harden multi-element key test to discriminate col1
+- repoint mixed-modal negative pilot to unbounded cons key
+- red device tests + ACCEPTED ex23 for structured modal tuple-keys
+- exact FAEEL founded-extension results on GPU runtime + mutation-probe-verified gate
+- cargo fmt on v0.9.1 epistemic changeset
+- safe split dependency and coupling semantics
+- document v0.9.0 epistemic language surface
+- *(release)* align v0.9.0 package metadata
+- integrate v0.8.9 diagnostics surfaces
+- gate split possible not-know fallbacks
+- gate split binary cpu fallbacks
+- certify split binary workspace timing
+- certify k7 k8 layout events
+- certify k7 k8 metadata timing
+- aggregate split batch cpu fallbacks
+- gate split batch h2d transfer
+- aggregate split batch final transfer
+- gate split batch final transfer
+- gate single-result final transfer
+- gate single-result kernel timing
+- gate single-result workspace buffers
+- gate single-result row-count membership rejection
+- gate single-result host transfer rejection
+- gate single-result cpu fallback rejection
+- gate split batch incremental prob updates
+- gate accepted evidence incremental prob updates
+- gate rejected world-view consumers
+- gate split quaternary host transfer rejection
+- gate split quaternary row-count membership rejection
+- gate split quaternary cpu fallback rejection
+- gate split quaternary workspace buffers
+- gate split quaternary all-operator timing
+- gate split quaternary all-operator prob deep paths
+- gate split quaternary all-operator prob gradients
+- gate split quaternary all-operator probability
+- gate split quaternary all-operator solver search
+- gate split quaternary all-operator solver reuse
+- gate split quaternary all-operator solver lifecycle
+- gate split quaternary all-operator parity
+- gate split quaternary possible not-know parity
+- gate quaternary possible not-know source gradients
+- gate quaternary not-possible prob gradients
+- gate quaternary know prob gradients
+- gate quaternary know probabilistic reuse
+- gate quaternary know solver search
+- gate quaternary know solver reuse
+- gate quaternary possible not-know solver search
+- gate quaternary possible not-know solver reuse
+- gate quaternary not-possible solver search
+- gate quaternary not-possible solver reuse
+- gate quaternary not-possible PIR reuse
+- gate quaternary source PIR reuse
+- gate quaternary program PIR reuse
+- gate quaternary program probability reuse
+- gate all-operator program probability eval
+- gate all-operator source probability paths
+- gate all-operator solver search
+- gate split all-binary solver search
+- gate split quaternary not-possible solver search
+- gate split quaternary solver search
+- gate split quaternary prob reuse
+- gate split quaternary solver reuse
+- gate split quaternary production reuse
+- gate quaternary operator production reuse
+- gate quaternary operator gpu parity
+- gate split quaternary gpu parity
+- gate split quaternary prob reuse
+- gate split quaternary solver reuse
+- gate split quaternary solver evidence
+- gate split quaternary prob batch reuse
+- gate parsed quaternary negative prob reuse
+- gate negated quaternary solver prob reuse
+- cover negated quaternary membership parity
+- require complete aggregate timing
+- require single result timing gates
+- require split batch timing gates
+- aggregate split batch kernel timing
+- lock production metric audit wording
+- name alternative compiler adapters
+- deepen all-operator reuse gates
+- gate all-operator membership reuse
+- cover all-operator mixed memberships
+- cover negated mixed memberships
+- cover mixed epistemic memberships
+- reject unsafe split modal coupling
+- gate all-operator split prob eval
+- gate all-operator split prob gradients
+- gate all-operator split solver reuse
+- gate all-operator split solver lifecycle
+- condition split all-operator probability
+- trace split all binary operators
+- trace split binary operator parity
+- trace solver quaternary evidence arity
+- trace source quaternary evidence arity
+- trace prob quaternary evidence arity
+- trace solver nonzero evidence arity
+- trace nonzero probabilistic evidence arity
+- reuse v0.8.6 bundle for v0.9.0
+- aggregate split operator trace counts
+- guard maxsat scheduler prevalidation
+- guard encoded maxsat prevalidation
+- guard maxsat search prevalidation
+- guard maxsat lifecycle prevalidation
+- gate split maxsat lifecycle
+- gate solver maxsat lifecycle
+- gate ternary epistemic gpu parity
+- gate split prob exact compile on batches
+- gate split prob pir cnf evaluation on batches
+- gate split solver maxsat scheduler on batches
+- gate split prob exact paths on batches
+- gate split solver maxsat search on batches
+- gate split solver maxsat on batches
+- gate split solver learned reuse on batches
+- gate split solver portfolio on batches
+- gate split solver lifecycle on batches
+- gate split prob gradients on batches
+- gate parsed prob evidence on split batches
+- gate prob evidence on split batches
+- trace split gpu batch execution
+- split prob operator evidence by source path
+- trace solver evidence by operator family
+- trace semantic modes through solver gates
+- trace semantic modes through prob gates
+- cover negative probabilistic batches
+- certify accepted k8 wcoj dispatch
+- certify accepted k7 wcoj dispatch
+- audit production path reuse
+- mark v0.7.0 release complete
+- close phase2 integration gate
+- Merge sort-label propagation branch into the phase-2 integration branch
+- Merge K7/K8 clique-template branch into the phase-2 integration branch
+- add K7/K8 clique templates
+- close purge gate
+- unwire executor sort-merge dispatch + rewrite sort-merge dispatch certs as operator-level
+- workspace gate green pre-bench (+ stale-comment cleanup)
+- workspace gate green
+- scrub stale "multi-recursive skip" contract notes
+- flip recursive-SCC stats integration multi-recursive WCOJ cert to assert multi-recursive WCOJ dispatch
+- rewrite input/fallback `rewrite_scan_nth` tests for positional symmetry
+- strengthen rewrite_scan_nth regression for exact positional identity
+- cargo fmt for workspace gate
+- patch evidence/comment drift round 2
+- patch evidence/comment drift before closure approval
+- *(test)* correct recursive-SCC stats integration feature-gate test header — feature gate, not cfg(test)
+- *(runtime)* strengthen recursive-SCC stats integration distinct binary_est + pin exact counter
+- *(runtime)* recursive-SCC stats integration acceptance gate acceptance matrix + recursive-stats-trace feature
+- restore selectivity-driven join reordering acceptance gates — 4-cycle compile-time + runtime helper and synthesis certs
+- *(runtime,logic)* align stale claims with the recursive WCOJ contract
+- *(runtime)* unit-test SkewScoreSource seam via stub scorer
+- *(runtime)* rename wcoj_triangle_stream to wcoj_dispatch_stream
+- *(workspace)* MultiWayJoin shape-agnosticism guards
+- *(v0.6.2)* prepare roadmap changelog and version
+- *(runtime)* WCOJ phase-timing scaffolding + report (v0.6.2)
+- *(runtime)* cover WCOJ dispatch env resolvers
+- *(wcoj)* update Symbol dispatch scope comments
+- *(v0.6.1)* version bump + roadmap cleanup + changelog
+- *(readme)* bump version badge + release-status line to v0.6.0
+- restore audit README framing with current release setup
+- Tighten workspace warning hygiene
+- Merge branch 'audit/v0.5.0-prerelease'
+- integrate prerelease audit docs
+- harden public release readiness
+
+## [0.9.2](https://github.com/BrainyBlaze/xlog/compare/xlog-logic-v0.5.0...xlog-logic-v0.9.2) - 2026-06-08
+
+### Added
+
+- admit stratified negated-modal recursion as Case B; bound genuine negation cycle to host-only WFS
+- grammar+parser collapse nested modal chains to single epistemic literal
+- variable-keyed + nested epistemic constraints (GPU world-view pruning)
+- single-occurrence variable-keyed epistemic constraints (GPU existential world-view pruning)
+- flatten structured modal tuple-keys (finite+typed list/compound/anonymous on GPU)
+- admit positive modal recursion with a founded least fixpoint
+- drop unfounded FAEEL self-support from reduced founded-model base
+- close determined-epistemic multi-column binding (determined-modal family complete)
+- close transitive determined-ordinary modal coupling via stratification
+- close augmented-projection multi-head coupling scope limit
+- determined-head recursion and negated-modal-over-invariant recursive epistemic fixpoint
+- stratified epistemic analysis (determined-head detection + strata partition)
+- cross-component epistemic joint-solving (multi-output)
+- cross-component epistemic coupling
+- recursive epistemic fixpoint support
+- joint multi-epistemic predicate solving
+- epistemic integrity constraints
+- nested modal explicit representation and fail-closed diagnostics
+- FAEEL founded self-support completion
+- checkpoint epistemic solver semantics
+- add incremental parser session
+- add approximate inference pragmas
+- add magic-set rewriting
+- harden deterministic naf safety
+- add safe meta lowering
+- add finite list lowering
+- add type term foundation
+- add stream-mux AOT schedule
+- add helper-split AOT pass
+- *(logic)* K=5 and K=6 clique WCOJ promoter try_promote_clique_k for k=5/6
+- *(promote)* normalize right-deep triangle / fully-right-deep 4-cycle
+- HeatAwareLeaderModel plus variable-order-aware join-result feedback
+- *(logic)* promote_multiway takes (stats, config); 25 caller sites updated
+- *(logic)* WcojVariableOrderingModel trait + LeaderCardinalityModel
+- *(logic)* CompilerConfig + composable compile API
+- *(ir)* VariableOrder + LookupPerm types + MultiWayJoin.var_order field
+- *(logic)* selectivity_pass real triangle + 4-cycle reordering
+- *(logic)* variable-graph triangle + 4-cycle promoters
+- *(logic)* selectivity_pass takes rel_ids; module-doc rewritten
+- *(logic)* promote_multiway gates recursive SCCs by per-rule scan count
+- *(logic)* wire selectivity_pass into Compiler post-optimizer
+- *(logic)* selectivity_pass inline pub mod (no-op)
+- *(logic)* try_promote_4cycle for canonical 4-cycle shape
+- *(logic)* wire promote_multiway after optimizer
+- *(logic)* promote_multiway pass for triangle WCOJ
+- *(workspace)* cross-crate MultiWayJoin walker arms
+- *(logic)* transitive SCC type inference (v0.6.2 PR 8)
+- *(logic)* hypergraph mixed plan contract (v0.6.2 PR 6)
+- *(logic)* hypergraph typed oracle gate (v0.6.2 PR 5)
+- *(logic)* hypergraph SCC fixpoint evaluator (v0.6.2 PR 4)
+- *(logic)* hypergraph fixpoint evaluator (v0.6.2 PR 3)
+- *(logic)* hypergraph reference evaluator (v0.6.2 PR 2)
+- *(logic)* hypergraph planner foundation (v0.6.2 PR 1)
+
+### Fixed
+
+- *(release)* drop README version sync + dynamic badges + agent release rules ([#124](https://github.com/BrainyBlaze/xlog/pull/124))
+- standalone negated-variable-keyed constraint is a NAF safety error, not 'unimplemented'
+- fail closed when a recursive epistemic program carries an epistemic constraint
+- fail closed on ordinary recursion in epistemic programs
+- route bound-variable multi-head epistemic programs through split
+- route epistemic examples through xlog run
+- fail closed nonzero faeel self support
+- preserve independent epistemic split inputs
+- guard epistemic split constraints
+- coalesce dependent epistemic split rules
+- *(release)* harden validation and gpu fallback paths
+- integrate K7 K8 planned clique metadata
+- module-level docs + lib-test flips
+- remove multi-recursive promoter gate
+- cargo fmt, evidence count, extract prepare_leader_inputs + real helper extraction
+- address selectivity-driven join reordering review patches — duplicate attr, stale comment, evidence count, matcher tests
+- classifier col0 + missing scope deliverables
+- *(logic)* skip recursive SCCs in promote_multiway
+- *(logic)* SCC-aware planner + structural-precedence repair (v0.6.2 PR 9)
+- *(logic)* canonical explain_plans + refreshed module docs (PR 6 follow-up)
+- *(logic)* typed gate defers to structural errors (v0.6.2 PR 5 follow-up)
+- *(pyxlog)* install local wheels for explicit python
+- *(cuda)* embed portable PTX fallback
+- *(pyxlog)* ship kernels in wheels and document cubin path
+- *(ci)* repair main release automation ([#27](https://github.com/BrainyBlaze/xlog/pull/27))
+- *(ci)* keep README release metadata in sync ([#26](https://github.com/BrainyBlaze/xlog/pull/26))
+
+### Other
+
+- v0.9.2 whitepaper + documentation realignment ([#133](https://github.com/BrainyBlaze/xlog/pull/133))
+- Set v0.9.2 release metadata
+- Clarify v0.9.2 WFS release contract
+- Close v0.9.2 epistemic semantic gaps
+- Close v0.9.2 epistemic release
+- cargo fmt
+- negated-modal-in-recursion — stratified sub-case admits (co-evolving modal-recursion case), genuine negation cycle hits formal WFS bound
+- document nested-modal chain-collapse semantics + interior-negation boundary
+- update EIR+split tests from nested-modal rejection to collapse contract
+- world-view mutation probe for nested-modal collapse direction
+- derived-head coupling — stratified-vs-reference equivalence + true-cycle wall
+- co-evolving modal-recursion classification unit tests (polarity/mode scoping)
+- flip FAEEL foundedness logic tests to founded-extension semantics
+- document split_epistemic_program (clean release surface)
+- cargo fmt on v0.9.1 epistemic changeset
+- safe split dependency and coupling semantics
+- document v0.9.0 epistemic language surface
+- *(release)* align v0.9.0 package metadata
+- integrate v0.8.9 diagnostics surfaces
+- reuse v0.8.6 bundle for v0.9.0
+- *(release)* prepare v0.8.6 tag metadata
+- *(release)* correct v0.8.5 public status
+- certify language integration
+- *(release)* prepare v0.8.0
+- mark v0.7.0 release complete
+- close phase2 integration gate
+- Merge sort-label propagation branch into the phase-2 integration branch
+- Merge K7/K8 clique-template branch into the phase-2 integration branch
+- add K7/K8 clique templates
+- cert flat-stats no helper rewrite
+- scrub stale doc fragment in promotes_multirec_triangle test
+- clean up dead helpers + unused imports in K=5 and K=6 clique WCOJ test files
+- cargo fmt for workspace gate
+- promoter + runtime-dispatch certs
+- 15 acceptance tests across the acceptance matrix
+- rename acceptance test + clarify evidence count math
+- *(logic+integration)* variable-ordering cost model acceptance gate across the full matrix
+- restore selectivity-driven join reordering acceptance gates — 4-cycle compile-time + runtime helper and synthesis certs
+- *(logic)* selectivity_pass compile-time certs
+- cargo fmt 4-cycle WCOJ test files
+- *(logic)* strengthen optimizer arm tests with 4-input fixture
+- *(workspace)* WCOJ doc cleanup post-MultiWayJoin
+- *(v0.6.2)* prepare roadmap changelog and version
+- *(logic)* hypergraph certification workloads (v0.6.2 PR 7)
+- *(logic)* correct explain_plans sort ordering claims
+- *(v0.6.1)* version bump + roadmap cleanup + changelog
+- *(readme)* bump version badge + release-status line to v0.6.0
+- restore audit README framing with current release setup
+- Tighten workspace warning hygiene
+- Merge branch 'audit/v0.5.0-prerelease'
+- integrate prerelease audit docs
+- harden public release readiness
+
+## [0.9.2](https://github.com/BrainyBlaze/xlog/compare/xlog-stats-v0.5.0...xlog-stats-v0.9.2) - 2026-06-08
+
+### Added
+
+- add cost-aware k-clique planner
+
+### Fixed
+
+- *(release)* drop README version sync + dynamic badges + agent release rules ([#124](https://github.com/BrainyBlaze/xlog/pull/124))
+- route epistemic examples through xlog run
+- *(release)* harden validation and gpu fallback paths
+- *(pyxlog)* install local wheels for explicit python
+- *(cuda)* embed portable PTX fallback
+- *(pyxlog)* ship kernels in wheels and document cubin path
+- *(ci)* repair main release automation ([#27](https://github.com/BrainyBlaze/xlog/pull/27))
+- *(ci)* keep README release metadata in sync ([#26](https://github.com/BrainyBlaze/xlog/pull/26))
+
+### Other
+
+- v0.9.2 whitepaper + documentation realignment ([#133](https://github.com/BrainyBlaze/xlog/pull/133))
+- Set v0.9.2 release metadata
+- document v0.9.0 epistemic language surface
+- *(release)* align v0.9.0 package metadata
+- integrate v0.8.9 diagnostics surfaces
+- integrate v0.8.8 external world-model diagnostics into v0.8.9
+- integrate first external diagnostics into v0.8.9
+- Exercise external generated-rule diagnostics
+- Resolve remaining XLOG evidence issues
+- Add v0.8.7 external world-model diagnostics
+- *(release)* prepare v0.8.6 tag metadata
+- *(release)* correct v0.8.5 public status
+- *(release)* prepare v0.8.0
+- mark v0.7.0 release complete
+- *(v0.6.2)* prepare roadmap changelog and version
+- *(v0.6.1)* version bump + roadmap cleanup + changelog
+- *(readme)* bump version badge + release-status line to v0.6.0
+- restore audit README framing with current release setup
+- Merge branch 'audit/v0.5.0-prerelease'
+- integrate prerelease audit docs
+- harden public release readiness
+
+## [0.9.2](https://github.com/BrainyBlaze/xlog/compare/xlog-cuda-v0.5.0...xlog-cuda-v0.9.2) - 2026-06-08
+
+### Added
+
+- *(cuda)* XLOG_PTX_MAX_VERSION â downgrade embedded portable PTX ISA
+- *(mc)* sparse WCOJ world-batched GPU-resident MC engine
+- *(mc)* no-host instrumentation foundation for WCOJ engine (alloc + fixpoint counters)
+- *(mc)* GPU-resident Datalog/MC engine (megakernel) + K1-K5 pilots
+- checkpoint epistemic solver semantics
+- add chain exact shared-memory scorer
+- extend exact induction typed dispatch
+- close CUDA Graph-mode set maintenance
+- certify CUDA Graph external consumer graph path
+- cache bounded CSM CUDA graphs
+- add bounded CSM CUDA graph path
+- add CUDA graph execution wrapper
+- remove adaptive skew classifier surface
+- route clique kernels through HG block-slice
+- route u64 4-cycle through HG block-slice
+- route u64 triangle through HG block-slice
+- retire old u32 triangle materialize surface
+- route u32 4-cycle through HG block-slice
+- retire old u32 triangle count surface
+- retire layout/count kernel fusion fused count kernel
+- reuse HG block workspace
+- make HG cached count single-pass
+- cache HG materialization and add superhub gate bench
+- route u32 triangle dispatch through HG pipeline
+- add triangle HG materialize pipeline
+- add triangle HG work-plan count surface
+- add persistent WCOJ metadata builder
+- production kernel fusion (layout+count) with threshold dispatch + auto-disable + cert grid
+- add sort_merge_join_v2_inner_u32_1key + is_sorted_ascending_u32 provider fns
+- add sort-merge inner-join kernel + sortedness-detection kernel
+- add nested_loop_join_v2_inner_u32_1key in relational.rs (gather-based)
+- add nested-loop emit-pairs kernel (multi-col-compatible)
+- *(cuda)* K=5 and K=6 clique WCOJ clique provider entries
+- *(cuda)* K=5 and K=6 clique WCOJ templated clique kernel for k=5 + k=6
+- *(cuda)* generic sorted-relation accessors generic wcoj_layout_sort_*_recorded entry points
+- *(cuda)* wcoj_project_2col_swap_recorded + wcoj_project_output_columns_recorded
+- *(cuda+runtime)* 4-cycle skew classifier + adaptive opt-in
+- *(cuda)* u64 4-cycle WCOJ kernels + provider + tests
+- *(cuda)* u32 4-cycle WCOJ kernels + provider + tests
+- *(cuda)* WCOJ layout fast-path for sorted+unique inputs (v0.6.2)
+- *(cuda)* WCOJ adaptive-dispatch skew classifier (v0.6.2 A2-lite commit A)
+- *(cuda)* WCOJ u64 provider kernels + entries (v0.6.2)
+- *(cuda)* sort_recorded + dedup_full_row_recorded U64 (v0.6.2)
+- *(cuda)* WCOJ Symbol key support (v0.6.2)
+- *(cuda)* WCOJ sorted-layout construction u32 (v0.6.2)
+- *(cuda)* WCOJ triangle device-side scan + scalar D2H total
+- *(cuda)* GPU 3-way WCOJ triangle kernel u32 v1 (v0.6.2)
+- *(cuda)* wire recorded CSM hash-join dispatch ([#91](https://github.com/BrainyBlaze/xlog/pull/91))
+- *(cuda)* add recorded indexed LeftOuter count-scan-materialize path ([#87](https://github.com/BrainyBlaze/xlog/pull/87))
+- *(cuda)* add recorded LeftOuter count-scan-materialize path ([#84](https://github.com/BrainyBlaze/xlog/pull/84))
+- *(cuda)* formal cert harness for runtime-backed recorded path
+- *(cuda)* GPU-resident binary-join indexed Inner CSM
+- *(cuda)* GPU-resident binary-join Inner retake — count→scan→materialize
+- *(cuda)* env-gated runtime dispatch for sort/dedup/GroupBy/hash-join + cert mode
+- *(cuda)* provider-level recorded indexed hash join + LeftOuter step-D recorder fix
+- *(cuda)* provider-level recorded LeftOuter hash join
+- *(cuda)* provider-level recorded Semi / Anti hash join
+- *(cuda)* provider-level recorded inner hash join
+- *(cuda)* provider-level recorded GroupBy multi-agg (U32 keys, count/sum/min/max)
+- *(cuda)* provider-level recorded sort + dedup_full_row (u32 / Symbol)
+- *(cuda)* preserve runtime identity for xlog-owned DLPack / Arrow columns
+- *(cuda)* migrate fused compare+scan+compact filter to recorded discipline
+- *(cuda)* env-gated recorded filter dispatch (XLOG_USE_RECORDED_FILTERS)
+- *(cuda)* v0.6 stream-safe runtime + LaunchRecorder + filter predicate matrix
+- *(cuda)* v0.6 device-runtime allocator (opt-in) + A3 stability ([#54](https://github.com/BrainyBlaze/xlog/pull/54))
+- *(cuda)* binary-join output counts as metadata reads (v0.5.5 PR 3) ([#52](https://github.com/BrainyBlaze/xlog/pull/52))
+- *(cuda)* GPU full-row dedup and set-difference (v0.5.5 PR 2) ([#50](https://github.com/BrainyBlaze/xlog/pull/50))
+- *(runtime)* add strict deterministic D2H guard (v0.5.5) ([#49](https://github.com/BrainyBlaze/xlog/pull/49))
+
+### Fixed
+
+- bootstrap cuda-ci runner — bump test iterations + fix maturin compatibility ([#127](https://github.com/BrainyBlaze/xlog/pull/127))
+- *(release)* drop README version sync + dynamic badges + agent release rules ([#124](https://github.com/BrainyBlaze/xlog/pull/124))
+- route epistemic examples through xlog run
+- close persistent index background build scope
+- close GPU-native count-lift exact path
+- *(release)* harden validation and gpu fallback paths
+- integrate K7 K8 planned clique metadata
+- close mint4 path-isolated gate
+- extend 4cycle e2-prefix mitigation to u64
+- mitigate M_INT.4 4cycle HG regression
+- route nested-loop dispatch through shared record_join_result feedback
+- tighten Tier-1 wrapper contract + revert recursive helper extension
+- real interner-allocated Symbol IDs + drop test-file warnings + tighten D4 wording
+- cargo fmt, evidence count, extract prepare_leader_inputs + real helper extraction
+- classifier col0 + missing scope deliverables
+- *(cuda)* drain WCOJ layout fast-path failure paths
+- *(runtime)* harden WCOJ phase timing diagnostics
+- *(cuda)* drain launch stream on skew classifier failure paths (v0.6.2)
+- *(cuda)* record d_overflow on three CSM materialize recorders ([#89](https://github.com/BrainyBlaze/xlog/pull/89))
+- *(cuda)* access-aware stream dependency manager for cross-stream lifetime safety ([#72](https://github.com/BrainyBlaze/xlog/pull/72))
+- *(cuda)* clamp recorded compact mask domain
+- *(logic)* restore deterministic recursive set evaluation
+- *(pyxlog)* install local wheels for explicit python
+- *(cuda)* embed portable PTX fallback
+- *(pyxlog)* ship kernels in wheels and document cubin path
+- *(ci)* repair main release automation ([#27](https://github.com/BrainyBlaze/xlog/pull/27))
+- *(ci)* keep README release metadata in sync ([#26](https://github.com/BrainyBlaze/xlog/pull/26))
+
+### Other
+
+- v0.9.2 whitepaper + documentation realignment ([#133](https://github.com/BrainyBlaze/xlog/pull/133))
+- Set v0.9.2 release metadata
+- integrate main MC GPU-resident engine into v0.9.2 epistemic completion
+- document v0.9.0 epistemic language surface
+- *(release)* align v0.9.0 package metadata
+- integrate v0.8.9 diagnostics surfaces
+- reuse v0.8.6 bundle for v0.9.0
+- *(release)* prepare v0.8.6 tag metadata
+- *(release)* correct v0.8.5 public status
+- *(release)* prepare v0.8.0
+- mark v0.7.0 release complete
+- close phase2 purge gate
+- close phase2 integration gate
+- Merge CUDA Graph benchmark-spike branch into the phase-2 integration branch
+- Merge sort-label propagation branch into the phase-2 integration branch
+- Merge K7/K8 clique-template branch into the phase-2 integration branch
+- add K7/K8 clique templates
+- Merge stream-mux AOT branch into WCOJ bundle integration
+- graceful close and paper harness
+- certify HG metadata storage budget
+- remove dead layout/count kernel fusion route counters
+- patch stale rustdoc + kernel comments after iter-6 unwiring
+- fmt + rustdoc cleanup
+- align plan + provider rustdoc with landed byte-check + counter type
+- workspace gate green pre-bench
+- clean up dead helpers + unused imports in K=5 and K=6 clique WCOJ test files
+- cargo fmt for workspace gate
+- *(cuda)* K=5 and K=6 clique WCOJ provider certs + source-audit
+- *(cuda)* generic sorted-relation accessors acceptance grid — 82 tests across width-class and arity
+- *(cuda)* correct wcoj_4cycle_skew_score_u32 doc to col0
+- *(cuda)* layout reuse smoke for 4-cycle
+- *(v0.6.2)* prepare roadmap changelog and version
+- *(runtime)* WCOJ phase-timing scaffolding + report (v0.6.2)
+- *(cuda)* WCOJ U64 strict deterministic-D2H gate (v0.6.2)
+- *(cuda)* update recorded dedup U64 scope comment
+- *(wcoj)* update Symbol dispatch scope comments
+- *(cuda)* planner-to-provider WCOJ certification (v0.6.2)
+- *(v0.6.1)* version bump + roadmap cleanup + changelog
+- *(readme)* bump version badge + release-status line to v0.6.0
+- restore audit README framing with current release setup
+- Fix validation regressions in release and examples
+- Merge branch 'audit/v0.5.0-prerelease'
+- integrate prerelease audit docs
+- harden public release readiness
+
+## [0.9.2](https://github.com/BrainyBlaze/xlog/compare/xlog-ir-v0.5.0...xlog-ir-v0.9.2) - 2026-06-08
+
+### Added
+
+- close augmented-projection multi-head coupling scope limit
+- epistemic integrity constraints
+- checkpoint epistemic solver semantics
+- add k-clique cost gate routes
+- add k-clique RIR variable order
+- *(logic)* WcojVariableOrderingModel trait + LeaderCardinalityModel
+- *(ir)* VariableOrder + LookupPerm types + MultiWayJoin.var_order field
+- *(ir)* add RirNode::MultiWayJoin variant
+
+### Fixed
+
+- *(release)* drop README version sync + dynamic badges + agent release rules ([#124](https://github.com/BrainyBlaze/xlog/pull/124))
+- route epistemic examples through xlog run
+- *(release)* harden validation and gpu fallback paths
+- *(pyxlog)* install local wheels for explicit python
+- *(cuda)* embed portable PTX fallback
+- *(pyxlog)* ship kernels in wheels and document cubin path
+- *(ci)* repair main release automation ([#27](https://github.com/BrainyBlaze/xlog/pull/27))
+- *(ci)* keep README release metadata in sync ([#26](https://github.com/BrainyBlaze/xlog/pull/26))
+- unblock release publish verification
+
+### Other
+
+- v0.9.2 whitepaper + documentation realignment ([#133](https://github.com/BrainyBlaze/xlog/pull/133))
+- Set v0.9.2 release metadata
+- document v0.9.0 epistemic language surface
+- *(release)* align v0.9.0 package metadata
+- integrate v0.8.9 diagnostics surfaces
+- reuse v0.8.6 bundle for v0.9.0
+- *(release)* prepare v0.8.6 tag metadata
+- *(release)* correct v0.8.5 public status
+- *(release)* prepare v0.8.0
+- mark v0.7.0 release complete
+- G_W63 production chain join route
+- phase-2 purge rerun
+- *(workspace)* MultiWayJoin shape-agnosticism guards
+- *(ir)* MultiWayJoin walker contract
+- *(v0.6.2)* prepare roadmap changelog and version
+- *(v0.6.1)* version bump + roadmap cleanup + changelog
+- *(readme)* bump version badge + release-status line to v0.6.0
+- restore audit README framing with current release setup
+- Tighten workspace warning hygiene
+- Merge branch 'audit/v0.5.0-prerelease'
+- integrate prerelease audit docs
+- harden public release readiness
+
+## [0.9.2](https://github.com/BrainyBlaze/xlog/compare/xlog-core-v0.5.0...xlog-core-v0.9.2) - 2026-06-08
+
+### Added
+
+- add persistent hash index telemetry
+- add adaptive runtime reoptimization
+- add runtime common subexpression cache
+- extend exact induction typed dispatch
+- expose xlog sort-label metadata
+- remove adaptive skew classifier surface
+- retire old u32 triangle count surface
+- production kernel fusion (layout+count) with threshold dispatch + auto-disable + cert grid
+- default-flip wcoj_cost_model resolver to Cardinality
+- *(runtime)* dispatch sites use build_wcoj_cost_model factory
+- *(core)* CostModelKind + RuntimeConfig::wcoj_cost_model
+- *(runtime)* match_multiway_4cycle + try_dispatch_wcoj_4cycle force gate
+- *(runtime)* default-on adaptive WCOJ + hard kill switch (v0.6.2)
+- *(runtime)* adaptive WCOJ dispatch + classifier branch (v0.6.2 A2-lite commit B)
+- *(runtime)* env-gated WCOJ triangle executor wiring (v0.6.2)
+- *(runtime)* add strict deterministic D2H guard (v0.5.5) ([#49](https://github.com/BrainyBlaze/xlog/pull/49))
+
+### Fixed
+
+- *(release)* drop README version sync + dynamic badges + agent release rules ([#124](https://github.com/BrainyBlaze/xlog/pull/124))
+- route epistemic examples through xlog run
+- *(release)* harden validation and gpu fallback paths
+- restore cost-model default-flip cert
+- *(pyxlog)* install local wheels for explicit python
+- *(cuda)* embed portable PTX fallback
+- *(pyxlog)* ship kernels in wheels and document cubin path
+- *(ci)* repair main release automation ([#27](https://github.com/BrainyBlaze/xlog/pull/27))
+- *(ci)* keep README release metadata in sync ([#26](https://github.com/BrainyBlaze/xlog/pull/26))
+- unblock release publish verification
+
+### Other
+
+- v0.9.2 whitepaper + documentation realignment ([#133](https://github.com/BrainyBlaze/xlog/pull/133))
+- Set v0.9.2 release metadata
+- document v0.9.0 epistemic language surface
+- *(release)* align v0.9.0 package metadata
+- integrate v0.8.9 diagnostics surfaces
+- integrate v0.8.8 external world-model diagnostics into v0.8.9
+- integrate first external diagnostics into v0.8.9
+- Exercise external generated-rule diagnostics
+- Resolve remaining XLOG evidence issues
+- Add v0.8.7 external world-model diagnostics
+- *(release)* prepare v0.8.6 tag metadata
+- *(release)* correct v0.8.5 public status
+- *(release)* prepare v0.8.0
+- mark v0.7.0 release complete
+- close purge gate
+- *(v0.6.2)* prepare roadmap changelog and version
+- *(v0.6.1)* version bump + roadmap cleanup + changelog
+- *(readme)* bump version badge + release-status line to v0.6.0
+- restore audit README framing with current release setup
+- Merge branch 'audit/v0.5.0-prerelease'
+- integrate prerelease audit docs
+- harden public release readiness
+
 ## [0.9.2] — 2026-06-02
 
 v0.9.2 Epistemic Executor Semantic Completion. Closes the three honest
@@ -12,12 +1437,12 @@ Category-B semantic gaps tracked after v0.9.1, all validated on the production
 
 ### Added (v0.9.2)
 
-- EGB-02B: a rule combining a global modal gate (ground/anonymous/nullary modal)
+- Mixed modal membership: a rule combining a global modal gate (ground/anonymous/nullary modal)
   with a per-row bound-variable modal gate now composes both gate classes
   conjunctively on the GPU device path (the row-map kernel's per-row path applies
   the global-gate check); the prior fail-closed guard is removed. Example
   `14-mixed-literal-membership.xlog`.
-- Case-A recursive epistemic fixpoint: recursive ordinary predicates inside
+- recursive epistemic fixpoint recursive epistemic fixpoint: recursive ordinary predicates inside
   epistemic programs now evaluate to fixpoint when every modal atom ranges over an
   invariant relation (EDB / lower non-recursive non-epistemic stratum) — the modal
   literal reduces to its gated relation and the reduced ordinary recursive program
@@ -29,7 +1454,7 @@ Category-B semantic gaps tracked after v0.9.1, all validated on the production
   multi-output materialization — one candidate enumeration + world-view validation
   over the combined modals, then each head materialized against the same accepted
   world view (per-head scoped row-filter + per-head output projection via
-  `public_head_arity`, reusing the WCOJ-promoted reduced runtime plan and EGB-01
+  `public_head_arity`, reusing the WCOJ-promoted reduced runtime plan and candidate-world enumeration
   enumeration). Heads of DIFFERING arity sharing a base modal are supported.
   Examples `18-cross-component-joint-shared-modal.xlog` (`known={1,2}`,
   `maybe={2}`), `21` (three heads), `27` (augmented differing-arity).
@@ -82,9 +1507,9 @@ Category-B semantic gaps tracked after v0.9.1, all validated on the production
   ill-formed, not a missing feature. The meaningful negated form `:- q(X), not know p(X).`
   (X positively bound) is the shared-variable join above (item E1).
 
-- Recursive epistemic programs are no longer uniformly fail-closed: the Case-A
+- Recursive epistemic programs are no longer uniformly fail-closed: the recursive epistemic fixpoint
   invariant-modal fragment AND recursion/coupling over any DETERMINED head (via
-  stratified execution, see above), positive Case-B founded recursion, explicit
+  stratified execution, see above), positive modal recursion with founded semantics, explicit
   G91 positive `possible` recursion, stratified negated-modal recursion, and cyclic
   negated-modal recursion through WFS are now supported. A negated modal over an
   invariant or materialized determined relation reduces to ordinary negation.
@@ -97,7 +1522,7 @@ joint-solving or stratified execution; any arity, filtering or binding, coupling
 recursion) or NON-DETERMINED and handled by the appropriate recursive semantics or
 typed boundary:
 
-- Positive Case-B `know` recursion computes the FAEEL founded least fixpoint.
+- Positive co-evolving modal-recursion case `know` recursion computes the FAEEL founded least fixpoint.
 - Positive G91 `possible` recursion applies the G91 compatibility self-support
   assumption.
 - Negated-modal recursion that is stratified reduces to ordinary anti-join after
@@ -195,11 +1620,10 @@ recorded in `docs/plans/2026-05-29-v091-epistemic-executor-completion-status.md`
 
 ### Known gaps (v0.9.1, tracked — closed or narrowed in v0.9.2)
 
-- **EGB-02 mixed per-row + global modal literal in one rule:** _CLOSED in v0.9.2
-  (EGB-02B)_ — the two gate classes now compose conjunctively on the GPU path.
+-  **mixed per-row and global modal membership in one rule:** _CLOSED in v0.9.2_ — the two gate classes now compose conjunctively on the GPU path.
 - **Recursive epistemic fixpoints:** _CLOSED in v0.9.2 under the exact
-  GPU-backed WFS contract_ — Case-A invariant-modal recursion,
-  determined-head stratification, positive Case-B founded recursion, G91 positive
+  GPU-backed WFS contract_ — recursive epistemic fixpoint invariant-modal recursion,
+  determined-head stratification, positive modal recursion with founded semantics, G91 positive
   `possible` recursion, stratified negated-modal recursion, and cyclic
   negated-modal recursion through the `xlog-gpu` GPU-backed WFS plan execute
   through `xlog run` without the old `xlog_prob` host-WFS solver. This closure
@@ -235,15 +1659,14 @@ Historical v0.9.1 rejection list:
 `docs/plans/2026-05-29-v091-epistemic-executor-completion-status.md`.
 
 v0.9.0 Epistemic Solver Release Candidate. This branch layers the v0.8.7-v0.8.9
-BFO diagnostics and provenance pack into the v0.9.0 GPU-native epistemic,
+external diagnostic provenance pack into the v0.9.0 GPU-native epistemic,
 solver, and probabilistic release candidate.
 
-v0.8.9 Integrated BFO Diagnostics Pack. This branch consolidates the reusable
-XLOG and pyxlog gaps exposed by the BFO Autonomous Science Engine, Living World
-Model, and Universal Case Reasoner into core APIs, focused regressions, and
-release-facing documentation. It includes the Project 1/v0.8.7 diagnostics and
-biomedical graph fixes, the v0.8.8 living-world provenance refinements, and the
-v0.8.9 UCR diagnostic surfaces.
+v0.8.9 Integrated External Diagnostics Pack. This branch consolidates reusable
+XLOG and pyxlog gaps exposed by external diagnostic consumers into core APIs,
+focused regressions, and release-facing documentation. It includes the initial
+v0.8.7 diagnostics and biomedical graph fixes, the v0.8.8 world-model provenance
+refinements, and the v0.8.9 external diagnostic surfaces.
 
 ### Added
 
@@ -254,7 +1677,7 @@ v0.8.9 UCR diagnostic surfaces.
 - Added production `xlog run` pilots for `examples/epistemic/*.xlog`, covering
   accepted EIR, G91, FAEEL, GPT, and split epistemic programs through the
   high-level GPU runtime route.
-- Added the v0.8.7 Living-World Diagnostics architecture document covering
+- Added the v0.8.7 external world-model diagnostics architecture document covering
   induced-rule provenance, rule provenance, proof traces, delta debug,
   temporal relation metadata, and neural hot-loop diagnostics.
 - Added shared `xlog-logic` rule provenance and query proof trace diagnostics,
@@ -269,8 +1692,8 @@ v0.8.9 UCR diagnostic surfaces.
   names, metadata-only debug traces, and an opt-in full-recompute equivalence
   check.
 - Added pyxlog temporal relation metadata helpers for session-managed
-  relations, including process-boundary and temporal-order metadata used by the
-  living-world validation package.
+  relations, including process-boundary and temporal-order metadata used by an
+  external world-model validation package.
 - Added `CompiledProgram.neural_hot_loop_diagnostics()` with transfer,
   CUDA Graph, circuit-cache, and explicit unavailable-status diagnostics for
   unsupported hot-loop counters.
@@ -280,7 +1703,7 @@ v0.8.9 UCR diagnostic surfaces.
 - Added `xlog explain --format json` generated-rule row diagnostics with
   accepted/rejected row decisions, failed predicates, threshold comparisons,
   and aggregate inputs. The CLI now also binds external candidate relation rows
-  from colocated execution manifests so BFO generated HF rules produce non-empty
+  from colocated execution manifests so external generated rules produce non-empty
   row-level diagnostics through the XLOG explain surface.
 - Added pyxlog session evidence APIs:
   `put_relation_with_provenance(...)`, `evidence(...)`, and
@@ -319,14 +1742,13 @@ v0.8.9 UCR diagnostic surfaces.
 - Added `pyxlog.transfer_diagnostics.compute_transfer_diagnostics(...)` for
   grouped macro F1, minimum group F1, bootstrap confidence intervals, baseline
   uplift, paired sign tests, and missing-domain or missing-variant failures.
-- Added the BFO Universal Case Reasoner validation package under
-  `examples/BFO/universal_case_reasoner/`, including requirements, validation
-  plan, BFO programs, evidence JSON, minimal reproducers, project-specific tests,
-  validator tooling, and the resolved `xlog_issue_ledger.json`.
-- Added `docs/architecture/ucr-xlog-diagnostics.md` as the architecture record
-  for all six `UCR-XLOG-*` issue resolutions and their regression locations.
-- Added `docs/architecture/lwm-diagnostics-provenance.md` as the issue-by-issue
-  architecture note for the v0.8.8 living-world diagnostics surface.
+- Added an external diagnostic validation package, including requirements,
+  validation plan, Datalog programs, evidence JSON, minimal reproducers,
+  project-specific tests, validator tooling, and the resolved issue ledger.
+- Added an architecture record for six external diagnostic issue resolutions and
+  their regression locations.
+- Added an issue-by-issue architecture note for the v0.8.8 external world-model
+  diagnostics surface.
 
 ### Changed
 
@@ -338,7 +1760,7 @@ v0.8.9 UCR diagnostic surfaces.
   `xlog run` pilots.
 - Updated architecture docs for Python bindings, CLI explain diagnostics,
   GPU execution, bounded exact-induction provenance, relation evidence, graph
-  ingestion, delta planner telemetry, nn/4 lineage, validation staging, UCR
+  ingestion, delta planner telemetry, nn/4 lineage, validation staging, external
   dILP diagnostics, and transfer diagnostics.
 - `train_and_promote(...)` now accepts training-fold, held-out-domain, and
   base-kernel checksum metadata so promotion results can carry reusable transfer
@@ -346,7 +1768,8 @@ v0.8.9 UCR diagnostic surfaces.
 - `pyxlog` can import pure-Python helper modules when `pyxlog._native` is absent;
   native-backed entry points still fail explicitly instead of pretending to run.
 - README, roadmap, dILP architecture, and Python binding docs now describe the
-  unreleased integrated v0.8.9 BFO diagnostic surfaces and validation packages.
+  unreleased integrated v0.8.9 external diagnostic surfaces and validation
+  packages.
 - The high-level `xlog-gpu::LogicProgram` path now detects accepted epistemic
   programs and dispatches them through the existing single/split epistemic GPU
   runtime instead of treating production examples as fixture-only inputs.
@@ -404,13 +1827,13 @@ v0.8.9 UCR diagnostic surfaces.
 
 ### Tests
 
-- Added Project 1/v0.8.7-focused source and regression coverage for generated
+- Added v0.8.7-focused source and regression coverage for generated
   rule diagnostics, biomedical graph streaming, relation-delta planner
   telemetry, pyxlog evidence APIs, nn/4 training lineage, and validation
   staging.
-- Added `python/tests/test_v088_lwm_source.py` to lock the v0.8.8 pyxlog stubs,
-  docs, and Rust/Python source API surfaces.
-- Added focused regressions for UCR-XLOG-001 through UCR-XLOG-006:
+- Added pyxlog source API regression tests to lock the v0.8.8 stubs, docs, and
+  Rust/Python source API surfaces.
+- Added focused regressions for external diagnostic issues:
   `python/tests/test_nn4_dilp_training_surface.py`,
   `crates/xlog-logic/tests/differentiable_proof_trace.rs`,
   `python/tests/test_ilp_rule_inventory.py`,
@@ -432,7 +1855,7 @@ v0.8.9 UCR diagnostic surfaces.
 
 ## [0.8.6] — 2026-05-19
 
-DTS-DLM Runtime Completion and GPU-Native Optimizer Pack. This release closes
+external consumer Runtime Completion and GPU-Native Optimizer Pack. This release closes
 the deferred v0.8.0 runtime completion items while preserving the v0.8.5
 language-completeness surface.
 
@@ -460,7 +1883,7 @@ language-completeness surface.
   records `speedup_ratio=3.206` against the >=1.5x persistent-index target
   with zero tracked DTOH/H2D calls.
 - Added v0.8.6 runtime consumer example-execution fixtures and validator for
-  DTS-DLM-shaped delta/optimizer workloads, neutral Mistaber-derived `.xlog`
+  external consumer-shaped delta/optimizer workloads, neutral Mistaber-derived `.xlog`
   fixtures, v0.9.0 substrate primitives, and public pyxlog compatibility,
   reusing the v0.8.0/v0.8.5 validators and recording production-path evidence.
   The validator now includes a public `LogicRelationSession` persistent-index
@@ -495,7 +1918,7 @@ Language Completeness and Developer Experience. This release refreshes the
 public language surface for finite terms/lists/meta constructs, explicit NAF,
 magic-set planning, probabilistic aggregate inference, approximate inference
 configuration, incremental parsing, and CLI inspectability while preserving
-the v0.8.0 DTS-DLM runtime compatibility surface.
+the v0.8.0 external consumer runtime compatibility surface.
 
 ### Added
 
@@ -504,8 +1927,8 @@ the v0.8.0 DTS-DLM runtime compatibility surface.
   probabilistic aggregate semantics, aggregate lifting, approximate inference
   configuration, incremental parsing, and `xlog explain` / `xlog repl` /
   `xlog watch` boundaries. The implementation remains tracked by the
-  corresponding `G085_*` evidence gates.
-- Added `docs/architecture/language-v085.md` as the parser, term, probability,
+  corresponding language-completeness evidence gates.
+- Added `docs/architecture/language-v0.8.5.md` as the parser, term, probability,
   CLI, and v0.9.0 handoff contract for the v0.8.5 branch.
 - Added finite list normalization for `list<T>` columns, list literals, safe
   cons patterns, and core list built-ins via `__xlog_list_*` helper relations
@@ -554,8 +1977,8 @@ the v0.8.0 DTS-DLM runtime compatibility surface.
 
 ### Migration Notes
 
-- Existing v0.8.0 programs remain compatible. The G085_INT gate revalidated
-  the v0.8.0 DTS example/source guards and strict deterministic D2H runtime
+- Existing v0.8.0 programs remain compatible. The integration gate revalidated
+  the v0.8.0 external consumer example/source guards and strict deterministic D2H runtime
   paths.
 - New finite list/meta features intentionally reject non-finite, dynamic, or
   CPU-only term forms. Unsupported forms emit typed `v0.8.5 ... error`
@@ -575,9 +1998,9 @@ the v0.8.0 DTS-DLM runtime compatibility surface.
 
 ## [0.8.0] — 2026-05-18
 
-DTS-DLM ML/Python Productization. This release pulls the consumer-critical
+external consumer ML/Python Productization. This release pulls the consumer-critical
 Python, neural-symbolic, incremental-session, and native exact-induction work
-forward so DTS-DLM can execute the queued M37-A+B path against production xlog
+forward so external consumer can execute the queued external-consumer bridge-training path against production xlog
 surfaces.
 
 ### Added
@@ -588,21 +2011,21 @@ surfaces.
 - Persistent relation delta APIs on `LogicRelationSession`, including insert,
   delete, mixed `apply_relation_delta`, and `delta_stats` reporting backed by
   runtime `RelationDelta` recomputation paths.
-- DTS-DLM neural bridge helpers: registered-network top-k and deterministic
+- external consumer neural bridge helpers: registered-network top-k and deterministic
   output modes, stable top-k tie-breaking, neural cache telemetry, Belnap
   pro/contra/quarantine loss helpers, semantic loss, MSE, and infoloss
   surfaces.
 - Native exact-induction consumer integration through
-  `pyxlog.ilp.exact_induce.induce_exact(..., backend="native")` for the DTS
+  `pyxlog.ilp.exact_induce.induce_exact(..., backend="native")` for the external consumer
   tensorized ILP `U64` path, with strict-per-topology compatibility policy and
   packaging of `ilp_exact` CUDA artifacts through the normal `pyxlog/kernels`
   wheel path.
-- A DTS-focused example suite under `examples/v080-dts/` plus
-  `scripts/validate_v080_examples.py`, covering async/streaming runtime
+- An external-consumer-focused example suite under `examples/external-consumer-python/` plus
+  `scripts/validate_external_consumer_examples.py`, covering async/streaming runtime
   controls, relation deltas, neural bridge helpers, native exact induction, and
   probabilistic async diagnostics.
 - A machine-readable v0.8.0 certification pack under
-  `docs/evidence/2026-05-18-v080-cert/` with `17/17` DTS-required pyxlog symbol
+  `docs/evidence/2026-05-18-v080-cert/` with `17/17` external consumer-required pyxlog symbol
   coverage and `signature_drift=0`.
 
 ### Changed
@@ -610,8 +2033,8 @@ surfaces.
 - Workspace package version and internal xlog crate dependency constraints now
   target `0.8.0`.
 - README and roadmap release status now identify `v0.8.0` as the current
-  tagged release and route DTS-DLM users to the Python bindings and
-  `examples/v080-dts/` suite.
+  tagged release and route external consumer users to the Python bindings and
+  `examples/external-consumer-python/` suite.
 - v0.9.0 is the next Epistemic/Solver Semantics train; v0.10.0 is the
   Multi-GPU / Out-of-Core train.
 
@@ -619,7 +2042,7 @@ surfaces.
 
 - Closure proposal: `docs/plans/2026-05-18-v080-closure-proposal.md`.
 - Certification evidence: `docs/evidence/2026-05-18-v080-*/`.
-- DTS-DLM full 449-doc native-liveness replay is accepted by historical
+- external consumer full 449-doc native-liveness replay is accepted by historical
   evidence waiver; it was not freshly rerun inside the xlog release worktree.
 
 ## [0.7.0] — 2026-05-18
@@ -628,7 +2051,7 @@ General WCOJ Architecture and Runtime Expansion. This release
 retargets the completed feature pack originally planned as v0.6.5
 to v0.7.0 because the delivered surface is a full WCOJ subsystem
 expansion: cost-aware planning, recursive integration, K-clique
-coverage, paper-aligned helper/runtime mechanisms, DTS-DLM hot-loop
+coverage, paper-aligned helper/runtime mechanisms, external consumer hot-loop
 integration, and release-board closure.
 
 ### Added
@@ -645,8 +2068,8 @@ integration, and release-board closure.
 - Certification and benchmark surfaces for GPU Same Generation,
   skewed multiway, deep-recursive WCOJ, deterministic mixed execution,
   widened-frontier replay, and paper-class production-scale fixtures.
-- DTS-DLM Phase-2 integration evidence for chain-shaped joins,
-  sort-label propagation, CUDA Graph capture/replay, M37-A surface
+- external consumer Phase-2 integration evidence for chain-shaped joins,
+  sort-label propagation, CUDA Graph capture/replay, external-consumer neural-symbolic training surface
   preservation, and m37c-prime end-to-end validation.
 - Dedicated WCOJ architecture and user guides.
 
@@ -658,7 +2081,7 @@ integration, and release-board closure.
   historical evidence may still say the work was originally targeted
   as `v0.6.5`.
 - Roadmap release trains move forward: the completed WCOJ expansion is
-  v0.7.0, v0.8.0 is narrowed to DTS-DLM ML/Python
+  v0.7.0, v0.8.0 is narrowed to external consumer ML/Python
   productization, Epistemic/Solver Semantics moves to v0.9.0,
   and Multi-GPU / Out-of-Core moves to v0.10.0. The broader
   language / CLI product backlog is deferred until it has a named
@@ -667,7 +2090,7 @@ integration, and release-board closure.
 ### Release Status
 
 - Closure board: 31 DONE, 0 IN-PROGRESS, 0 BLOCKED, 0 OPEN.
-- W7.1 is complete: the annotated `v0.7.0` tag has been created and pushed.
+- release tagging is complete: the annotated `v0.7.0` tag has been created and pushed.
 
 ## [0.6.0] — 2026-04-29
 
@@ -795,8 +2218,8 @@ unchanged; the new path is opt-in via
   exact-induction downstream consumer work resumes (v0.8.0
   native exact-induction consumer gate) and requires
   runtime-backed stream safety.
-- **Sub-slice 3 LeftOuter CSM** (commit `b90ae77f`, never
-  pushed; recovered into `.recovery/sub-slice-3-edits.md`).
+- **Deferred LeftOuter count-scan-materialize migration** (commit `b90ae77f`, never
+  pushed; recovered into a branch-local recovery note).
   Apply on a fresh post-v0.6.0 branch after auditing every
   scratch alloc against the access-aware contract documented
   in `docs/architecture/recorded-launch-migration.md`.
@@ -1075,9 +2498,1056 @@ Run before tagging `v0.6.2`:
 - Existing certification modes from v0.6.1 remain the recorded-launch
   baseline for runtime safety.
 
-## [Unreleased] — targeting v0.6.3
+## [0.9.2](https://github.com/BrainyBlaze/xlog/compare/xlog-cli-v0.5.0...xlog-cli-v0.9.2) - 2026-06-05
 
-> Empty.
+### Added
+
+- full shared-variable epistemic constraint joins via program-level desugaring
+- diagonal modal constraint via sound program-level desugaring
+- pilot ex37 (stratified negated-modal recursion EXECUTES) + device test/mutation + reword ex33 to formal WFS bound
+- multi-literal distinct-variable epistemic constraints + README
+- *(epistemic)* epistemic plan-dump surface â xlog run --epistemic-plan-json
+- close determined-epistemic multi-column binding (determined-modal family complete)
+- close transitive determined-ordinary modal coupling via stratification
+- close augmented-projection multi-head coupling scope limit
+- cross-component epistemic joint-solving (multi-output)
+- cross-component epistemic coupling
+- recursive epistemic fixpoint support
+- mixed per-row and global modal membership
+- checkpoint epistemic solver semantics
+- add cli explain repl watch surfaces
+- add incremental parser session
+- add approximate inference pragmas
+- add aggregate lifting reports
+- add magic-set rewriting
+
+### Fixed
+
+- *(release)* drop README version sync + dynamic badges + agent release rules ([#124](https://github.com/BrainyBlaze/xlog/pull/124))
+- guard diagonal desugaring to non-modal-derived targets
+- route bound-variable multi-head epistemic programs through split
+- route epistemic examples through xlog run
+- *(release)* harden validation and gpu fallback paths
+- *(pyxlog)* install local wheels for explicit python
+- *(cuda)* embed portable PTX fallback
+- *(pyxlog)* ship kernels in wheels and document cubin path
+- *(ci)* repair main release automation ([#27](https://github.com/BrainyBlaze/xlog/pull/27))
+- *(ci)* keep README release metadata in sync ([#26](https://github.com/BrainyBlaze/xlog/pull/26))
+
+### Other
+
+- Set v0.9.2 release metadata
+- Clarify v0.9.2 WFS release contract
+- Close v0.9.2 epistemic semantic gaps
+- Close v0.9.2 epistemic release
+- CLI markers for accepted chain pilots; repoint negative test to interior-negation boundary
+- variable-keyed constraint device tests + CLI goldens + mutation probe
+- CLI golden ex23 ACCEPTED + repoint negative test to unbounded cons
+- CLI accepted-fixpoint + negated-modal-floor contracts
+- FAEEL unfounded self-support → exact founded-extension semantic result
+- integrate main MC GPU-resident engine into v0.9.2 epistemic completion
+- complete determined-modal-family showcase (negated-over-derived, possible-binding, FAEEL-unfounded)
+- determined-head and negated-modal-over-invariant xlog-run pilots (examples 25,26) with anti-gaming gating checks
+- flip example 17 to accepted stratified pilot; add example 24 transitive out-of-scope negative
+- full robust validated v0.9.2 epistemic examples
+- add validated v0.9.1 epistemic executor showcase (06-11)
+- document v0.9.0 epistemic language surface
+- *(release)* align v0.9.0 package metadata
+- integrate v0.8.9 diagnostics surfaces
+- *(release)* prepare v0.8.6 tag metadata
+- *(release)* correct v0.8.5 public status
+- *(release)* prepare v0.8.0
+- mark v0.7.0 release complete
+- close purge gate
+- *(v0.6.2)* prepare roadmap changelog and version
+- *(v0.6.1)* version bump + roadmap cleanup + changelog
+- *(readme)* bump version badge + release-status line to v0.6.0
+- restore audit README framing with current release setup
+- Merge branch 'audit/v0.5.0-prerelease'
+- integrate prerelease audit docs
+- harden public release readiness
+
+## [0.9.2](https://github.com/BrainyBlaze/xlog/compare/xlog-gpu-v0.5.0...xlog-gpu-v0.9.2) - 2026-06-05
+
+### Added
+
+- full shared-variable epistemic constraint joins via program-level desugaring
+- diagonal modal constraint via sound program-level desugaring
+- pilot ex37 (stratified negated-modal recursion EXECUTES) + device test/mutation + reword ex33 to formal WFS bound
+- co-evolving modal and recursive founded least fixpoint
+- *(epistemic)* epistemic plan-dump surface â xlog run --epistemic-plan-json
+- close determined-epistemic multi-column binding (determined-modal family complete)
+- determined-head recursion and negated-modal-over-invariant recursive epistemic fixpoint
+- stratified epistemic execution wiring (materialize gated head between strata)
+- cross-component epistemic joint-solving (multi-output)
+- recursive epistemic fixpoint support
+- coalesce relation delta batches
+- add safe meta lowering
+- add finite list lowering
+- add type term foundation
+- *(pyxlog)* add v0.8.0 relation delta sessions
+- expose xlog sort-label metadata
+
+### Fixed
+
+- *(release)* drop README version sync + dynamic badges + agent release rules ([#124](https://github.com/BrainyBlaze/xlog/pull/124))
+- guard diagonal desugaring to non-modal-derived targets
+- route bound-variable multi-head epistemic programs through split
+- materialize nullary EDB facts as present (1 row)
+- route epistemic examples through xlog run
+- prove pyxlog persistent index session reuse
+- *(release)* harden validation and gpu fallback paths
+- expose query-variable sort labels at runtime
+- *(pyxlog)* install local wheels for explicit python
+- *(cuda)* embed portable PTX fallback
+- *(pyxlog)* ship kernels in wheels and document cubin path
+- *(ci)* repair main release automation ([#27](https://github.com/BrainyBlaze/xlog/pull/27))
+- *(ci)* keep README release metadata in sync ([#26](https://github.com/BrainyBlaze/xlog/pull/26))
+
+### Other
+
+- Set v0.9.2 release metadata
+- Clarify v0.9.2 WFS release contract
+- Close v0.9.2 epistemic semantic gaps
+- Close v0.9.2 epistemic release
+- cargo fmt
+- derived-head coupling — stratified-vs-reference equivalence + true-cycle wall
+- device co-evolving modal-recursion case founded-fixpoint + ungated mutation probe
+- document v0.9.0 epistemic language surface
+- *(release)* align v0.9.0 package metadata
+- integrate v0.8.9 diagnostics surfaces
+- integrate v0.8.8 external world-model diagnostics into v0.8.9
+- integrate first external diagnostics into v0.8.9
+- Exercise external generated-rule diagnostics
+- Resolve remaining XLOG evidence issues
+- Add v0.8.7 external world-model diagnostics
+- *(release)* prepare v0.8.6 tag metadata
+- *(release)* correct v0.8.5 public status
+- *(release)* prepare v0.8.0
+- mark v0.7.0 release complete
+- *(v0.6.2)* prepare roadmap changelog and version
+- *(v0.6.1)* version bump + roadmap cleanup + changelog
+- *(readme)* bump version badge + release-status line to v0.6.0
+- restore audit README framing with current release setup
+- Merge branch 'audit/v0.5.0-prerelease'
+- integrate prerelease audit docs
+- harden public release readiness
+
+## [0.9.2](https://github.com/BrainyBlaze/xlog/compare/xlog-prob-v0.5.0...xlog-prob-v0.9.2) - 2026-06-05
+
+### Added
+
+- close augmented-projection multi-head coupling scope limit
+- checkpoint epistemic solver semantics
+- add approximate inference pragmas
+- add aggregate lifting reports
+- add probabilistic aggregate support
+- add safe meta lowering
+- add type term foundation
+
+### Fixed
+
+- *(release)* drop README version sync + dynamic badges + agent release rules ([#124](https://github.com/BrainyBlaze/xlog/pull/124))
+- route epistemic examples through xlog run
+- close GPU-native count-lift exact path
+- *(release)* harden validation and gpu fallback paths
+- *(pyxlog)* install local wheels for explicit python
+- *(cuda)* embed portable PTX fallback
+- *(pyxlog)* ship kernels in wheels and document cubin path
+- *(ci)* repair main release automation ([#27](https://github.com/BrainyBlaze/xlog/pull/27))
+- *(ci)* keep README release metadata in sync ([#26](https://github.com/BrainyBlaze/xlog/pull/26))
+
+### Other
+
+- Set v0.9.2 release metadata
+- Close v0.9.2 epistemic release
+- integrate main MC GPU-resident engine into v0.9.2 epistemic completion
+- document v0.9.0 epistemic language surface
+- *(release)* align v0.9.0 package metadata
+- integrate v0.8.9 diagnostics surfaces
+- aggregate split batch cpu fallbacks
+- gate split batch h2d transfer
+- gate split batch incremental prob updates
+- gate accepted evidence incremental prob updates
+- centralize probabilistic batch gate
+- require single result timing gates
+- require split batch timing gates
+- tighten prob production metric gate
+- replace incremental evidence updates
+- name alternative compiler adapters
+- trace nonzero probabilistic evidence arity
+- reuse v0.8.6 bundle for v0.9.0
+- *(release)* prepare v0.8.6 tag metadata
+- *(release)* correct v0.8.5 public status
+- *(release)* prepare v0.8.0
+- mark v0.7.0 release complete
+- *(v0.6.2)* prepare roadmap changelog and version
+- *(v0.6.1)* version bump + roadmap cleanup + changelog
+- *(readme)* bump version badge + release-status line to v0.6.0
+- restore audit README framing with current release setup
+- Tighten workspace warning hygiene
+- Merge branch 'audit/v0.5.0-prerelease'
+- integrate prerelease audit docs
+- harden public release readiness
+
+## [0.9.2](https://github.com/BrainyBlaze/xlog/compare/xlog-solve-v0.5.0...xlog-solve-v0.9.2) - 2026-06-05
+
+### Added
+
+- close augmented-projection multi-head coupling scope limit
+- checkpoint epistemic solver semantics
+- gate multi-candidate solver portfolios
+- schedule gpu maxsat batches
+- schedule multi-result gpu maxsat search
+- schedule multi-result gpu maxsat encodes
+- encode weighted gpu maxsat candidates
+- prune unsat gpu maxsat candidates
+- batch accepted gpu maxsat candidates
+- reuse learned clauses across accepted gpu candidates
+- propagate gpu solver lifecycle statuses
+- cover multi-candidate gpu solver lifecycle
+- reject unsafe learned clause reuse
+- gate oracle fixtures from production metrics
+- reuse gpu learned clauses for same cnf
+- publish gpu learned clause arenas
+- propagate solver portfolio status in gpu adapter
+- gate maxsat portfolio through gpu solver adapter
+- gate solver lifecycle with accepted gpu evidence
+- gate solver workspace unsat with accepted gpu evidence
+- gate solver unsat path with accepted gpu evidence
+- gate solver sat path with accepted gpu evidence
+- report solver production capability blockers
+- add gpu solver production reuse adapter
+- add bounded solver service semantics
+
+### Fixed
+
+- *(release)* drop README version sync + dynamic badges + agent release rules ([#124](https://github.com/BrainyBlaze/xlog/pull/124))
+- route epistemic examples through xlog run
+- *(release)* harden validation and gpu fallback paths
+- *(pyxlog)* install local wheels for explicit python
+- *(cuda)* embed portable PTX fallback
+- *(pyxlog)* ship kernels in wheels and document cubin path
+- *(ci)* repair main release automation ([#27](https://github.com/BrainyBlaze/xlog/pull/27))
+- *(ci)* keep README release metadata in sync ([#26](https://github.com/BrainyBlaze/xlog/pull/26))
+
+### Other
+
+- Set v0.9.2 release metadata
+- document v0.9.0 epistemic language surface
+- *(release)* align v0.9.0 package metadata
+- integrate v0.8.9 diagnostics surfaces
+- aggregate split batch cpu fallbacks
+- gate split batch h2d transfer
+- centralize solver batch gate
+- require single result timing gates
+- require split batch timing gates
+- lock production metric audit wording
+- tighten solver production metric gate
+- trace solver nonzero evidence arity
+- reuse v0.8.6 bundle for v0.9.0
+- guard maxsat scheduler prevalidation
+- guard encoded maxsat prevalidation
+- guard maxsat search prevalidation
+- guard maxsat lifecycle prevalidation
+- gate split maxsat lifecycle
+- gate solver maxsat lifecycle
+- gate split solver maxsat scheduler on batches
+- gate split solver maxsat search on batches
+- gate split solver maxsat on batches
+- gate split solver learned reuse on batches
+- gate split solver portfolio on batches
+- gate split solver lifecycle on batches
+- trace solver evidence by operator family
+- trace semantic modes through solver gates
+- mark gpu native gate blocked
+- mark v0.7.0 release complete
+- *(v0.6.2)* prepare roadmap changelog and version
+- *(v0.6.1)* version bump + roadmap cleanup + changelog
+- *(readme)* bump version badge + release-status line to v0.6.0
+- restore audit README framing with current release setup
+- Tighten workspace warning hygiene
+- Merge branch 'audit/v0.5.0-prerelease'
+- integrate prerelease audit docs
+- harden public release readiness
+
+## [0.9.2](https://github.com/BrainyBlaze/xlog/compare/xlog-runtime-v0.5.0...xlog-runtime-v0.9.2) - 2026-06-05
+
+### Added
+
+- same-name multi-arity modal coupling solved via arity-qualified tuple sources
+- variable-keyed + nested epistemic constraints (GPU world-view pruning)
+- multi-literal distinct-variable epistemic constraints + README
+- drop unfounded FAEEL self-support from reduced founded-model base
+- close determined-epistemic multi-column binding (determined-modal family complete)
+- close augmented-projection multi-head coupling scope limit
+- determined-head recursion and negated-modal-over-invariant recursive epistemic fixpoint
+- stratified epistemic execution wiring (materialize gated head between strata)
+- cross-component epistemic joint-solving (multi-output)
+- cross-component epistemic coupling
+- mixed per-row and global modal membership
+- constraint-specific rejection reasons
+- joint multi-epistemic predicate solving
+- epistemic integrity constraints
+- EIR-derived candidate-world enumeration
+- tuple-key bound-value membership
+- checkpoint epistemic solver semantics
+- compare G91 GPU traces to oracle
+- expose gpt rejected candidate indices
+- expose gpu semantic candidate indices
+- type gpu epistemic rejection reasons
+- gate probabilistic pir cnf batches
+- gate probabilistic evaluation batches
+- gate parsed probabilistic program batches
+- gate multi-candidate solver portfolios
+- add split world-view parity fixture
+- add G91 runtime parity fixture
+- certify skew-scheduled wcoj reuse
+- permit founded faeel self possible
+- require complete world-view support
+- require helper scans in wcoj plans
+- certify helper split rewrites
+- require wcoj layout evidence
+- guard faeel self support
+- trace not possible row filters
+- certify kclique stream groups
+- trace epistemic operator metrics
+- trace kclique metadata timing
+- schedule gpu maxsat batches
+- schedule multi-result gpu maxsat search
+- schedule multi-result gpu maxsat encodes
+- condition negative gpu prob evidence
+- execute split gpu components
+- encode weighted gpu maxsat candidates
+- condition gpu prob gradients
+- prune unsat gpu maxsat candidates
+- certify helper split wcoj trace metrics
+- batch conditioned gpu prob programs
+- batch conditioned gpu prob queries
+- condition accepted gpu prob programs
+- condition accepted gpu prob tuple evidence
+- batch accepted gpu maxsat candidates
+- reuse learned clauses across accepted gpu candidates
+- propagate gpu solver lifecycle statuses
+- batch accepted gpu prob execution
+- cover multi-candidate gpu solver lifecycle
+- trace gpu semantic candidate outcomes
+- honor not-know tuple membership on gpu
+- condition accepted evidence in gpu exact path
+- gate oracle fixtures from production metrics
+- account final gpu result transfers
+- reuse gpu learned clauses for same cnf
+- trace kclique arity preflight reuse
+- trace program prob knowledge compilation
+- publish gpu learned clause arenas
+- propagate solver portfolio status in gpu adapter
+- lower split components through gpu executable plans
+- gate maxsat portfolio through gpu solver adapter
+- filter final rows by all epistemic memberships
+- gate prob end-to-end exact evaluation
+- gate solver lifecycle with accepted gpu evidence
+- gate prob pir cnf with accepted gpu evidence
+- gate prob query evaluation with accepted gpu evidence
+- gate prob program compile with accepted gpu evidence
+- gate solver workspace unsat with accepted gpu evidence
+- gate prob gradient evaluation with accepted gpu evidence
+- gate solver unsat path with accepted gpu evidence
+- gate solver sat path with accepted gpu evidence
+- gate prob exact path with accepted gpu evidence
+- filter final tuples by bound membership
+- certify accepted wcoj execution
+- gate final tuples by gpu membership
+- bind tuple keys to gpu output columns
+- add generic gpu tuple membership kernel
+- add arity-three epistemic tuple key kernel
+- encode ground epistemic tuple keys for gpu matching
+- preserve epistemic tuple key terms in eir
+- stage fixed-arity epistemic tuple sources on gpu
+- populate arity-zero epistemic membership from tuple sources
+- bind epistemic literals to tuple membership sources
+- fail closed on row-count epistemic membership
+- materialize epistemic final tuples on gpu
+- enforce epistemic wcoj runtime certification
+- gate epistemic model membership on gpu output
+- trace epistemic gpu transfer budget
+- materialize epistemic final result flags on gpu
+- validate epistemic world views on gpu
+- stage epistemic model membership on gpu
+- trace epistemic gpu staging timings
+- stage epistemic materialization on gpu
+- validate staged epistemic candidates on gpu
+- stage epistemic propagation on gpu
+- add gpu candidate generation kernel
+- reset epistemic gpu workspace on device
+- trace epistemic reduced runtime execution
+- gate epistemic wcoj evidence on counters
+- add epistemic runtime preflight
+- add epistemic gpu workspace contract
+- close CUDA Graph-mode set maintenance
+- bind delta variants as WCOJ leaders
+- remove adaptive skew classifier surface
+- route variable-ordering cost model u32 triangle through HG
+- route u32 triangle dispatch through HG pipeline
+- production kernel fusion (layout+count) with threshold dispatch + auto-disable + cert grid
+- wire sort-merge dispatch + counter at execute_join + de-overlap nested-loop dispatch cert fixtures for dispatch precedence
+- add eligible_for_sort_merge predicate
+- wire nested-loop dispatch + counter at execute_join
+- add eligible_for_nested_loop predicate
+- *(runtime)* K=5 and K=6 clique WCOJ dispatcher + counters
+- HeatAwareLeaderModel plus variable-order-aware join-result feedback
+- *(runtime)* per-iteration stats integration for recursive SCC
+- *(runtime)* dispatcher reroute on var_order — variable-ordering cost model leader rotation + post-kernel projection
+- *(ir)* VariableOrder + LookupPerm types + MultiWayJoin.var_order field
+- *(runtime)* record_join_result feedback from successful WCOJ dispatch
+- *(runtime)* dispatch sites use build_wcoj_cost_model factory
+- *(runtime)* CardinalityAwareCostModel with delegate-on-missing-stats
+- *(runtime)* execute_wcoj_or_fallback_node hooks recursive arm
+- *(runtime)* try_dispatch_wcoj_*_on_body entry points
+- *(runtime)* migrate adaptive dispatch to WcojCostModel seam
+- *(runtime)* WcojCostModel + SkewScoreSource cost-model seam
+- *(cuda+runtime)* 4-cycle skew classifier + adaptive opt-in
+- *(runtime)* wire 4-cycle dispatch + executor wiring cert
+- *(runtime)* match_multiway_4cycle + try_dispatch_wcoj_4cycle force gate
+- *(runtime)* replace triangle-tree matcher with MultiWayJoin
+- *(workspace)* cross-crate MultiWayJoin walker arms
+- *(runtime)* default-on adaptive WCOJ + hard kill switch (v0.6.2)
+- *(runtime)* adaptive WCOJ dispatch + classifier branch (v0.6.2 A2-lite commit B)
+- *(dispatch)* WCOJ width-aware AST/RIR dispatch (v0.6.2)
+- *(cuda)* WCOJ Symbol key support (v0.6.2)
+- *(runtime)* env-gated WCOJ triangle executor wiring (v0.6.2)
+- *(runtime)* add strict deterministic D2H guard (v0.5.5) ([#49](https://github.com/BrainyBlaze/xlog/pull/49))
+
+### Fixed
+
+- *(release)* drop README version sync + dynamic badges + agent release rules ([#124](https://github.com/BrainyBlaze/xlog/pull/124))
+- standalone negated-variable-keyed constraint is a NAF safety error, not 'unimplemented'
+- route epistemic examples through xlog run
+- fail closed nonzero faeel self support
+- certify v0.7.0 multiway wcoj reuse
+- require tuple-source proof before validation
+- *(release)* harden validation and gpu fallback paths
+- integrate K7 K8 planned clique metadata
+- restore cost-model default-flip cert
+- route nested-loop dispatch through shared record_join_result feedback
+- preserve occurrence identity in rewrite_scan_nth
+- tighten Tier-1 wrapper contract + revert recursive helper extension
+- cargo fmt + correct prepare_leader_inputs visibility doc
+- cargo fmt, evidence count, extract prepare_leader_inputs + real helper extraction
+- address selectivity-driven join reordering review patches — duplicate attr, stale comment, evidence count, matcher tests
+- *(runtime)* harden WCOJ phase timing diagnostics
+- *(runtime)* cache WCOJ launch stream on Executor (v0.6.2)
+- *(logic)* restore deterministic recursive set evaluation
+- *(pyxlog)* install local wheels for explicit python
+- *(cuda)* embed portable PTX fallback
+- *(pyxlog)* ship kernels in wheels and document cubin path
+- *(ci)* repair main release automation ([#27](https://github.com/BrainyBlaze/xlog/pull/27))
+- *(ci)* keep README release metadata in sync ([#26](https://github.com/BrainyBlaze/xlog/pull/26))
+
+### Other
+
+- Set v0.9.2 release metadata
+- device test — nested-modal chain collapses, executes, zero CPU fallback
+- rustfmt multi-arity device test upload helper
+- variable-keyed constraint device tests + CLI goldens + mutation probe
+- harden multi-element key test to discriminate col1
+- repoint mixed-modal negative pilot to unbounded cons key
+- red device tests + ACCEPTED ex23 for structured modal tuple-keys
+- exact FAEEL founded-extension results on GPU runtime + mutation-probe-verified gate
+- cargo fmt on v0.9.1 epistemic changeset
+- safe split dependency and coupling semantics
+- document v0.9.0 epistemic language surface
+- *(release)* align v0.9.0 package metadata
+- integrate v0.8.9 diagnostics surfaces
+- gate split possible not-know fallbacks
+- gate split binary cpu fallbacks
+- certify split binary workspace timing
+- certify k7 k8 layout events
+- certify k7 k8 metadata timing
+- aggregate split batch cpu fallbacks
+- gate split batch h2d transfer
+- aggregate split batch final transfer
+- gate split batch final transfer
+- gate single-result final transfer
+- gate single-result kernel timing
+- gate single-result workspace buffers
+- gate single-result row-count membership rejection
+- gate single-result host transfer rejection
+- gate single-result cpu fallback rejection
+- gate split batch incremental prob updates
+- gate accepted evidence incremental prob updates
+- gate rejected world-view consumers
+- gate split quaternary host transfer rejection
+- gate split quaternary row-count membership rejection
+- gate split quaternary cpu fallback rejection
+- gate split quaternary workspace buffers
+- gate split quaternary all-operator timing
+- gate split quaternary all-operator prob deep paths
+- gate split quaternary all-operator prob gradients
+- gate split quaternary all-operator probability
+- gate split quaternary all-operator solver search
+- gate split quaternary all-operator solver reuse
+- gate split quaternary all-operator solver lifecycle
+- gate split quaternary all-operator parity
+- gate split quaternary possible not-know parity
+- gate quaternary possible not-know source gradients
+- gate quaternary not-possible prob gradients
+- gate quaternary know prob gradients
+- gate quaternary know probabilistic reuse
+- gate quaternary know solver search
+- gate quaternary know solver reuse
+- gate quaternary possible not-know solver search
+- gate quaternary possible not-know solver reuse
+- gate quaternary not-possible solver search
+- gate quaternary not-possible solver reuse
+- gate quaternary not-possible PIR reuse
+- gate quaternary source PIR reuse
+- gate quaternary program PIR reuse
+- gate quaternary program probability reuse
+- gate all-operator program probability eval
+- gate all-operator source probability paths
+- gate all-operator solver search
+- gate split all-binary solver search
+- gate split quaternary not-possible solver search
+- gate split quaternary solver search
+- gate split quaternary prob reuse
+- gate split quaternary solver reuse
+- gate split quaternary production reuse
+- gate quaternary operator production reuse
+- gate quaternary operator gpu parity
+- gate split quaternary gpu parity
+- gate split quaternary prob reuse
+- gate split quaternary solver reuse
+- gate split quaternary solver evidence
+- gate split quaternary prob batch reuse
+- gate parsed quaternary negative prob reuse
+- gate negated quaternary solver prob reuse
+- cover negated quaternary membership parity
+- require complete aggregate timing
+- require single result timing gates
+- require split batch timing gates
+- aggregate split batch kernel timing
+- lock production metric audit wording
+- name alternative compiler adapters
+- deepen all-operator reuse gates
+- gate all-operator membership reuse
+- cover all-operator mixed memberships
+- cover negated mixed memberships
+- cover mixed epistemic memberships
+- reject unsafe split modal coupling
+- gate all-operator split prob eval
+- gate all-operator split prob gradients
+- gate all-operator split solver reuse
+- gate all-operator split solver lifecycle
+- condition split all-operator probability
+- trace split all binary operators
+- trace split binary operator parity
+- trace solver quaternary evidence arity
+- trace source quaternary evidence arity
+- trace prob quaternary evidence arity
+- trace solver nonzero evidence arity
+- trace nonzero probabilistic evidence arity
+- reuse v0.8.6 bundle for v0.9.0
+- aggregate split operator trace counts
+- guard maxsat scheduler prevalidation
+- guard encoded maxsat prevalidation
+- guard maxsat search prevalidation
+- guard maxsat lifecycle prevalidation
+- gate split maxsat lifecycle
+- gate solver maxsat lifecycle
+- gate ternary epistemic gpu parity
+- gate split prob exact compile on batches
+- gate split prob pir cnf evaluation on batches
+- gate split solver maxsat scheduler on batches
+- gate split prob exact paths on batches
+- gate split solver maxsat search on batches
+- gate split solver maxsat on batches
+- gate split solver learned reuse on batches
+- gate split solver portfolio on batches
+- gate split solver lifecycle on batches
+- gate split prob gradients on batches
+- gate parsed prob evidence on split batches
+- gate prob evidence on split batches
+- trace split gpu batch execution
+- split prob operator evidence by source path
+- trace solver evidence by operator family
+- trace semantic modes through solver gates
+- trace semantic modes through prob gates
+- cover negative probabilistic batches
+- certify accepted k8 wcoj dispatch
+- certify accepted k7 wcoj dispatch
+- audit production path reuse
+- mark v0.7.0 release complete
+- close phase2 integration gate
+- Merge sort-label propagation branch into the phase-2 integration branch
+- Merge K7/K8 clique-template branch into the phase-2 integration branch
+- add K7/K8 clique templates
+- close purge gate
+- unwire executor sort-merge dispatch + rewrite sort-merge dispatch certs as operator-level
+- workspace gate green pre-bench (+ stale-comment cleanup)
+- workspace gate green
+- scrub stale "multi-recursive skip" contract notes
+- flip recursive-SCC stats integration multi-recursive WCOJ cert to assert multi-recursive WCOJ dispatch
+- rewrite input/fallback `rewrite_scan_nth` tests for positional symmetry
+- strengthen rewrite_scan_nth regression for exact positional identity
+- cargo fmt for workspace gate
+- patch evidence/comment drift round 2
+- patch evidence/comment drift before closure approval
+- *(test)* correct recursive-SCC stats integration feature-gate test header — feature gate, not cfg(test)
+- *(runtime)* strengthen recursive-SCC stats integration distinct binary_est + pin exact counter
+- *(runtime)* recursive-SCC stats integration acceptance gate acceptance matrix + recursive-stats-trace feature
+- restore selectivity-driven join reordering acceptance gates — 4-cycle compile-time + runtime helper and synthesis certs
+- *(runtime,logic)* align stale claims with the recursive WCOJ contract
+- *(runtime)* unit-test SkewScoreSource seam via stub scorer
+- *(runtime)* rename wcoj_triangle_stream to wcoj_dispatch_stream
+- *(workspace)* MultiWayJoin shape-agnosticism guards
+- *(v0.6.2)* prepare roadmap changelog and version
+- *(runtime)* WCOJ phase-timing scaffolding + report (v0.6.2)
+- *(runtime)* cover WCOJ dispatch env resolvers
+- *(wcoj)* update Symbol dispatch scope comments
+- *(v0.6.1)* version bump + roadmap cleanup + changelog
+- *(readme)* bump version badge + release-status line to v0.6.0
+- restore audit README framing with current release setup
+- Tighten workspace warning hygiene
+- Merge branch 'audit/v0.5.0-prerelease'
+- integrate prerelease audit docs
+- harden public release readiness
+
+## [0.9.2](https://github.com/BrainyBlaze/xlog/compare/xlog-logic-v0.5.0...xlog-logic-v0.9.2) - 2026-06-05
+
+### Added
+
+- admit stratified negated-modal recursion as Case B; bound genuine negation cycle to host-only WFS
+- grammar+parser collapse nested modal chains to single epistemic literal
+- variable-keyed + nested epistemic constraints (GPU world-view pruning)
+- single-occurrence variable-keyed epistemic constraints (GPU existential world-view pruning)
+- flatten structured modal tuple-keys (finite+typed list/compound/anonymous on GPU)
+- admit positive modal recursion with a founded least fixpoint
+- drop unfounded FAEEL self-support from reduced founded-model base
+- close determined-epistemic multi-column binding (determined-modal family complete)
+- close transitive determined-ordinary modal coupling via stratification
+- close augmented-projection multi-head coupling scope limit
+- determined-head recursion and negated-modal-over-invariant recursive epistemic fixpoint
+- stratified epistemic analysis (determined-head detection + strata partition)
+- cross-component epistemic joint-solving (multi-output)
+- cross-component epistemic coupling
+- recursive epistemic fixpoint support
+- joint multi-epistemic predicate solving
+- epistemic integrity constraints
+- nested modal explicit representation and fail-closed diagnostics
+- FAEEL founded self-support completion
+- checkpoint epistemic solver semantics
+- add incremental parser session
+- add approximate inference pragmas
+- add magic-set rewriting
+- harden deterministic naf safety
+- add safe meta lowering
+- add finite list lowering
+- add type term foundation
+- add stream-mux AOT schedule
+- add helper-split AOT pass
+- *(logic)* K=5 and K=6 clique WCOJ promoter try_promote_clique_k for k=5/6
+- *(promote)* normalize right-deep triangle / fully-right-deep 4-cycle
+- HeatAwareLeaderModel plus variable-order-aware join-result feedback
+- *(logic)* promote_multiway takes (stats, config); 25 caller sites updated
+- *(logic)* WcojVariableOrderingModel trait + LeaderCardinalityModel
+- *(logic)* CompilerConfig + composable compile API
+- *(ir)* VariableOrder + LookupPerm types + MultiWayJoin.var_order field
+- *(logic)* selectivity_pass real triangle + 4-cycle reordering
+- *(logic)* variable-graph triangle + 4-cycle promoters
+- *(logic)* selectivity_pass takes rel_ids; module-doc rewritten
+- *(logic)* promote_multiway gates recursive SCCs by per-rule scan count
+- *(logic)* wire selectivity_pass into Compiler post-optimizer
+- *(logic)* selectivity_pass inline pub mod (no-op)
+- *(logic)* try_promote_4cycle for canonical 4-cycle shape
+- *(logic)* wire promote_multiway after optimizer
+- *(logic)* promote_multiway pass for triangle WCOJ
+- *(workspace)* cross-crate MultiWayJoin walker arms
+- *(logic)* transitive SCC type inference (v0.6.2 PR 8)
+- *(logic)* hypergraph mixed plan contract (v0.6.2 PR 6)
+- *(logic)* hypergraph typed oracle gate (v0.6.2 PR 5)
+- *(logic)* hypergraph SCC fixpoint evaluator (v0.6.2 PR 4)
+- *(logic)* hypergraph fixpoint evaluator (v0.6.2 PR 3)
+- *(logic)* hypergraph reference evaluator (v0.6.2 PR 2)
+- *(logic)* hypergraph planner foundation (v0.6.2 PR 1)
+
+### Fixed
+
+- *(release)* drop README version sync + dynamic badges + agent release rules ([#124](https://github.com/BrainyBlaze/xlog/pull/124))
+- standalone negated-variable-keyed constraint is a NAF safety error, not 'unimplemented'
+- fail closed when a recursive epistemic program carries an epistemic constraint
+- fail closed on ordinary recursion in epistemic programs
+- route bound-variable multi-head epistemic programs through split
+- route epistemic examples through xlog run
+- fail closed nonzero faeel self support
+- preserve independent epistemic split inputs
+- guard epistemic split constraints
+- coalesce dependent epistemic split rules
+- *(release)* harden validation and gpu fallback paths
+- integrate K7 K8 planned clique metadata
+- module-level docs + lib-test flips
+- remove multi-recursive promoter gate
+- cargo fmt, evidence count, extract prepare_leader_inputs + real helper extraction
+- address selectivity-driven join reordering review patches — duplicate attr, stale comment, evidence count, matcher tests
+- classifier col0 + missing scope deliverables
+- *(logic)* skip recursive SCCs in promote_multiway
+- *(logic)* SCC-aware planner + structural-precedence repair (v0.6.2 PR 9)
+- *(logic)* canonical explain_plans + refreshed module docs (PR 6 follow-up)
+- *(logic)* typed gate defers to structural errors (v0.6.2 PR 5 follow-up)
+- *(pyxlog)* install local wheels for explicit python
+- *(cuda)* embed portable PTX fallback
+- *(pyxlog)* ship kernels in wheels and document cubin path
+- *(ci)* repair main release automation ([#27](https://github.com/BrainyBlaze/xlog/pull/27))
+- *(ci)* keep README release metadata in sync ([#26](https://github.com/BrainyBlaze/xlog/pull/26))
+
+### Other
+
+- Set v0.9.2 release metadata
+- Clarify v0.9.2 WFS release contract
+- Close v0.9.2 epistemic semantic gaps
+- Close v0.9.2 epistemic release
+- cargo fmt
+- negated-modal-in-recursion — stratified sub-case admits (co-evolving modal-recursion case), genuine negation cycle hits formal WFS bound
+- document nested-modal chain-collapse semantics + interior-negation boundary
+- update EIR+split tests from nested-modal rejection to collapse contract
+- world-view mutation probe for nested-modal collapse direction
+- derived-head coupling — stratified-vs-reference equivalence + true-cycle wall
+- co-evolving modal-recursion classification unit tests (polarity/mode scoping)
+- flip FAEEL foundedness logic tests to founded-extension semantics
+- document split_epistemic_program (clean release surface)
+- cargo fmt on v0.9.1 epistemic changeset
+- safe split dependency and coupling semantics
+- document v0.9.0 epistemic language surface
+- *(release)* align v0.9.0 package metadata
+- integrate v0.8.9 diagnostics surfaces
+- reuse v0.8.6 bundle for v0.9.0
+- *(release)* prepare v0.8.6 tag metadata
+- *(release)* correct v0.8.5 public status
+- certify language integration
+- *(release)* prepare v0.8.0
+- mark v0.7.0 release complete
+- close phase2 integration gate
+- Merge sort-label propagation branch into the phase-2 integration branch
+- Merge K7/K8 clique-template branch into the phase-2 integration branch
+- add K7/K8 clique templates
+- cert flat-stats no helper rewrite
+- scrub stale doc fragment in promotes_multirec_triangle test
+- clean up dead helpers + unused imports in K=5 and K=6 clique WCOJ test files
+- cargo fmt for workspace gate
+- promoter + runtime-dispatch certs
+- 15 acceptance tests across the acceptance matrix
+- rename acceptance test + clarify evidence count math
+- *(logic+integration)* variable-ordering cost model acceptance gate across the full matrix
+- restore selectivity-driven join reordering acceptance gates — 4-cycle compile-time + runtime helper and synthesis certs
+- *(logic)* selectivity_pass compile-time certs
+- cargo fmt 4-cycle WCOJ test files
+- *(logic)* strengthen optimizer arm tests with 4-input fixture
+- *(workspace)* WCOJ doc cleanup post-MultiWayJoin
+- *(v0.6.2)* prepare roadmap changelog and version
+- *(logic)* hypergraph certification workloads (v0.6.2 PR 7)
+- *(logic)* correct explain_plans sort ordering claims
+- *(v0.6.1)* version bump + roadmap cleanup + changelog
+- *(readme)* bump version badge + release-status line to v0.6.0
+- restore audit README framing with current release setup
+- Tighten workspace warning hygiene
+- Merge branch 'audit/v0.5.0-prerelease'
+- integrate prerelease audit docs
+- harden public release readiness
+
+## [0.9.2](https://github.com/BrainyBlaze/xlog/compare/xlog-stats-v0.5.0...xlog-stats-v0.9.2) - 2026-06-05
+
+### Added
+
+- add cost-aware k-clique planner
+
+### Fixed
+
+- *(release)* drop README version sync + dynamic badges + agent release rules ([#124](https://github.com/BrainyBlaze/xlog/pull/124))
+- route epistemic examples through xlog run
+- *(release)* harden validation and gpu fallback paths
+- *(pyxlog)* install local wheels for explicit python
+- *(cuda)* embed portable PTX fallback
+- *(pyxlog)* ship kernels in wheels and document cubin path
+- *(ci)* repair main release automation ([#27](https://github.com/BrainyBlaze/xlog/pull/27))
+- *(ci)* keep README release metadata in sync ([#26](https://github.com/BrainyBlaze/xlog/pull/26))
+
+### Other
+
+- Set v0.9.2 release metadata
+- document v0.9.0 epistemic language surface
+- *(release)* align v0.9.0 package metadata
+- integrate v0.8.9 diagnostics surfaces
+- integrate v0.8.8 external world-model diagnostics into v0.8.9
+- integrate first external diagnostics into v0.8.9
+- Exercise external generated-rule diagnostics
+- Resolve remaining XLOG evidence issues
+- Add v0.8.7 external world-model diagnostics
+- *(release)* prepare v0.8.6 tag metadata
+- *(release)* correct v0.8.5 public status
+- *(release)* prepare v0.8.0
+- mark v0.7.0 release complete
+- *(v0.6.2)* prepare roadmap changelog and version
+- *(v0.6.1)* version bump + roadmap cleanup + changelog
+- *(readme)* bump version badge + release-status line to v0.6.0
+- restore audit README framing with current release setup
+- Merge branch 'audit/v0.5.0-prerelease'
+- integrate prerelease audit docs
+- harden public release readiness
+
+## [0.9.2](https://github.com/BrainyBlaze/xlog/compare/xlog-cuda-v0.5.0...xlog-cuda-v0.9.2) - 2026-06-05
+
+### Added
+
+- *(cuda)* XLOG_PTX_MAX_VERSION â downgrade embedded portable PTX ISA
+- *(mc)* sparse WCOJ world-batched GPU-resident MC engine
+- *(mc)* no-host instrumentation foundation for WCOJ engine (alloc + fixpoint counters)
+- *(mc)* GPU-resident Datalog/MC engine (megakernel) + K1-K5 pilots
+- checkpoint epistemic solver semantics
+- add chain exact shared-memory scorer
+- extend exact induction typed dispatch
+- close CUDA Graph-mode set maintenance
+- certify CUDA Graph external consumer graph path
+- cache bounded CSM CUDA graphs
+- add bounded CSM CUDA graph path
+- add CUDA graph execution wrapper
+- remove adaptive skew classifier surface
+- route clique kernels through HG block-slice
+- route u64 4-cycle through HG block-slice
+- route u64 triangle through HG block-slice
+- retire old u32 triangle materialize surface
+- route u32 4-cycle through HG block-slice
+- retire old u32 triangle count surface
+- retire layout/count kernel fusion fused count kernel
+- reuse HG block workspace
+- make HG cached count single-pass
+- cache HG materialization and add superhub gate bench
+- route u32 triangle dispatch through HG pipeline
+- add triangle HG materialize pipeline
+- add triangle HG work-plan count surface
+- add persistent WCOJ metadata builder
+- production kernel fusion (layout+count) with threshold dispatch + auto-disable + cert grid
+- add sort_merge_join_v2_inner_u32_1key + is_sorted_ascending_u32 provider fns
+- add sort-merge inner-join kernel + sortedness-detection kernel
+- add nested_loop_join_v2_inner_u32_1key in relational.rs (gather-based)
+- add nested-loop emit-pairs kernel (multi-col-compatible)
+- *(cuda)* K=5 and K=6 clique WCOJ clique provider entries
+- *(cuda)* K=5 and K=6 clique WCOJ templated clique kernel for k=5 + k=6
+- *(cuda)* generic sorted-relation accessors generic wcoj_layout_sort_*_recorded entry points
+- *(cuda)* wcoj_project_2col_swap_recorded + wcoj_project_output_columns_recorded
+- *(cuda+runtime)* 4-cycle skew classifier + adaptive opt-in
+- *(cuda)* u64 4-cycle WCOJ kernels + provider + tests
+- *(cuda)* u32 4-cycle WCOJ kernels + provider + tests
+- *(cuda)* WCOJ layout fast-path for sorted+unique inputs (v0.6.2)
+- *(cuda)* WCOJ adaptive-dispatch skew classifier (v0.6.2 A2-lite commit A)
+- *(cuda)* WCOJ u64 provider kernels + entries (v0.6.2)
+- *(cuda)* sort_recorded + dedup_full_row_recorded U64 (v0.6.2)
+- *(cuda)* WCOJ Symbol key support (v0.6.2)
+- *(cuda)* WCOJ sorted-layout construction u32 (v0.6.2)
+- *(cuda)* WCOJ triangle device-side scan + scalar D2H total
+- *(cuda)* GPU 3-way WCOJ triangle kernel u32 v1 (v0.6.2)
+- *(cuda)* wire recorded CSM hash-join dispatch ([#91](https://github.com/BrainyBlaze/xlog/pull/91))
+- *(cuda)* add recorded indexed LeftOuter count-scan-materialize path ([#87](https://github.com/BrainyBlaze/xlog/pull/87))
+- *(cuda)* add recorded LeftOuter count-scan-materialize path ([#84](https://github.com/BrainyBlaze/xlog/pull/84))
+- *(cuda)* formal cert harness for runtime-backed recorded path
+- *(cuda)* GPU-resident binary-join indexed Inner CSM
+- *(cuda)* GPU-resident binary-join Inner retake — count→scan→materialize
+- *(cuda)* env-gated runtime dispatch for sort/dedup/GroupBy/hash-join + cert mode
+- *(cuda)* provider-level recorded indexed hash join + LeftOuter step-D recorder fix
+- *(cuda)* provider-level recorded LeftOuter hash join
+- *(cuda)* provider-level recorded Semi / Anti hash join
+- *(cuda)* provider-level recorded inner hash join
+- *(cuda)* provider-level recorded GroupBy multi-agg (U32 keys, count/sum/min/max)
+- *(cuda)* provider-level recorded sort + dedup_full_row (u32 / Symbol)
+- *(cuda)* preserve runtime identity for xlog-owned DLPack / Arrow columns
+- *(cuda)* migrate fused compare+scan+compact filter to recorded discipline
+- *(cuda)* env-gated recorded filter dispatch (XLOG_USE_RECORDED_FILTERS)
+- *(cuda)* v0.6 stream-safe runtime + LaunchRecorder + filter predicate matrix
+- *(cuda)* v0.6 device-runtime allocator (opt-in) + A3 stability ([#54](https://github.com/BrainyBlaze/xlog/pull/54))
+- *(cuda)* binary-join output counts as metadata reads (v0.5.5 PR 3) ([#52](https://github.com/BrainyBlaze/xlog/pull/52))
+- *(cuda)* GPU full-row dedup and set-difference (v0.5.5 PR 2) ([#50](https://github.com/BrainyBlaze/xlog/pull/50))
+- *(runtime)* add strict deterministic D2H guard (v0.5.5) ([#49](https://github.com/BrainyBlaze/xlog/pull/49))
+
+### Fixed
+
+- bootstrap cuda-ci runner — bump test iterations + fix maturin compatibility ([#127](https://github.com/BrainyBlaze/xlog/pull/127))
+- *(release)* drop README version sync + dynamic badges + agent release rules ([#124](https://github.com/BrainyBlaze/xlog/pull/124))
+- route epistemic examples through xlog run
+- close persistent index background build scope
+- close GPU-native count-lift exact path
+- *(release)* harden validation and gpu fallback paths
+- integrate K7 K8 planned clique metadata
+- close mint4 path-isolated gate
+- extend 4cycle e2-prefix mitigation to u64
+- mitigate M_INT.4 4cycle HG regression
+- route nested-loop dispatch through shared record_join_result feedback
+- tighten Tier-1 wrapper contract + revert recursive helper extension
+- real interner-allocated Symbol IDs + drop test-file warnings + tighten D4 wording
+- cargo fmt, evidence count, extract prepare_leader_inputs + real helper extraction
+- classifier col0 + missing scope deliverables
+- *(cuda)* drain WCOJ layout fast-path failure paths
+- *(runtime)* harden WCOJ phase timing diagnostics
+- *(cuda)* drain launch stream on skew classifier failure paths (v0.6.2)
+- *(cuda)* record d_overflow on three CSM materialize recorders ([#89](https://github.com/BrainyBlaze/xlog/pull/89))
+- *(cuda)* access-aware stream dependency manager for cross-stream lifetime safety ([#72](https://github.com/BrainyBlaze/xlog/pull/72))
+- *(cuda)* clamp recorded compact mask domain
+- *(logic)* restore deterministic recursive set evaluation
+- *(pyxlog)* install local wheels for explicit python
+- *(cuda)* embed portable PTX fallback
+- *(pyxlog)* ship kernels in wheels and document cubin path
+- *(ci)* repair main release automation ([#27](https://github.com/BrainyBlaze/xlog/pull/27))
+- *(ci)* keep README release metadata in sync ([#26](https://github.com/BrainyBlaze/xlog/pull/26))
+
+### Other
+
+- Set v0.9.2 release metadata
+- integrate main MC GPU-resident engine into v0.9.2 epistemic completion
+- document v0.9.0 epistemic language surface
+- *(release)* align v0.9.0 package metadata
+- integrate v0.8.9 diagnostics surfaces
+- reuse v0.8.6 bundle for v0.9.0
+- *(release)* prepare v0.8.6 tag metadata
+- *(release)* correct v0.8.5 public status
+- *(release)* prepare v0.8.0
+- mark v0.7.0 release complete
+- close phase2 purge gate
+- close phase2 integration gate
+- Merge CUDA Graph benchmark-spike branch into the phase-2 integration branch
+- Merge sort-label propagation branch into the phase-2 integration branch
+- Merge K7/K8 clique-template branch into the phase-2 integration branch
+- add K7/K8 clique templates
+- Merge stream-mux AOT branch into WCOJ bundle integration
+- graceful close and paper harness
+- certify HG metadata storage budget
+- remove dead layout/count kernel fusion route counters
+- patch stale rustdoc + kernel comments after iter-6 unwiring
+- fmt + rustdoc cleanup
+- align plan + provider rustdoc with landed byte-check + counter type
+- workspace gate green pre-bench
+- clean up dead helpers + unused imports in K=5 and K=6 clique WCOJ test files
+- cargo fmt for workspace gate
+- *(cuda)* K=5 and K=6 clique WCOJ provider certs + source-audit
+- *(cuda)* generic sorted-relation accessors acceptance grid — 82 tests across width-class and arity
+- *(cuda)* correct wcoj_4cycle_skew_score_u32 doc to col0
+- *(cuda)* layout reuse smoke for 4-cycle
+- *(v0.6.2)* prepare roadmap changelog and version
+- *(runtime)* WCOJ phase-timing scaffolding + report (v0.6.2)
+- *(cuda)* WCOJ U64 strict deterministic-D2H gate (v0.6.2)
+- *(cuda)* update recorded dedup U64 scope comment
+- *(wcoj)* update Symbol dispatch scope comments
+- *(cuda)* planner-to-provider WCOJ certification (v0.6.2)
+- *(v0.6.1)* version bump + roadmap cleanup + changelog
+- *(readme)* bump version badge + release-status line to v0.6.0
+- restore audit README framing with current release setup
+- Fix validation regressions in release and examples
+- Merge branch 'audit/v0.5.0-prerelease'
+- integrate prerelease audit docs
+- harden public release readiness
+
+## [0.9.2](https://github.com/BrainyBlaze/xlog/compare/xlog-ir-v0.5.0...xlog-ir-v0.9.2) - 2026-06-05
+
+### Added
+
+- close augmented-projection multi-head coupling scope limit
+- epistemic integrity constraints
+- checkpoint epistemic solver semantics
+- add k-clique cost gate routes
+- add k-clique RIR variable order
+- *(logic)* WcojVariableOrderingModel trait + LeaderCardinalityModel
+- *(ir)* VariableOrder + LookupPerm types + MultiWayJoin.var_order field
+- *(ir)* add RirNode::MultiWayJoin variant
+
+### Fixed
+
+- *(release)* drop README version sync + dynamic badges + agent release rules ([#124](https://github.com/BrainyBlaze/xlog/pull/124))
+- route epistemic examples through xlog run
+- *(release)* harden validation and gpu fallback paths
+- *(pyxlog)* install local wheels for explicit python
+- *(cuda)* embed portable PTX fallback
+- *(pyxlog)* ship kernels in wheels and document cubin path
+- *(ci)* repair main release automation ([#27](https://github.com/BrainyBlaze/xlog/pull/27))
+- *(ci)* keep README release metadata in sync ([#26](https://github.com/BrainyBlaze/xlog/pull/26))
+- unblock release publish verification
+
+### Other
+
+- Set v0.9.2 release metadata
+- document v0.9.0 epistemic language surface
+- *(release)* align v0.9.0 package metadata
+- integrate v0.8.9 diagnostics surfaces
+- reuse v0.8.6 bundle for v0.9.0
+- *(release)* prepare v0.8.6 tag metadata
+- *(release)* correct v0.8.5 public status
+- *(release)* prepare v0.8.0
+- mark v0.7.0 release complete
+- G_W63 production chain join route
+- phase-2 purge rerun
+- *(workspace)* MultiWayJoin shape-agnosticism guards
+- *(ir)* MultiWayJoin walker contract
+- *(v0.6.2)* prepare roadmap changelog and version
+- *(v0.6.1)* version bump + roadmap cleanup + changelog
+- *(readme)* bump version badge + release-status line to v0.6.0
+- restore audit README framing with current release setup
+- Tighten workspace warning hygiene
+- Merge branch 'audit/v0.5.0-prerelease'
+- integrate prerelease audit docs
+- harden public release readiness
+
+## [0.9.2](https://github.com/BrainyBlaze/xlog/compare/xlog-core-v0.5.0...xlog-core-v0.9.2) - 2026-06-05
+
+### Added
+
+- add persistent hash index telemetry
+- add adaptive runtime reoptimization
+- add runtime common subexpression cache
+- extend exact induction typed dispatch
+- expose xlog sort-label metadata
+- remove adaptive skew classifier surface
+- retire old u32 triangle count surface
+- production kernel fusion (layout+count) with threshold dispatch + auto-disable + cert grid
+- default-flip wcoj_cost_model resolver to Cardinality
+- *(runtime)* dispatch sites use build_wcoj_cost_model factory
+- *(core)* CostModelKind + RuntimeConfig::wcoj_cost_model
+- *(runtime)* match_multiway_4cycle + try_dispatch_wcoj_4cycle force gate
+- *(runtime)* default-on adaptive WCOJ + hard kill switch (v0.6.2)
+- *(runtime)* adaptive WCOJ dispatch + classifier branch (v0.6.2 A2-lite commit B)
+- *(runtime)* env-gated WCOJ triangle executor wiring (v0.6.2)
+- *(runtime)* add strict deterministic D2H guard (v0.5.5) ([#49](https://github.com/BrainyBlaze/xlog/pull/49))
+
+### Fixed
+
+- *(release)* drop README version sync + dynamic badges + agent release rules ([#124](https://github.com/BrainyBlaze/xlog/pull/124))
+- route epistemic examples through xlog run
+- *(release)* harden validation and gpu fallback paths
+- restore cost-model default-flip cert
+- *(pyxlog)* install local wheels for explicit python
+- *(cuda)* embed portable PTX fallback
+- *(pyxlog)* ship kernels in wheels and document cubin path
+- *(ci)* repair main release automation ([#27](https://github.com/BrainyBlaze/xlog/pull/27))
+- *(ci)* keep README release metadata in sync ([#26](https://github.com/BrainyBlaze/xlog/pull/26))
+- unblock release publish verification
+
+### Other
+
+- Set v0.9.2 release metadata
+- document v0.9.0 epistemic language surface
+- *(release)* align v0.9.0 package metadata
+- integrate v0.8.9 diagnostics surfaces
+- integrate v0.8.8 external world-model diagnostics into v0.8.9
+- integrate first external diagnostics into v0.8.9
+- Exercise external generated-rule diagnostics
+- Resolve remaining XLOG evidence issues
+- Add v0.8.7 external world-model diagnostics
+- *(release)* prepare v0.8.6 tag metadata
+- *(release)* correct v0.8.5 public status
+- *(release)* prepare v0.8.0
+- mark v0.7.0 release complete
+- close purge gate
+- *(v0.6.2)* prepare roadmap changelog and version
+- *(v0.6.1)* version bump + roadmap cleanup + changelog
+- *(readme)* bump version badge + release-status line to v0.6.0
+- restore audit README framing with current release setup
+- Merge branch 'audit/v0.5.0-prerelease'
+- integrate prerelease audit docs
+- harden public release readiness
 
 ## [0.5.2](https://github.com/BrainyBlaze/xlog/compare/xlog-cli-v0.5.0...xlog-cli-v0.5.2) — 2026-04-20
 
@@ -1095,10 +3565,10 @@ Run before tagging `v0.6.2`:
 
 - **Bounded exact-induction engine** (`xlog-induce` + `ilp_exact` CUDA kernel + `pyxlog`
   bridge): New `xlog-induce` crate scores all `(left, right)` candidate pairs across the
-  four canonical DTS topologies (`chain`, `star`, `fanout`, `fanin`) in a single batched
+  four canonical external consumer topologies (`chain`, `star`, `fanout`, `fanin`) in a single batched
   GPU pass and returns top-K per topology with full candidate metadata
   (`positives_covered`, `negatives_covered`, `next_*_covered`, `tie_class_size`).
-  Designed for DTS's M8 Phase 1 integration; behaviorally equivalent on bounded
+  Designed for external consumer's bounded exact-induction integration; behaviorally equivalent on bounded
   requests to `pyxlog.ilp.induce_exact(backend="python", strict_per_topology=True)`.
   - **Engine** (`crates/xlog-induce/`): `InduceExactRequest` (indices + buffer handles),
     `ExactInductionResult` / `ScoredCandidate`, pre-kernel classification
@@ -1180,7 +3650,7 @@ Run before tagging `v0.6.2`:
   new code calls `set_cached_row_count_if_unset(source.cached_row_count())` on the
   clone when the source has a populated cache, preserving the host-visible count
   across clones. Pinned by the new `test_clone_buffer_preserves_cached_row_count`
-  test, and a load-bearing precondition for the M8 exact-induction engine's
+  test, and a load-bearing precondition for the bounded exact-induction engine's
   hot-loop D2H budget.
 - **`pyxlog.ilp.induce_exact()` gains `strict_per_topology` opt-in flag**
   (`pyxlog`, Python): The `backend="python"` prototype has a latent cross-topology
@@ -1190,7 +3660,7 @@ Run before tagging `v0.6.2`:
   each topology's inner loop, yielding per-topology-isolated scoring that matches
   the `backend="native"` kernel's by-construction semantics. Default remains
   `False` for full backward compatibility with callers that are calibrated
-  against the prototype's historical numbers (notably DTS Phase 0 liveness
+  against the prototype's historical numbers (notably external consumer Phase 0 liveness
   baselines). The `"native"` backend is unaffected — it is strict by design.
 - **ILP reliability gate 4.6x faster** (`pyxlog`): Compile once per stage and reuse across
   all 5 seeds via `reset_runtime()`, eliminating 16 redundant compilations and 20 holdout
@@ -1327,14 +3797,14 @@ Run before tagging `v0.6.2`:
 
 ### Added
 
-- **P2a: Term Embeddings (training-only)** — `register_embedding()` for
+- **Term embeddings (training-only)** — `register_embedding()` for
   `nn.Embedding` (trainable) and `torch.Tensor` (frozen) payloads.
   `forward_embedding(name, ids)` returns batched tensors with autograd
   support on the same device as the embedding (CUDA-safe). Cross-registration
   validation: embedding declarations reject `register_network()` and vice
   versa. Compile-time mixed-form rejection for network names. Raw tensors
   are detached at registration to enforce frozen contract even when input
-  has `requires_grad=True`. User-managed optimizer (P2b APIs do not cover
+  has `requires_grad=True`. User-managed optimizer (training-control APIs do not cover
   embeddings). Inference path deferred to v0.5.1+.
 - **GPU-resident ILP credit/loss path** (`compute_ilp_loss_grad_gpu`): Single Rust/CUDA call replaces
   Python-side `_compute_loss_from_candidates()` loop. Builds COO→CSR on-device, runs forward/backward
@@ -1376,7 +3846,7 @@ Run before tagging `v0.6.2`:
   stop training after `patience` consecutive epochs without improvement.
 - **`TrainingHistory.stopped_early`**: Boolean flag indicating whether early stopping was triggered.
 - **`GpuCdclWorkspace`**: Pre-allocated solver arena for reusing GPU buffers across multiple CDCL
-  solves (P3 incremental verifier). Created via `GpuCdclSolver::new_workspace()`.
+  solves (incremental Monte Carlo verifier). Created via `GpuCdclSolver::new_workspace()`.
 - **`solve_expect_unsat_*_ws` method variants**: Workspace-backed CDCL solving that reuses
   pre-allocated device buffers instead of per-call allocation.
 - **`GpuCompileConfig.incremental_verify`**: Opt-in for workspace reuse in the equivalence
@@ -1600,8 +4070,8 @@ those first (see v0.3.2 release notes below), then apply the v0.5.0 changes abov
 
 ### Deferred to v0.4.0-rc
 
-- ~~Term embeddings for neural-symbolic integration~~ (done in v0.5.0: P2a)
-- ~~Extended neural-symbolic training controls~~ (done in v0.5.0: P2b)
+- ~~Term embeddings for neural-symbolic integration~~ (done in v0.5.0: term embeddings)
+- ~~Extended neural-symbolic training controls~~ (done in v0.5.0: extended neural-symbolic training controls)
 
 ### Deferred to v0.5.0
 
@@ -1683,13 +4153,13 @@ Milestone snapshot of the neural-symbolic integration layer (training APIs + GPU
 - Non-monotone (cyclic) negation via Well-Founded Semantics (WFS)
 - Exact gradients flow through negated literals for neural-symbolic training
 
-**GPU Certification Suite (G01-G06):**
-- G01: Circuit Forward Kernel tests (8 tests) — `xgcf_forward_level` PTX validation
-- G02: Circuit Backward Kernel tests (12 tests) — gradient computation verification
-- G03: Weight Injection tests (6 tests) — GPU weight buffer management
-- G04: Transfer Efficiency tests (8 tests) — 0% CPU bottleneck verification
-- G05: Circuit Cache tests (6 tests) — GpuXgcf reuse, D4 elimination
-- G06: PTX Robustness tests (10 tests) — large circuits, edge cases, numerical stability
+**GPU Certification Suite:**
+- Circuit forward kernel tests (8 tests) — `xgcf_forward_level` PTX validation
+- Circuit backward kernel tests (12 tests) — gradient computation verification
+- Weight injection tests (6 tests) — GPU weight buffer management
+- Transfer efficiency tests (8 tests) — 0% CPU bottleneck verification
+- Circuit cache tests (6 tests) — GpuXgcf reuse, D4 elimination
+- PTX robustness tests (10 tests) — large circuits, edge cases, numerical stability
 - Total: 50 new GPU-focused tests validating neural-symbolic kernel correctness
 
 **PIR Extension:**
@@ -1733,13 +4203,13 @@ Milestone snapshot of the neural-symbolic integration layer (training APIs + GPU
 | PIR | `pir.rs` | `NegLit` variant |
 | WFS | `wfs.rs` | Well-Founded Semantics (1,461 lines) |
 | Exact | `exact.rs` | `random_var_indices()`, `evaluate_gpu_with_grads_weights()` |
-| G01-G06 | `xlog-cuda-tests/src/categories/g0*.rs` | GPU certification tests (50 tests) |
+| GPU certification tests | GPU certification category test files | GPU certification tests (50 tests) |
 
 ### Validation
 
-- **CUDA Certification Suite:** 200/200 tests passed (C01-C25 + G01-G06)
+- **CUDA Certification Suite:** 200/200 tests passed (core CUDA certification tests + GPU certification tests)
 - **Python Tests:** 109/109 tests passed
-- **Spec Alignment:** All 50 G01-G06 tests match specification
+- **Spec Alignment:** All 50 GPU certification tests match specification
 - **Code Quality:** No stubs, placeholders, or TODOs
 
 ### Example: MNIST Addition Training
@@ -1876,7 +4346,7 @@ Phase 4 probabilistic logic programming (`xlog-prob`) merged into `main`; Python
 
 ### Added
 - `xlog-prob`: exact inference via Decision-DNNF (vendored D4) + GPU weighted model counting and gradients.
-- `xlog-prob`: P3 Monte Carlo engine (`prob_engine=mc`) with GPU sampling, deterministic non-monotone SCC semantics, and uncertainty metadata.
+- `xlog-prob`: Monte Carlo engine (`prob_engine=mc`) with GPU sampling, deterministic non-monotone SCC semantics, and uncertainty metadata.
 - New CUDA kernels: `kernels/circuit.ptx` (XGCF forward/backward) and `kernels/mc_sample.ptx` (MC sampling).
 - New examples: `examples/prob/` (probabilistic `.xlog`) and `examples/python/` (DLPack bindings).
 - `xlog-gpu` + `pyxlog`: `pyxlog` Python module (PyO3) with DLPack-first I/O for deterministic and probabilistic evaluation.

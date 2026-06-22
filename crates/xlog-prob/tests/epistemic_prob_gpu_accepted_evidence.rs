@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
-use std::sync::Arc;
+use std::ops::Deref;
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 
 #[cfg(feature = "host-io")]
 use xlog_core::symbol;
@@ -31,7 +32,28 @@ use xlog_prob::provenance::Value;
 use xlog_runtime::EpistemicGpuBatchExecutionResult;
 use xlog_runtime::{EpistemicGpuWorkspaceCapacities, Executor};
 
-fn try_provider() -> Option<Arc<CudaKernelProvider>> {
+struct LockedCudaProvider {
+    _guard: MutexGuard<'static, ()>,
+    provider: Arc<CudaKernelProvider>,
+}
+
+impl Deref for LockedCudaProvider {
+    type Target = Arc<CudaKernelProvider>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.provider
+    }
+}
+
+fn gpu_exact_test_lock() -> MutexGuard<'static, ()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+fn try_provider() -> Option<LockedCudaProvider> {
+    let guard = gpu_exact_test_lock();
     let device = match CudaDevice::new(0) {
         Ok(d) => Arc::new(d),
         Err(e) => {
@@ -42,7 +64,10 @@ fn try_provider() -> Option<Arc<CudaKernelProvider>> {
     let budget = MemoryBudget::with_limit(1024 * 1024 * 1024);
     let memory = Arc::new(GpuMemoryManager::new(device.clone(), budget));
     match CudaKernelProvider::new(device, memory) {
-        Ok(p) => Some(Arc::new(p)),
+        Ok(p) => Some(LockedCudaProvider {
+            _guard: guard,
+            provider: Arc::new(p),
+        }),
         Err(e) => {
             eprintln!("Skipping test: failed to create CUDA kernel provider: {e}");
             None

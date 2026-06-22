@@ -185,21 +185,22 @@ fn validate_neural_ptx_contains_expected_kernels() {
 }
 
 #[test]
-fn validate_d4_ptx_contains_expected_kernels() {
+fn validate_decision_dnnf_ptx_contains_expected_kernels() {
     let ptx_path = kernel_locator()
         .resolve_module_path("d4", 999)
         .map(|(path, _)| path)
-        .expect("d4 portable PTX should exist in generated or staged artifacts");
+        .expect("Decision-DNNF portable PTX should exist in generated or staged artifacts");
     let ptx = fs::read_to_string(&ptx_path)
-        .unwrap_or_else(|e| panic!("d4.ptx should exist after build: {}", e));
+        .unwrap_or_else(|e| panic!("Decision-DNNF PTX should exist after build: {}", e));
 
-    // D4 module entrypoints.
-    // Phase 1 will add compilation kernels, but we start with invariant validation + levelization.
+    // Decision-DNNF module entrypoints.
+    // Compilation kernels can be added incrementally; this test starts with
+    // invariant validation and levelization.
     assert!(ptx.contains("d4_validate_cnf"));
     assert!(ptx.contains("d4_levelize_counts"));
     assert!(ptx.contains("d4_levelize_emit"));
 
-    // BFS frontier expansion (Task 4).
+    // BFS frontier expansion kernels.
     assert!(ptx.contains("d4_frontier_prepare"));
     assert!(ptx.contains("d4_frontier_expand"));
     assert!(ptx.contains("d4_frontier_prepare_dense"));

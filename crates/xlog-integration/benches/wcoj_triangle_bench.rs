@@ -4,7 +4,7 @@
     clippy::needless_range_loop
 )]
 
-//! v0.6.2 WCOJ triangle benchmark baseline.
+//! WCOJ triangle benchmark baseline.
 //!
 //! Bench-only — no provider, kernel, or runtime changes. Compares
 //! the env-gated GPU 3-way WCOJ dispatch against the existing
@@ -24,9 +24,9 @@
 //!                   join chain only. Baseline for speedup.
 //!   * **Force**:    `wcoj_triangle_dispatch=Some(true)`. WCOJ
 //!                   pipeline always; adaptive model bypassed. The
-//!                   pre-A2-lite "gate-on" path.
+//!                   forced WCOJ dispatch path.
 //!   * **Adaptive**: `wcoj_triangle_dispatch_adaptive=Some(true)`,
-//!                   force left None. The default v0.7 cardinality
+//!                   force left None. The default cardinality
 //!                   cost model runs first. Bench cells seed stats
 //!                   to lock the intended route: uniform/empty
 //!                   route to binary; superhub routes to WCOJ.
@@ -169,7 +169,7 @@ fn superhub_pairs_first(seed: u64, rows: u32, key_range: u32, hub_first: u32) ->
 /// Empty-result triangle: three uniform relations over disjoint
 /// key ranges so no triangles exist. Locks the count→scan→total
 /// fast path on no-output (kernel still runs count + scan + a
-/// 4-byte D2H of the inclusive total, then early-returns).
+/// 4-byte device-to-host read of the inclusive total, then early-returns).
 fn disjoint_pairs(seed: u64, rows: u32, base: u32, range: u32) -> Vec<(u32, u32)> {
     let mut state = seed;
     (0..rows)
@@ -409,9 +409,9 @@ fn make_provider(memory_mb: u64) -> Option<ProviderFixture> {
 ///                 Binary-join chain only. Baseline.
 ///   * `Force`    — `with_wcoj_triangle_dispatch(Some(true))`.
 ///                 WCOJ pipeline always; adaptive model bypassed.
-///                 The pre-A2-lite "gate-on" semantic.
+///                 The forced WCOJ dispatch semantic.
 ///   * `Adaptive` — `with_wcoj_triangle_dispatch_adaptive(Some(true))`,
-///                 force left `None`. The v0.7 cardinality model
+///                 force left `None`. The default cardinality model
 ///                 runs and dispatches WCOJ when seeded stats
 ///                 estimate a large binary intermediate.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -552,7 +552,7 @@ fn download_triples_u64(buf: &CudaBuffer) -> BTreeSet<(u64, u64, u64)> {
 /// cell: row sets from `Mode::Off` (binary-join) and `Mode::Force`
 /// (WCOJ pipeline) must agree, and the dispatch counter must
 /// reflect mode semantics. `expects_adaptive_dispatch` says
-/// whether the cell's seeded v0.7 cardinality stats should route
+/// whether the cell's seeded cardinality stats should route
 /// `Mode::Adaptive` through WCOJ.
 fn correctness_check(
     fix: &ProviderFixture,
@@ -812,7 +812,7 @@ fn bench_uniform(c: &mut Criterion) {
         return;
     };
     // Uniform Erdős-Rényi: adaptive cells seed small stats so the
-    // v0.7 cardinality model routes to binary join.
+    // Default cardinality model routes to binary join.
     run_family(c, &fix, "uniform", make_uniform, false);
 }
 
@@ -821,7 +821,7 @@ fn bench_superhub(c: &mut Criterion) {
         eprintln!("Skipping bench_superhub: No CUDA device");
         return;
     };
-    // Super-hub: adaptive cells seed large stats so the v0.7
+    // Super-hub: adaptive cells seed large stats so the default
     // cardinality model dispatches WCOJ.
     run_family(c, &fix, "superhub", make_superhub, true);
 }
@@ -832,7 +832,7 @@ fn bench_empty(c: &mut Criterion) {
         return;
     };
     // Disjoint key ranges: adaptive cells seed small stats so the
-    // v0.7 cardinality model routes to binary join.
+    // Default cardinality model routes to binary join.
     run_family(c, &fix, "empty", make_empty, false);
 }
 

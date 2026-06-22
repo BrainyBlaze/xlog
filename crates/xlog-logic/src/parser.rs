@@ -839,7 +839,7 @@ fn build_neural_pred_decl(pair: Pair<'_, Rule>) -> Result<NeuralPredDecl> {
 
 /// Build a learnable rule from a parsed pair.
 /// Grammar: learnable_rule = { "learnable" ~ "(" ~ ident ~ ")" ~ "::" ~ head ~ ":-" ~ body ~ "." }
-/// RD-33: Uses build_head (not build_atom) because grammar produces `head` pair.
+/// Uses build_head instead of build_atom because the grammar produces a `head` pair.
 fn build_learnable_rule(pair: Pair<'_, Rule>) -> Result<LearnableRule> {
     let mut inner = pair.into_inner();
     let mask_name = inner
@@ -1761,7 +1761,7 @@ mod tests {
 
     #[test]
     fn test_parse_is_expr() {
-        // Test that grammar accepts 'is' expressions (AST building is in Task 3)
+        // Test that grammar accepts 'is' expressions before AST lowering.
         let input = "result(X, Z) :- input(X, Y), Z is Y + 1.";
         let result = XlogParser::parse(Rule::program, input);
         assert!(

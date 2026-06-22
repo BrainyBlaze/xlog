@@ -151,10 +151,10 @@ fn validate_atom_terms(atom: &Atom, context: &str) -> Result<()> {
 
 fn validate_term_lowerable(term: &Term, context: &str) -> Result<()> {
     match term {
-        Term::List(_) => Err(v085_term_not_lowerable(context, "list")),
-        Term::Cons { .. } => Err(v085_term_not_lowerable(context, "cons")),
-        Term::Compound { .. } => Err(v085_term_not_lowerable(context, "compound")),
-        Term::PredRef(_) => Err(v085_term_not_lowerable(context, "predref")),
+        Term::List(_) => Err(term_not_lowerable_error(context, "list")),
+        Term::Cons { .. } => Err(term_not_lowerable_error(context, "cons")),
+        Term::Compound { .. } => Err(term_not_lowerable_error(context, "compound")),
+        Term::PredRef(_) => Err(term_not_lowerable_error(context, "predref")),
         Term::Variable(_)
         | Term::Anonymous
         | Term::Integer(_)
@@ -165,14 +165,14 @@ fn validate_term_lowerable(term: &Term, context: &str) -> Result<()> {
     }
 }
 
-fn v085_term_not_lowerable(context: &str, kind: &str) -> XlogError {
+fn term_not_lowerable_error(context: &str, kind: &str) -> XlogError {
     XlogError::Compilation(format!(
-        "v0.8.5 term form '{}' in {} is parsed but not lowerable before its G085 implementation node",
+        "term form '{}' in {} is parsed but not lowerable by this execution path",
         kind, context
     ))
 }
 
-fn v085_term_kind(term: &Term) -> &'static str {
+fn term_kind_for_lowering_error(term: &Term) -> &'static str {
     match term {
         Term::List(_) => "list",
         Term::Cons { .. } => "cons",
@@ -257,7 +257,7 @@ impl Lowerer {
     }
 
     pub(crate) fn create_helper_relation(&mut self, schema: Schema) -> (String, RelId) {
-        let name = format!("__w37_helper_{}", self.next_rel_id);
+        let name = format!("__kclique_helper_{}", self.next_rel_id);
         let rel_id = self.get_or_create_rel_id(&name);
         self.schemas.insert(name.clone(), schema);
         (name, rel_id)
@@ -568,7 +568,7 @@ impl Lowerer {
             }
         }
 
-        // Lower learnable rules (RD-32)
+        // Lower learnable rules into tensor-masked joins.
         // Pre-allocate RelIds for ALL learnable predicates (heads + bodies)
         // so every lower_learnable_rule snapshot is complete.
         for learnable in &program.learnable_rules {
@@ -594,7 +594,32 @@ impl Lowerer {
             );
         }
 
-        Ok(builder.build())
+        let mut plan = builder.build();
+        // Record relation arities for downstream generic multiway shape
+        // promoters that size Scan leaves from these values.
+        // One pre-pass over the AST covers every predicate the lowerer
+        // assigned a RelId: rule heads, positive/negated body atoms,
+        // and facts.
+        for rule in program.proper_rules() {
+            if let Some(&id) = self.rel_ids.get(&rule.head.predicate) {
+                plan.rel_arities.insert(id, rule.head.terms.len());
+            }
+            for lit in &rule.body {
+                let atom = match lit {
+                    BodyLiteral::Positive(a) | BodyLiteral::Negated(a) => a,
+                    _ => continue,
+                };
+                if let Some(&id) = self.rel_ids.get(&atom.predicate) {
+                    plan.rel_arities.insert(id, atom.terms.len());
+                }
+            }
+        }
+        for fact in program.facts() {
+            if let Some(&id) = self.rel_ids.get(&fact.head.predicate) {
+                plan.rel_arities.insert(id, fact.head.terms.len());
+            }
+        }
+        Ok(plan)
     }
 
     /// Find the SCC ID for a predicate
@@ -617,11 +642,11 @@ impl Lowerer {
     }
 
     /// Lower a learnable rule template into a TensorMaskedJoin node.
-    /// RD-34: Validates body has exactly 2 positive atoms.
-    /// RD-36: Sorts rel_index by RelId for deterministic tensor dimension mapping.
-    /// RD-30: Uses get_or_create_rel_id for head (handles head-only predicates).
+    /// Validates that the body has exactly two positive atoms.
+    /// Sorts rel_index by RelId for deterministic tensor dimension mapping.
+    /// Uses get_or_create_rel_id for heads so head-only predicates are handled.
     fn lower_learnable_rule(&mut self, rule: &LearnableRule) -> Result<RirNode> {
-        // RD-34: Validate body shape
+        // Validate body shape before indexing fixed body positions.
         if rule.body.len() != 2 {
             return Err(XlogError::Compilation(format!(
                 "learnable rule '{}' requires exactly 2 body literals, got {}",
@@ -641,7 +666,7 @@ impl Lowerer {
             }
         }
 
-        // RD-36: Sort by RelId for deterministic mapping
+        // Sort by RelId for deterministic tensor dimension mapping.
         let mut rel_index: Vec<(RelId, String)> = self
             .rel_ids()
             .iter()
@@ -654,7 +679,7 @@ impl Lowerer {
             self.extract_template_join_keys(&rule.body[0], &rule.body[1])?;
 
         let head_rel_name = rule.head.predicate.clone();
-        // RD-30: Allocate lazily — head-only predicates may not have a RelId yet
+        // Allocate lazily because head-only predicates may not have a RelId yet.
         let head_rel_id = self.get_or_create_rel_id(&head_rel_name);
 
         // Compute head projection: map head variables to join result columns.
@@ -1584,9 +1609,9 @@ impl Lowerer {
             Term::Aggregate(_) => Err(XlogError::Compilation(
                 "Aggregates not allowed in comparisons".to_string(),
             )),
-            Term::List(_) | Term::Cons { .. } | Term::Compound { .. } | Term::PredRef(_) => {
-                Err(v085_term_not_lowerable("comparison", v085_term_kind(term)))
-            }
+            Term::List(_) | Term::Cons { .. } | Term::Compound { .. } | Term::PredRef(_) => Err(
+                term_not_lowerable_error("comparison", term_kind_for_lowering_error(term)),
+            ),
         }
     }
 
@@ -1714,9 +1739,9 @@ impl Lowerer {
                     cols.push(ProjectExpr::Computed(expr, typ));
                 }
                 Term::List(_) | Term::Cons { .. } | Term::Compound { .. } | Term::PredRef(_) => {
-                    return Err(v085_term_not_lowerable(
+                    return Err(term_not_lowerable_error(
                         "rule head projection",
-                        v085_term_kind(term),
+                        term_kind_for_lowering_error(term),
                     ));
                 }
             }
@@ -1793,9 +1818,9 @@ impl Lowerer {
                     // Constants are allowed in the head; they are projected after aggregation.
                 }
                 Term::List(_) | Term::Cons { .. } | Term::Compound { .. } | Term::PredRef(_) => {
-                    return Err(v085_term_not_lowerable(
+                    return Err(term_not_lowerable_error(
                         "aggregate rule head",
-                        v085_term_kind(term),
+                        term_kind_for_lowering_error(term),
                     ));
                 }
             }
@@ -1892,9 +1917,9 @@ impl Lowerer {
                     final_proj.push(ProjectExpr::Computed(expr, typ));
                 }
                 Term::List(_) | Term::Cons { .. } | Term::Compound { .. } | Term::PredRef(_) => {
-                    return Err(v085_term_not_lowerable(
+                    return Err(term_not_lowerable_error(
                         "aggregate rule projection",
-                        v085_term_kind(term),
+                        term_kind_for_lowering_error(term),
                     ));
                 }
             }

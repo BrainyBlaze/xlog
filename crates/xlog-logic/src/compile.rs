@@ -17,10 +17,10 @@ use xlog_ir::ExecutionPlan;
 use xlog_stats::{StatsManager, StatsSnapshot};
 
 use crate::compiler_config::CompilerConfig;
-use crate::list_normalize::normalize_v085_lists;
+use crate::list_normalize::normalize_list_builtins;
 use crate::lower::Lowerer;
-use crate::magic_sets::rewrite_v085_magic_sets;
-use crate::meta_normalize::normalize_v085_meta;
+use crate::magic_sets::rewrite_magic_sets;
+use crate::meta_normalize::normalize_meta_builtins;
 use crate::module::ModuleError;
 use crate::optimizer::Optimizer;
 use crate::parser::parse_program;
@@ -111,9 +111,10 @@ impl Compiler {
     /// Compile XLOG source code into an execution plan, optionally seeding the optimizer
     /// with a runtime statistics snapshot.
     ///
-    /// W2.1: this entry point delegates through the new composable API
-    /// with `CompilerConfig::default()`, which preserves slice
-    /// 1/2/4/W2.2 behavior bit-identically.
+    /// This entry point delegates through the composable config-aware API
+    /// with `CompilerConfig::default()`, which preserves existing triangle,
+    /// 4-cycle, recursive, and selectivity-aware dispatch behavior
+    /// bit-identically.
     pub fn compile_with_stats_snapshot(
         &mut self,
         source: &str,
@@ -126,12 +127,12 @@ impl Compiler {
         )
     }
 
-    /// W2.1: composable entry point that accepts a `CompilerConfig`.
+    /// Composable entry point that accepts a `CompilerConfig`.
     ///
     /// Default-config callers should keep using `compile()` /
-    /// `compile_with_stats_snapshot()`. This entry point exists so
-    /// W2.1 can flip the variable-ordering cost model on per-call
-    /// without an env override.
+    /// `compile_with_stats_snapshot()`. This entry point exists so callers can
+    /// enable the variable-ordering cost model per call without an environment
+    /// override.
     pub fn compile_with_config_and_stats_snapshot(
         &mut self,
         source: &str,
@@ -152,9 +153,8 @@ impl Compiler {
 
     /// Compile a parsed XLOG program into an execution plan, optionally seeding the optimizer.
     ///
-    /// W2.1: delegates to
-    /// [`Self::compile_program_with_config_and_stats_snapshot`] with
-    /// `CompilerConfig::default()`.
+    /// Delegates to [`Self::compile_program_with_config_and_stats_snapshot`]
+    /// with `CompilerConfig::default()`.
     pub fn compile_program_with_stats_snapshot(
         &mut self,
         program: &Program,
@@ -167,12 +167,11 @@ impl Compiler {
         )
     }
 
-    /// W2.1: composable program-level entry point.
+    /// Composable program-level entry point.
     ///
-    /// `config` is currently consumed only by the promoter
-    /// (W2.1 step 5) when it wires the variable-ordering cost
-    /// model. With `CompilerConfig::default()`, the promoter
-    /// behaves identically to pre-W2.1.
+    /// `config` is currently consumed only by the promoter when it wires the
+    /// variable-ordering cost model. With `CompilerConfig::default()`, the
+    /// promoter keeps the default variable order.
     pub fn compile_program_with_config_and_stats_snapshot(
         &mut self,
         program: &Program,
@@ -180,10 +179,10 @@ impl Compiler {
         stats_snapshot: Option<&StatsSnapshot>,
     ) -> Result<ExecutionPlan> {
         let program = desugar_queries_and_constraints(program);
-        let program = normalize_v085_meta(&program)?;
-        let program = normalize_v085_lists(&program)?;
-        let program = rewrite_v085_magic_sets(&program)?.program;
-        validate_v085_naf_safety(&program)?;
+        let program = normalize_meta_builtins(&program)?;
+        let program = normalize_list_builtins(&program)?;
+        let program = rewrite_magic_sets(&program)?.program;
+        validate_negation_safety(&program)?;
 
         // Phase 2: Stratify (analyze dependencies, detect cycles)
         let strata = stratify(&program).map_err(map_stratification_to_naf_error)?;
@@ -355,30 +354,28 @@ impl Compiler {
             }
         }
 
-        // v0.6.5 slice 3: selectivity-aware reordering pass. Runs
-        // BETWEEN the optimizer loop and promote_multiway.
+        // Selectivity-aware reordering pass. Runs BETWEEN the optimizer loop
+        // and promote_multiway.
         // Locked compile-pipeline ordering:
         //   lower → helper_split_pass → optimizer → selectivity_pass → promote_multiway
         //
-        // v0.6.5 W2.2: takes `rel_ids` so per-body Scans can be
-        // resolved against `StatsManager`. Behavior on empty
-        // stats / unseeded relations is no-op (safety floor).
+        // Takes `rel_ids` so per-body Scans can be resolved against
+        // `StatsManager`. Behavior on empty stats / unseeded relations is
+        // no-op (safety floor).
         crate::optimizer::selectivity_pass::run(&mut plan, &stats_arc, self.lowerer.rel_ids());
 
-        // v0.6.5 slice 1: promote eligible triangle subtrees to
-        // RirNode::MultiWayJoin. Runs *after* the optimizer so the
-        // optimizer never has to learn the new variant. Fallback
-        // identity preserves v0.6.2 binary-join semantics on
+        // Promote eligible triangle subtrees to RirNode::MultiWayJoin. Runs
+        // *after* the optimizer so the optimizer never has to learn the new
+        // variant. Fallback identity preserves binary-join semantics on
         // dispatch decline.
         //
-        // v0.6.5 slice 4: pass the lowerer's predicate→RelId map
-        // so the promoter can gate recursive-SCC bodies on the
-        // count of in-SCC Scans (≤ 1 = promote, ≥ 2 = skip).
+        // Pass the lowerer's predicate→RelId map so the promoter can gate
+        // recursive-SCC bodies on the count of in-SCC Scans (≤ 1 = promote,
+        // ≥ 2 = skip).
         //
-        // W2.1: also pass `&stats_arc` and the caller-provided
-        // `&CompilerConfig`. With `CompilerConfig::default()`
-        // (`Disabled`), the promoter never sets `var_order` and
-        // slice 1/2/4/W2.2 dispatch is bit-identical.
+        // Also pass `&stats_arc` and the caller-provided `&CompilerConfig`.
+        // With `CompilerConfig::default()` (`Disabled`), the promoter never
+        // sets `var_order` and default dispatch is bit-identical.
         crate::promote::promote_multiway(&mut plan, self.lowerer.rel_ids(), &stats_arc, config);
 
         let schemas_by_rel_id: HashMap<RelId, Schema> = self
@@ -472,7 +469,7 @@ fn desugar_queries_and_constraints(program: &Program) -> Program {
     out
 }
 
-fn validate_v085_naf_safety(program: &Program) -> Result<()> {
+fn validate_negation_safety(program: &Program) -> Result<()> {
     for rule in &program.rules {
         validate_body_naf_safety(&rule.body, &format!("rule {}", rule.head.predicate))?;
     }
@@ -528,7 +525,7 @@ fn map_stratification_to_naf_error(err: XlogError) -> XlogError {
 }
 
 fn naf_error(message: impl Into<String>) -> XlogError {
-    XlogError::Compilation(format!("v0.8.5 naf error: {}", message.into()))
+    XlogError::Compilation(format!("negation safety error: {}", message.into()))
 }
 
 /// Convenience function to compile source in one call.
@@ -921,9 +918,9 @@ mod tests {
                 fallback,
                 ..
             } => {
-                // W63 wraps eligible two-atom joins after stats-aware
-                // ordering. The chain node and its captured fallback must
-                // agree on the build-side choice.
+                // ChainJoin promotion wraps eligible two-atom joins after
+                // stats-aware ordering. The chain node and its captured
+                // fallback must agree on the build-side choice.
                 assert!(matches!(**left, RirNode::Scan { rel } if rel == foo_id));
                 assert!(matches!(**right, RirNode::Scan { rel } if rel == edge_id));
 
@@ -995,7 +992,7 @@ mod tests {
             .rel_ids()
             .iter()
             .find_map(|(name, rel)| {
-                name.starts_with("__w37_helper_")
+                name.starts_with("__kclique_helper_")
                     .then_some((name.clone(), *rel))
             })
             .expect("helper relation allocated");
@@ -1016,7 +1013,7 @@ mod tests {
             .expect("helper rule");
         assert!(
             matches!(helper_rule.body, RirNode::ChainJoin { .. }),
-            "helper split output should be eligible for W63 ChainJoin promotion"
+            "helper split output should be eligible for ChainJoin promotion"
         );
 
         let out_rule = plan
@@ -1039,7 +1036,7 @@ mod tests {
         assert!(!compiler
             .rel_ids()
             .keys()
-            .any(|name| name.starts_with("__w37_helper_")));
+            .any(|name| name.starts_with("__kclique_helper_")));
         let out_rules = plan
             .rules_by_scc
             .iter()

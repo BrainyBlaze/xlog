@@ -12,6 +12,10 @@ use crate::gpu_cnf::GpuCnf;
 // Must match kernels/sat.cu.
 const SAT_STATUS_UNSAT: i32 = 0;
 const SAT_STATUS_SAT: i32 = 1;
+/// Conflict budget reached before the search terminated (mirrors the kernel's
+/// `SAT_STATUS_BUDGET_EXHAUSTED`). INDETERMINATE — the verifier must treat this
+/// as a fail-closed decline, never as a proof.
+const SAT_STATUS_BUDGET_EXHAUSTED: i32 = 2;
 
 struct GpuCdclRun {
     assignment: TrackedCudaSlice<i8>,
@@ -50,6 +54,12 @@ pub struct GpuCdclConfig {
     pub restart_base: u32,
     /// Conflict count between clause-database reductions.
     pub reduce_interval: u32,
+    /// Conflict budget: `0` = unlimited (default; no behavior change). When
+    /// nonzero, the solver bails with status `BUDGET_EXHAUSTED` after this many
+    /// conflicts without terminating, bounding wall-clock so a treewidth-hard
+    /// instance returns gracefully instead of running to a CUDA launch timeout
+    /// that poisons the primary context.
+    pub max_conflicts: u32,
 }
 
 impl Default for GpuCdclConfig {
@@ -60,6 +70,7 @@ impl Default for GpuCdclConfig {
             max_proof_u32: 1_048_576,
             restart_base: 100,
             reduce_interval: 2000,
+            max_conflicts: 0,
         }
     }
 }
@@ -196,6 +207,18 @@ impl GpuCdclSolver {
             .provider
             .dtoh_scalar_untracked(out_error, 0)
             .map_err(|e| XlogError::Kernel(format!("Failed to read {context} error: {e}")))?;
+        // A conflict-budget bail is not a solver error and not a proof: it is a
+        // fail-closed decline (the search was cut short on purpose to avoid a
+        // context-poisoning launch timeout). Surface it as the typed,
+        // catchable VerifyBudgetExceeded rather than a generic kernel error.
+        if actual_error == 0 && actual_status == SAT_STATUS_BUDGET_EXHAUSTED {
+            return Err(XlogError::VerifyBudgetExceeded {
+                context: context.to_string(),
+                detail: "CDCL conflict budget exhausted before the search \
+                         terminated (indeterminate; verify declined fail-closed)"
+                    .to_string(),
+            });
+        }
         if actual_error != 0 || actual_status != expected_status {
             return Err(XlogError::Kernel(format!(
                 "{context} expected status {expected_status}, got status {actual_status} error {actual_error}"
@@ -546,6 +569,7 @@ impl GpuCdclSolver {
         let cfg_max_proof_u32 = self.config.max_proof_u32;
         let cfg_restart_base = self.config.restart_base;
         let cfg_reduce_interval = self.config.reduce_interval;
+        let cfg_max_conflicts = self.config.max_conflicts;
         let learned_import_count_param = (&out_learned_count).as_kernel_param();
 
         let mut params: Vec<*mut c_void> = vec![
@@ -564,6 +588,7 @@ impl GpuCdclSolver {
             cfg_max_proof_u32.as_kernel_param(),
             cfg_restart_base.as_kernel_param(),
             cfg_reduce_interval.as_kernel_param(),
+            cfg_max_conflicts.as_kernel_param(),
             learned_import_count_param,
             (&assign).as_kernel_param(),
             (&level).as_kernel_param(),
@@ -721,6 +746,7 @@ impl GpuCdclSolver {
         let cfg_max_proof_u32 = self.config.max_proof_u32;
         let cfg_restart_base = self.config.restart_base;
         let cfg_reduce_interval = self.config.reduce_interval;
+        let cfg_max_conflicts = self.config.max_conflicts;
         let learned_import_count_param = (&ws.out_learned_count).as_kernel_param();
 
         // Parameter order MUST match launch_cdcl_with_decision_ranges_gated exactly.
@@ -740,6 +766,7 @@ impl GpuCdclSolver {
             cfg_max_proof_u32.as_kernel_param(),
             cfg_restart_base.as_kernel_param(),
             cfg_reduce_interval.as_kernel_param(),
+            cfg_max_conflicts.as_kernel_param(),
             learned_import_count_param,
             (&ws.assign).as_kernel_param(),
             (&ws.level).as_kernel_param(),

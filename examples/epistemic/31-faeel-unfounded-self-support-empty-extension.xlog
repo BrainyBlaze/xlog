@@ -1,32 +1,32 @@
-// v0.9.2 ITEM B: FAEEL unfounded self-support -> EXACT EMPTY founded extension.
+// FAEEL unfounded self-support executes to an empty founded extension.
 //
-//   p() :- possible p().    -- `p` is supported ONLY by the possibility of itself
+//   p() :- possible p().    -- `p` is supported only by the possibility of itself
 //
-// This is the canonical NON-determined case: `p` has no fixed extension. Its only
-// support is circular (`p` holds if `p` is possible), with NO independent founded
-// derivation. Under the default FAEEL (Founded Autoepistemic Equilibrium Logic)
-// semantics this atom is UNFOUNDED, so it is NOT in the founded model: it is simply
-// ABSENT. This is the standard founded/equilibrium semantics -- the model where
-// unfounded-by-circular-possibility atoms are false IS the founded model.
+// This is the canonical not-determined case: `p` has no fixed extension. Its
+// only support is circular (`p` holds if `p` is possible), with no independent
+// founded derivation. Under the default FAEEL (Founded Autoepistemic Equilibrium Logic)
+// semantics this atom is unfounded, so it is not in the founded model: it is
+// simply absent. This is the standard founded/equilibrium semantics; the model
+// where unfounded-by-circular-possibility atoms are false is the founded model.
 //
-// The program is EXECUTED (not rejected): the founded extension is computed on the
-// GPU/runtime path (the circular self-support rule is excluded from the reduced
-// founded base, and the GPU world-view validation then materializes the empty
+// The program is executed rather than rejected: the founded extension is
+// computed on the GPU/runtime path (the circular self-support rule is excluded
+// from the reduced founded base, and the GPU world-view validation then materializes the empty
 // extension). `?- p()` therefore prints `rows: 0` and `xlog run` exits 0.
 //
-// This is the MANDATE: a case that is mathematically false under a semantics mode is
-// EXECUTED to its exact semantic result (empty extension under FAEEL), NOT rejected
-// with an unsupported-construct error.
+// A case that is mathematically false under a semantics mode executes to its
+// semantic result, which is the empty extension under FAEEL, instead of being
+// rejected with an unsupported-construct error.
 //
 // Contrast:
-//   * example 11 (`11-faeel-foundedness.xlog`): the SAME circular self-support but WITH
-//     independent founded support via base() -- FAEEL ACCEPTS it (rows: 1).
-//   * example 32 (`32-g91-self-support-accepted.xlog`): the SAME unfounded program under
-//     explicit g91 mode -- the autoepistemic model ACCEPTS circular self-support
-//     (rows: 1). The FAEEL-vs-G91 difference (rows: 0 vs rows: 1) is the exact
+//   * `11-faeel-foundedness.xlog`: the same circular self-support with
+//     independent founded support via base(), so FAEEL accepts it with one row.
+//   * `32-g91-self-support-accepted.xlog`: the same unfounded program under
+//     explicit G91 mode, where the autoepistemic model accepts circular
+//     self-support with one row. The FAEEL-vs-G91 difference is the semantic
 //     mode-difference evidence.
 //
-// Expected: `xlog run` exits 0 and emits `rows: 0` for `?- p()` (NO rows).
+// Expected: `xlog run` exits 0 and emits `rows: 0` for `?- p()`.
 
 #pragma epistemic_mode = faeel
 

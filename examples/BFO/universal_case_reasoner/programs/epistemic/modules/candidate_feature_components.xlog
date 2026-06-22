@@ -1,0 +1,25 @@
+// Shared candidate feature-component semantics.
+//
+// Scoring programs stage raw feature columns. This module owns the executable
+// XLOG derivation of BFO evidence, literal-observation evidence, mismatch
+// penalty, and the composite feature tuple consumed by scoring policies.
+
+pred candidate_raw_feature_score(u32, u32, u32, u32, u32).
+pred bfo_evidence_score(u32, u32, u32).
+pred literal_observation_score(u32, u32, u32).
+pred mismatch_penalty_score(u32, u32, u32).
+pred candidate_feature_score(u32, u32, u32, u32, u32).
+
+bfo_evidence_score(Case, Candidate, Bfo) :-
+    candidate_raw_feature_score(Case, Candidate, Bfo, _, _).
+
+literal_observation_score(Case, Candidate, Literal) :-
+    candidate_raw_feature_score(Case, Candidate, _, Literal, _).
+
+mismatch_penalty_score(Case, Candidate, Mismatch) :-
+    candidate_raw_feature_score(Case, Candidate, _, _, Mismatch).
+
+candidate_feature_score(Case, Candidate, Bfo, Literal, Mismatch) :-
+    bfo_evidence_score(Case, Candidate, Bfo),
+    literal_observation_score(Case, Candidate, Literal),
+    mismatch_penalty_score(Case, Candidate, Mismatch).

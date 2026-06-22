@@ -1,0 +1,59 @@
+// UCR v0.9.0 FAEEL candidate rank narrowing.
+//
+// Python supplies candidate score facts, but XLOG owns the group-local
+// selected-candidate relation consumed by the final decision program.
+
+#pragma epistemic_mode = faeel
+
+use modules/selector_acceptance.
+
+pred decision_group(u32, u32, u32).
+pred ranked_candidate_score(u32, u32, u32).
+pred selector_candidate(u32, u32).
+pred selector_observed_evidence(u32, u32).
+pred selector_bfo_candidate(u32, u32).
+pred selector_unsafe_candidate(u32, u32).
+pred xlog_failure_chain_claim(u32, u32, u32, u32).
+pred selector_accepted(u32, u32).
+pred decision_candidate_support(u32, u32).
+pred dominated_rank_candidate(u32, u32).
+pred ranker_selected(u32, u32).
+
+decision_candidate_support(Case, Candidate) :-
+    selector_accepted(Case, Candidate),
+    selector_observed_evidence(Case, Candidate),
+    selector_bfo_candidate(Case, Candidate),
+    xlog_failure_chain_claim(Case, Candidate, 4, Chain),
+    not selector_unsafe_candidate(Case, Candidate).
+
+dominated_rank_candidate(Case, Candidate) :-
+    decision_candidate_support(Case, Candidate),
+    decision_group(Case, Candidate, Group),
+    ranked_candidate_score(Case, Candidate, Score),
+    decision_candidate_support(Case, OtherCandidate),
+    decision_group(Case, OtherCandidate, Group),
+    ranked_candidate_score(Case, OtherCandidate, OtherScore),
+    Candidate != OtherCandidate,
+    OtherScore > Score.
+
+dominated_rank_candidate(Case, Candidate) :-
+    decision_candidate_support(Case, Candidate),
+    decision_group(Case, Candidate, Group),
+    ranked_candidate_score(Case, Candidate, Score),
+    decision_candidate_support(Case, OtherCandidate),
+    decision_group(Case, OtherCandidate, Group),
+    ranked_candidate_score(Case, OtherCandidate, OtherScore),
+    Candidate != OtherCandidate,
+    OtherScore >= Score,
+    OtherCandidate < Candidate.
+
+ranker_selected(Case, Candidate) :-
+    decision_candidate_support(Case, Candidate),
+    decision_group(Case, Candidate, Group),
+    ranked_candidate_score(Case, Candidate, Score),
+    know decision_candidate_support(Case, Candidate),
+    possible decision_candidate_support(Case, Candidate),
+    not possible selector_unsafe_candidate(Case, Candidate),
+    not dominated_rank_candidate(Case, Candidate).
+
+?- ranker_selected(Case, Candidate).

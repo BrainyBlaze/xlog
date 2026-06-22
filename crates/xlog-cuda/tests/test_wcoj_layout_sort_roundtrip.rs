@@ -1,5 +1,5 @@
 // crates/xlog-cuda/tests/test_wcoj_layout_sort_roundtrip.rs
-//! W3.1 — round-trip Part B grid for the new generic accessors
+//! Generic WCOJ layout-sort round-trip grid for
 //! `CudaKernelProvider::wcoj_layout_sort_u32_recorded` (4-byte
 //! width-class) and `CudaKernelProvider::wcoj_layout_sort_u64_recorded`
 //! (8-byte width-class).
@@ -8,8 +8,8 @@
 //! unsorted+duplicated) × four width-class fixtures (U32 / U64 /
 //! Symbol / mixed-4-byte alternating `(U32, Symbol, ...)`) × six
 //! arities {2, 3, 4, 5, 6, 7} = **72 cells**. The arity=7 sentinel
-//! proves the implementation does not silently cap at the W3.2
-//! k-bound.
+//! proves the implementation does not silently cap at the K-clique
+//! dispatch arity bound.
 //!
 //! Per-cell asserts:
 //!   1. Output `num_rows()` matches expected (deduped, sorted).
@@ -23,7 +23,7 @@
 //! `xlog_core::symbol::intern("sym_<n>")`. The interner is the
 //! production allocator for `ScalarType::Symbol` values; using
 //! its IDs (rather than raw u32 bit patterns) is the
-//! Symbol-parity contract this cert is meant to lock. The seed
+//! Symbol-parity contract this test coverage is meant to lock. The seed
 //! pattern preserves cell-equality structure: every Symbol-typed
 //! cell with seed value `n` is replaced by `intern("sym_n")`,
 //! so two cells share an interned ID iff they share the seed

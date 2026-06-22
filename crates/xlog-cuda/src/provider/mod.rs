@@ -24,6 +24,9 @@ use crate::{
 
 mod arithmetic;
 mod filter;
+mod fj;
+mod fj_delta;
+mod fj_delta_sparse;
 mod groupby;
 mod ilp;
 mod ilp_exact;
@@ -37,6 +40,9 @@ mod transfer;
 mod wcoj;
 mod wcoj_metadata;
 mod wcoj_project;
+
+pub use fj::{FjNode, FjPlan, FjSubAtom};
+pub use fj_delta::{FjDeltaCols, FJ_DELTA_MAX_DOMAIN};
 
 /// Per-module PTX load timing (populated only when XLOG_WARMUP_PROFILE=1).
 #[derive(Debug, Clone, Default)]
@@ -81,38 +87,169 @@ pub(crate) enum KernelModuleSource {
     EmbeddedPortablePtx { ptx: &'static str },
 }
 
-fn resolve_module_source_with_locator(
+pub(crate) fn resolve_module_sources_with_locator(
     name: &str,
     cc: u32,
     locator: &kernel_paths::KernelArtifactLocator,
-) -> Option<KernelModuleSource> {
-    if let Some((path, is_cubin)) = locator.resolve_module_path(name, cc) {
-        return Some(KernelModuleSource::File { path, is_cubin });
-    }
+) -> Vec<KernelModuleSource> {
+    let mut sources: Vec<KernelModuleSource> = locator
+        .resolve_module_paths(name, cc)
+        .into_iter()
+        // Skip any staged cubin/PTX whose bytes diverge from what this binary
+        // was built against. A stale staged artifact (kernel signature changed
+        // but the staged copy was never refreshed) otherwise loads "fine" and
+        // then launches a mismatched kernel into an illegal address.
+        .filter(|(path, _)| !staged_artifact_is_stale(path))
+        .map(|(path, is_cubin)| KernelModuleSource::File { path, is_cubin })
+        .collect();
 
-    crate::embedded_kernel_data::portable_ptx(name)
-        .map(|ptx| KernelModuleSource::EmbeddedPortablePtx { ptx })
+    // ALWAYS append the embedded portable PTX as the final fallback. It is
+    // compiled into this binary, so it can never be stale relative to the launch
+    // sites — it guarantees a signature-correct kernel even when every staged
+    // File artifact was skipped as stale or fails to load. (Previously this was
+    // suppressed whenever any portable-PTX *file* existed, which let a stale
+    // staged PTX shadow the fresh embedded one.)
+    if let Some(ptx) = crate::embedded_kernel_data::portable_ptx(name) {
+        sources.push(KernelModuleSource::EmbeddedPortablePtx { ptx });
+    }
+    sources
 }
 
-fn resolve_module_source(name: &str, cc: u32) -> Option<KernelModuleSource> {
-    let locator = kernel_paths::KernelArtifactLocator::from_env();
-    resolve_module_source_with_locator(name, cc, &locator)
+/// A staged cubin/PTX is "stale" when this binary embeds a canonical integrity
+/// hash for that artifact file name and the on-disk bytes do not match it — the
+/// staged artifact diverges from what this build produced. Loading such an
+/// artifact can launch a mismatched kernel into an illegal address, so it is
+/// skipped in favor of a fresh source. Artifacts with no embedded canonical
+/// hash (e.g. an arch this build did not produce) are NOT treated as stale — we
+/// can only validate what we built — nor are unreadable files (the loader
+/// surfaces the IO error).
+fn staged_artifact_is_stale(path: &std::path::Path) -> bool {
+    let Some(file_name) = path.file_name().and_then(|n| n.to_str()) else {
+        return false;
+    };
+    let Some(expected) = crate::embedded_kernel_data::canonical_artifact_hash(file_name) else {
+        return false;
+    };
+    match std::fs::read(path) {
+        Ok(bytes) => fnv1a_64(&bytes) != expected,
+        Err(_) => false,
+    }
+}
+
+/// FNV-1a 64-bit, matching the build-time hash in `crates/xlog-cuda/build.rs`.
+fn fnv1a_64(bytes: &[u8]) -> u64 {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for &byte in bytes {
+        hash ^= byte as u64;
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    hash
+}
+
+#[cfg(test)]
+mod kernel_source_resolution_tests {
+    use super::{
+        kernel_paths::KernelArtifactLocator, resolve_module_sources_with_locator,
+        KernelModuleSource,
+    };
+    use std::fs;
+
+    #[test]
+    fn keeps_portable_ptx_fallback_when_cubin_exists() {
+        let root = std::env::temp_dir().join(format!(
+            "xlog-kernel-fallback-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system clock before UNIX_EPOCH")
+                .as_nanos()
+        ));
+        let kernels = root.join("kernels");
+        fs::create_dir_all(&kernels).expect("create kernels dir");
+        // Use a name this build does NOT produce, so neither file carries a
+        // canonical integrity hash (the staleness skip is exercised separately).
+        // This isolates the file-resolution precedence: cubin first, then the
+        // portable-PTX file as fallback.
+        fs::write(kernels.join("fakekernel.sm_86.cubin"), b"cubin").expect("write cubin");
+        fs::write(kernels.join("fakekernel.portable.ptx"), b"ptx").expect("write ptx");
+        let expected_cubin = kernels.join("fakekernel.sm_86.cubin");
+        let expected_ptx = kernels.join("fakekernel.portable.ptx");
+
+        let locator = KernelArtifactLocator::new(None, Some(kernels.clone()), None);
+        let sources = resolve_module_sources_with_locator("fakekernel", 86, &locator);
+
+        assert_eq!(sources.len(), 2);
+        assert!(matches!(
+            &sources[0],
+            KernelModuleSource::File {
+                path,
+                is_cubin: true
+            } if path == &expected_cubin
+        ));
+        assert!(matches!(
+            &sources[1],
+            KernelModuleSource::File {
+                path,
+                is_cubin: false
+            } if path == &expected_ptx
+        ));
+
+        fs::remove_dir_all(root).expect("remove temp kernels");
+    }
+
+    // Locks the FNV-1a contract between build.rs (which embeds canonical
+    // artifact hashes) and the runtime (which re-hashes staged artifacts). If
+    // these two implementations ever diverge, every staged artifact would read
+    // as "stale" — so these canonical FNV-1a 64-bit vectors must hold.
+    #[test]
+    fn fnv1a_64_matches_known_vectors() {
+        assert_eq!(super::fnv1a_64(b""), 0xcbf2_9ce4_8422_2325);
+        assert_eq!(super::fnv1a_64(b"a"), 0xaf63_dc4c_8601_ec8c);
+        assert_eq!(super::fnv1a_64(b"foobar"), 0x85944171_f73967e8);
+    }
+
+    // A file whose name this build did not produce has no canonical hash, so it
+    // is conservatively NOT treated as stale (we only validate what we built).
+    // A nonexistent path is likewise not "stale" — the loader surfaces IO.
+    #[test]
+    fn staged_artifact_not_stale_without_canonical_hash() {
+        let root = std::env::temp_dir().join(format!(
+            "xlog-kernel-stale-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system clock before UNIX_EPOCH")
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).expect("create dir");
+        let unknown = root.join("definitely_not_a_real_kernel.sm_86.cubin");
+        fs::write(&unknown, b"bytes").expect("write");
+        assert!(!super::staged_artifact_is_stale(&unknown));
+        assert!(!super::staged_artifact_is_stale(
+            &root.join("missing.portable.ptx")
+        ));
+        fs::remove_dir_all(root).expect("remove temp dir");
+    }
 }
 
 /// Resolve a kernel module from sidecar artifacts or embedded portable PTX.
 ///
 /// Asserts (in debug builds) that `name` is present in the kernel manifest,
 /// catching name/order drift between the manifest and provider load blocks.
-fn load_module_source(name: &str, cc: u32) -> Result<KernelModuleSource> {
+pub(crate) fn load_module_sources(name: &str, cc: u32) -> Result<Vec<KernelModuleSource>> {
     debug_assert!(
         crate::kernel_manifest_data::KERNEL_CU_NAMES.contains(&name),
         "kernel module '{name}' is not in KERNEL_CU_NAMES manifest — update kernel_manifest_data.rs"
     );
-    resolve_module_source(name, cc).ok_or_else(|| {
-        XlogError::Kernel(format!(
+    let locator = kernel_paths::KernelArtifactLocator::from_env();
+    let sources = resolve_module_sources_with_locator(name, cc, &locator);
+    if sources.is_empty() {
+        Err(XlogError::Kernel(format!(
             "{name}: no cubin, sidecar portable PTX, or embedded portable PTX found"
-        ))
-    })
+        )))
+    } else {
+        Ok(sources)
+    }
 }
 
 #[derive(Clone)]
@@ -141,8 +278,8 @@ pub(crate) struct RawCudaView<'a, T> {
 ///
 /// The legacy stream-aware scan helper allocates recursive `block_sums`
 /// buffers inside the helper. CUDA Graph capture records concrete allocation
-/// addresses, so W66 needs the scan topology and scratch buffers to be fixed
-/// before capture begins.
+/// addresses, so bounded CSM CUDA Graph replay needs the scan topology and
+/// scratch buffers to be fixed before capture begins.
 pub(crate) struct MultiblockScanScratchU32 {
     levels: Vec<TrackedCudaSlice<u32>>,
 }
@@ -311,9 +448,27 @@ pub mod wcoj_kernels {
     pub const WCOJ_BUILD_METADATA_SCATTER_U64: &str = "wcoj_build_metadata_scatter_u64";
     pub const WCOJ_TRIANGLE_BUILD_HG_WORK_PLAN_U32: &str = "wcoj_triangle_build_hg_work_plan_u32";
     pub const WCOJ_TRIANGLE_COUNT_HG_U32: &str = "wcoj_triangle_count_hg_u32";
+    pub const WCOJ_TRIANGLE_GROUPBY_ROOT_COUNT_HG_U32: &str =
+        "wcoj_triangle_groupby_root_count_hg_u32";
+    pub const WCOJ_TRIANGLE_GROUPBY_ROOT_SUM_HG_U32: &str = "wcoj_triangle_groupby_root_sum_hg_u32";
+    pub const WCOJ_TRIANGLE_GROUPBY_ROOT_MIN_HG_U32: &str = "wcoj_triangle_groupby_root_min_hg_u32";
+    pub const WCOJ_TRIANGLE_GROUPBY_ROOT_MAX_HG_U32: &str = "wcoj_triangle_groupby_root_max_hg_u32";
     pub const WCOJ_TRIANGLE_MATERIALIZE_HG_U32: &str = "wcoj_triangle_materialize_hg_u32";
     pub const WCOJ_TRIANGLE_BUILD_HG_WORK_PLAN_U64: &str = "wcoj_triangle_build_hg_work_plan_u64";
     pub const WCOJ_TRIANGLE_COUNT_HG_U64: &str = "wcoj_triangle_count_hg_u64";
+    pub const WCOJ_TRIANGLE_GROUPBY_ROOT_COUNT_HG_U64: &str =
+        "wcoj_triangle_groupby_root_count_hg_u64";
+    pub const WCOJ_TRIANGLE_GROUPBY_ROOT_SUM_HG_U64: &str = "wcoj_triangle_groupby_root_sum_hg_u64";
+    pub const WCOJ_TRIANGLE_GROUPBY_ROOT_MIN_HG_U64: &str = "wcoj_triangle_groupby_root_min_hg_u64";
+    pub const WCOJ_TRIANGLE_GROUPBY_ROOT_MAX_HG_U64: &str = "wcoj_triangle_groupby_root_max_hg_u64";
+    pub const WCOJ_GROUPBY_ROOT_SEGMENT_SUM_COUNTS_U32: &str =
+        "wcoj_groupby_root_segment_sum_counts_u32";
+    pub const WCOJ_GROUPBY_ROOT_SEGMENT_SUM_VALUES_U64: &str =
+        "wcoj_groupby_root_segment_sum_values_u64";
+    pub const WCOJ_GROUPBY_ROOT_SEGMENT_MIN_VALUES_U64: &str =
+        "wcoj_groupby_root_segment_min_values_u64";
+    pub const WCOJ_GROUPBY_ROOT_SEGMENT_MAX_VALUES_U64: &str =
+        "wcoj_groupby_root_segment_max_values_u64";
     pub const WCOJ_TRIANGLE_MATERIALIZE_HG_U64: &str = "wcoj_triangle_materialize_hg_u64";
     pub const WCOJ_TRIANGLE_COUNT_HG_CACHED_U32: &str = "wcoj_triangle_count_hg_cached_u32";
     pub const WCOJ_TRIANGLE_MATERIALIZE_HG_CACHED_U32: &str =
@@ -325,12 +480,17 @@ pub mod wcoj_kernels {
     pub const WCOJ_4CYCLE_BUILD_E2_WORK_PREFIX_U32: &str = "wcoj_4cycle_build_e2_work_prefix_u32";
     pub const WCOJ_4CYCLE_BUILD_HG_WORK_PLAN_U32: &str = "wcoj_4cycle_build_hg_work_plan_u32";
     pub const WCOJ_4CYCLE_COUNT_HG_U32: &str = "wcoj_4cycle_count_hg_u32";
+    pub const WCOJ_4CYCLE_GROUPBY_ROOT_COUNT_HG_U32: &str = "wcoj_4cycle_groupby_root_count_hg_u32";
+    pub const WCOJ_4CYCLE_GROUPBY_ROOT_SUM_HG_U32: &str = "wcoj_4cycle_groupby_root_sum_hg_u32";
+    pub const WCOJ_4CYCLE_GROUPBY_ROOT_MIN_HG_U32: &str = "wcoj_4cycle_groupby_root_min_hg_u32";
+    pub const WCOJ_4CYCLE_GROUPBY_ROOT_MAX_HG_U32: &str = "wcoj_4cycle_groupby_root_max_hg_u32";
     pub const WCOJ_4CYCLE_MATERIALIZE_HG_U32: &str = "wcoj_4cycle_materialize_hg_u32";
     pub const WCOJ_4CYCLE_BUILD_E2_WORK_PREFIX_U64: &str = "wcoj_4cycle_build_e2_work_prefix_u64";
     pub const WCOJ_4CYCLE_BUILD_HG_WORK_PLAN_U64: &str = "wcoj_4cycle_build_hg_work_plan_u64";
     pub const WCOJ_4CYCLE_COUNT_HG_U64: &str = "wcoj_4cycle_count_hg_u64";
+    pub const WCOJ_4CYCLE_GROUPBY_ROOT_COUNT_HG_U64: &str = "wcoj_4cycle_groupby_root_count_hg_u64";
     pub const WCOJ_4CYCLE_MATERIALIZE_HG_U64: &str = "wcoj_4cycle_materialize_hg_u64";
-    // W3.2/W6.4 — General-arity clique kernels (k=5..8 from single template).
+    // General-arity clique kernels (k=5..8 from a single template).
     pub const WCOJ_CLIQUE5_COUNT_HG_U32: &str = "wcoj_clique5_count_hg_u32";
     pub const WCOJ_CLIQUE5_MATERIALIZE_HG_U32: &str = "wcoj_clique5_materialize_hg_u32";
     pub const WCOJ_CLIQUE5_COUNT_HG_U64: &str = "wcoj_clique5_count_hg_u64";
@@ -347,6 +507,33 @@ pub mod wcoj_kernels {
     pub const WCOJ_CLIQUE8_MATERIALIZE_HG_U32: &str = "wcoj_clique8_materialize_hg_u32";
     pub const WCOJ_CLIQUE8_COUNT_HG_U64: &str = "wcoj_clique8_count_hg_u64";
     pub const WCOJ_CLIQUE8_MATERIALIZE_HG_U64: &str = "wcoj_clique8_materialize_hg_u64";
+    pub const WCOJ_CLIQUE5_GROUPBY_ROOT_COUNT_HG_U32: &str =
+        "wcoj_clique5_groupby_root_count_hg_u32";
+    pub const WCOJ_CLIQUE6_GROUPBY_ROOT_COUNT_HG_U32: &str =
+        "wcoj_clique6_groupby_root_count_hg_u32";
+    // Free Join frontier engine primitives. The work
+    // prefix kernel is width-agnostic (ranges are u32 row indices in
+    // every width class); count/emit/probe have u64 data twins.
+    pub const FJ_EXPAND_WORK_PREFIX_U32: &str = "fj_expand_work_prefix_u32";
+    pub const FJ_EXPAND_COUNT_U32: &str = "fj_expand_count_u32";
+    pub const FJ_EXPAND_EMIT_U32: &str = "fj_expand_emit_u32";
+    pub const FJ_PROBE_REFINE_U32: &str = "fj_probe_refine_u32";
+    pub const FJ_EXPAND_COUNT_U64: &str = "fj_expand_count_u64";
+    pub const FJ_EXPAND_EMIT_U64: &str = "fj_expand_emit_u64";
+    pub const FJ_PROBE_REFINE_U64: &str = "fj_probe_refine_u64";
+    pub const FJ_COUNT_MULTIPLICITY: &str = "fj_count_multiplicity";
+    // D3 S3 spike — factorized recursive delta novel-set pipeline.
+    pub const FJ_DELTA_RANGE_U32: &str = "fj_delta_range_u32";
+    pub const FJ_DELTA_MARK_U32: &str = "fj_delta_mark_u32";
+    pub const FJ_DELTA_SUBTRACT_U32: &str = "fj_delta_subtract_u32";
+    pub const FJ_DELTA_POPCOUNT: &str = "fj_delta_popcount";
+    pub const FJ_DELTA_EMIT_U32: &str = "fj_delta_emit_u32";
+    pub const FJ_DELTA_MAX_U32: &str = "fj_delta_max_u32";
+    pub const FJ_DELTA_SPARSE_ESTIMATE: &str = "fj_delta_sparse_estimate";
+    pub const FJ_DELTA_SPARSE_LOAD_R: &str = "fj_delta_sparse_load_r";
+    pub const FJ_DELTA_SPARSE_INSERT_CANDIDATES: &str = "fj_delta_sparse_insert_candidates";
+    pub const FJ_DELTA_SPARSE_MARK: &str = "fj_delta_sparse_mark";
+    pub const FJ_DELTA_SPARSE_EMIT: &str = "fj_delta_sparse_emit";
 }
 
 /// Kernel function names in the Monte Carlo sampling module
@@ -481,7 +668,7 @@ pub mod ilp_credit_kernels {
     pub const ILP_CREDIT_BACKWARD_F64: &str = "ilp_credit_backward_f64";
 }
 
-/// Kernel function names in the ILP exact-induction module (M8 Phase 1).
+/// Kernel function names in the native bounded exact-induction module.
 pub mod ilp_exact_kernels {
     pub const ILP_EXACT_SCORE: &str = "ilp_exact_score";
     pub const ILP_EXACT_SCORE_U32: &str = "ilp_exact_score_u32";
@@ -551,21 +738,22 @@ pub mod weights_kernels {
         "weights_restore_query_vars_true_batched";
 }
 
-/// Kernel function names in the GPU D4 module (CNF validation + circuit levelization).
+/// Kernel function names in the GPU Decision-DNNF compiler module
+/// (CNF validation + circuit levelization).
 pub mod d4_kernels {
     pub const D4_VALIDATE_CNF: &str = "d4_validate_cnf";
     pub const D4_LEVELIZE_COUNTS: &str = "d4_levelize_counts";
     pub const D4_LEVELIZE_EMIT: &str = "d4_levelize_emit";
-    // Task 4: BFS frontier expansion + unit propagation.
+    // BFS frontier expansion and unit propagation.
     pub const D4_FRONTIER_PREPARE: &str = "d4_frontier_prepare";
     pub const D4_FRONTIER_EXPAND: &str = "d4_frontier_expand";
     pub const D4_FRONTIER_PREPARE_DENSE: &str = "d4_frontier_prepare_dense";
     pub const D4_FRONTIER_EXPAND_DENSE: &str = "d4_frontier_expand_dense";
-    // Task 5: per-frontier D4 DFS worker (count+emit).
+    // Per-frontier Decision-DNNF DFS worker (count+emit).
     pub const D4_COMPILE_COUNT: &str = "d4_compile_count";
     pub const D4_COMPILE_EMIT: &str = "d4_compile_emit";
     pub const D4_CAPTURE_EMIT_META: &str = "d4_capture_emit_meta";
-    // Task 6: GPU smoothing (random-var support + wrapper emission).
+    // GPU smoothing with random-variable support and wrapper emission.
     pub const D4_SUPPORT_LEVEL: &str = "d4_support_level";
     pub const D4_SUPPORT_SET_ROOT_BITS: &str = "d4_support_set_root_bits";
     pub const D4_SMOOTH_COUNT: &str = "d4_smooth_count";
@@ -575,7 +763,7 @@ pub mod d4_kernels {
     pub const D4_SMOOTH_INIT_NODES: &str = "d4_smooth_init_nodes";
     pub const D4_SMOOTH_EMIT_LEVEL: &str = "d4_smooth_emit_level";
     pub const D4_SMOOTH_CHECK_EDGE_CAP: &str = "d4_smooth_check_edge_cap";
-    // Task 6: GPU free-var mask (vars in clauses vs circuit).
+    // GPU free-variable mask for variables in clauses versus the circuit.
     pub const D4_MARK_VARS_IN_CLAUSES: &str = "d4_mark_vars_in_clauses";
     pub const D4_MARK_VARS_IN_CIRCUIT: &str = "d4_mark_vars_in_circuit";
     pub const D4_BUILD_FREE_VAR_MASK: &str = "d4_build_free_var_mask";
@@ -602,13 +790,13 @@ pub mod join_kernels {
     pub const HASH_JOIN_SEMI: &str = "hash_join_semi";
     pub const HASH_JOIN_ANTI: &str = "hash_join_anti";
     pub const INIT_HASH_TABLE: &str = "init_hash_table";
-    /// W4.2 nested-loop inner join (emit-pairs design). Reads
+    /// Nested-loop inner join (emit-pairs design). Reads
     /// the single key column from each side; emits matched
     /// `(left_idx, right_idx)` pairs as two parallel u32 arrays.
     /// Payload columns are materialized after the kernel via
     /// `gather_buffer_by_indices` in the provider fn.
     pub const NESTED_LOOP_JOIN_INNER_U32_1KEY_PAIRS: &str = "nested_loop_join_inner_u32_1key_pairs";
-    /// W4.3 sort-merge inner join (emit-pairs design,
+    /// Sort-merge inner join (emit-pairs design,
     /// caller-asserted pre-sorted inputs). Reads the single
     /// key column from each side, performs per-thread binary
     /// search on the right side to find matched-key runs,
@@ -639,8 +827,11 @@ pub mod groupby_kernels {
     pub const CAPTURE_NUM_GROUPS: &str = "capture_num_groups";
     pub const GROUPBY_COUNT: &str = "groupby_count";
     pub const GROUPBY_SUM: &str = "groupby_sum";
+    pub const GROUPBY_SUM_U64: &str = "groupby_sum_u64";
     pub const GROUPBY_MIN: &str = "groupby_min";
+    pub const GROUPBY_MIN_U64: &str = "groupby_min_u64";
     pub const GROUPBY_MAX: &str = "groupby_max";
+    pub const GROUPBY_MAX_U64: &str = "groupby_max_u64";
     pub const GROUPBY_LOGSUMEXP_MAX: &str = "groupby_logsumexp_max";
     pub const GROUPBY_LOGSUMEXP_SUMEXP: &str = "groupby_logsumexp_sumexp";
     pub const GROUPBY_LOGSUMEXP_FINAL: &str = "groupby_logsumexp_final";
@@ -682,7 +873,7 @@ pub mod sort_kernels {
 
     pub const GATHER_KEYS_F64_LO_U32: &str = "gather_keys_f64_lo_u32";
     pub const GATHER_KEYS_F64_HI_U32: &str = "gather_keys_f64_hi_u32";
-    /// W4.3 sortedness-detection kernel — single-pass adjacent-
+    /// Sort-merge sortedness-detection kernel — single-pass adjacent-
     /// pair check; atomically writes 0 to a u32 flag on
     /// `keys[i] > keys[i+1]`. Caller initializes flag to 1
     /// before launch, reads result post-launch. Used by the
@@ -826,7 +1017,7 @@ pub mod sat_kernels {
 /// This prevents memory overflow when joining large tables with high cardinality matches.
 pub const DEFAULT_JOIN_MAX_OUTPUT: usize = 1_000_000;
 
-/// W4.2 nested-loop join eligibility threshold (Cartesian product
+/// Nested-loop join eligibility threshold (Cartesian product
 /// upper bound). The dispatcher routes to nested-loop iff
 /// `num_left * num_right <= NESTED_LOOP_TOTAL_THRESHOLD`; the
 /// provider validates the same invariant fail-closed before any
@@ -1000,19 +1191,19 @@ pub struct CudaKernelProvider {
     /// was actually selected for eligible Inner / LeftOuter cases (and
     /// not selected for Semi / Anti or when the env gate is off).
     csm_invocations: AtomicU64,
-    /// Diagnostic counter for W66 bounded CSM CUDA Graph captures.
+    /// Diagnostic counter for bounded CSM CUDA Graph captures.
     csm_cuda_graph_captures: AtomicU64,
-    /// Diagnostic counter for W66 bounded CSM CUDA Graph launches.
+    /// Diagnostic counter for bounded CSM CUDA Graph launches.
     csm_cuda_graph_launches: AtomicU64,
-    /// Diagnostic counter for W66 CSM CUDA Graph ineligibility fallbacks.
+    /// Diagnostic counter for bounded CSM CUDA Graph ineligibility fallbacks.
     csm_cuda_graph_fallbacks: AtomicU64,
-    /// Diagnostic counter for W66 bounded CSM CUDA Graph cache replays.
+    /// Diagnostic counter for bounded CSM CUDA Graph cache replays.
     csm_cuda_graph_cache_hits: AtomicU64,
-    /// Diagnostic counter for W66 graph-mode small full-row set-maintenance
+    /// Diagnostic counter for graph-mode small full-row set-maintenance
     /// sorts. This is test telemetry only; production correctness must not
     /// depend on the value.
     small_full_row_sort_invocations: AtomicU64,
-    /// W66 bounded CSM CUDA Graph replay cache.
+    /// Bounded CSM CUDA Graph replay cache.
     csm_cuda_graph_cache: Mutex<HashMap<CsmCudaGraphKey, CsmCudaGraphEntry>>,
     /// Per-process counter of WCOJ layout fast-path hits. The
     /// fast-path skips `dedup_full_row_recorded` when the input
@@ -1022,19 +1213,17 @@ pub struct CudaKernelProvider {
     /// through to the existing dedup pipeline.
     wcoj_layout_fast_path_hit_count: AtomicU64,
     /// Diagnostic counter for generic WCOJ layout-sort helper
-    /// invocations. Used by goal-038-B dispatch-plan certs to
+    /// invocations. Used by K-clique dispatch-plan certifications to
     /// prove K-clique runtime dispatch no longer routes every edge
     /// through the old all-edge `wcoj_layout_sort_*_recorded` path.
     wcoj_layout_sort_invocation_count: AtomicU64,
-    /// Authorization 5 G_HIST_KC diagnostic counter: number of
-    /// K-clique leader-edge metadata builds.
+    /// Diagnostic counter for K-clique leader-edge metadata builds.
     kclique_metadata_build_count: AtomicU64,
-    /// Authorization 5 G_HIST_KC diagnostic counter: cumulative
-    /// nanoseconds spent building K-clique leader-edge metadata.
+    /// Diagnostic counter for cumulative nanoseconds spent building K-clique
+    /// leader-edge metadata.
     kclique_metadata_build_nanos: AtomicU64,
-    /// W3.3 routing counter: successful triangle dispatches
-    /// accepted through the histogram-guided block-slice provider
-    /// entry.
+    /// Histogram-guided triangle WCOJ routing counter: successful dispatches
+    /// accepted through the block-slice provider entry.
     wcoj_triangle_hg_dispatch_count: AtomicU64,
     /// Diagnostic-only: last WCOJ triangle dispatch's per-phase
     /// CUDA-event timings, populated by `wcoj_triangle_*_recorded`
@@ -1248,8 +1437,8 @@ impl CudaKernelProvider {
 
     /// Whether the recorded sort dispatch is enabled via env.
     /// Reads `XLOG_USE_RECORDED_SORT` or the umbrella
-    /// `XLOG_USE_RECORDED_OPS`. Slice #5 narrowed
-    /// `sort_recorded` to U32 / Symbol keys only — the public
+    /// `XLOG_USE_RECORDED_OPS`. The recorded-sort path is narrowed
+    /// to U32 / Symbol keys only — the public
     /// `sort()` dispatcher checks both this env flag AND key
     /// type compatibility before routing.
     pub(crate) fn use_recorded_sort_env() -> bool {
@@ -1295,7 +1484,7 @@ impl CudaKernelProvider {
         Self::env_flag("XLOG_USE_RECORDED_CSM") || Self::env_flag("XLOG_USE_RECORDED_OPS")
     }
 
-    /// Whether W66's bounded CSM CUDA Graph path is enabled.
+    /// Whether the bounded CSM CUDA Graph path is enabled.
     ///
     /// This is narrower than `XLOG_USE_RECORDED_CSM`: callers must first select
     /// the recorded CSM hash-join path, then opt into graph capture/replay with
@@ -1419,9 +1608,8 @@ impl CudaKernelProvider {
         self.wcoj_layout_fast_path_hit_count.load(Ordering::Relaxed)
     }
 
-    /// W3.3 test/diagnostic counter: successful triangle WCOJ
-    /// dispatches that routed through the HG block-slice provider
-    /// entry.
+    /// Histogram-guided block-slice triangle WCOJ test/diagnostic counter:
+    /// successful dispatches that routed through the provider entry.
     pub fn wcoj_triangle_hg_dispatch_count(&self) -> u64 {
         self.wcoj_triangle_hg_dispatch_count.load(Ordering::Relaxed)
     }
@@ -1434,8 +1622,7 @@ impl CudaKernelProvider {
     }
 
     /// Number of calls to `wcoj_layout_sort_*_recorded` since the
-    /// last reset. Diagnostic-only; used by Step 4 dispatch-plan
-    /// certification.
+    /// last reset. Diagnostic-only; used by dispatch-plan certification.
     pub fn wcoj_layout_sort_invocation_count(&self) -> u64 {
         self.wcoj_layout_sort_invocation_count
             .load(Ordering::Relaxed)
@@ -1490,8 +1677,8 @@ impl CudaKernelProvider {
             .fetch_add(nanos, Ordering::Relaxed);
     }
 
-    /// W3.3 runtime hook: record a successful HG block-slice
-    /// triangle dispatch.
+    /// Runtime hook: record a successful histogram-guided block-slice triangle
+    /// dispatch.
     #[doc(hidden)]
     pub fn record_wcoj_triangle_hg_dispatch(&self) {
         self.wcoj_triangle_hg_dispatch_count
@@ -2865,10 +3052,14 @@ mod tests {
 
         let locator = KernelArtifactLocator::new(None, None, None);
         for name in crate::kernel_manifest_data::KERNEL_CU_NAMES {
-            let source = resolve_module_source_with_locator(name, 999, &locator)
-                .unwrap_or_else(|| panic!("{name}: expected embedded portable PTX fallback"));
+            let sources = resolve_module_sources_with_locator(name, 999, &locator);
+            assert_eq!(
+                sources.len(),
+                1,
+                "{name}: expected only embedded portable PTX fallback"
+            );
 
-            match source {
+            match &sources[0] {
                 KernelModuleSource::EmbeddedPortablePtx { ptx } => {
                     assert!(
                         ptx.contains(".entry"),
@@ -3274,8 +3465,8 @@ mod tests {
     /// Without this propagation, buffers flowed through the relation store
     /// (`CompiledIlpProgram::put_relation` calls `clone_buffer` before
     /// storing) lose their host-visible count, forcing consumers to choose
-    /// between an extra D2H (blowing the D2H-budget gates used by M8/Phase 1
-    /// and beyond) and a hard error. This test pins the cache-propagation
+    /// between an extra D2H (violating the native bounded exact-induction
+    /// transfer-budget gates) and a hard error. This test pins the cache-propagation
     /// contract directly.
     #[test]
     fn test_clone_buffer_preserves_cached_row_count() {

@@ -627,12 +627,12 @@ fn public_adapter_gates_encoded_maxsat_on_parsed_all_operator_runtime_evidence()
 }
 
 #[test]
-fn public_adapter_gates_encoded_maxsat_on_g91_runtime_evidence() {
+fn public_adapter_gates_encoded_maxsat_on_gelfond1991_runtime_evidence() {
     let Some(provider) = try_provider() else {
         return;
     };
 
-    let result = execute_accepted_g91_possible_literal(&provider);
+    let result = execute_accepted_gelfond1991_possible_literal(&provider);
     let weighted = SolveInstance::with_weights(
         3,
         vec![
@@ -646,7 +646,7 @@ fn public_adapter_gates_encoded_maxsat_on_g91_runtime_evidence() {
     let mut adapter = GpuSolverProductionAdapter::new(provider.clone(), GpuCdclConfig::default());
     let mut workspace = adapter
         .new_workspace(weighted.num_vars, weighted.clauses.len() as u32)
-        .expect("new G91 MaxSAT workspace");
+        .expect("new Gelfond-1991 compatibility MaxSAT workspace");
     let branch_limit = upload_u32(&provider, weighted.num_vars);
     let contradictory_selection = [0usize, 1usize];
     let selections = [GpuSolverProductionWeightedMaxSatSelection {
@@ -663,7 +663,9 @@ fn public_adapter_gates_encoded_maxsat_on_g91_runtime_evidence() {
             &branch_limit,
             &selections,
         )
-        .expect("G91 accepted runtime evidence should gate encoded GPU MaxSAT search");
+        .expect(
+            "Gelfond-1991 compatibility runtime evidence should gate encoded GPU MaxSAT search",
+        );
 
     assert_eq!(report.candidate_evidence_records, 1);
     assert_eq!(report.optimum_score, 7);
@@ -708,10 +710,10 @@ fn public_adapter_gates_encoded_maxsat_on_g91_runtime_evidence() {
     assert_eq!(trace.cpu_learned_clause_transfers, 0);
     trace
         .require_zero_cpu_search()
-        .expect("G91 accepted MaxSAT path must not use CPU search");
-    trace
-        .require_production_metric_eligibility()
-        .expect("G91 accepted runtime evidence plus encoded GPU MaxSAT satisfies metric gate");
+        .expect("Gelfond-1991 compatibility MaxSAT path must not use CPU search");
+    trace.require_production_metric_eligibility().expect(
+        "Gelfond-1991 compatibility runtime evidence plus encoded GPU MaxSAT satisfies metric gate",
+    );
 }
 
 #[test]
@@ -1867,7 +1869,7 @@ fn execute_accepted_symbol_variable_bound_literal(
     result
 }
 
-fn execute_accepted_g91_possible_literal(
+fn execute_accepted_gelfond1991_possible_literal(
     provider: &Arc<CudaKernelProvider>,
 ) -> xlog_runtime::EpistemicGpuExecutionResult {
     let program = parse_program(
@@ -1879,9 +1881,9 @@ fn execute_accepted_g91_possible_literal(
         p(X) :- seed(X), possible p(X).
         "#,
     )
-    .expect("parse G91 accepted solver evidence program");
-    let executable =
-        compile_epistemic_gpu_execution(&program).expect("compile G91 epistemic GPU plan");
+    .expect("parse Gelfond-1991 compatibility accepted solver evidence program");
+    let executable = compile_epistemic_gpu_execution(&program)
+        .expect("compile Gelfond-1991 compatibility epistemic GPU plan");
     let mut executor = Executor::new(provider.clone());
 
     for (name, rel) in &executable.relation_ids {
@@ -1898,7 +1900,7 @@ fn execute_accepted_g91_possible_literal(
                 max_models_per_reduction: 1,
             },
         )
-        .expect("G91 possible program should execute on GPU before solver handoff");
+        .expect("Gelfond-1991 compatibility possible program should execute on GPU before solver handoff");
 
     assert_eq!(
         result.prepared.preflight.epistemic_mode,
@@ -1922,9 +1924,9 @@ fn execute_accepted_g91_possible_literal(
     assert_eq!(result.semantic_trace.cpu_candidate_enumerations, 0);
     assert_eq!(result.semantic_trace.cpu_world_view_validations, 0);
     assert_eq!(result.final_result_transfer.final_output_rows, 1);
-    result
-        .require_runtime_dispatch_certification()
-        .expect("G91 solver evidence should retain GPU runtime certification");
+    result.require_runtime_dispatch_certification().expect(
+        "Gelfond-1991 compatibility solver evidence should retain GPU runtime certification",
+    );
     result
 }
 

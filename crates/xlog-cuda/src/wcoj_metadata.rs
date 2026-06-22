@@ -45,6 +45,34 @@ pub struct WcojRelationMetadata<K: DeviceRepr> {
     pub row_count: u32,
 }
 
+/// Aggregate-fused triangle group-by-root sum/min/max selector: which
+/// triangle output variable supplies the aggregate
+/// value for the fused group-by-root sum/min/max kernels. The group key is
+/// always the variable-order root X; the value must itself be a triangle
+/// output variable (Y or Z) so the kernel can read it during traversal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WcojRootAggValue {
+    /// Aggregate over Y (`e_xy.col1` of the root row).
+    Y,
+    /// Aggregate over Z (the matched intersection value).
+    Z,
+}
+
+/// Aggregate-fused 4-cycle group-by-root sum/min/max selector: which
+/// 4-cycle output variable supplies the aggregate value for
+/// the fused group-by-root sum/min/max kernels. The group key is always
+/// the variable-order root W; the value must itself be a 4-cycle output
+/// variable (X, Y or Z) so the kernel can read it during traversal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Wcoj4CycleRootAggValue {
+    /// Aggregate over X (`e1.col1` of the root row).
+    X,
+    /// Aggregate over Y (`e2.col1` of the resolved work item).
+    Y,
+    /// Aggregate over Z (`e3.col1` of the resolved work item).
+    Z,
+}
+
 pub struct WcojTriangleHgWorkPlanU32 {
     pub xy_work_prefix: TrackedCudaSlice<u32>,
     pub xy_yz_start: TrackedCudaSlice<u32>,

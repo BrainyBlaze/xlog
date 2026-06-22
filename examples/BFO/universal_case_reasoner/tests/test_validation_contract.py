@@ -209,7 +209,7 @@ def _computed_production_evidence_fixture(path: Path) -> None:
         },
         "bundle_reuse": {
             "status": "PASS",
-            "v080_runtime_session": {
+            "runtime_session_reuse": {
                 "status": "PASS",
                 "logic_program_compile": True,
                 "session_evaluate": True,
@@ -221,15 +221,15 @@ def _computed_production_evidence_fixture(path: Path) -> None:
                     "htod_bytes": 0,
                 },
             },
-            "v085_language_contract": {
+            "language_contract_reuse": {
                 "status": "PASS",
                 "feature_count": 15,
                 "reused_artifacts": [
-                    "scripts/validate_v085_examples.py",
-                    "examples/v085-language/showcase",
+                    "language contract validation script",
+                    "examples/language-completeness/showcase",
                 ],
             },
-            "v086_runtime_optimizer": {
+            "runtime_optimizer_reuse": {
                 "status": "PASS",
                 "apply_relation_delta_batch": True,
                 "join_index_cache_stats": {
@@ -413,7 +413,7 @@ def _verified_production_evidence_fixture(path: Path) -> None:
         ),
         "bundle_reuse": {
             "status": "PASS",
-            "v080_runtime_session": {
+            "runtime_session_reuse": {
                 "status": "PASS",
                 "logic_program_compile": True,
                 "session_evaluate": True,
@@ -425,15 +425,15 @@ def _verified_production_evidence_fixture(path: Path) -> None:
                     "htod_bytes": 0,
                 },
             },
-            "v085_language_contract": {
+            "language_contract_reuse": {
                 "status": "PASS",
                 "feature_count": 15,
                 "reused_artifacts": [
-                    "scripts/validate_v085_examples.py",
-                    "examples/v085-language/showcase",
+                    "language contract validation script",
+                    "examples/language-completeness/showcase",
                 ],
             },
-            "v086_runtime_optimizer": {
+            "runtime_optimizer_reuse": {
                 "status": "PASS",
                 "apply_relation_delta_batch": True,
                 "join_index_cache_stats": {
@@ -523,23 +523,31 @@ def test_strict_validator_fails_closed_and_writes_summary(tmp_path: Path) -> Non
     assert summary["status"] == "FAIL"
     assert summary["strict"] is True
     assert summary["gpu_required"] is True
-    assert summary["branch"] == "feat/bfo-universal-case-reasoner"
+    expected_branch = subprocess.run(
+        ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+        cwd=ROOT,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    assert summary["branch"] == expected_branch
     assert summary["commands"][0]["argv"][:3] == ["validate.sh", "--strict", "--gpu-required"]
     assert len(summary["gqm_metrics"]) == 12
     assert {entry["id"] for entry in summary["gqm_metrics"]} == {f"Q{i}" for i in range(1, 13)}
-    assert len(summary["p0_gates"]) >= 8
-    assert all(gate["status"] in {"PASS", "FAIL"} for gate in summary["p0_gates"])
-    assert any(gate["status"] == "FAIL" for gate in summary["p0_gates"])
+    assert len(summary["production_blocking_gates"]) >= 8
+    assert all(gate["status"] in {"PASS", "FAIL"} for gate in summary["production_blocking_gates"])
+    assert any(gate["status"] == "FAIL" for gate in summary["production_blocking_gates"])
     assert summary["blockers"]
     assert all("requirement_id" in blocker for blocker in summary["blockers"])
     assert all("evidence" in blocker for blocker in summary["blockers"])
 
 
-def test_validation_plan_covers_all_p0_requirement_sections() -> None:
+def test_validation_plan_covers_all_production_blocking_requirement_sections() -> None:
     plan = (ROOT / "VALIDATION_PLAN.md").read_text(encoding="utf-8")
 
     for section in [
-        "P0 Hard Gates",
+        "Production-Blocking Gates",
         "BFO Transfer Conformance",
         "Domain Coverage",
         "Neural Requirements",
@@ -549,6 +557,7 @@ def test_validation_plan_covers_all_p0_requirement_sections() -> None:
         "Bundle Reuse",
         "Scale And Performance",
         "Evidence Schema",
+        "Public Benchmark Claim Boundary",
     ]:
         assert section in plan
 
@@ -767,21 +776,21 @@ def test_validator_requires_unseen_dataset_transfer_in_raw_records() -> None:
         }
     )
 
-    assert assessment["gates"]["GEN-006"]["passed"] is False
+    assert assessment["gates"]["unseen_dataset_transfer"]["passed"] is False
 
 
-def test_validator_requires_dilp_rule_induction_evidence() -> None:
+def test_validator_requires_differentiable_inductive_logic_rule_induction_evidence() -> None:
     validator = _validator_module()
 
-    assessment = validator._dilp_assessment({})
+    assessment = validator._differentiable_inductive_logic_assessment({})
 
     assert assessment["status"] == "FAIL"
-    assert assessment["gates"]["DILP-001"]["passed"] is False
-    assert assessment["gates"]["DILP-002"]["passed"] is False
-    assert assessment["gates"]["DILP-003"]["passed"] is False
-    assert assessment["gates"]["DILP-004"]["passed"] is False
-    assert assessment["gates"]["DILP-005"]["passed"] is False
-    assert assessment["gates"]["DILP-006"]["passed"] is False
+    assert assessment["gates"]["xlog_proof_paths"]["passed"] is False
+    assert assessment["gates"]["joint_training"]["passed"] is False
+    assert assessment["gates"]["rule_inventory"]["passed"] is False
+    assert assessment["gates"]["clause_ablations"]["passed"] is False
+    assert assessment["gates"]["proof_gradients"]["passed"] is False
+    assert assessment["gates"]["heldout_safe_induction"]["passed"] is False
 
 
 def _generalization_record(
@@ -931,7 +940,7 @@ def _generalization_report_fixture(
     }
 
 
-def test_validator_uses_multiclass_macro_f1_not_accuracy_for_gen003() -> None:
+def test_validator_uses_multiclass_macro_f1_not_accuracy_for_macro_transfer_quality() -> None:
     validator = _validator_module()
     domains = [
         "clinical_deterioration",
@@ -983,7 +992,7 @@ def test_validator_uses_multiclass_macro_f1_not_accuracy_for_gen003() -> None:
     )
 
     assert assessment["computed"]["macro_held_out_root_cause_f1"] < 0.90
-    assert assessment["gates"]["GEN-003"]["passed"] is False
+    assert assessment["gates"]["macro_transfer_quality"]["passed"] is False
 
 
 def test_validator_requires_generalization_uplift_over_strongest_baseline() -> None:
@@ -1027,8 +1036,117 @@ def test_validator_requires_generalization_uplift_over_strongest_baseline() -> N
         )
     )
 
-    assert assessment["gates"]["GEN-007"]["passed"] is False
+    assert assessment["gates"]["strong_baseline_uplift"]["passed"] is False
     assert assessment["computed"]["baseline_uplift"]["beats_strongest_baseline"] is False
+
+
+def test_validator_rejects_legacy_baseline_namespaces_that_contradict_strong_baseline_uplift() -> None:
+    validator = _validator_module()
+    domains = [
+        "clinical_deterioration",
+        "manufacturing_quality",
+        "cybersecurity_intrusion",
+        "lab_operations_incident",
+        "cloud_operations_rca",
+    ]
+    records = [
+        _generalization_record(
+            domain=domain,
+            index=index,
+            label=f"{domain}_root",
+            prediction=f"{domain}_root",
+        )
+        for domain in domains
+        for index in range(100)
+    ]
+    ablation_records = []
+    for record in records:
+        label = str(record["root_label"])
+        ablation_records.append(
+            {
+                "neuro_symbolic": {"root_label": label, "root_prediction": label},
+                "symbolic_only": {"root_label": label, "root_prediction": "wrong_root"},
+                "neural_only": {"root_label": label, "root_prediction": "wrong_root"},
+                "domain_specific_classifier": {
+                    "root_label": label,
+                    "root_prediction": "wrong_root",
+                },
+                "retrieval_rag_nearest_neighbor": {
+                    "root_label": label,
+                    "root_prediction": "wrong_root",
+                },
+                "majority_prior": {"root_label": label, "root_prediction": "wrong_root"},
+            }
+        )
+    payload = _generalization_report_fixture(
+        domains=domains,
+        records=records,
+        ablation_records=ablation_records,
+    )
+    payload["generalization_report"]["baseline_uplift"][
+        "relative_uplift_over_best_baseline_pct"
+    ] = 100.0
+    payload["baseline_metrics"] = {
+        "neural_only": 1.0,
+        "neuro_symbolic": 1.0,
+    }
+    payload["computed_metrics"] = {
+        "baseline_metrics": {
+            "neural_only": 1.0,
+            "neuro_symbolic": 1.0,
+        }
+    }
+
+    assessment = validator._generalization_assessment(payload)
+    strong_baseline_uplift_gate = assessment["gates"]["strong_baseline_uplift"]
+
+    assert strong_baseline_uplift_gate["passed"] is False
+    assert strong_baseline_uplift_gate["summary_metric_consistency"]["passed"] is False
+    assert sorted(strong_baseline_uplift_gate["summary_metric_consistency"]["legacy_metric_locations"]) == [
+        "baseline_metrics",
+        "computed_metrics.baseline_metrics",
+    ]
+
+
+def test_public_benchmark_assessment_requires_explicit_nonclaim_or_coverage() -> None:
+    validator = _validator_module()
+
+    missing = validator._public_benchmark_assessment({})
+    assert missing["passed"] is False
+    assert "PUBLIC_STATE_OF_THE_ART_REPORT_MISSING" in missing["blockers"]
+
+    nonclaim = validator._public_benchmark_assessment(
+        {
+            "public_benchmark_report": {
+                "status": "FAIL",
+                "external_state_of_the_art_claim": False,
+                "runner": "MISSING_PUBLIC_STATE_OF_THE_ART_RUNNER",
+                "covered_public_benchmark_families": [],
+                "blockers": [
+                    "MISSING_PUBLIC_STATE_OF_THE_ART_RUNNER",
+                    "PUBLIC_STATE_OF_THE_ART_FAMILY_COVERAGE",
+                    "PUBLIC_STATE_OF_THE_ART_UNMET",
+                ],
+            }
+        }
+    )
+    assert nonclaim["passed"] is True
+    assert nonclaim["external_state_of_the_art_claim"] is False
+    assert nonclaim["missing_public_benchmark_families"]
+
+    unsupported_claim = validator._public_benchmark_assessment(
+        {
+            "public_benchmark_report": {
+                "status": "PASS",
+                "external_state_of_the_art_claim": True,
+                "runner": "MISSING_PUBLIC_STATE_OF_THE_ART_RUNNER",
+                "covered_public_benchmark_families": [],
+                "blockers": [],
+            }
+        }
+    )
+    assert unsupported_claim["passed"] is False
+    assert "PUBLIC_STATE_OF_THE_ART_FAMILY_COVERAGE" in unsupported_claim["blockers"]
 
 
 def test_validator_requires_heldout_scoring_through_xlog_nn4() -> None:
@@ -1075,7 +1193,7 @@ def test_validator_requires_heldout_scoring_through_xlog_nn4() -> None:
 
     assessment = validator._generalization_assessment(payload)
 
-    assert assessment["gates"]["GEN-005"]["passed"] is False
+    assert assessment["gates"]["frozen_model_and_ranker"]["passed"] is False
 
 
 def test_validator_requires_adversarial_performance_thresholds() -> None:
@@ -1135,7 +1253,7 @@ def test_validator_requires_adversarial_performance_thresholds() -> None:
         )
     )
 
-    assert assessment["gates"]["GEN-009"]["passed"] is False
+    assert assessment["gates"]["adversarial_domain_shift"]["passed"] is False
     assert assessment["computed"]["adversarial_domain_shift"]["macro_f1_by_variant"]["sparse"] < 0.80
 
 
@@ -1233,10 +1351,10 @@ def test_strict_validator_consumes_neural_smoke_evidence(tmp_path: Path) -> None
 
     assert proc.returncode == 1
     summary = json.loads(output.read_text(encoding="utf-8"))
-    gates = {gate["requirement_id"]: gate for gate in summary["p0_gates"]}
+    gates = {gate["requirement_id"]: gate for gate in summary["production_blocking_gates"]}
     metrics = {metric["id"]: metric for metric in summary["gqm_metrics"]}
 
-    assert gates["P0-HARD-005"]["status"] == "PASS"
+    assert gates["real_cuda_neural_bridge"]["status"] == "PASS"
     assert metrics["Q4"]["status"] == "PASS"
     assert metrics["Q4"]["actual"] == "ranking_changed"
     assert any(path.endswith("evidence/neural_smoke.json") for path in summary["raw_output_paths"])
@@ -1266,12 +1384,12 @@ def test_strict_validator_consumes_bfo_fixture_smoke_evidence(tmp_path: Path) ->
 
     assert proc.returncode == 1
     summary = json.loads(output.read_text(encoding="utf-8"))
-    gates = {gate["requirement_id"]: gate for gate in summary["p0_gates"]}
+    gates = {gate["requirement_id"]: gate for gate in summary["production_blocking_gates"]}
     metrics = {metric["id"]: metric for metric in summary["gqm_metrics"]}
 
-    assert gates["TRANSFER-002"]["status"] == "FAIL"
-    assert gates["TRANSFER-003"]["status"] == "FAIL"
-    assert "production" in gates["TRANSFER-002"]["evidence"]
+    assert gates["heldout_root_cause_quality"]["status"] == "FAIL"
+    assert gates["accepted_intervention_precision"]["status"] == "FAIL"
+    assert "production" in gates["heldout_root_cause_quality"]["evidence"]
     assert metrics["Q5"]["status"] == "FAIL"
     assert metrics["Q6"]["status"] == "FAIL"
     assert metrics["Q7"]["status"] == "FAIL"
@@ -1302,11 +1420,11 @@ def test_strict_validator_consumes_ablation_evidence(tmp_path: Path) -> None:
 
     assert proc.returncode == 1
     summary = json.loads(output.read_text(encoding="utf-8"))
-    gates = {gate["requirement_id"]: gate for gate in summary["p0_gates"]}
+    gates = {gate["requirement_id"]: gate for gate in summary["production_blocking_gates"]}
     metrics = {metric["id"]: metric for metric in summary["gqm_metrics"]}
 
-    assert gates["NEURAL-002"]["status"] == "FAIL"
-    assert "production" in gates["NEURAL-002"]["evidence"]
+    assert gates["neuro_symbolic_baseline_uplift"]["status"] == "FAIL"
+    assert "production" in gates["neuro_symbolic_baseline_uplift"]["evidence"]
     assert metrics["Q8"]["status"] == "FAIL"
     assert any(path.endswith("evidence/ablation_smoke.json") for path in summary["raw_output_paths"])
 
@@ -1335,10 +1453,10 @@ def test_strict_validator_consumes_runtime_contract_evidence(tmp_path: Path) -> 
 
     assert proc.returncode == 1
     summary = json.loads(output.read_text(encoding="utf-8"))
-    gates = {gate["requirement_id"]: gate for gate in summary["p0_gates"]}
+    gates = {gate["requirement_id"]: gate for gate in summary["production_blocking_gates"]}
     metrics = {metric["id"]: metric for metric in summary["gqm_metrics"]}
 
-    assert gates["DEVICE-001"]["status"] == "PASS"
+    assert gates["device_resident_hot_loop"]["status"] == "PASS"
     assert metrics["Q9"]["status"] == "PASS"
     assert metrics["Q9"]["actual"] == 100.0
     assert metrics["Q10"]["status"] == "PASS"
@@ -1373,17 +1491,29 @@ def test_strict_validator_rejects_demo_only_generalization_evidence(tmp_path: Pa
 
     assert proc.returncode == 1
     summary = json.loads(output.read_text(encoding="utf-8"))
-    gates = {gate["requirement_id"]: gate for gate in summary["p0_gates"]}
+    gates = {gate["requirement_id"]: gate for gate in summary["production_blocking_gates"]}
 
     assert summary["status"] == "FAIL"
-    assert gates["TRANSFER-002"]["status"] == "FAIL"
-    assert gates["TRANSFER-003"]["status"] == "FAIL"
-    assert gates["NEURAL-002"]["status"] == "FAIL"
-    assert gates["XLOG-001"]["status"] == "PASS"
-    assert gates["GEN-001"]["status"] == "FAIL"
-    assert gates["GEN-002"]["status"] == "FAIL"
-    assert gates["GEN-010"]["status"] == "FAIL"
-    assert any(blocker["requirement_id"].startswith("GEN-") for blocker in summary["blockers"])
+    assert gates["heldout_root_cause_quality"]["status"] == "FAIL"
+    assert gates["accepted_intervention_precision"]["status"] == "FAIL"
+    assert gates["neuro_symbolic_baseline_uplift"]["status"] == "FAIL"
+    assert gates["shipped_xlog_programs_run"]["status"] == "PASS"
+    assert gates["leave_one_domain_out_coverage"]["status"] == "FAIL"
+    assert gates["minimum_heldout_domain_size"]["status"] == "FAIL"
+    assert gates["aggregate_generalization_recompute"]["status"] == "FAIL"
+    generalization_requirement_ids = {
+        "leave_one_domain_out_coverage",
+        "minimum_heldout_domain_size",
+        "macro_transfer_quality",
+        "heldout_candidate_independence",
+        "frozen_model_and_ranker",
+        "unseen_dataset_transfer",
+        "strong_baseline_uplift",
+        "statistical_confidence",
+        "adversarial_domain_shift",
+        "aggregate_generalization_recompute",
+    }
+    assert any(blocker["requirement_id"] in generalization_requirement_ids for blocker in summary["blockers"])
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required for strict validation")
@@ -1413,9 +1543,9 @@ def test_strict_validator_rejects_summary_only_production_transfer_evidence(
 
     assert proc.returncode == 1
     summary = json.loads(output.read_text(encoding="utf-8"))
-    gates = {gate["requirement_id"]: gate for gate in summary["p0_gates"]}
-    assert gates["TRANSFER-002"]["status"] == "FAIL"
-    assert "prediction_records" in gates["TRANSFER-002"]["evidence"]
+    gates = {gate["requirement_id"]: gate for gate in summary["production_blocking_gates"]}
+    assert gates["heldout_root_cause_quality"]["status"] == "FAIL"
+    assert "prediction_records" in gates["heldout_root_cause_quality"]["evidence"]
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required for strict validation")
@@ -1448,6 +1578,6 @@ def test_strict_validator_rejects_production_transfer_without_bundle_reuse(
 
     assert proc.returncode == 1
     summary = json.loads(output.read_text(encoding="utf-8"))
-    gates = {gate["requirement_id"]: gate for gate in summary["p0_gates"]}
-    assert gates["BUNDLE-001"]["status"] == "FAIL"
-    assert "bundle_reuse" in gates["BUNDLE-001"]["evidence"]
+    gates = {gate["requirement_id"]: gate for gate in summary["production_blocking_gates"]}
+    assert gates["merged_runtime_bundle_reuse"]["status"] == "FAIL"
+    assert "bundle_reuse" in gates["merged_runtime_bundle_reuse"]["evidence"]

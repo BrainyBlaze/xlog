@@ -15,15 +15,15 @@
       "severity": "blocker",
       "status": "resolved",
       "expected_behavior": "XLOG should let a project declare neural predicates, learned clauses, symbolic rule weights, and proof-level training objectives in one executable neuro-symbolic program.",
-      "actual_behavior": "Resolved in v0.8.9 by pyxlog.ilp.neurosymbolic.train_neurosymbolic_program, which accepts one source containing nn/4, trainable_rule, and train objectives, trains neural parameters plus symbolic rule weights, and emits a learned rule inventory.",
+      "actual_behavior": "The earlier closure was a scalar-bias surrogate (regex parsing, no engine evaluation) and was later resolved by train_neurosymbolic_program: it now desugars trainable_rule into guard neural predicates, compiles the whole source through the native xlog parser (pyxlog.Program.compile), and trains via CompiledProgram.forward_backward so the rule body is evaluated by the compiled GPU circuit and gradients flow through actual inference into both networks and rule weights. Credit assignment is exported through DifferentiableProofTraceMap.",
       "minimal_reproducer_command": "python examples/BFO/universal_case_reasoner/repro/repro_001_nn4_scoring_not_dilp.py",
       "reproducer_path": "repro/repro_001_nn4_scoring_not_dilp.py",
       "evidence_artifact_path": "programs/production_ranker.xlog",
       "resolution_artifact_path": "crates/pyxlog/python/pyxlog/ilp/neurosymbolic.py",
-      "proposed_fix": "Implemented a first-class trainable neuro-symbolic pyxlog rule form that binds nn/4 outputs to learned symbolic clause weights and emits learned rule metadata.",
+      "proposed_fix": "Route the symbolic part through the real engine: native parse of the whole program, rule weights as guard-predicate probabilities inside the compiled circuit, joint gradients from circuit evaluation, behavioral (mutation + exact-semantics) regression assertions.",
       "suggested_regression_test": {
         "repo_location": "python/tests/test_nn4_dilp_training_surface.py",
-        "assertion": "A minimal nn/4 program with a learnable clause trains both neural predicate parameters and symbolic rule weights, then emits a learned rule inventory."
+        "assertion": "Engine-reported query probabilities equal exact circuit conjunction semantics with frozen parameters; mutating only the trainable rule body changes the loss; invalid xlog is rejected by the real parser; proof-level credit assignment flows through DifferentiableProofTraceMap."
       }
     },
     {
@@ -33,7 +33,7 @@
       "severity": "blocker",
       "status": "resolved",
       "expected_behavior": "The compiler/runtime should expose proof traces as differentiable objects with clause IDs, support tensors, weights, and gradients.",
-      "actual_behavior": "Resolved in v0.8.9 by xlog_logic::DifferentiableProofTraceMap, which exports stable proof IDs, clause IDs, support atoms, symbolic weights, logistic loss, and nonzero clause gradients.",
+      "actual_behavior": "Resolved by xlog_logic::DifferentiableProofTraceMap, which exports stable proof IDs, clause IDs, support atoms, symbolic weights, logistic loss, and nonzero clause gradients.",
       "minimal_reproducer_command": "python examples/BFO/universal_case_reasoner/repro/repro_002_proof_paths_without_gradients.py",
       "reproducer_path": "repro/repro_002_proof_paths_without_gradients.py",
       "evidence_artifact_path": "programs/dilp_proof_paths.xlog",
@@ -46,12 +46,12 @@
     },
     {
       "id": "UCR-XLOG-003",
-      "title": "Learned rule inventories are not produced by pyxlog for UCR-style transfer",
+      "title": "Learned rule inventories are not produced by pyxlog for universal case reasoner-style transfer",
       "component": "pyxlog",
       "severity": "major",
       "status": "resolved",
       "expected_behavior": "pyxlog should produce an auditable learned-rule inventory with selected clauses, rejected clauses, scores, training folds, and held-out safety metadata.",
-      "actual_behavior": "Resolved in v0.8.9 by pyxlog.ilp.inventory.build_rule_inventory and train_and_promote(...).rule_inventory, including selected and rejected clauses, scores, training fold, held-out exclusions, and base-kernel checksum status.",
+      "actual_behavior": "Resolved by pyxlog.ilp.inventory.build_rule_inventory and train_and_promote(...).rule_inventory, including selected and rejected clauses, scores, training fold, held-out exclusions, and base-kernel checksum status.",
       "minimal_reproducer_command": "python examples/BFO/universal_case_reasoner/repro/repro_003_missing_rule_inventory_audit.py",
       "reproducer_path": "repro/repro_003_missing_rule_inventory_audit.py",
       "evidence_artifact_path": "tests/test_production_transfer.py",
@@ -69,15 +69,15 @@
       "severity": "major",
       "status": "resolved",
       "expected_behavior": "XLOG/pyxlog should expose runtime counters or contracts that fail a CUDA nn/4 ranking loop when it materializes score rows, calls scalar extraction, or performs hidden host transfers.",
-      "actual_behavior": "Resolved in v0.8.9 by pyxlog.runtime_audit.CudaExecutionAudit, a reusable hot-loop audit context that records D2H/H2D counters, score-row downloads, scalar extraction, and fail-closed host materialization violations.",
+      "actual_behavior": "Resolved by pyxlog.runtime_audit.CudaExecutionAudit, a reusable hot-loop audit context that records device-to-host and host-to-device counters, score-row downloads, scalar extraction, and fail-closed host materialization violations.",
       "minimal_reproducer_command": "python examples/BFO/universal_case_reasoner/repro/repro_004_scalar_transfer_contract_is_example_side.py",
       "reproducer_path": "repro/repro_004_scalar_transfer_contract_is_example_side.py",
       "evidence_artifact_path": "tests/test_production_transfer.py",
       "resolution_artifact_path": "crates/pyxlog/python/pyxlog/runtime_audit.py",
-      "proposed_fix": "Implemented a pyxlog CUDA execution audit context that records tensor materialization, scalar extraction, D2H/H2D counters, and score-row downloads for nn/4 calls.",
+      "proposed_fix": "Implemented a pyxlog CUDA execution audit context that records tensor materialization, scalar extraction, device-to-host and host-to-device counters, and score-row downloads for nn/4 calls.",
       "suggested_regression_test": {
         "repo_location": "python/tests/test_nn4_cuda_no_host_transfer_contract.py",
-        "assertion": "A CUDA nn/4 ranking session reports zero hot-loop D2H/H2D transfers and fails when score tensors are materialized on host inside the ranking loop."
+        "assertion": "A CUDA nn/4 ranking session reports zero hot-loop device-to-host and host-to-device transfers and fails when score tensors are materialized on host inside the ranking loop."
       }
     },
     {
@@ -87,7 +87,7 @@
       "severity": "major",
       "status": "resolved",
       "expected_behavior": "XLOG should help declare frozen kernels, adapter-only fact modules, held-out domains, candidate provenance, and leakage checks as reusable diagnostics.",
-      "actual_behavior": "Resolved in v0.8.9 by xlog_logic::diagnose_module_boundaries, which audits frozen kernel predicates, adapter-only rule violations, held-out module declarations, and held-out-label candidate provenance.",
+      "actual_behavior": "Resolved by xlog_logic::diagnose_module_boundaries, which audits frozen kernel predicates, adapter-only rule violations, held-out module declarations, and held-out-label candidate provenance.",
       "minimal_reproducer_command": "python examples/BFO/universal_case_reasoner/repro/repro_005_adapter_boundary_diagnostics_are_example_side.py",
       "reproducer_path": "repro/repro_005_adapter_boundary_diagnostics_are_example_side.py",
       "evidence_artifact_path": "tools/validate_universal_case_reasoner.py",
@@ -105,7 +105,7 @@
       "severity": "improvement",
       "status": "resolved",
       "expected_behavior": "XLOG or pyxlog should provide reusable aggregate diagnostics for leave-one-domain-out macro F1, per-domain minima, confidence intervals, paired tests, and adversarial variants.",
-      "actual_behavior": "Resolved in v0.8.9 by pyxlog.transfer_diagnostics.compute_transfer_diagnostics, which recomputes grouped macro F1, minimum domain F1, bootstrap confidence intervals, baseline uplift, paired sign tests, and missing group failures from raw records.",
+      "actual_behavior": "Resolved by pyxlog.transfer_diagnostics.compute_transfer_diagnostics, which recomputes grouped macro F1, minimum domain F1, bootstrap confidence intervals, baseline uplift, paired sign tests, and missing group failures from raw records.",
       "minimal_reproducer_command": "python examples/BFO/universal_case_reasoner/repro/repro_006_aggregate_transfer_metrics_need_validator.py",
       "reproducer_path": "repro/repro_006_aggregate_transfer_metrics_need_validator.py",
       "evidence_artifact_path": "tools/validate_universal_case_reasoner.py",

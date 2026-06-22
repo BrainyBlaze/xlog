@@ -28,6 +28,21 @@ fn find_nvcc() -> PathBuf {
     }
 }
 
+fn find_ptxas_override() -> Option<PathBuf> {
+    let value = match env::var("XLOG_PTXAS_PATH") {
+        Ok(value) if !value.trim().is_empty() => value,
+        _ => return None,
+    };
+    let path = PathBuf::from(value);
+    if path.exists() {
+        return Some(path);
+    }
+    panic!(
+        "XLOG_PTXAS_PATH points to missing ptxas: {}",
+        path.display()
+    );
+}
+
 fn find_kernel_sources(manifest_dir: &Path) -> PathBuf {
     let packaged_dir = manifest_dir.join("kernels");
     if packaged_dir.is_dir() {
@@ -78,8 +93,52 @@ fn write_embedded_kernel_data(out_dir: &Path) {
     source.push_str("        .map(|artifact| artifact.ptx)\n");
     source.push_str("}\n");
 
+    // Canonical artifact integrity hashes. Hash every kernel artifact this
+    // build produced (per-arch cubins + portable PTX). At load time the runtime
+    // re-hashes any staged cubin/PTX file and skips it when it diverges from the
+    // hash this binary was built against — so a stale staged artifact (e.g. a
+    // kernel signature changed but the staged copy was never refreshed) can
+    // never launch a mismatched kernel into an illegal address; the loader
+    // falls through to the always-fresh embedded portable PTX instead.
+    let mut artifact_hashes: Vec<(String, u64)> = Vec::new();
+    if let Ok(entries) = fs::read_dir(out_dir) {
+        for entry in entries.flatten() {
+            let file_name = entry.file_name().to_string_lossy().to_string();
+            if file_name.ends_with(".cubin") || file_name.ends_with(".portable.ptx") {
+                if let Ok(bytes) = fs::read(entry.path()) {
+                    artifact_hashes.push((file_name, fnv1a_64(&bytes)));
+                }
+            }
+        }
+    }
+    artifact_hashes.sort();
+    source.push_str("\npub const CANONICAL_ARTIFACT_HASHES: &[(&str, u64)] = &[\n");
+    for (file_name, hash) in &artifact_hashes {
+        source.push_str(&format!("    ({file_name:?}, {hash}u64),\n"));
+    }
+    source.push_str("];\n\n");
+    source.push_str("/// Integrity hash of a kernel artifact (by file name) as produced by this\n");
+    source.push_str("/// build, or `None` for a file name this build did not generate.\n");
+    source.push_str("pub fn canonical_artifact_hash(file_name: &str) -> Option<u64> {\n");
+    source.push_str("    CANONICAL_ARTIFACT_HASHES\n");
+    source.push_str("        .iter()\n");
+    source.push_str("        .find(|(name, _)| *name == file_name)\n");
+    source.push_str("        .map(|(_, hash)| *hash)\n");
+    source.push_str("}\n");
+
     fs::write(out_dir.join("embedded_kernel_data.rs"), source)
         .expect("write embedded kernel metadata");
+}
+
+/// FNV-1a 64-bit hash (dependency-free) used to fingerprint kernel artifacts so
+/// the loader can detect a staged artifact that diverges from this build.
+fn fnv1a_64(bytes: &[u8]) -> u64 {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for &byte in bytes {
+        hash ^= byte as u64;
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    hash
 }
 
 fn push_wcoj_register_cap(args: &mut Vec<String>, name: &str) {
@@ -90,6 +149,7 @@ fn push_wcoj_register_cap(args: &mut Vec<String>, name: &str) {
 
 fn main() {
     let nvcc = find_nvcc();
+    let ptxas = find_ptxas_override();
 
     let manifest_dir =
         env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR must be set by cargo");
@@ -110,6 +170,7 @@ fn main() {
     println!("cargo:rerun-if-env-changed=XLOG_NO_CUBIN");
     println!("cargo:rerun-if-env-changed=XLOG_CUBIN_ARCHS");
     println!("cargo:rerun-if-env-changed=NVCC_PATH");
+    println!("cargo:rerun-if-env-changed=XLOG_PTXAS_PATH");
 
     // Emit the canonical kernel artifact root for packaging/staging helpers.
     // The staging script consumes this OUT_DIR and copies the generated
@@ -123,37 +184,7 @@ fn main() {
         let cu_path = kernels_dir.join(format!("{name}.cu"));
         println!("cargo:rerun-if-changed={}", cu_path.display());
 
-        // (a) Generate cubin per arch (unless XLOG_NO_CUBIN=1).
-        if !no_cubin {
-            for arch in &cubin_archs {
-                let cubin_path = out_dir.join(format!("{name}.{arch}.cubin"));
-                let mut args = vec![
-                    "--cubin".to_string(),
-                    format!("-arch={arch}"),
-                    "-O3".to_string(),
-                    "-o".to_string(),
-                    cubin_path
-                        .to_str()
-                        .expect("cubin output path must be valid UTF-8")
-                        .to_string(),
-                    cu_path
-                        .to_str()
-                        .expect("kernel source path must be valid UTF-8")
-                        .to_string(),
-                ];
-                push_wcoj_register_cap(&mut args, name);
-                let status = Command::new(&nvcc)
-                    .args(&args)
-                    .status()
-                    .unwrap_or_else(|e| panic!("failed to run nvcc for {name}.{arch}.cubin: {e}"));
-
-                if !status.success() {
-                    panic!("nvcc failed to compile {name}.cu to cubin for {arch}");
-                }
-            }
-        }
-
-        // (b) Always generate portable PTX (sm_75 baseline — lowest arch in CUDA 13+).
+        // Always generate portable PTX (sm_75 baseline — lowest arch in CUDA 13+).
         let ptx_path = out_dir.join(format!("{name}.portable.ptx"));
         let mut args = vec![
             "--ptx".to_string(),
@@ -187,6 +218,64 @@ fn main() {
         // ISA. The sm_75 baseline kernels use no ISA-9-only constructs, so this is a
         // sound downgrade (verified offline with the matching ptxas).
         maybe_downgrade_ptx_version(&ptx_path);
+
+        // Generate cubin per arch (unless XLOG_NO_CUBIN=1). When XLOG_PTXAS_PATH
+        // is set, assemble from the downgraded PTX so a CUDA 12.4 ptxas can
+        // produce driver-compatible cubins even if the only local nvcc is newer.
+        if !no_cubin {
+            for arch in &cubin_archs {
+                let cubin_path = out_dir.join(format!("{name}.{arch}.cubin"));
+                if let Some(ptxas_path) = &ptxas {
+                    let mut args = vec![
+                        format!("-arch={arch}"),
+                        "-O3".to_string(),
+                        "-o".to_string(),
+                        cubin_path
+                            .to_str()
+                            .expect("cubin output path must be valid UTF-8")
+                            .to_string(),
+                        ptx_path
+                            .to_str()
+                            .expect("ptx input path must be valid UTF-8")
+                            .to_string(),
+                    ];
+                    push_wcoj_register_cap(&mut args, name);
+                    let status = Command::new(ptxas_path)
+                        .args(&args)
+                        .status()
+                        .unwrap_or_else(|e| {
+                            panic!("failed to run ptxas for {name}.{arch}.cubin: {e}")
+                        });
+                    if !status.success() {
+                        panic!("ptxas failed to assemble {name}.portable.ptx to cubin for {arch}");
+                    }
+                    continue;
+                }
+                let mut args = vec![
+                    "--cubin".to_string(),
+                    format!("-arch={arch}"),
+                    "-O3".to_string(),
+                    "-o".to_string(),
+                    cubin_path
+                        .to_str()
+                        .expect("cubin output path must be valid UTF-8")
+                        .to_string(),
+                    cu_path
+                        .to_str()
+                        .expect("kernel source path must be valid UTF-8")
+                        .to_string(),
+                ];
+                push_wcoj_register_cap(&mut args, name);
+                let status = Command::new(&nvcc)
+                    .args(&args)
+                    .status()
+                    .unwrap_or_else(|e| panic!("failed to run nvcc for {name}.{arch}.cubin: {e}"));
+
+                if !status.success() {
+                    panic!("nvcc failed to compile {name}.cu to cubin for {arch}");
+                }
+            }
+        }
     }
 
     write_embedded_kernel_data(&out_dir);

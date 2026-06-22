@@ -1,20 +1,21 @@
 # Enterprise Analytics Example
 
-Demonstrates v0.3.2 features in a corporate HR/Finance/Org context.
+Demonstrates module, symbol, user-defined function, recursion, and aggregation
+features in a corporate human-resources, finance, and organization context.
 
 ## Modules
 
 | Module | Purpose | Key Features |
 |--------|---------|--------------|
 | `hr/employees.xlog` | Employee data | **symbols** for names, departments, skills |
-| `finance/compensation.xlog` | Salary calculations | **UDFs** for bonus, tax, net pay |
-| `org/hierarchy.xlog` | Org structure | **recursive** management chains |
+| `finance/compensation.xlog` | Salary calculations | **user-defined functions** for bonus, tax, net pay |
+| `org/hierarchy.xlog` | Organization structure | **recursive** management chains |
 
 ## Features Demonstrated
 
 | Feature | Usage |
 |---------|-------|
-| `symbol` type | Employee names (`"Alice Chen"`), department IDs (`eng`), skill names (`rust`) |
+| `symbol` type | Employee names (`"Alice Chen"`), department identifiers (`eng`), skill names (`rust`) |
 | `func` (arithmetic) | `years_of_service`, `calculate_bonus`, `net_after_tax` |
 | `func` (conditional) | `bonus_multiplier`, `tax_bracket`, `seniority_bonus` |
 | `use` imports | Main imports all three modules |
@@ -22,7 +23,7 @@ Demonstrates v0.3.2 features in a corporate HR/Finance/Org context.
 | Recursion | `management_chain` for org traversal |
 | Aggregation | `count`, `sum`, `max` for analytics |
 
-## UDFs Defined
+## User-Defined Functions
 
 ```prolog
 func years_of_service(HireYear, CurrentYear) = CurrentYear - HireYear.
@@ -51,8 +52,10 @@ func seniority_bonus(YearsService) =
 
 ## Running
 
+From this example directory:
+
 ```bash
-cargo run -p xlog-cli -- run examples/xlog/80-v032-showcase/01-enterprise/main.xlog
+cargo run -p xlog-cli -- run main.xlog
 ```
 
 ## Queries
@@ -60,11 +63,11 @@ cargo run -p xlog-cli -- run examples/xlog/80-v032-showcase/01-enterprise/main.x
 | Query | Description |
 |-------|-------------|
 | `senior_engineer(Name, Skill, Level)` | Engineers with 5+ years and skill level 4+ |
-| `high_earner(Name, Dept, Total)` | Employees earning > $150k total |
-| `dept_total_comp(Dept, Total)` | Total compensation by department |
+| `high_earner(Name, Department, Total)` | Employees earning > $150k total |
+| `dept_total_comp(Department, Total)` | Total compensation by department |
 | `expert_skill(Name, Skill)` | Employees with level-5 skills |
-| `management_chain(e009, Mgr, Level)` | Management chain for employee e009 |
-| `large_team_manager(Name, Dept, Size)` | Managers with 3+ direct reports |
+| `management_chain(e009, Manager, Level)` | Management chain for employee e009 |
+| `large_team_manager(Name, Department, Size)` | Managers with 3+ direct reports |
 | `team_size(Team, Size)` | Size of each team |
 
 ## Data Volume

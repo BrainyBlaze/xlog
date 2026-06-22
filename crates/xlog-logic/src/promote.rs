@@ -1,6 +1,6 @@
-//! v0.6.5 slice 1 — `MultiWayJoin` promotion pass.
-//! Goal-039 W6.3 — `ChainJoin` promotion for 2-atom chains.
-//! v0.6.5 slice 4 — recursive-SCC promotion gated on linear recursion.
+//! `MultiWayJoin` promotion pass.
+//! `ChainJoin` promotion for 2-atom chains.
+//! Recursive-SCC promotion for occurrence-level recursive bodies.
 //!
 //! Walks an [`ExecutionPlan`] (post-lowering, post-optimizer) and
 //! rewrites recognized triangle / 4-cycle / K-clique subtrees in
@@ -10,8 +10,8 @@
 //! ## Eligibility
 //!
 //! Exact-match against the canonical lowered-and-optimized triangle
-//! shape — the same tree the v0.6.2 executor's `match_triangle_rir`
-//! recognized:
+//! shape — the same tree shape recognized by the legacy triangle
+//! executor matcher:
 //!
 //! ```text
 //! Project {
@@ -32,11 +32,11 @@
 //! }
 //! ```
 //!
-//! 4-cycle has the analogous canonical lowered shape (slice 2). Any
+//! 4-cycle has the analogous canonical lowered shape. Any
 //! deviation in shape, predicate-pushdown-altered Join, or
 //! computed-projection variants is left untouched.
 //!
-//! ## Recursive SCC handling (slice 4 + W4.1)
+//! ## Recursive SCC handling
 //!
 //! The promoter does not blanket-skip recursive SCCs. It gates
 //! per-rule on the number of body Scans whose RelId resolves to a
@@ -46,17 +46,17 @@
 //! |-------------------------|------------------------------------------|
 //! | 0 (stable rule)         | Promote                                  |
 //! | 1 (linear recursion)    | Promote                                  |
-//! | ≥ 2 (multi-recursion)   | Promote (W4.1 — paper P1 admits this)    |
+//! | ≥ 2 (multi-recursion)   | Promote                                  |
 //!
-//! Per paper P1 (arXiv:2604.20073), semi-naïve evaluation reasons
-//! over body-clause OCCURRENCES, not predicate names. Multi-
-//! recursive bodies including same-predicate self-recursive
+//! Per arXiv:2604.20073, semi-naïve evaluation reasons over
+//! body-clause OCCURRENCES, not predicate names. Multi-recursive
+//! bodies including same-predicate self-recursive
 //! occurrences (e.g. `tri(X,Y,Z) :- p(X,Y), p(Y,Z), q(X,Z)` with
 //! `p` recursive) are admitted. The recursive engine
 //! (`Executor::execute_recursive_scc`) consumes the resulting
 //! `MultiWayJoin` via `execute_wcoj_or_fallback_node`, dispatching
 //! WCOJ kernels on the seeding pass and on each iteration's variant.
-//! The W4.1 `rewrite_scan_nth` occurrence-identity fix at
+//! The runtime occurrence-identity rewrite at
 //! `crates/xlog-runtime/src/executor/rewrite.rs:303-311 + :477-504`
 //! ensures per-variant rewrites preserve the N-th occurrence
 //! independently in `MultiWayJoin.inputs` and `MultiWayJoin.fallback`.
@@ -73,8 +73,8 @@
 //! * Cost model, selectivity reordering, variable-ordering choices.
 //! * Stream-aligned multiplexing and adaptive histogram resolution
 //!   for recursive cliques.
-//! * 4-way / general-arity admission beyond triangle / 4-cycle —
-//!   slice 5.
+//! * 4-way / general-arity admission beyond triangle / 4-cycle /
+//!   supported K-clique and generic Free Join paths.
 
 use std::collections::HashMap;
 use xlog_core::RelId;
@@ -104,53 +104,92 @@ use crate::wcoj_var_ordering::{wcoj_cost_gate_predicts_wcoj, WcojVariableOrderin
 /// resolve body Scans against the head SCC's predicate set. Pass
 /// `Compiler::rel_ids()` (or `Lowerer::rel_ids()`) at the call site.
 ///
-/// **Recursive SCC bodies (slice 4 + W4.1).** Multi-recursive
+/// **Recursive SCC bodies.** Multi-recursive
 /// bodies are admitted, including same-predicate self-recursive
-/// occurrences (per paper P1 from arXiv:2604.20073 — semi-naïve
-/// evaluation reasons over body-clause OCCURRENCES, not predicate
-/// names). The triangle / 4-cycle shape gates already cap atom
-/// count at 3 / 4, so the recursive-Scan count is implicitly
-/// bounded; the runtime's per-variant rewrite + dispatch loop in
-/// `execute_recursive_scc` handles N variants correctly with the
-/// W4.1 `rewrite_scan_nth` occurrence-identity fix.
+/// occurrences (per arXiv:2604.20073 — semi-naïve evaluation reasons
+/// over body-clause OCCURRENCES, not predicate names). The triangle /
+/// 4-cycle shape gates already cap atom count at 3 / 4, so the
+/// recursive-Scan count is implicitly bounded; the runtime's
+/// per-variant rewrite + dispatch loop in `execute_recursive_scc`
+/// handles N variants correctly with the occurrence-identity rewrite.
 pub fn promote_multiway(
     plan: &mut ExecutionPlan,
     _rel_ids: &HashMap<String, RelId>,
     stats: &StatsManager,
     config: &CompilerConfig,
 ) {
+    // Generic Free Join: the general multiway promoter sizes Scan leaves
+    // from relation arities (the clique walker's hardcoded arity-2
+    // assumption does not generalize). Cloned up front because the
+    // per-rule loop holds `rules_by_scc` mutably.
+    let rel_arities = plan.rel_arities.clone();
     for (scc_id, rules) in plan.rules_by_scc.iter_mut().enumerate() {
         if plan.sccs.get(scc_id).is_none() {
             continue;
         }
         for rule in rules.iter_mut() {
-            // W4.1 gate: the slice-4 `recursive_scan_count > 1`
-            // cutoff is absent (paper P1 — admit occurrence-level
-            // multi-recursion). The triangle / 4-cycle shape gates
-            // (try_promote_*) cap atom count at 3 / 4, implicitly
-            // bounding the recursive-Scan count at the rule's atom
-            // count. Multi-recursive bodies (count >= 2), including
-            // same-predicate self-recursive (e.g.
-            // `tri(X,Y,Z) :- p(X,Y), p(Y,Z), q(X,Z)`), are admitted;
-            // the runtime's per-variant rewrite + dispatch loop in
-            // `execute_recursive_scc` handles N variants correctly
-            // after the W4.1 `rewrite_scan_nth` fix at
+            // Occurrence-level recursive gate: the previous
+            // `recursive_scan_count > 1` cutoff is absent. The
+            // triangle / 4-cycle shape gates (try_promote_*) cap atom
+            // count at 3 / 4, implicitly bounding the recursive-Scan
+            // count at the rule's atom count. Multi-recursive bodies
+            // (count >= 2), including same-predicate self-recursive
+            // (e.g. `tri(X,Y,Z) :- p(X,Y), p(Y,Z), q(X,Z)`), are
+            // admitted; the runtime's per-variant rewrite + dispatch
+            // loop in `execute_recursive_scc` handles N variants
+            // correctly after the occurrence-identity rewrite at
             // `crates/xlog-runtime/src/executor/rewrite.rs:303-311 +
             // :477-504`.
-            // Goal-039 G_W63_CHAIN: a 2-atom chain is not
+            // ChainJoin promotion: a 2-atom chain is not
             // paper-prescribed WCOJ; it is xlog-original routing
-            // motivated by the G_PRE trace. Production emits a
+            // motivated by profiler traces. Production emits a
             // first-class `ChainJoin` so walkers and dispatchers can
             // distinguish the chain route from paper-derived
             // `MultiWayJoin` shapes.
+            // Aggregate group-by fusion: aggregate rules wrap the join tree as
+            // Project{final} -> GroupBy -> Project{group} -> <join tree>,
+            // so the shape gates below (which see only the outer Project)
+            // never promote triangle bodies under aggregate heads. Descend
+            // through the wrapper and promote the inner triangle in place;
+            // the executor's fused group-by-root count hook dispatches it,
+            // and a declined dispatch still executes the embedded binary
+            // fallback unchanged.
+            if try_promote_triangle_inside_aggregate(&mut rule.body, stats, config) {
+                continue;
+            }
+            // 4-cycle aggregate descent: sibling of the descent above (atom-count gates
+            // make the two matchers disjoint). The executor's fused hook
+            // dispatches Count only; declined dispatches still execute the
+            // embedded binary fallback unchanged.
+            if try_promote_4cycle_inside_aggregate(&mut rule.body, stats, config) {
+                continue;
+            }
+            // K-clique aggregate descent: k = 5, 6 sibling of the descents above
+            // (scan-count gates keep all three matchers disjoint). The
+            // executor's fused hook dispatches Count grouped by the
+            // plan's root variable only; declined dispatches still
+            // execute the embedded binary fallback unchanged.
+            if try_promote_clique_inside_aggregate(&mut rule.body, stats) {
+                continue;
+            }
+            // Generic multiway aggregate descent: sibling of the descents above
+            // — any >=3-atom inner-join tree under an aggregate
+            // wrapper that no dedicated descent recognized becomes a
+            // FreeJoin-marked MultiWayJoin. The executor's fused hook
+            // dispatches factorized count-by-root only; declined
+            // dispatches still execute the embedded binary fallback
+            // unchanged.
+            if try_promote_general_multiway_inside_aggregate(&mut rule.body, &rel_arities) {
+                continue;
+            }
             if let Some(promoted) = try_promote_chain(&rule.body) {
                 rule.body = promoted;
                 continue;
             }
-            // W2.6 robustness: the lowerer's bushy DP planner may
+            // Canonical-shape robustness: the lowerer's bushy DP planner may
             // emit a right-deep `Project(Join(Scan, Join(Scan,
             // Scan)))` triangle for small-card inputs (snapshot-driven
-            // recompile flow) — semantically a triangle, but slice-1's
+            // recompile flow) — semantically a triangle, but the original
             // canonical-shape matcher rejects it. `normalize_*_to_left_deep`
             // detects those alternative-but-equivalent shapes and
             // commutativity-rewrites them to the canonical left-deep
@@ -168,7 +207,7 @@ pub fn promote_multiway(
                 rule.body = promoted;
                 continue;
             }
-            // W3.2/W6.4 + Authorization 5 — k=5..k=8 clique promotion. Tree-flatten +
+            // K-clique promotion for k=5..k=8. Tree-flatten +
             // complete-K_k validation. Robust to left-deep /
             // right-deep / bushy. Order is doc anchor only;
             // a body matching one K cannot also match another
@@ -183,11 +222,23 @@ pub fn promote_multiway(
                 rule.body = promoted;
                 continue;
             }
+            // Generic Free Join — general >=3-atom inner-join bodies that
+            // no dedicated shape promoter recognized become a generic
+            // `MultiWayJoin` (plan: None). The executor derives a Free
+            // Join plan from `slot_vars` at dispatch time
+            // (`try_dispatch_free_join`); structural declines
+            // (non-prefix bound columns, non-u32/Symbol inputs,
+            // repeated cover vars, dedicated-shape carve-outs) execute
+            // the embedded binary fallback unchanged.
+            if let Some(promoted) = try_promote_general_multiway(&rule.body, &rel_arities) {
+                rule.body = promoted;
+                continue;
+            }
         }
     }
 }
 
-/// W2.2: encode each atom-column slot as a u8 in `0..6` —
+/// Triangle semantic-slot encoding: encode each atom-column slot as a u8 in `0..6` —
 /// `(atom_idx * 2) + col_idx` where `atom_idx` is `0` =
 /// inner-left, `1` = inner-right, `2` = outer-third.
 fn ac_idx(atom_idx: u8, col_idx: u8) -> u8 {
@@ -245,7 +296,7 @@ fn uf_union(parent: &mut [u8; 6], a: u8, b: u8) {
     }
 }
 
-/// W2.2 — semantic-slot inference for triangle bodies. Given
+/// Semantic-slot inference for triangle bodies. Given
 /// the inner-pair scans + outer scan + key shapes + project
 /// columns, deduce which atom is the XY-edge / YZ-edge /
 /// XZ-edge from the variable-equivalence graph. Returns
@@ -372,7 +423,7 @@ fn infer_triangle_semantics(
     Some((rel_xy?, rel_yz?, rel_xz?))
 }
 
-/// W2.6: detect a right-deep triangle body
+/// Right-deep triangle normalization: detect a right-deep triangle body
 /// `Project(Join(Scan(third), Join(Scan(inner_l), Scan(inner_r))))`
 /// and commutativity-rewrite it to the canonical left-deep
 /// form `Project(Join(Join(Scan(inner_l), Scan(inner_r)),
@@ -459,12 +510,12 @@ fn normalize_triangle_to_left_deep(node: &RirNode) -> Option<RirNode> {
     })
 }
 
-/// W2.6: detect a fully right-deep 4-cycle body
+/// Right-deep 4-cycle normalization: detect a fully right-deep 4-cycle body
 /// `Project(Join(Scan(R0), Join(Scan(R1), Join(Scan(R2), Scan(R3)))))`
 /// (the lowerer's bushy DP can pick this shape at small
 /// cardinalities) and rewrite to the canonical bushy form
 /// `Project(Join(Join(Scan(R0), Scan(R1)), Join(Scan(R2), Scan(R3))))`
-/// that the slice-2 4-cycle promoter matches.
+/// that the canonical 4-cycle promoter matches.
 ///
 /// The output column layout is preserved (both forms produce
 /// `[R0.0, R0.1, R1.0, R1.1, R2.0, R2.1, R3.0, R3.1]`), so
@@ -474,7 +525,7 @@ fn normalize_triangle_to_left_deep(node: &RirNode) -> Option<RirNode> {
 /// match the canonical 4-cycle topology
 /// (rotation-only `[1]/[0]` on each inner Join + outer keys
 /// `[0,1]/[5,0]`). Other shapes return `None` — caller falls
-/// back to the original body (and pre-W2.6 behavior).
+/// back to the original body (and previous canonical-shape behavior).
 fn normalize_4cycle_to_bushy(node: &RirNode) -> Option<RirNode> {
     let RirNode::Project {
         input: outer_input,
@@ -580,10 +631,284 @@ fn normalize_4cycle_to_bushy(node: &RirNode) -> Option<RirNode> {
     })
 }
 
-/// W2.2: recognize the canonical triangle in any valid
+/// Semantic triangle recognition: recognize the canonical triangle in any valid
 /// inner-key combination (`[1]/[0]`, `[1]/[1]`, `[0]/[0]`)
 /// and produce the equivalent `MultiWayJoin` with
 /// `inputs` arranged in canonical semantic order
+/// Aggregate group-by fusion: promote a triangle join tree sitting inside an
+/// aggregate rule's `Project{ GroupBy { Project { <join tree> } } }`
+/// wrapper. The inner tree is matched exactly like a top-level triangle
+/// body (via a synthesized canonical (X, Y, Z) projection), and on success
+/// the group projection's column indices are remapped from join-output
+/// space into the MultiWayJoin's (X, Y, Z) output space. Returns false —
+/// leaving the rule untouched — on any structural mismatch.
+fn try_promote_triangle_inside_aggregate(
+    body: &mut RirNode,
+    stats: &StatsManager,
+    config: &CompilerConfig,
+) -> bool {
+    let RirNode::Project { input: gb, .. } = body else {
+        return false;
+    };
+    let RirNode::GroupBy {
+        input: group_input, ..
+    } = gb.as_mut()
+    else {
+        return false;
+    };
+    let RirNode::Project {
+        input: inner,
+        columns: group_cols,
+    } = group_input.as_mut()
+    else {
+        return false;
+    };
+    // The matcher expects the canonical left-deep triangle projection
+    // (X, Y, Z) = join-output columns [0, 1, 3].
+    let canonical = RirNode::Project {
+        input: inner.clone(),
+        columns: vec![
+            ProjectExpr::Column(0),
+            ProjectExpr::Column(1),
+            ProjectExpr::Column(3),
+        ],
+    };
+    let normalized = normalize_triangle_to_left_deep(&canonical);
+    let candidate = normalized.as_ref().unwrap_or(&canonical);
+    let Some(promoted) = try_promote_triangle(candidate, stats, config) else {
+        return false;
+    };
+    let RirNode::MultiWayJoin { output_columns, .. } = &promoted else {
+        return false;
+    };
+    let mut remapped: Vec<ProjectExpr> = Vec::with_capacity(group_cols.len());
+    for col in group_cols.iter() {
+        let ProjectExpr::Column(c) = col else {
+            return false;
+        };
+        let Some(pos) = output_columns
+            .iter()
+            .position(|oc| matches!(oc, ProjectExpr::Column(x) if x == c))
+        else {
+            return false;
+        };
+        remapped.push(ProjectExpr::Column(pos));
+    }
+    *group_cols = remapped;
+    **inner = promoted;
+    true
+}
+
+/// 4-cycle aggregate group-by fusion: sibling of
+/// [`try_promote_triangle_inside_aggregate`]. Promotes a 4-cycle join tree
+/// sitting inside an aggregate rule's
+/// `Project{ GroupBy { Project { <join tree> } } }` wrapper. The inner tree
+/// is matched exactly like a top-level 4-cycle body via a synthesized
+/// canonical (W, X, Y, Z) projection (join-output columns [0, 1, 3, 5] of
+/// the canonical-cycle tree), and on success the group projection's column
+/// indices are remapped from join-output space into the MultiWayJoin's
+/// (W, X, Y, Z) output space — output position 0 is the variable-order
+/// root W by construction, which is what the executor's fused dispatch
+/// requires for the group key. Returns false — leaving the rule
+/// untouched — on any structural mismatch.
+fn try_promote_4cycle_inside_aggregate(
+    body: &mut RirNode,
+    stats: &StatsManager,
+    config: &CompilerConfig,
+) -> bool {
+    let RirNode::Project { input: gb, .. } = body else {
+        return false;
+    };
+    let RirNode::GroupBy {
+        input: group_input, ..
+    } = gb.as_mut()
+    else {
+        return false;
+    };
+    let RirNode::Project {
+        input: inner,
+        columns: group_cols,
+    } = group_input.as_mut()
+    else {
+        return false;
+    };
+    // The matcher expects the canonical 4-cycle projection
+    // (W, X, Y, Z) = join-output columns [0, 1, 3, 5].
+    let canonical = RirNode::Project {
+        input: inner.clone(),
+        columns: vec![
+            ProjectExpr::Column(0),
+            ProjectExpr::Column(1),
+            ProjectExpr::Column(3),
+            ProjectExpr::Column(5),
+        ],
+    };
+    let normalized = normalize_4cycle_to_bushy(&canonical);
+    let candidate = normalized.as_ref().unwrap_or(&canonical);
+    let Some(promoted) = try_promote_4cycle(candidate, stats, config) else {
+        return false;
+    };
+    let RirNode::MultiWayJoin { output_columns, .. } = &promoted else {
+        return false;
+    };
+    let mut remapped: Vec<ProjectExpr> = Vec::with_capacity(group_cols.len());
+    for col in group_cols.iter() {
+        let ProjectExpr::Column(c) = col else {
+            return false;
+        };
+        let Some(pos) = output_columns
+            .iter()
+            .position(|oc| matches!(oc, ProjectExpr::Column(x) if x == c))
+        else {
+            return false;
+        };
+        remapped.push(ProjectExpr::Column(pos));
+    }
+    *group_cols = remapped;
+    **inner = promoted;
+    true
+}
+
+/// K-clique aggregate group-by fusion: k = 5, 6 sibling of
+/// [`try_promote_triangle_inside_aggregate`]. Promotes a complete-K_k
+/// join tree sitting inside an aggregate rule's
+/// `Project{ GroupBy { Project { <join tree> } } }` wrapper.
+///
+/// Unlike triangle/4-cycle, the clique matcher derives head variables
+/// from a head projection over the join tree. The aggregate wrapper has
+/// no such projection, so this descent synthesizes one: union-find over
+/// the flattened global slot space yields the k variable classes, and
+/// one representative slot per class (in first-appearance order) forms
+/// the canonical k-variable projection handed to
+/// [`try_promote_clique_k`]. On success the group projection's column
+/// indices are remapped from join-output (global slot) space into the
+/// clique head-variable space via the same classes. K = 7/8 bodies are
+/// left untouched (no fused count kernels exist for them — the
+/// non-aggregate clique route would buy nothing under an aggregate
+/// wrapper that the executor cannot fuse). Returns false — leaving the
+/// rule untouched — on any structural mismatch.
+fn try_promote_clique_inside_aggregate(body: &mut RirNode, stats: &StatsManager) -> bool {
+    let RirNode::Project { input: gb, .. } = body else {
+        return false;
+    };
+    let RirNode::GroupBy {
+        input: group_input, ..
+    } = gb.as_mut()
+    else {
+        return false;
+    };
+    let RirNode::Project {
+        input: inner,
+        columns: group_cols,
+    } = group_input.as_mut()
+    else {
+        return false;
+    };
+    // Flatten the inner join tree directly (no head projection exists
+    // under the aggregate wrapper).
+    let mut scans: Vec<RelId> = Vec::new();
+    let mut key_pairs: Vec<(usize, usize)> = Vec::new();
+    if walk_clique_node(inner, &mut scans, &mut key_pairs).is_none() {
+        return false;
+    }
+    let k = match scans.len() {
+        10 => 5,
+        15 => 6,
+        _ => return false,
+    };
+    // Union-find on the global slot space; representative slot per
+    // class in first-appearance order defines the head variables.
+    let n_slots = 2 * scans.len();
+    let mut parent: Vec<usize> = (0..n_slots).collect();
+    for (a, b) in &key_pairs {
+        if *a >= n_slots || *b >= n_slots {
+            return false;
+        }
+        uf_union_clique(&mut parent, *a, *b);
+    }
+    let mut class_roots: Vec<usize> = Vec::new();
+    let mut first_slot_of_class: HashMap<usize, usize> = HashMap::new();
+    for slot in 0..n_slots {
+        let root = uf_find_clique(&mut parent, slot);
+        if !first_slot_of_class.contains_key(&root) {
+            first_slot_of_class.insert(root, slot);
+            class_roots.push(root);
+        }
+    }
+    if class_roots.len() != k {
+        return false;
+    }
+    // The clique matcher's orientation invariant requires every atom's
+    // col0 class to precede its col1 class in head order. The class
+    // digraph of a canonical complete-K_k body (one atom per unordered
+    // pair, consistent orientation) is a transitive tournament, whose
+    // unique topological order sorts classes by in-degree: head index h
+    // = the class with in-degree h. Duplicate in-degrees mean the
+    // orientation is not transitive (the top-level matcher would reject
+    // it too) — leave the rule untouched. NOTE: first-appearance slot
+    // order is NOT usable here because the lowerer's bushy DP plan
+    // reorders the scan leaves.
+    let class_idx: HashMap<usize, usize> = class_roots
+        .iter()
+        .enumerate()
+        .map(|(idx, root)| (*root, idx))
+        .collect();
+    let mut in_degree = vec![0usize; k];
+    for atom in 0..scans.len() {
+        let cls_a = uf_find_clique(&mut parent, 2 * atom);
+        let cls_b = uf_find_clique(&mut parent, 2 * atom + 1);
+        if cls_a == cls_b {
+            return false;
+        }
+        in_degree[class_idx[&cls_b]] += 1;
+    }
+    let mut class_pos_by_head = vec![usize::MAX; k];
+    for (pos, deg) in in_degree.iter().enumerate() {
+        if *deg >= k || class_pos_by_head[*deg] != usize::MAX {
+            return false;
+        }
+        class_pos_by_head[*deg] = pos;
+    }
+    let representative_slots: Vec<usize> = class_pos_by_head
+        .iter()
+        .map(|pos| first_slot_of_class[&class_roots[*pos]])
+        .collect();
+    let class_to_head: HashMap<usize, usize> = class_pos_by_head
+        .iter()
+        .enumerate()
+        .map(|(head_idx, pos)| (class_roots[*pos], head_idx))
+        .collect();
+    let canonical = RirNode::Project {
+        input: inner.clone(),
+        columns: representative_slots
+            .iter()
+            .map(|slot| ProjectExpr::Column(*slot))
+            .collect(),
+    };
+    let Some(promoted) = try_promote_clique_k(&canonical, k, stats) else {
+        return false;
+    };
+    // Remap the group projection from join-output (global slot) space
+    // into the clique head-variable space via the slot classes.
+    let mut remapped: Vec<ProjectExpr> = Vec::with_capacity(group_cols.len());
+    for col in group_cols.iter() {
+        let ProjectExpr::Column(c) = col else {
+            return false;
+        };
+        if *c >= n_slots {
+            return false;
+        }
+        let root = uf_find_clique(&mut parent, *c);
+        let Some(head_idx) = class_to_head.get(&root) else {
+            return false;
+        };
+        remapped.push(ProjectExpr::Column(*head_idx));
+    }
+    *group_cols = remapped;
+    **inner = promoted;
+    true
+}
+
 /// `[XY, YZ, XZ]` regardless of positional layout. Returns
 /// `None` for shape deviations.
 fn try_promote_triangle(
@@ -661,10 +986,10 @@ fn try_promote_triangle(
     ];
     let output_columns = columns.clone();
     let fallback = Box::new(node.clone());
-    // W2.1 + W2.6: dispatch to the cost model selected by
+    // Optional variable ordering: dispatch to the cost model selected by
     // `config.wcoj_variable_ordering`. With
     // `CompilerConfig::default()` (Disabled), no cost model
-    // runs and slice 1/2/4/W2.2 behavior is bit-identical.
+    // runs and default promotion behavior is bit-identical.
     use crate::compiler_config::WcojVarOrderingKind;
     use crate::wcoj_var_ordering::{
         build_triangle_var_order, HeatAwareLeaderModel, LeaderCardinalityModel,
@@ -689,7 +1014,7 @@ fn try_promote_triangle(
     })
 }
 
-/// Goal-039 G_W63_CHAIN: recognize a 2-atom inner chain
+/// Recognize a 2-atom inner chain
 /// `Project(Join(Scan, Scan))` with exactly one shared key column
 /// and wrap it as a production `ChainJoin`.
 fn try_promote_chain(node: &RirNode) -> Option<RirNode> {
@@ -734,7 +1059,7 @@ fn try_promote_chain(node: &RirNode) -> Option<RirNode> {
     })
 }
 
-/// W2.2: 4-cycle has 4 atoms × 2 cols = 8 slots. Encode as
+/// 4-cycle semantic-slot encoding: 4-cycle has 4 atoms × 2 cols = 8 slots. Encode as
 /// `(atom_idx * 2) + col_idx` where `atom_idx` is `0` =
 /// outer-left's left, `1` = outer-left's right, `2` =
 /// outer-right's left, `3` = outer-right's right.
@@ -794,7 +1119,7 @@ fn uf_union_8(parent: &mut [u8; 8], a: u8, b: u8) {
     }
 }
 
-/// W2.2 — semantic-slot inference for 4-cycle bodies. Given
+/// Semantic-slot inference for 4-cycle bodies. Given
 /// the four scans + key shapes + project columns, deduce
 /// which atom is the WX-edge / XY-edge / YZ-edge / ZW-edge
 /// from the variable-equivalence graph. Returns
@@ -920,7 +1245,7 @@ fn infer_4cycle_semantics(
     Some((rel_wx?, rel_xy?, rel_yz?, rel_zw?))
 }
 
-/// v0.6.5 slice 2 — recognize the canonical 4-cycle subtree and
+/// Recognize the canonical 4-cycle subtree and
 /// produce the equivalent `MultiWayJoin`.
 ///
 /// Target rule:
@@ -936,10 +1261,9 @@ fn infer_4cycle_semantics(
 /// This differs from triangle's left-deep shape; both promoters
 /// coexist by matching their respective canonical trees.
 ///
-/// Returns `None` for any deviation. Strict by design — slice 2's
-/// walker contract states only matchers/promoters with explicit
-/// shape qualifiers may shape-lock; this matcher locks 4-cycle
-/// specifically.
+/// Returns `None` for any deviation. Strict by design: only
+/// matchers/promoters with explicit shape qualifiers may require an
+/// exact shape, and this matcher requires 4-cycle specifically.
 fn try_promote_4cycle(
     node: &RirNode,
     stats: &StatsManager,
@@ -1004,7 +1328,7 @@ fn try_promote_4cycle(
         return None;
     };
 
-    // W2.2 — variable-graph deduction of which atom is
+    // Variable-graph deduction of which atom is
     // WX / XY / YZ / ZW.
     let (rel_wx, rel_xy, rel_yz, rel_zw) = infer_4cycle_semantics(
         *rel_ll, *rel_lr, *rel_rl, *rel_rr, ilk_l, irk_l, ilk_r, irk_r, olk, ork, columns,
@@ -1028,7 +1352,7 @@ fn try_promote_4cycle(
     ];
     let output_columns = columns.clone();
     let fallback = Box::new(node.clone());
-    // W2.1: ask the cost model whether to set a non-default
+    // Ask the cost model whether to set a non-default
     // leader. With `CompilerConfig::default()` (Disabled), this
     // always returns None.
     use crate::compiler_config::WcojVarOrderingKind;
@@ -1058,7 +1382,7 @@ fn try_promote_4cycle(
 }
 
 // ===============================================================
-// W3.2/W6.4 — K-clique promoter (k = 5..8).
+// K-clique promoter (k = 5..8).
 //
 // Tree-flatten + complete-K_k validation. Robust to left-deep /
 // right-deep / bushy lowered trees. Rejects:
@@ -1066,10 +1390,10 @@ fn try_promote_4cycle(
 //   * Non-canonical nodes (anything other than Project/Join/Scan).
 //   * Self-edge atoms (e(X, X) — same var in both columns).
 //   * Reversed atoms (e(v_j, v_i) for canonical (v_i, v_j) with
-//     i < j) — W3.2 does not implement column-swap layout for
-//     clique edges.
+//     i < j) — this promoter does not implement column-swap layout
+//     for clique edges.
 //   * Constants in atom positions.
-//   * Recursive scan bodies are admitted for Auth-5 K-clique
+//   * Recursive scan bodies are admitted for K-clique
 //     metadata refresh during semi-naive fixpoint.
 //   * Atom multisets that don't form the complete K_k edge set.
 // ===============================================================
@@ -1174,10 +1498,199 @@ fn walk_clique_node(
     }
 }
 
-/// W3.2/W6.4 K-clique promoter for k ∈ {5, 6, 7, 8}.
+/// Generic Free Join — general multiway flatten walker. Arity-aware
+/// sibling of [`walk_clique_node`]: sizes each Scan leaf from
+/// `arities` instead of the clique walker's hardcoded arity-2
+/// assumption, so global slot offsets are running width sums.
+/// Walks Join/Scan only; rejects non-Inner joins, keyless
+/// (Cartesian) joins — those stay on the bench-grounded nested-loop
+/// routing — and any other RIR variant. Returns the
+/// subtree width in global slots.
+fn walk_general_node(
+    node: &RirNode,
+    arities: &HashMap<RelId, usize>,
+    scans: &mut Vec<RelId>,
+    widths: &mut Vec<usize>,
+    key_pairs: &mut Vec<(usize, usize)>,
+) -> Option<usize> {
+    match node {
+        RirNode::Scan { rel } => {
+            let width = *arities.get(rel)?;
+            if width == 0 {
+                return None;
+            }
+            scans.push(*rel);
+            widths.push(width);
+            Some(width)
+        }
+        RirNode::Join {
+            left,
+            right,
+            left_keys,
+            right_keys,
+            join_type,
+        } => {
+            if !matches!(join_type, JoinType::Inner) {
+                return None;
+            }
+            // Offset of the left subtree = total width accumulated so
+            // far (widths fills in left-to-right traversal order).
+            let left_offset: usize = widths.iter().sum();
+            let left_width = walk_general_node(left, arities, scans, widths, key_pairs)?;
+            let right_offset = left_offset + left_width;
+            let right_width = walk_general_node(right, arities, scans, widths, key_pairs)?;
+            if left_keys.len() != right_keys.len() || left_keys.is_empty() {
+                return None;
+            }
+            for (lk, rk) in left_keys.iter().zip(right_keys.iter()) {
+                if *lk >= left_width || *rk >= right_width {
+                    return None;
+                }
+                key_pairs.push((left_offset + *lk, right_offset + *rk));
+            }
+            Some(left_width + right_width)
+        }
+        _ => None,
+    }
+}
+
+/// Generic Free Join — promote a general ≥3-atom inner-join body (any
+/// arity mix, any join-tree shape) to a generic `MultiWayJoin`
+/// carrying dense variable classes in `slot_vars` and `plan: None`.
 ///
-/// Per the W3.2 plan iteration 4 lock: tree-flatten + complete-
-/// K_k validation. Robust to left-deep / right-deep / bushy.
+/// Runs after every dedicated shape promoter declined in the
+/// per-rule loop (triangle / 4-cycle / K-clique successes `continue`
+/// past it), so dedicated shapes never reach this path. The executor
+/// (`try_dispatch_free_join`) derives a Free Join plan from
+/// `slot_vars` at dispatch time and silently declines to the
+/// embedded binary fallback for shapes the GPU engine cannot run.
+///
+/// Idempotent: only `Project(inner-join tree)` bodies match, so an
+/// already-promoted `MultiWayJoin` passes through unchanged.
+fn try_promote_general_multiway(
+    body: &RirNode,
+    arities: &HashMap<RelId, usize>,
+) -> Option<RirNode> {
+    let RirNode::Project { input, columns } = body else {
+        return None;
+    };
+    let mut scans: Vec<RelId> = Vec::new();
+    let mut widths: Vec<usize> = Vec::new();
+    let mut key_pairs: Vec<(usize, usize)> = Vec::new();
+    let total = walk_general_node(input, arities, &mut scans, &mut widths, &mut key_pairs)?;
+    if scans.len() < 3 {
+        return None;
+    }
+
+    // Union-find over the global slot space, then dense class ids in
+    // first-occurrence slot order. The executor treats `slot_vars`
+    // entries as opaque variable classes (it densely remaps again on
+    // its side), so first-occurrence numbering is canonical enough.
+    let mut parent: Vec<usize> = (0..total).collect();
+    for (a, b) in &key_pairs {
+        if *a >= total || *b >= total {
+            return None;
+        }
+        uf_union_clique(&mut parent, *a, *b);
+    }
+    let mut class_of_root: HashMap<usize, u32> = HashMap::new();
+    let mut slot_class: Vec<u32> = Vec::with_capacity(total);
+    for slot in 0..total {
+        let root = uf_find_clique(&mut parent, slot);
+        let next = class_of_root.len() as u32;
+        let cls = *class_of_root.entry(root).or_insert(next);
+        slot_class.push(cls);
+    }
+
+    // Every projection entry must be a plain column inside the slot
+    // space; computed projections stay on the binary path.
+    for c in columns {
+        let ProjectExpr::Column(k) = c else {
+            return None;
+        };
+        if *k >= total {
+            return None;
+        }
+    }
+
+    let inputs: Vec<RirNode> = scans
+        .iter()
+        .map(|rel| RirNode::Scan { rel: *rel })
+        .collect();
+    let mut slot_vars: Vec<Vec<Option<u32>>> = Vec::with_capacity(scans.len());
+    let mut offset = 0usize;
+    for &w in &widths {
+        slot_vars.push((offset..offset + w).map(|s| Some(slot_class[s])).collect());
+        offset += w;
+    }
+
+    Some(RirNode::MultiWayJoin {
+        inputs,
+        slot_vars,
+        output_columns: columns.clone(),
+        fallback: Box::new(body.clone()),
+        // Provenance marker: `inputs` are the fallback's Scan leaves
+        // in traversal order, so `output_columns` coincides with the
+        // concatenated-inputs column space — the contract the Free
+        // Join dispatcher requires (dedicated promoters reorder
+        // `inputs` canonically and must never carry this variant).
+        plan: Some(MultiwayPlan::FreeJoin),
+        var_order: None,
+    })
+}
+
+/// Generic multiway aggregate group-by fusion: general multiway sibling of
+/// [`try_promote_triangle_inside_aggregate`]. Promotes any >=3-atom
+/// inner-join tree sitting inside an aggregate rule's
+/// `Project{ GroupBy { Project { <join tree> } } }` wrapper through
+/// [`try_promote_general_multiway`].
+///
+/// Unlike the dedicated descents, no column remapping gymnastics are
+/// needed: FreeJoin-marked nodes keep `output_columns` in the
+/// join-output column space (inputs are the tree's Scan leaves in
+/// traversal order), so the group projection's columns are handed to
+/// the promoter as the head projection verbatim and the group
+/// projection becomes the identity over the MultiWayJoin's output.
+/// Returns false — leaving the rule untouched — on any structural
+/// mismatch.
+fn try_promote_general_multiway_inside_aggregate(
+    body: &mut RirNode,
+    arities: &HashMap<RelId, usize>,
+) -> bool {
+    let RirNode::Project { input: gb, .. } = body else {
+        return false;
+    };
+    let RirNode::GroupBy {
+        input: group_input, ..
+    } = gb.as_mut()
+    else {
+        return false;
+    };
+    let RirNode::Project {
+        input: inner,
+        columns: group_cols,
+    } = group_input.as_mut()
+    else {
+        return false;
+    };
+    let candidate = RirNode::Project {
+        input: inner.clone(),
+        columns: group_cols.clone(),
+    };
+    let Some(promoted) = try_promote_general_multiway(&candidate, arities) else {
+        return false;
+    };
+    // The MultiWayJoin's output IS the group projection, so the group
+    // projection becomes positional identity over it.
+    *group_cols = (0..group_cols.len()).map(ProjectExpr::Column).collect();
+    **inner = promoted;
+    true
+}
+
+/// K-clique promoter for k ∈ {5, 6, 7, 8}.
+///
+/// Uses tree-flatten + complete-K_k validation. Robust to left-deep
+/// / right-deep / bushy.
 /// Rejects filter wrappers, reversed atoms, self-edges,
 /// constants, and any non-canonical shape; admits recursive
 /// bodies so runtime metadata refresh can observe each merge.
@@ -1275,8 +1788,8 @@ fn try_promote_clique_k(body: &RirNode, k: usize, stats: &StatsManager) -> Optio
         let head_b = class_to_head_idx.get(&cls_b)?;
         // 11. Reversed-atom rejection: canonical form requires
         // col0 maps to lower head idx, col1 to higher. If col0
-        // is at higher idx, the atom is reversed (W3.2 does not
-        // implement column-swap layout for clique edges).
+        // is at higher idx, the atom is reversed (this promoter does
+        // not implement column-swap layout for clique edges).
         if *head_a > *head_b {
             return None;
         }
@@ -1336,10 +1849,10 @@ fn try_promote_clique_k(body: &RirNode, k: usize, stats: &StatsManager) -> Optio
     let shape = build_kclique_shape(k, &reordered_scans)?;
     let planner_stats = kclique_planner_stats(stats);
 
-    // Cost-planned K-clique routing follows paper §7.3's
-    // conditional-win-on-skew caveat and lock 29: recognized
-    // paper-aligned shapes emit a positive route. Hash is represented
-    // by `PlannedHashRoute`, never by a post-recognition raw decline.
+    // Cost-planned K-clique routing follows the arXiv paper's
+    // conditional-win-on-skew caveat: recognized paper-aligned shapes
+    // emit a positive route. Hash is represented by
+    // `PlannedHashRoute`, never by a post-recognition raw decline.
     let (plan, var_order) = match plan_kclique_var_order(&shape, &planner_stats) {
         Some(full_order) => {
             let evidence = rir_cost_prediction(&full_order);
@@ -1457,7 +1970,7 @@ fn kclique_variable_order_from_plan(
         key_columns: vec![vec![0, 1]],
     };
 
-    // Paper §5 Figure 3: Helper-relation splitting elevates buried inner-variable skew per Authorization 5 (2026-05-17)
+    // Helper-relation splitting elevates buried inner-variable skew.
     let helper_split_specs = plan.helper_split_specs.clone();
     Some(KCliqueVariableOrder::new(
         k,
@@ -1680,7 +2193,7 @@ mod tests {
         assert_eq!(first, second);
     }
 
-    /// W2.2: triangle with X-shared inner pair — inner keys
+    /// Triangle with X-shared inner pair — inner keys
     /// `[0]/[0]`, outer keys `[1, 3]/[0, 1]`, project `[0, 1, 3]`.
     /// Body atoms at positions: l2 = e_xy, r2 = e_xz, r1 = e_yz.
     /// Promoter must reorder inputs to canonical semantic order
@@ -1742,7 +2255,7 @@ mod tests {
         );
     }
 
-    /// W2.2: triangle with Z-shared inner pair — inner keys
+    /// Triangle with Z-shared inner pair — inner keys
     /// `[1]/[1]`, outer keys `[0, 2]/[0, 1]`, project `[0, 2, 3]`.
     /// Body atoms at positions: l2 = e_xz, r2 = e_yz, r1 = e_xy.
     /// Promoter must reorder inputs to canonical semantic order
@@ -1806,9 +2319,9 @@ mod tests {
 
     #[test]
     fn promotes_triangle_with_rotated_projection_columns() {
-        // v0.6.5 W2.2: slice 1's strict rejection of non-canonical
-        // projection columns is intentionally relaxed. The
-        // variable-graph promoter recognizes the triangle
+        // The original strict rejection of non-canonical projection
+        // columns is intentionally relaxed. The variable-graph
+        // promoter recognizes the triangle
         // topology regardless of which head position picks
         // which variable, as long as the 3 head columns pick
         // 3 distinct equivalence classes. The emitted
@@ -1848,7 +2361,7 @@ mod tests {
             &StatsManager::new(),
             &CompilerConfig::default(),
         );
-        // Body now promoted to MultiWayJoin (W2.2 contract).
+        // Body now promoted to MultiWayJoin by the semantic-slot contract.
         let RirNode::MultiWayJoin {
             slot_vars,
             output_columns,
@@ -1917,7 +2430,7 @@ mod tests {
     #[test]
     fn rejects_filter_above_outer_join() {
         // An optimizer may insert a Filter between the outer Project
-        // and the outer Join. v1 promoter does not recognize this.
+        // and the outer Join. This promoter does not recognize this.
         let inner = RirNode::Join {
             left: Box::new(RirNode::Scan { rel: RelId(1) }),
             right: Box::new(RirNode::Scan { rel: RelId(2) }),
@@ -1997,10 +2510,10 @@ mod tests {
     }
 
     // -----------------------------------------------------------
-    // v0.6.5 slice 4 — recursive-SCC promotion gates
+    // Recursive-SCC promotion gates
     // -----------------------------------------------------------
 
-    /// Slice 4 contract: a stable triangle (zero recursive Scans) in
+    /// Recursive promotion contract: a stable triangle (zero recursive Scans) in
     /// a recursive SCC IS promoted — the recursive engine's seeding
     /// pass dispatches WCOJ via `execute_wcoj_or_fallback_node`.
     /// Body Scans are RelId(1)/(2)/(3) and the SCC's predicate "tri"
@@ -2036,7 +2549,7 @@ mod tests {
         ));
     }
 
-    /// Slice 4 contract: a linear-recursive triangle (exactly one
+    /// Recursive promotion contract: a linear-recursive triangle (exactly one
     /// in-SCC Scan) IS promoted. Build a triangle whose RelId(2)
     /// corresponds to the head SCC's predicate "tri" and assert
     /// promotion despite `is_recursive: true`.
@@ -2071,11 +2584,11 @@ mod tests {
         ));
     }
 
-    /// W4.1 contract (paper P1): a recursive SCC body with ≥ 2
-    /// recursive Scans (here: 2 distinct in-SCC predicates) IS
-    /// promoted to `MultiWayJoin`. Mark "tri_a" → RelId(1) and
-    /// "tri_b" → RelId(2) so two of the three body Scans count as
-    /// in-SCC.
+    /// Occurrence-level recursive promotion contract: a recursive SCC
+    /// body with ≥ 2 recursive Scans (here: 2 distinct in-SCC
+    /// predicates) IS promoted to `MultiWayJoin`. Mark "tri_a" →
+    /// RelId(1) and "tri_b" → RelId(2) so two of the three body
+    /// Scans count as in-SCC.
     #[test]
     fn promotes_multirec_triangle_in_recursive_scc() {
         let mut builder = PlanBuilder::new();
@@ -2096,7 +2609,7 @@ mod tests {
         let mut rel_ids = HashMap::new();
         rel_ids.insert("tri_a".to_string(), RelId(1));
         rel_ids.insert("tri_b".to_string(), RelId(2));
-        // Count == 2 ≥ 2 → W4.1 admits (paper P1).
+        // Count == 2 ≥ 2 → occurrence-level recursive promotion admits it.
         promote_multiway(
             &mut plan,
             &rel_ids,
@@ -2111,7 +2624,7 @@ mod tests {
 
     /// Mixed plan: a recursive SCC with a linear-recursive triangle
     /// (count 1) AND a non-recursive SCC with a stable triangle
-    /// (count 0). BOTH get promoted under the slice 4 contract.
+    /// (count 0). BOTH get promoted under the recursive promotion contract.
     #[test]
     fn promotes_linear_rec_and_non_rec_sccs_in_mixed_plan() {
         let mut builder = PlanBuilder::new();
@@ -2163,7 +2676,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------
-    // v0.6.5 slice 2 — 4-cycle promotion
+    // 4-cycle promotion
     // -----------------------------------------------------------
 
     /// Build the canonical lowered+optimized 4-cycle subtree —
@@ -2347,7 +2860,7 @@ mod tests {
         );
     }
 
-    /// W2.2: 4-cycle with the alternative bushy grouping
+    /// 4-cycle with the alternative bushy grouping
     /// `(e2⋈e3) + (e4⋈e1)` — left-inner shares Y, right-inner
     /// shares W. Atoms at positions: ll=e2(X,Y), lr=e3(Y,Z),
     /// rl=e4(Z,W), rr=e1(W,X). Promoter must reorder inputs
@@ -2469,7 +2982,7 @@ mod tests {
         );
     }
 
-    /// Slice 4 contract: stable 4-cycle (zero recursive Scans) IS
+    /// Recursive promotion contract: stable 4-cycle (zero recursive Scans) IS
     /// promoted in a recursive SCC.
     #[test]
     fn promotes_stable_4cycle_in_recursive_scc() {
@@ -2501,7 +3014,7 @@ mod tests {
         ));
     }
 
-    /// Slice 4 contract: linear-recursive 4-cycle (count 1) IS
+    /// Recursive promotion contract: linear-recursive 4-cycle (count 1) IS
     /// promoted.
     #[test]
     fn promotes_linear_recursive_4cycle() {
@@ -2536,8 +3049,8 @@ mod tests {
         ));
     }
 
-    /// W4.1 contract (paper P1): ≥ 2 recursive Scans in a 4-cycle
-    /// body IS promoted to `MultiWayJoin`.
+    /// Occurrence-level recursive promotion contract: ≥ 2 recursive
+    /// Scans in a 4-cycle body IS promoted to `MultiWayJoin`.
     #[test]
     fn promotes_multirec_4cycle_in_recursive_scc() {
         let mut builder = PlanBuilder::new();

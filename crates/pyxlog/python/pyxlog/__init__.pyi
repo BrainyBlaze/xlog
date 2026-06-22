@@ -23,6 +23,7 @@ from pyxlog._native import (
     CompiledProgram as CompiledProgram,
     EvalResult as EvalResult,
     McDeviceEvalResult as McDeviceEvalResult,
+    DifferentiableProofTraceMap as DifferentiableProofTraceMap,
     # Training
     EpochStats as EpochStats,
     TrainingHistory as TrainingHistory,
@@ -34,6 +35,7 @@ from pyxlog._native import (
     IlpTaggedCreditDeviceResult as IlpTaggedCreditDeviceResult,
     # DLPack / Arrow utilities
     dlpack_roundtrip as dlpack_roundtrip,
+    dlpack_is_cuda as dlpack_is_cuda,
 )
 
 # Arrow imports are feature-gated; expose them for type checkers but they may

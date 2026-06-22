@@ -10,6 +10,8 @@
 mod common;
 use common::setup_provider;
 
+use std::sync::{Mutex, MutexGuard, OnceLock};
+
 use cudarc::driver::DeviceSlice;
 #[cfg(feature = "host-io")]
 use xlog_prob::mc::McSamplingMethod;
@@ -17,6 +19,13 @@ use xlog_prob::mc::{
     compile_resident_plan, McEvalConfig, McNoHostStats, McProgram, McResidentResult,
     ResidentRejectKind,
 };
+
+fn resident_test_lock() -> MutexGuard<'static, ()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
 
 fn cfg(samples: usize, seed: u64) -> McEvalConfig {
     let mut c = McEvalConfig::default();
@@ -110,6 +119,7 @@ fn download_resident_diagnostics(
 /// N=1024 (constant in N => nothing is per-sample on the host).
 #[test]
 fn resident_fact_marginal_no_host_constant_in_n() {
+    let _resident_test_guard = resident_test_lock();
     let Some(provider) = setup_provider() else {
         eprintln!("Skipping: no CUDA device");
         return;
@@ -175,6 +185,7 @@ fn oracle_count(program: &McProgram, c: McEvalConfig, qi: usize) -> usize {
 #[cfg(feature = "host-io")]
 #[test]
 fn resident_pilot_prob_fact_marginal_exact() {
+    let _resident_test_guard = resident_test_lock();
     let Some(provider) = setup_provider() else {
         eprintln!("Skipping: no CUDA device");
         return;
@@ -195,6 +206,7 @@ fn resident_pilot_prob_fact_marginal_exact() {
 #[cfg(feature = "host-io")]
 #[test]
 fn resident_pilot_evidence_conditioning_exact() {
+    let _resident_test_guard = resident_test_lock();
     let Some(provider) = setup_provider() else {
         eprintln!("Skipping: no CUDA device");
         return;
@@ -218,6 +230,7 @@ fn resident_pilot_evidence_conditioning_exact() {
 #[cfg(feature = "host-io")]
 #[test]
 fn resident_pilot_multi_evidence_exact() {
+    let _resident_test_guard = resident_test_lock();
     let Some(provider) = setup_provider() else {
         eprintln!("Skipping: no CUDA device");
         return;
@@ -246,6 +259,7 @@ fn resident_pilot_multi_evidence_exact() {
 #[cfg(feature = "host-io")]
 #[test]
 fn resident_pilot_annotated_disjunction_exclusive() {
+    let _resident_test_guard = resident_test_lock();
     let Some(provider) = setup_provider() else {
         eprintln!("Skipping: no CUDA device");
         return;
@@ -274,6 +288,7 @@ fn resident_pilot_annotated_disjunction_exclusive() {
 /// K4: device-side fixpoint trace shows >1 iteration). Deterministic (1.0 edges).
 #[test]
 fn resident_pilot_transitive_closure_recursion() {
+    let _resident_test_guard = resident_test_lock();
     let Some(provider) = setup_provider() else {
         eprintln!("Skipping: no CUDA device");
         return;
@@ -320,6 +335,7 @@ query(reach(1, 2)).
 /// longest derived path (reach(1,4)) cannot appear before the 2nd pass.
 #[test]
 fn resident_pilot_recursion_requires_multiple_iterations() {
+    let _resident_test_guard = resident_test_lock();
     let Some(provider) = setup_provider() else {
         eprintln!("Skipping: no CUDA device");
         return;
@@ -364,6 +380,7 @@ query(reach(1, 3)).
 
 #[test]
 fn resident_sparse_wcoj_single_join_populates_world_segmented_sparse_counts() {
+    let _resident_test_guard = resident_test_lock();
     let Some(provider) = setup_provider() else {
         eprintln!("Skipping: no CUDA device");
         return;
@@ -406,6 +423,7 @@ query(join_rel(9, 3)).
 
 #[test]
 fn resident_sparse_wcoj_branching_join_outputs_exact_rows() {
+    let _resident_test_guard = resident_test_lock();
     let Some(provider) = setup_provider() else {
         eprintln!("Skipping: no CUDA device");
         return;
@@ -444,6 +462,7 @@ query(out_rel(3, 9)).
 
 #[test]
 fn resident_sparse_wcoj_chain_join_supports_four_distinct_variables() {
+    let _resident_test_guard = resident_test_lock();
     let Some(provider) = setup_provider() else {
         eprintln!("Skipping: no CUDA device");
         return;
@@ -479,6 +498,7 @@ query(out_rel(1, 3)).
 
 #[test]
 fn resident_sparse_wcoj_constant_constrained_join_exact_rows() {
+    let _resident_test_guard = resident_test_lock();
     let Some(provider) = setup_provider() else {
         eprintln!("Skipping: no CUDA device");
         return;
@@ -514,6 +534,7 @@ query(out_rel(2)).
 
 #[test]
 fn resident_sparse_wcoj_rule_chaining_uses_sparse_derived_relation() {
+    let _resident_test_guard = resident_test_lock();
     let Some(provider) = setup_provider() else {
         eprintln!("Skipping: no CUDA device");
         return;
@@ -558,6 +579,7 @@ query(out_rel(2)).
 
 #[test]
 fn resident_sparse_recursive_generic_closure_exact_trace_and_rows() {
+    let _resident_test_guard = resident_test_lock();
     let Some(provider) = setup_provider() else {
         eprintln!("Skipping: no CUDA device");
         return;
@@ -605,6 +627,7 @@ query(path_rel(4, 1)).
 /// region remains host-free.
 #[test]
 fn resident_sparse_wcoj_three_way_join_exact_no_host() {
+    let _resident_test_guard = resident_test_lock();
     let Some(provider) = setup_provider() else {
         eprintln!("Skipping: no CUDA device");
         return;
@@ -661,6 +684,7 @@ query(out_rel(2, 4)).
 
 #[test]
 fn resident_sparse_wcoj_ternary_relation_join_exact_no_host() {
+    let _resident_test_guard = resident_test_lock();
     let Some(provider) = setup_provider() else {
         eprintln!("Skipping: no CUDA device");
         return;
@@ -699,6 +723,7 @@ query(out_rel(2, 4)).
 
 #[test]
 fn resident_device_diagnostics_are_resident_exact_and_clean() {
+    let _resident_test_guard = resident_test_lock();
     let Some(provider) = setup_provider() else {
         eprintln!("Skipping: no CUDA device");
         return;
@@ -754,6 +779,7 @@ query(path_rel(1, 4)).
 
 #[test]
 fn resident_multiblock_world_executes_with_device_coordination() {
+    let _resident_test_guard = resident_test_lock();
     let Some(provider) = setup_provider() else {
         eprintln!("Skipping: no CUDA device");
         return;
@@ -800,6 +826,7 @@ query(path_rel(4, 1)).
 
 #[test]
 fn resident_sparse_wcoj_over_budget_fails_closed_before_execution() {
+    let _resident_test_guard = resident_test_lock();
     let Some(provider) = setup_provider() else {
         eprintln!("Skipping: no CUDA device");
         return;
@@ -844,6 +871,7 @@ fn reject(src: &str) -> xlog_prob::mc::ResidentRejection {
 
 #[test]
 fn resident_rejects_negation_fail_closed() {
+    let _resident_test_guard = resident_test_lock();
     let r = reject("1.0::a().\nb() :- not a().\nquery(b()).\n");
     assert_eq!(r.kind, ResidentRejectKind::Negation);
     assert!(!r.construct.is_empty(), "construct must name the predicate");
@@ -852,6 +880,7 @@ fn resident_rejects_negation_fail_closed() {
 
 #[test]
 fn resident_rejects_arity_too_high_fail_closed() {
+    let _resident_test_guard = resident_test_lock();
     let r = reject("1.0::p(1, 2, 3, 4).\nquery(p(1, 2, 3, 4)).\n");
     assert_eq!(r.kind, ResidentRejectKind::ArityTooHigh);
     assert_eq!(r.construct, "p");
@@ -860,6 +889,7 @@ fn resident_rejects_arity_too_high_fail_closed() {
 
 #[test]
 fn resident_rejects_comparison_literal_fail_closed() {
+    let _resident_test_guard = resident_test_lock();
     let r = reject("1.0::a(1).\nb(X) :- a(X), X < 5.\nquery(b(1)).\n");
     assert_eq!(r.kind, ResidentRejectKind::NonRelationalLiteral);
     assert!(!r.construct.is_empty());
@@ -872,6 +902,7 @@ fn resident_rejects_comparison_literal_fail_closed() {
 
 #[test]
 fn resident_rejects_body_too_long_fail_closed() {
+    let _resident_test_guard = resident_test_lock();
     let r = reject("1.0::a(1).\n1.0::b(1).\n1.0::c(1).\n1.0::d(1).\nout(X) :- a(X), b(X), c(X), d(X).\nquery(out(1)).\n");
     assert_eq!(r.kind, ResidentRejectKind::BodyTooLong);
     assert!(r.context.contains("body length"), "context: {}", r.context);

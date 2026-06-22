@@ -1,0 +1,50 @@
+// Shared dILP proof-schema support policy.
+//
+// This module owns the support-axis, weight, and threshold-floor semantics used
+// by the FAEEL proof-schema generator. Entry programs stage only raw support
+// features; XLOG derives policy rows and weighted support internally.
+
+pred raw_training_support_feature(u32, u32, u32, u32).
+pred support_schema_axis(u32, u32).
+pred training_support_feature(u32, u32, u32, u32, u32).
+pred support_policy_basis(u32, u32).
+pred support_weight_component(u32, u32, u32, u32, u32).
+pred schema_support_weight(u32, u32, u32, u32, u32).
+pred support_threshold_floor_seed(u32, u32, u32).
+pred support_threshold_floor(u32, u32, u32).
+
+support_schema_axis(1, 1) :-
+    raw_training_support_feature(Case, RootSignal, Alignment, Richness).
+
+support_schema_axis(2, 2) :-
+    raw_training_support_feature(Case, RootSignal, Alignment, Richness).
+
+support_schema_axis(3, 3) :-
+    raw_training_support_feature(Case, RootSignal, Alignment, Richness).
+
+training_support_feature(Support, Case, RootSignal, Alignment, Richness) :-
+    support_schema_axis(Support, Policy),
+    raw_training_support_feature(Case, RootSignal, Alignment, Richness).
+
+support_policy_basis(Support, Policy) :-
+    support_schema_axis(Support, Policy),
+    training_support_feature(Support, Case, RootSignal, Alignment, Richness).
+
+support_weight_component(Support, 100, 0, 0, 100) :-
+    support_policy_basis(Support, 1).
+
+support_weight_component(Support, 75, 25, 0, 100) :-
+    support_policy_basis(Support, 2).
+
+support_weight_component(Support, 85, 0, 15, 100) :-
+    support_policy_basis(Support, 3).
+
+schema_support_weight(Support, RootWeight, AlignmentWeight, RichnessWeight, Divisor) :-
+    support_weight_component(Support, RootWeight, AlignmentWeight, RichnessWeight, Divisor).
+
+support_threshold_floor(Support, Zero, One) :-
+    support_threshold_floor_seed(Support, Zero, One).
+
+support_threshold_floor_seed(Support, 0, 1) :-
+    support_schema_axis(Support, Policy),
+    training_support_feature(Support, Case, RootSignal, Alignment, Richness).

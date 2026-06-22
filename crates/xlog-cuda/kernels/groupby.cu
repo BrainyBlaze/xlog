@@ -108,6 +108,21 @@ extern "C" __global__ void groupby_sum(
     atomicAdd((unsigned long long*)&sums[group], (unsigned long long)values[tid]);
 }
 
+// Sum aggregation per group over u64 values, consumed by the aggregate-fused
+// WCOJ root-sum path whose per-row partial sums are already u64.
+extern "C" __global__ void groupby_sum_u64(
+    const uint64_t* __restrict__ values,
+    const uint32_t* __restrict__ group_ids,
+    uint32_t num_rows,
+    uint64_t* __restrict__ sums
+) {
+    uint32_t tid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (tid >= num_rows) return;
+
+    uint32_t group = group_ids[tid];
+    atomicAdd((unsigned long long*)&sums[group], (unsigned long long)values[tid]);
+}
+
 // Min aggregation per group
 extern "C" __global__ void groupby_min(
     const uint32_t* __restrict__ values,
@@ -134,6 +149,36 @@ extern "C" __global__ void groupby_max(
 
     uint32_t group = group_ids[tid];
     atomicMax(&maxs[group], values[tid]);
+}
+
+// Min aggregation per group over u64 values. The legacy groupby is the
+// unfused baseline for u64-key WCOJ relations whose value columns are U64.
+// Host pre-fills `mins` with u64::MAX.
+extern "C" __global__ void groupby_min_u64(
+    const uint64_t* __restrict__ values,
+    const uint32_t* __restrict__ group_ids,
+    uint32_t num_rows,
+    unsigned long long* __restrict__ mins
+) {
+    uint32_t tid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (tid >= num_rows) return;
+
+    uint32_t group = group_ids[tid];
+    atomicMin(&mins[group], (unsigned long long)values[tid]);
+}
+
+// Max aggregation per group over u64 values. Host zeroes `maxs`.
+extern "C" __global__ void groupby_max_u64(
+    const uint64_t* __restrict__ values,
+    const uint32_t* __restrict__ group_ids,
+    uint32_t num_rows,
+    unsigned long long* __restrict__ maxs
+) {
+    uint32_t tid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (tid >= num_rows) return;
+
+    uint32_t group = group_ids[tid];
+    atomicMax(&maxs[group], (unsigned long long)values[tid]);
 }
 
 // Detect group boundaries in sorted data (single-column version)

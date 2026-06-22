@@ -1,4 +1,4 @@
-//! Launcher for the M8 Phase 1 bounded exact-induction kernel.
+//! Launcher for the native bounded exact-induction scoring kernel.
 //!
 //! Drives `kernels/ilp_exact.cu`'s `ilp_exact_score` kernel: scores all
 //! `(topology, L, R)` triples for a single `induce_exact` call in one

@@ -1,6 +1,6 @@
 // kernels/d4.cu
 //
-// GPU-native D4 compiler support kernels (Phase 1).
+// GPU-native Decision-DNNF compiler support kernels.
 //
 // Design constraints:
 // - GPU-native data-plane: no device->host copies for CNF/circuit data
@@ -27,7 +27,7 @@ __device__ __forceinline__ uint32_t d4_var(int32_t lit) {
 }
 
 // ---------------------------------------------------------------------------
-// D4 frontier work items (must match Rust `#[repr(C)]` layout)
+// Decision-DNNF compiler frontier work items (must match Rust `#[repr(C)]` layout)
 // ---------------------------------------------------------------------------
 
 struct D4WorkItem {
@@ -162,7 +162,7 @@ extern "C" __global__ void d4_levelize_emit(
 }
 
 // ---------------------------------------------------------------------------
-// Frontier expansion (Phase 1): unit propagation + deterministic branching
+// Frontier expansion: unit propagation + deterministic branching
 // ---------------------------------------------------------------------------
 
 // XGCF node tags (must match kernels/circuit.cu and crates/xlog-prob/src/xgcf.rs).
@@ -777,7 +777,7 @@ extern "C" __global__ void d4_frontier_expand_dense(
 }
 
 // ---------------------------------------------------------------------------
-// Per-frontier DFS compilation (Phase 1): count + emit
+// Per-frontier DFS compilation: count + emit
 // ---------------------------------------------------------------------------
 
 // NOTE: Device recursion is not enabled in this build (no -rdc). Use an explicit stack.
@@ -1146,7 +1146,8 @@ __device__ __forceinline__ uint32_t d4_new_and_children<D4EmitWriter>(
 }
 
 // AND node with children = contiguous LIT id range [+ optional main child].
-// This is the only AND pattern used in the Phase 1 D4 kernel (unit propagation + decision-DPLL).
+// This is the only AND pattern used in the GPU-native Decision-DNNF compiler kernel
+// (unit propagation + decision-DPLL).
 __device__ __forceinline__ uint32_t d4_new_and_lit_range(
     D4EmitWriter* w,
     uint32_t first_lit_id,
@@ -1849,7 +1850,8 @@ extern "C" __global__ void d4_compile_emit(
     uint32_t* __restrict__ decision_var,
     uint32_t* __restrict__ decision_child_false,
     uint32_t* __restrict__ decision_child_true,
-    uint32_t* __restrict__ node_level
+    uint32_t* __restrict__ node_level,
+    uint32_t* __restrict__ overflow_flag // len=1; set to 1 on capacity overflow
 ) {
     if (compile_needed[0] == 0u) {
         return;
@@ -1857,6 +1859,23 @@ extern "C" __global__ void d4_compile_emit(
     uint32_t n = frontier_size[0];
     if (n > max_frontier_items) {
         d4_trap();
+    }
+
+    // Graceful capacity guard, evaluated in EVERY block before any write: if the
+    // emitted node/edge totals would exceed the fixed-capacity buffers, set the
+    // overflow flag and return rather than trapping. A trap (asm "trap;") poisons
+    // the CUDA primary context and kills every later compile in the process; the
+    // flag lets the host decline cleanly with a typed error instead.
+    {
+        uint32_t cap_last = max_frontier_items - 1u;
+        uint32_t cap_total_nodes = node_offsets[cap_last] + node_counts[cap_last];
+        uint32_t cap_total_edges = edge_offsets[cap_last] + edge_counts[cap_last];
+        if (3u + cap_total_nodes > node_cap || n + cap_total_edges > edge_cap) {
+            if (blockIdx.x == 0u && threadIdx.x == 0u) {
+                overflow_flag[0] = 1u;
+            }
+            return;
+        }
     }
 
     // Initialize reserved nodes once.
@@ -1882,13 +1901,8 @@ extern "C" __global__ void d4_compile_emit(
         uint32_t reserved_nodes = 3u;
         uint32_t reserved_edges = n;
 
-        if (reserved_nodes + total_nodes > node_cap) {
-            d4_trap();
-        }
-        if (reserved_edges + total_edges > edge_cap) {
-            d4_trap();
-        }
-
+        // Capacity already verified by the graceful guard above (overflow sets
+        // the flag and returns), so totals fit the buffers here.
         uint32_t sentinel_idx = reserved_nodes + total_nodes;
         child_offsets[sentinel_idx] = reserved_edges + total_edges;
         // Ensure the root OR degree is well-defined even when there are no leaf nodes.

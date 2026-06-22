@@ -342,9 +342,9 @@ pub struct EpistemicGpuFinalResultTransferTrace {
     pub final_output_payload_bytes: u64,
     /// Device row-count metadata reads used for this accounting.
     pub row_count_device_reads: u32,
-    /// Data-plane D2H calls issued by accepted execution. Execution returns a device buffer, so this is zero.
+    /// Data-plane device-to-host calls issued by accepted execution. Execution returns a device buffer, so this is zero.
     pub tracked_data_plane_dtoh_calls: u64,
-    /// Data-plane D2H bytes issued by accepted execution. Execution returns a device buffer, so this is zero.
+    /// Data-plane device-to-host bytes issued by accepted execution. Execution returns a device buffer, so this is zero.
     pub tracked_data_plane_dtoh_bytes: u64,
 }
 
@@ -461,7 +461,7 @@ pub struct EpistemicGpuSemanticTrace {
     /// `rejected_candidate_indices`. `Some(idx)` when an integrity constraint
     /// (reason code 6) rejected the candidate, where `idx` is the firing
     /// constraint's declaration-order index; `None` for every other rejection
-    /// reason. Surfaces EGB-04.K2 constraint-specific rejection detail.
+    /// reason. Surfaces constraint-specific rejection detail.
     pub constraint_violation_indices: Vec<Option<u32>>,
     /// Bounded metadata reads from the device rejection buffer after the hot path.
     pub rejection_reason_device_reads: u32,
@@ -1067,7 +1067,7 @@ impl EpistemicGpuTransferBudgetTrace {
     }
 
     /// Build a hot-path transfer trace while distinguishing bounded launch
-    /// metadata H2D from data-plane transfers.
+    /// metadata host-to-device transfers from data-plane transfers.
     pub fn from_host_transfer_stats_with_launch_metadata(
         candidate_count: usize,
         before: HostTransferStats,
@@ -1968,6 +1968,13 @@ pub struct EpistemicGpuRuntimePreflight {
     pub wcoj_triangle_route_count: usize,
     /// Number of 4-cycle WCOJ routes reused from the production runtime.
     pub wcoj_4cycle_route_count: usize,
+    /// Generic Free Join multiway routes: `plan: None` nodes
+    /// matching no dedicated kernel shape. Opportunistic by contract —
+    /// the dispatcher may structurally decline to the embedded binary
+    /// fallback (non-prefix bound columns, non-u32 inputs, …), so these
+    /// routes carry no hard dispatch obligation and are excluded from
+    /// the dedicated-WCOJ certification arithmetic.
+    pub free_join_route_count: usize,
     /// K-clique WCOJ plan counts by arity K=5..8.
     pub kclique_wcoj_plan_count_by_arity: [usize; 4],
     /// Maximum K-clique arity observed across production WCOJ plans.
@@ -2015,7 +2022,7 @@ pub struct EpistemicGpuRuntimePreflight {
 }
 
 impl EpistemicGpuRuntimePreflight {
-    /// Whether this accepted execution used G91 compatibility semantics.
+    /// Whether this accepted execution used Gelfond-1991 (G91) compatibility semantics.
     pub fn is_g91_mode(&self) -> bool {
         matches!(self.epistemic_mode, EirEpistemicMode::G91)
     }
@@ -2082,7 +2089,7 @@ impl EpistemicGpuRuntimePreflight {
             {
                 reduced_constraint_relation_names.push(rule.head.as_str());
             }
-            if rule.head.starts_with("__w37_helper_") {
+            if rule.head.starts_with("__kclique_helper_") {
                 helper_relation_rule_count += 1;
             }
             helper_relation_scan_count +=
@@ -2174,6 +2181,7 @@ impl EpistemicGpuRuntimePreflight {
             kclique_wcoj_plan_count: routes.kclique_wcoj_plan_count,
             wcoj_triangle_route_count: routes.wcoj_triangle_route_count,
             wcoj_4cycle_route_count: routes.wcoj_4cycle_route_count,
+            free_join_route_count: routes.free_join_route_count,
             kclique_wcoj_plan_count_by_arity: routes.kclique_wcoj_plan_count_by_arity,
             kclique_wcoj_max_arity: routes.kclique_wcoj_max_arity,
             kclique_wcoj_edge_permutation_count: routes.kclique_wcoj_edge_permutation_count,
@@ -2322,8 +2330,8 @@ pub struct EpistemicGpuRuntimeCounters {
     pub wcoj_triangle_dispatch_count: u64,
     /// Successful 4-cycle WCOJ dispatches installed by the executor.
     pub wcoj_4cycle_dispatch_count: u64,
-    /// Successful Goal-039 chain dispatches installed by the executor.
-    pub w63_chain_dispatch_count: u64,
+    /// Successful chain dispatches installed by the executor.
+    pub chain_dispatch_count: u64,
     /// Successful K=5 clique WCOJ dispatches installed by the executor.
     pub wcoj_clique5_dispatch_count: u64,
     /// Successful K=6 clique WCOJ dispatches installed by the executor.
@@ -2332,6 +2340,17 @@ pub struct EpistemicGpuRuntimeCounters {
     pub wcoj_clique7_dispatch_count: u64,
     /// Successful K=8 clique WCOJ dispatches installed by the executor.
     pub wcoj_clique8_dispatch_count: u64,
+    /// Successful generic Free Join dispatches installed by the
+    /// executor. Observability only: free-join routes carry no hard
+    /// dispatch obligation (structural declines execute the embedded
+    /// binary fallback by contract), so this counter never gates
+    /// certification.
+    pub free_join_dispatch_count: u64,
+    /// D3 — successful factorized recursive-delta dispatches installed
+    /// by the executor. Observability only, same contract as the Free
+    /// Join counter: declines execute the legacy semi-naive path, so
+    /// this counter never gates certification.
+    pub factorized_delta_dispatch_count: u64,
     /// Provider-level HG triangle dispatch counter.
     pub provider_wcoj_triangle_hg_dispatch_count: u64,
     /// WCOJ layout-sort invocations observed by the provider.
@@ -2396,10 +2415,10 @@ impl EpistemicGpuRuntimeCounters {
                 self.wcoj_4cycle_dispatch_count,
                 before.wcoj_4cycle_dispatch_count,
             )?,
-            w63_chain_dispatch_count: Self::checked_counter_delta(
-                "w63_chain_dispatch_count",
-                self.w63_chain_dispatch_count,
-                before.w63_chain_dispatch_count,
+            chain_dispatch_count: Self::checked_counter_delta(
+                "chain_dispatch_count",
+                self.chain_dispatch_count,
+                before.chain_dispatch_count,
             )?,
             wcoj_clique5_dispatch_count: Self::checked_counter_delta(
                 "wcoj_clique5_dispatch_count",
@@ -2420,6 +2439,16 @@ impl EpistemicGpuRuntimeCounters {
                 "wcoj_clique8_dispatch_count",
                 self.wcoj_clique8_dispatch_count,
                 before.wcoj_clique8_dispatch_count,
+            )?,
+            factorized_delta_dispatch_count: Self::checked_counter_delta(
+                "factorized_delta_dispatch_count",
+                self.factorized_delta_dispatch_count,
+                before.factorized_delta_dispatch_count,
+            )?,
+            free_join_dispatch_count: Self::checked_counter_delta(
+                "free_join_dispatch_count",
+                self.free_join_dispatch_count,
+                before.free_join_dispatch_count,
             )?,
             provider_wcoj_triangle_hg_dispatch_count: Self::checked_counter_delta(
                 "provider_wcoj_triangle_hg_dispatch_count",
@@ -2468,9 +2497,9 @@ impl EpistemicGpuRuntimeCounters {
             wcoj_4cycle_dispatch_count: self
                 .wcoj_4cycle_dispatch_count
                 .saturating_sub(before.wcoj_4cycle_dispatch_count),
-            w63_chain_dispatch_count: self
-                .w63_chain_dispatch_count
-                .saturating_sub(before.w63_chain_dispatch_count),
+            chain_dispatch_count: self
+                .chain_dispatch_count
+                .saturating_sub(before.chain_dispatch_count),
             wcoj_clique5_dispatch_count: self
                 .wcoj_clique5_dispatch_count
                 .saturating_sub(before.wcoj_clique5_dispatch_count),
@@ -2483,6 +2512,12 @@ impl EpistemicGpuRuntimeCounters {
             wcoj_clique8_dispatch_count: self
                 .wcoj_clique8_dispatch_count
                 .saturating_sub(before.wcoj_clique8_dispatch_count),
+            free_join_dispatch_count: self
+                .free_join_dispatch_count
+                .saturating_sub(before.free_join_dispatch_count),
+            factorized_delta_dispatch_count: self
+                .factorized_delta_dispatch_count
+                .saturating_sub(before.factorized_delta_dispatch_count),
             provider_wcoj_triangle_hg_dispatch_count: self
                 .provider_wcoj_triangle_hg_dispatch_count
                 .saturating_sub(before.provider_wcoj_triangle_hg_dispatch_count),
@@ -2843,15 +2878,15 @@ pub struct EpistemicGpuBatchExecutionTrace {
     pub cpu_solver_search_fallbacks: u64,
     /// CPU probability recomputations observed across component preflight traces.
     pub cpu_probability_recomputations: u64,
-    /// Hot-path D2H calls tracked across all components.
+    /// Hot-path device-to-host calls tracked across all components.
     pub tracked_dtoh_calls: u64,
-    /// Hot-path data-plane H2D calls tracked across all components.
+    /// Hot-path data-plane host-to-device calls tracked across all components.
     pub tracked_htod_calls: u64,
-    /// Hot-path aggregate H2D calls tracked across all components.
+    /// Hot-path aggregate host-to-device calls tracked across all components.
     pub tracked_aggregate_htod_calls: u64,
-    /// Hot-path launch-metadata H2D calls tracked across all components.
+    /// Hot-path launch-metadata host-to-device calls tracked across all components.
     pub tracked_launch_metadata_htod_calls: u64,
-    /// Hot-path data-plane H2D calls tracked across all components.
+    /// Hot-path data-plane host-to-device calls tracked across all components.
     pub tracked_data_plane_htod_calls: u64,
     /// Per-candidate host round trips tracked across all components.
     pub per_candidate_host_round_trips: u64,
@@ -2861,9 +2896,9 @@ pub struct EpistemicGpuBatchExecutionTrace {
     pub final_output_payload_bytes: u64,
     /// Device row-count metadata reads used for component final-result accounting.
     pub final_result_row_count_device_reads: u32,
-    /// Post-hot-path final-result data-plane D2H calls across all components.
+    /// Post-hot-path final-result data-plane device-to-host calls across all components.
     pub final_result_data_plane_dtoh_calls: u64,
-    /// Post-hot-path final-result data-plane D2H bytes across all components.
+    /// Post-hot-path final-result data-plane device-to-host bytes across all components.
     pub final_result_data_plane_dtoh_bytes: u64,
     /// Reduced integrity-constraint relations checked across all components.
     pub checked_constraint_relations: usize,
@@ -3194,12 +3229,19 @@ impl EpistemicGpuRuntimeWcojCertification {
         let wcoj_routed_reduction_count = preflight
             .multiway_reduction_count
             .checked_sub(preflight.planned_hash_route_count)
+            // Generic Free Join routes are opportunistic by
+            // contract (structural decline executes the embedded
+            // binary fallback), so they never form part of the hard
+            // dedicated-WCOJ dispatch obligation.
+            .and_then(|count| count.checked_sub(preflight.free_join_route_count))
             .ok_or_else(|| XlogError::UnsupportedEpistemicConstruct {
                 construct: "epistemic GPU WCOJ route certification".to_string(),
                 context: format!(
-                    "planned hash routes exceed observed route obligations: \
-                     multiway_reductions={} planned_hash_routes={}",
-                    preflight.multiway_reduction_count, preflight.planned_hash_route_count
+                    "planned hash + free-join routes exceed observed route obligations: \
+                     multiway_reductions={} planned_hash_routes={} free_join_routes={}",
+                    preflight.multiway_reduction_count,
+                    preflight.planned_hash_route_count,
+                    preflight.free_join_route_count
                 ),
             })?;
         let required_multiway_reductions = wcoj_routed_reduction_count;
@@ -3470,11 +3512,13 @@ impl Executor {
         EpistemicGpuRuntimeCounters {
             wcoj_triangle_dispatch_count: self.wcoj_triangle_dispatch_count(),
             wcoj_4cycle_dispatch_count: self.wcoj_4cycle_dispatch_count(),
-            w63_chain_dispatch_count: self.w63_chain_dispatch_count(),
+            chain_dispatch_count: self.chain_dispatch_count(),
             wcoj_clique5_dispatch_count: self.wcoj_clique5_dispatch_count(),
             wcoj_clique6_dispatch_count: self.wcoj_clique6_dispatch_count(),
             wcoj_clique7_dispatch_count: self.wcoj_clique7_dispatch_count(),
             wcoj_clique8_dispatch_count: self.wcoj_clique8_dispatch_count(),
+            free_join_dispatch_count: self.free_join_dispatch_count(),
+            factorized_delta_dispatch_count: self.factorized_delta_dispatch_count(),
             provider_wcoj_triangle_hg_dispatch_count: self
                 .provider
                 .wcoj_triangle_hg_dispatch_count(),
@@ -5068,7 +5112,7 @@ impl Executor {
         // candidate rejected by reason codes 1-5 (or accepted) must read back as
         // the sentinel, never a spurious `Some(0)`. The upload rides the
         // launch-metadata channel (like the CSR buffers below), so it adds no
-        // tracked data-plane HTOD and keeps `host_write_ops` at zero.
+        // tracked data-plane host-to-device transfer and keeps `host_write_ops` at zero.
         if candidate_count > workspace.layout.rejection_reason_slots {
             return Err(XlogError::ResourceExhausted {
                 context: "epistemic GPU constraint-violation index workspace".to_string(),
@@ -6492,6 +6536,7 @@ struct RuntimeRouteSummary {
     kclique_wcoj_plan_count: usize,
     wcoj_triangle_route_count: usize,
     wcoj_4cycle_route_count: usize,
+    free_join_route_count: usize,
     kclique_wcoj_plan_count_by_arity: [usize; 4],
     kclique_wcoj_max_arity: u8,
     kclique_wcoj_edge_permutation_count: usize,
@@ -6551,6 +6596,14 @@ fn summarize_runtime_routes(node: &RirNode, routes: &mut RuntimeRouteSummary) {
                         }
                     }
                 }
+                // Generic Free Join route: provenance variant set
+                // only by the general multiway promoter. Opportunistic
+                // — the dispatcher's structural decline executes the
+                // embedded binary fallback, so no hard dispatch
+                // obligation accrues here.
+                Some(MultiwayPlan::FreeJoin) => {
+                    routes.free_join_route_count += 1;
+                }
                 None => {
                     if super::wcoj_dispatch::match_multiway_triangle(node).is_some() {
                         routes.wcoj_triangle_route_count += 1;
@@ -6595,7 +6648,7 @@ fn helper_relation_ids(executable: &EpistemicExecutablePlan) -> BTreeSet<RelId> 
     executable
         .relation_ids
         .iter()
-        .filter_map(|(name, rel)| name.starts_with("__w37_helper_").then_some(*rel))
+        .filter_map(|(name, rel)| name.starts_with("__kclique_helper_").then_some(*rel))
         .collect()
 }
 

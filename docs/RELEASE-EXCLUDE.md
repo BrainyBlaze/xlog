@@ -17,7 +17,7 @@ Status as of: v0.8.6 (2026-05).
 | `docs/superpowers/plans/` | 4 | Implementation plans for release/tooling prep | Internal process artifacts; not user-facing |
 | `docs/plans/` | ~88 | supervisor-goal-NNN, *-closure-proposal, *-plan, design docs | Goal-driven development infrastructure; development history, not reference |
 | `docs/evidence/` | ~159 (72 dirs) | Dated acceptance evidence (README + measurements.json per slice) | Internal acceptance-gate audits; consumed by release tooling, not consumers |
-| `docs/v065-closure-board.md` | 1 | v0.7.0 release closure board | Internal release-tracking infrastructure |
+| `docs/v065-closure-board.md` | 1 | Legacy release closure board (the filename uses the old release-board shorthand) | Internal release-tracking infrastructure |
 
 ## Archive candidates (historical, superseded)
 
@@ -28,8 +28,8 @@ moving to an archive location or excluding from release:
 |---|---|
 | `docs/certification/2026-01-12-cuda-certification-results.md` | v0.4.0-alpha era (133 tests) |
 | `docs/certification/2026-01-14-cuda-certification-results.md` | v0.4.0-alpha era (140 tests) |
-| `docs/certification/2026-01-22-v0.4.0-alpha-certification-report.md` | Untagged milestone report |
-| `docs/certification/v0.4.0-alpha-certification-spec.md` | Pre-v0.5.0 spec |
+| `docs/certification/2026-01-22-neural-symbolic-certification-report.md` | Untagged neural-symbolic certification report |
+| `docs/certification/neural-symbolic-gpu-certification-spec.md` | Historical neural-symbolic certification spec |
 | `clippy-report.txt` (repo root) | Empty build artifact |
 
 ## Notes

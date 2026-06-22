@@ -1,4 +1,4 @@
-//! W3.8 AOT stream schedule construction for independent WCOJ rules.
+//! Ahead-of-time stream schedule construction for independent WCOJ rules.
 
 use xlog_ir::Stratum;
 
@@ -21,7 +21,7 @@ impl HardwareCapabilities {
     }
 }
 
-/// Phase node kind in the W3.8 Count -> Scan -> Resize -> Materialize schedule.
+/// Phase node kind in the Count -> Scan -> Resize -> Materialize schedule.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StreamPhase {
     /// WCOJ count kernel phase.
@@ -58,9 +58,9 @@ pub struct StreamSchedule {
     pub phases: Vec<StreamPhaseNode>,
 }
 
-/// Build the W3.8 phase-aligned schedule for a stratum.
+/// Build the phase-aligned stream schedule for a stratum.
 ///
-/// Stream count follows the paper-plan rule:
+/// Stream count follows the GPU occupancy rule:
 /// `min(SM_count / 4, max_independent_rules_in_stratum)`, with one stream
 /// retained for single-rule strata so the scheduler produces the same serial
 /// execution shape as the non-mux path.

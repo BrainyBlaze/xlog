@@ -1,0 +1,80 @@
+// UCR v0.9.0 FAEEL proof-schema selection.
+//
+// Learned symbolic weights are staged as raw relation facts, but the production
+// promotion score and selected proof schema are emitted by executable XLOG
+// semantics after proof-search support, solver support, held-out exclusion, and
+// blocked-schema tests. Python may serialize the selected row; it does not own
+// promotion scoring or clause identity.
+
+#pragma epistemic_mode = faeel
+
+pred generated_proof_schema(u32, u32).
+pred schema_symbolic_weight(u32, u32).
+pred schema_promotion_score(u32, u32).
+pred schema_promotion_threshold(u32, u32).
+pred schema_proof_search_support(u32, u32).
+pred schema_solver_support(u32, u32).
+pred heldout_promoted_schema(u32).
+pred blocked_promoted_schema(u32).
+pred promotion_candidate(u32, u32).
+pred dominated_promoted_proof_schema(u32, u32).
+pred selection_candidate(u32, u32).
+pred selected_promoted_proof_schema(u32, u32).
+
+schema_promotion_threshold(Schema, 0) :-
+    generated_proof_schema(Schema, Support).
+
+schema_promotion_score(Schema, Score) :-
+    generated_proof_schema(Schema, Support),
+    schema_symbolic_weight(Schema, Score),
+    schema_proof_search_support(Schema, Support),
+    schema_solver_support(Schema, Support).
+
+promotion_candidate(Schema, Support) :-
+    generated_proof_schema(Schema, Support),
+    schema_promotion_score(Schema, Score),
+    schema_promotion_threshold(Schema, Threshold),
+    schema_proof_search_support(Schema, Support),
+    schema_solver_support(Schema, Support),
+    Score >= Threshold.
+
+dominated_promoted_proof_schema(Schema, Support) :-
+    promotion_candidate(Schema, Support),
+    not heldout_promoted_schema(Schema),
+    not blocked_promoted_schema(Schema),
+    schema_promotion_score(Schema, Score),
+    promotion_candidate(OtherSchema, OtherSupport),
+    not heldout_promoted_schema(OtherSchema),
+    not blocked_promoted_schema(OtherSchema),
+    schema_promotion_score(OtherSchema, OtherScore),
+    OtherSchema != Schema,
+    OtherScore > Score.
+
+dominated_promoted_proof_schema(Schema, Support) :-
+    promotion_candidate(Schema, Support),
+    not heldout_promoted_schema(Schema),
+    not blocked_promoted_schema(Schema),
+    schema_promotion_score(Schema, Score),
+    promotion_candidate(OtherSchema, OtherSupport),
+    not heldout_promoted_schema(OtherSchema),
+    not blocked_promoted_schema(OtherSchema),
+    schema_promotion_score(OtherSchema, OtherScore),
+    OtherSchema != Schema,
+    OtherScore >= Score,
+    OtherSchema < Schema.
+
+selection_candidate(Schema, Support) :-
+    promotion_candidate(Schema, Support),
+    not heldout_promoted_schema(Schema),
+    not blocked_promoted_schema(Schema),
+    not dominated_promoted_proof_schema(Schema, Support).
+
+selected_promoted_proof_schema(Schema, Support) :-
+    selection_candidate(Schema, Support),
+    know generated_proof_schema(Schema, Support),
+    possible schema_proof_search_support(Schema, Support),
+    possible schema_solver_support(Schema, Support),
+    not know heldout_promoted_schema(Schema),
+    not possible blocked_promoted_schema(Schema).
+
+?- selected_promoted_proof_schema(Schema, Support).

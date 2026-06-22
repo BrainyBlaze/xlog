@@ -1,19 +1,19 @@
 // =============================================================================
 // Knowledge Graph - Main Entry Point
 // =============================================================================
-// Demonstrates v0.3.2 module system with a movie domain knowledge graph.
+// Demonstrates module imports with a movie domain knowledge graph.
 //
 // Features demonstrated:
 //   - Module imports: use statement for importing from submodules
 //   - Ontology: Type hierarchy with recursive is_subclass rule
 //   - Entities: Movies, people, genres, studios with symbol identifiers
-//   - Inference: UDFs for decade, rating, ROI, age calculations
+//   - Inference: user-defined functions for decade, rating, return on investment, age calculations
 //   - Analytics: Derived predicates using aggregations
 //
 // Module structure:
 //   - ontology/schema.xlog: Type hierarchy and is_subclass inference
 //   - entities/movies.xlog: Facts database (200+ facts)
-//   - inference/reasoning.xlog: UDFs and derived analytics
+//   - inference/reasoning.xlog: user-defined functions and derived analytics
 // =============================================================================
 
 // =============================================================================

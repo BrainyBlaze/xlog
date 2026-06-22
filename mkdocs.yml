@@ -1,0 +1,101 @@
+site_name: XLOG
+site_description: GPU-native logic programming for unified symbolic reasoning.
+site_url: https://xlog.md/
+repo_name: BrainyBlaze/xlog
+repo_url: https://github.com/BrainyBlaze/xlog
+docs_dir: docs
+site_dir: .docs/site
+strict: true
+
+theme:
+  name: material
+  features:
+    - navigation.sections
+    - navigation.indexes
+    - navigation.top
+    - content.code.copy
+  palette:
+    - scheme: default
+      primary: black
+      accent: indigo
+      toggle:
+        icon: material/weather-night
+        name: Switch to dark mode
+    - scheme: slate
+      primary: black
+      accent: indigo
+      toggle:
+        icon: material/weather-sunny
+        name: Switch to light mode
+
+plugins:
+  - search
+  - mkdocstrings:
+      handlers:
+        python:
+          paths:
+            - crates/pyxlog/python
+            - scripts
+          options:
+            show_source: true
+            show_root_heading: true
+            show_signature_annotations: true
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - def_list
+  - fenced_code
+  - md_in_html
+  - pymdownx.details
+  - pymdownx.tabbed:
+      alternate_style: true
+  - toc:
+      permalink: true
+
+exclude_docs: |
+  evidence/
+  plans/
+  reports/
+  superpowers/
+  whitepaper/**/*.md
+  whitepaper/**/*.tex
+  whitepaper/**/*.bib
+  whitepaper/**/*.sty
+  RELEASE-EXCLUDE.md
+  source-clarity-closure-board.md
+  v065-closure-board.md
+
+not_in_nav: |
+  ROADMAP.md
+  api/generated/pyxlog-api.md
+
+validation:
+  omitted_files: ignore
+  absolute_links: warn
+  not_found: ignore
+  unrecognized_links: ignore
+  anchors: warn
+
+nav:
+  - Home: index.md
+  - Getting started:
+      - Project overview: project-overview.md
+      - Benchmarks: BENCHMARKS.md
+      - Release process: release-process.md
+  - Language:
+      - Language Reference: language-reference.md
+      - Epistemic solver semantics: epistemic-solver-semantics-guide.md
+  - Architecture:
+      - Architecture: ARCHITECTURE.md
+      - GPU execution: architecture/gpu-execution.md
+      - CUDA certification: architecture/cuda-certification.md
+      - Python bindings: architecture/python-bindings.md
+      - Probabilistic inference: architecture/xlog-prob.md
+      - WCOJ architecture guide: wcoj-architecture-guide.md
+      - WCOJ user guide: wcoj-user-guide.md
+  - API Reference:
+      - Overview: api/README.md
+      - Python API: api/python.md
+      - Rust API: api/rust.md
+      - CUDA API: api/cuda.md

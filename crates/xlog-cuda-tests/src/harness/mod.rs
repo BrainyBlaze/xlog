@@ -9,4 +9,4 @@ pub mod xgcf;
 pub use diagnostics::{
     CategoryResult, CertificationResults, FailureDiagnostic, TestResult, TestStatus,
 };
-pub use provider::TestContext;
+pub use provider::{enforce_cuda_required, TestContext};

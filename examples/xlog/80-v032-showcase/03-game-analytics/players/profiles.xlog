@@ -6,13 +6,13 @@
 // =============================================================================
 
 // --- Predicate Declarations ---
-pred player(symbol, symbol, symbol, symbol).   // player_id, username, country, status
-pred player_stats(symbol, u32, u32, u32).      // player_id, total_xp, games_played, hours_played
-pred region(symbol, symbol).                   // region_id, region_name
-pred player_region(symbol, symbol).            // player_id, region_id
-pred friend(symbol, symbol).                   // player1_id, player2_id (symmetric)
-pred guild(symbol, symbol, symbol).            // guild_id, guild_name, leader_id
-pred guild_member(symbol, symbol).             // guild_id, player_id
+pred player(symbol, symbol, symbol, symbol).   // player, username, country, status
+pred player_stats(symbol, u32, u32, u32).      // player, total experience, games played, hours played
+pred region(symbol, symbol).                   // region, region name
+pred player_region(symbol, symbol).            // player, region
+pred friend(symbol, symbol).                   // first player, second player (symmetric)
+pred guild(symbol, symbol, symbol).            // guild, guild name, leader
+pred guild_member(symbol, symbol).             // guild, player
 
 // --- Private Helpers ---
 pred active_threshold(u32).
@@ -236,7 +236,7 @@ player_region(p055, oce).
 // FRIENDSHIPS (symmetric relationships - 30 pairs = 60 facts)
 // =============================================================================
 
-// NA friend clusters
+// North America friend clusters
 friend(p001, p002). friend(p002, p001).
 friend(p001, p005). friend(p005, p001).
 friend(p002, p005). friend(p005, p002).
@@ -247,7 +247,7 @@ friend(p008, p014). friend(p014, p008).
 friend(p010, p011). friend(p011, p010).
 friend(p013, p014). friend(p014, p013).
 
-// EU friend clusters
+// Europe friend clusters
 friend(p016, p017). friend(p017, p016).
 friend(p016, p025). friend(p025, p016).
 friend(p018, p025). friend(p025, p018).
@@ -289,20 +289,20 @@ guild(g008, global_elite, p008).
 // GUILD MEMBERSHIPS (40 memberships)
 // =============================================================================
 
-// Dragon Knights (NA guild)
+// Dragon Knights (North America guild)
 guild_member(g001, p001).
 guild_member(g001, p002).
 guild_member(g001, p007).
 guild_member(g001, p012).
 guild_member(g001, p014).
 
-// Shadow Legion (NA/Mexico)
+// Shadow Legion (North America/Mexico)
 guild_member(g002, p005).
 guild_member(g002, p006).
 guild_member(g002, p009).
 guild_member(g002, p011).
 
-// Frost Wolves (EU guild)
+// Frost Wolves (Europe guild)
 guild_member(g003, p016).
 guild_member(g003, p017).
 guild_member(g003, p025).
@@ -316,13 +316,13 @@ guild_member(g004, p043).
 guild_member(g004, p044).
 guild_member(g004, p037).
 
-// Steel Titans (SA guild)
+// Steel Titans (South America guild)
 guild_member(g005, p046).
 guild_member(g005, p047).
 guild_member(g005, p048).
 guild_member(g005, p050).
 
-// Nordic Raiders (EU Scandinavian)
+// Nordic Raiders (Europe Scandinavian)
 guild_member(g006, p017).
 guild_member(g006, p026).
 guild_member(g006, p030).
@@ -350,32 +350,32 @@ guild_member(g008, p025).
 
 // Friend count per player
 pred friend_count(symbol, u64).
-friend_count(PlayerId, count(FriendId)) :- friend(PlayerId, FriendId).
+friend_count(Player, count(Friend)) :- friend(Player, Friend).
 
 // Active player check (300+ hours)
 pred is_active_player(symbol).
-is_active_player(PlayerId) :-
-    player_stats(PlayerId, _, _, Hours),
+is_active_player(Player) :-
+    player_stats(Player, _, _, Hours),
     active_threshold(Threshold),
     Hours >= Threshold.
 
 // Friend of friend (2-hop social connection, avoiding self-loops)
 pred friend_of_friend(symbol, symbol).
-friend_of_friend(P1, P3) :-
-    friend(P1, P2),
-    friend(P2, P3),
-    P1 != P3,
-    P1 != P2.
+friend_of_friend(FirstPlayer, CandidateFriend) :-
+    friend(FirstPlayer, MutualFriend),
+    friend(MutualFriend, CandidateFriend),
+    FirstPlayer != CandidateFriend,
+    FirstPlayer != MutualFriend.
 
 // Guild member count
 pred guild_size(symbol, u64).
-guild_size(GuildId, count(PlayerId)) :- guild_member(GuildId, PlayerId).
+guild_size(Guild, count(Player)) :- guild_member(Guild, Player).
 
 // Popular players (3+ friends)
 pred popular_player(symbol, symbol, u64).
 popular_player(Username, RegionName, FriendCount) :-
-    player(PlayerId, Username, _, active),
-    player_region(PlayerId, RegionId),
-    region(RegionId, RegionName),
-    friend_count(PlayerId, FriendCount),
+    player(Player, Username, _, active),
+    player_region(Player, Region),
+    region(Region, RegionName),
+    friend_count(Player, FriendCount),
     FriendCount >= 3.

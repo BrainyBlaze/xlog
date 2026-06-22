@@ -1,11 +1,11 @@
 // crates/xlog-integration/tests/test_wcoj_4cycle_adaptive_dispatch.rs
-//! v0.6.5 slice 2 — adaptive opt-in dispatch for 4-cycle.
+//! Adaptive opt-in dispatch for 4-cycle.
 //!
-//! Locks the post-G1 cardinality-backed adaptive behavior:
+//! Locks cardinality-backed adaptive behavior:
 //!   * Seeded large relation cards → WCOJ dispatches.
 //!   * Missing runtime stats → binary fallback.
 //!   * Default config (no overrides, no env): adaptive is OFF →
-//!     no dispatch (slice 2 contract; contrasts with triangle).
+//!     no dispatch (4-cycle adaptive contract; contrasts with triangle).
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -238,7 +238,7 @@ fn adaptive_falls_back_on_uniform_fixture() {
 
 #[test]
 fn adaptive_default_off_does_not_dispatch_on_superhub() {
-    // No overrides, no env. Slice 2 contract: 4-cycle adaptive
+    // No overrides, no env. The 4-cycle adaptive dispatch contract
     // defaults OFF (opt-in). The same super-hub fixture that
     // would dispatch under adaptive=Some(true) must NOT dispatch
     // under default config.

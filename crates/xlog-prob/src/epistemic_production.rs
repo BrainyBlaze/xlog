@@ -102,7 +102,8 @@ pub struct EpistemicProbProductionTrace {
     pub gpu_exact_program_compiles: u64,
     /// Number of accepted world-view evidence objects consumed as a gate.
     pub accepted_world_view_evidence_consumed: u64,
-    /// Number of accepted G91 GPU world-view evidence objects consumed as a gate.
+    /// Number of accepted Gelfond-1991 compatibility-mode GPU world-view
+    /// evidence objects consumed as a gate.
     pub accepted_g91_world_view_evidence_consumed: u64,
     /// Number of accepted FAEEL GPU world-view evidence objects consumed as a gate.
     pub accepted_faeel_world_view_evidence_consumed: u64,
@@ -460,7 +461,7 @@ impl EpistemicProbProductionTrace {
                 construct: "epistemic probabilistic production metric gate".to_string(),
                 context: format!(
                     "accepted GPU world-view evidence must be classified by epistemic mode, got \
-                     evidence={} g91={} faeel={}",
+                     evidence={} gelfond_1991={} faeel={}",
                     self.accepted_world_view_evidence_consumed,
                     self.accepted_g91_world_view_evidence_consumed,
                     self.accepted_faeel_world_view_evidence_consumed
@@ -916,7 +917,7 @@ impl EpistemicProbProductionTrace {
     /// Require that this trace is eligible for v0.9 production probability metrics.
     ///
     /// This gate only proves fixture containment for an accepted probabilistic
-    /// path. It does not claim the broader G090 probabilistic goal is complete.
+    /// path. It does not claim the broader probabilistic production goal is complete.
     pub fn require_production_metric_eligibility(&self) -> Result<()> {
         let capabilities = production_capabilities();
         if capabilities.fixture_circuit_allowed {
@@ -3236,7 +3237,7 @@ fn require_gpu_exact_backend(program: &ExactDdnnfProgram, construct: &'static st
         return Err(XlogError::UnsupportedEpistemicConstruct {
             construct: construct.to_string(),
             context:
-                "production probability metrics require a compiled GPU D4 exact/provenance/PIR/CNF backend; \
+                "production probability metrics require a compiled GPU-native Decision-DNNF exact/provenance/PIR/CNF backend; \
                       empty roots and count-lift-only evaluation cannot satisfy accepted epistemic probability reuse"
                     .to_string(),
         });

@@ -1,16 +1,15 @@
-//! Compile-time configuration for the W2.1 variable-ordering cost
-//! model.
+//! Compile-time configuration for the WCOJ variable-ordering cost model.
 //!
 //! `CompilerConfig` is a per-call argument to
 //! [`crate::compile::Compiler::compile_with_config_and_stats_snapshot`].
-//! `CompilerConfig::default()` disables W2.1 — slice 1/2/4 + W2.2
-//! dispatch behavior is bit-identical when the default config is in
-//! effect.
+//! `CompilerConfig::default()` disables variable-ordering rewrites, preserving
+//! existing triangle, 4-cycle, recursive, and selectivity-aware dispatch
+//! behavior when the default config is in effect.
 //!
 //! Activation requires explicitly constructing a `CompilerConfig`
 //! with [`WcojVarOrderingKind::LeaderCardinality`]. There is no
-//! environment override on this path; env-driven activation is out
-//! of W2.1 scope.
+//! environment override on this path; env-driven activation is outside this
+//! compile-time config surface.
 //!
 //! # Threshold contract
 //!
@@ -21,31 +20,29 @@
 //! [`CompilerConfig::DEFAULT_THRESHOLD`] rather than silently
 //! widening the gate.
 
-/// Selector for the W2.1 variable-ordering cost model.
+/// Selector for the WCOJ variable-ordering cost model.
 ///
 /// `Disabled` is the load-bearing default: when set, the promoter
-/// never emits `RirNode::MultiWayJoin::var_order`, and slice
-/// 1/2/4/W2.2 dispatch + row-set semantics are bit-identical.
+/// never emits `RirNode::MultiWayJoin::var_order`, preserving existing
+/// triangle, 4-cycle, recursive, and selectivity-aware dispatch row-set
+/// semantics.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WcojVarOrderingKind {
-    /// W2.1 disabled: promoter never sets `var_order`. Bit-identical
-    /// to slice 1/2/4 + W2.2.
+    /// Variable-ordering disabled: promoter never sets `var_order`.
     Disabled,
     /// Use the default `LeaderCardinalityModel` to pick a
     /// stats-driven leader for triangle / 4-cycle WCOJ inputs.
     LeaderCardinality,
-    /// W2.6: use `HeatAwareLeaderModel` — combines cardinality,
-    /// access heat, and observed join selectivity into a
-    /// composite score. Hot relations and rels in tight (low
-    /// selectivity) edges get demoted from the leader slot;
+    /// Use `HeatAwareLeaderModel`: combines cardinality, access heat, and
+    /// observed join selectivity into a composite score. Hot relations and
+    /// relations in tight (low selectivity) edges get demoted from the leader slot;
     /// cold extensional rels are preferred as leader. Same
     /// threshold gate as `LeaderCardinality` via
     /// `effective_wcoj_var_ordering_threshold()`.
     HeatAware,
 }
 
-/// Compile-time configuration for the W2.1 variable-ordering cost
-/// model.
+/// Compile-time configuration for the WCOJ variable-ordering cost model.
 ///
 /// See module docs for activation semantics + threshold contract.
 #[derive(Debug, Clone, PartialEq)]
@@ -98,8 +95,7 @@ impl CompilerConfig {
 
 #[cfg(test)]
 mod tests {
-    //! W2.1 step 4: 4 resolver unit tests pinning the
-    //! out-of-range fallback contract.
+    //! Resolver unit tests pinning the out-of-range fallback contract.
     use super::*;
 
     #[test]

@@ -188,7 +188,7 @@ pub struct AdaptiveReoptimizationStats {
     pub last_observations: Vec<AdaptiveJoinObservation>,
     /// Typed diagnostics emitted by the adaptive entry point.
     pub diagnostics: Vec<AdaptiveReoptimizationDiagnostic>,
-    /// Tracked data-plane DTOH calls added during the most recent adaptive path.
+    /// Tracked data-plane device-to-host calls added during the most recent adaptive path.
     pub data_plane_dtoh_calls: u64,
 }
 
@@ -275,41 +275,59 @@ pub struct Executor {
     /// counter to assert that the WCOJ path actually fired vs. silently
     /// falling back to the binary-join chain with the same answer.
     wcoj_triangle_dispatch_count: u64,
-    /// v0.6.5 slice 2 — count of times `try_dispatch_wcoj_4cycle`
-    /// produced a result and the executor installed it. Tracks
-    /// 4-cycle dispatches separately from triangle.
+    /// Count of times `try_dispatch_wcoj_4cycle` produced a result and the
+    /// executor installed it. Tracks 4-cycle dispatches separately from triangle.
     pub(super) wcoj_4cycle_dispatch_count: u64,
-    /// Goal-039 G_W63_CHAIN — count of times the chain
-    /// dispatcher produced a result and the executor installed it.
-    pub(super) w63_chain_dispatch_count: u64,
-    /// W3.2 — count of times `try_dispatch_wcoj_clique5` produced
+    /// Count of times the chain dispatcher produced a result and the
+    /// executor installed it.
+    pub(super) chain_dispatch_count: u64,
+    /// Count of times `try_dispatch_wcoj_clique5` produced
     /// a result and the executor installed it. Public accessor:
     /// `Executor::wcoj_clique5_dispatch_count(&self) -> u64`.
     pub(super) wcoj_clique5_dispatch_count: u64,
-    /// W3.2 — count of times `try_dispatch_wcoj_clique6` produced
+    /// Count of times `try_dispatch_wcoj_clique6` produced
     /// a result and the executor installed it.
     pub(super) wcoj_clique6_dispatch_count: u64,
-    /// W6.4 — count of times `try_dispatch_wcoj_clique7` produced
+    /// Count of times `try_dispatch_wcoj_clique7` produced
     /// a result and the executor installed it.
     pub(super) wcoj_clique7_dispatch_count: u64,
-    /// W6.4 — count of times `try_dispatch_wcoj_clique8` produced
+    /// Count of times `try_dispatch_wcoj_clique8` produced
     /// a result and the executor installed it.
     pub(super) wcoj_clique8_dispatch_count: u64,
-    /// Authorization 5 G_HIST_KC — number of recursive Merge-phase
-    /// K-clique histogram refresh boundaries observed.
+    /// Number of recursive Merge-phase K-clique histogram refresh
+    /// boundaries observed.
     pub(super) kclique_histogram_refresh_count: u64,
-    /// Authorization 5 G_HIST_KC — cumulative nanoseconds spent in
-    /// recursive Merge-phase K-clique histogram refresh accounting.
+    /// Cumulative nanoseconds spent in recursive Merge-phase K-clique
+    /// histogram refresh accounting.
     pub(super) kclique_histogram_refresh_nanos: u128,
-    /// W4.2 — count of times `execute_join` routed an inner-join
-    /// to the nested-loop provider entry point
+    /// Count of times `execute_join` routed an inner-join to the
+    /// nested-loop provider entry point
     /// (`CudaKernelProvider::nested_loop_join_v2_inner_u32_1key`)
     /// because the eligibility predicate + Cartesian-product
     /// threshold both held. Tests use this counter to assert that
-    /// the W4.2 path actually fired vs. silently falling back to
+    /// the nested-loop path actually fired vs. silently falling back to
     /// hash. Public accessor:
     /// `Executor::nested_loop_dispatch_count(&self) -> u64`.
     pub(super) nested_loop_dispatch_count: u64,
+    /// Counts WCOJ pipeline errors (layout or kernel failures) that were
+    /// converted into binary-join declines instead of propagating. Healthy
+    /// dispatch keeps this at 0; nonzero values expose regressed kernels
+    /// that would otherwise hide behind the silent-fallback contract.
+    /// `XLOG_WCOJ_STRICT=1` propagates the error instead. Public accessor:
+    /// `Executor::wcoj_error_decline_count(&self) -> u64`.
+    pub(super) wcoj_error_decline_count: u64,
+    /// Count of fused group-by-root count dispatches that produced the
+    /// installed result. Public accessor:
+    /// `Executor::wcoj_groupby_fusion_dispatch_count(&self) -> u64`.
+    pub(super) wcoj_groupby_fusion_dispatch_count: u64,
+    /// Count of generalized Free Join dispatches that produced the
+    /// installed result. Public accessor:
+    /// `Executor::free_join_dispatch_count(&self) -> u64`.
+    pub(super) free_join_dispatch_count: u64,
+    /// D3 — count of factorized recursive-delta dispatches that produced
+    /// an installed novel set. Public accessor:
+    /// `Executor::factorized_delta_dispatch_count(&self) -> u64`.
+    pub(super) factorized_delta_dispatch_count: u64,
     /// Cached non-default stream for the WCOJ triangle dispatch hook.
     /// Acquired lazily on first dispatch and reused thereafter — mirrors
     /// [`xlog_cuda::CudaKernelProvider::recorded_op_stream`] for the
@@ -321,10 +339,9 @@ pub struct Executor {
     /// subsequent dispatches through the binary-join fallback,
     /// invalidating the dispatch counter and the gate-on path.
     ///
-    /// **Shared across WCOJ shapes** (v0.6.5 slice 2): triangle and
-    /// 4-cycle dispatch both acquire and reuse this single stream.
-    /// Renamed from `wcoj_triangle_stream` when 4-cycle dispatch
-    /// landed.
+    /// **Shared across WCOJ shapes**: triangle and 4-cycle dispatch both
+    /// acquire and reuse this single stream. Renamed from
+    /// `wcoj_triangle_stream` when 4-cycle dispatch landed.
     wcoj_dispatch_stream: OnceLock<xlog_cuda::device_runtime::StreamId>,
     /// Diagnostic-only: per-dispatch WCOJ triangle phase
     /// timings, populated by `try_dispatch_wcoj_triangle` when
@@ -335,28 +352,26 @@ pub struct Executor {
     #[cfg(feature = "wcoj-phase-timing")]
     pub(super) last_wcoj_phase_timing:
         std::sync::Mutex<Option<wcoj_phase_timing::WcojDispatchPhaseTiming>>,
-    /// W2.3: per-iteration recursive-SCC stats trace, populated
-    /// by `execute_recursive_scc` after each Phase 2 (delta) and
-    /// Phase 4 (full) cardinality update site. Field + types +
-    /// accessor + populating call sites are gated on the
-    /// `recursive-stats-trace` Cargo feature (default OFF) so
-    /// production builds carry zero trace overhead — no field,
-    /// no populating call site, no symbol. The W2.3 acceptance
-    /// test target declares this feature in its
-    /// `required-features`, so it is only built when the
-    /// feature is enabled.
+    /// Per-iteration recursive-SCC stats trace, populated by
+    /// `execute_recursive_scc` after each delta-relation and full-relation
+    /// cardinality update site. Field, types, accessor, and populating call
+    /// sites are gated on the `recursive-stats-trace` Cargo feature
+    /// (default OFF) so production builds carry zero trace overhead: no
+    /// field, no populating call site, no symbol. The recursive stats trace
+    /// test target declares this feature in its `required-features`, so it
+    /// is only built when the feature is enabled.
     #[cfg(feature = "recursive-stats-trace")]
     pub(super) last_recursive_stats_trace: RecursiveStatsTrace,
 }
 
-/// W2.3 step 7 acceptance gate — recursive-SCC stats trace.
+/// Recursive-SCC stats trace for recursive cardinality updates.
 ///
 /// Captures one entry per `(iteration, predicate)` boundary
 /// at which `execute_recursive_scc` updates `StatsManager` for
 /// a recursive predicate's `(full_rel, delta_rel)` RelIds.
-/// Used by Part A + Part B tests to assert per-iteration
-/// cardinality evolution + binary-join estimate evolution
-/// without intrusive instrumentation.
+/// Used by recursive stats trace tests to assert per-iteration cardinality
+/// evolution and binary-join estimate evolution without intrusive
+/// instrumentation.
 #[cfg(feature = "recursive-stats-trace")]
 #[derive(Debug, Default, Clone)]
 #[allow(missing_docs)]
@@ -367,11 +382,10 @@ pub struct RecursiveStatsTrace {
 /// One entry per `(iteration, pred)` boundary.
 ///
 /// `iteration == 0` is the seed pass; `iteration >= 1` is the
-/// fixpoint loop. `phase` distinguishes the Phase 2 delta-
-/// recording site from the Phase 4 full-recording site so Part
-/// A's strict `>` assertions on `full_rows` only see Phase 4
-/// snapshots (full_rel actually advanced) and Part A's
-/// delta-evolves assertions only see Phase 2 snapshots.
+/// fixpoint loop. `phase` distinguishes the delta-recording site
+/// from the full-recording site so full-row growth assertions only
+/// see snapshots where `full_rel` advanced, and delta-evolution
+/// assertions only see delta-update snapshots.
 #[cfg(feature = "recursive-stats-trace")]
 #[derive(Debug, Clone)]
 #[allow(missing_docs)]
@@ -398,13 +412,13 @@ pub enum RecursiveStatsPhase {
     /// Seed pass — full_rel + delta_rel both updated; trace
     /// entry contains both row counts. iteration == 0.
     Seed,
-    /// Fixpoint loop Phase 2 — delta_rel updated; full_rel
-    /// holds the previous iteration's value. Trace entry
-    /// reports `full_rows` as the previous-iter card it sees.
+    /// Fixpoint loop delta update: `delta_rel` updated while `full_rel`
+    /// holds the previous iteration's value. Trace entry reports
+    /// `full_rows` as the previous-iteration cardinality it sees.
     Phase2Delta,
-    /// Fixpoint loop Phase 4 — full_rel updated post-merge.
-    /// Trace entry reports the new full row count + the
-    /// delta_rel value Phase 2 just recorded.
+    /// Fixpoint loop full update after merge. Trace entry reports the new
+    /// full row count plus the `delta_rel` value just recorded by the
+    /// delta update.
     Phase4Full,
 }
 
@@ -439,7 +453,7 @@ impl Executor {
             ilp_last_result: None,
             wcoj_triangle_dispatch_count: 0,
             wcoj_4cycle_dispatch_count: 0,
-            w63_chain_dispatch_count: 0,
+            chain_dispatch_count: 0,
             wcoj_clique5_dispatch_count: 0,
             wcoj_clique6_dispatch_count: 0,
             wcoj_clique7_dispatch_count: 0,
@@ -447,6 +461,10 @@ impl Executor {
             kclique_histogram_refresh_count: 0,
             kclique_histogram_refresh_nanos: 0,
             nested_loop_dispatch_count: 0,
+            wcoj_error_decline_count: 0,
+            wcoj_groupby_fusion_dispatch_count: 0,
+            free_join_dispatch_count: 0,
+            factorized_delta_dispatch_count: 0,
             wcoj_dispatch_stream: OnceLock::new(),
             #[cfg(feature = "wcoj-phase-timing")]
             last_wcoj_phase_timing: std::sync::Mutex::new(None),
@@ -455,10 +473,9 @@ impl Executor {
         }
     }
 
-    /// W2.3 Part A + Part B test seam — return the most recent
-    /// recursive-SCC stats trace populated by
-    /// `execute_recursive_scc`. Gated on the
-    /// `recursive-stats-trace` Cargo feature; default OFF.
+    /// Return the most recent recursive-SCC stats trace populated by
+    /// `execute_recursive_scc`. Gated on the `recursive-stats-trace`
+    /// Cargo feature; default OFF.
     #[cfg(feature = "recursive-stats-trace")]
     pub fn last_recursive_stats_trace(&self) -> &RecursiveStatsTrace {
         &self.last_recursive_stats_trace
@@ -513,7 +530,7 @@ impl Executor {
         &mut self.store
     }
 
-    /// Get a mutable reference to the ILP registry (RD-35).
+    /// Get a mutable reference to the ILP registry.
     pub fn ilp_registry_mut(&mut self) -> &mut IlpRegistry {
         &mut self.ilp_registry
     }
@@ -523,7 +540,7 @@ impl Executor {
         &self.ilp_registry
     }
 
-    /// Get the last ILP tagged result (RD-35).
+    /// Get the last ILP tagged result.
     pub fn ilp_last_result(&self) -> Option<&IlpTaggedResult> {
         self.ilp_last_result.as_ref()
     }
@@ -1139,13 +1156,13 @@ impl Executor {
         self.stats.register_relation(rel_id);
     }
 
-    /// W2.3: reverse-lookup a RelId by predicate name. Used by
+    /// Reverse-lookup a RelId by predicate name. Used by
     /// `execute_recursive_scc` to resolve a recursive predicate's
-    /// full-rel RelId for `StatsManager::update_cardinality`
-    /// calls at iteration boundaries. Returns `None` for
-    /// unregistered names (defensive — production callers
-    /// register IDB heads before `execute_plan`; tests that
-    /// omit registration get a no-op stats update).
+    /// full-rel RelId for `StatsManager::update_cardinality` calls at
+    /// iteration boundaries. Returns `None` for unregistered names
+    /// (defensive: production callers register IDB heads before
+    /// `execute_plan`; tests that omit registration get a no-op stats
+    /// update).
     fn name_to_rel_id(&self, name: &str) -> Option<RelId> {
         self.name_to_rel.get(name).copied()
     }
@@ -2857,6 +2874,7 @@ mod tests {
             strata: vec![stratum],
             rules_by_scc: vec![vec![rule]],
             est_memory_peak: 0,
+            rel_arities: std::collections::HashMap::new(),
         };
 
         let result = executor.execute_plan(&plan);
@@ -2924,6 +2942,7 @@ mod tests {
             strata: vec![stratum],
             rules_by_scc: vec![vec![input_rule], vec![output_rule]],
             est_memory_peak: 0,
+            rel_arities: std::collections::HashMap::new(),
         };
 
         executor.execute_plan(&plan).expect("initial execute_plan");
@@ -3021,6 +3040,7 @@ mod tests {
             strata: vec![stratum],
             rules_by_scc: vec![vec![lhs_rule], vec![blocked_rule], vec![out_rule]],
             est_memory_peak: 0,
+            rel_arities: std::collections::HashMap::new(),
         };
 
         executor.execute_plan(&plan).expect("initial execute_plan");
@@ -3090,7 +3110,7 @@ mod tests {
         assert_eq!(values, vec![3, 4, 5]);
     }
 
-    // ============== v0.8.6 Common Subexpression Elimination Tests ==============
+    // ============== Common Subexpression Elimination Tests ==============
 
     fn duplicate_join_union_plan() -> RirNode {
         let join = RirNode::Join {
@@ -3294,7 +3314,7 @@ mod tests {
             .any(|reason| reason == "specialized_dispatch_boundary"));
     }
 
-    // ============== v0.8.6 Adaptive Runtime Re-Optimization Tests ==============
+    // ============== Adaptive Runtime Re-Optimization Tests ==============
 
     fn adaptive_scc() -> Scc {
         Scc {
@@ -3325,6 +3345,7 @@ mod tests {
             strata: vec![adaptive_stratum()],
             rules_by_scc: vec![vec![adaptive_rule(body)]],
             est_memory_peak: 0,
+            rel_arities: std::collections::HashMap::new(),
         }
     }
 
@@ -3481,7 +3502,7 @@ mod tests {
         }
     }
 
-    // ============== v0.8.6 Persistent Hash Index Manager Tests ==============
+    // ============== Persistent Hash Index Manager Tests ==============
 
     fn persistent_index_join_plan() -> ExecutionPlan {
         adaptive_baseline_join_plan()

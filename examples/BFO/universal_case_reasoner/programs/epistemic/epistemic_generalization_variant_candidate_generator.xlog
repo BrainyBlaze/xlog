@@ -1,0 +1,22 @@
+// UCR v0.9.0 FAEEL variant-specific candidate generator.
+//
+// Variant seed facts model adversarial or ontology-shift candidates that are
+// scoped to a single case/variant rather than promoted into the domain seed
+// inventory.
+
+#pragma epistemic_mode = faeel
+
+pred case_variant(u32, u32).
+pred variant_candidate_seed(u32, u32, u32, u32, u32).
+pred heldout_label_seed(u32, u32).
+pred blocked_candidate(u32, u32, u32).
+pred generated_variant_candidate(u32, u32, u32, u32, u32).
+
+generated_variant_candidate(Case, Variant, Candidate, Root, Intervention) :-
+    variant_candidate_seed(Case, Variant, Candidate, Root, Intervention),
+    know variant_candidate_seed(Case, Variant, Candidate, Root, Intervention),
+    possible case_variant(Case, Variant),
+    not know heldout_label_seed(Case, Candidate),
+    not possible blocked_candidate(Case, Variant, Candidate).
+
+?- generated_variant_candidate(Case, Variant, Candidate, Root, Intervention).

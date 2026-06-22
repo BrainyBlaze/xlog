@@ -1,6 +1,6 @@
 # WCOJ User Guide
 
-Status: Goal-039 G_W62_DOC user guide.
+Status: WCOJ user guide.
 Audience: downstream users who need to decide whether to enable, force, tune,
 or debug xlog WCOJ routes.
 
@@ -27,7 +27,7 @@ Start
  |      triangle: e(X,Y), e(Y,Z), e(X,Z)
  |      4-cycle: e(W,X), e(X,Y), e(Y,Z), e(Z,W)
  |      K=5/K=6 clique: every C(K,2) edge is present
- |      no  -> ordinary binary/hash plan, or Phase-2 ChainJoin for 2-atom chains
+ |      no  -> ordinary binary/hash plan, or follow-on ChainJoin for 2-atom chains
  |      yes
  |
  |-- Are join-key types supported?
@@ -70,12 +70,17 @@ WCOJ routes are certified by shape, type, and runtime validation.
 | Triangle | Production WCOJ route | Supports `U32`, `Symbol`, and `U64` width classes. Triangle adaptive is default-on through `RuntimeConfig::default()` in this branch. |
 | 4-cycle | Production WCOJ route, adaptive opt-in | Force gate is available. Adaptive/cost-model mode is off unless enabled by config or env. |
 | K=5/K=6 clique | Production WCOJ route after planner cost gate | Requires complete clique edge set and usable stats. May emit a planned hash route instead of WCOJ. |
-| K=7/K=8 clique | Phase-2 target, not a current user promise on this branch | The planner data structures admit K up to 8, but G_W64 owns template/counter/cert closure. |
-| 2-atom chain | Phase-2 `ChainJoin`, not WCOJ | G_W63 routes hot two-atom chains through a chain dispatcher. It is not paper WCOJ. |
+| K=7/K=8 clique | Follow-on target, not a current user promise on this branch | The planner data structures admit K up to 8, but template, counter, and certification closure are separate. |
+| 2-atom chain | Follow-on `ChainJoin`, not WCOJ | Hot two-atom chains route through a chain dispatcher after chain integration. It is not paper WCOJ. |
 | Arbitrary deep join tree | Not automatically WCOJ | Use helper-split/K-clique paths where applicable; otherwise fallback is expected. |
 
 Hard fallback reasons include:
 
+- Free Join order planner declines a large bad-order body. Free Join cannot
+  reorder a chain to start from a selective tail, so on a large join whose only
+  prefix-key-joinable order would materialize a much larger intermediate than
+  the binary plan, the planner declines to the binary fallback rather than
+  dispatch the loss. Small joins and competitively-ordered bodies are unaffected.
 - Ground facts, negation, aggregation boundaries, `is` expressions, or too few
   positive atoms.
 - Unsupported join-key types. WCOJ join keys are `U32`, `U64`, and `Symbol`.
@@ -123,7 +128,10 @@ builders. Production services should set them once at process startup.
 | `XLOG_DISABLE_WCOJ_4CYCLE` | `1`/`true` disables | 4-cycle kill switch | Beats force and adaptive. |
 | `XLOG_WCOJ_COST_MODEL` | `cardinality`, `skew`, `skewclassifier` | Runtime cost model | Selects `CostModelKind`. Invalid non-empty values resolve to `SkewClassifier`. Unset defaults to `Cardinality`. |
 | `XLOG_WCOJ_BLOCK_WORK_UNIT` | integer `1..8192` | HG block-slice work unit | Default `1024`. Invalid values fall back to default with a warning. |
-| `XLOG_WCOJ_W63_CHAIN_ENABLE` | `0`/`false` disables; unset/default enables | Phase-2 G_W63 branch only | Controls the `ChainJoin` route after G_W63 integration. Not present on this branch until G_W63 merges. |
+| `XLOG_DISABLE_FREE_JOIN` | `1`/`true` disables | Free Join kill switch | Forces general multiway bodies through the binary fallback instead of the Free Join engine. |
+| `XLOG_DISABLE_WCOJ_GROUPBY_FUSION` | `1`/`true` disables | Aggregate-fused WCOJ kill switch | Forces count/sum/min/max-by-root over a triangle body to materialize then group, instead of the fused aggregate. |
+| `XLOG_DISABLE_FACTORIZED_DELTA` | `1`/`true` disables | Factorized recursive-delta kill switch | Forces every semi-naive delta step through the legacy hash-join → diff path. |
+| `XLOG_FACTORIZED_DELTA_MAX_DOMAIN` | integer | Factorized-delta dense-domain cap | Largest dense domain the bitvector delta route accepts (default `2^14`, hard bound `2^16`); above it the sparse route or legacy path runs. |
 
 Current branch caveat: triangle adaptive and triangle hard-disable are runtime
 config builders, not env resolvers. Use
@@ -222,7 +230,7 @@ Runtime dispatch:
 - `CostModelKind::Cardinality` is the default. Use it when relation
   cardinalities and observed selectivity are populated or when you want the
   current production route.
-- `CostModelKind::SkewClassifier` is conservative on the current G38/G39 code
+- `CostModelKind::SkewClassifier` is conservative on the current skew-classifier integration code
   path. It acts as a legacy opt-out from stats/cardinality dispatch when you
   need to prove fallback behavior.
 
@@ -311,7 +319,7 @@ Actions:
    and let the planner choose WCOJ or planned hash.
 2. If the rule has buried skew, rely on helper-split rather than manually
    decomposing the whole rule.
-3. If helper-split produces a two-atom helper consumer, use the G_W63
+3. If helper-split produces a two-atom helper consumer, use the
    `ChainJoin` route after integration.
 4. Do not assume arbitrary deep trees are WCOJ just because they are expensive.
    Unsupported shapes should fall back until a certified promoter exists.
@@ -339,7 +347,7 @@ Actions:
 2. Keep rules independent within a monotonic stratum so stream-mux can batch
    phase-aligned work after integration.
 3. Preserve the recorded-launch stream discipline. Avoid ad hoc host syncs.
-4. For Phase-2 integration, validate per-stream pool sizing before increasing
+4. For follow-on integration, validate per-stream pool sizing before increasing
    stream count.
 
 Expected evidence:

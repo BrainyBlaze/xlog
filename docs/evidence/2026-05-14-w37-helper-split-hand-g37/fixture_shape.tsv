@@ -1,3 +1,0 @@
-workload	outer_rows	inner_fanout	f_buckets	inner_intermediate_rows	final_rows	helper_rows
-callgraph-inner-skew	4096	1024	4	4194304	4096	4
-heapalloc-inner-skew	4096	8192	1	33554432	4096	1

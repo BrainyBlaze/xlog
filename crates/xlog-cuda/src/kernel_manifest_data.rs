@@ -64,9 +64,9 @@ pub const KERNEL_MODULES: &[KernelModuleSpec] = &[
             "hash_join_semi",
             "hash_join_anti",
             "init_hash_table",
-            // W4.2 nested-loop inner join (emit-pairs design).
+            // Nested-loop inner join production operator (emit-pairs design).
             "nested_loop_join_inner_u32_1key_pairs",
-            // W4.3 sort-merge inner join (emit-pairs design,
+            // Sort-merge inner join provider-level operator (emit-pairs design,
             // caller-asserted pre-sorted inputs).
             "sort_merge_join_inner_u32_1key_pairs",
         ],
@@ -96,8 +96,11 @@ pub const KERNEL_MODULES: &[KernelModuleSpec] = &[
             "capture_num_groups",
             "groupby_count",
             "groupby_sum",
+            "groupby_sum_u64",
             "groupby_min",
+            "groupby_min_u64",
             "groupby_max",
+            "groupby_max_u64",
             "groupby_logsumexp_max",
             "groupby_logsumexp_sumexp",
             "groupby_logsumexp_final",
@@ -138,9 +141,8 @@ pub const KERNEL_MODULES: &[KernelModuleSpec] = &[
             "gather_keys_i64_hi_u32",
             "gather_keys_f64_lo_u32",
             "gather_keys_f64_hi_u32",
-            // W4.3 sortedness-detection kernel (used by the
-            // dispatch-site eligibility check before invoking
-            // the sort-merge join).
+            // Sort-merge sortedness-detection kernel used by provider-level
+            // callers before invoking the sort-merge join.
             "check_ascending_sorted_u32",
         ],
     },
@@ -492,9 +494,21 @@ pub const KERNEL_MODULES: &[KernelModuleSpec] = &[
             "wcoj_build_metadata_scatter_u64",
             "wcoj_triangle_build_hg_work_plan_u32",
             "wcoj_triangle_count_hg_u32",
+            "wcoj_triangle_groupby_root_count_hg_u32",
+            "wcoj_triangle_groupby_root_sum_hg_u32",
+            "wcoj_triangle_groupby_root_min_hg_u32",
+            "wcoj_triangle_groupby_root_max_hg_u32",
             "wcoj_triangle_materialize_hg_u32",
             "wcoj_triangle_build_hg_work_plan_u64",
             "wcoj_triangle_count_hg_u64",
+            "wcoj_triangle_groupby_root_count_hg_u64",
+            "wcoj_triangle_groupby_root_sum_hg_u64",
+            "wcoj_triangle_groupby_root_min_hg_u64",
+            "wcoj_triangle_groupby_root_max_hg_u64",
+            "wcoj_groupby_root_segment_sum_counts_u32",
+            "wcoj_groupby_root_segment_sum_values_u64",
+            "wcoj_groupby_root_segment_min_values_u64",
+            "wcoj_groupby_root_segment_max_values_u64",
             "wcoj_triangle_materialize_hg_u64",
             "wcoj_triangle_count_hg_cached_u32",
             "wcoj_triangle_materialize_hg_cached_u32",
@@ -505,14 +519,19 @@ pub const KERNEL_MODULES: &[KernelModuleSpec] = &[
             "wcoj_4cycle_build_e2_work_prefix_u32",
             "wcoj_4cycle_build_hg_work_plan_u32",
             "wcoj_4cycle_count_hg_u32",
+            "wcoj_4cycle_groupby_root_count_hg_u32",
+            "wcoj_4cycle_groupby_root_sum_hg_u32",
+            "wcoj_4cycle_groupby_root_min_hg_u32",
+            "wcoj_4cycle_groupby_root_max_hg_u32",
             "wcoj_4cycle_materialize_hg_u32",
             "wcoj_4cycle_build_e2_work_prefix_u64",
             "wcoj_4cycle_build_hg_work_plan_u64",
             "wcoj_4cycle_count_hg_u64",
+            "wcoj_4cycle_groupby_root_count_hg_u64",
             "wcoj_4cycle_materialize_hg_u64",
-            // W3.2/W6.4 — General-arity clique kernel (k=5..8 from
-            // single C++ template; ABI wrappers below are
-            // template-call-only per Tier-1 source-audit).
+            // General-arity WCOJ clique kernel family (k=5..8 from
+            // a single C++ template; ABI wrappers below are
+            // template-call-only for source-auditability).
             "wcoj_clique5_count_hg_u32",
             "wcoj_clique5_materialize_hg_u32",
             "wcoj_clique5_count_hg_u64",
@@ -529,6 +548,36 @@ pub const KERNEL_MODULES: &[KernelModuleSpec] = &[
             "wcoj_clique8_materialize_hg_u32",
             "wcoj_clique8_count_hg_u64",
             "wcoj_clique8_materialize_hg_u64",
+            // Aggregate-fused K-clique group-by-root count kernels (u32
+            // width-class, K=5/6).
+            "wcoj_clique5_groupby_root_count_hg_u32",
+            "wcoj_clique6_groupby_root_count_hg_u32",
+            // GPU Free Join level-synchronous frontier engine primitives.
+            "fj_expand_work_prefix_u32",
+            "fj_expand_count_u32",
+            "fj_expand_emit_u32",
+            "fj_probe_refine_u32",
+            // u64 width-class twins (work prefix is
+            // width-agnostic and shared).
+            "fj_expand_count_u64",
+            "fj_expand_emit_u64",
+            "fj_probe_refine_u64",
+            // Factorized count epilogue (width-agnostic).
+            "fj_count_multiplicity",
+            // D3 S3 spike — factorized recursive delta novel-set
+            // pipeline (dense-domain bitmap union–diff).
+            "fj_delta_range_u32",
+            "fj_delta_mark_u32",
+            "fj_delta_subtract_u32",
+            "fj_delta_popcount",
+            "fj_delta_emit_u32",
+            "fj_delta_max_u32",
+            // D3 sparse-domain spike — hash-set novel pipeline.
+            "fj_delta_sparse_estimate",
+            "fj_delta_sparse_load_r",
+            "fj_delta_sparse_insert_candidates",
+            "fj_delta_sparse_mark",
+            "fj_delta_sparse_emit",
         ],
     },
     KernelModuleSpec {

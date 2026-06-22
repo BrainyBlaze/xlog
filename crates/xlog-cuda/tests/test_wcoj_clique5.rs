@@ -1,12 +1,12 @@
 // crates/xlog-cuda/tests/test_wcoj_clique5.rs
-//! W3.2 — k=5 clique provider × width-class round-trip certs.
+//! K=5 clique provider width-class round-trip coverage.
 //!
-//! 3 cells: u32 / u64 / Symbol. Each:
+//! 3 width classes: u32 / u64 / Symbol. Each test:
 //!   1. Build a small clique fixture (≤ 6 vertices).
 //!   2. Upload each of the 10 edges to a CudaBuffer.
-//!   3. Layout-sort+dedup each via W3.1's wcoj_layout_sort_*_recorded
-//!      (the runtime dispatcher's pre-condition contract; certs
-//!      satisfy it explicitly).
+//!   3. Layout-sort+dedup each via `wcoj_layout_sort_*_recorded`
+//!      (the runtime dispatcher's pre-condition contract; this test
+//!      satisfies it explicitly).
 //!   4. Call provider entry on the laid-out edges.
 //!   5. Download output, compare against `cpu_clique5_reference`
 //!      brute-force oracle (set equality modulo row order).
@@ -456,5 +456,8 @@ fn clique5_u32_metadata_path_is_bit_exact_for_100_runs() {
         }
         pass_count += 1;
     }
-    assert_eq!(pass_count, 100, "M_HIST_KC.4 K5 raw pass count");
+    assert_eq!(
+        pass_count, 100,
+        "K5 metadata path must be bit-exact across 100 runs"
+    );
 }

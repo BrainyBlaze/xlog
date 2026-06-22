@@ -13,12 +13,12 @@ separate instruction explicitly authorizes that scope.
 
 - `ROADMAP.md`
 - `docs/language-reference.md`
-- `docs/architecture/language-v085.md`
+- `docs/architecture/language-completeness.md`
 - `docs/architecture/dilp-training.md`
 - `docs/architecture/xlog-prob.md`
 - `examples/neural/*`
 - `examples/v080-dts/*`
-- `examples/v085-language/showcase/*`
+- `examples/language-completeness/showcase/*`
 - `examples/v086-runtime/*`
 - `docs/evidence/2026-05-19-v086-consumers/validation_summary.json`
 - `/home/dev/projects/Goal-Driven_Software_Development.pdf`

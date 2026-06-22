@@ -1,5 +1,6 @@
 # Build artifacts
 /target/
+/target-sm89-py310/
 
 # Compiled CUDA kernel artifacts (regenerated during build)
 *.ptx
@@ -44,8 +45,13 @@ crates/pyxlog/dist/
 data/
 *.pt
 
-# Committed evidence and example artifacts must stay visible to git-based release tooling.
-!docs/evidence/**/*.log
+# Local-only agent workspaces
+docs/evidence/
+docs/plans/
+docs/reports/
+docs/superpowers/
+
+# Committed example artifacts must stay visible to git-based release tooling.
 !examples/neural/baseline/deepproblog/**/data/
 !examples/neural/baseline/deepproblog/**/data/**
 !examples/neural/baseline/results/**/*.log
@@ -53,6 +59,8 @@ data/
 !examples/neural/results/**/*.pt
 
 .docs/
+docs/api/generated/
+docs/ROADMAP.md
 
 # Fuzz testing artifacts
 fuzz/target/

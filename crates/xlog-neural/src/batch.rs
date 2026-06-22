@@ -9,7 +9,7 @@
 //!
 //! ```text
 //! nn(mnist_net, [X], Y, [0..9]) :: digit(X, Y).
-//! addition(X, Y, Z) :- digit(X, D1), digit(Y, D2), Z is D1 + D2.
+//! addition(X, Y, Z) :- digit(X, LeftDigit), digit(Y, RightDigit), Z is LeftDigit + RightDigit.
 //! ```
 //!
 //! For a query like `addition(img1, img2, Z)`, we need to evaluate `mnist_net`

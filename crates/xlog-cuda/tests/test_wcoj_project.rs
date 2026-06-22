@@ -1,5 +1,5 @@
 // crates/xlog-cuda/tests/test_wcoj_project.rs
-//! W2.1 step 2 — owned, recorded helpers
+//! Owned, recorded WCOJ projection helper coverage for
 //! `wcoj_project_2col_swap_recorded` +
 //! `wcoj_project_output_columns_recorded`.
 //!
@@ -70,7 +70,7 @@ fn make_runtime_fixture() -> Option<RuntimeFixture> {
 }
 
 // ---------------------------------------------------------------
-// Upload / download helpers — minimal, scoped to W2.1 tests.
+// Upload / download helpers — minimal, scoped to projection helper tests.
 // ---------------------------------------------------------------
 
 fn upload_binary_typed(

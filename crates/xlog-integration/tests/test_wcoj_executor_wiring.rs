@@ -1,5 +1,5 @@
 // crates/xlog-integration/tests/test_wcoj_executor_wiring.rs
-//! v0.6.2 executor-level WCOJ triangle dispatch wiring.
+//! Executor-level WCOJ triangle dispatch wiring.
 //!
 //! Locks the contract for the hook installed in
 //! [`xlog_runtime::Executor::execute_plan`]'s non-recursive
@@ -11,7 +11,7 @@
 //!     `XLOG_DISABLE_WCOJ_TRIANGLE` not set), AND
 //!   * Either force-on (`wcoj_triangle_dispatch=Some(true)` /
 //!     `XLOG_USE_WCOJ_TRIANGLE_U32=1`) is set, OR the adaptive
-//!     classifier is on (default-on post-A2-lite, opt-out via
+//!     classifier is on (default-on after adaptive dispatch was introduced, opt-out via
 //!     `wcoj_triangle_dispatch_adaptive=Some(false)`).
 //!   * The rule's RIR matches the canonical triangle shape:
 //!     `Project([0, 1, 3]) → Join → Join → Scan, Scan, Scan`
@@ -174,7 +174,7 @@ fn upload_binary_u32(memory: &Arc<GpuMemoryManager>, rows: &[(u32, u32)]) -> Cud
 /// Read a 3-column u32 result buffer to a sorted, deduped
 /// `Vec<(u32, u32, u32)>`. Uses cached_row_count when available
 /// (set by the executor / WCOJ kernel) and falls back to a 4-byte
-/// D2H of `d_num_rows` for compact-in-place outputs.
+/// device-to-host read of `d_num_rows` for compact-in-place outputs.
 fn download_triples(buf: &CudaBuffer) -> Vec<(u32, u32, u32)> {
     let n = match buf.cached_row_count() {
         Some(c) => c as usize,
@@ -546,7 +546,7 @@ fn wiring_gate_on_symbol_triangle_dispatches_and_preserves_schema() {
     //
     // We don't compare against a gate-off reference here — the
     // existing binary-join chain may apply schema policies
-    // (Union, dedup) that are unrelated to this slice. The cert
+    // (Union, dedup) that are unrelated to this path. The check
     // is narrower: gate-on dispatches, output schema is correct,
     // row count is the expected 5.
     let Some(fix) = make_runtime_backed_fixture() else {
@@ -594,7 +594,7 @@ fn wiring_gate_on_symbol_triangle_dispatches_and_preserves_schema() {
 }
 
 // ---------------------------------------------------------------
-// U64 + mixed-width executor wiring (commit 3 of v0.6.2 u64 slice).
+// U64 + mixed-width executor wiring.
 // ---------------------------------------------------------------
 
 /// U64 sibling of `upload_binary_u32` / `upload_binary_symbol`.

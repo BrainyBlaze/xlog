@@ -42,7 +42,7 @@
 //! land 0xCD on top of `next` (bug). With the recorder, the
 //! free is correctly ordered and PATTERN_NEW survives.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 
 use cudarc::driver::sys;
 use xlog_core::{MemoryBudget, XlogError};
@@ -63,6 +63,13 @@ impl LoggingSink for DiscardSink {
     fn emit(&self, _record: LogRecord) -> Result<(), SinkError> {
         Ok(())
     }
+}
+
+fn recorder_test_lock() -> MutexGuard<'static, ()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 unsafe fn dtoh_sync(dst: &mut [u8], src: u64) {
@@ -101,6 +108,7 @@ unsafe fn memset_sync_default(dst: u64, value: u8, len: usize) {
 
 #[test]
 fn provider_memset_recorded_survives_drop_and_reuse() {
+    let _recorder_test_guard = recorder_test_lock();
     let Some(device) = CudaDevice::new(0).ok().map(Arc::new) else {
         eprintln!("Skipping: CUDA runtime unavailable");
         return;
@@ -238,6 +246,7 @@ fn provider_memset_recorded_survives_drop_and_reuse() {
 /// migrated path requires runtime-backed allocation.
 #[test]
 fn provider_memset_recorded_rejects_legacy_manager() {
+    let _recorder_test_guard = recorder_test_lock();
     let Some(device) = CudaDevice::new(0).ok().map(Arc::new) else {
         return;
     };
@@ -275,6 +284,7 @@ fn provider_memset_recorded_rejects_legacy_manager() {
 /// error message identifies preflight rather than commit.
 #[test]
 fn provider_memset_recorded_surfaces_stream_misuse_from_direct_resource() {
+    let _recorder_test_guard = recorder_test_lock();
     use xlog_cuda::device_runtime::DirectCudaResource;
 
     let Some(device) = CudaDevice::new(0).ok().map(Arc::new) else {
@@ -321,6 +331,7 @@ fn provider_memset_recorded_surfaces_stream_misuse_from_direct_resource() {
 /// version.
 #[test]
 fn provider_memset_column_recorded_survives_drop_and_reuse() {
+    let _recorder_test_guard = recorder_test_lock();
     use xlog_cuda::CudaColumn;
 
     let Some(device) = CudaDevice::new(0).ok().map(Arc::new) else {
@@ -412,6 +423,7 @@ fn provider_memset_column_recorded_survives_drop_and_reuse() {
 /// invoking the deleter).
 #[test]
 fn provider_memset_column_recorded_rejects_external_dlpack_column() {
+    let _recorder_test_guard = recorder_test_lock();
     use xlog_cuda::{CudaColumn, DlpackManagedTensor};
 
     let Some(device) = CudaDevice::new(0).ok().map(Arc::new) else {
@@ -481,6 +493,7 @@ fn provider_memset_column_recorded_rejects_external_dlpack_column() {
 /// (covered by the sibling test above).
 #[test]
 fn provider_memset_column_recorded_accepts_xlog_owned_dlpack_column() {
+    let _recorder_test_guard = recorder_test_lock();
     use xlog_cuda::{CudaColumn, DlpackManagedTensor};
 
     let Some(device) = CudaDevice::new(0).ok().map(Arc::new) else {
@@ -549,6 +562,7 @@ fn provider_memset_column_recorded_accepts_xlog_owned_dlpack_column() {
 /// instead of the original column.
 #[test]
 fn provider_sort_recorded_survives_drop_and_reuse() {
+    let _recorder_test_guard = recorder_test_lock();
     use xlog_core::{ScalarType, Schema};
     use xlog_cuda::CudaBuffer;
 
@@ -585,7 +599,11 @@ fn provider_sort_recorded_survives_drop_and_reuse() {
     let default_stream = device.inner().stream();
 
     const ROWS: usize = 1024;
-    const ITERATIONS: usize = 16;
+    // High-memory GPUs (e.g. RTX 5090) do not observe allocator address
+    // reuse within 16 iterations, leaving the cross-stream lifetime safety
+    // invariant unexercised. Matches the higher iteration counts other
+    // recorder tests in this file already use.
+    const ITERATIONS: usize = 128;
     const TRAMPLE: u8 = 0xEE;
     let schema = Schema::new(vec![
         ("k".to_string(), ScalarType::U32),
@@ -720,6 +738,7 @@ fn provider_sort_recorded_survives_drop_and_reuse() {
 /// over-reads compacted buffers.
 #[test]
 fn provider_sort_recorded_keeps_logical_row_count_with_capacity_slack() {
+    let _recorder_test_guard = recorder_test_lock();
     use xlog_core::{ScalarType, Schema};
     use xlog_cuda::CudaBuffer;
 
@@ -832,6 +851,7 @@ fn provider_sort_recorded_keeps_logical_row_count_with_capacity_slack() {
 /// `(k, v)` rows.
 #[test]
 fn provider_dedup_full_row_recorded_survives_drop_and_reuse() {
+    let _recorder_test_guard = recorder_test_lock();
     use xlog_core::{ScalarType, Schema};
     use xlog_cuda::CudaBuffer;
 
@@ -1051,6 +1071,7 @@ fn provider_dedup_full_row_recorded_survives_drop_and_reuse() {
 ///   * max   = k + 15*64 = k + 960
 #[test]
 fn provider_groupby_multi_agg_recorded_survives_drop_and_reuse() {
+    let _recorder_test_guard = recorder_test_lock();
     use xlog_core::{AggOp, ScalarType, Schema};
     use xlog_cuda::CudaBuffer;
 
@@ -1284,6 +1305,7 @@ fn provider_groupby_multi_agg_recorded_survives_drop_and_reuse() {
 /// Negative test: recorded GroupBy against a no-runtime manager.
 #[test]
 fn provider_groupby_multi_agg_recorded_rejects_legacy_manager() {
+    let _recorder_test_guard = recorder_test_lock();
     use xlog_core::{AggOp, ScalarType, Schema};
     use xlog_cuda::CudaBuffer;
 
@@ -1357,6 +1379,7 @@ fn provider_groupby_multi_agg_recorded_rejects_legacy_manager() {
 /// → cross product per matching key.
 #[test]
 fn provider_hash_join_inner_v2_recorded_survives_drop_and_reuse() {
+    let _recorder_test_guard = recorder_test_lock();
     use xlog_core::{ScalarType, Schema};
     use xlog_cuda::{CudaBuffer, JoinType};
 
@@ -1640,6 +1663,7 @@ fn provider_hash_join_inner_v2_recorded_survives_drop_and_reuse() {
 /// manager. Must reject before any allocation / kernel.
 #[test]
 fn provider_hash_join_v2_recorded_rejects_legacy_manager() {
+    let _recorder_test_guard = recorder_test_lock();
     use xlog_core::{ScalarType, Schema};
     use xlog_cuda::{CudaBuffer, JoinType};
 
@@ -1736,6 +1760,7 @@ fn provider_hash_join_v2_recorded_rejects_legacy_manager() {
 /// minimal runtime-backed setup.
 #[test]
 fn provider_hash_join_v2_recorded_accepts_all_join_types() {
+    let _recorder_test_guard = recorder_test_lock();
     use xlog_core::{ScalarType, Schema};
     use xlog_cuda::{CudaBuffer, JoinType};
 
@@ -1828,6 +1853,7 @@ fn provider_hash_join_v2_recorded_accepts_all_join_types() {
 /// whose key is in [0, RKEYS) survive — half of left.
 #[test]
 fn provider_hash_join_semi_v2_recorded_survives_drop_and_reuse() {
+    let _recorder_test_guard = recorder_test_lock();
     use xlog_core::{ScalarType, Schema};
     use xlog_cuda::{CudaBuffer, JoinType};
 
@@ -2079,6 +2105,7 @@ fn provider_hash_join_semi_v2_recorded_survives_drop_and_reuse() {
 /// only left rows with key ≥ RKEYS survive.
 #[test]
 fn provider_hash_join_anti_v2_recorded_survives_drop_and_reuse() {
+    let _recorder_test_guard = recorder_test_lock();
     use xlog_core::{ScalarType, Schema};
     use xlog_cuda::{CudaBuffer, JoinType};
 
@@ -2328,6 +2355,7 @@ fn provider_hash_join_anti_v2_recorded_survives_drop_and_reuse() {
 /// zero-filled.
 #[test]
 fn provider_hash_join_left_outer_v2_recorded_partial_match_survives_drop_and_reuse() {
+    let _recorder_test_guard = recorder_test_lock();
     use xlog_core::{ScalarType, Schema};
     use xlog_cuda::{CudaBuffer, JoinType};
 
@@ -2594,6 +2622,7 @@ fn provider_hash_join_left_outer_v2_recorded_partial_match_survives_drop_and_reu
 /// (per-right-column zero-fill only, no inner copy).
 #[test]
 fn provider_hash_join_left_outer_v2_recorded_all_unmatched_survives_drop_and_reuse() {
+    let _recorder_test_guard = recorder_test_lock();
     use xlog_core::{ScalarType, Schema};
     use xlog_cuda::{CudaBuffer, JoinType};
 
@@ -2809,6 +2838,7 @@ fn provider_hash_join_left_outer_v2_recorded_all_unmatched_survives_drop_and_reu
 /// expected (left columns + right zeros) shape.
 #[test]
 fn provider_hash_join_left_outer_v2_recorded_empty_right() {
+    let _recorder_test_guard = recorder_test_lock();
     use xlog_core::{ScalarType, Schema};
     use xlog_cuda::{CudaBuffer, JoinType};
 
@@ -2934,6 +2964,7 @@ fn provider_hash_join_left_outer_v2_recorded_empty_right() {
 /// launch_stream chain completes.
 #[test]
 fn provider_hash_join_v2_with_index_recorded_inner_survives_drop_and_reuse() {
+    let _recorder_test_guard = recorder_test_lock();
     use xlog_core::{ScalarType, Schema};
     use xlog_cuda::{CudaBuffer, JoinType};
 
@@ -3174,6 +3205,7 @@ fn provider_hash_join_v2_with_index_recorded_inner_survives_drop_and_reuse() {
 /// Slice #7D: drop+reuse for indexed Anti.
 #[test]
 fn provider_hash_join_v2_with_index_recorded_anti_survives_drop_and_reuse() {
+    let _recorder_test_guard = recorder_test_lock();
     use xlog_core::{ScalarType, Schema};
     use xlog_cuda::{CudaBuffer, JoinType};
 
@@ -3397,6 +3429,7 @@ fn provider_hash_join_v2_with_index_recorded_anti_survives_drop_and_reuse() {
 /// Slice #7D: drop+reuse for indexed LeftOuter (partial-match).
 #[test]
 fn provider_hash_join_v2_with_index_recorded_left_outer_survives_drop_and_reuse() {
+    let _recorder_test_guard = recorder_test_lock();
     use xlog_core::{ScalarType, Schema};
     use xlog_cuda::{CudaBuffer, JoinType};
 
@@ -3632,6 +3665,7 @@ fn provider_hash_join_v2_with_index_recorded_left_outer_survives_drop_and_reuse(
 /// manager. Must reject before any allocation / kernel.
 #[test]
 fn provider_hash_join_v2_with_index_recorded_rejects_legacy_manager() {
+    let _recorder_test_guard = recorder_test_lock();
     use xlog_core::{ScalarType, Schema};
     use xlog_cuda::{CudaBuffer, JoinType};
 
@@ -3714,6 +3748,7 @@ fn provider_hash_join_v2_with_index_recorded_rejects_legacy_manager() {
 /// Negative test: recorded sort against a no-runtime manager.
 #[test]
 fn provider_sort_recorded_rejects_legacy_manager() {
+    let _recorder_test_guard = recorder_test_lock();
     use xlog_core::{ScalarType, Schema};
     use xlog_cuda::CudaBuffer;
 
@@ -3783,6 +3818,7 @@ fn provider_sort_recorded_rejects_legacy_manager() {
 /// deviation is a corruption signal.
 #[test]
 fn provider_compare_const_mask_recorded_survives_drop_and_reuse() {
+    let _recorder_test_guard = recorder_test_lock();
     use xlog_core::{ScalarType, Schema};
     use xlog_cuda::{CompareOp, CudaBuffer};
 
@@ -3931,6 +3967,7 @@ fn provider_compare_const_mask_recorded_survives_drop_and_reuse() {
 /// happens.
 #[test]
 fn provider_compare_const_mask_recorded_rejects_legacy_manager() {
+    let _recorder_test_guard = recorder_test_lock();
     use xlog_core::{ScalarType, Schema};
     use xlog_cuda::{CompareOp, CudaBuffer};
 
@@ -4006,6 +4043,7 @@ fn provider_compare_const_mask_recorded_rejects_legacy_manager() {
 /// pattern is a corruption signal.
 #[test]
 fn provider_compare_columns_mask_recorded_survives_drop_and_reuse() {
+    let _recorder_test_guard = recorder_test_lock();
     use xlog_core::{ScalarType, Schema};
     use xlog_cuda::{CompareOp, CudaBuffer};
 
@@ -4171,6 +4209,7 @@ fn provider_compare_columns_mask_recorded_survives_drop_and_reuse() {
 /// happens.
 #[test]
 fn provider_compare_columns_mask_recorded_rejects_legacy_manager() {
+    let _recorder_test_guard = recorder_test_lock();
     use xlog_core::{ScalarType, Schema};
     use xlog_cuda::{CompareOp, CudaBuffer};
 
@@ -4261,6 +4300,7 @@ fn provider_compare_columns_mask_recorded_rejects_legacy_manager() {
 /// remaining 2 of 5 row_cap slots untouched / unspecified).
 #[test]
 fn provider_compact_buffer_by_device_mask_counted_recorded_survives_drop_and_reuse() {
+    let _recorder_test_guard = recorder_test_lock();
     use xlog_core::{ScalarType, Schema};
     use xlog_cuda::CudaBuffer;
 
@@ -4443,6 +4483,7 @@ fn provider_compact_buffer_by_device_mask_counted_recorded_survives_drop_and_reu
 /// `capture_compact_count` and `compact_bytes_by_mask`.
 #[test]
 fn provider_compact_recorded_short_mask_ignores_capacity_slack() {
+    let _recorder_test_guard = recorder_test_lock();
     use xlog_core::{ScalarType, Schema};
     use xlog_cuda::CudaBuffer;
 
@@ -4533,6 +4574,7 @@ fn provider_compact_recorded_short_mask_ignores_capacity_slack() {
 /// (no-runtime) manager. Must reject before any allocation.
 #[test]
 fn provider_compact_buffer_by_device_mask_counted_recorded_rejects_legacy_manager() {
+    let _recorder_test_guard = recorder_test_lock();
     use xlog_core::{ScalarType, Schema};
     use xlog_cuda::CudaBuffer;
 
@@ -4623,6 +4665,7 @@ fn provider_compact_buffer_by_device_mask_counted_recorded_rejects_legacy_manage
 /// rows are `{i : i%5 == PREDICATE_KEY}`.
 #[test]
 fn provider_filter_recorded_survives_drop_and_reuse() {
+    let _recorder_test_guard = recorder_test_lock();
     use xlog_core::{ScalarType, Schema};
     use xlog_cuda::{CompareOp, CudaBuffer};
 
@@ -4811,6 +4854,7 @@ fn provider_filter_recorded_survives_drop_and_reuse() {
 /// allocation / kernel — same loud-failure contract.
 #[test]
 fn provider_filter_recorded_rejects_legacy_manager() {
+    let _recorder_test_guard = recorder_test_lock();
     use xlog_core::{ScalarType, Schema};
     use xlog_cuda::{CompareOp, CudaBuffer};
 
@@ -4883,6 +4927,7 @@ fn provider_filter_recorded_rejects_legacy_manager() {
 /// row data integrity post-compact.
 #[test]
 fn provider_filter_columns_recorded_survives_drop_and_reuse() {
+    let _recorder_test_guard = recorder_test_lock();
     use xlog_core::{ScalarType, Schema};
     use xlog_cuda::{CompareOp, CudaBuffer};
 
@@ -5083,6 +5128,7 @@ fn provider_filter_columns_recorded_survives_drop_and_reuse() {
 /// allocation / kernel launch.
 #[test]
 fn provider_filter_columns_recorded_rejects_legacy_manager() {
+    let _recorder_test_guard = recorder_test_lock();
     use xlog_core::{ScalarType, Schema};
     use xlog_cuda::{CompareOp, CudaBuffer};
 
@@ -5165,6 +5211,7 @@ fn provider_filter_columns_recorded_rejects_legacy_manager() {
 /// `i%5 == TARGET as usize`.
 #[test]
 fn provider_filter_fused_scan_recorded_f64_survives_drop_and_reuse() {
+    let _recorder_test_guard = recorder_test_lock();
     use xlog_core::{ScalarType, Schema};
     use xlog_cuda::{CompareOp, CudaBuffer};
 
@@ -5341,6 +5388,7 @@ fn provider_filter_fused_scan_recorded_f64_survives_drop_and_reuse() {
 /// manager. Must reject before any allocation / kernel.
 #[test]
 fn provider_filter_fused_scan_recorded_rejects_legacy_manager() {
+    let _recorder_test_guard = recorder_test_lock();
     use xlog_core::{ScalarType, Schema};
     use xlog_cuda::{CompareOp, CudaBuffer};
 
@@ -5414,6 +5462,7 @@ fn provider_filter_fused_scan_recorded_rejects_legacy_manager() {
 /// race-free output across many iterations.
 #[test]
 fn provider_hash_join_inner_csm_v2_recorded_result_set_matches() {
+    let _recorder_test_guard = recorder_test_lock();
     use xlog_core::{ScalarType, Schema};
     use xlog_cuda::CudaBuffer;
 
@@ -5574,6 +5623,7 @@ fn provider_hash_join_inner_csm_v2_recorded_result_set_matches() {
 /// sync, reuses + tramples slots, asserts result-set integrity.
 #[test]
 fn provider_hash_join_inner_csm_v2_recorded_survives_drop_and_reuse() {
+    let _recorder_test_guard = recorder_test_lock();
     use xlog_core::{ScalarType, Schema};
     use xlog_cuda::CudaBuffer;
 
@@ -5801,6 +5851,7 @@ fn provider_hash_join_inner_csm_v2_recorded_survives_drop_and_reuse() {
 /// Negative test: CSM Inner against a no-runtime manager.
 #[test]
 fn provider_hash_join_inner_csm_v2_recorded_rejects_legacy_manager() {
+    let _recorder_test_guard = recorder_test_lock();
     use xlog_core::{ScalarType, Schema};
     use xlog_cuda::CudaBuffer;
 
@@ -5877,6 +5928,7 @@ fn provider_hash_join_inner_csm_v2_recorded_rejects_legacy_manager() {
 /// the build side.
 #[test]
 fn provider_hash_join_inner_csm_v2_with_index_recorded_result_set_matches() {
+    let _recorder_test_guard = recorder_test_lock();
     use xlog_core::{ScalarType, Schema};
     use xlog_cuda::CudaBuffer;
 
@@ -6040,6 +6092,7 @@ fn provider_hash_join_inner_csm_v2_with_index_recorded_result_set_matches() {
 /// until the chain completes.
 #[test]
 fn provider_hash_join_inner_csm_v2_with_index_recorded_survives_drop_and_reuse() {
+    let _recorder_test_guard = recorder_test_lock();
     use xlog_core::{ScalarType, Schema};
     use xlog_cuda::CudaBuffer;
 
@@ -6275,6 +6328,7 @@ fn provider_hash_join_inner_csm_v2_with_index_recorded_survives_drop_and_reuse()
 /// manager.
 #[test]
 fn provider_hash_join_inner_csm_v2_with_index_recorded_rejects_legacy_manager() {
+    let _recorder_test_guard = recorder_test_lock();
     use xlog_core::{ScalarType, Schema};
     use xlog_cuda::CudaBuffer;
 
@@ -6367,6 +6421,7 @@ fn provider_hash_join_inner_csm_v2_with_index_recorded_rejects_legacy_manager() 
 /// to host-computed expected multiset.
 #[test]
 fn provider_hash_join_left_outer_csm_v2_recorded_result_set_matches() {
+    let _recorder_test_guard = recorder_test_lock();
     use xlog_core::{ScalarType, Schema};
     use xlog_cuda::CudaBuffer;
 
@@ -6542,6 +6597,7 @@ fn provider_hash_join_left_outer_csm_v2_recorded_result_set_matches() {
 /// trampled.
 #[test]
 fn provider_hash_join_left_outer_csm_v2_recorded_partial_match_survives_drop_and_reuse() {
+    let _recorder_test_guard = recorder_test_lock();
     use xlog_core::{ScalarType, Schema};
     use xlog_cuda::CudaBuffer;
 
@@ -6777,6 +6833,7 @@ fn provider_hash_join_left_outer_csm_v2_recorded_partial_match_survives_drop_and
 /// empty.
 #[test]
 fn provider_hash_join_left_outer_csm_v2_recorded_all_unmatched_survives_drop_and_reuse() {
+    let _recorder_test_guard = recorder_test_lock();
     use xlog_core::{ScalarType, Schema};
     use xlog_cuda::CudaBuffer;
 
@@ -6992,6 +7049,7 @@ fn provider_hash_join_left_outer_csm_v2_recorded_all_unmatched_survives_drop_and
 /// output with zero-filled right columns.
 #[test]
 fn provider_hash_join_left_outer_csm_v2_recorded_empty_right() {
+    let _recorder_test_guard = recorder_test_lock();
     use xlog_core::{ScalarType, Schema};
     use xlog_cuda::CudaBuffer;
 
@@ -7118,6 +7176,7 @@ fn provider_hash_join_left_outer_csm_v2_recorded_empty_right() {
 /// helpful Kernel error when the manager has no runtime.
 #[test]
 fn provider_hash_join_left_outer_csm_v2_recorded_rejects_legacy_manager() {
+    let _recorder_test_guard = recorder_test_lock();
     use xlog_core::{ScalarType, Schema};
     use xlog_cuda::CudaBuffer;
 
@@ -7206,6 +7265,7 @@ fn provider_hash_join_left_outer_csm_v2_recorded_rejects_legacy_manager() {
 /// (lk >= RKEYS) are exercised.
 #[test]
 fn provider_hash_join_left_outer_csm_v2_with_index_recorded_result_set_matches() {
+    let _recorder_test_guard = recorder_test_lock();
     use xlog_core::{ScalarType, Schema};
     use xlog_cuda::CudaBuffer;
 
@@ -7379,6 +7439,7 @@ fn provider_hash_join_left_outer_csm_v2_with_index_recorded_result_set_matches()
 #[test]
 fn provider_hash_join_left_outer_csm_v2_with_index_recorded_partial_match_survives_drop_and_reuse()
 {
+    let _recorder_test_guard = recorder_test_lock();
     use xlog_core::{ScalarType, Schema};
     use xlog_cuda::CudaBuffer;
 
@@ -7615,6 +7676,7 @@ fn provider_hash_join_left_outer_csm_v2_with_index_recorded_partial_match_surviv
 #[test]
 fn provider_hash_join_left_outer_csm_v2_with_index_recorded_all_unmatched_survives_drop_and_reuse()
 {
+    let _recorder_test_guard = recorder_test_lock();
     use xlog_core::{ScalarType, Schema};
     use xlog_cuda::CudaBuffer;
 
@@ -7838,6 +7900,7 @@ fn provider_hash_join_left_outer_csm_v2_with_index_recorded_all_unmatched_surviv
 /// Legacy-manager rejection.
 #[test]
 fn provider_hash_join_left_outer_csm_v2_with_index_recorded_rejects_legacy_manager() {
+    let _recorder_test_guard = recorder_test_lock();
     use xlog_core::{ScalarType, Schema};
     use xlog_cuda::CudaBuffer;
 

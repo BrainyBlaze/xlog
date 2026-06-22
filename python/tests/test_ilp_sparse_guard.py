@@ -158,7 +158,7 @@ def test_sparse_backend_internal_strict_apply_mask_is_hard_gated():
         )
 
 
-def test_sparse_backend_apply_mask_selected_path_is_zero_dtoh():
+def test_sparse_backend_apply_mask_selected_path_is_zero_device_to_host():
     prog = pyxlog.IlpProgramFactory.compile(SOURCE, device=0, memory_mb=512)
     backend = backend_mod.SparseMaskBackend()
     candidates = prog.valid_candidates("W", False)
@@ -181,11 +181,11 @@ def test_sparse_backend_apply_mask_selected_path_is_zero_dtoh():
     assert after["dtoh_bytes"] == 0
 
 
-def test_sparse_d2h_counter_clean_after_mask_setup():
-    """set_rule_mask_sparse must not increment the D2H transfer counter.
+def test_sparse_device_to_host_counter_clean_after_mask_setup():
+    """set_rule_mask_sparse must not increment the device-to-host transfer counter.
 
     The Rust implementation uses download_f64_untracked for the DLPack
-    soft-probs import, so the D2H counter should remain at zero.
+    soft-probs import, so the device-to-host counter should remain at zero.
     """
     prog = pyxlog.IlpProgramFactory.compile(SOURCE, device=0, memory_mb=512)
     cands = prog.valid_candidates("W", False)
@@ -196,11 +196,11 @@ def test_sparse_d2h_counter_clean_after_mask_setup():
     prog.set_rule_mask_sparse("W", list(range(c)), soft, 32)
 
     assert prog.d2h_transfer_count() == 0, (
-        f"set_rule_mask_sparse incremented D2H counter to {prog.d2h_transfer_count()}"
+        f"set_rule_mask_sparse incremented device-to-host counter to {prog.d2h_transfer_count()}"
     )
 
 
-def test_legacy_sparse_api_rejected_in_strict_zero_dtoh_mode():
+def test_legacy_sparse_api_rejected_in_strict_zero_device_to_host_mode():
     prog = pyxlog.IlpProgramFactory.compile(SOURCE, device=0, memory_mb=512)
     cands = prog.valid_candidates("W", False)
     c = len(cands)
@@ -301,7 +301,7 @@ def test_strict_selected_device_setter_contains_no_download_helpers():
     assert "download_" not in setter_src
 
 
-def test_strict_selected_device_provider_helper_contains_no_raw_dtoh():
+def test_strict_selected_device_provider_helper_contains_no_raw_device_to_host_copy():
     repo_root = Path(__file__).resolve().parents[2]
     src = (repo_root / "crates/xlog-cuda/src/provider/ilp.rs").read_text()
     match = re.search(

@@ -2,6 +2,7 @@
 
 use crate::metadata::RirMeta;
 use crate::rir::RirNode;
+use xlog_core::RelId;
 
 /// Strongly Connected Component in the dependency graph
 #[derive(Debug, Clone)]
@@ -45,6 +46,11 @@ pub struct ExecutionPlan {
     pub rules_by_scc: Vec<Vec<CompiledRule>>,
     /// Total estimated memory peak (bytes)
     pub est_memory_peak: u64,
+    /// Relation arities known at lowering time (every predicate the
+    /// lowerer assigned a RelId). Consumed by shape promoters that
+    /// must size Scan leaves without schema access (general Free Join
+    /// multiway promotion).
+    pub rel_arities: std::collections::HashMap<RelId, usize>,
 }
 
 impl ExecutionPlan {
@@ -55,6 +61,7 @@ impl ExecutionPlan {
             strata: vec![],
             rules_by_scc: vec![],
             est_memory_peak: 0,
+            rel_arities: std::collections::HashMap::new(),
         }
     }
 
@@ -117,6 +124,7 @@ impl PlanBuilder {
             strata: self.strata,
             rules_by_scc: self.rules,
             est_memory_peak: 0,
+            rel_arities: std::collections::HashMap::new(),
         }
     }
 }

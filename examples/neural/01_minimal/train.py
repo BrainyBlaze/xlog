@@ -16,7 +16,10 @@ Usage:
 Example:
     # The program defines:
     # nn(mnist_net, [X], Y, [0,1,2,3,4,5,6,7,8,9]) :: digit(X, Y).
-    # addition(X, Y, Z) :- digit(X, D1), digit(Y, D2), Z is D1 + D2.
+    # addition(X, Y, Z) :-
+    #     digit(X, LeftDigit),
+    #     digit(Y, RightDigit),
+    #     Z is LeftDigit + RightDigit.
     #
     # Given images at indices 0 and 1, the query:
     #   addition(0, 1, 7)
@@ -189,8 +192,11 @@ def create_program():
         nn(mnist_net, [X], Y, [0,1,2,3,4,5,6,7,8,9]) :: digit(X, Y).
 
         // Addition rule: sum of two classified digits
-        // Given digit(img1, d1) and digit(img2, d2), compute d1 + d2
-        addition(X, Y, Z) :- digit(X, D1), digit(Y, D2), Z is D1 + D2.
+        // Given digit(img1, left_digit) and digit(img2, right_digit), compute their sum
+        addition(X, Y, Z) :-
+            digit(X, LeftDigit),
+            digit(Y, RightDigit),
+            Z is LeftDigit + RightDigit.
     """)
 
 

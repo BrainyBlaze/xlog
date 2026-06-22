@@ -1,4 +1,4 @@
-//! Finite list normalization for the v0.8.5 language surface.
+//! Finite list normalization for the language-completeness surface.
 
 use std::collections::{HashMap, HashSet};
 
@@ -11,7 +11,7 @@ use crate::ast::{
 
 const LIST_ID_TYPE: ScalarType = ScalarType::U64;
 
-/// Normalize finite v0.8.5 list syntax into scalar list identifiers plus helper relations.
+/// Normalize finite list syntax into scalar list identifiers plus helper relations.
 ///
 /// The normalized program uses ordinary XLOG relations:
 ///
@@ -21,7 +21,7 @@ const LIST_ID_TYPE: ScalarType = ScalarType::U64;
 /// - selected built-in helper relations such as `append`, `sort`, `msort`, and `list_to_set`
 ///
 /// This keeps accepted list programs on the existing relational lowering/runtime path.
-pub fn normalize_v085_lists(program: &Program) -> Result<Program> {
+pub fn normalize_list_builtins(program: &Program) -> Result<Program> {
     let mut normalizer = ListNormalizer::new(program)?;
     normalizer.normalize_program(program)
 }
@@ -198,7 +198,7 @@ impl ListNormalizer {
                 BodyLiteral::IsExpr(is_expr) => out.push(BodyLiteral::IsExpr(is_expr.clone())),
                 BodyLiteral::Univ(_) => {
                     return Err(list_error(
-                        "univ literals must be normalized by G085_META before list normalization",
+                        "univ literals must be normalized by the meta-term pass before list normalization",
                     ));
                 }
             }
@@ -232,7 +232,7 @@ impl ListNormalizer {
         }
         if is_reserved_pair_helper(atom) {
             return Err(list_error(
-                "pair helpers are reserved for G085_META and are not implemented in G085_LIST",
+                "pair helpers are reserved for meta-term normalization and are not implemented in list normalization",
             ));
         }
 
@@ -345,7 +345,7 @@ impl ListNormalizer {
                     && !matches!(atom.terms[1], Term::List(_) | Term::Cons { .. })
                 {
                     return Err(list_error(
-                        "unbounded append/3 generation is unsupported; bind the first two lists to finite literals in G085_LIST",
+                        "unbounded append/3 generation is unsupported during list normalization; bind the first two lists to finite literals",
                     ));
                 }
                 let left = self.normalize_list_arg(&atom.terms[0], None, var_list_types)?;
@@ -360,7 +360,7 @@ impl ListNormalizer {
                     self.normalize_list_arg(&atom.terms[2], Some(left.elem_type), var_list_types)?;
                 if !left.is_literal || !right.is_literal {
                     return Err(list_error(
-                        "unbounded append/3 generation is unsupported; bind the first two lists to finite literals in G085_LIST",
+                        "unbounded append/3 generation is unsupported during list normalization; bind the first two lists to finite literals",
                     ));
                 }
                 let left_id = left.id.expect("literal list has id");
@@ -387,7 +387,7 @@ impl ListNormalizer {
                 let input = self.normalize_list_arg(&atom.terms[0], None, var_list_types)?;
                 if !input.is_literal {
                     return Err(list_error(
-                        "sort/msort/list_to_set require a finite list literal in G085_LIST",
+                        "sort/msort/list_to_set require a finite list literal during list normalization",
                     ));
                 }
                 let op = match pred {
@@ -612,7 +612,7 @@ impl ListNormalizer {
                 Ok((LIST_ID_TYPE, Term::Integer(id as i64)))
             }
             Term::Compound { .. } | Term::PredRef(_) | Term::Aggregate(_) => Err(list_error(
-                "compound, predref, and aggregate list elements require later G085_META support",
+                "compound, predref, and aggregate list elements require meta-term normalization support",
             )),
         }
     }
@@ -982,5 +982,5 @@ fn is_reserved_pair_helper(atom: &Atom) -> bool {
 }
 
 fn list_error(message: impl Into<String>) -> XlogError {
-    XlogError::Compilation(format!("v0.8.5 list error: {}", message.into()))
+    XlogError::Compilation(format!("list normalization error: {}", message.into()))
 }

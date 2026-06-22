@@ -1,6 +1,6 @@
 use xlog_core::ScalarType;
 use xlog_logic::ast::{BodyLiteral, Term, TypeRef};
-use xlog_logic::{normalize_v085_lists, normalize_v085_meta, parse_program, Compiler};
+use xlog_logic::{normalize_list_builtins, normalize_meta_builtins, parse_program, Compiler};
 
 fn fact_rows(program: &xlog_logic::Program, pred: &str) -> Vec<Vec<Term>> {
     program
@@ -80,10 +80,10 @@ fn parses_20_positive_and_10_negative_meta_fixtures() {
 
     for (label, src) in rejected {
         let program = parse_program(src).unwrap_or_else(|err| panic!("{label}: parse: {err}"));
-        let err = normalize_v085_meta(&program).expect_err(label);
+        let err = normalize_meta_builtins(&program).expect_err(label);
         let msg = err.to_string();
         assert!(
-            msg.contains("v0.8.5 meta error"),
+            msg.contains("meta normalization error"),
             "{label}: expected typed meta error, got {msg}"
         );
     }
@@ -112,8 +112,8 @@ fn normalizes_meta_predicates_to_relational_helpers() {
     "#;
 
     let program = parse_program(src).expect("parse");
-    let meta_normalized = normalize_v085_meta(&program).expect("meta normalize");
-    let normalized = normalize_v085_lists(&meta_normalized).expect("list normalize");
+    let meta_normalized = normalize_meta_builtins(&program).expect("meta normalize");
+    let normalized = normalize_list_builtins(&meta_normalized).expect("list normalize");
 
     let body_preds = body_predicates(&normalized);
     for builtin in ["ground", "var", "nonvar", "functor", "findall", "maplist"] {
@@ -236,7 +236,7 @@ fn rejects_unsafe_meta_forms_with_typed_diagnostics() {
         let err = Compiler::new().compile(src).expect_err(label);
         let msg = err.to_string();
         assert!(
-            msg.contains("v0.8.5 meta error") && msg.contains(needle),
+            msg.contains("meta normalization error") && msg.contains(needle),
             "{label}: expected meta diagnostic containing {needle:?}, got {msg}"
         );
     }
@@ -270,9 +270,9 @@ fn committed_meta_examples_compile() {
         .canonicalize()
         .expect("repo root");
     for path in [
-        "examples/v085-language/meta/inspection.xlog",
-        "examples/v085-language/meta/findall.xlog",
-        "examples/v085-language/meta/maplist.xlog",
+        "examples/language-completeness/meta/inspection.xlog",
+        "examples/language-completeness/meta/findall.xlog",
+        "examples/language-completeness/meta/maplist.xlog",
     ] {
         let full_path = repo_root.join(path);
         let src = std::fs::read_to_string(&full_path)

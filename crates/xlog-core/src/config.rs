@@ -72,7 +72,7 @@ pub struct RuntimeConfig {
     /// `deterministic_d2h_violation_count`. Metadata reads via
     /// `dtoh_scalar_untracked` remain allowed.
     ///
-    /// Default `false`: v0.5.5 still has known data-plane D2H paths in
+    /// Default `false`: the runtime still has known data-plane D2H paths in
     /// relational set difference and binary-join count/materialize that are
     /// scheduled for replacement before the default flips.
     pub strict_deterministic_d2h: bool,
@@ -94,31 +94,30 @@ pub struct RuntimeConfig {
     /// `None` uses the production default.
     pub wcoj_triangle_dispatch_disabled: Option<bool>,
 
-    /// v0.6.5 slice 2 — force gate for the 4-cycle WCOJ dispatch.
+    /// Force gate for the 4-cycle WCOJ dispatch.
     /// `Some(true)` / env `XLOG_USE_WCOJ_4CYCLE=1` forces every
-    /// recognized 4-cycle to dispatch the GPU kernel. `Some(false)` is explicit force-off. `None`
-    /// (default) consults the env.
+    /// recognized 4-cycle to dispatch the GPU kernel. `Some(false)` is
+    /// explicit force-off. `None` (default) consults the env.
     pub wcoj_4cycle_dispatch: Option<bool>,
-    /// v0.6.5 slice 2 — adaptive opt-in for 4-cycle WCOJ. **Unlike
-    /// triangle, 4-cycle adaptive is opt-in by default**, not
-    /// default-on: `None` resolves to `false`. Default-on for
-    /// 4-cycle is a separate follow-up slice gated by bench evidence.
+    /// Adaptive opt-in for 4-cycle WCOJ. **Unlike triangle, 4-cycle
+    /// adaptive is opt-in by default**, not default-on: `None` resolves
+    /// to `false`. Default-on for 4-cycle requires separate benchmark evidence.
     pub wcoj_4cycle_dispatch_adaptive: Option<bool>,
-    /// v0.6.5 slice 2 — kill switch for 4-cycle WCOJ. Same shape
-    /// as triangle's kill switch: beats force + adaptive.
+    /// Kill switch for 4-cycle WCOJ. Same shape as triangle's kill switch:
+    /// beats force + adaptive.
     pub wcoj_4cycle_dispatch_disabled: Option<bool>,
-    /// v0.6.5 W2.5 — selects the runtime WCOJ cost model.
+    /// Selects the runtime WCOJ cost model.
     /// `None` resolves by env/default precedence; see
     /// [`RuntimeConfig::with_wcoj_cost_model`].
     pub wcoj_cost_model: Option<CostModelKind>,
-    /// v0.8.6 G086_CSE — runtime common subexpression elimination.
+    /// Runtime common subexpression elimination.
     ///
     /// `Some(true)` enables structural CSE for safe deterministic subplans.
     /// `Some(false)` disables it. `None` consults `XLOG_CSE`; unset defaults
     /// to disabled so existing runtime behavior is preserved unless the caller
     /// opts in.
     pub common_subexpression_elimination: Option<bool>,
-    /// v0.8.6 G086_ADAPT — runtime adaptive re-optimization adoption gate.
+    /// Runtime adaptive re-optimization adoption gate.
     ///
     /// `Some(true)` allows an executor to compare a baseline plan against a
     /// compiler-supplied candidate plan using runtime telemetry, adopt the
@@ -130,28 +129,27 @@ pub struct RuntimeConfig {
     /// candidate re-optimized plan. `None` consults
     /// `XLOG_ADAPTIVE_REOPT_MIN_RATIO`; unset or invalid values default to 1.2.
     pub adaptive_reoptimization_min_misplan_ratio: Option<f64>,
-    /// v0.8.6 G086_INDEX — persistent hash index manager gate.
+    /// Persistent hash index manager gate.
     ///
     /// `Some(true)` enables persistent build-side hash index reuse in the
     /// existing executor join-index cache. `Some(false)` disables the manager.
     /// `None` consults `XLOG_PERSISTENT_HASH_INDEXES`; unset defaults to
     /// enabled to preserve the existing adaptive-indexing behavior.
     pub persistent_hash_indexes: Option<bool>,
-    /// v0.8.6 G086_INDEX — record background-build mode for the persistent
-    /// hash index manager. The current runtime keeps builds on the existing
-    /// provider path but records background build requests/completions so the
-    /// transition to recorded asynchronous builds has stable telemetry.
+    /// Record background-build mode for the persistent hash index manager.
+    /// The current runtime keeps builds on the existing provider path but
+    /// records background build requests/completions so the transition to
+    /// recorded asynchronous builds has stable telemetry.
     pub persistent_hash_index_background_build: Option<bool>,
 }
 
-/// v0.6.5 W2.5 cost-model selector for WCOJ dispatch.
+/// Cost-model selector for WCOJ dispatch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CostModelKind {
     /// Legacy skew-classifier opt-out selector.
     ///
-    /// On current G38 integration code the GPU classifier surface is absent,
-    /// so this selector is implemented as a conservative opt-out from
-    /// stats/cardinality dispatch.
+    /// The GPU skew-classifier surface is absent, so this selector is
+    /// implemented as a conservative opt-out from stats/cardinality dispatch.
     SkewClassifier,
     /// Stats/cardinality-backed dispatch selector.
     Cardinality,
@@ -224,7 +222,7 @@ impl RuntimeConfig {
         self
     }
 
-    /// v0.6.5 slice 2 — override the 4-cycle force-gate.
+    /// Override the 4-cycle force gate.
     /// `Some(true)` forces the GPU kernel; `Some(false)` is
     /// explicit force-off; `None` consults `XLOG_USE_WCOJ_4CYCLE`.
     pub fn with_wcoj_4cycle_dispatch(mut self, override_value: Option<bool>) -> Self {
@@ -232,7 +230,7 @@ impl RuntimeConfig {
         self
     }
 
-    /// v0.6.5 slice 2 — override the 4-cycle stats opt-in.
+    /// Override the 4-cycle stats opt-in.
     /// `Some(true)` engages the cardinality model; `Some(false)` skips it.
     /// `None` resolves to `false` (opt-in by default — 4-cycle
     /// does NOT inherit triangle's default-on behavior).
@@ -241,7 +239,7 @@ impl RuntimeConfig {
         self
     }
 
-    /// v0.6.5 slice 2 — engage / disengage the 4-cycle kill switch.
+    /// Engage / disengage the 4-cycle kill switch.
     /// Same shape as the triangle kill switch.
     pub fn with_wcoj_4cycle_dispatch_disabled(mut self, override_value: Option<bool>) -> Self {
         self.wcoj_4cycle_dispatch_disabled = override_value;

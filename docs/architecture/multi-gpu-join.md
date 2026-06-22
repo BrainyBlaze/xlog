@@ -1,10 +1,10 @@
 # Multi-GPU Join Architecture
 
-> **Implementation status (current as of v0.9.2):** **Design only.** Multi-GPU memory management
+> **Implementation status:** **Design only.** Multi-GPU memory management
 > (`crates/xlog-cuda/src/multi_gpu_memory.rs`) is implemented, but distributed join
 > execution and cross-device partitioning kernels are not shipped. Single-GPU joins
 > (`hash_join_v2`) remain the production path. Multi-GPU partitioned evaluation is
-> targeted for v0.10.0 (see `ROADMAP.md`).
+> tracked as future roadmap work (see `ROADMAP.md`).
 
 ## Overview
 
@@ -40,7 +40,7 @@ final_result = concatenate(result[0], result[1], ..., result[n])
 ## Implementation Notes
 
 1. **Partitioning Kernel**: Need GPU kernel to compute partition IDs and scatter
-2. **Cross-Device Copy**: Use P2P if available, else copy through host
+2. **Cross-Device Copy**: Use peer-to-peer device copy if available, else copy through host
 3. **Load Balancing**: Hash partitioning may be skewed; consider sampling for better distribution
 4. **Memory Management**: Each device needs memory for:
    - Input partition
@@ -65,5 +65,5 @@ impl MultiGpuKernelProvider {
 
 - Implement `DistributedBuffer` type
 - Add partitioning kernels
-- Implement P2P copy optimization
+- Implement peer-to-peer device copy optimization
 - Add skew detection and handling

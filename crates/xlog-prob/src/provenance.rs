@@ -13,7 +13,7 @@ use xlog_logic::stratify::{
 
 use crate::wfs::{evaluate_wfs_rules, WfsAtom, WfsConfig, WfsLiteral, WfsRule};
 
-use crate::aggregates::AggState;
+use crate::aggregates::{AggState, AggStateKey};
 use crate::pir::{ChoiceVarId, LeafId, PirGraph, PirNodeId};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -559,16 +559,28 @@ pub(crate) fn value_from_term(term: &Term) -> Result<Value> {
         Term::Variable(_) | Term::Anonymous | Term::Aggregate(_) => Err(XlogError::Compilation(
             "Non-constant term cannot be converted to a value".to_string(),
         )),
-        Term::List(_) => Err(v085_prob_term_error("value conversion", "list")),
-        Term::Cons { .. } => Err(v085_prob_term_error("value conversion", "cons")),
-        Term::Compound { .. } => Err(v085_prob_term_error("value conversion", "compound")),
-        Term::PredRef(_) => Err(v085_prob_term_error("value conversion", "predref")),
+        Term::List(_) => Err(unsupported_probabilistic_term_error(
+            "value conversion",
+            "list",
+        )),
+        Term::Cons { .. } => Err(unsupported_probabilistic_term_error(
+            "value conversion",
+            "cons",
+        )),
+        Term::Compound { .. } => Err(unsupported_probabilistic_term_error(
+            "value conversion",
+            "compound",
+        )),
+        Term::PredRef(_) => Err(unsupported_probabilistic_term_error(
+            "value conversion",
+            "predref",
+        )),
     }
 }
 
-fn v085_prob_term_error(context: &str, kind: &str) -> XlogError {
+fn unsupported_probabilistic_term_error(context: &str, kind: &str) -> XlogError {
     XlogError::Compilation(format!(
-        "v0.8.5 term form '{}' is parsed but not supported in probabilistic {} before its G085 implementation node",
+        "high-level term form '{}' is parsed but not supported in probabilistic provenance {} until a lowering/materialization path exists",
         kind, context
     ))
 }
@@ -1012,8 +1024,7 @@ fn ground_rule_for_wfs(
             }
             BodyLiteral::Univ(_) => {
                 return Err(XlogError::Compilation(
-                    "v0.8.5 meta error: univ literal was not normalized before provenance extraction"
-                        .to_string(),
+                    "univ literal was not normalized before provenance extraction".to_string(),
                 ));
             }
         }
@@ -1241,7 +1252,8 @@ fn eval_rule(
                     } else {
                         // For negation to succeed, ALL matching tuples must be "absent" (negated).
                         // If tuple can exist via multiple provenances (disjunction), we negate that.
-                        // Negation of (P1 or P2 or ...) = (not P1) and (not P2) and ...
+                        // Negation of (proof_a or proof_b or ...) =
+                        // (not proof_a) and (not proof_b) and ...
                         let combined_tuple_prov = builder.or(matching_provs);
                         let neg_prov = negate_provenance(combined_tuple_prov, builder);
                         let new_prov = builder.and(vec![prov, neg_prov]);
@@ -1257,8 +1269,7 @@ fn eval_rule(
             }
             BodyLiteral::Univ(_) => {
                 return Err(XlogError::Compilation(
-                    "v0.8.5 meta error: univ literal was not normalized before provenance extraction"
-                        .to_string(),
+                    "univ literal was not normalized before provenance extraction".to_string(),
                 ));
             }
         }
@@ -1358,7 +1369,7 @@ fn eval_aggregate_head_provenance(
         if count_only {
             if uncertain_rows.len() > MAX_EXACT_PROB_COUNT_LIFT_ROWS {
                 return Err(XlogError::Compilation(format!(
-                    "v0.8.5 agg_lift error: count lift finite domain cap exceeded for predicate {} group {:?}: {} uncertain rows > cap {}; use prob_engine = mc or reduce the finite aggregate domain",
+                    "count aggregate lifting finite domain cap exceeded for predicate {} group {:?}: {} uncertain rows > cap {}; use prob_engine = mc or reduce the finite aggregate domain",
                     head.predicate,
                     group.key,
                     uncertain_rows.len(),
@@ -1394,13 +1405,15 @@ fn eval_aggregate_head_provenance(
 
         if uncertain_rows.len() > MAX_EXACT_PROB_AGG_UNCERTAIN_ROWS {
             return Err(XlogError::Compilation(format!(
-                "v0.8.5 prob_aggregate error: exact aggregate domain cap exceeded for predicate {} group {:?}: {} uncertain rows > cap {}; use prob_engine = mc or reduce the finite aggregate domain",
+                "exact probabilistic aggregate domain cap exceeded for predicate {} group {:?}: {} uncertain rows > cap {}; use prob_engine = mc or reduce the finite aggregate domain",
                 head.predicate,
                 group.key,
                 uncertain_rows.len(),
                 MAX_EXACT_PROB_AGG_UNCERTAIN_ROWS
             )));
         }
+        let (outcomes, dp_states) =
+            factorized_aggregate_outcomes(&agg_specs, &always_rows, &uncertain_rows, builder)?;
         record_aggregate_lift_reports(
             aggregate_lifting,
             head,
@@ -1408,32 +1421,17 @@ fn eval_aggregate_head_provenance(
             &agg_specs,
             always_rows.len(),
             uncertain_rows.len(),
-            AggregateLiftStatus::FallbackExactEnumeration,
-            "operator uses exact finite outcome enumeration; lifted implementation is not selected for this aggregate head",
+            AggregateLiftStatus::Fired,
+            "finite outcome domain folded with factorized aggregate-state dynamic programming",
             MAX_EXACT_PROB_AGG_UNCERTAIN_ROWS,
-            0,
+            dp_states,
         );
 
-        let mask_count = 1usize << uncertain_rows.len();
-        for mask in 0..mask_count {
-            if always_rows.is_empty() && mask == 0 {
+        for (agg_states, selected_any, proof) in outcomes {
+            if always_rows.is_empty() && !selected_any {
+                // No deterministic rows and no uncertain row selected: the group
+                // is empty in this outcome, so no head tuple materializes.
                 continue;
-            }
-
-            let mut agg_states: Vec<AggState> =
-                agg_specs.iter().map(|(op, _)| AggState::new(*op)).collect();
-            for row in &always_rows {
-                update_aggregate_states(&mut agg_states, &agg_specs, row)?;
-            }
-
-            let mut proof_terms: Vec<PirNodeId> = Vec::with_capacity(uncertain_rows.len());
-            for (idx, row) in uncertain_rows.iter().enumerate() {
-                if (mask & (1usize << idx)) != 0 {
-                    proof_terms.push(row.prov);
-                    update_aggregate_states(&mut agg_states, &agg_specs, row)?;
-                } else {
-                    proof_terms.push(negate_provenance(row.prov, builder));
-                }
             }
 
             let tuple = materialize_aggregate_tuple(
@@ -1444,13 +1442,89 @@ fn eval_aggregate_head_provenance(
                 &agg_to_pos,
                 &agg_states,
             )?;
-            let proof = builder.and(proof_terms);
             let entry = out.entry(tuple).or_insert_with(|| builder.const_false());
             *entry = builder.or(vec![*entry, proof]);
         }
     }
 
     Ok(out)
+}
+
+/// Factorized aggregate-outcome folding for non-count exact aggregates.
+///
+/// Instead of enumerating all `2^k` present/absent masks over the `k` uncertain
+/// rows (one conjunctive PIR formula per mask), fold the rows one at a time
+/// through a dynamic program keyed by the aggregate state reached so far.
+/// Outcomes that agree on the aggregate state share one PIR sub-DAG, so the
+/// emitted PIR is `O(k * #distinct-states)` instead of `O(2^k)` formulas.
+///
+/// Rows are folded in the same order as the previous mask enumeration
+/// (deterministic rows first, then uncertain rows in index order), so every
+/// outcome value is bit-identical to the enumerated result and the union of
+/// worlds reaching each outcome is unchanged (identical query probabilities).
+///
+/// Returns the folded outcomes as `(aggregate states, any-uncertain-row-selected,
+/// proof formula)` triples plus the total number of DP states visited.
+#[allow(clippy::type_complexity)]
+fn factorized_aggregate_outcomes(
+    agg_specs: &[(AggOp, String)],
+    always_rows: &[AggregateProvRow],
+    uncertain_rows: &[AggregateProvRow],
+    builder: &mut PirBuilder,
+) -> Result<(Vec<(Vec<AggState>, bool, PirNodeId)>, usize)> {
+    use std::collections::btree_map::Entry;
+
+    fn states_key(states: &[AggState]) -> Vec<AggStateKey> {
+        states.iter().map(AggState::dp_key).collect()
+    }
+
+    let mut base: Vec<AggState> = agg_specs.iter().map(|(op, _)| AggState::new(*op)).collect();
+    for row in always_rows {
+        update_aggregate_states(&mut base, agg_specs, row)?;
+    }
+
+    let mut dp: BTreeMap<(Vec<AggStateKey>, bool), (Vec<AggState>, PirNodeId)> = BTreeMap::new();
+    let true_proof = builder.const_true();
+    dp.insert((states_key(&base), false), (base, true_proof));
+    let mut dp_states = dp.len();
+
+    for row in uncertain_rows {
+        let absent = negate_provenance(row.prov, builder);
+        let mut next: BTreeMap<(Vec<AggStateKey>, bool), (Vec<AggState>, PirNodeId)> =
+            BTreeMap::new();
+        for ((key, selected_any), (states, proof)) in dp {
+            let mut present_states = states.clone();
+            update_aggregate_states(&mut present_states, agg_specs, row)?;
+            let present_key = states_key(&present_states);
+            let present_proof = builder.and(vec![proof, row.prov]);
+            match next.entry((present_key, true)) {
+                Entry::Occupied(mut entry) => {
+                    entry.get_mut().1 = builder.or(vec![entry.get().1, present_proof]);
+                }
+                Entry::Vacant(entry) => {
+                    entry.insert((present_states, present_proof));
+                }
+            }
+
+            let absent_proof = builder.and(vec![proof, absent]);
+            match next.entry((key, selected_any)) {
+                Entry::Occupied(mut entry) => {
+                    entry.get_mut().1 = builder.or(vec![entry.get().1, absent_proof]);
+                }
+                Entry::Vacant(entry) => {
+                    entry.insert((states, absent_proof));
+                }
+            }
+        }
+        dp = next;
+        dp_states += dp.len();
+    }
+
+    let outcomes = dp
+        .into_iter()
+        .map(|((_, selected_any), (states, proof))| (states, selected_any, proof))
+        .collect();
+    Ok((outcomes, dp_states))
 }
 
 fn validate_count_lift_rows(
@@ -1528,25 +1602,25 @@ fn materialize_count_lift_tuple(
             }
             Term::Anonymous => unreachable!("aggregate head plan rejects anonymous terms"),
             Term::List(_) => {
-                return Err(v085_prob_term_error(
+                return Err(unsupported_probabilistic_term_error(
                     "aggregate head materialization",
                     "list",
                 ));
             }
             Term::Cons { .. } => {
-                return Err(v085_prob_term_error(
+                return Err(unsupported_probabilistic_term_error(
                     "aggregate head materialization",
                     "cons",
                 ));
             }
             Term::Compound { .. } => {
-                return Err(v085_prob_term_error(
+                return Err(unsupported_probabilistic_term_error(
                     "aggregate head materialization",
                     "compound",
                 ));
             }
             Term::PredRef(_) => {
-                return Err(v085_prob_term_error(
+                return Err(unsupported_probabilistic_term_error(
                     "aggregate head materialization",
                     "predref",
                 ));
@@ -1648,15 +1722,29 @@ fn aggregate_head_plan(head: &Atom) -> Result<AggregatePlan> {
                     head.predicate
                 )));
             }
-            Term::List(_) => return Err(v085_prob_term_error("aggregate head planning", "list")),
+            Term::List(_) => {
+                return Err(unsupported_probabilistic_term_error(
+                    "aggregate head planning",
+                    "list",
+                ));
+            }
             Term::Cons { .. } => {
-                return Err(v085_prob_term_error("aggregate head planning", "cons"));
+                return Err(unsupported_probabilistic_term_error(
+                    "aggregate head planning",
+                    "cons",
+                ));
             }
             Term::Compound { .. } => {
-                return Err(v085_prob_term_error("aggregate head planning", "compound"));
+                return Err(unsupported_probabilistic_term_error(
+                    "aggregate head planning",
+                    "compound",
+                ));
             }
             Term::PredRef(_) => {
-                return Err(v085_prob_term_error("aggregate head planning", "predref"));
+                return Err(unsupported_probabilistic_term_error(
+                    "aggregate head planning",
+                    "predref",
+                ));
             }
         }
     }
@@ -1729,25 +1817,25 @@ fn materialize_aggregate_tuple(
             }
             Term::Anonymous => unreachable!("aggregate head plan rejects anonymous terms"),
             Term::List(_) => {
-                return Err(v085_prob_term_error(
+                return Err(unsupported_probabilistic_term_error(
                     "aggregate head materialization",
                     "list",
                 ));
             }
             Term::Cons { .. } => {
-                return Err(v085_prob_term_error(
+                return Err(unsupported_probabilistic_term_error(
                     "aggregate head materialization",
                     "cons",
                 ));
             }
             Term::Compound { .. } => {
-                return Err(v085_prob_term_error(
+                return Err(unsupported_probabilistic_term_error(
                     "aggregate head materialization",
                     "compound",
                 ));
             }
             Term::PredRef(_) => {
-                return Err(v085_prob_term_error(
+                return Err(unsupported_probabilistic_term_error(
                     "aggregate head materialization",
                     "predref",
                 ));
@@ -1818,12 +1906,24 @@ pub(crate) fn unify_atom(
                     "Aggregation not supported in provenance extraction".to_string(),
                 ));
             }
-            Term::List(_) => return Err(v085_prob_term_error("unification", "list")),
-            Term::Cons { .. } => return Err(v085_prob_term_error("unification", "cons")),
-            Term::Compound { .. } => {
-                return Err(v085_prob_term_error("unification", "compound"));
+            Term::List(_) => {
+                return Err(unsupported_probabilistic_term_error("unification", "list"))
             }
-            Term::PredRef(_) => return Err(v085_prob_term_error("unification", "predref")),
+            Term::Cons { .. } => {
+                return Err(unsupported_probabilistic_term_error("unification", "cons"))
+            }
+            Term::Compound { .. } => {
+                return Err(unsupported_probabilistic_term_error(
+                    "unification",
+                    "compound",
+                ));
+            }
+            Term::PredRef(_) => {
+                return Err(unsupported_probabilistic_term_error(
+                    "unification",
+                    "predref",
+                ))
+            }
         }
     }
     Ok(true)
@@ -1875,13 +1975,29 @@ fn materialize_head(head: &Atom, binding: &HashMap<String, Value>) -> Result<Vec
                     "Aggregation not supported in provenance extraction".to_string(),
                 ));
             }
-            Term::List(_) => return Err(v085_prob_term_error("head materialization", "list")),
-            Term::Cons { .. } => return Err(v085_prob_term_error("head materialization", "cons")),
+            Term::List(_) => {
+                return Err(unsupported_probabilistic_term_error(
+                    "head materialization",
+                    "list",
+                ));
+            }
+            Term::Cons { .. } => {
+                return Err(unsupported_probabilistic_term_error(
+                    "head materialization",
+                    "cons",
+                ));
+            }
             Term::Compound { .. } => {
-                return Err(v085_prob_term_error("head materialization", "compound"));
+                return Err(unsupported_probabilistic_term_error(
+                    "head materialization",
+                    "compound",
+                ));
             }
             Term::PredRef(_) => {
-                return Err(v085_prob_term_error("head materialization", "predref"));
+                return Err(unsupported_probabilistic_term_error(
+                    "head materialization",
+                    "predref",
+                ));
             }
         }
     }
@@ -1944,10 +2060,16 @@ pub(crate) fn resolve_term(term: &Term, binding: &HashMap<String, Value>) -> Res
         Term::Aggregate(_) => Err(XlogError::Compilation(
             "Aggregation not supported in provenance extraction".to_string(),
         )),
-        Term::List(_) => Err(v085_prob_term_error("comparison", "list")),
-        Term::Cons { .. } => Err(v085_prob_term_error("comparison", "cons")),
-        Term::Compound { .. } => Err(v085_prob_term_error("comparison", "compound")),
-        Term::PredRef(_) => Err(v085_prob_term_error("comparison", "predref")),
+        Term::List(_) => Err(unsupported_probabilistic_term_error("comparison", "list")),
+        Term::Cons { .. } => Err(unsupported_probabilistic_term_error("comparison", "cons")),
+        Term::Compound { .. } => Err(unsupported_probabilistic_term_error(
+            "comparison",
+            "compound",
+        )),
+        Term::PredRef(_) => Err(unsupported_probabilistic_term_error(
+            "comparison",
+            "predref",
+        )),
     }
 }
 

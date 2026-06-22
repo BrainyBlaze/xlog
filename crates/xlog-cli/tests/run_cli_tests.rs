@@ -62,8 +62,8 @@ fn test_xlog_run_epistemic_examples() {
         ("04-gpt-candidate-filter.xlog", "accepted", "rows: 1"),
         ("05-splitting.xlog", "left", "rows: 1"),
         ("05-splitting.xlog", "right", "rows: 1"),
-        // v0.9.1 epistemic executor showcase (EGB-01/02/04/05/06/07), each validated
-        // through the production `xlog run` path with a deterministic output marker.
+        // Epistemic executor showcase programs, each validated through the production
+        // `xlog run` path with a deterministic output marker.
         ("06-eir-candidate-enumeration.xlog", "believed", "| 3  |"),
         ("07-tuple-key-membership.xlog", "matched", "| 3  | 3  |"),
         ("08-repeated-variable.xlog", "reflexive", "| 3  |"),
@@ -72,14 +72,14 @@ fn test_xlog_run_epistemic_examples() {
         ("11-faeel-foundedness.xlog", "founded", "rows: 1"),
         ("12-bound-variable-splitting.xlog", "both_known", "| 1  |"),
         ("12-bound-variable-splitting.xlog", "safe_alt", "| 2  |"),
-        // v0.9.2 EGB-02B: mixed per-row (`possible edge(X)`) + global
-        // (`know global_flag()`) modal membership composed conjunctively.
+        // Mixed per-row (`possible edge(X)`) and global (`know global_flag()`)
+        // modal membership composed conjunctively.
         ("14-mixed-literal-membership.xlog", "reachable", "| 1  |"),
         ("14-mixed-literal-membership.xlog", "reachable", "| 3  |"),
-        // v0.9.2 Case-A recursive epistemic fixpoint: ordinary recursion gated by a
-        // modal literal over an INVARIANT relation, delegated to the existing
+        // Recursive epistemic fixpoint where ordinary recursion is gated by a modal
+        // literal over an invariant relation and delegated to the existing
         // recursive/semi-naive engine. The derived multi-hop tuples prove the
-        // fixpoint is NOT single-pass.
+        // fixpoint is not single-pass.
         // 3-vertex closure: base (1,2),(2,3) plus DERIVED (1,3).
         (
             "15-recursive-epistemic-closure.xlog",
@@ -107,18 +107,18 @@ fn test_xlog_run_epistemic_examples() {
             "__xlog_query_0",
             "| 2  | 4  |",
         ),
-        // v0.9.2 Bundle 3: cross-component epistemic coupling (ACCEPTED safe case).
+        // Cross-component epistemic coupling in the accepted safe case.
         // The ordinary head `report` consumes the epistemic-derived head `trusted`,
         // coupling two locally-splittable components through a derived dependency.
         // Single epistemic output head -> joint single-output path materializes the
         // gated `trusted = {1, 3}` exactly (node 2 is not vetted, so not known).
         ("16-cross-component-coupling.xlog", "trusted", "| 1  |"),
         ("16-cross-component-coupling.xlog", "trusted", "| 3  |"),
-        // v0.9.2 STRATIFIED epistemic execution: chained coupling over a DETERMINED
+        // Stratified epistemic execution: chained coupling over a determined
         // epistemic-derived head. `trusted` (gated by `know vetted` over EDB) is a
         // strictly-lower stratum materialized into the store; `flagged :- know
         // trusted` then gates against the materialized `trusted = {1, 3}` via the
-        // existing EGB-02 membership filter. flagged = {1, 3}; node 2 is gated out.
+        // existing tuple-membership filter. flagged = {1, 3}; node 2 is gated out.
         (
             "17-cross-component-chained-stratified.xlog",
             "flagged",
@@ -129,8 +129,8 @@ fn test_xlog_run_epistemic_examples() {
             "flagged",
             "| 3  |",
         ),
-        // v0.9.2 Bundle 3 COMPLETION: cross-component epistemic JOINT-SOLVING
-        // (multi-output). Two epistemic heads share ONE base modal predicate `q`
+        // Cross-component epistemic joint solving with multiple outputs. Two
+        // epistemic heads share one base modal predicate `q`
         // (SharedModalPredicate coalesce) but neither feeds the other, so the
         // coalesced multi-head component is JOINT-SOLVED: one candidate enumeration
         // + world-view validation over the COMBINED modals (`know q`, `possible q`),
@@ -154,16 +154,16 @@ fn test_xlog_run_epistemic_examples() {
             "maybe",
             "| 2  |",
         ),
-        // v0.9.2 EGB-02B (FULL): access-control mixed modal gating. ONE accepted
+        // Access-control mixed modal gating. One accepted
         // rule combines a GLOBAL `know gateway_online()` gate, a PER-ROW
         // `possible cleared(P)`, and a PER-ROW negated `not possible revoked(P)`,
         // composed conjunctively. granted = {1, 2}; carol(3) and dave(4) are
         // gated out (absence checked below).
         ("19-access-control-mixed-modal.xlog", "granted", "| 1  |"),
         ("19-access-control-mixed-modal.xlog", "granted", "| 2  |"),
-        // v0.9.2 Case-A recursive epistemic fixpoint (FULL): supply-chain
-        // provenance. Ordinary recursion in `sources_from` gated by `know
-        // certified` over the INVARIANT EDB. 10 tuples incl. 4-hop derived
+        // Supply-chain recursive epistemic fixpoint: ordinary recursion in
+        // `sources_from` gated by `know certified` over the INVARIANT EDB. 10 tuples
+        // incl. 4-hop derived
         // (1,5); supplier 6 is reachable only via an uncertified link and is
         // fully gated out (no `| 6  |` row; absence checked below).
         (
@@ -176,9 +176,9 @@ fn test_xlog_run_epistemic_examples() {
             "__xlog_query_0",
             "| 2  | 5  |",
         ),
-        // v0.9.2 Bundle 3 JOINT-SOLVING (FULL): incident triage. THREE epistemic
-        // heads share the base modal `compromised`; all three modalities used and
-        // all three heads materialized against the SAME accepted world view.
+        // Incident-triage joint solving: three epistemic heads share the base modal
+        // `compromised`; all three modalities are used and all three heads materialize
+        // against the same accepted world view.
         //   quarantine = {1,2}, watch = {2}, clear = {3,4,5}.
         (
             "21-incident-triage-joint-modal.xlog",
@@ -193,7 +193,7 @@ fn test_xlog_run_epistemic_examples() {
         ("21-incident-triage-joint-modal.xlog", "watch", "| 2  |"),
         ("21-incident-triage-joint-modal.xlog", "clear", "| 3  |"),
         ("21-incident-triage-joint-modal.xlog", "clear", "| 5  |"),
-        // v0.9.2 STRATIFIED recursion over a DETERMINED epistemic-derived head:
+        // Stratified recursion over a determined epistemic-derived head:
         // `a` (gated by `know certified` over EDB) is materialized as a lower
         // stratum, then `reach` recurses via `know a` over the now-base relation.
         // reach = {(1,2),(2,3),(1,3)}; the derived (1,3) proves multi-hop fixpoint.
@@ -212,7 +212,7 @@ fn test_xlog_run_epistemic_examples() {
             "reach",
             "| 1  | 3  |",
         ),
-        // v0.9.2 NEGATED modal over an INVARIANT relation in a recursive context:
+        // Negated modal over an invariant relation in a recursive context:
         // `not know blocked(Y)` == ordinary `not blocked(Y)` anti-join. blocked
         // node 3 severs the chain -> reach = {(1,2),(3,4)}.
         (
@@ -225,8 +225,8 @@ fn test_xlog_run_epistemic_examples() {
             "__xlog_query_0",
             "| 3  | 4  |",
         ),
-        // v0.9.2 SCOPE-LIMIT CLOSED: AUGMENTED multi-head coupling with PER-HEAD
-        // output projection at DIFFERING arity. Two epistemic heads share the base
+        // Augmented multi-head coupling with per-head output projection at differing
+        // arity. Two epistemic heads share the base
         // modal `edge/2` (SharedModalPredicate coalesce -> ONE joint component) but
         // have DIFFERING public arity and BOTH need projection:
         //   one_hop(X)    :- node(X),  know edge(X, Y).      -> {1, 2}  (arity 1)
@@ -256,8 +256,8 @@ fn test_xlog_run_epistemic_examples() {
             "pair",
             "| 3  | 30 |",
         ),
-        // v0.9.2 SCOPE-LIMIT CLOSED: modal over an ORDINARY predicate transitively
-        // derived from a DETERMINED epistemic head, stratified. `r :- a` (a determined
+        // Modal over an ordinary predicate transitively derived from a determined
+        // epistemic head, stratified. `r :- a` (a determined
         // via `know p` over EDB) makes `r` determined; the lower stratum materializes
         // gated `a`, `r :- a` is computed over the base, and `know r` gates against the
         // materialized base `r`. b = node intersect r = {1} (node 2 has no `know p`).
@@ -266,14 +266,14 @@ fn test_xlog_run_epistemic_examples() {
             "b",
             "| 1  |",
         ),
-        // v0.9.2 SCOPE-LIMIT CLOSED: a modal BINDING an output variable over a DETERMINED
-        // MULTI-COLUMN epistemic head. `r(X,Y) :- edge(X,Y), know flag(X)` is determined;
+        // Modal binding an output variable over a determined multi-column epistemic
+        // head. `r(X,Y) :- edge(X,Y), know flag(X)` is determined;
         // `out(X) :- node(X), know r(X,Y)` binds the extra column Y. The lower stratum
         // materializes gated `r = {(1,2),(1,3)}`; the higher stratum gates `know r`
         // against that base, projecting away Y. out = {X in node : exists Y r(X,Y)} = {1}.
         ("28-determined-multicol-binding-modal.xlog", "out", "| 1  |"),
-        // v0.9.2 COMPLETENESS CELL: a NEGATED modal (`not know` / `not possible`) over
-        // a DETERMINED epistemic-DERIVED head. `a` (gated by `know p` over EDB `p`) is
+        // Negated modal (`not know` / `not possible`) over a determined
+        // epistemic-derived head. `a` (gated by `know p` over EDB `p`) is
         // determined, so `not know a == not possible a == not a` (ordinary stratified
         // negation over the materialized base `a = {1,2}`). Both heads = {3} (node 3 is
         // the only node not in `a`); the equal results prove the modal equivalence.
@@ -287,14 +287,14 @@ fn test_xlog_run_epistemic_examples() {
             "q_poss",
             "| 3  |",
         ),
-        // v0.9.2 COMPLETENESS CELL: the `possible` twin of example 28 -- a BINDING
-        // `possible r(X, Y)` over a DETERMINED multi-column epistemic head. Proves the
+        // The `possible` twin of example 28: a binding `possible r(X, Y)` over a
+        // determined multi-column epistemic head. Proves the
         // modal operator is irrelevant for a determined target (`possible r == know r ==
         // r`); stratifies identically to 28. out = {1} (gate load-bearing: ungated node
         // = {1,2,3}).
         ("30-possible-binding-over-determined.xlog", "out", "| 1  |"),
-        // v0.9.2 ITEM B: FAEEL unfounded self-support EXECUTES to its EXACT empty
-        // founded extension (NOT a rejection). `p() :- possible p()` is supported only
+        // FAEEL unfounded self-support executes to its exact empty founded extension
+        // instead of rejecting. `p() :- possible p()` is supported only
         // by circular modal self-support with no independent founded derivation, so `p`
         // is absent from the founded model -> rows: 0, exit 0.
         (
@@ -302,17 +302,17 @@ fn test_xlog_run_epistemic_examples() {
             "p",
             "rows: 0",
         ),
-        // v0.9.2 ITEM B mode-difference pair: the SAME unfounded self-support program
-        // under explicit G91 accepts circular self-support -> rows: 1. (31 FAEEL rows:0
-        // vs 32 G91 rows:1 is the exact FAEEL-vs-G91 semantic divergence.)
+        // Mode-difference pair: the same unfounded self-support program under explicit
+        // G91 compatibility mode accepts circular self-support -> rows: 1. The
+        // FAEEL companion rows:0 vs G91 rows:1 is the exact semantic divergence.
         ("32-g91-self-support-accepted.xlog", "p", "rows: 1"),
-        // v0.9.2 ITEM D: a STRUCTURED finite+typed modal tuple-key. The 1-element
+        // Structured finite typed modal tuple-key. The one-element
         // list `[H]` flattens element-wise into `watched`'s scalar u32 key column,
         // so `know watched([H])` GATES `host` by `watched` membership. Load-bearing
         // (gated != ungated): only watched hosts survive -> alert = {1} (node 2 is
         // dropped). The structured-key flattening runs entirely on the GPU.
         ("23-compound-modal-key-membership.xlog", "alert", "| 1  |"),
-        // v0.9.2 ITEM E: a VARIABLE-KEYED epistemic integrity constraint
+        // Variable-keyed epistemic integrity constraint:
         // `:- know flagged(X).` ranges X EXISTENTIALLY over the modal relation's
         // tuple-key domain on the GPU world-view path. In ex34 `flagged` carries
         // MULTIPLE tuples {7, 9, 11}, so the existential body holds and the world
@@ -334,7 +334,7 @@ fn test_xlog_run_epistemic_examples() {
             "report",
             "rows: 1",
         ),
-        // v0.9.2 ITEM E multi-literal (DISTINCT independent variables):
+        // Multi-literal epistemic integrity constraint with distinct independent variables:
         // `:- know watch(X), know hot(Y).` factors to "watch non-empty AND hot
         // non-empty". Both relations are non-empty, so the conjunctive existential
         // body holds and the world view is pruned -> report absent (rows: 0). This
@@ -347,13 +347,15 @@ fn test_xlog_run_epistemic_examples() {
             "report",
             "rows: 0",
         ),
-        // v0.9.2 ITEM C: NESTED MODAL OPERATORS execute via sound chain-collapse.
-        // A modal chain collapses (KD45/S5) to the operator ADJACENT to the atom;
+        // Nested modal operators execute via sound chain collapse. A modal chain
+        // collapses according to the supported modal logic to the operator adjacent
+        // to the atom;
         // a leading `not` distributes. The collapse routes through the existing
         // single-level epistemic path (no new evaluator). ex13 `know possible p()`
         // collapses to `possible p()` over EDB `p` (determined) -> q holds, rows: 1.
         ("13-nested-modal-chain-collapse.xlog", "q", "rows: 1"),
-        // 13b: `know know reachable(X)` (KK == K) gates `node` by `reachable`.
+        // `know know reachable(X)` collapses to `know reachable(X)` and gates
+        // `node` by `reachable`.
         // Load-bearing: gated = node intersect reachable = {1, 3} (node 2 dropped).
         ("13b-nested-modal-chain-filter.xlog", "gated", "| 1  |"),
         ("13b-nested-modal-chain-filter.xlog", "gated", "| 3  |"),
@@ -362,7 +364,8 @@ fn test_xlog_run_epistemic_examples() {
         // (anti-join over EDB). Load-bearing: allowed = node \ blocked = {1, 3}.
         ("13c-nested-modal-chain-negated.xlog", "allowed", "| 1  |"),
         ("13c-nested-modal-chain-negated.xlog", "allowed", "| 3  |"),
-        // 13d: `p() :- possible possible p()` (MM == M) is the CHAIN form of ex31.
+        // `p() :- possible possible p()` collapses to `possible p()` and mirrors
+        // the FAEEL unfounded self-support example.
         // The collapse forwards the per-mode foundedness difference: under FAEEL the
         // circular self-support is unfounded -> p absent -> rows: 0.
         (
@@ -370,9 +373,9 @@ fn test_xlog_run_epistemic_examples() {
             "p",
             "rows: 0",
         ),
-        // 13e: the SAME chain program under explicit G91 ACCEPTS self-support ->
-        // rows: 1. 13d (FAEEL rows:0) vs 13e (G91 rows:1) is the exact per-mode
-        // divergence of the collapsed chain (mirrors 31 vs 32 with a chain).
+        // The same chain program under explicit G91 compatibility mode accepts
+        // self-support -> rows: 1. The FAEEL rows:0 vs G91 rows:1 pair is the exact
+        // per-mode divergence of the collapsed chain.
         ("13e-nested-modal-chain-g91-accepted.xlog", "p", "rows: 1"),
         // 13f: `know not possible p()` dualizes to `not possible p()`. Because p()
         // is present, q is absent, but the program succeeds through `xlog run`.
@@ -392,11 +395,11 @@ fn test_xlog_run_epistemic_examples() {
             "q",
             "rows: 1",
         ),
-        // 13g-13v exhaust every two-operator modal chain over `{know, possible}` with
-        // leading/interior/atom-adjacent negation placements, split by operator
-        // pair, present/absent target, and derived/non-derived outcome to keep each
-        // example within the accepted candidate-generation bound. Together these
-        // slices cover all 64 source forms.
+        // The committed matrix examples exhaust every two-operator modal chain over
+        // `{know, possible}` with leading/interior/atom-adjacent negation placements,
+        // split by operator pair, present/absent target, and derived/non-derived
+        // outcome to keep each example within the accepted candidate-generation
+        // bound. Together these slices cover all 64 source forms.
         (
             "13g-nested-modal-negation-matrix-know-know-present.xlog",
             "holds",
@@ -597,9 +600,9 @@ fn test_xlog_run_epistemic_examples() {
             "holds",
             "+----+\n| c0 |\n+----+\n+----+",
         ),
-        // v0.9.2 WALL A1 (ACCEPTED): a NEGATED modal `not know reach` over a GENUINELY
-        // RECURSIVE relation in a strictly LOWER stratum than the negating head
-        // EXECUTES on the GPU production path as ordinary stratified negation. reach =
+        // Negated modal `not know reach` over a genuinely recursive relation in a
+        // strictly lower stratum than the negating head executes on the GPU production
+        // path as ordinary stratified negation. reach =
         // transitive closure of link {(1,2),(2,3)} = {(1,2),(2,3),(1,3)}; unreachable =
         // node x node MINUS reach = 6 pairs. (1,1) is a self-pair excluded from reach
         // (modal gate load-bearing); (3,1) confirms the anti-join against the recursive
@@ -614,8 +617,8 @@ fn test_xlog_run_epistemic_examples() {
             "__xlog_query_0",
             "| 3  | 1  |",
         ),
-        // v0.9.2 EGB-06 K2/K4: same-name multi-arity modal predicates resolve
-        // through full `xlog run` by loading p/1 and p/2 under arity-qualified
+        // Same-name multi-arity modal predicates resolve through full `xlog run`
+        // by loading p/1 and p/2 under arity-qualified
         // store keys. This base example proves the load-bearing conjunction; the
         // exhaustive finite matrix lives in 42a*/42b* and is asserted by
         // test_xlog_run_same_name_multi_arity_exhaustive_matrix.
@@ -634,8 +637,8 @@ fn test_xlog_run_epistemic_examples() {
             "a",
             "!| 3  | 30 |",
         ),
-        // v0.9.2 G91 possible recursion: positive `possible` over the co-evolving
-        // recursive target is the compatibility self-support assumption. The full
+        // G91 compatibility-mode possible recursion: positive `possible` over the
+        // co-evolving recursive target is the compatibility self-support assumption. The full
         // `xlog run` path returns the complete 3 x 3 vertex relation.
         (
             "43-g91-possible-recursion-self-support.xlog",
@@ -732,13 +735,13 @@ fn test_xlog_run_epistemic_examples() {
 
 #[test]
 fn test_xlog_run_transitive_determined_modal_stratifies_accepted() {
-    // v0.9.2 SCOPE-LIMIT CLOSED: a modal over an ORDINARY predicate transitively
-    // derived from a DETERMINED epistemic head (`b :- know r`, `r :- a`, `a :- know p`)
-    // is now ACCEPTED via stratification. `r` is determined-in-principle (ordinary over
+    // A modal over an ordinary predicate transitively derived from a determined
+    // epistemic head (`b :- know r`, `r :- a`, `a :- know p`) is accepted via
+    // stratification. `r` is determined-in-principle (ordinary over
     // the determined `a`), so the lower stratum materializes the gated `a`, the
     // ordinary `r :- a` is computed over the materialized base (making `r` locally
     // invariant), and the higher stratum gates `know r` against the materialized base
-    // `r` via the existing EGB-02 filter. EXACT tuples: with node={1,2}, p={1},
+    // `r` via the existing tuple-membership filter. EXACT tuples: with node={1,2}, p={1},
     // a=r={1}, b = node intersect r = {1}. The gate is load-bearing: dropping `know r`
     // would give b = node = {1,2}; the gate restricts b to {1}.
     let _device = match CudaDevice::new(0) {
@@ -772,8 +775,8 @@ fn test_xlog_run_transitive_determined_modal_stratifies_accepted() {
 
 #[test]
 fn test_xlog_run_determined_multicol_binding_modal_stratifies_accepted() {
-    // v0.9.2 SCOPE-LIMIT CLOSED: a modal that BINDS an output variable over a DETERMINED
-    // MULTI-COLUMN epistemic head is now ACCEPTED via stratification. The full program:
+    // A modal that binds an output variable over a determined multi-column epistemic
+    // head is accepted via stratification. The full program:
     //   r(X, Y) :- edge(X, Y), know flag(X).   -- determined multi-column epistemic head
     //   out(X)  :- node(X), know r(X, Y).        -- modal binds the extra output column Y
     // Previously failed closed with `UnsafeVariable("Y")`. The lower stratum materializes
@@ -914,15 +917,15 @@ fn assert_wfs_reach_shape(example: &str, label: &str, seed_present: bool) {
 
 #[test]
 fn test_xlog_run_same_name_multi_arity_exhaustive_matrix() {
-    // v0.9.2 EGB-06 K2/K4 exhaustive production-path matrix.
+    // Exhaustive production-path matrix for same-name multi-arity modal predicates.
     //
     // Single-literal cells cover:
     //   arity {1,2} x modal {know,possible} x polarity {positive,negated}
     //   x queried-tuple state {present,absent}.
     //
     // Cross-arity cells cover every conjunction:
-    //   unary modal form {K,M,not K,not M}
-    //   x binary modal form {K,M,not K,not M}
+    //   unary modal form {know, possible, not-know, not-possible}
+    //   x binary modal form {know, possible, not-know, not-possible}
     //   x unary queried-tuple state {present,absent}
     //   x binary queried-tuple state {present,absent}.
     //
@@ -977,10 +980,11 @@ fn test_xlog_run_same_name_multi_arity_exhaustive_matrix() {
 
 #[test]
 fn test_xlog_run_single_modal_truth_table_exhaustive_matrix() {
-    // v0.9.2 exhaustive base truth table for one modal literal over a determined EDB target.
+    // Exhaustive base truth table for one modal literal over a determined EDB target.
     //
     // Covers:
-    //   mode {FAEEL,G91} x modal form {K,M,not K,not M} x queried tuple {present,absent}.
+    //   mode {FAEEL, G91 compatibility} x modal form
+    //   {know, possible, not-know, not-possible} x queried tuple {present, absent}.
     //
     // Both modes should agree for a determined target; the mode axis is still explicit so
     // future regressions cannot silently make only one mode work. Each committed example has
@@ -1013,10 +1017,10 @@ fn test_xlog_run_single_modal_truth_table_exhaustive_matrix() {
 
 #[test]
 fn test_xlog_run_nested_modal_negation_matrix_g91_companion() {
-    // v0.9.2 ITEM C2 both-mode guard: 13g-13v exhaust the finite two-operator
-    // negation matrix under default FAEEL. These 13w* companions replay the same
-    // source forms under explicit G91 so the chain-collapse/duality rewrite is not
-    // accidentally mode-specific.
+    // Both-mode guard: the default-mode examples exhaust the finite two-operator
+    // negation matrix. These explicit G91 compatibility-mode companions replay the
+    // same source forms so the chain-collapse/duality rewrite is not accidentally
+    // mode-specific.
     let _device = match CudaDevice::new(0) {
         Ok(d) => d,
         Err(_) => {
@@ -1099,10 +1103,10 @@ fn test_xlog_run_nested_modal_negation_matrix_g91_companion() {
 }
 
 #[test]
-fn test_xlog_run_v092_examples_modal_gating_filters() {
-    // v0.9.2 anti-gaming: prove the accepted examples are REAL modal filtering,
-    // not store extraction -- the gated output must strictly OMIT the rows that
-    // fail the modal gate (so the result DIFFERS from the ungated relation).
+fn test_xlog_run_epistemic_examples_modal_gating_filters() {
+    // Prove the accepted examples are real modal filtering, not store extraction:
+    // the gated output must strictly omit the rows that fail the modal gate, so the
+    // result differs from the ungated relation.
     let _device = match CudaDevice::new(0) {
         Ok(d) => d,
         Err(_) => {
@@ -1204,9 +1208,9 @@ fn test_xlog_run_v092_examples_modal_gating_filters() {
 
 #[test]
 fn test_xlog_run_recursion_through_modal_computes_founded_fixpoint() {
-    // v0.9.2 ITEM A: a POSITIVE modal over a relation that CO-EVOLVES with the
-    // program's ordinary recursion (Case B) is EXECUTED to its FAEEL founded least
-    // fixpoint, NOT rejected. The modal feeds a non-mirror relation `trust`, so the
+    // A positive modal over a relation that co-evolves with the program's ordinary
+    // recursion executes to its FAEEL founded least fixpoint instead of rejecting.
+    // The modal feeds a non-mirror relation `trust`, so the
     // modal gate is load-bearing: founded reach = {(1,2),(1,3)}.
     //   (1,2): seed-founded.
     //   (1,3): reach(1,2) + trust(2,3); trust(2,3) founded because know reach(1,2)
@@ -1225,7 +1229,7 @@ fn test_xlog_run_recursion_through_modal_computes_founded_fixpoint() {
     let (ok, stdout, stderr) = run_epistemic_example("22-recursion-through-modal-fixpoint.xlog");
     assert!(
         ok,
-        "Case-B recursive epistemic fixpoint must EXECUTE, stdout:\n{stdout}\nstderr:\n{stderr}"
+        "recursive epistemic fixpoint must execute, stdout:\n{stdout}\nstderr:\n{stderr}"
     );
     // EXACT founded tuples: {(1,2),(1,3)}.
     assert!(
@@ -1248,12 +1252,12 @@ fn test_xlog_run_recursion_through_modal_computes_founded_fixpoint() {
 
 #[test]
 fn test_xlog_run_negated_modal_through_recursion_uses_gpu_wfs_engine() {
-    // v0.9.2 A1 closure: a NEGATED modal whose target CYCLES through recursion via
-    // negation now executes through the GPU-backed WFS alternating-fixpoint path.
+    // A negated modal whose target cycles through recursion via negation executes
+    // through the GPU-backed WFS alternating-fixpoint path.
     //
     // Covers every cyclic-negated WFS modal cell across:
-    //   mode {FAEEL,G91}
-    //   x modal form {not K,not M}
+    //   mode {FAEEL, G91 compatibility}
+    //   x modal form {not-know, not-possible}
     //   x seed state {present,absent}
     //   x ordinary EDB negation {absent,present-in-SCC}.
     //
@@ -1311,12 +1315,11 @@ fn test_xlog_run_negated_modal_through_recursion_uses_gpu_wfs_engine() {
 
 #[test]
 fn test_xlog_run_compound_modal_key_reports_typed_epistemic_diagnostic() {
-    // v0.9.2 ITEM D BOUNDARY: structured finite+typed modal keys (fixed-arity
-    // list/compound of scalar elements) are now ACCEPTED and flattened onto the
-    // GPU (see 23-compound-modal-key-membership.xlog + the accepted examples
-    // list). What stays REJECTED is a genuinely UNBOUNDED structured key -- a
-    // `cons` `[H | T]` whose tail length is not statically fixed has no finite,
-    // typed GPU key-column set. It must FAIL CLOSED with a precise FINITENESS
+    // Structured finite typed modal keys (fixed-arity list/compound of scalar
+    // elements) are accepted and flattened onto the GPU. What stays rejected is a
+    // genuinely unbounded structured key: a `cons` `[H | T]` whose tail length is
+    // not statically fixed has no finite, typed GPU key-column set. It must FAIL
+    // CLOSED with a precise FINITENESS
     // (resource) diagnostic, NOT a blanket "unsupported construct".
     let _device = match CudaDevice::new(0) {
         Ok(d) => d,
@@ -1352,9 +1355,8 @@ fn test_xlog_run_compound_modal_key_reports_typed_epistemic_diagnostic() {
 
 #[test]
 fn test_xlog_run_diagonal_modal_constraint_prunes() {
-    // v0.9.2 E1 (diagonal): `:- know route(X, X).` -- a single modal literal repeating X
-    // across its OWN key columns -- was rejected as an unimplemented shared-variable join.
-    // It is now resolved by a sound PROGRAM-level desugaring (ordinary diagonal extraction
+    // Diagonal modal constraint: `:- know route(X, X).` repeats X across its own key
+    // columns. It is resolved by a sound program-level desugaring (ordinary diagonal extraction
     // `__epi_diag_0(X) :- route(X, X)` + single-occurrence `:- know __epi_diag_0(X)`), which
     // routes through the existing variable-keyed world-view constraint path and PRUNES the
     // world view to empty when a self-loop exists -- no new kernel. 38 has a self-loop
@@ -1392,10 +1394,9 @@ fn test_xlog_run_diagonal_modal_constraint_prunes() {
 
 #[test]
 fn test_xlog_run_shared_variable_join_constraints_prune() {
-    // v0.9.2 E1 (join + negated-difference): a shared-variable epistemic constraint --
-    // `:- know p(X), possible q(X).` (40, intersection) and `:- q(X), not know p(X).` (41,
-    // set difference) -- was rejected as an unimplemented shared-variable join. Both are now
-    // resolved by a sound PROGRAM-level desugaring (ordinary join/difference extraction
+    // Shared-variable epistemic constraints: `:- know p(X), possible q(X).` (40,
+    // intersection) and `:- q(X), not know p(X).` (41, set difference) are resolved
+    // by a sound program-level desugaring (ordinary join/difference extraction
     // `__epi_join_0(X) :- ...` + single-occurrence `:- know __epi_join_0(X)`), routing through
     // the existing variable-keyed world-view constraint path -- no new kernel. In both
     // programs the helper relation is non-empty (p∩q={2}; q\p={3}), so the constraint fires
@@ -1434,8 +1435,8 @@ fn test_xlog_run_shared_variable_join_constraints_prune() {
 
 #[test]
 fn test_xlog_run_faeel_unfounded_self_support_executes_to_empty_extension() {
-    // v0.9.2 ITEM B (mandate headline): a self-supported possible rule
-    // (`p() :- possible p().`) with no independent founded support is UNFOUNDED under
+    // A self-supported possible rule (`p() :- possible p().`) with no independent
+    // founded support is unfounded under
     // default FAEEL, so `p` is ABSENT from the founded model. The program EXECUTES to
     // its exact empty founded extension (`rows: 0`, exit 0) -- it is NOT rejected with
     // an unsupported-construct error.
@@ -1466,8 +1467,8 @@ fn test_xlog_run_faeel_unfounded_self_support_executes_to_empty_extension() {
         "FAEEL unfounded self-support must no longer be rejected:\n{stderr}"
     );
 
-    // Mode-difference evidence: the SAME program under explicit G91 ACCEPTS the
-    // circular self-support and emits rows: 1.
+    // Mode-difference evidence: the same program under explicit G91 compatibility
+    // mode accepts circular self-support and emits rows: 1.
     let (g91_ok, g91_stdout, g91_stderr) =
         run_epistemic_example("32-g91-self-support-accepted.xlog");
     assert!(

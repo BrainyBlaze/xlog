@@ -184,16 +184,17 @@ fn test_executor_filter_with_column_column_compare_and_symbol() {
     assert_eq!(vals, vec![1, 3]);
 }
 
-/// Clean-path coverage for the strict deterministic-Datalog D2H gate.
+/// Clean-path coverage for the strict deterministic-Datalog device-to-host
+/// transfer gate.
 ///
 /// The v0.5.5 runtime is the *target* of the guard: most non-trivial
 /// deterministic paths still fall back to host-side set algebra (this is
 /// why the guard ships opt-in for now). The clean path that is provably
-/// D2H-free today is a facts-only program: no rules, no queries, no
-/// fixpoint iteration. `execute_plan` must:
+/// free of tracked device-to-host transfers today is a facts-only program: no
+/// rules, no queries, no fixpoint iteration. `execute_plan` must:
 ///
 ///   * Engage the gate on entry (config flag is `true`).
-///   * Run all strata without issuing a tracked D2H transfer.
+///   * Run all strata without issuing a tracked device-to-host transfer.
 ///   * Restore the gate to its prior state on exit (RAII guard).
 ///   * Leave the violation counter at zero.
 ///
@@ -202,7 +203,7 @@ fn test_executor_filter_with_column_column_compare_and_symbol() {
 /// contract; this test is the foothold that lets later PRs widen the
 /// clean-path coverage.
 #[test]
-fn strict_deterministic_d2h_clean_path() {
+fn strict_deterministic_device_to_host_clean_path() {
     let mut config = RuntimeConfig::default();
     config.strict_deterministic_d2h = true;
 
@@ -215,10 +216,10 @@ fn strict_deterministic_d2h_clean_path() {
     };
 
     // Single-column facts-only program. Both single-column and
-    // multi-column EDB ingestion are GPU-D2H-clean since the
-    // set-algebra GPU pipeline landed; this test stays single-column
-    // because the gate-guard machinery is what's being exercised
-    // here, not the dedup pipeline.
+    // multi-column EDB ingestion are free of tracked device-to-host
+    // transfers since the set-algebra GPU pipeline landed; this test
+    // stays single-column because the gate-guard machinery is what's
+    // being exercised here, not the dedup pipeline.
     let source = r#"
         node(1).
         node(2).
@@ -238,7 +239,7 @@ fn strict_deterministic_d2h_clean_path() {
     provider.reset_deterministic_d2h_violations();
     executor
         .execute_plan(&plan)
-        .expect("facts-only plan must succeed under strict deterministic D2H gate");
+        .expect("facts-only plan must succeed under strict deterministic device-to-host gate");
 
     // Gate must have been restored to its prior state by the RAII guard.
     assert_eq!(
@@ -262,11 +263,11 @@ fn strict_deterministic_d2h_clean_path() {
 }
 
 /// `execute_plan` must only reset the provider's
-/// `deterministic_d2h_violation_count` when *this* call is the one that
-/// engages the gate. If a caller has manually enabled the gate to
-/// accumulate violations across a broader strict section,
-/// `execute_plan` running with `RuntimeConfig::strict_deterministic_d2h
-/// = true` must preserve that accumulated count rather than clobbering it.
+/// strict deterministic device-to-host violation count when *this* call is the
+/// one that engages the gate. If a caller has manually enabled the gate to
+/// accumulate violations across a broader strict section, `execute_plan`
+/// running with strict deterministic device-to-host transfer checking enabled
+/// must preserve that accumulated count rather than clobbering it.
 #[test]
 fn execute_plan_preserves_externally_engaged_violation_counter() {
     let mut config = RuntimeConfig::default();
@@ -384,7 +385,7 @@ fn default_runtime_does_not_engage_gate() {
 /// program must run cleanly under the strict gate with the correct
 /// result set.
 #[test]
-fn strict_deterministic_d2h_single_column_negation_clean() {
+fn strict_deterministic_device_to_host_single_column_negation_clean() {
     let mut config = RuntimeConfig::default();
     config.strict_deterministic_d2h = true;
 
@@ -455,10 +456,10 @@ fn strict_deterministic_d2h_single_column_negation_clean() {
 /// column 0 alone equals `1` in `blocked`. This test fails iff the
 /// runtime wires negation onto a key-only diff.
 ///
-/// Run under `strict_deterministic_d2h = true` so the test simultaneously
-/// seals "no host fallback".
+/// Run under the strict deterministic device-to-host transfer gate so the test
+/// simultaneously seals "no host fallback".
 #[test]
-fn strict_deterministic_d2h_two_column_negation_full_row_semantics() {
+fn strict_deterministic_device_to_host_two_column_negation_full_row_semantics() {
     let mut config = RuntimeConfig::default();
     config.strict_deterministic_d2h = true;
 
@@ -519,11 +520,11 @@ fn strict_deterministic_d2h_two_column_negation_full_row_semantics() {
 }
 
 /// Recursive reach: full-row tuple semantics for semi-naive delta dedup,
-/// strict-D2H clean.
+/// free of tracked device-to-host transfers.
 ///
 /// Proves that the recursive fixpoint preserves *full-row* equality
-/// AND that binary-join materialization is deterministic-D2H clean
-/// after the metadata-read hardening — the eight
+/// AND that binary-join materialization is free of tracked device-to-host
+/// transfers after the metadata-read hardening — the eight
 /// `Failed to read output count` sites in `provider/relational.rs`
 /// were reclassified as metadata reads via `dtoh_scalar_untracked`,
 /// which the strict gate explicitly allows.
@@ -532,7 +533,7 @@ fn strict_deterministic_d2h_two_column_negation_full_row_semantics() {
 /// single entry. With full-row dedup all three survive and the answer
 /// set has five unique rows.
 #[test]
-fn strict_deterministic_d2h_recursive_reach_clean() {
+fn strict_deterministic_device_to_host_recursive_reach_clean() {
     let mut config = RuntimeConfig::default();
     config.strict_deterministic_d2h = true;
 
@@ -586,7 +587,7 @@ fn strict_deterministic_d2h_recursive_reach_clean() {
 
 /// Join-heavy strict-gate seal: forces inner-join materialization with a
 /// non-trivial fan-out (one binary join with multiple matches per probe
-/// key), then asserts the result is correct AND that no host D2H tracked
+/// key), then asserts the result is correct AND that no tracked device-to-host
 /// transfer was issued.
 ///
 /// Distinct from the recursive-reach test: this exercises a
@@ -597,11 +598,11 @@ fn strict_deterministic_d2h_recursive_reach_clean() {
 /// rule body; both halves of that path (non-indexed
 /// `hash_join_left_outer_impl` and indexed
 /// `hash_join_left_outer_indexed`) are covered by kernel-level
-/// strict-gate tests in `xlog-cuda/tests/test_deterministic_d2h_gate.rs`
+/// strict-gate tests in the CUDA provider test suite
 /// (`left_outer_join_strict_gate_clean` and
 /// `left_outer_join_indexed_strict_gate_clean`).
 #[test]
-fn strict_deterministic_d2h_inner_join_materialize_clean() {
+fn strict_deterministic_device_to_host_inner_join_materialize_clean() {
     let mut config = RuntimeConfig::default();
     config.strict_deterministic_d2h = true;
 

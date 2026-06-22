@@ -143,6 +143,16 @@ class LogicRelationSession:
         """Return persistent hash-index cache telemetry for this session."""
         ...
 
+    def wcoj_dispatch_stats(self) -> dict[str, int]:
+        """Multiway/Free-Join dispatch telemetry for this session.
+
+        Keys: ``free_join_dispatch_count``,
+        ``factorized_delta_dispatch_count``,
+        ``wcoj_groupby_fusion_dispatch_count``, ``wcoj_error_decline_count``.
+        Counters accumulate across evaluates within this session.
+        """
+        ...
+
     def reset_host_transfer_stats(self) -> None:
         """Reset all host-transfer statistics."""
         ...
@@ -249,6 +259,7 @@ class CompiledProgram:
         max_nonmonotone_iterations: int = 1024,
         sampling_method: Optional[str] = None,
         memory_mb: Optional[int] = None,
+        allow_cpu_oracle: bool = False,
     ) -> EvalResult:
         """Evaluate the program and return probabilities (host-side).
 
@@ -256,7 +267,10 @@ class CompiledProgram:
         ``None``.  Set *return_grads=True* to also compute marginal gradients.
 
         For MC programs: *return_grads* must be ``False``.  *sampling_method*
-        is ``"rejection"`` or ``"evidence_clamping"``.
+        is ``"rejection"`` or ``"evidence_clamping"``.  Programs rejected by
+        the GPU-resident MC engine (negation, aggregates, ...) fail closed
+        unless *allow_cpu_oracle=True*, in which case the labeled CPU oracle
+        runs and ``EvalResult.mc_engine`` is ``"cpu-oracle"``.
         """
         ...
 
@@ -624,6 +638,9 @@ class EvalResult:
     nonmonotone_cycles: Optional[int]
     nonmonotone_iteration_limit_hits: Optional[int]
     sampling_method: Optional[str]
+    mc_engine: Optional[str]
+    """MC only: ``"gpu-resident"`` (production megakernel engine) or
+    ``"cpu-oracle"`` (explicit opt-in via *allow_cpu_oracle*)."""
 
 class McDeviceEvalResult:
     """Device-resident MC result from :meth:`CompiledProgram.evaluate_device`."""
@@ -640,6 +657,48 @@ class McDeviceEvalResult:
     nonmonotone_cycles: int
     nonmonotone_iteration_limit_hits: int
     sampling_method: str
+    resident_no_host_certified: bool
+    resident_no_host_policy_result: str
+    resident_no_host_tracked_dtoh_calls: int
+    resident_no_host_tracked_htod_calls: int
+    resident_no_host_host_loop_iterations: int
+    resident_no_host_per_sample_host_launches: int
+    resident_no_host_untracked_metadata_reads: int
+    resident_no_host_engine_launches: int
+    resident_no_host_host_fixpoint_iterations: int
+    resident_no_host_per_operator_host_allocations: int
+
+class DifferentiableProofTraceMap:
+    """XLOG differentiable proof traces keyed by stable proof ids."""
+
+    def insert(
+        self,
+        answer_key: str,
+        clause_id: str,
+        support_atoms: list[str],
+        initial_weight: float,
+    ) -> int:
+        """Insert one differentiable proof trace and return its stable proof id."""
+        ...
+
+    def trace(self, proof_id: int) -> Optional[dict[str, Any]]:
+        """Return one exported proof trace or ``None``."""
+        ...
+
+    def traces(self) -> list[dict[str, Any]]:
+        """Return all exported proof traces with weights and gradients."""
+        ...
+
+    def accumulate_binary_logistic_gradients(
+        self,
+        targets: list[tuple[str, float]],
+    ) -> float:
+        """Accumulate binary-logistic gradients grouped by answer key."""
+        ...
+
+    def apply_gradients(self, learning_rate: float) -> None:
+        """Apply accumulated proof-trace gradients to symbolic weights."""
+        ...
 
 # ---------------------------------------------------------------------------
 # Training infrastructure
@@ -991,6 +1050,10 @@ def dlpack_roundtrip(
 
     Primarily used for testing the DLPack import/export pipeline.
     """
+    ...
+
+def dlpack_is_cuda(tensor: Any) -> bool:
+    """Return True when a DLPack capsule is backed by CUDA memory."""
     ...
 
 # The following two functions are only present when pyxlog is compiled with

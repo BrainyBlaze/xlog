@@ -245,7 +245,7 @@ fn accepted_gpu_execution_dispatches_kclique_wcoj_reduction_through_runtime_path
             upload_binary_u32(&fixture.memory, &complete_k5_edges, "src", "dst"),
         );
     }
-    executor.register_relation(RelId(99), "__w37_helper_99");
+    executor.register_relation(RelId(99), "__kclique_helper_99");
 
     let result = executor
         .execute_epistemic_gpu_execution(
@@ -458,7 +458,7 @@ fn parsed_epistemic_kclique_reduction_dispatches_wcoj_runtime_path() {
 #[cfg(feature = "epistemic-logic-tests")]
 #[test]
 fn single_head_modal_only_bound_over_invariant_materializes_q_extension_on_device() {
-    // v0.9.2 sound consequence of the invariant-resolve: a single epistemic head whose
+    // Invariant modal resolution: a single epistemic head whose
     // ONLY binder of its output variable is a POSITIVE modal over an INVARIANT relation
     // is accepted and materializes the gated extension. For invariant `q`,
     // `possible q(X) == know q(X) == q(X)`, so `p(X) :- possible q(X)` yields p = q.
@@ -520,7 +520,7 @@ fn single_head_modal_only_bound_over_invariant_materializes_q_extension_on_devic
 #[cfg(feature = "epistemic-logic-tests")]
 #[test]
 fn nested_modal_chain_collapses_and_materializes_on_device_no_cpu_fallback() {
-    // v0.9.2 ITEM C: a NESTED modal CHAIN executes on the GPU path via the sound
+    // Nested modal chain execution stays on the GPU path via the sound
     // KD45/S5 collapse, with NO CPU fallback and NO CPU candidate enumeration.
     //
     // `p(X) :- know possible q(X)` collapses (KM == M, inner operator wins) to
@@ -605,8 +605,8 @@ fn nested_modal_chain_collapses_and_materializes_on_device_no_cpu_fallback() {
 #[cfg(feature = "epistemic-logic-tests")]
 #[test]
 fn determined_multicol_binding_modal_materializes_higher_stratum_on_device() {
-    // v0.9.2 DETERMINED-EPISTEMIC MULTI-COLUMN BINDING (example 28), POST-MATERIALIZATION
-    // higher stratum in isolation. The full program is
+    // Determined epistemic multi-column binding over a post-materialized higher
+    // stratum in isolation. The full program is
     //   r(X, Y) :- edge(X, Y), know flag(X).   -- DETERMINED multi-column epistemic head
     //   out(X)  :- node(X), know r(X, Y).        -- modal BINDS the extra output column Y
     // and is executed by the stratified driver (logic.rs), which materializes the GATED
@@ -614,7 +614,7 @@ fn determined_multicol_binding_modal_materializes_higher_stratum_on_device() {
     // applied ONCE at the store boundary). Stratification orchestration sits ABOVE this
     // workspace harness, so this test exercises the HIGHER stratum directly: `r` is
     // present as a materialized base relation `{(1,2),(1,3)}` and `out`'s augmenting
-    // `know r(X, Y)` binds `Y` via the existing EGB-02 membership/join over that base
+    // `know r(X, Y)` binds `Y` via the existing tuple-key membership join over that base
     // (the strict invariant resolve — `r` is invariant once materialized). This is the
     // exact GPU mechanism the schema fix unblocks end-to-end.
     //
@@ -838,7 +838,7 @@ fn augmented_multi_head_per_head_projection_materializes_differing_arity_on_devi
 #[cfg(feature = "epistemic-logic-tests")]
 #[test]
 fn shared_modal_two_head_coupling_joint_solves_multi_output_on_device() {
-    // v0.9.2 Bundle 3 COMPLETION (K1/K2): two epistemic heads share ONE base modal
+    // Shared-modal coupling: two epistemic heads share ONE base modal
     // predicate `q` (SharedModalPredicate coalesce). The coalesced component is
     // JOINT-SOLVED: ONE candidate enumeration + world-view validation over the
     // combined modal literals (`know q`, `possible q`), then EACH head relation is
@@ -949,7 +949,7 @@ fn shared_modal_two_head_coupling_joint_solves_multi_output_on_device() {
         by_head.insert(head.clone(), rows);
     }
 
-    // K1: EXACT tuples for EVERY coupled head, materialized against the shared
+    // Exact tuples for every coupled head, materialized against the shared
     // accepted world view.
     assert_eq!(
         by_head.get("known").map(Vec::as_slice),
@@ -968,7 +968,7 @@ fn shared_modal_two_head_coupling_joint_solves_multi_output_on_device() {
 #[cfg(feature = "epistemic-logic-tests")]
 #[test]
 fn joint_multi_head_output_equals_per_head_split_reference_on_device() {
-    // v0.9.2 Bundle 3 COMPLETION (K2): split-vs-unsplit OUTPUT equivalence.
+    // Split-vs-unsplit output equivalence.
     //
     // REFERENCE = the per-head SPLIT evaluation: each coupled head solved as its
     // OWN single-head epistemic program (the semantically-correct independent
@@ -1101,7 +1101,7 @@ fn joint_multi_head_output_equals_per_head_split_reference_on_device() {
         reference_by_head.insert(head.to_string(), rows);
     }
 
-    // K2: joint multi-head output == per-head split reference, EXACT rows per head.
+    // Joint multi-head output matches the per-head split reference exactly.
     assert_eq!(
         joint_by_head, reference_by_head,
         "joint multi-head output must equal per-head split reference exactly"
@@ -1585,7 +1585,7 @@ fn parsed_split_components_execute_through_gpu_runtime_batch() {
     }
 }
 
-/// EGB-05 K1 equivalence: a split component's GPU output must be *row-identical*
+/// Split-component equivalence: a split component's GPU output must be *row-identical*
 /// to running that component's isolated subprogram through the UNSPLIT
 /// single-execution path.
 ///
@@ -1664,7 +1664,7 @@ fn split_component_outputs_match_unsplit_single_execution_outputs() {
         )
         .expect("split components should execute through GPU runtime batch adapter");
     assert_eq!(batch.results.len(), 2);
-    // K4 fallback safety: split orchestration must keep CPU fallbacks at zero.
+    // Fallback safety: split orchestration must keep CPU fallbacks at zero.
     assert_eq!(batch.trace.cpu_recomposition_steps, 0);
     assert_eq!(batch.trace.cpu_candidate_enumerations, 0);
     assert_eq!(batch.trace.cpu_world_view_validations, 0);
@@ -1732,7 +1732,7 @@ fn split_component_outputs_match_unsplit_single_execution_outputs() {
     }
 }
 
-/// v0.9.2 Bundle 3 K2: split-vs-unsplit OUTPUT equivalence for the ACCEPTED
+/// Split-vs-unsplit output equivalence for the ACCEPTED
 /// cross-component coupling case.
 ///
 /// The accepted coupling (`trusted(X) :- node(X), know vetted(X). report(X) :-
@@ -1817,7 +1817,7 @@ fn accepted_cross_component_coupling_split_matches_unsplit_output() {
         .expect("download accepted coupling split output");
     split_output.sort_unstable();
 
-    // K2: identical rows, and the exact gated tuples {1, 3} (node 2 is not vetted).
+    // Identical rows, and the exact gated tuples {1, 3} (node 2 is not vetted).
     assert_eq!(
         split_output, unsplit_output,
         "split coupled output must equal unsplit single-execution output"
@@ -3027,9 +3027,9 @@ fn parsed_g91_self_supported_possible_executes_on_gpu_runtime_values() {
         p(X) :- seed(X), possible p(X).
         "#,
     )
-    .expect("parse source-annotated G91 self-supported program");
+    .expect("parse source-annotated Gelfond-1991 self-supported program");
     let executable =
-        compile_epistemic_gpu_execution(&program).expect("compile G91 epistemic GPU plan");
+        compile_epistemic_gpu_execution(&program).expect("compile Gelfond-1991 epistemic GPU plan");
     let mut executor = Executor::new(Arc::clone(&fixture.provider));
 
     for (name, rel) in &executable.relation_ids {
@@ -3046,7 +3046,7 @@ fn parsed_g91_self_supported_possible_executes_on_gpu_runtime_values() {
                 max_models_per_reduction: 1,
             },
         )
-        .expect("G91 self-supported possible should execute through GPU runtime");
+        .expect("Gelfond-1991 self-supported possible should execute through GPU runtime");
 
     assert!(result.prepared.preflight.is_g91_mode());
     assert_eq!(result.prepared.preflight.possible_operator_count, 1);
@@ -3067,7 +3067,7 @@ fn parsed_g91_self_supported_possible_executes_on_gpu_runtime_values() {
         result
             .semantic_trace
             .typed_rejection_reasons()
-            .expect("decode typed GPU G91 rejection reason"),
+            .expect("decode typed GPU Gelfond-1991 rejection reason"),
         vec![EpistemicGpuRejectionReason::UnsatisfiedMembership]
     );
     assert_eq!(result.semantic_trace.cpu_candidate_enumerations, 0);
@@ -3075,11 +3075,11 @@ fn parsed_g91_self_supported_possible_executes_on_gpu_runtime_values() {
     let rows = fixture
         .provider
         .download_column::<u32>(&result.final_output, 0)
-        .expect("download final G91 output values");
+        .expect("download final Gelfond-1991 output values");
     assert_eq!(rows, vec![7]);
     result
         .require_runtime_dispatch_certification()
-        .expect("G91 runtime path should retain GPU semantic certification");
+        .expect("Gelfond-1991 runtime path should retain GPU semantic certification");
 }
 
 #[cfg(feature = "epistemic-logic-tests")]
@@ -3144,7 +3144,7 @@ fn parsed_faeel_tuple_founded_possible_executes_on_gpu_runtime_values() {
         .expect("tuple-founded FAEEL runtime path should retain GPU semantic certification");
 }
 
-// === v0.9.2 ITEM B: FAEEL unfounded self-support -> EXACT empty founded extension ===
+// === FAEEL unfounded self-support -> exact empty founded extension ===
 
 #[cfg(feature = "epistemic-logic-tests")]
 #[test]
@@ -4339,7 +4339,7 @@ fn parsed_bound_quaternary_know_filters_final_gpu_tuple_values() {
 }
 
 // =====================================================================
-// EGB-04 epistemic integrity constraint world-view pilots.
+// Epistemic integrity constraint world-view pilots.
 //
 // `:- know unsafe().` must prune candidate world views in which the
 // constraint body holds, leaving valid world views untouched. The
@@ -4483,7 +4483,7 @@ fn parsed_know_constraint_prunes_world_view_when_constraint_body_true() {
         .expect("all-pruned know-constraint path should retain GPU semantic certification");
 }
 
-// EGB-04.K2: rejected candidates must carry constraint-SPECIFIC reasons.
+// Rejected candidates must carry constraint-specific reasons.
 // With two integrity constraints, the surviving rejected world view must
 // identify WHICH constraint (by source-declaration index) actually fired,
 // not merely that "some" constraint did. The kernel evaluates constraints in
@@ -4491,7 +4491,7 @@ fn parsed_know_constraint_prunes_world_view_when_constraint_body_true() {
 // inputs so that exactly one of the two bodies holds pins the firing index.
 #[cfg(feature = "epistemic-logic-tests")]
 #[test]
-fn egb04_constraint_specific_reason_identifies_firing_constraint() {
+fn constraint_specific_reason_identifies_firing_constraint() {
     let Some(fixture) = runtime_fixture() else {
         return;
     };
@@ -4726,7 +4726,7 @@ fn parsed_possible_constraint_prunes_when_contradiction_possible() {
 }
 
 // =====================================================================
-// v0.9.2 ITEM E: VARIABLE-KEYED epistemic integrity constraints.
+// Variable-keyed epistemic integrity constraints.
 //
 // `:- know flagged(X).` ranges X EXISTENTIALLY over the modal relation's
 // tuple-key domain: a world view is pruned iff there EXISTS a binding of X for
@@ -4739,7 +4739,7 @@ fn parsed_possible_constraint_prunes_when_contradiction_possible() {
 
 #[cfg(feature = "epistemic-logic-tests")]
 #[test]
-fn egb_e_variable_keyed_constraint_prunes_when_relation_non_empty() {
+fn variable_keyed_constraint_prunes_when_relation_non_empty() {
     let Some(fixture) = runtime_fixture() else {
         return;
     };
@@ -4824,7 +4824,7 @@ fn egb_e_variable_keyed_constraint_prunes_when_relation_non_empty() {
 
 #[cfg(feature = "epistemic-logic-tests")]
 #[test]
-fn egb_e_variable_keyed_constraint_survives_when_relation_empty() {
+fn variable_keyed_constraint_survives_when_relation_empty() {
     let Some(fixture) = runtime_fixture() else {
         return;
     };
@@ -4891,7 +4891,7 @@ fn egb_e_variable_keyed_constraint_survives_when_relation_empty() {
         .expect("variable-keyed-constraint survive path should retain GPU semantic certification");
 }
 
-// ITEM E multi-literal (DISTINCT variables): `:- know p(X), know q(Y).` with
+// Multi-literal variable-keyed constraint (distinct variables): `:- know p(X), know q(Y).` with
 // INDEPENDENT single-occurrence X, Y factors to (∃X: know p(X)) AND
 // (∃Y: know q(Y)) = "p non-empty AND q non-empty in the accepted model". Each
 // literal lowers to an independent Anonymous wildcard, and the constraint kernel
@@ -4902,7 +4902,7 @@ fn egb_e_variable_keyed_constraint_survives_when_relation_empty() {
 // test below). The empty-q companion proves the SECOND literal is load-bearing.
 #[cfg(feature = "epistemic-logic-tests")]
 #[test]
-fn egb_e_distinct_variable_multi_literal_constraint_prunes_when_both_non_empty() {
+fn distinct_variable_multi_literal_constraint_prunes_when_both_non_empty() {
     let Some(fixture) = runtime_fixture() else {
         return;
     };
@@ -4968,7 +4968,7 @@ fn egb_e_distinct_variable_multi_literal_constraint_prunes_when_both_non_empty()
 
 #[cfg(feature = "epistemic-logic-tests")]
 #[test]
-fn egb_e_distinct_variable_multi_literal_constraint_survives_when_one_empty() {
+fn distinct_variable_multi_literal_constraint_survives_when_one_empty() {
     let Some(fixture) = runtime_fixture() else {
         return;
     };
@@ -5038,7 +5038,7 @@ fn egb_e_distinct_variable_multi_literal_constraint_survives_when_one_empty() {
         .expect("distinct-variable multi-literal survive path retains GPU semantic certification");
 }
 
-// ITEM E scope boundary: a SHARED tuple-key variable across constraint literals
+// Scope boundary: a shared tuple-key variable across constraint literals
 // (`:- know p(X), q(X).`) needs an existential JOIN over the shared key, which
 // independent wildcards cannot express. This is finite+typed, NOT an unbounded
 // domain, so it fails closed as UNIMPLEMENTED scope with a plain
@@ -5046,7 +5046,7 @@ fn egb_e_distinct_variable_multi_literal_constraint_survives_when_one_empty() {
 // diagnostic.
 #[cfg(feature = "epistemic-logic-tests")]
 #[test]
-fn egb_e_shared_variable_constraint_rejected_as_unimplemented_scope() {
+fn shared_variable_constraint_rejected_as_unimplemented_scope() {
     let program = parse_program(
         r#"
         pred seed(u32).
@@ -5080,17 +5080,17 @@ fn egb_e_shared_variable_constraint_rejected_as_unimplemented_scope() {
     }
 }
 
-// ITEM E / E2: a NEGATED variable-keyed constraint literal whose variable appears
+// Negated variable-keyed constraint literal whose variable appears
 // ONLY under negation (`:- not know p(X).`) has NO positive binder — X is not
 // range-restricted. This is the SAME unsafe shape ordinary Datalog rejects
 // (`:- not r(X).` -> "unbound variable ... in negated atom"). The sound answer is
 // that NAF safety error, NOT a "missing feature" diagnostic. The meaningful negated
 // form `:- q(X), not know p(X).` binds X with a positive literal and is the
 // shared-variable join. (Negated ALL-GROUND constraint literals stay supported via
-// the EGB-04 ground path.)
+// the ground epistemic-integrity-constraint path.)
 #[cfg(feature = "epistemic-logic-tests")]
 #[test]
-fn egb_e_standalone_negated_variable_keyed_constraint_is_unbound_safety_error() {
+fn standalone_negated_variable_keyed_constraint_is_unbound_safety_error() {
     let program = parse_program(
         r#"
         pred seed(u32).
@@ -6235,7 +6235,7 @@ fn transfer_budget_trace_rejects_tracked_host_transfers_in_gpu_hot_path() {
         ..after
     };
     let err = EpistemicGpuTransferBudgetTrace::from_host_transfer_stats(8, before, after_with_dtoh)
-        .expect_err("tracked D2H is not allowed in the epistemic GPU hot path");
+        .expect_err("tracked device-to-host transfer is not allowed in the epistemic GPU hot path");
     match err {
         xlog_core::XlogError::UnsupportedEpistemicConstruct { construct, context } => {
             assert_eq!(construct, "epistemic GPU transfer budget");
@@ -6401,7 +6401,7 @@ fn cycle4_epistemic_literal() -> EirEpistemicLiteral {
 }
 
 // =====================================================================
-// EGB-02B: mixed per-row + global modal membership value-level pilots.
+// Mixed per-row + global modal membership value-level pilots.
 //
 // Each pilot compiles a single rule that combines a GLOBAL modal gate
 // (nullary `know flag()` / `possible flag()` / `not possible block()`)
@@ -6457,7 +6457,7 @@ fn run_mixed_modal_pilot(
 fn assert_no_cpu_fallback(result: &xlog_runtime::EpistemicGpuExecutionResult) {
     assert_eq!(result.semantic_trace.cpu_candidate_enumerations, 0);
     assert_eq!(result.semantic_trace.cpu_world_view_validations, 0);
-    // K3: membership is device-backed. The single per-row `possible edge(X)`
+    // Membership is device-backed. The single per-row `possible edge(X)`
     // literal drives exactly one tuple-source key column read on the GPU; the
     // nullary global gate (`flag()` / `block()`) drives zero. This is NOT
     // subsumed by `require_runtime_dispatch_certification()`.
@@ -6692,7 +6692,7 @@ fn mixed_modal_know_notpossible_global_false_rejects_all_rows() {
     assert_no_cpu_fallback(&result);
 }
 
-// K4 negative pilot (v0.9.2 ITEM D): a MIXED rule whose per-row tuple key is a
+// Structured-key negative pilot: a mixed rule whose per-row tuple key is a
 // genuinely UNBOUNDED structured class (a `cons` `[X | T]` with a
 // statically-unknown tail) must still fail closed via an INDEPENDENT guard --
 // now the structured-key FINITENESS guard -- proving removal of the mixed guard
@@ -7200,7 +7200,7 @@ fn executable_with_kclique_wcoj_plan() -> EpistemicExecutablePlan {
     EpistemicExecutablePlan {
         gpu_plan,
         relation_ids: std::collections::BTreeMap::from([(
-            "__w37_helper_99".to_string(),
+            "__kclique_helper_99".to_string(),
             xlog_core::RelId(99),
         )]),
         reduced_runtime_plan: runtime_plan_with_kclique_wcoj(),
@@ -7250,7 +7250,7 @@ fn executable_with_live_kclique_wcoj_literal() -> EpistemicExecutablePlan {
     EpistemicExecutablePlan {
         gpu_plan,
         relation_ids: std::collections::BTreeMap::from([(
-            "__w37_helper_99".to_string(),
+            "__kclique_helper_99".to_string(),
             xlog_core::RelId(99),
         )]),
         reduced_runtime_plan: runtime_plan_with_live_kclique_wcoj(),
@@ -7293,7 +7293,7 @@ fn executable_with_kclique_helper_scan_outside_wcoj_plan() -> EpistemicExecutabl
     EpistemicExecutablePlan {
         gpu_plan,
         relation_ids: std::collections::BTreeMap::from([(
-            "__w37_helper_99".to_string(),
+            "__kclique_helper_99".to_string(),
             xlog_core::RelId(99),
         )]),
         reduced_runtime_plan: runtime_plan_with_helper_scan_outside_wcoj(),
@@ -7316,7 +7316,7 @@ fn executable_with_kclique_empty_edge_permutation_plan() -> EpistemicExecutableP
     EpistemicExecutablePlan {
         gpu_plan,
         relation_ids: std::collections::BTreeMap::from([(
-            "__w37_helper_99".to_string(),
+            "__kclique_helper_99".to_string(),
             xlog_core::RelId(99),
         )]),
         reduced_runtime_plan: runtime_plan_with_empty_edge_permutation_kclique_wcoj(),
@@ -7414,7 +7414,7 @@ fn executable_with_live_v070_4cycle_wcoj_literal_with_plan(
 fn runtime_plan_with_kclique_wcoj() -> ExecutionPlan {
     let mut plan = ExecutionPlan::new(vec![Scc {
         id: 0,
-        predicates: vec!["__w37_helper_99".to_string(), "clique5".to_string()],
+        predicates: vec!["__kclique_helper_99".to_string(), "clique5".to_string()],
         is_recursive: false,
     }]);
     let mut inputs: Vec<_> = (1..=10)
@@ -7427,7 +7427,7 @@ fn runtime_plan_with_kclique_wcoj() -> ExecutionPlan {
     };
     plan.rules_by_scc = vec![vec![
         CompiledRule {
-            head: "__w37_helper_99".to_string(),
+            head: "__kclique_helper_99".to_string(),
             body: RirNode::Scan {
                 rel: xlog_core::RelId(2),
             },
@@ -7617,7 +7617,7 @@ fn runtime_plan_with_helper_scan_outside_wcoj() -> ExecutionPlan {
     let mut plan = ExecutionPlan::new(vec![Scc {
         id: 0,
         predicates: vec![
-            "__w37_helper_99".to_string(),
+            "__kclique_helper_99".to_string(),
             "helper_probe".to_string(),
             "clique5".to_string(),
         ],
@@ -7625,7 +7625,7 @@ fn runtime_plan_with_helper_scan_outside_wcoj() -> ExecutionPlan {
     }]);
     plan.rules_by_scc = vec![vec![
         CompiledRule {
-            head: "__w37_helper_99".to_string(),
+            head: "__kclique_helper_99".to_string(),
             body: RirNode::Scan {
                 rel: xlog_core::RelId(2),
             },
@@ -7702,7 +7702,7 @@ fn runtime_plan_with_scan_rule_execution() -> ExecutionPlan {
 fn runtime_plan_with_empty_edge_permutation_kclique_wcoj() -> ExecutionPlan {
     let mut plan = ExecutionPlan::new(vec![Scc {
         id: 0,
-        predicates: vec!["__w37_helper_99".to_string(), "clique5".to_string()],
+        predicates: vec!["__kclique_helper_99".to_string(), "clique5".to_string()],
         is_recursive: false,
     }]);
     let mut inputs: Vec<_> = (1..=10)
@@ -7715,7 +7715,7 @@ fn runtime_plan_with_empty_edge_permutation_kclique_wcoj() -> ExecutionPlan {
     };
     plan.rules_by_scc = vec![vec![
         CompiledRule {
-            head: "__w37_helper_99".to_string(),
+            head: "__kclique_helper_99".to_string(),
             body: RirNode::Scan {
                 rel: xlog_core::RelId(2),
             },
@@ -7814,7 +7814,7 @@ fn kclique_order_without_edge_permutation() -> KCliqueVariableOrder {
 }
 
 // =====================================================================
-// EGB-02: tuple-key / bound-value modal membership KPI pilots.
+// Tuple-key / bound-value modal membership pilots.
 //
 // Each pilot parses a real epistemic program, compiles it through the
 // production lowering boundary, and executes it on the GPU device path.
@@ -7823,7 +7823,7 @@ fn kclique_order_without_edge_permutation() -> KCliqueVariableOrder {
 // =====================================================================
 
 #[cfg(feature = "epistemic-logic-tests")]
-fn egb02_run_unary_result(
+fn run_tuple_key_unary_result(
     fixture: &RuntimeFixture,
     source: &str,
     unary_inputs: &[(&str, &[u32])],
@@ -7831,8 +7831,9 @@ fn egb02_run_unary_result(
     ternary_inputs: &[(&str, &[(u32, u32, u32)])],
     expected_key_column_reads: u32,
 ) -> Vec<u32> {
-    let program = parse_program(source).expect("parse EGB-02 pilot program");
-    let executable = compile_epistemic_gpu_execution(&program).expect("compile EGB-02 pilot plan");
+    let program = parse_program(source).expect("parse tuple-key membership pilot program");
+    let executable =
+        compile_epistemic_gpu_execution(&program).expect("compile tuple-key membership pilot plan");
     let mut executor = Executor::new(Arc::clone(&fixture.provider));
     for (name, rel) in &executable.relation_ids {
         executor.register_relation(*rel, name);
@@ -7859,9 +7860,9 @@ fn egb02_run_unary_result(
                 max_models_per_reduction: 4,
             },
         )
-        .expect("EGB-02 pilot should execute through GPU runtime path");
+        .expect("tuple-key membership pilot should execute through GPU runtime path");
 
-    // K3/K4 lock evidence: device-backed tuple-key reads, zero CPU fallback.
+    // Device-backed tuple-key reads and zero CPU fallback.
     assert_eq!(
         result.model_membership.tuple_source_key_column_device_reads, expected_key_column_reads,
         "tuple-key column reads must be device-backed for {source:?}"
@@ -7870,25 +7871,25 @@ fn egb02_run_unary_result(
     assert_eq!(result.semantic_trace.cpu_world_view_validations, 0);
     result
         .require_runtime_dispatch_certification()
-        .expect("EGB-02 pilot runtime evidence must remain certified");
+        .expect("tuple-key membership pilot runtime evidence must remain certified");
 
     let mut rows = fixture
         .provider
         .download_column::<u32>(&result.final_output, 0)
-        .expect("download EGB-02 pilot output column 0");
+        .expect("download tuple-key membership pilot output column 0");
     rows.sort_unstable();
     rows
 }
 
-/// K1: ground arity-1 tuple key gates candidates on a present ground tuple.
+/// Ground arity-1 tuple key gates candidates on a present ground tuple.
 #[cfg(feature = "epistemic-logic-tests")]
 #[test]
-fn egb02_ground_arity_one_tuple_key_through_gpu_membership() {
+fn ground_arity_one_tuple_key_through_gpu_membership() {
     let Some(fixture) = runtime_fixture() else {
         return;
     };
     // know flag(7) holds (flag has row 7), so every node row is founded.
-    let present = egb02_run_unary_result(
+    let present = run_tuple_key_unary_result(
         &fixture,
         r#"
         pred node(u32).
@@ -7905,7 +7906,7 @@ fn egb02_ground_arity_one_tuple_key_through_gpu_membership() {
     assert_eq!(present, vec![1, 2, 3]);
 
     // know flag(7) fails (flag lacks row 7), so no node row is founded.
-    let absent = egb02_run_unary_result(
+    let absent = run_tuple_key_unary_result(
         &fixture,
         r#"
         pred node(u32).
@@ -7922,14 +7923,14 @@ fn egb02_ground_arity_one_tuple_key_through_gpu_membership() {
     assert!(absent.is_empty(), "absent ground key must found no rows");
 }
 
-/// K1: ground arity-2 tuple key matches a specific stable-model edge tuple.
+/// Ground arity-2 tuple key matches a specific stable-model edge tuple.
 #[cfg(feature = "epistemic-logic-tests")]
 #[test]
-fn egb02_ground_arity_two_tuple_key_through_gpu_membership() {
+fn ground_arity_two_tuple_key_through_gpu_membership() {
     let Some(fixture) = runtime_fixture() else {
         return;
     };
-    let present = egb02_run_unary_result(
+    let present = run_tuple_key_unary_result(
         &fixture,
         r#"
         pred node(u32).
@@ -7945,7 +7946,7 @@ fn egb02_ground_arity_two_tuple_key_through_gpu_membership() {
     );
     assert_eq!(present, vec![1, 2, 3]);
 
-    let absent = egb02_run_unary_result(
+    let absent = run_tuple_key_unary_result(
         &fixture,
         r#"
         pred node(u32).
@@ -7962,14 +7963,14 @@ fn egb02_ground_arity_two_tuple_key_through_gpu_membership() {
     assert!(absent.is_empty(), "absent ground edge must found no rows");
 }
 
-/// K1: ground arity-3 tuple key matches a specific stable-model triple.
+/// Ground arity-3 tuple key matches a specific stable-model triple.
 #[cfg(feature = "epistemic-logic-tests")]
 #[test]
-fn egb02_ground_arity_three_tuple_key_through_gpu_membership() {
+fn ground_arity_three_tuple_key_through_gpu_membership() {
     let Some(fixture) = runtime_fixture() else {
         return;
     };
-    let present = egb02_run_unary_result(
+    let present = run_tuple_key_unary_result(
         &fixture,
         r#"
         pred node(u32).
@@ -7985,7 +7986,7 @@ fn egb02_ground_arity_three_tuple_key_through_gpu_membership() {
     );
     assert_eq!(present, vec![5, 6]);
 
-    let absent = egb02_run_unary_result(
+    let absent = run_tuple_key_unary_result(
         &fixture,
         r#"
         pred node(u32).
@@ -8002,10 +8003,10 @@ fn egb02_ground_arity_three_tuple_key_through_gpu_membership() {
     assert!(absent.is_empty(), "absent ground triple must found no rows");
 }
 
-/// K2: a single bound variable yields exactly the founded rows, deterministic.
+/// A single bound variable yields exactly the founded rows, deterministically.
 #[cfg(feature = "epistemic-logic-tests")]
 #[test]
-fn egb02_single_bound_variable_tuple_key_through_gpu_membership() {
+fn single_bound_variable_tuple_key_through_gpu_membership() {
     let Some(fixture) = runtime_fixture() else {
         return;
     };
@@ -8017,17 +8018,17 @@ fn egb02_single_bound_variable_tuple_key_through_gpu_membership() {
         known_child(X) :- node(X), know child(X).
         "#;
     let inputs_unary = &[("node", &[1, 2, 3, 4][..]), ("child", &[2, 4][..])];
-    let first = egb02_run_unary_result(&fixture, source, inputs_unary, &[], &[], 1);
+    let first = run_tuple_key_unary_result(&fixture, source, inputs_unary, &[], &[], 1);
     assert_eq!(first, vec![2, 4]);
-    // Determinism across reruns (K2).
-    let second = egb02_run_unary_result(&fixture, source, inputs_unary, &[], &[], 1);
+    // Determinism across reruns.
+    let second = run_tuple_key_unary_result(&fixture, source, inputs_unary, &[], &[], 1);
     assert_eq!(first, second);
 }
 
-/// K2: multiple bound variables type-correct on both columns and match by value.
+/// Multiple bound variables type-correct on both columns and match by value.
 #[cfg(feature = "epistemic-logic-tests")]
 #[test]
-fn egb02_multiple_bound_variables_tuple_key_through_gpu_membership() {
+fn multiple_bound_variables_tuple_key_through_gpu_membership() {
     let Some(fixture) = runtime_fixture() else {
         return;
     };
@@ -8090,16 +8091,16 @@ fn egb02_multiple_bound_variables_tuple_key_through_gpu_membership() {
     assert_eq!(ys, vec![10, 30]);
 }
 
-/// K2: a repeated variable enforces value equality across both key columns.
+/// A repeated variable enforces value equality across both key columns.
 #[cfg(feature = "epistemic-logic-tests")]
 #[test]
-fn egb02_repeated_variable_tuple_key_enforces_equality_through_gpu_membership() {
+fn repeated_variable_tuple_key_enforces_equality_through_gpu_membership() {
     let Some(fixture) = runtime_fixture() else {
         return;
     };
     // X is bound by node(X). know loop(X, X) only matches stable-model tuples
     // where both columns equal X, so loop rows like (3, 7) must NOT found X=3.
-    let founded = egb02_run_unary_result(
+    let founded = run_tuple_key_unary_result(
         &fixture,
         r#"
         pred node(u32).
@@ -8117,16 +8118,16 @@ fn egb02_repeated_variable_tuple_key_enforces_equality_through_gpu_membership() 
     assert_eq!(founded, vec![1, 4]);
 }
 
-/// K1/K3: an anonymous position acts as a wildcard (no equality requirement).
+/// An anonymous position acts as a wildcard with no equality requirement.
 #[cfg(feature = "epistemic-logic-tests")]
 #[test]
-fn egb02_anonymous_position_tuple_key_is_wildcard_through_gpu_membership() {
+fn anonymous_position_tuple_key_is_wildcard_through_gpu_membership() {
     let Some(fixture) = runtime_fixture() else {
         return;
     };
     // out(X) :- node(X), know edge(X, _). X is founded iff edge has ANY row
     // whose first column equals X, regardless of the second column.
-    let founded = egb02_run_unary_result(
+    let founded = run_tuple_key_unary_result(
         &fixture,
         r#"
         pred node(u32).
@@ -8144,16 +8145,16 @@ fn egb02_anonymous_position_tuple_key_is_wildcard_through_gpu_membership() {
     assert_eq!(founded, vec![1, 3]);
 }
 
-/// K1/K3: a pure-anonymous modal atom (no bound variable) is a global gate that
+/// A pure-anonymous modal atom with no bound variable is a global gate that
 /// holds iff the tuple source is non-empty.
 #[cfg(feature = "epistemic-logic-tests")]
 #[test]
-fn egb02_pure_anonymous_global_gate_through_gpu_membership() {
+fn pure_anonymous_global_gate_through_gpu_membership() {
     let Some(fixture) = runtime_fixture() else {
         return;
     };
     // know flag(_): holds iff flag has any row.
-    let nonempty = egb02_run_unary_result(
+    let nonempty = run_tuple_key_unary_result(
         &fixture,
         r#"
         pred node(u32).
@@ -8173,7 +8174,7 @@ fn egb02_pure_anonymous_global_gate_through_gpu_membership() {
         "anonymous gate holds when non-empty"
     );
 
-    let empty = egb02_run_unary_result(
+    let empty = run_tuple_key_unary_result(
         &fixture,
         r#"
         pred node(u32).
@@ -8190,7 +8191,7 @@ fn egb02_pure_anonymous_global_gate_through_gpu_membership() {
     assert!(empty.is_empty(), "anonymous gate fails when empty");
 
     // know edge(_, _): arity-2 pure-anonymous global gate.
-    let edge_nonempty = egb02_run_unary_result(
+    let edge_nonempty = run_tuple_key_unary_result(
         &fixture,
         r#"
         pred node(u32).
@@ -8207,10 +8208,10 @@ fn egb02_pure_anonymous_global_gate_through_gpu_membership() {
     assert_eq!(edge_nonempty, vec![5, 6]);
 }
 
-/// K1: an arity-0 (nullary) modal atom is a global gate on a fact relation.
+/// An arity-0 (nullary) modal atom is a global gate on a fact relation.
 #[cfg(feature = "epistemic-logic-tests")]
 #[test]
-fn egb02_arity_zero_tuple_key_through_gpu_membership() {
+fn arity_zero_tuple_key_through_gpu_membership() {
     let Some(fixture) = runtime_fixture() else {
         return;
     };
@@ -8266,7 +8267,7 @@ fn egb02_arity_zero_tuple_key_through_gpu_membership() {
     assert!(run(0).is_empty(), "nullary gate fails when fact absent");
 }
 
-/// EGB-02B: a rule mixing a per-row (bound-variable) modal literal with a
+/// A rule mixing a per-row bound-variable modal literal with a
 /// global gate (ground/nullary) modal literal now executes SOUNDLY. The global
 /// gate and the per-row bound tuple-key gate compose conjunctively on the GPU
 /// row-map kernel: a row is emitted iff its per-row tuple holds AND every
@@ -8275,7 +8276,7 @@ fn egb02_arity_zero_tuple_key_through_gpu_membership() {
 /// `know child(X)` is the per-row bound-variable filter.
 #[cfg(feature = "epistemic-logic-tests")]
 #[test]
-fn egb02_mixed_per_row_and_global_modal_executes_conjunctively() {
+fn mixed_per_row_and_global_modal_executes_conjunctively() {
     let Some(fixture) = runtime_fixture() else {
         return;
     };
@@ -8329,15 +8330,15 @@ fn egb02_mixed_per_row_and_global_modal_executes_conjunctively() {
     assert_eq!(run(&[9], &[1, 2, 3]), Vec::<u32>::new());
 }
 
-/// K2/K3: an empty `possible` tuple source founds nothing; `not possible`
+/// An empty `possible` tuple source founds nothing; `not possible`
 /// founds everything (the negated empty membership).
 #[cfg(feature = "epistemic-logic-tests")]
 #[test]
-fn egb02_empty_possible_tuple_source_through_gpu_membership() {
+fn empty_possible_tuple_source_through_gpu_membership() {
     let Some(fixture) = runtime_fixture() else {
         return;
     };
-    let possible_rows = egb02_run_unary_result(
+    let possible_rows = run_tuple_key_unary_result(
         &fixture,
         r#"
         pred node(u32).
@@ -8356,7 +8357,7 @@ fn egb02_empty_possible_tuple_source_through_gpu_membership() {
         "empty possible source must found no rows"
     );
 
-    let not_possible_rows = egb02_run_unary_result(
+    let not_possible_rows = run_tuple_key_unary_result(
         &fixture,
         r#"
         pred node(u32).
@@ -8373,11 +8374,11 @@ fn egb02_empty_possible_tuple_source_through_gpu_membership() {
     assert_eq!(not_possible_rows, vec![1, 2, 3]);
 }
 
-/// v0.9.2 SCOPE-LIMIT CLOSED: a modal-local variable (`Y`) absent from the head over
+/// A modal-local variable (`Y`) absent from the head over
 /// an INVARIANT relation is now resolved by augmented projection, not fail-closed.
 #[cfg(feature = "epistemic-logic-tests")]
 #[test]
-fn egb02_augmenting_modal_variable_over_invariant_resolves_with_projection() {
+fn augmenting_modal_variable_over_invariant_resolves_with_projection() {
     // `Y` appears only inside the positive modal atom `know edge(X, Y)` over the
     // INVARIANT EDB `edge`. The augmented-projection reduction resolves it into a
     // positive `edge(X, Y)` join (binding `Y`), augments the reduced head to carry
@@ -8447,11 +8448,11 @@ fn egb02_augmenting_modal_variable_over_invariant_resolves_with_projection() {
     );
 }
 
-/// K3: a type mismatch between a bound variable and the tuple-key column is
+/// A type mismatch between a bound variable and the tuple-key column is
 /// rejected with a typed diagnostic before result materialization.
 #[cfg(feature = "epistemic-logic-tests")]
 #[test]
-fn egb02_type_mismatch_bound_variable_is_fail_closed() {
+fn type_mismatch_bound_variable_is_fail_closed() {
     let Some(fixture) = runtime_fixture() else {
         return;
     };
@@ -8504,18 +8505,18 @@ fn egb02_type_mismatch_bound_variable_is_fail_closed() {
     }
 }
 
-/// K1/K3: pure-ground `not know` / `possible` / `not possible` global gates.
+/// Pure-ground `not know` / `possible` / `not possible` global gates.
 /// These ride the global membership gate (no bound output column), which must
 /// honor body-literal semantics including negation.
 #[cfg(feature = "epistemic-logic-tests")]
 #[test]
-fn egb02_ground_global_gate_honors_negation_and_modality() {
+fn ground_global_gate_honors_negation_and_modality() {
     let Some(fixture) = runtime_fixture() else {
         return;
     };
 
     // not know flag(7): holds iff flag(7) is absent.
-    let not_know_absent = egb02_run_unary_result(
+    let not_know_absent = run_tuple_key_unary_result(
         &fixture,
         r#"
         pred node(u32).
@@ -8531,7 +8532,7 @@ fn egb02_ground_global_gate_honors_negation_and_modality() {
     );
     assert_eq!(not_know_absent, vec![1, 2, 3], "not know of absent holds");
 
-    let not_know_present = egb02_run_unary_result(
+    let not_know_present = run_tuple_key_unary_result(
         &fixture,
         r#"
         pred node(u32).
@@ -8551,7 +8552,7 @@ fn egb02_ground_global_gate_honors_negation_and_modality() {
     );
 
     // possible flag(7): holds iff flag(7) is present (single-world FAEEL).
-    let possible_present = egb02_run_unary_result(
+    let possible_present = run_tuple_key_unary_result(
         &fixture,
         r#"
         pred node(u32).
@@ -8567,7 +8568,7 @@ fn egb02_ground_global_gate_honors_negation_and_modality() {
     );
     assert_eq!(possible_present, vec![1, 2, 3], "possible present holds");
 
-    let possible_absent = egb02_run_unary_result(
+    let possible_absent = run_tuple_key_unary_result(
         &fixture,
         r#"
         pred node(u32).
@@ -8587,16 +8588,16 @@ fn egb02_ground_global_gate_honors_negation_and_modality() {
     );
 }
 
-/// K1/K2: a modal atom mixing a bound variable and a ground value matches by
+/// A modal atom mixing a bound variable and a ground value matches by
 /// value on both positions.
 #[cfg(feature = "epistemic-logic-tests")]
 #[test]
-fn egb02_mixed_bound_and_ground_tuple_key_through_gpu_membership() {
+fn mixed_bound_and_ground_tuple_key_through_gpu_membership() {
     let Some(fixture) = runtime_fixture() else {
         return;
     };
     // out(X) :- node(X), know edge(X, 10). X founded iff edge(X, 10) holds.
-    let founded = egb02_run_unary_result(
+    let founded = run_tuple_key_unary_result(
         &fixture,
         r#"
         pred node(u32).
@@ -8614,7 +8615,7 @@ fn egb02_mixed_bound_and_ground_tuple_key_through_gpu_membership() {
 }
 
 // ---------------------------------------------------------------------------
-// EGB-01: arbitrary-EIR candidate-world enumeration.
+// Arbitrary-EIR candidate-world enumeration.
 //
 // These pilots prove the production device path
 // (compile_epistemic_gpu_execution -> execute_epistemic_gpu_execution) derives
@@ -8622,18 +8623,18 @@ fn egb02_mixed_bound_and_ground_tuple_key_through_gpu_membership() {
 // no hand-supplied EpistemicInterpretation candidate lists -- generates the
 // full 2^literal_count lattice on device, evaluates each candidate against the
 // reduced stable-model semantics through the production runtime path, and emits
-// the K2 trace counts. They route through the same single-plan GPU runtime path
+// the required trace counts. They route through the same single-plan GPU runtime path
 // as every other accepted epistemic execution; nothing here touches the CPU
 // fixture layer (run_generate_propagate_test).
 // ---------------------------------------------------------------------------
 
-/// EGB-01 K1/K2: a program with MULTIPLE epistemic literals derives its full
+/// A program with multiple epistemic literals derives its full
 /// candidate space (2^literal_count) FROM the EIR program -- no fixture list --
 /// and emits every required trace count (generated, propagated, tested,
 /// accepted, rejected, rejection reasons) from device-derived semantics.
 #[cfg(feature = "epistemic-logic-tests")]
 #[test]
-fn egb01_multi_literal_program_enumerates_candidate_space_from_eir() {
+fn multi_literal_program_enumerates_candidate_space_from_eir() {
     let Some(fixture) = runtime_fixture() else {
         return;
     };
@@ -8650,9 +8651,9 @@ fn egb01_multi_literal_program_enumerates_candidate_space_from_eir() {
         out(X) :- seed(X), know a(X), possible b(X), not possible c(X).
         "#,
     )
-    .expect("parse EGB-01 multi-literal program");
-    let executable =
-        compile_epistemic_gpu_execution(&program).expect("compile EGB-01 multi-literal plan");
+    .expect("parse multi-literal candidate-world enumeration program");
+    let executable = compile_epistemic_gpu_execution(&program)
+        .expect("compile multi-literal candidate-world enumeration plan");
     // The candidate space is derived from the program's epistemic literals,
     // not supplied by the caller.
     assert_eq!(
@@ -8685,9 +8686,9 @@ fn egb01_multi_literal_program_enumerates_candidate_space_from_eir() {
                 max_models_per_reduction: 1,
             },
         )
-        .expect("EGB-01 multi-literal program should enumerate and evaluate on device");
+        .expect("multi-literal candidate-world enumeration should evaluate on device");
 
-    // K2: every required trace count is emitted from device-derived semantics.
+    // Every required trace count is emitted from device-derived semantics.
     let trace = &result.semantic_trace;
     assert_eq!(trace.generated_candidates, 8, "generated = 2^3");
     assert_eq!(trace.guesses, 24, "guesses = 8 candidates * 3 literals");
@@ -8710,7 +8711,7 @@ fn egb01_multi_literal_program_enumerates_candidate_space_from_eir() {
             .all(|reason| *reason == EpistemicGpuRejectionReason::UnsatisfiedMembership),
         "rejected candidates fail membership against the EIR-derived assumptions"
     );
-    // K4: no CPU fallback in candidate enumeration / world-view validation.
+    // No CPU fallback in candidate enumeration or world-view validation.
     assert_eq!(trace.cpu_candidate_enumerations, 0);
     assert_eq!(trace.cpu_world_view_validations, 0);
     assert!(result.prepared.preflight.cpu_fallbacks.is_zero());
@@ -8719,20 +8720,20 @@ fn egb01_multi_literal_program_enumerates_candidate_space_from_eir() {
     let rows = fixture
         .provider
         .download_column::<u32>(&result.final_output, 0)
-        .expect("download EGB-01 multi-literal output");
+        .expect("download multi-literal candidate-world enumeration output");
     assert_eq!(rows, vec![7]);
     result
         .require_runtime_dispatch_certification()
-        .expect("EGB-01 multi-literal result must retain dispatch + semantic certification");
+        .expect("multi-literal result must retain dispatch and semantic certification");
 }
 
-/// EGB-01 K3: an EIR-derived candidate space where EVERY candidate is rejected
+/// An EIR-derived candidate space where every candidate is rejected
 /// returns Ok cleanly with an empty accepted world-view set -- distinguishable
 /// from execution failure (which returns Err) -- and still emits a full
 /// rejection trace.
 #[cfg(feature = "epistemic-logic-tests")]
 #[test]
-fn egb01_empty_accepted_world_view_is_distinct_from_failure() {
+fn empty_accepted_world_view_is_distinct_from_failure() {
     let Some(fixture) = runtime_fixture() else {
         return;
     };
@@ -8749,9 +8750,9 @@ fn egb01_empty_accepted_world_view_is_distinct_from_failure() {
         out(X) :- seed(X), know a(X), possible b(X).
         "#,
     )
-    .expect("parse EGB-01 empty-world-view program");
-    let executable =
-        compile_epistemic_gpu_execution(&program).expect("compile EGB-01 empty-world-view plan");
+    .expect("parse empty-world-view candidate enumeration program");
+    let executable = compile_epistemic_gpu_execution(&program)
+        .expect("compile empty-world-view candidate enumeration plan");
     let mut executor = Executor::new(Arc::clone(&fixture.provider));
     for (name, rel) in &executable.relation_ids {
         executor.register_relation(*rel, name);
@@ -8796,18 +8797,18 @@ fn egb01_empty_accepted_world_view_is_distinct_from_failure() {
     let rows = fixture
         .provider
         .download_column::<u32>(&result.final_output, 0)
-        .expect("download empty EGB-01 output column");
+        .expect("download empty candidate-enumeration output column");
     assert!(rows.is_empty(), "empty accepted world view yields no rows");
     result
         .require_runtime_dispatch_certification()
         .expect("empty-world-view result must still be a certified runtime dispatch");
 }
 
-/// EGB-01 K3: repeated deterministic runs of the same EIR-derived enumeration
+/// Repeated deterministic runs of the same EIR-derived enumeration
 /// produce identical candidate AND result sets.
 #[cfg(feature = "epistemic-logic-tests")]
 #[test]
-fn egb01_repeated_runs_are_deterministic() {
+fn candidate_world_enumeration_repeated_runs_are_deterministic() {
     let Some(fixture) = runtime_fixture() else {
         return;
     };
@@ -8827,9 +8828,10 @@ fn egb01_repeated_runs_are_deterministic() {
     };
 
     let run_once = || {
-        let program = parse_program(source).expect("parse EGB-01 determinism program");
-        let executable =
-            compile_epistemic_gpu_execution(&program).expect("compile EGB-01 determinism plan");
+        let program =
+            parse_program(source).expect("parse candidate-enumeration determinism program");
+        let executable = compile_epistemic_gpu_execution(&program)
+            .expect("compile candidate-enumeration determinism plan");
         let mut executor = Executor::new(Arc::clone(&fixture.provider));
         for (name, rel) in &executable.relation_ids {
             executor.register_relation(*rel, name);
@@ -8844,11 +8846,11 @@ fn egb01_repeated_runs_are_deterministic() {
         }
         let result = executor
             .execute_epistemic_gpu_execution(&executable, capacities)
-            .expect("EGB-01 determinism run should execute on device");
+            .expect("candidate-enumeration determinism run should execute on device");
         let mut rows = fixture
             .provider
             .download_column::<u32>(&result.final_output, 0)
-            .expect("download EGB-01 determinism output");
+            .expect("download candidate-enumeration determinism output");
         rows.sort_unstable();
         (
             result.semantic_trace.accepted_candidate_indices.clone(),
@@ -8878,13 +8880,13 @@ fn egb01_repeated_runs_are_deterministic() {
 }
 
 // ============================================================================
-// EGB-06: joint multi-epistemic-predicate solving.
+// Joint multi-epistemic-predicate solving.
 //
 // A rule coupling more than one DISTINCT epistemic body predicate is solved as a
 // JOINT modal conjunction over the candidate world view. Because such a rule has
 // a single output relation, the WHOLE program is expressible on both the split
 // path (`compile_epistemic_gpu_split_execution`) and the unsplit joint path
-// (`compile_epistemic_gpu_execution`); EGB-06 requires the two to be
+// (`compile_epistemic_gpu_execution`); the contract requires the two to be
 // row-identical. Both sides are real device runs; neither output is hardcoded.
 // ============================================================================
 
@@ -8931,7 +8933,7 @@ fn run_split_single_output(
         .execute_epistemic_gpu_execution_batch_with_trace(&executables, capacities)
         .expect("split single-output component executes through GPU runtime batch");
     assert_eq!(batch.results.len(), 1);
-    // K4 / LOCK 1: split orchestration keeps every CPU fallback counter at zero.
+    // Split orchestration keeps every CPU fallback counter at zero.
     assert_eq!(batch.trace.cpu_recomposition_steps, 0);
     assert_eq!(batch.trace.cpu_candidate_enumerations, 0);
     assert_eq!(batch.trace.cpu_world_view_validations, 0);
@@ -8953,13 +8955,13 @@ fn run_split_single_output(
     )
 }
 
-/// EGB-06 K1/K2/K3: distinct-predicate modal conjunction (`know p(X), possible q(X)`)
+/// Distinct-predicate modal conjunction (`know p(X), possible q(X)`)
 /// with mixed operators. Joint split execution must equal unsplit single execution
 /// row-for-row, and the joint-handling preflight must show ONE reduction binding
 /// BOTH modal predicates (not two independent split pieces).
 #[cfg(feature = "epistemic-logic-tests")]
 #[test]
-fn egb06_distinct_predicate_conjunction_joint_matches_unsplit() {
+fn distinct_predicate_conjunction_joint_matches_unsplit() {
     let Some(fixture) = runtime_fixture() else {
         return;
     };
@@ -8987,12 +8989,12 @@ fn egb06_distinct_predicate_conjunction_joint_matches_unsplit() {
     let unsplit_out =
         run_unsplit_single_component_output_with_caps(&fixture, source, relations, caps);
 
-    // K2 unsplit parity: row-identical output.
+    // Unsplit parity: row-identical output.
     assert_eq!(
         split_out, unsplit_out,
         "joint split output must equal unsplit single-execution output"
     );
-    // K1 modal-conjunction correctness: exactly the rows where BOTH modal atoms hold.
+    // Modal-conjunction correctness: exactly the rows where both modal atoms hold.
     assert_eq!(
         split_out,
         vec![1, 3],
@@ -9001,7 +9003,7 @@ fn egb06_distinct_predicate_conjunction_joint_matches_unsplit() {
     assert_eq!(split_rows, 2);
     assert!(!split_out.is_empty(), "non-vacuous joint derivation");
 
-    // K3 joint-handling trace: ONE reduction binds BOTH distinct modal predicates,
+    // Joint-handling trace: one reduction binds both distinct modal predicates,
     // with operator-specific semantics preserved (one know + one possible). This is
     // the structural proof the rule was solved JOINTLY, not split into independent
     // unsound pieces.
@@ -9021,13 +9023,13 @@ fn egb06_distinct_predicate_conjunction_joint_matches_unsplit() {
     assert_eq!(preflight.cpu_fallbacks.world_view_validation, 0);
 }
 
-/// EGB-06 K1/K2/K3: all-operator joint conjunction including negated modals
+/// All-operator joint conjunction including negated modals
 /// (`not know`, `not possible`) over four distinct modal predicates. Joint split
 /// execution equals unsplit, and negated modal literals participate in the same
 /// candidate test.
 #[cfg(feature = "epistemic-logic-tests")]
 #[test]
-fn egb06_mixed_operator_conjunction_joint_matches_unsplit() {
+fn mixed_operator_conjunction_joint_matches_unsplit() {
     let Some(fixture) = runtime_fixture() else {
         return;
     };
@@ -9069,7 +9071,7 @@ fn egb06_mixed_operator_conjunction_joint_matches_unsplit() {
         vec![9],
         "head derived iff full mixed-operator modal conjunction holds"
     );
-    // K3: one reduction binds all four distinct modal predicates with their
+    // One reduction binds all four distinct modal predicates with their
     // operator-specific semantics.
     assert_eq!(preflight.reduced_runtime_rule_count, 1);
     assert_eq!(preflight.tuple_membership_binding_count, 4);
@@ -9079,7 +9081,7 @@ fn egb06_mixed_operator_conjunction_joint_matches_unsplit() {
     assert_eq!(preflight.not_possible_operator_count, 1);
 }
 
-/// EGB-06 K2/K4 (v0.9.2F): cross-arity SAME-NAME predicate coupling
+/// Cross-arity same-name predicate coupling
 /// (`know p(X), possible p(X,Y)`) is now SOLVED by treating the two arities as
 /// DISTINCT relations. The relation store and the executable's `relation_ids` map
 /// stay name-keyed, but the modal tuple-source resolution disambiguates by ARITY:
@@ -9099,7 +9101,7 @@ fn egb06_mixed_operator_conjunction_joint_matches_unsplit() {
 /// execute), with no CPU fallback or CPU candidate enumeration.
 #[cfg(feature = "epistemic-logic-tests")]
 #[test]
-fn egb06_cross_arity_same_name_solved_identically_split_and_unsplit() {
+fn cross_arity_same_name_solved_identically_split_and_unsplit() {
     let Some(fixture) = runtime_fixture() else {
         return;
     };
@@ -9198,12 +9200,12 @@ fn egb06_cross_arity_same_name_solved_identically_split_and_unsplit() {
     );
 }
 
-/// EGB-06 K1: empty/contradictory candidate evidence yields an accepted but EMPTY
+/// Empty/contradictory candidate evidence yields an accepted but empty
 /// result (no crash). Here `possible q` never holds, so the joint conjunction is
 /// false for every seed row.
 #[cfg(feature = "epistemic-logic-tests")]
 #[test]
-fn egb06_contradictory_joint_conjunction_yields_empty_accepted() {
+fn contradictory_joint_conjunction_yields_empty_accepted() {
     let Some(fixture) = runtime_fixture() else {
         return;
     };
@@ -9232,12 +9234,12 @@ fn egb06_contradictory_joint_conjunction_yields_empty_accepted() {
     assert_eq!(rows, 0, "empty accepted result, not a crash");
 }
 
-/// EGB-06 K4: over-budget joint solving fails with a resource diagnostic BEFORE
+/// Over-budget joint solving fails with a resource diagnostic before
 /// partial execution, surfaced through the SPLIT entry. Candidate capacity below
 /// the 2^N guess space for the joint reduction (here N=3 → 8 guesses) is rejected.
 #[cfg(feature = "epistemic-logic-tests")]
 #[test]
-fn egb06_over_budget_joint_fails_closed_before_execution() {
+fn over_budget_joint_fails_closed_before_execution() {
     let Some(fixture) = runtime_fixture() else {
         return;
     };
@@ -9299,14 +9301,14 @@ fn egb06_over_budget_joint_fails_closed_before_execution() {
     }
 }
 
-/// EGB-06 K4: a joint rule whose coupling depends on unsupported semantics
+/// A joint rule whose coupling depends on unsupported semantics
 /// (here an unsafe shared modal variable) fails with the relevant typed diagnostic
 /// through the split entry, rather than being silently accepted by removing the
 /// blanket coupling rejection.
 #[cfg(feature = "epistemic-logic-tests")]
 #[test]
-fn egb06_cross_arity_joint_coupling_over_invariant_resolves_on_device() {
-    // v0.9.2 sound consequence of the invariant-resolve: a head variable bound ONLY by
+fn cross_arity_joint_coupling_over_invariant_resolves_on_device() {
+    // Invariant modal resolution: a head variable bound ONLY by
     // positive modal literals over INVARIANT relations is range-restricted by resolving
     // those modals into positive join atoms. `a(X, Y) :- know p(X), possible link(X, Y)`
     // reduces to `a(X, Y) :- p(X), link(X, Y)` (both invariant), which is safe and
@@ -9383,7 +9385,7 @@ fn egb06_cross_arity_joint_coupling_over_invariant_resolves_on_device() {
 #[cfg(feature = "epistemic-logic-tests")]
 #[test]
 fn single_element_list_modal_key_binds_element_against_scalar_column_on_device() {
-    // v0.9.2 ITEM D: a STRUCTURED finite+typed modal tuple-key. The key term is a
+    // Structured finite typed modal tuple-key. The key term is a
     // 1-element list `[H]` whose element `H` is a bound variable. The list is
     // flattened element-wise into the modal relation's scalar key columns, so
     // `know watched([H])` binds `H` against the single u32 column of `watched`.
@@ -9448,7 +9450,7 @@ fn single_element_list_modal_key_binds_element_against_scalar_column_on_device()
 #[cfg(feature = "epistemic-logic-tests")]
 #[test]
 fn multi_element_list_modal_key_binds_elements_against_columns_on_device() {
-    // v0.9.2 ITEM D: a multi-element list `[A, B]` modal key over an arity-2
+    // Multi-element list `[A, B]` modal key over an arity-2
     // relation. Each element flattens into its own scalar key column, so the
     // PER-ELEMENT conjunctive match is load-bearing: a row of `host` survives only
     // when BOTH `A` and `B` match the SAME `watched` tuple.
@@ -9529,7 +9531,7 @@ fn multi_element_list_modal_key_binds_elements_against_columns_on_device() {
 #[cfg(feature = "epistemic-logic-tests")]
 #[test]
 fn anonymous_wildcard_list_modal_key_matches_any_in_position_on_device() {
-    // v0.9.2 ITEM D: an anonymous `_` inside a structured list key is a per-column
+    // Anonymous `_` inside a structured list key is a per-column
     // WILDCARD -- it imposes no equality on that flattened column, while the bound
     // element still filters. `know watched([A, _])` keeps rows whose first column
     // matches some watched tuple's first column, regardless of the second.

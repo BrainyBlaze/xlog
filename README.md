@@ -2,12 +2,12 @@
 
 [![License](https://img.shields.io/badge/license-MIT%2FApache--2.0-blue.svg)](#license)
 [![CUDA Tests](https://img.shields.io/badge/CUDA%20tests-207%2F207-brightgreen.svg)](docs/architecture/cuda-certification.md)
-[![Version](https://img.shields.io/badge/version-v0.9.2-blue.svg)](CHANGELOG.md)
+[![crates.io](https://img.shields.io/crates/v/xlog-cli.svg?label=xlog-cli&color=blue)](https://crates.io/crates/xlog-cli)
+[![PyPI](https://img.shields.io/pypi/v/pyxlog.svg?label=pyxlog&color=blue)](https://pypi.org/project/pyxlog/)
 
-> **Release status:** `v0.9.2`; this release integrates the v0.8.7-v0.8.9
-> BFO-derived diagnostics from the
-> Autonomous Science Engine, Living World Model, and Universal Case Reasoner as
-> predecessor surfaces, the v0.9.0 GPU-native epistemic, solver, and
+> **Latest milestone:** integrates the v0.8.7-v0.8.9
+> external diagnostic surfaces as predecessor surfaces, the v0.9.0 GPU-native
+> epistemic, solver, and
 > probabilistic release-candidate surface, and the v0.9.1/v0.9.2 epistemic
 > executor semantic completion. The integrated diagnostics include
 > generated-rule diagnostics over inline and external candidate rows, native
@@ -16,22 +16,20 @@
 > temporal/general relation evidence, nn/4 lineage and hot-loop diagnostics,
 > joint `nn/4` plus symbolic rule-weight training, differentiable proof traces,
 > learned-rule inventories, CUDA host-transfer audits, module-boundary
-> diagnostics, grouped transfer metrics, and the BFO UCR validation package.
+> diagnostics, grouped transfer metrics, and an external diagnostic validation
+> package.
 > See `ROADMAP.md`, `CHANGELOG.md`,
-> `docs/architecture/ucr-xlog-diagnostics.md`,
-> `docs/architecture/living-world-diagnostics-v087.md`,
-> `docs/architecture/lwm-diagnostics-provenance.md`,
 > `docs/architecture/python-bindings.md`, `examples/epistemic/`,
-> `examples/BFO/universal_case_reasoner/`, `examples/v086-runtime/`,
-> `examples/v085-language/`, and `examples/v080-dts/`.
+> and `examples/python/`.
 
 **XLOG is a GPU-native logic programming language for unified symbolic reasoning.**
 Neural-symbolic systems today keep symbolic reasoning on the CPU while neural computation runs on
 the GPU; every training iteration pays a PCIe round-trip that dominates wall-clock time at scale.
 XLOG closes that gap: its compiler and runtime span four reasoning paradigms - deterministic
-Datalog evaluation, probabilistic inference via knowledge compilation (PIR -> CNF -> D4 -> XGCF),
+Datalog evaluation, probabilistic inference via knowledge compilation (PIR -> CNF -> external decision-DNNF compiler -> XGCF),
 SAT/MaxSAT verification, and differentiable neural-symbolic training - on a single CUDA runtime
-with zero host-device transfers in production paths. Implemented in Rust with custom CUDA kernels,
+with zero tracked host-device transfers in production data planes (bounded control-plane
+metadata reads, such as fixpoint row counts, are documented exemptions). Implemented in Rust with custom CUDA kernels,
 XLOG caches compiled circuits across training iterations, yielding a measured **2.74x end-to-end
 speedup** (95% CI `[2.29, 3.18]`) on the MNIST addition benchmark, and exposes GPU-resident
 results via DLPack and Arrow for zero-copy interop with PyTorch, JAX, and cuDF.
@@ -57,7 +55,7 @@ XLOG is not a DSL bolted onto a tensor framework. It is a full typed logic progr
 ## When to use XLOG
 
 - **Neural-symbolic training** where logic structure depends on the program, not on network weights. Compiled circuits are cached across iterations; only weights change, not the DAG.
-- **Probabilistic reasoning at scale** where exact inference benefits from a compile-once, evaluate-many discipline across repeated queries or training loops.
+- **Probabilistic reasoning** where exact inference benefits from a compile-once, evaluate-many discipline across repeated queries or training loops (see `docs/BENCHMARKS.md` for which numbers are measured vs. targets).
 - **Graph analytics, program analysis, and recursive queries** over device-resident data, with semi-naive fixpoint evaluation and minimal host round-trips.
 - **Learned-rule induction (dILP)** with GPU-resident credit assignment, sparse candidate masks, and transactional promotion gates.
 
@@ -73,11 +71,11 @@ XLOG is not a DSL bolted onto a tensor framework. It is a full typed logic progr
 | **Aggregation** | Head-positional `count`, `sum`, `min`, `max`, `logsumexp` |
 | **GPU operators** | Hash joins, radix sort, filter, dedup, union, difference, group-by - all custom CUDA |
 | **Float semantics** | IEEE 754 total ordering for `f32`/`f64` (`NaN > Inf > nums > +0 > -0 > -Inf`) |
-| **Probabilistic** | Exact inference via knowledge compilation (D4 -> XGCF), Monte Carlo sampling, WFS negation |
+| **Probabilistic** | Exact inference via knowledge compilation (decision-DNNF compiler -> XGCF), Monte Carlo sampling, WFS negation |
 | **v0.8.5 language** | Finite `list<T>` and `term` surfaces, safe `findall` / `maplist` / inspection predicates, deterministic NAF, magic sets, aggregate lifting, approximate-inference pragmas |
 | **v0.8.6 runtime** | Delta coalescing, relation callbacks, typed exact induction, chain shared-memory scoring, runtime CSE, adaptive re-optimization, persistent hash-index reuse, behavior-probe consumer certification |
-| **v0.8.9 BFO diagnostics** | Generated-rule row decisions, source/generated rule provenance, proof traces, native biomedical graph stream provenance, delta planner telemetry/equivalence probes, validation staging, temporal/general relation evidence, nn/4 lineage and hot-loop diagnostics, joint `nn/4`/symbolic training, rule inventories, CUDA host-transfer audits, module-boundary diagnostics, grouped transfer metrics |
-| **v0.9.2 epistemic solver** | EIR, G91, FAEEL, Generate-Propagate-Test execution, finite nested modal chains, same-name multi-arity modal predicates, recursive epistemic execution through the exact GPU-backed WFS contract, epistemic splitting, production `xlog run` pilots, GPU-backed executable plans, solver-service integration, MaxSAT, GPU portfolio solving, and probabilistic epistemic evidence paths |
+| **v0.8.9 external diagnostics** | Generated-rule row decisions, source/generated rule provenance, proof traces, native biomedical graph stream provenance, delta planner telemetry/equivalence probes, validation staging, temporal/general relation evidence, nn/4 lineage and hot-loop diagnostics, joint `nn/4`/symbolic training, rule inventories, CUDA host-transfer audits, module-boundary diagnostics, grouped transfer metrics |
+| **v0.9.2 epistemic solver** | EIR, G91 epistemic mode, FAEEL, Generate-Propagate-Test execution, finite nested modal chains, same-name multi-arity modal predicates, recursive epistemic execution through the exact GPU-backed WFS contract, epistemic splitting, production `xlog run` pilots, GPU-backed executable plans, solver-service integration, MaxSAT, GPU portfolio solving, and probabilistic epistemic evidence paths |
 | **Neural-symbolic** | Neural predicates (`nn/k`), PyTorch autograd integration, circuit caching, term embeddings |
 | **dILP training** | Sparse GPU mask, deterministic mode, promotion pipeline, holdout validation, artifact save/load |
 | **Bounded exact induction** | `xlog-induce` plus `ilp_exact` CUDA scoring with top-K per topology and fixed-size D2H summaries |
@@ -258,24 +256,20 @@ __xlog_query_0
 ```
 
 For the full language reference and worked examples, see
-[`docs/language-reference.md`](docs/language-reference.md). For v0.8.5 language
-showcases covering finite lists, meta-predicates, magic sets, probabilistic
+[`docs/language-reference.md`](docs/language-reference.md). The language
+showcases cover finite lists, meta-predicates, magic sets, probabilistic
 aggregates, aggregate lifting, approximate inference, REPL/watch/explain, and
-incremental parsing, see [`examples/v085-language/`](examples/v085-language/).
-For v0.9.x epistemic examples covering EIR, G91, FAEEL, Generate-Propagate-Test,
+incremental parsing.
+For v0.9.x epistemic examples covering EIR, G91 epistemic mode, FAEEL,
+Generate-Propagate-Test,
 splitting, recursive/stratified epistemic execution, and constraint joins
 through `xlog run`, see
 [`examples/epistemic/`](examples/epistemic/).
-For DTS-DLM Python productization examples, see
-[`examples/v080-dts/`](examples/v080-dts/). For Rust and Python API usage, see
+For productization-oriented Python and Rust API usage, see
 [`examples/python/`](examples/python/) and
 [`docs/architecture/python-bindings.md`](docs/architecture/python-bindings.md).
-For the BFO Universal Case Reasoner validation package and its resolved XLOG
-issue ledger, see
-[`examples/BFO/universal_case_reasoner/`](examples/BFO/universal_case_reasoner/)
-and [`docs/architecture/ucr-xlog-diagnostics.md`](docs/architecture/ucr-xlog-diagnostics.md).
-For the v0.8.7 diagnostics and provenance surfaces, see
-[`docs/architecture/living-world-diagnostics-v087.md`](docs/architecture/living-world-diagnostics-v087.md).
+External diagnostic validation packages and resolved issue ledgers are described
+by the architecture records and example packages in this repository.
 
 ---
 
@@ -320,12 +314,12 @@ flag reference.
 | [Roadmap](ROADMAP.md) | Feature status, shipped milestones, and planned work |
 | [Benchmarks](docs/BENCHMARKS.md) | Performance methodology and benchmark artifacts |
 | [WCOJ architecture guide](docs/wcoj-architecture-guide.md) | RIR, promoter, dispatch, cost model, recursive integration, and Phase-2 WCOJ mechanisms |
-| [WCOJ user guide](docs/wcoj-user-guide.md) | Eligibility, fallback behavior, performance tuning, env vars, troubleshooting, and DTS-DLM guidance |
-| [v0.8.7 living-world diagnostics](docs/architecture/living-world-diagnostics-v087.md) | Generated-rule provenance, source rule provenance, proof traces, delta debug, temporal metadata, and neural hot-loop diagnostics |
+| [WCOJ user guide](docs/wcoj-user-guide.md) | Eligibility, fallback behavior, performance tuning, env vars, troubleshooting, and external consumer guidance |
+| External world-model diagnostics | Generated-rule provenance, source rule provenance, proof traces, delta debug, temporal metadata, and neural hot-loop diagnostics |
 | [Probabilistic tier](docs/architecture/xlog-prob.md) | Exact knowledge compilation and Monte Carlo inference |
 | [Solver services](docs/architecture/solver-services.md) | GPU CDCL verifier, SAT/MaxSAT services, workspace arena reuse |
 | [dILP training](docs/architecture/dilp-training.md) | Differentiable ILP trainer architecture and GPU hot-loop contract |
-| [UCR diagnostics](docs/architecture/ucr-xlog-diagnostics.md) | v0.8.9 BFO Universal Case Reasoner issue resolutions and reusable XLOG/pyxlog diagnostic surfaces |
+| External diagnostic issue resolutions | v0.8.9 external diagnostic issue resolutions and reusable XLOG/pyxlog diagnostic surfaces |
 | [dILP showcase report](docs/architecture/dilp-showcase-report.md) | End-to-end dILP training results |
 | [CLI reference](docs/architecture/cli-reference.md) | Full flag and subcommand reference |
 | [Arrow / DLPack interop](docs/architecture/cudf-interop.md) | Zero-copy interop with cuDF, PyTorch, and JAX |
@@ -409,4 +403,4 @@ logic programming, and neural-symbolic AI. Primary influences:
 - [GPUlog](https://dl.acm.org/doi/10.1145/3183713.3183727) - HISA indexing and parallel fixpoint on GPU
 - [VFLog](https://dl.acm.org/doi/10.1145/3639310) - columnar GPU Datalog
 - [ProbLog](https://dtai.cs.kuleuven.be/problog/) and [DeepProbLog](https://github.com/ML-KULeuven/deepproblog) - probabilistic logic programming and neural-symbolic integration
-- [D4](https://github.com/crillab/d4) - decision-DNNF compilation reference
+- [Decision-DNNF compiler](https://github.com/crillab/d4) - compilation reference

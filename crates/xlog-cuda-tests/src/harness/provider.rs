@@ -136,11 +136,34 @@ pub struct TestContext {
     transfer: Arc<TransferCounters>,
 }
 
+/// Release-gate hardening: when `XLOG_REQUIRE_CUDA=1`, CUDA/test-context
+/// initialization failures must fail loudly instead of returning `Err`.
+/// Tests use `let Ok(ctx) = ... else { return; }` skip patterns that pass
+/// vacuously without a GPU; `scripts/validate_release_gpu.sh` exports this
+/// variable so a CPU-only machine can never satisfy the certification gate.
+pub fn enforce_cuda_required(context: &str, err: &XlogError) {
+    if std::env::var("XLOG_REQUIRE_CUDA").as_deref() == Ok("1") {
+        panic!("XLOG_REQUIRE_CUDA=1 but CUDA is unavailable ({context}): {err}");
+    }
+}
+
 impl TestContext {
     /// Create test context with specific memory budget in bytes.
     /// Backend is chosen by `XLOG_USE_DEVICE_RUNTIME` (default
     /// legacy).
+    ///
+    /// When `XLOG_REQUIRE_CUDA=1`, any initialization failure panics via
+    /// [`enforce_cuda_required`] so callers' skip-on-error paths cannot turn
+    /// a missing GPU into a vacuous pass.
     pub fn with_budget(budget_bytes: usize) -> Result<Self> {
+        let result = Self::with_budget_inner(budget_bytes);
+        if let Err(err) = &result {
+            enforce_cuda_required("TestContext::with_budget", err);
+        }
+        result
+    }
+
+    fn with_budget_inner(budget_bytes: usize) -> Result<Self> {
         let lock = gpu_test_lock();
         let file_lock = gpu_test_lock_file()?;
 

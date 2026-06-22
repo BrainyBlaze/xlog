@@ -18,12 +18,56 @@ use std::collections::HashMap as StdHashMap;
 use super::neural_registry::NeuralPredicateInfo;
 use super::{
     dlpack_capsule_from_tensor, dlpack_from_py, types, CachedCircuit, CompiledProgram, EpochStats,
-    InputSource, NeuralGroup, QuerySignature, TrainingHistory,
+    HardFilter, InputSource, NeuralGroup, QuerySignature, TrainingHistory,
 };
 
 /// Build the standard 1-column schema for probability values.
 fn prob_schema(scalar_type: ScalarType) -> Schema {
     Schema::new(vec![("col0".to_string(), scalar_type)])
+}
+
+/// Comparable key for a constant term, used to test hard join conditions over
+/// the program's ground facts.
+#[derive(Debug, Clone, PartialEq)]
+enum ConstKey {
+    Int(i64),
+    Sym(u32),
+    Str(String),
+    Float(u64),
+}
+
+fn const_key(term: &Term) -> Option<ConstKey> {
+    match term {
+        Term::Integer(v) => Some(ConstKey::Int(*v)),
+        Term::Symbol(s) => Some(ConstKey::Sym(*s)),
+        Term::String(s) => Some(ConstKey::Str(s.clone())),
+        Term::Float(f) => Some(ConstKey::Float(f.to_bits())),
+        _ => None,
+    }
+}
+
+/// Accumulate one producing call's loss into a running device-resident total
+/// via in-place add. The backward pass already ran inside the producing call,
+/// so the loss is detached before accumulation; it is cast to f64 so f32
+/// (direct) and f64 (batched) losses accumulate in a single dtype. No host
+/// sync happens here — the total is read back once by the caller.
+fn accumulate_device_loss(
+    py: Python<'_>,
+    total: Option<PyObject>,
+    loss: PyObject,
+) -> PyResult<PyObject> {
+    let detached = loss
+        .bind(py)
+        .call_method0("detach")?
+        .call_method0("double")?
+        .unbind();
+    Ok(match total {
+        None => detached,
+        Some(acc) => {
+            acc.bind(py).call_method1("add_", (detached.bind(py),))?;
+            acc
+        }
+    })
 }
 
 fn apply_network_output_mode(
@@ -616,6 +660,261 @@ impl CompiledProgram {
         self.forward_backward_tensor_internal(py, query, expected)
     }
 
+    /// GPU-resident batched forward-backward over many queries with PER-QUERY
+    /// `expected` labels, accumulating loss on device with a SINGLE host sync.
+    ///
+    /// The scalar [`forward_backward`] reads the loss back with `.item()` on
+    /// every call, so a training step that loops it over N queries pays N host
+    /// syncs and goes CPU-bound — the GPU sits idle between syncs. This method
+    /// keeps the whole step device-resident: queries are partitioned by
+    /// hard-filter eligibility and grouped by `(expected, circuit template)` so
+    /// each group runs as one batched circuit pass, the losses accumulate on
+    /// device, and exactly one `.item()` reads the summed loss back — one host
+    /// sync per call regardless of N.
+    ///
+    /// Mixed positive/negative supervision is supported via the per-query
+    /// `expected` vector; the existing batched epoch path fixes `expected=true`
+    /// for every query and so cannot express it. Hard-filter gating is preserved
+    /// exactly as in the scalar path: an ineligible query contributes a constant
+    /// loss with no neural forward and no gradient (gradient isolation).
+    ///
+    /// Call `zero_grad()` before and `optimizer_step()` after, like
+    /// `forward_backward`. Returns the summed NLL loss over all queries.
+    #[pyo3(signature = (queries, expected))]
+    fn forward_backward_grouped(
+        &mut self,
+        py: Python<'_>,
+        queries: Vec<String>,
+        expected: Vec<bool>,
+    ) -> PyResult<f64> {
+        if queries.len() != expected.len() {
+            return Err(PyValueError::new_err(format!(
+                "forward_backward_grouped: {} queries but {} expected labels",
+                queries.len(),
+                expected.len()
+            )));
+        }
+        if queries.is_empty() {
+            return Ok(0.0);
+        }
+
+        // Eligible complex queries grouped by (expected, circuit template) so
+        // each group runs as one batched circuit pass; insertion-ordered for
+        // deterministic gradient accumulation.
+        let mut group_order: Vec<(bool, String)> = Vec::new();
+        let mut groups: StdHashMap<(bool, String), Vec<Atom>> = StdHashMap::new();
+
+        // Eligible (batched + direct) losses accumulate on device; ineligible
+        // queries contribute a host-side constant that carries no gradient, so
+        // it never enters the device path (and never costs a sync).
+        let mut device_loss: Option<PyObject> = None;
+        let mut host_const_loss: f64 = 0.0;
+
+        for (query, &exp) in queries.iter().zip(expected.iter()) {
+            match self.try_parse_direct_neural_query(query) {
+                Ok((predicate, network_name, input_idx, target_label)) => {
+                    let loss = self.forward_backward_direct_tensor(
+                        py,
+                        &predicate,
+                        &network_name,
+                        input_idx,
+                        &target_label,
+                        exp,
+                    )?;
+                    device_loss = Some(accumulate_device_loss(py, device_loss, loss)?);
+                }
+                Err(_) => {
+                    let atom = self.parse_query_atom(query)?;
+                    let signature = self
+                        .get_or_build_query_signature(&atom.predicate, atom.terms.len())?
+                        .clone();
+                    // Same short-circuit as forward_backward_complex_tensor: an
+                    // ineligible query is probability 0 with no neural forward,
+                    // so no gradient flows through it. The constant matches
+                    // zero_probability_loss(py, exp) exactly.
+                    if !signature.hard_filters().is_empty()
+                        && !self.hard_filters_satisfied(&atom, signature.hard_filters())?
+                    {
+                        host_const_loss += if exp { -(types::NLL_EPSILON.ln()) } else { 0.0 };
+                        continue;
+                    }
+                    let key = self.generate_cache_key_for_signature(
+                        &signature,
+                        &atom.predicate,
+                        atom.terms.len(),
+                    );
+                    let group_key = (exp, key);
+                    if !groups.contains_key(&group_key) {
+                        group_order.push(group_key.clone());
+                    }
+                    groups.entry(group_key).or_default().push(atom);
+                }
+            }
+        }
+
+        // One batched circuit pass per (expected, template) group.
+        for group_key in &group_order {
+            let atoms = groups.remove(group_key).expect("group populated above");
+            // The batched pass returns per-query losses; sum them for this group.
+            let loss = self.forward_backward_batch_complex_tensor(py, &atoms, group_key.0)?;
+            let loss_sum = loss.bind(py).call_method0("sum")?.unbind();
+            device_loss = Some(accumulate_device_loss(py, device_loss, loss_sum)?);
+        }
+
+        // Single host sync: read the device-accumulated loss back once.
+        let device_total: f64 = match device_loss {
+            Some(t) => t.bind(py).call_method0("item")?.extract()?,
+            None => 0.0,
+        };
+        Ok(device_total + host_const_loss)
+    }
+
+    /// GPU-resident batched query probabilities (one circuit pass per template).
+    ///
+    /// Mirrors `exp(-forward_backward(query, true))` for every query but without
+    /// the per-query host sync: eligible queries are grouped by circuit template
+    /// and evaluated in one batched pass each (host syncs are O(templates), not
+    /// O(N)), and an ineligible (hard-filtered) query takes the same near-zero
+    /// probability as the scalar path. Used for the post-training probability
+    /// readout so the whole training surface — not just the step loop — avoids
+    /// per-query host syncs at corpus scale.
+    #[pyo3(signature = (queries))]
+    fn query_probabilities_grouped(
+        &mut self,
+        py: Python<'_>,
+        queries: Vec<String>,
+    ) -> PyResult<Vec<f64>> {
+        let n = queries.len();
+        // Ineligible (hard-filtered) queries take exp(-zero_probability_loss(true))
+        // = exp(-(-ln eps)) = eps, the same near-zero probability as the scalar path.
+        let mut probs = vec![types::NLL_EPSILON; n];
+        if n == 0 {
+            return Ok(probs);
+        }
+
+        // Eligible complex queries grouped by template, tracking original indices.
+        let mut group_order: Vec<String> = Vec::new();
+        let mut groups: StdHashMap<String, (Vec<Atom>, Vec<usize>)> = StdHashMap::new();
+
+        for (i, query) in queries.iter().enumerate() {
+            match self.try_parse_direct_neural_query(query) {
+                Ok(_) => {
+                    // Direct queries are not template-batched here; evaluate one.
+                    let loss = self.forward_backward(py, query, true)?;
+                    probs[i] = (-loss).exp();
+                }
+                Err(_) => {
+                    let atom = self.parse_query_atom(query)?;
+                    let signature = self
+                        .get_or_build_query_signature(&atom.predicate, atom.terms.len())?
+                        .clone();
+                    if !signature.hard_filters().is_empty()
+                        && !self.hard_filters_satisfied(&atom, signature.hard_filters())?
+                    {
+                        continue; // ineligible: keep the eps default
+                    }
+                    let key = self.generate_cache_key_for_signature(
+                        &signature,
+                        &atom.predicate,
+                        atom.terms.len(),
+                    );
+                    if !groups.contains_key(&key) {
+                        group_order.push(key.clone());
+                    }
+                    let entry = groups
+                        .entry(key)
+                        .or_insert_with(|| (Vec::new(), Vec::new()));
+                    entry.0.push(atom);
+                    entry.1.push(i);
+                }
+            }
+        }
+
+        for key in &group_order {
+            let (atoms, indices) = groups.remove(key).expect("group populated above");
+            // Per-query NLL losses for the group (expected=true); prob = exp(-loss).
+            let losses = self.forward_backward_batch_complex_tensor(py, &atoms, true)?;
+            let prob_tensor = losses.bind(py).call_method0("neg")?.call_method0("exp")?;
+            let prob_list: Vec<f64> = prob_tensor.call_method0("tolist")?.extract()?;
+            for (j, &orig_i) in indices.iter().enumerate() {
+                probs[orig_i] = prob_list[j];
+            }
+        }
+        Ok(probs)
+    }
+
+    /// Per-candidate hard-filter eligibility for the joint multi-rule same-head
+    /// mixture (ST-TRC Phase-1b, guard-only candidates). For each rule defining
+    /// `(head_pred, arity)`, returns `(guard_predicate_name, mask)` where
+    /// `mask[i]` is whether the ground head binding `head_pred(i)` satisfies that
+    /// rule's hard join conditions (its ordinary-relation body atoms). The
+    /// differentiable noisy-OR over `(mask × guard sigmoid)` is assembled
+    /// torch-side by the caller; this exposes only the engine's relational
+    /// eligibility, so a query contributes through candidate k exactly where
+    /// candidate k's join holds — the OR-amalgamation gate.
+    ///
+    /// Guard-only candidates only: each defining rule must carry exactly the
+    /// trainable guard as its neural group (the relational joins are the hard
+    /// conditions). General multi-rule OR over candidates with neural predicates
+    /// beyond the guard requires the circuit backward and is a documented
+    /// follow-up.
+    #[pyo3(signature = (head_pred, arity, num_queries))]
+    fn joint_candidate_eligibility(
+        &self,
+        head_pred: &str,
+        arity: usize,
+        num_queries: usize,
+    ) -> PyResult<Vec<(String, Vec<bool>)>> {
+        let rules = self.find_query_rules(head_pred, arity);
+        if rules.is_empty() {
+            return Err(PyValueError::new_err(format!(
+                "No rule defines query predicate '{}' with arity {}",
+                head_pred, arity
+            )));
+        }
+        let mut out: Vec<(String, Vec<bool>)> = Vec::with_capacity(rules.len());
+        for rule in rules {
+            let signature = self.build_query_signature_for_rule(rule, head_pred, arity)?;
+            // Guard-only candidate: exactly one neural group (the guard).
+            let guard_pred = signature
+                .groups()
+                .first()
+                .map(|g| g.info.predicate.clone())
+                .ok_or_else(|| {
+                    PyValueError::new_err(format!(
+                        "Candidate rule for '{}' has no neural guard group; the joint \
+                         multi-rule mixture requires guard-only candidates (relational joins \
+                         plus a single trainable guard)",
+                        head_pred
+                    ))
+                })?;
+            let filters = signature.hard_filters();
+            let mut mask = Vec::with_capacity(num_queries);
+            for i in 0..num_queries {
+                let atom = Atom {
+                    predicate: head_pred.to_string(),
+                    terms: (0..arity.max(1))
+                        .map(|p| {
+                            if p == 0 {
+                                Term::Integer(i as i64)
+                            } else {
+                                Term::Integer(0)
+                            }
+                        })
+                        .collect(),
+                };
+                let eligible = if filters.is_empty() {
+                    true
+                } else {
+                    self.hard_filters_satisfied(&atom, filters)?
+                };
+                mask.push(eligible);
+            }
+            out.push((guard_pred, mask));
+        }
+        Ok(out)
+    }
+
     /// Belnap-aware dual-channel loss terms for bridge training.
     #[pyo3(signature = (pro, contra, quarantine, pro_reward=1.0, contra_penalty=1.0, quarantine_penalty=1.0, reduction="mean"))]
     fn belnap_loss(
@@ -893,8 +1192,13 @@ impl CompiledProgram {
                 // Batch-process each complex group in insertion order.
                 for key in &complex_group_order {
                     let group = complex_groups.remove(key).unwrap();
+                    // The batched pass returns per-query losses; sum for the batch.
                     let loss = self.forward_backward_batch_complex_tensor(py, &group, true)?;
-                    let loss_val = loss.bind(py).call_method0("detach")?.unbind();
+                    let loss_val = loss
+                        .bind(py)
+                        .call_method0("sum")?
+                        .call_method0("detach")?
+                        .unbind();
                     batch_loss_tensor = Some(match batch_loss_tensor {
                         None => loss_val,
                         Some(acc) => {
@@ -1028,6 +1332,73 @@ impl CompiledProgram {
         }
     }
 
+    /// Whether every hard join condition holds for this query's head bindings.
+    /// Each condition is an ordinary relation that must contain the tuple formed
+    /// by the query's (ground) head arguments at the recorded positions.
+    fn hard_filters_satisfied(&self, atom: &Atom, filters: &[HardFilter]) -> PyResult<bool> {
+        for filter in filters {
+            let mut key: Vec<ConstKey> = Vec::with_capacity(filter.arg_head_positions.len());
+            for &head_pos in &filter.arg_head_positions {
+                let term = atom.terms.get(head_pos).ok_or_else(|| {
+                    PyRuntimeError::new_err(format!(
+                        "hard condition references head position {} out of range for query '{}'",
+                        head_pos, atom.predicate
+                    ))
+                })?;
+                let k = const_key(term).ok_or_else(|| {
+                    PyValueError::new_err(format!(
+                        "query '{}' head argument at position {} is not a constant; \
+                         trainable-rule queries must be ground",
+                        atom.predicate, head_pos
+                    ))
+                })?;
+                key.push(k);
+            }
+            if !self.relation_has_tuple(&filter.relation, &key) {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
+    /// Whether the program's facts contain `relation(key...)`. Scans ground
+    /// facts (rules with an empty body); the relation's facts are compiled into
+    /// the program.
+    fn relation_has_tuple(&self, relation: &str, key: &[ConstKey]) -> bool {
+        for fact in self.ast.facts() {
+            if fact.head.predicate != relation || fact.head.terms.len() != key.len() {
+                continue;
+            }
+            let matches = fact
+                .head
+                .terms
+                .iter()
+                .zip(key.iter())
+                .all(|(ft, k)| const_key(ft).as_ref() == Some(k));
+            if matches {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Loss for a derived atom that is hard-false (probability 0): NLL is
+    /// `-log(eps)` when the example expects it true, else 0. Returned as a plain
+    /// constant tensor — detached from every network graph, so the backward pass
+    /// flows no gradient through a filtered-out query (gradient isolation).
+    fn zero_probability_loss(&self, py: Python<'_>, expected: bool) -> PyResult<PyObject> {
+        let loss_value = if expected {
+            -(types::NLL_EPSILON.ln())
+        } else {
+            0.0
+        };
+        let torch = py.import("torch")?;
+        let kwargs = PyDict::new(py);
+        kwargs.set_item("dtype", torch.getattr("float64")?)?;
+        let tensor = torch.call_method("tensor", (loss_value,), Some(&kwargs))?;
+        Ok(tensor.into())
+    }
+
     /// Forward-backward for a direct neural predicate query.
     ///
     /// E.g., `digit(0, 5)` - runs network on input 0, computes NLL loss for label 5.
@@ -1100,10 +1471,11 @@ impl CompiledProgram {
     /// Forward-backward for a complex query involving neural predicates through rules.
     ///
     /// E.g., `addition(0, 1, 7)` where:
-    /// - `addition(X, Y, Z) :- digit(X, D1), digit(Y, D2), Z is D1 + D2.`
+    /// - `addition(X, Y, Z) :- digit(X, LeftDigit), digit(Y, RightDigit),
+    ///   Z is LeftDigit + RightDigit.`
     /// - `nn(mnist_net, [X], Y, [0,1,2,3,4,5,6,7,8,9]) :: digit(X, Y).`
     ///
-    /// This method uses circuit caching to avoid D4 recompilation:
+    /// This method uses circuit caching to avoid Decision-DNNF circuit recompilation:
     /// 1. Extracts input indices and runs neural networks
     /// 2. Generates template cache key from query structure
     /// 3. If cached: update weights and evaluate
@@ -1119,6 +1491,17 @@ impl CompiledProgram {
             .get_or_build_query_signature(&atom.predicate, atom.terms.len())?
             .clone();
         let pred_name = atom.predicate.clone();
+
+        // Hard join conditions (ordinary relations) gate which groundings can
+        // fire. If any fails for this query's head bindings, the derived atom
+        // is false: short-circuit to probability 0 with NO neural forward, so
+        // no gradient flows through the fact atoms. Evaluating before the
+        // network forward is what enforces the gradient isolation.
+        if !signature.hard_filters().is_empty()
+            && !self.hard_filters_satisfied(atom, signature.hard_filters())?
+        {
+            return self.zero_probability_loss(py, expected);
+        }
 
         let input_indices: Vec<usize> = signature
             .groups()
@@ -1679,13 +2062,17 @@ impl CompiledProgram {
                     .column(0)
                     .map_err(|e| types::gpu_err("DLPack export failed", e))?;
                 let loss_capsule = dlpack_capsule_from_tensor(py, loss_dl)?;
-                let loss_tensor = torch.getattr("from_dlpack")?.call1((loss_capsule,))?;
-                loss_tensor.call_method0("sum")?.unbind()
+                // Per-query 1D loss tensor (length n_queries), in input order.
+                torch
+                    .getattr("from_dlpack")?
+                    .call1((loss_capsule,))?
+                    .unbind()
             }
             Err(_batch_err) => {
                 // Fallback path: preserve prior semantics if batched circuit path
-                // is unavailable for this circuit.
-                let mut accum: Option<PyObject> = None;
+                // is unavailable for this circuit. Collect per-query 1D losses and
+                // concatenate so the return shape matches the batched path.
+                let mut per_query_losses: Vec<PyObject> = Vec::with_capacity(n_queries);
                 for q in 0..n_queries {
                     let loss_dev = py
                         .allow_threads(|| {
@@ -1724,16 +2111,13 @@ impl CompiledProgram {
                         .map_err(|e| types::gpu_err("DLPack export failed", e))?;
                     let loss_capsule = dlpack_capsule_from_tensor(py, loss_dl)?;
                     let loss_tensor = torch.getattr("from_dlpack")?.call1((loss_capsule,))?;
-
-                    accum = Some(match accum {
-                        None => loss_tensor.unbind(),
-                        Some(acc) => {
-                            acc.bind(py).call_method1("add_", (loss_tensor,))?;
-                            acc
-                        }
-                    });
+                    per_query_losses.push(loss_tensor.unbind());
                 }
-                accum.ok_or_else(|| PyRuntimeError::new_err("No loss computed in batch"))?
+                if per_query_losses.is_empty() {
+                    return Err(PyRuntimeError::new_err("No loss computed in batch"));
+                }
+                let loss_list = pyo3::types::PyList::new(py, per_query_losses.iter())?;
+                torch.call_method1("cat", (loss_list,))?.unbind()
             }
         };
 
@@ -1745,7 +2129,9 @@ impl CompiledProgram {
         let grad_list = pyo3::types::PyList::new(py, all_grad_tensors.iter())?;
         autograd.call_method1("backward", (out_list, grad_list))?;
 
-        // -- 9. Return accumulated loss ------
+        // -- 9. Return per-query losses (1D, input order) ------
+        // Callers that want the scalar batch loss call `.sum()`; callers that
+        // want per-query probabilities use the per-query losses directly.
         Ok(batch_loss_tensor)
     }
 
@@ -1766,15 +2152,101 @@ impl CompiledProgram {
 
     fn build_query_signature(&self, pred_name: &str, arity: usize) -> PyResult<QuerySignature> {
         let rule = self.find_query_rule(pred_name, arity)?;
+        self.build_query_signature_for_rule(rule, pred_name, arity)
+    }
 
+    /// Build the query signature from ONE specific defining rule. The single-rule
+    /// path reaches this via `build_query_signature` (after `find_query_rule`);
+    /// the multi-rule same-head path (ST-TRC Phase-1b) builds one signature per
+    /// candidate rule and OR-amalgamates them in the forward.
+    fn build_query_signature_for_rule(
+        &self,
+        rule: &Rule,
+        pred_name: &str,
+        arity: usize,
+    ) -> PyResult<QuerySignature> {
         let mut groups: Vec<NeuralGroup> = Vec::with_capacity(rule.body.len());
+        // Ordinary-relation body atoms collected as HARD join conditions.
+        let mut hard_filters: Vec<HardFilter> = Vec::new();
         for literal in &rule.body {
+            // The query template grounds ONLY nn/4 predicates; any other
+            // relational literal would silently evaluate over an empty
+            // relation and collapse the query probability. Fail closed.
             let body_atom = match literal {
                 BodyLiteral::Positive(atom) => atom,
+                BodyLiteral::Negated(atom) => {
+                    return Err(PyValueError::new_err(format!(
+                        "Query rule for '{}' has negated literal 'not {}(..)'; \
+                         negation is not supported by the neural query template path",
+                        pred_name, atom.predicate
+                    )));
+                }
+                BodyLiteral::Epistemic(_) => {
+                    return Err(PyValueError::new_err(format!(
+                        "Query rule for '{}' has an epistemic literal; \
+                         epistemic operators are not supported by the neural query template path",
+                        pred_name
+                    )));
+                }
+                // Comparisons / is-expressions / univ are grounded by the
+                // circuit compiler itself and remain supported.
                 _ => continue,
             };
 
             if self.neural_registry.get(&body_atom.predicate).is_none() {
+                // An ordinary relation is a HARD join condition, not a
+                // probability source. Record how its args bind to the query
+                // head positions; it gates which groundings fire but flows no
+                // gradient. Existential (non-head) join variables are a
+                // documented follow-up — reject them clearly for now.
+                let mut arg_head_positions = Vec::with_capacity(body_atom.terms.len());
+                for (i, term) in body_atom.terms.iter().enumerate() {
+                    match term {
+                        Term::Variable(name) => match Self::find_head_position(&rule.head, name) {
+                            Some(pos) => arg_head_positions.push(pos),
+                            None => {
+                                return Err(PyValueError::new_err(format!(
+                                    "Query rule for '{}' joins ordinary relation '{}' on \
+                                     existential variable '{}' (arg {}); existential-join hard \
+                                     conditions are not yet supported (follow-up). Only \
+                                     head-variable hard filters are supported today.",
+                                    pred_name, body_atom.predicate, name, i
+                                )));
+                            }
+                        },
+                        _ => {
+                            return Err(PyValueError::new_err(format!(
+                                "Query rule for '{}' hard-condition relation '{}' has a \
+                                 non-variable argument at position {}; only variables bound to \
+                                 head positions are supported",
+                                pred_name, body_atom.predicate, i
+                            )));
+                        }
+                    }
+                }
+                // The hard condition is checked against the program's GROUND
+                // facts only; a derived relation (one defined by a rule with a
+                // body) is not materialized and would silently filter every
+                // grounding to probability 0. Fail loud instead — the join must
+                // be done upstream and supplied as ground facts.
+                let is_derived = self
+                    .ast
+                    .rules
+                    .iter()
+                    .any(|r| r.head.predicate == body_atom.predicate && !r.body.is_empty());
+                if is_derived {
+                    return Err(PyValueError::new_err(format!(
+                        "Query rule for '{}' uses derived relation '{}' as a hard condition; \
+                         hard conditions are checked against ground facts only, so a derived \
+                         relation would silently exclude every grounding. Materialize it \
+                         upstream and supply it as ground facts.",
+                        pred_name, body_atom.predicate
+                    )));
+                }
+                hard_filters.push(HardFilter {
+                    relation: body_atom.predicate.clone(),
+                    arg_head_positions,
+                });
                 continue;
             }
 
@@ -1844,7 +2316,10 @@ impl CompiledProgram {
         }
 
         if arity == 0 {
-            return Ok(QuerySignature::Boolean { groups });
+            return Ok(QuerySignature::Boolean {
+                groups,
+                hard_filters,
+            });
         }
 
         let mut used_head_positions: Vec<usize> = groups
@@ -1860,6 +2335,15 @@ impl CompiledProgram {
         let target_positions: Vec<usize> = (0..arity)
             .filter(|pos| !used_head_positions.contains(pos))
             .collect();
+        if target_positions.is_empty() {
+            // Every head position is consumed by a neural input, so the query
+            // atom is fully ground: supervise the truth of the derived atom
+            // itself (boolean NLL with the caller's `expected` flag).
+            return Ok(QuerySignature::Boolean {
+                groups,
+                hard_filters,
+            });
+        }
         if target_positions.len() != 1 {
             return Err(PyValueError::new_err(format!(
                 "Could not determine unique target position for '{}': target positions {:?}",
@@ -1870,7 +2354,20 @@ impl CompiledProgram {
         Ok(QuerySignature::Targeted {
             target_position: target_positions[0],
             groups,
+            hard_filters,
         })
+    }
+
+    /// All rules defining `(pred_name, arity)` — the multi-rule same-head
+    /// candidate set for the ST-TRC joint soft-mixture. The single-rule helper
+    /// `find_query_rule` enforces exactly one for the legacy path; the multi-rule
+    /// forward consumes the full set and OR-amalgamates them.
+    fn find_query_rules(&self, pred_name: &str, arity: usize) -> Vec<&Rule> {
+        self.ast
+            .rules
+            .iter()
+            .filter(|rule| rule.head.predicate == pred_name && rule.head.arity() == arity)
+            .collect()
     }
 
     fn find_query_rule(&self, pred_name: &str, arity: usize) -> PyResult<&Rule> {
@@ -1929,6 +2426,16 @@ impl CompiledProgram {
         let mut template_program = xlog_logic::ast::Program::default();
         let mut target_domain = self.generate_target_domain(query_pred, query_arity, signature)?;
 
+        // Canonical placeholder per head position: groups that read the same
+        // head variable must share one placeholder constant so their template
+        // facts unify with the (single) binding of that variable.
+        let mut head_to_group: StdHashMap<usize, usize> = StdHashMap::new();
+        for (idx, group) in signature.groups().iter().enumerate() {
+            if let InputSource::QueryArg(pos) = group.input_source {
+                head_to_group.entry(pos).or_insert(idx);
+            }
+        }
+
         for (group_idx, group) in signature.groups().iter().enumerate() {
             let labels = group.info.labels.as_ref().ok_or_else(|| {
                 PyValueError::new_err(format!(
@@ -1949,7 +2456,13 @@ impl CompiledProgram {
                 let mut terms = Vec::with_capacity(group.info.predicate_arity);
                 for pos in 0..group.info.predicate_arity {
                     if group.info.input_positions.contains(&pos) {
-                        terms.push(Term::Integer(group_idx as i64));
+                        let placeholder = match group.input_source {
+                            InputSource::QueryArg(head_pos) => {
+                                *head_to_group.get(&head_pos).unwrap_or(&group_idx)
+                            }
+                            InputSource::ImplicitSlot(_) => group_idx,
+                        };
+                        terms.push(Term::Integer(placeholder as i64));
                     } else if pos == group.info.output_position {
                         terms.push(self.label_string_to_term(label));
                     } else {
@@ -1971,16 +2484,45 @@ impl CompiledProgram {
                 .push(xlog_logic::ast::AnnotatedDisjunction { choices });
         }
 
-        template_program.rules.push(template_rule.clone());
+        // The probabilistic circuit covers only the neural part of the body.
+        // Hard join conditions (ordinary relations) are evaluated separately as
+        // a pre-filter, so strip them from the template rule — otherwise the
+        // circuit would try to satisfy a relation that has no facts in the
+        // synthetic template program and collapse the query to empty.
+        let hard_relations: std::collections::HashSet<&str> = signature
+            .hard_filters()
+            .iter()
+            .map(|f| f.relation.as_str())
+            .collect();
+        let mut circuit_rule = template_rule.clone();
+        if !hard_relations.is_empty() {
+            circuit_rule.body.retain(|lit| match lit {
+                BodyLiteral::Positive(atom) => !hard_relations.contains(atom.predicate.as_str()),
+                _ => true,
+            });
+        }
+        template_program.rules.push(circuit_rule);
 
         match signature {
             QuerySignature::Boolean { .. } => {
+                // Fully-ground boolean query: each head position carries the
+                // canonical placeholder of the neural group that consumes it.
+                let mut terms = Vec::with_capacity(query_arity);
+                for pos in 0..query_arity {
+                    let group_idx = head_to_group.get(&pos).ok_or_else(|| {
+                        PyValueError::new_err(format!(
+                            "Boolean query '{}' head position {} is not bound to any neural input",
+                            query_pred, pos
+                        ))
+                    })?;
+                    terms.push(Term::Integer(*group_idx as i64));
+                }
                 template_program
                     .prob_queries
                     .push(xlog_logic::ast::ProbQuery {
                         atom: Atom {
                             predicate: query_pred.to_string(),
-                            terms: Vec::new(),
+                            terms,
                         },
                     });
             }
@@ -1992,13 +2534,6 @@ impl CompiledProgram {
                         "Targeted signature '{}' has empty target domain",
                         query_pred
                     )));
-                }
-
-                let mut head_to_group: StdHashMap<usize, usize> = StdHashMap::new();
-                for (idx, group) in signature.groups().iter().enumerate() {
-                    if let InputSource::QueryArg(pos) = group.input_source {
-                        head_to_group.entry(pos).or_insert(idx);
-                    }
                 }
 
                 for target in target_domain.iter() {

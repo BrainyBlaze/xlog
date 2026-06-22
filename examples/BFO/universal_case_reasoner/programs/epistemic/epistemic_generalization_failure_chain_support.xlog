@@ -1,0 +1,49 @@
+// UCR v0.9.2 FAEEL modular failure-chain support split.
+//
+// This stage derives the type-4 decision claim from candidate-local raw claim
+// options and BFO support before the final decision program consumes it.
+
+#pragma epistemic_mode = faeel
+
+use modules/failure_chain_closure.
+
+pred decision_claim_option(u32, u32, u32, u32).
+pred selector_candidate(u32, u32).
+pred selector_observed_evidence(u32, u32).
+pred selector_bfo_candidate(u32, u32).
+pred selector_unsafe_candidate(u32, u32).
+pred root_cause_option(u32, u32).
+pred candidate_root_evidence_seed(u32, u32, u32).
+pred candidate_root_bfo_seed(u32, u32, u32).
+pred unsafe_root_option(u32, u32).
+pred intervention_option(u32, u32).
+pred intervention_objective_support(u32, u32).
+pred intervention_safety_support(u32, u32).
+pred unsafe_intervention_option(u32, u32).
+pred risk_state_option(u32, u32).
+pred risk_state_world_view_support(u32, u32).
+pred risk_state_bfo_support(u32, u32).
+pred unsafe_risk_state_option(u32, u32).
+pred failure_chain_root_link(u32, u32, u32).
+pred failure_chain_intervention_link(u32, u32, u32).
+pred failure_chain_risk_state_link(u32, u32, u32).
+pred failure_chain_bfo_support(u32, u32).
+pred unsafe_failure_chain_option(u32, u32).
+pred failure_chain_candidate_seed(u32, u32, u32, u32).
+pred candidate_failure_chain_claim_ready(u32, u32, u32, u32).
+pred xlog_failure_chain_claim(u32, u32, u32, u32).
+
+candidate_failure_chain_claim_ready(Case, Candidate, ClaimType, Chain) :-
+    failure_chain_candidate_seed(Case, Candidate, ClaimType, Chain),
+    selector_candidate(Case, Candidate),
+    decision_claim_option(Case, Candidate, ClaimType, Chain),
+    candidate_failure_chain_support(Case, Candidate, Chain).
+
+xlog_failure_chain_claim(Case, Candidate, ClaimType, Chain) :-
+    candidate_failure_chain_claim_ready(Case, Candidate, ClaimType, Chain),
+    know selector_observed_evidence(Case, Candidate),
+    possible selector_bfo_candidate(Case, Candidate),
+    not possible unsafe_failure_chain_option(Case, Chain),
+    not possible selector_unsafe_candidate(Case, Candidate).
+
+?- xlog_failure_chain_claim(Case, Candidate, ClaimType, Chain).

@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 
-#[path = "dts_dlm_analog.rs"]
-pub mod dts_dlm_analog;
+#[path = "external_consumer_analog.rs"]
+pub mod external_consumer_analog;
 
 #[derive(Clone)]
 pub struct TriangleFixture {
@@ -70,7 +70,7 @@ pub fn call_graph_edge_analog(scale: u32) -> TriangleFixture {
         name: "call_graph_edge_analog",
         recursive: false,
         bundle_path_status:
-            "g1_metadata=PASS g_w35=GRACEFUL g_w36=GRACEFUL g4_helper_split=PASS g5_stream_mux=PASS invoked=5/5",
+            "metadata=PASS sort_merge_overlap=GRACEFUL stream_overlap=GRACEFUL helper_split=PASS stream_multiplexing=PASS invoked=5/5",
         e_xy: sorted_pairs(xy),
         e_yz: sorted_pairs(yz),
         e_xz: sorted_pairs(xz),
@@ -99,7 +99,7 @@ pub fn andersen_analog(scale: u32) -> TriangleFixture {
         name: "andersen_analog",
         recursive: false,
         bundle_path_status:
-            "g1_metadata=PASS g_w35=GRACEFUL g_w36=GRACEFUL g4_helper_split=PASS g5_stream_mux=PASS invoked=5/5",
+            "metadata=PASS sort_merge_overlap=GRACEFUL stream_overlap=GRACEFUL helper_split=PASS stream_multiplexing=PASS invoked=5/5",
         e_xy: sorted_pairs(xy),
         e_yz: sorted_pairs(yz),
         e_xz: sorted_pairs(xz),
@@ -128,7 +128,7 @@ pub fn ddisasm_analog(scale: u32) -> TriangleFixture {
         name: "ddisasm_analog",
         recursive: true,
         bundle_path_status:
-            "g1_metadata=PASS g_w35=GRACEFUL g_w36=GRACEFUL g4_helper_split=PASS g5_stream_mux=PASS invoked=5/5",
+            "metadata=PASS sort_merge_overlap=GRACEFUL stream_overlap=GRACEFUL helper_split=PASS stream_multiplexing=PASS invoked=5/5",
         e_xy: sorted_pairs(xy),
         e_yz: sorted_pairs(yz),
         e_xz: sorted_pairs(xz),
@@ -142,12 +142,12 @@ pub fn paper_class_expected_fixture_count() -> usize {
 pub fn paper_class_fixtures(scale: u32) -> Vec<TriangleFixture> {
     let mut registry = FixtureRegistry::default();
     registry.add_fixture_module("fixtures::paper_class");
-    registry.add_fixture_module("fixtures::dts_dlm_analog");
+    registry.add_fixture_module("fixtures::external_consumer_analog");
     assert_eq!(registry.module_count(), 2);
     vec![
         call_graph_edge_analog(scale),
         andersen_analog(scale),
         ddisasm_analog(scale),
-        dts_dlm_analog::dts_dlm_analog(scale),
+        external_consumer_analog::external_consumer_analog(scale),
     ]
 }

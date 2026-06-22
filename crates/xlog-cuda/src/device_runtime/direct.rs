@@ -24,11 +24,11 @@
 //! out-of-bounds access from Compute Sanitizer. The cudarc default
 //! path forwards to `cuMemAllocAsync`, which on async-alloc hosts is
 //! a stream-ordered allocator; whether that is sufficiently
-//! sanitizer-visible is exactly what the **M1 acceptance gate**
-//! (manual, Compute-Sanitizer-supported host) is supposed to
-//! confirm. Do not describe this backend as "sanitizer-certified"
-//! until M1 has produced a captured negative-test pass; until M1
-//! lands, treat the sanitizer role as "candidate, not certified".
+//! sanitizer-visible is exactly what the **manual Compute Sanitizer
+//! acceptance gate** is supposed to confirm on a supported host. Do
+//! not describe this backend as "sanitizer-certified" until that
+//! manual gate has produced a captured negative-test pass; until the
+//! gate lands, treat the sanitizer role as "candidate, not certified".
 //!
 //! Stream-ordered semantics: the backend records the caller-supplied
 //! `alloc_stream` on the returned [`DeviceBlock`] but does **not**

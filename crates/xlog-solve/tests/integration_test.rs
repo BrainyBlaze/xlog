@@ -310,9 +310,9 @@ fn test_pigeonhole_unsat_3_2() {
     // p[0][0]=0, p[0][1]=1, p[1][0]=2, p[1][1]=3, p[2][0]=4, p[2][1]=5
     // Each pigeon must be in some hole
     let clauses = vec![
-        Clause::new(vec![Literal::positive(0), Literal::positive(1)]), // P0
-        Clause::new(vec![Literal::positive(2), Literal::positive(3)]), // P1
-        Clause::new(vec![Literal::positive(4), Literal::positive(5)]), // P2
+        Clause::new(vec![Literal::positive(0), Literal::positive(1)]), // Pigeon 0 in some hole
+        Clause::new(vec![Literal::positive(2), Literal::positive(3)]), // Pigeon 1 in some hole
+        Clause::new(vec![Literal::positive(4), Literal::positive(5)]), // Pigeon 2 in some hole
         // At most one pigeon per hole
         // Hole 0: at most one of vars 0, 2, 4
         Clause::new(vec![Literal::negative(0), Literal::negative(2)]),

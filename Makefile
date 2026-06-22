@@ -3,7 +3,7 @@ SHELLCHECK ?= shellcheck
 PACKAGE_OUTPUT ?= dist
 PYTHON ?= python3
 
-.PHONY: doctor build build-host-io check check-warnings install-pyxlog package validate-release-local lint-workflows lint-shell check-tracked-ignored
+.PHONY: doctor build build-host-io check check-warnings install-pyxlog package validate-release-local lint-workflows lint-shell check-tracked-ignored docs docs-validate
 
 doctor:
 	python scripts/xlog_doctor.py
@@ -45,13 +45,12 @@ lint-shell:
 check-tracked-ignored:
 	@bash -lc 'set -euo pipefail; \
 	files=$$(git ls-files -ci --exclude-standard); \
-	if [ -z "$$files" ]; then \
-		echo "No tracked files match .gitignore rules."; \
-		exit 0; \
+	if [ -n "$$files" ]; then \
+		echo "Tracked files must not match .gitignore rules:"; \
+		printf "%s\n" "$$files"; \
+		exit 1; \
 	fi; \
-	echo "Tracked files must not match .gitignore rules:"; \
-	printf "%s\n" "$$files"; \
-	exit 1'
+	echo "No tracked files match .gitignore rules."'
 
 build:
 	cargo build --release
@@ -73,3 +72,9 @@ package:
 
 validate-release-local:
 	bash scripts/validate_release_gpu.sh --mode release
+
+docs:
+	bash scripts/docs/build_docs.sh
+
+docs-validate:
+	bash scripts/docs/build_docs.sh --no-rust --no-cuda

@@ -76,7 +76,7 @@ fn rejects_8_unsafe_or_unstratified_naf_fixtures_with_typed_diagnostics() {
         let err = Compiler::new().compile(src).expect_err(label);
         let msg = err.to_string();
         assert!(
-            msg.contains("v0.8.5 naf error") && msg.contains(needle),
+            msg.contains("negation safety error") && msg.contains(needle),
             "{label}: expected NAF diagnostic containing {needle:?}, got {msg}"
         );
     }
@@ -114,7 +114,7 @@ fn committed_naf_example_compiles() {
         .join("../..")
         .canonicalize()
         .expect("repo root");
-    let path = "examples/v085-language/naf/closed_world.xlog";
+    let path = "examples/language-completeness/naf/closed_world.xlog";
     let full_path = repo_root.join(path);
     let src = std::fs::read_to_string(&full_path)
         .unwrap_or_else(|err| panic!("failed to read {}: {err}", full_path.display()));

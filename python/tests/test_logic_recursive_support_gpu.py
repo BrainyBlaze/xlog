@@ -18,28 +18,28 @@ def _query_columns(query):
 
 def test_logic_session_recursive_support_4_reports_exact_rows():
     source = """
-pred wmir_committed(i64, i64, i64).
-pred wmir_body_0(i64, i64, i64).
-pred wmir_body_1(i64, i64, i64).
-pred wmir_body_2(i64, i64, i64).
-pred wmir_body_3(i64, i64, i64).
+pred committed_fact(i64, i64, i64).
+pred first_body_literal(i64, i64, i64).
+pred second_body_literal(i64, i64, i64).
+pred third_body_literal(i64, i64, i64).
+pred fourth_body_literal(i64, i64, i64).
 pred usable(i64, i64, i64).
 pred support_4(i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64).
 
-usable(P, A0, A1) :- wmir_committed(P, A0, A1).
-usable(H, A0, A2) :- support_4(H, A0, A2, R, B0, A0, A1, B1, A1, A_mid, B2, A_mid, A2, B3, A0, A_mid).
+usable(P, A0, A1) :- committed_fact(P, A0, A1).
+usable(H, A0, A2) :- support_4(H, A0, A2, R, FirstBodyPredicate, A0, A1, SecondBodyPredicate, A1, MiddleArgument, ThirdBodyPredicate, MiddleArgument, A2, FourthBodyPredicate, A0, MiddleArgument).
 
-support_4(H, A0, A2, R, B0, A0, A1, B1, A1, A_mid, B2, A_mid, A2, B3, A0, A_mid) :-
-    wmir_body_0(R, H, B0),
-    wmir_body_1(R, H, B1),
-    wmir_body_2(R, H, B2),
-    wmir_body_3(R, H, B3),
-    usable(B0, A0, A1),
-    usable(B1, A1, A_mid),
-    usable(B2, A_mid, A2),
-    usable(B3, A0, A_mid).
+support_4(H, A0, A2, R, FirstBodyPredicate, A0, A1, SecondBodyPredicate, A1, MiddleArgument, ThirdBodyPredicate, MiddleArgument, A2, FourthBodyPredicate, A0, MiddleArgument) :-
+    first_body_literal(R, H, FirstBodyPredicate),
+    second_body_literal(R, H, SecondBodyPredicate),
+    third_body_literal(R, H, ThirdBodyPredicate),
+    fourth_body_literal(R, H, FourthBodyPredicate),
+    usable(FirstBodyPredicate, A0, A1),
+    usable(SecondBodyPredicate, A1, MiddleArgument),
+    usable(ThirdBodyPredicate, MiddleArgument, A2),
+    usable(FourthBodyPredicate, A0, MiddleArgument).
 
-?- support_4(H, A0, A2, R, B0, X0, X1, B1, X2, X3, B2, X4, X5, B3, X6, X7).
+?- support_4(H, A0, A2, R, FirstBodyPredicate, X0, X1, SecondBodyPredicate, X2, X3, ThirdBodyPredicate, X4, X5, FourthBodyPredicate, X6, X7).
 ?- usable(P, X, Y).
 """
 
@@ -48,26 +48,26 @@ support_4(H, A0, A2, R, B0, A0, A1, B1, A1, A_mid, B2, A_mid, A2, B3, A0, A_mid)
 
     # Rule 1 has a valid 4-body witness and derives usable(300, 1, 4).
     # Rule 2 reuses that derived head in body position 0, but has no valid
-    # witness because the final diamond edge does not reach A_mid = 5.
+    # witness because the final diamond edge does not reach MiddleArgument = 5.
     # The correct support_4 output therefore contains exactly one row.
     session.put_relation(
-        "wmir_body_0",
+        "first_body_literal",
         [_i64([1, 2]), _i64([300, 400]), _i64([10, 300])],
     )
     session.put_relation(
-        "wmir_body_1",
+        "second_body_literal",
         [_i64([1, 2]), _i64([300, 400]), _i64([20, 40])],
     )
     session.put_relation(
-        "wmir_body_2",
+        "third_body_literal",
         [_i64([1, 2]), _i64([300, 400]), _i64([30, 50])],
     )
     session.put_relation(
-        "wmir_body_3",
+        "fourth_body_literal",
         [_i64([1, 2]), _i64([300, 400]), _i64([60, 60])],
     )
     session.put_relation(
-        "wmir_committed",
+        "committed_fact",
         [
             _i64([10, 20, 30, 40, 50, 60]),
             _i64([1, 2, 3, 4, 5, 1]),
@@ -111,25 +111,25 @@ support_4(H, A0, A2, R, B0, A0, A1, B1, A1, A_mid, B2, A_mid, A2, B3, A0, A_mid)
 
 def test_logic_session_recursive_support_3_chain_rows_and_arity():
     source = """
-pred wmir_committed(i64, i64, i64).
-pred wmir_body_0(i64, i64, i64).
-pred wmir_body_1(i64, i64, i64).
-pred wmir_body_2(i64, i64, i64).
+pred committed_fact(i64, i64, i64).
+pred first_body_literal(i64, i64, i64).
+pred second_body_literal(i64, i64, i64).
+pred third_body_literal(i64, i64, i64).
 pred usable(i64, i64, i64).
 pred support_3(i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64).
 
-usable(P, A0, A1) :- wmir_committed(P, A0, A1).
-usable(H, A0, A2) :- support_3(H, A0, A2, R, B0, A0, A1, B1, A1, A_mid, B2, A_mid, A2).
+usable(P, A0, A1) :- committed_fact(P, A0, A1).
+usable(H, A0, A2) :- support_3(H, A0, A2, R, FirstBodyPredicate, A0, A1, SecondBodyPredicate, A1, MiddleArgument, ThirdBodyPredicate, MiddleArgument, A2).
 
-support_3(H, A0, A2, R, B0, A0, A1, B1, A1, A_mid, B2, A_mid, A2) :-
-    wmir_body_0(R, H, B0),
-    wmir_body_1(R, H, B1),
-    wmir_body_2(R, H, B2),
-    usable(B0, A0, A1),
-    usable(B1, A1, A_mid),
-    usable(B2, A_mid, A2).
+support_3(H, A0, A2, R, FirstBodyPredicate, A0, A1, SecondBodyPredicate, A1, MiddleArgument, ThirdBodyPredicate, MiddleArgument, A2) :-
+    first_body_literal(R, H, FirstBodyPredicate),
+    second_body_literal(R, H, SecondBodyPredicate),
+    third_body_literal(R, H, ThirdBodyPredicate),
+    usable(FirstBodyPredicate, A0, A1),
+    usable(SecondBodyPredicate, A1, MiddleArgument),
+    usable(ThirdBodyPredicate, MiddleArgument, A2).
 
-?- support_3(H, A0, A2, R, B0, X0, X1, B1, X2, X3, B2, X4, X5).
+?- support_3(H, A0, A2, R, FirstBodyPredicate, X0, X1, SecondBodyPredicate, X2, X3, ThirdBodyPredicate, X4, X5).
 ?- usable(P, X, Y).
 """
 
@@ -137,19 +137,19 @@ support_3(H, A0, A2, R, B0, A0, A1, B1, A1, A_mid, B2, A_mid, A2) :-
     session = program.session()
 
     session.put_relation(
-        "wmir_body_0",
+        "first_body_literal",
         [_i64([1, 2]), _i64([100, 200]), _i64([10, 100])],
     )
     session.put_relation(
-        "wmir_body_1",
+        "second_body_literal",
         [_i64([1, 2]), _i64([100, 200]), _i64([20, 40])],
     )
     session.put_relation(
-        "wmir_body_2",
+        "third_body_literal",
         [_i64([1, 2]), _i64([100, 200]), _i64([30, 50])],
     )
     session.put_relation(
-        "wmir_committed",
+        "committed_fact",
         [
             _i64([10, 20, 30, 40, 50]),
             _i64([1, 2, 3, 4, 5]),
@@ -190,92 +190,92 @@ support_3(H, A0, A2, R, B0, A0, A1, B1, A1, A_mid, B2, A_mid, A2) :-
 
 def test_logic_session_recursive_mixed_arity_and_session_reuse():
     source = """
-pred wmir_committed(i64, i64, i64).
-pred wmir_body_0(i64, i64, i64).
-pred wmir_body_1(i64, i64, i64).
-pred wmir_body_2(i64, i64, i64).
-pred wmir_body_3(i64, i64, i64).
-pred wmir_len_1(i64).
-pred wmir_len_2(i64).
-pred wmir_len_3(i64).
-pred wmir_len_4(i64).
+pred committed_fact(i64, i64, i64).
+pred first_body_literal(i64, i64, i64).
+pred second_body_literal(i64, i64, i64).
+pred third_body_literal(i64, i64, i64).
+pred fourth_body_literal(i64, i64, i64).
+pred one_body_rule(i64).
+pred two_body_rule(i64).
+pred three_body_rule(i64).
+pred four_body_rule(i64).
 pred usable(i64, i64, i64).
 pred support_1(i64, i64, i64, i64, i64, i64, i64).
 pred support_2(i64, i64, i64, i64, i64, i64, i64, i64, i64, i64).
 pred support_3(i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64).
 pred support_4(i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64).
 
-usable(P, A0, A1) :- wmir_committed(P, A0, A1).
-usable(H, A0, A1) :- support_1(H, A0, A1, R, B0, A0, A1).
-usable(H, A0, A2) :- support_2(H, A0, A2, R, B0, A0, A1, B1, A1, A2).
-usable(H, A0, A3) :- support_3(H, A0, A3, R, B0, A0, A1, B1, A1, A2, B2, A2, A3).
-usable(H, A0, A3) :- support_4(H, A0, A3, R, B0, A0, A1, B1, A1, A2, B2, A2, A3, B3, A0, A2).
+usable(P, A0, A1) :- committed_fact(P, A0, A1).
+usable(H, A0, A1) :- support_1(H, A0, A1, R, FirstBodyPredicate, A0, A1).
+usable(H, A0, A2) :- support_2(H, A0, A2, R, FirstBodyPredicate, A0, A1, SecondBodyPredicate, A1, A2).
+usable(H, A0, A3) :- support_3(H, A0, A3, R, FirstBodyPredicate, A0, A1, SecondBodyPredicate, A1, A2, ThirdBodyPredicate, A2, A3).
+usable(H, A0, A3) :- support_4(H, A0, A3, R, FirstBodyPredicate, A0, A1, SecondBodyPredicate, A1, A2, ThirdBodyPredicate, A2, A3, FourthBodyPredicate, A0, A2).
 
-support_1(H, A0, A1, R, B0, A0, A1) :-
-    wmir_len_1(R),
-    wmir_body_0(R, H, B0),
-    usable(B0, A0, A1).
+support_1(H, A0, A1, R, FirstBodyPredicate, A0, A1) :-
+    one_body_rule(R),
+    first_body_literal(R, H, FirstBodyPredicate),
+    usable(FirstBodyPredicate, A0, A1).
 
-support_2(H, A0, A2, R, B0, A0, A1, B1, A1, A2) :-
-    wmir_len_2(R),
-    wmir_body_0(R, H, B0),
-    wmir_body_1(R, H, B1),
-    usable(B0, A0, A1),
-    usable(B1, A1, A2).
+support_2(H, A0, A2, R, FirstBodyPredicate, A0, A1, SecondBodyPredicate, A1, A2) :-
+    two_body_rule(R),
+    first_body_literal(R, H, FirstBodyPredicate),
+    second_body_literal(R, H, SecondBodyPredicate),
+    usable(FirstBodyPredicate, A0, A1),
+    usable(SecondBodyPredicate, A1, A2).
 
-support_3(H, A0, A3, R, B0, A0, A1, B1, A1, A2, B2, A2, A3) :-
-    wmir_len_3(R),
-    wmir_body_0(R, H, B0),
-    wmir_body_1(R, H, B1),
-    wmir_body_2(R, H, B2),
-    usable(B0, A0, A1),
-    usable(B1, A1, A2),
-    usable(B2, A2, A3).
+support_3(H, A0, A3, R, FirstBodyPredicate, A0, A1, SecondBodyPredicate, A1, A2, ThirdBodyPredicate, A2, A3) :-
+    three_body_rule(R),
+    first_body_literal(R, H, FirstBodyPredicate),
+    second_body_literal(R, H, SecondBodyPredicate),
+    third_body_literal(R, H, ThirdBodyPredicate),
+    usable(FirstBodyPredicate, A0, A1),
+    usable(SecondBodyPredicate, A1, A2),
+    usable(ThirdBodyPredicate, A2, A3).
 
-support_4(H, A0, A3, R, B0, A0, A1, B1, A1, A2, B2, A2, A3, B3, A0, A2) :-
-    wmir_len_4(R),
-    wmir_body_0(R, H, B0),
-    wmir_body_1(R, H, B1),
-    wmir_body_2(R, H, B2),
-    wmir_body_3(R, H, B3),
-    usable(B0, A0, A1),
-    usable(B1, A1, A2),
-    usable(B2, A2, A3),
-    usable(B3, A0, A2).
+support_4(H, A0, A3, R, FirstBodyPredicate, A0, A1, SecondBodyPredicate, A1, A2, ThirdBodyPredicate, A2, A3, FourthBodyPredicate, A0, A2) :-
+    four_body_rule(R),
+    first_body_literal(R, H, FirstBodyPredicate),
+    second_body_literal(R, H, SecondBodyPredicate),
+    third_body_literal(R, H, ThirdBodyPredicate),
+    fourth_body_literal(R, H, FourthBodyPredicate),
+    usable(FirstBodyPredicate, A0, A1),
+    usable(SecondBodyPredicate, A1, A2),
+    usable(ThirdBodyPredicate, A2, A3),
+    usable(FourthBodyPredicate, A0, A2).
 
-?- support_1(H, A0, A1, R, B0, X0, X1).
-?- support_2(H, A0, A2, R, B0, X0, X1, B1, X2, X3).
-?- support_3(H, A0, A3, R, B0, X0, X1, B1, X2, X3, B2, X4, X5).
-?- support_4(H, A0, A3, R, B0, X0, X1, B1, X2, X3, B2, X4, X5, B3, X6, X7).
+?- support_1(H, A0, A1, R, FirstBodyPredicate, X0, X1).
+?- support_2(H, A0, A2, R, FirstBodyPredicate, X0, X1, SecondBodyPredicate, X2, X3).
+?- support_3(H, A0, A3, R, FirstBodyPredicate, X0, X1, SecondBodyPredicate, X2, X3, ThirdBodyPredicate, X4, X5).
+?- support_4(H, A0, A3, R, FirstBodyPredicate, X0, X1, SecondBodyPredicate, X2, X3, ThirdBodyPredicate, X4, X5, FourthBodyPredicate, X6, X7).
 ?- usable(P, X, Y).
 """
 
     program = pyxlog.LogicProgram.compile(source, device=0, memory_mb=512)
     session = program.session()
 
-    session.put_relation("wmir_len_1", [_i64([11])])
-    session.put_relation("wmir_len_2", [_i64([12])])
-    session.put_relation("wmir_len_3", [_i64([13])])
-    session.put_relation("wmir_len_4", [_i64([14])])
+    session.put_relation("one_body_rule", [_i64([11])])
+    session.put_relation("two_body_rule", [_i64([12])])
+    session.put_relation("three_body_rule", [_i64([13])])
+    session.put_relation("four_body_rule", [_i64([14])])
     session.put_relation(
-        "wmir_body_0",
+        "first_body_literal",
         [_i64([11, 12, 13, 14]), _i64([101, 102, 103, 104]), _i64([10, 101, 102, 103])],
     )
     session.put_relation(
-        "wmir_body_1",
+        "second_body_literal",
         [_i64([12, 13, 14]), _i64([102, 103, 104]), _i64([20, 30, 50])],
     )
     session.put_relation(
-        "wmir_body_2",
+        "third_body_literal",
         [_i64([13, 14]), _i64([103, 104]), _i64([40, 60])],
     )
     session.put_relation(
-        "wmir_body_3",
+        "fourth_body_literal",
         [_i64([14]), _i64([104]), _i64([70])],
     )
 
     session.put_relation(
-        "wmir_committed",
+        "committed_fact",
         [
             _i64([10, 20, 30, 40, 50, 60, 70]),
             _i64([1, 2, 3, 4, 5, 6, 1]),
@@ -335,7 +335,7 @@ support_4(H, A0, A3, R, B0, A0, A1, B1, A1, A2, B2, A2, A3, B3, A0, A2) :-
     ]
 
     session.put_relation(
-        "wmir_committed",
+        "committed_fact",
         [
             _i64([10, 20]),
             _i64([9, 10]),

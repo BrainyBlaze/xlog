@@ -58,21 +58,48 @@ pub(crate) struct NeuralGroup {
     pub(crate) output_var: Option<String>,
 }
 
+/// An ordinary-relation body atom in a trainable-rule query treated as a HARD
+/// join condition: it gates which query groundings can fire but contributes no
+/// probability mass and no gradient. The query probability is
+/// `(hard conditions satisfiable?) x (neural prob)`; gradients flow only
+/// through the neural predicates x sigma(w), never through these fact atoms.
+#[derive(Debug, Clone)]
+pub(crate) struct HardFilter {
+    /// Ordinary relation name (must hold over the program's facts).
+    pub(crate) relation: String,
+    /// For each relation argument position, the query HEAD position whose value
+    /// it must equal. Current scope: every relation argument is a head
+    /// variable; hard conditions that join on existential (non-head) variables
+    /// are a documented follow-up.
+    pub(crate) arg_head_positions: Vec<usize>,
+}
+
 #[derive(Debug, Clone)]
 pub(crate) enum QuerySignature {
     Boolean {
         groups: Vec<NeuralGroup>,
+        hard_filters: Vec<HardFilter>,
     },
     Targeted {
         target_position: usize,
         groups: Vec<NeuralGroup>,
+        hard_filters: Vec<HardFilter>,
     },
 }
 
 impl QuerySignature {
     pub(crate) fn groups(&self) -> &[NeuralGroup] {
         match self {
-            QuerySignature::Boolean { groups } | QuerySignature::Targeted { groups, .. } => groups,
+            QuerySignature::Boolean { groups, .. } | QuerySignature::Targeted { groups, .. } => {
+                groups
+            }
+        }
+    }
+
+    pub(crate) fn hard_filters(&self) -> &[HardFilter] {
+        match self {
+            QuerySignature::Boolean { hard_filters, .. }
+            | QuerySignature::Targeted { hard_filters, .. } => hard_filters,
         }
     }
 }
@@ -271,6 +298,7 @@ impl CompiledProgram {
             nonmonotone_cycles: None,
             nonmonotone_iteration_limit_hits: None,
             sampling_method: None,
+            mc_engine: None,
         })
     }
 
@@ -359,6 +387,7 @@ impl CompiledProgram {
             nonmonotone_cycles: None,
             nonmonotone_iteration_limit_hits: None,
             sampling_method: None,
+            mc_engine: None,
         })
     }
 
@@ -455,6 +484,7 @@ impl CompiledProgram {
                 McSamplingMethod::Rejection => "rejection".to_string(),
                 McSamplingMethod::EvidenceClamping => "evidence_clamping".to_string(),
             }),
+            mc_engine: Some(result.engine.as_str().to_string()),
         })
     }
 }
@@ -465,7 +495,7 @@ impl CompiledProgram {
 
 #[pymethods]
 impl CompiledProgram {
-    #[pyo3(signature = (return_grads=false, samples=None, seed=None, confidence=0.95, max_nonmonotone_iterations=1024, sampling_method=None, memory_mb=None))]
+    #[pyo3(signature = (return_grads=false, samples=None, seed=None, confidence=0.95, max_nonmonotone_iterations=1024, sampling_method=None, memory_mb=None, allow_cpu_oracle=false))]
     pub fn evaluate(
         &self,
         _py: Python<'_>,
@@ -476,6 +506,7 @@ impl CompiledProgram {
         max_nonmonotone_iterations: usize,
         sampling_method: Option<String>,
         memory_mb: Option<u64>,
+        allow_cpu_oracle: bool,
     ) -> PyResult<EvalResult> {
         enforce_call_memory_limit(&self.output_provider, memory_mb)?;
         match &self.program {
@@ -516,6 +547,10 @@ impl CompiledProgram {
                 cfg.confidence = confidence;
                 cfg.max_nonmonotone_iterations = max_nonmonotone_iterations;
                 cfg.sampling_method = Self::parse_sampling_method(sampling_method)?;
+                // Fail-closed contract: resident-rejected programs (negation,
+                // aggregates, ...) error unless the caller explicitly opts
+                // into the labeled CPU oracle.
+                cfg.allow_cpu_oracle_fallback = allow_cpu_oracle;
                 #[cfg(feature = "host-io")]
                 {
                     let result = _program.evaluate(cfg).map_err(types::xlog_err)?;
@@ -556,6 +591,7 @@ impl CompiledProgram {
             nonmonotone_cycles,
             nonmonotone_iteration_limit_hits,
             sampling_method_val,
+            no_host,
         ) = match &self.program {
             CompiledProbProgram::Mc(program) => {
                 let mut cfg = McEvalConfig::default();
@@ -579,6 +615,7 @@ impl CompiledProgram {
                     result.nonmonotone_cycles,
                     result.nonmonotone_iteration_limit_hits,
                     result.sampling_method,
+                    result.no_host,
                 )
             }
             _ => {
@@ -627,6 +664,7 @@ impl CompiledProgram {
             .map_err(|_| PyValueError::new_err("query_counts length overflow"))?;
         let query_counts_capsule = make_count_tensor(query_counts, query_rows)?;
         let evidence_count_capsule = make_count_tensor(evidence_count, 1)?;
+        let resident_no_host_certified = no_host.is_no_host();
 
         Ok(McDeviceEvalResult {
             query_counts: query_counts_capsule,
@@ -642,6 +680,20 @@ impl CompiledProgram {
                 McSamplingMethod::Rejection => "rejection".to_string(),
                 McSamplingMethod::EvidenceClamping => "evidence_clamping".to_string(),
             },
+            resident_no_host_certified,
+            resident_no_host_policy_result: if resident_no_host_certified {
+                "certified".to_string()
+            } else {
+                "failed".to_string()
+            },
+            resident_no_host_tracked_dtoh_calls: no_host.tracked_dtoh_calls,
+            resident_no_host_tracked_htod_calls: no_host.tracked_htod_calls,
+            resident_no_host_host_loop_iterations: no_host.host_loop_iterations,
+            resident_no_host_per_sample_host_launches: no_host.per_sample_host_launches,
+            resident_no_host_untracked_metadata_reads: no_host.untracked_metadata_reads,
+            resident_no_host_engine_launches: no_host.engine_launches,
+            resident_no_host_host_fixpoint_iterations: no_host.host_fixpoint_iterations,
+            resident_no_host_per_operator_host_allocations: no_host.per_operator_host_allocations,
         })
     }
 

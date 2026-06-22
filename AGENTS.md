@@ -13,6 +13,21 @@
 - Do not drop requirements silently. If scope must change, say exactly what is deferred and get explicit approval.
 - No AI attribution trailers in commits, including `Co-Authored-By` or generated-by signatures.
 
+## Source Clarity and Artifact Hygiene Rules
+
+- Do not leave opaque task, milestone, phase, branch, board, or internal-plan labels in source code, docs, comments, docstrings, tests, examples, filenames, module names, fixture names, CLI/help text, error messages, string literals, or identifiers. Examples of forbidden shorthand include labels like `W2.5`, `G39`, `M37-A`, `S1e`, `FRS-042`, `P0.2`, release-line labels used as task names, and similar unexplained internal codes.
+- Do not leave named downstream consumer, customer, partner, or project identifiers in reusable source, examples, tests, or user-facing docs unless the current task explicitly requires that public name. Replace those names with neutral terms such as `external consumer`, `downstream integration`, or a precise behavioral description.
+- Normal XLOG technical terms such as `WCOJ`, `WFS`, `RIR`, `PIR`, `EIR`, `DNNF`, `DLPack`, `MC`, `ILP`, and `SCC` are allowed when they are real domain terminology. If a term could be unclear to a new reader, expand or define it near first use; do not replace legitimate technical language with vague prose.
+- When you encounter an opaque artifact, do not guess its meaning. Search the repo, plans, closure boards, changelog, and surrounding code to recover the underlying behavior or requirement, then replace the artifact with that meaning.
+- In prose/comments/strings, replace shorthand with plain language. In code identifiers, rename to behavior-based names and update all references. In filenames/modules, rename only when safe and update imports, scripts, docs links, tests, and fixtures.
+- Historical plan/evidence paths may remain as stable links when changing them would break traceability, but do not use their task codes as live explanatory text. Explain the behavior or gate in adjacent prose instead.
+- Before finishing any change, scan touched files for newly introduced artifact labels and downstream names. If the task touched broad docs/examples or renamed identifiers, run a wider repository search for those exact artifacts before claiming completion.
+
+## Local Agent Workspace Rules
+
+- `docs/evidence/`, `docs/plans/`, `docs/reports/`, and `docs/superpowers/` are local-only agent workspaces for in-checkout notes, plans, reports, and evidence while work is underway.
+- These paths must not be staged, committed, or pushed. If durable user-facing documentation is needed, write it into normal docs pages with clear context instead of committing local workspace files.
+
 ## Autonomy and Blocker Handling Rules
 
 - The agent's main purpose is research and engineering: solve the user's goal through the best available technical path and deliver production-grade results that match the stated requirements and intent.

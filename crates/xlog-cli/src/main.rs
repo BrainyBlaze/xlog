@@ -10,11 +10,13 @@ use arrow::util::pretty::pretty_format_batches;
 use xlog_core::{symbol, MemoryBudget, Result, XlogError};
 use xlog_cuda::{CudaDevice, CudaKernelProvider, GpuMemoryManager};
 use xlog_gpu::logic::LogicProgram;
+use xlog_ir::{EirBodyLiteral, EirTerm};
 use xlog_logic::ast::{BodyLiteral, CompOp, ProbEngine, Program, Term};
 use xlog_logic::compile::load_modules;
 #[cfg(feature = "host-io")]
 use xlog_logic::parse_program;
-use xlog_logic::{rewrite_v085_magic_sets, MagicSetReport, MagicSetStatus, ParserSession};
+use xlog_logic::IncrementalParseResult;
+use xlog_logic::{rewrite_magic_sets, MagicSetReport, MagicSetStatus, ParserSession};
 use xlog_logic::{stratify, Compiler};
 use xlog_logic::{QueryProofTrace, RuleProvenance};
 #[cfg(feature = "host-io")]
@@ -65,9 +67,9 @@ struct RunArgs {
     module_path: Vec<PathBuf>,
     /// Dump the compiled epistemic execution plan (EIR-derived GPU plan, world-view
     /// integrity constraints, and CPU-fallback counters) as JSON to this path.
-    /// No-op for ordinary (non-epistemic) programs. This is the C7 epistemic-plan
-    /// dump surface: it exposes accepted `know`/`possible` literals and lets a
-    /// caller assert `cpu_fallback == 0` off a real GPU run.
+    /// No-op for ordinary (non-epistemic) programs. This compiled
+    /// epistemic-plan/EIR JSON dump exposes accepted `know`/`possible` literals
+    /// and lets a caller assert `cpu_fallback == 0` off a real GPU run.
     #[arg(long)]
     epistemic_plan_json: Option<PathBuf>,
 }
@@ -98,6 +100,11 @@ struct ProbArgs {
     prob_method: Option<ProbMethodCli>,
     #[arg(long, alias = "max-nonmonotone-iterations")]
     prob_max_nonmonotone_iterations: Option<usize>,
+    /// Allow the labeled CPU oracle when the resident GPU MC engine rejects
+    /// the program (negation, aggregates, ...). Fail-closed when unset; the
+    /// result is labeled `mc_engine: cpu-oracle` and is not GPU-native evidence.
+    #[arg(long)]
+    allow_cpu_oracle: bool,
     #[arg(long, value_enum, default_value = "pretty")]
     output: ProbOutputFormat,
     #[arg(long)]
@@ -112,6 +119,9 @@ struct ExplainArgs {
     source: PathBuf,
     #[arg(long, value_enum, default_value = "text")]
     format: ExplainFormat,
+    /// Additional directories to search for modules (colon-separated)
+    #[arg(long, value_delimiter = ':')]
+    module_path: Vec<PathBuf>,
 }
 
 #[derive(Parser)]
@@ -185,6 +195,7 @@ fn explain(args: ExplainArgs) -> Result<()> {
     })?;
     let mut parser_session = ParserSession::new();
     let parsed = parser_session.parse_path(&args.source, &source)?;
+    let parsed = resolve_explain_imports(parsed, &args.source, args.module_path)?;
     let report = build_explain_report(parsed, Some(&args.source))?;
     match args.format {
         ExplainFormat::Text => print_explain_text(&report),
@@ -192,6 +203,22 @@ fn explain(args: ExplainArgs) -> Result<()> {
         ExplainFormat::Dot => print_magic_dot(&report.magic_sets),
     }
     Ok(())
+}
+
+fn resolve_explain_imports(
+    mut parsed: IncrementalParseResult,
+    source_path: &Path,
+    module_path: Vec<PathBuf>,
+) -> Result<IncrementalParseResult> {
+    if parsed.program.imports.is_empty() {
+        return Ok(parsed);
+    }
+    let resolver = load_modules(source_path, module_path)
+        .map_err(|e| XlogError::Execution(format!("Module resolution failed: {}", e)))?;
+    parsed.program = resolver
+        .merge_imports(parsed.program)
+        .map_err(|e| XlogError::Execution(format!("Module resolution failed: {}", e)))?;
+    Ok(parsed)
 }
 
 fn repl(args: ReplArgs) -> Result<()> {
@@ -241,6 +268,7 @@ fn watch(args: WatchArgs) -> Result<()> {
 struct ExplainReport {
     program: Program,
     parse_stats: xlog_logic::ParseCacheStats,
+    epistemic: serde_json::Value,
     magic_sets: MagicSetReport,
     aggregate_lifting: Vec<AggregateLiftReport>,
     generated_rule_diagnostics: Vec<GeneratedRuleDiagnostic>,
@@ -259,12 +287,13 @@ fn build_explain_report(
     source_path: Option<&Path>,
 ) -> Result<ExplainReport> {
     let program = parsed.program;
-    let magic_rewrite = rewrite_v085_magic_sets(&program)?;
+    let magic_rewrite = rewrite_magic_sets(&program)?;
     let rule_provenance = xlog_logic::rule_provenance(&program, Some(&magic_rewrite.program));
     let proof_traces = xlog_logic::query_proof_traces(&program, &rule_provenance);
     let magic_sets = magic_rewrite.report;
     let aggregate_lifting = explain_aggregate_lifting(&program)?;
     let generated_rule_diagnostics = explain_generated_rule_diagnostics(&program, source_path);
+    let epistemic = explain_epistemic(&program);
     let (stratification_status, stratification_count) = match stratify(&program) {
         Ok(strata) => ("ok".to_string(), strata.len()),
         Err(err) => (format!("error: {}", err), 0),
@@ -283,6 +312,7 @@ fn build_explain_report(
     Ok(ExplainReport {
         program,
         parse_stats: parsed.stats,
+        epistemic,
         magic_sets,
         aggregate_lifting,
         generated_rule_diagnostics,
@@ -295,6 +325,219 @@ fn build_explain_report(
         optimizer_status,
         optimizer_memory_peak,
     })
+}
+
+fn explain_epistemic(program: &Program) -> serde_json::Value {
+    if !program_has_epistemic_literals(program) {
+        let not_applicable = serde_json::json!({
+            "status": "not_applicable",
+            "reason": "program has no epistemic literals",
+            "epistemic_literal_count": 0,
+        });
+        return serde_json::json!({
+            "eir": not_applicable.clone(),
+            "gpu_plan": not_applicable.clone(),
+            "executable_plan": not_applicable,
+        });
+    }
+
+    let eir = match xlog_logic::build_eir(program) {
+        Ok(eir) => {
+            let literals = eir
+                .rules
+                .iter()
+                .enumerate()
+                .flat_map(|(rule_index, rule)| {
+                    rule.body.iter().filter_map(move |lit| match lit {
+                        EirBodyLiteral::Epistemic(epistemic) => Some(serde_json::json!({
+                            "rule_index": rule_index,
+                            "literal": eir_epistemic_literal_json(epistemic),
+                        })),
+                        _ => None,
+                    })
+                })
+                .collect::<Vec<_>>();
+            let rule_summaries = eir
+                .rules
+                .iter()
+                .enumerate()
+                .map(|(rule_index, rule)| {
+                    let epistemic_literal_count = rule
+                        .body
+                        .iter()
+                        .filter(|lit| matches!(lit, EirBodyLiteral::Epistemic(_)))
+                        .count();
+                    let relational_body_atoms = rule
+                        .body
+                        .iter()
+                        .filter(|lit| {
+                            matches!(lit, EirBodyLiteral::Relational { negated: false, .. })
+                        })
+                        .count();
+                    serde_json::json!({
+                        "rule_index": rule_index,
+                        "head": eir_atom_json(&rule.head),
+                        "body_literal_count": rule.body.len(),
+                        "epistemic_literal_count": epistemic_literal_count,
+                        "relational_body_atoms": relational_body_atoms,
+                    })
+                })
+                .collect::<Vec<_>>();
+            serde_json::json!({
+                "status": "ok",
+                "mode": format!("{:?}", eir.mode),
+                "rule_count": eir.rules.len(),
+                "epistemic_literal_count": literals.len(),
+                "literals": literals,
+                "rules": rule_summaries,
+            })
+        }
+        Err(err) => serde_json::json!({
+            "status": "error",
+            "error": err.to_string(),
+        }),
+    };
+
+    let gpu_plan = match xlog_logic::epistemic::plan_epistemic_gpu_execution(program) {
+        Ok(plan) => {
+            let reductions = plan
+                .reductions
+                .iter()
+                .map(|reduction| {
+                    serde_json::json!({
+                        "rule_index": reduction.rule_index,
+                        "head_predicate": &reduction.head_predicate,
+                        "relational_body_atoms": reduction.relational_body_atoms,
+                        "wcoj_status": format!("{:?}", reduction.wcoj_status),
+                    })
+                })
+                .collect::<Vec<_>>();
+            let tuple_membership = plan
+                .tuple_membership_bindings
+                .iter()
+                .map(|binding| {
+                    serde_json::json!({
+                        "literal_index": binding.literal_index,
+                        "reduction_index": binding.reduction_index,
+                        "predicate": &binding.predicate,
+                        "arity": binding.arity,
+                        "key_columns": binding.key_columns,
+                        "key_terms": binding.key_terms.iter().map(eir_term_label).collect::<Vec<_>>(),
+                        "bound_output_columns": binding.bound_output_columns,
+                        "op": format!("{:?}", binding.op),
+                        "negated": binding.negated,
+                    })
+                })
+                .collect::<Vec<_>>();
+            serde_json::json!({
+                "status": "ok",
+                "mode": format!("{:?}", plan.mode),
+                "epistemic_literal_count": plan.epistemic_literals.len(),
+                "required_phases": plan.required_phases.iter().map(|phase| format!("{:?}", phase)).collect::<Vec<_>>(),
+                "required_kernel_phases": plan.required_kernel_phases.iter().map(|phase| format!("{:?}", phase)).collect::<Vec<_>>(),
+                "required_buffers": plan.required_buffers.iter().map(|buffer| format!("{:?}", buffer)).collect::<Vec<_>>(),
+                "reductions": reductions,
+                "tuple_membership_bindings": tuple_membership,
+                "solver_contract": {
+                    "assumption_count": plan.solver_contract.assumption_bindings.len(),
+                    "required_capabilities": plan.solver_contract.required_capabilities.iter().map(|cap| format!("{:?}", cap)).collect::<Vec<_>>(),
+                    "required_statuses": plan.solver_contract.required_statuses.iter().map(|status| format!("{:?}", status)).collect::<Vec<_>>(),
+                },
+                "cpu_fallbacks": {
+                    "candidate_enumeration": plan.cpu_fallbacks.candidate_enumeration,
+                    "world_view_validation": plan.cpu_fallbacks.world_view_validation,
+                    "solver_search": plan.cpu_fallbacks.solver_search,
+                    "probabilistic_recompute": plan.cpu_fallbacks.probabilistic_recompute,
+                    "is_zero": plan.cpu_fallbacks.is_zero(),
+                }
+            })
+        }
+        Err(err) => serde_json::json!({
+            "status": "error",
+            "error": err.to_string(),
+        }),
+    };
+
+    let executable_plan = match xlog_logic::epistemic::compile_epistemic_gpu_execution(program) {
+        Ok(plan) => serde_json::json!({
+            "status": "ok",
+            "relation_id_count": plan.relation_ids.len(),
+            "reduced_runtime_sccs": plan.reduced_runtime_plan.sccs.len(),
+            "reduced_runtime_est_memory_peak": plan.reduced_runtime_plan.est_memory_peak,
+            "gpu_plan_literal_count": plan.gpu_plan.epistemic_literals.len(),
+        }),
+        Err(err) => serde_json::json!({
+            "status": "error",
+            "error": err.to_string(),
+        }),
+    };
+
+    serde_json::json!({
+        "eir": eir,
+        "gpu_plan": gpu_plan,
+        "executable_plan": executable_plan,
+    })
+}
+
+fn program_has_epistemic_literals(program: &Program) -> bool {
+    program.rules.iter().any(|rule| {
+        rule.body
+            .iter()
+            .any(|lit| matches!(lit, BodyLiteral::Epistemic(_)))
+    }) || program.constraints.iter().any(|constraint| {
+        constraint
+            .body
+            .iter()
+            .any(|lit| matches!(lit, BodyLiteral::Epistemic(_)))
+    })
+}
+
+fn eir_atom_json(atom: &xlog_ir::EirAtom) -> serde_json::Value {
+    serde_json::json!({
+        "predicate": &atom.predicate,
+        "arity": atom.arity,
+        "terms": atom.terms.iter().map(eir_term_label).collect::<Vec<_>>(),
+    })
+}
+
+fn eir_epistemic_literal_json(lit: &xlog_ir::EirEpistemicLiteral) -> serde_json::Value {
+    serde_json::json!({
+        "op": format!("{:?}", lit.op),
+        "negated": lit.negated,
+        "atom": eir_atom_json(&lit.atom),
+    })
+}
+
+fn eir_term_label(term: &EirTerm) -> String {
+    match term {
+        EirTerm::Variable(name) => name.clone(),
+        EirTerm::Anonymous => "_".to_string(),
+        EirTerm::Integer(value) => value.to_string(),
+        EirTerm::FloatBits(bits) => f64::from_bits(*bits).to_string(),
+        EirTerm::String(value) => value.clone(),
+        EirTerm::Symbol(id) => symbol::resolve(*id),
+        EirTerm::List(items) => format!(
+            "[{}]",
+            items
+                .iter()
+                .map(eir_term_label)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        EirTerm::Cons { head, tail } => {
+            format!("{}|{}", eir_term_label(head), eir_term_label(tail))
+        }
+        EirTerm::Compound { functor, args } => format!(
+            "{}({})",
+            functor,
+            args.iter()
+                .map(eir_term_label)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        EirTerm::PredRef(name) => name.clone(),
+        EirTerm::Aggregate { op, variable } => format!("{}({})", op, variable),
+    }
 }
 
 fn explain_aggregate_lifting(program: &Program) -> Result<Vec<AggregateLiftReport>> {
@@ -793,6 +1036,28 @@ fn print_explain_text(report: &ExplainReport) {
     println!("  est_memory_peak: {}", report.optimizer_memory_peak);
     println!("wcoj:");
     println!("  status: reported");
+    println!("epistemic:");
+    let eir_status = report
+        .epistemic
+        .get("eir")
+        .and_then(|value| value.get("status"))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("not_available");
+    let gpu_plan_status = report
+        .epistemic
+        .get("gpu_plan")
+        .and_then(|value| value.get("status"))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("not_available");
+    let executable_status = report
+        .epistemic
+        .get("executable_plan")
+        .and_then(|value| value.get("status"))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("not_available");
+    println!("  eir: {}", eir_status);
+    println!("  gpu_plan: {}", gpu_plan_status);
+    println!("  executable_plan: {}", executable_status);
     print_magic_text(&report.magic_sets);
     if !report.aggregate_lifting.is_empty() {
         println!("aggregate_lifting:");
@@ -894,6 +1159,7 @@ fn print_explain_json(report: &ExplainReport) {
     println!("  \"wcoj\": {{");
     println!("    \"status\": \"reported\"");
     println!("  }},");
+    println!("  \"epistemic\": {},", report.epistemic);
     println!("  \"magic_sets\": {{");
     println!(
         "    \"status\": \"{}\",",
@@ -1216,8 +1482,8 @@ fn run_deterministic(args: RunArgs) -> Result<()> {
 
     let result = program.evaluate_with_options(provider.clone(), inputs, args.stats)?;
 
-    // C7: dump the compiled epistemic execution plan (after a successful GPU run, so
-    // the dump corresponds to a real accepted hot-path execution).
+    // Dump the compiled epistemic execution plan after a successful GPU run, so
+    // the JSON corresponds to a real accepted hot-path execution.
     if let Some(plan_path) = &args.epistemic_plan_json {
         match program.epistemic_plan_json() {
             Some(json) => {
@@ -1345,6 +1611,7 @@ fn apply_mc_cli_overrides(args: &ProbArgs, cfg: &mut McEvalConfig) -> Result<()>
             ProbMethodCli::EvidenceClamping => McSamplingMethod::EvidenceClamping,
         });
     }
+    cfg.allow_cpu_oracle_fallback = args.allow_cpu_oracle;
     cfg.validate()
 }
 
@@ -1451,6 +1718,7 @@ fn emit_prob_mc(
     let seed = result.seed;
     let confidence = result.confidence;
     let sampling_method = result.sampling_method.as_str().to_string();
+    let mc_engine = result.engine.as_str().to_string();
 
     let mut atoms = Vec::new();
     let mut probs = Vec::new();
@@ -1463,6 +1731,7 @@ fn emit_prob_mc(
     let mut seed_col = Vec::new();
     let mut confidence_col = Vec::new();
     let mut sampling_method_col = Vec::new();
+    let mut mc_engine_col = Vec::new();
     for q in result.query_estimates {
         atoms.push(atom_to_string(&q.atom));
         probs.push(q.prob);
@@ -1475,6 +1744,7 @@ fn emit_prob_mc(
         seed_col.push(seed);
         confidence_col.push(confidence);
         sampling_method_col.push(sampling_method.clone());
+        mc_engine_col.push(mc_engine.clone());
     }
 
     let batch = arrow::record_batch::RecordBatch::try_from_iter(vec![
@@ -1526,6 +1796,11 @@ fn emit_prob_mc(
             Arc::new(arrow::array::StringArray::from(sampling_method_col))
                 as Arc<dyn arrow::array::Array>,
         ),
+        (
+            "mc_engine",
+            Arc::new(arrow::array::StringArray::from(mc_engine_col))
+                as Arc<dyn arrow::array::Array>,
+        ),
     ])
     .map_err(|e| XlogError::Execution(format!("Failed to build mc batch: {}", e)))?;
 
@@ -1575,8 +1850,10 @@ fn print_prob_mc_json(result: xlog_prob::mc::McResult) {
     let seed = result.seed;
     let confidence = result.confidence;
     let sampling_method = result.sampling_method.as_str();
+    let mc_engine = result.engine.as_str();
     println!("{{");
     println!("  \"engine\": \"mc\",");
+    println!("  \"mc_engine\": \"{}\",", mc_engine);
     println!("  \"total_samples\": {},", total_samples);
     println!("  \"evidence_samples\": {},", evidence_samples);
     println!("  \"seed\": {},", seed);

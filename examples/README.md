@@ -39,32 +39,30 @@ Examples live under `examples/xlog/`, grouped by intent:
 
 - `00-basics/`: minimal, "learn the syntax" programs
 - `10-arithmetic/`: `is` expressions and numeric reasoning patterns
-- `15-float-predicates/`: IEEE 754 float support with total ordering (v0.3.1)
+- `15-float-predicates/`: IEEE 754 float support with total ordering
 - `20-graphs/`: graph reachability and social-network style queries
 - `30-security/`: RBAC and policy derivations
 - `40-supply-chain/`: BOM explosion and dependency reasoning
 - `50-program-analysis/`: points-to and call graph construction
 - `60-database-style/`: realistic multi-way join patterns
 - `70-aggregates/`: aggregation queries (count/sum/min/max/logsumexp)
-- `80-v032-showcase/`: comprehensive v0.3.2 feature demonstrations (symbol type, recursion, aggregations)
+- Feature showcase examples: comprehensive feature demonstrations for symbol values, recursion, and aggregations
 - `90-negative-tests/`: programs expected to fail (stratification/type errors)
 
 Phase 4 examples live under:
 - `examples/prob/`: probabilistic `.xlog` programs (prob facts, AD, evidence/query, and `prob_engine=mc`)
 - `examples/python/`: Python scripts exercising `pyxlog` via DLPack (Torch optional)
 
-v0.9.0 semantic fixtures live under:
+Epistemic semantic fixtures live under:
 - `examples/epistemic/`: epistemic `.xlog` examples for EIR, G91, FAEEL, Generate-Propagate-Test, and splitting.
   These are run through `cargo test -p xlog-logic --test test_epistemic_examples`, not the production CLI.
 
-Neural-symbolic examples, introduced during the `v0.4.0-alpha` milestone and carried
-forward in the current `v0.5.x` release line, live under:
+Neural-symbolic examples live under:
 - `examples/neural/`: Neural-symbolic training examples
 
-v0.8.0 DTS-DLM productization examples live under:
-- `examples/v080-dts/`: Small certification-friendly showcase examples for
-  async/streaming runtime controls, relation deltas, neural bridge helpers,
-  native exact induction, and probabilistic async diagnostics.
+Runtime productization examples cover small certification-friendly showcases for
+async/streaming runtime controls, relation deltas, neural bridge helpers,
+native exact induction, and probabilistic async diagnostics.
 
 ## Example Index
 
@@ -78,7 +76,7 @@ v0.8.0 DTS-DLM productization examples live under:
 - `examples/xlog/10-arithmetic/01_arithmetic_demo.xlog`: `is` + `abs()` + `cast()`
 - `examples/xlog/10-arithmetic/02_builtins_and_precedence.xlog`: full operator/builtin coverage (`+ - * / %`, `abs/min/max/pow/cast`)
 
-**15-float-predicates/** (IEEE 754 float support - v0.3.1)
+**15-float-predicates/** (IEEE 754 float support)
 - `examples/xlog/15-float-predicates/01_nan_handling.xlog`: NaN detection and filtering
 - `examples/xlog/15-float-predicates/02_infinity_detection.xlog`: infinity handling
 - `examples/xlog/15-float-predicates/03_signed_zero.xlog`: signed zero (+0/-0) distinction
@@ -113,11 +111,11 @@ v0.8.0 DTS-DLM productization examples live under:
 - `examples/xlog/70-aggregates/04_min_max_latency_stats.xlog`: `min()` + `max()`
 - `examples/xlog/70-aggregates/05_average_from_sum_count.xlog`: derived average via `sum`/`count` + `cast`
 
-**80-v032-showcase/** (v0.3.2 feature demonstrations)
-- `examples/xlog/80-v032-showcase/01-enterprise/`: HR analytics with org hierarchy, salary calculations
-- `examples/xlog/80-v032-showcase/02-knowledge-graph/`: Scientific ontology with type inheritance, citations
-- `examples/xlog/80-v032-showcase/03-game-analytics/`: Gaming platform with player stats, achievements, guilds
-- `examples/xlog/80-v032-showcase/04-supply-chain/`: Manufacturing with BOM explosion, inventory management
+**Feature showcase examples**
+- Enterprise analytics with org hierarchy and salary calculations
+- Scientific knowledge graph with type inheritance and citations
+- Game analytics with player stats, achievements, and guilds
+- Manufacturing supply chain with BOM explosion and inventory management
 
 **90-negative-tests/** (expected failures)
 - `examples/xlog/90-negative-tests/01_constraint_cycle_violation.xlog`: constraint violation at runtime
@@ -125,14 +123,14 @@ v0.8.0 DTS-DLM productization examples live under:
 - `examples/xlog/90-negative-tests/03_arithmetic_type_mismatch.xlog`: missing `cast()` type mismatch (compile-time)
 - `examples/xlog/90-negative-tests/04_is_target_already_bound.xlog`: invalid `is` target (compile-time)
 
-**epistemic/** (v0.9.0 semantic fixtures)
+**epistemic/** (semantic fixtures)
 - `examples/epistemic/01-eir-boundary.xlog`: explicit EIR epistemic literal
 - `examples/epistemic/02-g91-compatibility.xlog`: G91 possible-only support
 - `examples/epistemic/03-faeel-default.xlog`: FAEEL founded knowledge candidate
 - `examples/epistemic/04-gpt-candidate-filter.xlog`: bounded Generate-Propagate-Test trace
 - `examples/epistemic/05-splitting.xlog`: deterministic split/recompose fixture
 
-## Neural-Symbolic Examples (Introduced In `v0.4.0-alpha`, Available In Current `v0.5.x` Releases)
+## Neural-Symbolic Examples
 
 Neural-symbolic training examples demonstrating integration where neural network
 outputs become probabilistic facts in logic programs.
@@ -177,5 +175,5 @@ When a language feature is syntactically accepted but not yet executed end-to-en
 kept in `70-aggregates/` or `90-negative-tests/` and clearly marked.
 
 Additional runner/runtime notes:
-- `symbol` values are stored as `u32` IDs with a bidirectional string table; as of v0.3.2, symbols are **reversible** and display as readable strings in query output.
+- `symbol` values are stored as `u32` IDs with a bidirectional string table; symbols are **reversible** and display as readable strings in query output.
 - Some aggregate implementations have value-type restrictions (documented in `docs/ARCHITECTURE.md`).

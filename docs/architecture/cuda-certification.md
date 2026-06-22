@@ -11,7 +11,7 @@ The certification suite is implemented in the `xlog-cuda-tests` crate and provid
 | Metric | Value |
 |--------|-------|
 | Total tests | 207 |
-| Categories | 33 (C01-C25 + G01-G08) |
+| Categories | 33 (core categories 1-25 plus GPU-tier categories 1-8) |
 | PTX modules | 22 |
 | Execution mode | GPU-only (requires CUDA hardware) |
 
@@ -30,9 +30,9 @@ crates/xlog-cuda-tests/
 │   │   └── diagnostics.rs        # Failure analysis and reporting
 │   └── categories/
 │       ├── mod.rs                # Category registry
-│       ├── c01_toolchain.rs      # Category 1: Toolchain/PTX/SASS
-│       ├── c02_launch_config.rs  # Category 2: Launch configuration
-│       ... (C01-C25 + G01-G08)
+│       ├── c01_toolchain.rs      # Core category 1: Toolchain/PTX/SASS
+│       ├── c02_launch_config.rs  # Core category 2: Launch configuration
+│       ... (core categories 1-25 plus GPU-tier categories 1-8)
 │       ├── c25_float_filter.rs   # Category 25: Float filter semantics
 │       └── g08_device_counts.rs  # GPU category: device-count / row-count invariants
 └── tests/
@@ -43,69 +43,69 @@ crates/xlog-cuda-tests/
 
 ## Test Categories
 
-### Infrastructure (C01-C08)
+### Infrastructure (core categories 1-8)
 
 | Category | Name | Focus |
 |----------|------|-------|
-| C01 | Toolchain/PTX/SASS | PTX loading, JIT compilation, symbol resolution |
-| C02 | Launch Configuration | Grid/block dimensions, shared memory sizing |
-| C03 | Pointer/Indexing/Bounds | Overflow, off-by-one, stride calculations |
-| C04 | Address Space | Global/shared/local/const memory correctness |
-| C05 | Global Memory Hazards | OOB access, alignment, uninitialized reads |
-| C06 | Shared Memory | Bank conflicts, barriers, dynamic smem |
-| C07 | Local Memory/Stack | Register spilling, stack overflow |
-| C08 | Synchronization/Ordering | Atomics, fences, stream ordering |
+| Core category 1 | Toolchain/PTX/SASS | PTX loading, JIT compilation, symbol resolution |
+| Core category 2 | Launch Configuration | Grid/block dimensions, shared memory sizing |
+| Core category 3 | Pointer/Indexing/Bounds | Overflow, off-by-one, stride calculations |
+| Core category 4 | Address Space | Global/shared/local/const memory correctness |
+| Core category 5 | Global Memory Hazards | OOB access, alignment, uninitialized reads |
+| Core category 6 | Shared Memory | Bank conflicts, barriers, dynamic smem |
+| Core category 7 | Local Memory/Stack | Register spilling, stack overflow |
+| Core category 8 | Synchronization/Ordering | Atomics, fences, stream ordering |
 
-### Execution Model (C09-C16)
-
-| Category | Name | Focus |
-|----------|------|-------|
-| C09 | Warp-Level | Divergence, shuffle, ballot, partial warps |
-| C10 | Block/Grid Coordination | Cross-block behavior, atomic contention |
-| C11 | Control Flow/Predication | Early return, predicated operations |
-| C12 | Atomics | Correctness, contention, overflow, CAS loops |
-| C13 | Floating-Point | NaN, Inf, subnormals, FMA, accumulation |
-| C14 | Integer Edge Cases | Overflow, shifts, division |
-| C15 | Determinism | Reproducibility, sort stability |
-| C16 | Async/Pipeline | cp.async, tensor ops (sm_80+) |
-
-### Environment (C17-C21)
+### Execution Model (core categories 9-16)
 
 | Category | Name | Focus |
 |----------|------|-------|
-| C17 | Caching/Coherence | L1/L2, volatile, cache lines |
-| C18 | Host-Device Integration | Lifetime, async transfers, errors, OOM |
-| C19 | Multi-Stream Concurrency | Parallel streams, events |
-| C20 | Multi-GPU | Device enumeration, P2P, context switching |
-| C21 | Hardware Reliability | Timeout, reset, error reporting |
+| Core category 9 | Warp-Level | Divergence, shuffle, ballot, partial warps |
+| Core category 10 | Block/Grid Coordination | Cross-block behavior, atomic contention |
+| Core category 11 | Control Flow/Predication | Early return, predicated operations |
+| Core category 12 | Atomics | Correctness, contention, overflow, CAS loops |
+| Core category 13 | Floating-Point | NaN, Inf, subnormals, FMA, accumulation |
+| Core category 14 | Integer Edge Cases | Overflow, shifts, division |
+| Core category 15 | Determinism | Reproducibility, sort stability |
+| Core category 16 | Async/Pipeline | cp.async, tensor ops (sm_80+) |
 
-### Comprehensive (C22-C25)
+### Environment (core categories 17-21)
 
 | Category | Name | Focus |
 |----------|------|-------|
-| C22 | Algorithm-Specific | Reduction, sort, join, groupby edge cases |
-| C23 | Testing Blind Spots | Non-power-of-two, misaligned, stress tests |
-| C24 | Edge Case Matrix | Size x Distribution x Type cross-product |
-| C25 | Float Filter | Float predicate semantics and total ordering edge cases |
+| Core category 17 | Caching/Coherence | L1/L2, volatile, cache lines |
+| Core category 18 | Host-Device Integration | Lifetime, async transfers, errors, OOM |
+| Core category 19 | Multi-Stream Concurrency | Parallel streams, events |
+| Core category 20 | Multi-GPU | Device enumeration, P2P, context switching |
+| Core category 21 | Hardware Reliability | Timeout, reset, error reporting |
 
-### GPU Tier (G01-G08)
+### Comprehensive (core categories 22-25)
+
+| Category | Name | Focus |
+|----------|------|-------|
+| Core category 22 | Algorithm-Specific | Reduction, sort, join, groupby edge cases |
+| Core category 23 | Testing Blind Spots | Non-power-of-two, misaligned, stress tests |
+| Core category 24 | Edge Case Matrix | Size x Distribution x Type cross-product |
+| Core category 25 | Float Filter | Float predicate semantics and total ordering edge cases |
+
+### GPU Tier (GPU-tier categories 1-8)
 
 These categories cover probabilistic/neural/solver kernels that sit above the core relational operator suite.
 
 | Category | Name | Focus |
 |----------|------|-------|
-| G01 | Circuit Forward | XGCF forward evaluation correctness |
-| G02 | Circuit Backward | XGCF backward/gradient correctness |
-| G03 | Weight Injection | GPU weight/evidence buffer correctness |
-| G04 | Transfer Efficiency | Guardrails for host↔device transfers in critical paths |
-| G05 | Circuit Cache | Cache hit/miss correctness and reuse properties |
-| G06 | PTX Robustness | Large-scale + numerical edge cases for circuit kernels |
-| G07 | SAT/CDCL | GPU CDCL SAT/UNSAT verifier correctness |
-| G08 | Device Counts | Device-resident row-count invariants and related helpers |
+| GPU-tier category 1 | Circuit Forward | XGCF forward evaluation correctness |
+| GPU-tier category 2 | Circuit Backward | XGCF backward/gradient correctness |
+| GPU-tier category 3 | Weight Injection | GPU weight/evidence buffer correctness |
+| GPU-tier category 4 | Transfer Efficiency | Guardrails for host-device transfers in critical paths |
+| GPU-tier category 5 | Circuit Cache | Cache hit/miss correctness and reuse properties |
+| GPU-tier category 6 | PTX Robustness | Large-scale + numerical edge cases for circuit kernels |
+| GPU-tier category 7 | SAT/CDCL | GPU CDCL SAT/UNSAT verifier correctness |
+| GPU-tier category 8 | Device Counts | Device-resident row-count invariants and related helpers |
 
 ## PTX Module Coverage
 
-Category C01 enumerates every `.entry` in each PTX module and verifies resolution via `CudaKernelProvider`:
+The toolchain/PTX/SASS category enumerates every `.entry` in each PTX module and verifies resolution via `CudaKernelProvider`:
 
 | Module | Kernels |
 |--------|---------|
@@ -137,18 +137,18 @@ Three kernel modules are compiled from `.cu` at build time by
 `crates/xlog-cuda/build.rs` and do **not** have checked-in `.ptx`
 artifacts. They are loaded at runtime via the `KERNEL_MODULES` manifest
 (currently 22 entries) but are *not* auto-discovered by
-`c01_toolchain::test_kernel_function_resolution`, which enumerates
+the toolchain category's kernel-function-resolution test, which enumerates
 committed `.ptx` files only.
 
 | Module | `.cu` source | Purpose |
 |--------|--------------|---------|
 | `xlog_ilp` | `kernels/ilp.cu` | Selected-ID mask helpers, sparse mask COO fill, CSR histogram, f32/f64 block reductions |
 | `xlog_ilp_credit` | `kernels/ilp_credit.cu` | Credit forward/backward for dILP loss gradient |
-| `xlog_ilp_exact` | `kernels/ilp_exact.cu` | M8 Phase 1 bounded exact-induction scorer (`ilp_exact_score`). See [bounded-exact-induction.md](bounded-exact-induction.md). |
+| `xlog_ilp_exact` | `kernels/ilp_exact.cu` | External-consumer bounded exact-induction scorer (`ilp_exact_score`). See [bounded-exact-induction.md](bounded-exact-induction.md). |
 
 Each module is covered by crate-local CUDA-gated tests instead of the
-central C01 enumeration (see each crate's `provider/ilp*.rs` test
-submodules). If a future need arises for central C01-style coverage of
+central toolchain enumeration (see each crate's `provider/ilp*.rs` test
+submodules). If a future need arises for central toolchain-style coverage of
 these modules, committing their `.portable.ptx` build output into
 `kernels/` is the minimal incremental change.
 
@@ -199,8 +199,8 @@ CPU reference implementations for all operations:
 
 | Category Group | Tests |
 |----------------|-------|
-| Core CUDA kernels (C01-C25) | 151 |
-| Probabilistic/Neural/Solver kernels (G01-G08) | 56 |
+| Core CUDA kernels (core categories 1-25) | 151 |
+| Probabilistic/Neural/Solver kernels (GPU-tier categories 1-8) | 56 |
 | **Total** | **207** |
 
 ## Key Correctness Tests
@@ -223,8 +223,8 @@ Tests verify that radix sort maintains stable ordering (equal keys preserve orig
 
 ## Adding New Tests
 
-1. Identify the appropriate category (core: C01-C25; probabilistic/neural/solver: G01-G08)
-2. Add test function in `src/categories/{cXX,gXX}_*.rs`
+1. Identify the appropriate category (core categories or GPU-tier categories)
+2. Add test function in the matching `src/categories/` file
 3. Use generators for edge case coverage
 4. Implement CPU reference validator
 5. Register in category module

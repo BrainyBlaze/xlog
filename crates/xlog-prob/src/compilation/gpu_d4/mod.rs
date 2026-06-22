@@ -1,4 +1,4 @@
-//! GPU-native D4 compilation (Phase 1).
+//! GPU-native Decision-DNNF knowledge compilation.
 //!
 //! This module provides the configuration and kernel-facing utilities needed
 //! to compile a device-resident CNF into a device-resident XGCF circuit.
@@ -46,7 +46,7 @@ pub(super) fn memset_u8_sync(dst: &mut TrackedCudaSlice<u8>, value: u8) -> Resul
     Ok(())
 }
 
-/// Configuration for GPU D4 + GPU CDCL.
+/// Configuration for GPU-native Decision-DNNF knowledge compilation plus GPU CDCL verification.
 ///
 /// This is the public control-plane contract for the GPU-native compilation pipeline.
 /// Use [`GpuCompileConfig::default()`] for conservative static defaults, or
@@ -400,17 +400,17 @@ pub(crate) fn exclusive_scan_u32_inplace(
     Ok(())
 }
 
-/// Compile a device-resident CNF into a device-resident XGCF circuit (Phase 1).
+/// Compile a device-resident CNF into a device-resident XGCF circuit.
 pub(crate) fn compile_gpu_d4(
     cnf: &GpuCnf,
     provider: &Arc<CudaKernelProvider>,
     config: &GpuCompileConfig,
 ) -> Result<GpuXgcf> {
     let compile_needed = alloc_compile_gate(provider, 1)?;
-    build::compile_gpu_d4_with_gate(cnf, provider, config, &compile_needed)
+    Ok(build::compile_gpu_d4_with_gate(cnf, provider, config, &compile_needed)?.0)
 }
 
-/// Compile a device-resident CNF into a device-resident XGCF circuit (Phase 1),
+/// Compile a device-resident CNF into a device-resident XGCF circuit,
 /// skipping work on the device when `compile_needed` is 0.
 pub fn compile_gpu_d4_gated(
     cnf: &GpuCnf,
@@ -418,6 +418,17 @@ pub fn compile_gpu_d4_gated(
     config: &GpuCompileConfig,
     compile_needed: &TrackedCudaSlice<u32>,
 ) -> Result<GpuXgcf> {
+    Ok(build::compile_gpu_d4_with_gate(cnf, provider, config, compile_needed)?.0)
+}
+
+/// Gated compile that also returns the BFS frontier item count for profiling
+/// (0 unless `XLOG_WARMUP_PROFILE=1`).
+pub(crate) fn compile_gpu_d4_gated_with_stats(
+    cnf: &GpuCnf,
+    provider: &Arc<CudaKernelProvider>,
+    config: &GpuCompileConfig,
+    compile_needed: &TrackedCudaSlice<u32>,
+) -> Result<(GpuXgcf, u32)> {
     build::compile_gpu_d4_with_gate(cnf, provider, config, compile_needed)
 }
 

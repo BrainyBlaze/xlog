@@ -5,8 +5,8 @@ set_rule_mask / evaluate / batch_fact_membership_device API to exhaustively
 score all (left, right) candidate pairs across the four canonical topologies,
 returning the top-K per topology with full candidate metadata.
 
-Phase 0 throwaway — Phase 1 replaces this with a Rust/CUDA crate that does
-the same scoring in a single batched GPU pass with one D2H transfer.
+Python reference scorer. The native Rust/CUDA backend performs the same scoring
+in a single batched GPU pass with one D2H transfer.
 """
 from __future__ import annotations
 
@@ -95,7 +95,7 @@ def induce_exact(
         ``candidate_relations`` may include the head relation — the scorer
         will happily score self-referential rules (e.g. p(X,Y) :- p(X,Z), p(Z,Y)).
         The caller is responsible for excluding the head if self-reference is
-        undesired. DTS production code excludes it; the learned-rules data shows
+        undesired. Production consumers can exclude it; learned-rules data shows
         self-referential rules ARE frequently the top scorer.
 
     Args:
@@ -106,7 +106,7 @@ def induce_exact(
         negative_arg0, negative_arg1: Optional 1-D device tensors of negative pairs.
         k_per_topology: How many top candidates to keep per topology.
         deterministic: Unused in Python prototype (determinism is inherent).
-        backend: ``"native"`` dispatches to the Phase 1 ``xlog-induce`` engine
+        backend: ``"native"`` dispatches to the ``xlog-induce`` engine
             and is the default production path. ``"python"`` is a gated
             reference prototype implementation (the
             host-orchestrated ``set_rule_mask``/``evaluate``/``batch_fact_membership_device``
@@ -118,8 +118,8 @@ def induce_exact(
             original prototype behavior in which stale masks from prior
             outer-loop iterations contaminate later topologies' coverage
             numbers. Kept default-False for backward compatibility with
-            historical DTS Phase 0 measurements (e.g. Phase 0d's 449/449
-            liveness baseline was measured against this behavior).
+            historical compatibility measurements that were taken before the
+            native backend isolated topology scoring.
 
             The ``"native"`` backend implements the strict-per-topology
             semantics by construction — each ``(topology, L, R)`` triple is
@@ -192,7 +192,7 @@ def induce_exact(
     # between outer-loop iterations so each topology's inner-loop scoring is
     # isolated. Without this, a topology's final one-hot mask bleeds into
     # the next topology's coverage counts via stale state inside evaluate(),
-    # which was a real bug caught by Phase 1 parity testing against the
+    # which was a real bug caught by native-backend parity testing against the
     # native backend.
     flat_zero = torch.zeros(N * N * N, dtype=torch.float32, device=device)
 
@@ -203,7 +203,7 @@ def induce_exact(
         # Opt-in: zero out all other topology masks so only this topology's
         # rule can contribute to p_A derivations during evaluate(). See
         # comment on `flat_zero` above. Default-off to preserve historical
-        # DTS Phase 0 measurements that were calibrated against the original
+        # compatibility measurements that were calibrated against the original
         # prototype's cross-topology contamination behavior.
         if strict_per_topology:
             for other_topo, other_mask in zip(TOPOLOGIES, mask_names):

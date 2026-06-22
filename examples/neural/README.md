@@ -4,8 +4,7 @@ Neural-symbolic training examples demonstrating integration where neural network
 
 ## Overview
 
-These examples exercise XLOG's neural-symbolic training stack, introduced during the
-`v0.4.0-alpha` milestone and available in the current `v0.5.x` release line:
+These examples exercise XLOG's neural-symbolic training stack:
 
 - **Neural Predicates**: `nn(network, [inputs], output, [labels]) :: predicate(args).`
 - **Network Registration**: PyTorch networks with optimizers and schedulers
@@ -51,7 +50,10 @@ This benchmark is no-leakage: training uses only train split images with additio
 **Program:**
 ```prolog
 nn(mnist_net, [X], Y, [0,1,2,3,4,5,6,7,8,9]) :: digit(X, Y).
-addition(X, Y, Z) :- digit(X, D1), digit(Y, D2), Z is D1 + D2.
+addition(X, Y, Z) :-
+    digit(X, LeftDigit),
+    digit(Y, RightDigit),
+    Z is LeftDigit + RightDigit.
 ```
 
 **Training:**
@@ -63,7 +65,7 @@ queries = ["addition(0, 1, 7)", "addition(2, 3, 5)", ...]
 history = pyxlog.train_model(program, queries, epochs=50, batch_size=32)
 ```
 
-## Required Example Set (Carried Forward Since `v0.4.0-alpha`)
+## Required Example Set
 
 The required neural-symbolic example set is now present in the repository:
 
@@ -75,8 +77,8 @@ The required neural-symbolic example set is now present in the repository:
 | **05_poker** | Card rank classification |
 | **06_clutrr** | Family relationship reasoning with knowledge graphs |
 
-The original milestone was gated on end-to-end validation across these examples with
-real datasets; the examples remain part of the current release line.
+The set is intended for end-to-end validation across these examples with real
+datasets.
 
 Each `train.py --mode release` run now emits a `FINAL_METRIC` line and enforces
 the example-specific minimum accuracy from `examples/neural/<example>/dataset.json`
@@ -111,7 +113,10 @@ import pyxlog
 # Compile program with neural predicates
 program = pyxlog.Program.compile("""
     nn(net_name, [X], Y, [0,1,...,9]) :: digit(X, Y).
-    addition(X, Y, Z) :- digit(X, D1), digit(Y, D2), Z is D1 + D2.
+    addition(X, Y, Z) :-
+        digit(X, LeftDigit),
+        digit(Y, RightDigit),
+        Z is LeftDigit + RightDigit.
 """)
 
 # Register PyTorch network

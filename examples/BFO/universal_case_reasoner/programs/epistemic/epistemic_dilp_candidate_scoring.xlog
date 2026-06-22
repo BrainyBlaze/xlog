@@ -1,0 +1,142 @@
+// UCR v0.9.0 FAEEL DILP candidate scoring.
+//
+// Python may stage CUDA neural margins, raw XLOG proof-trace support, and
+// learned selected-schema weights as relation facts. Production proof support
+// and candidate scores are emitted by executable XLOG semantics and then
+// consumed by the final XLOG generalization decision program.
+
+#pragma epistemic_mode = faeel
+
+use modules/candidate_feature_components.
+
+pred scoring_candidate(u32, u32, u32, u32).
+pred selected_proof_schema(u32, u32).
+pred neural_margin_score(u32, u32, u32).
+pred candidate_raw_feature_score(u32, u32, u32, u32, u32).
+pred bfo_evidence_score(u32, u32, u32).
+pred literal_observation_score(u32, u32, u32).
+pred mismatch_penalty_score(u32, u32, u32).
+pred candidate_feature_score(u32, u32, u32, u32, u32).
+pred proof_trace_support(u32, u32, u32, u32, u32).
+pred selected_proof_support_score(u32, u32, u32).
+pred selected_proof_schema_weight(u32, u32, u32).
+pred selector_accepted_score(u32, u32).
+pred unsafe_score_candidate(u32, u32).
+pred dilp_scoring_epistemic_gate().
+pred dilp_selector_epistemic_gate().
+pred proof_weighted_score(u32, u32, u32).
+pred dilp_transductive_transfer_signal(u32, u32, u32).
+pred dilp_neural_instability_score(u32, u32, u32).
+pred dilp_metastable_transfer_margin(u32, u32, u32).
+pred dilp_metastable_transfer_floor_zero(u32, u32).
+pred bounded_dilp_metastable_transfer_margin(u32, u32, u32).
+pred dilp_neural_base_score(u32, u32, u32).
+pred dilp_candidate_feature_support(u32, u32, u32).
+pred dilp_candidate_positive_score(u32, u32, u32).
+pred dilp_candidate_mismatch_penalty(u32, u32, u32).
+pred raw_dilp_candidate_score(u32, u32, u32).
+pred dilp_candidate_score_floor_zero(u32, u32).
+pred ungated_dilp_candidate_score(u32, u32, u32).
+pred dilp_candidate_score(u32, u32, u32).
+
+selected_proof_support_score(Case, Candidate, Support) :-
+    scoring_candidate(Case, Candidate, Schema, SupportId),
+    selected_proof_schema(Schema, SupportId),
+    proof_trace_support(Case, Candidate, Schema, SupportId, Support).
+
+proof_weighted_score(Case, Candidate, Score) :-
+    scoring_candidate(Case, Candidate, Schema, SupportId),
+    selected_proof_support_score(Case, Candidate, Support),
+    selected_proof_schema_weight(Schema, SupportId, Weight),
+    Score is (Support * Weight) / cast(10000, u32).
+
+dilp_transductive_transfer_signal(Case, Candidate, Support) :-
+    scoring_candidate(Case, Candidate, Schema, SupportId),
+    selected_proof_support_score(Case, Candidate, Support),
+    selected_proof_schema_weight(Schema, SupportId, Weight),
+    Support <= Weight.
+
+dilp_transductive_transfer_signal(Case, Candidate, Weight) :-
+    scoring_candidate(Case, Candidate, Schema, SupportId),
+    selected_proof_support_score(Case, Candidate, Support),
+    selected_proof_schema_weight(Schema, SupportId, Weight),
+    Weight < Support.
+
+dilp_neural_instability_score(Case, Candidate, Instability) :-
+    neural_margin_score(Case, Candidate, Neural),
+    Neural <= 10000,
+    Instability is cast(10000, u32) - Neural.
+
+dilp_neural_instability_score(Case, Candidate, Zero) :-
+    neural_margin_score(Case, Candidate, Neural),
+    Neural > 10000,
+    Zero is Neural - Neural.
+
+dilp_metastable_transfer_margin(Case, Candidate, Margin) :-
+    dilp_transductive_transfer_signal(Case, Candidate, Signal),
+    dilp_neural_instability_score(Case, Candidate, Instability),
+    Signal >= Instability,
+    Margin is Signal - Instability.
+
+dilp_metastable_transfer_floor_zero(Case, Candidate) :-
+    dilp_transductive_transfer_signal(Case, Candidate, Signal),
+    dilp_neural_instability_score(Case, Candidate, Instability),
+    Instability > Signal.
+
+bounded_dilp_metastable_transfer_margin(Case, Candidate, Margin) :-
+    dilp_metastable_transfer_margin(Case, Candidate, Margin).
+
+bounded_dilp_metastable_transfer_margin(Case, Candidate, Zero) :-
+    dilp_transductive_transfer_signal(Case, Candidate, Signal),
+    dilp_neural_instability_score(Case, Candidate, Instability),
+    Instability > Signal,
+    Zero is Signal - Signal.
+
+dilp_neural_base_score(Case, Candidate, NeuralBase) :-
+    neural_margin_score(Case, Candidate, NeuralBase).
+
+dilp_candidate_feature_support(Case, Candidate, FeatureSupport) :-
+    scoring_candidate(Case, Candidate, Schema, SupportId),
+    selected_proof_schema(Schema, SupportId),
+    proof_weighted_score(Case, Candidate, Proof),
+    candidate_feature_score(Case, Candidate, Bfo, Literal, _),
+    dilp_transductive_transfer_signal(Case, Candidate, TransferSignal),
+    FeatureSupport is Proof + (Bfo * cast(2, u32)) + Literal + TransferSignal.
+
+dilp_candidate_positive_score(Case, Candidate, Positive) :-
+    dilp_neural_base_score(Case, Candidate, NeuralBase),
+    dilp_candidate_feature_support(Case, Candidate, FeatureSupport),
+    Positive is NeuralBase + FeatureSupport.
+
+dilp_candidate_mismatch_penalty(Case, Candidate, Penalty) :-
+    candidate_feature_score(Case, Candidate, _, _, Mismatch),
+    Penalty is Mismatch.
+
+raw_dilp_candidate_score(Case, Candidate, Score) :-
+    dilp_candidate_positive_score(Case, Candidate, Positive),
+    dilp_candidate_mismatch_penalty(Case, Candidate, Penalty),
+    Positive >= Penalty,
+    Score is Positive - Penalty.
+
+dilp_candidate_score_floor_zero(Case, Candidate) :-
+    dilp_candidate_positive_score(Case, Candidate, Positive),
+    dilp_candidate_mismatch_penalty(Case, Candidate, Penalty),
+    Penalty > Positive.
+
+ungated_dilp_candidate_score(Case, Candidate, Score) :-
+    raw_dilp_candidate_score(Case, Candidate, Score).
+
+ungated_dilp_candidate_score(Case, Candidate, Zero) :-
+    dilp_candidate_score_floor_zero(Case, Candidate),
+    dilp_candidate_positive_score(Case, Candidate, Positive),
+    Zero is Positive - Positive.
+
+dilp_candidate_score(Case, Candidate, Score) :-
+    ungated_dilp_candidate_score(Case, Candidate, Score),
+    selector_accepted_score(Case, Candidate),
+    know dilp_scoring_epistemic_gate(),
+    know dilp_selector_epistemic_gate(),
+    possible dilp_selector_epistemic_gate(),
+    not unsafe_score_candidate(Case, Candidate).
+
+?- dilp_candidate_score(Case, Candidate, Score).

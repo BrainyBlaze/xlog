@@ -225,7 +225,7 @@ extern "C" __global__ void wcoj_build_metadata_scatter_u32(
     uint32_t degree = end - i;
     unique_keys[out] = key;
     fan_out[out] = degree;
-    prefix_sum[out] = degree;
+    prefix_sum[out] = i;
 }
 
 extern "C" __global__ void wcoj_build_metadata_scatter_u64(
@@ -246,7 +246,7 @@ extern "C" __global__ void wcoj_build_metadata_scatter_u64(
     uint32_t degree = end - i;
     unique_keys[out] = key;
     fan_out[out] = degree;
-    prefix_sum[out] = degree;
+    prefix_sum[out] = i;
 }
 
 extern "C" __global__ void wcoj_triangle_build_hg_work_plan_u32(
@@ -371,6 +371,275 @@ extern "C" __global__ void wcoj_triangle_count_hg_u32(
     if (threadIdx.x == 0) {
         // T3 Alg.1 line 9: per-block output counts feed the deterministic scan.
         out_block_counts[blockIdx.x] = partial[0];
+    }
+}
+
+// Aggregate-fused triangle group-by-root count variant of
+// wcoj_triangle_count_hg_u32: instead of
+// reducing matches to one total, each match increments the counter of its
+// e_xy root row (`out_row_counts[xy_idx]`, length n_xy, zero-initialized by
+// the host). e_xy is lex-sorted by (X, Y), so per-X group counts are a
+// segmented sum over contiguous row ranges downstream. Integer atomicAdd is
+// order-insensitive, so the final counter values are deterministic
+// (precedent: groupby_sum). The triangle rows are never materialized.
+extern "C" __global__ void wcoj_triangle_groupby_root_count_hg_u32(
+    const uint32_t* __restrict__ yz_col1,
+    uint32_t n_yz,
+    const uint32_t* __restrict__ xz_col1,
+    uint32_t n_xz,
+    const uint32_t* __restrict__ xy_work_prefix,
+    const uint32_t* __restrict__ xy_yz_start,
+    const uint32_t* __restrict__ xy_yz_end,
+    const uint32_t* __restrict__ xy_xz_start,
+    const uint32_t* __restrict__ xy_xz_end,
+    uint32_t n_xy,
+    uint32_t total_work,
+    uint32_t block_work_unit,
+    uint32_t* __restrict__ out_row_counts) {
+    uint32_t block_start = blockIdx.x * block_work_unit;
+    if (block_start >= total_work) {
+        return;
+    }
+    uint32_t block_end = block_start + block_work_unit;
+    if (block_end < block_start || block_end > total_work) {
+        block_end = total_work;
+    }
+
+    for (uint32_t work_idx = block_start + threadIdx.x;
+         work_idx < block_end;
+         work_idx += blockDim.x) {
+        uint32_t root_pos = upper_bound_u32(xy_work_prefix, n_xy + 1, work_idx);
+        if (root_pos == 0) {
+            continue;
+        }
+        uint32_t xy_idx = root_pos - 1;
+        if (xy_idx >= n_xy) {
+            continue;
+        }
+        uint32_t row_start = xy_work_prefix[xy_idx];
+        uint32_t yz_lo = xy_yz_start[xy_idx];
+        uint32_t yz_hi = xy_yz_end[xy_idx];
+        uint32_t xz_lo = xy_xz_start[xy_idx];
+        uint32_t xz_hi = xy_xz_end[xy_idx];
+        if (yz_hi > n_yz || xz_hi > n_xz || yz_lo >= yz_hi || xz_lo >= xz_hi) {
+            continue;
+        }
+        uint32_t yz_len = yz_hi - yz_lo;
+        uint32_t xz_len = xz_hi - xz_lo;
+        uint32_t probe_offset = work_idx - row_start;
+        bool matched = false;
+        if (yz_len <= xz_len) {
+            if (probe_offset >= yz_len) {
+                continue;
+            }
+            uint32_t z = yz_col1[yz_lo + probe_offset];
+            uint32_t found = lower_bound_u32(xz_col1 + xz_lo, xz_len, z);
+            matched = found < xz_len && xz_col1[xz_lo + found] == z;
+        } else {
+            if (probe_offset >= xz_len) {
+                continue;
+            }
+            uint32_t z = xz_col1[xz_lo + probe_offset];
+            uint32_t found = lower_bound_u32(yz_col1 + yz_lo, yz_len, z);
+            matched = found < yz_len && yz_col1[yz_lo + found] == z;
+        }
+        if (matched) {
+            atomicAdd(&out_row_counts[xy_idx], 1u);
+        }
+    }
+}
+
+namespace {
+
+// Triangle aggregate-fusion helper: resolve one flattened work index
+// to its e_xy root row and, on a completed triangle, the aggregate value (Y when
+// `value_from_z == 0`, the matched Z otherwise). Traversal is identical to
+// `wcoj_triangle_groupby_root_count_hg_u32`. Returns false for padding /
+// out-of-range / unmatched work items.
+__device__ __forceinline__ bool groupby_root_match_value_u32(
+    const uint32_t* __restrict__ yz_col1, uint32_t n_yz,
+    const uint32_t* __restrict__ xz_col1, uint32_t n_xz,
+    const uint32_t* __restrict__ xy_col1,
+    uint32_t value_from_z,
+    const uint32_t* __restrict__ xy_work_prefix,
+    const uint32_t* __restrict__ xy_yz_start,
+    const uint32_t* __restrict__ xy_yz_end,
+    const uint32_t* __restrict__ xy_xz_start,
+    const uint32_t* __restrict__ xy_xz_end,
+    uint32_t n_xy,
+    uint32_t work_idx,
+    uint32_t* __restrict__ out_xy_idx,
+    uint32_t* __restrict__ out_value) {
+    uint32_t root_pos = upper_bound_u32(xy_work_prefix, n_xy + 1, work_idx);
+    if (root_pos == 0) {
+        return false;
+    }
+    uint32_t xy_idx = root_pos - 1;
+    if (xy_idx >= n_xy) {
+        return false;
+    }
+    uint32_t row_start = xy_work_prefix[xy_idx];
+    uint32_t yz_lo = xy_yz_start[xy_idx];
+    uint32_t yz_hi = xy_yz_end[xy_idx];
+    uint32_t xz_lo = xy_xz_start[xy_idx];
+    uint32_t xz_hi = xy_xz_end[xy_idx];
+    if (yz_hi > n_yz || xz_hi > n_xz || yz_lo >= yz_hi || xz_lo >= xz_hi) {
+        return false;
+    }
+    uint32_t yz_len = yz_hi - yz_lo;
+    uint32_t xz_len = xz_hi - xz_lo;
+    uint32_t probe_offset = work_idx - row_start;
+    bool matched = false;
+    uint32_t z = 0;
+    if (yz_len <= xz_len) {
+        if (probe_offset >= yz_len) {
+            return false;
+        }
+        z = yz_col1[yz_lo + probe_offset];
+        uint32_t found = lower_bound_u32(xz_col1 + xz_lo, xz_len, z);
+        matched = found < xz_len && xz_col1[xz_lo + found] == z;
+    } else {
+        if (probe_offset >= xz_len) {
+            return false;
+        }
+        z = xz_col1[xz_lo + probe_offset];
+        uint32_t found = lower_bound_u32(yz_col1 + yz_lo, yz_len, z);
+        matched = found < yz_len && yz_col1[yz_lo + found] == z;
+    }
+    if (!matched) {
+        return false;
+    }
+    *out_xy_idx = xy_idx;
+    *out_value = (value_from_z != 0u) ? z : xy_col1[xy_idx];
+    return true;
+}
+
+}  // anonymous namespace
+
+// Triangle aggregate-fused sum/min/max variants of the root kernel.
+// Each match contributes its value (Y or Z, both triangle output
+// variables) to the e_xy root row's accumulator, alongside a match
+// counter (`out_row_counts`) that downstream compaction uses to drop
+// roots with no completion. Integer atomics are order-insensitive, so
+// final accumulator values are deterministic. Host pre-initializes
+// accumulators: 0 for sum/max, 0xFFFFFFFF for min.
+extern "C" __global__ void wcoj_triangle_groupby_root_sum_hg_u32(
+    const uint32_t* __restrict__ yz_col1,
+    uint32_t n_yz,
+    const uint32_t* __restrict__ xz_col1,
+    uint32_t n_xz,
+    const uint32_t* __restrict__ xy_col1,
+    uint32_t value_from_z,
+    const uint32_t* __restrict__ xy_work_prefix,
+    const uint32_t* __restrict__ xy_yz_start,
+    const uint32_t* __restrict__ xy_yz_end,
+    const uint32_t* __restrict__ xy_xz_start,
+    const uint32_t* __restrict__ xy_xz_end,
+    uint32_t n_xy,
+    uint32_t total_work,
+    uint32_t block_work_unit,
+    uint32_t* __restrict__ out_row_counts,
+    unsigned long long* __restrict__ out_row_sums) {
+    uint32_t block_start = blockIdx.x * block_work_unit;
+    if (block_start >= total_work) {
+        return;
+    }
+    uint32_t block_end = block_start + block_work_unit;
+    if (block_end < block_start || block_end > total_work) {
+        block_end = total_work;
+    }
+    for (uint32_t work_idx = block_start + threadIdx.x;
+         work_idx < block_end;
+         work_idx += blockDim.x) {
+        uint32_t xy_idx = 0;
+        uint32_t value = 0;
+        if (groupby_root_match_value_u32(
+                yz_col1, n_yz, xz_col1, n_xz, xy_col1, value_from_z,
+                xy_work_prefix, xy_yz_start, xy_yz_end, xy_xz_start,
+                xy_xz_end, n_xy, work_idx, &xy_idx, &value)) {
+            atomicAdd(&out_row_counts[xy_idx], 1u);
+            atomicAdd(&out_row_sums[xy_idx], (unsigned long long)value);
+        }
+    }
+}
+
+extern "C" __global__ void wcoj_triangle_groupby_root_min_hg_u32(
+    const uint32_t* __restrict__ yz_col1,
+    uint32_t n_yz,
+    const uint32_t* __restrict__ xz_col1,
+    uint32_t n_xz,
+    const uint32_t* __restrict__ xy_col1,
+    uint32_t value_from_z,
+    const uint32_t* __restrict__ xy_work_prefix,
+    const uint32_t* __restrict__ xy_yz_start,
+    const uint32_t* __restrict__ xy_yz_end,
+    const uint32_t* __restrict__ xy_xz_start,
+    const uint32_t* __restrict__ xy_xz_end,
+    uint32_t n_xy,
+    uint32_t total_work,
+    uint32_t block_work_unit,
+    uint32_t* __restrict__ out_row_counts,
+    uint32_t* __restrict__ out_row_mins) {
+    uint32_t block_start = blockIdx.x * block_work_unit;
+    if (block_start >= total_work) {
+        return;
+    }
+    uint32_t block_end = block_start + block_work_unit;
+    if (block_end < block_start || block_end > total_work) {
+        block_end = total_work;
+    }
+    for (uint32_t work_idx = block_start + threadIdx.x;
+         work_idx < block_end;
+         work_idx += blockDim.x) {
+        uint32_t xy_idx = 0;
+        uint32_t value = 0;
+        if (groupby_root_match_value_u32(
+                yz_col1, n_yz, xz_col1, n_xz, xy_col1, value_from_z,
+                xy_work_prefix, xy_yz_start, xy_yz_end, xy_xz_start,
+                xy_xz_end, n_xy, work_idx, &xy_idx, &value)) {
+            atomicAdd(&out_row_counts[xy_idx], 1u);
+            atomicMin(&out_row_mins[xy_idx], value);
+        }
+    }
+}
+
+extern "C" __global__ void wcoj_triangle_groupby_root_max_hg_u32(
+    const uint32_t* __restrict__ yz_col1,
+    uint32_t n_yz,
+    const uint32_t* __restrict__ xz_col1,
+    uint32_t n_xz,
+    const uint32_t* __restrict__ xy_col1,
+    uint32_t value_from_z,
+    const uint32_t* __restrict__ xy_work_prefix,
+    const uint32_t* __restrict__ xy_yz_start,
+    const uint32_t* __restrict__ xy_yz_end,
+    const uint32_t* __restrict__ xy_xz_start,
+    const uint32_t* __restrict__ xy_xz_end,
+    uint32_t n_xy,
+    uint32_t total_work,
+    uint32_t block_work_unit,
+    uint32_t* __restrict__ out_row_counts,
+    uint32_t* __restrict__ out_row_maxs) {
+    uint32_t block_start = blockIdx.x * block_work_unit;
+    if (block_start >= total_work) {
+        return;
+    }
+    uint32_t block_end = block_start + block_work_unit;
+    if (block_end < block_start || block_end > total_work) {
+        block_end = total_work;
+    }
+    for (uint32_t work_idx = block_start + threadIdx.x;
+         work_idx < block_end;
+         work_idx += blockDim.x) {
+        uint32_t xy_idx = 0;
+        uint32_t value = 0;
+        if (groupby_root_match_value_u32(
+                yz_col1, n_yz, xz_col1, n_xz, xy_col1, value_from_z,
+                xy_work_prefix, xy_yz_start, xy_yz_end, xy_xz_start,
+                xy_xz_end, n_xy, work_idx, &xy_idx, &value)) {
+            atomicAdd(&out_row_counts[xy_idx], 1u);
+            atomicMax(&out_row_maxs[xy_idx], value);
+        }
     }
 }
 
@@ -633,6 +902,357 @@ extern "C" __global__ void wcoj_triangle_count_hg_u64(
     if (threadIdx.x == 0) {
         out_block_counts[blockIdx.x] = partial[0];
     }
+}
+
+// U64-key triangle aggregate-fused count sibling of
+// `wcoj_triangle_groupby_root_count_hg_u32`: each match increments the
+// counter of its e_xy root row. Traversal mirrors
+// `wcoj_triangle_count_hg_u64`; counters stay u32 (row counts bounded by
+// the host-side u32 row guard upstream of every WCOJ entry).
+extern "C" __global__ void wcoj_triangle_groupby_root_count_hg_u64(
+    const uint64_t* __restrict__ yz_col1,
+    uint32_t n_yz,
+    const uint64_t* __restrict__ xz_col1,
+    uint32_t n_xz,
+    const uint32_t* __restrict__ xy_work_prefix,
+    const uint32_t* __restrict__ xy_yz_start,
+    const uint32_t* __restrict__ xy_yz_end,
+    const uint32_t* __restrict__ xy_xz_start,
+    const uint32_t* __restrict__ xy_xz_end,
+    uint32_t n_xy,
+    uint32_t total_work,
+    uint32_t block_work_unit,
+    uint32_t* __restrict__ out_row_counts) {
+    uint32_t block_start = blockIdx.x * block_work_unit;
+    if (block_start >= total_work) {
+        return;
+    }
+    uint32_t block_end = block_start + block_work_unit;
+    if (block_end < block_start || block_end > total_work) {
+        block_end = total_work;
+    }
+
+    for (uint32_t work_idx = block_start + threadIdx.x;
+         work_idx < block_end;
+         work_idx += blockDim.x) {
+        uint32_t root_pos = upper_bound_u32(xy_work_prefix, n_xy + 1, work_idx);
+        if (root_pos == 0) {
+            continue;
+        }
+        uint32_t xy_idx = root_pos - 1;
+        if (xy_idx >= n_xy) {
+            continue;
+        }
+        uint32_t row_start = xy_work_prefix[xy_idx];
+        uint32_t yz_lo = xy_yz_start[xy_idx];
+        uint32_t yz_hi = xy_yz_end[xy_idx];
+        uint32_t xz_lo = xy_xz_start[xy_idx];
+        uint32_t xz_hi = xy_xz_end[xy_idx];
+        if (yz_hi > n_yz || xz_hi > n_xz || yz_lo >= yz_hi || xz_lo >= xz_hi) {
+            continue;
+        }
+        uint32_t yz_len = yz_hi - yz_lo;
+        uint32_t xz_len = xz_hi - xz_lo;
+        uint32_t probe_offset = work_idx - row_start;
+        bool matched = false;
+        if (yz_len <= xz_len) {
+            if (probe_offset >= yz_len) {
+                continue;
+            }
+            uint64_t z = yz_col1[yz_lo + probe_offset];
+            uint32_t found = lower_bound_u64(xz_col1 + xz_lo, xz_len, z);
+            matched = found < xz_len && xz_col1[xz_lo + found] == z;
+        } else {
+            if (probe_offset >= xz_len) {
+                continue;
+            }
+            uint64_t z = xz_col1[xz_lo + probe_offset];
+            uint32_t found = lower_bound_u64(yz_col1 + yz_lo, yz_len, z);
+            matched = found < yz_len && yz_col1[yz_lo + found] == z;
+        }
+        if (matched) {
+            atomicAdd(&out_row_counts[xy_idx], 1u);
+        }
+    }
+}
+
+// Reduce per-row match counts into per-unique-root u64
+// totals. `group_start[g]` is the first e_xy row of unique root g
+// (ascending; the WCOJ metadata builder's prefix_sum), so a row's group is
+// found by binary search. Key-width agnostic: only row indices are read.
+// Integer atomicAdd keeps the totals deterministic.
+extern "C" __global__ void wcoj_groupby_root_segment_sum_counts_u32(
+    const uint32_t* __restrict__ row_counts,
+    uint32_t n_rows,
+    const uint32_t* __restrict__ group_start,
+    uint32_t key_count,
+    unsigned long long* __restrict__ out_sums) {
+    uint32_t i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n_rows) {
+        return;
+    }
+    uint32_t c = row_counts[i];
+    if (c == 0) {
+        return;
+    }
+    uint32_t pos = upper_bound_u32(group_start, key_count, i);
+    if (pos == 0) {
+        return;
+    }
+    atomicAdd(&out_sums[pos - 1], (unsigned long long)c);
+}
+
+namespace {
+
+// U64-key triangle aggregate helper: sibling of `groupby_root_match_value_u32`.
+// Resolves one flattened work index to its e_xy root row and, on a
+// completed triangle, the aggregate value (Y when `value_from_z == 0`,
+// the matched Z otherwise). Traversal is identical to
+// `wcoj_triangle_groupby_root_count_hg_u64`.
+__device__ __forceinline__ bool groupby_root_match_value_u64(
+    const uint64_t* __restrict__ yz_col1, uint32_t n_yz,
+    const uint64_t* __restrict__ xz_col1, uint32_t n_xz,
+    const uint64_t* __restrict__ xy_col1,
+    uint32_t value_from_z,
+    const uint32_t* __restrict__ xy_work_prefix,
+    const uint32_t* __restrict__ xy_yz_start,
+    const uint32_t* __restrict__ xy_yz_end,
+    const uint32_t* __restrict__ xy_xz_start,
+    const uint32_t* __restrict__ xy_xz_end,
+    uint32_t n_xy,
+    uint32_t work_idx,
+    uint32_t* __restrict__ out_xy_idx,
+    uint64_t* __restrict__ out_value) {
+    uint32_t root_pos = upper_bound_u32(xy_work_prefix, n_xy + 1, work_idx);
+    if (root_pos == 0) {
+        return false;
+    }
+    uint32_t xy_idx = root_pos - 1;
+    if (xy_idx >= n_xy) {
+        return false;
+    }
+    uint32_t row_start = xy_work_prefix[xy_idx];
+    uint32_t yz_lo = xy_yz_start[xy_idx];
+    uint32_t yz_hi = xy_yz_end[xy_idx];
+    uint32_t xz_lo = xy_xz_start[xy_idx];
+    uint32_t xz_hi = xy_xz_end[xy_idx];
+    if (yz_hi > n_yz || xz_hi > n_xz || yz_lo >= yz_hi || xz_lo >= xz_hi) {
+        return false;
+    }
+    uint32_t yz_len = yz_hi - yz_lo;
+    uint32_t xz_len = xz_hi - xz_lo;
+    uint32_t probe_offset = work_idx - row_start;
+    bool matched = false;
+    uint64_t z = 0;
+    if (yz_len <= xz_len) {
+        if (probe_offset >= yz_len) {
+            return false;
+        }
+        z = yz_col1[yz_lo + probe_offset];
+        uint32_t found = lower_bound_u64(xz_col1 + xz_lo, xz_len, z);
+        matched = found < xz_len && xz_col1[xz_lo + found] == z;
+    } else {
+        if (probe_offset >= xz_len) {
+            return false;
+        }
+        z = xz_col1[xz_lo + probe_offset];
+        uint32_t found = lower_bound_u64(yz_col1 + yz_lo, yz_len, z);
+        matched = found < yz_len && yz_col1[yz_lo + found] == z;
+    }
+    if (!matched) {
+        return false;
+    }
+    *out_xy_idx = xy_idx;
+    *out_value = (value_from_z != 0u) ? z : xy_col1[xy_idx];
+    return true;
+}
+
+}  // anonymous namespace
+
+// U64-key triangle aggregate-fused sum/min/max variants of the root
+// kernel. Each match contributes its u64 value (Y or Z) to the e_xy root
+// row's accumulator, alongside a match counter that downstream compaction
+// uses to drop roots with no completion. Integer atomics are
+// order-insensitive, so final accumulator values are deterministic. Host
+// pre-initializes accumulators: 0 for sum/max, u64::MAX for min. Sum
+// accumulates u64 (wrapping on overflow, exactly like groupby_sum_u64).
+extern "C" __global__ void wcoj_triangle_groupby_root_sum_hg_u64(
+    const uint64_t* __restrict__ yz_col1,
+    uint32_t n_yz,
+    const uint64_t* __restrict__ xz_col1,
+    uint32_t n_xz,
+    const uint64_t* __restrict__ xy_col1,
+    uint32_t value_from_z,
+    const uint32_t* __restrict__ xy_work_prefix,
+    const uint32_t* __restrict__ xy_yz_start,
+    const uint32_t* __restrict__ xy_yz_end,
+    const uint32_t* __restrict__ xy_xz_start,
+    const uint32_t* __restrict__ xy_xz_end,
+    uint32_t n_xy,
+    uint32_t total_work,
+    uint32_t block_work_unit,
+    uint32_t* __restrict__ out_row_counts,
+    unsigned long long* __restrict__ out_row_sums) {
+    uint32_t block_start = blockIdx.x * block_work_unit;
+    if (block_start >= total_work) {
+        return;
+    }
+    uint32_t block_end = block_start + block_work_unit;
+    if (block_end < block_start || block_end > total_work) {
+        block_end = total_work;
+    }
+    for (uint32_t work_idx = block_start + threadIdx.x;
+         work_idx < block_end;
+         work_idx += blockDim.x) {
+        uint32_t xy_idx = 0;
+        uint64_t value = 0;
+        if (groupby_root_match_value_u64(
+                yz_col1, n_yz, xz_col1, n_xz, xy_col1, value_from_z,
+                xy_work_prefix, xy_yz_start, xy_yz_end, xy_xz_start,
+                xy_xz_end, n_xy, work_idx, &xy_idx, &value)) {
+            atomicAdd(&out_row_counts[xy_idx], 1u);
+            atomicAdd(&out_row_sums[xy_idx], (unsigned long long)value);
+        }
+    }
+}
+
+extern "C" __global__ void wcoj_triangle_groupby_root_min_hg_u64(
+    const uint64_t* __restrict__ yz_col1,
+    uint32_t n_yz,
+    const uint64_t* __restrict__ xz_col1,
+    uint32_t n_xz,
+    const uint64_t* __restrict__ xy_col1,
+    uint32_t value_from_z,
+    const uint32_t* __restrict__ xy_work_prefix,
+    const uint32_t* __restrict__ xy_yz_start,
+    const uint32_t* __restrict__ xy_yz_end,
+    const uint32_t* __restrict__ xy_xz_start,
+    const uint32_t* __restrict__ xy_xz_end,
+    uint32_t n_xy,
+    uint32_t total_work,
+    uint32_t block_work_unit,
+    uint32_t* __restrict__ out_row_counts,
+    unsigned long long* __restrict__ out_row_mins) {
+    uint32_t block_start = blockIdx.x * block_work_unit;
+    if (block_start >= total_work) {
+        return;
+    }
+    uint32_t block_end = block_start + block_work_unit;
+    if (block_end < block_start || block_end > total_work) {
+        block_end = total_work;
+    }
+    for (uint32_t work_idx = block_start + threadIdx.x;
+         work_idx < block_end;
+         work_idx += blockDim.x) {
+        uint32_t xy_idx = 0;
+        uint64_t value = 0;
+        if (groupby_root_match_value_u64(
+                yz_col1, n_yz, xz_col1, n_xz, xy_col1, value_from_z,
+                xy_work_prefix, xy_yz_start, xy_yz_end, xy_xz_start,
+                xy_xz_end, n_xy, work_idx, &xy_idx, &value)) {
+            atomicAdd(&out_row_counts[xy_idx], 1u);
+            atomicMin(&out_row_mins[xy_idx], (unsigned long long)value);
+        }
+    }
+}
+
+extern "C" __global__ void wcoj_triangle_groupby_root_max_hg_u64(
+    const uint64_t* __restrict__ yz_col1,
+    uint32_t n_yz,
+    const uint64_t* __restrict__ xz_col1,
+    uint32_t n_xz,
+    const uint64_t* __restrict__ xy_col1,
+    uint32_t value_from_z,
+    const uint32_t* __restrict__ xy_work_prefix,
+    const uint32_t* __restrict__ xy_yz_start,
+    const uint32_t* __restrict__ xy_yz_end,
+    const uint32_t* __restrict__ xy_xz_start,
+    const uint32_t* __restrict__ xy_xz_end,
+    uint32_t n_xy,
+    uint32_t total_work,
+    uint32_t block_work_unit,
+    uint32_t* __restrict__ out_row_counts,
+    unsigned long long* __restrict__ out_row_maxs) {
+    uint32_t block_start = blockIdx.x * block_work_unit;
+    if (block_start >= total_work) {
+        return;
+    }
+    uint32_t block_end = block_start + block_work_unit;
+    if (block_end < block_start || block_end > total_work) {
+        block_end = total_work;
+    }
+    for (uint32_t work_idx = block_start + threadIdx.x;
+         work_idx < block_end;
+         work_idx += blockDim.x) {
+        uint32_t xy_idx = 0;
+        uint64_t value = 0;
+        if (groupby_root_match_value_u64(
+                yz_col1, n_yz, xz_col1, n_xz, xy_col1, value_from_z,
+                xy_work_prefix, xy_yz_start, xy_yz_end, xy_xz_start,
+                xy_xz_end, n_xy, work_idx, &xy_idx, &value)) {
+            atomicAdd(&out_row_counts[xy_idx], 1u);
+            atomicMax(&out_row_maxs[xy_idx], (unsigned long long)value);
+        }
+    }
+}
+
+// Reduce per-row u64 aggregate partials into per-unique-root
+// totals, sibling of `wcoj_groupby_root_segment_sum_counts_u32`. Rows with
+// zero matches are skipped (their partials are identities anyway); roots
+// whose entire segment is empty are compacted away downstream via the
+// count totals. `group_start[g]` is the first e_xy row of unique root g.
+extern "C" __global__ void wcoj_groupby_root_segment_sum_values_u64(
+    const uint32_t* __restrict__ row_counts,
+    const unsigned long long* __restrict__ row_values,
+    uint32_t n_rows,
+    const uint32_t* __restrict__ group_start,
+    uint32_t key_count,
+    unsigned long long* __restrict__ out_sums) {
+    uint32_t i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n_rows || row_counts[i] == 0) {
+        return;
+    }
+    uint32_t pos = upper_bound_u32(group_start, key_count, i);
+    if (pos == 0) {
+        return;
+    }
+    atomicAdd(&out_sums[pos - 1], row_values[i]);
+}
+
+extern "C" __global__ void wcoj_groupby_root_segment_min_values_u64(
+    const uint32_t* __restrict__ row_counts,
+    const unsigned long long* __restrict__ row_values,
+    uint32_t n_rows,
+    const uint32_t* __restrict__ group_start,
+    uint32_t key_count,
+    unsigned long long* __restrict__ out_mins) {
+    uint32_t i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n_rows || row_counts[i] == 0) {
+        return;
+    }
+    uint32_t pos = upper_bound_u32(group_start, key_count, i);
+    if (pos == 0) {
+        return;
+    }
+    atomicMin(&out_mins[pos - 1], row_values[i]);
+}
+
+extern "C" __global__ void wcoj_groupby_root_segment_max_values_u64(
+    const uint32_t* __restrict__ row_counts,
+    const unsigned long long* __restrict__ row_values,
+    uint32_t n_rows,
+    const uint32_t* __restrict__ group_start,
+    uint32_t key_count,
+    unsigned long long* __restrict__ out_maxs) {
+    uint32_t i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n_rows || row_counts[i] == 0) {
+        return;
+    }
+    uint32_t pos = upper_bound_u32(group_start, key_count, i);
+    if (pos == 0) {
+        return;
+    }
+    atomicMax(&out_maxs[pos - 1], row_values[i]);
 }
 
 extern "C" __global__ void wcoj_triangle_materialize_hg_u64(
@@ -1145,6 +1765,260 @@ extern "C" __global__ void wcoj_4cycle_count_hg_u32(
     }
 }
 
+// Aggregate-fused 4-cycle group-by-root count variant of
+// wcoj_4cycle_count_hg_u32: instead of
+// reducing matches to per-block totals, each completed 4-cycle increments
+// the counter of its e1 root row (`out_row_counts[e1_idx]`, length n_e1,
+// zero-initialized by the host). e1 is lex-sorted by (W, X), so per-W group
+// counts are a contiguous-range reduction downstream. Integer atomicAdd is
+// order-insensitive, so the final counter values are deterministic
+// (precedent: wcoj_triangle_groupby_root_count_hg_u32). The 4-cycle rows
+// are never materialized. `e1_col1` is kept for ABI symmetry with the
+// count/materialize siblings.
+extern "C" __global__ void wcoj_4cycle_groupby_root_count_hg_u32(
+    const uint32_t* __restrict__ e1_col0,
+    const uint32_t* __restrict__ e1_col1,
+    uint32_t n_e1,
+    const uint32_t* __restrict__ e2_col1,
+    const uint32_t* __restrict__ e3_col0,
+    const uint32_t* __restrict__ e3_col1,
+    uint32_t n_e3,
+    const uint32_t* __restrict__ e4_col0,
+    const uint32_t* __restrict__ e4_col1,
+    uint32_t n_e4,
+    const uint32_t* __restrict__ e1_work_prefix,
+    const uint32_t* __restrict__ e2_work_prefix,
+    const uint32_t* __restrict__ e1_e2_start,
+    const uint32_t* __restrict__ e1_e2_end,
+    uint32_t total_work,
+    uint32_t block_work_unit,
+    uint32_t* __restrict__ out_row_counts) {
+    (void)e1_col1;
+    uint32_t block_start = blockIdx.x * block_work_unit;
+    if (block_start >= total_work) {
+        return;
+    }
+    uint32_t block_end = block_start + block_work_unit;
+    if (block_end < block_start || block_end > total_work) {
+        block_end = total_work;
+    }
+
+    for (uint32_t work_idx = block_start + threadIdx.x;
+         work_idx < block_end;
+         work_idx += blockDim.x) {
+        uint32_t root_pos = upper_bound_u32(e1_work_prefix, n_e1 + 1, work_idx);
+        if (root_pos == 0) {
+            continue;
+        }
+        uint32_t e1_idx = root_pos - 1;
+        if (e1_idx >= n_e1) {
+            continue;
+        }
+        uint32_t local = work_idx - e1_work_prefix[e1_idx];
+        uint32_t w = e1_col0[e1_idx];
+        uint32_t e2_lo = e1_e2_start[e1_idx];
+        uint32_t e2_hi = e1_e2_end[e1_idx];
+        uint32_t y = 0;
+        uint32_t z = 0;
+        if (resolve_4cycle_e2_work_u32(
+                e2_work_prefix, e2_col1, e3_col0, e3_col1, n_e3, e2_lo, e2_hi, local, &y, &z)
+            && contains_pair_u32(e4_col0, e4_col1, n_e4, z, w)) {
+            atomicAdd(&out_row_counts[e1_idx], 1u);
+        }
+    }
+}
+
+namespace {
+
+// 4-cycle aggregate helper: resolve one flattened work index to its
+// e1 root row and, on a completed 4-cycle, the aggregate value (X = e1.col1 when
+// `value_sel == 0`, the resolved Y when 1, the matched Z when 2).
+// Traversal is identical to `wcoj_4cycle_groupby_root_count_hg_u32`.
+// Returns false for padding / out-of-range / unmatched work items.
+__device__ __forceinline__ bool groupby_root_4cycle_match_value_u32(
+    const uint32_t* __restrict__ e1_col0,
+    const uint32_t* __restrict__ e1_col1,
+    uint32_t n_e1,
+    const uint32_t* __restrict__ e2_col1,
+    const uint32_t* __restrict__ e3_col0,
+    const uint32_t* __restrict__ e3_col1,
+    uint32_t n_e3,
+    const uint32_t* __restrict__ e4_col0,
+    const uint32_t* __restrict__ e4_col1,
+    uint32_t n_e4,
+    uint32_t value_sel,
+    const uint32_t* __restrict__ e1_work_prefix,
+    const uint32_t* __restrict__ e2_work_prefix,
+    const uint32_t* __restrict__ e1_e2_start,
+    const uint32_t* __restrict__ e1_e2_end,
+    uint32_t work_idx,
+    uint32_t* __restrict__ out_e1_idx,
+    uint32_t* __restrict__ out_value) {
+    uint32_t root_pos = upper_bound_u32(e1_work_prefix, n_e1 + 1, work_idx);
+    if (root_pos == 0) {
+        return false;
+    }
+    uint32_t e1_idx = root_pos - 1;
+    if (e1_idx >= n_e1) {
+        return false;
+    }
+    uint32_t local = work_idx - e1_work_prefix[e1_idx];
+    uint32_t w = e1_col0[e1_idx];
+    uint32_t e2_lo = e1_e2_start[e1_idx];
+    uint32_t e2_hi = e1_e2_end[e1_idx];
+    uint32_t y = 0;
+    uint32_t z = 0;
+    if (!resolve_4cycle_e2_work_u32(
+            e2_work_prefix, e2_col1, e3_col0, e3_col1, n_e3, e2_lo, e2_hi, local, &y, &z)
+        || !contains_pair_u32(e4_col0, e4_col1, n_e4, z, w)) {
+        return false;
+    }
+    *out_e1_idx = e1_idx;
+    *out_value = (value_sel == 0u) ? e1_col1[e1_idx] : (value_sel == 1u ? y : z);
+    return true;
+}
+
+}  // anonymous namespace
+
+// 4-cycle aggregate-fused sum/min/max variants of the root kernel.
+// Each completed 4-cycle contributes its value (X, Y or Z — all 4-cycle
+// output variables) to the e1 root row's accumulator, alongside a match
+// counter (`out_row_counts`) that downstream compaction uses to drop roots
+// with no completion. Integer atomics are order-insensitive, so final
+// accumulator values are deterministic. Host pre-initializes accumulators:
+// 0 for sum/max, 0xFFFFFFFF for min.
+extern "C" __global__ void wcoj_4cycle_groupby_root_sum_hg_u32(
+    const uint32_t* __restrict__ e1_col0,
+    const uint32_t* __restrict__ e1_col1,
+    uint32_t n_e1,
+    const uint32_t* __restrict__ e2_col1,
+    const uint32_t* __restrict__ e3_col0,
+    const uint32_t* __restrict__ e3_col1,
+    uint32_t n_e3,
+    const uint32_t* __restrict__ e4_col0,
+    const uint32_t* __restrict__ e4_col1,
+    uint32_t n_e4,
+    uint32_t value_sel,
+    const uint32_t* __restrict__ e1_work_prefix,
+    const uint32_t* __restrict__ e2_work_prefix,
+    const uint32_t* __restrict__ e1_e2_start,
+    const uint32_t* __restrict__ e1_e2_end,
+    uint32_t total_work,
+    uint32_t block_work_unit,
+    uint32_t* __restrict__ out_row_counts,
+    unsigned long long* __restrict__ out_row_sums) {
+    uint32_t block_start = blockIdx.x * block_work_unit;
+    if (block_start >= total_work) {
+        return;
+    }
+    uint32_t block_end = block_start + block_work_unit;
+    if (block_end < block_start || block_end > total_work) {
+        block_end = total_work;
+    }
+    for (uint32_t work_idx = block_start + threadIdx.x;
+         work_idx < block_end;
+         work_idx += blockDim.x) {
+        uint32_t e1_idx = 0;
+        uint32_t value = 0;
+        if (groupby_root_4cycle_match_value_u32(
+                e1_col0, e1_col1, n_e1, e2_col1, e3_col0, e3_col1, n_e3,
+                e4_col0, e4_col1, n_e4, value_sel, e1_work_prefix,
+                e2_work_prefix, e1_e2_start, e1_e2_end, work_idx, &e1_idx,
+                &value)) {
+            atomicAdd(&out_row_counts[e1_idx], 1u);
+            atomicAdd(&out_row_sums[e1_idx], (unsigned long long)value);
+        }
+    }
+}
+
+extern "C" __global__ void wcoj_4cycle_groupby_root_min_hg_u32(
+    const uint32_t* __restrict__ e1_col0,
+    const uint32_t* __restrict__ e1_col1,
+    uint32_t n_e1,
+    const uint32_t* __restrict__ e2_col1,
+    const uint32_t* __restrict__ e3_col0,
+    const uint32_t* __restrict__ e3_col1,
+    uint32_t n_e3,
+    const uint32_t* __restrict__ e4_col0,
+    const uint32_t* __restrict__ e4_col1,
+    uint32_t n_e4,
+    uint32_t value_sel,
+    const uint32_t* __restrict__ e1_work_prefix,
+    const uint32_t* __restrict__ e2_work_prefix,
+    const uint32_t* __restrict__ e1_e2_start,
+    const uint32_t* __restrict__ e1_e2_end,
+    uint32_t total_work,
+    uint32_t block_work_unit,
+    uint32_t* __restrict__ out_row_counts,
+    uint32_t* __restrict__ out_row_mins) {
+    uint32_t block_start = blockIdx.x * block_work_unit;
+    if (block_start >= total_work) {
+        return;
+    }
+    uint32_t block_end = block_start + block_work_unit;
+    if (block_end < block_start || block_end > total_work) {
+        block_end = total_work;
+    }
+    for (uint32_t work_idx = block_start + threadIdx.x;
+         work_idx < block_end;
+         work_idx += blockDim.x) {
+        uint32_t e1_idx = 0;
+        uint32_t value = 0;
+        if (groupby_root_4cycle_match_value_u32(
+                e1_col0, e1_col1, n_e1, e2_col1, e3_col0, e3_col1, n_e3,
+                e4_col0, e4_col1, n_e4, value_sel, e1_work_prefix,
+                e2_work_prefix, e1_e2_start, e1_e2_end, work_idx, &e1_idx,
+                &value)) {
+            atomicAdd(&out_row_counts[e1_idx], 1u);
+            atomicMin(&out_row_mins[e1_idx], value);
+        }
+    }
+}
+
+extern "C" __global__ void wcoj_4cycle_groupby_root_max_hg_u32(
+    const uint32_t* __restrict__ e1_col0,
+    const uint32_t* __restrict__ e1_col1,
+    uint32_t n_e1,
+    const uint32_t* __restrict__ e2_col1,
+    const uint32_t* __restrict__ e3_col0,
+    const uint32_t* __restrict__ e3_col1,
+    uint32_t n_e3,
+    const uint32_t* __restrict__ e4_col0,
+    const uint32_t* __restrict__ e4_col1,
+    uint32_t n_e4,
+    uint32_t value_sel,
+    const uint32_t* __restrict__ e1_work_prefix,
+    const uint32_t* __restrict__ e2_work_prefix,
+    const uint32_t* __restrict__ e1_e2_start,
+    const uint32_t* __restrict__ e1_e2_end,
+    uint32_t total_work,
+    uint32_t block_work_unit,
+    uint32_t* __restrict__ out_row_counts,
+    uint32_t* __restrict__ out_row_maxs) {
+    uint32_t block_start = blockIdx.x * block_work_unit;
+    if (block_start >= total_work) {
+        return;
+    }
+    uint32_t block_end = block_start + block_work_unit;
+    if (block_end < block_start || block_end > total_work) {
+        block_end = total_work;
+    }
+    for (uint32_t work_idx = block_start + threadIdx.x;
+         work_idx < block_end;
+         work_idx += blockDim.x) {
+        uint32_t e1_idx = 0;
+        uint32_t value = 0;
+        if (groupby_root_4cycle_match_value_u32(
+                e1_col0, e1_col1, n_e1, e2_col1, e3_col0, e3_col1, n_e3,
+                e4_col0, e4_col1, n_e4, value_sel, e1_work_prefix,
+                e2_work_prefix, e1_e2_start, e1_e2_end, work_idx, &e1_idx,
+                &value)) {
+            atomicAdd(&out_row_counts[e1_idx], 1u);
+            atomicMax(&out_row_maxs[e1_idx], value);
+        }
+    }
+}
+
 extern "C" __global__ void wcoj_4cycle_materialize_hg_u32(
     const uint32_t* __restrict__ e1_col0,
     const uint32_t* __restrict__ e1_col1,
@@ -1429,6 +2303,71 @@ extern "C" __global__ void wcoj_4cycle_count_hg_u64(
     }
 }
 
+// U64-key aggregate-fused 4-cycle count variant of
+// wcoj_4cycle_count_hg_u64.
+// Instead of reducing matches to per-block totals, each completed 4-cycle
+// increments the counter of its e1 root row (`out_row_counts[e1_idx]`,
+// length n_e1, zero-initialized by the host). e1 is lex-sorted by (W, X),
+// so per-W group counts are a contiguous-range reduction downstream
+// (relation-metadata segment sum — the recorded groupby is U32/Symbol-key
+// only). Integer atomicAdd is order-insensitive, so the final counter
+// values are deterministic (precedent:
+// wcoj_triangle_groupby_root_count_hg_u64). The 4-cycle rows are never
+// materialized. `e1_col1` is kept for ABI symmetry with the
+// count/materialize siblings.
+extern "C" __global__ void wcoj_4cycle_groupby_root_count_hg_u64(
+    const uint64_t* __restrict__ e1_col0,
+    const uint64_t* __restrict__ e1_col1,
+    uint32_t n_e1,
+    const uint64_t* __restrict__ e2_col1,
+    const uint64_t* __restrict__ e3_col0,
+    const uint64_t* __restrict__ e3_col1,
+    uint32_t n_e3,
+    const uint64_t* __restrict__ e4_col0,
+    const uint64_t* __restrict__ e4_col1,
+    uint32_t n_e4,
+    const uint32_t* __restrict__ e1_work_prefix,
+    const uint32_t* __restrict__ e2_work_prefix,
+    const uint32_t* __restrict__ e1_e2_start,
+    const uint32_t* __restrict__ e1_e2_end,
+    uint32_t total_work,
+    uint32_t block_work_unit,
+    uint32_t* __restrict__ out_row_counts) {
+    (void)e1_col1;
+    uint32_t block_start = blockIdx.x * block_work_unit;
+    if (block_start >= total_work) {
+        return;
+    }
+    uint32_t block_end = block_start + block_work_unit;
+    if (block_end < block_start || block_end > total_work) {
+        block_end = total_work;
+    }
+
+    for (uint32_t work_idx = block_start + threadIdx.x;
+         work_idx < block_end;
+         work_idx += blockDim.x) {
+        uint32_t root_pos = upper_bound_u32(e1_work_prefix, n_e1 + 1, work_idx);
+        if (root_pos == 0) {
+            continue;
+        }
+        uint32_t e1_idx = root_pos - 1;
+        if (e1_idx >= n_e1) {
+            continue;
+        }
+        uint32_t local = work_idx - e1_work_prefix[e1_idx];
+        uint64_t w = e1_col0[e1_idx];
+        uint32_t e2_lo = e1_e2_start[e1_idx];
+        uint32_t e2_hi = e1_e2_end[e1_idx];
+        uint64_t y = 0;
+        uint64_t z = 0;
+        if (resolve_4cycle_e2_work_u64(
+                e2_work_prefix, e2_col1, e3_col0, e3_col1, n_e3, e2_lo, e2_hi, local, &y, &z)
+            && contains_pair_u64(e4_col0, e4_col1, n_e4, z, w)) {
+            atomicAdd(&out_row_counts[e1_idx], 1u);
+        }
+    }
+}
+
 extern "C" __global__ void wcoj_4cycle_materialize_hg_u64(
     const uint64_t* __restrict__ e1_col0,
     const uint64_t* __restrict__ e1_col1,
@@ -1596,7 +2535,7 @@ extern "C" __global__ void wcoj_layout_check_sorted_unique_u64(
 }
 
 // ===============================================================
-// W3.2 — General-arity WCOJ clique kernel (K = 5, 6).
+// General-arity WCOJ clique kernel family.
 // Single C++ template instantiated at K=5 and K=6 from the same
 // source. The ABI wrappers are template-call-only; no hand-written
 // K-specific algorithm body lives behind any wrapper.
@@ -1816,8 +2755,7 @@ __device__ __forceinline__ uint32_t wcoj_clique_metadata_leader_idx(
 // Grid-level templates — absorb thread-idx + bound checks so the
 // `extern "C"` ABI wrappers below are single-statement
 // template-calls, satisfying the locked Tier-1 source-audit
-// contract (W3.2 plan §345: "exactly one template-call statement
-// with no conditionals").
+// contract: exactly one template-call statement with no conditionals.
 // ---------------------------------------------------------------
 
 template <int K_VAL, typename T>
@@ -2249,4 +3187,935 @@ extern "C" __global__ void wcoj_clique8_materialize_hg_u64(
     uint32_t total_rows,
     uint64_t* const* out_cols) {
     wcoj_clique_template_materialize_hg_grid_t<8, uint64_t>(edge_col0, edge_col1, edge_n, leader_edge_idx, edge_order, iteration_order, leader_count, unique_keys, fan_out, prefix_sum, total, block_work_unit, thread_counts, block_offsets, total_rows, out_cols);
+}
+
+// ---------------------------------------------------------------
+// Aggregate-fused K-clique group-by-root count variant of
+// wcoj_clique{K}_count_hg_*:
+// instead of reducing matches into block/thread totals, each
+// leader-edge row's K-clique completion count is accumulated into
+// `out_row_counts[row]` (length leader_count, zero-initialized by
+// the host). Leader-edge row identity is the same `i` the count
+// template resolves via `wcoj_clique_metadata_leader_idx`; the
+// row's group key is the leader edge's col0 (= binding[0], the
+// plan's position-0 root variable). The leader edge is lex-sorted
+// by (root, col1), so per-root group counts are a segmented sum
+// over contiguous row ranges downstream. Integer atomicAdd is
+// order-insensitive, so the final counter values are deterministic
+// (precedent: wcoj_triangle_groupby_root_count_hg_u32). The clique
+// rows are never materialized.
+// ---------------------------------------------------------------
+
+template <int K_VAL, typename T>
+__device__ __forceinline__ void wcoj_clique_template_groupby_root_count_hg_grid_t(
+    const T* const* edge_col0,
+    const T* const* edge_col1,
+    const uint32_t* edge_n,
+    uint32_t leader_edge_idx,
+    const uint8_t* edge_order,
+    const uint8_t* iteration_order,
+    uint32_t leader_count,
+    const T* unique_keys,
+    const uint32_t* fan_out,
+    const uint32_t* prefix_sum,
+    uint32_t total,
+    uint32_t block_work_unit,
+    uint32_t* out_row_counts) {
+    uint32_t leader_work_total = wcoj_clique_metadata_leader_work_total<T>(
+        unique_keys, fan_out, prefix_sum, total);
+    if (leader_work_total == 0u || leader_work_total > leader_count) {
+        leader_work_total = leader_count;
+    }
+    uint32_t block_start = blockIdx.x * block_work_unit;
+    if (block_start >= leader_work_total) {
+        return;
+    }
+    uint32_t block_end = block_start + block_work_unit;
+    if (block_end < block_start || block_end > leader_work_total) {
+        block_end = leader_work_total;
+    }
+
+    for (uint32_t work_idx = block_start + threadIdx.x;
+         work_idx < block_end;
+         work_idx += blockDim.x) {
+        uint32_t i = wcoj_clique_metadata_leader_idx(fan_out, prefix_sum, total, work_idx);
+        uint32_t c = wcoj_clique_template_count_t<K_VAL, T>(
+            edge_col0, edge_col1, edge_n, leader_edge_idx, edge_order, iteration_order, i);
+        if (c != 0u) {
+            atomicAdd(&out_row_counts[i], c);
+        }
+    }
+}
+
+extern "C" __global__ void wcoj_clique5_groupby_root_count_hg_u32(
+    const uint32_t* const* edge_col0,
+    const uint32_t* const* edge_col1,
+    const uint32_t* edge_n,
+    uint32_t leader_edge_idx,
+    const uint8_t* edge_order,
+    const uint8_t* iteration_order,
+    uint32_t leader_count,
+    const uint32_t* unique_keys,
+    const uint32_t* fan_out,
+    const uint32_t* prefix_sum,
+    uint32_t total,
+    uint32_t block_work_unit,
+    uint32_t* out_row_counts) {
+    wcoj_clique_template_groupby_root_count_hg_grid_t<5, uint32_t>(edge_col0, edge_col1, edge_n, leader_edge_idx, edge_order, iteration_order, leader_count, unique_keys, fan_out, prefix_sum, total, block_work_unit, out_row_counts);
+}
+
+extern "C" __global__ void wcoj_clique6_groupby_root_count_hg_u32(
+    const uint32_t* const* edge_col0,
+    const uint32_t* const* edge_col1,
+    const uint32_t* edge_n,
+    uint32_t leader_edge_idx,
+    const uint8_t* edge_order,
+    const uint8_t* iteration_order,
+    uint32_t leader_count,
+    const uint32_t* unique_keys,
+    const uint32_t* fan_out,
+    const uint32_t* prefix_sum,
+    uint32_t total,
+    uint32_t block_work_unit,
+    uint32_t* out_row_counts) {
+    wcoj_clique_template_groupby_root_count_hg_grid_t<6, uint32_t>(edge_col0, edge_col1, edge_n, leader_edge_idx, edge_order, iteration_order, leader_count, unique_keys, fan_out, prefix_sum, total, block_work_unit, out_row_counts);
+}
+
+// =====================================================================
+// GPU Free Join level-synchronous frontier engine primitives.
+//
+// A frontier is a SoA set of u32 columns; each row is one partial
+// binding plus, per not-yet-exhausted atom, a (lo, hi) trie range
+// into that atom's lex-sorted dedup'd buffer (flat sorted-range
+// tries: a trie node IS a contiguous row range; get(key) is a
+// binary-search refinement). Column sets are passed as device
+// pointer tables so the kernels stay arity-generic.
+//
+// Determinism contract (§2.3): two-phase count → scan → emit, no
+// atomics anywhere; output order is parent-row order × lex order of
+// the cover range, so results are canonical without re-sorting.
+//
+// Work-index mapping: when the cover atom has per-row parent ranges
+// (has_parent_range == 1) work item w maps to frontier row r via the
+// exclusive work prefix (same upper_bound discipline as the triangle
+// HG kernels). When the cover atom is untouched every row shares the
+// constant range [const_lo, const_hi), so the mapping is a uniform
+// divide/modulo and no work prefix is materialized at all.
+
+// Per-frontier-row cover range length, written into work_prefix[i];
+// work_prefix[n_frontier] zeroed for the exclusive scan that follows
+// (mirrors wcoj_triangle_build_hg_work_plan_u32).
+extern "C" __global__ void fj_expand_work_prefix_u32(
+    const uint32_t* __restrict__ parent_lo,
+    const uint32_t* __restrict__ parent_hi,
+    uint32_t n_frontier,
+    uint32_t* __restrict__ work_prefix) {
+    uint32_t i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i == 0) {
+        work_prefix[n_frontier] = 0;
+    }
+    if (i >= n_frontier) {
+        return;
+    }
+    work_prefix[i] = parent_hi[i] - parent_lo[i];
+}
+
+// Phase 1 of EXPAND: mark distinct cover-prefix group starts. A
+// candidate position starts a group iff it is the first position of
+// its frontier row's range or any of the cover columns changes value
+// vs the previous position (ranges are lex-sorted, so groups are
+// contiguous runs). group_marks has length total_work + 1; the
+// trailing slot is zeroed for the exclusive scan.
+//
+// identity_groups == 1: the cover consumes through the atom's last
+// column, so every position is its own group and the start predicate
+// is skipped (the pass then only exists to evaluate fused probes).
+//
+// Fused probe filters: range-exhausting probe subatoms whose key
+// variables are all bound by THIS node's cover are folded into the
+// mark (group survives only if every fused probe's binary-search
+// refinement is non-empty). Keys are constant within a group (cover
+// values), so per-position evaluation is exact. This removes the
+// separate probe kernel + mask compaction for those subatoms — the
+// emit pass then materializes exactly the surviving children.
+// probe_desc packs one descriptor per fused probe, sequentially:
+//   [n_cols, has_range, in_lo_ptr, in_hi_ptr, n_atom_rows,
+//    data_col_ptr * n_cols, cover_var_idx * n_cols]
+extern "C" __global__ void fj_expand_count_u32(
+    const uint32_t* const* __restrict__ cover_cols,
+    uint32_t n_cover_cols,
+    const uint32_t* __restrict__ parent_lo,
+    const uint32_t* __restrict__ work_prefix,
+    uint32_t has_parent_range,
+    uint32_t const_lo,
+    uint32_t const_hi,
+    uint32_t n_frontier,
+    uint32_t total_work,
+    uint32_t identity_groups,
+    const unsigned long long* __restrict__ probe_desc,
+    uint32_t n_fused_probes,
+    uint32_t* __restrict__ group_marks) {
+    uint32_t w = blockIdx.x * blockDim.x + threadIdx.x;
+    if (w == 0) {
+        group_marks[total_work] = 0;
+    }
+    if (w >= total_work) {
+        return;
+    }
+    uint32_t r = 0;
+    uint32_t lo;
+    uint32_t pos;
+    if (has_parent_range != 0u) {
+        r = upper_bound_u32(work_prefix, n_frontier + 1, w) - 1u;
+        lo = parent_lo[r];
+        pos = lo + (w - work_prefix[r]);
+    } else {
+        uint32_t len = const_hi - const_lo;
+        r = w / len;
+        lo = const_lo;
+        pos = const_lo + (w % len);
+    }
+    if (identity_groups == 0u) {
+        uint32_t start = (pos == lo) ? 1u : 0u;
+        if (start == 0u) {
+            for (uint32_t j = 0; j < n_cover_cols; ++j) {
+                const uint32_t* col = cover_cols[j];
+                if (col[pos] != col[pos - 1u]) {
+                    start = 1u;
+                    break;
+                }
+            }
+        }
+        if (start == 0u) {
+            group_marks[w] = 0;
+            return;
+        }
+    }
+    uint32_t ok = 1;
+    const unsigned long long* d = probe_desc;
+    for (uint32_t q = 0; q < n_fused_probes; ++q) {
+        uint32_t p_cols = (uint32_t)d[0];
+        uint32_t p_has_range = (uint32_t)d[1];
+        uint32_t p_lo;
+        uint32_t p_hi;
+        if (p_has_range != 0u) {
+            p_lo = ((const uint32_t*)d[2])[r];
+            p_hi = ((const uint32_t*)d[3])[r];
+        } else {
+            p_lo = 0;
+            p_hi = (uint32_t)d[4];
+        }
+        for (uint32_t k = 0; k < p_cols && p_lo < p_hi; ++k) {
+            const uint32_t* col = (const uint32_t*)d[5 + k];
+            uint32_t cover_idx = (uint32_t)d[5 + p_cols + k];
+            uint32_t v = cover_cols[cover_idx][pos];
+            uint32_t new_lo = p_lo + lower_bound_u32(col + p_lo, p_hi - p_lo, v);
+            uint32_t new_hi = p_lo + upper_bound_u32(col + p_lo, p_hi - p_lo, v);
+            p_lo = new_lo;
+            p_hi = new_hi;
+        }
+        if (p_lo >= p_hi) {
+            ok = 0;
+            break;
+        }
+        d += 5 + 2 * (size_t)p_cols;
+    }
+    group_marks[w] = ok;
+}
+
+// Phase 2 of EXPAND: emit one child frontier row per distinct cover
+// group. Output index = group_offsets[w] (exclusive scan of the
+// marks), so emission is atomics-free and deterministic. The group's
+// refined subrange [pos, g_hi) is recovered by successive
+// upper_bound refinement on the cover columns (each column is sorted
+// within the prefix-equal range of the previous columns).
+//
+// group_offsets == null: the host skipped the count pass entirely
+// (identity-group cover with no fused probes — the cover consumes
+// through its atom's LAST column, so rows in a trie range share all
+// columns before the range's depth and, inputs being full-row
+// deduped, the remaining column suffix is distinct within every
+// range: every candidate position is its own group) and out == w.
+//
+// group_offsets != null: survival is read from the scanned marks
+// (group_offsets[w + 1] > group_offsets[w]), NOT recomputed from the
+// group-start predicate — fused probe filters in the count pass can
+// zero a mark that the predicate alone would set.
+// Copied parent columns are split into two groups so the same launch
+// shape serves every width class: VAR columns hold bound data values
+// (uint32_t here, uint64_t in the _u64 twin) while RANGE columns hold
+// u32 row indices in every width class.
+extern "C" __global__ void fj_expand_emit_u32(
+    const uint32_t* const* __restrict__ cover_cols,
+    uint32_t n_cover_cols,
+    const uint32_t* __restrict__ parent_lo,
+    const uint32_t* __restrict__ parent_hi,
+    const uint32_t* __restrict__ work_prefix,
+    uint32_t has_parent_range,
+    uint32_t const_lo,
+    uint32_t const_hi,
+    uint32_t n_frontier,
+    uint32_t total_work,
+    const uint32_t* __restrict__ group_offsets,
+    const uint32_t* const* __restrict__ parent_copy_var_cols,
+    uint32_t* const* __restrict__ child_copy_var_cols,
+    uint32_t n_copy_var_cols,
+    const uint32_t* const* __restrict__ parent_copy_range_cols,
+    uint32_t* const* __restrict__ child_copy_range_cols,
+    uint32_t n_copy_range_cols,
+    uint32_t* const* __restrict__ child_var_cols,
+    uint32_t keep_cover_range,
+    uint32_t* __restrict__ child_cover_lo,
+    uint32_t* __restrict__ child_cover_hi) {
+    uint32_t w = blockIdx.x * blockDim.x + threadIdx.x;
+    if (w >= total_work) {
+        return;
+    }
+    uint32_t r;
+    uint32_t lo;
+    uint32_t pos;
+    uint32_t row_hi;
+    if (has_parent_range != 0u) {
+        r = upper_bound_u32(work_prefix, n_frontier + 1, w) - 1u;
+        lo = parent_lo[r];
+        pos = lo + (w - work_prefix[r]);
+        row_hi = parent_hi[r];
+    } else {
+        uint32_t len = const_hi - const_lo;
+        r = w / len;
+        lo = const_lo;
+        pos = const_lo + (w % len);
+        row_hi = const_hi;
+    }
+    uint32_t out;
+    if (group_offsets == nullptr) {
+        out = w;
+    } else {
+        out = group_offsets[w];
+        if (group_offsets[w + 1u] == out) {
+            return; // not a surviving group start
+        }
+    }
+    for (uint32_t j = 0; j < n_copy_var_cols; ++j) {
+        child_copy_var_cols[j][out] = parent_copy_var_cols[j][r];
+    }
+    for (uint32_t j = 0; j < n_copy_range_cols; ++j) {
+        child_copy_range_cols[j][out] = parent_copy_range_cols[j][r];
+    }
+    for (uint32_t j = 0; j < n_cover_cols; ++j) {
+        child_var_cols[j][out] = cover_cols[j][pos];
+    }
+    if (keep_cover_range != 0u) {
+        uint32_t g_hi = row_hi;
+        for (uint32_t j = 0; j < n_cover_cols; ++j) {
+            const uint32_t* col = cover_cols[j];
+            g_hi = pos + upper_bound_u32(col + pos, g_hi - pos, col[pos]);
+        }
+        child_cover_lo[out] = pos;
+        child_cover_hi[out] = g_hi;
+    }
+}
+
+// PROBE: per frontier row, refine the probe atom's current trie
+// range by binary search on each probe key column (all keys already
+// bound — they are frontier columns, so reads coalesce). Writes the
+// refined range (when the atom still has unconsumed columns) and the
+// survival mask consumed by the existing mask+scan+gather
+// compaction. combine_mask == 1 ANDs into an earlier probe's mask.
+extern "C" __global__ void fj_probe_refine_u32(
+    const uint32_t* const* __restrict__ probe_cols,
+    uint32_t n_probe_cols,
+    const uint32_t* const* __restrict__ key_cols,
+    const uint32_t* __restrict__ in_lo,
+    const uint32_t* __restrict__ in_hi,
+    uint32_t has_range,
+    uint32_t const_lo,
+    uint32_t const_hi,
+    uint32_t n_frontier,
+    uint32_t keep_range,
+    uint32_t* __restrict__ out_lo,
+    uint32_t* __restrict__ out_hi,
+    uint8_t* __restrict__ mask,
+    uint32_t combine_mask) {
+    uint32_t i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n_frontier) {
+        return;
+    }
+    uint32_t lo = (has_range != 0u) ? in_lo[i] : const_lo;
+    uint32_t hi = (has_range != 0u) ? in_hi[i] : const_hi;
+    for (uint32_t j = 0; j < n_probe_cols && lo < hi; ++j) {
+        const uint32_t* col = probe_cols[j];
+        uint32_t v = key_cols[j][i];
+        uint32_t new_lo = lo + lower_bound_u32(col + lo, hi - lo, v);
+        uint32_t new_hi = lo + upper_bound_u32(col + lo, hi - lo, v);
+        lo = new_lo;
+        hi = new_hi;
+    }
+    uint8_t hit = (lo < hi) ? 1u : 0u;
+    if (combine_mask != 0u) {
+        hit = (mask[i] != 0u && hit != 0u) ? 1u : 0u;
+    }
+    mask[i] = hit;
+    if (keep_range != 0u) {
+        out_lo[i] = lo;
+        out_hi[i] = hi;
+    }
+}
+
+// ---------------------------------------------------------------
+// GPU Free Join u64 width-class twins. Row indices, ranges, work
+// prefixes, and group marks stay u32 (the frontier budget bounds
+// total_work below 2^32); only DATA columns (cover, probe, var) and
+// their value comparisons widen to uint64_t. The fused-probe
+// descriptor layout is unchanged — data_col_ptr entries simply point
+// at uint64_t columns.
+// ---------------------------------------------------------------
+
+extern "C" __global__ void fj_expand_count_u64(
+    const uint64_t* const* __restrict__ cover_cols,
+    uint32_t n_cover_cols,
+    const uint32_t* __restrict__ parent_lo,
+    const uint32_t* __restrict__ work_prefix,
+    uint32_t has_parent_range,
+    uint32_t const_lo,
+    uint32_t const_hi,
+    uint32_t n_frontier,
+    uint32_t total_work,
+    uint32_t identity_groups,
+    const unsigned long long* __restrict__ probe_desc,
+    uint32_t n_fused_probes,
+    uint32_t* __restrict__ group_marks) {
+    uint32_t w = blockIdx.x * blockDim.x + threadIdx.x;
+    if (w == 0) {
+        group_marks[total_work] = 0;
+    }
+    if (w >= total_work) {
+        return;
+    }
+    uint32_t r = 0;
+    uint32_t lo;
+    uint32_t pos;
+    if (has_parent_range != 0u) {
+        r = upper_bound_u32(work_prefix, n_frontier + 1, w) - 1u;
+        lo = parent_lo[r];
+        pos = lo + (w - work_prefix[r]);
+    } else {
+        uint32_t len = const_hi - const_lo;
+        r = w / len;
+        lo = const_lo;
+        pos = const_lo + (w % len);
+    }
+    if (identity_groups == 0u) {
+        uint32_t start = (pos == lo) ? 1u : 0u;
+        if (start == 0u) {
+            for (uint32_t j = 0; j < n_cover_cols; ++j) {
+                const uint64_t* col = cover_cols[j];
+                if (col[pos] != col[pos - 1u]) {
+                    start = 1u;
+                    break;
+                }
+            }
+        }
+        if (start == 0u) {
+            group_marks[w] = 0;
+            return;
+        }
+    }
+    uint32_t ok = 1;
+    const unsigned long long* d = probe_desc;
+    for (uint32_t q = 0; q < n_fused_probes; ++q) {
+        uint32_t p_cols = (uint32_t)d[0];
+        uint32_t p_has_range = (uint32_t)d[1];
+        uint32_t p_lo;
+        uint32_t p_hi;
+        if (p_has_range != 0u) {
+            p_lo = ((const uint32_t*)d[2])[r];
+            p_hi = ((const uint32_t*)d[3])[r];
+        } else {
+            p_lo = 0;
+            p_hi = (uint32_t)d[4];
+        }
+        for (uint32_t k = 0; k < p_cols && p_lo < p_hi; ++k) {
+            const uint64_t* col = (const uint64_t*)d[5 + k];
+            uint32_t cover_idx = (uint32_t)d[5 + p_cols + k];
+            uint64_t v = cover_cols[cover_idx][pos];
+            uint32_t new_lo = p_lo + lower_bound_u64(col + p_lo, p_hi - p_lo, v);
+            uint32_t new_hi = p_lo + upper_bound_u64(col + p_lo, p_hi - p_lo, v);
+            p_lo = new_lo;
+            p_hi = new_hi;
+        }
+        if (p_lo >= p_hi) {
+            ok = 0;
+            break;
+        }
+        d += 5 + 2 * (size_t)p_cols;
+    }
+    group_marks[w] = ok;
+}
+
+extern "C" __global__ void fj_expand_emit_u64(
+    const uint64_t* const* __restrict__ cover_cols,
+    uint32_t n_cover_cols,
+    const uint32_t* __restrict__ parent_lo,
+    const uint32_t* __restrict__ parent_hi,
+    const uint32_t* __restrict__ work_prefix,
+    uint32_t has_parent_range,
+    uint32_t const_lo,
+    uint32_t const_hi,
+    uint32_t n_frontier,
+    uint32_t total_work,
+    const uint32_t* __restrict__ group_offsets,
+    const uint64_t* const* __restrict__ parent_copy_var_cols,
+    uint64_t* const* __restrict__ child_copy_var_cols,
+    uint32_t n_copy_var_cols,
+    const uint32_t* const* __restrict__ parent_copy_range_cols,
+    uint32_t* const* __restrict__ child_copy_range_cols,
+    uint32_t n_copy_range_cols,
+    uint64_t* const* __restrict__ child_var_cols,
+    uint32_t keep_cover_range,
+    uint32_t* __restrict__ child_cover_lo,
+    uint32_t* __restrict__ child_cover_hi) {
+    uint32_t w = blockIdx.x * blockDim.x + threadIdx.x;
+    if (w >= total_work) {
+        return;
+    }
+    uint32_t r;
+    uint32_t lo;
+    uint32_t pos;
+    uint32_t row_hi;
+    if (has_parent_range != 0u) {
+        r = upper_bound_u32(work_prefix, n_frontier + 1, w) - 1u;
+        lo = parent_lo[r];
+        pos = lo + (w - work_prefix[r]);
+        row_hi = parent_hi[r];
+    } else {
+        uint32_t len = const_hi - const_lo;
+        r = w / len;
+        lo = const_lo;
+        pos = const_lo + (w % len);
+        row_hi = const_hi;
+    }
+    uint32_t out;
+    if (group_offsets == nullptr) {
+        out = w;
+    } else {
+        out = group_offsets[w];
+        if (group_offsets[w + 1u] == out) {
+            return; // not a surviving group start
+        }
+    }
+    for (uint32_t j = 0; j < n_copy_var_cols; ++j) {
+        child_copy_var_cols[j][out] = parent_copy_var_cols[j][r];
+    }
+    for (uint32_t j = 0; j < n_copy_range_cols; ++j) {
+        child_copy_range_cols[j][out] = parent_copy_range_cols[j][r];
+    }
+    for (uint32_t j = 0; j < n_cover_cols; ++j) {
+        child_var_cols[j][out] = cover_cols[j][pos];
+    }
+    if (keep_cover_range != 0u) {
+        uint32_t g_hi = row_hi;
+        for (uint32_t j = 0; j < n_cover_cols; ++j) {
+            const uint64_t* col = cover_cols[j];
+            g_hi = pos + upper_bound_u64(col + pos, g_hi - pos, col[pos]);
+        }
+        child_cover_lo[out] = pos;
+        child_cover_hi[out] = g_hi;
+    }
+}
+
+extern "C" __global__ void fj_probe_refine_u64(
+    const uint64_t* const* __restrict__ probe_cols,
+    uint32_t n_probe_cols,
+    const uint64_t* const* __restrict__ key_cols,
+    const uint32_t* __restrict__ in_lo,
+    const uint32_t* __restrict__ in_hi,
+    uint32_t has_range,
+    uint32_t const_lo,
+    uint32_t const_hi,
+    uint32_t n_frontier,
+    uint32_t keep_range,
+    uint32_t* __restrict__ out_lo,
+    uint32_t* __restrict__ out_hi,
+    uint8_t* __restrict__ mask,
+    uint32_t combine_mask) {
+    uint32_t i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n_frontier) {
+        return;
+    }
+    uint32_t lo = (has_range != 0u) ? in_lo[i] : const_lo;
+    uint32_t hi = (has_range != 0u) ? in_hi[i] : const_hi;
+    for (uint32_t j = 0; j < n_probe_cols && lo < hi; ++j) {
+        const uint64_t* col = probe_cols[j];
+        uint64_t v = key_cols[j][i];
+        uint32_t new_lo = lo + lower_bound_u64(col + lo, hi - lo, v);
+        uint32_t new_hi = lo + upper_bound_u64(col + lo, hi - lo, v);
+        lo = new_lo;
+        hi = new_hi;
+    }
+    uint8_t hit = (lo < hi) ? 1u : 0u;
+    if (combine_mask != 0u) {
+        hit = (mask[i] != 0u && hit != 0u) ? 1u : 0u;
+    }
+    mask[i] = hit;
+    if (keep_range != 0u) {
+        out_lo[i] = lo;
+        out_hi[i] = hi;
+    }
+}
+
+// COUNT epilogue (§2.4 factorized counting): per surviving frontier
+// row, the count multiplicity is the product of the remaining live
+// trie-range lengths (unconsumed trailing columns of partially
+// consumed atoms — the d-representation count). Width-agnostic:
+// ranges are u32 row indices in every width class. n_ranges == 0
+// (fully-consumed plans) degenerates to multiplicity 1.
+extern "C" __global__ void fj_count_multiplicity(
+    const uint32_t* const* __restrict__ range_lo_cols,
+    const uint32_t* const* __restrict__ range_hi_cols,
+    uint32_t n_ranges,
+    uint32_t n_frontier,
+    unsigned long long* __restrict__ mult) {
+    uint32_t i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n_frontier) {
+        return;
+    }
+    unsigned long long m = 1ull;
+    for (uint32_t k = 0; k < n_ranges; ++k) {
+        m *= (unsigned long long)(range_hi_cols[k][i] - range_lo_cols[k][i]);
+    }
+    mult[i] = m;
+}
+
+// ---------------------------------------------------------------------------
+// D3 S3 spike — factorized recursive delta (TC novel-set pipeline).
+//
+// The per-source novel set of a semi-naive TC iteration is
+//   novel[x] = (∪_{y ∈ delta[x]} edge[y]) \ R[x]
+// — a union of sorted trie ranges minus the stable relation's rows.
+// These kernels evaluate that union–diff over a dense-domain
+// characteristic bitvector (one row of `words_per_row` u32 words per
+// source x) instead of materializing the witness-multiplied flat
+// join: rediscoveries and duplicate witnesses collapse in the bitmap
+// and only surviving novel tuples are ever written out. The emit
+// order (word index = (x, z) order) makes the output lex-sorted and
+// full-row-deduped by construction.
+//
+// Out-of-domain ids fail closed: kernels set *error_flag and skip the
+// write; the host surfaces the flag as a typed error after sync.
+
+// Per delta row: locate the edge trie range for y (edge is lex-sorted
+// (y, z), full-row deduped) and record its start + length. Lengths go
+// into work_prefix for the exclusive scan that drives the mark pass;
+// the trailing slot is zeroed for the scan.
+extern "C" __global__ void fj_delta_range_u32(
+    const uint32_t* __restrict__ delta_y,
+    uint32_t n_delta,
+    const uint32_t* __restrict__ edge_y,
+    uint32_t n_edge,
+    uint32_t* __restrict__ range_lo,
+    uint32_t* __restrict__ work_prefix) {
+    uint32_t i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i == 0) {
+        work_prefix[n_delta] = 0;
+    }
+    if (i >= n_delta) {
+        return;
+    }
+    uint32_t y = delta_y[i];
+    uint32_t lo = lower_bound_u32(edge_y, n_edge, y);
+    uint32_t hi = upper_bound_u32(edge_y, n_edge, y);
+    range_lo[i] = lo;
+    work_prefix[i] = hi - lo;
+}
+
+// Mark candidates: one work item per (delta row, range offset). Sets
+// bit (x, z) for every candidate successor; atomicOr collapses
+// duplicate witnesses for free.
+extern "C" __global__ void fj_delta_mark_u32(
+    const uint32_t* __restrict__ delta_x,
+    uint32_t n_delta,
+    const uint32_t* __restrict__ range_lo,
+    const uint32_t* __restrict__ work_prefix,
+    uint32_t total_work,
+    const uint32_t* __restrict__ edge_z,
+    uint32_t* __restrict__ bitmap,
+    uint32_t words_per_row,
+    uint32_t domain,
+    uint32_t* __restrict__ error_flag) {
+    uint32_t w = blockIdx.x * blockDim.x + threadIdx.x;
+    if (w >= total_work) {
+        return;
+    }
+    uint32_t r = upper_bound_u32(work_prefix, n_delta + 1, w) - 1u;
+    uint32_t k = w - work_prefix[r];
+    uint32_t x = delta_x[r];
+    uint32_t z = edge_z[range_lo[r] + k];
+    if (x >= domain || z >= domain) {
+        atomicExch(error_flag, 1u);
+        return;
+    }
+    atomicOr(&bitmap[(size_t)x * words_per_row + (z >> 5)], 1u << (z & 31u));
+}
+
+// Subtract the stable relation: clear bit (x, z) for every row of R.
+// Clearing a bit that was never marked is a no-op, so R needs no
+// pre-filtering against the candidate set.
+extern "C" __global__ void fj_delta_subtract_u32(
+    const uint32_t* __restrict__ r_x,
+    const uint32_t* __restrict__ r_z,
+    uint32_t n_r,
+    uint32_t* __restrict__ bitmap,
+    uint32_t words_per_row,
+    uint32_t domain,
+    uint32_t* __restrict__ error_flag) {
+    uint32_t j = blockIdx.x * blockDim.x + threadIdx.x;
+    if (j >= n_r) {
+        return;
+    }
+    uint32_t x = r_x[j];
+    uint32_t z = r_z[j];
+    if (x >= domain || z >= domain) {
+        atomicExch(error_flag, 1u);
+        return;
+    }
+    atomicAnd(&bitmap[(size_t)x * words_per_row + (z >> 5)], ~(1u << (z & 31u)));
+}
+
+// Per-word survivor counts for the exclusive scan that sizes and
+// places the emit. The trailing slot is zeroed for the scan.
+extern "C" __global__ void fj_delta_popcount(
+    const uint32_t* __restrict__ bitmap,
+    uint32_t n_words,
+    uint32_t* __restrict__ counts) {
+    uint32_t w = blockIdx.x * blockDim.x + threadIdx.x;
+    if (w == 0) {
+        counts[n_words] = 0;
+    }
+    if (w >= n_words) {
+        return;
+    }
+    counts[w] = __popc(bitmap[w]);
+}
+
+// Emit surviving novel pairs at their scanned offsets. Word order is
+// (x, z) order, and bits are drained ascending, so the output is
+// lex-sorted and deduped by construction — it is simultaneously the
+// next iteration's delta and the union input.
+extern "C" __global__ void fj_delta_emit_u32(
+    const uint32_t* __restrict__ bitmap,
+    uint32_t words_per_row,
+    uint32_t n_words,
+    const uint32_t* __restrict__ offsets,
+    uint32_t* __restrict__ out_x,
+    uint32_t* __restrict__ out_z) {
+    uint32_t w = blockIdx.x * blockDim.x + threadIdx.x;
+    if (w >= n_words) {
+        return;
+    }
+    uint32_t bits = bitmap[w];
+    if (bits == 0u) {
+        return;
+    }
+    uint32_t x = w / words_per_row;
+    uint32_t base = (w % words_per_row) << 5;
+    uint32_t o = offsets[w];
+    while (bits != 0u) {
+        uint32_t b = __ffs(bits) - 1u;
+        out_x[o] = x;
+        out_z[o] = base + b;
+        o += 1u;
+        bits &= bits - 1u;
+    }
+}
+
+// Column max for the factorized-delta domain bound: one atomicMax per
+// element into a single u32 cell (caller zeroes it). Trivial traffic
+// next to the relations it scans; runs once per SCC fixpoint.
+extern "C" __global__ void fj_delta_max_u32(
+    const uint32_t* __restrict__ col,
+    uint32_t n,
+    uint32_t* __restrict__ out_max) {
+    uint32_t i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) {
+        return;
+    }
+    atomicMax(out_max, col[i]);
+}
+
+// ---------------------------------------------------------------------------
+// D3 sparse-domain spike — factorized novel set via an open-addressing
+// hash set, for large/sparse domains where the dense bitvector
+// (domain^2/8 bytes) is infeasible.
+//
+// Keys pack (x, z) as ((u64)x << 32) | z, stored as key+1 so the
+// all-zero state (memset) is the EMPTY sentinel; the single key whose
+// +1 overflows to 0 (x==z==0xFFFFFFFF) is forbidden and fails closed
+// upstream. A parallel is_r flag marks slots loaded from the stable
+// relation R, so candidate inserts can tell "already known" from
+// "freshly novel". Linear probing; capacity is a power of two so the
+// mask is (cap-1).
+
+__device__ __forceinline__ unsigned long long fj_sparse_pack(uint32_t x, uint32_t z) {
+    return (((unsigned long long)x << 32) | (unsigned long long)z) + 1ull;
+}
+
+// Insert one key (stored = key+1) into the table by linear probing.
+// Returns the slot it occupies (existing or newly claimed). Sets
+// *inserted_new = 1 iff this call claimed an empty slot.
+// Linear-probe insert with a bounded probe budget. Returns the slot
+// (existing or freshly claimed), or UINT32_MAX if the probe budget is
+// exhausted (table too full — the distinct estimate under-sized it);
+// the caller raises an overflow flag and declines to the legacy path.
+__device__ __forceinline__ uint32_t fj_sparse_put(
+    unsigned long long* __restrict__ table,
+    uint32_t mask,
+    unsigned long long stored,
+    int* inserted_new) {
+    uint32_t slot = (uint32_t)((stored * 0x9E3779B97F4A7C15ull) >> 40) & mask;
+    // Probe budget: the whole table in the worst case. Open addressing
+    // at load factor <= 0.5 resolves in O(1) expected; the bound is a
+    // safety backstop against an under-sized table (no infinite loop).
+    for (uint32_t probe = 0; probe <= mask; ++probe) {
+        unsigned long long cur = table[slot];
+        if (cur == stored) {
+            *inserted_new = 0;
+            return slot;
+        }
+        if (cur == 0ull) {
+            unsigned long long prev = atomicCAS(table + slot, 0ull, stored);
+            if (prev == 0ull) {
+                *inserted_new = 1;
+                return slot;
+            }
+            if (prev == stored) {
+                *inserted_new = 0;
+                return slot;
+            }
+        }
+        slot = (slot + 1u) & mask;
+    }
+    *inserted_new = 0;
+    return 0xFFFFFFFFu;
+}
+
+// Sizing pass: hash each candidate key into a fixed estimator bitmap
+// (atomicOr); the host popcounts it to approximate the number of
+// DISTINCT candidate keys, so the real table is sized to
+// |R| + distinct (not to the witness count). Collisions undercount
+// slightly — the host adds margin and the overflow-safe insert is the
+// backstop. est_mask = est_words*32 - 1 (power of two).
+extern "C" __global__ void fj_delta_sparse_estimate(
+    const uint32_t* __restrict__ delta_x,
+    uint32_t n_delta,
+    const uint32_t* __restrict__ range_lo,
+    const uint32_t* __restrict__ work_prefix,
+    uint32_t total_work,
+    const uint32_t* __restrict__ edge_z,
+    uint32_t* __restrict__ est_bitmap,
+    uint32_t est_bit_mask) {
+    uint32_t w = blockIdx.x * blockDim.x + threadIdx.x;
+    if (w >= total_work) {
+        return;
+    }
+    uint32_t r = upper_bound_u32(work_prefix, n_delta + 1, w) - 1u;
+    uint32_t k = w - work_prefix[r];
+    uint32_t x = delta_x[r];
+    uint32_t z = edge_z[range_lo[r] + k];
+    unsigned long long key = fj_sparse_pack(x, z);
+    uint32_t h = (uint32_t)((key * 0x9E3779B97F4A7C15ull) >> 32) & est_bit_mask;
+    atomicOr(&est_bitmap[h >> 5], 1u << (h & 31u));
+}
+
+// Load the stable relation R into the table, marking is_r. Raises
+// *overflow if any insert exhausts its probe budget.
+extern "C" __global__ void fj_delta_sparse_load_r(
+    const uint32_t* __restrict__ r_x,
+    const uint32_t* __restrict__ r_z,
+    uint32_t n_r,
+    unsigned long long* __restrict__ table,
+    uint8_t* __restrict__ is_r,
+    uint32_t mask,
+    uint32_t* __restrict__ overflow) {
+    uint32_t i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n_r) {
+        return;
+    }
+    int newit = 0;
+    uint32_t slot = fj_sparse_put(table, mask, fj_sparse_pack(r_x[i], r_z[i]), &newit);
+    if (slot == 0xFFFFFFFFu) {
+        atomicExch(overflow, 1u);
+        return;
+    }
+    is_r[slot] = 1;
+}
+
+// Insert candidates (delta row x crossed with the edge[y] range) into
+// the table. Duplicate witnesses and rediscoveries collapse at the
+// slot; only slots that are claimed fresh AND not flagged is_r are
+// novel (resolved by the emit scan). Raises *overflow on probe-budget
+// exhaustion.
+extern "C" __global__ void fj_delta_sparse_insert_candidates(
+    const uint32_t* __restrict__ delta_x,
+    uint32_t n_delta,
+    const uint32_t* __restrict__ range_lo,
+    const uint32_t* __restrict__ work_prefix,
+    uint32_t total_work,
+    const uint32_t* __restrict__ edge_z,
+    unsigned long long* __restrict__ table,
+    uint32_t mask,
+    uint32_t* __restrict__ overflow) {
+    uint32_t w = blockIdx.x * blockDim.x + threadIdx.x;
+    if (w >= total_work) {
+        return;
+    }
+    uint32_t r = upper_bound_u32(work_prefix, n_delta + 1, w) - 1u;
+    uint32_t k = w - work_prefix[r];
+    uint32_t x = delta_x[r];
+    uint32_t z = edge_z[range_lo[r] + k];
+    int newit = 0;
+    uint32_t slot = fj_sparse_put(table, mask, fj_sparse_pack(x, z), &newit);
+    if (slot == 0xFFFFFFFFu) {
+        atomicExch(overflow, 1u);
+    }
+}
+
+// Per-slot novelty mask: 1 iff occupied (key != 0) and NOT from R.
+// counts[cap] zeroed for the exclusive scan.
+extern "C" __global__ void fj_delta_sparse_mark(
+    const unsigned long long* __restrict__ table,
+    const uint8_t* __restrict__ is_r,
+    uint32_t cap,
+    uint32_t* __restrict__ counts) {
+    uint32_t s = blockIdx.x * blockDim.x + threadIdx.x;
+    if (s == 0) {
+        counts[cap] = 0;
+    }
+    if (s >= cap) {
+        return;
+    }
+    counts[s] = (table[s] != 0ull && is_r[s] == 0) ? 1u : 0u;
+}
+
+// Emit novel (x, z) at scanned offsets. Unordered (slot order); the
+// caller sorts if it needs lex order (union_gpu does).
+extern "C" __global__ void fj_delta_sparse_emit(
+    const unsigned long long* __restrict__ table,
+    const uint8_t* __restrict__ is_r,
+    const uint32_t* __restrict__ offsets,
+    uint32_t cap,
+    uint32_t* __restrict__ out_x,
+    uint32_t* __restrict__ out_z) {
+    uint32_t s = blockIdx.x * blockDim.x + threadIdx.x;
+    if (s >= cap) {
+        return;
+    }
+    unsigned long long stored = table[s];
+    if (stored == 0ull || is_r[s] != 0) {
+        return;
+    }
+    unsigned long long key = stored - 1ull;
+    uint32_t o = offsets[s];
+    out_x[o] = (uint32_t)(key >> 32);
+    out_z[o] = (uint32_t)(key & 0xFFFFFFFFull);
 }

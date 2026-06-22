@@ -205,16 +205,15 @@ impl CudaKernelProvider {
         self.dedup_full_row_recorded(input, launch_stream)
     }
 
-    /// W3.1 — generic full-row sort+dedup for relations of any
+    /// Generic full-row WCOJ layout sort+dedup for relations of any
     /// arity ≥ 2 in the 4-byte width-class (`U32`, `Symbol`,
     /// mixable within the class).
     ///
-    /// **Design (per W3.1 plan iteration 6, D1)**: this is a NEW
-    /// entry point. The existing arity-2
+    /// **Design**: this entry point leaves the existing arity-2
     /// [`Self::wcoj_layout_u32_recorded`] is **unchanged** for
     /// the triangle / 4-cycle / project-then-layout callers — it
-    /// retains its arity-2-specific fast-path branch. W3.1's
-    /// generic surface delegates straight to
+    /// retains its arity-2-specific fast-path branch. This generic
+    /// surface delegates straight to
     /// [`Self::dedup_full_row_recorded`] for any arity ≥ 2.
     ///
     /// **Validation order** (`runtime → arity ≥ 2 → per-column
@@ -235,7 +234,8 @@ impl CudaKernelProvider {
     /// empty-buffer semantics.
     ///
     /// **Composition**: `dedup_full_row_recorded` only — there
-    /// is no fast-path branch for arity ≥ 3 in W3.1 (the
+    /// is no fast-path branch for arity ≥ 3 in this generic
+    /// full-row layout-sort accessor (the
     /// existing arity-2 fast-path stays untouched and reachable
     /// only via `wcoj_layout_u32_recorded`).
     ///
@@ -436,14 +436,13 @@ impl CudaKernelProvider {
         self.dedup_full_row_recorded(input, launch_stream)
     }
 
-    /// W3.1 — generic full-row sort+dedup for relations of any
+    /// Generic full-row WCOJ layout sort+dedup for relations of any
     /// arity ≥ 2 in the 8-byte width-class (`U64` only).
     ///
-    /// **Design (per W3.1 plan iteration 6, D1)**: NEW entry
-    /// point. The existing arity-2
+    /// **Design**: this entry point leaves the existing arity-2
     /// [`Self::wcoj_layout_u64_recorded`] is **unchanged** for
     /// the existing 2-column callers — it retains its
-    /// arity-2-specific fast-path branch. W3.1's generic surface
+    /// arity-2-specific fast-path branch. This generic surface
     /// delegates straight to [`Self::dedup_full_row_recorded`]
     /// for any arity ≥ 2.
     ///
@@ -1018,7 +1017,7 @@ impl CudaKernelProvider {
 }
 
 // ===============================================================
-// W3.2/W6.4 — General-arity clique WCOJ (k = 5..8) provider.
+// General-arity clique WCOJ provider for K=5..8.
 //
 // Thin public methods (k=5..8 × u32/u64) delegate to a
 // single generic helper `wcoj_clique_recorded_inner`. Width-class
@@ -1030,7 +1029,7 @@ impl CudaKernelProvider {
 // Each public entry assumes sorted+deduped input as a
 // pre-condition (same contract as `wcoj_triangle_u32_recorded` /
 // `wcoj_4cycle_u32_recorded`); the runtime dispatcher routes
-// every edge through W3.1's `wcoj_layout_sort_*_recorded` before
+// every edge through the generic full-row layout-sort accessors before
 // invoking these entries.
 // ===============================================================
 
@@ -1269,7 +1268,7 @@ impl CudaKernelProvider {
         )
     }
 
-    /// W3.2 — generic clique provider helper. Orchestrates count
+    /// Generic clique provider helper. Orchestrates count
     /// → scan → total → materialize for K-clique on K*(K-1)/2
     /// 2-column edges in the given width-class.
     ///
@@ -1280,8 +1279,8 @@ impl CudaKernelProvider {
     ///   * Each edge is 2-column with all columns in `width_class`.
     ///   * Each edge is lex-sorted+deduped on `(col0, col1)` —
     ///     same contract as `wcoj_triangle_*_recorded`. The
-    ///     runtime dispatcher (W3.2 step 7) routes every edge
-    ///     through W3.1's `wcoj_layout_sort_*_recorded` before
+    ///     runtime dispatcher routes every edge through the generic
+    ///     full-row layout-sort accessors before
     ///     calling here; provider does NOT layout-sort itself.
     #[allow(clippy::too_many_arguments)]
     fn wcoj_clique_recorded_inner(
@@ -1411,7 +1410,8 @@ impl CudaKernelProvider {
         if n_leader == 0 {
             return self.create_empty_buffer(out_schema);
         }
-        // Paper §5 Algorithm 1 Phase 1: Histograms maintained alongside data; refreshed during Merge per Authorization 5 (2026-05-17)
+        // Paper section 5 Algorithm 1 Phase 1: histograms are maintained
+        // alongside data and refreshed during recursive merge handling.
         let metadata_start = Instant::now();
         let leader_metadata = match width_class {
             CliqueWidthClass::FourByte => {
@@ -1873,7 +1873,7 @@ impl CudaKernelProvider {
         ))
     }
 
-    /// W3.2 — 5-clique WCOJ at 4-byte width-class.
+    /// 5-clique WCOJ at 4-byte width-class.
     ///
     /// `edges` must contain exactly **10** 2-column buffers in
     /// canonical lex `(i, j)` order (i < j): `(0,1), (0,2), (0,3),
@@ -1920,7 +1920,7 @@ impl CudaKernelProvider {
         )
     }
 
-    /// W3.2 — 5-clique WCOJ at 8-byte width-class (U64 only).
+    /// 5-clique WCOJ at 8-byte width-class (U64 only).
     pub fn wcoj_clique5_u64_recorded(
         &self,
         edges: &[&CudaBuffer; 10],
@@ -1959,7 +1959,7 @@ impl CudaKernelProvider {
         )
     }
 
-    /// W3.2 — 6-clique WCOJ at 4-byte width-class.
+    /// 6-clique WCOJ at 4-byte width-class.
     ///
     /// `edges` must contain exactly **15** 2-column buffers in
     /// canonical lex `(i, j)` order. Width-class + sort+dedup
@@ -2002,7 +2002,7 @@ impl CudaKernelProvider {
         )
     }
 
-    /// W3.2 — 6-clique WCOJ at 8-byte width-class (U64 only).
+    /// 6-clique WCOJ at 8-byte width-class (U64 only).
     pub fn wcoj_clique6_u64_recorded(
         &self,
         edges: &[&CudaBuffer; 15],
@@ -2041,7 +2041,7 @@ impl CudaKernelProvider {
         )
     }
 
-    /// W6.4 — 7-clique WCOJ at 4-byte width-class.
+    /// 7-clique WCOJ at 4-byte width-class.
     pub fn wcoj_clique7_u32_recorded(
         &self,
         edges: &[&CudaBuffer; 21],
@@ -2059,7 +2059,7 @@ impl CudaKernelProvider {
         )
     }
 
-    /// W6.4 — 7-clique WCOJ at 4-byte width-class using plan-derived launch params.
+    /// 7-clique WCOJ at 4-byte width-class using plan-derived launch params.
     pub fn wcoj_clique7_u32_recorded_planned(
         &self,
         edges: &[&CudaBuffer; 21],
@@ -2080,7 +2080,7 @@ impl CudaKernelProvider {
         )
     }
 
-    /// W6.4 — 7-clique WCOJ at 8-byte width-class (U64 only).
+    /// 7-clique WCOJ at 8-byte width-class (U64 only).
     pub fn wcoj_clique7_u64_recorded(
         &self,
         edges: &[&CudaBuffer; 21],
@@ -2098,7 +2098,7 @@ impl CudaKernelProvider {
         )
     }
 
-    /// W6.4 — 7-clique WCOJ at 8-byte width-class using plan-derived launch params.
+    /// 7-clique WCOJ at 8-byte width-class using plan-derived launch params.
     pub fn wcoj_clique7_u64_recorded_planned(
         &self,
         edges: &[&CudaBuffer; 21],
@@ -2119,7 +2119,7 @@ impl CudaKernelProvider {
         )
     }
 
-    /// W6.4 — 8-clique WCOJ at 4-byte width-class.
+    /// 8-clique WCOJ at 4-byte width-class.
     pub fn wcoj_clique8_u32_recorded(
         &self,
         edges: &[&CudaBuffer; 28],
@@ -2137,7 +2137,7 @@ impl CudaKernelProvider {
         )
     }
 
-    /// W6.4 — 8-clique WCOJ at 4-byte width-class using plan-derived launch params.
+    /// 8-clique WCOJ at 4-byte width-class using plan-derived launch params.
     pub fn wcoj_clique8_u32_recorded_planned(
         &self,
         edges: &[&CudaBuffer; 28],
@@ -2158,7 +2158,7 @@ impl CudaKernelProvider {
         )
     }
 
-    /// W6.4 — 8-clique WCOJ at 8-byte width-class (U64 only).
+    /// 8-clique WCOJ at 8-byte width-class (U64 only).
     pub fn wcoj_clique8_u64_recorded(
         &self,
         edges: &[&CudaBuffer; 28],
@@ -2176,7 +2176,7 @@ impl CudaKernelProvider {
         )
     }
 
-    /// W6.4 — 8-clique WCOJ at 8-byte width-class using plan-derived launch params.
+    /// 8-clique WCOJ at 8-byte width-class using plan-derived launch params.
     pub fn wcoj_clique8_u64_recorded_planned(
         &self,
         edges: &[&CudaBuffer; 28],
@@ -2194,6 +2194,400 @@ impl CudaKernelProvider {
             CliqueWidthClass::EightByte,
             launch_stream,
             "wcoj_clique8_u64_recorded_planned",
+        )
+    }
+
+    /// Aggregate-fused K-clique count-by-root (u32 width-class,
+    /// K ∈ {5, 6}). For `q(R, count(*)) :- <complete K-clique body>`
+    /// grouped by the plan's position-0 root variable, computes the
+    /// (root, count) row set WITHOUT materializing the clique rows.
+    ///
+    /// Pipeline (mirrors `wcoj_4cycle_groupby_root_count_u32_recorded`):
+    ///   1. Layout-normalize every edge per dispatch (sorted-fast-path
+    ///      clone when already lex-sorted + unique) — the fused path must
+    ///      give the same guarantee as the unfused pipeline instead of
+    ///      trusting store-buffer sortedness.
+    ///   2. Build the leader-edge runtime metadata, htod the per-edge
+    ///      pointer arrays + plan orders (same surface as the unfused
+    ///      planned clique entries).
+    ///   3. `wcoj_clique{K}_groupby_root_count_hg_u32` accumulates, per
+    ///      leader-edge row, the row's clique completion count via
+    ///      atomicAdd (order-insensitive, deterministic values). The
+    ///      row's group key is the oriented leader edge's col0 — the
+    ///      kernel's binding[0] root.
+    ///   4. Staging (root, count) over the n_leader input rows, compact
+    ///      count>0, reduce per root with the recorded groupby Sum.
+    ///
+    /// All reduction work is O(n_leader) — input-sized, never
+    /// join-output-sized. Output schema (root: U32/Symbol, count: U64)
+    /// matches the unfused materialize+groupby baseline.
+    #[allow(clippy::too_many_arguments)]
+    fn wcoj_clique_groupby_root_count_recorded_inner(
+        &self,
+        k: usize,
+        edges: &[&CudaBuffer],
+        leader_edge_idx: u32,
+        edge_order: &[u8],
+        iteration_order: &[u8],
+        launch_stream: StreamId,
+        entry_label: &str,
+    ) -> Result<CudaBuffer> {
+        let runtime = self.memory().runtime().ok_or_else(|| {
+            XlogError::Kernel(format!(
+                "{} requires a runtime-backed GpuMemoryManager (with_runtime)",
+                entry_label
+            ))
+        })?;
+        let cu_stream = runtime
+            .stream_pool()
+            .resolve(launch_stream)
+            .ok_or_else(|| {
+                XlogError::Kernel(format!(
+                    "{}: launch_stream StreamId({}) does not resolve",
+                    entry_label, launch_stream.0
+                ))
+            })?;
+        if !matches!(k, 5 | 6) {
+            return Err(XlogError::Kernel(format!(
+                "{}: fused count-by-root supports k 5..6, got {}",
+                entry_label, k
+            )));
+        }
+        let expected_edges = k * (k - 1) / 2;
+        if edges.len() != expected_edges {
+            return Err(XlogError::Kernel(format!(
+                "{}: expected {} edges (= C({}, 2)), got {}",
+                entry_label,
+                expected_edges,
+                k,
+                edges.len()
+            )));
+        }
+        let leader_slot = usize::try_from(leader_edge_idx)
+            .ok()
+            .filter(|idx| *idx < expected_edges)
+            .ok_or_else(|| {
+                XlogError::Kernel(format!(
+                    "{}: leader_edge_idx {} out of range for {} edges",
+                    entry_label, leader_edge_idx, expected_edges
+                ))
+            })?;
+        validate_clique_u8_permutation(edge_order, expected_edges, "edge_order", entry_label)?;
+        validate_clique_u8_permutation(iteration_order, k, "iteration_order", entry_label)?;
+
+        // Layout-normalize per dispatch (commit 31b0ccf0 contract for
+        // ALL fused group-by-root entries). Also enforces the 2-column
+        // 4-byte width-class per edge.
+        let mut laid_out: Vec<CudaBuffer> = Vec::with_capacity(expected_edges);
+        for buf in edges {
+            laid_out.push(self.wcoj_layout_u32_recorded(buf, launch_stream)?);
+        }
+        let edges: Vec<&CudaBuffer> = laid_out.iter().collect();
+        let leader = edges[leader_slot];
+
+        let w_type = leader.schema.column_type(0).ok_or_else(|| {
+            XlogError::Kernel(format!(
+                "{}: leader edge column 0 type missing",
+                entry_label
+            ))
+        })?;
+        let out_schema = Schema::new(vec![
+            ("root".to_string(), w_type),
+            ("count".to_string(), ScalarType::U64),
+        ]);
+        let n_leader = self.logical_row_count_u32(leader)?;
+        if n_leader == 0 {
+            return self.create_empty_buffer(out_schema);
+        }
+
+        let leader_metadata = self.wcoj_clique_metadata_recorded_u32_inner(
+            k,
+            &edges,
+            leader_edge_idx,
+            launch_stream,
+            entry_label,
+        )?;
+        let leader_work_total = u32::try_from(leader_metadata.total).map_err(|_| {
+            XlogError::Kernel(format!(
+                "{}: leader metadata total {} exceeds u32 kernel surface",
+                entry_label, leader_metadata.total
+            ))
+        })?;
+        if leader_work_total != n_leader {
+            return Err(XlogError::Kernel(format!(
+                "{}: leader metadata total {} does not match leader row count {}",
+                entry_label, leader_work_total, n_leader
+            )));
+        }
+        if leader_metadata.key_count == 0 {
+            return self.create_empty_buffer(out_schema);
+        }
+
+        // Host-side per-edge pointer arrays + row counts, htod'd to
+        // small device buffers (same surface as the unfused planned
+        // clique entries).
+        let mut edge_col0_ptrs: Vec<u64> = Vec::with_capacity(expected_edges);
+        let mut edge_col1_ptrs: Vec<u64> = Vec::with_capacity(expected_edges);
+        let mut edge_n_host: Vec<u32> = Vec::with_capacity(expected_edges);
+        for buf in edges.iter() {
+            let col0 = buf.column(0).ok_or_else(|| {
+                XlogError::Kernel(format!("{}: edge column 0 missing", entry_label))
+            })?;
+            let col1 = buf.column(1).ok_or_else(|| {
+                XlogError::Kernel(format!("{}: edge column 1 missing", entry_label))
+            })?;
+            edge_col0_ptrs.push(*col0.device_ptr());
+            edge_col1_ptrs.push(*col1.device_ptr());
+            edge_n_host.push(self.logical_row_count_u32(buf)?);
+        }
+        let mut d_edge_col0 = self.memory.alloc::<u64>(expected_edges)?;
+        let mut d_edge_col1 = self.memory.alloc::<u64>(expected_edges)?;
+        let mut d_edge_n = self.memory.alloc::<u32>(expected_edges)?;
+        self.htod_launch_metadata_sync_copy_into(&edge_col0_ptrs, &mut d_edge_col0)
+            .map_err(|e| {
+                XlogError::Kernel(format!(
+                    "{}: htod edge_col0_ptrs failed: {}",
+                    entry_label, e
+                ))
+            })?;
+        self.htod_launch_metadata_sync_copy_into(&edge_col1_ptrs, &mut d_edge_col1)
+            .map_err(|e| {
+                XlogError::Kernel(format!(
+                    "{}: htod edge_col1_ptrs failed: {}",
+                    entry_label, e
+                ))
+            })?;
+        self.htod_launch_metadata_sync_copy_into(&edge_n_host, &mut d_edge_n)
+            .map_err(|e| {
+                XlogError::Kernel(format!("{}: htod edge_n failed: {}", entry_label, e))
+            })?;
+        let mut d_edge_order = self.memory.alloc::<u8>(expected_edges)?;
+        self.htod_launch_metadata_sync_copy_into(edge_order, &mut d_edge_order)
+            .map_err(|e| {
+                XlogError::Kernel(format!("{}: htod edge_order failed: {}", entry_label, e))
+            })?;
+        let mut d_iteration_order = self.memory.alloc::<u8>(k)?;
+        self.htod_launch_metadata_sync_copy_into(iteration_order, &mut d_iteration_order)
+            .map_err(|e| {
+                XlogError::Kernel(format!(
+                    "{}: htod iteration_order failed: {}",
+                    entry_label, e
+                ))
+            })?;
+
+        // Per-leader-row match counters, zero-initialized. Allocated as
+        // the u8-backed column layout so the array doubles as the
+        // staging buffer's count column after the kernel fills it.
+        let mut row_counts = self
+            .memory()
+            .alloc::<u8>(n_leader as usize * std::mem::size_of::<u32>())?;
+        self.device()
+            .inner()
+            .memset_zeros(&mut row_counts)
+            .map_err(|e| {
+                XlogError::Kernel(format!("{}: zero row counts failed: {}", entry_label, e))
+            })?;
+
+        let block_work_unit = crate::wcoj_metadata::WCOJ_HG_BLOCK_WORK_UNIT_DEFAULT;
+        let grid = leader_work_total.div_ceil(block_work_unit);
+        let mut rec = LaunchRecorder::new_strict(launch_stream);
+        for buf in edges.iter() {
+            rec.read(buf.num_rows_device());
+            rec.read_column(buf.column(0).expect("validated"));
+            rec.read_column(buf.column(1).expect("validated"));
+        }
+        rec.read(&d_edge_col0);
+        rec.read(&d_edge_col1);
+        rec.read(&d_edge_n);
+        rec.read(&d_edge_order);
+        rec.read(&d_iteration_order);
+        rec.read(&leader_metadata.unique_keys);
+        rec.read(&leader_metadata.fan_out);
+        rec.read(&leader_metadata.prefix_sum);
+        rec.write(&row_counts);
+        rec.preflight(runtime)
+            .map_err(|e| XlogError::Kernel(format!("{}: preflight failed: {}", entry_label, e)))?;
+
+        let kernel_name = match k {
+            5 => wcoj_kernels::WCOJ_CLIQUE5_GROUPBY_ROOT_COUNT_HG_U32,
+            _ => wcoj_kernels::WCOJ_CLIQUE6_GROUPBY_ROOT_COUNT_HG_U32,
+        };
+        let kernel = self
+            .device()
+            .inner()
+            .get_func(WCOJ_MODULE, kernel_name)
+            .ok_or_else(|| {
+                XlogError::Kernel(format!(
+                    "{}: kernel '{}' not found",
+                    entry_label, kernel_name
+                ))
+            })?;
+        // SAFETY: kernel signature
+        //   wcoj_clique{K}_groupby_root_count_hg_u32(
+        //     const u32* const* edge_col0,
+        //     const u32* const* edge_col1,
+        //     const u32* edge_n,
+        //     u32 leader_edge_idx,
+        //     const u8* edge_order,
+        //     const u8* iteration_order,
+        //     u32 leader_count,
+        //     const u32* unique_keys,
+        //     const u32* fan_out,
+        //     const u32* prefix_sum,
+        //     u32 metadata_key_count,
+        //     u32 block_work_unit,
+        //     u32* out_row_counts)
+        // Pointers all device-resident; preflight verified cross-stream
+        // tracking. Raw params are required because the
+        // metadata-extended ABI exceeds the tuple-launch arity.
+        unsafe {
+            let mut params: Vec<*mut c_void> = vec![
+                (&d_edge_col0).as_kernel_param(),
+                (&d_edge_col1).as_kernel_param(),
+                (&d_edge_n).as_kernel_param(),
+                leader_edge_idx.as_kernel_param(),
+                (&d_edge_order).as_kernel_param(),
+                (&d_iteration_order).as_kernel_param(),
+                n_leader.as_kernel_param(),
+                (&leader_metadata.unique_keys).as_kernel_param(),
+                (&leader_metadata.fan_out).as_kernel_param(),
+                (&leader_metadata.prefix_sum).as_kernel_param(),
+                leader_metadata.key_count.as_kernel_param(),
+                block_work_unit.as_kernel_param(),
+                (&row_counts).as_kernel_param(),
+            ];
+            kernel
+                .clone()
+                .launch_on_stream(
+                    &cu_stream,
+                    LaunchConfig {
+                        grid_dim: (grid, 1, 1),
+                        block_dim: (BLOCK_SIZE, 1, 1),
+                        shared_mem_bytes: 0,
+                    },
+                    &mut params,
+                )
+                .map_err(|e| {
+                    XlogError::Kernel(format!(
+                        "{}: groupby-count launch failed: {}",
+                        entry_label, e
+                    ))
+                })?;
+        }
+        rec.commit(runtime)
+            .map_err(|e| XlogError::Kernel(format!("{}: commit failed: {}", entry_label, e)))?;
+
+        // Staging buffer (root, count) over the n_leader input rows:
+        // root is a device-to-device copy of the oriented leader edge's
+        // col0; the count column is the kernel-filled array. Rows stay
+        // lex-sorted by root.
+        let root_src = match leader.column(0).expect("validated") {
+            CudaColumn::Owned(slice) => slice,
+            _ => {
+                return Err(XlogError::Kernel(format!(
+                    "{}: leader.col0 must be an owned CudaColumn",
+                    entry_label
+                )))
+            }
+        };
+        let root_copy = self
+            .memory()
+            .alloc::<u8>(n_leader as usize * std::mem::size_of::<u32>())?;
+        // Explicit-length copy: layout-normalized columns are allocated at
+        // capacity, which can exceed the logical n_leader * 4 bytes a
+        // full-slice typed copy would assert on.
+        unsafe {
+            let res = sys::cuMemcpyDtoD_v2(
+                *root_copy.device_ptr(),
+                *root_src.device_ptr(),
+                n_leader as usize * std::mem::size_of::<u32>(),
+            );
+            if res != sys::cudaError_enum::CUDA_SUCCESS {
+                return Err(XlogError::Kernel(format!(
+                    "{}: copy root column failed: {:?}",
+                    entry_label, res
+                )));
+            }
+        }
+        let mut d_num_rows = self.memory().alloc::<u32>(1)?;
+        self.device()
+            .inner()
+            .dtod_copy(leader.num_rows_device(), &mut d_num_rows)
+            .map_err(|e| {
+                XlogError::Kernel(format!("{}: copy row count failed: {}", entry_label, e))
+            })?;
+        let staging_schema = Schema::new(vec![
+            ("root".to_string(), w_type),
+            ("count".to_string(), ScalarType::U32),
+        ]);
+        let staging = CudaBuffer::from_columns_with_host_count(
+            vec![root_copy.into(), row_counts.into()],
+            n_leader as u64,
+            d_num_rows,
+            staging_schema,
+            n_leader,
+        );
+
+        // Keep only roots with at least one completed clique, then
+        // reduce per root. Both steps run over input-sized data.
+        let mask = self.compare_const_mask_recorded::<u32>(
+            &staging,
+            1,
+            0u32,
+            crate::CompareOp::Gt,
+            launch_stream,
+        )?;
+        let compacted =
+            self.compact_buffer_by_device_mask_counted_recorded(&staging, &mask, launch_stream)?;
+        self.groupby_multi_agg_recorded(
+            &compacted,
+            &[0],
+            &[(1, xlog_core::AggOp::Sum)],
+            launch_stream,
+        )
+    }
+
+    /// Fused 5-clique count-by-root at the 4-byte width-class,
+    /// using plan-derived launch params. See
+    /// [`Self::wcoj_clique_groupby_root_count_recorded_inner`].
+    pub fn wcoj_clique5_groupby_root_count_u32_recorded_planned(
+        &self,
+        edges: &[&CudaBuffer; 10],
+        leader_edge_idx: u32,
+        edge_order: &[u8],
+        iteration_order: &[u8],
+        launch_stream: StreamId,
+    ) -> Result<CudaBuffer> {
+        self.wcoj_clique_groupby_root_count_recorded_inner(
+            5,
+            edges,
+            leader_edge_idx,
+            edge_order,
+            iteration_order,
+            launch_stream,
+            "wcoj_clique5_groupby_root_count_u32_recorded_planned",
+        )
+    }
+
+    /// Fused 6-clique count-by-root at the 4-byte width-class,
+    /// using plan-derived launch params. See
+    /// [`Self::wcoj_clique_groupby_root_count_recorded_inner`].
+    pub fn wcoj_clique6_groupby_root_count_u32_recorded_planned(
+        &self,
+        edges: &[&CudaBuffer; 15],
+        leader_edge_idx: u32,
+        edge_order: &[u8],
+        iteration_order: &[u8],
+        launch_stream: StreamId,
+    ) -> Result<CudaBuffer> {
+        self.wcoj_clique_groupby_root_count_recorded_inner(
+            6,
+            edges,
+            leader_edge_idx,
+            edge_order,
+            iteration_order,
+            launch_stream,
+            "wcoj_clique6_groupby_root_count_u32_recorded_planned",
         )
     }
 }

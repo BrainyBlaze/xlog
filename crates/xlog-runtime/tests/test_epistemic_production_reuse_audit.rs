@@ -157,7 +157,9 @@ fn hot_path_transfer_budget_allows_launch_metadata_but_rejects_data_plane_transf
         host_transfer_stats(0, 0, 0, 0),
         host_transfer_stats(4, 0, 1, 0),
     )
-    .expect_err("data-plane D2H inside the hot path must fail production reuse gates");
+    .expect_err(
+        "data-plane device-to-host transfer inside the hot path must fail production reuse gates",
+    );
     assert!(format!("{err}").contains("tracked host transfer in GPU hot path"));
 }
 
@@ -191,6 +193,7 @@ fn preflight_requiring_kclique_wcoj() -> EpistemicGpuRuntimePreflight {
         kclique_wcoj_plan_count: 1,
         wcoj_triangle_route_count: 0,
         wcoj_4cycle_route_count: 0,
+        free_join_route_count: 0,
         kclique_wcoj_plan_count_by_arity: [1, 0, 0, 0],
         kclique_wcoj_max_arity: 5,
         kclique_wcoj_edge_permutation_count: 10,

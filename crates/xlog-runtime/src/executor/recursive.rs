@@ -14,35 +14,27 @@ impl Executor {
     /// Maximum iterations for fixpoint computation to prevent infinite loops
     const MAX_FIXPOINT_ITERATIONS: usize = 1000;
 
-    /// v0.6.5 slice 4 / W4.1 helper. For a `MultiWayJoin` body
-    /// (produced by the slice 1–2 promoter), try WCOJ dispatch
-    /// via the triangle/4-cycle entry points; on decline, fall
-    /// back to the embedded fallback subtree via `execute_node`.
-    /// For any other RIR variant, defer to `execute_node`
-    /// directly.
+    /// For a `MultiWayJoin` or `ChainJoin` body, try the specialized WCOJ
+    /// dispatchers first; on decline, fall back to the embedded fallback
+    /// subtree via `execute_node`. For any other RIR variant, defer to
+    /// `execute_node` directly.
     ///
-    /// Used at TWO sites in the recursive engine — the seeding
-    /// pass (where stable rules with zero recursive Scans AND
-    /// linear/multi-recursive rules with non-zero in-SCC Scans
-    /// get their initial dispatch on the full body) and the
-    /// per-variant loop (where each recursive Scan with a
-    /// non-empty delta is rewritten to its delta RelId for one
-    /// dispatch). Multi-recursive bodies — both distinct-
-    /// recursive-predicate and same-predicate self-recursive
-    /// (paper P1, arXiv:2604.20073) — DO reach a `MultiWayJoin`
-    /// here after W4.1 eliminated the `recursive_scan_count > 1`
-    /// promoter cutoff at `crates/xlog-logic/src/promote.rs:114`;
-    /// the per-variant rewrite loop builds N variants (one per
-    /// recursive occurrence with a non-empty delta) and
-    /// dispatches each via this helper.
+    /// Used at two sites in the recursive engine: the seeding pass, where
+    /// stable rules and recursive rules get their initial dispatch on the full
+    /// body, and the per-variant loop, where each recursive scan with a
+    /// non-empty delta is rewritten to its delta `RelId` for one dispatch.
+    /// Multi-recursive bodies, including distinct recursive predicates and
+    /// same-predicate self-recursive bodies, reach a `MultiWayJoin` here after
+    /// the promoter admits bodies with more than one recursive scan; the
+    /// per-variant rewrite loop builds one variant per recursive occurrence
+    /// with a non-empty delta and dispatches each via this helper.
     ///
-    /// Counter semantics: `wcoj_*_dispatch_count` increments per
-    /// successful WCOJ kernel result — once per (rule, iteration,
-    /// variant). Slice 1–3 non-recursive sites still increment
-    /// once per rule per call.
+    /// Counter semantics: `wcoj_*_dispatch_count` increments once per
+    /// successful WCOJ kernel result: once per recursive rule, iteration, and
+    /// variant. Non-recursive dispatch sites increment once per rule per call.
     fn execute_wcoj_or_fallback_node(&mut self, node: &RirNode) -> Result<CudaBuffer> {
         if let RirNode::ChainJoin { .. } = node {
-            if let Some(buf) = self.try_dispatch_w63_chain_on_body(node)? {
+            if let Some(buf) = self.try_dispatch_chain_on_body(node)? {
                 return Ok(buf);
             }
             return self.execute_node(node);
@@ -59,9 +51,8 @@ impl Executor {
             if let Some(buf) = self.try_dispatch_wcoj_4cycle_on_body(node)? {
                 return Ok(buf);
             }
-            // Authorization 5 G_HIST_KC: recursive clique bodies
-            // must use the same launch-local metadata builders as
-            // non-recursive K-clique dispatch, so rewritten
+            // Recursive clique bodies use the same launch-local metadata
+            // builders as non-recursive K-clique dispatch, so rewritten
             // semi-naive variants are eligible here too.
             if let Some(buf) = self.try_dispatch_wcoj_clique5_on_body(node)? {
                 return Ok(buf);
@@ -73,6 +64,12 @@ impl Executor {
                 return Ok(buf);
             }
             if let Some(buf) = self.try_dispatch_wcoj_clique8_on_body(node)? {
+                return Ok(buf);
+            }
+            // Generalized Free Join dispatch for every multiway shape the
+            // dedicated dispatchers declined. The hook re-checks dedicated
+            // shapes structurally, so it only fires on general bodies.
+            if let Some(buf) = self.try_dispatch_free_join(node)? {
                 return Ok(buf);
             }
         }
@@ -176,25 +173,20 @@ impl Executor {
                 let is_recursive = scc.map(|s| s.is_recursive).unwrap_or(false);
 
                 if is_recursive {
-                    // Recursive SCC: use semi-naive fixpoint iteration.
-                    // v0.6.5 slice 4: the recursive engine now invokes
-                    // WCOJ dispatch via `execute_wcoj_or_fallback_node`
-                    // on both the seeding pass and per-variant
-                    // evaluation, gated by the slice 4 promoter
-                    // (recursive-Scan count ≤ 1).
+                    // Recursive SCC: use semi-naive fixpoint iteration. The
+                    // recursive engine invokes WCOJ dispatch via
+                    // `execute_wcoj_or_fallback_node` on both the seeding
+                    // pass and per-variant evaluation when the promoted body
+                    // shape is eligible.
                     self.execute_recursive_scc(rules)?;
                 } else {
                     // Non-recursive SCC: execute rules once, union results for same predicate.
                     for rule in rules {
-                        // Goal-039 G_W63_CHAIN — route two-atom
-                        // ChainJoin bodies before the
-                        // triangle/4-cycle/KC attempts. The
-                        // dispatcher silently declines on non-chain
-                        // bodies or when the env gate disables the
-                        // route.
-                        if let Some(chain_result) =
-                            self.try_dispatch_w63_chain_on_body(&rule.body)?
-                        {
+                        // Route two-atom ChainJoin bodies before the
+                        // triangle/4-cycle/KC attempts. The dispatcher
+                        // silently declines on non-chain bodies or when
+                        // the env gate disables the route.
+                        if let Some(chain_result) = self.try_dispatch_chain_on_body(&rule.body)? {
                             if let Some(existing) = self.store.get(&rule.head) {
                                 let merged = self.provider.union_gpu(existing, &chain_result)?;
                                 self.store_put(&rule.head, merged);
@@ -224,7 +216,7 @@ impl Executor {
                             continue;
                         }
 
-                        // v0.6.2 WCOJ triangle dispatch — env-gated.
+                        // WCOJ triangle dispatch, gated by runtime configuration.
                         // Try to short-circuit the rule via the GPU
                         // 3-way kernel. On Some(_), install the
                         // result and skip the binary-join path for
@@ -249,7 +241,7 @@ impl Executor {
                             continue;
                         }
 
-                        // v0.6.5 slice 2: WCOJ 4-cycle dispatch.
+                        // WCOJ 4-cycle dispatch.
                         // Same pattern as triangle. Order is a doc
                         // anchor — a body cannot match both shapes
                         // (different atom counts), so triangle's
@@ -265,7 +257,7 @@ impl Executor {
                             continue;
                         }
 
-                        // W3.2/W6.4 — k=5..k=8 clique dispatch.
+                        // K-clique dispatch for k=5..k=8.
                         // Same shape-gated default-dispatch
                         // pattern as triangle / 4-cycle; silent
                         // fallback to MultiWayJoin.fallback on
@@ -307,16 +299,37 @@ impl Executor {
                             continue;
                         }
 
-                        // v0.6.5 slice 1: when WCOJ dispatch declines on
-                        // a `MultiWayJoin` body (gate off, kernel error,
-                        // adaptive score below threshold, …), execute
-                        // the embedded `fallback` — the post-optimizer
-                        // binary-join tree the promoter captured. This
-                        // preserves byte-identical behavior with v0.6.2.
-                        // `execute_node`'s `MultiWayJoin` arm is the
-                        // defensive safety net; explicit destructuring
-                        // here keeps the intent visible at the dispatch
-                        // site.
+                        // Generalized Free Join dispatch for every multiway
+                        // shape the dedicated dispatchers above declined. The
+                        // dispatcher re-checks those shapes structurally, so
+                        // it only fires on general bodies. Unlike the
+                        // dedicated kernels, the frontier engine emits one row
+                        // per derivation path, so the install mirrors the
+                        // binary-join arm below: `union_gpu` dedups, and
+                        // fresh installs dedup explicitly.
+                        if let Some(fj_result) = self.try_dispatch_free_join(&rule.body)? {
+                            if let Some(existing) = self.store.get(&rule.head) {
+                                let merged = self.provider.union_gpu(existing, &fj_result)?;
+                                self.store_put(&rule.head, merged);
+                            } else {
+                                let key_cols: Vec<usize> = (0..fj_result.arity()).collect();
+                                let deduped = if fj_result.is_empty() {
+                                    fj_result
+                                } else {
+                                    self.provider.dedup(&fj_result, &key_cols)?
+                                };
+                                self.store_put(&rule.head, deduped);
+                            }
+                            continue;
+                        }
+
+                        // When WCOJ dispatch declines on a `MultiWayJoin`
+                        // body (gate off, kernel error, adaptive score below
+                        // threshold, ...), execute the embedded `fallback`,
+                        // the post-optimizer binary-join tree the promoter
+                        // captured. `execute_node`'s `MultiWayJoin` arm is the
+                        // defensive safety net; explicit destructuring here
+                        // keeps the intent visible at the dispatch site.
                         let body_to_execute = match &rule.body {
                             xlog_ir::RirNode::MultiWayJoin { fallback, .. }
                             | xlog_ir::RirNode::ChainJoin { fallback, .. } => fallback.as_ref(),
@@ -380,9 +393,9 @@ impl Executor {
     /// 3. Re-execute rules, using delta from previous iteration
     /// 4. Repeat until no changes (fixpoint reached)
     pub fn execute_recursive_scc(&mut self, rules: &[xlog_ir::CompiledRule]) -> Result<()> {
-        // W2.3: reset the per-iteration stats trace at SCC entry so
-        // tests see a fresh trace per invocation. Gated on the
-        // `recursive-stats-trace` feature; default OFF.
+        // Reset the per-iteration stats trace at SCC entry so tests see a
+        // fresh trace per invocation. Gated on the `recursive-stats-trace`
+        // feature; default OFF.
         #[cfg(feature = "recursive-stats-trace")]
         {
             self.last_recursive_stats_trace.entries.clear();
@@ -440,15 +453,14 @@ impl Executor {
             delta_tracker.insert(pred.clone(), rel_id, name);
         }
 
-        // Step 1: Execute all rules once against the current store to seed initial results.
+        // Execute all rules once against the current store to seed initial results.
         // Accumulate per-head before mutating the store to avoid order dependence.
         //
-        // v0.6.5 slice 4: route through `execute_wcoj_or_fallback_node`
-        // so MultiWayJoin bodies (slice 4 promoter output for stable
-        // and linear-recursive triangles / 4-cycles) get a chance at
-        // WCOJ dispatch on the seeding pass. Stable rules — bodies
-        // with zero recursive Scans — only run here, so without this
-        // hook they'd never see a kernel.
+        // Route through `execute_wcoj_or_fallback_node` so promoted
+        // MultiWayJoin bodies for stable and linear-recursive triangles or
+        // 4-cycles get a chance at WCOJ dispatch on the seeding pass. Stable
+        // rules with zero recursive scans only run here, so without this hook
+        // they would never see a kernel.
         let mut derived_initial: HashMap<String, CudaBuffer> = HashMap::new();
         for rule in rules {
             let result = self.execute_wcoj_or_fallback_node(&rule.body)?;
@@ -517,10 +529,9 @@ impl Executor {
                 diffed
             };
 
-            // W2.3 step 4 — seed-iteration cardinality refresh.
-            // Capture the actual delta_initial row count BEFORE the
-            // `store_put` move (after the move, the buffer is gone).
-            // `full_new_rows` was captured at line 356 above.
+            // Seed-iteration cardinality refresh. Capture the actual
+            // `delta_initial` row count before the `store_put` move; after the
+            // move, the buffer is gone.
             let delta_initial_rows = self.buffer_row_count(&delta_initial)? as u64;
             let seed_full_rows = full_new_rows as u64;
             // Pre-resolve rel_id lookups before the &mut self stats
@@ -540,7 +551,7 @@ impl Executor {
             }
             self.stats.update_cardinality(delta_rel, delta_initial_rows);
 
-            // W2.3 trace seam — gated on `recursive-stats-trace`.
+            // Seed stats trace entry, gated on `recursive-stats-trace`.
             #[cfg(feature = "recursive-stats-trace")]
             self.last_recursive_stats_trace
                 .entries
@@ -556,14 +567,23 @@ impl Executor {
                 });
         }
 
-        // Step 2: Iterate until no new tuples are produced.
+        // Iterate until no new tuples are produced.
         let mut reached_fixpoint = false;
         let max_iterations = self.config.max_iterations as usize;
         let mut iteration_count = 0usize;
+        // D3 — per-fixpoint dispatch context for the factorized delta
+        // (domain bounds + normalized EDB statics are cached across
+        // iterations).
+        let mut fd_ctx = super::wcoj_dispatch::FactorizedDeltaCtx::default();
         for _iteration in 0..max_iterations {
             iteration_count += 1;
             // Compute delta_new_raw per head by evaluating each rule once per recursive Scan occurrence.
             let mut delta_new_raw_by_head: HashMap<String, CudaBuffer> = HashMap::new();
+            // D3 — factorized novel sets per head: already diffed
+            // against the stable relation and full-row deduped at
+            // dispatch time. Kept separate from the raw accumulator so
+            // all-factorized heads can skip the legacy diff entirely.
+            let mut delta_novel_by_head: HashMap<String, CudaBuffer> = HashMap::new();
 
             for rule in rules {
                 let mut scans = Vec::new();
@@ -605,6 +625,7 @@ impl Executor {
                 }
 
                 let mut rule_delta_raw: Option<CudaBuffer> = None;
+                let mut rule_delta_novel: Option<CudaBuffer> = None;
                 for (rel_id, occ, pred_name) in variants {
                     let delta_rel_id = delta_tracker.delta_rel_id(&pred_name)?;
 
@@ -618,8 +639,27 @@ impl Executor {
                             },
                         )?;
 
-                    // v0.6.5 slice 4: try WCOJ on the rewritten variant
-                    // body before falling back to the binary-join walker.
+                    // Try the factorized delta pipeline first: a qualifying
+                    // ChainJoin variant returns the novel set directly
+                    // (already diffed against the head's stable relation and
+                    // deduped). Declines are silent and fall through to the
+                    // legacy path.
+                    if let Some(novel) = self.try_dispatch_factorized_delta(
+                        &variant_node,
+                        delta_rel_id,
+                        &rule.head,
+                        &recursive_pred_lookup,
+                        &mut fd_ctx,
+                    )? {
+                        rule_delta_novel = Some(match rule_delta_novel {
+                            Some(acc) => self.provider.union_gpu(&acc, &novel)?,
+                            None => novel,
+                        });
+                        continue;
+                    }
+
+                    // Try WCOJ on the rewritten variant body before falling
+                    // back to the binary-join walker.
                     // For a linear-recursive triangle/4-cycle, the
                     // variant has one Scan's RelId swapped to its
                     // delta — the kernel reads from the delta store
@@ -647,6 +687,17 @@ impl Executor {
                     });
                 }
 
+                // D3 — a rule with BOTH factorized and legacy variant
+                // outputs folds its novel set into the raw accumulator
+                // (the legacy diff is a no-op on novel rows, so this is
+                // sound); an all-factorized rule keeps its novel set on
+                // the diff-free track.
+                if rule_delta_raw.is_some() {
+                    if let Some(novel) = rule_delta_novel.take() {
+                        let raw = rule_delta_raw.as_ref().expect("checked above");
+                        rule_delta_raw = Some(self.provider.union_gpu(raw, &novel)?);
+                    }
+                }
                 if let Some(rule_out) = rule_delta_raw {
                     if let Some(acc) = delta_new_raw_by_head.get_mut(&rule.head) {
                         let union_input = acc.num_rows() + rule_out.num_rows();
@@ -668,6 +719,13 @@ impl Executor {
                         delta_new_raw_by_head.insert(rule.head.clone(), rule_out);
                     }
                 }
+                if let Some(rule_novel) = rule_delta_novel {
+                    if let Some(acc) = delta_novel_by_head.get_mut(&rule.head) {
+                        *acc = self.provider.union_gpu(acc, &rule_novel)?;
+                    } else {
+                        delta_novel_by_head.insert(rule.head.clone(), rule_novel);
+                    }
+                }
             }
 
             // Finalize delta_new per head: delta_new = dedup(delta_raw - full).
@@ -678,15 +736,30 @@ impl Executor {
                     .store
                     .get(pred)
                     .ok_or_else(|| XlogError::Execution(format!("Missing relation: {}", pred)))?;
-                // W2.3 step 5: capture the pre-Phase-4 full row count
-                // for the trace's full_rows field at this Phase 2 site.
-                // Gated on `recursive-stats-trace` so production builds
-                // don't compute it.
+                // Capture the current full row count for the trace's
+                // `full_rows` field before this iteration's delta relation is
+                // replaced. Gated on `recursive-stats-trace` so production
+                // builds do not compute it.
                 #[cfg(feature = "recursive-stats-trace")]
                 let pre_phase4_full_rows = self.buffer_row_count(full)? as u64;
 
                 let delta_raw = delta_new_raw_by_head.remove(pred);
-                let delta_new = if let Some(delta_raw) = delta_raw {
+                let delta_novel = delta_novel_by_head.remove(pred);
+                // D3 — when a head received both raw and factorized
+                // contributions (different rules), fold the novel set
+                // into the raw side before the legacy diff (sound: the
+                // diff is a no-op on novel rows). An all-factorized
+                // head skips the diff entirely — its novel set is
+                // already diffed and deduped by construction.
+                let (delta_raw, delta_novel) = match (delta_raw, delta_novel) {
+                    (Some(raw), Some(novel)) => {
+                        (Some(self.provider.union_gpu(&raw, &novel)?), None)
+                    }
+                    other => other,
+                };
+                let delta_new = if let Some(novel) = delta_novel {
+                    novel
+                } else if let Some(delta_raw) = delta_raw {
                     if self.buffer_row_count(&delta_raw)? == 0 {
                         self.create_empty_buffer(full.schema().clone())?
                     } else {
@@ -724,15 +797,16 @@ impl Executor {
                 let delta_rel = delta_tracker.delta_rel_id(pred)?;
                 self.store_put(&delta_name, delta_new);
 
-                // W2.3 step 5 — Phase 2: refresh delta_rel card.
-                // full_rel card is NOT updated here (full hasn't
-                // changed yet this iteration; Phase 4 owns that).
+                // Refresh the delta relation cardinality after computing this
+                // iteration's delta. The full relation cardinality is not
+                // updated here because the full relation has not changed yet
+                // this iteration; the merge step owns that.
                 self.stats.update_cardinality(delta_rel, delta_new_rows);
 
-                // W2.3 trace seam — gated on `recursive-stats-trace`.
+                // Delta stats trace entry, gated on `recursive-stats-trace`.
                 // binary_est_for_variant captures the cost model's
-                // first-binary-hop estimate for the slice-4
-                // linear-recursive fixtures (`pred == "e1"` rewrites
+                // first-binary-hop estimate for the linear-recursive fixtures
+                // (`pred == "e1"` rewrites
                 // Scan(e1) → Scan(delta_e1); first hop is
                 // `delta_e1.col1 ⋈ e2.col0`). Populated inline because
                 // delta_rel is unregistered at fixpoint exit, so the
@@ -780,11 +854,10 @@ impl Executor {
                     .ok_or_else(|| XlogError::Execution(format!("Missing relation: {}", dn)))?;
 
                 if self.buffer_row_count(&delta)? == 0 {
-                    // W2.3: zero-delta short-circuit — full and delta
-                    // unchanged this iteration. Phase 2's delta_rel
-                    // record (with rows == 0) stands; full_rel record
-                    // from a prior iteration's Phase 4 stands. No
-                    // additional update.
+                    // Zero-delta short-circuit: full and delta are unchanged
+                    // this iteration. The delta relation record with zero
+                    // rows stands, and the full relation record from the prior
+                    // merge stands. No additional update is needed.
                     self.store_put(pred, full_old);
                     self.store_put(&dn, delta);
                     continue;
@@ -801,11 +874,10 @@ impl Executor {
                 }
 
                 let full_new = merged;
-                // W2.3 step 6 — Phase 4: capture full_new's row count
-                // BEFORE the store_put move; pre-resolve full_rel_opt
-                // before the &mut self stats borrow. delta_rows_phase4
-                // and delta_rel are only used by the trace under the
-                // `recursive-stats-trace` feature.
+                // Capture `full_new`'s row count before the `store_put` move
+                // and pre-resolve `full_rel_opt` before the mutable stats
+                // borrow. The delta row count and delta relation id are only
+                // used by the trace under the `recursive-stats-trace` feature.
                 let full_new_rows_phase4 = self.buffer_row_count(&full_new)? as u64;
                 #[cfg(feature = "recursive-stats-trace")]
                 let delta_rows_phase4 = self.buffer_row_count(&delta)? as u64;
@@ -815,15 +887,15 @@ impl Executor {
                 self.store_put(pred, full_new);
                 self.store_put(&dn, delta);
 
-                // Record full_rel's new card. (Phase 2 already
-                // recorded delta_rel for this iteration.)
+                // Record the full relation's new cardinality. The delta
+                // relation was already recorded for this iteration.
                 if let Some(full_rel) = full_rel_opt {
                     self.stats
                         .update_cardinality(full_rel, full_new_rows_phase4);
                 }
                 self.refresh_kclique_edge_metadata_after_merge(rules, pred);
 
-                // W2.3 trace seam — gated on `recursive-stats-trace`.
+                // Full-relation stats trace entry, gated on `recursive-stats-trace`.
                 #[cfg(feature = "recursive-stats-trace")]
                 self.last_recursive_stats_trace
                     .entries
@@ -897,7 +969,7 @@ impl Executor {
         delta_rel: RelId,
         full_rel: RelId,
     ) -> Result<CudaBuffer> {
-        // Step 1: Compute base case R = eval(base)
+        // Compute base case R = eval(base)
         let r_initial = self.execute_node(base)?;
 
         // Handle empty base case using device-resident row count
@@ -905,7 +977,7 @@ impl Executor {
             return Ok(r_initial);
         }
 
-        // Step 2: Initialize delta = R (clone the base result)
+        // Initialize delta = R (clone the base result)
         let delta_initial = self.clone_buffer(&r_initial)?;
 
         // Get relation names for delta and full relations
@@ -916,7 +988,7 @@ impl Executor {
         self.store_put(&full_name, r_initial);
         self.store_put(&delta_name, delta_initial);
 
-        // Step 3: Iterate until fixpoint
+        // Iterate until fixpoint
         for _iteration in 0..Self::MAX_FIXPOINT_ITERATIONS {
             // Evaluate recursive step using current delta
             // The recursive RIR tree should reference delta_rel internally

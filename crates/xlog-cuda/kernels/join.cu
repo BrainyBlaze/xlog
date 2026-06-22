@@ -383,8 +383,8 @@ extern "C" __global__ void hash_join_probe_v2_materialize(
  * pass, before the materialize pass that consumes
  * `d_logical_count` indirectly via `output_capacity`. Sets
  * `d_overflow` if `total > capacity` and clamps the recorded
- * logical count to `capacity`. Avoids a host-side D2H of the
- * post-scan total — the recorded path consumes the value via
+ * logical count to `capacity`. Avoids a host-side device-to-host
+ * copy of the post-scan total — the recorded path consumes the value via
  * the output buffer's `num_rows_device` scalar without
  * touching the host data plane.
  */
@@ -550,7 +550,7 @@ extern "C" __global__ void init_hash_table(
 }
 
 // ===============================================================
-// W4.2 — Nested-loop inner join (emit-pairs design).
+// Nested-loop inner join production operator (emit-pairs design).
 // Multi-col-compatible via columnar `CudaBuffer`: kernel reads
 // ONLY the key columns (one `*const uint32_t` pointer per side)
 // and emits matched (left_idx, right_idx) pairs as two parallel
@@ -564,7 +564,7 @@ extern "C" __global__ void init_hash_table(
 // crossover measurement; that kernel does NOT graduate to
 // production. This kernel is the production-shape design.
 //
-// Restrictions (per W4.2 plan iteration-4 canonical, D1+D2):
+// Restrictions for the nested-loop production operator:
 //   * Inner join only (Semi/Anti/LeftOuter not supported).
 //   * U32 / Symbol keys (Symbol IS u32 at the byte level).
 //   * Single key column (multi-key not supported).
@@ -573,12 +573,12 @@ extern "C" __global__ void init_hash_table(
 //   * `left_keys`, `right_keys`: pointers to the single key
 //     column from each side. Caller (provider fn) validates
 //     `num_bytes() == num_rows * 4` BEFORE launching this
-//     kernel (per plan F-W42-14 byte-length validation).
+//     kernel; this is the single-key-column byte-length validation.
 //   * `output_left_idx`, `output_right_idx`: pre-allocated to
 //     `output_capacity = num_left * num_right` rows. Caller
 //     (provider fn) enforces `num_left * num_right <=
 //     NESTED_LOOP_TOTAL_THRESHOLD = 4_000_000` via `checked_mul`
-//     before allocation (per plan F-W42-15).
+//     before allocation, enforcing the Cartesian-product capacity guard.
 //   * `output_count`: pre-zeroed `uint32_t[1]`.
 //
 // Defense-in-depth: the kernel guards `out_idx <
@@ -612,18 +612,18 @@ extern "C" __global__ void nested_loop_join_inner_u32_1key_pairs(
 }
 
 // ===============================================================
-// W4.3 — Sort-merge inner join (emit-pairs design,
+// Sort-merge inner join operator (emit-pairs design,
 // multi-col-compatible via columnar `CudaBuffer`).
 //
 // Caller asserts both inputs are pre-sorted ascending by the
 // single key column. Callers may pre-check via the runtime
 // detection kernel `check_ascending_sorted_u32` (provider fn
 // `is_sorted_ascending_u32`); on caller-contract violation the
-// row-set output is undefined. Per W4.3 plan iter-6 F-W43-14
-// (operator-only scope after Step 12 bench rejected D2
-// precedence), there is no executor dispatch-site pre-check
-// — sortedness is purely a caller-supplied invariant. Each
-// thread takes one LEFT-row
+// row-set output is undefined. After the production benchmark
+// rejected sort-merge executor precedence over nested-loop, this
+// operator remains provider-level only: there is no executor
+// dispatch-site pre-check, and sortedness is purely a
+// caller-supplied invariant. Each thread takes one LEFT-row
 // and uses binary search on the RIGHT side to find the matched-
 // key run (`lower_bound` + `upper_bound`), then emits
 // `(left_idx, right_idx)` pairs for each `right_idx` in
@@ -637,9 +637,10 @@ extern "C" __global__ void nested_loop_join_inner_u32_1key_pairs(
 // `sort_merge_join_inner_u32_1key_pairs_spike` used for the
 // crossover measurement; that kernel does NOT graduate to
 // production. This kernel is the production-shape design,
-// written fresh per W4.3 plan iter-4 D8.
+// written fresh for the production operator rather than promoted
+// from the spike.
 //
-// Restrictions (per W4.3 plan iter-4 D4):
+// Restrictions for the sort-merge operator:
 //   * Inner join only.
 //   * U32 / Symbol keys (Symbol IS u32 at the byte level).
 //   * Single key column.
@@ -648,12 +649,13 @@ extern "C" __global__ void nested_loop_join_inner_u32_1key_pairs(
 //   * `left_keys` / `right_keys`: pointers to the single key
 //     column from each side, sorted ascending. Caller
 //     (provider fn) validates `num_bytes() >= num_rows * 4`
-//     BEFORE launching (W4.2 F-W42-14 idiom).
+//     BEFORE launching, matching the nested-loop single-key-column
+//     byte-length validation.
 //   * Index arrays: pre-allocated to
 //     `output_capacity = num_left * num_right`. Caller
 //     enforces `num_left * num_right <= 4_000_000` via
-//     `checked_mul` (shared `NESTED_LOOP_TOTAL_THRESHOLD`
-//     per W4.3 D3).
+//     `checked_mul` using the shared nested-loop Cartesian-product
+//     capacity guard.
 //   * `output_count`: pre-zeroed.
 //
 // Defense-in-depth: kernel guards `out_idx < output_capacity`

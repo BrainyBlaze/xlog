@@ -55,6 +55,11 @@ pub struct GpuMemoryManager {
     budget: MemoryBudget,
     /// Currently allocated bytes (tracked atomically for thread safety)
     allocated: AtomicU64,
+    /// High-water mark of `allocated` since construction or the last
+    /// [`reset_peak`](Self::reset_peak). Updated at the two reservation
+    /// funnels (`alloc`, `alloc_raw`); used by measurement harnesses to
+    /// report true peak device-memory pressure across an operation.
+    peak: AtomicU64,
     /// Count of `alloc` calls (device allocation requests). Resettable; used by
     /// the GPU-resident MC engine's no-host gate to prove that **zero** device
     /// allocations happen inside the measured region (all arenas are allocated
@@ -91,6 +96,78 @@ enum Backing {
         runtime: Arc<XlogDeviceRuntime>,
         block: Option<DeviceBlock>,
     },
+}
+
+/// Debug probe: poison legacy allocations with 0xDD at drop so any
+/// live alias of freed memory becomes visually distinct. Gated on
+/// `XLOG_DEBUG_POISON_FREE=1`, read once per process.
+fn poison_free_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var("XLOG_DEBUG_POISON_FREE").map(|v| v == "1") == Ok(true))
+}
+
+/// Debug probe: poison fresh legacy allocations with 0xDD so reads of
+/// unwritten contents surface deterministically. Gated on
+/// `XLOG_DEBUG_POISON_ALLOC=1`, read once per process.
+fn poison_alloc_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var("XLOG_DEBUG_POISON_ALLOC").map(|v| v == "1") == Ok(true))
+}
+
+/// Debug probe: track live legacy allocation ranges and panic if the
+/// allocator ever hands out a region overlapping one that is still
+/// live (double-hand-out / use-after-free detector, timing
+/// independent). Gated on `XLOG_DEBUG_ALLOC_GUARD=1`.
+fn alloc_guard() -> Option<&'static std::sync::Mutex<std::collections::BTreeMap<u64, u64>>> {
+    static GUARD: std::sync::OnceLock<
+        Option<std::sync::Mutex<std::collections::BTreeMap<u64, u64>>>,
+    > = std::sync::OnceLock::new();
+    GUARD
+        .get_or_init(|| {
+            if std::env::var("XLOG_DEBUG_ALLOC_GUARD").map(|v| v == "1") == Ok(true) {
+                Some(std::sync::Mutex::new(std::collections::BTreeMap::new()))
+            } else {
+                None
+            }
+        })
+        .as_ref()
+}
+
+fn alloc_guard_insert(ptr: u64, bytes: u64) {
+    let Some(guard) = alloc_guard() else { return };
+    if bytes == 0 {
+        return;
+    }
+    let mut live = guard.lock().unwrap();
+    // Overlap check against the nearest live range at or below ptr and
+    // the first live range above it.
+    if let Some((&p, &b)) = live.range(..=ptr).next_back() {
+        if p + b > ptr {
+            panic!(
+                "ALLOC GUARD: new allocation [{:#x}, {:#x}) overlaps live [{:#x}, {:#x})",
+                ptr,
+                ptr + bytes,
+                p,
+                p + b
+            );
+        }
+    }
+    if let Some((&p, _)) = live.range(ptr + 1..).next() {
+        if ptr + bytes > p {
+            panic!(
+                "ALLOC GUARD: new allocation [{:#x}, {:#x}) overlaps live starting at {:#x}",
+                ptr,
+                ptr + bytes,
+                p
+            );
+        }
+    }
+    live.insert(ptr, bytes);
+}
+
+fn alloc_guard_remove(ptr: u64) {
+    let Some(guard) = alloc_guard() else { return };
+    guard.lock().unwrap().remove(&ptr);
 }
 
 /// A `CudaSlice` that automatically updates `GpuMemoryManager`
@@ -284,6 +361,21 @@ impl<T: cudarc::driver::DeviceRepr> Drop for TrackedCudaSlice<T> {
     fn drop(&mut self) {
         match &mut self.backing {
             Backing::Cudarc => {
+                // Debug probe (XLOG_DEBUG_POISON_FREE=1): overwrite the
+                // allocation with 0xDD before cudarc frees it, so any
+                // still-live alias of this memory reads the poison
+                // pattern instead of recycled contents. Diagnostic only;
+                // off unless the env var is set.
+                if poison_free_enabled() && self.bytes > 0 {
+                    unsafe {
+                        let _ = cudarc::driver::sys::cuMemsetD8_v2(
+                            self.raw_ptr,
+                            0xDD,
+                            self.bytes as usize,
+                        );
+                    }
+                }
+                alloc_guard_remove(self.raw_ptr);
                 // SAFETY: drop runs at most once per slice, and the
                 // inner CudaSlice<T> has not been moved out by any
                 // method (`into_bytes` consumes `self` by value and
@@ -316,6 +408,7 @@ impl GpuMemoryManager {
             device,
             budget,
             allocated: AtomicU64::new(0),
+            peak: AtomicU64::new(0),
             alloc_count: AtomicU64::new(0),
             runtime: None,
         }
@@ -341,6 +434,7 @@ impl GpuMemoryManager {
             device,
             budget,
             allocated: AtomicU64::new(0),
+            peak: AtomicU64::new(0),
             alloc_count: AtomicU64::new(0),
             runtime: Some(runtime),
         }
@@ -405,6 +499,7 @@ impl GpuMemoryManager {
                 .compare_exchange(current, new_val, Ordering::SeqCst, Ordering::SeqCst)
                 .is_ok()
             {
+                self.peak.fetch_max(new_val, Ordering::SeqCst);
                 break;
             }
         }
@@ -505,6 +600,23 @@ impl GpuMemoryManager {
         };
         let (raw_ptr, sync) = DevicePtr::device_ptr(&slice, slice.stream());
         std::mem::forget(sync);
+        alloc_guard_insert(raw_ptr, bytes);
+
+        // Debug probe (XLOG_DEBUG_POISON_ALLOC=1): poison fresh legacy
+        // allocations with 0xDD so any read of unwritten allocation
+        // contents becomes a deterministic, recognizable pattern
+        // instead of whatever the recycled memory held. Diagnostic
+        // only; off unless the env var is set.
+        if poison_alloc_enabled() && bytes > 0 {
+            unsafe {
+                let _ = cudarc::driver::sys::cuMemsetD8Async(
+                    raw_ptr,
+                    0xDD,
+                    bytes as usize,
+                    std::ptr::null_mut(),
+                );
+            }
+        }
 
         Ok(TrackedCudaSlice {
             bytes,
@@ -543,6 +655,22 @@ impl GpuMemoryManager {
     /// Get the current allocated memory in bytes
     pub fn allocated_bytes(&self) -> u64 {
         self.allocated.load(Ordering::SeqCst)
+    }
+
+    /// High-water mark of allocated bytes since construction or the
+    /// last [`reset_peak`](Self::reset_peak). Always ≥
+    /// [`allocated_bytes`](Self::allocated_bytes) at the moment it was
+    /// recorded. Measurement-harness API (S3 peak-memory gate).
+    pub fn peak_bytes(&self) -> u64 {
+        self.peak.load(Ordering::SeqCst)
+    }
+
+    /// Reset the peak high-water mark to the *current* allocated
+    /// level, so a measurement window starts from live state rather
+    /// than zero. Measurement-harness API.
+    pub fn reset_peak(&self) {
+        self.peak
+            .store(self.allocated.load(Ordering::SeqCst), Ordering::SeqCst);
     }
 
     /// Number of `alloc` calls issued so far (device allocation requests).
@@ -627,6 +755,7 @@ impl GpuMemoryManager {
                 .compare_exchange(current, new_val, Ordering::SeqCst, Ordering::SeqCst)
                 .is_ok()
             {
+                self.peak.fetch_max(new_val, Ordering::SeqCst);
                 break;
             }
         }
@@ -665,6 +794,7 @@ impl GpuMemoryManager {
     /// RAII-based tracking is implemented.
     pub fn reset_tracking(&self) {
         self.allocated.store(0, Ordering::SeqCst);
+        self.peak.store(0, Ordering::SeqCst);
     }
 }
 
@@ -1396,6 +1526,36 @@ mod tests {
         drop(slice);
         assert_eq!(manager.allocated_bytes(), 0);
         assert_eq!(manager.remaining_bytes(), 4096);
+    }
+
+    #[test]
+    fn test_memory_manager_peak_tracking() {
+        let Some(device) = try_device() else {
+            return;
+        };
+        let budget = MemoryBudget::with_limit(8192);
+        let manager = Arc::new(GpuMemoryManager::new(device, budget));
+
+        let a = manager.alloc::<u32>(256).expect("alloc a"); // 1024 B
+        let b = manager.alloc::<u32>(512).expect("alloc b"); // 2048 B
+        assert_eq!(manager.peak_bytes(), 3072);
+
+        // Frees lower `allocated` but never the peak.
+        drop(b);
+        assert_eq!(manager.allocated_bytes(), 1024);
+        assert_eq!(manager.peak_bytes(), 3072);
+
+        // reset_peak restarts the window from live state.
+        manager.reset_peak();
+        assert_eq!(manager.peak_bytes(), 1024);
+
+        let c = manager.alloc::<u32>(128).expect("alloc c"); // 512 B
+        assert_eq!(manager.peak_bytes(), 1536);
+
+        drop(c);
+        drop(a);
+        assert_eq!(manager.allocated_bytes(), 0);
+        assert_eq!(manager.peak_bytes(), 1536);
     }
 
     #[test]

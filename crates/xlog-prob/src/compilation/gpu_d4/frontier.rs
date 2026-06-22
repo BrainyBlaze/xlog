@@ -1,4 +1,4 @@
-//! Frontier expansion for GPU D4 compilation.
+//! Frontier expansion for GPU-native Decision-DNNF knowledge compilation.
 
 use std::ffi::c_void;
 
@@ -14,7 +14,7 @@ use super::{
 };
 
 // ---------------------------------------------------------------------------
-// Frontier work queues (Phase 1) - device-resident BFS expansion
+// Frontier work queues for device-resident breadth-first expansion
 // ---------------------------------------------------------------------------
 
 /// Must match `struct D4WorkItem` in `kernels/d4.cu`.
@@ -104,7 +104,7 @@ impl GpuFrontierDense {
 
 /// Build a BFS frontier using compressed bitsets (default).
 ///
-/// This is an internal building block for Phase 1 GPU D4 compilation.
+/// This is an internal building block for GPU-native Decision-DNNF frontier expansion.
 pub(crate) fn build_frontier_bitset(
     cnf: &GpuCnf,
     provider: &CudaKernelProvider,
@@ -492,6 +492,7 @@ mod tests {
 
     #[test]
     fn gpu_d4_frontier_prepare_and_expand_unit_clause_prunes_branching() {
+        let _gpu_guard = crate::test_gpu_lock::lock();
         let Some(provider) = try_provider() else {
             return;
         };
@@ -690,6 +691,7 @@ mod tests {
 
     #[test]
     fn gpu_d4_frontier_prepare_and_expand_branches_on_first_clause_min_var() {
+        let _gpu_guard = crate::test_gpu_lock::lock();
         let Some(provider) = try_provider() else {
             return;
         };
@@ -897,6 +899,7 @@ mod tests {
 
     #[test]
     fn gpu_d4_build_frontier_dense_depth2_sets_expected_assignments() {
+        let _gpu_guard = crate::test_gpu_lock::lock();
         let Some(provider) = try_provider() else {
             return;
         };
@@ -1204,6 +1207,7 @@ mod tests {
 
     #[test]
     fn gpu_d4_build_frontier_bitset_depth2_sets_expected_assignments() {
+        let _gpu_guard = crate::test_gpu_lock::lock();
         let Some(provider) = try_provider() else {
             return;
         };

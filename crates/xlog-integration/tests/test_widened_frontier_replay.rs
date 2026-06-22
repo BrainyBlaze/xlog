@@ -1,7 +1,7 @@
 #![allow(clippy::arc_with_non_send_sync)]
 
-//! G_W54 / W5.4: replay the DTS-DLM widened-frontier promotion shape through
-//! xlog and assert deterministic clean output.
+//! Replay an external consumer widened-frontier promotion shape through xlog and
+//! assert deterministic clean output.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -16,7 +16,9 @@ use xlog_cuda::{CudaBuffer, CudaDevice, CudaKernelProvider, GpuMemoryManager};
 use xlog_logic::Compiler;
 use xlog_runtime::Executor;
 
-const DTS_SERVING_V2: &str = "/home/dev/projects/dts-dlm/data/serving/v2";
+const EXTERNAL_CONSUMER_SERVING_V2_ENV: &str = "XLOG_EXTERNAL_CONSUMER_SERVING_V2";
+const DEFAULT_EXTERNAL_CONSUMER_SERVING_V2: &str =
+    "/home/dev/projects/external-consumer/data/serving/v2";
 const ITERATIONS: usize = 20;
 
 const REPLAY_SOURCE: &str = r#"
@@ -147,8 +149,10 @@ fn validate_serving_v2(schema: &str, promotion: &str, allowed: &[u32]) {
 }
 
 fn load_replay_artifact() -> ReplayArtifact {
-    let schema_path = Path::new(DTS_SERVING_V2).join("schema.json");
-    let promotion_path = Path::new(DTS_SERVING_V2).join("promotion.json");
+    let artifact_root = std::env::var(EXTERNAL_CONSUMER_SERVING_V2_ENV)
+        .unwrap_or_else(|_| DEFAULT_EXTERNAL_CONSUMER_SERVING_V2.to_string());
+    let schema_path = Path::new(&artifact_root).join("schema.json");
+    let promotion_path = Path::new(&artifact_root).join("promotion.json");
     if let (Ok(schema), Ok(promotion)) = (
         std::fs::read_to_string(&schema_path),
         std::fs::read_to_string(&promotion_path),
@@ -158,7 +162,7 @@ fn load_replay_artifact() -> ReplayArtifact {
             .expect("serving/v2 schema must expose at least five allowed predicates");
         validate_serving_v2(&schema, &promotion, &allowed);
         return ReplayArtifact {
-            source: "dts-dlm:data/serving/v2",
+            source: "external-consumer:data/serving/v2",
             allowed_predicates: allowed,
         };
     }
@@ -279,9 +283,9 @@ fn run_replay(fixture: &RuntimeFixture, inputs: &ReplayInputs) -> ReplaySnapshot
 }
 
 #[test]
-fn dts_widened_frontier_replay_is_clean_and_deterministic() {
+fn external_consumer_widened_frontier_replay_is_clean_and_deterministic() {
     let Some(fixture) = make_runtime_fixture() else {
-        eprintln!("Skipping G_W54 widened-frontier replay: CUDA runtime unavailable");
+        eprintln!("Skipping widened-frontier replay: CUDA runtime unavailable");
         return;
     };
     let artifact = load_replay_artifact();
@@ -301,7 +305,7 @@ fn dts_widened_frontier_replay_is_clean_and_deterministic() {
     }
 
     println!(
-        "G_W54_REPLAY PASS artifact_source={} allowed_predicates={} iterations={} \
+        "WIDENED_FRONTIER_REPLAY PASS artifact_source={} allowed_predicates={} iterations={} \
          promoted_rows={} reachable_rows={} rollback_rows={}",
         artifact.source,
         artifact.allowed_predicates.len(),

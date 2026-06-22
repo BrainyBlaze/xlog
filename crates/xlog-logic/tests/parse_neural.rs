@@ -59,7 +59,7 @@ fn test_parse_multiple_neural_predicates() {
     let source = r#"
         nn(net1, [X], Y, [0,1]) :: digit1(X, Y).
         nn(net2, [X], Y, [0,1]) :: digit2(X, Y).
-        addition(X, Y, Z) :- digit1(X, D1), digit2(Y, D2), Z is D1 + D2.
+        addition(X, Y, Z) :- digit1(X, LeftDigit), digit2(Y, RightDigit), Z is LeftDigit + RightDigit.
     "#;
     let program = parse_program(source).expect("should parse");
     assert_eq!(program.neural_predicates.len(), 2);

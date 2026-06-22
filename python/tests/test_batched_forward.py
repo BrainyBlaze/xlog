@@ -5,15 +5,15 @@ pyxlog = pytest.importorskip("pyxlog")
 
 
 class CountingNet(torch.nn.Module):
-    def __init__(self, out_dim):
+    def __init__(self, output_dimension):
         super().__init__()
-        self.out_dim = out_dim
+        self.output_dimension = output_dimension
         self.calls = 0
-        self.fc = torch.nn.Linear(1, out_dim)
+        self.linear = torch.nn.Linear(1, output_dimension)
 
     def forward(self, x):
         self.calls += 1
-        return torch.softmax(self.fc(x), dim=-1)
+        return torch.softmax(self.linear(x), dim=-1)
 
 
 def test_complex_query_batches_forward_calls():
@@ -24,14 +24,18 @@ def test_complex_query_batches_forward_calls():
     program = pyxlog.Program.compile(
         """
         nn(net, [X], Y, [0,1,2,3]) :: digit(X, Y).
-        addition(X, Y, Z) :- digit(X, D1), digit(Y, D2), Z is D1 + D2.
+        addition(FirstImage, SecondImage, Sum) :-
+            digit(FirstImage, FirstDigitValue),
+            digit(SecondImage, SecondDigitValue),
+            Sum is FirstDigitValue + SecondDigitValue.
         """
     )
 
     net = CountingNet(4)
     net.to(device)
-    opt = torch.optim.SGD(net.parameters(), lr=0.1)
-    program.register_network("net", net, opt, batching=True)
+    learning_rate = 0.1
+    optimizer = torch.optim.SGD(net.parameters(), lr=learning_rate)
+    program.register_network("net", net, optimizer, batching=True)
 
     program.add_tensor_source("data", torch.randn(10, 1, device=device))
     program.forward_backward("addition(0, 1, 2)")

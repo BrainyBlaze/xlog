@@ -1,6 +1,7 @@
 # Supply Chain Example
 
-Manufacturing supply chain analytics demonstrating XLOG's capabilities for Bill of Materials (BOM) processing, inventory management, and supplier analysis.
+Manufacturing supply chain analytics demonstrating XLOG's capabilities for
+bill-of-materials processing, inventory management, and supplier analysis.
 
 ## Domain Model
 
@@ -16,8 +17,8 @@ This example models a supply chain ecosystem with:
 
 | Feature | Usage |
 |---------|-------|
-| **symbol type** | Product IDs, supplier names, warehouse locations |
-| **Recursive rules** | BOM explosion (nested components) |
+| **symbol type** | Product identifiers, supplier names, warehouse locations |
+| **Recursive rules** | Bill-of-materials expansion for nested components |
 | **count aggregation** | Products per warehouse, suppliers per product |
 | **sum aggregation** | Inventory value, order totals |
 | **Comparisons** | Low stock alerts, premium suppliers (rating >= 85) |
@@ -38,36 +39,36 @@ pred order_line(symbol, symbol, u32, u32).   // order, product, qty, price
 
 ### Derived Relations
 ```xlog
-// BOM explosion (recursive)
+// Bill-of-materials expansion (recursive)
 pred bom_exploded(symbol, symbol, u32).
-bom_exploded(Product, Component, Qty) :- bom(Product, Component, Qty).
+bom_exploded(Product, Component, Quantity) :- bom(Product, Component, Quantity).
 
 pred bom_explosion_recursive(symbol, symbol, u32).
-bom_explosion_recursive(Product, SubComponent, TotalQty) :-
-    bom(Product, Component, ParentQty),
-    bom_exploded(Component, SubComponent, ChildQty),
-    TotalQty is ParentQty * ChildQty.
+bom_explosion_recursive(Product, SubComponent, TotalQuantity) :-
+    bom(Product, Component, ParentQuantity),
+    bom_exploded(Component, SubComponent, ChildQuantity),
+    TotalQuantity is ParentQuantity * ChildQuantity.
 
 // Inventory analytics
 pred warehouse_inventory_value(symbol, u64).
-warehouse_inventory_value(WarehouseId, sum(Value)) :-
-    inventory(WarehouseId, ProductId, Qty),
-    unit_cost(ProductId, Cost),
-    Value is Qty * Cost.
+warehouse_inventory_value(Warehouse, sum(Value)) :-
+    inventory(Warehouse, Product, Quantity),
+    unit_cost(Product, Cost),
+    Value is Quantity * Cost.
 
 // Low stock alerts
 pred low_stock_alert(symbol, symbol, symbol, u32, u32).
-low_stock_alert(WarehouseName, ProductName, Category, CurrentQty, ReorderPt) :-
-    warehouse(WarehouseId, WarehouseName, _),
-    inventory(WarehouseId, ProductId, CurrentQty),
-    product(ProductId, ProductName, Category),
-    reorder_point(ProductId, ReorderPt),
-    CurrentQty < ReorderPt.
+low_stock_alert(WarehouseName, ProductName, Category, CurrentQuantity, ReorderPoint) :-
+    warehouse(Warehouse, WarehouseName, _),
+    inventory(Warehouse, Product, CurrentQuantity),
+    product(Product, ProductName, Category),
+    reorder_point(Product, ReorderPoint),
+    CurrentQuantity < ReorderPoint.
 ```
 
 ## Queries
 
-1. **BOM explosion**: Full component tree for Laptop X1
+1. **Bill-of-materials expansion**: Full component tree for Laptop X1
 2. **Low stock alerts**: Products below reorder point
 3. **Premium suppliers**: High-rated suppliers (rating >= 85)
 4. **Single-source products**: Supply chain risk (only 1 supplier)
@@ -77,14 +78,16 @@ low_stock_alert(WarehouseName, ProductName, Category, CurrentQty, ReorderPt) :-
 
 ## Running
 
+From this example directory:
+
 ```bash
-cargo run --release -- run examples/xlog/80-v032-showcase/04-supply-chain/main.xlog
+cargo run -p xlog-cli -- run main.xlog
 ```
 
 ## Sample Output
 
 ```
-__xlog_query_0 (BOM explosion for Laptop X1)
+__xlog_query_0 (Bill-of-materials expansion for Laptop X1)
 +-------+-------+
 | col_0 | col_1 |
 +-------+-------+
@@ -126,13 +129,13 @@ __xlog_query_5 (Major warehouses)
 - 4 regional warehouses
 - 5 customers in different segments
 - 6 orders with multiple line items
-- Nested BOM structure (Laptop → Motherboard → components)
+- Nested bill-of-materials structure (Laptop -> Motherboard -> components)
 
 ## Use Cases
 
 This example demonstrates patterns applicable to:
 
-- **Manufacturing**: BOM explosion for production planning
+- **Manufacturing**: Bill-of-materials expansion for production planning
 - **Retail**: Inventory management and reorder automation
 - **Logistics**: Warehouse optimization and routing
 - **Procurement**: Supplier risk analysis and sourcing decisions

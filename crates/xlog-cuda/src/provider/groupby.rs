@@ -70,7 +70,7 @@ impl super::CudaKernelProvider {
         aggs: &[(usize, AggOp)],
     ) -> Result<CudaBuffer> {
         // Env-gated recorded dispatch. `groupby_multi_agg_recorded`
-        // (slice #6) is narrow to U32 / Symbol keys + Count /
+        // is narrow to U32 / Symbol keys + Count /
         // Sum / Min / Max aggs + ≤4 key columns. Mismatch
         // (any other key type, LogSumExp, or >4 keys) falls
         // through to the legacy path.
@@ -147,10 +147,13 @@ impl super::CudaKernelProvider {
                 .ok_or_else(|| XlogError::Kernel("Value column has no type".to_string()))?;
             match agg_op {
                 AggOp::Count => {}
+                // U64 value-column widening: values reduce through the u64-value
+                // kernels (the legacy groupby is the unfused baseline for
+                // u64-key WCOJ relations, whose value columns are U64).
                 AggOp::Sum | AggOp::Min | AggOp::Max => {
-                    if value_ty != ScalarType::U32 {
+                    if !matches!(value_ty, ScalarType::U32 | ScalarType::U64) {
                         return Err(XlogError::Kernel(format!(
-                            "{:?} currently requires U32 values, got {:?}",
+                            "{:?} currently requires U32 or U64 values, got {:?}",
                             agg_op, value_ty
                         )));
                     }
@@ -352,7 +355,10 @@ impl super::CudaKernelProvider {
                     agg_columns.push(output.into());
                 }
                 AggOp::Sum => {
-                    let values_view = self.column_as_u32_view(values, num_rows as usize)?;
+                    let value_ty = sorted
+                        .schema()
+                        .column_type(value_col)
+                        .ok_or_else(|| XlogError::Kernel("Value column has no type".to_string()))?;
                     let output_bytes = row_cap_usize
                         .checked_mul(std::mem::size_of::<u64>())
                         .ok_or_else(|| XlogError::Kernel("Sum output size overflow".to_string()))?;
@@ -361,86 +367,192 @@ impl super::CudaKernelProvider {
                         XlogError::Kernel(format!("Failed to zero sum output: {}", e))
                     })?;
 
-                    let sum_func = device
-                        .get_func(GROUPBY_MODULE, groupby_kernels::GROUPBY_SUM)
-                        .ok_or_else(|| {
-                            XlogError::Kernel("groupby_sum kernel not found".to_string())
-                        })?;
-
-                    // SAFETY: groupby_sum(values, group_ids, num_rows, sums)
-                    unsafe {
-                        sum_func
-                            .clone()
-                            .launch(config, (&values_view, &group_ids, num_rows, &output))
+                    // U64 value-column widening: value columns reduce through the
+                    // u64-value sum kernel (same u64 accumulator).
+                    if value_ty == ScalarType::U64 {
+                        let values_view = self.column_as_u64_view(values, num_rows as usize)?;
+                        let sum_func = device
+                            .get_func(GROUPBY_MODULE, groupby_kernels::GROUPBY_SUM_U64)
+                            .ok_or_else(|| {
+                                XlogError::Kernel("groupby_sum_u64 kernel not found".to_string())
+                            })?;
+                        // SAFETY: groupby_sum_u64(values, group_ids, num_rows, sums)
+                        unsafe {
+                            sum_func
+                                .clone()
+                                .launch(config, (&values_view, &group_ids, num_rows, &output))
+                        }
+                        .map_err(|e| XlogError::Kernel(format!("groupby_sum_u64 failed: {}", e)))?;
+                    } else {
+                        let values_view = self.column_as_u32_view(values, num_rows as usize)?;
+                        let sum_func = device
+                            .get_func(GROUPBY_MODULE, groupby_kernels::GROUPBY_SUM)
+                            .ok_or_else(|| {
+                                XlogError::Kernel("groupby_sum kernel not found".to_string())
+                            })?;
+                        // SAFETY: groupby_sum(values, group_ids, num_rows, sums)
+                        unsafe {
+                            sum_func
+                                .clone()
+                                .launch(config, (&values_view, &group_ids, num_rows, &output))
+                        }
+                        .map_err(|e| XlogError::Kernel(format!("groupby_sum failed: {}", e)))?;
                     }
-                    .map_err(|e| XlogError::Kernel(format!("groupby_sum failed: {}", e)))?;
 
                     self.device.synchronize()?;
                     agg_columns.push(output.into());
                 }
                 AggOp::Min => {
-                    let values_view = self.column_as_u32_view(values, num_rows as usize)?;
-                    let output_bytes = row_cap_usize
-                        .checked_mul(std::mem::size_of::<u32>())
-                        .ok_or_else(|| XlogError::Kernel("Min output size overflow".to_string()))?;
-                    let mut output = self.memory.alloc::<u8>(output_bytes)?;
-                    let fill_fn = device
-                        .get_func(ARITH_MODULE, arith_kernels::ARITH_FILL_CONST_U32)
-                        .ok_or_else(|| {
-                            XlogError::Kernel("arith_fill_const_u32 not found".to_string())
+                    let value_ty = sorted
+                        .schema()
+                        .column_type(value_col)
+                        .ok_or_else(|| XlogError::Kernel("Value column has no type".to_string()))?;
+                    if value_ty == ScalarType::U64 {
+                        // U64 value-column min path (output U64,
+                        // identity u64::MAX).
+                        let values_view = self.column_as_u64_view(values, num_rows as usize)?;
+                        let output_bytes = row_cap_usize
+                            .checked_mul(std::mem::size_of::<u64>())
+                            .ok_or_else(|| {
+                                XlogError::Kernel("Min output size overflow".to_string())
+                            })?;
+                        let mut output = self.memory.alloc::<u8>(output_bytes)?;
+                        let fill_fn = device
+                            .get_func(ARITH_MODULE, arith_kernels::ARITH_FILL_CONST_U64)
+                            .ok_or_else(|| {
+                                XlogError::Kernel("arith_fill_const_u64 not found".to_string())
+                            })?;
+                        let fill_config = LaunchConfig::for_num_elems(row_cap_u32);
+                        // SAFETY: arith_fill_const_u64(value, n, output)
+                        unsafe {
+                            fill_fn
+                                .clone()
+                                .launch(fill_config, (u64::MAX, row_cap_u32, &mut output))
+                        }
+                        .map_err(|e| {
+                            XlogError::Kernel(format!("Failed to init min output: {}", e))
                         })?;
-                    let fill_config = LaunchConfig::for_num_elems(row_cap_u32);
-                    // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
-                    unsafe {
-                        fill_fn
-                            .clone()
-                            .launch(fill_config, (u32::MAX, row_cap_u32, &mut output))
-                    }
-                    .map_err(|e| XlogError::Kernel(format!("Failed to init min output: {}", e)))?;
 
-                    let min_func = device
-                        .get_func(GROUPBY_MODULE, groupby_kernels::GROUPBY_MIN)
-                        .ok_or_else(|| {
-                            XlogError::Kernel("groupby_min kernel not found".to_string())
+                        let min_func = device
+                            .get_func(GROUPBY_MODULE, groupby_kernels::GROUPBY_MIN_U64)
+                            .ok_or_else(|| {
+                                XlogError::Kernel("groupby_min_u64 kernel not found".to_string())
+                            })?;
+                        // SAFETY: groupby_min_u64(values, group_ids, num_rows, mins)
+                        unsafe {
+                            min_func
+                                .clone()
+                                .launch(config, (&values_view, &group_ids, num_rows, &output))
+                        }
+                        .map_err(|e| XlogError::Kernel(format!("groupby_min_u64 failed: {}", e)))?;
+
+                        self.device.synchronize()?;
+                        agg_columns.push(output.into());
+                    } else {
+                        let values_view = self.column_as_u32_view(values, num_rows as usize)?;
+                        let output_bytes = row_cap_usize
+                            .checked_mul(std::mem::size_of::<u32>())
+                            .ok_or_else(|| {
+                                XlogError::Kernel("Min output size overflow".to_string())
+                            })?;
+                        let mut output = self.memory.alloc::<u8>(output_bytes)?;
+                        let fill_fn = device
+                            .get_func(ARITH_MODULE, arith_kernels::ARITH_FILL_CONST_U32)
+                            .ok_or_else(|| {
+                                XlogError::Kernel("arith_fill_const_u32 not found".to_string())
+                            })?;
+                        let fill_config = LaunchConfig::for_num_elems(row_cap_u32);
+                        // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
+                        unsafe {
+                            fill_fn
+                                .clone()
+                                .launch(fill_config, (u32::MAX, row_cap_u32, &mut output))
+                        }
+                        .map_err(|e| {
+                            XlogError::Kernel(format!("Failed to init min output: {}", e))
                         })?;
 
-                    // SAFETY: groupby_min(values, group_ids, num_rows, mins)
-                    unsafe {
-                        min_func
-                            .clone()
-                            .launch(config, (&values_view, &group_ids, num_rows, &output))
-                    }
-                    .map_err(|e| XlogError::Kernel(format!("groupby_min failed: {}", e)))?;
+                        let min_func = device
+                            .get_func(GROUPBY_MODULE, groupby_kernels::GROUPBY_MIN)
+                            .ok_or_else(|| {
+                                XlogError::Kernel("groupby_min kernel not found".to_string())
+                            })?;
 
-                    self.device.synchronize()?;
-                    agg_columns.push(output.into());
+                        // SAFETY: groupby_min(values, group_ids, num_rows, mins)
+                        unsafe {
+                            min_func
+                                .clone()
+                                .launch(config, (&values_view, &group_ids, num_rows, &output))
+                        }
+                        .map_err(|e| XlogError::Kernel(format!("groupby_min failed: {}", e)))?;
+
+                        self.device.synchronize()?;
+                        agg_columns.push(output.into());
+                    }
                 }
                 AggOp::Max => {
-                    let values_view = self.column_as_u32_view(values, num_rows as usize)?;
-                    let output_bytes = row_cap_usize
-                        .checked_mul(std::mem::size_of::<u32>())
-                        .ok_or_else(|| XlogError::Kernel("Max output size overflow".to_string()))?;
-                    let mut output = self.memory.alloc::<u8>(output_bytes)?;
-                    device.memset_zeros(&mut output).map_err(|e| {
-                        XlogError::Kernel(format!("Failed to zero max output: {}", e))
-                    })?;
-
-                    let max_func = device
-                        .get_func(GROUPBY_MODULE, groupby_kernels::GROUPBY_MAX)
-                        .ok_or_else(|| {
-                            XlogError::Kernel("groupby_max kernel not found".to_string())
+                    let value_ty = sorted
+                        .schema()
+                        .column_type(value_col)
+                        .ok_or_else(|| XlogError::Kernel("Value column has no type".to_string()))?;
+                    if value_ty == ScalarType::U64 {
+                        // U64 value-column max path (output U64,
+                        // identity 0).
+                        let values_view = self.column_as_u64_view(values, num_rows as usize)?;
+                        let output_bytes = row_cap_usize
+                            .checked_mul(std::mem::size_of::<u64>())
+                            .ok_or_else(|| {
+                                XlogError::Kernel("Max output size overflow".to_string())
+                            })?;
+                        let mut output = self.memory.alloc::<u8>(output_bytes)?;
+                        device.memset_zeros(&mut output).map_err(|e| {
+                            XlogError::Kernel(format!("Failed to zero max output: {}", e))
                         })?;
 
-                    // SAFETY: groupby_max(values, group_ids, num_rows, maxs)
-                    unsafe {
-                        max_func
-                            .clone()
-                            .launch(config, (&values_view, &group_ids, num_rows, &output))
-                    }
-                    .map_err(|e| XlogError::Kernel(format!("groupby_max failed: {}", e)))?;
+                        let max_func = device
+                            .get_func(GROUPBY_MODULE, groupby_kernels::GROUPBY_MAX_U64)
+                            .ok_or_else(|| {
+                                XlogError::Kernel("groupby_max_u64 kernel not found".to_string())
+                            })?;
+                        // SAFETY: groupby_max_u64(values, group_ids, num_rows, maxs)
+                        unsafe {
+                            max_func
+                                .clone()
+                                .launch(config, (&values_view, &group_ids, num_rows, &output))
+                        }
+                        .map_err(|e| XlogError::Kernel(format!("groupby_max_u64 failed: {}", e)))?;
 
-                    self.device.synchronize()?;
-                    agg_columns.push(output.into());
+                        self.device.synchronize()?;
+                        agg_columns.push(output.into());
+                    } else {
+                        let values_view = self.column_as_u32_view(values, num_rows as usize)?;
+                        let output_bytes = row_cap_usize
+                            .checked_mul(std::mem::size_of::<u32>())
+                            .ok_or_else(|| {
+                                XlogError::Kernel("Max output size overflow".to_string())
+                            })?;
+                        let mut output = self.memory.alloc::<u8>(output_bytes)?;
+                        device.memset_zeros(&mut output).map_err(|e| {
+                            XlogError::Kernel(format!("Failed to zero max output: {}", e))
+                        })?;
+
+                        let max_func = device
+                            .get_func(GROUPBY_MODULE, groupby_kernels::GROUPBY_MAX)
+                            .ok_or_else(|| {
+                                XlogError::Kernel("groupby_max kernel not found".to_string())
+                            })?;
+
+                        // SAFETY: groupby_max(values, group_ids, num_rows, maxs)
+                        unsafe {
+                            max_func
+                                .clone()
+                                .launch(config, (&values_view, &group_ids, num_rows, &output))
+                        }
+                        .map_err(|e| XlogError::Kernel(format!("groupby_max failed: {}", e)))?;
+
+                        self.device.synchronize()?;
+                        agg_columns.push(output.into());
+                    }
                 }
                 AggOp::LogSumExp => {
                     let values_f64 = self.column_as_f64_view(values, num_rows as usize)?;
@@ -676,7 +788,7 @@ impl super::CudaKernelProvider {
             })
             .collect();
 
-        for (i, &(_value_col, agg_op)) in aggs.iter().enumerate() {
+        for (i, &(value_col, agg_op)) in aggs.iter().enumerate() {
             let agg_name = match agg_op {
                 AggOp::Count => format!("count_{}", i),
                 AggOp::Sum => format!("sum_{}", i),
@@ -689,7 +801,12 @@ impl super::CudaKernelProvider {
             let agg_type = match agg_op {
                 AggOp::Count => ScalarType::U64,
                 AggOp::Sum => ScalarType::U64,
-                AggOp::Min | AggOp::Max => ScalarType::U32,
+                // Value-width preserving min/max: preserve the value column's width
+                // (U64 values reduce to U64; everything else stays U32).
+                AggOp::Min | AggOp::Max => match input.columns.get(value_col).map(|(_, ty)| *ty) {
+                    Some(ScalarType::U64) => ScalarType::U64,
+                    _ => ScalarType::U32,
+                },
                 AggOp::LogSumExp => ScalarType::F64,
             };
             columns.push((agg_name, agg_type));
@@ -702,7 +819,7 @@ impl super::CudaKernelProvider {
     }
 
     // ======================================================================
-    // Recorded GroupBy (v0.6 slice #6, provider-level only)
+    // Recorded GroupBy provider-level path
     //
     // Strict-recorder, launch_stream-routed sibling of `groupby_multi_agg`.
     // Scope-narrow per the slice directive:
@@ -904,12 +1021,12 @@ impl super::CudaKernelProvider {
     ///   gather/unpack — every kernel runs on the caller-supplied
     ///   `launch_stream` via `launch_on_stream`. Composition with
     ///   existing recorded primitives:
-    ///   * `sort_recorded` (slice #5) does the typed multi-column
+    ///   * `sort_recorded` does the typed multi-column
     ///     sort and commits its own LaunchRecorder.
-    ///   * `pack_keys_gpu_on_stream` (this slice) runs the fused
+    ///   * `pack_keys_gpu_on_stream` runs the fused
     ///     pack+hash kernel on launch_stream and records its
     ///     buffers directly via `record_block_use`.
-    ///   * `multiblock_scan_u32_inplace_on_stream` (slice #4)
+    ///   * `multiblock_scan_u32_inplace_on_stream`
     ///     drives the boundary-position scan tail.
     ///   * The groupby-specific chain has its own LaunchRecorder
     ///     for the boundary mask, group ids, group_first
@@ -1016,10 +1133,23 @@ impl super::CudaKernelProvider {
                 .ok_or_else(|| XlogError::Kernel("Value column has no type".to_string()))?;
             match agg_op {
                 AggOp::Count => {}
-                AggOp::Sum | AggOp::Min | AggOp::Max => {
-                    if value_ty != ScalarType::U32 {
+                AggOp::Sum => {
+                    // Recorded groupby U64 value-column sum path: values reduce through the u64-value
+                    // sum kernel (same u64 accumulator as the U32 path).
+                    if !matches!(value_ty, ScalarType::U32 | ScalarType::U64) {
                         return Err(XlogError::Kernel(format!(
-                            "{:?} currently requires U32 values, got {:?}",
+                            "Sum currently requires U32 or U64 values, got {:?}",
+                            value_ty
+                        )));
+                    }
+                }
+                AggOp::Min | AggOp::Max => {
+                    // Recorded groupby U64 value-column min/max path: values reduce through the
+                    // u64-value min/max kernels (result preserves the
+                    // value width, mirroring the legacy path).
+                    if !matches!(value_ty, ScalarType::U32 | ScalarType::U64) {
+                        return Err(XlogError::Kernel(format!(
+                            "{:?} currently requires U32 or U64 values, got {:?}",
                             agg_op, value_ty
                         )));
                     }
@@ -1027,7 +1157,7 @@ impl super::CudaKernelProvider {
                 AggOp::LogSumExp => {
                     return Err(XlogError::Kernel(
                         "groupby_multi_agg_recorded: LogSumExp not yet supported in the \
-                         recorded path (multi-kernel chain deferred to a future slice)"
+                        recorded path (multi-kernel chain deferred to a future implementation)"
                             .to_string(),
                     ));
                 }
@@ -1083,10 +1213,14 @@ impl super::CudaKernelProvider {
 
         // Per-aggregation outputs (allocated up front).
         let mut agg_outputs: Vec<TrackedCudaSlice<u8>> = Vec::with_capacity(aggs.len());
-        for &(_, agg_op) in aggs {
+        for &(value_col, agg_op) in aggs {
             let elem_size = match agg_op {
                 AggOp::Count | AggOp::Sum => std::mem::size_of::<u64>(),
-                AggOp::Min | AggOp::Max => std::mem::size_of::<u32>(),
+                // Value-width preserving min/max: preserve the value column's width.
+                AggOp::Min | AggOp::Max => match sorted.schema().column_type(value_col) {
+                    Some(ScalarType::U64) => std::mem::size_of::<u64>(),
+                    _ => std::mem::size_of::<u32>(),
+                },
                 AggOp::LogSumExp => unreachable!("rejected above"),
             };
             let bytes = row_cap_usize
@@ -1317,79 +1451,177 @@ impl super::CudaKernelProvider {
                 }
                 AggOp::Sum => {
                     self.memset_zeros_u8_on_stream(output, &cu_stream)?;
-                    let values_view = self.column_as_u32_view(values, row_cap_usize)?;
-                    let sum_func = device
-                        .get_func(GROUPBY_MODULE, groupby_kernels::GROUPBY_SUM)
-                        .ok_or_else(|| {
-                            XlogError::Kernel("groupby_sum kernel not found".to_string())
+                    let value_ty = sorted
+                        .schema()
+                        .column_type(*value_col)
+                        .ok_or_else(|| XlogError::Kernel("Value column has no type".to_string()))?;
+                    if value_ty == ScalarType::U64 {
+                        let values_view = self.column_as_u64_view(values, row_cap_usize)?;
+                        let sum_func = device
+                            .get_func(GROUPBY_MODULE, groupby_kernels::GROUPBY_SUM_U64)
+                            .ok_or_else(|| {
+                                XlogError::Kernel("groupby_sum_u64 kernel not found".to_string())
+                            })?;
+                        // SAFETY: groupby_sum_u64(values, group_ids, num_rows, sums)
+                        unsafe {
+                            sum_func.clone().launch_on_stream(
+                                &cu_stream,
+                                cfg,
+                                (&values_view, &group_ids, num_rows, &*output),
+                            )
+                        }
+                        .map_err(|e| {
+                            XlogError::Kernel(format!("groupby_sum_u64 (on_stream) failed: {}", e))
                         })?;
-                    // SAFETY: groupby_sum(values, group_ids, num_rows, sums)
-                    unsafe {
-                        sum_func.clone().launch_on_stream(
-                            &cu_stream,
-                            cfg,
-                            (&values_view, &group_ids, num_rows, &*output),
-                        )
+                    } else {
+                        let values_view = self.column_as_u32_view(values, row_cap_usize)?;
+                        let sum_func = device
+                            .get_func(GROUPBY_MODULE, groupby_kernels::GROUPBY_SUM)
+                            .ok_or_else(|| {
+                                XlogError::Kernel("groupby_sum kernel not found".to_string())
+                            })?;
+                        // SAFETY: groupby_sum(values, group_ids, num_rows, sums)
+                        unsafe {
+                            sum_func.clone().launch_on_stream(
+                                &cu_stream,
+                                cfg,
+                                (&values_view, &group_ids, num_rows, &*output),
+                            )
+                        }
+                        .map_err(|e| {
+                            XlogError::Kernel(format!("groupby_sum (on_stream) failed: {}", e))
+                        })?;
                     }
-                    .map_err(|e| {
-                        XlogError::Kernel(format!("groupby_sum (on_stream) failed: {}", e))
-                    })?;
                 }
                 AggOp::Min => {
-                    let fill_fn = device
-                        .get_func(ARITH_MODULE, arith_kernels::ARITH_FILL_CONST_U32)
-                        .ok_or_else(|| {
-                            XlogError::Kernel("arith_fill_const_u32 not found".to_string())
-                        })?;
+                    let value_ty = sorted
+                        .schema()
+                        .column_type(*value_col)
+                        .ok_or_else(|| XlogError::Kernel("Value column has no type".to_string()))?;
                     let fill_config = LaunchConfig::for_num_elems(row_cap_u32);
-                    // SAFETY: arith_fill_const_u32(value, n, output)
-                    unsafe {
-                        fill_fn.clone().launch_on_stream(
-                            &cu_stream,
-                            fill_config,
-                            (u32::MAX, row_cap_u32, &mut *output),
-                        )
-                    }
-                    .map_err(|e| {
-                        XlogError::Kernel(format!("arith_fill_const_u32 (on_stream) failed: {}", e))
-                    })?;
-                    let values_view = self.column_as_u32_view(values, row_cap_usize)?;
-                    let min_func = device
-                        .get_func(GROUPBY_MODULE, groupby_kernels::GROUPBY_MIN)
-                        .ok_or_else(|| {
-                            XlogError::Kernel("groupby_min kernel not found".to_string())
+                    if value_ty == ScalarType::U64 {
+                        // U64 value-column min path (output U64,
+                        // identity u64::MAX).
+                        let fill_fn = device
+                            .get_func(ARITH_MODULE, arith_kernels::ARITH_FILL_CONST_U64)
+                            .ok_or_else(|| {
+                                XlogError::Kernel("arith_fill_const_u64 not found".to_string())
+                            })?;
+                        // SAFETY: arith_fill_const_u64(value, n, output)
+                        unsafe {
+                            fill_fn.clone().launch_on_stream(
+                                &cu_stream,
+                                fill_config,
+                                (u64::MAX, row_cap_u32, &mut *output),
+                            )
+                        }
+                        .map_err(|e| {
+                            XlogError::Kernel(format!(
+                                "arith_fill_const_u64 (on_stream) failed: {}",
+                                e
+                            ))
                         })?;
-                    // SAFETY: groupby_min(values, group_ids, num_rows, mins)
-                    unsafe {
-                        min_func.clone().launch_on_stream(
-                            &cu_stream,
-                            cfg,
-                            (&values_view, &group_ids, num_rows, &*output),
-                        )
+                        let values_view = self.column_as_u64_view(values, row_cap_usize)?;
+                        let min_func = device
+                            .get_func(GROUPBY_MODULE, groupby_kernels::GROUPBY_MIN_U64)
+                            .ok_or_else(|| {
+                                XlogError::Kernel("groupby_min_u64 kernel not found".to_string())
+                            })?;
+                        // SAFETY: groupby_min_u64(values, group_ids, num_rows, mins)
+                        unsafe {
+                            min_func.clone().launch_on_stream(
+                                &cu_stream,
+                                cfg,
+                                (&values_view, &group_ids, num_rows, &*output),
+                            )
+                        }
+                        .map_err(|e| {
+                            XlogError::Kernel(format!("groupby_min_u64 (on_stream) failed: {}", e))
+                        })?;
+                    } else {
+                        let fill_fn = device
+                            .get_func(ARITH_MODULE, arith_kernels::ARITH_FILL_CONST_U32)
+                            .ok_or_else(|| {
+                                XlogError::Kernel("arith_fill_const_u32 not found".to_string())
+                            })?;
+                        // SAFETY: arith_fill_const_u32(value, n, output)
+                        unsafe {
+                            fill_fn.clone().launch_on_stream(
+                                &cu_stream,
+                                fill_config,
+                                (u32::MAX, row_cap_u32, &mut *output),
+                            )
+                        }
+                        .map_err(|e| {
+                            XlogError::Kernel(format!(
+                                "arith_fill_const_u32 (on_stream) failed: {}",
+                                e
+                            ))
+                        })?;
+                        let values_view = self.column_as_u32_view(values, row_cap_usize)?;
+                        let min_func = device
+                            .get_func(GROUPBY_MODULE, groupby_kernels::GROUPBY_MIN)
+                            .ok_or_else(|| {
+                                XlogError::Kernel("groupby_min kernel not found".to_string())
+                            })?;
+                        // SAFETY: groupby_min(values, group_ids, num_rows, mins)
+                        unsafe {
+                            min_func.clone().launch_on_stream(
+                                &cu_stream,
+                                cfg,
+                                (&values_view, &group_ids, num_rows, &*output),
+                            )
+                        }
+                        .map_err(|e| {
+                            XlogError::Kernel(format!("groupby_min (on_stream) failed: {}", e))
+                        })?;
                     }
-                    .map_err(|e| {
-                        XlogError::Kernel(format!("groupby_min (on_stream) failed: {}", e))
-                    })?;
                 }
                 AggOp::Max => {
                     self.memset_zeros_u8_on_stream(output, &cu_stream)?;
-                    let values_view = self.column_as_u32_view(values, row_cap_usize)?;
-                    let max_func = device
-                        .get_func(GROUPBY_MODULE, groupby_kernels::GROUPBY_MAX)
-                        .ok_or_else(|| {
-                            XlogError::Kernel("groupby_max kernel not found".to_string())
+                    let value_ty = sorted
+                        .schema()
+                        .column_type(*value_col)
+                        .ok_or_else(|| XlogError::Kernel("Value column has no type".to_string()))?;
+                    if value_ty == ScalarType::U64 {
+                        // U64 value-column max path (output U64,
+                        // identity 0).
+                        let values_view = self.column_as_u64_view(values, row_cap_usize)?;
+                        let max_func = device
+                            .get_func(GROUPBY_MODULE, groupby_kernels::GROUPBY_MAX_U64)
+                            .ok_or_else(|| {
+                                XlogError::Kernel("groupby_max_u64 kernel not found".to_string())
+                            })?;
+                        // SAFETY: groupby_max_u64(values, group_ids, num_rows, maxs)
+                        unsafe {
+                            max_func.clone().launch_on_stream(
+                                &cu_stream,
+                                cfg,
+                                (&values_view, &group_ids, num_rows, &*output),
+                            )
+                        }
+                        .map_err(|e| {
+                            XlogError::Kernel(format!("groupby_max_u64 (on_stream) failed: {}", e))
                         })?;
-                    // SAFETY: groupby_max(values, group_ids, num_rows, maxs)
-                    unsafe {
-                        max_func.clone().launch_on_stream(
-                            &cu_stream,
-                            cfg,
-                            (&values_view, &group_ids, num_rows, &*output),
-                        )
+                    } else {
+                        let values_view = self.column_as_u32_view(values, row_cap_usize)?;
+                        let max_func = device
+                            .get_func(GROUPBY_MODULE, groupby_kernels::GROUPBY_MAX)
+                            .ok_or_else(|| {
+                                XlogError::Kernel("groupby_max kernel not found".to_string())
+                            })?;
+                        // SAFETY: groupby_max(values, group_ids, num_rows, maxs)
+                        unsafe {
+                            max_func.clone().launch_on_stream(
+                                &cu_stream,
+                                cfg,
+                                (&values_view, &group_ids, num_rows, &*output),
+                            )
+                        }
+                        .map_err(|e| {
+                            XlogError::Kernel(format!("groupby_max (on_stream) failed: {}", e))
+                        })?;
                     }
-                    .map_err(|e| {
-                        XlogError::Kernel(format!("groupby_max (on_stream) failed: {}", e))
-                    })?;
                 }
                 AggOp::LogSumExp => unreachable!("rejected above"),
             }

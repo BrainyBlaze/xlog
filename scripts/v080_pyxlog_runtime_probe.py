@@ -3,7 +3,7 @@
 
 The probe is intentionally small and branch-local: it exercises the public
 pyxlog runtime/session controls that are recorded in the v0.8.0 PYAPI evidence
-without launching a DTS-DLM pilot.
+without launching an external consumer pilot.
 """
 
 from __future__ import annotations

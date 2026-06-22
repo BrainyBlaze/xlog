@@ -1,10 +1,10 @@
 // crates/xlog-integration/tests/test_wcoj_record_join_result_feedback.rs
-//! W2.4 cert — successful WCOJ dispatch wires observed
+//! WCOJ dispatch feedback validation: successful WCOJ dispatch wires observed
 //! selectivity back into `xlog_stats::StatsManager` via
 //! `record_join_result`.
 //!
-//! Locks three properties per the W2.4 acceptance gate
-//! (corrected per slice review):
+//! Locks three `record_join_result` feedback properties
+//! (corrected after review):
 //!
 //!   1. **Dispatch path actually calls `record_join_result`.**
 //!      Pre-dispatch `get_join_selectivity(slot_a, slot_b) == None`;
@@ -24,7 +24,7 @@
 //!      store converges to the same fixpoint both times.
 //!
 //! Recording is skipped when input cardinalities are missing
-//! (slice 5 missing-stats safety floor); cert
+//! (the missing-stats safety floor); the validation
 //! `wcoj_dispatch_does_not_record_when_input_cards_missing`
 //! pins this.
 
@@ -377,7 +377,7 @@ fn triangle_dispatch_records_join_result_into_stats_manager() {
     let rows_run1 = download_triples(executor.store().get("tri").expect("tri"));
     assert!(
         !rows_run1.is_empty(),
-        "fixture should produce ≥ 1 tri row to make the cert non-degenerate"
+        "fixture should produce at least 1 tri row to make this validation non-degenerate"
     );
 
     // Capture binary_est BEFORE run 2 (i.e., AFTER run 1's

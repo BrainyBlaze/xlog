@@ -950,6 +950,87 @@ pub(crate) fn check_equivalence_gpu_gated(
     Ok(())
 }
 
+/// Pre-launch CNF size bound for the equivalence verifier.
+///
+/// The GPU CDCL equivalence check is treewidth-exponential; on a hard CNF it
+/// can run long enough to hit a CUDA launch failure, which poisons the primary
+/// context for every later compile in the process. Catching that
+/// after the fact is impossible — a poisoned context cannot be recovered
+/// in-process — so the only sound mitigation is to decline *before* launch.
+///
+/// The bound is on the host-side `var_cap`/`clause_cap` (capacity upper bounds,
+/// no device read). Defaults are unbounded (`u32::MAX`), so behavior is
+/// unchanged unless an operator sets `XLOG_D4_VERIFY_MAX_VARS` /
+/// `XLOG_D4_VERIFY_MAX_CLAUSES`. The recommended production default is a
+/// calibration follow-up against the measured explosion boundary.
+fn verify_size_budget() -> (u32, u32) {
+    fn env_u32(key: &str) -> u32 {
+        std::env::var(key)
+            .ok()
+            .and_then(|v| v.trim().parse::<u32>().ok())
+            .unwrap_or(u32::MAX)
+    }
+    static BUDGET: std::sync::OnceLock<(u32, u32)> = std::sync::OnceLock::new();
+    *BUDGET.get_or_init(|| {
+        (
+            env_u32("XLOG_D4_VERIFY_MAX_VARS"),
+            env_u32("XLOG_D4_VERIFY_MAX_CLAUSES"),
+        )
+    })
+}
+
+/// Pure size-bound decision: typed [`XlogError::VerifyBudgetExceeded`] when the
+/// CNF caps exceed the budget. GPU-free so the decline path is unit-testable
+/// without a device.
+fn enforce_verify_size_bound(
+    var_cap: u32,
+    clause_cap: u32,
+    var_budget: u32,
+    clause_budget: u32,
+    context: &str,
+) -> Result<()> {
+    if var_cap > var_budget || clause_cap > clause_budget {
+        // A size-based decline is a COMPILE-capacity issue ("too big to
+        // compile safely"), distinct from the verify-phase conflict budget.
+        return Err(XlogError::CompileCapacityExceeded {
+            context: context.to_string(),
+            detail: format!(
+                "CNF {var_cap} vars / {clause_cap} clauses exceeds size bound \
+                 ({var_budget} vars / {clause_budget} clauses)"
+            ),
+        });
+    }
+    Ok(())
+}
+
+/// Decline the verify with a typed [`XlogError::VerifyBudgetExceeded`] when the
+/// CNF exceeds the configured size bound, before any kernel launches.
+///
+/// Callable from the compile path so the size guard runs BEFORE `compile_gpu_d4`
+/// — the D4 compile itself can crash (context-poisoning launch failure) on a
+/// large CNF, earlier than the verify, so a size check only at the verify entry
+/// is too late to prevent it.
+pub(crate) fn check_verify_size_bound(phi: &GpuCnf, context: &str) -> Result<()> {
+    // Operator/calibration diagnostic: log the CNF caps the bound sees, so the
+    // safe value of XLOG_D4_VERIFY_MAX_VARS/_MAX_CLAUSES can be read off a real
+    // workload (must sit above every program that compiles fine, below the
+    // explosion boundary). Off unless XLOG_DEBUG_VERIFY_SIZE=1.
+    if std::env::var("XLOG_DEBUG_VERIFY_SIZE").as_deref() == Ok("1") {
+        eprintln!(
+            "[xlog-prob] verify-size {context}: var_cap={} clause_cap={} lit_cap={}",
+            phi.var_cap, phi.clause_cap, phi.lit_cap
+        );
+    }
+    let (var_budget, clause_budget) = verify_size_budget();
+    enforce_verify_size_bound(
+        phi.var_cap,
+        phi.clause_cap,
+        var_budget,
+        clause_budget,
+        context,
+    )
+}
+
 pub fn validate_equivalence_gpu(
     phi: &GpuCnf,
     phi_decision_var_limit: &TrackedCudaSlice<u32>,
@@ -957,6 +1038,7 @@ pub fn validate_equivalence_gpu(
     provider: &Arc<CudaKernelProvider>,
     config: GpuEquivalenceConfig,
 ) -> Result<()> {
+    check_verify_size_bound(phi, "validate_equivalence_gpu")?;
     check_equivalence_gpu(phi, phi_decision_var_limit, circuit, provider, config)
 }
 
@@ -968,6 +1050,7 @@ pub fn validate_equivalence_gpu_gated(
     config: GpuEquivalenceConfig,
     compile_needed: &TrackedCudaSlice<u32>,
 ) -> Result<()> {
+    check_verify_size_bound(phi, "validate_equivalence_gpu_gated")?;
     check_equivalence_gpu_gated(
         phi,
         phi_decision_var_limit,
@@ -976,4 +1059,50 @@ pub fn validate_equivalence_gpu_gated(
         config,
         compile_needed,
     )
+}
+
+#[cfg(test)]
+mod verify_size_bound_tests {
+    use super::enforce_verify_size_bound;
+    use xlog_core::XlogError;
+
+    // A CNF over the configured bound must decline with a typed
+    // VerifyBudgetExceeded carrying the tripping sizes — BEFORE any launch —
+    // never a panic and never a doomed kernel that poisons the context.
+    #[test]
+    fn over_var_budget_declines_typed() {
+        let err = enforce_verify_size_bound(5000, 100, 4096, u32::MAX, "ctx")
+            .expect_err("must decline over var budget");
+        match err {
+            // Size declines are COMPILE-capacity, distinct from verify budget.
+            XlogError::CompileCapacityExceeded { context, detail } => {
+                assert_eq!(context, "ctx");
+                // detail names the tripping sizes and the bound.
+                assert!(detail.contains("5000 vars"), "detail: {detail}");
+                assert!(detail.contains("size bound"), "detail: {detail}");
+            }
+            other => panic!("wrong error variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn over_clause_budget_declines_typed() {
+        let err = enforce_verify_size_bound(10, 20_000, u32::MAX, 16_384, "ctx")
+            .expect_err("must decline over clause budget");
+        assert!(matches!(err, XlogError::CompileCapacityExceeded { .. }));
+    }
+
+    #[test]
+    fn within_budget_proceeds() {
+        enforce_verify_size_bound(100, 200, 4096, 16_384, "ctx")
+            .expect("within budget must pass the bound");
+    }
+
+    // Default budget is unbounded (u32::MAX) => no regression: any real CNF
+    // passes the bound unless an operator opts in via env.
+    #[test]
+    fn unbounded_default_never_declines() {
+        enforce_verify_size_bound(u32::MAX, u32::MAX, u32::MAX, u32::MAX, "ctx")
+            .expect("unbounded default must not decline");
+    }
 }

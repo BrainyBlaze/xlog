@@ -487,10 +487,10 @@ fn walk_tmj(node: &RirNode, target_mask: Option<&str>) -> Option<TmjMeta> {
         RirNode::Join { left, right, .. } | RirNode::Diff { left, right } => {
             walk_tmj(left, target_mask).or_else(|| walk_tmj(right, target_mask))
         }
-        // v0.6.5: descend into the fallback so a TMJ wrapped beneath a
-        // promoted MultiWayJoin is still discoverable. The promoter does
-        // not currently wrap TMJ-bearing trees, but the explicit arm
-        // documents the contract instead of relying on the catch-all.
+        // Descend into the fallback so a TMJ wrapped beneath a promoted
+        // MultiWayJoin is still discoverable. The promoter does not currently
+        // wrap TMJ-bearing trees, but the explicit arm documents the contract
+        // instead of relying on the catch-all.
         RirNode::MultiWayJoin { fallback, .. } => walk_tmj(fallback, target_mask),
         RirNode::ChainJoin { fallback, .. } => walk_tmj(fallback, target_mask),
         _ => None,
@@ -736,7 +736,7 @@ impl CompiledIlpProgram {
         negatives: Vec<(String, Vec<i64>)>,
         cand_probs_obj: &Bound<'py, PyAny>,
     ) -> PyResult<(PyObject, PyObject)> {
-        // ── Phase A: Validation + DLPack import ──
+        // Validate inputs and import candidate probabilities via DLPack.
         let candidate_map = self.candidate_map.clone().ok_or_else(|| {
             PyRuntimeError::new_err(
                 "candidate_map not set — call set_candidate_map() before compute_ilp_loss_grad_gpu()",
@@ -775,7 +775,7 @@ impl CompiledIlpProgram {
             )));
         }
 
-        // ── Phase B: Build fact list, group by relation ──
+        // Build the fact list and group examples by relation.
         let num_pos = positives.len();
         let num_neg = negatives.len();
         let num_facts = (num_pos + num_neg) as u32;
@@ -832,7 +832,7 @@ impl CompiledIlpProgram {
             .ilp_last_result()
             .ok_or_else(|| PyRuntimeError::new_err("No ILP result — call evaluate() first"))?;
 
-        // ── Phase C: Device-side COO build (zero D2H) ──
+        // Build the COO structure on the device without D2H reads.
         //
         // Two-pass approach over (relation, candidate) tasks:
         //   Pass 1: compute GPU membership masks
@@ -961,7 +961,7 @@ impl CompiledIlpProgram {
             .column(0)
             .ok_or_else(|| PyRuntimeError::new_err("cand_probs has no column"))?;
 
-        // ── Phase C: COO construction ──
+        // Construct COO entries.
         let (mut d_coo_facts, mut d_coo_cands, actual_nnz) = if !needs_chunking {
             ilp_gpu::build_coo_single(
                 &self.provider,
@@ -992,7 +992,7 @@ impl CompiledIlpProgram {
             }
         };
 
-        // ── Phase D: Sort COO + device-side CSR build ──
+        // Sort COO entries and build CSR row offsets on the device.
         let d_row_offsets = ilp_gpu::sort_and_build_csr(
             &self.provider,
             &mut d_coo_facts,
@@ -1001,7 +1001,7 @@ impl CompiledIlpProgram {
             num_facts,
         )?;
 
-        // ── Phase E: Forward + backward + device-side reduction ──
+        // Run forward, backward, and device-side reduction kernels.
         ilp_gpu::forward_backward_reduce(
             &self.provider,
             py,

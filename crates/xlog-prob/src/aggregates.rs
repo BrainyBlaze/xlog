@@ -13,6 +13,23 @@ pub(crate) enum AggState {
     LogSumExp { max: f64, sumexp: f64, init: bool },
 }
 
+/// Canonical, totally-ordered key over an [`AggState`] for deduplicating
+/// dynamic-programming states in factorized aggregate-outcome folding.
+/// Floats are keyed by their exact bit pattern.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum AggStateKey {
+    Count(u64),
+    SumI128(i128),
+    SumF64(u64),
+    Min(Option<Value>),
+    Max(Option<Value>),
+    LogSumExp {
+        max_bits: u64,
+        sumexp_bits: u64,
+        init: bool,
+    },
+}
+
 impl AggState {
     pub(crate) fn new(op: AggOp) -> Self {
         match op {
@@ -127,6 +144,21 @@ impl AggState {
                     Ok(())
                 }
                 _ => Err(internal_state_error()),
+            },
+        }
+    }
+
+    pub(crate) fn dp_key(&self) -> AggStateKey {
+        match self {
+            AggState::Count(c) => AggStateKey::Count(*c),
+            AggState::SumI128(acc) => AggStateKey::SumI128(*acc),
+            AggState::SumF64(acc) => AggStateKey::SumF64(acc.to_bits()),
+            AggState::Min(v) => AggStateKey::Min(v.clone()),
+            AggState::Max(v) => AggStateKey::Max(v.clone()),
+            AggState::LogSumExp { max, sumexp, init } => AggStateKey::LogSumExp {
+                max_bits: max.to_bits(),
+                sumexp_bits: sumexp.to_bits(),
+                init: *init,
             },
         }
     }

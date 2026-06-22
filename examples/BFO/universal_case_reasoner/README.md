@@ -1,8 +1,6 @@
 # BFO Universal Case Reasoner
 
-Branch: `feat/bfo-universal-case-reasoner`
-
-This directory is the branch-local contract for a BFO-governed
+This directory is the local contract for a BFO-governed
 neuro-symbolic case reasoner. The target system must use one stable BFO kernel
 to reason over structurally analogous cases across medicine, manufacturing,
 cybersecurity, scientific or lab operations, and cloud operations / quality
@@ -17,7 +15,7 @@ generalization claim:
 - `VALIDATION_PLAN.md` refines the local validation plan against `GOALS.md`,
   `GQM.md`, and `REQUIREMENTS.md`.
 - `validate.sh` writes `validation_summary.json` and returns non-zero while any
-  P0 gate is unproven.
+  production-blocking gate is unproven.
 - `bfo/kernel.xlog` declares the shared BFO categories, relation families, and
   root-cause/intervention/explanation rules.
 - `domains/domain_inventory.json` defines five thin domain adapters and the
@@ -35,16 +33,16 @@ generalization claim:
   predicate used by the transfer run.
 - `tools/run_production_transfer.py` writes
   `evidence/production_transfer.json` with five-domain zero-shot holdout
-  transfer, real Hugging Face source provenance, externally supplied RCA/fault
+  transfer, real Hugging Face source provenance, externally supplied root-cause/fault
   truth fields, per-case predictions, confusion inputs, computed ablations,
-  production scale/profile metrics, v0.8.0/v0.8.5/v0.8.6 bundle reuse probes,
+  production scale/profile metrics, runtime bundle reuse probes,
   and 30-minute soak evidence.
-- `programs/dilp_proof_paths.xlog` and `dilp_report` add example-level DILP
+- `programs/dilp_proof_paths.xlog` and `dilp_report` add example-level differentiable ILP
   evidence: XLOG proof-path clauses, CUDA joint neural/symbolic rule-weight
   training, learned rule inventories, clause ablations, proof gradients, and
   held-out-safe rule induction.
-- Robust generalization gates `GEN-001` through `GEN-010` require
-  leave-one-domain-out evaluation over every domain, at least 100 held-out HF
+- Robust generalization gates require
+  leave-one-domain-out evaluation over every domain, at least 100 held-out Hugging Face
   cases per domain, frozen model/rule manifests, unseen dataset-family
   transfer, strong baselines, confidence intervals, and adversarial
   domain-shift variants.
@@ -53,17 +51,17 @@ generalization claim:
 
 Smoke runners remain intentionally separate from production evidence. They prove
 local surfaces, but only `evidence/production_transfer.json` with `scope:
-"production"` can close `TRANSFER-002`, `TRANSFER-003`, `NEURAL-002`,
-`PERF-001`, `PERF-002`, and GQM `Q5`-`Q8`/`Q12`.
+"production"` can close the transfer, neural, performance, and
+measurement-plan acceptance gates.
 
 The current production evidence should be read as a production-grade
 XLOG/CUDA neuro-symbolic cross-domain ranking and transfer demo. It closes the
-corrected robust-generalization contract when every `GEN-*` gate passes. It now
-also carries example-level DILP evidence when every `DILP-*` gate passes:
+corrected robust-generalization contract when every robust generalization gate passes. It now
+also carries example-level differentiable ILP evidence when every differentiable ILP gate passes:
 XLOG proof-path clauses feed CUDA joint neural/symbolic rule-weight training,
 learned inventories, clause ablations, proof gradients, and held-out-safe rule
-  induction. v0.8.9 adds reusable XLOG/pyxlog surfaces for the six UCR issue
-  ledger gaps; broader full-language DILP productization remains outside this
+  induction. The example adds reusable XLOG/pyxlog surfaces for the six Universal Case Reasoner issue
+  ledger gaps; broader full-language differentiable ILP productization remains outside this
   example.
 
 ## Production Goal
@@ -84,10 +82,10 @@ ontology structure. With no per-domain BFO core edits, the finished system must:
 
 | File | Purpose |
 | --- | --- |
-| `GOALS.md` | GDSP goal tree, questions, and leaf artifacts. |
+| `GOALS.md` | Goal-driven software development tree, questions, and leaf artifacts. |
 | `GQM.md` | Measurement goal, hypotheses, metrics, data collection, and analysis plan. |
-| `REQUIREMENTS.md` | P0 production gates and evidence schema. |
-| `WORKER_BRIEF.md` | Branch ownership, read-first sources, first implementation step, and completion standard. |
+| `REQUIREMENTS.md` | Production-blocking gates and evidence schema. |
+| `WORKER_BRIEF.md` | Scope ownership, read-first sources, first implementation step, and completion standard. |
 | `README.md` | Orientation and handoff entrypoint. |
 
 ## Required Deliverables
@@ -98,22 +96,30 @@ This directory contains:
 - At least five thin domain adapters containing domain facts and mappings only.
 - Root-cause, failure-chain, risk-state, intervention, and explanation rules.
 - A real CUDA PyTorch neural component invoked through XLOG `nn/4`.
-- A DILP evidence path that learns symbolic rule weights over XLOG proof-path
+- A differentiable ILP evidence path that learns symbolic rule weights over XLOG proof-path
   clauses jointly with the neural predicate.
-- Real Hugging Face dataset rows and externally supplied RCA/fault truth fields
+- Real Hugging Face dataset rows and externally supplied root-cause/fault truth fields
   for every production-transfer domain.
 - Neural-only, domain-symbolic, shared-symbolic, and neuro-symbolic baselines.
 - A holdout protocol proving zero-shot or few-shot transfer.
 - A core mutation audit proving the BFO kernel checksum is identical across
   domains.
-- Executable reuse evidence for the merged v0.8.0 session bridge, v0.8.5
-  language contract, and v0.8.6 runtime optimizer/session APIs.
+- Executable reuse evidence for the merged session bridge, language contract,
+  and runtime optimizer/session APIs.
 - `validate.sh`, where `./validate.sh --strict --gpu-required` is the
   authoritative gate.
 - `validation_summary.json` with raw metrics, evidence paths, PASS/FAIL for
-  every P0 gate, and exact blockers for unsupported requirements.
+  every production-blocking gate, and exact blockers for unsupported requirements.
 - `generalization_report` plus raw generalization prediction records that close
-  `GEN-001` through `GEN-010` before making a robust-generalization claim.
+  the robust generalization gate set before making a robust-generalization claim.
+- `public_benchmark_report` that either records runnable public benchmark
+  coverage for every required family before any external state-of-the-art claim, or
+  fail-closes with `external_state_of_the_art_claim: false` and exact missing-family
+  blockers.
+- Separate `showcase_metrics`, `generalization_report`, `dilp_report`, and
+  `public_benchmark_report` namespaces; baseline uplift claims must come from
+  `generalization_report.baseline_uplift`, not legacy top-level
+  `baseline_metrics`.
 - `XLOG_FINDINGS.md`, `xlog_issue_ledger.json`, `proposed_fixes.md`, and
   `repro/` so the project reports what it revealed about XLOG, which runtime or
   pyxlog features are weak, and what upstream regression tests should be added.
@@ -134,13 +140,13 @@ requirements include:
 - Accepted intervention precision `>= 0.95`.
 - Neuro-symbolic uplift `>= 15%` over the strongest baseline.
 - Fixed-seed byte-identical results across 5 runs.
-- Data-plane D2H transfers in the hot loop: `0`.
-- Data-plane H2D transfers after initial load: `0`.
+- Data-plane device-to-host transfers in the hot loop: `0`.
+- Data-plane host-to-device transfers after initial load: `0`.
 - p95 core indexed query latency `<= 50 ms`.
 
 ## Scope Boundary
 
-This branch owns primarily:
+This example owns primarily:
 
 ```text
 examples/BFO/universal_case_reasoner/
@@ -148,7 +154,7 @@ examples/BFO/universal_case_reasoner/
 
 Do not edit shared BFO libraries, repo-wide runtime code, common helper
 directories, or sibling `examples/BFO/*` projects unless a separate instruction
-explicitly authorizes that scope. The v0.8.6 bundle-reuse path also depends on
+explicitly authorizes that scope. The runtime bundle-reuse path also depends on
 the repo-level pyxlog kernel staging script; fixes there are limited to making
 the merged runtime bundle reproducible for this production evidence path.
 

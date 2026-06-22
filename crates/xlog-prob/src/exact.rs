@@ -1,6 +1,7 @@
-//! Exact probabilistic inference via Decision-DNNF (D4) + weighted model counting.
+//! Exact probabilistic inference via GPU-native Decision-DNNF knowledge compilation
+//! and weighted model counting.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 use cudarc::driver::LaunchConfig;
@@ -92,6 +93,10 @@ struct GpuExactState {
     provider: Arc<CudaKernelProvider>,
     cache: Mutex<GpuCircuitCache>,
     handle: GpuCircuitCacheHandle,
+    /// Device-resident batched query-var metadata, keyed by the host vector of
+    /// CNF query vars. Lets a warm training loop reuse a single upload instead
+    /// of re-uploading (a tracked htod) on every batched force call.
+    query_var_batch_cache: Mutex<HashMap<Vec<u32>, Arc<TrackedCudaSlice<u32>>>>,
 }
 
 /// GPU device selection and memory budget for probabilistic inference.
@@ -104,6 +109,12 @@ pub struct GpuConfig {
     pub device_ordinal: usize,
     /// Device memory budget in bytes (clamped to available memory at runtime).
     pub memory_bytes: u64,
+    /// Host-side Decision-DNNF compiler decision-order hint: renumber leaf/choice
+    /// variables by descending structural fanout in the provenance DAG before CNF
+    /// encoding, steering the deterministic variable-id tie-breaks of the
+    /// (unchanged) GPU-native Decision-DNNF branching heuristic. Query probabilities
+    /// are unaffected; only compile-time search shape can differ.
+    pub decision_order_hint: bool,
 }
 
 impl Default for GpuConfig {
@@ -111,6 +122,7 @@ impl Default for GpuConfig {
         Self {
             device_ordinal: 0,
             memory_bytes: 32 * 1024 * 1024 * 1024, // 32 GB — clamped to available device memory by GpuMemoryManager at runtime.
+            decision_order_hint: false,
         }
     }
 }
@@ -125,6 +137,7 @@ impl GpuExactState {
             provider,
             cache: Mutex::new(cache),
             handle,
+            query_var_batch_cache: Mutex::new(HashMap::new()),
         })
     }
 
@@ -134,6 +147,32 @@ impl GpuExactState {
 
     fn handle(&self) -> &GpuCircuitCacheHandle {
         &self.handle
+    }
+
+    /// Device-resident batched query vars for `query_vars_host`, uploading once
+    /// and reusing the cached slice on repeat calls with the same vars. The
+    /// upload is a tracked htod; caching it keeps a warm training loop free of
+    /// per-step host transfers.
+    fn cached_query_var_batch(
+        &self,
+        query_vars_host: Vec<u32>,
+    ) -> Result<Arc<TrackedCudaSlice<u32>>> {
+        let mut cache = self
+            .query_var_batch_cache
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(cached) = cache.get(&query_vars_host) {
+            return Ok(Arc::clone(cached));
+        }
+        let mut query_vars = self.provider.memory().alloc::<u32>(query_vars_host.len())?;
+        self.provider
+            .htod_sync_copy_into_tracked(&query_vars_host, &mut query_vars)
+            .map_err(|e| {
+                XlogError::Kernel(format!("Failed to upload batched query vars: {}", e))
+            })?;
+        let query_vars = Arc::new(query_vars);
+        cache.insert(query_vars_host, Arc::clone(&query_vars));
+        Ok(query_vars)
     }
 }
 
@@ -301,6 +340,11 @@ impl ExactDdnnfProgram {
             return count_lift_gpu.evaluate();
         }
 
+        // `gpu` is `None` only when compilation found an empty PIR root set
+        // (no probabilistic leaves and no derivations reach any query), so
+        // every query atom is unprovable and P = 0 is the correct semantics —
+        // this is NOT a missing-GPU fallback; a real circuit with an
+        // unavailable GPU fails at compile time instead.
         if self.gpu.is_none() {
             let mut query_probs: Vec<QueryProbability> = Vec::with_capacity(self.queries.len());
             for query in &self.queries {
@@ -598,7 +642,6 @@ impl ExactDdnnfProgram {
         let mut base_roots = state.provider.memory().alloc::<f64>(batch)?;
         let mut query_roots = state.provider.memory().alloc::<f64>(batch)?;
         let mut losses = state.provider.memory().alloc::<f64>(batch)?;
-        let mut query_vars = state.provider.memory().alloc::<u32>(batch)?;
         let mut force_saved = state.provider.memory().alloc::<f64>(batch)?;
 
         let mut query_vars_host: Vec<u32> = Vec::with_capacity(batch);
@@ -776,12 +819,9 @@ impl ExactDdnnfProgram {
             }
         }
 
-        state
-            .provider
-            .htod_sync_copy_into_tracked(&query_vars_host, &mut query_vars)
-            .map_err(|e| {
-                XlogError::Kernel(format!("Failed to upload batched query vars: {}", e))
-            })?;
+        // Reuse the device-resident query-var batch (uploaded once and cached),
+        // so a warm training loop performs no per-step tracked host transfer here.
+        let query_vars = state.cached_query_var_batch(query_vars_host)?;
         let force_grid = checked_launch_grid_u32("gpu exact batched query force", batch_u32, 256)?;
         if force_grid != 0 {
             if expected_true {
@@ -794,7 +834,7 @@ impl ExactDdnnfProgram {
                             shared_mem_bytes: 0,
                         },
                         (
-                            &query_vars,
+                            query_vars.as_ref(),
                             batch_u32,
                             self.max_var,
                             var_stride,
@@ -819,7 +859,7 @@ impl ExactDdnnfProgram {
                             shared_mem_bytes: 0,
                         },
                         (
-                            &query_vars,
+                            query_vars.as_ref(),
                             batch_u32,
                             self.max_var,
                             var_stride,
@@ -1241,7 +1281,7 @@ impl ExactDdnnfProgram {
                 return Err(XlogError::UnsupportedEpistemicConstruct {
                     construct: "GPU exact gradient evaluation".to_string(),
                     context: "GPU count-lift exact backend does not expose gradient evaluation; \
-                              gradient production paths require a compiled GPU D4 exact backend"
+                              gradient production paths require a compiled GPU-native Decision-DNNF exact backend"
                         .to_string(),
                 });
             }
@@ -1342,6 +1382,12 @@ impl ExactDdnnfProgram {
                 "GPU memory budget must be non-zero".to_string(),
             ));
         }
+
+        let provenance = if config.decision_order_hint {
+            crate::decision_order::apply_decision_order_hint(provenance)
+        } else {
+            provenance
+        };
 
         let mut roots_set: HashSet<crate::pir::PirNodeId> = HashSet::new();
 
@@ -1944,7 +1990,8 @@ pub(crate) fn default_compile_config(
     cnf: &xlog_solve::GpuCnf,
     memory_bytes: u64,
 ) -> Result<GpuCompileConfig> {
-    // Must match the default GPU D4 configuration expected by the Python training paths.
+    // Must match the default GPU-native Decision-DNNF compiler configuration expected
+    // by the Python training paths.
     // Sizing is conservative and strictly bounded by `GpuCompileConfig::{smooth_node_cap,smooth_edge_cap}`.
     let frontier_depth: u16 = 6;
 
@@ -1962,15 +2009,16 @@ pub(crate) fn default_compile_config(
         })?
     {
         return Err(XlogError::Compilation(format!(
-            "memory budget {} cannot hold the minimum GPU D4 frontier allocation",
+            "memory budget {} cannot hold the minimum GPU-native Decision-DNNF frontier allocation",
             memory_bytes
         )));
     }
     let max_items_by_trail = memory_bytes / denom;
     let max_frontier_items = max_items_by_trail.min(4096).min(u64::from(u32::MAX)) as u32;
 
-    // The Phase 1 D4 compiler emits one leaf circuit per frontier item; caps must scale with the
-    // maximum frontier size (up to 2^frontier_depth, bounded by max_frontier_items).
+    // The GPU-native Decision-DNNF compiler emits one leaf circuit per frontier item;
+    // caps must scale with the maximum frontier size (up to 2^frontier_depth,
+    // bounded by max_frontier_items).
     let frontier_cap_factor = (1u64
         .checked_shl(frontier_depth as u32)
         .unwrap_or(u64::from(u32::MAX)))
@@ -1986,7 +2034,7 @@ pub(crate) fn default_compile_config(
         .ok_or_else(|| XlogError::Compilation("smooth_node_cap overflow".to_string()))?;
 
     // Edge capacity scales with node capacity; AND/OR fanout grows edges but stays within a small
-    // multiple of nodes for the compiler's Phase 1 emission patterns.
+    // multiple of nodes for the compiler's frontier emission patterns.
     let mut smooth_edge_cap = smooth_node_cap
         .checked_mul(2)
         .ok_or_else(|| XlogError::Compilation("smooth_edge_cap overflow".to_string()))?;
@@ -2282,6 +2330,7 @@ mod tests {
 
     #[test]
     fn test_exact_negation_probability() {
+        let _gpu_guard = crate::test_gpu_lock::lock();
         if CudaDevice::new(0).is_err() {
             eprintln!("Skipping test: CUDA runtime unavailable");
             return;
@@ -2308,6 +2357,7 @@ query(dry()).
 
     #[test]
     fn test_exact_multi_layer_negation() {
+        let _gpu_guard = crate::test_gpu_lock::lock();
         if CudaDevice::new(0).is_err() {
             eprintln!("Skipping test: CUDA runtime unavailable");
             return;
@@ -2336,6 +2386,7 @@ query(a()).
 
     #[test]
     fn test_eval_log_z_changes_for_sprinkler_given_wet() {
+        let _gpu_guard = crate::test_gpu_lock::lock();
         if CudaDevice::new(0).is_err() {
             eprintln!("Skipping test: CUDA runtime unavailable");
             return;

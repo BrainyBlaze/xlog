@@ -10,8 +10,7 @@ exposes two execution subcommands:
 - `xlog run` — Deterministic program execution
 - `xlog prob` — Probabilistic program execution
 
-The v0.8.5 language contract added developer-experience commands, which ship as
-of v0.8.5:
+The current language contract includes developer-experience commands:
 
 - `xlog explain` — Inspect parse, strata, RIR, optimizer, magic-set, WCOJ,
   probabilistic plans, rule provenance, and proof traces
@@ -107,6 +106,10 @@ xlog prob [OPTIONS] <SOURCE>
 - `--samples <N>` — Monte Carlo sample count (with `--prob-engine mc`)
 - `--seed <N>` — Random seed for Monte Carlo (with `--prob-engine mc`)
 - `--confidence <LEVEL>` — Confidence level for MC intervals (default: 0.95)
+- `--allow-cpu-oracle` — Allow the labeled CPU oracle when the GPU-resident MC
+  engine rejects the program (negation, aggregates, ...). Fail-closed when
+  unset; the result is labeled `mc_engine: "cpu-oracle"` and is never
+  GPU-native evidence
 - `--output <FORMAT>` — Output format: `pretty` (default), `csv`, `arrow`
 - `--output-dir <DIR>` — Directory for Arrow output files (with `--output arrow`)
 - `--device <N>` — CUDA device index (default: 0)
@@ -172,8 +175,7 @@ xlog explain --format json program.xlog
 xlog explain --format dot program.xlog
 ```
 
-For the shared v0.8.7 diagnostics model, see
-[`living-world-diagnostics-v087.md`](living-world-diagnostics-v087.md).
+For the shared generated-rule diagnostics model, see the living-world diagnostics architecture note.
 
 ## Input Formats
 

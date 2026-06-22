@@ -148,7 +148,7 @@ class TestTensorSourceShapes:
             nn(mnist_net, [X], Y, [0,1,2,3,4,5,6,7,8,9]) :: digit(X, Y).
         """)
 
-        # 1000 grayscale MNIST images: [N, C, H, W]
+        # 1000 grayscale MNIST images: [batch, channel, height, width]
         program.add_tensor_source("mnist", torch.randn(1000, 1, 28, 28))
         assert program.active_tensor_source_size() == 1000
 
@@ -158,7 +158,7 @@ class TestTensorSourceShapes:
             nn(imagenet, [X], Y, [cat, dog, bird]) :: classify(X, Y).
         """)
 
-        # 500 RGB images: [N, C, H, W]
+        # 500 RGB images: [batch, channel, height, width]
         program.add_tensor_source("images", torch.randn(500, 3, 224, 224))
         assert program.active_tensor_source_size() == 500
 
@@ -205,10 +205,10 @@ class TestTensorSourceIntegration:
         """Test setting up tensor sources for MNIST addition."""
         program = pyxlog.Program.compile("""
             nn(digit_net, [X], Y, [0,1,2,3,4,5,6,7,8,9]) :: digit(X, Y).
-            addition(I1, I2, Sum) :-
-                digit(I1, D1),
-                digit(I2, D2),
-                Sum is D1 + D2.
+            addition(FirstImage, SecondImage, Sum) :-
+                digit(FirstImage, FirstDigitValue),
+                digit(SecondImage, SecondDigitValue),
+                Sum is FirstDigitValue + SecondDigitValue.
         """)
 
         # Training data
@@ -232,11 +232,11 @@ class TestTensorSourceIntegration:
     def test_sequence_labeling_setup(self):
         """Test setting up tensor sources for sequence labeling."""
         program = pyxlog.Program.compile("""
-            nn(tagger, [W], T, [noun, verb, adj, det]) :: pos_tag(W, T).
-            valid_phrase(W1, W2, W3) :-
-                pos_tag(W1, det),
-                pos_tag(W2, adj),
-                pos_tag(W3, noun).
+            nn(tagger, [Word], WordTag, [noun, verb, adj, det]) :: pos_tag(Word, WordTag).
+            valid_phrase(FirstWord, SecondWord, ThirdWord) :-
+                pos_tag(FirstWord, det),
+                pos_tag(SecondWord, adj),
+                pos_tag(ThirdWord, noun).
         """)
 
         # Word embeddings: 10000 words, 300-dim embeddings
@@ -249,9 +249,9 @@ class TestTensorSourceIntegration:
     def test_multi_network_different_sources(self):
         """Test multiple networks with different tensor sources."""
         program = pyxlog.Program.compile("""
-            nn(image_encoder, [I], E) :: encode_image(I, E).
-            nn(text_encoder, [T], E) :: encode_text(T, E).
-            nn(classifier, [E], C, [match, no_match]) :: classify(E, C).
+            nn(image_encoder, [ImageInput], ImageEmbedding) :: encode_image(ImageInput, ImageEmbedding).
+            nn(text_encoder, [TextInput], TextEmbedding) :: encode_text(TextInput, TextEmbedding).
+            nn(classifier, [Embedding], MatchLabel, [match, no_match]) :: classify(Embedding, MatchLabel).
         """)
 
         # Different tensor sources for different input types

@@ -50,7 +50,9 @@ fn template_source_addition(num_labels: usize) -> String {
         source.push_str(".\n");
     }
 
-    source.push_str("addition(X, Y, Z) :- digit(X, D1), digit(Y, D2), Z is D1 + D2.\n");
+    source.push_str(
+        "addition(X, Y, Z) :- digit(X, LeftDigit), digit(Y, RightDigit), Z is LeftDigit + RightDigit.\n",
+    );
 
     let max_sum = 2usize * (num_labels.saturating_sub(1));
     for sum in 0..=max_sum {
@@ -122,7 +124,7 @@ fn cdcl_q2_reports_status_and_error_without_trap() {
     let frontier_depth: u16 = 6;
     let max_frontier_items: u32 = 4096;
 
-    // D4 smoothing caps: base formula from `default_compile_config` minus headroom for smoothing.
+    // Decision-DNNF smoothing caps: base formula from `default_compile_config` minus headroom for smoothing.
     let per_item_nodes = encoding.cnf.var_cap.saturating_mul(5).max(1024);
     let frontier_cap_factor = 1u32 << (frontier_depth as u32);
     let base_node_cap = per_item_nodes.saturating_mul(frontier_cap_factor);
@@ -156,7 +158,7 @@ fn cdcl_q2_reports_status_and_error_without_trap() {
         .expect("upload compile gate");
 
     let circuit = gpu_d4::compile_gpu_d4_gated(&encoding.cnf, &provider, &compile, &compile_needed)
-        .expect("compile d4");
+        .expect("compile Decision-DNNF");
 
     let queries =
         build_equivalence_queries_gpu(&encoding.cnf, &circuit, &provider).expect("build queries");

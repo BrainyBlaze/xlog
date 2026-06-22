@@ -89,6 +89,20 @@ mkdir -p "$wheel_dir" "$bundle_dir"
 
 cd "$repo_root"
 
+# Hard gate: this script certifies GPU behavior. The test harness turns
+# CUDA-init failures into loud panics under XLOG_REQUIRE_CUDA=1 (see
+# crates/xlog-cuda-tests/src/harness/provider.rs and the require_cuda_guard
+# tests), so a CPU-only machine can never satisfy this gate via the
+# skip-on-missing-device paths.
+export XLOG_REQUIRE_CUDA=1
+if [[ "$dry_run" != "1" ]]; then
+  require_cmd nvidia-smi
+  if ! nvidia-smi -L 2>/dev/null | grep -q "GPU"; then
+    echo "FATAL: no CUDA GPU visible to nvidia-smi; refusing to run the GPU release gate" >&2
+    exit 1
+  fi
+fi
+
 run_cmd python3 scripts/xlog_doctor.py --workflow release
 run_cmd bash scripts/preflight_release_publish.sh
 run_cmd cargo build --workspace --locked --release --exclude pyxlog

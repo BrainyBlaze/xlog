@@ -24,7 +24,7 @@
     "peak_memory_bytes": 11768,
     "status": "available"
   },
-  "pyxlog_version": "0.8.6",
+  "pyxlog_version": "0.9.2",
   "query_row_counts": {
     "bfo_explanation": 5,
     "candidate_root_cause": 5,

@@ -1,0 +1,37 @@
+{
+  "consumer": "neutral-external-consumer",
+  "features": [
+    "common_subexpression_elimination",
+    "persistent_hash_index",
+    "production_path_reuse"
+  ],
+  "source_required_substrings": [
+    "material_link(A, B), material_link(B, C)",
+    "quality_gate(B)",
+    "not blocked_step(C)",
+    "flow_count(A, count(C))"
+  ],
+  "checks": {
+    "run": {
+      "returncode": 0,
+      "stdout_contains": [
+        "__xlog_query_0",
+        "| 1",
+        "| 4",
+        "__xlog_query_1",
+        "| 1",
+        "| 4",
+        "| 2",
+        "| 6",
+        "__xlog_query_2",
+        "| 1",
+        "| 2"
+      ]
+    },
+    "explain_json": {
+      "min_statements": 24,
+      "stratification_status": "ok",
+      "rir_status": "ok"
+    }
+  }
+}

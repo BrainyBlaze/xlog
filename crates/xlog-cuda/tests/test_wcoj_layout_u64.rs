@@ -1,17 +1,18 @@
 // crates/xlog-cuda/tests/test_wcoj_layout_u64.rs
-//! Tests for the v0.6.2 GPU WCOJ sorted-layout construction —
-//! u64 variant.
+//! Tests for the GPU WCOJ sorted-layout construction path for
+//! u64 inputs.
 //!
 //! Locks the provider entry
 //! `CudaKernelProvider::wcoj_layout_u64_recorded(input, launch_stream)`
 //! against the same contract as the u32 path, widened to 64-bit
 //! keys. Internally delegates to `dedup_full_row_recorded` (which
-//! gained U64 admission in commit 1).
+//! accepts U64 rows).
 //!
-//! Hard scope (commit 2 of 3):
-//!   * Layout-only — feeds into `wcoj_triangle_u64_recorded`
-//!     for the integration test below.
-//!   * No AST/RIR dispatch (commit 3).
+//! Coverage scope:
+//!   * Layout construction plus `wcoj_triangle_u64_recorded`
+//!     integration below.
+//!   * AST/RIR dispatch is covered by dispatcher integration tests,
+//!     not this provider-layout test.
 
 use std::collections::BTreeSet;
 use std::sync::Arc;
@@ -161,6 +162,14 @@ fn download_pairs_u64(buf: &CudaBuffer) -> Vec<(u64, u64)> {
     out
 }
 
+fn sync_stream(fix: &RuntimeFixture, stream: StreamId) {
+    fix.pool
+        .resolve(stream)
+        .expect("resolve stream")
+        .synchronize()
+        .expect("sync stream");
+}
+
 fn cpu_sort_dedup(rows: &[(u64, u64)]) -> Vec<(u64, u64)> {
     let set: BTreeSet<(u64, u64)> = rows.iter().copied().collect();
     set.into_iter().collect()
@@ -251,6 +260,7 @@ fn wcoj_layout_u64_sorts_unsorted_input_lex() {
         .provider
         .wcoj_layout_u64_recorded(&buf, stream)
         .expect("layout u64");
+    sync_stream(&fix, stream);
     assert_eq!(out.schema.column_type(0), Some(ScalarType::U64));
     assert_eq!(out.schema.column_type(1), Some(ScalarType::U64));
     assert_eq!(download_pairs_u64(&out), cpu_sort_dedup(&input));
@@ -276,6 +286,7 @@ fn wcoj_layout_u64_removes_duplicates() {
         .provider
         .wcoj_layout_u64_recorded(&buf, stream)
         .expect("layout u64 dedup");
+    sync_stream(&fix, stream);
     assert_eq!(download_pairs_u64(&out), cpu_sort_dedup(&input));
 }
 
@@ -291,6 +302,7 @@ fn wcoj_layout_u64_empty_input_produces_empty_output() {
         .provider
         .wcoj_layout_u64_recorded(&buf, stream)
         .expect("layout u64 empty");
+    sync_stream(&fix, stream);
     assert_eq!(download_pairs_u64(&out), Vec::<(u64, u64)>::new());
 }
 
@@ -308,6 +320,7 @@ fn wcoj_layout_u64_already_sorted_deduped_round_trips() {
         .provider
         .wcoj_layout_u64_recorded(&buf, stream)
         .expect("layout u64 sorted/deduped");
+    sync_stream(&fix, stream);
     assert_eq!(download_pairs_u64(&out), input);
 }
 
@@ -341,7 +354,7 @@ fn wcoj_layout_u64_legacy_manager_rejected() {
 fn wcoj_layout_then_triangle_u64_matches_cpu_oracle() {
     // Feed three unsorted U64 fixtures through layout construction
     // into wcoj_triangle_u64_recorded and verify the row set
-    // matches the CPU oracle. End-to-end provider pipeline cert.
+    // matches the CPU oracle. End-to-end provider pipeline coverage.
     let Some(fix) = make_runtime_fixture() else {
         eprintln!("Skipping: CUDA runtime unavailable");
         return;
@@ -392,12 +405,14 @@ fn wcoj_layout_then_triangle_u64_matches_cpu_oracle() {
         .provider
         .wcoj_layout_u64_recorded(&buf_xz_raw, stream)
         .expect("layout xz");
+    sync_stream(&fix, stream);
 
     let tri_stream = fix.pool.acquire().expect("triangle stream");
     let result = fix
         .provider
         .wcoj_triangle_u64_recorded(&buf_xy, &buf_yz, &buf_xz, tri_stream)
         .expect("triangle u64");
+    sync_stream(&fix, tri_stream);
     assert_eq!(result.schema.column_type(0), Some(ScalarType::U64));
     assert_eq!(result.schema.column_type(1), Some(ScalarType::U64));
     assert_eq!(result.schema.column_type(2), Some(ScalarType::U64));

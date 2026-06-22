@@ -18,8 +18,11 @@ cudarc.workspace = true
 
 [dev-dependencies]
 criterion = "0.5"
-xlog-ir.workspace = true
-xlog-logic.workspace = true
+# Path-only (no version) dev-deps: keeps publish ordering robust by
+# omitting these from the packaged manifest (cargo drops version-less
+# dev-dependencies). In-workspace tests/benches still resolve via path.
+xlog-ir = { path = "../xlog-ir" }
+xlog-logic = { path = "../xlog-logic" }
 
 [[bench]]
 name = "solver_bench"

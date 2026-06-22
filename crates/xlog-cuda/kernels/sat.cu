@@ -34,6 +34,12 @@ static constexpr int8_t SAT_VAL_TRUE = 1;
 // Solver status codes.
 static constexpr int32_t SAT_STATUS_UNSAT = 0;
 static constexpr int32_t SAT_STATUS_SAT = 1;
+// Conflict budget reached before the search terminated: the result is
+// INDETERMINATE (neither UNSAT nor SAT proven). Callers expecting a definite
+// answer (e.g. the equivalence verifier) must treat this as a fail-closed
+// decline, never as a proof either way. Bounds wall-clock so a treewidth-hard
+// instance returns gracefully instead of running to a CUDA launch timeout.
+static constexpr int32_t SAT_STATUS_BUDGET_EXHAUSTED = 2;
 static constexpr int32_t SAT_STATUS_ERROR = -1;
 
 // Reason encoding.
@@ -1092,6 +1098,7 @@ extern "C" __global__ void sat_cdcl_solve(
     uint32_t max_proof_u32,
     uint32_t restart_base,        // e.g. 100
     uint32_t reduce_interval,     // e.g. 2000
+    uint32_t max_conflicts,       // 0 = unlimited; else bail INDETERMINATE at this many conflicts
     const uint32_t* __restrict__ learned_import_count, // len = 1
     // Variable state
     int8_t* __restrict__ assign,      // len = num_vars+1
@@ -1673,6 +1680,17 @@ extern "C" __global__ void sat_cdcl_solve(
             if (confl >= 0) {
                 // Conflict.
                 conflicts++;
+                // Conflict budget: bail INDETERMINATE before the next decision
+                // when we've spent the budget without terminating. Guarded by
+                // decision_level != 0 so a terminal level-0 UNSAT proof (this
+                // very conflict) always wins over the budget.
+                if (max_conflicts != 0u && conflicts >= max_conflicts && decision_level != 0) {
+                    sh_done = 1u;
+                    sh_final_status = SAT_STATUS_BUDGET_EXHAUSTED;
+                    sh_final_error = SAT_ERR_OK;
+                    sh_final_learned_count = learned_count;
+                    goto iter_done;
+                }
                 if (decision_level == 0) {
                     // UNSAT. Emit an empty learned clause + resolution trace certificate.
                     uint32_t proof_steps = 0;

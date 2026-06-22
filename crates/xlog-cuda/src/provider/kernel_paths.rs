@@ -39,8 +39,17 @@ impl KernelArtifactLocator {
 
     /// Resolve a module to a staged cubin or portable PTX.
     pub fn resolve_module_path(&self, name: &str, cc: u32) -> Option<(PathBuf, bool)> {
+        self.resolve_module_paths(name, cc).into_iter().next()
+    }
+
+    /// Resolve all viable module artifacts in runtime precedence order.
+    ///
+    /// A matching cubin remains the first choice, but portable PTX is retained
+    /// as a fallback when a target driver rejects a cubin image.
+    pub fn resolve_module_paths(&self, name: &str, cc: u32) -> Vec<(PathBuf, bool)> {
         let cubin_name = format!("{name}.sm_{cc}.cubin");
         let ptx_name = format!("{name}.portable.ptx");
+        let mut found_paths = Vec::new();
 
         for dir in [
             self.cubin_dir.as_ref(),
@@ -53,14 +62,14 @@ impl KernelArtifactLocator {
             };
 
             if let Some(found) = Self::resolve_in_dir(dir, &cubin_name, true) {
-                return Some(found);
+                found_paths.push(found);
             }
             if let Some(found) = Self::resolve_in_dir(dir, &ptx_name, false) {
-                return Some(found);
+                found_paths.push(found);
             }
         }
 
-        None
+        found_paths
     }
 
     fn resolve_in_dir(dir: &Path, file_name: &str, is_cubin: bool) -> Option<(PathBuf, bool)> {

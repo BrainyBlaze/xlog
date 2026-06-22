@@ -8,6 +8,7 @@ name: ci
 on:
   pull_request:
   push:
+    branches: [main]
 
 permissions:
   contents: read
@@ -213,4 +214,4 @@ jobs:
         run: python3 -m pip install --upgrade pip maturin
 
       - name: Build pyxlog wheel without GPU execution
-        run: maturin build -m crates/pyxlog/Cargo.toml --release --compatibility pypi --out dist
+        run: maturin build -m crates/pyxlog/Cargo.toml --release --compatibility manylinux_2_34 --out dist

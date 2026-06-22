@@ -1,13 +1,13 @@
 // crates/xlog-cuda/tests/test_wcoj_layout_fast_path.rs
-//! v0.6.2 — WCOJ layout fast-path correctness tests.
+//! WCOJ layout fast-path correctness tests.
 //!
 //! `wcoj_layout_u32_recorded` / `wcoj_layout_u64_recorded` gain
 //! a proof-based pre-check: if the input is already lex-sorted
 //! and full-row unique, skip `dedup_full_row_recorded` (sort +
 //! mark-unique + compact) and emit a recorded device-side
-//! clone. Phase report at v0.6.2 showed layout to be 91-97%
-//! of WCOJ adaptive dispatch wall time on the bench's host-
-//! deduped fixtures; this slice targets that overhead.
+//! clone. Phase-timing evidence showed layout to be 91-97%
+//! of WCOJ adaptive dispatch wall time on host-deduped
+//! fixtures; these tests target that overhead.
 //!
 //! No caching, no buffer fingerprint — purely proof-based per
 //! invocation. Failures fall through silently to the existing
@@ -222,6 +222,14 @@ fn download_pairs_u64(buf: &CudaBuffer) -> Vec<(u64, u64)> {
         .collect()
 }
 
+fn sync_stream(fix: &Fix, stream: xlog_cuda::device_runtime::StreamId) {
+    fix.pool
+        .resolve(stream)
+        .expect("resolve stream")
+        .synchronize()
+        .expect("sync stream");
+}
+
 // =================================================================
 // Fast-path hits — already sorted+unique input
 // =================================================================
@@ -240,6 +248,7 @@ fn fast_path_u32_sorted_unique_increments_counter() {
         .provider
         .wcoj_layout_u32_recorded(&buf, stream)
         .expect("layout u32");
+    sync_stream(&fix, stream);
     assert_eq!(
         fix.provider.wcoj_layout_fast_path_hit_count(),
         1,
@@ -265,6 +274,7 @@ fn fast_path_u64_sorted_unique_increments_counter() {
         .provider
         .wcoj_layout_u64_recorded(&buf, stream)
         .expect("layout u64");
+    sync_stream(&fix, stream);
     assert_eq!(
         fix.provider.wcoj_layout_fast_path_hit_count(),
         1,
@@ -296,6 +306,7 @@ fn fast_path_symbol_sorted_unique_increments_counter() {
         .provider
         .wcoj_layout_u32_recorded(&buf, stream)
         .expect("layout symbol");
+    sync_stream(&fix, stream);
     assert_eq!(
         fix.provider.wcoj_layout_fast_path_hit_count(),
         1,
@@ -320,6 +331,7 @@ fn fast_path_n1_input_hits() {
         .provider
         .wcoj_layout_u32_recorded(&buf, stream)
         .expect("layout n=1");
+    sync_stream(&fix, stream);
     assert_eq!(
         fix.provider.wcoj_layout_fast_path_hit_count(),
         1,
@@ -348,6 +360,7 @@ fn duplicate_input_falls_back() {
         .provider
         .wcoj_layout_u32_recorded(&buf, stream)
         .expect("layout dup");
+    sync_stream(&fix, stream);
     assert_eq!(
         fix.provider.wcoj_layout_fast_path_hit_count(),
         0,
@@ -373,6 +386,7 @@ fn unsorted_input_falls_back() {
         .provider
         .wcoj_layout_u32_recorded(&buf, stream)
         .expect("layout unsorted");
+    sync_stream(&fix, stream);
     assert_eq!(
         fix.provider.wcoj_layout_fast_path_hit_count(),
         0,
@@ -442,6 +456,7 @@ fn compacted_buffer_checks_only_logical_rows() {
         .provider
         .wcoj_layout_u32_recorded(&buf, stream)
         .expect("layout compacted");
+    sync_stream(&fix, stream);
     assert_eq!(
         fix.provider.wcoj_layout_fast_path_hit_count(),
         1,
@@ -454,7 +469,7 @@ fn compacted_buffer_checks_only_logical_rows() {
 
 // =================================================================
 // n==0 preserves existing empty-buffer semantics. NO fast-path
-// counter increment (the zero-row early-out predates this slice).
+// counter increment (the zero-row early-out predates this fast path).
 // =================================================================
 
 #[test]
@@ -470,6 +485,7 @@ fn empty_input_preserves_existing_semantics_no_counter() {
         .provider
         .wcoj_layout_u32_recorded(&buf, stream)
         .expect("layout empty");
+    sync_stream(&fix, stream);
     assert_eq!(
         fix.provider.wcoj_layout_fast_path_hit_count(),
         0,
@@ -497,6 +513,7 @@ fn fast_path_no_d2h_violations_under_strict_gate() {
     let result = fix.provider.wcoj_layout_u32_recorded(&buf, stream);
     fix.provider.disable_strict_deterministic_d2h();
     let _ = result.expect("layout under strict gate");
+    sync_stream(&fix, stream);
     let v = fix.provider.deterministic_d2h_violation_count();
     assert_eq!(
         v, 0,

@@ -1,10 +1,11 @@
-//! Approximate probabilistic inference via Monte Carlo sampling (P3).
+//! Approximate probabilistic inference via Monte Carlo sampling.
 //!
 //! This engine samples probabilistic facts / annotated disjunction decisions on the GPU and
 //! evaluates the deterministic core in each sampled world.
 //!
-//! For programs with non-monotone recursion (cycles through `not` and/or aggregates), Phase 4
-//! requires explicit P3 opt-in. The deterministic evaluation uses a bounded, cycle-aware semantics:
+//! For programs with non-monotone recursion (cycles through `not` and/or aggregates),
+//! Monte Carlo evaluation requires the user to opt into the approximate probabilistic
+//! engine. The deterministic evaluation uses a bounded, cycle-aware semantics:
 //!
 //! - If an SCC reaches a fixpoint under synchronous iteration, that fixpoint is used.
 //! - If the SCC enters a cycle, the interpretation is the intersection of all states in the cycle
@@ -111,7 +112,7 @@ impl McTimingBreakdown {
     }
 }
 
-/// Phase 4 semantics for non-monotone SCC evaluation inside MC sampling.
+/// Bounded semantics for non-monotone SCC evaluation inside MC sampling.
 pub const NONMONOTONE_SEMANTICS: &str = "Synchronous iteration per SCC; if a fixpoint is reached, use it; if a cycle is detected, use the intersection of all states in the cycle (skeptical tuples only); if the iteration budget is exceeded, use the intersection across all visited states (conservative).";
 
 #[derive(Debug, Clone)]
@@ -131,6 +132,12 @@ pub struct McEvalConfig {
     pub max_nonmonotone_iterations: usize,
     /// Sampling method override. `None` = auto-select (EvidenceClamping when forceable, Rejection otherwise).
     pub sampling_method: Option<McSamplingMethod>,
+    /// Allow the host CPU oracle ([`McProgram::evaluate_cpu`]) when the
+    /// resident GPU engine rejects the program. Default `false`: a rejected
+    /// program fails closed with the typed rejection instead of silently
+    /// running on the CPU. When set, the oracle result is labeled
+    /// [`McEngine::CpuOracle`] and must never serve as GPU-native evidence.
+    pub allow_cpu_oracle_fallback: bool,
 }
 
 impl Default for McEvalConfig {
@@ -141,6 +148,7 @@ impl Default for McEvalConfig {
             confidence: 0.95,
             max_nonmonotone_iterations: 1024,
             sampling_method: None,
+            allow_cpu_oracle_fallback: false,
         }
     }
 }
@@ -196,6 +204,27 @@ pub struct McQueryEstimate {
     pub ci_high: f64,
 }
 
+/// Which engine produced an [`McResult`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum McEngine {
+    /// GPU-resident megakernel engine — the production MC path.
+    GpuResident,
+    /// Host CPU oracle ([`McProgram::evaluate_cpu`]) — explicit opt-in only
+    /// (see [`McEvalConfig::allow_cpu_oracle_fallback`]); never valid as
+    /// GPU-native or zero-host evidence.
+    CpuOracle,
+}
+
+impl McEngine {
+    /// Stable string form for result metadata surfaces (CLI JSON, pyxlog).
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            McEngine::GpuResident => "gpu-resident",
+            McEngine::CpuOracle => "cpu-oracle",
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct McResult {
     pub total_samples: usize,
@@ -207,6 +236,10 @@ pub struct McResult {
     pub nonmonotone_cycles: usize,
     pub nonmonotone_iteration_limit_hits: usize,
     pub sampling_method: McSamplingMethod,
+    /// Engine that produced this result; CPU-oracle results are reachable
+    /// only through explicit opt-in and are labeled so downstream consumers
+    /// can never mistake them for GPU-resident evidence.
+    pub engine: McEngine,
 }
 
 /// **Legacy back-compat surface** — tracked (data-plane) host<->device transfer
@@ -254,6 +287,8 @@ pub struct McDeviceResult {
     /// engine's measured region (zero). The authoritative no-host contract is
     /// [`McNoHostStats`] on [`McResidentResult`]; see [`McHotLoopTransfers`].
     pub hot_loop_transfers: McHotLoopTransfers,
+    /// Authoritative no-host counters for the resident engine measured region.
+    pub no_host: McNoHostStats,
 }
 
 #[derive(Debug, Clone)]
@@ -354,11 +389,36 @@ impl McProgram {
     /// belongs to the resident engine, not to this convenience wrapper. Use
     /// [`Self::evaluate_gpu_device`] when you want device-resident counts with no
     /// host download at all.
+    ///
+    /// **Fail-closed contract:** if the resident engine rejects the program
+    /// (negation, aggregates, unbounded terms, ...), this returns the typed
+    /// rejection error. The CPU oracle is reachable only via the explicit
+    /// [`McEvalConfig::allow_cpu_oracle_fallback`] opt-in and its result is
+    /// labeled [`McEngine::CpuOracle`].
     #[cfg(feature = "host-io")]
     pub fn evaluate(&self, cfg: McEvalConfig) -> Result<McResult> {
         let provider = Arc::new(self.provider()?);
         let cfg_clone = cfg.clone();
-        let device_result = self.evaluate_gpu_device_with_provider(cfg_clone, provider.clone())?;
+        let device_result =
+            match self.evaluate_gpu_device_with_provider(cfg_clone, provider.clone()) {
+                Ok(result) => result,
+                Err(XlogError::Compilation(message))
+                    if message.starts_with("resident MC engine rejected program") =>
+                {
+                    // Fail closed by default: the CPU oracle is an explicit,
+                    // labeled opt-in (`allow_cpu_oracle_fallback`), never a
+                    // silent substitute for the resident GPU engine.
+                    if cfg.allow_cpu_oracle_fallback {
+                        return self.evaluate_cpu(cfg);
+                    }
+                    return Err(XlogError::Compilation(format!(
+                        "{message}; MC fail-closed: set \
+                         McEvalConfig::allow_cpu_oracle_fallback to explicitly \
+                         run the labeled CPU oracle instead"
+                    )));
+                }
+                Err(err) => return Err(err),
+            };
 
         let mut host_counts = vec![0u32; device_result.query_counts.len()];
         if !host_counts.is_empty() {
@@ -421,6 +481,7 @@ impl McProgram {
             query_estimates,
             nonmonotone_sccs: device_result.nonmonotone_sccs,
             nonmonotone_cycles: device_result.nonmonotone_cycles,
+            engine: McEngine::GpuResident,
             nonmonotone_iteration_limit_hits: device_result.nonmonotone_iteration_limit_hits,
             sampling_method: device_result.sampling_method,
         })
@@ -596,6 +657,7 @@ impl McProgram {
             nonmonotone_cycles: stats.nonmonotone_cycles,
             nonmonotone_iteration_limit_hits: stats.nonmonotone_iteration_limit_hits,
             sampling_method: method,
+            engine: McEngine::CpuOracle,
         })
     }
 
@@ -643,6 +705,7 @@ impl McProgram {
         // returns device-resident counts. Programs outside the supported bounded
         // fragment fail closed (typed `ResidentRejection`).
         let r = self.evaluate_resident_with_provider(cfg, provider)?;
+        let no_host = r.no_host;
         Ok(McDeviceResult {
             query_counts: r.query_counts,
             evidence_count: r.evidence_count,
@@ -660,11 +723,12 @@ impl McProgram {
             // engine's tracked transfers (zero). Richer no-host evidence (untracked
             // reads, fixpoint/alloc counts) lives in `McResidentResult::no_host`.
             hot_loop_transfers: McHotLoopTransfers {
-                htod_calls: r.no_host.tracked_htod_calls,
-                dtoh_calls: r.no_host.tracked_dtoh_calls,
+                htod_calls: no_host.tracked_htod_calls,
+                dtoh_calls: no_host.tracked_dtoh_calls,
                 htod_bytes: 0,
                 dtoh_bytes: 0,
             },
+            no_host,
         })
     }
 
