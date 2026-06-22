@@ -231,25 +231,15 @@ impl EpistemicInterpretation {
             .map(|key| (key.predicate().to_string(), key.arity()))
     }
 
-    /// Whether `atom` is classified KNOWN (true in every accepted world, ∀-worlds).
-    /// Public so downstream consumers (e.g. the ST-TRC (A) road-not-taken source)
-    /// can read per-atom epistemic status, not just evaluate epistemic literals.
-    pub fn contains_known(&self, atom: &Atom) -> bool {
+    fn contains_known(&self, atom: &Atom) -> bool {
         self.known.iter().any(|key| key.matches_atom(atom))
     }
 
-    /// Whether `atom` is classified POSSIBLE (true in some accepted world, ∃-world)
-    /// — a live, not-yet-ruled-out hypothesis (discriminator class (i)).
-    pub fn contains_possible(&self, atom: &Atom) -> bool {
+    fn contains_possible(&self, atom: &Atom) -> bool {
         self.possible.iter().any(|key| key.matches_atom(atom))
     }
 
-    /// Whether `atom` is classified REJECTED — the logic actively ruled it out
-    /// (discriminator class (ii)). This is the atom-level rejection filter the
-    /// (A) road-not-taken derivation must apply to exclude (ii)-circular atoms:
-    /// world-view-level rejection is NOT the same as atom-level rejection, so a
-    /// possible-not-known atom must additionally be checked against this set.
-    pub fn contains_rejected(&self, atom: &Atom) -> bool {
+    fn contains_rejected(&self, atom: &Atom) -> bool {
         self.rejected.iter().any(|key| key.matches_atom(atom))
     }
 
