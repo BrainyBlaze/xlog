@@ -1,65 +1,67 @@
-\section{Probabilistic Inference on GPU}\label{sec:prob}
+\section{Verified Knowledge Compilation}\label{sec:prob}
 
-\subsection{Approach}
+Knowledge compilation is the bridge that makes a neural network and a logic program differentiable end-to-end. A network's softmax becomes a distribution over weighted facts; provenance tracking over the program yields a weighted Boolean formula; and that formula compiles into an arithmetic circuit whose forward pass is exact weighted model counting (the query probability) and whose backward pass yields exact gradients with respect to the weights---hence with respect to the network outputs. Probabilistic systems such as ProbLog~\cite{problog2} follow this compile-once/evaluate-many model on the CPU, so a neural pairing like DeepProbLog~\cite{deepproblog} ping-pongs circuit values and gradients across the PCIe bus every iteration. xlog runs the entire pipeline on the GPU---and, crucially, \emph{proves the compiled circuit correct on-device}, so the bridge is sound rather than assumed.
 
-Probabilistic logic programming systems such as ProbLog~\cite{problog2} compute the probability of queries over programs containing probabilistic facts. The standard technique is knowledge compilation: compile the ground Boolean formula derived from provenance tracking into a tractable circuit (typically a Decision-DNNF), then evaluate weighted model counts over that circuit. ProbLog follows a compile-once/evaluate-many model: the circuit structure is determined by the logical program and is independent of the probability weights, so a single compilation can serve many weight configurations during parameter learning.
+\subsection{The Compilation Pipeline}
 
-xlog adopts the same compile-once/evaluate-many model but moves the entire pipeline onto the GPU. In ProbLog, provenance extraction, CNF encoding, D4 compilation, and circuit evaluation all execute on the CPU. When ProbLog is paired with a neural component (as in DeepProbLog~\cite{deepproblog}), each training iteration requires transferring circuit evaluation results from CPU to GPU for gradient computation, and pulling gradients back for weight updates. xlog eliminates this architectural split: PIR extraction, Tseitin~\cite{tseitin} CNF encoding, D4~\cite{d4compiler} compilation, CDCL equivalence verification, and forward/backward circuit evaluation all execute as CUDA kernels on the GPU. The compiled circuit is a GPU-resident data structure (XGCF), weight buffers and gradient buffers are GPU-resident, and no host--device transfers occur in the evaluation hot path. This design turns what would be a PCIe-bottlenecked ping-pong between CPU logic engine and GPU tensor framework into a single-device pipeline.
+The pipeline transforms a probabilistic program into a GPU-resident arithmetic circuit (the XGCF format) through five stages (\Cref{fig:kc}); each is one or more CUDA kernel launches, with all intermediate state device-resident.
 
-\subsection{GPU Knowledge Compilation Pipeline}
-
-The probabilistic compilation pipeline transforms a Datalog program with probabilistic annotations into a GPU-resident arithmetic circuit through five stages (\Cref{fig:kc}). Each stage is implemented as one or more CUDA kernel launches, with intermediate data structures remaining in device memory throughout.
-
-\begin{figure}[htbp]
+\begin{figure*}[tbp]
   \centering
-  \includegraphics[width=\linewidth]{kc_pipeline.pdf}
-  \caption{Knowledge compilation pipeline. All five stages execute as CUDA kernels on GPU-resident data; no host--device transfers occur between stages.}
+  \resizebox{0.86\linewidth}{!}{%
+  \begin{tikzpicture}[node distance=6mm]
+    \node[fproc] (prov) {provenance\\formula $\varphi$};
+    \node[fproc,right=of prov] (cnf) {CNF\\(Tseitin)};
+    \node[fproc,right=of cnf] (d4) {d-DNNF\\(D4)};
+    \node[fproc,right=of d4] (xgcf) {XGCF\\circuit $C$};
+    \node[fnode,right=of xgcf] (eval) {forward $\log Z$\\backward gradients};
+    \draw[farrow] (prov)--(cnf); \draw[farrow] (cnf)--(d4);
+    \draw[farrow] (d4)--(xgcf); \draw[farrow] (xgcf)--(eval);
+    \node[fcert,below=11mm of $(cnf)!0.5!(d4)$,text width=66mm] (cdcl)
+      {on-GPU CDCL certificate:\\$\varphi\!\land\!\lnot C$ and $C\!\land\!\lnot\varphi$ both UNSAT $\Rightarrow C\equiv\varphi$ (else device trap)};
+    \draw[fgrad] (prov.south) node[flabel,below right=0pt and 1pt]{$\varphi$} |- (cdcl.west);
+    \draw[fgrad] (xgcf.south) node[flabel,below left=0pt and 1pt]{$C$} |- (cdcl.east);
+  \end{tikzpicture}}
+  \caption{Verified knowledge-compilation pipeline. All stages execute as CUDA kernels on device-resident data; before the circuit is used, an on-GPU CDCL solver proves it equivalent to its source formula.}
   \label{fig:kc}
-\end{figure}
+\end{figure*}
 
-The five stages map to the kernel files \texttt{pir.cu}, \texttt{cnf.cu}, \texttt{d4.cu}, \texttt{sat.cu}, and \texttt{circuit.cu}.
+\textbf{Provenance extraction.} Provenance over deterministic evaluation produces a weighted Boolean formula. An on-device interner hash-conses node batches through an atomic GPU hash table, deduplicating structurally identical subformulas; this is essential because grounding can produce exponentially many redundant subformulas, and interning on the host would force the uninterned graph into host memory---reintroducing the very transfer the pipeline exists to avoid.
 
-\textbf{Stage 1: PIR extraction.} Provenance tracking over deterministic evaluation produces a weighted Boolean formula. The interner hash-conses node batches on the GPU, deduplicating structurally identical subformulas through an atomic GPU hash table. This on-device deduplication is essential: grounding can produce exponentially many redundant subformulas, and interning on the host would force the full uninterned graph into host memory---reintroducing the very transfer the pipeline exists to avoid.
+\textbf{CNF encoding.} A Tseitin~\cite{tseitin} transformation lowers the formula to CNF on the GPU, using parallel prefix sums to assign compact, gap-free variable IDs and emit clauses into a device-resident compressed-sparse-row structure.
 
-\textbf{Stage 2: CNF encoding.} A Tseitin transformation lowers the formula to CNF entirely on GPU, using parallel prefix sums to assign compact, gap-free variable IDs and emit clauses into a device-resident compressed-sparse-row structure.
+\textbf{D4 compilation.} The CNF compiles into a Decision-DNNF circuit via a GPU-native variant of the D4 algorithm~\cite{d4compiler}: a BFS frontier exposes parallelism, per-block DFS workers perform component detection, decision-variable selection by VSIDS-like activity~\cite{grasp}, and recursive decomposition. A smoothing pass forces every branch of an OR/decision node to mention the same variable set (required for correct weighted model counting), and the result is levelized so each topological level evaluates in one kernel launch.
 
-\textbf{Stage 3: D4 compilation.} The most complex stage compiles the CNF into a Decision-DNNF circuit (the XGCF format) via a GPU-native variant of the D4 algorithm~\cite{d4compiler}. A BFS frontier exposes parallelism, then per-block DFS workers perform component detection, decision-variable selection via VSIDS-like activity scores~\cite{grasp}, and recursive decomposition. A smoothing pass forces every branch of an OR/Decision node to mention the same variable set---required for correct weighted model counting---and the result is levelized so each topological level evaluates in one kernel launch.
+\textbf{Verification and evaluation} are described next.
 
-\textbf{Stage 4: CDCL verification.} Rather than trust the compiler, xlog proves the compiled circuit $C$ is equivalent to the source formula $\varphi$: it solves $\varphi \land \lnot C$ and $C \land \lnot \varphi$ on a GPU CDCL solver, both of which must be unsatisfiable. This is a complete formal proof, not a sampling check. UNSAT results carry a resolution proof checked on-device, and the solver never reads its status back to the host---a wrong answer triggers a device-side trap. Circuit correctness thus becomes a machine-checked certificate rather than an assumption, which matters because a silently miscompiled circuit would corrupt every downstream probability and gradient.
+\subsection{Verification: a Machine-Checked Certificate}
 
-\textbf{Stage 5: circuit evaluation.} The verified XGCF supports a level-parallel forward pass (log-space weighted model counting, one kernel per level, yielding $\log Z$) and a reverse-order backward pass that accumulates per-variable gradients. Both leave their results in GPU-resident buffers consumable directly by PyTorch via DLPack (\Cref{sec:nesy}).
+Rather than trust the compiler, xlog proves the compiled circuit $C$ equivalent to its source formula $\varphi$ (\Cref{alg:verifiedkc}). It solves $\varphi \land \lnot C$ and $C \land \lnot \varphi$ on a GPU CDCL solver; both must be unsatisfiable for $C \equiv \varphi$. This is a complete formal proof, not a sampling check: UNSAT results carry a resolution proof checked on-device, and the solver never reads its status back to the host---a wrong answer triggers a device-side trap rather than silently propagating. Circuit correctness thus becomes a machine-checked certificate, which matters because a silently miscompiled circuit would corrupt every downstream probability and gradient, and hence every parameter update. The same device-resident CDCL substrate is reused for SAT/MaxSAT queries and for epistemic candidate validation (\Cref{sec:epistemic}).
+
+\begin{algorithm}[htbp]
+\caption{GPU-native verified knowledge compilation. The circuit is accepted only if proven equivalent to its source formula on-device.}
+\label{alg:verifiedkc}
+\begin{algorithmic}[1]
+\Require weighted Boolean formula $\varphi$ from provenance (device-resident)
+\Ensure verified arithmetic circuit $C$ (XGCF), or a device-side trap
+\State $\varphi \gets \textsc{InternHashCons}(\varphi)$ \Comment{dedup subformulas via atomic GPU hash table}
+\State $\Phi \gets \textsc{TseitinCNF}(\varphi)$ \Comment{prefix-sum variable IDs; CSR clauses}
+\State $C \gets \textsc{D4}(\Phi)$ \Comment{BFS frontier + per-block DFS; VSIDS decisions; smooth; levelize}
+\State $u_1 \gets \textsc{CDCL}(\varphi \land \lnot C)$;\quad $u_2 \gets \textsc{CDCL}(C \land \lnot \varphi)$
+\If{$u_1 \neq \textsc{Unsat}$ \textbf{or} $u_2 \neq \textsc{Unsat}$}
+  \State device-side trap \Comment{miscompilation never reaches host or downstream}
+\EndIf
+\State check resolution proofs of $u_1, u_2$ on-device
+\State \Return $C$ \Comment{certificate: $C \equiv \varphi$, machine-checked}
+\end{algorithmic}
+\end{algorithm}
+
+The verified circuit supports a level-parallel forward pass (log-space weighted model counting, one kernel per level, yielding $\log Z$) and a reverse-order backward pass that accumulates per-variable gradients. Both leave their results in GPU-resident buffers consumable directly by PyTorch via DLPack (\Cref{sec:nesy}).
 
 \subsection{Circuit Caching}
 
-D4 compilation is the most expensive stage in the pipeline. On the MNIST addition benchmark (\texttt{01\_minimal}, 512 training examples), a cold-start compilation takes approximately 75 seconds. Since this cost is incurred at the beginning of each training epoch in a naive implementation, it can dominate total training time.
+D4 compilation is the most expensive stage---on the order of a minute for a cold start on the MNIST-addition benchmark---and a naive implementation pays it every epoch. The key observation is that the circuit \emph{structure} depends on the propositional structure of the grounded program and the evidence pattern, but \emph{not} on the numerical weights. When neural parameters change between iterations, the weights on probabilistic facts change while the Boolean formula and its compiled circuit stay identical. The compiled circuit is therefore cached, keyed by a structural hash of the provenance graph and evidence configuration; subsequent iterations update only the weight buffers and run the forward/backward kernels. On MNIST addition this amortization yields a $2.74\times$ end-to-end training speedup (\Cref{sec:eval}).
 
-The key insight enabling circuit caching is that the XGCF circuit structure depends on the logic program---specifically, on the propositional structure of the grounded rules and the evidence pattern---but not on the numerical values of the probability weights. When neural network parameters change between training iterations, the weights assigned to probabilistic facts change, but the Boolean formula and its compiled Decision-DNNF structure remain identical. This means the compiled XGCF can be cached and reused across all training iterations, with only the weight buffers updated before each forward pass.
+\subsection{Monte Carlo Fallback}
 
-The \texttt{GpuCircuitCache} in \texttt{crates/xlog-prob/src/compilation/gpu\_cache.rs} implements this caching. On the first evaluation, the full pipeline runs (PIR extraction, CNF encoding, D4 compilation, CDCL verification), and the resulting \texttt{GpuXgcf} is stored in the cache keyed by a structural hash of the PIR graph and evidence configuration. On subsequent evaluations, the cache returns the existing circuit, and only the weight-upload and forward/backward passes execute. The cache also stores the CNF variable tables (\texttt{GpuCnfVarTables}) needed to map between PIR leaf IDs and CNF variable IDs for weight construction.
-
-Measured impact: on the MNIST addition benchmark (3 epochs, 512 training examples, 3 seeds), cache-enabled training completes in a mean of $88.89$ seconds (std: $3.48$\,s), compared to $242.90$ seconds (std: $8.19$\,s) with caching disabled. This yields a $2.74\times$ end-to-end speedup (95\% CI: $[2.29, 3.18]$). The speedup is large because D4 compilation cost is amortized across all epochs: in the latest checked-in post-fix rerun on \texttt{main}, the first epoch averages $71.654$\,s while warm epochs average $0.248$\,s once the cached circuit and batched evaluation path are active (\Cref{sec:eval}).
-
-\subsection{Monte Carlo Sampling}
-
-For programs where exact inference via knowledge compilation is infeasible---either because the ground formula is too large for D4 compilation within the available GPU memory, or because the user prefers approximate results with bounded computation---xlog provides a GPU-parallel Monte Carlo sampling engine implemented in \texttt{crates/xlog-prob/src/mc/}.
-
-The MC engine supports two sampling methods, selectable via \texttt{McSamplingMethod}:
-
-\begin{itemize}
-  \item \textbf{Rejection sampling.} The sampler draws values for all probabilistic facts from their prior distributions on the GPU, then evaluates the deterministic Datalog program in each sampled world. Worlds where the evidence is not satisfied are discarded. Query probabilities are estimated as the fraction of accepted worlds in which each query atom is derived. This method is unbiased but can be inefficient when the evidence has low prior probability, as most samples are rejected.
-  \item \textbf{Evidence clamping.} When all evidence atoms correspond to Bernoulli probabilistic facts, the sampler can force those facts to their observed values, guaranteeing that every sample satisfies the evidence. This eliminates rejection waste entirely: the \texttt{McCountStrategy} switches to \texttt{QueriesOnly} mode, skipping evidence-side buffer allocations and truth-kernel evidence checks. Evidence clamping is auto-selected when the \texttt{EvidenceForcing} analysis determines that all evidence is forceable (i.e., each evidence atom maps to a single probabilistic fact with no intermediate rules).
-\end{itemize}
-
-Both methods report confidence intervals for estimated probabilities. The sampling loop is structured to minimize per-sample overhead: probabilistic fact values are sampled in bulk on the GPU via the \texttt{sampling} submodule, the relation store is reset using a targeted \texttt{McSampleResetPlan} that preserves pure deterministic relations and clears only dynamic relations (avoiding a full store clone per sample), and per-sample pointer buffers are pre-allocated outside the sample loop. The current repository contains these hot-loop optimizations in code, but does not ship a standalone archived MC timing report with stable phase-by-phase numbers, so this paper limits itself to the implementation strategy rather than quoting unsupported per-benchmark deltas.
-
-\subsection{Probabilistic Aggregates}
-
-v0.8.5 extends probabilistic inference with finite aggregate queries. Aggregate heads and outputs over \texttt{count}, \texttt{sum}, \texttt{min}, \texttt{max}, and \texttt{logsumexp} are evaluated in both exact provenance/PIR inference and Monte Carlo deterministic aggregate execution, subject to a typed exact-domain cap that rejects domains too large for tractable enumeration (with a diagnostic recommending MC or a smaller finite domain). For small finite \texttt{count} domains, \emph{aggregate lifting} replaces naive world enumeration with exact cardinality dynamic programming over a compact state set---collapsing, for example, a $2^{17}$-outcome enumeration into roughly $170$ lifted states with identical results. Accepted fired \texttt{count} aggregate queries dispatch a GPU-native exact evaluator (\texttt{weights\_count\_lift\_exact}) rather than a CPU finite-world shortcut, keeping the exact aggregate path device-resident; explain metadata records which aggregate operators fired versus fell back to exact enumeration.
-
-\subsection{Well-Founded Semantics}
-
-Standard stratified negation requires that no recursive cycle passes through a negated literal. Programs that violate this constraint---such as the classic \texttt{p :- not q.\ q :- not p.}---have no two-valued stable model and are rejected by most Datalog engines. xlog handles such non-monotone programs via Well-Founded Semantics (WFS), implemented in \texttt{crates/xlog-prob/src/wfs.rs}.
-
-WFS assigns three-valued truth to atoms: true, false, or undefined. The algorithm computes an alternating fixed point: (1) find the greatest unfounded set (atoms that cannot be supported by any rule), mark them false; (2) derive all consequences of the current knowledge, mark them true; (3) repeat until stable. Atoms that remain neither true nor false are classified as undefined. For probabilistic programs, true atoms receive normal probability and gradient computation, while false and undefined atoms are assigned probability zero with zero gradients---matching ProbLog's conservative treatment of non-stratified programs.
-
-WFS is invoked automatically during provenance extraction when a non-monotone SCC is detected. The Monte Carlo engine, by contrast, is the GPU-resident Datalog megakernel (\texttt{crates/xlog-prob/src/mc/resident.rs}): it evaluates every sampled world in a single device launch with a device-side bounded fixpoint and supports only \emph{bounded-domain positive} Datalog (arity $\leq 2$, body $\leq 2$). Non-monotone and otherwise unsupported fragments are \emph{rejected fail-closed} before execution with a typed diagnostic (there is no host-orchestrated fallback); such programs must use the exact / WFS path. A representative supported MC program is \texttt{examples/prob/04-recursive-mc.xlog}, a recursive transitive closure (\texttt{reach(X,Z) :- reach(X,Y), edge(Y,Z).}) whose non-base tuple \texttt{reach(1,3)} is derived by a multi-iteration device-side fixpoint.
+When exact compilation is infeasible---the ground formula is too large for D4 within the GPU memory budget, or the user accepts approximate results---xlog provides a GPU-parallel Monte Carlo engine. It draws values for all probabilistic facts on the GPU and evaluates the deterministic program in each sampled world, using rejection sampling or, when every evidence atom is a Bernoulli fact, evidence clamping that forces observed values and eliminates rejection waste. Both methods report confidence intervals. The sampler is a GPU-resident megakernel that evaluates each world in a single device launch with a bounded device-side fixpoint; unsupported fragments are rejected fail-closed with a typed diagnostic rather than silently falling back to the host.

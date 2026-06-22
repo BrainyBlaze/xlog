@@ -1,64 +1,56 @@
-\section{Architecture}\label{sec:arch}
+\section{Integration Model and Architecture}\label{sec:arch}
 
-\subsection{System Overview}
+\subsection{The Integration Model}
 
-xlog's current workspace contains 15 Rust crates organized around a five-tier product/runtime hierarchy. \Cref{fig:arch} summarizes the primary dependency spine and certification surface; two support crates discussed below (\texttt{xlog-induce} and \texttt{xlog-integration}) are omitted from the diagram for readability. The architecture still enforces strict layering: no crate depends on a crate in its own tier or a higher tier.
-
-\begin{figure}[htbp]
-  \centering
-  \includegraphics[width=0.95\linewidth]{architecture.pdf}
-  \caption{xlog crate hierarchy. Tier 0 is the leaf foundation; each higher tier depends only on strictly lower tiers.}
-  \label{fig:arch}
-\end{figure}
-
-\textbf{Tier 0} contains \texttt{xlog-core}, the leaf crate that defines shared scalar types (\texttt{ScalarType}, \texttt{Schema}, \texttt{AggOp}), the \texttt{KernelProvider} trait, error types, memory budgets, runtime configuration, and a bidirectional \texttt{SymbolTable} for dictionary-encoded strings. Every other crate in the workspace depends on \texttt{xlog-core}.
-
-\textbf{Tier 1} provides domain-specific intermediate representations and service providers that depend only on \texttt{xlog-core}. \texttt{xlog-ir} defines the relational IR node tree (\texttt{RirNode}), expression algebra, and \texttt{ExecutionPlan} structures. \texttt{xlog-cuda} wraps CUDA device management via cudarc~\cite{cudarc}, stages CUDA kernel modules (cubin-first with portable PTX fallback), implements the \texttt{CudaKernelProvider} with modular submodules (relational, filter, group-by, arithmetic, I/O, ILP, probabilistic, transfer, kernel loading), and exposes Arrow IPC/C Data and DLPack interoperability. \texttt{xlog-stats} provides \texttt{StatsManager} for compiler feedback and runtime tracking. \texttt{xlog-neural} defines the \texttt{NetworkRegistry}, \texttt{NetworkHandle}, \texttt{TensorSourceRegistry}, \texttt{NeuralBridge}, and \texttt{BatchCollector} types for neural-symbolic integration, with an optional PyO3~\cite{pyo3} feature gate for Python interop.
-
-\textbf{Tier 2} implements the three core subsystems. \texttt{xlog-logic} implements the xlog language frontend (see \Cref{sec:lang}): PEG parser (pest), SCC-based stratifier, AST-to-RIR lowerer, and cost-aware optimizer. An internal rule-rewriting pass normalizes repeated patterns before stratification, invisible to user programs. xlog programs may also carry \texttt{\#pragma} directives (e.g., \texttt{prob\_engine}, \texttt{prob\_cache}, \texttt{max\_recursion\_depth}) that influence compiler behavior; pragmas parse into dedicated AST nodes consumed by the compiler before lowering. Its production dependencies are \texttt{xlog-core}, \texttt{xlog-ir}, and \texttt{xlog-stats}. \texttt{xlog-runtime} provides the \texttt{Executor} (modular across delta computation, expression evaluation, join caching, node dispatch, recursive evaluation, and rewriting), versioned \texttt{RelationStore}, profiling, and query statistics. It depends on \texttt{xlog-core}, \texttt{xlog-ir}, \texttt{xlog-cuda}, and \texttt{xlog-stats}. \texttt{xlog-solve} implements GPU CDCL verification (complete SAT/UNSAT with on-GPU model and proof validation) and continuous local search for SAT/MaxSAT. It depends on \texttt{xlog-core} and \texttt{xlog-cuda}.
-
-\textbf{Tier 3} composes Tier 2 subsystems into integrated reasoning pipelines. \texttt{xlog-gpu} provides a high-level deterministic execution API with input/output buffer management; it depends on \texttt{xlog-core}, \texttt{xlog-cuda}, \texttt{xlog-ir}, \texttt{xlog-logic}, and \texttt{xlog-runtime}. \texttt{xlog-prob} implements the full probabilistic tier---provenance tracking, PIR-to-CNF encoding, GPU-native D4 compilation, XGCF circuit construction, exact inference, Monte Carlo sampling, and circuit caching---depending on \texttt{xlog-core}, \texttt{xlog-cuda}, \texttt{xlog-ir}, \texttt{xlog-logic}, \texttt{xlog-runtime}, and \texttt{xlog-solve}. \texttt{xlog-induce} is a support subsystem for bounded exact induction on top of the runtime/CUDA stack; it depends on \texttt{xlog-core}, \texttt{xlog-cuda}, and \texttt{xlog-runtime}, and is consumed by the Python ILP surface.
-
-\textbf{Tier 4} presents user-facing interfaces. \texttt{pyxlog} is a PyO3 extension module that bridges nine internal crates (\texttt{xlog-core}, \texttt{xlog-cuda}, \texttt{xlog-gpu}, \texttt{xlog-prob}, \texttt{xlog-logic}, \texttt{xlog-neural}, \texttt{xlog-runtime}, \texttt{xlog-ir}, \texttt{xlog-induce}) to Python, exposing DLPack-first evaluation, training APIs, and ILP/dILP trainers. \texttt{xlog-cli} is the published Cargo package that provides the \texttt{xlog} command-line binary for deterministic and probabilistic execution with Arrow IPC I/O.
-
-Outside the product/runtime stack, \texttt{xlog-cuda-tests} is an unpublished certification suite for GPU release gating, and \texttt{xlog-integration} hosts workspace-only cross-crate executor tests and integration binaries.
-
-\subsection{Compilation Pipeline}
-
-The compilation pipeline transforms Datalog source text into a GPU-executable plan through five stages: parsing, stratification, lowering, optimization, and plan assembly.
-
-\textbf{Parsing.} The PEG parser (built with pest) produces an abstract syntax tree of \texttt{Program}, \texttt{Rule}, \texttt{Atom}, \texttt{Term}, and \texttt{BodyLiteral} nodes. It handles the full xlog language surface (\Cref{sec:lang}), including probabilistic facts, annotated disjunctions, neural predicate declarations, user-defined functions, and module imports.
-
-\textbf{Stratification.} The stratifier builds a predicate dependency graph with three edge types---positive, negative, and aggregate---then computes strongly connected components (SCCs) using Tarjan's algorithm. If any SCC contains a negative or aggregate edge, the program is rejected with a diagnostic error: stratified negation and stratified aggregation require that no recursion passes through negation or aggregation. The output is an ordered sequence of strata, each containing one or more SCCs that can be evaluated before any stratum that depends on them.
-
-\textbf{Lowering.} The lowerer translates each AST rule into a \texttt{RirNode} tree. Body literals become \texttt{Scan} nodes; variable bindings across atoms produce \texttt{Join} nodes with key columns derived from shared variable positions; negated literals become \texttt{Anti} joins; filters and arithmetic constraints become \texttt{Filter} nodes with \texttt{Expr} predicates (supporting comparison, Boolean connectives, arithmetic, built-in functions, and conditional expressions). The lowerer also emits \texttt{Fixpoint} nodes that wrap recursive SCC bodies for semi-naive iteration, and \texttt{GroupBy} nodes for stratified aggregation.
-
-\textbf{Optimization.} The optimizer applies cost-aware transformations driven by runtime statistics: predicate pushdown and cost-based join ordering, plus promotion of eligible multiway rules to the worst-case-optimal join (WCOJ) subsystem and magic-set rewriting of bound recursive queries. \Cref{sec:datalog} details the cost model and the v0.8.6 runtime optimizations (common-subexpression elimination, adaptive re-optimization).
-
-\textbf{Plan assembly.} The final output is an \texttt{ExecutionPlan} holding SCCs in dependency order, strata for negation ordering, and compiled rule trees grouped by SCC. The runtime executor interprets it by dispatching each \texttt{RirNode} to the appropriate CUDA kernel.
+In xlog a neural network \emph{is} a predicate. A declaration binds a network to a predicate symbol; evaluating that predicate runs a forward pass, and the network's softmax over a label set becomes a distribution over weighted facts. Those facts enter whichever reasoning mode the program uses---deterministic joins, probabilistic knowledge compilation, or epistemic world-view search---through the same relational interface, and the gradient of a query's value with respect to the network outputs flows back across the same boundary. The integration is \emph{uniform} (one mechanism, independent of backend) and \emph{transfer-free} (the facts, the compiled circuit, and the gradients never leave the GPU). The rest of this section describes the substrate that makes both properties hold: a strict GPU-residency contract, a layered crate architecture, a compilation pipeline, and an extensible IR stack.
 
 \subsection{GPU Residency Model}
 
-xlog enforces a hard guarantee: all runtime semantic state resides in GPU device memory, or the system returns a deterministic error. There is no silent out-of-core spilling, and there is no implicit CPU fallback. If a workload exceeds the GPU memory budget, xlog raises a \texttt{RESOURCE\_EXHAUSTED} error with diagnostic information rather than degrading to host memory transparently.
+xlog enforces a hard guarantee: all runtime semantic state resides in GPU device memory, or the system returns a deterministic error. There is no silent out-of-core spilling and no implicit CPU fallback; a workload that exceeds the memory budget raises \texttt{RESOURCE\_EXHAUSTED} with diagnostics rather than degrading transparently. The contract extends to production query paths, which target zero device-to-host (D2H) transfers: the kernel provider accounts for transfers at byte granularity through atomic counters, so a performance-critical section can be bracketed and asserted to download nothing---the check the training path relies on to prove its gradient path stays on-device.
 
-The residency contract extends to production query paths, where the system targets zero device-to-host (D2H) transfers. The kernel provider accounts for transfers at byte granularity through atomic counters, so a performance-critical section can be bracketed and asserted to perform no column downloads---a check the ILP trainer relies on to prove its credit path stays on-device.
+The payoff is bandwidth asymmetry. PCIe~4.0 $\times16$ delivers roughly 32\,GB/s, while GPU HBM provides 1--3\,TB/s. A single unnecessary D2H round-trip for a moderate relation (10M tuples at 16 bytes, ${\approx}160$\,MB) costs about 5\,ms---enough to dominate a semi-naive iteration that completes in microseconds on-device. Keeping fact stores, deltas, circuit values, solver state, and gradient buffers exclusively on the GPU eliminates this class of bottleneck; host involvement is restricted to orchestration, I/O, and compilation.
 
-The payoff is bandwidth asymmetry. PCIe~4.0 $\times 16$ delivers roughly 32\,GB/s peak bidirectional bandwidth, while GPU HBM provides 1--3\,TB/s. A single unnecessary D2H round-trip for a moderate relation (10M tuples at 16 bytes, roughly 160\,MB) costs about 5\,ms of bus latency---enough to dominate a semi-naive iteration that completes in microseconds on-device. Keeping fact stores, delta relations, circuit values, solver state, and gradient buffers exclusively on the GPU eliminates this class of bottleneck; host involvement is restricted to orchestration, I/O, and compilation.
+\subsection{Crate Architecture}
 
-This accounting is enforced, not advisory: since v0.5.5 a strict D2H guard rejects unexpected data-plane transfers in deterministic evaluation, with a single carve-out for binary-join output counts treated as control-plane metadata. Underneath, a stream-safe device runtime and a \texttt{LaunchRecorder} preflight/commit discipline (v0.6.0) keep the recorded paths correct under cross-stream concurrency; later releases build the WCOJ subsystem and the v0.8.6 runtime-optimization layer on the same provider stack (\Cref{sec:datalog}). Details: \texttt{docs/architecture/device-runtime.md} and \texttt{recorded-launch-migration.md}.
+\begin{figure*}[tbp]
+  \centering
+  \begin{tikzpicture}[node distance=2.6mm]
+    \node[fnode,text width=0.62\linewidth] (t4)
+      {\textbf{Tier 4 --- Interfaces:} \texttt{pyxlog} (PyO3), \texttt{xlog-cli}};
+    \node[fnode,text width=0.62\linewidth,below=of t4] (t3)
+      {\textbf{Tier 3 --- Pipelines:} deterministic $\cdot$ probabilistic (verified KC) $\cdot$ neural-symbolic};
+    \node[fproc,text width=0.62\linewidth,below=of t3] (t2)
+      {\textbf{Tier 2 --- Subsystems:} language frontend $\cdot$ GPU runtime executor $\cdot$ GPU CDCL / local search};
+    \node[fnode,text width=0.62\linewidth,below=of t2] (t1)
+      {\textbf{Tier 1 --- IR \& device services:} RIR/PIR/XGCF/EIR $\cdot$ CUDA wrapper $\cdot$ Arrow / DLPack interop};
+    \node[fnode,text width=0.62\linewidth,below=of t1] (t0)
+      {\textbf{Tier 0 --- Core:} scalar types $\cdot$ kernel-provider trait $\cdot$ symbol table $\cdot$ budgets};
+    \node[flabel,above=3mm of t4] {host: orchestration $\cdot$ I/O $\cdot$ compilation};
+    \begin{scope}[on background layer]
+      \node[fill=figband,rounded corners,fit=(t1)(t2)(t3),inner sep=2.4mm] (band) {};
+    \end{scope}
+    \node[flabel,figblue,anchor=south,rotate=90] at ([xshift=4mm]band.east) {GPU device-resident};
+    \draw[farrow] (t4) -- (t3); \draw[farrow] (t3) -- (t2);
+    \draw[farrow] (t2) -- (t1); \draw[farrow] (t1) -- (t0);
+  \end{tikzpicture}
+  \caption{xlog crate hierarchy. Each tier depends only on strictly lower tiers; all runtime semantic state is device-resident, while the host handles only orchestration, I/O, and compilation.}
+  \label{fig:arch}
+\end{figure*}
 
-The \texttt{MemoryBudget} configuration in \texttt{xlog-core} already carries an \texttt{allow\_ooc} flag, but current \texttt{main} treats it as reserved configuration rather than an implemented spill path. In today's runtime there is no silent out-of-core execution: workloads that exceed the GPU memory budget fail deterministically with \texttt{RESOURCE\_EXHAUSTED}.
+The workspace is organized into five tiers with strict layering: no crate depends on a peer or a higher tier (\Cref{fig:arch}). A leaf \emph{core} crate defines the shared scalar types, the kernel-provider trait, error and memory-budget types, and a bidirectional symbol table for dictionary-encoded strings. Above it, a tier of intermediate representations and device services wraps CUDA via cudarc~\cite{cudarc}, stages kernel modules (cubin-first with portable PTX fallback), and exposes Arrow and DLPack interoperability. The three core subsystems---the typed language frontend (\Cref{sec:lang}), the GPU runtime executor, and the GPU CDCL/local-search solver---compose into integrated pipelines for deterministic, probabilistic, and neural-symbolic execution, which a PyO3~\cite{pyo3} extension module (\texttt{pyxlog}) and a command-line binary surface to users.
+
+\subsection{Compilation Pipeline}
+
+A program is compiled to a GPU-executable plan in five stages. \textbf{Parsing} (a PEG parser built with pest) produces an AST covering the full surface, including probabilistic facts, annotated disjunctions, and neural-predicate declarations. \textbf{Stratification} builds a predicate dependency graph with positive, negative, and aggregate edges and computes its strongly connected components (SCCs) with Tarjan's algorithm; any SCC that crosses a negative or aggregate edge is rejected, guaranteeing a unique fixpoint and a deterministic stratum order. \textbf{Lowering} translates each rule into a relational-IR tree---body literals become scans, shared variables become join keys, negated literals become anti-joins, and recursive SCCs are wrapped in fixpoint nodes. \textbf{Optimization} applies cost-based predicate pushdown and join ordering, promotes eligible multiway rules to the WCOJ subsystem, and rewrites bound recursive queries via magic sets (\Cref{sec:datalog}). \textbf{Plan assembly} emits an execution plan holding SCCs in dependency order, which the runtime interprets by dispatching each node to its CUDA kernel.
 
 \subsection{IR Stack}
 
-xlog uses a layered intermediate representation stack designed for extensibility across reasoning paradigms. Each IR level serves a distinct role in the compilation and evaluation pipeline.
+A layered IR stack keeps the backends decoupled; each level has one role.
 
-\textbf{AST (Abstract Syntax Tree).} The parser produces a concrete syntax tree that preserves source-level structure: rules, atoms, terms, probabilistic annotations, neural predicate declarations, and directives. The AST lives in \texttt{crates/xlog-logic/src/ast.rs} and carries no execution semantics.
+\textbf{RIR (Relational IR)} is the algebraic tree---\texttt{Scan}, \texttt{Filter}, \texttt{Project}, \texttt{Join}, \texttt{GroupBy}, \texttt{Union}, \texttt{Distinct}, \texttt{Diff}, \texttt{Fixpoint}, and the worst-case-optimal \texttt{MultiWayJoin}/\texttt{ChainJoin}---carrying cardinality, skew, and delta-vs-full metadata. Every backend consumes it.
 
-\textbf{RIR (Relational IR).} The lowerer transforms the AST into an algebraic tree of \texttt{RirNode} variants defined in \texttt{crates/xlog-ir/src/rir.rs}. The key variants are: \texttt{Scan} (base relation access), \texttt{Filter} (predicate evaluation), \texttt{Project} (column selection and computation via \texttt{ProjectExpr}), \texttt{Join} (inner, left-outer, semi, and anti joins with explicit key columns), \texttt{GroupBy} (stratified aggregation), \texttt{Union}, \texttt{Distinct}, \texttt{Diff} (set difference for semi-naive delta computation), \texttt{Fixpoint} (recursive SCC wrapper), and \texttt{MultiWayJoin}/\texttt{ChainJoin} (worst-case-optimal multiway and chain joins promoted from eligible binary-join sequences). RIR nodes carry metadata including estimated cardinality ranges, memory peak estimates, skew hints for join partitioning, and incremental update semantics (delta vs.\ full materialization).
+\textbf{PIR (Provenance IR)} is the weighted Boolean formula (\texttt{Lit}, \texttt{NegLit}, \texttt{And}, \texttt{Or}, \texttt{Decision}) derived from provenance tracking over a probabilistic program, capturing its structure without execution order.
 
-\textbf{PIR (Provenance IR).} For probabilistic programs, \texttt{xlog-prob} constructs a \texttt{PirGraph} (defined in \texttt{crates/xlog-prob/src/pir.rs}) whose \texttt{PirNode} variants---\texttt{Lit}, \texttt{NegLit}, \texttt{And}, \texttt{Or}, \texttt{Decision}---represent the weighted Boolean formula derived from provenance tracking over the ground program. PIR captures the probabilistic structure needed for knowledge compilation without encoding execution order.
+\textbf{XGCF (xlog GPU Circuit Format)} is the compiled, device-resident form: a levelized DAG whose level offsets let every node at one topological level evaluate in a single kernel launch, with forward (log-space weighted model counting) and backward (adjoint) passes.
 
-\textbf{XGCF (xlog GPU Circuit Format).} The final compiled form is a levelized DAG stored in \texttt{crates/xlog-prob/src/xgcf.rs} as an \texttt{Xgcf} structure. Each node has a type (\texttt{Const0}, \texttt{Const1}, \texttt{Lit}, \texttt{And}, \texttt{Or}, \texttt{Decision}), child indices, and variable/literal identifiers. Level offsets enable parallel evaluation: all nodes at the same topological level execute in a single kernel launch. Forward passes compute log-space values; backward passes propagate adjoints for gradient computation. The \texttt{GpuXgcf} structure in \texttt{crates/xlog-prob/src/gpu.rs} holds the device-resident buffers. Multiple circuits can be batched via \texttt{circuit\_offsets} for fused evaluation across neural batch dimensions.
-
-\textbf{Extensibility.} The IR stack accommodates additional representations as the system grows. In v0.9.x, \textbf{EIR} (Epistemic IR) is the accepted epistemic boundary for world-view reasoning with modal operators, split plans, executable GPU plans, and world-view candidates. \textbf{SIR} (Solver IR) remains the planned Boolean-satisfiability representation for CNF clauses, cardinality constraints, weight vectors, and proof policies. The layered design ensures that adding or extending an IR requires implementing a lowering pass from the appropriate source IR and a backend that targets either XGCF or a GPU-resident evaluation format, without modifying unrelated IR definitions or execution paths.
+\textbf{EIR (Epistemic IR)} preserves modal operators for world-view reasoning and lowers to a dedicated GPU execution plan rather than ordinary relational algebra (\Cref{sec:epistemic}).
