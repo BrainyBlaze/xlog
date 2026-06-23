@@ -30,6 +30,12 @@ def strengthens(sample: EdgeSample) -> bool:
     return sample.pre_post and sample.saliency >= SALIENCY_THRESHOLD
 
 
+def weakens(sample: EdgeSample) -> bool:
+    """The planted ground-truth rule for the opposite direction (LTD): a
+    post-before-pre coincidence with high saliency."""
+    return sample.post_pre and sample.saliency >= SALIENCY_THRESHOLD
+
+
 @dataclass
 class Split:
     """One data split. The binding index of a sample is its position in
@@ -48,6 +54,13 @@ class Split:
 
     def labels(self) -> list[bool]:
         return [strengthens(s) for s in self.samples]
+
+    def labels_for(self, outcome: str) -> list[bool]:
+        if outcome == "strengthens":
+            return [strengthens(s) for s in self.samples]
+        if outcome == "weakens":
+            return [weakens(s) for s in self.samples]
+        raise ValueError(f"unknown outcome: {outcome!r}")
 
     def entity_ids(self) -> set[str]:
         return {s.entity_id for s in self.samples}
@@ -112,3 +125,44 @@ def make_random_split(prefix: str, n: int, seed: int) -> Split:
 def make_demo_data() -> tuple[Split, Split]:
     """The canonical (train, held_out) pair with disjoint entity ids."""
     return make_fixed_split("e_tr"), make_held_out_split("e_ho")
+
+
+def make_weakens_split(prefix: str) -> Split:
+    """LTD analogue of make_fixed_split: post-before-pre is the primary timing, so
+    the planted weakens rule (post_pre AND saliency>=0.5) has discriminating cases."""
+    rows = [
+        # (pre_post, post_pre, saliency, distractor)
+        (False, True, 0.90, 0.10),  # 0  strong LTD        -> label TRUE
+        (False, True, 0.80, 0.90),  # 1  strong LTD        -> label TRUE
+        (False, True, 0.20, 0.80),  # 2  weak post-pre     -> FALSE (relational-only over-fires)
+        (False, True, 0.10, 0.20),  # 3  weak post-pre     -> FALSE
+        (True, False, 0.90, 0.10),  # 4  pre-post, high s  -> FALSE (wrong timing)
+        (True, False, 0.30, 0.50),  # 5  pre-post          -> FALSE
+        (False, False, 0.70, 0.40),  # 6 neither           -> FALSE
+        (False, False, 0.10, 0.10),  # 7 neither           -> FALSE
+    ]
+    samples = [
+        EdgeSample(f"{prefix}_{i}", pre, post, sal, dis)
+        for i, (pre, post, sal, dis) in enumerate(rows)
+    ]
+    return Split(samples)
+
+
+def make_weakens_held_out_split(prefix: str) -> Split:
+    """Disjoint held-out LTD entities for generalization and vigilance."""
+    rows = [
+        (False, True, 0.95, 0.20),  # 0  NEW strong LTD     -> should FIRE (generalize)
+        (False, True, 0.15, 0.90),  # 1  NEW weak post-pre  -> should NOT fire (vigilance)
+        (True, False, 0.90, 0.10),  # 2  NEW pre-post       -> should NOT fire (wrong timing)
+        (False, False, 0.60, 0.30),  # 3 NEW neither        -> should NOT fire
+    ]
+    samples = [
+        EdgeSample(f"{prefix}_{i}", pre, post, sal, dis)
+        for i, (pre, post, sal, dis) in enumerate(rows)
+    ]
+    return Split(samples)
+
+
+def make_weakens_demo_data() -> tuple[Split, Split]:
+    """The canonical LTD (train, held_out) pair with disjoint entity ids."""
+    return make_weakens_split("w_tr"), make_weakens_held_out_split("w_ho")

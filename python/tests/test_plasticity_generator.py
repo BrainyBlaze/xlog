@@ -1,6 +1,13 @@
+import pytest
 import torch
 
-from pyxlog.demos.plasticity import make_demo_data, make_fixed_split, strengthens
+from pyxlog.demos.plasticity import (
+    make_demo_data,
+    make_fixed_split,
+    make_weakens_demo_data,
+    strengthens,
+    weakens,
+)
 from pyxlog.demos.plasticity.generator import EdgeSample, SALIENCY_THRESHOLD
 
 
@@ -43,3 +50,18 @@ def test_demo_data_splits_are_entity_disjoint() -> None:
     # held-out carries a strong pre-post positive (generalize) and a weak pre-post negative (vigilance)
     assert any(s.pre_post and s.saliency >= 0.5 for s in held_out.samples)
     assert any(s.pre_post and s.saliency < 0.5 for s in held_out.samples)
+
+
+def test_weakens_ground_truth_and_split() -> None:
+    assert weakens(EdgeSample("e", pre_post=False, post_pre=True, saliency=0.9, distractor=0.0))
+    assert not weakens(EdgeSample("e", pre_post=False, post_pre=True, saliency=0.2, distractor=0.0))
+    assert not weakens(EdgeSample("e", pre_post=True, post_pre=False, saliency=0.9, distractor=0.0))
+    train, held_out = make_weakens_demo_data()
+    # exactly the two strong post-pre edges are positive for the weakens outcome
+    assert [i for i, t in enumerate(train.labels_for("weakens")) if t] == [0, 1]
+    assert train.entity_ids().isdisjoint(held_out.entity_ids())
+
+
+def test_labels_for_rejects_unknown_outcome() -> None:
+    with pytest.raises(ValueError, match="(?i)outcome"):
+        make_fixed_split("e").labels_for("nope")

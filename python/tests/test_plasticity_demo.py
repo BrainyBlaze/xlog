@@ -3,9 +3,11 @@ import torch
 
 from pyxlog.demos.plasticity import (
     CAND_POSTPRE_NEURAL,
+    CAND_POSTPRE_REL,
     CAND_PREPOST_NEURAL,
     CAND_PREPOST_REL,
     make_demo_data,
+    make_weakens_demo_data,
     run_demo,
 )
 from pyxlog.ilp.neurosymbolic import NeuroSymbolicTrainingConfig
@@ -71,3 +73,24 @@ def test_demo_rule_inventory_and_proof_trace_present() -> None:
     assert report.proof_trace_map is not None
     assert report.rule_inventory is not None
     assert report.symbolic_rule_weights[report.selected_rule_id] >= 0.5
+
+
+@requires_cuda
+def test_demo_recovers_weakens_rule() -> None:
+    """The same pipeline retargeted to LTD (weakens = post-before-pre AND high
+    saliency) induces the post-pre neural candidate — no new mechanism."""
+    train, held_out = make_weakens_demo_data()
+    report = run_demo(train, held_out, _CFG, outcome="weakens")
+
+    assert report.selected_rule_id == CAND_POSTPRE_NEURAL
+    assert report.symbolic_rule_weights[CAND_POSTPRE_NEURAL] > 0.5
+    assert report.symbolic_rule_weights[CAND_POSTPRE_REL] < 0.5
+    assert report.symbolic_rule_weights[CAND_PREPOST_NEURAL] < 0.5
+    p = report.train_query_probabilities
+    assert min(p[0], p[1]) > 0.6  # strong LTD edges
+    assert max(p[2], p[3], p[4], p[5], p[6], p[7]) < 0.4
+    # held-out generalization + vigilance
+    adm = report.heldout_admission
+    assert report.heldout_labels[0] is True
+    assert adm[0] > 0.6
+    assert max(adm[1], adm[2], adm[3]) < 0.4
