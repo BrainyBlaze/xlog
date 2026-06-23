@@ -169,4 +169,72 @@ mod tests {
         let result = road_not_taken_possible_not_known(&accepted, 3, &lits(), &positives);
         assert!(result.is_empty());
     }
+
+    /// (2b) GENUINE contestation — the required-goal trigger. A forced target `g`
+    /// (`:- not g`) derivable by TWO competing rule-supported paths (`g :- c1.` /
+    /// `g :- c2.`) makes the all-candidates-false world INCONSISTENT (g would be
+    /// false) => that world is REJECTED, so the accepted world-views are exactly
+    /// the ones choosing >=1 path. c1/c2 are then NECESSARY alternatives (each
+    /// possible, neither forced), so the runner-up c2 (top-1 c1 committed) is
+    /// genuine road-not-taken. This is the (2b) contestation-structure the corpus
+    /// must engineer (criterion 4 = forced/required target).
+    #[test]
+    fn required_goal_two_paths_yields_genuine_runner_up() {
+        // Literal layout: 0 = c1, 1 = c2. (g is the forced target, not a candidate literal.)
+        const C1: AtomKey = (200, 1, 0);
+        const C2: AtomKey = (200, 2, 0);
+        let lits = [C1, C2];
+        // `:- not g` rejects the {} world (g false there); accepted = choose >=1 path.
+        let wv_c1 = [0b01u8]; // {c1}
+        let wv_c2 = [0b10u8]; // {c2}
+        let wv_both = [0b11u8]; // {c1, c2}
+        let accepted: Vec<&[u8]> = vec![&wv_c1, &wv_c2, &wv_both];
+        let mut positives = BTreeSet::new();
+        positives.insert(C1); // top-1 path committed.
+
+        // Discriminator: the all-candidates-false world (bitset 0) is NOT accepted => GENUINE.
+        assert!(
+            !accepted.iter().any(|wv| wv[0] == 0),
+            "required-goal must reject the all-false world for GENUINE contestation"
+        );
+
+        let result = road_not_taken_possible_not_known(&accepted, 2, &lits, &positives);
+        assert_eq!(
+            result,
+            vec![C2],
+            "c2 = runner-up necessary-alternative (possible-not-known, net-new vs committed c1); got {result:?}"
+        );
+    }
+
+    /// (2b) DISCRIMINATOR — a FREE (unconstrained) runner-up also lands in ⋃−⋂,
+    /// but TRIVIALLY: with no required-goal the all-candidates-false world is
+    /// ACCEPTED, so `r` is possible-not-known for the same reason ANY free atom
+    /// is (the false-positive #2/#3 shape), distinguished from genuine
+    /// contestation only by the rule-bearing label. => rule-bearing is NECESSARY
+    /// but NOT SUFFICIENT; the required-goal (criterion 4) is the trigger. The §1
+    /// reduction itself cannot tell the two apart — the discriminator is whether
+    /// the all-false world is in the accepted set (i.e. whether the target forces
+    /// a choice). Resolves @xlog-claude's free-vs-forced nuance.
+    #[test]
+    fn free_runner_up_is_trivially_possible_not_genuine() {
+        const R: AtomKey = (201, 1, 0);
+        let lits = [R];
+        let wv_empty = [0b0u8]; // {} accepted: nothing forces a choice.
+        let wv_r = [0b1u8]; // {r}
+        let accepted: Vec<&[u8]> = vec![&wv_empty, &wv_r];
+        let positives = BTreeSet::new();
+
+        let result = road_not_taken_possible_not_known(&accepted, 1, &lits, &positives);
+        assert_eq!(
+            result,
+            vec![R],
+            "free r is in ⋃−⋂ — the §1 reduction alone cannot tell it is trivial; got {result:?}"
+        );
+        // Discriminator: the all-false world IS accepted => TRIVIAL-free, NOT genuine.
+        assert!(
+            accepted.iter().any(|wv| wv[0] == 0),
+            "no required-goal => all-false world accepted => r trivially-free, NOT genuine \
+             road-not-taken: rule-bearing alone insufficient; the forced target is the trigger"
+        );
+    }
 }
