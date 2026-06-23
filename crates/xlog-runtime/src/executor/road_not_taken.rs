@@ -95,6 +95,32 @@ pub fn road_not_taken_possible_not_known(
     out
 }
 
+/// (2b) go/no-go DISCRIMINATOR gate — pairs with the reduction above.
+///
+/// A net-new road-not-taken result (`road_not_taken_possible_not_known(..) > 0`)
+/// is GENUINE — not trivially-free — only if the **all-candidates-false**
+/// world-view was REJECTED, i.e. a required goal (`:- not g`) forced a choice.
+/// Returns true iff the empty (every-literal-false) world-view is NOT among the
+/// ACCEPTED bitsets.
+///
+/// This gate is NECESSARY because net-new OUTPUT is identical for genuine vs
+/// trivially-free contestation (both yield `⋃−⋂` over the candidates with
+/// `⋂∩candidate = ∅`); the reduction alone cannot distinguish them. It
+/// **supersedes** an `⋂∩candidate`-size detector (which is `∅` for genuine AND
+/// trivial-free alike). Double role: (1) confirms the corpus is forced-target
+/// (not redundant-free); (2) confirms the GPU `:- not g` constraint ACTUALLY
+/// fired at runtime — a silent negation failure also leaves the all-false world
+/// accepted. The (2b) go/no-go is therefore `net-new > 0 AND forced_target_confirmed`.
+pub fn forced_target_confirmed(accepted_world_views: &[&[u8]], literal_count: usize) -> bool {
+    if accepted_world_views.is_empty() {
+        return false;
+    }
+    // The all-candidates-false world-view = every literal bit clear.
+    !accepted_world_views
+        .iter()
+        .any(|wv| (0..literal_count).all(|i| !literal_set(wv, i)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -236,5 +262,34 @@ mod tests {
             "no required-goal => all-false world accepted => r trivially-free, NOT genuine \
              road-not-taken: rule-bearing alone insufficient; the forced target is the trigger"
         );
+    }
+
+    /// (2b) discriminator GATE: `forced_target_confirmed` is true iff the
+    /// all-candidates-false world is rejected. Genuine (required-goal) accepted-set
+    /// excludes it; the trivially-free accepted-set includes it. This is the
+    /// co-equal go/no-go gate with net-new>0, and also the runtime check that the
+    /// GPU `:- not g` constraint actually fired.
+    #[test]
+    fn forced_target_confirmed_distinguishes_genuine_from_trivial_free() {
+        // Genuine: accepted = {c1},{c2},{c1,c2}; all-false {} REJECTED by the required goal.
+        let g_c1 = [0b01u8];
+        let g_c2 = [0b10u8];
+        let g_both = [0b11u8];
+        let genuine: Vec<&[u8]> = vec![&g_c1, &g_c2, &g_both];
+        assert!(
+            forced_target_confirmed(&genuine, 2),
+            "all-false world rejected => forced-target operative => genuine"
+        );
+        // Trivial-free: accepted includes {} (all-false) => target did not force a choice
+        // (or GPU `:- not g` did not fire).
+        let f_empty = [0b00u8];
+        let f_r = [0b01u8];
+        let trivial: Vec<&[u8]> = vec![&f_empty, &f_r];
+        assert!(
+            !forced_target_confirmed(&trivial, 2),
+            "all-false world accepted => not forced / `:- not g` silent => trivial-free"
+        );
+        // No accepted world-views => not confirmed (no consistent model).
+        assert!(!forced_target_confirmed(&[], 2));
     }
 }
