@@ -9622,24 +9622,36 @@ fn explore_grounded_marginal_export_over_gpu_world_views() {
     };
     let program = parse_program(
         r#"
-        #pragma epistemic_mode = faeel
+        #pragma epistemic_mode = g91
         pred consider(u32).
-        pred cand(u32).
-        cand(1). cand(2). cand(3).
-        consider(X) :- possible cand(X).
+        pred ca(u32).
+        pred cb(u32).
+        ca(1).
+        cb(1).
+        consider(1) :- possible ca(1).
+        consider(2) :- possible cb(1).
         "#,
     )
-    .expect("parse populated-candidate modal program");
+    .expect("parse g91 distinct-candidate modal program");
 
     let executable =
-        compile_epistemic_gpu_execution(&program).expect("populated-candidate modal must compile");
+        compile_epistemic_gpu_execution(&program).expect("g91 distinct-candidate modal must compile");
     let literal_count = executable.gpu_plan.epistemic_literals.len();
 
     let mut executor = Executor::new(Arc::clone(&fixture.provider));
     for (name, rel) in &executable.relation_ids {
         executor.register_relation(*rel, name);
     }
-    executor.put_relation("cand", upload_unary_u32(&fixture.memory, &[1, 2, 3], "x"));
+    // DECISIVE-PROBE finding (FAEEL+G91 x populated+empty): GPU single-component
+    // epistemic yields AT MOST ONE accepted world-view -- populated candidate => 1
+    // accepted (founded/determined, binary marginal); empty-registered candidate => 0
+    // accepted ("no consistent model"). NEVER >1. So contested marginals in (0,1)
+    // (which need >=2 accepted world-views differing on a candidate) are NOT producible
+    // via the epistemic path; they require MC/D4 (a probability distribution over
+    // models). This test retains the populated PATH-GREEN baseline (export validated
+    // end-to-end on real GPU, binary marginal).
+    executor.put_relation("ca", upload_unary_u32(&fixture.memory, &[1], "x"));
+    executor.put_relation("cb", upload_unary_u32(&fixture.memory, &[1], "x"));
 
     let max_worlds = 4usize;
     let result = executor
