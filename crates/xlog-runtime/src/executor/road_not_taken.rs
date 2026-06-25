@@ -252,6 +252,31 @@ pub fn decode_accepted_bitsets<'a>(
     out
 }
 
+/// Host-side `epistemic_export`: the pure pipeline the pyxlog `evaluate_epistemic`
+/// binding calls AFTER reading the device `world_views` buffer to host via the
+/// provider's untracked metadata DtoH (`dtoh_small_metadata_untracked`). The binding
+/// owns the device readback (it holds the provider/workspace context); this fn is
+/// the pure, host-TDD-able core — stride-aware decode → grounded export — so the
+/// only GPU-coupled step is the bounded metadata buffer copy the binding performs.
+///
+/// `literal_atoms[i]` is the binding's `candidate_index → (pred_id, arg0, arg1)` map
+/// (input-order); the result is keyed on those tuples for the DTS consume-surface.
+pub fn epistemic_export_from_host_buffer(
+    world_views_host: &[u8],
+    accepted_candidate_indices: &[usize],
+    literal_count: usize,
+    max_worlds: usize,
+    literal_atoms: &[AtomKey],
+) -> EpistemicExportResult {
+    let bitsets = decode_accepted_bitsets(
+        world_views_host,
+        accepted_candidate_indices,
+        literal_count,
+        max_worlds,
+    );
+    export_from_accepted_world_views(&bitsets, literal_count, literal_atoms)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -564,5 +589,21 @@ mod tests {
             "strided readback → grounded marginals; got {:?}",
             result.marginals
         );
+    }
+
+    /// TIER-2 host-side wrapper — the full pure pipeline the pyxlog binding calls
+    /// AFTER its provider untracked-dtoh readback of `world_views`: host buffer →
+    /// stride-aware decode → grounded export. The binding owns the device readback
+    /// (provider context); this fn is the pure, host-TDD-able core, so the only
+    /// GPU-coupled step left is the buffer copy the binding performs.
+    #[test]
+    fn host_buffer_wrapper_decodes_and_exports() {
+        // stride=4 (literal_count=3, max_worlds=4); accepted 0={X,Y}, 1={X}.
+        let buf: Vec<u8> = vec![0b011, 0xFF, 0xFF, 0xFF, 0b001, 0xFF, 0xFF, 0xFF];
+        let accepted = [0usize, 1];
+        let result = epistemic_export_from_host_buffer(&buf, &accepted, 3, 4, &lits());
+        assert_eq!(result.marginals, vec![1.0, 0.5, 0.0], "grounded marginals; got {:?}", result.marginals);
+        assert_eq!(result.possible_not_known, vec![Y], "§1 ⋃−⋂; got {:?}", result.possible_not_known);
+        assert!(result.no_substrate_reason.is_none(), "2 accepted, 3 candidates => substrate present");
     }
 }
