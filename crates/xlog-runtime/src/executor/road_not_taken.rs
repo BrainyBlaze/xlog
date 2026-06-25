@@ -215,6 +215,43 @@ pub fn export_from_accepted_world_views(
     }
 }
 
+/// Per-world-view bitset byte count for `literal_count` literals: `(literal_count + 7) / 8`
+/// (bit `i` lives in byte `i / 8`). This is the literal-bitset width; the device
+/// `world_views` row STRIDE may be larger (padded to `max_worlds`).
+#[inline]
+fn world_view_bitset_bytes(literal_count: usize) -> usize {
+    (literal_count + 7) / 8
+}
+
+/// Decode the accepted world-view literal-bitsets out of the flat device
+/// `world_views` buffer (already read back to host via untracked DtoH).
+///
+/// The buffer is `candidate_count × world_view_stride` bytes, where
+/// `world_view_stride = max(max_worlds, bitset_bytes(literal_count))` — the per-row
+/// stride is padded to `max_worlds` (allocation-conservative), so each candidate's
+/// literal-bitset is the PREFIX (`bitset_bytes`) of its stride-row, NOT a contiguous
+/// `idx * bitset_bytes` slice. Returns one bitset slice per accepted candidate index,
+/// ready for `export_from_accepted_world_views`. Out-of-range indices are skipped
+/// (defensive against a malformed buffer) rather than panicking.
+pub fn decode_accepted_bitsets<'a>(
+    world_views: &'a [u8],
+    accepted_candidate_indices: &[usize],
+    literal_count: usize,
+    max_worlds: usize,
+) -> Vec<&'a [u8]> {
+    let bitset_bytes = world_view_bitset_bytes(literal_count);
+    let stride = max_worlds.max(bitset_bytes);
+    let mut out = Vec::with_capacity(accepted_candidate_indices.len());
+    for &idx in accepted_candidate_indices {
+        let start = idx * stride;
+        let end = start + bitset_bytes;
+        if end <= world_views.len() {
+            out.push(&world_views[start..end]);
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -471,6 +508,61 @@ mod tests {
         assert!(
             result.no_substrate_reason.is_some(),
             "single candidate => <2 alternatives => LOUD no-substrate (sub-gap-2)"
+        );
+    }
+
+    /// TIER-2 readback decode — the STRIDE-GOTCHA gate. The device `world_views`
+    /// buffer rows are `world_view_stride = max(max_worlds, bitset_bytes)` bytes,
+    /// so each candidate's literal-bitset is the PREFIX of its stride-row. A naive
+    /// contiguous slice (`i * bitset_bytes`) would read the wrong row once the
+    /// stride is padded. literal_count=3 (bitset_bytes=1), max_worlds=4 (stride=4):
+    /// candidate 2 must be read at offset `2*4=8`, NOT `2*1=2`.
+    #[test]
+    fn decode_respects_world_view_stride_padding() {
+        let buf: Vec<u8> = vec![
+            0b011, 0xFF, 0xFF, 0xFF, // candidate 0 bitset {X,Y} + padding
+            0b001, 0xFF, 0xFF, 0xFF, // candidate 1 bitset {X}
+            0b100, 0xFF, 0xFF, 0xFF, // candidate 2 bitset {Z}
+        ];
+        let accepted = [0usize, 2];
+        let bitsets = decode_accepted_bitsets(&buf, &accepted, 3, 4);
+        assert_eq!(bitsets.len(), 2);
+        assert_eq!(bitsets[0], &[0b011u8], "candidate 0 bitset-prefix (padding skipped)");
+        assert_eq!(
+            bitsets[1],
+            &[0b100u8],
+            "candidate 2 read at offset 2*stride=8, NOT 2*bitset_bytes=2"
+        );
+    }
+
+    /// TIER-2 readback decode — when there is no stride padding
+    /// (`max_worlds <= bitset_bytes`) the rows are contiguous bitsets.
+    #[test]
+    fn decode_contiguous_when_no_stride_padding() {
+        let buf: Vec<u8> = vec![0b011, 0b001, 0b100];
+        let accepted = [0usize, 1, 2];
+        let bitsets = decode_accepted_bitsets(&buf, &accepted, 3, 1);
+        assert_eq!(bitsets, vec![&[0b011u8][..], &[0b001u8][..], &[0b100u8][..]]);
+    }
+
+    /// TIER-2 readback → export roundtrip over a PADDED-stride buffer: the decoded
+    /// bitsets feed the pure export, and the grounded marginals are correct
+    /// (X=2/2=1.0, Y=1/2=0.5, Z=0/2=0.0) — proving the stride handling is sound
+    /// end-to-end, not just in isolation.
+    #[test]
+    fn decode_then_export_roundtrip_over_strided_buffer() {
+        let buf: Vec<u8> = vec![
+            0b011, 0xFF, 0xFF, 0xFF, // {X, Y}
+            0b001, 0xFF, 0xFF, 0xFF, // {X}
+        ];
+        let accepted = [0usize, 1];
+        let bitsets = decode_accepted_bitsets(&buf, &accepted, 3, 4);
+        let result = export_from_accepted_world_views(&bitsets, 3, &lits());
+        assert_eq!(
+            result.marginals,
+            vec![1.0, 0.5, 0.0],
+            "strided readback → grounded marginals; got {:?}",
+            result.marginals
         );
     }
 }
