@@ -243,6 +243,43 @@ def test_existential_join_trains_with_or_aggregation() -> None:
     assert result.query_probabilities[1] == pytest.approx(expected_edge1, abs=1e-4)
 
 
+def test_existential_join_gradients_reach_net_and_guard_not_structure() -> None:
+    """Training a mislabeled edge drives gradient into the saliency network (all
+    joined events, through the expanded per-event circuit leaves) and the rule
+    guard, but never into the deterministic ``pre_before_post`` join structure.
+    The loss decreases — the existential-join rule actually trains."""
+    network = _sal_net()
+    feats = _event_features()
+    source = """
+        nn(sal_net, [Event], Label, [low, strengthen]) :: saliency(Event, Label).
+        pre_before_post(0, 0).
+        pre_before_post(1, 0).
+        pre_before_post(2, 1).
+        pred pre_before_post(i64, i64).
+        trainable_rule(rule_plastic, weight=0.0) :: plastic(Edge) :-
+            saliency(Event, strengthen), pre_before_post(Event, Edge).
+        train(plastic, binary_cross_entropy).
+    """
+    result = train_neurosymbolic_program(
+        source,
+        networks={"sal_net": network},
+        domain_inputs={"sal_net": feats},
+        examples=[{"targets": torch.tensor([1.0, 0.0], dtype=torch.float32)}],
+        config=NeuroSymbolicTrainingConfig(steps=4, learning_rate=0.2),
+    )
+
+    # Gradient reaches the neural predicate (summed over all joined events) and
+    # the rule guard.
+    assert result.neural_parameter_grads["sal_net"] > 0.0
+    assert result.symbolic_weight_grads["rule_plastic"] > 0.0
+    # The deterministic join structure is never a trainable parameter.
+    assert "pre_before_post" not in result.symbolic_weight_grads
+    assert "pre_before_post" not in result.neural_parameter_grads
+    # The rule trains: loss strictly decreases over the steps.
+    assert len(result.losses) == 4
+    assert result.losses[-1] < result.losses[0]
+
+
 def test_missing_network_validated_against_real_declarations() -> None:
     with pytest.raises(ValueError, match="missing network"):
         train_neurosymbolic_program(
