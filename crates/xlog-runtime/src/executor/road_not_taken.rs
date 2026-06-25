@@ -606,4 +606,29 @@ mod tests {
         assert_eq!(result.possible_not_known, vec![Y], "§1 ⋃−⋂; got {:?}", result.possible_not_known);
         assert!(result.no_substrate_reason.is_none(), "2 accepted, 3 candidates => substrate present");
     }
+
+    /// TIER-2 compact-readback (scaling follow-up, decode-side) — the per-accepted-index
+    /// reader (xlog-cuda, to lift the 4096B whole-buffer cap for the ≤20 live range)
+    /// packs ONLY the accepted bitsets contiguously into a compact buffer
+    /// (`accepted_count × bitset_bytes`), NOT the exponential `2^lit` candidate space.
+    /// The SAME `decode_accepted_bitsets` handles it: `max_worlds = 0` => `stride =
+    /// bitset_bytes` => contiguous rows over `0..accepted_count`. Marginal/§1 are over
+    /// the literals (bits), not candidate-row identity, so the result is identical.
+    /// => the export-lane needs NO new decode code for the scaling fix; the follow-up
+    /// reduces to the cuda per-offset reader alone.
+    #[test]
+    fn decode_handles_compact_accepted_only_buffer() {
+        // Compact buffer: accepted bitsets only, 1 byte each (literal_count=3), no padding.
+        let compact: Vec<u8> = vec![0b011, 0b001]; // {X,Y}, {X}
+        let indices = [0usize, 1];
+        let bitsets = decode_accepted_bitsets(&compact, &indices, 3, 0); // max_worlds=0 => contiguous
+        let result = export_from_accepted_world_views(&bitsets, 3, &lits());
+        assert_eq!(
+            result.marginals,
+            vec![1.0, 0.5, 0.0],
+            "compact-readback decode → same grounded marginals; got {:?}",
+            result.marginals
+        );
+        assert_eq!(result.possible_not_known, vec![Y], "§1 ⋃−⋂ unchanged under compact readback");
+    }
 }
