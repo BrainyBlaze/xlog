@@ -198,10 +198,15 @@ def _event_features():
 
 
 def _sal_strengthen_probs(net, feats):
-    """P(saliency(event, strengthen)) for each event row — label index 1."""
+    """P(saliency(event, strengthen)) for each event row — label index 1.
+
+    ``train_neurosymbolic_program`` moves the network to cuda in place, so feed
+    the features on the network's current device.
+    """
     with torch.no_grad():
-        out = net(feats)
-    return out[:, 1].tolist()
+        device = next(net.parameters()).device
+        out = net(feats.to(device))
+    return out[:, 1].cpu().tolist()
 
 
 def test_existential_join_trains_with_or_aggregation() -> None:
