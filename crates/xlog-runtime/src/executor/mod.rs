@@ -27,7 +27,9 @@ mod join_cache;
 mod node_dispatch;
 mod recursive;
 mod rewrite;
-mod road_not_taken;
+// TIER-2: public so the pyxlog `evaluate_epistemic` binding can import the
+// grounded-uncertainty export (`export_from_accepted_world_views` + result type).
+pub mod road_not_taken;
 mod wcoj_cost_model;
 mod wcoj_dispatch;
 #[cfg(feature = "wcoj-phase-timing")]

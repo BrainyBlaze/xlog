@@ -121,6 +121,100 @@ pub fn forced_target_confirmed(accepted_world_views: &[&[u8]], literal_count: us
         .any(|wv| (0..literal_count).all(|i| !literal_set(wv, i)))
 }
 
+/// Grounded world-fraction marginal for epistemic literal `i`
+/// = `|{accepted-wv : literal i set}| / |accepted-wv|` ∈ [0,1].
+///
+/// This is the sub-gap-1-SOUND uncertainty measure: the literal fraction of
+/// accepted world-views in which the atom holds. It is NOT a Belnap→probability
+/// heuristic — four-valued information-state (`none/false/true/both`) has no
+/// canonical map to `[0,1]`, ruled principled-unsound — it is the genuine
+/// fraction of the (consistent) models the engine explored.
+#[inline]
+fn world_fraction_marginal(accepted_world_views: &[&[u8]], literal_index: usize) -> f32 {
+    if accepted_world_views.is_empty() {
+        return 0.0;
+    }
+    let hits = accepted_world_views
+        .iter()
+        .filter(|wv| literal_set(wv, literal_index))
+        .count();
+    hits as f32 / accepted_world_views.len() as f32
+}
+
+/// TIER-2 grounded-uncertainty export over accepted world-views — BOTH coupling
+/// surfaces from one inference: grounded marginals (conditions / Arm-B re-weight)
+/// + the §1 road-not-taken set (proposes / producer). Atom-keyed for the locked
+/// `(pred_id, arg0, arg1)` consume-surface.
+#[derive(Debug, Clone, PartialEq)]
+pub struct EpistemicExportResult {
+    /// Grounded world-fraction marginal per candidate literal, index-aligned to
+    /// `literal_atoms` (== the binding's `candidate_index_to_atom`). ∈ [0,1].
+    pub marginals: Vec<f32>,
+    /// §1 road-not-taken `possible-not-known` set (`⋃−⋂−positives`), atom-keyed.
+    pub possible_not_known: Vec<AtomKey>,
+    /// LOUD no-substrate diagnostic (`None` = substrate present): set when there is
+    /// no consistent model (no accepted world-views) or no contestation
+    /// (`< 2` candidate literals — a single-world / no-alternative input). The
+    /// whole-group prune counts are DTS-pre-invoke diagnostics assembled by the
+    /// binding, not computed here (the export never prunes).
+    pub no_substrate_reason: Option<String>,
+}
+
+/// Grounded-uncertainty export over the accepted world-view bitsets — the pure,
+/// host-testable core of the `epistemic_export` binding. The pyxlog binding reads
+/// `DeviceSemanticSummary.world_views` (selected via `accepted_candidate_indices`)
+/// into these bitsets, builds `literal_atoms` from its `candidate_index_to_atom`
+/// map, and calls this; the result is wrapped to Python (DLPack marginals + dict).
+///
+/// Returns BOTH coupling directions from ONE accepted-world-view set:
+///  * `marginals[i]` = grounded world-fraction of candidate literal `i`
+///    (the conditions / Arm-B re-weight surface — existing-uncertain ∈ (0,1));
+///  * `possible_not_known` = grounded `⋃−⋂` over accepted worlds (the proposes /
+///    producer surface).
+///
+/// Net-additivity is NOT applied here: the engine returns the grounded `⋃−⋂` and
+/// DTS subtracts `request.positive_facts` consume-side (net-additivity is a
+/// DTS-induction concept, not engine-modal-state — the agreed seam). The §1 helper
+/// is therefore called with an empty positives set to get the raw `⋃−⋂`.
+///
+/// Soundness invariants (build-contract): marginals are the literal
+/// fraction-of-accepted-worlds (grounded), never a qualitative→prob heuristic; the
+/// `⋃−⋂` unions ACCEPTED world-views only, so (ii)-circular logic-pruned atoms are
+/// excluded by construction.
+pub fn export_from_accepted_world_views(
+    accepted_world_views: &[&[u8]],
+    literal_count: usize,
+    literal_atoms: &[AtomKey],
+) -> EpistemicExportResult {
+    let no_substrate_reason = if accepted_world_views.is_empty() {
+        Some("no accepted world-views (no consistent model)".to_string())
+    } else if literal_count < 2 {
+        Some(format!(
+            "no contestation: {literal_count} candidate literal(s) (< 2 alternatives)"
+        ))
+    } else {
+        None
+    };
+
+    let marginals = (0..literal_count)
+        .map(|i| world_fraction_marginal(accepted_world_views, i))
+        .collect();
+
+    // Grounded `⋃−⋂` (no positives subtraction — DTS does net-additivity consume-side).
+    let possible_not_known = road_not_taken_possible_not_known(
+        accepted_world_views,
+        literal_count,
+        literal_atoms,
+        &BTreeSet::new(),
+    );
+
+    EpistemicExportResult {
+        marginals,
+        possible_not_known,
+        no_substrate_reason,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -291,5 +385,92 @@ mod tests {
         );
         // No accepted world-views => not confirmed (no consistent model).
         assert!(!forced_target_confirmed(&[], 2));
+    }
+
+    // ---- TIER-2 grounded-uncertainty export (Phase-1 export-impl) ----
+
+    /// TIER-2 export — the GROUNDED world-fraction marginal per candidate is the
+    /// literal fraction of accepted world-views in which the atom holds. For the
+    /// `{X,Y}`/`{X}` accepted set: X ∈ both = 1.0; Y ∈ one = 0.5; Z ∈ none = 0.0.
+    /// This is the sub-gap-1-SOUND measure (grounded), NOT a Belnap→prob heuristic.
+    #[test]
+    fn export_returns_grounded_world_fraction_marginals() {
+        let wv_a = [0b011u8]; // {X, Y}
+        let wv_b = [0b001u8]; // {X}
+        let accepted: Vec<&[u8]> = vec![&wv_a, &wv_b];
+
+        let result = export_from_accepted_world_views(&accepted, 3, &lits());
+
+        assert_eq!(
+            result.marginals,
+            vec![1.0, 0.5, 0.0],
+            "grounded world-fraction: X=2/2, Y=1/2, Z=0/2; got {:?}",
+            result.marginals
+        );
+        assert!(result.no_substrate_reason.is_none(), "2 accepted worlds, 3 candidates => substrate present");
+    }
+
+    /// TIER-2 export — ONE accepted-world-view set yields BOTH coupling surfaces:
+    /// `marginals` (conditions / Arm-B re-weight) AND `possible_not_known` (§1
+    /// proposes / producer). Y is possible-not-known (0.5 marginal); X is committed
+    /// (1.0 marginal, excluded from §1); both come from the single export call.
+    #[test]
+    fn export_yields_both_surfaces_from_one_accepted_set() {
+        let wv_a = [0b011u8]; // {X, Y}
+        let wv_b = [0b001u8]; // {X}
+        let accepted: Vec<&[u8]> = vec![&wv_a, &wv_b];
+
+        let result = export_from_accepted_world_views(&accepted, 3, &lits());
+
+        // conditions-direction: Y carries genuine uncertainty (0.5), X is committed (1.0).
+        assert_eq!(result.marginals[1], 0.5, "Y world-fraction");
+        // proposes-direction: §1 road-not-taken = {Y} (X committed, Z absent).
+        assert_eq!(result.possible_not_known, vec![Y], "§1 road-not-taken; got {:?}", result.possible_not_known);
+    }
+
+    /// TIER-2 export — the engine returns the grounded `⋃−⋂` with NO positives
+    /// subtraction (the agreed seam): even an atom that would be a request-positive
+    /// is emitted here; DTS applies net-additivity consume-side. Y stays in the
+    /// `⋃−⋂` regardless, and its marginal is reported.
+    #[test]
+    fn export_returns_union_minus_intersection_without_positives_subtraction() {
+        let wv_a = [0b011u8]; // {X, Y}
+        let wv_b = [0b001u8]; // {X}
+        let accepted: Vec<&[u8]> = vec![&wv_a, &wv_b];
+
+        let result = export_from_accepted_world_views(&accepted, 3, &lits());
+
+        assert_eq!(
+            result.possible_not_known,
+            vec![Y],
+            "engine returns grounded ⋃−⋂ (Y possible-not-known); positives subtraction is DTS-side; got {:?}",
+            result.possible_not_known
+        );
+        assert_eq!(result.marginals[1], 0.5, "Y marginal reported");
+    }
+
+    /// TIER-2 export — empty accepted set is a LOUD no-substrate diagnostic
+    /// (no consistent model), NOT a silent all-zero result.
+    #[test]
+    fn export_empty_accepted_is_loud_no_substrate() {
+        let accepted: Vec<&[u8]> = Vec::new();
+        let result = export_from_accepted_world_views(&accepted, 3, &lits());
+        assert!(result.no_substrate_reason.is_some(), "empty accepted => LOUD no-substrate");
+        assert!(result.possible_not_known.is_empty());
+    }
+
+    /// TIER-2 export — a single candidate literal (no alternative) is a LOUD
+    /// no-substrate diagnostic: contestation requires >=2 competing alternatives
+    /// (the sub-gap-2 lesson — single-world / no-alternative is not substrate).
+    #[test]
+    fn export_single_candidate_is_loud_no_substrate() {
+        let wv = [0b1u8]; // {X}
+        let accepted: Vec<&[u8]> = vec![&wv];
+        let one_lit: [AtomKey; 1] = [X];
+        let result = export_from_accepted_world_views(&accepted, 1, &one_lit);
+        assert!(
+            result.no_substrate_reason.is_some(),
+            "single candidate => <2 alternatives => LOUD no-substrate (sub-gap-2)"
+        );
     }
 }
