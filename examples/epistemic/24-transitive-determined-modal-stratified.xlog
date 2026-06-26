@@ -1,5 +1,5 @@
-// v0.9.2 SCOPE-LIMIT CLOSED: modal over an ORDINARY predicate transitively derived
-// from a DETERMINED epistemic head -- now ACCEPTED via stratification.
+// Modal over an ORDINARY predicate transitively derived
+// from a DETERMINED epistemic head -- accepted via stratification.
 //
 //   a(X) :- node(X), know p(X).   -- DETERMINED epistemic head (know p over EDB p)
 //   r(X) :- a(X).                 -- ORDINARY copy of the determined `a`
@@ -21,7 +21,7 @@
 // Previously this failed closed with a `cross-component epistemic coupling`
 // diagnostic (the modal target `r` is an ordinary head, not a direct epistemic head).
 // That scope limit is now closed; finite nested modal chains, FAEEL-unfounded
-// self-support, and finite structured tuple keys have defined v0.9.2 behavior.
+// self-support, and finite structured tuple keys have defined behavior.
 // Only genuinely cyclic modal coupling with no founded/WFS order, unbounded tuple
 // keys, and unsafe unbound variables remain fail-closed.
 //

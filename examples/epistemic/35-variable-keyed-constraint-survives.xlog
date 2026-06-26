@@ -1,4 +1,4 @@
-// v0.9.2 ITEM E: the COMPANION to example 34. The SAME variable-keyed
+// The COMPANION to example 34. The SAME variable-keyed
 // constraint `:- know flagged(X).` does NOT prune when the modal relation
 // `flagged` is EMPTY: no binding of X satisfies `know flagged(X)`, so the
 // existential body is false in the accepted model and the world view survives.

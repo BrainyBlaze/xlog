@@ -1,7 +1,7 @@
-// v0.9.2 WALL A1 (ACCEPTED): a NEGATED modal `not know reach` over a GENUINELY
-// RECURSIVE relation that sits in a strictly LOWER stratum than the negating head.
-// This is the canonical "negated modal literal in a recursive epistemic program"
-// case the WALL names -- and it EXECUTES on the GPU production path.
+// A NEGATED modal `not know reach` over a GENUINELY
+// RECURSIVE relation that sits in a strictly LOWER stratum than the negating head
+// (accepted). This is the canonical "negated modal literal in a recursive epistemic
+// program" case -- and it EXECUTES on the GPU production path.
 //
 // WHY IT IS ADMISSIBLE (stratified, not a negation cycle):
 //   `reach` is the recursive transitive closure of `know link` (a Case-B founded

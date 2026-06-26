@@ -1,4 +1,4 @@
-// UCR v0.9.2 FAEEL modular failure-chain support split.
+// Universal case reasoner: FAEEL modular failure-chain support split.
 //
 // This stage derives the type-4 decision claim from candidate-local raw claim
 // options and BFO support before the final decision program consumes it.
