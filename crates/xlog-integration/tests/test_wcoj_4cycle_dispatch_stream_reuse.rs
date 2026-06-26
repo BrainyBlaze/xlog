@@ -1,9 +1,9 @@
 // crates/xlog-integration/tests/test_wcoj_4cycle_dispatch_stream_reuse.rs
-//! v0.6.5 slice 2 — confirms the cached `Executor::wcoj_dispatch_stream`
+//! confirms the cached `Executor::wcoj_dispatch_stream`
 //! is reused across triangle and 4-cycle dispatch within the same
 //! Executor.
 //!
-//! The slice 2 stream rename made the launch stream shape-agnostic.
+//! The stream rename made the launch stream shape-agnostic.
 //! Acquiring per-shape would silently drain the StreamPool (cap 16,
 //! grow-only) on long-lived runtimes with both shapes active. This
 //! test compiles a program with both a triangle rule AND a 4-cycle

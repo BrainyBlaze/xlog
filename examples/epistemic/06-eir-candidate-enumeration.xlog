@@ -1,4 +1,4 @@
-// v0.9.1 EGB-01 + EGB-02: candidate worlds are enumerated from EIR (not a fixture),
+// candidate worlds are enumerated from EIR (not a fixture),
 // and the `know edge(X)` modal literal is matched at value level against the bound X.
 // believed(X) holds for each node X whose edge(X) is known. Expect: {1, 3}.
 

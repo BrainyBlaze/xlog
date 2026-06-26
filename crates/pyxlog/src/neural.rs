@@ -844,7 +844,7 @@ impl CompiledProgram {
     }
 
     /// Per-candidate hard-filter eligibility for the joint multi-rule same-head
-    /// mixture (ST-TRC Phase-1b, guard-only candidates). For each rule defining
+    /// mixture (guard-only candidates). For each rule defining
     /// `(head_pred, arity)`, returns `(guard_predicate_name, mask)` where
     /// `mask[i]` is whether the ground head binding `head_pred(i)` satisfies that
     /// rule's hard join conditions (its ordinary-relation body atoms). The
@@ -2157,7 +2157,7 @@ impl CompiledProgram {
 
     /// Build the query signature from ONE specific defining rule. The single-rule
     /// path reaches this via `build_query_signature` (after `find_query_rule`);
-    /// the multi-rule same-head path (ST-TRC Phase-1b) builds one signature per
+    /// the multi-rule same-head path builds one signature per
     /// candidate rule and OR-amalgamates them in the forward.
     fn build_query_signature_for_rule(
         &self,
@@ -2359,7 +2359,7 @@ impl CompiledProgram {
     }
 
     /// All rules defining `(pred_name, arity)` — the multi-rule same-head
-    /// candidate set for the ST-TRC joint soft-mixture. The single-rule helper
+    /// candidate set for the joint soft-mixture. The single-rule helper
     /// `find_query_rule` enforces exactly one for the legacy path; the multi-rule
     /// forward consumes the full set and OR-amalgamates them.
     fn find_query_rules(&self, pred_name: &str, arity: usize) -> Vec<&Rule> {

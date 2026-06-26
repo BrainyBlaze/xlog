@@ -15,7 +15,7 @@
 // Execution stratifies: the lower stratum materializes the GATED `a` into the store
 // as a base relation, the ordinary `r :- a` is computed over that materialized base
 // (so `r` is LOCALLY INVARIANT in the higher stratum), and the higher stratum gates
-// `know r` against the materialized base `r` via the EXISTING EGB-02 membership
+// `know r` against the materialized base `r` via the EXISTING membership
 // filter. NO resolve-into-body against a still-modal relation.
 //
 // Previously this failed closed with a `cross-component epistemic coupling`

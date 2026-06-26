@@ -728,7 +728,7 @@ def _graded_admission_evidence(
                 graded = within_set
             else:
                 within_set = None
-                graded = torch.sigmoid(logit - tau_logit)  # surface-1 temp-1 gate
+                graded = torch.sigmoid(logit - tau_logit)  # per-entity temp-1 gate
             per_cand[rule_id] = {
                 "rel": rel, "logit": logit, "tau_logit": tau_logit,
                 "graded": graded, "hard": hard, "within_set": within_set,
@@ -775,7 +775,7 @@ def _graded_admission_evidence(
                 "hard_gate": float(sel["hard"][i]) if selected else None,
                 "graded_gate": float(sel["graded"][i]) if selected else None,
                 # within_set_norm: the operator's set-relative output (context-relative mode),
-                # None in surface-1 per-entity mode. Cross-check only — the checker
+                # None in per-entity mode. Cross-check only — the checker
                 # recomputes the within-set rank from raw g_theta (anti-gaming).
                 "within_set_norm": (
                     float(sel_within[i]) if sel_within is not None else None
@@ -1005,7 +1005,7 @@ def evaluate_joint_mixture(
         )
         # set_relative (context-relative admission): the de-saturating within-set normalization
         # of g_theta over the held-out comparison set (one group). Default off ->
-        # surface-1 per-entity graded gate, byte-unchanged.
+        # per-entity graded gate, byte-unchanged.
         return _graded_admission_evidence(
             eligibility,
             rule_weights,

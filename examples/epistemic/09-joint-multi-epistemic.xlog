@@ -1,4 +1,4 @@
-// v0.9.1 EGB-06: a rule coupling more than one distinct epistemic predicate is
+// a rule coupling more than one distinct epistemic predicate is
 // solved jointly as a full modal conjunction over the candidate world view.
 // both_known(X) requires BOTH know edge(X) and know color(X). Expect: {1}
 // (node 2 has a known edge but no known color).

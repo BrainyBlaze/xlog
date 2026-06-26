@@ -6255,7 +6255,7 @@ impl Executor {
     /// `possible` over that head must read the GATED extension — not the ungated
     /// reduced relation the reduced runtime plan leaves in the store. This OVERWRITES
     /// the store relation under `name` with a device-side clone of the gated buffer,
-    /// so the existing EGB-02 tuple-membership filter (which reads the source
+    /// so the existing tuple-membership filter (which reads the source
     /// relation from the store by predicate name) gates the higher stratum against
     /// the correct extension. No resolve-into-body is performed, so there is no
     /// double-gating against the GPU world-view filter.

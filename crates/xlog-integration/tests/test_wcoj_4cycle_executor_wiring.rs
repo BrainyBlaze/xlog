@@ -1,5 +1,5 @@
 // crates/xlog-integration/tests/test_wcoj_4cycle_executor_wiring.rs
-//! v0.6.5 slice 2 — executor-level WCOJ 4-cycle dispatch wiring.
+//! executor-level WCOJ 4-cycle dispatch wiring.
 //!
 //! End-to-end coverage for the 4-cycle dispatch path through
 //! Compiler + Executor:
@@ -8,7 +8,7 @@
 //!     binary-join reference (gate-off baseline).
 //!   * Gate-off path produces the same row set with counter == 0.
 //!   * Kill switch beats force.
-//!   * Adaptive opt-in defaults OFF (slice 2 contract).
+//!   * Adaptive opt-in defaults OFF (opt-in contract).
 //!
 //! Mirrors `test_wcoj_executor_wiring.rs` (triangle) for the
 //! 4-cycle shape.
@@ -277,7 +277,7 @@ fn wiring_kill_switch_beats_force() {
 
 #[test]
 fn wiring_adaptive_optin_default_off_does_not_dispatch() {
-    // Slice 2 contract: 4-cycle adaptive defaults OFF (opt-in).
+    // Contract: 4-cycle adaptive defaults OFF (opt-in).
     // With NO explicit force gate and NO adaptive opt-in, no
     // dispatch fires. Triangle would default-on the adaptive
     // here; 4-cycle does not.
@@ -290,7 +290,7 @@ fn wiring_adaptive_optin_default_off_does_not_dispatch() {
     let (_executor, _, four) = run_program(Arc::clone(&fix.provider), &fix.memory, config, &inputs);
     assert_eq!(
         four, 0,
-        "adaptive defaults OFF for 4-cycle (slice 2 contract); no dispatch on default config"
+        "adaptive defaults OFF for 4-cycle (opt-in contract); no dispatch on default config"
     );
 }
 

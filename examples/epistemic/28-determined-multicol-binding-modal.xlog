@@ -22,7 +22,7 @@
 // relation (theorem applied ONCE at the STORE boundary via
 // `materialize_epistemic_head_relation`), and the HIGHER stratum `out` then reads
 // that materialized base `r` -- where it is locally INVARIANT and `know r(X, Y)`
-// binds `Y` via the EXISTING EGB-02 membership/join path (the strict invariant
+// binds `Y` via the EXISTING membership/join path (the strict invariant
 // resolve). The plan SCHEMA step additionally resolves the augmenting modal over a
 // DETERMINED target so the augmented `out(X, Y)` column types from `r`'s declaration
 // (no `UnsafeVariable`); that relaxation drives ONLY column typing, never runtime

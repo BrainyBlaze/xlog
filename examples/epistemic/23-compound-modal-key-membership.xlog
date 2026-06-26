@@ -1,4 +1,4 @@
-// v0.9.2 ITEM D (ACCEPTED): structured finite+typed modal tuple-key.
+// Structured finite+typed modal tuple-key (accepted).
 //
 // A modal literal's tuple key may be STRUCTURED (a finite, fixed-arity list or
 // compound) as long as its elements are scalar/Symbol-typed. The structured key

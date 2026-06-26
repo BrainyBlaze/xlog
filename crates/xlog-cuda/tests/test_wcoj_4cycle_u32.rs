@@ -1,5 +1,5 @@
 // crates/xlog-cuda/tests/test_wcoj_4cycle_u32.rs
-//! v0.6.5 slice 2 — 4-cycle WCOJ kernel (u32) provider tests.
+//! 4-cycle WCOJ kernel (u32) provider tests.
 //!
 //! Locks the provider entry
 //! `CudaKernelProvider::wcoj_4cycle_u32_recorded(e1, e2, e3, e4, launch_stream)`
@@ -19,7 +19,7 @@
 //!   3. no false positives when the closing edge is missing
 //!   4. deterministic lex output across two runs
 //!
-//! Hard boundaries (per slice spec):
+//! Hard boundaries (per the documented contract):
 //!   * U32 only.
 //!   * Count → scan → materialize, deterministic output sorted (W, X, Y, Z).
 //!   * Strict LaunchRecorder discipline; runtime-backed manager required.

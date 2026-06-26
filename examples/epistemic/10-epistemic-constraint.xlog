@@ -1,4 +1,4 @@
-// v0.9.1 EGB-04: an epistemic integrity constraint prunes candidate world views.
+// an epistemic integrity constraint prunes candidate world views.
 // `:- know unsafe().` rejects any world view where `unsafe` is known. Here unsafe()
 // is a fact, so the only world view is pruned and the accepted result is empty
 // (a semantic pruning, NOT a runtime failure). Expect: accepted with rows: 0.

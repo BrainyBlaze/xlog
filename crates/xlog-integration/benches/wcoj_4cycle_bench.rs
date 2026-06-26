@@ -1,4 +1,4 @@
-//! v0.6.5 slice 2 — WCOJ 4-cycle benchmark baseline.
+//! WCOJ 4-cycle benchmark baseline.
 //!
 //! Bench-only. Compares the gate-controlled GPU 4-cycle WCOJ
 //! dispatch against the existing binary-join chain on identical

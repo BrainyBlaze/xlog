@@ -3,7 +3,7 @@
 //! WCOJ triangle dispatch.
 //!
 //! Locks the v1 dispatch policy across syntactic variants of a
-//! triangle rule. As of v0.6.5 slice 1 the executor's matcher
+//! triangle rule. As of `the executor's matcher
 //! `xlog_runtime::executor::wcoj_dispatch::match_multiway_triangle`
 //! consumes a `RirNode::MultiWayJoin` produced by
 //! `xlog_logic::promote::promote_multiway` after the optimizer

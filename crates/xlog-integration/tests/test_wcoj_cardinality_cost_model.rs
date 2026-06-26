@@ -1,5 +1,5 @@
 // crates/xlog-integration/tests/test_wcoj_cardinality_cost_model.rs
-//! v0.6.5 slice 5 — `CardinalityAwareCostModel` cert.
+//! `CardinalityAwareCostModel` cert.
 //!
 //! Locks the contract for the cardinality WCOJ cost model:
 //!
@@ -223,7 +223,7 @@ fn download_quads(buf: &CudaBuffer) -> Vec<(u32, u32, u32, u32)> {
 }
 
 /// Triangle program with `pred` declarations to anchor U32
-/// schemas, identical to slice 4's stable-triangle fixture.
+/// schemas, identical to the stable-triangle fixture.
 const STABLE_TRIANGLE_RECURSIVE: &str = r#"
     pred e1(u32, u32).
     pred e2(u32, u32).
@@ -235,7 +235,7 @@ const STABLE_TRIANGLE_RECURSIVE: &str = r#"
     tri(X, Y, Z) :- echo(X, Y, Z).
 "#;
 
-/// 4-cycle program with `pred` declarations, mirrors slice 4's
+/// 4-cycle program with `pred` declarations, mirrors the earlier
 /// stable-4-cycle fixture. Adaptive mode for 4-cycle is opt-in
 /// (not default-on like triangle), so the tests below set
 /// `with_wcoj_4cycle_dispatch_adaptive(Some(true))` explicitly.
@@ -337,7 +337,7 @@ fn cardinality_default_off_keeps_slice4_dispatch_counts() {
     assert_eq!(
         executor.wcoj_triangle_dispatch_count(),
         1,
-        "force gate must preserve slice 4 stable-triangle counter"
+        "force gate must preserve the stable-triangle counter"
     );
 }
 
