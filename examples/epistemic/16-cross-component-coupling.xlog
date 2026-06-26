@@ -1,4 +1,4 @@
-// v0.9.2 Bundle 3: cross-component epistemic coupling (ACCEPTED safe case).
+// cross-component epistemic coupling (ACCEPTED safe case).
 //
 // `trusted(X)` is an epistemic-derived head: a node is trusted iff it is a
 // `node` AND its membership is `know`n in the accepted world view's `vetted`

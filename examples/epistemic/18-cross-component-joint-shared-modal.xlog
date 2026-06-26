@@ -1,4 +1,4 @@
-// v0.9.2 Bundle 3 COMPLETION: cross-component epistemic JOINT-SOLVING (multi-output).
+// cross-component epistemic JOINT-SOLVING (multi-output).
 //
 // Two epistemic heads share ONE base modal predicate `q` (a SharedModalPredicate
 // coalesce), but neither head feeds the other -- `q` is a base/invariant
