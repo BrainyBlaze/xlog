@@ -26,6 +26,20 @@ fn prob_schema(scalar_type: ScalarType) -> Schema {
     Schema::new(vec![("col0".to_string(), scalar_type)])
 }
 
+/// Residency ablation hook (CRIT-2 / EIC C1). When `XLOG_FORCE_HOST_ROUNDTRIP=1`
+/// the engine forces a GPU -> host -> GPU round-trip on each neural-output tensor
+/// at the neural->symbolic handoff, before it is handed (zero-copy via DLPack) to
+/// the GPU-resident reasoner. This injects exactly the transfer cost a
+/// CPU-reasoning hybrid pays per iteration, so a with-vs-without timing run
+/// isolates xlog's transfer-free residency benefit from ordinary GPU
+/// acceleration. The round-trip is value-preserving (identity); only the data
+/// path changes.
+fn force_host_roundtrip_enabled() -> bool {
+    std::env::var("XLOG_FORCE_HOST_ROUNDTRIP")
+        .map(|v| v == "1")
+        .unwrap_or(false)
+}
+
 /// Comparable key for a constant term, used to test hard join conditions over
 /// the program's ground facts.
 #[derive(Debug, Clone, PartialEq)]
@@ -1598,6 +1612,13 @@ impl CompiledProgram {
                 let output_row = output_row.call_method0("contiguous")?;
 
                 let output_detached = output_row.call_method0("detach")?;
+                // Residency ablation (CRIT-2): optionally force a host round-trip
+                // on the neural output before the GPU-resident reasoner reads it.
+                let output_detached = if force_host_roundtrip_enabled() {
+                    output_detached.call_method0("cpu")?.call_method0("cuda")?
+                } else {
+                    output_detached
+                };
                 let managed = dlpack_from_py(&output_detached)?;
                 let prob_buf = self
                     .output_provider
@@ -1878,6 +1899,8 @@ impl CompiledProgram {
         // -- 4. Batched forward per network ------
         let torch = py.import("torch")?;
         let schema_f32 = prob_schema(ScalarType::F32);
+        // Residency ablation gate, read once per batch (CRIT-2).
+        let force_roundtrip = force_host_roundtrip_enabled();
 
         // Storage indexed by (query, group).
         let mut prob_map: StdHashMap<(usize, usize), xlog_cuda::CudaBuffer> = StdHashMap::new();
@@ -1939,6 +1962,13 @@ impl CompiledProgram {
 
                 // DLPack import: detach for prob values, keep original for autograd.
                 let row_detached = row.call_method0("detach")?;
+                // Residency ablation: optionally force the neural output through
+                // a host round-trip before the GPU-resident reasoner consumes it.
+                let row_detached = if force_roundtrip {
+                    row_detached.call_method0("cpu")?.call_method0("cuda")?
+                } else {
+                    row_detached
+                };
                 let managed = dlpack_from_py(&row_detached)?;
                 let prob_buf = self
                     .output_provider
