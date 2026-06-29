@@ -1490,7 +1490,10 @@ fn run_deterministic(args: RunArgs) -> Result<()> {
         // env vars; see xlog_core::RuntimeConfig::wcoj_triangle_dispatch).
         std::env::set_var("XLOG_USE_WCOJ_TRIANGLE_U32", "1");
         std::env::set_var("XLOG_USE_WCOJ_4CYCLE", "1");
-        eprintln!("WCOJ dispatch engaged (triangle + 4-cycle)");
+        // This only sets the gate. Whether a WCOJ kernel actually dispatched
+        // (vs. silently falling back to binary joins) is reported post-run
+        // via --stats `wcoj.triangle_dispatch` / `wcoj.four_cycle_dispatch`.
+        eprintln!("WCOJ dispatch gates set (triangle + 4-cycle); run with --stats to confirm a kernel fired");
     }
     let provider = make_provider(args.device, args.memory_mb)?;
     let source = std::fs::read_to_string(&args.source).map_err(|e| {
@@ -1549,6 +1552,33 @@ fn run_deterministic(args: RunArgs) -> Result<()> {
     // Emit stats if requested
     if args.stats {
         if let Some(stats) = result.stats {
+            if args.wcoj {
+                // Honest confirmation: did a WCOJ kernel actually fire, or did
+                // the run silently fall back to binary joins? Count every WCOJ
+                // dispatch kind — fused triangle COUNTING, for instance, routes
+                // through the group-by-fusion kernel, not the triangle hook.
+                let fired = stats.wcoj_triangle_dispatch_count
+                    + stats.wcoj_4cycle_dispatch_count
+                    + stats.wcoj_groupby_fusion_dispatch_count
+                    + stats.free_join_dispatch_count
+                    + stats.factorized_delta_dispatch_count;
+                if fired > 0 {
+                    eprintln!(
+                        "WCOJ kernels dispatched: triangle {}, 4-cycle {}, groupby-fusion {}, free-join {}, factorized-delta {} (declines {})",
+                        stats.wcoj_triangle_dispatch_count,
+                        stats.wcoj_4cycle_dispatch_count,
+                        stats.wcoj_groupby_fusion_dispatch_count,
+                        stats.free_join_dispatch_count,
+                        stats.factorized_delta_dispatch_count,
+                        stats.wcoj_error_decline_count,
+                    );
+                } else {
+                    eprintln!(
+                        "WARNING: --wcoj set but no WCOJ kernel dispatched (declines {}); the run fell back to binary joins",
+                        stats.wcoj_error_decline_count,
+                    );
+                }
+            }
             let stats_output = match args.stats_format {
                 StatsFormat::Human => stats.format_human(),
                 StatsFormat::Json => stats.format_json(),

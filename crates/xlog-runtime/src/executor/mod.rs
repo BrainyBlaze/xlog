@@ -517,7 +517,18 @@ impl Executor {
     ///
     /// Returns collected statistics if profiling was enabled.
     pub fn execution_stats(&self, total_output_rows: u64) -> ExecutionStats {
-        self.profiler.execution_stats(total_output_rows)
+        let mut stats = self.profiler.execution_stats(total_output_rows);
+        // WCOJ/multiway dispatch counters live on the executor, not the
+        // profiler. Surface them so a `--stats` run can be *verified* to have
+        // used the WCOJ kernels rather than silently falling back to binary
+        // joins (the failure mode that wasted a full GPU benchmark cycle).
+        stats.wcoj_triangle_dispatch_count = self.wcoj_triangle_dispatch_count();
+        stats.wcoj_4cycle_dispatch_count = self.wcoj_4cycle_dispatch_count();
+        stats.wcoj_groupby_fusion_dispatch_count = self.wcoj_groupby_fusion_dispatch_count();
+        stats.free_join_dispatch_count = self.free_join_dispatch_count();
+        stats.factorized_delta_dispatch_count = self.factorized_delta_dispatch_count();
+        stats.wcoj_error_decline_count = self.wcoj_error_decline_count();
+        stats
     }
 
     /// Get a reference to the relation store
