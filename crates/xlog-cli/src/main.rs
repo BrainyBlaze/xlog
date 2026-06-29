@@ -72,6 +72,12 @@ struct RunArgs {
     /// and lets a caller assert `cpu_fallback == 0` off a real GPU run.
     #[arg(long)]
     epistemic_plan_json: Option<PathBuf>,
+    /// Engage the worst-case-optimal join (WCOJ) subsystem for eligible
+    /// multiway rules (triangle + 4-cycle). Without this the deterministic
+    /// runner uses binary joins, which blow up on skewed cyclic queries.
+    /// Sets the documented WCOJ dispatch gates for this process.
+    #[arg(long)]
+    wcoj: bool,
 }
 
 #[derive(Copy, Clone, ValueEnum, Default)]
@@ -1438,12 +1444,33 @@ fn dot_escape(value: &str) -> String {
 }
 
 fn make_provider(device: usize, memory_mb: u64) -> Result<Arc<CudaKernelProvider>> {
+    use xlog_cuda::device_runtime::{
+        AsyncCudaResource, DeviceMemoryResource, GlobalDeviceBudget, StreamPool, XlogDeviceRuntime,
+    };
     let device = Arc::new(CudaDevice::new(device)?);
-    let memory = Arc::new(GpuMemoryManager::new(
-        device.clone(),
-        MemoryBudget::with_limit(memory_mb * 1024 * 1024),
+    // Runtime-backed memory manager: the recorded GPU primitives (WCOJ
+    // triangle/4-cycle/k-clique, Free Join, factorized delta) require a
+    // DeviceBlock-backed allocation routed through an XlogDeviceRuntime.
+    // The plain `GpuMemoryManager::new` path leaves `memory().runtime()`
+    // == None, so those dispatches silently fall back to binary joins.
+    let pool = Arc::new(StreamPool::with_defaults(Arc::clone(&device)));
+    let async_resource: Box<dyn DeviceMemoryResource + Send + Sync> =
+        Box::new(AsyncCudaResource::new(Arc::clone(&device), 0, Arc::clone(&pool)));
+    let budget_resource: Box<dyn DeviceMemoryResource + Send + Sync> = Box::new(
+        GlobalDeviceBudget::new(async_resource, (memory_mb * 1024 * 1024) as usize),
+    );
+    let runtime = Arc::new(XlogDeviceRuntime::with_resource(
+        Arc::clone(&device),
+        0,
+        Arc::clone(&pool),
+        budget_resource,
     ));
-    Ok(Arc::new(CudaKernelProvider::new(device, memory)?))
+    let memory = Arc::new(GpuMemoryManager::with_runtime(
+        Arc::clone(&device),
+        MemoryBudget::with_limit(memory_mb * 1024 * 1024),
+        Arc::clone(&runtime),
+    ));
+    Ok(Arc::new(CudaKernelProvider::with_runtime(device, memory)?))
 }
 
 fn parse_inputs(inputs: &[String]) -> Result<HashMap<String, PathBuf>> {
@@ -1458,6 +1485,13 @@ fn parse_inputs(inputs: &[String]) -> Result<HashMap<String, PathBuf>> {
 }
 
 fn run_deterministic(args: RunArgs) -> Result<()> {
+    if args.wcoj {
+        // Force the WCOJ dispatch gates (default RuntimeConfig consults these
+        // env vars; see xlog_core::RuntimeConfig::wcoj_triangle_dispatch).
+        std::env::set_var("XLOG_USE_WCOJ_TRIANGLE_U32", "1");
+        std::env::set_var("XLOG_USE_WCOJ_4CYCLE", "1");
+        eprintln!("WCOJ dispatch engaged (triangle + 4-cycle)");
+    }
     let provider = make_provider(args.device, args.memory_mb)?;
     let source = std::fs::read_to_string(&args.source).map_err(|e| {
         XlogError::Execution(format!("Failed to read {}: {}", args.source.display(), e))
