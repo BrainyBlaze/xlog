@@ -95,6 +95,7 @@ impl Program {
             declared_networks,
             declared_network_forms,
             tensor_sources: TensorSourceRegistry::new(),
+            domain_source: None,
             _source: source.to_string(),
             ast,
             _gpu_config: config,

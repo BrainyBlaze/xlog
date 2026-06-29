@@ -176,26 +176,108 @@ def test_real_parser_rejects_invalid_xlog() -> None:
     assert "trainable_rule" not in str(excinfo.value)
 
 
-def test_existential_join_hard_condition_fails_closed() -> None:
-    """A hard condition that joins an ordinary relation on an existential
-    (non-head) variable is not yet supported: typed error, never a
-    silently-wrong probability. Head-variable hard conditions ARE supported
-    (see test_mixed_trainable_rule_bodies.py)."""
-    source = """
-        nn(root_net, [Case], Label, [negative, positive]) :: neural_root(Case, Label).
-        link(0, 9).
-        pred link(i64, i64).
-        trainable_rule(rule_mixed, weight=0.0) :: root_case(Case) :-
-            neural_root(Case, positive), link(Case, Other).
-        train(root_case, binary_cross_entropy).
+# --- Stage B: existential-join trainable bodies (neural predicate grounded over a real domain) ---
+
+
+def _sal_net():
+    """saliency(Event, Label) over labels [low, strengthen]; input is a per-event
+    feature vector (the net learns a generalizable saliency function, not an id lookup)."""
+    net = torch.nn.Sequential(
+        torch.nn.Linear(1, 2, bias=False),
+        torch.nn.Softmax(dim=-1),
+    )
+    with torch.no_grad():
+        net[0].weight.copy_(torch.tensor(((0.0,), (3.0,)), dtype=torch.float32))
+    return net
+
+
+def _event_features():
+    """Per-event feature, row i = features of event i (domain order). Events 0,1
+    join edge 0; event 2 joins edge 1."""
+    return torch.tensor([[0.9], [0.8], [0.2]], dtype=torch.float32)
+
+
+def _sal_strengthen_probs(net, feats):
+    """P(saliency(event, strengthen)) for each event row — label index 1.
+
+    ``train_neurosymbolic_program`` moves the network to cuda in place, so feed
+    the features on the network's current device.
     """
-    with pytest.raises(Exception, match="(?i)existential"):
-        train_neurosymbolic_program(
-            source,
-            networks={"root_net": _root_net()},
-            examples=_examples(),
-            config=NeuroSymbolicTrainingConfig(steps=1, learning_rate=0.1),
-        )
+    with torch.no_grad():
+        device = next(net.parameters()).device
+        out = net(feats.to(device))
+    return out[:, 1].cpu().tolist()
+
+
+def test_existential_join_trains_with_or_aggregation() -> None:
+    """A neural predicate joined to an ordinary relation on an existential variable
+    grounds over the real join domain: P(plastic(Edge)) is the guard-gated noisy-OR
+    over the events joined to that edge. Per-event features arrive via ``domain_inputs``
+    (keyed by event id / domain order); ``examples`` carry only the per-edge targets."""
+    network = _sal_net()
+    feats = _event_features()
+    source = """
+        nn(sal_net, [Event], Label, [low, strengthen]) :: saliency(Event, Label).
+        pre_before_post(0, 0).
+        pre_before_post(1, 0).
+        pre_before_post(2, 1).
+        pred pre_before_post(i64, i64).
+        trainable_rule(rule_plastic, weight=2.0) :: plastic(Edge) :-
+            saliency(Event, strengthen), pre_before_post(Event, Edge).
+        train(plastic, binary_cross_entropy).
+    """
+    result = train_neurosymbolic_program(
+        source,
+        networks={"sal_net": network},
+        domain_inputs={"sal_net": feats},
+        examples=[{"targets": torch.tensor([1.0, 0.0], dtype=torch.float32)}],
+        config=NeuroSymbolicTrainingConfig(steps=1, learning_rate=0.0),
+    )
+
+    p_guard = 1.0 / (1.0 + math.exp(-2.0))
+    p = _sal_strengthen_probs(network, feats)
+    expected_edge0 = p_guard * (1.0 - (1.0 - p[0]) * (1.0 - p[1]))
+    expected_edge1 = p_guard * p[2]
+
+    assert result.query_probabilities[0] == pytest.approx(expected_edge0, abs=1e-4)
+    assert result.query_probabilities[1] == pytest.approx(expected_edge1, abs=1e-4)
+
+
+def test_existential_join_gradients_reach_net_and_guard_not_structure() -> None:
+    """Training a mislabeled edge drives gradient into the saliency network (all
+    joined events, through the expanded per-event circuit leaves) and the rule
+    guard, but never into the deterministic ``pre_before_post`` join structure.
+    The loss decreases — the existential-join rule actually trains."""
+    network = _sal_net()
+    feats = _event_features()
+    source = """
+        nn(sal_net, [Event], Label, [low, strengthen]) :: saliency(Event, Label).
+        pre_before_post(0, 0).
+        pre_before_post(1, 0).
+        pre_before_post(2, 1).
+        pred pre_before_post(i64, i64).
+        trainable_rule(rule_plastic, weight=0.0) :: plastic(Edge) :-
+            saliency(Event, strengthen), pre_before_post(Event, Edge).
+        train(plastic, binary_cross_entropy).
+    """
+    result = train_neurosymbolic_program(
+        source,
+        networks={"sal_net": network},
+        domain_inputs={"sal_net": feats},
+        examples=[{"targets": torch.tensor([1.0, 0.0], dtype=torch.float32)}],
+        config=NeuroSymbolicTrainingConfig(steps=4, learning_rate=0.2),
+    )
+
+    # Gradient reaches the neural predicate (summed over all joined events) and
+    # the rule guard.
+    assert result.neural_parameter_grads["sal_net"] > 0.0
+    assert result.symbolic_weight_grads["rule_plastic"] > 0.0
+    # The deterministic join structure is never a trainable parameter.
+    assert "pre_before_post" not in result.symbolic_weight_grads
+    assert "pre_before_post" not in result.neural_parameter_grads
+    # The rule trains: loss strictly decreases over the steps.
+    assert len(result.losses) == 4
+    assert result.losses[-1] < result.losses[0]
 
 
 def test_missing_network_validated_against_real_declarations() -> None:

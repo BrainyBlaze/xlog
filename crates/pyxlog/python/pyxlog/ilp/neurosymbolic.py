@@ -31,6 +31,11 @@ from pyxlog.ilp.inventory import RuleInventory, RuleInventoryClause
 _GUARD_PREDICATE_PREFIX = "nsr_guard_"
 _GUARD_NETWORK_PREFIX = "nsr_w_"
 _TENSOR_SOURCE_NAME = "nsr_examples"
+# Stage-B existential join: per-event feature batch the join neural predicate is
+# forwarded over. The driver owns this name and passes it to the engine via
+# `register_domain_tensor_source`; the engine reads whichever source it was given
+# (no hardcoded source name on the Rust side), so this is the single definition.
+_DOMAIN_SOURCE_NAME = "nsr_domain"
 _ENGINE_NAME = "xlog-exact-circuit"
 
 
@@ -140,6 +145,7 @@ def train_neurosymbolic_program(
     examples: list[dict[str, Any]],
     config: NeuroSymbolicTrainingConfig = NeuroSymbolicTrainingConfig(),
     neural_bodies: dict[str, "NeuralBodySpec"] | None = None,
+    domain_inputs: dict[str, Any] | None = None,
 ) -> NeuroSymbolicTrainingResult:
     """Jointly train neural predicates and symbolic rule weights on the engine.
 
@@ -149,6 +155,16 @@ def train_neurosymbolic_program(
     eligibility becomes its relational grounding AND the ST-thresholded gate, and
     ``g_theta_k`` trains jointly with the guards under the same held-out selector.
     Only meaningful in the multi-rule joint path (>1 same-head candidate).
+
+    ``domain_inputs`` is the Stage-B existential-join channel: a per-network
+    ``{net_name: features}`` map where ``features`` is a ``[n_events, k]`` tensor,
+    row ``i`` = the feature vector of the ``i``-th join-domain constant in sorted
+    order (e.g. event id ``i``). When a ``trainable_rule`` joins a neural predicate
+    to an ordinary relation on an existential variable, the predicate is grounded
+    over this real domain inside the circuit and OR-aggregated at the head; the
+    ``examples`` then carry ONLY per-head-binding ``targets`` (no per-query
+    ``inputs``). The head-binding (e.g. edge) ids must be ``0..len(targets)-1``,
+    row-aligned with ``targets``. Currently supports a single join network.
     """
 
     import torch
@@ -197,7 +213,23 @@ def train_neurosymbolic_program(
             _make_optimizer(config.optimizer, guard.parameters(), config.learning_rate),
         )
 
-    program.add_tensor_source(_TENSOR_SOURCE_NAME, inputs.cuda())
+    if inputs is not None:
+        program.add_tensor_source(_TENSOR_SOURCE_NAME, inputs.cuda())
+
+    # Stage-B existential join: register the per-event feature batch the join
+    # neural predicate is grounded over. A single join network is supported.
+    domain_inputs = domain_inputs or {}
+    if len(domain_inputs) > 1:
+        raise ValueError(
+            "domain_inputs currently supports a single join network; "
+            f"got {sorted(domain_inputs)}"
+        )
+    for name, feats in domain_inputs.items():
+        if name not in declared:
+            raise ValueError(
+                f"domain_inputs names network '{name}' which is not declared by any nn/4"
+            )
+        program.register_domain_tensor_source(_DOMAIN_SOURCE_NAME, feats.cuda())
 
     # Neural-body conjuncts: one small g_theta head per neural-bodied
     # candidate, over its fixed-width phi(x). Trained torch-side (not a circuit
@@ -1154,24 +1186,34 @@ def _make_rule_weight_module(initial_logit: float) -> Any:
 
 
 def _collect_examples(examples: list[dict[str, Any]]):
+    """Collect ``(inputs, targets)`` from the example batches.
+
+    ``inputs`` is ``None`` when the batches carry only ``targets`` — the Stage-B
+    existential-join contract, where the join neural predicate is forwarded over
+    the ``domain_inputs`` event domain rather than over per-query input rows.
+    """
     import torch
 
     input_parts = []
     target_parts = []
+    have_inputs = True
     for batch in examples:
-        inputs = batch["inputs"]
         targets = batch["targets"].to(dtype=torch.float32)
-        if inputs.shape[0] != targets.shape[0]:
-            raise ValueError(
-                f"examples batch has {inputs.shape[0]} inputs but "
-                f"{targets.shape[0]} targets"
-            )
         if bool(((targets != 0.0) & (targets != 1.0)).any()):
             raise ValueError("targets must be binary (0.0 or 1.0)")
-        input_parts.append(inputs)
+        if "inputs" in batch:
+            inputs = batch["inputs"]
+            if inputs.shape[0] != targets.shape[0]:
+                raise ValueError(
+                    f"examples batch has {inputs.shape[0]} inputs but "
+                    f"{targets.shape[0]} targets"
+                )
+            input_parts.append(inputs)
+        else:
+            have_inputs = False
         target_parts.append(targets)
-    all_inputs = torch.cat(input_parts, dim=0)
     all_targets = [bool(t >= 0.5) for t in torch.cat(target_parts, dim=0)]
+    all_inputs = torch.cat(input_parts, dim=0) if (have_inputs and input_parts) else None
     return all_inputs, all_targets
 
 

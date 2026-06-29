@@ -18,12 +18,23 @@ use std::collections::HashMap as StdHashMap;
 use super::neural_registry::NeuralPredicateInfo;
 use super::{
     dlpack_capsule_from_tensor, dlpack_from_py, types, CachedCircuit, CompiledProgram, EpochStats,
-    HardFilter, InputSource, NeuralGroup, QuerySignature, TrainingHistory,
+    HardFilter, InputSource, JoinPlan, NeuralGroup, QuerySignature, TrainingHistory,
 };
 
 /// Build the standard 1-column schema for probability values.
 fn prob_schema(scalar_type: ScalarType) -> Schema {
     Schema::new(vec![("col0".to_string(), scalar_type)])
+}
+
+/// How a neural group's forward input row is fetched. The placeholder/slot path
+/// reads the active per-query examples source; Stage-B real-domain groups read a
+/// fixed row of the join-domain source (per-event features) or a dummy row (an
+/// input-independent leaf such as the rule-weight guard).
+#[derive(Clone)]
+enum Fetch {
+    Active(usize),
+    Domain(usize),
+    Dummy,
 }
 
 /// Comparable key for a constant term, used to test hard join conditions over
@@ -588,6 +599,22 @@ impl CompiledProgram {
         let metadata = TensorMetadata::with_dtype(size, sample_shape, &dtype_str);
         self.tensor_sources.add(&name, tensor, metadata);
 
+        Ok(())
+    }
+
+    /// Register the Stage-B existential-join domain tensor source: stores the
+    /// per-event feature batch under `name` AND records `name` as the join-domain
+    /// source the forward reads (for `DomainRow`/`ConstDummy` groups). The name is
+    /// owned by the Python driver and flows in as data — the engine holds no
+    /// hardcoded source name.
+    fn register_domain_tensor_source(
+        &mut self,
+        py: Python<'_>,
+        name: String,
+        tensor: PyObject,
+    ) -> PyResult<()> {
+        self.add_tensor_source(py, name.clone(), tensor)?;
+        self.domain_source = Some(name);
         Ok(())
     }
 
@@ -1503,12 +1530,16 @@ impl CompiledProgram {
             return self.zero_probability_loss(py, expected);
         }
 
-        let input_indices: Vec<usize> = signature
+        let input_indices: Vec<Fetch> = signature
             .groups()
             .iter()
             .map(|group| match &group.input_source {
-                InputSource::QueryArg(pos) => self.term_to_input_idx(&atom.terms[*pos]),
-                InputSource::ImplicitSlot(slot) => Ok(*slot),
+                InputSource::QueryArg(pos) => {
+                    self.term_to_input_idx(&atom.terms[*pos]).map(Fetch::Active)
+                }
+                InputSource::ImplicitSlot(slot) => Ok(Fetch::Active(*slot)),
+                InputSource::DomainRow(row) => Ok(Fetch::Domain(*row)),
+                InputSource::ConstDummy => Ok(Fetch::Dummy),
             })
             .collect::<PyResult<Vec<_>>>()?;
         if input_indices.is_empty() {
@@ -1531,12 +1562,12 @@ impl CompiledProgram {
 
         #[derive(Clone)]
         struct NeuralCall {
-            input_idx: usize,
+            fetch: Fetch,
             order_idx: usize,
         }
 
         let mut calls_by_network: HashMap<String, Vec<NeuralCall>> = HashMap::new();
-        for (order_idx, &input_idx) in input_indices.iter().enumerate() {
+        for (order_idx, fetch) in input_indices.iter().enumerate() {
             let network_name = signature
                 .groups()
                 .get(order_idx)
@@ -1552,7 +1583,7 @@ impl CompiledProgram {
                 .entry(network_name)
                 .or_default()
                 .push(NeuralCall {
-                    input_idx,
+                    fetch: fetch.clone(),
                     order_idx,
                 });
         }
@@ -1581,7 +1612,7 @@ impl CompiledProgram {
 
             let mut inputs: Vec<PyObject> = Vec::with_capacity(calls.len());
             for call in &calls {
-                inputs.push(self.get_input_tensor(py, call.input_idx)?);
+                inputs.push(self.resolve_input_tensor(py, &call.fetch)?);
             }
 
             let input_list = pyo3::types::PyList::new(py, &inputs)?;
@@ -1802,17 +1833,21 @@ impl CompiledProgram {
             }
         }
 
-        // -- 2. Per-query data: input indices + query_idx ----
-        let mut per_query_inputs: Vec<Vec<usize>> = Vec::with_capacity(n_queries);
+        // -- 2. Per-query data: input fetches + query_idx ----
+        let mut per_query_inputs: Vec<Vec<Fetch>> = Vec::with_capacity(n_queries);
         let mut per_query_idx: Vec<usize> = Vec::with_capacity(n_queries);
 
         for atom in atoms {
-            let input_indices: Vec<usize> = signature
+            let input_indices: Vec<Fetch> = signature
                 .groups()
                 .iter()
                 .map(|group| match &group.input_source {
-                    InputSource::QueryArg(pos) => self.term_to_input_idx(&atom.terms[*pos]),
-                    InputSource::ImplicitSlot(slot) => Ok(*slot),
+                    InputSource::QueryArg(pos) => {
+                        self.term_to_input_idx(&atom.terms[*pos]).map(Fetch::Active)
+                    }
+                    InputSource::ImplicitSlot(slot) => Ok(Fetch::Active(*slot)),
+                    InputSource::DomainRow(row) => Ok(Fetch::Domain(*row)),
+                    InputSource::ConstDummy => Ok(Fetch::Dummy),
                 })
                 .collect::<PyResult<Vec<_>>>()?;
 
@@ -1850,7 +1885,7 @@ impl CompiledProgram {
         struct NetCall {
             query: usize,
             group: usize,
-            input_idx: usize,
+            fetch: Fetch,
         }
         let mut calls_by_network: Vec<(String, Vec<NetCall>)> = Vec::new();
         let mut net_index: StdHashMap<String, usize> = StdHashMap::new();
@@ -1870,7 +1905,7 @@ impl CompiledProgram {
                 calls_by_network[idx].1.push(NetCall {
                     query: q,
                     group: g,
-                    input_idx: inputs[g],
+                    fetch: inputs[g].clone(),
                 });
             }
         }
@@ -1897,7 +1932,7 @@ impl CompiledProgram {
             // Stack all inputs for this network into a single batch.
             let mut inputs: Vec<PyObject> = Vec::with_capacity(calls.len());
             for c in calls {
-                inputs.push(self.get_input_tensor(py, c.input_idx)?);
+                inputs.push(self.resolve_input_tensor(py, &c.fetch)?);
             }
             let input_list = pyo3::types::PyList::new(py, &inputs)?;
             let stacked = torch.call_method1("stack", (input_list, 0i32))?;
@@ -2165,13 +2200,21 @@ impl CompiledProgram {
         pred_name: &str,
         arity: usize,
     ) -> PyResult<QuerySignature> {
-        let mut groups: Vec<NeuralGroup> = Vec::with_capacity(rule.body.len());
-        // Ordinary-relation body atoms collected as HARD join conditions.
-        let mut hard_filters: Vec<HardFilter> = Vec::new();
+        // ---- Pass 1: collect neural occurrences and ordinary-relation atoms. ----
+        // The query template grounds ONLY nn/4 predicates; an ordinary relation
+        // is either a HARD pre-filter (head-bound args) or a Stage-B existential
+        // join (an existential arg that is a neural predicate's input variable).
+        struct NeuralOccurrence {
+            info: NeuralPredicateInfo,
+            input_var: String,
+            input_head_pos: Option<usize>,
+            #[cfg(feature = "host-io")]
+            output_var: Option<String>,
+        }
+        let mut neural_occ: Vec<NeuralOccurrence> = Vec::new();
+        let mut ordinary_atoms: Vec<&Atom> = Vec::new();
+
         for literal in &rule.body {
-            // The query template grounds ONLY nn/4 predicates; any other
-            // relational literal would silently evaluate over an empty
-            // relation and collapse the query probability. Fail closed.
             let body_atom = match literal {
                 BodyLiteral::Positive(atom) => atom,
                 BodyLiteral::Negated(atom) => {
@@ -2194,64 +2237,11 @@ impl CompiledProgram {
             };
 
             if self.neural_registry.get(&body_atom.predicate).is_none() {
-                // An ordinary relation is a HARD join condition, not a
-                // probability source. Record how its args bind to the query
-                // head positions; it gates which groundings fire but flows no
-                // gradient. Existential (non-head) join variables are a
-                // documented follow-up — reject them clearly for now.
-                let mut arg_head_positions = Vec::with_capacity(body_atom.terms.len());
-                for (i, term) in body_atom.terms.iter().enumerate() {
-                    match term {
-                        Term::Variable(name) => match Self::find_head_position(&rule.head, name) {
-                            Some(pos) => arg_head_positions.push(pos),
-                            None => {
-                                return Err(PyValueError::new_err(format!(
-                                    "Query rule for '{}' joins ordinary relation '{}' on \
-                                     existential variable '{}' (arg {}); existential-join hard \
-                                     conditions are not yet supported (follow-up). Only \
-                                     head-variable hard filters are supported today.",
-                                    pred_name, body_atom.predicate, name, i
-                                )));
-                            }
-                        },
-                        _ => {
-                            return Err(PyValueError::new_err(format!(
-                                "Query rule for '{}' hard-condition relation '{}' has a \
-                                 non-variable argument at position {}; only variables bound to \
-                                 head positions are supported",
-                                pred_name, body_atom.predicate, i
-                            )));
-                        }
-                    }
-                }
-                // The hard condition is checked against the program's GROUND
-                // facts only; a derived relation (one defined by a rule with a
-                // body) is not materialized and would silently filter every
-                // grounding to probability 0. Fail loud instead — the join must
-                // be done upstream and supplied as ground facts.
-                let is_derived = self
-                    .ast
-                    .rules
-                    .iter()
-                    .any(|r| r.head.predicate == body_atom.predicate && !r.body.is_empty());
-                if is_derived {
-                    return Err(PyValueError::new_err(format!(
-                        "Query rule for '{}' uses derived relation '{}' as a hard condition; \
-                         hard conditions are checked against ground facts only, so a derived \
-                         relation would silently exclude every grounding. Materialize it \
-                         upstream and supply it as ground facts.",
-                        pred_name, body_atom.predicate
-                    )));
-                }
-                hard_filters.push(HardFilter {
-                    relation: body_atom.predicate.clone(),
-                    arg_head_positions,
-                });
+                ordinary_atoms.push(body_atom);
                 continue;
             }
 
             let info = self.match_neural_decl_for_atom(body_atom)?;
-
             if info.input_positions.len() != 1 {
                 return Err(PyValueError::new_err(format!(
                     "Query signature currently supports exactly one input position per neural declaration; '{}' has {}",
@@ -2259,7 +2249,6 @@ impl CompiledProgram {
                     info.input_positions.len()
                 )));
             }
-
             let input_position = info.input_positions[0];
             let input_term = body_atom.terms.get(input_position).ok_or_else(|| {
                 PyValueError::new_err(format!(
@@ -2268,7 +2257,7 @@ impl CompiledProgram {
                 ))
             })?;
             let input_var = match input_term {
-                Term::Variable(name) => name.as_str(),
+                Term::Variable(name) => name.clone(),
                 _ => {
                     return Err(PyValueError::new_err(format!(
                         "Expected variable at input position {} of neural call '{}'",
@@ -2276,18 +2265,6 @@ impl CompiledProgram {
                     )))
                 }
             };
-
-            let input_source =
-                if let Some(head_position) = Self::find_head_position(&rule.head, input_var) {
-                    InputSource::QueryArg(head_position)
-                } else {
-                    let next_slot = groups
-                        .iter()
-                        .filter(|group| matches!(group.input_source, InputSource::ImplicitSlot(_)))
-                        .count();
-                    InputSource::ImplicitSlot(next_slot)
-                };
-
             let _output_term = body_atom.terms.get(info.output_position).ok_or_else(|| {
                 PyValueError::new_err(format!(
                     "Malformed declaration for '{}': missing output variable at {}",
@@ -2299,13 +2276,209 @@ impl CompiledProgram {
                 Term::Variable(name) => Some(name.clone()),
                 _ => None,
             };
-
-            groups.push(NeuralGroup {
+            let input_head_pos = Self::find_head_position(&rule.head, &input_var);
+            neural_occ.push(NeuralOccurrence {
                 info: info.clone(),
-                input_source,
+                input_var,
+                input_head_pos,
                 #[cfg(feature = "host-io")]
                 output_var,
             });
+        }
+
+        // ---- Pass 2: classify ordinary atoms as hard filters or Stage-B joins. --
+        // A join is an ordinary relation with EXACTLY one existential (non-head)
+        // argument variable that IS the input variable of a neural occurrence; its
+        // remaining argument variables bind head positions. Such a relation is
+        // grounded INSIDE the circuit (real-domain), not stripped as a pre-filter.
+        struct JoinRecord {
+            relation: String,
+            neural_idx: usize,
+            join_var_arg_pos: usize,
+            head_key: Vec<(usize, usize)>, // (relation arg position, head position)
+        }
+        let mut joins: Vec<JoinRecord> = Vec::new();
+        let mut hard_filters: Vec<HardFilter> = Vec::new();
+
+        for atom in &ordinary_atoms {
+            let mut existential_join: Option<(usize, usize)> = None;
+            let mut existential_nonjoin: Option<String> = None;
+            let mut head_key: Vec<(usize, usize)> = Vec::new();
+            let mut arg_head_positions: Vec<usize> = Vec::with_capacity(atom.terms.len());
+            let mut non_variable: Option<usize> = None;
+            for (i, term) in atom.terms.iter().enumerate() {
+                match term {
+                    Term::Variable(name) => match Self::find_head_position(&rule.head, name) {
+                        Some(pos) => {
+                            head_key.push((i, pos));
+                            arg_head_positions.push(pos);
+                        }
+                        None => match neural_occ.iter().position(|o| &o.input_var == name) {
+                            Some(nidx) => {
+                                if existential_join.is_some() {
+                                    return Err(PyValueError::new_err(format!(
+                                        "Query rule for '{}' relation '{}' joins on more than one \
+                                         existential neural-input variable; only a single \
+                                         existential join variable is supported",
+                                        pred_name, atom.predicate
+                                    )));
+                                }
+                                existential_join = Some((i, nidx));
+                            }
+                            None => existential_nonjoin = Some(name.clone()),
+                        },
+                    },
+                    _ => non_variable = Some(i),
+                }
+            }
+
+            if let Some(name) = existential_nonjoin {
+                return Err(PyValueError::new_err(format!(
+                    "Query rule for '{}' joins ordinary relation '{}' on existential variable '{}'; \
+                     existential-join conditions are supported only when the variable is the input \
+                     of a neural predicate (Stage-B). Only head-variable hard filters and \
+                     neural-input existential joins are supported.",
+                    pred_name, atom.predicate, name
+                )));
+            }
+
+            // Ground-facts-only requirement shared by joins and hard filters: a
+            // derived relation has no materialized extension and would not ground.
+            let is_derived = self
+                .ast
+                .rules
+                .iter()
+                .any(|r| r.head.predicate == atom.predicate && !r.body.is_empty());
+
+            if let Some((join_var_arg_pos, neural_idx)) = existential_join {
+                if is_derived {
+                    return Err(PyValueError::new_err(format!(
+                        "Query rule for '{}' uses derived relation '{}' as an existential join; \
+                         the join domain is materialized from ground facts only. Materialize it \
+                         upstream and supply it as ground facts.",
+                        pred_name, atom.predicate
+                    )));
+                }
+                joins.push(JoinRecord {
+                    relation: atom.predicate.clone(),
+                    neural_idx,
+                    join_var_arg_pos,
+                    head_key,
+                });
+                continue;
+            }
+
+            if let Some(i) = non_variable {
+                return Err(PyValueError::new_err(format!(
+                    "Query rule for '{}' hard-condition relation '{}' has a non-variable argument \
+                     at position {}; only variables bound to head positions are supported",
+                    pred_name, atom.predicate, i
+                )));
+            }
+
+            if is_derived {
+                return Err(PyValueError::new_err(format!(
+                    "Query rule for '{}' uses derived relation '{}' as a hard condition; \
+                     hard conditions are checked against ground facts only, so a derived \
+                     relation would silently exclude every grounding. Materialize it \
+                     upstream and supply it as ground facts.",
+                    pred_name, atom.predicate
+                )));
+            }
+            hard_filters.push(HardFilter {
+                relation: atom.predicate.clone(),
+                arg_head_positions,
+            });
+        }
+
+        let joins_present = !joins.is_empty();
+
+        // ---- Pass 3: build neural groups (expanded over the real join domain). --
+        let mut groups: Vec<NeuralGroup> = Vec::with_capacity(neural_occ.len());
+        for (occ_idx, occ) in neural_occ.iter().enumerate() {
+            if let Some(join) = joins.iter().find(|j| j.neural_idx == occ_idx) {
+                // Join-target group (e.g. saliency): one leaf per real event id.
+                let event_domain =
+                    self.materialize_int_domain(&join.relation, join.join_var_arg_pos)?;
+                if event_domain.is_empty() {
+                    return Err(PyValueError::new_err(format!(
+                        "Query rule for '{}': existential-join relation '{}' has no ground facts \
+                         to materialize the join domain for variable '{}'",
+                        pred_name, join.relation, occ.input_var
+                    )));
+                }
+                for (row, ev) in event_domain.iter().enumerate() {
+                    groups.push(NeuralGroup {
+                        info: occ.info.clone(),
+                        input_source: InputSource::DomainRow(row),
+                        ground_const: Some(Term::Integer(*ev)),
+                        #[cfg(feature = "host-io")]
+                        output_var: occ.output_var.clone(),
+                    });
+                }
+            } else if joins_present {
+                // In a join rule, the remaining neural predicates must be
+                // head-keyed (e.g. the rule-weight guard): one leaf per real head
+                // constant, fed a dummy input (the leaf weight is input-independent).
+                let head_pos = occ.input_head_pos.ok_or_else(|| {
+                    PyValueError::new_err(format!(
+                        "Query rule for '{}': neural predicate '{}' over existential variable '{}' \
+                         is neither the join target nor head-bound; unsupported in a Stage-B join rule",
+                        pred_name, occ.info.predicate, occ.input_var
+                    ))
+                })?;
+                let (rel, arg_pos) = joins
+                    .iter()
+                    .find_map(|j| {
+                        j.head_key
+                            .iter()
+                            .find(|(_, hp)| *hp == head_pos)
+                            .map(|(ap, _)| (j.relation.clone(), *ap))
+                    })
+                    .ok_or_else(|| {
+                        PyValueError::new_err(format!(
+                            "Query rule for '{}': head-keyed neural predicate '{}' is not bound by \
+                             any existential-join relation at head position {}",
+                            pred_name, occ.info.predicate, head_pos
+                        ))
+                    })?;
+                let edge_domain = self.materialize_int_domain(&rel, arg_pos)?;
+                if edge_domain.is_empty() {
+                    return Err(PyValueError::new_err(format!(
+                        "Query rule for '{}': join relation '{}' has no ground facts to materialize \
+                         the head-key domain",
+                        pred_name, rel
+                    )));
+                }
+                for edge in edge_domain.iter() {
+                    groups.push(NeuralGroup {
+                        info: occ.info.clone(),
+                        input_source: InputSource::ConstDummy,
+                        ground_const: Some(Term::Integer(*edge)),
+                        #[cfg(feature = "host-io")]
+                        output_var: occ.output_var.clone(),
+                    });
+                }
+            } else {
+                // No join present: the original placeholder/slot behavior.
+                let input_source = match occ.input_head_pos {
+                    Some(head_position) => InputSource::QueryArg(head_position),
+                    None => {
+                        let next_slot = groups
+                            .iter()
+                            .filter(|g| matches!(g.input_source, InputSource::ImplicitSlot(_)))
+                            .count();
+                        InputSource::ImplicitSlot(next_slot)
+                    }
+                };
+                groups.push(NeuralGroup {
+                    info: occ.info.clone(),
+                    input_source,
+                    ground_const: None,
+                    #[cfg(feature = "host-io")]
+                    output_var: occ.output_var.clone(),
+                });
+            }
         }
 
         if groups.is_empty() {
@@ -2313,6 +2486,51 @@ impl CompiledProgram {
                 "No neural groups found for query predicate '{}'",
                 pred_name
             )));
+        }
+
+        if joins_present {
+            // Stage-B existential-join signature: the head ranges over the real
+            // head-key domain (e.g. edges) and the groups are real-domain-grounded.
+            let mut head_positions: Vec<usize> = joins
+                .iter()
+                .flat_map(|j| j.head_key.iter().map(|(_, hp)| *hp))
+                .collect();
+            head_positions.sort_unstable();
+            head_positions.dedup();
+            if head_positions.len() != 1 {
+                return Err(PyValueError::new_err(format!(
+                    "Query rule for '{}': Stage-B existential join currently supports exactly one \
+                     head-key position; found {:?}",
+                    pred_name, head_positions
+                )));
+            }
+            let target_position = head_positions[0];
+            let (rel, arg_pos) = joins
+                .iter()
+                .find_map(|j| {
+                    j.head_key
+                        .iter()
+                        .find(|(_, hp)| *hp == target_position)
+                        .map(|(ap, _)| (j.relation.clone(), *ap))
+                })
+                .expect("target position came from a join head_key");
+            let head_domain: Vec<String> = self
+                .materialize_int_domain(&rel, arg_pos)?
+                .into_iter()
+                .map(|v| v.to_string())
+                .collect();
+            let mut relations: Vec<String> = joins.iter().map(|j| j.relation.clone()).collect();
+            relations.sort();
+            relations.dedup();
+            return Ok(QuerySignature::Targeted {
+                target_position,
+                groups,
+                hard_filters,
+                join: Some(JoinPlan {
+                    relations,
+                    head_domain,
+                }),
+            });
         }
 
         if arity == 0 {
@@ -2326,7 +2544,7 @@ impl CompiledProgram {
             .iter()
             .filter_map(|group| match group.input_source {
                 InputSource::QueryArg(pos) => Some(pos),
-                InputSource::ImplicitSlot(_) => None,
+                _ => None,
             })
             .collect();
         used_head_positions.sort_unstable();
@@ -2355,7 +2573,41 @@ impl CompiledProgram {
             target_position: target_positions[0],
             groups,
             hard_filters,
+            join: None,
         })
+    }
+
+    /// Materialize the sorted, distinct integer constants appearing at argument
+    /// position `arg_pos` of a relation's GROUND facts — the real domain a
+    /// Stage-B existential join grounds the neural predicate over. Row order in
+    /// this vector is the canonical domain order: it indexes `DomainRow(_)` for
+    /// the per-event leaves and orders the per-edge `prob_queries`.
+    fn materialize_int_domain(&self, relation: &str, arg_pos: usize) -> PyResult<Vec<i64>> {
+        use std::collections::BTreeSet;
+        let mut set: BTreeSet<i64> = BTreeSet::new();
+        for fact in self.ast.facts() {
+            if fact.head.predicate != relation {
+                continue;
+            }
+            let term = fact.head.terms.get(arg_pos).ok_or_else(|| {
+                PyValueError::new_err(format!(
+                    "relation '{}' ground fact has no argument at position {}",
+                    relation, arg_pos
+                ))
+            })?;
+            match term {
+                Term::Integer(v) => {
+                    set.insert(*v);
+                }
+                _ => {
+                    return Err(PyValueError::new_err(format!(
+                        "Stage-B join domain for relation '{}' arg {} must be integer constants",
+                        relation, arg_pos
+                    )))
+                }
+            }
+        }
+        Ok(set.into_iter().collect())
     }
 
     /// All rules defining `(pred_name, arity)` — the multi-rule same-head
@@ -2456,13 +2708,22 @@ impl CompiledProgram {
                 let mut terms = Vec::with_capacity(group.info.predicate_arity);
                 for pos in 0..group.info.predicate_arity {
                     if group.info.input_positions.contains(&pos) {
-                        let placeholder = match group.input_source {
-                            InputSource::QueryArg(head_pos) => {
-                                *head_to_group.get(&head_pos).unwrap_or(&group_idx)
+                        // Stage-B real-domain grounding pins the input position at
+                        // a real constant (event/edge id); otherwise use the
+                        // placeholder shared per head variable.
+                        let term = match &group.ground_const {
+                            Some(c) => c.clone(),
+                            None => {
+                                let placeholder = match group.input_source {
+                                    InputSource::QueryArg(head_pos) => {
+                                        *head_to_group.get(&head_pos).unwrap_or(&group_idx)
+                                    }
+                                    _ => group_idx,
+                                };
+                                Term::Integer(placeholder as i64)
                             }
-                            InputSource::ImplicitSlot(_) => group_idx,
                         };
-                        terms.push(Term::Integer(placeholder as i64));
+                        terms.push(term);
                     } else if pos == group.info.output_position {
                         terms.push(self.label_string_to_term(label));
                     } else {
@@ -2502,6 +2763,19 @@ impl CompiledProgram {
             });
         }
         template_program.rules.push(circuit_rule);
+
+        // Stage-B existential join: the join relations stay INSIDE the circuit
+        // rule (not stripped) so provenance OR-aggregates
+        // `OR_event(neural(event) ∧ join(event, head))` at each head binding. Add
+        // their ground facts to the template program so the join grounds against
+        // the real domain.
+        if let Some(join) = signature.join() {
+            for fact in self.ast.facts() {
+                if join.relations.iter().any(|r| r == &fact.head.predicate) {
+                    template_program.rules.push((*fact).clone());
+                }
+            }
+        }
 
         match signature {
             QuerySignature::Boolean { .. } => {
@@ -2582,6 +2856,12 @@ impl CompiledProgram {
         query_arity: usize,
         signature: &QuerySignature,
     ) -> PyResult<Vec<String>> {
+        // Stage-B existential join: the target domain IS the real head-key domain
+        // (e.g. edge ids), materialized in the signature builder.
+        if let Some(join) = signature.join() {
+            return Ok(join.head_domain.clone());
+        }
+
         let rule = self.find_query_rule(query_pred, query_arity)?;
 
         match signature {
@@ -2855,6 +3135,51 @@ impl CompiledProgram {
         let tensor_bound = tensor.bind(py);
         let indexed = tensor_bound.get_item(index)?;
         Ok(indexed.into())
+    }
+
+    /// Get input tensor for a given index from a specific NAMED tensor source
+    /// (regardless of which source is active). Used by Stage-B join groups to read
+    /// the per-event feature batch from the registered domain source.
+    fn get_input_tensor_named(
+        &self,
+        py: Python<'_>,
+        source: &str,
+        index: usize,
+    ) -> PyResult<PyObject> {
+        let tensor = self
+            .tensor_sources
+            .get_named(source)
+            .map_err(|e| PyValueError::new_err(format!("No tensor source '{}': {}", source, e)))?;
+        let indexed = tensor.bind(py).get_item(index)?;
+        Ok(indexed.into())
+    }
+
+    /// Resolve a forward input row for one neural group per its fetch kind. The
+    /// domain/dummy fetches read the Stage-B join-domain source whose NAME was
+    /// supplied by the Python driver (`register_domain_tensor_source`); the engine
+    /// holds no hardcoded source name.
+    fn resolve_input_tensor(&self, py: Python<'_>, fetch: &Fetch) -> PyResult<PyObject> {
+        match fetch {
+            Fetch::Active(idx) => self.get_input_tensor(py, *idx),
+            Fetch::Domain(idx) => self.get_input_tensor_named(py, self.domain_source_name()?, *idx),
+            // Input-independent leaf (rule-weight guard): reuse domain row 0 — it
+            // is on the correct device/dtype, and the module ignores input values.
+            Fetch::Dummy => self.get_input_tensor_named(py, self.domain_source_name()?, 0),
+        }
+    }
+
+    /// The Stage-B join-domain source name supplied by the Python driver. A
+    /// `Domain`/`Dummy` fetch is only produced for a join signature, which is built
+    /// only after the domain source is registered — so a missing name here is an
+    /// internal invariant violation, surfaced as a clear error rather than papered
+    /// over with a hardcoded fallback name.
+    fn domain_source_name(&self) -> PyResult<&str> {
+        self.domain_source.as_deref().ok_or_else(|| {
+            PyRuntimeError::new_err(
+                "Stage-B join forward requested the domain tensor source, but none was \
+                 registered; call register_domain_tensor_source before training a join rule",
+            )
+        })
     }
 }
 

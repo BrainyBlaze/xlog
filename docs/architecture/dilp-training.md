@@ -199,6 +199,37 @@ The source owns declarative `nn(...)`, `trainable_rule(...)`, and `train(...)`
 declarations. The result reports neural gradient norms, symbolic gradients,
 final symbolic weights, and a `RuleInventory` suitable for transfer audits.
 
+#### Existential-join trainable bodies (Stage B)
+
+A `trainable_rule` body may join a neural predicate to an ordinary relation on an
+**existential** (non-head) variable — the neural predicate is grounded over the
+**real join domain inside the circuit** and OR-aggregated at the head:
+
+```
+plastic(Edge) :- saliency(Event, strengthen), pre_before_post(Event, Edge).
+```
+
+Here `Event` appears only in the body. The engine materializes the join domain
+from `pre_before_post`'s ground facts, emits one neural leaf per joined event, and
+the differentiable provenance OR-aggregates the per-event contributions per head
+binding, yielding `P(plastic(Edge)) = σ(w) · (1 − ∏_{e : pre_before_post(e,Edge)} (1 − p_saliency(e)))`.
+Gradient flows into the neural predicate (all joined events) and the rule guard,
+but never into the deterministic join relation. The per-event features arrive
+through a `domain_inputs={"net": features}` channel (row `i` = the `i`-th
+join-domain constant in sorted order), and `examples` carry only per-head-binding
+`targets`. Because `saliency` is learned as a function of the event feature (not an
+id lookup), the trained predicate generalizes to unseen events.
+
+Constraints: the join domain must be ground facts (a derived relation is rejected,
+since its extension is not materialized); head-binding ids must be `0..N-1`
+row-aligned with `targets`; a single join network is supported; and the exact
+d-DNNF compiler builds one circuit over all head-binding queries, so the planted
+graph must stay within the compiler's fixed buffer (empirically ~6–7 events).
+Worked example + CUDA-gated recovery test:
+[`examples/plasticity_incircuit/`](../../examples/plasticity_incircuit/) and
+`python/tests/test_plasticity_incircuit.py`. Head-variable ("hard filter") joins
+remain supported as pre-filters; only the existential-join case is new.
+
 `train_and_promote(...)` also accepts `training_fold`, `held_out_domains`,
 `base_kernel_checksum_before`, and `base_kernel_checksum_after`. These fields are
 recorded on `PromotionResult.rule_inventory`, along with selected and rejected
