@@ -3135,9 +3135,10 @@ impl CompiledProgram {
         source: &str,
         index: usize,
     ) -> PyResult<PyObject> {
-        let tensor = self.tensor_sources.get_named(source).map_err(|e| {
-            PyValueError::new_err(format!("No tensor source '{}': {}", source, e))
-        })?;
+        let tensor = self
+            .tensor_sources
+            .get_named(source)
+            .map_err(|e| PyValueError::new_err(format!("No tensor source '{}': {}", source, e)))?;
         let indexed = tensor.bind(py).get_item(index)?;
         Ok(indexed.into())
     }
