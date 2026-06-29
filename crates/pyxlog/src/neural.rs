@@ -26,11 +26,6 @@ fn prob_schema(scalar_type: ScalarType) -> Schema {
     Schema::new(vec![("col0".to_string(), scalar_type)])
 }
 
-/// Tensor source holding the Stage-B existential-join domain (per-event feature
-/// batch). Registered by the Python driver via `add_tensor_source("nsr_domain", ...)`
-/// and read by `DomainRow(_)` groups while the per-query examples source stays active.
-const DOMAIN_SOURCE: &str = "nsr_domain";
-
 /// How a neural group's forward input row is fetched. The placeholder/slot path
 /// reads the active per-query examples source; Stage-B real-domain groups read a
 /// fixed row of the join-domain source (per-event features) or a dummy row (an
@@ -604,6 +599,22 @@ impl CompiledProgram {
         let metadata = TensorMetadata::with_dtype(size, sample_shape, &dtype_str);
         self.tensor_sources.add(&name, tensor, metadata);
 
+        Ok(())
+    }
+
+    /// Register the Stage-B existential-join domain tensor source: stores the
+    /// per-event feature batch under `name` AND records `name` as the join-domain
+    /// source the forward reads (for `DomainRow`/`ConstDummy` groups). The name is
+    /// owned by the Python driver and flows in as data — the engine holds no
+    /// hardcoded source name.
+    fn register_domain_tensor_source(
+        &mut self,
+        py: Python<'_>,
+        name: String,
+        tensor: PyObject,
+    ) -> PyResult<()> {
+        self.add_tensor_source(py, name.clone(), tensor)?;
+        self.domain_source = Some(name);
         Ok(())
     }
 
@@ -3128,7 +3139,7 @@ impl CompiledProgram {
 
     /// Get input tensor for a given index from a specific NAMED tensor source
     /// (regardless of which source is active). Used by Stage-B join groups to read
-    /// the per-event feature batch from `nsr_domain`.
+    /// the per-event feature batch from the registered domain source.
     fn get_input_tensor_named(
         &self,
         py: Python<'_>,
@@ -3143,15 +3154,32 @@ impl CompiledProgram {
         Ok(indexed.into())
     }
 
-    /// Resolve a forward input row for one neural group per its fetch kind.
+    /// Resolve a forward input row for one neural group per its fetch kind. The
+    /// domain/dummy fetches read the Stage-B join-domain source whose NAME was
+    /// supplied by the Python driver (`register_domain_tensor_source`); the engine
+    /// holds no hardcoded source name.
     fn resolve_input_tensor(&self, py: Python<'_>, fetch: &Fetch) -> PyResult<PyObject> {
         match fetch {
             Fetch::Active(idx) => self.get_input_tensor(py, *idx),
-            Fetch::Domain(idx) => self.get_input_tensor_named(py, DOMAIN_SOURCE, *idx),
+            Fetch::Domain(idx) => self.get_input_tensor_named(py, self.domain_source_name()?, *idx),
             // Input-independent leaf (rule-weight guard): reuse domain row 0 — it
             // is on the correct device/dtype, and the module ignores input values.
-            Fetch::Dummy => self.get_input_tensor_named(py, DOMAIN_SOURCE, 0),
+            Fetch::Dummy => self.get_input_tensor_named(py, self.domain_source_name()?, 0),
         }
+    }
+
+    /// The Stage-B join-domain source name supplied by the Python driver. A
+    /// `Domain`/`Dummy` fetch is only produced for a join signature, which is built
+    /// only after the domain source is registered — so a missing name here is an
+    /// internal invariant violation, surfaced as a clear error rather than papered
+    /// over with a hardcoded fallback name.
+    fn domain_source_name(&self) -> PyResult<&str> {
+        self.domain_source.as_deref().ok_or_else(|| {
+            PyRuntimeError::new_err(
+                "Stage-B join forward requested the domain tensor source, but none was \
+                 registered; call register_domain_tensor_source before training a join rule",
+            )
+        })
     }
 }
 

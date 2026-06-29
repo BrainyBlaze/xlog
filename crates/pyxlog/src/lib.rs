@@ -521,6 +521,11 @@ pub struct CompiledProgram {
     pub(crate) declared_network_forms: HashMap<String, bool>,
     /// Registry for tensor data sources (images, embeddings, etc.)
     pub(crate) tensor_sources: TensorSourceRegistry,
+    /// Name of the Stage-B existential-join domain tensor source, as supplied by
+    /// the Python driver (single source of truth). `None` until a domain source is
+    /// registered; read by the join forward to resolve `DomainRow`/`ConstDummy`
+    /// groups instead of an engine-side hardcoded name.
+    pub(crate) domain_source: Option<String>,
     /// Original program source (for dynamic query compilation)
     pub(crate) _source: String,
     /// Parsed program AST (for signature analysis)

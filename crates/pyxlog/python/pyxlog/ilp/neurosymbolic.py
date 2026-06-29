@@ -32,8 +32,9 @@ _GUARD_PREDICATE_PREFIX = "nsr_guard_"
 _GUARD_NETWORK_PREFIX = "nsr_w_"
 _TENSOR_SOURCE_NAME = "nsr_examples"
 # Stage-B existential join: per-event feature batch the join neural predicate is
-# forwarded over. Read by the engine's `DomainRow(_)` groups; must match the
-# `DOMAIN_SOURCE` constant in `crates/pyxlog/src/neural.rs`.
+# forwarded over. The driver owns this name and passes it to the engine via
+# `register_domain_tensor_source`; the engine reads whichever source it was given
+# (no hardcoded source name on the Rust side), so this is the single definition.
 _DOMAIN_SOURCE_NAME = "nsr_domain"
 _ENGINE_NAME = "xlog-exact-circuit"
 
@@ -228,7 +229,7 @@ def train_neurosymbolic_program(
             raise ValueError(
                 f"domain_inputs names network '{name}' which is not declared by any nn/4"
             )
-        program.add_tensor_source(_DOMAIN_SOURCE_NAME, feats.cuda())
+        program.register_domain_tensor_source(_DOMAIN_SOURCE_NAME, feats.cuda())
 
     # Neural-body conjuncts: one small g_theta head per neural-bodied
     # candidate, over its fixed-width phi(x). Trained torch-side (not a circuit
