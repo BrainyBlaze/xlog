@@ -315,3 +315,64 @@ query(c()).
         c_prob
     );
 }
+
+#[test]
+fn test_exact_ddnnf_two_sided_recursive_scc_converges() {
+    // Regression: a mutually-recursive SCC with base probabilistic facts on BOTH
+    // sides of the cycle previously never converged in the semi-naive provenance
+    // fixpoint ("Provenance iteration limit (1024) exceeded for SCC"): the
+    // convergence test compares hash-consed PIR node ids, and without OR/AND
+    // flattening + absorption each round re-embedded the counterpart's formula
+    // one level deeper (semantically fixed, syntactically new).
+    // Fixpoint semantics: a holds iff va ∨ vb, so P(a) = P(b) = 1-(1-pa)(1-pb).
+    let _lock = EXACT_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+    let source = r#"
+0.5406::a(1,2).
+0.7143::b(1,2).
+b(X,Y) :- a(X,Y).
+a(X,Y) :- b(X,Y).
+query(a(1,2)).
+query(b(1,2)).
+"#;
+
+    let compiled = ExactDdnnfProgram::compile_source(source).unwrap();
+    let result = compiled.evaluate().unwrap();
+
+    let expected = 1.0 - (1.0 - 0.5406) * (1.0 - 0.7143);
+    let pa = prob_of(&result, "a", &[Value::from(1_i64), Value::from(2_i64)]);
+    let pb = prob_of(&result, "b", &[Value::from(1_i64), Value::from(2_i64)]);
+    assert!((pa - expected).abs() < 1e-9, "pa={} expected={}", pa, expected);
+    assert!((pb - expected).abs() < 1e-9, "pb={} expected={}", pb, expected);
+}
+
+#[test]
+fn test_exact_ddnnf_two_sided_scc_duplicate_body_atom_converges() {
+    // Same regression, in the live rule-graph shape that surfaced it: the SCC
+    // rules repeat the body atom (X ∧ X ≡ X), which additionally exercises the
+    // AND-of-OR absorption path (proof = And(delta-leaf, Or(full)) each round).
+    let _lock = EXACT_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+    let source = r#"
+0.5406::q10001(10034,10042).
+0.7143::q10000(10034,10042).
+q10000(A,B) :- q10001(A,B), q10001(A,B).
+q10001(A,B) :- q10000(A,B), q10000(A,B).
+query(q10000(10034,10042)).
+"#;
+
+    let compiled = ExactDdnnfProgram::compile_source(source).unwrap();
+    let result = compiled.evaluate().unwrap();
+
+    let expected = 1.0 - (1.0 - 0.5406) * (1.0 - 0.7143);
+    let p = prob_of(
+        &result,
+        "q10000",
+        &[Value::from(10034_i64), Value::from(10042_i64)],
+    );
+    assert!((p - expected).abs() < 1e-9, "p={} expected={}", p, expected);
+}

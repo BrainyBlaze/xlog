@@ -188,6 +188,11 @@ struct PirBuilder {
     intern: HashMap<PirKey, PirNodeId>,
     const_true: PirNodeId,
     const_false: PirNodeId,
+    /// Children of interned Or nodes, used to flatten nested ORs and apply
+    /// absorption during normalization. Nodes absent from the map are opaque.
+    or_children: HashMap<PirNodeId, Vec<PirNodeId>>,
+    /// Children of interned And nodes (same role as `or_children`).
+    and_children: HashMap<PirNodeId, Vec<PirNodeId>>,
 }
 
 impl PirBuilder {
@@ -205,6 +210,8 @@ impl PirBuilder {
             intern,
             const_true,
             const_false,
+            or_children: HashMap::new(),
+            and_children: HashMap::new(),
         }
     }
 
@@ -240,7 +247,17 @@ impl PirBuilder {
         id
     }
 
-    fn and(&mut self, mut children: Vec<PirNodeId>) -> PirNodeId {
+    fn and(&mut self, children: Vec<PirNodeId>) -> PirNodeId {
+        // Flatten nested ANDs (associativity) so recursive-SCC provenance cannot
+        // grow syntactically forever while staying semantically fixed.
+        let mut flat: Vec<PirNodeId> = Vec::with_capacity(children.len());
+        for c in children {
+            match self.and_children.get(&c) {
+                Some(sub) => flat.extend_from_slice(sub),
+                None => flat.push(c),
+            }
+        }
+        let mut children = flat;
         children.retain(|&c| c != self.const_true);
         if children.contains(&self.const_false) {
             return self.const_false;
@@ -253,6 +270,16 @@ impl PirBuilder {
         }
         children.sort_by_key(|id| id.as_u32());
         children.dedup();
+        // Absorption: a ∧ (a ∨ b) = a — drop any Or-child containing another member.
+        if children.len() > 1 {
+            let members = children.clone();
+            children.retain(|c| match self.or_children.get(c) {
+                Some(sub) => !sub
+                    .iter()
+                    .any(|s| s != c && members.binary_search_by_key(&s.as_u32(), |m| m.as_u32()).is_ok()),
+                None => true,
+            });
+        }
         if children.len() == 1 {
             return children[0];
         }
@@ -260,12 +287,22 @@ impl PirBuilder {
         if let Some(&id) = self.intern.get(&key) {
             return id;
         }
-        let id = self.pir.and(children);
+        let id = self.pir.and(children.clone());
         self.intern.insert(key, id);
+        self.and_children.insert(id, children);
         id
     }
 
-    fn or(&mut self, mut children: Vec<PirNodeId>) -> PirNodeId {
+    fn or(&mut self, children: Vec<PirNodeId>) -> PirNodeId {
+        // Flatten nested ORs (associativity) — see `and` for rationale.
+        let mut flat: Vec<PirNodeId> = Vec::with_capacity(children.len());
+        for c in children {
+            match self.or_children.get(&c) {
+                Some(sub) => flat.extend_from_slice(sub),
+                None => flat.push(c),
+            }
+        }
+        let mut children = flat;
         children.retain(|&c| c != self.const_false);
         if children.contains(&self.const_true) {
             return self.const_true;
@@ -278,6 +315,16 @@ impl PirBuilder {
         }
         children.sort_by_key(|id| id.as_u32());
         children.dedup();
+        // Absorption: a ∨ (a ∧ b) = a — drop any And-child containing another member.
+        if children.len() > 1 {
+            let members = children.clone();
+            children.retain(|c| match self.and_children.get(c) {
+                Some(sub) => !sub
+                    .iter()
+                    .any(|s| s != c && members.binary_search_by_key(&s.as_u32(), |m| m.as_u32()).is_ok()),
+                None => true,
+            });
+        }
         if children.len() == 1 {
             return children[0];
         }
@@ -285,8 +332,9 @@ impl PirBuilder {
         if let Some(&id) = self.intern.get(&key) {
             return id;
         }
-        let id = self.pir.or(children);
+        let id = self.pir.or(children.clone());
         self.intern.insert(key, id);
+        self.or_children.insert(id, children);
         id
     }
 
