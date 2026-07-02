@@ -66,3 +66,7 @@ git_release_enable = true
 git_tag_enable = true
 git_tag_name = "xlog-cli-v{{ version }}"
 git_release_name = "xlog-cli v{{ version }}"
+
+[[package]]
+name = "xlog-induce"
+release = false

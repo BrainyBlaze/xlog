@@ -36,7 +36,7 @@ xlog-cli = { version = "0.9.2", path = "crates/xlog-cli" }
 xlog-core = { version = "0.9.2", path = "crates/xlog-core" }
 xlog-cuda = { version = "0.9.2", path = "crates/xlog-cuda" }
 xlog-gpu = { version = "0.9.2", path = "crates/xlog-gpu" }
-xlog-induce = { version = "0.9.2", path = "crates/xlog-induce" }
+xlog-induce = { path = "crates/xlog-induce" }
 xlog-ir = { version = "0.9.2", path = "crates/xlog-ir" }
 xlog-logic = { version = "0.9.2", path = "crates/xlog-logic" }
 xlog-neural = { version = "0.9.2", path = "crates/xlog-neural" }
