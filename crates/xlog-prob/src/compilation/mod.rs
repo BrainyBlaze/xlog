@@ -294,43 +294,73 @@ pub fn compile_gpu_d4_and_verify_cached(
         if let Ok(Some(artifact)) = disk_cache::read_artifact(disk_key) {
             #[cfg(debug_assertions)]
             eprintln!("[xlog-prob] compile_gpu_d4_and_verify_cached: disk cache hit");
-            let circuit = upload_disk_artifact_for_verification(&artifact, provider)?;
-            let verifier_decision_var_limit = if random_vars.is_empty() {
-                &cnf.num_vars
+            // Stale-artifact guard: the canonical PIR hash keeps semantically-stable
+            // cache identity, so an entry written by an earlier engine whose ENCODING
+            // differed (different var universe) can be served for the same key. A
+            // cached circuit referencing vars beyond the freshly-encoded CNF is
+            // staleness, not an engine bug — evict and fall through to a fresh
+            // compile (which overwrites the entry). Fail-closed equivalence checking
+            // stays authoritative for freshly-compiled circuits below.
+            if artifact.max_var > cnf.var_cap {
+                #[cfg(debug_assertions)]
+                eprintln!(
+                    "[xlog-prob] compile_gpu_d4_and_verify_cached: stale disk artifact \
+                     (max_var {} > cnf var_cap {}), evicting",
+                    artifact.max_var, cnf.var_cap
+                );
+                disk_cache::evict_artifact(disk_key);
             } else {
-                decision_var_limit
-            };
-            let cdcl = cdcl_config_from_compile(config)?;
-            let t_verify = if profiling {
-                Some(Instant::now())
-            } else {
-                None
-            };
-            validate_equivalence_gpu_gated(
-                cnf,
-                verifier_decision_var_limit,
-                &circuit,
-                provider,
-                GpuEquivalenceConfig {
-                    cdcl,
-                    reuse_workspace: config.incremental_verify,
-                },
-                handle.compile_needed_device(),
-            )?;
-            if let Some(t0) = t_verify {
-                provider.device().synchronize().map_err(|e| {
-                    XlogError::Kernel(format!("sync after disk cache verify: {}", e))
-                })?;
-                profile.verify_sec = t0.elapsed().as_secs_f64();
+                let circuit = upload_disk_artifact_for_verification(&artifact, provider)?;
+                let verifier_decision_var_limit = if random_vars.is_empty() {
+                    &cnf.num_vars
+                } else {
+                    decision_var_limit
+                };
+                let cdcl = cdcl_config_from_compile(config)?;
+                let t_verify = if profiling {
+                    Some(Instant::now())
+                } else {
+                    None
+                };
+                match validate_equivalence_gpu_gated(
+                    cnf,
+                    verifier_decision_var_limit,
+                    &circuit,
+                    provider,
+                    GpuEquivalenceConfig {
+                        cdcl,
+                        reuse_workspace: config.incremental_verify,
+                    },
+                    handle.compile_needed_device(),
+                ) {
+                    Ok(()) => {
+                        if let Some(t0) = t_verify {
+                            provider.device().synchronize().map_err(|e| {
+                                XlogError::Kernel(format!("sync after disk cache verify: {}", e))
+                            })?;
+                            profile.verify_sec = t0.elapsed().as_secs_f64();
+                        }
+                        cache.restore_from_host_arrays(&mut handle, &artifact)?;
+                        provider.device().synchronize().map_err(|e| {
+                            XlogError::Kernel(format!("sync after disk cache restore: {}", e))
+                        })?;
+                        profile.disk_cache_hit = true;
+                        let out_profile = if profiling { Some(profile) } else { None };
+                        return Ok((handle, out_profile));
+                    }
+                    Err(_stale) => {
+                        // A cached artifact failing equivalence against the current
+                        // CNF is a stale entry (fresh-compile verification below
+                        // remains fail-closed). Evict and recompile.
+                        #[cfg(debug_assertions)]
+                        eprintln!(
+                            "[xlog-prob] compile_gpu_d4_and_verify_cached: cached circuit \
+                             failed equivalence against current CNF ({_stale}), evicting"
+                        );
+                        disk_cache::evict_artifact(disk_key);
+                    }
+                }
             }
-            cache.restore_from_host_arrays(&mut handle, &artifact)?;
-            provider
-                .device()
-                .synchronize()
-                .map_err(|e| XlogError::Kernel(format!("sync after disk cache restore: {}", e)))?;
-            profile.disk_cache_hit = true;
-            let out_profile = if profiling { Some(profile) } else { None };
-            return Ok((handle, out_profile));
         }
         #[cfg(debug_assertions)]
         eprintln!("[xlog-prob] compile_gpu_d4_and_verify_cached: disk cache miss");
