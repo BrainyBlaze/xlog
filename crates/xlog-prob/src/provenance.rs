@@ -274,9 +274,12 @@ impl PirBuilder {
         if children.len() > 1 {
             let members = children.clone();
             children.retain(|c| match self.or_children.get(c) {
-                Some(sub) => !sub
-                    .iter()
-                    .any(|s| s != c && members.binary_search_by_key(&s.as_u32(), |m| m.as_u32()).is_ok()),
+                Some(sub) => !sub.iter().any(|s| {
+                    s != c
+                        && members
+                            .binary_search_by_key(&s.as_u32(), |m| m.as_u32())
+                            .is_ok()
+                }),
                 None => true,
             });
         }
@@ -319,9 +322,12 @@ impl PirBuilder {
         if children.len() > 1 {
             let members = children.clone();
             children.retain(|c| match self.and_children.get(c) {
-                Some(sub) => !sub
-                    .iter()
-                    .any(|s| s != c && members.binary_search_by_key(&s.as_u32(), |m| m.as_u32()).is_ok()),
+                Some(sub) => !sub.iter().any(|s| {
+                    s != c
+                        && members
+                            .binary_search_by_key(&s.as_u32(), |m| m.as_u32())
+                            .is_ok()
+                }),
                 None => true,
             });
         }

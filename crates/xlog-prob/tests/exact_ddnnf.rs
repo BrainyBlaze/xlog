@@ -344,8 +344,18 @@ query(b(1,2)).
     let expected = 1.0 - (1.0 - 0.5406) * (1.0 - 0.7143);
     let pa = prob_of(&result, "a", &[Value::from(1_i64), Value::from(2_i64)]);
     let pb = prob_of(&result, "b", &[Value::from(1_i64), Value::from(2_i64)]);
-    assert!((pa - expected).abs() < 1e-9, "pa={} expected={}", pa, expected);
-    assert!((pb - expected).abs() < 1e-9, "pb={} expected={}", pb, expected);
+    assert!(
+        (pa - expected).abs() < 1e-9,
+        "pa={} expected={}",
+        pa,
+        expected
+    );
+    assert!(
+        (pb - expected).abs() < 1e-9,
+        "pb={} expected={}",
+        pb,
+        expected
+    );
 }
 
 #[test]

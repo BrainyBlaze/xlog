@@ -2811,7 +2811,7 @@ pub struct EpistemicStratum {
 ///
 /// Stratum `i`'s epistemic heads are materialized (gated) into the relation store
 /// BEFORE stratum `i+1` runs, so a higher stratum's `know`/`possible` over a
-/// lower stratum's head reads the GATED extension through the EXISTING 
+/// lower stratum's head reads the GATED extension through the EXISTING
 /// membership filter (no resolve-into-body, no double-gating).
 #[derive(Debug, Clone)]
 pub struct EpistemicStratifiedPlan {
