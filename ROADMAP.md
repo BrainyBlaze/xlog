@@ -2123,7 +2123,7 @@ evidence live under `docs/plans/2026-06-*`.
   not the compile frontier, so factorized provenance does not address it.
   Evidence retained under `docs/plans/2026-06-*`.
 
-## main after v0.9.2 - Neuro-Symbolic Trainable-Rule & ST-TRC Joint-Mixture Pack
+## main after v0.9.2 - Neuro-Symbolic Trainable-Rule & Joint-Mixture Pack
 
 Completed on main, unreleased. The engine surface for learning logical rules by
 gradient descent (the consumer's "learn new rules, not validate a hard-coded
@@ -2143,7 +2143,7 @@ details.
       per query — no tracked device↔host transfers in the measured loop. The
       optimizer is configurable (`NeuroSymbolicTrainingConfig.optimizer`,
       default Adam; SGD stalls on the multiplicative-loss plateau).
-- [x] Joint multi-rule same-head soft-mixture (ST-TRC Phase-1b): a query head may
+- [x] Joint multi-rule same-head soft-mixture: a query head may
       be derived by more than one `trainable_rule`; the candidates compete for
       mass on one head as the noisy-OR over `(eligible_k × σ(guard_k))`, BCE on
       the supervised head driving the per-candidate guard competition. Relational
@@ -2193,8 +2193,8 @@ final ordering is a maintainer decision.
       network and w, never through fact atoms. Canonical example in the
       requirements doc (contrary_value_pair over nn_slot_competition +
       claim_fact + F1 != F2). Landed on main — see the "Neuro-Symbolic
-      Trainable-Rule & ST-TRC Joint-Mixture Pack" section above; it grew into the
-      full ST-TRC joint-mixture surface the consumer's training endgame needed.
+      Trainable-Rule & Joint-Mixture Pack" section above; it grew into the
+      full joint-mixture surface the consumer's training endgame needed.
 
 ### Session API and Performance
 
