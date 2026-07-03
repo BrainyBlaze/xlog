@@ -1,313 +1,191 @@
 ---
-title: "CLI Reference"
-description: "Complete reference for the xlog command-line interface: subcommands, flags, input/output formats, environment variables, and exit codes."
+title: "CLI reference"
+description: "Every xlog subcommand and flag, with input and output formats, environment variables, and exit codes."
 ---
 
-This document describes the `xlog` command-line interface for running deterministic and probabilistic Datalog programs.
+The `xlog` binary runs, inspects, and watches XLOG programs. It has five subcommands:
+`run` and `prob` execute programs; `explain`, `repl`, and `watch` support development.
+An unsupported subcommand fails explicitly rather than falling back to another mode.
 
-## Overview
-
-The `xlog` CLI is implemented in the `xlog-cli` crate. The current workspace
-exposes two execution subcommands:
-
-- `xlog run` — Deterministic program execution
-- `xlog prob` — Probabilistic program execution
-
-The current language contract includes developer-experience commands:
-
-- `xlog explain` — Inspect parse, strata, RIR, optimizer, magic-set, WCOJ,
-  probabilistic plans, rule provenance, and proof traces
-- `xlog repl` — Interactive multiline source/query session
-- `xlog watch` — Debounced file-change rerun with typed diagnostics
-
-Unsupported subcommands fail explicitly rather than silently falling back to
-another mode. Published artifacts follow tagged releases and may lag the current
-workspace surface.
+<Note>
+Host-readable output from `xlog prob` requires the CLI to be built with the `host-io`
+feature. Without it, `xlog prob` fails closed with a message telling you to rebuild —
+this keeps GPU-native call sites from accidentally reading results back to the host.
+</Note>
 
 ## Installation
-
-Install the latest published CLI crate:
 
 ```bash
 cargo install xlog-cli --features host-io
 ```
 
-This path requires Rust, Cargo, CUDA Toolkit 13.x, and `nvcc` at install time.
-The installed binary embeds portable PTX for runtime kernels, so it does not
-require a sidecar `kernels/` directory after `cargo install` completes. If
-`XLOG_CUBIN_DIR` or a binary-adjacent `kernels/` directory is present, xlog
-prefers those staged artifacts before falling back to embedded PTX.
+This requires Rust, Cargo, the CUDA Toolkit 13.x, and `nvcc` at install time. The
+installed binary embeds portable PTX for every runtime kernel, so it needs no sidecar
+`kernels/` directory. If `XLOG_CUBIN_DIR` or a binary-adjacent `kernels/` directory is
+present, xlog prefers those staged artifacts before falling back to embedded PTX.
 
-The CLI is built as part of the workspace:
+To build from a workspace checkout instead:
 
 ```bash
-cargo build --release -p xlog-cli
-# Binary at: target/release/xlog
-
-# For host-readable probabilistic output (`xlog prob`)
 cargo build --release -p xlog-cli --features host-io
+# binary at target/release/xlog
 ```
 
-`xlog run` works with the default build. `xlog prob`'s host-readable output path
-requires the `host-io` feature.
+## xlog run
 
-## Commands
-
-### xlog run
-
-Execute a deterministic Datalog program.
+Execute a deterministic program.
 
 ```bash
 xlog run [OPTIONS] <FILE>
 ```
 
-**Arguments:**
-- `<FILE>` — Path to the `.xlog` source file
-
-**Options:**
-- `--input <REL>=<PATH>` — Load Arrow IPC file as EDB relation (repeatable)
-- `--output <FORMAT>` — Output format: `pretty` (default), `csv`, `arrow`
-- `--output-dir <DIR>` — Directory for Arrow output files (with `--output arrow`)
-- `--device <N>` — CUDA device index (default: 0)
-- `--memory-mb <MB>` — GPU memory limit in megabytes
-- `--stats` — Emit execution statistics to stderr
-- `--stats-format <FORMAT>` — Statistics format: `human` (default) or `json`
-- `--module-path <DIR[:DIR...]>` — Additional module search paths
-
-**Examples:**
+| Option | Description | Default |
+|---|---|---|
+| `--input <REL>=<PATH>` | Load an Arrow IPC file as an EDB relation. Repeatable. | — |
+| `--output <FORMAT>` | `pretty`, `csv`, or `arrow`. | `pretty` |
+| `--output-dir <DIR>` | Directory for Arrow output files (with `--output arrow`). | — |
+| `--device <N>` | CUDA device index. | `0` |
+| `--memory-mb <MB>` | GPU memory budget in mebibytes. | `1024` |
+| `--stats` | Emit per-stratum timing and memory statistics to stderr. | off |
+| `--stats-format <FORMAT>` | `human` or `json` (written to stderr). | `human` |
+| `--module-path <DIR[:DIR...]>` | Extra module search paths. | — |
+| `--epistemic-plan-json <PATH>` | Write the compiled epistemic execution plan as JSON. | — |
 
 ```bash
-# Basic execution
 xlog run examples/xlog/00-basics/01_tc_reachability.xlog
-
-# With external data
 xlog run --input edge=graph.arrow program.xlog
-
-# CSV output
-xlog run --output csv program.xlog
-
-# Arrow IPC output
 xlog run --output arrow --output-dir ./results program.xlog
-
-# Specify GPU device and memory
-xlog run --device 1 --memory-mb 2048 program.xlog
+xlog run --device 1 --memory-mb 2048 --stats program.xlog
 ```
 
-### xlog prob
+## xlog prob
 
-Execute a probabilistic Datalog program.
+Execute a probabilistic program.
 
 ```bash
 xlog prob [OPTIONS] <SOURCE>
 ```
 
-**Arguments:**
-- `<SOURCE>` — Path to the `.xlog` source file with probabilistic facts
+| Option | Description | Default |
+|---|---|---|
+| `--prob-engine <ENGINE>` | `exact_ddnnf` or `mc`. | resolved from the program's `#pragma prob_engine` |
+| `--samples <N>` | Monte Carlo sample count (`mc` only). | from `#pragma prob_samples` |
+| `--seed <N>` | Random seed (`mc` only). | from `#pragma prob_seed` |
+| `--confidence <LEVEL>` | Confidence level for MC intervals. | `0.95` |
+| `--prob-method <METHOD>` | `rejection` or `evidence_clamping` (`mc` only). | from directives |
+| `--prob-max-nonmonotone-iterations <N>` | Cap on non-monotone iterations. Alias: `--max-nonmonotone-iterations`. | `1024` |
+| `--allow-cpu-oracle` | Permit the labeled CPU oracle when the GPU-resident MC engine rejects a program. Fail-closed when unset. | off |
+| `--output <FORMAT>` | `pretty`, `csv`, `arrow`, or `json`. | `pretty` |
+| `--output-dir <DIR>` | Directory for Arrow output files. | — |
+| `--device <N>` | CUDA device index. | `0` |
+| `--memory-mb <MB>` | GPU memory budget in mebibytes. | `1024` |
+| `--module-path <DIR[:DIR...]>` | Extra module search paths. | — |
 
-**Options:**
-- `--prob-engine <ENGINE>` — Inference engine: `exact_ddnnf` (default), `mc`
-- `--samples <N>` — Monte Carlo sample count (with `--prob-engine mc`)
-- `--seed <N>` — Random seed for Monte Carlo (with `--prob-engine mc`)
-- `--confidence <LEVEL>` — Confidence level for MC intervals (default: 0.95)
-- `--allow-cpu-oracle` — Allow the labeled CPU oracle when the GPU-resident MC
-  engine rejects the program (negation, aggregates, ...). Fail-closed when
-  unset; the result is labeled `mc_engine: "cpu-oracle"` and is never
-  GPU-native evidence
-- `--output <FORMAT>` — Output format: `pretty` (default), `csv`, `arrow`
-- `--output-dir <DIR>` — Directory for Arrow output files (with `--output arrow`)
-- `--device <N>` — CUDA device index (default: 0)
-- `--memory-mb <MB>` — GPU memory limit in megabytes
-- `--module-path <DIR[:DIR...]>` — Additional module search paths
+The exact engine (`exact_ddnnf`) and the Monte Carlo engine (`mc`) do not share
+sampling options — `--samples` and `--seed` apply only to `mc`.
 
-**Examples:**
+<Warning>
+The production Monte Carlo engine is GPU-resident and rejects programs it cannot run on
+the device (for example, ones using negation or aggregates), rather than silently
+degrading. Passing `--allow-cpu-oracle` lets a rejected program fall back to a labeled
+CPU oracle; the result is tagged `mc_engine: "cpu-oracle"` and is never GPU-native
+evidence. Without the flag, a rejected program fails.
+</Warning>
 
 ```bash
-# Exact inference
 xlog prob examples/prob/01-wet-conditioning.xlog --prob-engine exact_ddnnf
-
-# Monte Carlo inference
-xlog prob program.xlog --prob-engine mc --samples 10000
-
-# MC with reproducible seed
 xlog prob program.xlog --prob-engine mc --samples 10000 --seed 42
-
-# Custom confidence interval
-xlog prob program.xlog --prob-engine mc --samples 10000 --confidence 0.99
+xlog prob program.xlog --prob-engine mc --confidence 0.99 --output json
 ```
 
-### xlog explain
+## xlog explain
 
-Inspect compilation and diagnostic state for a deterministic source file.
+Inspect compilation and diagnostics for a source file, without running it on the GPU.
 
 ```bash
 xlog explain [OPTIONS] <SOURCE>
 ```
 
-**Arguments:**
-- `<SOURCE>` — Path to the `.xlog` source file
+| Option | Description | Default |
+|---|---|---|
+| `--format <FORMAT>` | `text`, `json`, or `dot`. | `text` |
+| `--module-path <DIR[:DIR...]>` | Extra module search paths. | — |
 
-**Options:**
-- `--format <FORMAT>` — Output format: `text` (default), `json`, or `dot`
-
-Text output prints compact sections for parse stats, magic-set rewrites,
-aggregate lifting, rule provenance, proof traces, stratification, RIR, and
-optimizer status. JSON output includes full `rule_provenance`, `proof_traces`,
-and `generated_rule_diagnostics` arrays. The rule provenance records contain
-`rule_id`, `head`, `source_kind`, `source_span`, `generation_trace_hash`,
-`support_relation_ids`, and `counterexample_relation_ids`. Proof trace records
-contain `query_id`, `query`, `answer_relation`, `rule_ids`, `source_facts`, and
-`rejected_alternatives`. Generated-rule diagnostics contain `row_decisions`
-with `row_key`, `accepted`, `failed_predicates`, `threshold_comparisons`, and
-`aggregate_inputs` so accepted and rejected generated rows can be audited from
-the CLI JSON report.
-
-When a generated-rule program uses an external candidate input relation instead
-of inline facts, `xlog explain --format json` also looks for a colocated
-execution manifest (`xlog_hypothesis_execution.json`) and relation JSON file.
-The manifest's `relation_input_columns` and `relation_input_path` let the CLI
-bind external rows to rule variables and compute the same row-level threshold
-decisions in `generated_rule_diagnostics`.
-
-`--format dot` prints the magic-set dependency graph.
-
-**Examples:**
+`text` prints compact sections for parse stats, stratification, negation safety, the
+relational IR and its optimized form, magic-set rewrites, WCOJ eligibility, aggregate
+lifting, rule provenance, and proof traces. `json` emits full `rule_provenance`,
+`proof_traces`, and `generated_rule_diagnostics` arrays. `dot` prints the magic-set
+dependency graph.
 
 ```bash
 xlog explain program.xlog
 xlog explain --format json program.xlog
-xlog explain --format dot program.xlog
 ```
 
-For the shared generated-rule diagnostics model, see the [living-world diagnostics architecture note](/guides/diagnostics).
+For the shared generated-rule diagnostics model, see [Diagnostics and provenance](/guides/diagnostics).
 
-## Input Formats
+## xlog repl
 
-### .xlog Source Files
-
-Datalog source with optional probabilistic annotations:
-
-```prolog
-% Type declarations
-pred edge(u32, u32).
-pred reach(u32, u32).
-
-% Facts
-edge(1, 2).
-edge(2, 3).
-
-% Probabilistic facts (for xlog prob)
-0.3::rain.
-0.7::sprinkler.
-
-% Rules
-reach(X, Y) :- edge(X, Y).
-reach(X, Z) :- reach(X, Y), edge(Y, Z).
-
-% Queries
-?- reach(1, N).
-```
-
-### Arrow IPC Files
-
-EDB relations can be loaded from Arrow IPC files:
+Read a program from standard input, compile it, and print a summary.
 
 ```bash
-xlog run --input edge=edges.arrow program.xlog
+xlog repl [OPTIONS]
 ```
 
-The Arrow file schema must match the predicate declaration:
-- Column count must match predicate arity
-- Column types must be compatible with declared types
+| Option | Description |
+|---|---|
+| `--module-path <DIR[:DIR...]>` | Extra module search paths. |
 
-## Output Formats
+<Note>
+`repl` reads all of standard input to end-of-file, parses it once, and prints a
+compilation summary. It is not an interactive line-by-line session and does not
+evaluate queries.
+</Note>
 
-### Pretty (Default)
+## xlog watch
 
-Human-readable table format:
-
-```
-reach(1, N):
-| N |
-|---|
-| 2 |
-| 3 |
-| 4 |
-| 5 |
-```
-
-### CSV
-
-Comma-separated values:
-
-```
-N
-2
-3
-4
-5
-```
-
-### Arrow
-
-Arrow IPC files written to the output directory:
+Re-read and re-check a source file at a fixed interval.
 
 ```bash
-xlog run --output arrow --output-dir ./results program.xlog
-# Creates: ./results/query_0.arrow
+xlog watch [OPTIONS] <SOURCE>
 ```
 
-## Probabilistic Output
+| Option | Description | Default |
+|---|---|---|
+| `--debounce-ms <MS>` | Interval between re-reads. | `250` |
+| `--explain` | Print explain output on each pass. | off |
+| `--once` | Run a single pass and exit. | off |
 
-### Exact Inference
+`watch` re-reads the file on each interval; it is not driven by filesystem events.
 
-Reports exact probabilities:
+## Input and output
 
-```
-Query: wet
-P(wet | evidence) = 0.3
-```
+**Arrow IPC input.** `--input <REL>=<PATH>` binds an Arrow IPC file to an EDB relation.
+The file's column count must match the predicate's arity and its column types must be
+compatible with the declared types.
 
-### Monte Carlo Inference
+**Output formats.** `pretty` renders human-readable tables (the default). `csv` writes
+comma-separated rows. `arrow` writes one Arrow IPC file per query into `--output-dir`.
+`xlog prob` additionally supports `json`.
 
-Reports estimates with uncertainty:
+## Environment variables
 
-```
-Query: wet
-P(wet) = 0.301 ± 0.009 (95% CI: [0.283, 0.319])
-Samples: 10000, Seed: 42
-```
+The CLI itself reads no environment variables. Two variables affect the layers beneath
+it:
 
-## Error Handling
+| Variable | Read by | Effect |
+|---|---|---|
+| `XLOG_CUBIN_DIR` | kernel loader | Directory of staged CUDA artifacts, preferred over embedded PTX. |
+| `CUDA_VISIBLE_DEVICES` | CUDA driver | Restricts which GPUs are visible. |
 
-The CLI provides actionable error messages:
+## Exit codes
 
-| Error | Message |
-|-------|---------|
-| Parse error | Syntax error with line/column |
-| Type mismatch | Expected vs. actual types |
-| Schema mismatch | Arrow file schema doesn't match predicate |
-| OOM | Memory budget exceeded with estimates |
-| CUDA error | Kernel failure with context |
+`xlog` returns `0` on success and `1` on any error — a parse or compile failure, an
+execution error, an I/O error, or an exhausted memory budget all surface as `1` with a
+descriptive message. There are no other exit codes.
 
-## Environment Variables
+## See also
 
-| Variable | Description |
-|----------|-------------|
-| `CUDA_VISIBLE_DEVICES` | Control visible GPU devices |
-| `XLOG_LOG_LEVEL` | Logging verbosity (debug, info, warn, error) |
-
-## Exit Codes
-
-| Code | Meaning |
-|------|---------|
-| 0 | Success |
-| 1 | Parse/compilation error |
-| 2 | Execution error |
-| 3 | I/O error (file not found, permission denied) |
-| 4 | Resource exhausted (OOM) |
-
-## See Also
-
-- [GPU Execution](/architecture/gpu-execution) — How programs are executed
-- [Probabilistic Tier](/probabilistic/engines) — Exact and Monte Carlo inference
-- [Data Interoperability](/guides/interop) — Arrow IPC format details
+- [GPU execution](/architecture/gpu-execution) — how programs run on the device
+- [Probabilistic engines](/probabilistic/engines) — exact and Monte Carlo inference
+- [Arrow, DLPack, and cuDF interop](/guides/interop) — data exchange formats
