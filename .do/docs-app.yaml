@@ -1,0 +1,10 @@
+name: xlog-docs
+region: fra
+static_sites:
+  - name: site
+    github:
+      repo: BrainyBlaze/xlog
+      branch: docs-dist
+      deploy_on_push: true
+    source_dir: /
+    output_dir: /
