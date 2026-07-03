@@ -50,6 +50,11 @@ XLOG does not re-derive everything on every round. It groups mutually recursive
 predicates into **strongly-connected components** — the cycles in the rule dependency
 graph — and evaluates each component with a **semi-naive fixpoint**.
 
+<Frame caption="Semi-naive evaluation: each round joins only the delta of newly-derived tuples, merges what is new, and stops when a round produces nothing.">
+  <img className="block dark:hidden" src="/assets/diagrams/semi-naive-fixpoint-light.svg" alt="Semi-naive fixpoint loop: Seed, then repeatedly Evaluate rules on the delta, compute New tuples via dedup, Merge into the full relation, and check whether the delta is empty; when it is, the fixpoint is reached." />
+  <img className="hidden dark:block" src="/assets/diagrams/semi-naive-fixpoint-dark.svg" alt="Semi-naive fixpoint loop: Seed, then repeatedly Evaluate rules on the delta, compute New tuples via dedup, Merge into the full relation, and check whether the delta is empty; when it is, the fixpoint is reached." />
+</Frame>
+
 The idea is to work only with what is new. On each round, the engine keeps the set of
 tuples derived on the *previous* round — the **delta** — and joins only those against the
 rules. Tuples that were already known contribute nothing new, so there is no reason to
