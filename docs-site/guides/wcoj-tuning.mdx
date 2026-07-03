@@ -12,6 +12,11 @@ see the [WCOJ architecture guide](/architecture/wcoj).
 
 ## When WCOJ dispatches
 
+<Frame caption="The promoter recognizes eligible join shapes; a runtime cost gate then chooses the worst-case-optimal multiway join or the binary-join fallback — and the two return the identical row set.">
+  <img className="block dark:hidden" src="/assets/diagrams/wcoj-dispatch-light.svg" alt="WCOJ dispatch: a join body passes through a promoter that recognizes triangle, 4-cycle, and clique shapes, then a cost gate routes it to the GPU multiway join when WCOJ wins or to a binary-join tree otherwise; both produce the same rows." />
+  <img className="hidden dark:block" src="/assets/diagrams/wcoj-dispatch-dark.svg" alt="WCOJ dispatch: a join body passes through a promoter that recognizes triangle, 4-cycle, and clique shapes, then a cost gate routes it to the GPU multiway join when WCOJ wins or to a binary-join tree otherwise; both produce the same rows." />
+</Frame>
+
 A rule is a candidate for WCOJ only when three things line up. Miss any one and the rule
 runs on the ordinary binary plan.
 
