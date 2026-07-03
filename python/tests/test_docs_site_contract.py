@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 import subprocess
 import sys
@@ -14,50 +15,61 @@ def read(path: str) -> str:
     return (ROOT / path).read_text(encoding="utf-8")
 
 
-def test_mkdocs_config_defines_curated_docs_and_reference_nav() -> None:
-    config = yaml.safe_load(read("mkdocs.yml"))
-    assert config["site_name"] == "XLOG"
-    assert config["site_url"] == "https://xlog.md/"
-    nav_text = repr(config["nav"])
+def test_mintlify_config_defines_curated_docs_and_reference_nav() -> None:
+    config = json.loads(read("docs-site/docs.json"))
+    assert config["name"] == "XLOG"
+    tab_text = repr(config["navigation"]["tabs"])
     for expected in [
-        "Language Reference",
+        "Documentation",
+        "Reference",
         "Architecture",
-        "Python API",
-        "Rust API",
-        "CUDA API",
+        "reference/python",
+        "reference/rust",
+        "reference/cuda",
     ]:
-        assert expected in nav_text
-    assert "docs/evidence" not in nav_text
-    assert "docs/plans" not in nav_text
+        assert expected in tab_text
+    assert "docs/evidence" not in tab_text
+    assert "docs/plans" not in tab_text
 
 
-def test_custom_domain_file_is_present_for_pages_artifact() -> None:
-    assert read("docs/CNAME").strip() == "xlog.md"
+def test_custom_domain_is_present_for_app_platform_artifact() -> None:
+    app = yaml.safe_load(read(".do/docs-app.yaml"))
+    domains = {entry["domain"]: entry for entry in app["domains"]}
+    assert domains["xlog.md"]["type"] == "PRIMARY"
+    assert domains["www.xlog.md"]["type"] == "ALIAS"
+    site = app["static_sites"][0]
+    assert site["github"]["branch"] == "docs-dist"
+    assert site["github"]["deploy_on_push"] is True
 
 
-def test_docs_build_script_generates_reference_outputs() -> None:
-    script = read("scripts/docs/build_docs.sh")
+def test_docs_workflow_generates_reference_outputs_and_exports() -> None:
+    workflow = read(".github/workflows/docs-site.yml")
     for expected in [
-        "gen_pyxlog_api.py",
-        "cargo doc --workspace --no-deps",
-        "cargo metadata --locked --no-deps --format-version=1",
-        "target_directory",
-        "doxygen Doxyfile.docs",
-        "mkdocs build",
+        "docs-site/**",
+        "node-version: \"22\"",
+        "mint@4.2.666",
+        "scripts/docs/build_rust_api.sh",
+        "mint validate",
+        "mint broken-links",
+        "mint export",
+        "docs-dist",
     ]:
-        assert expected in script
-    assert "target/doc" not in script
+        assert expected in workflow
+
+    script = read("scripts/docs/build_rust_api.sh")
+    assert "cargo doc --workspace --no-deps --locked" in script
+    assert "docs-site/generated/rust" in script
 
 
 def test_rust_api_page_links_to_generated_crate_roots() -> None:
-    rust_page = read("docs/api/rust.md")
+    rust_page = read("docs-site/reference/rust.mdx")
     assert "generated/rust/index.html" in rust_page
     assert "generated/rust/pyxlog/index.html" in rust_page
-    assert "docs/api/generated/rust/index.html" in read("scripts/docs/build_docs.sh")
+    assert "docs-site/generated/rust" in read("scripts/docs/build_rust_api.sh")
 
 
 def test_home_page_omits_local_generated_html_notice() -> None:
-    home = read("docs/index.md")
+    home = read("docs-site/index.mdx")
     assert "Generated HTML is not committed" not in home
     assert "make docs when Rust and Doxygen dependencies are available" not in home
 
@@ -80,15 +92,13 @@ def test_internal_agent_workspace_paths_are_local_only() -> None:
         assert "must not be staged, committed, or pushed" in guidance
 
 
-def test_github_docs_workflow_deploys_pages_only_from_main_docs_changes() -> None:
-    workflow = read(".github/workflows/docs.yml")
+def test_github_docs_workflow_deploys_docs_dist_only_from_main_docs_site_changes() -> None:
+    workflow = read(".github/workflows/docs-site.yml")
     for expected in [
-        "docs/**",
-        "mkdocs.yml",
-        "actions/deploy-pages",
+        "docs-site/**",
+        "Publish to docs-dist branch",
         "permissions:",
-        "id-token: write",
-        "pages: write",
+        "contents: write",
         "if: github.ref == 'refs/heads/main'",
     ]:
         assert expected in workflow

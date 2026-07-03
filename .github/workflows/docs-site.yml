@@ -26,8 +26,11 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
+      - uses: dtolnay/rust-toolchain@stable
       - name: Install Mintlify CLI (pinned)
         run: npm install -g mint@4.2.666
+      - name: Generate Rust API docs
+        run: bash scripts/docs/build_rust_api.sh
       - name: Validate
         working-directory: docs-site
         run: |
