@@ -53,6 +53,11 @@ After the shared parse and stratify stages, each reasoning path branches into it
 intermediate representation, built from the normalized program rather than from the
 deterministic `RIR`.
 
+<Frame caption="One typed frontend fans into four reasoning paradigms, each with its own IR, all executing on the shared GPU kernel provider.">
+  <img className="block dark:hidden" src="/assets/diagrams/architecture-overview-light.svg" alt="XLOG architecture: Source feeds a shared frontend that fans into Deterministic (RIR), Probabilistic (PIR to XGCF), Epistemic (EIR), and Solver (SIR) paradigms, all executing on a GPU-resident kernel provider." />
+  <img className="hidden dark:block" src="/assets/diagrams/architecture-overview-dark.svg" alt="XLOG architecture: Source feeds a shared frontend that fans into Deterministic (RIR), Probabilistic (PIR to XGCF), Epistemic (EIR), and Solver (SIR) paradigms, all executing on a GPU-resident kernel provider." />
+</Frame>
+
 | Paradigm | What it computes | Learn more |
 |---|---|---|
 | **Deterministic Datalog** | Least-model semantics with stratified negation and aggregation, evaluated as a semi-naive fixpoint | [Language reference](/reference/language) |
