@@ -1,0 +1,25 @@
+---
+title: "CUDA Kernel Reference"
+description: "Overview of the CUDA kernel modules that implement xlog's GPU runtime, with the kernels each module provides."
+---
+
+The CUDA surface of xlog lives in `kernels/`, `crates/xlog-cuda/src/`, and `crates/xlog-cuda/kernels/`. Detailed per-function reference pages are generated with Doxygen from those sources during the docs build; the table below summarizes the kernel modules and what each provides.
+
+## Kernel Modules
+
+| File | Kernels | Purpose |
+|------|---------|---------|
+| `arith.cu` | `arith_add_*`, `arith_sub_*`, `arith_mul_*`, `arith_div_*`, `arith_mod_*`, `arith_abs_*`, `arith_neg_*` | Arithmetic operations for `is` expressions |
+| `join.cu` | `hash_join_bucket_count_v2`, `hash_join_scatter_v2`, `hash_join_probe_v2`, `hash_join_semi`, `hash_join_anti`, `compute_composite_hash` | Hash joins (v2 with bucketed layout) + composite hashing |
+| `pack.cu` | `pack_keys`, `pack_and_hash_keys`, `hash_packed_keys`, `gather_packed_rows`, `compare_packed_keys` | Key packing/hashing + packed-row utilities |
+| `dedup.cu` | `mark_unique_*`, `compact_rows` | Sort-based deduplication |
+| `filter.cu` | `filter_compare_*`, `compact_*_by_mask`, `mask_{and,or,not}` | Filtering and stream compaction |
+| `sort.cu` | `radix_histogram`, `radix_scatter_*`, `init_indices`, `apply_permutation_*`, `gather_keys_*` | Stable radix sort + permutation apply |
+| `groupby.cu` | `detect_group_boundaries`, `extract_group_keys`, `groupby_*`, `groupby_logsumexp_*` | Sorted aggregation |
+| `scan.cu` | `exclusive_scan_mask`, `count_mask`, `multiblock_scan_*` | Prefix sum operations |
+| `set_ops.cu` | `concat_{u32,bytes}`, `sorted_diff_mark` | Union/difference operations |
+| `circuit.cu` | `xgcf_forward_level`, `xgcf_backward_level_*` | XGCF circuit eval + reverse-mode gradients (probabilistic) |
+| `sat.cu` | `sat_cdcl_solve`, `sat_check_model`, `sat_proof_check`, `sat_assert_*`, `sat_xgcf_cnf_*`, `sat_emit_not_phi` | GPU CDCL verifier + equivalence query construction helpers |
+| `mc_sample.cu` | `mc_sample_bernoulli` | Bernoulli sampling (Monte Carlo inference) |
+
+See the [architecture overview](/architecture/overview) for how these kernels are dispatched by the runtime, and [GPU Execution](/architecture/gpu-execution) for the execution model.
