@@ -1,0 +1,51 @@
+name: docs-site
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "docs-site/**"
+      - ".github/workflows/docs-site.yml"
+  pull_request:
+    paths:
+      - "docs-site/**"
+      - ".github/workflows/docs-site.yml"
+
+concurrency:
+  group: docs-site-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Install Mintlify CLI (pinned)
+        run: npm install -g mint@4.2.666
+      - name: Validate
+        working-directory: docs-site
+        run: |
+          mint validate
+          mint broken-links
+      - name: Export static bundle
+        working-directory: docs-site
+        run: |
+          mint export
+          mkdir -p ../.site-dist
+          unzip -o *.zip -d ../.site-dist
+      - name: Publish to docs-dist branch
+        if: github.ref == 'refs/heads/main'
+        run: |
+          cd .site-dist
+          git init -b docs-dist
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "docs: publish site build ${GITHUB_SHA}"
+          git push --force "https://x-access-token:${{ github.token }}@github.com/${GITHUB_REPOSITORY}.git" docs-dist
