@@ -64,6 +64,11 @@ XLOG builds an **epistemic IR** from your program (bare modal lowering is reject
 execution always goes through this boundary), then executes **Generate-Propagate-Test** on
 the GPU:
 
+<Frame caption="Generate-Propagate-Test runs on the GPU: candidate world views are enumerated, pruned to the consistent ones, and tested; the founded world views are accepted.">
+  <img className="block dark:hidden" src="/assets/diagrams/epistemic-gpt-light.svg" alt="Epistemic Generate-Propagate-Test: on the GPU, Generate enumerates candidate world views, Propagate prunes inconsistent ones, Test applies brave and cautious checks, and the founded world views are accepted." />
+  <img className="hidden dark:block" src="/assets/diagrams/epistemic-gpt-dark.svg" alt="Epistemic Generate-Propagate-Test: on the GPU, Generate enumerates candidate world views, Propagate prunes inconsistent ones, Test applies brave and cautious checks, and the founded world views are accepted." />
+</Frame>
+
 <Steps>
   <Step title="Generate">
     Candidate world views are enumerated from the program's epistemic literals.
