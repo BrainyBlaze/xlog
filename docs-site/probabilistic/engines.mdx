@@ -1,0 +1,377 @@
+---
+title: "Probabilistic Engines"
+description: "Exact GPU knowledge compilation and Monte Carlo sampling: engine semantics, contracts, and the fail-closed CPU-oracle rules."
+---
+
+`xlog-prob` is XLOG's probabilistic reasoning tier. It consumes a probabilistic `.xlog` program (probabilistic facts, annotated disjunctions, evidence, and probabilistic queries) and evaluates query probabilities either:
+
+- **Exactly** via GPU-native knowledge compilation (`prob_engine=exact_ddnnf`): PIR → GPU CNF → GPU Decision-DNNF compiler → XGCF circuit → GPU weighted model counting + gradients.
+- **Approximately** via Monte Carlo sampling (`prob_engine=mc`): GPU sampling of probabilistic leaves + deterministic evaluation per sampled world, with uncertainty reporting.
+
+## Language Surface (Probabilistic Profile)
+
+The probabilistic surface is parsed by the `xlog-logic` frontend and represented in the AST.
+
+Supported constructs:
+
+- **Probabilistic facts**: `p::atom(...).` (Bernoulli)
+- **Annotated disjunctions (AD)**: `p1::a1(...); p2::a2(...).` (categorical; optional "none" outcome if probabilities sum to `< 1`)
+- **Evidence**: `evidence(atom(...), true|false).`
+- **Queries**: `query(atom(...)).`
+- **Engine selection**: `#pragma prob_engine = exact_ddnnf|mc` (API overrides take precedence in Python)
+
+## Engine Selection and Contracts
+
+### `prob_engine=exact_ddnnf` (exact)
+
+**Primary goal:** compute exact conditional probabilities `P(Q|E)` and (optionally) gradients w.r.t. probabilistic leaf log-weights on GPU.
+
+**Current semantic constraints (enforced by implementation):**
+
+- **Negation is fully supported** via NNF transformation and Well-Founded Semantics:
+  - Stratified negation: automatic layer detection and two-valued evaluation
+  - Non-monotone (cyclic) negation: WFS three-valued semantics (True/False/Undefined)
+  - Gradients flow through negated literals with correct sign flip
+- Recursive programs are supported; provenance is constructed as an acyclic PIR by semi-naive, iteration-indexed unrolling.
+- **Aggregation is not supported** in exact inference rule bodies.
+
+If a program uses aggregation, use `prob_engine=mc`.
+
+### `prob_engine=mc` (approximate Monte Carlo)
+
+**Primary goal:** provide a robust, explicit escape hatch for:
+
+- non-monotone recursion (cycles through `not` and/or aggregates), and
+- probabilistic programs that are not supported by the exact provenance compiler.
+
+**Outputs are marked approximate** and include uncertainty metadata (standard error + confidence interval, sample counts, and seed).
+
+**Non-monotone SCC semantics:** `xlog_prob::mc::NONMONOTONE_SEMANTICS` (also surfaced to Python results).
+
+<Warning>
+**Engine split + fail-closed contract:** the production MC path
+is the GPU-resident megakernel engine, which **rejects** negation, aggregates,
+and other unbounded constructs with a typed `ResidentRejection`. Programs in
+that fragment do NOT run on the GPU: `McProgram::evaluate` fails closed with
+the rejection unless the caller explicitly sets
+`McEvalConfig::allow_cpu_oracle_fallback` (CLI: `--allow-cpu-oracle`; Python:
+`evaluate(..., allow_cpu_oracle=True)`), in which case the **CPU oracle**
+evaluates the program and the result is labeled `McResult::engine =
+McEngine::CpuOracle` (`mc_engine: "cpu-oracle"` in CLI JSON / Python
+metadata). CPU-oracle results are never valid GPU-native or zero-host
+evidence.
+</Warning>
+
+## Epistemic Integration Contract
+
+The epistemic integration contract treats accepted world views as the only valid source of
+epistemic probabilistic evidence. Raw generated guesses must not bypass
+world-view validation and enter the PIR or circuit layers as hidden rewrites. The
+bounded fixture API lives in `xlog_prob::epistemic` and documents the current
+contract:
+
+- `EpistemicAssumption` maps epistemic choices to compiler-facing evidence literals such as `know:rain/0=true`.
+- `AcceptedWorldViewEvidence` couples evidence assumptions to a non-empty accepted
+  `EpistemicWorldView`; callers use it after semantic validation has already
+  accepted the world view.
+- `EpistemicCircuit` keeps a compiled circuit fingerprint, active epistemic evidence, and deterministic query probability for fixture-scale integration tests.
+- `KnowledgeCompilerAdapter::gpu_d4()` represents the existing GPU Decision-DNNF/XGCF path and supports incremental evidence updates.
+- `KnowledgeCompilerAdapter::external_ddnnf_text(...)` records an alternative external Decision-DNNF text adapter design. It consumes DIMACS CNF and emits Decision-DNNF text, but is explicitly `DesignOnly` in this slice.
+- `conditional_probability_from_logs` normalizes `log P(Q and E)` and `log P(E)` with `EPISTEMIC_PROBABILITY_TOLERANCE = 1e-12`, clamping only values within that documented tolerance.
+
+When an adapter supports incremental evidence, changing an epistemic assumption
+updates active evidence without changing the circuit fingerprint or incrementing
+the compile count. Adapters that do not support incremental evidence must report
+a full rebuild. This preserves coherent query semantics for the semantic oracle.
+
+The production-facing bridge is
+`xlog_prob::epistemic_production::EpistemicProbProductionAdapter`. It is a thin
+adapter over `ExactDdnnfProgram`: callers must provide accepted world-view
+evidence before source or parsed programs are compiled through the existing
+GPU-native exact/provenance path. Its trace reports GPU exact compiles,
+accepted-evidence consumption, optional GPU gradient evaluations, and hard-zero
+CPU-only probability recomputation and fixture-circuit counters.
+
+The corrected production gate is stricter: accepted world-view evidence must
+flow into the existing GPU-native exact/provenance path without CPU-only
+probability recomputation in the accepted execution path. The current
+`xlog_prob::epistemic` fixtures do not by themselves close that gate, and the
+production adapter is partial reuse evidence until accepted runtime world views
+are wired through it end to end.
+
+## Exact Path (`ExactDdnnfProgram`)
+
+### Pipeline Overview
+
+1. **Parse + stratify** (`xlog_logic::parse_program`, then provenance lowering).
+2. **Provenance extraction** → PIR graph:
+   - probabilistic facts become PIR leaf literals with probabilities (`leaf_probs`)
+   - annotated disjunctions become a chain of Bernoulli decision variables (`choice_probs`)
+   - derived tuples map to PIR formulas (`tuple_formulas`)
+3. **GPU PIR → CNF** (`encode_cnf_gpu`) with a device-resident var map.
+4. **GPU Decision-DNNF compile + verify**: CNF → device-resident XGCF with cache storage
+   (`compile_gpu_d4_and_verify_cached`).
+5. **GPU evaluation** via cache-aware kernels:
+   - forward pass computes `log WMC(...)` in log-space
+   - backward pass computes gradients w.r.t. leaf log-weights
+
+### Conditional probability
+
+For each query variable `Q` and evidence `E`:
+
+- `log Z_E  = log WMC(E)`
+- `log Z_EQ = log WMC(E ∧ Q)`
+- `log P(Q|E) = log Z_EQ − log Z_E`
+
+This is implemented by `ExactDdnnfProgram::evaluate` and `ExactDdnnfProgram::evaluate_gpu_with_grads`.
+
+### GPU state and caching
+
+`ExactDdnnfProgram` compiles CNF on the GPU, invokes GPU Decision-DNNF + GPU CDCL verification, and stores the resulting circuit in a
+device-resident `GpuCircuitCache`. The program holds a cache handle and CUDA provider in `GpuExactState`; evaluations reuse
+the cached slot and run cache-aware XGCF kernels with no CPU Decision-DNNF invocation and no CNF/DDNNF host materialization.
+
+### Orchestration boundary (honest residency statement)
+
+XGCF forward evaluation launches one kernel **per circuit level** from a host
+loop (`eval_log_wmc_device_inplace`). On the
+GPU Decision-DNNF-native path the loop reads no per-level data back from the device
+(level sizing uses device-resident arrays; the host-side `level_offsets`
+mirror is populated only for host-uploaded circuits), and results stay on
+device until the caller downloads O(1) scalars (logZ, per-query gradients)
+after evaluation. Unlike the MC resident megakernel, exact inference is
+therefore **GPU-accelerated with host-orchestrated level launches**, not a
+single-launch device-resident engine — do not cite it under the MC engine's
+no-host-interaction measured contract.
+
+### CPU Decision-DNNF compilation (removed)
+
+The codebase does not include a CPU Decision-DNNF compilation pipeline:
+
+- No vendored Decision-DNNF compiler snapshot.
+- No shell-out to an external `d4` binary.
+
+Decision-DNNF parsing remains available for tests/fixtures only; production exact
+inference uses the GPU-native compiler + verifier and device-resident circuits.
+
+The GPU-native encoder (`encode_cnf_gpu`) produces a device-resident
+`GpuCnf` for the GPU Decision-DNNF/CDCL pipeline and is wired into `ExactDdnnfProgram` via
+`compile_gpu_d4_and_verify_cached` with a device-resident `GpuCircuitCache`.
+
+## GPU-Native Compilation + Verification
+
+XLOG's target architecture is a **100% GPU-native** compilation + verification
+path (GPU Decision-DNNF + GPU CDCL verifier) with **zero data-plane host transfers**. This
+path is integrated into `ExactDdnnfProgram`:
+
+- `xlog_prob::compilation::validate_equivalence_gpu` proves `φ ≡ C` by solving two UNSAT queries on GPU:
+  - `UNSAT(φ ∧ ¬C)`
+  - `UNSAT(C ∧ ¬φ)`
+
+**Verifier contract:**
+
+- **Zero device→host reads** in the production verifier path (the host never downloads SAT/UNSAT status).
+- **Fail-fast on mismatch**: GPU-side assertion/validation kernels trap; the host observes only CUDA success/failure.
+- **Capacity-safe CNF handling**: CNF buffers may be allocated with capacity greater than exact size; all index math uses
+  device-resident `GpuCnf::{num_vars,num_clauses,num_lits}`.
+
+Cache + integration is implemented: a GPU-resident circuit cache, cache-aware XGCF evaluation,
+GPU-only exact compilation (`compile_gpu_d4_and_verify_cached`), and guardrails enforcing
+no device→host reads in the cache path.
+
+## Monte Carlo Path (`McProgram`)
+
+### Sampling plan
+
+`McProgram` compiles probabilistic leaves into a flat Bernoulli vector (`bernoulli_probs: Vec<f32>`):
+
+- each probabilistic fact is a direct Bernoulli variable
+- each annotated disjunction is encoded as a **chain of conditional Bernoulli decisions** (matching the exact/provenance lowering):
+  - for categorical probabilities `(p0, p1, …, pk)` the chain samples `k-1` Bernoullis with conditional probabilities `p_i / remaining`
+  - if the probabilities sum to `< 1`, an explicit "none" outcome is represented by the remaining mass
+
+This compilation is implemented by `compile_sampling_plan`.
+
+### GPU sampling
+
+Sampling uses `CudaKernelProvider::sample_bernoulli_matrix_device(...)`, which calls a dedicated sampling kernel to generate a row-major `[samples][num_vars]` matrix of 0/1 bytes on the GPU. Sampling is deterministic given `seed`.
+
+### GPU-resident execution engine (device-only counts)
+
+The MC execution path is the **GPU-resident Datalog engine**, exposed via:
+
+- `McProgram::evaluate_gpu_device(...) -> McDeviceResult`
+- `McProgram::evaluate_gpu_device_with_provider(...) -> McDeviceResult` (caller-supplied provider)
+- `McProgram::evaluate_resident_with_provider(...) -> McResidentResult` (raw device result + no-host stats)
+
+It evaluates **all** sampled worlds in a single megakernel launch and returns
+device-resident count buffers (`query_counts`, `evidence_count`) plus a per-world
+`iter_trace`. The sample/world id is the CUDA grid dimension. Sampled facts,
+derived relations, evidence flags, query counts, sparse row counts, sparse
+world offsets, and fixpoint state are all device-resident.
+
+The current sparse/WCOJ resident engine stores each world in a preallocated
+columnar arena (`slot`, `arg0`, `arg1`, `arg2`) with kernel-populated device row
+counters, device world offsets, convergence flags, and sparse-arena overflow
+flags. A dense bounded bitset remains only as a device-side membership
+index for duplicate suppression and query/evidence membership checks; it is no
+longer the only execution proof. Generic positive joins are evaluated from the
+sparse row arena by binding variables from matching body rows and appending
+derived heads with device atomic cursors. Recursive programs converge in the
+same megakernel through a device-side double-buffered fixpoint. The default path
+uses one CUDA block per world; setting `XLOG_MC_RESIDENT_BLOCKS_PER_WORLD>1`
+before setup switches the same kernel to a cooperative multi-block-per-world
+launch with grid synchronization, explicit device fences around cooperative
+barriers, atomic reads of device change/continue flags, and device-written block
+participation counters. The final per-world convergence state is written to
+device memory, and no host read drives control flow.
+
+The supported production fragment remains bounded (`arity <= 3`, `body <= 3`,
+`<= 8` variables). Programs that would exceed a configured deterministic resident
+arena budget fail closed before device allocation with
+`XlogError::ResourceExhausted` (`resident_resource_budget`, `bound_bytes`,
+`budget_bytes`); there is no CPU or host-sizing fallback.
+
+#### No host interaction in the measured region
+
+The predecessor no-host-loop implementation only removed *tracked data-plane*
+host-to-device/device-to-host transfers from a host loop that **still
+orchestrated per sample**: a
+Rust `for sample_idx` loop, per-sample kernel launches, and per-sample untracked
+`dtoh_scalar_untracked` row-count reads. That is **not** the guarantee here.
+
+The resident engine's measured region is a single megakernel launch (+ one
+post-launch sync). It has **zero host interaction**: 0 tracked host-to-device, 0
+tracked device-to-host, **0 untracked metadata reads** (`dtoh_scalar_untracked` is never called
+in-region — a dedicated `untracked_metadata_dtoh_count` provider counter proves
+it), 0 host loop iterations, 0 per-sample host launches. This is measured via
+`McNoHostStats` (snapshots around the launch) and proven **constant across
+N=128 and N=1024** (nothing scales per-sample on the host). Static setup (the
+seeded sample matrix, force arrays, plan upload, buffer allocation) happens
+before the region; final aggregates are read only after it.
+
+There is **no host-orchestrated fallback**: programs outside the supported
+fragment (bounded-domain positive Datalog — arity ≤ 3, body ≤ 3, ≤ 8 vars,
+bounded universe) **fail closed** before execution with a typed
+`ResidentRejection` (kind + construct + context). The CPU path
+(`evaluate_cpu`) is a seed-matched test oracle only — never accepted execution.
+
+**Acceptance scope.** GPU-native no-host evidence comes from the resident-engine
+test suite (seven exact sparse resident pilots, including ternary-relation input,
+with device sparse row-count evidence plus device-written offsets/convergence/overflow
+diagnostics and a cooperative two-block-per-world recursion pilot,
+recursion with a non-base derived tuple and more than one fixpoint iteration, plus
+fail-closed negative tests) and the device-count test gates. A full
+`cargo test -p xlog-prob` run includes CPU-oracle/host-output tests and is **not**
+no-host evidence.
+
+### Evidence conditioning and uncertainty reporting
+
+`mc` uses rejection sampling for evidence:
+
+- Only samples satisfying `evidence(...)` are counted (`evidence_samples`).
+- If evidence is present and never satisfied, evaluation fails with a deterministic error.
+
+For each query, `mc` estimates `P(Q|E)` as a binomial proportion and reports:
+
+- `prob`, `log_prob`
+- standard error (`stderr`)
+- two-sided confidence interval (`ci_low`, `ci_high`) for the configured `confidence`
+- `samples`, `evidence_samples`, `seed`
+- non-monotone SCC diagnostics (`nonmonotone_sccs`, `nonmonotone_cycles`, `nonmonotone_iteration_limit_hits`)
+
+### Host outputs and CPU validation (feature-gated)
+
+Host-readable probability outputs are behind `--features host-io`:
+
+- `McProgram::evaluate(...) -> McResult` (and its alias `evaluate_gpu(...)`) run the
+  GPU-native device loop and then **materialize the result on the host** by
+  downloading the final query/evidence counts *after* the hot loop. This is
+  host-result materialization, not a hot-loop transfer — the `_gpu` suffix marks
+  GPU compute, it does not imply a zero-host result.
+- `McProgram::evaluate_cpu(...) -> McResult` is a CPU **oracle/debug** path that
+  downloads the full sample matrix and evaluates worlds on the host. It is never
+  GPU-native and never release evidence; it exists only as a seed-matched oracle.
+
+## Python API (`pyxlog`)
+
+The PyO3 extension exposes two entry points:
+
+- `Program.compile(source, device=0, memory_mb=32768, prob_engine=None) -> CompiledProgram`
+  - `CompiledProgram.evaluate(return_grads=False, ...) -> EvalResult`
+  - outputs probabilities as DLPack tensors (`prob`, `log_prob`)
+  - exact engine optionally returns per-query gradients (`grad_true`, `grad_false`)
+  - MC engine returns uncertainty metadata and sets `approx=True`
+- `LogicProgram.compile(source, device=0, memory_mb=32768) -> CompiledLogicProgram`
+  - `CompiledLogicProgram.evaluate(dlpack_inputs={...}) -> LogicEvalResult`
+
+All GPU table interchange is via DLPack capsules (framework-agnostic). The repository's `examples/python/` directory contains end-to-end scripts.
+
+For training workloads with neural predicates, `pyxlog` uses the **GPU neural
+fast-path**:
+
+- neural outputs are imported as CUDA tensors via DLPack (no `.tolist()`),
+- AD-chain weights and probability gradients are computed on GPU,
+- Torch receives device-resident gradients via `output.backward(grad)`.
+- The strict GPU-native entrypoint is `CompiledProgram.forward_backward_tensor(query) -> torch.Tensor` which returns a
+  CUDA scalar loss (no device→host reads required). The legacy `forward_backward(query) -> f64` helper reads back a
+  single scalar for convenience.
+
+## Provenance Primitives (Rust-only)
+
+`xlog-prob` exposes retained provenance metadata so external Rust consumers can resolve PIR nodes
+back to their source atoms and annotated-disjunction metadata. All data is retained inline during
+extraction — no new passes or post-hoc reconstruction.
+
+### Types
+
+- `ChoiceSource` — captures explicit annotated-disjunction heads (with probabilities), the
+  Bernoulli decision stage index (`choice_index`), and an optional AD identity (`source_id`,
+  `None` in the initial API).
+
+### Fields on `Provenance`
+
+- `leaf_atoms: BTreeMap<LeafId, GroundAtom>` — one entry per probabilistic fact leaf
+- `choice_sources: BTreeMap<ChoiceVarId, ChoiceSource>` — one entry per Bernoulli decision variable
+
+### Accessors
+
+- `leaf_atom(LeafId) -> Option<&GroundAtom>` — resolve a PIR leaf to its source atom
+- `choice_source(ChoiceVarId) -> Option<&ChoiceSource>` — resolve a decision node to AD metadata
+- `atoms_with_formulas() -> impl Iterator<Item = (&GroundAtom, PirNodeId)>` — iterate all atoms
+  with provenance formulas (exposes `tuple_formulas` read-only)
+
+### Re-exports
+
+`xlog-prob` re-exports key types at crate root:
+
+```rust
+pub use pir::{ChoiceVarId, LeafId, PirGraph, PirNode, PirNodeId};
+pub use provenance::{ChoiceSource, GroundAtom, Provenance, Value};
+```
+
+Use `CHANGELOG.md` and the crate-level API docs as the authoritative references for
+the provenance API.
+
+## Reproducibility
+
+```bash
+# Rust (workspace)
+cargo test --workspace --all-targets --exclude pyxlog --release
+
+# Rust (`xlog-prob` focused)
+cargo test -p xlog-prob --all-targets --release
+
+# CUDA certification suite (release)
+cargo test -p xlog-cuda-tests --test certification_suite --release -- --nocapture
+
+# Python examples (local wheel)
+python scripts/install_pyxlog_for_python.py --python /usr/local/bin/python --user
+python examples/python/03_prob_mc_nonmonotone_torch.py
+```
+
+## See Also
+
+- [Rule Learning (Differentiable ILP)](/neural/rule-learning) — shares XGCF/provenance infrastructure
+- [GPU Execution](/architecture/gpu-execution) — mask DAG evaluation, stream compaction
+- [Python Bindings](/reference/python) — user-facing API reference

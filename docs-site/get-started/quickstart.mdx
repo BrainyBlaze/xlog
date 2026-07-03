@@ -1,0 +1,80 @@
+---
+title: "Quickstart"
+description: "Write, run, and inspect your first XLOG program, then explore the CLI's deterministic, probabilistic, and diagnostic subcommands."
+---
+
+## Your first program
+
+Create `reachability.xlog`:
+
+```prolog
+pred edge(u32, u32).
+pred reach(u32, u32).
+
+edge(1, 2).
+edge(2, 3).
+edge(3, 4).
+
+reach(X, Y) :- edge(X, Y).
+reach(X, Z) :- reach(X, Y), edge(Y, Z).
+
+?- reach(1, N).
+```
+
+Run it:
+
+```bash
+./target/release/xlog run reachability.xlog
+```
+
+Expected output:
+
+```text
+__xlog_query_0
++-------+
+| col_0 |
++-------+
+| 2     |
+| 3     |
+| 4     |
++-------+
+```
+
+The [language reference](/reference/language) covers the full surface, and the
+repository's `examples/` directory contains annotated programs for lists and
+meta-predicates, magic sets, probabilistic aggregates, approximate inference,
+epistemic reasoning (`examples/epistemic/`), and Python neural-symbolic
+training (`examples/python/`).
+
+## CLI at a glance
+
+```bash
+# Deterministic execution
+./target/release/xlog run program.xlog
+./target/release/xlog run program.xlog --output csv
+./target/release/xlog run program.xlog --output arrow --output-dir ./results
+
+# External data (Arrow IPC)
+./target/release/xlog run program.xlog --input edge=graph.arrow
+
+# Probabilistic execution
+./target/release/xlog prob program.xlog --prob-engine exact_ddnnf
+./target/release/xlog prob program.xlog --prob-engine mc --samples 10000 --seed 42
+
+# Profiling
+./target/release/xlog run program.xlog --stats
+./target/release/xlog run program.xlog --stats --stats-format json
+
+# Explain diagnostics
+./target/release/xlog explain program.xlog
+./target/release/xlog explain --format json program.xlog
+
+./target/release/xlog run --help
+```
+
+See the [CLI reference](/reference/cli) for the complete flag reference.
+
+## Next steps
+
+- [Installation](/get-started/installation) — supported platform, source builds, PyPI, crates.io, and the CUDA kernel artifact model
+- [Language reference](/reference/language) — types, predicates, rules, modules, UDFs, aggregations, and pragmas
