@@ -65,6 +65,16 @@ deterministic `RIR`.
 | **Epistemic** | World-view semantics over modal `know` and `possible` operators | [Epistemic reasoning](/epistemic/overview) |
 | **Neural-symbolic** | Learned rules and neural predicates trained end-to-end with PyTorch | [Rule learning](/neural/rule-learning) |
 
+The intermediate representations make this concrete. Everything lowers through the
+relational IR (`RIR`); the probabilistic and solver paths compile further to a
+GPU-evaluable circuit format (`XGCF`), while the epistemic path drives GPU world-view
+execution directly.
+
+<Frame caption="The IR stack: AST lowers to RIR; PIR and SIR compile to the XGCF circuit format; EIR drives GPU world-view execution.">
+  <img className="block dark:hidden" src="/assets/diagrams/ir-stack-light.svg" alt="XLOG IR stack: AST to RIR, which branches into PIR (provenance), EIR (epistemic), and SIR (solver); PIR and SIR compile to the XGCF circuit format and EIR drives GPU epistemic execution." />
+  <img className="hidden dark:block" src="/assets/diagrams/ir-stack-dark.svg" alt="XLOG IR stack: AST to RIR, which branches into PIR (provenance), EIR (epistemic), and SIR (solver); PIR and SIR compile to the XGCF circuit format and EIR drives GPU epistemic execution." />
+</Frame>
+
 ## Compile once, evaluate many
 
 The compiled plan is structure, and structure is stable: across training iterations or

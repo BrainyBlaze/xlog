@@ -1,0 +1,60 @@
+<!-- xlog diagram: IR stack (dark). Source: docs ARCHITECTURE.md "Intermediate Representations". AST -> RIR -> {PIR, EIR, SIR}; PIR and SIR compile to XGCF; EIR drives GPU epistemic execution. -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 300" font-family="Inter, system-ui, sans-serif">
+  <rect width="900" height="300" fill="#0E0E16"/>
+  <defs>
+    <marker id="aid" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#9B98B4"/>
+    </marker>
+  </defs>
+
+  <text x="28" y="38" font-size="16" font-weight="600" fill="#E7E6F0">Intermediate representations</text>
+  <text x="28" y="56" font-size="11" fill="#9B98B4">The AST lowers to a relational IR; each reasoning path branches into its own IR built from it.</text>
+
+  <rect x="28" y="130" width="104" height="50" rx="7" fill="#171626" stroke="#E7E6F0" stroke-width="1.25"/>
+  <text x="80" y="152" text-anchor="middle" font-size="12.5" font-weight="600" fill="#E7E6F0">AST</text>
+  <text x="80" y="167" text-anchor="middle" font-size="9.5" fill="#9B98B4">parse tree</text>
+
+  <rect x="176" y="130" width="120" height="50" rx="7" fill="#171626" stroke="#E7E6F0" stroke-width="1.25"/>
+  <rect x="177.5" y="132" width="3.5" height="46" rx="1.75" fill="#8B83F0"/>
+  <text x="238" y="152" text-anchor="middle" font-size="12.5" font-weight="600" fill="#E7E6F0">RIR</text>
+  <text x="238" y="167" text-anchor="middle" font-size="9.5" fill="#9B98B4">relational IR</text>
+
+  <path d="M132,155 H174" stroke="#9B98B4" stroke-width="1.5" fill="none" marker-end="url(#aid)"/>
+
+  <g stroke="#9B98B4" stroke-width="1.5" fill="none" marker-end="url(#aid)">
+    <path d="M296,150 C330,150 330,86 372,86"/>
+    <path d="M296,155 H372"/>
+    <path d="M296,160 C330,160 330,224 372,224"/>
+  </g>
+
+  <rect x="374" y="62" width="140" height="48" rx="7" fill="#171626" stroke="#E7E6F0" stroke-width="1.25"/>
+  <rect x="375.5" y="64" width="3.5" height="44" rx="1.75" fill="#A78BFA"/>
+  <text x="392" y="84" font-size="12" font-weight="600" fill="#E7E6F0">PIR</text>
+  <text x="392" y="99" font-size="9.5" fill="#9B98B4">provenance</text>
+  <rect x="374" y="131" width="140" height="48" rx="7" fill="#171626" stroke="#E7E6F0" stroke-width="1.25"/>
+  <rect x="375.5" y="133" width="3.5" height="44" rx="1.75" fill="#22D3EE"/>
+  <text x="392" y="153" font-size="12" font-weight="600" fill="#E7E6F0">EIR</text>
+  <text x="392" y="168" font-size="9.5" fill="#9B98B4">epistemic</text>
+  <rect x="374" y="200" width="140" height="48" rx="7" fill="#171626" stroke="#E7E6F0" stroke-width="1.25"/>
+  <rect x="375.5" y="202" width="3.5" height="44" rx="1.75" fill="#FBBF24"/>
+  <text x="392" y="220" font-size="12" font-weight="600" fill="#E7E6F0">SIR</text>
+  <text x="392" y="235" font-size="9.5" fill="#9B98B4">solver</text>
+
+  <g stroke="#9B98B4" stroke-width="1.5" fill="none" marker-end="url(#aid)">
+    <path d="M514,86 C560,86 560,116 604,116"/>
+    <path d="M514,224 C560,224 560,140 604,140"/>
+    <path d="M514,165 C558,165 558,219 604,219"/>
+  </g>
+
+  <path d="M606,104 H744 L756,116 V152 H606 Z" fill="#1C1A33" stroke="#8B83F0" stroke-width="1.25"/>
+  <rect x="616" y="110" width="38" height="14" rx="7" fill="#10B981"/>
+  <text x="635" y="120" text-anchor="middle" font-size="8" font-weight="600" fill="#0E0E16" font-family="'JetBrains Mono','SF Mono',ui-monospace,Menlo,monospace">GPU</text>
+  <text x="681" y="137" text-anchor="middle" font-size="12" font-weight="600" fill="#E7E6F0">XGCF</text>
+  <text x="681" y="150" text-anchor="middle" font-size="9" fill="#9B98B4">circuit format</text>
+
+  <rect x="606" y="196" width="150" height="46" rx="7" fill="#1C1A33" stroke="#22D3EE" stroke-width="1.25"/>
+  <text x="681" y="216" text-anchor="middle" font-size="11.5" font-weight="600" fill="#E7E6F0">GPU epistemic</text>
+  <text x="681" y="230" text-anchor="middle" font-size="9.5" fill="#9B98B4">world-view execution</text>
+
+  <text x="28" y="288" font-size="10.5" fill="#9B98B4">RIR is the deterministic backbone; PIR and SIR compile to the GPU circuit format (XGCF); EIR drives GPU world-view execution.</text>
+</svg>
