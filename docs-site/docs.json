@@ -18,6 +18,7 @@
         "tab": "Documentation",
         "groups": [
           { "group": "Get Started", "pages": ["index", "get-started/quickstart", "get-started/installation"] },
+          { "group": "Core Concepts", "pages": ["core-concepts/how-xlog-works", "core-concepts/gpu-residency"] },
           { "group": "Probabilistic Programming", "pages": ["probabilistic/engines"] },
           { "group": "Epistemic Reasoning", "pages": ["epistemic/overview"] },
           { "group": "Neural-Symbolic", "pages": ["neural/rule-learning", "neural/exact-induction"] },

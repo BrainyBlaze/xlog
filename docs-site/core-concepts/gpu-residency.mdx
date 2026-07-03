@@ -1,0 +1,61 @@
+---
+title: "GPU residency"
+description: "Why XLOG keeps reasoning state on the device, what the residency contract guarantees, and how it fails when a program will not fit."
+---
+
+Most neural-symbolic systems run neural computation on the GPU and symbolic reasoning
+on the CPU. Every training iteration then pays a PCIe round-trip to move data across
+that boundary, and at scale those transfers dominate wall-clock time. XLOG removes the
+boundary: symbolic evaluation runs on the device, and reasoning state stays there.
+
+## The contract
+
+During execution, XLOG's runtime semantic state — relations, deltas, probabilistic
+circuit values, and solver state — is **GPU-resident**. The host compiles the program,
+launches kernels, and reads back bounded metadata (such as row counts to decide when a
+fixpoint has converged), but the production data plane performs no tracked
+host-to-device or device-to-host transfers of semantic data.
+
+<Note>
+"Bounded metadata" — a handful of counts read to drive control flow — is exempt from
+the zero-transfer contract. The guarantee is about semantic *data* (tuples, weights,
+circuit values), which never leaves the device in a production run.
+</Note>
+
+This is what makes XLOG a runtime you put *inside* a training loop. Query results and
+gradient tensors are exposed as GPU-resident DLPack capsules and Arrow arrays, so a
+PyTorch or JAX computation consumes them without a copy.
+
+## Strict residency, and what happens when it fails
+
+By default XLOG runs in **strict GPU-resident mode**: the entire plan must execute
+within the device memory budget. The budget defaults to a fixed limit you can raise
+per program (`memory_mb` in the API, `--memory-mb` on the CLI).
+
+If a plan cannot fit, XLOG does not silently spill or fall back to the host. It fails
+closed with a `ResourceExhausted` error that reports the estimated and available bytes,
+so an out-of-memory condition is a definite, diagnosable outcome rather than a slow
+degradation.
+
+```text
+Error: ResourceExhausted { context: "GPU memory budget exceeded", estimated_bytes: ..., budget_bytes: ... }
+```
+
+Fail-closed behavior is a running theme in XLOG. Where a computation cannot be done on
+the device within its declared bounds, the engine rejects it with a typed error instead
+of quietly switching to a slower or less exact path. You always know which path
+produced a result.
+
+## Compile once, keep the structure resident
+
+Because the compiled plan is stable across evaluations, XLOG keeps compiled artifacts
+resident and reuses them. For probabilistic inference this includes the compiled
+arithmetic circuit: training iterations update leaf weights and evidence in place
+without recompiling the circuit structure. For deterministic queries, build-side hash
+indexes for hot relations are cached and reused across evaluations in a session.
+
+<Card title="See it in the pipeline" icon="diagram-project" href="/core-concepts/how-xlog-works">
+  The compilation pipeline shows exactly where the host/device boundary sits: the
+  executor orchestrates on the host, while kernels and the relation store are resident
+  on the GPU.
+</Card>
