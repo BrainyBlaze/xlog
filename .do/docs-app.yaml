@@ -1,7 +1,7 @@
-name: xlog-docs
-region: fra
+name: xlogmd-site
+region: lon
 static_sites:
-  - name: site
+  - name: xlog
     github:
       repo: BrainyBlaze/xlog
       branch: docs-dist
