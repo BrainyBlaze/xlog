@@ -1,0 +1,96 @@
+---
+title: "Lists and meta-predicates"
+description: "Build finite lists, destructure them with cons patterns, and reach for the small, deliberately-bounded set of meta-predicates XLOG folds at compile time."
+---
+
+XLOG lets you carry structured data in a column and inspect the shape of terms — but
+it does so within tight, compile-time bounds. Lists are finite and interned to integers;
+meta-predicates are either grammar syntax or ordinary atoms recognized by name, and
+several of them are resolved before a single kernel runs. There is no runtime database
+to mutate, so the classic assert/retract family is rejected outright.
+
+## Finite lists
+
+A list literal is written with square brackets and commas:
+
+```xlog
+[a, b, c]
+```
+
+To take a list apart, use the cons pattern `[H | T]` — `H` binds to the first element
+(the head) and `T` binds to the rest (the tail):
+
+```xlog
+first(H) :- items([H | T]).
+```
+
+Everything before the `|` is a fixed prefix of elements; everything after it is the
+remaining list. You can bind several leading elements at once, as in `[A, B | Rest]`.
+
+Declare a list-valued column with the `list<T>` type, where `T` is any scalar type.
+List types nest, so `list<list<u32>>` is a column of lists of lists:
+
+```xlog
+pred path(nodes: list<u32>).
+```
+
+<Note>
+Lists in XLOG are **finite and interned**. At compile time every list literal and cons
+structure is registered to a dense integer ID, so a `list<T>` column joins and compares
+as fast as any integer column. There are no unbounded or cyclic lists — a list you can
+write down is a list the compiler can intern, and nothing else is representable.
+</Note>
+
+## Meta-predicates
+
+Only one meta-predicate, `=..` (read "univ"), is part of the grammar. It relates a
+compound term to a list of its functor and arguments — the same role it plays in
+Prolog. Every other meta-predicate is an **ordinary atom recognized by its predicate
+name** during compilation, not a special syntactic form.
+
+### findall/3
+
+`findall/3` collects every value of a template into a list:
+
+```xlog
+collect(Xs) :- findall(Y, edge(1, Y), Xs).
+```
+
+This gathers each `Y` for which `edge(1, Y)` holds and binds `Xs` to the resulting list.
+
+<Warning>
+`findall/3` is **limited to finite source facts**. Its inner goal must range over stored
+facts, not derived relations — a goal that depends on a rule head is rejected. Collecting
+over derived goals is reserved for a later aggregate-backed collection path, so reach for
+head aggregates like `count` and `sum` when you need to fold derived data.
+</Warning>
+
+### maplist and functor/3
+
+`maplist` applies a predicate across the elements of a list, and `functor/3` relates a
+compound term to its functor name and arity. Both are recognized by name and expanded
+during meta-normalization.
+
+### ground/1, var/1, nonvar/1 — folded at compile time
+
+`ground/1`, `var/1`, and `nonvar/1` look like runtime tests, but they are **folded at
+compile time**. At the program point where each appears, the compiler already knows
+whether the term is bound or ground, so the call resolves to either success (it vanishes)
+or a `fail` atom that prunes the rule. They never execute as runtime checks — they are a
+compile-time decision about the shape of your program, not a query against your data.
+
+## No runtime database
+
+XLOG evaluates a program to a fixpoint; it has **no mutable runtime database**. The
+dynamic-database predicates are therefore rejected with a typed error:
+
+<Warning>
+`call`, `assert`, `asserta`, `assertz`, and `retract` are **not supported** and are
+rejected at compile time. There is no way to add or remove facts while a program runs —
+all facts are declared up front and all derivation is done by rules. If you are porting
+Prolog that mutates the database, restructure it as declared facts plus rules.
+</Warning>
+
+<Card title="Modules" icon="cubes" href="/language-guide/modules">
+  Split a program across files, import selectively, and control visibility with `private`.
+</Card>

@@ -1,0 +1,107 @@
+---
+title: "Recursion"
+description: "Write rules that refer to themselves, and let XLOG's semi-naive fixpoint evaluate them to completion on the GPU."
+---
+
+A rule is **recursive** when the predicate in its head also appears in its body — directly,
+or through a cycle of other rules. Recursion is how you express reachability, ancestry,
+graph closure, and any relation that grows by repeatedly applying itself to what it has
+already produced.
+
+## A recursive rule
+
+The classic example is transitive closure. Start with a one-step `edge` relation and
+derive the many-step `reach` relation:
+
+```xlog
+pred edge(u32, u32).
+
+edge(1, 2).
+edge(2, 3).
+edge(3, 4).
+
+reach(X, Y) :- edge(X, Y).
+reach(X, Z) :- edge(X, Y), reach(Y, Z).
+```
+
+The first rule seeds `reach` with every direct edge. The second rule is recursive: it
+mentions `reach` in its own body, saying "if there is an edge from `X` to `Y`, and `Y`
+already reaches `Z`, then `X` reaches `Z`." Applied over and over, these two rules
+compute every path in the graph.
+
+```xlog
+?- reach(1, N).
+```
+
+```text
+__xlog_query_0
++-------+
+| col_0 |
++-------+
+| 2     |
+| 3     |
+| 4     |
++-------+
+```
+
+## Semi-naive fixpoint evaluation
+
+XLOG does not re-derive everything on every round. It groups mutually recursive
+predicates into **strongly-connected components** — the cycles in the rule dependency
+graph — and evaluates each component with a **semi-naive fixpoint**.
+
+The idea is to work only with what is new. On each round, the engine keeps the set of
+tuples derived on the *previous* round — the **delta** — and joins only those against the
+rules. Tuples that were already known contribute nothing new, so there is no reason to
+revisit them. Each round produces a fresh, usually smaller delta, and the work shrinks
+as the relation approaches its final answer.
+
+<Note>
+Semi-naive evaluation is what makes recursion practical on a GPU. Instead of recomputing
+the whole relation every round, each round is a join against a shrinking delta — the same
+hash joins you already use for non-recursive rules, run to a fixpoint.
+</Note>
+
+## Termination
+
+Evaluation of a recursive component **halts when a round derives no new tuples** — the
+delta is empty, the relation has stopped growing, and the fixpoint is reached. Because
+every derived tuple is built from a finite domain of values already present in the
+program, the relation cannot grow forever, and evaluation always terminates on
+well-formed input.
+
+As a safety bound against a runaway or accidentally explosive program, XLOG caps the
+number of recursive rounds with a pragma:
+
+```xlog
+#pragma max_recursion_depth = 5000.
+```
+
+The default is `1000`. If a recursive component has not reached its fixpoint within this
+many rounds, evaluation stops rather than looping indefinitely. Raise it for genuinely
+deep recursion; the bound exists to fail loudly, not to shape your answer.
+
+## Recursion must be stratified
+
+Recursion may flow through positive atoms freely, but it **may not flow through negation
+or aggregation**. A predicate cannot depend — even transitively — on the negation of
+itself, and it cannot recurse through an aggregate over itself. Such a program has no
+well-defined fixpoint, and XLOG rejects it at compile time with a stratification error.
+
+The fix is to **forward-link**: compute the recursive relation to its fixpoint first, then
+negate or aggregate over the finished result in a later, non-recursive rule. Because the
+recursion sits in an earlier stratum, its answer is fully settled before the negation or
+aggregation ever runs.
+
+```xlog
+// Fine: recursion through positive atoms only.
+reach(X, Z) :- edge(X, Y), reach(Y, Z).
+
+// Fine: aggregate over the finished relation in a later rule.
+reach_count(X, count(Z)) :- reach(X, Z).
+```
+
+<Card title="Negation" icon="ban" href="/language-guide/negation">
+  How stratified negation-as-failure works, why it must be stratifiable, and the binding
+  rules that keep negated atoms safe.
+</Card>
