@@ -1,0 +1,26 @@
+{
+  "$schema": "https://mintlify.com/docs.json",
+  "theme": "mint",
+  "name": "XLOG",
+  "description": "GPU-native logic programming for unified symbolic reasoning",
+  "colors": { "primary": "#4F46E5", "light": "#818CF8", "dark": "#312E81" },
+  "logo": { "light": "/assets/logo/light.svg", "dark": "/assets/logo/dark.svg" },
+  "favicon": "/assets/favicon.svg",
+  "navbar": {
+    "links": [{ "label": "GitHub", "href": "https://github.com/BrainyBlaze/xlog" }]
+  },
+  "footer": {
+    "socials": { "github": "https://github.com/BrainyBlaze/xlog" }
+  },
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          { "group": "Get Started", "pages": ["index"] }
+        ]
+      }
+    ]
+  },
+  "redirects": []
+}
