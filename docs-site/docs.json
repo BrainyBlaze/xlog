@@ -37,7 +37,7 @@
         "tab": "Architecture",
         "groups": [
           { "group": "System", "pages": ["architecture/overview", "architecture/gpu-execution", "architecture/device-runtime", "architecture/arithmetic", "architecture/language-completeness"] },
-          { "group": "Joins & Optimization", "pages": ["architecture/wcoj", "architecture/query-optimizer", "architecture/adaptive-indexing", "architecture/multi-gpu"] },
+          { "group": "Joins & Optimization", "pages": ["architecture/wcoj", "architecture/factorized-execution", "architecture/factorized-execution-internals", "architecture/query-optimizer", "architecture/adaptive-indexing", "architecture/multi-gpu"] },
           { "group": "Reasoning Engines", "pages": ["architecture/epistemic-internals", "architecture/solver-services"] },
           { "group": "Project", "pages": ["architecture/certification", "architecture/release-process", "architecture/roadmap"] }
         ]
