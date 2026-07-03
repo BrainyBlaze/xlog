@@ -9,7 +9,7 @@ output_dir="$repo_root/docs-site/generated/rust"
 
 cd "$repo_root"
 
-cargo doc --workspace --no-deps --locked --target-dir "$target_dir"
+XLOG_RUSTDOC_NO_CUDA=1 cargo doc --workspace --no-deps --locked --target-dir "$target_dir"
 
 rm -rf "$output_dir"
 mkdir -p "$(dirname "$output_dir")"

@@ -3,7 +3,7 @@ title: "Rust API"
 description: "Generated rustdoc entry points for the xlog workspace, plus docs.rs fallbacks for published crates."
 ---
 
-The docs build generates rustdoc for the full workspace before Mintlify validation and export. Those generated files are copied into `docs-site/generated/rust/` for the exported site and are intentionally not committed.
+The docs build generates rustdoc for the full workspace before Mintlify validation and export. Those generated files are copied into `docs-site/generated/rust/` for the exported site and are intentionally not committed. The CI docs build uses a rustdoc-only CUDA artifact mode: it documents the Rust API surface without compiling PTX or cubin files.
 
 <CardGroup cols={2}>
   <Card title="Workspace rustdoc" href="/generated/rust/index.html">
@@ -52,7 +52,7 @@ These crates are published on crates.io and also have hosted docs.rs pages:
 | `xlog-cli` | [docs.rs](https://docs.rs/xlog-cli) |
 
 <Note>
-  docs.rs builds can omit CUDA-gated modules because the hosted build environment has no CUDA toolkit or GPU. The generated site rustdoc is built from the current checkout with `cargo doc --workspace --no-deps --locked`, so it is the reference surface for this documentation site.
+  docs.rs builds can omit CUDA-gated modules because the hosted build environment has no CUDA toolkit or GPU. The generated site rustdoc is built from the current checkout with `XLOG_RUSTDOC_NO_CUDA=1 cargo doc --workspace --no-deps --locked`, so it is the reference API surface for this documentation site. Release builds still require `nvcc` and CUDA Toolkit 13.x to compile kernel artifacts.
 </Note>
 
 See the [architecture overview](/architecture/overview) for how these crates fit together, and the [CLI Reference](/reference/cli) for the command-line surface built on top of them.

@@ -58,7 +58,13 @@ def test_docs_workflow_generates_reference_outputs_and_exports() -> None:
 
     script = read("scripts/docs/build_rust_api.sh")
     assert "cargo doc --workspace --no-deps --locked" in script
+    assert "XLOG_RUSTDOC_NO_CUDA=1" in script
     assert "docs-site/generated/rust" in script
+
+    cuda_build = read("crates/xlog-cuda/build.rs")
+    assert "XLOG_RUSTDOC_NO_CUDA" in cuda_build
+    assert "DOCS_RS" in cuda_build
+    assert "write_empty_embedded_kernel_data" in cuda_build
 
 
 def test_rust_api_page_links_to_generated_crate_roots() -> None:
