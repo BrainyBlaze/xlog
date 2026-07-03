@@ -82,3 +82,4 @@ examples/neural/baseline/results/deepproblog_gpu_sequential/*.time
 crates/pyxlog/python/pyxlog/*.so
 
 .codex
+docs-site/*.zip
