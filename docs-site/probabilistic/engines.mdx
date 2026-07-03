@@ -57,6 +57,11 @@ Select the engine with `#pragma prob_engine = exact_ddnnf` or
 The exact engine (`exact_ddnnf`) computes exact probabilities by compiling your program
 into a circuit and counting its weighted models. The path is GPU-native end to end:
 
+<Frame caption="The exact path compiles provenance to CNF, then to a verified GPU Decision-DNNF, then to the XGCF circuit; the circuit is compiled once and evaluated many times, with gradients flowing back through it.">
+  <img className="block dark:hidden" src="/assets/diagrams/knowledge-compilation-light.svg" alt="Exact inference pipeline: PIR provenance to CNF (Tseitin), to GPU Decision-DNNF (compile plus CDCL verify), to the XGCF circuit format, to weighted model counting; the compile stages run once and gradients flow backward through XGCF." />
+  <img className="hidden dark:block" src="/assets/diagrams/knowledge-compilation-dark.svg" alt="Exact inference pipeline: PIR provenance to CNF (Tseitin), to GPU Decision-DNNF (compile plus CDCL verify), to the XGCF circuit format, to weighted model counting; the compile stages run once and gradients flow backward through XGCF." />
+</Frame>
+
 <Steps>
   <Step title="Provenance">
     Rule evaluation records, for every derived tuple, the probabilistic choices that
