@@ -10,6 +10,11 @@ space of candidate Datalog clauses with gradient descent and promotes the winner
 your program. Both share the compiled circuit and the same autograd bridge, so a loss
 computed on a symbolic query flows all the way back into network weights.
 
+<Frame caption="A loss on a symbolic query backpropagates through the cached circuit into the network's weights; only weights change between iterations.">
+  <img className="block dark:hidden" src="/assets/diagrams/neural-symbolic-loop-light.svg" alt="Neural-symbolic training loop: a PyTorch network produces predicate probabilities, the cached XGCF circuit evaluates the query probability, a loss is computed against the target, and gradients flow back through the circuit to the network weights." />
+  <img className="hidden dark:block" src="/assets/diagrams/neural-symbolic-loop-dark.svg" alt="Neural-symbolic training loop: a PyTorch network produces predicate probabilities, the cached XGCF circuit evaluates the query probability, a loss is computed against the target, and gradients flow back through the circuit to the network weights." />
+</Frame>
+
 <Note>
 The entire neural-symbolic surface — neural predicates, differentiable ILP, and
 exact induction — ships **only** through the `pyxlog` PyPI wheel, which tracks the
