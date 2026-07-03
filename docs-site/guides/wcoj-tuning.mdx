@@ -1,204 +1,138 @@
 ---
-title: "WCOJ Performance Tuning"
-description: "Operational guide for enabling, forcing, tuning, and debugging XLOG's worst-case-optimal join routes: eligibility, env vars, cost models, and a debug checklist."
+title: "Worst-case-optimal join tuning"
+description: "When XLOG routes a rule through a worst-case-optimal join, why an eligible rule can still fall back, and the environment variables and config builders that control it."
 ---
 
-Audience: downstream users who need to decide whether to enable, force, tune,
-or debug xlog WCOJ routes.
+XLOG can evaluate certain join shapes with a worst-case-optimal join (WCOJ) instead of
+a chain of binary hash joins. On the shapes it covers, a WCOJ avoids materializing large
+intermediate relations, which is where binary plans blow up on skewed graphs. This guide
+is operational: it answers whether your rule routes through WCOJ, why an eligible rule
+might still fall back, and which knobs move the decision. For the kernel architecture,
+see the [WCOJ architecture guide](/architecture/wcoj).
 
-This guide is about operational choices. It does not restate the kernel
-architecture. It answers:
+## When WCOJ dispatches
 
-- Does my rule shape route through WCOJ?
-- What makes it fall back?
-- Which env vars or config builders should I use?
-- Should I choose Cardinality, Skew, LeaderCardinality, or HeatAware?
-- Which tuning move is appropriate for skewed graphs, deep joins, multi-rule
-  strata, or recursive workloads?
+A rule is a candidate for WCOJ only when three things line up. Miss any one and the rule
+runs on the ordinary binary plan.
 
-## Quick Decision Flowchart
+<Steps>
+  <Step title="The body is positive relational Datalog">
+    Every body atom is a relation scan. Negation, aggregation, `is` expressions, ground
+    facts, and too-few positive atoms all disqualify the rule.
+  </Step>
+  <Step title="The body matches a certified shape">
+    XLOG certifies a fixed set of join geometries — a triangle `e(X,Y), e(Y,Z), e(X,Z)`,
+    a 4-cycle `e(W,X), e(X,Y), e(Y,Z), e(Z,W)`, and `K5` / `K6` cliques where every
+    `C(K,2)` edge is present. Shapes outside this set are not automatically WCOJ.
+  </Step>
+  <Step title="The join keys are a supported type">
+    WCOJ join keys must be `u32`, `u64`, or `Symbol`, and a single dispatch cannot mix
+    width classes. (`Symbol` shares `u32`'s physical layout.)
+  </Step>
+</Steps>
 
-```text
-Start
- |
- |-- Is the rule positive relational Datalog?
- |      no  -> WCOJ will not route. Use the normal fallback path.
- |      yes
- |
- |-- Does the body match a certified WCOJ family?
- |      triangle: e(X,Y), e(Y,Z), e(X,Z)
- |      4-cycle: e(W,X), e(X,Y), e(Y,Z), e(Z,W)
- |      K=5/K=6 clique: every C(K,2) edge is present
- |      no  -> ordinary binary/hash plan, or follow-on ChainJoin for 2-atom chains
- |      yes
- |
- |-- Are join-key types supported?
- |      supported: U32, U64, Symbol
- |      no -> fallback
- |      yes
- |
- |-- Are all runtime inputs present, same width class, and layout-buildable?
- |      no -> fallback
- |      yes
- |
- |-- Is dispatch disabled or explicitly forced off?
- |      yes -> fallback
- |      no
- |
- |-- Is force dispatch enabled?
- |      yes -> run WCOJ and compare counters/rows
- |      no
- |
- |-- Is adaptive/cost-model dispatch enabled for this shape?
- |      no -> fallback
- |      yes
- |
- |-- Does the selected cost model predict WCOJ should win?
- |      yes -> run WCOJ
- |      no  -> planned hash/fallback
-```
+## Eligible is not the same as dispatched
 
-The important point is that "eligible" and "dispatched" are different. A rule
-can be structurally eligible, promoted into `MultiWayJoin`, and still use the
-embedded fallback because a gate is off, stats are incomplete, the cost model
-predicts hash wins, or runtime validation declines.
+This is the point most people miss. A rule can clear every check above, be promoted into
+a `MultiWayJoin` plan node, and *still* execute on binary joins. Promotion makes a rule
+**eligible**; a second decision — made at runtime from cost and statistics — decides
+whether it is actually **dispatched**.
 
-## Eligibility Decision Flow
+Every promoted `MultiWayJoin` carries an embedded fallback: the post-optimizer binary
+plan that would have run without promotion. When the dispatcher declines, the executor
+descends into that fallback. Common reasons the dispatcher declines an eligible rule:
 
-WCOJ routes are certified by shape, type, and runtime validation.
+- The cost model, given the available statistics, predicts the binary plan wins.
+- Statistics are missing or too thin for the cost model to justify WCOJ.
+- The order planner would have to start from a bad prefix that materializes a larger
+  intermediate than the binary plan, so it declines rather than dispatch the loss.
+- A kill switch or force-off setting is active (see below).
+- Runtime validation fails — missing relation buffers, mixed width classes, a
+  projection that does not match the certified shape.
+- For a `K`-clique, the statistics are incomplete or a hash route is predicted to win.
+  This is a *planned* hash route, not a promoter miss.
 
-| Rule family | Current user-facing status | Notes |
-|---|---|---|
-| Triangle | Production WCOJ route | Supports `U32`, `Symbol`, and `U64` width classes. Triangle adaptive is default-on through `RuntimeConfig::default()` in this branch. |
-| 4-cycle | Production WCOJ route, adaptive opt-in | Force gate is available. Adaptive/cost-model mode is off unless enabled by config or env. |
-| K=5/K=6 clique | Production WCOJ route after planner cost gate | Requires complete clique edge set and usable stats. May emit a planned hash route instead of WCOJ. |
-| K=7/K=8 clique | Follow-on target, not a current user promise on this branch | The planner data structures admit K up to 8, but template, counter, and certification closure are separate. |
-| 2-atom chain | Follow-on `ChainJoin`, not WCOJ | Hot two-atom chains route through a chain dispatcher after chain integration. It is not paper WCOJ. |
-| Arbitrary deep join tree | Not automatically WCOJ | Use helper-split/K-clique paths where applicable; otherwise fallback is expected. |
+<Warning>
+Fallback is not an error and it is never a correctness compromise. The embedded binary
+plan is always **semantically equivalent** to the WCOJ route — identical row sets. That
+equivalence is what lets you run with WCOJ enabled in production: the worst case is a
+slower plan, never a wrong answer. When you A/B a tuning change, compare a forced-on run
+against a forced-off run and confirm the row sets match before trusting any speedup.
+</Warning>
 
-Hard fallback reasons include:
+## Environment-variable controls
 
-- Free Join order planner declines a large bad-order body. Free Join cannot
-  reorder a chain to start from a selective tail, so on a large join whose only
-  prefix-key-joinable order would materialize a much larger intermediate than
-  the binary plan, the planner declines to the binary fallback rather than
-  dispatch the loss. Small joins and competitively-ordered bodies are unaffected.
-- Ground facts, negation, aggregation boundaries, `is` expressions, or too few
-  positive atoms.
-- Unsupported join-key types. WCOJ join keys are `U32`, `U64`, and `Symbol`.
-- Mixed width classes inside one dispatch.
-- Malformed or non-scan `MultiWayJoin` inputs.
-- Projection or `slot_vars` not matching the certified shape.
-- Missing relation buffers in the runtime store.
-- Runtime/provider errors during layout, metadata, count, scan, total, or
-  materialize.
-- Explicit force-off or disable config.
-- Cost model declines.
-- For K-clique, incomplete stats or predicted hash win. This is a planned hash
-  route, not a promoter miss.
+Environment variables are process-global — set them once at process startup, and in
+tests prefer the per-runtime builders below to avoid cross-test bleed. Unset, empty,
+`0`, and `false` never force a route on.
 
-## Fallback Paths
-
-Every promoted `MultiWayJoin` carries an embedded `fallback` tree. That tree is
-the post-optimizer binary/hash plan that would have run without WCOJ promotion.
-If the dispatcher returns `Ok(None)`, the executor descends into that fallback.
-
-Fallback is not an error. It is the safety boundary that lets you run with
-WCOJ enabled in production while preserving row-set semantics.
-
-Use fallback intentionally when:
-
-- You are verifying a regression by comparing forced WCOJ to forced-off output.
-- Your workload is small enough that launch/layout overhead is more expensive
-  than the avoided binary intermediate.
-- Stats are missing and you do not want forced dispatch.
-- You are debugging a suspected layout, type, or projection issue.
-
-Do not add new kill switches for one-off tests. Prefer the existing
-`RuntimeConfig` builders or env vars listed below.
-
-## Env Vars
-
-Env vars are process-global. In tests, serialize them or prefer per-runtime
-builders. Production services should set them once at process startup.
-
-| Env var | Values | Scope | Effect |
+| Variable | Values | Controls | Effect |
 |---|---|---|---|
-| `XLOG_USE_WCOJ_TRIANGLE_U32` | `1`/`true` enables | Triangle force gate | Forces recognized triangle dispatch. `0`, `false`, unset, or empty do not force. |
-| `XLOG_USE_WCOJ_4CYCLE` | `1`/`true` enables | 4-cycle force gate | Forces recognized 4-cycle dispatch. |
-| `XLOG_USE_WCOJ_4CYCLE_ADAPTIVE` | `1`/`true` enables | 4-cycle adaptive opt-in | Lets the runtime cost model decide 4-cycle dispatch. Default is off. |
-| `XLOG_DISABLE_WCOJ_4CYCLE` | `1`/`true` disables | 4-cycle kill switch | Beats force and adaptive. |
-| `XLOG_WCOJ_COST_MODEL` | `cardinality`, `skew`, `skewclassifier` | Runtime cost model | Selects `CostModelKind`. Invalid non-empty values resolve to `SkewClassifier`. Unset defaults to `Cardinality`. |
-| `XLOG_WCOJ_BLOCK_WORK_UNIT` | integer `1..8192` | HG block-slice work unit | Default `1024`. Invalid values fall back to default with a warning. |
-| `XLOG_DISABLE_FREE_JOIN` | `1`/`true` disables | Free Join kill switch | Forces general multiway bodies through the binary fallback instead of the Free Join engine. |
-| `XLOG_DISABLE_WCOJ_GROUPBY_FUSION` | `1`/`true` disables | Aggregate-fused WCOJ kill switch | Forces count/sum/min/max-by-root over a triangle body to materialize then group, instead of the fused aggregate. |
-| `XLOG_DISABLE_FACTORIZED_DELTA` | `1`/`true` disables | Factorized recursive-delta kill switch | Forces every semi-naive delta step through the legacy hash-join → diff path. |
-| `XLOG_FACTORIZED_DELTA_MAX_DOMAIN` | integer | Factorized-delta dense-domain cap | Largest dense domain the bitvector delta route accepts (default `2^14`, hard bound `2^16`); above it the sparse route or legacy path runs. |
+| `XLOG_USE_WCOJ_TRIANGLE_U32` | `1` / `true` | Triangle force gate | Forces recognized triangle dispatch, bypassing the adaptive classifier. |
+| `XLOG_DISABLE_WCOJ_TRIANGLE` | `1` / `true` | Triangle kill switch | Pins all triangle WCOJ off; beats every other triangle flag. |
+| `XLOG_USE_WCOJ_4CYCLE` | `1` / `true` | 4-cycle force gate | Forces recognized 4-cycle dispatch. |
+| `XLOG_USE_WCOJ_4CYCLE_ADAPTIVE` | `1` / `true` | 4-cycle adaptive opt-in | Lets the cost model decide 4-cycle dispatch. Off by default. |
+| `XLOG_DISABLE_WCOJ_4CYCLE` | `1` / `true` | 4-cycle kill switch | Beats both force and adaptive. |
+| `XLOG_WCOJ_COST_MODEL` | `cardinality`, `skew`, `skewclassifier` | Runtime cost model | Selects the dispatch cost model. Invalid non-empty values resolve to `SkewClassifier`; unset defaults to `Cardinality`. |
+| `XLOG_WCOJ_BLOCK_WORK_UNIT` | integer `1..8192` | Block-slice work unit | Per-block work granularity. Default `1024`; invalid values warn and fall back to the default. |
 
-Current branch caveat: triangle adaptive and triangle hard-disable are runtime
-config builders, not env resolvers. Use
+<Note>
+Triangle **adaptive** dispatch is default-on and triangle **hard-disable** are exposed
+as runtime-config builders, not environment resolvers. Use
 `with_wcoj_triangle_dispatch_adaptive(...)` and
-`with_wcoj_triangle_dispatch_disabled(...)` for those controls.
+`with_wcoj_triangle_dispatch_disabled(...)` for those two controls.
+</Note>
 
-## Runtime Config Builders
+## Factorized execution controls (development branch only)
 
-Use `RuntimeConfig` when one process needs different WCOJ behavior for
-different executors or tests.
+<Note>
+The three variables below govern **factorized execution** — GPU Free Join, factorized
+recursive deltas, and aggregate-fused WCOJ. These features live on the development branch
+and are **not part of the v0.9.2 release**. In a released build the variables have no
+effect because the features they gate are not present. See the
+[factorized execution guide](/architecture/factorized-execution) for what they do and
+their current status.
+</Note>
 
-```rust
-use xlog_core::{CostModelKind, RuntimeConfig};
+| Variable | Values | Gates (unreleased) | Effect |
+|---|---|---|---|
+| `XLOG_DISABLE_FREE_JOIN` | `1` / `true` | GPU Free Join | Forces general multiway bodies through the binary fallback instead of the Free Join engine. |
+| `XLOG_DISABLE_WCOJ_GROUPBY_FUSION` | `1` / `true` | Aggregate-fused WCOJ | Forces count/sum/min/max-by-root over a triangle body to materialize then group, instead of the fused aggregate. |
+| `XLOG_DISABLE_FACTORIZED_DELTA` | `1` / `true` | Factorized recursive deltas | Forces every semi-naive delta step through the legacy hash-join then diff path. |
+| `XLOG_FACTORIZED_DELTA_MAX_DOMAIN` | integer | Factorized recursive deltas | Largest dense domain the bitvector delta route accepts (default `2^14`, hard bound `2^16`); above it the sparse or legacy route runs. |
 
-// Production default: deterministic execution, triangle adaptive on,
-// 4-cycle adaptive off, Cardinality runtime cost model.
-let default_runtime = RuntimeConfig::default();
+## Per-runtime and compile-time builders
 
-// Force triangle WCOJ for an A/B row-set comparison.
-let force_triangle =
-    RuntimeConfig::default().with_wcoj_triangle_dispatch(Some(true));
-
-// Force triangle off for the same comparison.
-let triangle_off =
-    RuntimeConfig::default().with_wcoj_triangle_dispatch(Some(false));
-
-// Runtime-local triangle hard stop. This beats force/adaptive.
-let triangle_disabled =
-    RuntimeConfig::default().with_wcoj_triangle_dispatch_disabled(Some(true));
-
-// Enable 4-cycle adaptive/cost-model routing.
-let adaptive_4cycle =
-    RuntimeConfig::default().with_wcoj_4cycle_dispatch_adaptive(Some(true));
-
-// Select the runtime dispatch model explicitly.
-let cardinality =
-    RuntimeConfig::default().with_wcoj_cost_model(Some(CostModelKind::Cardinality));
-let conservative =
-    RuntimeConfig::default().with_wcoj_cost_model(Some(CostModelKind::SkewClassifier));
-```
-
-Attach the config when constructing the executor:
+When one process needs different WCOJ behavior for different executors — or you want to
+avoid process-global environment variables in tests — configure `RuntimeConfig` and
+attach it to the executor:
 
 ```rust
 use std::sync::Arc;
-use xlog_core::RuntimeConfig;
+use xlog_core::{CostModelKind, RuntimeConfig};
 use xlog_runtime::Executor;
+
+// Production default: triangle adaptive on, 4-cycle adaptive off, Cardinality model.
+let default_runtime = RuntimeConfig::default();
+
+// Force triangle WCOJ for an A/B row-set comparison.
+let force_triangle = RuntimeConfig::default().with_wcoj_triangle_dispatch(Some(true));
+
+// Runtime-local triangle hard stop. Beats force and adaptive.
+let triangle_off = RuntimeConfig::default().with_wcoj_triangle_dispatch_disabled(Some(true));
+
+// Enable 4-cycle adaptive routing, or pick the runtime cost model explicitly.
+let adaptive_4cycle = RuntimeConfig::default().with_wcoj_4cycle_dispatch_adaptive(Some(true));
+let conservative = RuntimeConfig::default().with_wcoj_cost_model(Some(CostModelKind::SkewClassifier));
 
 let config = RuntimeConfig::default().with_wcoj_triangle_dispatch(Some(true));
 let mut executor = Executor::new_with_config(Arc::clone(&provider), config);
 ```
 
-## CompilerConfig Builders
-
-`RuntimeConfig` decides whether a recognized runtime shape dispatches.
-`CompilerConfig` decides whether the compiler emits non-default variable-order
-metadata for triangle and 4-cycle plans.
-
-Default compile behavior preserves the baseline:
-
-```rust
-let plan = compiler.compile_with_stats_snapshot(source, Some(&stats_snapshot))?;
-```
-
-Enable a compile-time variable-ordering model when stats are meaningful:
+`RuntimeConfig` decides whether a recognized shape dispatches at runtime. `CompilerConfig`
+is separate: it decides whether the compiler emits a non-default variable ordering for
+triangle and 4-cycle plans. The default preserves the baseline leader order; enable a
+heat-aware ordering only when statistics are meaningful:
 
 ```rust
 use xlog_logic::compiler_config::{CompilerConfig, WcojVarOrderingKind};
@@ -212,224 +146,79 @@ let plan =
     compiler.compile_with_config_and_stats_snapshot(source, &config, Some(&stats_snapshot))?;
 ```
 
-`wcoj_var_ordering_threshold` is a ratio gate. The model chooses a non-default
-leader only when:
+`wcoj_var_ordering_threshold` is a ratio gate: the model rotates the leader only when
+`candidate_score / default_leader_score` is at or below the threshold. The default is
+`0.5`; smaller values demand a clearer win before rotating. Values outside the interval
+`(0.0, 1.0]`, plus `NaN` and infinity, clamp back to the default.
 
-```text
-candidate_score / default_leader_score <= threshold
-```
+## Choosing a cost model
 
-Default threshold is `0.5`. Smaller values require a clearer win before
-rotating the leader. Values outside `(0.0, 1.0]`, NaN, and infinity clamp back
-to the default.
+There are two independent cost-model layers.
 
-## Cost-Model Trade-Offs
+**Runtime dispatch** picks whether an eligible shape dispatches:
 
-There are two cost-model layers.
+- `CostModelKind::Cardinality` is the default. Use it when relation cardinalities and
+  observed selectivity are populated, or when you just want the production route.
+- `CostModelKind::SkewClassifier` is the conservative opt-out. Use it to prove fallback
+  behavior or to bisect a suspected dispatch regression.
 
-Runtime dispatch:
+**Compile-time variable ordering** picks the join leader:
 
-- `CostModelKind::Cardinality` is the default. Use it when relation
-  cardinalities and observed selectivity are populated or when you want the
-  current production route.
-- `CostModelKind::SkewClassifier` is conservative on the current skew-classifier integration code
-  path. It acts as a legacy opt-out from stats/cardinality dispatch when you
-  need to prove fallback behavior.
+- `WcojVarOrderingKind::Disabled` (default) keeps bit-identical leader order to the
+  original slices.
+- `LeaderCardinality` picks the smallest relation as leader when the threshold gate
+  shows a clear win — the simplest useful model.
+- `HeatAware` combines cardinality, relation heat, and observed selectivity. Use it for
+  skewed graphs or repeated workloads where the `StatsManager` has enough evidence to
+  identify hot relations.
 
-Compile-time variable ordering:
-
-- `WcojVarOrderingKind::Disabled` is the default. Use it when you want
-  bit-identical leader order to the original WCOJ slices.
-- `LeaderCardinality` is the simplest useful model. It picks the smallest
-  relation as leader if the threshold gate shows a clear win.
-- `HeatAware` combines cardinality, relation heat, and observed selectivity.
-  Use it for skewed graphs or repeated workloads where `StatsManager` has
-  enough evidence to identify hot relations and tight edges.
-
-Practical selection:
-
-| Situation | Runtime model | Compiler model |
+| Situation | Runtime model | Compiler ordering |
 |---|---|---|
-| First run, little stats | `Cardinality`, or force only for experiments | `Disabled` |
+| First run, little statistics | `Cardinality` (or force only for experiments) | `Disabled` |
 | Stable batch with seeded cardinalities | `Cardinality` | `LeaderCardinality` |
-| Repeated skewed workload with heat/selectivity evidence | `Cardinality` | `HeatAware` |
-| Debug fallback or bisect | `SkewClassifier` or explicit force-off | `Disabled` |
-| K-clique with incomplete stats | Planned hash is expected | Seed complete stats first |
+| Repeated skewed workload with heat evidence | `Cardinality` | `HeatAware` |
+| Debugging fallback or bisecting | `SkewClassifier` or explicit force-off | `Disabled` |
+| `K`-clique with incomplete statistics | Planned hash is expected | Seed complete statistics first |
 
-## Threshold Tuning
+## Tuning workflow
 
-Tune one knob at a time and record counters plus row-set equality.
+Tune one knob at a time and record both the dispatch counters and row-set equality —
+never trust a speedup you have not proven row-equivalent.
 
-`wcoj_var_ordering_threshold`:
+- **`wcoj_var_ordering_threshold`** — lower it (for example `0.25`) when leader rotation
+  is too eager and layout overhead dominates; raise it toward `0.75` only after row
+  parity is stable and profiling shows the default leader is repeatedly expensive.
+- **`XLOG_WCOJ_BLOCK_WORK_UNIT`** — lower it for severe leader-key skew where a few keys
+  dominate work; raise it for uniform inputs where launch overhead dominates. Stay within
+  `1..8192`. This knob must not change row sets.
+- **Force gates** — use them to prove the WCOJ route produces the same rows, not as a
+  permanent substitute for a cost model. Leave them on only for a fixed, benchmarked
+  workload.
 
-- Lower it, for example `0.25`, when leader rotation is too eager and layout
-  overhead dominates.
-- Raise it toward `0.75` only after row parity is stable and profiling shows
-  the default leader is repeatedly expensive.
-- Keep the default `0.5` when you do not have repeatable stats evidence.
-
-`XLOG_WCOJ_BLOCK_WORK_UNIT`:
-
-- Lower it for severe leader-key skew when a few keys dominate work.
-- Raise it for uniform inputs when launch/block overhead dominates.
-- Stay within `1..8192`. The default is `1024`.
-- Validate with dispatch counters and elapsed time; this knob should not
-  change row sets.
-
-Force gates:
-
-- Use force gates to prove the WCOJ route can produce the same rows.
-- Do not leave force gates enabled as a substitute for a cost model unless the
-  workload is fixed and benchmarked.
-
-## Recipe: Skewed Graphs
-
-Symptoms:
-
-- A few root keys dominate runtime.
-- Binary fallback materializes large intermediates.
-- WCOJ dispatch works but is inconsistent across similar input sizes.
-
-Actions:
-
-1. Seed stats snapshots with relation cardinalities and selectivity if
-   available.
-2. Compile with `WcojVarOrderingKind::HeatAware`.
-3. Keep runtime model at `Cardinality`.
-4. Lower `XLOG_WCOJ_BLOCK_WORK_UNIT` one step and remeasure.
-5. For K-clique, confirm helper-split specs appear only for buried skew, not
-   uniform input.
-6. Compare forced WCOJ, default, and forced-off row sets before trusting speed.
-
-Expected evidence:
-
-- WCOJ dispatch counter advances on forced and accepted adaptive runs.
-- Row sets match forced-off fallback.
-- Hot relation is not selected as leader when `HeatAware` has evidence.
-
-## Recipe: Deep Join Trees
-
-Symptoms:
-
-- Rules contain five or more body atoms.
-- Binary fallback OOMs or creates very large intermediates.
-- Skew is buried below the first join level.
-
-Actions:
-
-1. If the rule is a complete K=5 or K=6 clique, seed complete K-clique stats
-   and let the planner choose WCOJ or planned hash.
-2. If the rule has buried skew, rely on helper-split rather than manually
-   decomposing the whole rule.
-3. If helper-split produces a two-atom helper consumer, use the
-   `ChainJoin` route after integration.
-4. Do not assume arbitrary deep trees are WCOJ just because they are expensive.
-   Unsupported shapes should fall back until a certified promoter exists.
-
-Expected evidence:
-
-- K-clique route is `WcojWithPlan` or `PlannedHashRoute`, not an unstructured
-  miss.
-- Helper relation count is zero for uniform input and positive for buried
-  skew fixtures.
-- Fallback parity remains exact.
-
-## Recipe: Multi-Rule Strata
-
-Symptoms:
-
-- Individual rules are too small to saturate the GPU.
-- Later fixpoint iterations have small deltas.
-- Kernel launch overhead becomes visible.
-
-Actions:
-
-1. Do not force WCOJ for every rule. Let the cost model skip rules that are too
-   small.
-2. Keep rules independent within a monotonic stratum so stream-mux can batch
-   phase-aligned work after integration.
-3. Preserve the recorded-launch stream discipline. Avoid ad hoc host syncs.
-4. For follow-on integration, validate per-stream pool sizing before increasing
-   stream count.
-
-Expected evidence:
-
-- WCOJ counters advance only on rules whose cost model accepts them.
-- No stream-pool exhaustion under repeated executor calls.
-- Row sets are independent of rule execution order.
-
-## Recipe: Recursive Workloads
-
-Symptoms:
-
-- WCOJ routes fire during seed but not later iterations, or counters are hard
-  to interpret.
-- Recursive SCCs mix binary fallback and WCOJ routes.
-- K-clique runtime histogram needs current per-iteration state.
-
-Actions:
-
-1. Use body-keyed dispatch through the normal executor. Do not call provider
-   kernels directly from recursive code.
-2. Interpret counters per successful dispatch, not per source rule. A rule can
-   dispatch once in seed and once per non-empty delta variant per iteration.
-3. Use force-off runs for row-set parity.
-4. For K-clique, rely on the Merge-phase metadata refresh accounting; metadata
-   is rebuilt from live buffers at launch.
-5. Keep `CompilerConfig::default()` if variable-ordering stats are stale.
-
-Expected evidence:
-
-- Forced-off and default/forced WCOJ produce the same final relation.
-- Dispatch counters align with seed plus variant count.
-- `kclique_histogram_refresh_count()` advances when recursive K-clique rules
-  mention a predicate that was merged.
-
-## Debug Checklist
+## Debug checklist
 
 When WCOJ did not run:
 
-1. Check the source shape. Is it triangle, 4-cycle, or K=5/K=6 clique?
-2. Check types. Are join keys `U32`, `U64`, or `Symbol`?
-3. Check env/config. Did you force off or disable the route?
-4. Check stats. Does the cost model have enough cardinality/selectivity?
-5. Check counters. Did the route fire but output zero rows?
-6. Check fallback parity. Does forced-off output match expected rows?
+1. Check the shape — is it a triangle, 4-cycle, or `K5` / `K6` clique?
+2. Check the key types — are they `u32`, `u64`, or `Symbol`?
+3. Check env and config — did you force off or disable the route?
+4. Check statistics — does the cost model have enough cardinality and selectivity?
+5. Check counters — did the route fire but emit zero rows?
+6. Check fallback parity — does forced-off output match the expected rows?
 
 When WCOJ ran but was slower:
 
 1. Confirm the input is large enough to amortize layout and launch overhead.
-2. Try `LeaderCardinality` or `HeatAware` only with meaningful stats.
+2. Try `LeaderCardinality` or `HeatAware`, but only with meaningful statistics.
 3. Tune `XLOG_WCOJ_BLOCK_WORK_UNIT` in one direction at a time.
 4. For 4-cycle, verify adaptive mode was intentionally enabled.
-5. For K-clique, inspect whether the planner predicted hash but force was used
-   anyway.
+5. For `K`-clique, check whether the planner predicted hash but force was used anyway.
 
-When rows differ:
+When rows differ, stop tuning and treat it as a correctness bug: capture the forced-off
+fallback rows and the forced WCOJ rows, record the plan shape and projection, and do not
+resume tuning until parity is restored.
 
-1. Treat it as a correctness bug.
-2. Capture forced-off fallback rows and forced WCOJ rows.
-3. Record the RIR shape and projection.
-4. Stop tuning until row parity is restored.
-
-## Minimal Evidence Template
-
-For a tuning change, record:
-
-```text
-source shape:
-runtime config:
-compiler config:
-env:
-stats snapshot source:
-fallback rows:
-WCOJ rows:
-dispatch counters:
-elapsed fallback:
-elapsed WCOJ:
-block work unit:
-notes:
-```
-
-This makes tuning reproducible and keeps performance claims separate from
-correctness claims.
+<Card title="Factorized execution" icon="layer-group" href="/architecture/factorized-execution">
+  GPU Free Join, factorized recursive deltas, and aggregate-fused WCOJ — the
+  development-branch work that extends WCOJ beyond the certified shapes.
+</Card>

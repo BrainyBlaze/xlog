@@ -1,277 +1,263 @@
 ---
-title: "Rule Learning (Differentiable ILP)"
-description: "The dILP training subsystem: a GPU-accelerated differentiable Inductive Logic Programming engine that learns Datalog rules from examples via gradient descent."
+title: "Rule learning (differentiable ILP)"
+description: "Train neural predicates and learn Datalog rules end-to-end — one differentiable path from PyTorch tensors through the GPU circuit to a promoted symbolic clause."
 ---
 
-This document describes the dILP training subsystem: a GPU-accelerated differentiable Inductive Logic
-Programming engine that learns Datalog rules from positive/negative examples via gradient descent.
+XLOG's neural-symbolic layer lets a program mix two kinds of knowledge: rules you
+write and rules the engine learns. A **neural predicate** turns a PyTorch network into
+a logical relation whose facts carry probabilities; **differentiable ILP** searches a
+space of candidate Datalog clauses with gradient descent and promotes the winner into
+your program. Both share the compiled circuit and the same autograd bridge, so a loss
+computed on a symbolic query flows all the way back into network weights.
 
-## Design Goals
+<Note>
+The entire neural-symbolic surface — neural predicates, differentiable ILP, and
+exact induction — ships **only** through the `pyxlog` PyPI wheel, which tracks the
+`v0.9.2` release. It is a Python-first API; the published crates on crates.io do not
+expose it. Everything on this page marked "released" means "present in the latest
+`pyxlog` wheel."
+</Note>
 
-1. **Learn rules, not weights** — discover symbolic Datalog clauses (e.g., `reach(X,Y) :- edge(X,Z), edge(Z,Y).`) from data
-2. **GPU-resident hot loop** — no semantic column downloads in the training step loop
-3. **Sparse by default** — candidate-indexed soft-probs instead of materializing N³ tensors
-4. **Transactional promotion** — learned rules pass gate checks before entering the knowledge base
-5. **Auditable transfer evidence** — learned rules carry fold, held-out-domain, gate, and base-kernel checksum metadata
+## Neural predicates
 
-## Core Idea: Tensorized Super-Graph Masking
+A neural predicate declares that a relation's truth is decided by a network rather than
+by stated facts. You write the declaration in the program with `::`, binding a
+registered network name to a predicate head:
 
-Traditional ILP systems compile candidate rules into executable programs — impossible at millisecond
-timescales. XLOG's approach pre-compiles a "super-graph" of all candidate rules and activates them
-via continuous mask tensors optimized with Gumbel-Softmax:
-
-```
-Candidate rules          Logit tensor W (C floats)
-  ┌──────────┐              ┌───────────┐
-  │ r1: A←B,C│              │ w1  w2 .. │ ─── Gumbel-Softmax(τ) ──►  soft mask
-  │ r2: A←B,D│              │           │                               │
-  │ ...       │              └───────────┘                               ▼
-  └──────────┘                                              set_rule_mask_sparse()
-                                                                        │
-                                                                        ▼
-                                                            xlog evaluate (GPU)
-                                                                        │
-                                                                        ▼
-                                                              BCE loss + ∇W
+```xlog
+nn(coin_net, [X], Y, [heads, tails]) :: coin(X, Y).
 ```
 
-At convergence, `argmax(W)` picks the winning rule. Temperature annealing (τ → τ_floor) drives the
-soft mask toward a one-hot selection.
+This is the four-argument form, `nn/4`. It reads: for input `X`, the network
+`coin_net` produces a distribution over the labels `[heads, tails]`, and that
+distribution becomes the probability of `coin(X, heads)` and `coin(X, tails)`. The
+presence of a label list makes it a **classification** predicate — the network output
+is a categorical label distribution.
 
-## Architecture Overview
+Drop the label list and you get the three-argument form, `nn/3`, an **embedding**
+predicate:
 
-```
-                           Python (pyxlog.ilp)
-     ┌─────────────────────────────────────────────────────┐
-     │  train_only()                                       │
-     │    ├─ valid_candidates()  → candidate map           │
-     │    ├─ MaskBackend.init_weights()                    │
-     │    ├─ AdaptiveTempController                        │
-     │    └─ step loop ──────────────────────────┐         │
-     │         ├─ MaskBackend.apply_mask()       │         │
-     │         ├─ program.evaluate_device()      │ GPU     │
-     │         ├─ BCE loss (torch)               │ only    │
-     │         ├─ loss.backward()                │         │
-     │         └─ optimizer.step()               │         │
-     │                                           │         │
-     │  train_and_promote()                      │         │
-     │    ├─ train_only()                        │         │
-     │    ├─ trial compile (Rust)                │         │
-     │    └─ promotion gates                     │         │
-     └───────────────────────────────────────────┘         │
-                        │                                   │
-                        ▼                                   │
-     ┌────────────────────────────────────┐                │
-     │  Rust (xlog-runtime, xlog-cuda)   │                │
-     │    ├─ set_rule_mask_sparse()       │◄───────────────┘
-     │    ├─ IlpRegistry (mask storage)  │
-     │    ├─ TensorMaskedJoin (executor) │
-     │    ├─ batch_fact_membership()     │
-     │    ├─ batch_fact_membership_device() │
-     │    ├─ batch_tagged_credit()       │
-     │    └─ batch_tagged_credit_device()│
-     └────────────────────────────────────┘
-                        │
-                        ▼
-     ┌────────────────────────────────────┐
-     │  CUDA (kernels/ilp.cu)            │
-     │    └─ extract_nonzero_indices()   │
-     └────────────────────────────────────┘
+```xlog
+nn(embed_net, [X], E) :: node_embedding(X, E).
 ```
 
-## Key Entry Points
+Here the network maps an input to a learned vector `E` rather than to a label
+distribution. A given network may be declared in one form or the other, but not both —
+declaring the same name as both classification and embedding is rejected at compile
+time.
 
-### Python (`pyxlog.ilp`)
+<Note>
+Declarations are validated when the program compiles: input and output variables must
+be disjoint, every argument must appear in the bound predicate, and anonymous or
+aggregate variables are not allowed in a neural declaration.
+</Note>
 
-| File | Purpose |
-|------|---------|
-| `pyxlog/ilp/trainer.py` | `train_only()` — multi-start training loop |
-| `pyxlog/ilp/promoter.py` | `train_and_promote()` — training + gate pipeline |
-| `pyxlog/ilp/neurosymbolic.py` | `train_neurosymbolic_program()` — joint `nn/4` and symbolic rule-weight training |
-| `pyxlog/ilp/inventory.py` | `build_rule_inventory()` — selected/rejected clause inventory with transfer metadata |
-| `pyxlog/ilp/backend.py` | `MaskBackend` protocol, `SparseMaskBackend`, `DenseMaskBackend` |
-| `pyxlog/ilp/temperature.py` | `AdaptiveTempController` — cosine-annealed τ schedule |
-| `pyxlog/ilp/entropy.py` | Entropy regularization helpers |
-| `pyxlog/ilp/holdout.py` | `holdout_f1_and_variance()` — LOO (`<=20`) and k-fold (`>20`) F1 scoring |
-| `pyxlog/ilp/types.py` | `TrainConfig`, `TrainResult`, `PromotionResult`, `LearnedArtifact`, etc. |
-| `pyxlog/ilp/exceptions.py` | `IlpConfigError`, `IlpCandidateError`, `IlpTrainingError` |
+## Registering networks
 
-### Rust (`xlog-runtime`, `xlog-cuda`)
+The declaration names a network; you supply the actual `torch.nn.Module` from Python.
+Registration is where the PyTorch autograd bridge is wired up.
 
-| File | Purpose |
-|------|---------|
-| `crates/xlog-runtime/src/ilp_registry.rs` | `IlpRegistry` — mask storage, `IlpTaggedResult` metadata |
-| `crates/xlog-runtime/tests/ilp_integration_tests.rs` | Rust-side integration tests for mask round-trips |
-| `crates/xlog-cuda/tests/ilp_kernel_tests.rs` | CUDA kernel unit tests (`extract_nonzero_indices`) |
+- `register_network(name, module, optimizer, scheduler=None, ...)` binds a classifier
+  or `nn/4` head. You pass the module and its optimizer (and optionally an LR
+  scheduler); the bridge holds them and drives forward and backward passes through the
+  circuit. Batching, top-`k` truncation, determinism, and a call cache are configurable
+  here.
+- `register_embedding(name, module_or_tensor, trainable=True)` binds an `nn/3`
+  embedding — either a module or a plain tensor of vectors. Set `trainable=False` to
+  freeze it.
 
-### CUDA Kernels
+Once registered, evaluating a query that touches the predicate runs the network,
+converts its output into circuit leaf probabilities, and — during training — pushes
+gradients back through those leaves into the module's parameters. The bridge exposes
+`forward_backward(query, expected=True)`, several differentiable losses
+(`belnap_loss`, `semantic_loss_tensor`, `mse_loss_tensor`), and epoch drivers
+(`train_epoch`, `train_model`) with optional validation-set early stopping.
 
-| File | Purpose |
-|------|---------|
-| `kernels/ilp.cu` | `extract_nonzero_indices()` — N³ mask → sparse index extraction |
+## Differentiable ILP
 
-## Mask Backends
+Writing a neural predicate assumes you already know the rule. Differentiable ILP is for
+the opposite case: you have examples of what should be true and want the engine to
+**discover the clause**. XLOG frames this as learning which body to attach to a head.
 
-The `MaskBackend` protocol abstracts how the learnable tensor W is applied to the XLOG executor:
+You mark a clause as learnable with a mask annotation:
 
-### SparseMaskBackend (default)
-
-```
-W (C logits) → Gumbel-Softmax(τ) → candidate_soft_probs (C,)
-                                          │
-                    argsort/top-k on CUDA in Python/Torch
-                                          │
-                    set_rule_mask_sparse_selected(selected_ids, selected_soft_probs)
-                                          │
-                                          ▼
-                              Rust builds executor mask internally
-                              (no N³ tensor materialized, no full soft-vector device-to-host transfer)
+```xlog
+learnable(mask) :: reach(X, Y) :- edge(X, Z), edge(Z, Y).
 ```
 
-- Learnable params: `C` floats (one per candidate rule)
-- Memory: O(C) — typically C < 100
-- Preferred hot-loop path calls `set_rule_mask_sparse_selected()` on the compiled program
-- Legacy compatibility path `set_rule_mask_sparse()` remains available when Rust-side ranking is desired
+Rather than compile one candidate rule at a time — impossible at training timescales —
+XLOG pre-compiles a **tensorized super-graph** containing every syntactically legal
+candidate body at once, then activates them with a continuous mask tensor. Each
+candidate gets a logit; a **Gumbel-Softmax** relaxation with temperature `τ` turns the
+logits into a soft, differentiable selection over candidates. The circuit evaluates
+under that soft mask, a loss compares the derived facts against the examples, and the
+gradient updates the logits.
 
-### DenseMaskBackend (alpha-compatible, debug)
+As training proceeds, the temperature anneals toward a floor on a cosine schedule,
+sharpening the soft mask toward a one-hot choice. At convergence the engine takes
+`argmax` over the logits: the winning candidate is decoded back into a concrete Datalog
+clause — a discrete rule string, not a soft mixture.
 
+### Sparse and dense mask backends
+
+How the mask reaches the executor is chosen by a backend:
+
+| Backend | Parameters | When to use |
+|---|---|---|
+| `SparseMaskBackend` (default) | `O(C)` — one logit per candidate | Production. Ranks candidates on device and pushes only the selected sparse set; no cubic tensor is materialized. |
+| `DenseMaskBackend` | `O(N³)` — full schema cube | Debugging and parity checks. Enable with `debug_dense_mask=True`; materializes the whole mask, so it is expensive on large schemas. |
+
+The sparse backend is the reason training stays inside the GPU-resident hot loop:
+candidate soft-probabilities are ranked and applied without downloading a full mask
+vector to the host.
+
+## The Python training API
+
+Two entry points drive learning, both in `pyxlog.ilp`.
+
+`train_only(...)` runs the search: it enumerates the legal candidates, launches several
+independent restarts from fresh logits, and for each restart iterates the step loop —
+apply the mask, evaluate on the device, compute the loss, back-propagate, step the
+optimizer, anneal `τ`, and stop early once the `argmax` is stable and the loss is below
+threshold. It returns the discovered rule and its training telemetry.
+
+`train_and_promote(...)` wraps `train_only` with a set of **promotion gates**. A
+discovered rule is only committed into your program if it clears every gate:
+
+| Gate | What it checks |
+|---|---|
+| Convergence | Training actually reached a stable `argmax`. |
+| Novel-rate | The rule does not over-derive facts outside the examples. |
+| Protected-relation | It produces no unwanted side effects on protected relations. |
+| Holdout F1 | F1 on held-out examples meets the threshold (leave-one-out for small sets, k-fold for larger). |
+| Ambiguity | No alternative candidate is a near-equal winner. |
+| Typed-schema | Relation type metadata is present (or a reviewed waiver is supplied). |
+
+Only a rule that passes all gates is written into the committed source; anything short
+of that is reported with the gate it failed, never silently promoted.
+
+## Reliability gates
+
+Because the search is stochastic, dILP is held to seed-level reliability gates that
+grow stricter as the subsystem matures:
+
+| Maturity | Gate | Meaning |
+|---|---|---|
+| Alpha | `5/5` | Five consecutive `train_only` runs must all converge. |
+| Beta | `20/20` | 5 seeds across each of 4 stages (reach, grandparent, colleague, plus-2) on the sparse backend — all 20 converge. |
+| GA | `50/50` | 50 seeds pass with a Clopper–Pearson lower bound on the success rate. |
+
+<Warning>
+The GA gate is `50/50` evaluated with a **Clopper–Pearson** lower confidence bound —
+not a loose "50-seed run," and there is no `200/200` gate anywhere in the suite.
+Quote these numbers exactly.
+</Warning>
+
+## A runnable `nn/4` example
+
+This is a self-contained DeepProbLog-style program: a small classifier decides whether
+each coin image shows heads or tails, symbolic rules define winning and losing, and the
+network is trained purely from the derived symbolic queries. The synthetic tensors let
+it run without a dataset download.
+
+```xlog
+nn(coin_net, [X], Y, [heads, tails]) :: coin(X, Y).
+
+win(X, Y)  :- coin(X, heads), coin(Y, heads).
+lose(X, Y) :- coin(X, tails).
+lose(X, Y) :- coin(Y, tails).
 ```
-W (N×N×N logits) → Gumbel-Softmax(τ) → 3D soft mask
-                                              │
-                           flatten → DLPack → set_rule_mask()
-                                              │
-                                              ▼
-                                    Rust imports N³ tensor
-```
-
-- Learnable params: N³ floats (N = schema size)
-- Memory: O(N³) — expensive for large schemas
-- Enabled via `TrainConfig(debug_dense_mask=True)` for parity testing
-
-## Training Pipeline
-
-### `train_only()`
-
-1. **Candidate enumeration** — `valid_candidates(source, mask_name)` returns all syntactically legal body-pair assignments
-2. **Multi-start** — up to `max_attempts` independent restarts with fresh logits
-3. **Step loop** (per attempt, up to `step_budget_per_attempt`):
-   - Apply mask via backend
-   - Forward pass: `program.evaluate_device()` (GPU-only, no host reads)
-   - BCE loss between predicted and target fact membership
-   - Backward pass: `loss.backward()` through PyTorch autograd
-   - Optimizer step on W
-   - Temperature anneal: τ_start → τ_floor (cosine schedule)
-   - Optional deterministic controls (`deterministic=True`) for reproducible attempt seeding
-   - Early stopping: when argmax is stable and loss < threshold
-4. **Decode** — `argmax(W)` maps to winning candidate → discovered rule string
-
-### `train_and_promote()`
-
-1. Call `train_only()` — get `TrainResult`
-2. If not converged → `PromotionStatus.NOT_CONVERGED`
-3. **Trial compile** — substitute discovered rule into source, compile via Rust
-4. **Promotion gates** (all must pass for `PROMOTED`):
-   - **Convergence gate** — training converged (already checked)
-   - **Novel-rate gate** — fraction of non-example derivations ≤ `max_novel_rate`
-   - **Protected-relation gate** — no unwanted relation side-effects
-   - **Holdout F1 gate** — F1 on held-out examples ≥ threshold
-   - **Ambiguity gate** — top-M scan (or exhaustive mode) detects no alternative winning candidates
-   - **Typed-schema gate** — optional hard gate requiring relation type metadata (or waiver-driven manual review)
-5. All pass → `PromotionStatus.PROMOTED` with `committed_source`
-
-### Higher-Level Neuro-Symbolic Training Surface
-
-A higher-level training entry point handles sources that mix neural predicates and
-trainable symbolic clauses:
 
 ```python
-from pyxlog.ilp.neurosymbolic import NeuroSymbolicTrainingConfig, train_neurosymbolic_program
+import torch
+import torch.nn as nn
+import pyxlog
 
-result = train_neurosymbolic_program(
-    source,
-    networks={"score": torch_module},
-    examples=training_rows,
-    config=NeuroSymbolicTrainingConfig(steps=16, learning_rate=0.05),
-)
+DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+
+# 2-class classifier over 3x64x64 coin images -> {heads, tails}
+class CoinNet(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Flatten(), nn.Linear(3 * 64 * 64, 64), nn.ReLU(), nn.Linear(64, 2)
+        )
+    def forward(self, x):
+        return torch.log_softmax(self.net(x), dim=-1)  # log-probs over [heads, tails]
+
+# Compile the program and bind the network to the nn(coin_net, ...) declaration.
+program = pyxlog.Program.compile(open("coins.xlog").read())
+net = CoinNet().to(DEVICE)
+opt = torch.optim.Adam(net.parameters(), lr=1e-3)
+program.register_network("coin_net", net, opt)
+
+# Synthetic labelled coin images (even idx -> heads, odd idx -> tails).
+labels = [i % 2 for i in range(16)]                    # 0=heads, 1=tails
+images = torch.zeros(16, 3, 64, 64, device=DEVICE)
+for i, y in enumerate(labels):
+    images[i, y] = 1.0                                 # class-separable signal
+program.add_tensor_source("train", images)
+
+# Supervised atoms: coin(i, heads|tails). The label distribution is trained
+# by back-propagating NLL through the circuit.
+classes = ["heads", "tails"]
+queries = [f"coin({i}, {classes[y]})" for i, y in enumerate(labels)]
+
+for epoch in range(10):
+    program.train_epoch(queries, batch_size=8)
+
+# Inference: query a derived symbolic head backed by the trained network.
+print(program.query("win(0, 2)"))   # both even -> both heads -> fires high
+print(program.query("lose(1, 3)"))  # odd -> tails -> lose fires high
 ```
 
-The source owns declarative `nn(...)`, `trainable_rule(...)`, and `train(...)`
-declarations. The result reports neural gradient norms, symbolic gradients,
-final symbolic weights, and a `RuleInventory` suitable for transfer audits.
+The optimizer here is Adam; on the multiplicative loss surface plain SGD tends to
+plateau, so Adam is the practical default.
 
-#### Existential-join trainable bodies (Stage B)
+## On the development branch (unreleased)
 
-A `trainable_rule` body may join a neural predicate to an ordinary relation on an
-**existential** (non-head) variable — the neural predicate is grounded over the
-**real join domain inside the circuit** and OR-aggregated at the head:
+The following extend the neural-symbolic surface but are **not** in the latest
+`pyxlog` wheel. They exist on the development branch only and should not be relied on in
+released code.
 
-```
-plastic(Edge) :- saliency(Event, strengthen), pre_before_post(Event, Edge).
-```
+<Warning>
+Available on the development branch; not in the `v0.9.2` release. Treat this section as
+a preview of in-progress work.
+</Warning>
 
-Here `Event` appears only in the body. The engine materializes the join domain
-from `pre_before_post`'s ground facts, emits one neural leaf per joined event, and
-the differentiable provenance OR-aggregates the per-event contributions per head
-binding, yielding `P(plastic(Edge)) = σ(w) · (1 − ∏_{e : pre_before_post(e,Edge)} (1 − p_saliency(e)))`.
-Gradient flows into the neural predicate (all joined events) and the rule guard,
-but never into the deterministic join relation. The per-event features arrive
-through a `domain_inputs={"net": features}` channel (row `i` = the `i`-th
-join-domain constant in sorted order), and `examples` carry only per-head-binding
-`targets`. Because `saliency` is learned as a function of the event feature (not an
-id lookup), the trained predicate generalizes to unseen events.
+- **Existential-join trainable bodies (Stage B).** A trainable body may join a neural
+  predicate to an ordinary relation on a non-head variable; the neural predicate is
+  grounded over the real join domain inside the circuit and OR-aggregated at the head.
+  Per-event features arrive through a `domain_inputs=` channel and
+  `register_domain_tensor_source`. The join domain must be ground facts, head-binding
+  ids must be `0..N-1`, and only a single join network is supported, with the planted
+  graph bounded (roughly six to seven events) by a fixed circuit buffer.
+- **Joint multi-rule mixtures.** Several same-head trainable clauses can be learned
+  jointly as a guard-only noisy-OR mixture, with `evaluate_joint_mixture` reading the
+  held-out result. Neural-carrying candidates beyond the guard remain a documented
+  follow-up.
+- **GPU-resident zero-host training step.** `forward_backward_grouped(queries,
+  expected)` performs one host synchronization per step instead of a per-query
+  round-trip, keeping the training loop resident on the device.
 
-Constraints: the join domain must be ground facts (a derived relation is rejected,
-since its extension is not materialized); head-binding ids must be `0..N-1`
-row-aligned with `targets`; a single join network is supported; and the exact
-d-DNNF compiler builds one circuit over all head-binding queries, so the planted
-graph must stay within the compiler's fixed buffer (empirically ~6–7 events). A
-worked example lives in `examples/plasticity_incircuit/` with a CUDA-gated
-recovery test in `python/tests/test_plasticity_incircuit.py`. Head-variable
-("hard filter") joins remain supported as pre-filters; only the existential-join
-case is new.
+<Note>
+The higher-level neuro-symbolic driver
+(`pyxlog.ilp.neurosymbolic.train_neurosymbolic_program`, with declarative
+`trainable_rule(...)` / `train(...)` in-source) is where the Stage-B `domain_inputs=`
+channel is exposed. It, too, is a development-branch surface.
+</Note>
 
-`train_and_promote(...)` also accepts `training_fold`, `held_out_domains`,
-`base_kernel_checksum_before`, and `base_kernel_checksum_after`. These fields are
-recorded on `PromotionResult.rule_inventory`, along with selected and rejected
-candidate clauses and gate outcomes.
+## See also
 
-## Artifact Persistence
+<Card title="Bounded exact induction" icon="magnifying-glass" href="/neural/exact-induction">
+  The non-gradient counterpart — deterministic GPU enumeration of candidate 2-body
+  rules across four fixed topologies.
+</Card>
 
-`LearnedArtifact` captures the full training result for reproducibility:
+<Card title="Python bindings" icon="python" href="/reference/python">
+  The full `pyxlog` API surface for registration, training, and querying.
+</Card>
 
-```python
-artifact.save("artifact.json")   # JSON with SHA-256 candidate-map hash
-loaded = LearnedArtifact.load("artifact.json", verify_hash=True)
-```
-
-Schema version: `beta-v1`. Fields: discovered rule, logits, candidate map, config, telemetry,
-precision/recall, metadata (timestamp, schema version, candidate map hash).
-
-## GPU Contract
-
-The training step loop obeys XLOG's GPU-resident contract:
-
-- `evaluate_device()` — no host reads for semantic results
-- `batch_fact_membership_device()` — returns a CUDA bool mask via DLPack with zero semantic-loop device-to-host transfer
-- `batch_tagged_credit_device()` — returns CSR-style CUDA credit data via DLPack with zero semantic-loop device-to-host transfer
-- `batch_fact_membership()` / `batch_tagged_credit()` remain available when host materialization is desired
-- `AtomicU64` device-to-host counter on `CudaKernelProvider` — hard gate raises if `download_column_*` is observed during step loop
-- `host_transfer_stats()` / `reset_host_transfer_stats()` expose broader host transfer accounting for profiling
-- Legacy `set_rule_mask_sparse()` still performs a control-plane soft-probability download; the selected-candidate sparse path avoids it
-
-## Testing
-
-- **86+ static test functions** across ILP Python test files (expanded by parametrized GA/beta gates)
-- **Reliability gate**: 20 consecutive `train_only()` runs must all converge (20/20 pass)
-- **GA reliability gate**: default 50-seed statistical run (`test_ilp_ga_reliability.py`)
-- **GA performance/transfer tests**: `forward_p95_us` + host transfer accounting (`test_ilp_performance.py`)
-- **Dense/sparse parity**: every sparse-path test has a `debug_dense_mask=True` variant
-- Rust-side: `ilp_integration_tests.rs`, `ilp_kernel_tests.rs`
-- CUDA certification: `extract_nonzero_indices` covered by kernel test suite
-
-## See Also
-
-- [Python Bindings — ILP Training API](/reference/python) — user-facing API reference
-- [GPU Execution](/architecture/gpu-execution) — mask DAG evaluation, stream compaction
-- [Probabilistic Engines](/probabilistic/engines) — XGCF circuits, provenance (shared infrastructure)
-- [Arrow, DLPack, and cuDF Interop](/guides/interop) — DLPack details
+<Card title="Arrow and DLPack interop" icon="arrows-left-right" href="/guides/interop">
+  How XLOG results and gradient tensors cross into PyTorch without a host round-trip.
+</Card>

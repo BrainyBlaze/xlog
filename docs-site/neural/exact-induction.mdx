@@ -1,387 +1,112 @@
 ---
-title: "Bounded Exact Induction"
-description: "The non-gradient, GPU-native induction engine that enumerates candidate pairs across four fixed 2-body Datalog rule templates and returns top-K per template."
+title: "Bounded exact induction"
+description: "A non-gradient, GPU-native rule miner — it enumerates every candidate 2-body Datalog rule across four fixed topologies and returns the top-K per topology, deterministically."
 ---
 
-This document describes XLOG's **bounded exact-induction engine** — the non-gradient,
-GPU-native path for enumerating all `(left, right)` candidate pairs across four
-fixed 2-body Datalog rule templates and returning top-K per template with full
-structured metadata.
+Where [differentiable ILP](/neural/rule-learning) *searches* a rule space with
+gradients, bounded exact induction *enumerates* it. Given a head relation and a set of
+candidate relations, the engine scores every candidate 2-body rule against your positive
+and negative examples directly on the GPU, then returns the top-`K` rules per rule shape.
+There is no learning loop, no temperature, and no randomness: the same inputs always
+produce the same ranked output.
 
-It replaces `pyxlog.ilp.induce_exact(backend="python")`, whose host-orchestrated
-`set_rule_mask`/`evaluate`/`batch_fact_membership_device` loop is documented as a
-throwaway prototype.
+<Note>
+Bounded exact induction ships in the `pyxlog` PyPI wheel that tracks the `v0.9.2`
+release, alongside the rest of the neural-symbolic surface. Its CUDA kernel is not yet
+in the formal certification registry, because its PTX is not committed — see
+[CUDA certification](/architecture/certification).
+</Note>
 
-- **Crate:** `crates/xlog-induce/`
-- **CUDA kernels:** `kernels/ilp_exact.cu` (module `xlog_ilp_exact`, entries
-  `ilp_exact_score` for `U64` and `ilp_exact_score_u32` for `U32` /
-  `Symbol`)
-- **Provider launcher:** `crates/xlog-cuda/src/provider/ilp_exact.rs`
-- **pyxlog bridge:** `crates/pyxlog/src/ilp_exact.rs` +
-  `crates/pyxlog/python/pyxlog/ilp/exact_induce.py`
-- **Parity tests:** `python/tests/test_ilp_exact_induce.py`
-- **Related:** Rule Learning (Differentiable ILP) — the gradient-trained
-  counterpart; this engine is exact / bounded and does not use learnable masks.
+## Four fixed topologies
 
-## Design Goals
+A "2-body" rule has a head `H(X, Y)` and two body atoms drawn from candidate relations
+`L` (left) and `R` (right). The engine considers exactly four ways those two atoms can
+share variables — the four topologies:
 
-1. **Zero host marshalling in the scoring loop.** Setup host-to-device and device-to-device uploads are
-   permitted but constant-size; the `(topology, L, R)` sweep itself performs
-   no host/device round trips. The production `ilp_exact_score_topk` path
-   reduces on device and the tracked device-to-host counter on `CudaKernelProvider`
-   ticks exactly **once per `induce_exact` call** for the compact selected-row
-   export, independent of candidate count.
-2. **Per-topology semantic isolation.** Each `(topology, L, R)` triple is
-   scored against the topology's rule template in isolation. There is no
-   interference across topologies — a direct fix for the Python prototype's
-   stale-mask contamination bug (see [Semantics](#semantics) below).
-3. **Deterministic output.** Integer counts only; each kernel block owns one
-   unique output slot (no cross-block atomics); host-side reduction is a
-   lex sort that is already locked bit-for-bit by 16 unit tests.
-4. **Surgical crate boundary.** `xlog-induce` speaks `RelId` +
-   `CudaBuffer` handles; name resolution and DLPack unwrapping happen at
-   the pyxlog boundary.
-
-## Topologies
-
-The engine scores against four fixed 2-body rule templates. For a head
-relation `H(X, Y)` and candidate relations `L` (left body) and `R` (right
-body), a query pair `(qx, qy)` is covered by a topology as follows:
-
-| Topology | Rule | Coverage predicate |
+| Topology | Rule shape | A pair `(x, y)` is covered when |
 |---|---|---|
-| `chain`  | `H(X,Y) :- L(X,Z), R(Z,Y)` | `∃ z such that (qx, z) ∈ L ∧ (z, qy) ∈ R` |
-| `star`   | `H(X,Y) :- L(X,Y), R(X,Y)` | `(qx, qy) ∈ L ∧ (qx, qy) ∈ R` |
-| `fanout` | `H(X,Y) :- L(X,Z), R(X,Y)` | `∃ _ such that (qx, _) ∈ L ∧ (qx, qy) ∈ R` |
-| `fanin`  | `H(X,Y) :- L(X,Y), R(Z,Y)` | `(qx, qy) ∈ L ∧ ∃ _ such that (_, qy) ∈ R` |
+| `chain` | `H(X,Y) :- L(X,Z), R(Z,Y)` | some `z` has `(x, z)` in `L` and `(z, y)` in `R` |
+| `star` | `H(X,Y) :- L(X,Y), R(X,Y)` | `(x, y)` is in both `L` and `R` |
+| `fanout` | `H(X,Y) :- L(X,Z), R(X,Y)` | `(x, y)` is in `R` and `x` has some outgoing `L` edge |
+| `fanin` | `H(X,Y) :- L(X,Y), R(Z,Y)` | `(x, y)` is in `L` and `y` has some incoming `R` edge |
 
-The kernel implements these predicates directly — it does **not** go
-through `evaluate()` / `set_rule_mask`. This is what guarantees per-topology
-isolation.
+Each `(topology, L, R)` combination is scored in isolation against its own template. The
+kernel implements the four coverage predicates directly on the candidate row sets — it
+does not route through general rule evaluation — so there is no cross-candidate
+contamination by construction.
 
-## Architecture
+## How a call runs
 
-```
-Python user
-    │
-    ▼
-pyxlog.ilp.induce_exact(prog, backend="native", ...)
-    │   (name resolution, DLPack unwrap, empty-negatives synthesis)
-    ▼
-CompiledIlpProgram::induce_exact_native  (crates/pyxlog/src/ilp_exact.rs)
-    │   (build InduceExactRequest with RelId + &CudaBuffer handles)
-    ▼
-xlog_induce::induce_exact(provider, &request)  (crates/xlog-induce/src/lib.rs)
-    │
-    ├──► validate::classify_request   (empty cands / zero positives → empty result)
-    │
-    ▼
-CudaKernelProvider::ilp_exact_score_topk(...)  (crates/xlog-cuda/src/provider/ilp_exact.rs)
-    │
-    ├── Setup (not counted as device-to-host transfer):
-    │     - device-to-device concat candidate arg0/arg1 columns
-    │     - host-to-device upload cand_offsets (small prefix-sum array)
-    │     - Alloc output pos_covered/neg_covered arrays
-    │
-    ├── Launch typed kernel  (kernels/ilp_exact.cu)
-    │     U64    → `ilp_exact_score`
-    │     U32    → `ilp_exact_score_u32`
-    │     Symbol → `ilp_exact_score_u32` with logical schema preserved
-    │     grid  = (C, C, 4)       — one block per (L, R, topology)
-    │     block = (256, 1, 1)
-    │     Each block writes exactly one slot in pos_covered and neg_covered.
-    │
-    ├── Device top-K selection over pos_covered / neg_covered
-    │
-    └── Download (1 tracked device-to-host transfer):
-          compact selected top-K rows as u32 field tuples
-    │
-    ▼
-xlog_induce::reduce_per_topology  (host-side, deterministic lex sort)
-    │
-    ▼
-ExactInductionResult { candidates: Vec<ScoredCandidate>, total_scored, ... }
-    │
-    ▼
-pyxlog wrapper repackages into Python ExactInductionResult / ScoredCandidate
-```
+One CUDA launch covers the whole sweep. The grid is `(C, C, 4)` blocks, one block per
+`(left, right, topology)` triple over the `C` candidate relations; each block scans all
+positive and negative query pairs for its triple and writes exactly one coverage slot.
+Because every block owns a distinct output slot, the scoring path uses no cross-block
+atomics, which is what makes the result bit-for-bit deterministic. After scoring, the
+engine selects the top-`K` per topology on the device and the host performs a fixed
+lexicographic sort to break ties.
 
-## Launch Geometry
+Column types are dispatched explicitly: `u64` columns use one kernel, `u32` and
+`symbol` columns use another (symbols keep their logical schema and never silently
+narrow). A request that mixes `u32` and `symbol` candidate types is rejected with a
+typed error rather than coerced.
 
-- **Grid dims:** `(C, C, 4)` blocks addressed as `(L, R, topology)`, where
-  `C` is the number of candidate relations in the request and topology
-  enumeration is `chain=0, star=1, fanout=2, fanin=3`.
-- **Block dims:** `(256, 1, 1)` threads. Each block cooperatively scans all
-  positive and negative query pairs for its single `(topology, L, R)`
-  triple.
-- **Output slot:** `slot = topology * (C * C) + L * C + R`. Each block
-  writes exactly one slot in each of `pos_covered` and `neg_covered`, so
-  there are no cross-block atomics on the scoring path. Shared-memory
-  pair-halving reduction is used *within* a block to sum per-thread
-  coverage counts.
+## One counted transfer per call
 
-At consumer-scale sizes (C ≈ 5–20, |P|+|N| ≈ 20–50) the launch is modest
-(≤ 1 600 blocks × 256 threads) but ample for occupancy. The inner
-per-thread work is O(|L|·|R|) for `chain` and O(|L|+|R|) for the other
-three topologies — microseconds per block in practice.
+The scoring sweep does no host round-trips. Setup uploads (a small candidate-offset
+array, device-to-device column concatenation) are constant-size and are not
+device-to-host transfers. The production `induce_exact` call downloads results exactly
+**once** — a single compact export of the selected top-`K` rows — regardless of how many
+candidates, queries, or topologies are involved. This is tracked by
+`prog.d2h_transfer_count()`.
 
-## Data Layout
+<Note>
+You may see "two count-array transfers" mentioned for the parity and chain-shared-memory
+tests. That is a separate diagnostic path that reads back the raw per-slot count arrays
+to compare against a reference implementation; it is test-only accounting. The
+production `induce_exact(backend="native")` path counts exactly one device-to-host
+transfer.
+</Note>
 
-| Buffer | Type / length | Contents |
-|---|---|---|
-| `cand_arg0`, `cand_arg1` | `u64` or `u32` × total_rows | Concatenated device-to-device-copied arg0 / arg1 columns of all candidate relations |
-| `cand_offsets` | `u32` × (C+1) | Exclusive prefix-sum of candidate row counts; host-to-device uploaded once per call |
-| `pos_arg0`, `pos_arg1` | `u64` or `u32` × num_pos | Device-resident positive query pairs (DLPack-imported from the caller's torch tensors) |
-| `neg_arg0`, `neg_arg1` | `u64` or `u32` × num_neg | Same for negatives. When the caller passes no negatives, the engine materializes a zero-row pair buffer with the positive pair type so the kernel signature stays uniform. |
-| `pos_covered`, `neg_covered` | `u32` × (4·C·C) | Output count arrays; kernel writes each slot exactly once. |
+## The Python API
 
-Column type dispatch is explicit at both native boundaries:
-
-- `xlog_induce::induce_exact` validates that positives, negatives, and every
-  candidate buffer are arity-2 pairs with one uniform logical type: `U64`,
-  `U32`, or `Symbol`.
-- `CudaKernelProvider::ilp_exact_score` repeats that validation at the provider
-  seam before choosing the physical kernel.
-- `U64` buffers launch `ilp_exact_score` over `uint64_t` columns.
-- `U32` buffers launch `ilp_exact_score_u32` over `uint32_t` columns.
-- `Symbol` buffers also launch `ilp_exact_score_u32`, but the `CudaBuffer`
-  schema remains `Symbol` and mixed `U32`/`Symbol` requests fail with typed
-  diagnostics rather than silently narrowing.
-
-The pyxlog DLPack layer accepts physical 32-bit tensor IDs for `symbol`
-schemas only through schema-checked import. This preserves public logical
-types while allowing CUDA-resident symbol-id tensors to reach the native scorer
-without host widening.
-
-## Semantics
-
-The Python prototype's `backend="python"` loop calls `set_rule_mask(mask_name,
-...)` **per inner iteration**, updating only the current topology's mask
-while leaving the other three topologies' masks at whatever state they
-last held. Because `evaluate()` derives facts from *all* currently-set
-masks, stale masks from earlier outer-loop iterations leak derivations
-into later topologies' coverage counts.
-
-The native kernel bypasses `evaluate()` and `set_rule_mask` entirely:
-it implements the four topology predicates directly on the candidate
-row sets. Per-topology isolation is a structural property, not a
-runtime hygiene requirement.
-
-The Python prototype gained an opt-in `strict_per_topology: bool = False`
-parameter that zeroes the three "other" topology masks before each
-topology's inner loop, yielding the same per-topology-isolated scoring
-that the kernel produces by construction. **Default is `False`** for
-backward compatibility with prototype callers that are calibrated
-against the historical prototype numbers. The parity test sets
-`strict_per_topology=True` explicitly to match the kernel.
-
-## Device-to-Host Transfer Budget
-
-The kernel is designed around the xlog-native device-to-host transfer counter
-(`CudaKernelProvider::d2h_transfer_count`, exposed to Python as
-`prog.d2h_transfer_count()`).
-
-- **Counted transfers per production `induce_exact` call: 1** (one compact
-  selected-row export) regardless of candidate count, query count, or topology count. The
-  parity test `test_induce_exact_native_does_not_scale_d2h_with_candidate_pairs`
-  enforces `large.d2h_transfer_count ≤ small.d2h_transfer_count + 2`,
-  which passes trivially.
-- Setup host-to-device (`cand_offsets`) and device-to-device (candidate column concatenation)
-  are not counted as device-to-host transfers.
-- Setup reads that would otherwise require a device-to-host transfer (e.g. relation row
-  counts) go through the host-side `CudaBuffer::cached_row_count()`
-  cache. This is a load-bearing invariant — see the next section.
-
-### `clone_buffer` cached-row-count propagation
-
-Every relation buffer in `CompiledIlpProgram`'s executor store was
-deep-copied via `CudaKernelProvider::clone_buffer` on insertion
-(`CompiledIlpProgram::put_relation` clones `live_buffer` before
-`executor.put_relation`). The previous `clone_buffer` implementation
-built the clone via `CudaBuffer::from_columns`, which does **not**
-populate the host-side `cached_row_count`. Downstream consumers that
-needed the row count were forced to either read `num_rows_device()` from device to host
-or trust the (misleading) `num_rows()` capacity accessor.
-
-`clone_buffer` now calls `set_cached_row_count_if_unset(source.cached_row_count())`
-on the clone when the source has a populated cache, preserving the
-host-visible count across clones. Pinned by
-`test_clone_buffer_preserves_cached_row_count`.
-
-## Validation Contract
-
-Buffer-level invariants enforced by `xlog_induce::induce_exact`:
-
-| Check | Location | Failure mode |
-|---|---|---|
-| `candidates.is_empty()` | Engine top of `induce_exact` | Returns default `ExactInductionResult` (all zeros) — matches Python reference's `if not body_indices: return …` |
-| Buffer arity == 2 | `validate_pair_buffer` | `XlogError::Execution` |
-| Column type is exactly one of `U64`, `U32`, `Symbol` | `validate_pair_buffer` | `XlogError::Type` |
-| Positive, negative, and candidate pair types match exactly | `require_pair_type` / provider layout check | `XlogError::Type` / `XlogError::Kernel` |
-| `cached_row_count()` populated | `cached_rows` helper | `XlogError::Execution` — caller fed a buffer that skipped the DLPack ingest path |
-| `positive_count == 0` | `classify_request` (pure) | Returns result with zero candidates but retained neg/candidate counts |
-
-Trivial dead-end classification (`classify_request`) is pure and
-unit-tested without CUDA via 5 tests in `xlog-induce/src/validate.rs`.
-
-## Public Types
-
-```rust
-// crates/xlog-induce/src/lib.rs
-pub struct InduceExactRequest<'a> {
-    pub head_rel_idx: RelId,
-    pub candidates: &'a [(RelId, &'a CudaBuffer)],
-    pub positives: &'a CudaBuffer,
-    pub negatives: Option<&'a CudaBuffer>,
-    pub config: ExactInductionConfig,
-}
-
-pub fn induce_exact(
-    provider: &CudaKernelProvider,
-    request: &InduceExactRequest<'_>,
-) -> Result<ExactInductionResult>;
-```
-
-```rust
-// crates/xlog-induce/src/types.rs
-pub enum Topology { Chain, Star, Fanout, Fanin }
-
-pub struct ExactInductionConfig {
-    pub k_per_topology: u32,
-    pub deterministic: bool,  // reserved — engine is inherently deterministic
-}
-
-pub struct ScoredCandidate {
-    pub topology: Topology,
-    pub head_rel_idx: RelId,
-    pub left_rel_idx: RelId,
-    pub right_rel_idx: RelId,
-    pub positives_covered: u32,
-    pub negatives_covered: u32,
-    pub local_rank: u32,
-    pub next_positives_covered: u32,
-    pub next_negatives_covered: u32,
-    pub tie_class_size: u32,
-}
-
-pub struct ExactInductionResult {
-    pub candidates: Vec<ScoredCandidate>,
-    pub total_scored: u32,
-    pub candidate_count: u32,
-    pub positive_count: u32,
-    pub negative_count: u32,
-}
-```
-
-## Generated Rule Provenance
-
-Generated-rule provenance adds audit records for generated/mined rules in
-`crates/xlog-induce/src/provenance.rs`. The scorer still returns
-`ExactInductionResult`; provenance is the companion layer for callers that
-promote a candidate into a generated rule and need to retain why it was selected.
-
-```rust
-pub struct InducedRuleProvenance {
-    pub rule_id: String,
-    pub rule_source: String,
-    pub source_kind: RuleSourceKind,
-    pub search_space_size: u64,
-    pub predicate_inventory: Vec<String>,
-    pub support_rows: Vec<InductionSupportRow>,
-    pub rejected_alternatives: Vec<InductionAlternative>,
-    pub falsification_count: u64,
-    pub generation_trace_hash: String,
-}
-```
-
-`InductionSupportRow` records retained positive support by relation, row index,
-and caller-supplied row hash. `InductionAlternative` records rejected candidate
-rules with support and falsification counts. `InductionProvenanceRegistry`
-stores the generated-rule records in memory for the caller's audit path.
-
-## Python Surface
+`induce_exact` takes a compiled program, the head and candidate relation names, and the
+positive (and optional negative) example pairs as device tensors:
 
 ```python
 from pyxlog.ilp import induce_exact
 
 result = induce_exact(
-    prog,                                   # CompiledIlpProgram
+    prog,                        # CompiledIlpProgram
     head_relation="p_A",
     candidate_relations=["p_B", "p_C", "p_D"],
-    positive_arg0=pos_a0,                   # 1-D device torch tensor
+    positive_arg0=pos_a0,        # 1-D device torch tensors
     positive_arg1=pos_a1,
-    negative_arg0=neg_a0,                   # optional
+    negative_arg0=neg_a0,        # optional
     negative_arg1=neg_a1,
     k_per_topology=2,
-    deterministic=True,
-    backend="native",                       # or "python" (prototype)
-    # strict_per_topology=True,             # only meaningful for backend="python"
+    backend="native",
 )
+
+for cand in result.candidates:
+    print(cand.topology, cand.left_rel_idx, cand.right_rel_idx,
+          cand.positives_covered, cand.negatives_covered)
 ```
 
-Returns an `ExactInductionResult` dataclass with `candidates: list[ScoredCandidate]`.
+It returns an `ExactInductionResult` whose `candidates` list holds the ranked
+`ScoredCandidate` records — each carrying its topology, the left and right relation ids,
+positive and negative coverage counts, and its local rank. When you pass no negatives,
+the engine synthesizes an empty negative buffer so the kernel signature stays uniform;
+when there are no candidates or no positives, it returns an all-zero result rather than
+launching.
 
-## Testing
+## See also
 
-- **Host-only unit tests** (`cargo test -p xlog-induce --lib`):
-  23 tests — 16 reduce-layer, 5 classify_request, 2 topology string/order.
-  No CUDA required.
-- **CUDA-gated launcher tests** (`cargo test -p xlog-cuda --lib ilp_exact`):
-  hand-derived coverage against C=2 candidates, determinism across runs,
-  empty-negatives handling, `U32` and `Symbol` pair-buffer acceptance, and
-  mixed-pair-type rejection. Skipped when no CUDA device is present.
-- **Python parity test** (`python -m pytest python/tests/test_ilp_exact_induce.py`):
-  native-vs-Python reference and the host-transfer budget parity test.
-  Uses `strict_per_topology=True` against the Python reference so both
-  backends compute clean per-topology coverage.
-- **Typed parity tests**:
-  `U32` and `Symbol` fixtures match the Python reference, preserve relation
-  type annotations, keep device-to-host transfer accounting at exactly two count-array transfers, and reject
-  mixed logical pair types.
+<Card title="Rule learning (differentiable ILP)" icon="brain" href="/neural/rule-learning">
+  The gradient-trained counterpart — learn a clause with Gumbel-Softmax masking and
+  promote it through reliability gates.
+</Card>
 
-## Type Dispatch And Packaging Policy
-
-- `U64`: supported through `ilp_exact_score`.
-- `U32`: supported through `ilp_exact_score_u32`.
-- `Symbol`: supported through the same physical `u32` kernel while retaining
-  `Symbol` schema identity and rejecting mixed `U32`/`Symbol` requests.
-- Chain topology shared-memory caching: supported through
-  `ilp_exact_score_chain_smem` and `ilp_exact_score_chain_smem_u32` when
-  `XLOG_ILP_EXACT_CHAIN_SMEM` is enabled and the candidate-row threshold is
-  met. Non-chain topologies inside those entry points continue to call the
-  baseline matcher.
-- PTX policy: `kernels/ilp_exact.cu` is checked in; generated
-  `ilp_exact.portable.ptx` and architecture-specific `.cubin` files are build
-  and packaging artifacts, not source artifacts. `crates/xlog-cuda/build.rs`
-  generates portable PTX for every manifest module, including `ilp_exact`;
-  `scripts/stage_pyxlog_kernels.sh` stages those artifacts into
-  `pyxlog/kernels/`; `scripts/install_pyxlog_for_python.py` rejects a wheel
-  that lacks portable PTX.
-
-## Profile-Gated Chain Shared Memory
-
-The profile-gated chain shared-memory scorer adds an A/B-controlled chain scorer that tiles
-left-relation rows into dynamic shared memory for the strict chain topology.
-It is enabled by default only for candidate relations with at least
-`XLOG_ILP_EXACT_CHAIN_SMEM_MIN_ROWS` rows, defaulting to `256`, and can be
-disabled with `XLOG_ILP_EXACT_CHAIN_SMEM=0`.
-
-The optimization preserves the public exact-induction contract:
-
-- chain-smem and baseline dispatch produce identical coverage signatures on
-  the certified small and chain-hot fixtures;
-- median runtime improves by more than `1.2x` on the certified chain-hot
-  fixture;
-- small fixtures do not regress by more than five percent;
-- the device-to-host transfer budget remains the same two count-array transfers used by the
-  baseline native exact-induction path.
-
-## See Also
-
-- [CUDA Certification](/architecture/certification) — CUDA certification suite
-  with numbered certification categories; `ilp_exact` is not yet in the formal certification
-  registry because its PTX is not committed (see above).
-- [Diagnostics and Provenance](/guides/diagnostics) — generated-rule provenance
-  and diagnostics surfaces for generated rules, source rules, proof traces,
-  deltas, temporal metadata, and neural hot loops.
-- [Roadmap](/architecture/roadmap) → "Bounded Exact Induction (`xlog-induce`)" — current status and planned integration.
+<Card title="Diagnostics and provenance" icon="clipboard-list" href="/guides/diagnostics">
+  Audit records for mined rules — support rows, rejected alternatives, and selection
+  traces.
+</Card>
