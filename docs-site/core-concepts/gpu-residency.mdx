@@ -8,6 +8,11 @@ on the CPU. Every training iteration then pays a PCIe round-trip to move data ac
 that boundary, and at scale those transfers dominate wall-clock time. XLOG removes the
 boundary: symbolic evaluation runs on the device, and reasoning state stays there.
 
+<Frame caption="The host launches kernels and reads only bounded metadata; relations, deltas, circuit values, and solver state stay in the device memory budget, and results reach PyTorch, JAX, and cuDF zero-copy through DLPack and Arrow.">
+  <img className="block dark:hidden" src="/assets/diagrams/gpu-residency-model-light.svg" alt="XLOG GPU residency model: the host executor and compiler launch kernels into a GPU-resident device plane holding relations, deltas, circuit values, and solver state within a memory budget, exposed zero-copy to PyTorch, JAX, and cuDF via DLPack and Arrow." />
+  <img className="hidden dark:block" src="/assets/diagrams/gpu-residency-model-dark.svg" alt="XLOG GPU residency model: the host executor and compiler launch kernels into a GPU-resident device plane holding relations, deltas, circuit values, and solver state within a memory budget, exposed zero-copy to PyTorch, JAX, and cuDF via DLPack and Arrow." />
+</Frame>
+
 ## The contract
 
 During execution, XLOG's runtime semantic state — relations, deltas, probabilistic
