@@ -5,6 +5,15 @@ description: "Reference for the pyxlog Python bindings: deterministic and probab
 
 This document describes the Python bindings for XLOG, implemented using PyO3 and exposing GPU tensors via DLPack for zero-copy interoperability.
 
+<Note>
+Always `import pyxlog`, never `pyxlog._native`. The package has two layers: a native
+PyO3 extension (`pyxlog._native`) and a pure-Python wrapper that re-exports it and adds
+convenience methods. Some documented methods — including `evaluate_async`,
+`evaluate_stream`, the relation callbacks, temporal provenance, and the `nn/4` lineage
+helpers — live only on the wrapped classes. Importing from `pyxlog._native` directly
+will make those methods appear missing.
+</Note>
+
 ## Overview
 
 The `pyxlog` Python module provides:
@@ -199,7 +208,6 @@ session.apply_relation_delta_batch([
     {"name": "external_consumer_commit", "delete_columns": [row_b, parent_b]},
 ])
 
-def apply_relation_delta_debug(updates, check_equivalence=False) -> dict: ...
 debug = session.apply_relation_delta_debug(
     [{"name": "external_consumer_commit", "insert_columns": [row_c, parent_c]}],
     check_equivalence=True,
@@ -949,16 +957,20 @@ for q in result.queries:
     cols = [cupy.from_dlpack(t) for t in q.tensors]
 ```
 
-### dlpack_roundtrip Helper
+### dlpack_roundtrip helper
 
-For testing interop:
+`dlpack_roundtrip` sends a CUDA tensor into XLOG and returns it as a fresh DLPack
+capsule — a quick way to verify zero-copy interop end to end. All three arguments are
+required:
 
 ```python
-# Verify DLPack roundtrip works
-capsule = results['reach']
-tensor = torch.from_dlpack(capsule)
-capsule2 = tensor.__dlpack__()
-# capsule2 can be passed back to xlog
+import torch
+from pyxlog import dlpack_roundtrip
+
+tensor = torch.arange(8, dtype=torch.int32, device="cuda")
+capsule = dlpack_roundtrip(tensor, device=0, memory_mb=1024)
+restored = torch.from_dlpack(capsule)
+assert torch.equal(tensor, restored)
 ```
 
 ## Compile Options

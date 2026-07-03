@@ -275,7 +275,7 @@ list error at program.xlog:12: unbounded append/3 generation is unsupported; bin
 meta error at program.xlog:8: maplist predicate argument must be a static predref; replace runtime variable P with a named predicate.
 negation safety error: unbound variable Y in negated atom edge/2; bind it before not with a positive atom or deterministic is expression, or use '_' for existential positions.
 magic_sets declined at program.xlog:21: recursive query crosses an aggregate boundary; run with #pragma magic_sets = off or isolate the aggregate.
-prob_aggregate error at program.xlog:17: exact aggregate domain exceeds cap 1024; add a finite cap or use prob_engine = mc.
+prob_aggregate error at program.xlog:17: exact probabilistic aggregate domain cap exceeded (16 uncertain rows per group); use prob_engine = mc.
 epistemic error at program.xlog:9: unbounded modal tuple key [H|T] has no finite GPU key-column set; use a fixed-arity typed list or bind the tail to a finite relation.
 ```
 
