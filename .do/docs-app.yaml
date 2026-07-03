@@ -1,5 +1,12 @@
 name: xlogmd-site
 region: lon
+domains:
+  - domain: xlog.md
+    type: PRIMARY
+    zone: xlog.md
+  - domain: www.xlog.md
+    type: ALIAS
+    zone: xlog.md
 static_sites:
   - name: xlog
     github:
