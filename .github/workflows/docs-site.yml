@@ -41,7 +41,7 @@ jobs:
         run: |
           mint export
           mkdir -p ../.site-dist
-          unzip -o *.zip -d ../.site-dist
+          unzip -o export.zip -d ../.site-dist
       - name: Publish to docs-dist branch
         if: github.ref == 'refs/heads/main'
         run: |
