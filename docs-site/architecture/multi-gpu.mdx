@@ -1,76 +1,68 @@
 ---
 title: "Multi-GPU Joins"
-description: "Design for distributed hash joins across multiple GPUs using hash-based partitioning; not yet shipped."
+description: "Current multi-GPU status in XLOG: memory-management substrate exists, distributed join execution is design-only."
 ---
 
-<Warning>This is a design document. Multi-GPU distributed joins are not shipped; single-GPU `hash_join_v2` is the production path.</Warning>
+Multi-GPU distributed joins are not shipped. The production join paths are still
+single-GPU CUDA routes such as `hash_join_v2`, WCOJ, and the main-only
+factorized routes described elsewhere in the Architecture tab.
 
-<Note>
-**Implementation status:** **Design only.** Multi-GPU memory management
-(`crates/xlog-cuda/src/multi_gpu_memory.rs`) is implemented, but distributed join
-execution and cross-device partitioning kernels are not shipped. Single-GPU joins
-(`hash_join_v2`) remain the production path. Multi-GPU partitioned evaluation is
-tracked as future roadmap work (see the [Roadmap](/architecture/roadmap)).
-</Note>
+<Warning>
+Treat this page as design-state documentation. Do not promise distributed join
+execution, cross-device partitioning, or multi-GPU WCOJ in current release
+artifacts.
+</Warning>
 
-## Overview
+## What Exists
 
-Distributed hash join across multiple GPUs using hash-based partitioning.
+`xlog-cuda` contains a `MultiGpuMemoryManager` substrate. It wraps a
+`GpuDevicePool`, builds one `GpuMemoryManager` per device, and supports:
 
-## Algorithm
+- device-count inspection;
+- allocation on a specified device;
+- round-robin allocation on the next device;
+- per-device remaining-byte reporting;
+- access to the underlying device pool.
 
-### Phase 1: Partition Both Tables
+CUDA certification also checks basic multi-GPU detection consistency when the
+test environment exposes multiple devices.
 
-```text
-For each row in left_table:
-    partition_id = hash(key) % num_devices
-    send row to device[partition_id]
+## What Does Not Exist Yet
 
-For each row in right_table:
-    partition_id = hash(key) % num_devices
-    send row to device[partition_id]
-```
+The repository does not currently ship:
 
-### Phase 2: Local Joins
+- a distributed relation buffer type for query execution;
+- partitioning kernels that route rows by hash key across devices;
+- peer-to-peer shuffle orchestration for joins;
+- distributed hash-join execution;
+- cross-device WCOJ or Free Join;
+- optimizer costing for multi-GPU partition plans.
 
-```text
-For each device d in parallel:
-    result[d] = hash_join(left_partition[d], right_partition[d])
-```
+Those pieces are future architecture work.
 
-### Phase 3: Gather Results
+## Design Direction
 
-```text
-final_result = concatenate(result[0], result[1], ..., result[n])
-```
+A future distributed hash join would likely use hash partitioning:
 
-## Implementation Notes
+1. compute a partition for each row from the join key;
+2. move left and right partitions to the same device;
+3. run the normal local join kernel per device;
+4. concatenate or expose the partitioned result as a distributed relation.
 
-1. **Partitioning Kernel**: Need GPU kernel to compute partition IDs and scatter
-2. **Cross-Device Copy**: Use peer-to-peer device copy if available, else copy through host
-3. **Load Balancing**: Hash partitioning may be skewed; consider sampling for better distribution
-4. **Memory Management**: Each device needs memory for:
-   - Input partition
-   - Hash table
-   - Output buffer
+That design still has unresolved production requirements:
 
-## API Design
+- skew handling for hot keys;
+- memory budgeting across devices;
+- peer-to-peer versus host-mediated copies;
+- deterministic result ordering or explicit unordered semantics;
+- relation-generation and cache invalidation across devices;
+- fallback behavior when only one GPU is present.
 
-```rust
-impl MultiGpuKernelProvider {
-    pub fn hash_join_distributed(
-        &self,
-        left: &DistributedBuffer,
-        right: &DistributedBuffer,
-        left_keys: &[usize],
-        right_keys: &[usize],
-    ) -> Result<DistributedBuffer>;
-}
-```
+## User Guidance
 
-## Future Work
+For current workloads, plan around one CUDA device per executor. Use the
+single-GPU execution, WCOJ, adaptive-indexing, and factorized-execution pages for
+the routes that actually run today.
 
-- Implement `DistributedBuffer` type
-- Add partitioning kernels
-- Implement peer-to-peer device copy optimization
-- Add skew detection and handling
+If you see multi-GPU allocation APIs in source, treat them as substrate, not as
+evidence that distributed joins are available.
