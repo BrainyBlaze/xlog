@@ -6,6 +6,24 @@ All notable changes to this project are documented in this file.
 
 ### Added
 
+- *(pyxlog)* **Graded per-binding candidate masses in the joint noisy-OR
+  mixture.** `train_neurosymbolic_program(..., candidate_masses={rule_id:
+  tensor})` supplies per-binding confidences in [0, 1] that multiply into a
+  candidate's relational eligibility, so the head probability becomes the
+  noisy-OR over graded evidence masses. Mapping head bindings to world steps
+  and masses to a fact's per-step confidence trains per-candidate guards
+  against an evolving trajectory. Omitting the argument leaves the binary
+  behavior unchanged; masses are validated for shape and range and rejected
+  outside the multi-rule joint path.
+
+- *(pyxlog)* **Stage-B existential-join trainable bodies (real-domain
+  grounding).** A trainable body may join a neural predicate to an ordinary
+  relation on a non-head variable; the neural predicate is grounded over the
+  real join domain inside the circuit and OR-aggregated at the head. Per-event
+  features arrive through `domain_inputs=` and `register_domain_tensor_source`;
+  a candidate may also carry a neural conjunct (`neural_bodies=`) whose
+  straight-through-thresholded head gates its eligibility.
+
 - *(pyxlog)* **Joint multi-rule same-head trainable mixture (guard-only).** A
   query head may now be derived by MORE THAN ONE `trainable_rule` — the joint
   soft-mixture where N candidate rules compete for mass on one head (previously
@@ -19,9 +37,8 @@ All notable changes to this project are documented in this file.
   `CompiledProgram.joint_candidate_eligibility` (reusing the engine's hard-filter
   evaluation); the differentiable mass is torch over the guard parameters, so the
   training loop performs no tracked device<->host transfers. Scope: guard-only
-  candidates (relational joins plus a trainable guard); candidates carrying neural
-  predicates beyond the guard are a documented follow-up (they require the circuit
-  backward, which fuses prob→loss→gradient on-device, to be un-fused).
+  candidates (relational joins plus a trainable guard); candidates carrying a neural
+  conjunct are supported via `neural_bodies=` (see the Stage-B entry above).
 - *(pyxlog)* **Held-out generalization read for the joint mixture
   (`evaluate_joint_mixture`).** Evaluates a trained joint mixture's guards on a
   HELD-OUT program split: given the held-out bindings' facts and the learned
@@ -161,6 +178,17 @@ All notable changes to this project are documented in this file.
   `docs/evidence/2026-06-14-sparse-domain-spike/`.
 
 ### Fixed
+
+- *(prob)* **Two-sided recursive SCC provenance now converges to the exact
+  fixpoint.** Circuit construction flattens same-operator OR/AND children
+  (associativity) and applies absorption, so mutually recursive two-sided
+  support (`a :- b` and `b :- a` with independent priors) compiles to the exact
+  d-DNNF marginal instead of diverging.
+
+- *(prob)* **Self-healing recovery from stale disk-cached circuits.** A cached
+  circuit whose variable capacity no longer matches the current CNF, or that
+  fails equivalence verification, is evicted and recompiled instead of failing
+  the compilation; fresh-compile verification stays fail-closed.
 
 - *(cuda)* Fused group-by-root entries now layout-normalize their inputs
   per dispatch (sorted-fast-path when already lex-sorted+unique), matching
