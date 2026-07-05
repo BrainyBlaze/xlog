@@ -6,6 +6,9 @@ on:
     paths:
       - "docs-site/**"
       - "scripts/docs/build_rust_api.sh"
+      - "scripts/docs/inject_search_shim.py"
+      - "scripts/docs/search-shim.css"
+      - "scripts/docs/search-shim.js"
       - "Cargo.toml"
       - "Cargo.lock"
       - "crates/**"
@@ -14,6 +17,9 @@ on:
     paths:
       - "docs-site/**"
       - "scripts/docs/build_rust_api.sh"
+      - "scripts/docs/inject_search_shim.py"
+      - "scripts/docs/search-shim.css"
+      - "scripts/docs/search-shim.js"
       - "Cargo.toml"
       - "Cargo.lock"
       - "crates/**"
@@ -52,6 +58,12 @@ jobs:
           mint export
           mkdir -p ../.site-dist
           unzip -o export.zip -d ../.site-dist
+      - name: Build self-hosted search index (Pagefind)
+        run: |
+          python3 scripts/docs/inject_search_shim.py .site-dist
+          npx -y pagefind@1.5.2 --site .site-dist
+          test -f .site-dist/pagefind/pagefind-ui.js
+          test -f .site-dist/pagefind/pagefind-ui.css
       - name: Attach generated Rust API docs
         run: |
           rm -rf .site-dist/generated/rust

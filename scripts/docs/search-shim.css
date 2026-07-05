@@ -1,0 +1,74 @@
+/*
+ * Styles for the self-hosted Pagefind search modal (see search-shim.js).
+ * Injected into exported pages at deploy time; deliberately kept outside
+ * docs-site/ so Mintlify never inlines it as custom CSS.
+ */
+
+#xlog-search-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 9999;
+  display: none;
+}
+
+#xlog-search-overlay.open {
+  display: block;
+}
+
+#xlog-search-backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(15, 14, 30, 0.45);
+  backdrop-filter: blur(2px);
+}
+
+#xlog-search-panel {
+  position: relative;
+  margin: 10vh auto 0;
+  width: min(680px, calc(100vw - 2rem));
+  max-height: 70vh;
+  overflow-y: auto;
+  border-radius: 12px;
+  background: #ffffff;
+  border: 1px solid #d9d8e3;
+  box-shadow: 0 18px 50px rgba(15, 14, 30, 0.25);
+  padding: 14px 16px 10px;
+}
+
+#xlog-search-hint {
+  padding: 8px 4px 4px;
+  font-size: 11px;
+  color: #6b6880;
+  text-align: right;
+}
+
+/* Pagefind UI theme variables - light */
+#xlog-search-overlay {
+  --pagefind-ui-scale: 0.9;
+  --pagefind-ui-primary: #4f46e5;
+  --pagefind-ui-text: #1e1b2e;
+  --pagefind-ui-background: #ffffff;
+  --pagefind-ui-border: #d9d8e3;
+  --pagefind-ui-tag: #eceafb;
+  --pagefind-ui-border-width: 1px;
+  --pagefind-ui-border-radius: 8px;
+  --pagefind-ui-font: Inter, system-ui, sans-serif;
+}
+
+/* Dark mode (html.dark toggled by the site theme switch) */
+#xlog-search-overlay.xlog-dark #xlog-search-panel {
+  background: #17162a;
+  border-color: #2c2a3c;
+}
+
+#xlog-search-overlay.xlog-dark {
+  --pagefind-ui-primary: #8b83f0;
+  --pagefind-ui-text: #e7e6f0;
+  --pagefind-ui-background: #17162a;
+  --pagefind-ui-border: #2c2a3c;
+  --pagefind-ui-tag: #1c1a33;
+}
+
+#xlog-search-overlay.xlog-dark #xlog-search-hint {
+  color: #9b98b4;
+}

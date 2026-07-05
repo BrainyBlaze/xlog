@@ -86,6 +86,34 @@ def test_docs_workflow_attaches_rustdoc_after_mintlify_export() -> None:
     assert workflow.index("mint export") < workflow.index("Attach generated Rust API docs")
 
 
+def test_docs_workflow_builds_self_hosted_search_before_rustdoc_graft() -> None:
+    workflow = read(".github/workflows/docs-site.yml")
+    assert "Build self-hosted search index (Pagefind)" in workflow
+    assert "scripts/docs/inject_search_shim.py .site-dist" in workflow
+    assert "pagefind@1.5.2 --site .site-dist" in workflow
+    assert "test -f .site-dist/pagefind/pagefind-ui.js" in workflow
+    assert "test -f .site-dist/pagefind/pagefind-ui.css" in workflow
+    assert '"scripts/docs/inject_search_shim.py"' in workflow
+    assert '"scripts/docs/search-shim.js"' in workflow
+    assert '"scripts/docs/search-shim.css"' in workflow
+    assert workflow.index("mint export") < workflow.index("Build self-hosted search index")
+    assert workflow.index("Build self-hosted search index") < workflow.index("Attach generated Rust API docs")
+
+    injector = read("scripts/docs/inject_search_shim.py")
+    assert "data-pagefind-body" in injector
+    assert "/search-shim.js" in injector
+    assert "/search-shim.css" in injector
+
+
+def test_search_shim_uses_pagefind_assets_and_suppresses_mintlify_search() -> None:
+    shim = read("scripts/docs/search-shim.js")
+    assert "/pagefind/pagefind-ui.js" in shim
+    assert "/pagefind/pagefind-ui.css" in shim
+    assert "stopImmediatePropagation" in shim
+    assert "#search-bar-entry" in shim
+    assert 'key === "k"' in shim
+
+
 def test_home_page_omits_local_generated_html_notice() -> None:
     home = read("docs-site/index.mdx")
     assert "Generated HTML is not committed" not in home
