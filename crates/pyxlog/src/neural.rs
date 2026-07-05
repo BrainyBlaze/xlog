@@ -3131,8 +3131,25 @@ impl CompiledProgram {
             .get_active()
             .map_err(|e| PyValueError::new_err(format!("No active tensor source: {}", e)))?;
 
-        // Index into the tensor: tensor[index]
         let tensor_bound = tensor.bind(py);
+        // Each neural atom in a complex query binds its own source row (atom k
+        // reads row k), so a query with N neural atoms needs at least N rows.
+        // Check the bound here so an undersized source fails with the contract
+        // spelled out instead of a bare tensor IndexError.
+        let rows: usize = tensor_bound
+            .getattr("shape")?
+            .get_item(0)?
+            .extract()
+            .unwrap_or(0);
+        if index >= rows {
+            return Err(PyValueError::new_err(format!(
+                "tensor source has {} row(s) but the query needs row {}: each \
+                 neural atom in a complex query binds one source row (atom k \
+                 reads row k), so a body with N neural atoms requires at least \
+                 N rows in the active tensor source",
+                rows, index
+            )));
+        }
         let indexed = tensor_bound.get_item(index)?;
         Ok(indexed.into())
     }
