@@ -5,7 +5,7 @@ script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "$script_dir/../.." && pwd)"
 
 target_dir="${XLOG_RUSTDOC_TARGET_DIR:-$repo_root/target/docs-rustdoc}"
-output_dir="$repo_root/docs-site/generated/rust"
+output_dir="${XLOG_RUSTDOC_OUTPUT_DIR:-$repo_root/.site-rustdoc/generated/rust}"
 
 cd "$repo_root"
 

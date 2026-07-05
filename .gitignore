@@ -69,6 +69,8 @@ fuzz/artifacts/
 
 docs/ref
 docs-site/generated/
+/.site-rustdoc/
+/.site-dist/
 
 # Local research/reference PDFs
 docs/Helbig200-semantic-role-book.pdf

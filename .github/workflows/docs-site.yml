@@ -5,10 +5,18 @@ on:
     branches: [main]
     paths:
       - "docs-site/**"
+      - "scripts/docs/build_rust_api.sh"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "crates/**"
       - ".github/workflows/docs-site.yml"
   pull_request:
     paths:
       - "docs-site/**"
+      - "scripts/docs/build_rust_api.sh"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "crates/**"
       - ".github/workflows/docs-site.yml"
 
 concurrency:
@@ -31,6 +39,8 @@ jobs:
         run: npm install -g mint@4.2.666
       - name: Generate Rust API docs
         run: bash scripts/docs/build_rust_api.sh
+        env:
+          XLOG_RUSTDOC_OUTPUT_DIR: ${{ github.workspace }}/.site-rustdoc/generated/rust
       - name: Validate
         working-directory: docs-site
         run: |
@@ -42,6 +52,11 @@ jobs:
           mint export
           mkdir -p ../.site-dist
           unzip -o export.zip -d ../.site-dist
+      - name: Attach generated Rust API docs
+        run: |
+          rm -rf .site-dist/generated/rust
+          mkdir -p .site-dist/generated
+          cp -R .site-rustdoc/generated/rust .site-dist/generated/rust
       - name: Publish to docs-dist branch
         if: github.ref == 'refs/heads/main'
         run: |

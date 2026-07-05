@@ -59,7 +59,9 @@ def test_docs_workflow_generates_reference_outputs_and_exports() -> None:
     script = read("scripts/docs/build_rust_api.sh")
     assert "cargo doc --workspace --no-deps --locked" in script
     assert "XLOG_RUSTDOC_NO_CUDA=1" in script
-    assert "docs-site/generated/rust" in script
+    assert "XLOG_RUSTDOC_OUTPUT_DIR" in script
+    assert ".site-rustdoc/generated/rust" in script
+    assert "docs-site/generated/rust" not in script
 
     cuda_build = read("crates/xlog-cuda/build.rs")
     assert "XLOG_RUSTDOC_NO_CUDA" in cuda_build
@@ -71,7 +73,17 @@ def test_rust_api_page_links_to_generated_crate_roots() -> None:
     rust_page = read("docs-site/reference/rust.mdx")
     assert "generated/rust/index.html" in rust_page
     assert "generated/rust/pyxlog/index.html" in rust_page
-    assert "docs-site/generated/rust" in read("scripts/docs/build_rust_api.sh")
+    assert "generated Rustdoc is attached after Mintlify export" in rust_page
+    assert "docs-site/generated/rust" not in rust_page
+
+
+def test_docs_workflow_attaches_rustdoc_after_mintlify_export() -> None:
+    workflow = read(".github/workflows/docs-site.yml")
+    assert "XLOG_RUSTDOC_OUTPUT_DIR" in workflow
+    assert ".site-rustdoc/generated/rust" in workflow
+    assert "Attach generated Rust API docs" in workflow
+    assert "cp -R .site-rustdoc/generated/rust .site-dist/generated/rust" in workflow
+    assert workflow.index("mint export") < workflow.index("Attach generated Rust API docs")
 
 
 def test_home_page_omits_local_generated_html_notice() -> None:
