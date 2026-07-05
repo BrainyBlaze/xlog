@@ -15,3 +15,4 @@ static_sites:
       deploy_on_push: true
     source_dir: /
     output_dir: /
+    error_document: 404.html

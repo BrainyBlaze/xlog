@@ -71,6 +71,11 @@ jobs:
           test -f .site-dist/architecture/gpu-execution.md
           test -f .site-dist/pagefind/pagefind-ui.js
           test -f .site-dist/pagefind/pagefind-ui.css
+      - name: Add legacy redirects and 404 page
+        run: |
+          python3 scripts/docs/build_redirect_stubs.py docs-site .site-dist
+          test -f .site-dist/404.html
+          test -f .site-dist/architecture/xlog-prob/index.html
       - name: Attach generated Rust API docs
         run: |
           rm -rf .site-dist/generated/rust
