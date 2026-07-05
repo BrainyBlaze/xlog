@@ -18,6 +18,11 @@ def read(path: str) -> str:
 def test_mintlify_config_defines_curated_docs_and_reference_nav() -> None:
     config = json.loads(read("docs-site/docs.json"))
     assert config["name"] == "XLOG"
+    assert [tab["tab"] for tab in config["navigation"]["tabs"]] == [
+        "Documentation",
+        "Architecture",
+        "Reference",
+    ]
     tab_text = repr(config["navigation"]["tabs"])
     for expected in [
         "Documentation",

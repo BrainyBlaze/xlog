@@ -27,20 +27,20 @@
         ]
       },
       {
-        "tab": "Reference",
-        "groups": [
-          { "group": "Language", "pages": ["reference/language"] },
-          { "group": "Tooling", "pages": ["reference/cli"] },
-          { "group": "APIs", "pages": ["reference/python", "reference/rust", "reference/cuda"] }
-        ]
-      },
-      {
         "tab": "Architecture",
         "groups": [
           { "group": "System", "pages": ["architecture/overview", "architecture/gpu-execution", "architecture/device-runtime", "architecture/arithmetic", "architecture/language-completeness"] },
           { "group": "Joins & Optimization", "pages": ["architecture/wcoj", "architecture/factorized-execution", "architecture/factorized-execution-internals", "architecture/query-optimizer", "architecture/adaptive-indexing", "architecture/multi-gpu"] },
           { "group": "Reasoning Engines", "pages": ["architecture/epistemic-internals", "architecture/solver-services"] },
           { "group": "Project", "pages": ["architecture/certification", "architecture/release-process", "architecture/roadmap"] }
+        ]
+      },
+      {
+        "tab": "Reference",
+        "groups": [
+          { "group": "Language", "pages": ["reference/language"] },
+          { "group": "Tooling", "pages": ["reference/cli"] },
+          { "group": "APIs", "pages": ["reference/python", "reference/rust", "reference/cuda"] }
         ]
       }
     ]
