@@ -87,6 +87,11 @@ Gradients flow through the same circuit, including through negation: a negated l
 contributes with the correct sign flip, so a probabilistic program stays differentiable
 end to end and can sit inside a training loop.
 
+<Frame caption="The XGCF circuit is a levelized DAG: literal leaves feed AND and OR nodes evaluated one level per kernel launch in log space, and adjoints propagate back down to produce gradients at the leaves.">
+  <img className="block dark:hidden" src="/assets/diagrams/xgcf-circuit-light.svg" alt="XGCF circuit structure: LIT leaf nodes at level 0 feed AND nodes at level 1 and an OR root using logsumexp at level 2, producing the log probability of the query; a dashed backward path carries adjoints from the root back to gradients at the leaves." />
+  <img className="hidden dark:block" src="/assets/diagrams/xgcf-circuit-dark.svg" alt="XGCF circuit structure: LIT leaf nodes at level 0 feed AND nodes at level 1 and an OR root using logsumexp at level 2, producing the log probability of the query; a dashed backward path carries adjoints from the root back to gradients at the leaves." />
+</Frame>
+
 <Note>
 **Honest residency.** The exact engine is GPU-accelerated but host-orchestrated: the
 forward evaluation launches one kernel per circuit level from a host loop. No per-level
