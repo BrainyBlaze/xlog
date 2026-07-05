@@ -96,7 +96,7 @@
     );
   }
 
-  document.addEventListener(
+  window.addEventListener(
     "click",
     function (ev) {
       if (matchesTrigger(ev.target)) {
@@ -108,7 +108,7 @@
     true
   );
 
-  document.addEventListener(
+  window.addEventListener(
     "keydown",
     function (ev) {
       var key = (ev.key || "").toLowerCase();
