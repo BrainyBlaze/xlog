@@ -1,0 +1,77 @@
+<!-- xlog diagram: deterministic dataflow (light). Source: ARCHITECTURE.md "RIR Node Execution" + gpu-execution page. The host executor walks the RIR plan; each operator dispatches a CUDA kernel family; results live in the device-resident relation store and feed later operators. -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 310" font-family="Inter, system-ui, sans-serif">
+  <rect width="900" height="310" fill="#FBFBFD"/>
+  <defs>
+    <marker id="ad2" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#6B6880"/>
+    </marker>
+  </defs>
+
+  <text x="28" y="38" font-size="16" font-weight="600" fill="#1E1B2E">Deterministic dataflow</text>
+  <text x="28" y="56" font-size="11" fill="#6B6880">The executor walks the relational plan; every operator is a GPU kernel over relations that never leave the device.</text>
+
+  <!-- RIR plan -->
+  <rect x="28" y="104" width="130" height="120" rx="7" fill="#F3F3F8" stroke="#1E1B2E" stroke-width="1.25"/>
+  <rect x="29.5" y="106" width="3.5" height="116" rx="1.75" fill="#4F46E5"/>
+  <text x="93" y="126" text-anchor="middle" font-size="12" font-weight="600" fill="#1E1B2E">RIR plan</text>
+  <g font-size="9" fill="#6B6880" font-family="'JetBrains Mono','SF Mono',ui-monospace,Menlo,monospace">
+    <text x="48" y="146">Project</text>
+    <text x="58" y="161">&#9492; Join</text>
+    <text x="68" y="176">&#9500; Scan e</text>
+    <text x="68" y="191">&#9492; Filter</text>
+    <text x="78" y="206">&#9492; Scan f</text>
+  </g>
+
+  <!-- executor -->
+  <path d="M158,164 H186" stroke="#6B6880" stroke-width="1.5" fill="none" marker-end="url(#ad2)"/>
+  <rect x="188" y="134" width="112" height="60" rx="7" fill="#F3F3F8" stroke="#1E1B2E" stroke-width="1.25"/>
+  <text x="244" y="158" text-anchor="middle" font-size="12" font-weight="600" fill="#1E1B2E">Executor</text>
+  <text x="244" y="174" text-anchor="middle" font-size="9" fill="#6B6880" font-family="'JetBrains Mono','SF Mono',ui-monospace,Menlo,monospace">host walk &#183; dispatch</text>
+
+  <!-- dispatch fan -->
+  <g stroke="#6B6880" stroke-width="1.3" fill="none" marker-end="url(#ad2)">
+    <path d="M300,146 C330,124 340,112 366,110"/>
+    <path d="M300,156 C330,146 340,142 366,141"/>
+    <path d="M300,164 H366"/>
+    <path d="M300,172 C330,182 340,186 366,187"/>
+    <path d="M300,182 C330,204 340,216 366,218"/>
+  </g>
+
+  <!-- device plane with kernel rows + store -->
+  <path d="M368,84 H856 L868,96 V250 H368 Z" fill="#ECEBFB" stroke="#4F46E5" stroke-width="1.25"/>
+  <rect x="380" y="92" width="104" height="15" rx="7.5" fill="#10B981"/>
+  <text x="432" y="102.5" text-anchor="middle" font-size="9" font-weight="600" fill="#FFFFFF" letter-spacing="0.5" font-family="'JetBrains Mono','SF Mono',ui-monospace,Menlo,monospace">GPU-RESIDENT</text>
+
+  <g>
+    <rect x="380" y="112" width="250" height="24" rx="5" fill="#FBFBFD" stroke="#B9B7C8" stroke-width="1"/>
+    <text x="392" y="128" font-size="9.5" font-weight="600" fill="#1E1B2E">Scan</text>
+    <text x="618" y="128" text-anchor="end" font-size="8.5" fill="#6B6880" font-family="'JetBrains Mono','SF Mono',ui-monospace,Menlo,monospace">store read</text>
+    <rect x="380" y="143" width="250" height="24" rx="5" fill="#FBFBFD" stroke="#B9B7C8" stroke-width="1"/>
+    <text x="392" y="159" font-size="9.5" font-weight="600" fill="#1E1B2E">Filter</text>
+    <text x="618" y="159" text-anchor="end" font-size="8.5" fill="#6B6880" font-family="'JetBrains Mono','SF Mono',ui-monospace,Menlo,monospace">mask DAG + compact</text>
+    <rect x="380" y="174" width="250" height="24" rx="5" fill="#FBFBFD" stroke="#B9B7C8" stroke-width="1"/>
+    <text x="392" y="190" font-size="9.5" font-weight="600" fill="#1E1B2E">Join</text>
+    <text x="618" y="190" text-anchor="end" font-size="8.5" fill="#6B6880" font-family="'JetBrains Mono','SF Mono',ui-monospace,Menlo,monospace">hash build + probe</text>
+    <rect x="380" y="205" width="250" height="24" rx="5" fill="#FBFBFD" stroke="#B9B7C8" stroke-width="1"/>
+    <text x="392" y="221" font-size="9.5" font-weight="600" fill="#1E1B2E">GroupBy / Distinct</text>
+    <text x="618" y="221" text-anchor="end" font-size="8.5" fill="#6B6880" font-family="'JetBrains Mono','SF Mono',ui-monospace,Menlo,monospace">radix sort + reduce</text>
+  </g>
+
+  <!-- relation store -->
+  <g stroke="#6B6880" stroke-width="1.3" fill="none" marker-end="url(#ad2)">
+    <path d="M630,124 C660,124 660,150 690,154"/>
+    <path d="M630,155 C660,155 660,162 690,164"/>
+    <path d="M630,186 C660,186 660,176 690,174"/>
+    <path d="M630,217 C660,217 660,188 690,184"/>
+  </g>
+  <rect x="692" y="132" width="152" height="76" rx="7" fill="#FBFBFD" stroke="#1E1B2E" stroke-width="1.25"/>
+  <text x="768" y="158" text-anchor="middle" font-size="11.5" font-weight="600" fill="#1E1B2E">Relation store</text>
+  <text x="768" y="174" text-anchor="middle" font-size="9" fill="#6B6880" font-family="'JetBrains Mono','SF Mono',ui-monospace,Menlo,monospace">columnar &#183; versioned</text>
+  <text x="768" y="189" text-anchor="middle" font-size="9" fill="#6B6880" font-family="'JetBrains Mono','SF Mono',ui-monospace,Menlo,monospace">full + delta relations</text>
+
+  <!-- feedback: store feeds next scans -->
+  <path d="M768,208 V232 H505 V230" stroke="#6B6880" stroke-width="1.3" fill="none" stroke-dasharray="4 3" marker-end="url(#ad2)"/>
+  <text x="655" y="244" text-anchor="middle" font-size="9" fill="#6B6880" font-family="'JetBrains Mono','SF Mono',ui-monospace,Menlo,monospace">feeds the next operator / fixpoint round</text>
+
+  <text x="28" y="292" font-size="10.5" fill="#6B6880">Intermediate results never return to the host; only bounded row counts are read to drive control flow, and query output leaves via DLPack or Arrow.</text>
+</svg>

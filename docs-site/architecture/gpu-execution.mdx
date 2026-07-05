@@ -9,6 +9,11 @@ intermediate relations as CUDA buffers. The kernels perform scans, filters,
 joins, groupby operations, arithmetic expressions, recursive delta steps, and
 specialized multiway routes.
 
+<Frame caption="The host executor walks the RIR plan and dispatches one kernel family per operator; relations stay in the device-resident store, which feeds the next operator or fixpoint round.">
+  <img className="block dark:hidden" src="/assets/diagrams/deterministic-dataflow-light.svg" alt="Deterministic dataflow: an RIR plan tree enters the host executor, which dispatches Scan, Filter, Join, and GroupBy/Distinct kernel families inside the GPU-resident plane; results accumulate in the columnar versioned relation store, which loops back to feed the next operator or fixpoint round." />
+  <img className="hidden dark:block" src="/assets/diagrams/deterministic-dataflow-dark.svg" alt="Deterministic dataflow: an RIR plan tree enters the host executor, which dispatches Scan, Filter, Join, and GroupBy/Distinct kernel families inside the GPU-resident plane; results accumulate in the columnar versioned relation store, which loops back to feed the next operator or fixpoint round." />
+</Frame>
+
 ## Host Control, Device Data
 
 `xlog-runtime::Executor` manages:
