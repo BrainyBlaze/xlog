@@ -44,6 +44,7 @@
         "groups": [
           { "group": "Language", "pages": ["reference/language"] },
           { "group": "Tooling", "pages": ["reference/cli"] },
+          { "group": "Configuration", "pages": ["reference/environment-variables", "reference/errors"] },
           { "group": "APIs", "pages": ["reference/python", "reference/rust", "reference/cuda"] }
         ]
       }

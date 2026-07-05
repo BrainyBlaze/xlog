@@ -37,6 +37,18 @@ def test_mintlify_config_defines_curated_docs_and_reference_nav() -> None:
     assert "docs/plans" not in tab_text
 
 
+def test_reference_nav_includes_configuration_pages() -> None:
+    config = json.loads(read("docs-site/docs.json"))
+    reference_tab = next(
+        tab for tab in config["navigation"]["tabs"] if tab["tab"] == "Reference"
+    )
+    groups = {group["group"]: group["pages"] for group in reference_tab["groups"]}
+    assert groups["Configuration"] == [
+        "reference/environment-variables",
+        "reference/errors",
+    ]
+
+
 def test_mintlify_config_enables_copy_page_markdown_action() -> None:
     config = json.loads(read("docs-site/docs.json"))
     assert config["contextual"]["options"] == ["copy"]
@@ -51,6 +63,7 @@ def test_custom_domain_is_present_for_app_platform_artifact() -> None:
     site = app["static_sites"][0]
     assert site["github"]["branch"] == "docs-dist"
     assert site["github"]["deploy_on_push"] is True
+    assert site["error_document"] == "404.html"
 
 
 def test_docs_workflow_generates_reference_outputs_and_exports() -> None:
@@ -193,12 +206,32 @@ def test_github_docs_workflow_deploys_docs_dist_only_from_main_docs_site_changes
     workflow = read(".github/workflows/docs-site.yml")
     for expected in [
         "docs-site/**",
+        ".do/docs-app.yaml",
         "Publish to docs-dist branch",
         "permissions:",
         "contents: write",
         "if: github.ref == 'refs/heads/main'",
     ]:
         assert expected in workflow
+
+
+def test_docs_workflow_materializes_redirect_stubs_after_search_indexing() -> None:
+    workflow = read(".github/workflows/docs-site.yml")
+    assert '"scripts/docs/build_redirect_stubs.py"' in workflow
+    assert "Add legacy redirects and 404 page" in workflow
+    assert "scripts/docs/build_redirect_stubs.py docs-site .site-dist" in workflow
+    assert "test -f .site-dist/404.html" in workflow
+    assert "test -f .site-dist/architecture/xlog-prob/index.html" in workflow
+    assert workflow.index("Build self-hosted search index") < workflow.index(
+        "Add legacy redirects and 404 page"
+    )
+    assert workflow.index("Add legacy redirects and 404 page") < workflow.index(
+        "Attach generated Rust API docs"
+    )
+
+    script = read("scripts/docs/build_redirect_stubs.py")
+    assert "Never clobber a real exported page" in script
+    assert "404.html written" in script
 
 
 def test_pyxlog_stub_generator_extracts_classes_and_methods() -> None:
