@@ -131,6 +131,11 @@ are counted, and each query reports an estimate `prob` (with `log_prob`), a stan
 `stderr`, a two-sided confidence interval (`ci_low`, `ci_high`), the sample counts, and
 the `seed`.
 
+<Frame caption="One kernel launch evaluates every sampled world in parallel on the device; counts stay device-resident, and the host reads back only the final estimate.">
+  <img className="block dark:hidden" src="/assets/diagrams/mc-resident-megakernel-light.svg" alt="Monte Carlo resident megakernel: a fragment gate rejects unsupported programs with a typed error; supported programs enter a single GPU-resident kernel launch where each world samples facts, derives, and checks the query in parallel; per-world results accumulate into device-resident counts that produce the estimate with confidence interval and seed." />
+  <img className="hidden dark:block" src="/assets/diagrams/mc-resident-megakernel-dark.svg" alt="Monte Carlo resident megakernel: a fragment gate rejects unsupported programs with a typed error; supported programs enter a single GPU-resident kernel launch where each world samples facts, derives, and checks the query in parallel; per-world results accumulate into device-resident counts that produce the estimate with confidence interval and seed." />
+</Frame>
+
 <Warning>
 The resident Monte Carlo engine **fails closed**. It rejects programs that use negation,
 aggregates, or annotated disjunctions with a typed rejection, and never falls back to a
