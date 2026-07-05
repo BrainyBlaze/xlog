@@ -51,6 +51,11 @@ expected to preserve the factorized benefit. Otherwise the route declines.
 Factorized recursive deltas target rules such as transitive closure, where a
 delta join can produce many witnesses for the same novel tuple.
 
+<Frame caption="Inside the semi-naive loop, the delta join routes dense, sparse, or legacy based on domain size and byte budget — every route produces the same novel set.">
+  <img className="block dark:hidden" src="/assets/diagrams/factorized-recursive-delta-light.svg" alt="Factorized recursive delta routing: the delta join passes through a router checking domain and budget, dispatching to a dense GPU bitvector route, a sparse GPU hash-set route, or the legacy join-plus-diff route; all three converge on the same novel set, which feeds the next semi-naive round." />
+  <img className="hidden dark:block" src="/assets/diagrams/factorized-recursive-delta-dark.svg" alt="Factorized recursive delta routing: the delta join passes through a router checking domain and budget, dispatching to a dense GPU bitvector route, a sparse GPU hash-set route, or the legacy join-plus-diff route; all three converge on the same novel set, which feeds the next semi-naive round." />
+</Frame>
+
 The dispatcher chooses among:
 
 | Route | Representation | Decline reason |
