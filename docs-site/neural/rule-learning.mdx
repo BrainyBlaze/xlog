@@ -238,9 +238,18 @@ a preview of in-progress work.
   ids must be `0..N-1`, and only a single join network is supported, with the planted
   graph bounded (roughly six to seven events) by a fixed circuit buffer.
 - **Joint multi-rule mixtures.** Several same-head trainable clauses can be learned
-  jointly as a guard-only noisy-OR mixture, with `evaluate_joint_mixture` reading the
-  held-out result. Neural-carrying candidates beyond the guard remain a documented
-  follow-up.
+  jointly as a noisy-OR mixture, with `evaluate_joint_mixture` reading the held-out
+  result. Candidates may be guard-only or carry a neural conjunct
+  (`neural_bodies=`): a small trained head whose straight-through-thresholded
+  output gates the candidate's eligibility, so the conjunct stays a derivation
+  gate rather than soft truth mass.
+- **Graded per-binding candidate masses.** `train_neurosymbolic_program(...,
+  candidate_masses={rule_id: tensor})` supplies per-binding confidences in
+  `[0, 1]` that multiply into a candidate's eligibility, so the head probability
+  becomes the noisy-OR over graded evidence masses. Mapping head bindings to
+  world steps and masses to a fact's per-step confidence trains the guards
+  against an evolving trajectory; omitting the argument leaves the binary
+  behavior unchanged.
 - **GPU-resident zero-host training step.** `forward_backward_grouped(queries,
   expected)` performs one host synchronization per step instead of a per-query
   round-trip, keeping the training loop resident on the device.
