@@ -6,6 +6,8 @@ on:
     paths:
       - "docs-site/**"
       - "scripts/docs/build_rust_api.sh"
+      - "scripts/docs/build_markdown_exports.py"
+      - "scripts/docs/copy-page-shim.js"
       - "scripts/docs/inject_search_shim.py"
       - "scripts/docs/search-shim.css"
       - "scripts/docs/search-shim.js"
@@ -17,6 +19,8 @@ on:
     paths:
       - "docs-site/**"
       - "scripts/docs/build_rust_api.sh"
+      - "scripts/docs/build_markdown_exports.py"
+      - "scripts/docs/copy-page-shim.js"
       - "scripts/docs/inject_search_shim.py"
       - "scripts/docs/search-shim.css"
       - "scripts/docs/search-shim.js"
@@ -60,8 +64,11 @@ jobs:
           unzip -o export.zip -d ../.site-dist
       - name: Build self-hosted search index (Pagefind)
         run: |
+          python3 scripts/docs/build_markdown_exports.py docs-site .site-dist
           python3 scripts/docs/inject_search_shim.py .site-dist
           npx -y pagefind@1.5.2 --site .site-dist
+          test -f .site-dist/index.md
+          test -f .site-dist/architecture/gpu-execution.md
           test -f .site-dist/pagefind/pagefind-ui.js
           test -f .site-dist/pagefind/pagefind-ui.css
       - name: Attach generated Rust API docs

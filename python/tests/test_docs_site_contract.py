@@ -37,6 +37,12 @@ def test_mintlify_config_defines_curated_docs_and_reference_nav() -> None:
     assert "docs/plans" not in tab_text
 
 
+def test_mintlify_config_enables_copy_page_markdown_action() -> None:
+    config = json.loads(read("docs-site/docs.json"))
+    assert config["contextual"]["options"] == ["copy"]
+    assert config["contextual"]["display"] == "header"
+
+
 def test_custom_domain_is_present_for_app_platform_artifact() -> None:
     app = yaml.safe_load(read(".do/docs-app.yaml"))
     domains = {entry["domain"]: entry for entry in app["domains"]}
@@ -94,11 +100,16 @@ def test_docs_workflow_attaches_rustdoc_after_mintlify_export() -> None:
 def test_docs_workflow_builds_self_hosted_search_before_rustdoc_graft() -> None:
     workflow = read(".github/workflows/docs-site.yml")
     assert "Build self-hosted search index (Pagefind)" in workflow
+    assert "scripts/docs/build_markdown_exports.py docs-site .site-dist" in workflow
     assert "scripts/docs/inject_search_shim.py .site-dist" in workflow
     assert "pagefind@1.5.2 --site .site-dist" in workflow
+    assert "test -f .site-dist/index.md" in workflow
+    assert "test -f .site-dist/architecture/gpu-execution.md" in workflow
     assert "test -f .site-dist/pagefind/pagefind-ui.js" in workflow
     assert "test -f .site-dist/pagefind/pagefind-ui.css" in workflow
+    assert '"scripts/docs/build_markdown_exports.py"' in workflow
     assert '"scripts/docs/inject_search_shim.py"' in workflow
+    assert '"scripts/docs/copy-page-shim.js"' in workflow
     assert '"scripts/docs/search-shim.js"' in workflow
     assert '"scripts/docs/search-shim.css"' in workflow
     assert workflow.index("mint export") < workflow.index("Build self-hosted search index")
@@ -106,6 +117,7 @@ def test_docs_workflow_builds_self_hosted_search_before_rustdoc_graft() -> None:
 
     injector = read("scripts/docs/inject_search_shim.py")
     assert "data-pagefind-body" in injector
+    assert "/copy-page-shim.js" in injector
     assert "/search-shim.js" in injector
     assert "/search-shim.css" in injector
 
@@ -117,6 +129,40 @@ def test_search_shim_uses_pagefind_assets_and_suppresses_mintlify_search() -> No
     assert "stopImmediatePropagation" in shim
     assert "#search-bar-entry" in shim
     assert 'key === "k"' in shim
+
+
+def test_copy_page_shim_uses_markdown_export_and_suppresses_mintlify_copy() -> None:
+    shim = read("scripts/docs/copy-page-shim.js")
+    assert 'button[aria-label="Copy page"]' in shim
+    assert 'link[rel="alternate"][type="text/markdown"]' in shim
+    assert "navigator.clipboard.writeText" in shim
+    assert "stopImmediatePropagation" in shim
+    assert "xlog-copy-source" in shim
+
+
+def test_static_markdown_export_generator_writes_route_markdown(tmp_path: Path) -> None:
+    result = subprocess.run(
+        [
+            sys.executable,
+            "scripts/docs/build_markdown_exports.py",
+            "docs-site",
+            str(tmp_path),
+        ],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert result.returncode == 0, result.stderr + result.stdout
+
+    index = tmp_path / "index.md"
+    gpu = tmp_path / "architecture/gpu-execution.md"
+    assert index.exists()
+    assert gpu.exists()
+    assert index.read_text(encoding="utf-8").startswith("# XLOG Documentation\n\n")
+    gpu_text = gpu.read_text(encoding="utf-8")
+    assert gpu_text.startswith("# GPU Execution\n\n")
+    assert "XLOG's deterministic runtime" in gpu_text
+    assert "title:" not in gpu_text.splitlines()[:5]
 
 
 def test_home_page_omits_local_generated_html_notice() -> None:

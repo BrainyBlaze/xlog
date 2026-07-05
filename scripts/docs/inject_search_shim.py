@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Prepare the exported docs bundle for self-hosted Pagefind search.
+"""Prepare the exported docs bundle for self-hosted page actions and search.
 
 Run BEFORE `pagefind --site <bundle>` and BEFORE the rustdoc graft:
 
@@ -7,8 +7,9 @@ Run BEFORE `pagefind --site <bundle>` and BEFORE the rustdoc graft:
    Pagefind indexes article content only (not the sidebar/nav chrome).
    Because the attribute is present, Pagefind ignores any page without it
    (e.g. later-grafted rustdoc pages) by design.
-2. Injects the search-shim stylesheet/script tags before </head>.
-3. Copies search-shim.js / search-shim.css into the bundle root.
+2. Injects the copy-page and search-shim tags before </head>.
+3. Copies copy-page-shim.js, search-shim.js, and search-shim.css into the
+   bundle root.
 
 Usage: inject_search_shim.py <bundle-dir>
 """
@@ -19,6 +20,7 @@ import sys
 
 HEAD_SNIPPET = (
     '<link rel="stylesheet" href="/search-shim.css">'
+    '<script src="/copy-page-shim.js" defer></script>'
     '<script src="/search-shim.js" defer></script></head>'
 )
 BODY_MARK = '<main id="content-container"'
@@ -51,7 +53,7 @@ def main() -> int:
         if changed:
             page.write_text(text, encoding="utf-8")
 
-    for asset in ("search-shim.js", "search-shim.css"):
+    for asset in ("copy-page-shim.js", "search-shim.js", "search-shim.css"):
         shutil.copy2(here / asset, bundle / asset)
 
     print(f"pages={pages} tagged={tagged} head-injected={injected}")

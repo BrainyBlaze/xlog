@@ -12,6 +12,10 @@
   "footer": {
     "socials": { "github": "https://github.com/BrainyBlaze/xlog" }
   },
+  "contextual": {
+    "options": ["copy"],
+    "display": "header"
+  },
   "navigation": {
     "tabs": [
       {
