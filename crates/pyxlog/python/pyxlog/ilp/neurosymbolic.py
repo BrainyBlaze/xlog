@@ -146,6 +146,7 @@ def train_neurosymbolic_program(
     config: NeuroSymbolicTrainingConfig = NeuroSymbolicTrainingConfig(),
     neural_bodies: dict[str, "NeuralBodySpec"] | None = None,
     domain_inputs: dict[str, Any] | None = None,
+    candidate_masses: dict[str, Any] | None = None,
 ) -> NeuroSymbolicTrainingResult:
     """Jointly train neural predicates and symbolic rule weights on the engine.
 
@@ -155,6 +156,18 @@ def train_neurosymbolic_program(
     eligibility becomes its relational grounding AND the ST-thresholded gate, and
     ``g_theta_k`` trains jointly with the guards under the same held-out selector.
     Only meaningful in the multi-rule joint path (>1 same-head candidate).
+
+    ``candidate_masses`` supplies graded per-binding confidences for joint-mixture
+    candidates: ``{trainable_rule id: tensor[len(targets)]}`` with values in
+    [0, 1]. A candidate's eligibility becomes its relational grounding TIMES its
+    graded mass, so the head probability is
+    ``P(head_i) = 1 - prod_k (1 - rel_k[i] * mass_k[i] * sigmoid(w_k))`` — the
+    noisy-OR over graded evidence masses rather than binary grounding alone.
+    This is the trajectory-supervision channel: mapping head bindings to world
+    steps and masses to a fact's per-step confidence (e.g. a version-chain walk)
+    trains the guards against an evolving world. Omitted candidates keep their
+    binary relational mask; omitting the argument entirely leaves every code
+    path identical to before. Only meaningful in the multi-rule joint path.
 
     ``domain_inputs`` is the Stage-B existential-join channel: a per-network
     ``{net_name: features}`` map where ``features`` is a ``[n_events, k]`` tensor,
@@ -260,6 +273,17 @@ def train_neurosymbolic_program(
         for rule in rules
         if rule.head.split("(", 1)[0].strip() == train_head
     ]
+    if candidate_masses and len(candidate_ids) <= 1:
+        raise ValueError(
+            "candidate_masses requires the multi-rule joint mixture (more than "
+            "one same-head trainable_rule candidate)"
+        )
+    if candidate_masses:
+        unknown = sorted(set(candidate_masses) - set(candidate_ids))
+        if unknown:
+            raise ValueError(
+                f"candidate_masses names unknown candidates: {unknown}"
+            )
     if len(candidate_ids) > 1:
         host_transfer_stats, query_probabilities = _train_joint_mixture(
             program,
@@ -272,6 +296,7 @@ def train_neurosymbolic_program(
             neural_modules=neural_modules,
             neural_specs=neural_bodies,
             neural_optims=neural_optims,
+            candidate_masses=candidate_masses,
         )
         for rule in rules:
             grad = guard_modules[rule.id].logit.grad
@@ -414,6 +439,7 @@ def _train_joint_mixture(
     neural_modules: dict[str, Any] | None = None,
     neural_specs: dict[str, "NeuralBodySpec"] | None = None,
     neural_optims: dict[str, Any] | None = None,
+    candidate_masses: dict[str, Any] | None = None,
 ) -> tuple[dict[str, int], list[float]]:
     """Joint soft-mixture over same-head candidates (guard-only, or neural-bodied
     when a candidate carries a neural conjunct).
@@ -449,6 +475,22 @@ def _train_joint_mixture(
         rel_masks[rule_id] = torch.tensor(
             [1.0 if m else 0.0 for m in mask], dtype=torch.float32, device=device
         )
+    # Graded per-binding confidences fold multiplicatively onto the relational
+    # eligibility: a candidate contributes mass_k[i] * sigmoid(w_k) where it is
+    # relationally grounded, zero elsewhere. Values must already be in [0, 1];
+    # candidates absent from the map keep their binary mask.
+    for rule_id, masses in (candidate_masses or {}).items():
+        masses_t = masses.detach().to(device=device, dtype=torch.float32)
+        if masses_t.shape != (n,):
+            raise ValueError(
+                f"candidate_masses['{rule_id}'] must have one value per head "
+                f"binding ({n}); got shape {tuple(masses_t.shape)}"
+            )
+        if bool((masses_t < 0.0).any()) or bool((masses_t > 1.0).any()):
+            raise ValueError(
+                f"candidate_masses['{rule_id}'] values must lie in [0, 1]"
+            )
+        rel_masks[rule_id] = rel_masks[rule_id] * masses_t
     targets_t = torch.tensor(
         [1.0 if t else 0.0 for t in targets], dtype=torch.float32, device=device
     )

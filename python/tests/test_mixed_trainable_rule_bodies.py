@@ -617,3 +617,83 @@ def test_set_relative_admission_routes_within_set_norm_and_desaturates() -> None
     assert wsn[0] > wsn[1]  # fragile (held-out 0) out-ranks sturdy (held-out 1)
     assert pq[0]["graded_mass"] > pq[1]["graded_mass"]  # graded mass rank-faithful
     assert pq[0]["g_theta"] is not None  # raw rank carrier for recompute-from-raw
+
+
+# Graded candidate masses: the joint noisy-OR accepts per-binding confidences in
+# [0,1] that scale each candidate's contribution — the trajectory-supervision
+# channel (binding axis = world-step axis, masses from a fact's version chain).
+GRADED_MASS_SOURCE = """
+    a(0). a(1). a(2). b(0). b(1). b(2).
+    pred a(i64). pred b(i64).
+    trainable_rule(cand_a, weight=2.0) :: target(C) :- a(C).
+    trainable_rule(cand_b, weight=2.0) :: target(C) :- b(C).
+    train(target, binary_cross_entropy).
+"""
+
+
+@requires_cuda
+def test_graded_candidate_masses_scale_the_joint_noisy_or() -> None:
+    """Pure-forward pin: with fixed guards (weight=2.0, zero learning rate), the
+    head probability under graded masses must equal the analytic noisy-OR
+    ``1 - prod_k(1 - mass_k[i] * sigmoid(w_k))`` per binding — graded confidences
+    multiply into eligibility exactly, no other behavior change."""
+    import math
+
+    m_a = torch.tensor([1.0, 0.5, 0.0])
+    m_b = torch.tensor([0.25, 0.75, 1.0])
+    result = train_neurosymbolic_program(
+        GRADED_MASS_SOURCE,
+        networks={},
+        examples=[
+            {
+                "inputs": torch.zeros((3, 1), dtype=torch.float32),
+                "targets": torch.tensor([1.0, 0.0, 1.0], dtype=torch.float32),
+            }
+        ],
+        config=NeuroSymbolicTrainingConfig(steps=1, learning_rate=0.0),
+        candidate_masses={"cand_a": m_a, "cand_b": m_b},
+    )
+    p = 1.0 / (1.0 + math.exp(-2.0))
+    for i in range(3):
+        expected = 1.0 - (1.0 - float(m_a[i]) * p) * (1.0 - float(m_b[i]) * p)
+        assert result.query_probabilities[i] == pytest.approx(expected, abs=1e-4)
+
+
+@requires_cuda
+def test_graded_candidate_masses_reject_bad_inputs() -> None:
+    """Typed rejections: wrong length, out-of-range values, unknown candidate id,
+    and the single-rule path (no joint competition to scale) all raise."""
+    base = dict(
+        networks={},
+        examples=[
+            {
+                "inputs": torch.zeros((3, 1), dtype=torch.float32),
+                "targets": torch.tensor([1.0, 0.0, 1.0], dtype=torch.float32),
+            }
+        ],
+        config=NeuroSymbolicTrainingConfig(steps=1, learning_rate=0.0),
+    )
+    with pytest.raises(ValueError, match="one value per head binding"):
+        train_neurosymbolic_program(
+            GRADED_MASS_SOURCE, candidate_masses={"cand_a": torch.ones(2)}, **base
+        )
+    with pytest.raises(ValueError, match="lie in"):
+        train_neurosymbolic_program(
+            GRADED_MASS_SOURCE,
+            candidate_masses={"cand_a": torch.tensor([0.5, 1.5, 0.5])},
+            **base,
+        )
+    with pytest.raises(ValueError, match="unknown candidates"):
+        train_neurosymbolic_program(
+            GRADED_MASS_SOURCE, candidate_masses={"nope": torch.ones(3)}, **base
+        )
+    single_rule = """
+        a(0). a(1). a(2).
+        pred a(i64).
+        trainable_rule(cand_a, weight=2.0) :: target(C) :- a(C).
+        train(target, binary_cross_entropy).
+    """
+    with pytest.raises(ValueError, match="multi-rule joint mixture"):
+        train_neurosymbolic_program(
+            single_rule, candidate_masses={"cand_a": torch.ones(3)}, **base
+        )
