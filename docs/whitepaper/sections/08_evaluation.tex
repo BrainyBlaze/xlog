@@ -41,7 +41,7 @@ On uniform or empty inputs the adaptive classifier falls back to the binary-join
 
 \subsection{Circuit Caching and Training}\label{sec:cache-eval}
 
-Neural-symbolic training is measured on MNIST single-digit addition (512 training images, 5 epochs, batch size 64). Circuit caching (\Cref{sec:prob}) amortizes D4 compilation across epochs: a cache ablation over 3 seeds and 3 epochs reduced mean training time from $242.9$\,s (uncached) to $88.9$\,s (cached), a $2.74\times$ speedup (95\% CI $[2.29, 3.18]$). \Cref{tab:training-summary} summarizes the full-run timing: the first epoch pays cold-start compilation and verification, while warm epochs run only the cached forward/backward kernels. The ablation is a separate experiment from this full run---its uncached arm recompiles the circuit every epoch while its cached arm compiles once, so it isolates compilation amortization; the apparent speedup therefore grows with epoch count toward the cold/warm ratio rather than being a fixed property.
+Neural-symbolic training is measured on MNIST single-digit addition (512 training images, 5 epochs, batch size 64). Circuit caching (\Cref{sec:prob}) amortizes D4 compilation across epochs: a cache ablation over 3 seeds and 3 epochs reduced mean training time from $242.9$\,s (uncached) to $88.9$\,s (cached), a $2.74\times$ speedup (95\% CI $[2.29, 3.18]$). \Cref{tab:training-summary} summarizes the full-run timing: the first epoch pays cold-start compilation and verification, while warm epochs run only the cached forward/backward kernels. The ablation is a separate experiment from this full run---its uncached arm recompiles the circuit every epoch while its cached arm compiles once, so it isolates compilation amortization; the apparent speedup therefore grows with epoch count toward the cold/warm ratio rather than being a fixed property. This 512-image protocol isolates cold/warm compilation timing and is deliberately under-trained (near-chance accuracy); held-out accuracy is measured at scale in the Scallop head-to-head (\Cref{sec:h2h}), where the same pipeline reaches ${\approx}95\%$.
 
 \begin{table}[htbp]
   \centering
@@ -63,7 +63,23 @@ Neural-symbolic training is measured on MNIST single-digit addition (512 trainin
 
 \subsection{Head-to-Head Comparisons}\label{sec:h2h}
 
-The measurements above compare xlog against its own baselines. We additionally ran controlled head-to-head comparisons against external engines---one per reasoning mode---on ephemeral cloud GPUs (RunPod RTX 3090/4090), with matched programs, data, and metrics; the artifacts are under \texttt{artifacts/head-to-head/}. The picture is deliberately honest: xlog wins clearly where its GPU-resident, bounded-memory design is the point, and does not where a mature CPU compiler is already fast enough on small inputs.
+The measurements above compare xlog against its own baselines. We additionally ran controlled head-to-head comparisons against external engines---one per reasoning mode---on ephemeral cloud GPUs (RunPod RTX 3090/4090), with matched programs, data, and metrics; the artifacts are under \texttt{artifacts/head-to-head/}. The picture is deliberately honest: xlog wins clearly where its GPU-resident, bounded-memory design is the point, and does not where a mature CPU compiler is already fast enough on small inputs. \Cref{tab:h2h} summarizes; the paragraphs below give the detail.
+
+\begin{table*}[htbp]
+  \centering
+  \caption{Head-to-head summary: one external engine per reasoning mode, matched programs, data, and metrics, on ephemeral cloud GPUs. The correctness gate passes in all three; timing is the honest comparative picture. Artifacts in \texttt{artifacts/head-to-head/}.}
+  \label{tab:h2h}
+  \small
+  \begin{tabularx}{\linewidth}{@{}l l l X@{}}
+    \toprule
+    \textbf{Mode / task} & \textbf{Baseline} & \textbf{Correctness} & \textbf{Timing (xlog vs.\ baseline)} \\
+    \midrule
+    Neural: MNIST addition           & Scallop  & acc $0.955$ vs.\ $0.950$ & steady epoch $8.71$\,s vs.\ $24.35$\,s ($\mathbf{2.80\times}$ faster); faster end-to-end \\
+    Probabilistic: exact inference   & ProbLog2 & $0$ error (both) & per query ${\approx}0.25$\,s vs.\ $0.014$--$0.028$\,s ($9$--$19\times$ \emph{slower} on small programs) \\
+    Deterministic: triangle counting & Soufflé  & counts match exactly & $0.24$--$0.33$\,s vs.\ $3.0$--$13.6$\,s ($\mathbf{12.6}$--$\mathbf{42.5\times}$ faster), peak memory flat $4$--$15$\,MB \\
+    \bottomrule
+  \end{tabularx}
+\end{table*}
 
 \textbf{Neural-symbolic: MNIST addition vs.\ Scallop.} With identical MNISTNet, data, metric, and seeds, and held-out addition accuracy on the 10k-image test set, at 20\,000 training images over 5 epochs (3 seeds) xlog and Scallop reach comparable accuracy ($0.955 \pm 0.003$ vs.\ $0.950 \pm 0.006$), while xlog runs a steady epoch in $8.71 \pm 0.09$\,s against Scallop's $24.35 \pm 0.51$\,s---a $2.80\times$ per-epoch speedup---and is faster end-to-end ($108.5$\,s vs.\ $122.7$\,s over 5 epochs) once the one-time D4 compilation amortizes. The advantage is time and residency, not accuracy.
 
@@ -77,7 +93,7 @@ Two isolations separate xlog's two design costs from ordinary GPU acceleration; 
 
 \textbf{Verification cost.} The cold epoch's compilation time is dominated by the on-GPU CDCL equivalence check, not the D4 compile. Splitting the cold compile via \texttt{warmup\_breakdown()} on probabilistic reachability chains, CDCL verification accounts for $96$--$100\%$ of the cold-compile time and grows with circuit size ($251$\,ms at $n{=}5$ to $508$\,ms at $n{=}40$), while D4 compilation stays under $17$\,ms. The ``expensive'' cold epoch is thus almost entirely the price of the machine-checked correctness certificate (\Cref{sec:prob})---a cost the other systems in \Cref{tab:comparison} do not pay because they do not verify.
 
-\textbf{Residency benefit.} To isolate the transfer-free advantage we run the same neural--symbolic pipeline with and without a forced device$\to$host$\to$device round-trip at the neural--symbolic boundary---the transfer a CPU-reasoning hybrid pays every iteration. The round-trip is a fixed ${\approx}0.06$\,ms per iteration: $5.1\%$ overhead when the per-iteration symbolic compute is light ($1.2$\,ms) and negligible ($<0.2\%$, within noise) when it is heavy ($18$\,ms). The residency contribution is therefore a fixed per-handoff transfer tax that xlog eliminates---material for workloads with many small neural$\to$symbolic handoffs, and an upper bound on a hybrid's transfer term.
+\textbf{Residency benefit.} To isolate the transfer-free advantage we run the same neural--symbolic pipeline with and without a forced device$\to$host$\to$device round-trip at the neural--symbolic boundary---the transfer a CPU-reasoning hybrid pays every iteration. The round-trip is a fixed ${\approx}0.06$\,ms per iteration: $5.1\%$ overhead when the per-iteration symbolic compute is light ($1.2$\,ms) and negligible ($<0.2\%$, within noise) when it is heavy ($18$\,ms). The residency contribution is therefore a fixed per-handoff transfer tax that xlog eliminates---material for workloads with many small neural$\to$symbolic handoffs, and an upper bound on a hybrid's transfer term. On MNIST addition this tax is ${\approx}0.2\%$ of an epoch, consistent with MNIST sitting below the transfer-wall regime (\Cref{sec:intro}): here the measured advantage over a CPU-symbolic baseline comes from GPU-resident \emph{compute} and circuit caching, not from transfer avoidance. Directly measuring the transfer-dominated regime---large-state Datalog fixpoints or many-handoff programs, where the round-trip should dominate---requires a large-state ablation we leave to future work (\Cref{sec:limits}).
 
 \subsection{Runtime Optimization}\label{sec:runtime-eval}
 
