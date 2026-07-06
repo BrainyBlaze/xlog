@@ -55,7 +55,7 @@ Authoritative reference: `docs/release-process.md`. The rules below are non-nego
 ### Commits
 
 - Every commit message uses Conventional Commits. The type controls release-plz's version bump:
-  - `feat:` → minor bump in 1.x+, patch in 0.x (no `features_always_increment_minor` override here)
+  - `feat:` → minor bump (release-plz default `features_always_increment_minor = true` applies in 0.x too; `release-plz.toml` sets no override, so a feature batch on 0.9.x releases as 0.10.0)
   - `feat!:` or a `BREAKING CHANGE:` footer → major bump in 1.x+, minor in 0.x
   - `fix:`, `perf:`, `refactor:`, `docs:`, `build:`, `ci:`, `test:`, `revert:` → patch bump
   - `chore:` → not release-worthy; merging a `chore:` does not enqueue the next release PR

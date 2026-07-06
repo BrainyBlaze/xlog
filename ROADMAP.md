@@ -57,7 +57,7 @@ surfaces in the v0.9.0 Epistemic/Solver Semantics train. v0.9.1 completes the
 bounded epistemic executor into a load-bearing surface (EIR-derived candidate
 enumeration, value-level modal membership, per-tuple-key FAEEL foundedness,
 epistemic constraints, safe split equivalence, and joint multi-epistemic
-solving), and v0.10.0 is the Multi-GPU / Out-of-Core train.
+solving), and v0.11.0 is the Multi-GPU / Out-of-Core train.
 
 ## v0.0.1 - Workspace Foundation
 
@@ -2227,7 +2227,7 @@ final ordering is a maintainer decision.
       (document + test) so consumers can drop fixed-point `_i64` mirror
       rules for Belnap channel masses, slot probabilities, and rule weights.
 
-## v0.10.0 - Multi-GPU and Out-of-Core Execution
+## v0.11.0 - Multi-GPU and Out-of-Core Execution
 
 ### Runtime and Memory
 
@@ -2304,6 +2304,6 @@ final ordering is a maintainer decision.
 - [ ] Epistemic semantics can introduce high complexity and must remain isolated from stable Datalog execution.
 - [ ] decision-DNNF compiler and solver integration must preserve deterministic certification paths.
 
-### v0.10.0 Risks
+### v0.11.0 Risks
 
 - [ ] Multi-GPU synchronization and skew handling can dominate performance if partitioning policy is not benchmark-driven.
