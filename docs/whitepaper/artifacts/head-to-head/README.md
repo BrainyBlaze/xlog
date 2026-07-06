@@ -13,7 +13,8 @@ mixed within a comparison.
 | `exact_inference_vs_problog2.json` | Probabilistic: exact inference, xlog vs ProbLog2 | RTX 4090 | **true** |
 | `triangle_counting_vs_souffle.json` | Deterministic: fused WCOJ triangle counting vs Soufflé (skewed) | RTX 4090 | **false** — see note |
 | `triangle_counting_moderate_skew_vs_souffle.json` | Deterministic: WCOJ vs binary vs Soufflé, moderate skew | RTX 4090 | **true** |
-| `residency_ablation.json` | xlog-only: forced host round-trip (CRIT-2) | RTX 3090 | n/a (single-system) |
+| `residency_ablation.json` | xlog-only: forced host round-trip, single query (CRIT-2) | RTX 3090 | n/a (single-system) |
+| `residency_scale_ablation.json` | xlog-only: forced host round-trip vs handoff count, batched (CRIT-2) | RTX 3090 | n/a (single-system) |
 | `verify_overhead_isolation.json` | xlog-only: CDCL-verify vs D4-compile split (EIC W5) | RTX 3090 | n/a (single-system) |
 
 ## Protocol notes
@@ -35,7 +36,12 @@ mixed within a comparison.
   are valid.
 - **Residency ablation** — same pipeline with vs without
   `XLOG_FORCE_HOST_ROUNDTRIP`; the on-minus-off per-iteration delta is the
-  transfer cost residency eliminates. 3 seeds.
+  transfer cost residency eliminates. The single-query file measures 2 handoffs
+  (near-noise). The `_scale` file sweeps the batched path (2--512 handoffs per
+  step) and is the one to cite: per-handoff round-trip is ~40--56 us, and the
+  round-trip's share of a step rises with the handoff count to ~10% at the
+  standard batch-64 MNIST step (7.2 ms of 72 ms). `runners/residency_sweep.py`
+  is the single-query runner; the scale runner is `runners/residency_scale.py`.
 - **Verify-overhead isolation** — `program.warmup_breakdown()` under
   `XLOG_WARMUP_PROFILE=1` splits the cold compile into D4-compile and on-GPU
   CDCL equivalence-verify.
