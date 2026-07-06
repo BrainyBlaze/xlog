@@ -1,15 +1,15 @@
 ---
 title: "Roadmap"
-description: "A concise release-state roadmap for the 0.9.2 line, main-only work, and the next XLOG architecture priorities."
+description: "A concise release-state roadmap for the 0.10.0 line, main-only work, and the next XLOG architecture priorities."
 ---
 
 This roadmap is a release-state view, not a historical task board. It separates
-what is in the 0.9.2 artifact line from work that exists only on `main` and from
+what is in the 0.10.0 artifact line from work that exists only on `main` and from
 forward-looking architecture priorities.
 
-## Released Baseline: 0.9.2
+## Released Baseline: 0.10.0
 
-The 0.9.2 line is the current public release baseline. It includes the shared
+The 0.10.0 line is the current public release baseline. It includes the shared
 Rust workspace, CUDA-backed deterministic execution, probabilistic and epistemic
 surfaces, solver services, Python packaging, and the `xlog` CLI.
 
@@ -32,28 +32,14 @@ XLOG's architecture is organized around these commitments:
 These are the commitments public docs should emphasize over old milestone
 labels or implementation-board names.
 
-## Main-Only Work Beyond 0.9.2
+## Main-Only Work Beyond 0.10.0
 
-The repository main branch contains implemented work that is not part of the
-0.9.2 release artifacts:
+The 0.10.0 release absorbed the previously main-only feature set (aggregate-fused
+WCOJ, GPU Free Join, factorized recursive deltas, joint mixtures with graded
+masses, Stage-B existential joins, grouped training, and both provenance-engine
+fixes). Work on main beyond the 0.10.0 artifacts: currently none — the
+release and `main` coincide. New main-only work is tracked here as it lands.
 
-- aggregate-fused WCOJ for selected triangle, 4-cycle, and clique aggregate
-  shapes;
-- GPU Free Join for general multiway bodies and factorized count-by-root;
-- dense and sparse factorized recursive deltas;
-- factorized non-count aggregate folding for probabilistic provenance;
-- joint multi-rule neural-symbolic mixtures;
-- graded per-binding candidate masses in the joint mixture (trajectory-style
-  supervision over evolving per-candidate confidences);
-- Stage-B existential joins;
-- grouped forward/backward training paths;
-- exact convergence for two-sided recursive SCC provenance (OR/AND flattening
-  with absorption in circuit construction);
-- self-healing recovery from stale disk-cached circuits instead of a failed
-  compilation.
-
-Document these features as "on main, unreleased beyond 0.9.2" until a new public
-release includes them.
 
 ## Near-Term Documentation Priorities
 

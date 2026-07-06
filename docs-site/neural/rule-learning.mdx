@@ -219,16 +219,10 @@ print(program.query("lose(1, 3)"))  # odd -> tails -> lose fires high
 The optimizer here is Adam; on the multiplicative loss surface plain SGD tends to
 plateau, so Adam is the practical default.
 
-## On the development branch (unreleased)
+## New in the 0.10.0 wheel
 
-The following extend the neural-symbolic surface but are **not** in the latest
-`pyxlog` wheel. They exist on the development branch only and should not be relied on in
-released code.
-
-<Warning>
-Available on the development branch; not in the `v0.9.2` release. Treat this section as
-a preview of in-progress work.
-</Warning>
+The following extend the neural-symbolic surface and ship in the `pyxlog`
+0.10.0 wheel.
 
 - **Existential-join trainable bodies (Stage B).** A trainable body may join a neural
   predicate to an ordinary relation on a non-head variable; the neural predicate is
@@ -258,7 +252,7 @@ a preview of in-progress work.
 The higher-level neuro-symbolic driver
 (`pyxlog.ilp.neurosymbolic.train_neurosymbolic_program`, with declarative
 `trainable_rule(...)` / `train(...)` in-source) is where the Stage-B `domain_inputs=`
-channel is exposed. It, too, is a development-branch surface.
+channel is exposed.
 </Note>
 
 ## See also

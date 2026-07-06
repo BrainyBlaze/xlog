@@ -1,7 +1,7 @@
 # XLOG Development Roadmap
 
 Last updated: June 2, 2026
-Current release: v0.9.2. v0.9.2 ships the epistemic executor semantic
+Current release: v0.10.0. v0.10.0 ships the neural-symbolic training expansion (joint multi-rule mixtures, Stage-B existential-join trainable bodies, graded per-binding candidate masses) and the provenance-engine fixes (two-sided recursive SCC convergence, self-healing circuit disk cache). v0.9.2 shipped the epistemic executor semantic
 completion under the exact GPU-backed WFS contract: accepted cyclic
 negated-modal recursion uses the `xlog-gpu` GPU-backed WFS plan without the
 old `xlog_prob` host-WFS solver, but this is not a device-resident/no-host
