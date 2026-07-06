@@ -9,7 +9,8 @@ In xlog a neural network \emph{is} a predicate. The \texttt{nn/4} declaration em
 \begin{lstlisting}[style=xlogstyle,
                    caption={Neural predicate declaration (\texttt{nn/4}).},
                    label={lst:nn-decl}]
-nn(network_name, [input_vars], output_var, [output_labels]) :: predicate(args).
+nn(network_name, [input_vars], output_var,
+   [output_labels]) :: predicate(args).
 \end{lstlisting}
 
 This is not a foreign-function escape hatch: it states that evaluating \texttt{predicate(args)} requires a forward pass through the named network, whose softmax over the label set becomes a distribution over probabilistic facts feeding the knowledge-compilation pipeline of \Cref{sec:prob}. On the Python side a PyTorch module is registered against the predicate:
@@ -24,13 +25,15 @@ The dataflow runs in two directions. \textbf{Forward:} when evaluation reaches a
 
 \subsection{End-to-End Training}
 
-The canonical example is MNIST addition (the DeepProbLog benchmark): given two digit images, predict their sum, with supervision only on sums---the network never sees individual digit labels. The entire reasoning structure is two lines:
+The canonical example is MNIST addition (the DeepProbLog benchmark): given two digit images, predict their sum, with supervision only on sums---the network never sees individual digit labels. The entire reasoning structure is two rules:
 
 \begin{lstlisting}[style=xlogstyle,
                    caption={MNIST addition: a CNN-backed digit predicate and an addition rule.},
                    label={lst:mnist-prog}]
-nn(mnist_net, [X], Y, [0,1,2,3,4,5,6,7,8,9]) :: digit(X, Y).
-addition(X, Y, Z) :- digit(X, D1), digit(Y, D2), Z is D1 + D2.
+nn(mnist_net, [X], Y, [0,1,2,3,4,5,6,7,8,9])
+    :: digit(X, Y).
+addition(X, Y, Z) :-
+    digit(X, D1), digit(Y, D2), Z is D1 + D2.
 \end{lstlisting}
 
 The \texttt{nn/4} declaration connects the CNN to \texttt{digit/2}; the addition rule computes every consistent decomposition of a sum through probabilistic marginalization. Each query \texttt{addition(i, j, s)} trains by minimizing $-\log P(\texttt{addition}(i, j, s))$ under the compiled circuit. The driver compiles the program, registers the network, and runs the loop, which batches queries sharing a circuit template and runs forward/backward over the cached circuit:
@@ -41,8 +44,9 @@ The \texttt{nn/4} declaration connects the CNN to \texttt{digit/2}; the addition
 program = pyxlog.Program.compile(SRC)
 program.register_network("mnist_net", net, optimizer)
 program.add_tensor_source("train", train_images)
-history = pyxlog.train_model_tensor(program, queries,
-                                    epochs=epochs, batch_size=batch_size)
+history = pyxlog.train_model_tensor(
+    program, queries,
+    epochs=epochs, batch_size=batch_size)
 \end{lstlisting}
 
 \begin{figure*}[tbp]

@@ -48,7 +48,7 @@ Neural-symbolic training is measured on MNIST single-digit addition (512 trainin
   \caption{MNIST-addition training summary (mean over 3 seeds).}
   \label{tab:training-summary}
   \small
-  \begin{tabularx}{\linewidth}{@{}l l X@{}}
+  \begin{tabularx}{\linewidth}{@{}l l L@{}}
     \toprule
     \textbf{Metric} & \textbf{Value} & \textbf{Notes} \\
     \midrule
@@ -70,7 +70,7 @@ The measurements above compare xlog against its own baselines. We additionally r
   \caption{Head-to-head summary: one external engine per reasoning mode, matched programs, data, and metrics, on ephemeral cloud GPUs. The correctness gate passes in all three; timing is the honest comparative picture. Artifacts in \texttt{artifacts/head-to-head/}.}
   \label{tab:h2h}
   \small
-  \begin{tabularx}{\linewidth}{@{}l l l X@{}}
+  \begin{tabularx}{\linewidth}{@{}l l l L@{}}
     \toprule
     \textbf{Mode / task} & \textbf{Baseline} & \textbf{Correctness} & \textbf{Timing (xlog vs.\ baseline)} \\
     \midrule
@@ -108,7 +108,7 @@ The runtime optimizations (\Cref{sec:datalog}) are measured on repeated-session 
   \caption{Capability comparison across neurosymbolic and GPU logic systems.}
   \label{tab:comparison}
   \small
-  \begin{tabularx}{\linewidth}{@{}l X X X X X@{}}
+  \begin{tabularx}{\linewidth}{@{}l L L L L L@{}}
     \toprule
     \textbf{Dimension} & \textbf{DeepProbLog} & \textbf{Scallop} & \textbf{Lobster} & \textbf{GPUlog} & \textbf{xlog} \\
     \midrule

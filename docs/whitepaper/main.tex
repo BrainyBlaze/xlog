@@ -13,6 +13,11 @@
 \usepackage{booktabs}
 \usepackage{tabularx}
 \usepackage{array}
+\usepackage{needspace}  % keep short code listings from splitting across columns
+% Left-aligned (ragged-right) flexible column for description cells, so narrow
+% wrapping columns read like reference papers instead of justified text with
+% inter-word rivers and mid-word hyphenation.
+\newcolumntype{L}{>{\raggedright\arraybackslash}X}
 \usepackage{graphicx}
 \usepackage{tikz}
 \usetikzlibrary{arrows.meta,positioning,fit,backgrounds,calc,shapes.geometric}
@@ -51,14 +56,15 @@
 % Shared base style; xlog/python only override `language=`.
 \lstdefinestyle{codebase}{
   backgroundcolor=\color{codebg},
-  basicstyle=\ttfamily\small,
+  basicstyle=\ttfamily\footnotesize,
   keywordstyle=\color{codekey}\bfseries,
   commentstyle=\color{codecomment}\itshape,
   stringstyle=\color{codestring},
   frame=single,
   framerule=0.3pt,
   breaklines=true,
-  breakatwhitespace=false,
+  breakatwhitespace=true,
+  breakindent=0pt,
   prebreak=\mbox{\textcolor{codecomment}{$\hookleftarrow$}},
   postbreak=\mbox{\textcolor{codecomment}{$\hookrightarrow$}\space},
   columns=fullflexible,
