@@ -1,0 +1,177 @@
+{
+  "benchmark": "probabilistic_exact_xlog_vs_problog",
+  "hardware": "RunPod RTX 4090 (ephemeral)",
+  "comparison_acceptable": true,
+  "results": [
+    {
+      "name": "wet_conditioning",
+      "expected": [
+        0.263158,
+        0.921053
+      ],
+      "xlog": {
+        "atoms": [
+          "rain()",
+          "sprinkler()"
+        ],
+        "probs": [
+          0.921053,
+          0.263158
+        ],
+        "median_sec": 0.2547,
+        "times": [
+          0.5268,
+          0.2547,
+          0.2521
+        ]
+      },
+      "xlog_max_abs_err": 0.0,
+      "problog": {
+        "probs": {
+          "sprinkler": 0.263158,
+          "rain": 0.921053
+        },
+        "median_sec": 0.0136,
+        "times": [
+          0.0173,
+          0.0136,
+          0.0136
+        ]
+      },
+      "problog_max_abs_err": 0.0
+    },
+    {
+      "name": "reach_chain_5",
+      "expected": [
+        0.0625
+      ],
+      "xlog": {
+        "atoms": [
+          "reach(1, 5)"
+        ],
+        "probs": [
+          0.0625
+        ],
+        "median_sec": 0.2516,
+        "times": [
+          0.2516,
+          0.2516,
+          0.2524
+        ]
+      },
+      "xlog_max_abs_err": 0.0,
+      "problog": {
+        "probs": {
+          "reach(1,5)": 0.0625
+        },
+        "median_sec": 0.0158,
+        "times": [
+          0.018,
+          0.0158,
+          0.0155
+        ]
+      },
+      "problog_max_abs_err": 0.0
+    },
+    {
+      "name": "reach_chain_10",
+      "expected": [
+        0.001953
+      ],
+      "xlog": {
+        "atoms": [
+          "reach(1, 10)"
+        ],
+        "probs": [
+          0.001953
+        ],
+        "median_sec": 0.2539,
+        "times": [
+          0.2539,
+          0.2532,
+          0.2539
+        ]
+      },
+      "xlog_max_abs_err": 0.0,
+      "problog": {
+        "probs": {
+          "reach(1,10)": 0.001953
+        },
+        "median_sec": 0.0194,
+        "times": [
+          0.0205,
+          0.0189,
+          0.0194
+        ]
+      },
+      "problog_max_abs_err": 0.0
+    },
+    {
+      "name": "reach_chain_15",
+      "expected": [
+        6.1e-05
+      ],
+      "xlog": {
+        "atoms": [
+          "reach(1, 15)"
+        ],
+        "probs": [
+          6.1e-05
+        ],
+        "median_sec": 0.2565,
+        "times": [
+          0.2565,
+          0.2562,
+          0.2578
+        ]
+      },
+      "xlog_max_abs_err": 0.0,
+      "problog": {
+        "probs": {
+          "reach(1,15)": 6.1e-05
+        },
+        "median_sec": 0.0224,
+        "times": [
+          0.0244,
+          0.0224,
+          0.0224
+        ]
+      },
+      "problog_max_abs_err": 0.0
+    },
+    {
+      "name": "reach_chain_20",
+      "expected": [
+        2e-06
+      ],
+      "xlog": {
+        "atoms": [
+          "reach(1, 20)"
+        ],
+        "probs": [
+          2e-06
+        ],
+        "median_sec": 0.262,
+        "times": [
+          0.262,
+          0.2619,
+          0.2646
+        ]
+      },
+      "xlog_max_abs_err": 0.0,
+      "problog": {
+        "probs": {
+          "reach(1,20)": 2e-06
+        },
+        "median_sec": 0.0277,
+        "times": [
+          0.0293,
+          0.0277,
+          0.0272
+        ]
+      },
+      "problog_max_abs_err": 0.0
+    }
+  ],
+  "note": "xlog GPU-native verified KC vs ProbLog2 CPU (D4/c2d). Timing=full inference (compile+evaluate), median of 3. Correctness gate: probs match analytic expected within 1e-4."
+}
