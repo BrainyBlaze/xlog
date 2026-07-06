@@ -4,6 +4,292 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+## [0.10.0](https://github.com/BrainyBlaze/xlog/compare/xlog-cli-v0.9.2...xlog-cli-v0.10.0) - 2026-07-06
+
+### Added
+
+- *(runtime)* D2 Free Join production integration â general multiway promotion + executor dispatch
+- *(cli)* expose epistemic explain plans ([#138](https://github.com/BrainyBlaze/xlog/pull/138))
+
+### Fixed
+
+- *(prob)* fail closed on resident MC rejection with labeled CPU-oracle opt-in
+
+### Other
+
+- rewrite README for public release and remove environment-specific paths
+- clarify language completeness naming
+- clarify epistemic run test comments
+- inline magic set explain fixture
+- clarify epistemic plan json docs
+- clarify epistemic evidence fixture names
+- clarify readme artifact labels
+- add source clarity closure board
+- label unmeasured benchmark targets and document MC engine split
+- Add UCR-driven XLOG engine support ([#139](https://github.com/BrainyBlaze/xlog/pull/139))
+
+## [0.10.0](https://github.com/BrainyBlaze/xlog/compare/xlog-gpu-v0.9.2...xlog-gpu-v0.10.0) - 2026-07-06
+
+### Added
+
+- *(pyxlog)* expose session multiway dispatch telemetry
+
+### Other
+
+- rewrite README for public release and remove environment-specific paths
+- apply workspace rustfmt
+- replace opaque task labels with behavior-based wording in factorized code/tests
+- Merge branch 'feat/factorized-finalize'
+- clarify delta coalescing fixture relation
+- clarify language completeness naming
+- clarify logic runner plan labels
+- clarify epistemic plan labels
+- clarify readme artifact labels
+- add source clarity closure board
+- label unmeasured benchmark targets and document MC engine split
+
+## [0.10.0](https://github.com/BrainyBlaze/xlog/compare/xlog-prob-v0.9.2...xlog-prob-v0.10.0) - 2026-07-06
+
+### Added
+
+- *(neurosymbolic)* Stage B — existential-join trainable bodies (real-domain grounding)
+- *(prob)* provenance-derived decision-order hints for GPU D4
+- *(prob)* factorized outcome folding for exact non-count aggregates
+
+### Fixed
+
+- *(prob)* recover from stale disk-cached circuits instead of failing compilation
+- *(prob)* converge two-sided recursive SCC provenance via OR/AND flattening and absorption
+- *(prob)* fail closed on resident MC rejection with labeled CPU-oracle opt-in
+
+### Other
+
+- *(fmt)* apply rustfmt to epistemic stratified-plan docs and provenance absorption code
+- rewrite README for public release and remove environment-specific paths
+- apply workspace rustfmt
+- mixed-trainable-rule bodies + GPU-resident zero-host neuro-symbolic training
+- *(prob,pyxlog)* eliminate tracked host upload from the neuro-symbolic training loop
+- replace opaque task labels with behavior-based wording in factorized code/tests
+- Merge branch 'feat/factorized-finalize'
+- Merge branch 'codex/artifact-closure-board-20260614'
+- clarify probabilistic aggregate tests
+- clarify monte carlo approximate tests
+- clarify aggregate lifting tests
+- clarify template addition variables
+- clarify decision order hint terminology
+- clarify fused backward level labels
+- clarify cdcl q2 diagnostics
+- clarify provenance diagnostics
+- clarify mc result diagnostics
+- clarify monte carlo semantics docs
+- clarify exact compiler docs
+- clarify epistemic production semantics labels
+- clarify epistemic compiler adapter docs
+- clarify decision order compiler docs
+- clarify compilation compiler comments
+- clarify gpu compiler module docs
+- clarify gpu frontier compiler docs
+- clarify exact benchmark compiler note
+- clarify language completeness naming
+- clarify readme artifact labels
+- add source clarity closure board
+- label unmeasured benchmark targets and document MC engine split
+- Add UCR-driven XLOG engine support ([#139](https://github.com/BrainyBlaze/xlog/pull/139))
+
+## [0.10.0](https://github.com/BrainyBlaze/xlog/compare/xlog-solve-v0.9.2...xlog-solve-v0.10.0) - 2026-07-06
+
+### Added
+
+- *(prob,solve,cuda)* fail-closed D4 compile/verify robustness — typed declines instead of context-poisoning launches
+
+### Other
+
+- rewrite README for public release and remove environment-specific paths
+- clarify solver service blocker
+- clarify pigeonhole comments
+- clarify accepted evidence compatibility tests
+- clarify production adapter transfer wording
+- clarify readme artifact labels
+- add source clarity closure board
+- label unmeasured benchmark targets and document MC engine split
+
+## [0.10.0](https://github.com/BrainyBlaze/xlog/compare/xlog-runtime-v0.9.2...xlog-runtime-v0.10.0) - 2026-07-06
+
+### Added
+
+- *(cuda)* D2 Phase C â u64 Free Join engine, recursive verification, factorized count-by-root
+- *(runtime)* D2 Free Join production integration â general multiway promotion + executor dispatch
+- *(runtime)* wire K=5/K=6 clique count fusion through promoter and executor
+- *(runtime)* dispatch u64-key sum/min/max through the fused WCOJ aggregates
+- *(runtime)* dispatch 4-cycle count-by-root aggregates through the fused WCOJ kernel
+- *(runtime)* dispatch sum/min/max and u64 count through fused WCOJ aggregates
+- *(runtime)* dispatch count-by-root aggregates through the fused WCOJ kernel
+- *(runtime)* count WCOJ pipeline error declines and add XLOG_WCOJ_STRICT
+
+### Other
+
+- rewrite README for public release and remove environment-specific paths
+- replace internal task-codes with behavioral descriptions in comments, tests, and examples
+- apply workspace rustfmt
+- replace opaque task labels with behavior-based wording in factorized code/tests
+- Merge branch 'feat/factorized-finalize'
+- Merge branch 'codex/artifact-closure-board-20260614'
+- clarify cost model default tests
+- clarify leader input permutation tests
+- clarify production reuse transfer text
+- clarify epistemic gpu workspace labels
+- clarify wcoj dispatch labels
+- clarify rewrite occurrence labels
+- clarify recursive dispatch labels
+- clarify node dispatch labels
+- clarify executor milestone labels
+- clarify epistemic workspace labels
+- clarify recursive stats trace tests
+- clarify clique dispatch helper artifacts
+- clarify chain dispatch artifacts
+- clarify readme artifact labels
+- add source clarity closure board
+- Merge branch 'feat/factorized-kclique-count-fusion'
+- label unmeasured benchmark targets and document MC engine split
+
+## [0.10.0](https://github.com/BrainyBlaze/xlog/compare/xlog-logic-v0.9.2...xlog-logic-v0.10.0) - 2026-07-06
+
+### Added
+
+- *(cuda)* D2 Phase C â u64 Free Join engine, recursive verification, factorized count-by-root
+- *(runtime)* D2 Free Join production integration â general multiway promotion + executor dispatch
+- *(runtime)* wire K=5/K=6 clique count fusion through promoter and executor
+- *(runtime)* dispatch 4-cycle count-by-root aggregates through the fused WCOJ kernel
+- *(runtime)* dispatch count-by-root aggregates through the fused WCOJ kernel
+
+### Other
+
+- *(fmt)* apply rustfmt to epistemic stratified-plan docs and provenance absorption code
+- rewrite README for public release and remove environment-specific paths
+- remove remaining internal task-codes from epistemic examples and tests
+- replace internal task-codes with behavioral descriptions in comments, tests, and examples
+- clarify kclique cost gate test
+- clarify kclique promoter test
+- clarify heat aware var ordering test
+- clarify leader cardinality test
+- clarify language completeness naming
+- clarify multiway promotion test docs
+- clarify skewed multiway planner fixture
+- clarify epistemic split test docs
+- clarify g91 mode test docs
+- clarify faeel foundedness docs
+- clarify epistemic executable plan docs
+- clarify epistemic eir test docs
+- clarify neural parser fixture variables
+- clarify learnable test comments
+- clarify wcoj variable ordering docs
+- clarify promoter docs
+- clarify parser comments
+- clarify stream scheduler docs
+- clarify optimizer planner docs
+- clarify meta normalization diagnostics
+- clarify lowering diagnostics
+- clarify variable order docs
+- clarify epistemic planner docs
+- clarify compiler config docs
+- clarify compiler pipeline docs
+- clarify gelfond epistemic mode
+- clarify optimizer demo variables
+- clarify clique dispatch helper artifacts
+- clarify chain dispatch artifacts
+- clarify readme artifact labels
+- add source clarity closure board
+- label unmeasured benchmark targets and document MC engine split
+- Add UCR-driven XLOG engine support ([#139](https://github.com/BrainyBlaze/xlog/pull/139))
+
+## [0.10.0](https://github.com/BrainyBlaze/xlog/compare/xlog-stats-v0.9.2...xlog-stats-v0.10.0) - 2026-07-06
+
+### Other
+
+- rewrite README for public release and remove environment-specific paths
+- clarify readme artifact labels
+- add source clarity closure board
+- label unmeasured benchmark targets and document MC engine split
+
+## [0.10.0](https://github.com/BrainyBlaze/xlog/compare/xlog-cuda-v0.9.2...xlog-cuda-v0.10.0) - 2026-07-06
+
+### Added
+
+- *(prob,solve,cuda)* fail-closed D4 compile/verify robustness — typed declines instead of context-poisoning launches
+- *(cuda)* distinct-aware sparse table sizing (2-pass estimator)
+- *(runtime)* route factorized delta dense|sparse|legacy by domain
+- *(cuda)* D3 sparse-domain hash-set novel-set spike kernels + provider
+- *(cuda)* re-export FJ_DELTA_MAX_DOMAIN for the runtime domain cap
+- *(cuda)* generalize fj_delta entry to column roles + domain max helper
+- *(cuda)* fj_delta factorized novel-set pipeline (D3 S3 spike)
+- *(cuda)* peak-bytes high-water mark on GpuMemoryManager
+- *(cuda)* env-gated memory debug probes for corruption forensics
+- *(cuda)* accept u64 value columns for recorded-groupby min/max
+- *(cuda)* fuse u64-key 4-cycle group-by-root count
+- *(cuda)* fuse 4-cycle sum/min/max group-by-root aggregates (u32)
+- *(cuda)* u64-key sum/min/max fused WCOJ group-by-root aggregates
+- *(cuda)* widen the legacy groupby to u64-value sum/min/max
+- *(cuda)* aggregate-fused WCOJ 4-cycle group-by-root count
+- *(cuda)* u64-key variant of the fused WCOJ group-by-root count
+- *(cuda)* aggregate-fused WCOJ sum/min/max group-by-root (u32)
+- *(cuda)* aggregate-fused WCOJ triangle group-by-root count
+
+### Fixed
+
+- *(cuda)* skip stale staged kernel artifacts, fail closed, auto-heal to embedded PTX
+- *(cuda)* record conditional R-column reads before LaunchRecorder preflight
+- *(cuda)* guard compute_ranks tail blocks against block_count underflow
+- *(cuda)* drop unused mut on fused staging key copies
+- *(cuda)* layout-normalize inputs in all fused group-by-root entries
+
+### Other
+
+- allow rustdoc generation without nvcc
+- rewrite README for public release and remove environment-specific paths
+- remove remaining internal task-codes from epistemic examples and tests
+- replace internal task-codes with behavioral descriptions in comments, tests, and examples
+- apply workspace rustfmt
+- Merge branch 'codex/artifact-closure-board-20260614'
+- Support ptxas cubin assembly for packaged kernels
+- Fallback to portable PTX when cubin load fails
+- *(cuda)* correct fj_delta_sparse entry doc for distinct sizing
+- Merge branch 'feat/d3-factorized-delta'
+- Merge branch 'feat/d2-free-join'
+- Merge branch 'feat/factorized-kclique-count-fusion'
+- label unmeasured benchmark targets and document MC engine split
+- Add UCR-driven XLOG engine support ([#139](https://github.com/BrainyBlaze/xlog/pull/139))
+
+## [0.10.0](https://github.com/BrainyBlaze/xlog/compare/xlog-ir-v0.9.2...xlog-ir-v0.10.0) - 2026-07-06
+
+### Added
+
+- *(runtime)* D2 Free Join production integration â general multiway promotion + executor dispatch
+
+### Other
+
+- rewrite README for public release and remove environment-specific paths
+- clarify multiway rir tests
+- clarify multiway route docs
+- clarify free join arity metadata
+- clarify gelfond compatibility mode
+- clarify readme artifact labels
+- add source clarity closure board
+- label unmeasured benchmark targets and document MC engine split
+
+## [0.10.0](https://github.com/BrainyBlaze/xlog/compare/xlog-core-v0.9.2...xlog-core-v0.10.0) - 2026-07-06
+
+### Added
+
+- *(prob,solve,cuda)* fail-closed D4 compile/verify robustness — typed declines instead of context-poisoning launches
+
+### Other
+
+- rewrite README for public release and remove environment-specific paths
+- clarify runtime config docs
+- clarify readme artifact labels
+- add source clarity closure board
+- label unmeasured benchmark targets and document MC engine split
+
 ### Added
 
 - *(pyxlog)* **Graded per-binding candidate masses in the joint noisy-OR
