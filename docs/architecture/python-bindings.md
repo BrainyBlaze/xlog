@@ -37,7 +37,7 @@ replay that runs outside the packaged wheel layout should set
 `XLOG_CUBIN_DIR` explicitly before importing `pyxlog`, for example:
 
 ```bash
-export XLOG_CUBIN_DIR=/home/dev/projects/xlog/crates/pyxlog/python/pyxlog/kernels
+export XLOG_CUBIN_DIR=/path/to/xlog/crates/pyxlog/python/pyxlog/kernels
 python your_probe.py
 ```
 

@@ -1,0 +1,125 @@
+---
+title: "Release Process"
+description: "XLOG's release boundaries for crates, Python wheels, CLI archives, CUDA validation, and the xlog.md docs deployment."
+---
+
+XLOG uses a split release model. GitHub Actions validate source hygiene and
+package metadata, while real CUDA validation runs manually on a supported GPU
+host before publication.
+
+This page describes release mechanics, not feature promises. Anything in
+`CHANGELOG.md` under `[Unreleased]` is main-only until a release artifact ships.
+
+## Published Artifacts
+
+Public releases target:
+
+- Linux `x86_64`;
+- NVIDIA CUDA Toolkit 13.x;
+- crates.io packages for the public Rust crates;
+- `pyxlog` Python wheels;
+- GitHub release CLI archives for `xlog`.
+
+The workspace version is currently `0.9.2`.
+
+## Rust Package Boundary
+
+Publishable crates:
+
+- `xlog-cli`
+- `xlog-core`
+- `xlog-cuda`
+- `xlog-gpu`
+- `xlog-ir`
+- `xlog-logic`
+- `xlog-prob`
+- `xlog-runtime`
+- `xlog-solve`
+- `xlog-stats`
+
+Workspace packages that are not published to crates.io:
+
+- `pyxlog`
+- `xlog-neural`
+- `xlog-induce`
+- `xlog-cuda-tests`
+- `xlog-integration`
+
+`pyxlog` is distributed as a Python package. Do not describe it as a published
+Rust crate.
+
+## CUDA Artifact Model
+
+Generated CUDA artifacts are not source files. CUDA source lives under
+`crates/xlog-cuda/kernels` and is compiled by the Rust build and packaging
+scripts.
+
+Runtime lookup is layered:
+
+1. `XLOG_CUBIN_DIR`;
+2. package- or binary-adjacent `kernels/`;
+3. Cargo `OUT_DIR` for source-tree builds;
+4. embedded portable PTX compiled into the Rust binary.
+
+Release archives and Python wheels should include staged kernel artifacts so
+consumers do not need to rebuild kernels at runtime.
+
+## GPU Release Validation
+
+Before publication, maintainers run:
+
+```bash
+scripts/validate_release_gpu.sh --mode release
+```
+
+That script requires CUDA hardware, sets `XLOG_REQUIRE_CUDA=1`, builds release
+artifacts, runs the CUDA certification suite, and checks packaged kernel layout.
+A green GitHub-hosted CI run is not a substitute for this GPU gate.
+
+## Docs Deployment
+
+The public docs live at `https://xlog.md`.
+
+Source pages are in `docs-site/`. The GitHub workflow
+`.github/workflows/docs-site.yml` runs when `docs-site/**` changes on pull
+requests or `main`. It pins Node 22 and `mint@4.2.666`, validates the Mintlify
+site, exports a static bundle, and force-pushes the generated site to the
+`docs-dist` branch on `main`.
+
+DigitalOcean App Platform is configured by `.do/docs-app.yaml` to serve the
+`docs-dist` branch. The app owns both `xlog.md` and `www.xlog.md`.
+
+Generated static HTML is not edited by hand in the source tree. Change MDX in
+`docs-site/`, validate, export, and let the workflow publish `docs-dist`.
+
+## Main-Only Feature Boundary
+
+The following work exists on `main` but is unreleased beyond 0.9.2:
+
+- aggregate-fused WCOJ;
+- GPU Free Join and factorized count-by-root;
+- factorized recursive deltas;
+- factorized non-count aggregate folding;
+- joint multi-rule mixtures;
+- Stage-B existential joins;
+- grouped forward/backward neural-symbolic training.
+
+Public docs may describe these features only with the main-only label until a
+new release artifact contains them.
+
+## Required Secrets
+
+Release workflows depend on repository secrets for crates.io, PyPI, GitHub
+release automation, and DigitalOcean deployment metadata. Keep those secrets in
+GitHub Actions settings; do not commit tokens or generated credentials.
+
+## Release Checklist
+
+For a release candidate:
+
+1. Confirm `CHANGELOG.md` separates `[Unreleased]` from the target release.
+2. Run ordinary CI and docs validation.
+3. Run CUDA release validation on a supported GPU host.
+4. Build and inspect Python wheel and CLI archive layouts.
+5. Publish Rust crates, Python wheels, and GitHub release artifacts.
+6. Confirm `xlog.md` serves the exported docs over HTTPS.

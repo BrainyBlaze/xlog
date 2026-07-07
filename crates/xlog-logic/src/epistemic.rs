@@ -581,7 +581,7 @@ fn lower_epistemic_constraints(
                         // finite+typed UNIMPLEMENTED scope, NOT a finiteness bound, so
                         // a plain UnsupportedEpistemicConstruct (never ResourceExhausted).
                         // Negated ALL-GROUND constraint literals are unaffected (they
-                        // bind no variable, no quantifier flip — the EGB-04 path).
+                        // bind no variable, no quantifier flip — the path).
                         //
                         // Reaching here, `name` is SINGLE-occurrence (the multiplicity > 1
                         // arm above already returned) AND appears under negation — so it has
@@ -853,7 +853,7 @@ pub fn classify_recursive_epistemic_program(program: &Program) -> Result<Recursi
             // NON-invariant modal target: the gated relation co-evolves with the
             // recursion.
             if modal.negated {
-                // A NEGATED modal over a NON-invariant relation is the WALL A1 case.
+                // A NEGATED modal over a NON-invariant relation is the deferred case.
                 // SOUNDNESS ARGUMENT (why stratification decides it): when the reduced
                 // ordinary program (`not know R` -> `not R`, `know R` -> `R`) is
                 // STRATIFIED, its perfect model is TOTAL and 2-valued. A total
@@ -884,7 +884,7 @@ pub fn classify_recursive_epistemic_program(program: &Program) -> Result<Recursi
         }
     }
 
-    // WALL A1 DISCRIMINATOR: a deferred negated-modal-over-non-invariant is accepted
+    // NEGATED-MODAL DISCRIMINATOR: a deferred negated-modal-over-non-invariant is accepted
     // as Case B. The high-level executor inspects the reduced ordinary program: no
     // negation cycle routes to ordinary stratified execution; a negation cycle routes
     // to the GPU-backed WFS alternating-fixpoint plan.
@@ -1712,7 +1712,7 @@ fn faeel_unfounded_self_support_rule_indices(program: &Program) -> Vec<usize> {
 /// The augmenting positive-modal resolve is gated on INVARIANT targets only (see the
 /// body comment): for an invariant `R`, `know R`/`possible R` ranges exactly over
 /// `R`'s extension, so resolving the modal into an ordinary join binds the augmented
-/// output column WITHOUT leaking — and the GPU EGB-02 membership filter re-gates
+/// output column WITHOUT leaking — and the GPU membership filter re-gates
 /// post hoc. A determined-but-not-invariant target (an epistemic-derived head like a
 /// multi-column `r`) is NOT resolved here, so its augmenting output variable stays
 /// unbound and the reduced program fails closed at this strict (execution) entry
@@ -1801,7 +1801,7 @@ fn reduce_epistemic_program_to_ordinary_inner(
     // (`reduce_case_a_epistemic_program_to_ordinary`): for an INVARIANT relation `R`,
     // `know R`/`possible R` ranges exactly over `R`'s extension, so the reduced
     // candidate join over `R` enumerates the correct augmented tuples and the GPU
-    // EGB-02 membership filter then re-gates them against the accepted world view.
+    // membership filter then re-gates them against the accepted world view.
     //
     // STRICTLY SCOPED to keep the prohibition on resolving over still-modal relations
     // machine-checked: only POSITIVE modals (negated `not know`/`not possible` is an
@@ -1842,7 +1842,7 @@ fn reduce_epistemic_program_to_ordinary_inner(
         // variable is range-restricted in the reduced candidate program); strip every
         // other modal. For an invariant relation `R`, `know R`/`possible R` ranges
         // exactly over `R`'s extension, so the reduced join enumerates the correct
-        // candidate tuples and the GPU EGB-02 filter re-gates against the accepted
+        // candidate tuples and the GPU filter re-gates against the accepted
         // world view. A NEGATED modal (anti-join) never binds and is never resolved; a
         // still-modal / epistemic-derived target is NOT invariant and is never
         // resolved, so its unbound output variable correctly fails closed downstream.
@@ -2811,7 +2811,7 @@ pub struct EpistemicStratum {
 ///
 /// Stratum `i`'s epistemic heads are materialized (gated) into the relation store
 /// BEFORE stratum `i+1` runs, so a higher stratum's `know`/`possible` over a
-/// lower stratum's head reads the GATED extension through the EXISTING EGB-02
+/// lower stratum's head reads the GATED extension through the EXISTING
 /// membership filter (no resolve-into-body, no double-gating).
 #[derive(Debug, Clone)]
 pub struct EpistemicStratifiedPlan {
@@ -2859,7 +2859,7 @@ impl EpistemicallyDeterminedPredicates {
         // determined epistemic head). Such an `r` is determined-in-principle: its
         // extension is fixed once the determined heads it derives from are fixed, so a
         // higher modal `know r`/`possible r` can stratify against the materialized
-        // base `r` via the existing EGB-02 membership filter. The acyclicity guard in
+        // base `r` via the existing membership filter. The acyclicity guard in
         // `head_is_determined` (self-reference returns false) plus the fixpoint's
         // monotonicity keep every recursive predicate OUT of `determined`, so a
         // circular `know reach` in a recursive SCC (example 22) is never determined
@@ -2941,7 +2941,7 @@ impl EpistemicallyDeterminedPredicates {
 /// through the EXISTING single/joint epistemic path; at runtime the executor
 /// materializes each stratum's GATED head into the store before the next stratum
 /// runs, so the higher stratum gates against the materialized (now-base) relation
-/// via the existing EGB-02 membership filter — never via resolve-into-body.
+/// via the existing membership filter — never via resolve-into-body.
 ///
 /// Returns:
 /// - `Ok(Some(plan))` when the program genuinely needs (and admits) stratification:
@@ -3322,7 +3322,7 @@ fn is_program_head(program: &Program, predicate: &str) -> bool {
 /// in isolation. This is the entry point for the safe-split / joint-solving and
 /// stratified-execution routing decisions in the GPU driver.
 pub fn split_epistemic_program(program: &Program) -> Result<EpistemicSplitPlan> {
-    // EGB-06: rules that couple more than one distinct epistemic body predicate
+    // rules that couple more than one distinct epistemic body predicate
     // are NOT rejected here. The dependency graph already unions every such rule
     // into a single component (each epistemic predicate occurrence routes through
     // `modal_owner` in `build_epistemic_dependency_graph`), and that component is

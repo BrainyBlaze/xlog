@@ -1,0 +1,107 @@
+---
+title: "Language Completeness Contract"
+description: "How the XLOG frontend keeps richer language features finite, typed, and routed through the normal compiler and runtime pipeline."
+---
+
+The language-completeness contract defines which high-level language constructs
+are accepted by the frontend and how they are reduced to finite, typed execution
+paths. It is not a separate runtime and it is not a Prolog interpreter.
+
+## Pipeline Position
+
+Accepted source flows through the same compiler path as ordinary XLOG programs:
+
+1. parse source into the frontend AST;
+2. desugar queries and constraints;
+3. normalize safe meta builtins;
+4. normalize finite list builtins;
+5. apply eligible magic-set rewrites;
+6. validate deterministic negation safety;
+7. stratify dependencies;
+8. lower to RIR and continue through the optimizer and runtime.
+
+This ordering matters. Meta and list constructs must become finite helper
+relations or typed scalar representations before stratification and lowering.
+
+## Finite Terms
+
+The frontend accepts richer terms only when they have a finite representation:
+
+| Surface | Accepted role |
+| --- | --- |
+| Named predicate columns | Schema and diagnostics metadata over ordinary relation columns. |
+| Domain aliases | Source-level type names resolved before runtime layout. |
+| Lists | Finite list literals and safe list builtins normalized to helper relations. |
+| Compound terms | Finite functor/argument shapes that can be represented or rejected statically. |
+| Predicate references | Static predicate references used by safe meta expansion. |
+
+Open-ended generation, cyclic terms, runtime-variable predicate dispatch, and
+dynamic database mutation are outside the contract.
+
+## Safe Meta Subset
+
+The meta layer is intentionally finite. Accepted meta predicates are normalized
+by `meta_normalize` before list normalization and lowering. Unsupported dynamic
+forms fail with compiler diagnostics instead of being interpreted by a CPU-side
+meta engine.
+
+This keeps accepted programs on the normal typed AST, RIR, statistics, optimizer,
+and runtime path.
+
+## Magic Sets
+
+`#pragma magic_sets = auto|on|off` controls bound recursive query rewriting for
+the supported deterministic subset.
+
+- `auto` rewrites only when the compiler proves the supported shape.
+- `on` fails closed when the requested rewrite is unsafe or unsupported.
+- `off` leaves the program on the ordinary recursive path.
+
+Magic sets decline for unsafe negation, aggregates in recursive rules, helper
+relations outside the supported subset, unsupported mutual recursion, and
+unsupported sideways-information-passing shapes.
+
+## Deterministic Negation
+
+Deterministic `not atom` is stratified closed-world negation. The compiler
+validates source-order safety after normalization and before stratification, then
+maps unsafe cycles and binding errors to deterministic negation diagnostics.
+
+This is separate from probabilistic or epistemic semantics.
+
+## Probabilistic Aggregates
+
+Finite probabilistic aggregate support is routed through `xlog-prob`.
+Exact paths enumerate finite aggregate outcomes into provenance/PIR structures;
+Monte Carlo paths share aggregate operator semantics with deterministic
+aggregate execution.
+
+When an exact finite domain exceeds the accepted cap, the program must report a
+typed probabilistic aggregate diagnostic with a remediation path such as Monte
+Carlo or domain reduction.
+
+## Incremental Parsing And Explain
+
+`ParserSession` and the incremental parser keep statement spans, parse-cache
+statistics, and invalidation data for developer workflows. The CLI explain path
+uses the same parser and compiler surfaces to report:
+
+- parse and schema summaries;
+- strata and deterministic negation safety;
+- magic-set rewrite status;
+- normalized and optimized plan shape;
+- probabilistic aggregate and approximate-inference metadata where applicable.
+
+Explain output is an observability surface. It should describe the same compiler
+path users run, not a separate documentation-only model.
+
+## Documentation Boundary
+
+When documenting a language feature, state three things:
+
+1. the source syntax accepted by the parser;
+2. the finite normalization or lowering path;
+3. the typed failure mode for unsupported shapes.
+
+If a construct has parser support but no lowering path, document it as a parsed
+surface with a compile-time rejection, not as an executable feature.

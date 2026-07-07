@@ -68,6 +68,9 @@ fuzz/corpus/
 fuzz/artifacts/
 
 docs/ref
+docs-site/generated/
+/.site-rustdoc/
+/.site-dist/
 
 # Local research/reference PDFs
 docs/Helbig200-semantic-role-book.pdf
@@ -82,3 +85,4 @@ examples/neural/baseline/results/deepproblog_gpu_sequential/*.time
 crates/pyxlog/python/pyxlog/*.so
 
 .codex
+docs-site/*.zip

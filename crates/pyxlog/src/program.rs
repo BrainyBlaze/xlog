@@ -13,6 +13,7 @@ use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 
 use xlog_core::{ScalarType, Schema};
+use xlog_logic::ast::Term;
 use xlog_prob::exact::ExactDdnnfProgram;
 #[cfg(feature = "host-io")]
 use xlog_prob::exact::{ExactResultWithGrads, QueryProbability};
@@ -48,12 +49,25 @@ pub(crate) struct CachedCircuit {
 pub(crate) enum InputSource {
     QueryArg(usize),
     ImplicitSlot(usize),
+    /// Stage-B real-domain grounding: read row `usize` of the join-domain tensor
+    /// source (`nsr_domain`, the per-event feature batch). Used by the per-event
+    /// expansions of a neural predicate joined on an existential variable.
+    DomainRow(usize),
+    /// Stage-B real-domain grounding: an input-independent group (the rule-weight
+    /// guard expanded per head-key constant). The forward feeds a dummy row of the
+    /// declared input width; only the network's parameters (not the input) matter.
+    ConstDummy,
 }
 
 #[derive(Debug, Clone)]
 pub(crate) struct NeuralGroup {
     pub(crate) info: NeuralPredicateInfo,
     pub(crate) input_source: InputSource,
+    /// Stage-B real-domain grounding: when `Some(c)`, the template grounds this
+    /// group's neural atom at the real constant `c` (a domain event id or a
+    /// head-key edge id) instead of a synthetic placeholder, so the one neural
+    /// occurrence expands into one circuit leaf per domain constant.
+    pub(crate) ground_const: Option<Term>,
     #[cfg(feature = "host-io")]
     pub(crate) output_var: Option<String>,
 }
@@ -74,6 +88,23 @@ pub(crate) struct HardFilter {
     pub(crate) arg_head_positions: Vec<usize>,
 }
 
+/// Stage-B existential join: the plan for grounding a neural predicate over the
+/// REAL join domain inside the circuit (instead of stripping the join relation as
+/// a pre-filter). The neural groups are already expanded per domain constant; this
+/// records the ordinary relations whose ground facts must stay IN the circuit (so
+/// provenance OR-aggregates `OR_event(neural(event) ∧ join(event, head))` at each
+/// head binding) and the head-key domain that the query ranges over.
+#[derive(Debug, Clone)]
+pub(crate) struct JoinPlan {
+    /// Ordinary relations kept inside the circuit rule; their ground facts are
+    /// added to the template program (read from `self.ast`).
+    pub(crate) relations: Vec<String>,
+    /// The real head-key domain the query ranges over (e.g. edge ids), in the
+    /// same sorted order as the per-edge guard group expansion and the emitted
+    /// `prob_queries`. Serves as the `target_domain` for a join signature.
+    pub(crate) head_domain: Vec<String>,
+}
+
 #[derive(Debug, Clone)]
 pub(crate) enum QuerySignature {
     Boolean {
@@ -84,6 +115,10 @@ pub(crate) enum QuerySignature {
         target_position: usize,
         groups: Vec<NeuralGroup>,
         hard_filters: Vec<HardFilter>,
+        /// `Some` for a Stage-B existential-join signature: the head target
+        /// position ranges over the real head-key domain (e.g. edges) and the
+        /// groups are real-domain-grounded. `None` for the ordinary targeted path.
+        join: Option<JoinPlan>,
     },
 }
 
@@ -100,6 +135,14 @@ impl QuerySignature {
         match self {
             QuerySignature::Boolean { hard_filters, .. }
             | QuerySignature::Targeted { hard_filters, .. } => hard_filters,
+        }
+    }
+
+    /// The Stage-B join plan, if this is an existential-join signature.
+    pub(crate) fn join(&self) -> Option<&JoinPlan> {
+        match self {
+            QuerySignature::Targeted { join, .. } => join.as_ref(),
+            QuerySignature::Boolean { .. } => None,
         }
     }
 }

@@ -1,4 +1,4 @@
-// v0.9.1 EGB-02: multi-column bound-variable tuple-key membership.
+// multi-column bound-variable tuple-key membership.
 // matched(X, Y) holds when the ground pair (X, Y) is a known link, matching both
 // bound columns at value level. Expect: {(1, 2), (3, 3)}.
 

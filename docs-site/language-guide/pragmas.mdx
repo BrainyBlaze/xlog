@@ -1,0 +1,52 @@
+---
+title: "Pragmas"
+description: "Set compiler and engine behavior from inside a program with #pragma directives — and let CLI flags override them when you need to."
+---
+
+A pragma configures the compiler or engine from **inside a program**. Write it as a
+directive of the form `#pragma key = value`, and the setting applies when that program is
+compiled and run:
+
+```xlog
+#pragma prob_engine = mc.
+#pragma prob_samples = 20000.
+```
+
+Pragmas keep engine choices next to the code they affect, so a program that needs Monte
+Carlo inference or a particular epistemic mode carries that requirement with it. When you
+pass the corresponding flag on the command line, the **CLI flag overrides the pragma** —
+the in-program directive is the default, and the invocation gets the final say.
+
+## The ten pragmas
+
+| Pragma | Values | Default |
+|---|---|---|
+| `prob_engine` | `exact_ddnnf` or `mc` | `exact_ddnnf` |
+| `prob_cache` | `on` or `off` | none |
+| `epistemic_mode` | `g91` or `faeel` | `faeel` |
+| `prob_samples` | `<int>` | `10000` |
+| `prob_seed` | `<int>` | `0` |
+| `prob_confidence` | `<float>` | `0.95` |
+| `prob_method` | `rejection` or `evidence_clamping` | none |
+| `prob_max_nonmonotone_iterations` | `<int>` (must be `> 0`) | `1024` |
+| `max_recursion_depth` | `<int>` | `1000` |
+| `magic_sets` | `auto`, `on`, or `off` | `auto` semantics |
+
+<Note>
+The probabilistic pragmas (`prob_samples`, `prob_seed`, `prob_confidence`,
+`prob_method`, `prob_max_nonmonotone_iterations`) shape Monte Carlo inference and take
+effect when `prob_engine = mc`. `prob_max_nonmonotone_iterations` is validated at parse
+time and must be strictly greater than zero.
+</Note>
+
+## Magic sets
+
+The `magic_sets` pragma controls a query-rewriting optimization. When a recursive query
+has bound arguments, magic sets rewrites the recursion to push those bindings inward so
+the engine derives only the facts the query can reach, rather than the whole relation.
+
+Setting `on` requests the rewrite and `off` disables it. The default, `auto`, applies the
+rewrite only when the compiler can **prove the rewritten program is equivalent** to the
+original; where it cannot establish that equivalence, `auto` declines and evaluates the
+program unchanged. This makes `auto` safe to leave on: it optimizes what it can prove and
+never risks changing your program's meaning.

@@ -1,4 +1,4 @@
-// v0.9.2 EGB-02B: mixed per-row + global modal membership.
+// mixed per-row + global modal membership.
 //
 // `reachable(X)` couples a GLOBAL modal gate (`know global_flag()`, a nullary
 // modal literal checked once per accepted candidate) with a PER-ROW

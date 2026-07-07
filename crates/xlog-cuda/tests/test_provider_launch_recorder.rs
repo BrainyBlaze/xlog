@@ -4025,7 +4025,7 @@ fn provider_compare_const_mask_recorded_rejects_legacy_manager() {
     }
 }
 
-/// Filter-class slice 2: column-column compare. Same drop+reuse
+/// Filter-class column-column compare. Same drop+reuse
 /// shape as `compare_const_mask_recorded`, but exercises BOTH
 /// column reads being recorded before preflight.
 ///
@@ -4275,7 +4275,7 @@ fn provider_compare_columns_mask_recorded_rejects_legacy_manager() {
     }
 }
 
-/// Filter-class slice 3: COMPACT path. The compact pipeline is
+/// Filter-class COMPACT path. The compact pipeline is
 /// a multi-kernel chain — `mask_clamp_rows` →
 /// `multiblock_scan_phase1` (and inplace+phase3 when
 /// `num_blocks > 1`) → `capture_compact_count` →
@@ -5923,7 +5923,7 @@ fn provider_hash_join_inner_csm_v2_recorded_rejects_legacy_manager() {
 }
 
 /// Result-set correctness for indexed-Inner CSM
-/// (binary-join retake sub-slice 2). Mirrors the non-indexed
+/// (binary-join retake). Mirrors the non-indexed
 /// CSM correctness test but uses a cached `JoinIndexV2` for
 /// the build side.
 #[test]
@@ -6404,7 +6404,7 @@ fn provider_hash_join_inner_csm_v2_with_index_recorded_rejects_legacy_manager() 
 }
 
 // ───────────────────────────────────────────────────────────
-// Sub-slice 3: non-indexed LeftOuter CSM
+// Non-indexed LeftOuter CSM
 // (`hash_join_left_outer_v2_count_scan_materialize_recorded`)
 //
 // Same gate matrix as sub-slices 1 & 2: result-set
@@ -7248,7 +7248,7 @@ fn provider_hash_join_left_outer_csm_v2_recorded_rejects_legacy_manager() {
 }
 
 // ───────────────────────────────────────────────────────────
-// Sub-slice 4: indexed LeftOuter CSM
+// Indexed LeftOuter CSM
 // (`hash_join_left_outer_v2_with_index_count_scan_materialize_recorded`)
 //
 // Same gate matrix as the non-indexed LeftOuter CSM (PR #84):

@@ -220,6 +220,18 @@ impl TensorSourceRegistry {
         }
     }
 
+    /// Get the PyTorch tensor for a specific named source (regardless of which
+    /// source is active). Used by the Stage-B existential-join forward, which
+    /// reads the per-event feature batch from a fixed `nsr_domain` source while
+    /// the per-query examples source stays active.
+    #[cfg(feature = "python")]
+    pub fn get_named(&self, name: &str) -> Result<&PyObject, TensorSourceError> {
+        self.sources
+            .get(name)
+            .map(|s| &s.tensor)
+            .ok_or_else(|| TensorSourceError::NotFound(name.to_string()))
+    }
+
     /// Get metadata for a specific source.
     pub fn get_metadata(&self, name: &str) -> Option<&TensorMetadata> {
         #[cfg(feature = "python")]

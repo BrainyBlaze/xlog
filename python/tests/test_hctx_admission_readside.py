@@ -1,16 +1,16 @@
 """H_ctx read-side: set-relative de-saturated graded admission mass (Step 2).
 
-The surface-1 graded gate ``sigmoid(g_theta - logit(tau))`` saturates to a
+The per-entity graded gate ``sigmoid(g_theta - logit(tau))`` saturates to a
 near-constant when the head is saturated (real cells: g_theta ~70-200), erasing
 the rank numerically. The H_ctx within-set operator replaces it with a
 SET-RELATIVE normalization of g_theta (rank-pct over the comparison set, eval
 realization), which de-saturates AND preserves the rank.
 
 This test pins the read-side seam: ``_graded_admission_evidence`` accepts the
-within-set-norm function (dependency-injected — @xlog-claude-2 authors the helper,
+within-set-norm function (dependency-injected — the helper is authored separately,
 the read consumes it); when provided, the neural candidate's graded mass is the
 set-relative normalization, so graded_mass becomes rank-faithful even on a
-saturated head. When None, the surface-1 per-entity behavior is unchanged.
+saturated head. When None, the per-entity behavior is unchanged.
 """
 
 import pytest
@@ -27,7 +27,7 @@ from pyxlog.ilp.neurosymbolic import (  # noqa: E402
 
 
 def _within_set_rankpct_ref(g_theta, group_id, *, mode):
-    """Contract-conformant reference for @xlog-claude-2's within_set_norm (eval):
+    """Contract-conformant reference for the within_set_norm helper (eval):
     rank-percentile of g_theta within each group, returned as mass in [0, 1]."""
     out = torch.zeros_like(g_theta)
     for gid in group_id.unique():
@@ -83,7 +83,7 @@ def test_set_relative_norm_desaturates_graded_mass_on_saturated_head():
     gm_sat = [r["graded_mass"] for r in saturated["per_query"]]
     gm_rel = [r["graded_mass"] for r in setrel["per_query"]]
 
-    # surface-1 path saturates -> constant graded_mass -> rank destroyed (AUC 0.5)
+    # per-entity path saturates -> constant graded_mass -> rank destroyed (AUC 0.5)
     assert max(gm_sat) - min(gm_sat) < 1e-6
     assert _auc(gm_sat, labels) == pytest.approx(0.5)
 
@@ -96,7 +96,7 @@ def test_set_relative_norm_desaturates_graded_mass_on_saturated_head():
 
 
 def test_none_norm_fn_preserves_surface1_behavior():
-    # With no within-set fn the read is byte-identical to surface-1 (hard default
+    # With no within-set fn the read is byte-identical to the per-entity gate (hard default
     # unchanged): graded_gate stays the per-entity sigmoid, within_set_norm absent.
     logits = [2.0, -1.0]
     state, features = _saturated_state(logits)

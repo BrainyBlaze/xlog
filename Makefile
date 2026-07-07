@@ -74,7 +74,7 @@ validate-release-local:
 	bash scripts/validate_release_gpu.sh --mode release
 
 docs:
-	bash scripts/docs/build_docs.sh
+	cd docs-site && mint export
 
 docs-validate:
-	bash scripts/docs/build_docs.sh --no-rust --no-cuda
+	cd docs-site && mint validate && mint broken-links

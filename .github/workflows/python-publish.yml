@@ -33,6 +33,14 @@ jobs:
       image: nvidia/cuda:13.1.1-devel-ubuntu22.04
     env:
       XLOG_NO_CUBIN: "1"
+      # The wheel ships only the JIT-compiled portable PTX (no embedded cubins).
+      # Built under CUDA 13.1, nvcc stamps that PTX at ISA 9.x, which every
+      # driver older than CUDA 13 (e.g. the common 550.x = CUDA 12.4) rejects at
+      # load with CUDA_ERROR_UNSUPPORTED_PTX_VERSION. Pin the embedded ISA to 8.4
+      # (CUDA 12.4) so the wheel JIT-loads on drivers from 550.54 up while still
+      # working on Blackwell. The sm_75 baseline PTX uses no ISA-9-only
+      # constructs, so the downgrade is sound (see crates/xlog-cuda/build.rs).
+      XLOG_PTX_MAX_VERSION: "8.4"
     steps:
       - name: Install system dependencies
         run: |

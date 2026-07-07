@@ -1,7 +1,7 @@
 # XLOG Development Roadmap
 
 Last updated: June 2, 2026
-Current release: v0.9.2. v0.9.2 ships the epistemic executor semantic
+Current release: v0.10.0. v0.10.0 ships the neural-symbolic training expansion (joint multi-rule mixtures, Stage-B existential-join trainable bodies, graded per-binding candidate masses) and the provenance-engine fixes (two-sided recursive SCC convergence, self-healing circuit disk cache). v0.9.2 shipped the epistemic executor semantic
 completion under the exact GPU-backed WFS contract: accepted cyclic
 negated-modal recursion uses the `xlog-gpu` GPU-backed WFS plan without the
 old `xlog_prob` host-WFS solver, but this is not a device-resident/no-host
@@ -57,7 +57,7 @@ surfaces in the v0.9.0 Epistemic/Solver Semantics train. v0.9.1 completes the
 bounded epistemic executor into a load-bearing surface (EIR-derived candidate
 enumeration, value-level modal membership, per-tuple-key FAEEL foundedness,
 epistemic constraints, safe split equivalence, and joint multi-epistemic
-solving), and v0.10.0 is the Multi-GPU / Out-of-Core train.
+solving), and v0.11.0 is the Multi-GPU / Out-of-Core train.
 
 ## v0.0.1 - Workspace Foundation
 
@@ -2123,7 +2123,7 @@ evidence live under `docs/plans/2026-06-*`.
   not the compile frontier, so factorized provenance does not address it.
   Evidence retained under `docs/plans/2026-06-*`.
 
-## main after v0.9.2 - Neuro-Symbolic Trainable-Rule & ST-TRC Joint-Mixture Pack
+## main after v0.9.2 - Neuro-Symbolic Trainable-Rule & Joint-Mixture Pack
 
 Completed on main, unreleased. The engine surface for learning logical rules by
 gradient descent (the consumer's "learn new rules, not validate a hard-coded
@@ -2143,7 +2143,7 @@ details.
       per query — no tracked device↔host transfers in the measured loop. The
       optimizer is configurable (`NeuroSymbolicTrainingConfig.optimizer`,
       default Adam; SGD stalls on the multiplicative-loss plateau).
-- [x] Joint multi-rule same-head soft-mixture (ST-TRC Phase-1b): a query head may
+- [x] Joint multi-rule same-head soft-mixture: a query head may
       be derived by more than one `trainable_rule`; the candidates compete for
       mass on one head as the noisy-OR over `(eligible_k × σ(guard_k))`, BCE on
       the supervised head driving the per-candidate guard competition. Relational
@@ -2193,8 +2193,8 @@ final ordering is a maintainer decision.
       network and w, never through fact atoms. Canonical example in the
       requirements doc (contrary_value_pair over nn_slot_competition +
       claim_fact + F1 != F2). Landed on main — see the "Neuro-Symbolic
-      Trainable-Rule & ST-TRC Joint-Mixture Pack" section above; it grew into the
-      full ST-TRC joint-mixture surface the consumer's training endgame needed.
+      Trainable-Rule & Joint-Mixture Pack" section above; it grew into the
+      full joint-mixture surface the consumer's training endgame needed.
 
 ### Session API and Performance
 
@@ -2227,7 +2227,7 @@ final ordering is a maintainer decision.
       (document + test) so consumers can drop fixed-point `_i64` mirror
       rules for Belnap channel masses, slot probabilities, and rule weights.
 
-## v0.10.0 - Multi-GPU and Out-of-Core Execution
+## v0.11.0 - Multi-GPU and Out-of-Core Execution
 
 ### Runtime and Memory
 
@@ -2304,6 +2304,6 @@ final ordering is a maintainer decision.
 - [ ] Epistemic semantics can introduce high complexity and must remain isolated from stable Datalog execution.
 - [ ] decision-DNNF compiler and solver integration must preserve deterministic certification paths.
 
-### v0.10.0 Risks
+### v0.11.0 Risks
 
 - [ ] Multi-GPU synchronization and skew handling can dominate performance if partitioning policy is not benchmark-driven.

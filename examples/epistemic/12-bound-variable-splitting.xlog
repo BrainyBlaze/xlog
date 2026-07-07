@@ -1,4 +1,4 @@
-// v0.9.1 EGB-05 + EGB-06: multi-output epistemic programs with value-level
+// multi-output epistemic programs with value-level
 // bound-variable modal membership route through split GPU execution from
 // `xlog run`.
 // Expect: both_known={1}, safe_alt={2}.

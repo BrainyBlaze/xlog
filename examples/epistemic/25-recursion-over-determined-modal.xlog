@@ -1,11 +1,11 @@
-// v0.9.2 STRATIFIED epistemic execution: recursion whose MODAL ranges over a
-// DETERMINED epistemic-derived head (ACCEPTED).
+// Stratified epistemic execution: recursion whose MODAL ranges over a
+// DETERMINED epistemic-derived head (accepted).
 //
 // `a(X, Y)` is a DETERMINED epistemic-derived head: `know certified(X, Y)` over
 // the INVARIANT EDB `certified`, so `a = {(1,2), (2,3)}` IS its truth. `reach`
 // RECURSES with the modal `know a(...)` over that determined head.
 //
-// v0.9.2 stratifies: `a` is the LOWER stratum, executed first and MATERIALIZED
+// Stratification: `a` is the LOWER stratum, executed first and MATERIALIZED
 // (gated) into the store as a base relation. The higher `reach` stratum then has
 // `know a` over a now-BASE relation, which is admissible Case-A: the modal
 // resolves to an ordinary join over the materialized `a` (NO second gate) and the

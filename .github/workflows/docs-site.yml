@@ -1,0 +1,97 @@
+name: docs-site
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "docs-site/**"
+      - "scripts/docs/build_rust_api.sh"
+      - "scripts/docs/build_markdown_exports.py"
+      - "scripts/docs/build_redirect_stubs.py"
+      - "scripts/docs/copy-page-shim.js"
+      - "scripts/docs/inject_search_shim.py"
+      - "scripts/docs/search-shim.css"
+      - "scripts/docs/search-shim.js"
+      - ".do/docs-app.yaml"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "crates/**"
+      - ".github/workflows/docs-site.yml"
+  pull_request:
+    paths:
+      - "docs-site/**"
+      - "scripts/docs/build_rust_api.sh"
+      - "scripts/docs/build_markdown_exports.py"
+      - "scripts/docs/build_redirect_stubs.py"
+      - "scripts/docs/copy-page-shim.js"
+      - "scripts/docs/inject_search_shim.py"
+      - "scripts/docs/search-shim.css"
+      - "scripts/docs/search-shim.js"
+      - ".do/docs-app.yaml"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "crates/**"
+      - ".github/workflows/docs-site.yml"
+
+concurrency:
+  group: docs-site-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      - name: Install Mintlify CLI (pinned)
+        run: npm install -g mint@4.2.666
+      - name: Generate Rust API docs
+        run: bash scripts/docs/build_rust_api.sh
+        env:
+          XLOG_RUSTDOC_OUTPUT_DIR: ${{ github.workspace }}/.site-rustdoc/generated/rust
+      - name: Validate
+        working-directory: docs-site
+        run: |
+          mint validate
+          mint broken-links
+      - name: Export static bundle
+        working-directory: docs-site
+        run: |
+          mint export
+          mkdir -p ../.site-dist
+          unzip -o export.zip -d ../.site-dist
+      - name: Build self-hosted search index (Pagefind)
+        run: |
+          python3 scripts/docs/build_markdown_exports.py docs-site .site-dist
+          python3 scripts/docs/inject_search_shim.py .site-dist
+          npx -y pagefind@1.5.2 --site .site-dist
+          test -f .site-dist/index.md
+          test -f .site-dist/architecture/gpu-execution.md
+          test -f .site-dist/pagefind/pagefind-ui.js
+          test -f .site-dist/pagefind/pagefind-ui.css
+      - name: Add legacy redirects and 404 page
+        run: |
+          python3 scripts/docs/build_redirect_stubs.py docs-site .site-dist
+          test -f .site-dist/404.html
+          test -f .site-dist/architecture/xlog-prob/index.html
+      - name: Attach generated Rust API docs
+        run: |
+          rm -rf .site-dist/generated/rust
+          mkdir -p .site-dist/generated
+          cp -R .site-rustdoc/generated/rust .site-dist/generated/rust
+      - name: Publish to docs-dist branch
+        if: github.ref == 'refs/heads/main'
+        run: |
+          cd .site-dist
+          git init -b docs-dist
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "docs: publish site build ${GITHUB_SHA}"
+          git push --force "https://x-access-token:${{ github.token }}@github.com/${GITHUB_REPOSITORY}.git" docs-dist

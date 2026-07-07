@@ -1,0 +1,106 @@
+---
+title: "Query Optimizer"
+description: "The layered optimizer stack behind XLOG plans: lowerer ordering, predicate pushdown, shape-specific selectivity rewrites, and runtime route planning."
+---
+
+XLOG does not have one monolithic SQL-style optimizer. It has a layered planning
+stack that preserves Datalog semantics while exposing enough structure for GPU
+dispatch.
+
+The active layers are:
+
+1. lowering-time atom ordering and RIR construction;
+2. generic predicate pushdown;
+3. statistics-backed rewrites for recognized triangle and 4-cycle shapes;
+4. multiway promotion into WCOJ/Free Join candidates;
+5. runtime dispatch gates and counters.
+
+## Lowering-Time Planning
+
+`xlog-logic::lower::Lowerer` converts frontend rules into RIR. It owns the first
+join-tree shape for ordinary positive atoms and uses greedy ordering/planning
+helpers when it builds scan and join nodes.
+
+This is also where predicate names become relation IDs, schemas are inferred,
+and stratum order from the dependency analyzer becomes executable SCC order.
+
+## Predicate Pushdown
+
+`xlog_logic::optimizer::Optimizer` currently applies predicate pushdown as its
+generic transformation. Filters are moved closer to scans when the predicate can
+be evaluated on one side of a join or safely through projection.
+
+The optimizer has a cost type, a default transfer multiplier, and a
+`dp_threshold` configuration field, but broad dynamic-programming join ordering
+is not the active generic planner. Do not document it as a universal SQL-style
+join optimizer.
+
+## Selectivity Rewrites
+
+The `selectivity_pass` is shape-specific. It recognizes canonical lowered
+triangle and 4-cycle bodies, estimates candidate inner pairings with
+`StatsManager::estimate_join_cardinality`, and rewrites only when statistics
+make a valid lower-cost pairing available.
+
+Safety floors:
+
+- unrecognized shapes are left unchanged;
+- missing or zero cardinality entries leave the body unchanged;
+- ties keep the existing order;
+- recursive SCC bodies stay on the safe default order.
+
+The pass runs after generic optimization and before multiway promotion, so a
+rewritten triangle or 4-cycle can still promote into the WCOJ route.
+
+## Multiway Promotion
+
+`promote_multiway` identifies eligible bodies and emits `RirNode::MultiWayJoin`
+for runtime dispatch. It coordinates with statistics, variable-order settings,
+and shape rules so the runtime can decide between:
+
+- dedicated WCOJ kernels;
+- main-only Free Join routes;
+- ordinary binary fallback.
+
+Promotion is not the same as dispatch. The runtime can still decline a promoted
+candidate if a final gate fails.
+
+## Runtime Planning
+
+The executor adds runtime information the compiler cannot know:
+
+- actual relation buffers and row counts;
+- relation generations and cache state;
+- available device budget;
+- CUDA provider capabilities;
+- kill switches;
+- route-specific counters and error-decline counts.
+
+For main-only factorized routes, `wcoj_cost_model` also plans Free Join order and
+uses a factorized-loss veto so a route can decline when the known workload would
+lose the intended benefit.
+
+## Statistics Layer
+
+`xlog-stats::StatsManager` stores:
+
+- relation cardinality and byte-size estimates;
+- column statistics where available;
+- join selectivity observations;
+- heat used by adaptive indexing decisions.
+
+Stats are advisory. They can improve plan shape, but correctness must not depend
+on their precision. Missing stats should produce a conservative no-op or a
+fallback route.
+
+## Documentation Rules
+
+When documenting optimizer behavior:
+
+- say "predicate pushdown" for the generic optimizer;
+- say "shape-specific selectivity rewrite" for triangle and 4-cycle pairing;
+- say "multiway promotion" for RIR conversion into dispatch candidates;
+- say "runtime dispatch" for actual WCOJ, Free Join, nested-loop, or hash-join
+  execution;
+- avoid "DP optimizer" unless a concrete future implementation lands and is
+  verified through the compile path.

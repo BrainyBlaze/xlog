@@ -1,0 +1,98 @@
+---
+title: "CUDA Certification"
+description: "How XLOG separates ordinary CI, docs validation, CUDA-required release gates, and staged reliability evidence."
+---
+
+XLOG has several validation layers. They answer different questions and should
+not be collapsed into one test count.
+
+<Warning>
+Do not use stale fixed pass-count snapshots as public certification statements.
+The authoritative gate is the command that ran, the hardware it ran on, and the
+evidence it produced.
+</Warning>
+
+## Validation Layers
+
+| Layer | Where it runs | What it proves |
+| --- | --- | --- |
+| GitHub CI | GitHub-hosted runners | Formatting, workflow hygiene, package metadata, no-GPU CUDA build, and non-GPU checks. |
+| Docs site CI | GitHub Actions for `docs-site/**` | Mintlify validation, broken-link checks, and static export publication. |
+| GPU release validation | Maintainer-run CUDA host | Actual CUDA behavior through `scripts/validate_release_gpu.sh`. |
+| Subsystem reliability gates | Subsystem-specific suites | Statistical or staged reliability for neural-symbolic and other higher-level engines. |
+
+Green GitHub CI does not certify GPU correctness. GPU certification requires a
+CUDA machine.
+
+## GPU Release Gate
+
+The canonical manual gate is:
+
+```bash
+scripts/validate_release_gpu.sh --mode release
+```
+
+The script:
+
+- sets `XLOG_REQUIRE_CUDA=1`, so CUDA initialization failures cannot be skipped;
+- requires a visible NVIDIA GPU through `nvidia-smi`;
+- runs release doctor checks;
+- builds the workspace and `xlog-cli` release binary;
+- stages Python and CLI kernel artifacts;
+- builds the `pyxlog` wheel and CLI archive;
+- runs `xlog-cuda-tests` certification in release mode;
+- runs a basic `xlog run` smoke command;
+- verifies that packaged artifacts include the expected kernel files.
+
+Use `--mode smoke` for a shorter CUDA smoke gate. Use `--dry-run` only to inspect
+the command sequence; it does not certify GPU behavior.
+
+## Docs Gate
+
+The docs workflow triggers on edits under `docs-site/**` or the workflow itself.
+It uses Node 22, installs `mint@4.2.666`, runs:
+
+```bash
+mint validate
+mint broken-links
+mint export
+```
+
+On `main`, the exported static bundle is pushed to the `docs-dist` branch. The
+DigitalOcean App Platform site serves that branch at `xlog.md`.
+
+## Reliability Gates
+
+Reliability gates are not the same as CUDA kernel certification. The real staged
+reliability labels used in the repository are:
+
+- alpha: 5/5;
+- beta: 20/20, defined as 5 seeds across 4 stages;
+- GA: 50/50 with Clopper-Pearson confidence accounting.
+
+Use those labels only for the subsystem that defines and runs that gate. Do not
+reuse them as global CUDA test counts.
+
+## Epistemic Candidate Bounds
+
+Epistemic execution does not use a public fixed-literal or large hardcoded
+candidate-count bound. The source computes
+`max_candidates = 2^(number of epistemic literals)` and caps models per
+reduction at `MAX_MODELS_PER_REDUCTION = 1024`.
+
+Document that concrete bound when discussing epistemic planning limits.
+
+## Evidence Requirements
+
+A certification claim should include:
+
+- exact command;
+- commit or release tag;
+- CUDA toolkit and GPU class;
+- whether `XLOG_REQUIRE_CUDA=1` was active;
+- route counters or transfer telemetry when the claim depends on a specific
+  optimized path;
+- artifact or log location when the evidence is durable.
+
+If those details are missing, phrase the result as a local check, not a release
+certification.

@@ -1,0 +1,86 @@
+---
+title: "Solver Services"
+description: "The GPU CNF and CDCL substrate used by XLOG's probabilistic and epistemic verification paths."
+---
+
+XLOG's solver services provide a CUDA-backed CNF representation and CDCL solver
+workspace for subsystems that need SAT or UNSAT evidence. The solver is a
+substrate: probabilistic compilation, epistemic planning, and future verification
+paths decide when and how to use it.
+
+## CNF Representation
+
+`xlog-solve::GpuCnf` stores DIMACS-style CNF in CSR form:
+
+- `var_cap`, `clause_cap`, and `lit_cap` are host-known allocation capacities;
+- `num_vars`, `num_clauses`, and `num_lits` are device-resident scalar buffers;
+- `clause_offsets` and `literals` are device-resident CSR buffers;
+- provider-memory checks reject CNF buffers owned by a different CUDA provider.
+
+`GpuCnf::from_host` exists for tests and tooling. Production GPU-native paths can
+construct CNF directly on device and pass the same solver-facing structure
+forward.
+
+## CDCL Workspace
+
+`GpuCdclSolver` owns a CUDA provider and `GpuCdclConfig`. The config controls:
+
+- learned-clause arena capacity;
+- learned-literal capacity;
+- proof-trace capacity;
+- deterministic restart and reduction intervals;
+- optional conflict budget.
+
+`GpuCdclWorkspace` pre-allocates the device buffers needed for repeated solves:
+assignments, levels, reasons, variable activity, trail, watch lists, learned
+clauses, proof data, and scalar status outputs. The workspace does not own the
+input CNF buffers.
+
+## Status And Validation
+
+The solver has raw and expected-status paths:
+
+- raw solve APIs return device-resident assignment/status/error buffers for
+  debugging and research;
+- `solve_expect_sat` expects SAT, validates the result, and returns a
+  device-resident assignment;
+- `solve_expect_unsat` expects UNSAT and returns `Ok(())` only when the expected
+  result is observed.
+
+Expected-status helpers read scalar status and error values as control-plane
+checks. That is different from copying the CNF, proof state, or circuit data
+through the host as the data plane.
+
+## Fail-Closed Budgets
+
+On main, unreleased beyond 0.9.2, the CDCL config includes `max_conflicts`. A
+nonzero value bounds hard verification instances. If the kernel reaches the
+budget before SAT or UNSAT is established, it reports a budget-exhausted status.
+The Rust API surfaces that as a typed `VerifyBudgetExceeded` error.
+
+A budget-exhausted result is indeterminate. It is never a proof.
+
+## Consumers
+
+Solver services are used by higher-level engines:
+
+| Consumer | Use |
+| --- | --- |
+| `xlog-prob` | Verification around probabilistic circuit and knowledge-compilation paths. |
+| `xlog-gpu` | Epistemic GPU planning and split-execution certification surfaces. |
+| `xlog-cli` | Diagnostic plan dumps and release validation flows. |
+
+The consumer owns the semantic contract. The solver service owns the CUDA CNF,
+CDCL workspace, expected-status checks, and fail-closed resource behavior.
+
+## Documentation Boundaries
+
+Do not describe every solver-backed path as zero host reads. The stricter
+no-host-transfer contract belongs only to the integrations that track and expose
+it. The general solver contract is:
+
+- CNF and solver workspaces are device-resident;
+- status handling is explicit and typed;
+- capacity or budget failures decline fail-closed;
+- SAT/UNSAT claims must come from an expected-status path or a caller-specific
+  verifier contract.

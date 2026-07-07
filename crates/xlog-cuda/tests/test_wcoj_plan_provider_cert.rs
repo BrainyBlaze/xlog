@@ -20,7 +20,7 @@
 //!      > with `JoinKeysExceedBinaryFallbackLimit`; the GPU path is
 //!      > never invoked.
 //!
-//! Hard boundaries (per slice spec):
+//! Hard boundaries (per the documented contract):
 //!   * No automatic dispatch from planner to GPU — the test
 //!     manually orchestrates the two layers.
 //!   * No runtime executor wiring.

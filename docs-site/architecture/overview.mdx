@@ -1,0 +1,116 @@
+---
+title: "System Architecture"
+description: "How XLOG compiles logic programs, controls GPU execution from the host, and keeps data-plane state resident on CUDA devices."
+---
+
+XLOG is a CUDA-backed logic engine with one language frontend and several
+execution backends. Source programs enter through `xlog-logic`, lower into
+relational and domain-specific IRs, and run through host-side control code that
+launches CUDA kernels over device-resident relation, circuit, and solver state.
+
+The important boundary is simple: the compiler and executor live on the host,
+while relation buffers, kernel workspaces, solver arenas, and selected hot-path
+training state live on the GPU. Public docs should use "GPU-resident" for the
+device data plane, not for the host executor object.
+
+<Note>
+XLOG's published Rust workspace version is `0.9.2`. Features listed as
+"on main, unreleased beyond 0.9.2" exist in the repository but are not part of
+the tagged 0.9.2 release artifacts.
+</Note>
+
+## Architecture Layers
+
+| Layer | Crates | Responsibility |
+| --- | --- | --- |
+| Language frontend | `xlog-logic`, `xlog-ir` | Parse XLOG source, normalize safe language constructs, stratify dependencies, lower to RIR/EIR, and build execution plans. |
+| Runtime control | `xlog-runtime`, `xlog-stats` | Interpret RIR, maintain relation state, collect statistics, choose opportunistic dispatch routes, and expose telemetry. |
+| CUDA substrate | `xlog-cuda` | Own device buffers, load CUDA artifacts, launch recorded kernels, and provide join/groupby/WCOJ/solver primitives. |
+| Probabilistic and epistemic engines | `xlog-prob`, `xlog-gpu`, `xlog-solve` | Encode probabilistic circuits, epistemic execution plans, and SAT/UNSAT solver workloads over the shared CUDA substrate. |
+| User surfaces | `xlog-cli`, `pyxlog` | Provide CLI commands and Python bindings. `pyxlog` is distributed as a Python package, not as a crates.io package. |
+
+Ten Rust packages are publishable on crates.io: `xlog-cli`, `xlog-core`,
+`xlog-cuda`, `xlog-gpu`, `xlog-ir`, `xlog-logic`, `xlog-prob`,
+`xlog-runtime`, `xlog-solve`, and `xlog-stats`. `pyxlog`, `xlog-neural`,
+`xlog-induce`, `xlog-cuda-tests`, and `xlog-integration` are workspace
+packages used for Python packaging, internal development, validation, or
+integration coverage.
+
+## Compile Pipeline
+
+The deterministic compile path is implemented in `xlog-logic`:
+
+1. `parser::parse_program` converts source text into the frontend AST.
+2. Meta and list builtins are normalized into the supported safe subset.
+3. Magic-set rewrites and negation-safety checks run before stratification.
+4. `stratify` computes dependency strata for recursion, negation, and
+   aggregates.
+5. `Lowerer::lower_program` emits RIR execution plans.
+6. Helper-split, predicate-pushdown, selectivity, and multiway-promotion passes
+   refine eligible plan shapes.
+
+Epistemic execution builds EIR from the parsed AST. It is not a post-RIR branch.
+Probabilistic and solver paths likewise share the frontend but introduce their
+own planning artifacts after parsing and normalization.
+
+## Runtime Boundary
+
+`xlog-runtime::Executor` is the host-side RIR interpreter and dispatcher. It
+owns relation metadata, runtime statistics, persistent join-index cache state,
+common-subexpression telemetry, adaptive observations, and counters for WCOJ,
+Free Join, aggregate fusion, and factorized delta routes.
+
+The executor does not execute on the GPU. It orchestrates:
+
+- relation uploads and device-buffer ownership;
+- RIR node evaluation over CUDA kernels;
+- recursive SCC seed and delta iterations;
+- opportunistic route selection for WCOJ, Free Join, nested-loop, hash-join,
+  groupby, and solver-backed operations;
+- diagnostics that show whether an optimized route actually fired.
+
+Device-resident state lives in CUDA buffers and kernel workspaces managed by
+`xlog-cuda`. The host may launch kernels, synchronize streams, and read control
+status when an API requires it. Data-plane no-host-transfer claims are valid only
+for specific paths that track and expose that contract.
+
+## Execution Families
+
+| Family | What runs | Primary docs |
+| --- | --- | --- |
+| Deterministic Datalog | RIR scans, filters, joins, groupby, recursion, and arithmetic over CUDA buffers. | [GPU Execution](/architecture/gpu-execution), [Query Optimizer](/architecture/query-optimizer) |
+| Multiway joins | Dedicated WCOJ kernels for recognized graph shapes and opportunistic Free Join routes for broader multiway bodies. | [Worst-Case Optimal Joins](/architecture/wcoj) |
+| Device resource management | Optional stream-aware allocator stack with byte budgets and deferred frees. | [Device Runtime](/architecture/device-runtime) |
+| Persistent join reuse | Build-side hash-index cache keyed by relation generation, schema, keys, and CUDA device. | [Adaptive Indexing](/architecture/adaptive-indexing) |
+| Solver services | GPU CNF representation and CDCL workspace used by probabilistic and epistemic verification paths. | [Solver Services](/architecture/solver-services) |
+
+## Main-Only Factorized Work
+
+The repository `main` branch contains additional factorized execution routes
+that are unreleased beyond 0.9.2:
+
+- aggregate-fused WCOJ for selected triangle, 4-cycle, and clique aggregate
+  shapes;
+- GPU Free Join for general multiway bodies and factorized count-by-root;
+- dense and sparse factorized recursive-delta routes for transitive-closure
+  shaped recursion;
+- factorized non-count aggregate folding in probabilistic provenance.
+
+Treat these as real implementation on main, but label them as unreleased in user
+guides, architecture notes, and examples until a release artifact contains them.
+
+## Operational Contracts
+
+XLOG favors explicit decline over silent semantic drift:
+
+- unsupported optimizer or kernel shapes fall back to the ordinary route with
+  row-set parity;
+- fail-closed solver and compilation guards return typed errors rather than
+  turning an incomplete proof into a success;
+- CUDA-required release gates must run on a GPU host with `XLOG_REQUIRE_CUDA=1`;
+- docs generated HTML is exported to the `docs-dist` branch and served by
+  DigitalOcean App Platform at `xlog.md`.
+
+Use runtime counters, kill switches, and certification commands to verify that a
+specific route fired. Do not infer GPU residency or optimized dispatch from a
+correct final answer alone.

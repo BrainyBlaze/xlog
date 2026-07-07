@@ -1,0 +1,191 @@
+---
+title: "Benchmarks"
+description: "XLOG's benchmarking methodology and results, with a hard line between measured, source-backed numbers and aspirational performance targets."
+---
+
+XLOG's benchmark suite runs on [Criterion.rs](https://github.com/bheisler/criterion.rs)
+for statistically rigorous measurement. This page separates two things that are easy to
+conflate: numbers that have actually been **measured** and committed as evidence, and
+**targets** that describe where a benchmark is *aimed* but which no published run yet
+backs. The distinction is load-bearing — cite only the measured results as evidence.
+
+## Measured results
+
+These are the only benchmark numbers in this repository that are backed by a committed,
+source-verified run. Each was produced by the Criterion harness described in the
+methodology section below.
+
+| Result | Speedup | Fixture / setup | Notes |
+|---|---|---|---|
+| WCOJ super-hub | `10.5x` to `33.8x` | Deterministic super-hub triangle fixtures (`wcoj_triangle_bench`) | Worst-case-optimal join versus binary-join chain on skewed graphs |
+| Aggregate-fused WCOJ | `6.05x` / `5.37x` | Hub fixtures | count/sum/min/max-by-root fused over a triangle body |
+| Neural-symbolic cache ablation | `2.74x` | `01_minimal` MNIST addition, end-to-end | Circuit caching vs no caching; 95% CI `[2.29, 3.18]`, measured 2026-02-18 |
+
+<Note>
+The WCOJ super-hub result reflects the released triangle route. The **aggregate-fused
+WCOJ** result was measured on the development branch — aggregate fusion is part of the
+factorized-execution work and is **not in the v0.9.2 release**. Treat its speedup as a
+development-branch measurement, not a released-product claim.
+</Note>
+
+### Neural-symbolic training detail
+
+Measured on development hardware with the `01_minimal` example (MNIST addition, 512
+images, 5 epochs, `batch_size=64`):
+
+| Metric | Value | Notes |
+|---|---|---|
+| `PTX JIT (cold)` | 0.02 s | Cubin loading |
+| `first_epoch_sec` | ~75 s | Cold start (Decision-DNNF compile + verify); warm starts drop to ~0.26 s |
+| `steady_epoch_sec_mean` | ~0.25 s | Epochs 2–5 after warm-up, batched evaluation |
+| `per_query_ms` | ~1.0 ms | Per-query forward + backward through the circuit |
+| Cache speedup | `2.74x` | Circuit caching vs no caching, 95% CI `[2.29, 3.18]` |
+
+Evidence: `examples/neural/results/evidence/cache_ablation_20260218.json`.
+
+## Aspirational targets — not measured
+
+<Warning>
+The tables in this section are **aspirational targets, not measured results** (audited
+2026-06-10). No published in-repo run backs them. The Criterion harnesses exist
+(`crates/xlog-gpu/benches/`, `crates/xlog-prob/benches/`) but their output is git-ignored
+and no baseline has been committed. **Do not cite these numbers as evidence** or state
+them as achieved. They describe where each benchmark is aimed; only the numbers under
+"Measured results" above are backed by a run.
+</Warning>
+
+### Transitive closure (targets — unmeasured)
+
+| Configuration | Target | Notes |
+|---|---|---|
+| 100K random edges | `>1M rows/sec` | Sparse graph |
+| 1M random edges | `>5M rows/sec` | Medium graph |
+| `K_{500,500}` bipartite | `>10M rows/sec` | Dense output |
+
+### Hash join (targets — unmeasured)
+
+| Configuration | Target | Notes |
+|---|---|---|
+| 100K × 100K | `>50M rows/sec` | Medium cardinality |
+| 1M × 100K | `>100M rows/sec` | Large left relation |
+| High selectivity | `>20M rows/sec` | Many output rows |
+
+### Exact inference (targets — unmeasured)
+
+| Configuration | Target | Notes |
+|---|---|---|
+| 20-variable path | `<100ms` | Small circuit |
+| 50-variable Bayesian | `<500ms` | Medium complexity |
+| With gradients | `<2x base` | Backward-pass overhead |
+
+### Monte Carlo (targets — unmeasured)
+
+| Configuration | Target | Notes |
+|---|---|---|
+| 100K samples, 100 vars | `>10M worlds/sec` | Throughput mode |
+| 10K samples, 500 vars | `>5M worlds/sec` | Complexity mode |
+
+## Running benchmarks
+
+### Prerequisites
+
+- A CUDA-capable NVIDIA GPU (compute capability 7.0+). Development device: RTX PRO 3000
+  Blackwell, `SM120`, 12 GB.
+- The CUDA Toolkit 13.x, with `nvcc` on `PATH`, to compile the kernels. Runtime PTX is
+  floored so the compiled artifacts also load on pre-CUDA-13 drivers.
+- Enough GPU memory: 4 GB minimum, 12 GB recommended for neural-symbolic training.
+
+### Quick start
+
+```bash
+# Run all benchmarks
+cargo bench
+
+# Run a specific suite
+cargo bench -p xlog-gpu    # Transitive closure, joins, aggregation
+cargo bench -p xlog-prob   # Exact inference, Monte Carlo
+cargo bench -p xlog-solve  # SAT solver
+
+# Save and compare a baseline
+cargo bench -- --save-baseline my_baseline
+cargo bench -- --baseline my_baseline
+```
+
+### Benchmark-relevant environment variables
+
+| Variable | Description | Default |
+|---|---|---|
+| `CUDA_VISIBLE_DEVICES` | GPU device ordinal | `0` |
+| `XLOG_BENCH_MEMORY_MB` | GPU memory budget | `4096` |
+| `WCOJ_BENCH_FULL` | Run the full WCOJ triangle matrix (adds 100K + 250K row sizes) | `0` |
+| `XLOG_USE_WCOJ_TRIANGLE_U32` | Force-on WCOJ triangle dispatch (bypasses the adaptive classifier) | unset |
+| `XLOG_DISABLE_WCOJ_TRIANGLE` | Hard kill switch — pins all triangle WCOJ off, beats every other flag | unset |
+
+## Methodology
+
+### Measurement approach
+
+Criterion drives every benchmark. The default settings target regression detection over
+raw peak numbers:
+
+| Setting | Value | Rationale |
+|---|---|---|
+| Sample size | 10–100 | GPU warm-up and noise reduction |
+| Warm-up | 3 iterations | JIT compilation, cache priming |
+| Significance level | 0.1 | Detect `>10%` regressions |
+| Noise threshold | 0.05 | Ignore `<5%` variance |
+
+Throughput is elements per unit time, where "elements" varies by benchmark: input edges
+for transitive closure, total input rows for joins, input rows for aggregation, circuit
+variables for exact inference, and samples × variables for Monte Carlo.
+
+### Warm-up and reproducibility
+
+GPU benchmarks warm up so the timed region excludes one-time costs: PTX modules compile
+and cache, memory pools initialize, and the CUDA context is established. All random data
+uses deterministic seeding — a fixed-seed LCG, no system entropy — so the same seed
+produces identical graphs across runs.
+
+### The WCOJ triangle harness
+
+The measured WCOJ result comes from `crates/xlog-integration/benches/wcoj_triangle_bench.rs`,
+which compares the GPU 3-way worst-case-optimal join against the binary-join chain on
+identical fixtures across `u32`, `u64`, and a `Symbol` sanity case. Each cell runs three
+modes — `Off` (binary), `Force` (WCOJ always), and `Adaptive` (classifier-gated,
+default-on) — overriding the mode explicitly via `RuntimeConfig` to keep the timed path
+free of process-global state.
+
+Two guards keep the numbers honest. Before timing, each cell asserts that the binary and
+WCOJ paths produce identical row sets. During timing, it asserts the dispatch counter
+advances by exactly the iteration count on the WCOJ path and by zero on the binary path —
+so a silent fallback anywhere in the hot loop fails the benchmark rather than quietly
+reporting the wrong path's time. The super-hub fixture, which concentrates roughly half the
+edges on a single key, is where the `10.5x` to `33.8x` speedups are measured.
+
+## Interpreting Criterion output
+
+```text
+tc_random/edges/100K_edges
+                        time:   [12.345 ms 12.456 ms 12.567 ms]
+                        thrpt:  [7.9567 Melem/s 8.0283 Melem/s 8.1003 Melem/s]
+                 change: [-2.5% -1.2% +0.1%] (p = 0.12 > 0.10)
+                        No change in performance detected.
+```
+
+| Field | Meaning |
+|---|---|
+| `time` | Lower bound, estimate, upper bound at 95% CI |
+| `thrpt` | Throughput in million elements per second |
+| `change` | Comparison against the saved baseline |
+| `p` | Statistical significance |
+
+A run is flagged as a regression when the `change` lower bound exceeds `+5%` with
+`p < 0.10`. Common noise sources: GPU thermal throttling inflates variance (cool down
+between runs), and the first sample is slow because of JIT compilation (warm-up absorbs
+it).
+
+## See also
+
+- [WCOJ tuning](/guides/wcoj-tuning) — when a rule routes through a worst-case-optimal join
+- [Architecture overview](/architecture/overview) — system design
+- [Roadmap](/architecture/roadmap) — development plans

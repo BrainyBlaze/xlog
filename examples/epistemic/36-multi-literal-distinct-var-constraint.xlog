@@ -1,4 +1,4 @@
-// v0.9.2 ITEM E: a MULTI-LITERAL epistemic integrity constraint with DISTINCT
+// A MULTI-LITERAL epistemic integrity constraint with DISTINCT
 // (independent) single-occurrence key variables. `:- know watch(X), know hot(Y).`
 // factors to (EXISTS X: know watch(X)) AND (EXISTS Y: know hot(Y)) = "watch is
 // non-empty AND hot is non-empty in the accepted model". Each literal lowers to

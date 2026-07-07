@@ -1,5 +1,5 @@
-// v0.9.2 SCOPE-LIMIT CLOSED: AUGMENTED multi-head coupling with PER-HEAD output
-// projection at DIFFERING arity.
+// AUGMENTED multi-head coupling with PER-HEAD output
+// projection at DIFFERING arity (accepted).
 //
 // Two epistemic output heads share ONE base modal predicate `edge/2`
 // (SharedModalPredicate coalesce -> ONE joint component), but have DIFFERING public
@@ -14,7 +14,7 @@
 // head independently"): the joint plan shared ONE plan-global `final_output_columns`
 // derived from the first head, which mis-projects coupled heads of differing arity.
 //
-// v0.9.2 closes this scope limit with PER-HEAD augmented projection: each head is
+// The executor closes this scope limit with PER-HEAD augmented projection: each head is
 // materialized from ITS OWN reduced relation buffer with ITS OWN reduction
 // row-filter, projecting the first `public_head_arity` columns. This reads only the
 // store/world-view boundary (the reduced relation buffer + the plan's recorded

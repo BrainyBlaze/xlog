@@ -1,0 +1,18 @@
+name: xlogmd-site
+region: lon
+domains:
+  - domain: xlog.md
+    type: PRIMARY
+    zone: xlog.md
+  - domain: www.xlog.md
+    type: ALIAS
+    zone: xlog.md
+static_sites:
+  - name: xlog
+    github:
+      repo: BrainyBlaze/xlog
+      branch: docs-dist
+      deploy_on_push: true
+    source_dir: /
+    output_dir: /
+    error_document: 404.html

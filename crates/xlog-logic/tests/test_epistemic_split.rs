@@ -337,7 +337,7 @@ fn negated_modal_over_recursive_lower_stratum_is_accepted_case_b() {
     // edge`, `unreachable :- node, node, not reach` -- is an ordinary stratified-negation
     // recursive program: the semi-naive engine completes the recursive `reach` fixpoint,
     // THEN anti-joins it. This is the genuine "negated modal in a recursive epistemic
-    // program" the WALL names, and it EXECUTES.
+    // program", and it EXECUTES.
     let program = parse_program(
         r#"
         #pragma epistemic_mode = faeel

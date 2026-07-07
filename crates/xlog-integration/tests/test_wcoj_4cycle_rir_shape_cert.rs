@@ -1,7 +1,7 @@
 // crates/xlog-integration/tests/test_wcoj_4cycle_rir_shape_cert.rs
 #![allow(clippy::needless_range_loop, clippy::too_many_arguments)]
 
-//! v0.6.5 slice 2 — RIR-shape certification for the 4-cycle WCOJ
+//! RIR-shape certification for the 4-cycle WCOJ
 //! dispatch.
 //!
 //! Locks the v1 dispatch policy across syntactic variants of a

@@ -87,6 +87,21 @@ pub(crate) fn read_artifact(key: &CircuitCacheKey) -> Result<Option<CircuitArtif
     read_artifact_from(&cache_dir(), key)
 }
 
+/// Best-effort eviction of a stale cache entry.
+///
+/// Used when a cached circuit fails validity against the CURRENT compile (e.g. its
+/// var universe no longer matches the freshly-encoded CNF after an engine change):
+/// the canonical PIR hash keeps semantically-stable cache identity, so entries
+/// written by an earlier engine whose encoding differed can collide with the same
+/// key. Such entries are staleness, not corruption — remove and recompile.
+pub(crate) fn evict_artifact(key: &CircuitCacheKey) {
+    evict_artifact_from(&cache_dir(), key);
+}
+
+fn evict_artifact_from(dir: &Path, key: &CircuitCacheKey) {
+    let _ = fs::remove_file(dir.join(artifact_filename(key)));
+}
+
 // ---------------------------------------------------------------------------
 // Internal implementations that accept an explicit directory (testable).
 // ---------------------------------------------------------------------------
@@ -810,6 +825,31 @@ mod tests {
         let r2 = read_artifact_from(&dir, &key2).unwrap();
         assert!(r1.is_none(), "key1 should have been evicted");
         assert!(r2.is_none(), "key2 should have been evicted");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_evict_artifact_removes_stale_entry() {
+        // Regression (engine defect #2): a cached circuit whose var universe no
+        // longer matches the freshly-encoded CNF (canonical PIR hash keeps
+        // semantically-stable identity across engine changes that alter the
+        // encoding) must be evictable so the compile path can fall back to a
+        // fresh compile instead of failing with a var-mismatch compile error.
+        let dir = test_cache_dir();
+        let key = make_key(0xA11CE);
+        let artifact = make_artifact();
+
+        write_artifact_to(&dir, &key, &artifact).expect("write should succeed");
+        assert!(read_artifact_from(&dir, &key).expect("read ok").is_some());
+
+        evict_artifact_from(&dir, &key);
+        assert!(
+            read_artifact_from(&dir, &key).expect("read ok").is_none(),
+            "evicted entry must read as a cache miss"
+        );
+        // Eviction of a missing entry is a no-op, not an error.
+        evict_artifact_from(&dir, &key);
 
         let _ = fs::remove_dir_all(&dir);
     }

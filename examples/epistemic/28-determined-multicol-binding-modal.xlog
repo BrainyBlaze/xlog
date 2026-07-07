@@ -1,5 +1,5 @@
-// v0.9.2 SCOPE-LIMIT CLOSED: a modal that BINDS an output variable over a
-// DETERMINED-EPISTEMIC MULTI-COLUMN head -- now ACCEPTED via stratification.
+// A modal that BINDS an output variable over a
+// DETERMINED-EPISTEMIC MULTI-COLUMN head -- accepted via stratification.
 //
 //   r(X, Y)   :- edge(X, Y), know flag(X).   -- DETERMINED multi-column epistemic head
 //   out(X)    :- node(X), know r(X, Y).       -- modal over `r` BINDS the extra column Y
@@ -17,12 +17,12 @@
 // unbound. The unary determined-epistemic targets (examples 17/24/25) work because
 // their modals do NOT bind an extra output column.
 //
-// v0.9.2 closes this. EXECUTION stratifies (exactly as the landed stratified path):
+// The executor closes this. EXECUTION stratifies (exactly as the landed stratified path):
 // the LOWER stratum materializes the GATED multi-column `r` into the store as a base
 // relation (theorem applied ONCE at the STORE boundary via
 // `materialize_epistemic_head_relation`), and the HIGHER stratum `out` then reads
 // that materialized base `r` -- where it is locally INVARIANT and `know r(X, Y)`
-// binds `Y` via the EXISTING EGB-02 membership/join path (the strict invariant
+// binds `Y` via the EXISTING membership/join path (the strict invariant
 // resolve). The plan SCHEMA step additionally resolves the augmenting modal over a
 // DETERMINED target so the augmented `out(X, Y)` column types from `r`'s declaration
 // (no `UnsafeVariable`); that relaxation drives ONLY column typing, never runtime

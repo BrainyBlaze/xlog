@@ -1,5 +1,5 @@
-// v0.9.2 COMPLETENESS CELL: a NEGATED modal (`not know` / `not possible`) over an
-// epistemic-DERIVED head that is itself DETERMINED -- ACCEPTED via stratification.
+// A NEGATED modal (`not know` / `not possible`) over an
+// epistemic-DERIVED head that is itself DETERMINED -- accepted via stratification.
 //
 //   a(X)      :- know p(X).                  -- DETERMINED epistemic head (p is EDB)
 //   q_know(X) :- node(X), not know a(X).      -- negated modal over the DERIVED `a`

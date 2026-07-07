@@ -1,0 +1,112 @@
+---
+title: "Bounded exact induction"
+description: "A non-gradient, GPU-native rule miner — it enumerates every candidate 2-body Datalog rule across four fixed topologies and returns the top-K per topology, deterministically."
+---
+
+Where [differentiable ILP](/neural/rule-learning) *searches* a rule space with
+gradients, bounded exact induction *enumerates* it. Given a head relation and a set of
+candidate relations, the engine scores every candidate 2-body rule against your positive
+and negative examples directly on the GPU, then returns the top-`K` rules per rule shape.
+There is no learning loop, no temperature, and no randomness: the same inputs always
+produce the same ranked output.
+
+<Note>
+Bounded exact induction ships in the `pyxlog` PyPI wheel that tracks the `v0.9.2`
+release, alongside the rest of the neural-symbolic surface. Its CUDA kernel is not yet
+in the formal certification registry, because its PTX is not committed — see
+[CUDA certification](/architecture/certification).
+</Note>
+
+## Four fixed topologies
+
+A "2-body" rule has a head `H(X, Y)` and two body atoms drawn from candidate relations
+`L` (left) and `R` (right). The engine considers exactly four ways those two atoms can
+share variables — the four topologies:
+
+| Topology | Rule shape | A pair `(x, y)` is covered when |
+|---|---|---|
+| `chain` | `H(X,Y) :- L(X,Z), R(Z,Y)` | some `z` has `(x, z)` in `L` and `(z, y)` in `R` |
+| `star` | `H(X,Y) :- L(X,Y), R(X,Y)` | `(x, y)` is in both `L` and `R` |
+| `fanout` | `H(X,Y) :- L(X,Z), R(X,Y)` | `(x, y)` is in `R` and `x` has some outgoing `L` edge |
+| `fanin` | `H(X,Y) :- L(X,Y), R(Z,Y)` | `(x, y)` is in `L` and `y` has some incoming `R` edge |
+
+Each `(topology, L, R)` combination is scored in isolation against its own template. The
+kernel implements the four coverage predicates directly on the candidate row sets — it
+does not route through general rule evaluation — so there is no cross-candidate
+contamination by construction.
+
+## How a call runs
+
+One CUDA launch covers the whole sweep. The grid is `(C, C, 4)` blocks, one block per
+`(left, right, topology)` triple over the `C` candidate relations; each block scans all
+positive and negative query pairs for its triple and writes exactly one coverage slot.
+Because every block owns a distinct output slot, the scoring path uses no cross-block
+atomics, which is what makes the result bit-for-bit deterministic. After scoring, the
+engine selects the top-`K` per topology on the device and the host performs a fixed
+lexicographic sort to break ties.
+
+Column types are dispatched explicitly: `u64` columns use one kernel, `u32` and
+`symbol` columns use another (symbols keep their logical schema and never silently
+narrow). A request that mixes `u32` and `symbol` candidate types is rejected with a
+typed error rather than coerced.
+
+## One counted transfer per call
+
+The scoring sweep does no host round-trips. Setup uploads (a small candidate-offset
+array, device-to-device column concatenation) are constant-size and are not
+device-to-host transfers. The production `induce_exact` call downloads results exactly
+**once** — a single compact export of the selected top-`K` rows — regardless of how many
+candidates, queries, or topologies are involved. This is tracked by
+`prog.d2h_transfer_count()`.
+
+<Note>
+You may see "two count-array transfers" mentioned for the parity and chain-shared-memory
+tests. That is a separate diagnostic path that reads back the raw per-slot count arrays
+to compare against a reference implementation; it is test-only accounting. The
+production `induce_exact(backend="native")` path counts exactly one device-to-host
+transfer.
+</Note>
+
+## The Python API
+
+`induce_exact` takes a compiled program, the head and candidate relation names, and the
+positive (and optional negative) example pairs as device tensors:
+
+```python
+from pyxlog.ilp import induce_exact
+
+result = induce_exact(
+    prog,                        # CompiledIlpProgram
+    head_relation="p_A",
+    candidate_relations=["p_B", "p_C", "p_D"],
+    positive_arg0=pos_a0,        # 1-D device torch tensors
+    positive_arg1=pos_a1,
+    negative_arg0=neg_a0,        # optional
+    negative_arg1=neg_a1,
+    k_per_topology=2,
+    backend="native",
+)
+
+for cand in result.candidates:
+    print(cand.topology, cand.left_rel_idx, cand.right_rel_idx,
+          cand.positives_covered, cand.negatives_covered)
+```
+
+It returns an `ExactInductionResult` whose `candidates` list holds the ranked
+`ScoredCandidate` records — each carrying its topology, the left and right relation ids,
+positive and negative coverage counts, and its local rank. When you pass no negatives,
+the engine synthesizes an empty negative buffer so the kernel signature stays uniform;
+when there are no candidates or no positives, it returns an all-zero result rather than
+launching.
+
+## See also
+
+<Card title="Rule learning (differentiable ILP)" icon="brain" href="/neural/rule-learning">
+  The gradient-trained counterpart — learn a clause with Gumbel-Softmax masking and
+  promote it through reliability gates.
+</Card>
+
+<Card title="Diagnostics and provenance" icon="clipboard-list" href="/guides/diagnostics">
+  Audit records for mined rules — support rows, rejected alternatives, and selection
+  traces.
+</Card>

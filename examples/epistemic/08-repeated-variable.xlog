@@ -1,4 +1,4 @@
-// v0.9.1 EGB-02: repeated-variable equality in a modal tuple key.
+// repeated-variable equality in a modal tuple key.
 // reflexive(X) requires know self(X, X) — the repeated variable forces both
 // columns to the same value, so self(4, 5) does NOT qualify. Expect: {3}.
 

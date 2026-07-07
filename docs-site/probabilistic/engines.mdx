@@ -1,0 +1,193 @@
+---
+title: "Probabilistic engines"
+description: "Attach probabilities to facts and let XLOG compute marginals and conditionals — exactly by GPU knowledge compilation, or approximately by a GPU-resident Monte Carlo megakernel."
+---
+
+XLOG lets you attach a probability to a fact and then ask what the rules imply about
+the world. You write ordinary facts and rules, mark the uncertain ones with a
+probability, state what you have observed with `evidence(...)`, and ask for a marginal
+or conditional probability with `query(...)`. XLOG evaluates the query with one of two
+engines — an **exact** engine built on GPU knowledge compilation, or an **approximate**
+Monte Carlo engine that samples on the GPU.
+
+## Writing a probabilistic program
+
+A **probabilistic fact** is a fact prefixed with a probability and `::`. It holds with
+that probability and fails otherwise:
+
+```xlog
+0.7::rain().
+0.2::sprinkler().
+```
+
+An **annotated disjunction** places several outcomes on one line, separated by `;`,
+each with its own probability. Exactly one outcome is chosen; if the probabilities sum
+to less than `1`, the remaining mass is an implicit "none" outcome:
+
+```xlog
+0.6::coin(heads); 0.4::coin(tails).
+```
+
+You condition on observations with `evidence(...)` and ask for probabilities with
+`query(...)`:
+
+```xlog
+evidence(wet(), true).
+query(rain()).
+```
+
+Rules are written exactly as in a deterministic program — the probability lives on the
+facts, and the engine propagates it through the derivations.
+
+<Note>
+Select the engine with `#pragma prob_engine = exact_ddnnf` or
+`#pragma prob_engine = mc`. From Python, the `prob_engine` argument to
+`Program.compile(...)` takes precedence over the pragma.
+</Note>
+
+## Two engines
+
+| Engine | Pragma | What it computes | When to reach for it |
+|---|---|---|---|
+| Exact | `exact_ddnnf` | Exact marginals and conditionals via knowledge compilation, with gradients | Negation, recursion, and small aggregates where you need an exact answer |
+| Monte Carlo | `mc` | Sampled estimates with a confidence interval | Larger models, or anything outside the exact engine's supported fragment |
+
+## Exact inference
+
+The exact engine (`exact_ddnnf`) computes exact probabilities by compiling your program
+into a circuit and counting its weighted models. The path is GPU-native end to end:
+
+<Frame caption="The exact path compiles provenance to CNF, then to a verified GPU Decision-DNNF, then to the XGCF circuit; the circuit is compiled once and evaluated many times, with gradients flowing back through it.">
+  <img className="block dark:hidden" src="/assets/diagrams/knowledge-compilation-light.svg" alt="Exact inference pipeline: PIR provenance to CNF (Tseitin), to GPU Decision-DNNF (compile plus CDCL verify), to the XGCF circuit format, to weighted model counting; the compile stages run once and gradients flow backward through XGCF." />
+  <img className="hidden dark:block" src="/assets/diagrams/knowledge-compilation-dark.svg" alt="Exact inference pipeline: PIR provenance to CNF (Tseitin), to GPU Decision-DNNF (compile plus CDCL verify), to the XGCF circuit format, to weighted model counting; the compile stages run once and gradients flow backward through XGCF." />
+</Frame>
+
+<Steps>
+  <Step title="Provenance">
+    Rule evaluation records, for every derived tuple, the probabilistic choices that
+    support it — a provenance graph over the probabilistic facts and annotated
+    disjunctions.
+  </Step>
+  <Step title="CNF">
+    The provenance graph is encoded into a Boolean formula (`CNF`) with a
+    device-resident variable map.
+  </Step>
+  <Step title="Decision-DNNF">
+    A GPU compiler turns the `CNF` into a Decision-DNNF circuit, and a GPU CDCL solver
+    verifies the circuit is logically equivalent to the formula before it is trusted.
+  </Step>
+  <Step title="Weighted model counting">
+    The verified circuit (`XGCF`) is evaluated in log-space to produce
+    `log P(Q and E)` and `log P(E)`; their difference is the conditional probability
+    `log P(Q | E)`.
+  </Step>
+</Steps>
+
+Gradients flow through the same circuit, including through negation: a negated literal
+contributes with the correct sign flip, so a probabilistic program stays differentiable
+end to end and can sit inside a training loop.
+
+<Frame caption="The XGCF circuit is a levelized DAG: literal leaves feed AND and OR nodes evaluated one level per kernel launch in log space, and adjoints propagate back down to produce gradients at the leaves.">
+  <img className="block dark:hidden" src="/assets/diagrams/xgcf-circuit-light.svg" alt="XGCF circuit structure: LIT leaf nodes at level 0 feed AND nodes at level 1 and an OR root using logsumexp at level 2, producing the log probability of the query; a dashed backward path carries adjoints from the root back to gradients at the leaves." />
+  <img className="hidden dark:block" src="/assets/diagrams/xgcf-circuit-dark.svg" alt="XGCF circuit structure: LIT leaf nodes at level 0 feed AND nodes at level 1 and an OR root using logsumexp at level 2, producing the log probability of the query; a dashed backward path carries adjoints from the root back to gradients at the leaves." />
+</Frame>
+
+<Note>
+**Honest residency.** The exact engine is GPU-accelerated but host-orchestrated: the
+forward evaluation launches one kernel per circuit level from a host loop. No per-level
+data is read back — the circuit and its intermediate values stay on the device, and only
+`O(1)` scalars (the log-partition value and per-query gradients) return to the host after
+evaluation. This is not the single-launch, device-resident contract that the Monte Carlo
+engine offers; do not cite it as such.
+</Note>
+
+There is no CPU Decision-DNNF compiler in XLOG. The engine never vendors a d-DNNF
+compiler and never shells out to an external `d4` binary; production exact inference is
+the GPU compiler and verifier described above. Decision-DNNF parsing survives only for
+tests and fixtures.
+
+### Aggregates in exact inference
+
+The exact engine can push aggregates through uncertainty up to fixed, honest bounds:
+
+- For `sum`, `min`, `max`, and `logsumexp`, it enumerates the outcomes of up to
+  `16` uncertain rows per group exactly.
+- For `count`, a dedicated count-lifting path handles up to `64` uncertain rows per
+  group.
+
+Beyond those caps the engine **fails closed** with a typed rejection rather than
+silently approximating — the diagnostic tells you to switch to `#pragma prob_engine = mc`
+for that program.
+
+## Monte Carlo inference
+
+The Monte Carlo engine (`mc`) estimates probabilities by sampling. Its production path is
+a **GPU-resident megakernel**: all sampled worlds are evaluated in a single kernel launch
+followed by one synchronization, and the engine proves a zero-host contract for that
+region — `0` tracked host-to-device transfers, `0` tracked device-to-host transfers, and
+`0` untracked metadata reads, held constant whether you draw `128` samples or `1024`.
+Evidence is handled by rejection sampling: only sampled worlds satisfying `evidence(...)`
+are counted, and each query reports an estimate `prob` (with `log_prob`), a standard error
+`stderr`, a two-sided confidence interval (`ci_low`, `ci_high`), the sample counts, and
+the `seed`.
+
+<Frame caption="One kernel launch evaluates every sampled world in parallel on the device; counts stay device-resident, and the host reads back only the final estimate.">
+  <img className="block dark:hidden" src="/assets/diagrams/mc-resident-megakernel-light.svg" alt="Monte Carlo resident megakernel: a fragment gate rejects unsupported programs with a typed error; supported programs enter a single GPU-resident kernel launch where each world samples facts, derives, and checks the query in parallel; per-world results accumulate into device-resident counts that produce the estimate with confidence interval and seed." />
+  <img className="hidden dark:block" src="/assets/diagrams/mc-resident-megakernel-dark.svg" alt="Monte Carlo resident megakernel: a fragment gate rejects unsupported programs with a typed error; supported programs enter a single GPU-resident kernel launch where each world samples facts, derives, and checks the query in parallel; per-world results accumulate into device-resident counts that produce the estimate with confidence interval and seed." />
+</Frame>
+
+<Warning>
+The resident Monte Carlo engine **fails closed**. It rejects programs that use negation,
+aggregates, or annotated disjunctions with a typed rejection, and never falls back to a
+host-sized path. The `--allow-cpu-oracle` flag (Python: `allow_cpu_oracle=True`) is an
+explicit, labeled opt-in that runs a CPU oracle instead; its results are marked
+`mc_engine: "cpu-oracle"` and are **never** valid GPU-native or zero-host evidence.
+</Warning>
+
+The resident fragment is bounded so the arena can be sized deterministically before any
+device allocation. A program is accepted only when it stays within:
+
+| Bound | Limit |
+|---|---|
+| Predicate arity | `<= 3` |
+| Body literals per rule | `<= 3` |
+| Distinct variables per rule | `<= 8` |
+| Universe (bounded domain) | `<= 65536` |
+| Domain size | `<= 256` |
+
+A program that would exceed the resident arena budget fails closed with a
+`ResourceExhausted` error before allocation — there is no host-sizing fallback.
+
+## A worked example
+
+The classic wet-grass model: rain and the sprinkler each make the grass wet, we observe
+that the grass is wet, and we ask how likely each cause was.
+
+```xlog
+0.7::rain().
+0.2::sprinkler().
+
+wet() :- rain().
+wet() :- sprinkler().
+
+evidence(wet(), true).
+
+query(rain()).
+query(sprinkler()).
+```
+
+Run it with the exact engine:
+
+```bash
+xlog run wet-grass.xlog
+```
+
+Because the grass is wet, both causes become more likely than their priors, and rain —
+the stronger prior — carries most of the posterior mass. Conditioning on an aggregate or
+adding non-monotone recursion to a larger model is where you would switch to
+`#pragma prob_engine = mc`.
+
+<Card title="Rule learning" icon="brain" href="/neural/rule-learning">
+  The exact engine's differentiable circuits are the same infrastructure that trains
+  neural predicates and learned rules end to end with PyTorch.
+</Card>

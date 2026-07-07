@@ -1,0 +1,101 @@
+---
+title: "Factorized Execution Internals"
+description: "Implementation notes for the main-only factorized routes: WCOJ aggregate fusion, Free Join frontiers, and dense or sparse recursive deltas."
+---
+
+This page describes the internal shape of XLOG's factorized execution routes on
+`main`. The routes are unreleased beyond 0.9.2.
+
+## Design Pattern
+
+Every factorized route follows the same pattern:
+
+1. recognize a rule shape that can avoid a large intermediate;
+2. prove the needed key, width, and variable-layout constraints;
+3. choose a compact representation;
+4. run a CUDA route over that representation;
+5. install the result only after row-set or aggregate parity is preserved;
+6. decline to fallback when the contract is not met.
+
+## Aggregate-Fused WCOJ
+
+Aggregate-fused WCOJ routes grouped aggregate shapes through kernels that reduce
+by a planned root variable.
+
+Instead of:
+
+1. materialize all joined tuples;
+2. group by the root key;
+3. reduce values;
+
+the fused path accumulates the aggregate during the WCOJ traversal. The runtime
+still checks shape, key width, aggregate operator, and group-key position before
+dispatch.
+
+## Free Join Frontiers
+
+Free Join represents multiway execution as a frontier over sorted range tries:
+
+- relation columns are laid out so prefix probes can advance level by level;
+- each frontier level binds another variable or proves that a branch has no
+  compatible tuples;
+- identity groups and probe filters avoid unnecessary expansion;
+- count-by-root can multiply remaining trie-range lengths for private variables
+  instead of enumerating each full binding.
+
+The runtime order planner chooses a prefix-key-compatible order only when it is
+expected to preserve the factorized benefit. Otherwise the route declines.
+
+## Recursive Delta Factorization
+
+Factorized recursive deltas target rules such as transitive closure, where a
+delta join can produce many witnesses for the same novel tuple.
+
+<Frame caption="Inside the semi-naive loop, the delta join routes dense, sparse, or legacy based on domain size and byte budget — every route produces the same novel set.">
+  <img className="block dark:hidden" src="/assets/diagrams/factorized-recursive-delta-light.svg" alt="Factorized recursive delta routing: the delta join passes through a router checking domain and budget, dispatching to a dense GPU bitvector route, a sparse GPU hash-set route, or the legacy join-plus-diff route; all three converge on the same novel set, which feeds the next semi-naive round." />
+  <img className="hidden dark:block" src="/assets/diagrams/factorized-recursive-delta-dark.svg" alt="Factorized recursive delta routing: the delta join passes through a router checking domain and budget, dispatching to a dense GPU bitvector route, a sparse GPU hash-set route, or the legacy join-plus-diff route; all three converge on the same novel set, which feeds the next semi-naive round." />
+</Frame>
+
+The dispatcher chooses among:
+
+| Route | Representation | Decline reason |
+| --- | --- | --- |
+| Dense | Root-indexed bitvectors over a bounded domain. | Domain too large or unsupported shape. |
+| Sparse | GPU open-addressing hash set over distinct candidates. | Table estimate or byte budget exceeds limits. |
+| Legacy | Hash join followed by diff. | Fallback for unsupported or declined cases. |
+
+Both factorized routes must produce the same novel set as the legacy recursive
+path.
+
+## Loss Vetoes
+
+Factorized execution is not always better. The cost model can veto a route when
+available statistics show that the ordinary binary path should be cheaper or no
+prefix-key-compatible Free Join order is viable.
+
+Missing stats should not manufacture confidence. The route either uses a safe
+default, keeps the existing order, or declines.
+
+## Device And Host Boundaries
+
+The executor remains host-side control. It chooses routes, owns counters, and
+installs resulting relation buffers. CUDA kernels own the data-plane work:
+frontier expansion, grouped accumulation, dense bitvector novel-set computation,
+and sparse hash-set novel-set computation.
+
+Use transfer telemetry when a route claims no tracked host data movement in its
+hot loop.
+
+## Verification Obligations
+
+A factorized route is not complete until evidence shows:
+
+- fallback parity with the route disabled;
+- dispatch counter increments with the route enabled;
+- unsupported shapes decline cleanly;
+- budget and overflow conditions fail closed;
+- recursive routes converge to the same full relation as the legacy path;
+- aggregate routes match the materialize-plus-groupby result.
+
+Those obligations are route-specific. Passing a generic docs or unit-test gate
+does not prove a factorized CUDA path fired.

@@ -6181,7 +6181,7 @@ fn accepted_split_quaternary_all_operator_batch_rejects_hot_path_host_transfers(
 
 #[test]
 fn split_multi_membership_modal_coupling_solves_jointly_per_component() {
-    // EGB-06: a rule coupling more than one DISTINCT epistemic body predicate is no
+    // a rule coupling more than one DISTINCT epistemic body predicate is no
     // longer rejected by the split layer. Each such rule's modal predicates are
     // unioned into a single component that the joint path solves as a full modal
     // conjunction over the candidate world view; independent heads form independent

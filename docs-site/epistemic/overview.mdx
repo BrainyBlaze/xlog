@@ -1,0 +1,141 @@
+---
+title: "Epistemic reasoning"
+description: "Reason about what is known and what is possible across the stable models of a program — modal operators, world-view semantics, FAEEL and Gelfond-1991 modes, and a GPU Generate-Propagate-Test executor."
+---
+
+Epistemic reasoning lets a program ask not just what is true, but what is *known* and
+what is *possible*. Where deterministic Datalog computes a single model, an epistemic
+program reasons over the whole collection of a program's stable models — its **world
+views** — and the modal operators `know` and `possible` quantify over them. XLOG accepts
+these programs, builds an epistemic intermediate representation, and executes them on the
+GPU.
+
+## Modal operators
+
+You write a modal literal by prefixing a body atom with `know` or `possible`, and you can
+negate either one. Over a world view — a non-empty set of accepted stable models — the
+operators mean:
+
+| Operator | Holds when |
+|---|---|
+| `know p` | `p` appears in every world |
+| `possible p` | `p` appears in at least one world |
+| `not know p` | `know p` does not hold |
+| `not possible p` | `possible p` does not hold |
+
+Operators may be nested into finite modal chains. XLOG preserves the chain, then
+normalizes it to a single-level literal by parity and duality before execution — for
+example `know possible p` reduces to `possible p`, and `know possible not p` reduces to
+`not know p`.
+
+## World-view semantics
+
+An epistemic program is evaluated against its world view rather than a single model. A
+rule like
+
+```xlog
+safe(P) :- person(P), know vaccinated(P).
+```
+
+fires for a person only when `vaccinated(P)` is settled across *every* world the program
+admits — knowledge, not mere possibility. Swapping `know` for `possible` weakens the
+requirement to holding in *at least one* world. This distinction is the whole point of the
+layer: `possible p` and `not know p` can both be true of the same atom, and that is how you
+express genuine uncertainty about what the program commits to.
+
+## Choosing a semantics
+
+Two world-view semantics are available, selected with a pragma:
+
+```xlog
+#pragma epistemic_mode = faeel
+#pragma epistemic_mode = g91
+```
+
+`faeel` is the default and requires *founded* support: both `know p` and `possible p` demand
+that `p` be founded, so purely self-supporting `possible` (as in `p() :- possible p().`)
+collapses to the empty founded extension. `g91` selects Gelfond-1991 semantics, under which
+that same self-support is accepted. Choose `faeel` when you want knowledge to be grounded in
+derivation, and `g91` for classical Gelfond-1991 compatibility.
+
+## How it runs
+
+XLOG builds an **epistemic IR** from your program (bare modal lowering is rejected; accepted
+execution always goes through this boundary), then executes **Generate-Propagate-Test** on
+the GPU:
+
+<Frame caption="Generate-Propagate-Test runs on the GPU: candidate world views are enumerated, pruned to the consistent ones, and tested; the founded world views are accepted.">
+  <img className="block dark:hidden" src="/assets/diagrams/epistemic-gpt-light.svg" alt="Epistemic Generate-Propagate-Test: on the GPU, Generate enumerates candidate world views, Propagate prunes inconsistent ones, Test applies brave and cautious checks, and the founded world views are accepted." />
+  <img className="hidden dark:block" src="/assets/diagrams/epistemic-gpt-dark.svg" alt="Epistemic Generate-Propagate-Test: on the GPU, Generate enumerates candidate world views, Propagate prunes inconsistent ones, Test applies brave and cautious checks, and the founded world views are accepted." />
+</Frame>
+
+<Steps>
+  <Step title="Generate">
+    Candidate world views are enumerated from the program's epistemic literals.
+  </Step>
+  <Step title="Propagate">
+    Immediate known-or-rejected contradictions are pruned before any candidate is tested.
+  </Step>
+  <Step title="Test">
+    Each surviving candidate is evaluated under the selected semantics, and the founded
+    world views are accepted.
+  </Step>
+</Steps>
+
+To keep the search tractable, **epistemic splitting** decomposes the program: independent
+components are solved separately, while rules that genuinely couple more than one modal
+predicate are unioned into a single component and solved jointly as a modal conjunction over
+the candidate world view. The original rule order is recovered after the components are
+recomposed.
+
+## Bounds and failing closed
+
+The number of candidate world views is `2^(number of epistemic literals)` — one candidate
+per truth assignment to the program's epistemic literals. That enumeration is gated by a
+per-reduction model cap, `MAX_MODELS_PER_REDUCTION = 1024`, which bounds how many models any
+single reduction may produce. Genuinely-cyclic modal coupling with no founded or well-founded
+evaluation order **fails closed** with a typed diagnostic rather than being solved by guessing.
+
+<Warning>
+There is no `k <= 24` limit and no `50000`-candidate limit — earlier design notes that quoted
+those figures do not reflect the shipped engine. The real bound is `2^(number of epistemic literals)`
+candidates, capped per reduction by `MAX_MODELS_PER_REDUCTION = 1024`.
+</Warning>
+
+## A worked example
+
+Only Alice is on record as vaccinated, so she is the only person `know vaccinated` can settle
+across every world:
+
+```xlog
+#pragma epistemic_mode = faeel
+
+pred person(symbol).
+pred vaccinated(symbol).
+pred safe(symbol).
+
+person(alice).
+person(bob).
+vaccinated(alice).
+
+safe(P) :- person(P), know vaccinated(P).
+
+?- safe(P).
+```
+
+```bash
+xlog run safe.xlog
+```
+
+The query returns `alice` alone: `bob` is a person, but nothing makes his vaccination status
+known, so `know vaccinated(bob)` fails and he is not derived as safe.
+
+<Note>
+The epistemic capability described here — the modal operators, `faeel` and `g91` modes,
+GPU Generate-Propagate-Test, and epistemic splitting — shipped in XLOG v0.9.2.
+</Note>
+
+<Card title="How XLOG works" icon="diagram-project" href="/core-concepts/how-xlog-works">
+  Epistemic reasoning reuses the same parser, stratifier, and CUDA runtime as every other
+  XLOG paradigm — see how a program travels from source to GPU.
+</Card>
