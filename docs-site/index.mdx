@@ -11,7 +11,7 @@ Neural-symbolic systems today keep symbolic reasoning on the CPU while neural co
 on the GPU, and every training iteration pays a PCIe round-trip that dominates wall-clock time
 at scale. XLOG closes that gap: symbolic evaluation is GPU-resident with zero tracked
 host–device transfers in production data planes. Compiled circuits are cached across training
-iterations and GPU-resident results are exposed through DLPack and Arrow for zero-copy interop
+iterations. GPU-resident results are exposed through DLPack and Arrow for zero-copy interop
 with PyTorch, JAX, and cuDF. On the MNIST-addition neural-symbolic benchmark this yields a
 measured **2.74× end-to-end speedup** (95% CI `[2.29, 3.18]`) over a CPU-resident baseline.
 

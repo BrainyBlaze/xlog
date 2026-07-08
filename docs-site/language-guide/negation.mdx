@@ -12,6 +12,11 @@ isolated(X) :- node(X), not edge(X, _).
 
 A node is isolated when it is a node and there is no edge leaving it.
 
+Reach for `not` when the *absence* of a fact is what you care about — isolated nodes,
+unreached states, records with no match. You know it worked when the rule compiles and
+runs: if a variable is left unbound or the program cannot be stratified, XLOG rejects it
+at compile time with an explicit error (both cases are covered below).
+
 ## Negation-as-failure, closed-world
 
 `not atom` is **negation-as-failure** under the **closed-world assumption**: the engine
@@ -63,7 +68,8 @@ needs to be bound beforehand.
 ## A different kind of negation for probabilities
 
 The `not` described here is the deterministic, two-valued negation of ordinary Datalog
-rules. Probabilistic programs use a distinct **well-founded** negation over uncertain
+rules. Probabilistic programs use a distinct **well-founded** negation — a negation semantics
+that stays well-defined even when negation and recursion interact — over uncertain
 facts, which is evaluated differently and lives in its own surface.
 
 <Card title="Arithmetic and functions" icon="calculator" href="/language-guide/arithmetic-and-functions">

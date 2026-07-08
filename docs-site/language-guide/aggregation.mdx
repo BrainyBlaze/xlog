@@ -79,6 +79,11 @@ widening is needed.
 
 ## Aggregation is stratified
 
+**When this matters:** only if an aggregate's inputs could loop back to its own result —
+usually recursive rules; otherwise you can skip this section. *Stratified* means xlog
+settles those inputs in order, computing the aggregate only after everything it reads is
+final.
+
 An aggregate introduces a **stratification boundary**: a relation defined by aggregation
 cannot depend, recursively, on itself through that aggregate. Concretely, you cannot
 have a rule whose head aggregates a predicate that (directly or transitively) depends on

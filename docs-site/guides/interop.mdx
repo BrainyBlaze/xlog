@@ -62,6 +62,10 @@ for q in result.queries:
     print(q.relation_name, q.num_rows, cols)
 ```
 
+**Confirm it stayed on the GPU.** Check each wrapped tensor's device: `cols[0].device`
+reports `cuda` (the same device XLOG computed on). A host round-trip would surface as
+`cpu` instead.
+
 Input relations travel the same path in reverse. `evaluate(dlpack_inputs=...)` takes a
 mapping from relation name to a sequence of 1-D DLPack columns — one tensor per column,
 never a single 2-D tensor:
