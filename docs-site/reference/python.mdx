@@ -3,7 +3,11 @@ title: "Python API (pyxlog)"
 description: "Reference for the pyxlog Python bindings: deterministic and probabilistic program APIs, DLPack interop, neural-symbolic training, and ILP rule learning."
 ---
 
-This document describes the Python bindings for XLOG, implemented using PyO3 and exposing GPU tensors via DLPack for zero-copy interoperability.
+`pyxlog` lets you compile and run XLOG programs from Python and hand GPU tensors
+back and forth with PyTorch, CuPy, JAX, and TensorFlow without copying them. It is
+built with PyO3 (a framework for exposing Rust code to Python) and moves GPU
+tensors across the boundary using DLPack (a framework-neutral standard for sharing
+a tensor's device memory without a copy).
 
 <Note>
 Always `import pyxlog`, never `pyxlog._native`. The package has two layers: a native
@@ -18,21 +22,25 @@ will make those methods appear missing.
 
 The `pyxlog` Python module provides:
 
-- Deterministic Datalog execution via `LogicProgram`
-- Probabilistic inference via `Program`
+- Deterministic (ordinary, non-probabilistic) Datalog execution via `LogicProgram`
+- Probabilistic inference (facts and rules carry probabilities) via `Program`
 - Term embedding registration and lookup via `register_embedding` / `forward_embedding`
-- Differentiable ILP training via `pyxlog.ilp` (rule learning from examples)
-- Reusable external-consumer diagnostics for learned-rule inventories, CUDA
-  hot-loop audits, and grouped transfer metrics
-- Zero-copy GPU tensor exchange via DLPack (primary interop boundary)
-- Optional experimental Arrow C Device interop (feature-gated)
-- Living-world diagnostics for rule provenance, proof traces, relation delta debug,
-  temporal relation metadata, and neural hot-loop audits
+- Differentiable inductive logic programming (ILP) — learning Datalog rules from
+  labeled examples — via `pyxlog.ilp`
+- Reusable diagnostics for downstream applications ("external consumers"):
+  learned-rule inventories, audits of the tight GPU inner loop ("hot loop"), and
+  grouped transfer metrics
+- Zero-copy GPU tensor exchange via DLPack (the primary interop boundary)
+- Optional, experimental Apache Arrow C Device interop (enabled by a build feature)
+- Runtime introspection surfaces ("living-world diagnostics"): rule provenance,
+  proof traces, incremental relation-change ("delta") debugging, temporal relation
+  metadata, and neural hot-loop audits
 
-Host-read convenience outputs (probabilities, gradients, confidence intervals) are behind a `host-io`
-Cargo feature so GPU-native call sites can enforce a "no device-to-host result
-transfer" contract. For the full living-world diagnostics map, see
-[Living-World Diagnostics](/guides/diagnostics).
+Convenience outputs that must be read on the host CPU (probabilities, gradients,
+confidence intervals) are behind a `host-io` Cargo build feature. Keeping them
+optional lets GPU-native code enforce a rule that results never transfer from the
+device (GPU) back to host (CPU) memory. For the full map of runtime introspection
+surfaces, see [Living-World Diagnostics](/guides/diagnostics).
 
 ## Installation
 
@@ -53,7 +61,7 @@ export XLOG_CUBIN_DIR=/path/to/xlog/crates/pyxlog/python/pyxlog/kernels
 python your_probe.py
 ```
 
-This is especially important for `pipeline_run`-style execution on saved
+This matters most for `pipeline_run`-style execution on saved
 artifacts: cold starts without `XLOG_CUBIN_DIR` can fail if the active install
 does not contain `pyxlog/kernels/`.
 
@@ -71,6 +79,8 @@ with the same interpreter's `pip`, and verifies that the installed package has
 and are not tracked in git.
 
 ### Build Features
+
+Build features are compile-time flags that turn optional API surfaces on:
 
 - `host-io`: enable host-read convenience APIs (e.g. `CompiledProgram.evaluate(...)`)
 - `arrow-device-import`: enable experimental Arrow C Device export/import helpers
@@ -95,6 +105,9 @@ python scripts/install_pyxlog_for_python.py --python /usr/local/bin/python \
 ## API Reference
 
 ### LogicProgram (Deterministic)
+
+Compiles and runs an ordinary (non-probabilistic) Datalog program on the GPU and
+returns each query's answer as DLPack columns (one tensor per column).
 
 ```python
 import pyxlog
@@ -182,12 +195,16 @@ The persistent session path is additive:
 
 #### Persistent Relation Deltas
 
-Persistent sessions also support DLPack-backed relation deltas for external consumer
-session-update loops. `insert_relation(...)`, `delete_relation(...)`, and
-`apply_relation_delta(...)` update the session relation store through the
-runtime `RelationDelta` / `apply_deltas_and_recompute` path. Insert-only
-monotone SCCs keep prior materialized output where the execution plan permits
-it; delete-containing deltas clear and recompute affected SCCs for correctness.
+A delta is an incremental change to a relation — rows to add or remove — applied
+without recomputing the whole program. Persistent sessions accept DLPack-backed
+deltas so a caller can update its data in a loop.
+
+`insert_relation(...)`, `delete_relation(...)`, and `apply_relation_delta(...)`
+update the session's stored relations through the runtime's incremental-recompute
+path (`RelationDelta` / `apply_deltas_and_recompute`). Updates that only insert
+rows into a mutually-recursive relation group (a strongly connected component, or
+SCC) reuse previously computed output where the plan allows. Updates that delete
+rows clear and recompute the affected groups so results stay correct.
 
 ```python
 session.put_relation("external_consumer_commit", [row_id, parent_id])
@@ -224,14 +241,16 @@ nested `planner_telemetry`. Planner telemetry reports `cache_reused`,
 `estimated_delta_speedup`, `measured_delta_speedup`, and `planner_advice`.
 `equivalent_to_full_recompute` is `None` unless the caller opts into
 `check_equivalence=True`.
-Batch updates coalesce repeated relation mutations before runtime recompute
-using existing device-resident set operations; callback or diagnostic code must
-not materialize relation rows on the host.
-Direct `put_relation`, `remove_relation`, or `clear_relations` calls invalidate
-the cached runtime store and make the next `evaluate()` perform a full plan
+
+Batch updates merge repeated changes to the same relation before the runtime
+recomputes, using device-resident set operations. Callback and diagnostic code
+must not copy relation rows down to the host.
+
+Calling `put_relation`, `remove_relation`, or `clear_relations` directly
+invalidates the cached runtime store. The next `evaluate()` then does a full plan
 run before later deltas can reuse it.
 
-Persistent sessions retain their runtime executor across `evaluate()` and
+Persistent sessions keep their runtime executor across `evaluate()` and
 delta recompute calls, so persistent hash indexes can be reused through public
 pyxlog mutation loops. `session.join_index_cache_stats()` returns the retained
 executor's `lookups`, `hits`, `misses`, `builds`, invalidation counters,
@@ -263,15 +282,16 @@ metadata-only dictionary with `relation`, `generation`, `input_delta_count`,
 
 Callbacks are invoked synchronously while the pyxlog method holds the Python
 GIL. Registration order is callback order, and relation events are emitted in
-the caller's update order after duplicate relation names are coalesced. The
-relation-callback ordering fixture records 100 replays with identical callback
-sequences. Callback payload construction does not export DLPack tensors or
-download relation data-plane rows; use explicit `evaluate()` or
-`export_relation()` when row materialization is actually requested.
+the caller's update order after duplicate relation names are coalesced. This
+ordering is deterministic: a regression fixture confirms that 100 repeated runs
+produce identical callback sequences. Building a callback payload does not export
+DLPack tensors or download relation data rows; use explicit `evaluate()` or
+`export_relation()` when you actually need the rows materialized.
 
 #### Rule, Proof, And Temporal Provenance
 
-Compiled logic/probabilistic programs and sessions expose source-level introspection:
+Compiled logic/probabilistic programs and sessions can report where their results
+came from (provenance):
 
 ```python
 def rule_provenance() -> list[dict]: ...
@@ -359,7 +379,7 @@ class RelationEvidence:
 
 #### Runtime Controls And Diagnostics
 
-Long-running external consumer callers can submit logic or probabilistic evaluations to a
+Long-running callers can submit logic or probabilistic evaluations to a
 background Python worker with `evaluate_async(...)`. The returned
 `AsyncEvaluation` is awaitable and also exposes `done()`, `cancel()`,
 `exception()`, and `result(timeout=None)` for synchronous orchestration.
@@ -411,17 +431,19 @@ program.neural_hot_loop_diagnostics()
 `memory_stats()` reports `allocated_bytes`, `memory_limit_bytes`,
 `peak_memory_bytes`, and `status`. CUDA Graph stats report
 `csm_cuda_graph_captures`, `csm_cuda_graph_launches`,
-`csm_cuda_graph_fallbacks`, and `csm_cuda_graph_cache_hits`. Environments that
-cannot provide a future diagnostic must report an explicit unavailable status or
-error rather than fabricating a zero-valued probe.
+`csm_cuda_graph_fallbacks`, and `csm_cuda_graph_cache_hits`. If an environment
+cannot supply a given diagnostic, it reports an explicit unavailable status or
+error rather than a fabricated zero.
 
-`neural_hot_loop_diagnostics()` is the unified nn/4 hot-loop audit surface. It
-reports `post_load_dtoh_bytes`, `post_load_htod_bytes`,
+`neural_hot_loop_diagnostics()` is the single audit surface for the neural inner
+loop. (`nn/4` is a neural predicate declared with four arguments — the
+classification form, which carries a list of output labels.) It reports
+`post_load_dtoh_bytes`, `post_load_htod_bytes`,
 `control_plane_bytes_per_iteration`, `scalar_sync_checks`, nested
 `cuda_graph`, and nested `circuit_cache` diagnostics from the same runtime API.
 When this runtime cannot yet provide a separate control-plane or scalar-sync
 counter, the corresponding value is `None` and a `*_status` field explains why.
-The top-level `pyxlog` wrapper also carries nn/4 training lineage:
+The top-level `pyxlog` wrapper also carries `nn/4` training lineage:
 
 ```python
 program.register_network(
@@ -450,6 +472,13 @@ The lineage payload contains `checkpoint_hash`, `split_hashes`,
 `changed_acceptance` evidence recorded through `record_nn4_influence(...)`.
 
 ### Program (Probabilistic)
+
+Compiles and runs a probabilistic Datalog program — facts and rules annotated
+with probabilities, such as `0.3::rain` — and computes query probabilities. The
+`prob_engine` argument selects the inference method: `"exact_ddnnf"` compiles the
+program to a Boolean circuit (a deterministic, decomposable negation normal form,
+or d-DNNF) that makes exact probability and gradient computation tractable, while
+`"mc"` estimates probabilities by Monte Carlo sampling.
 
 ```python
 import pyxlog
@@ -534,19 +563,23 @@ print(f"95% CI: [{float(ci_low[0].item())}, {float(ci_high[0].item())}]") # host
 
 ### Experimental Arrow C Device Interop (Feature `arrow-device-import`)
 
-When built with `--features arrow-device-import`, `pyxlog` exposes:
+These helpers bridge XLOG's DLPack columns to Apache Arrow's C Device interface —
+a standard for sharing columnar data that already lives on a device (GPU) —
+without host copies. When built with `--features arrow-device-import`, `pyxlog`
+exposes:
 
 - `pyxlog.export_arrow_device(...) -> PyCapsule` (name `arrow_device_array`)
 - `pyxlog.import_arrow_device(...) -> (dlpack_tensors, names, num_rows)`
 
-These helpers exist to bridge between DLPack columns and Arrow's C Device interface without host
-copies. This is experimental and currently rejects nulls; import does not yet support bit-packed
+This is experimental and currently rejects nulls; import does not yet support bit-packed
 `Bool`.
 
 ## Term Embeddings
 
 The `register_embedding` / `forward_embedding` API enables explicit PyTorch-side embedding training
-through the logic program. Embedding predicates use the label-free `nn/3` declaration form.
+through the logic program. Embedding predicates use the label-free `nn/3`
+declaration form (a neural predicate declared with three arguments and no output
+label list).
 
 ### Embedding Registration
 
@@ -594,12 +627,16 @@ vectors = program.forward_embedding("entity_embed", [0, 5, 42])
 
 ## Training Loop API (Neural-Symbolic)
 
-For neural-symbolic training with `nn/k` predicates, `Program` exposes loss
-computation, optimizer stepping, gradient clipping, learning-rate control, and
-batched training loops in addition to the single-query
-`forward_backward*` helpers.
+For neural-symbolic training with neural predicates (`nn/k` — a predicate backed
+by a neural network), `Program` exposes loss computation, optimizer stepping,
+gradient clipping, learning-rate control, and batched training loops, in addition
+to the single-query `forward_backward*` helpers.
 
 ### Loss computation
+
+The `nll_loss*` helpers compute a negative log-likelihood (NLL) loss — the
+standard training objective that penalizes low predicted probability for the
+target answer.
 
 ```python
 loss = program.nll_loss("addition(0, 1, 7)")
@@ -613,10 +650,11 @@ avg_loss = program.evaluate_loss(queries)
 
 ### External Consumer Bridge Helpers
 
-External bridge training keeps Belnap pro/contra/quarantine semantics in the
-Python/ML layer. Structural kernels remain oblivious to those channels. The
-helper surfaces operate on PyTorch tensors and preserve autograd unless the
-caller explicitly detaches inputs.
+These helpers keep a four-valued evidence model (Belnap logic) in the Python/ML
+layer: each candidate carries separate `pro` (evidence for), `contra` (evidence
+against), and `quarantine` (held-out) scores. The GPU structural kernels never see
+those channels. The helper surfaces operate on PyTorch tensors and preserve
+autograd unless the caller explicitly detaches inputs.
 
 ```python
 top = program.deterministic_topk(scores, k=4)
@@ -647,8 +685,10 @@ Registered-network output modes reuse the existing `register_network(..., k=N,
 det=True)` configuration. `forward_backward_tensor(...)`,
 `forward_backward(...)`, and batched neural-query training apply the configured
 stable top-k or deterministic top-1 mode before NLL loss and cached circuit
-probability import. Deterministic mode uses a hard top-1 forward value with a
-straight-through gradient path through the selected probability.
+probability import. Deterministic mode picks a single hard top-1 value on the
+forward pass, then routes gradients straight through the selected probability on
+the backward pass (a straight-through estimator, so the discrete choice still
+trains).
 
 ### Optimizer and scheduler control
 
@@ -681,8 +721,10 @@ profile = program.warmup_breakdown()
 
 ## ILP Training (dILP Beta)
 
-The `pyxlog.ilp` subpackage provides differentiable ILP (Inductive Logic Programming) for learning
-Datalog rules from examples via gradient descent.
+The `pyxlog.ilp` subpackage provides differentiable ILP (Inductive Logic
+Programming): it learns Datalog rules from labeled positive and negative examples
+by gradient descent, treating rule choice as something that can be optimized like
+neural weights. This surface is beta.
 
 ### Training API
 
@@ -745,6 +787,11 @@ print(loaded.logits)
 | `device` | 0 | CUDA device index |
 | `memory_mb` | 512 | GPU memory limit |
 
+The temperature fields (`tau_start`, `tau_floor`) control a Gumbel-softmax
+relaxation — a technique that makes discrete rule choices differentiable so they
+can be trained by gradient descent. Training starts hot (`tau_start`, soft and
+exploratory) and anneals toward `tau_floor` (sharp, near-discrete).
+
 ### Result Types
 
 ```python
@@ -769,8 +816,8 @@ promotion.rule_inventory  # RuleInventory | None
 
 ### External Consumer Diagnostics
 
-External consumer validation work adds reusable pyxlog helpers for the audit
-surface that used to live in example validators:
+These helpers package the ILP audit surface for downstream applications ("external
+consumers") as reusable pyxlog utilities:
 
 ```python
 from pyxlog.ilp.neurosymbolic import (
@@ -811,8 +858,8 @@ documentation.
 
 ### Device Query APIs
 
-For GPU-native ILP workflows, `CompiledIlpProgram` now exposes device-resident query helpers in
-addition to the existing host-returning helpers:
+For GPU-native ILP workflows, `CompiledIlpProgram` exposes device-resident query
+helpers (results stay on the GPU) alongside the existing host-returning helpers:
 
 ```python
 import torch
@@ -835,7 +882,8 @@ entry_j = torch.from_dlpack(credit.entry_j)                # int32 CUDA tensor
 entry_k = torch.from_dlpack(credit.entry_k)                # int32 CUDA tensor
 ```
 
-Contract notes:
+Contract notes (CSR here means compressed sparse row — a compact layout that
+stores per-row offsets plus a flat list of entries):
 
 - `batch_fact_membership()` and `batch_tagged_credit()` remain available for host-materialized Python outputs
 - `batch_fact_membership_device()` returns a DLPack bool tensor on CUDA
@@ -847,11 +895,12 @@ Contract notes:
 
 ### Bounded Exact Induction API
 
-`pyxlog.ilp.induce_exact(..., backend="native")` exposes the GPU-native
-bounded exact-induction scorer used by external consumer tensorized ILP consumers. The
-public entry point returns an `ExactInductionResult` containing
-`ScoredCandidate` rows grouped by topology order: `chain`, `star`, `fanout`,
-then `fanin`.
+Bounded exact induction searches a bounded space of candidate rules and scores
+each one exactly on the GPU, rather than optimizing rule choice by gradient
+descent. `pyxlog.ilp.induce_exact(..., backend="native")` is the GPU-native
+scorer. The public entry point returns an `ExactInductionResult` containing
+`ScoredCandidate` rows grouped by join shape (topology): `chain`, `star`,
+`fanout`, then `fanin`.
 
 ```python
 from pyxlog.ilp import induce_exact
@@ -883,30 +932,32 @@ and `.cubin` files are packaged build artifacts, not checked-in source files.
 
 ### Sparse Mask APIs
 
-`CompiledIlpProgram` exposes two sparse mask setters:
+A rule mask selects which candidate rules are active during training. Sparse mask
+setters let you pass only the selected candidates instead of a full dense vector.
+`CompiledIlpProgram` exposes two:
 
 - `set_rule_mask_sparse(name, candidate_ids, soft_probs, budget, allow_recursive=False)`
   is the legacy compatibility path. Rust receives the full candidate soft-probability vector and
   ranks it internally.
 - `set_rule_mask_sparse_selected(name, selected_candidate_ids, selected_soft_probs, allow_recursive=False)`
-  is the preferred hot-loop path. Python/Torch performs ranking on CUDA, then Rust consumes only
+  is the preferred inner-loop path. Python/Torch performs ranking on CUDA, then Rust consumes only
   the selected subset and preserves that order as the sparse active-rule list.
 
-The selected-candidate path is the one to prefer when enforcing zero
-provider-side device-to-host transfer during mask setup.
+Prefer the selected-candidate path when you need zero device-to-host transfer on
+the provider side during mask setup.
 
 ### GPU-Native Contract
 
-For Python consumers that need an auditable GPU-native ILP hot loop, the intended contract is:
+For Python consumers that need an auditable GPU-native ILP inner loop, the intended contract is:
 
-- Zero provider-tracked semantic-loop device-to-host transfer:
+- Zero provider-tracked device-to-host transfer inside the semantic loop:
   `set_rule_mask_sparse_selected(...)`,
   `batch_fact_membership_device(...)`,
   `batch_tagged_credit_device(...)`,
   and `compute_ilp_loss_grad_gpu(...)`
 - Metadata/control-plane reads may still occur behind public runtime/provider helpers such as
   cached row-count access; these are not relation-column materializations
-- Compatibility paths that are not suitable for a strict GPU-native hot loop:
+- Compatibility paths that are not suitable for a strict GPU-native inner loop:
   `set_rule_mask_sparse(...)`,
   `batch_fact_membership(...)`,
   `batch_tagged_credit(...)`,

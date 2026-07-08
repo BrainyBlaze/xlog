@@ -9,8 +9,9 @@ An unsupported subcommand fails explicitly rather than falling back to another m
 
 <Note>
 Host-readable output from `xlog prob` requires the CLI to be built with the `host-io`
-feature. Without it, `xlog prob` fails closed with a message telling you to rebuild —
-this keeps GPU-native call sites from accidentally reading results back to the host.
+feature. Without it, `xlog prob` fails closed — it stops with a message telling you to
+rebuild, rather than silently continuing. This keeps code paths that are meant to stay
+on the GPU from accidentally copying results back to the host (CPU) machine.
 </Note>
 
 ## Installation
@@ -20,9 +21,11 @@ cargo install xlog-cli --features host-io
 ```
 
 This requires Rust, Cargo, the CUDA Toolkit 13.x, and `nvcc` at install time. The
-installed binary embeds portable PTX for every runtime kernel, so it needs no sidecar
-`kernels/` directory. If `XLOG_CUBIN_DIR` or a binary-adjacent `kernels/` directory is
-present, xlog prefers those staged artifacts before falling back to embedded PTX.
+installed binary embeds portable PTX for every runtime kernel. (PTX is NVIDIA's
+portable GPU assembly; it is compiled to your specific device when a kernel is loaded.)
+Because the PTX is embedded, the binary needs no separate `kernels/` directory next to
+it. If `XLOG_CUBIN_DIR` or a binary-adjacent `kernels/` directory is present, xlog
+prefers those pre-built artifacts before falling back to the embedded PTX.
 
 To build from a workspace checkout instead:
 
@@ -33,11 +36,15 @@ cargo build --release -p xlog-cli --features host-io
 
 ## xlog run
 
-Execute a deterministic program.
+Execute a deterministic program — one with a single definite answer, no probabilities.
 
 ```bash
 xlog run [OPTIONS] <FILE>
 ```
+
+In the table below, an *EDB relation* is an input table of facts the program reads (as
+opposed to facts it derives). An *Arrow IPC file* is a file in Apache Arrow's columnar
+format, used to exchange tables between tools.
 
 | Option | Description | Default |
 |---|---|---|
@@ -49,7 +56,7 @@ xlog run [OPTIONS] <FILE>
 | `--stats` | Emit per-stratum timing and memory statistics to stderr. | off |
 | `--stats-format <FORMAT>` | `human` or `json` (written to stderr). | `human` |
 | `--module-path <DIR[:DIR...]>` | Extra module search paths. | — |
-| `--epistemic-plan-json <PATH>` | Write the compiled epistemic execution plan as JSON. | — |
+| `--epistemic-plan-json <PATH>` | Write the compiled epistemic execution plan as JSON. The plan describes how the program reasons about what it knows and does not know. | — |
 
 ```bash
 xlog run examples/xlog/00-basics/01_tc_reachability.xlog
@@ -60,7 +67,8 @@ xlog run --device 1 --memory-mb 2048 --stats program.xlog
 
 ## xlog prob
 
-Execute a probabilistic program.
+Execute a probabilistic program — one whose facts carry probabilities, so answers come
+back with a probability rather than a plain yes/no.
 
 ```bash
 xlog prob [OPTIONS] <SOURCE>
@@ -73,7 +81,7 @@ xlog prob [OPTIONS] <SOURCE>
 | `--seed <N>` | Random seed (`mc` only). | from `#pragma prob_seed` |
 | `--confidence <LEVEL>` | Confidence level for MC intervals. | `0.95` |
 | `--prob-method <METHOD>` | `rejection` or `evidence_clamping` (`mc` only). | from directives |
-| `--prob-max-nonmonotone-iterations <N>` | Cap on non-monotone iterations. Alias: `--max-nonmonotone-iterations`. | `1024` |
+| `--prob-max-nonmonotone-iterations <N>` | Cap on non-monotone iterations — passes where adding facts can retract earlier conclusions (from negation) and so may not settle on their own. Alias: `--max-nonmonotone-iterations`. | `1024` |
 | `--allow-cpu-oracle` | Permit the labeled CPU oracle when the GPU-resident MC engine rejects a program. Fail-closed when unset. | off |
 | `--output <FORMAT>` | `pretty`, `csv`, `arrow`, or `json`. | `pretty` |
 | `--output-dir <DIR>` | Directory for Arrow output files. | — |
@@ -81,15 +89,18 @@ xlog prob [OPTIONS] <SOURCE>
 | `--memory-mb <MB>` | GPU memory budget in mebibytes. | `1024` |
 | `--module-path <DIR[:DIR...]>` | Extra module search paths. | — |
 
-The exact engine (`exact_ddnnf`) and the Monte Carlo engine (`mc`) do not share
-sampling options — `--samples` and `--seed` apply only to `mc`.
+Two engines compute the probabilities. The exact engine (`exact_ddnnf`) compiles the
+program to a compact Boolean form that lets it count probabilities exactly. The Monte
+Carlo engine (`mc`) estimates them instead by running many random samples. The two do
+not share sampling options — `--samples` and `--seed` apply only to `mc`.
 
 <Warning>
-The production Monte Carlo engine is GPU-resident and rejects programs it cannot run on
-the device (for example, ones using negation or aggregates), rather than silently
-degrading. Passing `--allow-cpu-oracle` lets a rejected program fall back to a labeled
-CPU oracle; the result is tagged `mc_engine: "cpu-oracle"` and is never GPU-native
-evidence. Without the flag, a rejected program fails.
+The production Monte Carlo engine runs entirely on the GPU and rejects programs it
+cannot run on the device (for example, ones using negation or aggregates), rather than
+silently degrading. Passing `--allow-cpu-oracle` lets a rejected program fall back to a
+labeled CPU oracle — a reference implementation that runs on the CPU. Its result is
+tagged `mc_engine: "cpu-oracle"` and is never treated as GPU-native evidence. Without
+the flag, a rejected program fails.
 </Warning>
 
 ```bash
@@ -100,7 +111,8 @@ xlog prob program.xlog --prob-engine mc --confidence 0.99 --output json
 
 ## xlog explain
 
-Inspect compilation and diagnostics for a source file, without running it on the GPU.
+Inspect how a source file compiles, and see its diagnostics, without running it on the
+GPU.
 
 ```bash
 xlog explain [OPTIONS] <SOURCE>
@@ -111,11 +123,20 @@ xlog explain [OPTIONS] <SOURCE>
 | `--format <FORMAT>` | `text`, `json`, or `dot`. | `text` |
 | `--module-path <DIR[:DIR...]>` | Extra module search paths. | — |
 
-`text` prints compact sections for parse stats, stratification, negation safety, the
-relational IR and its optimized form, magic-set rewrites, WCOJ eligibility, aggregate
-lifting, rule provenance, and proof traces. `json` emits full `rule_provenance`,
-`proof_traces`, and `generated_rule_diagnostics` arrays. `dot` prints the magic-set
-dependency graph.
+`text` prints compact sections for the following, in order:
+
+- **parse stats** — counts from reading the program;
+- **stratification** — how the program is split into evaluation layers so that negation is well-defined;
+- **negation safety** — a check that negated conditions are used in a safe way;
+- **the relational IR and its optimized form** — the internal query plan xlog compiles the program to (IR = intermediate representation), before and after optimization;
+- **magic-set rewrites** — a query optimization that specializes rules to the actual question being asked;
+- **WCOJ eligibility** — whether a rule qualifies for a worst-case-optimal join, a join method that avoids building large intermediate tables;
+- **aggregate lifting** — how aggregates such as count or sum are folded into the plan;
+- **rule provenance** — which source rule each generated rule came from;
+- **proof traces** — step-by-step derivations of results.
+
+`json` emits full `rule_provenance`, `proof_traces`, and `generated_rule_diagnostics`
+arrays. `dot` prints the magic-set dependency graph.
 
 ```bash
 xlog explain program.xlog
@@ -160,9 +181,9 @@ xlog watch [OPTIONS] <SOURCE>
 
 ## Input and output
 
-**Arrow IPC input.** `--input <REL>=<PATH>` binds an Arrow IPC file to an EDB relation.
-The file's column count must match the predicate's arity and its column types must be
-compatible with the declared types.
+**Arrow IPC input.** `--input <REL>=<PATH>` binds an Arrow IPC file to an EDB relation
+(an input table of facts the program reads). The file's column count must match the
+predicate's arity and its column types must be compatible with the declared types.
 
 **Output formats.** `pretty` renders human-readable tables (the default). `csv` writes
 comma-separated rows. `arrow` writes one Arrow IPC file per query into `--output-dir`.
@@ -175,7 +196,7 @@ it:
 
 | Variable | Read by | Effect |
 |---|---|---|
-| `XLOG_CUBIN_DIR` | kernel loader | Directory of staged CUDA artifacts, preferred over embedded PTX. |
+| `XLOG_CUBIN_DIR` | kernel loader | Directory of pre-built CUDA artifacts, preferred over the embedded PTX (portable GPU assembly). |
 | `CUDA_VISIBLE_DEVICES` | CUDA driver | Restricts which GPUs are visible. |
 
 ## Exit codes

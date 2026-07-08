@@ -3,15 +3,15 @@ title: "Errors and diagnostics"
 description: "XLOG's typed error surface: XlogError variants, CLI exit codes, the fail-closed rejections you may hit, and how they map to Python exceptions."
 ---
 
-XLOG fails closed. When a program asks for something an engine cannot run soundly
-on the device, the engine returns a typed rejection that names the violated rule —
-it does not silently fall back to a slower or semantically different path. This
-page catalogs the error types, the exit codes, and the specific rejections you are
-most likely to encounter.
+XLOG fails closed: when a program asks for something the engine cannot run
+soundly on the device, the engine stops with a typed error that names the rule
+it violated. It does not silently fall back to a slower or semantically
+different path. This page catalogs the error types, the exit codes, and the
+specific rejections you are most likely to encounter.
 
 ## Error types
 
-All Rust-level errors are variants of `XlogError` (defined in
+Every Rust-level error is a variant of a single enum, `XlogError` (defined in
 `crates/xlog-core/src/error.rs`). The enum is marked non-exhaustive, so new
 variants may be added without a breaking change.
 
@@ -21,8 +21,8 @@ variants may be added without a breaking change.
 | `StratificationCycle` | Stratification failed: a cycle through negation, reported with the predicates involved. |
 | `UnsafeVariable` | Domain safety violation: a variable is not bound in any positive body literal. |
 | `ResourceExhausted` | GPU memory budget exceeded; carries the operation context, the estimated bytes, and the budget. |
-| `CompileCapacityExceeded` | The D4 knowledge-compilation phase declined a CNF too large to compile safely — the fixed-capacity emit buffers would overrun and fail with a context-poisoning CUDA launch error. "Too big to compile", catchable, distinct from the verify-phase signal. **(unreleased)** |
-| `VerifyBudgetExceeded` | The GPU CDCL equivalence verifier declined: the per-verify conflict budget ran out before a definite answer. The indeterminate result is never trusted as a proof. **(unreleased)** |
+| `CompileCapacityExceeded` | The knowledge-compilation phase (the step, named D4, that turns the program into a compiled Boolean circuit) declined the input: the Boolean formula it was asked to compile — a formula in conjunctive normal form, or CNF — was too large to compile safely. Compiling it anyway would overrun the fixed-capacity output buffers and trigger a CUDA launch error that leaves the GPU unusable for the rest of the process. Means "too big to compile"; catchable; distinct from the verify-phase signal below. **(unreleased)** |
+| `VerifyBudgetExceeded` | The GPU verifier that checks whether two formulas are equivalent declined. Its conflict-driven SAT search (CDCL) ran out of the per-verify conflict budget before reaching a definite answer. An indeterminate result is never trusted as a proof. **(unreleased)** |
 | `Kernel` | GPU kernel launch or execution error. |
 | `Type` | Type checking or inference error. |
 | `Compilation` | Compilation pipeline error (also carries the resident MC rejections and the exact aggregate cap declines described below). |
@@ -39,10 +39,12 @@ with a descriptive message on stderr. There are no other exit codes.
 
 ### Resident Monte Carlo rejection
 
-The production Monte Carlo engine is GPU-resident and bounded. At compile time it
-checks every rule and fact against its device model; anything outside that model is
-rejected with a typed `ResidentRejection` (surfaced as a `Compilation` error of the
-form `resident MC engine rejected program [kind=...] construct=... context=...`).
+The production Monte Carlo engine — which estimates probabilities by sampling
+many random possible worlds — runs entirely on the GPU ("resident") within fixed
+memory bounds. At compile time it checks every rule and fact against the model of
+what the device can run; anything outside that model is rejected with a typed
+`ResidentRejection` (surfaced as a `Compilation` error of the form
+`resident MC engine rejected program [kind=...] construct=... context=...`).
 There is no silent CPU fallback.
 
 | Rejection kind | Trigger |
@@ -68,8 +70,9 @@ GPU-native evidence. Without the flag, a rejected program fails. See the
 
 ### Exact aggregate caps
 
-The exact engine (`exact_ddnnf`) lifts aggregates over finite probabilistic
-domains with dynamic programming, and that lifting is capped per aggregate group:
+The exact engine (`exact_ddnnf`) computes probabilities exactly rather than by
+sampling. It evaluates aggregates over finite probabilistic domains using
+dynamic programming, and that evaluation is capped per aggregate group:
 
 - **Count-only aggregates**: at most **64** uncertain rows per group.
 - **All other aggregates** (`sum`, `min`, `max`, `logsumexp`): at most **16**
@@ -85,14 +88,17 @@ worlds instead of enumerating outcome formulas. See
 
 ### Compile and verify budgets (unreleased)
 
-On `main` (not yet in a published release), the D4 compile and verify phases
-decline oversized instances instead of risking a CUDA launch failure that would
-poison the GPU context for the rest of the process:
+These two budgets let the engine refuse an oversized problem cleanly instead of
+crashing the GPU. They currently live on the `main` branch and are not yet in a
+published release. The knowledge-compilation phase (D4) and the verify phase
+decline oversized instances rather than risk a CUDA launch failure that would
+leave the GPU unusable for the rest of the process:
 
-- A CNF whose variable or clause capacity exceeds `XLOG_D4_VERIFY_MAX_VARS` /
-  `XLOG_D4_VERIFY_MAX_CLAUSES` declines **before any kernel launch** with
-  `CompileCapacityExceeded`. Both bounds default to unbounded.
-- A verify whose CDCL search exhausts `XLOG_D4_VERIFY_MAX_CONFLICTS` declines
+- A CNF (Boolean formula in conjunctive normal form) whose variable or clause
+  capacity exceeds `XLOG_D4_VERIFY_MAX_VARS` / `XLOG_D4_VERIFY_MAX_CLAUSES`
+  declines **before any kernel launch** with `CompileCapacityExceeded`. Both
+  bounds default to unbounded.
+- A verify whose SAT search exhausts `XLOG_D4_VERIFY_MAX_CONFLICTS` declines
   with `VerifyBudgetExceeded` — an indeterminate search result is never
   reported as a proof. The default budget of `0` means unlimited.
 
@@ -115,7 +121,7 @@ answered.
 | `ValueError` | Invalid parameters: an unknown `prob_engine` (expected `exact_ddnnf` or `mc`), an unknown `sampling_method` (expected `rejection` or `evidence_clamping`), `memory_mb=0`, row counts exceeding `u32` range, and neural input shape or value validation. |
 | `MemoryError` | The per-call memory limit: when `memory_mb` is passed to an evaluation and the provider's allocated bytes already exceed it, the call raises before evaluating. |
 | `RuntimeError` | Any `XlogError` propagated from the engine (parse, compilation, kernel, execution, resource exhaustion — including the resident MC rejection and aggregate cap messages above), and host-output calls on a build without the `host-io` feature. |
-| `IlpConfigError` (a `ValueError` subclass) | `induce_exact(backend="python")` without `XLOG_ALLOW_PYTHON_ILP_REFERENCE=1` — the Python reference scorer is parity-only, never a production path. |
+| `IlpConfigError` (a `ValueError` subclass) | `induce_exact(backend="python")` without `XLOG_ALLOW_PYTHON_ILP_REFERENCE=1`. The Python reference scorer exists only to cross-check results (parity-only) and is never a production path. |
 
 ## See also
 

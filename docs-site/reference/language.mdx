@@ -3,21 +3,60 @@ title: "Language Reference"
 description: "Comprehensive reference for XLOG syntax, semantics, data types, rules, negation, aggregations, probabilistic and epistemic logic, and the complete grammar."
 ---
 
-> **Release context:** Current released language surface
-> **Language coverage:** Core language, the language-completeness contract, the epistemic solver surface, epistemic executor completion (EIR-derived candidate enumeration, value-level modal membership, per-tuple-key FAEEL foundedness, ground epistemic constraints, safe split, and joint multi-epistemic solving), and semantic completion (mixed global+per-row modal gates compose conjunctively; finite nested modal chains normalize by parity/duality; same-name multi-arity disambiguates by arity-qualified tuple sources; recursive execution covers determined stratification, positive Gelfond 1991 compatibility recursion, stratified negated modals, and cyclic negated modals through the `xlog-gpu` GPU-backed WFS plan without the old `xlog_prob` host-WFS solver; only genuinely unbounded, unsafe, or unfounded modal cycles remain fail-closed)
+XLOG is a GPU-native logic programming language: you declare typed facts and
+rules (in the Datalog tradition), and XLOG compiles them into GPU execution
+paths that run the joins, negation, aggregation, and inference. This page is the
+complete reference for the language — every statement form, data type, operator,
+built-in, pragma, and grammar rule. Use it to look up an exact detail; each
+section is meant to be read on its own.
 
-This document provides a comprehensive reference for the XLOG language,
-covering all syntax, semantics, and features of XLOG as a GPU-native logic
-programming language.
+### Scope and release context
 
-The language-completeness additions define the contract for finite
-terms, lists, safe meta-predicates, deterministic negation, magic sets,
-probabilistic aggregates, approximate inference, and CLI inspectability.
-The epistemic source surface adds `know`, `possible`,
-`not know`, `not possible`, and `#pragma epistemic_mode = faeel|g91`.
-Accepted epistemic programs route through the high-level EIR and GPU epistemic
-runtime; unsupported forms must fail with typed diagnostics rather than
+This reference describes XLOG's current released language surface. It has three
+layers:
+
+- **The core language** — facts, rules, recursion, deterministic negation,
+  aggregation, and arithmetic.
+- **The language-completeness contract** — finite terms and lists, safe
+  meta-predicates, deterministic negation, magic sets, probabilistic aggregates,
+  approximate inference, and CLI inspectability.
+- **The epistemic surface** — the modal operators `know`, `possible`,
+  `not know`, and `not possible`, plus `#pragma epistemic_mode = faeel|g91`.
+  "Modal" here means the operator talks about the *models* (the possible
+  "worlds") a program admits, not about a single fact.
+
+Accepted epistemic programs are compiled into the **EIR** — the epistemic
+intermediate representation, the compiler's internal form for `know`/`possible`
+programs — and run through the high-level `xlog run` GPU epistemic runtime. An
+unsupported epistemic form must fail with a typed diagnostic rather than
 silently falling back to CPU evaluation.
+
+Within the epistemic surface, the executor is complete for:
+
+- enumerating candidate worlds from the EIR;
+- checking modal membership at the value level, one tuple key at a time;
+- **FAEEL** foundedness per tuple key — FAEEL is XLOG's default epistemic
+  semantics, and a tuple is "founded" when it has a non-circular justification;
+- ground epistemic constraints, safe splitting of independent components, and
+  solving several epistemic components jointly.
+
+Its semantic rules are also complete for:
+
+- global and per-row modal gates, which combine with logical AND;
+- finite nested modal chains (such as `know possible fact()`), which normalize
+  to a single operator by parity/duality;
+- predicates that share a name but differ in arity, told apart by their
+  arity-qualified tuple sources;
+- recursion — covering determined **stratification** (layering the program so no
+  predicate depends on its own negation), positive Gelfond 1991 compatibility
+  recursion (Gelfond 1991 is an alternative epistemic semantics, selectable as a
+  compatibility mode), stratified negated modals, and cyclic negated modals. All
+  of these run through the `xlog-gpu` GPU-backed Well-Founded Semantics (WFS)
+  plan — a fixpoint that assigns each atom true, false, or undefined — which
+  replaces the older `xlog_prob` host-side WFS solver.
+
+Only genuinely unbounded, unsafe, or unfounded modal cycles still fail closed:
+they are rejected with a diagnostic instead of being executed.
 
 ---
 
@@ -223,8 +262,9 @@ runtime execution starts.
 ## Language Completeness Contract
 
 The language-completeness contract is a language-surface expansion over the core runtime. New syntax is
-accepted only when it can be normalized into the existing typed AST, RIR,
-probabilistic IR, optimizer, runtime, WCOJ, and CLI paths.
+accepted only when it can be normalized into the existing typed AST, RIR
+(XLOG's internal relational intermediate representation), probabilistic IR
+(PIR), optimizer, runtime, WCOJ (worst-case-optimal join), and CLI paths.
 
 ### Execution Responsibilities
 
@@ -279,23 +319,33 @@ prob_aggregate error at program.xlog:17: exact probabilistic aggregate domain ca
 epistemic error at program.xlog:9: unbounded modal tuple key [H|T] has no finite GPU key-column set; use a fixed-arity typed list or bind the tail to a finite relation.
 ```
 
-### Source-Audit Status
+### Current epistemic support and boundaries
 
-The historic documentation-reference checkpoint is retained by the language-completeness rows above.
-Current source accepts the epistemic literals and `epistemic_mode` pragma listed
-here and routes accepted epistemic examples through `xlog run`. The epistemic
-executor adds EIR-derived candidate enumeration, value-level modal
-membership, per-tuple-key FAEEL foundedness, ground and variable-keyed epistemic
-integrity constraints, safe split equivalence, same-name multi-arity
-disambiguation, finite nested-chain normalization, determined-head
-stratification, positive Gelfond 1991 compatibility recursion, stratified negated-modal
-recursion, and cyclic negated-modal recursion through the `xlog-gpu`
-GPU-backed WFS plan without the old `xlog_prob` host-WFS solver.
-The remaining unsupported epistemic boundaries are
-direct raw RIR lowering, genuinely unbounded/untyped modal tuple keys, unsafe
-unbound negated epistemic variables, CPU-only world-view scans, unimplemented
-cyclic WFS shapes outside the `xlog-gpu` GPU-backed negated-modal WFS plan, and modal
-cycles without a founded order.
+The current source accepts the epistemic literals and the `epistemic_mode`
+pragma listed here, and routes accepted epistemic examples through `xlog run`.
+The epistemic executor supports:
+
+- candidate enumeration derived from the EIR;
+- value-level modal membership;
+- per-tuple-key FAEEL foundedness;
+- ground and variable-keyed epistemic integrity constraints;
+- safe-split equivalence;
+- same-name, multi-arity disambiguation;
+- finite nested-chain normalization;
+- determined-head stratification;
+- positive Gelfond 1991 compatibility recursion;
+- stratified negated-modal recursion;
+- cyclic negated-modal recursion through the `xlog-gpu` GPU-backed WFS plan,
+  which replaces the old `xlog_prob` host-side WFS solver.
+
+The remaining unsupported epistemic forms are:
+
+- direct raw RIR lowering;
+- genuinely unbounded or untyped modal tuple keys;
+- unsafe unbound negated epistemic variables;
+- CPU-only world-view scans;
+- cyclic WFS shapes outside the `xlog-gpu` GPU-backed negated-modal WFS plan;
+- modal cycles without a founded order.
 
 ---
 
@@ -960,7 +1010,9 @@ all_positive(1) :- maplist(positive, [1, 2, 3]).
 Magic-set rewriting specializes bound deterministic recursive queries by adding
 derived magic predicates and adorned rules before optimization. The accepted
 accepted magic-set subset is a source-level rewrite over positive recursive rules
-that can be proven query-equivalent under the supported left-to-right SIPS.
+that can be proven query-equivalent under the supported left-to-right SIPS
+(sideways-information-passing strategy — the order in which bound argument
+values flow through a rule).
 
 ### Configuration
 
@@ -1368,7 +1420,7 @@ XLOG supports two inference engines:
 
 | Engine | Flag | Description |
 |--------|------|-------------|
-| **Exact** | `--prob-engine exact_ddnnf` | Knowledge compilation via Decision-DNNF; exact probabilities |
+| **Exact** | `--prob-engine exact_ddnnf` | Compiles the program to a Decision-DNNF (a Boolean form that supports exact probability counting); returns exact probabilities |
 | **Monte Carlo** | `--prob-engine mc` | Sampling-based; approximate with confidence intervals |
 
 **Exact inference** supports:
