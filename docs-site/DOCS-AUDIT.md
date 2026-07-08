@@ -1,6 +1,18 @@
 # XLOG Docs Audit — against DOCS-PROTOCOL.md
 
-Audited 44 pages: 🔴 35 · 🟡 7 · 🟢 2. One auditor per page (parallel). Zone = worst-section zone.
+**RESOLVED.** All 42 non-green pages were rewritten to GREEN through a
+rewrite → fidelity-review → fix loop (one reviewer per page checked protocol
+compliance and that no fact/flag/API was changed vs the original). Commits:
+`d816dbc2` (12 user-facing), `6abc634f` (7 reference), `08e5cfe5`
+(16 architecture, as labeled contributor pages), `e753d63a` (7 yellow). The
+one structural item — R6, a user-enabled feature living only on an architecture
+page — was already met by existing user pages (WCOJ → `guides/wcoj-tuning`;
+factorized execution is a transparent auto-optimization surfaced via
+`guides/diagnostics` counters and `reference/environment-variables` kill
+switches), so no new pages were needed. The table below is the original
+"before" snapshot.
+
+Audited 44 pages: 🔴 35 · 🟡 7 · 🟢 2 (before). One auditor per page (parallel). Zone = worst-section zone.
 
 | # | Page | Genre | Zone | Violations | Effort | Most important fix |
 |---|------|-------|------|-----------|--------|--------------------|
