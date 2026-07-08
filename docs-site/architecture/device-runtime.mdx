@@ -3,18 +3,29 @@ title: "Device Runtime"
 description: "The optional stream-aware CUDA resource stack used to budget allocations, track cross-stream lifetimes, and defer frees safely."
 ---
 
-The device runtime is an optional resource stack inside `xlog-cuda`. It gives
-runtime-backed providers a stream-aware allocator, a process-wide device-memory
-budget, block-use tracking, and deferred free/reap semantics for non-default
-stream execution.
+<Note>
+For contributors — how the device runtime works internally. It documents an
+internal `xlog-cuda` component, not a feature you enable from the CLI.
+</Note>
 
-Default providers can still use the simpler memory manager. Use the device
+The device runtime is an optional resource stack inside the `xlog-cuda` crate. It
+sits between the code that runs CUDA kernels and the GPU's memory allocator.
+
+It gives runtime-backed providers four things: a stream-aware allocator (one that
+knows which CUDA stream each allocation belongs to), a process-wide device-memory
+budget, block-use tracking, and deferred free/reap semantics for work that runs on
+a non-default stream. A CUDA *stream* is an ordered queue of GPU operations;
+"non-default" means work that runs on a stream other than the implicit default
+one, so ordering between streams has to be tracked explicitly.
+
+Default providers can still use the simpler memory manager. Reach for the device
 runtime when you need recorded launches, cross-stream dependency tracking, or a
 shared device budget across long-lived workloads.
 
 ## Resource Stack
 
-The core trait is `DeviceMemoryResource`. Implementations compose as decorators:
+The core trait is `DeviceMemoryResource`. Implementations compose as decorators —
+each layer wraps the one below it and adds one responsibility:
 
 | Layer | Role |
 | --- | --- |
@@ -23,63 +34,68 @@ The core trait is `DeviceMemoryResource`. Implementations compose as decorators:
 | `AsyncCudaResource` | Allocates and frees with CUDA async APIs, tracks live and pending bytes, and records stream events. |
 | `StreamPool` | Provides bounded reusable CUDA streams for recorded operations. |
 
-The runtime singleton, `XlogDeviceRuntime`, is keyed by CUDA ordinal and prepares
-the resource before first use.
+The runtime singleton, `XlogDeviceRuntime`, is keyed by CUDA ordinal (the device
+index) and prepares the resource before first use.
 
 ## Allocation Lifecycle
 
-A block records:
+Each allocated block records:
 
 - an allocation tag describing the caller;
 - the stream that allocated it;
-- a monotonic generation used to reject stale handles;
+- a monotonic generation counter used to reject stale handles;
 - the last writer event;
 - outstanding read events;
 - live and pending byte accounting.
 
-Before a kernel uses a block on another stream, `prepare_block_use` waits on the
-events needed for safe ordering. After the kernel records a read or write,
-`finish_block_use` installs the event that future users must respect. A free can
-be deferred until prior stream work is complete, then `reap_pending` retires it.
+The lifecycle enforces safe ordering across streams. Before a kernel uses a block
+on another stream, `prepare_block_use` waits on the events needed for safe
+ordering. After the kernel records a read or write, `finish_block_use` installs
+the event that future users must respect. A free can be deferred until prior
+stream work is complete; `reap_pending` then retires it.
 
-The generation check is important: if a pointer address is freed and reused, an
-old `DeviceBlock` handle does not silently mutate the new allocation.
+The generation counter matters for correctness. If a pointer address is freed and
+later reused for a new allocation, an old `DeviceBlock` handle will not silently
+mutate the new allocation — its stale generation no longer matches.
 
 ## Budget Behavior
 
 `GlobalDeviceBudget` wraps an inner resource and refuses allocations that would
-exceed the configured limit. It distinguishes:
+exceed the configured limit. It tracks three quantities separately:
 
 - bytes reserved by live allocations;
-- bytes pending deferred free;
+- bytes pending a deferred free;
 - bytes still available for new work.
 
-The runtime uses this budget to make memory pressure explicit. A route that
-cannot fit should return an allocation or capacity error, or decline to a
-fallback path when the caller defines one.
+The runtime uses this budget to make memory pressure explicit. A route (an
+optimized execution path) that cannot fit its allocations returns an allocation or
+capacity error, or declines to a fallback path when the caller defines one.
 
 ## Recorded Launches
 
-Recorded kernel paths use the runtime to preserve ordering across streams:
+"Recorded" kernel paths ask the runtime to preserve ordering across streams. Each
+launch follows five steps:
 
 1. Acquire or reuse a stream.
 2. Prepare all input and output blocks for that stream.
 3. Launch the kernel through the provider.
 4. Record the block uses.
-5. Reap pending frees when their stream work is complete.
+5. Reap pending frees once their stream work is complete.
 
-This is the mechanism behind the runtime-backed WCOJ, groupby, join, and solver
-paths that need reliable non-default stream behavior.
+This is the mechanism behind the runtime-backed WCOJ (worst-case-optimal join),
+groupby, join, and solver paths — the execution routes that need reliable
+non-default stream behavior.
 
 ## CUDA Version
 
 XLOG's public release process targets NVIDIA CUDA Toolkit 13.x. The workspace
-currently uses the `cudarc` `cuda-12040` feature as a driver API binding level;
-that is not the same thing as the toolkit requirement.
+currently uses the `cudarc` crate's `cuda-12040` feature as a driver API binding
+level. That binding level is not the same thing as the toolkit requirement.
 
 ## Failure Modes
 
-Device-runtime failures should be surfaced as explicit resource errors:
+When the device runtime cannot proceed, it surfaces the problem as an explicit
+resource error rather than failing silently. The cases are:
 
 - allocation over budget;
 - stale block use after free;
@@ -87,5 +103,6 @@ Device-runtime failures should be surfaced as explicit resource errors:
 - CUDA allocation/free failure;
 - inability to satisfy a launch dependency.
 
-These are runtime diagnostics, not proof that a query result is correct or that
-an optimized route fired. Pair them with route counters and validation gates.
+These are runtime diagnostics. A clean run of the device runtime does not prove
+that a query result is correct or that an optimized route fired. To check those,
+pair these diagnostics with route counters and validation gates.

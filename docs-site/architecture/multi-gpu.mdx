@@ -3,20 +3,36 @@ title: "Multi-GPU Joins"
 description: "Current multi-GPU status in XLOG: memory-management substrate exists, distributed join execution is design-only."
 ---
 
-Multi-GPU distributed joins are not shipped. The production join paths are still
-single-GPU CUDA routes such as `hash_join_v2`, WCOJ, and the main-only
-factorized routes described elsewhere in the Architecture tab.
+<Note>
+For contributors — how this works internally. This page describes the state of
+multi-GPU support in the codebase, not a feature you can turn on today.
+</Note>
+
+Multi-GPU distributed joins are not shipped. Every join that runs in production
+today uses a single GPU. Those single-GPU paths are CUDA routes such as
+`hash_join_v2`, WCOJ, and the factorized routes documented elsewhere in the
+Architecture tab.
+
+Two terms used below:
+
+- **WCOJ** — worst-case-optimal join, a join method that computes multiway
+  patterns (triangles, cycles) directly instead of through a chain of pairwise
+  joins.
+- **Free Join** — a related join method that generalizes WCOJ.
+- **Factorized routes** — join paths that keep intermediate results in a
+  compressed, factored form rather than fully expanded. These currently exist
+  only on the `main` branch and are not in a released build.
 
 <Warning>
-Treat this page as design-state documentation. Do not promise distributed join
-execution, cross-device partitioning, or multi-GPU WCOJ in current release
-artifacts.
+This is design-state documentation. Distributed join execution, cross-device
+partitioning, and multi-GPU WCOJ are not available in any current release
+artifact.
 </Warning>
 
 ## What Exists
 
-`xlog-cuda` contains a `MultiGpuMemoryManager` substrate. It wraps a
-`GpuDevicePool`, builds one `GpuMemoryManager` per device, and supports:
+The `xlog-cuda` crate contains a `MultiGpuMemoryManager` substrate. It wraps a
+`GpuDevicePool` and builds one `GpuMemoryManager` per device. It supports:
 
 - device-count inspection;
 - allocation on a specified device;
@@ -24,8 +40,8 @@ artifacts.
 - per-device remaining-byte reporting;
 - access to the underlying device pool.
 
-CUDA certification also checks basic multi-GPU detection consistency when the
-test environment exposes multiple devices.
+CUDA certification also checks basic multi-GPU detection consistency. This check
+only runs when the test environment exposes multiple devices.
 
 ## What Does Not Exist Yet
 
@@ -42,7 +58,7 @@ Those pieces are future architecture work.
 
 ## Design Direction
 
-A future distributed hash join would likely use hash partitioning:
+A future distributed hash join would likely use hash partitioning. The sketch is:
 
 1. compute a partition for each row from the join key;
 2. move left and right partitions to the same device;
@@ -60,9 +76,9 @@ That design still has unresolved production requirements:
 
 ## User Guidance
 
-For current workloads, plan around one CUDA device per executor. Use the
-single-GPU execution, WCOJ, adaptive-indexing, and factorized-execution pages for
-the routes that actually run today.
+For current workloads, plan around one CUDA device per executor. For the routes
+that actually run today, see the single-GPU execution, WCOJ, adaptive-indexing,
+and factorized-execution pages.
 
-If you see multi-GPU allocation APIs in source, treat them as substrate, not as
+The multi-GPU allocation APIs in the source are substrate only. They are not
 evidence that distributed joins are available.

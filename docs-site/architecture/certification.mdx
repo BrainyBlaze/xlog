@@ -3,16 +3,23 @@ title: "CUDA Certification"
 description: "How XLOG separates ordinary CI, docs validation, CUDA-required release gates, and staged reliability evidence."
 ---
 
-XLOG has several validation layers. They answer different questions and should
-not be collapsed into one test count.
+<Note>
+For contributors — how XLOG's validation gates work internally. This page
+explains what each gate proves and why they are not interchangeable.
+</Note>
 
-<Warning>
-Do not use stale fixed pass-count snapshots as public certification statements.
-The authoritative gate is the command that ran, the hardware it ran on, and the
-evidence it produced.
-</Warning>
+XLOG runs several validation layers, and each one answers a different question.
+Knowing which gate proves what keeps you from treating a cheap check as if it
+were a release certification. Do not collapse them into a single test count.
+
+A fixed pass-count snapshot (for example "9/9 passed") is not a certification on
+its own. What actually certifies a result is three things: the exact command
+that ran, the hardware it ran on, and the evidence it produced. Prefer those
+over a bare number.
 
 ## Validation Layers
+
+The four layers below run in different places and prove different things.
 
 | Layer | Where it runs | What it proves |
 | --- | --- | --- |
@@ -26,15 +33,18 @@ CUDA machine.
 
 ## GPU Release Gate
 
-The canonical manual gate is:
+This is the canonical manual gate for GPU behavior. A maintainer runs it on a
+real CUDA host before a release:
 
 ```bash
 scripts/validate_release_gpu.sh --mode release
 ```
 
-The script:
+The script does the following:
 
-- sets `XLOG_REQUIRE_CUDA=1`, so CUDA initialization failures cannot be skipped;
+- sets the `XLOG_REQUIRE_CUDA=1` environment variable, which forces a hard
+  failure if CUDA cannot initialize (so a broken GPU cannot be silently
+  skipped);
 - requires a visible NVIDIA GPU through `nvidia-smi`;
 - runs release doctor checks;
 - builds the workspace and `xlog-cli` release binary;
@@ -44,13 +54,14 @@ The script:
 - runs a basic `xlog run` smoke command;
 - verifies that packaged artifacts include the expected kernel files.
 
-Use `--mode smoke` for a shorter CUDA smoke gate. Use `--dry-run` only to inspect
-the command sequence; it does not certify GPU behavior.
+Use `--mode smoke` for a shorter CUDA smoke gate. Use `--dry-run` only to
+inspect the command sequence; it does not certify GPU behavior.
 
 ## Docs Gate
 
-The docs workflow triggers on edits under `docs-site/**` or the workflow itself.
-It uses Node 22, installs `mint@4.2.666`, runs:
+This gate validates the documentation site. It triggers on edits under
+`docs-site/**` or on changes to the workflow itself. It uses Node 22, installs
+`mint@4.2.666`, and runs:
 
 ```bash
 mint validate
@@ -63,24 +74,31 @@ DigitalOcean App Platform site serves that branch at `xlog.md`.
 
 ## Reliability Gates
 
-Reliability gates are not the same as CUDA kernel certification. The real staged
-reliability labels used in the repository are:
+Reliability gates measure how consistently a higher-level engine produces
+correct results across repeated runs. They are not the same as CUDA kernel
+certification. The staged reliability labels used in the repository are:
 
 - alpha: 5/5;
 - beta: 20/20, defined as 5 seeds across 4 stages;
-- GA: 50/50 with Clopper-Pearson confidence accounting.
+- GA: 50/50 with Clopper-Pearson confidence accounting. Clopper-Pearson is a
+  conservative way to put a confidence interval on a pass rate from a limited
+  number of trials.
 
-Use those labels only for the subsystem that defines and runs that gate. Do not
-reuse them as global CUDA test counts.
+These labels belong only to the subsystem that defines and runs that gate. They
+are not global CUDA test counts, so do not reuse them that way.
 
 ## Epistemic Candidate Bounds
 
-Epistemic execution does not use a public fixed-literal or large hardcoded
-candidate-count bound. The source computes
-`max_candidates = 2^(number of epistemic literals)` and caps models per
-reduction at `MAX_MODELS_PER_REDUCTION = 1024`.
+"Epistemic execution" is XLOG's mode for reasoning about what a program can and
+cannot conclude — it enumerates candidate answers over the program's epistemic
+literals (the atoms whose truth the reasoning is uncertain about). This mode has
+no public fixed-literal limit and no large hardcoded candidate-count bound.
+Instead, the source computes two concrete bounds:
 
-Document that concrete bound when discussing epistemic planning limits.
+- `max_candidates = 2^(number of epistemic literals)`;
+- a per-reduction cap of `MAX_MODELS_PER_REDUCTION = 1024` models.
+
+Those are the actual limits that apply to epistemic planning.
 
 ## Evidence Requirements
 
