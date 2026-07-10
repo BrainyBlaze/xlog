@@ -1454,8 +1454,9 @@ fn make_provider(device: usize, memory_mb: u64) -> Result<Arc<CudaKernelProvider
     // The plain `GpuMemoryManager::new` path leaves `memory().runtime()`
     // == None, so those dispatches silently fall back to binary joins.
     let pool = Arc::new(StreamPool::with_defaults(Arc::clone(&device)));
-    let async_resource: Box<dyn DeviceMemoryResource + Send + Sync> =
-        Box::new(AsyncCudaResource::new(Arc::clone(&device), 0, Arc::clone(&pool)));
+    let async_resource: Box<dyn DeviceMemoryResource + Send + Sync> = Box::new(
+        AsyncCudaResource::new(Arc::clone(&device), 0, Arc::clone(&pool)),
+    );
     let budget_resource: Box<dyn DeviceMemoryResource + Send + Sync> = Box::new(
         GlobalDeviceBudget::new(async_resource, (memory_mb * 1024 * 1024) as usize),
     );

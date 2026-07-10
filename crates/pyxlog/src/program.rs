@@ -1058,10 +1058,13 @@ impl CompiledProgram {
         // circuit was built (the cold D4-compile + CDCL-verify). Without this
         // fallback `warmup_breakdown()` returned None for non-neural programs,
         // hiding the verification-overhead split (EIC W5).
-        let circuit_profile = self.last_compile_profile.as_ref().or_else(|| match &self.program {
-            CompiledProbProgram::Exact(p) => p.last_compile_profile(),
-            CompiledProbProgram::Mc(_) => None,
-        });
+        let circuit_profile = self
+            .last_compile_profile
+            .as_ref()
+            .or_else(|| match &self.program {
+                CompiledProbProgram::Exact(p) => p.last_compile_profile(),
+                CompiledProbProgram::Mc(_) => None,
+            });
 
         // Return None if neither profile is available.
         if ptx_profile.is_none() && circuit_profile.is_none() {
