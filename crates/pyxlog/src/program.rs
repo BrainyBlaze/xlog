@@ -1057,7 +1057,7 @@ impl CompiledProgram {
         // so fall back to the compile profile captured when the program's own
         // circuit was built (the cold D4-compile + CDCL-verify). Without this
         // fallback `warmup_breakdown()` returned None for non-neural programs,
-        // hiding the verification-overhead split (EIC W5).
+        // hiding the verification-overhead split from benchmark isolation runs.
         let circuit_profile = self
             .last_compile_profile
             .as_ref()

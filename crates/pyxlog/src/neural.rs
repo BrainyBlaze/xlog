@@ -26,7 +26,7 @@ fn prob_schema(scalar_type: ScalarType) -> Schema {
     Schema::new(vec![("col0".to_string(), scalar_type)])
 }
 
-/// Residency ablation hook (CRIT-2 / EIC C1). When `XLOG_FORCE_HOST_ROUNDTRIP=1`
+/// Residency ablation hook. When `XLOG_FORCE_HOST_ROUNDTRIP=1`
 /// the engine forces a GPU -> host -> GPU round-trip on each neural-output tensor
 /// at the neural->symbolic handoff, before it is handed (zero-copy via DLPack) to
 /// the GPU-resident reasoner. This injects exactly the transfer cost a
@@ -1643,7 +1643,7 @@ impl CompiledProgram {
                 let output_row = output_row.call_method0("contiguous")?;
 
                 let output_detached = output_row.call_method0("detach")?;
-                // Residency ablation (CRIT-2): optionally force a host round-trip
+                // Residency ablation: optionally force a host round-trip
                 // on the neural output before the GPU-resident reasoner reads it.
                 let output_detached = if force_host_roundtrip_enabled() {
                     output_detached.call_method0("cpu")?.call_method0("cuda")?
@@ -1934,7 +1934,7 @@ impl CompiledProgram {
         // -- 4. Batched forward per network ------
         let torch = py.import("torch")?;
         let schema_f32 = prob_schema(ScalarType::F32);
-        // Residency ablation gate, read once per batch (CRIT-2).
+        // Residency ablation gate, read once per batch.
         let force_roundtrip = force_host_roundtrip_enabled();
 
         // Storage indexed by (query, group).
