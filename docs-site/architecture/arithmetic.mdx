@@ -3,12 +3,23 @@ title: "Arithmetic Expressions"
 description: "How XLOG compiles and executes arithmetic expressions on the GPU, from AST representation through type inference, lowering, and evaluation."
 ---
 
-This document describes how XLOG compiles and executes arithmetic expressions on
-the GPU. It complements the user-facing syntax reference in
-the language reference: start there if you need
-surface syntax, precedence, built-ins, or worked examples.
+<Note>
+For contributors — how XLOG compiles and runs arithmetic internally. If you only
+need the surface language (syntax, precedence, built-ins, worked examples), read
+the user-facing arithmetic syntax reference in the language reference instead.
+</Note>
+
+This page traces one arithmetic expression through the compiler and onto the GPU.
+The path has four stages: the parser builds a tree, the type checker assigns a
+type to every node, the lowerer turns the tree into a column computation, and the
+GPU evaluates it. Each section below covers one stage.
 
 ## AST Representation
+
+The parser represents an arithmetic expression as an abstract syntax tree (AST) —
+a tree where each node is one operation or value. `ArithExpr` is that tree type,
+and `IsExpr` wraps a single `is` binding (a fresh variable plus the expression
+that computes it).
 
 ```rust
 /// Arithmetic expression tree
@@ -46,6 +57,11 @@ pub struct IsExpr {
 
 ## Type Inference Rules
 
+Before lowering, every expression node gets a scalar type. The rules below are
+applied bottom-up over the tree. Most binary operations require both sides to
+share a type; a few (like `pow` and `cast`) fix the result type regardless of the
+inputs.
+
 | Expression | Rule | Result Type |
 |------------|------|-------------|
 | `X + Y` | `type(X) == type(Y)` required | `type(X)` |
@@ -62,7 +78,11 @@ that directs users to `cast()` when needed.
 
 ## Lowering to RIR
 
-The lowerer transforms `IsExpr` into computed projections:
+Lowering turns the type-checked tree into a query-plan node. XLOG's internal
+query plan is the relational intermediate representation (RIR) — the form the
+compiler works with after parsing and before it hits the GPU. Here the lowerer
+converts each `IsExpr` into a computed projection: it appends one new column to
+the current plan, and that column holds the value of the expression.
 
 ```rust
 fn lower_is_expr(
@@ -98,6 +118,9 @@ fn lower_is_expr(
 
 ### ProjectExpr
 
+Each column in a projection is either passed through unchanged or computed from an
+expression. `ProjectExpr` is the enum that captures that choice:
+
 ```rust
 pub enum ProjectExpr {
     Column(usize),                    // Pass-through column
@@ -108,9 +131,13 @@ pub enum ProjectExpr {
 ## GPU Execution
 
 Arithmetic expressions are evaluated on the GPU through the arithmetic support
-inside `CudaKernelProvider`.
+inside `CudaKernelProvider` (the component that runs XLOG kernels on CUDA).
 
 ### Evaluation Strategy
+
+The expression tree is compiled into column references and operations, its inputs
+are staged as GPU buffers, and the CUDA helpers apply the operations to produce
+one output column.
 
 ```text
 ArithExpr Tree
@@ -130,12 +157,17 @@ Output column in projected CudaBuffer
 
 ### Error Handling
 
+Arithmetic faults do not raise an error at runtime. Instead they produce special
+sentinel values, which flow through like any other data. The table shows what
+each fault yields for integer versus float columns.
+
 | Condition | Integer Behavior | Float Behavior |
 |-----------|------------------|----------------|
 | Division by zero | `INT64_MAX` | `NaN` / `Inf` |
 | Overflow | Wraps (standard semantics) | IEEE 754 |
 
-Errors propagate as special values; use explicit filtering to handle them:
+Because faults become values rather than errors, filter them out explicitly when
+you need to exclude them:
 
 ```prolog
 safe_ratio(X, Y, R) :-

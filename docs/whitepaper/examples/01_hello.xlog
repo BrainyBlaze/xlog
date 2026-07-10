@@ -1,4 +1,4 @@
-// The minimal xlog program: typed predicates, facts, a recursive rule, a query.
+// Typed predicates, facts, a rule, a query.
 pred edge(u32, u32).
 pred reach(u32, u32).
 

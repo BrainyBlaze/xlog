@@ -3,23 +3,38 @@ title: "CUDA Kernel Reference"
 description: "Overview of the CUDA kernel modules that implement xlog's GPU runtime, with the kernels each module provides."
 ---
 
-The CUDA surface of xlog lives in `kernels/`, `crates/xlog-cuda/src/`, and `crates/xlog-cuda/kernels/`. Detailed per-function reference pages are generated with Doxygen from those sources during the docs build; the table below summarizes the kernel modules and what each provides.
+xlog runs parts of a query on the GPU. Each GPU operation is implemented as a
+CUDA kernel (a small function that runs in parallel on the GPU), and the kernels
+are grouped into modules by the job they do — joins, sorting, filtering, and so
+on. This page lists those modules so you can find which source file implements a
+given operation.
+
+The CUDA source lives in three places: `kernels/`, `crates/xlog-cuda/src/`, and
+`crates/xlog-cuda/kernels/`. During the docs build, Doxygen generates a detailed
+per-function reference from those sources. The table below is the higher-level
+map: one row per module, the kernels it exports, and what it is for.
 
 ## Kernel Modules
 
+Each row is one source file. "Kernels" lists the functions it exports (`*` marks
+a family of same-named kernels specialized per data type); "Purpose" says what
+the module computes.
+
 | File | Kernels | Purpose |
 |------|---------|---------|
-| `arith.cu` | `arith_add_*`, `arith_sub_*`, `arith_mul_*`, `arith_div_*`, `arith_mod_*`, `arith_abs_*`, `arith_neg_*` | Arithmetic operations for `is` expressions |
-| `join.cu` | `hash_join_bucket_count_v2`, `hash_join_scatter_v2`, `hash_join_probe_v2`, `hash_join_semi`, `hash_join_anti`, `compute_composite_hash` | Hash joins (v2 with bucketed layout) + composite hashing |
-| `pack.cu` | `pack_keys`, `pack_and_hash_keys`, `hash_packed_keys`, `gather_packed_rows`, `compare_packed_keys` | Key packing/hashing + packed-row utilities |
-| `dedup.cu` | `mark_unique_*`, `compact_rows` | Sort-based deduplication |
-| `filter.cu` | `filter_compare_*`, `compact_*_by_mask`, `mask_{and,or,not}` | Filtering and stream compaction |
-| `sort.cu` | `radix_histogram`, `radix_scatter_*`, `init_indices`, `apply_permutation_*`, `gather_keys_*` | Stable radix sort + permutation apply |
-| `groupby.cu` | `detect_group_boundaries`, `extract_group_keys`, `groupby_*`, `groupby_logsumexp_*` | Sorted aggregation |
-| `scan.cu` | `exclusive_scan_mask`, `count_mask`, `multiblock_scan_*` | Prefix sum operations |
-| `set_ops.cu` | `concat_{u32,bytes}`, `sorted_diff_mark` | Union/difference operations |
-| `circuit.cu` | `xgcf_forward_level`, `xgcf_backward_level_*` | XGCF circuit eval + reverse-mode gradients (probabilistic) |
-| `sat.cu` | `sat_cdcl_solve`, `sat_check_model`, `sat_proof_check`, `sat_assert_*`, `sat_xgcf_cnf_*`, `sat_emit_not_phi` | GPU CDCL verifier + equivalence query construction helpers |
-| `mc_sample.cu` | `mc_sample_bernoulli` | Bernoulli sampling (Monte Carlo inference) |
+| `arith.cu` | `arith_add_*`, `arith_sub_*`, `arith_mul_*`, `arith_div_*`, `arith_mod_*`, `arith_abs_*`, `arith_neg_*` | Arithmetic operations for `is` expressions (the operator that evaluates a numeric expression and binds the result) |
+| `join.cu` | `hash_join_bucket_count_v2`, `hash_join_scatter_v2`, `hash_join_probe_v2`, `hash_join_semi`, `hash_join_anti`, `compute_composite_hash` | Hash joins (the `v2` kernels use a bucketed hash-table layout) plus composite hashing, which combines several key columns into one hash value |
+| `pack.cu` | `pack_keys`, `pack_and_hash_keys`, `hash_packed_keys`, `gather_packed_rows`, `compare_packed_keys` | Key packing (encoding a multi-column key into one contiguous byte string), hashing of packed keys, and utilities that operate on the packed rows |
+| `dedup.cu` | `mark_unique_*`, `compact_rows` | Removing duplicate rows, done by sorting first and then keeping one row per group |
+| `filter.cu` | `filter_compare_*`, `compact_*_by_mask`, `mask_{and,or,not}` | Filtering rows against a condition and stream compaction (dropping the rows a boolean mask rejects and closing the gaps) |
+| `sort.cu` | `radix_histogram`, `radix_scatter_*`, `init_indices`, `apply_permutation_*`, `gather_keys_*` | Stable radix sort (a sort that preserves the order of equal keys) and applying the resulting permutation to reorder rows |
+| `groupby.cu` | `detect_group_boundaries`, `extract_group_keys`, `groupby_*`, `groupby_logsumexp_*` | Aggregation over sorted rows; the `logsumexp` variant is the numerically stable way to sum values held in log space |
+| `scan.cu` | `exclusive_scan_mask`, `count_mask`, `multiblock_scan_*` | Prefix-sum operations (each output element is the running total of the inputs before it), used to compute output positions |
+| `set_ops.cu` | `concat_{u32,bytes}`, `sorted_diff_mark` | Set union and difference over sorted row sets |
+| `circuit.cu` | `xgcf_forward_level`, `xgcf_backward_level_*` | Evaluating a probabilistic program's compiled arithmetic circuit (XGCF, xlog's circuit form of the program) and computing gradients back through it with reverse-mode differentiation (the backpropagation used to train weights) |
+| `sat.cu` | `sat_cdcl_solve`, `sat_check_model`, `sat_proof_check`, `sat_assert_*`, `sat_xgcf_cnf_*`, `sat_emit_not_phi` | A GPU Boolean-satisfiability (SAT) verifier using CDCL (conflict-driven clause learning, the standard modern SAT search algorithm), plus helpers that build the formulas for checking whether two programs are equivalent |
+| `mc_sample.cu` | `mc_sample_bernoulli` | Drawing Bernoulli (biased-coin) samples for Monte Carlo inference, which estimates probabilities by averaging over many random samples |
 
-See the [architecture overview](/architecture/overview) for how these kernels are dispatched by the runtime, and [GPU Execution](/architecture/gpu-execution) for the execution model.
+See the [architecture overview](/architecture/overview) for how the runtime
+decides which of these kernels to run, and [GPU Execution](/architecture/gpu-execution)
+for the execution model.

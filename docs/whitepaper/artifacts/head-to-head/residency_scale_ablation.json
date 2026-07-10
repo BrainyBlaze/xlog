@@ -1,0 +1,47 @@
+[
+  {
+    "queries": 1,
+    "handoffs": 2,
+    "off_ms": 18.4377,
+    "on_ms": 18.5305,
+    "roundtrip_ms": 0.0927,
+    "overhead_pct": 0.5,
+    "roundtrip_per_handoff_us": 46.36
+  },
+  {
+    "queries": 4,
+    "handoffs": 8,
+    "off_ms": 23.1668,
+    "on_ms": 21.108,
+    "roundtrip_ms": -2.0589,
+    "overhead_pct": -8.9,
+    "roundtrip_per_handoff_us": -257.36
+  },
+  {
+    "queries": 16,
+    "handoffs": 32,
+    "off_ms": 30.5982,
+    "on_ms": 31.8238,
+    "roundtrip_ms": 1.2256,
+    "overhead_pct": 4.0,
+    "roundtrip_per_handoff_us": 38.3
+  },
+  {
+    "queries": 64,
+    "handoffs": 128,
+    "off_ms": 71.7954,
+    "on_ms": 78.954,
+    "roundtrip_ms": 7.1587,
+    "overhead_pct": 10.0,
+    "roundtrip_per_handoff_us": 55.93
+  },
+  {
+    "queries": 256,
+    "handoffs": 512,
+    "off_ms": 292.027,
+    "on_ms": 317.0759,
+    "roundtrip_ms": 25.049,
+    "overhead_pct": 8.6,
+    "roundtrip_per_handoff_us": 48.92
+  }
+]

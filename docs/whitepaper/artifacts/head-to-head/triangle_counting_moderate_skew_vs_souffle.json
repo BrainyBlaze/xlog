@@ -1,0 +1,102 @@
+{
+  "benchmark": "triangle_wcoj_bulk_edb",
+  "hardware": "RunPod RTX 4090 (ephemeral)",
+  "note": "edges bulk-loaded via --input Arrow IPC (EDB), NOT inline facts. xlog compute=total_ms; souffle compute=exe run.",
+  "comparison_acceptable": true,
+  "results": [
+    {
+      "case": "tri_40000",
+      "edges": 40000,
+      "xlog_wcoj": {
+        "compute_ms": 7,
+        "rows": 15789,
+        "wall_s": 0.39,
+        "rc": 0,
+        "err": null
+      },
+      "xlog_binary": {
+        "compute_ms": 9,
+        "rows": 15789,
+        "wall_s": 0.39,
+        "rc": 0,
+        "err": null
+      },
+      "souffle": {
+        "compute_s": 0.055,
+        "count": 15789,
+        "rc": 0
+      },
+      "counts_match": true,
+      "wcoj_vs_binary": 1.29,
+      "souffle_over_wcoj": 7.86
+    },
+    {
+      "case": "tri_100000",
+      "edges": 100000,
+      "xlog_wcoj": {
+        "compute_ms": 22,
+        "rows": 74318,
+        "wall_s": 0.55,
+        "rc": 0,
+        "err": null
+      },
+      "xlog_binary": {
+        "compute_ms": 25,
+        "rows": 74318,
+        "wall_s": 0.6,
+        "rc": 0,
+        "err": null
+      },
+      "souffle": {
+        "compute_s": 0.155,
+        "count": 74318,
+        "rc": 0
+      },
+      "counts_match": true,
+      "wcoj_vs_binary": 1.14,
+      "souffle_over_wcoj": 7.05
+    },
+    {
+      "case": "tri_200000",
+      "edges": 200000,
+      "xlog_wcoj": {
+        "compute_ms": 24,
+        "rows": 303611,
+        "wall_s": 1.36,
+        "rc": 0,
+        "err": null
+      },
+      "xlog_binary": {
+        "skipped": "binary blowup"
+      },
+      "souffle": {
+        "compute_s": 0.443,
+        "count": 303611,
+        "rc": 0
+      },
+      "counts_match": true,
+      "souffle_over_wcoj": 18.46
+    },
+    {
+      "case": "tri_400000",
+      "edges": 400000,
+      "xlog_wcoj": {
+        "compute_ms": 36,
+        "rows": 1268731,
+        "wall_s": 4.48,
+        "rc": 0,
+        "err": null
+      },
+      "xlog_binary": {
+        "skipped": "binary blowup"
+      },
+      "souffle": {
+        "compute_s": 1.363,
+        "count": 1268731,
+        "rc": 0
+      },
+      "counts_match": true,
+      "souffle_over_wcoj": 37.86
+    }
+  ]
+}

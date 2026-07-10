@@ -1,0 +1,14 @@
+{
+  "benchmark": "verify_vs_compile_isolation",
+  "hardware": "RunPod RTX 3090 (ephemeral, driver 580)",
+  "note": "Cold circuit compile split into D4-compile vs on-GPU CDCL equivalence-verify via program.warmup_breakdown() under XLOG_WARMUP_PROFILE=1. Linear probabilistic reachability chains (0.5::edge(i,i+1) + transitive path), fresh process per point so every compile is a real cache miss. n>=50 exceeds a CUDA grid-dimension limit on this CNF and is out of range.",
+  "metric": "seconds per cold-compile stage; verify_pct_of_cold = verify / (d4_compile + verify + smooth + cache_store + cnf_hash + free_var_mask)",
+  "results": [
+    {"n": 5,  "d4_compile_ms": 0.0,   "verify_ms": 251.034, "cold_ms": 251.044, "verify_pct_of_cold": 100.0},
+    {"n": 10, "d4_compile_ms": 0.0,   "verify_ms": 244.681, "cold_ms": 244.692, "verify_pct_of_cold": 100.0},
+    {"n": 15, "d4_compile_ms": 0.0,   "verify_ms": 253.031, "cold_ms": 253.044, "verify_pct_of_cold": 100.0},
+    {"n": 20, "d4_compile_ms": 0.0,   "verify_ms": 260.984, "cold_ms": 260.999, "verify_pct_of_cold": 100.0},
+    {"n": 30, "d4_compile_ms": 0.0,   "verify_ms": 300.295, "cold_ms": 300.312, "verify_pct_of_cold": 100.0},
+    {"n": 40, "d4_compile_ms": 17.237, "verify_ms": 507.555, "cold_ms": 527.422, "verify_pct_of_cold": 96.2}
+  ]
+}

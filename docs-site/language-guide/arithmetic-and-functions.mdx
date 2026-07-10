@@ -21,6 +21,9 @@ Read `Z is W * H` as "let `Z` be `W * H`". The variable on the left must be **fr
 unbound at that point in the body. The engine evaluates the right-hand side using
 values already bound (here `W` and `H`, supplied by `rect`), then binds the fresh `Z`.
 
+You know it worked when the computed value shows up bound in the results: with a
+`rect(3, 4)` fact, running this program derives `area(3, 4, 12)`.
+
 <Warning>
 `is` binds; it does not test. The left side must be a new variable. To *compare* an
 already-bound value against a computed one, use a comparison operator (`==`, `<`, `>=`,

@@ -1,8 +1,10 @@
-\documentclass[11pt]{article}
+\documentclass[10pt,twocolumn]{article}
 
 \usepackage{arxiv}
 \usepackage[htt]{hyphenat}
 \usepackage{amsmath,amssymb}
+\usepackage{algorithm}
+\usepackage[noend]{algpseudocode}
 
 % Allow a little extra flexibility in paragraph justification so long \texttt
 % identifiers (e.g. register_mask_sparse_device) don't trigger overfull hboxes.
@@ -11,7 +13,14 @@
 \usepackage{booktabs}
 \usepackage{tabularx}
 \usepackage{array}
+\usepackage{needspace}  % keep short code listings from splitting across columns
+% Left-aligned (ragged-right) flexible column for description cells, so narrow
+% wrapping columns read like reference papers instead of justified text with
+% inter-word rivers and mid-word hyphenation.
+\newcolumntype{L}{>{\raggedright\arraybackslash}X}
 \usepackage{graphicx}
+\usepackage{tikz}
+\usetikzlibrary{arrows.meta,positioning,fit,backgrounds,calc,shapes.geometric}
 \usepackage{listings}
 \usepackage{xcolor}
 \usepackage{caption}
@@ -20,6 +29,8 @@
             citecolor=black!70!blue,
             urlcolor=black!70!blue]{hyperref}
 \usepackage[noabbrev,capitalise]{cleveref}
+\crefname{algorithm}{Algorithm}{Algorithms}
+\Crefname{algorithm}{Algorithm}{Algorithms}
 \usepackage[backend=biber,style=numeric-comp,sorting=none]{biblatex}
 \addbibresource{refs.bib}
 
@@ -45,14 +56,15 @@
 % Shared base style; xlog/python only override `language=`.
 \lstdefinestyle{codebase}{
   backgroundcolor=\color{codebg},
-  basicstyle=\ttfamily\small,
+  basicstyle=\ttfamily\footnotesize,
   keywordstyle=\color{codekey}\bfseries,
   commentstyle=\color{codecomment}\itshape,
   stringstyle=\color{codestring},
   frame=single,
   framerule=0.3pt,
   breaklines=true,
-  breakatwhitespace=false,
+  breakatwhitespace=true,
+  breakindent=0pt,
   prebreak=\mbox{\textcolor{codecomment}{$\hookleftarrow$}},
   postbreak=\mbox{\textcolor{codecomment}{$\hookrightarrow$}\space},
   columns=fullflexible,
@@ -70,18 +82,37 @@
 \crefname{lstlisting}{Listing}{Listings}
 \Crefname{lstlisting}{Listing}{Listings}
 
+% --- TikZ figure styles ---
+\definecolor{figblue}{RGB}{0,90,156}
+\definecolor{figgreen}{RGB}{27,128,79}
+\definecolor{figgray}{RGB}{90,98,110}
+\definecolor{figband}{RGB}{233,240,247}
+\definecolor{figaccent}{RGB}{176,42,42}
+\tikzset{
+  fnode/.style={draw=figgray,rounded corners=2pt,fill=white,align=center,
+                font=\small,inner sep=4pt,minimum height=8mm},
+  fproc/.style={fnode,draw=figblue,very thick},
+  fcert/.style={fnode,draw=figaccent,very thick},
+  fneural/.style={fnode,draw=figgreen,very thick},
+  flabel/.style={font=\scriptsize\itshape,figgray},
+  farrow/.style={-{Stealth[length=2mm]},figgray,thick},
+  fgrad/.style={-{Stealth[length=2mm]},figaccent,thick,dashed},
+}
+
 % --- Title block ---
-\title{xlog: A GPU-Native Logic Programming Language for Unified Symbolic Reasoning}
-\author{The xlog Project\\\small v0.9.2 Technical Whitepaper}
-\date{June 2026}
+\title{{\Huge\bfseries XLOG}\\[0.45em]
+A Universal GPU-Native Engine for Neurosymbolic Integration}
+\author{BrainyBlaze team\\\small v0.10.0 Technical Whitepaper}
+\date{July 2026}
 
 \begin{document}
-\maketitle
-
-\input{sections/00_abstract.tex}
-
-\tableofcontents
-\vspace{1em}
+\twocolumn[
+  \begin{@twocolumnfalse}
+    \maketitle
+    \input{sections/00_abstract.tex}
+    \vspace{1.5em}
+  \end{@twocolumnfalse}
+]
 
 \input{sections/01_introduction.tex}
 \input{sections/02_architecture.tex}
@@ -89,14 +120,10 @@
 \input{sections/04_gpu_datalog.tex}
 \input{sections/05_probabilistic.tex}
 \input{sections/06_neural_symbolic.tex}
-\input{sections/065_epistemic.tex}
-\input{sections/07_interop.tex}
+\input{sections/07_epistemic.tex}
 \input{sections/08_evaluation.tex}
 \input{sections/09_related_work.tex}
 \input{sections/10_limitations.tex}
-
-\appendix
-\input{sections/A_performance_contract.tex}
 
 \printbibliography
 

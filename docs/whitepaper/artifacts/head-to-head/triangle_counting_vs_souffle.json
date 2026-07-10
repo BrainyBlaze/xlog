@@ -1,0 +1,85 @@
+{
+  "benchmark": "triangle_counting_pointed",
+  "hardware": "RunPod RTX 4090 (ephemeral)",
+  "note": "per-root triangle COUNT (tiny output, wall~=compute). A=fused WCOJ count (no materialization); B=WCOJ enumerate then count (XLOG_DISABLE_WCOJ_GROUPBY_FUSION=1); C=Souffle count. mem budget 18GB.",
+  "comparison_acceptable": false,
+  "results": [
+    {
+      "case": "h30_e150000",
+      "hubs": 30,
+      "edges": 150000,
+      "fused_wcoj": {
+        "wall_s": 0.24,
+        "peak_mb": 4,
+        "roots": 3030,
+        "total_triangles": 5398155,
+        "out_rows": 3030
+      },
+      "enum_then_count": {
+        "wall_s": 0.49,
+        "peak_mb": 3048,
+        "roots": 3030,
+        "total_triangles": 5398155,
+        "out_rows": 3030
+      },
+      "souffle": {
+        "wall_s": 3.012,
+        "total_triangles": 5398155,
+        "rc": 0
+      },
+      "counts_match": true,
+      "souffle_over_fused": 12.55,
+      "enum_over_fused": 2.04
+    },
+    {
+      "case": "h50_e300000",
+      "hubs": 50,
+      "edges": 300000,
+      "fused_wcoj": {
+        "wall_s": 0.33,
+        "peak_mb": 9,
+        "roots": 5050,
+        "total_triangles": 13135953,
+        "out_rows": 5050
+      },
+      "enum_then_count": {
+        "wall_s": 0.91,
+        "peak_mb": 7351,
+        "roots": 5050,
+        "total_triangles": 13135953,
+        "out_rows": 5050
+      },
+      "souffle": {
+        "wall_s": 7.881,
+        "total_triangles": 13135953,
+        "rc": 0
+      },
+      "counts_match": true,
+      "souffle_over_fused": 23.88,
+      "enum_over_fused": 2.76
+    },
+    {
+      "case": "h80_e500000",
+      "hubs": 80,
+      "edges": 500000,
+      "fused_wcoj": {
+        "wall_s": 0.32,
+        "peak_mb": 15,
+        "roots": 8080,
+        "total_triangles": 23054851,
+        "out_rows": 8080
+      },
+      "enum_then_count": {
+        "rc": 1,
+        "err": "COJ dispatch engaged (triangle + 4-cycle)\nError: ResourceExhausted { context: \"GPU memory allocation\", estimated_bytes: 3234973092, budget_bytes: 18874368000 }\n"
+      },
+      "souffle": {
+        "wall_s": 13.583,
+        "total_triangles": 23054851,
+        "rc": 0
+      },
+      "counts_match": false,
+      "souffle_over_fused": 42.45
+    }
+  ]
+}

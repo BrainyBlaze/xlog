@@ -1,78 +1,45 @@
 \section{The xlog Language}\label{sec:lang}
 
-This section describes the xlog language surface: types, expressions, user-defined functions, modules, and stratified aggregations with constraints. Probabilistic facts (\texttt{p::f.}) and neural predicate declarations (\texttt{nn/k}) are language-level constructs described in \Cref{sec:prob} and \Cref{sec:nesy} respectively. \Cref{sec:lang:completeness} covers the language-completeness surface added in v0.8.5---finite lists, safe meta-predicates, explicit negation-as-failure, magic-set planning, and probabilistic aggregates.
+This section describes the xlog surface: types, expressions, user-defined functions, modules, and stratified aggregation. Probabilistic facts (\texttt{p::f.}) and neural predicate declarations (\texttt{nn/k}) are language-level constructs covered in \Cref{sec:prob,sec:nesy}.
 
-\subsection{Design Philosophy}\label{sec:lang:philosophy}
+\subsection{Design Principles}
 
-xlog is a typed logic programming language designed for GPU execution. Three principles shape its surface:
+Three principles shape the surface, each a deliberate enabler of GPU execution rather than a concession. \textbf{Typed predicates:} every predicate has a declared signature over a closed set of scalar types (\texttt{u32}, \texttt{u64}, \texttt{i32}, \texttt{i64}, \texttt{f32}, \texttt{f64}, \texttt{bool}, \texttt{symbol}), so argument mismatches are caught before any kernel is generated and allocation stays bounded and columnar. \textbf{Stratified semantics:} negation, aggregation, and recursion interact through an SCC analysis on the predicate dependency graph, and programs whose SCCs cross negation or aggregation are rejected at compile time, guaranteeing a unique fixpoint computable by a deterministic semi-naive schedule. \textbf{One language for many paradigms:} probabilistic facts, annotated disjunctions, neural predicates, and SAT constraints share the syntactic core of deterministic Datalog; parsing, dependency analysis, and most lowering are shared, while backend-specific passes refine the plan. A language admitting unbounded terms or recursion through negation would forfeit exactly the allocation and fixpoint guarantees the GPU runtime depends on.
 
-\textbf{Typed predicates.} Every predicate has a declared signature over a closed set of scalar types (\texttt{u32}, \texttt{u64}, \texttt{i32}, \texttt{i64}, \texttt{f32}, \texttt{f64}, \texttt{bool}, \texttt{symbol}). On current \texttt{main}, predicate schemas and lowering-time validation catch argument mismatches before any GPU kernel is generated; richer standalone type inference exists in reserved frontend APIs but is not yet the universal production entry point.
+A minimal program exhibits the core surface:
 
-\textbf{Stratified semantics as contract.} Negation, aggregation, and recursion interact through a strongly-connected-component analysis on the predicate dependency graph. Programs whose SCCs cross negation or aggregation edges are rejected at compile time. Every accepted program has a well-defined fixpoint and a deterministic stratum order, which the runtime relies on for GPU scheduling.
-
-\textbf{One language for four paradigms.} Probabilistic facts (\texttt{p::f.}), annotated disjunctions, neural predicate declarations (\texttt{nn/k}), and SAT constraints share the same syntactic core with deterministic Datalog. Parsing, AST construction, dependency analysis, and most lowering logic are shared across the workspace, while backend-specific expansion and compilation passes refine the resulting plans for deterministic, probabilistic, SAT, and neural-symbolic execution. The distinction between reasoning paradigms lives primarily in the backend, not in the surface syntax.
-
-These three principles are deliberate enablers, not concessions to the GPU. Static types and finite domains are what permit bounded, statically-sized allocation and columnar kernels; stratification is what guarantees a unique fixpoint computable by a deterministic semi-naive schedule. A language admitting unbounded terms or recursion through negation would forfeit exactly the allocation and fixpoint guarantees the GPU runtime depends on---so xlog treats the restriction to finite, stratified programs as the price of compiling logic to efficient device kernels, and \Cref{sec:lang:completeness} shows how far the finite surface can be pushed before that price is paid.
-
-A minimal xlog program exhibits the core surface:
-
+\needspace{12\baselineskip}
 \lstinputlisting[style=xlogstyle,
                  caption={Minimal xlog program: typed predicates, facts, a recursive rule, a query.},
                  label={lst:hello}]{examples/01_hello.xlog}
 
-Typed predicate declarations, ground facts, recursive rules, and a query appear in eight lines. The remainder of this section expands each component and adds the extensions that move xlog beyond classical Datalog.
-
 \subsection{Type System}\label{sec:lang:types}
 
-Every predicate is declared with a typed signature via \texttt{pred}. Eight scalar types are supported: \texttt{u32}, \texttt{u64}, \texttt{i32}, \texttt{i64} for fixed-width integers; \texttt{f32} and \texttt{f64} for floats with IEEE 754 semantics; \texttt{bool}; and \texttt{symbol} for dictionary-encoded atoms. String literals in source (\texttt{"alice"}) are terms that map to \texttt{symbol} through the \texttt{SymbolTable} in \texttt{xlog-core}, giving the runtime dense integer identifiers while preserving source-level readability. Users can also introduce named type aliases through \texttt{domain} declarations.
-
-Current \texttt{main} enforces type consistency through explicit predicate schemas plus frontend/lowering checks. Variable occurrences across body atoms must agree with declared predicate signatures; literal constants are validated against their destination column types; arithmetic expressions preserve scalar types in the emitted \texttt{Expr} tree. The dedicated pass in \texttt{crates/xlog-logic/src/typeinfer.rs} covers richer inference cases, especially around user-defined functions, but remains a reserved API rather than the sole wired frontend path.
-
-A well-typed program:
+Every predicate is declared with \texttt{pred} over the eight scalar types, with \texttt{f32}/\texttt{f64} following IEEE~754. String literals (\texttt{"alice"}) map to \texttt{symbol} through a global symbol table, giving the runtime dense integer identifiers while preserving source-level readability; \texttt{domain} declarations introduce named aliases. Type consistency is enforced by predicate schemas and lowering-time checks: variable occurrences must agree with declared signatures, constants are validated against their destination columns, and arithmetic expressions preserve scalar types.
 
 \lstinputlisting[style=xlogstyle,
                  caption={A well-typed xlog program: typed bridge predicate.},
                  label={lst:types-ok}]{examples/02_types_ok.xlog}
 
-Changing \texttt{bridge}'s declaration to \texttt{pred bridge(symbol, u32).} would cause inference to report that the head argument \texttt{A} is constrained at \texttt{symbol} (head) and \texttt{u32} (through \texttt{connected}), rejecting the program at compile time.
+Declaring \texttt{bridge} so that its head argument is constrained at two incompatible types (e.g.\ \texttt{symbol} in the head but \texttt{u32} through \texttt{connected}) rejects the program at compile time.
 
-\subsection{Expressions and Arithmetic}\label{sec:lang:arith}
+\subsection{Expressions, Arithmetic, and User-Defined Functions}\label{sec:lang:arith}
 
-Rule bodies may contain arithmetic expressions, built-in function calls, and comparison filters. Arithmetic bindings use the \texttt{is} operator following Prolog convention: \texttt{D is X + Y} computes \texttt{X + Y} and binds the result to \texttt{D}. The right-hand side supports the standard arithmetic operators (\texttt{+}, \texttt{-}, \texttt{*}, \texttt{/}, \texttt{\%}), the built-ins \texttt{abs}, \texttt{min}, \texttt{max}, \texttt{pow}, and \texttt{cast}, and calls to user-defined functions (\Cref{sec:lang:udf}). Comparison literals (\texttt{<}, \texttt{<=}, \texttt{=}, \texttt{==}, \texttt{!=}, \texttt{>=}, \texttt{>}) compile to \texttt{Filter} RIR nodes and push down below joins where profitable.
-
-Float arithmetic follows IEEE 754 with explicit NaN and $\pm\infty$ handling: \texttt{NaN != NaN}, and ordering predicates place \texttt{NaN} outside any other value rather than raising errors. This matters for aggregations, where a single unguarded NaN would contaminate downstream GPU computations.
-
-A pairwise-proximity query illustrates expression use:
+Rule bodies may contain arithmetic, comparisons, and calls. Arithmetic bindings use the \texttt{is} operator (\texttt{D is X + Y}); the right-hand side supports \texttt{+ - * / \%}, the built-ins \texttt{abs}, \texttt{min}, \texttt{max}, \texttt{pow}, \texttt{cast}, and user-defined functions. Comparisons compile to \texttt{Filter} nodes and push below joins where profitable. Float comparison uses a total ordering---\texttt{NaN} and signed zeros yield deterministic results rather than contaminating downstream aggregations.
 
 \lstinputlisting[style=xlogstyle,
                  caption={Arithmetic in rule bodies: pairwise proximity via squared Euclidean distance.},
                  label={lst:arith}]{examples/03_arith.xlog}
 
-The rule compiles to a self-join of \texttt{point} with an intermediate \texttt{Project} that materializes \texttt{D}, followed by a \texttt{Filter} on \texttt{D < 1.0}. The optimizer relocates the cheap comparison \texttt{A < B} ahead of the join when profitable, reducing intermediate cardinality.
-
-\subsection{User-Defined Functions}\label{sec:lang:udf}
-
-xlog includes a user-defined function (UDF) surface for pure scalar computations inside rule bodies and expressions. A UDF is introduced with the \texttt{func} keyword; parameters carry optional type annotations, and the return type is declared after a \texttt{->}. Arithmetic-expression bodies (optionally with conditional \texttt{if/then/else}) are the path integrated into the current arithmetic frontend. The syntax also admits a more ambitious predicate-based form \texttt{V :- body.}, but that form remains partially wired and should be viewed as reserved rather than uniformly available across all compiler entry points.
-
-UDFs are intended to be pure: they take scalar arguments and return scalar values, and do not recurse through relations. The function registry in \texttt{crates/xlog-logic/src/function.rs} performs structural validation---duplicate definitions, unresolved calls, name conflicts, and recursive definitions without a guarded base case are rejected. Calls to arithmetic UDFs appear wherever arithmetic expressions do, including as the right-hand side of an \texttt{is}-expression. Expansion is explicit rather than universal on current \texttt{main}: selected execution paths invoke \texttt{crates/xlog-logic/src/expand.rs} to inline arithmetic UDFs into composed \texttt{Expr} trees (\texttt{Add}, \texttt{Mul}, \texttt{Conditional}, and so on), while predicate-bodied expansion remains reserved. Where this expansion path is used, UDFs participate in the same predicate-pushdown and expression-level optimization passes as built-in arithmetic.
-
-Most classical Datalog dialects have no UDF analogue: functors are either absent or restricted to uninterpreted term construction. xlog's arithmetic UDF path closes part of this gap without breaking monotonicity. Because the integrated bodies are pure scalar expressions, a UDF call in a recursive rule does not enlarge the set of derivable facts beyond what the surrounding Datalog rule already derives.
-
-A UDF for score normalization:
+A user-defined function (UDF) is introduced with \texttt{func}, with optional parameter types and a return type after \texttt{->}. Arithmetic bodies (optionally with \texttt{if/then/else}) inline into the same \texttt{Expr} trees as built-in arithmetic and participate in the same predicate-pushdown and expression-level optimization. UDFs are pure scalar functions and do not recurse through relations, so a UDF call in a recursive rule does not enlarge the derivable set---closing part of the gap to classical Datalog without breaking monotonicity.
 
 \lstinputlisting[style=xlogstyle,
                  caption={User-defined function: \texttt{clamp01} normalizes a raw score into the unit interval.},
                  label={lst:udf}]{examples/04_udf.xlog}
 
-The \texttt{clamp01} UDF lowers to a conditional expression embedded in the \texttt{Project} computing \texttt{norm\_score}'s second column; no host dispatch occurs during evaluation.
-
 \subsection{Modules and Imports}\label{sec:lang:modules}
 
-xlog programs decompose into modules. A module is a \texttt{.xlog} file located on the module search path, which the \texttt{xlog} CLI controls via the \texttt{--module-path} flag. The \texttt{use} directive loads a named module (e.g., \texttt{use graph.}) or selectively imports names from it (\texttt{use utils/math::\{abs, clamp\}.}). Module paths use \texttt{/} as a separator and mirror the on-disk directory structure. Declarations and functions carry an optional \texttt{private} modifier to hide them from importers.
-
-Name resolution runs before type inference. The resolver traverses the import graph, detects cycles, merges symbol tables, and surfaces a single logical program whose remaining compilation stages proceed as if the user had written all rules inline. Imports are transitive; attempts to reach a \texttt{private} name yield a structured \texttt{ModuleError::PrivatePredicate} diagnostic rather than a silent shadowing.
-
-A two-module program where a top-level entry imports a graph-reachability library:
+Programs decompose into \texttt{.xlog} modules on a search path. The \texttt{use} directive loads a module (\texttt{use graph.}) or selectively imports names (\texttt{use utils/math::\{abs, clamp\}.}); a \texttt{private} modifier hides declarations from importers. Name resolution runs before type inference: the resolver traverses the import graph, detects cycles, merges symbol tables, and surfaces a single logical program, so imported rules participate in exactly the same SCC analysis and GPU semi-naive evaluation as if written inline.
 
 \lstinputlisting[style=xlogstyle,
                  caption={Module \texttt{graph\_lib.xlog}: predicate declarations and recursive reach rules.},
@@ -82,34 +49,14 @@ A two-module program where a top-level entry imports a graph-reachability librar
                  caption={Entry \texttt{graph\_main.xlog}: imports \texttt{graph\_lib} and queries \texttt{reach}.},
                  label={lst:graph-main}]{examples/graph_main.xlog}
 
-The resolver merges the two files before stratification, so the library's recursive \texttt{reach} rules participate in exactly the same SCC analysis and GPU semi-naive evaluation as if they had been written inline.
-
 \subsection{Aggregations and Constraints}\label{sec:lang:agg}
 
-xlog supports stratified aggregation and integrity constraints. Aggregation operators---\texttt{count}, \texttt{sum}, \texttt{min}, \texttt{max}, and \texttt{logsumexp}---appear at head positions of rules, with an explicit aggregation variable. The stratifier rejects any program in which an aggregation participates in a recursive SCC, guaranteeing a well-defined fixpoint order. Aggregations lower to \texttt{GroupBy} RIR nodes, executed on the GPU as radix-sort-and-reduce kernels in \texttt{xlog-cuda}.
-
-Integrity constraints are headless rules: \texttt{:- body.} denotes a program-level assertion that \texttt{body} must be unsatisfiable after evaluation reaches fixpoint. A satisfied constraint is silent; a violated constraint raises a diagnostic. Constraints compose cleanly with stratification---they evaluate after the strata their body predicates inhabit.
-
-A graph-degree computation with an integrity check that every edge source has a degree record:
+Aggregation operators---\texttt{count}, \texttt{sum}, \texttt{min}, \texttt{max}, \texttt{logsumexp}---appear at rule heads with an explicit aggregation variable and lower to \texttt{GroupBy} nodes executed as radix-sort-and-reduce kernels; the stratifier rejects aggregation inside a recursive SCC. Integrity constraints are headless rules (\texttt{:- body.}) asserting that \texttt{body} is unsatisfiable once evaluation reaches fixpoint; a violation raises a diagnostic. \texttt{logsumexp} is included because it is the workhorse aggregation for probabilistic circuits, where log-space numerical stability is essential (\Cref{sec:prob}).
 
 \lstinputlisting[style=xlogstyle,
                  caption={Stratified aggregation: per-source out-degree with an integrity constraint.},
                  label={lst:agg}]{examples/06_agg.xlog}
 
-The \texttt{degree} rule lowers to a \texttt{GroupBy} over \texttt{edge} with \texttt{count} as the aggregator. The integrity constraint is desugared into an auxiliary rule whose body mirrors the constraint body (so the \texttt{not degree(X, \_)} literal here contributes an \texttt{Anti}-join); at evaluation completion the runtime asserts the auxiliary relation is empty and raises a diagnostic otherwise. \texttt{logsumexp} is included explicitly because it is the workhorse aggregation for probabilistic circuits (\Cref{sec:prob}), where log-space numerical stability is essential.
+\subsection{Completeness over Finite Domains}\label{sec:lang:completeness}
 
-\subsection{Language Completeness over Finite Domains}\label{sec:lang:completeness}
-
-Version 0.8.5 expands the surface toward language completeness while preserving the GPU-native execution discipline: every new construct must normalize into the existing typed AST, RIR, probabilistic IR, optimizer, and runtime paths. None of these features introduces a CPU Prolog term heap, dynamic predicate calls, or a hidden CPU-only fallback for a GPU-claimed path; forms that cannot be lowered safely are rejected at compile time with typed diagnostics rather than executed slowly.
-
-\textbf{Finite lists.} List literals (\texttt{[]}, \texttt{[A, B]}, cons patterns \texttt{[H|T]}) and the \texttt{list<T>} column type denote finite, homogeneous, typed lists. Lists and the core list built-ins normalize to \texttt{\_\_xlog\_list\_*} helper relations that lower through ordinary relational joins and aggregations; open-ended generators, cyclic lists, and untyped heterogeneous lists are rejected.
-
-\textbf{Safe meta-predicates.} Finite, statically-resolvable forms of \texttt{ground}, \texttt{var}, \texttt{nonvar}, \texttt{functor}, \texttt{=..} (univ), source-fact \texttt{findall}, and unary/binary \texttt{maplist} normalize to \texttt{\_\_xlog\_meta\_*} helper relations before stratification. Term, compound, and \texttt{predref} columns lower to \texttt{u64} term identifiers. Unrestricted \texttt{call/N}, dynamic database mutation, and runtime-variable predicate names remain outside the contract.
-
-\textbf{Explicit negation-as-failure.} Deterministic \texttt{not atom(\ldots)} is closed-world stratified negation over deterministic relations, lowering to the existing anti-join path. Source-order binding-safety diagnostics require every named variable in a negated atom to be bound by a prior positive binder. Probabilistic well-founded semantics (\Cref{sec:prob}) remains a separate exact-inference profile.
-
-\textbf{Magic-set planning.} The \texttt{\#pragma magic\_sets = auto|on|off} directive enables adornment-based rewriting of bound deterministic recursive queries: a query such as \texttt{?- reach(1, Y).} specializes recursive reachability to the reachable frontier, reducing materialized rows. The rewrite runs before optimizer and WCOJ planning and declines---with a typed diagnostic---when equivalence cannot be proven (e.g., unsafe interaction with negation, aggregates, or mutual recursion).
-
-\textbf{Probabilistic aggregates.} Finite \texttt{count}, \texttt{sum}, \texttt{min}, \texttt{max}, and \texttt{logsumexp} outcomes are supported as aggregate heads in exact provenance/PIR inference and in Monte Carlo deterministic aggregate execution, with typed exact-domain cap diagnostics. Small finite \texttt{count} domains use aggregate lifting---exact cardinality dynamic programming over a compact state set instead of naive world enumeration---and accepted fired \texttt{count} aggregates dispatch the GPU-native \texttt{weights\_count\_lift\_exact} evaluator rather than a CPU finite-world shortcut.
-
-\textbf{Approximate inference and incremental parsing.} Monte Carlo configuration is a first-class language feature via \texttt{\#pragma prob\_engine = mc} plus sample/seed/confidence pragmas, with documented source/CLI precedence and reported uncertainty. A statement-level incremental parser with stable spans reuses unchanged parses across edits, supporting interactive \texttt{xlog repl} and \texttt{xlog watch} developer workflows.
+The surface extends toward language completeness while preserving GPU-native execution: every construct normalizes into the existing typed AST, RIR, and runtime paths, and forms that cannot be lowered safely are rejected at compile time rather than executed on a hidden CPU interpreter. The accepted extensions are finite typed lists (\texttt{[]}, \texttt{[H|T]}, the \texttt{list<T>} column type), statically-resolvable meta-predicates (\texttt{ground}, \texttt{functor}, \texttt{=..}, source-fact \texttt{findall}, \texttt{maplist}), explicit stratified negation-as-failure over deterministic relations, magic-set rewriting of bound recursive queries, and finite probabilistic aggregates---each lowering to ordinary relational joins and aggregations. Open-ended generators, dynamic database mutation, unrestricted \texttt{call/N}, and runtime-variable predicate names remain outside the contract.

@@ -1,0 +1,20 @@
+[
+  {
+    "labels": 4,
+    "off_ms_mean": 1.194,
+    "off_ms_std": 0.0077,
+    "on_ms_mean": 1.2543,
+    "on_ms_std": 0.0028,
+    "roundtrip_ms": 0.0603,
+    "residency_overhead_pct": 5.1
+  },
+  {
+    "labels": 10,
+    "off_ms_mean": 18.2265,
+    "off_ms_std": 0.0305,
+    "on_ms_mean": 18.2098,
+    "on_ms_std": 0.0198,
+    "roundtrip_ms": -0.0166,
+    "residency_overhead_pct": -0.1
+  }
+]

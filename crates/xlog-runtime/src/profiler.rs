@@ -134,6 +134,24 @@ pub struct ExecutionStats {
     pub memory_budget_bytes: u64,
     /// Total output rows across all queries
     pub total_output_rows: u64,
+    /// WCOJ triangle-hook dispatches that installed a result (vs. silently
+    /// falling back to the binary-join path). A value > 0 is the proof a
+    /// run actually used the WCOJ triangle kernel.
+    pub wcoj_triangle_dispatch_count: u64,
+    /// WCOJ 4-cycle-hook dispatches that installed a result.
+    pub wcoj_4cycle_dispatch_count: u64,
+    /// Aggregate-fused group-by-root WCOJ dispatches (count without
+    /// materializing the join rows).
+    pub wcoj_groupby_fusion_dispatch_count: u64,
+    /// Generalized Free Join dispatches installed via the multiway plan.
+    pub free_join_dispatch_count: u64,
+    /// Factorized recursive-delta dispatches installed in the semi-naive
+    /// fixpoint.
+    pub factorized_delta_dispatch_count: u64,
+    /// WCOJ pipeline errors converted into binary-join declines. 0 is
+    /// healthy; a nonzero value signals a regressed WCOJ pipeline hiding
+    /// behind the silent-fallback contract.
+    pub wcoj_error_decline_count: u64,
 }
 
 impl ExecutionStats {
@@ -181,6 +199,15 @@ impl ExecutionStats {
             "Output: {} rows\n",
             format_rows(self.total_output_rows)
         ));
+        output.push_str(&format!(
+            "WCOJ dispatch: triangle {}, 4-cycle {}, groupby-fusion {}, free-join {}, factorized-delta {}, declines {}\n",
+            self.wcoj_triangle_dispatch_count,
+            self.wcoj_4cycle_dispatch_count,
+            self.wcoj_groupby_fusion_dispatch_count,
+            self.free_join_dispatch_count,
+            self.factorized_delta_dispatch_count,
+            self.wcoj_error_decline_count,
+        ));
 
         output
     }
@@ -203,12 +230,18 @@ impl ExecutionStats {
         }).collect();
 
         format!(
-            r#"{{"total_ms":{},"strata":[{}],"peak_memory_mb":{},"budget_memory_mb":{},"output_rows":{}}}"#,
+            r#"{{"total_ms":{},"strata":[{}],"peak_memory_mb":{},"budget_memory_mb":{},"output_rows":{},"wcoj":{{"triangle_dispatch":{},"four_cycle_dispatch":{},"groupby_fusion_dispatch":{},"free_join_dispatch":{},"factorized_delta_dispatch":{},"error_decline":{}}}}}"#,
             total_ms,
             strata_json.join(","),
             self.peak_memory_bytes / (1024 * 1024),
             self.memory_budget_bytes / (1024 * 1024),
-            self.total_output_rows
+            self.total_output_rows,
+            self.wcoj_triangle_dispatch_count,
+            self.wcoj_4cycle_dispatch_count,
+            self.wcoj_groupby_fusion_dispatch_count,
+            self.free_join_dispatch_count,
+            self.factorized_delta_dispatch_count,
+            self.wcoj_error_decline_count,
         )
     }
 }
@@ -396,6 +429,9 @@ impl Profiler {
             peak_memory_bytes: self.peak_memory_bytes,
             memory_budget_bytes: self.memory_budget_bytes,
             total_output_rows,
+            // WCOJ dispatch counters live on the executor, not the profiler;
+            // `Executor::execution_stats` fills them in after this call.
+            ..Default::default()
         }
     }
 

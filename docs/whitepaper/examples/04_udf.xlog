@@ -6,6 +6,9 @@ func clamp01(X: f64) -> f64 =
   else if X > 1.0 then 1.0
   else X.
 
-raw_score(1, -0.3). raw_score(2, 0.7). raw_score(3, 1.4).
+raw_score(1, -0.3).
+raw_score(2, 0.7).
+raw_score(3, 1.4).
 
-norm_score(Id, N) :- raw_score(Id, R), N is clamp01(R).
+norm_score(Id, N) :-
+  raw_score(Id, R), N is clamp01(R).

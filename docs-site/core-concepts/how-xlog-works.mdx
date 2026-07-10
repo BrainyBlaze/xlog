@@ -3,18 +3,34 @@ title: "How XLOG works"
 description: "One compiler and one CUDA runtime span four reasoning paradigms — here is the path a program takes from source to GPU."
 ---
 
-XLOG is a typed logic programming language whose compiler and runtime run reasoning
-on the GPU. A single frontend parses your program, checks it, and lowers it through
-staged intermediate representations; a shared CUDA runtime then executes it. Four
-reasoning paradigms — deterministic Datalog, probabilistic inference, epistemic
-reasoning, and SAT/MaxSAT solving — reuse that same frontend instead of living in
-separate engines.
+XLOG lets you write logic programs — Datalog rules, probabilistic models,
+epistemic reasoning, and SAT/MaxSAT solving — and run them directly on the GPU.
+You write in one typed language, and a single compiler plus one CUDA runtime handle
+all four styles of reasoning.
+
+Because the results stay on the GPU, you can feed them straight into a PyTorch
+training loop instead of copying data back and forth. This page follows the path a
+program takes from source text to running GPU code.
+
+## When this matters
+
+Read this page when you want a correct mental model of what happens after you write
+a program: how it is compiled, why all four reasoning styles share one frontend, and
+why the output is cheap to hand to a tensor framework.
+
+You do not need it to write your first program. You do need it to reason about
+performance, or to understand why XLOG fits inside a training loop rather than beside
+it.
+
+This is a conceptual explainer, not a task walkthrough: it builds a mental model of
+the compilation path rather than stepping you through a runnable program. For a
+hands-on start with real output, see the [quickstart](/get-started/quickstart).
 
 ## The pipeline
 
-Every program follows the same path. The host compiles and orchestrates; the
-executor dispatches CUDA kernels and manages relation state that stays resident on
-the device.
+Every program — whichever reasoning style it uses — takes the same path from source
+to GPU. The host machine compiles and orchestrates the work. The GPU holds the data
+and runs the actual computation as CUDA kernels.
 
 <Frame caption="A program is parsed, stratified, lowered to a relational IR, optimized, and executed by dispatching CUDA kernels over device-resident relations.">
   <img className="block dark:hidden" src="/assets/diagrams/compilation-pipeline-light.svg" alt="XLOG compilation pipeline: Source, Parser, Stratifier, Lowerer, Optimizer, and Executor run on the host; CUDA kernels and the relation store are GPU-resident." />
@@ -23,40 +39,63 @@ the device.
 
 <Steps>
   <Step title="Parse">
-    A PEG grammar turns source into an abstract syntax tree. The grammar is the
-    definitive surface of the language: if a construct does not appear in it, it does
-    not parse.
+    A PEG grammar (a formal grammar that tries its alternatives in a fixed order, so
+    every input has one unambiguous parse) turns your program into an abstract syntax
+    tree (a structured tree form of your program that the compiler works on).
+
+    The grammar is the definitive surface of the language: if a construct does not
+    appear in it, it does not parse.
   </Step>
   <Step title="Stratify">
-    Strongly-connected-component analysis over the predicate dependency graph orders
-    the program into strata and rejects negation or aggregation that cannot be
-    stratified.
+    XLOG splits the program into ordered layers, called *strata*, so that negation and
+    aggregation are computed in a safe order.
+
+    It does this by finding cycles in the predicate dependency graph
+    (strongly-connected-component analysis). If a use of negation or aggregation cannot
+    be placed in such an order, XLOG rejects the program.
   </Step>
   <Step title="Lower">
-    The stratified program is lowered to a relational IR (`RIR`) of joins, filters,
-    projections, aggregations, and recursive fixpoints.
+    The stratified program is rewritten into a relational intermediate representation
+    (`RIR`) — your program expressed as database-style operations.
+
+    Those operations are joins, filters, projections, aggregations, and recursive loops
+    (fixpoints).
   </Step>
   <Step title="Optimize">
-    A cost-aware pass plans join order, pushes down predicates, and promotes eligible
-    joins to worst-case-optimal multiway joins.
+    A cost-aware pass plans the join order and pushes filters closer to the data so
+    less work reaches later stages.
+
+    It also promotes eligible joins to *worst-case-optimal multiway joins* — a join
+    method that computes multi-way patterns, such as triangles in a graph, directly
+    instead of building a large intermediate table.
   </Step>
   <Step title="Execute">
-    The executor interprets the plan on the host, dispatching CUDA kernels over
-    relations that live in device memory. Deterministic recursion runs as a
-    semi-naive fixpoint.
+    The executor runs the plan on the host and dispatches CUDA kernels over relations
+    that live in GPU memory.
+
+    Deterministic recursion runs as a *semi-naive fixpoint*: a loop that repeats a rule
+    until nothing new is derived, processing only the newly-found facts on each round.
   </Step>
 </Steps>
 
 ## Four paradigms, one frontend
 
-After the shared parse and stratify stages, each reasoning path branches into its own
-intermediate representation, built from the normalized program rather than from the
-deterministic `RIR`.
+XLOG supports four reasoning styles, and all four share the same parsing and
+stratification stages. Only after those shared stages does each style branch into its
+own intermediate representation.
+
+Each branch is built from the normalized program — the parsed, stratified rules put
+into a common standard form — not from the deterministic `RIR`. So the probabilistic,
+epistemic, and solver paths are siblings of the deterministic path, not layers on top
+of it.
 
 <Frame caption="One typed frontend fans into four reasoning paradigms, each with its own IR, all executing on the shared GPU kernel provider.">
   <img className="block dark:hidden" src="/assets/diagrams/architecture-overview-light.svg" alt="XLOG architecture: Source feeds a shared frontend that fans into Deterministic (RIR), Probabilistic (PIR to XGCF), Epistemic (EIR), and Solver (SIR) paradigms, all executing on a GPU-resident kernel provider." />
   <img className="hidden dark:block" src="/assets/diagrams/architecture-overview-dark.svg" alt="XLOG architecture: Source feeds a shared frontend that fans into Deterministic (RIR), Probabilistic (PIR to XGCF), Epistemic (EIR), and Solver (SIR) paradigms, all executing on a GPU-resident kernel provider." />
 </Frame>
+
+Here is what each style computes and where to learn to use it. The glosses below the
+table explain the terms in plain language.
 
 | Paradigm | What it computes | Learn more |
 |---|---|---|
@@ -65,27 +104,61 @@ deterministic `RIR`.
 | **Epistemic** | World-view semantics over modal `know` and `possible` operators | [Epistemic reasoning](/epistemic/overview) |
 | **Neural-symbolic** | Learned rules and neural predicates trained end-to-end with PyTorch | [Rule learning](/neural/rule-learning) |
 
-The intermediate representations make this concrete. Everything lowers through the
-relational IR (`RIR`); the probabilistic and solver paths compile further to a
-GPU-evaluable circuit format (`XGCF`), while the epistemic path drives GPU world-view
-execution directly.
+- **Least-model semantics** — the unique smallest set of facts that the rules force to
+  be true.
+- **Exact knowledge compilation** — turning the program into a circuit that computes
+  exact probabilities, rather than estimating them by sampling.
+- **World-view semantics** — reasoning about what an agent knows (`know`) or considers
+  possible (`possible`); a *world view* is the set of models the program treats as
+  possible at once.
+
+## How the paradigms map to intermediate forms
+
+The pieces above become concrete once you see how each path is represented internally.
+Everything starts from the relational intermediate representation (`RIR`).
+
+From there the probabilistic and solver paths compile one step further, into a
+GPU-evaluable circuit format called `XGCF`. The epistemic path instead drives
+world-view execution on the GPU directly.
 
 <Frame caption="The IR stack: AST lowers to RIR; PIR and SIR compile to the XGCF circuit format; EIR drives GPU world-view execution.">
   <img className="block dark:hidden" src="/assets/diagrams/ir-stack-light.svg" alt="XLOG IR stack: AST to RIR, which branches into PIR (provenance), EIR (epistemic), and SIR (solver); PIR and SIR compile to the XGCF circuit format and EIR drives GPU epistemic execution." />
   <img className="hidden dark:block" src="/assets/diagrams/ir-stack-dark.svg" alt="XLOG IR stack: AST to RIR, which branches into PIR (provenance), EIR (epistemic), and SIR (solver); PIR and SIR compile to the XGCF circuit format and EIR drives GPU epistemic execution." />
 </Frame>
 
+<Note>
+  **Internal names, in one place.** These abbreviations name the intermediate forms a
+  program passes through. You do not write them, but you will see them in diagnostics
+  and diagrams.
+
+  - `RIR` — relational IR: your program as joins, filters, projections, aggregations,
+    and fixpoints.
+  - `PIR` — probabilistic IR; tracks which facts and probabilities contributed to each
+    result (its provenance), and compiles to `XGCF`.
+  - `SIR` — solver IR for SAT/MaxSAT; compiles to `XGCF`.
+  - `EIR` — epistemic IR; drives GPU world-view execution.
+  - `XGCF` — the GPU-evaluable circuit format that the probabilistic and solver paths
+    compile into.
+</Note>
+
 ## Compile once, evaluate many
 
-The compiled plan is structure, and structure is stable: across training iterations or
-repeated queries, only data and weights change, never the plan. XLOG compiles a program
-once and reuses the plan — and, for probabilistic inference, the compiled circuit —
-across evaluations. This is what makes XLOG usable inside a training loop rather than
-alongside it.
+The compiled plan is *structure*, and that structure is stable. Across training
+iterations or repeated queries, only the data and the weights change; the plan itself
+does not.
 
-Results stay on the GPU. Query outputs and gradient tensors are exposed through DLPack
-capsules and Arrow for zero-copy interop with PyTorch, JAX, and cuDF, so a downstream
-tensor computation reads XLOG's output without a host round-trip.
+So XLOG compiles a program once and reuses the plan on every evaluation. For
+probabilistic inference it also reuses the compiled circuit. This is what makes XLOG
+usable inside a training loop rather than alongside it.
+
+## Results stay on the GPU
+
+Query outputs and gradient tensors never leave the GPU on their way to your tensor
+code. XLOG exposes them through DLPack capsules and Arrow — two standard formats for
+sharing tensors and tables between GPU libraries without copying.
+
+Because of that, a downstream tensor computation in PyTorch, JAX, or cuDF reads XLOG's
+output directly, with no round-trip back through the host.
 
 <Card title="Why GPU residency matters" icon="microchip" href="/core-concepts/gpu-residency">
   The defining constraint behind XLOG's design — and what separates it from CPU logic

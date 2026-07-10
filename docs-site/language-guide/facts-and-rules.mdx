@@ -83,7 +83,8 @@ A query asks the engine to compute and print a relation. Write it with `?-`:
 ?- reach(1, N).
 ```
 
-Running a program evaluates every rule to a fixpoint, then prints the queries:
+Running a program evaluates every rule to a **fixpoint** — it keeps applying rules
+until no new facts can be derived — then prints the queries:
 
 ```bash
 xlog run reachability.xlog
@@ -128,7 +129,9 @@ reach(X, Z) :- edge(X, Y), reach(Y, Z).
 ```
 
 The second `reach` rule refers to `reach` in its own body — that is recursion, and it
-is where XLOG's semi-naive fixpoint evaluation does its work.
+is where XLOG's **semi-naive** fixpoint evaluation — which each round works only from
+the facts newly derived in the previous round, rather than recomputing everything —
+does its work.
 
 <Card title="Recursion" icon="arrows-rotate" href="/language-guide/recursion">
   How recursive rules are evaluated to a fixpoint, and how to keep them terminating.

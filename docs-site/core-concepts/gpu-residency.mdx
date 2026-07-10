@@ -29,7 +29,9 @@ circuit values), which never leaves the device in a production run.
 
 This is what makes XLOG a runtime you put *inside* a training loop. Query results and
 gradient tensors are exposed as GPU-resident DLPack capsules and Arrow arrays, so a
-PyTorch or JAX computation consumes them without a copy.
+PyTorch or JAX computation consumes them without a copy. You can confirm residency held
+on a run: the tensor XLOG hands back reports a CUDA device (`tensor.device`), which means
+the data was never copied to the host.
 
 ## Strict residency, and what happens when it fails
 

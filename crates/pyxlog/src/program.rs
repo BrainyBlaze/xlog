@@ -1052,7 +1052,19 @@ impl CompiledProgram {
     /// Returns None if profiling is not enabled or no data is available.
     fn warmup_breakdown(&self, py: Python<'_>) -> PyResult<Option<PyObject>> {
         let ptx_profile = self.output_provider.ptx_load_profile();
-        let circuit_profile = self.last_compile_profile.as_ref();
+        // The neural forward path records `self.last_compile_profile`. For a
+        // purely probabilistic/deterministic program no neural forward runs,
+        // so fall back to the compile profile captured when the program's own
+        // circuit was built (the cold D4-compile + CDCL-verify). Without this
+        // fallback `warmup_breakdown()` returned None for non-neural programs,
+        // hiding the verification-overhead split from benchmark isolation runs.
+        let circuit_profile = self
+            .last_compile_profile
+            .as_ref()
+            .or_else(|| match &self.program {
+                CompiledProbProgram::Exact(p) => p.last_compile_profile(),
+                CompiledProbProgram::Mc(_) => None,
+            });
 
         // Return None if neither profile is available.
         if ptx_profile.is_none() && circuit_profile.is_none() {
