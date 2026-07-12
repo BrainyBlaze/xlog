@@ -23,7 +23,7 @@ include = [
 [dependencies]
 xlog-core.workspace = true
 cudarc.workspace = true
-arrow = { version = "53", default-features = false, features = ["ffi", "ipc"] }
+arrow = { version = "59", default-features = false, features = ["ffi", "ipc"] }
 
 [dev-dependencies]
 bytemuck = "1.14"
