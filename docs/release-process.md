@@ -127,9 +127,11 @@ gh secret set RELEASE_PLZ_GITHUB_TOKEN -R BrainyBlaze/xlog
 - on pushes to `main`, runs `release-plz` in `release-pr` mode to open or update the release PR
 - on manual `workflow_dispatch`, runs `release-plz` in `release` mode after the maintainer confirms
   that real-GPU validation has already passed
-- `release-plz.toml` restricts release PR creation to commits whose subject starts with
-  `feat:`, `fix:`, `perf:`, `refactor:`, `docs:`, `build:`, `ci:`, `test:`, or `revert:`
-  including scoped forms such as `build(deps):`
+- a workspace-level worthiness check inside the workflow (before `release-plz release-pr`)
+  restricts release PR creation to pushes that carry at least one commit since the last
+  `xlog-cli-v*` tag whose subject starts with `feat:`, `fix:`, `perf:`, `refactor:`, `docs:`,
+  `build:`, `ci:`, `test:`, or `revert:` — including scoped forms such as `build(deps):` and
+  breaking-change forms such as `feat!:`
 - plain `chore:` commits are treated as non-release maintenance, so merging a release PR with a
   title such as `chore: release v0.5.2` does not immediately queue the next release PR
 - before the manual publish step, runs `scripts/preflight_release_publish.sh`, which currently
