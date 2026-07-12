@@ -171,6 +171,23 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
           if [[ "$command" == "release-pr" ]]; then
+            # Repo contract: chore-only pushes do not enqueue releases.
+            # Enforced here at WORKSPACE granularity: the per-package
+            # `release_commits` filter produced a partial release set, and
+            # under the shared [workspace.package] version a minor bump then
+            # left excluded crates' intra-workspace requirements at the old
+            # minor (cargo cannot resolve `xlog-core = "^0.10.0"` against a
+            # carried 0.11.0 — failed runs of 2026-07-10/12). One
+            # worthiness decision for the whole workspace keeps the release
+            # set uniform so version_group can unify next versions.
+            last_tag=$(git tag --list 'xlog-cli-v*' --sort=-v:refname | head -1)
+            range=${last_tag:+${last_tag}..HEAD}
+            if ! git log --format=%s ${range:-HEAD} | grep -qE '^(feat|fix|perf|refactor|docs|build|ci|test|revert)(\([^)]+\))?!?:'; then
+              echo "No release-worthy commits since ${last_tag:-repository start}; skipping release-pr."
+              echo "prs_created=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+
             release_pr_output=$(release-plz release-pr \
               --git-token "$GITHUB_TOKEN" \
               --repo-url "https://github.com/${GITHUB_REPOSITORY}" \

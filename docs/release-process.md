@@ -184,7 +184,11 @@ when the same workflow invocation actually emits the new CLI release.
 ## Release Commit Policy
 
 Release-plz PR preparation is intentionally narrower than "every commit that touched packaged
-files". The workspace `release_commits` rule treats the following commit types as release-worthy:
+files". A workspace-level worthiness check in the release-plz workflow (run before
+`release-plz release-pr`; it replaced the per-package `release_commits` config rule, whose
+per-crate filtering produced partial release sets that broke intra-workspace version
+requirements under the shared workspace version) treats the following commit types as
+release-worthy:
 
 - `feat`
 - `fix`

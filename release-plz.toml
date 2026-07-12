@@ -6,9 +6,13 @@ changelog_path = "CHANGELOG.md"
 max_analyze_commits = 5000
 pr_branch_prefix = "release-plz-"
 pr_labels = ["release"]
-# Keep merged release commits from immediately generating the next release PR.
-# Generic `chore:` commits are treated as non-release maintenance in this repo.
-release_commits = '^(feat|fix|perf|refactor|docs|build|ci|test|revert)(\([^)]+\))?:'
+# No `release_commits` filter: it applies PER PACKAGE, so a batch touching
+# only some crates yields a partial release set, and under the shared
+# [workspace.package] version a minor bump then breaks the excluded crates'
+# intra-workspace requirements (`xlog-core = "^0.10.0"` cannot resolve
+# against a carried 0.11.0). The "chore-only pushes do not enqueue releases"
+# contract is enforced at workspace granularity in the release-plz workflow
+# (worthiness check before `release-plz release-pr`).
 git_release_enable = false
 git_tag_enable = false
 
