@@ -38,9 +38,11 @@ mixed within a comparison.
   `XLOG_FORCE_HOST_ROUNDTRIP`; the on-minus-off per-iteration delta is the
   transfer cost residency eliminates. The single-query file measures 2 handoffs
   (near-noise). The `_scale` file sweeps the batched path (2--512 handoffs per
-  step) and is the one to cite: per-handoff round-trip is ~40--56 us, and the
-  round-trip's share of a step rises with the handoff count to ~10% at the
-  standard batch-64 MNIST step (7.2 ms of 72 ms). `runners/residency_sweep.py`
+  step) and is the one to cite: per-handoff round-trip is ~40--56 us; the
+  round-trip's share of a step is within noise below ~16 handoffs
+  (queries=4 even measures -8.9%), reaches ~10% at the standard batch-64
+  MNIST step (7.2 ms of 72 ms), and measures 8.6% at queries=256 — the
+  batch-64 point is the peak share in this sweep, not a monotone climb. `runners/residency_sweep.py`
   is the single-query runner; the scale runner is `runners/residency_scale.py`.
 - **Verify-overhead isolation** — `program.warmup_breakdown()` under
   `XLOG_WARMUP_PROFILE=1` splits the cold compile into D4-compile and on-GPU
