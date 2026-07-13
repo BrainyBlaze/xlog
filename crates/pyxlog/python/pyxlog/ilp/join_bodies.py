@@ -183,24 +183,24 @@ def read_join_extension(
 def domain_row_index(domain_ids: Sequence[int], network: str = "") -> dict[int, int]:
     """``constant -> row`` for one network's ``domain_ids``.
 
-    The ids must be STRICTLY INCREASING, and that is load-bearing rather than
-    stylistic: the exact d-DNNF circuit grounds the join predicate over the join
-    domain in SORTED order, so it reads row ``j`` as the ``j``-th sorted constant.
-    If ``domain_ids`` is sorted ascending, "row j holds constant ``domain_ids[j]``"
-    is true under the circuit's convention as well as under this map's — the two
-    engines then agree on ANY id set, sparse ones included. Unsorted ids would make
-    them disagree again, silently, which is precisely the bug this map exists to
-    close. Duplicates are refused for the same reason (two rows claiming one
-    constant has no meaning under either convention).
+    This map is the SINGLE source of truth for the correspondence, on both sides: the
+    ids are also handed to the engine (``register_domain_tensor_source``), and the
+    exact d-DNNF circuit resolves the constant it grounded a leaf at through the same
+    list. Neither path infers the row from an ordering any more, so no id set — sparse,
+    superset of the join domain, or dense — can put the two engines into disagreement.
+
+    The ids must still be STRICTLY INCREASING, but as a stated requirement on the
+    caller's layout, not as the thing that keeps the paths in step: duplicates are
+    meaningless (two rows claiming one constant), and a stable ascending order keeps
+    the row layout predictable and diffable across runs.
     """
     ids = list(domain_ids)
     for prev, cur in zip(ids, ids[1:]):
         if cur <= prev:
             where = f"domain_ids['{network}']" if network else "domain_ids"
             raise ValueError(
-                f"{where} must be strictly increasing (the exact circuit reads row j "
-                f"as the j-th join constant in SORTED order, so only sorted ids make "
-                f"the two paths agree); got {prev} followed by {cur}"
+                f"{where} must be strictly increasing (one row per constant, in a "
+                f"stable ascending layout); got {prev} followed by {cur}"
             )
     return {c: j for j, c in enumerate(ids)}
 

@@ -427,9 +427,10 @@ def test_a_sparse_join_domain_with_explicit_domain_ids_trains() -> None:
 
 
 def test_unsorted_domain_ids_are_refused() -> None:
-    """Sorted ids are what reconcile the two engines (the circuit reads row j as the
-    j-th SORTED constant), so unsorted ones are refused rather than silently putting the
-    paths back into disagreement."""
+    """One row per constant, in a stable ascending layout, is a stated requirement on the
+    caller's feature tensor -- unsorted (or duplicated) ids are refused rather than
+    guessed at. (What reconciles the two engines is that both resolve a constant through
+    this same id list; the ordering is a layout rule, not the reconciliation.)"""
     net = torch.nn.Sequential(torch.nn.Linear(1, 2, bias=True), torch.nn.Softmax(dim=-1))
     feats = torch.tensor([[0.9], [0.1], [0.2], [0.15]], dtype=torch.float32)
 

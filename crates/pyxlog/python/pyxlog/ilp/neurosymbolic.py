@@ -192,26 +192,26 @@ def train_neurosymbolic_program(
     ``domain_ids`` says WHICH CONSTANT EACH ROW HOLDS: ``domain_ids[net][j]`` is the
     domain constant whose feature vector is row ``j`` of ``domain_inputs[net]``. The
     tensor carries no labels, so that correspondence is a convention, and it must be
-    stated rather than inferred — inferring it is exactly what went wrong before:
-    the exact d-DNNF circuit read row ``j`` as the ``j``-th constant in SORTED order
-    (rank indexing) while the torch join path read row ``c`` as constant ``c``
-    (identity indexing). The two agree only when the constants happen to be the dense
-    range ``0..D-1``; on any other domain they read different rows, or index off the
-    end of the tensor.
+    stated rather than inferred — inferring it is exactly what went wrong before: the
+    exact d-DNNF circuit read row ``j`` as the ``j``-th constant of the join
+    relation's OWN domain (rank indexing) while the torch join path read the row the
+    caller assigned to that constant. The ids are therefore handed to the ENGINE too,
+    and BOTH paths now resolve a constant to its row through this one list. It is the
+    only map; there is no ordering left for either side to infer.
 
-    The ids must be STRICTLY INCREASING, and that requirement is load-bearing, not
-    stylistic: the circuit reads row ``j`` as the ``j``-th SORTED constant, so when
-    ``domain_ids`` is sorted ascending, "row ``j`` holds constant ``domain_ids[j]``"
-    is true under BOTH conventions and the two engines agree on any id set, sparse
-    ones included. Unsorted ids would make them disagree again. Sorting is what
-    reconciles the two paths.
+    The ids must be strictly increasing (one row per constant, in a stable ascending
+    layout) — a requirement on the caller's tensor, not the thing that keeps the two
+    paths in step.
 
     Omitting ``domain_ids`` defaults it to ``[0, 1, ..., D-1]`` per network — the
     dense identity, i.e. exactly the behaviour every existing caller already relies
     on. Every constant the join relation's extension mentions must appear in the
     network's ids; one that does not is named in a ``ValueError`` (it has no feature
-    row at all). ``domain_ids`` never supplies the join STRUCTURE: which constants a
-    head binding joins is read from the engine's relation, always.
+    row at all). The ids may cover MORE constants than the relation joins (features
+    for every event, though only some are joined): the row is looked up by constant,
+    so the unjoined ones simply go unread. ``domain_ids`` never supplies the join
+    STRUCTURE: which constants a head binding joins is read from the engine's
+    relation, always.
     """
 
     import torch
@@ -271,17 +271,22 @@ def train_neurosymbolic_program(
             "domain_inputs currently supports a single join network; "
             f"got {sorted(domain_inputs)}"
         )
+    # Which ROW of domain_inputs[net] holds which domain CONSTANT. Stated by the
+    # caller, never inferred; defaulted to the dense identity, which is what every
+    # caller written before this parameter existed already meant.
+    domain_ids = _resolve_domain_ids(domain_ids, domain_inputs)
+
     for name, feats in domain_inputs.items():
         if name not in declared:
             raise ValueError(
                 f"domain_inputs names network '{name}' which is not declared by any nn/4"
             )
-        program.register_domain_tensor_source(_DOMAIN_SOURCE_NAME, feats.cuda())
-
-    # Which ROW of domain_inputs[net] holds which domain CONSTANT. Stated by the
-    # caller, never inferred; defaulted to the dense identity, which is what every
-    # caller written before this parameter existed already meant.
-    domain_ids = _resolve_domain_ids(domain_ids, domain_inputs)
+        # The ids go DOWN TO THE ENGINE, so the exact circuit resolves a joined
+        # constant to a feature row through the very same list the torch-side mixture
+        # uses. One map, two engines: they cannot disagree about which row is whose.
+        program.register_domain_tensor_source(
+            _DOMAIN_SOURCE_NAME, feats.cuda(), domain_ids[name]
+        )
 
     # Neural-body conjuncts: one small g_theta head per neural-bodied
     # candidate, over its fixed-width phi(x). Trained torch-side (not a circuit
@@ -888,10 +893,10 @@ def _resolve_domain_ids(
     what a caller written before this parameter existed already meant, so omitting it
     reproduces the previous behaviour exactly.
 
-    The strictly-increasing requirement is enforced by :func:`domain_row_index`, and it
-    is what makes the two engines agree: the exact circuit reads row ``j`` as the
-    ``j``-th constant of the join domain in SORTED order, so sorted ``domain_ids`` make
-    "row j holds constant domain_ids[j]" true under the circuit's convention too.
+    What makes the two engines agree is that the resolved ids are registered WITH the
+    domain tensor, so the exact circuit looks a joined constant up in the same list the
+    torch-side mixture does. The strictly-increasing check (:func:`domain_row_index`) is
+    a layout requirement on the caller's tensor, not the reconciliation.
     """
     supplied = dict(domain_ids or {})
     unknown = sorted(set(supplied) - set(domain_inputs))

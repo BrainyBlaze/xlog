@@ -621,14 +621,23 @@ impl CompiledProgram {
     /// source the forward reads (for `DomainRow`/`ConstDummy` groups). The name is
     /// owned by the Python driver and flows in as data — the engine holds no
     /// hardcoded source name.
+    ///
+    /// `ids` states which ROW of that tensor holds which domain CONSTANT (`ids[j]` is
+    /// the constant whose features are row `j`). The tensor carries no labels, so the
+    /// correspondence is a convention, and the driver owns it: registering it here
+    /// makes this list the ONE map both engines resolve a constant through. Passing
+    /// `None` keeps the historical rank-indexing (see `materialize_int_domain`).
+    #[pyo3(signature = (name, tensor, ids=None))]
     fn register_domain_tensor_source(
         &mut self,
         py: Python<'_>,
         name: String,
         tensor: PyObject,
+        ids: Option<Vec<i64>>,
     ) -> PyResult<()> {
         self.add_tensor_source(py, name.clone(), tensor)?;
         self.domain_source = Some(name);
+        self.domain_ids = ids;
         Ok(())
     }
 
@@ -2437,7 +2446,24 @@ impl CompiledProgram {
                         pred_name, join.relation, occ.input_var
                     )));
                 }
-                for (row, ev) in event_domain.iter().enumerate() {
+                for (rank, ev) in event_domain.iter().enumerate() {
+                    // Which feature row holds THIS constant. When the driver registered
+                    // `domain_ids`, that list is the one map — the same one the torch-side
+                    // mixture resolves through — so the constant is looked up in it rather
+                    // than standing in for its own rank. With no ids registered, the row IS
+                    // the rank within this relation's domain (the historical behaviour).
+                    let row = match &self.domain_ids {
+                        Some(ids) => ids.iter().position(|c| c == ev).ok_or_else(|| {
+                            PyValueError::new_err(format!(
+                                "Query rule for '{}': existential-join relation '{}' joins domain \
+                                 constant {}, which is not in domain_ids for network '{}' — so no \
+                                 row of its domain feature tensor holds that constant's features. \
+                                 Give every joined constant an id, or drop the fact.",
+                                pred_name, join.relation, ev, occ.info.network
+                            ))
+                        })?,
+                        None => rank,
+                    };
                     groups.push(NeuralGroup {
                         info: occ.info.clone(),
                         input_source: InputSource::DomainRow(row),
@@ -2609,9 +2635,16 @@ impl CompiledProgram {
 
     /// Materialize the sorted, distinct integer constants appearing at argument
     /// position `arg_pos` of a relation's GROUND facts — the real domain a
-    /// Stage-B existential join grounds the neural predicate over. Row order in
-    /// this vector is the canonical domain order: it indexes `DomainRow(_)` for
-    /// the per-event leaves and orders the per-edge `prob_queries`.
+    /// Stage-B existential join grounds the neural predicate over. This vector says
+    /// WHICH constants the predicate is grounded at, and orders the per-edge
+    /// `prob_queries`.
+    ///
+    /// It does NOT decide which feature row a constant reads. When the driver
+    /// registered `domain_ids`, THAT list is the canonical constant -> row map and it
+    /// indexes `DomainRow(_)`; this domain is only a subset of it (the caller may hold
+    /// features for constants the relation never joins, whose presence would shift
+    /// every rank). Only with no ids registered does a constant's position in this
+    /// vector serve as its row.
     fn materialize_int_domain(&self, relation: &str, arg_pos: usize) -> PyResult<Vec<i64>> {
         use std::collections::BTreeSet;
         let mut set: BTreeSet<i64> = BTreeSet::new();

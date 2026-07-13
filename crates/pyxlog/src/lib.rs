@@ -526,6 +526,15 @@ pub struct CompiledProgram {
     /// registered; read by the join forward to resolve `DomainRow`/`ConstDummy`
     /// groups instead of an engine-side hardcoded name.
     pub(crate) domain_source: Option<String>,
+    /// Which ROW of the join-domain tensor holds which domain CONSTANT, as stated by
+    /// the Python driver: `domain_ids[j]` is the constant whose feature vector is row
+    /// `j`. This is the SINGLE source of truth for "constant -> feature row" — the
+    /// torch-side mixture and this circuit look the row up in the same list, so they
+    /// cannot drift apart. `None` when the driver registered no ids: the circuit then
+    /// keeps its historical rank-indexing (row = position of the constant within the
+    /// join relation's own materialized domain), so pre-`domain_ids` callers are
+    /// bit-for-bit unaffected.
+    pub(crate) domain_ids: Option<Vec<i64>>,
     /// Original program source (for dynamic query compilation)
     pub(crate) _source: String,
     /// Parsed program AST (for signature analysis)

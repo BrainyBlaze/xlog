@@ -270,9 +270,9 @@ def test_a_constant_with_no_row_is_named_not_silently_mis_read() -> None:
 
 
 def test_unsorted_ids_are_refused() -> None:
-    """Load-bearing, not stylistic: the exact circuit reads row j as the j-th constant
-    in SORTED order. Only ascending ids make "row j holds domain_ids[j]" true under BOTH
-    conventions; unsorted ids would put the two engines back into silent disagreement."""
+    """A stated layout requirement on the caller's tensor: one row per constant, in a
+    stable ascending order. (It is no longer what reconciles the two engines -- both now
+    resolve a constant through this same id list -- but the layout is still required.)"""
     with pytest.raises(ValueError, match="strictly increasing"):
         domain_row_index([0, 4, 2, 6], "sal_net")
     with pytest.raises(ValueError, match="strictly increasing"):
