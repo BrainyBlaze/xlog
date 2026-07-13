@@ -60,6 +60,10 @@ docs/superpowers/
 # Local debugging repro scripts (session-specific, not user-facing)
 scripts/repro/
 
+# Local scratch/work directories
+/scratchpad/
+/dist-fix3/
+
 # Committed example artifacts must stay visible to git-based release tooling.
 !examples/neural/baseline/deepproblog/**/data/
 !examples/neural/baseline/deepproblog/**/data/**
