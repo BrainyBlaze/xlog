@@ -4,11 +4,13 @@ torch = pytest.importorskip("torch")
 
 from pyxlog.ilp.join_bodies import (
     JoinBody,
+    domain_row_index,
     mentions_neural_on_nonhead_var,
     noisy_or_from_index,
     noisy_or_over_extension,
     parse_join_body,
     prepare_extension,
+    translate_extension_to_rows,
 )
 
 NEURAL = {"saliency": "sal_net"}
@@ -231,3 +233,53 @@ def test_the_prepared_index_is_differentiable() -> None:
     p = torch.tensor([0.3, 0.7], requires_grad=True)
     noisy_or_from_index(p, prepare_extension([[0, 1], []], "cpu")).sum().backward()
     assert p.grad is not None and float(p.grad.abs().sum()) > 0
+
+
+# --- constant -> row: the explicit-id translation (R3) -----------------------------
+# The engine's extension speaks RAW domain constants; domain_inputs is a bare tensor
+# whose rows the caller laid out. `domain_ids` is the caller's statement of which row
+# holds which constant, and this translation is the ONE place the two meet.
+
+
+def test_a_sparse_domain_maps_its_constants_onto_rows() -> None:
+    """The constants need not be their own row numbers: {0,2,4,6,8,10} over 6 rows."""
+    rows = translate_extension_to_rows(
+        [[0, 2], [4, 6], [8], [10], []], [0, 2, 4, 6, 8, 10], network="sal_net"
+    )
+    assert rows == [[0, 1], [2, 3], [4], [5], []]
+
+
+def test_the_dense_default_is_the_identity() -> None:
+    """The default ids (0..D-1) must translate to exactly themselves -- that is what
+    keeps every caller written before `domain_ids` existed behaving identically."""
+    ext = [[0, 1], [2], [], [0, 1, 2, 3]]
+    assert translate_extension_to_rows(ext, list(range(4))) == ext
+
+
+def test_domain_row_index_maps_constant_to_row() -> None:
+    assert domain_row_index([0, 2, 4, 6, 8, 10]) == {0: 0, 2: 1, 4: 2, 6: 3, 8: 4, 10: 5}
+
+
+def test_a_constant_with_no_row_is_named_not_silently_mis_read() -> None:
+    """Event 7 is joined by the engine's relation but has no feature row. Reading some
+    other constant's row (or off the end of the tensor -- a CUDA device-side assert that
+    poisons the process) is exactly the failure R3 exists to close, so it is a typed
+    error that NAMES the constant."""
+    with pytest.raises(ValueError, match="7"):
+        translate_extension_to_rows([[0, 2], [7]], [0, 2, 4, 6], network="sal_net")
+
+
+def test_unsorted_ids_are_refused() -> None:
+    """Load-bearing, not stylistic: the exact circuit reads row j as the j-th constant
+    in SORTED order. Only ascending ids make "row j holds domain_ids[j]" true under BOTH
+    conventions; unsorted ids would put the two engines back into silent disagreement."""
+    with pytest.raises(ValueError, match="strictly increasing"):
+        domain_row_index([0, 4, 2, 6], "sal_net")
+    with pytest.raises(ValueError, match="strictly increasing"):
+        translate_extension_to_rows([[0]], [0, 4, 2, 6], network="sal_net")
+
+
+def test_duplicate_ids_are_refused() -> None:
+    """Two rows claiming one constant has no meaning under either convention."""
+    with pytest.raises(ValueError, match="strictly increasing"):
+        domain_row_index([0, 2, 2, 6])

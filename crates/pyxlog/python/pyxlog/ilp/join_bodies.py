@@ -13,7 +13,11 @@ the OR over that domain. This module owns three things and nothing else:
   2. reading the join extension FROM THE ENGINE (:func:`read_join_extension`), by
      enumerating the relation's tuples (never from a Python side-channel: if the
      caller handed us the edge->events map, the OR would be Python's, not the
-     logic's, and the whole claim would be hollow);
+     logic's, and the whole claim would be hollow), and restating that extension --
+     which comes back in RAW domain constants -- in ``domain_inputs`` ROW indices
+     (:func:`translate_extension_to_rows`), against the caller's explicit
+     ``domain_ids``. The STRUCTURE is still entirely the engine's; ``domain_ids``
+     only says which row of the feature tensor holds which constant;
   3. the OR itself, in log space (a naive product underflows on a large domain),
      over a PRECOMPUTED index of that static extension so the training hot loop
      does no per-step host->device copies (:class:`JoinExtensionIndex`).
@@ -22,6 +26,7 @@ the OR over that domain. This module owns three things and nothing else:
 from __future__ import annotations
 
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -173,6 +178,71 @@ def read_join_extension(
     for bucket in buckets:
         bucket.sort()
     return buckets
+
+
+def domain_row_index(domain_ids: Sequence[int], network: str = "") -> dict[int, int]:
+    """``constant -> row`` for one network's ``domain_ids``.
+
+    The ids must be STRICTLY INCREASING, and that is load-bearing rather than
+    stylistic: the exact d-DNNF circuit grounds the join predicate over the join
+    domain in SORTED order, so it reads row ``j`` as the ``j``-th sorted constant.
+    If ``domain_ids`` is sorted ascending, "row j holds constant ``domain_ids[j]``"
+    is true under the circuit's convention as well as under this map's — the two
+    engines then agree on ANY id set, sparse ones included. Unsorted ids would make
+    them disagree again, silently, which is precisely the bug this map exists to
+    close. Duplicates are refused for the same reason (two rows claiming one
+    constant has no meaning under either convention).
+    """
+    ids = list(domain_ids)
+    for prev, cur in zip(ids, ids[1:]):
+        if cur <= prev:
+            where = f"domain_ids['{network}']" if network else "domain_ids"
+            raise ValueError(
+                f"{where} must be strictly increasing (the exact circuit reads row j "
+                f"as the j-th join constant in SORTED order, so only sorted ids make "
+                f"the two paths agree); got {prev} followed by {cur}"
+            )
+    return {c: j for j, c in enumerate(ids)}
+
+
+def translate_extension_to_rows(
+    extension: list[list[int]],
+    domain_ids: Sequence[int],
+    network: str = "",
+    rule_id: str = "",
+) -> list[list[int]]:
+    """The join extension, restated in ``domain_inputs`` ROW indices.
+
+    :func:`read_join_extension` returns the extension in RAW domain constants (they
+    are what the engine's relation holds). The network's per-constant probabilities,
+    however, are a tensor whose rows the CALLER laid out, and ``domain_ids`` is the
+    caller's statement of which row holds which constant. This is the ONE place the
+    two are reconciled; everything downstream (:func:`prepare_extension`, the OR)
+    then speaks rows only, so no other code has to know the convention.
+
+    A constant the engine's relation joins but ``domain_ids`` never mentions has no
+    feature vector at all: it is named in a typed error rather than silently read off
+    some other constant's row (or off the end of the tensor, which on CUDA is a
+    device-side assert that poisons the whole process).
+    """
+    row_of = domain_row_index(domain_ids, network)
+    out: list[list[int]] = []
+    for events in extension:
+        rows: list[int] = []
+        for e in events:
+            if e not in row_of:
+                who = f"trainable_rule '{rule_id}': " if rule_id else ""
+                where = f"domain_ids['{network}']" if network else "domain_ids"
+                raise ValueError(
+                    f"{who}the join extension contains domain constant {e}, which is "
+                    f"not in {where} — so no row of domain_inputs"
+                    f"{f'[{network!r}]' if network else ''} holds its feature vector. "
+                    f"{where} lists {sorted(row_of)[:8]}"
+                    f"{'...' if len(row_of) > 8 else ''}"
+                )
+            rows.append(row_of[e])
+        out.append(rows)
+    return out
 
 
 @dataclass(frozen=True)

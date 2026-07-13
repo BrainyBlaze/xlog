@@ -369,36 +369,106 @@ def test_the_positive_label_column_comes_from_the_rule_not_a_hardcoded_index() -
     assert got != pytest.approx(from_a_hardcoded_index, abs=1e-3)
 
 
-def test_a_sparse_join_domain_is_refused_not_silently_mis_indexed() -> None:
-    """The torch join path indexes domain_inputs by the RAW constant id; the exact
-    circuit indexes it by the constant's RANK among the sorted join domain. They agree
-    only on a dense 0..k-1 domain -- which is what the semantics anchor used, so the
-    anchor could not see the difference.
-
-    With a sparse domain the old code either tripped a CUDA device-side assert (which
-    poisons the context, so every later op in the process fails) or, if the caller padded
-    the feature tensor, silently read DIFFERENT rows from the circuit and disagreed with
-    it by 0.307. Both are now a typed refusal."""
+def _sparse_source() -> str:
     facts = "\n".join(
         f"    pbp({e}, {k})." for k, evs in {0: [0, 2], 1: [4, 6]}.items() for e in evs
     )
-    source = f"""
+    return f"""
         nn(sal_net, [Event], Label, [low, strengthen]) :: saliency(Event, Label).
 {facts}
         pred pbp(i64, i64).
         pred plastic(i64).
         trainable_rule(c_a, weight=0.0) :: plastic(E) :- saliency(Ev, strengthen), pbp(Ev, E).
-        trainable_rule(c_b, weight=0.0) :: plastic(E) :- saliency(Ev, strengthen), pbp(Ev, E).
+        trainable_rule(c_b, weight=0.0) :: plastic(E) :- saliency(Ev, low), pbp(Ev, E).
         train(plastic, binary_cross_entropy).
     """
+
+
+def test_a_sparse_join_domain_without_domain_ids_is_refused() -> None:
+    """domain_inputs carries no labels, so "which row is which constant" is a
+    CONVENTION. Omitting `domain_ids` states the DENSE one (row j = constant j) -- which
+    on the domain {0, 2, 4, 6} is simply false: constant 6 has no row. Before R3 that was
+    either a CUDA device-side assert (which poisons the context, so every later op in the
+    process fails) or, on a padded feature tensor, a silent read of a DIFFERENT row than
+    the circuit's, disagreeing with it by 0.307. It is now a typed refusal that NAMES the
+    constant with no row."""
     net = torch.nn.Sequential(torch.nn.Linear(1, 2, bias=True), torch.nn.Softmax(dim=-1))
     feats = torch.tensor([[0.9], [0.1], [0.2], [0.15]], dtype=torch.float32)
 
-    with pytest.raises(ValueError, match="not the dense range"):
+    with pytest.raises(ValueError, match="not in domain_ids"):
         train_neurosymbolic_program(
-            source,
+            _sparse_source(),
             networks={"sal_net": net},
             domain_inputs={"sal_net": feats},
+            examples=[{"targets": torch.tensor([1.0, 0.0], dtype=torch.float32)}],
+            config=NeuroSymbolicTrainingConfig(steps=5, learning_rate=0.1),
+        )
+
+
+def test_a_sparse_join_domain_with_explicit_domain_ids_trains() -> None:
+    """The other half of the new contract: SAY which row holds which constant and the
+    sparse domain is no longer special -- the mixture trains on it, and gradient still
+    reaches the per-event detector. (That the numbers it computes are the exact
+    circuit's is pinned by the sparse semantics anchor.)"""
+    torch.manual_seed(0)
+    net = torch.nn.Sequential(torch.nn.Linear(1, 2, bias=True), torch.nn.Softmax(dim=-1))
+    feats = torch.tensor([[0.9], [0.1], [0.2], [0.15]], dtype=torch.float32)
+
+    result = train_neurosymbolic_program(
+        _sparse_source(),
+        networks={"sal_net": net},
+        domain_inputs={"sal_net": feats},
+        domain_ids={"sal_net": [0, 2, 4, 6]},
+        examples=[{"targets": torch.tensor([1.0, 0.0], dtype=torch.float32)}],
+        config=NeuroSymbolicTrainingConfig(steps=100, learning_rate=0.1),
+    )
+    assert result.losses[-1] < result.losses[0]
+    assert result.neural_parameter_grads["sal_net"] > 0.0
+
+
+def test_unsorted_domain_ids_are_refused() -> None:
+    """Sorted ids are what reconcile the two engines (the circuit reads row j as the
+    j-th SORTED constant), so unsorted ones are refused rather than silently putting the
+    paths back into disagreement."""
+    net = torch.nn.Sequential(torch.nn.Linear(1, 2, bias=True), torch.nn.Softmax(dim=-1))
+    feats = torch.tensor([[0.9], [0.1], [0.2], [0.15]], dtype=torch.float32)
+
+    with pytest.raises(ValueError, match="strictly increasing"):
+        train_neurosymbolic_program(
+            _sparse_source(),
+            networks={"sal_net": net},
+            domain_inputs={"sal_net": feats},
+            domain_ids={"sal_net": [0, 4, 2, 6]},
+            examples=[{"targets": torch.tensor([1.0, 0.0], dtype=torch.float32)}],
+            config=NeuroSymbolicTrainingConfig(steps=5, learning_rate=0.1),
+        )
+
+
+def test_domain_ids_must_have_one_id_per_feature_row() -> None:
+    net = torch.nn.Sequential(torch.nn.Linear(1, 2, bias=True), torch.nn.Softmax(dim=-1))
+    feats = torch.tensor([[0.9], [0.1], [0.2], [0.15]], dtype=torch.float32)
+
+    with pytest.raises(ValueError, match="exactly one id per row"):
+        train_neurosymbolic_program(
+            _sparse_source(),
+            networks={"sal_net": net},
+            domain_inputs={"sal_net": feats},
+            domain_ids={"sal_net": [0, 2, 4]},          # 3 ids, 4 rows
+            examples=[{"targets": torch.tensor([1.0, 0.0], dtype=torch.float32)}],
+            config=NeuroSymbolicTrainingConfig(steps=5, learning_rate=0.1),
+        )
+
+
+def test_domain_ids_for_a_network_with_no_domain_inputs_is_refused() -> None:
+    net = torch.nn.Sequential(torch.nn.Linear(1, 2, bias=True), torch.nn.Softmax(dim=-1))
+    feats = torch.tensor([[0.9], [0.1], [0.2], [0.15]], dtype=torch.float32)
+
+    with pytest.raises(ValueError, match="no domain_inputs"):
+        train_neurosymbolic_program(
+            _sparse_source(),
+            networks={"sal_net": net},
+            domain_inputs={"sal_net": feats},
+            domain_ids={"sal_net": [0, 2, 4, 6], "ghost_net": [0]},
             examples=[{"targets": torch.tensor([1.0, 0.0], dtype=torch.float32)}],
             config=NeuroSymbolicTrainingConfig(steps=5, learning_rate=0.1),
         )

@@ -23,16 +23,19 @@ rule weights receive gradients from the same circuit evaluation.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any, NoReturn
 
 from pyxlog.ilp.inventory import RuleInventory, RuleInventoryClause
 from pyxlog.ilp.join_bodies import (
+    domain_row_index,
     mentions_neural_on_nonhead_var,
     noisy_or_from_index,
     parse_join_body,
     prepare_extension,
     read_join_extension,
+    translate_extension_to_rows,
 )
 
 _GUARD_PREDICATE_PREFIX = "nsr_guard_"
@@ -153,6 +156,7 @@ def train_neurosymbolic_program(
     config: NeuroSymbolicTrainingConfig = NeuroSymbolicTrainingConfig(),
     neural_bodies: dict[str, "NeuralBodySpec"] | None = None,
     domain_inputs: dict[str, Any] | None = None,
+    domain_ids: dict[str, Sequence[int]] | None = None,
     candidate_masses: dict[str, Any] | None = None,
 ) -> NeuroSymbolicTrainingResult:
     """Jointly train neural predicates and symbolic rule weights on the engine.
@@ -177,14 +181,37 @@ def train_neurosymbolic_program(
     path identical to before. Only meaningful in the multi-rule joint path.
 
     ``domain_inputs`` is the Stage-B existential-join channel: a per-network
-    ``{net_name: features}`` map where ``features`` is a ``[n_events, k]`` tensor,
-    row ``i`` = the feature vector of the ``i``-th join-domain constant in sorted
-    order (e.g. event id ``i``). When a ``trainable_rule`` joins a neural predicate
-    to an ordinary relation on an existential variable, the predicate is grounded
-    over this real domain inside the circuit and OR-aggregated at the head; the
+    ``{net_name: features}`` map where ``features`` is a ``[n_domain_constants, k]``
+    tensor — one row per join-domain constant. When a ``trainable_rule`` joins a
+    neural predicate to an ordinary relation on an existential variable, the
+    predicate is grounded over this real domain and OR-aggregated at the head; the
     ``examples`` then carry ONLY per-head-binding ``targets`` (no per-query
     ``inputs``). The head-binding (e.g. edge) ids must be ``0..len(targets)-1``,
     row-aligned with ``targets``. Currently supports a single join network.
+
+    ``domain_ids`` says WHICH CONSTANT EACH ROW HOLDS: ``domain_ids[net][j]`` is the
+    domain constant whose feature vector is row ``j`` of ``domain_inputs[net]``. The
+    tensor carries no labels, so that correspondence is a convention, and it must be
+    stated rather than inferred — inferring it is exactly what went wrong before:
+    the exact d-DNNF circuit read row ``j`` as the ``j``-th constant in SORTED order
+    (rank indexing) while the torch join path read row ``c`` as constant ``c``
+    (identity indexing). The two agree only when the constants happen to be the dense
+    range ``0..D-1``; on any other domain they read different rows, or index off the
+    end of the tensor.
+
+    The ids must be STRICTLY INCREASING, and that requirement is load-bearing, not
+    stylistic: the circuit reads row ``j`` as the ``j``-th SORTED constant, so when
+    ``domain_ids`` is sorted ascending, "row ``j`` holds constant ``domain_ids[j]``"
+    is true under BOTH conventions and the two engines agree on any id set, sparse
+    ones included. Unsorted ids would make them disagree again. Sorting is what
+    reconciles the two paths.
+
+    Omitting ``domain_ids`` defaults it to ``[0, 1, ..., D-1]`` per network — the
+    dense identity, i.e. exactly the behaviour every existing caller already relies
+    on. Every constant the join relation's extension mentions must appear in the
+    network's ids; one that does not is named in a ``ValueError`` (it has no feature
+    row at all). ``domain_ids`` never supplies the join STRUCTURE: which constants a
+    head binding joins is read from the engine's relation, always.
     """
 
     import torch
@@ -250,6 +277,11 @@ def train_neurosymbolic_program(
                 f"domain_inputs names network '{name}' which is not declared by any nn/4"
             )
         program.register_domain_tensor_source(_DOMAIN_SOURCE_NAME, feats.cuda())
+
+    # Which ROW of domain_inputs[net] holds which domain CONSTANT. Stated by the
+    # caller, never inferred; defaulted to the dense identity, which is what every
+    # caller written before this parameter existed already meant.
+    domain_ids = _resolve_domain_ids(domain_ids, domain_inputs)
 
     # Neural-body conjuncts: one small g_theta head per neural-bodied
     # candidate, over its fixed-width phi(x). Trained torch-side (not a circuit
@@ -319,6 +351,7 @@ def train_neurosymbolic_program(
             rules=rules,
             modules=modules,
             domain_inputs=domain_inputs,
+            domain_ids=domain_ids,
             join_read_source=_read_only_source(source),
         )
         for rule in rules:
@@ -478,6 +511,7 @@ def _train_joint_mixture(
     rules: list[TrainableRuleDecl] | None = None,
     modules: dict[str, Any] | None = None,
     domain_inputs: dict[str, Any] | None = None,
+    domain_ids: dict[str, Sequence[int]] | None = None,
     join_read_source: str | None = None,
 ) -> tuple[dict[str, int], list[float]]:
     """Joint soft-mixture over same-head candidates (guard-only, neural-bodied
@@ -514,6 +548,7 @@ def _train_joint_mixture(
     rules = rules or []
     modules = modules or {}
     domain_inputs = domain_inputs or {}
+    domain_ids = _resolve_domain_ids(domain_ids, domain_inputs)
 
     n = len(targets)
 
@@ -621,14 +656,23 @@ def _train_joint_mixture(
                     f"'{jb.neural_predicate}' on the existential join variable "
                     f"'{jb.join_var}', so network '{jb.network}' must be forwarded over "
                     f"the join domain: pass domain_inputs={{'{jb.network}': features}} "
-                    "(row i = the i-th join-domain constant, sorted)"
+                    f"(and domain_ids={{'{jb.network}': ids}} unless the constants are "
+                    "the dense range 0..D-1)"
                 )
             if ilp_read is None:
                 ilp_read = _open_join_read_handle(join_read_source, config)
             join_bodies[rule_id] = jb
-            extension = read_join_extension(ilp_read, jb, n)
-            _check_join_domain_is_row_indexable(
-                rule_id, jb, extension, int(domain_inputs[jb.network].shape[0])
+            # The engine hands the extension back in RAW domain constants; the network's
+            # per-constant probabilities are ROWS of domain_inputs. `domain_ids` states
+            # which row holds which constant, and this is the ONE place the two are
+            # reconciled — everything downstream speaks rows. A constant with no row is
+            # named in a typed error here (it used to be a CUDA out-of-bounds index, or,
+            # on a padded tensor, silently the wrong row).
+            extension = translate_extension_to_rows(
+                read_join_extension(ilp_read, jb, n),
+                domain_ids[jb.network],
+                network=jb.network,
+                rule_id=rule_id,
             )
             # The extension is STATIC: flatten it into device tensors ONCE, here,
             # outside the step loop, so the per-step OR is a single gather +
@@ -834,48 +878,42 @@ def _neural_predicate_networks(
     return mapping
 
 
-def _check_join_domain_is_row_indexable(
-    rule_id: str, jb: Any, extension: list[list[int]], num_rows: int
-) -> None:
-    """Fail closed unless the join-domain constants ARE their own ``domain_inputs`` rows.
+def _resolve_domain_ids(
+    domain_ids: dict[str, Sequence[int]] | None, domain_inputs: dict[str, Any]
+) -> dict[str, list[int]]:
+    """Validate the caller's ``domain_ids`` and default the ones it omits.
 
-    The torch join path indexes the network's per-constant output by the RAW constant
-    id (``p_event[event_id]``). The exact circuit indexes the SAME ``domain_inputs`` by
-    the constant's RANK among the sorted join domain. Those two agree only when the
-    join-domain ids are the dense prefix ``0..k-1`` — which is why the semantics anchor
-    (ids 0..5) could not see the difference.
+    ``domain_ids[net][j]`` is the domain constant whose feature vector is row ``j`` of
+    ``domain_inputs[net]``. The default is the dense identity ``0..D-1`` — which is
+    what a caller written before this parameter existed already meant, so omitting it
+    reproduces the previous behaviour exactly.
 
-    On a sparse domain (say ids ``{0, 2, 4, 6, 8, 10}`` with 6 feature rows) the circuit
-    reads rows 0..5 and recovers the rule, while this path indexes row 10 of a 6-row
-    tensor and trips a CUDA device-side assert — which poisons the CUDA context, so every
-    later op in the process fails too. Pad the tensor instead and nothing raises at all:
-    the two paths then read DIFFERENT rows and quietly disagree (measured: 0.307).
-
-    So the precondition is checked here, loudly, instead of being discovered as either a
-    poisoned context or a wrong number. Widening it (a per-relation rank map, or an
-    explicit id->row mapping) is a real design decision — note that with several
-    candidates joining DIFFERENT relations, "the i-th sorted join-domain constant" is
-    ambiguous, because each relation has its own domain — so it is deliberately not
-    guessed here.
+    The strictly-increasing requirement is enforced by :func:`domain_row_index`, and it
+    is what makes the two engines agree: the exact circuit reads row ``j`` as the
+    ``j``-th constant of the join domain in SORTED order, so sorted ``domain_ids`` make
+    "row j holds constant domain_ids[j]" true under the circuit's convention too.
     """
-    ids = sorted({e for events in extension for e in events})
-    if not ids:
-        return
-    if ids != list(range(len(ids))):
+    supplied = dict(domain_ids or {})
+    unknown = sorted(set(supplied) - set(domain_inputs))
+    if unknown:
         raise ValueError(
-            f"trainable_rule '{rule_id}' joins '{jb.relation}' on '{jb.join_var}', whose "
-            f"domain constants are {ids[:8]}{'...' if len(ids) > 8 else ''} — not the dense "
-            f"range 0..{len(ids) - 1}. The join path indexes domain_inputs['{jb.network}'] "
-            "by the constant itself, so the constants must BE their row numbers. Renumber "
-            "the join domain to 0..N-1 (and order domain_inputs to match), or drop to a "
-            "single trainable_rule, which the exact circuit grounds by sorted rank instead."
+            f"domain_ids names network(s) {unknown} with no domain_inputs; "
+            "domain_ids says which row of domain_inputs[net] holds which domain "
+            "constant, so every key must also be a key of domain_inputs"
         )
-    if len(ids) > num_rows:
-        raise ValueError(
-            f"trainable_rule '{rule_id}' joins '{jb.relation}' over {len(ids)} domain "
-            f"constants, but domain_inputs['{jb.network}'] has only {num_rows} row(s). "
-            "Row i must be the feature vector of domain constant i."
-        )
+    resolved: dict[str, list[int]] = {}
+    for name, feats in domain_inputs.items():
+        rows = int(feats.shape[0])
+        ids = [int(c) for c in supplied[name]] if name in supplied else list(range(rows))
+        if len(ids) != rows:
+            raise ValueError(
+                f"domain_ids['{name}'] has {len(ids)} id(s) but domain_inputs['{name}'] "
+                f"has {rows} row(s); there must be exactly one id per row (id j names the "
+                "domain constant whose feature vector is row j)"
+            )
+        domain_row_index(ids, name)      # strictly increasing, or a typed refusal
+        resolved[name] = ids
+    return resolved
 
 
 def _neural_atom_label(rule: TrainableRuleDecl, predicate: str) -> str:

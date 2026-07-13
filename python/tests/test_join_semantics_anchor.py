@@ -17,7 +17,12 @@ import pytest
 torch = pytest.importorskip("torch")
 pyxlog = pytest.importorskip("pyxlog")
 
-from pyxlog.ilp.join_bodies import JoinBody, noisy_or_over_extension, read_join_extension
+from pyxlog.ilp.join_bodies import (
+    JoinBody,
+    noisy_or_over_extension,
+    read_join_extension,
+    translate_extension_to_rows,
+)
 from pyxlog.ilp.neurosymbolic import (
     NeuroSymbolicTrainingConfig,
     _open_join_read_handle,
@@ -113,3 +118,133 @@ def test_torch_side_or_reproduces_the_exact_circuit() -> None:
     print(f"ours  (torch-side OR)  = {ours.tolist()}")
     print(f"guard sigma(w)         = {guard!r}")
     print(f"max abs deviation      = {deviation:.3e}")
+
+
+# ---------------------------------------------------------------------------
+# THE SPARSE ANCHOR. The dense anchor above cannot see the indexing convention at
+# all: with ids 0..5 the constant IS its own row, so rank indexing (the circuit)
+# and identity indexing (our torch path) coincide. That coincidence is exactly
+# what hid the bug -- so the anchor is re-run here on a SPARSE domain, where the
+# two conventions are only reconciled by `domain_ids` (sorted ascending: row j is
+# the j-th sorted constant under BOTH engines).
+# ---------------------------------------------------------------------------
+
+_SPARSE_IDS = [0, 2, 4, 6, 8, 10]                     # the join domain: NOT 0..5
+_SPARSE_EDGES = {0: [0, 2], 1: [4, 6], 2: [8], 3: [10]}
+
+_SPARSE_JB = JoinBody(
+    neural_predicate="saliency",
+    network="sal_net",
+    join_var="Event",
+    relation="pbp",
+    event_arg=0,
+    head_arg=1,
+)
+
+
+def _sparse_source() -> str:
+    facts = "\n".join(
+        f"    pbp({e}, {k})." for k in sorted(_SPARSE_EDGES) for e in _SPARSE_EDGES[k]
+    )
+    return f"""
+        nn(sal_net, [Event], Label, [low, strengthen]) :: saliency(Event, Label).
+{facts}
+        pred pbp(i64, i64).
+        pred plastic(i64).
+        trainable_rule(rule_plastic, weight=0.0) :: plastic(Edge) :- saliency(Event, strengthen), pbp(Event, Edge).
+        train(plastic, binary_cross_entropy).
+    """
+
+
+def test_torch_side_or_reproduces_the_exact_circuit_on_a_sparse_domain() -> None:
+    """The acceptance test for R3. Same claim as the dense anchor, on a domain whose
+    constants are NOT their own row numbers: the circuit reads row j as the j-th
+    SORTED join constant, our torch path reads the row `domain_ids` says holds that
+    constant. If R3 reconciles the two engines, these agree to 1e-4 here too."""
+    source = _sparse_source()
+    torch.manual_seed(0)
+    net = torch.nn.Sequential(torch.nn.Linear(1, 2, bias=True), torch.nn.Softmax(dim=-1))
+    feats = torch.tensor([[f] for f in _EF], dtype=torch.float32)   # 6 rows, sparse ids
+    row_of = {c: j for j, c in enumerate(_SPARSE_IDS)}
+    targets = [
+        1.0 if any(_EF[row_of[e]] > 0.5 for e in _SPARSE_EDGES[k]) else 0.0
+        for k in sorted(_SPARSE_EDGES)
+    ]
+
+    config = NeuroSymbolicTrainingConfig(steps=120, learning_rate=0.15)
+    result = train_neurosymbolic_program(
+        source,
+        networks={"sal_net": net},
+        domain_inputs={"sal_net": feats},
+        domain_ids={"sal_net": _SPARSE_IDS},
+        examples=[{"targets": torch.tensor(targets, dtype=torch.float32)}],
+        config=config,
+    )
+    exact = torch.tensor(result.query_probabilities, dtype=torch.float64)
+
+    # The extension still comes from the ENGINE, in RAW constants; `domain_ids` only
+    # says which ROW holds which constant, and the translation is the branch's own.
+    ilp_read = _open_join_read_handle(_read_only_source(source), config)
+    ext = read_join_extension(ilp_read, _SPARSE_JB, num_bindings=len(_SPARSE_EDGES))
+    assert ext == [_SPARSE_EDGES[k] for k in sorted(_SPARSE_EDGES)]
+    rows = translate_extension_to_rows(ext, _SPARSE_IDS, network="sal_net")
+    assert rows == [[0, 1], [2, 3], [4], [5]]
+
+    label_reader = pyxlog.Program.compile(
+        _read_only_source(source), device=config.device, memory_mb=config.gpu_memory_mb
+    )
+    positive = int(label_reader.label_to_index("saliency", "strengthen"))
+
+    with torch.no_grad():
+        dev = next(net.parameters()).device
+        p_event = net(feats.to(dev))[:, positive]
+        or_ = noisy_or_over_extension(p_event, rows, dev).double().cpu()
+    guard = float(result.symbolic_rule_weights["rule_plastic"])
+    ours = guard * or_
+
+    deviation = float((ours - exact).abs().max())
+    print(f"\n[sparse] exact (d-DNNF circuit) = {exact.tolist()}")
+    print(f"[sparse] ours  (torch-side OR)  = {ours.tolist()}")
+    print(f"[sparse] guard sigma(w)         = {guard!r}")
+    print(f"[sparse] max abs deviation      = {deviation:.3e}")
+    assert torch.allclose(ours, exact, atol=1e-4), (
+        f"\nours ={ours.tolist()}\nexact={exact.tolist()}\nmax|dev|={deviation:.3e}"
+    )
+
+
+def test_a_mixture_trains_on_a_sparse_domain() -> None:
+    """The multi-candidate mixture (2+ same-head join candidates) on the SAME sparse
+    world. This is what the old dense-range stopgap refused outright; with explicit
+    `domain_ids` it must simply train."""
+    torch.manual_seed(0)
+    net = torch.nn.Sequential(torch.nn.Linear(1, 2, bias=True), torch.nn.Softmax(dim=-1))
+    feats = torch.tensor([[f] for f in _EF], dtype=torch.float32)
+    row_of = {c: j for j, c in enumerate(_SPARSE_IDS)}
+    facts = "\n".join(
+        f"    pbp({e}, {k})." for k in sorted(_SPARSE_EDGES) for e in _SPARSE_EDGES[k]
+    )
+    source = f"""
+        nn(sal_net, [Event], Label, [low, strengthen]) :: saliency(Event, Label).
+{facts}
+        pred pbp(i64, i64).
+        pred plastic(i64).
+        trainable_rule(c_a, weight=0.0) :: plastic(E) :- saliency(Ev, strengthen), pbp(Ev, E).
+        trainable_rule(c_b, weight=0.0) :: plastic(E) :- saliency(Ev, low), pbp(Ev, E).
+        train(plastic, binary_cross_entropy).
+    """
+    targets = [
+        1.0 if any(_EF[row_of[e]] > 0.5 for e in _SPARSE_EDGES[k]) else 0.0
+        for k in sorted(_SPARSE_EDGES)
+    ]
+
+    result = train_neurosymbolic_program(
+        source,
+        networks={"sal_net": net},
+        domain_inputs={"sal_net": feats},
+        domain_ids={"sal_net": _SPARSE_IDS},
+        examples=[{"targets": torch.tensor(targets, dtype=torch.float32)}],
+        config=NeuroSymbolicTrainingConfig(steps=200, learning_rate=0.1),
+    )
+    assert result.losses[-1] < result.losses[0]
+    assert result.neural_parameter_grads["sal_net"] > 0.0
+    assert len(result.query_probabilities) == len(targets)
