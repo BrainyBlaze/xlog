@@ -38,29 +38,88 @@ class JoinBody:
     head_arg: int    # position of the head var in the relation
 
 
-def _atoms(body: str) -> list[tuple[str, list[str]]]:
+def _atoms(text: str) -> list[tuple[str, list[str]]]:
+    """Every parenthesized atom MENTIONED anywhere in ``text`` (so it also sees the
+    atom inside ``not p(X)`` or ``know p(X)``). Used for the crude routing question
+    "does this body touch a neural predicate at all", NOT for shape recognition."""
     return [
         (m.group(1), [a.strip() for a in m.group(2).split(",") if a.strip()])
-        for m in _ATOM.finditer(body)
+        for m in _ATOM.finditer(text)
     ]
 
 
-def parse_join_body(
-    body: str, neural_predicates: dict[str, str], head_var: str
-) -> JoinBody | None:
-    """Recognize the Stage-B shape. Returns None for any other body (the caller then
-    keeps its existing behaviour) -- this function never guesses.
+def _bare_positive_atom(literal: str) -> tuple[str, list[str]] | None:
+    """``p(A, B)`` -> ``("p", ["A", "B"])``; anything else -> ``None``.
 
-    The shape is EXACTLY two literals: the one neural atom and the one relation that
-    joins the existential variable to the head. A longer body (e.g. an extra
-    ``high_degree(E)`` conjunct) is a DIFFERENT rule, and this module has no mask for
-    it -- returning the two-literal mask anyway would silently drop the conjunct and
-    train a rule nobody wrote. Out of scope must mean rejected, so anything but the
-    exact shape returns None and the caller's typed rejection stands.
+    A body LITERAL is not necessarily an atom: xlog's ``BodyLiteral`` is also
+    ``not p(X)``, ``X < 3``, ``Z is X + Y``, ``know p(X)``. Only a literal that is
+    ENTIRELY one positive atom -- nothing before it, nothing after it -- is part of
+    the join shape; ``fullmatch`` is what enforces that, and it is the whole reason
+    the contract is checked against literals rather than against a count of
+    parenthesized atoms (a count cannot see the ``not``, and dropping a ``not``
+    trains the INVERSE rule).
     """
-    atoms = _atoms(body)
-    if len(atoms) != 2:
+    m = _ATOM.fullmatch(literal.strip())
+    if m is None:
         return None
+    return m.group(1), [a.strip() for a in m.group(2).split(",") if a.strip()]
+
+
+def _is_var(term: str) -> bool:
+    return term[:1].isupper()
+
+
+def mentions_neural_on_nonhead_var(
+    body_literals: list[str], neural_predicates: dict[str, str], head_var: str
+) -> bool:
+    """Does this body put a declared nn/4 predicate on a variable OTHER than the head?
+
+    The ROUTING question, deliberately cruder than :func:`parse_join_body`: it looks
+    inside every literal (negated, compared, modal -- anything), so a body that is
+    *about* an existential neural join but is not the supported SHAPE still answers
+    True. That is the point. Such a candidate's relational truth is an OR over a join
+    extension; treating it as a plain relational candidate -- e.g. because the engine
+    happened to hand back a hard-filters-only eligibility mask for it -- would train an
+    always-true rule with no gradient to the detector, silently. So the caller must
+    either take it through the join path or reject it, never neither.
+    """
+    for literal in body_literals:
+        for pred, args in _atoms(literal):
+            if pred not in neural_predicates:
+                continue
+            if any(_is_var(a) and a != head_var for a in args):
+                return True
+    return False
+
+
+def parse_join_body(
+    body_literals: list[str], neural_predicates: dict[str, str], head_var: str
+) -> JoinBody | None:
+    """Recognize the Stage-B shape. Returns None for any other body -- this function
+    never guesses.
+
+    The shape is EXACTLY two BODY LITERALS, each a bare positive atom: the one neural
+    atom and the one relation that joins the existential variable to the head. The
+    contract is checked against the literals the desugarer parsed, not against a
+    regex count of parenthesized atoms -- an atom count cannot tell
+    ``pre_before_post(Ev, E)`` from ``not pre_before_post(Ev, E)``, and cannot see a
+    comparison literal (``Ev < 3``) at all, so it would have accepted both and trained
+    the wrong rule (for the negation: the exact inverse of the written one).
+
+    A longer body (an extra ``high_degree(E)`` conjunct), a negated literal, a
+    comparison, an ``is`` expression or a modal literal is a DIFFERENT rule, and this
+    module has no mask for it -- returning the two-literal mask anyway would silently
+    drop the difference and train a rule nobody wrote. Out of scope must mean
+    rejected, so anything but the exact shape returns None and the caller's typed
+    rejection stands.
+    """
+    if len(body_literals) != 2:
+        return None
+    parsed = [_bare_positive_atom(lit) for lit in body_literals]
+    if any(atom is None for atom in parsed):
+        return None                          # a negation / comparison / is / modal
+    atoms: list[tuple[str, list[str]]] = [atom for atom in parsed if atom is not None]
+
     neural = [(p, args) for p, args in atoms if p in neural_predicates]
     if len(neural) != 1:
         return None
@@ -70,13 +129,11 @@ def parse_join_body(
     join_var = nargs[0]                      # nn(net, [Input], Label, ...) -> arg 0
     if join_var == head_var:
         return None                          # head-bound gate, not an existential join
-    if not join_var[:1].isupper():
+    if not _is_var(join_var):
         return None                          # a constant, not a variable
 
-    relation = [(p, args) for p, args in atoms if p not in neural_predicates]
-    if len(relation) != 1:
-        return None
-    p, args = relation[0]
+    # exactly two atoms, exactly one of them neural -> exactly one relation
+    p, args = next((q, a) for q, a in atoms if q not in neural_predicates)
     if join_var not in args or head_var not in args:
         return None
     return JoinBody(
@@ -134,7 +191,6 @@ class JoinExtensionIndex:
     event_ids: Any       # [total] long, on device
     binding_ids: Any     # [total] long, on device (segment id per entry)
     num_bindings: int
-    device: Any
 
 
 def prepare_extension(extension: list[list[int]], device: Any) -> JoinExtensionIndex:
@@ -150,7 +206,6 @@ def prepare_extension(extension: list[list[int]], device: Any) -> JoinExtensionI
         event_ids=torch.as_tensor(event_ids, device=device, dtype=torch.long),
         binding_ids=torch.as_tensor(binding_ids, device=device, dtype=torch.long),
         num_bindings=len(extension),
-        device=device,
     )
 
 
@@ -176,8 +231,10 @@ def noisy_or_from_index(p: Any, index: JoinExtensionIndex) -> Any:
 def noisy_or_over_extension(p: Any, extension: list[list[int]], device: Any) -> Any:
     """1 - PROD_{e in ext(h)} (1 - p_e), for a raw (unprepared) extension.
 
-    Convenience wrapper: builds the index and delegates, so there is exactly one
-    implementation of the OR. Callers in a hot loop must build the index ONCE with
-    :func:`prepare_extension` and call :func:`noisy_or_from_index` per step instead.
+    NOT ON THE HOT PATH, and deliberately: it has NO production callers. The trainer
+    builds the index ONCE with :func:`prepare_extension` (outside the step loop) and
+    calls :func:`noisy_or_from_index` per step. This wrapper exists for the CPU tests,
+    which want to state the OR over a plain ``list[list[int]]``; it builds the index
+    and delegates, so there is still exactly one implementation of the math.
     """
     return noisy_or_from_index(p, prepare_extension(extension, device))

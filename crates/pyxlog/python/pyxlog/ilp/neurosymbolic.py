@@ -24,10 +24,11 @@ rule weights receive gradients from the same circuit evaluation.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, NoReturn
 
 from pyxlog.ilp.inventory import RuleInventory, RuleInventoryClause
 from pyxlog.ilp.join_bodies import (
+    mentions_neural_on_nonhead_var,
     noisy_or_from_index,
     parse_join_body,
     prepare_extension,
@@ -515,6 +516,73 @@ def _train_joint_mixture(
     domain_inputs = domain_inputs or {}
 
     n = len(targets)
+
+    # --- neural JOIN bodies (Stage-B shape) ---------------------------------
+    # A candidate whose neural predicate sits on an EXISTENTIAL join variable has no
+    # boolean relational eligibility to speak of: its relational truth is the OR, over
+    # the join extension, of the network's per-event probability. Recognize that from
+    # the RULE (the rule names the join relation; nn/4 names the network) — never from
+    # the caller, and never from what the engine did or did not hand back.
+    #
+    # ROUTING IS DECIDED BY THE RULE, NOT BY THE MASK, and that is load-bearing. Today
+    # such a candidate happens to get NO mask out of joint_candidate_eligibility (its
+    # mask is keyed by the first neural group's predicate, which for a join candidate
+    # yields a key the guard-prefix strip turns to junk), so "no mask" alone would
+    # appear to be a sufficient trigger. But that is a property of the engine's current
+    # keying, not of the rule: were the keying fixed upstream, a join candidate would
+    # arrive WITH a hard-filters-only (all-True) mask and be trained as an always-true
+    # relational candidate — no gradient to the detector, no error, no failing test.
+    # So: any candidate that puts a declared nn/4 predicate on a non-head variable MUST
+    # be owned by the join path or be rejected here; it is never a plain relational one.
+    #
+    # The supported shape is EXACTLY {one neural atom, one join relation} — two BODY
+    # LITERALS, each a bare positive atom. Anything else (a further conjunct, a
+    # negation, a comparison, an `is`, a modal) is a DIFFERENT rule for which this
+    # module has no mask, and is rejected with a typed error rather than silently
+    # reduced to the shape it resembles. This check runs BEFORE the engine is asked for
+    # eligibility, so the diagnostic names the offending candidate and its body rather
+    # than surfacing whatever the engine says about the part it cannot compile.
+    join_bodies: dict[str, Any] = {}
+    join_index: dict[str, Any] = {}
+    join_label_index: dict[str, int] = {}
+    rule_by_id = {rule.id: rule for rule in rules}
+    neural_predicates = _neural_predicate_networks(program, rules)
+
+    def _rule(rule_id: str) -> TrainableRuleDecl:
+        rule = rule_by_id.get(rule_id)
+        if rule is None:      # candidate_ids are derived FROM rules; belt and braces
+            raise ValueError(
+                f"candidate '{rule_id}' has no trainable_rule declaration"
+            )
+        return rule
+
+    def _reject(rule: TrainableRuleDecl) -> NoReturn:
+        raise ValueError(
+            f"trainable_rule '{rule.id}' cannot be trained as a plain relational "
+            "candidate (it puts a neural predicate on a non-head variable, and/or it "
+            "has no relational eligibility mask), and its body is not the supported "
+            "neural-join shape (EXACTLY two literals, each a bare positive atom: one "
+            "neural atom on an existential variable, plus the one ordinary relation "
+            "that joins that variable to the head; a negation, a comparison, an 'is' "
+            "expression, a modal literal or any further conjunct is a different rule). "
+            "An unsupported body is rejected, not silently reduced to a shorter one: "
+            + ", ".join(rule.body_literals)
+        )
+
+    parsed_join: dict[str, Any] = {}
+    for rule_id in candidate_ids:
+        rule = _rule(rule_id)
+        if not mentions_neural_on_nonhead_var(
+            list(rule.body_literals), neural_predicates, rule.query_variable
+        ):
+            continue                     # not a join candidate; the engine's mask rules
+        jb = parse_join_body(
+            list(rule.body_literals), neural_predicates, rule.query_variable
+        )
+        if jb is None:
+            _reject(rule)                # a join candidate we cannot mask -> refused
+        parsed_join[rule_id] = jb
+
     # Engine relational eligibility per candidate: a length-n mask of which head
     # bindings 0..n-1 satisfy that candidate's relational grounding. Static.
     eligibility = program.joint_candidate_eligibility(train_head, 1, n)
@@ -526,39 +594,21 @@ def _train_joint_mixture(
             [1.0 if m else 0.0 for m in mask], dtype=torch.float32, device=device
         )
 
-    # --- neural JOIN bodies (Stage-B shape) ---------------------------------
-    # joint_candidate_eligibility emits NO mask for a candidate whose neural
-    # predicate sits on an EXISTENTIAL join variable, so rel_masks had no entry and
-    # head_prob died with KeyError. Recognize that shape here, from the RULE (the
-    # rule names the join relation; nn/4 names the network) — never from the
-    # caller. The shape is EXACTLY {one neural atom, one join relation}: a candidate
-    # whose body carries any further conjunct does NOT parse, and — having no
-    # eligibility mask either — is REJECTED here with a typed error. Masking it as if
-    # the extra conjunct were not there would train a rule nobody wrote.
-    join_bodies: dict[str, Any] = {}
-    join_index: dict[str, Any] = {}
-    join_label_index: dict[str, int] = {}
-    unmasked = [rule_id for rule_id in candidate_ids if rule_id not in rel_masks]
-    if unmasked:
-        rule_by_id = {rule.id: rule for rule in rules}
-        neural_predicates = _neural_predicate_networks(program, rules)
+    # The join path owns (a) every candidate the rule says is a join candidate, whatever
+    # mask the engine emitted for it, and (b) every candidate the engine left unmasked —
+    # which, not being a join candidate by (a), has no mask at all and is rejected.
+    needs_join = [
+        rule_id
+        for rule_id in candidate_ids
+        if rule_id in parsed_join or rule_id not in rel_masks
+    ]
+    if needs_join:
         ilp_read = None
-        for rule_id in unmasked:
-            rule = rule_by_id.get(rule_id)
-            if rule is None:
-                continue
-            jb = parse_join_body(
-                ", ".join(rule.body_literals), neural_predicates, rule.query_variable
-            )
+        for rule_id in needs_join:
+            rule = _rule(rule_id)
+            jb = parsed_join.get(rule_id)
             if jb is None:
-                raise ValueError(
-                    f"trainable_rule '{rule_id}' has no relational eligibility mask and "
-                    "its body is not the supported neural-join shape (exactly one neural "
-                    "atom on an existential variable, plus the one ordinary relation that "
-                    "joins that variable to the head); an unsupported body is rejected, "
-                    "not silently reduced to a shorter one: "
-                    + ", ".join(rule.body_literals)
-                )
+                _reject(rule)
             if jb.network not in modules:
                 raise ValueError(
                     f"trainable_rule '{rule_id}' joins neural predicate "
@@ -593,11 +643,19 @@ def _train_joint_mixture(
             # The binding-level relational mask: 1 where the join extension is
             # non-empty. The OR over the extension is 0 there anyway (an OR over
             # nothing is false); keeping the mask separate is what lets
-            # candidate_masses fold graded evidence onto a join candidate too.
-            rel_masks[rule_id] = torch.tensor(
+            # candidate_masses fold graded evidence onto a join candidate too. If the
+            # engine DID hand back an eligibility mask for this candidate (it does not
+            # today; it would after the upstream keying fix), that mask carries the
+            # hard filters and is kept — multiplied, never overwritten and never used
+            # on its own.
+            extension_mask = torch.tensor(
                 [1.0 if events else 0.0 for events in extension],
                 dtype=torch.float32,
                 device=device,
+            )
+            engine_mask = rel_masks.get(rule_id)
+            rel_masks[rule_id] = (
+                extension_mask if engine_mask is None else engine_mask * extension_mask
             )
 
     # Graded per-binding confidences fold multiplicatively onto the relational

@@ -173,6 +173,117 @@ def test_a_longer_body_is_rejected_not_silently_trained() -> None:
     assert "cand_pre" in str(exc.value)
 
 
+def test_a_negated_join_relation_is_rejected_not_trained_as_its_inverse() -> None:
+    """`not pre_before_post(Ev, E)` is a NEGATED literal, i.e. the complement of the
+    join relation. Counting parenthesized atoms sees two atoms and cannot see the
+    `not` at all, so before this fix the candidate parsed as the join shape and was
+    masked with the extension of `pre_before_post` — training, and then reporting, the
+    exact INVERSE of the rule that was written. It must be rejected."""
+    net, feats = _net_and_feats()
+    source = _world_source(
+        candidates="""
+        trainable_rule(cand_pre, weight=0.0) :: plastic(E) :- saliency(Ev, strengthen), not pre_before_post(Ev, E).
+        trainable_rule(cand_post, weight=0.0) :: plastic(E) :- saliency(Ev, strengthen), post_before_pre(Ev, E).
+"""
+    )
+    with pytest.raises(ValueError) as exc:
+        _train(source, net, feats, steps=5)
+    assert "cand_pre" in str(exc.value)
+
+
+def test_a_comparison_literal_is_rejected_not_silently_dropped() -> None:
+    """`Ev < 3` is a Comparison body literal, not an atom. An atom count cannot see it,
+    so before this fix the body parsed as the two-literal join shape and the comparison
+    was silently DISCARDED."""
+    net, feats = _net_and_feats()
+    source = _world_source(
+        candidates="""
+        trainable_rule(cand_pre, weight=0.0) :: plastic(E) :- saliency(Ev, strengthen), pre_before_post(Ev, E), Ev < 3.
+        trainable_rule(cand_post, weight=0.0) :: plastic(E) :- saliency(Ev, strengthen), post_before_pre(Ev, E).
+"""
+    )
+    with pytest.raises(ValueError) as exc:
+        _train(source, net, feats, steps=5)
+    assert "cand_pre" in str(exc.value)
+
+
+def test_a_join_candidate_is_never_trained_on_an_engine_mask_alone() -> None:
+    """Today a join candidate reaches the join path only because the engine emits no
+    eligibility mask for it (its mask is keyed by the FIRST neural group's predicate,
+    which for a join candidate yields a junk key). That is an upstream BUG, and the
+    join path must not depend on it: if the keying is fixed, a join candidate arrives
+    WITH a hard-filters-only (all-True) mask and — if routing were decided by "no mask"
+    — would silently train as an always-true relational candidate, with no gradient to
+    the per-event detector and no error.
+
+    This simulates that upstream fix by wrapping the compiled program so
+    `joint_candidate_eligibility` DOES return an all-True mask for every candidate, and
+    asserts the join path still owns the candidate: the detector still gets gradient and
+    the correct relation still wins. Before the routing fix, `sal_net` receives NO
+    gradient here."""
+    net, feats = _net_and_feats()
+    real_program_cls = pyxlog.Program
+
+    class _Fixed:
+        """Delegates everything to the real program, except that the eligibility read
+        also emits a mask for candidates the engine currently skips."""
+
+        def __init__(self, inner):
+            object.__setattr__(self, "_inner", inner)
+
+        def __getattr__(self, name):
+            return getattr(object.__getattribute__(self, "_inner"), name)
+
+        def joint_candidate_eligibility(self, head, lo, n):
+            inner = object.__getattribute__(self, "_inner")
+            out = list(inner.joint_candidate_eligibility(head, lo, n))
+            present = {guard_pred for guard_pred, _ in out}
+            for rule_id in ("cand_pre", "cand_post"):
+                guard_pred = f"nsr_guard_{rule_id}"
+                if guard_pred not in present:
+                    out.append((guard_pred, [True] * n))   # hard filters only
+            return out
+
+    class _Factory:
+        @staticmethod
+        def compile(*args, **kwargs):
+            return _Fixed(real_program_cls.compile(*args, **kwargs))
+
+    pyxlog.Program = _Factory
+    try:
+        result = _train(_world_source(), net, feats, steps=300)
+    finally:
+        pyxlog.Program = real_program_cls
+
+    assert result.neural_parameter_grads["sal_net"] > 0.0
+    w = result.symbolic_rule_weights
+    assert w["cand_pre"] > 0.7 and w["cand_post"] < 0.3, w
+
+
+def test_the_join_index_is_built_once_per_candidate_not_once_per_step() -> None:
+    """I2: the extension is STATIC, so its device index is built OUTSIDE the hot loop.
+    A per-step rebuild would be a host->device copy every step and would not fail any
+    other test, so it is pinned by counting the calls across a real multi-step run:
+    two join candidates, many steps, exactly two `prepare_extension` calls."""
+    import pyxlog.ilp.neurosymbolic as ns
+
+    net, feats = _net_and_feats()
+    real_prepare = ns.prepare_extension
+    calls = []
+
+    def counting_prepare(extension, device):
+        calls.append(len(extension))
+        return real_prepare(extension, device)
+
+    ns.prepare_extension = counting_prepare
+    try:
+        _train(_world_source(), net, feats, steps=25)
+    finally:
+        ns.prepare_extension = real_prepare
+
+    assert len(calls) == 2, calls      # once per join candidate, NOT once per step
+
+
 def test_a_purely_relational_existential_join_is_still_rejected() -> None:
     """`plastic(E) :- pre_before_post(Ev, E).` has an existential Ev that is NOT a
     neural predicate's input. It was rejected before this branch and must still be:
