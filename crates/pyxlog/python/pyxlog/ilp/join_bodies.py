@@ -73,30 +73,33 @@ def parse_join_body(
     return None
 
 
-def materialize_extension(
-    program: Any, jb: JoinBody, num_bindings: int, domain_size: int
+def read_join_extension(
+    ilp_program: Any, jb: JoinBody, num_bindings: int
 ) -> list[list[int]]:
-    """edge -> [event ids], read FROM THE ENGINE.
+    """head binding -> [event ids], read FROM THE ENGINE.
 
-    The engine owns the relation; we only ask it which tuples hold. This is
-    O(num_bindings * domain_size) membership probes. That is negligible at demo
-    scale and is a known wart at dataset scale -- the follow-up is an extension
-    ENUMERATION api. It is deliberately NOT solved by taking the map from Python:
-    that would move the aggregation structure out of the logic.
+    The engine owns the relation; we only ask it to enumerate the tuples that
+    hold, via ``CompiledIlpProgram.relation_facts(name) -> list[list[int]]``. This
+    is deliberately NOT solved by taking an edge->events map from Python: that
+    would move the aggregation structure out of the logic, and the claim that
+    "the logic performs the OR" would be false -- it would be Python's OR over a
+    caller-supplied hint, not the engine's own relation.
+
+    This is O(|extension|) -- it enumerates only the tuples that actually hold,
+    not O(num_bindings * domain_size) membership probes. Tuples whose head
+    binding falls outside ``0 .. num_bindings - 1`` are ignored. Bindings with no
+    joined events get ``[]``. Events are sorted ascending within each bucket, and
+    the traversal itself is a plain forward scan of ``relation_facts``, so the
+    result is deterministic for a given compiled program.
     """
-    tuples: list[list[int]] = []
-    for h in range(num_bindings):
-        for e in range(domain_size):
-            t = [0, 0]
-            t[jb.event_arg] = e
-            t[jb.head_arg] = h
-            tuples.append(t)
-    flat = program.batch_fact_membership(jb.relation, tuples)
-    ext: list[list[int]] = []
-    for h in range(num_bindings):
-        base = h * domain_size
-        ext.append([e for e in range(domain_size) if flat[base + e]])
-    return ext
+    buckets: list[list[int]] = [[] for _ in range(num_bindings)]
+    for t in ilp_program.relation_facts(jb.relation):
+        h = t[jb.head_arg]
+        if 0 <= h < num_bindings:
+            buckets[h].append(t[jb.event_arg])
+    for bucket in buckets:
+        bucket.sort()
+    return buckets
 
 
 def noisy_or_over_extension(p: Any, extension: list[list[int]], device: Any) -> Any:
