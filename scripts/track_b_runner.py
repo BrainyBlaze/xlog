@@ -12,8 +12,8 @@ Policy:
   - Metric JSON must include the frozen schema fields
   - GPU identity is captured and embedded in every metrics.json
 
-Spec: docs/BENCHMARKS.md  (baseline metrics)
-      docs/plans/2026-02-16-track-a-run-matrix.md  (run matrix)
+Spec: https://xlog.md/guides/benchmarking  (baseline metrics)
+      docs-internal/plans/2026-02-16-track-a-run-matrix.md  (run matrix, local-only)
 """
 
 import csv
@@ -465,13 +465,13 @@ def generate_comparisons(summary, out_dir):
                 "std": xlog_minimal["std"],
                 "n": xlog_minimal["n"],
             },
-            "deepproblog_baseline_report": "docs/reports/2026-02-10-deepproblog-baseline-gpu-sequential.md",
+            "deepproblog_baseline_report": "docs-internal/reports/2026-02-10-deepproblog-baseline-gpu-sequential.md",
         }
     else:
         mnist_comp = {
             "status": "blocked",
             "reason": "01_minimal XLOG run failed; no XLOG metric available",
-            "deepproblog_baseline_report": "docs/reports/2026-02-10-deepproblog-baseline-gpu-sequential.md",
+            "deepproblog_baseline_report": "docs-internal/reports/2026-02-10-deepproblog-baseline-gpu-sequential.md",
         }
     with open(comp_dir / "mnist_vs_deepproblog.json", "w") as f:
         json.dump(mnist_comp, f, indent=2)

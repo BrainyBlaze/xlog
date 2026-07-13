@@ -9,7 +9,7 @@ ROOT = Path(__file__).resolve().parents[2]
 
 def common_subexpression_elimination_evidence_dir() -> Path:
     matches = []
-    for path in sorted((ROOT / "docs" / "evidence").iterdir()):
+    for path in sorted((ROOT / "docs-internal" / "evidence").iterdir()):
         measurements_path = path / "measurements.json"
         if not measurements_path.exists() or not (path / "README.md").exists():
             continue
@@ -37,7 +37,7 @@ def test_common_subexpression_elimination_runtime_uses_existing_executor_path() 
     config = read("crates/xlog-core/src/config.rs")
     executor = read("crates/xlog-runtime/src/executor/mod.rs")
     dispatch = read("crates/xlog-runtime/src/executor/node_dispatch.rs")
-    optimizer_doc = read("docs/architecture/query-optimizer.md")
+    optimizer_doc = read("python/tests/contract_docs/query-optimizer.md")
 
     assert "XLOG_CSE" in config
     assert "with_common_subexpression_elimination" in config

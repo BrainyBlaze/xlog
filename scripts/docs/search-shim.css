@@ -1,7 +1,7 @@
 /*
  * Styles for the self-hosted Pagefind search modal (see search-shim.js).
  * Injected into exported pages at deploy time; deliberately kept outside
- * docs-site/ so Mintlify never inlines it as custom CSS.
+ * docs/ so Mintlify never inlines it as custom CSS.
  */
 
 #xlog-search-overlay {

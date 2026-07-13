@@ -10,7 +10,7 @@ ROOT = Path(__file__).resolve().parents[2]
 def exact_induction_evidence_dir() -> Path:
     matches = sorted(
         path
-        for path in (ROOT / "docs" / "evidence").glob("*-exact")
+        for path in (ROOT / "docs-internal" / "evidence").glob("*-exact")
         if (path / "runtime_probe.json").exists() and (path / "README.md").exists()
     )
     assert len(matches) == 1
@@ -48,8 +48,8 @@ def test_exact_source_contracts_are_current() -> None:
     py_bridge = read("crates/pyxlog/src/ilp_exact.rs")
     parity_test = read("python/tests/test_ilp_exact_induce.py")
     engine = read("crates/xlog-induce/src/lib.rs")
-    arch = read("docs/architecture/bounded-exact-induction.md")
-    py_docs = read("docs/architecture/python-bindings.md")
+    arch = read("python/tests/contract_docs/bounded-exact-induction.md")
+    py_docs = read("python/tests/contract_docs/python-bindings.md")
     manifest = read("crates/xlog-cuda/src/kernel_manifest_data.rs")
     installer = read("scripts/install_pyxlog_for_python.py")
 

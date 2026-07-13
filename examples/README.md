@@ -176,4 +176,4 @@ kept in `70-aggregates/` or `90-negative-tests/` and clearly marked.
 
 Additional runner/runtime notes:
 - `symbol` values are stored as `u32` IDs with a bidirectional string table; symbols are **reversible** and display as readable strings in query output.
-- Some aggregate implementations have value-type restrictions (documented in `docs/ARCHITECTURE.md`).
+- Some aggregate implementations have value-type restrictions (documented in the [architecture overview](https://xlog.md/architecture/overview)).

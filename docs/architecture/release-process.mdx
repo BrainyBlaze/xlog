@@ -94,8 +94,8 @@ this gate — only a passing GPU run does.
 The public docs live at `https://xlog.md`. Here is how a change to them reaches
 that site.
 
-Source pages are MDX files under `docs-site/`. The GitHub workflow
-`.github/workflows/docs-site.yml` runs whenever `docs-site/**` changes on a pull
+Source pages are MDX files under `docs/`. The GitHub workflow
+`.github/workflows/docs.yml` runs whenever `docs/**` changes on a pull
 request or on `main`. It pins Node 22 and `mint@4.2.666`. It validates the
 Mintlify site, exports a static bundle, and force-pushes the generated site to
 the `docs-dist` branch on `main`.
@@ -104,7 +104,7 @@ DigitalOcean App Platform serves the `docs-dist` branch, configured by
 `.do/docs-app.yaml`. That app owns both `xlog.md` and `www.xlog.md`.
 
 The generated static HTML is never hand-edited in the source tree. To change the
-docs, edit the MDX in `docs-site/`, then let validation, export, and the workflow
+docs, edit the MDX in `docs/`, then let validation, export, and the workflow
 publish `docs-dist`.
 
 ## Main-Only Feature Boundary

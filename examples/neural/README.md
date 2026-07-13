@@ -151,5 +151,5 @@ print(f"Final loss: {history.epoch_losses[-1]}")
 ## References
 
 - [Whitepaper](../../paper/) — architecture, language framing, and neural-symbolic design context
-- [Python Bindings](../../docs/architecture/python-bindings.md) — `register_network`, `register_embedding`, training-loop APIs, and result surfaces
-- [dILP Training](../../docs/architecture/dilp-training.md) — differentiable ILP architecture and trainer contract
+- [Python Bindings](https://xlog.md/reference/python) — `register_network`, `register_embedding`, training-loop APIs, and result surfaces
+- [dILP Training](https://xlog.md/neural/rule-learning) — differentiable ILP architecture and trainer contract

@@ -9,7 +9,7 @@ each old path, plus a branded 404.html for the App Platform error_document.
 Run AFTER Pagefind indexing (stubs carry no data-pagefind-body, so they are
 never indexed either way) and before the rustdoc graft.
 
-Usage: build_redirect_stubs.py <docs-site-dir> <bundle-dir>
+Usage: build_redirect_stubs.py <docs-dir> <bundle-dir>
 """
 
 import html
@@ -75,7 +75,7 @@ def main() -> int:
     bundle = pathlib.Path(sys.argv[2])
     docs_json = site_dir / "docs.json"
     if not docs_json.exists() or not (bundle / "index.html").exists():
-        print("error: bad docs-site or bundle dir", file=sys.stderr)
+        print("error: bad docs or bundle dir", file=sys.stderr)
         return 65
 
     redirects = json.loads(docs_json.read_text(encoding="utf-8")).get("redirects", [])

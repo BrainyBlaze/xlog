@@ -6,7 +6,7 @@ ROOT = Path(__file__).resolve().parents[2]
 
 def test_v087_rule_and_proof_introspection_is_exposed() -> None:
     native_stub = (ROOT / "crates/pyxlog/python/pyxlog/_native.pyi").read_text()
-    docs = (ROOT / "docs/architecture/python-bindings.md").read_text()
+    docs = (ROOT / "python/tests/contract_docs/python-bindings.md").read_text()
     logic_rs = (ROOT / "crates/pyxlog/src/logic.rs").read_text()
     diagnostics_rs = (ROOT / "crates/xlog-logic/src/diagnostics.rs").read_text()
 
@@ -28,7 +28,7 @@ def test_v087_rule_and_proof_introspection_is_exposed() -> None:
 
 def test_v087_delta_debug_reports_relations_equivalence_and_trace() -> None:
     native_stub = (ROOT / "crates/pyxlog/python/pyxlog/_native.pyi").read_text()
-    docs = (ROOT / "docs/architecture/python-bindings.md").read_text()
+    docs = (ROOT / "python/tests/contract_docs/python-bindings.md").read_text()
     logic_rs = (ROOT / "crates/pyxlog/src/logic.rs").read_text()
 
     for needle in [
@@ -52,7 +52,7 @@ def test_v087_delta_debug_reports_relations_equivalence_and_trace() -> None:
 def test_v087_temporal_provenance_helpers_are_exposed() -> None:
     init_py = (ROOT / "crates/pyxlog/python/pyxlog/__init__.py").read_text()
     init_stub = (ROOT / "crates/pyxlog/python/pyxlog/__init__.pyi").read_text()
-    docs = (ROOT / "docs/architecture/python-bindings.md").read_text()
+    docs = (ROOT / "python/tests/contract_docs/python-bindings.md").read_text()
 
     for needle in [
         "put_temporal_relation",
@@ -70,7 +70,7 @@ def test_v087_temporal_provenance_helpers_are_exposed() -> None:
 
 def test_v087_neural_hot_loop_diagnostics_are_unified() -> None:
     native_stub = (ROOT / "crates/pyxlog/python/pyxlog/_native.pyi").read_text()
-    docs = (ROOT / "docs/architecture/python-bindings.md").read_text()
+    docs = (ROOT / "python/tests/contract_docs/python-bindings.md").read_text()
     program_rs = (ROOT / "crates/pyxlog/src/program.rs").read_text()
 
     for needle in [

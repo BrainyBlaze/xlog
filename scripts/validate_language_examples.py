@@ -14,7 +14,7 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
 EXAMPLE_ROOT = ROOT / "examples" / "language-completeness" / "showcase"
-DEFAULT_OUTPUT = ROOT / "docs" / "evidence" / "language-examples" / "validation_summary.json"
+DEFAULT_OUTPUT = ROOT / "docs-internal" / "evidence" / "language-examples" / "validation_summary.json"
 EXAMPLES = [
     "01_list_typed_relation",
     "02_findall_aggregate",

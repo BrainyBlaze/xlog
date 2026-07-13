@@ -6,7 +6,7 @@ ROOT = Path(__file__).resolve().parents[2]
 
 def test_bridge_public_surface_is_stubbed_and_documented() -> None:
     native_stub = (ROOT / "crates/pyxlog/python/pyxlog/_native.pyi").read_text()
-    docs = (ROOT / "docs/architecture/python-bindings.md").read_text()
+    docs = (ROOT / "python/tests/contract_docs/python-bindings.md").read_text()
 
     for needle in [
         "def deterministic_topk(",
@@ -67,7 +67,7 @@ def test_bridge_reuses_registered_network_output_modes() -> None:
 
 
 def test_bridge_has_evidence_package() -> None:
-    evidence_root = ROOT / "docs/evidence"
+    evidence_root = ROOT / "docs-internal/evidence"
     evidence = next(
         path / "README.md"
         for path in sorted(evidence_root.glob("*-bridge"))

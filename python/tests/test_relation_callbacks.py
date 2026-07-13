@@ -7,7 +7,7 @@ ROOT = Path(__file__).resolve().parents[2]
 
 def relation_callback_evidence_dir() -> Path:
     matches = []
-    for path in sorted((ROOT / "docs" / "evidence").iterdir()):
+    for path in sorted((ROOT / "docs-internal" / "evidence").iterdir()):
         measurements_path = path / "measurements.json"
         if not measurements_path.exists() or not (path / "README.md").exists():
             continue
@@ -32,7 +32,7 @@ EVIDENCE_DIR = relation_callback_evidence_dir()
 
 def test_relation_callback_api_is_exposed_in_stubs_docs_and_rust() -> None:
     native_stub = (ROOT / "crates/pyxlog/python/pyxlog/_native.pyi").read_text()
-    docs = (ROOT / "docs/architecture/python-bindings.md").read_text()
+    docs = (ROOT / "python/tests/contract_docs/python-bindings.md").read_text()
     logic_rs = (ROOT / "crates/pyxlog/src/logic.rs").read_text()
     lib_rs = (ROOT / "crates/pyxlog/src/lib.rs").read_text()
 
@@ -99,7 +99,7 @@ def test_relation_callback_payload_is_metadata_only_and_post_commit() -> None:
 
 def test_relation_callback_ordering_and_unregister_are_source_auditable() -> None:
     logic_rs = (ROOT / "crates/pyxlog/src/logic.rs").read_text()
-    docs = (ROOT / "docs/architecture/python-bindings.md").read_text()
+    docs = (ROOT / "python/tests/contract_docs/python-bindings.md").read_text()
 
     assert "next_relation_callback_id" in logic_rs
     assert "retain(|registered| registered.id != callback_id)" in logic_rs

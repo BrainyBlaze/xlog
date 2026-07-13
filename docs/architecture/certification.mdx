@@ -24,7 +24,7 @@ The four layers below run in different places and prove different things.
 | Layer | Where it runs | What it proves |
 | --- | --- | --- |
 | GitHub CI | GitHub-hosted runners | Formatting, workflow hygiene, package metadata, no-GPU CUDA build, and non-GPU checks. |
-| Docs site CI | GitHub Actions for `docs-site/**` | Mintlify validation, broken-link checks, and static export publication. |
+| Docs site CI | GitHub Actions for `docs/**` | Mintlify validation, broken-link checks, and static export publication. |
 | GPU release validation | Maintainer-run CUDA host | Actual CUDA behavior through `scripts/validate_release_gpu.sh`. |
 | Subsystem reliability gates | Subsystem-specific suites | Statistical or staged reliability for neural-symbolic and other higher-level engines. |
 
@@ -60,7 +60,7 @@ inspect the command sequence; it does not certify GPU behavior.
 ## Docs Gate
 
 This gate validates the documentation site. It triggers on edits under
-`docs-site/**` or on changes to the workflow itself. It uses Node 22, installs
+`docs/**` or on changes to the workflow itself. It uses Node 22, installs
 `mint@4.2.666`, and runs:
 
 ```bash

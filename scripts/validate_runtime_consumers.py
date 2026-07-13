@@ -16,8 +16,8 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
 EXAMPLE_ROOT = ROOT / "examples" / "runtime-consumers"
-DEFAULT_OUTPUT = ROOT / "docs" / "evidence" / "runtime-consumers" / "validation_summary.json"
-DEFAULT_EVIDENCE = ROOT / "docs" / "evidence" / "runtime-consumers"
+DEFAULT_OUTPUT = ROOT / "docs-internal" / "evidence" / "runtime-consumers" / "validation_summary.json"
+DEFAULT_EVIDENCE = ROOT / "docs-internal" / "evidence" / "runtime-consumers"
 EXAMPLES = [
     "01_external_delta_optimizer",
     "02_neutral_material_flow",
@@ -62,7 +62,7 @@ def _find_measurement_file(feature: str) -> Path:
         return False
 
     matches = []
-    for path in sorted((ROOT / "docs" / "evidence").iterdir()):
+    for path in sorted((ROOT / "docs-internal" / "evidence").iterdir()):
         measurements_path = path / "measurements.json"
         if not measurements_path.exists():
             continue

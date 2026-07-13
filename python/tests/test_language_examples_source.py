@@ -38,7 +38,7 @@ REQUIRED_FEATURES = [
 
 def language_examples_evidence_dir() -> Path:
     matches = []
-    for path in sorted((ROOT / "docs" / "evidence").glob("*-examples")):
+    for path in sorted((ROOT / "docs-internal" / "evidence").glob("*-examples")):
         summary_path = path / "validation_summary.json"
         if not summary_path.exists() or not (path / "README.md").exists():
             continue

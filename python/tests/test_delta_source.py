@@ -7,7 +7,7 @@ ROOT = Path(__file__).resolve().parents[2]
 def test_delta_api_is_exposed_in_stubs_and_python_docs() -> None:
     native_stub = (ROOT / "crates/pyxlog/python/pyxlog/_native.pyi").read_text()
     init_stub = (ROOT / "crates/pyxlog/python/pyxlog/__init__.pyi").read_text()
-    docs = (ROOT / "docs/architecture/python-bindings.md").read_text()
+    docs = (ROOT / "python/tests/contract_docs/python-bindings.md").read_text()
 
     for needle in [
         "def insert_relation(",
@@ -40,7 +40,7 @@ def test_delta_routes_through_runtime_relation_delta() -> None:
 
 
 def test_delta_has_certified_runtime_evidence() -> None:
-    evidence_root = ROOT / "docs/evidence"
+    evidence_root = ROOT / "docs-internal/evidence"
     evidence = next(
         path / "README.md"
         for path in sorted(evidence_root.glob("*-delta"))

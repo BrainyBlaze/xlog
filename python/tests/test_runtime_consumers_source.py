@@ -41,7 +41,7 @@ PROJECT_TERM_PARTS = [("mista", "ber")]
 
 def runtime_consumers_evidence_dir() -> Path:
     matches = []
-    for path in sorted((ROOT / "docs" / "evidence").iterdir()):
+    for path in sorted((ROOT / "docs-internal" / "evidence").iterdir()):
         summary_path = path / "validation_summary.json"
         if not summary_path.exists() or not (path / "README.md").exists():
             continue

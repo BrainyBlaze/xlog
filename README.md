@@ -8,7 +8,7 @@
 [![PyPI](https://img.shields.io/pypi/v/pyxlog.svg?label=pyxlog&color=blue)](https://pypi.org/project/pyxlog/)
 [![Docs](https://img.shields.io/badge/docs-xlog.md-8A2BE2.svg)](https://xlog.md)
 
-**Documentation: [xlog.md](https://xlog.md)** · [Whitepaper](paper/) · [Language reference](docs/language-reference.md) · [Examples](examples/)
+**Documentation: [xlog.md](https://xlog.md)** · [Whitepaper](paper/) · [Language reference](https://xlog.md/reference/language) · [Examples](examples/)
 
 Neural-symbolic systems today keep symbolic reasoning on the CPU while neural computation runs
 on the GPU, and every training iteration pays a PCIe round-trip that dominates wall-clock time
@@ -80,7 +80,7 @@ __xlog_query_0
 +-------+
 ```
 
-The [language reference](docs/language-reference.md) covers the full surface, and the
+The [language reference](https://xlog.md/reference/language) covers the full surface, and the
 [examples](examples/) directory contains annotated programs for lists and meta-predicates,
 magic sets, probabilistic aggregates, approximate inference, epistemic reasoning
 ([`examples/epistemic/`](examples/epistemic/)), and Python neural-symbolic training
@@ -266,7 +266,7 @@ wheel with the same interpreter's `pip`, and verifies that the installed `pyxlog
 ./target/release/xlog run --help
 ```
 
-See the [CLI reference](docs/architecture/cli-reference.md) for the complete flag reference.
+See the [CLI reference](https://xlog.md/reference/cli) for the complete flag reference.
 
 ---
 
@@ -277,19 +277,19 @@ The documentation website is **[xlog.md](https://xlog.md)**. Key references in t
 | Document | Scope |
 |---|---|
 | [Whitepaper](paper/) | Primary technical reference: language, architecture, probabilistic inference, epistemic reasoning, neural-symbolic bridge, evaluation, and related work |
-| [Language reference](docs/language-reference.md) | Full language surface: types, predicates, rules, modules, UDFs, aggregations, pragmas |
-| [Architecture](docs/ARCHITECTURE.md) | System design, crate structure, IR layers, GPU execution model |
-| [Benchmarks](docs/BENCHMARKS.md) | Performance methodology and benchmark artifacts |
-| [Probabilistic tier](docs/architecture/xlog-prob.md) | Exact knowledge compilation and Monte Carlo inference |
-| [Solver services](docs/architecture/solver-services.md) | GPU CDCL verifier, SAT/MaxSAT services, workspace arena reuse |
-| [Differentiable ILP training](docs/architecture/dilp-training.md) | Trainer architecture and the GPU hot-loop contract |
-| [ILP showcase report](docs/architecture/dilp-showcase-report.md) | End-to-end rule-induction training results |
-| [WCOJ architecture guide](docs/wcoj-architecture-guide.md) | Worst-case-optimal joins: RIR, promoter, dispatch, cost model, recursive integration |
-| [WCOJ user guide](docs/wcoj-user-guide.md) | Eligibility, fallback behavior, performance tuning, troubleshooting |
-| [CLI reference](docs/architecture/cli-reference.md) | Full flag and subcommand reference |
-| [Arrow / DLPack interop](docs/architecture/cudf-interop.md) | Zero-copy interop with cuDF, PyTorch, and JAX |
-| [Python bindings](docs/architecture/python-bindings.md) | `pyxlog` API surface |
-| [CUDA certification](docs/architecture/cuda-certification.md) | Kernel certification suite coverage |
+| [Language reference](https://xlog.md/reference/language) | Full language surface: types, predicates, rules, modules, UDFs, aggregations, pragmas |
+| [Architecture](https://xlog.md/architecture/overview) | System design, crate structure, IR layers, GPU execution model |
+| [Benchmarks](https://xlog.md/guides/benchmarking) | Performance methodology and benchmark artifacts |
+| [Probabilistic tier](https://xlog.md/probabilistic/engines) | Exact knowledge compilation and Monte Carlo inference |
+| [Solver services](https://xlog.md/architecture/solver-services) | GPU CDCL verifier, SAT/MaxSAT services, workspace arena reuse |
+| [Differentiable ILP training](https://xlog.md/neural/rule-learning) | Trainer architecture and the GPU hot-loop contract |
+| [Exact induction](https://xlog.md/neural/exact-induction) | End-to-end rule-induction training results |
+| [WCOJ architecture guide](https://xlog.md/architecture/wcoj) | Worst-case-optimal joins: RIR, promoter, dispatch, cost model, recursive integration |
+| [WCOJ user guide](https://xlog.md/guides/wcoj-tuning) | Eligibility, fallback behavior, performance tuning, troubleshooting |
+| [CLI reference](https://xlog.md/reference/cli) | Full flag and subcommand reference |
+| [Arrow / DLPack interop](https://xlog.md/guides/interop) | Zero-copy interop with cuDF, PyTorch, and JAX |
+| [Python bindings](https://xlog.md/reference/python) | `pyxlog` API surface |
+| [CUDA certification](https://xlog.md/architecture/certification) | Kernel certification suite coverage |
 | [Roadmap](ROADMAP.md) | Feature status and planned work |
 | [Examples](examples/) | Annotated programs: basics, arithmetic, graphs, aggregations, probabilistic, epistemic, and neural |
 
@@ -342,9 +342,10 @@ cargo run -p xlog-cli --release -- run examples/xlog/00-basics/01_tc_reachabilit
 
 ## Contributing
 
-Contributions are welcome. Please read [`CONTRIBUTING.md`](CONTRIBUTING.md) and
-[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) first for the crate layout and layering rules,
-and run `cargo fmt` plus `cargo clippy --all-targets -- -D warnings` before submitting.
+Contributions are welcome. Please read [`CONTRIBUTING.md`](CONTRIBUTING.md) and the
+[architecture overview](https://xlog.md/architecture/overview) first for the crate layout and
+layering rules, and run `cargo fmt` plus `cargo clippy --all-targets -- -D warnings` before
+submitting.
 
 ---
 

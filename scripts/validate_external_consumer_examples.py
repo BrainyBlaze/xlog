@@ -16,7 +16,7 @@ from typing import Any
 ROOT = Path(__file__).resolve().parents[1]
 EXAMPLE_ROOT = ROOT / "examples" / "external-consumer-python"
 DEFAULT_OUTPUT = (
-    ROOT / "docs" / "evidence" / "external-consumer-examples" / "validation_summary.json"
+    ROOT / "docs-internal" / "evidence" / "external-consumer-examples" / "validation_summary.json"
 )
 EXAMPLES = [
     "01_async_streaming_reachability",

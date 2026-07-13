@@ -74,7 +74,7 @@ validate-release-local:
 	bash scripts/validate_release_gpu.sh --mode release
 
 docs:
-	cd docs-site && mint export
+	cd docs && mint export
 
 docs-validate:
-	cd docs-site && mint validate && mint broken-links
+	cd docs && mint validate && mint broken-links

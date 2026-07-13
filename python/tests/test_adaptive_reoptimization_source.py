@@ -9,7 +9,7 @@ ROOT = Path(__file__).resolve().parents[2]
 
 def adaptive_reoptimization_evidence_dir() -> Path:
     matches = []
-    for path in sorted((ROOT / "docs" / "evidence").glob("*adaptive-reoptimization")):
+    for path in sorted((ROOT / "docs-internal" / "evidence").glob("*adaptive-reoptimization")):
         measurements_path = path / "measurements.json"
         if not measurements_path.exists() or not (path / "README.md").exists():
             continue
@@ -41,7 +41,7 @@ def test_adaptive_reoptimization_reuses_executor_and_stats_paths() -> None:
     config = read("crates/xlog-core/src/config.rs")
     executor = read("crates/xlog-runtime/src/executor/mod.rs")
     dispatch = read("crates/xlog-runtime/src/executor/node_dispatch.rs")
-    optimizer_doc = read("docs/architecture/query-optimizer.md")
+    optimizer_doc = read("python/tests/contract_docs/query-optimizer.md")
 
     assert "XLOG_ADAPTIVE_REOPT" in config
     assert "with_adaptive_reoptimization" in config

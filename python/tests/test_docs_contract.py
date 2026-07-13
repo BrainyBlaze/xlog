@@ -16,7 +16,7 @@ def read(path: str) -> str:
 
 
 def test_mintlify_config_defines_curated_docs_and_reference_nav() -> None:
-    config = json.loads(read("docs-site/docs.json"))
+    config = json.loads(read("docs/docs.json"))
     assert config["name"] == "XLOG"
     assert [tab["tab"] for tab in config["navigation"]["tabs"]] == [
         "Documentation",
@@ -38,7 +38,7 @@ def test_mintlify_config_defines_curated_docs_and_reference_nav() -> None:
 
 
 def test_reference_nav_includes_configuration_pages() -> None:
-    config = json.loads(read("docs-site/docs.json"))
+    config = json.loads(read("docs/docs.json"))
     reference_tab = next(
         tab for tab in config["navigation"]["tabs"] if tab["tab"] == "Reference"
     )
@@ -50,7 +50,7 @@ def test_reference_nav_includes_configuration_pages() -> None:
 
 
 def test_mintlify_config_enables_copy_page_markdown_action() -> None:
-    config = json.loads(read("docs-site/docs.json"))
+    config = json.loads(read("docs/docs.json"))
     assert config["contextual"]["options"] == ["copy"]
     assert config["contextual"]["display"] == "header"
 
@@ -67,9 +67,9 @@ def test_custom_domain_is_present_for_app_platform_artifact() -> None:
 
 
 def test_docs_workflow_generates_reference_outputs_and_exports() -> None:
-    workflow = read(".github/workflows/docs-site.yml")
+    workflow = read(".github/workflows/docs.yml")
     for expected in [
-        "docs-site/**",
+        "docs/**",
         "node-version: \"22\"",
         "mint@4.2.666",
         "scripts/docs/build_rust_api.sh",
@@ -85,7 +85,7 @@ def test_docs_workflow_generates_reference_outputs_and_exports() -> None:
     assert "XLOG_RUSTDOC_NO_CUDA=1" in script
     assert "XLOG_RUSTDOC_OUTPUT_DIR" in script
     assert ".site-rustdoc/generated/rust" in script
-    assert "docs-site/generated/rust" not in script
+    assert "docs/generated/rust" not in script
 
     cuda_build = read("crates/xlog-cuda/build.rs")
     assert "XLOG_RUSTDOC_NO_CUDA" in cuda_build
@@ -94,15 +94,15 @@ def test_docs_workflow_generates_reference_outputs_and_exports() -> None:
 
 
 def test_rust_api_page_links_to_generated_crate_roots() -> None:
-    rust_page = read("docs-site/reference/rust.mdx")
+    rust_page = read("docs/reference/rust.mdx")
     assert "generated/rust/index.html" in rust_page
     assert "generated/rust/pyxlog/index.html" in rust_page
-    assert "generated Rustdoc is attached after Mintlify export" in rust_page
-    assert "docs-site/generated/rust" not in rust_page
+    assert "attaches it to the exported site" in rust_page
+    assert "docs/generated/rust" not in rust_page
 
 
 def test_docs_workflow_attaches_rustdoc_after_mintlify_export() -> None:
-    workflow = read(".github/workflows/docs-site.yml")
+    workflow = read(".github/workflows/docs.yml")
     assert "XLOG_RUSTDOC_OUTPUT_DIR" in workflow
     assert ".site-rustdoc/generated/rust" in workflow
     assert "Attach generated Rust API docs" in workflow
@@ -111,9 +111,9 @@ def test_docs_workflow_attaches_rustdoc_after_mintlify_export() -> None:
 
 
 def test_docs_workflow_builds_self_hosted_search_before_rustdoc_graft() -> None:
-    workflow = read(".github/workflows/docs-site.yml")
+    workflow = read(".github/workflows/docs.yml")
     assert "Build self-hosted search index (Pagefind)" in workflow
-    assert "scripts/docs/build_markdown_exports.py docs-site .site-dist" in workflow
+    assert "scripts/docs/build_markdown_exports.py docs .site-dist" in workflow
     assert "scripts/docs/inject_search_shim.py .site-dist" in workflow
     assert "pagefind@1.5.2 --site .site-dist" in workflow
     assert "test -f .site-dist/index.md" in workflow
@@ -158,7 +158,7 @@ def test_static_markdown_export_generator_writes_route_markdown(tmp_path: Path) 
         [
             sys.executable,
             "scripts/docs/build_markdown_exports.py",
-            "docs-site",
+            "docs",
             str(tmp_path),
         ],
         cwd=ROOT,
@@ -179,33 +179,37 @@ def test_static_markdown_export_generator_writes_route_markdown(tmp_path: Path) 
 
 
 def test_home_page_omits_local_generated_html_notice() -> None:
-    home = read("docs-site/index.mdx")
+    home = read("docs/index.mdx")
     assert "Generated HTML is not committed" not in home
     assert "make docs when Rust and Doxygen dependencies are available" not in home
 
 
 def test_internal_agent_workspace_paths_are_local_only() -> None:
     ignored = read(".gitignore")
-    agents = read("AGENTS.md")
-    claude = read("CLAUDE.md")
     for path in [
-        "docs/evidence",
-        "docs/plans",
-        "docs/reports",
-        "docs/superpowers",
+        "/docs-internal/",
+        "docs/evidence/",
+        "docs/plans/",
+        "docs/reports/",
+        "docs/superpowers/",
+        "scripts/repro/",
     ]:
-        assert f"{path}/" in ignored
-        assert path in agents
-        assert path in claude
-    for guidance in [agents, claude]:
-        assert "local-only agent workspaces" in guidance
-        assert "must not be staged, committed, or pushed" in guidance
+        assert path in ignored
+    tracked = subprocess.run(
+        ["git", "ls-files", "--", "AGENTS.md", "CLAUDE.md", "JCODEMUNCH.md",
+         "LEAN-CTX.md", "docs-internal", "scripts/repro"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=True,
+    ).stdout.strip()
+    assert tracked == "", f"internal-only paths must not be tracked: {tracked}"
 
 
 def test_github_docs_workflow_deploys_docs_dist_only_from_main_docs_site_changes() -> None:
-    workflow = read(".github/workflows/docs-site.yml")
+    workflow = read(".github/workflows/docs.yml")
     for expected in [
-        "docs-site/**",
+        "docs/**",
         ".do/docs-app.yaml",
         "Publish to docs-dist branch",
         "permissions:",
@@ -216,10 +220,10 @@ def test_github_docs_workflow_deploys_docs_dist_only_from_main_docs_site_changes
 
 
 def test_docs_workflow_materializes_redirect_stubs_after_search_indexing() -> None:
-    workflow = read(".github/workflows/docs-site.yml")
+    workflow = read(".github/workflows/docs.yml")
     assert '"scripts/docs/build_redirect_stubs.py"' in workflow
     assert "Add legacy redirects and 404 page" in workflow
-    assert "scripts/docs/build_redirect_stubs.py docs-site .site-dist" in workflow
+    assert "scripts/docs/build_redirect_stubs.py docs .site-dist" in workflow
     assert "test -f .site-dist/404.html" in workflow
     assert "test -f .site-dist/architecture/xlog-prob/index.html" in workflow
     assert workflow.index("Build self-hosted search index") < workflow.index(

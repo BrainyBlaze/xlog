@@ -5,7 +5,7 @@ Mintlify exposes per-page Markdown through `.md` URLs on hosted deployments, but
 `mint export` emits only HTML. This script mirrors those `.md` URLs from the
 source pages listed in docs.json so the static site can support copy-as-Markdown.
 
-Usage: build_markdown_exports.py <docs-site-dir> <bundle-dir>
+Usage: build_markdown_exports.py <docs-dir> <bundle-dir>
 """
 
 from __future__ import annotations
@@ -73,7 +73,7 @@ def main() -> int:
     bundle = Path(sys.argv[2])
     config_path = docs_site / "docs.json"
     if not config_path.exists() or not bundle.exists():
-        print("error: expected docs-site dir and exported bundle dir", file=sys.stderr)
+        print("error: expected docs dir and exported bundle dir", file=sys.stderr)
         return 65
 
     config = json.loads(config_path.read_text(encoding="utf-8"))

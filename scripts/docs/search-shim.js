@@ -5,9 +5,9 @@
  * search modal shows a login prompt. This shim intercepts the search
  * triggers (search bar, Ctrl/Cmd-K) and opens a Pagefind-powered modal
  * instead. The Pagefind index is built over the exported HTML at deploy
- * time (see .github/workflows/docs-site.yml).
+ * time (see .github/workflows/docs.yml).
  *
- * Kept outside docs-site/ on purpose: Mintlify inlines any CSS it finds
+ * Kept outside docs/ on purpose: Mintlify inlines any CSS it finds
  * in its content directory into every page (see the rustdoc custom-CSS
  * incident); these assets are copied into the bundle after export.
  */

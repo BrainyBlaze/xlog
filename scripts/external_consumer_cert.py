@@ -219,7 +219,7 @@ def _graph_telemetry(repo_root: Path, symbol_entries: Iterable[dict]) -> dict:
 
 
 def _runtime_probe(repo_root: Path) -> dict | None:
-    evidence_root = repo_root / "docs/evidence"
+    evidence_root = repo_root / "docs-internal/evidence"
     path = next(
         (
             candidate / "runtime_probe.json"

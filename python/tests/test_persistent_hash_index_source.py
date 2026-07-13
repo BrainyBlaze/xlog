@@ -9,7 +9,7 @@ ROOT = Path(__file__).resolve().parents[2]
 
 def persistent_hash_index_evidence_dir() -> Path:
     matches = []
-    for path in sorted((ROOT / "docs" / "evidence").iterdir()):
+    for path in sorted((ROOT / "docs-internal" / "evidence").iterdir()):
         measurements_path = path / "measurements.json"
         if not measurements_path.exists() or not (path / "README.md").exists():
             continue
@@ -49,7 +49,7 @@ def test_persistent_hash_index_extends_existing_cache_path() -> None:
     cache = read("crates/xlog-runtime/src/executor/join_cache.rs")
     executor = read("crates/xlog-runtime/src/executor/mod.rs")
     dispatch = read("crates/xlog-runtime/src/executor/node_dispatch.rs")
-    docs = read("docs/architecture/adaptive-indexing.md")
+    docs = read("python/tests/contract_docs/adaptive-indexing.md")
 
     assert "XLOG_PERSISTENT_HASH_INDEXES" in config
     assert "with_persistent_hash_indexes" in config
@@ -115,7 +115,7 @@ def test_persistent_hash_index_pyxlog_session_reuse_is_exposed() -> None:
     pyxlog_lib = read("crates/pyxlog/src/lib.rs")
     gpu_logic = read("crates/xlog-gpu/src/logic.rs")
     stub = read("crates/pyxlog/python/pyxlog/_native.pyi")
-    docs = read("docs/architecture/python-bindings.md")
+    docs = read("python/tests/contract_docs/python-bindings.md")
 
     assert "LogicSessionRuntime" in gpu_logic
     assert "apply_relation_deltas_with_session_runtime" in gpu_logic

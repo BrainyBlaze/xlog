@@ -1,6 +1,6 @@
 """Generate results.pdf: WCOJ speedup over the binary-join baseline.
 
-Artifact-backed numbers (single-system ablation); see docs/BENCHMARKS.md.
+Artifact-backed numbers (single-system ablation); see https://xlog.md/guides/benchmarking.
 Run: python make_results.py  ->  results.pdf
 """
 import matplotlib

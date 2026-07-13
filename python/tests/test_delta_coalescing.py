@@ -7,7 +7,7 @@ ROOT = Path(__file__).resolve().parents[2]
 
 def delta_coalescing_evidence_dir() -> Path:
     matches = []
-    for path in sorted((ROOT / "docs" / "evidence").iterdir()):
+    for path in sorted((ROOT / "docs-internal" / "evidence").iterdir()):
         measurements_path = path / "measurements.json"
         if not measurements_path.exists() or not (path / "README.md").exists():
             continue
@@ -24,7 +24,7 @@ def delta_coalescing_evidence_dir() -> Path:
 
 def test_delta_batch_api_is_exposed_in_stubs_docs_and_rust() -> None:
     native_stub = (ROOT / "crates/pyxlog/python/pyxlog/_native.pyi").read_text()
-    docs = (ROOT / "docs/architecture/python-bindings.md").read_text()
+    docs = (ROOT / "python/tests/contract_docs/python-bindings.md").read_text()
     logic_rs = (ROOT / "crates/pyxlog/src/logic.rs").read_text()
     gpu_logic_rs = (ROOT / "crates/xlog-gpu/src/logic.rs").read_text()
 

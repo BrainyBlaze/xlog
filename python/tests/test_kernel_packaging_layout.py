@@ -102,8 +102,8 @@ def test_stage_pyxlog_kernels_rebuilds_before_resolving_release_out_dir() -> Non
 def test_public_docs_use_explicit_pyxlog_python_install() -> None:
     docs = {
         "README.md": (ROOT / "README.md").read_text(encoding="utf-8"),
-        "docs/architecture/python-bindings.md": (
-            ROOT / "docs" / "architecture" / "python-bindings.md"
+        "python/tests/contract_docs/python-bindings.md": (
+            ROOT / "python" / "tests" / "contract_docs" / "python-bindings.md"
         ).read_text(encoding="utf-8"),
     }
 

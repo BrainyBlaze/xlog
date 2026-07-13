@@ -57,7 +57,7 @@ def test_manifest_records_certification_metric_evidence() -> None:
     runtime_probe = next(
         (
             path / "runtime_probe.json"
-            for path in sorted((ROOT / "docs/evidence").glob("*-cert"))
+            for path in sorted((ROOT / "docs-internal/evidence").glob("*-cert"))
             if (path / "runtime_probe.json").exists()
         ),
         None,
