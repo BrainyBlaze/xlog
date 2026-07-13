@@ -61,6 +61,11 @@ scripts/repro/
 !examples/neural/results/**/*.log
 !examples/neural/results/**/*.pt
 
+# CLUTRR generated datasets are CC-BY-NC 4.0 (facebookresearch/clutrr) and are
+# not redistributed in this MIT/Apache repository — regenerate locally, see
+# examples/neural/baseline/deepproblog/CLUTRR/data/ATTRIBUTION.md
+examples/neural/baseline/deepproblog/CLUTRR/data/data_*/
+
 .docs/
 docs/api/generated/
 docs/ROADMAP.md
