@@ -8,7 +8,7 @@
 [![PyPI](https://img.shields.io/pypi/v/pyxlog.svg?label=pyxlog&color=blue)](https://pypi.org/project/pyxlog/)
 [![Docs](https://img.shields.io/badge/docs-xlog.md-8A2BE2.svg)](https://xlog.md)
 
-**Documentation: [xlog.md](https://xlog.md)** · [Whitepaper (PDF)](docs/whitepaper/main.pdf) · [Language reference](docs/language-reference.md) · [Examples](examples/)
+**Documentation: [xlog.md](https://xlog.md)** · [Whitepaper](paper/) · [Language reference](docs/language-reference.md) · [Examples](examples/)
 
 Neural-symbolic systems today keep symbolic reasoning on the CPU while neural computation runs
 on the GPU, and every training iteration pays a PCIe round-trip that dominates wall-clock time
@@ -128,7 +128,7 @@ Language features worth naming:
 - **Integrity constraints** are headless rules desugared into auxiliary rules whose output must be empty at evaluation completion.
 - **Pragma directives** influence compiler behavior from within a program.
 
-For the design rationale, see the [technical whitepaper](docs/whitepaper/main.pdf).
+For the design rationale, see the [technical whitepaper](paper/).
 
 ---
 
@@ -276,7 +276,7 @@ The documentation website is **[xlog.md](https://xlog.md)**. Key references in t
 
 | Document | Scope |
 |---|---|
-| [Whitepaper (PDF)](docs/whitepaper/main.pdf) | Primary technical reference: language, architecture, probabilistic inference, epistemic reasoning, neural-symbolic bridge, evaluation, and related work |
+| [Whitepaper](paper/) | Primary technical reference: language, architecture, probabilistic inference, epistemic reasoning, neural-symbolic bridge, evaluation, and related work |
 | [Language reference](docs/language-reference.md) | Full language surface: types, predicates, rules, modules, UDFs, aggregations, pragmas |
 | [Architecture](docs/ARCHITECTURE.md) | System design, crate structure, IR layers, GPU execution model |
 | [Benchmarks](docs/BENCHMARKS.md) | Performance methodology and benchmark artifacts |
@@ -316,7 +316,8 @@ xlog/
 │   └── xlog-cuda-tests/   # CUDA certification suite
 ├── kernels/               # CUDA kernel sources (.cu)
 ├── examples/              # Example .xlog programs + Python neural-symbolic demos
-└── docs/                  # Documentation + whitepaper
+├── docs/                  # Documentation site source (published to xlog.md)
+└── paper/                 # Technical whitepaper (LaTeX source)
 ```
 
 ---

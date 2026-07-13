@@ -1,0 +1,24 @@
+# LaTeX build artifacts
+*.aux
+*.bbl
+*.bcf
+*.blg
+*.fdb_latexmk
+*.fls
+*.log
+*.out
+*.run.xml
+*.synctex.gz
+*.toc
+*.lof
+*.lot
+*.nav
+*.snm
+*.vrb
+
+# Figure build temp + generated figure PDFs (regenerate via figures/make_results.py)
+figures/*.tmp
+figures/results.pdf
+
+# Built paper — build locally with latexmk; not tracked
+main.pdf
