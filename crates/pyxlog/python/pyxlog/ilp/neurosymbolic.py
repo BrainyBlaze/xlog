@@ -627,6 +627,9 @@ def _train_joint_mixture(
                 ilp_read = _open_join_read_handle(join_read_source, config)
             join_bodies[rule_id] = jb
             extension = read_join_extension(ilp_read, jb, n)
+            _check_join_domain_is_row_indexable(
+                rule_id, jb, extension, int(domain_inputs[jb.network].shape[0])
+            )
             # The extension is STATIC: flatten it into device tensors ONCE, here,
             # outside the step loop, so the per-step OR is a single gather +
             # segmented sum with no host->device copy (see JoinExtensionIndex).
@@ -829,6 +832,50 @@ def _neural_predicate_networks(
                 continue  # not a neural predicate
             mapping[name] = str(info["network"])
     return mapping
+
+
+def _check_join_domain_is_row_indexable(
+    rule_id: str, jb: Any, extension: list[list[int]], num_rows: int
+) -> None:
+    """Fail closed unless the join-domain constants ARE their own ``domain_inputs`` rows.
+
+    The torch join path indexes the network's per-constant output by the RAW constant
+    id (``p_event[event_id]``). The exact circuit indexes the SAME ``domain_inputs`` by
+    the constant's RANK among the sorted join domain. Those two agree only when the
+    join-domain ids are the dense prefix ``0..k-1`` — which is why the semantics anchor
+    (ids 0..5) could not see the difference.
+
+    On a sparse domain (say ids ``{0, 2, 4, 6, 8, 10}`` with 6 feature rows) the circuit
+    reads rows 0..5 and recovers the rule, while this path indexes row 10 of a 6-row
+    tensor and trips a CUDA device-side assert — which poisons the CUDA context, so every
+    later op in the process fails too. Pad the tensor instead and nothing raises at all:
+    the two paths then read DIFFERENT rows and quietly disagree (measured: 0.307).
+
+    So the precondition is checked here, loudly, instead of being discovered as either a
+    poisoned context or a wrong number. Widening it (a per-relation rank map, or an
+    explicit id->row mapping) is a real design decision — note that with several
+    candidates joining DIFFERENT relations, "the i-th sorted join-domain constant" is
+    ambiguous, because each relation has its own domain — so it is deliberately not
+    guessed here.
+    """
+    ids = sorted({e for events in extension for e in events})
+    if not ids:
+        return
+    if ids != list(range(len(ids))):
+        raise ValueError(
+            f"trainable_rule '{rule_id}' joins '{jb.relation}' on '{jb.join_var}', whose "
+            f"domain constants are {ids[:8]}{'...' if len(ids) > 8 else ''} — not the dense "
+            f"range 0..{len(ids) - 1}. The join path indexes domain_inputs['{jb.network}'] "
+            "by the constant itself, so the constants must BE their row numbers. Renumber "
+            "the join domain to 0..N-1 (and order domain_inputs to match), or drop to a "
+            "single trainable_rule, which the exact circuit grounds by sorted rank instead."
+        )
+    if len(ids) > num_rows:
+        raise ValueError(
+            f"trainable_rule '{rule_id}' joins '{jb.relation}' over {len(ids)} domain "
+            f"constants, but domain_inputs['{jb.network}'] has only {num_rows} row(s). "
+            "Row i must be the feature vector of domain constant i."
+        )
 
 
 def _neural_atom_label(rule: TrainableRuleDecl, predicate: str) -> str:

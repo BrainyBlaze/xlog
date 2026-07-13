@@ -367,3 +367,38 @@ def test_the_positive_label_column_comes_from_the_rule_not_a_hardcoded_index() -
     assert got == pytest.approx(from_the_rule, abs=1e-5), (got, from_the_rule)
     # and the two really are distinguishable, so this test can fail
     assert got != pytest.approx(from_a_hardcoded_index, abs=1e-3)
+
+
+def test_a_sparse_join_domain_is_refused_not_silently_mis_indexed() -> None:
+    """The torch join path indexes domain_inputs by the RAW constant id; the exact
+    circuit indexes it by the constant's RANK among the sorted join domain. They agree
+    only on a dense 0..k-1 domain -- which is what the semantics anchor used, so the
+    anchor could not see the difference.
+
+    With a sparse domain the old code either tripped a CUDA device-side assert (which
+    poisons the context, so every later op in the process fails) or, if the caller padded
+    the feature tensor, silently read DIFFERENT rows from the circuit and disagreed with
+    it by 0.307. Both are now a typed refusal."""
+    facts = "\n".join(
+        f"    pbp({e}, {k})." for k, evs in {0: [0, 2], 1: [4, 6]}.items() for e in evs
+    )
+    source = f"""
+        nn(sal_net, [Event], Label, [low, strengthen]) :: saliency(Event, Label).
+{facts}
+        pred pbp(i64, i64).
+        pred plastic(i64).
+        trainable_rule(c_a, weight=0.0) :: plastic(E) :- saliency(Ev, strengthen), pbp(Ev, E).
+        trainable_rule(c_b, weight=0.0) :: plastic(E) :- saliency(Ev, strengthen), pbp(Ev, E).
+        train(plastic, binary_cross_entropy).
+    """
+    net = torch.nn.Sequential(torch.nn.Linear(1, 2, bias=True), torch.nn.Softmax(dim=-1))
+    feats = torch.tensor([[0.9], [0.1], [0.2], [0.15]], dtype=torch.float32)
+
+    with pytest.raises(ValueError, match="not the dense range"):
+        train_neurosymbolic_program(
+            source,
+            networks={"sal_net": net},
+            domain_inputs={"sal_net": feats},
+            examples=[{"targets": torch.tensor([1.0, 0.0], dtype=torch.float32)}],
+            config=NeuroSymbolicTrainingConfig(steps=5, learning_rate=0.1),
+        )
