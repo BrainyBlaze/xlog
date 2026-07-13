@@ -16,6 +16,11 @@ torch = pytest.importorskip("torch")
 pyxlog = pytest.importorskip("pyxlog")
 
 from pyxlog.ilp.join_bodies import JoinBody, read_join_extension
+from pyxlog.ilp.neurosymbolic import (
+    NeuralBodySpec,
+    NeuroSymbolicTrainingConfig,
+    train_neurosymbolic_program,
+)
 
 pytestmark = pytest.mark.skipif(
     not torch.cuda.is_available(), reason="xlog engine requires CUDA"
@@ -62,10 +67,6 @@ def test_a_head_binding_outside_the_range_is_ignored() -> None:
 # Task 3: a neural-JOIN candidate competes inside the multi-candidate mixture
 # ---------------------------------------------------------------------------
 
-from pyxlog.ilp.neurosymbolic import (
-    NeuroSymbolicTrainingConfig, train_neurosymbolic_program,
-)
-
 _EVENT_FEATURES = [0.9, 0.1, 0.2, 0.15, 0.85, 0.1]
 _PRE = {0: [0, 1], 1: [2, 3], 2: [4], 3: [5]}
 # The distractor is EQUAL-CARDINALITY with pre_before_post (2, 2, 1, 1 events per
@@ -83,18 +84,29 @@ _PRE = {0: [0, 1], 1: [2, 3], 2: [4], 3: [5]}
 _POST = {0: [2, 3], 1: [0, 1], 2: [5], 3: [4]}
 
 
-def _world_source() -> str:
+def _world_source(
+    candidates: str | None = None, extra_facts: str = "", extra_preds: str = ""
+) -> str:
+    """The two-relation world. ``candidates`` overrides the trainable_rule block so a
+    test can vary ONLY the rule shape (body length, label term) against the same
+    engine-owned facts."""
     pre = "\n".join(f"    pre_before_post({e}, {k})." for k in sorted(_PRE) for e in _PRE[k])
     post = "\n".join(f"    post_before_pre({e}, {k})." for k in sorted(_POST) for e in _POST[k])
+    if candidates is None:
+        candidates = """
+        trainable_rule(cand_pre, weight=0.0) :: plastic(E) :- saliency(Ev, strengthen), pre_before_post(Ev, E).
+        trainable_rule(cand_post, weight=0.0) :: plastic(E) :- saliency(Ev, strengthen), post_before_pre(Ev, E).
+"""
     return f"""
         nn(sal_net, [Event], Label, [low, strengthen]) :: saliency(Event, Label).
 {pre}
 {post}
+{extra_facts}
         pred pre_before_post(i64, i64).
         pred post_before_pre(i64, i64).
+{extra_preds}
         pred plastic(i64).
-        trainable_rule(cand_pre, weight=0.0) :: plastic(E) :- saliency(Ev, strengthen), pre_before_post(Ev, E).
-        trainable_rule(cand_post, weight=0.0) :: plastic(E) :- saliency(Ev, strengthen), post_before_pre(Ev, E).
+{candidates}
         train(plastic, binary_cross_entropy).
     """
 
@@ -123,3 +135,124 @@ def test_a_stage_b_candidate_trains_in_the_multi_candidate_mixture() -> None:
     # the correct timing relation won
     w = result.symbolic_rule_weights
     assert w["cand_pre"] > 0.7 and w["cand_post"] < 0.3, w
+
+
+def _net_and_feats():
+    torch.manual_seed(0)
+    net = torch.nn.Sequential(torch.nn.Linear(1, 2, bias=True), torch.nn.Softmax(dim=-1))
+    feats = torch.tensor([[f] for f in _EVENT_FEATURES], dtype=torch.float32)
+    return net, feats
+
+
+def _train(source: str, net, feats, steps: int = 300, lr: float = 0.1):
+    return train_neurosymbolic_program(
+        source,
+        networks={"sal_net": net},
+        domain_inputs={"sal_net": feats},
+        examples=[{"targets": torch.tensor(_targets(), dtype=torch.float32)}],
+        config=NeuroSymbolicTrainingConfig(steps=steps, learning_rate=lr),
+    )
+
+
+def test_a_longer_body_is_rejected_not_silently_trained() -> None:
+    """`high_degree(E)` is a third conjunct. The join machinery has no mask for it, so
+    the candidate must be REJECTED. Masking it as if the conjunct were absent would
+    train `plastic(E) :- saliency(Ev, strengthen), pre_before_post(Ev, E)` — a rule
+    nobody wrote — and report the result as if the written rule had trained."""
+    net, feats = _net_and_feats()
+    source = _world_source(
+        candidates="""
+        trainable_rule(cand_pre, weight=0.0) :: plastic(E) :- saliency(Ev, strengthen), pre_before_post(Ev, E), high_degree(E).
+        trainable_rule(cand_post, weight=0.0) :: plastic(E) :- saliency(Ev, strengthen), post_before_pre(Ev, E).
+""",
+        extra_facts="    high_degree(0).\n    high_degree(1).\n    high_degree(2).\n    high_degree(3).",
+        extra_preds="        pred high_degree(i64).",
+    )
+    with pytest.raises(ValueError) as exc:
+        _train(source, net, feats, steps=5)
+    assert "cand_pre" in str(exc.value)
+
+
+def test_a_purely_relational_existential_join_is_still_rejected() -> None:
+    """`plastic(E) :- pre_before_post(Ev, E).` has an existential Ev that is NOT a
+    neural predicate's input. It was rejected before this branch and must still be:
+    the join machinery only ever fires for the neural-join shape."""
+    net, feats = _net_and_feats()
+    source = _world_source(
+        candidates="""
+        trainable_rule(cand_pre, weight=0.0) :: plastic(E) :- pre_before_post(Ev, E).
+        trainable_rule(cand_post, weight=0.0) :: plastic(E) :- saliency(Ev, strengthen), post_before_pre(Ev, E).
+"""
+    )
+    with pytest.raises(ValueError) as exc:
+        _train(source, net, feats, steps=5)
+    assert "Ev" in str(exc.value)
+
+
+def test_a_network_named_like_a_candidate_is_refused() -> None:
+    """`neural_parameter_grads` is ONE flat map keyed both by nn/4 network name (join
+    bodies) and by candidate rule id (NeuralBodySpec bodies). A network named exactly
+    like a neural-bodied candidate would have its gradient silently overwritten, so the
+    collision is refused rather than reported as a wrong number."""
+    net, feats = _net_and_feats()
+    source = _world_source(
+        candidates="""
+        trainable_rule(sal_net, weight=0.0) :: plastic(E) :- high_degree(E).
+        trainable_rule(cand_pre, weight=0.0) :: plastic(E) :- saliency(Ev, strengthen), pre_before_post(Ev, E).
+""",
+        extra_facts="    high_degree(0).\n    high_degree(1).\n    high_degree(2).\n    high_degree(3).",
+        extra_preds="        pred high_degree(i64).",
+    )
+    with pytest.raises(ValueError, match="must not collide"):
+        train_neurosymbolic_program(
+            source,
+            networks={"sal_net": net},
+            domain_inputs={"sal_net": feats},
+            examples=[{"targets": torch.tensor(_targets(), dtype=torch.float32)}],
+            neural_bodies={"sal_net": NeuralBodySpec(features=torch.rand(4, 3))},
+            config=NeuroSymbolicTrainingConfig(steps=1, learning_rate=0.1),
+        )
+
+
+def test_the_positive_label_column_comes_from_the_rule_not_a_hardcoded_index() -> None:
+    """`strengthen` happens to be column 1, so a hardcoded `[:, 1]` passes every other
+    test in this file. Here `cand_low` names the OTHER label (`low`, column 0), and the
+    mask is pinned analytically: with learning_rate=0 the guards stay at their declared
+    logit 0.0 (sigmoid 0.5), so the head probability is exactly
+    ``1 - (1 - 0.5*m_low)(1 - 0.5*m_str)``. A hardcoded column-1 mask gives different
+    numbers, and the test asserts it does."""
+    net, feats = _net_and_feats()
+    source = _world_source(
+        candidates="""
+        trainable_rule(cand_low, weight=0.0) :: plastic(E) :- saliency(Ev, low), pre_before_post(Ev, E).
+        trainable_rule(cand_str, weight=0.0) :: plastic(E) :- saliency(Ev, strengthen), post_before_pre(Ev, E).
+"""
+    )
+    result = _train(source, net, feats, steps=1, lr=0.0)
+
+    with torch.no_grad():
+        device = next(net.parameters()).device
+        p = net(feats.to(device)).cpu()      # [n_events, 2]; column 0 = low, 1 = strengthen
+
+    def noisy_or(col: int, ext: dict[int, list[int]], k: int) -> float:
+        q = 1.0
+        for e in ext[k]:
+            q *= 1.0 - float(p[e, col])
+        return 1.0 - q
+
+    def head(low_col: int) -> list[float]:
+        # low_col is the column the cand_low mask reads: 0 is the rule's label,
+        # 1 is what a hardcoded index would (wrongly) read.
+        return [
+            1.0
+            - (1.0 - 0.5 * noisy_or(low_col, _PRE, k))
+            * (1.0 - 0.5 * noisy_or(1, _POST, k))
+            for k in sorted(_PRE)
+        ]
+
+    got = result.query_probabilities
+    from_the_rule = head(0)
+    from_a_hardcoded_index = head(1)
+    assert got == pytest.approx(from_the_rule, abs=1e-5), (got, from_the_rule)
+    # and the two really are distinguishable, so this test can fail
+    assert got != pytest.approx(from_a_hardcoded_index, abs=1e-3)

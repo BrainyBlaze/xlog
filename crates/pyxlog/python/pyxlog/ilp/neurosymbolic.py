@@ -28,8 +28,9 @@ from typing import Any
 
 from pyxlog.ilp.inventory import RuleInventory, RuleInventoryClause
 from pyxlog.ilp.join_bodies import (
-    noisy_or_over_extension,
+    noisy_or_from_index,
     parse_join_body,
+    prepare_extension,
     read_join_extension,
 )
 
@@ -254,6 +255,18 @@ def train_neurosymbolic_program(
     # predicate), so the heads carry their own optimizers stepped alongside the
     # guards. phi width is fixed here at construction.
     neural_bodies = neural_bodies or {}
+    # ``neural_parameter_grads`` is a single flat map keyed BOTH by nn/4 network name
+    # (join-body / gate networks) and by candidate rule id (NeuralBodySpec heads). A
+    # network named exactly like a neural-bodied candidate would therefore have its
+    # gradient silently overwritten by that candidate's. The two namespaces are the
+    # user's to choose, so refuse the overlap rather than report a wrong number.
+    grad_key_collisions = sorted(set(modules) & set(neural_bodies))
+    if grad_key_collisions:
+        raise ValueError(
+            "neural_parameter_grads is keyed by both nn/4 network name and "
+            "neural-bodied candidate id, so these names must not collide; "
+            f"rename one of: {grad_key_collisions}"
+        )
     neural_modules: dict[str, Any] = {}
     neural_optims: dict[str, Any] = {}
     for rule_id, spec in neural_bodies.items():
@@ -488,7 +501,7 @@ def _train_joint_mixture(
     existential and the candidate's relational truth is the OR, over the join
     extension, of the network's PER-EVENT probability. Such a candidate's mask is
     therefore ``1 - prod_{e in ext_k(h)} (1 - p_net(e))`` — see the join-body block
-    below and :func:`join_bodies.noisy_or_over_extension`.
+    below and :func:`join_bodies.noisy_or_from_index`.
 
     Returns ``(host_transfer_stats, query_probabilities)``.
     """
@@ -518,10 +531,12 @@ def _train_joint_mixture(
     # predicate sits on an EXISTENTIAL join variable, so rel_masks had no entry and
     # head_prob died with KeyError. Recognize that shape here, from the RULE (the
     # rule names the join relation; nn/4 names the network) — never from the
-    # caller. A candidate that does NOT parse as a join body is left untouched, so
-    # a genuinely unsupported body still reaches the existing typed error.
+    # caller. The shape is EXACTLY {one neural atom, one join relation}: a candidate
+    # whose body carries any further conjunct does NOT parse, and — having no
+    # eligibility mask either — is REJECTED here with a typed error. Masking it as if
+    # the extra conjunct were not there would train a rule nobody wrote.
     join_bodies: dict[str, Any] = {}
-    join_ext: dict[str, list[list[int]]] = {}
+    join_index: dict[str, Any] = {}
     join_label_index: dict[str, int] = {}
     unmasked = [rule_id for rule_id in candidate_ids if rule_id not in rel_masks]
     if unmasked:
@@ -536,7 +551,14 @@ def _train_joint_mixture(
                 ", ".join(rule.body_literals), neural_predicates, rule.query_variable
             )
             if jb is None:
-                continue
+                raise ValueError(
+                    f"trainable_rule '{rule_id}' has no relational eligibility mask and "
+                    "its body is not the supported neural-join shape (exactly one neural "
+                    "atom on an existential variable, plus the one ordinary relation that "
+                    "joins that variable to the head); an unsupported body is rejected, "
+                    "not silently reduced to a shorter one: "
+                    + ", ".join(rule.body_literals)
+                )
             if jb.network not in modules:
                 raise ValueError(
                     f"trainable_rule '{rule_id}' joins neural predicate "
@@ -554,7 +576,11 @@ def _train_joint_mixture(
             if ilp_read is None:
                 ilp_read = _open_join_read_handle(join_read_source, config)
             join_bodies[rule_id] = jb
-            join_ext[rule_id] = read_join_extension(ilp_read, jb, n)
+            extension = read_join_extension(ilp_read, jb, n)
+            # The extension is STATIC: flatten it into device tensors ONCE, here,
+            # outside the step loop, so the per-step OR is a single gather +
+            # segmented sum with no host->device copy (see JoinExtensionIndex).
+            join_index[rule_id] = prepare_extension(extension, device)
             # Which output column is the network's "positive" probability is not
             # ours to guess: the rule's neural atom names the label
             # (``saliency(Ev, strengthen)``) and the ENGINE resolves it against the
@@ -569,7 +595,7 @@ def _train_joint_mixture(
             # nothing is false); keeping the mask separate is what lets
             # candidate_masses fold graded evidence onto a join candidate too.
             rel_masks[rule_id] = torch.tensor(
-                [1.0 if events else 0.0 for events in join_ext[rule_id]],
+                [1.0 if events else 0.0 for events in extension],
                 dtype=torch.float32,
                 device=device,
             )
@@ -627,8 +653,8 @@ def _train_joint_mixture(
                 p_event = modules[jb.network](device_domain[jb.network])[
                     :, join_label_index[rule_id]
                 ]
-                masks[rule_id] = rel_masks[rule_id] * noisy_or_over_extension(
-                    p_event, join_ext[rule_id], device
+                masks[rule_id] = rel_masks[rule_id] * noisy_or_from_index(
+                    p_event, join_index[rule_id]
                 )
             elif rule_id in neural_modules:
                 spec = neural_specs[rule_id]
