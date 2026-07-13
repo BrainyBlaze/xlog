@@ -8,9 +8,10 @@ the OR over that domain. This module owns three things and nothing else:
 
   1. reading that shape OUT OF THE RULE (the rule is the single source of truth --
      the join relation is never supplied by the caller);
-  2. materializing the join extension FROM THE ENGINE (never from a Python
-     side-channel: if the caller handed us the edge->events map, the OR would be
-     Python's, not the logic's, and the whole claim would be hollow);
+  2. reading the join extension FROM THE ENGINE, by enumerating the relation's
+     tuples (never from a Python side-channel: if the caller handed us the
+     edge->events map, the OR would be Python's, not the logic's, and the whole
+     claim would be hollow);
   3. the OR itself, in log space (a naive product underflows on a large domain).
 """
 

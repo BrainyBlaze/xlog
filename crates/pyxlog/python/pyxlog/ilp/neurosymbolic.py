@@ -27,6 +27,11 @@ from dataclasses import dataclass
 from typing import Any
 
 from pyxlog.ilp.inventory import RuleInventory, RuleInventoryClause
+from pyxlog.ilp.join_bodies import (
+    noisy_or_over_extension,
+    parse_join_body,
+    read_join_extension,
+)
 
 _GUARD_PREDICATE_PREFIX = "nsr_guard_"
 _GUARD_NETWORK_PREFIX = "nsr_w_"
@@ -297,11 +302,27 @@ def train_neurosymbolic_program(
             neural_specs=neural_bodies,
             neural_optims=neural_optims,
             candidate_masses=candidate_masses,
+            rules=rules,
+            modules=modules,
+            domain_inputs=domain_inputs,
+            join_read_source=_read_only_source(source),
         )
         for rule in rules:
             grad = guard_modules[rule.id].logit.grad
             symbolic_grads[rule.id] = (
                 float(grad.detach().abs().item()) if grad is not None else 0.0
+            )
+        # nn/4 network gradients. A neural-JOIN candidate's network is forwarded
+        # inside the mixture's own head_prob, so its parameters receive gradient
+        # from the joint loss exactly as in the single-rule circuit path; a network
+        # no candidate uses keeps its 0.0 baseline (grad is None).
+        for name, module in modules.items():
+            neural_grads[name] = float(
+                sum(
+                    param.grad.detach().abs().sum().item()
+                    for param in module.parameters()
+                    if param.grad is not None
+                )
             )
         # Neural-head gradient magnitudes, read once after training (proof the
         # neural conjunct received gradient through the ST gate).
@@ -440,9 +461,14 @@ def _train_joint_mixture(
     neural_specs: dict[str, "NeuralBodySpec"] | None = None,
     neural_optims: dict[str, Any] | None = None,
     candidate_masses: dict[str, Any] | None = None,
+    rules: list[TrainableRuleDecl] | None = None,
+    modules: dict[str, Any] | None = None,
+    domain_inputs: dict[str, Any] | None = None,
+    join_read_source: str | None = None,
 ) -> tuple[dict[str, int], list[float]]:
-    """Joint soft-mixture over same-head candidates (guard-only, or neural-bodied
-    when a candidate carries a neural conjunct).
+    """Joint soft-mixture over same-head candidates (guard-only, neural-bodied
+    when a candidate carries a neural conjunct, or neural-JOIN when a candidate
+    puts a neural predicate on an existential join variable).
 
     N candidate rules derive the SAME head, each gated by its own guard. The head
     probability is the noisy-OR over candidates of (eligible_k x guard sigmoid);
@@ -456,6 +482,14 @@ def _train_joint_mixture(
     a derivation GATE (not soft truth-mass), so it composes in the noisy-OR without
     a circuit leaf.
 
+    A neural-JOIN candidate (``plastic(E) :- saliency(Ev, strengthen),
+    pre_before_post(Ev, E).``) has NO boolean eligibility to speak of: the engine's
+    ``joint_candidate_eligibility`` emits no mask for it, because ``Ev`` is
+    existential and the candidate's relational truth is the OR, over the join
+    extension, of the network's PER-EVENT probability. Such a candidate's mask is
+    therefore ``1 - prod_{e in ext_k(h)} (1 - p_net(e))`` — see the join-body block
+    below and :func:`join_bodies.noisy_or_over_extension`.
+
     Returns ``(host_transfer_stats, query_probabilities)``.
     """
     import torch
@@ -463,6 +497,9 @@ def _train_joint_mixture(
     neural_modules = neural_modules or {}
     neural_specs = neural_specs or {}
     neural_optims = neural_optims or {}
+    rules = rules or []
+    modules = modules or {}
+    domain_inputs = domain_inputs or {}
 
     n = len(targets)
     # Engine relational eligibility per candidate: a length-n mask of which head
@@ -475,6 +512,68 @@ def _train_joint_mixture(
         rel_masks[rule_id] = torch.tensor(
             [1.0 if m else 0.0 for m in mask], dtype=torch.float32, device=device
         )
+
+    # --- neural JOIN bodies (Stage-B shape) ---------------------------------
+    # joint_candidate_eligibility emits NO mask for a candidate whose neural
+    # predicate sits on an EXISTENTIAL join variable, so rel_masks had no entry and
+    # head_prob died with KeyError. Recognize that shape here, from the RULE (the
+    # rule names the join relation; nn/4 names the network) — never from the
+    # caller. A candidate that does NOT parse as a join body is left untouched, so
+    # a genuinely unsupported body still reaches the existing typed error.
+    join_bodies: dict[str, Any] = {}
+    join_ext: dict[str, list[list[int]]] = {}
+    join_label_index: dict[str, int] = {}
+    unmasked = [rule_id for rule_id in candidate_ids if rule_id not in rel_masks]
+    if unmasked:
+        rule_by_id = {rule.id: rule for rule in rules}
+        neural_predicates = _neural_predicate_networks(program, rules)
+        ilp_read = None
+        for rule_id in unmasked:
+            rule = rule_by_id.get(rule_id)
+            if rule is None:
+                continue
+            jb = parse_join_body(
+                ", ".join(rule.body_literals), neural_predicates, rule.query_variable
+            )
+            if jb is None:
+                continue
+            if jb.network not in modules:
+                raise ValueError(
+                    f"trainable_rule '{rule_id}' joins neural predicate "
+                    f"'{jb.neural_predicate}' (network '{jb.network}'), which has no "
+                    "registered network"
+                )
+            if jb.network not in domain_inputs:
+                raise ValueError(
+                    f"trainable_rule '{rule_id}' puts neural predicate "
+                    f"'{jb.neural_predicate}' on the existential join variable "
+                    f"'{jb.join_var}', so network '{jb.network}' must be forwarded over "
+                    f"the join domain: pass domain_inputs={{'{jb.network}': features}} "
+                    "(row i = the i-th join-domain constant, sorted)"
+                )
+            if ilp_read is None:
+                ilp_read = _open_join_read_handle(join_read_source, config)
+            join_bodies[rule_id] = jb
+            join_ext[rule_id] = read_join_extension(ilp_read, jb, n)
+            # Which output column is the network's "positive" probability is not
+            # ours to guess: the rule's neural atom names the label
+            # (``saliency(Ev, strengthen)``) and the ENGINE resolves it against the
+            # nn/4 label list.
+            join_label_index[rule_id] = int(
+                program.label_to_index(
+                    jb.neural_predicate, _neural_atom_label(rule, jb.neural_predicate)
+                )
+            )
+            # The binding-level relational mask: 1 where the join extension is
+            # non-empty. The OR over the extension is 0 there anyway (an OR over
+            # nothing is false); keeping the mask separate is what lets
+            # candidate_masses fold graded evidence onto a join candidate too.
+            rel_masks[rule_id] = torch.tensor(
+                [1.0 if events else 0.0 for events in join_ext[rule_id]],
+                dtype=torch.float32,
+                device=device,
+            )
+
     # Graded per-binding confidences fold multiplicatively onto the relational
     # eligibility: a candidate contributes mass_k[i] * sigmoid(w_k) where it is
     # relationally grounded, zero elsewhere. Values must already be in [0, 1];
@@ -502,6 +601,12 @@ def _train_joint_mixture(
         )
         for rule_id in neural_modules
     }
+    # The join domain (per-event features) moved to device ONCE: it is static, only
+    # the network's theta changes across steps.
+    device_domain = {
+        name: feats.detach().to(device=device, dtype=torch.float32)
+        for name, feats in domain_inputs.items()
+    }
     eps = 1e-7
 
     def head_prob(training: bool) -> Any:
@@ -512,7 +617,20 @@ def _train_joint_mixture(
         # held-out generalization read, so training and read cannot drift.
         masks: dict[str, Any] = {}
         for rule_id in candidate_ids:
-            if rule_id in neural_modules:
+            if rule_id in join_bodies:
+                # Neural JOIN body. The network scores EVERY event of the domain;
+                # the LOGIC's join extension (read from the engine) says which
+                # events belong to this head binding; the OR aggregates them. This
+                # is not a gate — it IS the candidate's relational truth, so its
+                # gradient reaches the per-event detector.
+                jb = join_bodies[rule_id]
+                p_event = modules[jb.network](device_domain[jb.network])[
+                    :, join_label_index[rule_id]
+                ]
+                masks[rule_id] = rel_masks[rule_id] * noisy_or_over_extension(
+                    p_event, join_ext[rule_id], device
+                )
+            elif rule_id in neural_modules:
                 spec = neural_specs[rule_id]
                 gate = _neural_gate_for(
                     neural_modules[rule_id](device_phi[rule_id]),
@@ -553,6 +671,95 @@ def _train_joint_mixture(
     with torch.no_grad():
         query_probabilities = head_prob(training=False).detach().cpu().tolist()
     return host_transfer_stats, query_probabilities
+
+
+def _read_only_source(source: str) -> str:
+    """The program with ONLY the training sugar (``trainable_rule`` / ``train``)
+    removed. Facts, ``pred`` declarations, ``nn`` declarations and any ordinary
+    rules are real xlog and stay — this is the logic program itself, minus the two
+    statements the native parser does not know."""
+    spans = [
+        (start, end)
+        for start, end, statement in _statement_spans(source)
+        if statement.startswith("trainable_rule") or statement.startswith("train(")
+    ]
+    out = source
+    for start, end in sorted(spans, reverse=True):
+        out = out[:start] + out[end:]
+    return out
+
+
+def _open_join_read_handle(join_read_source: str | None, config: Any) -> Any:
+    """A SECOND, read-only handle on the same program, used ONLY to enumerate the
+    deterministic ground join relation.
+
+    This is a deliberate, load-bearing choice, not an accident. The object the
+    mixture trains on is ``pyxlog.Program.compile(...)`` -> ``CompiledProgram``,
+    whose entire read surface is ``evaluate*``: it does not expose facts at all
+    (``EvalResult.atoms`` comes back empty for ground facts). ``IlpProgramFactory``
+    -> ``CompiledIlpProgram`` does, via ``relation_facts(rel)``. So to let the
+    ENGINE answer "which events does this head binding join?" — rather than accept
+    an edge->events map from the caller, which would make the OR Python's and the
+    claim that the LOGIC aggregates the join hollow — we compile the same source a
+    second time through the ILP factory and read it. Nothing is ever trained on
+    this handle; it is evaluated once and only enumerated.
+
+    The desugared source cannot be used here (its guard-carrying rules do not
+    survive the ILP plan builder's schema unification), which is why the handle is
+    compiled from :func:`_read_only_source` — the user's program with the two
+    training statements removed and everything else, including the facts and any
+    ordinary rules that DERIVE the join relation, intact.
+    """
+    import pyxlog
+
+    if join_read_source is None:
+        raise ValueError(
+            "a neural-join candidate needs the program source to read its join "
+            "extension from the engine, but none was threaded through"
+        )
+    handle = pyxlog.IlpProgramFactory.compile(
+        join_read_source,
+        device=config.device,
+        memory_mb=config.gpu_memory_mb,
+    )
+    handle.evaluate()
+    return handle
+
+
+def _neural_predicate_networks(
+    program: Any, rules: list[TrainableRuleDecl]
+) -> dict[str, str]:
+    """``neural predicate -> network`` for every predicate a candidate body mentions,
+    asked of the ENGINE (``neural_predicate_info``, populated from the nn/4
+    declarations it compiled) rather than re-parsed out of the source text.
+    Non-neural body predicates simply are not in the registry and are skipped."""
+    mapping: dict[str, str] = {}
+    for rule in rules:
+        for literal in rule.body_literals:
+            name = literal.split("(", 1)[0].strip()
+            if name in mapping:
+                continue
+            try:
+                info = program.neural_predicate_info(name)
+            except ValueError:
+                continue  # not a neural predicate
+            mapping[name] = str(info["network"])
+    return mapping
+
+
+def _neural_atom_label(rule: TrainableRuleDecl, predicate: str) -> str:
+    """The label term the rule's neural atom asks for (``saliency(Ev, strengthen)``
+    -> ``strengthen``): the LAST argument, since an nn/4 predicate is
+    ``p(Inputs..., Label)``."""
+    for literal in rule.body_literals:
+        if literal.split("(", 1)[0].strip() != predicate:
+            continue
+        args = _split_top_level(literal.split("(", 1)[1].rsplit(")", 1)[0])
+        if len(args) >= 2:
+            return args[-1].strip()
+    raise ValueError(
+        f"trainable_rule '{rule.id}' has no labelled '{predicate}' atom in its body"
+    )
 
 
 def _joint_noisy_or(
