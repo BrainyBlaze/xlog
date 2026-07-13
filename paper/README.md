@@ -2,7 +2,7 @@
 
 arxiv-style single-column LaTeX source for the XLOG technical whitepaper: *"xlog: A GPU-Native Logic Programming Language for Unified Symbolic Reasoning"*.
 
-Build outputs (`main.pdf`, generated figure PDFs) are not tracked in the repository — build locally from source.
+The rendered PDF is committed as `main.pdf`; rebuild only when sources change. Generated figure PDFs (`figures/results.pdf`) are not tracked — regenerate before building.
 
 ## Build
 

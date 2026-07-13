@@ -8,7 +8,7 @@
 [![PyPI](https://img.shields.io/pypi/v/pyxlog.svg?label=pyxlog&color=blue)](https://pypi.org/project/pyxlog/)
 [![Docs](https://img.shields.io/badge/docs-xlog.md-8A2BE2.svg)](https://xlog.md)
 
-**Documentation: [xlog.md](https://xlog.md)** · [Whitepaper](paper/) · [Language reference](https://xlog.md/reference/language) · [Examples](examples/)
+**Documentation: [xlog.md](https://xlog.md)** · [Whitepaper (PDF)](paper/main.pdf) · [Language reference](https://xlog.md/reference/language) · [Examples](examples/)
 
 Neural-symbolic systems today keep symbolic reasoning on the CPU while neural computation runs
 on the GPU, and every training iteration pays a PCIe round-trip that dominates wall-clock time
@@ -128,7 +128,7 @@ Language features worth naming:
 - **Integrity constraints** are headless rules desugared into auxiliary rules whose output must be empty at evaluation completion.
 - **Pragma directives** influence compiler behavior from within a program.
 
-For the design rationale, see the [technical whitepaper](paper/).
+For the design rationale, see the [technical whitepaper](paper/main.pdf).
 
 ---
 
@@ -276,7 +276,7 @@ The documentation website is **[xlog.md](https://xlog.md)**. Key references in t
 
 | Document | Scope |
 |---|---|
-| [Whitepaper](paper/) | Primary technical reference: language, architecture, probabilistic inference, epistemic reasoning, neural-symbolic bridge, evaluation, and related work |
+| [Whitepaper (PDF)](paper/main.pdf) | Primary technical reference: language, architecture, probabilistic inference, epistemic reasoning, neural-symbolic bridge, evaluation, and related work |
 | [Language reference](https://xlog.md/reference/language) | Full language surface: types, predicates, rules, modules, UDFs, aggregations, pragmas |
 | [Architecture](https://xlog.md/architecture/overview) | System design, crate structure, IR layers, GPU execution model |
 | [Benchmarks](https://xlog.md/guides/benchmarking) | Performance methodology and benchmark artifacts |

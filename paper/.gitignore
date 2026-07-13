@@ -20,5 +20,5 @@
 figures/*.tmp
 figures/results.pdf
 
-# Built paper — build locally with latexmk; not tracked
-main.pdf
+# main.pdf is the committed deliverable and IS tracked (rebuild via latexmk
+# when sources change); everything else the build emits stays untracked.
