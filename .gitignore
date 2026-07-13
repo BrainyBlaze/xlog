@@ -49,7 +49,9 @@ crates/pyxlog/dist/
 data/
 *.pt
 
-# Local-only agent workspaces
+# Local-only agent workspaces (docs-internal holds retired internal docs;
+# the docs/* entries keep agent-recreated workspaces out of the site source)
+/docs-internal/
 docs/evidence/
 docs/plans/
 docs/reports/
@@ -71,21 +73,15 @@ scripts/repro/
 examples/neural/baseline/deepproblog/CLUTRR/data/data_*/
 
 .docs/
-docs/api/generated/
-docs/ROADMAP.md
 
 # Fuzz testing artifacts
 fuzz/target/
 fuzz/corpus/
 fuzz/artifacts/
 
-docs/ref
 docs-site/generated/
 /.site-rustdoc/
 /.site-dist/
-
-# Local research/reference PDFs
-docs/Helbig200-semantic-role-book.pdf
 
 # DeepProbLog baseline generated artifacts
 examples/neural/baseline/deepproblog/*/snapshot/
