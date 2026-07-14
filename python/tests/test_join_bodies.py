@@ -269,17 +269,22 @@ def test_a_constant_with_no_row_is_named_not_silently_mis_read() -> None:
         translate_extension_to_rows([[0, 2], [7]], [0, 2, 4, 6], network="sal_net")
 
 
-def test_unsorted_ids_are_refused() -> None:
-    """A stated layout requirement on the caller's tensor: one row per constant, in a
-    stable ascending order. (It is no longer what reconciles the two engines -- both now
-    resolve a constant through this same id list -- but the layout is still required.)"""
-    with pytest.raises(ValueError, match="strictly increasing"):
-        domain_row_index([0, 4, 2, 6], "sal_net")
-    with pytest.raises(ValueError, match="strictly increasing"):
-        translate_extension_to_rows([[0]], [0, 4, 2, 6], network="sal_net")
+def test_ids_in_any_order_are_honoured_not_refused() -> None:
+    """The row layout of the feature tensor is the CALLER's. Both engines FIND a row by
+    the constant it holds -- the circuit looks the constant up in this same id list -- so
+    there is no ordering left for either side to count in, and an unsorted list is simply
+    the caller's honest statement of where things are. Ascending order used to be required
+    because it was what made the circuit's row-counting coincide with this map; the
+    counting is gone, so the requirement goes with it."""
+    assert domain_row_index([6, 0, 4, 2], "sal_net") == {6: 0, 0: 1, 4: 2, 2: 3}
+    assert translate_extension_to_rows(
+        [[0, 6], [2]], [6, 0, 4, 2], network="sal_net"
+    ) == [[1, 0], [3]]
 
 
 def test_duplicate_ids_are_refused() -> None:
-    """Two rows claiming one constant has no meaning under either convention."""
-    with pytest.raises(ValueError, match="strictly increasing"):
+    """Two rows claiming one constant leaves that constant's row undefined -- refused by
+    name, rather than resolved by a tie-break the caller never asked for. This is the part
+    the old ascending-order rule was really carrying."""
+    with pytest.raises(ValueError, match="must not repeat"):
         domain_row_index([0, 2, 2, 6])

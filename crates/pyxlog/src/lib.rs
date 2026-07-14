@@ -530,11 +530,20 @@ pub struct CompiledProgram {
     /// the Python driver: `domain_ids[j]` is the constant whose feature vector is row
     /// `j`. This is the SINGLE source of truth for "constant -> feature row" — the
     /// torch-side mixture and this circuit look the row up in the same list, so they
-    /// cannot drift apart. `None` when the driver registered no ids: the circuit then
-    /// keeps its historical rank-indexing (row = position of the constant within the
-    /// join relation's own materialized domain), so pre-`domain_ids` callers are
-    /// bit-for-bit unaffected.
-    pub(crate) domain_ids: Option<Vec<i64>>,
+    /// cannot drift apart.
+    ///
+    /// The ids arrive WITH the tensor (`register_domain_tensor_source` requires them), so
+    /// there is no "no ids registered" state to fall back from. The fallback that used to
+    /// live here — row = the constant's position in the relation's materialized domain —
+    /// is the defect this map exists to close: it reads a different row from the torch
+    /// path for any domain that is not exactly `0..D-1`, silently, and no test that
+    /// stays inside that coincidence can see it. Keeping it as a reachable branch would
+    /// leave the same silent-wrong mode one call away.
+    ///
+    /// Empty until a domain source is registered; a join signature is only built after
+    /// that, so a lookup against an empty map is an internal invariant violation and is
+    /// surfaced as an error rather than papered over.
+    pub(crate) domain_ids: Vec<i64>,
     /// Original program source (for dynamic query compilation)
     pub(crate) _source: String,
     /// Parsed program AST (for signature analysis)

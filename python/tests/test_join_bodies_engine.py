@@ -426,20 +426,21 @@ def test_a_sparse_join_domain_with_explicit_domain_ids_trains() -> None:
     assert result.neural_parameter_grads["sal_net"] > 0.0
 
 
-def test_unsorted_domain_ids_are_refused() -> None:
-    """One row per constant, in a stable ascending layout, is a stated requirement on the
-    caller's feature tensor -- unsorted (or duplicated) ids are refused rather than
-    guessed at. (What reconciles the two engines is that both resolve a constant through
-    this same id list; the ordering is a layout rule, not the reconciliation.)"""
+def test_duplicate_domain_ids_are_refused() -> None:
+    """Two rows claiming one constant leaves that constant's row undefined, and BOTH
+    engines resolve a row by constant now, so neither has a defensible tie-break: it is
+    refused at the door. (Unsorted ids, by contrast, are fine and TRAIN -- a row is found
+    by its constant, never counted. The shuffled semantics anchor pins that they also
+    agree with the exact circuit, not merely that they run.)"""
     net = torch.nn.Sequential(torch.nn.Linear(1, 2, bias=True), torch.nn.Softmax(dim=-1))
     feats = torch.tensor([[0.9], [0.1], [0.2], [0.15]], dtype=torch.float32)
 
-    with pytest.raises(ValueError, match="strictly increasing"):
+    with pytest.raises(ValueError, match="must not repeat"):
         train_neurosymbolic_program(
             _sparse_source(),
             networks={"sal_net": net},
             domain_inputs={"sal_net": feats},
-            domain_ids={"sal_net": [0, 4, 2, 6]},
+            domain_ids={"sal_net": [0, 2, 2, 6]},
             examples=[{"targets": torch.tensor([1.0, 0.0], dtype=torch.float32)}],
             config=NeuroSymbolicTrainingConfig(steps=5, learning_rate=0.1),
         )

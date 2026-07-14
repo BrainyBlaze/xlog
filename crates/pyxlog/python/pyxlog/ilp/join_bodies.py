@@ -189,20 +189,29 @@ def domain_row_index(domain_ids: Sequence[int], network: str = "") -> dict[int, 
     list. Neither path infers the row from an ordering any more, so no id set — sparse,
     superset of the join domain, or dense — can put the two engines into disagreement.
 
-    The ids must still be STRICTLY INCREASING, but as a stated requirement on the
-    caller's layout, not as the thing that keeps the paths in step: duplicates are
-    meaningless (two rows claiming one constant), and a stable ascending order keeps
-    the row layout predictable and diffable across runs.
+    The ids may be given in ANY ORDER — a row is FOUND by the constant it holds, never
+    counted off an ordering. Ascending order was once required, and that requirement was
+    load-bearing for exactly one reason: it was what made the circuit's row-counting
+    coincide with this map. The circuit no longer counts, so the reason is gone, and the
+    rule goes with it rather than standing around to be re-justified by the next reader
+    as "the circuit needs sorted ids" — which is the false belief that produced the bug.
+
+    The ids must be DISTINCT. That is the part the ordering rule was really carrying:
+    two rows claiming one constant leaves the row of that constant undefined, so it is
+    refused by name rather than resolved by a tie-break the caller never asked for.
     """
-    ids = list(domain_ids)
-    for prev, cur in zip(ids, ids[1:]):
-        if cur <= prev:
+    row_of: dict[int, int] = {}
+    for row, c in enumerate(domain_ids):
+        c = int(c)
+        if c in row_of:
             where = f"domain_ids['{network}']" if network else "domain_ids"
             raise ValueError(
-                f"{where} must be strictly increasing (one row per constant, in a "
-                f"stable ascending layout); got {prev} followed by {cur}"
+                f"{where} must not repeat a constant: {c} is claimed by row "
+                f"{row_of[c]} and row {row}, so the row holding its features "
+                f"would be ambiguous"
             )
-    return {c: j for j, c in enumerate(ids)}
+        row_of[c] = row
+    return row_of
 
 
 def translate_extension_to_rows(

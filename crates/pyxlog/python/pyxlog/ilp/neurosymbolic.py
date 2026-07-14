@@ -199,9 +199,10 @@ def train_neurosymbolic_program(
     and BOTH paths now resolve a constant to its row through this one list. It is the
     only map; there is no ordering left for either side to infer.
 
-    The ids must be strictly increasing (one row per constant, in a stable ascending
-    layout) — a requirement on the caller's tensor, not the thing that keeps the two
-    paths in step.
+    The ids may be given in ANY ORDER — both paths FIND a row by the constant it holds
+    rather than counting one off an ordering, so the layout of your feature tensor stays
+    yours. They must be DISTINCT: two rows claiming one constant leaves that constant's
+    row undefined, and is refused by name.
 
     Omitting ``domain_ids`` defaults it to ``[0, 1, ..., D-1]`` per network — the
     dense identity, i.e. exactly the behaviour every existing caller already relies
@@ -895,8 +896,8 @@ def _resolve_domain_ids(
 
     What makes the two engines agree is that the resolved ids are registered WITH the
     domain tensor, so the exact circuit looks a joined constant up in the same list the
-    torch-side mixture does. The strictly-increasing check (:func:`domain_row_index`) is
-    a layout requirement on the caller's tensor, not the reconciliation.
+    torch-side mixture does. Resolved BEFORE registration for that reason. The only check
+    on the ids themselves is distinctness (:func:`domain_row_index`); their order is free.
     """
     supplied = dict(domain_ids or {})
     unknown = sorted(set(supplied) - set(domain_inputs))
@@ -916,7 +917,7 @@ def _resolve_domain_ids(
                 f"has {rows} row(s); there must be exactly one id per row (id j names the "
                 "domain constant whose feature vector is row j)"
             )
-        domain_row_index(ids, name)      # strictly increasing, or a typed refusal
+        domain_row_index(ids, name)      # distinct constants, or a typed refusal
         resolved[name] = ids
     return resolved
 

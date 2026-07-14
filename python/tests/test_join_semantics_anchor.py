@@ -370,3 +370,92 @@ def test_a_mixture_trains_on_a_sparse_domain() -> None:
     assert result.losses[-1] < result.losses[0]
     assert result.neural_parameter_grads["sal_net"] > 0.0
     assert len(result.query_probabilities) == len(targets)
+
+
+# ---------------------------------------------------------------------------
+# THE SHUFFLED ANCHOR. Every anchor above hands the ids in ascending order, so a row
+# can still be found by counting -- the sorted layout is one more coincidence a
+# row-counting engine could hide inside. Here the caller lays the rows out in the
+# order it happens to have them, and says so. Nothing is left to count in: a row can
+# only be found by the constant it holds. (This test cannot exist under a contract
+# that requires sorted ids -- it is the reason not to require them.)
+# ---------------------------------------------------------------------------
+
+_SHUF_IDS = [10, 2, 6, 0, 8, 4]                  # row j holds constant _SHUF_IDS[j]
+_SHUF_FEAT = {10: 0.05, 2: 0.90, 6: 0.07, 0: 0.06, 8: 0.92, 4: 0.10}
+_SHUF_EDGES = {0: [2, 10], 1: [0, 6], 2: [8, 4]}  # OR -> [salient, quiet, salient]
+
+_SHUF_JB = JoinBody(
+    neural_predicate="saliency",
+    network="sal_net",
+    join_var="Event",
+    relation="pbp",
+    event_arg=0,
+    head_arg=1,
+)
+
+
+def _shuffled_source() -> str:
+    facts = "\n".join(
+        f"    pbp({e}, {k})." for k in sorted(_SHUF_EDGES) for e in sorted(_SHUF_EDGES[k])
+    )
+    return f"""
+        nn(sal_net, [Event], Label, [low, strengthen]) :: saliency(Event, Label).
+{facts}
+        pred pbp(i64, i64).
+        pred plastic(i64).
+        trainable_rule(rule_plastic, weight=0.0) :: plastic(Edge) :- saliency(Event, strengthen), pbp(Event, Edge).
+        train(plastic, binary_cross_entropy).
+    """
+
+
+def test_torch_side_or_reproduces_the_exact_circuit_on_a_shuffled_row_layout() -> None:
+    """The feature tensor's row order is the CALLER's, and `domain_ids` is the whole of
+    what states it. The rank a row-counting engine would use here differs from the row
+    for every constant but one, so if either engine were still counting, the two would
+    part company well past 1e-4."""
+    source = _shuffled_source()
+    torch.manual_seed(0)
+    net = torch.nn.Sequential(torch.nn.Linear(1, 2, bias=True), torch.nn.Softmax(dim=-1))
+    feats = torch.tensor([[_SHUF_FEAT[c]] for c in _SHUF_IDS], dtype=torch.float32)
+    targets = [
+        1.0 if any(_SHUF_FEAT[e] > 0.5 for e in _SHUF_EDGES[k]) else 0.0
+        for k in sorted(_SHUF_EDGES)
+    ]
+    # A world whose every target is 1.0 is satisfiable by raising EVERY row, so the two
+    # engines would agree under a wrong map and the anchor would prove nothing.
+    assert set(targets) == {0.0, 1.0}, "the world must discriminate, or it proves nothing"
+
+    config = NeuroSymbolicTrainingConfig(steps=120, learning_rate=0.15)
+    result = train_neurosymbolic_program(
+        source,
+        networks={"sal_net": net},
+        domain_inputs={"sal_net": feats},
+        domain_ids={"sal_net": _SHUF_IDS},
+        examples=[{"targets": torch.tensor(targets, dtype=torch.float32)}],
+        config=config,
+    )
+    exact = torch.tensor(result.query_probabilities, dtype=torch.float64)
+
+    ilp_read = _open_join_read_handle(_read_only_source(source), config)
+    ext = read_join_extension(ilp_read, _SHUF_JB, num_bindings=len(_SHUF_EDGES))
+    assert ext == [sorted(_SHUF_EDGES[k]) for k in sorted(_SHUF_EDGES)]
+    rows = translate_extension_to_rows(ext, _SHUF_IDS, network="sal_net")
+
+    label_reader = pyxlog.Program.compile(
+        _read_only_source(source), device=config.device, memory_mb=config.gpu_memory_mb
+    )
+    positive = int(label_reader.label_to_index("saliency", "strengthen"))
+    with torch.no_grad():
+        dev = next(net.parameters()).device
+        p_event = net(feats.to(dev))[:, positive]
+        or_ = noisy_or_over_extension(p_event, rows, dev).double().cpu()
+    ours = float(result.symbolic_rule_weights["rule_plastic"]) * or_
+
+    deviation = float((ours - exact).abs().max())
+    print(f"\n[shuffled] exact (d-DNNF circuit) = {exact.tolist()}")
+    print(f"[shuffled] ours  (torch-side OR)  = {ours.tolist()}")
+    print(f"[shuffled] max abs deviation      = {deviation:.3e}")
+    assert torch.allclose(ours, exact, atol=1e-4), (
+        f"\nours ={ours.tolist()}\nexact={exact.tolist()}\nmax|dev|={deviation:.3e}"
+    )
