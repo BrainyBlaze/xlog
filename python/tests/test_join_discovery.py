@@ -209,3 +209,90 @@ def test_discovery_is_stable_across_seeds() -> None:
         )
     print(f"\n[stability] {wins}/5 seeds discovered {WINNER}")
     assert wins >= 4, f"only {wins}/5 seeds discovered the correct relation"
+
+
+# ---------------------------------------------------------------------------
+# TASK 7 -- where the mechanism BREAKS. A measurement, not a pass/fail test.
+# ---------------------------------------------------------------------------
+
+SATURATION_K = (1, 2, 4, 8, 16)
+SATURATION_SEEDS = (0, 1, 2)
+
+
+def _sweep(output_bias: float) -> dict[int, tuple[int, float]]:
+    """k -> (how many seeds discovered the rule, mean accuracy).
+
+    A SINGLE seed per k would be worthless here and would have hidden the finding: the
+    failure is a basin of attraction, so at any fixed k some inits fall into it and
+    others do not. Seed 0 alone reports 1.000/True at every k in this sweep even for
+    the bare mechanism -- and the bare mechanism is nevertheless broken at k>=4. The
+    quantity that degrades is the RATE.
+    """
+    table: dict[int, tuple[int, float]] = {}
+    for k in SATURATION_K:
+        accuracies: list[float] = []
+        wins = 0
+        for seed in SATURATION_SEEDS:
+            world, _net, result, _pos = _run(
+                n_edges=40, events_per_edge=k, seed=seed, output_bias=output_bias
+            )
+            accuracy = _accuracy(result, world)
+            correct = _winner(result) == WINNER
+            accuracies.append(accuracy)
+            wins += correct
+            print(
+                f"  events/edge={k:>2} seed={seed}  accuracy={accuracy:.3f}  "
+                f"correct_rule={correct}  "
+                f"w({WINNER})={result.symbolic_rule_weights[WINNER]:.3f}"
+            )
+        table[k] = (wins, sum(accuracies) / len(accuracies))
+    return table
+
+
+def test_report_the_noisy_or_saturation_limit() -> None:
+    """As events-per-edge grows the OR saturates: with k events at probability p the
+    mask is 1-(1-p)^k, so at the p~0.5 default init EVERY binding starts at ~1 and the
+    gradient to the detector vanishes. The optimizer's cheapest descent is then to kill
+    the detector, and it lands in a degenerate minimum that MORE STEPS DO NOT ESCAPE
+    (seed 0, k=6, bare: loss stuck at 0.640 -- the base-rate entropy -- at 1500, 3000,
+    6000 and 12000 steps, with the WRONG candidate hardened to 1.0).
+
+    This test finds where that breaks and REPORTS it. Both configurations are run and
+    both are printed: the BARE mechanism, and the mechanism with the quiet-event prior
+    (QUIET_PRIOR_BIAS). Nothing is silently tuned.
+
+    THE FINDING (5 seeds, n_edges=40; this test re-measures 3 of them):
+
+        events/edge      1     2     4     6     8    16
+        bare       :   5/5   5/5   4/5   3/5   3/5   4/5
+        with prior :   5/5   5/5   5/5   5/5   4/5   5/5
+
+    The bare mechanism starts losing seeds at k=4 and is a coin-flip by k=6. The prior
+    buys back the whole k<=6 range and most of k=8..16, but does not make the failure
+    go away: at k=8 one seed in five still inverts, and at k=16 one seed discovers the
+    correct relation yet never converges its detector (accuracy 0.60). The residual is
+    reported, not asserted away.
+
+    Only the regime we can stand behind is asserted (k = 1, 2, 4, WITH the prior).
+    """
+    print("\n=== noisy-OR saturation, BARE mechanism (output_bias=0.0) ===")
+    bare = _sweep(output_bias=0.0)
+
+    print(
+        f"\n=== noisy-OR saturation, WITH the quiet-event prior "
+        f"(output_bias={QUIET_PRIOR_BIAS}) ==="
+    )
+    mitigated = _sweep(output_bias=QUIET_PRIOR_BIAS)
+
+    n = len(SATURATION_SEEDS)
+    print(f"\n{'k':>3} | {'bare: found':>12} {'mean acc':>9} | {'prior: found':>13} {'mean acc':>9}")
+    for k in SATURATION_K:
+        bw, ba = bare[k]
+        mw, ma = mitigated[k]
+        print(f"{k:>3} | {f'{bw}/{n}':>12} {ba:>9.3f} | {f'{mw}/{n}':>13} {ma:>9.3f}")
+    print(f"\nSATURATION REPORT (for the docs): bare={bare} with_prior={mitigated}")
+
+    # k=1..4 must hold WITH the prior; beyond that we RECORD rather than demand.
+    for k in (1, 2, 4):
+        wins, accuracy = mitigated[k]
+        assert wins == n and accuracy > 0.95, f"regression at k={k}: {mitigated[k]}"
