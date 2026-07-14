@@ -5,6 +5,17 @@
 \usepackage{amsmath,amssymb}
 \usepackage{algorithm}
 \usepackage[noend]{algpseudocode}
+\usepackage{etoolbox}
+
+% --- Algorithm typography ---
+% Footnote-size body so statements fit the column; gray scriptsize line
+% numbers and comments so annotations read as annotations, not statements.
+\makeatletter
+\algrenewcommand\ALG@beginalgorithmic{\footnotesize}
+\makeatother
+\algrenewcommand\alglinenumber[1]{{\scriptsize\color{figgray}#1:}}
+\algrenewcommand{\algorithmiccomment}[1]{%
+  \hfill{\scriptsize\itshape\color{figgray}$\triangleright$\ #1}}
 
 % Allow a little extra flexibility in paragraph justification so long \texttt
 % identifiers (e.g. register_mask_sparse_device) don't trigger overfull hboxes.
@@ -13,7 +24,6 @@
 \usepackage{booktabs}
 \usepackage{tabularx}
 \usepackage{array}
-\usepackage{needspace}  % keep short code listings from splitting across columns
 % Left-aligned (ragged-right) flexible column for description cells, so narrow
 % wrapping columns read like reference papers instead of justified text with
 % inter-word rivers and mid-word hyphenation.
@@ -81,6 +91,18 @@
 % Listings are referenced as "Listing N" via cleveref.
 \crefname{lstlisting}{Listing}{Listings}
 \Crefname{lstlisting}{Listing}{Listings}
+
+% Never split a code listing across a column or page break: wrap every
+% listing (environment and \lstinputlisting) in an unbreakable minipage.
+% The minipage absorbs listings' own above/belowskip, so restore it.
+\BeforeBeginEnvironment{lstlisting}{%
+  \par\medskip\noindent\begin{minipage}{\linewidth}}
+\AfterEndEnvironment{lstlisting}{\end{minipage}\par\medskip}
+\let\xlogInputListing\lstinputlisting
+\renewcommand{\lstinputlisting}[2][]{%
+  \par\medskip\noindent\begin{minipage}{\linewidth}%
+  \xlogInputListing[#1]{#2}%
+  \end{minipage}\par\medskip}
 
 % --- TikZ figure design system ---
 % Shared color semantics across all figures:

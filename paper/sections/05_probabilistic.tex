@@ -79,14 +79,14 @@ Rather than trust the compiler, xlog proves the compiled circuit $C$ equivalent 
 \caption{GPU-native verified knowledge compilation. The circuit is accepted only if proven equivalent to its source formula on-device.}
 \label{alg:verifiedkc}
 \begin{algorithmic}[1]
-\Require weighted Boolean formula $\varphi$ from provenance (device-resident)
-\Ensure verified arithmetic circuit $C$ (XGCF), or a device-side trap
-\State $\varphi \gets \textsc{InternHashCons}(\varphi)$ \Comment{dedup subformulas via atomic GPU hash table}
+\Require weighted Boolean formula $\varphi$ (device-resident)
+\Ensure verified circuit $C$ (XGCF), or device-side trap
+\State $\varphi \gets \textsc{InternHashCons}(\varphi)$ \Comment{dedup via atomic GPU hash table}
 \State $\Phi \gets \textsc{TseitinCNF}(\varphi)$ \Comment{prefix-sum variable IDs; CSR clauses}
-\State $C \gets \textsc{D4}(\Phi)$ \Comment{BFS frontier + per-block DFS; VSIDS decisions; smooth; levelize}
+\State $C \gets \textsc{D4}(\Phi)$ \Comment{BFS + block DFS; VSIDS; smooth; levelize}
 \State $u_1 \gets \textsc{CDCL}(\varphi \land \lnot C)$;\quad $u_2 \gets \textsc{CDCL}(C \land \lnot \varphi)$
 \If{$u_1 \neq \textsc{Unsat}$ \textbf{or} $u_2 \neq \textsc{Unsat}$}
-  \State device-side trap \Comment{miscompilation never reaches host or downstream}
+  \State device-side trap \Comment{miscompilation never reaches host}
 \EndIf
 \State check resolution proofs of $u_1, u_2$ on-device
 \State \Return $C$ \Comment{certificate: $C \equiv \varphi$, machine-checked}

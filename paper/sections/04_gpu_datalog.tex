@@ -13,14 +13,14 @@ The executor processes an execution plan as strata ordered by the dependency ana
 \Require SCC rules $\mathcal{R}$; relation store $S$ (device-resident)
 \Ensure least fixpoint of $\mathcal{R}$ merged into $S$
 \For{each rule $r \in \mathcal{R}$}
-  \State $\Delta_r \gets \textsc{Eval}(r, S) \setminus S$ \Comment{seed delta; set difference on device}
+  \State $\Delta_r \gets \textsc{Eval}(r, S) \setminus S$ \Comment{seed $\Delta$; set difference on device}
 \EndFor
 \Repeat
-  \For{each rule $r \in \mathcal{R}$ and each recursive scan $i$ in $r$}
-    \State $T_{r,i} \gets \textsc{Eval}(r[\Delta \text{ at scan } i], S)$ \Comment{one delta-variant per self-join occurrence}
+  \For{each rule $r \in \mathcal{R}$, recursive scan $i$ in $r$}
+    \State $T_{r,i} \gets \textsc{Eval}(r[\Delta \text{ at } i], S)$ \Comment{one $\Delta$-variant per self-join}
   \EndFor
   \For{each head predicate $p$}
-    \State $\Delta_p \gets \big(\textstyle\bigcup_{r,i \text{ for } p} T_{r,i}\big) \setminus S_p$; \quad dedup $\Delta_p$
+    \State $\Delta_p \gets \textsc{Dedup}\big(\big(\textstyle\bigcup_{r,i \text{ for } p} T_{r,i}\big) \setminus S_p\big)$
     \State $S_p \gets S_p \cup \Delta_p$ \Comment{union + sorted dedup on device}
   \EndFor
 \Until{all $\Delta_p = \emptyset$ \textbf{or} iteration cap reached}
