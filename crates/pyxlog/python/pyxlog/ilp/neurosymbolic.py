@@ -624,6 +624,32 @@ def _train_joint_mixture(
             _reject(rule)                # a join candidate we cannot mask -> refused
         parsed_join[rule_id] = jb
 
+    # The two CALLER contract checks, run here — BEFORE the engine is asked anything.
+    # They need nothing from the engine, and the order matters: `joint_candidate_
+    # eligibility` compiles a query signature for EVERY rule defining the head, join
+    # candidates included, and a join signature grounds its neural leaves through the
+    # engine's `domain_ids`. With `domain_inputs` omitted, that map is empty, so the
+    # engine gets there first and refuses with "constant 0 is not in domain_ids ...
+    # give every joined constant an id" — which sends the user to fix `domain_ids`
+    # when what they actually forgot is `domain_inputs`. Asking the caller's question
+    # first is what keeps the diagnostic pointed at the real mistake.
+    for rule_id, jb in parsed_join.items():
+        if jb.network not in modules:
+            raise ValueError(
+                f"trainable_rule '{rule_id}' joins neural predicate "
+                f"'{jb.neural_predicate}' (network '{jb.network}'), which has no "
+                "registered network"
+            )
+        if jb.network not in domain_inputs:
+            raise ValueError(
+                f"trainable_rule '{rule_id}' puts neural predicate "
+                f"'{jb.neural_predicate}' on the existential join variable "
+                f"'{jb.join_var}', so network '{jb.network}' must be forwarded over "
+                f"the join domain: pass domain_inputs={{'{jb.network}': features}} "
+                f"(and domain_ids={{'{jb.network}': ids}} unless the constants are "
+                "the dense range 0..D-1)"
+            )
+
     # Engine relational eligibility per candidate: a length-n mask of which head
     # bindings 0..n-1 satisfy that candidate's relational grounding. Static.
     eligibility = program.joint_candidate_eligibility(train_head, 1, n)
@@ -650,21 +676,8 @@ def _train_joint_mixture(
             jb = parsed_join.get(rule_id)
             if jb is None:
                 _reject(rule)
-            if jb.network not in modules:
-                raise ValueError(
-                    f"trainable_rule '{rule_id}' joins neural predicate "
-                    f"'{jb.neural_predicate}' (network '{jb.network}'), which has no "
-                    "registered network"
-                )
-            if jb.network not in domain_inputs:
-                raise ValueError(
-                    f"trainable_rule '{rule_id}' puts neural predicate "
-                    f"'{jb.neural_predicate}' on the existential join variable "
-                    f"'{jb.join_var}', so network '{jb.network}' must be forwarded over "
-                    f"the join domain: pass domain_inputs={{'{jb.network}': features}} "
-                    f"(and domain_ids={{'{jb.network}': ids}} unless the constants are "
-                    "the dense range 0..D-1)"
-                )
+            # `jb.network` is already known to have a module and domain_inputs: both
+            # were checked above, before the engine was asked for eligibility.
             if ilp_read is None:
                 ilp_read = _open_join_read_handle(join_read_source, config)
             join_bodies[rule_id] = jb
@@ -844,8 +857,18 @@ def _open_join_read_handle(join_read_source: str | None, config: Any) -> Any:
     The desugared source cannot be used here (its guard-carrying rules do not
     survive the ILP plan builder's schema unification), which is why the handle is
     compiled from :func:`_read_only_source` — the user's program with the two
-    training statements removed and everything else, including the facts and any
-    ordinary rules that DERIVE the join relation, intact.
+    training statements removed and everything else, the facts and the ordinary
+    rules alike, intact.
+
+    That does NOT make a DERIVED join relation supported. The join relation itself
+    must be GROUND FACTS: the exact d-DNNF circuit grounds the existential join
+    against the relation's materialized extension and refuses a relation that any
+    rule derives ("uses derived relation ... as an existential join; the join domain
+    is materialized from ground facts only"). So while this handle would
+    happily enumerate a derived relation, the circuit the mixture is judged against
+    would not have it, and the rule is rejected upstream. Ordinary rules survive here
+    because the source is the user's program minus two statements — not because a
+    derived join relation works.
     """
     import pyxlog
 

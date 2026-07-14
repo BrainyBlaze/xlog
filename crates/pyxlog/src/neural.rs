@@ -3251,11 +3251,14 @@ impl CompiledProgram {
         }
     }
 
-    /// The Stage-B join-domain source name supplied by the Python driver. A
-    /// `Domain`/`Dummy` fetch is only produced for a join signature, which is built
-    /// only after the domain source is registered — so a missing name here is an
-    /// internal invariant violation, surfaced as a clear error rather than papered
-    /// over with a hardcoded fallback name.
+    /// The Stage-B join-domain source name supplied by the Python driver. A join
+    /// SIGNATURE is built for every rule defining the train head, whether or not a
+    /// domain source was ever registered — so "no name" is NOT an internal invariant
+    /// violation; it is what a driver that never called `register_domain_tensor_source`
+    /// (typically: a caller who omitted `domain_inputs`) reaches. It is surfaced as a
+    /// clear error naming that call, rather than papered over with a hardcoded fallback
+    /// name. The Python driver checks the same condition earlier, in the caller's own
+    /// vocabulary, so this message is the backstop and not the usual diagnostic.
     fn domain_source_name(&self) -> PyResult<&str> {
         self.domain_source.as_deref().ok_or_else(|| {
             PyRuntimeError::new_err(

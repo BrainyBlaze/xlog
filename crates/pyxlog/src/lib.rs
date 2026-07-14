@@ -540,9 +540,14 @@ pub struct CompiledProgram {
     /// stays inside that coincidence can see it. Keeping it as a reachable branch would
     /// leave the same silent-wrong mode one call away.
     ///
-    /// Empty until a domain source is registered; a join signature is only built after
-    /// that, so a lookup against an empty map is an internal invariant violation and is
-    /// surfaced as an error rather than papered over.
+    /// Empty until a domain source is registered — and that state IS reachable from a
+    /// caller mistake, not only from an internal bug: a join signature is compiled for
+    /// every rule defining the train head (`joint_candidate_eligibility`), so a program
+    /// whose driver forgot `domain_inputs` reaches this map while it is still empty. The
+    /// lookup then fails with "constant N is not in domain_ids", which is true but points
+    /// at the wrong parameter, so the Python driver checks `domain_inputs` for every join
+    /// candidate BEFORE it asks for eligibility. A lookup miss here is therefore a real
+    /// error to surface (a joined constant with no id), never something to paper over.
     pub(crate) domain_ids: Vec<i64>,
     /// Original program source (for dynamic query compilation)
     pub(crate) _source: String,
