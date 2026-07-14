@@ -215,7 +215,11 @@ def test_discovery_is_stable_across_seeds() -> None:
 # TASK 7 -- where the mechanism BREAKS. A measurement, not a pass/fail test.
 # ---------------------------------------------------------------------------
 
-SATURATION_K = (1, 2, 4, 8, 16)
+# k=6 is in the sweep because it is in the PUBLISHED table (README and
+# docs/architecture/dilp-training.md both carry a k=6 row) and because it is what the
+# demo and the flagship run at. A published number no test reproduces is a number
+# nobody can check.
+SATURATION_K = (1, 2, 4, 6, 8, 16)
 SATURATION_SEEDS = (0, 1, 2)
 
 
