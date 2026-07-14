@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Neural join bodies in the joint mixture: the rule is DISCOVERED, not written.
+"""Neural join bodies in the joint mixture: SELECTING a rule from a relation vocabulary.
 
 A relation VOCABULARY goes in. One same-head Stage-B candidate per relation comes
 out, and they all compete in one joint mixture:
@@ -8,15 +8,21 @@ out, and they all compete in one joint mixture:
     plastic(E) :- saliency(Ev, strengthen), post_before_pre(Ev, E).
     plastic(E) :- saliency(Ev, strengthen), co_occurs(Ev, E).
 
-Nobody writes any of them by hand: `build_join_candidates` sweeps them out of the
-vocabulary. Each candidate's mask is the OR, over the join extension READ FROM THE
-ENGINE, of the network's PER-EVENT probability:
+Each candidate's mask is the OR, over the join extension READ FROM THE ENGINE, of the
+network's PER-EVENT probability:
 
     mask_k[edge] = 1 - PROD_{e : r_k(e, edge)} (1 - p_saliency(e))
 
 The system has to put its mass on the relation whose join extension actually carries
 the planted signal, while learning -- from scratch -- a per-EVENT detector of that
-signal that generalizes to feature values the world never contained.
+signal that generalizes to feature values the world never contained. THAT is the
+result: a neural predicate on an existential variable, trained through the logic.
+
+WHAT THIS IS NOT. It is not rule induction. The caller hands in the vocabulary; the
+body shape is a fixed one-slot template; the search is |R| candidates wide and has no
+conjunctions, no chaining, no recursion, no negation. Reading `argmax(weights)` as
+"the discovered rule" is exactly the mistake this demo used to make -- see
+`select_rule`, and the HONEST SCOPE section of the README.
 
 Planted world: an edge is plastic iff SOME of its pre->post events is salient
 (feature > 0.5). A positive edge carries EXACTLY ONE salient event out of six, which
@@ -34,6 +40,7 @@ from pyxlog.ilp.discovery import (
     POSITIVE_LABEL,
     build_join_candidates,
     make_world,
+    select_rule,
 )
 from pyxlog.ilp.neurosymbolic import (
     NeuroSymbolicTrainingConfig,
@@ -78,14 +85,16 @@ def main() -> None:
     print(f"Vocabulary   : {VOCABULARY}")
     print(f"World        : {N_EDGES} edges, {len(world.event_features)} events, "
           f"{sum(world.labels)} of {N_EDGES} edges plastic")
-    print("\ncandidates: NONE hand-written — generated from the vocabulary")
+    print("\ncandidates: one per relation, swept out of the vocabulary")
     for rule_id in candidate_ids:
         relation = rule_id[len("cand_"):]
         print(f"  {rule_id:<24} plastic(E) :- saliency(Ev, strengthen), "
               f"{relation}(Ev, E).")
     print("\nThe distractors are equal-cardinality (the same number of events per edge as")
     print("the correct relation, drawn from OTHER edges): their OR is exactly as sharp and")
-    print("they carry no label information. There is nothing to win on but the truth.\n")
+    print("they carry no label information. THIS IS THE FRIENDLY CASE, and the margin below")
+    print("measures it: exactly one candidate here is fittable at all. Give the vocabulary")
+    print("two OVERLAPPING relations and the margin collapses -- see the README.\n")
 
     torch.manual_seed(SEED)
     net = torch.nn.Sequential(torch.nn.Linear(1, 2, bias=True), torch.nn.Softmax(dim=-1))
@@ -108,17 +117,26 @@ def main() -> None:
     )
 
     weights = result.symbolic_rule_weights
-    discovered = max(weights, key=weights.get)
+    # NOT `max(weights, key=weights.get)`. On two indistinguishable relations that
+    # returns whichever the caller typed FIRST -- a confident wrong answer. `select_rule`
+    # refuses instead.
+    selection = select_rule(weights)
     print(f"loss {result.losses[0]:.4f} -> {result.losses[-1]:.4f}\n")
 
     print("Candidate weights in the joint mixture:")
     for rule_id in candidate_ids:
-        mark = "<-- DISCOVERED" if rule_id == discovered else ""
+        mark = "<-- SELECTED" if rule_id == selection.rule else ""
         print(f"  {rule_id:<24} weight={weights[rule_id]:.5f}  {mark}")
-    relation = discovered[len("cand_"):]
-    print(f"\nDiscovered rule: plastic(E) :- saliency(Ev, strengthen), {relation}(Ev, E).")
-    print(f"  planted rule joined on '{CORRECT_RELATION}' -> "
-          f"{'CORRECT' if relation == CORRECT_RELATION else 'WRONG'}\n")
+
+    if not selection.decided:
+        relation = None
+        print(f"\nNo rule selected: {selection.reason}")
+    else:
+        relation = selection.rule[len("cand_"):]
+        print(f"\nSelected rule: plastic(E) :- saliency(Ev, strengthen), {relation}(Ev, E).")
+        print(f"  planted rule joined on '{CORRECT_RELATION}' -> "
+              f"{'CORRECT' if relation == CORRECT_RELATION else 'WRONG'}")
+        print(f"  margin over the runner-up: {selection.margin:.5f}\n")
 
     device = next(net.parameters()).device
     with torch.no_grad():
@@ -160,9 +178,12 @@ def main() -> None:
     print(f"  head-gate baseline ceiling on this world shape: {HEAD_GATE_CEILING}")
     print(f"  (ONE gate on a pooled per-edge feature cannot beat {HEAD_GATE_CEILING} here; "
           "a per-event\n   detector under the join's OR has no such ceiling)")
+    print("  NOTE: accuracy is NOT evidence that the right relation was selected. Two")
+    print("  indistinguishable relations both give 1.000 while the winner is a coin flip.")
 
-    recovered = relation == CORRECT_RELATION and accuracy > 0.95 and unseen[0] > 0.5
-    print("\n" + ("RULE DISCOVERED ✓" if recovered else "rule NOT discovered ✗"))
+    ok = selection.rule == f"cand_{CORRECT_RELATION}" and accuracy > 0.95 and unseen[0] > 0.5
+    print("\n" + ("CORRECT RELATION SELECTED, detector learned ✓" if ok
+                  else "rule NOT selected ✗"))
 
 
 if __name__ == "__main__":

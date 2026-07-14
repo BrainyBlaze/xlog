@@ -25,6 +25,7 @@ from pyxlog.ilp.discovery import (
     POSITIVE_LABEL,
     build_join_candidates,
     make_world,
+    select_rule,
 )
 from pyxlog.ilp.neurosymbolic import (
     NeuroSymbolicTrainingConfig,
@@ -125,9 +126,16 @@ def _accuracy(result, world) -> float:
     ) / len(world.labels)
 
 
-def _winner(result) -> str:
-    weights = result.symbolic_rule_weights
-    return max(weights, key=weights.get)
+def _winner(result) -> str | None:
+    """The SELECTED rule, or None when the mixture is not entitled to name one.
+
+    Deliberately not ``max(weights, key=weights.get)``: that returns the first key
+    holding the maximum, so on two indistinguishable relations it silently reports
+    whichever the caller typed first. ``select_rule`` refuses instead, and every
+    assertion in this file is therefore an assertion that a rule was actually DECIDED --
+    see test_join_identifiability for the worlds where it is not.
+    """
+    return select_rule(result.symbolic_rule_weights).rule
 
 
 # ---------------------------------------------------------------------------

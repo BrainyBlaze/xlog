@@ -144,12 +144,13 @@ def make_world(n_edges: int, events_per_edge: int, seed: int) -> World:
 def build_join_candidates(
     vocabulary: list[str], head: str = HEAD
 ) -> tuple[str, list[str]]:
-    """Sweep a relation vocabulary into ONE Stage-B candidate per relation.
+    """Sweep a relation VOCABULARY into ONE Stage-B candidate per relation.
 
-    Nothing here is hand-written: give it ``["pre_before_post", "post_before_pre",
-    "co_occurs"]`` and it emits three same-head candidates that differ ONLY in which
-    relation joins the existential event variable to the head. Which of them is the
-    rule is the mixture's answer, not the caller's.
+    The caller supplies the relation names; this fills the single free slot of a fixed
+    template, once per name, and the mixture weighs the results. That is the whole of
+    the search: |R| candidates, linear, one body shape. It is candidate SELECTION, not
+    open rule induction -- see ``select_rule`` for how to read the answer honestly, and
+    the module docstring of ``join_bodies`` for what the body may contain.
 
     Returns ``(source, candidate_ids)``. The source carries the ``nn/4`` declaration,
     the ``pred`` declarations, the candidates and the ``train`` statement; the caller
@@ -173,3 +174,79 @@ def build_join_candidates(
 
     lines.append(f"train({head}, binary_cross_entropy).")
     return "\n".join(lines), ids
+
+
+# Two candidates whose weights land this close are NOT ranked -- they are TIED. The
+# value is not a taste: it is read off the measured collapse. On a nested-superset
+# distractor (the correct relation's events plus a few foreign quiet ones) the winning
+# margin fell from 3333x to 1.003x -- 0.99551 vs 0.99250, a gap of 0.003 -- and on an
+# exact extensional duplicate the two weights agreed to TWELVE decimal places. Anything
+# inside this band is the optimizer's coin, not the data's answer.
+TIE_TOLERANCE = 0.01
+
+# A candidate the mixture does not actually believe is not a rule. When a trivially-true
+# relation is in the vocabulary the run can land in a degenerate minimum where EVERY
+# weight is near zero and the argmax is meaningless (measured: 1 of 2 seeds, the winner
+# was a relation with no signal at all, accuracy 0.625 -- below the head-gate baseline).
+MIN_WEIGHT = 0.5
+
+
+@dataclass(frozen=True)
+class Selection:
+    """What the mixture is entitled to claim. ``rule`` is None unless ONE candidate won.
+
+    ``tied`` lists every candidate within ``TIE_TOLERANCE`` of the top weight, sorted by
+    id, so the verdict never depends on the order the caller listed the vocabulary in.
+    """
+
+    rule: str | None
+    tied: list[str]
+    margin: float
+    top_weight: float
+    reason: str
+
+    @property
+    def decided(self) -> bool:
+        return self.rule is not None
+
+
+def select_rule(
+    weights: dict[str, float],
+    *,
+    tie_tolerance: float = TIE_TOLERANCE,
+    min_weight: float = MIN_WEIGHT,
+) -> Selection:
+    """Read a winner off the candidate weights -- or REFUSE to.
+
+    ``max(weights, key=weights.get)`` is not a discovery signal. Python's ``max``
+    returns the FIRST key holding the maximum, so on two extensionally identical
+    candidates -- weights equal to twelve decimals -- it hands back whichever relation
+    the caller happened to type first. Reversing the vocabulary reverses the "discovered
+    rule", and the accuracy is 1.000 either way, so nothing downstream notices. That is
+    a confident wrong answer, and this function exists to refuse to give one.
+
+    A rule is claimed only when a single candidate is BOTH believed (weight >=
+    ``min_weight``) AND alone at the top (the runner-up is more than ``tie_tolerance``
+    behind). Otherwise ``rule`` is None and ``reason`` says which gate failed.
+    """
+    if not weights:
+        return Selection(None, [], 0.0, 0.0, "no candidates")
+
+    ranked = sorted(weights.items(), key=lambda kv: (-kv[1], kv[0]))
+    top_id, top = ranked[0]
+    runner_up = ranked[1][1] if len(ranked) > 1 else 0.0
+    margin = top - runner_up
+    tied = sorted(rid for rid, w in ranked if top - w <= tie_tolerance)
+
+    if top < min_weight:
+        return Selection(
+            None, tied, margin, top,
+            f"no candidate is believed: the top weight is {top:.5f} < {min_weight}",
+        )
+    if len(tied) > 1:
+        return Selection(
+            None, tied, margin, top,
+            f"{len(tied)} candidates tie within {tie_tolerance} "
+            f"({', '.join(tied)}): the relations are indistinguishable on this data",
+        )
+    return Selection(top_id, tied, margin, top, f"won by {margin:.5f}")

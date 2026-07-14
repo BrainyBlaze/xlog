@@ -1,8 +1,15 @@
-# Neural join bodies in the joint mixture — the rule is DISCOVERED
+# Neural join bodies in the joint mixture — selecting the rule's join relation
 
 `examples/plasticity_incircuit/` recovers a **hand-written** existential-join rule.
 This one does not get the rule. It gets a relation **vocabulary**, and has to find
 which relation the rule joins on — while learning the neural predicate from scratch.
+
+> **Read this before quoting the numbers.** This is candidate **selection**, not rule
+> induction: the body template is fixed and has exactly one free slot (the relation
+> name), and the vocabulary is supplied by the caller. The search is `|R|` candidates
+> wide — no conjunctions, no chaining, no recursion, no negation — and it does **not**
+> use the engine's dILP enumerator. The genuinely new thing is the **neural predicate on
+> an existential variable, trained through the logic**. See limits **5** and **6** below.
 
 A vocabulary goes in:
 
@@ -181,7 +188,46 @@ reliably **without** the prior. Without it the failure is a genuine degenerate,
 0.640 — the base-rate entropy — at 1500, 3000, 6000 **and** 12000 steps, with the
 *wrong* candidate hardened to weight 1.0. More steps do not rescue it.
 
-And saturation hits the **detector** before it hits the **discovery**: at `k=16` with
+And saturation hits the **detector** before it hits the **selection**: at `k=16` with
 the prior, all 5 seeds still pick the correct *relation*, but one never converges its
 detector (accuracy 0.600). This example runs at `k=6` with the prior — inside the
 regime we can stand behind.
+
+**5. Identifiability — the 3333× margin is a property of THIS WORLD.** The distractors
+here are built to carry **zero** label information (equal cardinality, drawn from other
+edges' events), so exactly one candidate is fittable at all, and the correct relation has
+perfect precision by construction while each distractor false-fires on ~41 % of edges.
+That gap is what `0.99975 vs 0.0003` measures. The mechanism has no Occam term to fall
+back on: the inter-candidate noisy-OR is **monotone** and there is **no sparsity
+pressure anywhere** — no L1, no `weight_decay`, no simplex over the weights. Measured
+(`python/tests/test_join_identifiability.py`):
+
+| the vocabulary also contains…                            | outcome                                          |
+| -------------------------------------------------------- | ------------------------------------------------ |
+| nothing (the demo)                                        | correct relation wins by **3333×**               |
+| a distractor holding 5 of 6 of the edge's own events      | correct relation **still wins by 971×**          |
+| a nested superset (same salient events + quiet ones)      | margin collapses to **1.003×** → reported a **tie** |
+| an exact extensional duplicate                            | weights agree to **12 decimals** → a **tie**     |
+| a trivially-true relation                                 | **1 of 2 seeds** derails: correct candidate crushed to 0.002, accuracy **0.625** — *below* the 0.847 head-gate baseline |
+
+Partial overlap is survivable, and that is a real result. Exact and near-duplicates are
+**not identifiable at all**, and the trivially-true case is **measured, not fixed**
+(`xfail`). Two rules follow:
+
+- **`argmax` over the candidate weights is not a selection signal.** Python's `max`
+  returns the *first* key holding the maximum, so on two indistinguishable relations it
+  reports whichever the caller **typed first** — reverse the vocabulary and the
+  "discovered rule" reverses with it. Use `discovery.select_rule`: it names a rule only
+  when one candidate is both *believed* (weight ≥ 0.5) and *alone* at the top (runner-up
+  more than 0.01 behind), and **abstains** otherwise.
+- **Accuracy is not evidence of selection.** It is **1.000** in every tied row above.
+  The demo prints the two side by side; they are independent claims.
+
+**6. This is selection, not induction.** `|R|` candidates from one fixed template with
+one free slot, over a caller-supplied vocabulary. No conjunctions, no chaining through
+an intermediate variable, no recursion, no negation, head arity 1. The engine's own dILP
+enumerator (`valid_candidates`: `|R|²` chained candidates, with recursion) is **not on
+this code path** — the two induction paths in xlog remain disjoint. Widening this by one
+honest notch means admitting head-bound filter conjuncts (`…, f(E).`), which the OR math
+already supports; a real bridge means teaching `valid_candidates` to enumerate
+neural-bodied candidates, which this work does not do.

@@ -283,9 +283,18 @@ d-DNNF circuit to ~2e-07 (tolerance 1e-4) on **four** domain layouts — dense, 
 superset (rows for constants that are never joined) and shuffled (`domain_ids` in
 non-sorted order). See `python/tests/test_join_semantics_anchor.py`.
 
-Worked example (rule discovered from a vocabulary, no hand-written candidate) +
-CUDA-gated tests: [`examples/neural_join_discovery/`](../../examples/neural_join_discovery/)
-and `python/tests/test_join_discovery.py`.
+**This is candidate SELECTION, not rule induction.** `build_join_candidates` fills the
+single free slot of a fixed body template once per relation name **supplied by the
+caller** — `|R|` candidates, no conjunctions, no chaining through an intermediate
+variable, no recursion, no negation. It is a different and *narrower* search than the
+engine-side dILP enumerator (`valid_candidates`, `|R|²` chained candidates with
+recursion), and it does **not** call it: the two induction paths remain disjoint. What is
+new here is the neural predicate on an existential variable, trained *through* the logic
+— not an enlargement of the hypothesis space.
+
+Worked example + CUDA-gated tests:
+[`examples/neural_join_discovery/`](../../examples/neural_join_discovery/),
+`python/tests/test_join_discovery.py` and `python/tests/test_join_identifiability.py`.
 
 **Limits — stated plainly:**
 
@@ -323,8 +332,33 @@ and `python/tests/test_join_discovery.py`.
 
    Beyond roughly 4–6 joined constants per head binding the detector stops converging
    reliably without a sparsity prior. Saturation hits the **detector** before it hits
-   the **discovery**: at `k = 16` with the prior all 5 seeds still pick the correct
+   the **selection**: at `k = 16` with the prior all 5 seeds still pick the correct
    relation, but one never converges its detector (accuracy 0.600).
+
+5. **Identifiability — the mixture cannot rank relations it cannot distinguish.** The
+   inter-candidate noisy-OR is **monotone** and the objective carries **no sparsity term
+   at all** (no L1, no `weight_decay`, no simplex over candidate weights). Two candidates
+   with the same extension are therefore exactly degenerate: `1 − (1−w₁m)(1−w₂m)` is
+   reachable with the mass **split**, so the loss is flat between them. Measured
+   (`python/tests/test_join_identifiability.py`):
+
+   | vocabulary contains…                        | outcome                                        |
+   | ------------------------------------------- | ---------------------------------------------- |
+   | label-independent distractors (the demo)     | correct relation wins by **3333×**             |
+   | a distractor sharing 5 of 6 of the edge's own events | correct relation still wins by **971×** |
+   | a nested superset (same salient events)      | margin collapses to **1.003×** → reported as a **tie** |
+   | an exact extensional duplicate               | weights equal to **12 decimals** → a **tie**   |
+   | a trivially-true relation                    | **1 of 2 seeds** lands in a degenerate minimum: correct candidate crushed to 0.002, accuracy 0.625 — *below* the head-gate baseline |
+
+   Two consequences, both load-bearing. **(a) `argmax` over candidate weights is not a
+   selection signal.** Python's `max` returns the *first* key holding the maximum, so on
+   indistinguishable relations it reports whichever the caller listed first — a confident
+   wrong answer. Use `discovery.select_rule`, which claims a rule only when one candidate
+   is both *believed* (weight ≥ 0.5) and *alone* at the top (runner-up > 0.01 behind),
+   and abstains otherwise. **(b) Accuracy is not evidence that the relation was
+   identified** — it is 1.000 in every tied case above. The trivially-true failure is
+   **measured, not fixed** (`xfail`); the missing ingredient is an Occam/sparsity term
+   that would make the objective prefer the *minimal* separating relation.
 
 `train_and_promote(...)` also accepts `training_fold`, `held_out_domains`,
 `base_kernel_checksum_before`, and `base_kernel_checksum_after`. These fields are
