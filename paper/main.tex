@@ -82,22 +82,56 @@
 \crefname{lstlisting}{Listing}{Listings}
 \Crefname{lstlisting}{Listing}{Listings}
 
-% --- TikZ figure styles ---
+% --- TikZ figure design system ---
+% Shared color semantics across all figures:
+%   blue  = xlog symbolic stage        green = neural / PyTorch
+%   red   = verification / certificate gray  = neutral ink
+% The light-blue "device plane" (fplane) marks GPU-resident state.
 \definecolor{figblue}{RGB}{0,90,156}
 \definecolor{figgreen}{RGB}{27,128,79}
 \definecolor{figgray}{RGB}{90,98,110}
-\definecolor{figband}{RGB}{233,240,247}
+\definecolor{figink}{RGB}{45,52,64}
+\definecolor{figband}{RGB}{235,242,249}
+\definecolor{figbandedge}{RGB}{170,197,222}
 \definecolor{figaccent}{RGB}{176,42,42}
+\definecolor{figchip}{RGB}{243,246,249}
 \tikzset{
   fnode/.style={draw=figgray,rounded corners=2pt,fill=white,align=center,
                 font=\small,inner sep=4pt,minimum height=8mm},
-  fproc/.style={fnode,draw=figblue,very thick},
-  fcert/.style={fnode,draw=figaccent,very thick},
-  fneural/.style={fnode,draw=figgreen,very thick},
-  flabel/.style={font=\scriptsize\itshape,figgray},
-  farrow/.style={-{Stealth[length=2mm]},figgray,thick},
-  fgrad/.style={-{Stealth[length=2mm]},figaccent,thick,dashed},
+  fproc/.style={fnode,draw=figblue,line width=0.9pt},
+  fcert/.style={fnode,draw=figaccent,line width=0.9pt},
+  fneural/.style={fnode,draw=figgreen,line width=0.9pt},
+  flabel/.style={font=\scriptsize\itshape,text=figgray,align=center},
+  fsub/.style={font=\scriptsize,text=figgray},
+  ftier/.style={draw=figink,fill=white,rounded corners=2pt,align=center,
+                inner sep=3pt},
+  fplane/.style={fill=figband,draw=figbandedge,rounded corners=3pt,
+                 line width=0.5pt},
+  fplanetitle/.style={fill=figband,draw=figbandedge,rounded corners=1.6pt,
+                      line width=0.5pt,font=\scriptsize\scshape,
+                      text=figblue,inner xsep=4pt,inner ysep=2.4pt},
+  farrow/.style={-{Stealth[length=2.2mm]},figink,line width=0.8pt},
+  fback/.style={-{Stealth[length=2.2mm]},figgreen,line width=0.8pt,dashed},
+  fver/.style={-{Stealth[length=1.8mm]},figaccent,line width=0.7pt},
+  pics/gpuchip/.style={code={%
+    \foreach \p in {-0.75,0,0.75}{%
+      \draw[figblue,line width=0.45pt] (\p mm,1.15mm)--(\p mm,1.7mm)
+                                       (\p mm,-1.15mm)--(\p mm,-1.7mm)
+                                       (1.15mm,\p mm)--(1.7mm,\p mm)
+                                       (-1.15mm,\p mm)--(-1.7mm,\p mm);}%
+    \draw[figblue,line width=0.6pt,fill=white]
+      (-1.15mm,-1.15mm) rectangle (1.15mm,1.15mm);
+    \draw[figblue,line width=0.4pt,fill=figblue!20]
+      (-0.5mm,-0.5mm) rectangle (0.5mm,0.5mm);
+  }},
 }
+% Crate-name chip used inside architecture cells.
+\newcommand{\cratechip}[1]{{\setlength{\fboxsep}{1.6pt}\setlength{\fboxrule}{0.4pt}%
+  \fcolorbox{figgray!45}{figchip}{\scriptsize\ttfamily #1}}}
+% Device-plane title: chip glyph + small-caps label, placed on the plane border.
+\newcommand{\planetitle}[1]{\tikz[baseline=-0.6ex]{\pic{gpuchip};}\hspace{1.4mm}#1}
+% Gray subtitle line inside figure nodes.
+\newcommand{\fsubt}[1]{{\scriptsize\color{figgray}#1}}
 
 % --- Title block ---
 \title{{\Huge\bfseries XLOG}\\[0.45em]

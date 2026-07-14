@@ -7,34 +7,62 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
+# Match the paper's Computer Modern typography.
 plt.rcParams.update({
     "font.family": "serif",
+    "font.serif": ["cmr10"],
+    "mathtext.fontset": "cm",
+    "axes.formatter.use_mathtext": True,
+    "axes.unicode_minus": False,
     "font.size": 8,
-    "axes.linewidth": 0.6,
+    "axes.linewidth": 0.5,
 })
 
-fixtures = ["call_graph", "andersen", "ddisasm", "nesy_analog"]
-speedup = [29.62, 26.96, 28.79, 26.60]
-geomean = 27.96
+INK = "#2d3440"
+MUTED = "#5a626e"
+BAR = "#1b804f"      # figgreen
+ACCENT = "#b02a2a"   # figaccent
 
-fig, ax = plt.subplots(figsize=(3.3, 2.1))
-bars = ax.bar(range(len(fixtures)), speedup, width=0.62,
-              color="#1b804f", edgecolor="black", linewidth=0.5, zorder=2)
-ax.axhline(geomean, ls="--", lw=0.8, color="#b02a2a", zorder=1)
-for b, v in zip(bars, speedup):
-    ax.text(b.get_x() + b.get_width() / 2, v + 0.7, f"{v:g}$\\times$",
-            ha="center", va="bottom", fontsize=7, zorder=3,
-            bbox=dict(boxstyle="round,pad=0.08", fc="white", ec="none"))
-ax.text(0.98, 0.97, f"geomean {geomean:g}$\\times$",
-        transform=ax.transAxes, color="#b02a2a",
-        fontsize=7, ha="right", va="top", zorder=3,
-        bbox=dict(boxstyle="round,pad=0.1", fc="white", ec="none"))
-ax.set_xticks(range(len(fixtures)))
-ax.set_xticklabels(fixtures, rotation=20, ha="right")
-ax.set_ylabel(r"WCOJ speedup ($\times$)")
-ax.set_ylim(0, 36)
-ax.spines["top"].set_visible(False)
-ax.spines["right"].set_visible(False)
+# Fixture display names (paper Sec. 8.2), artifact order preserved.
+fixtures = [
+    ("call-graph edges", 29.62),
+    ("Andersen points-to", 26.96),
+    ("disassembly (ddisasm)", 28.79),
+    ("NeSy mining analog", 26.60),
+]
+geomean = 27.96  # artifact-backed geometric mean
+
+names = [f[0] for f in fixtures]
+speedup = [f[1] for f in fixtures]
+ypos = range(len(fixtures) - 1, -1, -1)  # first fixture on top
+
+fig, ax = plt.subplots(figsize=(3.3, 1.55))
+ax.barh(ypos, speedup, height=0.58, color=BAR, zorder=2)
+ax.axvline(geomean, ls=(0, (4, 3)), lw=0.8, color=ACCENT, zorder=3)
+
+for y, v in zip(ypos, speedup):
+    ax.text(v - 0.6, y, f"{v:.2f}$\\times$", ha="right", va="center",
+            fontsize=7, color="white", zorder=4,
+            bbox=dict(boxstyle="square,pad=0.15", fc=BAR, ec="none"))
+
+ax.text(geomean - 0.5, len(fixtures) - 0.08, f"geomean {geomean:.2f}$\\times$",
+        color=ACCENT, fontsize=7, ha="right", va="top", zorder=4)
+
+ax.set_yticks(list(ypos))
+ax.set_yticklabels(names, fontsize=7.5, color=INK)
+ax.set_xlim(0, 34)
+ax.set_ylim(-0.55, len(fixtures) - 0.05)
+ax.set_xticks([0, 10, 20, 30])
+ax.set_xlabel(r"speedup over binary-join baseline ($\times$)",
+              fontsize=7.5, color=INK)
+ax.tick_params(axis="both", length=2.5, width=0.5, colors=MUTED,
+               labelcolor=INK)
+ax.xaxis.grid(True, ls=":", lw=0.4, color="#c8ccd2", zorder=1)
+ax.set_axisbelow(True)
+for side in ("top", "right", "left"):
+    ax.spines[side].set_visible(False)
+ax.spines["bottom"].set_color(MUTED)
+
 fig.tight_layout(pad=0.3)
 fig.savefig("results.pdf")
 print("wrote results.pdf")

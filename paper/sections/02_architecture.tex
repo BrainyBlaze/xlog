@@ -14,26 +14,73 @@ The payoff is bandwidth asymmetry. PCIe~4.0 $\times16$ delivers roughly 32\,GB/s
 
 \begin{figure*}[tbp]
   \centering
-  \begin{tikzpicture}[node distance=2.6mm]
-    \node[fnode,text width=0.62\linewidth] (t4)
-      {\textbf{Tier 4 --- Interfaces:} \texttt{pyxlog} (PyO3), \texttt{xlog-cli}};
-    \node[fnode,text width=0.62\linewidth,below=of t4] (t3)
-      {\textbf{Tier 3 --- Pipelines:} deterministic $\cdot$ probabilistic (verified KC) $\cdot$ neural-symbolic};
-    \node[fproc,text width=0.62\linewidth,below=of t3] (t2)
-      {\textbf{Tier 2 --- Subsystems:} language frontend $\cdot$ GPU runtime executor $\cdot$ GPU CDCL / local search};
-    \node[fnode,text width=0.62\linewidth,below=of t2] (t1)
-      {\textbf{Tier 1 --- IR \& device services:} RIR/PIR/XGCF/EIR $\cdot$ CUDA wrapper $\cdot$ Arrow / DLPack interop};
-    \node[fnode,text width=0.62\linewidth,below=of t1] (t0)
-      {\textbf{Tier 0 --- Core:} scalar types $\cdot$ kernel-provider trait $\cdot$ symbol table $\cdot$ budgets};
-    \node[flabel,above=3mm of t4] {host: orchestration $\cdot$ I/O $\cdot$ compilation};
+  \begin{tikzpicture}[x=1mm,y=1mm,
+      cell/.style={fnode,anchor=north west,font=\footnotesize,
+                   inner xsep=2mm,inner ysep=1.6mm,minimum height=12mm},
+      tag/.style={ftier,anchor=north west,text width=21mm,minimum height=12mm,
+                  font=\footnotesize}]
+    % ---- Tier 4 --- interfaces (host-facing) ----
+    \node[tag] (t4tag) at (0,0)
+      {\textbf{Tier 4}\\{\scriptsize\scshape interfaces}};
+    \node[cell,text width=67.5mm] (t4c1) at (27,0)
+      {Python API (PyO3)\\[0.6mm]\cratechip{pyxlog}};
+    \node[cell,text width=67.5mm] (t4c2) at (100.5,0)
+      {command-line interface\\[0.6mm]\cratechip{xlog-cli}};
+    % ---- Tier 3 --- pipelines ----
+    \node[tag] (t3tag) at (0,-19.5)
+      {\textbf{Tier 3}\\{\scriptsize\scshape pipelines}};
+    \node[cell,text width=43mm] (t3c1) at (27,-19.5)
+      {deterministic\\[0.6mm]\cratechip{xlog-gpu}};
+    \node[cell,text width=43mm] (t3c2) at (76,-19.5)
+      {probabilistic $\cdot$ verified KC\\[0.6mm]\cratechip{xlog-prob}};
+    \node[cell,text width=43mm] (t3c3) at (125,-19.5)
+      {neural-symbolic\\[0.6mm]\cratechip{xlog-neural} \cratechip{xlog-induce}};
+    % ---- Tier 2 --- subsystems ----
+    \node[tag] (t2tag) at (0,-36.5)
+      {\textbf{Tier 2}\\{\scriptsize\scshape subsystems}};
+    \node[cell,text width=43mm] (t2c1) at (27,-36.5)
+      {language frontend\\[0.6mm]\cratechip{xlog-logic}};
+    \node[cell,text width=43mm] (t2c2) at (76,-36.5)
+      {GPU runtime executor\\[0.6mm]\cratechip{xlog-runtime}};
+    \node[cell,text width=43mm] (t2c3) at (125,-36.5)
+      {GPU CDCL $\cdot$ local search\\[0.6mm]\cratechip{xlog-solve}};
+    % ---- Tier 1 --- IR & device services ----
+    \node[tag] (t1tag) at (0,-53.5)
+      {\textbf{Tier 1}\\{\scriptsize\scshape ir \& device\\[-0.4mm]\scriptsize\scshape services}};
+    \node[cell,text width=43mm] (t1c1) at (27,-53.5)
+      {IR stack: RIR/PIR/XGCF/EIR\\[0.6mm]\cratechip{xlog-ir}};
+    \node[cell,text width=43mm] (t1c2) at (76,-53.5)
+      {CUDA wrapper, Arrow/DLPack\\[0.6mm]\cratechip{xlog-cuda}};
+    \node[cell,text width=43mm] (t1c3) at (125,-53.5)
+      {runtime statistics\\[0.6mm]\cratechip{xlog-stats}};
+    % ---- Tier 0 --- core ----
+    \node[tag] (t0tag) at (0,-70.5)
+      {\textbf{Tier 0}\\{\scriptsize\scshape core}};
+    \node[cell,text width=141mm] (t0c1) at (27,-70.5)
+      {scalar types $\cdot$ kernel-provider trait $\cdot$ symbol table $\cdot$ memory budgets\\[0.6mm]\cratechip{xlog-core}};
+    % ---- GPU device plane behind tiers 1-3 ----
     \begin{scope}[on background layer]
-      \node[fill=figband,rounded corners,fit=(t1)(t2)(t3),inner sep=2.4mm] (band) {};
+      \node[fplane,fit=(t3tag)(t3c3)(t1tag)(t1c3),inner sep=2.2mm] (plane) {};
     \end{scope}
-    \node[flabel,figblue,anchor=south,rotate=90] at ([xshift=4mm]band.east) {GPU device-resident};
-    \draw[farrow] (t4) -- (t3); \draw[farrow] (t3) -- (t2);
-    \draw[farrow] (t2) -- (t1); \draw[farrow] (t1) -- (t0);
+    \node[fplanetitle,anchor=east] at ([xshift=-4mm]plane.north east)
+      {\planetitle{runtime semantic state $\cdot$ gpu-resident}};
+    % ---- dependency arrows (tier-level, down the tag column) ----
+    \draw[farrow] (12.5,-12) -- (12.5,-19.5);
+    \draw[farrow] (12.5,-31.5) -- (12.5,-36.5);
+    \draw[farrow] (12.5,-48.5) -- (12.5,-53.5);
+    \draw[farrow] (12.5,-65.5) -- (12.5,-70.5);
+    \node[flabel,anchor=west] at (14,-14.2) {depends on};
+    % ---- host annotations ----
+    \node[flabel,anchor=south east] at (172,1.5)
+      {host: orchestration $\cdot$ I/O $\cdot$ compilation};
+    \node[flabel,anchor=north east] at (172,-84)
+      {host-side foundation: shared types \& traits};
   \end{tikzpicture}
-  \caption{xlog crate hierarchy. Each tier depends only on strictly lower tiers; all runtime semantic state is device-resident, while the host handles only orchestration, I/O, and compilation.}
+  \caption{xlog crate hierarchy, with the workspace's production crates in
+  place. Each tier depends only on lower tiers; the shaded device plane marks
+  the tiers whose runtime semantic state is GPU-resident, while the host
+  provides orchestration, I/O, and compilation. Test-only crates
+  (\texttt{xlog-cuda-tests}, \texttt{xlog-integration}) are omitted.}
   \label{fig:arch}
 \end{figure*}
 

@@ -51,23 +51,63 @@ history = pyxlog.train_model_tensor(
 
 \begin{figure*}[tbp]
   \centering
-  \resizebox{0.86\linewidth}{!}{%
-  \begin{tikzpicture}
-    \node[fneural] (net) {neural net\\(PyTorch)};
-    \node[fproc,right=30mm of net] (sym) {symbolic\\reasoning};
-    \node[fcert,right=14mm of sym] (circ) {verified circuit\\(compiled once)};
-    \node[fnode,right=18mm of circ] (loss) {loss\\$-\log P$};
-    \draw[farrow] (net) -- node[flabel,above,align=center]{softmax $\to$\\weighted facts} (sym);
-    \draw[farrow] (sym) -- (circ);
-    \draw[farrow] (circ) -- node[flabel,above]{forward} (loss);
-    \draw[fgrad] (loss.south) to[out=-90,in=-90,looseness=0.7]
-          node[flabel,below]{gradients via DLPack (zero-copy)} (net.south);
+  \begin{tikzpicture}[x=1mm,y=1mm,
+      ring/.style={anchor=north west,text width=26mm,
+                   inner xsep=2mm,inner ysep=1.8mm,minimum height=14.5mm}]
+    % ---- forward row ----
+    \node[fneural,ring] (net) at (0,0)
+      {neural network\\[0.4mm]\fsubt{PyTorch forward}};
+    \node[fproc,ring] (ground) at (54,0)
+      {symbolic grounding\\[0.4mm]\fsubt{rules $\cdot$ provenance}};
+    \node[fproc,ring] (circ) at (96,0)
+      {verified circuit\\[0.4mm]\fsubt{proven once $\cdot$ cached}};
+    \node[fneural,ring] (loss) at (138,0)
+      {loss $-\log P$\\[0.4mm]\fsubt{per-query NLL}};
+    \node[circle,draw=figaccent,fill=white,line width=0.7pt,inner sep=0.4pt,
+          font=\tiny] at (circ.north west) {\checkmark};
+    % ---- backward row ----
+    \node[fproc,ring] (back) at (138,-27)
+      {circuit backward\\[0.4mm]\fsubt{level-parallel adjoint}};
+    \node[fneural,ring] (opt) at (0,-27)
+      {optimizer step\\[0.4mm]\fsubt{PyTorch autograd}};
+    % ---- ring edges ----
+    \draw[farrow] (net) -- node[flabel,above=0.4mm,text width=21mm]
+      {softmax $\to$ weighted facts} (ground);
+    \draw[farrow] (ground) -- (circ);
+    \draw[farrow] (circ) -- node[flabel,above=0.4mm,text width=11mm]
+      {forward $\log P$} (loss);
+    \draw[fback] (loss) -- node[flabel,anchor=east,xshift=-1mm] {backward} (back);
+    \draw[fback] (back) -- node[flabel,above=0.4mm]
+      {per-leaf gradients exported via DLPack (zero-copy)} (opt);
+    \draw[fback] (opt) -- node[flabel,anchor=west,xshift=1mm]
+      {update $\theta$} (net);
+    \node[flabel] at (84,-20)
+      {one training iteration --- circuit \& proof reused across iterations};
+    % ---- GPU device plane around the whole loop ----
+    \node[flabel] (foot) at (84,-45.5)
+      {zero host--device transfers in the loop (byte-accounted)};
     \begin{scope}[on background layer]
-      \node[fill=figband,rounded corners,fit=(sym)(circ),inner sep=3mm] (band) {};
+      \node[fplane,fit=(net)(loss)(back)(opt)(foot),inner sep=3mm] (plane) {};
     \end{scope}
-    \node[flabel,figblue,anchor=south] at (band.north) {GPU device-resident};
-  \end{tikzpicture}}
-  \caption{One end-to-end neurosymbolic iteration, exhibiting the three pillars: a device-resident symbolic substrate (the shaded region never leaves the GPU), verified knowledge compilation (the circuit is compiled and proven correct once, then reused), and zero-copy differentiable coupling (gradients return through DLPack into PyTorch's autograd graph).}
+    \node[fplanetitle,anchor=west] at ([xshift=4mm]plane.north west)
+      {\planetitle{gpu device-resident}};
+    % ---- legend ----
+    \draw[figgreen,line width=0.9pt,fill=white,rounded corners=1pt]
+      (38,-56.5) rectangle +(3,3);
+    \node[fsub,anchor=west] at (42.5,-55) {PyTorch};
+    \draw[figblue,line width=0.9pt,fill=white,rounded corners=1pt]
+      (62,-56.5) rectangle +(3,3);
+    \node[fsub,anchor=west] at (66.5,-55) {xlog substrate};
+    \draw[figaccent,line width=0.9pt,fill=white,rounded corners=1pt]
+      (96,-56.5) rectangle +(3,3);
+    \node[fsub,anchor=west] at (100.5,-55) {verified (\Cref{fig:kc})};
+  \end{tikzpicture}
+  \caption{One end-to-end neurosymbolic training iteration. The entire
+  loop---neural forward pass, symbolic grounding, circuit evaluation, loss,
+  and gradient return---executes on one CUDA device (shaded plane) with zero
+  host--device data-plane transfers. The circuit is compiled and proven
+  correct once (\checkmark, \Cref{fig:kc}), then reused across iterations,
+  and gradients re-enter PyTorch's autograd graph zero-copy through DLPack.}
   \label{fig:training}
 \end{figure*}
 

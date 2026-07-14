@@ -8,21 +8,58 @@ The pipeline transforms a probabilistic program into a GPU-resident arithmetic c
 
 \begin{figure*}[tbp]
   \centering
-  \resizebox{0.86\linewidth}{!}{%
-  \begin{tikzpicture}[node distance=6mm]
-    \node[fproc] (prov) {provenance\\formula $\varphi$};
-    \node[fproc,right=of prov] (cnf) {CNF\\(Tseitin)};
-    \node[fproc,right=of cnf] (d4) {d-DNNF\\(D4)};
-    \node[fproc,right=of d4] (xgcf) {XGCF\\circuit $C$};
-    \node[fnode,right=of xgcf] (eval) {forward $\log Z$\\backward gradients};
-    \draw[farrow] (prov)--(cnf); \draw[farrow] (cnf)--(d4);
-    \draw[farrow] (d4)--(xgcf); \draw[farrow] (xgcf)--(eval);
-    \node[fcert,below=11mm of $(cnf)!0.5!(d4)$,text width=66mm] (cdcl)
-      {on-GPU CDCL certificate:\\$\varphi\!\land\!\lnot C$ and $C\!\land\!\lnot\varphi$ both UNSAT $\Rightarrow C\equiv\varphi$ (else device trap)};
-    \draw[fgrad] (prov.south) node[flabel,below right=0pt and 1pt]{$\varphi$} |- (cdcl.west);
-    \draw[fgrad] (xgcf.south) node[flabel,below left=0pt and 1pt]{$C$} |- (cdcl.east);
-  \end{tikzpicture}}
-  \caption{Verified knowledge-compilation pipeline. All stages execute as CUDA kernels on device-resident data; before the circuit is used, an on-GPU CDCL solver proves it equivalent to its source formula.}
+  \begin{tikzpicture}[x=1mm,y=1mm,
+      stage/.style={fproc,anchor=north west,text width=24mm,
+                    inner xsep=2mm,inner ysep=1.8mm,minimum height=14.5mm}]
+    % ---- forward pipeline ----
+    \node[stage] (s1) at (0,0)
+      {provenance $\varphi$\\[0.4mm]\fsubt{hash-consing}};
+    \node[stage] (s2) at (34,0)
+      {CNF $\Phi$ (Tseitin)\\[0.4mm]\fsubt{prefix-sum var IDs}};
+    \node[stage] (s3) at (68,0)
+      {d-DNNF (D4)\\[0.4mm]\fsubt{BFS + block DFS}};
+    \node[stage] (s4) at (102,0)
+      {XGCF circuit $C$\\[0.4mm]\fsubt{levelized DAG}};
+    \node[stage] (s5) at (142,0)
+      {evaluate\\[0.4mm]\fsubt{forward $\log Z$}\\[-0.2mm]\fsubt{backward $\nabla$}};
+    \node[diamond,aspect=1.2,draw=figaccent,fill=white,line width=0.8pt,
+          inner sep=0.5pt] (gate) at (136,-7.25) {\scriptsize\checkmark};
+    \draw[farrow] (s1) -- (s2);
+    \draw[farrow] (s2) -- (s3);
+    \draw[farrow] (s3) -- (s4);
+    \draw[farrow] (s4) -- (gate);
+    \draw[farrow] (gate) -- (s5);
+    % ---- verification lane ----
+    \node[fcert,anchor=north,text width=78mm,inner ysep=1.8mm] (cert) at (82,-26)
+      {on-GPU CDCL equivalence certificate\\[0.4mm]
+       $\varphi\wedge\lnot C$ and $C\wedge\lnot\varphi$ both \textsc{unsat}
+       $\Rightarrow C\equiv\varphi$\\[0.4mm]
+       \fsubt{resolution proofs checked on-device}\\[-0.2mm]
+       \fsubt{complete proof, not sampling}};
+    \draw[fver] (s1.south) |- (cert.west);
+    \node[flabel,anchor=west] at (15,-20.5) {$\varphi$};
+    \draw[fver] (s4.south) -- (s4.south |- cert.north);
+    \node[flabel,anchor=west] at (117,-20.5) {$C$};
+    \draw[fver] (cert.east) -| (gate.south);
+    \node[flabel,anchor=west] at (137.5,-19) {proven $C\equiv\varphi$};
+    \node[fnode,anchor=north,draw=figaccent,font=\scriptsize,
+          text=figaccent,inner ysep=1.4mm,minimum height=5mm] (trap) at (82,-49)
+      {$\times$ device-side trap};
+    \draw[fver] (cert.south) -- (trap.north);
+    \node[flabel,anchor=west] at (83.5,-45.8) {otherwise};
+    % ---- GPU device plane ----
+    \begin{scope}[on background layer]
+      \node[fplane,fit=(s1)(s5)(cert)(trap),inner sep=3mm] (plane) {};
+    \end{scope}
+    \node[fplanetitle,anchor=west] at ([xshift=4mm]plane.north west)
+      {\planetitle{gpu device-resident --- all stages}};
+  \end{tikzpicture}
+  \caption{Verified knowledge-compilation pipeline. Every stage runs as CUDA
+  kernels on device-resident state. The compiled circuit $C$ reaches
+  evaluation only through the equivalence gate (\checkmark): an on-GPU CDCL
+  solver proves $\varphi\wedge\lnot C$ and $C\wedge\lnot\varphi$ both
+  unsatisfiable, and a failed proof halts in a device-side trap instead of
+  reaching evaluation.}
   \label{fig:kc}
 \end{figure*}
 
