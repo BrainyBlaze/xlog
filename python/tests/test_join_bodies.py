@@ -59,6 +59,24 @@ def test_an_extra_conjunct_is_not_silently_dropped() -> None:
     )
 
 
+def test_a_join_relation_with_a_third_argument_is_not_a_join_body() -> None:
+    """`pre_before_post(Ev, E, W)` mentions both the join var and the head var, so a
+    check that only asks "are both present?" accepts it. Its third argument is a SECOND
+    existential, though: the relation holds one (event, edge) tuple per W, and
+    `read_join_extension` — which buckets every tuple by its head argument — would bucket
+    the same event W times and compute `1 - (1 - p)^W` where the rule says
+    `1 - (1 - p)`. This module says its shape is EXACTLY one neural atom plus one join
+    relation and that it never guesses; that has to include the relation's arity."""
+    assert (
+        parse_join_body(
+            ["saliency(Ev, strengthen)", "pre_before_post(Ev, E, W)"],
+            NEURAL,
+            head_var="E",
+        )
+        is None
+    )
+
+
 def test_two_relations_on_the_join_var_are_not_a_join_body() -> None:
     assert (
         parse_join_body(

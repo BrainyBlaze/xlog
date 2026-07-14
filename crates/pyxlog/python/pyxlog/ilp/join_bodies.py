@@ -104,7 +104,8 @@ def parse_join_body(
     never guesses.
 
     The shape is EXACTLY two BODY LITERALS, each a bare positive atom: the one neural
-    atom and the one relation that joins the existential variable to the head. The
+    atom and the one relation that joins the existential variable to the head, the
+    relation carrying EXACTLY those two arguments and nothing else. The
     contract is checked against the literals the desugarer parsed, not against a
     regex count of parenthesized atoms -- an atom count cannot tell
     ``pre_before_post(Ev, E)`` from ``not pre_before_post(Ev, E)``, and cannot see a
@@ -139,6 +140,17 @@ def parse_join_body(
 
     # exactly two atoms, exactly one of them neural -> exactly one relation
     p, args = next((q, a) for q, a in atoms if q not in neural_predicates)
+    if len(args) != 2:
+        # The join relation carries EXACTLY the join variable and the head variable.
+        # `rel(Ev, E, W)` also "contains both", but its third argument is a second
+        # existential: the relation's extension then holds one (event, edge) pair per
+        # W, and `read_join_extension` — which buckets by the head argument and keeps
+        # every tuple — would bucket the same event once per W and compute
+        # `1 - (1 - p)^W` instead of `1 - (1 - p)`. There is no mask here for that
+        # rule, so it is refused, not silently reduced to the two-argument one it
+        # resembles. (A Rust check in the circuit path rejects the same shape; this
+        # module states its own contract rather than borrowing that one's.)
+        return None
     if join_var not in args or head_var not in args:
         return None
     return JoinBody(
