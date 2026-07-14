@@ -14,9 +14,13 @@ two candidates with the same extension are exactly degenerate: the head probabil
     1. partial overlap        -> the correct relation still wins, and by a lot (971x)
     2. exact duplicate        -> a TIE. Weights agreed to twelve decimals; `argmax` would
                                  have handed back whichever relation was typed first.
-    3. trivially-true relation-> the run can land in a degenerate minimum. XFAIL: measured
-                                 at 1 of 2 seeds, and NOT fixed. Not a defect of the
-                                 world -- a defect of an objective with no Occam term.
+    3. trivially-true relation-> a degenerate minimum, on BOTH seeds, and `select_rule`
+                                 does NOT catch it: the WRONG candidate comes back
+                                 believed (0.972 / 0.934) and alone at the top, at
+                                 accuracy 0.625 / 0.475. XFAIL: measured, not fixed.
+                                 Degeneracy is not ambiguity -- the gates below detect a
+                                 mixture that believes nothing, not one that confidently
+                                 believes the wrong thing.
 """
 import random
 
@@ -91,10 +95,16 @@ def test_a_near_duplicate_inside_the_tolerance_is_also_a_tie():
 
 
 def test_a_candidate_nobody_believes_is_not_a_rule():
-    # The always-on world's degenerate minimum: an argmax exists, but it means nothing.
+    """A run where the mixture believes nothing still has an argmax. It means nothing.
+
+    NOTE the limit of this gate, which the trivially-true world below makes painfully
+    concrete: it catches a mixture that believes NOTHING, not a mixture that confidently
+    believes the WRONG thing. Degeneracy is not ambiguity, and `select_rule` only sees
+    the weights.
+    """
     s = select_rule({"cand_post_before_pre": 0.0113, "cand_pre_before_post": 0.0024})
     assert not s.decided
-    assert "is not believed" in s.reason or "no candidate is believed" in s.reason
+    assert "no candidate is believed" in s.reason
 
 
 # ---------------------------------------------------------------------------
@@ -213,19 +223,25 @@ def test_an_exact_duplicate_relation_is_a_tie_and_the_run_says_so(seed):
 
 @cuda
 @pytest.mark.xfail(
-    reason="MEASURED, NOT FIXED. A trivially-true relation in the vocabulary can drive "
-           "the run into a degenerate minimum: at seed 0 the correct candidate is crushed "
-           "to 0.0024, a signal-free relation takes the argmax, and accuracy falls to "
-           "0.625 -- BELOW the 0.847 head-gate baseline this work claims to beat. Seed 1 "
-           "recovers (1.000). The objective has no Occam/sparsity term to prefer the "
-           "minimal separating relation; adding one is the fix, and it is not in this "
-           "branch. `select_rule` at least downgrades the confident wrong answer to an "
-           "abstention -- but abstaining on a solvable world is still a failure.",
-    strict=False,
+    reason="MEASURED, NOT FIXED, AND `select_rule` DOES NOT SAVE US HERE. A trivially-true "
+           "relation in the vocabulary drives the run into a degenerate minimum, and it "
+           "does so on BOTH seeds: seed 0 selects `post_before_pre` at weight 0.972 "
+           "(accuracy 0.625), seed 1 selects `co_occurs` at 0.934 (accuracy 0.475) -- both "
+           "far below the 0.847 head-gate baseline this work claims to beat. The wrong "
+           "candidate is BELIEVED and ALONE at the top, so the tie/min-weight gates pass "
+           "it through: this is a confident wrong answer, not an abstention. The objective "
+           "has no Occam/sparsity term to prefer the minimal separating relation, and "
+           "nothing gates on whether the fit is any good. Both are absent from this branch.",
+    strict=True,
 )
 @pytest.mark.parametrize("seed", [0, 1])
 def test_a_trivially_true_relation_does_not_derail_the_selection(seed):
-    """`anything(Ev, E)` holds for EVERY (event, edge): its mask is ~1 everywhere."""
+    """`anything(Ev, E)` holds for EVERY (event, edge): its mask is ~1 everywhere.
+
+    This is the honest red test. It is not a corner case invented to embarrass the
+    branch: a relation that holds of everything is the most ordinary thing a real
+    vocabulary can contain, and it takes the mechanism apart.
+    """
     world = make_world(n_edges=N_EDGES, events_per_edge=K, seed=seed)
     own = _own_events(world)
     rng = random.Random(2000 + seed)

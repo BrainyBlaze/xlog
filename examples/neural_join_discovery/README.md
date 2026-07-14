@@ -208,11 +208,18 @@ pressure anywhere** — no L1, no `weight_decay`, no simplex over the weights. M
 | a distractor holding 5 of 6 of the edge's own events      | correct relation **still wins by 971×**          |
 | a nested superset (same salient events + quiet ones)      | margin collapses to **1.003×** → reported a **tie** |
 | an exact extensional duplicate                            | weights agree to **12 decimals** → a **tie**     |
-| a trivially-true relation                                 | **1 of 2 seeds** derails: correct candidate crushed to 0.002, accuracy **0.625** — *below* the 0.847 head-gate baseline |
+| a trivially-true relation                                 | **both seeds derail** into a degenerate minimum: the **wrong** relation is selected, *confidently* (0.972 / 0.934), at accuracy **0.625 / 0.475** — far below the 0.847 head-gate baseline |
 
 Partial overlap is survivable, and that is a real result. Exact and near-duplicates are
-**not identifiable at all**, and the trivially-true case is **measured, not fixed**
-(`xfail`). Two rules follow:
+**not identifiable at all** — and there `select_rule` abstains, which is the right
+answer. The trivially-true case is worse and is **measured, not fixed** (`xfail`,
+`strict`): the mixture comes back **believing the wrong rule**, so the tie and
+min-weight gates pass it straight through. **Degeneracy is not ambiguity.** Closing it
+needs two things this branch does not have: an **Occam/sparsity term** on the candidate
+weights, so the objective prefers the *minimal* separating relation, and a **fit gate**,
+so a rule the model cannot actually fit the data with is not reported as a rule.
+
+Two rules follow:
 
 - **`argmax` over the candidate weights is not a selection signal.** Python's `max`
   returns the *first* key holding the maximum, so on two indistinguishable relations it

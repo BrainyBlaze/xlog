@@ -348,17 +348,20 @@ Worked example + CUDA-gated tests:
    | a distractor sharing 5 of 6 of the edge's own events | correct relation still wins by **971×** |
    | a nested superset (same salient events)      | margin collapses to **1.003×** → reported as a **tie** |
    | an exact extensional duplicate               | weights equal to **12 decimals** → a **tie**   |
-   | a trivially-true relation                    | **1 of 2 seeds** lands in a degenerate minimum: correct candidate crushed to 0.002, accuracy 0.625 — *below* the head-gate baseline |
+   | a trivially-true relation                    | **both seeds** land in a degenerate minimum and the **wrong** relation is selected *confidently* (0.972 / 0.934) at accuracy 0.625 / 0.475 — far below the head-gate baseline |
 
-   Two consequences, both load-bearing. **(a) `argmax` over candidate weights is not a
+   Three consequences, all load-bearing. **(a) `argmax` over candidate weights is not a
    selection signal.** Python's `max` returns the *first* key holding the maximum, so on
    indistinguishable relations it reports whichever the caller listed first — a confident
    wrong answer. Use `discovery.select_rule`, which claims a rule only when one candidate
    is both *believed* (weight ≥ 0.5) and *alone* at the top (runner-up > 0.01 behind),
    and abstains otherwise. **(b) Accuracy is not evidence that the relation was
-   identified** — it is 1.000 in every tied case above. The trivially-true failure is
-   **measured, not fixed** (`xfail`); the missing ingredient is an Occam/sparsity term
-   that would make the objective prefer the *minimal* separating relation.
+   identified** — it is 1.000 in every tied case above. **(c) `select_rule` catches
+   ambiguity, not degeneracy.** In the trivially-true world the wrong candidate comes back
+   *believed and alone*, so the gates pass it through; that failure is **measured, not
+   fixed** (`xfail`, strict). Closing it needs an **Occam/sparsity term** on the candidate
+   weights (to prefer the *minimal* separating relation) and a **fit gate** (a rule the
+   model cannot fit the data with is not a rule) — neither is in this branch.
 
 `train_and_promote(...)` also accepts `training_fold`, `held_out_domains`,
 `base_kernel_checksum_before`, and `base_kernel_checksum_after`. These fields are
