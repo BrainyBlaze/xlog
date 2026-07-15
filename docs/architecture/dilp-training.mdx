@@ -1,4 +1,7 @@
-# Differentiable ILP (dILP) Training Architecture
+---
+title: "dILP Training"
+description: "Differentiable ILP on the tensorized super-graph: candidate masks, tagged credit, the neurosymbolic joint mixture, and the neural join-body path with its measured limits."
+---
 
 This document describes the dILP training subsystem: a GPU-accelerated differentiable Inductive Logic
 Programming engine that learns Datalog rules from positive/negative examples via gradient descent.
@@ -36,7 +39,7 @@ At convergence, `argmax(W)` picks the winning rule. Temperature annealing (τ �
 soft mask toward a one-hot selection.
 
 For the full mathematical treatment and the resolved design decisions that led
-to the shipped trainer, see [`rfc-tensorized-ilp.md`](rfc-tensorized-ilp.md).
+to the shipped trainer, see `rfc-tensorized-ilp` (internal RFC, retired from the docs site).
 
 ## Architecture Overview
 
@@ -227,7 +230,7 @@ row-aligned with `targets`; a single join network is supported; and the exact
 d-DNNF compiler builds one circuit over all head-binding queries, so the planted
 graph must stay within the compiler's fixed buffer (empirically ~6–7 events).
 Worked example + CUDA-gated recovery test:
-[`examples/plasticity_incircuit/`](../../examples/plasticity_incircuit/) and
+[`examples/plasticity_incircuit/`](https://github.com/BrainyBlaze/xlog/tree/main/examples/plasticity_incircuit) and
 `python/tests/test_plasticity_incircuit.py`. Head-variable ("hard filter") joins
 remain supported as pre-filters; only the existential-join case is new.
 
@@ -293,7 +296,7 @@ new here is the neural predicate on an existential variable, trained *through* t
 — not an enlargement of the hypothesis space.
 
 Worked example + CUDA-gated tests:
-[`examples/neural_join_discovery/`](../../examples/neural_join_discovery/),
+[`examples/neural_join_discovery/`](https://github.com/BrainyBlaze/xlog/tree/main/examples/neural_join_discovery),
 `python/tests/test_join_discovery.py` and `python/tests/test_join_identifiability.py`.
 
 **Limits — stated plainly:**
@@ -447,14 +450,14 @@ RFC. The live references are:
 
 | Document | Content |
 |----------|---------|
-| [`rfc-tensorized-ilp.md`](rfc-tensorized-ilp.md) | Full RFC: mathematical foundation, hardware rationale, implementation map, and resolved design decisions |
-| [`dilp-showcase-report.md`](dilp-showcase-report.md) | Validation: four-stage showcase run analysis |
-| [`external-consumer-diagnostics.md`](external-consumer-diagnostics.md) | External-consumer issue resolutions and reusable diagnostics |
+| `rfc-tensorized-ilp` (internal RFC, retired from the docs site) | Full RFC: mathematical foundation, hardware rationale, implementation map, and resolved design decisions |
+| `dilp-showcase-report` (internal validation report, retired) | Validation: four-stage showcase run analysis |
+| `external-consumer-diagnostics` (retired) | External-consumer issue resolutions and reusable diagnostics |
 
 ## See Also
 
-- [Python Bindings — ILP Training API](python-bindings.md#ilp-training-dilp-beta) — user-facing API reference
-- [External Consumer Diagnostics](external-consumer-diagnostics.md) — proof traces, rule inventories, runtime audits, and transfer metrics
-- [GPU Execution](gpu-execution.md) — mask DAG evaluation, stream compaction
-- [Probabilistic Tier](xlog-prob.md) — XGCF circuits, provenance (shared infrastructure)
-- [Data Interoperability](cudf-interop.md) — DLPack details
+- [Python API reference](/reference/python) — user-facing API reference
+- [Diagnostics guide](/guides/diagnostics) — proof traces, rule inventories, runtime audits, and transfer metrics
+- [GPU Execution](/architecture/gpu-execution) — mask DAG evaluation, stream compaction
+- [Probabilistic reasoning](/probabilistic/engines) — XGCF circuits, provenance (shared infrastructure)
+- [Interop guide](/guides/interop) — DLPack details

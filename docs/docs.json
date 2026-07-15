@@ -3,17 +3,33 @@
   "theme": "mint",
   "name": "XLOG",
   "description": "GPU-native logic programming for unified symbolic reasoning",
-  "colors": { "primary": "#4F46E5", "light": "#818CF8", "dark": "#312E81" },
-  "logo": { "light": "/assets/logo/light.svg", "dark": "/assets/logo/dark.svg" },
+  "colors": {
+    "primary": "#4F46E5",
+    "light": "#818CF8",
+    "dark": "#312E81"
+  },
+  "logo": {
+    "light": "/assets/logo/light.svg",
+    "dark": "/assets/logo/dark.svg"
+  },
   "favicon": "/assets/favicon.svg",
   "navbar": {
-    "links": [{ "label": "GitHub", "href": "https://github.com/BrainyBlaze/xlog" }]
+    "links": [
+      {
+        "label": "GitHub",
+        "href": "https://github.com/BrainyBlaze/xlog"
+      }
+    ]
   },
   "footer": {
-    "socials": { "github": "https://github.com/BrainyBlaze/xlog" }
+    "socials": {
+      "github": "https://github.com/BrainyBlaze/xlog"
+    }
   },
   "contextual": {
-    "options": ["copy"],
+    "options": [
+      "copy"
+    ],
     "display": "header"
   },
   "navigation": {
@@ -21,58 +37,232 @@
       {
         "tab": "Documentation",
         "groups": [
-          { "group": "Get Started", "pages": ["index", "get-started/quickstart", "get-started/installation"] },
-          { "group": "Core Concepts", "pages": ["core-concepts/how-xlog-works", "core-concepts/gpu-residency"] },
-          { "group": "Language Guide", "pages": ["language-guide/facts-and-rules", "language-guide/recursion", "language-guide/negation", "language-guide/arithmetic-and-functions", "language-guide/aggregation", "language-guide/lists-and-meta", "language-guide/modules", "language-guide/pragmas"] },
-          { "group": "Probabilistic Programming", "pages": ["probabilistic/engines"] },
-          { "group": "Epistemic Reasoning", "pages": ["epistemic/overview"] },
-          { "group": "Neural-Symbolic", "pages": ["neural/rule-learning", "neural/exact-induction"] },
-          { "group": "Guides", "pages": ["guides/wcoj-tuning", "guides/interop", "guides/diagnostics", "guides/benchmarking"] }
+          {
+            "group": "Get Started",
+            "pages": [
+              "index",
+              "get-started/quickstart",
+              "get-started/installation"
+            ]
+          },
+          {
+            "group": "Core Concepts",
+            "pages": [
+              "core-concepts/how-xlog-works",
+              "core-concepts/gpu-residency"
+            ]
+          },
+          {
+            "group": "Language Guide",
+            "pages": [
+              "language-guide/facts-and-rules",
+              "language-guide/recursion",
+              "language-guide/negation",
+              "language-guide/arithmetic-and-functions",
+              "language-guide/aggregation",
+              "language-guide/lists-and-meta",
+              "language-guide/modules",
+              "language-guide/pragmas"
+            ]
+          },
+          {
+            "group": "Probabilistic Programming",
+            "pages": [
+              "probabilistic/engines"
+            ]
+          },
+          {
+            "group": "Epistemic Reasoning",
+            "pages": [
+              "epistemic/overview"
+            ]
+          },
+          {
+            "group": "Neural-Symbolic",
+            "pages": [
+              "neural/rule-learning",
+              "neural/exact-induction"
+            ]
+          },
+          {
+            "group": "Guides",
+            "pages": [
+              "guides/wcoj-tuning",
+              "guides/interop",
+              "guides/diagnostics",
+              "guides/benchmarking"
+            ]
+          }
         ]
       },
       {
         "tab": "Architecture",
         "groups": [
-          { "group": "System", "pages": ["architecture/overview", "architecture/gpu-execution", "architecture/device-runtime", "architecture/arithmetic", "architecture/language-completeness"] },
-          { "group": "Joins & Optimization", "pages": ["architecture/wcoj", "architecture/factorized-execution", "architecture/factorized-execution-internals", "architecture/query-optimizer", "architecture/adaptive-indexing", "architecture/multi-gpu"] },
-          { "group": "Reasoning Engines", "pages": ["architecture/epistemic-internals", "architecture/solver-services"] },
-          { "group": "Project", "pages": ["architecture/certification", "architecture/release-process", "architecture/roadmap"] }
+          {
+            "group": "System",
+            "pages": [
+              "architecture/overview",
+              "architecture/gpu-execution",
+              "architecture/device-runtime",
+              "architecture/arithmetic",
+              "architecture/language-completeness",
+              "architecture/dilp-training"
+            ]
+          },
+          {
+            "group": "Joins & Optimization",
+            "pages": [
+              "architecture/wcoj",
+              "architecture/factorized-execution",
+              "architecture/factorized-execution-internals",
+              "architecture/query-optimizer",
+              "architecture/adaptive-indexing",
+              "architecture/multi-gpu"
+            ]
+          },
+          {
+            "group": "Reasoning Engines",
+            "pages": [
+              "architecture/epistemic-internals",
+              "architecture/solver-services"
+            ]
+          },
+          {
+            "group": "Project",
+            "pages": [
+              "architecture/certification",
+              "architecture/release-process",
+              "architecture/roadmap"
+            ]
+          }
         ]
       },
       {
         "tab": "Reference",
         "groups": [
-          { "group": "Language", "pages": ["reference/language"] },
-          { "group": "Tooling", "pages": ["reference/cli"] },
-          { "group": "Configuration", "pages": ["reference/environment-variables", "reference/errors"] },
-          { "group": "APIs", "pages": ["reference/python", "reference/rust", "reference/cuda"] }
+          {
+            "group": "Language",
+            "pages": [
+              "reference/language"
+            ]
+          },
+          {
+            "group": "Tooling",
+            "pages": [
+              "reference/cli"
+            ]
+          },
+          {
+            "group": "Configuration",
+            "pages": [
+              "reference/environment-variables",
+              "reference/errors"
+            ]
+          },
+          {
+            "group": "APIs",
+            "pages": [
+              "reference/python",
+              "reference/rust",
+              "reference/cuda"
+            ]
+          }
         ]
       }
     ]
   },
   "redirects": [
-    { "source": "/language-reference", "destination": "/reference/language" },
-    { "source": "/ARCHITECTURE", "destination": "/architecture/overview" },
-    { "source": "/BENCHMARKS", "destination": "/guides/benchmarking" },
-    { "source": "/project-overview", "destination": "/" },
-    { "source": "/release-process", "destination": "/architecture/release-process" },
-    { "source": "/ROADMAP", "destination": "/architecture/roadmap" },
-    { "source": "/epistemic-solver-semantics-guide", "destination": "/epistemic/overview" },
-    { "source": "/wcoj-architecture-guide", "destination": "/architecture/wcoj" },
-    { "source": "/wcoj-user-guide", "destination": "/guides/wcoj-tuning" },
-    { "source": "/architecture/xlog-prob", "destination": "/probabilistic/engines" },
-    { "source": "/architecture/dilp-training", "destination": "/neural/rule-learning" },
-    { "source": "/architecture/bounded-exact-induction", "destination": "/neural/exact-induction" },
-    { "source": "/architecture/cudf-interop", "destination": "/guides/interop" },
-    { "source": "/architecture/living-world-diagnostics", "destination": "/guides/diagnostics" },
-    { "source": "/architecture/python-bindings", "destination": "/reference/python" },
-    { "source": "/architecture/cli-reference", "destination": "/reference/cli" },
-    { "source": "/architecture/cuda-certification", "destination": "/architecture/certification" },
-    { "source": "/architecture/epistemic-semantics", "destination": "/architecture/epistemic-internals" },
-    { "source": "/architecture/multi-gpu-join", "destination": "/architecture/multi-gpu" },
-    { "source": "/api/python", "destination": "/reference/python" },
-    { "source": "/api/rust", "destination": "/reference/rust" },
-    { "source": "/api/cuda", "destination": "/reference/cuda" },
-    { "source": "/api/README", "destination": "/reference/rust" }
+    {
+      "source": "/language-reference",
+      "destination": "/reference/language"
+    },
+    {
+      "source": "/ARCHITECTURE",
+      "destination": "/architecture/overview"
+    },
+    {
+      "source": "/BENCHMARKS",
+      "destination": "/guides/benchmarking"
+    },
+    {
+      "source": "/project-overview",
+      "destination": "/"
+    },
+    {
+      "source": "/release-process",
+      "destination": "/architecture/release-process"
+    },
+    {
+      "source": "/ROADMAP",
+      "destination": "/architecture/roadmap"
+    },
+    {
+      "source": "/epistemic-solver-semantics-guide",
+      "destination": "/epistemic/overview"
+    },
+    {
+      "source": "/wcoj-architecture-guide",
+      "destination": "/architecture/wcoj"
+    },
+    {
+      "source": "/wcoj-user-guide",
+      "destination": "/guides/wcoj-tuning"
+    },
+    {
+      "source": "/architecture/xlog-prob",
+      "destination": "/probabilistic/engines"
+    },
+    {
+      "source": "/architecture/dilp-training",
+      "destination": "/neural/rule-learning"
+    },
+    {
+      "source": "/architecture/bounded-exact-induction",
+      "destination": "/neural/exact-induction"
+    },
+    {
+      "source": "/architecture/cudf-interop",
+      "destination": "/guides/interop"
+    },
+    {
+      "source": "/architecture/living-world-diagnostics",
+      "destination": "/guides/diagnostics"
+    },
+    {
+      "source": "/architecture/python-bindings",
+      "destination": "/reference/python"
+    },
+    {
+      "source": "/architecture/cli-reference",
+      "destination": "/reference/cli"
+    },
+    {
+      "source": "/architecture/cuda-certification",
+      "destination": "/architecture/certification"
+    },
+    {
+      "source": "/architecture/epistemic-semantics",
+      "destination": "/architecture/epistemic-internals"
+    },
+    {
+      "source": "/architecture/multi-gpu-join",
+      "destination": "/architecture/multi-gpu"
+    },
+    {
+      "source": "/api/python",
+      "destination": "/reference/python"
+    },
+    {
+      "source": "/api/rust",
+      "destination": "/reference/rust"
+    },
+    {
+      "source": "/api/cuda",
+      "destination": "/reference/cuda"
+    },
+    {
+      "source": "/api/README",
+      "destination": "/reference/rust"
+    }
   ]
 }
