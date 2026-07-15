@@ -7,7 +7,12 @@ torch = pytest.importorskip("torch")
 pyxlog = pytest.importorskip("pyxlog")
 
 from pyxlog.ilp.join_bodies import prepare_extension
-from pyxlog.ilp.neural_credit import CandidateSpec, credit_nll, train_engine_mode
+from pyxlog.ilp.neural_credit import (
+    CandidateSpec,
+    credit_nll,
+    kfold_select,
+    train_engine_mode,
+)
 
 
 def test_credit_is_sum_of_prob_times_score_hand_computed() -> None:
@@ -163,10 +168,16 @@ def _w1_world(seed: int = 0):
     )
 
 
-def _w1_source(world) -> str:
+def _w1_source(world, extra: dict[str, list[tuple[int, int]]] | None = None) -> str:
+    """The W1 source, optionally with additional ground relations spliced in before
+    the (unchanged) plastic/2 rule -- used by the control tests below to add a
+    coincidental (`lucky`), a perfect-relational (`tag`), or a trivially-true
+    (`anything`) escape to the pool without duplicating the base world."""
     lines = []
     for name in ("has_event", "has_event_bad", "co", "sal"):
         lines += [f"{name}({a}, {b})." for a, b in world[name]]
+    for name, pairs in (extra or {}).items():
+        lines += [f"{name}({a}, {b})." for a, b in pairs]
     lines.append(TEMPLATE)
     return "\n".join(lines)
 
@@ -238,3 +249,118 @@ def test_w1_engine_mode_neural_wins_detector_separates_and_training_is_determini
     # produce a bitwise-equal final loss.
     result_b, _ = _train_w1(world, seed=0)
     assert result.losses[-1] == result_b.losses[-1]
+
+
+# ---------------------------------------------------------------------------
+# Task 5: engine-mode CONTROLS for the holdout arbiter. Each test extends the W1
+# world with one additional relation (via `_w1_source`'s `extra=` hook) and runs
+# the real `kfold_select` -- a fresh `prog_factory` recompiles the ENGINE program
+# per fold, so this exercises the whole holdout path Task 4 built, not a mock of
+# it. `folds=4, steps=300` keeps pod time sane; `seed=0` everywhere.
+# ---------------------------------------------------------------------------
+
+def _w1_make_network():
+    net = torch.nn.Sequential(torch.nn.Linear(1, 2), torch.nn.Softmax(dim=-1)).cuda()
+    with torch.no_grad():
+        net[0].bias[1] -= 2.0
+    return net
+
+
+@cuda
+def test_kill_criterion_holdout_separates_coincidental_from_correct():
+    """THIS IS THE PHASE KILL-CRITERION -- if this test fails on GPU, the phase stops.
+
+    Extends W1 with `lucky(Ev, L)`: truthful for edges 0..n//2 (every event of such
+    an edge is labeled with that edge's TRUE label), then coincidental for the rest
+    (labeled by `random.Random(7000)`, uncorrelated with the true label). `lucky` is
+    exactly the crisp-but-coincidental relation the training-weight-only selector
+    cannot be trusted to reject: it fits perfectly on the half of the data it was
+    built to fit, so its TRAINING score can rival the true neural join. Held-out
+    generalization is what must tell them apart -- `lucky`'s accuracy should collapse
+    towards chance on its random half while `sal`'s does not, so k-fold holdout must
+    still pick the true join.
+
+    measured numbers recorded after the pod run (holdout scores: sal vs lucky).
+    """
+    world = _w1_world(seed=0)
+    half = N_EDGES // 2
+    rng = random.Random(7000)
+    lucky = []
+    for edge in range(N_EDGES):
+        label = world["labels"][edge] if edge < half else bool(rng.choice([0, 1]))
+        lucky += [(e, int(label)) for e in world["own"][edge]]
+
+    src = _w1_source(world, extra={"lucky": lucky})
+    features = torch.tensor([[f] for f in world["features"]], dtype=torch.float32).cuda()
+    facts = [(edge, 1) for edge in range(N_EDGES)]
+    is_positive = [world["labels"][edge] for edge in range(N_EDGES)]
+
+    sel = kfold_select(
+        lambda: pyxlog.IlpProgramFactory.compile(src, device=0, memory_mb=1024),
+        "W", facts, is_positive, _w1_make_network, features,
+        neural_relations={"sal": world["n_ev"]}, folds=4, steps=300, seed=0,
+    )
+    print(f"\n[kill-criterion] rule={sel.rule} reason={sel.reason}")
+    assert sel.rule == ("has_event", "sal"), sel
+
+
+@cuda
+def test_occam_perfect_relational_beats_soft_neural():
+    """With a PERFECT relational escape `tag(Ev, L)` in the pool -- truthful for
+    EVERY event, not just half like `lucky` above -- holdout selection should
+    prefer the simpler relational candidate over the soft neural join at equal
+    (near-1.0) generalization. This is Occam's razor applied to holdout SCORES,
+    not training weight, which cannot distinguish crisp-and-correct from
+    soft-and-correct in principle (both fit the training data).
+
+    measured numbers recorded after the pod run (sel.reason / sel.margin).
+    """
+    world = _w1_world(seed=0)
+    tag = [(e, int(world["labels"][edge]))
+           for edge in range(N_EDGES) for e in world["own"][edge]]
+
+    src = _w1_source(world, extra={"tag": tag})
+    features = torch.tensor([[f] for f in world["features"]], dtype=torch.float32).cuda()
+    facts = [(edge, 1) for edge in range(N_EDGES)]
+    is_positive = [world["labels"][edge] for edge in range(N_EDGES)]
+
+    sel = kfold_select(
+        lambda: pyxlog.IlpProgramFactory.compile(src, device=0, memory_mb=1024),
+        "W", facts, is_positive, _w1_make_network, features,
+        neural_relations={"sal": world["n_ev"]}, folds=4, steps=300, seed=0,
+    )
+    print(f"\n[Occam] rule={sel.rule} reason={sel.reason} margin={sel.margin}")
+    assert sel.rule == ("has_event", "tag"), sel
+    assert "Occam" in sel.reason or sel.margin > 0
+
+
+@cuda
+def test_trivially_true_relation_no_confident_wrong_answer():
+    """`anything(Ev, L)` covers EVERY event x label pair -- a relation with zero
+    discriminative content that is nonetheless perfectly "true" everywhere it is
+    asked. A training-weight-only selector can land on such a relation with high
+    confidence and no signal (this is the exact failure `discovery.select_rule`'s
+    MIN_WEIGHT/TIE_TOLERANCE gates were built against -- see discovery.py). The
+    holdout arbiter must not hand out a CONFIDENT WRONG ANSWER for it: either
+    `anything` never wins (the true join still does, or nobody clears the fit
+    gate), or the arbiter abstains and says why.
+
+    measured numbers recorded after the pod run (sel.rule / sel.reason).
+    """
+    world = _w1_world(seed=0)
+    anything = [(e, l) for e in range(world["n_ev"]) for l in (0, 1)]
+
+    src = _w1_source(world, extra={"anything": anything})
+    features = torch.tensor([[f] for f in world["features"]], dtype=torch.float32).cuda()
+    facts = [(edge, 1) for edge in range(N_EDGES)]
+    is_positive = [world["labels"][edge] for edge in range(N_EDGES)]
+
+    sel = kfold_select(
+        lambda: pyxlog.IlpProgramFactory.compile(src, device=0, memory_mb=1024),
+        "W", facts, is_positive, _w1_make_network, features,
+        neural_relations={"sal": world["n_ev"]}, folds=4, steps=300, seed=0,
+    )
+    print(f"\n[anything] rule={sel.rule} reason={sel.reason} tied={sel.tied}")
+    assert sel.rule is None or sel.rule == ("has_event", "sal"), sel
+    if sel.rule is None:
+        assert "fit gate" in sel.reason or sel.tied
