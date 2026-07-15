@@ -208,7 +208,7 @@ pressure anywhere** — no L1, no `weight_decay`, no simplex over the weights. M
 | a distractor holding 5 of 6 of the edge's own events      | correct relation **still wins by 971×**          |
 | a nested superset (same salient events + quiet ones)      | margin collapses to **1.003×** → reported a **tie** |
 | an exact extensional duplicate                            | weights agree to **12 decimals** → a **tie**     |
-| a trivially-true relation                                 | **both seeds derail** into a degenerate minimum: the **wrong** relation is selected, *confidently* (0.972 / 0.934), at accuracy **0.625 / 0.475** — far below the 0.847 head-gate baseline |
+| a trivially-true relation                                 | **1 of 2 seeds derails** into a degenerate minimum: the **wrong** relation is selected, *confidently* (0.955), at accuracy **0.500** — far below the 0.847 head-gate baseline. The other seed recovered when the distractor composition became exactly class-independent |
 
 Partial overlap is survivable, and that is a real result. Exact and near-duplicates are
 **not identifiable at all** — and there `select_rule` abstains, which is the right

@@ -14,13 +14,17 @@ two candidates with the same extension are exactly degenerate: the head probabil
     1. partial overlap        -> the correct relation still wins, and by a lot (971x)
     2. exact duplicate        -> a TIE. Weights agreed to twelve decimals; `argmax` would
                                  have handed back whichever relation was typed first.
-    3. trivially-true relation-> a degenerate minimum, on BOTH seeds, and `select_rule`
-                                 does NOT catch it: the WRONG candidate comes back
-                                 believed (0.972 / 0.934) and alone at the top, at
-                                 accuracy 0.625 / 0.475. XFAIL: measured, not fixed.
-                                 Degeneracy is not ambiguity -- the gates below detect a
-                                 mixture that believes nothing, not one that confidently
-                                 believes the wrong thing.
+    3. trivially-true relation-> a degenerate minimum `select_rule` does NOT catch:
+                                 the WRONG candidate comes back believed and alone at
+                                 the top. Re-measured after the class-independent
+                                 distractor fix: seed 0 RECOVERED (correct rule at
+                                 0.9996, accuracy 1.000); seed 1 still derails
+                                 (co_occurs at 0.955, accuracy 0.500). XFAIL(strict) on
+                                 the seed that still fails. Degeneracy is not ambiguity
+                                 -- the gates below detect a mixture that believes
+                                 nothing, not one that confidently believes the wrong
+                                 thing; the root cause (no Occam term, no fit gate) is
+                                 unchanged.
 """
 import random
 
@@ -222,19 +226,31 @@ def test_an_exact_duplicate_relation_is_a_tie_and_the_run_says_so(seed):
 
 
 @cuda
-@pytest.mark.xfail(
-    reason="MEASURED, NOT FIXED, AND `select_rule` DOES NOT SAVE US HERE. A trivially-true "
-           "relation in the vocabulary drives the run into a degenerate minimum, and it "
-           "does so on BOTH seeds: seed 0 selects `post_before_pre` at weight 0.972 "
-           "(accuracy 0.625), seed 1 selects `co_occurs` at 0.934 (accuracy 0.475) -- both "
-           "far below the 0.847 head-gate baseline this work claims to beat. The wrong "
-           "candidate is BELIEVED and ALONE at the top, so the tie/min-weight gates pass "
-           "it through: this is a confident wrong answer, not an abstention. The objective "
-           "has no Occam/sparsity term to prefer the minimal separating relation, and "
-           "nothing gates on whether the fit is any good. Both are absent from this branch.",
-    strict=True,
+@pytest.mark.parametrize(
+    "seed",
+    [
+        # Seed 0 RECOVERED when the distractor became exactly class-independent
+        # (review finding 7): re-measured, it now selects the correct rule at 0.9996,
+        # accuracy 1.000. The strict xfail caught the recovery as an XPASS -- which is
+        # the whole point of strict.
+        0,
+        pytest.param(
+            1,
+            marks=pytest.mark.xfail(
+                reason="MEASURED, NOT FIXED, and `select_rule` does not save us here. "
+                       "With a trivially-true relation in the vocabulary, seed 1 still "
+                       "lands in a degenerate minimum: it selects `co_occurs` at weight "
+                       "0.955 (accuracy 0.500 -- coin-flip, far below the 0.847 "
+                       "head-gate baseline). The wrong candidate is BELIEVED and ALONE "
+                       "at the top, so the tie/min-weight gates pass it through: a "
+                       "confident wrong answer, not an abstention. The fair-distractor "
+                       "fix recovered seed 0; the ROOT CAUSE -- no Occam/sparsity term, "
+                       "no fit gate -- is unchanged, and this seed still exhibits it.",
+                strict=True,
+            ),
+        ),
+    ],
 )
-@pytest.mark.parametrize("seed", [0, 1])
 def test_a_trivially_true_relation_does_not_derail_the_selection(seed):
     """`anything(Ev, E)` holds for EVERY (event, edge): its mask is ~1 everywhere.
 

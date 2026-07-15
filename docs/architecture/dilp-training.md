@@ -348,7 +348,7 @@ Worked example + CUDA-gated tests:
    | a distractor sharing 5 of 6 of the edge's own events | correct relation still wins by **971×** |
    | a nested superset (same salient events)      | margin collapses to **1.003×** → reported as a **tie** |
    | an exact extensional duplicate               | weights equal to **12 decimals** → a **tie**   |
-   | a trivially-true relation                    | **both seeds** land in a degenerate minimum and the **wrong** relation is selected *confidently* (0.972 / 0.934) at accuracy 0.625 / 0.475 — far below the head-gate baseline |
+   | a trivially-true relation                    | **1 of 2 seeds** lands in a degenerate minimum and selects the **wrong** relation *confidently* (0.955, accuracy 0.500 — far below the head-gate baseline); the other seed recovered when the distractor became exactly class-independent |
 
    Three consequences, all load-bearing. **(a) `argmax` over candidate weights is not a
    selection signal.** Python's `max` returns the *first* key holding the maximum, so on
