@@ -37,7 +37,6 @@ import torch
 from pyxlog.ilp.discovery import (
     CORRECT_RELATION,
     NETWORK,
-    POSITIVE_LABEL,
     build_join_candidates,
     make_world,
     select_rule,
@@ -129,7 +128,6 @@ def main() -> None:
         print(f"  {rule_id:<24} weight={weights[rule_id]:.5f}  {mark}")
 
     if not selection.decided:
-        relation = None
         print(f"\nNo rule selected: {selection.reason}")
     else:
         relation = selection.rule[len("cand_"):]

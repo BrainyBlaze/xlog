@@ -290,22 +290,25 @@ def test_the_join_index_is_built_once_per_candidate_not_once_per_step() -> None:
     """I2: the extension is STATIC, so its device index is built OUTSIDE the hot loop.
     A per-step rebuild would be a host->device copy every step and would not fail any
     other test, so it is pinned by counting the calls across a real multi-step run:
-    two join candidates, many steps, exactly two `prepare_extension` calls."""
-    import pyxlog.ilp.neurosymbolic as ns
+    two join candidates, many steps, exactly two `prepare_extension` calls.
+
+    The patch targets the name in the MIXTURE's namespace — that is the binding the
+    production call resolves through, so the counter intercepts the real call path."""
+    from unittest import mock
+
+    from pyxlog.ilp.join_bodies import prepare_extension as real_prepare
 
     net, feats = _net_and_feats()
-    real_prepare = ns.prepare_extension
     calls = []
 
     def counting_prepare(extension, device, num_rows=None):
         calls.append(len(extension))
         return real_prepare(extension, device, num_rows=num_rows)
 
-    ns.prepare_extension = counting_prepare
-    try:
+    with mock.patch(
+        "pyxlog.ilp.neurosymbolic.prepare_extension", side_effect=counting_prepare
+    ):
         _train(_world_source(), net, feats, steps=25)
-    finally:
-        ns.prepare_extension = real_prepare
 
     assert len(calls) == 2, calls      # once per join candidate, NOT once per step
 
