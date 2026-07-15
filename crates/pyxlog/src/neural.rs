@@ -621,14 +621,60 @@ impl CompiledProgram {
     /// source the forward reads (for `DomainRow`/`ConstDummy` groups). The name is
     /// owned by the Python driver and flows in as data — the engine holds no
     /// hardcoded source name.
+    ///
+    /// `ids` states which ROW of that tensor holds which domain CONSTANT (`ids[j]` is
+    /// the constant whose features are row `j`). The tensor carries no labels, so the
+    /// correspondence is a convention, and the driver owns it: registering it here
+    /// makes this list the ONE map both engines resolve a constant through.
+    ///
+    /// The ids are REQUIRED, not defaulted: the tensor and the statement of what its
+    /// rows are cannot travel separately. The alternative — accepting a bare tensor and
+    /// falling back to "row = the constant's position in the join domain" — is precisely
+    /// the defect this parameter closes, and it is wrong SILENTLY (it reads a different
+    /// row than the torch path for any domain that is not exactly `0..D-1`). A caller who
+    /// means the dense layout says so with `list(range(D))`, which costs one expression
+    /// and cannot be misread.
     fn register_domain_tensor_source(
         &mut self,
         py: Python<'_>,
         name: String,
         tensor: PyObject,
+        ids: Vec<i64>,
     ) -> PyResult<()> {
+        // Validate HERE, at the public boundary, not only in the Python wrapper: a
+        // direct pyo3 caller with more ids than rows sends the circuit's DomainRow
+        // gather out of bounds on device (a context-poisoning CUDA assert), and a
+        // duplicated id silently resolves to its first occurrence instead of the
+        // refusal-by-name the contract documents.
+        let rows: usize = {
+            let shape_obj = tensor.getattr(py, "shape")?;
+            shape_obj.bind(py).get_item(0)?.extract()?
+        };
+        if ids.len() != rows {
+            return Err(PyValueError::new_err(format!(
+                "register_domain_tensor_source('{}'): {} id(s) for {} tensor row(s); \
+                 there must be exactly one id per row (id j names the domain constant \
+                 whose feature vector is row j)",
+                name,
+                ids.len(),
+                rows
+            )));
+        }
+        let mut seen: std::collections::HashMap<i64, usize> =
+            std::collections::HashMap::with_capacity(ids.len());
+        for (row, id) in ids.iter().enumerate() {
+            if let Some(prev) = seen.insert(*id, row) {
+                return Err(PyValueError::new_err(format!(
+                    "register_domain_tensor_source('{}'): domain_ids must not repeat a \
+                     constant: {} is claimed by row {} and row {}, so the row holding \
+                     its features would be ambiguous",
+                    name, id, prev, row
+                )));
+            }
+        }
         self.add_tensor_source(py, name.clone(), tensor)?;
         self.domain_source = Some(name);
+        self.domain_ids = ids;
         Ok(())
     }
 
@@ -2437,7 +2483,31 @@ impl CompiledProgram {
                         pred_name, join.relation, occ.input_var
                     )));
                 }
-                for (row, ev) in event_domain.iter().enumerate() {
+                // Which feature row holds each constant. `domain_ids` is the one map —
+                // the same one the torch-side mixture resolves through — so a constant
+                // is looked up in it rather than standing in for its own rank. A
+                // constant's rank in this relation's domain is NOT its row: the caller
+                // may hold features for constants the relation never joins, and every
+                // rank after such a gap slides. Built ONCE per signature: a linear
+                // .position() per joined constant is O(|domain|·|ids|), which at the
+                // feature-per-event scale this path exists for is billions of
+                // comparisons at compile time.
+                let row_of: std::collections::HashMap<i64, usize> = self
+                    .domain_ids
+                    .iter()
+                    .enumerate()
+                    .map(|(row, c)| (*c, row))
+                    .collect();
+                for ev in event_domain.iter() {
+                    let row = *row_of.get(ev).ok_or_else(|| {
+                        PyValueError::new_err(format!(
+                            "Query rule for '{}': existential-join relation '{}' joins domain \
+                             constant {}, which is not in domain_ids for network '{}' — so no \
+                             row of its domain feature tensor holds that constant's features. \
+                             Give every joined constant an id, or drop the fact.",
+                            pred_name, join.relation, ev, occ.info.network
+                        ))
+                    })?;
                     groups.push(NeuralGroup {
                         info: occ.info.clone(),
                         input_source: InputSource::DomainRow(row),
@@ -2609,9 +2679,15 @@ impl CompiledProgram {
 
     /// Materialize the sorted, distinct integer constants appearing at argument
     /// position `arg_pos` of a relation's GROUND facts — the real domain a
-    /// Stage-B existential join grounds the neural predicate over. Row order in
-    /// this vector is the canonical domain order: it indexes `DomainRow(_)` for
-    /// the per-event leaves and orders the per-edge `prob_queries`.
+    /// Stage-B existential join grounds the neural predicate over. This vector says
+    /// WHICH constants the predicate is grounded at, and orders the per-edge
+    /// `prob_queries`.
+    ///
+    /// It does NOT decide which feature row a constant reads — `domain_ids` is the
+    /// canonical constant -> row map, and it alone indexes `DomainRow(_)`. This domain is
+    /// only a subset of it: the caller may hold features for constants the relation never
+    /// joins, and every rank after such a gap slides. A constant's position in this vector
+    /// is therefore never its row.
     fn materialize_int_domain(&self, relation: &str, arg_pos: usize) -> PyResult<Vec<i64>> {
         use std::collections::BTreeSet;
         let mut set: BTreeSet<i64> = BTreeSet::new();
@@ -3215,11 +3291,14 @@ impl CompiledProgram {
         }
     }
 
-    /// The Stage-B join-domain source name supplied by the Python driver. A
-    /// `Domain`/`Dummy` fetch is only produced for a join signature, which is built
-    /// only after the domain source is registered — so a missing name here is an
-    /// internal invariant violation, surfaced as a clear error rather than papered
-    /// over with a hardcoded fallback name.
+    /// The Stage-B join-domain source name supplied by the Python driver. A join
+    /// SIGNATURE is built for every rule defining the train head, whether or not a
+    /// domain source was ever registered — so "no name" is NOT an internal invariant
+    /// violation; it is what a driver that never called `register_domain_tensor_source`
+    /// (typically: a caller who omitted `domain_inputs`) reaches. It is surfaced as a
+    /// clear error naming that call, rather than papered over with a hardcoded fallback
+    /// name. The Python driver checks the same condition earlier, in the caller's own
+    /// vocabulary, so this message is the backstop and not the usual diagnostic.
     fn domain_source_name(&self) -> PyResult<&str> {
         self.domain_source.as_deref().ok_or_else(|| {
             PyRuntimeError::new_err(

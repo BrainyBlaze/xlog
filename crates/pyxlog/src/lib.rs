@@ -526,6 +526,29 @@ pub struct CompiledProgram {
     /// registered; read by the join forward to resolve `DomainRow`/`ConstDummy`
     /// groups instead of an engine-side hardcoded name.
     pub(crate) domain_source: Option<String>,
+    /// Which ROW of the join-domain tensor holds which domain CONSTANT, as stated by
+    /// the Python driver: `domain_ids[j]` is the constant whose feature vector is row
+    /// `j`. This is the SINGLE source of truth for "constant -> feature row" — the
+    /// torch-side mixture and this circuit look the row up in the same list, so they
+    /// cannot drift apart.
+    ///
+    /// The ids arrive WITH the tensor (`register_domain_tensor_source` requires them), so
+    /// there is no "no ids registered" state to fall back from. The fallback that used to
+    /// live here — row = the constant's position in the relation's materialized domain —
+    /// is the defect this map exists to close: it reads a different row from the torch
+    /// path for any domain that is not exactly `0..D-1`, silently, and no test that
+    /// stays inside that coincidence can see it. Keeping it as a reachable branch would
+    /// leave the same silent-wrong mode one call away.
+    ///
+    /// Empty until a domain source is registered — and that state IS reachable from a
+    /// caller mistake, not only from an internal bug: a join signature is compiled for
+    /// every rule defining the train head (`joint_candidate_eligibility`), so a program
+    /// whose driver forgot `domain_inputs` reaches this map while it is still empty. The
+    /// lookup then fails with "constant N is not in domain_ids", which is true but points
+    /// at the wrong parameter, so the Python driver checks `domain_inputs` for every join
+    /// candidate BEFORE it asks for eligibility. A lookup miss here is therefore a real
+    /// error to surface (a joined constant with no id), never something to paper over.
+    pub(crate) domain_ids: Vec<i64>,
     /// Original program source (for dynamic query compilation)
     pub(crate) _source: String,
     /// Parsed program AST (for signature analysis)
