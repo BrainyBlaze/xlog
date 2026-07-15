@@ -1,0 +1,674 @@
+"""The join extension must come FROM THE ENGINE. If this test passed while the map
+were supplied from Python, it would prove nothing -- so it asserts against the
+engine's own answer for facts the engine compiled.
+
+API NOTE (correction found on the GPU box, 2026-07-13): the object the trainer's
+mixture holds is `pyxlog.Program.compile(...)` -> `CompiledProgram`, whose only
+read surface is `evaluate*` -- it does not expose facts at all (`EvalResult.atoms`
+comes back empty for ground facts, and it has no `batch_fact_membership`).
+`pyxlog.IlpProgramFactory.compile(...)` -> `CompiledIlpProgram` does expose facts,
+via `relation_facts(name) -> list[list[int]]`, a direct enumeration of the
+relation's extension. `read_join_extension` is built on that call.
+"""
+import pytest
+
+torch = pytest.importorskip("torch")
+pyxlog = pytest.importorskip("pyxlog")
+
+from pyxlog.ilp.join_bodies import JoinBody, read_join_extension
+from pyxlog.ilp.neurosymbolic import (
+    NeuralBodySpec,
+    NeuroSymbolicTrainingConfig,
+    train_neurosymbolic_program,
+)
+
+pytestmark = pytest.mark.skipif(
+    not torch.cuda.is_available(), reason="xlog engine requires CUDA"
+)
+
+_SOURCE = """
+    pre_before_post(0, 0). pre_before_post(1, 0).
+    pre_before_post(2, 1).
+    pre_before_post(4, 2).
+    pred pre_before_post(i64, i64).
+"""
+
+_JB = JoinBody(
+    neural_predicate="saliency", network="sal_net", join_var="Ev",
+    relation="pre_before_post", event_arg=0, head_arg=1,
+)
+
+
+def test_extension_is_read_from_the_engine() -> None:
+    prog = pyxlog.IlpProgramFactory.compile(_SOURCE, device=0, memory_mb=64)
+    prog.evaluate()
+    ext = read_join_extension(prog, _JB, num_bindings=4)
+    assert ext == [[0, 1], [2], [4], []]     # edge 3 joins nothing -> empty
+
+
+def test_an_edge_with_no_joined_events_gets_an_empty_extension() -> None:
+    prog = pyxlog.IlpProgramFactory.compile(_SOURCE, device=0, memory_mb=64)
+    prog.evaluate()
+    ext = read_join_extension(prog, _JB, num_bindings=4)
+    assert ext[3] == []
+
+
+_DUPLICATED_SOURCE = """
+    pre_before_post(0, 0). pre_before_post(0, 0).
+    pre_before_post(1, 0).
+    pre_before_post(2, 1).
+    pred pre_before_post(i64, i64).
+"""
+
+
+def test_a_duplicated_ground_fact_does_not_double_count_the_event() -> None:
+    """`pre_before_post(0, 0).` written twice is ONE tuple of the relation — a relation is
+    a SET. If `relation_facts` handed the tuple back twice, `read_join_extension` would
+    bucket event 0 twice under edge 0 and the OR would compute `1 - (1 - p_0)^2` instead
+    of `1 - (1 - p_0)`: the head would be strictly MORE true than the rule says, silently,
+    and every existing test (whose worlds have no duplicate facts) would stay green. Pin
+    the set semantics at the boundary we actually read through."""
+    prog = pyxlog.IlpProgramFactory.compile(_DUPLICATED_SOURCE, device=0, memory_mb=64)
+    prog.evaluate()
+    ext = read_join_extension(prog, _JB, num_bindings=2)
+    assert ext == [[0, 1], [2]], f"the duplicated fact was handed back twice: {ext}"
+
+
+def test_a_head_binding_outside_the_range_is_a_loud_error() -> None:
+    """CONTRACT FLIP, deliberate (PR review, part 1). This test used to pin the
+    opposite: out-of-range tuples were dropped, "not crash and not shift the buckets".
+    But a dropped tuple is the only OBSERVABLE symptom of a misnumbered world -- shift
+    every edge by one and the in-range buckets are silently WRONG while the only
+    witness disappears without a trace. Head bindings are the dense query indices by
+    contract; a tuple outside them is the same caller/world disagreement as a joined
+    constant missing from domain_ids, and that side is loud. So is this one now.
+    (Here: the (4, 2) tuple, with num_bindings=2.)"""
+    prog = pyxlog.IlpProgramFactory.compile(_SOURCE, device=0, memory_mb=64)
+    prog.evaluate()
+    with pytest.raises(ValueError, match=r"outside the query range 0\.\.1"):
+        read_join_extension(prog, _JB, num_bindings=2)
+
+
+# ---------------------------------------------------------------------------
+# Task 3: a neural-JOIN candidate competes inside the multi-candidate mixture
+# ---------------------------------------------------------------------------
+
+_EVENT_FEATURES = [0.9, 0.1, 0.2, 0.15, 0.85, 0.1]
+_PRE = {0: [0, 1], 1: [2, 3], 2: [4], 3: [5]}
+# The distractor is EQUAL-CARDINALITY with pre_before_post (2, 2, 1, 1 events per
+# edge) and takes each edge's events from OTHER edges. That is the plan's honest-
+# distractor contract, and it is load-bearing, not cosmetic: with the unbalanced
+# 1-event-per-edge distractor {0: [5], 1: [4], 2: [1], 3: [0]} the world has TWO
+# exact global optima -- pre_before_post with a correct detector, and
+# post_before_pre with an INVERTED one (that distractor is a bijection edge->event
+# whose features anti-correlate perfectly with the labels, so p(0.1)=1, p(0.85)=0,
+# p(0.9)=0 fits it to loss 0.0003). Which optimum SGD lands in is then decided by
+# the init, not by the mechanism; measured on this branch, the inverted one won.
+# With the balanced distractor no function of the event feature fits it (events 1
+# and 5 share the feature 0.1 but would need opposite probabilities), so the
+# correct relation + the correct per-event detector is the UNIQUE optimum.
+_POST = {0: [2, 3], 1: [0, 1], 2: [5], 3: [4]}
+
+
+def _world_source(
+    candidates: str | None = None, extra_facts: str = "", extra_preds: str = ""
+) -> str:
+    """The two-relation world. ``candidates`` overrides the trainable_rule block so a
+    test can vary ONLY the rule shape (body length, label term) against the same
+    engine-owned facts."""
+    pre = "\n".join(f"    pre_before_post({e}, {k})." for k in sorted(_PRE) for e in _PRE[k])
+    post = "\n".join(f"    post_before_pre({e}, {k})." for k in sorted(_POST) for e in _POST[k])
+    if candidates is None:
+        candidates = """
+        trainable_rule(cand_pre, weight=0.0) :: plastic(E) :- saliency(Ev, strengthen), pre_before_post(Ev, E).
+        trainable_rule(cand_post, weight=0.0) :: plastic(E) :- saliency(Ev, strengthen), post_before_pre(Ev, E).
+"""
+    return f"""
+        nn(sal_net, [Event], Label, [low, strengthen]) :: saliency(Event, Label).
+{pre}
+{post}
+{extra_facts}
+        pred pre_before_post(i64, i64).
+        pred post_before_pre(i64, i64).
+{extra_preds}
+        pred plastic(i64).
+{candidates}
+        train(plastic, binary_cross_entropy).
+    """
+
+
+def _targets() -> list[float]:
+    return [1.0 if any(_EVENT_FEATURES[e] > 0.5 for e in _PRE[k]) else 0.0 for k in sorted(_PRE)]
+
+
+def test_a_stage_b_candidate_trains_in_the_multi_candidate_mixture() -> None:
+    """Before this task it died with KeyError 'cand_pre' at neurosymbolic.py:530."""
+    torch.manual_seed(0)
+    net = torch.nn.Sequential(torch.nn.Linear(1, 2, bias=True), torch.nn.Softmax(dim=-1))
+    feats = torch.tensor([[f] for f in _EVENT_FEATURES], dtype=torch.float32)
+
+    result = train_neurosymbolic_program(
+        _world_source(),
+        networks={"sal_net": net},
+        domain_inputs={"sal_net": feats},
+        examples=[{"targets": torch.tensor(_targets(), dtype=torch.float32)}],
+        config=NeuroSymbolicTrainingConfig(steps=300, learning_rate=0.1),
+    )
+
+    # it trained, and gradient reached the PER-EVENT detector
+    assert result.losses[-1] < result.losses[0]
+    assert result.neural_parameter_grads["sal_net"] > 0.0
+    # the correct timing relation won
+    w = result.symbolic_rule_weights
+    assert w["cand_pre"] > 0.7 and w["cand_post"] < 0.3, w
+
+
+def _net_and_feats():
+    torch.manual_seed(0)
+    net = torch.nn.Sequential(torch.nn.Linear(1, 2, bias=True), torch.nn.Softmax(dim=-1))
+    feats = torch.tensor([[f] for f in _EVENT_FEATURES], dtype=torch.float32)
+    return net, feats
+
+
+def _train(source: str, net, feats, steps: int = 300, lr: float = 0.1):
+    return train_neurosymbolic_program(
+        source,
+        networks={"sal_net": net},
+        domain_inputs={"sal_net": feats},
+        examples=[{"targets": torch.tensor(_targets(), dtype=torch.float32)}],
+        config=NeuroSymbolicTrainingConfig(steps=steps, learning_rate=lr),
+    )
+
+
+def test_a_longer_body_is_rejected_not_silently_trained() -> None:
+    """`high_degree(E)` is a third conjunct. The join machinery has no mask for it, so
+    the candidate must be REJECTED. Masking it as if the conjunct were absent would
+    train `plastic(E) :- saliency(Ev, strengthen), pre_before_post(Ev, E)` — a rule
+    nobody wrote — and report the result as if the written rule had trained."""
+    net, feats = _net_and_feats()
+    source = _world_source(
+        candidates="""
+        trainable_rule(cand_pre, weight=0.0) :: plastic(E) :- saliency(Ev, strengthen), pre_before_post(Ev, E), high_degree(E).
+        trainable_rule(cand_post, weight=0.0) :: plastic(E) :- saliency(Ev, strengthen), post_before_pre(Ev, E).
+""",
+        extra_facts="    high_degree(0).\n    high_degree(1).\n    high_degree(2).\n    high_degree(3).",
+        extra_preds="        pred high_degree(i64).",
+    )
+    with pytest.raises(ValueError) as exc:
+        _train(source, net, feats, steps=5)
+    assert "cand_pre" in str(exc.value)
+
+
+def test_a_negated_join_relation_is_rejected_not_trained_as_its_inverse() -> None:
+    """`not pre_before_post(Ev, E)` is a NEGATED literal, i.e. the complement of the
+    join relation. Counting parenthesized atoms sees two atoms and cannot see the
+    `not` at all, so before this fix the candidate parsed as the join shape and was
+    masked with the extension of `pre_before_post` — training, and then reporting, the
+    exact INVERSE of the rule that was written. It must be rejected."""
+    net, feats = _net_and_feats()
+    source = _world_source(
+        candidates="""
+        trainable_rule(cand_pre, weight=0.0) :: plastic(E) :- saliency(Ev, strengthen), not pre_before_post(Ev, E).
+        trainable_rule(cand_post, weight=0.0) :: plastic(E) :- saliency(Ev, strengthen), post_before_pre(Ev, E).
+"""
+    )
+    with pytest.raises(ValueError) as exc:
+        _train(source, net, feats, steps=5)
+    assert "cand_pre" in str(exc.value)
+
+
+def test_a_comparison_literal_is_rejected_not_silently_dropped() -> None:
+    """`Ev < 3` is a Comparison body literal, not an atom. An atom count cannot see it,
+    so before this fix the body parsed as the two-literal join shape and the comparison
+    was silently DISCARDED."""
+    net, feats = _net_and_feats()
+    source = _world_source(
+        candidates="""
+        trainable_rule(cand_pre, weight=0.0) :: plastic(E) :- saliency(Ev, strengthen), pre_before_post(Ev, E), Ev < 3.
+        trainable_rule(cand_post, weight=0.0) :: plastic(E) :- saliency(Ev, strengthen), post_before_pre(Ev, E).
+"""
+    )
+    with pytest.raises(ValueError) as exc:
+        _train(source, net, feats, steps=5)
+    assert "cand_pre" in str(exc.value)
+
+
+def test_a_join_candidate_is_never_trained_on_an_engine_mask_alone() -> None:
+    """Today a join candidate reaches the join path only because the engine emits no
+    eligibility mask for it (its mask is keyed by the FIRST neural group's predicate,
+    which for a join candidate yields a junk key). That is an upstream BUG, and the
+    join path must not depend on it: if the keying is fixed, a join candidate arrives
+    WITH a hard-filters-only (all-True) mask and — if routing were decided by "no mask"
+    — would silently train as an always-true relational candidate, with no gradient to
+    the per-event detector and no error.
+
+    This simulates that upstream fix by wrapping the compiled program so
+    `joint_candidate_eligibility` DOES return an all-True mask for every candidate, and
+    asserts the join path still owns the candidate: the detector still gets gradient and
+    the correct relation still wins. Before the routing fix, `sal_net` receives NO
+    gradient here."""
+    net, feats = _net_and_feats()
+    real_program_cls = pyxlog.Program
+
+    class _Fixed:
+        """Delegates everything to the real program, except that the eligibility read
+        also emits a mask for candidates the engine currently skips."""
+
+        def __init__(self, inner):
+            object.__setattr__(self, "_inner", inner)
+
+        def __getattr__(self, name):
+            return getattr(object.__getattribute__(self, "_inner"), name)
+
+        def joint_candidate_eligibility(self, head, lo, n):
+            inner = object.__getattribute__(self, "_inner")
+            out = list(inner.joint_candidate_eligibility(head, lo, n))
+            present = {guard_pred for guard_pred, _ in out}
+            for rule_id in ("cand_pre", "cand_post"):
+                guard_pred = f"nsr_guard_{rule_id}"
+                if guard_pred not in present:
+                    out.append((guard_pred, [True] * n))   # hard filters only
+            return out
+
+    class _Factory:
+        @staticmethod
+        def compile(*args, **kwargs):
+            return _Fixed(real_program_cls.compile(*args, **kwargs))
+
+    pyxlog.Program = _Factory
+    try:
+        result = _train(_world_source(), net, feats, steps=300)
+    finally:
+        pyxlog.Program = real_program_cls
+
+    assert result.neural_parameter_grads["sal_net"] > 0.0
+    w = result.symbolic_rule_weights
+    assert w["cand_pre"] > 0.7 and w["cand_post"] < 0.3, w
+
+
+def test_the_join_index_is_built_once_per_candidate_not_once_per_step() -> None:
+    """I2: the extension is STATIC, so its device index is built OUTSIDE the hot loop.
+    A per-step rebuild would be a host->device copy every step and would not fail any
+    other test, so it is pinned by counting the calls across a real multi-step run:
+    two join candidates, many steps, exactly two `prepare_extension` calls.
+
+    The patch targets the name in the MIXTURE's namespace — that is the binding the
+    production call resolves through, so the counter intercepts the real call path."""
+    from unittest import mock
+
+    from pyxlog.ilp.join_bodies import prepare_extension as real_prepare
+
+    net, feats = _net_and_feats()
+    calls = []
+
+    def counting_prepare(extension, device, num_rows=None):
+        calls.append(len(extension))
+        return real_prepare(extension, device, num_rows=num_rows)
+
+    with mock.patch(
+        "pyxlog.ilp.neurosymbolic.prepare_extension", side_effect=counting_prepare
+    ):
+        _train(_world_source(), net, feats, steps=25)
+
+    assert len(calls) == 2, calls      # once per join candidate, NOT once per step
+
+
+def test_a_purely_relational_existential_join_is_still_rejected() -> None:
+    """`plastic(E) :- pre_before_post(Ev, E).` has an existential Ev that is NOT a
+    neural predicate's input. It was rejected before this branch and must still be:
+    the join machinery only ever fires for the neural-join shape."""
+    net, feats = _net_and_feats()
+    source = _world_source(
+        candidates="""
+        trainable_rule(cand_pre, weight=0.0) :: plastic(E) :- pre_before_post(Ev, E).
+        trainable_rule(cand_post, weight=0.0) :: plastic(E) :- saliency(Ev, strengthen), post_before_pre(Ev, E).
+"""
+    )
+    with pytest.raises(ValueError) as exc:
+        _train(source, net, feats, steps=5)
+    assert "Ev" in str(exc.value)
+
+
+def test_a_network_named_like_a_candidate_is_refused() -> None:
+    """`neural_parameter_grads` is ONE flat map keyed both by nn/4 network name (join
+    bodies) and by candidate rule id (NeuralBodySpec bodies). A network named exactly
+    like a neural-bodied candidate would have its gradient silently overwritten, so the
+    collision is refused rather than reported as a wrong number."""
+    net, feats = _net_and_feats()
+    source = _world_source(
+        candidates="""
+        trainable_rule(sal_net, weight=0.0) :: plastic(E) :- high_degree(E).
+        trainable_rule(cand_pre, weight=0.0) :: plastic(E) :- saliency(Ev, strengthen), pre_before_post(Ev, E).
+""",
+        extra_facts="    high_degree(0).\n    high_degree(1).\n    high_degree(2).\n    high_degree(3).",
+        extra_preds="        pred high_degree(i64).",
+    )
+    with pytest.raises(ValueError, match="must not collide"):
+        train_neurosymbolic_program(
+            source,
+            networks={"sal_net": net},
+            domain_inputs={"sal_net": feats},
+            examples=[{"targets": torch.tensor(_targets(), dtype=torch.float32)}],
+            neural_bodies={"sal_net": NeuralBodySpec(features=torch.rand(4, 3))},
+            config=NeuroSymbolicTrainingConfig(steps=1, learning_rate=0.1),
+        )
+
+
+def test_the_positive_label_column_comes_from_the_rule_not_a_hardcoded_index() -> None:
+    """`strengthen` happens to be column 1, so a hardcoded `[:, 1]` passes every other
+    test in this file. Here `cand_low` names the OTHER label (`low`, column 0), and the
+    mask is pinned analytically: with learning_rate=0 the guards stay at their declared
+    logit 0.0 (sigmoid 0.5), so the head probability is exactly
+    ``1 - (1 - 0.5*m_low)(1 - 0.5*m_str)``. A hardcoded column-1 mask gives different
+    numbers, and the test asserts it does."""
+    net, feats = _net_and_feats()
+    source = _world_source(
+        candidates="""
+        trainable_rule(cand_low, weight=0.0) :: plastic(E) :- saliency(Ev, low), pre_before_post(Ev, E).
+        trainable_rule(cand_str, weight=0.0) :: plastic(E) :- saliency(Ev, strengthen), post_before_pre(Ev, E).
+"""
+    )
+    result = _train(source, net, feats, steps=1, lr=0.0)
+
+    with torch.no_grad():
+        device = next(net.parameters()).device
+        p = net(feats.to(device)).cpu()      # [n_events, 2]; column 0 = low, 1 = strengthen
+
+    def noisy_or(col: int, ext: dict[int, list[int]], k: int) -> float:
+        q = 1.0
+        for e in ext[k]:
+            q *= 1.0 - float(p[e, col])
+        return 1.0 - q
+
+    def head(low_col: int) -> list[float]:
+        # low_col is the column the cand_low mask reads: 0 is the rule's label,
+        # 1 is what a hardcoded index would (wrongly) read.
+        return [
+            1.0
+            - (1.0 - 0.5 * noisy_or(low_col, _PRE, k))
+            * (1.0 - 0.5 * noisy_or(1, _POST, k))
+            for k in sorted(_PRE)
+        ]
+
+    got = result.query_probabilities
+    from_the_rule = head(0)
+    from_a_hardcoded_index = head(1)
+    assert got == pytest.approx(from_the_rule, abs=1e-5), (got, from_the_rule)
+    # and the two really are distinguishable, so this test can fail
+    assert got != pytest.approx(from_a_hardcoded_index, abs=1e-3)
+
+
+def _sparse_source() -> str:
+    facts = "\n".join(
+        f"    pbp({e}, {k})." for k, evs in {0: [0, 2], 1: [4, 6]}.items() for e in evs
+    )
+    return f"""
+        nn(sal_net, [Event], Label, [low, strengthen]) :: saliency(Event, Label).
+{facts}
+        pred pbp(i64, i64).
+        pred plastic(i64).
+        trainable_rule(c_a, weight=0.0) :: plastic(E) :- saliency(Ev, strengthen), pbp(Ev, E).
+        trainable_rule(c_b, weight=0.0) :: plastic(E) :- saliency(Ev, low), pbp(Ev, E).
+        train(plastic, binary_cross_entropy).
+    """
+
+
+def test_a_sparse_join_domain_without_domain_ids_is_refused() -> None:
+    """domain_inputs carries no labels, so "which row is which constant" is a
+    CONVENTION. Omitting `domain_ids` states the DENSE one (row j = constant j) -- which
+    on the domain {0, 2, 4, 6} is simply false: constant 6 has no row. Before R3 that was
+    either a CUDA device-side assert (which poisons the context, so every later op in the
+    process fails) or, on a padded feature tensor, a silent read of a DIFFERENT row than
+    the circuit's, disagreeing with it by 0.307. It is now a typed refusal that NAMES the
+    constant with no row."""
+    net = torch.nn.Sequential(torch.nn.Linear(1, 2, bias=True), torch.nn.Softmax(dim=-1))
+    feats = torch.tensor([[0.9], [0.1], [0.2], [0.15]], dtype=torch.float32)
+
+    with pytest.raises(ValueError, match="not in domain_ids"):
+        train_neurosymbolic_program(
+            _sparse_source(),
+            networks={"sal_net": net},
+            domain_inputs={"sal_net": feats},
+            examples=[{"targets": torch.tensor([1.0, 0.0], dtype=torch.float32)}],
+            config=NeuroSymbolicTrainingConfig(steps=5, learning_rate=0.1),
+        )
+
+
+def test_a_sparse_join_domain_with_explicit_domain_ids_trains() -> None:
+    """The other half of the new contract: SAY which row holds which constant and the
+    sparse domain is no longer special -- the mixture trains on it, and gradient still
+    reaches the per-event detector. (That the numbers it computes are the exact
+    circuit's is pinned by the sparse semantics anchor.)"""
+    torch.manual_seed(0)
+    net = torch.nn.Sequential(torch.nn.Linear(1, 2, bias=True), torch.nn.Softmax(dim=-1))
+    feats = torch.tensor([[0.9], [0.1], [0.2], [0.15]], dtype=torch.float32)
+
+    result = train_neurosymbolic_program(
+        _sparse_source(),
+        networks={"sal_net": net},
+        domain_inputs={"sal_net": feats},
+        domain_ids={"sal_net": [0, 2, 4, 6]},
+        examples=[{"targets": torch.tensor([1.0, 0.0], dtype=torch.float32)}],
+        config=NeuroSymbolicTrainingConfig(steps=100, learning_rate=0.1),
+    )
+    assert result.losses[-1] < result.losses[0]
+    assert result.neural_parameter_grads["sal_net"] > 0.0
+
+
+def test_duplicate_domain_ids_are_refused() -> None:
+    """Two rows claiming one constant leaves that constant's row undefined, and BOTH
+    engines resolve a row by constant now, so neither has a defensible tie-break: it is
+    refused at the door. (Unsorted ids, by contrast, are fine and TRAIN -- a row is found
+    by its constant, never counted. The shuffled semantics anchor pins that they also
+    agree with the exact circuit, not merely that they run.)"""
+    net = torch.nn.Sequential(torch.nn.Linear(1, 2, bias=True), torch.nn.Softmax(dim=-1))
+    feats = torch.tensor([[0.9], [0.1], [0.2], [0.15]], dtype=torch.float32)
+
+    with pytest.raises(ValueError, match="must not repeat"):
+        train_neurosymbolic_program(
+            _sparse_source(),
+            networks={"sal_net": net},
+            domain_inputs={"sal_net": feats},
+            domain_ids={"sal_net": [0, 2, 2, 6]},
+            examples=[{"targets": torch.tensor([1.0, 0.0], dtype=torch.float32)}],
+            config=NeuroSymbolicTrainingConfig(steps=5, learning_rate=0.1),
+        )
+
+
+def test_domain_ids_must_have_one_id_per_feature_row() -> None:
+    net = torch.nn.Sequential(torch.nn.Linear(1, 2, bias=True), torch.nn.Softmax(dim=-1))
+    feats = torch.tensor([[0.9], [0.1], [0.2], [0.15]], dtype=torch.float32)
+
+    with pytest.raises(ValueError, match="exactly one id per row"):
+        train_neurosymbolic_program(
+            _sparse_source(),
+            networks={"sal_net": net},
+            domain_inputs={"sal_net": feats},
+            domain_ids={"sal_net": [0, 2, 4]},          # 3 ids, 4 rows
+            examples=[{"targets": torch.tensor([1.0, 0.0], dtype=torch.float32)}],
+            config=NeuroSymbolicTrainingConfig(steps=5, learning_rate=0.1),
+        )
+
+
+def test_domain_ids_for_a_network_with_no_domain_inputs_is_refused() -> None:
+    net = torch.nn.Sequential(torch.nn.Linear(1, 2, bias=True), torch.nn.Softmax(dim=-1))
+    feats = torch.tensor([[0.9], [0.1], [0.2], [0.15]], dtype=torch.float32)
+
+    with pytest.raises(ValueError, match="no domain_inputs"):
+        train_neurosymbolic_program(
+            _sparse_source(),
+            networks={"sal_net": net},
+            domain_inputs={"sal_net": feats},
+            domain_ids={"sal_net": [0, 2, 4, 6], "ghost_net": [0]},
+            examples=[{"targets": torch.tensor([1.0, 0.0], dtype=torch.float32)}],
+            config=NeuroSymbolicTrainingConfig(steps=5, learning_rate=0.1),
+        )
+
+
+def test_a_forgotten_domain_inputs_names_domain_inputs_not_domain_ids() -> None:
+    """The COMMON first mistake: two join candidates, and the driver forgets
+    `domain_inputs` entirely. The engine is asked for candidate eligibility for every
+    rule that defines the head — join candidates included — and a join signature grounds
+    its neural leaves through the engine's `domain_ids`, which with no domain source
+    registered is EMPTY. So without an explicit ordering the engine got there first and
+    said "constant 0 is not in domain_ids ... give every joined constant an id": true,
+    and pointed squarely at the wrong parameter. The user's mistake is the missing
+    `domain_inputs`, and the error must say so."""
+    net = torch.nn.Sequential(torch.nn.Linear(1, 2, bias=True), torch.nn.Softmax(dim=-1))
+
+    with pytest.raises(ValueError) as exc:
+        train_neurosymbolic_program(
+            _sparse_source(),
+            networks={"sal_net": net},
+            examples=[{"targets": torch.tensor([1.0, 0.0], dtype=torch.float32)}],
+            config=NeuroSymbolicTrainingConfig(steps=5, learning_rate=0.1),
+        )
+    message = str(exc.value)
+    assert "domain_inputs" in message, message
+    assert "domain_ids" not in message.split("domain_inputs=")[0], message
+
+
+# ---------------------------------------------------------------------------
+# The two DOCUMENTED limits, pinned. Each is a hard negative claim in the docs;
+# a negative claim with no test is a bet, and the two that were taken on this
+# branch both lost.
+# ---------------------------------------------------------------------------
+
+
+def test_a_second_join_network_is_refused_not_half_trained() -> None:
+    """Documented limit (a): ONE join network per program. The mixture registers a single
+    domain tensor source (`_DOMAIN_SOURCE_NAME`), so a second network's feature rows would
+    overwrite the first's in the engine and both circuits would forward the wrong tensor.
+    The limit is real and is refused at the door — it must not become a silent
+    last-writer-wins."""
+    net_a = torch.nn.Sequential(torch.nn.Linear(1, 2, bias=True), torch.nn.Softmax(dim=-1))
+    net_b = torch.nn.Sequential(torch.nn.Linear(1, 2, bias=True), torch.nn.Softmax(dim=-1))
+    feats = torch.tensor([[0.9], [0.1], [0.2], [0.15]], dtype=torch.float32)
+    source = _sparse_source().replace(
+        "nn(sal_net, [Event], Label, [low, strengthen]) :: saliency(Event, Label).",
+        "nn(sal_net, [Event], Label, [low, strengthen]) :: saliency(Event, Label).\n"
+        "        nn(other_net, [Event], Label, [low, strengthen]) :: other_sal(Event, Label).",
+    )
+
+    with pytest.raises(ValueError, match="single join network"):
+        train_neurosymbolic_program(
+            source,
+            networks={"sal_net": net_a, "other_net": net_b},
+            domain_inputs={"sal_net": feats, "other_net": feats},
+            domain_ids={"sal_net": [0, 2, 4, 6], "other_net": [0, 2, 4, 6]},
+            examples=[{"targets": torch.tensor([1.0, 0.0], dtype=torch.float32)}],
+            config=NeuroSymbolicTrainingConfig(steps=5, learning_rate=0.1),
+        )
+
+
+def test_an_arity_2_head_is_refused_not_silently_trained_on_arity_1() -> None:
+    """Documented limit (b): the train head has arity 1. `plastic(E, L) :- saliency(Ev, L),
+    pre_before_post(Ev, E).` — the rule that would let the NETWORK'S OWN LABEL flow into
+    the head — does not compile, and the docs state that as a hard claim.
+
+    Where the refusal fires has MOVED (review wave 2), and the pin moves with it: the
+    multi-outcome rule's neural atom has a VARIABLE in the label slot, and the parse now
+    refuses that shape outright — earlier than the engine's arity-1 eligibility error this
+    test used to quote, and naming the offending rule instead of the query predicate. The
+    invariant this test protects is unchanged: this rule must never be SILENTLY trained as
+    something it is not; it must either be done right or refuse loudly, about THIS rule."""
+    net = torch.nn.Sequential(torch.nn.Linear(1, 2, bias=True), torch.nn.Softmax(dim=-1))
+    feats = torch.tensor([[f] for f in _EVENT_FEATURES], dtype=torch.float32)
+    pre = "\n".join(
+        f"    pre_before_post({e}, {k})." for k in sorted(_PRE) for e in _PRE[k]
+    )
+    source = f"""
+        nn(sal_net, [Event], Label, [low, strengthen]) :: saliency(Event, Label).
+{pre}
+        pred pre_before_post(i64, i64).
+        pred plastic(i64, i64).
+        trainable_rule(c_a, weight=0.0) :: plastic(E, L) :- saliency(Ev, L), pre_before_post(Ev, E).
+        trainable_rule(c_b, weight=0.0) :: plastic(E, L) :- saliency(Ev, L), pre_before_post(Ev, E).
+        train(plastic, binary_cross_entropy).
+    """
+
+    with pytest.raises(Exception) as exc:      # noqa: PT011 - engine error type is the point
+        train_neurosymbolic_program(
+            source,
+            networks={"sal_net": net},
+            domain_inputs={"sal_net": feats},
+            examples=[{"targets": torch.tensor(_targets(), dtype=torch.float32)}],
+            config=NeuroSymbolicTrainingConfig(steps=5, learning_rate=0.1),
+        )
+    # The refusal must be ABOUT this rule, not an incidental crash somewhere
+    # downstream that a later refactor would "fix" into a silent wrong training run.
+    message = str(exc.value)
+    assert "c_a" in message, message
+    assert "not silently reduced" in message, message
+
+
+# ---------------------------------------------------------------------------
+# The MIXTURE's own numbers on a non-dense, non-sorted row layout.
+# ---------------------------------------------------------------------------
+
+_SHUFFLED_IDS = [4, 0, 6, 2]        # row j holds constant _SHUFFLED_IDS[j]
+_SHUFFLED_FEATS = [[0.9], [0.1], [0.2], [0.15]]
+_SPARSE_EXT = {0: [0, 2], 1: [4, 6]}      # what `pbp` in _sparse_source() holds
+
+
+def test_the_mixture_indexes_p_event_by_the_translated_row_not_by_rank() -> None:
+    """The semantics anchors compare the CIRCUIT against a torch OR re-assembled inside
+    the test; they never run `head_prob`'s join branch, which is the code the flagship
+    actually trains through. And the only multi-candidate test on a non-dense domain
+    asserts nothing numeric (loss went down, gradient was positive).
+
+    So: a shuffled row layout, TWO candidates, through the MIXTURE, with the numbers
+    pinned analytically. `learning_rate=0.0` freezes the guards at their declared logit
+    0.0 (sigmoid = 0.5), so the head probability is exactly
+    ``1 - (1 - 0.5*or_str(k))(1 - 0.5*or_low(k))`` and every free quantity is the
+    network's forward, which the test recomputes.
+
+    The failure this exists to catch: `head_prob` indexing `p_event` by an event's RANK in
+    the domain instead of by its row from `domain_ids`. On the sorted layout [0,2,4,6]
+    rank == row, so that bug passes every existing test. Here the map is [4,0,6,2] and the
+    two differ for all four constants — and the test asserts the rank answer is a
+    DIFFERENT number, so it cannot pass by coincidence.
+
+    The net's weights are SET, not sampled: a freshly initialized softmax head puts every
+    row within ~0.01 of p=0.5, and on probabilities that flat the right map and the rank
+    map agree to 8e-4 — the discriminating assertion would hold vacuously. Here the rows
+    are driven apart (p(strengthen) spans 0.008 .. 0.992), so reading the wrong row is
+    worth ~0.5 of head probability and the test has something to see."""
+    net = torch.nn.Sequential(torch.nn.Linear(1, 2, bias=True), torch.nn.Softmax(dim=-1))
+    with torch.no_grad():
+        net[0].weight.copy_(torch.tensor([[-6.0], [6.0]]))   # col 0 = low, col 1 = strengthen
+        net[0].bias.copy_(torch.tensor([3.0, -3.0]))
+    feats = torch.tensor(_SHUFFLED_FEATS, dtype=torch.float32)
+
+    result = train_neurosymbolic_program(
+        _sparse_source(),
+        networks={"sal_net": net},
+        domain_inputs={"sal_net": feats},
+        domain_ids={"sal_net": _SHUFFLED_IDS},
+        examples=[{"targets": torch.tensor([1.0, 0.0], dtype=torch.float32)}],
+        config=NeuroSymbolicTrainingConfig(steps=1, learning_rate=0.0),
+    )
+
+    with torch.no_grad():
+        device = next(net.parameters()).device
+        p = net(feats.to(device)).cpu()       # [4, 2]; column 0 = low, 1 = strengthen
+
+    def head(row_of: dict[int, int]) -> list[float]:
+        out = []
+        for k in sorted(_SPARSE_EXT):
+            masks = []
+            for col in (1, 0):                # c_a reads `strengthen`, c_b reads `low`
+                q = 1.0
+                for e in _SPARSE_EXT[k]:
+                    q *= 1.0 - float(p[row_of[e], col])
+                masks.append(1.0 - q)
+            out.append(1.0 - (1.0 - 0.5 * masks[0]) * (1.0 - 0.5 * masks[1]))
+        return out
+
+    from_domain_ids = head({c: row for row, c in enumerate(_SHUFFLED_IDS)})
+    from_rank = head({c: rank for rank, c in enumerate(sorted(_SHUFFLED_IDS))})
+
+    got = result.query_probabilities
+    assert got == pytest.approx(from_domain_ids, abs=1e-5), (got, from_domain_ids)
+    # ... and the rank answer really is a different number, so this test can fail.
+    assert got != pytest.approx(from_rank, abs=1e-3), (got, from_rank)
