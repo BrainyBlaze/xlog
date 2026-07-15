@@ -69,9 +69,19 @@ class _FakeProg:
                 cands.append({"id": cid, "i": i, "j": j, "k": 3,
                               "left_name": ln, "right_name": rn, "head_name": "plastic"})
                 cid += 1
+        # The real engine's cross product also always contains the dILP
+        # TEMPLATE's own learnable placeholders (bL/bR): no ground extension,
+        # so relation_facts below raises ValueError for them just like the
+        # engine does for `prog.relation_facts("bL")`.
+        for ln, rn in (("bL", "sal"), ("has_event", "bR"), ("bL", "bR")):
+            cands.append({"id": cid, "i": 0, "j": 0, "k": 3,
+                          "left_name": ln, "right_name": rn, "head_name": "plastic"})
+            cid += 1
         return cands
 
     def relation_facts(self, name):
+        if name not in self._facts:
+            raise ValueError(f"Relation '{name}' not found")
         return self._facts[name]
 
 
@@ -107,6 +117,42 @@ def test_a_neural_relation_in_the_left_slot_is_skipped_not_fatal() -> None:
     has_event_right = [s for s in specs if s.right == "has_event"]
     assert len(has_event_right) > 0
     assert all(s.is_neural for s in has_event_right)
+
+
+def test_template_placeholder_slots_are_skipped_not_fatal() -> None:
+    """Template placeholders (bL/bR) have no ground extension: relation_facts
+    raises ValueError for them, exactly as the real engine does for
+    `prog.relation_facts("bL")`. This is a TARGETED skip -- pool filtering, same
+    rationale as the __xlog_ meta relations and the neural-in-left skip above --
+    not a blanket swallow of engine errors: a NON-ValueError from relation_facts
+    must still propagate."""
+    from pyxlog.ilp.neural_credit import enumerate_specs
+
+    facts = [(0, 1), (1, 0), (2, 1)]
+    specs = enumerate_specs(_FakeProg(), "W", facts,
+                            neural_relations={"sal": 3}, device="cpu")
+
+    # No spec touches a template placeholder.
+    assert not any(s.left in ("bL", "bR") or s.right in ("bL", "bR") for s in specs)
+
+    # The good candidates are unchanged from
+    # test_enumerate_specs_builds_neural_and_relational_columns.
+    by_names = {(s.left, s.right): s for s in specs}
+    neural = by_names[("has_event", "sal")]
+    assert neural.is_neural and neural.witness_index.num_bindings == len(facts)
+    relational = by_names[("has_event", "tag")]
+    assert relational.binary_cover.tolist() == [1.0, 0.0, 0.0]
+
+    # Only ValueError is a targeted skip; anything else propagates.
+    class _FakeProgBadRelation(_FakeProg):
+        def relation_facts(self, name):
+            if name == "tag":
+                raise TypeError("boom")
+            return super().relation_facts(name)
+
+    with pytest.raises(TypeError):
+        enumerate_specs(_FakeProgBadRelation(), "W", facts,
+                        neural_relations={"sal": 3}, device="cpu")
 
 
 # ---------------------------------------------------------------------------

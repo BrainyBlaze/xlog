@@ -82,8 +82,28 @@ def enumerate_specs(prog, mask_name, facts, neural_relations, device):
     [exists z: L(h,z) and R(z,y)] for a relational R. A neural relation in the LEFT
     slot has no witness semantics in this credit and is SKIPPED — filtering an
     auto-enumerated pool is not the same as silently altering a user-declared rule;
-    the engine's cross-product enumeration always contains such triples."""
+    the engine's cross-product enumeration always contains such triples. The same
+    pool always also contains the dILP TEMPLATE's own learnable placeholders (e.g.
+    `bL`/`bR`) and any other tuple-less name `valid_candidates` cross-products in:
+    these have no ground extension to read at all (`relation_facts` raises
+    `ValueError` for them), so they are pool-filtered for the same reason as the
+    `__xlog_` meta relations — this is a targeted skip of a known-unreadable slot,
+    not a blanket swallow of engine errors."""
     import torch
+
+    facts_cache: dict[str, Any] = {}
+
+    def _readable(name):
+        """True iff `name` has a ground extension the engine can read, caching the
+        rows on success (so `_left`/`_pairs` never call the engine twice) and
+        `False` on `ValueError` (ONLY `ValueError` — anything else is a real bug
+        and propagates)."""
+        if name not in facts_cache:
+            try:
+                facts_cache[name] = prog.relation_facts(name)
+            except ValueError:
+                facts_cache[name] = False
+        return facts_cache[name] is not False
 
     left_ext: dict[str, dict[int, list[int]]] = {}
     right_pairs: dict[str, set[tuple[int, int]]] = {}
@@ -91,7 +111,7 @@ def enumerate_specs(prog, mask_name, facts, neural_relations, device):
     def _left(name):
         if name not in left_ext:
             buckets: dict[int, list[int]] = {}
-            for row in prog.relation_facts(name):
+            for row in facts_cache[name]:
                 buckets.setdefault(int(row[0]), []).append(int(row[1]))
             left_ext[name] = buckets
         return left_ext[name]
@@ -99,7 +119,7 @@ def enumerate_specs(prog, mask_name, facts, neural_relations, device):
     def _pairs(name):
         if name not in right_pairs:
             right_pairs[name] = {
-                (int(r[0]), int(r[1])) for r in prog.relation_facts(name)
+                (int(r[0]), int(r[1])) for r in facts_cache[name]
             }
         return right_pairs[name]
 
@@ -110,6 +130,10 @@ def enumerate_specs(prog, mask_name, facts, neural_relations, device):
             continue                        # meta relations: arity-incompatible, skip
         if ln in neural_relations:
             continue                        # neural-in-left: no witness semantics, skip
+        if not _readable(ln):
+            continue                        # left slot has no ground extension (e.g. template placeholder), skip
+        if rn not in neural_relations and not _readable(rn):
+            continue                        # same, right slot -- a neural right needs no facts
         if rn in neural_relations:
             witnesses = [_left(ln).get(h, []) for h, _y in facts]
             idx = prepare_extension(
