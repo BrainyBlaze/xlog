@@ -90,7 +90,7 @@ def test_enumerate_specs_builds_neural_and_relational_columns() -> None:
 
     facts = [(0, 1), (1, 0), (2, 1)]                       # (edge, label)
     specs = enumerate_specs(_FakeProg(), "W", facts,
-                            neural_relations={"sal": 3}, device="cpu")
+                            neural_relations={"sal": 3}, device="cpu", n_labels=2)
     by_names = {(s.left, s.right): s for s in specs}
     neural = by_names[("has_event", "sal")]
     assert neural.is_neural and neural.witness_index.num_bindings == len(facts)
@@ -110,7 +110,8 @@ def test_a_neural_relation_in_the_left_slot_is_skipped_not_fatal() -> None:
     from pyxlog.ilp.neural_credit import enumerate_specs
 
     specs = enumerate_specs(_FakeProg(), "W", [(0, 1)],
-                            neural_relations={"has_event": 3}, device="cpu")
+                            neural_relations={"has_event": 3}, device="cpu",
+                            n_labels=2)
     # No spec should have has_event in the left slot
     assert not any(s.left == "has_event" for s in specs)
     # But specs with has_event in the right slot should be present and neural
@@ -130,7 +131,7 @@ def test_template_placeholder_slots_are_skipped_not_fatal() -> None:
 
     facts = [(0, 1), (1, 0), (2, 1)]
     specs = enumerate_specs(_FakeProg(), "W", facts,
-                            neural_relations={"sal": 3}, device="cpu")
+                            neural_relations={"sal": 3}, device="cpu", n_labels=2)
 
     # No spec touches a template placeholder.
     assert not any(s.left in ("bL", "bR") or s.right in ("bL", "bR") for s in specs)
@@ -152,7 +153,114 @@ def test_template_placeholder_slots_are_skipped_not_fatal() -> None:
 
     with pytest.raises(TypeError):
         enumerate_specs(_FakeProgBadRelation(), "W", facts,
-                        neural_relations={"sal": 3}, device="cpu")
+                        neural_relations={"sal": 3}, device="cpu", n_labels=2)
+
+
+# ---------------------------------------------------------------------------
+# Review wave, part 1 (levi770 on PR #154): the neural score must resolve the
+# network column at THE FACT'S OWN label y (finding A), seeds must determine
+# network construction (B), an empty scoreable pool refuses typed (C), and the
+# "l|r" key round-trip guards against '|' in relation names (D).
+# ---------------------------------------------------------------------------
+
+
+def test_neural_witnesses_resolve_the_network_column_per_fact_y() -> None:
+    """Finding A: a witness z for fact (h, y) indexes the FLAT (event, label)
+    probability at z * n_labels + y — the column comes from the fact's own y,
+    never from a hardcoded positive column."""
+    from pyxlog.ilp.neural_credit import enumerate_specs
+
+    specs = enumerate_specs(_FakeProg(), "W", [(0, 1), (1, 0)],
+                            neural_relations={"sal": 3}, device="cpu", n_labels=2)
+    neural = {(s.left, s.right): s for s in specs}[("has_event", "sal")]
+    # edge 0 owns events [0, 1] at y=1 -> flat [1, 3]; edge 1 owns [2] at y=0 -> [4]
+    assert neural.witness_index.event_ids.tolist() == [1, 3, 4]
+    assert neural.witness_index.binding_ids.tolist() == [0, 0, 1]
+
+
+def test_fact_label_outside_the_network_output_is_refused_typed() -> None:
+    """Finding A: a fact whose y has no network column is a contract violation,
+    refused with the label named — not silently scored at a wrong column."""
+    from pyxlog.ilp.neural_credit import enumerate_specs
+
+    with pytest.raises(ValueError, match="label 2"):
+        enumerate_specs(_FakeProg(), "W", [(0, 2)],
+                        neural_relations={"sal": 3}, device="cpu", n_labels=2)
+
+
+def test_train_engine_mode_refuses_a_non_2d_network_output() -> None:
+    """Finding A: n_labels is read off the network's actual output, so that
+    output must be 2-D [num_events, num_labels] — anything else is refused."""
+    class _FlatNet(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.lin = torch.nn.Linear(1, 1)
+
+        def forward(self, x):
+            return self.lin(x).reshape(-1)
+
+    features = torch.tensor([[0.1], [0.2], [0.3]])
+    with pytest.raises(ValueError, match="2-D"):
+        train_engine_mode(_FakeProg(), "W", [(0, 1)], [True], _FlatNet(),
+                          features, neural_relations={"sal": 3}, steps=1)
+
+
+def test_kfold_select_seeds_network_construction_not_ambient_rng() -> None:
+    """Finding B: kfold_select(..., seed=) must determine the per-fold network
+    inits by itself — two runs under scrambled ambient RNG draw identical values
+    inside make_network, and the folds draw DIFFERENT values from each other."""
+    features = torch.tensor([[0.1], [0.2], [0.3]])
+    facts = [(0, 1), (1, 0), (2, 1)]
+    is_positive = [True, False, True]
+    draws: list[float] = []
+
+    def make_network():
+        draws.append(float(torch.rand(())))
+        return torch.nn.Sequential(torch.nn.Linear(1, 2), torch.nn.Softmax(dim=-1))
+
+    def run():
+        return kfold_select(_FakeProg, "W", facts, is_positive, make_network,
+                            features, neural_relations={"sal": 3}, folds=3,
+                            steps=2, seed=0)
+
+    torch.manual_seed(11111); torch.rand(5)          # scramble ambient RNG
+    sel_a = run()
+    torch.manual_seed(22222); torch.rand(17)         # scramble it differently
+    sel_b = run()
+
+    assert draws[:3] == draws[3:], draws
+    assert len(set(draws[:3])) == 3, draws           # per-fold derived seeds differ
+    assert sel_a == sel_b
+
+
+def test_empty_scoreable_pool_is_refused_typed_with_filter_counts() -> None:
+    """Finding C: a pool that filters to nothing refuses typed, naming how many
+    candidates each filter removed — never AttributeError/max() deep inside."""
+    from pyxlog.ilp.neural_credit import enumerate_specs
+
+    with pytest.raises(ValueError, match="zero scoreable"):
+        enumerate_specs(_FakeProg(), "W", [(0, 1)],
+                        neural_relations={"has_event": 3, "sal": 3, "tag": 3},
+                        device="cpu", n_labels=2)
+
+
+def test_credit_nll_refuses_an_empty_candidate_list() -> None:
+    """Finding C: credit over no candidates is undefined, refused typed."""
+    from pyxlog.ilp.neural_credit import credit_nll
+
+    with pytest.raises(ValueError, match="no candidates"):
+        credit_nll(torch.tensor([]), [], torch.tensor([0.5]),
+                   torch.tensor([True]))
+
+
+def test_relation_name_containing_the_key_separator_is_refused() -> None:
+    """Finding D: candidate keys round-trip through 'l|r'; a relation name that
+    contains '|' would corrupt the round-trip, so it is refused up front."""
+    from pyxlog.ilp.neural_credit import _select_from_holdout
+
+    with pytest.raises(ValueError, match="separator"):
+        _select_from_holdout({("he|x", "sal"): 0.9}, neural_rights={"sal"},
+                             min_fit=0.75)
 
 
 # ---------------------------------------------------------------------------
@@ -292,9 +400,10 @@ def test_w1_engine_mode_neural_wins_detector_separates_and_training_is_determini
     assert mean_sal - mean_quiet > 0.5, (mean_sal, mean_quiet)
 
     # Determinism: two fresh, identically-seeded runs over the SAME world must
-    # produce a bitwise-equal final loss.
+    # produce a bitwise-equal loss at EVERY step, not just the last one -- the
+    # full trace is what the "bitwise" claim is about (review of PR #154).
     result_b, _ = _train_w1(world, seed=0)
-    assert result.losses[-1] == result_b.losses[-1]
+    assert result.losses == result_b.losses
 
 
 # ---------------------------------------------------------------------------

@@ -52,11 +52,20 @@ class CandidateSpec:
 def credit_nll(cand_probs, specs, p_event, is_positive, gamma: float = 1.0):
     """``credit[f] = sum_c p_c * s_c(f)``, NLL over facts. A torch graph end to end,
     so the gradient reaches BOTH the candidate logits and the network behind
-    ``p_event``. ``gamma`` sharpens only the neural score (calibration against
-    gradient starvation next to crisp {0,1} covers; it never decides truth --
-    holdout does)."""
+    ``p_event``. ``p_event`` is whatever vector the witness indices point into --
+    the trainer passes the network output flattened per (event, label) row, so a
+    witness for fact (h, y) reads the probability AT THE FACT'S OWN LABEL.
+    ``gamma`` sharpens only the neural score (calibration against gradient
+    starvation next to crisp {0,1} covers; it never decides truth -- holdout
+    does)."""
     import torch
 
+    if not specs:
+        raise ValueError(
+            "credit over no candidates is undefined: the spec list is empty. "
+            "enumerate_specs refuses an empty pool with per-filter counts; if you "
+            "built the specs yourself, at least one is required."
+        )
     credit = None
     for spec in specs:
         if spec.is_neural:
@@ -73,14 +82,17 @@ def credit_nll(cand_probs, specs, p_event, is_positive, gamma: float = 1.0):
     return loss.mean()
 
 
-def enumerate_specs(prog, mask_name, facts, neural_relations, device):
+def enumerate_specs(prog, mask_name, facts, neural_relations, device, n_labels):
     """One CandidateSpec per engine triple over the program's binary EDB relations.
 
     Witnesses come from the ENGINE (`relation_facts`), never from the caller: for a
     fact (h, y) and candidate (L, R) the witness set is {z : L(h, z)} scored by the
-    network at label y for a neural R, and the binary cover is
-    [exists z: L(h,z) and R(z,y)] for a relational R. A neural relation in the LEFT
-    slot has no witness semantics in this credit and is SKIPPED — filtering an
+    network AT THE FACT'S OWN LABEL y for a neural R -- each witness is stored as
+    the flat (event, label) row ``z * n_labels + y``, so the credit gathers from
+    the network output flattened row-major and no positive column is ever guessed
+    (a y outside ``0..n_labels-1`` is refused here, typed) -- and the binary cover
+    is [exists z: L(h,z) and R(z,y)] for a relational R. A neural relation in the
+    LEFT slot has no witness semantics in this credit and is SKIPPED — filtering an
     auto-enumerated pool is not the same as silently altering a user-declared rule;
     the engine's cross-product enumeration always contains such triples. The same
     pool always also contains the dILP TEMPLATE's own learnable placeholders (e.g.
@@ -88,8 +100,19 @@ def enumerate_specs(prog, mask_name, facts, neural_relations, device):
     these have no ground extension to read at all (`relation_facts` raises
     `ValueError` for them), so they are pool-filtered for the same reason as the
     `__xlog_` meta relations — this is a targeted skip of a known-unreadable slot,
-    not a blanket swallow of engine errors."""
+    not a blanket swallow of engine errors. A pool these filters empty out is
+    refused with per-filter counts: silent caps are exactly what this module
+    promises not to have."""
     import torch
+
+    for h, y in facts:
+        if not (0 <= y < n_labels):
+            raise ValueError(
+                f"fact ({h}, {y}) carries label {y}, but the network has "
+                f"{n_labels} output column(s) (0..{n_labels - 1}). The neural "
+                "score reads the network at the fact's own label; a label with "
+                "no column is a contract violation, refused."
+            )
 
     facts_cache: dict[str, Any] = {}
 
@@ -124,20 +147,28 @@ def enumerate_specs(prog, mask_name, facts, neural_relations, device):
         return right_pairs[name]
 
     specs: list[CandidateSpec] = []
+    n_total = n_meta = n_neural_left = n_unreadable = 0
     for cand in prog.valid_candidates(mask_name):
+        n_total += 1
         ln, rn = cand["left_name"], cand["right_name"]
         if ln.startswith("__xlog_") or rn.startswith("__xlog_"):
+            n_meta += 1
             continue                        # meta relations: arity-incompatible, skip
         if ln in neural_relations:
+            n_neural_left += 1
             continue                        # neural-in-left: no witness semantics, skip
         if not _readable(ln):
+            n_unreadable += 1
             continue                        # left slot has no ground extension (e.g. template placeholder), skip
         if rn not in neural_relations and not _readable(rn):
+            n_unreadable += 1
             continue                        # same, right slot -- a neural right needs no facts
         if rn in neural_relations:
-            witnesses = [_left(ln).get(h, []) for h, _y in facts]
+            witnesses = [
+                [z * n_labels + y for z in _left(ln).get(h, [])] for h, y in facts
+            ]
             idx = prepare_extension(
-                witnesses, device, num_rows=neural_relations[rn]
+                witnesses, device, num_rows=neural_relations[rn] * n_labels
             )
             specs.append(CandidateSpec(cand["id"], ln, rn, True, idx, None))
         else:
@@ -149,6 +180,14 @@ def enumerate_specs(prog, mask_name, facts, neural_relations, device):
                 device=device,
             )
             specs.append(CandidateSpec(cand["id"], ln, rn, False, None, cover))
+    if not specs:
+        raise ValueError(
+            f"pool filtering left zero scoreable candidates out of {n_total} "
+            f"enumerated: {n_meta} skipped as __xlog_ meta, {n_neural_left} as "
+            f"neural-in-left (no witness semantics), {n_unreadable} with an "
+            "unreadable slot (no ground extension). Nothing remains to train or "
+            "select over -- the filters above are the reason, not a silent cap."
+        )
     return specs
 
 
@@ -170,9 +209,15 @@ def train_engine_mode(prog, mask_name, facts, is_positive, network, features,
     """Train candidate logits + the network against the real-valued credit.
 
     Deterministic, mirroring the dILP trainer: the OR accumulates with index_add,
-    whose default CUDA path is atomic float addition. Entropy is the Occam pressure
-    the linear credit lacks (one-hot preference; weight annealed by
-    entropy_weight_at_step). Selection is NOT here -- see kfold_select."""
+    whose default CUDA path is atomic float addition. NOTE two scope caveats of
+    that contract: ``torch.use_deterministic_algorithms(True)`` is a PROCESS-GLOBAL
+    switch this call never restores (co-resident code that needs nondeterministic
+    kernels will start failing), and ``seed`` covers the TRAINING only -- the
+    network arrives already constructed, so its init came from the caller's RNG
+    (``kfold_select`` seeds each per-fold construction itself; a direct caller
+    owns that seeding). Entropy is the Occam pressure the linear credit lacks
+    (one-hot preference; weight annealed by entropy_weight_at_step). Selection is
+    NOT here -- see kfold_select."""
     import os
 
     import torch
@@ -186,7 +231,19 @@ def train_engine_mode(prog, mask_name, facts, is_positive, network, features,
     torch.manual_seed(seed)
 
     device = features.device
-    specs = enumerate_specs(prog, mask_name, facts, neural_relations, device)
+    with torch.no_grad():
+        out = network(features)
+    if out.ndim != 2:
+        raise ValueError(
+            f"network(features) returned a {out.ndim}-D tensor of shape "
+            f"{tuple(out.shape)}; the engine-mode credit reads the witness score "
+            "at the fact's own label column, so the output must be 2-D "
+            "[num_events, num_labels]."
+        )
+    n_labels = out.shape[1]
+    specs = enumerate_specs(
+        prog, mask_name, facts, neural_relations, device, n_labels
+    )
     C = max(s.cid for s in specs) + 1
     # Skipped candidates must not hold probability mass — the mixture is over
     # scoreable candidates only.
@@ -196,13 +253,14 @@ def train_engine_mode(prog, mask_name, facts, is_positive, network, features,
     W = torch.zeros(C, requires_grad=True, device=device)
     opt = torch.optim.Adam([W] + list(network.parameters()), lr=lr)
     is_pos_t = torch.as_tensor(is_positive, device=device)
-    pos_col = 1                                   # nn(net, [Ev], Label, [neg, pos])
 
     losses: list[float] = []
     for step in range(steps):
         opt.zero_grad()
         p = torch.softmax(W + neg_inf_mask, dim=0)
-        p_event = network(features)[:, pos_col]
+        # Flattened row-major: witness (z, y) gathers row z * n_labels + y --
+        # the fact's own label column, never a guessed positive column.
+        p_event = network(features).reshape(-1)
         loss = credit_nll(p, specs, p_event, is_pos_t, gamma=gamma)
         w_ent = entropy_weight_at_step(step, steps, entropy_start, entropy_end)
         active = torch.stack([p[s.cid] for s in specs])
@@ -245,6 +303,13 @@ def _select_from_holdout(scores, neural_rights, min_fit):
     (Occam: at equal generalization, prefer the explanation without a network)."""
     from pyxlog.ilp.discovery import select_rule
 
+    for l, r in scores:
+        if "|" in l or "|" in r:
+            raise ValueError(
+                f"relation name in candidate ({l!r}, {r!r}) contains '|', the "
+                "internal key separator select_rule keys round-trip through; "
+                "scoring it would corrupt the key split, refused."
+            )
     fit = {k: v for k, v in scores.items() if v >= min_fit}
     if not fit:
         return HoldoutSelection(
@@ -277,7 +342,13 @@ def kfold_select(prog_factory, mask_name, facts, is_positive, make_network,
     """Select a rule by K-FOLD HOLDOUT, not by training weight: per fold, train on
     the rest and score every engine-enumerated candidate on the held-out facts by
     its own witness/cover semantics (``s_c(f) >= 0.5``); average across folds, apply
-    the fit gate, then hand the holdout scores to ``_select_from_holdout``."""
+    the fit gate, then hand the holdout scores to ``_select_from_holdout``.
+
+    ``seed`` determines the WHOLE run, network inits included: each fold's
+    ``make_network()`` is called right after ``torch.manual_seed`` with a seed
+    derived from (seed, fold), so two calls with the same arguments are identical
+    regardless of ambient RNG state -- the declared contract, not a fixture
+    obligation."""
     import torch
 
     rng = torch.Generator().manual_seed(seed)
@@ -291,16 +362,21 @@ def kfold_select(prog_factory, mask_name, facts, is_positive, make_network,
         train_ids = [i for i in range(len(facts)) if fold_of[i] != fold]
         held_ids = [i for i in range(len(facts)) if fold_of[i] == fold]
         prog = prog_factory()
+        # Derived (seed, fold) seeding right before construction: the network
+        # init must come from OUR seed, not whatever ambient RNG state the
+        # caller happens to be in (finding B, review of PR #154).
+        torch.manual_seed(seed * 100_003 + fold)
         res = train_engine_mode(
             prog, mask_name,
             [facts[i] for i in train_ids],
             [is_positive[i] for i in train_ids],
             make_network(), features, neural_relations, seed=seed, **train_kw)
-        held_specs = enumerate_specs(
-            prog, mask_name, [facts[i] for i in held_ids],
-            neural_relations, features.device)
         with torch.no_grad():
-            p_event = res.network(features)[:, 1]
+            out = res.network(features)
+            held_specs = enumerate_specs(
+                prog, mask_name, [facts[i] for i in held_ids],
+                neural_relations, features.device, out.shape[1])
+            p_event = out.reshape(-1)
             y = torch.tensor([is_positive[i] for i in held_ids],
                              device=features.device, dtype=torch.float32)
             for spec in held_specs:
