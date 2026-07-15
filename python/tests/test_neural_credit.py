@@ -32,9 +32,9 @@ def test_credit_is_sum_of_prob_times_score_hand_computed() -> None:
 
     loss = credit_nll(p, specs, p_event, is_pos)
 
-    s_neural = torch.tensor([0.9, 1 - 0.5 * 0.5])          # noisy-OR по свидетелям
-    credit0 = 0.6 * 1.0 + 0.4 * 0.9                         # позитивный факт
-    credit1 = 0.6 * 0.0 + 0.4 * 0.75                        # негативный факт
+    s_neural = [0.9, 1 - 0.5 * 0.5]                         # noisy-OR по свидетелям
+    credit0 = 0.6 * 1.0 + 0.4 * s_neural[0]                 # позитивный факт
+    credit1 = 0.6 * 0.0 + 0.4 * s_neural[1]                 # негативный факт
     expected = (-math.log(credit0) - math.log(1 - credit1)) / 2
     assert loss.item() == pytest.approx(expected, abs=1e-6)
 
