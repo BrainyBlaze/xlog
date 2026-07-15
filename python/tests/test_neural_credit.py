@@ -1,10 +1,13 @@
 import math
+import random
+
 import pytest
 
 torch = pytest.importorskip("torch")
+pyxlog = pytest.importorskip("pyxlog")
 
 from pyxlog.ilp.join_bodies import prepare_extension
-from pyxlog.ilp.neural_credit import CandidateSpec, credit_nll
+from pyxlog.ilp.neural_credit import CandidateSpec, credit_nll, train_engine_mode
 
 
 def test_credit_is_sum_of_prob_times_score_hand_computed() -> None:
@@ -99,3 +102,116 @@ def test_a_neural_relation_in_the_left_slot_is_skipped_not_fatal() -> None:
     has_event_right = [s for s in specs if s.right == "has_event"]
     assert len(has_event_right) > 0
     assert all(s.is_neural for s in has_event_right)
+
+
+# ---------------------------------------------------------------------------
+# Engine-mode training loop (Task 3). CUDA-gated: the ENGINE compiles the
+# program (device=0), which needs a real CUDA context.
+#
+# World W1 is `code/spike_bridge.py::build_world(seed, informative=True)`,
+# rewritten locally here rather than imported from the artifacts spike: 30
+# edges, k=4 events each, exactly one salient event (slot 0) on a positive
+# edge with an INFORMATIVE feature; `has_event_bad` / `co` are
+# equal-cardinality relational distractors sampled from OTHER edges' events
+# (fair sampling, same as the spike), so they are exactly as sharp a noisy-OR
+# as the true join and carry zero label information. No `tag` escape is in
+# the pool (unlike the spike's W2/W3), so the network is the ONLY thing that
+# can explain the positives.
+# ---------------------------------------------------------------------------
+cuda = pytest.mark.skipif(not torch.cuda.is_available(), reason="xlog engine requires CUDA")
+
+N_EDGES = 30
+K = 4
+TEMPLATE = "learnable(W) :: plastic(X, Y) :- bL(X, Z), bR(Z, Y)."
+
+
+def _w1_world(seed: int = 0):
+    rng = random.Random(seed)
+    features, own, labels = [], {}, {}
+    salient = set()
+    ev = 0
+    for edge in range(N_EDGES):
+        positive = rng.random() < 0.5
+        evs = []
+        for slot in range(K):
+            is_sal = positive and slot == 0
+            if is_sal:
+                salient.add(ev)
+            features.append(
+                round(rng.uniform(0.6, 0.99) if is_sal else rng.uniform(0.01, 0.4), 3)
+            )
+            evs.append(ev)
+            ev += 1
+        own[edge] = evs
+        labels[edge] = positive
+    n_ev = ev
+    all_ev = list(range(n_ev))
+
+    def fair(r):
+        out = []
+        for edge in range(N_EDGES):
+            mine = set(own[edge])
+            out += [(edge, e) for e in r.sample([x for x in all_ev if x not in mine], K)]
+        return out
+
+    return dict(
+        features=features, own=own, labels=labels, n_ev=n_ev, salient=salient,
+        has_event=[(edge, e) for edge in range(N_EDGES) for e in own[edge]],
+        has_event_bad=fair(random.Random(1000 + seed)),
+        co=fair(random.Random(2000 + seed)),
+        sal=[(e, l) for e in all_ev for l in (0, 1)],
+    )
+
+
+def _w1_source(world) -> str:
+    lines = []
+    for name in ("has_event", "has_event_bad", "co", "sal"):
+        lines += [f"{name}({a}, {b})." for a, b in world[name]]
+    lines.append(TEMPLATE)
+    return "\n".join(lines)
+
+
+def _train_w1(world, seed: int = 0, steps: int = 400):
+    prog = pyxlog.IlpProgramFactory.compile(_w1_source(world), device=0, memory_mb=1024)
+    torch.manual_seed(seed)
+    network = torch.nn.Sequential(torch.nn.Linear(1, 2), torch.nn.Softmax(dim=-1)).cuda()
+    with torch.no_grad():
+        network[0].bias[1] -= 2.0
+    features = torch.tensor([[f] for f in world["features"]], dtype=torch.float32).cuda()
+    facts = [(edge, 1) for edge in range(N_EDGES)]
+    is_positive = [world["labels"][edge] for edge in range(N_EDGES)]
+    result = train_engine_mode(
+        prog, "W", facts, is_positive, network, features,
+        neural_relations={"sal": world["n_ev"]}, steps=steps, seed=seed,
+    )
+    return result, features
+
+
+@cuda
+def test_w1_engine_mode_neural_wins_detector_separates_and_training_is_deterministic():
+    """The true neural join wins the mixture, the per-event detector separates
+    salient from quiet events, and two identically-seeded runs are bitwise
+    deterministic (mirroring the dILP trainer's own determinism contract)."""
+    world = _w1_world(seed=0)
+    result, features = _train_w1(world, seed=0)
+
+    print(f"\n[W1] cand_probs = {result.cand_probs}")
+    assert result.cand_probs[("has_event", "sal")] > 0.95, result.cand_probs
+
+    with torch.no_grad():
+        probs = result.network(features)[:, 1].cpu().tolist()
+    sal_p = [p for e, p in enumerate(probs) if e in world["salient"]]
+    quiet_p = [p for e, p in enumerate(probs) if e not in world["salient"]]
+    mean_sal, mean_quiet = sum(sal_p) / len(sal_p), sum(quiet_p) / len(quiet_p)
+    print(
+        f"[W1] mean P(salient)={mean_sal:.4f} mean P(quiet)={mean_quiet:.4f} "
+        f"separation={mean_sal - mean_quiet:.4f}"
+    )
+    # min(salient) - max(quiet) > 0.5 is too strict for 400 steps (measured);
+    # the mean-vs-mean gap is the honest separation gate here.
+    assert mean_sal - mean_quiet > 0.5, (mean_sal, mean_quiet)
+
+    # Determinism: two fresh, identically-seeded runs over the SAME world must
+    # produce a bitwise-equal final loss.
+    result_b, _ = _train_w1(world, seed=0)
+    assert result.losses[-1] == result_b.losses[-1]

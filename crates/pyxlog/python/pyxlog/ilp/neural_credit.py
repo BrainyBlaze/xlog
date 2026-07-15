@@ -126,3 +126,67 @@ def enumerate_specs(prog, mask_name, facts, neural_relations, device):
             )
             specs.append(CandidateSpec(cand["id"], ln, rn, False, None, cover))
     return specs
+
+
+@dataclass(frozen=True)
+class EngineModeResult:
+    """The trained candidate mixture, the specs it was trained over, the (mutated
+    in place) network, and the per-step loss trace -- the last is what determinism
+    is checked against."""
+
+    cand_probs: dict
+    specs: list
+    network: Any
+    losses: list
+
+
+def train_engine_mode(prog, mask_name, facts, is_positive, network, features,
+                      neural_relations, steps=400, lr=0.05, gamma=1.0,
+                      entropy_start=0.0, entropy_end=0.1, seed=0):
+    """Train candidate logits + the network against the real-valued credit.
+
+    Deterministic, mirroring the dILP trainer: the OR accumulates with index_add,
+    whose default CUDA path is atomic float addition. Entropy is the Occam pressure
+    the linear credit lacks (one-hot preference; weight annealed by
+    entropy_weight_at_step). Selection is NOT here -- see kfold_select."""
+    import os
+
+    import torch
+
+    from pyxlog.ilp.entropy import entropy_weight_at_step, normalized_entropy
+
+    os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
+    torch.use_deterministic_algorithms(True)
+    if torch.cuda.is_available():
+        torch.backends.cudnn.benchmark = False
+    torch.manual_seed(seed)
+
+    device = features.device
+    specs = enumerate_specs(prog, mask_name, facts, neural_relations, device)
+    C = max(s.cid for s in specs) + 1
+    W = torch.zeros(C, requires_grad=True, device=device)
+    opt = torch.optim.Adam([W] + list(network.parameters()), lr=lr)
+    is_pos_t = torch.as_tensor(is_positive, device=device)
+    pos_col = 1                                   # nn(net, [Ev], Label, [neg, pos])
+
+    losses: list[float] = []
+    for step in range(steps):
+        opt.zero_grad()
+        p = torch.softmax(W, dim=0)
+        p_event = network(features)[:, pos_col]
+        loss = credit_nll(p, specs, p_event, is_pos_t, gamma=gamma)
+        w_ent = entropy_weight_at_step(step, steps, entropy_start, entropy_end)
+        active = torch.stack([p[s.cid] for s in specs])
+        loss = loss + w_ent * normalized_entropy(
+            active / active.sum().clamp(min=1e-8), len(specs)
+        )
+        loss.backward()
+        opt.step()
+        losses.append(float(loss.detach()))
+
+    with torch.no_grad():
+        p = torch.softmax(W, dim=0)
+    return EngineModeResult(
+        cand_probs={(s.left, s.right): float(p[s.cid]) for s in specs},
+        specs=specs, network=network, losses=losses,
+    )
