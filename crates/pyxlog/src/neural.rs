@@ -641,6 +641,37 @@ impl CompiledProgram {
         tensor: PyObject,
         ids: Vec<i64>,
     ) -> PyResult<()> {
+        // Validate HERE, at the public boundary, not only in the Python wrapper: a
+        // direct pyo3 caller with more ids than rows sends the circuit's DomainRow
+        // gather out of bounds on device (a context-poisoning CUDA assert), and a
+        // duplicated id silently resolves to its first occurrence instead of the
+        // refusal-by-name the contract documents.
+        let rows: usize = {
+            let shape_obj = tensor.getattr(py, "shape")?;
+            shape_obj.bind(py).get_item(0)?.extract()?
+        };
+        if ids.len() != rows {
+            return Err(PyValueError::new_err(format!(
+                "register_domain_tensor_source('{}'): {} id(s) for {} tensor row(s); \
+                 there must be exactly one id per row (id j names the domain constant \
+                 whose feature vector is row j)",
+                name,
+                ids.len(),
+                rows
+            )));
+        }
+        let mut seen: std::collections::HashMap<i64, usize> =
+            std::collections::HashMap::with_capacity(ids.len());
+        for (row, id) in ids.iter().enumerate() {
+            if let Some(prev) = seen.insert(*id, row) {
+                return Err(PyValueError::new_err(format!(
+                    "register_domain_tensor_source('{}'): domain_ids must not repeat a \
+                     constant: {} is claimed by row {} and row {}, so the row holding \
+                     its features would be ambiguous",
+                    name, id, prev, row
+                )));
+            }
+        }
         self.add_tensor_source(py, name.clone(), tensor)?;
         self.domain_source = Some(name);
         self.domain_ids = ids;
@@ -2452,26 +2483,31 @@ impl CompiledProgram {
                         pred_name, join.relation, occ.input_var
                     )));
                 }
+                // Which feature row holds each constant. `domain_ids` is the one map —
+                // the same one the torch-side mixture resolves through — so a constant
+                // is looked up in it rather than standing in for its own rank. A
+                // constant's rank in this relation's domain is NOT its row: the caller
+                // may hold features for constants the relation never joins, and every
+                // rank after such a gap slides. Built ONCE per signature: a linear
+                // .position() per joined constant is O(|domain|·|ids|), which at the
+                // feature-per-event scale this path exists for is billions of
+                // comparisons at compile time.
+                let row_of: std::collections::HashMap<i64, usize> = self
+                    .domain_ids
+                    .iter()
+                    .enumerate()
+                    .map(|(row, c)| (*c, row))
+                    .collect();
                 for ev in event_domain.iter() {
-                    // Which feature row holds THIS constant. `domain_ids` is the one map —
-                    // the same one the torch-side mixture resolves through — so the constant
-                    // is looked up in it rather than standing in for its own rank. A
-                    // constant's rank in this relation's domain is NOT its row: the caller
-                    // may hold features for constants the relation never joins, and every
-                    // rank after such a gap slides.
-                    let row = self
-                        .domain_ids
-                        .iter()
-                        .position(|c| c == ev)
-                        .ok_or_else(|| {
-                            PyValueError::new_err(format!(
-                                "Query rule for '{}': existential-join relation '{}' joins domain \
+                    let row = *row_of.get(ev).ok_or_else(|| {
+                        PyValueError::new_err(format!(
+                            "Query rule for '{}': existential-join relation '{}' joins domain \
                              constant {}, which is not in domain_ids for network '{}' — so no \
                              row of its domain feature tensor holds that constant's features. \
                              Give every joined constant an id, or drop the fact.",
-                                pred_name, join.relation, ev, occ.info.network
-                            ))
-                        })?;
+                            pred_name, join.relation, ev, occ.info.network
+                        ))
+                    })?;
                     groups.push(NeuralGroup {
                         info: occ.info.clone(),
                         input_source: InputSource::DomainRow(row),

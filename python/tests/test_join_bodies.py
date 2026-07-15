@@ -409,3 +409,35 @@ def test_a_negated_only_neural_mention_still_registers_its_network() -> None:
         query_variable="E",
     )
     assert _neural_predicate_networks(_FakeProgram(), [rule]) == {"saliency": "sal_net"}
+
+
+def test_the_distractor_salient_composition_is_class_independent() -> None:
+    """Review (engine half), finding 7: uniform sampling from "other edges' events"
+    leaks anti-correlated label signal -- a positive edge's pool holds S-1 salient
+    events, a negative edge's holds S -- and the bias is MATERIAL at small n_edges
+    (analytically about -0.20 salient-per-bucket at n_edges=6, k=6). The composition
+    is now drawn from ONE distribution shared by both classes, so the salient count a
+    converged detector's OR sees carries no label information by construction.
+
+    Pinned where it discriminates: small world, 40 fixed seeds, SIGNED per-class gap
+    averaged across seeds and both distractor relations. Measured: -0.026 for the
+    shared-composition sampler vs -0.20 for the old one; the 0.1 bound sits between.
+    Fixed seeds -- cannot flake."""
+    from pyxlog.ilp.discovery import SALIENT_THRESHOLD, make_world
+
+    gaps: list[float] = []
+    for seed in range(40):
+        world = make_world(n_edges=6, events_per_edge=6, seed=seed)
+        salient = {
+            ev for ev, f in enumerate(world.event_features) if f > SALIENT_THRESHOLD
+        }
+        for relation in (world.post_before_pre, world.co_occurs):
+            per_edge: dict[int, int] = {}
+            for ev, edge in relation:
+                per_edge[edge] = per_edge.get(edge, 0) + (1 if ev in salient else 0)
+            pos = [per_edge.get(e, 0) for e in world.edges if world.labels[e]]
+            neg = [per_edge.get(e, 0) for e in world.edges if not world.labels[e]]
+            if pos and neg:
+                gaps.append(sum(pos) / len(pos) - sum(neg) / len(neg))
+    mean_gap = sum(gaps) / len(gaps)
+    assert abs(mean_gap) < 0.1, mean_gap

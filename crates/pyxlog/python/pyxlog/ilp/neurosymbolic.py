@@ -206,8 +206,10 @@ def train_neurosymbolic_program(
     row undefined, and is refused by name.
 
     Omitting ``domain_ids`` defaults it to ``[0, 1, ..., D-1]`` per network — the
-    dense identity, i.e. exactly the behaviour every existing caller already relies
-    on. Every constant the join relation's extension mentions must appear in the
+    dense identity. That default is accepted only when the join relation's domain is
+    exactly ``0..D-1``; anything else is ambiguous against the deleted rank contract
+    and is refused with a demand for explicit ids (see ``_resolve_domain_ids``).
+    Every constant the join relation's extension mentions must appear in the
     network's ids; one that does not is named in a ``ValueError`` (it has no feature
     row at all). The ids may cover MORE constants than the relation joins (features
     for every event, though only some are joined): the row is looked up by constant,
@@ -219,6 +221,24 @@ def train_neurosymbolic_program(
     import torch
 
     import pyxlog
+
+    # Determinism is an EVIDENCE property here, not a nicety: the join OR accumulates
+    # with index_add, whose default CUDA path is atomic float addition — bitwise
+    # different every run, and the drift amplifies through hundreds of optimizer steps.
+    # When a winning margin sits near select_rule's TIE_TOLERANCE, two identically
+    # seeded runs can disagree on whether a rule was selected at all. The dILP trainer
+    # already runs deterministic (trainer._set_deterministic_cuda); this entry point
+    # mirrors it. Seeding stays the caller's.
+    import os
+
+    # cuBLAS refuses deterministic mode without a fixed workspace; without this, the
+    # first Linear on CUDA raises instead of running. Respect a caller's own setting.
+    os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
+    torch.use_deterministic_algorithms(True)
+    if hasattr(torch, "set_float32_matmul_precision"):
+        torch.set_float32_matmul_precision("high")
+    if torch.cuda.is_available():
+        torch.backends.cudnn.benchmark = False
 
     program_source, rules, train_head, objective = _desugar_source(source)
     if objective != "binary_cross_entropy":
@@ -274,9 +294,11 @@ def train_neurosymbolic_program(
             f"got {sorted(domain_inputs)}"
         )
     # Which ROW of domain_inputs[net] holds which domain CONSTANT. Stated by the
-    # caller, never inferred; defaulted to the dense identity, which is what every
-    # caller written before this parameter existed already meant.
-    domain_ids = _resolve_domain_ids(domain_ids, domain_inputs)
+    # caller, never inferred; defaulted to the dense identity. NOTE the default is
+    # NOT the deleted rank contract — see _resolve_domain_ids; the joint-mixture
+    # path refuses the ambiguous case, this single-rule path relies on the engine's
+    # own missing-constant refusal.
+    domain_ids, _defaulted = _resolve_domain_ids(domain_ids, domain_inputs)
 
     for name, feats in domain_inputs.items():
         if name not in declared:
@@ -555,7 +577,7 @@ def _train_joint_mixture(
     rules = rules or []
     modules = modules or {}
     domain_inputs = domain_inputs or {}
-    domain_ids = _resolve_domain_ids(domain_ids, domain_inputs)
+    domain_ids, defaulted_domain_ids = _resolve_domain_ids(domain_ids, domain_inputs)
 
     n = len(targets)
 
@@ -625,6 +647,23 @@ def _train_joint_mixture(
             _reject(rule)                # a join candidate we cannot mask -> refused
         parsed_join[rule_id] = jb
 
+    # A candidate cannot be BOTH a neural-join body and carry a declared g_theta
+    # gate (neural_bodies): the mask loop takes one branch per candidate, so the
+    # loser would be dropped SILENTLY — the gate's optimizer stepping on grad=None
+    # forever, neural_grads reporting 0.0 as if it merely learned nothing. Before
+    # the join path existed this program failed loudly (KeyError); refusing typed
+    # keeps it loud.
+    overlap = sorted(set(parsed_join) & set(neural_modules))
+    if overlap:
+        raise ValueError(
+            "candidates "
+            + ", ".join(f"'{r}'" for r in overlap)
+            + " both parse as a neural-join body AND declare a neural_bodies gate. "
+            "The mixture evaluates exactly one mechanism per candidate, so one of "
+            "the two would be silently ignored. Split them into separate candidates "
+            "or drop one declaration."
+        )
+
     # The two CALLER contract checks, run here — BEFORE the engine is asked anything.
     # They need nothing from the engine, and the order matters: `joint_candidate_
     # eligibility` compiles a query signature for EVERY rule defining the head, join
@@ -657,6 +696,13 @@ def _train_joint_mixture(
     device = guard_modules[candidate_ids[0]].logit.device
     rel_masks: dict[str, Any] = {}
     for guard_pred, mask in eligibility:
+        if not guard_pred.startswith(_GUARD_PREDICATE_PREFIX):
+            # Join candidates' eligibility entries come back keyed by their NEURAL
+            # PREDICATE name, not guard-prefixed; the join path builds its own masks.
+            # Stripping unconditionally turned such a key into a junk rule id — and a
+            # predicate whose tail happened to equal another candidate's id CLOBBERED
+            # that candidate's genuine hard-filter mask with this one, silently.
+            continue
         rule_id = guard_pred[len(_GUARD_PREDICATE_PREFIX) :]
         rel_masks[rule_id] = torch.tensor(
             [1.0 if m else 0.0 for m in mask], dtype=torch.float32, device=device
@@ -688,8 +734,30 @@ def _train_joint_mixture(
             # reconciled — everything downstream speaks rows. A constant with no row is
             # named in a typed error here (it used to be a CUDA out-of-bounds index, or,
             # on a padded tensor, silently the wrong row).
+            raw_extension = read_join_extension(ilp_read, jb, n)
+            if jb.network in defaulted_domain_ids:
+                # The dense-identity default is only UNAMBIGUOUS when the joined
+                # domain is exactly 0..D-1. Anything else is indistinguishable from
+                # a pre-domain_ids caller whose rows followed the deleted rank
+                # contract — for whom identity lookups can land in range and read
+                # the WRONG feature vectors, silently. That is the exact window
+                # this parameter exists to close, so the ambiguity is refused, not
+                # guessed at.
+                joined = {ev for bucket in raw_extension for ev in bucket}
+                rows = len(domain_ids[jb.network])
+                if joined != set(range(rows)):
+                    missing = sorted(set(range(rows)) - joined)[:5]
+                    extra = sorted(joined - set(range(rows)))[:5]
+                    raise ValueError(
+                        f"domain_ids was omitted for network '{jb.network}', and the "
+                        f"default (dense identity 0..{rows - 1}) is only unambiguous "
+                        "when the join relation's domain is exactly that range. Here "
+                        f"it is not (unjoined rows e.g. {missing}, out-of-range "
+                        f"constants e.g. {extra}). Pass domain_ids explicitly — "
+                        f"list(range({rows})) if row j really holds constant j."
+                    )
             extension = translate_extension_to_rows(
-                read_join_extension(ilp_read, jb, n),
+                raw_extension,
                 domain_ids[jb.network],
                 network=jb.network,
                 rule_id=rule_id,
@@ -921,13 +989,22 @@ def _neural_predicate_networks(
 
 def _resolve_domain_ids(
     domain_ids: dict[str, Sequence[int]] | None, domain_inputs: dict[str, Any]
-) -> dict[str, list[int]]:
+) -> tuple[dict[str, list[int]], set[str]]:
     """Validate the caller's ``domain_ids`` and default the ones it omits.
 
     ``domain_ids[net][j]`` is the domain constant whose feature vector is row ``j`` of
-    ``domain_inputs[net]``. The default is the dense identity ``0..D-1`` — which is
-    what a caller written before this parameter existed already meant, so omitting it
-    reproduces the previous behaviour exactly.
+    ``domain_inputs[net]``. The default is the dense identity ``0..D-1``.
+
+    THE DEFAULT IS NOT THE OLD CONTRACT. The deleted behaviour resolved a row by the
+    constant's RANK in the join relation's own sorted domain; the identity default
+    coincides with it ONLY when that domain is exactly ``0..D-1``. A pre-existing
+    caller with a SPARSE domain (say ``{0, 2, 5}`` packed into three rows) does not
+    get its old rows back from the default — it gets identity lookups that can land
+    in range and read the WRONG feature vectors, silently. That ambiguity is
+    detectable, and the join path refuses it: a defaulted network whose joined
+    domain is not exactly ``0..D-1`` is a typed error demanding explicit ids (see
+    the caller). Returns ``(resolved, defaulted_names)`` so the join path knows
+    which networks to hold to that stricter bar.
 
     What makes the two engines agree is that the resolved ids are registered WITH the
     domain tensor, so the exact circuit looks a joined constant up in the same list the
@@ -943,9 +1020,14 @@ def _resolve_domain_ids(
             "constant, so every key must also be a key of domain_inputs"
         )
     resolved: dict[str, list[int]] = {}
+    defaulted: set[str] = set()
     for name, feats in domain_inputs.items():
         rows = int(feats.shape[0])
-        ids = [int(c) for c in supplied[name]] if name in supplied else list(range(rows))
+        if name in supplied:
+            ids = [int(c) for c in supplied[name]]
+        else:
+            ids = list(range(rows))
+            defaulted.add(name)
         if len(ids) != rows:
             raise ValueError(
                 f"domain_ids['{name}'] has {len(ids)} id(s) but domain_inputs['{name}'] "
@@ -954,7 +1036,7 @@ def _resolve_domain_ids(
             )
         domain_row_index(ids, name)      # distinct constants, or a typed refusal
         resolved[name] = ids
-    return resolved
+    return resolved, defaulted
 
 
 def _neural_atom_label(rule: TrainableRuleDecl, predicate: str) -> str:

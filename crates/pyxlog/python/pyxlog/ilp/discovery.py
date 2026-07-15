@@ -72,19 +72,40 @@ def _fair_distractor(
     n_edges: int,
     events_per_edge: int,
     own: dict[int, list[int]],
+    salient_events: set[int],
     all_events: list[int],
 ) -> list[tuple[int, int]]:
-    """``events_per_edge`` events per edge, sampled from OTHER edges' events.
+    """``events_per_edge`` events per edge, sampled from OTHER edges' events, with a
+    CLASS-INDEPENDENT salient composition.
 
     Same cardinality as the correct relation (so its OR is exactly as sharp -- no
-    structural advantage) and no information about the edge's own label (so it cannot
-    be fit, in either polarity, by any detector).
+    structural advantage) and no information about the edge's own label. The second
+    property needs more than "sample from other edges": a positive edge's pool holds
+    S-1 salient events while a negative edge's holds S, so uniform sampling leaks
+    O(1/(n_edges-1)) of ANTI-correlated label signal into the distractor -- exactly
+    the inverted-detector zero-loss direction the module docstring calls a coin flip
+    no correct implementation can pass, and material at small n_edges. So the
+    COMPOSITION is drawn first, from one distribution shared by both classes
+    (Binomial(k, (S-1)/(N-k)) -- the positive-pool rate, used for everyone), and only
+    then are event identities sampled per stratum. The count a converged detector's
+    OR sees is thereby exactly label-independent by construction.
     """
+    n_total = len(all_events)
+    n_salient = len(salient_events)
+    pool_rate = max(0.0, (n_salient - 1) / max(1, n_total - events_per_edge))
+
     tuples: list[tuple[int, int]] = []
     for edge in range(n_edges):
         mine = set(own[edge])
-        pool = [ev for ev in all_events if ev not in mine]
-        for ev in rng.sample(pool, events_per_edge):
+        pool_sal = [ev for ev in all_events if ev in salient_events and ev not in mine]
+        pool_quiet = [
+            ev for ev in all_events if ev not in salient_events and ev not in mine
+        ]
+        n_sal = sum(1 for _ in range(events_per_edge) if rng.random() < pool_rate)
+        n_sal = min(n_sal, len(pool_sal))
+        n_quiet = min(events_per_edge - n_sal, len(pool_quiet))
+        n_sal = events_per_edge - n_quiet     # backfill if the quiet pool ran short
+        for ev in rng.sample(pool_sal, n_sal) + rng.sample(pool_quiet, n_quiet):
             tuples.append((ev, edge))
     return tuples
 
@@ -120,8 +141,15 @@ def make_world(n_edges: int, events_per_edge: int, seed: int) -> World:
         own[edge] = events
 
     all_events = list(range(event_id))
-    post = _fair_distractor(rng, n_edges, events_per_edge, own, all_events)
-    co = _fair_distractor(rng, n_edges, events_per_edge, own, all_events)
+    salient_events = {
+        ev for ev in all_events if features[ev] > SALIENT_THRESHOLD
+    }
+    post = _fair_distractor(
+        rng, n_edges, events_per_edge, own, salient_events, all_events
+    )
+    co = _fair_distractor(
+        rng, n_edges, events_per_edge, own, salient_events, all_events
+    )
 
     edges = list(range(n_edges))
     # The label is READ BACK off the generated relation, not off `positive`: it is a
