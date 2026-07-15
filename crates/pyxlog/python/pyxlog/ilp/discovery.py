@@ -218,6 +218,16 @@ TIE_TOLERANCE = 0.01
 # was a relation with no signal at all, accuracy 0.625 -- below the head-gate baseline).
 MIN_WEIGHT = 0.5
 
+# A candidate can ALSO be believed and alone at the top while not actually fitting the
+# data: a trivially-true relation's mask is ~1 everywhere, so its "fit" to the label is
+# just the label's own base rate, not evidence of a relationship. MIN_FIT is the default
+# floor on `fits[rule_id]` (== mean((mask >= 0.5) == targets) on the TRAIN set, from
+# `neurosymbolic.train_neurosymbolic_program`'s `candidate_train_fit`) below which a
+# candidate is dropped BEFORE ranking, whatever its guard weight. Measured: the
+# trivially-true world's derailing seed selects `co_occurs` at weight 0.955 but fit
+# 0.500 (a coin flip) -- comfortably caught by this gate.
+MIN_FIT = 0.75
+
 
 @dataclass(frozen=True)
 class Selection:
@@ -243,6 +253,8 @@ def select_rule(
     *,
     tie_tolerance: float = TIE_TOLERANCE,
     min_weight: float = MIN_WEIGHT,
+    fits: dict[str, float] | None = None,
+    min_fit: float = MIN_FIT,
 ) -> Selection:
     """Read a winner off the candidate weights -- or REFUSE to.
 
@@ -256,11 +268,42 @@ def select_rule(
     A rule is claimed only when a single candidate is BOTH believed (weight >=
     ``min_weight``) AND alone at the top (the runner-up is more than ``tie_tolerance``
     behind). Otherwise ``rule`` is None and ``reason`` says which gate failed.
+
+    ``fits``, when given, is the per-candidate TRAIN-set fit (e.g.
+    ``NeuroSymbolicTrainingResult.candidate_train_fit``): ``mean((mask >= 0.5) ==
+    targets)``. Any candidate whose fit is below ``min_fit`` is dropped BEFORE
+    ranking -- whatever its guard weight -- because a believed, top-ranked candidate
+    can still fail to actually fit the data (a trivially-true relation's mask is ~1
+    everywhere, so it "wins" the weight ranking on a degenerate minimum while its fit
+    is a coin flip). A candidate ``fits`` does not mention is treated as fit 0.0 (it
+    cannot pass the gate). If NO candidate survives the gate, this returns an
+    abstention naming the fit gate and the best fit value seen, and nothing below is
+    reached. Omitting ``fits`` (the default, ``None``) skips this gate entirely --
+    behavior is then byte-identical to before this parameter existed.
     """
     if not weights:
         return Selection(None, [], 0.0, 0.0, "no candidates")
 
-    ranked = sorted(weights.items(), key=lambda kv: (-kv[1], kv[0]))
+    candidates = weights
+    if fits is not None:
+        candidate_fits = {rule_id: fits.get(rule_id, 0.0) for rule_id in weights}
+        gated = {
+            rule_id: w
+            for rule_id, w in weights.items()
+            if candidate_fits[rule_id] >= min_fit
+        }
+        if not gated:
+            best_id, best_fit = max(
+                candidate_fits.items(), key=lambda kv: (kv[1], kv[0])
+            )
+            return Selection(
+                None, [], 0.0, 0.0,
+                f"fit gate: no candidate reaches min_fit={min_fit} "
+                f"(best fit: {best_id} at {best_fit:.5f})",
+            )
+        candidates = gated
+
+    ranked = sorted(candidates.items(), key=lambda kv: (-kv[1], kv[0]))
     top_id, top = ranked[0]
     runner_up = ranked[1][1] if len(ranked) > 1 else 0.0
     margin = top - runner_up

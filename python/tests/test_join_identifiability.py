@@ -14,17 +14,22 @@ two candidates with the same extension are exactly degenerate: the head probabil
     1. partial overlap        -> the correct relation still wins, and by a lot (971x)
     2. exact duplicate        -> a TIE. Weights agreed to twelve decimals; `argmax` would
                                  have handed back whichever relation was typed first.
-    3. trivially-true relation-> a degenerate minimum `select_rule` does NOT catch:
-                                 the WRONG candidate comes back believed and alone at
-                                 the top. Re-measured after the class-independent
-                                 distractor fix: seed 0 RECOVERED (correct rule at
-                                 0.9996, accuracy 1.000); seed 1 still derails
-                                 (co_occurs at 0.955, accuracy 0.500). XFAIL(strict) on
-                                 the seed that still fails. Degeneracy is not ambiguity
-                                 -- the gates below detect a mixture that believes
-                                 nothing, not one that confidently believes the wrong
-                                 thing; the root cause (no Occam term, no fit gate) is
-                                 unchanged.
+    3. trivially-true relation-> a degenerate minimum the WEIGHT gates alone do not
+                                 catch: the WRONG candidate comes back believed and
+                                 alone at the top. Re-measured after the
+                                 class-independent distractor fix: seed 0 RECOVERED
+                                 (correct rule at 0.9996, accuracy 1.000, and its TRAIN
+                                 fit is ~1.0 -- it passes the fit gate too); seed 1
+                                 still derails on weight ALONE (co_occurs at 0.955,
+                                 accuracy 0.500), but its TRAIN fit is 0.500 -- a coin
+                                 flip -- so `select_rule(fits=..., min_fit=0.75)` drops
+                                 it before ranking and abstains ("fit gate" in the
+                                 reason). The former XFAIL(strict) is now a green
+                                 abstention: `candidate_train_fit`
+                                 (`neurosymbolic._train_joint_mixture`) plus
+                                 `select_rule`'s fit gate is exactly the missing piece
+                                 named above -- a rule the model cannot fit the data
+                                 with is not a rule, whatever its guard weight.
 """
 import random
 
@@ -112,6 +117,46 @@ def test_a_candidate_nobody_believes_is_not_a_rule():
 
 
 # ---------------------------------------------------------------------------
+# The fit gate: closes exactly the limit the previous test's docstring names --
+# a candidate can be believed and alone at the top and still not fit the data.
+# `fits` is `NeuroSymbolicTrainingResult.candidate_train_fit`: the TRAIN-set
+# agreement of the candidate's OWN mask with the label, independent of its guard
+# weight or its rank among the others.
+# ---------------------------------------------------------------------------
+def test_fit_gate_refuses_a_confident_candidate_whose_fit_is_a_coin_flip():
+    # The measured trivially-true-world shape: alone at the top on weight (0.955),
+    # but its TRAIN fit is 0.500 -- a coin flip. Confident does not mean fitting.
+    weights = {"cand_co_occurs": 0.955}
+    fits = {"cand_co_occurs": 0.5}
+    s = select_rule(weights, fits=fits, min_fit=0.75)
+    assert not s.decided
+    assert "fit gate" in s.reason
+    assert "0.50000" in s.reason  # names the best (here: only) fit value
+
+
+def test_fit_gate_lets_a_candidate_that_fits_through_selected_as_before():
+    # Every candidate clears min_fit, so the gate drops nothing: the ranking and
+    # its reasoning are byte-identical to a plain call, survivors included.
+    weights = {"cand_a": 0.99975, "cand_b": 0.00030, "cand_c": 0.00028}
+    fits = {"cand_a": 0.99, "cand_b": 0.90, "cand_c": 0.90}
+    gated = select_rule(weights, fits=fits, min_fit=0.75)
+    ungated = select_rule(weights)
+    assert gated.decided and gated.rule == "cand_a"
+    assert gated == ungated
+
+
+def test_fits_none_is_byte_identical_to_omitting_the_argument():
+    # The measured exact-duplicate weights from the tie test above: a regression
+    # anchor on old numbers so `fits=None` cannot silently change behavior.
+    weights = {
+        "cand_pre_before_post": 0.994825720787,
+        "cand_co_occurs": 0.994825720787,
+        "cand_post_before_pre": 0.00034,
+    }
+    assert select_rule(weights, fits=None) == select_rule(weights)
+
+
+# ---------------------------------------------------------------------------
 # The worlds. These train, so they need CUDA.
 # ---------------------------------------------------------------------------
 cuda = pytest.mark.skipif(
@@ -174,7 +219,7 @@ def _train(source, world, seed):
     accuracy = sum(
         (p >= 0.5) == y for p, y in zip(result.query_probabilities, world.labels)
     ) / len(world.labels)
-    return select_rule(result.symbolic_rule_weights), accuracy
+    return select_rule(result.symbolic_rule_weights), accuracy, result
 
 
 @cuda
@@ -198,7 +243,7 @@ def test_a_distractor_holding_five_of_six_own_events_still_loses(seed):
         foreign = rng.sample([e for e in all_events if e not in set(mine)], K - 5)
         co += [(ev, edge) for ev in mine[:5] + foreign]
 
-    selection, accuracy = _train(_source(world, co), world, seed)
+    selection, accuracy, _result = _train(_source(world, co), world, seed)
     assert selection.rule == WINNER, selection.reason
     assert selection.margin > 0.5
     assert accuracy > 0.95
@@ -219,7 +264,7 @@ def test_an_exact_duplicate_relation_is_a_tie_and_the_run_says_so(seed):
     own = _own_events(world)
     co = [(ev, edge) for edge in range(N_EDGES) for ev in own[edge]]
 
-    selection, accuracy = _train(_source(world, co), world, seed)
+    selection, accuracy, _result = _train(_source(world, co), world, seed)
     assert not selection.decided, f"claimed {selection.rule} on indistinguishable relations"
     assert selection.tied == ["cand_co_occurs", f"cand_{CORRECT_RELATION}"]
     assert accuracy > 0.95, "and the labels are still fit perfectly -- that is the trap"
@@ -227,36 +272,32 @@ def test_an_exact_duplicate_relation_is_a_tie_and_the_run_says_so(seed):
 
 @cuda
 @pytest.mark.parametrize(
-    "seed",
+    "seed, gate_survives",
     [
         # Seed 0 RECOVERED when the distractor became exactly class-independent
-        # (review finding 7): re-measured, it now selects the correct rule at 0.9996,
-        # accuracy 1.000. The strict xfail caught the recovery as an XPASS -- which is
-        # the whole point of strict.
-        0,
-        pytest.param(
-            1,
-            marks=pytest.mark.xfail(
-                reason="MEASURED, NOT FIXED, and `select_rule` does not save us here. "
-                       "With a trivially-true relation in the vocabulary, seed 1 still "
-                       "lands in a degenerate minimum: it selects `co_occurs` at weight "
-                       "0.955 (accuracy 0.500 -- coin-flip, far below the 0.847 "
-                       "head-gate baseline). The wrong candidate is BELIEVED and ALONE "
-                       "at the top, so the tie/min-weight gates pass it through: a "
-                       "confident wrong answer, not an abstention. The fair-distractor "
-                       "fix recovered seed 0; the ROOT CAUSE -- no Occam/sparsity term, "
-                       "no fit gate -- is unchanged, and this seed still exhibits it.",
-                strict=True,
-            ),
-        ),
+        # (review finding 7): it selects the correct rule at 0.9996, accuracy 1.000,
+        # and its TRAIN fit is ~1.0 -- it clears the fit gate too, unchanged.
+        (0, True),
+        # Seed 1 still lands in a degenerate minimum ON WEIGHT ALONE: it selects
+        # `co_occurs` at weight 0.955 (accuracy 0.500 -- coin-flip, far below the
+        # 0.847 head-gate baseline). The wrong candidate is BELIEVED and ALONE at
+        # the top, so weight/tie gates pass it through -- but its TRAIN fit is
+        # 0.500, also a coin flip, and `min_fit=0.75` catches exactly that: this is
+        # the former XFAIL(strict), now a green abstention via the fit gate.
+        (1, False),
     ],
 )
-def test_a_trivially_true_relation_does_not_derail_the_selection(seed):
+def test_a_trivially_true_relation_does_not_derail_the_selection(seed, gate_survives):
     """`anything(Ev, E)` holds for EVERY (event, edge): its mask is ~1 everywhere.
 
-    This is the honest red test. It is not a corner case invented to embarrass the
-    branch: a relation that holds of everything is the most ordinary thing a real
-    vocabulary can contain, and it takes the mechanism apart.
+    Without a fit gate this is a real derailment (seed 1's honest red test, formerly
+    `xfail(strict)`): a relation that holds of everything is the most ordinary thing a
+    real vocabulary can contain, and on weight alone it can be BELIEVED and ALONE at
+    the top while its own mask agrees with the label only at the label's base rate.
+    `select_rule(fits=result.candidate_train_fit, min_fit=0.75)` closes it: the
+    derailing seed's candidate fails the fit gate and the run abstains instead of
+    confidently naming the wrong relation; the recovered seed's candidate passes the
+    fit gate (~1.0) and is selected exactly as before.
     """
     world = make_world(n_edges=N_EDGES, events_per_edge=K, seed=seed)
     own = _own_events(world)
@@ -269,8 +310,14 @@ def test_a_trivially_true_relation_does_not_derail_the_selection(seed):
         co += [(ev, edge) for ev in rng.sample([e for e in all_events if e not in mine], K)]
     anything = [(ev, edge) for ev in all_events for edge in range(N_EDGES)]
 
-    selection, accuracy = _train(
+    _selection, accuracy, result = _train(
         _source(world, co, extra_relation=("anything", anything)), world, seed
     )
-    assert selection.rule == WINNER, selection.reason
-    assert accuracy > 0.95
+    sel = select_rule(
+        result.symbolic_rule_weights, fits=result.candidate_train_fit, min_fit=0.75
+    )
+    if gate_survives:
+        assert sel.decided and sel.rule == WINNER, sel.reason
+        assert accuracy > 0.95
+    else:
+        assert not sel.decided and "fit gate" in sel.reason
