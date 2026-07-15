@@ -368,6 +368,44 @@ Worked example + CUDA-gated tests:
 recorded on `PromotionResult.rule_inventory`, along with selected and rejected
 candidate clauses and gate outcomes.
 
+#### Toward a neural body literal in the engine's own candidate space (spike finding)
+
+The mixture above is candidate *selection* over a caller-supplied vocabulary; it does not
+touch the engine's dILP enumerator, so the two induction paths stay disjoint. A natural
+next step is to let a neural predicate ride in the enumerator's *own* candidate space, so
+that `valid_candidates` — with its chain template `head(X, Y) :- L(X, Z), R(Z, Y)`, its
+`|R|²` breadth and its recursion — searches neural-bodied rules directly. The following is
+**measured by a spike, not implemented in this branch**; it records what is already true
+and what the one remaining obstacle is, so the work is not restarted from scratch.
+
+**Already true — no enumerator change needed.** The chain template's join variable `Z` is
+existential (it is absent from `head_projection`). A relation with **no tuples** is still a
+legal body slot: `candidate_triples_for_mask` prunes a pair only when *both* slots are
+empty, and `rel_index` is keyed by relation *name*, not extension. So a candidate whose
+body puts a neural predicate on `Z` is *already enumerated*. Given the neural predicate its
+domain as ground tuples, the engine also *derives* it: activated alone, the triple
+`(has_event, sal, plastic)` produced its head facts with the expected labels and every
+query fact was covered. The structural half of the bridge exists today.
+
+**The one obstacle — the credit is linear coverage.** `compute_ilp_loss_grad_gpu` builds a
+**binary** coverage matrix (`ilp_credit.cu`: `credit[f] = Σ_c A[f,c]·p_c`, `A ∈ {0,1}`,
+CSR with column indices and no value array), and its gradient is hand-injected into torch
+(`cand_probs.detach()` in, `cand_probs.backward(credit_grad)` out). To carry a per-event
+neural probability the credit must become real-valued —
+`s_c(f) = 1 − Π_{z ∈ ext_c(f)} (1 − p_net(z))` for a neural candidate, `A[f,c]` otherwise —
+where `ext_c(f)` is read from the engine exactly as Stage B already does
+(`join_bodies.read_join_extension`). A host-side torch reimplementation of that credit
+trains end to end. But because the combination is a **sum**, a crisp relational rule
+(`s ∈ {0,1}`) dominates a soft neural rule (`s < 1`) whenever both explain the data: in the
+spike, with the true join isolated the neural rule won (weight 0.9995, detector separation
+0.81), but adding one perfect relational competitor flipped selection to it (0.997 vs
+0.0007) even though the detector still learned. **The open design question — make the
+neural score enter as a product, or calibrate the credit so a soft-but-correct rule is not
+dominated by a crisp coincidental one — must be settled before any Rust credit-value
+kernel work.** Crossing onto this path also inherits the enumerator path's entropy
+regularization, temperature schedule and holdout arbiter — the Occam pressure the mixture
+lacks (see limit 5).
+
 ## Artifact Persistence
 
 `LearnedArtifact` captures the full training result for reproducibility:
