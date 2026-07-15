@@ -2459,15 +2459,19 @@ impl CompiledProgram {
                     // constant's rank in this relation's domain is NOT its row: the caller
                     // may hold features for constants the relation never joins, and every
                     // rank after such a gap slides.
-                    let row = self.domain_ids.iter().position(|c| c == ev).ok_or_else(|| {
-                        PyValueError::new_err(format!(
-                            "Query rule for '{}': existential-join relation '{}' joins domain \
+                    let row = self
+                        .domain_ids
+                        .iter()
+                        .position(|c| c == ev)
+                        .ok_or_else(|| {
+                            PyValueError::new_err(format!(
+                                "Query rule for '{}': existential-join relation '{}' joins domain \
                              constant {}, which is not in domain_ids for network '{}' — so no \
                              row of its domain feature tensor holds that constant's features. \
                              Give every joined constant an id, or drop the fact.",
-                            pred_name, join.relation, ev, occ.info.network
-                        ))
-                    })?;
+                                pred_name, join.relation, ev, occ.info.network
+                            ))
+                        })?;
                     groups.push(NeuralGroup {
                         info: occ.info.clone(),
                         input_source: InputSource::DomainRow(row),
