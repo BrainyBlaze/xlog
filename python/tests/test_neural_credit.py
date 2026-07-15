@@ -130,15 +130,15 @@ K = 4
 TEMPLATE = "learnable(W) :: plastic(X, Y) :- bL(X, Z), bR(Z, Y)."
 
 
-def _w1_world(seed: int = 0):
+def _w1_world(n_edges: int = N_EDGES, k: int = K, seed: int = 0):
     rng = random.Random(seed)
     features, own, labels = [], {}, {}
     salient = set()
     ev = 0
-    for edge in range(N_EDGES):
+    for edge in range(n_edges):
         positive = rng.random() < 0.5
         evs = []
-        for slot in range(K):
+        for slot in range(k):
             is_sal = positive and slot == 0
             if is_sal:
                 salient.add(ev)
@@ -154,14 +154,14 @@ def _w1_world(seed: int = 0):
 
     def fair(r):
         out = []
-        for edge in range(N_EDGES):
+        for edge in range(n_edges):
             mine = set(own[edge])
-            out += [(edge, e) for e in r.sample([x for x in all_ev if x not in mine], K)]
+            out += [(edge, e) for e in r.sample([x for x in all_ev if x not in mine], k)]
         return out
 
     return dict(
         features=features, own=own, labels=labels, n_ev=n_ev, salient=salient,
-        has_event=[(edge, e) for edge in range(N_EDGES) for e in own[edge]],
+        has_event=[(edge, e) for edge in range(n_edges) for e in own[edge]],
         has_event_bad=fair(random.Random(1000 + seed)),
         co=fair(random.Random(2000 + seed)),
         sal=[(e, l) for e in all_ev for l in (0, 1)],
@@ -364,3 +364,90 @@ def test_trivially_true_relation_no_confident_wrong_answer():
     assert sel.rule is None or sel.rule == ("has_event", "sal"), sel
     if sel.rule is None:
         assert "fit gate" in sel.reason or sel.tied
+
+
+# ---------------------------------------------------------------------------
+# Task 6: THE ACCEPTANCE TEST -- the project's original killer criterion
+# (`code/spike_bridge.py`), reproduced in engine mode. `spike_bridge.py` hand-wrote
+# a 6-triple `POOL` and could only ever exercise the arity-1-pinned torch mixture
+# path; here the pool is `prog.valid_candidates("W")` in full (zero hand-written
+# candidates) and the head is `plastic(X, Y)` -- arity 2, the multi-outcome shape
+# `neurosymbolic.py`'s `joint_candidate_eligibility(train_head, 1, n)` call cannot
+# even compile (its arity argument is hardcoded to 1: one supervised column
+# ranging over example rows), let alone select correctly on.
+# ---------------------------------------------------------------------------
+
+@cuda
+def test_acceptance_original_killer_criterion_arity2_head():
+    """THE ORIGINAL KILLER CRITERION, passing in engine mode.
+
+    THE POINT: the head is ARITY 2 -- `plastic(X, Y)`, edge X, label Y -- a
+    multi-outcome plasticity relation that the torch MIXTURE path
+    (`neurosymbolic.py::_train_joint_mixture`) cannot even compile: its
+    `joint_candidate_eligibility` call is hardcoded to `arity=1` (a single
+    supervised head column ranging over example row indices), not
+    parameterized per candidate or per head. Engine mode carries no such pin --
+    `enumerate_specs` reads witnesses and covers straight from
+    `prog.relation_facts`, indifferent to how many columns the head carries --
+    so this is the first time the original spike's killer criterion (a soft
+    neural join beating hand-picked relational distractors under k-fold
+    holdout, with a per-event detector that generalizes OUT of the training
+    support) runs on a head the older mixture path structurally cannot touch.
+
+    ZERO HAND-WRITTEN CANDIDATES: unlike `code/spike_bridge.py`'s hand-built
+    `POOL = [(has_event, sal), (has_event_bad, sal), (co, sal), (has_event,
+    tag), (has_event_bad, tag), (co, tag)]`, the pool here is whatever
+    `prog.valid_candidates("W")` enumerates over the four ground relations
+    `_w1_source` splices in (has_event, has_event_bad, co, sal) -- the full
+    cross product, neural-in-left triples filtered by `enumerate_specs` (no
+    witness semantics), everything else scored. `kfold_select` must still land
+    on the true join, `(has_event, sal)`, purely from held-out generalization.
+
+    measured numbers (recorded after the controller's pod run):
+      kfold: sel.rule=<TBD>, sel.reason=<TBD>
+      detector: mean P(salient)=<TBD>, mean P(quiet)=<TBD>
+      generalization: net([[0.95]])[:,1]=<TBD>, net([[0.005]])[:,1]=<TBD>
+    """
+    world = _w1_world(n_edges=40, k=4, seed=0)
+    n_edges = len(world["own"])
+    src = _w1_source(world)
+    features = torch.tensor([[f] for f in world["features"]], dtype=torch.float32).cuda()
+    facts = [(edge, 1) for edge in range(n_edges)]
+    is_positive = [world["labels"][edge] for edge in range(n_edges)]
+
+    def prog_factory():
+        return pyxlog.IlpProgramFactory.compile(src, device=0, memory_mb=1024)
+
+    sel = kfold_select(
+        prog_factory, "W", facts, is_positive, _w1_make_network, features,
+        neural_relations={"sal": world["n_ev"]}, folds=4, steps=300, seed=0,
+    )
+    print(f"\n[acceptance] kfold rule={sel.rule} reason={sel.reason}")
+    assert sel.rule == ("has_event", "sal"), sel
+
+    prog = prog_factory()
+    network = _w1_make_network()
+    result = train_engine_mode(
+        prog, "W", facts, is_positive, network, features,
+        neural_relations={"sal": world["n_ev"]}, steps=400, seed=0,
+    )
+    print(f"\n[acceptance] cand_probs = {result.cand_probs}")
+
+    with torch.no_grad():
+        probs = result.network(features)[:, 1].cpu().tolist()
+    sal_p = [p for e, p in enumerate(probs) if e in world["salient"]]
+    quiet_p = [p for e, p in enumerate(probs) if e not in world["salient"]]
+    mean_sal, mean_quiet = sum(sal_p) / len(sal_p), sum(quiet_p) / len(quiet_p)
+    print(f"[acceptance] mean P(salient)={mean_sal:.4f} mean P(quiet)={mean_quiet:.4f}")
+    assert mean_sal > 0.9, mean_sal
+    assert mean_quiet < 0.1, mean_quiet
+
+    # Generalization OUT of the training support: probe features never seen during
+    # training (the world only ever samples quiet in [0.01,0.4] and salient in
+    # [0.6,0.99]), as in the merged demo's decisive probe.
+    probe = torch.tensor([[0.95], [0.005]], dtype=torch.float32).cuda()
+    with torch.no_grad():
+        probe_p = result.network(probe)[:, 1].cpu().tolist()
+    print(f"[acceptance] probe P(0.95)={probe_p[0]:.4f} P(0.005)={probe_p[1]:.4f}")
+    assert probe_p[0] > 0.5, probe_p
+    assert probe_p[1] < 0.5, probe_p
