@@ -82,9 +82,20 @@ def test_enumerate_specs_builds_neural_and_relational_columns() -> None:
     assert relational.binary_cover.tolist() == [1.0, 0.0, 0.0]
 
 
-def test_a_neural_relation_in_the_left_slot_is_refused() -> None:
+def test_a_neural_relation_in_the_left_slot_is_skipped_not_fatal() -> None:
+    """Neural relations in the left slot are skipped during enumeration.
+
+    This is pool filtering of an auto-enumerated space, not silent alteration of
+    a user-declared rule: the engine always produces triples with neural-in-left,
+    but the credit cannot score them (no witness semantics), so they are filtered
+    rather than refused — a distinction that matters for production robustness."""
     from pyxlog.ilp.neural_credit import enumerate_specs
 
-    with pytest.raises(ValueError, match="left slot"):
-        enumerate_specs(_FakeProg(), "W", [(0, 1)],
-                        neural_relations={"has_event": 3}, device="cpu")
+    specs = enumerate_specs(_FakeProg(), "W", [(0, 1)],
+                            neural_relations={"has_event": 3}, device="cpu")
+    # No spec should have has_event in the left slot
+    assert not any(s.left == "has_event" for s in specs)
+    # But specs with has_event in the right slot should be present and neural
+    has_event_right = [s for s in specs if s.right == "has_event"]
+    assert len(has_event_right) > 0
+    assert all(s.is_neural for s in has_event_right)

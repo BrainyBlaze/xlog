@@ -80,7 +80,9 @@ def enumerate_specs(prog, mask_name, facts, neural_relations, device):
     fact (h, y) and candidate (L, R) the witness set is {z : L(h, z)} scored by the
     network at label y for a neural R, and the binary cover is
     [exists z: L(h,z) and R(z,y)] for a relational R. A neural relation in the LEFT
-    slot has no witness semantics here and is refused, not guessed at."""
+    slot has no witness semantics in this credit and is SKIPPED — filtering an
+    auto-enumerated pool is not the same as silently altering a user-declared rule;
+    the engine's cross-product enumeration always contains such triples."""
     import torch
 
     left_ext: dict[str, dict[int, list[int]]] = {}
@@ -101,17 +103,13 @@ def enumerate_specs(prog, mask_name, facts, neural_relations, device):
             }
         return right_pairs[name]
 
-    edb = {c["left_name"] for c in prog.valid_candidates(mask_name)} | set(neural_relations)
     specs: list[CandidateSpec] = []
     for cand in prog.valid_candidates(mask_name):
         ln, rn = cand["left_name"], cand["right_name"]
         if ln.startswith("__xlog_") or rn.startswith("__xlog_"):
             continue                        # meta relations: arity-incompatible, skip
         if ln in neural_relations:
-            raise ValueError(
-                f"candidate ({ln}, {rn}): the neural relation sits in the left slot, "
-                "which has no witness semantics in this credit; refused."
-            )
+            continue                        # neural-in-left: no witness semantics, skip
         if rn in neural_relations:
             witnesses = [_left(ln).get(h, []) for h, _y in facts]
             idx = prepare_extension(
@@ -119,11 +117,8 @@ def enumerate_specs(prog, mask_name, facts, neural_relations, device):
             )
             specs.append(CandidateSpec(cand["id"], ln, rn, True, idx, None))
         else:
-            try:
-                pairs = _pairs(rn)
-                lext = _left(ln)
-            except Exception:
-                continue                    # relation unreadable -> not a candidate here
+            pairs = _pairs(rn)
+            lext = _left(ln)
             cover = torch.tensor(
                 [1.0 if any((z, y) in pairs for z in lext.get(h, [])) else 0.0
                  for h, y in facts],
