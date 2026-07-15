@@ -164,6 +164,11 @@ def train_engine_mode(prog, mask_name, facts, is_positive, network, features,
     device = features.device
     specs = enumerate_specs(prog, mask_name, facts, neural_relations, device)
     C = max(s.cid for s in specs) + 1
+    # Skipped candidates must not hold probability mass — the mixture is over
+    # scoreable candidates only.
+    neg_inf_mask = torch.full((C,), float("-inf"), device=device)
+    spec_cids = torch.tensor(sorted({s.cid for s in specs}), device=device)
+    neg_inf_mask[spec_cids] = 0.0
     W = torch.zeros(C, requires_grad=True, device=device)
     opt = torch.optim.Adam([W] + list(network.parameters()), lr=lr)
     is_pos_t = torch.as_tensor(is_positive, device=device)
@@ -172,20 +177,18 @@ def train_engine_mode(prog, mask_name, facts, is_positive, network, features,
     losses: list[float] = []
     for step in range(steps):
         opt.zero_grad()
-        p = torch.softmax(W, dim=0)
+        p = torch.softmax(W + neg_inf_mask, dim=0)
         p_event = network(features)[:, pos_col]
         loss = credit_nll(p, specs, p_event, is_pos_t, gamma=gamma)
         w_ent = entropy_weight_at_step(step, steps, entropy_start, entropy_end)
         active = torch.stack([p[s.cid] for s in specs])
-        loss = loss + w_ent * normalized_entropy(
-            active / active.sum().clamp(min=1e-8), len(specs)
-        )
+        loss = loss + w_ent * normalized_entropy(active, len(specs))
         loss.backward()
         opt.step()
         losses.append(float(loss.detach()))
 
     with torch.no_grad():
-        p = torch.softmax(W, dim=0)
+        p = torch.softmax(W + neg_inf_mask, dim=0)
     return EngineModeResult(
         cand_probs={(s.left, s.right): float(p[s.cid]) for s in specs},
         specs=specs, network=network, losses=losses,
