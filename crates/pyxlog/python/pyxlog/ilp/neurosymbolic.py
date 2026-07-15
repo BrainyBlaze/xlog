@@ -29,6 +29,7 @@ from typing import Any, NoReturn
 
 from pyxlog.ilp.inventory import RuleInventory, RuleInventoryClause
 from pyxlog.ilp.join_bodies import (
+    _atoms,
     domain_row_index,
     mentions_neural_on_nonhead_var,
     noisy_or_from_index,
@@ -696,7 +697,11 @@ def _train_joint_mixture(
             # The extension is STATIC: flatten it into device tensors ONCE, here,
             # outside the step loop, so the per-step OR is a single gather +
             # segmented sum with no host->device copy (see JoinExtensionIndex).
-            join_index[rule_id] = prepare_extension(extension, device)
+            # num_rows re-checks the translation's output against the tensor the OR
+            # will gather from — one host-side pass, both overrun directions closed.
+            join_index[rule_id] = prepare_extension(
+                extension, device, num_rows=len(domain_ids[jb.network])
+            )
             # Which output column is the network's "positive" probability is not
             # ours to guess: the rule's neural atom names the label
             # (``saliency(Ev, strengthen)``) and the ENGINE resolves it against the
@@ -892,18 +897,25 @@ def _neural_predicate_networks(
     """``neural predicate -> network`` for every predicate a candidate body mentions,
     asked of the ENGINE (``neural_predicate_info``, populated from the nn/4
     declarations it compiled) rather than re-parsed out of the source text.
-    Non-neural body predicates simply are not in the registry and are skipped."""
+    Non-neural body predicates simply are not in the registry and are skipped.
+
+    Candidate names come from the same ``_ATOM`` regex the join module parses with,
+    not from ``literal.split("(")``: a split yields ``"not saliency"`` for a negated
+    literal, which is not in the registry, so a rule whose ONLY mention of a neural
+    predicate is negated (or modal, or inside a comparison) would never register its
+    network — and the routing question downstream, which explicitly sees through
+    negation, would be asked against an empty map."""
     mapping: dict[str, str] = {}
     for rule in rules:
         for literal in rule.body_literals:
-            name = literal.split("(", 1)[0].strip()
-            if name in mapping:
-                continue
-            try:
-                info = program.neural_predicate_info(name)
-            except ValueError:
-                continue  # not a neural predicate
-            mapping[name] = str(info["network"])
+            for name, _args in _atoms(literal):
+                if name in mapping:
+                    continue
+                try:
+                    info = program.neural_predicate_info(name)
+                except ValueError:
+                    continue  # not a neural predicate
+                mapping[name] = str(info["network"])
     return mapping
 
 
@@ -1697,9 +1709,9 @@ def _build_proof_trace_map(
 
 def _first_neural_predicate(rule: TrainableRuleDecl) -> str:
     for literal in rule.body_literals:
-        name = literal.split("(", 1)[0].strip()
-        if not name.startswith(_GUARD_PREDICATE_PREFIX):
-            return name
+        for name, _args in _atoms(literal):
+            if not name.startswith(_GUARD_PREDICATE_PREFIX):
+                return name
     return ""
 
 

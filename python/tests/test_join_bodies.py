@@ -306,3 +306,106 @@ def test_duplicate_ids_are_refused() -> None:
     the old ascending-order rule was really carrying."""
     with pytest.raises(ValueError, match="must not repeat"):
         domain_row_index([0, 2, 2, 6])
+
+
+# ---------------------------------------------------------------------------
+# Review wave 2 (PR #152 feedback): three more spots where "out of scope must
+# mean refused" had holes, each reproduced by execution before it was fixed.
+# ---------------------------------------------------------------------------
+
+
+def test_a_neural_atom_with_extra_arguments_is_rejected() -> None:
+    """`saliency(Ev, X, strengthen)` is a DIFFERENT rule: X is a second existential
+    this mask cannot express. Before the fix it parsed -- the middle argument simply
+    vanished, and because the label lookup takes the last argument, nothing
+    downstream errored: the mixture trained the two-argument rule the body merely
+    resembled."""
+    assert parse_join_body(
+        ["saliency(Ev, X, strengthen)", "pre_before_post(Ev, E)"], NEURAL, head_var="E"
+    ) is None
+
+
+def test_a_variable_in_the_label_slot_is_rejected() -> None:
+    """`saliency(Ev, Lbl)` has no single output column to train against. Refusing it
+    here names the rule; deferring to the engine's label_to_index surfaces the same
+    failure far from its cause."""
+    assert parse_join_body(
+        ["saliency(Ev, Lbl)", "pre_before_post(Ev, E)"], NEURAL, head_var="E"
+    ) is None
+
+
+def test_the_wildcard_is_a_variable_to_the_router_and_refused_by_the_parse() -> None:
+    """The grammar admits `_` as an anonymous variable, and each `_` is a DISTINCT
+    variable -- `saliency(_, l), rel(_, E)` shares nothing, so no join exists.
+
+    Two properties, both load-bearing: the ROUTER must see the neural predicate on
+    `_` (a router blind to it waved the candidate through to the plain relational
+    path -- trained as an always-true rule, no gradient to the detector, no error),
+    and the PARSE must refuse it (textual matching would wrongly see a shared
+    variable where the semantics has two)."""
+    body = ["saliency(_, strengthen)", "pre_before_post(_, E)"]
+    assert mentions_neural_on_nonhead_var(body, NEURAL, "E")
+    assert parse_join_body(body, NEURAL, head_var="E") is None
+
+
+class _FakeIlpProgram:
+    def __init__(self, facts: list[list[int]]) -> None:
+        self._facts = facts
+
+    def relation_facts(self, rel_name: str) -> list[list[int]]:
+        return self._facts
+
+
+def test_an_out_of_range_head_binding_is_a_loud_error_not_a_silent_drop() -> None:
+    """A tuple whose head binding falls outside 0..num_bindings-1 is the same class
+    of caller/world disagreement as a joined constant missing from domain_ids, which
+    is loud. Silently dropping it shrank the candidate's extension -- and its OR --
+    without a trace."""
+    from pyxlog.ilp.join_bodies import read_join_extension
+
+    jb = JoinBody(
+        neural_predicate="saliency", network="sal_net", join_var="Ev",
+        relation="pbp", event_arg=0, head_arg=1,
+    )
+    prog = _FakeIlpProgram([[0, 0], [1, 7]])   # binding 7 with num_bindings=2
+    with pytest.raises(ValueError, match=r"outside the query range 0\.\.1"):
+        read_join_extension(prog, jb, num_bindings=2)
+
+
+def test_an_untranslated_extension_is_caught_at_prepare_time() -> None:
+    """Both overrun directions, closed once at build time: an id >= num_rows dies
+    later as a context-poisoning CUDA device assert, and an id that happens to fall
+    inside num_rows gathers the WRONG rows and computes a silently wrong OR. The
+    host-side bounds check catches the loud direction; the silent one is exactly why
+    the check names translate_extension_to_rows."""
+    with pytest.raises(ValueError, match="TRANSLATED to rows"):
+        prepare_extension([[0], [12]], device="cpu", num_rows=4)
+    # and a translated extension passes untouched
+    idx = prepare_extension([[0], [3]], device="cpu", num_rows=4)
+    assert idx.num_bindings == 2
+
+
+def test_a_negated_only_neural_mention_still_registers_its_network() -> None:
+    """`literal.split("(")` yields "not saliency" for a negated literal, so a rule
+    whose ONLY mention of a neural predicate was negated never registered the
+    network -- and the routing question downstream, which explicitly sees through
+    negation, was asked against an empty map. Name derivation now uses the same
+    _ATOM regex the join module parses with."""
+    from pyxlog.ilp.neurosymbolic import TrainableRuleDecl, _neural_predicate_networks
+
+    class _FakeProgram:
+        def neural_predicate_info(self, name: str) -> dict:
+            if name == "saliency":
+                return {"network": "sal_net"}
+            raise ValueError(f"{name} is not a neural predicate")
+
+    rule = TrainableRuleDecl(
+        id="r1", head="plastic(E)",
+        body_literals=("not saliency(Ev, strengthen)", "pre_before_post(Ev, E)"),
+        initial_weight=0.0,
+        source="trainable_rule(r1, weight=0.0) :: plastic(E) :- "
+               "not saliency(Ev, strengthen), pre_before_post(Ev, E).",
+        guard_predicate="__xlog_rule_guard_r1", guard_network="__xlog_rule_gnet_r1",
+        query_variable="E",
+    )
+    assert _neural_predicate_networks(_FakeProgram(), [rule]) == {"saliency": "sal_net"}

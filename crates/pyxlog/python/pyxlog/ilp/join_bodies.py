@@ -71,7 +71,18 @@ def _bare_positive_atom(literal: str) -> tuple[str, list[str]] | None:
 
 
 def _is_var(term: str) -> bool:
-    return term[:1].isupper()
+    """A variable, INCLUDING the anonymous wildcard.
+
+    The grammar (grammar.pest: ``var_or_anon``) admits exactly two variable forms — an
+    uppercase-first name and the bare ``_``. The wildcard must count as a variable
+    HERE, in the routing predicate's alphabet: a body that puts the neural predicate
+    on ``_`` is still an existential neural join as far as routing is concerned, and a
+    router blind to ``_`` would wave it through to the plain relational path — trained
+    as an always-true candidate, no gradient to the detector, no error. Whether the
+    shape is then ACCEPTED is :func:`parse_join_body`'s decision, and it refuses ``_``
+    (each ``_`` is a distinct variable, so no join exists to aggregate over).
+    """
+    return term[:1].isupper() or term == "_"
 
 
 def mentions_neural_on_nonhead_var(
@@ -130,13 +141,27 @@ def parse_join_body(
     if len(neural) != 1:
         return None
     pred, nargs = neural[0]
-    if not nargs:
+    if len(nargs) != 2:
+        # The join shape's neural atom is EXACTLY (join_var, label). A third argument
+        # is a second existential this mask cannot express — `saliency(Ev, X, str)`
+        # is a DIFFERENT rule, and dropping X would train the two-argument rule the
+        # body merely resembles, silently. Same contract as the relation atom below.
         return None
     join_var = nargs[0]                      # nn(net, [Input], Label, ...) -> arg 0
     if join_var == head_var:
         return None                          # head-bound gate, not an existential join
     if not _is_var(join_var):
         return None                          # a constant, not a variable
+    if join_var == "_":
+        # Anonymous wildcards are DISTINCT variables per occurrence: `saliency(_, l),
+        # rel(_, E)` shares nothing, so there is no join to OR over. Textual matching
+        # below would wrongly see one; refuse instead.
+        return None
+    if _is_var(nargs[-1]):
+        # The label slot must be a CONSTANT. `saliency(Ev, Lbl)` has no single output
+        # column to train against; deferring to the engine's label_to_index would
+        # surface the failure far from the rule that caused it.
+        return None
 
     # exactly two atoms, exactly one of them neural -> exactly one relation
     p, args = next((q, a) for q, a in atoms if q not in neural_predicates)
@@ -176,17 +201,26 @@ def read_join_extension(
     caller-supplied hint, not the engine's own relation.
 
     This is O(|extension|) -- it enumerates only the tuples that actually hold,
-    not O(num_bindings * domain_size) membership probes. Tuples whose head
-    binding falls outside ``0 .. num_bindings - 1`` are ignored. Bindings with no
-    joined events get ``[]``. Events are sorted ascending within each bucket, and
+    not O(num_bindings * domain_size) membership probes. A tuple whose head binding
+    falls outside ``0 .. num_bindings - 1`` is a REFUSAL, not a skip: it is the same
+    class of caller/world disagreement as a joined constant missing from
+    ``domain_ids`` (loud there too), and silently dropping it would shrink the
+    candidate's extension -- and therefore its OR -- without a trace. Bindings with
+    no joined events get ``[]``. Events are sorted ascending within each bucket, and
     the traversal itself is a plain forward scan of ``relation_facts``, so the
     result is deterministic for a given compiled program.
     """
     buckets: list[list[int]] = [[] for _ in range(num_bindings)]
     for t in ilp_program.relation_facts(jb.relation):
         h = t[jb.head_arg]
-        if 0 <= h < num_bindings:
-            buckets[h].append(t[jb.event_arg])
+        if not 0 <= h < num_bindings:
+            raise ValueError(
+                f"join relation '{jb.relation}' holds a tuple whose head binding is "
+                f"{h}, outside the query range 0..{num_bindings - 1}. Head bindings "
+                "must be the dense query indices; dropping the tuple would silently "
+                "shrink this candidate's OR. Renumber the world or widen the query."
+            )
+        buckets[h].append(t[jb.event_arg])
     for bucket in buckets:
         bucket.sort()
     return buckets
@@ -284,8 +318,19 @@ class JoinExtensionIndex:
     num_bindings: int
 
 
-def prepare_extension(extension: list[list[int]], device: Any) -> JoinExtensionIndex:
-    """Flatten ``head binding -> [event ids]`` into the device-resident index."""
+def prepare_extension(
+    extension: list[list[int]], device: Any, num_rows: int | None = None
+) -> JoinExtensionIndex:
+    """Flatten ``head binding -> [event ids]`` into the device-resident index.
+
+    ``num_rows``, when given, is the row count of the tensor the index will gather
+    from, and every entry is checked against it HERE, once, on the host. The two
+    failure directions are asymmetric and both real: an id >= num_rows dies later as
+    a CUDA device-side assert (which poisons the context), while an UNTRANSLATED
+    extension whose raw constants happen to fall < num_rows gathers the wrong rows
+    and computes a silently wrong OR. A one-time bounds check at build time closes
+    both without touching the hot loop.
+    """
     import torch
 
     event_ids: list[int] = []
@@ -293,6 +338,16 @@ def prepare_extension(extension: list[list[int]], device: Any) -> JoinExtensionI
     for h, events in enumerate(extension):
         event_ids.extend(events)
         binding_ids.extend([h] * len(events))
+    if num_rows is not None and event_ids:
+        lo, hi = min(event_ids), max(event_ids)
+        if lo < 0 or hi >= num_rows:
+            raise ValueError(
+                f"join extension holds row index {lo if lo < 0 else hi}, outside the "
+                f"feature tensor's 0..{num_rows - 1}. The extension must be "
+                "TRANSLATED to rows (translate_extension_to_rows) before it is "
+                "prepared; raw domain constants only coincide with rows on the "
+                "dense layout."
+            )
     return JoinExtensionIndex(
         event_ids=torch.as_tensor(event_ids, device=device, dtype=torch.long),
         binding_ids=torch.as_tensor(binding_ids, device=device, dtype=torch.long),
