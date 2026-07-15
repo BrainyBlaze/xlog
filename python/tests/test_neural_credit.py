@@ -187,6 +187,29 @@ def _train_w1(world, seed: int = 0, steps: int = 400):
     return result, features
 
 
+def test_kfold_selection_semantics_on_synthetic_scores() -> None:
+    """Селекция и Оккам-tie-break — чистая функция от holdout-скоров."""
+    from pyxlog.ilp.neural_credit import _select_from_holdout
+
+    # чёткое-случайное: 1.0 на трейне, 0.55 на holdout -> ниже min_fit? нет, но ниже
+    # мягко-верного -> проигрывает селекцию
+    s = _select_from_holdout(
+        {("he", "lucky"): 0.55, ("he", "sal"): 0.97}, neural_rights={"sal"},
+        min_fit=0.75)
+    assert s.rule == ("he", "sal")
+
+    # Оккам: реляционный и нейро в ничьей -> реляционный
+    s = _select_from_holdout(
+        {("he", "tag"): 0.99, ("he", "sal"): 0.985}, neural_rights={"sal"},
+        min_fit=0.75)
+    assert s.rule == ("he", "tag")
+
+    # никто не прошёл fit-гейт -> воздержание с причиной
+    s = _select_from_holdout(
+        {("he", "a"): 0.5, ("he", "b"): 0.6}, neural_rights=set(), min_fit=0.75)
+    assert s.rule is None and "fit gate" in s.reason
+
+
 @cuda
 def test_w1_engine_mode_neural_wins_detector_separates_and_training_is_deterministic():
     """The true neural join wins the mixture, the per-event detector separates

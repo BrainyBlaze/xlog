@@ -193,3 +193,99 @@ def train_engine_mode(prog, mask_name, facts, is_positive, network, features,
         cand_probs={(s.left, s.right): float(p[s.cid]) for s in specs},
         specs=specs, network=network, losses=losses,
     )
+
+
+@dataclass(frozen=True)
+class HoldoutSelection:
+    """What the holdout arbiter is entitled to claim. Mirrors discovery.Selection's five
+    fields, but ``rule``/``tied`` hold (left, right) TUPLES -- our candidates are keyed
+    by a relation pair, not by a single string id, so reusing discovery.Selection here
+    would be type-sloppy (it constructs fine since dataclasses carry no runtime type
+    checks, but its annotations claim strings). A dedicated type keeps that honest."""
+
+    rule: tuple[str, str] | None
+    tied: list[tuple[str, str]]
+    margin: float
+    top_weight: float
+    reason: str
+
+    @property
+    def decided(self) -> bool:
+        return self.rule is not None
+
+
+def _select_from_holdout(scores, neural_rights, min_fit):
+    """Selection over HOLDOUT scores. The fit gate kills candidates that cannot fit
+    even their best folds (the confident-wrong class the mixture's select_rule cannot
+    see); ties within select_rule's tolerance break toward the RELATIONAL candidate
+    (Occam: at equal generalization, prefer the explanation without a network)."""
+    from pyxlog.ilp.discovery import select_rule
+
+    fit = {k: v for k, v in scores.items() if v >= min_fit}
+    if not fit:
+        return HoldoutSelection(
+            rule=None, tied=sorted(scores), margin=0.0,
+            top_weight=max(scores.values(), default=0.0),
+            reason=f"no candidate passed the fit gate (min_fit={min_fit}): a rule "
+                   "that cannot fit held-out data is not a rule",
+        )
+    keyed = {f"{l}|{r}": v for (l, r), v in fit.items()}
+    sel = select_rule(keyed, min_weight=min_fit)
+    if sel.rule is not None:
+        l, r = sel.rule.split("|")
+        return HoldoutSelection(rule=(l, r), tied=[(l, r)], margin=sel.margin,
+                                top_weight=sel.top_weight, reason=sel.reason)
+    tied = [tuple(t.split("|")) for t in sel.tied]
+    relational = [t for t in tied if t[1] not in neural_rights]
+    if relational and len(relational) < len(tied):
+        best = max(relational, key=lambda t: fit[t])
+        return HoldoutSelection(rule=best, tied=tied, margin=sel.margin,
+                                top_weight=fit[best],
+                                reason="holdout tie broken toward the relational candidate "
+                                       "(Occam: equal generalization, simpler explanation)")
+    return HoldoutSelection(rule=None, tied=tied, margin=sel.margin,
+                            top_weight=sel.top_weight, reason=sel.reason)
+
+
+def kfold_select(prog_factory, mask_name, facts, is_positive, make_network,
+                 features, neural_relations, folds=4, min_fit=0.75, seed=0,
+                 **train_kw):
+    """Select a rule by K-FOLD HOLDOUT, not by training weight: per fold, train on
+    the rest and score every engine-enumerated candidate on the held-out facts by
+    its own witness/cover semantics (``s_c(f) >= 0.5``); average across folds, apply
+    the fit gate, then hand the holdout scores to ``_select_from_holdout``."""
+    import torch
+
+    rng = torch.Generator().manual_seed(seed)
+    order = torch.randperm(len(facts), generator=rng).tolist()
+    fold_of = {f_idx: i % folds for i, f_idx in enumerate(order)}
+    sums: dict[tuple[str, str], float] = {}
+    counts: dict[tuple[str, str], int] = {}
+    neural_rights = set(neural_relations)
+
+    for fold in range(folds):
+        train_ids = [i for i in range(len(facts)) if fold_of[i] != fold]
+        held_ids = [i for i in range(len(facts)) if fold_of[i] == fold]
+        prog = prog_factory()
+        res = train_engine_mode(
+            prog, mask_name,
+            [facts[i] for i in train_ids],
+            [is_positive[i] for i in train_ids],
+            make_network(), features, neural_relations, seed=seed, **train_kw)
+        held_specs = enumerate_specs(
+            prog, mask_name, [facts[i] for i in held_ids],
+            neural_relations, features.device)
+        with torch.no_grad():
+            p_event = res.network(features)[:, 1]
+            y = torch.tensor([is_positive[i] for i in held_ids],
+                             device=features.device, dtype=torch.float32)
+            for spec in held_specs:
+                s = (noisy_or_from_index(p_event, spec.witness_index)
+                     if spec.is_neural else spec.binary_cover)
+                acc = float(((s >= 0.5).float() == y).float().mean())
+                key = (spec.left, spec.right)
+                sums[key] = sums.get(key, 0.0) + acc
+                counts[key] = counts.get(key, 0) + 1
+
+    scores = {k: sums[k] / counts[k] for k in sums}
+    return _select_from_holdout(scores, neural_rights, min_fit)
