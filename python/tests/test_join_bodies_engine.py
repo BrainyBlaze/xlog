@@ -74,14 +74,19 @@ def test_a_duplicated_ground_fact_does_not_double_count_the_event() -> None:
     assert ext == [[0, 1], [2]], f"the duplicated fact was handed back twice: {ext}"
 
 
-def test_a_head_binding_outside_the_range_is_ignored() -> None:
-    """The engine's relation may carry tuples whose head binding lies outside the
-    supervised range 0..num_bindings-1 (here: edge 2, with num_bindings=2). Those
-    tuples must be dropped, not crash and not shift the buckets."""
+def test_a_head_binding_outside_the_range_is_a_loud_error() -> None:
+    """CONTRACT FLIP, deliberate (PR review, part 1). This test used to pin the
+    opposite: out-of-range tuples were dropped, "not crash and not shift the buckets".
+    But a dropped tuple is the only OBSERVABLE symptom of a misnumbered world -- shift
+    every edge by one and the in-range buckets are silently WRONG while the only
+    witness disappears without a trace. Head bindings are the dense query indices by
+    contract; a tuple outside them is the same caller/world disagreement as a joined
+    constant missing from domain_ids, and that side is loud. So is this one now.
+    (Here: the (4, 2) tuple, with num_bindings=2.)"""
     prog = pyxlog.IlpProgramFactory.compile(_SOURCE, device=0, memory_mb=64)
     prog.evaluate()
-    ext = read_join_extension(prog, _JB, num_bindings=2)
-    assert ext == [[0, 1], [2]]     # the (4, 2) tuple is out of range -> ignored
+    with pytest.raises(ValueError, match=r"outside the query range 0\.\.1"):
+        read_join_extension(prog, _JB, num_bindings=2)
 
 
 # ---------------------------------------------------------------------------
@@ -292,9 +297,9 @@ def test_the_join_index_is_built_once_per_candidate_not_once_per_step() -> None:
     real_prepare = ns.prepare_extension
     calls = []
 
-    def counting_prepare(extension, device):
+    def counting_prepare(extension, device, num_rows=None):
         calls.append(len(extension))
-        return real_prepare(extension, device)
+        return real_prepare(extension, device, num_rows=num_rows)
 
     ns.prepare_extension = counting_prepare
     try:
@@ -558,14 +563,12 @@ def test_an_arity_2_head_is_refused_not_silently_trained_on_arity_1() -> None:
     pre_before_post(Ev, E).` — the rule that would let the NETWORK'S OWN LABEL flow into
     the head — does not compile, and the docs state that as a hard claim.
 
-    It is true today for one reason only: the mixture asks the engine for eligibility with
-    a hardcoded arity of 1 (`joint_candidate_eligibility(train_head, 1, n)`) and supervises
-    `plastic(i)` queries. The claim is therefore load-bearing on a literal `1`. Pin it: a
-    refactor that makes the arity dynamic must not SILENTLY start training something on
-    this rule — it must either do it right or keep refusing.
-
-    Today it refuses with the engine's own words: "No rule defines query predicate
-    'plastic' with arity 1"."""
+    Where the refusal fires has MOVED (review wave 2), and the pin moves with it: the
+    multi-outcome rule's neural atom has a VARIABLE in the label slot, and the parse now
+    refuses that shape outright — earlier than the engine's arity-1 eligibility error this
+    test used to quote, and naming the offending rule instead of the query predicate. The
+    invariant this test protects is unchanged: this rule must never be SILENTLY trained as
+    something it is not; it must either be done right or refuse loudly, about THIS rule."""
     net = torch.nn.Sequential(torch.nn.Linear(1, 2, bias=True), torch.nn.Softmax(dim=-1))
     feats = torch.tensor([[f] for f in _EVENT_FEATURES], dtype=torch.float32)
     pre = "\n".join(
@@ -589,11 +592,11 @@ def test_an_arity_2_head_is_refused_not_silently_trained_on_arity_1() -> None:
             examples=[{"targets": torch.tensor(_targets(), dtype=torch.float32)}],
             config=NeuroSymbolicTrainingConfig(steps=5, learning_rate=0.1),
         )
-    # The refusal must be ABOUT this head's arity, not an incidental crash somewhere
+    # The refusal must be ABOUT this rule, not an incidental crash somewhere
     # downstream that a later refactor would "fix" into a silent wrong training run.
     message = str(exc.value)
-    assert "arity" in message.lower(), message
-    assert "plastic" in message, message
+    assert "c_a" in message, message
+    assert "not silently reduced" in message, message
 
 
 # ---------------------------------------------------------------------------
