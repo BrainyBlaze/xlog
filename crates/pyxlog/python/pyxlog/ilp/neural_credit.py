@@ -71,3 +71,63 @@ def credit_nll(cand_probs, specs, p_event, is_positive, gamma: float = 1.0):
     pos = is_positive.to(credit.dtype)
     loss = -(pos * torch.log(credit) + (1 - pos) * torch.log(1 - credit))
     return loss.mean()
+
+
+def enumerate_specs(prog, mask_name, facts, neural_relations, device):
+    """One CandidateSpec per engine triple over the program's binary EDB relations.
+
+    Witnesses come from the ENGINE (`relation_facts`), never from the caller: for a
+    fact (h, y) and candidate (L, R) the witness set is {z : L(h, z)} scored by the
+    network at label y for a neural R, and the binary cover is
+    [exists z: L(h,z) and R(z,y)] for a relational R. A neural relation in the LEFT
+    slot has no witness semantics here and is refused, not guessed at."""
+    import torch
+
+    left_ext: dict[str, dict[int, list[int]]] = {}
+    right_pairs: dict[str, set[tuple[int, int]]] = {}
+
+    def _left(name):
+        if name not in left_ext:
+            buckets: dict[int, list[int]] = {}
+            for row in prog.relation_facts(name):
+                buckets.setdefault(int(row[0]), []).append(int(row[1]))
+            left_ext[name] = buckets
+        return left_ext[name]
+
+    def _pairs(name):
+        if name not in right_pairs:
+            right_pairs[name] = {
+                (int(r[0]), int(r[1])) for r in prog.relation_facts(name)
+            }
+        return right_pairs[name]
+
+    edb = {c["left_name"] for c in prog.valid_candidates(mask_name)} | set(neural_relations)
+    specs: list[CandidateSpec] = []
+    for cand in prog.valid_candidates(mask_name):
+        ln, rn = cand["left_name"], cand["right_name"]
+        if ln.startswith("__xlog_") or rn.startswith("__xlog_"):
+            continue                        # meta relations: arity-incompatible, skip
+        if ln in neural_relations:
+            raise ValueError(
+                f"candidate ({ln}, {rn}): the neural relation sits in the left slot, "
+                "which has no witness semantics in this credit; refused."
+            )
+        if rn in neural_relations:
+            witnesses = [_left(ln).get(h, []) for h, _y in facts]
+            idx = prepare_extension(
+                witnesses, device, num_rows=neural_relations[rn]
+            )
+            specs.append(CandidateSpec(cand["id"], ln, rn, True, idx, None))
+        else:
+            try:
+                pairs = _pairs(rn)
+                lext = _left(ln)
+            except Exception:
+                continue                    # relation unreadable -> not a candidate here
+            cover = torch.tensor(
+                [1.0 if any((z, y) in pairs for z in lext.get(h, [])) else 0.0
+                 for h, y in facts],
+                device=device,
+            )
+            specs.append(CandidateSpec(cand["id"], ln, rn, False, None, cover))
+    return specs
