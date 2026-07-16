@@ -109,8 +109,11 @@ def test_a_neural_relation_in_the_left_slot_is_skipped_not_fatal() -> None:
     rather than refused — a distinction that matters for production robustness."""
     from pyxlog.ilp.neural_credit import enumerate_specs
 
+    # num_rows=2: has_event's left partners (sal, tag) join constants {0, 1},
+    # and the dense-identity law (finding 1 of the part-2 review) requires the
+    # witness domain to be exactly 0..num_rows-1.
     specs = enumerate_specs(_FakeProg(), "W", [(0, 1)],
-                            neural_relations={"has_event": 3}, device="cpu",
+                            neural_relations={"has_event": 2}, device="cpu",
                             n_labels=2)
     # No spec should have has_event in the left slot
     assert not any(s.left == "has_event" for s in specs)
@@ -261,6 +264,108 @@ def test_relation_name_containing_the_key_separator_is_refused() -> None:
     with pytest.raises(ValueError, match="separator"):
         _select_from_holdout({("he|x", "sal"): 0.9}, neural_rights={"sal"},
                              min_fit=0.75)
+
+
+# ---------------------------------------------------------------------------
+# Review wave, part 2 (levi770 on PR #154, engine-semantics half): the mixture
+# path's domain_ids dense-identity law applies to engine mode too (finding 1),
+# Occam licenses nothing among relational duplicates (2), the engine's pool
+# cross-products ALL arities (3), empty held-out folds poison scores (5), and
+# the tie tolerance is a holdout-axis quantity (8).
+# ---------------------------------------------------------------------------
+
+
+def test_sparse_witness_domain_without_dense_identity_is_refused() -> None:
+    """Finding 1: raw engine constants index feature rows, so the dense-identity
+    law from the mixture path applies verbatim -- a witness domain that is not
+    exactly 0..num_rows-1 could gather other events' probabilities silently and
+    is refused, not guessed at."""
+    from pyxlog.ilp.neural_credit import enumerate_specs
+
+    # _FakeProg's left relations only ever join constants {0, 1, 2}; declaring
+    # 5 feature rows leaves rows 3..4 unjoined -- ambiguous, refused.
+    with pytest.raises(ValueError, match="dense identity"):
+        enumerate_specs(_FakeProg(), "W", [(0, 1)],
+                        neural_relations={"sal": 5}, device="cpu", n_labels=2)
+
+
+def test_occam_narrowing_refuses_a_residual_relational_tie() -> None:
+    """Finding 2: the relational preference resolves a MIXED tie only when it
+    yields a UNIQUE relational candidate; between extensionally identical
+    relational duplicates it abstains -- vocabulary order must not pick."""
+    from pyxlog.ilp.neural_credit import _select_from_holdout
+
+    scores = {("he", "dup_a"): 0.9, ("he", "dup_b"): 0.9, ("he", "sal"): 0.9}
+    s = _select_from_holdout(scores, neural_rights={"sal"}, min_fit=0.75)
+    assert s.rule is None, s
+    assert "relational" in s.reason
+
+    # Vocabulary-order independence: reversed insertion order, same abstention.
+    rev = dict(reversed(list(scores.items())))
+    s2 = _select_from_holdout(rev, neural_rights={"sal"}, min_fit=0.75)
+    assert s2.rule is None, s2
+
+
+def test_non_binary_relations_in_the_pool_are_skipped_not_fatal() -> None:
+    """Finding 3: valid_candidates cross-products ALL relations regardless of
+    arity; a unary or arity-3 relation must be pool-filtered (counted), never
+    a bare IndexError or a silent first-two-columns projection."""
+    from pyxlog.ilp.neural_credit import enumerate_specs
+
+    class _FakeProgMixedArity(_FakeProg):
+        def __init__(self) -> None:
+            super().__init__()
+            self._facts["un"] = [[0], [1]]
+            self._facts["tri"] = [[0, 1, 2], [1, 0, 1]]
+
+        def valid_candidates(self, mask_name):
+            names = ["has_event", "sal", "tag", "un", "tri"]
+            cands, cid = [], 0
+            for i, ln in enumerate(names):
+                for j, rn in enumerate(names):
+                    cands.append({"id": cid, "i": i, "j": j, "k": 5,
+                                  "left_name": ln, "right_name": rn,
+                                  "head_name": "plastic"})
+                    cid += 1
+            return cands
+
+    facts = [(0, 1), (1, 0), (2, 1)]
+    specs = enumerate_specs(_FakeProgMixedArity(), "W", facts,
+                            neural_relations={"sal": 3}, device="cpu", n_labels=2)
+    assert not any(s.left in ("un", "tri") or s.right in ("un", "tri")
+                   for s in specs)
+    assert (("has_event", "sal") in {(s.left, s.right) for s in specs})
+
+
+def test_more_folds_than_facts_is_refused_typed() -> None:
+    """Finding 5: len(facts) < folds leaves empty held-out folds whose mean is
+    NaN, poisoning every candidate's score -- refused typed at entry."""
+    features = torch.tensor([[0.1], [0.2], [0.3]])
+
+    def make_network():
+        return torch.nn.Sequential(torch.nn.Linear(1, 2), torch.nn.Softmax(dim=-1))
+
+    with pytest.raises(ValueError, match="folds"):
+        kfold_select(_FakeProg, "W", [(0, 1), (1, 0), (2, 1)],
+                     [True, False, True], make_network, features,
+                     neural_relations={"sal": 3}, folds=5, steps=2, seed=0)
+
+
+def test_holdout_tie_tolerance_is_a_parameter_on_the_holdout_axis() -> None:
+    """Finding 8: the tie tolerance is a holdout-axis quantity kfold_select
+    derives from the score quantum, so _select_from_holdout must accept it --
+    and a coarser tolerance turns a clean win into a tie resolved by Occam."""
+    from pyxlog.ilp.neural_credit import _select_from_holdout
+
+    scores = {("he", "tag"): 0.95, ("he", "sal"): 0.90}
+    # Default tolerance: 0.05 apart is a clean win for tag.
+    assert _select_from_holdout(scores, {"sal"}, 0.75).rule == ("he", "tag")
+    # A coarser holdout quantum makes 0.05 indistinguishable -> the tie is
+    # mixed and the unique relational candidate wins by Occam, with the reason
+    # saying so.
+    s = _select_from_holdout(scores, {"sal"}, 0.75, tie_tolerance=0.06)
+    assert s.rule == ("he", "tag"), s
+    assert "Occam" in s.reason
 
 
 # ---------------------------------------------------------------------------

@@ -118,8 +118,10 @@ def main() -> None:
     weights = result.symbolic_rule_weights
     # NOT `max(weights, key=weights.get)`. On two indistinguishable relations that
     # returns whichever the caller typed FIRST -- a confident wrong answer. `select_rule`
-    # refuses instead.
-    selection = select_rule(weights)
+    # refuses instead. `fits=` threads the per-candidate TRAIN fit so the gate against
+    # believed-but-unfitting candidates (a trivially-true relation "winning" on a
+    # degenerate minimum) is ON in the showcased path, not silently defaulted off.
+    selection = select_rule(weights, fits=result.candidate_train_fit)
     print(f"loss {result.losses[0]:.4f} -> {result.losses[-1]:.4f}\n")
 
     print("Candidate weights in the joint mixture:")

@@ -280,6 +280,12 @@ def select_rule(
     abstention naming the fit gate and the best fit value seen, and nothing below is
     reached. Omitting ``fits`` (the default, ``None``) skips this gate entirely --
     behavior is then byte-identical to before this parameter existed.
+
+    When the gate runs, ``tied``, ``margin`` and ``top_weight`` are POST-GATE
+    quantities, computed over the surviving candidates only: a gated-out rival
+    with a near-top weight is not a viable alternative, so it no longer blocks
+    selection through the tie refusal. This is intended (the seed-1
+    trivially-true world depends on it), not an accident of ordering.
     """
     if not weights:
         return Selection(None, [], 0.0, 0.0, "no candidates")

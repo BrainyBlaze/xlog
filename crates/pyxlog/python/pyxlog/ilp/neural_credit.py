@@ -100,9 +100,20 @@ def enumerate_specs(prog, mask_name, facts, neural_relations, device, n_labels):
     these have no ground extension to read at all (`relation_facts` raises
     `ValueError` for them), so they are pool-filtered for the same reason as the
     `__xlog_` meta relations — this is a targeted skip of a known-unreadable slot,
-    not a blanket swallow of engine errors. A pool these filters empty out is
-    refused with per-filter counts: silent caps are exactly what this module
-    promises not to have."""
+    not a blanket swallow of engine errors. The same cross product also contains
+    relations of every ARITY; only binary rows have (h, z)/(z, y) semantics here,
+    so non-binary relations are pool-filtered too (counted, never a bare
+    IndexError or a silent first-two-columns projection). A pool these filters
+    empty out is refused with per-filter counts: silent caps are exactly what
+    this module promises not to have.
+
+    Raw engine constants index the caller's feature rows, so the mixture path's
+    ``domain_ids`` law applies verbatim: with no explicit constant->row map, the
+    identity is only unambiguous when each neural relation's witness domain (the
+    union of its left partners' joined constants) is EXACTLY ``0..num_rows-1``.
+    Anything else could gather other events' probabilities while staying in
+    bounds — silently — and is refused, not guessed at (mirrors
+    ``neurosymbolic._resolve_domain_ids``)."""
     import torch
 
     for h, y in facts:
@@ -128,6 +139,19 @@ def enumerate_specs(prog, mask_name, facts, neural_relations, device, n_labels):
                 facts_cache[name] = False
         return facts_cache[name] is not False
 
+    binary_cache: dict[str, bool] = {}
+
+    def _binary(name):
+        """True iff every row of `name` has exactly two columns. The engine's
+        cross product carries relations of every arity; only binary rows have
+        (h, z)/(z, y) semantics in this credit, so anything else is
+        pool-filtered -- never indexed blind (a unary row would be a bare
+        IndexError, an arity>=3 row a silently wrong first-two-columns cover).
+        Assumes `_readable(name)` was already True."""
+        if name not in binary_cache:
+            binary_cache[name] = all(len(r) == 2 for r in facts_cache[name])
+        return binary_cache[name]
+
     left_ext: dict[str, dict[int, list[int]]] = {}
     right_pairs: dict[str, set[tuple[int, int]]] = {}
 
@@ -147,7 +171,8 @@ def enumerate_specs(prog, mask_name, facts, neural_relations, device, n_labels):
         return right_pairs[name]
 
     specs: list[CandidateSpec] = []
-    n_total = n_meta = n_neural_left = n_unreadable = 0
+    domain_union: dict[str, set[int]] = {}
+    n_total = n_meta = n_neural_left = n_unreadable = n_non_binary = 0
     for cand in prog.valid_candidates(mask_name):
         n_total += 1
         ln, rn = cand["left_name"], cand["right_name"]
@@ -160,9 +185,16 @@ def enumerate_specs(prog, mask_name, facts, neural_relations, device, n_labels):
         if not _readable(ln):
             n_unreadable += 1
             continue                        # left slot has no ground extension (e.g. template placeholder), skip
-        if rn not in neural_relations and not _readable(rn):
-            n_unreadable += 1
-            continue                        # same, right slot -- a neural right needs no facts
+        if not _binary(ln):
+            n_non_binary += 1
+            continue                        # non-binary rows have no (h, z) reading, skip
+        if rn not in neural_relations:
+            if not _readable(rn):
+                n_unreadable += 1
+                continue                    # same, right slot -- a neural right needs no facts
+            if not _binary(rn):
+                n_non_binary += 1
+                continue
         if rn in neural_relations:
             witnesses = [
                 [z * n_labels + y for z in _left(ln).get(h, [])] for h, y in facts
@@ -171,6 +203,11 @@ def enumerate_specs(prog, mask_name, facts, neural_relations, device, n_labels):
                 witnesses, device, num_rows=neural_relations[rn] * n_labels
             )
             specs.append(CandidateSpec(cand["id"], ln, rn, True, idx, None))
+            # The FULL left extension (not the fact-restricted witnesses, which
+            # vary per fold) is what can ever index this relation's feature rows.
+            domain_union.setdefault(rn, set()).update(
+                z for zs in _left(ln).values() for z in zs
+            )
         else:
             pairs = _pairs(rn)
             lext = _left(ln)
@@ -185,9 +222,27 @@ def enumerate_specs(prog, mask_name, facts, neural_relations, device, n_labels):
             f"pool filtering left zero scoreable candidates out of {n_total} "
             f"enumerated: {n_meta} skipped as __xlog_ meta, {n_neural_left} as "
             f"neural-in-left (no witness semantics), {n_unreadable} with an "
-            "unreadable slot (no ground extension). Nothing remains to train or "
-            "select over -- the filters above are the reason, not a silent cap."
+            f"unreadable slot (no ground extension), {n_non_binary} with "
+            "non-binary rows. Nothing remains to train or select over -- the "
+            "filters above are the reason, not a silent cap."
         )
+    for rn, joined in domain_union.items():
+        rows = neural_relations[rn]
+        if joined != set(range(rows)):
+            missing = sorted(set(range(rows)) - joined)[:5]
+            extra = sorted(joined - set(range(rows)))[:5]
+            raise ValueError(
+                f"neural relation '{rn}': raw engine constants index the "
+                f"caller's {rows} feature rows, and with no explicit "
+                "constant->row map that dense identity is only unambiguous "
+                f"when the witness domain is exactly 0..{rows - 1}. Here it is "
+                f"not (unjoined rows e.g. {missing}, out-of-range constants "
+                f"e.g. {extra}) -- an in-range misalignment would gather other "
+                "events' probabilities silently, so this is refused, not "
+                "guessed at. Renumber the event constants to the dense range, "
+                "or use the mixture path, whose domain_ids= states the map "
+                "explicitly."
+            )
     return specs
 
 
@@ -296,11 +351,16 @@ class HoldoutSelection:
         return self.rule is not None
 
 
-def _select_from_holdout(scores, neural_rights, min_fit):
+def _select_from_holdout(scores, neural_rights, min_fit, tie_tolerance=0.01):
     """Selection over HOLDOUT scores. The fit gate kills candidates that cannot fit
     even their best folds (the confident-wrong class the mixture's select_rule cannot
-    see); ties within select_rule's tolerance break toward the RELATIONAL candidate
-    (Occam: at equal generalization, prefer the explanation without a network)."""
+    see). A MIXED tie within ``tie_tolerance`` breaks toward the RELATIONAL candidate
+    (Occam: at equal generalization, prefer the explanation without a network) -- but
+    only when that narrowing yields a UNIQUE relational candidate: Occam licenses
+    preferring relational over neural, it licenses nothing among relational
+    duplicates, so a residual relational tie is an abstention, never a vocabulary-
+    order pick. ``tie_tolerance`` lives on the HOLDOUT-accuracy axis; kfold_select
+    derives it from the score quantum rather than reusing the weight-axis default."""
     from pyxlog.ilp.discovery import select_rule
 
     for l, r in scores:
@@ -319,7 +379,10 @@ def _select_from_holdout(scores, neural_rights, min_fit):
                    "that cannot fit held-out data is not a rule",
         )
     keyed = {f"{l}|{r}": v for (l, r), v in fit.items()}
-    sel = select_rule(keyed, min_weight=min_fit)
+    # min_weight=min_fit is deliberately vacuous here -- everything below min_fit
+    # was already dropped by the gate above; it is stated so select_rule's believed
+    # threshold and our fit gate can never disagree.
+    sel = select_rule(keyed, min_weight=min_fit, tie_tolerance=tie_tolerance)
     if sel.rule is not None:
         l, r = sel.rule.split("|")
         return HoldoutSelection(rule=(l, r), tied=[(l, r)], margin=sel.margin,
@@ -327,11 +390,22 @@ def _select_from_holdout(scores, neural_rights, min_fit):
     tied = [tuple(t.split("|")) for t in sel.tied]
     relational = [t for t in tied if t[1] not in neural_rights]
     if relational and len(relational) < len(tied):
-        best = max(relational, key=lambda t: fit[t])
-        return HoldoutSelection(rule=best, tied=tied, margin=sel.margin,
-                                top_weight=fit[best],
-                                reason="holdout tie broken toward the relational candidate "
-                                       "(Occam: equal generalization, simpler explanation)")
+        best_fit = max(fit[t] for t in relational)
+        rel_tied = sorted(t for t in relational
+                          if best_fit - fit[t] <= tie_tolerance)
+        if len(rel_tied) == 1:
+            best = rel_tied[0]
+            return HoldoutSelection(rule=best, tied=tied, margin=sel.margin,
+                                    top_weight=fit[best],
+                                    reason="holdout tie broken toward the relational candidate "
+                                           "(Occam: equal generalization, simpler explanation)")
+        return HoldoutSelection(
+            rule=None, tied=tied, margin=sel.margin, top_weight=best_fit,
+            reason=f"Occam narrowed the tie to {len(rel_tied)} relational "
+                   f"candidates ({', '.join('|'.join(t) for t in rel_tied)}) the "
+                   "data cannot distinguish: preferring relational over neural is "
+                   "licensed, picking among relational duplicates is not",
+        )
     return HoldoutSelection(rule=None, tied=tied, margin=sel.margin,
                             top_weight=sel.top_weight, reason=sel.reason)
 
@@ -351,6 +425,13 @@ def kfold_select(prog_factory, mask_name, facts, is_positive, make_network,
     obligation."""
     import torch
 
+    if not 2 <= folds <= len(facts):
+        raise ValueError(
+            f"folds={folds} with {len(facts)} facts: every fold needs at least "
+            "one held-out fact (an empty fold's mean accuracy is NaN and would "
+            "poison every candidate's score) and training needs at least one "
+            "fold's worth of facts left over."
+        )
     rng = torch.Generator().manual_seed(seed)
     order = torch.randperm(len(facts), generator=rng).tolist()
     fold_of = {f_idx: i % folds for i, f_idx in enumerate(order)}
@@ -388,4 +469,11 @@ def kfold_select(prog_factory, mask_name, facts, is_positive, make_network,
                 counts[key] = counts.get(key, 0) + 1
 
     scores = {k: sums[k] / counts[k] for k in sums}
-    return _select_from_holdout(scores, neural_rights, min_fit)
+    # The tie tolerance lives on the HOLDOUT-accuracy axis, not the guard-weight
+    # axis select_rule's 0.01 default was calibrated for. Each fact is held out
+    # exactly once, so flipping one fact moves the fold-mean score by roughly
+    # 1/len(facts) -- differences below one fact are quantization noise, not
+    # evidence, and must count as ties.
+    tie_tolerance = max(0.01, 1.0 / len(facts))
+    return _select_from_holdout(scores, neural_rights, min_fit,
+                                tie_tolerance=tie_tolerance)
