@@ -369,6 +369,107 @@ def test_holdout_tie_tolerance_is_a_parameter_on_the_holdout_axis() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Consumer asks (levi770, integration seam-mapping after #154 merged): a typed
+# registry for neural relations (ask 2) and a frozen-detector entry point
+# (ask 3). Ask 1 (per-witness mask channel) is Phase-2 kernel design, not
+# Python surface.
+# ---------------------------------------------------------------------------
+
+
+def test_neural_relation_spec_int_shorthand_is_equivalent_to_the_spec() -> None:
+    """Ask 2: neural_relations={name: num_rows} stays valid shorthand for a
+    full NeuralRelationSpec -- same pool either way."""
+    from pyxlog.ilp.neural_credit import NeuralRelationSpec, enumerate_specs
+
+    facts = [(0, 1), (1, 0), (2, 1)]
+    a = enumerate_specs(_FakeProg(), "W", facts,
+                        neural_relations={"sal": 3}, device="cpu", n_labels=2)
+    b = enumerate_specs(_FakeProg(), "W", facts,
+                        neural_relations={"sal": NeuralRelationSpec(num_rows=3)},
+                        device="cpu", n_labels=2)
+    assert ([(s.left, s.right, s.is_neural) for s in a]
+            == [(s.left, s.right, s.is_neural) for s in b])
+
+
+def test_registry_refuses_a_non_binary_declared_arity() -> None:
+    """Ask 2: the pool is validated against the typed registry, not name
+    conventions -- the credit scores the chain template's binary R(Z, Y) only,
+    so a neural relation declared at any other arity is refused."""
+    from pyxlog.ilp.neural_credit import NeuralRelationSpec, enumerate_specs
+
+    with pytest.raises(ValueError, match="arity 3"):
+        enumerate_specs(_FakeProg(), "W", [(0, 1)],
+                        neural_relations={"sal": NeuralRelationSpec(num_rows=3,
+                                                                    arity=3)},
+                        device="cpu", n_labels=2)
+
+
+def test_registry_refuses_arg_sorts_that_do_not_match_the_arity() -> None:
+    from pyxlog.ilp.neural_credit import NeuralRelationSpec
+
+    with pytest.raises(ValueError, match="arg_sorts"):
+        NeuralRelationSpec(num_rows=3, arg_sorts=("event",))   # declared arity 2
+
+
+def _frozen_detector_module():
+    """A PARAMETERLESS detector: P(label 1) = [feature > 0.5]. Parameterless is
+    load-bearing -- the training path cannot even build an optimizer over it,
+    so this module working at all proves the frozen path trains nothing."""
+    class _Frozen(torch.nn.Module):
+        def forward(self, x):
+            p = (x[:, 0] > 0.5).float()
+            return torch.stack([1 - p, p], dim=1)
+    return _Frozen()
+
+
+def test_frozen_select_scores_candidates_against_an_external_detector() -> None:
+    """Ask 3: engine-mode as an ACCEPTANCE INSTRUMENT -- candidates scored
+    against a frozen, externally-trained detector, no gradient anywhere, the
+    holdout arbiter's gates unchanged."""
+    from pyxlog.ilp.neural_credit import frozen_select
+
+    features = torch.tensor([[0.9], [0.8], [0.1]])   # events 0,1 salient; 2 quiet
+    facts = [(0, 1), (1, 0), (2, 1)]
+    is_positive = [True, True, False]
+
+    sel = frozen_select(_FakeProg(), "W", facts, is_positive,
+                        _frozen_detector_module(), features,
+                        neural_relations={"sal": 3})
+    assert sel.rule == ("has_event", "sal"), sel
+
+
+def test_frozen_select_abstains_when_the_detector_fits_nothing() -> None:
+    """Ask 3, the other direction: a detector under which no candidate fits
+    ends in a fit-gate abstention -- 'is this rule right given this detector'
+    can be answered NO."""
+    from pyxlog.ilp.neural_credit import frozen_select
+
+    class _Useless(torch.nn.Module):
+        def forward(self, x):
+            half = torch.full((x.shape[0],), 0.5)
+            return torch.stack([half, half], dim=1)
+
+    features = torch.tensor([[0.9], [0.8], [0.1]])
+    facts = [(0, 1), (1, 0), (2, 1)]
+    # Labels chosen so neither the flat detector nor any relational cover fits.
+    is_positive = [False, True, True]
+
+    sel = frozen_select(_FakeProg(), "W", facts, is_positive, _Useless(),
+                        features, neural_relations={"sal": 3})
+    assert sel.rule is None, sel
+    assert "fit gate" in sel.reason
+
+
+def test_frozen_select_refuses_no_facts() -> None:
+    from pyxlog.ilp.neural_credit import frozen_select
+
+    with pytest.raises(ValueError, match="facts"):
+        frozen_select(_FakeProg(), "W", [], [], _frozen_detector_module(),
+                      torch.tensor([[0.9], [0.8], [0.1]]),
+                      neural_relations={"sal": 3})
+
+
+# ---------------------------------------------------------------------------
 # Engine-mode training loop (Task 3). CUDA-gated: the ENGINE compiles the
 # program (device=0), which needs a real CUDA context.
 #
