@@ -359,12 +359,20 @@ Worked example + CUDA-gated tests:
    wrong answer. Use `discovery.select_rule`, which claims a rule only when one candidate
    is both *believed* (weight ≥ 0.5) and *alone* at the top (runner-up > 0.01 behind),
    and abstains otherwise. **(b) Accuracy is not evidence that the relation was
-   identified** — it is 1.000 in every tied case above. **(c) `select_rule` catches
-   ambiguity, not degeneracy.** In the trivially-true world the wrong candidate comes back
-   *believed and alone*, so the gates pass it through; that failure is **measured, not
-   fixed** (`xfail`, strict). Closing it needs an **Occam/sparsity term** on the candidate
-   weights (to prefer the *minimal* separating relation) and a **fit gate** (a rule the
-   model cannot fit the data with is not a rule) — neither is in this branch.
+   identified** — it is 1.000 in every tied case above. **(c) Weight alone catches
+   ambiguity, not degeneracy** — in the trivially-true world the wrong candidate can come
+   back *believed and alone* on weight, so the weight/tie gates pass it through. **The
+   fit gate ships in `select_rule(fits=...)`**: the joint mixture
+   (`neurosymbolic._train_joint_mixture`) exports `candidate_train_fit`, each
+   candidate's TRAIN-set agreement `mean((mask ≥ 0.5) == targets)` off the final step's
+   own mask, independent of its guard weight or its rank among the others. Passing it
+   through (`select_rule(weights, fits=candidate_train_fit, min_fit=0.75)`) drops any
+   candidate below `min_fit` *before* ranking; if none survive, the run abstains and
+   names the fit gate in `reason`. Measured on the trivially-true world: the recovered
+   seed's winner fits at ~1.0 and is selected exactly as before; the seed that used to
+   derail selects `co_occurs` at weight 0.955 but fit 0.500 — a coin flip — and is now
+   caught and abstained on rather than confidently misreported
+   (`python/tests/test_join_identifiability.py`, formerly the last `xfail(strict)`).
 
 `train_and_promote(...)` also accepts `training_fold`, `held_out_domains`,
 `base_kernel_checksum_before`, and `base_kernel_checksum_after`. These fields are

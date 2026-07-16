@@ -147,6 +147,14 @@ class NeuroSymbolicTrainingResult:
     # params + the phi/threshold spec so the driver can build the parametric
     # HardenedClause and the held-out read can reconstruct the gate.
     neural_body_state: dict[str, "NeuralBodyState"] = None
+    # Per-candidate TRAIN-set fit, from the FINAL step's masks:
+    # ``mean((masks[rule_id] >= 0.5) == targets)``. Only populated by the joint
+    # multi-rule mixture path (``_train_joint_mixture``) -- the single-rule
+    # circuit path has no same-head competition to fit-gate, so it stays None.
+    # This is the input to ``discovery.select_rule(fits=...)``: a candidate the
+    # model cannot fit the data with, even alone at the top of the weight
+    # ranking, is not a rule.
+    candidate_train_fit: dict[str, float] | None = None
 
 
 def train_neurosymbolic_program(
@@ -364,8 +372,9 @@ def train_neurosymbolic_program(
             raise ValueError(
                 f"candidate_masses names unknown candidates: {unknown}"
             )
+    candidate_train_fit: dict[str, float] | None = None
     if len(candidate_ids) > 1:
-        host_transfer_stats, query_probabilities = _train_joint_mixture(
+        host_transfer_stats, query_probabilities, candidate_train_fit = _train_joint_mixture(
             program,
             train_head,
             targets,
@@ -522,6 +531,7 @@ def train_neurosymbolic_program(
         proof_trace_map=proof_trace_map,
         training_host_transfer_stats=host_transfer_stats,
         neural_body_state=neural_body_state or None,
+        candidate_train_fit=candidate_train_fit,
     )
 
 
@@ -542,7 +552,7 @@ def _train_joint_mixture(
     domain_inputs: dict[str, Any] | None = None,
     domain_ids: dict[str, Sequence[int]] | None = None,
     join_read_source: str | None = None,
-) -> tuple[dict[str, int], list[float]]:
+) -> tuple[dict[str, int], list[float], dict[str, float]]:
     """Joint soft-mixture over same-head candidates (guard-only, neural-bodied
     when a candidate carries a neural conjunct, or neural-JOIN when a candidate
     puts a neural predicate on an existential join variable).
@@ -567,7 +577,16 @@ def _train_joint_mixture(
     therefore ``1 - prod_{e in ext_k(h)} (1 - p_net(e))`` — see the join-body block
     below and :func:`join_bodies.noisy_or_from_index`.
 
-    Returns ``(host_transfer_stats, query_probabilities)``.
+    Returns ``(host_transfer_stats, query_probabilities, candidate_train_fit)``.
+    ``candidate_train_fit[rule_id]`` is that candidate's TRAIN-set fit --
+    ``mean((mask_k >= 0.5) == targets)`` -- read off the FINAL step's masks
+    (the same ``masks[rule_id]`` the training loop's noisy-OR consumes),
+    recomputed once under ``no_grad`` after the loop. It is the input to
+    ``discovery.select_rule(fits=...)``'s fit gate: a candidate can be believed
+    (guard weight high) and alone at the top of the ranking while still not
+    actually fitting the labels -- e.g. a trivially-true relation, whose mask is
+    ~1 everywhere and therefore agrees with the labels only by chance -- and
+    that is exactly the confident-wrong-answer failure mode this fit measures.
     """
     import torch
 
@@ -832,12 +851,15 @@ def _train_joint_mixture(
     }
     eps = 1e-7
 
-    def head_prob(training: bool) -> Any:
+    def head_prob(training: bool, masks_out: dict[str, Any] | None = None) -> Any:
         # Noisy-OR: P(head) = 1 - prod_k (1 - eligible_k * sigmoid(w_k)).
         # eligible_k = relational grounding mask, AND the ST neural gate for a
         # neural-bodied candidate (recomputed each call so theta_k gets gradient
         # and the gate tracks the current head). The SAME _joint_noisy_or backs the
         # held-out generalization read, so training and read cannot drift.
+        # ``masks_out``, when given, is filled with this call's per-candidate mask
+        # (the same tensors the noisy-OR below consumes) -- the fit-gate read after
+        # training reuses this instead of a second, possibly-diverging computation.
         masks: dict[str, Any] = {}
         for rule_id in candidate_ids:
             if rule_id in join_bodies:
@@ -865,6 +887,8 @@ def _train_joint_mixture(
                 masks[rule_id] = rel_masks[rule_id] * gate
             else:
                 masks[rule_id] = rel_masks[rule_id]
+        if masks_out is not None:
+            masks_out.update(masks)
         p_by_rule = {
             rule_id: torch.sigmoid(guard_modules[rule_id].logit)
             for rule_id in candidate_ids
@@ -892,8 +916,24 @@ def _train_joint_mixture(
     host_transfer_stats = dict(program.host_transfer_stats())
 
     with torch.no_grad():
-        query_probabilities = head_prob(training=False).detach().cpu().tolist()
-    return host_transfer_stats, query_probabilities
+        final_masks: dict[str, Any] = {}
+        query_probabilities = (
+            head_prob(training=False, masks_out=final_masks).detach().cpu().tolist()
+        )
+        # Per-candidate TRAIN-set fit off the FINAL step's masks: how often this
+        # candidate's own (thresholded) mask agrees with the label, independent of
+        # its guard weight or its rank among the other candidates. A candidate can
+        # be believed and alone at the top and still not fit the data (a
+        # trivially-true relation's mask is ~1 everywhere, so it "agrees" with a
+        # label only by the label's own base rate) -- this is the number that
+        # catches that.
+        candidate_train_fit: dict[str, float] = {
+            rule_id: float(
+                ((final_masks[rule_id] >= 0.5) == targets_t).float().mean().item()
+            )
+            for rule_id in candidate_ids
+        }
+    return host_transfer_stats, query_probabilities, candidate_train_fit
 
 
 def _read_only_source(source: str) -> str:
