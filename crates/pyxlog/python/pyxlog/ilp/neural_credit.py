@@ -31,9 +31,12 @@ class NeuralRelationSpec:
     the engine-mode credit scores the chain template's binary ``R(Z, Y)`` only,
     so anything but 2 is refused at enumeration -- the pool is validated against
     this registry, never trusted by name convention. ``arg_sorts`` optionally
-    names the argument domains (length must equal ``arity``). ``artifact_hash``
-    is an opaque content hash of the detector artifact, carried for
-    consumer-side validation and never interpreted here.
+    names the argument domains (length must equal ``arity``); IN THIS PHASE
+    nothing here reads the sorts -- like ``artifact_hash`` they are carried for
+    consumer-side validation only, and slot sort-matching at enumeration is
+    future surface, not a check you can rely on today. ``artifact_hash`` is an
+    opaque content hash of the detector artifact, carried for consumer-side
+    validation and never interpreted here.
 
     A plain ``int`` in ``neural_relations`` remains valid shorthand for
     ``NeuralRelationSpec(num_rows=that_int)``.
@@ -66,6 +69,16 @@ def _registry(neural_relations):
     registry the candidate pool is checked against, not a name convention."""
     reg = {}
     for name, value in neural_relations.items():
+        if isinstance(value, bool) or not isinstance(
+            value, (int, NeuralRelationSpec)
+        ):
+            raise ValueError(
+                f"neural relation '{name}': registry value must be an int "
+                "(the num_rows shorthand) or a NeuralRelationSpec, got "
+                f"{type(value).__name__}. A bool is refused explicitly -- "
+                "isinstance(True, int) holds in Python, and num_rows=True "
+                "silently means one feature row."
+            )
         spec = (NeuralRelationSpec(num_rows=value)
                 if isinstance(value, int) else value)
         if spec.arity != 2:
@@ -491,13 +504,34 @@ def frozen_select(prog, mask_name, facts, is_positive, network, features,
     score-quantum tolerance, Occam narrowing to a unique relational candidate,
     abstention as a first-class outcome. This answers "is this rule right GIVEN
     this detector" -- ``kfold_select`` answers "can a detector be trained for
-    this rule"."""
+    this rule".
+
+    The detector must be in EVAL mode (``network.eval()``): in train mode a
+    BatchNorm mutates its running statistics even under no_grad and dropout
+    makes two identical scoring calls disagree -- both would break the
+    bit-identical-artifact guarantee, so a train-mode module is refused, not
+    silently switched (refusal teaches the contract; mode-switching would hide
+    caller bugs)."""
     import torch
 
     if not facts:
         raise ValueError(
             "frozen_select needs at least one fact: candidate accuracies are "
             "means over facts, and a mean over nothing is not a score."
+        )
+    if len(is_positive) != len(facts):
+        raise ValueError(
+            f"is_positive has {len(is_positive)} entries for {len(facts)} "
+            "facts. A shorter tensor would BROADCAST silently and score every "
+            "candidate against the wrong labels, so the mismatch is refused."
+        )
+    if getattr(network, "training", False):
+        raise ValueError(
+            "a frozen detector is scored in eval mode -- call network.eval() "
+            "first. In train mode BatchNorm mutates its running statistics "
+            "even under no_grad and dropout de-determinizes the scores, both "
+            "violating the frozen guarantee this entry point exists to "
+            "provide."
         )
     out = _validated_output(network, features)
     specs = enumerate_specs(
