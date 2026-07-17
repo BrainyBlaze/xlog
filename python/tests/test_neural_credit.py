@@ -563,6 +563,53 @@ def test_frozen_select_refuses_no_facts() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Witness-mask channel (contract #155): a MASKED witness contributes EXACTLY
+# zero credit and gradient -- the masked row is physically absent from the
+# index, never coerced to false, and each fact affected is flagged via
+# `masked_any`.
+# ---------------------------------------------------------------------------
+
+
+def test_masked_witness_rows_are_excluded_from_the_index() -> None:
+    """Контракт #155: MASKED вносит РОВНО ноль кредита — строка физически
+    отсутствует в индексе, а masked_any помечает затронутые факты."""
+    from pyxlog.ilp.neural_credit import enumerate_specs
+
+    mask = torch.zeros(3, 2, dtype=torch.bool)
+    mask[0, 1] = True                     # событие 0 на метке 1 — замаскировано
+    specs = enumerate_specs(_FakeProg(), "W", [(0, 1), (1, 0)],
+                            neural_relations={"sal": 3}, device="cpu",
+                            n_labels=2, witness_mask=mask)
+    neural = {(s.left, s.right): s for s in specs}[("has_event", "sal")]
+    # без маски было [1, 3, 4] (см. тест per-fact y); строка 0*2+1=1 исключена
+    assert neural.witness_index.event_ids.tolist() == [3, 4]
+    assert neural.masked_any.tolist() == [True, False]
+
+
+def test_none_mask_is_byte_identical_to_omitting_it() -> None:
+    from pyxlog.ilp.neural_credit import enumerate_specs
+
+    a = enumerate_specs(_FakeProg(), "W", [(0, 1), (1, 0)],
+                        neural_relations={"sal": 3}, device="cpu", n_labels=2)
+    b = enumerate_specs(_FakeProg(), "W", [(0, 1), (1, 0)],
+                        neural_relations={"sal": 3}, device="cpu", n_labels=2,
+                        witness_mask=None)
+    na = {(s.left, s.right): s for s in a}[("has_event", "sal")]
+    nb = {(s.left, s.right): s for s in b}[("has_event", "sal")]
+    assert na.witness_index.event_ids.tolist() == nb.witness_index.event_ids.tolist()
+    assert nb.masked_any is None          # дефолт не создаёт нового состояния
+
+
+def test_mask_of_wrong_shape_is_refused_typed() -> None:
+    from pyxlog.ilp.neural_credit import enumerate_specs
+
+    with pytest.raises(ValueError, match="witness_mask"):
+        enumerate_specs(_FakeProg(), "W", [(0, 1)],
+                        neural_relations={"sal": 3}, device="cpu", n_labels=2,
+                        witness_mask=torch.zeros(5, 2, dtype=torch.bool))
+
+
+# ---------------------------------------------------------------------------
 # Engine-mode training loop (Task 3). CUDA-gated: the ENGINE compiles the
 # program (device=0), which needs a real CUDA context.
 #

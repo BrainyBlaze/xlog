@@ -106,6 +106,7 @@ class CandidateSpec:
     is_neural: bool
     witness_index: JoinExtensionIndex | None
     binary_cover: Any | None
+    masked_any: Any | None = None
 
     def __post_init__(self) -> None:
         if self.is_neural != (self.witness_index is not None) or (
@@ -151,7 +152,8 @@ def credit_nll(cand_probs, specs, p_event, is_positive, gamma: float = 1.0):
     return loss.mean()
 
 
-def enumerate_specs(prog, mask_name, facts, neural_relations, device, n_labels):
+def enumerate_specs(prog, mask_name, facts, neural_relations, device, n_labels,
+                    witness_mask=None):
     """One CandidateSpec per engine triple over the program's binary EDB relations.
 
     Witnesses come from the ENGINE (`relation_facts`), never from the caller: for a
@@ -182,10 +184,39 @@ def enumerate_specs(prog, mask_name, facts, neural_relations, device, n_labels):
     union of its left partners' joined constants) is EXACTLY ``0..num_rows-1``.
     Anything else could gather other events' probabilities while staying in
     bounds — silently — and is refused, not guessed at (mirrors
-    ``neurosymbolic._resolve_domain_ids``)."""
+    ``neurosymbolic._resolve_domain_ids``).
+
+    ``witness_mask`` is the witness-level mask/abstain channel (contract
+    #155): a bool tensor ``[num_rows, n_labels]`` (True = MASKED) or ``None``
+    (= everything ACTIVE, byte-identical to omitting the argument). A MASKED
+    (event, label) row is REMOVED from the witness index at build time -- it
+    contributes exactly zero credit and zero gradient, never a coerced
+    ``False`` cover -- and each fact with at least one masked witness is
+    flagged in the neural spec's ``masked_any``. The mask is validated
+    against EVERY registered neural relation's ``(num_rows, n_labels)`` up
+    front, not lazily per-candidate."""
     import torch
 
     neural_relations = _registry(neural_relations)
+    if witness_mask is not None:
+        rows_by_relation = {rn: spec.num_rows for rn, spec in neural_relations.items()}
+        distinct_rows = set(rows_by_relation.values())
+        if len(distinct_rows) > 1:
+            detail = ", ".join(f"'{rn}'={rows}" for rn, rows in sorted(rows_by_relation.items()))
+            raise ValueError(
+                f"witness_mask was supplied, but the registered neural "
+                f"relations disagree on num_rows ({detail}): a single "
+                "witness_mask tensor cannot be interpreted against two "
+                "different row spaces at once, refused."
+            )
+        for rn, spec in neural_relations.items():
+            expected_shape = (spec.num_rows, n_labels)
+            if tuple(witness_mask.shape) != expected_shape:
+                raise ValueError(
+                    f"witness_mask has shape {tuple(witness_mask.shape)}, but "
+                    f"neural relation '{rn}' expects shape {expected_shape} "
+                    "((num_rows, n_labels)) -- refused, not guessed at."
+                )
     for h, y in facts:
         if not (0 <= y < n_labels):
             raise ValueError(
@@ -267,13 +298,19 @@ def enumerate_specs(prog, mask_name, facts, neural_relations, device, n_labels):
                 continue
         if rn in neural_relations:
             witnesses = [
-                [z * n_labels + y for z in _left(ln).get(h, [])] for h, y in facts
+                [z * n_labels + y for z in _left(ln).get(h, [])
+                 if witness_mask is None or not bool(witness_mask[z, y])]
+                for h, y in facts
             ]
+            masked_any = (None if witness_mask is None else torch.tensor(
+                [any(bool(witness_mask[z, y]) for z in _left(ln).get(h, []))
+                 for h, y in facts], device=device))
             idx = prepare_extension(
                 witnesses, device,
                 num_rows=neural_relations[rn].num_rows * n_labels
             )
-            specs.append(CandidateSpec(cand["id"], ln, rn, True, idx, None))
+            specs.append(CandidateSpec(cand["id"], ln, rn, True, idx, None,
+                                       masked_any=masked_any))
             # The FULL left extension (not the fact-restricted witnesses, which
             # vary per fold) is what can ever index this relation's feature rows.
             domain_union.setdefault(rn, set()).update(
