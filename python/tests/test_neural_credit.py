@@ -741,6 +741,68 @@ def test_kfold_select_pools_coverage_across_folds_under_a_witness_mask() -> None
 
 
 # ---------------------------------------------------------------------------
+# Task 3 of the witness-mask plan: thread witness masks through training with
+# masked-fact accounting.
+# ---------------------------------------------------------------------------
+
+
+def test_masked_rows_receive_exactly_zero_gradient() -> None:
+    """Инвариант 1 контракта #155 в градиентной форме: замаскированная строка
+    не участвует в лоссе — её градиент не «мал», он отсутствует."""
+    from pyxlog.ilp.neural_credit import enumerate_specs, credit_nll
+
+    mask = torch.zeros(3, 2, dtype=torch.bool)
+    mask[0, 1] = True
+    specs = enumerate_specs(_FakeProg(), "W", [(0, 1), (1, 0)],
+                            neural_relations={"sal": 3}, device="cpu",
+                            n_labels=2, witness_mask=mask)
+    neural = [s for s in specs if s.is_neural and s.right == "sal"]
+    p_event = torch.full((6,), 0.5, requires_grad=True)
+    p = torch.softmax(torch.zeros(len(specs)), dim=0)
+    cand = torch.zeros(max(s.cid for s in specs) + 1)
+    for s, w in zip(specs, p):
+        cand[s.cid] = w
+    loss = credit_nll(cand, specs, p_event,
+                      torch.tensor([True, False]))
+    loss.backward()
+    assert p_event.grad[0 * 2 + 1].item() == 0.0     # ровно ноль, не «мало»
+    assert p_event.grad[2 * 2 + 0].item() != 0.0     # активная строка живёт
+
+
+def test_train_engine_mode_threads_witness_mask_into_masked_facts_accounting() -> None:
+    """Task 3: `train_engine_mode(..., witness_mask=)` threads the mask into
+    `enumerate_specs`, and `EngineModeResult.masked_facts` reports
+    `{(left, right): count of facts with >=1 masked witness}` for NEURAL specs
+    only, entries with zero masked facts omitted.
+
+    facts=[(0, 1), (1, 0)], mask[0, 1]=True masks witness (event 0, label 1).
+    `sal` is neural, so both `has_event` and `tag` (its left partners) produce
+    neural specs against it here. `has_event`'s edge-0 bucket is [0, 1]: fact
+    (0, 1) reads witnesses (0, 1) and (1, 1) -- the first is masked, so
+    (has_event, sal) counts 1. `tag`'s edge-0 bucket is [1]: fact (0, 1) reads
+    only witness (1, 1), which is NOT masked, so (tag, sal) contributes zero
+    masked facts and must not appear in the dict at all."""
+    features = torch.tensor([[0.1], [0.2], [0.3]])
+    facts = [(0, 1), (1, 0)]
+    is_positive = [True, False]
+
+    mask = torch.zeros(3, 2, dtype=torch.bool)
+    mask[0, 1] = True
+
+    result = train_engine_mode(
+        _FakeProg(), "W", facts, is_positive,
+        torch.nn.Sequential(torch.nn.Linear(1, 2), torch.nn.Softmax(dim=-1)),
+        features, neural_relations={"sal": 3}, steps=1, witness_mask=mask)
+    assert result.masked_facts == {("has_event", "sal"): 1}
+
+    result_unmasked = train_engine_mode(
+        _FakeProg(), "W", facts, is_positive,
+        torch.nn.Sequential(torch.nn.Linear(1, 2), torch.nn.Softmax(dim=-1)),
+        features, neural_relations={"sal": 3}, steps=1)
+    assert result_unmasked.masked_facts == {}
+
+
+# ---------------------------------------------------------------------------
 # Engine-mode training loop (Task 3). CUDA-gated: the ENGINE compiles the
 # program (device=0), which needs a real CUDA context.
 #

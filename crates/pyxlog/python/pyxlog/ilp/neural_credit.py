@@ -388,17 +388,25 @@ def _validated_output(network, features):
 class EngineModeResult:
     """The trained candidate mixture, the specs it was trained over, the (mutated
     in place) network, and the per-step loss trace -- the last is what determinism
-    is checked against."""
+    is checked against.
+
+    ``masked_facts`` maps ``(left, right)`` -- for NEURAL specs only -- to the
+    number of facts with at least one masked witness (``spec.masked_any.sum()``);
+    entries whose count is zero are omitted, never held at 0. Empty when no
+    ``witness_mask`` was supplied to ``train_engine_mode``, byte-identical to the
+    pre-mask surface."""
 
     cand_probs: dict
     specs: list
     network: Any
     losses: list
+    masked_facts: dict = field(default_factory=dict)
 
 
 def train_engine_mode(prog, mask_name, facts, is_positive, network, features,
                       neural_relations, steps=400, lr=0.05, gamma=1.0,
-                      entropy_start=0.0, entropy_end=0.1, seed=0):
+                      entropy_start=0.0, entropy_end=0.1, seed=0,
+                      witness_mask=None):
     """Train candidate logits + the network against the real-valued credit.
 
     Deterministic, mirroring the dILP trainer: the OR accumulates with index_add,
@@ -410,7 +418,18 @@ def train_engine_mode(prog, mask_name, facts, is_positive, network, features,
     (``kfold_select`` seeds each per-fold construction itself; a direct caller
     owns that seeding). Entropy is the Occam pressure the linear credit lacks
     (one-hot preference; weight annealed by entropy_weight_at_step). Selection is
-    NOT here -- see kfold_select."""
+    NOT here -- see kfold_select.
+
+    ``witness_mask`` (contract #155) is threaded straight into
+    ``enumerate_specs``: a MASKED witness is excluded from the index at build
+    time, so it contributes exactly zero credit and zero gradient to the
+    training loss below -- not a smaller one, an absent one. The training NLL
+    therefore is a lower bound over the OR's ACTIVE (unmasked) witnesses only;
+    the full masked-interval treatment ``frozen_select``/``kfold_select`` apply
+    to held-out scoring is a SELECTION-time concern, documented there, not a
+    training-loss one -- this bound is the Python-phase boundary (the interval
+    itself is future kernel surface). ``EngineModeResult.masked_facts`` reports
+    the per-candidate masked-fact accounting from the same specs."""
     import os
 
     import torch
@@ -427,7 +446,8 @@ def train_engine_mode(prog, mask_name, facts, is_positive, network, features,
     out = _validated_output(network, features)
     n_labels = out.shape[1]
     specs = enumerate_specs(
-        prog, mask_name, facts, neural_relations, device, n_labels
+        prog, mask_name, facts, neural_relations, device, n_labels,
+        witness_mask=witness_mask,
     )
     C = max(s.cid for s in specs) + 1
     # Skipped candidates must not hold probability mass — the mixture is over
@@ -456,9 +476,15 @@ def train_engine_mode(prog, mask_name, facts, is_positive, network, features,
 
     with torch.no_grad():
         p = torch.softmax(W + neg_inf_mask, dim=0)
+    masked_facts = {
+        (s.left, s.right): int(s.masked_any.sum())
+        for s in specs
+        if s.is_neural and s.masked_any is not None and bool(s.masked_any.any())
+    }
     return EngineModeResult(
         cand_probs={(s.left, s.right): float(p[s.cid]) for s in specs},
         specs=specs, network=network, losses=losses,
+        masked_facts=masked_facts,
     )
 
 
@@ -695,13 +721,17 @@ def kfold_select(prog_factory, mask_name, facts, is_positive, make_network,
     regardless of ambient RNG state -- the declared contract, not a fixture
     obligation.
 
-    ``witness_mask`` is threaded into the HELD-OUT scoring's ``enumerate_specs``
-    call only -- training (``train_engine_mode``) is untouched here, that is a
-    later task's surface. Per fold, a fact is CERTAIN by the same interval rule
-    as ``frozen_select`` (predicted-true, or never masked); uncertain facts are
-    excluded from that fold's accuracy and contribute to ``n_certain``/``n_total``,
-    which are summed ACROSS folds (each fact is held out exactly once) into a
-    single pooled ``coverage`` fraction per candidate, gated the same way."""
+    ``witness_mask`` is threaded into BOTH the per-fold ``train_engine_mode``
+    call and the HELD-OUT scoring's ``enumerate_specs`` call: the mask is a
+    GLOBAL (event, label) row space, the same tensor for every fold -- only the
+    fact subsets differ per fold, already handled by the per-fold train/held-out
+    split -- so passing the identical mask to each fold's training is correct,
+    not a per-fold recomputation. Per fold, a fact is CERTAIN by the same
+    interval rule as ``frozen_select`` (predicted-true, or never masked);
+    uncertain facts are excluded from that fold's accuracy and contribute to
+    ``n_certain``/``n_total``, which are summed ACROSS folds (each fact is held
+    out exactly once) into a single pooled ``coverage`` fraction per candidate,
+    gated the same way."""
     import torch
 
     if not 2 <= folds <= len(facts):
@@ -732,7 +762,8 @@ def kfold_select(prog_factory, mask_name, facts, is_positive, make_network,
             prog, mask_name,
             [facts[i] for i in train_ids],
             [is_positive[i] for i in train_ids],
-            make_network(), features, neural_relations, seed=seed, **train_kw)
+            make_network(), features, neural_relations, seed=seed,
+            witness_mask=witness_mask, **train_kw)
         with torch.no_grad():
             out = res.network(features)
             held_specs = enumerate_specs(
