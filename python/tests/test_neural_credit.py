@@ -720,7 +720,10 @@ def test_kc2_mirror_masking_must_not_be_equivalent_to_false_labels() -> None:
     coerced = frozen_select(_FakeProg(), "W", facts, is_positive,
                             _Coerced().eval(), features,
                             neural_relations={"sal": 3})
-    assert masked != coerced             # исходы обязаны разойтись
+    # DECISIONS must diverge, not just dataclass fields (coverage differs
+    # trivially whenever a mask is supplied): coercion gates the true rule out.
+    assert masked.rule != coerced.rule
+    assert coerced.rule is None, coerced
     # и канал маски не наказывает кандидата за немаскируемое:
     assert masked.rule == ("has_event", "sal") or "coverage" in masked.reason
 
