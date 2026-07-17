@@ -369,6 +369,200 @@ def test_holdout_tie_tolerance_is_a_parameter_on_the_holdout_axis() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Consumer asks (levi770, integration seam-mapping after #154 merged): a typed
+# registry for neural relations (ask 2) and a frozen-detector entry point
+# (ask 3). Ask 1 (per-witness mask channel) is Phase-2 kernel design, not
+# Python surface.
+# ---------------------------------------------------------------------------
+
+
+def test_neural_relation_spec_int_shorthand_is_equivalent_to_the_spec() -> None:
+    """Ask 2: neural_relations={name: num_rows} stays valid shorthand for a
+    full NeuralRelationSpec -- same pool either way."""
+    from pyxlog.ilp.neural_credit import NeuralRelationSpec, enumerate_specs
+
+    facts = [(0, 1), (1, 0), (2, 1)]
+    a = enumerate_specs(_FakeProg(), "W", facts,
+                        neural_relations={"sal": 3}, device="cpu", n_labels=2)
+    b = enumerate_specs(_FakeProg(), "W", facts,
+                        neural_relations={"sal": NeuralRelationSpec(num_rows=3)},
+                        device="cpu", n_labels=2)
+    assert ([(s.left, s.right, s.is_neural) for s in a]
+            == [(s.left, s.right, s.is_neural) for s in b])
+
+
+def test_registry_refuses_a_non_binary_declared_arity() -> None:
+    """Ask 2: the pool is validated against the typed registry, not name
+    conventions -- the credit scores the chain template's binary R(Z, Y) only,
+    so a neural relation declared at any other arity is refused."""
+    from pyxlog.ilp.neural_credit import NeuralRelationSpec, enumerate_specs
+
+    with pytest.raises(ValueError, match="arity 3"):
+        enumerate_specs(_FakeProg(), "W", [(0, 1)],
+                        neural_relations={"sal": NeuralRelationSpec(num_rows=3,
+                                                                    arity=3)},
+                        device="cpu", n_labels=2)
+
+
+def test_registry_refuses_arg_sorts_that_do_not_match_the_arity() -> None:
+    from pyxlog.ilp.neural_credit import NeuralRelationSpec
+
+    with pytest.raises(ValueError, match="arg_sorts"):
+        NeuralRelationSpec(num_rows=3, arg_sorts=("event",))   # declared arity 2
+
+
+def _frozen_detector_module():
+    """A PARAMETERLESS detector: P(label 1) = [feature > 0.5]. Parameterless is
+    load-bearing -- the training path cannot even build an optimizer over it,
+    so this module working at all proves the frozen path trains nothing.
+    Returned in eval mode: frozen_select refuses train-mode detectors."""
+    class _Frozen(torch.nn.Module):
+        def forward(self, x):
+            p = (x[:, 0] > 0.5).float()
+            return torch.stack([1 - p, p], dim=1)
+    return _Frozen().eval()
+
+
+def test_frozen_select_scores_candidates_against_an_external_detector() -> None:
+    """Ask 3: engine-mode as an ACCEPTANCE INSTRUMENT -- candidates scored
+    against a frozen, externally-trained detector, no gradient anywhere, the
+    holdout arbiter's gates unchanged."""
+    from pyxlog.ilp.neural_credit import frozen_select
+
+    features = torch.tensor([[0.9], [0.8], [0.1]])   # events 0,1 salient; 2 quiet
+    facts = [(0, 1), (1, 0), (2, 1)]
+    is_positive = [True, True, False]
+
+    sel = frozen_select(_FakeProg(), "W", facts, is_positive,
+                        _frozen_detector_module(), features,
+                        neural_relations={"sal": 3})
+    assert sel.rule == ("has_event", "sal"), sel
+
+
+def test_frozen_select_abstains_when_the_detector_fits_nothing() -> None:
+    """Ask 3, the other direction: a detector under which no candidate fits
+    ends in a fit-gate abstention -- 'is this rule right given this detector'
+    can be answered NO."""
+    from pyxlog.ilp.neural_credit import frozen_select
+
+    class _Useless(torch.nn.Module):
+        def forward(self, x):
+            half = torch.full((x.shape[0],), 0.5)
+            return torch.stack([half, half], dim=1)
+
+    features = torch.tensor([[0.9], [0.8], [0.1]])
+    facts = [(0, 1), (1, 0), (2, 1)]
+    # Labels chosen so neither the flat detector nor any relational cover fits.
+    is_positive = [False, True, True]
+
+    sel = frozen_select(_FakeProg(), "W", facts, is_positive,
+                        _Useless().eval(), features,
+                        neural_relations={"sal": 3})
+    assert sel.rule is None, sel
+    assert "fit gate" in sel.reason
+
+
+def test_frozen_select_refuses_a_detector_left_in_train_mode() -> None:
+    """Review finding 1 (major, executed by the reviewer): in train mode a
+    BatchNorm mutates its running statistics EVEN UNDER no_grad and dropout
+    makes two identical scoring calls disagree -- both violate the
+    bit-identical-artifact guarantee this entry point exists to provide.
+    Refusal teaches the contract; silent mode-switching would hide caller bugs."""
+    from pyxlog.ilp.neural_credit import frozen_select
+
+    net = torch.nn.Sequential(torch.nn.BatchNorm1d(1), torch.nn.Linear(1, 2),
+                              torch.nn.Softmax(dim=-1))
+    assert net.training                      # torch's default -- exactly the trap
+    with pytest.raises(ValueError, match="eval"):
+        frozen_select(_FakeProg(), "W", [(0, 1), (1, 0), (2, 1)],
+                      [True, True, False], net,
+                      torch.tensor([[0.9], [0.8], [0.1]]),
+                      neural_relations={"sal": 3})
+
+
+def test_frozen_select_in_eval_mode_mutates_nothing_and_is_repeatable() -> None:
+    """The frozen guarantee, pinned: state-hash-before == state-hash-after
+    (parameters AND buffers -- BatchNorm running stats live in buffers), and
+    two identical scoring calls return the same selection."""
+    from pyxlog.ilp.neural_credit import frozen_select
+
+    torch.manual_seed(0)
+    net = torch.nn.Sequential(torch.nn.BatchNorm1d(1), torch.nn.Dropout(0.5),
+                              torch.nn.Linear(1, 2),
+                              torch.nn.Softmax(dim=-1)).eval()
+    state_before = [t.clone() for t in list(net.parameters()) + list(net.buffers())]
+
+    features = torch.tensor([[0.9], [0.8], [0.1]])
+    facts = [(0, 1), (1, 0), (2, 1)]
+    is_positive = [True, True, False]
+    sel_a = frozen_select(_FakeProg(), "W", facts, is_positive, net, features,
+                          neural_relations={"sal": 3})
+    sel_b = frozen_select(_FakeProg(), "W", facts, is_positive, net, features,
+                          neural_relations={"sal": 3})
+
+    state_after = list(net.parameters()) + list(net.buffers())
+    assert all(torch.equal(a, b) for a, b in zip(state_before, state_after))
+    assert sel_a == sel_b
+
+
+def test_frozen_select_refuses_a_mismatched_is_positive_length() -> None:
+    """Review finding N1 (medium, executed by the reviewer): a length-1
+    is_positive broadcasts silently and every candidate scores against ONE
+    label -- meaningless scores with no error. Refused typed, like zero facts."""
+    from pyxlog.ilp.neural_credit import frozen_select
+
+    with pytest.raises(ValueError, match="is_positive"):
+        frozen_select(_FakeProg(), "W", [(0, 1), (1, 0), (2, 1)], [True],
+                      _frozen_detector_module(),
+                      torch.tensor([[0.9], [0.8], [0.1]]),
+                      neural_relations={"sal": 3})
+
+
+def test_registry_refuses_values_that_are_neither_int_nor_spec() -> None:
+    """Review finding N2 (low): bool sneaks through isinstance(value, int),
+    and a float used to die as a raw AttributeError -- the registry surface is
+    now fully typed."""
+    from pyxlog.ilp.neural_credit import enumerate_specs
+
+    for bad in (True, 3.0):
+        with pytest.raises(ValueError, match="NeuralRelationSpec"):
+            enumerate_specs(_FakeProg(), "W", [(0, 1)],
+                            neural_relations={"sal": bad}, device="cpu",
+                            n_labels=2)
+
+
+def test_arg_sorts_and_artifact_hash_are_carried_opaquely() -> None:
+    """Review finding N3 (low) + finding 2: in this phase nothing here reads
+    arg_sorts or artifact_hash -- they are consumer-side metadata. Pinned:
+    identical enumeration with and without them, and the spec survives
+    registration untouched."""
+    from pyxlog.ilp.neural_credit import (NeuralRelationSpec, _registry,
+                                          enumerate_specs)
+
+    facts = [(0, 1), (1, 0), (2, 1)]
+    tagged_spec = NeuralRelationSpec(num_rows=3, arg_sorts=("event", "label"),
+                                     artifact_hash="sha256:abc")
+    plain = enumerate_specs(_FakeProg(), "W", facts,
+                            neural_relations={"sal": 3}, device="cpu",
+                            n_labels=2)
+    tagged = enumerate_specs(_FakeProg(), "W", facts,
+                             neural_relations={"sal": tagged_spec},
+                             device="cpu", n_labels=2)
+    assert ([(s.left, s.right, s.is_neural) for s in plain]
+            == [(s.left, s.right, s.is_neural) for s in tagged])
+    assert _registry({"sal": tagged_spec})["sal"] is tagged_spec
+
+
+def test_frozen_select_refuses_no_facts() -> None:
+    from pyxlog.ilp.neural_credit import frozen_select
+
+    with pytest.raises(ValueError, match="facts"):
+        frozen_select(_FakeProg(), "W", [], [], _frozen_detector_module(),
+                      torch.tensor([[0.9], [0.8], [0.1]]),
+                      neural_relations={"sal": 3})
+
+
+# ---------------------------------------------------------------------------
 # Engine-mode training loop (Task 3). CUDA-gated: the ENGINE compiles the
 # program (device=0), which needs a real CUDA context.
 #

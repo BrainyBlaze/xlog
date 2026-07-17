@@ -23,6 +23,75 @@ from pyxlog.ilp.join_bodies import (
 
 
 @dataclass(frozen=True)
+class NeuralRelationSpec:
+    """Registration metadata for one neural relation (typed registry).
+
+    ``num_rows`` is the feature-tensor row count -- the witness domain size the
+    dense-identity law checks against. ``arity`` is the DECLARED relation arity:
+    the engine-mode credit scores the chain template's binary ``R(Z, Y)`` only,
+    so anything but 2 is refused at enumeration -- the pool is validated against
+    this registry, never trusted by name convention. ``arg_sorts`` optionally
+    names the argument domains (length must equal ``arity``); IN THIS PHASE
+    nothing here reads the sorts -- like ``artifact_hash`` they are carried for
+    consumer-side validation only, and slot sort-matching at enumeration is
+    future surface, not a check you can rely on today. ``artifact_hash`` is an
+    opaque content hash of the detector artifact, carried for consumer-side
+    validation and never interpreted here.
+
+    A plain ``int`` in ``neural_relations`` remains valid shorthand for
+    ``NeuralRelationSpec(num_rows=that_int)``.
+    """
+
+    num_rows: int
+    arity: int = 2
+    arg_sorts: tuple | None = None
+    artifact_hash: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.num_rows <= 0:
+            raise ValueError(
+                f"num_rows={self.num_rows}: a neural relation needs at least "
+                "one feature row."
+            )
+        if self.arg_sorts is not None and len(self.arg_sorts) != self.arity:
+            raise ValueError(
+                f"arg_sorts has {len(self.arg_sorts)} entries for declared "
+                f"arity {self.arity}; the sorts name the arguments, so the "
+                "lengths must match."
+            )
+
+
+def _registry(neural_relations):
+    """Normalize ``{name: int | NeuralRelationSpec}`` to specs and validate.
+
+    The int shorthand stays byte-compatible with the pre-registry surface.
+    A declared arity other than 2 is refused HERE, for every entry -- a typed
+    registry the candidate pool is checked against, not a name convention."""
+    reg = {}
+    for name, value in neural_relations.items():
+        if isinstance(value, bool) or not isinstance(
+            value, (int, NeuralRelationSpec)
+        ):
+            raise ValueError(
+                f"neural relation '{name}': registry value must be an int "
+                "(the num_rows shorthand) or a NeuralRelationSpec, got "
+                f"{type(value).__name__}. A bool is refused explicitly -- "
+                "isinstance(True, int) holds in Python, and num_rows=True "
+                "silently means one feature row."
+            )
+        spec = (NeuralRelationSpec(num_rows=value)
+                if isinstance(value, int) else value)
+        if spec.arity != 2:
+            raise ValueError(
+                f"neural relation '{name}' declares arity {spec.arity}; the "
+                "engine-mode credit scores the chain template's binary R(Z, Y) "
+                "only, so a non-binary declaration is refused at the registry."
+            )
+        reg[name] = spec
+    return reg
+
+
+@dataclass(frozen=True)
 class CandidateSpec:
     """One engine-enumerated candidate, ready for the torch credit.
 
@@ -116,6 +185,7 @@ def enumerate_specs(prog, mask_name, facts, neural_relations, device, n_labels):
     ``neurosymbolic._resolve_domain_ids``)."""
     import torch
 
+    neural_relations = _registry(neural_relations)
     for h, y in facts:
         if not (0 <= y < n_labels):
             raise ValueError(
@@ -200,7 +270,8 @@ def enumerate_specs(prog, mask_name, facts, neural_relations, device, n_labels):
                 [z * n_labels + y for z in _left(ln).get(h, [])] for h, y in facts
             ]
             idx = prepare_extension(
-                witnesses, device, num_rows=neural_relations[rn] * n_labels
+                witnesses, device,
+                num_rows=neural_relations[rn].num_rows * n_labels
             )
             specs.append(CandidateSpec(cand["id"], ln, rn, True, idx, None))
             # The FULL left extension (not the fact-restricted witnesses, which
@@ -227,7 +298,7 @@ def enumerate_specs(prog, mask_name, facts, neural_relations, device, n_labels):
             "filters above are the reason, not a silent cap."
         )
     for rn, joined in domain_union.items():
-        rows = neural_relations[rn]
+        rows = neural_relations[rn].num_rows
         if joined != set(range(rows)):
             missing = sorted(set(range(rows)) - joined)[:5]
             extra = sorted(joined - set(range(rows)))[:5]
@@ -244,6 +315,24 @@ def enumerate_specs(prog, mask_name, facts, neural_relations, device, n_labels):
                 "explicitly."
             )
     return specs
+
+
+def _validated_output(network, features):
+    """The network's output under no_grad, refused unless 2-D: the engine-mode
+    credit reads the witness score at the fact's own label column, so the
+    output must be [num_events, num_labels]."""
+    import torch
+
+    with torch.no_grad():
+        out = network(features)
+    if out.ndim != 2:
+        raise ValueError(
+            f"network(features) returned a {out.ndim}-D tensor of shape "
+            f"{tuple(out.shape)}; the engine-mode credit reads the witness score "
+            "at the fact's own label column, so the output must be 2-D "
+            "[num_events, num_labels]."
+        )
+    return out
 
 
 @dataclass(frozen=True)
@@ -286,15 +375,7 @@ def train_engine_mode(prog, mask_name, facts, is_positive, network, features,
     torch.manual_seed(seed)
 
     device = features.device
-    with torch.no_grad():
-        out = network(features)
-    if out.ndim != 2:
-        raise ValueError(
-            f"network(features) returned a {out.ndim}-D tensor of shape "
-            f"{tuple(out.shape)}; the engine-mode credit reads the witness score "
-            "at the fact's own label column, so the output must be 2-D "
-            "[num_events, num_labels]."
-        )
+    out = _validated_output(network, features)
     n_labels = out.shape[1]
     specs = enumerate_specs(
         prog, mask_name, facts, neural_relations, device, n_labels
@@ -408,6 +489,69 @@ def _select_from_holdout(scores, neural_rights, min_fit, tie_tolerance=0.01):
         )
     return HoldoutSelection(rule=None, tied=tied, margin=sel.margin,
                             top_weight=sel.top_weight, reason=sel.reason)
+
+
+def frozen_select(prog, mask_name, facts, is_positive, network, features,
+                  neural_relations, min_fit=0.75):
+    """Score every engine-enumerated candidate against a FROZEN detector.
+
+    Engine mode as an ACCEPTANCE INSTRUMENT rather than a trainer: the detector
+    is externally trained and never touched here -- no gradient, no optimizer
+    (a parameterless module works), no folds (nothing trains, so every fact is
+    already held out with respect to this system). Each candidate is scored by
+    its own witness/cover semantics over ALL facts and the selection gates are
+    exactly the holdout arbiter's: fit gate, select_rule tie semantics with the
+    score-quantum tolerance, Occam narrowing to a unique relational candidate,
+    abstention as a first-class outcome. This answers "is this rule right GIVEN
+    this detector" -- ``kfold_select`` answers "can a detector be trained for
+    this rule".
+
+    The detector must be in EVAL mode (``network.eval()``): in train mode a
+    BatchNorm mutates its running statistics even under no_grad and dropout
+    makes two identical scoring calls disagree -- both would break the
+    bit-identical-artifact guarantee, so a train-mode module is refused, not
+    silently switched (refusal teaches the contract; mode-switching would hide
+    caller bugs)."""
+    import torch
+
+    if not facts:
+        raise ValueError(
+            "frozen_select needs at least one fact: candidate accuracies are "
+            "means over facts, and a mean over nothing is not a score."
+        )
+    if len(is_positive) != len(facts):
+        raise ValueError(
+            f"is_positive has {len(is_positive)} entries for {len(facts)} "
+            "facts. A shorter tensor would BROADCAST silently and score every "
+            "candidate against the wrong labels, so the mismatch is refused."
+        )
+    if getattr(network, "training", False):
+        raise ValueError(
+            "a frozen detector is scored in eval mode -- call network.eval() "
+            "first. In train mode BatchNorm mutates its running statistics "
+            "even under no_grad and dropout de-determinizes the scores, both "
+            "violating the frozen guarantee this entry point exists to "
+            "provide."
+        )
+    out = _validated_output(network, features)
+    specs = enumerate_specs(
+        prog, mask_name, facts, neural_relations, features.device, out.shape[1]
+    )
+    with torch.no_grad():
+        p_event = out.reshape(-1)
+        y = torch.tensor([bool(v) for v in is_positive],
+                         device=features.device, dtype=torch.float32)
+        scores = {}
+        for spec in specs:
+            s = (noisy_or_from_index(p_event, spec.witness_index)
+                 if spec.is_neural else spec.binary_cover)
+            scores[(spec.left, spec.right)] = float(
+                ((s >= 0.5).float() == y).float().mean()
+            )
+    # Same derivation as kfold_select: one fact is the smallest evidence step.
+    tie_tolerance = max(0.01, 1.0 / len(facts))
+    return _select_from_holdout(scores, set(neural_relations), min_fit,
+                                tie_tolerance=tie_tolerance)
 
 
 def kfold_select(prog_factory, mask_name, facts, is_positive, make_network,
