@@ -271,6 +271,18 @@ def enumerate_specs(prog, mask_name, facts, neural_relations, device, n_labels,
             }
         return right_pairs[name]
 
+    def _mask_masks(z, y):
+        """True iff witness_mask marks witness (z, y) MASKED. An out-of-range z
+        (>= the mask's own row count) is NOT excluded here -- bounds-checking raw
+        engine constants is the downstream typed checks' job (prepare_extension's
+        bounds check and the dense-identity law below), and they must fire
+        exactly as they do on the no-mask path, not be preempted by a bare
+        IndexError. A NEGATIVE z is likewise left alone rather than silently
+        aliased to the mask's last row via Python's negative indexing."""
+        return (witness_mask is not None
+                and 0 <= z < witness_mask.shape[0]
+                and bool(witness_mask[z, y]))
+
     specs: list[CandidateSpec] = []
     domain_union: dict[str, set[int]] = {}
     n_total = n_meta = n_neural_left = n_unreadable = n_non_binary = 0
@@ -299,11 +311,11 @@ def enumerate_specs(prog, mask_name, facts, neural_relations, device, n_labels,
         if rn in neural_relations:
             witnesses = [
                 [z * n_labels + y for z in _left(ln).get(h, [])
-                 if witness_mask is None or not bool(witness_mask[z, y])]
+                 if not _mask_masks(z, y)]
                 for h, y in facts
             ]
             masked_any = (None if witness_mask is None else torch.tensor(
-                [any(bool(witness_mask[z, y]) for z in _left(ln).get(h, []))
+                [any(_mask_masks(z, y) for z in _left(ln).get(h, []))
                  for h, y in facts], device=device))
             idx = prepare_extension(
                 witnesses, device,

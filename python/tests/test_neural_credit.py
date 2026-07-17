@@ -609,6 +609,43 @@ def test_mask_of_wrong_shape_is_refused_typed() -> None:
                         witness_mask=torch.zeros(5, 2, dtype=torch.bool))
 
 
+def test_witness_mask_with_disagreeing_num_rows_names_both_relations() -> None:
+    """Finding 2: two neural relations declaring different num_rows while a
+    mask is supplied cannot be interpreted against a single row space at once
+    -- refused typed, naming both relations."""
+    from pyxlog.ilp.neural_credit import enumerate_specs
+
+    with pytest.raises(ValueError) as excinfo:
+        enumerate_specs(_FakeProg(), "W", [(0, 1)],
+                        neural_relations={"sal": 3, "tag": 2}, device="cpu",
+                        n_labels=2, witness_mask=torch.zeros(3, 2, dtype=torch.bool))
+    assert "sal" in str(excinfo.value)
+    assert "tag" in str(excinfo.value)
+
+
+def test_out_of_range_witness_constant_stays_a_typed_refusal_under_a_mask() -> None:
+    """Finding 1: an out-of-range engine constant must not crash on a bare
+    IndexError when a mask is supplied, and a NEGATIVE one must not silently
+    alias to the mask's last row -- the mask is only consulted for in-range
+    (z, y), and anything else is left for the downstream typed checks
+    (prepare_extension's bounds check / the dense-identity law) to refuse,
+    exactly as on the no-mask path."""
+    from pyxlog.ilp.neural_credit import enumerate_specs
+
+    class _FakeProgOutOfRangeEvent(_FakeProg):
+        def __init__(self) -> None:
+            super().__init__()
+            # edge 0 now also joins event 7, which is outside both the mask's
+            # 0..2 row range and sal's declared num_rows=3.
+            self._facts["has_event"] = self._facts["has_event"] + [[0, 7]]
+
+    mask = torch.zeros(3, 2, dtype=torch.bool)
+    with pytest.raises(ValueError):
+        enumerate_specs(_FakeProgOutOfRangeEvent(), "W", [(0, 1)],
+                        neural_relations={"sal": 3}, device="cpu",
+                        n_labels=2, witness_mask=mask)
+
+
 # ---------------------------------------------------------------------------
 # Engine-mode training loop (Task 3). CUDA-gated: the ENGINE compiles the
 # program (device=0), which needs a real CUDA context.
