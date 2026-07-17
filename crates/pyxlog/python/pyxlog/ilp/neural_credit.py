@@ -12,7 +12,7 @@ principle; generalization can.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from pyxlog.ilp.join_bodies import (
@@ -468,20 +468,29 @@ class HoldoutSelection:
     fields, but ``rule``/``tied`` hold (left, right) TUPLES -- our candidates are keyed
     by a relation pair, not by a single string id, so reusing discovery.Selection here
     would be type-sloppy (it constructs fine since dataclasses carry no runtime type
-    checks, but its annotations claim strings). A dedicated type keeps that honest."""
+    checks, but its annotations claim strings). A dedicated type keeps that honest.
+
+    ``coverage`` maps each SURVIVING-OR-DROPPED candidate key to the fraction of
+    its facts that were CERTAIN (predicted-true, or unmasked) rather than
+    uncertain (masked and not yet provably true) -- see ``frozen_select`` /
+    ``kfold_select`` for how it is computed. Empty when no ``witness_mask`` was
+    supplied: the coverage channel simply did not run, not "everything was
+    fully covered"."""
 
     rule: tuple[str, str] | None
     tied: list[tuple[str, str]]
     margin: float
     top_weight: float
     reason: str
+    coverage: dict = field(default_factory=dict)
 
     @property
     def decided(self) -> bool:
         return self.rule is not None
 
 
-def _select_from_holdout(scores, neural_rights, min_fit, tie_tolerance=0.01):
+def _select_from_holdout(scores, neural_rights, min_fit, tie_tolerance=0.01,
+                         coverage=None, min_coverage=0.5):
     """Selection over HOLDOUT scores. The fit gate kills candidates that cannot fit
     even their best folds (the confident-wrong class the mixture's select_rule cannot
     see). A MIXED tie within ``tie_tolerance`` breaks toward the RELATIONAL candidate
@@ -490,9 +499,21 @@ def _select_from_holdout(scores, neural_rights, min_fit, tie_tolerance=0.01):
     preferring relational over neural, it licenses nothing among relational
     duplicates, so a residual relational tie is an abstention, never a vocabulary-
     order pick. ``tie_tolerance`` lives on the HOLDOUT-accuracy axis; kfold_select
-    derives it from the score quantum rather than reusing the weight-axis default."""
+    derives it from the score quantum rather than reusing the weight-axis default.
+
+    ``coverage`` (candidate key -> fraction of CERTAIN facts) gates BEFORE the fit
+    gate, when supplied and non-empty: a candidate whose masked witnesses leave it
+    with too little certain evidence (< ``min_coverage``) is dropped first --
+    masked is not false, so a candidate should never be killed by facts it was
+    never allowed to see. If that leaves nothing to score, the reason names
+    coverage outright; if some candidates survive but still fail the fit gate,
+    the fit-gate reason names the coverage-dropped candidates too, so the
+    abstention stays traceable to masking rather than reading as a bare
+    "nothing fit". Empty/``None`` coverage (no witness_mask in play) leaves this
+    gate a no-op, byte-identical to the pre-mask behavior."""
     from pyxlog.ilp.discovery import select_rule
 
+    coverage = coverage or {}
     for l, r in scores:
         if "|" in l or "|" in r:
             raise ValueError(
@@ -500,13 +521,36 @@ def _select_from_holdout(scores, neural_rights, min_fit, tie_tolerance=0.01):
                 "internal key separator select_rule keys round-trip through; "
                 "scoring it would corrupt the key split, refused."
             )
+    dropped: dict = {}
+    if coverage:
+        low = {k for k, c in coverage.items() if c < min_coverage}
+        dropped = {k: scores[k] for k in low if k in scores}
+        scores = {k: v for k, v in scores.items() if k not in low}
+        if not scores:
+            return HoldoutSelection(
+                rule=None, tied=sorted(dropped), margin=0.0,
+                top_weight=0.0, coverage=coverage,
+                reason=f"every candidate lost certain coverage below "
+                       f"min_coverage={min_coverage} to masked witnesses: nothing "
+                       "is scoreable — masked is not false",
+            )
     fit = {k: v for k, v in scores.items() if v >= min_fit}
     if not fit:
+        # If the coverage gate already dropped candidates above, the abstention
+        # is still traceable to masking, not merely "nothing fit": name it, so a
+        # reader is not left to guess whether the discarded candidates would
+        # have passed the fit gate had their masked witnesses been readable.
+        coverage_note = (
+            f" ({len(dropped)} candidate(s) already dropped below "
+            f"min_coverage={min_coverage} to masked witnesses before the fit "
+            f"gate ran: {', '.join('|'.join(k) for k in sorted(dropped))})"
+            if dropped else ""
+        )
         return HoldoutSelection(
             rule=None, tied=sorted(scores), margin=0.0,
-            top_weight=max(scores.values(), default=0.0),
+            top_weight=max(scores.values(), default=0.0), coverage=coverage,
             reason=f"no candidate passed the fit gate (min_fit={min_fit}): a rule "
-                   "that cannot fit held-out data is not a rule",
+                   f"that cannot fit held-out data is not a rule{coverage_note}",
         )
     keyed = {f"{l}|{r}": v for (l, r), v in fit.items()}
     # min_weight=min_fit is deliberately vacuous here -- everything below min_fit
@@ -516,7 +560,8 @@ def _select_from_holdout(scores, neural_rights, min_fit, tie_tolerance=0.01):
     if sel.rule is not None:
         l, r = sel.rule.split("|")
         return HoldoutSelection(rule=(l, r), tied=[(l, r)], margin=sel.margin,
-                                top_weight=sel.top_weight, reason=sel.reason)
+                                top_weight=sel.top_weight, reason=sel.reason,
+                                coverage=coverage)
     tied = [tuple(t.split("|")) for t in sel.tied]
     relational = [t for t in tied if t[1] not in neural_rights]
     if relational and len(relational) < len(tied):
@@ -526,22 +571,25 @@ def _select_from_holdout(scores, neural_rights, min_fit, tie_tolerance=0.01):
         if len(rel_tied) == 1:
             best = rel_tied[0]
             return HoldoutSelection(rule=best, tied=tied, margin=sel.margin,
-                                    top_weight=fit[best],
+                                    top_weight=fit[best], coverage=coverage,
                                     reason="holdout tie broken toward the relational candidate "
                                            "(Occam: equal generalization, simpler explanation)")
         return HoldoutSelection(
             rule=None, tied=tied, margin=sel.margin, top_weight=best_fit,
+            coverage=coverage,
             reason=f"Occam narrowed the tie to {len(rel_tied)} relational "
                    f"candidates ({', '.join('|'.join(t) for t in rel_tied)}) the "
                    "data cannot distinguish: preferring relational over neural is "
                    "licensed, picking among relational duplicates is not",
         )
     return HoldoutSelection(rule=None, tied=tied, margin=sel.margin,
-                            top_weight=sel.top_weight, reason=sel.reason)
+                            top_weight=sel.top_weight, reason=sel.reason,
+                            coverage=coverage)
 
 
 def frozen_select(prog, mask_name, facts, is_positive, network, features,
-                  neural_relations, min_fit=0.75):
+                  neural_relations, min_fit=0.75, witness_mask=None,
+                  min_coverage=0.5):
     """Score every engine-enumerated candidate against a FROZEN detector.
 
     Engine mode as an ACCEPTANCE INSTRUMENT rather than a trainer: the detector
@@ -560,7 +608,21 @@ def frozen_select(prog, mask_name, facts, is_positive, network, features,
     makes two identical scoring calls disagree -- both would break the
     bit-identical-artifact guarantee, so a train-mode module is refused, not
     silently switched (refusal teaches the contract; mode-switching would hide
-    caller bugs)."""
+    caller bugs).
+
+    ``witness_mask`` (contract #155, threaded into ``enumerate_specs``) turns a
+    masked fact's truth into an INTERVAL, not a coerced ``False``: a neural
+    fact is CERTAIN iff it is predicted-true (``OR_active >= 0.5`` -- the OR is
+    monotone in its witness probabilities, so this stays true under ANY
+    completion of the masked witnesses) or it never had a masked witness at all
+    (``masked_any`` is ``False``). Facts that are neither -- masked AND not yet
+    predicted-true -- are UNCERTAIN: excluded from the candidate's accuracy
+    (they neither help nor hurt) and counted against its ``coverage`` (the
+    fraction of facts that were certain). Relational candidates are never
+    masked, so every one of their facts is certain. A candidate with zero
+    certain facts gets accuracy 0.0 and coverage 0.0 (never NaN, which would
+    corrupt ``select_rule``'s comparisons) -- the coverage gate in
+    ``_select_from_holdout`` drops it by name before the fit gate ever runs."""
     import torch
 
     if not facts:
@@ -584,28 +646,44 @@ def frozen_select(prog, mask_name, facts, is_positive, network, features,
         )
     out = _validated_output(network, features)
     specs = enumerate_specs(
-        prog, mask_name, facts, neural_relations, features.device, out.shape[1]
+        prog, mask_name, facts, neural_relations, features.device, out.shape[1],
+        witness_mask=witness_mask,
     )
     with torch.no_grad():
         p_event = out.reshape(-1)
         y = torch.tensor([bool(v) for v in is_positive],
                          device=features.device, dtype=torch.float32)
         scores = {}
+        coverage = {}
         for spec in specs:
+            key = (spec.left, spec.right)
             s = (noisy_or_from_index(p_event, spec.witness_index)
                  if spec.is_neural else spec.binary_cover)
-            scores[(spec.left, spec.right)] = float(
-                ((s >= 0.5).float() == y).float().mean()
+            pred = (s >= 0.5).float()
+            if spec.masked_any is not None:
+                # OR>=0.5 is a CERTAIN true regardless of the masked witnesses
+                # (monotonicity); the remaining facts are uncertain, not false.
+                certain = pred.bool() | (~spec.masked_any)
+            else:
+                certain = torch.ones_like(pred, dtype=torch.bool)
+            n_certain = int(certain.sum())
+            n_total = certain.numel()
+            scores[key] = (
+                float((pred[certain] == y[certain]).float().mean())
+                if n_certain else 0.0
             )
+            if witness_mask is not None:
+                coverage[key] = (n_certain / n_total) if n_total else 0.0
     # Same derivation as kfold_select: one fact is the smallest evidence step.
     tie_tolerance = max(0.01, 1.0 / len(facts))
     return _select_from_holdout(scores, set(neural_relations), min_fit,
-                                tie_tolerance=tie_tolerance)
+                                tie_tolerance=tie_tolerance,
+                                coverage=coverage, min_coverage=min_coverage)
 
 
 def kfold_select(prog_factory, mask_name, facts, is_positive, make_network,
                  features, neural_relations, folds=4, min_fit=0.75, seed=0,
-                 **train_kw):
+                 witness_mask=None, min_coverage=0.5, **train_kw):
     """Select a rule by K-FOLD HOLDOUT, not by training weight: per fold, train on
     the rest and score every engine-enumerated candidate on the held-out facts by
     its own witness/cover semantics (``s_c(f) >= 0.5``); average across folds, apply
@@ -615,7 +693,15 @@ def kfold_select(prog_factory, mask_name, facts, is_positive, make_network,
     ``make_network()`` is called right after ``torch.manual_seed`` with a seed
     derived from (seed, fold), so two calls with the same arguments are identical
     regardless of ambient RNG state -- the declared contract, not a fixture
-    obligation."""
+    obligation.
+
+    ``witness_mask`` is threaded into the HELD-OUT scoring's ``enumerate_specs``
+    call only -- training (``train_engine_mode``) is untouched here, that is a
+    later task's surface. Per fold, a fact is CERTAIN by the same interval rule
+    as ``frozen_select`` (predicted-true, or never masked); uncertain facts are
+    excluded from that fold's accuracy and contribute to ``n_certain``/``n_total``,
+    which are summed ACROSS folds (each fact is held out exactly once) into a
+    single pooled ``coverage`` fraction per candidate, gated the same way."""
     import torch
 
     if not 2 <= folds <= len(facts):
@@ -630,6 +716,8 @@ def kfold_select(prog_factory, mask_name, facts, is_positive, make_network,
     fold_of = {f_idx: i % folds for i, f_idx in enumerate(order)}
     sums: dict[tuple[str, str], float] = {}
     counts: dict[tuple[str, str], int] = {}
+    certain_sums: dict[tuple[str, str], int] = {}
+    total_sums: dict[tuple[str, str], int] = {}
     neural_rights = set(neural_relations)
 
     for fold in range(folds):
@@ -649,19 +737,38 @@ def kfold_select(prog_factory, mask_name, facts, is_positive, make_network,
             out = res.network(features)
             held_specs = enumerate_specs(
                 prog, mask_name, [facts[i] for i in held_ids],
-                neural_relations, features.device, out.shape[1])
+                neural_relations, features.device, out.shape[1],
+                witness_mask=witness_mask)
             p_event = out.reshape(-1)
             y = torch.tensor([is_positive[i] for i in held_ids],
                              device=features.device, dtype=torch.float32)
             for spec in held_specs:
                 s = (noisy_or_from_index(p_event, spec.witness_index)
                      if spec.is_neural else spec.binary_cover)
-                acc = float(((s >= 0.5).float() == y).float().mean())
+                pred = (s >= 0.5).float()
+                if spec.masked_any is not None:
+                    certain = pred.bool() | (~spec.masked_any)
+                else:
+                    certain = torch.ones_like(pred, dtype=torch.bool)
+                n_certain = int(certain.sum())
+                n_total = certain.numel()
+                acc = (
+                    float((pred[certain] == y[certain]).float().mean())
+                    if n_certain else 0.0
+                )
                 key = (spec.left, spec.right)
                 sums[key] = sums.get(key, 0.0) + acc
                 counts[key] = counts.get(key, 0) + 1
+                if witness_mask is not None:
+                    certain_sums[key] = certain_sums.get(key, 0) + n_certain
+                    total_sums[key] = total_sums.get(key, 0) + n_total
 
     scores = {k: sums[k] / counts[k] for k in sums}
+    coverage = (
+        {k: (certain_sums[k] / total_sums[k]) if total_sums[k] else 0.0
+         for k in sums}
+        if witness_mask is not None else {}
+    )
     # The tie tolerance lives on the HOLDOUT-accuracy axis, not the guard-weight
     # axis select_rule's 0.01 default was calibrated for. Each fact is held out
     # exactly once, so flipping one fact moves the fold-mean score by roughly
@@ -669,4 +776,5 @@ def kfold_select(prog_factory, mask_name, facts, is_positive, make_network,
     # evidence, and must count as ties.
     tie_tolerance = max(0.01, 1.0 / len(facts))
     return _select_from_holdout(scores, neural_rights, min_fit,
-                                tie_tolerance=tie_tolerance)
+                                tie_tolerance=tie_tolerance,
+                                coverage=coverage, min_coverage=min_coverage)

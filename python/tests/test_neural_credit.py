@@ -647,6 +647,48 @@ def test_out_of_range_witness_constant_stays_a_typed_refusal_under_a_mask() -> N
 
 
 # ---------------------------------------------------------------------------
+# Task 2 of the witness-mask plan: interval-aware selection under witness
+# masks with a coverage gate.
+# ---------------------------------------------------------------------------
+def test_masked_uncertain_facts_neither_help_nor_hurt_a_candidate() -> None:
+    """Маскируем ЕДИНСТВЕННОГО свидетеля позитивного факта: без канала маски
+    OR=0 посчитался бы ложью и убил бы кандидата (коэрция!); с каналом факт
+    неопределён, исключён, и кандидат выбирается по оставшимся."""
+    from pyxlog.ilp.neural_credit import frozen_select
+
+    features = torch.tensor([[0.9], [0.8], [0.1]])
+    facts = [(0, 1), (1, 0), (2, 1)]
+    is_positive = [True, True, False]
+    mask = torch.zeros(3, 2, dtype=torch.bool)
+    mask[2, 0] = True                     # свидетель факта (1,0) — событие 2, метка 0
+
+    sel = frozen_select(_FakeProg(), "W", facts, is_positive,
+                        _frozen_detector_module(), features,
+                        neural_relations={"sal": 3}, witness_mask=mask)
+    assert sel.rule == ("has_event", "sal"), sel
+    assert sel.coverage[("has_event", "sal")] == pytest.approx(2 / 3)
+
+
+def test_low_coverage_candidate_abstains_with_a_named_reason() -> None:
+    from pyxlog.ilp.neural_credit import frozen_select
+
+    features = torch.tensor([[0.9], [0.8], [0.1]])
+    facts = [(0, 1), (1, 0), (2, 1)]
+    is_positive = [True, True, False]
+    mask = torch.ones(3, 2, dtype=torch.bool)   # замаскировано ВСЁ
+
+    sel = frozen_select(_FakeProg(), "W", facts, is_positive,
+                        _frozen_detector_module(), features,
+                        neural_relations={"sal": 3}, witness_mask=mask)
+    # нейро-кандидаты потеряли покрытие; реляционные не маскируются — селекция
+    # либо реляционная, либо воздержание с причиной про coverage
+    if sel.rule is not None:
+        assert sel.rule[1] not in ("sal",), sel
+    else:
+        assert "coverage" in sel.reason
+
+
+# ---------------------------------------------------------------------------
 # Engine-mode training loop (Task 3). CUDA-gated: the ENGINE compiles the
 # program (device=0), which needs a real CUDA context.
 #
