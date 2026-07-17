@@ -689,6 +689,42 @@ def test_low_coverage_candidate_abstains_with_a_named_reason() -> None:
         assert "coverage" in sel.reason
 
 
+def test_kc2_mirror_masking_must_not_be_equivalent_to_false_labels() -> None:
+    """Mirrors the consumer's kill-criterion 2 (`coerce_abstain_to_false=True`
+    in their test_bridge_kill_criteria.py, issue #155): coercing an abstained/
+    masked witness to a hard `False` must be REJECTABLE and DIFFERENT from the
+    witness-mask channel's actual behavior, not an accidental equivalent.
+
+    Мир, где коэрция «замаскирован ⇒ ложь» меняет исход: у верного кандидата
+    маскируем свидетелей ровно на позитивных фактах. Коэрция занизила бы его
+    точность ниже гейта (score как у лжи); канал маски обязан дать другой
+    исход, чем ручная коэрция."""
+    from pyxlog.ilp.neural_credit import frozen_select
+
+    features = torch.tensor([[0.9], [0.8], [0.1]])
+    facts = [(0, 1), (1, 0), (2, 1)]
+    is_positive = [True, True, False]
+    mask = torch.zeros(3, 2, dtype=torch.bool)
+    mask[0, 1] = True
+    mask[1, 1] = True                    # оба свидетеля позитивного факта (0,1)
+
+    masked = frozen_select(_FakeProg(), "W", facts, is_positive,
+                           _frozen_detector_module(), features,
+                           neural_relations={"sal": 3}, witness_mask=mask)
+    # коэрция: те же строки НЕ маскируем, а обнуляем скор (масked≡false)
+    class _Coerced(torch.nn.Module):
+        def forward(self, x):
+            p = (x[:, 0] > 0.5).float()
+            p = p.clone(); p[0] = 0.0; p[1] = 0.0     # «ложь» вместо маски
+            return torch.stack([1 - p, p], dim=1)
+    coerced = frozen_select(_FakeProg(), "W", facts, is_positive,
+                            _Coerced().eval(), features,
+                            neural_relations={"sal": 3})
+    assert masked != coerced             # исходы обязаны разойтись
+    # и канал маски не наказывает кандидата за немаскируемое:
+    assert masked.rule == ("has_event", "sal") or "coverage" in masked.reason
+
+
 def test_kfold_select_pools_coverage_across_folds_under_a_witness_mask() -> None:
     """Pins the fold-pooled coverage accounting added in Task 2: kfold_select's
     masked path sums `certain_sums`/`total_sums` ACROSS folds (each fact held
