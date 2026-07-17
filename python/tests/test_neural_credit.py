@@ -9,6 +9,7 @@ pyxlog = pytest.importorskip("pyxlog")
 from pyxlog.ilp.join_bodies import prepare_extension
 from pyxlog.ilp.neural_credit import (
     CandidateSpec,
+    HoldoutSelection,
     credit_nll,
     kfold_select,
     train_engine_mode,
@@ -686,6 +687,57 @@ def test_low_coverage_candidate_abstains_with_a_named_reason() -> None:
         assert sel.rule[1] not in ("sal",), sel
     else:
         assert "coverage" in sel.reason
+
+
+def test_kfold_select_pools_coverage_across_folds_under_a_witness_mask() -> None:
+    """Pins the fold-pooled coverage accounting added in Task 2: kfold_select's
+    masked path sums `certain_sums`/`total_sums` ACROSS folds (each fact held
+    out exactly once) into one pooled `coverage` fraction per candidate, guarded
+    by the zero-total fallback to 0.0. `frozen_select`'s masked path already has
+    coverage tests; the fold-pooled accounting here is kfold-only and had zero
+    coverage before this test.
+
+    Mirrors the calling convention of
+    `test_kfold_select_seeds_network_construction_not_ambient_rng`. The mask
+    marks witness (event 0, label 1) as masked, which affects fact (0, 1) via
+    `has_event`'s bucket edge0 -> events [0, 1]."""
+    features = torch.tensor([[0.1], [0.2], [0.3]])
+    facts = [(0, 1), (1, 0), (2, 1)]
+    is_positive = [True, False, True]
+
+    def make_network():
+        return torch.nn.Sequential(torch.nn.Linear(1, 2), torch.nn.Softmax(dim=-1))
+
+    def run(witness_mask):
+        return kfold_select(_FakeProg, "W", facts, is_positive, make_network,
+                            features, neural_relations={"sal": 3}, folds=3,
+                            steps=2, seed=0, witness_mask=witness_mask)
+
+    sel_unmasked = run(None)
+    assert sel_unmasked.coverage == {}          # no witness_mask -> the channel didn't run
+
+    mask = torch.zeros(3, 2, dtype=torch.bool)
+    mask[0, 1] = True                            # witness of fact (0, 1) via has_event
+    sel_masked = run(mask)
+
+    assert sel_masked.coverage                   # non-empty: the channel ran
+    for key, c in sel_masked.coverage.items():
+        assert isinstance(c, float)
+        assert 0.0 <= c <= 1.0
+    # Relational candidates are never masked, so their pooled coverage is exact.
+    for key, c in sel_masked.coverage.items():
+        if key[1] != "sal":
+            assert c == 1.0, (key, c)
+    # The neural candidate lost some certain evidence to the mask, but tiny
+    # 2-step training leaves the network near softmax init (~0.5), so whether
+    # OR_active clears 0.5 for the affected fact is not pinned here -- only
+    # that the pooled fraction stays a valid coverage value.
+    neural_key = ("has_event", "sal")
+    assert neural_key in sel_masked.coverage
+    assert 0.0 <= sel_masked.coverage[neural_key] <= 1.0
+
+    assert isinstance(sel_unmasked, HoldoutSelection)
+    assert isinstance(sel_masked, HoldoutSelection)
 
 
 # ---------------------------------------------------------------------------
