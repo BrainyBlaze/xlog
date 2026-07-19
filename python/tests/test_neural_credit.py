@@ -9,6 +9,7 @@ pyxlog = pytest.importorskip("pyxlog")
 from pyxlog.ilp.join_bodies import prepare_extension
 from pyxlog.ilp.neural_credit import (
     CandidateSpec,
+    HoldoutSelection,
     credit_nll,
     kfold_select,
     train_engine_mode,
@@ -560,6 +561,288 @@ def test_frozen_select_refuses_no_facts() -> None:
         frozen_select(_FakeProg(), "W", [], [], _frozen_detector_module(),
                       torch.tensor([[0.9], [0.8], [0.1]]),
                       neural_relations={"sal": 3})
+
+
+# ---------------------------------------------------------------------------
+# Witness-mask channel (contract #155): a MASKED witness contributes EXACTLY
+# zero credit and gradient -- the masked row is physically absent from the
+# index, never coerced to false, and each fact affected is flagged via
+# `masked_any`.
+# ---------------------------------------------------------------------------
+
+
+def test_masked_witness_rows_are_excluded_from_the_index() -> None:
+    """Контракт #155: MASKED вносит РОВНО ноль кредита — строка физически
+    отсутствует в индексе, а masked_any помечает затронутые факты."""
+    from pyxlog.ilp.neural_credit import enumerate_specs
+
+    mask = torch.zeros(3, 2, dtype=torch.bool)
+    mask[0, 1] = True                     # событие 0 на метке 1 — замаскировано
+    specs = enumerate_specs(_FakeProg(), "W", [(0, 1), (1, 0)],
+                            neural_relations={"sal": 3}, device="cpu",
+                            n_labels=2, witness_mask=mask)
+    neural = {(s.left, s.right): s for s in specs}[("has_event", "sal")]
+    # без маски было [1, 3, 4] (см. тест per-fact y); строка 0*2+1=1 исключена
+    assert neural.witness_index.event_ids.tolist() == [3, 4]
+    assert neural.masked_any.tolist() == [True, False]
+
+
+def test_none_mask_is_byte_identical_to_omitting_it() -> None:
+    from pyxlog.ilp.neural_credit import enumerate_specs
+
+    a = enumerate_specs(_FakeProg(), "W", [(0, 1), (1, 0)],
+                        neural_relations={"sal": 3}, device="cpu", n_labels=2)
+    b = enumerate_specs(_FakeProg(), "W", [(0, 1), (1, 0)],
+                        neural_relations={"sal": 3}, device="cpu", n_labels=2,
+                        witness_mask=None)
+    na = {(s.left, s.right): s for s in a}[("has_event", "sal")]
+    nb = {(s.left, s.right): s for s in b}[("has_event", "sal")]
+    assert na.witness_index.event_ids.tolist() == nb.witness_index.event_ids.tolist()
+    assert nb.masked_any is None          # дефолт не создаёт нового состояния
+
+
+def test_mask_of_wrong_shape_is_refused_typed() -> None:
+    from pyxlog.ilp.neural_credit import enumerate_specs
+
+    with pytest.raises(ValueError, match="witness_mask"):
+        enumerate_specs(_FakeProg(), "W", [(0, 1)],
+                        neural_relations={"sal": 3}, device="cpu", n_labels=2,
+                        witness_mask=torch.zeros(5, 2, dtype=torch.bool))
+
+
+def test_witness_mask_with_disagreeing_num_rows_names_both_relations() -> None:
+    """Finding 2: two neural relations declaring different num_rows while a
+    mask is supplied cannot be interpreted against a single row space at once
+    -- refused typed, naming both relations."""
+    from pyxlog.ilp.neural_credit import enumerate_specs
+
+    with pytest.raises(ValueError) as excinfo:
+        enumerate_specs(_FakeProg(), "W", [(0, 1)],
+                        neural_relations={"sal": 3, "tag": 2}, device="cpu",
+                        n_labels=2, witness_mask=torch.zeros(3, 2, dtype=torch.bool))
+    assert "sal" in str(excinfo.value)
+    assert "tag" in str(excinfo.value)
+
+
+def test_out_of_range_witness_constant_stays_a_typed_refusal_under_a_mask() -> None:
+    """Finding 1: an out-of-range engine constant must not crash on a bare
+    IndexError when a mask is supplied, and a NEGATIVE one must not silently
+    alias to the mask's last row -- the mask is only consulted for in-range
+    (z, y), and anything else is left for the downstream typed checks
+    (prepare_extension's bounds check / the dense-identity law) to refuse,
+    exactly as on the no-mask path."""
+    from pyxlog.ilp.neural_credit import enumerate_specs
+
+    class _FakeProgOutOfRangeEvent(_FakeProg):
+        def __init__(self) -> None:
+            super().__init__()
+            # edge 0 now also joins event 7, which is outside both the mask's
+            # 0..2 row range and sal's declared num_rows=3.
+            self._facts["has_event"] = self._facts["has_event"] + [[0, 7]]
+
+    mask = torch.zeros(3, 2, dtype=torch.bool)
+    with pytest.raises(ValueError):
+        enumerate_specs(_FakeProgOutOfRangeEvent(), "W", [(0, 1)],
+                        neural_relations={"sal": 3}, device="cpu",
+                        n_labels=2, witness_mask=mask)
+
+
+# ---------------------------------------------------------------------------
+# Task 2 of the witness-mask plan: interval-aware selection under witness
+# masks with a coverage gate.
+# ---------------------------------------------------------------------------
+def test_masked_uncertain_facts_neither_help_nor_hurt_a_candidate() -> None:
+    """Маскируем ЕДИНСТВЕННОГО свидетеля позитивного факта: без канала маски
+    OR=0 посчитался бы ложью и убил бы кандидата (коэрция!); с каналом факт
+    неопределён, исключён, и кандидат выбирается по оставшимся."""
+    from pyxlog.ilp.neural_credit import frozen_select
+
+    features = torch.tensor([[0.9], [0.8], [0.1]])
+    facts = [(0, 1), (1, 0), (2, 1)]
+    is_positive = [True, True, False]
+    mask = torch.zeros(3, 2, dtype=torch.bool)
+    mask[2, 0] = True                     # свидетель факта (1,0) — событие 2, метка 0
+
+    sel = frozen_select(_FakeProg(), "W", facts, is_positive,
+                        _frozen_detector_module(), features,
+                        neural_relations={"sal": 3}, witness_mask=mask)
+    assert sel.rule == ("has_event", "sal"), sel
+    assert sel.coverage[("has_event", "sal")] == pytest.approx(2 / 3)
+
+
+def test_low_coverage_candidate_abstains_with_a_named_reason() -> None:
+    from pyxlog.ilp.neural_credit import frozen_select
+
+    features = torch.tensor([[0.9], [0.8], [0.1]])
+    facts = [(0, 1), (1, 0), (2, 1)]
+    is_positive = [True, True, False]
+    mask = torch.ones(3, 2, dtype=torch.bool)   # замаскировано ВСЁ
+
+    sel = frozen_select(_FakeProg(), "W", facts, is_positive,
+                        _frozen_detector_module(), features,
+                        neural_relations={"sal": 3}, witness_mask=mask)
+    # нейро-кандидаты потеряли покрытие; реляционные не маскируются — селекция
+    # либо реляционная, либо воздержание с причиной про coverage
+    if sel.rule is not None:
+        assert sel.rule[1] not in ("sal",), sel
+    else:
+        assert "coverage" in sel.reason
+
+
+def test_kc2_mirror_masking_must_not_be_equivalent_to_false_labels() -> None:
+    """Mirrors the consumer's kill-criterion 2 (`coerce_abstain_to_false=True`
+    in their test_bridge_kill_criteria.py, issue #155): coercing an abstained/
+    masked witness to a hard `False` must be REJECTABLE and DIFFERENT from the
+    witness-mask channel's actual behavior, not an accidental equivalent.
+
+    Мир, где коэрция «замаскирован ⇒ ложь» меняет исход: у верного кандидата
+    маскируем свидетелей ровно на позитивных фактах. Коэрция занизила бы его
+    точность ниже гейта (score как у лжи); канал маски обязан дать другой
+    исход, чем ручная коэрция."""
+    from pyxlog.ilp.neural_credit import frozen_select
+
+    features = torch.tensor([[0.9], [0.8], [0.1]])
+    facts = [(0, 1), (1, 0), (2, 1)]
+    is_positive = [True, True, False]
+    mask = torch.zeros(3, 2, dtype=torch.bool)
+    mask[0, 1] = True
+    mask[1, 1] = True                    # оба свидетеля позитивного факта (0,1)
+
+    masked = frozen_select(_FakeProg(), "W", facts, is_positive,
+                           _frozen_detector_module(), features,
+                           neural_relations={"sal": 3}, witness_mask=mask)
+    # коэрция: те же строки НЕ маскируем, а обнуляем скор (масked≡false)
+    class _Coerced(torch.nn.Module):
+        def forward(self, x):
+            p = (x[:, 0] > 0.5).float()
+            p = p.clone(); p[0] = 0.0; p[1] = 0.0     # «ложь» вместо маски
+            return torch.stack([1 - p, p], dim=1)
+    coerced = frozen_select(_FakeProg(), "W", facts, is_positive,
+                            _Coerced().eval(), features,
+                            neural_relations={"sal": 3})
+    # DECISIONS must diverge, not just dataclass fields (coverage differs
+    # trivially whenever a mask is supplied): coercion gates the true rule out.
+    assert masked.rule != coerced.rule
+    assert coerced.rule is None, coerced
+    # и канал маски не наказывает кандидата за немаскируемое:
+    assert masked.rule == ("has_event", "sal") or "coverage" in masked.reason
+
+
+def test_kfold_select_pools_coverage_across_folds_under_a_witness_mask() -> None:
+    """Pins the fold-pooled coverage accounting added in Task 2: kfold_select's
+    masked path sums `certain_sums`/`total_sums` ACROSS folds (each fact held
+    out exactly once) into one pooled `coverage` fraction per candidate, guarded
+    by the zero-total fallback to 0.0. `frozen_select`'s masked path already has
+    coverage tests; the fold-pooled accounting here is kfold-only and had zero
+    coverage before this test.
+
+    Mirrors the calling convention of
+    `test_kfold_select_seeds_network_construction_not_ambient_rng`. The mask
+    marks witness (event 0, label 1) as masked, which affects fact (0, 1) via
+    `has_event`'s bucket edge0 -> events [0, 1]."""
+    features = torch.tensor([[0.1], [0.2], [0.3]])
+    facts = [(0, 1), (1, 0), (2, 1)]
+    is_positive = [True, False, True]
+
+    def make_network():
+        return torch.nn.Sequential(torch.nn.Linear(1, 2), torch.nn.Softmax(dim=-1))
+
+    def run(witness_mask):
+        return kfold_select(_FakeProg, "W", facts, is_positive, make_network,
+                            features, neural_relations={"sal": 3}, folds=3,
+                            steps=2, seed=0, witness_mask=witness_mask)
+
+    sel_unmasked = run(None)
+    assert sel_unmasked.coverage == {}          # no witness_mask -> the channel didn't run
+
+    mask = torch.zeros(3, 2, dtype=torch.bool)
+    mask[0, 1] = True                            # witness of fact (0, 1) via has_event
+    sel_masked = run(mask)
+
+    assert sel_masked.coverage                   # non-empty: the channel ran
+    for key, c in sel_masked.coverage.items():
+        assert isinstance(c, float)
+        assert 0.0 <= c <= 1.0
+    # Relational candidates are never masked, so their pooled coverage is exact.
+    for key, c in sel_masked.coverage.items():
+        if key[1] != "sal":
+            assert c == 1.0, (key, c)
+    # The neural candidate lost some certain evidence to the mask, but tiny
+    # 2-step training leaves the network near softmax init (~0.5), so whether
+    # OR_active clears 0.5 for the affected fact is not pinned here -- only
+    # that the pooled fraction stays a valid coverage value.
+    neural_key = ("has_event", "sal")
+    assert neural_key in sel_masked.coverage
+    assert 0.0 <= sel_masked.coverage[neural_key] <= 1.0
+
+    assert isinstance(sel_unmasked, HoldoutSelection)
+    assert isinstance(sel_masked, HoldoutSelection)
+
+
+# ---------------------------------------------------------------------------
+# Task 3 of the witness-mask plan: thread witness masks through training with
+# masked-fact accounting.
+# ---------------------------------------------------------------------------
+
+
+def test_masked_rows_receive_exactly_zero_gradient() -> None:
+    """Инвариант 1 контракта #155 в градиентной форме: замаскированная строка
+    не участвует в лоссе — её градиент не «мал», он отсутствует."""
+    from pyxlog.ilp.neural_credit import enumerate_specs, credit_nll
+
+    mask = torch.zeros(3, 2, dtype=torch.bool)
+    mask[0, 1] = True
+    specs = enumerate_specs(_FakeProg(), "W", [(0, 1), (1, 0)],
+                            neural_relations={"sal": 3}, device="cpu",
+                            n_labels=2, witness_mask=mask)
+    # Precondition guard: the mask actually landed on at least one neural spec
+    # -- otherwise the zero-gradient assertions below would pass vacuously.
+    neural = [s for s in specs if s.is_neural and s.right == "sal"]
+    assert any(s.masked_any is not None and bool(s.masked_any.any())
+               for s in neural)
+    p_event = torch.full((6,), 0.5, requires_grad=True)
+    p = torch.softmax(torch.zeros(len(specs)), dim=0)
+    cand = torch.zeros(max(s.cid for s in specs) + 1)
+    for s, w in zip(specs, p):
+        cand[s.cid] = w
+    loss = credit_nll(cand, specs, p_event,
+                      torch.tensor([True, False]))
+    loss.backward()
+    assert p_event.grad[0 * 2 + 1].item() == 0.0     # ровно ноль, не «мало»
+    assert p_event.grad[2 * 2 + 0].item() != 0.0     # активная строка живёт
+
+
+def test_train_engine_mode_threads_witness_mask_into_masked_facts_accounting() -> None:
+    """Task 3: `train_engine_mode(..., witness_mask=)` threads the mask into
+    `enumerate_specs`, and `EngineModeResult.masked_facts` reports
+    `{(left, right): count of facts with >=1 masked witness}` for NEURAL specs
+    only, entries with zero masked facts omitted.
+
+    facts=[(0, 1), (1, 0)], mask[0, 1]=True masks witness (event 0, label 1).
+    `sal` is neural, so both `has_event` and `tag` (its left partners) produce
+    neural specs against it here. `has_event`'s edge-0 bucket is [0, 1]: fact
+    (0, 1) reads witnesses (0, 1) and (1, 1) -- the first is masked, so
+    (has_event, sal) counts 1. `tag`'s edge-0 bucket is [1]: fact (0, 1) reads
+    only witness (1, 1), which is NOT masked, so (tag, sal) contributes zero
+    masked facts and must not appear in the dict at all."""
+    features = torch.tensor([[0.1], [0.2], [0.3]])
+    facts = [(0, 1), (1, 0)]
+    is_positive = [True, False]
+
+    mask = torch.zeros(3, 2, dtype=torch.bool)
+    mask[0, 1] = True
+
+    result = train_engine_mode(
+        _FakeProg(), "W", facts, is_positive,
+        torch.nn.Sequential(torch.nn.Linear(1, 2), torch.nn.Softmax(dim=-1)),
+        features, neural_relations={"sal": 3}, steps=1, witness_mask=mask)
+    assert result.masked_facts == {("has_event", "sal"): 1}
+
+    result_unmasked = train_engine_mode(
+        _FakeProg(), "W", facts, is_positive,
+        torch.nn.Sequential(torch.nn.Linear(1, 2), torch.nn.Softmax(dim=-1)),
+        features, neural_relations={"sal": 3}, steps=1)
+    assert result_unmasked.masked_facts == {}
 
 
 # ---------------------------------------------------------------------------
