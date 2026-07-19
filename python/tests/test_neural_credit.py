@@ -795,7 +795,11 @@ def test_masked_rows_receive_exactly_zero_gradient() -> None:
     specs = enumerate_specs(_FakeProg(), "W", [(0, 1), (1, 0)],
                             neural_relations={"sal": 3}, device="cpu",
                             n_labels=2, witness_mask=mask)
+    # Precondition guard: the mask actually landed on at least one neural spec
+    # -- otherwise the zero-gradient assertions below would pass vacuously.
     neural = [s for s in specs if s.is_neural and s.right == "sal"]
+    assert any(s.masked_any is not None and bool(s.masked_any.any())
+               for s in neural)
     p_event = torch.full((6,), 0.5, requires_grad=True)
     p = torch.softmax(torch.zeros(len(specs)), dim=0)
     cand = torch.zeros(max(s.cid for s in specs) + 1)
