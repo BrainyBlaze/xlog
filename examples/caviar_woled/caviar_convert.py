@@ -154,7 +154,9 @@ def convert_split(
         true at that pair-time: ``"both_active"``, ``"both_walking"``,
         ``"both_inactive"``, ``"mixed_active_walking"`` (decoded simple
         labels), ``"close"`` / ``"far"`` (euclidean p1-p2 distance vs.
-        ``close_threshold``, omitted where coords are missing), and
+        ``close_threshold``; ``close`` iff ``dist <= close_threshold``,
+        so a distance exactly at the threshold is close, as in OLED's
+        precomputed ``close/2``; omitted where coords are missing), and
         ``"coords_missing"`` (flags exactly those omitted rows).
       * ``"features"``: ``torch.FloatTensor[num_pt, 2]``, per-pair-time
         ``(dx, dy)`` scaled by ``1 / FEATURE_SCALE``; ``(0.0, 0.0)`` where
@@ -231,6 +233,8 @@ def convert_split(
                 dy = c1[1] - c2[1]
                 feature_rows.append((dx / FEATURE_SCALE, dy / FEATURE_SCALE))
                 dist = (dx * dx + dy * dy) ** 0.5
+                # Tie rule: dist == close_threshold counts as close (<=), matching
+                # OLED's close/2 which is defined as distance <= threshold.
                 if dist <= close_threshold:
                     relations["close"].append((pt, 1))
                 else:
