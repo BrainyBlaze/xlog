@@ -50,6 +50,19 @@ pub struct NetworkHandle {
 
     /// Maximum number of cached outputs
     pub cache_size: usize,
+
+    /// Registration-time arity, as passed to `register_network` (see
+    /// `NetworkConfig::arity`). Carried through unchanged so it can be read
+    /// back after registration; the handle does not interpret it.
+    pub arity: Option<usize>,
+
+    /// Registration-time per-argument sort names (see `NetworkConfig::arg_sorts`).
+    /// Carried through unchanged, like `arity`.
+    pub arg_sorts: Option<Vec<String>>,
+
+    /// Registration-time artifact content hash (see `NetworkConfig::artifact_hash`).
+    /// Carried through unchanged, like `arity`.
+    pub artifact_hash: Option<String>,
 }
 
 impl NetworkHandle {
@@ -69,6 +82,9 @@ impl NetworkHandle {
             train_mode: false,
             cache_enabled: true,
             cache_size: 10000,
+            arity: None,
+            arg_sorts: None,
+            artifact_hash: None,
         }
     }
 
@@ -88,6 +104,9 @@ impl NetworkHandle {
             train_mode: false,
             cache_enabled: config.cache_enabled,
             cache_size: config.cache_size,
+            arity: config.arity,
+            arg_sorts: config.arg_sorts.clone(),
+            artifact_hash: config.artifact_hash.clone(),
         }
     }
 
@@ -286,6 +305,28 @@ mod tests {
         assert!(handle.det);
         assert!(!handle.cache_enabled);
         assert_eq!(handle.cache_size, 500);
+        assert!(handle.arity.is_none());
+        assert!(handle.arg_sorts.is_none());
+        assert!(handle.artifact_hash.is_none());
+    }
+
+    #[test]
+    fn test_handle_from_config_carries_registration_metadata() {
+        // The handle is what survives after `register()` consumes the config
+        // (see NetworkRegistry::register), so registration metadata that
+        // isn't copied here is lost the moment registration completes.
+        let mut config = crate::NetworkConfig::default("configured");
+        config.arity = Some(2);
+        config.arg_sorts = Some(vec!["int".to_string(), "sym".to_string()]);
+        config.artifact_hash = Some("deadbeef".to_string());
+
+        let handle = NetworkHandle::from_config(&config);
+        assert_eq!(handle.arity, Some(2));
+        assert_eq!(
+            handle.arg_sorts,
+            Some(vec!["int".to_string(), "sym".to_string()])
+        );
+        assert_eq!(handle.artifact_hash, Some("deadbeef".to_string()));
     }
 
     #[test]

@@ -574,6 +574,58 @@ impl CompiledProgram {
         Ok(dict.into())
     }
 
+    /// Get queryable metadata for a registered network.
+    ///
+    /// Returns a dict with the registration-time metadata passed to
+    /// `register_network` — `"arity"`, `"arg_sorts"`, `"artifact_hash"`
+    /// (each `None` if unstated at registration) — plus `"declared"`: a list
+    /// of one dict per `nn/4` declaration bound to this network name, each
+    /// `{"predicate", "predicate_arity", "input_arity", "labels"}`. A
+    /// consumer compares its own idea of a network's shape against these
+    /// actual declarations, not against a naming convention.
+    ///
+    /// # Errors
+    /// * `PyValueError` if `name` has no `nn/4` declaration in the program.
+    /// * `PyValueError` if `name` is declared but not yet registered — call
+    ///   `register_network()` first.
+    fn network_metadata(&self, py: Python<'_>, name: &str) -> PyResult<PyObject> {
+        if !self.declared_networks.contains(name) {
+            return Err(PyValueError::new_err(format!(
+                "Network '{}' not declared in program. Declared networks: {:?}",
+                name,
+                self.declared_networks.iter().collect::<Vec<_>>()
+            )));
+        }
+
+        let handle = self.network_registry.get(name).ok_or_else(|| {
+            PyValueError::new_err(format!(
+                "Network '{}' is declared but not registered; call register_network() first",
+                name
+            ))
+        })?;
+
+        let dict = PyDict::new(py);
+        dict.set_item("arity", handle.arity)?;
+        dict.set_item("arg_sorts", handle.arg_sorts.clone())?;
+        dict.set_item("artifact_hash", handle.artifact_hash.clone())?;
+
+        let declared = pyo3::types::PyList::empty(py);
+        for info in self.neural_registry.infos() {
+            if info.network != name {
+                continue;
+            }
+            let entry = PyDict::new(py);
+            entry.set_item("predicate", info.predicate.clone())?;
+            entry.set_item("predicate_arity", info.predicate_arity)?;
+            entry.set_item("input_arity", info.input_arity)?;
+            entry.set_item("labels", info.labels.clone())?;
+            declared.append(entry)?;
+        }
+        dict.set_item("declared", declared)?;
+
+        Ok(dict.into())
+    }
+
     /// Resolve a label to its index using the declared nn/4 label list.
     fn label_to_index(&self, predicate: &str, label: &str) -> PyResult<usize> {
         let infos = self.neural_registry.get(predicate).ok_or_else(|| {
