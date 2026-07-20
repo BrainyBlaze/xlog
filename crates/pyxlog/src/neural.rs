@@ -586,14 +586,30 @@ impl CompiledProgram {
     ///
     /// # Errors
     /// * `PyValueError` if `name` has no `nn/4` declaration in the program.
-    /// * `PyValueError` if `name` is declared but not yet registered — call
-    ///   `register_network()` first.
+    /// * `PyValueError` if `name` is declared as an embedding —
+    ///   `network_metadata` covers classification networks only. Embeddings
+    ///   register via `register_embedding()`, which carries no
+    ///   arity/arg_sorts/artifact_hash metadata; that registration-metadata
+    ///   seat lives on `register_network()`, which embeddings do not use.
+    ///   Out of scope by design.
+    /// * `PyValueError` if `name` is declared (as a classification network)
+    ///   but not yet registered — call `register_network()` first.
     fn network_metadata(&self, py: Python<'_>, name: &str) -> PyResult<PyObject> {
         if !self.declared_networks.contains(name) {
             return Err(PyValueError::new_err(format!(
                 "Network '{}' not declared in program. Declared networks: {:?}",
                 name,
                 self.declared_networks.iter().collect::<Vec<_>>()
+            )));
+        }
+
+        if let Some(&true) = self.declared_network_forms.get(name) {
+            return Err(PyValueError::new_err(format!(
+                "declaration '{}' is an embedding; network_metadata covers classification \
+                 networks only. Embeddings register via register_embedding(), which carries \
+                 no arity/arg_sorts/artifact_hash — that registration metadata is out of \
+                 scope by design for embeddings",
+                name
             )));
         }
 
