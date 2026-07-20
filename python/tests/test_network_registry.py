@@ -272,6 +272,31 @@ class TestRegistrationMetadata:
             }
         ]
 
+    def test_reregistration_is_retrain_last_write_wins(self):
+        """Re-registering the same name with a fresh module/optimizer and a
+        new artifact_hash overwrites the prior registration -- the
+        documented retrain semantics are last-write-wins, not accumulate or
+        refuse."""
+        program = pyxlog.Program.compile("""
+            nn(evt_net, [X], Y, [0,1]) :: event_label(X, Y).
+        """)
+
+        net_a = SimpleNet()
+        optimizer_a = torch.optim.Adam(net_a.parameters())
+        program.register_network(
+            "evt_net", net_a, optimizer_a, artifact_hash="hash-A",
+        )
+        assert program.network_metadata("evt_net")["artifact_hash"] == "hash-A"
+
+        net_b = SimpleNet()
+        optimizer_b = torch.optim.Adam(net_b.parameters())
+        program.register_network(
+            "evt_net", net_b, optimizer_b, artifact_hash="hash-B",
+        )
+
+        meta = program.network_metadata("evt_net")
+        assert meta["artifact_hash"] == "hash-B"
+
     def test_register_network_without_new_kwargs_is_byte_compatible(self):
         """Registering WITHOUT arity/arg_sorts/artifact_hash still succeeds
         exactly as before, and network_metadata reports None for all three
@@ -364,6 +389,23 @@ class TestRegistrationMetadata:
         message = str(excinfo.value)
         assert "bool" in message
         assert "1" in message  # the offending index
+
+    def test_arity_bool_is_refused_regardless_of_declared_arity(self):
+        """arity is a plain int; bool is a subclass of int in Python
+        (isinstance(True, int) holds), so arity=True is refused explicitly,
+        mirroring the arg_sorts bool trap. The refusal precedes the
+        declared-arity comparison, so it fires regardless of what this
+        fixture's declared arity actually is (event_label/2, declared arity
+        2 here) -- arity=True is never treated as arity=1."""
+        program = pyxlog.Program.compile("""
+            nn(evt_net, [X], Y, [0,1]) :: event_label(X, Y).
+        """)
+
+        net = SimpleNet()
+        optimizer = torch.optim.Adam(net.parameters())
+
+        with pytest.raises(ValueError, match="bool"):
+            program.register_network("evt_net", net, optimizer, arity=True)
 
     def test_arg_sorts_string_element_is_refused(self):
         """arg_sorts are catalog sort ids (ints), not sort names -- a string

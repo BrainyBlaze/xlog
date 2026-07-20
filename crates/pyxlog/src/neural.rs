@@ -177,7 +177,9 @@ impl CompiledProgram {
     /// * `arity` - Number of arguments the network's predicate(s) take (default: None
     ///   = unstated). When given, it is validated against every `nn/4` declaration
     ///   bound to this network name in the program, not merely trusted: a mismatch
-    ///   is rejected.
+    ///   is rejected. Must be a Python `int` that is NOT a `bool` (`isinstance(True,
+    ///   int)` holds in Python, but a bool is refused explicitly), mirroring the
+    ///   `arg_sorts` bool trap below.
     /// * `arg_sorts` - Per-argument catalog sort ids (Python `int`), in declared-
     ///   argument order (default: None; keyword-only). Requires `arity`, and its
     ///   length must equal `arity`. Each element must be a Python `int` that is NOT
@@ -205,13 +207,42 @@ impl CompiledProgram {
         det: bool,
         cache: bool,
         cache_size: usize,
-        arity: Option<usize>,
+        arity: Option<PyObject>,
         arg_sorts: Option<Vec<PyObject>>,
         artifact_hash: Option<String>,
     ) -> PyResult<()> {
         if k == Some(0) {
             return Err(PyValueError::new_err("k must be > 0"));
         }
+
+        // arity is a plain Python int: the predicate's argument count. `bool`
+        // is a subclass of `int` in Python (`isinstance(True, int)` holds),
+        // and pyo3 would silently extract a bool into a usize (True -> 1) --
+        // so the bool check MUST run before the usize extraction, not be
+        // inferred from it, mirroring the arg_sorts bool trap below. Without
+        // this, `arity=True` would slip through unnoticed on an arity-1
+        // predicate (it is caught downstream only when the declared arity
+        // != 1).
+        let arity: Option<usize> = match arity {
+            None => None,
+            Some(obj) => {
+                let bound = obj.bind(py);
+                if bound.is_instance_of::<pyo3::types::PyBool>() {
+                    return Err(PyValueError::new_err(
+                        "register_network: arity is a bool; arity is an int, and bool is \
+                         refused explicitly -- isinstance(True, int) holds in Python, but a \
+                         bool is never a valid arity",
+                    ));
+                }
+                let value: usize = bound.extract().map_err(|_| {
+                    PyValueError::new_err(
+                        "register_network: arity must be an int (the predicate's declared \
+                         argument count); non-int arity values are refused",
+                    )
+                })?;
+                Some(value)
+            }
+        };
 
         // Validate network name exists in neural predicates
         if !self.declared_networks.contains(&name) {
