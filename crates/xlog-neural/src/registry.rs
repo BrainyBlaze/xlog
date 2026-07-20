@@ -46,11 +46,13 @@ pub struct NetworkConfig {
     /// declared is rejected rather than trusted.
     pub arity: Option<usize>,
 
-    /// Per-argument sort names, in declared-argument order. Carried
+    /// Per-argument catalog sort ids, in declared-argument order. Carried
     /// opaquely: the registry does not interpret or validate these against
     /// the program, it only stores them so callers (e.g. slot-matching
-    /// enumeration) can sort-match candidate slots by name.
-    pub arg_sorts: Option<Vec<String>>,
+    /// enumeration) can sort-match candidate slots by id. Validated at the
+    /// pyo3 boundary (`register_network`) to be Python ints, with `bool`
+    /// explicitly excluded even though `isinstance(True, int)` holds.
+    pub arg_sorts: Option<Vec<i64>>,
 
     /// Content hash of the registered artifact (module weights). Carried
     /// opaquely, like `arg_sorts`: a retrained network is expected to mint a
@@ -293,15 +295,12 @@ mod tests {
     fn test_config_registration_metadata_survives_clone() {
         let mut config = NetworkConfig::default("meta_test");
         config.arity = Some(2);
-        config.arg_sorts = Some(vec!["int".to_string(), "sym".to_string()]);
+        config.arg_sorts = Some(vec![0, 1]);
         config.artifact_hash = Some("deadbeef".to_string());
 
         let cloned = config.clone();
         assert_eq!(cloned.arity, Some(2));
-        assert_eq!(
-            cloned.arg_sorts,
-            Some(vec!["int".to_string(), "sym".to_string()])
-        );
+        assert_eq!(cloned.arg_sorts, Some(vec![0, 1]));
         assert_eq!(cloned.artifact_hash, Some("deadbeef".to_string()));
     }
 

@@ -56,9 +56,9 @@ pub struct NetworkHandle {
     /// back after registration; the handle does not interpret it.
     pub arity: Option<usize>,
 
-    /// Registration-time per-argument sort names (see `NetworkConfig::arg_sorts`).
-    /// Carried through unchanged, like `arity`.
-    pub arg_sorts: Option<Vec<String>>,
+    /// Registration-time per-argument catalog sort ids (see
+    /// `NetworkConfig::arg_sorts`). Carried through unchanged, like `arity`.
+    pub arg_sorts: Option<Vec<i64>>,
 
     /// Registration-time artifact content hash (see `NetworkConfig::artifact_hash`).
     /// Carried through unchanged, like `arity`.
@@ -317,15 +317,12 @@ mod tests {
         // isn't copied here is lost the moment registration completes.
         let mut config = crate::NetworkConfig::default("configured");
         config.arity = Some(2);
-        config.arg_sorts = Some(vec!["int".to_string(), "sym".to_string()]);
+        config.arg_sorts = Some(vec![0, 1]);
         config.artifact_hash = Some("deadbeef".to_string());
 
         let handle = NetworkHandle::from_config(&config);
         assert_eq!(handle.arity, Some(2));
-        assert_eq!(
-            handle.arg_sorts,
-            Some(vec!["int".to_string(), "sym".to_string()])
-        );
+        assert_eq!(handle.arg_sorts, Some(vec![0, 1]));
         assert_eq!(handle.artifact_hash, Some("deadbeef".to_string()));
     }
 

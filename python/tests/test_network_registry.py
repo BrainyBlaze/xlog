@@ -252,13 +252,16 @@ class TestRegistrationMetadata:
             net,
             optimizer,
             arity=2,
-            arg_sorts=("event", "label"),
+            arg_sorts=(0, 1),
             artifact_hash="sha256:test",
         )
 
         meta = program.network_metadata("evt_net")
         assert meta["arity"] == 2
-        assert meta["arg_sorts"] == ["event", "label"]
+        assert meta["arg_sorts"] == [0, 1]
+        # arg_sorts are catalog sort ids (ints); bool is a subclass of int in
+        # Python, so this pins the roundtrip to actual ints, not bools.
+        assert all(type(sort_id) is int for sort_id in meta["arg_sorts"])
         assert meta["artifact_hash"] == "sha256:test"
         assert meta["declared"] == [
             {
@@ -321,7 +324,7 @@ class TestRegistrationMetadata:
 
         with pytest.raises(ValueError, match="arg_sorts"):
             program.register_network(
-                "evt_net", net, optimizer, arg_sorts=("event", "label")
+                "evt_net", net, optimizer, arg_sorts=(0, 1)
             )
 
     def test_arg_sorts_length_mismatched_with_arity_is_refused(self):
@@ -335,12 +338,68 @@ class TestRegistrationMetadata:
 
         with pytest.raises(ValueError) as excinfo:
             program.register_network(
-                "evt_net", net, optimizer, arity=2, arg_sorts=("event",)
+                "evt_net", net, optimizer, arity=2, arg_sorts=(0,)
             )
 
         message = str(excinfo.value)
         assert "1" in message  # len(arg_sorts)
         assert "2" in message  # arity
+
+    def test_arg_sorts_bool_element_is_refused(self):
+        """bool is a subclass of int in Python (isinstance(True, int) holds),
+        but a bool is never a valid catalog sort id, so it is refused
+        explicitly -- pyo3 would otherwise extract it into i64 silently."""
+        program = pyxlog.Program.compile("""
+            nn(evt_net, [X], Y, [0,1]) :: event_label(X, Y).
+        """)
+
+        net = SimpleNet()
+        optimizer = torch.optim.Adam(net.parameters())
+
+        with pytest.raises(ValueError) as excinfo:
+            program.register_network(
+                "evt_net", net, optimizer, arity=2, arg_sorts=(0, True)
+            )
+
+        message = str(excinfo.value)
+        assert "bool" in message
+        assert "1" in message  # the offending index
+
+    def test_arg_sorts_string_element_is_refused(self):
+        """arg_sorts are catalog sort ids (ints), not sort names -- a string
+        element is refused."""
+        program = pyxlog.Program.compile("""
+            nn(evt_net, [X], Y, [0,1]) :: event_label(X, Y).
+        """)
+
+        net = SimpleNet()
+        optimizer = torch.optim.Adam(net.parameters())
+
+        with pytest.raises(ValueError) as excinfo:
+            program.register_network(
+                "evt_net", net, optimizer, arity=2, arg_sorts=(0, "label")
+            )
+
+        message = str(excinfo.value)
+        assert "int" in message
+        assert "1" in message  # the offending index
+
+    def test_registration_metadata_kwargs_are_keyword_only(self):
+        """arity/arg_sorts/artifact_hash must be passed as keywords, matching
+        the consumer's registration signature `(..., cache_size, *, arity,
+        arg_sorts, artifact_hash)` -- passing them positionally raises
+        TypeError."""
+        program = pyxlog.Program.compile("""
+            nn(evt_net, [X], Y, [0,1]) :: event_label(X, Y).
+        """)
+
+        net = SimpleNet()
+        optimizer = torch.optim.Adam(net.parameters())
+
+        with pytest.raises(TypeError):
+            program.register_network(
+                "evt_net", net, optimizer, None, True, None, False, True, 10000, 2,
+            )
 
     def test_network_metadata_undeclared_name_is_refused(self):
         """The same 'not declared' wording as register_network's existing

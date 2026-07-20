@@ -489,10 +489,10 @@ def _compiled_program_register_network_with_lineage(
     det: bool = False,
     cache: bool = True,
     cache_size: int = 10000,
+    *,
     arity: int | None = None,
     arg_sorts: Any = None,
     artifact_hash: str | None = None,
-    *,
     checkpoint_hash: str | None = None,
     split_hashes: dict[str, str] | None = None,
     calibration_metrics: dict[str, float] | None = None,
@@ -501,7 +501,7 @@ def _compiled_program_register_network_with_lineage(
 ) -> Any:
     result = _RUNTIME_API_ORIGINALS[(CompiledProgram, "register_network")](
         self, name, module, optimizer, scheduler, batching, k, det, cache, cache_size,
-        arity, arg_sorts, artifact_hash,
+        arity=arity, arg_sorts=arg_sorts, artifact_hash=artifact_hash,
     )
     lineage = {
         "network": name,

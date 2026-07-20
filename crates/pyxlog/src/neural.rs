@@ -178,16 +178,24 @@ impl CompiledProgram {
     ///   = unstated). When given, it is validated against every `nn/4` declaration
     ///   bound to this network name in the program, not merely trusted: a mismatch
     ///   is rejected.
-    /// * `arg_sorts` - Per-argument sort names, in declared-argument order (default:
-    ///   None). Requires `arity`, and its length must equal `arity`. Carried opaquely
-    ///   so enumeration can sort-match candidate slots by name.
+    /// * `arg_sorts` - Per-argument catalog sort ids (Python `int`), in declared-
+    ///   argument order (default: None; keyword-only). Requires `arity`, and its
+    ///   length must equal `arity`. Each element must be a Python `int` that is NOT
+    ///   a `bool`: `bool` is a subclass of `int` in Python (`isinstance(True, int)`
+    ///   holds) but is refused explicitly, since it is never a valid catalog sort
+    ///   id. Carried opaquely so enumeration can sort-match candidate slots by id.
     /// * `artifact_hash` - Content hash of the registered artifact (module weights)
-    ///   (default: None). Carried opaquely: a retrained network is expected to mint a
-    ///   new hash on re-registration.
-    #[pyo3(signature = (name, module, optimizer, scheduler=None, batching=true, k=None, det=false, cache=true, cache_size=10000, arity=None, arg_sorts=None, artifact_hash=None))]
+    ///   (default: None; keyword-only). Carried opaquely: a retrained network is
+    ///   expected to mint a new hash on re-registration.
+    ///
+    /// `arity`, `arg_sorts`, and `artifact_hash` are keyword-only, matching the
+    /// consumer's registration signature `(..., cache_size, *, arity, arg_sorts,
+    /// artifact_hash)`.
+    #[pyo3(signature = (name, module, optimizer, scheduler=None, batching=true, k=None, det=false, cache=true, cache_size=10000, *, arity=None, arg_sorts=None, artifact_hash=None))]
     #[allow(clippy::too_many_arguments)]
     fn register_network(
         &mut self,
+        py: Python<'_>,
         name: String,
         module: PyObject,
         optimizer: PyObject,
@@ -198,7 +206,7 @@ impl CompiledProgram {
         cache: bool,
         cache_size: usize,
         arity: Option<usize>,
-        arg_sorts: Option<Vec<String>>,
+        arg_sorts: Option<Vec<PyObject>>,
         artifact_hash: Option<String>,
     ) -> PyResult<()> {
         if k == Some(0) {
@@ -241,6 +249,38 @@ impl CompiledProgram {
                 )));
             }
         }
+
+        // arg_sorts are catalog sort ids: plain Python ints. `bool` is a
+        // subclass of `int` in Python (`isinstance(True, int)` holds), and
+        // pyo3 will silently extract a bool into an i64 -- so the bool check
+        // MUST run before the int extraction, not be inferred from it, or a
+        // caller's `True`/`False` would be accepted as sort id 1/0 by accident.
+        let arg_sorts: Option<Vec<i64>> = match arg_sorts {
+            None => None,
+            Some(items) => {
+                let mut sort_ids = Vec::with_capacity(items.len());
+                for (idx, item) in items.iter().enumerate() {
+                    let bound = item.bind(py);
+                    if bound.is_instance_of::<pyo3::types::PyBool>() {
+                        return Err(PyValueError::new_err(format!(
+                            "register_network: arg_sorts[{}] is a bool; sort ids are ints, \
+                             and bool is refused explicitly -- isinstance(True, int) holds \
+                             in Python, but a bool is never a valid catalog sort id",
+                            idx
+                        )));
+                    }
+                    let sort_id: i64 = bound.extract().map_err(|_| {
+                        PyValueError::new_err(format!(
+                            "register_network: arg_sorts[{}] must be an int (a catalog sort \
+                             id); non-int arg_sorts elements are refused",
+                            idx
+                        ))
+                    })?;
+                    sort_ids.push(sort_id);
+                }
+                Some(sort_ids)
+            }
+        };
 
         // A caller-supplied arity is validated against the program's own
         // declarations, not trusted: it must match every nn/4 declaration bound
