@@ -587,6 +587,43 @@ def test_masked_witness_rows_are_excluded_from_the_index() -> None:
     assert neural.masked_any.tolist() == [True, False]
 
 
+def test_masked_row_probability_is_byte_invariant_in_the_or() -> None:
+    """Byte-invariance probe promised to the external reviewer (#157): a
+    masked witness row is physically ABSENT from the prepared index (see
+    `test_masked_witness_rows_are_excluded_from_the_index` above), so the
+    noisy-OR computed over that index cannot depend -- not even in the last
+    bit -- on what probability the masked row happens to hold. Two p_event
+    vectors that differ ONLY at the masked flat row must produce
+    bitwise-identical OR tensors; a probe that could not tell 0.01 from 0.99
+    would be too weak to prove anything, so a second assertion pins that
+    changing an ACTIVE row DOES change the OR."""
+    from pyxlog.ilp.join_bodies import noisy_or_from_index
+    from pyxlog.ilp.neural_credit import enumerate_specs
+
+    mask = torch.zeros(3, 2, dtype=torch.bool)
+    mask[0, 1] = True                     # flat row 0*2+1 = 1, masked
+    specs = enumerate_specs(_FakeProg(), "W", [(0, 1), (1, 0)],
+                            neural_relations={"sal": 3}, device="cpu",
+                            n_labels=2, witness_mask=mask)
+    neural = {(s.left, s.right): s for s in specs}[("has_event", "sal")]
+    assert neural.witness_index.event_ids.tolist() == [3, 4]   # row 1 excluded
+
+    p_low = torch.tensor([0.5, 0.01, 0.5, 0.5, 0.5, 0.5])
+    p_high = p_low.clone()
+    p_high[1] = 0.99                      # differ ONLY at the masked flat row
+
+    or_low = noisy_or_from_index(p_low, neural.witness_index)
+    or_high = noisy_or_from_index(p_high, neural.witness_index)
+    assert torch.equal(or_low, or_high)
+
+    # Sanity: the probe is not vacuously equal -- changing an ACTIVE row's
+    # probability does change the OR.
+    p_active_changed = p_low.clone()
+    p_active_changed[3] = 0.99
+    or_active_changed = noisy_or_from_index(p_active_changed, neural.witness_index)
+    assert not torch.equal(or_low, or_active_changed)
+
+
 def test_none_mask_is_byte_identical_to_omitting_it() -> None:
     from pyxlog.ilp.neural_credit import enumerate_specs
 

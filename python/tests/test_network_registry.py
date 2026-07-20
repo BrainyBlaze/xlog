@@ -229,3 +229,149 @@ class TestNetworkRegistrationEdgeCases:
         program.register_network("multi_net", net, optimizer)
 
         assert "multi_net" in program.network_names()
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="Program.compile requires CUDA (device=0)")
+class TestRegistrationMetadata:
+    """Test suite for the arity/arg_sorts/artifact_hash registration surface
+    (register_network's new kwargs) and its network_metadata(name) getter."""
+
+    def test_registration_metadata_roundtrips(self):
+        """arity matching the declaration, arg_sorts of that length, and an
+        artifact_hash all round-trip through network_metadata exactly, plus
+        the declared nn/4 entry is reported with the right shape."""
+        program = pyxlog.Program.compile("""
+            nn(evt_net, [X], Y, [0,1]) :: event_label(X, Y).
+        """)
+
+        net = SimpleNet()
+        optimizer = torch.optim.Adam(net.parameters())
+
+        program.register_network(
+            "evt_net",
+            net,
+            optimizer,
+            arity=2,
+            arg_sorts=("event", "label"),
+            artifact_hash="sha256:test",
+        )
+
+        meta = program.network_metadata("evt_net")
+        assert meta["arity"] == 2
+        assert meta["arg_sorts"] == ["event", "label"]
+        assert meta["artifact_hash"] == "sha256:test"
+        assert meta["declared"] == [
+            {
+                "predicate": "event_label",
+                "predicate_arity": 2,
+                "input_arity": 1,
+                "labels": ["0", "1"],
+            }
+        ]
+
+    def test_register_network_without_new_kwargs_is_byte_compatible(self):
+        """Registering WITHOUT arity/arg_sorts/artifact_hash still succeeds
+        exactly as before, and network_metadata reports None for all three
+        registration-metadata fields -- the legacy call path is untouched."""
+        program = pyxlog.Program.compile("""
+            nn(evt_net, [X], Y, [0,1]) :: event_label(X, Y).
+        """)
+
+        net = SimpleNet()
+        optimizer = torch.optim.Adam(net.parameters())
+
+        program.register_network("evt_net", net, optimizer)
+
+        assert "evt_net" in program.network_names()
+
+        meta = program.network_metadata("evt_net")
+        assert meta["arity"] is None
+        assert meta["arg_sorts"] is None
+        assert meta["artifact_hash"] is None
+
+    def test_arity_contradicting_the_declaration_is_refused(self):
+        """A caller-supplied arity is validated against the program's own
+        nn/4 declaration, not trusted -- a mismatch names the predicate and
+        both arities."""
+        program = pyxlog.Program.compile("""
+            nn(evt_net, [X], Y, [0,1]) :: event_label(X, Y).
+        """)
+
+        net = SimpleNet()
+        optimizer = torch.optim.Adam(net.parameters())
+
+        with pytest.raises(ValueError) as excinfo:
+            program.register_network("evt_net", net, optimizer, arity=3)
+
+        message = str(excinfo.value)
+        assert "event_label" in message
+        assert "declaration" in message
+        assert "2" in message  # the declared arity
+        assert "3" in message  # the passed arity
+
+    def test_arg_sorts_without_arity_is_refused(self):
+        """arg_sorts names the arguments, so it requires an arity to name
+        them against."""
+        program = pyxlog.Program.compile("""
+            nn(evt_net, [X], Y, [0,1]) :: event_label(X, Y).
+        """)
+
+        net = SimpleNet()
+        optimizer = torch.optim.Adam(net.parameters())
+
+        with pytest.raises(ValueError, match="arg_sorts"):
+            program.register_network(
+                "evt_net", net, optimizer, arg_sorts=("event", "label")
+            )
+
+    def test_arg_sorts_length_mismatched_with_arity_is_refused(self):
+        """len(arg_sorts) != arity is refused, naming both lengths."""
+        program = pyxlog.Program.compile("""
+            nn(evt_net, [X], Y, [0,1]) :: event_label(X, Y).
+        """)
+
+        net = SimpleNet()
+        optimizer = torch.optim.Adam(net.parameters())
+
+        with pytest.raises(ValueError) as excinfo:
+            program.register_network(
+                "evt_net", net, optimizer, arity=2, arg_sorts=("event",)
+            )
+
+        message = str(excinfo.value)
+        assert "1" in message  # len(arg_sorts)
+        assert "2" in message  # arity
+
+    def test_network_metadata_undeclared_name_is_refused(self):
+        """The same 'not declared' wording as register_network's existing
+        undeclared-name refusal."""
+        program = pyxlog.Program.compile("""
+            nn(evt_net, [X], Y, [0,1]) :: event_label(X, Y).
+        """)
+
+        with pytest.raises(ValueError, match="not declared"):
+            program.network_metadata("undeclared_net")
+
+    def test_network_metadata_declared_but_unregistered_is_refused(self):
+        """A declared classification network that has not been registered
+        yet must be told to call register_network() first."""
+        program = pyxlog.Program.compile("""
+            nn(evt_net, [X], Y, [0,1]) :: event_label(X, Y).
+        """)
+
+        with pytest.raises(ValueError, match="register_network"):
+            program.network_metadata("evt_net")
+
+    def test_network_metadata_on_embedding_declared_network_is_refused(self):
+        """network_metadata covers classification networks only -- an
+        embedding-declared name is refused with the honest boundary,
+        naming register_embedding() as the actual registration path."""
+        program = pyxlog.Program.compile("""
+            nn(encoder, [X], Embedding) :: encode(X, Embedding).
+        """)
+
+        embedding = torch.nn.Embedding(100, 128)
+        program.register_embedding("encoder", embedding, trainable=True)
+
+        with pytest.raises(ValueError, match="register_embedding"):
+            program.network_metadata("encoder")
