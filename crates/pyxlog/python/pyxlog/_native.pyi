@@ -9,7 +9,7 @@ importable from Python.
 
 from __future__ import annotations
 
-from typing import Any, Optional
+from typing import Any, Optional, Sequence
 
 # ---------------------------------------------------------------------------
 # Module-level constant
@@ -356,6 +356,10 @@ class CompiledProgram:
         det: bool = False,
         cache: bool = True,
         cache_size: int = 10000,
+        *,
+        arity: Optional[int] = None,
+        arg_sorts: Optional[Sequence[int]] = None,
+        artifact_hash: Optional[str] = None,
     ) -> None:
         """Register a PyTorch classification network declared via ``nn()``.
 
@@ -417,6 +421,16 @@ class CompiledProgram:
 
     def neural_predicate_info(self, predicate: str) -> dict[str, Any]:
         """Return metadata dict ``{network: str, labels: list[str] | None}``."""
+        ...
+
+    def network_metadata(self, name: str) -> dict[str, Any]:
+        """Registered metadata plus the actual declarations for a network.
+
+        Returns ``{arity, arg_sorts, artifact_hash, declared: [{predicate,
+        predicate_arity, input_arity, labels}]}``. Classification networks
+        only; embedding-declared names are refused (they carry no registration
+        metadata by design).
+        """
         ...
 
     def label_to_index(self, predicate: str, label: str) -> int:
