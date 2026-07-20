@@ -977,6 +977,146 @@ def test_star_out_of_bounds_fact_key_is_refused_typed() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Star-mode canonicalization (S3a review, finding F1): a star cover for a
+# fully-relational (both non-neural) pair is symmetric --
+# cover(A,B) == cover(B,A) element for element -- but `valid_candidates`
+# enumerates BOTH orders as distinct candidates. Left undeduplicated, this
+# guarantees an exact tie between (A,B) and (B,A) at every fold, which
+# `select_rule`'s tie-tolerance floor then turns into a certain abstention
+# whenever the winning pair is the top candidate (proven against the real
+# CAVIAR fold1 data during review). Star mode must therefore keep only the
+# lexicographically-smaller ordering of each fully-relational pair and drop
+# the `(A,A)` diagonal outright (a duplicate literal, not a genuine 2-body
+# rule) -- counted, never a silent cap, exactly like the pre-existing
+# per-filter counters. Neural-right candidates are untouched (no mirror
+# exists there -- see enumerate_specs' docstring). CHAIN mode must stay
+# byte-identical: cover(A,B) there joins through an existential witness and
+# is not symmetric in A/B, so no analogous canonicalization applies.
+# ---------------------------------------------------------------------------
+
+
+class _FakeProgAllRelational:
+    """Two purely-relational binary relations, no neural candidate at all --
+    the star-search's real `neural_relations={}` shape."""
+
+    def __init__(self) -> None:
+        self._facts = {
+            "has_event": [[0, 0], [0, 1], [1, 2]],
+            "tag": [[0, 1], [1, 0], [2, 1]],
+        }
+
+    def valid_candidates(self, mask_name):
+        names = ["has_event", "tag"]
+        cands, cid = [], 0
+        for ln in names:
+            for rn in names:
+                cands.append({"id": cid, "i": 0, "j": 0, "k": 0,
+                              "left_name": ln, "right_name": rn, "head_name": "plastic"})
+                cid += 1
+        return cands
+
+    def relation_facts(self, name):
+        if name not in self._facts:
+            raise ValueError(f"Relation '{name}' not found")
+        return self._facts[name]
+
+
+class _FakeProgSingleRelation:
+    """One relation only: its only cross-product candidate is the (R, R)
+    diagonal -- an empty pool purely from the diagonal filter, no mirror
+    involved (n_star_mirror stays 0), used to pin the empty-pool message."""
+
+    def __init__(self) -> None:
+        self._facts = {"only": [[0, 0], [1, 1]]}
+
+    def valid_candidates(self, mask_name):
+        return [{"id": 0, "i": 0, "j": 0, "k": 0,
+                 "left_name": "only", "right_name": "only", "head_name": "plastic"}]
+
+    def relation_facts(self, name):
+        if name != "only":
+            raise ValueError(f"Relation '{name}' not found")
+        return self._facts["only"]
+
+
+def test_star_pool_keeps_exactly_one_ordering_of_each_unordered_pair() -> None:
+    from pyxlog.ilp.neural_credit import enumerate_specs
+
+    facts = [(0, 1), (1, 0), (2, 1)]
+    specs = enumerate_specs(_FakeProgAllRelational(), "W", facts,
+                            neural_relations={}, device="cpu", n_labels=2,
+                            topology="star")
+    pairs = {(s.left, s.right) for s in specs}
+    # (has_event, tag) is the lexicographically smaller ordering -- kept;
+    # (tag, has_event), its mirror, must be gone.
+    assert pairs == {("has_event", "tag")}
+    assert ("tag", "has_event") not in pairs
+
+
+def test_star_pool_drops_the_diagonal() -> None:
+    from pyxlog.ilp.neural_credit import enumerate_specs
+
+    facts = [(0, 1), (1, 0), (2, 1)]
+    specs = enumerate_specs(_FakeProgAllRelational(), "W", facts,
+                            neural_relations={}, device="cpu", n_labels=2,
+                            topology="star")
+    pairs = {(s.left, s.right) for s in specs}
+    assert ("has_event", "has_event") not in pairs
+    assert ("tag", "tag") not in pairs
+
+
+def test_star_pool_filter_counts_report_mirror_and_diagonal_drops() -> None:
+    """A single relation's only candidate is its own (R, R) diagonal: the
+    pool empties out purely from the diagonal filter, and the refusal names
+    BOTH new counters (diagonal nonzero, mirror zero -- still reported by
+    name, not omitted)."""
+    from pyxlog.ilp.neural_credit import enumerate_specs
+
+    with pytest.raises(ValueError) as excinfo:
+        enumerate_specs(_FakeProgSingleRelation(), "W", [(0, 1)],
+                        neural_relations={}, device="cpu", n_labels=2,
+                        topology="star")
+    msg = str(excinfo.value)
+    assert "star diagonal" in msg
+    assert "star mirror" in msg
+    assert "1" in msg          # 1 candidate dropped as diagonal
+
+
+def test_star_canonicalization_does_not_touch_a_neural_right() -> None:
+    """The existing neural-tail star candidate (has_event, sal) must survive
+    canonicalization untouched -- no mirror exists for a neural right (it
+    can never appear in the left slot), so it is neither a diagonal nor a
+    mirror drop."""
+    from pyxlog.ilp.neural_credit import enumerate_specs
+
+    facts = [(0, 1), (1, 0), (2, 1)]
+    specs = enumerate_specs(_FakeProg(), "W", facts, neural_relations={"sal": 3},
+                            device="cpu", n_labels=2, topology="star")
+    pairs = {(s.left, s.right) for s in specs}
+    assert ("has_event", "sal") in pairs
+
+
+def test_topology_chain_star_dedup_does_not_affect_chain_byte_identity() -> None:
+    """Same byte-identity contract as test_topology_chain_default_is_byte_identical,
+    re-asserted after the star-mode dedup change: chain output for a fully-
+    relational fake prog must be untouched (both (A,B) and (B,A)-shaped chain
+    candidates, if the pool ever produced mirrored pairs, survive -- chain's
+    cover is not symmetric, so no canonicalization ever applies there)."""
+    from pyxlog.ilp.neural_credit import enumerate_specs
+
+    facts = [(0, 1), (1, 0), (2, 1)]
+    a = enumerate_specs(_FakeProgAllRelational(), "W", facts, neural_relations={},
+                        device="cpu", n_labels=2)
+    b = enumerate_specs(_FakeProgAllRelational(), "W", facts, neural_relations={},
+                        device="cpu", n_labels=2, topology="chain")
+    assert ([(s.left, s.right, s.is_neural) for s in a]
+            == [(s.left, s.right, s.is_neural) for s in b])
+    pairs = {(s.left, s.right) for s in a}
+    assert ("has_event", "tag") in pairs
+    assert ("tag", "has_event") in pairs        # chain keeps BOTH orders
+
+
+# ---------------------------------------------------------------------------
 # Engine-mode training loop (Task 3). CUDA-gated: the ENGINE compiles the
 # program (device=0), which needs a real CUDA context.
 #

@@ -184,6 +184,36 @@ def enumerate_specs(prog, mask_name, facts, neural_relations, device, n_labels,
       honestly rather than by a separate multiplicative mask. Masking (below)
       applies to that one row exactly as it does to any chain witness.
 
+    STAR-MODE CANONICALIZATION of the fully-relational (both non-neural)
+    pool (S3a review, finding F1). A star cover between two RELATIONAL
+    relations is symmetric -- ``cover(A, B) == cover(B, A)`` element for
+    element, since it is just ``(x,y) in A and (x,y) in B`` -- but
+    `valid_candidates`'s ordered cross product enumerates BOTH ``(A, B)``
+    and ``(B, A)`` as distinct candidates regardless. Left undeduplicated,
+    that guarantees an EXACT tie between them at every fold (byte-identical
+    fold-mean holdout accuracies), which `_select_from_holdout`'s
+    tie-tolerance floor then turns into a certain, structural abstention
+    whenever the winning pair happens to be the top candidate -- proven
+    against the real CAVIAR fold1 data during review, independent of steps,
+    seed, or dataset size. Star mode therefore filters the fully-relational
+    branch (neither side neural) two ways before it ever reaches a
+    `CandidateSpec`: a pair with ``left_name == right_name`` (the would-be
+    candidate ``A(X,Y), A(X,Y)``, a duplicate literal and not a genuine
+    2-body star rule) is dropped outright, counted as ``n_star_diagonal``;
+    otherwise, of the two mirrored orderings, only the lexicographically
+    SMALLER ``(left_name, right_name)`` survives -- the other is dropped as
+    the mirror duplicate, counted as ``n_star_mirror``. Neither filter
+    touches a candidate with a NEURAL right: a neural relation is already
+    excluded from the left slot (see the SKIP paragraph just below), so it
+    only ever appears as ``rn``, and its score there is not symmetric in the
+    same sense (the left relation GATES the witness, the right SUPPLIES the
+    probability) -- there is no mirror to deduplicate. CHAIN mode is
+    unaffected by any of this: its cover joins through an existential
+    witness variable and is not symmetric in ``(left_name, right_name)``, so
+    no analogous canonicalization applies or is performed there -- chain's
+    candidate pool, including any ``(A, B)``/``(B, A)`` pair the engine
+    happens to enumerate, is exactly as before this change.
+
     Both topologies SKIP a neural relation in the LEFT slot (A for star, L for
     chain): filtering an auto-enumerated pool is not the same as silently
     altering a user-declared rule, and the engine's cross-product enumeration
@@ -343,6 +373,7 @@ def enumerate_specs(prog, mask_name, facts, neural_relations, device, n_labels,
     domain_union: dict[str, set[int]] = {}
     star_neural_rights: set[str] = set()
     n_total = n_meta = n_neural_left = n_unreadable = n_non_binary = 0
+    n_star_diagonal = n_star_mirror = 0
     for cand in prog.valid_candidates(mask_name):
         n_total += 1
         ln, rn = cand["left_name"], cand["right_name"]
@@ -384,6 +415,12 @@ def enumerate_specs(prog, mask_name, facts, neural_relations, device, n_labels,
                                            masked_any=masked_any))
                 star_neural_rights.add(rn)
             else:
+                if ln == rn:
+                    n_star_diagonal += 1
+                    continue                # A(X,Y),A(X,Y): duplicate literal, not a 2-body rule
+                if ln > rn:
+                    n_star_mirror += 1
+                    continue                # (B,A) once (A,B) is kept: star cover is order-symmetric
                 bpairs = _pairs(rn)
                 cover = torch.tensor(
                     [1.0 if (x, y) in apairs and (x, y) in bpairs else 0.0
@@ -422,13 +459,21 @@ def enumerate_specs(prog, mask_name, facts, neural_relations, device, n_labels,
                 )
                 specs.append(CandidateSpec(cand["id"], ln, rn, False, None, cover))
     if not specs:
+        star_detail = (
+            f", {n_star_diagonal} skipped as a star diagonal (A,A -- a "
+            "duplicate literal, not a 2-body rule), "
+            f"{n_star_mirror} skipped as a star mirror duplicate "
+            "((B,A) once (A,B) was kept -- a star cover is order-symmetric)"
+            if topology == "star" else ""
+        )
         raise ValueError(
             f"pool filtering left zero scoreable candidates out of {n_total} "
             f"enumerated: {n_meta} skipped as __xlog_ meta, {n_neural_left} as "
             f"neural-in-left (no witness semantics), {n_unreadable} with an "
             f"unreadable slot (no ground extension), {n_non_binary} with "
-            "non-binary rows. Nothing remains to train or select over -- the "
-            "filters above are the reason, not a silent cap."
+            f"non-binary rows{star_detail}. Nothing remains to train or "
+            "select over -- the filters above are the reason, not a silent "
+            "cap."
         )
     if topology == "chain":
         for rn, joined in domain_union.items():
