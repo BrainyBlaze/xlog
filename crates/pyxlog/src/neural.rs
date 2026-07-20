@@ -174,7 +174,18 @@ impl CompiledProgram {
     /// * `det` - Deterministic mode: use argmax instead of sampling (default: false)
     /// * `cache` - Whether to cache network outputs (default: true)
     /// * `cache_size` - Maximum cache entries (default: 10000)
-    #[pyo3(signature = (name, module, optimizer, scheduler=None, batching=true, k=None, det=false, cache=true, cache_size=10000))]
+    /// * `arity` - Number of arguments the network's predicate(s) take (default: None
+    ///   = unstated). When given, it is validated against every `nn/4` declaration
+    ///   bound to this network name in the program, not merely trusted: a mismatch
+    ///   is rejected.
+    /// * `arg_sorts` - Per-argument sort names, in declared-argument order (default:
+    ///   None). Requires `arity`, and its length must equal `arity`. Carried opaquely
+    ///   so enumeration can sort-match candidate slots by name.
+    /// * `artifact_hash` - Content hash of the registered artifact (module weights)
+    ///   (default: None). Carried opaquely: a retrained network is expected to mint a
+    ///   new hash on re-registration.
+    #[pyo3(signature = (name, module, optimizer, scheduler=None, batching=true, k=None, det=false, cache=true, cache_size=10000, arity=None, arg_sorts=None, artifact_hash=None))]
+    #[allow(clippy::too_many_arguments)]
     fn register_network(
         &mut self,
         name: String,
@@ -186,6 +197,9 @@ impl CompiledProgram {
         det: bool,
         cache: bool,
         cache_size: usize,
+        arity: Option<usize>,
+        arg_sorts: Option<Vec<String>>,
+        artifact_hash: Option<String>,
     ) -> PyResult<()> {
         if k == Some(0) {
             return Err(PyValueError::new_err("k must be > 0"));
@@ -208,12 +222,53 @@ impl CompiledProgram {
             )));
         }
 
+        // arg_sorts name the arguments; declare the arity they name. Without an
+        // arity, "which argument is sort[i]" has no positional referent.
+        if arg_sorts.is_some() && arity.is_none() {
+            return Err(PyValueError::new_err(
+                "register_network: arg_sorts given without arity; \
+                 the sorts name the arguments, so declare the arity they name",
+            ));
+        }
+
+        if let (Some(sorts), Some(declared_arity)) = (&arg_sorts, arity) {
+            if sorts.len() != declared_arity {
+                return Err(PyValueError::new_err(format!(
+                    "register_network: arg_sorts has {} entries but arity is {}; \
+                     one sort per declared argument is required",
+                    sorts.len(),
+                    declared_arity
+                )));
+            }
+        }
+
+        // A caller-supplied arity is validated against the program's own
+        // declarations, not trusted: it must match every nn/4 declaration bound
+        // to this network name. A network with no declarations in the registry
+        // is unreachable here (the declared_networks check above already
+        // rejected it), so this loop only ever runs against real declarations.
+        if let Some(declared_arity) = arity {
+            for info in self.neural_registry.infos() {
+                if info.network == name && info.predicate_arity != declared_arity {
+                    return Err(PyValueError::new_err(format!(
+                        "register_network: predicate '{}' declares arity {} for network \
+                         '{}', but arity={} was passed to register_network; the arity is \
+                         validated against the program's own declaration, not trusted",
+                        info.predicate, info.predicate_arity, name, declared_arity
+                    )));
+                }
+            }
+        }
+
         let mut config = NetworkConfig::default(&name);
         config.batching = batching;
         config.k = k;
         config.det = det;
         config.cache_enabled = cache;
         config.cache_size = cache_size;
+        config.arity = arity;
+        config.arg_sorts = arg_sorts;
+        config.artifact_hash = artifact_hash;
 
         self.network_registry.register(config);
 

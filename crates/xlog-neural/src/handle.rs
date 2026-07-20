@@ -274,6 +274,9 @@ mod tests {
             det: true,
             cache_enabled: false,
             cache_size: 500,
+            arity: None,
+            arg_sorts: None,
+            artifact_hash: None,
         };
 
         let handle = NetworkHandle::from_config(&config);

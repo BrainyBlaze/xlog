@@ -162,6 +162,15 @@ impl NeuralPredicateRegistry {
         self.by_predicate.get(predicate)
     }
 
+    /// Iterate over every declared `nn/4` entry, across all predicates.
+    ///
+    /// Used to validate a caller-supplied network `arity` at registration
+    /// time against every predicate declaration bound to that network name
+    /// (a network name is not unique to one predicate).
+    pub fn infos(&self) -> impl Iterator<Item = &NeuralPredicateInfo> {
+        self.by_predicate.values().flatten()
+    }
+
     pub fn resolve_atom(&self, atom: &Atom) -> Result<&NeuralPredicateInfo, String> {
         let infos = self
             .by_predicate
