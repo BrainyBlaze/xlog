@@ -750,10 +750,15 @@ def kfold_select(prog_factory, mask_name, facts, is_positive, make_network,
     total_sums: dict[tuple[str, str], int] = {}
     neural_rights = set(neural_relations)
 
+    # ONE compilation serves every fold: the program is only ever READ here
+    # (valid_candidates, relation_facts), and the scale probe measured per-fold
+    # recompilation at ~75% of the kfold wall time at 10^4 events. A factory
+    # with per-call side effects would observe one call instead of `folds`.
+    prog = prog_factory()
+
     for fold in range(folds):
         train_ids = [i for i in range(len(facts)) if fold_of[i] != fold]
         held_ids = [i for i in range(len(facts)) if fold_of[i] == fold]
-        prog = prog_factory()
         # Derived (seed, fold) seeding right before construction: the network
         # init must come from OUR seed, not whatever ambient RNG state the
         # caller happens to be in (finding B, review of PR #154).

@@ -845,6 +845,28 @@ def test_train_engine_mode_threads_witness_mask_into_masked_facts_accounting() -
     assert result_unmasked.masked_facts == {}
 
 
+def test_kfold_select_compiles_the_program_once_not_per_fold() -> None:
+    """W1.5 (scale probe follow-up): program compilation dominated the measured
+    kfold wall time (~75% at 10^4 events) because prog_factory was invoked per
+    fold -- yet the program is only ever READ (valid_candidates,
+    relation_facts), so one compilation serves every fold. Pin the invocation
+    count; the CUDA suite pins that selections stay correct."""
+    calls = {"n": 0}
+
+    def counting_factory():
+        calls["n"] += 1
+        return _FakeProg()
+
+    features = torch.tensor([[0.1], [0.2], [0.3]])
+    kfold_select(counting_factory, "W", [(0, 1), (1, 0), (2, 1)],
+                 [True, False, True],
+                 lambda: torch.nn.Sequential(torch.nn.Linear(1, 2),
+                                             torch.nn.Softmax(dim=-1)),
+                 features, neural_relations={"sal": 3}, folds=3, steps=2,
+                 seed=0)
+    assert calls["n"] == 1, calls
+
+
 # ---------------------------------------------------------------------------
 # Engine-mode training loop (Task 3). CUDA-gated: the ENGINE compiles the
 # program (device=0), which needs a real CUDA context.
