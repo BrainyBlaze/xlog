@@ -868,6 +868,115 @@ def test_kfold_select_compiles_the_program_once_not_per_fold() -> None:
 
 
 # ---------------------------------------------------------------------------
+# STAR topology (WOLED/CAVIAR track): the engine also compiles STAR templates
+# (`head(X,Y) :- bL(X,Y), bR(X,Y)`, verified in test_ilp_exact_induce.py:39),
+# and `valid_candidates` enumerates the SAME (left, right) pairs for both
+# topologies -- the topology lives in the program text, not the pool. These
+# tests pin the "star" semantics of `enumerate_specs`: relational-relational
+# cover is a plain pairwise AND (no join, no existential), and a neural
+# tail's witness is the fact's own (x, y) row, gated by the left relation's
+# cover rather than joined through it.
+# ---------------------------------------------------------------------------
+
+
+def test_star_relational_cover_is_hand_computed_and_of_two_relations() -> None:
+    """A=has_event={(0,0),(0,1),(1,2)}, B=tag={(0,1),(1,0),(2,1)}: cover[f] = 1
+    iff (x,y) is in BOTH -- only fact (0,1) is."""
+    from pyxlog.ilp.neural_credit import enumerate_specs
+
+    facts = [(0, 1), (1, 0), (2, 1)]
+    specs = enumerate_specs(_FakeProg(), "W", facts, neural_relations={"sal": 3},
+                            device="cpu", n_labels=2, topology="star")
+    star = {(s.left, s.right): s for s in specs}[("has_event", "tag")]
+    assert not star.is_neural
+    assert star.binary_cover.tolist() == [1.0, 0.0, 0.0]
+
+
+def test_star_neural_tail_is_cover_gated_single_witness() -> None:
+    """B=sal is neural: a fact covered by A=has_event scores at its OWN flat
+    row x*n_labels+y (a single-witness noisy-OR reduces to that probability
+    itself); a fact NOT covered by A gets the empty witness list -- the
+    noisy-OR over nothing is 0, regardless of what the network says about
+    that row (A's cover gates the score honestly, not via a separate mask)."""
+    from pyxlog.ilp.join_bodies import noisy_or_from_index
+    from pyxlog.ilp.neural_credit import enumerate_specs
+
+    facts = [(0, 1), (1, 0), (2, 1)]      # has_event covers only (0, 1)
+    specs = enumerate_specs(_FakeProg(), "W", facts, neural_relations={"sal": 3},
+                            device="cpu", n_labels=2, topology="star")
+    neural = {(s.left, s.right): s for s in specs}[("has_event", "sal")]
+    assert neural.is_neural
+
+    p_event = torch.tensor([0.1, 0.7, 0.2, 0.3, 0.4, 0.5])   # flat [3 rows x 2 labels]
+    s = noisy_or_from_index(p_event, neural.witness_index)
+    # fact 0 = (0, 1): covered -> row 0*2+1=1 -> p=0.7, exactly the network's own value
+    # facts 1, 2: not covered by has_event -> empty witness -> OR over nothing = 0
+    assert s.tolist() == pytest.approx([0.7, 0.0, 0.0])
+
+
+def test_topology_chain_default_is_byte_identical() -> None:
+    """topology='chain' pinned byte-identical to omitting the argument
+    entirely -- same reuse pattern as test_none_mask_is_byte_identical_to_omitting_it."""
+    from pyxlog.ilp.neural_credit import enumerate_specs
+
+    facts = [(0, 1), (1, 0), (2, 1)]
+    a = enumerate_specs(_FakeProg(), "W", facts, neural_relations={"sal": 3},
+                        device="cpu", n_labels=2)
+    b = enumerate_specs(_FakeProg(), "W", facts, neural_relations={"sal": 3},
+                        device="cpu", n_labels=2, topology="chain")
+    assert ([(s.left, s.right, s.is_neural) for s in a]
+            == [(s.left, s.right, s.is_neural) for s in b])
+    na = {(s.left, s.right): s for s in a}[("has_event", "sal")]
+    nb = {(s.left, s.right): s for s in b}[("has_event", "sal")]
+    assert na.witness_index.event_ids.tolist() == nb.witness_index.event_ids.tolist()
+    ra = {(s.left, s.right): s for s in a}[("has_event", "tag")]
+    rb = {(s.left, s.right): s for s in b}[("has_event", "tag")]
+    assert ra.binary_cover.tolist() == rb.binary_cover.tolist()
+
+
+def test_invalid_topology_is_refused_typed_naming_both_supported() -> None:
+    from pyxlog.ilp.neural_credit import enumerate_specs
+
+    with pytest.raises(ValueError) as excinfo:
+        enumerate_specs(_FakeProg(), "W", [(0, 1)], neural_relations={"sal": 3},
+                        device="cpu", n_labels=2, topology="ring")
+    assert "chain" in str(excinfo.value)
+    assert "star" in str(excinfo.value)
+
+
+def test_star_witness_mask_masks_the_facts_own_row() -> None:
+    """The star witness IS the fact's own (x, y) row: masking it excludes the
+    single witness (OR over nothing -> s=0) and flags masked_any True for
+    that fact -- distinguishing 'masked away' from 'genuinely uncovered by
+    A' (both end up s=0, but only the masked one is reported as uncertain)."""
+    from pyxlog.ilp.neural_credit import enumerate_specs
+
+    facts = [(0, 1), (1, 0), (2, 1)]      # has_event covers only (0, 1)
+    mask = torch.zeros(3, 2, dtype=torch.bool)
+    mask[0, 1] = True                      # masks fact (0, 1)'s own row
+    specs = enumerate_specs(_FakeProg(), "W", facts, neural_relations={"sal": 3},
+                            device="cpu", n_labels=2, topology="star",
+                            witness_mask=mask)
+    neural = {(s.left, s.right): s for s in specs}[("has_event", "sal")]
+    assert neural.witness_index.event_ids.tolist() == []   # the one witness was masked away
+    assert neural.masked_any.tolist() == [True, False, False]
+    assert neural.masked_any[0].item() is True
+
+
+def test_star_out_of_bounds_fact_key_is_refused_typed() -> None:
+    """Star mode validates BOUNDS ONLY (the documented deviation from chain's
+    exact-density law -- see enumerate_specs' docstring): fact x=5 has no row
+    in a 3-row feature tensor, and there is no join extension in star mode
+    whose full domain a fold-independent exact-density check could anchor
+    on, so bounds are all that is checked -- and this fact fails even that."""
+    from pyxlog.ilp.neural_credit import enumerate_specs
+
+    with pytest.raises(ValueError, match="0..2"):
+        enumerate_specs(_FakeProg(), "W", [(5, 1)], neural_relations={"sal": 3},
+                        device="cpu", n_labels=2, topology="star")
+
+
+# ---------------------------------------------------------------------------
 # Engine-mode training loop (Task 3). CUDA-gated: the ENGINE compiles the
 # program (device=0), which needs a real CUDA context.
 #

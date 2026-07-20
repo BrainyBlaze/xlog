@@ -153,38 +153,88 @@ def credit_nll(cand_probs, specs, p_event, is_positive, gamma: float = 1.0):
 
 
 def enumerate_specs(prog, mask_name, facts, neural_relations, device, n_labels,
-                    witness_mask=None):
+                    witness_mask=None, topology="chain"):
     """One CandidateSpec per engine triple over the program's binary EDB relations.
 
-    Witnesses come from the ENGINE (`relation_facts`), never from the caller: for a
-    fact (h, y) and candidate (L, R) the witness set is {z : L(h, z)} scored by the
-    network AT THE FACT'S OWN LABEL y for a neural R -- each witness is stored as
-    the flat (event, label) row ``z * n_labels + y``, so the credit gathers from
-    the network output flattened row-major and no positive column is ever guessed
-    (a y outside ``0..n_labels-1`` is refused here, typed) -- and the binary cover
-    is [exists z: L(h,z) and R(z,y)] for a relational R. A neural relation in the
-    LEFT slot has no witness semantics in this credit and is SKIPPED — filtering an
-    auto-enumerated pool is not the same as silently altering a user-declared rule;
-    the engine's cross-product enumeration always contains such triples. The same
-    pool always also contains the dILP TEMPLATE's own learnable placeholders (e.g.
-    `bL`/`bR`) and any other tuple-less name `valid_candidates` cross-products in:
-    these have no ground extension to read at all (`relation_facts` raises
-    `ValueError` for them), so they are pool-filtered for the same reason as the
-    `__xlog_` meta relations — this is a targeted skip of a known-unreadable slot,
-    not a blanket swallow of engine errors. The same cross product also contains
-    relations of every ARITY; only binary rows have (h, z)/(z, y) semantics here,
-    so non-binary relations are pool-filtered too (counted, never a bare
-    IndexError or a silent first-two-columns projection). A pool these filters
-    empty out is refused with per-filter counts: silent caps are exactly what
-    this module promises not to have.
+    ``topology`` selects which dILP TEMPLATE the pool is being scored for --
+    the engine enumerates the SAME (left, right) pairs for both, the topology
+    lives in the program text, not in the pool (`valid_candidates` is blind to
+    it), so this function must be told which reading applies:
 
-    Raw engine constants index the caller's feature rows, so the mixture path's
-    ``domain_ids`` law applies verbatim: with no explicit constant->row map, the
-    identity is only unambiguous when each neural relation's witness domain (the
-    union of its left partners' joined constants) is EXACTLY ``0..num_rows-1``.
-    Anything else could gather other events' probabilities while staying in
-    bounds — silently — and is refused, not guessed at (mirrors
-    ``neurosymbolic._resolve_domain_ids``).
+    * ``"chain"`` (default, byte-identical to omitting the argument) --
+      ``head(X,Y) :- bL(X,Z), bR(Z,Y)``. Witnesses come from the ENGINE
+      (`relation_facts`), never from the caller: for a fact (h, y) and
+      candidate (L, R) the witness set is {z : L(h, z)} scored by the network
+      AT THE FACT'S OWN LABEL y for a neural R -- each witness is stored as
+      the flat (event, label) row ``z * n_labels + y``, so the credit gathers
+      from the network output flattened row-major and no positive column is
+      ever guessed (a y outside ``0..n_labels-1`` is refused here, typed) --
+      and the binary cover is [exists z: L(h,z) and R(z,y)] for a relational
+      R.
+    * ``"star"`` -- ``head(X,Y) :- bL(X,Y), bR(X,Y)``. Both body atoms are
+      keyed by the SAME (X, Y) as the head, so there is no existential to OR
+      over: relational-relational cover is ``1.0 iff (x,y) in A and (x,y) in
+      B`` (reusing the same ``_pairs`` pair-set machinery the chain path's
+      right slot already uses); a neural B's witness set for fact (x, y) is
+      the SINGLE flat row ``x * n_labels + y`` -- the fact's own row at its
+      own label -- but ONLY when A covers (x, y): a fact NOT covered by A
+      contributes the empty witness list, and the noisy-OR over an empty list
+      is 0 (the same "OR over nothing is false" convention `noisy_or_from_index`
+      already establishes), which is how A's cover gates the neural score
+      honestly rather than by a separate multiplicative mask. Masking (below)
+      applies to that one row exactly as it does to any chain witness.
+
+    Both topologies SKIP a neural relation in the LEFT slot (A for star, L for
+    chain): filtering an auto-enumerated pool is not the same as silently
+    altering a user-declared rule, and the engine's cross-product enumeration
+    always contains such triples (counted via the same neural-in-left
+    counter). A candidate with BOTH slots neural has no supported circuit
+    either and is skipped the same way -- it is already caught by the
+    neural-in-left check before the right slot is even inspected, so no
+    separate counter is needed. The same pool always also contains the dILP
+    TEMPLATE's own learnable placeholders (e.g. `bL`/`bR`) and any other
+    tuple-less name `valid_candidates` cross-products in: these have no
+    ground extension to read at all (`relation_facts` raises `ValueError` for
+    them), so they are pool-filtered for the same reason as the `__xlog_`
+    meta relations — this is a targeted skip of a known-unreadable slot, not
+    a blanket swallow of engine errors. The same cross product also contains
+    relations of every ARITY; only binary rows have two-column semantics
+    here, so non-binary relations are pool-filtered too (counted, never a
+    bare IndexError or a silent first-two-columns projection). A pool these
+    filters empty out is refused with per-filter counts: silent caps are
+    exactly what this module promises not to have.
+
+    Raw engine constants index the caller's feature rows, so the mixture
+    path's ``domain_ids`` law applies to CHAIN mode verbatim: with no
+    explicit constant->row map, the identity is only unambiguous when each
+    neural relation's witness domain (the union of its left partners' joined
+    constants) is EXACTLY ``0..num_rows-1``. Anything else could gather other
+    events' probabilities while staying in bounds — silently — and is
+    refused, not guessed at (mirrors ``neurosymbolic._resolve_domain_ids``).
+
+    DOCUMENTED DEVIATION for STAR mode: the exact-density law above does NOT
+    apply to star, and this was a deliberate choice, not an oversight. Chain
+    mode anchors its density check on the FULL left extension (every z any
+    fact's h joins to, not just the fact-restricted witnesses) precisely
+    because that union is fold-independent -- the same regardless of which
+    facts a given call happens to carry. Star mode has no such anchor: the
+    witness row IS the fact's own key x, there is no engine-side join
+    extension whose full domain could be unioned instead, so the only
+    candidate domain is "every x that appears in `facts`" -- and that set is
+    fold-dependent by construction (kfold_select calls this once per fold
+    with a different fact subset each time). Applying the chain law naively
+    would therefore make the SAME neural relation pass on one fold's call and
+    fail on another's, for no reason connected to the data being wrong -- a
+    spurious, fold-shape-driven refusal. Star mode instead validates BOUNDS
+    ONLY: every fact's x must lie in ``0..num_rows-1`` for every neural
+    relation it is scored against (typed refusal naming the offending keys),
+    over ALL facts in this call regardless of which A happens to cover them,
+    since some other candidate's A could cover a key this one's does not.
+    Bounds plus the caller-declared ``num_rows`` is the honest contract here:
+    it catches the same out-of-range-constant failure mode chain's law
+    catches, it just cannot also catch an in-bounds-but-unjoined row the way
+    chain's exact-equality check can, because star has no join to define
+    "unjoined" against.
 
     ``witness_mask`` is the witness-level mask/abstain channel (contract
     #155): a bool tensor ``[num_rows, n_labels]`` (True = MASKED) or ``None``
@@ -197,6 +247,12 @@ def enumerate_specs(prog, mask_name, facts, neural_relations, device, n_labels,
     front, not lazily per-candidate."""
     import torch
 
+    if topology not in ("chain", "star"):
+        raise ValueError(
+            f"topology={topology!r} is not supported: enumerate_specs "
+            "implements 'chain' (head(X,Y) :- bL(X,Z), bR(Z,Y)) and 'star' "
+            "(head(X,Y) :- bL(X,Y), bR(X,Y)) only."
+        )
     neural_relations = _registry(neural_relations)
     if witness_mask is not None:
         rows_by_relation = {rn: spec.num_rows for rn, spec in neural_relations.items()}
@@ -285,6 +341,7 @@ def enumerate_specs(prog, mask_name, facts, neural_relations, device, n_labels,
 
     specs: list[CandidateSpec] = []
     domain_union: dict[str, set[int]] = {}
+    star_neural_rights: set[str] = set()
     n_total = n_meta = n_neural_left = n_unreadable = n_non_binary = 0
     for cand in prog.valid_candidates(mask_name):
         n_total += 1
@@ -294,7 +351,7 @@ def enumerate_specs(prog, mask_name, facts, neural_relations, device, n_labels,
             continue                        # meta relations: arity-incompatible, skip
         if ln in neural_relations:
             n_neural_left += 1
-            continue                        # neural-in-left: no witness semantics, skip
+            continue                        # neural-in-left (incl. both-neural): no witness semantics, skip
         if not _readable(ln):
             n_unreadable += 1
             continue                        # left slot has no ground extension (e.g. template placeholder), skip
@@ -308,35 +365,62 @@ def enumerate_specs(prog, mask_name, facts, neural_relations, device, n_labels,
             if not _binary(rn):
                 n_non_binary += 1
                 continue
-        if rn in neural_relations:
-            witnesses = [
-                [z * n_labels + y for z in _left(ln).get(h, [])
-                 if not _mask_masks(z, y)]
-                for h, y in facts
-            ]
-            masked_any = (None if witness_mask is None else torch.tensor(
-                [any(_mask_masks(z, y) for z in _left(ln).get(h, []))
-                 for h, y in facts], device=device))
-            idx = prepare_extension(
-                witnesses, device,
-                num_rows=neural_relations[rn].num_rows * n_labels
-            )
-            specs.append(CandidateSpec(cand["id"], ln, rn, True, idx, None,
-                                       masked_any=masked_any))
-            # The FULL left extension (not the fact-restricted witnesses, which
-            # vary per fold) is what can ever index this relation's feature rows.
-            domain_union.setdefault(rn, set()).update(
-                z for zs in _left(ln).values() for z in zs
-            )
-        else:
-            pairs = _pairs(rn)
-            lext = _left(ln)
-            cover = torch.tensor(
-                [1.0 if any((z, y) in pairs for z in lext.get(h, [])) else 0.0
-                 for h, y in facts],
-                device=device,
-            )
-            specs.append(CandidateSpec(cand["id"], ln, rn, False, None, cover))
+        if topology == "star":
+            apairs = _pairs(ln)
+            if rn in neural_relations:
+                witnesses = [
+                    ([x * n_labels + y] if not _mask_masks(x, y) else [])
+                    if (x, y) in apairs else []
+                    for x, y in facts
+                ]
+                masked_any = (None if witness_mask is None else torch.tensor(
+                    [(x, y) in apairs and _mask_masks(x, y) for x, y in facts],
+                    device=device))
+                idx = prepare_extension(
+                    witnesses, device,
+                    num_rows=neural_relations[rn].num_rows * n_labels
+                )
+                specs.append(CandidateSpec(cand["id"], ln, rn, True, idx, None,
+                                           masked_any=masked_any))
+                star_neural_rights.add(rn)
+            else:
+                bpairs = _pairs(rn)
+                cover = torch.tensor(
+                    [1.0 if (x, y) in apairs and (x, y) in bpairs else 0.0
+                     for x, y in facts],
+                    device=device,
+                )
+                specs.append(CandidateSpec(cand["id"], ln, rn, False, None, cover))
+        else:                                # topology == "chain"
+            if rn in neural_relations:
+                witnesses = [
+                    [z * n_labels + y for z in _left(ln).get(h, [])
+                     if not _mask_masks(z, y)]
+                    for h, y in facts
+                ]
+                masked_any = (None if witness_mask is None else torch.tensor(
+                    [any(_mask_masks(z, y) for z in _left(ln).get(h, []))
+                     for h, y in facts], device=device))
+                idx = prepare_extension(
+                    witnesses, device,
+                    num_rows=neural_relations[rn].num_rows * n_labels
+                )
+                specs.append(CandidateSpec(cand["id"], ln, rn, True, idx, None,
+                                           masked_any=masked_any))
+                # The FULL left extension (not the fact-restricted witnesses, which
+                # vary per fold) is what can ever index this relation's feature rows.
+                domain_union.setdefault(rn, set()).update(
+                    z for zs in _left(ln).values() for z in zs
+                )
+            else:
+                pairs = _pairs(rn)
+                lext = _left(ln)
+                cover = torch.tensor(
+                    [1.0 if any((z, y) in pairs for z in lext.get(h, [])) else 0.0
+                     for h, y in facts],
+                    device=device,
+                )
+                specs.append(CandidateSpec(cand["id"], ln, rn, False, None, cover))
     if not specs:
         raise ValueError(
             f"pool filtering left zero scoreable candidates out of {n_total} "
@@ -346,23 +430,38 @@ def enumerate_specs(prog, mask_name, facts, neural_relations, device, n_labels,
             "non-binary rows. Nothing remains to train or select over -- the "
             "filters above are the reason, not a silent cap."
         )
-    for rn, joined in domain_union.items():
-        rows = neural_relations[rn].num_rows
-        if joined != set(range(rows)):
-            missing = sorted(set(range(rows)) - joined)[:5]
-            extra = sorted(joined - set(range(rows)))[:5]
-            raise ValueError(
-                f"neural relation '{rn}': raw engine constants index the "
-                f"caller's {rows} feature rows, and with no explicit "
-                "constant->row map that dense identity is only unambiguous "
-                f"when the witness domain is exactly 0..{rows - 1}. Here it is "
-                f"not (unjoined rows e.g. {missing}, out-of-range constants "
-                f"e.g. {extra}) -- an in-range misalignment would gather other "
-                "events' probabilities silently, so this is refused, not "
-                "guessed at. Renumber the event constants to the dense range, "
-                "or use the mixture path, whose domain_ids= states the map "
-                "explicitly."
-            )
+    if topology == "chain":
+        for rn, joined in domain_union.items():
+            rows = neural_relations[rn].num_rows
+            if joined != set(range(rows)):
+                missing = sorted(set(range(rows)) - joined)[:5]
+                extra = sorted(joined - set(range(rows)))[:5]
+                raise ValueError(
+                    f"neural relation '{rn}': raw engine constants index the "
+                    f"caller's {rows} feature rows, and with no explicit "
+                    "constant->row map that dense identity is only unambiguous "
+                    f"when the witness domain is exactly 0..{rows - 1}. Here it is "
+                    f"not (unjoined rows e.g. {missing}, out-of-range constants "
+                    f"e.g. {extra}) -- an in-range misalignment would gather other "
+                    "events' probabilities silently, so this is refused, not "
+                    "guessed at. Renumber the event constants to the dense range, "
+                    "or use the mixture path, whose domain_ids= states the map "
+                    "explicitly."
+                )
+    else:                                    # topology == "star": bounds only (see docstring)
+        for rn in star_neural_rights:
+            rows = neural_relations[rn].num_rows
+            bad = sorted({x for x, y in facts if not (0 <= x < rows)})
+            if bad:
+                raise ValueError(
+                    f"neural relation '{rn}' in star mode: fact key(s) "
+                    f"{bad[:5]} fall outside the feature tensor's "
+                    f"0..{rows - 1} -- the star witness row is the fact's own "
+                    "key x, scored directly with no join extension to anchor "
+                    "a fold-independent density check against (see the "
+                    "docstring's documented deviation), so only bounds are "
+                    "checked here, and this fact fails even that, refused."
+                )
     return specs
 
 
@@ -406,8 +505,12 @@ class EngineModeResult:
 def train_engine_mode(prog, mask_name, facts, is_positive, network, features,
                       neural_relations, steps=400, lr=0.05, gamma=1.0,
                       entropy_start=0.0, entropy_end=0.1, seed=0,
-                      witness_mask=None):
+                      witness_mask=None, topology="chain"):
     """Train candidate logits + the network against the real-valued credit.
+
+    ``topology`` (default ``"chain"``, byte-identical to omitting it) is
+    threaded straight into ``enumerate_specs`` -- see its docstring for the
+    "chain" vs "star" candidate semantics.
 
     Deterministic, mirroring the dILP trainer: the OR accumulates with index_add,
     whose default CUDA path is atomic float addition. NOTE two scope caveats of
@@ -447,7 +550,7 @@ def train_engine_mode(prog, mask_name, facts, is_positive, network, features,
     n_labels = out.shape[1]
     specs = enumerate_specs(
         prog, mask_name, facts, neural_relations, device, n_labels,
-        witness_mask=witness_mask,
+        witness_mask=witness_mask, topology=topology,
     )
     C = max(s.cid for s in specs) + 1
     # Skipped candidates must not hold probability mass — the mixture is over
@@ -615,8 +718,12 @@ def _select_from_holdout(scores, neural_rights, min_fit, tie_tolerance=0.01,
 
 def frozen_select(prog, mask_name, facts, is_positive, network, features,
                   neural_relations, min_fit=0.75, witness_mask=None,
-                  min_coverage=0.5):
+                  min_coverage=0.5, topology="chain"):
     """Score every engine-enumerated candidate against a FROZEN detector.
+
+    ``topology`` (default ``"chain"``, byte-identical to omitting it) is
+    threaded straight into ``enumerate_specs`` -- see its docstring for the
+    "chain" vs "star" candidate semantics.
 
     Engine mode as an ACCEPTANCE INSTRUMENT rather than a trainer: the detector
     is externally trained and never touched here -- no gradient, no optimizer
@@ -673,7 +780,7 @@ def frozen_select(prog, mask_name, facts, is_positive, network, features,
     out = _validated_output(network, features)
     specs = enumerate_specs(
         prog, mask_name, facts, neural_relations, features.device, out.shape[1],
-        witness_mask=witness_mask,
+        witness_mask=witness_mask, topology=topology,
     )
     with torch.no_grad():
         p_event = out.reshape(-1)
@@ -709,11 +816,17 @@ def frozen_select(prog, mask_name, facts, is_positive, network, features,
 
 def kfold_select(prog_factory, mask_name, facts, is_positive, make_network,
                  features, neural_relations, folds=4, min_fit=0.75, seed=0,
-                 witness_mask=None, min_coverage=0.5, **train_kw):
+                 witness_mask=None, min_coverage=0.5, topology="chain",
+                 **train_kw):
     """Select a rule by K-FOLD HOLDOUT, not by training weight: per fold, train on
     the rest and score every engine-enumerated candidate on the held-out facts by
     its own witness/cover semantics (``s_c(f) >= 0.5``); average across folds, apply
     the fit gate, then hand the holdout scores to ``_select_from_holdout``.
+
+    ``topology`` (default ``"chain"``, byte-identical to omitting it) is
+    threaded through to BOTH the per-fold ``train_engine_mode`` call and the
+    held-out ``enumerate_specs`` call -- see ``enumerate_specs`` for the
+    "chain" vs "star" candidate semantics.
 
     ``seed`` determines the WHOLE run, network inits included: each fold's
     ``make_network()`` is called right after ``torch.manual_seed`` with a seed
@@ -768,13 +881,13 @@ def kfold_select(prog_factory, mask_name, facts, is_positive, make_network,
             [facts[i] for i in train_ids],
             [is_positive[i] for i in train_ids],
             make_network(), features, neural_relations, seed=seed,
-            witness_mask=witness_mask, **train_kw)
+            witness_mask=witness_mask, topology=topology, **train_kw)
         with torch.no_grad():
             out = res.network(features)
             held_specs = enumerate_specs(
                 prog, mask_name, [facts[i] for i in held_ids],
                 neural_relations, features.device, out.shape[1],
-                witness_mask=witness_mask)
+                witness_mask=witness_mask, topology=topology)
             p_event = out.reshape(-1)
             y = torch.tensor([is_positive[i] for i in held_ids],
                              device=features.device, dtype=torch.float32)
