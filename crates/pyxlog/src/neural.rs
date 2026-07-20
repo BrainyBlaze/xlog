@@ -174,9 +174,28 @@ impl CompiledProgram {
     /// * `det` - Deterministic mode: use argmax instead of sampling (default: false)
     /// * `cache` - Whether to cache network outputs (default: true)
     /// * `cache_size` - Maximum cache entries (default: 10000)
-    #[pyo3(signature = (name, module, optimizer, scheduler=None, batching=true, k=None, det=false, cache=true, cache_size=10000))]
+    /// * `arity` - Number of arguments the network's predicate(s) take (default: None
+    ///   = unstated). When given, it is validated against every `nn/4` declaration
+    ///   bound to this network name in the program, not merely trusted: a mismatch
+    ///   is rejected.
+    /// * `arg_sorts` - Per-argument catalog sort ids (Python `int`), in declared-
+    ///   argument order (default: None; keyword-only). Requires `arity`, and its
+    ///   length must equal `arity`. Each element must be a Python `int` that is NOT
+    ///   a `bool`: `bool` is a subclass of `int` in Python (`isinstance(True, int)`
+    ///   holds) but is refused explicitly, since it is never a valid catalog sort
+    ///   id. Carried opaquely so enumeration can sort-match candidate slots by id.
+    /// * `artifact_hash` - Content hash of the registered artifact (module weights)
+    ///   (default: None; keyword-only). Carried opaquely: a retrained network is
+    ///   expected to mint a new hash on re-registration.
+    ///
+    /// `arity`, `arg_sorts`, and `artifact_hash` are keyword-only, matching the
+    /// consumer's registration signature `(..., cache_size, *, arity, arg_sorts,
+    /// artifact_hash)`.
+    #[pyo3(signature = (name, module, optimizer, scheduler=None, batching=true, k=None, det=false, cache=true, cache_size=10000, *, arity=None, arg_sorts=None, artifact_hash=None))]
+    #[allow(clippy::too_many_arguments)]
     fn register_network(
         &mut self,
+        py: Python<'_>,
         name: String,
         module: PyObject,
         optimizer: PyObject,
@@ -186,6 +205,9 @@ impl CompiledProgram {
         det: bool,
         cache: bool,
         cache_size: usize,
+        arity: Option<usize>,
+        arg_sorts: Option<Vec<PyObject>>,
+        artifact_hash: Option<String>,
     ) -> PyResult<()> {
         if k == Some(0) {
             return Err(PyValueError::new_err("k must be > 0"));
@@ -208,12 +230,85 @@ impl CompiledProgram {
             )));
         }
 
+        // arg_sorts name the arguments; declare the arity they name. Without an
+        // arity, "which argument is sort[i]" has no positional referent.
+        if arg_sorts.is_some() && arity.is_none() {
+            return Err(PyValueError::new_err(
+                "register_network: arg_sorts given without arity; \
+                 the sorts name the arguments, so declare the arity they name",
+            ));
+        }
+
+        if let (Some(sorts), Some(declared_arity)) = (&arg_sorts, arity) {
+            if sorts.len() != declared_arity {
+                return Err(PyValueError::new_err(format!(
+                    "register_network: arg_sorts has {} entries but arity is {}; \
+                     one sort per declared argument is required",
+                    sorts.len(),
+                    declared_arity
+                )));
+            }
+        }
+
+        // arg_sorts are catalog sort ids: plain Python ints. `bool` is a
+        // subclass of `int` in Python (`isinstance(True, int)` holds), and
+        // pyo3 will silently extract a bool into an i64 -- so the bool check
+        // MUST run before the int extraction, not be inferred from it, or a
+        // caller's `True`/`False` would be accepted as sort id 1/0 by accident.
+        let arg_sorts: Option<Vec<i64>> = match arg_sorts {
+            None => None,
+            Some(items) => {
+                let mut sort_ids = Vec::with_capacity(items.len());
+                for (idx, item) in items.iter().enumerate() {
+                    let bound = item.bind(py);
+                    if bound.is_instance_of::<pyo3::types::PyBool>() {
+                        return Err(PyValueError::new_err(format!(
+                            "register_network: arg_sorts[{}] is a bool; sort ids are ints, \
+                             and bool is refused explicitly -- isinstance(True, int) holds \
+                             in Python, but a bool is never a valid catalog sort id",
+                            idx
+                        )));
+                    }
+                    let sort_id: i64 = bound.extract().map_err(|_| {
+                        PyValueError::new_err(format!(
+                            "register_network: arg_sorts[{}] must be an int (a catalog sort \
+                             id); non-int arg_sorts elements are refused",
+                            idx
+                        ))
+                    })?;
+                    sort_ids.push(sort_id);
+                }
+                Some(sort_ids)
+            }
+        };
+
+        // A caller-supplied arity is validated against the program's own
+        // declarations, not trusted: it must match every nn/4 declaration bound
+        // to this network name. A network with no declarations in the registry
+        // is unreachable here (the declared_networks check above already
+        // rejected it), so this loop only ever runs against real declarations.
+        if let Some(declared_arity) = arity {
+            for info in self.neural_registry.infos() {
+                if info.network == name && info.predicate_arity != declared_arity {
+                    return Err(PyValueError::new_err(format!(
+                        "register_network: predicate '{}' declares arity {} for network \
+                         '{}', but arity={} was passed to register_network; the arity is \
+                         validated against the program's own declaration, not trusted",
+                        info.predicate, info.predicate_arity, name, declared_arity
+                    )));
+                }
+            }
+        }
+
         let mut config = NetworkConfig::default(&name);
         config.batching = batching;
         config.k = k;
         config.det = det;
         config.cache_enabled = cache;
         config.cache_size = cache_size;
+        config.arity = arity;
+        config.arg_sorts = arg_sorts;
+        config.artifact_hash = artifact_hash;
 
         self.network_registry.register(config);
 
@@ -516,6 +611,74 @@ impl CompiledProgram {
         let dict = PyDict::new(py);
         dict.set_item("network", info.network.clone())?;
         dict.set_item("labels", info.labels.clone())?;
+        Ok(dict.into())
+    }
+
+    /// Get queryable metadata for a registered network.
+    ///
+    /// Returns a dict with the registration-time metadata passed to
+    /// `register_network` — `"arity"`, `"arg_sorts"`, `"artifact_hash"`
+    /// (each `None` if unstated at registration) — plus `"declared"`: a list
+    /// of one dict per `nn/4` declaration bound to this network name, each
+    /// `{"predicate", "predicate_arity", "input_arity", "labels"}`. A
+    /// consumer compares its own idea of a network's shape against these
+    /// actual declarations, not against a naming convention.
+    ///
+    /// # Errors
+    /// * `PyValueError` if `name` has no `nn/4` declaration in the program.
+    /// * `PyValueError` if `name` is declared as an embedding —
+    ///   `network_metadata` covers classification networks only. Embeddings
+    ///   register via `register_embedding()`, which carries no
+    ///   arity/arg_sorts/artifact_hash metadata; that registration-metadata
+    ///   seat lives on `register_network()`, which embeddings do not use.
+    ///   Out of scope by design.
+    /// * `PyValueError` if `name` is declared (as a classification network)
+    ///   but not yet registered — call `register_network()` first.
+    fn network_metadata(&self, py: Python<'_>, name: &str) -> PyResult<PyObject> {
+        if !self.declared_networks.contains(name) {
+            return Err(PyValueError::new_err(format!(
+                "Network '{}' not declared in program. Declared networks: {:?}",
+                name,
+                self.declared_networks.iter().collect::<Vec<_>>()
+            )));
+        }
+
+        if let Some(&true) = self.declared_network_forms.get(name) {
+            return Err(PyValueError::new_err(format!(
+                "declaration '{}' is an embedding; network_metadata covers classification \
+                 networks only. Embeddings register via register_embedding(), which carries \
+                 no arity/arg_sorts/artifact_hash — that registration metadata is out of \
+                 scope by design for embeddings",
+                name
+            )));
+        }
+
+        let handle = self.network_registry.get(name).ok_or_else(|| {
+            PyValueError::new_err(format!(
+                "Network '{}' is declared but not registered; call register_network() first",
+                name
+            ))
+        })?;
+
+        let dict = PyDict::new(py);
+        dict.set_item("arity", handle.arity)?;
+        dict.set_item("arg_sorts", handle.arg_sorts.clone())?;
+        dict.set_item("artifact_hash", handle.artifact_hash.clone())?;
+
+        let declared = pyo3::types::PyList::empty(py);
+        for info in self.neural_registry.infos() {
+            if info.network != name {
+                continue;
+            }
+            let entry = PyDict::new(py);
+            entry.set_item("predicate", info.predicate.clone())?;
+            entry.set_item("predicate_arity", info.predicate_arity)?;
+            entry.set_item("input_arity", info.input_arity)?;
+            entry.set_item("labels", info.labels.clone())?;
+            declared.append(entry)?;
+        }
+        dict.set_item("declared", declared)?;
+
         Ok(dict.into())
     }
 

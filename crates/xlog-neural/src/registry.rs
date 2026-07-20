@@ -37,6 +37,28 @@ pub struct NetworkConfig {
 
     /// Maximum number of entries in the output cache.
     pub cache_size: usize,
+
+    /// Number of arguments the network's declared predicate(s) take, as
+    /// stated by the caller at registration time. `None` means unstated.
+    /// When present, this is validated against every `nn/4` declaration
+    /// bound to this network name (see `register_network`), so a mismatch
+    /// between what the caller claims and what the program actually
+    /// declared is rejected rather than trusted.
+    pub arity: Option<usize>,
+
+    /// Per-argument catalog sort ids, in declared-argument order. Carried
+    /// opaquely: the registry does not interpret or validate these against
+    /// the program, it only stores them so callers (e.g. slot-matching
+    /// enumeration) can sort-match candidate slots by id. Validated at the
+    /// pyo3 boundary (`register_network`) to be Python ints, with `bool`
+    /// explicitly excluded even though `isinstance(True, int)` holds.
+    pub arg_sorts: Option<Vec<i64>>,
+
+    /// Content hash of the registered artifact (module weights). Carried
+    /// opaquely, like `arg_sorts`: a retrained network is expected to mint a
+    /// new hash, so this field is the identity of *this* registration, not
+    /// a claim the registry checks.
+    pub artifact_hash: Option<String>,
 }
 
 impl NetworkConfig {
@@ -56,6 +78,9 @@ impl NetworkConfig {
             det: false,
             cache_enabled: true,
             cache_size: 10000,
+            arity: None,
+            arg_sorts: None,
+            artifact_hash: None,
         }
     }
 
@@ -68,6 +93,9 @@ impl NetworkConfig {
             det: true,
             cache_enabled: true,
             cache_size: 10000,
+            arity: None,
+            arg_sorts: None,
+            artifact_hash: None,
         }
     }
 
@@ -80,6 +108,9 @@ impl NetworkConfig {
             det: false,
             cache_enabled: true,
             cache_size: 10000,
+            arity: None,
+            arg_sorts: None,
+            artifact_hash: None,
         }
     }
 
@@ -239,6 +270,38 @@ mod tests {
         assert!(!config.det);
         assert!(config.cache_enabled);
         assert_eq!(config.cache_size, 10000);
+        assert!(config.arity.is_none());
+        assert!(config.arg_sorts.is_none());
+        assert!(config.artifact_hash.is_none());
+    }
+
+    #[test]
+    fn test_config_registration_metadata_none_across_constructors() {
+        // Registration metadata (arity/arg_sorts/artifact_hash) is not part of
+        // DeepProbLog-style tuning knobs, so every constructor must default it
+        // to None the same way, not just `default()`.
+        let det = NetworkConfig::deterministic("det_test");
+        assert!(det.arity.is_none());
+        assert!(det.arg_sorts.is_none());
+        assert!(det.artifact_hash.is_none());
+
+        let top_k = NetworkConfig::with_top_k("top_k_test", 5);
+        assert!(top_k.arity.is_none());
+        assert!(top_k.arg_sorts.is_none());
+        assert!(top_k.artifact_hash.is_none());
+    }
+
+    #[test]
+    fn test_config_registration_metadata_survives_clone() {
+        let mut config = NetworkConfig::default("meta_test");
+        config.arity = Some(2);
+        config.arg_sorts = Some(vec![0, 1]);
+        config.artifact_hash = Some("deadbeef".to_string());
+
+        let cloned = config.clone();
+        assert_eq!(cloned.arity, Some(2));
+        assert_eq!(cloned.arg_sorts, Some(vec![0, 1]));
+        assert_eq!(cloned.artifact_hash, Some("deadbeef".to_string()));
     }
 
     #[test]
