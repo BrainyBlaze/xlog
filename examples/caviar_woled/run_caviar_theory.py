@@ -559,13 +559,18 @@ def _run_neural_theory(pyxlog, torch, kfold_select, args, train, test, wall):
         probe_test = probe_detector(test_scores, test_close_rows, test_dists, exclude_rows=test_missing)
         probe_control = probe_detector(control_scores, test_close_rows, test_dists, exclude_rows=test_missing)
 
+        # polar_spread builds its grid on CPU; the nets live on the CUDA
+        # device -- move the probe input to the net's device and the scores
+        # back, so both probes work regardless of where the net sits.
+        net_device = next(net.parameters()).device
+
         def score_fn(x, net=net):
             with torch.no_grad():
-                return net(x)[:, 1]
+                return net(x.to(net_device))[:, 1].cpu()
 
         def control_score_fn(x, control_net=control_net):
             with torch.no_grad():
-                return control_net(x)[:, 1]
+                return control_net(x.to(net_device))[:, 1].cpu()
 
         clause_detector_evidence[f"{left}|{right}"] = {
             "probe": {
