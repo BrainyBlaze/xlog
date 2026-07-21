@@ -457,30 +457,40 @@ def _run_neural_theory(pyxlog, torch, kfold_select, args, train, test, wall):
         if it["reason"] == "committed"
     ]
     clauses = theory["clauses"]
-    assert len(nets_per_clause) == len(clauses)
-    nets_by_rule = dict(zip(clauses, nets_per_clause))
+    if len(nets_per_clause) != len(clauses):
+        raise RuntimeError(
+            f"per-clause net recovery drifted: {len(nets_per_clause)} nets "
+            f"for {len(clauses)} committed clauses -- the call_log/iterations "
+            "lockstep invariant is broken."
+        )
+    # Keyed POSITIONALLY (clause index), never by rule value: a theory may
+    # legally commit the same rule twice (each with its own net), and a
+    # value-keyed dict would silently collapse them.
+    nets_by_clause_idx = dict(enumerate(nets_per_clause))
 
     def make_final_predict_clause(relations, features):
         sets = {n: set(relations[n]) for n in ACTIVITY_RELATIONS}
-        scores_by_rule = {}
-        for rule, net in nets_by_rule.items():
+        scores_by_clause_idx = {}
+        for idx, net in nets_by_clause_idx.items():
             with torch.no_grad():
-                scores_by_rule[rule] = net(features)[:, 1].tolist()
+                scores_by_clause_idx[idx] = net(features)[:, 1].tolist()
 
-        def predict(rule, fact):
+        def predict(rule, fact, _clause_idx=None):
             left, right = rule
             if fact not in sets[left]:
                 return False
             if right == CLOSE_NN_NAME:
-                return scores_by_rule[rule][fact[0]] > 0.5
+                idx = (_clause_idx if _clause_idx is not None
+                       else clauses.index(rule))
+                return scores_by_clause_idx[idx][fact[0]] > 0.5
             return fact in sets[right]
 
-        return predict, scores_by_rule
+        return predict, scores_by_clause_idx
 
-    predict_clause_train, train_scores_by_rule = make_final_predict_clause(
+    predict_clause_train, train_scores_by_idx = make_final_predict_clause(
         train["relations"], features_train
     )
-    predict_clause_test, test_scores_by_rule = make_final_predict_clause(
+    predict_clause_test, test_scores_by_idx = make_final_predict_clause(
         test["relations"], features_test
     )
 
@@ -500,7 +510,7 @@ def _run_neural_theory(pyxlog, torch, kfold_select, args, train, test, wall):
         left, right = rule
         if right == CLOSE_NN_NAME:
             gated = [
-                test_scores_by_rule[rule][pt] if (pt, 1) in activity_sets_test[left] else 0.0
+                test_scores_by_idx[idx][pt] if (pt, 1) in activity_sets_test[left] else 0.0
                 for pt in range(test["num_pt"])
             ]
         else:
@@ -508,7 +518,7 @@ def _run_neural_theory(pyxlog, torch, kfold_select, args, train, test, wall):
                 1.0 if predict_clause_test(rule, (pt, 1)) else 0.0
                 for pt in range(test["num_pt"])
             ]
-        pr_curves["clauses"][f"{left}|{right}"] = pr_curve(gated, test["is_positive"])
+        pr_curves["clauses"][f"clause{idx}:{left}|{right}"] = pr_curve(gated, test["is_positive"])
 
     if clauses:
         # Soft union: max over each clause's own gated score at that row --
@@ -517,11 +527,11 @@ def _run_neural_theory(pyxlog, torch, kfold_select, args, train, test, wall):
         # asked for, generalized from "one clause's PR curve" to "the whole
         # theory's").
         per_clause_gated = []
-        for rule in clauses:
+        for idx, rule in enumerate(clauses):
             left, right = rule
             if right == CLOSE_NN_NAME:
                 per_clause_gated.append([
-                    test_scores_by_rule[rule][pt] if (pt, 1) in activity_sets_test[left] else 0.0
+                    test_scores_by_idx[idx][pt] if (pt, 1) in activity_sets_test[left] else 0.0
                     for pt in range(test["num_pt"])
                 ])
             else:
@@ -543,7 +553,8 @@ def _run_neural_theory(pyxlog, torch, kfold_select, args, train, test, wall):
     test_missing = {pt for pt, _ in test["relations"]["coords_missing"]}
 
     clause_detector_evidence = {}
-    for rule, net in nets_by_rule.items():
+    for clause_idx, net in nets_by_clause_idx.items():
+        rule = clauses[clause_idx]
         left, right = rule
         if right != CLOSE_NN_NAME:
             continue
@@ -572,7 +583,7 @@ def _run_neural_theory(pyxlog, torch, kfold_select, args, train, test, wall):
             with torch.no_grad():
                 return control_net(x.to(net_device))[:, 1].cpu()
 
-        clause_detector_evidence[f"{left}|{right}"] = {
+        clause_detector_evidence[f"clause{clause_idx}:{left}|{right}"] = {
             "probe": {
                 "train": probe_train, "test": probe_test, "control": probe_control,
                 "monotone_decay": {
