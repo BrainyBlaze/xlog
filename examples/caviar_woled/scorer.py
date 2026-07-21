@@ -127,6 +127,83 @@ DEFAULT_BASELINE_PAIRS: list[tuple[str, str]] = [
 ]
 
 
+def theory_predictions(clauses: list, predict_clause, num_pt: int) -> list[bool]:
+    """Prediction for every pair-time ``pt`` in ``range(num_pt)``: ``True``
+    iff ANY committed clause predicts it True (union over clauses -- task
+    S5a's theory-loop reading of a multi-clause theory: the theory fires
+    whenever at least one of its clauses does, mirroring how a set of
+    definite-clause rules for the same head predicate is read as their
+    disjunction).
+
+    ``clauses`` is `theory_loop.induce_theory`'s ``"clauses"`` list (any
+    caller-defined rule object -- a ``(left, right)`` tuple for a relational
+    or neural-tailed star rule, but this function never inspects a rule's
+    shape itself). ``predict_clause(rule, fact) -> bool`` is the SAME
+    per-fact closure `theory_loop.induce_theory` was given; every fact here
+    is the star convention's fixed-label-column pair, ``(pt, 1)`` (matching
+    `rule_predictions`' and `caviar_convert.convert_split`'s own
+    convention).
+
+    An empty ``clauses`` list (a theory that induced nothing) predicts
+    ``False`` everywhere -- ``any(())`` is ``False`` -- not an error: an
+    empty theory is a legitimate, if useless, degenerate theory.
+    """
+    return [
+        any(predict_clause(rule, (pt, 1)) for rule in clauses)
+        for pt in range(num_pt)
+    ]
+
+
+def pr_curve(scores_gated: list[float], gold: list[bool], n_points: int = 50) -> list[dict]:
+    """Precision/recall/F1 swept over ``n_points`` thresholds evenly spaced
+    over the closed interval ``[0.0, 1.0]`` -- the "soft-scoring" report the
+    deep analysis's proposal 4 asked for, so a single hard ``score > 0.5``
+    number never has to stand in for the whole picture (the S4 analysis
+    found that on CAVIAR fold1's test split, EVERY threshold ``theta > 0``
+    hurt F1 relative to ``theta -> 0``; a single ``@0.5`` reading hid that
+    entirely).
+
+    ``scores_gated`` is one real-valued score per row -- e.g. a neural
+    clause's cover-gated score (the network's own probability where the
+    clause's left literal covers the row, ``0.0`` elsewhere), or a whole
+    theory's soft union score -- aligned one-to-one with ``gold``. The
+    prediction at threshold ``t`` is ``score > t`` (strict, matching
+    `probe_detector`'s own ``score > threshold`` convention). Each returned
+    entry is ``{"threshold", "precision", "recall", "f1"}`` (the raw
+    tp/fp/fn/tn/degenerate fields from `prf1` are NOT repeated here -- a
+    50-point curve is verbose enough without them; call `prf1` directly at
+    a single threshold if those are needed).
+
+    Thresholds are monotonically increasing over the returned list, so a
+    genuinely learned, well-separated score's RECALL is expected to be
+    non-increasing threshold-to-threshold (raising the bar can only turn a
+    True prediction False, never the reverse) -- precision has no such
+    guarantee (it is a ratio that can move either way as true/false
+    positives drop out together).
+
+    ``n_points`` must be at least 2 (a "curve" over a single point is not
+    a sweep); raises ``ValueError`` otherwise. ``scores_gated``/``gold``
+    length-mismatch is refused via `prf1`'s own check.
+    """
+    if n_points < 2:
+        raise ValueError(
+            f"pr_curve needs n_points >= 2 to sweep a range of thresholds, "
+            f"got {n_points}."
+        )
+    curve = []
+    for i in range(n_points):
+        threshold = i / (n_points - 1)
+        pred = [s > threshold for s in scores_gated]
+        metrics = prf1(pred, gold)
+        curve.append({
+            "threshold": threshold,
+            "precision": metrics["precision"],
+            "recall": metrics["recall"],
+            "f1": metrics["f1"],
+        })
+    return curve
+
+
 def baseline_report(
     relations: dict, gold: list[bool], num_pt: int, pairs: list[tuple[str, str]] | None = None
 ) -> dict:

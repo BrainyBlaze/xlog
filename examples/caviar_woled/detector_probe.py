@@ -195,3 +195,129 @@ def probe_detector(
         "prf1": metrics,
         "bins": bins,
     }
+
+
+# ---------------------------------------------------------------------------
+# Anisotropy metrics (task S5a, deep-analysis proposal 3)
+#
+# The S4 deep analysis (`FINDINGS.md`, Finding 2) showed that `probe_detector`
+# / `monotone_decay_report`'s per-DISTANCE-BIN aggregation, averaged over
+# every angle that fell in a bin, completely hid a decision surface that was
+# a diagonal band (not a disk): at EVERY radius 5-30 the raw score ranged
+# 0.000-1.000 depending on angle alone (a polar-grid "spread" of 1.0), and
+# the pair-order asymmetry (swapping which person is p1 vs p2, i.e. negating
+# the (dx, dy) input) moved the score by 0.364 on average -- a third of the
+# score's whole range, for a quantity ((dx, dy)'s sign) that is an artifact
+# of person-numbering, not evidence. Bin-mean tables cannot show either
+# effect; the two functions below make them visible directly in RESULT.json.
+#
+# Both take `score_fn`: a callable ``Tensor[N, 2] -> Tensor[N]`` (or anything
+# a plain Python `for` loop and `float()` can walk -- these functions never
+# call a torch-specific method on the RETURNED scores) that reads the
+# network's own P(label=1) at each row, the exact quantity `probe_detector`
+# already reads. `torch` itself is imported lazily inside each function (not
+# at module level), keeping this module's own no-torch-import-at-module-level
+# contract (see the module docstring) even though these two helpers need a
+# real tensor to hand `score_fn` -- unlike `probe_detector`, which is
+# duck-typed all the way through and works on plain floats already computed
+# elsewhere, these two build the (dx, dy) grid THEMSELVES and so need torch
+# to construct it.
+
+
+def polar_spread(
+    score_fn,
+    radii: tuple[float, ...] = (10.0, 20.0, 25.0, 30.0),
+    n_angles: int = 36,
+    scale: float = 1.0 / 100.0,
+) -> dict:
+    """Per-radius angular spread of ``score_fn`` over a polar grid.
+
+    For each ``r`` in ``radii``, samples ``n_angles`` points evenly spaced
+    around the full circle of that RAW radius (``(r*cos(a), r*sin(a))`` for
+    ``n_angles`` angles ``a`` in ``[0, 2*pi)``), scales them by ``scale``
+    (default ``1/100`` -- matches `caviar_convert.FEATURE_SCALE`'s inverse,
+    so a real trained ``close_nn`` net can be probed with its own native
+    input convention with no unscaling on the caller's part), evaluates
+    ``score_fn`` on the whole batch at once, and reports
+    ``{"min", "max", "mean", "spread", "std"}`` (``spread = max - min``, the
+    population ``std`` -- divide by ``n_angles``, not ``n_angles - 1``).
+
+    A genuinely RADIAL score (a function of distance-from-origin alone) has
+    every point on a fixed-radius circle at (up to floating-point trig
+    rounding, ~1e-14) the exact same input norm, hence the exact same score
+    -- ``spread`` collapses to ~0 for such a function, by construction, not
+    by a statistical accident. A score that instead depends on angle (e.g.
+    the S4 net's diagonal decision band) shows a spread up to 1.0 (a
+    ``[0, 1]``-valued score's own full range) at every radius -- exactly the
+    anisotropy `FINDINGS.md`'s polar grid found and the bin-mean tables
+    could not show.
+
+    ``radii``/``n_angles`` are refused (``ValueError``) if empty/non-positive
+    -- a spread over zero points is undefined, not a silent ``0.0``.
+    """
+    import math
+
+    import torch
+
+    if not radii:
+        raise ValueError("polar_spread needs at least one radius in `radii`.")
+    if n_angles < 1:
+        raise ValueError(f"polar_spread needs n_angles >= 1, got {n_angles}.")
+
+    result: dict = {}
+    for r in radii:
+        angles = [2.0 * math.pi * i / n_angles for i in range(n_angles)]
+        rows = [
+            (r * math.cos(a) * scale, r * math.sin(a) * scale) for a in angles
+        ]
+        grid = torch.tensor(rows, dtype=torch.float32)
+        scores = score_fn(grid)
+        values = [float(s) for s in scores]
+
+        mn = min(values)
+        mx = max(values)
+        mean = sum(values) / len(values)
+        variance = sum((v - mean) ** 2 for v in values) / len(values)
+        result[r] = {
+            "min": mn,
+            "max": mx,
+            "mean": mean,
+            "spread": mx - mn,
+            "std": variance ** 0.5,
+        }
+    return result
+
+
+def pair_swap_asymmetry(score_fn, features) -> float:
+    """``mean |score_fn(x) - score_fn(-x)|`` over every row of ``features``.
+
+    The (dx, dy) pair-time input's SIGN is an artifact of which person in
+    the pair is labeled p1 vs p2 -- an arbitrary numbering choice, not
+    evidence -- so a detector that has actually learned a symmetric notion
+    of "close" should score a pair the same regardless of which of the two
+    (equivalent, mirrored) input rows it is handed. This is exactly the
+    quantity `FINDINGS.md`'s Finding 2 measured as 0.364 on the S4 net (a
+    third of the score's own range): the negated batch is built and scored
+    HERE, in one extra `score_fn` call over the whole tensor, not per-row,
+    so this stays cheap even for a large ``features``.
+
+    ``features`` must support tensor negation (``-features``); a plain
+    ``torch.Tensor`` is expected (this function does not itself construct
+    the grid, unlike `polar_spread`, so it takes whatever the caller already
+    has -- e.g. a real dataset's feature tensor). Refuses (``ValueError``) a
+    zero-row ``features``: a mean over nothing is undefined, not ``0.0``.
+    """
+    import torch
+
+    if not isinstance(features, torch.Tensor):
+        features = torch.as_tensor(features, dtype=torch.float32)
+    if features.shape[0] == 0:
+        raise ValueError(
+            "pair_swap_asymmetry needs at least one row in `features`; a "
+            "mean over zero rows is undefined."
+        )
+
+    s_pos = score_fn(features)
+    s_neg = score_fn(-features)
+    diffs = [abs(float(a) - float(b)) for a, b in zip(s_pos, s_neg)]
+    return sum(diffs) / len(diffs)
