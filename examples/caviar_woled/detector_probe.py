@@ -151,7 +151,9 @@ def probe_detector(
             f"scores has {n_total} rows but dists has {len(dists)}; they "
             "must be aligned one-to-one over the same pair-times."
         )
-    excluded = exclude_rows or set()
+    # Intersect with the valid row range so num_excluded reports rows
+    # actually removed, not the size of whatever set the caller passed.
+    excluded = {i for i in (exclude_rows or set()) if 0 <= i < n_total}
 
     kept_idx = [i for i in range(n_total) if i not in excluded]
     if not kept_idx:

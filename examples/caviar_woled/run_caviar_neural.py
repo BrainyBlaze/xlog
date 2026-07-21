@@ -69,13 +69,13 @@ output shape `train_engine_mode`'s `_validated_output` requires (mirrors
 `run_caviar_star.py`'s `make_network`, just with two hidden layers instead
 of a bare `Linear`). `--hidden` (default 16) is the hidden width.
 
-CLOSE-CALL THRESHOLD (documented choice): both the star engine's own
-cover-gated score (`s_c(f) >= 0.5` inside `kfold_select`'s held-out scoring)
-and this script's own TEST-time prediction for a selected `close_nn` rule
-use `network output at label 1 > 0.5` as "predicted close" -- the same
-threshold `frozen_select`/`kfold_select` already use internally for every
-neural candidate, chosen for consistency with the engine's own semantics,
-not re-tuned here.
+CLOSE-CALL THRESHOLD (documented choice): the star engine's cover-gated
+held-out scoring uses `s_c(f) >= 0.5` (non-strict); this script's TEST-time
+prediction for a selected `close_nn` rule uses `network output at label 1
+> 0.5` (strict). The strict/non-strict difference matters only at exactly
+0.5 -- measure-zero for a float softmax output -- so the threshold VALUE is
+shared with the engine's semantics and not re-tuned here, but the
+comparisons are not literally identical operators.
 
 `--steps` STAYS UN-CLAMPED, UNLIKE S3a (documented there as a cost-knob
 guard when `neural_relations={}`): here `neural_relations` always contains
