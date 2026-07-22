@@ -1,5 +1,5 @@
 """Manual verification for `caviar_convert.convert_split` against the REAL
-`caviar_folds.pkl` (task S2).
+`caviar_folds.pkl`.
 
 Loads the pkl, converts one fold/split, then samples a fixed number of
 pair-times (seeded, so the sample is reproducible) and prints everything a
@@ -14,7 +14,7 @@ Usage:
 Defaults: fold=fold1, split=train, seed=0, n=10.
 
 This script does NOT commit or read any output file -- it is meant to be
-run once and the printed output pasted into the task report by hand.
+run once, with the printed output eyeballed by a human.
 """
 
 from __future__ import annotations

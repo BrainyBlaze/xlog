@@ -464,7 +464,7 @@ def test_frozen_select_abstains_when_the_detector_fits_nothing() -> None:
 
 
 def test_frozen_select_refuses_a_detector_left_in_train_mode() -> None:
-    """Review finding 1 (major, executed by the reviewer): in train mode a
+    """In train mode a
     BatchNorm mutates its running statistics EVEN UNDER no_grad and dropout
     makes two identical scoring calls disagree -- both violate the
     bit-identical-artifact guarantee this entry point exists to provide.
@@ -507,7 +507,7 @@ def test_frozen_select_in_eval_mode_mutates_nothing_and_is_repeatable() -> None:
 
 
 def test_frozen_select_refuses_a_mismatched_is_positive_length() -> None:
-    """Review finding N1 (medium, executed by the reviewer): a length-1
+    """A length-1
     is_positive broadcasts silently and every candidate scores against ONE
     label -- meaningless scores with no error. Refused typed, like zero facts."""
     from pyxlog.ilp.neural_credit import frozen_select
@@ -846,7 +846,7 @@ def test_train_engine_mode_threads_witness_mask_into_masked_facts_accounting() -
 
 
 def test_kfold_select_compiles_the_program_once_not_per_fold() -> None:
-    """W1.5 (scale probe follow-up): program compilation dominated the measured
+    """Program compilation dominated the measured
     kfold wall time (~75% at 10^4 events) because prog_factory was invoked per
     fold -- yet the program is only ever READ (valid_candidates,
     relation_facts), so one compilation serves every fold. Pin the invocation
@@ -977,14 +977,14 @@ def test_star_out_of_bounds_fact_key_is_refused_typed() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Star-mode canonicalization (S3a review, finding F1): a star cover for a
+# Star-mode canonicalization: a star cover for a
 # fully-relational (both non-neural) pair is symmetric --
 # cover(A,B) == cover(B,A) element for element -- but `valid_candidates`
 # enumerates BOTH orders as distinct candidates. Left undeduplicated, this
 # guarantees an exact tie between (A,B) and (B,A) at every fold, which
 # `select_rule`'s tie-tolerance floor then turns into a certain abstention
-# whenever the winning pair is the top candidate (proven against the real
-# CAVIAR fold1 data during review). Star mode must therefore keep only the
+# whenever the winning pair is the top candidate (confirmed against real
+# CAVIAR fold1 data). Star mode must therefore keep only the
 # lexicographically-smaller ordering of each fully-relational pair and drop
 # the `(A,A)` diagonal outright (a duplicate literal, not a genuine 2-body
 # rule) -- counted, never a silent cap, exactly like the pre-existing

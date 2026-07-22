@@ -1,4 +1,4 @@
-"""CAVIAR-to-relations converter for the WOLED star probe (task S2).
+"""CAVIAR-to-relations converter for the WOLED star probe.
 
 CAVIAR (`caviar_folds.pkl`) stores one (p1, p2) PAIR-WINDOW per datapoint: 24
 timesteps of two people's simple activities (walking/active/inactive/running)

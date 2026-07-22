@@ -1,8 +1,7 @@
-"""Multi-clause induction via sequential covering (task S5a).
+"""Multi-clause induction via sequential covering.
 
-WHY. The S4 deep analysis (`.analysis/analysis_s4_low_f1_2026_07_21/
-FINDINGS.md`, Finding 4) found that a SINGLE star clause is capped by
-composition alone: on CAVIAR fold1, ``both_inactive`` covers 77.2% of TRAIN
+WHY. A SINGLE star clause is capped by composition alone: on CAVIAR fold1,
+``both_inactive`` covers 77.2% of TRAIN
 positives but only 21.5% of TEST positives, so any single-clause rule that
 picks the "obviously best" train body is structurally recall-capped on test
 (F1 <= 0.354 at P=1). A two-clause THEORY -- ``(both_inactive ^ close) v
@@ -88,7 +87,7 @@ def induce_theory(
        immediately, no second-guessing.
     4. The proposed clause's NEWLY covered residual positives (facts that
        are residual-positive AND ``predict_clause(rule, fact)`` is True)
-       number FEWER than ``min_new_covered``. Per the task brief, this
+       number FEWER than ``min_new_covered``. In that case this
        clause is REJECTED, not committed -- a clause that barely nudges
        coverage is more likely fold noise than a genuine second mode in the
        data, and letting it in would silently degrade the "each clause is a

@@ -1,4 +1,4 @@
-"""Unit tests for `theory_loop.py` (task S5a) -- CPU, no pkl, no engine,
+"""Unit tests for `theory_loop.py` -- CPU, no pkl, no engine,
 no torch. `induce_theory` is pure control logic wrapping two caller-supplied
 closures (`select_once`, `predict_clause`); every fake here is plain Python,
 following the style of `test_caviar_scorer.py`/`test_caviar_detector_probe.py`.

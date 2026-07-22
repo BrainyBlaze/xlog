@@ -185,7 +185,7 @@ def enumerate_specs(prog, mask_name, facts, neural_relations, device, n_labels,
       applies to that one row exactly as it does to any chain witness.
 
     STAR-MODE CANONICALIZATION of the fully-relational (both non-neural)
-    pool (S3a review, finding F1). A star cover between two RELATIONAL
+    pool. A star cover between two RELATIONAL
     relations is symmetric -- ``cover(A, B) == cover(B, A)`` element for
     element, since it is just ``(x,y) in A and (x,y) in B`` -- but
     `valid_candidates`'s ordered cross product enumerates BOTH ``(A, B)``
@@ -193,8 +193,8 @@ def enumerate_specs(prog, mask_name, facts, neural_relations, device, n_labels,
     that guarantees an EXACT tie between them at every fold (byte-identical
     fold-mean holdout accuracies), which `_select_from_holdout`'s
     tie-tolerance floor then turns into a certain, structural abstention
-    whenever the winning pair happens to be the top candidate -- proven
-    against the real CAVIAR fold1 data during review, independent of steps,
+    whenever the winning pair happens to be the top candidate -- confirmed
+    against real CAVIAR fold1 data, independent of steps,
     seed, or dataset size. Star mode therefore filters the fully-relational
     branch (neither side neural) two ways before it ever reaches a
     `CandidateSpec`: a pair with ``left_name == right_name`` (the would-be

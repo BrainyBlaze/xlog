@@ -1,5 +1,5 @@
 """Pure-Python/torch detector-probe helpers for the CAVIAR neural-close
-differentiator (task S4a).
+differentiator.
 
 This module is the DIFFERENTIATOR'S EVIDENCE: `run_caviar_neural.py` trains a
 small MLP (`close_nn`) jointly through the star-topology engine credit, over
@@ -33,7 +33,7 @@ if str(EXAMPLE_DIR) not in sys.path:
 
 from scorer import prf1  # noqa: E402  -- pure Python, no torch/engine import
 
-# Distance-bin edges (module constant, per the task brief): 10 finite 5-unit
+# Distance-bin edges (module constant): 10 finite 5-unit
 # bins covering [0, 50) plus one open-ended "50+" bin for anything at or past
 # the last edge -- 11 bins total. CAVIAR's `close_threshold` (25.0, see
 # `caviar_convert.py`) falls at the boundary between bin index 4 ("20-25")
@@ -198,18 +198,19 @@ def probe_detector(
 
 
 # ---------------------------------------------------------------------------
-# Anisotropy metrics (task S5a, deep-analysis proposal 3)
+# Anisotropy metrics.
 #
-# The S4 deep analysis (`FINDINGS.md`, Finding 2) showed that `probe_detector`
-# / `monotone_decay_report`'s per-DISTANCE-BIN aggregation, averaged over
-# every angle that fell in a bin, completely hid a decision surface that was
-# a diagonal band (not a disk): at EVERY radius 5-30 the raw score ranged
-# 0.000-1.000 depending on angle alone (a polar-grid "spread" of 1.0), and
-# the pair-order asymmetry (swapping which person is p1 vs p2, i.e. negating
-# the (dx, dy) input) moved the score by 0.364 on average -- a third of the
-# score's whole range, for a quantity ((dx, dy)'s sign) that is an artifact
-# of person-numbering, not evidence. Bin-mean tables cannot show either
-# effect; the two functions below make them visible directly in RESULT.json.
+# `probe_detector`/`monotone_decay_report`'s per-DISTANCE-BIN aggregation,
+# averaged over every angle that fell in a bin, can completely hide a
+# decision surface that is a diagonal band (not a disk): an unconstrained
+# network trained on this task has been observed to range across its whole
+# 0.000-1.000 score at EVERY radius depending on angle alone (a polar-grid
+# "spread" of 1.0), and the pair-order asymmetry (swapping which person is
+# p1 vs p2, i.e. negating the (dx, dy) input) moved the score by ~0.364 on
+# average on real data -- a third of the score's whole range, for a
+# quantity ((dx, dy)'s sign) that is an artifact of person-numbering, not
+# evidence. Bin-mean tables cannot show either effect; the two functions
+# below make them visible directly in RESULT.json.
 #
 # Both take `score_fn`: a callable ``Tensor[N, 2] -> Tensor[N]`` (or anything
 # a plain Python `for` loop and `float()` can walk -- these functions never
@@ -247,10 +248,10 @@ def polar_spread(
     rounding, ~1e-14) the exact same input norm, hence the exact same score
     -- ``spread`` collapses to ~0 for such a function, by construction, not
     by a statistical accident. A score that instead depends on angle (e.g.
-    the S4 net's diagonal decision band) shows a spread up to 1.0 (a
+    a diagonal decision band) shows a spread up to 1.0 (a
     ``[0, 1]``-valued score's own full range) at every radius -- exactly the
-    anisotropy `FINDINGS.md`'s polar grid found and the bin-mean tables
-    could not show.
+    kind of anisotropy a polar grid can surface that bin-mean tables cannot
+    show.
 
     ``radii``/``n_angles`` are refused (``ValueError``) if empty/non-positive
     -- a spread over zero points is undefined, not a silent ``0.0``.
@@ -295,11 +296,12 @@ def pair_swap_asymmetry(score_fn, features) -> float:
     the pair is labeled p1 vs p2 -- an arbitrary numbering choice, not
     evidence -- so a detector that has actually learned a symmetric notion
     of "close" should score a pair the same regardless of which of the two
-    (equivalent, mirrored) input rows it is handed. This is exactly the
-    quantity `FINDINGS.md`'s Finding 2 measured as 0.364 on the S4 net (a
-    third of the score's own range): the negated batch is built and scored
-    HERE, in one extra `score_fn` call over the whole tensor, not per-row,
-    so this stays cheap even for a large ``features``.
+    (equivalent, mirrored) input rows it is handed. An unconstrained network
+    trained on this task has been measured scoring this asymmetry as high as
+    ~0.364 on real data (a third of the score's own range): the negated
+    batch is built and scored HERE, in one extra `score_fn` call over the
+    whole tensor, not per-row, so this stays cheap even for a large
+    ``features``.
 
     ``features`` must support tensor negation (``-features``); a plain
     ``torch.Tensor`` is expected (this function does not itself construct

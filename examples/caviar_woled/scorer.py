@@ -1,4 +1,4 @@
-"""Pure-Python/torch scoring for the CAVIAR star-search probe (task S3a).
+"""Pure-Python/torch scoring for the CAVIAR star-search probe.
 
 CPU-only, no engine import: everything here works on the plain Python
 ``relations``/``is_positive`` structures `caviar_convert.convert_split`
@@ -129,8 +129,8 @@ DEFAULT_BASELINE_PAIRS: list[tuple[str, str]] = [
 
 def theory_predictions(clauses: list, predict_clause, num_pt: int) -> list[bool]:
     """Prediction for every pair-time ``pt`` in ``range(num_pt)``: ``True``
-    iff ANY committed clause predicts it True (union over clauses -- task
-    S5a's theory-loop reading of a multi-clause theory: the theory fires
+    iff ANY committed clause predicts it True (union over clauses -- the
+    theory-loop reading of a multi-clause theory: the theory fires
     whenever at least one of its clauses does, mirroring how a set of
     definite-clause rules for the same head predicate is read as their
     disjunction).
@@ -156,10 +156,10 @@ def theory_predictions(clauses: list, predict_clause, num_pt: int) -> list[bool]
 
 def pr_curve(scores_gated: list[float], gold: list[bool], n_points: int = 50) -> list[dict]:
     """Precision/recall/F1 swept over ``n_points`` thresholds evenly spaced
-    over the closed interval ``[0.0, 1.0]`` -- the "soft-scoring" report the
-    deep analysis's proposal 4 asked for, so a single hard ``score > 0.5``
-    number never has to stand in for the whole picture (the S4 analysis
-    found that on CAVIAR fold1's test split, EVERY threshold ``theta > 0``
+    over the closed interval ``[0.0, 1.0]`` -- the "soft-scoring" report that
+    keeps a single hard ``score > 0.5`` number from having to stand in for
+    the whole picture: a single fixed threshold can hide sharp threshold
+    sensitivity (on CAVIAR fold1's test split, EVERY threshold ``theta > 0``
     hurt F1 relative to ``theta -> 0``; a single ``@0.5`` reading hid that
     entirely).
 

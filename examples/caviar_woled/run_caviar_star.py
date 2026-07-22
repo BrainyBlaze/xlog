@@ -1,4 +1,4 @@
-"""CAVIAR star-search pod entrypoint (task S3a).
+"""CAVIAR star-search pod entrypoint.
 
 Runs the first real WOLED/CAVIAR star-topology candidate search: load a fold
 split of `caviar_folds.pkl`, convert it to the pair-time relation space
@@ -18,9 +18,7 @@ engine. Argument parsing itself (``--help``) needs neither CUDA nor
 `pyxlog`/`torch` to succeed: every import that touches either -- including
 `caviar_convert`, which does `import torch` at its OWN module level -- is
 deferred into `main()`/its helpers, past `parse_args`, so `--help` is
-dependency-free. (A prior version of this script imported `caviar_convert`
-eagerly at module level, contradicting this same claim; caught in the S3a
-review, finding F3, and fixed here.)
+dependency-free.
 
 COORDS_MISSING IS EXCLUDED FROM THE CANDIDATE VOCABULARY. `coords_missing`
 (from `convert_split`) flags pair-times where a person's coordinates were
@@ -30,11 +28,10 @@ therefore never declared in the compiled schema and never `put_relation`'d
 into the engine here, so `valid_candidates` can never enumerate it as a
 bL/bR candidate. It remains available in Python -- `converted["relations"]
 ["coords_missing"]` and `converted["n_coords_missing"]` -- for a FUTURE
-witness_mask (contract #155) built from it; wiring that mask up is out of
-scope for this task and left for later.
+witness_mask built from it; wiring that mask up is left for later work.
 
-`--steps` IS CURRENTLY A COST KNOB ONLY, NOT A RESULT KNOB (S3a review,
-finding F2). This run configures `neural_relations={}` (no neural detector is
+`--steps` IS CURRENTLY A COST KNOB ONLY, NOT A RESULT KNOB. This run
+configures `neural_relations={}` (no neural detector is
 wired up yet -- see above), so every surviving star candidate scores via
 `spec.binary_cover`: a fixed {0,1} tensor with no dependency on the trained
 candidate logits `W` or the network `train_engine_mode` optimizes per fold.
@@ -72,8 +69,8 @@ CLOSE_THRESHOLD = 25.0
 MASK_NAME = "W"  # the learnable weight name in build_star_schema_source's template
 N_LABELS = 2
 MEMORY_MB = 2048
-# S3a review finding F2: with neural_relations={}, no held-out score can ever
-# depend on the trained W/network, so training steps beyond a small sanity
+# With neural_relations={}, no held-out score can ever depend on the
+# trained W/network, so training steps beyond a small sanity
 # budget are pure GPU cost with no effect on the result -- see the module
 # docstring's "`--steps` IS CURRENTLY A COST KNOB ONLY" paragraph.
 EMPTY_NEURAL_POOL_STEP_CAP = 25
@@ -81,8 +78,8 @@ EMPTY_NEURAL_POOL_STEP_CAP = 25
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(
-        description="CAVIAR star-topology candidate search over a fold split "
-        "(task S3a). Needs CUDA at run time; --help does not."
+        description="CAVIAR star-topology candidate search over a fold split. "
+        "Needs CUDA at run time; --help does not."
     )
     p.add_argument("--pkl", required=True, help="path to caviar_folds.pkl")
     p.add_argument("--fold", default="fold1", help="fold key, e.g. fold1 (default: fold1)")
@@ -117,8 +114,8 @@ def _require_cuda() -> None:
 
 def _prepare_out_path(out: str) -> Path:
     """Create --out's parent directory and write a tiny probe file BEFORE any
-    expensive work starts (S3a review, finding F4: RESULT.json was
-    previously written only after the paid kfold_select run, so a missing
+    expensive work starts (previously, RESULT.json was written only after
+    the paid kfold_select run, so a missing
     parent directory or a permissions problem surfaced as a
     FileNotFoundError/PermissionError only AFTER the GPU budget was already
     spent, with the run's stdout summary never printed at all). Both a
@@ -173,8 +170,7 @@ def _compile_and_ingest(pyxlog, converted: dict, n_labels: int = N_LABELS):
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
 
-    # Fail fast on a bad --out BEFORE any CUDA check or expensive work
-    # (S3a review finding F4).
+    # Fail fast on a bad --out BEFORE any CUDA check or expensive work.
     out_path = _prepare_out_path(args.out)
 
     _require_cuda()
@@ -190,7 +186,7 @@ def main(argv: list[str] | None = None) -> int:
     t0 = time.perf_counter()
     folds = load_folds(args.pkl)
     if args.fold not in folds:
-        # S3a review finding F5 (nit): only list keys that are actually fold
+        # Only list keys that are actually fold
         # splits (a dict with train/test), not the pkl's top-level encoder
         # keys (complex_label_encoder/simple_label_encoder) alongside them.
         available = sorted(
@@ -217,7 +213,7 @@ def main(argv: list[str] | None = None) -> int:
     # v1 probe: relational star candidates only, no neural detector yet.
     neural_relations: dict = {}
 
-    # S3a review finding F2: an empty neural pool means every held-out score
+    # An empty neural pool means every held-out score
     # is a fixed spec.binary_cover, never spec.is_neural -- the trained W and
     # network cannot affect the selection outcome, so steps beyond a small
     # sanity budget are wasted GPU time. Clamp loudly rather than silently.

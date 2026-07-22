@@ -1,6 +1,6 @@
-"""CAVIAR neural-close DIFFERENTIATOR pod entrypoint (task S4a).
+"""CAVIAR neural-close differentiator entrypoint.
 
-WHAT THIS SCRIPT IS FOR. `run_caviar_star.py` (task S3a) searched the star
+WHAT THIS SCRIPT IS FOR. `run_caviar_star.py` searched the star
 body over a candidate pool that INCLUDES the precomputed `close`/`far`
 relations (euclidean distance vs. a fixed threshold, computed once in
 `caviar_convert.convert_split` and handed to the engine as ground truth).
@@ -30,13 +30,13 @@ LOUD STATEMENT OF THE CANDIDATE VOCABULARY (read this twice):
     form:
         close, far, coords_missing
 
-`convert_split` still computes `close`/`far`/`coords_missing` internally (it
-always has, since S2) -- this script reads `train["relations"]["close"]` /
+`convert_split` still computes `close`/`far`/`coords_missing` internally --
+this script reads `train["relations"]["close"]` /
 `test["relations"]["close"]` ONLY for the DETECTOR PROBE below, which
 compares the trained network's output against that ground truth AFTER
 training has finished. `close`/`far` never reach `kfold_select`,
 `train_engine_mode`, or the network's loss in any form -- grep this file (and
-`caviar_convert.py`, unmodified) yourself before trusting that claim.
+`caviar_convert.py`) yourself before trusting that claim.
 
 `close_nn`'S ENGINE REGISTRATION. Star mode's neural-tail semantics
 (`pyxlog.ilp.neural_credit.enumerate_specs`, `topology="star"`) are:
@@ -56,8 +56,8 @@ placeholders, which have NO ground extension at all and are still
 cross-producted by `valid_candidates` before being pool-filtered downstream.
 `close_nn` is therefore declared but never `put_relation`'d -- see
 `_compile_and_ingest`'s docstring for the exact mechanics. `neural_credit.py`
-is NOT modified by this task; this registration uses only its existing,
-tested API (mirrors `test_star_neural_tail_is_cover_gated_single_witness` in
+is unchanged; this registration only exercises its existing, tested API
+(mirrors `test_star_neural_tail_is_cover_gated_single_witness` in
 `test_neural_credit.py`).
 
 NETWORK SHAPE (the exact convention a pod runner should sanity-check
@@ -77,15 +77,16 @@ prediction for a selected `close_nn` rule uses `network output at label 1
 shared with the engine's semantics and not re-tuned here, but the
 comparisons are not literally identical operators.
 
-`--steps` STAYS UN-CLAMPED, UNLIKE S3a (documented there as a cost-knob
-guard when `neural_relations={}`): here `neural_relations` always contains
-`close_nn`, so every held-out score for an (`A`, `close_nn`) candidate DOES
-depend on the trained network (`spec.is_neural` is taken), and the
-star-canonicalized relational-relational candidates still exist alongside it
--- training steps are a real result knob. The clamp code is kept (mirroring
-S3a's structure so a future all-relational configuration stays protected by
-the same guard) but is provably dead code in THIS script, since
-`neural_relations` is never empty here.
+`--steps` STAYS UN-CLAMPED here, UNLIKE `run_caviar_star.py` (which caps
+steps as a cost-knob guard only when its neural-relations pool is empty):
+here `neural_relations` always contains `close_nn`, so every held-out score
+for an (`A`, `close_nn`) candidate DOES depend on the trained network
+(`spec.is_neural` is taken), and the star-canonicalized relational-relational
+candidates still exist alongside it -- training steps are a real result
+knob. The clamp code is kept (mirroring `run_caviar_star.py`'s structure so a
+future all-relational configuration stays protected by the same guard) but
+is provably dead code in THIS script, since `neural_relations` is never
+empty here.
 
 DETECTOR PROBE (the differentiator's actual evidence -- see
 `detector_probe.py`): after training, the network's output is compared
@@ -103,7 +104,7 @@ training, not to a different random init.
 CUDA-ONLY AT RUNTIME (mirrors `run_caviar_star.py`): `IlpProgramFactory.
 compile`/`put_relation`/`kfold_select` need a real CUDA device; `--help`
 needs neither CUDA nor `pyxlog`/`torch` (every such import is deferred past
-`parse_args`, exactly like S3a after its F3 fix).
+`parse_args`, exactly like `run_caviar_star.py`).
 """
 
 from __future__ import annotations
@@ -139,9 +140,9 @@ ACTIVITY_RELATIONS: tuple[str, ...] = (
 )
 CLOSE_NN_NAME = "close_nn"
 
-# S3a's cost-knob guard, kept for structural parity (see module docstring's
-# "--steps STAYS UN-CLAMPED" paragraph) -- unreachable in this script, since
-# `neural_relations` always contains `close_nn` here.
+# Cost-knob guard kept for structural parity with run_caviar_star.py (see
+# module docstring's "--steps STAYS UN-CLAMPED" paragraph) -- unreachable in
+# this script, since `neural_relations` always contains `close_nn` here.
 EMPTY_NEURAL_POOL_STEP_CAP = 25
 
 # Activities-only baseline pairs (close/far are absent from the vocabulary,
@@ -156,7 +157,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(
         description="CAVIAR neural-close differentiator: star-topology "
         "candidate search with a trained close_nn detector replacing the "
-        "precomputed close/far relations (task S4a). Needs CUDA at run "
+        "precomputed close/far relations. Needs CUDA at run "
         "time; --help does not."
     )
     p.add_argument("--pkl", required=True, help="path to caviar_folds.pkl")
@@ -191,7 +192,7 @@ def _require_cuda() -> None:
 
 def _prepare_out_path(out: str) -> Path:
     """Create --out's parent directory and write a tiny probe file BEFORE
-    any expensive work starts (mirrors S3a's F4 fix): a missing parent
+    any expensive work starts: a missing parent
     directory or a permissions problem must surface in the first second,
     not after a paid GPU run. Overwritten by the real RESULT.json at the
     end of a successful run."""

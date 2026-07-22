@@ -1,4 +1,4 @@
-"""Unit tests for `detector_probe.py` (task S4a) -- CPU, no pkl, no engine,
+"""Unit tests for `detector_probe.py` -- CPU, no pkl, no engine,
 no torch required (every case here uses plain Python lists; the module
 itself never imports torch, so these tests would pass even without torch
 installed -- verified by NOT importing torch anywhere in this file).
@@ -130,7 +130,7 @@ def test_probe_detector_exclude_rows_drops_them_from_everything():
 
 
 def test_probe_detector_no_close_rows_is_flagged_not_crashed():
-    """Degenerate case (per the brief): no ground-truth close rows at all
+    """Degenerate case: no ground-truth close rows at all
     must not crash -- flagged via `no_close_rows`, and `prf1`'s own
     `degenerate` flag fires (zero actual positives)."""
     scores = [0.9, 0.2]
@@ -207,7 +207,7 @@ def test_monotone_decay_with_fewer_than_two_populated_bins_is_undefined_not_cras
 
 
 # ---------------------------------------------------------------------------
-# polar_spread (task S5a, deep-analysis proposal 3)
+# polar_spread
 # ---------------------------------------------------------------------------
 
 
@@ -270,7 +270,7 @@ def test_polar_spread_refuses_non_positive_n_angles():
 
 
 # ---------------------------------------------------------------------------
-# pair_swap_asymmetry (task S5a, deep-analysis proposal 3)
+# pair_swap_asymmetry
 # ---------------------------------------------------------------------------
 
 

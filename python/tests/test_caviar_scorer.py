@@ -1,4 +1,4 @@
-"""Unit tests for `scorer.py` (task S3a) -- CPU, no pkl, no engine.
+"""Unit tests for `scorer.py` -- CPU, no pkl, no engine.
 
 Hand-built tiny `relations` dicts (the same `dict[str, list[(pt, 1)]]` shape
 `caviar_convert.convert_split` produces) so every number below is hand-
@@ -142,7 +142,7 @@ def test_baseline_report_uses_default_pairs_when_none_given():
 
 
 # ---------------------------------------------------------------------------
-# theory_predictions (task S5a): union of clause predictions
+# theory_predictions: union of clause predictions
 # ---------------------------------------------------------------------------
 
 
@@ -179,7 +179,7 @@ def test_theory_predictions_single_clause_matches_that_clauses_own_predictions()
 
 
 # ---------------------------------------------------------------------------
-# pr_curve (task S5a): soft-scoring PR sweep
+# pr_curve: soft-scoring PR sweep
 # ---------------------------------------------------------------------------
 
 

@@ -1,31 +1,33 @@
-"""CAVIAR multi-clause THEORY LOOP pod entrypoint (task S5a).
+"""CAVIAR multi-clause THEORY LOOP pod entrypoint.
 
-WHAT THIS SCRIPT IS FOR. `run_caviar_star.py` (S3a) and `run_caviar_neural.py`
-(S4a) each search for a SINGLE star clause. The S4 deep analysis
-(`.analysis/analysis_s4_low_f1_2026_07_21/FINDINGS.md`) found that a single
-clause is capped by CAVIAR fold1's own composition: ``both_inactive`` covers
+WHAT THIS SCRIPT IS FOR. `run_caviar_star.py` and `run_caviar_neural.py`
+each search for a SINGLE star clause. A single clause is capped by CAVIAR
+fold1's own composition: ``both_inactive`` covers
 77.2% of TRAIN positives but only 21.5% of TEST positives, so whichever
 single body the arbiter picks on train is structurally recall-capped on
 test. A TWO-clause theory that also covers the OTHER composition mode
-(``both_active``) lifts test F1 from 0.354/0.078 to 0.921 (Finding 4). This
+(``both_active``) lifts test F1 from 0.354/0.078 to 0.921. This
 script wraps `theory_loop.induce_theory` (pure sequential-covering control
 logic, engine-agnostic, unit-tested on its own) around the real engine to
 build such a multi-clause theory for real, in two vocabularies:
 
-* ``--mode relational``: the S3a vocabulary (4 activities + the PRECOMPUTED
+* ``--mode relational``: the same vocabulary as `run_caviar_star.py` (4
+  activities + the PRECOMPUTED
   ``close``/``far`` ground-truth relations) -- geometry is given, not
   learned. `select_once` wraps `kfold_select(topology="star")` over
   whatever residual facts/labels the theory loop hands it; the compiled
   PROGRAM and its ingested relations never change between iterations, only
   the fact/label lists searched over shrink.
-* ``--mode neural``: the S4a vocabulary (4 activities only, plus a trained
+* ``--mode neural``: the same vocabulary as `run_caviar_neural.py` (4
+  activities only, plus a trained
   ``close_nn`` detector -- no precomputed geometry reaches the candidate
-  pool at all) BUT with SYMMETRIZATION (deep-analysis proposal 2, see
+  pool at all) BUT with SYMMETRIZATION (see
   `_build_symmetric_mlp` below): the network is wrapped so
-  ``forward(x) == forward(-x)`` EXACTLY, by construction, addressing the S4
-  finding that a person-pair's (dx, dy) sign is an arbitrary numbering
-  choice the S4 net nonetheless leaned on (pair-swap asymmetry 0.364 on
-  test -- FINDINGS.md, Finding 2). Each theory-loop iteration RE-TRAINS a
+  ``forward(x) == forward(-x)`` EXACTLY, by construction, addressing the
+  fact that a person-pair's (dx, dy) sign is an arbitrary numbering
+  choice an unconstrained network can still lean on (an unconstrained net
+  trained this way has measured pair-swap asymmetry up to ~0.364 on real
+  data; the wrapper makes it exactly 0). Each theory-loop iteration RE-TRAINS a
   fresh network via `kfold_select`, and -- once a clause is accepted -- a
   SEPARATE full-train pass over that iteration's own residual produces the
   network actually deployed for THAT clause; the theory therefore ends up
@@ -33,21 +35,21 @@ build such a multi-clause theory for real, in two vocabularies:
   clause, not one shared network (documented honestly -- see
   `_run_neural_theory`'s docstring).
 
-SYMMETRIZATION IS SCOPED TO THIS SCRIPT ONLY. `run_caviar_neural.py` (S4a)
-is a RECORDED RESULT and its entrypoint semantics stay byte-equivalent --
+SYMMETRIZATION IS SCOPED TO THIS SCRIPT ONLY. `run_caviar_neural.py`'s
+entrypoint semantics stay byte-equivalent --
 its own network construction (`_build_mlp`) is untouched, and this script
 does not import or call it. `caviar_convert.py`, `scorer.py`, and
-`detector_probe.py` are shared, unmodified-behavior helpers (this task adds
-new functions to the latter two; every pre-existing function's behavior is
+`detector_probe.py` are shared, unmodified-behavior helpers (new functions
+were added to the latter two; every pre-existing function's behavior is
 unchanged -- see their own module docstrings).
 
-CLOSE/FAR NEVER REACH NEURAL TRAINING (same guarantee as S4a): in
+CLOSE/FAR NEVER REACH NEURAL TRAINING (same guarantee as `run_caviar_neural.py`): in
 ``--mode neural``, `close`/`far`/`coords_missing` are never declared in the
 compiled schema and never `put_relation`'d; they are read ONLY after all
 training has finished, purely for the detector-probe/polar-spread/
 pair-swap-asymmetry evidence below.
 
-CUDA-ONLY AT RUNTIME (mirrors S3a/S4a): `IlpProgramFactory.compile`/
+CUDA-ONLY AT RUNTIME (mirrors `run_caviar_star.py`/`run_caviar_neural.py`): `IlpProgramFactory.compile`/
 `put_relation`/`kfold_select`/`train_engine_mode` need a real CUDA device;
 `--help` needs neither CUDA nor `pyxlog`/`torch` -- every such import is
 deferred past `parse_args`.
@@ -91,11 +93,11 @@ ACTIVITY_RELATIONS: tuple[str, ...] = (
     "both_active", "both_inactive", "both_walking", "mixed_active_walking",
 )
 
-# The theory loop's own coverage-acceptance floor (task brief's default;
-# not exposed on the CLI -- see the brief's exact CLI argument list).
+# The theory loop's own coverage-acceptance floor (default value;
+# not exposed on the CLI).
 MIN_NEW_COVERED = 10
 
-# S3a's cost-knob guard: relational mode's `neural_relations` is always
+# Cost-knob guard: relational mode's `neural_relations` is always
 # empty (geometry is precomputed `close`/`far`, not a trained detector), so
 # every held-out score is a fixed relational cover and the trained
 # placeholder network/candidate weights cannot affect the result -- see
@@ -105,7 +107,7 @@ EMPTY_NEURAL_POOL_STEP_CAP = 25
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(
-        description="CAVIAR multi-clause theory loop (task S5a): sequential "
+        description="CAVIAR multi-clause theory loop: sequential "
         "covering over a star-topology candidate pool, relational or "
         "neural vocabulary. Needs CUDA at run time; --help does not.",
     )
@@ -142,7 +144,8 @@ def _require_cuda() -> None:
 
 def _prepare_out_path(out: str) -> Path:
     """Create --out's parent directory and write a tiny probe file BEFORE
-    any expensive work starts (mirrors S3a's/S4a's fail-fast fix)."""
+    any expensive work starts (mirrors `run_caviar_star.py`'s/
+    `run_caviar_neural.py`'s fail-fast fix)."""
     out_path = Path(out)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text("started\n")
@@ -158,16 +161,16 @@ def _pair_dists(features) -> list[float]:
 
 
 # ---------------------------------------------------------------------------
-# Relational mode: vocabulary = 4 activities + close + far (S3a-style).
+# Relational mode: vocabulary = 4 activities + close + far.
 # ---------------------------------------------------------------------------
 
 
 def _filtered_relation_names(converted: dict) -> list[str]:
     """Every relation name except 'coords_missing' -- mirrors
     `run_caviar_star.py`'s identically-named helper (not imported from
-    there: that script's own entrypoint semantics stay untouched by this
-    task, so its helpers are re-derived here rather than shared, per the
-    brief's byte-equivalence requirement)."""
+    there: that script's own entrypoint semantics stay untouched,
+    so its helpers are re-derived here rather than shared, to preserve
+    byte-for-byte equivalent behavior)."""
     return sorted(name for name in converted["relations"] if name != "coords_missing")
 
 
@@ -286,7 +289,7 @@ def _run_relational_theory(pyxlog, torch, kfold_select, args, train, test, wall)
 
 
 # ---------------------------------------------------------------------------
-# Neural mode: vocabulary = 4 activities + close_nn (S4a-style), symmetrized.
+# Neural mode: vocabulary = 4 activities + close_nn, symmetrized.
 # ---------------------------------------------------------------------------
 
 
@@ -319,16 +322,16 @@ def _compile_and_ingest_neural(pyxlog, converted: dict, n_labels: int = N_LABELS
 
 
 def _build_symmetric_mlp(hidden: int, device):
-    """`close_nn`'s network, WRAPPED for exact pair-order invariance (deep-
-    analysis proposal 2): ``forward(x) = (base(x) + base(-x)) / 2``.
+    """`close_nn`'s network, WRAPPED for exact pair-order invariance:
+    ``forward(x) = (base(x) + base(-x)) / 2``.
 
     WHY. A CAVIAR pair-time's ``(dx, dy)`` input sign depends on which
     person is arbitrarily labeled p1 vs p2 -- an artifact of enumeration
-    order, not evidence about the world. `FINDINGS.md`'s Finding 2 measured
-    the UNSYMMETRIZED S4 network's pair-swap asymmetry
-    (``mean |s(dx,dy) - s(-dx,-dy)|``) at 0.364 on test: over a third of the
-    score's own [0, 1] range moved for no reason but which person happened
-    to be listed first. Wrapping the base network this way makes
+    order, not evidence about the world. An unsymmetrized network trained
+    this way has measured pair-swap asymmetry
+    (``mean |s(dx,dy) - s(-dx,-dy)|``) as high as 0.364 on real test data:
+    over a third of the score's own [0, 1] range moved for no reason but
+    which person happened to be listed first. Wrapping the base network this way makes
     ``forward(x) == forward(-x)`` EXACTLY, for every input, by construction
     (algebraic identity: ``base(-(-x)) == base(x)``, so swapping the wrapped
     network's own input just swaps the two summands) -- not an
@@ -410,8 +413,8 @@ def _run_neural_theory(pyxlog, torch, kfold_select, args, train, test, wall):
             # own trained network AND its own later "control" (see below)
             # both start from torch.manual_seed(args.seed) immediately
             # before construction, so the two are directly comparable per
-            # clause -- mirrors S4a's trained-vs-control convention,
-            # generalized to "per clause" instead of "the one net".
+            # clause -- mirrors run_caviar_neural.py's trained-vs-control
+            # convention, generalized to "per clause" instead of "the one net".
             torch.manual_seed(args.seed)
             net_to_train = make_network()
             train_result = train_engine_mode(
@@ -498,7 +501,7 @@ def _run_neural_theory(pyxlog, torch, kfold_select, args, train, test, wall):
         clauses, predict_clause_train, predict_clause_test, train, test,
     )
 
-    # Soft PR curves (deep-analysis proposal 4): per neural clause, the
+    # Soft PR curves: per neural clause, the
     # COVER-GATED score (the network's own P(label=1) where the clause's
     # left literal covers the row, 0.0 elsewhere -- the same cover-gating
     # `enumerate_specs`' star mode already applies), swept over thresholds;
@@ -523,9 +526,8 @@ def _run_neural_theory(pyxlog, torch, kfold_select, args, train, test, wall):
     if clauses:
         # Soft union: max over each clause's own gated score at that row --
         # a soft OR (documented choice: a hard union would just be
-        # theory_predictions itself; this is the SOFT reading proposal 4
-        # asked for, generalized from "one clause's PR curve" to "the whole
-        # theory's").
+        # theory_predictions itself; this is the SOFT reading that
+        # generalizes "one clause's PR curve" to "the whole theory's").
         per_clause_gated = []
         for idx, rule in enumerate(clauses):
             left, right = rule

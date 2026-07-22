@@ -1,4 +1,4 @@
-"""Unit tests for `caviar_convert.convert_split` (task S2) -- CPU, no pkl.
+"""Unit tests for `caviar_convert.convert_split` -- CPU, no pkl.
 
 Builds two tiny synthetic datapoints (T=3, not 24: the converter must infer
 the window length from `complex_labels`, never hardcode it) with hand-known
