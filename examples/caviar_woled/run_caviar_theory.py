@@ -38,16 +38,32 @@ build such a multi-clause theory for real, in two vocabularies:
 SYMMETRIZATION IS SCOPED TO THIS SCRIPT ONLY. `run_caviar_neural.py`'s
 entrypoint semantics stay byte-equivalent --
 its own network construction (`_build_mlp`) is untouched, and this script
-does not import or call it. `caviar_convert.py`, `scorer.py`, and
-`detector_probe.py` are shared, unmodified-behavior helpers (new functions
-were added to the latter two; every pre-existing function's behavior is
-unchanged -- see their own module docstrings).
+does not import or call it. `caviar_convert.py`, `scorer.py`,
+`detector_probe.py`, and `ec_scorer.py` are shared, unmodified-behavior
+helpers (new functions were added to `caviar_convert.py`, `scorer.py`, and
+`detector_probe.py`; `ec_scorer.py` is new; every pre-existing function's
+behavior is unchanged -- see their own module docstrings).
 
 CLOSE/FAR NEVER REACH NEURAL TRAINING (same guarantee as `run_caviar_neural.py`): in
 ``--mode neural``, `close`/`far`/`coords_missing` are never declared in the
 compiled schema and never `put_relation`'d; they are read ONLY after all
 training has finished, purely for the detector-probe/polar-spread/
 pair-swap-asymmetry evidence below.
+
+TWO EVALUATION PROTOCOLS. ``--protocol direct`` (default, unchanged) induces
+ONE theory against the per-timestep holdsAt-style label, exactly as
+described above. ``--protocol ec`` instead induces TWO theories -- one
+against `caviar_convert.derive_ec_targets`'s ``is_init``, one against its
+``is_term`` -- in the SAME candidate vocabulary and with the SAME theory-
+loop control logic (relational mode: both reuse the one compiled program
+and its set-intersection cover; neural mode: each gets its own per-clause
+``close_nn`` networks, exactly as the direct protocol's single theory
+already does). The two predicted event sequences are then reconstructed
+into a holdsAt sequence by the classic Event-Calculus inertia rule
+(`ec_scorer.reconstruct_holds`) and scored frame-by-frame against the same
+gold the direct protocol scores against (`ec_scorer.frame_f1`); the direct
+protocol's own theory is run once more, in full, on this SAME fold and
+reported alongside for context.
 
 CUDA-ONLY AT RUNTIME (mirrors `run_caviar_star.py`/`run_caviar_neural.py`): `IlpProgramFactory.compile`/
 `put_relation`/`kfold_select`/`train_engine_mode` need a real CUDA device;
@@ -80,6 +96,7 @@ from detector_probe import (  # noqa: E402
     polar_spread,
     probe_detector,
 )
+from ec_scorer import frame_f1, reconstruct_holds  # noqa: E402
 from scorer import baseline_report, pr_curve, prf1, theory_predictions  # noqa: E402
 from theory_loop import induce_theory  # noqa: E402
 
@@ -112,6 +129,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "neural vocabulary. Needs CUDA at run time; --help does not.",
     )
     p.add_argument("--mode", required=True, choices=("relational", "neural"))
+    p.add_argument(
+        "--protocol", default="direct", choices=("direct", "ec"),
+        help="'direct': the existing per-timestep holdsAt-style target "
+        "(default, unchanged behavior). 'ec': induce a SEPARATE "
+        "initiatedAt/terminatedAt theory pair, reconstruct holdsAt by "
+        "inertia, and report frame-level F1 alongside the direct "
+        "protocol's own theory F1 on the same fold for context.",
+    )
     p.add_argument("--pkl", required=True, help="path to caviar_folds.pkl")
     p.add_argument("--fold", default="fold1", help="fold key, e.g. fold1 (default: fold1)")
     p.add_argument("--k", type=int, default=4, help="k-fold holdout folds per select_once call (default: 4)")
@@ -264,7 +289,7 @@ def _run_relational_theory(pyxlog, torch, kfold_select, args, train, test, wall)
     predict_clause_test = _predict_clause_relational(test["relations"])
     scoring = _score_theory(
         theory["clauses"], predict_clause_train, predict_clause_test,
-        train, test,
+        train["num_pt"], train["is_positive"], test["num_pt"], test["is_positive"],
     )
 
     baselines = {
@@ -366,28 +391,25 @@ def _build_symmetric_mlp(hidden: int, device):
     return _Symmetrized(base).to(device)
 
 
-def _run_neural_theory(pyxlog, torch, kfold_select, args, train, test, wall):
-    from pyxlog.ilp.neural_credit import NeuralRelationSpec, train_engine_mode
+def _induce_neural_theory_for_target(
+    torch, kfold_select, train_engine_mode, prog, make_network, features_train,
+    neural_relations, activity_sets_train, args, facts, target_labels, wall, wall_key,
+):
+    """Neural-mode theory induction for ONE target label sequence aligned
+    with ``facts`` -- the exact per-clause-retrain mechanism `_run_neural_
+    theory` uses for the direct (meeting) target, generalized so `--protocol
+    ec` can call it again for ``is_init`` and again for ``is_term``: each
+    committed clause still gets its OWN independently trained ``close_nn``
+    network (never a network shared across clauses, or across target
+    calls -- see the module docstring's "each theory gets its own nets"
+    note).
 
-    prog = _compile_and_ingest_neural(pyxlog, train)
-
-    device = torch.device("cuda")
-    features_train = train["features"].to(device)
-    features_test = test["features"].to(device)
-
-    def make_network():
-        return _build_symmetric_mlp(args.hidden, device)
-
-    neural_relations = {CLOSE_NN_NAME: NeuralRelationSpec(num_rows=train["num_pt"], arity=2)}
-
-    # `call_log`: every `select_once` call's (rule, net) pair, IN CALL ORDER
-    # (rule=None, net=None on an abstain). `theory_loop.induce_theory` calls
-    # `select_once` exactly once per entry in its own returned
-    # `"iterations"` list, in the same order -- so zipping the two after the
-    # loop finishes recovers each COMMITTED clause's own net unambiguously,
-    # without keying anything by the rule's (left, right) VALUE (which a
-    # later, rejected re-proposal of an already-committed rule could
-    # otherwise silently corrupt -- see `main`'s post-loop bookkeeping).
+    Returns ``(theory, nets_by_clause_idx)``: ``theory`` is `theory_loop.
+    induce_theory`'s own result dict; ``nets_by_clause_idx`` maps each
+    COMMITTED clause's position to its trained network, recovered
+    positionally from a per-call ``call_log`` (never keyed by the rule's
+    VALUE, since a theory may legally commit the same rule twice, each with
+    its own net)."""
     call_log: list[tuple] = []
     # In-loop-only mutable slot: `theory_loop.induce_theory` only ever calls
     # `predict_clause` about the rule `select_once` JUST returned THIS
@@ -397,8 +419,6 @@ def _run_neural_theory(pyxlog, torch, kfold_select, args, train, test, wall):
     # cheaper than a per-fact forward pass.
     current = {"rule": None, "scores": None}
     iteration_wall: list[float] = []
-
-    activity_sets_train = {n: set(train["relations"][n]) for n in ACTIVITY_RELATIONS}
 
     def select_once(residual_facts, residual_is_positive):
         t = time.perf_counter()
@@ -445,16 +465,17 @@ def _run_neural_theory(pyxlog, torch, kfold_select, args, train, test, wall):
 
     t0 = time.perf_counter()
     theory = induce_theory(
-        select_once, loop_predict_clause, train["facts"], train["is_positive"],
+        select_once, loop_predict_clause, facts, target_labels,
         max_clauses=args.max_clauses, min_new_covered=MIN_NEW_COVERED,
     )
-    wall["theory_loop"] = time.perf_counter() - t0
-    wall["theory_loop_per_iteration"] = iteration_wall
+    wall[wall_key] = time.perf_counter() - t0
+    wall[f"{wall_key}_per_iteration"] = iteration_wall
 
-    # Recover each COMMITTED clause's own net, positionally (see call_log's
-    # docstring above) -- `clauses[j]` and `nets_per_clause[j]` are THE SAME
-    # commit, by construction (both built by iterating `iterations` and
-    # `call_log` in lockstep and keeping only "committed" entries).
+    # Recover each COMMITTED clause's own net, positionally (see this
+    # function's own docstring) -- `clauses[j]` and `nets_per_clause[j]` are
+    # THE SAME commit, by construction (both built by iterating
+    # `iterations` and `call_log` in lockstep and keeping only "committed"
+    # entries).
     nets_per_clause = [
         net for it, (_, net) in zip(theory["iterations"], call_log)
         if it["reason"] == "committed"
@@ -462,43 +483,75 @@ def _run_neural_theory(pyxlog, torch, kfold_select, args, train, test, wall):
     clauses = theory["clauses"]
     if len(nets_per_clause) != len(clauses):
         raise RuntimeError(
-            f"per-clause net recovery drifted: {len(nets_per_clause)} nets "
-            f"for {len(clauses)} committed clauses -- the call_log/iterations "
-            "lockstep invariant is broken."
+            f"per-clause net recovery drifted for {wall_key}: "
+            f"{len(nets_per_clause)} nets for {len(clauses)} committed "
+            "clauses -- the call_log/iterations lockstep invariant is broken."
         )
     # Keyed POSITIONALLY (clause index), never by rule value: a theory may
     # legally commit the same rule twice (each with its own net), and a
     # value-keyed dict would silently collapse them.
     nets_by_clause_idx = dict(enumerate(nets_per_clause))
+    return theory, nets_by_clause_idx
 
-    def make_final_predict_clause(relations, features):
-        sets = {n: set(relations[n]) for n in ACTIVITY_RELATIONS}
-        scores_by_clause_idx = {}
-        for idx, net in nets_by_clause_idx.items():
-            with torch.no_grad():
-                scores_by_clause_idx[idx] = net(features)[:, 1].tolist()
 
-        def predict(rule, fact, _clause_idx=None):
-            left, right = rule
-            if fact not in sets[left]:
-                return False
-            if right == CLOSE_NN_NAME:
-                idx = (_clause_idx if _clause_idx is not None
-                       else clauses.index(rule))
-                return scores_by_clause_idx[idx][fact[0]] > 0.5
-            return fact in sets[right]
+def _make_final_predict_clause(clauses, nets_by_clause_idx, torch, relations, features):
+    """A `predict_clause(rule, fact) -> bool` closure for the FINAL,
+    committed theory (as opposed to `_induce_neural_theory_for_target`'s own
+    in-loop ``loop_predict_clause``, which only ever needs the CURRENT
+    iteration's clause): reads each clause's own trained network's score
+    over the given ``features`` tensor (train or test), batched once up
+    front rather than per fact."""
+    sets = {n: set(relations[n]) for n in ACTIVITY_RELATIONS}
+    scores_by_clause_idx = {}
+    for idx, net in nets_by_clause_idx.items():
+        with torch.no_grad():
+            scores_by_clause_idx[idx] = net(features)[:, 1].tolist()
 
-        return predict, scores_by_clause_idx
+    def predict(rule, fact, _clause_idx=None):
+        left, right = rule
+        if fact not in sets[left]:
+            return False
+        if right == CLOSE_NN_NAME:
+            idx = (_clause_idx if _clause_idx is not None
+                   else clauses.index(rule))
+            return scores_by_clause_idx[idx][fact[0]] > 0.5
+        return fact in sets[right]
 
-    predict_clause_train, train_scores_by_idx = make_final_predict_clause(
-        train["relations"], features_train
+    return predict, scores_by_clause_idx
+
+
+def _run_neural_theory(pyxlog, torch, kfold_select, args, train, test, wall):
+    from pyxlog.ilp.neural_credit import NeuralRelationSpec, train_engine_mode
+
+    prog = _compile_and_ingest_neural(pyxlog, train)
+
+    device = torch.device("cuda")
+    features_train = train["features"].to(device)
+    features_test = test["features"].to(device)
+
+    def make_network():
+        return _build_symmetric_mlp(args.hidden, device)
+
+    neural_relations = {CLOSE_NN_NAME: NeuralRelationSpec(num_rows=train["num_pt"], arity=2)}
+    activity_sets_train = {n: set(train["relations"][n]) for n in ACTIVITY_RELATIONS}
+
+    theory, nets_by_clause_idx = _induce_neural_theory_for_target(
+        torch, kfold_select, train_engine_mode, prog, make_network, features_train,
+        neural_relations, activity_sets_train, args, train["facts"], train["is_positive"],
+        wall, "theory_loop",
     )
-    predict_clause_test, test_scores_by_idx = make_final_predict_clause(
-        test["relations"], features_test
+    clauses = theory["clauses"]
+
+    predict_clause_train, train_scores_by_idx = _make_final_predict_clause(
+        clauses, nets_by_clause_idx, torch, train["relations"], features_train
+    )
+    predict_clause_test, test_scores_by_idx = _make_final_predict_clause(
+        clauses, nets_by_clause_idx, torch, test["relations"], features_test
     )
 
     scoring = _score_theory(
-        clauses, predict_clause_train, predict_clause_test, train, test,
+        clauses, predict_clause_train, predict_clause_test,
+        train["num_pt"], train["is_positive"], test["num_pt"], test["is_positive"],
     )
 
     # Soft PR curves: per neural clause, the
@@ -656,25 +709,34 @@ def _theory_json(theory: dict) -> dict:
     }
 
 
-def _score_theory(clauses, predict_clause_train, predict_clause_test, train, test) -> dict:
+def _score_theory(
+    clauses, predict_clause_train, predict_clause_test,
+    num_pt_train, gold_train, num_pt_test, gold_test,
+) -> dict:
     """Theory F1 (train + test, union of clauses) plus each clause's
     marginal contribution to TEST F1 (theory F1 minus the F1 of the theory
     with that one clause removed) -- a NEGATIVE marginal is possible and
     reported honestly (a clause can, in principle, hurt precision more than
-    it helps recall once combined with the others)."""
-    train_pred = theory_predictions(clauses, predict_clause_train, train["num_pt"])
-    test_pred = theory_predictions(clauses, predict_clause_test, test["num_pt"])
+    it helps recall once combined with the others).
+
+    ``gold_train``/``gold_test`` are passed explicitly (rather than read off
+    a ``train``/``test`` dict's own ``"is_positive"``) so this same scoring
+    logic is reusable against ANY aligned target -- the direct per-timestep
+    label, or the Event-Calculus ``is_init``/``is_term`` targets `run_caviar_
+    theory.py`'s ``--protocol ec`` induces separate theories for."""
+    train_pred = theory_predictions(clauses, predict_clause_train, num_pt_train)
+    test_pred = theory_predictions(clauses, predict_clause_test, num_pt_test)
     theory_prf1 = {
-        "train": prf1(train_pred, train["is_positive"]),
-        "test": prf1(test_pred, test["is_positive"]),
+        "train": prf1(train_pred, gold_train),
+        "test": prf1(test_pred, gold_test),
     }
 
     marginal = []
     full_test_f1 = theory_prf1["test"]["f1"]
     for i, clause in enumerate(clauses):
         without = clauses[:i] + clauses[i + 1:]
-        pred_without = theory_predictions(without, predict_clause_test, test["num_pt"])
-        f1_without = prf1(pred_without, test["is_positive"])["f1"]
+        pred_without = theory_predictions(without, predict_clause_test, num_pt_test)
+        f1_without = prf1(pred_without, gold_test)["f1"]
         marginal.append({
             "clause": list(clause),
             "test_f1_without": f1_without,
@@ -682,6 +744,212 @@ def _score_theory(clauses, predict_clause_train, predict_clause_test, train, tes
         })
 
     return {"theory_prf1": theory_prf1, "marginal_contribution": marginal}
+
+
+# ---------------------------------------------------------------------------
+# Event-Calculus protocol: induce a SEPARATE is_init/is_term theory pair,
+# reconstruct holdsAt by inertia, score against the same per-timestep gold
+# the direct protocol uses -- alongside the direct protocol's own theory F1
+# on the SAME fold, for context.
+# ---------------------------------------------------------------------------
+
+
+def _run_relational_ec(pyxlog, torch, kfold_select, args, train, test, ec_train, ec_test, wall):
+    """Relational-vocabulary Event-Calculus protocol. Both the init search
+    and the term search reuse the SAME compiled program and the SAME
+    set-intersection `predict_clause` closures `_run_relational_theory`
+    itself would build -- a star rule's cover is a fixed relation
+    membership test that does not depend on which target label is being
+    explained, so nothing about the candidate pool changes between the
+    direct target and either event target.
+
+    The direct protocol's own theory is run in full, once, on this SAME
+    fold, and returned under ``"direct_context"`` so the two protocols'
+    numbers sit side by side without a second invocation of this script."""
+    direct_wall: dict = {}
+    t_direct = time.perf_counter()
+    direct_result = _run_relational_theory(pyxlog, torch, kfold_select, args, train, test, direct_wall)
+    wall["direct_context"] = time.perf_counter() - t_direct
+    wall["direct_context_wall_clock_s"] = direct_wall
+
+    prog = _compile_and_ingest_relational(pyxlog, train)
+
+    device = torch.device("cuda")
+    features = train["features"].to(device)
+
+    def make_network():
+        return torch.nn.Sequential(
+            torch.nn.Linear(features.shape[1], N_LABELS), torch.nn.Softmax(dim=-1)
+        ).to(device)
+
+    # See EMPTY_NEURAL_POOL_STEP_CAP / _run_relational_theory's identical guard.
+    steps_requested = args.steps
+    steps_effective = min(args.steps, EMPTY_NEURAL_POOL_STEP_CAP)
+    steps_clamped = steps_effective != steps_requested
+
+    predict_clause_train = _predict_clause_relational(train["relations"])
+    predict_clause_test = _predict_clause_relational(test["relations"])
+
+    def induce_for(target_train_labels, wall_key):
+        iteration_wall: list[float] = []
+
+        def select_once(residual_facts, residual_is_positive):
+            t = time.perf_counter()
+            sel = kfold_select(
+                lambda: prog, MASK_NAME, residual_facts, residual_is_positive,
+                make_network, features, neural_relations={}, folds=args.k,
+                seed=args.seed, steps=steps_effective, topology="star",
+            )
+            iteration_wall.append(time.perf_counter() - t)
+            return sel
+
+        t0 = time.perf_counter()
+        theory = induce_theory(
+            select_once, predict_clause_train, train["facts"], target_train_labels,
+            max_clauses=args.max_clauses, min_new_covered=MIN_NEW_COVERED,
+        )
+        wall[wall_key] = time.perf_counter() - t0
+        wall[f"{wall_key}_per_iteration"] = iteration_wall
+        return theory
+
+    init_theory = induce_for(ec_train["is_init"], "theory_loop_init")
+    term_theory = induce_for(ec_train["is_term"], "theory_loop_term")
+
+    init_scoring = _score_theory(
+        init_theory["clauses"], predict_clause_train, predict_clause_test,
+        train["num_pt"], ec_train["is_init"], test["num_pt"], ec_test["is_init"],
+    )
+    term_scoring = _score_theory(
+        term_theory["clauses"], predict_clause_train, predict_clause_test,
+        train["num_pt"], ec_train["is_term"], test["num_pt"], ec_test["is_term"],
+    )
+
+    init_pred_test = theory_predictions(init_theory["clauses"], predict_clause_test, test["num_pt"])
+    term_pred_test = theory_predictions(term_theory["clauses"], predict_clause_test, test["num_pt"])
+    num_windows = test["num_pt"] // ec_test["T"]
+    holds_pred_test = reconstruct_holds(init_pred_test, term_pred_test, num_windows, ec_test["T"])
+    frame_scoring = frame_f1(holds_pred_test, test["is_positive"])
+
+    return {
+        "candidate_vocabulary": {
+            "relational": sorted(set(train["relations"]) - {"coords_missing"}),
+            "neural": [],
+            "excluded": ["coords_missing"],
+        },
+        "steps_requested": steps_requested,
+        "steps_effective": steps_effective,
+        "steps_clamped": steps_clamped,
+        "ec": {
+            "n_init": {"train": ec_train["n_init"], "test": ec_test["n_init"]},
+            "n_term": {"train": ec_train["n_term"], "test": ec_test["n_term"]},
+            "init_theory": _theory_json(init_theory),
+            "term_theory": _theory_json(term_theory),
+            "init_scoring": init_scoring,
+            "term_scoring": term_scoring,
+            "frame_f1": frame_scoring,
+        },
+        "direct_context": direct_result,
+        "detector_probe": None,
+    }
+
+
+def _run_neural_ec(pyxlog, torch, kfold_select, args, train, test, ec_train, ec_test, wall):
+    """Neural-vocabulary Event-Calculus protocol. The init search and the
+    term search each call `_induce_neural_theory_for_target` independently,
+    so EACH theory ends up with its OWN per-clause `close_nn` networks --
+    exactly like the direct protocol's single theory does (see that
+    function's docstring); nothing is shared between the two searches
+    except the compiled program and the candidate vocabulary.
+
+    The direct protocol's own theory is run in full, once, on this SAME
+    fold, and returned under ``"direct_context"``, mirroring
+    `_run_relational_ec`."""
+    from pyxlog.ilp.neural_credit import NeuralRelationSpec, train_engine_mode
+
+    direct_wall: dict = {}
+    t_direct = time.perf_counter()
+    direct_result = _run_neural_theory(pyxlog, torch, kfold_select, args, train, test, direct_wall)
+    wall["direct_context"] = time.perf_counter() - t_direct
+    wall["direct_context_wall_clock_s"] = direct_wall
+
+    prog = _compile_and_ingest_neural(pyxlog, train)
+
+    device = torch.device("cuda")
+    features_train = train["features"].to(device)
+    features_test = test["features"].to(device)
+
+    def make_network():
+        return _build_symmetric_mlp(args.hidden, device)
+
+    neural_relations = {CLOSE_NN_NAME: NeuralRelationSpec(num_rows=train["num_pt"], arity=2)}
+    activity_sets_train = {n: set(train["relations"][n]) for n in ACTIVITY_RELATIONS}
+
+    init_theory, init_nets = _induce_neural_theory_for_target(
+        torch, kfold_select, train_engine_mode, prog, make_network, features_train,
+        neural_relations, activity_sets_train, args, train["facts"], ec_train["is_init"],
+        wall, "theory_loop_init",
+    )
+    term_theory, term_nets = _induce_neural_theory_for_target(
+        torch, kfold_select, train_engine_mode, prog, make_network, features_train,
+        neural_relations, activity_sets_train, args, train["facts"], ec_train["is_term"],
+        wall, "theory_loop_term",
+    )
+
+    init_predict_train, _ = _make_final_predict_clause(
+        init_theory["clauses"], init_nets, torch, train["relations"], features_train
+    )
+    init_predict_test, _ = _make_final_predict_clause(
+        init_theory["clauses"], init_nets, torch, test["relations"], features_test
+    )
+    term_predict_train, _ = _make_final_predict_clause(
+        term_theory["clauses"], term_nets, torch, train["relations"], features_train
+    )
+    term_predict_test, _ = _make_final_predict_clause(
+        term_theory["clauses"], term_nets, torch, test["relations"], features_test
+    )
+
+    init_scoring = _score_theory(
+        init_theory["clauses"], init_predict_train, init_predict_test,
+        train["num_pt"], ec_train["is_init"], test["num_pt"], ec_test["is_init"],
+    )
+    term_scoring = _score_theory(
+        term_theory["clauses"], term_predict_train, term_predict_test,
+        train["num_pt"], ec_train["is_term"], test["num_pt"], ec_test["is_term"],
+    )
+
+    init_pred_test = theory_predictions(init_theory["clauses"], init_predict_test, test["num_pt"])
+    term_pred_test = theory_predictions(term_theory["clauses"], term_predict_test, test["num_pt"])
+    num_windows = test["num_pt"] // ec_test["T"]
+    holds_pred_test = reconstruct_holds(init_pred_test, term_pred_test, num_windows, ec_test["T"])
+    frame_scoring = frame_f1(holds_pred_test, test["is_positive"])
+
+    return {
+        "candidate_vocabulary": {
+            "relational": sorted(ACTIVITY_RELATIONS),
+            "neural": [CLOSE_NN_NAME],
+            "excluded": ["close", "far", "coords_missing"],
+        },
+        "steps_requested": args.steps,
+        "steps_effective": args.steps,
+        "steps_clamped": False,
+        "ec": {
+            "n_init": {"train": ec_train["n_init"], "test": ec_test["n_init"]},
+            "n_term": {"train": ec_train["n_term"], "test": ec_test["n_term"]},
+            "init_theory": _theory_json(init_theory),
+            "term_theory": _theory_json(term_theory),
+            "init_scoring": init_scoring,
+            "term_scoring": term_scoring,
+            "frame_f1": frame_scoring,
+        },
+        "direct_context": direct_result,
+        "detector_probe": None,
+        "note": (
+            "init/term theories each carry their OWN independently trained "
+            "close_nn networks per clause (see "
+            "_induce_neural_theory_for_target); close/far were never fed to "
+            "any close_nn training in any form, in either theory."
+        ),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -715,11 +983,32 @@ def main(argv: list[str] | None = None) -> int:
     test = convert_split(split["test"], close_threshold=CLOSE_THRESHOLD)
     wall["convert"] = time.perf_counter() - t0
 
+    # `--protocol ec` only: initiatedAt/terminatedAt targets, in the SAME
+    # pt indexing `train`/`test` already use (both derived from the SAME
+    # `split["train"]`/`split["test"]` datapoints). `--protocol direct`
+    # never derives these -- untouched, so its own run is unaffected.
+    ec_train = ec_test = None
+    if args.protocol == "ec":
+        from caviar_convert import derive_ec_targets
+
+        ec_train = derive_ec_targets(split["train"])
+        ec_test = derive_ec_targets(split["test"])
+
     t1 = time.perf_counter()
     if args.mode == "relational":
-        mode_result = _run_relational_theory(pyxlog, torch, kfold_select, args, train, test, wall)
+        if args.protocol == "direct":
+            mode_result = _run_relational_theory(pyxlog, torch, kfold_select, args, train, test, wall)
+        else:
+            mode_result = _run_relational_ec(
+                pyxlog, torch, kfold_select, args, train, test, ec_train, ec_test, wall
+            )
     else:
-        mode_result = _run_neural_theory(pyxlog, torch, kfold_select, args, train, test, wall)
+        if args.protocol == "direct":
+            mode_result = _run_neural_theory(pyxlog, torch, kfold_select, args, train, test, wall)
+        else:
+            mode_result = _run_neural_ec(
+                pyxlog, torch, kfold_select, args, train, test, ec_train, ec_test, wall
+            )
     wall["mode_total"] = time.perf_counter() - t1
     wall["total"] = time.perf_counter() - t0
 
@@ -727,6 +1016,7 @@ def main(argv: list[str] | None = None) -> int:
         "pkl": args.pkl,
         "fold": args.fold,
         "mode": args.mode,
+        "protocol": args.protocol,
         "close_threshold": CLOSE_THRESHOLD,
         "k": args.k,
         "seed": args.seed,
@@ -748,13 +1038,25 @@ def main(argv: list[str] | None = None) -> int:
         f"CAVIAR theory loop: mode={args.mode} pkl={args.pkl} fold={args.fold} "
         f"k={args.k} seed={args.seed} max_clauses={args.max_clauses}"
     )
-    print(f"  theory clauses: {result['theory']['clauses']}")
-    print(f"  stop_reason: {result['theory']['stop_reason']}")
-    print(f"  train prf1: {result['scoring']['theory_prf1']['train']}")
-    print(f"  test  prf1: {result['scoring']['theory_prf1']['test']}")
-    for m in result["scoring"]["marginal_contribution"]:
-        print(f"    clause {m['clause']}: marginal test F1 = {m['marginal_test_f1']:.4f}")
-    print(f"  wall clock total: {wall['total']:.2f}s (theory_loop: {wall['theory_loop']:.2f}s)")
+    if args.protocol == "direct":
+        print(f"  theory clauses: {result['theory']['clauses']}")
+        print(f"  stop_reason: {result['theory']['stop_reason']}")
+        print(f"  train prf1: {result['scoring']['theory_prf1']['train']}")
+        print(f"  test  prf1: {result['scoring']['theory_prf1']['test']}")
+        for m in result["scoring"]["marginal_contribution"]:
+            print(f"    clause {m['clause']}: marginal test F1 = {m['marginal_test_f1']:.4f}")
+        print(f"  wall clock total: {wall['total']:.2f}s (theory_loop: {wall['theory_loop']:.2f}s)")
+    else:
+        ec = result["ec"]
+        print(f"  init theory clauses: {ec['init_theory']['clauses']}")
+        print(f"  term theory clauses: {ec['term_theory']['clauses']}")
+        print(f"  n_init: {ec['n_init']}  n_term: {ec['n_term']}")
+        print(f"  frame F1 (holdsAt reconstruction, test): {ec['frame_f1']}")
+        print(
+            "  direct-protocol theory F1 on this fold (context, test): "
+            f"{result['direct_context']['scoring']['theory_prf1']['test']}"
+        )
+        print(f"  wall clock total: {wall['total']:.2f}s")
     print(f"  wrote {out_path}")
     return 0
 
