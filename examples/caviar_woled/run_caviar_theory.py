@@ -149,6 +149,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     p.add_argument("--hidden", type=int, default=16, help="close_nn MLP hidden width, neural mode only (default: 16)")
     p.add_argument("--max-clauses", type=int, default=4, help="theory_loop.induce_theory's max_clauses (default: 4)")
+    p.add_argument(
+        "--no-direct-context", action="store_true",
+        help="ec protocol only: skip the side-by-side direct-protocol run "
+             "(it roughly doubles a neural ec run's training cost); "
+             "RESULT.json's direct_context becomes null",
+    )
     p.add_argument("--out", required=True, help="path to write RESULT.json")
     return p.parse_args(argv)
 
@@ -512,9 +518,16 @@ def _make_final_predict_clause(clauses, nets_by_clause_idx, torch, relations, fe
         if fact not in sets[left]:
             return False
         if right == CLOSE_NN_NAME:
-            idx = (_clause_idx if _clause_idx is not None
-                   else clauses.index(rule))
-            return scores_by_clause_idx[idx][fact[0]] > 0.5
+            if _clause_idx is not None:
+                return scores_by_clause_idx[_clause_idx][fact[0]] > 0.5
+            # Rule-keyed call (the generic union scorer): a theory may hold
+            # the same rule twice with two different nets, so OR over every
+            # clause index carrying this rule value -- never pick just the
+            # first match, which would silently read the wrong net.
+            return any(
+                scores_by_clause_idx[i][fact[0]] > 0.5
+                for i, r in enumerate(clauses) if r == rule
+            )
         return fact in sets[right]
 
     return predict, scores_by_clause_idx
@@ -765,12 +778,15 @@ def _run_relational_ec(pyxlog, torch, kfold_select, args, train, test, ec_train,
 
     The direct protocol's own theory is run in full, once, on this SAME
     fold, and returned under ``"direct_context"`` so the two protocols'
-    numbers sit side by side without a second invocation of this script."""
-    direct_wall: dict = {}
-    t_direct = time.perf_counter()
-    direct_result = _run_relational_theory(pyxlog, torch, kfold_select, args, train, test, direct_wall)
-    wall["direct_context"] = time.perf_counter() - t_direct
-    wall["direct_context_wall_clock_s"] = direct_wall
+    numbers sit side by side without a second invocation of this script
+    (skippable via ``--no-direct-context``)."""
+    direct_result = None
+    if not args.no_direct_context:
+        direct_wall: dict = {}
+        t_direct = time.perf_counter()
+        direct_result = _run_relational_theory(pyxlog, torch, kfold_select, args, train, test, direct_wall)
+        wall["direct_context"] = time.perf_counter() - t_direct
+        wall["direct_context_wall_clock_s"] = direct_wall
 
     prog = _compile_and_ingest_relational(pyxlog, train)
 
@@ -863,14 +879,17 @@ def _run_neural_ec(pyxlog, torch, kfold_select, args, train, test, ec_train, ec_
 
     The direct protocol's own theory is run in full, once, on this SAME
     fold, and returned under ``"direct_context"``, mirroring
-    `_run_relational_ec`."""
+    `_run_relational_ec` (skippable via ``--no-direct-context`` -- in this
+    mode it roughly doubles the training cost)."""
     from pyxlog.ilp.neural_credit import NeuralRelationSpec, train_engine_mode
 
-    direct_wall: dict = {}
-    t_direct = time.perf_counter()
-    direct_result = _run_neural_theory(pyxlog, torch, kfold_select, args, train, test, direct_wall)
-    wall["direct_context"] = time.perf_counter() - t_direct
-    wall["direct_context_wall_clock_s"] = direct_wall
+    direct_result = None
+    if not args.no_direct_context:
+        direct_wall: dict = {}
+        t_direct = time.perf_counter()
+        direct_result = _run_neural_theory(pyxlog, torch, kfold_select, args, train, test, direct_wall)
+        wall["direct_context"] = time.perf_counter() - t_direct
+        wall["direct_context_wall_clock_s"] = direct_wall
 
     prog = _compile_and_ingest_neural(pyxlog, train)
 
@@ -1054,7 +1073,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"  frame F1 (holdsAt reconstruction, test): {ec['frame_f1']}")
         print(
             "  direct-protocol theory F1 on this fold (context, test): "
-            f"{result['direct_context']['scoring']['theory_prf1']['test']}"
+            f"{result['direct_context']['scoring']['theory_prf1']['test'] if result['direct_context'] else 'skipped (--no-direct-context)'}"
         )
         print(f"  wall clock total: {wall['total']:.2f}s")
     print(f"  wrote {out_path}")
