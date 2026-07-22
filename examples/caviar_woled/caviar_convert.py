@@ -134,6 +134,34 @@ def _parse_coords(atoms: str) -> tuple[dict[int, tuple[int, int]], dict[int, tup
     return out["p1"], out["p2"]
 
 
+def _shared_window_length(datapoints: list[dict], caller: str) -> int:
+    """The single global window length T shared by every datapoint, exactly
+    as `convert_split` has always derived it -- factored out so
+    `derive_ec_targets` reuses the SAME check rather than re-deriving it: a
+    pair-time id `pt = dp_index * T + t` is only meaningful when every
+    datapoint agrees on T, and both functions build that same id space.
+    Raises the same refusals `convert_split` always has (now under
+    ``caller``'s own name in the "no datapoints" message): no datapoints, a
+    non-positive T, or a later datapoint whose own T disagrees with
+    datapoint 0's."""
+    if not datapoints:
+        raise ValueError(f"{caller} needs at least one datapoint.")
+    T = window_length(datapoints[0])
+    if T <= 0:
+        raise ValueError(f"datapoint 0 has window length {T}; a window needs >= 1 timestep.")
+    for i, dp in enumerate(datapoints):
+        t_i = window_length(dp)
+        if t_i != T:
+            raise ValueError(
+                f"datapoint {i} has window length {t_i}, but datapoint 0 has "
+                f"{T}. The pair-time id `pt = dp_index * T + t` uses a SINGLE "
+                "global stride T; a differing window length would make pt "
+                "collide across datapoints, so this is refused rather than "
+                "silently using the wrong stride."
+            )
+    return T
+
+
 def convert_split(
     datapoints: list[dict],
     close_threshold: float = 25.0,
@@ -165,23 +193,8 @@ def convert_split(
       * ``"n_coords_missing"``: ``int``, count of pair-times flagged
         ``"coords_missing"``.
     """
-    if not datapoints:
-        raise ValueError("convert_split needs at least one datapoint.")
     simple_names = simple_label_names or SIMPLE_LABEL_NAMES
-
-    T = window_length(datapoints[0])
-    if T <= 0:
-        raise ValueError(f"datapoint 0 has window length {T}; a window needs >= 1 timestep.")
-    for i, dp in enumerate(datapoints):
-        t_i = window_length(dp)
-        if t_i != T:
-            raise ValueError(
-                f"datapoint {i} has window length {t_i}, but datapoint 0 has "
-                f"{T}. The pair-time id `pt = dp_index * T + t` uses a SINGLE "
-                "global stride T; a differing window length would make pt "
-                "collide across datapoints, so this is refused rather than "
-                "silently using the wrong stride."
-            )
+    T = _shared_window_length(datapoints, "convert_split")
 
     num_pt = len(datapoints) * T
     facts: list[tuple[int, int]] = []
@@ -248,6 +261,63 @@ def convert_split(
         "features": features,
         "num_pt": num_pt,
         "n_coords_missing": n_coords_missing,
+    }
+
+
+def derive_ec_targets(datapoints: list[dict], target_label_id: int = COMPLEX_MEETING_ID) -> dict:
+    """Event-Calculus (initiatedAt/terminatedAt) targets for a fold split, in
+    the SAME ``pt = dp_index * T + t`` indexing `convert_split` uses (and
+    checked against the same shared T -- `_shared_window_length`, so the two
+    outputs always align one-to-one over the same pair-times).
+
+    Where `convert_split`'s ``is_positive`` is the direct holdsAt-style
+    per-timestep flag (label[t] == target), this instead reads
+    ``complex_labels`` (via the same `_to_int_list` decoding convert_split
+    itself uses -- not re-derived) as a two-event temporal process:
+
+      * ``"is_init"``: ``True`` at pair-time ``pt`` iff
+        ``label[t] == target_label_id`` AND (``t == 0`` OR
+        ``label[t-1] != target_label_id``). A window only ever shows a
+        BOUNDED stretch of a longer sequence, so a target that is already
+        holding at the window's very first timestep has no earlier frame to
+        show it starting in -- ``t == 0`` is treated as an initiation, not
+        left undecided, because that is the only choice consistent with
+        "the window is all we observe": there is no better answer available
+        from the data.
+      * ``"is_term"``: ``True`` at pair-time ``pt`` iff
+        ``label[t] != target_label_id`` AND ``t > 0`` AND
+        ``label[t-1] == target_label_id``. Termination is placed on the
+        FIRST non-target step (the frame where the fluent is observed to
+        have stopped holding), never inferred past the window's last
+        timestep: a target still holding at the final timestep produces no
+        terminating pair-time at all, because the window simply ends before
+        any such step is observed -- nothing is extrapolated beyond what the
+        window shows.
+
+    Returns ``{"is_init": list[bool], "is_term": list[bool], "n_init": int,
+    "n_term": int, "num_pt": int, "T": int}``, all aligned with `pt` exactly
+    as `convert_split`'s own lists are.
+    """
+    T = _shared_window_length(datapoints, "derive_ec_targets")
+    num_pt = len(datapoints) * T
+
+    is_init: list[bool] = []
+    is_term: list[bool] = []
+    for dp in datapoints:
+        complex_labels = _to_int_list(dp["complex_labels"])
+        for t in range(T):
+            is_target = complex_labels[t] == target_label_id
+            prev_is_target = t > 0 and complex_labels[t - 1] == target_label_id
+            is_init.append(is_target and (t == 0 or not prev_is_target))
+            is_term.append((not is_target) and t > 0 and prev_is_target)
+
+    return {
+        "is_init": is_init,
+        "is_term": is_term,
+        "n_init": sum(is_init),
+        "n_term": sum(is_term),
+        "num_pt": num_pt,
+        "T": T,
     }
 
 
