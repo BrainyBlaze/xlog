@@ -7,8 +7,6 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
-import pytest
-
 EXAMPLE_DIR = Path(__file__).resolve().parents[2] / "examples" / "caviar_woled"
 if str(EXAMPLE_DIR) not in sys.path:
     sys.path.insert(0, str(EXAMPLE_DIR))
