@@ -81,6 +81,7 @@ impl OpStats {
 
 /// Statistics for a single stratum
 #[derive(Debug, Clone, Default)]
+#[non_exhaustive]
 pub struct StratumStats {
     /// Stratum index (0-based)
     pub stratum_id: usize,
@@ -123,6 +124,7 @@ impl StratumStats {
 
 /// Final execution statistics returned to CLI
 #[derive(Debug, Clone, Default)]
+#[non_exhaustive]
 pub struct ExecutionStats {
     /// Total execution duration in microseconds
     pub total_duration_us: u64,
