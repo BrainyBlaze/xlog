@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"struct":["ExactDdnnfProgram","ExactResult","ExactResultWithGrads","GpuConfig","QueryGradients","QueryProbability"]};

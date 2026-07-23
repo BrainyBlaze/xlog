@@ -1,0 +1,45 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Well-Founded Semantics for non-monotone probabilistic programs."><title>xlog_prob::wfs - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../static.files/rustdoc-17e0aaed.css"><meta name="rustdoc-vars" data-root-path="../../" data-static-root-path="../../static.files/" data-current-crate="xlog_prob" data-themes="" data-resource-suffix="" data-rustdoc-version="1.97.1 (8bab26f4f 2026-07-14)" data-channel="1.97.1" data-search-js="search-fd9372ac.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../static.files/storage-41dd4d93.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../static.files/main-fcd733ba.js"></script><noscript><link rel="stylesheet" href="../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module wfs</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../xlog_prob/index.html">xlog_<wbr>prob</a><span class="version">0.11.0</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module wfs</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#algorithm-overview" title="Algorithm Overview">Algorithm Overview</a></li><li><a href="#gradient-treatment" title="Gradient Treatment">Gradient Treatment</a></li><li><a href="#integration" title="Integration">Integration</a></li></ul><h3><a href="#structs">Module Items</a></h3><ul class="block"><li><a href="#structs" title="Structs">Structs</a></li><li><a href="#enums" title="Enums">Enums</a></li><li><a href="#functions" title="Functions">Functions</a></li></ul></section><div id="rustdoc-modnav"><h2 class="in-crate"><a href="../index.html">In crate xlog_<wbr>prob</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../index.html">xlog_prob</a></div><h1>Module <span>wfs</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../src/xlog_prob/wfs.rs.html#1-1387">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>Well-Founded Semantics for non-monotone probabilistic programs.</p>
+<p>WFS handles programs with cycles through negation using three-valued logic:</p>
+<ul>
+<li>True: definitely derivable</li>
+<li>False: definitely not derivable</li>
+<li>Undefined: in cycle, neither provable nor refutable</li>
+</ul>
+<h2 id="algorithm-overview"><a class="doc-anchor" href="#algorithm-overview">§</a>Algorithm Overview</h2>
+<p>The WFS alternating fixed-point algorithm works as follows:</p>
+<ol>
+<li><strong>Initialize</strong>: All atoms start as undefined</li>
+<li><strong>Loop until fixed point</strong>:
+a. <strong>Unfounded set computation</strong>: Find atoms that cannot be supported
+<ul>
+<li>An atom is unfounded if every rule that derives it either:
+<ul>
+<li>Has a body literal that is known false, or</li>
+<li>Depends positively on an unfounded atom
+b. <strong>Mark unfounded atoms as false</strong>
+c. <strong>Consequence derivation</strong>: Find atoms that must be true</li>
+</ul>
+</li>
+<li>An atom is a consequence if some rule has:
+<ul>
+<li>All positive body literals true</li>
+<li>All negative body literals false
+d. <strong>Mark consequences as true</strong></li>
+</ul>
+</li>
+</ul>
+</li>
+<li><strong>Remaining atoms stay undefined</strong></li>
+</ol>
+<h2 id="gradient-treatment"><a class="doc-anchor" href="#gradient-treatment">§</a>Gradient Treatment</h2>
+<ul>
+<li>True atoms: Normal probability and gradient computation</li>
+<li>False atoms: Probability = 0, gradient = 0</li>
+<li>Undefined atoms: Probability = 0, gradient = 0 (conservative)</li>
+</ul>
+<p>This matches ProbLog’s behavior for non-stratified programs.</p>
+<h2 id="integration"><a class="doc-anchor" href="#integration">§</a>Integration</h2>
+<p>WFS is invoked during provenance extraction when a non-monotone SCC is detected.
+It receives ground rules (after variable substitution) and returns the well-founded
+model with provenance formulas for true atoms.</p>
+</div></details><h2 id="structs" class="section-header">Structs<a href="#structs" class="anchor">§</a></h2><dl class="item-table"><dt><a class="struct" href="struct.WfsAtom.html" title="struct xlog_prob::wfs::WfsAtom">WfsAtom</a></dt><dd>Ground atom representation for WFS</dd><dt><a class="struct" href="struct.WfsConfig.html" title="struct xlog_prob::wfs::WfsConfig">WfsConfig</a></dt><dd>Configuration for Well-Founded Semantics evaluation.</dd><dt><a class="struct" href="struct.WfsContext.html" title="struct xlog_prob::wfs::WfsContext">WfsContext</a></dt><dd>Context for WFS evaluation</dd><dt><a class="struct" href="struct.WfsResult.html" title="struct xlog_prob::wfs::WfsResult">WfsResult</a></dt><dd>Result of WFS evaluation for an SCC</dd><dt><a class="struct" href="struct.WfsRule.html" title="struct xlog_prob::wfs::WfsRule">WfsRule</a></dt><dd>A ground rule for WFS evaluation</dd></dl><h2 id="enums" class="section-header">Enums<a href="#enums" class="anchor">§</a></h2><dl class="item-table"><dt><a class="enum" href="enum.TruthValue.html" title="enum xlog_prob::wfs::TruthValue">Truth<wbr>Value</a></dt><dd>Three-valued truth value for WFS</dd><dt><a class="enum" href="enum.WfsLiteral.html" title="enum xlog_prob::wfs::WfsLiteral">WfsLiteral</a></dt><dd>A ground literal in a rule body</dd></dl><h2 id="functions" class="section-header">Functions<a href="#functions" class="anchor">§</a></h2><dl class="item-table"><dt><a class="fn" href="fn.evaluate_wfs_rules.html" title="fn xlog_prob::wfs::evaluate_wfs_rules">evaluate_<wbr>wfs_<wbr>rules</a></dt><dd>Evaluate a non-monotone SCC using Well-Founded Semantics.</dd><dt><a class="fn" href="fn.evaluate_wfs_with_rules.html" title="fn xlog_prob::wfs::evaluate_wfs_with_rules">evaluate_<wbr>wfs_<wbr>with_<wbr>rules</a></dt><dd>Evaluate WFS with provided ground rules.</dd></dl></section></div></main></body></html>

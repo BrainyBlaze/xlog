@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["PirNode"],"struct":["ChoiceVarId","LeafId","PirGraph","PirNodeId"]};

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["evaluate_fixpoint_typed","evaluate_rule_typed","evaluate_scc_fixpoint_typed"]};

@@ -1,0 +1,85 @@
+<!-- xlog diagram: compilation pipeline (light). Source of truth: crates/xlog-logic/src/compile.rs (parse->normalize->stratify->lower->optimize), crates/xlog-runtime/src/executor (host-side RIR interpreter dispatching CUDA kernels + managing device-resident relations). Executor is HOST control; only kernels + relation state are GPU-resident. -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 310" font-family="Inter, system-ui, sans-serif">
+  <rect width="900" height="310" fill="#FBFBFD"/>
+  <defs>
+    <marker id="ah" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#6B6880"/>
+    </marker>
+  </defs>
+
+  <text x="28" y="38" font-size="16" font-weight="600" fill="#1E1B2E">Compilation pipeline</text>
+  <text x="28" y="56" font-size="11" fill="#6B6880">The host compiles and orchestrates; CUDA kernels and relation state stay GPU-resident.</text>
+
+  <text x="28" y="94" font-size="9" font-weight="600" letter-spacing="0.6" fill="#9B98B4" font-family="'JetBrains Mono','SF Mono',ui-monospace,Menlo,monospace">HOST</text>
+
+  <!-- host rail edges -->
+  <g stroke="#6B6880" stroke-width="1.5" marker-end="url(#ah)" fill="none">
+    <path d="M142,132 H168"/><path d="M288,132 H314"/><path d="M434,132 H460"/><path d="M580,132 H606"/><path d="M726,132 H752"/>
+  </g>
+
+  <!-- host stage nodes -->
+  <g font-size="12.5" font-weight="500">
+    <g>
+      <rect x="24" y="104" width="118" height="56" rx="7" fill="#F3F3F8" stroke="#1E1B2E" stroke-width="1.25"/>
+      <rect x="25.5" y="106" width="3" height="52" rx="1.5" fill="#4F46E5"/>
+      <text x="83" y="129" text-anchor="middle" fill="#1E1B2E">Source</text>
+      <text x="83" y="145" text-anchor="middle" font-size="10.5" font-weight="400" fill="#6B6880" font-family="'JetBrains Mono','SF Mono',ui-monospace,Menlo,monospace">.xlog</text>
+    </g>
+    <g>
+      <rect x="170" y="104" width="118" height="56" rx="7" fill="#F3F3F8" stroke="#1E1B2E" stroke-width="1.25"/>
+      <rect x="171.5" y="106" width="3" height="52" rx="1.5" fill="#4F46E5"/>
+      <text x="229" y="129" text-anchor="middle" fill="#1E1B2E">Parser</text>
+      <text x="229" y="145" text-anchor="middle" font-size="10.5" font-weight="400" fill="#6B6880" font-family="'JetBrains Mono','SF Mono',ui-monospace,Menlo,monospace">&#8594; AST</text>
+    </g>
+    <g>
+      <rect x="316" y="104" width="118" height="56" rx="7" fill="#F3F3F8" stroke="#1E1B2E" stroke-width="1.25"/>
+      <rect x="317.5" y="106" width="3" height="52" rx="1.5" fill="#4F46E5"/>
+      <text x="375" y="129" text-anchor="middle" fill="#1E1B2E">Stratifier</text>
+      <text x="375" y="145" text-anchor="middle" font-size="10.5" font-weight="400" fill="#6B6880" font-family="'JetBrains Mono','SF Mono',ui-monospace,Menlo,monospace">SCC &#8594; strata</text>
+    </g>
+    <g>
+      <rect x="462" y="104" width="118" height="56" rx="7" fill="#F3F3F8" stroke="#1E1B2E" stroke-width="1.25"/>
+      <rect x="463.5" y="106" width="3" height="52" rx="1.5" fill="#4F46E5"/>
+      <text x="521" y="129" text-anchor="middle" fill="#1E1B2E">Lowerer</text>
+      <text x="521" y="145" text-anchor="middle" font-size="10.5" font-weight="400" fill="#6B6880" font-family="'JetBrains Mono','SF Mono',ui-monospace,Menlo,monospace">&#8594; RIR</text>
+    </g>
+    <g>
+      <rect x="608" y="104" width="118" height="56" rx="7" fill="#F3F3F8" stroke="#1E1B2E" stroke-width="1.25"/>
+      <rect x="609.5" y="106" width="3" height="52" rx="1.5" fill="#4F46E5"/>
+      <text x="667" y="129" text-anchor="middle" fill="#1E1B2E">Optimizer</text>
+      <text x="667" y="145" text-anchor="middle" font-size="10.5" font-weight="400" fill="#6B6880" font-family="'JetBrains Mono','SF Mono',ui-monospace,Menlo,monospace">cost plan</text>
+    </g>
+    <g>
+      <rect x="754" y="104" width="118" height="56" rx="7" fill="#F3F3F8" stroke="#1E1B2E" stroke-width="1.25"/>
+      <rect x="755.5" y="106" width="3" height="52" rx="1.5" fill="#4F46E5"/>
+      <text x="813" y="129" text-anchor="middle" fill="#1E1B2E">Executor</text>
+      <text x="813" y="145" text-anchor="middle" font-size="10.5" font-weight="400" fill="#6B6880" font-family="'JetBrains Mono','SF Mono',ui-monospace,Menlo,monospace">xlog-runtime</text>
+    </g>
+  </g>
+
+  <!-- xlog-logic bracket -->
+  <path d="M170,170 V176 H726 V170" fill="none" stroke="#B9B7C8" stroke-width="1"/>
+  <text x="448" y="190" text-anchor="middle" font-size="10" fill="#6B6880" font-family="'JetBrains Mono','SF Mono',ui-monospace,Menlo,monospace">xlog-logic</text>
+
+  <!-- dispatch arrow: Executor (host) -> device plane -->
+  <path d="M813,160 V206" stroke="#6B6880" stroke-width="1.5" fill="none" marker-end="url(#ah)"/>
+  <text x="822" y="188" font-size="9.5" fill="#9B98B4" font-family="'JetBrains Mono','SF Mono',ui-monospace,Menlo,monospace">dispatch</text>
+
+  <!-- device plane (signature): chip-notched recessed panel = GPU-resident state -->
+  <path d="M520,210 H860 L872,222 V286 H520 Z" fill="#ECEBFB" stroke="#4F46E5" stroke-width="1.25"/>
+  <rect x="530" y="216" width="104" height="15" rx="7.5" fill="#10B981"/>
+  <text x="582" y="226.5" text-anchor="middle" font-size="9" font-weight="600" fill="#FFFFFF" letter-spacing="0.5" font-family="'JetBrains Mono','SF Mono',ui-monospace,Menlo,monospace">GPU-RESIDENT</text>
+
+  <!-- CUDA kernels (chip-notch motif) -->
+  <path d="M534,238 H672 L684,250 V280 H534 Z" fill="#FBFBFD" stroke="#1E1B2E" stroke-width="1.25"/>
+  <text x="605" y="258" text-anchor="middle" font-size="12" font-weight="500" fill="#1E1B2E">CUDA kernels</text>
+  <text x="605" y="271" text-anchor="middle" font-size="9.5" fill="#6B6880" font-family="'JetBrains Mono','SF Mono',ui-monospace,Menlo,monospace">joins &#183; sort &#183; circuits</text>
+  <!-- Relation store -->
+  <rect x="700" y="238" width="158" height="42" rx="6" fill="#FBFBFD" stroke="#1E1B2E" stroke-width="1.25"/>
+  <text x="779" y="258" text-anchor="middle" font-size="12" font-weight="500" fill="#1E1B2E">Relation store</text>
+  <text x="779" y="271" text-anchor="middle" font-size="9.5" fill="#6B6880" font-family="'JetBrains Mono','SF Mono',ui-monospace,Menlo,monospace">device-resident</text>
+  <!-- kernels <-> relations -->
+  <path d="M685,259 H699" stroke="#6B6880" stroke-width="1.5" fill="none" marker-start="url(#ah)" marker-end="url(#ah)"/>
+
+  <text x="28" y="304" font-size="10.5" fill="#6B6880">Deterministic path shown; probabilistic, epistemic, and solver paths branch into their own IRs (PIR / EIR / SIR) from the normalized program, not from RIR.</text>
+</svg>

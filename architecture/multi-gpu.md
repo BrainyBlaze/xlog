@@ -1,0 +1,83 @@
+# Multi-GPU Joins
+
+Current multi-GPU status in XLOG: memory-management substrate exists, distributed join execution is design-only.
+
+<Note>
+For contributors — how this works internally. This page describes the state of
+multi-GPU support in the codebase, not a feature you can turn on today.
+</Note>
+
+Multi-GPU distributed joins are not shipped. Every join that runs in production
+today uses a single GPU. Those single-GPU paths are CUDA routes such as
+`hash_join_v2`, WCOJ, and the factorized routes documented elsewhere in the
+Architecture tab.
+
+Two terms used below:
+
+- **WCOJ** — worst-case-optimal join, a join method that computes multiway
+  patterns (triangles, cycles) directly instead of through a chain of pairwise
+  joins.
+- **Free Join** — a related join method that generalizes WCOJ.
+- **Factorized routes** — join paths that keep intermediate results in a
+  compressed, factored form rather than fully expanded. These currently exist
+  only on the `main` branch and are not in a released build.
+
+<Warning>
+This is design-state documentation. Distributed join execution, cross-device
+partitioning, and multi-GPU WCOJ are not available in any current release
+artifact.
+</Warning>
+
+## What Exists
+
+The `xlog-cuda` crate contains a `MultiGpuMemoryManager` substrate. It wraps a
+`GpuDevicePool` and builds one `GpuMemoryManager` per device. It supports:
+
+- device-count inspection;
+- allocation on a specified device;
+- round-robin allocation on the next device;
+- per-device remaining-byte reporting;
+- access to the underlying device pool.
+
+CUDA certification also checks basic multi-GPU detection consistency. This check
+only runs when the test environment exposes multiple devices.
+
+## What Does Not Exist Yet
+
+The repository does not currently ship:
+
+- a distributed relation buffer type for query execution;
+- partitioning kernels that route rows by hash key across devices;
+- peer-to-peer shuffle orchestration for joins;
+- distributed hash-join execution;
+- cross-device WCOJ or Free Join;
+- optimizer costing for multi-GPU partition plans.
+
+Those pieces are future architecture work.
+
+## Design Direction
+
+A future distributed hash join would likely use hash partitioning. The sketch is:
+
+1. compute a partition for each row from the join key;
+2. move left and right partitions to the same device;
+3. run the normal local join kernel per device;
+4. concatenate or expose the partitioned result as a distributed relation.
+
+That design still has unresolved production requirements:
+
+- skew handling for hot keys;
+- memory budgeting across devices;
+- peer-to-peer versus host-mediated copies;
+- deterministic result ordering or explicit unordered semantics;
+- relation-generation and cache invalidation across devices;
+- fallback behavior when only one GPU is present.
+
+## User Guidance
+
+For current workloads, plan around one CUDA device per executor. For the routes
+that actually run today, see the single-GPU execution, WCOJ, adaptive-indexing,
+and factorized-execution pages.
+
+The multi-GPU allocation APIs in the source are substrate only. They are not
+evidence that distributed joins are available.

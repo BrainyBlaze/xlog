@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"mod":["ast","compile","compiler_config","diagnostics","eir","epistemic","expand","function","hypergraph","incremental_parse","list_normalize","lower","magic_sets","meta_normalize","module","module_diagnostics","optimizer","parser","promote","proof_trace","resolver","stratify","typeinfer","wcoj_var_ordering"]};

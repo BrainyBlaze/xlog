@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["induce_exact"],"mod":["index","provenance","reduce","score","types"],"struct":["InduceExactRequest"]};

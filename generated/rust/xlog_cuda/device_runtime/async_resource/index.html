@@ -1,0 +1,60 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="`AsyncCudaResource` — stream-ordered allocation backed by cudarc’s `CudaStream::alloc` (which forwards to `cuMemAllocAsync` when the context supports it)."><title>xlog_cuda::device_runtime::async_resource - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-17e0aaed.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="xlog_cuda" data-themes="" data-resource-suffix="" data-rustdoc-version="1.97.1 (8bab26f4f 2026-07-14)" data-channel="1.97.1" data-search-js="search-fd9372ac.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../static.files/storage-41dd4d93.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../../static.files/main-fcd733ba.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module async_resource</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../../xlog_cuda/index.html">xlog_<wbr>cuda</a><span class="version">0.11.0</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module async_<wbr>resource</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#stream-ordering-contract-enforced-here" title="Stream-ordering contract enforced here">Stream-ordering contract enforced here</a></li><li><a href="#bytes_outstanding-and-pending-free-accounting" title="`bytes_outstanding` and pending-free accounting"><code>bytes_outstanding</code> and pending-free accounting</a></li></ul><h3><a href="#structs">Module Items</a></h3><ul class="block"><li><a href="#structs" title="Structs">Structs</a></li></ul></section><div id="rustdoc-modnav"><h2><a href="../index.html">In xlog_<wbr>cuda::<wbr>device_<wbr>runtime</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../../index.html">xlog_cuda</a>::<wbr><a href="../index.html">device_runtime</a></div><h1>Module <span>async_<wbr>resource</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../../src/xlog_cuda/device_runtime/async_resource.rs.html#1-954">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p><a href="struct.AsyncCudaResource.html" title="struct xlog_cuda::device_runtime::async_resource::AsyncCudaResource"><code>AsyncCudaResource</code></a> — stream-ordered allocation backed by
+cudarc’s <code>CudaStream::alloc</code> (which forwards to <code>cuMemAllocAsync</code>
+when the context supports it).</p>
+<p>Each <a href="../resource/trait.DeviceMemoryResource.html#tymethod.allocate" title="method xlog_cuda::device_runtime::resource::DeviceMemoryResource::allocate"><code>DeviceMemoryResource::allocate</code></a> call resolves the
+caller-supplied <a href="../resource/struct.StreamId.html" title="struct xlog_cuda::device_runtime::resource::StreamId"><code>StreamId</code></a> to a live <code>cudarc::driver::CudaStream</code>
+via the <a href="../stream_pool/struct.StreamPool.html" title="struct xlog_cuda::device_runtime::stream_pool::StreamPool"><code>StreamPool</code></a>, allocates against that stream, and stores
+the resulting <code>CudaSlice&lt;u8&gt;</code> in the resource’s live map. Drop on
+deallocate invokes <code>cuMemFreeAsync</code> (when supported) on the same
+stream the allocation was bound to.</p>
+<p>This backend is the production candidate. It is <strong>not</strong> the
+sanitizer/cert backend — pool/async behavior can hide byte-level
+out-of-bounds patterns from Compute Sanitizer; the cert role
+belongs to [<code>DirectCudaResource</code>] (subject to manual Compute Sanitizer
+confirmation on a supported host).</p>
+<h2 id="stream-ordering-contract-enforced-here"><a class="doc-anchor" href="#stream-ordering-contract-enforced-here">§</a>Stream-ordering contract enforced here</h2>
+<ul>
+<li><code>allocate(.., stream, ..)</code> is ordered on the resolved
+<code>CudaStream</code>. The returned <code>DeviceBlock</code> carries the same
+<code>alloc_stream</code>.</li>
+<li><code>deallocate(block)</code> releases the underlying memory ordered on
+the block’s <code>alloc_stream</code>. Callers must have synchronized any
+work on a different stream before deallocation.</li>
+<li>Reuse of the underlying byte address by a future <code>allocate</code> is
+ordered after the previous deallocate by the CUDA driver’s
+stream-ordered memory allocator semantics. The stream-ordered
+allocation lifetime regression test encodes this.</li>
+</ul>
+<h2 id="bytes_outstanding-and-pending-free-accounting"><a class="doc-anchor" href="#bytes_outstanding-and-pending-free-accounting">§</a><code>bytes_outstanding</code> and pending-free accounting</h2>
+<p>The trait contract is “live + retired-but-not-yet-freed”. A queued
+<code>cuMemFreeAsync</code> is “retired-but-not-yet-freed” until the host
+synchronizes the stream the free was queued on. We therefore keep
+two atomic counters:</p>
+<ul>
+<li><code>live_bytes</code> — bytes for blocks currently in the live map.</li>
+<li><code>pending_bytes</code> — bytes for blocks whose <code>CudaSlice</code> has been
+dropped (so a <code>cuMemFreeAsync</code> is queued on the alloc stream)
+but whose stream has not yet been synchronized by us.</li>
+</ul>
+<p><code>bytes_outstanding()</code> returns <code>live_bytes + pending_bytes</code>.</p>
+<p><code>reap_pending()</code> drains the per-stream pending map under the
+per-stream mutex, synchronizes each drained stream, and then
+subtracts only the <strong>synchronized</strong> total from <code>pending_bytes</code>
+via <code>fetch_sub</code> — it does <strong>not</strong> zero the counter. A
+<code>deallocate</code> that races between reap’s drain and its <code>fetch_sub</code>
+re-populates both the per-stream map and the global atomic
+together (under the same mutex), so its bytes either land
+entirely before the drain (reaped this round) or entirely after
+(kept for the next reap), never split.</p>
+<p>On the first stream-sync failure, the failing entry and every
+remaining un-iterated drained entry are <strong>restored</strong> into
+<code>pending_per_stream</code> so a subsequent reap can retry them. Only
+the bytes for streams that successfully synchronized are
+decremented from <code>pending_bytes</code>. Without this recovery, a
+transient driver error mid-reap would lose track of pending
+bytes forever — the drained map would be gone, <code>pending_bytes</code>
+would still count them, but no stream id would be queued for
+a future reap. Production callers (<code>GlobalDeviceBudget</code>, the
+stream-ordered allocation lifetime tests’ final assertions) thus see consistent
+<code>bytes_outstanding()</code> even on transient sync failures.</p>
+</div></details><h2 id="structs" class="section-header">Structs<a href="#structs" class="anchor">§</a></h2><dl class="item-table"><dt><a class="struct" href="struct.AsyncCudaResource.html" title="struct xlog_cuda::device_runtime::async_resource::AsyncCudaResource">Async<wbr>Cuda<wbr>Resource</a></dt><dd>Stream-ordered cudarc-backed allocator.</dd></dl></section></div></main></body></html>

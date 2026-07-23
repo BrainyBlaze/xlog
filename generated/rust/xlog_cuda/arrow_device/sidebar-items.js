@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["ARROW_DEVICE_CUDA"],"struct":["ArrowDeviceArray","ArrowDeviceArrayOwned","ArrowDeviceImport"]};

@@ -1,0 +1,43 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Naive fixpoint evaluator for recursive hypergraph rules."><title>xlog_logic::hypergraph::fixpoint - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-17e0aaed.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="xlog_logic" data-themes="" data-resource-suffix="" data-rustdoc-version="1.97.1 (8bab26f4f 2026-07-14)" data-channel="1.97.1" data-search-js="search-fd9372ac.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../static.files/storage-41dd4d93.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../../static.files/main-fcd733ba.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module fixpoint</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../../xlog_logic/index.html">xlog_<wbr>logic</a><span class="version">0.11.0</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module fixpoint</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#algorithm" title="Algorithm">Algorithm</a></li><li><a href="#schema-seeding" title="Schema seeding">Schema seeding</a></li></ul><h3><a href="#structs">Module Items</a></h3><ul class="block"><li><a href="#structs" title="Structs">Structs</a></li><li><a href="#enums" title="Enums">Enums</a></li><li><a href="#functions" title="Functions">Functions</a></li></ul></section><div id="rustdoc-modnav"><h2><a href="../index.html">In xlog_<wbr>logic::<wbr>hypergraph</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../../index.html">xlog_logic</a>::<wbr><a href="../index.html">hypergraph</a></div><h1>Module <span>fixpoint</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../../src/xlog_logic/hypergraph/fixpoint.rs.html#1-273">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>Naive fixpoint evaluator for recursive hypergraph rules.</p>
+<p>Builds on PR 2’s <a href="../reference/fn.evaluate_rule.html" title="fn xlog_logic::hypergraph::reference::evaluate_rule"><code>super::evaluate_rule</code></a>: each iteration runs
+every supplied rule once against the union of supplied base
+relations and the target predicate’s currently-derived rows,
+unions new rows into the derived set, sorts and deduplicates,
+and stops when an iteration produces zero new rows.</p>
+<p>Pure-Rust, deterministic, set-semantics. Built to be the
+recursive-WCOJ correctness oracle for PR 4+ mixed-execution
+kernels. Not optimized — a real engine would use semi-naive
+delta-driven evaluation; this slice prefers simplicity over
+speed.</p>
+<h3 id="algorithm"><a class="doc-anchor" href="#algorithm">§</a>Algorithm</h3>
+<ol>
+<li>Validate that every supplied rule’s head predicate equals
+the target. (The slice ships single-predicate fixpoint;
+multi-predicate SCCs are a later concern.)</li>
+<li>Compute the target relation’s schema by inferring per-vertex
+types from the <em>first</em> iteration’s evaluation: each rule
+head’s term shape gives an arity; every cell’s <a href="../reference/enum.RefValue.html" title="enum xlog_logic::hypergraph::reference::RefValue"><code>RefValue</code></a>
+variant gives a <a href="../../../xlog_core/types/enum.ScalarType.html" title="enum xlog_core::types::ScalarType"><code>ScalarType</code></a>. The first iteration that
+produces non-empty rows freezes the schema.</li>
+<li>Loop up to <code>max_iterations</code> times:
+a. For each rule, run <a href="../reference/fn.evaluate_rule.html" title="fn xlog_logic::hypergraph::reference::evaluate_rule"><code>super::evaluate_rule</code></a> against
+<code>base_relations ∪ {target → derived}</code>. Union new rows
+into a per-iteration scratch buffer.
+b. Merge scratch into <code>derived</code>, sort+dedupe.
+c. If <code>derived</code> is unchanged this iteration, return.
+d. Otherwise increment the iteration counter and continue.</li>
+<li>If the loop exits without convergence, return
+<a href="enum.FixpointError.html#variant.MaxIterationsExceeded" title="variant xlog_logic::hypergraph::fixpoint::FixpointError::MaxIterationsExceeded"><code>FixpointError::MaxIterationsExceeded</code></a>.</li>
+</ol>
+<h3 id="schema-seeding"><a class="doc-anchor" href="#schema-seeding">§</a>Schema seeding</h3>
+<p>On iteration 1, rules referencing the target predicate would
+ordinarily fail with <a href="../reference/enum.RefEvalError.html#variant.MissingRelation" title="variant xlog_logic::hypergraph::reference::RefEvalError::MissingRelation"><code>RefEvalError::MissingRelation</code></a>. The
+evaluator pre-seeds an empty <code>target</code> relation whose schema is
+taken from the head arity of the first rule with a non-empty
+head. Once a real iteration produces tuples the schema is
+frozen against per-cell variant types — drift in later
+iterations surfaces as a
+<a href="../reference/enum.RefEvalError.html#variant.RelationValueTypeMismatch" title="variant xlog_logic::hypergraph::reference::RefEvalError::RelationValueTypeMismatch"><code>RefEvalError::RelationValueTypeMismatch</code></a> from PR 2’s
+validation.</p>
+</div></details><h2 id="structs" class="section-header">Structs<a href="#structs" class="anchor">§</a></h2><dl class="item-table"><dt><a class="struct" href="struct.FixpointConfig.html" title="struct xlog_logic::hypergraph::fixpoint::FixpointConfig">Fixpoint<wbr>Config</a></dt><dd>Configuration for <a href="fn.evaluate_fixpoint.html" title="fn xlog_logic::hypergraph::fixpoint::evaluate_fixpoint"><code>evaluate_fixpoint</code></a>.</dd></dl><h2 id="enums" class="section-header">Enums<a href="#enums" class="anchor">§</a></h2><dl class="item-table"><dt><a class="enum" href="enum.FixpointError.html" title="enum xlog_logic::hypergraph::fixpoint::FixpointError">Fixpoint<wbr>Error</a></dt><dd>Errors surfaced by <a href="fn.evaluate_fixpoint.html" title="fn xlog_logic::hypergraph::fixpoint::evaluate_fixpoint"><code>evaluate_fixpoint</code></a>.</dd></dl><h2 id="functions" class="section-header">Functions<a href="#functions" class="anchor">§</a></h2><dl class="item-table"><dt><a class="fn" href="fn.evaluate_fixpoint.html" title="fn xlog_logic::hypergraph::fixpoint::evaluate_fixpoint">evaluate_<wbr>fixpoint</a></dt><dd>Evaluate a recursive set of rules to a fixpoint over a single
+target predicate.</dd></dl></section></div></main></body></html>

@@ -1,0 +1,48 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Typed oracle gate."><title>xlog_logic::hypergraph::typed - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-17e0aaed.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="xlog_logic" data-themes="" data-resource-suffix="" data-rustdoc-version="1.97.1 (8bab26f4f 2026-07-14)" data-channel="1.97.1" data-search-js="search-fd9372ac.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../static.files/storage-41dd4d93.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../../static.files/main-fcd733ba.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module typed</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../../xlog_logic/index.html">xlog_<wbr>logic</a><span class="version">0.11.0</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module typed</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#locked-policy-unknowable-after-inference--unsupported" title="Locked policy: unknowable-after-inference ≠ unsupported">Locked policy: unknowable-after-inference ≠ unsupported</a></li><li><a href="#why-a-separate-module" title="Why a separate module">Why a separate module</a></li></ul><h3><a href="#functions">Module Items</a></h3><ul class="block"><li><a href="#functions" title="Functions">Functions</a></li></ul></section><div id="rustdoc-modnav"><h2><a href="../index.html">In xlog_<wbr>logic::<wbr>hypergraph</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../../index.html">xlog_logic</a>::<wbr><a href="../index.html">hypergraph</a></div><h1>Module <span>typed</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../../src/xlog_logic/hypergraph/typed.rs.html#1-459">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>Typed oracle gate.</p>
+<p>Wraps the structural <a href="../reference/fn.evaluate_rule.html" title="fn xlog_logic::hypergraph::reference::evaluate_rule"><code>super::evaluate_rule</code></a>,
+<a href="../fixpoint/fn.evaluate_fixpoint.html" title="fn xlog_logic::hypergraph::fixpoint::evaluate_fixpoint"><code>super::evaluate_fixpoint</code></a>, and <a href="../scc/fn.evaluate_scc_fixpoint.html" title="fn xlog_logic::hypergraph::scc::evaluate_scc_fixpoint"><code>super::evaluate_scc_fixpoint</code></a>
+oracles with a relation-schema-driven type gate. For each rule:</p>
+<ol>
+<li>Walk positive body atoms; for each <code>Term::Variable</code> whose
+predicate is present in <code>base_relations</code>, look up
+<code>relation.schema[position]</code> and unify into a per-rule
+<code>BTreeMap&lt;String, ScalarType&gt;</code>. Cross-atom disagreement is a
+<a href="../reference/enum.RefEvalError.html#variant.ConflictingVariableType" title="variant xlog_logic::hypergraph::reference::RefEvalError::ConflictingVariableType"><code>RefEvalError::ConflictingVariableType</code></a>.</li>
+<li>Run <a href="../eligibility/fn.analyze_typed.html" title="fn xlog_logic::hypergraph::eligibility::analyze_typed"><code>super::analyze_typed</code></a> with that map. Any
+<a href="../eligibility/enum.Boundary.html" title="enum xlog_logic::hypergraph::eligibility::Boundary"><code>Boundary::UnsupportedKeyType</code></a> for a
+join-key vertex becomes an <a href="../reference/enum.RefEvalError.html#variant.Ineligible" title="variant xlog_logic::hypergraph::reference::RefEvalError::Ineligible"><code>RefEvalError::Ineligible</code></a>.</li>
+<li>Delegate to the structural evaluator.</li>
+</ol>
+<h3 id="locked-policy-unknowable-after-inference--unsupported"><a class="doc-anchor" href="#locked-policy-unknowable-after-inference--unsupported">§</a>Locked policy: unknowable-after-inference ≠ unsupported</h3>
+<p>A “missing vertex type” means <em>not derivable from base relation
+schemas</em> AND <em>not derivable from PR 8 transitive SCC type
+inference</em>, <strong>not</strong> “supported.” The typed gate rejects only
+known-unsupported join-key types.</p>
+<p>For the <strong>single-rule</strong> entry point (<a href="fn.evaluate_rule_typed.html" title="fn xlog_logic::hypergraph::typed::evaluate_rule_typed"><code>evaluate_rule_typed</code></a>),
+types come from <code>base_relations</code> only — there is no group
+context for inference. A self-referencing or recursive rule
+used through this path therefore retains the original
+“unknown ≠ unsupported” behavior on its recursive body atoms;
+callers needing inference-aware typing should drive
+<a href="fn.evaluate_fixpoint_typed.html" title="fn xlog_logic::hypergraph::typed::evaluate_fixpoint_typed"><code>evaluate_fixpoint_typed</code></a> or <a href="fn.evaluate_scc_fixpoint_typed.html" title="fn xlog_logic::hypergraph::typed::evaluate_scc_fixpoint_typed"><code>evaluate_scc_fixpoint_typed</code></a>.</p>
+<p>For the <strong>group-aware</strong> entry points (<a href="fn.evaluate_fixpoint_typed.html" title="fn xlog_logic::hypergraph::typed::evaluate_fixpoint_typed"><code>evaluate_fixpoint_typed</code></a>,
+<a href="fn.evaluate_scc_fixpoint_typed.html" title="fn xlog_logic::hypergraph::typed::evaluate_scc_fixpoint_typed"><code>evaluate_scc_fixpoint_typed</code></a>), PR 8 inference runs at entry
+and feeds inferred SCC predicate schemas alongside
+<code>base_relations</code> into per-rule type derivation. Cyclic-only
+predicates (no base anchor anywhere in the rule graph) produce
+all-<code>None</code> inferred schemas and pass the gate; this is the
+narrowed policy now locked by
+<code>cyclic_only_predicate_still_passes_typed_gate_locked_policy</code>.</p>
+<h3 id="why-a-separate-module"><a class="doc-anchor" href="#why-a-separate-module">§</a>Why a separate module</h3>
+<p>The structural evaluators (PR 2/3/4) take no type map. Wiring
+type derivation into each evaluator’s signature would either
+(a) force callers to pre-compute the map even when they want
+the structural-only behavior or (b) introduce a parallel
+“with-types” code path inside each evaluator. Keeping the gate
+as a thin orchestration layer above the existing oracles
+preserves the structural API and makes the typed contract
+testable in one place.</p>
+</div></details><h2 id="functions" class="section-header">Functions<a href="#functions" class="anchor">§</a></h2><dl class="item-table"><dt><a class="fn" href="fn.evaluate_fixpoint_typed.html" title="fn xlog_logic::hypergraph::typed::evaluate_fixpoint_typed">evaluate_<wbr>fixpoint_<wbr>typed</a></dt><dd>Evaluate a recursive fixpoint with typed gating applied to every
+rule against <code>base_relations</code> at function entry.</dd><dt><a class="fn" href="fn.evaluate_rule_typed.html" title="fn xlog_logic::hypergraph::typed::evaluate_rule_typed">evaluate_<wbr>rule_<wbr>typed</a></dt><dd>Evaluate a single rule with relation-schema-driven type gating.</dd><dt><a class="fn" href="fn.evaluate_scc_fixpoint_typed.html" title="fn xlog_logic::hypergraph::typed::evaluate_scc_fixpoint_typed">evaluate_<wbr>scc_<wbr>fixpoint_<wbr>typed</a></dt><dd>Evaluate a multi-predicate SCC fixpoint with typed gating
+applied to every rule against <code>base_relations</code> at function
+entry.</dd></dl></section></div></main></body></html>

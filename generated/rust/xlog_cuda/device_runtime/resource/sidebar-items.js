@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["Access","BlockState","ResourceError"],"struct":["AllocTag","BlockId","DeviceBlock","Generation","StreamId"],"trait":["DeviceMemoryResource"],"type":["ResourceResult"]};

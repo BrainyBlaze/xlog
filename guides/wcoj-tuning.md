@@ -1,0 +1,299 @@
+# Worst-case-optimal join tuning
+
+When XLOG routes a rule through a worst-case-optimal join, why an eligible rule can still fall back, and the environment variables and config builders that control it.
+
+Some queries — counting triangles, 4-cycles, or small cliques in a large graph —
+make an ordinary join build a huge intermediate table before returning a small
+answer. XLOG can instead route these shapes through a **worst-case-optimal join
+(WCOJ)**: a join that computes the whole pattern at once instead of joining two
+relations at a time. On the shapes it covers, WCOJ never materializes those large
+intermediate relations, so peak memory stays flat even on skewed graphs — exactly
+where a chain of ordinary two-relation ("binary") joins blows up.
+
+This page is for tuning that routing. It answers three questions:
+
+- **Will my rule use WCOJ?** (which shapes and key types qualify)
+- **Why did an eligible rule still fall back to the ordinary join?**
+- **Which settings move the decision, and how do I confirm the change?**
+
+For the internal kernel design (a contributor-facing page), see the
+[WCOJ architecture guide](/architecture/wcoj).
+
+## When to use this
+
+Reach for this page when you have a triangle, 4-cycle, or clique query over a
+large, skewed graph and you want to confirm — or force — that XLOG runs it with
+WCOJ. It is also the page to open when a rule you expected to speed up did not,
+and you need to find out why.
+
+## How you confirm it worked
+
+Two signals, together, tell you a tuning change did what you wanted:
+
+1. **Dispatch counters** report whether the WCOJ route actually fired for your
+   rule, or whether XLOG quietly ran the ordinary binary join instead.
+2. **Row-set equality** confirms correctness: the WCOJ route and the ordinary
+   join must return the identical set of rows.
+
+Read the dispatch counters by running with `--wcoj --stats`:
+
+```bash
+xlog run triangles.xlog --wcoj --stats
+```
+
+If a WCOJ kernel fired, the stats output (written to stderr) reports the count per
+shape:
+
+```
+WCOJ kernels dispatched: triangle 1, 4-cycle 0, groupby-fusion 0, free-join 0, factorized-delta 0 (declines 0)
+```
+
+A non-zero `triangle` count means your triangle rule dispatched to WCOJ. If instead
+you see
+
+```
+WARNING: --wcoj set but no WCOJ kernel dispatched (declines 0); the run fell back to binary joins
+```
+
+then XLOG ran the ordinary binary join — same answer, no WCOJ — and the "Eligible is
+not the same as dispatched" section below explains why.
+
+Never trust a speedup you have not proven row-equivalent. When you A/B a tuning
+change, compare a forced-on run against a forced-off run and confirm the row sets
+match before you believe any timing difference.
+
+## When WCOJ dispatches
+
+<Frame caption="The promoter recognizes eligible join shapes; a runtime cost gate then chooses the worst-case-optimal multiway join or the binary-join fallback — and the two return the identical row set.">
+  <img className="block dark:hidden" src="/assets/diagrams/wcoj-dispatch-light.svg" alt="WCOJ dispatch: a join body passes through a promoter that recognizes triangle, 4-cycle, and clique shapes, then a cost gate routes it to the GPU multiway join when WCOJ wins or to a binary-join tree otherwise; both produce the same rows." />
+  <img className="hidden dark:block" src="/assets/diagrams/wcoj-dispatch-dark.svg" alt="WCOJ dispatch: a join body passes through a promoter that recognizes triangle, 4-cycle, and clique shapes, then a cost gate routes it to the GPU multiway join when WCOJ wins or to a binary-join tree otherwise; both produce the same rows." />
+</Frame>
+
+A rule is a candidate for WCOJ only when three things line up. Miss any one and
+the rule runs on the ordinary binary plan.
+
+<Steps>
+  <Step title="The body is positive relational Datalog">
+    Every body atom is a relation scan. Negation, aggregation, `is` expressions, ground
+    facts, and too-few positive atoms all disqualify the rule.
+  </Step>
+  <Step title="The body matches a certified shape">
+    XLOG certifies a fixed set of join geometries — a triangle `e(X,Y), e(Y,Z), e(X,Z)`,
+    a 4-cycle `e(W,X), e(X,Y), e(Y,Z), e(Z,W)`, and `K5` / `K6` cliques (a clique on
+    `K` nodes, where every one of the `C(K,2)` possible edges is present). Shapes
+    outside this set are not automatically routed through WCOJ.
+  </Step>
+  <Step title="The join keys are a supported type">
+    WCOJ join keys must be `u32`, `u64`, or `Symbol`, and a single dispatch cannot mix
+    width classes — that is, it cannot mix 32-bit and 64-bit keys. (`Symbol` shares
+    `u32`'s physical layout.)
+  </Step>
+</Steps>
+
+## Eligible is not the same as dispatched
+
+This is the point most people miss. A rule can clear every check above and still
+run on ordinary binary joins.
+
+There are two decisions, not one. First the rule is **promoted** into a
+`MultiWayJoin` plan node — the plan step that represents the whole multiway
+pattern. Promotion makes the rule **eligible**. Then, at runtime, a second
+decision — based on cost estimates and table statistics — decides whether the
+rule is actually **dispatched** to WCOJ.
+
+Every promoted `MultiWayJoin` carries an embedded fallback: the post-optimizer binary
+plan that would have run without promotion. When the dispatcher declines WCOJ,
+the executor runs that embedded fallback instead.
+
+Common reasons the dispatcher declines an eligible rule:
+
+- The cost model, given the available statistics, predicts the binary plan wins.
+- Statistics are missing or too thin for the cost model to justify WCOJ.
+- The best available join order would have to start from a bad prefix — one that
+  materializes a larger intermediate than the binary plan — so the planner
+  declines rather than dispatch the loss.
+- A kill switch (a hard off switch) or a force-off setting is active (see below).
+- Runtime validation fails — missing relation buffers, mixed width classes, or a
+  projection that does not match the certified shape.
+- For a `K`-clique, the statistics are incomplete or a hash-join route is predicted
+  to win. This is a *planned* hash route, not a missed recognition.
+
+<Warning>
+Fallback is not an error and it is never a correctness compromise. The embedded binary
+plan is always **semantically equivalent** to the WCOJ route — it returns identical row
+sets. That equivalence is what lets you run with WCOJ enabled in production: the worst
+case is a slower plan, never a wrong answer.
+</Warning>
+
+## Environment-variable controls
+
+Environment variables are process-global: set them once at process startup. In
+tests, prefer the per-runtime builders below so one test's setting does not bleed
+into another. Unset, empty, `0`, and `false` never force a route on.
+
+| Variable | Values | Controls | Effect |
+|---|---|---|---|
+| `XLOG_USE_WCOJ_TRIANGLE_U32` | `1` / `true` | Triangle force gate | Forces recognized triangle dispatch, bypassing the adaptive classifier (the cost-based chooser). |
+| `XLOG_DISABLE_WCOJ_TRIANGLE` | `1` / `true` | Triangle kill switch | Pins all triangle WCOJ off; beats every other triangle flag. |
+| `XLOG_USE_WCOJ_4CYCLE` | `1` / `true` | 4-cycle force gate | Forces recognized 4-cycle dispatch. |
+| `XLOG_USE_WCOJ_4CYCLE_ADAPTIVE` | `1` / `true` | 4-cycle adaptive opt-in | Lets the cost model decide 4-cycle dispatch. Off by default. |
+| `XLOG_DISABLE_WCOJ_4CYCLE` | `1` / `true` | 4-cycle kill switch | Beats both force and adaptive. |
+| `XLOG_WCOJ_COST_MODEL` | `cardinality`, `skew`, `skewclassifier` | Runtime cost model | Selects the dispatch cost model. Invalid non-empty values resolve to `SkewClassifier`; unset defaults to `Cardinality`. |
+| `XLOG_WCOJ_BLOCK_WORK_UNIT` | integer `1..8192` | Block-slice work unit | Per-block work granularity. Default `1024`; invalid values warn and fall back to the default. |
+
+<Note>
+Two triangle controls are exposed as runtime-config builders instead of environment
+variables: triangle **adaptive** dispatch (which is on by default) and triangle
+**hard-disable**. Use `with_wcoj_triangle_dispatch_adaptive(...)` and
+`with_wcoj_triangle_dispatch_disabled(...)` for those two.
+</Note>
+
+## Factorized execution controls (development branch only)
+
+<Note>
+The three variables below govern **factorized execution** — an extension that computes
+larger join and aggregate patterns without expanding them into full intermediate tables.
+It covers three features: GPU Free Join (a WCOJ-style engine for general multiway
+bodies), factorized recursive deltas (compact incremental updates during recursion),
+and aggregate-fused WCOJ (combining a count/sum/min/max with the join in one pass).
+
+These features live on the development branch and are **not part of the v0.9.2 release**.
+In a released build the variables have no effect, because the features they gate are not
+present. See the [factorized execution guide](/architecture/factorized-execution) for
+what they do and their current status.
+</Note>
+
+| Variable | Values | Gates (unreleased) | Effect |
+|---|---|---|---|
+| `XLOG_DISABLE_FREE_JOIN` | `1` / `true` | GPU Free Join | Forces general multiway bodies through the binary fallback instead of the Free Join engine. |
+| `XLOG_DISABLE_WCOJ_GROUPBY_FUSION` | `1` / `true` | Aggregate-fused WCOJ | Forces count/sum/min/max-by-root over a triangle body to materialize then group, instead of the fused aggregate. |
+| `XLOG_DISABLE_FACTORIZED_DELTA` | `1` / `true` | Factorized recursive deltas | Forces every recursive-update step (a semi-naive delta step — the incremental pass that processes only newly derived rows) through the legacy hash-join then diff path. |
+| `XLOG_FACTORIZED_DELTA_MAX_DOMAIN` | integer | Factorized recursive deltas | Largest dense domain the bitvector delta route accepts (default `2^14`, hard bound `2^16`); above it the sparse or legacy route runs. |
+
+## Per-runtime and compile-time builders
+
+When one process needs different WCOJ behavior for different executors — or you want to
+avoid process-global environment variables in tests — configure `RuntimeConfig` and
+attach it to the executor. Forcing triangle WCOJ, as below, is the usual first step in
+an A/B row-set comparison:
+
+```rust
+use std::sync::Arc;
+use xlog_core::{CostModelKind, RuntimeConfig};
+use xlog_runtime::Executor;
+
+// Production default: triangle adaptive on, 4-cycle adaptive off, Cardinality model.
+let default_runtime = RuntimeConfig::default();
+
+// Force triangle WCOJ for an A/B row-set comparison.
+let force_triangle = RuntimeConfig::default().with_wcoj_triangle_dispatch(Some(true));
+
+// Runtime-local triangle hard stop. Beats force and adaptive.
+let triangle_off = RuntimeConfig::default().with_wcoj_triangle_dispatch_disabled(Some(true));
+
+// Enable 4-cycle adaptive routing, or pick the runtime cost model explicitly.
+let adaptive_4cycle = RuntimeConfig::default().with_wcoj_4cycle_dispatch_adaptive(Some(true));
+let conservative = RuntimeConfig::default().with_wcoj_cost_model(Some(CostModelKind::SkewClassifier));
+
+let config = RuntimeConfig::default().with_wcoj_triangle_dispatch(Some(true));
+let mut executor = Executor::new_with_config(Arc::clone(&provider), config);
+```
+
+`RuntimeConfig` decides whether a recognized shape dispatches at runtime.
+`CompilerConfig` is a separate setting: it decides whether the compiler emits a
+non-default **variable ordering** for triangle and 4-cycle plans — the order in which
+the join binds its variables, which fixes the "leader" relation the join starts from.
+
+The default preserves the baseline leader order. Enable a heat-aware ordering (one that
+prefers relations the workload touches most) only when statistics are meaningful:
+
+```rust
+use xlog_logic::compiler_config::{CompilerConfig, WcojVarOrderingKind};
+
+let config = CompilerConfig {
+    wcoj_variable_ordering: WcojVarOrderingKind::HeatAware,
+    wcoj_var_ordering_threshold: 0.5,
+};
+
+let plan =
+    compiler.compile_with_config_and_stats_snapshot(source, &config, Some(&stats_snapshot))?;
+```
+
+`wcoj_var_ordering_threshold` is a ratio gate. The model rotates the leader only when
+`candidate_score / default_leader_score` is at or below the threshold. The default is
+`0.5`; smaller values demand a clearer win before rotating. Values outside the interval
+`(0.0, 1.0]`, plus `NaN` and infinity, clamp back to the default.
+
+## Choosing a cost model
+
+There are two independent cost-model layers. One picks whether to use WCOJ at all; the
+other picks the join order once you do.
+
+**Runtime dispatch** picks whether an eligible shape dispatches:
+
+- `CostModelKind::Cardinality` is the default. Use it when relation cardinalities and
+  observed selectivity are populated, or when you just want the production route.
+- `CostModelKind::SkewClassifier` is the conservative opt-out. Use it to prove fallback
+  behavior or to bisect a suspected dispatch regression.
+
+**Compile-time variable ordering** picks the join leader:
+
+- `WcojVarOrderingKind::Disabled` (default) keeps bit-identical leader order to the
+  original slices.
+- `LeaderCardinality` picks the smallest relation as leader when the threshold gate
+  shows a clear win — the simplest useful model.
+- `HeatAware` combines cardinality, relation heat (how often a relation is touched),
+  and observed selectivity. Use it for skewed graphs or repeated workloads where the
+  `StatsManager` (XLOG's runtime statistics tracker) has enough evidence to identify
+  hot relations.
+
+| Situation | Runtime model | Compiler ordering |
+|---|---|---|
+| First run, little statistics | `Cardinality` (or force only for experiments) | `Disabled` |
+| Stable batch with seeded cardinalities | `Cardinality` | `LeaderCardinality` |
+| Repeated skewed workload with heat evidence | `Cardinality` | `HeatAware` |
+| Debugging fallback or bisecting | `SkewClassifier` or explicit force-off | `Disabled` |
+| `K`-clique with incomplete statistics | Planned hash is expected | Seed complete statistics first |
+
+## Tuning workflow
+
+Tune one knob at a time, and for each change record both the dispatch counters and
+row-set equality. Never trust a speedup you have not proven row-equivalent.
+
+- **`wcoj_var_ordering_threshold`** — lower it (for example `0.25`) when leader rotation
+  is too eager and layout overhead dominates; raise it toward `0.75` only after row
+  parity is stable and profiling shows the default leader is repeatedly expensive.
+- **`XLOG_WCOJ_BLOCK_WORK_UNIT`** — lower it for severe leader-key skew where a few keys
+  dominate work; raise it for uniform inputs where launch overhead dominates. Stay within
+  `1..8192`. This knob must not change row sets.
+- **Force gates** — use them to prove the WCOJ route produces the same rows, not as a
+  permanent substitute for a cost model. Leave them on only for a fixed, benchmarked
+  workload.
+
+## Debug checklist
+
+When WCOJ did not run:
+
+1. Check the shape — is it a triangle, 4-cycle, or `K5` / `K6` clique?
+2. Check the key types — are they `u32`, `u64`, or `Symbol`?
+3. Check env and config — did you force off or disable the route?
+4. Check statistics — does the cost model have enough cardinality and selectivity?
+5. Check counters — did the route fire but emit zero rows?
+6. Check fallback parity — does forced-off output match the expected rows?
+
+When WCOJ ran but was slower:
+
+1. Confirm the input is large enough to amortize layout and launch overhead.
+2. Try `LeaderCardinality` or `HeatAware`, but only with meaningful statistics.
+3. Tune `XLOG_WCOJ_BLOCK_WORK_UNIT` in one direction at a time.
+4. For 4-cycle, verify adaptive mode was intentionally enabled.
+5. For `K`-clique, check whether the planner predicted hash but force was used anyway.
+
+When rows differ, stop tuning and treat it as a correctness bug: capture the forced-off
+fallback rows and the forced WCOJ rows, record the plan shape and projection, and do not
+resume tuning until parity is restored.
+
+<Card title="Factorized execution" icon="layer-group" href="/architecture/factorized-execution">
+  GPU Free Join, factorized recursive deltas, and aggregate-fused WCOJ — the
+  development-branch work that extends WCOJ beyond the certified shapes.
+</Card>

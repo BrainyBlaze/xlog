@@ -1,0 +1,196 @@
+# Epistemic reasoning
+
+Reason about what is known and what is possible across the stable models of a program — modal operators, world-view semantics, FAEEL and Gelfond-1991 modes, and a GPU Generate-Propagate-Test executor.
+
+Epistemic reasoning lets your program ask not just *what is true*, but *what is
+known* and *what is merely possible*. You write rules with the operators `know`
+and `possible`, and XLOG answers them on the GPU.
+
+Use it when a plain fact is not enough and you need to distinguish a settled
+conclusion from an open one — for example, "treat someone as safe only if their
+vaccination is confirmed no matter how the facts shake out," versus "it is at
+least possible they are vaccinated."
+
+## When to use this
+
+Reach for epistemic reasoning when your program has more than one self-consistent
+solution and you care about that spread.
+
+A **stable model** is one such solution: an assignment of facts that justifies
+exactly itself and nothing more. A program can have many. Ordinary Datalog picks
+a single model and stops; an epistemic program instead reasons over the whole set
+of models it considers possible at once — its **world view** — and lets you ask
+what holds across that set.
+
+- `know p` — is `p` true in *every* possible world? (a settled conclusion)
+- `possible p` — is `p` true in *at least one* possible world? (an open one)
+
+If you only ever need one model, you do not need this layer. You need it when the
+gap between "known" and "possible" is the answer you are looking for.
+
+## Smallest runnable example
+
+Only Alice is on record as vaccinated, so she is the only person whose
+`know vaccinated` can hold across every world. Save this as `safe.xlog`:
+
+```xlog
+#pragma epistemic_mode = faeel
+
+pred person(symbol).
+pred vaccinated(symbol).
+pred safe(symbol).
+
+person(alice).
+person(bob).
+vaccinated(alice).
+
+safe(P) :- person(P), know vaccinated(P).
+
+?- safe(P).
+```
+
+Run it:
+
+```bash
+xlog run safe.xlog
+```
+
+**Expected output.** The query returns `alice` alone. `bob` is a person, but
+nothing makes his vaccination status known, so `know vaccinated(bob)` fails and
+he is not derived as safe. That single-row answer is how you confirm the modal
+rule fired: getting `alice` alone — rather than every person, the way plain
+Datalog would with no vaccination guard — is your signal that the `know` operator
+is doing the work.
+
+## Modal operators
+
+You write a modal literal by prefixing a body atom with `know` or `possible`, and
+you can negate either one. Over a world view — a non-empty set of accepted stable
+models — the operators mean:
+
+| Operator | Holds when |
+|---|---|
+| `know p` | `p` appears in every world |
+| `possible p` | `p` appears in at least one world |
+| `not know p` | `know p` does not hold |
+| `not possible p` | `possible p` does not hold |
+
+The key distinction is that `possible p` and `not know p` can both be true of the
+same atom at the same time. That is exactly how you express genuine uncertainty
+about what the program commits to.
+
+### Nested operators
+
+You may nest operators into finite chains, such as `know possible p`. XLOG
+collapses each chain to a single operator before running it, using the standard
+logical equivalences for nesting (parity and duality).
+
+For example, `know possible p` reduces to `possible p`, and `know possible not p`
+reduces to `not know p`.
+
+## World-view semantics
+
+An epistemic program is evaluated against its world view rather than a single
+model. Consider this rule:
+
+```xlog
+safe(P) :- person(P), know vaccinated(P).
+```
+
+It fires for a person only when `vaccinated(P)` is settled across *every* world
+the program admits — that is knowledge, not mere possibility. Swapping `know` for
+`possible` weakens the requirement to holding in *at least one* world.
+
+## Choosing a semantics: `faeel` vs `g91`
+
+Two semantics decide when a `know` or `possible` fact counts. You pick one with a
+pragma:
+
+```xlog
+#pragma epistemic_mode = faeel
+#pragma epistemic_mode = g91
+```
+
+`faeel` is the **founded** semantics and the default. *Founded* means a fact
+counts only if the program actually derives it, not if it merely asserts itself.
+Under `faeel`, both `know p` and `possible p` demand that `p` be founded, so a
+purely self-supporting rule like `p() :- possible p().` collapses to the empty
+founded extension — nothing is concluded.
+
+`g91` selects **Gelfond-1991** semantics, the classical 1991 definition, under
+which that same self-support *is* accepted.
+
+Choose `faeel` when you want knowledge grounded in derivation. Choose `g91` for
+classical Gelfond-1991 compatibility.
+
+## How it runs
+
+XLOG first compiles your program into an **epistemic IR** — an internal form
+built specifically for modal reasoning. Accepted programs always go through this
+form; a bare modal lowering that skips it is rejected.
+
+It then runs **Generate-Propagate-Test** on the GPU: it enumerates candidate
+world views, prunes the inconsistent ones, and tests the rest, accepting the
+founded world views.
+
+<Frame caption="Generate-Propagate-Test runs on the GPU: candidate world views are enumerated, pruned to the consistent ones, and tested; the founded world views are accepted.">
+  <img className="block dark:hidden" src="/assets/diagrams/epistemic-gpt-light.svg" alt="Epistemic Generate-Propagate-Test: on the GPU, Generate enumerates candidate world views, Propagate prunes inconsistent ones, Test applies brave and cautious checks, and the founded world views are accepted." />
+  <img className="hidden dark:block" src="/assets/diagrams/epistemic-gpt-dark.svg" alt="Epistemic Generate-Propagate-Test: on the GPU, Generate enumerates candidate world views, Propagate prunes inconsistent ones, Test applies brave and cautious checks, and the founded world views are accepted." />
+</Frame>
+
+<Steps>
+  <Step title="Generate">
+    Candidate world views are enumerated from the program's epistemic literals.
+  </Step>
+  <Step title="Propagate">
+    Immediate known-or-rejected contradictions are pruned before any candidate is tested.
+  </Step>
+  <Step title="Test">
+    Each surviving candidate is evaluated under the selected semantics, and the founded
+    world views are accepted.
+  </Step>
+</Steps>
+
+### Keeping the search tractable
+
+To avoid enumerating more than it has to, XLOG uses **epistemic splitting**: it
+breaks the program into independent pieces and solves each on its own.
+
+Rules that genuinely couple more than one modal predicate cannot be split. XLOG
+unions those into a single piece and solves them jointly, as one modal
+conjunction over the candidate world view. It then restores the original rule
+order once the pieces are recombined.
+
+## Limits
+
+The number of candidate world views is `2^(number of epistemic literals)` — one
+candidate per truth assignment to the program's epistemic literals. Every extra
+epistemic literal doubles the search, so this layer is for programs with a small
+number of them.
+
+A per-reduction cap, `MAX_MODELS_PER_REDUCTION = 1024`, bounds how many models any
+single reduction may produce.
+
+Some programs have modal coupling that is genuinely cyclic, with no order in which
+the founded (or well-founded) values can be worked out. Rather than guessing an
+answer, XLOG **fails closed**: it stops and returns a typed diagnostic — a
+structured error identifying the problem — instead of a result.
+
+<Note>
+The bound is not a fixed candidate ceiling. There is no `k <= 24` limit and no
+`50000`-candidate limit. The real bound is `2^(number of epistemic literals)`
+candidates, capped per reduction by `MAX_MODELS_PER_REDUCTION = 1024`.
+</Note>
+
+## Reference
+
+<Note>
+The epistemic capability described here — the modal operators, `faeel` and `g91`
+modes, GPU Generate-Propagate-Test, and epistemic splitting — shipped in XLOG
+v0.9.2.
+</Note>
+
+<Card title="How XLOG works" icon="diagram-project" href="/core-concepts/how-xlog-works">
+  Epistemic reasoning reuses the same parser, stratifier, and CUDA runtime as every other
+  XLOG paradigm — see how a program travels from source to GPU.
+</Card>

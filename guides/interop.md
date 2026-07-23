@@ -1,0 +1,144 @@
+# Arrow, DLPack, and cuDF interop
+
+Move relation columns between XLOG and the GPU tensor ecosystem — which paths keep data on the device and which pay a host round-trip.
+
+XLOG's query results and input relations are columnar tensors that live in device
+memory. To use them from PyTorch, JAX, cuDF, or any other GPU framework, you need an
+interchange format — and the format you pick decides whether the data stays on the GPU
+or takes a detour through host memory. XLOG's CUDA backend (`crates/xlog-cuda`) offers
+three: DLPack, the Arrow C Device interface, and Arrow IPC. Two are zero-copy; the
+third is not.
+
+## Zero-copy versus copy at a glance
+
+The distinction is the whole point of this page. A **zero-copy** path hands the
+consumer a pointer to the same device buffer XLOG already holds — no bytes move. A
+**copy** path serializes the buffer to host memory and back, so a downstream GPU
+computation pays a device-to-host-to-device round trip before it can start.
+
+| Path | Direction | Data movement | Status |
+|---|---|---|---|
+| DLPack (per column) | Export and import | Zero-copy, stays on GPU | Stable |
+| Arrow C Device interface | Export | Zero-copy, stays on GPU | Stable |
+| Arrow C Device interface | Import | Zero-copy, stays on GPU | Experimental, feature-gated |
+| Arrow IPC stream | Export and import | Host copy — GPU to host, host to GPU | Stable |
+
+<Note>
+Arrow **IPC** and the Arrow **C Device** interface are both "Arrow," but they sit on
+opposite sides of the copy boundary. IPC is a host-serialized byte stream; the C Device
+interface passes CUDA device pointers. Reach for IPC only when the consumer genuinely
+needs host-side Arrow (a `pyarrow.Table`, a file on disk); reach for the C Device
+interface or DLPack when the data must stay on the GPU.
+</Note>
+
+## DLPack — the default zero-copy path
+
+DLPack is the most direct way to share a column with a tensor framework. XLOG exports
+each relation column as a contiguous 1-D device tensor and consumes DLPack tensors the
+same way, so a query result flows into PyTorch without leaving the GPU:
+
+```python
+import pyxlog
+import torch
+
+program = pyxlog.LogicProgram.compile("""
+    pred edge(u32, u32).
+    pred reach(u32, u32).
+
+    edge(1, 2). edge(2, 3). edge(3, 4).
+
+    reach(X, Y) :- edge(X, Y).
+    reach(X, Z) :- reach(X, Y), edge(Y, Z).
+
+    ?- reach(1, N).
+""")
+
+result = program.evaluate()
+
+for q in result.queries:
+    # Each column is a DLPack tensor; torch.from_dlpack wraps it with no copy.
+    cols = [torch.from_dlpack(t) for t in q.tensors]
+    print(q.relation_name, q.num_rows, cols)
+```
+
+**Confirm it stayed on the GPU.** Check each wrapped tensor's device: `cols[0].device`
+reports `cuda` (the same device XLOG computed on). A host round-trip would surface as
+`cpu` instead.
+
+Input relations travel the same path in reverse. `evaluate(dlpack_inputs=...)` takes a
+mapping from relation name to a sequence of 1-D DLPack columns — one tensor per column,
+never a single 2-D tensor:
+
+```python
+# Two 1-D columns for edge(u32, u32), already resident on the GPU.
+edge_src = torch.tensor([1, 2, 3], device="cuda", dtype=torch.int32)
+edge_dst = torch.tensor([2, 3, 4], device="cuda", dtype=torch.int32)
+
+result = program.evaluate(dlpack_inputs={"edge": [edge_src, edge_dst]})
+```
+
+The Rust surface mirrors this with `to_dlpack_table` for export and
+`from_dlpack_tensors` / `from_dlpack_tensors_with_schema` for import — the latter
+validates the incoming columns against a declared schema instead of inferring it.
+
+<Warning>
+DLPack columns are contiguous 1-D device buffers. A 2-D tensor, a non-contiguous view,
+or a strided slice is not a valid column — materialize a contiguous copy on your side
+before handing it to XLOG.
+</Warning>
+
+## Arrow C Device interface — zero-copy Arrow
+
+When the consumer speaks Arrow but you still want to stay on the GPU, the Arrow C
+Device interface exports device-resident columns as an `ArrowDeviceArray` carrying CUDA
+device pointers. The device descriptor reports `device_type = ARROW_DEVICE_CUDA` and the
+originating `device_id`, so a RAPIDS consumer knows the buffers are already on the
+right device.
+
+Export covers `u32`, `u64`, `i32`, `i64`, `f32`, `f64`, `bool` (bit-packed), and
+`symbol` (exported as `UInt32`). Symbol columns carry `xlog.symbol=true` and
+`xlog.symbol_encoding=u32` in their schema metadata so the interned-string encoding
+survives the boundary. Ownership stays explicit: `ArrowDeviceArrayOwned` keeps the GPU
+buffers alive until the FFI handle is released.
+
+Import over the same interface is **experimental** and compiled out by default. Build
+`pyxlog` with the `arrow-device-import` feature to enable it:
+
+```bash
+maturin develop --features arrow-device-import
+```
+
+With that feature, import wraps an `ArrowDeviceArrayOwned`'s device pointers as XLOG
+columns without copying. It accepts numeric types and `Symbol` (as `UInt32` marked
+`xlog.symbol=true`); it currently **rejects nulls** and does **not** yet accept
+bit-packed `Bool`.
+
+## Arrow IPC — the host-copy path
+
+Arrow IPC is the interoperability escape hatch: it serializes relations to a standard
+Arrow stream that any Arrow-native tool can read, including plain CPU `pyarrow`. It is
+**not zero-copy** — export downloads GPU to host, and import uploads host to GPU. Use it
+when you need a portable artifact or a host-side table, not on a hot path.
+
+The Rust side writes a stream file with `write_arrow_ipc_stream_file`; Python reads it
+back through `pyarrow` and, if desired, up-loads it into cuDF:
+
+```python
+import pyarrow.ipc as ipc
+import cudf
+
+with open("data.arrow", "rb") as f:
+    table = ipc.open_stream(f).read_all()
+
+df = cudf.DataFrame.from_arrow(table)   # host table -> GPU (upload)
+print(df)
+```
+
+That `from_arrow` step is exactly the host-to-GPU copy the zero-copy paths avoid — a
+reminder to prefer DLPack or the Arrow C Device interface whenever the consumer can take
+device pointers directly.
+
+<Card title="How results stay on the GPU" icon="microchip" href="/core-concepts/gpu-residency">
+  Why zero-copy interop matters — XLOG keeps semantic state device-resident so a
+  downstream tensor computation reads its output without a host round-trip.
+</Card>

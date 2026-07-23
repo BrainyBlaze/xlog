@@ -1,0 +1,253 @@
+# Diagnostics and provenance
+
+Inspect why XLOG produced a result — rule and induced-rule provenance, proof traces, relation deltas, host-transfer audits, and neural hot-loop state — without perturbing the production data path.
+
+When XLOG returns an answer, these tools tell you *why*: which rule fired, which
+facts supported it, why one learned rule was kept over another, and whether an
+incremental update stayed fast. You get that explanation without pulling relation
+data back off the GPU and without changing the behavior you are trying to observe.
+
+Reach for this page when a result surprises you, when a rule you expected did not
+fire, or when an update that should have been cheap suddenly got slow — and you
+want an audit trail rather than a guess.
+
+<Note>
+Every surface here reports **metadata, hashes, counters, and runtime state** — never
+relation rows. Turning diagnostics on does not move data to the host or alter the
+production data path, unless you separately call a host-readable API. XLOG keeps its
+working state on the GPU, so observability is built to respect that boundary.
+</Note>
+
+Throughout this page, a few recurring terms:
+
+- **Provenance** — a record of where something came from (which source rule, which
+  facts, which search).
+- **Delta** — the set of changes in an incremental update (rows inserted or deleted),
+  as opposed to recomputing everything from scratch.
+- **SCC (strongly connected component)** — a cluster of rules that depend on each
+  other recursively. XLOG evaluates one SCC at a time, so an incremental update can
+  recompute some SCCs while reusing cached results for others.
+
+## What you can inspect
+
+| Question | Surface | How you read it |
+|---|---|---|
+| Which rules exist, and where did each come from? | Rule provenance | `xlog explain`, `rule_provenance()` |
+| Why did a specific query answer hold? | Proof traces | `xlog explain`, `proof_traces()` |
+| Why was a mined or induced rule kept, and what did it beat? | Induced-rule provenance | `InducedRuleProvenance` |
+| Did my incremental update stay incremental? | Relation-delta debugging | `apply_relation_delta_debug(...)`, `delta_stats()` |
+| Is the neural hot loop actually host-free? | Host-transfer audits | `neural_hot_loop_diagnostics()` |
+
+## Rule provenance and proof traces
+
+**When to use it.** You want to know what rules are in play and how a particular
+answer was derived — for example, to confirm a query answer came from the rule you
+expected and not a rewrite.
+
+**How.** The fastest path is the CLI:
+
+```bash
+xlog explain program.xlog
+```
+
+This prints compact `rule_provenance:` and `proof_traces:` sections as text. For
+machine-readable output, use JSON:
+
+```bash
+xlog explain program.xlog --format json
+```
+
+The JSON emits the full arrays with stable snake-case keys. From Python, the same
+records come back as dictionaries:
+
+```python
+program.rule_provenance()   # list of rule-provenance dicts
+program.proof_traces()      # list of proof-trace dicts
+# rule_provenance() -> [{'rule_id': ..., 'head': ..., 'source_kind': 'Source', ...}, ...]
+```
+
+These methods are available on `CompiledLogicProgram`, `LogicRelationSession`, and
+`CompiledProgram`.
+
+**How do I know it worked.** You get one `rule_provenance` entry per rule and one
+`proof_traces` entry per explained query answer. Each carries the fields below.
+
+`xlog_logic::diagnostics` is the shared source of truth for both records. A
+`RuleProvenance` record tells you what a rule is and where it came from; a
+`QueryProofTrace` reconstructs the derivation behind a query answer.
+
+```rust
+pub enum RuleSourceKind { Source, Generated, Imported, RuntimeInjected }
+
+pub struct RuleProvenance {
+    pub rule_id: String,
+    pub head: String,
+    pub source_kind: RuleSourceKind,
+    pub source_span: Option<String>,
+    pub generation_trace_hash: Option<String>,
+    pub support_relation_ids: Vec<String>,
+    pub counterexample_relation_ids: Vec<String>,
+}
+
+pub struct QueryProofTrace {
+    pub query_id: String,
+    pub query: String,
+    pub answer_relation: String,
+    pub rule_ids: Vec<String>,
+    pub source_facts: Vec<String>,
+    pub rejected_alternatives: Vec<String>,
+}
+```
+
+Generated rewrite rules are included when you supply a generated program — for
+example, the magic-set path, a query-rewriting optimization that produces new
+helper rules. Duplicate generated rules whose text matches a source rule are
+suppressed, so the report names only genuinely new rules.
+
+For generated-rule candidates, the JSON output adds a `generated_rule_diagnostics`
+block. Its `row_decisions` explain each row that was accepted or rejected. For each
+row you get:
+
+- `failed_predicates` — the predicates that did not hold,
+- `threshold_comparisons` — the left/right values and pass/fail status of each
+  threshold check,
+- `aggregate_inputs` — the inputs to any aggregate.
+
+That covers both accepted rows and rows rejected because a predicate or threshold
+check failed.
+
+## Induced-rule provenance
+
+**When to use it.** After rule learning or mining, you want to audit *which* rule the
+search selected and *why the others lost* — not just the winner, but the alternatives
+it beat.
+
+**How.** Rule learning and mining produce first-class `InducedRuleProvenance` records:
+
+```rust
+pub struct InducedRuleProvenance {
+    pub rule_id: String,
+    pub rule_source: String,
+    pub source_kind: RuleSourceKind,
+    pub search_space_size: u64,
+    pub predicate_inventory: Vec<String>,
+    pub support_rows: Vec<InductionSupportRow>,
+    pub rejected_alternatives: Vec<InductionAlternative>,
+    pub falsification_count: u64,
+    pub generation_trace_hash: String,
+}
+```
+
+**How do I know it worked.** Each `InductionSupportRow` names the relation, row
+offset, and caller-supplied row hash of retained positive support. Each
+`InductionAlternative` keeps a rejected candidate's source, support count, and
+falsification count.
+
+This is an audit layer over the induction scorer. It records which rule was selected
+and why the others were not; it does not change the scoring itself.
+
+## Relation-delta debugging
+
+**When to use it.** You feed XLOG an incremental update and want to confirm the engine
+actually recomputed incrementally instead of quietly falling back to a full recompute —
+the difference between a fast update and a silent performance cliff.
+
+**How.** pyxlog returns delta metadata from the normal delta APIs and from
+`apply_relation_delta_debug`:
+
+```python
+report = session.apply_relation_delta_debug(updates, check_equivalence=True)
+print(report["planner_telemetry"])
+print(report["equivalent_to_full_recompute"])   # only when check_equivalence=True
+```
+
+`check_equivalence` defaults to `False`. Verifying it re-runs a full recompute and
+compares the query stores — an intentionally expensive audit you opt into, not a cost
+you pay on every update.
+
+The underlying `LogicDeltaReport` is metadata-only:
+
+```rust
+pub struct LogicDeltaReport {
+    pub input_delta_count: usize,
+    pub changed_relations: usize,
+    pub changed_relation_names: Vec<String>,
+    pub insert_rows: u64,
+    pub delete_rows: u64,
+    pub affected_sccs: usize,
+    pub recomputed_sccs: usize,
+    pub incremental_sccs: usize,
+    pub planner_telemetry: DeltaPlannerTelemetry,
+    pub debug_trace: Vec<String>,
+}
+```
+
+**How do I know it worked.** Compare `incremental_sccs` against `recomputed_sccs`: a
+healthy incremental update touches few recomputed SCCs. The nested `planner_telemetry`
+is the audit surface for the incremental planner. It reports cache reuse, the fallback
+decision, the count of affected / recomputed / incremental SCCs, estimated and measured
+delta speedups when available, and free-text planner advice about the
+incremental-versus-full tradeoff.
+
+Relation callbacks receive the same changed-relation names and debug trace in their
+metadata payload; that path stays metadata-only too.
+
+## Host-transfer audits
+
+**When to use it.** XLOG's neural hot loop — the tight per-step inference loop for the
+`nn/4` predicate — is designed to run without moving data between GPU and host on every
+step. When you suspect a stray transfer is slowing it down, you want a transfer count.
+
+**How.** `neural_hot_loop_diagnostics()` returns one dictionary for the `nn/4` loop:
+
+```python
+diag = program.neural_hot_loop_diagnostics()
+```
+
+The dictionary contains:
+
+- `post_load_dtoh_bytes`, `post_load_htod_bytes`, `post_load_dtoh_calls`,
+  `post_load_htod_calls` — the device-to-host (DtoH) and host-to-device (HtoD) traffic
+  after load,
+- `control_plane_bytes_per_iteration` and `control_plane_status`,
+- `scalar_sync_checks` and `scalar_sync_status`,
+- nested `cuda_graph` and `circuit_cache` counters.
+
+**How do I know it worked.** A clean loop shows **zero post-load host traffic**. Non-zero
+counts tell you exactly where a transfer crept in.
+
+When the runtime cannot supply a particular counter, its value is `None` and the matching
+status field explains why. An unavailable probe is reported as unavailable, never as a
+fake zero.
+
+## Relation evidence
+
+**When to use it.** You load relations with provenance and later want to audit what was
+accepted, what was rejected, and against which hashes.
+
+**How.** For relations loaded with provenance, the session retains a separate evidence
+record — schema, source and output hashes, row hashes, and accepted/rejected decision
+counts:
+
+```python
+session.put_relation_with_provenance(
+    "edge",
+    columns,
+    relation_schema=["subject", "predicate", "object"],
+    source_hash="sha256:...",
+    row_hashes=["..."],
+    decision_counts={"accepted": 10, "rejected": 2},
+)
+
+session.evidence()                        # program_hash + per-relation evidence
+session.relation("edge").provenance()     # schema, hashes, decision counts
+```
+
+**How do I know it worked.** `evidence()` returns a `program_hash` plus one evidence
+entry per relation; `relation("edge").provenance()` returns that relation's schema,
+hashes, and decision counts.
+
+<Note>
+The evidence store is session-local and in-memory — an audit companion to the relation
+store, not a persistence format.
+</Note>

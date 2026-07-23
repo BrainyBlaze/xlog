@@ -1,0 +1,39 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Selectivity-driven join reordering for canonical lowered triangle and 4-cycle bodies."><title>xlog_logic::optimizer::selectivity_pass - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-17e0aaed.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="xlog_logic" data-themes="" data-resource-suffix="" data-rustdoc-version="1.97.1 (8bab26f4f 2026-07-14)" data-channel="1.97.1" data-search-js="search-fd9372ac.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../static.files/storage-41dd4d93.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../../static.files/main-fcd733ba.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module selectivity_pass</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../../xlog_logic/index.html">xlog_<wbr>logic</a><span class="version">0.11.0</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module selectivity_<wbr>pass</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#behavior" title="Behavior">Behavior</a></li><li><a href="#safety-floor" title="Safety floor">Safety floor</a></li><li><a href="#default-fallback-edge-case" title="Default-fallback edge case">Default-fallback edge case</a></li><li><a href="#promoter-coordination" title="Promoter coordination">Promoter coordination</a></li></ul><h3><a href="#functions">Module Items</a></h3><ul class="block"><li><a href="#functions" title="Functions">Functions</a></li></ul></section><div id="rustdoc-modnav"><h2><a href="../index.html">In xlog_<wbr>logic::<wbr>optimizer</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../../index.html">xlog_logic</a>::<wbr><a href="../index.html">optimizer</a></div><h1>Module <span>selectivity_<wbr>pass</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../../src/xlog_logic/optimizer.rs.html#1253">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>Selectivity-driven join reordering for canonical lowered triangle and
+4-cycle bodies.</p>
+<h3 id="behavior"><a class="doc-anchor" href="#behavior">§</a>Behavior</h3>
+<p>For each rule body that matches the canonical lowered
+triangle or 4-cycle shape, the pass enumerates the valid
+candidate inner pairings (3 for triangle, 2 for 4-cycle),
+computes each candidate’s
+<code>StatsManager::estimate_join_cardinality</code> with
+<strong>pair-derived join keys from the shared-variable
+mapping</strong>, and rewrites the body so the smallest-cost
+choice is materialized first. Tie → keep the optimizer’s
+existing order (deterministic no-op).</p>
+<h3 id="safety-floor"><a class="doc-anchor" href="#safety-floor">§</a>Safety floor</h3>
+<p>If any input atom for a recognized body has no
+<code>StatsManager</code> entry OR <code>cardinality == 0</code>, the body is
+left unchanged. Recursive deltas / freshly-uploaded
+relations / unseeded predicates therefore stay on the
+optimizer’s default order until stats are populated.</p>
+<h3 id="default-fallback-edge-case"><a class="doc-anchor" href="#default-fallback-edge-case">§</a>Default-fallback edge case</h3>
+<p><code>StatsManager::estimate_join_cardinality</code> returns <code>u64</code>
+with no provenance — the caller cannot tell whether the
+estimate came from the cached <code>JoinSelectivity</code> table,
+the column-distinct heuristic, or the 10% default
+fallback. When all input atoms have populated
+cardinalities but no column statistics, the per-pair
+estimates may all collapse to the same fallback ratio,
+making the chosen pairing uninformative. <strong>This is an
+accepted trade-off</strong>: row-set parity holds regardless of
+selectivity quality (the rewrite preserves semantics);
+the integration checks gate on row-set + WCOJ-dispatch
+correctness, not on optimal pair choice.</p>
+<h3 id="promoter-coordination"><a class="doc-anchor" href="#promoter-coordination">§</a>Promoter coordination</h3>
+<p>The triangle and 4-cycle promoters accept the canonical <em>semantic</em>
+shape with any valid key combination; they emit <code>MultiWayJoin.inputs</code>
+and <code>slot_vars</code> in canonical semantic order regardless of the body’s
+positional layout. Reordered bodies therefore still promote and still
+dispatch the WCOJ kernel correctly.</p>
+</div></details><h2 id="functions" class="section-header">Functions<a href="#functions" class="anchor">§</a></h2><dl class="item-table"><dt><a class="fn" href="fn.run.html" title="fn xlog_logic::optimizer::selectivity_pass::run">run</a></dt><dd>Selectivity-driven join reordering for canonical triangle and 4-cycle
+bodies. See module-level doc.</dd></dl></section></div></main></body></html>

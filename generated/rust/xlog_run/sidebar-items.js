@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["decode_column_to_strings","format_constraint","format_query","format_term","main","module_search_paths","parse_args","push_term_bytes","query_output_vars","usage"]};

@@ -1,0 +1,60 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="`LoggingResource` — telemetry decorator for any `DeviceMemoryResource`."><title>xlog_cuda::device_runtime::logging - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-17e0aaed.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="xlog_cuda" data-themes="" data-resource-suffix="" data-rustdoc-version="1.97.1 (8bab26f4f 2026-07-14)" data-channel="1.97.1" data-search-js="search-fd9372ac.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../static.files/storage-41dd4d93.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../../static.files/main-fcd733ba.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module logging</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../../xlog_cuda/index.html">xlog_<wbr>cuda</a><span class="version">0.11.0</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module logging</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#sink-design" title="Sink design">Sink design</a></li><li><a href="#record-contents" title="Record contents">Record contents</a></li></ul><h3><a href="#structs">Module Items</a></h3><ul class="block"><li><a href="#structs" title="Structs">Structs</a></li><li><a href="#enums" title="Enums">Enums</a></li><li><a href="#traits" title="Traits">Traits</a></li></ul></section><div id="rustdoc-modnav"><h2><a href="../index.html">In xlog_<wbr>cuda::<wbr>device_<wbr>runtime</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../../index.html">xlog_cuda</a>::<wbr><a href="../index.html">device_runtime</a></div><h1>Module <span>logging</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../../src/xlog_cuda/device_runtime/logging.rs.html#1-683">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p><a href="struct.LoggingResource.html" title="struct xlog_cuda::device_runtime::logging::LoggingResource"><code>LoggingResource</code></a> — telemetry decorator for any
+<a href="../resource/trait.DeviceMemoryResource.html" title="trait xlog_cuda::device_runtime::resource::DeviceMemoryResource"><code>DeviceMemoryResource</code></a>.</p>
+<p>Wraps an inner resource and records every <code>allocate</code>,
+<code>deallocate</code>, and <code>reap_pending</code> call (success and failure) into
+a <a href="trait.LoggingSink.html" title="trait xlog_cuda::device_runtime::logging::LoggingSink"><code>LoggingSink</code></a>. The decorator is fully transparent to allocator
+semantics: it forwards every method, never alters the inner
+result, and never panics or returns an error caused by the sink
+itself. Logging failure is recorded into a per-resource diagnostic
+counter (visible via <a href="struct.LoggingResource.html#method.dropped_records" title="method xlog_cuda::device_runtime::logging::LoggingResource::dropped_records"><code>LoggingResource::dropped_records</code></a>) and
+otherwise silenced — losing a log line must not corrupt
+allocation correctness.</p>
+<h3 id="sink-design"><a class="doc-anchor" href="#sink-design">§</a>Sink design</h3>
+<p><a href="trait.LoggingSink.html" title="trait xlog_cuda::device_runtime::logging::LoggingSink"><code>LoggingSink</code></a> is a tiny trait with a single <code>emit</code> method that
+returns <code>Result&lt;(), SinkError&gt;</code>. The default in-memory sink
+(<a href="struct.InMemorySink.html" title="struct xlog_cuda::device_runtime::logging::InMemorySink"><code>InMemorySink</code></a>) buffers records in a <code>Mutex&lt;Vec&lt;LogRecord&gt;&gt;</code>
+and is the test workhorse — it lets unit tests assert the exact
+sequence of records without filesystem dependencies. A future
+<code>CsvFileSink</code> or <code>RingBufferSink</code> slots in without touching the
+decorator.</p>
+<h3 id="record-contents"><a class="doc-anchor" href="#record-contents">§</a>Record contents</h3>
+<p>Every emitted <a href="struct.LogRecord.html" title="struct xlog_cuda::device_runtime::logging::LogRecord"><code>LogRecord</code></a> carries:</p>
+<ul>
+<li><code>action</code> — Allocate / Deallocate / ReapPending</li>
+<li><code>device_ordinal</code></li>
+<li><code>stream_id</code> — present for Allocate / Deallocate (the block’s
+alloc_stream); absent for ReapPending which spans streams.</li>
+<li><code>ptr</code> / <code>bytes</code> / <code>tag</code> / <code>generation</code> — present when the
+operation has a corresponding <a href="../resource/struct.DeviceBlock.html" title="struct xlog_cuda::device_runtime::resource::DeviceBlock"><code>DeviceBlock</code></a> reference.</li>
+<li><code>thread_id</code> — <code>std::thread::current().id()</code> rendered as u64
+for portability.</li>
+<li><code>order_counter</code> — monotonic per-process u64. Strictly
+increasing across all sinks, all threads, all resources.</li>
+<li><code>timestamp_nanos</code> — <code>SystemTime::now()</code> since UNIX epoch in
+nanoseconds. Wall-clock; not monotonic. Use <code>order_counter</code>
+for ordering, <code>timestamp_nanos</code> for human-readable spans.</li>
+<li><code>result</code> — Ok or short error tag string.</li>
+</ul>
+<p>Decorator does NOT capture the inner resource’s pre-call state
+(e.g., bytes_outstanding before allocate) — that would require
+locking the inner resource an extra time and is not part of the
+v0.6 telemetry contract. Callers that need pre/post diffs read
+<code>bytes_outstanding</code> themselves.</p>
+</div></details><h2 id="structs" class="section-header">Structs<a href="#structs" class="anchor">§</a></h2><dl class="item-table"><dt><a class="struct" href="struct.InMemorySink.html" title="struct xlog_cuda::device_runtime::logging::InMemorySink">InMemory<wbr>Sink</a></dt><dd>In-memory sink for tests and lightweight use. Records are
+appended to a <code>Vec</code> under a <code>Mutex</code>. <code>snapshot</code> returns a clone
+so consumers can inspect without holding the mutex.</dd><dt><a class="struct" href="struct.LogRecord.html" title="struct xlog_cuda::device_runtime::logging::LogRecord">LogRecord</a></dt><dd>A single allocation-log entry. Values are owned/<code>Copy</code> so the
+record is <code>Clone + Send + Sync</code> and trivially serializable.</dd><dt><a class="struct" href="struct.LoggingResource.html" title="struct xlog_cuda::device_runtime::logging::LoggingResource">Logging<wbr>Resource</a></dt><dd>Telemetry decorator for <a href="../resource/trait.DeviceMemoryResource.html" title="trait xlog_cuda::device_runtime::resource::DeviceMemoryResource"><code>DeviceMemoryResource</code></a>.</dd><dt><a class="struct" href="struct.NullSink.html" title="struct xlog_cuda::device_runtime::logging::NullSink">Null<wbr>Sink</a></dt><dd>Discard sink: accepts every record and drops it. Use this when
+the test or production stack needs the runtime composition to
+match <code>LoggingResource(...)</code> shape but does <strong>not</strong> need to
+retain log records.</dd></dl><h2 id="enums" class="section-header">Enums<a href="#enums" class="anchor">§</a></h2><dl class="item-table"><dt><a class="enum" href="enum.LogAction.html" title="enum xlog_cuda::device_runtime::logging::LogAction">LogAction</a></dt><dd>Action recorded in a <a href="struct.LogRecord.html" title="struct xlog_cuda::device_runtime::logging::LogRecord"><code>LogRecord</code></a>. Distinct variants for the
+three inner methods so consumers can filter without parsing the
+result message.</dd><dt><a class="enum" href="enum.LogResult.html" title="enum xlog_cuda::device_runtime::logging::LogResult">LogResult</a></dt><dd>Result status as recorded in a log entry. Successful operations
+are recorded as <code>Ok</code>; failed ones carry the error variant tag
+plus an optional short message. We keep the message bounded so a
+runaway driver-error string cannot blow up the sink buffer.</dd><dt><a class="enum" href="enum.SinkError.html" title="enum xlog_cuda::device_runtime::logging::SinkError">Sink<wbr>Error</a></dt><dd>Sink-side error. Returned by <a href="trait.LoggingSink.html#tymethod.emit" title="method xlog_cuda::device_runtime::logging::LoggingSink::emit"><code>LoggingSink::emit</code></a> when the sink
+cannot accept a record (full ring buffer, IO error, etc.). The
+decorator catches this and increments
+<a href="struct.LoggingResource.html#method.dropped_records" title="method xlog_cuda::device_runtime::logging::LoggingResource::dropped_records"><code>LoggingResource::dropped_records</code></a>; it does <strong>not</strong> propagate
+the error to the allocator caller.</dd></dl><h2 id="traits" class="section-header">Traits<a href="#traits" class="anchor">§</a></h2><dl class="item-table"><dt><a class="trait" href="trait.LoggingSink.html" title="trait xlog_cuda::device_runtime::logging::LoggingSink">Logging<wbr>Sink</a></dt><dd>Trait for log destinations. Implementations are required to be
+thread-safe (<code>Send + Sync</code>); the decorator may emit from any
+thread that calls into the resource.</dd></dl></section></div></main></body></html>

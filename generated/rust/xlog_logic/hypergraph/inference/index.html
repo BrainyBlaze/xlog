@@ -1,0 +1,56 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Transitive type inference across SCC predicates."><title>xlog_logic::hypergraph::inference - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-17e0aaed.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="xlog_logic" data-themes="" data-resource-suffix="" data-rustdoc-version="1.97.1 (8bab26f4f 2026-07-14)" data-channel="1.97.1" data-search-js="search-fd9372ac.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../static.files/storage-41dd4d93.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../../static.files/main-fcd733ba.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module inference</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../../xlog_logic/index.html">xlog_<wbr>logic</a><span class="version">0.11.0</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module inference</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#where-inference-is-engaged" title="Where inference is engaged">Where inference is engaged</a></li><li><a href="#conflict-layering" title="Conflict layering">Conflict layering</a></li><li><a href="#cyclic-only-predicates" title="Cyclic-only predicates">Cyclic-only predicates</a></li><li><a href="#strict-correctness-behavior-change" title="Strict-correctness behavior change">Strict-correctness behavior change</a></li></ul><h3><a href="#enums">Module Items</a></h3><ul class="block"><li><a href="#enums" title="Enums">Enums</a></li><li><a href="#functions" title="Functions">Functions</a></li><li><a href="#types" title="Type Aliases">Type Aliases</a></li></ul></section><div id="rustdoc-modnav"><h2><a href="../index.html">In xlog_<wbr>logic::<wbr>hypergraph</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../../index.html">xlog_logic</a>::<wbr><a href="../index.html">hypergraph</a></div><h1>Module <span>inference</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../../src/xlog_logic/hypergraph/inference.rs.html#1-367">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>Transitive type inference across SCC predicates.</p>
+<p>Closes the PR 5 policy gap: where a join-key vertex was anchored
+only through SCC-recursive atoms, the typed gate previously left
+it untyped under “unknown ≠ unsupported.” This module propagates
+types through the rule graph — body atoms type variables, head
+atoms back-propagate to head-predicate columns, iterate to
+fixpoint — so the typed gate has full type information when it
+consults <a href="../eligibility/fn.analyze_typed.html" title="fn xlog_logic::hypergraph::eligibility::analyze_typed"><code>super::analyze_typed</code></a>.</p>
+<h3 id="where-inference-is-engaged"><a class="doc-anchor" href="#where-inference-is-engaged">§</a>Where inference is engaged</h3>
+<p>Only the <strong>group-aware</strong> typed entry points engage inference:</p>
+<ul>
+<li><a href="../typed/fn.evaluate_scc_fixpoint_typed.html" title="fn xlog_logic::hypergraph::typed::evaluate_scc_fixpoint_typed"><code>super::evaluate_scc_fixpoint_typed</code></a> runs inference once at
+entry, then types each rule’s body using the inferred schemas
+plus <code>base_relations</code>.</li>
+<li><a href="../typed/fn.evaluate_fixpoint_typed.html" title="fn xlog_logic::hypergraph::typed::evaluate_fixpoint_typed"><code>super::evaluate_fixpoint_typed</code></a> treats <code>target_predicate</code>
+as a single-element rule group and runs the same inference.</li>
+</ul>
+<p>The single-rule entry points retain the base-only typing policy
+because they have no SCC structure to propagate over:</p>
+<ul>
+<li><a href="../typed/fn.evaluate_rule_typed.html" title="fn xlog_logic::hypergraph::typed::evaluate_rule_typed"><code>super::evaluate_rule_typed</code></a> takes one rule.</li>
+<li><a href="../plan/fn.plan_rule.html" title="fn xlog_logic::hypergraph::plan::plan_rule"><code>super::plan_rule</code></a> / <a href="../plan/fn.plan_rules.html" title="fn xlog_logic::hypergraph::plan::plan_rules"><code>super::plan_rules</code></a> plan per-rule.</li>
+</ul>
+<p>Callers that want SCC-aware planning should drive
+<a href="../typed/fn.evaluate_scc_fixpoint_typed.html" title="fn xlog_logic::hypergraph::typed::evaluate_scc_fixpoint_typed"><code>super::evaluate_scc_fixpoint_typed</code></a> directly or build their
+own inference pass via <a href="fn.infer_scc_predicate_schemas.html" title="fn xlog_logic::hypergraph::inference::infer_scc_predicate_schemas"><code>infer_scc_predicate_schemas</code></a>.</p>
+<h3 id="conflict-layering"><a class="doc-anchor" href="#conflict-layering">§</a>Conflict layering</h3>
+<p>Inference detects only <strong>back-propagation conflicts</strong>: e.g.,
+predicate <code>p</code>’s column 0 is <code>U32</code> from rule A’s head and
+<code>Symbol</code> from rule B’s head → <a href="enum.InferenceError.html#variant.ConflictingPredicateColumnType" title="variant xlog_logic::hypergraph::inference::InferenceError::ConflictingPredicateColumnType"><code>InferenceError::ConflictingPredicateColumnType</code></a>.
+Within-rule body conflicts (variable <code>X</code> typed <code>U32</code> in one body
+atom and <code>Symbol</code> in another) stay in the existing
+<a href="../typed/index.html" title="mod xlog_logic::hypergraph::typed"><code>super::typed</code></a> flow and surface as
+<a href="../reference/enum.RefEvalError.html#variant.ConflictingVariableType" title="variant xlog_logic::hypergraph::reference::RefEvalError::ConflictingVariableType"><code>super::RefEvalError::ConflictingVariableType</code></a>. Each conflict
+type is detected at exactly one layer.</p>
+<h3 id="cyclic-only-predicates"><a class="doc-anchor" href="#cyclic-only-predicates">§</a>Cyclic-only predicates</h3>
+<p>When an SCC has no base anchor anywhere (e.g., <code>a(X) :- b(X), b(X) :- a(X)</code> with no rule referencing <code>base_relations</code>), every
+column converges to <code>None</code>. The typed gate must NOT reject such
+rules: the policy narrows from “unknown ≠ unsupported” to
+“unknowable-after-inference ≠ unsupported.” Locked by
+<code>cyclic_only_predicate_still_passes_typed_gate_locked_policy</code>.</p>
+<h3 id="strict-correctness-behavior-change"><a class="doc-anchor" href="#strict-correctness-behavior-change">§</a>Strict-correctness behavior change</h3>
+<p>Fixtures whose base-relation schemas disagreed but whose actual
+rows happened to agree at runtime were previously silent (the
+typed gate types each body atom independently). They now surface
+as <a href="enum.InferenceError.html#variant.ConflictingPredicateColumnType" title="variant xlog_logic::hypergraph::inference::InferenceError::ConflictingPredicateColumnType"><code>InferenceError::ConflictingPredicateColumnType</code></a> when
+back-propagating to a head predicate. That is a strict
+correctness win, not a regression — fixtures with internally
+contradictory schemas are now caught before evaluation rather
+than silently corrupting downstream comparisons.</p>
+</div></details><h2 id="enums" class="section-header">Enums<a href="#enums" class="anchor">§</a></h2><dl class="item-table"><dt><a class="enum" href="enum.InferenceError.html" title="enum xlog_logic::hypergraph::inference::InferenceError">Inference<wbr>Error</a></dt><dd>Errors surfaced by <a href="fn.infer_scc_predicate_schemas.html" title="fn xlog_logic::hypergraph::inference::infer_scc_predicate_schemas"><code>infer_scc_predicate_schemas</code></a>.</dd></dl><h2 id="functions" class="section-header">Functions<a href="#functions" class="anchor">§</a></h2><dl class="item-table"><dt><a class="fn" href="fn.infer_scc_predicate_schemas.html" title="fn xlog_logic::hypergraph::inference::infer_scc_predicate_schemas">infer_<wbr>scc_<wbr>predicate_<wbr>schemas</a></dt><dd>Infer per-predicate schemas for a rule group via constraint
+propagation through the rule graph.</dd></dl><h2 id="types" class="section-header">Type Aliases<a href="#types" class="anchor">§</a></h2><dl class="item-table"><dt><a class="type" href="type.InferredSchemas.html" title="type xlog_logic::hypergraph::inference::InferredSchemas">Inferred<wbr>Schemas</a></dt><dd>Per-predicate inferred schema. <code>Vec</code> length equals the head
+arity; each element is <code>Some(t)</code> if inference established the
+column’s type, or <code>None</code> if the column remains unknowable
+(e.g., cyclic-only predicate, or a head term whose body atoms
+don’t type the corresponding variable).</dd></dl></section></div></main></body></html>

@@ -1,0 +1,145 @@
+# Installation
+
+Supported platform requirements and the four install paths: source build, GitHub release binary, PyPI wheel, and crates.io.
+
+XLOG gives you a logic engine (`xlog`) plus a Python package (`pyxlog`) that run on an NVIDIA GPU. This page gets you a working install and shows you how to confirm it worked.
+
+There are four ways to install, depending on what you are doing:
+
+<CardGroup cols={2}>
+  <Card title="Build from source" icon="hammer">
+    You want the latest `main`-branch code, or you plan to change xlog itself.
+  </Card>
+  <Card title="GitHub release binary" icon="download">
+    You want a ready-to-run `xlog` command and don't want to compile anything.
+  </Card>
+  <Card title="PyPI wheel (pyxlog)" icon="python">
+    You want to call xlog from Python.
+  </Card>
+  <Card title="crates.io (xlog-cli)" icon="rust">
+    You want the `xlog` command installed through Cargo.
+  </Card>
+</CardGroup>
+
+<Note>
+Published artifacts (GitHub releases, PyPI, crates.io) follow tagged releases and may lag the current `main` branch. To use unreleased features, [build from source](#build-from-source) or use the [local Python development install](#local-python-development-install).
+</Note>
+
+## Before you install: supported platform
+
+Public releases of XLOG are supported on Linux `x86_64` with an NVIDIA GPU and CUDA Toolkit 13.x. You need all of the following:
+
+- Linux `x86_64`
+- `nvidia-smi` sees the GPU
+- `nvcc --version` works
+- Rust `rustc` and `cargo` are available
+- Python 3.8 or newer
+
+One optional feature: the `xlog prob` command (probabilistic query output) can only print human-readable results on the host when the CLI is built with the `host-io` build feature. Some install paths turn `host-io` on for you; where it matters, this page says so.
+
+### Confirm your machine is ready
+
+Run the doctor script first. It checks the requirements above and reports what is missing:
+
+```bash
+python scripts/xlog_doctor.py
+```
+
+Fix anything it flags before continuing. (The source clone below includes this script; if you are not cloning, the same checks are `nvidia-smi`, `nvcc --version`, and `cargo --version`.)
+
+## Build from source
+
+Use this when you want the latest `main`-branch code or plan to modify xlog.
+
+```bash
+git clone https://github.com/BrainyBlaze/xlog.git
+cd xlog
+python scripts/xlog_doctor.py
+cargo build --release
+
+# If you need host-readable probabilistic CLI output (`xlog prob`),
+# build the CLI with host I/O enabled.
+cargo build --release -p xlog-cli --features host-io
+```
+
+The second `cargo build` is only needed for host-readable `xlog prob` output. Skip it otherwise.
+
+**How you know it worked.** The release binary is `./target/release/xlog`. Run it to check.
+
+## GitHub release binary install
+
+Use this when you want a ready-to-run command without compiling.
+
+Download the Linux `x86_64` archive from the GitHub Releases page, unpack it, and run the bundled `xlog` binary from the extracted directory.
+
+Public release archives are already built with `host-io`, so `xlog prob` prints host-readable output without a rebuild.
+
+## PyPI install
+
+Use this when you want to call xlog from Python. Install the latest published `pyxlog` wheel:
+
+```bash
+pip install pyxlog
+```
+
+**GPU kernels.** xlog runs compiled CUDA kernels. `pyxlog` finds them through the `XLOG_CUBIN_DIR` environment variable — the directory that holds those compiled kernels. The wheel sets `XLOG_CUBIN_DIR` for you from its packaged `pyxlog/kernels/` directory when the wheel includes staged CUDA artifacts, so a plain `pip install` normally needs no extra setup.
+
+You only set `XLOG_CUBIN_DIR` yourself when you run outside that packaged layout — for example probe scripts, artifact replays, or source-tree experiments. In that case, export it before importing `pyxlog`:
+
+```bash
+export XLOG_CUBIN_DIR=/path/to/xlog/crates/pyxlog/python/pyxlog/kernels
+```
+
+For unreleased `main` branch features, use the [local development install](#local-python-development-install) below instead of expecting PyPI to match the current `main` branch.
+
+## crates.io install
+
+Use this when you want the `xlog` command installed through Cargo:
+
+```bash
+cargo install xlog-cli --features host-io
+```
+
+The `--features host-io` flag gives you host-readable `xlog prob` output.
+
+This binary works without any separate kernel files. It embeds portable PTX — a GPU instruction format the driver compiles for your exact GPU at first run — for all runtime kernels, so it can run without a sidecar `kernels/` directory.
+
+If a staged `kernels/` directory or `XLOG_CUBIN_DIR` is present, xlog still prefers those files. They hold cubins (kernels already compiled for a specific GPU architecture), which start faster than compiling the portable PTX on the fly. So release archives and local builds can use their architecture-specific kernels first.
+
+As with the GitHub and PyPI artifacts, published crate versions follow tagged releases and may lag the current `main` branch.
+
+## Local Python development install
+
+Use this when you want unreleased `main`-branch features available from Python, or when you need `pyxlog` installed into a specific Python interpreter.
+
+Install into the exact Python interpreter used by your downstream project:
+
+```bash
+python scripts/install_pyxlog_for_python.py --python /usr/local/bin/python --user
+```
+
+The helper stages CUDA kernels, builds a local wheel for the requested interpreter, installs that wheel with the same interpreter's `pip`, and verifies that the installed `pyxlog` package contains `pyxlog/kernels/`.
+
+<Warning>
+Do not rely on a bare `maturin develop` from the xlog checkout. (`maturin` is the tool that builds a Python wheel from the Rust source.) If this repository has its own `.venv`, `maturin develop` can install into that environment while your project imports a different Python — so your project would not see `pyxlog`. The helper script above targets the interpreter you name with `--python`, which avoids this.
+</Warning>
+
+## Reference: how xlog finds its CUDA kernels
+
+You do not normally need this section — the install paths above handle kernels for you. It explains what is happening underneath if you are debugging a missing-kernel error.
+
+XLOG does not track generated `.ptx` or `.cubin` files in git. Kernel artifacts are produced from `kernels/*.cu` by the Rust build.
+
+At runtime, xlog looks for kernels in this order and uses the first it finds:
+
+1. `XLOG_CUBIN_DIR`
+2. a package- or binary-adjacent `kernels/` directory
+3. Cargo build output for source-tree builds
+4. embedded portable PTX compiled into the Cargo-installed binary
+
+This is why `cargo install xlog-cli --features host-io` works without a sidecar `kernels/` directory (it falls through to step 4), while GitHub release archives and PyPI wheels still ship staged kernel artifacts (steps 1–2) for faster, architecture-specific startup when available.
+
+## Next steps
+
+- [Quickstart](/get-started/quickstart) — run your first program
+- [Language reference](/reference/language) — the full language surface

@@ -1,0 +1,30 @@
+# XLOG Documentation
+
+A GPU-native logic programming language for unified symbolic reasoning
+
+XLOG is a full typed logic programming language with one compiler and one CUDA runtime spanning
+four reasoning paradigms: deterministic Datalog, exact and approximate probabilistic inference,
+SAT/MaxSAT verification, and differentiable neural-symbolic training.
+
+Neural-symbolic systems today keep symbolic reasoning on the CPU while neural computation runs
+on the GPU, and every training iteration pays a PCIe round-trip that dominates wall-clock time
+at scale. XLOG closes that gap: symbolic evaluation is GPU-resident with zero tracked
+host–device transfers in production data planes. Compiled circuits are cached across training
+iterations. GPU-resident results are exposed through DLPack and Arrow for zero-copy interop
+with PyTorch, JAX, and cuDF. On the MNIST-addition neural-symbolic benchmark this yields a
+measured **2.74× end-to-end speedup** (95% CI `[2.29, 3.18]`) over a CPU-resident baseline.
+
+<CardGroup cols={2}>
+  <Card title="Quickstart" icon="rocket" href="/get-started/quickstart">
+    Install XLOG, write your first program, and run it on the GPU in five minutes.
+  </Card>
+  <Card title="Language Reference" icon="book" href="/reference/language">
+    The full language surface: types, predicates, rules, modules, aggregation, and pragmas.
+  </Card>
+  <Card title="Probabilistic Programming" icon="dice" href="/probabilistic/engines">
+    Exact inference via GPU knowledge compilation, plus Monte Carlo sampling with confidence intervals.
+  </Card>
+  <Card title="Architecture" icon="microchip" href="/architecture/overview">
+    How the compiler, IR stack, and CUDA runtime fit together.
+  </Card>
+</CardGroup>

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"struct":["DeltaPlannerTelemetry","LogicDeltaReport","LogicEvalResult","LogicProgram","LogicQueryResult","LogicSessionRuntime","WcojDispatchStats"]};

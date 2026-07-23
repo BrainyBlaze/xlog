@@ -1,0 +1,138 @@
+# Factorized Execution
+
+Architecture reference for contributors: XLOG's main-branch factorized routes (aggregate-fused WCOJ, Free Join, and recursive-delta) that avoid materializing large intermediate joins. Unreleased beyond 0.9.2.
+
+<Note>
+For contributors — this page explains how factorized execution works
+internally. It is not a user setup guide.
+</Note>
+
+Some queries force the engine to build a huge intermediate table before it can
+return a small answer. **Factorized execution** is a set of routes that skip that
+step: when a compact representation is enough to compute the answer, XLOG uses it
+instead of materializing every intermediate row. "Materializing" here means
+writing out the full set of joined rows in memory.
+
+These routes live on the `main` branch and are unreleased beyond 0.9.2. Packages
+installed from the 0.9.2 release do not include them.
+
+<Frame caption="Both routes return the identical row set: the ordinary path materializes every intermediate row, while a factorized route computes the answer from a compact per-key structure — gated by dispatch counters and kill switches (environment variables that force a route off).">
+  <img className="block dark:hidden" src="/assets/diagrams/factorized-execution-light.svg" alt="Factorized execution: the materialized fallback joins R with S into a full intermediate row set before joining T and aggregating, while the factorized route builds a compact GPU per-key structure over R, S, and T and aggregates from it; both converge on the identical answer, with routes controlled by dispatch counters and XLOG_DISABLE kill switches." />
+  <img className="hidden dark:block" src="/assets/diagrams/factorized-execution-dark.svg" alt="Factorized execution: the materialized fallback joins R with S into a full intermediate row set before joining T and aggregating, while the factorized route builds a compact GPU per-key structure over R, S, and T and aggregates from it; both converge on the identical answer, with routes controlled by dispatch counters and XLOG_DISABLE kill switches." />
+</Frame>
+
+## The routes
+
+Factorized execution covers five routes. Each one avoids a specific kind of
+intermediate blow-up, and each exposes a **dispatch counter** — a runtime tally
+you read to confirm the route actually fired. A few terms used below:
+
+- **WCOJ** — worst-case-optimal join, a join algorithm for multiway patterns
+  (triangles, cycles, cliques) that keeps peak memory flat instead of building a
+  large intermediate.
+- **Free Join** — a generalized multiway join route for bodies that do not match
+  a dedicated WCOJ shape.
+- **count-by-root** — counting grouped results by their group key without first
+  expanding the private trailing variables that are only there to be counted.
+- **recursive delta** — the newly-derived tuples added on each round of a
+  recursive rule (for example, transitive closure).
+
+| Route | Avoids | Dispatch counter |
+| --- | --- | --- |
+| Aggregate-fused WCOJ | Materializing all triangle, 4-cycle, or clique rows before grouped aggregation. | `wcoj_groupby_fusion_dispatch_count`. |
+| Free Join | Forcing every eligible multiway body into a binary join chain. | `free_join_dispatch_count`. |
+| Free Join count-by-root | Expanding private trailing variables just to count them. | Free Join dispatch plus grouped-count output parity. |
+| Factorized recursive deltas | Materializing witness-multiplied recursive delta joins. | `factorized_delta_dispatch_count`. |
+| Probabilistic aggregate folding | Enumerating every outcome mask for selected non-count aggregates. | Probabilistic circuit / provenance diagnostics (a record of how each result was derived). |
+
+Two terms in that table: a **witness** is one specific derivation (one way a fact
+was proved), so "witness-multiplied" means the delta join produces a row per
+witness. An **outcome mask** is one possible truth assignment over the uncertain
+facts in a probabilistic program.
+
+## When routes fire
+
+Factorized routes are deliberately narrow. A route checks rule shape, key width,
+variable layout, aggregate operator, relation statistics, domain size, memory
+budget, and kill switches (environment variables that force a route off) before
+it accepts a query.
+
+If a route declines, the runtime uses the ordinary path when a fallback is
+defined. A decline is not a correctness failure. It is the mechanism that keeps
+an unsupported shape from pretending it used a specialized engine. The answer is
+the same either way; only the execution strategy differs.
+
+## Confirming which route ran
+
+Read the dispatch counters instead of guessing from timing. Query them from the
+session or executor that ran the workload:
+
+```python
+stats = session.wcoj_dispatch_stats()
+print(stats["free_join_dispatch_count"])
+print(stats["wcoj_groupby_fusion_dispatch_count"])
+print(stats["factorized_delta_dispatch_count"])
+```
+
+Exact key names depend on the Python surface in use. The rule that always holds:
+read the dispatch telemetry from the same session or executor that ran the
+workload.
+
+## Kill switches
+
+A **kill switch** is an environment variable that forces a route off, so you can
+run the ordinary fallback path for a side-by-side comparison. Set any of these to
+`1`:
+
+- `XLOG_DISABLE_WCOJ_GROUPBY_FUSION=1`
+- `XLOG_DISABLE_FREE_JOIN=1`
+- `XLOG_DISABLE_FACTORIZED_DELTA=1`
+
+A good parity check proves both halves:
+
+- the optimized route fired when enabled (its dispatch counter is `> 0`);
+- the fallback produced the same row set when the route is disabled.
+
+## Aggregate-fused WCOJ
+
+This route computes selected grouped aggregates directly over the WCOJ shape. It
+reduces by the group root (the group key it aggregates by) without first
+producing the full join output.
+
+Supported shapes and widths are implementation-defined. An unsupported aggregate
+operator, key width, or group key declines to the existing materialize-plus-
+groupby route, or returns the same error that the fallback would return.
+
+## Free Join
+
+Free Join is the main-only generalized multiway route. It handles eligible bodies
+with three or more atoms that do not use a dedicated triangle, 4-cycle, or clique
+kernel.
+
+The planner has three options for such a body. It can keep the source order,
+choose a better prefix-key-compatible order, or decline to the binary-join
+fallback. Dedicated WCOJ shapes stay on their dedicated kernels.
+
+## Factorized recursive deltas
+
+This route targets transitive-closure-shaped rules — recursive rules that keep
+adding reachable pairs until nothing new appears. Instead of materializing every
+witness pair and then subtracting the tuples it already knows, the route computes
+the novel set directly, grouped by root.
+
+The route picks its data structure by domain density. A dense domain uses a
+bitvector route. A large sparse domain uses a hash-set route. A shape outside the
+supported rule family falls back to the ordinary recursive path.
+
+## Verifying a route in practice
+
+To demonstrate that a route did what it claims, pin down all four of these:
+
+1. the program shape that should trigger the route;
+2. the route expected to fire;
+3. the dispatch counter that proves it fired;
+4. the kill-switch parity check (route on vs. route off, same row set).
+
+Keep the release status attached to any such example: these routes are on `main`
+and unreleased beyond 0.9.2, so they are not the default behavior for anyone
+running the 0.9.2 packages.

@@ -1,0 +1,61 @@
+# Rust API
+
+Generated rustdoc entry points for the xlog workspace, plus docs.rs fallbacks for published crates.
+
+This page links to the generated Rust API documentation for every crate in the xlog workspace, plus hosted fallbacks for the crates published to crates.io. "rustdoc" is Rust's standard tool for turning source comments into browsable HTML API reference.
+
+The docs build generates rustdoc for the full workspace in a temporary build directory, then attaches it to the exported site at `/generated/rust/` after the Mintlify export step. This keeps the generated Rustdoc HTML out of the Mintlify source tree while still publishing the generated API with the site. The CI docs build uses a rustdoc-only CUDA artifact mode: it documents the Rust API surface without compiling PTX or cubin files (the two compiled GPU-code formats that a release build would normally emit).
+
+<CardGroup cols={2}>
+  <Card title="Workspace rustdoc" href="https://xlog.md/generated/rust/index.html">
+    Generated index for every documented crate in the current checkout.
+  </Card>
+  <Card title="Python extension crate" href="https://xlog.md/generated/rust/pyxlog/index.html">
+    Native Rust layer used by the Python package.
+  </Card>
+</CardGroup>
+
+## Workspace Crates
+
+Every crate in the xlog source tree, with a link to its generated API docs and a one-line summary of what it owns. Terms in parentheses are the exact type or module names as they appear in the API.
+
+| Crate | Generated API | Responsibility |
+|-------|---------------|----------------|
+| `xlog-core` | [rustdoc](https://xlog.md/generated/rust/xlog_core/index.html) | Shared types (`ScalarType`, `Schema`, `AggOp`), traits (`KernelProvider`), and common errors. |
+| `xlog-ir` | [rustdoc](https://xlog.md/generated/rust/xlog_ir/index.html) | Relational intermediate-representation nodes — the query plan xlog builds internally (`RirNode`) — plus expressions (`Expr`) and execution plans. |
+| `xlog-cuda` | [rustdoc](https://xlog.md/generated/rust/xlog_cuda/index.html) | CUDA provider, GPU buffers, PTX embedding (bundling compiled GPU code into the binary), Arrow IPC/C Data interop (exchanging Apache Arrow columnar data with other tools), and DLPack support (a standard for sharing tensors across frameworks). |
+| `xlog-stats` | [rustdoc](https://xlog.md/generated/rust/xlog_stats/index.html) | Runtime and compiler feedback through `StatsManager` and `StatsSnapshot`. |
+| `xlog-runtime` | [rustdoc](https://xlog.md/generated/rust/xlog_runtime/index.html) | Host-side executor, relation stores, profiling, incremental maintenance (updating results as data changes instead of recomputing), and join index caches. |
+| `xlog-logic` | [rustdoc](https://xlog.md/generated/rust/xlog_logic/index.html) | Parser, stratification (ordering rules into evaluation layers so negation and recursion are handled in the right sequence), AST-to-RIR lowering (translating the parsed syntax tree into the relational intermediate representation above), optimization, and neural predicate syntax. |
+| `xlog-solve` | [rustdoc](https://xlog.md/generated/rust/xlog_solve/index.html) | Solver services, including GPU CDCL verification (conflict-driven clause learning, the standard algorithm for deciding Boolean satisfiability) and CLS SAT/MaxSAT paths (SAT = is a Boolean formula satisfiable; MaxSAT = satisfy as many clauses as possible). |
+| `xlog-gpu` | [rustdoc](https://xlog.md/generated/rust/xlog_gpu/index.html) | High-level GPU execution API and integration buffers. |
+| `xlog-prob` | [rustdoc](https://xlog.md/generated/rust/xlog_prob/index.html) | Probabilistic provenance (tracking which input facts support each answer), CNF lowering (rewriting a formula into conjunctive normal form, a standard Boolean-formula shape), Decision-DNNF compilation (a compiled form of the formula that makes exact probability counting tractable), exact inference, and sampling. |
+| `xlog-cli` | [rustdoc](https://xlog.md/generated/rust/xlog/index.html) | Command-line execution surface for deterministic and probabilistic runs. The package renders under the Rust crate root `xlog`. |
+| `pyxlog` | [rustdoc](https://xlog.md/generated/rust/pyxlog/index.html) | Native Python extension crate. It is built for the Python package rather than published to crates.io. |
+| `xlog-neural` | [rustdoc](https://xlog.md/generated/rust/xlog_neural/index.html) | Neural-symbolic rule learning implementation. It is not a published crates.io package. |
+| `xlog-induce` | [rustdoc](https://xlog.md/generated/rust/xlog_induce/index.html) | Exact induction implementation. It is not a published crates.io package. |
+| `xlog-cuda-tests` | [rustdoc](https://xlog.md/generated/rust/xlog_cuda_tests/index.html) | CUDA-facing workspace test crate. It is not a published crates.io package. |
+| `xlog-integration` | [rustdoc](https://xlog.md/generated/rust/xlog_integration/index.html) | Integration test crate. It is not a published crates.io package. |
+
+## Published Crates
+
+These crates are published on crates.io and also have hosted docs.rs pages:
+
+| Crate | docs.rs |
+|-------|---------|
+| `xlog-core` | [docs.rs](https://docs.rs/xlog-core) |
+| `xlog-ir` | [docs.rs](https://docs.rs/xlog-ir) |
+| `xlog-cuda` | [docs.rs](https://docs.rs/xlog-cuda) |
+| `xlog-stats` | [docs.rs](https://docs.rs/xlog-stats) |
+| `xlog-runtime` | [docs.rs](https://docs.rs/xlog-runtime) |
+| `xlog-logic` | [docs.rs](https://docs.rs/xlog-logic) |
+| `xlog-solve` | [docs.rs](https://docs.rs/xlog-solve) |
+| `xlog-gpu` | [docs.rs](https://docs.rs/xlog-gpu) |
+| `xlog-prob` | [docs.rs](https://docs.rs/xlog-prob) |
+| `xlog-cli` | [docs.rs](https://docs.rs/xlog-cli) |
+
+<Note>
+  docs.rs builds can omit CUDA-gated modules because the hosted build environment has no CUDA toolkit or GPU. The generated site rustdoc is built from the current checkout with `XLOG_RUSTDOC_NO_CUDA=1 cargo doc --workspace --no-deps --locked`, so it is the reference API surface for this documentation site. Release builds still require `nvcc` and CUDA Toolkit 13.x to compile kernel artifacts.
+</Note>
+
+See the [architecture overview](/architecture/overview) for how these crates fit together, and the [CLI Reference](/reference/cli) for the command-line surface built on top of them.

@@ -1,0 +1,262 @@
+# Benchmarks
+
+XLOG's benchmarking methodology and results, with a hard line between measured, source-backed numbers and aspirational performance targets.
+
+This page lets you do two things: reproduce XLOG's performance measurements on
+your own machine, and tell which of XLOG's published numbers you can trust as
+evidence.
+
+Not every number on this page is equal. Some are **measured** — they come from a
+benchmark run that was committed to this repository, so you can rerun it and get
+the same result. Others are **targets** — a number a benchmark is *aimed* at, but
+which no committed run yet backs. When you quote XLOG's performance, quote the
+measured numbers only.
+
+XLOG's benchmarks run on [Criterion.rs](https://github.com/bheisler/criterion.rs),
+a Rust harness that repeats each measurement many times and reports a confidence
+interval instead of a single fragile timing.
+
+## When to use this page
+
+Reach for this page when you want to:
+
+- Check what XLOG's real, backed-by-evidence speedups are before you cite them.
+- Rerun a benchmark yourself to confirm a number or to check for a regression on
+  your own hardware.
+- Understand how the numbers were produced, so you can judge whether they apply
+  to your workload.
+
+## Measured results
+
+These are the only benchmark numbers in this repository backed by a committed,
+source-verified run. Each came from the Criterion harness described under
+[Methodology](#methodology) below.
+
+| Result | Speedup | Fixture / setup | Notes |
+|---|---|---|---|
+| WCOJ super-hub | `10.5x` to `33.8x` | Deterministic super-hub triangle fixtures (`wcoj_triangle_bench`) | Worst-case-optimal join versus binary-join chain on skewed graphs |
+| Aggregate-fused WCOJ | `6.05x` / `5.37x` | Hub fixtures | count/sum/min/max-by-root fused over a triangle body |
+| Neural-symbolic cache ablation | `2.74x` | `01_minimal` MNIST addition, end-to-end | Circuit caching vs no caching; 95% CI `[2.29, 3.18]`, measured 2026-02-18 |
+
+A **worst-case-optimal join (WCOJ)** computes multi-way patterns — such as
+triangles in a graph — directly, instead of joining two tables at a time and
+building a large intermediate result on the way to a small answer. That is why
+it can be many times faster on skewed graphs.
+
+**Circuit caching** reuses the compiled inference circuit across training steps
+instead of rebuilding it each time; the `2.74x` above is the speedup from turning
+that reuse on.
+
+<Note>
+The WCOJ super-hub result reflects the released triangle route. The
+**aggregate-fused WCOJ** result was measured on the development branch. Aggregate
+fusion — folding a `count`/`sum`/`min`/`max` directly into the join instead of
+computing the join first and aggregating after — is part of the not-yet-released
+factorized-execution work, and is **not in the v0.9.2 release**. Treat its speedup
+as a development-branch measurement, not a released-product claim.
+</Note>
+
+### Neural-symbolic training detail
+
+The cache-ablation result above was measured on development hardware with the
+`01_minimal` example (MNIST addition, 512 images, 5 epochs, `batch_size=64`).
+These are the per-run timings behind it:
+
+| Metric | Value | Notes |
+|---|---|---|
+| `PTX JIT (cold)` | 0.02 s | Cubin loading |
+| `first_epoch_sec` | ~75 s | Cold start (Decision-DNNF compile + verify); warm starts drop to ~0.26 s |
+| `steady_epoch_sec_mean` | ~0.25 s | Epochs 2–5 after warm-up, batched evaluation |
+| `per_query_ms` | ~1.0 ms | Per-query forward + backward through the circuit |
+| Cache speedup | `2.74x` | Circuit caching vs no caching, 95% CI `[2.29, 3.18]` |
+
+The first epoch is slow because XLOG compiles the logic program into a
+**Decision-DNNF** — a circuit form that makes exact probability counting cheap to
+evaluate — and verifies it. Once that circuit is cached, later epochs skip the
+compile and run in a fraction of a second.
+
+Evidence: `examples/neural/results/evidence/cache_ablation_20260218.json`.
+
+## Aspirational targets — not measured
+
+<Warning>
+The tables in this section are **aspirational targets, not measured results**
+(audited 2026-06-10). No committed in-repo run backs them. The Criterion harnesses
+exist (`crates/xlog-gpu/benches/`, `crates/xlog-prob/benches/`), but their output
+is git-ignored and no baseline has been committed. **Do not cite these numbers as
+evidence** or state them as achieved. They describe where each benchmark is aimed;
+only the numbers under [Measured results](#measured-results) are backed by a run.
+</Warning>
+
+### Transitive closure (targets — unmeasured)
+
+Transitive closure repeatedly follows edges until no new reachable pairs appear.
+
+| Configuration | Target | Notes |
+|---|---|---|
+| 100K random edges | `>1M rows/sec` | Sparse graph |
+| 1M random edges | `>5M rows/sec` | Medium graph |
+| `K_{500,500}` bipartite | `>10M rows/sec` | Dense output |
+
+### Hash join (targets — unmeasured)
+
+| Configuration | Target | Notes |
+|---|---|---|
+| 100K × 100K | `>50M rows/sec` | Medium cardinality |
+| 1M × 100K | `>100M rows/sec` | Large left relation |
+| High selectivity | `>20M rows/sec` | Many output rows |
+
+### Exact inference (targets — unmeasured)
+
+Exact inference computes an exact probability over the compiled circuit, rather
+than estimating it by sampling.
+
+| Configuration | Target | Notes |
+|---|---|---|
+| 20-variable path | `<100ms` | Small circuit |
+| 50-variable Bayesian | `<500ms` | Medium complexity |
+| With gradients | `<2x base` | Backward-pass overhead |
+
+### Monte Carlo (targets — unmeasured)
+
+Monte Carlo estimates the same probability by drawing many random possible
+worlds and averaging, trading exactness for speed on larger problems.
+
+| Configuration | Target | Notes |
+|---|---|---|
+| 100K samples, 100 vars | `>10M worlds/sec` | Throughput mode |
+| 10K samples, 500 vars | `>5M worlds/sec` | Complexity mode |
+
+## Running benchmarks
+
+<Steps>
+<Step title="Check prerequisites">
+
+- A CUDA-capable NVIDIA GPU (compute capability 7.0+). Development device: RTX PRO
+  3000 Blackwell, `SM120`, 12 GB.
+- The CUDA Toolkit 13.x, with `nvcc` on `PATH`, to compile the kernels. Runtime PTX
+  is floored so the compiled artifacts also load on pre-CUDA-13 drivers.
+- Enough GPU memory: 4 GB minimum, 12 GB recommended for neural-symbolic training.
+
+</Step>
+<Step title="Run a suite">
+
+```bash
+# Run all benchmarks
+cargo bench
+
+# Run a specific suite
+cargo bench -p xlog-gpu    # Transitive closure, joins, aggregation
+cargo bench -p xlog-prob   # Exact inference, Monte Carlo
+cargo bench -p xlog-solve  # SAT solver
+```
+
+</Step>
+<Step title="Save and compare a baseline">
+
+To catch regressions, save one run as a named baseline and compare later runs
+against it:
+
+```bash
+cargo bench -- --save-baseline my_baseline
+cargo bench -- --baseline my_baseline
+```
+
+</Step>
+</Steps>
+
+## Reading Criterion output
+
+A benchmark run prints a block like this for each case:
+
+```text
+tc_random/edges/100K_edges
+                        time:   [12.345 ms 12.456 ms 12.567 ms]
+                        thrpt:  [7.9567 Melem/s 8.0283 Melem/s 8.1003 Melem/s]
+                 change: [-2.5% -1.2% +0.1%] (p = 0.12 > 0.10)
+                        No change in performance detected.
+```
+
+| Field | Meaning |
+|---|---|
+| `time` | Lower bound, estimate, upper bound at 95% CI |
+| `thrpt` | Throughput in million elements per second |
+| `change` | Comparison against the saved baseline |
+| `p` | Statistical significance |
+
+A run is flagged as a regression when the `change` lower bound exceeds `+5%` with
+`p < 0.10`.
+
+Two common noise sources can distort a run. GPU thermal throttling inflates
+variance, so let the card cool down between runs. And the first sample is slow
+because of one-time compilation, which the warm-up phase absorbs.
+
+## Methodology
+
+### Measurement approach
+
+Criterion drives every benchmark. The default settings favor catching regressions
+over reporting a single peak number:
+
+| Setting | Value | Rationale |
+|---|---|---|
+| Sample size | 10–100 | GPU warm-up and noise reduction |
+| Warm-up | 3 iterations | JIT compilation, cache priming |
+| Significance level | 0.1 | Detect `>10%` regressions |
+| Noise threshold | 0.05 | Ignore `<5%` variance |
+
+Throughput is elements per unit time, where "elements" varies by benchmark: input
+edges for transitive closure, total input rows for joins, input rows for
+aggregation, circuit variables for exact inference, and samples × variables for
+Monte Carlo.
+
+### Warm-up and reproducibility
+
+GPU benchmarks warm up so the timed region excludes one-time costs: PTX modules
+compile and cache, memory pools initialize, and the CUDA context is established.
+
+All random data uses deterministic seeding — a fixed-seed LCG, no system entropy —
+so the same seed produces identical graphs across runs. That is what makes a
+measured number reproducible rather than a one-off.
+
+### The WCOJ triangle harness
+
+The measured WCOJ result comes from
+`crates/xlog-integration/benches/wcoj_triangle_bench.rs`. It compares the GPU
+3-way worst-case-optimal join against the ordinary binary-join chain on identical
+fixtures across `u32`, `u64`, and a `Symbol` sanity case.
+
+Each case runs three modes: `Off` (binary join), `Force` (WCOJ always), and
+`Adaptive` (classifier-gated, the default). The mode is set explicitly via
+`RuntimeConfig` so the timed path never depends on process-global state.
+
+Two guards keep the numbers honest:
+
+- **Same answer.** Before timing, each case asserts that the binary and WCOJ paths
+  produce identical row sets.
+- **Right path.** During timing, it asserts the dispatch counter advances by
+  exactly the iteration count on the WCOJ path and by zero on the binary path. A
+  silent fallback anywhere in the hot loop fails the benchmark instead of quietly
+  reporting the wrong path's time.
+
+The super-hub fixture — which concentrates roughly half the edges on a single key —
+is where the `10.5x` to `33.8x` speedups are measured.
+
+## Reference: benchmark environment variables
+
+These variables tune what the benchmarks run and which code path they take. The
+last two are diagnostics for forcing or disabling the WCOJ triangle route.
+
+| Variable | Description | Default |
+|---|---|---|
+| `CUDA_VISIBLE_DEVICES` | GPU device ordinal | `0` |
+| `XLOG_BENCH_MEMORY_MB` | GPU memory budget | `4096` |
+| `WCOJ_BENCH_FULL` | Run the full WCOJ triangle matrix (adds 100K + 250K row sizes) | `0` |
+| `XLOG_USE_WCOJ_TRIANGLE_U32` | Force-on WCOJ triangle dispatch (bypasses the adaptive classifier) | unset |
+| `XLOG_DISABLE_WCOJ_TRIANGLE` | Hard kill switch — pins all triangle WCOJ off, beats every other flag | unset |
+
+## See also
+
+- [WCOJ tuning](/guides/wcoj-tuning) — when a rule routes through a worst-case-optimal join
+- [Architecture overview](/architecture/overview) — system design
+- [Roadmap](/architecture/roadmap) — development plans

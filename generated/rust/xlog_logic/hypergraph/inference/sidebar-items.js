@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["InferenceError"],"fn":["infer_scc_predicate_schemas"],"type":["InferredSchemas"]};

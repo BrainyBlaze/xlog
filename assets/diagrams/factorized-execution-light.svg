@@ -1,0 +1,70 @@
+<!-- xlog diagram: factorized execution (light). Source: architecture/factorized-execution.mdx. Materialized binary chain blows up intermediates; factorized routes compute the same answer from a compact per-key representation. Main-only (unreleased beyond 0.9.2). -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 300" font-family="Inter, system-ui, sans-serif">
+  <rect width="900" height="300" fill="#FBFBFD"/>
+  <defs>
+    <marker id="ax" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#6B6880"/>
+    </marker>
+  </defs>
+
+  <text x="28" y="38" font-size="16" font-weight="600" fill="#1E1B2E">Factorized execution</text>
+  <text x="28" y="56" font-size="11" fill="#6B6880">The ordinary path materializes every intermediate row; factorized routes compute the same answer from a compact representation.</text>
+
+  <!-- LEFT LANE: materialized -->
+  <text x="46" y="86" font-size="10" font-weight="600" letter-spacing="0.5" fill="#9B98B4" font-family="'JetBrains Mono','SF Mono',ui-monospace,Menlo,monospace">MATERIALIZED (fallback)</text>
+  <rect x="44" y="100" width="96" height="40" rx="7" fill="#F3F3F8" stroke="#1E1B2E" stroke-width="1.25"/>
+  <text x="92" y="124" text-anchor="middle" font-size="11.5" font-weight="500" fill="#1E1B2E">R &#8904; S</text>
+  <path d="M140,120 H160" stroke="#6B6880" stroke-width="1.5" fill="none" marker-end="url(#ax)"/>
+  <!-- big intermediate: stacked rows -->
+  <g>
+    <rect x="162" y="96" width="128" height="56" rx="6" fill="#FDF2F2" stroke="#DC2626" stroke-width="1.1" stroke-dasharray="3 2"/>
+    <g fill="#DC2626" fill-opacity="0.18">
+      <rect x="170" y="103" width="112" height="7" rx="2"/><rect x="170" y="113" width="112" height="7" rx="2"/>
+      <rect x="170" y="123" width="112" height="7" rx="2"/><rect x="170" y="133" width="112" height="7" rx="2"/>
+      <rect x="170" y="143" width="112" height="7" rx="2"/>
+    </g>
+    <text x="226" y="166" text-anchor="middle" font-size="9.5" fill="#DC2626">every intermediate row</text>
+  </g>
+  <path d="M290,120 H310" stroke="#6B6880" stroke-width="1.5" fill="none" marker-end="url(#ax)"/>
+  <rect x="312" y="100" width="96" height="40" rx="7" fill="#F3F3F8" stroke="#1E1B2E" stroke-width="1.25"/>
+  <text x="360" y="124" text-anchor="middle" font-size="11.5" font-weight="500" fill="#1E1B2E">&#8904; T &#8594; agg</text>
+
+  <!-- RIGHT LANE: factorized -->
+  <text x="46" y="200" font-size="10" font-weight="600" letter-spacing="0.5" fill="#9B98B4" font-family="'JetBrains Mono','SF Mono',ui-monospace,Menlo,monospace">FACTORIZED (main, unreleased)</text>
+  <rect x="44" y="216" width="96" height="40" rx="7" fill="#F3F3F8" stroke="#1E1B2E" stroke-width="1.25"/>
+  <text x="92" y="240" text-anchor="middle" font-size="11.5" font-weight="500" fill="#1E1B2E">R, S, T</text>
+  <path d="M140,236 H160" stroke="#6B6880" stroke-width="1.5" fill="none" marker-end="url(#ax)"/>
+  <!-- compact per-key structure -->
+  <g>
+    <path d="M162,212 H278 L290,224 V268 H162 Z" fill="#ECEBFB" stroke="#4F46E5" stroke-width="1.25"/>
+    <rect x="172" y="219" width="30" height="13" rx="6.5" fill="#10B981"/>
+    <text x="187" y="228.5" text-anchor="middle" font-size="7.5" font-weight="600" fill="#FFFFFF" font-family="'JetBrains Mono','SF Mono',ui-monospace,Menlo,monospace">GPU</text>
+    <text x="226" y="246" text-anchor="middle" font-size="11" font-weight="600" fill="#1E1B2E">per-key structure</text>
+    <text x="226" y="260" text-anchor="middle" font-size="9" fill="#6B6880" font-family="'JetBrains Mono','SF Mono',ui-monospace,Menlo,monospace">keys &#183; counts &#183; deltas</text>
+  </g>
+  <path d="M290,236 H310" stroke="#6B6880" stroke-width="1.5" fill="none" marker-end="url(#ax)"/>
+  <rect x="312" y="216" width="96" height="40" rx="7" fill="#F3F3F8" stroke="#1E1B2E" stroke-width="1.25"/>
+  <text x="360" y="240" text-anchor="middle" font-size="11.5" font-weight="500" fill="#1E1B2E">aggregate</text>
+
+  <!-- converge to identical answer -->
+  <g stroke="#6B6880" stroke-width="1.5" fill="none" marker-end="url(#ax)">
+    <path d="M408,120 C452,120 452,162 496,166"/>
+    <path d="M408,236 C452,236 452,194 496,190"/>
+  </g>
+  <rect x="498" y="150" width="150" height="56" rx="7" fill="#F3F3F8" stroke="#10B981" stroke-width="1.25"/>
+  <text x="573" y="174" text-anchor="middle" font-size="12" font-weight="600" fill="#1E1B2E">Identical answer</text>
+  <text x="573" y="190" text-anchor="middle" font-size="9.5" fill="#6B6880">same row set, either route</text>
+
+  <!-- routes + controls panel -->
+  <rect x="676" y="96" width="196" height="164" rx="8" fill="#F3F3F8" stroke="#B9B7C8" stroke-width="1"/>
+  <text x="692" y="118" font-size="10" font-weight="600" letter-spacing="0.5" fill="#6B6880" font-family="'JetBrains Mono','SF Mono',ui-monospace,Menlo,monospace">ROUTES</text>
+  <text x="692" y="136" font-size="10.5" fill="#1E1B2E">Aggregate-fused WCOJ</text>
+  <text x="692" y="152" font-size="10.5" fill="#1E1B2E">Free Join</text>
+  <text x="692" y="168" font-size="10.5" fill="#1E1B2E">Factorized recursive deltas</text>
+  <text x="692" y="184" font-size="10.5" fill="#1E1B2E">Aggregate outcome folding</text>
+  <text x="692" y="210" font-size="10" font-weight="600" letter-spacing="0.5" fill="#6B6880" font-family="'JetBrains Mono','SF Mono',ui-monospace,Menlo,monospace">CONTROLS</text>
+  <text x="692" y="228" font-size="9" fill="#6B6880" font-family="'JetBrains Mono','SF Mono',ui-monospace,Menlo,monospace">dispatch counters</text>
+  <text x="692" y="243" font-size="9" fill="#6B6880" font-family="'JetBrains Mono','SF Mono',ui-monospace,Menlo,monospace">XLOG_DISABLE_* kill switches</text>
+
+  <text x="28" y="290" font-size="10.5" fill="#6B6880">Routes are narrow by design: shape, types, statistics, and budget are checked, and a decline falls back to the ordinary path with the same result.</text>
+</svg>

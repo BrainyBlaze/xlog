@@ -1,0 +1,33 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Multi-predicate SCC fixpoint evaluator."><title>xlog_logic::hypergraph::scc - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-17e0aaed.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="xlog_logic" data-themes="" data-resource-suffix="" data-rustdoc-version="1.97.1 (8bab26f4f 2026-07-14)" data-channel="1.97.1" data-search-js="search-fd9372ac.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../static.files/storage-41dd4d93.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../../static.files/main-fcd733ba.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module scc</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../../xlog_logic/index.html">xlog_<wbr>logic</a><span class="version">0.11.0</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module scc</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#determinism" title="Determinism">Determinism</a></li><li><a href="#schema-management" title="Schema management">Schema management</a></li></ul><h3><a href="#enums">Module Items</a></h3><ul class="block"><li><a href="#enums" title="Enums">Enums</a></li><li><a href="#functions" title="Functions">Functions</a></li></ul></section><div id="rustdoc-modnav"><h2><a href="../index.html">In xlog_<wbr>logic::<wbr>hypergraph</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../../index.html">xlog_logic</a>::<wbr><a href="../index.html">hypergraph</a></div><h1>Module <span>scc</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../../src/xlog_logic/hypergraph/scc.rs.html#1-330">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>Multi-predicate SCC fixpoint evaluator.</p>
+<p>Extends the single-target <a href="../fixpoint/fn.evaluate_fixpoint.html" title="fn xlog_logic::hypergraph::fixpoint::evaluate_fixpoint"><code>super::evaluate_fixpoint</code></a> to a
+mutually-recursive SCC: rules grouped by their target predicate,
+evaluated jointly so each predicate’s body can reference any
+other predicate in the SCC. Naive evaluation: one iteration runs
+every rule for every predicate; convergence is the global
+“no relation grew this iteration” check.</p>
+<p>Pure-Rust, deterministic, set-semantics. Built to be the
+recursive-multi-predicate WCOJ correctness oracle for PR 5+
+mixed-execution kernels. Not optimized — semi-naive
+delta-driven SCC fixpoint is a separate concern.</p>
+<h3 id="determinism"><a class="doc-anchor" href="#determinism">§</a>Determinism</h3>
+<ul>
+<li>Rules grouped under each predicate are evaluated in input
+order (slice order). Rule order does NOT affect the result
+(locked by test) — it’s an efficiency knob, not a semantic
+one.</li>
+<li>Predicates are iterated in <a href="https://doc.rust-lang.org/1.97.1/alloc/collections/btree/map/struct.BTreeMap.html" title="struct alloc::collections::btree::map::BTreeMap"><code>BTreeMap</code></a>’s sorted-by-key
+order. Predicate order does NOT affect the result (locked
+by test).</li>
+<li>Output rows for each predicate are sorted lexicographically
+and deduplicated.</li>
+</ul>
+<h3 id="schema-management"><a class="doc-anchor" href="#schema-management">§</a>Schema management</h3>
+<p>Per-predicate schemas are frozen from the first iteration
+that produces non-empty rows for that predicate. Subsequent
+iterations validate every newly-produced row’s variants against
+the frozen schema; mismatches surface as
+<a href="enum.SccFixpointError.html#variant.InconsistentHeadValueTypes" title="variant xlog_logic::hypergraph::scc::SccFixpointError::InconsistentHeadValueTypes"><code>SccFixpointError::InconsistentHeadValueTypes</code></a> before the
+row is unioned. Row arity drift surfaces as
+<a href="enum.SccFixpointError.html#variant.HeadArityMismatch" title="variant xlog_logic::hypergraph::scc::SccFixpointError::HeadArityMismatch"><code>SccFixpointError::HeadArityMismatch</code></a> at function entry —
+checked once per predicate group across its rules.</p>
+</div></details><h2 id="enums" class="section-header">Enums<a href="#enums" class="anchor">§</a></h2><dl class="item-table"><dt><a class="enum" href="enum.SccFixpointError.html" title="enum xlog_logic::hypergraph::scc::SccFixpointError">SccFixpoint<wbr>Error</a></dt><dd>Errors surfaced by <a href="fn.evaluate_scc_fixpoint.html" title="fn xlog_logic::hypergraph::scc::evaluate_scc_fixpoint"><code>evaluate_scc_fixpoint</code></a>.</dd></dl><h2 id="functions" class="section-header">Functions<a href="#functions" class="anchor">§</a></h2><dl class="item-table"><dt><a class="fn" href="fn.evaluate_scc_fixpoint.html" title="fn xlog_logic::hypergraph::scc::evaluate_scc_fixpoint">evaluate_<wbr>scc_<wbr>fixpoint</a></dt><dd>Evaluate a mutually-recursive SCC of predicates to a fixpoint.</dd></dl></section></div></main></body></html>

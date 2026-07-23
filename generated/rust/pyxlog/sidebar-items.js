@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"struct":["CompiledIlpProgram","CompiledLogicProgram","CompiledProgram","EpochStats","EvalResult","IlpProgramFactory","IlpTaggedCreditDeviceResult","LogicEvalResult","LogicProgram","LogicQueryResult","LogicRelationSession","McDeviceEvalResult","Program","PyDifferentiableProofTraceMap","TrainingHistory"]};

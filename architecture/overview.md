@@ -1,0 +1,168 @@
+# System Architecture
+
+How XLOG compiles logic programs, controls GPU execution from the host, and keeps data-plane state resident on CUDA devices.
+
+<Note>
+For contributors — how XLOG works internally. This page assumes you work on the
+engine itself. It is dense on purpose, but every internal name is glossed on
+first use.
+</Note>
+
+XLOG is a CUDA-backed logic engine. It has one language frontend and several
+execution backends. Source programs enter through the `xlog-logic` crate. They
+are lowered into a relational intermediate representation and a few
+domain-specific ones. Host-side control code then launches CUDA kernels over
+device-resident relation, circuit, and solver state.
+
+The important boundary is simple. The compiler and executor live on the host.
+The GPU holds relation buffers, kernel workspaces, solver arenas, and selected
+hot-path training state. "GPU-resident" refers to that device data plane, not to
+the host executor object.
+
+The published Rust workspace version is `0.9.2`. Some features described here are
+marked "on main, unreleased beyond 0.9.2": they exist in the repository but are
+not part of the tagged 0.9.2 release artifacts.
+
+## Architecture Layers
+
+The engine is organized into five layers, each owned by a small set of crates.
+
+| Layer | Crates | Responsibility |
+| --- | --- | --- |
+| Language frontend | `xlog-logic`, `xlog-ir` | Parse XLOG source, normalize safe language constructs, stratify dependencies, lower to RIR/EIR, and build execution plans. |
+| Runtime control | `xlog-runtime`, `xlog-stats` | Interpret RIR, maintain relation state, collect statistics, choose opportunistic dispatch routes (an optimized kernel is used only when a rule's shape makes it applicable), and expose telemetry. |
+| CUDA substrate | `xlog-cuda` | Own device buffers, load CUDA artifacts, launch recorded kernels, and provide join/groupby/WCOJ/solver primitives. |
+| Probabilistic and epistemic engines | `xlog-prob`, `xlog-gpu`, `xlog-solve` | Encode probabilistic circuits, epistemic execution plans, and SAT/UNSAT solver workloads over the shared CUDA substrate. |
+| User surfaces | `xlog-cli`, `pyxlog` | Provide CLI commands and Python bindings. `pyxlog` is distributed as a Python package, not as a crates.io package. |
+
+Two abbreviations appear in the table above. RIR is the relational intermediate
+representation — the plan form the runtime interprets. EIR is the epistemic
+intermediate representation — a separate plan form for epistemic (knowledge-and-
+belief) queries. Both are glossed again below where they matter.
+
+Three optimized join routes appear in the sections below (the table names WCOJ
+directly); here is what each name means. WCOJ (worst-case-optimal join) computes multiway graph patterns —
+such as triangles or cycles — without first building a large intermediate table.
+Free Join is a broader multiway-join route that applies to more rule bodies than
+the dedicated WCOJ kernels. Factorized delta keeps recursive intermediate results
+in a compact, unexpanded form instead of materializing every row. Each is
+expanded again below where it matters.
+
+Ten Rust packages are publishable on crates.io: `xlog-cli`, `xlog-core`,
+`xlog-cuda`, `xlog-gpu`, `xlog-ir`, `xlog-logic`, `xlog-prob`,
+`xlog-runtime`, `xlog-solve`, and `xlog-stats`. Five more packages are
+workspace-only — `pyxlog`, `xlog-neural`, `xlog-induce`, `xlog-cuda-tests`, and
+`xlog-integration` — and cover Python packaging, internal development,
+validation, or integration coverage.
+
+## Compile Pipeline
+
+The deterministic compile path turns source text into a runnable plan. It is
+implemented in `xlog-logic`:
+
+1. `parser::parse_program` converts source text into the frontend AST.
+2. Meta and list builtins are normalized into the supported safe subset.
+3. Magic-set rewrites run, then negation-safety checks. (A magic-set rewrite
+   restricts a rule so it only computes rows relevant to the query.)
+4. `stratify` computes dependency strata. Stratification splits the program into
+   ordered layers so that recursion, negation, and aggregates each evaluate in a
+   sound order.
+5. `Lowerer::lower_program` emits RIR execution plans.
+6. A set of refinement passes rewrites eligible plan shapes: helper-split,
+   predicate-pushdown, selectivity, and multiway-promotion. (Helper-split breaks
+   a plan node into smaller helper nodes the optimizer can specialize.)
+
+Epistemic execution builds its own plan form, EIR, directly from the parsed AST.
+It is not a branch taken after RIR. Probabilistic and solver paths also share the
+frontend, but each introduces its own planning artifacts after parsing and
+normalization.
+
+## Runtime Boundary
+
+`xlog-runtime::Executor` is the host-side interpreter and dispatcher for RIR
+plans. It holds the engine's runtime state and decides which kernel route to run
+for each plan node.
+
+Concretely, the executor owns relation metadata, runtime statistics, and the
+persistent join-index cache state. It also owns common-subexpression telemetry,
+adaptive observations, and the dispatch counters for the optimized join routes:
+WCOJ, Free Join, aggregate fusion, and factorized delta. These route names are
+explained under [Execution Families](#execution-families) and
+[Main-Only Factorized Work](#main-only-factorized-work) below.
+
+The executor itself does not run on the GPU. It orchestrates work that does:
+
+- relation uploads and device-buffer ownership;
+- RIR node evaluation over CUDA kernels;
+- recursive SCC seed and delta iterations (an SCC is a strongly connected
+  component of the rule dependency graph — the unit of recursive evaluation);
+- opportunistic route selection for WCOJ, Free Join, nested-loop, hash-join,
+  groupby, and solver-backed operations;
+- diagnostics that show whether an optimized route actually fired.
+
+Device-resident state lives in CUDA buffers and kernel workspaces managed by
+`xlog-cuda`. The host may launch kernels, synchronize streams, and read control
+status when an API requires it. The "no host transfer" claim for the data plane
+holds only for specific paths that track and expose that contract — not for the
+engine as a whole.
+
+## Execution Families
+
+XLOG runs work through several execution families. Each has its own kernels and
+its own user-facing documentation.
+
+| Family | What runs | Primary docs |
+| --- | --- | --- |
+| Deterministic Datalog | RIR scans, filters, joins, groupby, recursion, and arithmetic over CUDA buffers. | [GPU Execution](/architecture/gpu-execution), [Query Optimizer](/architecture/query-optimizer) |
+| Multiway joins | Dedicated WCOJ kernels for recognized graph shapes and opportunistic Free Join routes for broader multiway bodies. | [Worst-Case Optimal Joins](/architecture/wcoj) |
+| Device resource management | Optional stream-aware allocator stack with byte budgets and deferred frees. | [Device Runtime](/architecture/device-runtime) |
+| Persistent join reuse | Build-side hash-index cache keyed by relation generation, schema, keys, and CUDA device. | [Adaptive Indexing](/architecture/adaptive-indexing) |
+| Solver services | GPU CNF representation and CDCL workspace used by probabilistic and epistemic verification paths. | [Solver Services](/architecture/solver-services) |
+
+Three terms from that table are worth naming plainly. A worst-case-optimal join
+(WCOJ) computes multiway patterns — such as triangles or cycles — without first
+building a large intermediate table. Free Join is a broader multiway-join route
+that applies to more rule bodies than the dedicated WCOJ kernels. A CNF
+(conjunctive normal form) is the clause form a SAT solver consumes, and CDCL
+(conflict-driven clause learning) is the search algorithm the solver workspace
+runs over it.
+
+## Main-Only Factorized Work
+
+The `main` branch carries extra "factorized" execution routes. Factorized
+execution keeps intermediate results in a compact, unexpanded form instead of
+materializing every row, which lowers peak memory. These routes are real
+implementations on `main` but are unreleased beyond 0.9.2 — they are not in the
+tagged release artifacts.
+
+The main-only routes are:
+
+- aggregate-fused WCOJ for selected triangle, 4-cycle, and clique aggregate
+  shapes;
+- GPU Free Join for general multiway bodies, plus factorized count-by-root (a
+  count computed per root node without expanding the full join);
+- dense and sparse factorized recursive-delta routes for transitive-closure
+  shaped recursion (the delta step is the semi-naive idea of only processing
+  newly derived rows each iteration);
+- factorized non-count aggregate folding in probabilistic provenance.
+
+## Operational Contracts
+
+XLOG favors an explicit decline over silent semantic drift. When an optimized
+path cannot handle a shape, it says so rather than quietly returning a different
+result. The contracts a contributor must preserve:
+
+- Unsupported optimizer or kernel shapes fall back to the ordinary route. The
+  fallback returns the same row set (row-set parity).
+- Solver and compilation guards are fail-closed. They return typed errors instead
+  of turning an incomplete proof into a reported success.
+- CUDA-required release gates must run on a GPU host with the environment
+  variable `XLOG_REQUIRE_CUDA=1`.
+- Generated docs HTML is exported to the `docs-dist` branch and served by
+  DigitalOcean App Platform at `xlog.md`.
+
+To confirm that a specific optimized route actually fired, read the runtime
+counters, toggle the relevant kill switch (a flag that disables a route so you can
+compare against it), or run the certification commands. A correct final answer
+alone does not prove GPU residency or an optimized dispatch — always check the
+counters.

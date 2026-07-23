@@ -1,0 +1,100 @@
+# Roadmap
+
+A concise release-state roadmap for the 0.10.0 line, main-only work, and the next XLOG architecture priorities.
+
+<Note>
+For contributors — how xlog's release state and architecture priorities are
+organized internally. This is a roadmap, not a user guide.
+</Note>
+
+This roadmap is a release-state view, not a historical task board. It separates
+three things: what is in the 0.10.0 release artifacts, what exists only on the
+`main` branch, and forward-looking architecture priorities.
+
+## Released Baseline: 0.10.0
+
+The 0.10.0 line is the current public release baseline. It includes the shared
+Rust workspace, CUDA-backed deterministic execution (GPU-accelerated evaluation
+that returns the same result every run), probabilistic and epistemic surfaces,
+solver services, Python packaging, and the `xlog` CLI.
+
+The public Rust release boundary is the set of publishable crates listed in
+[Release Process](/architecture/release-process). `pyxlog` is shipped through
+Python packaging, not through crates.io.
+
+## Stable Architecture Commitments
+
+XLOG's architecture is organized around a fixed set of commitments. These
+commitments — not old milestone labels or implementation-board names — define
+the architecture:
+
+- **One frontend** for deterministic, probabilistic, epistemic, and
+  solver-backed programs.
+- **An explicit boundary** between host-side control logic and the GPU
+  data plane.
+- **Inspectable subsystem contracts** carried by internal intermediate
+  representations of a program (named RIR, EIR, PIR, and SIR). Each subsystem
+  consumes one of these forms, so its contract can be examined.
+- **CUDA kernels** that operate over device-resident buffers (data that stays on
+  the GPU).
+- **Fail-closed behavior**: when a proof, route, or capacity contract is not
+  met, execution stops rather than returning an unchecked result.
+- **Route counters and telemetry**: dispatch counts that record which optimized
+  execution path actually fired.
+
+## Main-Only Work Beyond 0.10.0
+
+The 0.10.0 release absorbed a feature set that had previously lived only on the
+`main` branch. Those features are:
+
+- **Aggregate-fused WCOJ** — worst-case-optimal join, a strategy that computes
+  multiway patterns (such as triangles) without first building a large
+  intermediate table, here fused with an aggregation step.
+- **GPU Free Join** — a GPU join-execution strategy that mixes binary-join and
+  worst-case-optimal steps.
+- **Factorized recursive deltas** — the newly derived facts produced on each
+  round of recursion, stored in a compact, factorized form.
+- **Joint mixtures with graded masses** — probabilistic outputs where the
+  possible outcomes carry graded weights.
+- **Stage-B existential joins** — a join form that handles existentially
+  quantified variables.
+- **Grouped training** — training run over grouped batches of examples.
+- **Both provenance-engine fixes** — fixes to the subsystem that tracks how each
+  derived fact was produced.
+
+Work on `main` beyond the 0.10.0 artifacts is currently none: the release and
+`main` coincide. New main-only work is tracked here as it lands.
+
+## Near-Term Documentation Priorities
+
+The documentation roadmap is:
+
+- keep `docs/` as the public source of truth for xlog.md;
+- keep local agent reports, plans, evidence, and superpower notes out of Git;
+- replace internal milestone prose with source-backed product documentation;
+- add accurate diagrams that show the host/device boundary and the boundaries
+  between the internal representations (RIR, EIR, PIR, SIR);
+- keep generated static HTML in the `docs-dist` deployment branch, not in the
+  source docs.
+
+## Architecture Priorities
+
+The next architecture work stays focused on runtime facts that users can
+observe:
+
+- clearer route telemetry for worst-case-optimal join (WCOJ), Free Join,
+  aggregate fusion, and recursive delta routing;
+- stronger release evidence for CUDA-required behavior;
+- explicit no-host-transfer counters wherever a path claims device-resident data
+  flow (data that never leaves the GPU);
+- sharper failure diagnostics for unsupported probabilistic, epistemic, and
+  solver shapes;
+- documentation examples that show how to verify route dispatch directly,
+  instead of inferring it from the final answers.
+
+## Out-Of-Scope For This Roadmap
+
+This page is a release-state view, not the historical task board. Internal phase
+labels, board codes, and dated task bundles are not part of this roadmap. Where a
+historical item still matters, it is documented as shipped behavior, the command
+that verifies it, and the release boundary — not as a task entry.

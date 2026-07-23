@@ -1,0 +1,196 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Stream-ordered device memory resource. Implementations:"><title>DeviceMemoryResource in xlog_cuda::device_runtime::resource - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-17e0aaed.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="xlog_cuda" data-themes="" data-resource-suffix="" data-rustdoc-version="1.97.1 (8bab26f4f 2026-07-14)" data-channel="1.97.1" data-search-js="search-fd9372ac.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../static.files/storage-41dd4d93.js"></script><script defer src="sidebar-items.js"></script><script defer src="../../../static.files/main-fcd733ba.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc trait"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">DeviceMemoryResource</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../../xlog_cuda/index.html">xlog_<wbr>cuda</a><span class="version">0.11.0</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Device<wbr>Memory<wbr>Resource</a></h2><h3><a href="#required-methods">Required Methods</a></h3><ul class="block"><li><a href="#tymethod.allocate" title="allocate">allocate</a></li><li><a href="#tymethod.bytes_outstanding" title="bytes_outstanding">bytes_outstanding</a></li><li><a href="#tymethod.deallocate" title="deallocate">deallocate</a></li><li><a href="#tymethod.device_ordinal" title="device_ordinal">device_ordinal</a></li></ul><h3><a href="#provided-methods">Provided Methods</a></h3><ul class="block"><li><a href="#method.finish_block_use" title="finish_block_use">finish_block_use</a></li><li><a href="#method.prepare_block_use" title="prepare_block_use">prepare_block_use</a></li><li><a href="#method.reap_pending" title="reap_pending">reap_pending</a></li><li><a href="#method.record_block_use" title="record_block_use">record_block_use</a></li><li><a href="#method.supports_block_use_tracking" title="supports_block_use_tracking">supports_block_use_tracking</a></li></ul><h3><a href="#implementors">Implementors</a></h3></section><div id="rustdoc-modnav"><h2><a href="index.html">In xlog_<wbr>cuda::<wbr>device_<wbr>runtime::<wbr>resource</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../../index.html">xlog_cuda</a>::<wbr><a href="../index.html">device_runtime</a>::<wbr><a href="index.html">resource</a></div><h1>Trait <span class="trait">Device<wbr>Memory<wbr>Resource</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../../src/xlog_cuda/device_runtime/resource.rs.html#236-430">Source</a> </span></div><pre class="rust item-decl"><code>pub trait DeviceMemoryResource: <a class="trait" href="https://doc.rust-lang.org/1.97.1/core/marker/trait.Send.html" title="trait core::marker::Send">Send</a> + <a class="trait" href="https://doc.rust-lang.org/1.97.1/core/marker/trait.Sync.html" title="trait core::marker::Sync">Sync</a> {
+    // Required methods
+    fn <a href="#tymethod.allocate" class="fn">allocate</a>(
+        &amp;self,
+        bytes: <a class="primitive" href="https://doc.rust-lang.org/1.97.1/std/primitive.usize.html">usize</a>,
+        stream: <a class="struct" href="struct.StreamId.html" title="struct xlog_cuda::device_runtime::resource::StreamId">StreamId</a>,
+        tag: <a class="struct" href="struct.AllocTag.html" title="struct xlog_cuda::device_runtime::resource::AllocTag">AllocTag</a>,
+    ) -&gt; <a class="type" href="type.ResourceResult.html" title="type xlog_cuda::device_runtime::resource::ResourceResult">ResourceResult</a>&lt;<a class="struct" href="struct.DeviceBlock.html" title="struct xlog_cuda::device_runtime::resource::DeviceBlock">DeviceBlock</a>&gt;;
+<span class="item-spacer"></span>    fn <a href="#tymethod.deallocate" class="fn">deallocate</a>(&amp;self, block: <a class="struct" href="struct.DeviceBlock.html" title="struct xlog_cuda::device_runtime::resource::DeviceBlock">DeviceBlock</a>) -&gt; <a class="type" href="type.ResourceResult.html" title="type xlog_cuda::device_runtime::resource::ResourceResult">ResourceResult</a>&lt;<a class="primitive" href="https://doc.rust-lang.org/1.97.1/std/primitive.unit.html">()</a>&gt;;
+<span class="item-spacer"></span>    fn <a href="#tymethod.device_ordinal" class="fn">device_ordinal</a>(&amp;self) -&gt; <a class="primitive" href="https://doc.rust-lang.org/1.97.1/std/primitive.u32.html">u32</a>;
+<span class="item-spacer"></span>    fn <a href="#tymethod.bytes_outstanding" class="fn">bytes_outstanding</a>(&amp;self) -&gt; <a class="primitive" href="https://doc.rust-lang.org/1.97.1/std/primitive.usize.html">usize</a>;
+
+    // Provided methods
+    fn <a href="#method.reap_pending" class="fn">reap_pending</a>(&amp;self) -&gt; <a class="type" href="type.ResourceResult.html" title="type xlog_cuda::device_runtime::resource::ResourceResult">ResourceResult</a>&lt;<a class="primitive" href="https://doc.rust-lang.org/1.97.1/std/primitive.unit.html">()</a>&gt; { ... }
+<span class="item-spacer"></span>    fn <a href="#method.record_block_use" class="fn">record_block_use</a>(
+        &amp;self,
+        block: &amp;<a class="struct" href="struct.DeviceBlock.html" title="struct xlog_cuda::device_runtime::resource::DeviceBlock">DeviceBlock</a>,
+        use_stream: <a class="struct" href="struct.StreamId.html" title="struct xlog_cuda::device_runtime::resource::StreamId">StreamId</a>,
+    ) -&gt; <a class="type" href="type.ResourceResult.html" title="type xlog_cuda::device_runtime::resource::ResourceResult">ResourceResult</a>&lt;<a class="primitive" href="https://doc.rust-lang.org/1.97.1/std/primitive.unit.html">()</a>&gt; { ... }
+<span class="item-spacer"></span>    fn <a href="#method.supports_block_use_tracking" class="fn">supports_block_use_tracking</a>(&amp;self) -&gt; <a class="primitive" href="https://doc.rust-lang.org/1.97.1/std/primitive.bool.html">bool</a> { ... }
+<span class="item-spacer"></span>    fn <a href="#method.prepare_block_use" class="fn">prepare_block_use</a>(
+        &amp;self,
+        block: <a class="struct" href="struct.BlockId.html" title="struct xlog_cuda::device_runtime::resource::BlockId">BlockId</a>,
+        use_stream: <a class="struct" href="struct.StreamId.html" title="struct xlog_cuda::device_runtime::resource::StreamId">StreamId</a>,
+        access: <a class="enum" href="enum.Access.html" title="enum xlog_cuda::device_runtime::resource::Access">Access</a>,
+    ) -&gt; <a class="type" href="type.ResourceResult.html" title="type xlog_cuda::device_runtime::resource::ResourceResult">ResourceResult</a>&lt;<a class="primitive" href="https://doc.rust-lang.org/1.97.1/std/primitive.unit.html">()</a>&gt; { ... }
+<span class="item-spacer"></span>    fn <a href="#method.finish_block_use" class="fn">finish_block_use</a>(
+        &amp;self,
+        block: <a class="struct" href="struct.BlockId.html" title="struct xlog_cuda::device_runtime::resource::BlockId">BlockId</a>,
+        use_stream: <a class="struct" href="struct.StreamId.html" title="struct xlog_cuda::device_runtime::resource::StreamId">StreamId</a>,
+        access: <a class="enum" href="enum.Access.html" title="enum xlog_cuda::device_runtime::resource::Access">Access</a>,
+    ) -&gt; <a class="type" href="type.ResourceResult.html" title="type xlog_cuda::device_runtime::resource::ResourceResult">ResourceResult</a>&lt;<a class="primitive" href="https://doc.rust-lang.org/1.97.1/std/primitive.unit.html">()</a>&gt; { ... }
+}</code></pre><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>Stream-ordered device memory resource. Implementations:</p>
+<ul>
+<li><a href="../direct/struct.DirectCudaResource.html" title="struct xlog_cuda::device_runtime::direct::DirectCudaResource"><code>crate::device_runtime::direct::DirectCudaResource</code></a> —
+cudarc default (non-pooled) backend; <strong>candidate</strong> for the
+sanitizer/cert role, <strong>unproven</strong> until the manual Compute Sanitizer
+acceptance gate runs on a supported host.</li>
+<li><a href="../async_resource/struct.AsyncCudaResource.html" title="struct xlog_cuda::device_runtime::async_resource::AsyncCudaResource"><code>crate::device_runtime::async_resource::AsyncCudaResource</code></a> —
+stream-ordered cuMemAllocAsync/cuMemFreeAsync backend;
+production default when the context supports async-alloc.</li>
+<li><a href="../logging/struct.LoggingResource.html" title="struct xlog_cuda::device_runtime::logging::LoggingResource"><code>crate::device_runtime::logging::LoggingResource</code></a> —
+telemetry decorator over any inner resource.</li>
+<li><a href="../budget/struct.GlobalDeviceBudget.html" title="struct xlog_cuda::device_runtime::budget::GlobalDeviceBudget"><code>crate::device_runtime::budget::GlobalDeviceBudget</code></a> —
+per-runtime byte-limit decorator over any inner resource.</li>
+<li><code>PoolResource</code> — performance tier; v0.7+ (not implemented).</li>
+<li><code>DebugGuardResource</code> — canary/poison/quarantine; v0.7+
+(not implemented).</li>
+</ul>
+<p>Implementations must be thread-safe. The runtime composes resources
+via decoration (each resource wraps an inner <code>Box&lt;dyn DeviceMemoryResource + Send + Sync&gt;</code>).</p>
+</div></details><h2 id="required-methods" class="section-header">Required Methods<a href="#required-methods" class="anchor">§</a></h2><div class="methods"><details class="toggle method-toggle" open><summary><section id="tymethod.allocate" class="method"><a class="src rightside" href="../../../src/xlog_cuda/device_runtime/resource.rs.html#239-244">Source</a><h4 class="code-header">fn <a href="#tymethod.allocate" class="fn">allocate</a>(
+    &amp;self,
+    bytes: <a class="primitive" href="https://doc.rust-lang.org/1.97.1/std/primitive.usize.html">usize</a>,
+    stream: <a class="struct" href="struct.StreamId.html" title="struct xlog_cuda::device_runtime::resource::StreamId">StreamId</a>,
+    tag: <a class="struct" href="struct.AllocTag.html" title="struct xlog_cuda::device_runtime::resource::AllocTag">AllocTag</a>,
+) -&gt; <a class="type" href="type.ResourceResult.html" title="type xlog_cuda::device_runtime::resource::ResourceResult">ResourceResult</a>&lt;<a class="struct" href="struct.DeviceBlock.html" title="struct xlog_cuda::device_runtime::resource::DeviceBlock">DeviceBlock</a>&gt;</h4></section></summary><div class="docblock"><p>Allocate <code>bytes</code> bytes on the resource’s device, ordered on
+<code>stream</code>. The returned block is in <a href="enum.BlockState.html#variant.Live" title="variant xlog_cuda::device_runtime::resource::BlockState::Live"><code>BlockState::Live</code></a>.</p>
+</div></details><details class="toggle method-toggle" open><summary><section id="tymethod.deallocate" class="method"><a class="src rightside" href="../../../src/xlog_cuda/device_runtime/resource.rs.html#254">Source</a><h4 class="code-header">fn <a href="#tymethod.deallocate" class="fn">deallocate</a>(&amp;self, block: <a class="struct" href="struct.DeviceBlock.html" title="struct xlog_cuda::device_runtime::resource::DeviceBlock">DeviceBlock</a>) -&gt; <a class="type" href="type.ResourceResult.html" title="type xlog_cuda::device_runtime::resource::ResourceResult">ResourceResult</a>&lt;<a class="primitive" href="https://doc.rust-lang.org/1.97.1/std/primitive.unit.html">()</a>&gt;</h4></section></summary><div class="docblock"><p>Return <code>block</code> to the resource. After this call the block’s
+state is <a href="enum.BlockState.html#variant.Retired" title="variant xlog_cuda::device_runtime::resource::BlockState::Retired"><code>BlockState::Retired</code></a> (or <a href="enum.BlockState.html#variant.Quarantined" title="variant xlog_cuda::device_runtime::resource::BlockState::Quarantined"><code>BlockState::Quarantined</code></a>
+for debug-guard resources). Reuse of the underlying memory is
+resource-specific but must respect the stream-ordered contract.</p>
+<p><code>block.alloc_stream</code> is authoritative for ordering. If the
+caller has touched the memory on a different stream, they must
+have synchronized before calling <code>deallocate</code>.</p>
+</div></details><details class="toggle method-toggle" open><summary><section id="tymethod.device_ordinal" class="method"><a class="src rightside" href="../../../src/xlog_cuda/device_runtime/resource.rs.html#258">Source</a><h4 class="code-header">fn <a href="#tymethod.device_ordinal" class="fn">device_ordinal</a>(&amp;self) -&gt; <a class="primitive" href="https://doc.rust-lang.org/1.97.1/std/primitive.u32.html">u32</a></h4></section></summary><div class="docblock"><p>CUDA device ordinal this resource serves. Resources are pinned
+to a single device.</p>
+</div></details><details class="toggle method-toggle" open><summary><section id="tymethod.bytes_outstanding" class="method"><a class="src rightside" href="../../../src/xlog_cuda/device_runtime/resource.rs.html#262">Source</a><h4 class="code-header">fn <a href="#tymethod.bytes_outstanding" class="fn">bytes_outstanding</a>(&amp;self) -&gt; <a class="primitive" href="https://doc.rust-lang.org/1.97.1/std/primitive.usize.html">usize</a></h4></section></summary><div class="docblock"><p>Bytes currently outstanding (live + retired-but-not-yet-freed).
+Used by tests and by the global budget adaptor.</p>
+</div></details></div><h2 id="provided-methods" class="section-header">Provided Methods<a href="#provided-methods" class="anchor">§</a></h2><div class="methods"><details class="toggle method-toggle" open><summary><section id="method.reap_pending" class="method"><a class="src rightside" href="../../../src/xlog_cuda/device_runtime/resource.rs.html#274-276">Source</a><h4 class="code-header">fn <a href="#method.reap_pending" class="fn">reap_pending</a>(&amp;self) -&gt; <a class="type" href="type.ResourceResult.html" title="type xlog_cuda::device_runtime::resource::ResourceResult">ResourceResult</a>&lt;<a class="primitive" href="https://doc.rust-lang.org/1.97.1/std/primitive.unit.html">()</a>&gt;</h4></section></summary><div class="docblock"><p>Drain any retired-but-not-yet-freed bytes whose underlying
+CUDA work has completed. For synchronous backends this is a
+no-op. For stream-ordered async backends this synchronizes
+the streams that have queued <code>cuMemFreeAsync</code> calls and
+re-counts <code>bytes_outstanding</code> accordingly.</p>
+<p>Callers that need an accurate budget reading after a burst
+of asynchronous deallocations should call this before
+reading <code>bytes_outstanding</code>. Calling on a synchronous backend
+is harmless and free.</p>
+</div></details><details class="toggle method-toggle" open><summary><section id="method.record_block_use" class="method"><a class="src rightside" href="../../../src/xlog_cuda/device_runtime/resource.rs.html#331-340">Source</a><h4 class="code-header">fn <a href="#method.record_block_use" class="fn">record_block_use</a>(
+    &amp;self,
+    block: &amp;<a class="struct" href="struct.DeviceBlock.html" title="struct xlog_cuda::device_runtime::resource::DeviceBlock">DeviceBlock</a>,
+    use_stream: <a class="struct" href="struct.StreamId.html" title="struct xlog_cuda::device_runtime::resource::StreamId">StreamId</a>,
+) -&gt; <a class="type" href="type.ResourceResult.html" title="type xlog_cuda::device_runtime::resource::ResourceResult">ResourceResult</a>&lt;<a class="primitive" href="https://doc.rust-lang.org/1.97.1/std/primitive.unit.html">()</a>&gt;</h4></section></summary><div class="docblock"><p>Record that work has been (or is being) submitted on
+<code>use_stream</code> that touches <code>block</code>’s bytes. Resources that
+participate in cross-stream lifetime tracking (notably the
+stream-ordered async backend) MUST attach a CUDA event from
+<code>use_stream</code> to the block; on <code>deallocate(block)</code>, the
+block’s <code>alloc_stream</code> will wait on every recorded event
+before queueing the underlying free.</p>
+<p><strong>The default implementation returns
+<a href="enum.ResourceError.html#variant.StreamMisuse" title="variant xlog_cuda::device_runtime::resource::ResourceError::StreamMisuse"><code>ResourceError::StreamMisuse</code></a>.</strong> This is intentional: a
+silent no-op default would let a launch builder call
+<code>record_block_use</code> against a resource that does not
+actually track cross-stream uses (e.g.,
+<a href="../direct/struct.DirectCudaResource.html" title="struct xlog_cuda::device_runtime::direct::DirectCudaResource"><code>crate::device_runtime::direct::DirectCudaResource</code></a>),
+observe <code>Ok(())</code>, queue a kernel on a different stream,
+then drop the block — and quietly hit the cross-stream
+use-after-free that this API exists to prevent. False
+safety is worse than no safety. Resources that cannot
+track cross-stream uses MUST inherit this default;
+callers (notably the future xlog launch builder) MUST
+surface the error rather than masking it.</p>
+<p>Override status today:</p>
+<ul>
+<li><a href="../async_resource/struct.AsyncCudaResource.html" title="struct xlog_cuda::device_runtime::async_resource::AsyncCudaResource"><code>crate::device_runtime::async_resource::AsyncCudaResource</code></a>
+overrides with real event tracking.</li>
+<li><a href="../logging/struct.LoggingResource.html" title="struct xlog_cuda::device_runtime::logging::LoggingResource"><code>crate::device_runtime::logging::LoggingResource</code></a> and
+<a href="../budget/struct.GlobalDeviceBudget.html" title="struct xlog_cuda::device_runtime::budget::GlobalDeviceBudget"><code>crate::device_runtime::budget::GlobalDeviceBudget</code></a>
+forward to their inner resource (so the underlying
+backend’s behavior surfaces unchanged).</li>
+<li><a href="../direct/struct.DirectCudaResource.html" title="struct xlog_cuda::device_runtime::direct::DirectCudaResource"><code>crate::device_runtime::direct::DirectCudaResource</code></a>
+does NOT override — it correctly returns
+<code>StreamMisuse</code> and forces callers to either route
+allocations through <code>AsyncCudaResource</code> or take
+responsibility for cross-stream synchronization
+themselves.</li>
+</ul>
+<h5 id="errors"><a class="doc-anchor" href="#errors">§</a>Errors</h5>
+<ul>
+<li><a href="enum.ResourceError.html#variant.StreamMisuse" title="variant xlog_cuda::device_runtime::resource::ResourceError::StreamMisuse"><code>ResourceError::StreamMisuse</code></a> from the default impl
+when the resource cannot track cross-stream uses.</li>
+<li><a href="enum.ResourceError.html#variant.UseAfterFree" title="variant xlog_cuda::device_runtime::resource::ResourceError::UseAfterFree"><code>ResourceError::UseAfterFree</code></a> if <code>block</code> is not the
+block currently live at <code>block.ptr</code> (caller likely
+handed back a stale <a href="struct.DeviceBlock.html" title="struct xlog_cuda::device_runtime::resource::DeviceBlock"><code>DeviceBlock</code></a> whose generation
+no longer matches the live entry).</li>
+<li><a href="enum.ResourceError.html#variant.StreamMisuse" title="variant xlog_cuda::device_runtime::resource::ResourceError::StreamMisuse"><code>ResourceError::StreamMisuse</code></a> if <code>use_stream</code> does
+not resolve in the resource’s stream pool.</li>
+<li><a href="enum.ResourceError.html#variant.Driver" title="variant xlog_cuda::device_runtime::resource::ResourceError::Driver"><code>ResourceError::Driver</code></a> for CUDA driver / event
+creation failures.</li>
+</ul>
+<p>Callers that bypass this API and submit cross-stream work
+directly (raw <code>cuMemcpyDtoHAsync</code>, raw <code>Vec&lt;*mut c_void&gt;</code>
+kernel launches that the launch builder did not see, etc.)
+are responsible for their own cross-stream synchronization.
+The resource cannot infer arbitrary external CUDA work.</p>
+</div></details><details class="toggle method-toggle" open><summary><section id="method.supports_block_use_tracking" class="method"><a class="src rightside" href="../../../src/xlog_cuda/device_runtime/resource.rs.html#350-352">Source</a><h4 class="code-header">fn <a href="#method.supports_block_use_tracking" class="fn">supports_block_use_tracking</a>(&amp;self) -&gt; <a class="primitive" href="https://doc.rust-lang.org/1.97.1/std/primitive.bool.html">bool</a></h4></section></summary><div class="docblock"><p>Whether this resource (and any inner resources it
+composes) actually tracks cross-stream uses via
+<code>record_block_use</code>. Used by the launch recorder’s
+preflight to fail BEFORE queueing CUDA work, rather than
+after. The default returns <code>false</code> to match the trait’s
+default <code>record_block_use</code> behavior; resources that
+override <code>record_block_use</code> to track events MUST override
+this to return <code>true</code>. Decorators forward to inner.</p>
+</div></details><details class="toggle method-toggle" open><summary><section id="method.prepare_block_use" class="method"><a class="src rightside" href="../../../src/xlog_cuda/device_runtime/resource.rs.html#382-396">Source</a><h4 class="code-header">fn <a href="#method.prepare_block_use" class="fn">prepare_block_use</a>(
+    &amp;self,
+    block: <a class="struct" href="struct.BlockId.html" title="struct xlog_cuda::device_runtime::resource::BlockId">BlockId</a>,
+    use_stream: <a class="struct" href="struct.StreamId.html" title="struct xlog_cuda::device_runtime::resource::StreamId">StreamId</a>,
+    access: <a class="enum" href="enum.Access.html" title="enum xlog_cuda::device_runtime::resource::Access">Access</a>,
+) -&gt; <a class="type" href="type.ResourceResult.html" title="type xlog_cuda::device_runtime::resource::ResourceResult">ResourceResult</a>&lt;<a class="primitive" href="https://doc.rust-lang.org/1.97.1/std/primitive.unit.html">()</a>&gt;</h4></section></summary><div class="docblock"><p>Pre-launch / pre-copy hook: queue any cross-stream waits
+required for <code>use_stream</code> to safely access <code>block</code> with
+<code>access</code> semantics. MUST be called BEFORE the GPU work is
+enqueued on <code>use_stream</code>.</p>
+<p>Concretely, on <a href="enum.Access.html#variant.Read" title="variant xlog_cuda::device_runtime::resource::Access::Read"><code>Access::Read</code></a> the resource must queue
+<code>use_stream.wait(&amp;last_write)</code> if a write on a different
+stream is outstanding. On <a href="enum.Access.html#variant.Write" title="variant xlog_cuda::device_runtime::resource::Access::Write"><code>Access::Write</code></a> /
+<a href="enum.Access.html#variant.ReadWrite" title="variant xlog_cuda::device_runtime::resource::Access::ReadWrite"><code>Access::ReadWrite</code></a> the resource must additionally queue
+waits on every outstanding read recorded on a different
+stream — the writer must observe completion of every prior
+reader. Same-stream events are skipped (CUDA stream order
+already covers them).</p>
+<p><strong>The default implementation returns
+<a href="enum.ResourceError.html#variant.StreamMisuse" title="variant xlog_cuda::device_runtime::resource::ResourceError::StreamMisuse"><code>ResourceError::StreamMisuse</code></a>.</strong> Same rationale as
+<code>record_block_use</code>: a silent no-op default would let
+callers paired against a non-tracking backend believe the
+dependency edge was queued. Decorators forward; tracking
+backends override.</p>
+<h5 id="errors-1"><a class="doc-anchor" href="#errors-1">§</a>Errors</h5>
+<ul>
+<li><a href="enum.ResourceError.html#variant.StreamMisuse" title="variant xlog_cuda::device_runtime::resource::ResourceError::StreamMisuse"><code>ResourceError::StreamMisuse</code></a> from the default impl
+when the resource cannot track cross-stream uses.</li>
+<li><a href="enum.ResourceError.html#variant.UseAfterFree" title="variant xlog_cuda::device_runtime::resource::ResourceError::UseAfterFree"><code>ResourceError::UseAfterFree</code></a> if <code>block</code> is not the
+id currently live at <code>block.ptr</code>.</li>
+<li><a href="enum.ResourceError.html#variant.Driver" title="variant xlog_cuda::device_runtime::resource::ResourceError::Driver"><code>ResourceError::Driver</code></a> for CUDA driver / event-wait
+failures.</li>
+</ul>
+</div></details><details class="toggle method-toggle" open><summary><section id="method.finish_block_use" class="method"><a class="src rightside" href="../../../src/xlog_cuda/device_runtime/resource.rs.html#415-429">Source</a><h4 class="code-header">fn <a href="#method.finish_block_use" class="fn">finish_block_use</a>(
+    &amp;self,
+    block: <a class="struct" href="struct.BlockId.html" title="struct xlog_cuda::device_runtime::resource::BlockId">BlockId</a>,
+    use_stream: <a class="struct" href="struct.StreamId.html" title="struct xlog_cuda::device_runtime::resource::StreamId">StreamId</a>,
+    access: <a class="enum" href="enum.Access.html" title="enum xlog_cuda::device_runtime::resource::Access">Access</a>,
+) -&gt; <a class="type" href="type.ResourceResult.html" title="type xlog_cuda::device_runtime::resource::ResourceResult">ResourceResult</a>&lt;<a class="primitive" href="https://doc.rust-lang.org/1.97.1/std/primitive.unit.html">()</a>&gt;</h4></section></summary><div class="docblock"><p>Post-launch / post-copy hook: record an event on
+<code>use_stream</code> capturing the work just enqueued and update
+<code>block</code>’s dependency state.</p>
+<p>Concretely, on <a href="enum.Access.html#variant.Read" title="variant xlog_cuda::device_runtime::resource::Access::Read"><code>Access::Read</code></a> the new event is appended
+to the block’s outstanding-reads list (so future writers
+and the eventual deallocate can wait on it). On
+<a href="enum.Access.html#variant.Write" title="variant xlog_cuda::device_runtime::resource::Access::Write"><code>Access::Write</code></a> / <a href="enum.Access.html#variant.ReadWrite" title="variant xlog_cuda::device_runtime::resource::Access::ReadWrite"><code>Access::ReadWrite</code></a> the new event
+<strong>replaces</strong> the block’s last-write event and the
+outstanding-reads list is cleared (any prior reader’s
+dependency was queued at prepare time and is now subsumed
+by the new write event).</p>
+<p><strong>The default implementation returns
+<a href="enum.ResourceError.html#variant.StreamMisuse" title="variant xlog_cuda::device_runtime::resource::ResourceError::StreamMisuse"><code>ResourceError::StreamMisuse</code></a>.</strong> Same rationale as
+<code>record_block_use</code>. Decorators forward; tracking backends
+override.</p>
+</div></details></div><h2 id="implementors" class="section-header">Implementors<a href="#implementors" class="anchor">§</a></h2><div id="implementors-list"><div class="negative-marker"></div><section id="impl-DeviceMemoryResource-for-AsyncCudaResource" class="impl"><a class="src rightside" href="../../../src/xlog_cuda/device_runtime/async_resource.rs.html#235-666">Source</a><a href="#impl-DeviceMemoryResource-for-AsyncCudaResource" class="anchor">§</a><h3 class="code-header">impl <a class="trait" href="trait.DeviceMemoryResource.html" title="trait xlog_cuda::device_runtime::resource::DeviceMemoryResource">DeviceMemoryResource</a> for <a class="struct" href="../async_resource/struct.AsyncCudaResource.html" title="struct xlog_cuda::device_runtime::async_resource::AsyncCudaResource">AsyncCudaResource</a></h3></section><section id="impl-DeviceMemoryResource-for-GlobalDeviceBudget" class="impl"><a class="src rightside" href="../../../src/xlog_cuda/device_runtime/budget.rs.html#127-272">Source</a><a href="#impl-DeviceMemoryResource-for-GlobalDeviceBudget" class="anchor">§</a><h3 class="code-header">impl <a class="trait" href="trait.DeviceMemoryResource.html" title="trait xlog_cuda::device_runtime::resource::DeviceMemoryResource">DeviceMemoryResource</a> for <a class="struct" href="../budget/struct.GlobalDeviceBudget.html" title="struct xlog_cuda::device_runtime::budget::GlobalDeviceBudget">GlobalDeviceBudget</a></h3></section><section id="impl-DeviceMemoryResource-for-DirectCudaResource" class="impl"><a class="src rightside" href="../../../src/xlog_cuda/device_runtime/direct.rs.html#95-205">Source</a><a href="#impl-DeviceMemoryResource-for-DirectCudaResource" class="anchor">§</a><h3 class="code-header">impl <a class="trait" href="trait.DeviceMemoryResource.html" title="trait xlog_cuda::device_runtime::resource::DeviceMemoryResource">DeviceMemoryResource</a> for <a class="struct" href="../direct/struct.DirectCudaResource.html" title="struct xlog_cuda::device_runtime::direct::DirectCudaResource">DirectCudaResource</a></h3></section><section id="impl-DeviceMemoryResource-for-LoggingResource" class="impl"><a class="src rightside" href="../../../src/xlog_cuda/device_runtime/logging.rs.html#333-451">Source</a><a href="#impl-DeviceMemoryResource-for-LoggingResource" class="anchor">§</a><h3 class="code-header">impl <a class="trait" href="trait.DeviceMemoryResource.html" title="trait xlog_cuda::device_runtime::resource::DeviceMemoryResource">DeviceMemoryResource</a> for <a class="struct" href="../logging/struct.LoggingResource.html" title="struct xlog_cuda::device_runtime::logging::LoggingResource">LoggingResource</a></h3></section></div><script src="../../../trait.impl/xlog_cuda/device_runtime/resource/trait.DeviceMemoryResource.js" async></script></section></div></main></body></html>

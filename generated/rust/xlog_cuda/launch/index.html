@@ -1,0 +1,92 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Launch / use recorder for runtime-backed buffers."><title>xlog_cuda::launch - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../static.files/rustdoc-17e0aaed.css"><meta name="rustdoc-vars" data-root-path="../../" data-static-root-path="../../static.files/" data-current-crate="xlog_cuda" data-themes="" data-resource-suffix="" data-rustdoc-version="1.97.1 (8bab26f4f 2026-07-14)" data-channel="1.97.1" data-search-js="search-fd9372ac.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../static.files/storage-41dd4d93.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../static.files/main-fcd733ba.js"></script><noscript><link rel="stylesheet" href="../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module launch</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../xlog_cuda/index.html">xlog_<wbr>cuda</a><span class="version">0.11.0</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module launch</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#modes" title="Modes">Modes</a></li><li><a href="#preflight--commit" title="Preflight + commit">Preflight + commit</a></li><li><a href="#why-preflight-queues-waits-not-just-validates" title="Why preflight queues waits, not just validates">Why preflight queues waits, not just validates</a></li><li><a href="#external-memory-dlpack-arrow-device" title="External memory (DLPack, Arrow device)">External memory (DLPack, Arrow device)</a></li></ul><h3><a href="#structs">Module Items</a></h3><ul class="block"><li><a href="#structs" title="Structs">Structs</a></li><li><a href="#enums" title="Enums">Enums</a></li></ul></section><div id="rustdoc-modnav"><h2 class="in-crate"><a href="../index.html">In crate xlog_<wbr>cuda</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../index.html">xlog_cuda</a></div><h1>Module <span>launch</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../src/xlog_cuda/launch.rs.html#1-856">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>Launch / use recorder for runtime-backed buffers.</p>
+<p>Closes the production-side of the cross-stream lifetime gap
+identified by A4 <em>and</em> the use-after-prior-write hazard
+discovered by the multi-threaded sort+hash-join regression.
+Code that enqueues kernels or copies on a <code>launch_stream</code>
+other than the buffer’s <code>alloc_stream</code> MUST tell the runtime
+about the use BEFORE the launch (so prior cross-stream waits
+can be queued ahead of the work) AND AFTER the launch (so a
+use-event is recorded for future readers / writers and for
+the eventual deallocate).</p>
+<p>Without preflight, the CUDA mempool is free to reuse the
+address while the cross-stream work is still in flight, AND
+prior writes / reads on a different stream remain
+invisible to the new work — kernels read torn state.</p>
+<h2 id="modes"><a class="doc-anchor" href="#modes">§</a>Modes</h2>
+<p>Two construction modes:</p>
+<ul>
+<li>
+<p><a href="struct.LaunchRecorder.html#method.new_permissive" title="associated function xlog_cuda::launch::LaunchRecorder::new_permissive"><code>LaunchRecorder::new_permissive</code></a> — silently skips
+buffers that have no runtime-side identity (legacy
+cudarc-backed <code>TrackedCudaSlice</code>, external <code>Dlpack</code> /
+<code>ArrowDevice</code> columns). Intended for low-level helpers
+during the migration window where mixed legacy/runtime
+calls are unavoidable. <strong>Not safe for production
+migrated paths</strong> — silent skips are silent gaps.</p>
+</li>
+<li>
+<p><a href="struct.LaunchRecorder.html#method.new_strict" title="associated function xlog_cuda::launch::LaunchRecorder::new_strict"><code>LaunchRecorder::new_strict</code></a> — rejects any buffer that
+cannot be tracked. Intended for production migrated
+launch paths: any buffer the recorder cannot attach an
+event to is a structural problem the caller must fix
+(route the allocation through the runtime, or refuse
+external memory in this code path).</p>
+</li>
+</ul>
+<h2 id="preflight--commit"><a class="doc-anchor" href="#preflight--commit">§</a>Preflight + commit</h2>
+<p>Production callers split the recorder into TWO phases around
+the actual CUDA call:</p>
+<ol>
+<li>Build the recorder, register every buffer the launch
+will touch via <code>read</code> / <code>write</code> / <code>read_write</code> /
+<code>read_column</code> / <code>write_column</code> <em>before</em> enqueueing any
+CUDA work. Fresh output buffers go through the same
+<code>write</code> / <code>write_column</code> API — there is no separate
+post-launch path. The recorder snapshots the block id
+at record time and immediately drops the slice borrow,
+so callers can take <code>&amp;mut</code> afterwards.</li>
+<li>Call <a href="struct.LaunchRecorder.html#method.preflight" title="method xlog_cuda::launch::LaunchRecorder::preflight"><code>LaunchRecorder::preflight</code></a> BEFORE enqueueing
+any CUDA work. Preflight verifies the active resource
+supports cross-stream tracking and (in strict mode)
+that every recorded buffer has a runtime block, then
+queues the cross-stream waits required by each
+recorded access kind via
+<a href="../device_runtime/runtime/struct.XlogDeviceRuntime.html#method.prepare_block_use" title="method xlog_cuda::device_runtime::runtime::XlogDeviceRuntime::prepare_block_use"><code>crate::device_runtime::XlogDeviceRuntime::prepare_block_use</code></a>.
+On failure no CUDA work has been queued yet.</li>
+<li>Enqueue the CUDA call on <code>launch_stream</code>.</li>
+<li>Call <a href="struct.LaunchRecorder.html#method.commit" title="method xlog_cuda::launch::LaunchRecorder::commit"><code>LaunchRecorder::commit</code></a> AFTER the launch is
+enqueued. Commit calls <code>finish_block_use</code> on each
+tracked block — the runtime records its event on
+<code>launch_stream</code> at this point, and that event becomes
+part of the block’s dependency state for future
+readers / writers and the eventual deallocate.</li>
+</ol>
+<h2 id="why-preflight-queues-waits-not-just-validates"><a class="doc-anchor" href="#why-preflight-queues-waits-not-just-validates">§</a>Why preflight queues waits, not just validates</h2>
+<p>Earlier revisions only validated the resource stack at
+preflight and queued waits implicitly via deallocate.
+That protected free-after-use but NOT use-after-prior-write
+across streams: if sort writes column A on stream X and
+join reads column A on stream Y, the join’s read kernel
+could observe sort’s pre-write contents because no event
+fenced X→Y. This recorder closes that gap by queuing
+<code>cuStreamWaitEvent</code> calls in preflight, before the join
+kernel is enqueued on Y, against sort’s recorded write
+event on X.</p>
+<h2 id="external-memory-dlpack-arrow-device"><a class="doc-anchor" href="#external-memory-dlpack-arrow-device">§</a>External memory (DLPack, Arrow device)</h2>
+<p>Strict mode rejects <a href="../memory/enum.CudaColumn.html#variant.Dlpack" title="variant xlog_cuda::memory::CudaColumn::Dlpack"><code>crate::memory::CudaColumn::Dlpack</code></a>
+and <a href="../memory/enum.CudaColumn.html#variant.ArrowDevice" title="variant xlog_cuda::memory::CudaColumn::ArrowDevice"><code>crate::memory::CudaColumn::ArrowDevice</code></a> columns
+outright. External memory has no xlog-side runtime identity
+— the prepare/finish APIs cannot attach events to a buffer
+the runtime did not allocate. Callers that need to consume
+external columns must either:</p>
+<ul>
+<li>use a permissive recorder (and accept that no
+cross-stream safety applies to those buffers), or</li>
+<li>synchronize externally (e.g., wait on the producing
+framework’s stream / event before queueing xlog work).</li>
+</ul>
+<p>Permissive mode skips external columns silently, matching
+the legacy-buffer policy.</p>
+</div></details><h2 id="structs" class="section-header">Structs<a href="#structs" class="anchor">§</a></h2><dl class="item-table"><dt><a class="struct" href="struct.LaunchRecorder.html" title="struct xlog_cuda::launch::LaunchRecorder">Launch<wbr>Recorder</a></dt><dd>Records buffer uses for a single launch / copy on
+<code>launch_stream</code>. Drop without <code>commit</code> is a programmer error;
+the recorder logs (debug builds only) and never panics.</dd></dl><h2 id="enums" class="section-header">Enums<a href="#enums" class="anchor">§</a></h2><dl class="item-table"><dt><a class="enum" href="enum.RecorderMode.html" title="enum xlog_cuda::launch::RecorderMode">Recorder<wbr>Mode</a></dt><dd>Recorder construction mode.</dd></dl></section></div></main></body></html>

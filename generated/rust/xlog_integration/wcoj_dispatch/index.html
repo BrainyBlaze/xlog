@@ -1,0 +1,59 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="v0.6.2 minimal env-gated GPU 3-way WCOJ triangle dispatch."><title>xlog_integration::wcoj_dispatch - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../static.files/rustdoc-17e0aaed.css"><meta name="rustdoc-vars" data-root-path="../../" data-static-root-path="../../static.files/" data-current-crate="xlog_integration" data-themes="" data-resource-suffix="" data-rustdoc-version="1.97.1 (8bab26f4f 2026-07-14)" data-channel="1.97.1" data-search-js="search-fd9372ac.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../static.files/storage-41dd4d93.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../static.files/main-fcd733ba.js"></script><noscript><link rel="stylesheet" href="../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module wcoj_dispatch</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../xlog_integration/index.html">xlog_<wbr>integration</a><span class="version">0.1.0</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module wcoj_<wbr>dispatch</a></h2><h3><a href="#constants">Module Items</a></h3><ul class="block"><li><a href="#constants" title="Constants">Constants</a></li><li><a href="#functions" title="Functions">Functions</a></li></ul></section><div id="rustdoc-modnav"><h2 class="in-crate"><a href="../index.html">In crate xlog_<wbr>integration</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../index.html">xlog_integration</a></div><h1>Module <span>wcoj_<wbr>dispatch</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../src/xlog_integration/wcoj_dispatch.rs.html#1-369">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>v0.6.2 minimal env-gated GPU 3-way WCOJ triangle dispatch.</p>
+<p>Single public entry:
+<a href="fn.try_wcoj_triangle_u32_dispatch.html" title="fn xlog_integration::wcoj_dispatch::try_wcoj_triangle_u32_dispatch"><code>try_wcoj_triangle_u32_dispatch</code></a> (env-driven) and
+<a href="fn.try_wcoj_triangle_u32_dispatch_with_gate.html" title="fn xlog_integration::wcoj_dispatch::try_wcoj_triangle_u32_dispatch_with_gate"><code>try_wcoj_triangle_u32_dispatch_with_gate</code></a> (boolean-driven,
+for tests). The slice is intentionally narrow:</p>
+<ul>
+<li><strong>Env flag only.</strong> <code>XLOG_USE_WCOJ_TRIANGLE_U32=1</code> (or
+<code>true</code>/<code>TRUE</code>) opts in. Anything else (unset, <code>0</code>,
+<code>false</code>, etc.) means the helper returns <code>Ok(None)</code>
+unconditionally — the caller takes the existing
+binary-join path.</li>
+<li><strong>Recognizes exactly one shape.</strong> A rule of the form
+<code>tri(X, Y, Z) :- e1(X, Y), e2(Y, Z), e3(X, Z)</code> over
+2-column WCOJ-eligible relations (U32, Symbol, or U64
+keys — see <code>WcojKeyWidth</code>): three positive 2-arity body
+atoms covering the head’s three distinct variables in
+head-position order. No negation, no comparison filters,
+no recursion (head predicate not in body), no
+reversed-axis atoms (e.g. <code>e1(Y, X)</code>), no constants in
+atom args. The planner must also return
+[<code>xlog_logic::hypergraph::RulePlan::MultiwayCandidate</code>].</li>
+<li><strong>Width uniformity.</strong> All three slots must share a key
+width. A mixed-width triangle (e.g. e1 U32, e2 U64) is
+rejected at this dispatch level — the binary-join chain
+handles it.</li>
+<li><strong>Silent fallback.</strong> Any mismatch — gate off, shape
+mismatch, planner verdict not multiway, missing input
+buffer, unsupported scalar type, mixed-width slots —
+returns <code>Ok(None)</code> without an error or log line. The
+caller is expected to silently route to the existing
+binary-join path. This keeps the env flag truly opt-in
+and prevents the helper from accidentally diverting
+work it can’t handle.</li>
+<li><strong>Strict GPU pipeline on dispatch.</strong> When all checks pass,
+the helper builds three sorted+deduped layouts and runs
+the matching WCOJ triangle kernel on the configured
+<code>launch_stream</code> — <code>wcoj_layout_u32_recorded</code> /
+<code>wcoj_triangle_u32_recorded</code> for 4-byte keys, the
+<code>_u64_recorded</code> siblings for 8-byte keys. All
+<a href="../../xlog_cuda/launch/struct.LaunchRecorder.html" title="struct xlog_cuda::launch::LaunchRecorder"><code>xlog_cuda::launch::LaunchRecorder</code></a> discipline carries
+through unchanged.</li>
+</ul>
+<p>What this slice deliberately does NOT do:</p>
+<ul>
+<li>No automatic detection at the executor level — callers
+pass the rule + input buffers explicitly. Executor
+wiring lives in <code>xlog-runtime</code>.</li>
+<li>No recursion / SCC mixed execution.</li>
+<li>No cost model.</li>
+<li>No mixed-width admission (U32+U64 triangle stays on the
+binary-join path).</li>
+<li>No histogram-guided block dispatch.</li>
+</ul>
+</div></details><h2 id="constants" class="section-header">Constants<a href="#constants" class="anchor">§</a></h2><dl class="item-table"><dt><a class="constant" href="constant.ENV_USE_WCOJ_TRIANGLE_U32.html" title="constant xlog_integration::wcoj_dispatch::ENV_USE_WCOJ_TRIANGLE_U32">ENV_<wbr>USE_<wbr>WCOJ_<wbr>TRIANGLE_<wbr>U32</a></dt><dd>Env variable controlling the dispatch gate. Treated as ON
+when set to <code>"1"</code> or case-insensitive <code>"true"</code>; anything else
+(unset, <code>"0"</code>, <code>"false"</code>, empty string, …) means OFF.</dd></dl><h2 id="functions" class="section-header">Functions<a href="#functions" class="anchor">§</a></h2><dl class="item-table"><dt><a class="fn" href="fn.try_wcoj_triangle_u32_dispatch.html" title="fn xlog_integration::wcoj_dispatch::try_wcoj_triangle_u32_dispatch">try_<wbr>wcoj_<wbr>triangle_<wbr>u32_<wbr>dispatch</a></dt><dd>Env-driven entry. Reads <code>XLOG_USE_WCOJ_TRIANGLE_U32</code> and
+delegates to <a href="fn.try_wcoj_triangle_u32_dispatch_with_gate.html" title="fn xlog_integration::wcoj_dispatch::try_wcoj_triangle_u32_dispatch_with_gate"><code>try_wcoj_triangle_u32_dispatch_with_gate</code></a>.</dd><dt><a class="fn" href="fn.try_wcoj_triangle_u32_dispatch_with_gate.html" title="fn xlog_integration::wcoj_dispatch::try_wcoj_triangle_u32_dispatch_with_gate">try_<wbr>wcoj_<wbr>triangle_<wbr>u32_<wbr>dispatch_<wbr>with_<wbr>gate</a></dt><dd>Test-friendly form that takes the gate as an explicit boolean.
+Production callers use <a href="fn.try_wcoj_triangle_u32_dispatch.html" title="fn xlog_integration::wcoj_dispatch::try_wcoj_triangle_u32_dispatch"><code>try_wcoj_triangle_u32_dispatch</code></a> which
+reads the env var.</dd></dl></section></div></main></body></html>

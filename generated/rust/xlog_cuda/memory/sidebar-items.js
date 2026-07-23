@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["CudaColumn"],"fn":["validate_logical_row_count"],"struct":["ArrowDeviceColumn","CudaBuffer","DlpackColumn","GpuMemoryManager","RuntimeAllocBlock","TrackedCudaSlice"]};

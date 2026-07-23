@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"struct":["ColumnStats","JoinSelectivity","KeyHeatStats","PrefixDegreeStats","RelationStats","StatsManager","StatsSnapshot"]};

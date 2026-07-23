@@ -1,0 +1,45 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="GPU-resident statistics for query optimization and solver heuristics."><title>xlog_stats - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../static.files/rustdoc-17e0aaed.css"><meta name="rustdoc-vars" data-root-path="../" data-static-root-path="../static.files/" data-current-crate="xlog_stats" data-themes="" data-resource-suffix="" data-rustdoc-version="1.97.1 (8bab26f4f 2026-07-14)" data-channel="1.97.1" data-search-js="search-fd9372ac.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../static.files/storage-41dd4d93.js"></script><script defer src="../crates.js"></script><script defer src="../static.files/main-fcd733ba.js"></script><noscript><link rel="stylesheet" href="../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../static.files/favicon-044be391.svg"></head><body class="rustdoc mod crate"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Crate xlog_stats</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../xlog_stats/index.html">xlog_<wbr>stats</a><span class="version">0.11.0</span></h2></div><div class="sidebar-elems"><ul class="block"><li><a id="all-types" href="all.html">All Items</a></li></ul><section id="rustdoc-toc"><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#core-types" title="Core Types">Core Types</a></li><li><a href="#usage" title="Usage">Usage</a></li></ul><h3><a href="#structs">Crate Items</a></h3><ul class="block"><li><a href="#structs" title="Structs">Structs</a></li></ul></section><div id="rustdoc-modnav"></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><h1>Crate <span>xlog_<wbr>stats</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../src/xlog_stats/lib.rs.html#1-58">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>GPU-resident statistics for query optimization and solver heuristics.</p>
+<p>This crate provides statistics tracking for GPU-resident relations and columns
+that are used by the query optimizer and solver heuristics to make informed
+decisions about query execution strategies.</p>
+<h2 id="core-types"><a class="doc-anchor" href="#core-types">§</a>Core Types</h2>
+<ul>
+<li><a href="struct.StatsManager.html" title="struct xlog_stats::StatsManager"><code>StatsManager</code></a>: Central coordinator for all relation statistics and join
+selectivity tracking.</li>
+<li><a href="struct.RelationStats.html" title="struct xlog_stats::RelationStats"><code>RelationStats</code></a>: Tracks cardinality, memory usage, access patterns, and
+column-level statistics for GPU-resident relations.</li>
+<li><a href="struct.ColumnStats.html" title="struct xlog_stats::ColumnStats"><code>ColumnStats</code></a>: Per-column statistics including distinct counts, null counts,
+and value ranges for selectivity estimation.</li>
+<li><a href="struct.JoinSelectivity.html" title="struct xlog_stats::JoinSelectivity"><code>JoinSelectivity</code></a>: Models join behavior between relations for cardinality
+estimation.</li>
+<li><a href="struct.PrefixDegreeStats.html" title="struct xlog_stats::PrefixDegreeStats"><code>PrefixDegreeStats</code></a> and <a href="struct.KeyHeatStats.html" title="struct xlog_stats::KeyHeatStats"><code>KeyHeatStats</code></a>: WCOJ planner inputs for prefix
+fan-out and per-key skew.</li>
+</ul>
+<h2 id="usage"><a class="doc-anchor" href="#usage">§</a>Usage</h2>
+<div class="example-wrap ignore"><a href="#" class="tooltip" title="This example is not tested">ⓘ</a><pre class="rust rust-example-rendered"><code><span class="kw">use </span>xlog_stats::{StatsManager, RelationStats, ColumnStats};
+<span class="kw">use </span>xlog_core::{RelId, ScalarType};
+
+<span class="comment">// Create a stats manager and register relations
+</span><span class="kw">let </span><span class="kw-2">mut </span>mgr = StatsManager::new();
+mgr.register_relation(RelId(<span class="number">1</span>));
+mgr.register_relation(RelId(<span class="number">2</span>));
+
+<span class="comment">// Update statistics
+</span>mgr.update_cardinality(RelId(<span class="number">1</span>), <span class="number">10_000</span>);
+mgr.update_cardinality(RelId(<span class="number">2</span>), <span class="number">5_000</span>);
+
+<span class="comment">// Add column statistics
+</span><span class="kw">let </span><span class="kw-2">mut </span>col_stats = ColumnStats::new(<span class="number">0</span>, ScalarType::I64);
+col_stats.update_distinct(<span class="number">500</span>);
+col_stats.update_range(<span class="number">0</span>, <span class="number">1000</span>);
+mgr.add_column_stats(RelId(<span class="number">1</span>), col_stats);
+
+<span class="comment">// Estimate join cardinality
+</span><span class="kw">let </span>estimate = mgr.estimate_join_cardinality(RelId(<span class="number">1</span>), RelId(<span class="number">2</span>), <span class="kw-2">&amp;</span>[<span class="number">0</span>], <span class="kw-2">&amp;</span>[<span class="number">0</span>]);
+
+<span class="comment">// Record actual join result to improve future estimates
+</span>mgr.record_join_result(RelId(<span class="number">1</span>), RelId(<span class="number">2</span>), <span class="macro">vec!</span>[<span class="number">0</span>], <span class="macro">vec!</span>[<span class="number">0</span>], <span class="number">50_000_000</span>, <span class="number">25_000</span>);
+
+<span class="comment">// Track hot relations for LRU eviction
+</span>mgr.record_access(RelId(<span class="number">1</span>));
+<span class="kw">let </span>hot_rels = mgr.hot_relations(<span class="number">0.5</span>);</code></pre></div></div></details><h2 id="structs" class="section-header">Structs<a href="#structs" class="anchor">§</a></h2><dl class="item-table"><dt><a class="struct" href="struct.ColumnStats.html" title="struct xlog_stats::ColumnStats">Column<wbr>Stats</a></dt><dd>Per-column statistics for optimizer cost estimation.</dd><dt><a class="struct" href="struct.JoinSelectivity.html" title="struct xlog_stats::JoinSelectivity">Join<wbr>Selectivity</a></dt><dd>Join selectivity model for estimating join output cardinality.</dd><dt><a class="struct" href="struct.KeyHeatStats.html" title="struct xlog_stats::KeyHeatStats">KeyHeat<wbr>Stats</a></dt><dd>Per-key heat/skew statistics for one relation column.</dd><dt><a class="struct" href="struct.PrefixDegreeStats.html" title="struct xlog_stats::PrefixDegreeStats">Prefix<wbr>Degree<wbr>Stats</a></dt><dd>Prefix fan-out statistics for one relation column.</dd><dt><a class="struct" href="struct.RelationStats.html" title="struct xlog_stats::RelationStats">Relation<wbr>Stats</a></dt><dd>GPU-resident relation statistics.</dd><dt><a class="struct" href="struct.StatsManager.html" title="struct xlog_stats::StatsManager">Stats<wbr>Manager</a></dt><dd>Manages GPU-resident statistics for all relations.</dd><dt><a class="struct" href="struct.StatsSnapshot.html" title="struct xlog_stats::StatsSnapshot">Stats<wbr>Snapshot</a></dt><dd>Serializable snapshot of collected statistics.</dd></dl></section></div></main></body></html>

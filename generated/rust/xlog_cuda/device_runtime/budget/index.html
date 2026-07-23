@@ -1,0 +1,60 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="`GlobalDeviceBudget` — per-runtime byte-limit decorator."><title>xlog_cuda::device_runtime::budget - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-17e0aaed.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="xlog_cuda" data-themes="" data-resource-suffix="" data-rustdoc-version="1.97.1 (8bab26f4f 2026-07-14)" data-channel="1.97.1" data-search-js="search-fd9372ac.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../static.files/storage-41dd4d93.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../../static.files/main-fcd733ba.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module budget</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../../xlog_cuda/index.html">xlog_<wbr>cuda</a><span class="version">0.11.0</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module budget</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#accounting-model" title="Accounting model">Accounting model</a><ul><li><a href="#allocate" title="Allocate">Allocate</a></li><li><a href="#deallocate--reap" title="Deallocate / Reap">Deallocate / Reap</a></li></ul></li><li><a href="#composition" title="Composition">Composition</a></li></ul><h3><a href="#structs">Module Items</a></h3><ul class="block"><li><a href="#structs" title="Structs">Structs</a></li></ul></section><div id="rustdoc-modnav"><h2><a href="../index.html">In xlog_<wbr>cuda::<wbr>device_<wbr>runtime</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../../index.html">xlog_cuda</a>::<wbr><a href="../index.html">device_runtime</a></div><h1>Module <span>budget</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../../src/xlog_cuda/device_runtime/budget.rs.html#1-534">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p><a href="struct.GlobalDeviceBudget.html" title="struct xlog_cuda::device_runtime::budget::GlobalDeviceBudget"><code>GlobalDeviceBudget</code></a> — per-runtime byte-limit decorator.</p>
+<p>Wraps a <a href="../resource/trait.DeviceMemoryResource.html" title="trait xlog_cuda::device_runtime::resource::DeviceMemoryResource"><code>DeviceMemoryResource</code></a> and enforces a single byte limit
+across all allocations that flow through it. Designed to be the
+per-runtime singleton replacement for the v0.5 per-provider
+<code>GpuMemoryManager</code> (which had no way to enforce a coherent budget
+across parallel tests, multiple providers, or Python callers
+sharing one physical GPU).</p>
+<h2 id="accounting-model"><a class="doc-anchor" href="#accounting-model">§</a>Accounting model</h2>
+<p><code>GlobalDeviceBudget</code> keeps <code>reserved_bytes</code> strictly equal to
+<code>inner.bytes_outstanding()</code> at every quiescent moment. This is the
+“live + retired-but-not-yet-freed” view from the trait — exactly
+the bytes the budget should be guarding.</p>
+<p>To keep that invariant under both synchronous and stream-ordered
+async inners, every public method is serialized through a single
+<code>Mutex&lt;BudgetState&gt;</code> and the inner call is invoked <strong>inside</strong> the
+lock. The lock window is bounded by the inner’s CUDA call, which
+is in any case the dominant cost — the budget decorator does not
+add hot-path overhead beyond what the inner already imposes.</p>
+<h3 id="allocate"><a class="doc-anchor" href="#allocate">§</a>Allocate</h3>
+<ol>
+<li>Lock state.</li>
+<li>If <code>reserved + bytes &gt; limit</code>: return
+<code>ResourceError::OutOfBudget { requested, remaining }</code>.</li>
+<li>Optimistically reserve: <code>reserved += bytes</code>.</li>
+<li>Call <code>inner.allocate(bytes, ..)</code> under the lock. The inner’s
+own bookkeeping moves <code>bytes</code> from “free” to “live”.</li>
+<li>If inner returned <code>Err</code>, roll back the reservation:
+<code>reserved -= bytes</code>. Forward the error.</li>
+</ol>
+<h3 id="deallocate--reap"><a class="doc-anchor" href="#deallocate--reap">§</a>Deallocate / Reap</h3>
+<p>For both methods we sample <code>inner.bytes_outstanding()</code> before and
+after the inner call (under the lock), and decrement <code>reserved</code>
+by the observed delta. The pattern handles both backends without
+branching:</p>
+<ul>
+<li>Synchronous inner (<code>DirectCudaResource</code>): <code>bytes_outstanding</code>
+drops by the block’s bytes on <code>deallocate</code>, so the delta is
+<code>block.bytes</code>. <code>reap_pending</code> is a no-op (delta zero).</li>
+<li>Stream-ordered async inner (<code>AsyncCudaResource</code>): <code>deallocate</code>
+moves bytes from “live” to “pending”; <code>bytes_outstanding</code>
+stays the same, so the delta is zero — the budget is <em>not</em>
+released yet. <code>reap_pending</code> drains the pending bytes whose
+queued <code>cuMemFreeAsync</code> has completed; <code>bytes_outstanding</code>
+drops by the drained total and the budget releases that
+same total.</li>
+</ul>
+<p>Because the inner call and the before/after samples happen under
+the same lock, no concurrent budget op can perturb the inner’s
+<code>bytes_outstanding</code> between our reads — the delta strictly
+reflects this call’s effect on the inner.</p>
+<h2 id="composition"><a class="doc-anchor" href="#composition">§</a>Composition</h2>
+<p><code>GlobalDeviceBudget</code> is a normal <code>DeviceMemoryResource</code>, so it
+plugs into [<code>XlogDeviceRuntime::with_resource</code>] and stacks under
+/ over [<code>LoggingResource</code>]. Recommended ordering for production:
+<code>GlobalDeviceBudget(LoggingResource(AsyncCudaResource))</code>. That
+gives the budget atomic accounting, the logger sees the
+eventually-applied call (so <code>OutOfBudget</code> errors do not get
+double-logged), and the underlying allocator is reached last.
+Tests can stack either way.</p>
+</div></details><h2 id="structs" class="section-header">Structs<a href="#structs" class="anchor">§</a></h2><dl class="item-table"><dt><a class="struct" href="struct.GlobalDeviceBudget.html" title="struct xlog_cuda::device_runtime::budget::GlobalDeviceBudget">Global<wbr>Device<wbr>Budget</a></dt><dd>Per-runtime byte-limit decorator.</dd></dl></section></div></main></body></html>

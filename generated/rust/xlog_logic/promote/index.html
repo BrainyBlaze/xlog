@@ -1,0 +1,67 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="`MultiWayJoin` promotion pass. `ChainJoin` promotion for 2-atom chains. Recursive-SCC promotion for occurrence-level recursive bodies."><title>xlog_logic::promote - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../static.files/rustdoc-17e0aaed.css"><meta name="rustdoc-vars" data-root-path="../../" data-static-root-path="../../static.files/" data-current-crate="xlog_logic" data-themes="" data-resource-suffix="" data-rustdoc-version="1.97.1 (8bab26f4f 2026-07-14)" data-channel="1.97.1" data-search-js="search-fd9372ac.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../static.files/storage-41dd4d93.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../static.files/main-fcd733ba.js"></script><noscript><link rel="stylesheet" href="../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module promote</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../xlog_logic/index.html">xlog_<wbr>logic</a><span class="version">0.11.0</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module promote</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#eligibility" title="Eligibility">Eligibility</a></li><li><a href="#recursive-scc-handling" title="Recursive SCC handling">Recursive SCC handling</a></li><li><a href="#fallback-identity-invariant" title="Fallback identity invariant">Fallback identity invariant</a></li><li><a href="#out-of-scope" title="Out of scope">Out of scope</a></li></ul><h3><a href="#functions">Module Items</a></h3><ul class="block"><li><a href="#functions" title="Functions">Functions</a></li></ul></section><div id="rustdoc-modnav"><h2 class="in-crate"><a href="../index.html">In crate xlog_<wbr>logic</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../index.html">xlog_logic</a></div><h1>Module <span>promote</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../src/xlog_logic/promote.rs.html#1-3104">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p><code>MultiWayJoin</code> promotion pass.
+<code>ChainJoin</code> promotion for 2-atom chains.
+Recursive-SCC promotion for occurrence-level recursive bodies.</p>
+<p>Walks an [<code>ExecutionPlan</code>] (post-lowering, post-optimizer) and
+rewrites recognized triangle / 4-cycle / K-clique subtrees in
+<code>rule.body</code> to [<code>RirNode::MultiWayJoin</code>], plus recognized 2-atom
+chains to [<code>RirNode::ChainJoin</code>]. Idempotent.</p>
+<h3 id="eligibility"><a class="doc-anchor" href="#eligibility">§</a>Eligibility</h3>
+<p>Exact-match against the canonical lowered-and-optimized triangle
+shape — the same tree shape recognized by the legacy triangle
+executor matcher:</p>
+<div class="example-wrap"><pre class="language-text"><code>Project {
+    input: Join {
+        left: Join {
+            left: Scan(rel_xy),
+            right: Scan(rel_yz),
+            left_keys: [1],
+            right_keys: [0],
+            join_type: Inner,
+        },
+        right: Scan(rel_xz),
+        left_keys: [0, 3],
+        right_keys: [0, 1],
+        join_type: Inner,
+    },
+    columns: [Column(0), Column(1), Column(3)],
+}</code></pre></div>
+<p>4-cycle has the analogous canonical lowered shape. Any
+deviation in shape, predicate-pushdown-altered Join, or
+computed-projection variants is left untouched.</p>
+<h3 id="recursive-scc-handling"><a class="doc-anchor" href="#recursive-scc-handling">§</a>Recursive SCC handling</h3>
+<p>The promoter does not blanket-skip recursive SCCs. It gates
+per-rule on the number of body Scans whose RelId resolves to a
+predicate inside the rule’s head SCC:</p>
+<div><table><thead><tr><th>Recursive Scans in body</th><th>Behavior</th></tr></thead><tbody>
+<tr><td>0 (stable rule)</td><td>Promote</td></tr>
+<tr><td>1 (linear recursion)</td><td>Promote</td></tr>
+<tr><td>≥ 2 (multi-recursion)</td><td>Promote</td></tr>
+</tbody></table>
+</div>
+<p>Per arXiv:2604.20073, semi-naïve evaluation reasons over
+body-clause OCCURRENCES, not predicate names. Multi-recursive
+bodies including same-predicate self-recursive
+occurrences (e.g. <code>tri(X,Y,Z) :- p(X,Y), p(Y,Z), q(X,Z)</code> with
+<code>p</code> recursive) are admitted. The recursive engine
+(<code>Executor::execute_recursive_scc</code>) consumes the resulting
+<code>MultiWayJoin</code> via <code>execute_wcoj_or_fallback_node</code>, dispatching
+WCOJ kernels on the seeding pass and on each iteration’s variant.
+The runtime occurrence-identity rewrite at
+<code>crates/xlog-runtime/src/executor/rewrite.rs:303-311 + :477-504</code>
+ensures per-variant rewrites preserve the N-th occurrence
+independently in <code>MultiWayJoin.inputs</code> and <code>MultiWayJoin.fallback</code>.</p>
+<h3 id="fallback-identity-invariant"><a class="doc-anchor" href="#fallback-identity-invariant">§</a>Fallback identity invariant</h3>
+<p>The promoter captures the exact post-optimizer subtree as
+<code>MultiWayJoin.fallback</code>. Executing <code>fallback</code> produces the same
+row set as the pre-promotion tree — guaranteed by being the
+identical [<code>RirNode</code>].</p>
+<h3 id="out-of-scope"><a class="doc-anchor" href="#out-of-scope">§</a>Out of scope</h3>
+<ul>
+<li>Cost model, selectivity reordering, variable-ordering choices.</li>
+<li>Stream-aligned multiplexing and adaptive histogram resolution
+for recursive cliques.</li>
+<li>4-way / general-arity admission beyond triangle / 4-cycle /
+supported K-clique and generic Free Join paths.</li>
+</ul>
+</div></details><h2 id="functions" class="section-header">Functions<a href="#functions" class="anchor">§</a></h2><dl class="item-table"><dt><a class="fn" href="fn.promote_multiway.html" title="fn xlog_logic::promote::promote_multiway">promote_<wbr>multiway</a></dt><dd>Walk an <code>ExecutionPlan</code> and rewrite eligible triangle / 4-cycle
+subtrees in each rule body to <code>RirNode::MultiWayJoin</code>. Idempotent.</dd></dl></section></div></main></body></html>

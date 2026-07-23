@@ -1,0 +1,370 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Source of the Rust file `crates/xlog-integration/src/wcoj_dispatch.rs`."><title>wcoj_dispatch.rs - source</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../static.files/rustdoc-17e0aaed.css"><meta name="rustdoc-vars" data-root-path="../../" data-static-root-path="../../static.files/" data-current-crate="xlog_integration" data-themes="" data-resource-suffix="" data-rustdoc-version="1.97.1 (8bab26f4f 2026-07-14)" data-channel="1.97.1" data-search-js="search-fd9372ac.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../static.files/storage-41dd4d93.js"></script><script defer src="../../static.files/src-script-813739b1.js"></script><script defer src="../../src-files.js"></script><script defer src="../../static.files/main-fcd733ba.js"></script><noscript><link rel="stylesheet" href="../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../static.files/favicon-044be391.svg"></head><body class="rustdoc src"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><nav class="sidebar"><div class="src-sidebar-title"><h2>Files</h2></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><h1><div class="sub-heading">xlog_integration/</div>wcoj_dispatch.rs</h1><rustdoc-toolbar></rustdoc-toolbar></div><div class="example-wrap digits-3"><pre class="rust"><code><a href=#1 id=1 data-nosnippet>1</a><span class="doccomment">//! v0.6.2 minimal env-gated GPU 3-way WCOJ triangle dispatch.
+<a href=#2 id=2 data-nosnippet>2</a>//!
+<a href=#3 id=3 data-nosnippet>3</a>//! Single public entry:
+<a href=#4 id=4 data-nosnippet>4</a>//! [`try_wcoj_triangle_u32_dispatch`] (env-driven) and
+<a href=#5 id=5 data-nosnippet>5</a>//! [`try_wcoj_triangle_u32_dispatch_with_gate`] (boolean-driven,
+<a href=#6 id=6 data-nosnippet>6</a>//! for tests). The slice is intentionally narrow:
+<a href=#7 id=7 data-nosnippet>7</a>//!
+<a href=#8 id=8 data-nosnippet>8</a>//!   * **Env flag only.** `XLOG_USE_WCOJ_TRIANGLE_U32=1` (or
+<a href=#9 id=9 data-nosnippet>9</a>//!     `true`/`TRUE`) opts in. Anything else (unset, `0`,
+<a href=#10 id=10 data-nosnippet>10</a>//!     `false`, etc.) means the helper returns `Ok(None)`
+<a href=#11 id=11 data-nosnippet>11</a>//!     unconditionally — the caller takes the existing
+<a href=#12 id=12 data-nosnippet>12</a>//!     binary-join path.
+<a href=#13 id=13 data-nosnippet>13</a>//!   * **Recognizes exactly one shape.** A rule of the form
+<a href=#14 id=14 data-nosnippet>14</a>//!     `tri(X, Y, Z) :- e1(X, Y), e2(Y, Z), e3(X, Z)` over
+<a href=#15 id=15 data-nosnippet>15</a>//!     2-column WCOJ-eligible relations (U32, Symbol, or U64
+<a href=#16 id=16 data-nosnippet>16</a>//!     keys — see `WcojKeyWidth`): three positive 2-arity body
+<a href=#17 id=17 data-nosnippet>17</a>//!     atoms covering the head's three distinct variables in
+<a href=#18 id=18 data-nosnippet>18</a>//!     head-position order. No negation, no comparison filters,
+<a href=#19 id=19 data-nosnippet>19</a>//!     no recursion (head predicate not in body), no
+<a href=#20 id=20 data-nosnippet>20</a>//!     reversed-axis atoms (e.g. `e1(Y, X)`), no constants in
+<a href=#21 id=21 data-nosnippet>21</a>//!     atom args. The planner must also return
+<a href=#22 id=22 data-nosnippet>22</a>//!     [`xlog_logic::hypergraph::RulePlan::MultiwayCandidate`].
+<a href=#23 id=23 data-nosnippet>23</a>//!   * **Width uniformity.** All three slots must share a key
+<a href=#24 id=24 data-nosnippet>24</a>//!     width. A mixed-width triangle (e.g. e1 U32, e2 U64) is
+<a href=#25 id=25 data-nosnippet>25</a>//!     rejected at this dispatch level — the binary-join chain
+<a href=#26 id=26 data-nosnippet>26</a>//!     handles it.
+<a href=#27 id=27 data-nosnippet>27</a>//!   * **Silent fallback.** Any mismatch — gate off, shape
+<a href=#28 id=28 data-nosnippet>28</a>//!     mismatch, planner verdict not multiway, missing input
+<a href=#29 id=29 data-nosnippet>29</a>//!     buffer, unsupported scalar type, mixed-width slots —
+<a href=#30 id=30 data-nosnippet>30</a>//!     returns `Ok(None)` without an error or log line. The
+<a href=#31 id=31 data-nosnippet>31</a>//!     caller is expected to silently route to the existing
+<a href=#32 id=32 data-nosnippet>32</a>//!     binary-join path. This keeps the env flag truly opt-in
+<a href=#33 id=33 data-nosnippet>33</a>//!     and prevents the helper from accidentally diverting
+<a href=#34 id=34 data-nosnippet>34</a>//!     work it can't handle.
+<a href=#35 id=35 data-nosnippet>35</a>//!   * **Strict GPU pipeline on dispatch.** When all checks pass,
+<a href=#36 id=36 data-nosnippet>36</a>//!     the helper builds three sorted+deduped layouts and runs
+<a href=#37 id=37 data-nosnippet>37</a>//!     the matching WCOJ triangle kernel on the configured
+<a href=#38 id=38 data-nosnippet>38</a>//!     `launch_stream` — `wcoj_layout_u32_recorded` /
+<a href=#39 id=39 data-nosnippet>39</a>//!     `wcoj_triangle_u32_recorded` for 4-byte keys, the
+<a href=#40 id=40 data-nosnippet>40</a>//!     `_u64_recorded` siblings for 8-byte keys. All
+<a href=#41 id=41 data-nosnippet>41</a>//!     [`xlog_cuda::launch::LaunchRecorder`] discipline carries
+<a href=#42 id=42 data-nosnippet>42</a>//!     through unchanged.
+<a href=#43 id=43 data-nosnippet>43</a>//!
+<a href=#44 id=44 data-nosnippet>44</a>//! What this slice deliberately does NOT do:
+<a href=#45 id=45 data-nosnippet>45</a>//!
+<a href=#46 id=46 data-nosnippet>46</a>//!   * No automatic detection at the executor level — callers
+<a href=#47 id=47 data-nosnippet>47</a>//!     pass the rule + input buffers explicitly. Executor
+<a href=#48 id=48 data-nosnippet>48</a>//!     wiring lives in `xlog-runtime`.
+<a href=#49 id=49 data-nosnippet>49</a>//!   * No recursion / SCC mixed execution.
+<a href=#50 id=50 data-nosnippet>50</a>//!   * No cost model.
+<a href=#51 id=51 data-nosnippet>51</a>//!   * No mixed-width admission (U32+U64 triangle stays on the
+<a href=#52 id=52 data-nosnippet>52</a>//!     binary-join path).
+<a href=#53 id=53 data-nosnippet>53</a>//!   * No histogram-guided block dispatch.
+<a href=#54 id=54 data-nosnippet>54</a>
+<a href=#55 id=55 data-nosnippet>55</a></span><span class="kw">use </span>std::collections::{BTreeMap, BTreeSet};
+<a href=#56 id=56 data-nosnippet>56</a>
+<a href=#57 id=57 data-nosnippet>57</a><span class="kw">use </span>xlog_core::{<span class="prelude-ty">Result</span>, ScalarType};
+<a href=#58 id=58 data-nosnippet>58</a><span class="kw">use </span>xlog_cuda::device_runtime::StreamId;
+<a href=#59 id=59 data-nosnippet>59</a><span class="kw">use </span>xlog_cuda::memory::CudaBuffer;
+<a href=#60 id=60 data-nosnippet>60</a><span class="kw">use </span>xlog_cuda::CudaKernelProvider;
+<a href=#61 id=61 data-nosnippet>61</a><span class="kw">use </span>xlog_logic::ast::{BodyLiteral, Rule, Term};
+<a href=#62 id=62 data-nosnippet>62</a><span class="kw">use </span>xlog_logic::hypergraph::{plan_rule, RefRelation, RefRelationStore, RefValue, RulePlan};
+<a href=#63 id=63 data-nosnippet>63</a>
+<a href=#64 id=64 data-nosnippet>64</a><span class="doccomment">/// Env variable controlling the dispatch gate. Treated as ON
+<a href=#65 id=65 data-nosnippet>65</a>/// when set to `"1"` or case-insensitive `"true"`; anything else
+<a href=#66 id=66 data-nosnippet>66</a>/// (unset, `"0"`, `"false"`, empty string, …) means OFF.
+<a href=#67 id=67 data-nosnippet>67</a></span><span class="kw">pub const </span>ENV_USE_WCOJ_TRIANGLE_U32: <span class="kw-2">&amp;</span>str = <span class="string">"XLOG_USE_WCOJ_TRIANGLE_U32"</span>;
+<a href=#68 id=68 data-nosnippet>68</a>
+<a href=#69 id=69 data-nosnippet>69</a><span class="doccomment">/// Env-driven entry. Reads `XLOG_USE_WCOJ_TRIANGLE_U32` and
+<a href=#70 id=70 data-nosnippet>70</a>/// delegates to [`try_wcoj_triangle_u32_dispatch_with_gate`].
+<a href=#71 id=71 data-nosnippet>71</a>///
+<a href=#72 id=72 data-nosnippet>72</a>/// Tests should prefer [`try_wcoj_triangle_u32_dispatch_with_gate`]
+<a href=#73 id=73 data-nosnippet>73</a>/// to avoid races on the process-global env var; the env-driven
+<a href=#74 id=74 data-nosnippet>74</a>/// form exists for production callers that want to opt in via
+<a href=#75 id=75 data-nosnippet>75</a>/// configuration alone.
+<a href=#76 id=76 data-nosnippet>76</a></span><span class="kw">pub fn </span>try_wcoj_triangle_u32_dispatch(
+<a href=#77 id=77 data-nosnippet>77</a>    rule: <span class="kw-2">&amp;</span>Rule,
+<a href=#78 id=78 data-nosnippet>78</a>    inputs: <span class="kw-2">&amp;</span>BTreeMap&lt;String, CudaBuffer&gt;,
+<a href=#79 id=79 data-nosnippet>79</a>    provider: <span class="kw-2">&amp;</span>CudaKernelProvider,
+<a href=#80 id=80 data-nosnippet>80</a>    launch_stream: StreamId,
+<a href=#81 id=81 data-nosnippet>81</a>) -&gt; <span class="prelude-ty">Result</span>&lt;<span class="prelude-ty">Option</span>&lt;CudaBuffer&gt;&gt; {
+<a href=#82 id=82 data-nosnippet>82</a>    <span class="kw">let </span>gate = std::env::var(ENV_USE_WCOJ_TRIANGLE_U32)
+<a href=#83 id=83 data-nosnippet>83</a>        .map(|v| v == <span class="string">"1" </span>|| v.eq_ignore_ascii_case(<span class="string">"true"</span>))
+<a href=#84 id=84 data-nosnippet>84</a>        .unwrap_or(<span class="bool-val">false</span>);
+<a href=#85 id=85 data-nosnippet>85</a>    try_wcoj_triangle_u32_dispatch_with_gate(gate, rule, inputs, provider, launch_stream)
+<a href=#86 id=86 data-nosnippet>86</a>}
+<a href=#87 id=87 data-nosnippet>87</a>
+<a href=#88 id=88 data-nosnippet>88</a><span class="doccomment">/// Test-friendly form that takes the gate as an explicit boolean.
+<a href=#89 id=89 data-nosnippet>89</a>/// Production callers use [`try_wcoj_triangle_u32_dispatch`] which
+<a href=#90 id=90 data-nosnippet>90</a>/// reads the env var.
+<a href=#91 id=91 data-nosnippet>91</a></span><span class="kw">pub fn </span>try_wcoj_triangle_u32_dispatch_with_gate(
+<a href=#92 id=92 data-nosnippet>92</a>    gate_enabled: bool,
+<a href=#93 id=93 data-nosnippet>93</a>    rule: <span class="kw-2">&amp;</span>Rule,
+<a href=#94 id=94 data-nosnippet>94</a>    inputs: <span class="kw-2">&amp;</span>BTreeMap&lt;String, CudaBuffer&gt;,
+<a href=#95 id=95 data-nosnippet>95</a>    provider: <span class="kw-2">&amp;</span>CudaKernelProvider,
+<a href=#96 id=96 data-nosnippet>96</a>    launch_stream: StreamId,
+<a href=#97 id=97 data-nosnippet>97</a>) -&gt; <span class="prelude-ty">Result</span>&lt;<span class="prelude-ty">Option</span>&lt;CudaBuffer&gt;&gt; {
+<a href=#98 id=98 data-nosnippet>98</a>    <span class="kw">if </span>!gate_enabled {
+<a href=#99 id=99 data-nosnippet>99</a>        <span class="kw">return </span><span class="prelude-val">Ok</span>(<span class="prelude-val">None</span>);
+<a href=#100 id=100 data-nosnippet>100</a>    }
+<a href=#101 id=101 data-nosnippet>101</a>    <span class="comment">// Match the triangle shape — silently bail on any mismatch.
+<a href=#102 id=102 data-nosnippet>102</a>    </span><span class="kw">let </span><span class="prelude-val">Some</span>(matched) = match_triangle_shape(rule, inputs) <span class="kw">else </span>{
+<a href=#103 id=103 data-nosnippet>103</a>        <span class="kw">return </span><span class="prelude-val">Ok</span>(<span class="prelude-val">None</span>);
+<a href=#104 id=104 data-nosnippet>104</a>    };
+<a href=#105 id=105 data-nosnippet>105</a>
+<a href=#106 id=106 data-nosnippet>106</a>    <span class="comment">// Run the planner on a synthetic store carrying the inputs'
+<a href=#107 id=107 data-nosnippet>107</a>    // schemas. plan_rule needs schemas (not rows) for typed
+<a href=#108 id=108 data-nosnippet>108</a>    // gating; rows are not consulted at the gate phase.
+<a href=#109 id=109 data-nosnippet>109</a>    </span><span class="kw">let </span><span class="kw-2">mut </span>plan_store: RefRelationStore = BTreeMap::new();
+<a href=#110 id=110 data-nosnippet>110</a>    <span class="kw">for </span>atom_match <span class="kw">in </span><span class="kw-2">&amp;</span>matched.atoms {
+<a href=#111 id=111 data-nosnippet>111</a>        <span class="comment">// Skip duplicates: the same predicate may legitimately
+<a href=#112 id=112 data-nosnippet>112</a>        // appear in multiple slots (e.g. all three atoms over a
+<a href=#113 id=113 data-nosnippet>113</a>        // single edge relation), and a BTreeMap insert collapses
+<a href=#114 id=114 data-nosnippet>114</a>        // them naturally. Schemas are guaranteed identical
+<a href=#115 id=115 data-nosnippet>115</a>        // because they all came from the same `inputs[name]`.
+<a href=#116 id=116 data-nosnippet>116</a>        </span>plan_store.insert(
+<a href=#117 id=117 data-nosnippet>117</a>            atom_match.predicate.clone(),
+<a href=#118 id=118 data-nosnippet>118</a>            schema_only_relation(<span class="kw-2">&amp;</span>inputs[<span class="kw-2">&amp;</span>atom_match.predicate]),
+<a href=#119 id=119 data-nosnippet>119</a>        );
+<a href=#120 id=120 data-nosnippet>120</a>    }
+<a href=#121 id=121 data-nosnippet>121</a>    <span class="kw">let </span>plan = plan_rule(rule, <span class="kw-2">&amp;</span>plan_store).ok();
+<a href=#122 id=122 data-nosnippet>122</a>    <span class="kw">match </span>plan {
+<a href=#123 id=123 data-nosnippet>123</a>        <span class="prelude-val">Some</span>(RulePlan::MultiwayCandidate { .. }) =&gt; {}
+<a href=#124 id=124 data-nosnippet>124</a>        <span class="kw">_ </span>=&gt; <span class="kw">return </span><span class="prelude-val">Ok</span>(<span class="prelude-val">None</span>),
+<a href=#125 id=125 data-nosnippet>125</a>    }
+<a href=#126 id=126 data-nosnippet>126</a>
+<a href=#127 id=127 data-nosnippet>127</a>    <span class="comment">// Construct sorted+deduped layouts for each slot and run
+<a href=#128 id=128 data-nosnippet>128</a>    // the WCOJ triangle kernel. Branch by width: 4-byte
+<a href=#129 id=129 data-nosnippet>129</a>    // (U32 / Symbol) and 8-byte (U64) inputs go to parallel
+<a href=#130 id=130 data-nosnippet>130</a>    // provider entries. Mixed-width triangles never reach this
+<a href=#131 id=131 data-nosnippet>131</a>    // point — `match_triangle_shape` requires all three slots
+<a href=#132 id=132 data-nosnippet>132</a>    // to share a width.
+<a href=#133 id=133 data-nosnippet>133</a>    </span><span class="kw">let </span>result = <span class="kw">match </span>matched.width {
+<a href=#134 id=134 data-nosnippet>134</a>        WcojKeyWidth::FourByte =&gt; {
+<a href=#135 id=135 data-nosnippet>135</a>            <span class="kw">let </span>buf_xy = provider.wcoj_layout_u32_recorded(matched.e_xy, launch_stream)<span class="question-mark">?</span>;
+<a href=#136 id=136 data-nosnippet>136</a>            <span class="kw">let </span>buf_yz = provider.wcoj_layout_u32_recorded(matched.e_yz, launch_stream)<span class="question-mark">?</span>;
+<a href=#137 id=137 data-nosnippet>137</a>            <span class="kw">let </span>buf_xz = provider.wcoj_layout_u32_recorded(matched.e_xz, launch_stream)<span class="question-mark">?</span>;
+<a href=#138 id=138 data-nosnippet>138</a>            provider.wcoj_triangle_u32_recorded(<span class="kw-2">&amp;</span>buf_xy, <span class="kw-2">&amp;</span>buf_yz, <span class="kw-2">&amp;</span>buf_xz, launch_stream)<span class="question-mark">?
+<a href=#139 id=139 data-nosnippet>139</a>        </span>}
+<a href=#140 id=140 data-nosnippet>140</a>        WcojKeyWidth::EightByte =&gt; {
+<a href=#141 id=141 data-nosnippet>141</a>            <span class="kw">let </span>buf_xy = provider.wcoj_layout_u64_recorded(matched.e_xy, launch_stream)<span class="question-mark">?</span>;
+<a href=#142 id=142 data-nosnippet>142</a>            <span class="kw">let </span>buf_yz = provider.wcoj_layout_u64_recorded(matched.e_yz, launch_stream)<span class="question-mark">?</span>;
+<a href=#143 id=143 data-nosnippet>143</a>            <span class="kw">let </span>buf_xz = provider.wcoj_layout_u64_recorded(matched.e_xz, launch_stream)<span class="question-mark">?</span>;
+<a href=#144 id=144 data-nosnippet>144</a>            provider.wcoj_triangle_u64_recorded(<span class="kw-2">&amp;</span>buf_xy, <span class="kw-2">&amp;</span>buf_yz, <span class="kw-2">&amp;</span>buf_xz, launch_stream)<span class="question-mark">?
+<a href=#145 id=145 data-nosnippet>145</a>        </span>}
+<a href=#146 id=146 data-nosnippet>146</a>    };
+<a href=#147 id=147 data-nosnippet>147</a>    <span class="prelude-val">Ok</span>(<span class="prelude-val">Some</span>(result))
+<a href=#148 id=148 data-nosnippet>148</a>}
+<a href=#149 id=149 data-nosnippet>149</a>
+<a href=#150 id=150 data-nosnippet>150</a><span class="doccomment">/// Matched atom slots after pattern recognition. Each `&amp;CudaBuffer`
+<a href=#151 id=151 data-nosnippet>151</a>/// borrows from the caller's `inputs` map. `width` is the key
+<a href=#152 id=152 data-nosnippet>152</a>/// width shared by all three slots (mixed-width triangles never
+<a href=#153 id=153 data-nosnippet>153</a>/// reach this struct — see `match_triangle_shape`).
+<a href=#154 id=154 data-nosnippet>154</a></span><span class="kw">struct </span>MatchedAtoms&lt;<span class="lifetime">'a</span>&gt; {
+<a href=#155 id=155 data-nosnippet>155</a>    atoms: Vec&lt;MatchedAtom&gt;,
+<a href=#156 id=156 data-nosnippet>156</a>    e_xy: <span class="kw-2">&amp;</span><span class="lifetime">'a </span>CudaBuffer,
+<a href=#157 id=157 data-nosnippet>157</a>    e_yz: <span class="kw-2">&amp;</span><span class="lifetime">'a </span>CudaBuffer,
+<a href=#158 id=158 data-nosnippet>158</a>    e_xz: <span class="kw-2">&amp;</span><span class="lifetime">'a </span>CudaBuffer,
+<a href=#159 id=159 data-nosnippet>159</a>    width: WcojKeyWidth,
+<a href=#160 id=160 data-nosnippet>160</a>}
+<a href=#161 id=161 data-nosnippet>161</a>
+<a href=#162 id=162 data-nosnippet>162</a><span class="kw">struct </span>MatchedAtom {
+<a href=#163 id=163 data-nosnippet>163</a>    predicate: String,
+<a href=#164 id=164 data-nosnippet>164</a>}
+<a href=#165 id=165 data-nosnippet>165</a>
+<a href=#166 id=166 data-nosnippet>166</a><span class="doccomment">/// Physical key width for a WCOJ-eligible binary relation.
+<a href=#167 id=167 data-nosnippet>167</a>/// `FourByte` covers `U32` and `Symbol` (bit-identical layout);
+<a href=#168 id=168 data-nosnippet>168</a>/// `EightByte` covers `U64`. Other scalar types are not
+<a href=#169 id=169 data-nosnippet>169</a>/// WCOJ-eligible at this dispatch level (the planner upstream
+<a href=#170 id=170 data-nosnippet>170</a>/// is the source of truth for cross-relation type compatibility;
+<a href=#171 id=171 data-nosnippet>171</a>/// `analyze_typed` rejects them before we get here).
+<a href=#172 id=172 data-nosnippet>172</a></span><span class="attr">#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+<a href=#173 id=173 data-nosnippet>173</a></span><span class="kw">enum </span>WcojKeyWidth {
+<a href=#174 id=174 data-nosnippet>174</a>    FourByte,
+<a href=#175 id=175 data-nosnippet>175</a>    EightByte,
+<a href=#176 id=176 data-nosnippet>176</a>}
+<a href=#177 id=177 data-nosnippet>177</a>
+<a href=#178 id=178 data-nosnippet>178</a><span class="doccomment">/// Attempt to match the rule + inputs against the v1 triangle
+<a href=#179 id=179 data-nosnippet>179</a>/// shape. Returns `Some(...)` if every check passes; `None`
+<a href=#180 id=180 data-nosnippet>180</a>/// otherwise. All checks are pure validation — no buffer
+<a href=#181 id=181 data-nosnippet>181</a>/// modification, no kernel launches, no errors.
+<a href=#182 id=182 data-nosnippet>182</a></span><span class="kw">fn </span>match_triangle_shape&lt;<span class="lifetime">'a</span>&gt;(
+<a href=#183 id=183 data-nosnippet>183</a>    rule: <span class="kw-2">&amp;</span>Rule,
+<a href=#184 id=184 data-nosnippet>184</a>    inputs: <span class="kw-2">&amp;</span><span class="lifetime">'a </span>BTreeMap&lt;String, CudaBuffer&gt;,
+<a href=#185 id=185 data-nosnippet>185</a>) -&gt; <span class="prelude-ty">Option</span>&lt;MatchedAtoms&lt;<span class="lifetime">'a</span>&gt;&gt; {
+<a href=#186 id=186 data-nosnippet>186</a>    <span class="comment">// Head must have exactly 3 distinct variable terms.
+<a href=#187 id=187 data-nosnippet>187</a>    </span><span class="kw">let </span>head_vars = head_vars_or_none(rule)<span class="question-mark">?</span>;
+<a href=#188 id=188 data-nosnippet>188</a>
+<a href=#189 id=189 data-nosnippet>189</a>    <span class="comment">// Body must have exactly 3 BodyLiteral::Positive atoms; no
+<a href=#190 id=190 data-nosnippet>190</a>    // negation, no comparison filters, no is-expr.
+<a href=#191 id=191 data-nosnippet>191</a>    </span><span class="kw">if </span>rule.body.len() != <span class="number">3 </span>{
+<a href=#192 id=192 data-nosnippet>192</a>        <span class="kw">return </span><span class="prelude-val">None</span>;
+<a href=#193 id=193 data-nosnippet>193</a>    }
+<a href=#194 id=194 data-nosnippet>194</a>    <span class="kw">let </span><span class="kw-2">mut </span>positive_atoms = Vec::with_capacity(<span class="number">3</span>);
+<a href=#195 id=195 data-nosnippet>195</a>    <span class="kw">for </span>literal <span class="kw">in </span><span class="kw-2">&amp;</span>rule.body {
+<a href=#196 id=196 data-nosnippet>196</a>        <span class="kw">match </span>literal {
+<a href=#197 id=197 data-nosnippet>197</a>            BodyLiteral::Positive(atom) =&gt; positive_atoms.push(atom),
+<a href=#198 id=198 data-nosnippet>198</a>            <span class="kw">_ </span>=&gt; <span class="kw">return </span><span class="prelude-val">None</span>,
+<a href=#199 id=199 data-nosnippet>199</a>        }
+<a href=#200 id=200 data-nosnippet>200</a>    }
+<a href=#201 id=201 data-nosnippet>201</a>
+<a href=#202 id=202 data-nosnippet>202</a>    <span class="comment">// Head predicate must NOT appear in the body — rules out
+<a href=#203 id=203 data-nosnippet>203</a>    // direct recursion. Indirect recursion through SCC structure
+<a href=#204 id=204 data-nosnippet>204</a>    // is also unsupported in this slice; since we only see one
+<a href=#205 id=205 data-nosnippet>205</a>    // rule at a time, "head predicate equals any body
+<a href=#206 id=206 data-nosnippet>206</a>    // predicate" is the conservative check.
+<a href=#207 id=207 data-nosnippet>207</a>    </span><span class="kw">let </span>head_predicate = <span class="kw-2">&amp;</span>rule.head.predicate;
+<a href=#208 id=208 data-nosnippet>208</a>    <span class="kw">for </span>atom <span class="kw">in </span><span class="kw-2">&amp;</span>positive_atoms {
+<a href=#209 id=209 data-nosnippet>209</a>        <span class="kw">if </span><span class="kw-2">&amp;</span>atom.predicate == head_predicate {
+<a href=#210 id=210 data-nosnippet>210</a>            <span class="kw">return </span><span class="prelude-val">None</span>;
+<a href=#211 id=211 data-nosnippet>211</a>        }
+<a href=#212 id=212 data-nosnippet>212</a>    }
+<a href=#213 id=213 data-nosnippet>213</a>
+<a href=#214 id=214 data-nosnippet>214</a>    <span class="comment">// Each atom must be 2-arity, with both args being head
+<a href=#215 id=215 data-nosnippet>215</a>    // variables (not constants, anonymous, or non-head vars).
+<a href=#216 id=216 data-nosnippet>216</a>    // Collect (head_position_0, head_position_1) per atom; the
+<a href=#217 id=217 data-nosnippet>217</a>    // pair must be in ascending order — i.e. atom args are in
+<a href=#218 id=218 data-nosnippet>218</a>    // head-position order, not reversed.
+<a href=#219 id=219 data-nosnippet>219</a>    //
+<a href=#220 id=220 data-nosnippet>220</a>    // After this collection, the three atoms together must
+<a href=#221 id=221 data-nosnippet>221</a>    // cover EXACTLY the three pairs {0,1}, {1,2}, {0,2} (the
+<a href=#222 id=222 data-nosnippet>222</a>    // triangle's three edges over head positions).
+<a href=#223 id=223 data-nosnippet>223</a>    </span><span class="kw">let </span><span class="kw-2">mut </span>atom_specs: Vec&lt;(usize, usize, <span class="kw-2">&amp;</span>xlog_logic::ast::Atom)&gt; = Vec::with_capacity(<span class="number">3</span>);
+<a href=#224 id=224 data-nosnippet>224</a>    <span class="kw">for </span>atom <span class="kw">in </span><span class="kw-2">&amp;</span>positive_atoms {
+<a href=#225 id=225 data-nosnippet>225</a>        <span class="kw">if </span>atom.terms.len() != <span class="number">2 </span>{
+<a href=#226 id=226 data-nosnippet>226</a>            <span class="kw">return </span><span class="prelude-val">None</span>;
+<a href=#227 id=227 data-nosnippet>227</a>        }
+<a href=#228 id=228 data-nosnippet>228</a>        <span class="kw">let </span>pos0 = head_pos_of_var(<span class="kw-2">&amp;</span>head_vars, <span class="kw-2">&amp;</span>atom.terms[<span class="number">0</span>])<span class="question-mark">?</span>;
+<a href=#229 id=229 data-nosnippet>229</a>        <span class="kw">let </span>pos1 = head_pos_of_var(<span class="kw-2">&amp;</span>head_vars, <span class="kw-2">&amp;</span>atom.terms[<span class="number">1</span>])<span class="question-mark">?</span>;
+<a href=#230 id=230 data-nosnippet>230</a>        <span class="kw">if </span>pos0 &gt;= pos1 {
+<a href=#231 id=231 data-nosnippet>231</a>            <span class="comment">// Same variable twice (`e(X, X)`) or reversed
+<a href=#232 id=232 data-nosnippet>232</a>            // axis (`e(Y, X)`). Both are out-of-scope for v1
+<a href=#233 id=233 data-nosnippet>233</a>            // dispatch.
+<a href=#234 id=234 data-nosnippet>234</a>            </span><span class="kw">return </span><span class="prelude-val">None</span>;
+<a href=#235 id=235 data-nosnippet>235</a>        }
+<a href=#236 id=236 data-nosnippet>236</a>        atom_specs.push((pos0, pos1, atom));
+<a href=#237 id=237 data-nosnippet>237</a>    }
+<a href=#238 id=238 data-nosnippet>238</a>    <span class="kw">let </span>pair_set: BTreeSet&lt;(usize, usize)&gt; = atom_specs.iter().map(|(a, b, <span class="kw">_</span>)| (<span class="kw-2">*</span>a, <span class="kw-2">*</span>b)).collect();
+<a href=#239 id=239 data-nosnippet>239</a>    <span class="kw">let </span><span class="kw-2">mut </span>expected: BTreeSet&lt;(usize, usize)&gt; = BTreeSet::new();
+<a href=#240 id=240 data-nosnippet>240</a>    expected.insert((<span class="number">0</span>, <span class="number">1</span>));
+<a href=#241 id=241 data-nosnippet>241</a>    expected.insert((<span class="number">1</span>, <span class="number">2</span>));
+<a href=#242 id=242 data-nosnippet>242</a>    expected.insert((<span class="number">0</span>, <span class="number">2</span>));
+<a href=#243 id=243 data-nosnippet>243</a>    <span class="kw">if </span>pair_set != expected {
+<a href=#244 id=244 data-nosnippet>244</a>        <span class="kw">return </span><span class="prelude-val">None</span>;
+<a href=#245 id=245 data-nosnippet>245</a>    }
+<a href=#246 id=246 data-nosnippet>246</a>
+<a href=#247 id=247 data-nosnippet>247</a>    <span class="comment">// Look up each input buffer by predicate name. Validate
+<a href=#248 id=248 data-nosnippet>248</a>    // every buffer is a 2-column WCOJ-eligible relation
+<a href=#249 id=249 data-nosnippet>249</a>    // (4-byte U32/Symbol or 8-byte U64) AND that all three
+<a href=#250 id=250 data-nosnippet>250</a>    // slots share the same width — mixed-width triangles fall
+<a href=#251 id=251 data-nosnippet>251</a>    // back here so the binary-join chain handles them.
+<a href=#252 id=252 data-nosnippet>252</a>    </span><span class="kw">let </span><span class="kw-2">mut </span>e_xy: <span class="prelude-ty">Option</span>&lt;<span class="kw-2">&amp;</span>CudaBuffer&gt; = <span class="prelude-val">None</span>;
+<a href=#253 id=253 data-nosnippet>253</a>    <span class="kw">let </span><span class="kw-2">mut </span>e_yz: <span class="prelude-ty">Option</span>&lt;<span class="kw-2">&amp;</span>CudaBuffer&gt; = <span class="prelude-val">None</span>;
+<a href=#254 id=254 data-nosnippet>254</a>    <span class="kw">let </span><span class="kw-2">mut </span>e_xz: <span class="prelude-ty">Option</span>&lt;<span class="kw-2">&amp;</span>CudaBuffer&gt; = <span class="prelude-val">None</span>;
+<a href=#255 id=255 data-nosnippet>255</a>    <span class="kw">let </span><span class="kw-2">mut </span>atoms_out: Vec&lt;MatchedAtom&gt; = Vec::with_capacity(<span class="number">3</span>);
+<a href=#256 id=256 data-nosnippet>256</a>    <span class="kw">let </span><span class="kw-2">mut </span>shared_width: <span class="prelude-ty">Option</span>&lt;WcojKeyWidth&gt; = <span class="prelude-val">None</span>;
+<a href=#257 id=257 data-nosnippet>257</a>    <span class="kw">for </span>(pos0, pos1, atom) <span class="kw">in </span><span class="kw-2">&amp;</span>atom_specs {
+<a href=#258 id=258 data-nosnippet>258</a>        <span class="kw">let </span>buf = inputs.get(<span class="kw-2">&amp;</span>atom.predicate)<span class="question-mark">?</span>;
+<a href=#259 id=259 data-nosnippet>259</a>        <span class="kw">let </span>w = classify_two_col_wcoj_width(buf)<span class="question-mark">?</span>;
+<a href=#260 id=260 data-nosnippet>260</a>        <span class="kw">match </span>shared_width {
+<a href=#261 id=261 data-nosnippet>261</a>            <span class="prelude-val">None </span>=&gt; shared_width = <span class="prelude-val">Some</span>(w),
+<a href=#262 id=262 data-nosnippet>262</a>            <span class="prelude-val">Some</span>(prev) <span class="kw">if </span>prev == w =&gt; {}
+<a href=#263 id=263 data-nosnippet>263</a>            <span class="prelude-val">Some</span>(<span class="kw">_</span>) =&gt; <span class="kw">return </span><span class="prelude-val">None</span>,
+<a href=#264 id=264 data-nosnippet>264</a>        }
+<a href=#265 id=265 data-nosnippet>265</a>        atoms_out.push(MatchedAtom {
+<a href=#266 id=266 data-nosnippet>266</a>            predicate: atom.predicate.clone(),
+<a href=#267 id=267 data-nosnippet>267</a>        });
+<a href=#268 id=268 data-nosnippet>268</a>        <span class="kw">match </span>(<span class="kw-2">*</span>pos0, <span class="kw-2">*</span>pos1) {
+<a href=#269 id=269 data-nosnippet>269</a>            (<span class="number">0</span>, <span class="number">1</span>) =&gt; e_xy = <span class="prelude-val">Some</span>(buf),
+<a href=#270 id=270 data-nosnippet>270</a>            (<span class="number">1</span>, <span class="number">2</span>) =&gt; e_yz = <span class="prelude-val">Some</span>(buf),
+<a href=#271 id=271 data-nosnippet>271</a>            (<span class="number">0</span>, <span class="number">2</span>) =&gt; e_xz = <span class="prelude-val">Some</span>(buf),
+<a href=#272 id=272 data-nosnippet>272</a>            <span class="kw">_ </span>=&gt; <span class="macro">unreachable!</span>(<span class="string">"pair_set check above guarantees these three"</span>),
+<a href=#273 id=273 data-nosnippet>273</a>        }
+<a href=#274 id=274 data-nosnippet>274</a>    }
+<a href=#275 id=275 data-nosnippet>275</a>    <span class="prelude-val">Some</span>(MatchedAtoms {
+<a href=#276 id=276 data-nosnippet>276</a>        atoms: atoms_out,
+<a href=#277 id=277 data-nosnippet>277</a>        e_xy: e_xy<span class="question-mark">?</span>,
+<a href=#278 id=278 data-nosnippet>278</a>        e_yz: e_yz<span class="question-mark">?</span>,
+<a href=#279 id=279 data-nosnippet>279</a>        e_xz: e_xz<span class="question-mark">?</span>,
+<a href=#280 id=280 data-nosnippet>280</a>        width: shared_width<span class="question-mark">?</span>,
+<a href=#281 id=281 data-nosnippet>281</a>    })
+<a href=#282 id=282 data-nosnippet>282</a>}
+<a href=#283 id=283 data-nosnippet>283</a>
+<a href=#284 id=284 data-nosnippet>284</a><span class="doccomment">/// Return the rule head's variable names if every head term is a
+<a href=#285 id=285 data-nosnippet>285</a>/// distinct `Term::Variable`; `None` otherwise.
+<a href=#286 id=286 data-nosnippet>286</a></span><span class="kw">fn </span>head_vars_or_none(rule: <span class="kw-2">&amp;</span>Rule) -&gt; <span class="prelude-ty">Option</span>&lt;Vec&lt;String&gt;&gt; {
+<a href=#287 id=287 data-nosnippet>287</a>    <span class="kw">if </span>rule.head.terms.len() != <span class="number">3 </span>{
+<a href=#288 id=288 data-nosnippet>288</a>        <span class="kw">return </span><span class="prelude-val">None</span>;
+<a href=#289 id=289 data-nosnippet>289</a>    }
+<a href=#290 id=290 data-nosnippet>290</a>    <span class="kw">let </span><span class="kw-2">mut </span>out = Vec::with_capacity(<span class="number">3</span>);
+<a href=#291 id=291 data-nosnippet>291</a>    <span class="kw">for </span>term <span class="kw">in </span><span class="kw-2">&amp;</span>rule.head.terms {
+<a href=#292 id=292 data-nosnippet>292</a>        <span class="kw">match </span>term {
+<a href=#293 id=293 data-nosnippet>293</a>            Term::Variable(name) =&gt; out.push(name.clone()),
+<a href=#294 id=294 data-nosnippet>294</a>            <span class="kw">_ </span>=&gt; <span class="kw">return </span><span class="prelude-val">None</span>,
+<a href=#295 id=295 data-nosnippet>295</a>        }
+<a href=#296 id=296 data-nosnippet>296</a>    }
+<a href=#297 id=297 data-nosnippet>297</a>    <span class="comment">// Distinctness.
+<a href=#298 id=298 data-nosnippet>298</a>    </span><span class="kw">let </span>unique: BTreeSet&lt;<span class="kw-2">&amp;</span>String&gt; = out.iter().collect();
+<a href=#299 id=299 data-nosnippet>299</a>    <span class="kw">if </span>unique.len() != <span class="number">3 </span>{
+<a href=#300 id=300 data-nosnippet>300</a>        <span class="kw">return </span><span class="prelude-val">None</span>;
+<a href=#301 id=301 data-nosnippet>301</a>    }
+<a href=#302 id=302 data-nosnippet>302</a>    <span class="prelude-val">Some</span>(out)
+<a href=#303 id=303 data-nosnippet>303</a>}
+<a href=#304 id=304 data-nosnippet>304</a>
+<a href=#305 id=305 data-nosnippet>305</a><span class="doccomment">/// Map an atom-arg term to its position in the head variable list
+<a href=#306 id=306 data-nosnippet>306</a>/// (0, 1, or 2). Returns `None` for anything that isn't a
+<a href=#307 id=307 data-nosnippet>307</a>/// head-list variable.
+<a href=#308 id=308 data-nosnippet>308</a></span><span class="kw">fn </span>head_pos_of_var(head_vars: <span class="kw-2">&amp;</span>[String], term: <span class="kw-2">&amp;</span>Term) -&gt; <span class="prelude-ty">Option</span>&lt;usize&gt; {
+<a href=#309 id=309 data-nosnippet>309</a>    <span class="kw">match </span>term {
+<a href=#310 id=310 data-nosnippet>310</a>        Term::Variable(name) =&gt; head_vars.iter().position(|v| v == name),
+<a href=#311 id=311 data-nosnippet>311</a>        <span class="kw">_ </span>=&gt; <span class="prelude-val">None</span>,
+<a href=#312 id=312 data-nosnippet>312</a>    }
+<a href=#313 id=313 data-nosnippet>313</a>}
+<a href=#314 id=314 data-nosnippet>314</a>
+<a href=#315 id=315 data-nosnippet>315</a><span class="doccomment">/// Classify a binary [`CudaBuffer`]'s key width for WCOJ
+<a href=#316 id=316 data-nosnippet>316</a>/// dispatch. Returns
+<a href=#317 id=317 data-nosnippet>317</a>///
+<a href=#318 id=318 data-nosnippet>318</a>/// * `Some(WcojKeyWidth::FourByte)` when both columns are
+<a href=#319 id=319 data-nosnippet>319</a>///   `U32` or `Symbol` (bit-identical 4-byte physical layout —
+<a href=#320 id=320 data-nosnippet>320</a>///   the WCOJ kernel reads them identically),
+<a href=#321 id=321 data-nosnippet>321</a>/// * `Some(WcojKeyWidth::EightByte)` when both columns are
+<a href=#322 id=322 data-nosnippet>322</a>///   `U64`,
+<a href=#323 id=323 data-nosnippet>323</a>/// * `None` for any other arity / type combination, including
+<a href=#324 id=324 data-nosnippet>324</a>///   mixed widths within a single buffer (e.g. one column U32
+<a href=#325 id=325 data-nosnippet>325</a>///   and the other U64).
+<a href=#326 id=326 data-nosnippet>326</a>///
+<a href=#327 id=327 data-nosnippet>327</a>/// Cross-relation type-compatibility (so a Symbol column never
+<a href=#328 id=328 data-nosnippet>328</a>/// joins with a U32 column with the same bit pattern, and a
+<a href=#329 id=329 data-nosnippet>329</a>/// U32 column never joins with a U64 column) is enforced by
+<a href=#330 id=330 data-nosnippet>330</a>/// the planner upstream via `xlog_logic::hypergraph::analyze_typed`;
+<a href=#331 id=331 data-nosnippet>331</a>/// the dispatch helper additionally requires width-uniformity
+<a href=#332 id=332 data-nosnippet>332</a>/// across the three slots in `match_triangle_shape`.
+<a href=#333 id=333 data-nosnippet>333</a></span><span class="kw">fn </span>classify_two_col_wcoj_width(buf: <span class="kw-2">&amp;</span>CudaBuffer) -&gt; <span class="prelude-ty">Option</span>&lt;WcojKeyWidth&gt; {
+<a href=#334 id=334 data-nosnippet>334</a>    <span class="kw">if </span>buf.arity() != <span class="number">2 </span>{
+<a href=#335 id=335 data-nosnippet>335</a>        <span class="kw">return </span><span class="prelude-val">None</span>;
+<a href=#336 id=336 data-nosnippet>336</a>    }
+<a href=#337 id=337 data-nosnippet>337</a>    <span class="kw">let </span>c0 = buf.schema.column_type(<span class="number">0</span>)<span class="question-mark">?</span>;
+<a href=#338 id=338 data-nosnippet>338</a>    <span class="kw">let </span>c1 = buf.schema.column_type(<span class="number">1</span>)<span class="question-mark">?</span>;
+<a href=#339 id=339 data-nosnippet>339</a>    <span class="kw">let </span>width0 = scalar_wcoj_width(c0)<span class="question-mark">?</span>;
+<a href=#340 id=340 data-nosnippet>340</a>    <span class="kw">let </span>width1 = scalar_wcoj_width(c1)<span class="question-mark">?</span>;
+<a href=#341 id=341 data-nosnippet>341</a>    <span class="kw">if </span>width0 != width1 {
+<a href=#342 id=342 data-nosnippet>342</a>        <span class="kw">return </span><span class="prelude-val">None</span>;
+<a href=#343 id=343 data-nosnippet>343</a>    }
+<a href=#344 id=344 data-nosnippet>344</a>    <span class="prelude-val">Some</span>(width0)
+<a href=#345 id=345 data-nosnippet>345</a>}
+<a href=#346 id=346 data-nosnippet>346</a>
+<a href=#347 id=347 data-nosnippet>347</a><span class="doccomment">/// Map a single [`ScalarType`] to its WCOJ key width, or `None`
+<a href=#348 id=348 data-nosnippet>348</a>/// if the type is not supported by any current WCOJ entry.
+<a href=#349 id=349 data-nosnippet>349</a></span><span class="kw">fn </span>scalar_wcoj_width(ty: ScalarType) -&gt; <span class="prelude-ty">Option</span>&lt;WcojKeyWidth&gt; {
+<a href=#350 id=350 data-nosnippet>350</a>    <span class="kw">match </span>ty {
+<a href=#351 id=351 data-nosnippet>351</a>        ScalarType::U32 | ScalarType::Symbol =&gt; <span class="prelude-val">Some</span>(WcojKeyWidth::FourByte),
+<a href=#352 id=352 data-nosnippet>352</a>        ScalarType::U64 =&gt; <span class="prelude-val">Some</span>(WcojKeyWidth::EightByte),
+<a href=#353 id=353 data-nosnippet>353</a>        <span class="kw">_ </span>=&gt; <span class="prelude-val">None</span>,
+<a href=#354 id=354 data-nosnippet>354</a>    }
+<a href=#355 id=355 data-nosnippet>355</a>}
+<a href=#356 id=356 data-nosnippet>356</a>
+<a href=#357 id=357 data-nosnippet>357</a><span class="doccomment">/// Build a synthetic schema-only [`RefRelation`] for the planner's
+<a href=#358 id=358 data-nosnippet>358</a>/// view. Rows are intentionally empty: `plan_rule` only consults
+<a href=#359 id=359 data-nosnippet>359</a>/// schemas for typed gating, never rows.
+<a href=#360 id=360 data-nosnippet>360</a></span><span class="kw">fn </span>schema_only_relation(buf: <span class="kw-2">&amp;</span>CudaBuffer) -&gt; RefRelation {
+<a href=#361 id=361 data-nosnippet>361</a>    <span class="kw">let </span>arity = buf.arity();
+<a href=#362 id=362 data-nosnippet>362</a>    <span class="kw">let </span>schema: Vec&lt;ScalarType&gt; = (<span class="number">0</span>..arity)
+<a href=#363 id=363 data-nosnippet>363</a>        .map(|i| buf.schema.column_type(i).unwrap_or(ScalarType::U32))
+<a href=#364 id=364 data-nosnippet>364</a>        .collect();
+<a href=#365 id=365 data-nosnippet>365</a>    RefRelation {
+<a href=#366 id=366 data-nosnippet>366</a>        schema,
+<a href=#367 id=367 data-nosnippet>367</a>        rows: Vec::&lt;Vec&lt;RefValue&gt;&gt;::new(),
+<a href=#368 id=368 data-nosnippet>368</a>    }
+<a href=#369 id=369 data-nosnippet>369</a>}
+</code></pre></div></section></main></body></html>

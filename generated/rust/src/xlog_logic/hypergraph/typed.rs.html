@@ -1,0 +1,460 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Source of the Rust file `crates/xlog-logic/src/hypergraph/typed.rs`."><title>typed.rs - source</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-17e0aaed.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="xlog_logic" data-themes="" data-resource-suffix="" data-rustdoc-version="1.97.1 (8bab26f4f 2026-07-14)" data-channel="1.97.1" data-search-js="search-fd9372ac.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../static.files/storage-41dd4d93.js"></script><script defer src="../../../static.files/src-script-813739b1.js"></script><script defer src="../../../src-files.js"></script><script defer src="../../../static.files/main-fcd733ba.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc src"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><nav class="sidebar"><div class="src-sidebar-title"><h2>Files</h2></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><h1><div class="sub-heading">xlog_logic/hypergraph/</div>typed.rs</h1><rustdoc-toolbar></rustdoc-toolbar></div><div class="example-wrap digits-3"><pre class="rust"><code><a href=#1 id=1 data-nosnippet>1</a><span class="doccomment">//! Typed oracle gate.
+<a href=#2 id=2 data-nosnippet>2</a>//!
+<a href=#3 id=3 data-nosnippet>3</a>//! Wraps the structural [`super::evaluate_rule`],
+<a href=#4 id=4 data-nosnippet>4</a>//! [`super::evaluate_fixpoint`], and [`super::evaluate_scc_fixpoint`]
+<a href=#5 id=5 data-nosnippet>5</a>//! oracles with a relation-schema-driven type gate. For each rule:
+<a href=#6 id=6 data-nosnippet>6</a>//!
+<a href=#7 id=7 data-nosnippet>7</a>//! 1. Walk positive body atoms; for each `Term::Variable` whose
+<a href=#8 id=8 data-nosnippet>8</a>//!    predicate is present in `base_relations`, look up
+<a href=#9 id=9 data-nosnippet>9</a>//!    `relation.schema[position]` and unify into a per-rule
+<a href=#10 id=10 data-nosnippet>10</a>//!    `BTreeMap&lt;String, ScalarType&gt;`. Cross-atom disagreement is a
+<a href=#11 id=11 data-nosnippet>11</a>//!    [`RefEvalError::ConflictingVariableType`].
+<a href=#12 id=12 data-nosnippet>12</a>//! 2. Run [`super::analyze_typed`] with that map. Any
+<a href=#13 id=13 data-nosnippet>13</a>//!    [`Boundary::UnsupportedKeyType`](super::Boundary) for a
+<a href=#14 id=14 data-nosnippet>14</a>//!    join-key vertex becomes an [`RefEvalError::Ineligible`].
+<a href=#15 id=15 data-nosnippet>15</a>//! 3. Delegate to the structural evaluator.
+<a href=#16 id=16 data-nosnippet>16</a>//!
+<a href=#17 id=17 data-nosnippet>17</a>//! ## Locked policy: unknowable-after-inference ≠ unsupported
+<a href=#18 id=18 data-nosnippet>18</a>//!
+<a href=#19 id=19 data-nosnippet>19</a>//! A "missing vertex type" means *not derivable from base relation
+<a href=#20 id=20 data-nosnippet>20</a>//! schemas* AND *not derivable from PR 8 transitive SCC type
+<a href=#21 id=21 data-nosnippet>21</a>//! inference*, **not** "supported." The typed gate rejects only
+<a href=#22 id=22 data-nosnippet>22</a>//! known-unsupported join-key types.
+<a href=#23 id=23 data-nosnippet>23</a>//!
+<a href=#24 id=24 data-nosnippet>24</a>//! For the **single-rule** entry point ([`evaluate_rule_typed`]),
+<a href=#25 id=25 data-nosnippet>25</a>//! types come from `base_relations` only — there is no group
+<a href=#26 id=26 data-nosnippet>26</a>//! context for inference. A self-referencing or recursive rule
+<a href=#27 id=27 data-nosnippet>27</a>//! used through this path therefore retains the original
+<a href=#28 id=28 data-nosnippet>28</a>//! "unknown ≠ unsupported" behavior on its recursive body atoms;
+<a href=#29 id=29 data-nosnippet>29</a>//! callers needing inference-aware typing should drive
+<a href=#30 id=30 data-nosnippet>30</a>//! [`evaluate_fixpoint_typed`] or [`evaluate_scc_fixpoint_typed`].
+<a href=#31 id=31 data-nosnippet>31</a>//!
+<a href=#32 id=32 data-nosnippet>32</a>//! For the **group-aware** entry points ([`evaluate_fixpoint_typed`],
+<a href=#33 id=33 data-nosnippet>33</a>//! [`evaluate_scc_fixpoint_typed`]), PR 8 inference runs at entry
+<a href=#34 id=34 data-nosnippet>34</a>//! and feeds inferred SCC predicate schemas alongside
+<a href=#35 id=35 data-nosnippet>35</a>//! `base_relations` into per-rule type derivation. Cyclic-only
+<a href=#36 id=36 data-nosnippet>36</a>//! predicates (no base anchor anywhere in the rule graph) produce
+<a href=#37 id=37 data-nosnippet>37</a>//! all-`None` inferred schemas and pass the gate; this is the
+<a href=#38 id=38 data-nosnippet>38</a>//! narrowed policy now locked by
+<a href=#39 id=39 data-nosnippet>39</a>//! `cyclic_only_predicate_still_passes_typed_gate_locked_policy`.
+<a href=#40 id=40 data-nosnippet>40</a>//!
+<a href=#41 id=41 data-nosnippet>41</a>//! ## Why a separate module
+<a href=#42 id=42 data-nosnippet>42</a>//!
+<a href=#43 id=43 data-nosnippet>43</a>//! The structural evaluators (PR 2/3/4) take no type map. Wiring
+<a href=#44 id=44 data-nosnippet>44</a>//! type derivation into each evaluator's signature would either
+<a href=#45 id=45 data-nosnippet>45</a>//! (a) force callers to pre-compute the map even when they want
+<a href=#46 id=46 data-nosnippet>46</a>//! the structural-only behavior or (b) introduce a parallel
+<a href=#47 id=47 data-nosnippet>47</a>//! "with-types" code path inside each evaluator. Keeping the gate
+<a href=#48 id=48 data-nosnippet>48</a>//! as a thin orchestration layer above the existing oracles
+<a href=#49 id=49 data-nosnippet>49</a>//! preserves the structural API and makes the typed contract
+<a href=#50 id=50 data-nosnippet>50</a>//! testable in one place.
+<a href=#51 id=51 data-nosnippet>51</a>
+<a href=#52 id=52 data-nosnippet>52</a></span><span class="kw">use </span><span class="kw">super</span>::inference::{
+<a href=#53 id=53 data-nosnippet>53</a>    derive_vertex_types_with_inference, infer_scc_predicate_schemas, InferenceError,
+<a href=#54 id=54 data-nosnippet>54</a>    InferredSchemas,
+<a href=#55 id=55 data-nosnippet>55</a>};
+<a href=#56 id=56 data-nosnippet>56</a><span class="kw">use super</span>::{
+<a href=#57 id=57 data-nosnippet>57</a>    analyze_typed, evaluate_fixpoint, evaluate_rule, evaluate_scc_fixpoint, Eligibility,
+<a href=#58 id=58 data-nosnippet>58</a>    ExecutorContext, FixpointConfig, FixpointError, HypergraphRule, RefEvalError, RefRelation,
+<a href=#59 id=59 data-nosnippet>59</a>    RefRelationStore, RefValue, SccFixpointError, VariableOrder,
+<a href=#60 id=60 data-nosnippet>60</a>};
+<a href=#61 id=61 data-nosnippet>61</a><span class="kw">use </span><span class="kw">crate</span>::ast::{BodyLiteral, Rule, Term};
+<a href=#62 id=62 data-nosnippet>62</a><span class="kw">use </span>std::collections::BTreeMap;
+<a href=#63 id=63 data-nosnippet>63</a><span class="kw">use </span>xlog_core::ScalarType;
+<a href=#64 id=64 data-nosnippet>64</a>
+<a href=#65 id=65 data-nosnippet>65</a><span class="doccomment">/// Evaluate a single rule with relation-schema-driven type gating.
+<a href=#66 id=66 data-nosnippet>66</a>///
+<a href=#67 id=67 data-nosnippet>67</a>/// Equivalent to [`evaluate_rule`] except that the rule is first
+<a href=#68 id=68 data-nosnippet>68</a>/// run through the typed gate: vertex types are derived from
+<a href=#69 id=69 data-nosnippet>69</a>/// `relations` (see module-level docs), then [`analyze_typed`] is
+<a href=#70 id=70 data-nosnippet>70</a>/// run; any [`super::Boundary::UnsupportedKeyType`] surfaces as
+<a href=#71 id=71 data-nosnippet>71</a>/// [`RefEvalError::Ineligible`]. Cross-atom type conflicts surface
+<a href=#72 id=72 data-nosnippet>72</a>/// as [`RefEvalError::ConflictingVariableType`].
+<a href=#73 id=73 data-nosnippet>73</a>///
+<a href=#74 id=74 data-nosnippet>74</a>/// Structural boundaries (negation, aggregation, ground fact, key
+<a href=#75 id=75 data-nosnippet>75</a>/// limit) flow through `analyze_typed` unchanged.
+<a href=#76 id=76 data-nosnippet>76</a>///
+<a href=#77 id=77 data-nosnippet>77</a>/// ## Within-gate precedence: conflict before boundaries
+<a href=#78 id=78 data-nosnippet>78</a>///
+<a href=#79 id=79 data-nosnippet>79</a>/// Variable-type derivation runs before [`analyze_typed`]. A rule
+<a href=#80 id=80 data-nosnippet>80</a>/// that would fail *both* checks (e.g. a negated body **and** a
+<a href=#81 id=81 data-nosnippet>81</a>/// cross-atom type conflict on a positive atom) surfaces as
+<a href=#82 id=82 data-nosnippet>82</a>/// [`RefEvalError::ConflictingVariableType`], not as
+<a href=#83 id=83 data-nosnippet>83</a>/// [`RefEvalError::Ineligible`]. Type conflicts indicate the
+<a href=#84 id=84 data-nosnippet>84</a>/// fixture supplied a contradiction the analyzer cannot resolve;
+<a href=#85 id=85 data-nosnippet>85</a>/// reporting that first guides the caller to a fixable input.
+<a href=#86 id=86 data-nosnippet>86</a>/// Locked by `typed_gate_conflict_precedes_structural_boundary`.
+<a href=#87 id=87 data-nosnippet>87</a>///
+<a href=#88 id=88 data-nosnippet>88</a>/// On a successful gate, delegates to [`evaluate_rule`] for the
+<a href=#89 id=89 data-nosnippet>89</a>/// actual computation. The structural analyzer there re-checks
+<a href=#90 id=90 data-nosnippet>90</a>/// boundaries (cheap, defensive), and returns the same row set
+<a href=#91 id=91 data-nosnippet>91</a>/// that [`evaluate_rule`] would have returned for an Eligible rule.
+<a href=#92 id=92 data-nosnippet>92</a>///
+<a href=#93 id=93 data-nosnippet>93</a>/// ## SCC type inference is NOT engaged here
+<a href=#94 id=94 data-nosnippet>94</a>///
+<a href=#95 id=95 data-nosnippet>95</a>/// The PR 8 transitive type inference pass
+<a href=#96 id=96 data-nosnippet>96</a>/// ([`super::infer_scc_predicate_schemas`]) requires a rule
+<a href=#97 id=97 data-nosnippet>97</a>/// group as input. This single-rule entry point has no such
+<a href=#98 id=98 data-nosnippet>98</a>/// group, so a self-referencing rule's recursive body atom
+<a href=#99 id=99 data-nosnippet>99</a>/// contributes no type info. For that case, use
+<a href=#100 id=100 data-nosnippet>100</a>/// [`evaluate_fixpoint_typed`] (treating the rule as the target
+<a href=#101 id=101 data-nosnippet>101</a>/// of a single-rule fixpoint) or [`evaluate_scc_fixpoint_typed`].
+<a href=#102 id=102 data-nosnippet>102</a></span><span class="kw">pub fn </span>evaluate_rule_typed(
+<a href=#103 id=103 data-nosnippet>103</a>    rule: <span class="kw-2">&amp;</span>Rule,
+<a href=#104 id=104 data-nosnippet>104</a>    relations: <span class="kw-2">&amp;</span>RefRelationStore,
+<a href=#105 id=105 data-nosnippet>105</a>    order: <span class="kw-2">&amp;</span><span class="kw">dyn </span>VariableOrder,
+<a href=#106 id=106 data-nosnippet>106</a>) -&gt; <span class="prelude-ty">Result</span>&lt;Vec&lt;Vec&lt;RefValue&gt;&gt;, RefEvalError&gt; {
+<a href=#107 id=107 data-nosnippet>107</a>    typed_gate(rule, relations)<span class="question-mark">?</span>;
+<a href=#108 id=108 data-nosnippet>108</a>    evaluate_rule(rule, relations, order)
+<a href=#109 id=109 data-nosnippet>109</a>}
+<a href=#110 id=110 data-nosnippet>110</a>
+<a href=#111 id=111 data-nosnippet>111</a><span class="doccomment">/// Evaluate a recursive fixpoint with typed gating applied to every
+<a href=#112 id=112 data-nosnippet>112</a>/// rule against `base_relations` at function entry.
+<a href=#113 id=113 data-nosnippet>113</a>///
+<a href=#114 id=114 data-nosnippet>114</a>/// Failures from the gate surface as
+<a href=#115 id=115 data-nosnippet>115</a>/// [`FixpointError::RuleEval { rule_index, source }`] with `source`
+<a href=#116 id=116 data-nosnippet>116</a>/// being either [`RefEvalError::Ineligible`] or
+<a href=#117 id=117 data-nosnippet>117</a>/// [`RefEvalError::ConflictingVariableType`]. This matches the
+<a href=#118 id=118 data-nosnippet>118</a>/// per-rule error wrapping the structural [`evaluate_fixpoint`]
+<a href=#119 id=119 data-nosnippet>119</a>/// already uses, so callers do not need a separate error path for
+<a href=#120 id=120 data-nosnippet>120</a>/// the typed gate.
+<a href=#121 id=121 data-nosnippet>121</a>///
+<a href=#122 id=122 data-nosnippet>122</a>/// ## Transitive type inference
+<a href=#123 id=123 data-nosnippet>123</a>///
+<a href=#124 id=124 data-nosnippet>124</a>/// Treats `target_predicate` as a single-element rule group and
+<a href=#125 id=125 data-nosnippet>125</a>/// runs [`infer_scc_predicate_schemas`] before per-rule typed
+<a href=#126 id=126 data-nosnippet>126</a>/// gating. The inferred schema for `target_predicate` is consulted
+<a href=#127 id=127 data-nosnippet>127</a>/// alongside `base_relations` when typing variables in body atoms
+<a href=#128 id=128 data-nosnippet>128</a>/// — so a variable anchored only via the recursive
+<a href=#129 id=129 data-nosnippet>129</a>/// `target_predicate` body atom now receives the inferred type
+<a href=#130 id=130 data-nosnippet>130</a>/// rather than staying untyped. Inference conflicts surface as
+<a href=#131 id=131 data-nosnippet>131</a>/// [`FixpointError::RuleEval { source: ConflictingVariableType }`]
+<a href=#132 id=132 data-nosnippet>132</a>/// (within-rule conflict) or as the new
+<a href=#133 id=133 data-nosnippet>133</a>/// [`FixpointError::RuleEval`]-wrapped synthetic conflict from
+<a href=#134 id=134 data-nosnippet>134</a>/// inference (back-prop conflict; same `RefEvalError` shape).
+<a href=#135 id=135 data-nosnippet>135</a>///
+<a href=#136 id=136 data-nosnippet>136</a>/// ## Structural-error precedence
+<a href=#137 id=137 data-nosnippet>137</a>///
+<a href=#138 id=138 data-nosnippet>138</a>/// The typed gate is skipped for any rule whose head predicate
+<a href=#139 id=139 data-nosnippet>139</a>/// does not equal `target_predicate`. Such a rule would be
+<a href=#140 id=140 data-nosnippet>140</a>/// rejected by the structural [`evaluate_fixpoint`] with
+<a href=#141 id=141 data-nosnippet>141</a>/// [`FixpointError::RuleNotForTarget`] — running the typed gate
+<a href=#142 id=142 data-nosnippet>142</a>/// first would mask that more precise diagnostic. Other structural
+<a href=#143 id=143 data-nosnippet>143</a>/// entry-validation errors (target-in-base, max-iterations,
+<a href=#144 id=144 data-nosnippet>144</a>/// schema-indeterminable, head-arity mismatch) are surfaced by
+<a href=#145 id=145 data-nosnippet>145</a>/// the delegation at the end of this function and so naturally
+<a href=#146 id=146 data-nosnippet>146</a>/// take precedence over typed-gate failures on rules that survive
+<a href=#147 id=147 data-nosnippet>147</a>/// the per-rule head-match filter.
+<a href=#148 id=148 data-nosnippet>148</a></span><span class="attr">#[allow(clippy::result_large_err)]
+<a href=#149 id=149 data-nosnippet>149</a></span><span class="kw">pub fn </span>evaluate_fixpoint_typed(
+<a href=#150 id=150 data-nosnippet>150</a>    rules: <span class="kw-2">&amp;</span>[Rule],
+<a href=#151 id=151 data-nosnippet>151</a>    base_relations: <span class="kw-2">&amp;</span>RefRelationStore,
+<a href=#152 id=152 data-nosnippet>152</a>    target_predicate: <span class="kw-2">&amp;</span>str,
+<a href=#153 id=153 data-nosnippet>153</a>    order: <span class="kw-2">&amp;</span><span class="kw">dyn </span>VariableOrder,
+<a href=#154 id=154 data-nosnippet>154</a>    config: <span class="kw-2">&amp;</span>FixpointConfig,
+<a href=#155 id=155 data-nosnippet>155</a>) -&gt; <span class="prelude-ty">Result</span>&lt;RefRelation, FixpointError&gt; {
+<a href=#156 id=156 data-nosnippet>156</a>    <span class="comment">// ### Structural precedence pre-flight (PR 9 contract repair)
+<a href=#157 id=157 data-nosnippet>157</a>    //
+<a href=#158 id=158 data-nosnippet>158</a>    // Inference back-propagates from each rule's head into its
+<a href=#159 id=159 data-nosnippet>159</a>    // group key — if any rule in the input is misgrouped relative
+<a href=#160 id=160 data-nosnippet>160</a>    // to `target_predicate`, that back-propagation could surface
+<a href=#161 id=161 data-nosnippet>161</a>    // as `InferenceConflict` before structural validation has a
+<a href=#162 id=162 data-nosnippet>162</a>    // chance to emit `RuleNotForTarget`. Defer to the structural
+<a href=#163 id=163 data-nosnippet>163</a>    // evaluator BEFORE running inference, so the diagnostic order
+<a href=#164 id=164 data-nosnippet>164</a>    // matches PR 5/PR 6 expectations.
+<a href=#165 id=165 data-nosnippet>165</a>    </span><span class="kw">if </span>rules.iter().any(|r| r.head.predicate != target_predicate) {
+<a href=#166 id=166 data-nosnippet>166</a>        <span class="kw">return </span>evaluate_fixpoint(rules, base_relations, target_predicate, order, config);
+<a href=#167 id=167 data-nosnippet>167</a>    }
+<a href=#168 id=168 data-nosnippet>168</a>    <span class="comment">// Inference treats target_predicate as a single-element SCC
+<a href=#169 id=169 data-nosnippet>169</a>    // group so the same machinery covers single-target fixpoint
+<a href=#170 id=170 data-nosnippet>170</a>    // and full SCC fixpoint.
+<a href=#171 id=171 data-nosnippet>171</a>    </span><span class="kw">let </span><span class="kw-2">mut </span>group: BTreeMap&lt;String, Vec&lt;Rule&gt;&gt; = BTreeMap::new();
+<a href=#172 id=172 data-nosnippet>172</a>    group.insert(target_predicate.to_string(), rules.to_vec());
+<a href=#173 id=173 data-nosnippet>173</a>    <span class="kw">let </span>inferred = <span class="kw">match </span>infer_scc_predicate_schemas(<span class="kw-2">&amp;</span>group, base_relations) {
+<a href=#174 id=174 data-nosnippet>174</a>        <span class="prelude-val">Ok</span>(s) =&gt; s,
+<a href=#175 id=175 data-nosnippet>175</a>        <span class="prelude-val">Err</span>(InferenceError::ConflictingPredicateColumnType {
+<a href=#176 id=176 data-nosnippet>176</a>            predicate,
+<a href=#177 id=177 data-nosnippet>177</a>            column,
+<a href=#178 id=178 data-nosnippet>178</a>            first_rule_index,
+<a href=#179 id=179 data-nosnippet>179</a>            first_type,
+<a href=#180 id=180 data-nosnippet>180</a>            second_rule_index,
+<a href=#181 id=181 data-nosnippet>181</a>            second_type,
+<a href=#182 id=182 data-nosnippet>182</a>        }) =&gt; {
+<a href=#183 id=183 data-nosnippet>183</a>            <span class="comment">// Map the per-group rule index back to the input slice's
+<a href=#184 id=184 data-nosnippet>184</a>            // rule index so the caller's `rule_index` field stays
+<a href=#185 id=185 data-nosnippet>185</a>            // aligned with `rules`.
+<a href=#186 id=186 data-nosnippet>186</a>            </span><span class="kw">let </span>mapped_rule_index =
+<a href=#187 id=187 data-nosnippet>187</a>                nth_rule_index_with_head(rules, target_predicate, second_rule_index);
+<a href=#188 id=188 data-nosnippet>188</a>            <span class="kw">return </span><span class="prelude-val">Err</span>(FixpointError::RuleEval {
+<a href=#189 id=189 data-nosnippet>189</a>                rule_index: mapped_rule_index,
+<a href=#190 id=190 data-nosnippet>190</a>                source: RefEvalError::InferenceConflict {
+<a href=#191 id=191 data-nosnippet>191</a>                    predicate,
+<a href=#192 id=192 data-nosnippet>192</a>                    column,
+<a href=#193 id=193 data-nosnippet>193</a>                    first_rule_index,
+<a href=#194 id=194 data-nosnippet>194</a>                    first_type,
+<a href=#195 id=195 data-nosnippet>195</a>                    second_rule_index,
+<a href=#196 id=196 data-nosnippet>196</a>                    second_type,
+<a href=#197 id=197 data-nosnippet>197</a>                },
+<a href=#198 id=198 data-nosnippet>198</a>            });
+<a href=#199 id=199 data-nosnippet>199</a>        }
+<a href=#200 id=200 data-nosnippet>200</a>    };
+<a href=#201 id=201 data-nosnippet>201</a>    <span class="kw">for </span>(rule_index, rule) <span class="kw">in </span>rules.iter().enumerate() {
+<a href=#202 id=202 data-nosnippet>202</a>        <span class="comment">// Pre-flight has guaranteed every rule heads target_predicate.
+<a href=#203 id=203 data-nosnippet>203</a>        </span><span class="kw">if let </span><span class="prelude-val">Err</span>(source) = typed_gate_with_inference(rule, base_relations, <span class="kw-2">&amp;</span>inferred) {
+<a href=#204 id=204 data-nosnippet>204</a>            <span class="kw">return </span><span class="prelude-val">Err</span>(FixpointError::RuleEval { rule_index, source });
+<a href=#205 id=205 data-nosnippet>205</a>        }
+<a href=#206 id=206 data-nosnippet>206</a>    }
+<a href=#207 id=207 data-nosnippet>207</a>    evaluate_fixpoint(rules, base_relations, target_predicate, order, config)
+<a href=#208 id=208 data-nosnippet>208</a>}
+<a href=#209 id=209 data-nosnippet>209</a>
+<a href=#210 id=210 data-nosnippet>210</a><span class="doccomment">/// Evaluate a multi-predicate SCC fixpoint with typed gating
+<a href=#211 id=211 data-nosnippet>211</a>/// applied to every rule against `base_relations` at function
+<a href=#212 id=212 data-nosnippet>212</a>/// entry.
+<a href=#213 id=213 data-nosnippet>213</a>///
+<a href=#214 id=214 data-nosnippet>214</a>/// Failures from the gate surface as
+<a href=#215 id=215 data-nosnippet>215</a>/// [`SccFixpointError::RuleEval { predicate, rule_index, source }`]
+<a href=#216 id=216 data-nosnippet>216</a>/// where `source` is either [`RefEvalError::Ineligible`] or
+<a href=#217 id=217 data-nosnippet>217</a>/// [`RefEvalError::ConflictingVariableType`]. Same wrapping
+<a href=#218 id=218 data-nosnippet>218</a>/// pattern as [`evaluate_fixpoint_typed`].
+<a href=#219 id=219 data-nosnippet>219</a>///
+<a href=#220 id=220 data-nosnippet>220</a>/// ## Transitive type inference
+<a href=#221 id=221 data-nosnippet>221</a>///
+<a href=#222 id=222 data-nosnippet>222</a>/// Runs [`infer_scc_predicate_schemas`] over the full rule group
+<a href=#223 id=223 data-nosnippet>223</a>/// at entry. For each rule, the typed gate consults
+<a href=#224 id=224 data-nosnippet>224</a>/// `base_relations` AND the inferred schema of any SCC predicate
+<a href=#225 id=225 data-nosnippet>225</a>/// referenced in its body. Variables anchored only via SCC
+<a href=#226 id=226 data-nosnippet>226</a>/// predicates get their inferred types and flow through
+<a href=#227 id=227 data-nosnippet>227</a>/// [`analyze_typed`] like any other typed vertex. Cyclic-only
+<a href=#228 id=228 data-nosnippet>228</a>/// predicates (no base anchor anywhere) produce all-`None`
+<a href=#229 id=229 data-nosnippet>229</a>/// inferred schemas and pass the gate per the locked
+<a href=#230 id=230 data-nosnippet>230</a>/// "unknowable-after-inference ≠ unsupported" policy.
+<a href=#231 id=231 data-nosnippet>231</a>///
+<a href=#232 id=232 data-nosnippet>232</a>/// ## Structural-error precedence
+<a href=#233 id=233 data-nosnippet>233</a>///
+<a href=#234 id=234 data-nosnippet>234</a>/// The typed gate is skipped for any rule whose head predicate
+<a href=#235 id=235 data-nosnippet>235</a>/// does not equal its `BTreeMap` group key. Such a misgrouped
+<a href=#236 id=236 data-nosnippet>236</a>/// rule would be rejected by the structural
+<a href=#237 id=237 data-nosnippet>237</a>/// [`evaluate_scc_fixpoint`] with
+<a href=#238 id=238 data-nosnippet>238</a>/// [`SccFixpointError::RuleHeadPredicateMismatch`] — running the
+<a href=#239 id=239 data-nosnippet>239</a>/// typed gate first would mask that diagnostic. Other structural
+<a href=#240 id=240 data-nosnippet>240</a>/// entry-validation errors (predicate-in-base, max-iterations,
+<a href=#241 id=241 data-nosnippet>241</a>/// schema-indeterminable, head-arity mismatch) are surfaced by
+<a href=#242 id=242 data-nosnippet>242</a>/// the delegation at the end of this function.
+<a href=#243 id=243 data-nosnippet>243</a></span><span class="attr">#[allow(clippy::result_large_err)]
+<a href=#244 id=244 data-nosnippet>244</a></span><span class="kw">pub fn </span>evaluate_scc_fixpoint_typed(
+<a href=#245 id=245 data-nosnippet>245</a>    rules: <span class="kw-2">&amp;</span>BTreeMap&lt;String, Vec&lt;Rule&gt;&gt;,
+<a href=#246 id=246 data-nosnippet>246</a>    base_relations: <span class="kw-2">&amp;</span>RefRelationStore,
+<a href=#247 id=247 data-nosnippet>247</a>    order: <span class="kw-2">&amp;</span><span class="kw">dyn </span>VariableOrder,
+<a href=#248 id=248 data-nosnippet>248</a>    config: <span class="kw-2">&amp;</span>FixpointConfig,
+<a href=#249 id=249 data-nosnippet>249</a>) -&gt; <span class="prelude-ty">Result</span>&lt;RefRelationStore, SccFixpointError&gt; {
+<a href=#250 id=250 data-nosnippet>250</a>    <span class="comment">// ### Structural precedence pre-flight (PR 9 contract repair)
+<a href=#251 id=251 data-nosnippet>251</a>    //
+<a href=#252 id=252 data-nosnippet>252</a>    // Inference back-propagates from each rule's head into its
+<a href=#253 id=253 data-nosnippet>253</a>    // group key. If any rule is misgrouped (its head predicate
+<a href=#254 id=254 data-nosnippet>254</a>    // doesn't equal its `BTreeMap` group key), the back-prop
+<a href=#255 id=255 data-nosnippet>255</a>    // could surface as `InferenceConflict` before structural
+<a href=#256 id=256 data-nosnippet>256</a>    // validation has a chance to emit `RuleHeadPredicateMismatch`.
+<a href=#257 id=257 data-nosnippet>257</a>    // Defer to the structural evaluator BEFORE running inference,
+<a href=#258 id=258 data-nosnippet>258</a>    // so the diagnostic order matches PR 5/PR 6 expectations.
+<a href=#259 id=259 data-nosnippet>259</a>    </span><span class="kw">if </span>rules
+<a href=#260 id=260 data-nosnippet>260</a>        .iter()
+<a href=#261 id=261 data-nosnippet>261</a>        .any(|(predicate, group)| group.iter().any(|r| <span class="kw-2">&amp;</span>r.head.predicate != predicate))
+<a href=#262 id=262 data-nosnippet>262</a>    {
+<a href=#263 id=263 data-nosnippet>263</a>        <span class="kw">return </span>evaluate_scc_fixpoint(rules, base_relations, order, config);
+<a href=#264 id=264 data-nosnippet>264</a>    }
+<a href=#265 id=265 data-nosnippet>265</a>    <span class="kw">let </span>inferred = <span class="kw">match </span>infer_scc_predicate_schemas(rules, base_relations) {
+<a href=#266 id=266 data-nosnippet>266</a>        <span class="prelude-val">Ok</span>(s) =&gt; s,
+<a href=#267 id=267 data-nosnippet>267</a>        <span class="prelude-val">Err</span>(InferenceError::ConflictingPredicateColumnType {
+<a href=#268 id=268 data-nosnippet>268</a>            predicate,
+<a href=#269 id=269 data-nosnippet>269</a>            column,
+<a href=#270 id=270 data-nosnippet>270</a>            first_rule_index,
+<a href=#271 id=271 data-nosnippet>271</a>            first_type,
+<a href=#272 id=272 data-nosnippet>272</a>            second_rule_index,
+<a href=#273 id=273 data-nosnippet>273</a>            second_type,
+<a href=#274 id=274 data-nosnippet>274</a>        }) =&gt; {
+<a href=#275 id=275 data-nosnippet>275</a>            <span class="kw">return </span><span class="prelude-val">Err</span>(SccFixpointError::RuleEval {
+<a href=#276 id=276 data-nosnippet>276</a>                predicate: predicate.clone(),
+<a href=#277 id=277 data-nosnippet>277</a>                rule_index: second_rule_index,
+<a href=#278 id=278 data-nosnippet>278</a>                source: RefEvalError::InferenceConflict {
+<a href=#279 id=279 data-nosnippet>279</a>                    predicate,
+<a href=#280 id=280 data-nosnippet>280</a>                    column,
+<a href=#281 id=281 data-nosnippet>281</a>                    first_rule_index,
+<a href=#282 id=282 data-nosnippet>282</a>                    first_type,
+<a href=#283 id=283 data-nosnippet>283</a>                    second_rule_index,
+<a href=#284 id=284 data-nosnippet>284</a>                    second_type,
+<a href=#285 id=285 data-nosnippet>285</a>                },
+<a href=#286 id=286 data-nosnippet>286</a>            });
+<a href=#287 id=287 data-nosnippet>287</a>        }
+<a href=#288 id=288 data-nosnippet>288</a>    };
+<a href=#289 id=289 data-nosnippet>289</a>    <span class="kw">for </span>(predicate, group) <span class="kw">in </span>rules.iter() {
+<a href=#290 id=290 data-nosnippet>290</a>        <span class="kw">for </span>(rule_index, rule) <span class="kw">in </span>group.iter().enumerate() {
+<a href=#291 id=291 data-nosnippet>291</a>            <span class="comment">// Pre-flight has guaranteed every rule heads its group key.
+<a href=#292 id=292 data-nosnippet>292</a>            </span><span class="kw">if let </span><span class="prelude-val">Err</span>(source) = typed_gate_with_inference(rule, base_relations, <span class="kw-2">&amp;</span>inferred) {
+<a href=#293 id=293 data-nosnippet>293</a>                <span class="kw">return </span><span class="prelude-val">Err</span>(SccFixpointError::RuleEval {
+<a href=#294 id=294 data-nosnippet>294</a>                    predicate: predicate.clone(),
+<a href=#295 id=295 data-nosnippet>295</a>                    rule_index,
+<a href=#296 id=296 data-nosnippet>296</a>                    source,
+<a href=#297 id=297 data-nosnippet>297</a>                });
+<a href=#298 id=298 data-nosnippet>298</a>            }
+<a href=#299 id=299 data-nosnippet>299</a>        }
+<a href=#300 id=300 data-nosnippet>300</a>    }
+<a href=#301 id=301 data-nosnippet>301</a>    evaluate_scc_fixpoint(rules, base_relations, order, config)
+<a href=#302 id=302 data-nosnippet>302</a>}
+<a href=#303 id=303 data-nosnippet>303</a>
+<a href=#304 id=304 data-nosnippet>304</a><span class="doccomment">/// Shared typed-gate check that consults inferred SCC schemas
+<a href=#305 id=305 data-nosnippet>305</a>/// alongside `base_relations`. On the gate phase only — does NOT
+<a href=#306 id=306 data-nosnippet>306</a>/// evaluate the rule.
+<a href=#307 id=307 data-nosnippet>307</a>///
+<a href=#308 id=308 data-nosnippet>308</a>/// **Within-gate precedence.** Type conflicts (from
+<a href=#309 id=309 data-nosnippet>309</a>/// [`derive_vertex_types_with_inference`]) are reported before
+<a href=#310 id=310 data-nosnippet>310</a>/// [`super::Boundary`] verdicts (from [`analyze_typed`]); see the
+<a href=#311 id=311 data-nosnippet>311</a>/// `evaluate_rule_typed` doc comment for the rationale.
+<a href=#312 id=312 data-nosnippet>312</a></span><span class="kw">fn </span>typed_gate_with_inference(
+<a href=#313 id=313 data-nosnippet>313</a>    rule: <span class="kw-2">&amp;</span>Rule,
+<a href=#314 id=314 data-nosnippet>314</a>    relations: <span class="kw-2">&amp;</span>RefRelationStore,
+<a href=#315 id=315 data-nosnippet>315</a>    inferred: <span class="kw-2">&amp;</span>InferredSchemas,
+<a href=#316 id=316 data-nosnippet>316</a>) -&gt; <span class="prelude-ty">Result</span>&lt;(), RefEvalError&gt; {
+<a href=#317 id=317 data-nosnippet>317</a>    <span class="kw">let </span>vertex_types = derive_vertex_types_with_inference(rule, relations, inferred)<span class="question-mark">?</span>;
+<a href=#318 id=318 data-nosnippet>318</a>    <span class="kw">let </span>hg = HypergraphRule::from_rule(rule);
+<a href=#319 id=319 data-nosnippet>319</a>    <span class="kw">if let </span>Eligibility::Ineligible(bs) =
+<a href=#320 id=320 data-nosnippet>320</a>        analyze_typed(<span class="kw-2">&amp;</span>hg, <span class="kw-2">&amp;</span>vertex_types, ExecutorContext::HashFallback)
+<a href=#321 id=321 data-nosnippet>321</a>    {
+<a href=#322 id=322 data-nosnippet>322</a>        <span class="kw">return </span><span class="prelude-val">Err</span>(RefEvalError::Ineligible(bs));
+<a href=#323 id=323 data-nosnippet>323</a>    }
+<a href=#324 id=324 data-nosnippet>324</a>    <span class="prelude-val">Ok</span>(())
+<a href=#325 id=325 data-nosnippet>325</a>}
+<a href=#326 id=326 data-nosnippet>326</a>
+<a href=#327 id=327 data-nosnippet>327</a><span class="doccomment">/// Map an SCC-group rule index back to the position in a flat
+<a href=#328 id=328 data-nosnippet>328</a>/// `&amp;[Rule]` slice for [`evaluate_fixpoint_typed`]'s error
+<a href=#329 id=329 data-nosnippet>329</a>/// reporting. `n` is the index within the target predicate's
+<a href=#330 id=330 data-nosnippet>330</a>/// group; we walk the slice and return the position of the n-th
+<a href=#331 id=331 data-nosnippet>331</a>/// rule whose head matches `target`.
+<a href=#332 id=332 data-nosnippet>332</a></span><span class="kw">fn </span>nth_rule_index_with_head(rules: <span class="kw-2">&amp;</span>[Rule], target: <span class="kw-2">&amp;</span>str, n: usize) -&gt; usize {
+<a href=#333 id=333 data-nosnippet>333</a>    <span class="kw">let </span><span class="kw-2">mut </span>counter = <span class="number">0usize</span>;
+<a href=#334 id=334 data-nosnippet>334</a>    <span class="kw">for </span>(idx, rule) <span class="kw">in </span>rules.iter().enumerate() {
+<a href=#335 id=335 data-nosnippet>335</a>        <span class="kw">if </span>rule.head.predicate == target {
+<a href=#336 id=336 data-nosnippet>336</a>            <span class="kw">if </span>counter == n {
+<a href=#337 id=337 data-nosnippet>337</a>                <span class="kw">return </span>idx;
+<a href=#338 id=338 data-nosnippet>338</a>            }
+<a href=#339 id=339 data-nosnippet>339</a>            counter += <span class="number">1</span>;
+<a href=#340 id=340 data-nosnippet>340</a>        }
+<a href=#341 id=341 data-nosnippet>341</a>    }
+<a href=#342 id=342 data-nosnippet>342</a>    <span class="comment">// Fallback: if mapping fails (shouldn't, by construction),
+<a href=#343 id=343 data-nosnippet>343</a>    // return 0 so the error still surfaces. The structural
+<a href=#344 id=344 data-nosnippet>344</a>    // evaluator will catch any actual mismatch.
+<a href=#345 id=345 data-nosnippet>345</a>    </span><span class="number">0
+<a href=#346 id=346 data-nosnippet>346</a></span>}
+<a href=#347 id=347 data-nosnippet>347</a>
+<a href=#348 id=348 data-nosnippet>348</a><span class="doccomment">/// Shared typed-gate check (base-only path). Used by
+<a href=#349 id=349 data-nosnippet>349</a>/// [`evaluate_rule_typed`].
+<a href=#350 id=350 data-nosnippet>350</a>///
+<a href=#351 id=351 data-nosnippet>351</a>/// Returns `Ok(())` when the rule passes the typed gate (no
+<a href=#352 id=352 data-nosnippet>352</a>/// cross-atom type conflict, no unsupported join-key types known
+<a href=#353 id=353 data-nosnippet>353</a>/// from base relations). Returns `Err(RefEvalError::*)` otherwise.
+<a href=#354 id=354 data-nosnippet>354</a>///
+<a href=#355 id=355 data-nosnippet>355</a>/// **Within-gate precedence.** Type conflicts (from
+<a href=#356 id=356 data-nosnippet>356</a>/// [`derive_vertex_types`]) are reported before
+<a href=#357 id=357 data-nosnippet>357</a>/// [`super::Boundary`] verdicts (from [`analyze_typed`]); see the
+<a href=#358 id=358 data-nosnippet>358</a>/// `evaluate_rule_typed` doc comment for the rationale.
+<a href=#359 id=359 data-nosnippet>359</a></span><span class="kw">fn </span>typed_gate(rule: <span class="kw-2">&amp;</span>Rule, relations: <span class="kw-2">&amp;</span>RefRelationStore) -&gt; <span class="prelude-ty">Result</span>&lt;(), RefEvalError&gt; {
+<a href=#360 id=360 data-nosnippet>360</a>    <span class="kw">let </span>vertex_types = derive_vertex_types(rule, relations)<span class="question-mark">?</span>;
+<a href=#361 id=361 data-nosnippet>361</a>    <span class="kw">let </span>hg = HypergraphRule::from_rule(rule);
+<a href=#362 id=362 data-nosnippet>362</a>    <span class="kw">if let </span>Eligibility::Ineligible(bs) =
+<a href=#363 id=363 data-nosnippet>363</a>        analyze_typed(<span class="kw-2">&amp;</span>hg, <span class="kw-2">&amp;</span>vertex_types, ExecutorContext::HashFallback)
+<a href=#364 id=364 data-nosnippet>364</a>    {
+<a href=#365 id=365 data-nosnippet>365</a>        <span class="kw">return </span><span class="prelude-val">Err</span>(RefEvalError::Ineligible(bs));
+<a href=#366 id=366 data-nosnippet>366</a>    }
+<a href=#367 id=367 data-nosnippet>367</a>    <span class="prelude-val">Ok</span>(())
+<a href=#368 id=368 data-nosnippet>368</a>}
+<a href=#369 id=369 data-nosnippet>369</a>
+<a href=#370 id=370 data-nosnippet>370</a><span class="doccomment">/// Derive variable types from the schemas of body-atom relations.
+<a href=#371 id=371 data-nosnippet>371</a>///
+<a href=#372 id=372 data-nosnippet>372</a>/// Only [`BodyLiteral::Positive`] atoms whose predicate is present
+<a href=#373 id=373 data-nosnippet>373</a>/// in `relations` contribute. For each such atom, every
+<a href=#374 id=374 data-nosnippet>374</a>/// [`Term::Variable`] argument is unified with the relation's
+<a href=#375 id=375 data-nosnippet>375</a>/// `schema[position]`. Variables that appear only through
+<a href=#376 id=376 data-nosnippet>376</a>/// predicates absent from `relations` (or only through non-positive
+<a href=#377 id=377 data-nosnippet>377</a>/// literals) do not appear in the returned map; per the locked
+<a href=#378 id=378 data-nosnippet>378</a>/// policy, [`analyze_typed`] does not flag them.
+<a href=#379 id=379 data-nosnippet>379</a>///
+<a href=#380 id=380 data-nosnippet>380</a>/// On the first atom that types a given variable, the type is
+<a href=#381 id=381 data-nosnippet>381</a>/// recorded together with the (predicate, position) pair. A later
+<a href=#382 id=382 data-nosnippet>382</a>/// atom that types the same variable to a *different* type
+<a href=#383 id=383 data-nosnippet>383</a>/// surfaces as [`RefEvalError::ConflictingVariableType`] with both
+<a href=#384 id=384 data-nosnippet>384</a>/// triples populated. Subsequent agreeing atoms are silent.
+<a href=#385 id=385 data-nosnippet>385</a>///
+<a href=#386 id=386 data-nosnippet>386</a>/// `pub(super)` so [`super::plan`] can reuse the same conflict
+<a href=#387 id=387 data-nosnippet>387</a>/// detection without duplicating the source-walk logic.
+<a href=#388 id=388 data-nosnippet>388</a></span><span class="kw">pub</span>(<span class="kw">super</span>) <span class="kw">fn </span>derive_vertex_types(
+<a href=#389 id=389 data-nosnippet>389</a>    rule: <span class="kw-2">&amp;</span>Rule,
+<a href=#390 id=390 data-nosnippet>390</a>    relations: <span class="kw-2">&amp;</span>RefRelationStore,
+<a href=#391 id=391 data-nosnippet>391</a>) -&gt; <span class="prelude-ty">Result</span>&lt;BTreeMap&lt;String, ScalarType&gt;, RefEvalError&gt; {
+<a href=#392 id=392 data-nosnippet>392</a>    <span class="doccomment">/// First-recorded site for a variable. Stored separately from
+<a href=#393 id=393 data-nosnippet>393</a>    /// the public type map so the conflict report can name the
+<a href=#394 id=394 data-nosnippet>394</a>    /// originating atom.
+<a href=#395 id=395 data-nosnippet>395</a>    </span><span class="kw">struct </span>FirstSite {
+<a href=#396 id=396 data-nosnippet>396</a>        predicate: String,
+<a href=#397 id=397 data-nosnippet>397</a>        position: usize,
+<a href=#398 id=398 data-nosnippet>398</a>        ty: ScalarType,
+<a href=#399 id=399 data-nosnippet>399</a>    }
+<a href=#400 id=400 data-nosnippet>400</a>    <span class="kw">let </span><span class="kw-2">mut </span>sites: BTreeMap&lt;String, FirstSite&gt; = BTreeMap::new();
+<a href=#401 id=401 data-nosnippet>401</a>    <span class="kw">for </span>literal <span class="kw">in </span><span class="kw-2">&amp;</span>rule.body {
+<a href=#402 id=402 data-nosnippet>402</a>        <span class="kw">let </span>atom = <span class="kw">match </span>literal {
+<a href=#403 id=403 data-nosnippet>403</a>            BodyLiteral::Positive(a) =&gt; a,
+<a href=#404 id=404 data-nosnippet>404</a>            <span class="comment">// Comparisons, negations, and is-expressions don't
+<a href=#405 id=405 data-nosnippet>405</a>            // constrain types via relation schema. Negation is also
+<a href=#406 id=406 data-nosnippet>406</a>            // a structural boundary that analyze_typed will reject;
+<a href=#407 id=407 data-nosnippet>407</a>            // is-expr likewise. We don't pre-empt those here.
+<a href=#408 id=408 data-nosnippet>408</a>            </span><span class="kw">_ </span>=&gt; <span class="kw">continue</span>,
+<a href=#409 id=409 data-nosnippet>409</a>        };
+<a href=#410 id=410 data-nosnippet>410</a>        <span class="kw">let </span>relation = <span class="kw">match </span>relations.get(<span class="kw-2">&amp;</span>atom.predicate) {
+<a href=#411 id=411 data-nosnippet>411</a>            <span class="prelude-val">Some</span>(r) =&gt; r,
+<a href=#412 id=412 data-nosnippet>412</a>            <span class="prelude-val">None </span>=&gt; <span class="kw">continue</span>, <span class="comment">// unknown predicate: no type info
+<a href=#413 id=413 data-nosnippet>413</a>        </span>};
+<a href=#414 id=414 data-nosnippet>414</a>        <span class="comment">// Defensive: an atom whose arity disagrees with its
+<a href=#415 id=415 data-nosnippet>415</a>        // relation's schema is rejected by `evaluate_rule`'s
+<a href=#416 id=416 data-nosnippet>416</a>        // `AtomSpec::build` with `RelationArityMismatch`. The gate
+<a href=#417 id=417 data-nosnippet>417</a>        // intentionally does NOT pre-empt that — leaving arity
+<a href=#418 id=418 data-nosnippet>418</a>        // checks to one place keeps the error surface minimal.
+<a href=#419 id=419 data-nosnippet>419</a>        // We just stop deriving from positions past the schema.
+<a href=#420 id=420 data-nosnippet>420</a>        </span><span class="kw">let </span>limit = atom.terms.len().min(relation.schema.len());
+<a href=#421 id=421 data-nosnippet>421</a>        <span class="kw">for </span>(position, term) <span class="kw">in </span>atom.terms[..limit].iter().enumerate() {
+<a href=#422 id=422 data-nosnippet>422</a>            <span class="kw">let </span>var_name = <span class="kw">match </span>term {
+<a href=#423 id=423 data-nosnippet>423</a>                Term::Variable(name) =&gt; name.clone(),
+<a href=#424 id=424 data-nosnippet>424</a>                <span class="kw">_ </span>=&gt; <span class="kw">continue</span>,
+<a href=#425 id=425 data-nosnippet>425</a>            };
+<a href=#426 id=426 data-nosnippet>426</a>            <span class="kw">let </span>ty = relation.schema[position];
+<a href=#427 id=427 data-nosnippet>427</a>            <span class="kw">match </span>sites.get(<span class="kw-2">&amp;</span>var_name) {
+<a href=#428 id=428 data-nosnippet>428</a>                <span class="prelude-val">None </span>=&gt; {
+<a href=#429 id=429 data-nosnippet>429</a>                    sites.insert(
+<a href=#430 id=430 data-nosnippet>430</a>                        var_name,
+<a href=#431 id=431 data-nosnippet>431</a>                        FirstSite {
+<a href=#432 id=432 data-nosnippet>432</a>                            predicate: atom.predicate.clone(),
+<a href=#433 id=433 data-nosnippet>433</a>                            position,
+<a href=#434 id=434 data-nosnippet>434</a>                            ty,
+<a href=#435 id=435 data-nosnippet>435</a>                        },
+<a href=#436 id=436 data-nosnippet>436</a>                    );
+<a href=#437 id=437 data-nosnippet>437</a>                }
+<a href=#438 id=438 data-nosnippet>438</a>                <span class="prelude-val">Some</span>(prior) <span class="kw">if </span>prior.ty == ty =&gt; {
+<a href=#439 id=439 data-nosnippet>439</a>                    <span class="comment">// Agreeing repeat — silent.
+<a href=#440 id=440 data-nosnippet>440</a>                </span>}
+<a href=#441 id=441 data-nosnippet>441</a>                <span class="prelude-val">Some</span>(prior) =&gt; {
+<a href=#442 id=442 data-nosnippet>442</a>                    <span class="kw">return </span><span class="prelude-val">Err</span>(RefEvalError::ConflictingVariableType {
+<a href=#443 id=443 data-nosnippet>443</a>                        var: var_name,
+<a href=#444 id=444 data-nosnippet>444</a>                        first_predicate: prior.predicate.clone(),
+<a href=#445 id=445 data-nosnippet>445</a>                        first_position: prior.position,
+<a href=#446 id=446 data-nosnippet>446</a>                        first_type: prior.ty,
+<a href=#447 id=447 data-nosnippet>447</a>                        second_predicate: atom.predicate.clone(),
+<a href=#448 id=448 data-nosnippet>448</a>                        second_position: position,
+<a href=#449 id=449 data-nosnippet>449</a>                        second_type: ty,
+<a href=#450 id=450 data-nosnippet>450</a>                    });
+<a href=#451 id=451 data-nosnippet>451</a>                }
+<a href=#452 id=452 data-nosnippet>452</a>            }
+<a href=#453 id=453 data-nosnippet>453</a>        }
+<a href=#454 id=454 data-nosnippet>454</a>    }
+<a href=#455 id=455 data-nosnippet>455</a>    <span class="prelude-val">Ok</span>(sites
+<a href=#456 id=456 data-nosnippet>456</a>        .into_iter()
+<a href=#457 id=457 data-nosnippet>457</a>        .map(|(name, site)| (name, site.ty))
+<a href=#458 id=458 data-nosnippet>458</a>        .collect())
+<a href=#459 id=459 data-nosnippet>459</a>}
+</code></pre></div></section></main></body></html>

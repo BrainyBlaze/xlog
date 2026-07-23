@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["DEFAULT_MAX_STREAMS","DEFAULT_POOL_MB_PER_STREAM","ENV_WCOJ_POOL_MB_PER_STREAM"],"enum":["StreamPoolError"],"fn":["configured_pool_bytes_per_stream","configured_pool_mb_per_stream","planned_pool_budget_bytes"],"struct":["StreamPool"]};

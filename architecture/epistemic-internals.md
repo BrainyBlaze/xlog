@@ -1,0 +1,160 @@
+# Epistemic Execution Internals
+
+How XLOG keeps epistemic literals explicit through EIR, validates GPU execution contracts, and lowers accepted programs through the normal runtime.
+
+<Note>
+For contributors — how epistemic execution works internally. This page assumes
+you work on the xlog runtime itself. It is dense on purpose; it is not the
+user-facing explanation of the epistemic feature.
+</Note>
+
+## What this page covers
+
+XLOG can reason about what a program *knows* and what it holds *possible*, not
+just what is plainly true. These are called epistemic (knowledge-level) literals.
+This page explains how the runtime carries those literals through compilation
+and GPU execution without losing their meaning.
+
+The key design choice: epistemic literals travel through their own explicit
+intermediate representation, called **EIR** (the Epistemic Intermediate
+Representation), before anything else touches them. That way `know` and
+`possible` literals do not quietly collapse into ordinary predicate rewrites
+before their semantic mode has been validated.
+
+## The accepted path
+
+An accepted epistemic program moves through six stages:
+
+1. parse epistemic syntax into the frontend AST (abstract syntax tree);
+2. build EIR from the AST;
+3. validate the epistemic GPU plan contract;
+4. reduce accepted epistemic literals into an ordinary (non-epistemic) program;
+5. compile the reduced program through the normal compiler, optimizer, helper
+   splitting, and WCOJ promotion pipeline;
+6. execute reduced runtime work and epistemic GPU workspace phases through the
+   executor.
+
+Two terms above are xlog internals. **Helper splitting** breaks a complex rule
+into smaller helper rules. **WCOJ** is worst-case-optimal join, a join strategy
+that computes multiway patterns directly to keep peak memory flat.
+
+## Source surface
+
+The frontend represents epistemic constructs explicitly, so the programmer's
+intent survives parsing:
+
+- `#pragma epistemic_mode = faeel`
+- `#pragma epistemic_mode = g91`
+- `know atom(...)`
+- `possible atom(...)`
+- `not know atom(...)`
+- `not possible atom(...)`
+
+`faeel` is the default semantic mode for evaluating these literals. `g91`
+selects a compatibility mode matching Gelfond's 1991 epistemic-specification
+semantics.
+
+## The EIR boundary
+
+`xlog_logic::build_eir` converts the parsed AST into the EIR structures defined
+in `xlog-ir`:
+
+- `EirProgram`
+- `EirRule`
+- `EirBodyLiteral`
+- `EirEpistemicLiteral`
+- `EirEpistemicMode`
+- `EirEpistemicOp`
+
+The runtime's ordinary intermediate representation is called RIR (used for
+deterministic, non-epistemic programs). Lowering an epistemic body literal
+directly into RIR is rejected. That rejection is intentional: an accepted
+epistemic program must first pass through EIR planning.
+
+## The GPU plan contract
+
+`plan_epistemic_gpu_execution` builds the semantic contract that runtime
+execution must satisfy. The plan does four things:
+
+- it preserves the epistemic literals rather than discarding them;
+- it records, for each accepted rule, how that rule is reduced;
+- it binds each modal literal (a `know` or `possible` literal) to the reduced
+  stable-model tuple source it draws from — where stable models are the answer
+  sets a logic program admits;
+- it tracks CPU fallback counters.
+
+The runtime rejects any plan whose required bindings, workspace sizes, or
+fallback counters do not satisfy this contract.
+
+## The reduced runtime plan
+
+`compile_epistemic_gpu_execution` and
+`compile_epistemic_gpu_execution_with_stats_snapshot` strip out the epistemic
+literals, but only after the GPU plan contract already exists. The reduced,
+ordinary program then goes through the same compiler that deterministic programs
+use.
+
+That reuse is load-bearing:
+
+- statistics snapshots still feed the compiler;
+- helper splitting stays owned by the ordinary optimizer path;
+- WCOJ promotion and route gates (the checks deciding whether a specialized
+  execution route such as WCOJ fires) are shared with deterministic execution;
+- reduced plans do not get a private epistemic join planner.
+
+## Candidate bounds
+
+The runtime must enumerate the candidate knowledge states it will test. A
+bounded Generate-Propagate-Test fixture (a test harness that generates
+candidates, propagates constraints, then tests them) accepts an explicit
+`max_candidates` configuration.
+
+Production GPU planning is different: it derives the candidate space from the
+EIR program itself. Current source computes the full candidate lattice (the
+ordered space of candidate knowledge states) from the number of epistemic
+literals. It is not a fixed literal count and not a large
+hardcoded bound. Models per reduction are capped at
+`MAX_MODELS_PER_REDUCTION = 1024`.
+
+## Workspace phases
+
+The runtime workspace uses device (GPU) buffers for:
+
+- candidate assumptions;
+- world views (a world view is the set of models the program considers possible
+  at once);
+- model membership;
+- rejection reasons;
+- final flags and materialized output tuples where applicable.
+
+The executor initializes these buffers, then launches a sequence of kernels for
+accepted finite shapes: candidate generation, propagation, validation,
+model-membership staging, world-view validation, and materialization.
+
+Some inputs are not supported. Unsupported tuple-key shapes, unbounded arities,
+and unfounded modal cycles (a modal cycle with no non-circular derivation
+grounding it — no founded support) fail closed — the runtime stops with an
+explicit typed diagnostic rather than guessing a result.
+
+## Split execution
+
+Epistemic splitting groups rules by their modal dependencies and their ordinary
+derived dependencies. Independent components may be solved separately, but only
+when splitting preserves the semantics of the unsplit program. Modal predicates
+that are coupled stay in one component and are solved jointly.
+
+Split execution reuses `compile_epistemic_gpu_execution_with_stats_snapshot` for
+each executable component. There is no separate split-only runtime.
+
+## Invariants and diagnostics
+
+Contributors verifying epistemic behavior can rely on these facts:
+
+- EIR is built from the AST, not from RIR.
+- The bounded fixture evaluators (with `max_candidates`) are distinct from the
+  production GPU execution path.
+- Unsupported shapes surface as typed, fail-closed boundaries.
+- Preflight metadata (information collected before execution runs) alone is not
+  proof that a WCOJ or solver route fired.
+- Runtime claims should be paired with counters, transfer telemetry, or
+  validation evidence.
