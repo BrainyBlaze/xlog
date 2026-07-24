@@ -117,3 +117,66 @@ def test_tie_tolerance_default_is_none_and_explicit_value_parses():
     assert run_caviar_theory.parse_args(REQUIRED).tie_tolerance is None
     args = run_caviar_theory.parse_args(REQUIRED + ["--tie-tolerance", "0.005"])
     assert args.tie_tolerance == 0.005
+
+
+# ---------------------------------------------------------------------------
+# EC don't-care wiring helpers -- both are plain Python (no torch/pyxlog/
+# CUDA), so they are directly CPU-testable here, unlike the CUDA-only
+# induction paths that use them (`_run_relational_ec`/`_run_neural_ec`).
+# ---------------------------------------------------------------------------
+
+
+def test_exclude_dontcare_drops_flagged_rows():
+    facts = [(0, 1), (1, 1), (2, 1), (3, 1)]
+    labels = [False, True, False, True]
+    dontcare = [True, False, True, False]
+    kept_facts, kept_labels = run_caviar_theory._exclude_dontcare(facts, labels, dontcare)
+    assert kept_facts == [(1, 1), (3, 1)]
+    assert kept_labels == [True, True]
+
+
+def test_exclude_dontcare_with_none_mask_is_a_no_op():
+    facts = [(0, 1), (1, 1)]
+    labels = [False, True]
+    kept_facts, kept_labels = run_caviar_theory._exclude_dontcare(facts, labels, None)
+    assert kept_facts == facts
+    assert kept_labels == labels
+
+
+def test_exclude_dontcare_all_dontcare_yields_empty_lists():
+    facts = [(0, 1), (1, 1)]
+    labels = [True, False]
+    kept_facts, kept_labels = run_caviar_theory._exclude_dontcare(facts, labels, [True, True])
+    assert kept_facts == []
+    assert kept_labels == []
+
+
+def test_ec_relations_with_transitions_merges_only_when_present():
+    train = {"relations": {"close": [(0, 1)]}, "transition_relations": {"any_became_active": [(0, 1)]}}
+    test = {"relations": {"close": [(1, 1)]}, "transition_relations": {"any_became_active": []}}
+    train_rel, test_rel = run_caviar_theory._ec_relations_with_transitions(train, test)
+    assert train_rel == {"close": [(0, 1)], "any_became_active": [(0, 1)]}
+    assert test_rel == {"close": [(1, 1)], "any_became_active": []}
+
+
+def test_ec_relations_with_transitions_pkl_data_is_unaugmented():
+    # --data pkl's converted dicts have no "transition_relations" key at
+    # all -- the merge must be a no-op, returning the SAME relations dicts
+    # unchanged, so a direct-protocol-shaped vocabulary never gains anything.
+    train = {"relations": {"close": [(0, 1)]}}
+    test = {"relations": {"close": [(1, 1)]}}
+    train_rel, test_rel = run_caviar_theory._ec_relations_with_transitions(train, test)
+    assert train_rel is train["relations"]
+    assert test_rel is test["relations"]
+
+
+def test_filtered_relation_names_never_sees_transition_relations():
+    # `_filtered_relation_names` is the DIRECT-protocol (relational mode)
+    # vocabulary builder; it must only ever be handed a "relations" dict,
+    # never a merged one -- pinning that guarantee here, at the function
+    # that would silently perturb --protocol direct if it ever were.
+    converted = {
+        "relations": {"close": [(0, 1)], "coords_missing": [(1, 1)]},
+        "transition_relations": {"any_became_active": [(0, 1)]},
+    }
+    assert run_caviar_theory._filtered_relation_names(converted) == ["close"]

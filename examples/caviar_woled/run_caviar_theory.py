@@ -69,6 +69,41 @@ CUDA-ONLY AT RUNTIME (mirrors `run_caviar_star.py`/`run_caviar_neural.py`): `Ilp
 `put_relation`/`kfold_select`/`train_engine_mode` need a real CUDA device;
 `--help` needs neither CUDA nor `pyxlog`/`torch` -- every such import is
 deferred past `parse_args`.
+
+EC DON'T-CARE FRAMES (``--protocol ec --data continuous`` only). With
+strict transition-only ``is_init``/``is_term`` labels, a state-shaped
+candidate (e.g. ``both_active & close``) is punished, in holdout accuracy,
+for every already-holding frame it also covers -- even though re-asserting
+``initiatedAt``/``terminatedAt`` on a frame the inertia closure would
+reconstruct identically either way is semantically harmless, not an error
+(see `.superpowers/sdd/task-e2-review.md`'s F3 finding and
+`caviar_continuous.derive_ec_masks_continuous`'s own docstring for the exact
+truth table). ``_run_relational_ec``/``_run_neural_ec`` exclude these
+frames from the facts/labels handed to `theory_loop.induce_theory` (and,
+through it, to every `kfold_select` call) for BOTH the init and the term
+search, entirely -- not scored, not trained on, in either direction.
+
+WHY EXCLUSION, NOT ``pyxlog.ilp.neural_credit``'s ``witness_mask``. That
+parameter (contract #155) IS the documented mechanism for "cannot honestly
+judge" frames, and was the first one investigated here -- but reading
+`enumerate_specs` shows its masking is wired ONLY into the NEURAL-witness
+branches (``masked_any`` is constructed there and nowhere else); a fully
+relational star candidate (``CandidateSpec.masked_any is None`` always,
+since neither side is a registered neural relation) is untouched by it --
+`frozen_select`'s own docstring says as much ("Relational candidates are
+never masked"). Relational mode is exactly the vocabulary this dataset's EC
+search actually uses (activities + precomputed close/far), so ``witness_
+mask`` would be a silent no-op for it: correctly shaped, faithfully passed,
+and provably inert. Excluding the don't-care facts from the arrays passed
+to ``kfold_select`` instead gives the identical "excluded from holdout
+accuracy, zero credit and zero gradient" guarantee `witness_mask` promises,
+but for EVERY candidate type uniformly (a strict generalization, not a
+workaround) -- so ``kfold_select``'s ``min_coverage`` gate, which only ever
+activates when a ``witness_mask`` is supplied, never engages here and never
+needs a tuned threshold: there is nothing left in the arrays it is left to
+gate. ``--data pkl`` never derives a don't-care mask at all (this dataset's
+own EC target derivation, `caviar_convert.derive_ec_targets`, is untouched
+and out of this scope), so its EC path is exactly as before.
 """
 
 from __future__ import annotations
@@ -365,23 +400,30 @@ def _run_relational_theory(pyxlog, torch, kfold_select, args, train, test, wall)
 # ---------------------------------------------------------------------------
 
 
-def _compile_and_ingest_neural(pyxlog, converted: dict, n_labels: int = N_LABELS):
+def _compile_and_ingest_neural(pyxlog, converted: dict, n_labels: int = N_LABELS, extra_relation_names: tuple = ()):
     """Schema-only compile + `put_relation` of the 4 activity relations PLUS
     a `close_nn` seed row (never `put_relation`'d -- it has no ground table,
     see `run_caviar_neural.py`'s identically-reasoned helper, which this one
     mirrors rather than imports, for the same byte-equivalence reason as
-    `_compile_and_ingest_relational` above)."""
+    `_compile_and_ingest_relational` above).
+
+    ``extra_relation_names`` (default ``()``, byte-identical to omitting it):
+    additional relation names to ingest ALONGSIDE ``ACTIVITY_RELATIONS`` --
+    used only by `_run_neural_ec` for ``--data continuous``'s frame-
+    difference TRANSITION relations (see `_ec_relations_with_transitions`);
+    `_run_neural_theory`'s own (direct-protocol) call never passes any, so
+    its schema/ingest stays exactly the 4-activity set it always was."""
     from caviar_convert import build_star_schema_source, put_caviar_relations
 
-    activity_names = sorted(ACTIVITY_RELATIONS)
+    activity_names = sorted(set(ACTIVITY_RELATIONS) | set(extra_relation_names))
     schema_src = build_star_schema_source(activity_names + [CLOSE_NN_NAME])
     prog = pyxlog.IlpProgramFactory.compile(schema_src, device=0, memory_mb=MEMORY_MB)
 
-    missing = [n for n in ACTIVITY_RELATIONS if n not in converted["relations"]]
+    missing = [n for n in activity_names if n not in converted["relations"]]
     if missing:
         raise KeyError(f"convert_split's output is missing {missing}; have {sorted(converted['relations'])}.")
     ingest_converted = dict(
-        converted, relations={n: converted["relations"][n] for n in ACTIVITY_RELATIONS},
+        converted, relations={n: converted["relations"][n] for n in activity_names},
     )
     returned_schema = put_caviar_relations(prog, ingest_converted, n_labels=n_labels)
     expected = build_star_schema_source(activity_names)
@@ -542,14 +584,21 @@ def _induce_neural_theory_for_target(
     return theory, nets_by_clause_idx
 
 
-def _make_final_predict_clause(clauses, nets_by_clause_idx, torch, relations, features):
+def _make_final_predict_clause(clauses, nets_by_clause_idx, torch, relations, features, extra_relation_names: tuple = ()):
     """A `predict_clause(rule, fact) -> bool` closure for the FINAL,
     committed theory (as opposed to `_induce_neural_theory_for_target`'s own
     in-loop ``loop_predict_clause``, which only ever needs the CURRENT
     iteration's clause): reads each clause's own trained network's score
     over the given ``features`` tensor (train or test), batched once up
-    front rather than per fact."""
-    sets = {n: set(relations[n]) for n in ACTIVITY_RELATIONS}
+    front rather than per fact.
+
+    ``extra_relation_names`` (default ``()``, byte-identical to omitting it):
+    see `_compile_and_ingest_neural`'s identical parameter -- a committed
+    clause naming one of these (only possible for `_run_neural_ec`'s
+    ``--data continuous`` transition vocabulary) needs its own entry in
+    ``sets``, or a relational-left clause referencing it would ``KeyError``
+    here instead of resolving its cover."""
+    sets = {n: set(relations[n]) for n in set(ACTIVITY_RELATIONS) | set(extra_relation_names)}
     scores_by_clause_idx = {}
     for idx, net in nets_by_clause_idx.items():
         with torch.no_grad():
@@ -809,7 +858,48 @@ def _score_theory(
 # ---------------------------------------------------------------------------
 
 
-def _run_relational_ec(pyxlog, torch, kfold_select, args, train, test, ec_train, ec_test, wall, reconstruct_fn=None):
+def _exclude_dontcare(facts, labels, dontcare):
+    """Drop every ``(fact, label)`` pair flagged don't-care in ``dontcare``
+    (same pt-alignment as ``facts``/``labels``) so neither `theory_loop.
+    induce_theory` nor the `kfold_select` call underneath it ever sees that
+    row: not scored as a positive, not scored as a negative, no gradient --
+    see the module docstring's "EC DON'T-CARE FRAMES" section for why this
+    exclusion, rather than `kfold_select`'s own ``witness_mask``, is the
+    mechanism used here. ``dontcare=None`` (``--data pkl``, which derives no
+    don't-care mask) returns ``facts``/``labels`` unchanged, byte-identical
+    to the pre-mask call."""
+    if dontcare is None:
+        return facts, labels
+    kept_facts = []
+    kept_labels = []
+    for f, y, dc in zip(facts, labels, dontcare):
+        if not dc:
+            kept_facts.append(f)
+            kept_labels.append(y)
+    return kept_facts, kept_labels
+
+
+def _ec_relations_with_transitions(train, test):
+    """Merge `caviar_continuous.convert_continuous`'s ``"transition_
+    relations"`` into a COPY of ``train``/``test``'s own ``"relations"``
+    dict, for the EC-search-only candidate pool -- ``--data pkl`` (no
+    ``"transition_relations"`` key at all) and any ``--protocol direct`` run
+    are untouched, since neither ever calls this function; see
+    `caviar_continuous.convert_continuous`'s docstring for why the merge
+    lives here, at the ec-protocol call site, rather than inside
+    `convert_continuous` itself."""
+    if "transition_relations" not in train:
+        return train["relations"], test["relations"]
+    return (
+        {**train["relations"], **train["transition_relations"]},
+        {**test["relations"], **test["transition_relations"]},
+    )
+
+
+def _run_relational_ec(
+    pyxlog, torch, kfold_select, args, train, test, ec_train, ec_test, wall,
+    reconstruct_fn=None, ec_masks=None,
+):
     """Relational-vocabulary Event-Calculus protocol. Both the init search
     and the term search reuse the SAME compiled program and the SAME
     set-intersection `predict_clause` closures `_run_relational_theory`
@@ -830,7 +920,18 @@ def _run_relational_ec(pyxlog, torch, kfold_select, args, train, test, ec_train,
     behavior for ``--data pkl``. ``--data continuous`` passes
     `caviar_continuous.reconstruct_holds_continuous` instead, since that
     dataset's segments/pairs have no fixed window length for the pkl
-    reading to apply to."""
+    reading to apply to.
+
+    ``ec_masks``: ``--data continuous`` only (``None`` for ``--data pkl``,
+    unchanged behavior) -- `caviar_continuous.derive_ec_masks_continuous`'s
+    own output over ``train``. Its ``"init_dontcare"``/``"term_dontcare"``
+    lists exclude the corresponding don't-care facts from EACH search before
+    `theory_loop.induce_theory` ever sees them (see the module docstring's
+    "EC DON'T-CARE FRAMES" section and `_exclude_dontcare`); this is also
+    where ``--data continuous``'s frame-difference TRANSITION relations
+    (`caviar_continuous.convert_continuous`'s ``"transition_relations"``)
+    enter THIS function's own candidate pool -- never the ``direct_context``
+    run above, which already ran against ``train``/``test`` unaugmented."""
     direct_result = None
     if not args.no_direct_context:
         direct_wall: dict = {}
@@ -839,7 +940,8 @@ def _run_relational_ec(pyxlog, torch, kfold_select, args, train, test, ec_train,
         wall["direct_context"] = time.perf_counter() - t_direct
         wall["direct_context_wall_clock_s"] = direct_wall
 
-    prog = _compile_and_ingest_relational(pyxlog, train)
+    train_relations_ec, test_relations_ec = _ec_relations_with_transitions(train, test)
+    prog = _compile_and_ingest_relational(pyxlog, dict(train, relations=train_relations_ec))
 
     device = torch.device("cuda")
     features = train["features"].to(device)
@@ -854,10 +956,13 @@ def _run_relational_ec(pyxlog, torch, kfold_select, args, train, test, ec_train,
     steps_effective = min(args.steps, EMPTY_NEURAL_POOL_STEP_CAP)
     steps_clamped = steps_effective != steps_requested
 
-    predict_clause_train = _predict_clause_relational(train["relations"])
-    predict_clause_test = _predict_clause_relational(test["relations"])
+    predict_clause_train = _predict_clause_relational(train_relations_ec)
+    predict_clause_test = _predict_clause_relational(test_relations_ec)
 
-    def induce_for(target_train_labels, wall_key):
+    def induce_for(target_train_labels, dontcare, wall_key):
+        facts_for_search, labels_for_search = _exclude_dontcare(
+            train["facts"], target_train_labels, dontcare
+        )
         iteration_wall: list[float] = []
 
         def select_once(residual_facts, residual_is_positive):
@@ -873,15 +978,19 @@ def _run_relational_ec(pyxlog, torch, kfold_select, args, train, test, ec_train,
 
         t0 = time.perf_counter()
         theory = induce_theory(
-            select_once, predict_clause_train, train["facts"], target_train_labels,
+            select_once, predict_clause_train, facts_for_search, labels_for_search,
             max_clauses=args.max_clauses, min_new_covered=args.min_new_covered,
         )
         wall[wall_key] = time.perf_counter() - t0
         wall[f"{wall_key}_per_iteration"] = iteration_wall
         return theory
 
-    init_theory = induce_for(ec_train["is_init"], "theory_loop_init")
-    term_theory = induce_for(ec_train["is_term"], "theory_loop_term")
+    init_theory = induce_for(
+        ec_train["is_init"], ec_masks["init_dontcare"] if ec_masks else None, "theory_loop_init",
+    )
+    term_theory = induce_for(
+        ec_train["is_term"], ec_masks["term_dontcare"] if ec_masks else None, "theory_loop_term",
+    )
 
     init_scoring = _score_theory(
         init_theory["clauses"], predict_clause_train, predict_clause_test,
@@ -903,7 +1012,7 @@ def _run_relational_ec(pyxlog, torch, kfold_select, args, train, test, ec_train,
 
     return {
         "candidate_vocabulary": {
-            "relational": sorted(set(train["relations"]) - {"coords_missing"}),
+            "relational": sorted(set(train_relations_ec) - {"coords_missing"}),
             "neural": [],
             "excluded": ["coords_missing"],
         },
@@ -913,6 +1022,8 @@ def _run_relational_ec(pyxlog, torch, kfold_select, args, train, test, ec_train,
         "ec": {
             "n_init": {"train": ec_train["n_init"], "test": ec_test["n_init"]},
             "n_term": {"train": ec_train["n_term"], "test": ec_test["n_term"]},
+            "n_init_dontcare_train": ec_masks["n_init_dontcare"] if ec_masks else None,
+            "n_term_dontcare_train": ec_masks["n_term_dontcare"] if ec_masks else None,
             "init_theory": _theory_json(init_theory),
             "term_theory": _theory_json(term_theory),
             "init_scoring": init_scoring,
@@ -924,7 +1035,10 @@ def _run_relational_ec(pyxlog, torch, kfold_select, args, train, test, ec_train,
     }
 
 
-def _run_neural_ec(pyxlog, torch, kfold_select, args, train, test, ec_train, ec_test, wall, reconstruct_fn=None):
+def _run_neural_ec(
+    pyxlog, torch, kfold_select, args, train, test, ec_train, ec_test, wall,
+    reconstruct_fn=None, ec_masks=None,
+):
     """Neural-vocabulary Event-Calculus protocol. The init search and the
     term search each call `_induce_neural_theory_for_target` independently,
     so EACH theory ends up with its OWN per-clause `close_nn` networks --
@@ -939,7 +1053,16 @@ def _run_neural_ec(pyxlog, torch, kfold_select, args, train, test, ec_train, ec_
 
     ``reconstruct_fn``: see `_run_relational_ec`'s identical parameter --
     same default (the pkl's fixed-window inertia closure), same
-    ``--data continuous`` override."""
+    ``--data continuous`` override.
+
+    ``ec_masks``: see `_run_relational_ec`'s identical parameter -- the
+    don't-care facts it names are excluded from BOTH searches' own
+    ``facts``/``target_labels`` before `_induce_neural_theory_for_target`
+    (and, through it, `kfold_select`) ever sees them; ``--data continuous``'s
+    transition relations are merged into this function's OWN activity-set
+    vocabulary and final predict-clause closures the same way
+    `_run_relational_ec` merges them into its relational one -- never into
+    the ``direct_context`` run above, which already finished."""
     from pyxlog.ilp.neural_credit import NeuralRelationSpec, train_engine_mode
 
     direct_result = None
@@ -950,7 +1073,18 @@ def _run_neural_ec(pyxlog, torch, kfold_select, args, train, test, ec_train, ec_
         wall["direct_context"] = time.perf_counter() - t_direct
         wall["direct_context_wall_clock_s"] = direct_wall
 
-    prog = _compile_and_ingest_neural(pyxlog, train)
+    train_relations_ec, test_relations_ec = _ec_relations_with_transitions(train, test)
+    # Derived from the data dict itself, not imported from
+    # `caviar_continuous.TRANSITION_RELATION_NAMES`: this keeps
+    # run_caviar_theory.py's module-level imports torch-free (see the
+    # module docstring's CUDA-ONLY paragraph) and can never drift out of
+    # sync with whatever convert_continuous actually produced.
+    extra_relation_names = (
+        tuple(train["transition_relations"]) if "transition_relations" in train else ()
+    )
+    prog = _compile_and_ingest_neural(
+        pyxlog, dict(train, relations=train_relations_ec), extra_relation_names=extra_relation_names,
+    )
 
     device = torch.device("cuda")
     features_train = train["features"].to(device)
@@ -960,30 +1094,43 @@ def _run_neural_ec(pyxlog, torch, kfold_select, args, train, test, ec_train, ec_
         return _build_symmetric_mlp(args.hidden, device)
 
     neural_relations = {CLOSE_NN_NAME: NeuralRelationSpec(num_rows=train["num_pt"], arity=2)}
-    activity_sets_train = {n: set(train["relations"][n]) for n in ACTIVITY_RELATIONS}
+    activity_sets_train = {
+        n: set(train_relations_ec[n]) for n in set(ACTIVITY_RELATIONS) | set(extra_relation_names)
+    }
+
+    init_facts, init_labels = _exclude_dontcare(
+        train["facts"], ec_train["is_init"], ec_masks["init_dontcare"] if ec_masks else None,
+    )
+    term_facts, term_labels = _exclude_dontcare(
+        train["facts"], ec_train["is_term"], ec_masks["term_dontcare"] if ec_masks else None,
+    )
 
     init_theory, init_nets = _induce_neural_theory_for_target(
         torch, kfold_select, train_engine_mode, prog, make_network, features_train,
-        neural_relations, activity_sets_train, args, train["facts"], ec_train["is_init"],
+        neural_relations, activity_sets_train, args, init_facts, init_labels,
         wall, "theory_loop_init",
     )
     term_theory, term_nets = _induce_neural_theory_for_target(
         torch, kfold_select, train_engine_mode, prog, make_network, features_train,
-        neural_relations, activity_sets_train, args, train["facts"], ec_train["is_term"],
+        neural_relations, activity_sets_train, args, term_facts, term_labels,
         wall, "theory_loop_term",
     )
 
     init_predict_train, _ = _make_final_predict_clause(
-        init_theory["clauses"], init_nets, torch, train["relations"], features_train
+        init_theory["clauses"], init_nets, torch, train_relations_ec, features_train,
+        extra_relation_names=extra_relation_names,
     )
     init_predict_test, _ = _make_final_predict_clause(
-        init_theory["clauses"], init_nets, torch, test["relations"], features_test
+        init_theory["clauses"], init_nets, torch, test_relations_ec, features_test,
+        extra_relation_names=extra_relation_names,
     )
     term_predict_train, _ = _make_final_predict_clause(
-        term_theory["clauses"], term_nets, torch, train["relations"], features_train
+        term_theory["clauses"], term_nets, torch, train_relations_ec, features_train,
+        extra_relation_names=extra_relation_names,
     )
     term_predict_test, _ = _make_final_predict_clause(
-        term_theory["clauses"], term_nets, torch, test["relations"], features_test
+        term_theory["clauses"], term_nets, torch, test_relations_ec, features_test,
+        extra_relation_names=extra_relation_names,
     )
 
     init_scoring = _score_theory(
@@ -1006,7 +1153,7 @@ def _run_neural_ec(pyxlog, torch, kfold_select, args, train, test, ec_train, ec_
 
     return {
         "candidate_vocabulary": {
-            "relational": sorted(ACTIVITY_RELATIONS),
+            "relational": sorted(set(ACTIVITY_RELATIONS) | set(extra_relation_names)),
             "neural": [CLOSE_NN_NAME],
             "excluded": ["close", "far", "coords_missing"],
         },
@@ -1016,6 +1163,8 @@ def _run_neural_ec(pyxlog, torch, kfold_select, args, train, test, ec_train, ec_
         "ec": {
             "n_init": {"train": ec_train["n_init"], "test": ec_test["n_init"]},
             "n_term": {"train": ec_train["n_term"], "test": ec_test["n_term"]},
+            "n_init_dontcare_train": ec_masks["n_init_dontcare"] if ec_masks else None,
+            "n_term_dontcare_train": ec_masks["n_term_dontcare"] if ec_masks else None,
             "init_theory": _theory_json(init_theory),
             "term_theory": _theory_json(term_theory),
             "init_scoring": init_scoring,
@@ -1082,6 +1231,14 @@ def main(argv: list[str] | None = None) -> int:
     # pt indexing `train`/`test` already use. `--protocol direct` never
     # derives these -- untouched, so its own run is unaffected.
     ec_train = ec_test = None
+    # `--protocol ec --data continuous` only: don't-care masks for the
+    # SAME targets (see the module docstring's "EC DON'T-CARE FRAMES"
+    # section) -- `--data pkl` derives no such mask (its own EC target
+    # derivation, `caviar_convert.derive_ec_targets`, is untouched and out
+    # of this scope), so `ec_train_masks` stays `None` there, and
+    # `_run_relational_ec`/`_run_neural_ec` treat `None` as "no exclusion",
+    # byte-identical to before this mask existed.
+    ec_train_masks = None
     if args.protocol == "ec":
         if args.data == "pkl":
             from caviar_convert import derive_ec_targets
@@ -1089,10 +1246,11 @@ def main(argv: list[str] | None = None) -> int:
             ec_train = derive_ec_targets(split["train"])
             ec_test = derive_ec_targets(split["test"])
         else:
-            from caviar_continuous import derive_ec_targets_continuous
+            from caviar_continuous import derive_ec_masks_continuous, derive_ec_targets_continuous
 
             ec_train = derive_ec_targets_continuous(train_segments, train)
             ec_test = derive_ec_targets_continuous(test_segments, test)
+            ec_train_masks = derive_ec_masks_continuous(train_segments, train)
 
     # `--data continuous` only: the segments/pairs on this dataset have no
     # fixed window length, so the pkl reading's `reconstruct_holds` (fixed
@@ -1112,7 +1270,7 @@ def main(argv: list[str] | None = None) -> int:
         else:
             mode_result = _run_relational_ec(
                 pyxlog, torch, kfold_select, args, train, test, ec_train, ec_test, wall,
-                reconstruct_fn=reconstruct_fn,
+                reconstruct_fn=reconstruct_fn, ec_masks=ec_train_masks,
             )
     else:
         if args.protocol == "direct":
@@ -1120,7 +1278,7 @@ def main(argv: list[str] | None = None) -> int:
         else:
             mode_result = _run_neural_ec(
                 pyxlog, torch, kfold_select, args, train, test, ec_train, ec_test, wall,
-                reconstruct_fn=reconstruct_fn,
+                reconstruct_fn=reconstruct_fn, ec_masks=ec_train_masks,
             )
     wall["mode_total"] = time.perf_counter() - t1
     wall["total"] = time.perf_counter() - t0
