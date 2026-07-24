@@ -862,7 +862,7 @@ def frozen_select(prog, mask_name, facts, is_positive, network, features,
 def kfold_select(prog_factory, mask_name, facts, is_positive, make_network,
                  features, neural_relations, folds=4, min_fit=0.75, seed=0,
                  witness_mask=None, min_coverage=0.5, topology="chain",
-                 **train_kw):
+                 tie_tolerance=None, **train_kw):
     """Select a rule by K-FOLD HOLDOUT, not by training weight: per fold, train on
     the rest and score every engine-enumerated candidate on the held-out facts by
     its own witness/cover semantics (``s_c(f) >= 0.5``); average across folds, apply
@@ -892,6 +892,14 @@ def kfold_select(prog_factory, mask_name, facts, is_positive, make_network,
     gated the same way."""
     import torch
 
+    if tie_tolerance is not None and not (
+        isinstance(tie_tolerance, (int, float)) and tie_tolerance > 0.0
+    ):
+        raise ValueError(
+            f"tie_tolerance must be a positive number or None (got "
+            f"{tie_tolerance!r}); a non-positive tolerance would treat "
+            "holdout quantization noise as evidence."
+        )
     if not 2 <= folds <= len(facts):
         raise ValueError(
             f"folds={folds} with {len(facts)} facts: every fold needs at least "
@@ -967,8 +975,14 @@ def kfold_select(prog_factory, mask_name, facts, is_positive, make_network,
     # axis select_rule's 0.01 default was calibrated for. Each fact is held out
     # exactly once, so flipping one fact moves the fold-mean score by roughly
     # 1/len(facts) -- differences below one fact are quantization noise, not
-    # evidence, and must count as ties.
-    tie_tolerance = max(0.01, 1.0 / len(facts))
+    # evidence, and must count as ties. The default 0.01 floor was calibrated
+    # on ~10^4-fact datasets; on much smaller datasets it can swallow a
+    # genuine lead worth hundreds of facts, so a caller may pass an explicit
+    # ``tie_tolerance`` (validated up front, before any training) -- it must
+    # be chosen BEFORE looking at results (a pre-registered analysis
+    # decision, not a post-hoc knob).
+    if tie_tolerance is None:
+        tie_tolerance = max(0.01, 1.0 / len(facts))
     return _select_from_holdout(scores, neural_rights, min_fit,
                                 tie_tolerance=tie_tolerance,
                                 coverage=coverage, min_coverage=min_coverage)

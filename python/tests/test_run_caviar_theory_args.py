@@ -111,3 +111,9 @@ def test_omitting_data_leaves_every_other_default_unchanged_including_new_flags(
     omitted = run_caviar_theory.parse_args(REQUIRED)
     explicit = run_caviar_theory.parse_args(REQUIRED + ["--data", "pkl"])
     assert vars(omitted) == vars(explicit)
+
+
+def test_tie_tolerance_default_is_none_and_explicit_value_parses():
+    assert run_caviar_theory.parse_args(REQUIRED).tie_tolerance is None
+    args = run_caviar_theory.parse_args(REQUIRED + ["--tie-tolerance", "0.005"])
+    assert args.tie_tolerance == 0.005

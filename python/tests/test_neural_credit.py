@@ -1496,3 +1496,21 @@ def test_acceptance_original_killer_criterion_arity2_head():
     print(f"[acceptance] probe P(0.95)={probe_p[0]:.4f} P(0.005)={probe_p[1]:.4f}")
     assert probe_p[0] > 0.5, probe_p
     assert probe_p[1] < 0.5, probe_p
+
+
+def test_kfold_select_refuses_non_positive_tie_tolerance() -> None:
+    """An explicit tie_tolerance must be positive: zero/negative would turn
+    holdout quantization noise into fake decisiveness. Refused typed, before
+    any expensive work depends on it."""
+    from pyxlog.ilp.neural_credit import kfold_select
+
+    with pytest.raises(ValueError, match="tie_tolerance"):
+        kfold_select(
+            lambda: None, "W", [(0, 1)], [True], lambda: None,
+            None, {}, folds=1, tie_tolerance=0.0,
+        )
+    with pytest.raises(ValueError, match="tie_tolerance"):
+        kfold_select(
+            lambda: None, "W", [(0, 1)], [True], lambda: None,
+            None, {}, folds=1, tie_tolerance=-0.01,
+        )

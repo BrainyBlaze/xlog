@@ -179,6 +179,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "value explicitly -- this default is never silently changed for it.",
     )
     p.add_argument(
+        "--tie-tolerance", type=float, default=None,
+        help="explicit holdout tie tolerance for kfold_select (default: its "
+             "own derived max(0.01, 1/n_facts)). The 0.01 floor was "
+             "calibrated on ~10^4-fact datasets; on much smaller data it can "
+             "swallow a genuine lead. Pre-register the value before looking "
+             "at results -- this is an analysis decision, not a tuning knob.",
+    )
+    p.add_argument(
         "--no-direct-context", action="store_true",
         help="ec protocol only: skip the side-by-side direct-protocol run "
              "(it roughly doubles a neural ec run's training cost); "
@@ -310,6 +318,7 @@ def _run_relational_theory(pyxlog, torch, kfold_select, args, train, test, wall)
             lambda: prog, MASK_NAME, residual_facts, residual_is_positive,
             make_network, features, neural_relations={}, folds=args.k,
             seed=args.seed, steps=steps_effective, topology="star",
+            tie_tolerance=args.tie_tolerance,
         )
         iteration_wall.append(time.perf_counter() - t)
         return sel
@@ -464,6 +473,7 @@ def _induce_neural_theory_for_target(
             lambda: prog, MASK_NAME, residual_facts, residual_is_positive,
             make_network, features_train, neural_relations=neural_relations,
             folds=args.k, seed=args.seed, steps=args.steps, topology="star",
+            tie_tolerance=args.tie_tolerance,
         )
         net = None
         if selection.rule is not None:
@@ -856,6 +866,7 @@ def _run_relational_ec(pyxlog, torch, kfold_select, args, train, test, ec_train,
                 lambda: prog, MASK_NAME, residual_facts, residual_is_positive,
                 make_network, features, neural_relations={}, folds=args.k,
                 seed=args.seed, steps=steps_effective, topology="star",
+            tie_tolerance=args.tie_tolerance,
             )
             iteration_wall.append(time.perf_counter() - t)
             return sel

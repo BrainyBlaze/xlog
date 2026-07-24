@@ -401,9 +401,12 @@ def derive_ec_targets_continuous(
 ) -> dict:
     """Event-Calculus (initiatedAt/terminatedAt) targets on the CONTINUOUS
     timeline: one independent transition sequence PER (video segment,
-    canonical pair), walked over only that pair's own observed co-visible
-    timesteps within that segment (never across a segment boundary, and
-    never across a gap where the pair was not co-visible at all -- see
+    canonical pair), walked over that pair's own observed co-visible
+    timesteps within that segment in OBSERVATION order (never across a
+    segment boundary; two observed timesteps that straddle a gap where the
+    pair was temporarily not co-visible ARE adjacent in this walk, so a
+    label change across such a gap counts as a transition -- on the real
+    train split exactly one termination is of this kind -- see
     `_group_pts_by_pair`).
 
     DEFAULT (``treat_first_observed_as_init=False``): counts ONLY REAL
