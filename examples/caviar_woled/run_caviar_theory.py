@@ -76,7 +76,7 @@ candidate (e.g. ``both_active & close``) is punished, in holdout accuracy,
 for every already-holding frame it also covers -- even though re-asserting
 ``initiatedAt``/``terminatedAt`` on a frame the inertia closure would
 reconstruct identically either way is semantically harmless, not an error
-(see `.superpowers/sdd/task-e2-review.md`'s F3 finding and
+(see
 `caviar_continuous.derive_ec_masks_continuous`'s own docstring for the exact
 truth table). ``_run_relational_ec``/``_run_neural_ec`` exclude these
 frames from the facts/labels handed to `theory_loop.induce_theory` (and,

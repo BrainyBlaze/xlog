@@ -30,8 +30,7 @@ Two further additions, both scoped to the Event-Calculus protocol only (see
 each function's own docstring for the full reasoning): `derive_ec_masks_
 continuous` builds per-target DON'T-CARE masks (frames where firing
 `is_init`/`is_term`'s own event predicate is semantically harmless under
-inertia, so scoring it as an ordinary error is dishonest -- see
-task-e2-review.md's F3 finding); `convert_continuous` also returns a
+inertia, so scoring it as an ordinary error is dishonest); `convert_continuous` also returns a
 `"transition_relations"` key (four frame-DIFFERENCE relations, kept
 deliberately separate from `"relations"` so no direct-protocol vocabulary
 builder can pick them up by accident -- only `run_caviar_theory.py`'s own
@@ -600,7 +599,7 @@ def derive_ec_masks_continuous(
     that scoring a clause's prediction there as an ordinary error (a false
     positive against the target's own True/False label) is dishonest.
 
-    WHY THIS EXISTS (see task-e2-review.md's F3 finding). With strict
+    WHY THIS EXISTS. With strict
     transition-only ``is_init``/``is_term`` labels (~10/~11 positives on the
     real train split), a state-shaped clause such as ``both_active & close``
     covers ~500 rows -- and every already-holding frame among those is
