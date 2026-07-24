@@ -62,3 +62,52 @@ def test_explicit_protocol_direct_parses_identically_to_omitting_it():
     omitted = run_caviar_theory.parse_args(REQUIRED)
     explicit = run_caviar_theory.parse_args(REQUIRED + ["--protocol", "direct"])
     assert vars(omitted) == vars(explicit)
+
+
+# ---------------------------------------------------------------------------
+# `--data`/`--test-json`/`--min-new-covered` -- added alongside the
+# continuous-dataset loader (caviar_continuous.py). The one behavior these
+# guard: `--data` must default to `"pkl"` (byte-identical CLI behavior when
+# omitted) and every OTHER argument's default (including the ones the
+# `--protocol` tests above already pin) must stay unchanged.
+# ---------------------------------------------------------------------------
+
+
+def test_data_defaults_to_pkl():
+    args = run_caviar_theory.parse_args(REQUIRED)
+    assert args.data == "pkl"
+    assert args.test_json is None
+
+
+def test_min_new_covered_defaults_to_ten():
+    args = run_caviar_theory.parse_args(REQUIRED)
+    assert args.min_new_covered == 10
+
+
+def test_min_new_covered_is_overridable():
+    args = run_caviar_theory.parse_args(REQUIRED + ["--min-new-covered", "3"])
+    assert args.min_new_covered == 3
+
+
+def test_data_rejects_an_unknown_value():
+    with pytest.raises(SystemExit):
+        run_caviar_theory.parse_args(REQUIRED + ["--data", "bogus"])
+
+
+def test_data_continuous_requires_test_json():
+    with pytest.raises(SystemExit):
+        run_caviar_theory.parse_args(REQUIRED + ["--data", "continuous"])
+
+
+def test_data_continuous_with_test_json_parses():
+    args = run_caviar_theory.parse_args(
+        REQUIRED + ["--data", "continuous", "--test-json", "caviar-test.json"]
+    )
+    assert args.data == "continuous"
+    assert args.test_json == "caviar-test.json"
+
+
+def test_omitting_data_leaves_every_other_default_unchanged_including_new_flags():
+    omitted = run_caviar_theory.parse_args(REQUIRED)
+    explicit = run_caviar_theory.parse_args(REQUIRED + ["--data", "pkl"])
+    assert vars(omitted) == vars(explicit)

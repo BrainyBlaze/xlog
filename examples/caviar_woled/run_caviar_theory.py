@@ -110,8 +110,11 @@ ACTIVITY_RELATIONS: tuple[str, ...] = (
     "both_active", "both_inactive", "both_walking", "mixed_active_walking",
 )
 
-# The theory loop's own coverage-acceptance floor (default value;
-# not exposed on the CLI).
+# The theory loop's own coverage-acceptance floor's DEFAULT value
+# (overridable via --min-new-covered; see parse_args -- a caller running
+# --protocol ec --data continuous should lower it explicitly, since that
+# combination has far fewer positives per target than this default was
+# tuned against).
 MIN_NEW_COVERED = 10
 
 # Cost-knob guard: relational mode's `neural_relations` is always
@@ -137,8 +140,24 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "inertia, and report frame-level F1 alongside the direct "
         "protocol's own theory F1 on the same fold for context.",
     )
-    p.add_argument("--pkl", required=True, help="path to caviar_folds.pkl")
-    p.add_argument("--fold", default="fold1", help="fold key, e.g. fold1 (default: fold1)")
+    p.add_argument(
+        "--data", default="pkl", choices=("pkl", "continuous"),
+        help="'pkl' (default, unchanged behavior): --pkl is caviar_folds.pkl, "
+        "a fold of which is selected by --fold. 'continuous': --pkl is "
+        "instead the ORIGINAL continuous caviar-train.json and --test-json "
+        "is caviar-test.json -- train/test are two separate files in this "
+        "dataset, not folds of one file (--fold is ignored); read via "
+        "caviar_continuous.load_continuous/convert_continuous, which "
+        "preserves the dataset's own 40ms timeline and real video "
+        "boundaries instead of the pkl's fixed-length re-windowing.",
+    )
+    p.add_argument("--pkl", required=True, help="path to caviar_folds.pkl ('--data pkl') or caviar-train.json ('--data continuous')")
+    p.add_argument(
+        "--test-json", default=None,
+        help="path to caviar-test.json; required by, and only meaningful "
+        "with, '--data continuous'.",
+    )
+    p.add_argument("--fold", default="fold1", help="fold key, e.g. fold1 (default: fold1); '--data pkl' only")
     p.add_argument("--k", type=int, default=4, help="k-fold holdout folds per select_once call (default: 4)")
     p.add_argument("--seed", type=int, default=7, help="RNG seed, covers the whole run (default: 7)")
     p.add_argument(
@@ -150,13 +169,26 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--hidden", type=int, default=16, help="close_nn MLP hidden width, neural mode only (default: 16)")
     p.add_argument("--max-clauses", type=int, default=4, help="theory_loop.induce_theory's max_clauses (default: 4)")
     p.add_argument(
+        "--min-new-covered", type=int, default=MIN_NEW_COVERED,
+        help="theory_loop.induce_theory's min_new_covered coverage-"
+        f"acceptance floor (default: {MIN_NEW_COVERED}, tuned against the "
+        "windowed pkl's per-timestep direct target). The continuous "
+        "dataset's EC protocol has only ~10-22 real init/term transitions "
+        "in the WHOLE train split (see caviar_continuous.py's own report), "
+        "so '--protocol ec --data continuous' should pass a much lower "
+        "value explicitly -- this default is never silently changed for it.",
+    )
+    p.add_argument(
         "--no-direct-context", action="store_true",
         help="ec protocol only: skip the side-by-side direct-protocol run "
              "(it roughly doubles a neural ec run's training cost); "
              "RESULT.json's direct_context becomes null",
     )
     p.add_argument("--out", required=True, help="path to write RESULT.json")
-    return p.parse_args(argv)
+    args = p.parse_args(argv)
+    if args.data == "continuous" and args.test_json is None:
+        p.error("--data continuous requires --test-json (path to caviar-test.json).")
+    return args
 
 
 def _require_cuda() -> None:
@@ -287,7 +319,7 @@ def _run_relational_theory(pyxlog, torch, kfold_select, args, train, test, wall)
     t0 = time.perf_counter()
     theory = induce_theory(
         select_once, predict_clause_train, train["facts"], train["is_positive"],
-        max_clauses=args.max_clauses, min_new_covered=MIN_NEW_COVERED,
+        max_clauses=args.max_clauses, min_new_covered=args.min_new_covered,
     )
     wall["theory_loop"] = time.perf_counter() - t0
     wall["theory_loop_per_iteration"] = iteration_wall
@@ -472,7 +504,7 @@ def _induce_neural_theory_for_target(
     t0 = time.perf_counter()
     theory = induce_theory(
         select_once, loop_predict_clause, facts, target_labels,
-        max_clauses=args.max_clauses, min_new_covered=MIN_NEW_COVERED,
+        max_clauses=args.max_clauses, min_new_covered=args.min_new_covered,
     )
     wall[wall_key] = time.perf_counter() - t0
     wall[f"{wall_key}_per_iteration"] = iteration_wall
@@ -767,7 +799,7 @@ def _score_theory(
 # ---------------------------------------------------------------------------
 
 
-def _run_relational_ec(pyxlog, torch, kfold_select, args, train, test, ec_train, ec_test, wall):
+def _run_relational_ec(pyxlog, torch, kfold_select, args, train, test, ec_train, ec_test, wall, reconstruct_fn=None):
     """Relational-vocabulary Event-Calculus protocol. Both the init search
     and the term search reuse the SAME compiled program and the SAME
     set-intersection `predict_clause` closures `_run_relational_theory`
@@ -779,7 +811,16 @@ def _run_relational_ec(pyxlog, torch, kfold_select, args, train, test, ec_train,
     The direct protocol's own theory is run in full, once, on this SAME
     fold, and returned under ``"direct_context"`` so the two protocols'
     numbers sit side by side without a second invocation of this script
-    (skippable via ``--no-direct-context``)."""
+    (skippable via ``--no-direct-context``).
+
+    ``reconstruct_fn(init_pred_test, term_pred_test) -> holds_pred_test``:
+    defaults (``None``) to the pkl's own fixed-window inertia closure
+    (`ec_scorer.reconstruct_holds` over ``test["num_pt"] // ec_test["T"]``
+    windows of length ``ec_test["T"]``) -- unchanged, byte-identical
+    behavior for ``--data pkl``. ``--data continuous`` passes
+    `caviar_continuous.reconstruct_holds_continuous` instead, since that
+    dataset's segments/pairs have no fixed window length for the pkl
+    reading to apply to."""
     direct_result = None
     if not args.no_direct_context:
         direct_wall: dict = {}
@@ -822,7 +863,7 @@ def _run_relational_ec(pyxlog, torch, kfold_select, args, train, test, ec_train,
         t0 = time.perf_counter()
         theory = induce_theory(
             select_once, predict_clause_train, train["facts"], target_train_labels,
-            max_clauses=args.max_clauses, min_new_covered=MIN_NEW_COVERED,
+            max_clauses=args.max_clauses, min_new_covered=args.min_new_covered,
         )
         wall[wall_key] = time.perf_counter() - t0
         wall[f"{wall_key}_per_iteration"] = iteration_wall
@@ -842,8 +883,11 @@ def _run_relational_ec(pyxlog, torch, kfold_select, args, train, test, ec_train,
 
     init_pred_test = theory_predictions(init_theory["clauses"], predict_clause_test, test["num_pt"])
     term_pred_test = theory_predictions(term_theory["clauses"], predict_clause_test, test["num_pt"])
-    num_windows = test["num_pt"] // ec_test["T"]
-    holds_pred_test = reconstruct_holds(init_pred_test, term_pred_test, num_windows, ec_test["T"])
+    if reconstruct_fn is None:
+        num_windows = test["num_pt"] // ec_test["T"]
+        holds_pred_test = reconstruct_holds(init_pred_test, term_pred_test, num_windows, ec_test["T"])
+    else:
+        holds_pred_test = reconstruct_fn(init_pred_test, term_pred_test)
     frame_scoring = frame_f1(holds_pred_test, test["is_positive"])
 
     return {
@@ -869,7 +913,7 @@ def _run_relational_ec(pyxlog, torch, kfold_select, args, train, test, ec_train,
     }
 
 
-def _run_neural_ec(pyxlog, torch, kfold_select, args, train, test, ec_train, ec_test, wall):
+def _run_neural_ec(pyxlog, torch, kfold_select, args, train, test, ec_train, ec_test, wall, reconstruct_fn=None):
     """Neural-vocabulary Event-Calculus protocol. The init search and the
     term search each call `_induce_neural_theory_for_target` independently,
     so EACH theory ends up with its OWN per-clause `close_nn` networks --
@@ -880,7 +924,11 @@ def _run_neural_ec(pyxlog, torch, kfold_select, args, train, test, ec_train, ec_
     The direct protocol's own theory is run in full, once, on this SAME
     fold, and returned under ``"direct_context"``, mirroring
     `_run_relational_ec` (skippable via ``--no-direct-context`` -- in this
-    mode it roughly doubles the training cost)."""
+    mode it roughly doubles the training cost).
+
+    ``reconstruct_fn``: see `_run_relational_ec`'s identical parameter --
+    same default (the pkl's fixed-window inertia closure), same
+    ``--data continuous`` override."""
     from pyxlog.ilp.neural_credit import NeuralRelationSpec, train_engine_mode
 
     direct_result = None
@@ -938,8 +986,11 @@ def _run_neural_ec(pyxlog, torch, kfold_select, args, train, test, ec_train, ec_
 
     init_pred_test = theory_predictions(init_theory["clauses"], init_predict_test, test["num_pt"])
     term_pred_test = theory_predictions(term_theory["clauses"], term_predict_test, test["num_pt"])
-    num_windows = test["num_pt"] // ec_test["T"]
-    holds_pred_test = reconstruct_holds(init_pred_test, term_pred_test, num_windows, ec_test["T"])
+    if reconstruct_fn is None:
+        num_windows = test["num_pt"] // ec_test["T"]
+        holds_pred_test = reconstruct_holds(init_pred_test, term_pred_test, num_windows, ec_test["T"])
+    else:
+        holds_pred_test = reconstruct_fn(init_pred_test, term_pred_test)
     frame_scoring = frame_f1(holds_pred_test, test["is_positive"])
 
     return {
@@ -986,32 +1037,62 @@ def main(argv: list[str] | None = None) -> int:
     import pyxlog
     from pyxlog.ilp.neural_credit import kfold_select
 
-    from caviar_convert import convert_split, load_folds
-
     wall: dict = {}
     t0 = time.perf_counter()
-    folds = load_folds(args.pkl)
-    if args.fold not in folds:
-        available = sorted(
-            k for k, v in folds.items()
-            if isinstance(v, dict) and "train" in v and "test" in v
-        )
-        raise KeyError(f"fold {args.fold!r} not found in {args.pkl!r} (have: {available}).")
-    split = folds[args.fold]
-    train = convert_split(split["train"], close_threshold=CLOSE_THRESHOLD)
-    test = convert_split(split["test"], close_threshold=CLOSE_THRESHOLD)
+
+    # `train_segments`/`test_segments` stay `None` for `--data pkl`; they
+    # are only needed (by the `reconstruct_fn` closures below) to re-walk
+    # `caviar_continuous`'s per-pair grouping, which is otherwise opaque
+    # once collapsed into `train`/`test`'s own dicts.
+    train_segments = test_segments = None
+    if args.data == "pkl":
+        from caviar_convert import convert_split, load_folds
+
+        folds = load_folds(args.pkl)
+        if args.fold not in folds:
+            available = sorted(
+                k for k, v in folds.items()
+                if isinstance(v, dict) and "train" in v and "test" in v
+            )
+            raise KeyError(f"fold {args.fold!r} not found in {args.pkl!r} (have: {available}).")
+        split = folds[args.fold]
+        train = convert_split(split["train"], close_threshold=CLOSE_THRESHOLD)
+        test = convert_split(split["test"], close_threshold=CLOSE_THRESHOLD)
+    else:
+        from caviar_continuous import convert_continuous, load_continuous
+
+        train_segments = load_continuous(args.pkl)
+        test_segments = load_continuous(args.test_json)
+        train = convert_continuous(train_segments, close_threshold=CLOSE_THRESHOLD)
+        test = convert_continuous(test_segments, close_threshold=CLOSE_THRESHOLD)
     wall["convert"] = time.perf_counter() - t0
 
     # `--protocol ec` only: initiatedAt/terminatedAt targets, in the SAME
-    # pt indexing `train`/`test` already use (both derived from the SAME
-    # `split["train"]`/`split["test"]` datapoints). `--protocol direct`
-    # never derives these -- untouched, so its own run is unaffected.
+    # pt indexing `train`/`test` already use. `--protocol direct` never
+    # derives these -- untouched, so its own run is unaffected.
     ec_train = ec_test = None
     if args.protocol == "ec":
-        from caviar_convert import derive_ec_targets
+        if args.data == "pkl":
+            from caviar_convert import derive_ec_targets
 
-        ec_train = derive_ec_targets(split["train"])
-        ec_test = derive_ec_targets(split["test"])
+            ec_train = derive_ec_targets(split["train"])
+            ec_test = derive_ec_targets(split["test"])
+        else:
+            from caviar_continuous import derive_ec_targets_continuous
+
+            ec_train = derive_ec_targets_continuous(train_segments, train)
+            ec_test = derive_ec_targets_continuous(test_segments, test)
+
+    # `--data continuous` only: the segments/pairs on this dataset have no
+    # fixed window length, so the pkl reading's `reconstruct_holds` (fixed
+    # `num_windows * T`) does not apply -- see `_run_relational_ec`'s own
+    # `reconstruct_fn` docstring.
+    reconstruct_fn = None
+    if args.protocol == "ec" and args.data == "continuous":
+        from caviar_continuous import reconstruct_holds_continuous
+
+        def reconstruct_fn(init_pred_test, term_pred_test):
+            return reconstruct_holds_continuous(init_pred_test, term_pred_test, test_segments, test)
 
     t1 = time.perf_counter()
     if args.mode == "relational":
@@ -1019,21 +1100,25 @@ def main(argv: list[str] | None = None) -> int:
             mode_result = _run_relational_theory(pyxlog, torch, kfold_select, args, train, test, wall)
         else:
             mode_result = _run_relational_ec(
-                pyxlog, torch, kfold_select, args, train, test, ec_train, ec_test, wall
+                pyxlog, torch, kfold_select, args, train, test, ec_train, ec_test, wall,
+                reconstruct_fn=reconstruct_fn,
             )
     else:
         if args.protocol == "direct":
             mode_result = _run_neural_theory(pyxlog, torch, kfold_select, args, train, test, wall)
         else:
             mode_result = _run_neural_ec(
-                pyxlog, torch, kfold_select, args, train, test, ec_train, ec_test, wall
+                pyxlog, torch, kfold_select, args, train, test, ec_train, ec_test, wall,
+                reconstruct_fn=reconstruct_fn,
             )
     wall["mode_total"] = time.perf_counter() - t1
     wall["total"] = time.perf_counter() - t0
 
     result = {
         "pkl": args.pkl,
-        "fold": args.fold,
+        "test_json": args.test_json,
+        "data": args.data,
+        "fold": args.fold if args.data == "pkl" else None,
         "mode": args.mode,
         "protocol": args.protocol,
         "close_threshold": CLOSE_THRESHOLD,
@@ -1041,7 +1126,7 @@ def main(argv: list[str] | None = None) -> int:
         "seed": args.seed,
         "hidden": args.hidden,
         "max_clauses": args.max_clauses,
-        "min_new_covered": MIN_NEW_COVERED,
+        "min_new_covered": args.min_new_covered,
         "num_pt": {"train": train["num_pt"], "test": test["num_pt"]},
         "n_pos": {
             "train": int(sum(train["is_positive"])),
