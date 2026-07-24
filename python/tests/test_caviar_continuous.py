@@ -17,7 +17,9 @@ if str(EXAMPLE_DIR) not in sys.path:
     sys.path.insert(0, str(EXAMPLE_DIR))
 
 from caviar_continuous import (  # noqa: E402
+    TRANSITION_RELATION_NAMES,
     convert_continuous,
+    derive_ec_masks_continuous,
     derive_ec_targets_continuous,
     load_continuous,
     reconstruct_holds_continuous,
@@ -233,7 +235,7 @@ def test_convert_continuous_output_keys_match_convert_split_plus_segment_of_pt(t
         "p1_labels": [0], "p2_labels": [0], "complex_labels": [0],
         "atoms": "coords(p1,0,0,0). coords(p2,0,0,0).",
     }])
-    assert set(continuous_out) == set(split_out) | {"segment_of_pt"}
+    assert set(continuous_out) == set(split_out) | {"segment_of_pt", "transition_relations"}
 
 
 # ---------------------------------------------------------------------------
@@ -362,3 +364,191 @@ def test_reconstruct_holds_continuous_rejects_mismatched_term_length(two_segment
     converted = convert_continuous(segments)
     with pytest.raises(ValueError):
         reconstruct_holds_continuous([False] * 6, [True, False], segments, converted)
+
+
+# ---------------------------------------------------------------------------
+# transition_relations: frame-difference vocabulary, ec-mode only (kept out
+# of "relations" -- see convert_continuous's own docstring paragraph on why).
+# One pair (id0, id1), id1 held fixed at "inactive" throughout so every fired
+# relation below is caused by id0's own activity alone, isolating each of the
+# four relations to its own pair-time.
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture()
+def transition_fixture_file(tmp_path):
+    docs = [{
+        "_id": 0, "time": "0",
+        "narrative": [
+            "happensAt(inactive(id0),0)", "coords(id0,0,0,0)",
+            "happensAt(inactive(id1),0)", "coords(id1,0,0,0)",
+            "happensAt(active(id0),40)", "coords(id0,0,0,40)",
+            "happensAt(inactive(id1),40)", "coords(id1,0,0,40)",
+            "happensAt(inactive(id0),80)", "coords(id0,0,0,80)",
+            "happensAt(inactive(id1),80)", "coords(id1,0,0,80)",
+            "happensAt(walking(id0),120)", "coords(id0,0,0,120)",
+            "happensAt(inactive(id1),120)", "coords(id1,0,0,120)",
+            "happensAt(running(id0),160)", "coords(id0,0,0,160)",
+            "happensAt(inactive(id1),160)", "coords(id1,0,0,160)",
+        ],
+        "annotation": [],
+    }]
+    path = tmp_path / "mini.json"
+    _write_docs(path, docs)
+    return path
+
+
+def test_transition_relations_exact_contents(transition_fixture_file):
+    segments = load_continuous(str(transition_fixture_file))
+    out = convert_continuous(segments)
+    tr = out["transition_relations"]
+    # pt0=t0 (first observed), pt1=t40 (inactive->active), pt2=t80
+    # (active->inactive), pt3=t120 (inactive->walking), pt4=t160
+    # (walking->running).
+    assert tr["any_became_active"] == [(1, 1)]
+    assert tr["any_became_inactive"] == [(2, 1)]
+    assert tr["any_became_walking"] == [(3, 1)]
+    assert tr["any_stopped_walking"] == [(4, 1)]
+
+
+def test_transition_relations_first_observed_pt_belongs_to_none(transition_fixture_file):
+    segments = load_continuous(str(transition_fixture_file))
+    out = convert_continuous(segments)
+    tr = out["transition_relations"]
+    for name in TRANSITION_RELATION_NAMES:
+        assert (0, 1) not in tr[name]
+
+
+def test_transition_relations_are_never_merged_into_relations(transition_fixture_file):
+    segments = load_continuous(str(transition_fixture_file))
+    out = convert_continuous(segments)
+    for name in TRANSITION_RELATION_NAMES:
+        assert name not in out["relations"]
+    assert set(out["transition_relations"]) == set(TRANSITION_RELATION_NAMES)
+
+
+def test_transition_relations_direct_protocol_vocabulary_guard(two_segment_file):
+    # Any --data continuous run (direct OR ec protocol) shares this same
+    # convert_continuous output; a direct-protocol vocabulary builder reads
+    # only "relations" (run_caviar_theory.py's _filtered_relation_names /
+    # ACTIVITY_RELATIONS), never "transition_relations" -- pinning that the
+    # two dicts never overlap is what keeps that guarantee true regardless
+    # of which fixture produced them.
+    segments = load_continuous(str(two_segment_file))
+    out = convert_continuous(segments)
+    assert set(out["relations"]) & set(TRANSITION_RELATION_NAMES) == set()
+
+
+# ---------------------------------------------------------------------------
+# derive_ec_masks_continuous: don't-care truth table (task-e2-review.md's F3)
+# ---------------------------------------------------------------------------
+
+
+def test_derive_ec_masks_continuous_matches_two_segment_fixture(two_segment_file):
+    segments = load_continuous(str(two_segment_file))
+    converted = convert_continuous(segments)
+    masks = derive_ec_masks_continuous(segments, converted)
+    # pt0/pt4: first-observed, not holding -> term don't-care, init negative.
+    # pt1/pt5: real init transitions -> neither dontcare.
+    # pt2: real term transition -> neither dontcare.
+    # pt3: not-holds-and-not-held-before -> term don't-care, init negative.
+    assert masks["init_dontcare"] == [False, False, False, False, False, False]
+    assert masks["term_dontcare"] == [True, False, False, True, True, False]
+    assert masks["n_init_dontcare"] == 0
+    assert masks["n_term_dontcare"] == 3
+    assert masks["num_pt"] == 6
+
+
+@pytest.fixture()
+def mid_interval_file(tmp_path):
+    # One pair, one segment, 5 frames: not-meeting, meet, meet, meet,
+    # not-meeting -- exercises the "pos and prev" (init don't-care / term
+    # negative) cell at the two MIDDLE meeting frames.
+    docs = [{
+        "_id": 0, "time": "0",
+        "narrative": [
+            f"happensAt(active(id0),{t})" for t in (0, 40, 80, 120, 160)
+        ] + [
+            f"coords(id0,0,0,{t})" for t in (0, 40, 80, 120, 160)
+        ] + [
+            f"happensAt(active(id1),{t})" for t in (0, 40, 80, 120, 160)
+        ] + [
+            f"coords(id1,0,0,{t})" for t in (0, 40, 80, 120, 160)
+        ],
+        "annotation": [
+            f"holdsAt(meeting(id0,id1),{t})" for t in (40, 80, 120)
+        ] + [
+            f"holdsAt(meeting(id1,id0),{t})" for t in (40, 80, 120)
+        ],
+    }]
+    path = tmp_path / "mini.json"
+    _write_docs(path, docs)
+    return path
+
+
+def test_derive_ec_masks_continuous_mid_interval_cells(mid_interval_file):
+    segments = load_continuous(str(mid_interval_file))
+    converted = convert_continuous(segments)
+    assert converted["is_positive"] == [False, True, True, True, False]
+    ec = derive_ec_targets_continuous(segments, converted)
+    assert ec["is_init"] == [False, True, False, False, False]
+    assert ec["is_term"] == [False, False, False, False, True]
+
+    masks = derive_ec_masks_continuous(segments, converted)
+    # pt2, pt3: holds now AND held before -> init don't-care, term negative.
+    assert masks["init_dontcare"] == [False, False, True, True, False]
+    assert masks["term_dontcare"] == [True, False, False, False, False]
+    assert masks["n_init_dontcare"] == 2
+    assert masks["n_term_dontcare"] == 1
+
+
+def test_derive_ec_masks_continuous_first_observed_holding(tmp_path):
+    # Same fixture as derive_ec_targets_continuous's own first-observed test:
+    # the pair is already meeting at its very first observed pair-time.
+    docs = [{
+        "_id": 0, "time": "0",
+        "narrative": [
+            "happensAt(active(id0),0)", "coords(id0,0,0,0)",
+            "happensAt(active(id1),0)", "coords(id1,0,0,0)",
+            "happensAt(active(id0),40)", "coords(id0,0,0,40)",
+            "happensAt(active(id1),40)", "coords(id1,0,0,40)",
+        ],
+        "annotation": [
+            "holdsAt(meeting(id0,id1),0)", "holdsAt(meeting(id1,id0),0)",
+            "holdsAt(meeting(id0,id1),40)", "holdsAt(meeting(id1,id0),40)",
+        ],
+    }]
+    path = tmp_path / "mini.json"
+    _write_docs(path, docs)
+    segments = load_continuous(str(path))
+    converted = convert_continuous(segments)
+
+    masks_default = derive_ec_masks_continuous(segments, converted)
+    # pt0: first-observed AND holding -> unobservable initiation -> init
+    # don't-care (term stays negative: the fluent demonstrably holds).
+    # pt1: holds AND held before (pt0) -> also init don't-care.
+    assert masks_default["init_dontcare"] == [True, True]
+    assert masks_default["term_dontcare"] == [False, False]
+
+    masks_incl = derive_ec_masks_continuous(
+        segments, converted, treat_first_observed_as_init=True
+    )
+    # With the flag, pt0 becomes the real is_init positive instead --
+    # dropped from init_dontcare; pt1's own mid-interval cell is unaffected.
+    assert masks_incl["init_dontcare"] == [False, True]
+    assert masks_incl["term_dontcare"] == [False, False]
+
+
+def test_derive_ec_masks_continuous_rejects_mismatched_is_positive_length(two_segment_file):
+    segments = load_continuous(str(two_segment_file))
+    converted = convert_continuous(segments)
+    bad = dict(converted, is_positive=converted["is_positive"][:-1])
+    with pytest.raises(ValueError, match="is_positive"):
+        derive_ec_masks_continuous(segments, bad)
+
+
+def test_derive_ec_masks_continuous_rejects_segments_not_matching_converted(two_segment_file):
+    segments = load_continuous(str(two_segment_file))
+    converted = convert_continuous(segments)
+    with pytest.raises(ValueError, match="segments/converted mismatch"):
+        derive_ec_masks_continuous(segments[:1], converted)

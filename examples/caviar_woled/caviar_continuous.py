@@ -26,6 +26,17 @@ either data source) plus one addition, `segment_of_pt`, so nothing at any
 call site can accidentally let a pair-time row's neighbor comparison cross a
 video boundary.
 
+Two further additions, both scoped to the Event-Calculus protocol only (see
+each function's own docstring for the full reasoning): `derive_ec_masks_
+continuous` builds per-target DON'T-CARE masks (frames where firing
+`is_init`/`is_term`'s own event predicate is semantically harmless under
+inertia, so scoring it as an ordinary error is dishonest -- see
+task-e2-review.md's F3 finding); `convert_continuous` also returns a
+`"transition_relations"` key (four frame-DIFFERENCE relations, kept
+deliberately separate from `"relations"` so no direct-protocol vocabulary
+builder can pick them up by accident -- only `run_caviar_theory.py`'s own
+`--protocol ec` code reads that key).
+
 DATA SHAPE. One JSON document per line; keys `_id`, `time`, `narrative`
 (list of atom strings), `annotation` (list of atom strings) -- `_id`/`time`
 are read by nothing here (every meaningful value already lives in the atom
@@ -274,6 +285,11 @@ def _iter_pair_rows(segments: list[dict]):
                     yield seg_idx, t, present[i], present[j]
 
 
+TRANSITION_RELATION_NAMES: tuple[str, ...] = (
+    "any_became_active", "any_became_inactive", "any_became_walking", "any_stopped_walking",
+)
+
+
 def convert_continuous(segments: list[dict], close_threshold: float = 25.0) -> dict:
     """Flatten continuous per-video segments into the SAME pair-time
     relation space `caviar_convert.convert_split` builds for the windowed
@@ -289,6 +305,20 @@ def convert_continuous(segments: list[dict], close_threshold: float = 25.0) -> d
     comparing neighboring pair-times can refuse to cross a video boundary by
     checking this list, exactly as `derive_ec_targets_continuous` and
     `reconstruct_holds_continuous` do internally via `_group_pts_by_pair`.
+    PLUS ``"transition_relations"``: ``dict[str, list[tuple[int, int]]]``,
+    the same ``(pt, 1)``-row shape as ``"relations"`` but for FOUR
+    frame-DIFFERENCE relations computed from per-person activity CHANGES
+    between a pair's own consecutive observed co-visible pair-times (see the
+    per-relation docstring below) -- kept in a SEPARATE dict key, deliberately
+    NEVER merged into ``"relations"``, so that any caller reading
+    ``"relations"`` alone (every existing direct-protocol vocabulary builder
+    in `run_caviar_theory.py`: ``_filtered_relation_names``,
+    ``ACTIVITY_RELATIONS``) is structurally unable to pick these up by
+    accident -- only `run_caviar_theory.py`'s own ``--protocol ec`` code
+    explicitly reads ``"transition_relations"`` and merges it into the
+    EC-search-only candidate pool. This is the enforcement mechanism for
+    "transition relations enter the ec-mode vocabulary only", not a
+    convention a caller has to remember.
 
     ``pt`` is a plain sequential row index (0..num_pt-1) in `_iter_pair_rows`'s
     own order -- NOT `caviar_convert`'s ``dp_index * T + t`` formula, which
@@ -307,6 +337,20 @@ def convert_continuous(segments: list[dict], close_threshold: float = 25.0) -> d
         "far": [],
         "coords_missing": [],
     }
+    transition_relations: dict[str, list[tuple[int, int]]] = {
+        name: [] for name in TRANSITION_RELATION_NAMES
+    }
+    # One entry per (segment, canonical pair) the walk has already visited,
+    # holding that pair's own most recently OBSERVED co-visible activity pair
+    # -- `_iter_pair_rows` visits a fixed pair's occurrences in strictly
+    # increasing t order within a segment (segment ascending, then t
+    # ascending, then pair ascending -- see its own docstring), so this dict,
+    # updated once per pt in this same forward pass, always holds exactly the
+    # "immediately preceding observed co-visible" activities the transition
+    # relations below need; no second pass or `_group_pts_by_pair` re-walk
+    # required. A key absent here means "first observed pair-time in this
+    # segment" -- see the per-relation note below on what that implies.
+    prev_activity: dict[tuple[int, str, str], tuple[str, str]] = {}
     feature_rows: list[tuple[float, float]] = []
     segment_of_pt: list[int] = []
     n_coords_missing = 0
@@ -327,6 +371,36 @@ def convert_continuous(segments: list[dict], close_threshold: float = 25.0) -> d
             relations["both_inactive"].append((pt, 1))
         if (a1 == "active" and a2 == "walking") or (a1 == "walking" and a2 == "active"):
             relations["mixed_active_walking"].append((pt, 1))
+
+        # FRAME-DIFFERENCE relations: any_{became_active,became_inactive,
+        # became_walking,stopped_walking} -- true iff EITHER person's own
+        # activity changed, in that specific direction, from this pair's
+        # immediately preceding OBSERVED co-visible pair-time (never the
+        # previous TIMESTEP -- a gap where the pair was not co-visible is
+        # bridged the same way `derive_ec_targets_continuous` bridges it).
+        # "any_stopped_walking" is the one NEGATIVE-direction relation
+        # (walking -> anything else) -- there is no "stopped active"/
+        # "stopped inactive" counterpart; this is a deliberate, asymmetric,
+        # domain-informed choice (arriving/departing a meeting is more often
+        # signaled by a person stopping walking than by leaving "active" or
+        # "inactive"), not an oversight. A pair's very FIRST observed
+        # co-visible pair-time in a segment has no preceding activities to
+        # difference against, so it belongs to NONE of these four relations
+        # (the same convention `derive_ec_targets_continuous` documents for
+        # ``is_init``'s own first-observed case) -- `prev_activity.get`
+        # returning ``None`` below skips every check for that pt entirely.
+        prev = prev_activity.get((seg_idx, p1, p2))
+        if prev is not None:
+            pa1, pa2 = prev
+            if (a1 == "active" and pa1 != "active") or (a2 == "active" and pa2 != "active"):
+                transition_relations["any_became_active"].append((pt, 1))
+            if (a1 == "inactive" and pa1 != "inactive") or (a2 == "inactive" and pa2 != "inactive"):
+                transition_relations["any_became_inactive"].append((pt, 1))
+            if (a1 == "walking" and pa1 != "walking") or (a2 == "walking" and pa2 != "walking"):
+                transition_relations["any_became_walking"].append((pt, 1))
+            if (pa1 == "walking" and a1 != "walking") or (pa2 == "walking" and a2 != "walking"):
+                transition_relations["any_stopped_walking"].append((pt, 1))
+        prev_activity[(seg_idx, p1, p2)] = (a1, a2)
 
         c1 = seg["coords"].get((p1, t))
         c2 = seg["coords"].get((p2, t))
@@ -355,6 +429,7 @@ def convert_continuous(segments: list[dict], close_threshold: float = 25.0) -> d
         "num_pt": num_pt,
         "n_coords_missing": n_coords_missing,
         "segment_of_pt": segment_of_pt,
+        "transition_relations": transition_relations,
     }
 
 
@@ -507,6 +582,156 @@ def derive_ec_targets_continuous(
         "n_term": sum(is_term),
         "n_init_real_transitions_only": sum(is_init_real),
         "n_init_including_first_observed_holding": sum(is_init_incl_start),
+        "num_pt": num_pt,
+    }
+
+
+def derive_ec_masks_continuous(
+    segments: list[dict],
+    converted: dict,
+    *,
+    treat_first_observed_as_init: bool = False,
+) -> dict:
+    """Event-Calculus DON'T-CARE masks for the ``is_init``/``is_term``
+    targets `derive_ec_targets_continuous` builds over the SAME continuous
+    timeline -- one boolean flag per pair-time, per target, marking a frame
+    where firing that target's event predicate is semantically HARMLESS
+    under the inertia closure `reconstruct_holds_continuous` applies, so
+    that scoring a clause's prediction there as an ordinary error (a false
+    positive against the target's own True/False label) is dishonest.
+
+    WHY THIS EXISTS (see task-e2-review.md's F3 finding). With strict
+    transition-only ``is_init``/``is_term`` labels (~10/~11 positives on the
+    real train split), a state-shaped clause such as ``both_active & close``
+    covers ~500 rows -- and every already-holding frame among those is
+    counted as a false positive in holdout accuracy, so the empty theory
+    wins by never being wrong. But re-asserting ``initiatedAt`` on a frame
+    where the fluent ALREADY holds changes nothing `reconstruct_holds_
+    continuous` would reconstruct differently (inertia already has it
+    holding); scoring that as an error contradicts the Event-Calculus
+    semantics this protocol claims to implement. This function marks
+    exactly those "cannot honestly judge" frames so a caller (see
+    `run_caviar_theory.py`'s EC protocol) can exclude them from the
+    induction search's accuracy/coverage computation entirely, rather than
+    silently mislabeling them as negatives.
+
+    THE TRUTH TABLE, per pair-time, where ``pos`` is the direct meeting
+    label AT this pair-time and ``prev`` is the SAME pair's label at its
+    immediately preceding OBSERVED co-visible pair-time in the SAME segment
+    (``None`` at a pair's first observed pair-time in a segment -- see the
+    dedicated first-observed paragraph below, which does NOT reduce to
+    simply treating ``prev`` as ``False``):
+
+    INIT (``"init_dontcare"``):
+      * ``pos and prev``         -> DON'T-CARE. Mid-interval: the meeting
+        already held at the previous observed step and still holds now;
+        re-firing ``initiatedAt`` here is a no-op under inertia -- exactly
+        the frames a state-shaped clause like ``both_active & close`` keeps
+        covering long after the real transition.
+      * ``pos and not prev``     -> POSITIVE (this is ``is_init`` itself;
+        not part of this function's own output).
+      * ``not pos and prev``     -> NEGATIVE. This is the OTHER target's
+        (term's) transition frame; firing ``initiatedAt`` here would flip a
+        frame the gold says is False -- an unambiguous wrong prediction,
+        not a don't-care.
+      * ``not pos and not prev`` -> NEGATIVE (firing would wrongly start an
+        interval that never starts).
+
+    TERM (``"term_dontcare"``) -- the ASYMMETRIC mirror, spelled out because
+    it is NOT the same table with polarities flipped:
+      * ``not pos and not prev`` -> DON'T-CARE. Nothing holds now, nothing
+        held before; firing ``terminatedAt`` on a fluent that was never
+        holding is a no-op under inertia (there is nothing to clip).
+      * ``not pos and prev``     -> POSITIVE (this is ``is_term`` itself;
+        not part of this function's own output).
+      * ``pos and prev``         -> NEGATIVE. Mid-interval: the meeting held
+        before and still holds now; firing ``terminatedAt`` here WOULD
+        wrongly clip a real, ongoing interval -- this is the one genuinely
+        dangerous case that looks superficially similar to init's own
+        "holds and held" don't-care cell but is scored as a real negative
+        on purpose. THIS is the asymmetry: init's "pos and prev" is
+        don't-care, term's is not.
+      * ``pos and not prev``     -> NEGATIVE. This is the init transition
+        frame; the fluent demonstrably holds NOW (an observed fact, not an
+        inference), so firing ``terminatedAt`` here contradicts an observed
+        truth, not merely an inertia no-op -- unlike init's own
+        first-observed-holding cell (below), there is no missing-earlier-
+        frame ambiguity to excuse it.
+
+    FIRST-OBSERVED PAIR-TIMES (``prev is None``) -- handled explicitly, not
+    by defaulting ``prev`` to ``False``, because init and term diverge here:
+      * ``pos`` (already holding at the very first observed frame) -> INIT
+        DON'T-CARE (an unobservable initiation -- `derive_ec_targets_
+        continuous`'s own documented reasoning for why this is not counted
+        as ``is_init`` by default: we cannot tell whether this is a real
+        transition that happened off-camera or a pre-existing state).
+        TERM stays a plain NEGATIVE here (not don't-care): the fluent
+        demonstrably holds, an observed fact, so firing ``terminatedAt``
+        contradicts it outright, same reasoning as the general
+        ``pos and not prev`` term cell above.
+      * ``not pos`` -> TERM DON'T-CARE (nothing holds; `derive_ec_targets_
+        continuous` never infers ``is_term`` at a first-observed pair-time
+        either, and firing it is the same harmless no-op as the general
+        ``not pos and not prev`` term cell). INIT stays a plain NEGATIVE
+        here (not don't-care): nothing holds and there is no ambiguity
+        about whether it should -- same reasoning as the general
+        ``not pos and not prev`` init cell above.
+
+    ``treat_first_observed_as_init`` mirrors `derive_ec_targets_continuous`'s
+    own flag of the same name and MUST be passed the same value that built
+    the ``is_init`` this mask is paired with: when ``True``, a first-
+    observed-and-holding pair-time is counted as a real ``is_init`` positive
+    there too, so it stops being this function's init don't-care case (it
+    becomes ordinary "not part of this function's output" territory, exactly
+    like the general ``pos and not prev`` positive cell) -- calling the two
+    functions with different flag values would return a mask describing an
+    ``is_init`` reading this run does not actually use.
+
+    Returns ``{"init_dontcare", "term_dontcare", "n_init_dontcare",
+    "n_term_dontcare", "num_pt"}``, all aligned with ``converted``'s own
+    ``pt`` numbering. Same validation as `derive_ec_targets_continuous`
+    (``is_positive`` length mismatch, or a segments/converted mismatch
+    surfaced by the shared `_group_pts_by_pair`)."""
+    num_pt = converted["num_pt"]
+    is_positive = converted["is_positive"]
+    if len(is_positive) != num_pt:
+        raise ValueError(
+            f"converted['is_positive'] has {len(is_positive)} entries but "
+            f"converted['num_pt']={num_pt} -- pass convert_continuous's own "
+            "unmodified output."
+        )
+
+    groups = _group_pts_by_pair(segments, num_pt)
+
+    init_dontcare = [False] * num_pt
+    term_dontcare = [False] * num_pt
+
+    for pts in groups.values():
+        prev_pos: bool | None = None
+        for idx, pt in enumerate(pts):
+            pos = is_positive[pt]
+            if idx == 0:
+                if pos:
+                    if not treat_first_observed_as_init:
+                        init_dontcare[pt] = True
+                else:
+                    term_dontcare[pt] = True
+            else:
+                if pos and prev_pos:
+                    init_dontcare[pt] = True
+                elif (not pos) and (not prev_pos):
+                    term_dontcare[pt] = True
+                # (pos and not prev_pos): the is_init transition frame --
+                # NEGATIVE for term, not a don't-care (see docstring).
+                # (not pos and prev_pos): the is_term transition frame --
+                # NEGATIVE for init, not a don't-care (see docstring).
+            prev_pos = pos
+
+    return {
+        "init_dontcare": init_dontcare,
+        "term_dontcare": term_dontcare,
+        "n_init_dontcare": sum(init_dontcare),
+        "n_term_dontcare": sum(term_dontcare),
         "num_pt": num_pt,
     }
 
