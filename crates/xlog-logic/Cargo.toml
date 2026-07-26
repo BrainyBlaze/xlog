@@ -19,4 +19,4 @@ pest_derive.workspace = true
 
 [dev-dependencies]
 tempfile = "3"
-serial_test = "3"
+serial_test = "4"
