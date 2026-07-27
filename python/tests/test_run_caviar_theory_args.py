@@ -170,6 +170,58 @@ def test_ec_relations_with_transitions_pkl_data_is_unaugmented():
     assert test_rel is test["relations"]
 
 
+# ---------------------------------------------------------------------------
+# --max-body-literals -- the 3-literal relational_search.py upgrade. The
+# behaviors these guard: the flag defaults to 2 (byte-identical to every
+# behavior that predates it), accepts only 2 or 3, and REFUSES (typed
+# argparse error, not a silent no-op) any combination with '3' other than
+# '--mode relational --protocol ec'.
+# ---------------------------------------------------------------------------
+
+
+def test_max_body_literals_defaults_to_2():
+    args = run_caviar_theory.parse_args(REQUIRED)
+    assert args.max_body_literals == 2
+
+
+def test_max_body_literals_accepts_3_with_relational_ec():
+    args = run_caviar_theory.parse_args(
+        REQUIRED + ["--protocol", "ec", "--max-body-literals", "3"]
+    )
+    assert args.max_body_literals == 3
+
+
+def test_max_body_literals_rejects_values_other_than_2_or_3():
+    with pytest.raises(SystemExit):
+        run_caviar_theory.parse_args(REQUIRED + ["--max-body-literals", "4"])
+    with pytest.raises(SystemExit):
+        run_caviar_theory.parse_args(REQUIRED + ["--max-body-literals", "1"])
+
+
+def test_max_body_literals_3_refuses_neural_mode():
+    neural_required = ["--mode", "neural", "--pkl", "x.pkl", "--steps", "5", "--out", "o.json"]
+    with pytest.raises(SystemExit):
+        run_caviar_theory.parse_args(
+            neural_required + ["--protocol", "ec", "--max-body-literals", "3"]
+        )
+
+
+def test_max_body_literals_3_refuses_direct_protocol():
+    with pytest.raises(SystemExit):
+        run_caviar_theory.parse_args(
+            REQUIRED + ["--protocol", "direct", "--max-body-literals", "3"]
+        )
+    # Omitting --protocol also defaults to "direct" -- must refuse the same way.
+    with pytest.raises(SystemExit):
+        run_caviar_theory.parse_args(REQUIRED + ["--max-body-literals", "3"])
+
+
+def test_omitting_max_body_literals_leaves_every_other_default_unchanged():
+    omitted = run_caviar_theory.parse_args(REQUIRED)
+    explicit = run_caviar_theory.parse_args(REQUIRED + ["--max-body-literals", "2"])
+    assert vars(omitted) == vars(explicit)
+
+
 def test_filtered_relation_names_never_sees_transition_relations():
     # `_filtered_relation_names` is the DIRECT-protocol (relational mode)
     # vocabulary builder; it must only ever be handed a "relations" dict,

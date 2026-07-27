@@ -227,10 +227,39 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
              "(it roughly doubles a neural ec run's training cost); "
              "RESULT.json's direct_context becomes null",
     )
+    p.add_argument(
+        "--max-body-literals", type=int, default=2, choices=(2, 3),
+        help="star-rule body arity for the CANDIDATE POOL (default: 2, "
+        "byte-identical to every behavior that predates this flag). '3' "
+        "enables the pure-Python relational_search.py search (2-literal AND "
+        "3-literal bodies) instead of the 2-literal-only kfold_select pool, "
+        "so the literature's 3+-literal CAVIAR initiation/termination rules "
+        "become reachable -- see relational_search.py's own module "
+        "docstring for why this needs no engine/CUDA at all. Scoped to "
+        "'--mode relational --protocol ec' ONLY: refused (with '--mode "
+        "neural' or '--protocol direct') at parse time, below.",
+    )
     p.add_argument("--out", required=True, help="path to write RESULT.json")
     args = p.parse_args(argv)
     if args.data == "continuous" and args.test_json is None:
         p.error("--data continuous requires --test-json (path to caviar-test.json).")
+    if args.max_body_literals == 3:
+        if args.mode != "relational":
+            p.error(
+                "--max-body-literals 3 is scoped to '--mode relational' "
+                f"only (got --mode {args.mode!r}): the 3-literal search is "
+                "relational_search.py's pure set-intersection candidate "
+                "pool, which has no neural-detector counterpart -- neural "
+                "mode is out of scope for this flag."
+            )
+        if args.protocol != "ec":
+            p.error(
+                "--max-body-literals 3 is scoped to '--protocol ec' only "
+                f"(got --protocol {args.protocol!r}): the direct protocol's "
+                "single-theory search is out of scope for this flag -- only "
+                "the ec protocol's init/term searches route through "
+                "relational_search.py."
+            )
     return args
 
 
@@ -801,6 +830,17 @@ def _run_neural_theory(pyxlog, torch, kfold_select, args, train, test, wall):
 # ---------------------------------------------------------------------------
 
 
+def _top5_scores(scores: dict) -> list:
+    """A `relational_search.kfold_scores`-shaped ``{body: score}`` dict
+    (``body`` a relation-name tuple, 2 or 3 long), JSON-safe and truncated
+    to its top 5 by score (ties broken by the body's own ``"&"``-joined
+    name, matching `relational_search.select_body`'s deterministic
+    ordering) -- ``--max-body-literals 3``'s abstain-still-reports-how-close
+    mechanism (see `_run_relational_ec`'s own docstring)."""
+    ranked = sorted(scores.items(), key=lambda kv: (-kv[1], kv[0]))
+    return [["&".join(body), score] for body, score in ranked[:5]]
+
+
 def _theory_json(theory: dict) -> dict:
     """`induce_theory`'s result, JSON-safe (rule tuples -> lists)."""
     return {
@@ -931,66 +971,142 @@ def _run_relational_ec(
     where ``--data continuous``'s frame-difference TRANSITION relations
     (`caviar_continuous.convert_continuous`'s ``"transition_relations"``)
     enter THIS function's own candidate pool -- never the ``direct_context``
-    run above, which already ran against ``train``/``test`` unaugmented."""
-    direct_result = None
-    if not args.no_direct_context:
-        direct_wall: dict = {}
-        t_direct = time.perf_counter()
-        direct_result = _run_relational_theory(pyxlog, torch, kfold_select, args, train, test, direct_wall)
-        wall["direct_context"] = time.perf_counter() - t_direct
-        wall["direct_context_wall_clock_s"] = direct_wall
+    run above, which already ran against ``train``/``test`` unaugmented.
+
+    ``args.max_body_literals == 3`` (``parse_args`` refuses this value with
+    any protocol/mode other than ``ec``/``relational``, so reaching this
+    function with it set is the only way it is ever seen) takes an ENTIRELY
+    DIFFERENT, engine-free branch for the init AND term searches:
+    `relational_search.induce_relational_theory` replaces the
+    `kfold_select`-backed `induce_for` below, over the SAME vocabulary
+    (``train_relations_ec`` -- activities, close/far, and, for ``--data
+    continuous``, the transition relations) and the SAME don't-care
+    exclusion (`_exclude_dontcare`) -- but no `IlpProgramFactory.compile`/
+    `put_relation` call happens at all, and ``direct_context`` is forced to
+    ``None`` regardless of ``--no-direct-context`` (it is the OLD
+    2-literal, `kfold_select`-backed search and would need a CUDA device to
+    run; this function's whole point at ``max_body_literals == 3`` is that
+    no such device is needed, so the side-by-side run is never spent)."""
+    if args.max_body_literals == 3:
+        print(
+            "NOTE: --max-body-literals 3 -- direct_context is always "
+            "skipped (it is the 2-literal kfold_select-backed search and "
+            "needs a CUDA device; see relational_search.py's own KEY "
+            "INSIGHT for why the init/term searches below need neither)."
+        )
+        direct_result = None
+    else:
+        direct_result = None
+        if not args.no_direct_context:
+            direct_wall: dict = {}
+            t_direct = time.perf_counter()
+            direct_result = _run_relational_theory(pyxlog, torch, kfold_select, args, train, test, direct_wall)
+            wall["direct_context"] = time.perf_counter() - t_direct
+            wall["direct_context_wall_clock_s"] = direct_wall
 
     train_relations_ec, test_relations_ec = _ec_relations_with_transitions(train, test)
-    prog = _compile_and_ingest_relational(pyxlog, dict(train, relations=train_relations_ec))
 
-    device = torch.device("cuda")
-    features = train["features"].to(device)
+    if args.max_body_literals == 3:
+        from relational_search import induce_relational_theory, make_predict_clause
 
-    def make_network():
-        return torch.nn.Sequential(
-            torch.nn.Linear(features.shape[1], N_LABELS), torch.nn.Softmax(dim=-1)
-        ).to(device)
-
-    # See EMPTY_NEURAL_POOL_STEP_CAP / _run_relational_theory's identical guard.
-    steps_requested = args.steps
-    steps_effective = min(args.steps, EMPTY_NEURAL_POOL_STEP_CAP)
-    steps_clamped = steps_effective != steps_requested
-
-    predict_clause_train = _predict_clause_relational(train_relations_ec)
-    predict_clause_test = _predict_clause_relational(test_relations_ec)
-
-    def induce_for(target_train_labels, dontcare, wall_key):
-        facts_for_search, labels_for_search = _exclude_dontcare(
-            train["facts"], target_train_labels, dontcare
+        print(
+            "NOTE: --max-body-literals 3 -- the init/term searches below "
+            "run relational_search.induce_relational_theory (pure Python, "
+            "2- and 3-literal bodies): no put_relation/kfold_select call, "
+            "no engine compiled at all."
         )
-        iteration_wall: list[float] = []
+        steps_requested = steps_effective = None
+        steps_clamped = False
 
-        def select_once(residual_facts, residual_is_positive):
-            t = time.perf_counter()
-            sel = kfold_select(
-                lambda: prog, MASK_NAME, residual_facts, residual_is_positive,
-                make_network, features, neural_relations={}, folds=args.k,
-                seed=args.seed, steps=steps_effective, topology="star",
-            tie_tolerance=args.tie_tolerance,
+        # 'coords_missing' is a data-quality flag, never a candidate
+        # vocabulary member -- excluded here the same way
+        # _filtered_relation_names/_compile_and_ingest_relational exclude it
+        # from the OLD kfold_select-backed pool (there, exclusion happens at
+        # the schema-compile step; there is no such step here, so it must be
+        # filtered before enumerate_bodies ever sees it, or it would enter
+        # the 3-literal candidate pool as an ordinary relation).
+        train_relations_search = {
+            n: v for n, v in train_relations_ec.items() if n != "coords_missing"
+        }
+        test_relations_search = {
+            n: v for n, v in test_relations_ec.items() if n != "coords_missing"
+        }
+        predict_clause_train = make_predict_clause(train_relations_search)
+        predict_clause_test = make_predict_clause(test_relations_search)
+
+        def induce_for(target_train_labels, dontcare, wall_key):
+            facts_for_search, labels_for_search = _exclude_dontcare(
+                train["facts"], target_train_labels, dontcare
             )
-            iteration_wall.append(time.perf_counter() - t)
-            return sel
+            t0 = time.perf_counter()
+            result = induce_relational_theory(
+                train_relations_search, facts_for_search, labels_for_search,
+                max_literals=3, folds=args.k, seed=args.seed,
+                tie_tolerance=args.tie_tolerance,
+                max_clauses=args.max_clauses, min_new_covered=args.min_new_covered,
+            )
+            wall[wall_key] = time.perf_counter() - t0
+            return result
 
-        t0 = time.perf_counter()
-        theory = induce_theory(
-            select_once, predict_clause_train, facts_for_search, labels_for_search,
-            max_clauses=args.max_clauses, min_new_covered=args.min_new_covered,
+        init_theory = induce_for(
+            ec_train["is_init"], ec_masks["init_dontcare"] if ec_masks else None, "theory_loop_init",
         )
-        wall[wall_key] = time.perf_counter() - t0
-        wall[f"{wall_key}_per_iteration"] = iteration_wall
-        return theory
+        term_theory = induce_for(
+            ec_train["is_term"], ec_masks["term_dontcare"] if ec_masks else None, "theory_loop_term",
+        )
+        relational_search_pool = {"init": init_theory["pool"], "term": term_theory["pool"]}
+    else:
+        prog = _compile_and_ingest_relational(pyxlog, dict(train, relations=train_relations_ec))
 
-    init_theory = induce_for(
-        ec_train["is_init"], ec_masks["init_dontcare"] if ec_masks else None, "theory_loop_init",
-    )
-    term_theory = induce_for(
-        ec_train["is_term"], ec_masks["term_dontcare"] if ec_masks else None, "theory_loop_term",
-    )
+        device = torch.device("cuda")
+        features = train["features"].to(device)
+
+        def make_network():
+            return torch.nn.Sequential(
+                torch.nn.Linear(features.shape[1], N_LABELS), torch.nn.Softmax(dim=-1)
+            ).to(device)
+
+        # See EMPTY_NEURAL_POOL_STEP_CAP / _run_relational_theory's identical guard.
+        steps_requested = args.steps
+        steps_effective = min(args.steps, EMPTY_NEURAL_POOL_STEP_CAP)
+        steps_clamped = steps_effective != steps_requested
+
+        predict_clause_train = _predict_clause_relational(train_relations_ec)
+        predict_clause_test = _predict_clause_relational(test_relations_ec)
+
+        def induce_for(target_train_labels, dontcare, wall_key):
+            facts_for_search, labels_for_search = _exclude_dontcare(
+                train["facts"], target_train_labels, dontcare
+            )
+            iteration_wall: list[float] = []
+
+            def select_once(residual_facts, residual_is_positive):
+                t = time.perf_counter()
+                sel = kfold_select(
+                    lambda: prog, MASK_NAME, residual_facts, residual_is_positive,
+                    make_network, features, neural_relations={}, folds=args.k,
+                    seed=args.seed, steps=steps_effective, topology="star",
+                tie_tolerance=args.tie_tolerance,
+                )
+                iteration_wall.append(time.perf_counter() - t)
+                return sel
+
+            t0 = time.perf_counter()
+            theory = induce_theory(
+                select_once, predict_clause_train, facts_for_search, labels_for_search,
+                max_clauses=args.max_clauses, min_new_covered=args.min_new_covered,
+            )
+            wall[wall_key] = time.perf_counter() - t0
+            wall[f"{wall_key}_per_iteration"] = iteration_wall
+            return theory
+
+        init_theory = induce_for(
+            ec_train["is_init"], ec_masks["init_dontcare"] if ec_masks else None, "theory_loop_init",
+        )
+        term_theory = induce_for(
+            ec_train["is_term"], ec_masks["term_dontcare"] if ec_masks else None, "theory_loop_term",
+        )
+        relational_search_pool = None
 
     init_scoring = _score_theory(
         init_theory["clauses"], predict_clause_train, predict_clause_test,
@@ -1016,6 +1132,7 @@ def _run_relational_ec(
             "neural": [],
             "excluded": ["coords_missing"],
         },
+        "max_body_literals": args.max_body_literals,
         "steps_requested": steps_requested,
         "steps_effective": steps_effective,
         "steps_clamped": steps_clamped,
@@ -1029,6 +1146,22 @@ def _run_relational_ec(
             "init_scoring": init_scoring,
             "term_scoring": term_scoring,
             "frame_f1": frame_scoring,
+            # Non-null ONLY at --max-body-literals 3 (see relational_search_
+            # pool/scores_per_iteration's own construction above): the pure
+            # relational search's full candidate-pool size, and, for
+            # whichever of init/term theory ended up empty, the top-5
+            # holdout scores its LAST select_once call saw -- so an honest
+            # abstain still reports how close the search came, without a
+            # second search.
+            "relational_search_pool": relational_search_pool,
+            "init_scores_last_iteration_top5": (
+                _top5_scores(init_theory["scores_per_iteration"][-1])
+                if args.max_body_literals == 3 else None
+            ),
+            "term_scores_last_iteration_top5": (
+                _top5_scores(term_theory["scores_per_iteration"][-1])
+                if args.max_body_literals == 3 else None
+            ),
         },
         "direct_context": direct_result,
         "detector_probe": None,
@@ -1191,7 +1324,14 @@ def main(argv: list[str] | None = None) -> int:
 
     out_path = _prepare_out_path(args.out)
 
-    _require_cuda()
+    # --max-body-literals 3 is refused, at parse time, with anything other
+    # than --mode relational --protocol ec (see parse_args) -- and THAT
+    # combination's init/term searches run entirely through
+    # relational_search.induce_relational_theory (pure Python, no engine, no
+    # CUDA -- see _run_relational_ec's own docstring), so the CUDA guard
+    # below would refuse a run this script is specifically built to allow.
+    if args.max_body_literals != 3:
+        _require_cuda()
 
     import torch
     import pyxlog
@@ -1296,6 +1436,7 @@ def main(argv: list[str] | None = None) -> int:
         "hidden": args.hidden,
         "max_clauses": args.max_clauses,
         "min_new_covered": args.min_new_covered,
+        "max_body_literals": args.max_body_literals,
         "num_pt": {"train": train["num_pt"], "test": test["num_pt"]},
         "n_pos": {
             "train": int(sum(train["is_positive"])),
@@ -1327,8 +1468,15 @@ def main(argv: list[str] | None = None) -> int:
         print(f"  frame F1 (holdsAt reconstruction, test): {ec['frame_f1']}")
         print(
             "  direct-protocol theory F1 on this fold (context, test): "
-            f"{result['direct_context']['scoring']['theory_prf1']['test'] if result['direct_context'] else 'skipped (--no-direct-context)'}"
+            f"{result['direct_context']['scoring']['theory_prf1']['test'] if result['direct_context'] else 'skipped (--no-direct-context or --max-body-literals 3)'}"
         )
+        if args.max_body_literals == 3:
+            print(f"  relational search pool (init): {ec['relational_search_pool']['init']}")
+            print(f"  relational search pool (term): {ec['relational_search_pool']['term']}")
+            if not ec["init_theory"]["clauses"]:
+                print(f"  init abstained -- top5 holdout scores (last search): {ec['init_scores_last_iteration_top5']}")
+            if not ec["term_theory"]["clauses"]:
+                print(f"  term abstained -- top5 holdout scores (last search): {ec['term_scores_last_iteration_top5']}")
         print(f"  wall clock total: {wall['total']:.2f}s")
     print(f"  wrote {out_path}")
     return 0
