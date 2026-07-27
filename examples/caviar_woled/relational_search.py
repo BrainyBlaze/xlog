@@ -222,8 +222,9 @@ def select_body(
 
     * A tie within `tie_tolerance` is first grouped by each tied body's own
       fixed COVER (the exact fact set it predicts True on). If every tied
-      body shares the IDENTICAL cover, they are provably indistinguishable
-      on this data -- no future fact could ever separate them -- so Occam
+      body shares the IDENTICAL cover, they are indistinguishable on the
+      TRAINING data (their covers could still diverge on unseen facts --
+      the identity holds for this dataset, not universally), so Occam
       licenses keeping the SHORTEST body (fewer literals is a simpler
       explanation of the same predictions), breaking any remaining tie
       lexicographically. This is the same "equal generalization, simpler
@@ -289,7 +290,7 @@ def select_body(
             rule=winner, tied=tied, margin=sel.margin, top_weight=fit[winner],
             reason=(
                 "holdout tie broken by Occam: every tied body covers an "
-                "IDENTICAL fact set (provably indistinguishable on this "
+                "IDENTICAL fact set (indistinguishable on this training "
                 f"data), so the shortest/lexicographically-first body "
                 f"({'&'.join(winner)}) is kept -- generalizes "
                 "_select_from_holdout's relational-over-neural tie-break "

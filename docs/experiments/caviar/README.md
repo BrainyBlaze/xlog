@@ -86,12 +86,22 @@ configuration — 2-literal bodies, don't-care-corrected supervision,
 transition vocabulary, and 3-literal bodies alike (frame F1 0.0, empty
 theories). With 3-literal bodies the top initiation candidate is
 `any_became_active & both_active & close` — the canonical rule shape from
-the literature — at holdout score 0.9996, but ~10 true initiation events
-in the whole training split cannot single out one winner among dozens of
-near-tied distinct covers, and the arbiter refuses to guess. This is
-recorded as a data-sparsity boundary (and, at 2 literals, an
-expressiveness boundary), not tuned away. Files:
-`results/caviar-e3-cont_rel_ec_*.json`, `results/caviar-e5-cont_*_ec_*.json`.
+the literature — at holdout score 0.9996. The two abstentions have
+DIFFERENT root causes, both recorded rather than tuned away:
+
+* **Termination**: genuine data sparsity — three single-row covers each
+  catching a different one of 11 termination events tie under any metric.
+* **Initiation**: the holdout METRIC, not the data — with 10 positives
+  against ~23,000 rows, held-out accuracy sits on the all-false base-rate
+  plateau (0.9996), and provably inverts the quality ranking: the best
+  real detector by train F1 (`both_active & close`, tp 3/10) scores BELOW
+  the empty predictor. The identified fix — a pre-registered
+  recall-aware holdout score (per-fold F1 instead of accuracy) — would
+  spread the field on the same data, and is future work, to be
+  pre-registered before any run.
+
+Files: `results/caviar-e3-cont_rel_ec_*.json`,
+`results/caviar-e5-cont_*_ec_*.json`.
 
 ## Reproduction
 
