@@ -440,7 +440,7 @@ def test_transition_relations_direct_protocol_vocabulary_guard(two_segment_file)
 
 
 # ---------------------------------------------------------------------------
-# derive_ec_masks_continuous: don't-care truth table (task-e2-review.md's F3)
+# derive_ec_masks_continuous: the don't-care truth table
 # ---------------------------------------------------------------------------
 
 
