@@ -263,6 +263,123 @@ def test_omitting_holdout_score_leaves_every_other_default_unchanged():
     assert vars(omitted) == vars(explicit)
 
 
+# ---------------------------------------------------------------------------
+# --ec-fit-mode/--min-fit/--null-permutations/--null-quantile/--null-perm-seed
+# -- the pre-registered permutation-null fit-gate threshold for the
+# '--max-body-literals 3' relational_search.py search. The behaviors these
+# guard: '--ec-fit-mode' defaults to 'fixed' and '--min-fit' defaults to
+# None (byte-identical to every behavior that predates these flags), both
+# are scoped to '--max-body-literals 3' ONLY, '--min-fit' is further scoped
+# to '--ec-fit-mode fixed' ONLY, and the three '--null-*' knobs are scoped
+# to '--ec-fit-mode permutation-null' ONLY.
+# ---------------------------------------------------------------------------
+
+
+def test_ec_fit_mode_defaults_to_fixed_and_min_fit_defaults_to_none():
+    args = run_caviar_theory.parse_args(REQUIRED)
+    assert args.ec_fit_mode == "fixed"
+    assert args.min_fit is None
+
+
+def test_null_knobs_default_values():
+    args = run_caviar_theory.parse_args(REQUIRED)
+    assert args.null_permutations == 1000
+    assert args.null_quantile == 0.95
+    assert args.null_perm_seed == 7
+
+
+def test_ec_fit_mode_accepts_permutation_null_with_max_body_literals_3():
+    args = run_caviar_theory.parse_args(
+        REQUIRED + ["--protocol", "ec", "--max-body-literals", "3",
+                    "--ec-fit-mode", "permutation-null"]
+    )
+    assert args.ec_fit_mode == "permutation-null"
+
+
+def test_ec_fit_mode_rejects_an_unknown_value():
+    with pytest.raises(SystemExit):
+        run_caviar_theory.parse_args(REQUIRED + ["--ec-fit-mode", "bogus"])
+
+
+def test_ec_fit_mode_permutation_null_refused_without_max_body_literals_3():
+    with pytest.raises(SystemExit):
+        run_caviar_theory.parse_args(REQUIRED + ["--ec-fit-mode", "permutation-null"])
+    with pytest.raises(SystemExit):
+        run_caviar_theory.parse_args(
+            REQUIRED + ["--protocol", "ec", "--ec-fit-mode", "permutation-null"]
+        )
+
+
+def test_min_fit_refused_without_max_body_literals_3():
+    with pytest.raises(SystemExit):
+        run_caviar_theory.parse_args(REQUIRED + ["--min-fit", "0.8"])
+    with pytest.raises(SystemExit):
+        run_caviar_theory.parse_args(
+            REQUIRED + ["--protocol", "ec", "--min-fit", "0.8"]
+        )
+
+
+def test_min_fit_accepts_explicit_value_with_max_body_literals_3_fixed():
+    args = run_caviar_theory.parse_args(
+        REQUIRED + ["--protocol", "ec", "--max-body-literals", "3", "--min-fit", "0.8"]
+    )
+    assert args.min_fit == 0.8
+    assert args.ec_fit_mode == "fixed"
+
+
+def test_min_fit_refused_with_permutation_null():
+    with pytest.raises(SystemExit):
+        run_caviar_theory.parse_args(
+            REQUIRED + [
+                "--protocol", "ec", "--max-body-literals", "3",
+                "--ec-fit-mode", "permutation-null", "--min-fit", "0.8",
+            ]
+        )
+
+
+def test_null_knobs_refused_without_permutation_null_mode():
+    with pytest.raises(SystemExit):
+        run_caviar_theory.parse_args(
+            REQUIRED + ["--protocol", "ec", "--max-body-literals", "3",
+                        "--null-permutations", "500"]
+        )
+    with pytest.raises(SystemExit):
+        run_caviar_theory.parse_args(
+            REQUIRED + ["--protocol", "ec", "--max-body-literals", "3",
+                        "--null-quantile", "0.9"]
+        )
+    with pytest.raises(SystemExit):
+        run_caviar_theory.parse_args(
+            REQUIRED + ["--protocol", "ec", "--max-body-literals", "3",
+                        "--null-perm-seed", "1"]
+        )
+
+
+def test_null_knobs_accepted_with_permutation_null_mode():
+    args = run_caviar_theory.parse_args(
+        REQUIRED + [
+            "--protocol", "ec", "--max-body-literals", "3",
+            "--ec-fit-mode", "permutation-null",
+            "--null-permutations", "500", "--null-quantile", "0.9",
+            "--null-perm-seed", "1",
+        ]
+    )
+    assert args.null_permutations == 500
+    assert args.null_quantile == 0.9
+    assert args.null_perm_seed == 1
+
+
+def test_omitting_ec_fit_mode_knobs_leaves_every_other_default_unchanged():
+    omitted = run_caviar_theory.parse_args(REQUIRED)
+    explicit = run_caviar_theory.parse_args(
+        REQUIRED + [
+            "--ec-fit-mode", "fixed", "--null-permutations", "1000",
+            "--null-quantile", "0.95", "--null-perm-seed", "7",
+        ]
+    )
+    assert vars(omitted) == vars(explicit)
+
+
 def test_filtered_relation_names_never_sees_transition_relations():
     # `_filtered_relation_names` is the DIRECT-protocol (relational mode)
     # vocabulary builder; it must only ever be handed a "relations" dict,

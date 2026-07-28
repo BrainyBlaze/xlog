@@ -20,6 +20,7 @@ from relational_search import (  # noqa: E402
     induce_relational_theory,
     kfold_scores,
     make_predict_clause,
+    permutation_null_threshold,
     select_body,
 )
 
@@ -485,3 +486,221 @@ def test_induce_relational_theory_default_holdout_score_is_accuracy(monkeypatch)
     )
     assert seen_scores
     assert all(s == "accuracy" for s in seen_scores)
+
+
+# ---------------------------------------------------------------------------
+# permutation_null_threshold: exact arithmetic on a tiny hand-built case,
+# permutation-invariance of the fold split/covers, and the quantile
+# convention's own edge cases.
+# ---------------------------------------------------------------------------
+
+
+def test_permutation_null_threshold_exact_on_tiny_hand_built_case():
+    # Independent reference (NOT relational_search's own set-intersection
+    # shortcut): reshuffle the label array literally, per permutation, then
+    # recompute each fold's F1 via scorer.prf1 directly -- the same
+    # cross-check style test_kfold_scores_f1_matches_manual_prf1_per_fold
+    # uses for kfold_scores itself.
+    from pyxlog.ilp.neural_credit import holdout_fold_assignment
+    from scorer import prf1
+
+    n_facts = 12
+    facts = [(i, 1) for i in range(n_facts)]
+    labels = [i in {0, 4, 8} for i in range(n_facts)]  # 3 positives
+    relations = {
+        "a": [facts[i] for i in [0, 1, 4, 9]],
+        "b": [facts[i] for i in range(n_facts)],
+        "c": [facts[i] for i in [2, 4, 6, 8, 10]],
+        "d": [facts[i] for i in range(n_facts)],
+    }
+    body1 = ("a", "b")
+    body2 = ("c", "d")
+    bodies = [body1, body2]
+    folds = 3
+    seed = 5
+    n_permutations = 4
+    quantile = 0.75
+    perm_seed = 7
+
+    covers = {body1: body_cover(body1, relations), body2: body_cover(body2, relations)}
+    fold_of = holdout_fold_assignment(n_facts, folds, seed)
+
+    rng = torch.Generator().manual_seed(perm_seed)
+    pool_max_samples = []
+    for _ in range(n_permutations):
+        perm = torch.randperm(n_facts, generator=rng).tolist()
+        labels_perm = [labels[perm[i]] for i in range(n_facts)]
+        body_means = []
+        for body in bodies:
+            cover = covers[body]
+            per_fold_f1 = []
+            for fold in range(folds):
+                held = [i for i in range(n_facts) if fold_of[i] == fold]
+                gold = [labels_perm[i] for i in held]
+                if not any(gold):
+                    continue  # zero-positive fold under THIS permutation: skipped
+                pred = [facts[i] in cover for i in held]
+                per_fold_f1.append(prf1(pred, gold)["f1"])
+            body_means.append(
+                sum(per_fold_f1) / len(per_fold_f1) if per_fold_f1 else 0.0
+            )
+        pool_max_samples.append(max(body_means))
+
+    sorted_samples = sorted(pool_max_samples)
+    idx = quantile * (len(sorted_samples) - 1)
+    lo = int(idx)
+    hi = min(lo + 1, len(sorted_samples) - 1)
+    frac = idx - lo
+    expected_threshold = (
+        sorted_samples[lo] + (sorted_samples[hi] - sorted_samples[lo]) * frac
+    )
+
+    result = permutation_null_threshold(
+        bodies, relations, facts, labels, folds=folds, seed=seed,
+        n_permutations=n_permutations, quantile=quantile, perm_seed=perm_seed,
+    )
+
+    assert result["threshold"] == pytest.approx(expected_threshold)
+    assert result["n_permutations"] == n_permutations
+    assert result["quantile"] == quantile
+    assert result["perm_seed"] == perm_seed
+    assert result["pool_max_samples_summary"]["min"] == pytest.approx(min(pool_max_samples))
+    assert result["pool_max_samples_summary"]["max"] == pytest.approx(max(pool_max_samples))
+
+
+def test_permutation_null_threshold_computes_fold_split_and_covers_once(monkeypatch):
+    # The fold split and every body's cover are permutation-INVARIANT (see
+    # the function's own docstring) -- pin that they are derived exactly
+    # once each, never once per permutation, by counting calls to the
+    # shared helpers.
+    import relational_search
+
+    calls = {"fold_assignment": 0, "body_cover": 0}
+    real_fold_assignment = relational_search.holdout_fold_assignment
+    real_body_cover = relational_search.body_cover
+
+    def spy_fold_assignment(*a, **kw):
+        calls["fold_assignment"] += 1
+        return real_fold_assignment(*a, **kw)
+
+    def spy_body_cover(*a, **kw):
+        calls["body_cover"] += 1
+        return real_body_cover(*a, **kw)
+
+    monkeypatch.setattr(relational_search, "holdout_fold_assignment", spy_fold_assignment)
+    monkeypatch.setattr(relational_search, "body_cover", spy_body_cover)
+
+    relations, facts, is_positive = _three_literal_world()
+    bodies, _ = enumerate_bodies(relations, max_literals=3)
+
+    relational_search.permutation_null_threshold(
+        bodies, relations, facts, is_positive, folds=4, seed=7,
+        n_permutations=50, quantile=0.95, perm_seed=7,
+    )
+
+    assert calls["fold_assignment"] == 1
+    assert calls["body_cover"] == len(bodies)
+
+
+def test_permutation_null_threshold_accepts_precomputed_covers_without_recomputing(monkeypatch):
+    import relational_search
+
+    relations, facts, is_positive = _three_literal_world()
+    bodies, _ = enumerate_bodies(relations, max_literals=3)
+    covers = {b: body_cover(b, relations) for b in bodies}
+
+    calls = {"body_cover": 0}
+    real_body_cover = relational_search.body_cover
+
+    def spy(*a, **kw):
+        calls["body_cover"] += 1
+        return real_body_cover(*a, **kw)
+
+    monkeypatch.setattr(relational_search, "body_cover", spy)
+    relational_search.permutation_null_threshold(
+        bodies, relations, facts, is_positive, folds=4, seed=7,
+        n_permutations=10, quantile=0.95, perm_seed=7, covers=covers,
+    )
+
+    assert calls["body_cover"] == 0
+
+
+def test_permutation_null_threshold_single_permutation_threshold_is_that_sample():
+    relations, facts, is_positive = _three_literal_world()
+    bodies, _ = enumerate_bodies(relations, max_literals=3)
+    result = permutation_null_threshold(
+        bodies, relations, facts, is_positive, folds=4, seed=7,
+        n_permutations=1, quantile=0.95, perm_seed=3,
+    )
+    summary = result["pool_max_samples_summary"]
+    assert summary["min"] == summary["max"] == summary["median"] == summary["p95"]
+    assert result["threshold"] == pytest.approx(summary["max"])
+
+
+def test_permutation_null_threshold_p95_summary_is_independent_of_quantile_param():
+    # pool_max_samples_summary's own "p95" is ALWAYS the literal 95th
+    # percentile, regardless of the caller's chosen `quantile` -- see the
+    # function's own docstring.
+    relations, facts, is_positive = _three_literal_world()
+    bodies, _ = enumerate_bodies(relations, max_literals=3)
+    at_default = permutation_null_threshold(
+        bodies, relations, facts, is_positive, folds=4, seed=7,
+        n_permutations=30, quantile=0.95, perm_seed=7,
+    )
+    at_custom = permutation_null_threshold(
+        bodies, relations, facts, is_positive, folds=4, seed=7,
+        n_permutations=30, quantile=0.5, perm_seed=7,
+    )
+    assert at_default["pool_max_samples_summary"] == at_custom["pool_max_samples_summary"]
+    assert at_default["quantile"] == 0.95
+    assert at_custom["quantile"] == 0.5
+    # threshold tracks the CALLER's own quantile, unlike the fixed p95 summary
+    assert at_default["threshold"] == pytest.approx(
+        at_default["pool_max_samples_summary"]["p95"]
+    )
+
+
+def test_permutation_null_threshold_rejects_folds_out_of_range():
+    facts = [(i, 1) for i in range(3)]
+    labels = [True, False, True]
+    relations = {"a": facts, "b": facts}
+    with pytest.raises(ValueError):
+        permutation_null_threshold(
+            [("a", "b")], relations, facts, labels, folds=5, seed=0,
+            n_permutations=2,
+        )
+
+
+def test_permutation_null_threshold_rejects_mismatched_labels_length():
+    facts = [(i, 1) for i in range(4)]
+    relations = {"a": facts, "b": facts}
+    with pytest.raises(ValueError):
+        permutation_null_threshold(
+            [("a", "b")], relations, facts, [True, False], folds=2, seed=0,
+            n_permutations=2,
+        )
+
+
+def test_permutation_null_threshold_rejects_non_positive_permutation_count():
+    relations, facts, is_positive = _three_literal_world()
+    bodies, _ = enumerate_bodies(relations, max_literals=3)
+    with pytest.raises(ValueError):
+        permutation_null_threshold(
+            bodies, relations, facts, is_positive, folds=4, seed=7,
+            n_permutations=0,
+        )
+
+
+def test_permutation_null_threshold_rejects_quantile_out_of_range():
+    relations, facts, is_positive = _three_literal_world()
+    bodies, _ = enumerate_bodies(relations, max_literals=3)
+    with pytest.raises(ValueError):
+        permutation_null_threshold(
+            bodies, relations, facts, is_positive, folds=4, seed=7,
+            n_permutations=5, quantile=0.0,
+        )
+    with pytest.raises(ValueError):
+        permutation_null_threshold(
+            bodies, relations, facts, is_positive, folds=4, seed=7,
+            n_permutations=5, quantile=1.5,
+        )
