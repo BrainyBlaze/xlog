@@ -254,6 +254,47 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "own scoring (kfold_select's holdout accuracy) is untouched by this "
         "flag.",
     )
+    p.add_argument(
+        "--min-fit", type=float, default=None,
+        help="explicit fit-gate threshold for the '--max-body-literals 3' "
+        "relational_search.py search's '--ec-fit-mode fixed' path "
+        "(default: None, resolves to induce_relational_theory's own 0.75 "
+        "default -- byte-identical to every behavior that predates this "
+        "flag). Scoped to '--max-body-literals 3 --ec-fit-mode fixed' "
+        "ONLY: refused (with any other combination) at parse time, below.",
+    )
+    p.add_argument(
+        "--ec-fit-mode", default="fixed", choices=("fixed", "permutation-null"),
+        help="how the '--max-body-literals 3' relational_search.py "
+        "search's min_fit threshold is derived, separately per target "
+        "(init/term each get their OWN null distribution -- see "
+        "relational_search.permutation_null_threshold). 'fixed' (default, "
+        "byte-identical to every behavior that predates this flag): "
+        "--min-fit (or its own 0.75 default), a constant. "
+        "'permutation-null': the --null-quantile quantile of "
+        "--null-permutations label-permutation pool-max F1 samples -- a "
+        "pre-registered, data-derived threshold rather than a hand-picked "
+        "constant. Scoped to '--max-body-literals 3' ONLY.",
+    )
+    p.add_argument(
+        "--null-permutations", type=int, default=1000,
+        help="'--ec-fit-mode permutation-null' only: number of label "
+        "permutations sampled per target (default: 1000). Scoped to "
+        "'--ec-fit-mode permutation-null' ONLY.",
+    )
+    p.add_argument(
+        "--null-quantile", type=float, default=0.95,
+        help="'--ec-fit-mode permutation-null' only: the quantile of the "
+        "permutation pool-max F1 distribution used as min_fit (default: "
+        "0.95). Scoped to '--ec-fit-mode permutation-null' ONLY.",
+    )
+    p.add_argument(
+        "--null-perm-seed", type=int, default=7,
+        help="'--ec-fit-mode permutation-null' only: RNG seed for the "
+        "label permutations themselves (default: 7, independent of "
+        "--seed, which still determines the fold split every permutation "
+        "shares). Scoped to '--ec-fit-mode permutation-null' ONLY.",
+    )
     p.add_argument("--out", required=True, help="path to write RESULT.json")
     args = p.parse_args(argv)
     if args.data == "continuous" and args.test_json is None:
@@ -283,6 +324,34 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "engine path's scoring is kfold_select's own holdout accuracy, "
             "not touched by this flag -- there is no F1 option to select "
             "there."
+        )
+    if args.ec_fit_mode != "fixed" and args.max_body_literals != 3:
+        p.error(
+            f"--ec-fit-mode {args.ec_fit_mode!r} is scoped to "
+            "'--max-body-literals 3' ONLY (got --max-body-literals "
+            f"{args.max_body_literals!r})."
+        )
+    if args.min_fit is not None and args.max_body_literals != 3:
+        p.error(
+            "--min-fit is scoped to '--max-body-literals 3' ONLY (got "
+            f"--max-body-literals {args.max_body_literals!r})."
+        )
+    if args.min_fit is not None and args.ec_fit_mode != "fixed":
+        p.error(
+            "--min-fit is scoped to '--ec-fit-mode fixed' ONLY: it names a "
+            "constant threshold, incompatible with '--ec-fit-mode "
+            f"{args.ec_fit_mode!r}', which DERIVES the threshold from the "
+            "data instead."
+        )
+    if (
+        (args.null_permutations != 1000 or args.null_quantile != 0.95
+         or args.null_perm_seed != 7)
+        and args.ec_fit_mode != "permutation-null"
+    ):
+        p.error(
+            "--null-permutations/--null-quantile/--null-perm-seed are "
+            "scoped to '--ec-fit-mode permutation-null' ONLY (got "
+            f"--ec-fit-mode {args.ec_fit_mode!r})."
         )
     return args
 
@@ -1031,7 +1100,13 @@ def _run_relational_ec(
     train_relations_ec, test_relations_ec = _ec_relations_with_transitions(train, test)
 
     if args.max_body_literals == 3:
-        from relational_search import induce_relational_theory, make_predict_clause
+        from relational_search import (
+            body_cover,
+            enumerate_bodies,
+            induce_relational_theory,
+            make_predict_clause,
+            permutation_null_threshold,
+        )
 
         print(
             "NOTE: --max-body-literals 3 -- the init/term searches below "
@@ -1058,19 +1133,48 @@ def _run_relational_ec(
         predict_clause_train = make_predict_clause(train_relations_search)
         predict_clause_test = make_predict_clause(test_relations_search)
 
+        def resolve_min_fit(facts_for_search, labels_for_search, wall_key):
+            """The fit-gate threshold `induce_relational_theory` is called
+            with for THIS target -- `args.ec_fit_mode`'s two readings (see
+            parse_args's own help text): 'fixed' names a constant (--min-fit,
+            or induce_relational_theory's own 0.75 default, byte-identical to
+            every behavior that predates --ec-fit-mode); 'permutation-null'
+            DERIVES it from `relational_search.permutation_null_threshold`
+            over THIS target's own (post-don't-care-exclusion) facts/labels
+            -- init and term therefore get their OWN null distribution, not
+            a shared one, since their label vectors and exclusions differ.
+            Returns ``(min_fit, null_summary)``; ``null_summary`` is ``None``
+            in fixed mode (nothing was derived)."""
+            if args.ec_fit_mode == "fixed":
+                return (args.min_fit if args.min_fit is not None else 0.75), None
+            null_bodies, _ = enumerate_bodies(train_relations_search, max_literals=3)
+            null_covers = {b: body_cover(b, train_relations_search) for b in null_bodies}
+            t0 = time.perf_counter()
+            null = permutation_null_threshold(
+                null_bodies, train_relations_search, facts_for_search, labels_for_search,
+                folds=args.k, seed=args.seed, n_permutations=args.null_permutations,
+                quantile=args.null_quantile, perm_seed=args.null_perm_seed,
+                covers=null_covers,
+            )
+            wall[f"{wall_key}_null"] = time.perf_counter() - t0
+            return null["threshold"], null
+
         def induce_for(target_train_labels, dontcare, wall_key):
             facts_for_search, labels_for_search = _exclude_dontcare(
                 train["facts"], target_train_labels, dontcare
             )
+            min_fit, null_summary = resolve_min_fit(facts_for_search, labels_for_search, wall_key)
             t0 = time.perf_counter()
             result = induce_relational_theory(
                 train_relations_search, facts_for_search, labels_for_search,
                 max_literals=3, folds=args.k, seed=args.seed,
                 tie_tolerance=args.tie_tolerance,
                 max_clauses=args.max_clauses, min_new_covered=args.min_new_covered,
-                holdout_score=args.holdout_score,
+                holdout_score=args.holdout_score, min_fit=min_fit,
             )
             wall[wall_key] = time.perf_counter() - t0
+            result["min_fit"] = min_fit
+            result["null_summary"] = null_summary
             return result
 
         init_theory = induce_for(
@@ -1195,6 +1299,16 @@ def _run_relational_ec(
                 term_theory["selection_reasons_per_iteration"]
                 if args.max_body_literals == 3 else None
             ),
+            # Non-null ONLY at --max-body-literals 3 (see resolve_min_fit's
+            # own construction above): the actual fit-gate threshold each
+            # target's search ran with, and -- '--ec-fit-mode
+            # permutation-null' only -- the null distribution it was derived
+            # from (None in 'fixed' mode: nothing was derived).
+            "ec_fit_mode": args.ec_fit_mode if args.max_body_literals == 3 else None,
+            "init_min_fit": init_theory.get("min_fit") if args.max_body_literals == 3 else None,
+            "term_min_fit": term_theory.get("min_fit") if args.max_body_literals == 3 else None,
+            "init_null_summary": init_theory.get("null_summary") if args.max_body_literals == 3 else None,
+            "term_null_summary": term_theory.get("null_summary") if args.max_body_literals == 3 else None,
         },
         "direct_context": direct_result,
         "detector_probe": None,
@@ -1471,6 +1585,11 @@ def main(argv: list[str] | None = None) -> int:
         "min_new_covered": args.min_new_covered,
         "max_body_literals": args.max_body_literals,
         "holdout_score": args.holdout_score,
+        "ec_fit_mode": args.ec_fit_mode,
+        "min_fit": args.min_fit,
+        "null_permutations": args.null_permutations,
+        "null_quantile": args.null_quantile,
+        "null_perm_seed": args.null_perm_seed,
         "tie_tolerance": args.tie_tolerance,
         "num_pt": {"train": train["num_pt"], "test": test["num_pt"]},
         "n_pos": {
@@ -1507,6 +1626,12 @@ def main(argv: list[str] | None = None) -> int:
         )
         if args.max_body_literals == 3:
             print(f"  holdout_score: {args.holdout_score}")
+            print(f"  ec_fit_mode: {ec['ec_fit_mode']}")
+            print(f"  init min_fit: {ec['init_min_fit']}  term min_fit: {ec['term_min_fit']}")
+            if ec["init_null_summary"] is not None:
+                print(f"  init null summary: {ec['init_null_summary']}")
+            if ec["term_null_summary"] is not None:
+                print(f"  term null summary: {ec['term_null_summary']}")
             print(f"  relational search pool (init): {ec['relational_search_pool']['init']}")
             print(f"  relational search pool (term): {ec['relational_search_pool']['term']}")
             if not ec["init_theory"]["clauses"]:

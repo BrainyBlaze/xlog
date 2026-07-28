@@ -251,6 +251,213 @@ def kfold_scores(
     return {body: sums[body] / len(measurable_folds) for body in bodies}
 
 
+def _f1_from_counts(tp: int, fp: int, fn: int) -> float:
+    """The F1 arithmetic `scorer.prf1` computes from a `pred`/`gold` pair,
+    read straight off the raw tp/fp/fn counts instead -- byte-identical
+    formula (same zero-division-to-0.0 substitutions), used where a
+    permutation's per-fold counts are already in hand as set sizes and
+    materializing a `pred`/`gold` list per body per fold per permutation
+    would be the whole cost `permutation_null_threshold`'s precomputation
+    exists to avoid."""
+    precision = 0.0 if tp + fp == 0 else tp / (tp + fp)
+    recall = 0.0 if tp + fn == 0 else tp / (tp + fn)
+    if precision + recall == 0:
+        return 0.0
+    return 2 * precision * recall / (precision + recall)
+
+
+def _quantile(sorted_values: list[float], q: float) -> float:
+    """Linear-interpolation quantile (the same convention `numpy.quantile`/
+    `torch.quantile` default to) over an ALREADY-SORTED list -- kept as a
+    tiny pure-Python function rather than a `torch.quantile` call so a
+    hand-built test can recompute the exact same value with a pocket
+    calculator, not merely re-derive it from another tensor op."""
+    n = len(sorted_values)
+    if n == 1:
+        return sorted_values[0]
+    idx = q * (n - 1)
+    lo = int(idx)
+    hi = min(lo + 1, n - 1)
+    frac = idx - lo
+    return sorted_values[lo] + (sorted_values[hi] - sorted_values[lo]) * frac
+
+
+def permutation_null_threshold(
+    bodies: list[Body],
+    relations: dict[str, list],
+    facts: list,
+    labels: list[bool],
+    folds: int,
+    seed: int,
+    n_permutations: int = 1000,
+    quantile: float = 0.95,
+    perm_seed: int = 7,
+    covers: dict[Body, set] | None = None,
+) -> dict:
+    """A pre-registered, data-derived `min_fit` threshold for `select_body`'s
+    fit gate: the ``quantile`` (default 0.95) of the POOL MAXIMUM per-fold-
+    mean F1 seen across ``n_permutations`` (default 1000) label permutations
+    -- "how good can the BEST of these bodies look, by chance alone, if the
+    label/fact pairing carries no real signal". A body's real holdout F1
+    clearing this threshold is therefore evidence it beats the pool's own
+    chance ceiling, not merely a hand-picked constant like `select_body`'s
+    0.75 default.
+
+    THE PERMUTATION. One `torch.Generator` seeded with ``perm_seed``
+    (independent of ``seed``, which -- exactly as in `kfold_scores` -- only
+    ever determines the FOLD split) draws ``n_permutations`` SEQUENTIAL
+    `torch.randperm(len(facts))` draws; permutation ``p``'s labels are
+    ``labels[perm[i]]`` for each position ``i`` -- the label VECTOR is
+    reshuffled across the SAME fact list, exactly the null `select_body`'s
+    fit gate is meant to be judged against (a real rule's cover is a fact
+    about the geometry/activity vocabulary, not about which label happened
+    to land where).
+
+    THE FOLD SPLIT IS PERMUTATION-INVARIANT, computed ONCE: `holdout_fold_
+    assignment(len(facts), folds, seed)` never changes across permutations
+    (a permutation reshuffles WHICH FACT carries which label, not which fold
+    a fact was assigned to), so it -- and each body's cover, and each body's
+    per-fold PREDICTED-positive fact set -- are derived exactly once, before
+    the permutation loop starts, not re-derived per permutation.
+
+    THE EFFICIENT ARITHMETIC (why this needs no per-permutation, per-body
+    O(facts) pass). A permutation only moves WHICH fact positions count as
+    positive -- it never changes a body's cover, and it never changes how
+    many facts a fold holds out. So, per permutation, only the (typically
+    tiny) set of positive positions needs to be recomputed: the inverse of
+    the drawn permutation, gathered at the ORIGINAL positive positions,
+    gives exactly ``{i : labels[perm[i]] is True}`` (see this function's own
+    derivation below for why the inverse-gather is algebraically identical
+    to reshuffling the whole label array and reading off the True
+    positions). From there, per fold, per body: ``tp = |held-out predicted-
+    positive positions (precomputed) INTERSECT this permutation's held-out
+    positive positions|`` -- a set intersection over the SMALLER of the two
+    sides, never an ``O(facts)`` rescan.
+
+    THE ZERO-POSITIVE-FOLD SKIP RULE APPLIES PER PERMUTATION, exactly as
+    `kfold_scores(score="f1")` applies it to the real (unpermuted) labels: a
+    fold with no held-out positive UNDER THIS PERMUTATION contributes to no
+    body's mean for THIS permutation (a different permutation can, and
+    generally will, make a different fold set measurable). If NO fold is
+    measurable under a permutation (only possible when the real label
+    vector itself holds zero positives, since permutation never changes
+    the total positive COUNT), every body's mean is undefined for that
+    permutation and its pool-max sample is reported as ``0.0`` -- the same
+    substitution `kfold_scores` makes for the analogous real-run case.
+
+    Returns ``{"threshold": float, "pool_max_samples_summary": {"min",
+    "median", "p95", "max"}, "n_permutations": int, "quantile": float,
+    "perm_seed": int}``. ``"threshold"`` is `_quantile` at ``quantile``;
+    ``"pool_max_samples_summary"``'s own ``"p95"`` is ALWAYS the literal
+    95th percentile (a fixed diagnostic), independent of whatever
+    ``quantile`` the caller passed -- so a caller who deliberately chose a
+    non-default ``quantile`` can still see where their chosen threshold
+    sits relative to the conventional 95th-percentile reading.
+    """
+    if not 2 <= folds <= len(facts):
+        raise ValueError(
+            f"folds={folds} with {len(facts)} facts: every fold needs at "
+            "least one held-out fact -- mirrors kfold_scores's identical "
+            "guard."
+        )
+    if len(labels) != len(facts):
+        raise ValueError(
+            f"labels has {len(labels)} entries for {len(facts)} facts -- a "
+            "mismatched pair would silently permute against misaligned "
+            "facts."
+        )
+    if n_permutations < 1:
+        raise ValueError(f"n_permutations must be >= 1 (got {n_permutations!r}).")
+    if not 0.0 < quantile <= 1.0:
+        raise ValueError(f"quantile must be in (0.0, 1.0] (got {quantile!r}).")
+
+    import torch
+
+    if covers is None:
+        covers = {body: body_cover(body, relations) for body in bodies}
+
+    n = len(facts)
+    fold_of = holdout_fold_assignment(n, folds, seed)
+    fold_held_ids = [
+        [i for i in range(n) if fold_of[i] == fold] for fold in range(folds)
+    ]
+    held_ids_set = [set(ids) for ids in fold_held_ids]
+
+    # Per body, per fold: the FIXED (permutation-invariant) held-out
+    # predicted-positive position set and its size -- computed once here,
+    # never inside the permutation loop.
+    pred_pos_set: dict[Body, list[set]] = {}
+    pred_pos_count: dict[Body, list[int]] = {}
+    for body in bodies:
+        cover = covers[body]
+        pred_pos_set[body] = [
+            {i for i in held_ids if facts[i] in cover} for held_ids in fold_held_ids
+        ]
+        pred_pos_count[body] = [len(s) for s in pred_pos_set[body]]
+
+    original_positive_idx = torch.tensor(
+        [i for i, y in enumerate(labels) if bool(y)], dtype=torch.long,
+    )
+
+    rng = torch.Generator().manual_seed(perm_seed)
+    pool_max_samples: list[float] = []
+    for _ in range(n_permutations):
+        perm = torch.randperm(n, generator=rng)
+        # Inverse-gather: perm_inv[perm[i]] = i, so perm_inv[original
+        # positive index j] is the position i with perm[i] == j, i.e. the
+        # position whose PERMUTED label reads labels[j] -- exactly the set
+        # {i : labels[perm[i]] is True} a literal reshuffle-then-scan would
+        # produce, without ever materializing the full permuted label array.
+        perm_inv = torch.empty(n, dtype=torch.long)
+        perm_inv[perm] = torch.arange(n)
+        positive_positions = set(perm_inv[original_positive_idx].tolist())
+
+        held_pos_by_fold = []
+        for held_set in held_ids_set:
+            if len(positive_positions) <= len(held_set):
+                hp = {i for i in positive_positions if i in held_set}
+            else:
+                hp = {i for i in held_set if i in positive_positions}
+            held_pos_by_fold.append(hp)
+        measurable = [f for f, hp in enumerate(held_pos_by_fold) if hp]
+
+        if not measurable:
+            pool_max_samples.append(0.0)
+            continue
+
+        pool_max = 0.0
+        for body in bodies:
+            total = 0.0
+            for f in measurable:
+                hp = held_pos_by_fold[f]
+                pset = pred_pos_set[body][f]
+                if len(hp) <= len(pset):
+                    tp = sum(1 for i in hp if i in pset)
+                else:
+                    tp = sum(1 for i in pset if i in hp)
+                fp = pred_pos_count[body][f] - tp
+                fn = len(hp) - tp
+                total += _f1_from_counts(tp, fp, fn)
+            body_score = total / len(measurable)
+            if body_score > pool_max:
+                pool_max = body_score
+        pool_max_samples.append(pool_max)
+
+    sorted_samples = sorted(pool_max_samples)
+    return {
+        "threshold": _quantile(sorted_samples, quantile),
+        "pool_max_samples_summary": {
+            "min": sorted_samples[0],
+            "median": _quantile(sorted_samples, 0.5),
+            "p95": _quantile(sorted_samples, 0.95),
+            "max": sorted_samples[-1],
+        },
+        "n_permutations": n_permutations,
+        "quantile": quantile,
+        "perm_seed": perm_seed,
+    }
+
+
 @dataclass(frozen=True)
 class BodySelection:
     """What the relational-body arbiter is entitled to claim -- mirrors
