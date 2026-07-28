@@ -183,6 +183,45 @@ DIFFERENT root causes, both recorded rather than tuned away:
 Files: `results/caviar-e3-cont_rel_ec_*.json`,
 `results/caviar-e5-cont_*_ec_*.json`.
 
+### D.1 Recall-aware holdout + permutation-null fit gate: the first EC theory
+
+Both follow-ups above were then implemented under pre-registered
+protocols (each configuration declared before its run; no other
+configurations were executed on the real data):
+
+1. **Per-fold-F1 holdout** (`--holdout-score f1`) removes the base-rate
+   plateau: the initiation field spreads (top `both_active & close` at
+   F1 0.238 with a real 0.138 margin) — but every body still fails the
+   accuracy-era fit gate (0.75), which under F1 semantics on 10 positives
+   demands near-perfection.
+2. **Permutation-null fit gate** (`--ec-fit-mode permutation-null`,
+   1000 label permutations, permutation seed 7, 95th percentile of the
+   POOL-MAXIMUM mean per-fold F1, per target, same fold split): derived
+   gates init 0.0444 / term 0.1250. Under these statistically-grounded
+   gates:
+   * **Initiation: the first non-abstaining EC theory** —
+     `initiatedAt_meeting :- both_active & close` (F1 0.238 = 5.4x its
+     own null gate); a second clause honestly abstains on a genuinely
+     different-cover tie.
+   * **Termination: still abstains** (top 0.100 < its 0.125 gate) — the
+     negative is now statistically grounded, not metric-artifactual.
+   * **Reconstructed holdsAt on test: P 0.984 / R 0.904 / frame F1
+     0.942** (tp 442, fp 7, fn 47). Inertia is load-bearing: the same
+     clause scored per-frame with NO inertia gives F1 0.341.
+
+**Read this number with its structural caveat.** The 0.942 frame F1 is a
+single-split result whose termination theory is empty (once initiated,
+the fluent persists to the end of each co-visible pair-run by inertia):
+this is benign here only because 96% of positive frames lie in one
+interval that ends by the pair leaving co-visibility rather than by an
+observed termination, and the sole interior-terminating interval never
+triggers the initiation clause (had it fired there, precision would fall
+to ~0.50 over its 455 post-meeting frames). The score is therefore not
+evidence that terminations are learned, and is comparable to the
+published OLED/WOLED numbers only if their evaluation shares this frame
+universe (co-visible pair-frames) and tolerates a persistence-only
+termination model. Files: `results/e9_permutation_null/*.json`.
+
 ## Reproduction
 
 ```
@@ -200,6 +239,12 @@ python examples/caviar_woled/run_caviar_theory.py --mode relational --protocol d
 python examples/caviar_woled/run_caviar_theory.py --mode relational --protocol ec \
   --data continuous --pkl caviar-train.json --test-json caviar-test.json \
   --k 4 --seed 7 --min-new-covered 2 --max-body-literals 3 --out RESULT.json
+
+# continuous, EC protocol, F1 holdout + permutation-null fit gate (section D.1; CPU-only)
+python examples/caviar_woled/run_caviar_theory.py --mode relational --protocol ec \
+  --data continuous --pkl caviar-train.json --test-json caviar-test.json \
+  --k 4 --seed 7 --min-new-covered 2 --max-body-literals 3 \
+  --holdout-score f1 --ec-fit-mode permutation-null --out RESULT.json
 ```
 
 GPU runs need CUDA (see each script's docstring); the 3-literal EC search
