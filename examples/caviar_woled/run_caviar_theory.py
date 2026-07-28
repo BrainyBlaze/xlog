@@ -1187,6 +1187,14 @@ def _run_relational_ec(
                 _top5_scores(term_theory["scores_per_iteration"][-1])
                 if args.max_body_literals == 3 else None
             ),
+            "init_selection_reasons": (
+                init_theory["selection_reasons_per_iteration"]
+                if args.max_body_literals == 3 else None
+            ),
+            "term_selection_reasons": (
+                term_theory["selection_reasons_per_iteration"]
+                if args.max_body_literals == 3 else None
+            ),
         },
         "direct_context": direct_result,
         "detector_probe": None,

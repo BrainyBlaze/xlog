@@ -175,10 +175,12 @@ def kfold_scores(
       any body's cover), so it is not literally "k-fold F1" for k=`folds`
       when some folds are unmeasurable -- it is the honest mean over the
       folds where F1 means something. The alternative (counting a
-      zero-positive fold's F1 as 0.0) is rejected: it would tax every body
-      by a fold-composition accident unrelated to the body's own quality,
-      re-introducing a milder version of the exact plateau problem `"f1"`
-      exists to fix. In the degenerate case where NO fold has any held-out
+      zero-positive fold's F1 as 0.0) would be a body-INDEPENDENT constant
+      rescale of every mean -- the skip set depends only on the fold/label
+      split -- so the choice cannot change any ranking or selection; skip
+      is preferred only because the reported number then means "mean F1
+      where F1 is defined" rather than a value diluted by unmeasurable
+      folds. In the degenerate case where NO fold has any held-out
       positive at all (recall is unmeasurable everywhere), every body's
       score is reported as `0.0` (empty-mean is otherwise undefined) --
       this can only happen if the residual holds zero positives overall,
@@ -431,6 +433,10 @@ def induce_relational_theory(
     * `"scores_per_iteration"`: one `dict[Body, float]` PER `select_once`
       call, in call order -- so a caller whose search abstained can still
       report the top-N scores it came closest with, without a second search.
+    * `"selection_reasons_per_iteration"`: the underlying selection's own
+      `reason` string per `select_once` call (e.g. the fit-gate rejection
+      message) -- the loop's iteration record alone cannot distinguish a
+      fit-gate abstain from a tie abstain.
     """
     if max_literals not in (2, 3):
         raise ValueError(
@@ -443,6 +449,7 @@ def induce_relational_theory(
     predict_clause = make_predict_clause(relations)
 
     scores_per_iteration: list[dict[Body, float]] = []
+    selection_reasons_per_iteration: list[str] = []
 
     def select_once(residual_facts, residual_is_positive):
         resolved_tt = (
@@ -454,7 +461,12 @@ def induce_relational_theory(
             folds, seed, covers=covers, score=holdout_score,
         )
         scores_per_iteration.append(scores)
-        return select_body(scores, covers, min_fit, resolved_tt)
+        sel = select_body(scores, covers, min_fit, resolved_tt)
+        # The select-level reason (fit-gate rejection vs tie vs win) is the
+        # diagnostic a result reader actually needs on an abstain; the theory
+        # loop's own iteration record only says that select_once abstained.
+        selection_reasons_per_iteration.append(sel.reason)
+        return sel
 
     theory = induce_theory(
         select_once, predict_clause, facts, is_positive,
@@ -471,4 +483,5 @@ def induce_relational_theory(
             "skipped_empty_cover": skip_counts,
         },
         "scores_per_iteration": scores_per_iteration,
+        "selection_reasons_per_iteration": selection_reasons_per_iteration,
     }
