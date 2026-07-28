@@ -1,0 +1,42 @@
+{
+  "provenance": {
+    "caviar-train.json_md5": "5ba64bf80f135e5a874c3bac2fd0af73",
+    "caviar-test.json_md5": "08cba3f04c2f528356cd70dd23360d5b",
+    "note": "Every count below was recomputed independently of caviar_continuous.py's own parsing by python/tests/test_caviar_alignment_evidence.py (own regex pass, own segmentation, own transition counting), run against the two real files pinned by the md5s above."
+  },
+  "annotation_timestamp_grid_coverage": {
+    "train": {"n_annotation_timestamps": 1344, "n_absent_from_narrative_grid": 0},
+    "test": {"n_annotation_timestamps": 489, "n_absent_from_narrative_grid": 0}
+  },
+  "per_pair_transitions_no_shift": {
+    "train": {
+      "total_init_per_ordered_pair": 22,
+      "total_term_per_ordered_pair": 22,
+      "per_unordered_pair": {
+        "id0,id1": [3, 3],
+        "id1,id2": [5, 5],
+        "id1,id3": [1, 1],
+        "id2,id6": [1, 1],
+        "id5,id6": [1, 1]
+      },
+      "boundary_truncated_pairs": []
+    },
+    "test": {
+      "total_init_per_ordered_pair": 6,
+      "total_term_per_ordered_pair": 4,
+      "per_unordered_pair": {
+        "id1,id2": [1, 0],
+        "id2,id6": [1, 1],
+        "id4,id5": [1, 1]
+      },
+      "boundary_truncated_pairs": ["id1,id2"]
+    }
+  },
+  "t_minus_40_reading_falsification": {
+    "test": {
+      "total_init_per_ordered_pair": 6,
+      "total_term_per_ordered_pair": 6,
+      "verdict": "falsified -- the shifted reading manufactures a termination for the id1,id2 boundary-truncated case that the source data does not actually show happening before the video ends; only the no-shift reading (6/4) is honest"
+    }
+  }
+}

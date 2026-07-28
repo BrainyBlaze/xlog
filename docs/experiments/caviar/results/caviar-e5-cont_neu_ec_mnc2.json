@@ -1,0 +1,159 @@
+{
+  "pkl": "/workspace/caviar-train.json",
+  "test_json": "/workspace/caviar-test.json",
+  "data": "continuous",
+  "fold": null,
+  "mode": "neural",
+  "protocol": "ec",
+  "close_threshold": 25.0,
+  "k": 4,
+  "seed": 7,
+  "hidden": 16,
+  "max_clauses": 4,
+  "min_new_covered": 2,
+  "num_pt": {
+    "train": 24312,
+    "test": 8048
+  },
+  "n_pos": {
+    "train": 1344,
+    "test": 489
+  },
+  "wall_clock_s": {
+    "convert": 0.4522745395079255,
+    "theory_loop_init": 60.630273210816085,
+    "theory_loop_init_per_iteration": [
+      60.62966270279139
+    ],
+    "theory_loop_term": 56.31903161481023,
+    "theory_loop_term_per_iteration": [
+      56.31885512638837
+    ],
+    "mode_total": 117.2959698298946,
+    "total": 117.81900627631694
+  },
+  "candidate_vocabulary": {
+    "relational": [
+      "any_became_active",
+      "any_became_inactive",
+      "any_became_walking",
+      "any_stopped_walking",
+      "both_active",
+      "both_inactive",
+      "both_walking",
+      "mixed_active_walking"
+    ],
+    "neural": [
+      "close_nn"
+    ],
+    "excluded": [
+      "close",
+      "far",
+      "coords_missing"
+    ]
+  },
+  "steps_requested": 400,
+  "steps_effective": 400,
+  "steps_clamped": false,
+  "ec": {
+    "n_init": {
+      "train": 10,
+      "test": 3
+    },
+    "n_term": {
+      "train": 11,
+      "test": 1
+    },
+    "n_init_dontcare_train": 1334,
+    "n_term_dontcare_train": 22957,
+    "init_theory": {
+      "clauses": [],
+      "iterations": [
+        {
+          "rule": null,
+          "reason": "select_once abstained",
+          "margin": 0.0,
+          "n_residual_pos_before": 10,
+          "n_newly_covered": 0
+        }
+      ],
+      "stop_reason": "select_once abstained"
+    },
+    "term_theory": {
+      "clauses": [],
+      "iterations": [
+        {
+          "rule": null,
+          "reason": "select_once abstained",
+          "margin": 0.0007374584674835205,
+          "n_residual_pos_before": 11,
+          "n_newly_covered": 0
+        }
+      ],
+      "stop_reason": "select_once abstained"
+    },
+    "init_scoring": {
+      "theory_prf1": {
+        "train": {
+          "precision": 0.0,
+          "recall": 0.0,
+          "f1": 0.0,
+          "tp": 0,
+          "fp": 0,
+          "fn": 10,
+          "tn": 24302,
+          "degenerate": true
+        },
+        "test": {
+          "precision": 0.0,
+          "recall": 0.0,
+          "f1": 0.0,
+          "tp": 0,
+          "fp": 0,
+          "fn": 3,
+          "tn": 8045,
+          "degenerate": true
+        }
+      },
+      "marginal_contribution": []
+    },
+    "term_scoring": {
+      "theory_prf1": {
+        "train": {
+          "precision": 0.0,
+          "recall": 0.0,
+          "f1": 0.0,
+          "tp": 0,
+          "fp": 0,
+          "fn": 11,
+          "tn": 24301,
+          "degenerate": true
+        },
+        "test": {
+          "precision": 0.0,
+          "recall": 0.0,
+          "f1": 0.0,
+          "tp": 0,
+          "fp": 0,
+          "fn": 1,
+          "tn": 8047,
+          "degenerate": true
+        }
+      },
+      "marginal_contribution": []
+    },
+    "frame_f1": {
+      "precision": 0.0,
+      "recall": 0.0,
+      "f1": 0.0,
+      "tp": 0,
+      "fp": 0,
+      "fn": 489,
+      "tn": 7559,
+      "degenerate": true
+    }
+  },
+  "direct_context": null,
+  "detector_probe": null,
+  "note": "init/term theories each carry their OWN independently trained close_nn networks per clause (see _induce_neural_theory_for_target); close/far were never fed to any close_nn training in any form, in either theory."
+}
