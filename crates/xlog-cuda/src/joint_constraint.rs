@@ -295,10 +295,16 @@ fn ensure_joint_solve_module(device: &Arc<CudaDevice>) -> Result<(), CarrierErro
     {
         return Ok(());
     }
-    let cc = crate::provider::detect_compute_capability(device)
-        .map_err(|e| CarrierError::KernelUnavailable { detail: e.to_string() })?;
-    let sources = crate::provider::load_module_sources("joint_solve", cc)
-        .map_err(|e| CarrierError::KernelUnavailable { detail: e.to_string() })?;
+    let cc = crate::provider::detect_compute_capability(device).map_err(|e| {
+        CarrierError::KernelUnavailable {
+            detail: e.to_string(),
+        }
+    })?;
+    let sources = crate::provider::load_module_sources("joint_solve", cc).map_err(|e| {
+        CarrierError::KernelUnavailable {
+            detail: e.to_string(),
+        }
+    })?;
     let mut load_errors = Vec::new();
     for source in sources {
         let attempt = match source {
@@ -369,9 +375,10 @@ impl JointConstraintCarrier {
         let async_resource: Box<dyn DeviceMemoryResource + Send + Sync> = Box::new(
             AsyncCudaResource::new(Arc::clone(&device), 0, Arc::clone(&pool)),
         );
-        let logging: Box<dyn DeviceMemoryResource + Send + Sync> = Box::new(
-            LoggingResource::new(async_resource, Arc::new(SilentSink) as Arc<dyn LoggingSink>),
-        );
+        let logging: Box<dyn DeviceMemoryResource + Send + Sync> = Box::new(LoggingResource::new(
+            async_resource,
+            Arc::new(SilentSink) as Arc<dyn LoggingSink>,
+        ));
         let budget: Box<dyn DeviceMemoryResource + Send + Sync> = Box::new(
             GlobalDeviceBudget::new(logging, CARRIER_BUDGET_BYTES as usize),
         );
@@ -404,9 +411,7 @@ impl JointConstraintCarrier {
         let feasible_sets = memory
             .alloc::<u64>(candidates * label_words(labels))
             .map_err(CarrierError::Allocation)?;
-        let logical_counts = memory
-            .alloc::<u32>(4)
-            .map_err(CarrierError::Allocation)?;
+        let logical_counts = memory.alloc::<u32>(4).map_err(CarrierError::Allocation)?;
         let map_results = memory
             .alloc::<u32>(candidates * 4)
             .map_err(CarrierError::Allocation)?;
@@ -514,9 +519,9 @@ impl JointConstraintCarrier {
                 external_stream as cudarc::driver::sys::CUstream,
             ) {
                 let _ = cudarc::driver::result::event::destroy(event);
-                return Err(CarrierError::Launch(xlog_core::XlogError::Kernel(
-                    format!("producer event record failed: {e}"),
-                )));
+                return Err(CarrierError::Launch(xlog_core::XlogError::Kernel(format!(
+                    "producer event record failed: {e}"
+                ))));
             }
             self.pending_producer_events.push(event);
         }
@@ -526,10 +531,7 @@ impl JointConstraintCarrier {
     /// Make `cu_stream` wait on every pending producer event, then
     /// destroy and clear them. Enqueued waits capture the events, so
     /// destruction is deferred by the driver until they complete.
-    fn drain_producer_waits(
-        &mut self,
-        cu_stream: &crate::CudaStream,
-    ) -> Result<(), CarrierError> {
+    fn drain_producer_waits(&mut self, cu_stream: &crate::CudaStream) -> Result<(), CarrierError> {
         for event in self.pending_producer_events.drain(..) {
             // SAFETY: event was created and recorded by
             // note_producer_stream and is consumed exactly once here.
@@ -561,9 +563,7 @@ impl JointConstraintCarrier {
             CarrierBufferId::Scores => (1, 4, self.candidates, self.labels),
             CarrierBufferId::Constraints => (2, 4, self.candidates, 2),
             CarrierBufferId::Outputs => (3, 4, self.candidates, 1),
-            CarrierBufferId::FeasibleSets => {
-                (4, 8, self.candidates, label_words(self.labels))
-            }
+            CarrierBufferId::FeasibleSets => (4, 8, self.candidates, label_words(self.labels)),
             CarrierBufferId::LogicalCounts => (5, 4, 1, 4),
             CarrierBufferId::MapResults => (6, 4, self.candidates, 4),
             CarrierBufferId::SolveStatus => (7, 4, self.candidates, 1),
@@ -1013,13 +1013,11 @@ impl JointConstraintCarrier {
         // the meter to the DEVICE-measured expansions.
         let mut measured = [0u64; 1];
         unsafe {
-            cudarc::driver::result::stream::synchronize(cu_stream.cu_stream()).map_err(
-                |e| {
-                    CarrierError::Launch(xlog_core::XlogError::Kernel(format!(
-                        "component solve completion wait failed: {e}"
-                    )))
-                },
-            )?;
+            cudarc::driver::result::stream::synchronize(cu_stream.cu_stream()).map_err(|e| {
+                CarrierError::Launch(xlog_core::XlogError::Kernel(format!(
+                    "component solve completion wait failed: {e}"
+                )))
+            })?;
             cudarc::driver::result::memcpy_dtoh_sync(&mut measured, *fuel_col.device_ptr())
                 .map_err(|e| {
                     CarrierError::Launch(xlog_core::XlogError::Kernel(format!(
@@ -1072,8 +1070,7 @@ impl JointConstraintCarrier {
                 solver_identity: solver.clone(),
             });
         }
-        self.registered_schema =
-            Some((catalog_sha.to_string(), solver_identity.to_string()));
+        self.registered_schema = Some((catalog_sha.to_string(), solver_identity.to_string()));
         Ok(())
     }
 }

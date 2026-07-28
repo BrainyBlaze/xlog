@@ -58,11 +58,10 @@ fn duplicate_schema_registration_refuses_typed() {
 
     // Deterministic test identity: sha256 of the empty string — a
     // valid, reproducible catalog anchor with no placeholder text.
-    const CATALOG_SHA: &str =
-        "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+    const CATALOG_SHA: &str = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
 
-    let mut carrier = JointConstraintCarrier::allocate(Arc::clone(&device), 4, 8, 4, 4)
-        .expect("allocation");
+    let mut carrier =
+        JointConstraintCarrier::allocate(Arc::clone(&device), 4, 8, 4, 4).expect("allocation");
     carrier
         .register_schema(CATALOG_SHA, xlog_cuda::SOLVER_ABI_IDENTITY)
         .expect("first registration succeeds");
@@ -214,8 +213,8 @@ fn solve_label_feasibility_is_existential_on_device() {
 
     // 2 entities, 1 domain lane, 1 candidate pair, 3 labels
     // (label 0 = abstain).
-    let mut carrier = JointConstraintCarrier::allocate(Arc::clone(&device), 2, 1, 1, 3)
-        .expect("allocation");
+    let mut carrier =
+        JointConstraintCarrier::allocate(Arc::clone(&device), 2, 1, 1, 3).expect("allocation");
     carrier
         .register_schema(
             "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -240,11 +239,8 @@ fn solve_label_feasibility_is_existential_on_device() {
         *columns[4].device_ptr(),
     );
     unsafe {
-        cudarc::driver::result::memcpy_htod_sync(
-            domains_ptr,
-            &[0b0110u64, 0b1000u64],
-        )
-        .expect("domain upload");
+        cudarc::driver::result::memcpy_htod_sync(domains_ptr, &[0b0110u64, 0b1000u64])
+            .expect("domain upload");
         cudarc::driver::result::memcpy_htod_sync(constraints_ptr, &[0u32, 1u32])
             .expect("pair upload");
     }
@@ -261,8 +257,7 @@ fn solve_label_feasibility_is_existential_on_device() {
     unsafe {
         cudarc::driver::result::memcpy_dtoh_sync(&mut counts, outputs_ptr)
             .expect("counts readback");
-        cudarc::driver::result::memcpy_dtoh_sync(&mut sets, sets_ptr)
-            .expect("sets readback");
+        cudarc::driver::result::memcpy_dtoh_sync(&mut sets, sets_ptr).expect("sets readback");
     }
     assert_eq!(
         sets[0], 0b011,
@@ -285,8 +280,8 @@ fn solve_prerequisites_refuse_typed_in_order() {
         return;
     };
 
-    let mut carrier = JointConstraintCarrier::allocate(Arc::clone(&device), 2, 1, 1, 3)
-        .expect("allocation");
+    let mut carrier =
+        JointConstraintCarrier::allocate(Arc::clone(&device), 2, 1, 1, 3).expect("allocation");
     let mut fuel = FuelMeter::new(1 << 10);
 
     let err = carrier.solve_label_feasibility(0, &mut fuel).unwrap_err();
@@ -317,7 +312,10 @@ fn solve_prerequisites_refuse_typed_in_order() {
         .bind_signatures(&[0; 3], &[0; 3])
         .expect("lawful binding");
     let err = carrier.bind_signatures(&[0; 3], &[0; 3]).unwrap_err();
-    assert!(matches!(err, CarrierError::SignaturesAlreadyBound), "{err:?}");
+    assert!(
+        matches!(err, CarrierError::SignaturesAlreadyBound),
+        "{err:?}"
+    );
 
     let err = carrier.solve_label_feasibility(3, &mut fuel).unwrap_err();
     assert!(
@@ -344,8 +342,8 @@ fn solve_beyond_fuel_refuses_without_partial_emission() {
         return;
     };
 
-    let mut carrier = JointConstraintCarrier::allocate(Arc::clone(&device), 2, 1, 1, 3)
-        .expect("allocation");
+    let mut carrier =
+        JointConstraintCarrier::allocate(Arc::clone(&device), 2, 1, 1, 3).expect("allocation");
     carrier
         .register_schema("00", SOLVER_ABI_IDENTITY)
         .expect("registration");
@@ -384,10 +382,12 @@ fn solve_beyond_fuel_refuses_without_partial_emission() {
     unsafe {
         cudarc::driver::result::memcpy_dtoh_sync(&mut counts, outputs_ptr)
             .expect("counts readback");
-        cudarc::driver::result::memcpy_dtoh_sync(&mut sets, sets_ptr)
-            .expect("sets readback");
+        cudarc::driver::result::memcpy_dtoh_sync(&mut sets, sets_ptr).expect("sets readback");
     }
-    assert_eq!(counts[0], 0xDEAD_BEEF, "refused solve must not touch outputs");
+    assert_eq!(
+        counts[0], 0xDEAD_BEEF,
+        "refused solve must not touch outputs"
+    );
     assert_eq!(
         sets[0], 0xFEED_FACE_CAFE_D00D,
         "refused solve must not touch feasible sets"
@@ -409,8 +409,8 @@ fn top2_consumes_feasibility_across_streams_exactly() {
         return;
     };
 
-    let mut carrier = JointConstraintCarrier::allocate(Arc::clone(&device), 2, 1, 1, 3)
-        .expect("allocation");
+    let mut carrier =
+        JointConstraintCarrier::allocate(Arc::clone(&device), 2, 1, 1, 3).expect("allocation");
     carrier
         .register_schema("00", SOLVER_ABI_IDENTITY)
         .expect("registration");
@@ -454,14 +454,20 @@ fn top2_consumes_feasibility_across_streams_exactly() {
 
     let mut map = [0u32; 4];
     unsafe {
-        cudarc::driver::result::memcpy_dtoh_sync(&mut map, map_ptr)
-            .expect("map readback");
+        cudarc::driver::result::memcpy_dtoh_sync(&mut map, map_ptr).expect("map readback");
     }
-    assert_eq!(map[0], 1, "best label is the FEASIBLE maximum, not the raw one");
+    assert_eq!(
+        map[0], 1,
+        "best label is the FEASIBLE maximum, not the raw one"
+    );
     assert_eq!(map[1], 0, "unique maximum carries no ambiguity flag");
     assert_eq!(f32::from_bits(map[2]), 2.0, "best score");
     assert_eq!(f32::from_bits(map[3]), 1.5, "margin = best minus runner-up");
-    assert_eq!(fuel.spent(), 6, "both stages charge candidate x label cells");
+    assert_eq!(
+        fuel.spent(),
+        6,
+        "both stages charge candidate x label cells"
+    );
 }
 
 /// A tied maximum is a typed MAP-ambiguity signal: the ambiguity
@@ -476,8 +482,8 @@ fn tied_maximum_flags_ambiguity_never_unique() {
         return;
     };
 
-    let mut carrier = JointConstraintCarrier::allocate(Arc::clone(&device), 2, 1, 1, 3)
-        .expect("allocation");
+    let mut carrier =
+        JointConstraintCarrier::allocate(Arc::clone(&device), 2, 1, 1, 3).expect("allocation");
     carrier
         .register_schema("00", SOLVER_ABI_IDENTITY)
         .expect("registration");
@@ -516,8 +522,7 @@ fn tied_maximum_flags_ambiguity_never_unique() {
 
     let mut map = [0u32; 4];
     unsafe {
-        cudarc::driver::result::memcpy_dtoh_sync(&mut map, map_ptr)
-            .expect("map readback");
+        cudarc::driver::result::memcpy_dtoh_sync(&mut map, map_ptr).expect("map readback");
     }
     assert_eq!(map[1], 1, "tied maximum must set the ambiguity flag");
     assert_eq!(f32::from_bits(map[3]), 0.0, "tied maximum has zero margin");
@@ -553,14 +558,15 @@ fn fresh_session_buffers_read_back_zero() {
         cudarc::driver::result::memcpy_dtoh_sync(&mut outputs, outputs_ptr)
             .expect("outputs readback");
         cudarc::driver::result::memcpy_dtoh_sync(&mut maps, map_ptr).expect("map readback");
-        cudarc::driver::result::memcpy_dtoh_sync(&mut status, status_ptr)
-            .expect("status readback");
+        cudarc::driver::result::memcpy_dtoh_sync(&mut status, status_ptr).expect("status readback");
     }
-    assert_eq!(outputs, [0; 2], "fresh outputs are zero, never reused bytes");
+    assert_eq!(
+        outputs, [0; 2],
+        "fresh outputs are zero, never reused bytes"
+    );
     assert_eq!(maps, [0; 8], "fresh map results are zero");
     assert_eq!(
-        status,
-        [0; 2],
+        status, [0; 2],
         "fresh solve status is zero — no accidental authority claim"
     );
 }
@@ -585,8 +591,8 @@ fn component_solve_rejects_jointly_infeasible_greedy_maximum() {
     // (0 = abstain). Label 1 pins its tail to sort 2; label 2 pins
     // its head to sort 3 — both constrain shared entity e1, with
     // empty intersection.
-    let mut carrier = JointConstraintCarrier::allocate(Arc::clone(&device), 3, 1, 2, 3)
-        .expect("allocation");
+    let mut carrier =
+        JointConstraintCarrier::allocate(Arc::clone(&device), 3, 1, 2, 3).expect("allocation");
     carrier
         .register_schema("00", SOLVER_ABI_IDENTITY)
         .expect("registration");
@@ -606,20 +612,14 @@ fn component_solve_rejects_jointly_infeasible_greedy_maximum() {
     };
     let pairs = [(0u32, 1u32), (1u32, 2u32)];
     unsafe {
-        cudarc::driver::result::memcpy_htod_sync(
-            domains_ptr,
-            &[0b0010u64, 0b1100u64, 0b0001u64],
-        )
-        .expect("domain upload");
+        cudarc::driver::result::memcpy_htod_sync(domains_ptr, &[0b0010u64, 0b1100u64, 0b0001u64])
+            .expect("domain upload");
         cudarc::driver::result::memcpy_htod_sync(constraints_ptr, &[0u32, 1u32, 1u32, 2u32])
             .expect("pair upload");
         // Greedy favorites: c0 -> label 1 (5.0), c1 -> label 2 (4.0);
         // infeasible labels carry decoy-high scores.
-        cudarc::driver::result::memcpy_htod_sync(
-            scores_ptr,
-            &[0.1f32, 5.0, 9.9, 0.1, 7.7, 4.0],
-        )
-        .expect("scores upload");
+        cudarc::driver::result::memcpy_htod_sync(scores_ptr, &[0.1f32, 5.0, 9.9, 0.1, 7.7, 4.0])
+            .expect("scores upload");
     }
     device.inner().synchronize().expect("scaffold sync");
 
@@ -640,10 +640,8 @@ fn component_solve_rejects_jointly_infeasible_greedy_maximum() {
     let mut maps = [0u32; 8];
     let mut status = [0u32; 2];
     unsafe {
-        cudarc::driver::result::memcpy_dtoh_sync(&mut maps, map_ptr)
-            .expect("map readback");
-        cudarc::driver::result::memcpy_dtoh_sync(&mut status, status_ptr)
-            .expect("status readback");
+        cudarc::driver::result::memcpy_dtoh_sync(&mut maps, map_ptr).expect("map readback");
+        cudarc::driver::result::memcpy_dtoh_sync(&mut status, status_ptr).expect("status readback");
     }
 
     // Mirror the kernel's f32 accumulation order exactly.
@@ -666,7 +664,11 @@ fn component_solve_rejects_jointly_infeasible_greedy_maximum() {
     // Device-exact fuel: feasibility 6 + top-two 6 + exactly the 4
     // enumerated combinations — the conservative upfront
     // authorization was refunded down to the measured literal.
-    assert_eq!(fuel.spent(), 16, "meter reconciles to device-measured expansions");
+    assert_eq!(
+        fuel.spent(),
+        16,
+        "meter reconciles to device-measured expansions"
+    );
 }
 
 /// Producer-event seam: writes enqueued ASYNCHRONOUSLY on an
@@ -685,8 +687,8 @@ fn noted_producer_stream_orders_async_writes_before_solve() {
         return;
     };
 
-    let mut carrier = JointConstraintCarrier::allocate(Arc::clone(&device), 2, 1, 1, 3)
-        .expect("allocation");
+    let mut carrier =
+        JointConstraintCarrier::allocate(Arc::clone(&device), 2, 1, 1, 3).expect("allocation");
     carrier
         .register_schema("00", SOLVER_ABI_IDENTITY)
         .expect("registration");
@@ -759,11 +761,17 @@ fn noted_producer_stream_orders_async_writes_before_solve() {
 
     let mut map = [0u32; 4];
     unsafe {
-        cudarc::driver::result::memcpy_dtoh_sync(&mut map, map_ptr)
-            .expect("map readback");
+        cudarc::driver::result::memcpy_dtoh_sync(&mut map, map_ptr).expect("map readback");
     }
-    assert_eq!(map[0], 1, "event-ordered producer data yields the exact MAP label");
-    assert_eq!(f32::from_bits(map[3]), 1.5, "exact margin through the event seam");
+    assert_eq!(
+        map[0], 1,
+        "event-ordered producer data yields the exact MAP label"
+    );
+    assert_eq!(
+        f32::from_bits(map[3]),
+        1.5,
+        "exact margin through the event seam"
+    );
 }
 
 /// A corrupt producer record — a pair index outside the entity
@@ -780,8 +788,8 @@ fn corrupt_pair_index_poisons_its_row_only() {
     };
 
     // 2 candidates: row 0 healthy, row 1 references entity 7 of 2.
-    let mut carrier = JointConstraintCarrier::allocate(Arc::clone(&device), 2, 1, 2, 3)
-        .expect("allocation");
+    let mut carrier =
+        JointConstraintCarrier::allocate(Arc::clone(&device), 2, 1, 2, 3).expect("allocation");
     carrier
         .register_schema("00", SOLVER_ABI_IDENTITY)
         .expect("registration");
@@ -802,11 +810,8 @@ fn corrupt_pair_index_poisons_its_row_only() {
     unsafe {
         cudarc::driver::result::memcpy_htod_sync(domains_ptr, &[0b0110u64, 0b1000u64])
             .expect("domain upload");
-        cudarc::driver::result::memcpy_htod_sync(
-            constraints_ptr,
-            &[0u32, 1u32, 7u32, 1u32],
-        )
-        .expect("pair upload");
+        cudarc::driver::result::memcpy_htod_sync(constraints_ptr, &[0u32, 1u32, 7u32, 1u32])
+            .expect("pair upload");
         cudarc::driver::result::memcpy_htod_sync(
             scores_ptr,
             &[0.5f32, 2.0f32, 9.0f32, 0.5f32, 2.0f32, 9.0f32],
@@ -829,11 +834,16 @@ fn corrupt_pair_index_poisons_its_row_only() {
     unsafe {
         cudarc::driver::result::memcpy_dtoh_sync(&mut counts, outputs_ptr)
             .expect("counts readback");
-        cudarc::driver::result::memcpy_dtoh_sync(&mut maps, map_ptr)
-            .expect("map readback");
+        cudarc::driver::result::memcpy_dtoh_sync(&mut maps, map_ptr).expect("map readback");
     }
-    assert_eq!(counts[0], 2, "healthy row keeps its exact feasibility count");
-    assert_eq!(counts[1], 0xFFFF_FFFF, "corrupt row carries the poison count");
+    assert_eq!(
+        counts[0], 2,
+        "healthy row keeps its exact feasibility count"
+    );
+    assert_eq!(
+        counts[1], 0xFFFF_FFFF,
+        "corrupt row carries the poison count"
+    );
     assert_eq!(maps[0], 1, "healthy row keeps its exact MAP label");
     assert_eq!(
         (maps[4], maps[5]),
@@ -853,8 +863,8 @@ fn top2_before_feasibility_refuses_typed() {
         return;
     };
 
-    let mut carrier = JointConstraintCarrier::allocate(Arc::clone(&device), 2, 1, 1, 3)
-        .expect("allocation");
+    let mut carrier =
+        JointConstraintCarrier::allocate(Arc::clone(&device), 2, 1, 1, 3).expect("allocation");
     carrier
         .register_schema("00", SOLVER_ABI_IDENTITY)
         .expect("registration");
@@ -879,8 +889,8 @@ fn export_shares_allocation_identity_and_stays_recorder_acceptable() {
         return;
     };
 
-    let carrier = JointConstraintCarrier::allocate(Arc::clone(&device), 2, 1, 1, 3)
-        .expect("allocation");
+    let carrier =
+        JointConstraintCarrier::allocate(Arc::clone(&device), 2, 1, 1, 3).expect("allocation");
 
     use cudarc::driver::DevicePtr;
     let columns: Vec<&CudaColumn> = carrier.columns().collect();
@@ -905,12 +915,12 @@ fn export_shares_allocation_identity_and_stays_recorder_acceptable() {
         );
 
         let tensor = unsafe { DlpackManagedTensor::from_raw(std::ptr::null_mut()) };
-        let wrapped = CudaColumn::dlpack_xlog_owned(
-            Arc::clone(&export.slice),
-            export.stream.clone(),
-            tensor,
+        let wrapped =
+            CudaColumn::dlpack_xlog_owned(Arc::clone(&export.slice), export.stream.clone(), tensor);
+        assert!(
+            !wrapped.is_external(),
+            "{id:?}: export wrap stays xlog-owned"
         );
-        assert!(!wrapped.is_external(), "{id:?}: export wrap stays xlog-owned");
         assert!(
             wrapped.runtime_block().is_some(),
             "{id:?}: export wrap keeps the runtime block — strict recorders record it"

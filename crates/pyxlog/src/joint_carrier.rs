@@ -14,12 +14,10 @@ use pyo3::create_exception;
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 
-use xlog_cuda::dlpack::{
-    export_slice_managed_tensor, DLDataType, K_DLFLOAT, K_DLUINT,
-};
+use xlog_cuda::dlpack::{export_slice_managed_tensor, DLDataType, K_DLFLOAT, K_DLUINT};
 use xlog_cuda::{
-    CarrierBufferId, CarrierError, CudaDevice, FuelMeter,
-    JointConstraintCarrier as NativeCarrier, SolverError,
+    CarrierBufferId, CarrierError, CudaDevice, FuelMeter, JointConstraintCarrier as NativeCarrier,
+    SolverError,
 };
 
 create_exception!(
@@ -74,9 +72,8 @@ impl JointConstraintCarrier {
         labels: usize,
         fuel_limit: u64,
     ) -> PyResult<Self> {
-        let cuda = CudaDevice::new(device).map_err(|e| {
-            PyRuntimeError::new_err(format!("CUDA device {device}: {e}"))
-        })?;
+        let cuda = CudaDevice::new(device)
+            .map_err(|e| PyRuntimeError::new_err(format!("CUDA device {device}: {e}")))?;
         let carrier = NativeCarrier::allocate(
             std::sync::Arc::new(cuda),
             entities,
@@ -94,11 +91,7 @@ impl JointConstraintCarrier {
         })
     }
 
-    fn register_schema(
-        &self,
-        catalog_sha: &str,
-        solver_identity: &str,
-    ) -> PyResult<()> {
+    fn register_schema(&self, catalog_sha: &str, solver_identity: &str) -> PyResult<()> {
         let mut state = self.state.lock().expect("carrier state lock");
         state
             .carrier
@@ -106,11 +99,7 @@ impl JointConstraintCarrier {
             .map_err(carrier_err)
     }
 
-    fn bind_signatures(
-        &self,
-        head_masks: Vec<u64>,
-        tail_masks: Vec<u64>,
-    ) -> PyResult<()> {
+    fn bind_signatures(&self, head_masks: Vec<u64>, tail_masks: Vec<u64>) -> PyResult<()> {
         let mut state = self.state.lock().expect("carrier state lock");
         state
             .carrier
@@ -131,35 +120,67 @@ impl JointConstraintCarrier {
         let (id, dtype) = match name {
             "domains" => (
                 CarrierBufferId::Domains,
-                DLDataType { code: K_DLUINT, bits: 64, lanes: 1 },
+                DLDataType {
+                    code: K_DLUINT,
+                    bits: 64,
+                    lanes: 1,
+                },
             ),
             "scores" => (
                 CarrierBufferId::Scores,
-                DLDataType { code: K_DLFLOAT, bits: 32, lanes: 1 },
+                DLDataType {
+                    code: K_DLFLOAT,
+                    bits: 32,
+                    lanes: 1,
+                },
             ),
             "constraints" => (
                 CarrierBufferId::Constraints,
-                DLDataType { code: K_DLUINT, bits: 32, lanes: 1 },
+                DLDataType {
+                    code: K_DLUINT,
+                    bits: 32,
+                    lanes: 1,
+                },
             ),
             "outputs" => (
                 CarrierBufferId::Outputs,
-                DLDataType { code: K_DLUINT, bits: 32, lanes: 1 },
+                DLDataType {
+                    code: K_DLUINT,
+                    bits: 32,
+                    lanes: 1,
+                },
             ),
             "feasible_sets" => (
                 CarrierBufferId::FeasibleSets,
-                DLDataType { code: K_DLUINT, bits: 64, lanes: 1 },
+                DLDataType {
+                    code: K_DLUINT,
+                    bits: 64,
+                    lanes: 1,
+                },
             ),
             "logical_counts" => (
                 CarrierBufferId::LogicalCounts,
-                DLDataType { code: K_DLUINT, bits: 32, lanes: 1 },
+                DLDataType {
+                    code: K_DLUINT,
+                    bits: 32,
+                    lanes: 1,
+                },
             ),
             "map_results" => (
                 CarrierBufferId::MapResults,
-                DLDataType { code: K_DLUINT, bits: 32, lanes: 1 },
+                DLDataType {
+                    code: K_DLUINT,
+                    bits: 32,
+                    lanes: 1,
+                },
             ),
             "solve_status" => (
                 CarrierBufferId::SolveStatus,
-                DLDataType { code: K_DLUINT, bits: 32, lanes: 1 },
+                DLDataType {
+                    code: K_DLUINT,
+                    bits: 32,
+                    lanes: 1,
+                },
             ),
             other => {
                 return Err(PyValueError::new_err(format!(

@@ -381,15 +381,15 @@ mod tests {
         let star = ConstraintGraph::new(5, [(0, 1), (0, 2), (0, 3), (0, 4)]).decompose();
         assert_eq!(star[0].width_bound, 1);
         // Complete graph K4: treewidth 3.
-        let k4 = ConstraintGraph::new(4, [(0, 1), (0, 2), (0, 3), (1, 2), (1, 3), (2, 3)])
-            .decompose();
+        let k4 =
+            ConstraintGraph::new(4, [(0, 1), (0, 2), (0, 3), (1, 2), (1, 3), (2, 3)]).decompose();
         assert_eq!(k4[0].width_bound, 3);
     }
 
     #[test]
     fn strategy_splits_on_the_pinned_envelope() {
-        let k4 = ConstraintGraph::new(4, [(0, 1), (0, 2), (0, 3), (1, 2), (1, 3), (2, 3)])
-            .decompose();
+        let k4 =
+            ConstraintGraph::new(4, [(0, 1), (0, 2), (0, 3), (1, 2), (1, 3), (2, 3)]).decompose();
         assert_eq!(k4[0].strategy(3), SolveStrategy::ExactDp);
         assert_eq!(k4[0].strategy(2), SolveStrategy::BranchAndBound);
     }
