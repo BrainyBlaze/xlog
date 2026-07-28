@@ -222,6 +222,47 @@ def test_omitting_max_body_literals_leaves_every_other_default_unchanged():
     assert vars(omitted) == vars(explicit)
 
 
+# ---------------------------------------------------------------------------
+# --holdout-score -- the recall-aware F1 holdout metric for the
+# '--max-body-literals 3' relational_search.py search. The behaviors these
+# guard: the flag defaults to 'accuracy' (byte-identical to every behavior
+# that predates it), accepts only 'accuracy'/'f1', and is refused (typed
+# argparse error) with anything other than '--max-body-literals 3'.
+# ---------------------------------------------------------------------------
+
+
+def test_holdout_score_defaults_to_accuracy():
+    args = run_caviar_theory.parse_args(REQUIRED)
+    assert args.holdout_score == "accuracy"
+
+
+def test_holdout_score_accepts_f1_with_max_body_literals_3():
+    args = run_caviar_theory.parse_args(
+        REQUIRED + ["--protocol", "ec", "--max-body-literals", "3", "--holdout-score", "f1"]
+    )
+    assert args.holdout_score == "f1"
+
+
+def test_holdout_score_rejects_an_unknown_value():
+    with pytest.raises(SystemExit):
+        run_caviar_theory.parse_args(REQUIRED + ["--holdout-score", "bogus"])
+
+
+def test_holdout_score_f1_refused_without_max_body_literals_3():
+    with pytest.raises(SystemExit):
+        run_caviar_theory.parse_args(REQUIRED + ["--holdout-score", "f1"])
+    with pytest.raises(SystemExit):
+        run_caviar_theory.parse_args(
+            REQUIRED + ["--protocol", "ec", "--holdout-score", "f1"]
+        )
+
+
+def test_omitting_holdout_score_leaves_every_other_default_unchanged():
+    omitted = run_caviar_theory.parse_args(REQUIRED)
+    explicit = run_caviar_theory.parse_args(REQUIRED + ["--holdout-score", "accuracy"])
+    assert vars(omitted) == vars(explicit)
+
+
 def test_filtered_relation_names_never_sees_transition_relations():
     # `_filtered_relation_names` is the DIRECT-protocol (relational mode)
     # vocabulary builder; it must only ever be handed a "relations" dict,
