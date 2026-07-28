@@ -97,9 +97,9 @@ def test_make_predict_clause_matches_body_cover():
 
 # ---------------------------------------------------------------------------
 # kfold_scores: fold-assignment convention cross-check against
-# pyxlog.ilp.neural_credit.kfold_select's own inlined derivation (reproduced
-# here verbatim, since it is not a separately importable helper -- see
-# kfold_scores's own docstring).
+# pyxlog.ilp.neural_credit's SHARED `holdout_fold_assignment` helper (both
+# `kfold_scores` and `pyxlog.ilp.neural_credit.kfold_select` call the same
+# function now -- see kfold_scores's own docstring).
 # ---------------------------------------------------------------------------
 
 
@@ -120,11 +120,12 @@ def test_kfold_scores_fold_assignment_matches_neural_credit_convention():
     body = ("a", "b")
     covers = {body: body_cover(body, relations)}
 
-    # Reproduce kfold_select's own fold-assignment lines verbatim (see
-    # pyxlog/ilp/neural_credit.py's kfold_select).
-    rng = torch.Generator().manual_seed(seed)
-    order = torch.randperm(len(facts), generator=rng).tolist()
-    fold_of = {f_idx: i % folds for i, f_idx in enumerate(order)}
+    # The SAME shared function kfold_scores itself calls internally (see
+    # pyxlog.ilp.neural_credit.holdout_fold_assignment) -- this is now a
+    # same-function cross-check, not two independent reproductions.
+    from pyxlog.ilp.neural_credit import holdout_fold_assignment
+
+    fold_of = holdout_fold_assignment(len(facts), folds, seed)
 
     cover = covers[body]
     expected_sum = 0.0

@@ -1437,6 +1437,7 @@ def main(argv: list[str] | None = None) -> int:
         "max_clauses": args.max_clauses,
         "min_new_covered": args.min_new_covered,
         "max_body_literals": args.max_body_literals,
+        "tie_tolerance": args.tie_tolerance,
         "num_pt": {"train": train["num_pt"], "test": test["num_pt"]},
         "n_pos": {
             "train": int(sum(train["is_positive"])),

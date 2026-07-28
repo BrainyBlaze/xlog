@@ -859,6 +859,28 @@ def frozen_select(prog, mask_name, facts, is_positive, network, features,
                                 coverage=coverage, min_coverage=min_coverage)
 
 
+def holdout_fold_assignment(n_facts, folds, seed):
+    """The fold-assignment convention every k-fold holdout arbiter in this
+    codebase shares: a `torch.Generator` seeded once, a single
+    `torch.randperm` over ``n_facts`` indices, then `i % folds` assigns each
+    shuffled position to a fold -- a pure function of ``(n_facts, folds,
+    seed)``, nothing else. Extracted verbatim from `kfold_select`'s own
+    former inline lines (this function's behavior, and `kfold_select`'s,
+    are byte-identical before and after the extraction) so
+    `relational_search.kfold_scores` can import and call the SAME
+    derivation instead of maintaining its own reproduction of it (see that
+    module's own docstring for why it used to reproduce these lines rather
+    than import them: there was nothing importable to import).
+
+    Returns ``{fact_index: fold_index}`` for every ``i`` in
+    ``range(n_facts)``."""
+    import torch
+
+    rng = torch.Generator().manual_seed(seed)
+    order = torch.randperm(n_facts, generator=rng).tolist()
+    return {f_idx: i % folds for i, f_idx in enumerate(order)}
+
+
 def kfold_select(prog_factory, mask_name, facts, is_positive, make_network,
                  features, neural_relations, folds=4, min_fit=0.75, seed=0,
                  witness_mask=None, min_coverage=0.5, topology="chain",
@@ -907,9 +929,7 @@ def kfold_select(prog_factory, mask_name, facts, is_positive, make_network,
             "poison every candidate's score) and training needs at least one "
             "fold's worth of facts left over."
         )
-    rng = torch.Generator().manual_seed(seed)
-    order = torch.randperm(len(facts), generator=rng).tolist()
-    fold_of = {f_idx: i % folds for i, f_idx in enumerate(order)}
+    fold_of = holdout_fold_assignment(len(facts), folds, seed)
     sums: dict[tuple[str, str], float] = {}
     counts: dict[tuple[str, str], int] = {}
     certain_sums: dict[tuple[str, str], int] = {}

@@ -47,9 +47,8 @@ from __future__ import annotations
 import itertools
 from dataclasses import dataclass
 
-import torch
-
 from pyxlog.ilp.discovery import select_rule
+from pyxlog.ilp.neural_credit import holdout_fold_assignment
 from theory_loop import induce_theory
 
 Body = tuple[str, ...]
@@ -127,12 +126,10 @@ def kfold_scores(
 ) -> dict[Body, float]:
     """Held-out accuracy of each body's fixed cover-membership prediction,
     k-fold, using the EXACT SAME fold-assignment convention `pyxlog.ilp.
-    neural_credit.kfold_select` uses (`torch.Generator().manual_seed(seed)`,
-    `torch.randperm(len(facts), generator=rng).tolist()`, `i % folds`) --
-    reproduced here rather than imported, since `kfold_select`'s own fold
-    assignment is inlined in its body, not a separate importable helper (see
-    `test_relational_search.py`'s cross-check, which calls both derivations
-    on the same tiny input and asserts they agree).
+    neural_credit.kfold_select` uses -- both call the shared
+    `pyxlog.ilp.neural_credit.holdout_fold_assignment(n_facts, folds, seed)`
+    (see `test_relational_search.py`'s pinning test, which asserts this
+    module's own usage matches that shared function's output).
 
     Because a body's prediction is a FIXED set-membership test (see this
     module's own KEY INSIGHT), no training happens per fold: a fold's score
@@ -165,9 +162,7 @@ def kfold_scores(
     if covers is None:
         covers = {body: body_cover(body, relations) for body in bodies}
 
-    rng = torch.Generator().manual_seed(seed)
-    order = torch.randperm(len(facts), generator=rng).tolist()
-    fold_of = {f_idx: i % folds for i, f_idx in enumerate(order)}
+    fold_of = holdout_fold_assignment(len(facts), folds, seed)
 
     sums = {body: 0.0 for body in bodies}
     for fold in range(folds):
