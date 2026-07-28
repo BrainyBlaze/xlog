@@ -38,6 +38,7 @@ mod neural_registry;
 use neural_registry::NeuralPredicateRegistry;
 mod dlpack;
 mod ilp;
+mod joint_carrier;
 mod ilp_exact;
 mod ilp_gpu;
 mod logic;
@@ -845,5 +846,13 @@ fn pyxlog(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(dlpack::export_arrow_device, m)?)?;
     #[cfg(feature = "arrow-device-import")]
     m.add_function(wrap_pyfunction!(dlpack::import_arrow_device, m)?)?;
+    // Joint constraint carrier bindings
+    m.add_class::<joint_carrier::JointConstraintCarrier>()?;
+    m.add("CarrierRefused", _py.get_type::<joint_carrier::CarrierRefused>())?;
+    m.add(
+        "SolverResourceExhausted",
+        _py.get_type::<joint_carrier::SolverResourceExhausted>(),
+    )?;
+    m.add("SOLVER_ABI_IDENTITY", xlog_cuda::SOLVER_ABI_IDENTITY)?;
     Ok(())
 }

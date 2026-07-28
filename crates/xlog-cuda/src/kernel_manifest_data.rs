@@ -34,6 +34,7 @@ pub const KERNEL_CU_NAMES: &[&str] = &[
     "epistemic",
     "wcoj",
     "mc_resident",
+    "joint_solve",
 ];
 
 /// Describes a single CUDA module: the .cu file name, the runtime module name
@@ -585,6 +586,15 @@ pub const KERNEL_MODULES: &[KernelModuleSpec] = &[
         module_name: "xlog_mc_resident",
         kernels: &["mc_resident_engine"],
     },
+    KernelModuleSpec {
+        cu_name: "joint_solve",
+        module_name: "xlog_joint_solve",
+        kernels: &[
+            "joint_label_feasibility",
+            "joint_label_top2",
+            "joint_component_enumerate",
+        ],
+    },
 ];
 
 #[cfg(test)]
@@ -610,8 +620,8 @@ mod tests {
     }
 
     #[test]
-    fn kernel_modules_count_is_25() {
-        assert_eq!(KERNEL_MODULES.len(), 25);
+    fn kernel_modules_count_is_26() {
+        assert_eq!(KERNEL_MODULES.len(), 26);
     }
 
     #[test]

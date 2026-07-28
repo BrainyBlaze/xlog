@@ -462,3 +462,86 @@ impl CudaKernelProvider {
         self.buffer_from_columns(columns, num_rows.unwrap_or(0), schema)
     }
 }
+
+/// Manager context for a slice-backed export: keeps the runtime-backed
+/// allocation alive until the consumer invokes the deleter.
+struct SliceExportCtx {
+    _slice: Arc<crate::memory::TrackedCudaSlice<u8>>,
+    shape: Box<[i64; 2]>,
+}
+
+unsafe extern "C" fn slice_export_deleter(ptr: *mut DLManagedTensor) {
+    if ptr.is_null() {
+        return;
+    }
+    // SAFETY: ptr is non-null (checked above); manager_ctx was set from a Box<SliceExportCtx> raw pointer
+    let ctx_ptr = unsafe { (*ptr).manager_ctx as *mut SliceExportCtx };
+    if !ctx_ptr.is_null() {
+        // SAFETY: ctx_ptr was originally created via Box::into_raw; we are the sole owner
+        unsafe {
+            drop(Box::from_raw(ctx_ptr));
+        }
+    }
+    // SAFETY: ptr was originally created via Box::into_raw; we are the sole owner
+    unsafe {
+        drop(Box::from_raw(ptr));
+    }
+}
+
+/// Export an xlog-owned runtime-backed slice as a 2-D DLPack managed
+/// tensor without copies. The manager context holds the slice's `Arc`,
+/// so the export shares the exact producer allocation and the memory
+/// stays alive until the consumer's deleter runs; xlog remains the
+/// owner throughout. The declared `rows x cols x dtype` view must
+/// cover the allocation exactly — a mismatched shape is a typed error,
+/// never a truncated or padded view.
+pub fn export_slice_managed_tensor(
+    slice: Arc<crate::memory::TrackedCudaSlice<u8>>,
+    device_id: i32,
+    dtype: DLDataType,
+    rows: usize,
+    cols: usize,
+) -> Result<DlpackManagedTensor> {
+    let elem_bytes = (dtype.bits as usize / 8) * dtype.lanes as usize;
+    let needed = rows
+        .checked_mul(cols)
+        .and_then(|cells| cells.checked_mul(elem_bytes))
+        .ok_or_else(|| XlogError::Kernel("export shape overflows".to_string()))?;
+    if needed != slice.len() {
+        return Err(XlogError::Kernel(format!(
+            "export view {rows}x{cols}x{elem_bytes}B = {needed} bytes does not \
+             cover the {}-byte allocation exactly",
+            slice.len()
+        )));
+    }
+
+    let data = *slice.device_ptr() as usize as *mut c_void;
+    let mut ctx = Box::new(SliceExportCtx {
+        _slice: slice,
+        shape: Box::new([rows as i64, cols as i64]),
+    });
+    let shape_ptr = ctx.shape.as_mut_ptr();
+
+    let dl_tensor = DLTensor {
+        data,
+        device: DLDevice {
+            device_type: K_DLCUDA,
+            device_id,
+        },
+        ndim: 2,
+        dtype,
+        shape: shape_ptr,
+        strides: std::ptr::null_mut(),
+        byte_offset: 0,
+    };
+
+    let managed = Box::new(DLManagedTensor {
+        dl_tensor,
+        manager_ctx: Box::into_raw(ctx) as *mut c_void,
+        deleter: Some(slice_export_deleter),
+    });
+
+    Ok(DlpackManagedTensor {
+        ptr: Box::into_raw(managed),
+    })
+}

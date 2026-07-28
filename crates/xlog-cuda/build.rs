@@ -179,6 +179,12 @@ fn main() {
     let kernels_dir = find_kernel_sources(&manifest_dir);
     let out_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR must be set by cargo"));
 
+    // The kernel manifest is include!()d above, so it is a real build
+    // input; without this declaration a manifest edit (e.g. a new
+    // kernel module) leaves other build configs reusing a cached
+    // OUT_DIR whose embedded PTX table predates the module.
+    println!("cargo:rerun-if-changed=src/kernel_manifest_data.rs");
+
     println!("cargo:rerun-if-env-changed=XLOG_RUSTDOC_NO_CUDA");
     println!("cargo:rerun-if-env-changed=DOCS_RS");
     let docs_only = env::var("XLOG_RUSTDOC_NO_CUDA").as_deref() == Ok("1")

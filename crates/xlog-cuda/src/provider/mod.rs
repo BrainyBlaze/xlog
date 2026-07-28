@@ -60,7 +60,7 @@ fn warmup_profiling_enabled() -> bool {
 }
 
 /// Detect device compute capability as a two-digit number (e.g. 75, 80, 120).
-fn detect_compute_capability(device: &Arc<CudaDevice>) -> Result<u32> {
+pub(crate) fn detect_compute_capability(device: &Arc<CudaDevice>) -> Result<u32> {
     let major = device
         .inner()
         .attribute(
@@ -434,9 +434,10 @@ pub const ILP_CREDIT_MODULE: &str = "xlog_ilp_credit";
 pub const ILP_EXACT_MODULE: &str = "xlog_ilp_exact";
 pub const EPISTEMIC_MODULE: &str = "xlog_epistemic";
 pub const WCOJ_MODULE: &str = "xlog_wcoj";
+pub const JOINT_SOLVE_MODULE: &str = "xlog_joint_solve";
 
-// Compile-time check: kernel manifest lists exactly 25 modules.
-const _: () = assert!(crate::kernel_manifest_data::KERNEL_CU_NAMES.len() == 25);
+// Compile-time check: kernel manifest lists exactly 26 modules.
+const _: () = assert!(crate::kernel_manifest_data::KERNEL_CU_NAMES.len() == 26);
 
 /// Kernel function names in the GPU WCOJ module.
 pub mod wcoj_kernels {
