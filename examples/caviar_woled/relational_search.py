@@ -49,6 +49,7 @@ from dataclasses import dataclass
 
 from pyxlog.ilp.discovery import select_rule
 from pyxlog.ilp.neural_credit import holdout_fold_assignment
+from scorer import prf1
 from theory_loop import induce_theory
 
 Body = tuple[str, ...]
@@ -123,8 +124,9 @@ def kfold_scores(
     folds: int,
     seed: int,
     covers: dict[Body, set] | None = None,
+    score: str = "accuracy",
 ) -> dict[Body, float]:
-    """Held-out accuracy of each body's fixed cover-membership prediction,
+    """Held-out score of each body's fixed cover-membership prediction,
     k-fold, using the EXACT SAME fold-assignment convention `pyxlog.ilp.
     neural_credit.kfold_select` uses -- both call the shared
     `pyxlog.ilp.neural_credit.holdout_fold_assignment(n_facts, folds, seed)`
@@ -132,13 +134,56 @@ def kfold_scores(
     module's own usage matches that shared function's output).
 
     Because a body's prediction is a FIXED set-membership test (see this
-    module's own KEY INSIGHT), no training happens per fold: a fold's score
-    is simply the fraction of that fold's held-out facts whose cover
-    membership matches their label, and the reported score is the mean of
-    that fraction across all `folds` folds -- the same "sum of per-fold
-    accuracy, divided by fold count" reading `kfold_select` computes for a
-    trained candidate, specialized to the case where every fold's "training"
-    step is a no-op.
+    module's own KEY INSIGHT), no training happens per fold: each fold's
+    score is computed directly from the fixed cover, and the reported score
+    is the mean across folds -- the same "sum of per-fold score, divided by
+    fold count" reading `kfold_select` computes for a trained candidate,
+    specialized to the case where every fold's "training" step is a no-op.
+
+    `score` (default `"accuracy"`, byte-identical to this function's
+    pre-`score`-parameter behavior): the per-fold metric being averaged.
+
+    * `"accuracy"`: a fold's score is the fraction of that fold's held-out
+      facts whose cover membership matches their label. On a task with a
+      rare positive class and a large held-out set (e.g. 10 EC-initiation
+      positives against ~23,000 rows), this sits on the all-false base-rate
+      plateau and can rank a body that predicts nothing at all ABOVE the
+      best real detector -- the accuracy metric does not distinguish "always
+      right by predicting nothing" from "right for the right reason". This
+      is not a hypothetical: it is exactly the failure this module's own
+      task (the "recall-aware" `score="f1"` option below) exists to fix.
+    * `"f1"`: a fold's score is `scorer.prf1`'s F1 of that fold's cover-
+      membership prediction against that fold's held-out labels -- the SAME
+      F1 arithmetic `run_caviar_theory.py`'s own scoring uses, reused (not
+      re-derived) so the two never drift apart. F1 is RECALL-AWARE: a body
+      that predicts nothing scores F1 0.0 on any fold with a real positive,
+      instead of accuracy's near-1.0, so a real detector's few true
+      positives can outrank the empty predictor even against a heavily
+      imbalanced holdout.
+
+      A fold with ZERO held-out positives makes every body's recall (and
+      therefore its F1) UNDEFINED, not merely 0 -- `prf1` substitutes 0.0
+      for an undefined ratio and flags `degenerate=True`, but averaging that
+      substituted 0.0 in here would penalize EVERY body identically for a
+      fact about the fold split, not about the body. Such a fold is
+      therefore SKIPPED from the mean entirely -- the reported score is the
+      mean F1 over folds that can actually measure recall (folds with at
+      least one held-out positive), not over all `folds` folds. Tradeoff,
+      stated honestly: a body's reported "f1" score can therefore average
+      over FEWER than `folds` folds (and different bodies always see the
+      same skip set, since it depends only on the fold/label split, not on
+      any body's cover), so it is not literally "k-fold F1" for k=`folds`
+      when some folds are unmeasurable -- it is the honest mean over the
+      folds where F1 means something. The alternative (counting a
+      zero-positive fold's F1 as 0.0) is rejected: it would tax every body
+      by a fold-composition accident unrelated to the body's own quality,
+      re-introducing a milder version of the exact plateau problem `"f1"`
+      exists to fix. In the degenerate case where NO fold has any held-out
+      positive at all (recall is unmeasurable everywhere), every body's
+      score is reported as `0.0` (empty-mean is otherwise undefined) --
+      this can only happen if the residual holds zero positives overall,
+      which `theory_loop.induce_theory` does not call `select_once` for
+      (see its own stop condition).
 
     `covers` (default `None`, recomputed from `relations` here): callers that
     already hold a per-body cover dict (e.g. `induce_relational_theory`,
@@ -146,6 +191,10 @@ def kfold_scores(
     only the residual facts do) should pass it, to avoid re-deriving the
     same set-intersection on every iteration.
     """
+    if score not in ("accuracy", "f1"):
+        raise ValueError(
+            f"score must be 'accuracy' or 'f1' (got {score!r})."
+        )
     if not 2 <= folds <= len(facts):
         raise ValueError(
             f"folds={folds} with {len(facts)} facts: every fold needs at "
@@ -163,20 +212,41 @@ def kfold_scores(
         covers = {body: body_cover(body, relations) for body in bodies}
 
     fold_of = holdout_fold_assignment(len(facts), folds, seed)
+    fold_held_ids = [
+        [i for i in range(len(facts)) if fold_of[i] == fold]
+        for fold in range(folds)
+    ]
+
+    if score == "accuracy":
+        sums = {body: 0.0 for body in bodies}
+        for held_ids in fold_held_ids:
+            n_held = len(held_ids)
+            for body in bodies:
+                cover = covers[body]
+                correct = sum(
+                    1 for i in held_ids
+                    if (facts[i] in cover) == bool(labels[i])
+                )
+                sums[body] += correct / n_held
+        return {body: sums[body] / folds for body in bodies}
+
+    # score == "f1": see this function's own docstring for why a
+    # zero-positive fold is skipped from the mean rather than counted as 0.
+    measurable_folds = [
+        held_ids for held_ids in fold_held_ids
+        if any(bool(labels[i]) for i in held_ids)
+    ]
+    if not measurable_folds:
+        return {body: 0.0 for body in bodies}
 
     sums = {body: 0.0 for body in bodies}
-    for fold in range(folds):
-        held_ids = [i for i in range(len(facts)) if fold_of[i] == fold]
-        n_held = len(held_ids)
+    for held_ids in measurable_folds:
+        gold = [bool(labels[i]) for i in held_ids]
         for body in bodies:
             cover = covers[body]
-            correct = sum(
-                1 for i in held_ids
-                if (facts[i] in cover) == bool(labels[i])
-            )
-            sums[body] += correct / n_held
-
-    return {body: sums[body] / folds for body in bodies}
+            pred = [facts[i] in cover for i in held_ids]
+            sums[body] += prf1(pred, gold)["f1"]
+    return {body: sums[body] / len(measurable_folds) for body in bodies}
 
 
 @dataclass(frozen=True)
@@ -316,6 +386,7 @@ def induce_relational_theory(
     tie_tolerance: float | None = None,
     max_clauses: int = 4,
     min_new_covered: int = 10,
+    holdout_score: str = "accuracy",
 ) -> dict:
     """The CPU-only, up-to-`max_literals`-literal relational counterpart to
     `run_caviar_theory.py`'s `kfold_select`-backed relational search: wires
@@ -330,6 +401,13 @@ def induce_relational_theory(
 
     `min_fit` defaults to 0.75, matching `kfold_select`'s own default -- the
     two searches are meant to be compared on equal footing.
+
+    `holdout_score` (default `"accuracy"`, byte-identical to this function's
+    pre-`holdout_score`-parameter behavior): forwarded, unchanged, to every
+    `kfold_scores` call this function makes -- see that function's own
+    docstring for `"accuracy"` vs `"f1"`'s semantics (and, in particular, why
+    `"f1"` exists: on a rare-positive-class holdout, accuracy can rank the
+    empty predictor above the best real detector).
 
     `tie_tolerance=None` (default) resolves, EVERY iteration, to
     `kfold_select`'s identical derivation (`max(0.01, 1 / len(residual_
@@ -373,7 +451,7 @@ def induce_relational_theory(
         )
         scores = kfold_scores(
             all_bodies, relations, residual_facts, residual_is_positive,
-            folds, seed, covers=covers,
+            folds, seed, covers=covers, score=holdout_score,
         )
         scores_per_iteration.append(scores)
         return select_body(scores, covers, min_fit, resolved_tt)

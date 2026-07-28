@@ -239,6 +239,21 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "'--mode relational --protocol ec' ONLY: refused (with '--mode "
         "neural' or '--protocol direct') at parse time, below.",
     )
+    p.add_argument(
+        "--holdout-score", default="accuracy", choices=("accuracy", "f1"),
+        help="per-fold holdout metric for the '--max-body-literals 3' "
+        "relational_search.py search (default: 'accuracy', byte-identical "
+        "to every behavior that predates this flag). 'f1' selects "
+        "relational_search.kfold_scores's recall-aware per-fold F1 instead "
+        "-- see that function's own docstring for why plain accuracy can "
+        "rank an empty predictor above the best real detector on a "
+        "rare-positive-class holdout (this is the fix that flag exists "
+        "for). Scoped to '--mode relational --protocol ec "
+        "--max-body-literals 3' ONLY: refused (with any other combination) "
+        "at parse time, below -- the '--max-body-literals 2' engine path's "
+        "own scoring (kfold_select's holdout accuracy) is untouched by this "
+        "flag.",
+    )
     p.add_argument("--out", required=True, help="path to write RESULT.json")
     args = p.parse_args(argv)
     if args.data == "continuous" and args.test_json is None:
@@ -260,6 +275,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                 "the ec protocol's init/term searches route through "
                 "relational_search.py."
             )
+    if args.holdout_score != "accuracy" and args.max_body_literals != 3:
+        p.error(
+            f"--holdout-score {args.holdout_score!r} is scoped to "
+            "'--max-body-literals 3' ONLY (got --max-body-literals "
+            f"{args.max_body_literals!r}): the '--max-body-literals 2' "
+            "engine path's scoring is kfold_select's own holdout accuracy, "
+            "not touched by this flag -- there is no F1 option to select "
+            "there."
+        )
     return args
 
 
@@ -1044,6 +1068,7 @@ def _run_relational_ec(
                 max_literals=3, folds=args.k, seed=args.seed,
                 tie_tolerance=args.tie_tolerance,
                 max_clauses=args.max_clauses, min_new_covered=args.min_new_covered,
+                holdout_score=args.holdout_score,
             )
             wall[wall_key] = time.perf_counter() - t0
             return result
@@ -1437,6 +1462,7 @@ def main(argv: list[str] | None = None) -> int:
         "max_clauses": args.max_clauses,
         "min_new_covered": args.min_new_covered,
         "max_body_literals": args.max_body_literals,
+        "holdout_score": args.holdout_score,
         "tie_tolerance": args.tie_tolerance,
         "num_pt": {"train": train["num_pt"], "test": test["num_pt"]},
         "n_pos": {
@@ -1472,6 +1498,7 @@ def main(argv: list[str] | None = None) -> int:
             f"{result['direct_context']['scoring']['theory_prf1']['test'] if result['direct_context'] else 'skipped (--no-direct-context or --max-body-literals 3)'}"
         )
         if args.max_body_literals == 3:
+            print(f"  holdout_score: {args.holdout_score}")
             print(f"  relational search pool (init): {ec['relational_search_pool']['init']}")
             print(f"  relational search pool (term): {ec['relational_search_pool']['term']}")
             if not ec["init_theory"]["clauses"]:
