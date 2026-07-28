@@ -1501,7 +1501,17 @@ def test_acceptance_original_killer_criterion_arity2_head():
 def test_kfold_select_refuses_non_positive_tie_tolerance() -> None:
     """An explicit tie_tolerance must be positive: zero/negative would turn
     holdout quantization noise into fake decisiveness. Refused typed, before
-    any expensive work depends on it."""
+    any expensive work depends on it.
+
+    SOURCE-FIRST RESOLUTION REQUIRED: run this against the pyxlog checked out
+    in THIS worktree (e.g. via PYTHONPATH, not an older installed wheel). An
+    older wheel predating the ``tie_tolerance`` parameter has no such keyword
+    on ``kfold_select`` -- it silently swallows the kwarg into its own
+    ``**train_kw`` catch-all and forwards it straight to
+    ``train_engine_mode``, which fails with an unrelated, confusing
+    ``folds=`` (or similar) error instead of the ``ValueError`` this test
+    asserts on, making the real problem (a stale install) look like a
+    regression here."""
     from pyxlog.ilp.neural_credit import kfold_select
 
     with pytest.raises(ValueError, match="tie_tolerance"):
