@@ -176,18 +176,57 @@ fn dropping_carrier_releases_all_device_memory() {
     // the measured delta reflects carrier buffers only.
     drop(allocate_near_budget(&device));
 
+    // The first solve in the process lazily loads the joint_solve
+    // module (~52 MiB, context-lifetime). Force the load BEFORE the
+    // snapshot so a sibling test thread's first solve cannot land
+    // inside the measured window and masquerade as a drop leak.
+    {
+        use xlog_cuda::{FuelMeter, SOLVER_ABI_IDENTITY};
+
+        let mut warmup = JointConstraintCarrier::allocate(Arc::clone(&device), 2, 1, 1, 3)
+            .expect("warmup allocation");
+        warmup
+            .register_schema("00", SOLVER_ABI_IDENTITY)
+            .expect("warmup registration");
+        warmup
+            .bind_signatures(&[0, 0b0100, 0b0001], &[0, 0b1000, 0b1000])
+            .expect("warmup binding");
+        let mut fuel = FuelMeter::new(1 << 22);
+        warmup
+            .solve_label_feasibility(0, &mut fuel)
+            .expect("warmup feasibility");
+        warmup
+            .solve_label_map_top2(&mut fuel)
+            .expect("warmup top-two");
+        device.inner().synchronize().expect("warmup sync");
+    }
+
     let (free_before, _total) = mem_get_info().expect("cudaMemGetInfo before cycles");
     for _ in 0..4 {
         let carrier = allocate_near_budget(&device);
         assert!(carrier.columns().all(|c| !c.is_external()));
         drop(carrier);
     }
-    let (free_after, _total) = mem_get_info().expect("cudaMemGetInfo after cycles");
-
-    // Leak-direction bound only: concurrent tests may free memory
-    // (raising `free_after`), but a drop leak of ~225 MB cannot
-    // hide inside a 32 MiB tolerance.
+    // `mem_get_info` is device-wide: a concurrent test (same binary
+    // or another process) holding its own near-budget carrier during
+    // the window depresses `free_after` and mimics a leak. A real
+    // drop leak never recovers, while foreign carrier buffers are
+    // transient, so re-sample with settle delays before failing.
+    // Limit: another process's CUDA context (~52 MiB) lives for that
+    // process's lifetime and can outlast the retries — this test is
+    // only sound when no other process shares the GPU.
     const TOLERANCE_BYTES: usize = 32 * 1024 * 1024;
+    let mut free_after = 0;
+    for attempt in 0..10 {
+        let (sampled, _total) = mem_get_info().expect("cudaMemGetInfo after cycles");
+        free_after = sampled;
+        if free_after + TOLERANCE_BYTES >= free_before {
+            break;
+        }
+        if attempt < 9 {
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        }
+    }
     assert!(
         free_after + TOLERANCE_BYTES >= free_before,
         "carrier drop leaked device memory: free before {free_before}, after {free_after}"
@@ -772,6 +811,97 @@ fn noted_producer_stream_orders_async_writes_before_solve() {
         1.5,
         "exact margin through the event seam"
     );
+}
+
+/// Consumer-event seam: registrations are one-shot for the next
+/// successful solve, a failed solve clears them without handing off,
+/// and a null stream handle refuses typed.
+#[test]
+fn consumer_stream_registration_is_one_shot_and_cleared_on_failure() {
+    use xlog_cuda::{FuelMeter, SOLVER_ABI_IDENTITY};
+
+    let Some(device) = CudaDevice::new(0).ok().map(Arc::new) else {
+        eprintln!("Skipping: CUDA runtime unavailable");
+        return;
+    };
+
+    let mut carrier =
+        JointConstraintCarrier::allocate(Arc::clone(&device), 2, 1, 1, 3).expect("allocation");
+    let err = carrier.note_consumer_stream(0).unwrap_err();
+    assert!(
+        matches!(err, CarrierError::Launch(_)),
+        "null consumer stream must refuse typed, got: {err:?}"
+    );
+
+    // A registration attached to a failed solve must be cleared. Drop
+    // its stream before the next attempt so retaining the stale handle
+    // would make the successful solve refuse at the consumer wait.
+    let failed_pool = Arc::new(xlog_cuda::device_runtime::StreamPool::with_defaults(
+        Arc::clone(&device),
+    ));
+    let failed_id = failed_pool
+        .acquire()
+        .expect("acquire failed-attempt stream");
+    let failed_stream = failed_pool
+        .resolve(failed_id)
+        .expect("resolve failed-attempt stream");
+    carrier
+        .note_consumer_stream(failed_stream.cu_stream() as u64)
+        .expect("register failed-attempt consumer");
+    let mut fuel = FuelMeter::new(1 << 22);
+    assert!(matches!(
+        carrier.solve_label_feasibility(0, &mut fuel),
+        Err(CarrierError::SchemaNotRegistered)
+    ));
+    drop(failed_stream);
+    drop(failed_pool);
+
+    carrier
+        .register_schema("00", SOLVER_ABI_IDENTITY)
+        .expect("registration");
+    carrier
+        .bind_signatures(&[0, 0b0100, 0b0001], &[0, 0b1000, 0b1000])
+        .expect("binding");
+    carrier
+        .solve_label_feasibility(0, &mut fuel)
+        .expect("successful solve after failed registration was cleared");
+
+    // Every registered consumer stream waits on the same successful
+    // solve completion event. Once consumed, the registrations must
+    // not affect a later solve.
+    let consumer_pool = Arc::new(xlog_cuda::device_runtime::StreamPool::with_defaults(
+        Arc::clone(&device),
+    ));
+    let consumer_a_id = consumer_pool.acquire().expect("acquire consumer A");
+    let consumer_b_id = consumer_pool.acquire().expect("acquire consumer B");
+    let consumer_a = consumer_pool
+        .resolve(consumer_a_id)
+        .expect("resolve consumer A");
+    let consumer_b = consumer_pool
+        .resolve(consumer_b_id)
+        .expect("resolve consumer B");
+    carrier
+        .note_consumer_stream(consumer_a.cu_stream() as u64)
+        .expect("register consumer A");
+    carrier
+        .note_consumer_stream(consumer_b.cu_stream() as u64)
+        .expect("register consumer B");
+    carrier
+        .solve_label_feasibility(0, &mut fuel)
+        .expect("solve with consumer handoff");
+    unsafe {
+        cudarc::driver::result::stream::synchronize(consumer_a.cu_stream())
+            .expect("consumer A completion");
+        cudarc::driver::result::stream::synchronize(consumer_b.cu_stream())
+            .expect("consumer B completion");
+    }
+    drop(consumer_a);
+    drop(consumer_b);
+    drop(consumer_pool);
+
+    carrier
+        .solve_label_feasibility(0, &mut fuel)
+        .expect("consumer registrations are one-shot");
 }
 
 /// A corrupt producer record — a pair index outside the entity

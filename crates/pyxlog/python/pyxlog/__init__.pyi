@@ -12,6 +12,10 @@ from typing import Any, Iterator, Optional
 from pyxlog._native import (
     # Module constant
     __version__ as __version__,
+    SOLVER_ABI_IDENTITY as SOLVER_ABI_IDENTITY,
+    CarrierRefused as CarrierRefused,
+    SolverResourceExhausted as SolverResourceExhausted,
+    JointConstraintCarrier as JointConstraintCarrier,
     # Logic (pure Datalog)
     LogicProgram as LogicProgram,
     CompiledLogicProgram as CompiledLogicProgram,

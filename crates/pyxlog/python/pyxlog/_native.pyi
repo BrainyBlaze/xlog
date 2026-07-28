@@ -18,6 +18,41 @@ from typing import Any, Optional, Sequence
 __version__: str
 
 # ---------------------------------------------------------------------------
+# Joint constraint carrier
+# ---------------------------------------------------------------------------
+
+SOLVER_ABI_IDENTITY: str
+
+class CarrierRefused(RuntimeError): ...
+
+class SolverResourceExhausted(RuntimeError): ...
+
+class JointConstraintCarrier:
+    def __init__(
+        self,
+        device: int,
+        entities: int,
+        domain_lanes: int,
+        candidates: int,
+        labels: int,
+        fuel_limit: int,
+    ) -> None: ...
+    def register_schema(self, catalog_sha: str, solver_identity: str) -> None: ...
+    def bind_signatures(
+        self, head_masks: list[int], tail_masks: list[int]
+    ) -> None: ...
+    def export_buffer(self, name: str) -> Any: ...
+    def solve_label_feasibility(self, abstain_label: int) -> None: ...
+    def solve_label_map_top2(self) -> None: ...
+    def solve_components_exact(
+        self, comp_offsets: list[int], comp_indices: list[int]
+    ) -> None: ...
+    def note_producer_stream(self, external_stream: int) -> None: ...
+    def note_consumer_stream(self, external_stream: int) -> None: ...
+    @property
+    def fuel_spent(self) -> int: ...
+
+# ---------------------------------------------------------------------------
 # Logic (pure Datalog, no probabilities)
 # ---------------------------------------------------------------------------
 

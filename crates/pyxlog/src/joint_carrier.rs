@@ -269,6 +269,23 @@ impl JointConstraintCarrier {
             .map_err(carrier_err)
     }
 
+    /// Register an external CUDA consumer stream for the next
+    /// successful solve stage. The carrier records completion on its
+    /// internal stream and enqueues a wait on every registered
+    /// consumer stream without a host synchronization barrier.
+    ///
+    /// Registrations are one-shot and are also cleared when the solve
+    /// fails or the carrier is dropped. Use a dedicated stream
+    /// (`torch.cuda.Stream()`, pass its `cuda_stream`); raw handle zero
+    /// is refused.
+    fn note_consumer_stream(&self, external_stream: u64) -> PyResult<()> {
+        let mut state = self.state.lock().expect("carrier state lock");
+        state
+            .carrier
+            .note_consumer_stream(external_stream)
+            .map_err(carrier_err)
+    }
+
     #[getter]
     fn fuel_spent(&self) -> u64 {
         self.state.lock().expect("carrier state lock").fuel.spent()

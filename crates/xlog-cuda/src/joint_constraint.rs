@@ -256,6 +256,11 @@ pub struct JointConstraintCarrier {
     /// destroyed) by the next solve stage. Raw driver handles; the
     /// carrier destroys any leftovers on drop.
     pending_producer_events: Vec<cudarc::driver::sys::CUevent>,
+    /// External consumer streams waiting for completion of the next
+    /// successful solve stage. The carrier does not own these raw
+    /// handles; registrations are cleared after handoff, solve
+    /// failure, or drop.
+    pending_consumer_streams: Vec<cudarc::driver::sys::CUstream>,
     entities: usize,
     domain_lanes: usize,
     candidates: usize,
@@ -346,6 +351,7 @@ impl Drop for JointConstraintCarrier {
                 let _ = cudarc::driver::result::event::destroy(event);
             }
         }
+        self.pending_consumer_streams.clear();
     }
 }
 
@@ -477,6 +483,7 @@ impl JointConstraintCarrier {
             registered_schema: None,
             feasibility_solved: false,
             pending_producer_events: Vec::new(),
+            pending_consumer_streams: Vec::new(),
             entities,
             domain_lanes,
             candidates,
@@ -548,6 +555,74 @@ impl JointConstraintCarrier {
                     )))
                 })?;
             }
+        }
+        Ok(())
+    }
+
+    /// Register an external CUDA stream to consume the next
+    /// successful solve stage. After the solve work is enqueued, the
+    /// carrier records one completion event on its internal stream and
+    /// makes every registered consumer stream wait on that event.
+    pub fn note_consumer_stream(&mut self, external_stream: u64) -> Result<(), CarrierError> {
+        if external_stream == 0 {
+            return Err(CarrierError::Launch(xlog_core::XlogError::Kernel(
+                "null consumer stream handle".to_string(),
+            )));
+        }
+        self.pending_consumer_streams
+            .push(external_stream as cudarc::driver::sys::CUstream);
+        Ok(())
+    }
+
+    /// Publish successful solve completion to every registered
+    /// consumer stream, consuming the registrations exactly once.
+    fn handoff_consumers(&mut self, cu_stream: &crate::CudaStream) -> Result<(), CarrierError> {
+        let consumer_streams = std::mem::take(&mut self.pending_consumer_streams);
+        if consumer_streams.is_empty() {
+            return Ok(());
+        }
+
+        // SAFETY: the event is created in the carrier's current CUDA
+        // context. Registered stream handles are caller-guaranteed to
+        // be live streams on the same device. Event destruction is
+        // deferred by the driver until every enqueued wait completes.
+        unsafe {
+            let event = cudarc::driver::result::event::create(
+                cudarc::driver::sys::CUevent_flags::CU_EVENT_DISABLE_TIMING,
+            )
+            .map_err(|e| {
+                CarrierError::Launch(xlog_core::XlogError::Kernel(format!(
+                    "consumer event create failed: {e}"
+                )))
+            })?;
+            if let Err(e) = cudarc::driver::result::event::record(event, cu_stream.cu_stream()) {
+                let _ = cudarc::driver::result::event::destroy(event);
+                return Err(CarrierError::Launch(xlog_core::XlogError::Kernel(format!(
+                    "consumer event record failed: {e}"
+                ))));
+            }
+
+            let wait_result = consumer_streams
+                .into_iter()
+                .try_for_each(|consumer_stream| {
+                    cudarc::driver::result::stream::wait_event(
+                        consumer_stream,
+                        event,
+                        cudarc::driver::sys::CUevent_wait_flags::CU_EVENT_WAIT_DEFAULT,
+                    )
+                    .map_err(|e| {
+                        CarrierError::Launch(xlog_core::XlogError::Kernel(format!(
+                            "consumer event wait failed: {e}"
+                        )))
+                    })
+                });
+            let destroy_result = cudarc::driver::result::event::destroy(event).map_err(|e| {
+                CarrierError::Launch(xlog_core::XlogError::Kernel(format!(
+                    "consumer event destroy failed: {e}"
+                )))
+            });
+            wait_result?;
+            destroy_result?;
         }
         Ok(())
     }
@@ -633,6 +708,18 @@ impl JointConstraintCarrier {
     /// device. Results stay device-resident in the outputs
     /// (feasible counts) and feasible-sets columns.
     pub fn solve_label_feasibility(
+        &mut self,
+        abstain_label: u32,
+        fuel: &mut FuelMeter,
+    ) -> Result<(), CarrierError> {
+        let result = self.solve_label_feasibility_inner(abstain_label, fuel);
+        if result.is_err() {
+            self.pending_consumer_streams.clear();
+        }
+        result
+    }
+
+    fn solve_label_feasibility_inner(
         &mut self,
         abstain_label: u32,
         fuel: &mut FuelMeter,
@@ -734,6 +821,7 @@ impl JointConstraintCarrier {
                 "solve launch commit failed: {e}"
             )))
         })?;
+        self.handoff_consumers(&cu_stream)?;
         self.feasibility_solved = true;
         Ok(())
     }
@@ -751,6 +839,14 @@ impl JointConstraintCarrier {
     /// emit as a unique label. Multi-candidate components stay behind
     /// the cross-candidate dynamic-programming stage.
     pub fn solve_label_map_top2(&mut self, fuel: &mut FuelMeter) -> Result<(), CarrierError> {
+        let result = self.solve_label_map_top2_inner(fuel);
+        if result.is_err() {
+            self.pending_consumer_streams.clear();
+        }
+        result
+    }
+
+    fn solve_label_map_top2_inner(&mut self, fuel: &mut FuelMeter) -> Result<(), CarrierError> {
         if self.registered_schema.is_none() {
             return Err(CarrierError::SchemaNotRegistered);
         }
@@ -825,7 +921,9 @@ impl JointConstraintCarrier {
             CarrierError::Launch(xlog_core::XlogError::Kernel(format!(
                 "top-two launch commit failed: {e}"
             )))
-        })
+        })?;
+        self.handoff_consumers(&cu_stream)?;
+        Ok(())
     }
 
     /// Solve every planned multi-candidate component EXACTLY by
@@ -843,6 +941,19 @@ impl JointConstraintCarrier {
     /// remaining fuel budget is authorized (charged) up front; the
     /// device spends at most that.
     pub fn solve_components_exact(
+        &mut self,
+        comp_offsets: &[u32],
+        comp_indices: &[u32],
+        fuel: &mut FuelMeter,
+    ) -> Result<(), CarrierError> {
+        let result = self.solve_components_exact_inner(comp_offsets, comp_indices, fuel);
+        if result.is_err() {
+            self.pending_consumer_streams.clear();
+        }
+        result
+    }
+
+    fn solve_components_exact_inner(
         &mut self,
         comp_offsets: &[u32],
         comp_indices: &[u32],
@@ -1026,6 +1137,7 @@ impl JointConstraintCarrier {
                 })?;
         }
         fuel.refund(authorized.saturating_sub(measured[0]));
+        self.handoff_consumers(&cu_stream)?;
         Ok(())
     }
 

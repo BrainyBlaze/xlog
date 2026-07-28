@@ -212,6 +212,45 @@ def test_producer_event_replaces_host_sync() -> None:
         carrier.note_producer_stream(0)
 
 
+def test_consumer_events_order_solve_before_external_stream_reads() -> None:
+    carrier = _registered()
+    domains = from_dlpack(carrier.export_buffer("domains"))
+    constraints = from_dlpack(carrier.export_buffer("constraints"))
+    feasible = from_dlpack(carrier.export_buffer("feasible_sets"))
+
+    producer = torch.cuda.Stream()
+    with torch.cuda.stream(producer):
+        domains.copy_(
+            torch.tensor([[0b011], [0b001], [0b100]], dtype=torch.int64, device="cuda")
+        )
+        constraints.copy_(
+            torch.tensor([[0, 1], [1, 1]], dtype=torch.int32, device="cuda")
+        )
+        carrier.note_producer_stream(producer.cuda_stream)
+
+    consumers = [torch.cuda.Stream(), torch.cuda.Stream()]
+    for consumer in consumers:
+        carrier.note_consumer_stream(consumer.cuda_stream)
+
+    carrier.solve_label_feasibility(ABSTAIN)
+
+    # Each clone is enqueued after the wait that the carrier placed on
+    # that external stream. Synchronizing only the consumer streams is
+    # therefore sufficient; there is no host/global solve barrier.
+    snapshots = []
+    for consumer in consumers:
+        with torch.cuda.stream(consumer):
+            snapshots.append(feasible.clone())
+    for consumer in consumers:
+        consumer.synchronize()
+
+    assert [int(snapshot[0, 0]) for snapshot in snapshots] == [0b1101, 0b1101]
+    assert [int(snapshot[1, 0]) for snapshot in snapshots] == [0b1001, 0b1001]
+
+    with pytest.raises(pyxlog.CarrierRefused, match="null consumer stream"):
+        carrier.note_consumer_stream(0)
+
+
 def test_component_exact_rejects_greedy_infeasible_joint() -> None:
     import struct
 
