@@ -35,7 +35,14 @@ const TOP2_KERNEL: &str = "joint_label_top2";
 /// Kernel entry point for the exact component-enumeration stage.
 const COMPONENT_KERNEL: &str = "joint_component_enumerate";
 /// All joint-solve module entry points, in manifest order.
-const JOINT_SOLVE_KERNELS: &[&str] = &[FEASIBILITY_KERNEL, TOP2_KERNEL, COMPONENT_KERNEL];
+const MEMOIZED_KERNEL: &str = "joint_label_memoized";
+
+const JOINT_SOLVE_KERNELS: &[&str] = &[
+    FEASIBILITY_KERNEL,
+    TOP2_KERNEL,
+    COMPONENT_KERNEL,
+    MEMOIZED_KERNEL,
+];
 
 /// Fixed carrier budget: slice-1 buffers are capacity-bounded and
 /// small; the production capacity envelope arrives with the solver
@@ -1127,6 +1134,208 @@ impl JointConstraintCarrier {
             cudarc::driver::result::stream::synchronize(cu_stream.cu_stream()).map_err(|e| {
                 CarrierError::Launch(xlog_core::XlogError::Kernel(format!(
                     "component solve completion wait failed: {e}"
+                )))
+            })?;
+            cudarc::driver::result::memcpy_dtoh_sync(&mut measured, *fuel_col.device_ptr())
+                .map_err(|e| {
+                    CarrierError::Launch(xlog_core::XlogError::Kernel(format!(
+                        "fuel counter readback failed: {e}"
+                    )))
+                })?;
+        }
+        fuel.refund(authorized.saturating_sub(measured[0]));
+        self.handoff_consumers(&cu_stream)?;
+        Ok(())
+    }
+
+    /// Exact memoized-DP stage for components beyond the enumeration
+    /// capacity: chain-order path components solve by reached-domain
+    /// bitset DP (restricted forward passes, so every emitted total is
+    /// a linearly accumulated f32 — margins only from exact passes,
+    /// never bounds). Wider frontiers refuse typed on the device
+    /// (status 3); the pinned width gates eligibility, the fuel meter
+    /// reconciles to the device-measured DP transitions.
+    pub fn solve_components_memoized(
+        &mut self,
+        comp_offsets: &[u32],
+        comp_indices: &[u32],
+        pinned_width: u32,
+        fuel: &mut FuelMeter,
+    ) -> Result<(), CarrierError> {
+        let result =
+            self.solve_components_memoized_inner(comp_offsets, comp_indices, pinned_width, fuel);
+        if result.is_err() {
+            self.pending_consumer_streams.clear();
+        }
+        result
+    }
+
+    fn solve_components_memoized_inner(
+        &mut self,
+        comp_offsets: &[u32],
+        comp_indices: &[u32],
+        pinned_width: u32,
+        fuel: &mut FuelMeter,
+    ) -> Result<(), CarrierError> {
+        if self.registered_schema.is_none() {
+            return Err(CarrierError::SchemaNotRegistered);
+        }
+        if !self.feasibility_solved {
+            return Err(CarrierError::FeasibilityNotSolved);
+        }
+        let invalid = |detail: String| CarrierError::InvalidComponentPlan { detail };
+        if comp_offsets.first() != Some(&0)
+            || comp_offsets.last().copied() != Some(comp_indices.len() as u32)
+        {
+            return Err(invalid(format!(
+                "offsets must run 0..={}, got first {:?} last {:?}",
+                comp_indices.len(),
+                comp_offsets.first(),
+                comp_offsets.last()
+            )));
+        }
+        if comp_offsets.windows(2).any(|w| w[0] > w[1]) {
+            return Err(invalid("offsets are not monotone".to_string()));
+        }
+        let mut seen = vec![false; self.candidates];
+        for &cand in comp_indices {
+            let slot = seen
+                .get_mut(cand as usize)
+                .ok_or_else(|| invalid(format!("candidate {cand} outside capacity")))?;
+            if *slot {
+                return Err(invalid(format!("candidate {cand} listed twice")));
+            }
+            *slot = true;
+        }
+        let num_components = comp_offsets.len() - 1;
+        if num_components == 0 {
+            return Ok(());
+        }
+
+        let fuel_per_component = fuel.remaining() / num_components as u64;
+        let authorized = fuel_per_component * num_components as u64;
+        fuel.charge(authorized).map_err(CarrierError::Solver)?;
+
+        let stream_id = self.pool.acquire().map_err(|e| {
+            CarrierError::Launch(xlog_core::XlogError::Kernel(format!(
+                "no launch stream available: {e:?}"
+            )))
+        })?;
+        let cu_stream = self.pool.resolve(stream_id).ok_or_else(|| {
+            CarrierError::Launch(xlog_core::XlogError::Kernel(
+                "launch stream did not resolve".to_string(),
+            ))
+        })?;
+        self.drain_producer_waits(&cu_stream)?;
+
+        let offsets_col = self.upload_plan(comp_offsets)?;
+        let indices_col = self.upload_plan(comp_indices)?;
+        let fuel_words = [0u32, 0u32];
+        let fuel_col = self.upload_plan(&fuel_words)?;
+
+        let Some(signatures) = &self.signatures else {
+            return Err(CarrierError::SignaturesUnbound);
+        };
+        let [domains, scores, constraints, _outputs, feasible_sets, map_results, solve_status] =
+            &self.columns;
+        let [head_masks, tail_masks] = signatures;
+
+        let mut rec = LaunchRecorder::new_strict(stream_id);
+        rec.read_column(scores);
+        rec.read_column(feasible_sets);
+        rec.read_column(constraints);
+        rec.read_column(domains);
+        rec.read_column(head_masks);
+        rec.read_column(tail_masks);
+        rec.read_column(&offsets_col);
+        rec.read_column(&indices_col);
+        rec.write_column(map_results);
+        rec.write_column(solve_status);
+        rec.write_column(&fuel_col);
+        rec.preflight(&self.runtime).map_err(|e| {
+            CarrierError::Launch(xlog_core::XlogError::Kernel(format!(
+                "memoized solve preflight failed: {e}"
+            )))
+        })?;
+
+        let kernel = self
+            .device
+            .inner()
+            .get_func(JOINT_SOLVE_MODULE, MEMOIZED_KERNEL)
+            .ok_or_else(|| CarrierError::KernelUnavailable {
+                detail: format!("{MEMOIZED_KERNEL} not resolvable after module load"),
+            })?;
+        // SAFETY: the raw parameter array matches the kernel ABI
+        // joint_label_memoized(scores, feasible_sets, pairs, domains,
+        // head_masks, tail_masks, comp_cand_offsets,
+        // comp_cand_indices, num_components, num_labels, lanes,
+        // pinned_width, fuel_per_component, map_results,
+        // solve_status, fuel_spent) exactly, in order; every device
+        // pointer is a live runtime-backed column recorded above and
+        // the locals stay alive past the enqueue.
+        unsafe {
+            use std::ffi::c_void;
+            let scores_p = *scores.device_ptr();
+            let feasible_p = *feasible_sets.device_ptr();
+            let pairs_p = *constraints.device_ptr();
+            let domains_p = *domains.device_ptr();
+            let head_p = *head_masks.device_ptr();
+            let tail_p = *tail_masks.device_ptr();
+            let offsets_p = *offsets_col.device_ptr();
+            let indices_p = *indices_col.device_ptr();
+            let num_components_v = num_components as u32;
+            let num_labels_v = self.labels as u32;
+            let lanes_v = self.domain_lanes as u32;
+            let map_p = *map_results.device_ptr();
+            let status_p = *solve_status.device_ptr();
+            let fuel_p = *fuel_col.device_ptr();
+            let mut params: [*mut c_void; 16] = [
+                &scores_p as *const _ as *mut c_void,
+                &feasible_p as *const _ as *mut c_void,
+                &pairs_p as *const _ as *mut c_void,
+                &domains_p as *const _ as *mut c_void,
+                &head_p as *const _ as *mut c_void,
+                &tail_p as *const _ as *mut c_void,
+                &offsets_p as *const _ as *mut c_void,
+                &indices_p as *const _ as *mut c_void,
+                &num_components_v as *const _ as *mut c_void,
+                &num_labels_v as *const _ as *mut c_void,
+                &lanes_v as *const _ as *mut c_void,
+                &pinned_width as *const _ as *mut c_void,
+                &fuel_per_component as *const _ as *mut c_void,
+                &map_p as *const _ as *mut c_void,
+                &status_p as *const _ as *mut c_void,
+                &fuel_p as *const _ as *mut c_void,
+            ];
+            kernel
+                .launch_on_stream(
+                    &cu_stream,
+                    LaunchConfig {
+                        grid_dim: (num_components as u32, 1, 1),
+                        block_dim: (32, 1, 1),
+                        shared_mem_bytes: 0,
+                    },
+                    &mut params[..],
+                )
+                .map_err(|e| {
+                    CarrierError::Launch(xlog_core::XlogError::Kernel(format!(
+                        "memoized solve launch failed: {e}"
+                    )))
+                })?;
+        }
+        rec.commit(&self.runtime).map_err(|e| {
+            CarrierError::Launch(xlog_core::XlogError::Kernel(format!(
+                "memoized solve commit failed: {e}"
+            )))
+        })?;
+        // Bounded post-solve metadata read (num_rows class): one
+        // 8-byte counter after a stream-scoped completion wait,
+        // reconciling the meter to the DEVICE-measured transitions.
+        let mut measured = [0u64; 1];
+        unsafe {
+            cudarc::driver::result::stream::synchronize(cu_stream.cu_stream()).map_err(|e| {
+                CarrierError::Launch(xlog_core::XlogError::Kernel(format!(
+                    "memoized solve completion wait failed: {e}"
                 )))
             })?;
             cudarc::driver::result::memcpy_dtoh_sync(&mut measured, *fuel_col.device_ptr())

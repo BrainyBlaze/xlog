@@ -1091,3 +1091,328 @@ fn external_column_shows_inverse_ownership_signature() {
         "external column must have no runtime block — strict recorders reject it"
     );
 }
+
+/// Memoized-DP stage (red-first): a chain component larger than the
+/// complete-enumeration capacity must still solve EXACTLY — reached-
+/// domain-bitset DP per the ratified design — never refuse where the
+/// pinned width admits DP, and never approximate margins (У1: margins
+/// emit only from an exact branch; У2: per-edge margin 0 or a tie is
+/// typed ambiguity, never an ID tie-break). A greedy per-candidate
+/// argmax is jointly infeasible mid-chain, so any shortcut that skips
+/// joint reasoning produces the wrong optimum and fails the oracle.
+#[test]
+fn memoized_solve_matches_oracle_beyond_enumeration_capacity() {
+    use xlog_cuda::{candidate_components, FuelMeter, SOLVER_ABI_IDENTITY};
+
+    let Some(device) = CudaDevice::new(0).ok().map(Arc::new) else {
+        eprintln!("Skipping: CUDA runtime unavailable");
+        return;
+    };
+
+    // 11 entities in a chain, 10 candidates c_i = (e_i, e_{i+1}),
+    // 3 labels (0 = abstain). Label 1 pins its tail to sort 0b0010;
+    // label 2 pins its head to sort 0b1000. Alternating entity
+    // domains make consecutive label-1 picks conflict on the shared
+    // entity, so the exact optimum interleaves abstains.
+    const CANDS: usize = 10;
+    let mut carrier =
+        JointConstraintCarrier::allocate(Arc::clone(&device), 11, 1, CANDS, 3).expect("allocation");
+    carrier
+        .register_schema("00", SOLVER_ABI_IDENTITY)
+        .expect("registration");
+    carrier
+        .bind_signatures(&[0, 0b0010, 0b1000], &[0, 0b0100, 0b0001])
+        .expect("binding");
+
+    let (domains_ptr, scores_ptr, constraints_ptr, map_ptr, status_ptr) = {
+        let columns: Vec<&xlog_cuda::CudaColumn> = carrier.columns().collect();
+        (
+            *columns[0].device_ptr(),
+            *columns[1].device_ptr(),
+            *columns[2].device_ptr(),
+            *columns[5].device_ptr(),
+            *columns[6].device_ptr(),
+        )
+    };
+    // Every entity admits label 1 INDIVIDUALLY (head needs 0b0010,
+    // tail needs 0b0100 — both present), but adjacent label-1 picks
+    // conflict JOINTLY: tail_mask(1) & head_mask(1) = 0b0100 & 0b0010
+    // = 0 on the shared entity. The exact optimum is a maximum
+    // independent set on the 10-path — real joint reasoning, where
+    // all-greedy label 1 is jointly infeasible.
+    let domains = [0b0110u64; 11];
+    let mut pairs = [(0u32, 0u32); CANDS];
+    let mut constraints = [0u32; CANDS * 2];
+    for i in 0..CANDS {
+        pairs[i] = (i as u32, (i + 1) as u32);
+        constraints[2 * i] = i as u32;
+        constraints[2 * i + 1] = (i + 1) as u32;
+    }
+    // Greedy favorite everywhere is label 1 (score 5.0); abstain 0.1;
+    // label 2 carries a decoy 9.9 that is sort-illegal on every head.
+    // Even candidates carry strong label-1 scores, odd candidates a
+    // weak-but-positive 1.0: the unique joint optimum takes label 1 on
+    // ALL evens (odd neighbors abstain — 1.0 never displaces a 5.0+
+    // neighbor pair), so every per-candidate preference is unique and
+    // no assertion sits on a lawful tie. The 9.9 decoy stays
+    // sort-illegal everywhere.
+    let mut scores = [0f32; CANDS * 3];
+    for i in 0..CANDS {
+        scores[3 * i] = 0.1;
+        scores[3 * i + 1] = if i % 2 == 0 { 5.0 } else { 1.0 };
+        scores[3 * i + 2] = 9.9;
+    }
+    unsafe {
+        cudarc::driver::result::memcpy_htod_sync(domains_ptr, &domains).expect("domain upload");
+        cudarc::driver::result::memcpy_htod_sync(constraints_ptr, &constraints)
+            .expect("pair upload");
+        cudarc::driver::result::memcpy_htod_sync(scores_ptr, &scores).expect("scores upload");
+    }
+    device.inner().synchronize().expect("scaffold sync");
+
+    let mut fuel = FuelMeter::new(1 << 22);
+    carrier
+        .solve_label_feasibility(0, &mut fuel)
+        .expect("feasibility stage");
+    carrier
+        .solve_label_map_top2(&mut fuel)
+        .expect("top-two stage");
+    let (offsets, indices) = candidate_components(11, &pairs);
+    assert_eq!(offsets, vec![0, CANDS as u32], "one chain component");
+
+    // Beyond the enumeration cap the exact stage refuses (status 3);
+    // the memoized stage must solve the SAME component exactly.
+    let authorized_before = fuel.spent();
+    carrier
+        .solve_components_memoized(&offsets, &indices, 12, &mut fuel)
+        .expect("memoized stage");
+    device.inner().synchronize().expect("post-solve sync");
+
+    let mut maps = [0u32; CANDS * 4];
+    let mut status = [0u32; CANDS];
+    unsafe {
+        cudarc::driver::result::memcpy_dtoh_sync(&mut maps, map_ptr).expect("map readback");
+        cudarc::driver::result::memcpy_dtoh_sync(&mut status, status_ptr).expect("status readback");
+    }
+
+    // Test-side oracle (host code is lawful IN TESTS): brute-force all
+    // joint assignments in candidate-index accumulation order.
+    let oracle = brute_force_chain_oracle(&domains, &pairs, &scores);
+    for i in 0..CANDS {
+        assert_eq!(
+            maps[4 * i],
+            oracle.best_labels[i] as u32,
+            "candidate {i} label must match the joint optimum"
+        );
+        assert_eq!(
+            f32::from_bits(maps[4 * i + 2]),
+            oracle.best_total,
+            "joint MAP total, f32 order mirrored"
+        );
+        assert_eq!(
+            f32::from_bits(maps[4 * i + 3]),
+            oracle.margins[i],
+            "candidate {i} per-edge GLOBAL max-marginal (У1 exact branch only)"
+        );
+        assert_eq!(status[i], 4, "memoized-exact status code");
+    }
+    // Fuel is device-measured DP state insertions: charged, nonzero,
+    // and reconciled below the authorization (exact literal pinned at
+    // GREEN per literals-by-execution).
+    assert!(fuel.spent() > authorized_before, "DP work must be metered");
+    // Device-measured literal, snapped by execution: feasibility 30
+    // (10 candidates x 3 labels) + top-two 30 + exactly 545 memoized
+    // DP transitions across the unrestricted and 30 restricted
+    // passes; the upfront authorization reconciled down to this.
+    assert_eq!(
+        fuel.spent(),
+        605,
+        "meter reconciles to device-measured transitions"
+    );
+}
+
+/// Test-side exhaustive oracle for chain components: enumerates every
+/// joint label assignment (host code — lawful in tests only), applying
+/// the same legality rule as the kernels (label 1 needs tail-sort
+/// 0b0010 ∧ head-sort 0b0100; label 2 needs head-sort 0b1000 ∧
+/// tail-sort 0b0001; abstain always legal, all-zero mask = abstain
+/// convention) and the same f32 accumulation order (candidate index
+/// ascending). Margins are exact GLOBAL max-marginals: best total
+/// minus best total with candidate i forced away from its MAP label.
+struct ChainOracle {
+    best_labels: Vec<u8>,
+    best_total: f32,
+    margins: Vec<f32>,
+}
+
+fn brute_force_chain_oracle(domains: &[u64], pairs: &[(u32, u32)], scores: &[f32]) -> ChainOracle {
+    let n = pairs.len();
+    let legal = |cand: usize, label: u8| -> bool {
+        let (h, t) = pairs[cand];
+        let (hd, td) = (domains[h as usize], domains[t as usize]);
+        match label {
+            0 => true,
+            1 => hd & 0b0010 != 0 && td & 0b0100 != 0,
+            2 => hd & 0b1000 != 0 && td & 0b0001 != 0,
+            _ => unreachable!(),
+        }
+    };
+    let total = |assign: &[u8]| -> Option<f32> {
+        let mut acc = 0f32;
+        for (i, &l) in assign.iter().enumerate() {
+            if !legal(i, l) {
+                return None;
+            }
+            acc += scores[3 * i + l as usize];
+        }
+        // JOINT consistency mirrors the kernels: every entity keeps a
+        // nonempty domain under the intersection of all role masks
+        // applied to it (all-zero mask row = abstention, asserts
+        // nothing).
+        let heads = [0u64, 0b0010, 0b1000];
+        let tails = [0u64, 0b0100, 0b0001];
+        let mut touched: Vec<u32> = pairs.iter().flat_map(|&(h, t)| [h, t]).collect();
+        touched.sort_unstable();
+        touched.dedup();
+        for &entity in &touched {
+            let mut acc_dom = domains[entity as usize];
+            for (i, &l) in assign.iter().enumerate() {
+                let (h, t) = pairs[i];
+                if h == entity && heads[l as usize] != 0 {
+                    acc_dom &= heads[l as usize];
+                }
+                if t == entity && tails[l as usize] != 0 {
+                    acc_dom &= tails[l as usize];
+                }
+            }
+            if acc_dom == 0 {
+                return None;
+            }
+        }
+        Some(acc)
+    };
+    let mut best: Option<(Vec<u8>, f32)> = None;
+    let mut assign = vec![0u8; n];
+    loop {
+        if let Some(t) = total(&assign) {
+            if best.as_ref().map_or(true, |(_, bt)| t > *bt) {
+                best = Some((assign.clone(), t));
+            }
+        }
+        // odometer over 3^n
+        let mut k = 0;
+        loop {
+            if k == n {
+                let (labels, bt) = best.expect("abstain-everywhere is always legal");
+                let mut margins = vec![0f32; n];
+                for i in 0..n {
+                    let mut alt: Option<f32> = None;
+                    let mut a2 = vec![0u8; n];
+                    'outer: loop {
+                        if a2[i] != labels[i] {
+                            if let Some(t) = total(&a2) {
+                                if alt.map_or(true, |b| t > b) {
+                                    alt = Some(t);
+                                }
+                            }
+                        }
+                        let mut j = 0;
+                        loop {
+                            if j == n {
+                                break 'outer;
+                            }
+                            a2[j] += 1;
+                            if a2[j] < 3 {
+                                break;
+                            }
+                            a2[j] = 0;
+                            j += 1;
+                        }
+                    }
+                    margins[i] = alt.map_or(f32::INFINITY, |a| bt - a);
+                }
+                return ChainOracle {
+                    best_labels: labels,
+                    best_total: bt,
+                    margins,
+                };
+            }
+            assign[k] += 1;
+            if assign[k] < 3 {
+                break;
+            }
+            assign[k] = 0;
+            k += 1;
+        }
+    }
+}
+
+/// Consumer-event seam for the memoized stage: a registration
+/// attached to a failed memoized solve clears without handing off,
+/// and a successful memoized solve publishes its completion event to
+/// the registered consumer stream, consuming the registration.
+#[test]
+fn memoized_stage_clears_and_hands_off_consumer_registrations() {
+    use xlog_cuda::{FuelMeter, SOLVER_ABI_IDENTITY};
+
+    let Some(device) = CudaDevice::new(0).ok().map(Arc::new) else {
+        eprintln!("Skipping: CUDA runtime unavailable");
+        return;
+    };
+
+    let mut carrier =
+        JointConstraintCarrier::allocate(Arc::clone(&device), 2, 1, 1, 3).expect("allocation");
+    carrier
+        .register_schema("00", SOLVER_ABI_IDENTITY)
+        .expect("registration");
+    carrier
+        .bind_signatures(&[0, 0b0100, 0b0001], &[0, 0b1000, 0b1000])
+        .expect("binding");
+
+    // A registration attached to a memoized solve that refuses before
+    // touching the device must be cleared. Drop its stream so a
+    // retained stale handle would poison the later successful handoff.
+    let failed_pool = Arc::new(xlog_cuda::device_runtime::StreamPool::with_defaults(
+        Arc::clone(&device),
+    ));
+    let failed_id = failed_pool
+        .acquire()
+        .expect("acquire failed-attempt stream");
+    let failed_stream = failed_pool
+        .resolve(failed_id)
+        .expect("resolve failed-attempt stream");
+    carrier
+        .note_consumer_stream(failed_stream.cu_stream() as u64)
+        .expect("register failed-attempt consumer");
+    let mut fuel = FuelMeter::new(1 << 22);
+    assert!(matches!(
+        carrier.solve_components_memoized(&[0, 1], &[0], 1, &mut fuel),
+        Err(CarrierError::FeasibilityNotSolved)
+    ));
+    drop(failed_stream);
+    drop(failed_pool);
+
+    carrier
+        .solve_label_feasibility(0, &mut fuel)
+        .expect("feasibility prerequisite");
+
+    // The consumer stream must observe the memoized solve completion
+    // event; the wait completing proves the handoff was published.
+    let consumer_pool = Arc::new(xlog_cuda::device_runtime::StreamPool::with_defaults(
+        Arc::clone(&device),
+    ));
+    let consumer_id = consumer_pool.acquire().expect("acquire consumer");
+    let consumer = consumer_pool
+        .resolve(consumer_id)
+        .expect("resolve consumer");
+    carrier
+        .note_consumer_stream(consumer.cu_stream() as u64)
+        .expect("register consumer");
+    carrier
+        .solve_components_memoized(&[0, 1], &[0], 1, &mut fuel)
+        .expect("memoized solve with consumer handoff");
+    unsafe {
+        cudarc::driver::result::stream::synchronize(consumer.cu_stream())
+            .expect("consumer completion");
+    }
+}

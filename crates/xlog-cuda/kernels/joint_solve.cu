@@ -427,3 +427,202 @@ extern "C" __global__ void joint_component_enumerate(
         solve_status[cand] = 2u;
     }
 }
+
+// Memoized chain DP (slice 1): exact joint MAP + exact per-candidate
+// GLOBAL max-marginals for PATH components whose candidates arrive in
+// chain order (tail of i == head of i+1). Wider frontiers and multi-
+// lane domains REFUSE typed (status 3) — staged capability, never an
+// approximation. Totals are assembled by restricted forward passes,
+// each accumulating scores in candidate-index order, so every emitted
+// f32 is bit-identical to a linear left-associated sum: margins come
+// only from exact passes (never from bound propagation), a tie or a
+// zero margin is typed ambiguity, and fuel counts every DP state
+// transition the device actually performs.
+extern "C" __global__ void joint_label_memoized(
+    const float* __restrict__ scores,
+    const uint64_t* __restrict__ feasible_sets,
+    const uint32_t* __restrict__ pairs,
+    const uint64_t* __restrict__ domains,
+    const uint64_t* __restrict__ head_masks,
+    const uint64_t* __restrict__ tail_masks,
+    const uint32_t* __restrict__ comp_cand_offsets,
+    const uint32_t* __restrict__ comp_cand_indices,
+    uint32_t num_components,
+    uint32_t num_labels,
+    uint32_t lanes,
+    uint32_t pinned_width,
+    uint64_t fuel_per_component,
+    uint32_t* __restrict__ map_results,
+    uint32_t* __restrict__ solve_status,
+    unsigned long long* __restrict__ fuel_spent
+) {
+    uint32_t comp = blockIdx.x;
+    if (comp >= num_components || threadIdx.x != 0) return;
+
+    const uint32_t MAX_CHAIN = 32;
+    const uint32_t MAX_LABELS = 32;
+    const uint32_t MAX_STATES = 33;
+    uint32_t begin = comp_cand_offsets[comp];
+    uint32_t end = comp_cand_offsets[comp + 1];
+    uint32_t n = end - begin;
+    uint32_t label_words = (num_labels + 63u) / 64u;
+    const float NEG_INF = -__int_as_float(0x7f800000);
+
+    // Slice-1 eligibility: single-lane domains, bounded chain, chain
+    // order, and a pinned width that admits the path frontier.
+    bool refuse = (n > MAX_CHAIN) || (lanes != 1u)
+        || (num_labels > MAX_LABELS) || (pinned_width < 1u);
+    for (uint32_t i = 0; i + 1 < n && !refuse; ++i) {
+        uint32_t t = pairs[comp_cand_indices[begin + i] * 2u + 1u];
+        uint32_t h = pairs[comp_cand_indices[begin + i + 1u] * 2u];
+        refuse = t != h;
+    }
+    if (refuse) {
+        for (uint32_t j = begin; j < end; ++j) {
+            solve_status[comp_cand_indices[j]] = 3u;
+        }
+        return;
+    }
+
+    // Effective per-label masks: an all-zero row asserts nothing
+    // (abstention convention shared with the enumeration stage).
+    uint64_t full = ~0ull;
+    unsigned long long transitions = 0;
+
+    // One restricted forward pass: candidate `pin` forced to label
+    // `pin_label` (pin == 0xFFFFFFFF: unrestricted). Returns the best
+    // full-assignment total, accumulated left-to-right.
+    // States: reachable bitsets of the link entity after each step.
+    auto head_eff = [&](uint32_t lab) {
+        uint64_t m = head_masks[lab];
+        return m == 0ull ? full : m;
+    };
+    auto tail_eff = [&](uint32_t lab) {
+        uint64_t m = tail_masks[lab];
+        return m == 0ull ? full : m;
+    };
+    auto feasible = [&](uint32_t cand, uint32_t lab) {
+        return ((feasible_sets[(uint64_t)cand * label_words + (lab >> 6)]
+                 >> (lab & 63u)) & 1ull) != 0ull;
+    };
+    auto run_pass = [&](uint32_t pin, uint32_t pin_label) -> float {
+        uint64_t state_bits[MAX_STATES];
+        float state_best[MAX_STATES];
+        uint32_t states = 1;
+        state_bits[0] = domains[pairs[comp_cand_indices[begin] * 2u]];
+        state_best[0] = 0.0f;
+        for (uint32_t i = 0; i < n; ++i) {
+            uint32_t cand = comp_cand_indices[begin + i];
+            uint64_t tail_dom = domains[pairs[cand * 2u + 1u]];
+            uint64_t next_bits[MAX_STATES];
+            float next_best[MAX_STATES];
+            uint32_t next_states = 0;
+            for (uint32_t s = 0; s < states; ++s) {
+                if (state_best[s] == NEG_INF) continue;
+                for (uint32_t l = 0; l < num_labels; ++l) {
+                    if (i == pin && l != pin_label) continue;
+                    if (!feasible(cand, l)) continue;
+                    if ((state_bits[s] & head_eff(l)) == 0ull) continue;
+                    uint64_t out = tail_dom & tail_eff(l);
+                    if (out == 0ull) continue;
+                    ++transitions;
+                    float total = state_best[s]
+                        + scores[(uint64_t)cand * num_labels + l];
+                    uint32_t k = 0;
+                    for (; k < next_states; ++k) {
+                        if (next_bits[k] == out) break;
+                    }
+                    if (k == next_states) {
+                        if (next_states == MAX_STATES) return NEG_INF;
+                        next_bits[next_states] = out;
+                        next_best[next_states] = total;
+                        ++next_states;
+                    } else if (total > next_best[k]) {
+                        next_best[k] = total;
+                    }
+                }
+            }
+            states = next_states;
+            for (uint32_t s = 0; s < states; ++s) {
+                state_bits[s] = next_bits[s];
+                state_best[s] = next_best[s];
+            }
+            if (states == 0) return NEG_INF;
+        }
+        float best = NEG_INF;
+        for (uint32_t s = 0; s < states; ++s) {
+            if (state_best[s] > best) best = state_best[s];
+        }
+        return best;
+    };
+
+    float joint_best = run_pass(0xFFFFFFFFu, 0u);
+    if (joint_best == NEG_INF) {
+        // No consistent assignment exists: typed existence failure.
+        for (uint32_t j = begin; j < end; ++j) {
+            uint32_t cand = comp_cand_indices[j];
+            uint32_t* out = map_results + (uint64_t)cand * 4u;
+            out[0] = 0xFFFFFFFFu; out[1] = 1u; out[2] = 0u; out[3] = 0u;
+            solve_status[cand] = 0xFFFFFFFFu;
+        }
+        atomicAdd(fuel_spent, transitions);
+        return;
+    }
+
+    // Compute every row into locals FIRST: a fuel refusal must not
+    // leave partially emitted rows behind (per-candidate execution
+    // witness law — refusal emits status only, like the enumeration
+    // stage).
+    uint32_t row_lab[MAX_CHAIN];
+    uint32_t row_amb[MAX_CHAIN];
+    float row_total[MAX_CHAIN];
+    float row_margin[MAX_CHAIN];
+    for (uint32_t i = 0; i < n; ++i) {
+        uint32_t cand = comp_cand_indices[begin + i];
+        uint32_t best_lab = 0xFFFFFFFFu;
+        float best_total = NEG_INF;
+        float alt_total = NEG_INF;
+        uint32_t tied = 0;
+        for (uint32_t l = 0; l < num_labels; ++l) {
+            if (!feasible(cand, l)) continue;
+            float t = run_pass(i, l);
+            if (t == NEG_INF) continue;
+            if (t > best_total) {
+                if (best_lab != 0xFFFFFFFFu) {
+                    alt_total = best_total > alt_total ? best_total : alt_total;
+                }
+                best_total = t;
+                best_lab = l;
+                tied = 0;
+            } else if (t == best_total && l != best_lab) {
+                tied = 1u;
+                alt_total = t;
+            } else if (t > alt_total) {
+                alt_total = t;
+            }
+        }
+        row_lab[i] = best_lab;
+        row_total[i] = best_total;
+        row_margin[i] = alt_total == NEG_INF
+            ? __int_as_float(0x7f800000)
+            : best_total - alt_total;
+        row_amb[i] = (tied != 0u || row_margin[i] == 0.0f) ? 1u : 0u;
+    }
+    if (fuel_per_component != 0ull && transitions > fuel_per_component) {
+        for (uint32_t j = begin; j < end; ++j) {
+            solve_status[comp_cand_indices[j]] = 3u;
+        }
+        atomicAdd(fuel_spent, transitions);
+        return;
+    }
+    for (uint32_t i = 0; i < n; ++i) {
+        uint32_t cand = comp_cand_indices[begin + i];
+        uint32_t* out = map_results + (uint64_t)cand * 4u;
+        out[0] = row_lab[i];
+        out[1] = row_amb[i];
+        out[2] = __float_as_uint(row_total[i]);
+        out[3] = __float_as_uint(row_margin[i]);
+        solve_status[cand] = 4u;
+    }
+    atomicAdd(fuel_spent, transitions);
+}
