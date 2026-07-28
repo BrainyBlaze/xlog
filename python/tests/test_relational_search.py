@@ -139,6 +139,172 @@ def test_kfold_scores_fold_assignment_matches_neural_credit_convention():
     assert got == pytest.approx(expected)
 
 
+# ---------------------------------------------------------------------------
+# kfold_scores(score="f1"): recall-aware per-fold F1, byte-identical
+# accuracy default, zero-positive-fold skip rule, and the ranking-inversion
+# regression this option exists to fix (see kfold_scores's own docstring for
+# the score="f1" semantics being pinned here).
+# ---------------------------------------------------------------------------
+
+
+def test_kfold_scores_score_accuracy_explicit_matches_default():
+    facts = [(i, 1) for i in range(12)]
+    labels = [i % 4 == 0 for i in range(12)]
+    relations = {
+        "a": [facts[i] for i in [0, 4, 5, 8]],
+        "b": [facts[i] for i in range(12)],
+    }
+    body = ("a", "b")
+    default_scores = kfold_scores([body], relations, facts, labels, folds=3, seed=5)
+    explicit_scores = kfold_scores(
+        [body], relations, facts, labels, folds=3, seed=5, score="accuracy",
+    )
+    assert default_scores == explicit_scores
+
+
+def test_kfold_scores_rejects_unknown_score_value():
+    facts = [(i, 1) for i in range(4)]
+    labels = [True, False, True, False]
+    relations = {"a": facts, "b": facts}
+    with pytest.raises(ValueError):
+        kfold_scores([("a", "b")], relations, facts, labels, folds=2, seed=0, score="bogus")
+
+
+def test_kfold_scores_f1_matches_manual_prf1_per_fold():
+    # Independent recomputation (via scorer.prf1 directly, per fold, with
+    # the SAME zero-positive-fold skip this function documents) cross-checked
+    # against kfold_scores's own score="f1" output -- not just "some number
+    # changed", but the EXACT arithmetic.
+    from pyxlog.ilp.neural_credit import holdout_fold_assignment
+    from scorer import prf1
+
+    n_facts = 20
+    folds = 4
+    seed = 3
+    facts = [(i, 1) for i in range(n_facts)]
+    positive_idx = {0, 1, 2, 3, 10}
+    labels = [i in positive_idx for i in range(n_facts)]
+
+    # Body's cover: true positives at 0, 1, 10; false positives at 5, 15;
+    # false negative at 2, 3 -- a genuinely imperfect detector, not a
+    # perfect-fit toy.
+    cover_idx = {0, 1, 5, 10, 15}
+    relations = {
+        "a": [facts[i] for i in cover_idx],
+        "b": [facts[i] for i in range(n_facts)],
+    }
+    body = ("a", "b")
+    covers = {body: body_cover(body, relations)}
+
+    fold_of = holdout_fold_assignment(n_facts, folds, seed)
+    per_fold_f1 = []
+    for fold in range(folds):
+        held = [i for i in range(n_facts) if fold_of[i] == fold]
+        gold = [labels[i] for i in held]
+        if not any(gold):
+            continue  # zero-positive fold: recall undefined, skipped -- see docstring
+        pred = [i in cover_idx for i in held]
+        per_fold_f1.append(prf1(pred, gold)["f1"])
+    expected = sum(per_fold_f1) / len(per_fold_f1)
+
+    got = kfold_scores(
+        [body], relations, facts, labels, folds, seed, covers=covers, score="f1",
+    )[body]
+    assert got == pytest.approx(expected)
+
+
+def test_kfold_scores_f1_skips_a_zero_positive_fold_rather_than_scoring_it_zero():
+    # Fold assignment discovered from the SAME shared function kfold_scores
+    # itself calls (holdout_fold_assignment), not hard-coded -- then labels
+    # are built so fold 0 holds ZERO positives (every fold-0 fact is
+    # negative) while folds 1 and 2 each hold exactly one. A body whose
+    # cover is EXACTLY the positive set has perfect precision/recall (F1
+    # 1.0) on every fold that can measure it; the zero-positive fold 0
+    # contributes NOTHING to the mean (documented skip, not a 0.0 tax).
+    n_facts = 12
+    folds = 3
+    seed = 5
+    facts = [(i, 1) for i in range(n_facts)]
+
+    from pyxlog.ilp.neural_credit import holdout_fold_assignment
+
+    fold_of = holdout_fold_assignment(n_facts, folds, seed)
+
+    labels = [False] * n_facts
+    for fold in (1, 2):
+        held = sorted(i for i in range(n_facts) if fold_of[i] == fold)
+        labels[held[0]] = True
+
+    fold0_held = [i for i in range(n_facts) if fold_of[i] == 0]
+    assert not any(labels[i] for i in fold0_held)  # sanity: fold 0 really is zero-positive
+
+    positive_facts = [facts[i] for i in range(n_facts) if labels[i]]
+    relations = {
+        "a": positive_facts,
+        "b": [facts[i] for i in range(n_facts)],
+    }
+    body = ("a", "b")
+    covers = {body: body_cover(body, relations)}
+
+    got = kfold_scores(
+        [body], relations, facts, labels, folds, seed, covers=covers, score="f1",
+    )[body]
+    assert got == pytest.approx(1.0)
+
+
+def test_ranking_inversion_accuracy_vs_f1_on_rare_positive_holdout():
+    """THE POINT of score="f1" (see kfold_scores's own docstring and
+    docs/experiments/caviar/README.md section D): on a rare-positive-class
+    holdout, accuracy can rank an empty predictor ABOVE the best real
+    detector. This reproduces exactly that inversion on a small, hand-built
+    dataset and pins that score="f1" resolves it -- the whole reason this
+    module gained a score parameter."""
+    n_facts = 1000
+    facts = [(i, 1) for i in range(n_facts)]
+    positive_idx = set(range(10))  # 10 positives, indices 0..9
+    labels = [i in positive_idx for i in range(n_facts)]
+
+    # "real": a genuine (if imperfect) detector -- true positives at 0, 1, 2
+    # (recall 3/10) plus 8 false positives elsewhere (indices 500..507):
+    # 7 misses + 8 false positives = 15 mistakes.
+    real_cover_idx = {0, 1, 2} | set(range(500, 508))
+    # "empty": predicts nothing, ever -- misses all 10 positives, 0 false
+    # positives = 10 mistakes (FEWER raw mistakes than "real", hence the
+    # accuracy inversion below).
+    relations = {
+        "real_a": [facts[i] for i in real_cover_idx],
+        "real_b": [facts[i] for i in range(n_facts)],  # superset: real_a & real_b == real_a
+        "empty_a": [],
+        "empty_b": [facts[i] for i in range(n_facts)],  # empty_a & empty_b == empty
+    }
+    real_body = ("real_a", "real_b")
+    empty_body = ("empty_a", "empty_b")
+    covers = {
+        real_body: body_cover(real_body, relations),
+        empty_body: body_cover(empty_body, relations),
+    }
+    assert covers[real_body] == {facts[i] for i in real_cover_idx}
+    assert covers[empty_body] == set()
+
+    acc = kfold_scores(
+        [real_body, empty_body], relations, facts, labels, folds=4, seed=7,
+        covers=covers, score="accuracy",
+    )
+    f1 = kfold_scores(
+        [real_body, empty_body], relations, facts, labels, folds=4, seed=7,
+        covers=covers, score="f1",
+    )
+
+    # THE INVERSION: under accuracy, the empty predictor outranks the real
+    # detector.
+    assert acc[empty_body] > acc[real_body]
+    # THE FIX: under F1, the real detector outranks the empty predictor, and
+    # the empty predictor's F1 is exactly 0 (degenerate: no predicted
+    # positives on any fold).
+    assert f1[real_body] > f1[empty_body]
+    assert f1[empty_body] == pytest.approx(0.0)
+
+
 def test_kfold_scores_rejects_folds_out_of_range():
     facts = [(i, 1) for i in range(3)]
     labels = [True, False, True]
@@ -273,3 +439,49 @@ def test_induce_relational_theory_rejects_bad_max_literals():
     relations, facts, is_positive = _three_literal_world()
     with pytest.raises(ValueError):
         induce_relational_theory(relations, facts, is_positive, max_literals=5)
+
+
+def test_induce_relational_theory_forwards_holdout_score_to_kfold_scores(monkeypatch):
+    # Direct plumbing check: induce_relational_theory's own select_once must
+    # pass its holdout_score parameter straight through to every
+    # kfold_scores call it makes (not silently default to "accuracy"
+    # regardless of what the caller asked for).
+    import relational_search
+
+    seen_scores = []
+    real_kfold_scores = relational_search.kfold_scores
+
+    def spy(*args, **kwargs):
+        seen_scores.append(kwargs.get("score"))
+        return real_kfold_scores(*args, **kwargs)
+
+    monkeypatch.setattr(relational_search, "kfold_scores", spy)
+
+    relations, facts, is_positive = _three_literal_world()
+    induce_relational_theory(
+        relations, facts, is_positive,
+        max_literals=3, folds=4, seed=7, min_new_covered=2, holdout_score="f1",
+    )
+    assert seen_scores  # at least one select_once call happened
+    assert all(s == "f1" for s in seen_scores)
+
+
+def test_induce_relational_theory_default_holdout_score_is_accuracy(monkeypatch):
+    import relational_search
+
+    seen_scores = []
+    real_kfold_scores = relational_search.kfold_scores
+
+    def spy(*args, **kwargs):
+        seen_scores.append(kwargs.get("score"))
+        return real_kfold_scores(*args, **kwargs)
+
+    monkeypatch.setattr(relational_search, "kfold_scores", spy)
+
+    relations, facts, is_positive = _three_literal_world()
+    induce_relational_theory(
+        relations, facts, is_positive,
+        max_literals=3, folds=4, seed=7, min_new_covered=2,
+    )
+    assert seen_scores
+    assert all(s == "accuracy" for s in seen_scores)
