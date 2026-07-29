@@ -18,9 +18,11 @@ verification, and differentiable neural-symbolic training — with zero tracked 
 transfers in production data planes.
 
 Implemented in Rust with custom CUDA kernels, XLOG caches compiled circuits across training
-iterations and exposes GPU-resident results through DLPack and Arrow for zero-copy interop
-with PyTorch, JAX, and cuDF. On the MNIST-addition neural-symbolic benchmark this yields a
-measured **2.74× end-to-end speedup** (95% CI `[2.29, 3.18]`) over a CPU-resident baseline.
+iterations and exposes GPU-resident results zero-copy through DLPack and the Arrow C Device
+interface to PyTorch, JAX, and cuDF (Arrow IPC covers host-side interchange). On the MNIST-addition neural-symbolic benchmark, circuit caching
+yields a measured **2.74× end-to-end training speedup** (95% CI `[2.29, 3.18]`) in a
+cached-vs-uncached ablation of XLOG's own pipeline, and steady epochs run **2.80× faster than
+Scallop** at matched accuracy under an identical protocol.
 
 ---
 
@@ -32,7 +34,7 @@ XLOG is not a DSL bolted onto a tensor framework. It is a full typed logic progr
 - **User-defined functions, modules and imports, stratified aggregation, and integrity constraints**, so programs decompose cleanly instead of collapsing into flat rule lists.
 - **One syntax for four paradigms:** probabilistic facts (`p::f.`), annotated disjunctions, neural predicate declarations (`nn/k`), and SAT constraints share the same syntactic core with deterministic Datalog.
 - **GPU-resident semantics:** relational operators, circuit evaluation, and verification paths run on the device instead of bouncing through the host.
-- **A runtime inside your training loop, not a service:** DLPack capsules and Arrow IPC expose GPU-resident query results and gradient tensors directly.
+- **A runtime inside your training loop, not a service:** DLPack capsules and the Arrow C Device interface expose GPU-resident query results and gradient tensors directly; Arrow IPC handles host-side interchange.
 
 ## When to use XLOG
 
@@ -105,7 +107,7 @@ magic sets, probabilistic aggregates, approximate inference, epistemic reasoning
 | **GPU execution** | Custom CUDA kernels for hash joins, radix sort, filter, dedup, union, difference, group-by; worst-case-optimal joins; delta coalescing; runtime CSE; adaptive re-optimization; persistent hash-index reuse |
 | **Float semantics** | IEEE 754 total ordering for `f32`/`f64` (`NaN > Inf > nums > +0 > -0 > -Inf`) |
 | **Diagnostics & provenance** | Rule and fact provenance, proof traces, planner telemetry, host-transfer audits, module-boundary diagnostics, `--stats` per-stratum timing and memory accounting |
-| **Interop** | DLPack capsules (zero-copy), Arrow IPC / C Data Interface, PyTorch, JAX, cuDF, Python bindings (`pyxlog`) |
+| **Interop** | DLPack capsules and Arrow C Device interface (zero-copy device export), Arrow IPC (host serialization), PyTorch, JAX, cuDF, Python bindings (`pyxlog`) |
 
 ---
 
@@ -159,11 +161,14 @@ python scripts/xlog_doctor.py
 git clone https://github.com/BrainyBlaze/xlog.git
 cd xlog
 python scripts/xlog_doctor.py
-cargo build --release
 
-# If you need host-readable probabilistic CLI output (`xlog prob`),
-# build the CLI with host I/O enabled.
+# Recommended: build the CLI with host-readable output enabled.
+# Without `host-io`, `xlog prob` cannot print results and fails with
+# "Host output is disabled".
 cargo build --release -p xlog-cli --features host-io
+
+# Full workspace build (libraries, tests, benches; CLI without host-io):
+cargo build --release
 ```
 
 The release binary is `./target/release/xlog`.
@@ -287,7 +292,7 @@ The documentation website is **[xlog.md](https://xlog.md)**. Key references in t
 | [WCOJ architecture guide](https://xlog.md/architecture/wcoj) | Worst-case-optimal joins: RIR, promoter, dispatch, cost model, recursive integration |
 | [WCOJ user guide](https://xlog.md/guides/wcoj-tuning) | Eligibility, fallback behavior, performance tuning, troubleshooting |
 | [CLI reference](https://xlog.md/reference/cli) | Full flag and subcommand reference |
-| [Arrow / DLPack interop](https://xlog.md/guides/interop) | Zero-copy interop with cuDF, PyTorch, and JAX |
+| [Arrow / DLPack interop](https://xlog.md/guides/interop) | Zero-copy device interop (DLPack, Arrow C Device) and Arrow IPC interchange with cuDF, PyTorch, and JAX |
 | [Python bindings](https://xlog.md/reference/python) | `pyxlog` API surface |
 | [CUDA certification](https://xlog.md/architecture/certification) | Kernel certification suite coverage |
 | [Roadmap](ROADMAP.md) | Feature status and planned work |

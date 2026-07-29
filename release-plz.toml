@@ -66,6 +66,17 @@ git_release_enable = true
 git_tag_enable = true
 git_tag_name = "xlog-cli-v{{ version }}"
 git_release_name = "xlog-cli v{{ version }}"
+# The shared workspace CHANGELOG.md contains one "## [x.y.z]" heading per crate
+# in the version group, which can leave "{{ changelog }}" empty at release time.
+# Keep the install/docs footer so the GitHub release body is never blank.
+git_release_body = """
+{{ changelog }}
+
+---
+
+**Install**: `cargo install xlog-cli --features host-io` · `pip install pyxlog` · [release archives](https://github.com/BrainyBlaze/xlog/releases)
+**Docs**: https://xlog.md · **Full changelog**: [CHANGELOG.md](https://github.com/BrainyBlaze/xlog/blob/main/CHANGELOG.md)
+"""
 
 [[package]]
 name = "pyxlog"

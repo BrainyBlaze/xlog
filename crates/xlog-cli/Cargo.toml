@@ -7,7 +7,8 @@ license.workspace = true
 repository.workspace = true
 homepage.workspace = true
 keywords.workspace = true
-description = "Command-line interface for deterministic and probabilistic XLOG execution"
+categories = ["command-line-utilities", "science", "database-implementations", "mathematics", "algorithms"]
+description = "GPU-native logic programming CLI: typed Datalog with exact and Monte Carlo probabilistic inference on CUDA"
 documentation = "https://docs.rs/xlog-cli"
 readme = "../../README.md"
 

@@ -5,15 +5,35 @@ build-backend = "maturin"
 [project]
 name = "pyxlog"
 dynamic = ["version"]
-description = "GPU-accelerated XLOG probabilistic logic programming (PyO3 bindings)"
+description = "GPU-native logic programming for Python: typed Datalog, exact probabilistic inference, and PyTorch neural-symbolic training (PyO3 bindings)"
 requires-python = ">=3.8"
 license = { text = "MIT OR Apache-2.0" }
 readme = "README.md"
 optional-dependencies = { test = ["scipy"] }
+keywords = [
+  "datalog",
+  "logic-programming",
+  "gpu",
+  "cuda",
+  "probabilistic-programming",
+  "neural-symbolic",
+  "pytorch",
+]
 classifiers = [
+  "Development Status :: 4 - Beta",
   "Programming Language :: Rust",
   "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.8",
+  "Programming Language :: Python :: 3.9",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
   "Operating System :: POSIX :: Linux",
+  "Environment :: GPU :: NVIDIA CUDA",
+  "Intended Audience :: Developers",
+  "Intended Audience :: Science/Research",
+  "Topic :: Scientific/Engineering :: Artificial Intelligence",
+  "Topic :: Software Development :: Compilers",
 ]
 
 [project.urls]
