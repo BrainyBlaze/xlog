@@ -881,10 +881,32 @@ def holdout_fold_assignment(n_facts, folds, seed):
     return {f_idx: i % folds for i, f_idx in enumerate(order)}
 
 
+def _f1(tp: int, fp: int, fn: int) -> float:
+    """F1 from raw tp/fp/fn counts, replicating ``examples/caviar_woled/
+    scorer.py``'s ``prf1`` arithmetic BYTE-FOR-BYTE: precision is 0.0 when
+    ``tp + fp == 0`` (no predicted positives), recall is 0.0 when
+    ``tp + fn == 0`` (no actual positives), and F1 is 0.0 whenever
+    ``precision + recall == 0`` (in particular ``tp == 0`` with any fp or
+    fn) -- never NaN, which would silently poison a fold-mean comparison.
+
+    PARITY CONTRACT: this is a deliberate LOCAL reimplementation, not an
+    import from the ``examples/`` tree -- the core package does not depend
+    on example scripts. ``test_f1_matches_scorer_prf1_on_a_grid_of_counts``
+    pins this function's output against ``scorer.prf1``'s own ``"f1"`` on a
+    grid of (tp, fp, fn) cases; if the two ever drift, that test is the
+    signal, not a runtime check here (this module doesn't import ``scorer``
+    even for testing)."""
+    precision = 0.0 if tp + fp == 0 else tp / (tp + fp)
+    recall = 0.0 if tp + fn == 0 else tp / (tp + fn)
+    if precision + recall == 0:
+        return 0.0
+    return 2 * precision * recall / (precision + recall)
+
+
 def kfold_select(prog_factory, mask_name, facts, is_positive, make_network,
                  features, neural_relations, folds=4, min_fit=0.75, seed=0,
                  witness_mask=None, min_coverage=0.5, topology="chain",
-                 tie_tolerance=None, **train_kw):
+                 tie_tolerance=None, holdout_score="accuracy", **train_kw):
     """Select a rule by K-FOLD HOLDOUT, not by training weight: per fold, train on
     the rest and score every engine-enumerated candidate on the held-out facts by
     its own witness/cover semantics (``s_c(f) >= 0.5``); average across folds, apply
@@ -911,9 +933,54 @@ def kfold_select(prog_factory, mask_name, facts, is_positive, make_network,
     uncertain facts are excluded from that fold's accuracy and contribute to
     ``n_certain``/``n_total``, which are summed ACROSS folds (each fact is held
     out exactly once) into a single pooled ``coverage`` fraction per candidate,
-    gated the same way."""
+    gated the same way -- this coverage bookkeeping runs identically
+    regardless of ``holdout_score``.
+
+    ``holdout_score`` (default ``"accuracy"``, byte-identical to every
+    caller that predates this parameter -- the accuracy path below is
+    untouched by its addition): the per-fold, per-candidate metric being
+    averaged into the holdout score ``_select_from_holdout`` gates on.
+
+    * ``"accuracy"``: a candidate's fold score is the fraction of that
+      fold's CERTAIN held-out facts whose prediction (``s_c(f) >= 0.5``)
+      matches the label -- exactly the pre-existing computation. On a task
+      with a rare positive class and a large held-out set, this sits on
+      the all-negative base-rate plateau and can rank a candidate that
+      predicts nothing at all ABOVE the best real detector -- accuracy does
+      not distinguish "right by predicting nothing" from "right for the
+      right reason" (mirrors ``relational_search.kfold_scores``'s own
+      ``"accuracy"`` failure mode, documented there in more depth).
+    * ``"f1"``: a candidate's fold score is the F1 (via this module's own
+      ``_f1`` helper, a byte-for-byte reimplementation of
+      ``examples/caviar_woled/scorer.py``'s ``prf1`` arithmetic -- see
+      ``_f1``'s own docstring for the parity contract) of that fold's
+      CERTAIN held-out predictions against the CERTAIN held-out labels --
+      same ``s_c(f) >= 0.5`` prediction and same masked-uncertain-row
+      exclusion as ``"accuracy"``, just a different aggregate of the same
+      pred/label pair. F1 is RECALL-AWARE: a candidate that predicts
+      nothing scores F1 0.0 on any fold with a real held-out positive,
+      instead of accuracy's near-1.0, so a real detector's few true
+      positives can outrank the empty predictor even on a heavily
+      imbalanced holdout.
+
+      A fold with ZERO held-out positives (checked against the RAW
+      ``is_positive`` labels for that fold's held-out facts, never
+      restricted to any one candidate's masked-certain subset -- the same
+      skip set applies to every candidate, exactly as
+      ``relational_search.kfold_scores(score="f1")`` documents) makes
+      every candidate's recall -- and therefore F1 -- UNDEFINED for that
+      fold, not merely 0: such a fold is SKIPPED from that candidate's mean
+      entirely, rather than diluting it with a substituted 0.0. If NO fold
+      has a held-out positive at all, every candidate's F1 score is
+      reported as ``0.0`` (an empty mean is otherwise undefined)."""
     import torch
 
+    if holdout_score not in ("accuracy", "f1"):
+        raise ValueError(
+            f"holdout_score must be 'accuracy' or 'f1' (got "
+            f"{holdout_score!r}); kfold_select implements only these two "
+            "per-fold metrics -- see this function's own docstring."
+        )
     if tie_tolerance is not None and not (
         isinstance(tie_tolerance, (int, float)) and tie_tolerance > 0.0
     ):
@@ -934,6 +1001,11 @@ def kfold_select(prog_factory, mask_name, facts, is_positive, make_network,
     counts: dict[tuple[str, str], int] = {}
     certain_sums: dict[tuple[str, str], int] = {}
     total_sums: dict[tuple[str, str], int] = {}
+    # F1-axis accumulators only: kept SEPARATE from sums/counts above so the
+    # "accuracy" path (still summing unconditionally into sums/counts, every
+    # fold) is untouched by holdout_score="f1" ever being requested.
+    f1_sums: dict[tuple[str, str], float] = {}
+    f1_counts: dict[tuple[str, str], int] = {}
     neural_rights = set(neural_relations)
 
     # ONE compilation serves every fold: the program is only ever READ here
@@ -964,6 +1036,14 @@ def kfold_select(prog_factory, mask_name, facts, is_positive, make_network,
             p_event = out.reshape(-1)
             y = torch.tensor([is_positive[i] for i in held_ids],
                              device=features.device, dtype=torch.float32)
+            # Fold measurability for the F1 axis is a fact about THIS FOLD's
+            # RAW held-out labels only -- label/fold-dependent, never
+            # candidate-dependent (the same skip set applies to every
+            # candidate) -- mirrors relational_search.kfold_scores(score=
+            # "f1")'s identical derivation. Computed even when holdout_score
+            # == "accuracy" is cheap (a python `any` over a small id list)
+            # and unused in that case.
+            fold_measurable = any(is_positive[i] for i in held_ids)
             for spec in held_specs:
                 s = (noisy_or_from_index(p_event, spec.witness_index)
                      if spec.is_neural else spec.binary_cover)
@@ -984,8 +1064,34 @@ def kfold_select(prog_factory, mask_name, facts, is_positive, make_network,
                 if witness_mask is not None:
                     certain_sums[key] = certain_sums.get(key, 0) + n_certain
                     total_sums[key] = total_sums.get(key, 0) + n_total
+                if holdout_score == "f1" and fold_measurable:
+                    # Same CERTAIN pred/label pair "accuracy" already computed
+                    # above, just a different aggregate (F1 via _f1, mirroring
+                    # scorer.prf1's arithmetic -- see _f1's own docstring for
+                    # the parity contract) -- masked-uncertain rows are
+                    # excluded here exactly as they are from `acc` above.
+                    pred_c = pred[certain].bool()
+                    gold_c = y[certain].bool()
+                    tp = int((pred_c & gold_c).sum())
+                    fp = int((pred_c & ~gold_c).sum())
+                    fn = int((~pred_c & gold_c).sum())
+                    f1_sums[key] = f1_sums.get(key, 0.0) + _f1(tp, fp, fn)
+                    f1_counts[key] = f1_counts.get(key, 0) + 1
 
-    scores = {k: sums[k] / counts[k] for k in sums}
+    if holdout_score == "accuracy":
+        scores = {k: sums[k] / counts[k] for k in sums}
+    else:
+        # A candidate key with zero measurable folds (only possible when NO
+        # fold in this whole run held a positive) scores 0.0 -- an empty
+        # mean is otherwise undefined, and `relational_search.kfold_scores
+        # (score="f1")` makes the identical substitution for the identical
+        # reason. `sums` (built by the accuracy accumulation above,
+        # unconditionally, every fold) is reused here purely as the set of
+        # known candidate keys -- its VALUES play no part in the "f1" score.
+        scores = {
+            k: (f1_sums[k] / f1_counts[k]) if f1_counts.get(k) else 0.0
+            for k in sums
+        }
     coverage = (
         {k: (certain_sums[k] / total_sums[k]) if total_sums[k] else 0.0
          for k in sums}
