@@ -605,7 +605,7 @@ def _build_symmetric_mlp(hidden: int, device):
 def _induce_neural_theory_for_target(
     torch, kfold_select, train_engine_mode, prog, make_network, features_train,
     neural_relations, activity_sets_train, args, facts, target_labels, wall, wall_key,
-    min_fit=0.75,
+    min_fit=0.75, holdout_score="accuracy",
 ):
     """Neural-mode theory induction for ONE target label sequence aligned
     with ``facts`` -- the exact per-clause-retrain mechanism `_run_neural_
@@ -624,6 +624,16 @@ def _induce_neural_theory_for_target(
     which derives its OWN per-fold threshold (a permutation-null quantile
     over its relational sub-pool -- see that script's own
     ``_neural_init_fit_gate``) rather than accepting the arbitrary constant.
+
+    ``holdout_score`` (default ``"accuracy"`` -- BYTE-IDENTICAL to every
+    existing caller, none of which passes this parameter): forwarded,
+    unchanged, to every `kfold_select` call this function makes, exactly
+    like ``min_fit`` above. Added for the same `run_caviar_cv.py` initiation
+    search, whose `_neural_init_fit_gate` threshold lives on the F1 axis
+    (`relational_search.permutation_null_threshold`'s own per-fold-F1 pool)
+    -- passing it as `min_fit` into an ACCURACY-scored `kfold_select` would
+    gate a threshold from one axis against scores from another, which is
+    exactly the mismatch this parameter exists to close.
 
     Returns ``(theory, nets_by_clause_idx)``: ``theory`` is `theory_loop.
     induce_theory`'s own result dict; ``nets_by_clause_idx`` maps each
@@ -648,6 +658,7 @@ def _induce_neural_theory_for_target(
             make_network, features_train, neural_relations=neural_relations,
             folds=args.k, seed=args.seed, steps=args.steps, topology="star",
             tie_tolerance=args.tie_tolerance, min_fit=min_fit,
+            holdout_score=holdout_score,
         )
         net = None
         if selection.rule is not None:

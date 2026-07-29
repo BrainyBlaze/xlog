@@ -110,11 +110,15 @@ scoring/reconstruction are unchanged in shape (only the init clauses'
   what the gate can prove and what it is applied to.
 * Induction (`_run_neural_init`): CUDA-required (`IlpProgramFactory.
   compile`/`kfold_select`/`train_engine_mode`) -- reuses `run_caviar_theory.
-  _induce_neural_theory_for_target` UNCHANGED (its own per-clause-retrain
-  mechanism: each committed clause gets its OWN independently trained
-  `close_nn` network), with that function's `min_fit` parameter set to
-  THIS fold's own derived threshold above instead of `kfold_select`'s own
-  0.75 default.
+  _induce_neural_theory_for_target`'s per-clause-retrain mechanism (each
+  committed clause gets its OWN independently trained `close_nn` network)
+  with two arguments set away from that function's own defaults: `min_fit`
+  is THIS fold's own derived threshold above, and `holdout_score="f1"` --
+  the threshold above is a quantile of PER-FOLD F1 samples, so the
+  `kfold_select` scores it gates must live on the SAME axis
+  (`kfold_select`'s own default, `holdout_score="accuracy"`, sits on a
+  different plateau entirely and would gate a threshold from one metric
+  against scores from another).
 * Detector probe (`_neural_init_detector_probe`): per fold, per committed
   `close_nn`-tailed clause, `detector_probe.probe_detector`'s accuracy/F1
   of that clause's own trained net against the HELD-OUT fold's GROUND-TRUTH
@@ -406,10 +410,16 @@ def _run_neural_init(
     """CUDA-bound half of the NEURAL initiation search. Compiles a program
     over `_neural_init_vocab`'s restricted vocabulary (plus a ``close_nn``
     seed row -- `run_caviar_theory._compile_and_ingest_neural`), then reuses
-    `run_caviar_theory._induce_neural_theory_for_target` UNCHANGED (its own
-    per-clause-retrain mechanism), with `min_fit` set to THIS fold's own
-    permutation-null threshold (`_neural_init_fit_gate`) instead of that
-    function's own 0.75 default -- the ONLY behavioral difference from
+    `run_caviar_theory._induce_neural_theory_for_target`'s per-clause-retrain
+    mechanism, with `min_fit` set to THIS fold's own permutation-null
+    threshold (`_neural_init_fit_gate`) instead of that function's own 0.75
+    default, AND `holdout_score="f1"` instead of its own `"accuracy"`
+    default -- `_neural_init_fit_gate`'s threshold is a quantile of PER-FOLD
+    F1 samples, so `kfold_select`'s own scores must be computed on that same
+    F1 axis, or the gate compares a threshold from one metric against scores
+    from another and decides nothing (a rare-positive-class holdout's
+    accuracy plateau ties every candidate together well above any F1-axis
+    threshold). These two are the ONLY behavioral differences from
     `run_caviar_theory.py --mode neural --protocol ec`'s own initiation
     search.
 
@@ -455,7 +465,7 @@ def _run_neural_init(
     theory, nets_by_clause_idx = _induce_neural_theory_for_target(
         torch, kfold_select, train_engine_mode, prog, make_network, features_train,
         neural_relations, activity_sets_train, args_ns, init_facts, init_labels,
-        wall, "theory_loop_init", min_fit=min_fit,
+        wall, "theory_loop_init", min_fit=min_fit, holdout_score="f1",
     )
 
     predict_clause_test, test_scores_by_idx = _make_final_predict_clause(
