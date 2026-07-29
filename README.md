@@ -28,7 +28,7 @@ measured **2.74× end-to-end speedup** (95% CI `[2.29, 3.18]`) over a CPU-reside
 
 XLOG is not a DSL bolted onto a tensor framework. It is a full typed logic programming language:
 
-- **Typed predicates** over a closed scalar set (`u32`, `u64`, `i32`, `i64`, `f32`, `f64`, `bool`, `symbol`) with single-pass type inference that rejects ill-typed programs before any GPU kernel runs.
+- **Typed predicates** over a closed scalar set (`u32`, `u64`, `i32`, `i64`, `f32`, `f64`, `bool`, `symbol`). Arithmetic type mismatches are rejected at compile time with actionable errors; schema violations between predicates fail closed at execution instead of producing wrong results.
 - **User-defined functions, modules and imports, stratified aggregation, and integrity constraints**, so programs decompose cleanly instead of collapsing into flat rule lists.
 - **One syntax for four paradigms:** probabilistic facts (`p::f.`), annotated disjunctions, neural predicate declarations (`nn/k`), and SAT constraints share the same syntactic core with deterministic Datalog.
 - **GPU-resident semantics:** relational operators, circuit evaluation, and verification paths run on the device instead of bouncing through the host.
@@ -159,11 +159,14 @@ python scripts/xlog_doctor.py
 git clone https://github.com/BrainyBlaze/xlog.git
 cd xlog
 python scripts/xlog_doctor.py
-cargo build --release
 
-# If you need host-readable probabilistic CLI output (`xlog prob`),
-# build the CLI with host I/O enabled.
+# Recommended: build the CLI with host-readable output enabled.
+# Without `host-io`, `xlog prob` cannot print results and fails with
+# "Host output is disabled".
 cargo build --release -p xlog-cli --features host-io
+
+# Full workspace build (libraries, tests, benches; CLI without host-io):
+cargo build --release
 ```
 
 The release binary is `./target/release/xlog`.
