@@ -4,6 +4,36 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+## [0.11.1](https://github.com/BrainyBlaze/xlog/compare/xlog-cli-v0.11.0...xlog-cli-v0.11.1) - 2026-07-29
+
+### Other
+
+- updated the following local packages: xlog-logic, xlog-runtime, xlog-solve, xlog-prob, xlog-gpu
+
+## [0.11.1](https://github.com/BrainyBlaze/xlog/compare/xlog-gpu-v0.11.0...xlog-gpu-v0.11.1) - 2026-07-29
+
+### Other
+
+- updated the following local packages: xlog-logic, xlog-runtime
+
+## [0.11.1](https://github.com/BrainyBlaze/xlog/compare/xlog-prob-v0.11.0...xlog-prob-v0.11.1) - 2026-07-29
+
+### Other
+
+- updated the following local packages: xlog-logic, xlog-runtime, xlog-solve
+
+## [0.11.1](https://github.com/BrainyBlaze/xlog/compare/xlog-solve-v0.11.0...xlog-solve-v0.11.1) - 2026-07-29
+
+### Other
+
+- updated the following local packages: xlog-runtime
+
+## [0.11.1](https://github.com/BrainyBlaze/xlog/compare/xlog-runtime-v0.11.0...xlog-runtime-v0.11.1) - 2026-07-29
+
+### Other
+
+- updated the following local packages: xlog-logic
+
 ## [0.11.0](https://github.com/BrainyBlaze/xlog/compare/xlog-cli-v0.10.0...xlog-cli-v0.11.0) - 2026-07-29
 
 ### Added
