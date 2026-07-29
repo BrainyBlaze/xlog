@@ -264,6 +264,47 @@ what the direct protocol reaches under its own studied settings.
 
 Files: `results/e10_cv/caviar-e10-cv10.json`.
 
+### E.1 Termination-signature vocabulary: the termination theory is learned
+
+Adding exactly two pre-declared pair-level transition relations to the EC
+vocabulary — `became_far` (the pair crosses the 25-unit threshold outward
+between consecutive observed co-visible steps) and `distance_increasing`
+(strictly growing distance) — and re-running the same pre-registered CV:
+
+| 10-fold CV micro | P | R | F1 | tp/fp/fn |
+|---|---|---|---|---|
+| step 1 (state vocabulary) | 0.658 | 0.827 | 0.733 | 1516/788/317 |
+| step 2 (+ termination signature) | **0.736** | 0.826 | **0.778** | 1514/544/319 |
+
+The termination theory is now LEARNED on 7 of 10 folds — the same clause
+`terminatedAt :- became_far & distance_increasing` each time, over each
+fold's own permutation-null gate, at zero false-negative cost on every
+fold where selected. The direct-protocol reference is byte-identical to
+step 1, proving the new relations never reach the direct vocabulary.
+
+**Caveat (supersedes section E's for the headline).** 0.778 micro-F1
+(10-fold CV over video segments, pre-registered gates/seeds): the
+termination theory is now learned on 7 of 10 folds (the same 2-literal
+clause, became_far & distance_increasing, costing zero false negatives
+where selected), but 92% of the remaining 544 false positives come from
+one fold where the termination search abstains under its own null gate
+and one meeting ends without the pair ever separating spatially — a
+termination shape invisible to distance-crossing vocabulary;
+comparability to OLED's 0.792 remains subject to the step-1 protocol
+deltas (folds over segments vs their windowed interpretations with
+subsampled negatives, co-visible pair-frame universe, pre-registered vs
+tuned settings, and a rule language still without full termination
+programs on 3 of 10 folds), and the direct-protocol reference of 0.214
+reflects pre-registered defaults, not that protocol's ceiling.
+
+Two accuracy notes from adversarial review: the small tp/fn shift
+(1516→1514 / 317→319) is an initiation-side effect on the abstaining
+fold (the enlarged pool's `both_active & close & distance_increasing`
+narrows initiation there), and the two folds whose initiation search now
+abstains contribute identically to both runs (the baseline clause never
+fired on them: tp/fp 0/0 in both). Files:
+`results/e11_cv10_termination.json`.
+
 ## Reproduction
 
 ```
