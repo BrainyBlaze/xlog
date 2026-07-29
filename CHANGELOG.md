@@ -4,6 +4,105 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+## [0.11.0](https://github.com/BrainyBlaze/xlog/compare/xlog-cli-v0.10.0...xlog-cli-v0.11.0) - 2026-07-29
+
+### Added
+
+- WCOJ observability, residency-ablation hook, whitepaper neural sections, docs-site audit
+
+### Other
+
+- ship the built whitepaper PDF as the committed deliverable
+- promote the documentation-site source to docs/ and retarget references
+- move the whitepaper to paper/ and stop tracking LaTeX build outputs
+
+## [0.11.0](https://github.com/BrainyBlaze/xlog/compare/xlog-gpu-v0.10.0...xlog-gpu-v0.11.0) - 2026-07-29
+
+### Other
+
+- ship the built whitepaper PDF as the committed deliverable
+- promote the documentation-site source to docs/ and retarget references
+- move the whitepaper to paper/ and stop tracking LaTeX build outputs
+
+## [0.11.0](https://github.com/BrainyBlaze/xlog/compare/xlog-prob-v0.10.0...xlog-prob-v0.11.0) - 2026-07-29
+
+### Other
+
+- ship the built whitepaper PDF as the committed deliverable
+- promote the documentation-site source to docs/ and retarget references
+- move the whitepaper to paper/ and stop tracking LaTeX build outputs
+
+## [0.11.0](https://github.com/BrainyBlaze/xlog/compare/xlog-solve-v0.10.0...xlog-solve-v0.11.0) - 2026-07-29
+
+### Other
+
+- ship the built whitepaper PDF as the committed deliverable
+- promote the documentation-site source to docs/ and retarget references
+- move the whitepaper to paper/ and stop tracking LaTeX build outputs
+
+## [0.11.0](https://github.com/BrainyBlaze/xlog/compare/xlog-runtime-v0.10.0...xlog-runtime-v0.11.0) - 2026-07-29
+
+### Added
+
+- WCOJ observability, residency-ablation hook, whitepaper neural sections, docs-site audit
+
+### Other
+
+- ship the built whitepaper PDF as the committed deliverable
+- promote the documentation-site source to docs/ and retarget references
+- move the whitepaper to paper/ and stop tracking LaTeX build outputs
+
+## [0.11.0](https://github.com/BrainyBlaze/xlog/compare/xlog-logic-v0.10.0...xlog-logic-v0.11.0) - 2026-07-29
+
+### Other
+
+- ship the built whitepaper PDF as the committed deliverable
+- promote the documentation-site source to docs/ and retarget references
+- move the whitepaper to paper/ and stop tracking LaTeX build outputs
+
+## [0.11.0](https://github.com/BrainyBlaze/xlog/compare/xlog-stats-v0.10.0...xlog-stats-v0.11.0) - 2026-07-29
+
+### Other
+
+- ship the built whitepaper PDF as the committed deliverable
+- promote the documentation-site source to docs/ and retarget references
+- move the whitepaper to paper/ and stop tracking LaTeX build outputs
+
+## [0.11.0](https://github.com/BrainyBlaze/xlog/compare/xlog-cuda-v0.10.0...xlog-cuda-v0.11.0) - 2026-07-29
+
+### Added
+
+- *(cuda)* memoized-DP stage for chain components beyond enumeration capacity
+- *(cuda)* consumer-event handoff with drop-leak hardening
+- *(cuda)* joint-constraint carrier with zero-copy DLPack binding
+
+### Fixed
+
+- *(cuda)* register the memoized DP kernel in the kernel manifest
+
+### Other
+
+- *(cuda)* apply rustfmt to the joint-constraint carrier sources
+- ship the built whitepaper PDF as the committed deliverable
+- promote the documentation-site source to docs/ and retarget references
+- move the whitepaper to paper/ and stop tracking LaTeX build outputs
+
+## [0.11.0](https://github.com/BrainyBlaze/xlog/compare/xlog-ir-v0.10.0...xlog-ir-v0.11.0) - 2026-07-29
+
+### Other
+
+- ship the built whitepaper PDF as the committed deliverable
+- promote the documentation-site source to docs/ and retarget references
+- move the whitepaper to paper/ and stop tracking LaTeX build outputs
+
+## [0.11.0](https://github.com/BrainyBlaze/xlog/compare/xlog-core-v0.10.0...xlog-core-v0.11.0) - 2026-07-29
+
+### Other
+
+- ship the built whitepaper PDF as the committed deliverable
+- promote the documentation-site source to docs/ and retarget references
+- move the whitepaper to paper/ and stop tracking LaTeX build outputs
+
 ## [0.11.0](https://github.com/BrainyBlaze/xlog/compare/xlog-cli-v0.10.0...xlog-cli-v0.11.0) - 2026-07-23
 
 ### Added
