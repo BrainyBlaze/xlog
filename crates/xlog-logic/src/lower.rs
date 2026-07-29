@@ -192,6 +192,9 @@ fn term_kind_for_lowering_error(term: &Term) -> &'static str {
 pub struct Lowerer {
     /// Inferred or declared schemas for each predicate
     schemas: HashMap<String, Schema>,
+    /// Predicates whose schema comes from an explicit `pred` declaration;
+    /// only these participate in cross-predicate type validation.
+    declared_preds: std::collections::HashSet<String>,
     /// Stratification result (predicates grouped by strata)
     strata: Vec<Vec<String>>,
     /// Estimated cardinality per predicate (for join ordering)
@@ -219,6 +222,7 @@ impl Lowerer {
     pub fn new() -> Self {
         Self {
             schemas: HashMap::new(),
+            declared_preds: std::collections::HashSet::new(),
             strata: Vec::new(),
             est_cardinality: HashMap::new(),
             cardinality_hints: HashMap::new(),
@@ -275,6 +279,90 @@ impl Lowerer {
         }
     }
 
+    /// Reject rules whose variables draw incompatible column types from
+    /// the predicate schemas they touch. The executor requires exact
+    /// schema equality when relations meet, so any conflict tolerated
+    /// here would surface later as an internal kernel schema error
+    /// instead of a source-level diagnostic.
+    fn validate_rule_types(&self, program: &Program) -> Result<()> {
+        for rule in &program.rules {
+            // variable -> (type, source predicate, source position)
+            let mut var_types: HashMap<String, (ScalarType, String, usize)> = HashMap::new();
+            for lit in &rule.body {
+                let atom = match lit {
+                    BodyLiteral::Positive(atom) | BodyLiteral::Negated(atom) => atom,
+                    _ => continue,
+                };
+                if !self.declared_preds.contains(&atom.predicate) {
+                    continue;
+                }
+                let Some(schema) = self.schemas.get(&atom.predicate) else {
+                    continue;
+                };
+                for (i, term) in atom.terms.iter().enumerate() {
+                    let Term::Variable(name) = term else {
+                        continue;
+                    };
+                    let Some((_, ty)) = schema.columns.get(i) else {
+                        continue;
+                    };
+                    match var_types.get(name) {
+                        Some((prev_ty, prev_pred, prev_pos)) if prev_ty != ty => {
+                            return Err(XlogError::Compilation(format!(
+                                "Type mismatch in rule for '{}': variable {} is {:?} \
+                                 (from {} position {}) but {} declares {:?} at position {}",
+                                rule.head.predicate,
+                                name,
+                                prev_ty,
+                                prev_pred,
+                                prev_pos,
+                                atom.predicate,
+                                ty,
+                                i
+                            )));
+                        }
+                        Some(_) => {}
+                        None => {
+                            var_types.insert(name.clone(), (*ty, atom.predicate.clone(), i));
+                        }
+                    }
+                }
+            }
+            if !self.declared_preds.contains(&rule.head.predicate) {
+                continue;
+            }
+            let Some(head_schema) = self.schemas.get(&rule.head.predicate) else {
+                continue;
+            };
+            for (j, term) in rule.head.terms.iter().enumerate() {
+                let Term::Variable(name) = term else {
+                    continue;
+                };
+                let Some((body_ty, src_pred, src_pos)) = var_types.get(name) else {
+                    continue;
+                };
+                let Some((_, head_ty)) = head_schema.columns.get(j) else {
+                    continue;
+                };
+                if body_ty != head_ty {
+                    return Err(XlogError::Compilation(format!(
+                        "Type mismatch in rule for '{}': variable {} is {:?} \
+                         (from {} position {}) but {} declares {:?} at position {}",
+                        rule.head.predicate,
+                        name,
+                        body_ty,
+                        src_pred,
+                        src_pos,
+                        rule.head.predicate,
+                        head_ty,
+                        j
+                    )));
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Infer schemas from facts and predicate declarations
     fn infer_schemas(&mut self, program: &Program) -> Result<()> {
         let domains: HashMap<String, ScalarType> = program
@@ -295,6 +383,7 @@ impl Lowerer {
                         .map(|ty| (name, ty))
                 })
                 .collect::<Result<Vec<_>>>()?;
+            self.declared_preds.insert(pred_decl.name.clone());
             self.schemas
                 .insert(pred_decl.name.clone(), Schema::new(columns));
         }
@@ -482,6 +571,7 @@ impl Lowerer {
         validate_lowerable_terms(program)?;
         // Infer schemas
         self.infer_schemas(program)?;
+        self.validate_rule_types(program)?;
         self.infer_cardinalities(program);
 
         // Pre-allocate RelIds for declared predicates so schema-only programs
@@ -3432,5 +3522,100 @@ mod tests {
             ConstValue::U64(v) => assert_eq!(*v, 2, "Value should be 2"),
             other => panic!("Expected U64(2), got {:?}", other),
         }
+    }
+}
+
+#[cfg(test)]
+mod cross_predicate_type_tests {
+    use super::*;
+
+    // Regression for the paper's deliberately ill-typed example: the head
+    // declaration constrains bridge column 0 to symbol while the body
+    // constrains the same variable to u32 through connected/node. The
+    // mismatch must surface as a compilation error naming the predicate
+    // and argument positions, never as a kernel schema dump.
+    const ILL_TYPED_BRIDGE: &str = r#"
+pred node(u32, symbol).
+pred connected(u32, u32).
+pred bridge(symbol, u32).
+
+node(1, "alice").
+connected(1, 2).
+
+bridge(A, B) :- connected(A, B), node(A, _).
+
+?- bridge(W, X).
+"#;
+
+    #[test]
+    fn cross_predicate_schema_mismatch_is_a_compilation_error() {
+        let program = crate::parse_program(ILL_TYPED_BRIDGE).expect("example parses");
+        let mut lowerer = Lowerer::new();
+        let err = lowerer
+            .lower_program(&program)
+            .expect_err("ill-typed program must not lower");
+        let msg = err.to_string();
+        assert!(
+            matches!(err, xlog_core::XlogError::Compilation(_)),
+            "expected a compilation error, got: {msg}"
+        );
+        assert!(
+            msg.contains("bridge"),
+            "must name the head predicate: {msg}"
+        );
+        assert!(
+            msg.contains("connected") || msg.contains("node"),
+            "must name the conflicting body predicate: {msg}"
+        );
+        assert!(msg.contains('A'), "must name the variable: {msg}");
+        assert!(msg.contains("position 0"), "must name the position: {msg}");
+    }
+
+    #[test]
+    fn well_typed_cross_predicate_rule_still_lowers() {
+        let source = r#"
+pred node(u32, symbol).
+pred connected(u32, u32).
+pred bridge(u32, u32).
+
+node(1, "alice").
+connected(1, 2).
+
+bridge(A, B) :- connected(A, B), node(A, _).
+
+?- bridge(W, X).
+"#;
+        let program = crate::parse_program(source).expect("example parses");
+        let mut lowerer = Lowerer::new();
+        lowerer
+            .lower_program(&program)
+            .expect("well-typed program lowers");
+    }
+
+    #[test]
+    fn body_body_schema_conflict_is_a_compilation_error() {
+        // The same variable drawing incompatible types from two body atoms
+        // must be rejected even when the head is consistent with one side.
+        let source = r#"
+pred label(symbol).
+pred count(u32).
+pred out(u32).
+
+label("x").
+count(1).
+
+out(A) :- count(A), label(A).
+
+?- out(W).
+"#;
+        let program = crate::parse_program(source).expect("example parses");
+        let mut lowerer = Lowerer::new();
+        let err = lowerer
+            .lower_program(&program)
+            .expect_err("body-body conflict must not lower");
+        assert!(
+            matches!(err, xlog_core::XlogError::Compilation(_)),
+            "expected a compilation error, got: {err}"
+        );
     }
 }
