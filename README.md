@@ -30,7 +30,7 @@ Scallop** at matched accuracy under an identical protocol.
 
 XLOG is not a DSL bolted onto a tensor framework. It is a full typed logic programming language:
 
-- **Typed predicates** over a closed scalar set (`u32`, `u64`, `i32`, `i64`, `f32`, `f64`, `bool`, `symbol`). Arithmetic type mismatches are rejected at compile time with actionable errors; schema violations between predicates fail closed at execution instead of producing wrong results.
+- **Typed predicates** over a closed scalar set (`u32`, `u64`, `i32`, `i64`, `f32`, `f64`, `bool`, `symbol`) with single-pass type inference that rejects ill-typed programs before any GPU kernel runs.
 - **User-defined functions, modules and imports, stratified aggregation, and integrity constraints**, so programs decompose cleanly instead of collapsing into flat rule lists.
 - **One syntax for four paradigms:** probabilistic facts (`p::f.`), annotated disjunctions, neural predicate declarations (`nn/k`), and SAT constraints share the same syntactic core with deterministic Datalog.
 - **GPU-resident semantics:** relational operators, circuit evaluation, and verification paths run on the device instead of bouncing through the host.
