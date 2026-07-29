@@ -222,6 +222,48 @@ published OLED/WOLED numbers only if their evaluation shares this frame
 universe (co-visible pair-frames) and tolerates a persistence-only
 termination model. Files: `results/e9_permutation_null/*.json`.
 
+## E. 10-fold cross-validation over the whole corpus (protocol-matched)
+
+The combined corpus (train + test dumps, 26 video segments, 32,360
+pair-frames, 1,833 gold meeting frames) was cross-validated 10-fold BY
+VIDEO SEGMENT (seeded descending round-robin balance), with every gate
+re-derived inside each fold: per-fold permutation-null fit thresholds
+(1000 permutations, seed 7, p95 pool-max, per target, train-side only),
+F1 holdout, inner k=4, all pre-registered. Micro-aggregation over
+accumulated tp/fp/fn, as in the papers.
+
+| protocol (10-fold CV micro) | P | R | F1 |
+|---|---|---|---|
+| EC + inertia (this work) | 0.658 | 0.827 | **0.733** |
+| direct relational reference (pre-registered defaults) | 0.686 | 0.127 | 0.214 |
+| OLED (published, their CV regime) | 0.678 | 0.953 | 0.792 |
+| hand-crafted rules (published) | — | — | 0.735 |
+| WOLED-ASP (published) | — | — | 0.887 |
+
+The same initiation clause `both_active & close` was selected on ALL ten
+folds (with its own per-fold null gate each time); the termination theory
+is empty on all ten. The single-split 0.942 from section D.1 is hereby
+SUPERSEDED as a headline: cross-validation exposes exactly the structural
+shield D.1's caveat described — 98% of the 788 false positives come from
+three folds where detected interior terminations flood unterminated
+persistence, dropping precision from 0.984 (single split) to 0.658.
+
+**Comparability caveat.** 0.733 micro-F1 (10-fold CV over video segments,
+pre-registered gates/seeds, single 2-literal initiation clause with an
+EMPTY termination theory — the fluent persists to the end of each
+co-visible pair-run, costing 788 of 2,304 predicted-positive frames as
+false positives on folds with detected interior terminations) is
+comparable to OLED's 0.792 only up to protocol deltas: OLED
+cross-validates over windowed interpretations with subsampled negatives,
+learns full initiation AND termination programs in a richer rule
+language, and reports tuned rather than pre-registered settings. The
+direct-protocol reference of 0.214 reflects pre-registered defaults
+(accuracy holdout, fit gate 0.75, default tie floor — dominated by one
+fold's total abstain), NOT that protocol's ceiling; sections A/B show
+what the direct protocol reaches under its own studied settings.
+
+Files: `results/e10_cv/caviar-e10-cv10.json`.
+
 ## Reproduction
 
 ```
@@ -249,3 +291,6 @@ python examples/caviar_woled/run_caviar_theory.py --mode relational --protocol e
 
 GPU runs need CUDA (see each script's docstring); the 3-literal EC search
 runs on CPU.
+
+# 10-fold CV over the whole corpus, EC protocol (section E; CPU-only)
+python examples/caviar_woled/run_caviar_cv.py   --train-json caviar-train.json --test-json caviar-test.json   --folds 10 --seed 7 --out RESULT.json
