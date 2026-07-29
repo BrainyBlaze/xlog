@@ -1,0 +1,979 @@
+{
+  "train_json": "C:\\Users\\User\\flt-workspace\\projects\\xlog\\runs\\r_djwq4hnn0dqoi4e2\\caviar_data_continuous\\caviar-data\\caviar-train.json",
+  "test_json": "C:\\Users\\User\\flt-workspace\\projects\\xlog\\runs\\r_djwq4hnn0dqoi4e2\\caviar_data_continuous\\caviar-data\\caviar-test.json",
+  "folds": 10,
+  "seed": 7,
+  "n_segments_total": 26,
+  "fold_of_segment": [
+    5,
+    2,
+    5,
+    0,
+    3,
+    4,
+    1,
+    7,
+    3,
+    9,
+    6,
+    8,
+    2,
+    7,
+    5,
+    4,
+    9,
+    1,
+    0,
+    3,
+    6,
+    0,
+    4,
+    1,
+    7,
+    8
+  ],
+  "segment_positive_counts": [
+    855,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    188,
+    0,
+    0,
+    0,
+    0,
+    25,
+    0,
+    173,
+    22,
+    60,
+    0,
+    0,
+    21,
+    469,
+    0,
+    0,
+    0,
+    20
+  ],
+  "fold_results": [
+    {
+      "fold": 0,
+      "n_train_segments": 23,
+      "n_test_segments": 3,
+      "n_train_pt": 29433,
+      "n_test_pt": 2927,
+      "ec": {
+        "n_init_train": 11,
+        "n_term_train": 12,
+        "n_init_test": 2,
+        "n_term_test": 0,
+        "init_min_fit": 0.037037037037037035,
+        "term_min_fit": 0.125,
+        "init_null_summary": {
+          "threshold": 0.037037037037037035,
+          "pool_max_samples_summary": {
+            "min": 0.0,
+            "median": 0.002122074948927111,
+            "p95": 0.037037037037037035,
+            "max": 0.25
+          },
+          "n_permutations": 1000,
+          "quantile": 0.95,
+          "perm_seed": 7
+        },
+        "term_null_summary": {
+          "threshold": 0.125,
+          "pool_max_samples_summary": {
+            "min": 0.012499999999999999,
+            "median": 0.03892146939747559,
+            "p95": 0.125,
+            "max": 0.25
+          },
+          "n_permutations": 1000,
+          "quantile": 0.95,
+          "perm_seed": 7
+        },
+        "init_clauses": [
+          [
+            "both_active",
+            "close"
+          ]
+        ],
+        "term_clauses": [],
+        "init_stop_reason": "select_once abstained",
+        "term_stop_reason": "select_once abstained",
+        "init_selection_reasons": [
+          "won by 0.14603",
+          "holdout tie among 4 bodies clustering into 3 genuinely different covers: Occam licenses narrowing an identical-cover tie to its simplest description, not choosing among bodies that actually disagree on some fact"
+        ],
+        "term_selection_reasons": [
+          "no body passed the fit gate (min_fit=0.125): a body that cannot fit held-out data is not a rule"
+        ],
+        "scoring": {
+          "precision": 0.9844097995545658,
+          "recall": 0.9424307036247335,
+          "f1": 0.962962962962963,
+          "tp": 442,
+          "fp": 7,
+          "fn": 27,
+          "tn": 2451,
+          "degenerate": false
+        }
+      },
+      "direct": {
+        "clauses": [
+          [
+            "both_inactive",
+            "close"
+          ]
+        ],
+        "stop_reason": "select_once abstained",
+        "scoring": {
+          "precision": 1.0,
+          "recall": 0.4946695095948827,
+          "f1": 0.6619115549215406,
+          "tp": 232,
+          "fp": 0,
+          "fn": 237,
+          "tn": 2458,
+          "degenerate": false
+        }
+      },
+      "wall_clock_s": {
+        "convert": 0.23899269999674289,
+        "init_search": 2.5315626000010525,
+        "term_search": 0.5701109000001452,
+        "direct_search": 0.29848360000323737
+      }
+    },
+    {
+      "fold": 1,
+      "n_train_segments": 23,
+      "n_test_segments": 3,
+      "n_train_pt": 30073,
+      "n_test_pt": 2287,
+      "ec": {
+        "n_init_train": 12,
+        "n_term_train": 11,
+        "n_init_test": 1,
+        "n_term_test": 1,
+        "init_min_fit": 0.03571428571428572,
+        "term_min_fit": 0.125,
+        "init_null_summary": {
+          "threshold": 0.03571428571428572,
+          "pool_max_samples_summary": {
+            "min": 0.0004058441558441558,
+            "median": 0.0024175235820918153,
+            "p95": 0.03571428571428572,
+            "max": 0.16666666666666666
+          },
+          "n_permutations": 1000,
+          "quantile": 0.95,
+          "perm_seed": 7
+        },
+        "term_null_summary": {
+          "threshold": 0.125,
+          "pool_max_samples_summary": {
+            "min": 0.010204081632653062,
+            "median": 0.03571428571428571,
+            "p95": 0.125,
+            "max": 0.3333333333333333
+          },
+          "n_permutations": 1000,
+          "quantile": 0.95,
+          "perm_seed": 7
+        },
+        "init_clauses": [
+          [
+            "both_active",
+            "close"
+          ]
+        ],
+        "term_clauses": [],
+        "init_stop_reason": "select_once abstained",
+        "term_stop_reason": "select_once abstained",
+        "init_selection_reasons": [
+          "won by 0.07692",
+          "holdout tie among 3 bodies clustering into 2 genuinely different covers: Occam licenses narrowing an identical-cover tie to its simplest description, not choosing among bodies that actually disagree on some fact"
+        ],
+        "term_selection_reasons": [
+          "no body passed the fit gate (min_fit=0.125): a body that cannot fit held-out data is not a rule"
+        ],
+        "scoring": {
+          "precision": 0.3,
+          "recall": 1.0,
+          "f1": 0.4615384615384615,
+          "tp": 60,
+          "fp": 140,
+          "fn": 0,
+          "tn": 2087,
+          "degenerate": false
+        }
+      },
+      "direct": {
+        "clauses": [
+          [
+            "both_inactive",
+            "close"
+          ]
+        ],
+        "stop_reason": "select_once abstained",
+        "scoring": {
+          "precision": 0.0,
+          "recall": 0.0,
+          "f1": 0.0,
+          "tp": 0,
+          "fp": 0,
+          "fn": 60,
+          "tn": 2227,
+          "degenerate": true
+        }
+      },
+      "wall_clock_s": {
+        "convert": 0.20478839999850607,
+        "init_search": 2.9181989999997313,
+        "term_search": 0.7040340000021388,
+        "direct_search": 0.349937899998622
+      }
+    },
+    {
+      "fold": 2,
+      "n_train_segments": 24,
+      "n_test_segments": 2,
+      "n_train_pt": 30324,
+      "n_test_pt": 2036,
+      "ec": {
+        "n_init_train": 13,
+        "n_term_train": 12,
+        "n_init_test": 0,
+        "n_term_test": 0,
+        "init_min_fit": 0.035851648351648224,
+        "term_min_fit": 0.125,
+        "init_null_summary": {
+          "threshold": 0.035851648351648224,
+          "pool_max_samples_summary": {
+            "min": 0.0005827505827505828,
+            "median": 0.002873563218390805,
+            "p95": 0.035851648351648224,
+            "max": 0.16666666666666666
+          },
+          "n_permutations": 1000,
+          "quantile": 0.95,
+          "perm_seed": 7
+        },
+        "term_null_summary": {
+          "threshold": 0.125,
+          "pool_max_samples_summary": {
+            "min": 0.010941040875405449,
+            "median": 0.03526139755833904,
+            "p95": 0.125,
+            "max": 0.29166666666666663
+          },
+          "n_permutations": 1000,
+          "quantile": 0.95,
+          "perm_seed": 7
+        },
+        "init_clauses": [
+          [
+            "both_active",
+            "close"
+          ]
+        ],
+        "term_clauses": [],
+        "init_stop_reason": "insufficient new coverage",
+        "term_stop_reason": "select_once abstained",
+        "init_selection_reasons": [
+          "won by 0.13333",
+          "won by 0.01667"
+        ],
+        "term_selection_reasons": [
+          "no body passed the fit gate (min_fit=0.125): a body that cannot fit held-out data is not a rule"
+        ],
+        "scoring": {
+          "precision": 0.0,
+          "recall": 0.0,
+          "f1": 0.0,
+          "tp": 0,
+          "fp": 0,
+          "fn": 0,
+          "tn": 2036,
+          "degenerate": true
+        }
+      },
+      "direct": {
+        "clauses": [
+          [
+            "both_inactive",
+            "close"
+          ]
+        ],
+        "stop_reason": "select_once abstained",
+        "scoring": {
+          "precision": 0.0,
+          "recall": 0.0,
+          "f1": 0.0,
+          "tp": 0,
+          "fp": 0,
+          "fn": 0,
+          "tn": 2036,
+          "degenerate": true
+        }
+      },
+      "wall_clock_s": {
+        "convert": 0.18790579999767942,
+        "init_search": 2.963395300001139,
+        "term_search": 0.739982200000668,
+        "direct_search": 0.3277749999979278
+      }
+    },
+    {
+      "fold": 3,
+      "n_train_segments": 23,
+      "n_test_segments": 3,
+      "n_train_pt": 30515,
+      "n_test_pt": 1845,
+      "ec": {
+        "n_init_train": 12,
+        "n_term_train": 10,
+        "n_init_test": 1,
+        "n_term_test": 2,
+        "init_min_fit": 0.041805555555555436,
+        "term_min_fit": 0.125,
+        "init_null_summary": {
+          "threshold": 0.041805555555555436,
+          "pool_max_samples_summary": {
+            "min": 0.00037344819584638584,
+            "median": 0.0024146993152598236,
+            "p95": 0.041805555555555436,
+            "max": 0.25
+          },
+          "n_permutations": 1000,
+          "quantile": 0.95,
+          "perm_seed": 7
+        },
+        "term_null_summary": {
+          "threshold": 0.125,
+          "pool_max_samples_summary": {
+            "min": 0.009243366383848612,
+            "median": 0.029411764705882353,
+            "p95": 0.125,
+            "max": 0.25
+          },
+          "n_permutations": 1000,
+          "quantile": 0.95,
+          "perm_seed": 7
+        },
+        "init_clauses": [
+          [
+            "both_active",
+            "close"
+          ]
+        ],
+        "term_clauses": [],
+        "init_stop_reason": "select_once abstained",
+        "term_stop_reason": "select_once abstained",
+        "init_selection_reasons": [
+          "won by 0.17403",
+          "no body passed the fit gate (min_fit=0.041805555555555436): a body that cannot fit held-out data is not a rule"
+        ],
+        "term_selection_reasons": [
+          "holdout tie among 4 bodies clustering into 3 genuinely different covers: Occam licenses narrowing an identical-cover tie to its simplest description, not choosing among bodies that actually disagree on some fact"
+        ],
+        "scoring": {
+          "precision": 0.0,
+          "recall": 0.0,
+          "f1": 0.0,
+          "tp": 0,
+          "fp": 0,
+          "fn": 188,
+          "tn": 1657,
+          "degenerate": true
+        }
+      },
+      "direct": {
+        "clauses": [
+          [
+            "both_inactive",
+            "close"
+          ]
+        ],
+        "stop_reason": "select_once abstained",
+        "scoring": {
+          "precision": 0.0,
+          "recall": 0.0,
+          "f1": 0.0,
+          "tp": 0,
+          "fp": 0,
+          "fn": 188,
+          "tn": 1657,
+          "degenerate": true
+        }
+      },
+      "wall_clock_s": {
+        "convert": 0.18677909999678377,
+        "init_search": 3.08952280000085,
+        "term_search": 0.7281150999988313,
+        "direct_search": 0.3390282999971532
+      }
+    },
+    {
+      "fold": 4,
+      "n_train_segments": 23,
+      "n_test_segments": 3,
+      "n_train_pt": 28440,
+      "n_test_pt": 3920,
+      "ec": {
+        "n_init_train": 10,
+        "n_term_train": 9,
+        "n_init_test": 3,
+        "n_term_test": 3,
+        "init_min_fit": 0.04166666666666667,
+        "term_min_fit": 0.125,
+        "init_null_summary": {
+          "threshold": 0.04166666666666667,
+          "pool_max_samples_summary": {
+            "min": 0.00021267545725223313,
+            "median": 0.0020356281544466823,
+            "p95": 0.04166666666666667,
+            "max": 0.125
+          },
+          "n_permutations": 1000,
+          "quantile": 0.95,
+          "perm_seed": 7
+        },
+        "term_null_summary": {
+          "threshold": 0.125,
+          "pool_max_samples_summary": {
+            "min": 0.009125957079693735,
+            "median": 0.03125,
+            "p95": 0.125,
+            "max": 0.3333333333333333
+          },
+          "n_permutations": 1000,
+          "quantile": 0.95,
+          "perm_seed": 7
+        },
+        "init_clauses": [
+          [
+            "both_active",
+            "close"
+          ]
+        ],
+        "term_clauses": [],
+        "init_stop_reason": "select_once abstained",
+        "term_stop_reason": "select_once abstained",
+        "init_selection_reasons": [
+          "won by 0.15833",
+          "holdout tie among 3 bodies clustering into 2 genuinely different covers: Occam licenses narrowing an identical-cover tie to its simplest description, not choosing among bodies that actually disagree on some fact"
+        ],
+        "term_selection_reasons": [
+          "no body passed the fit gate (min_fit=0.125): a body that cannot fit held-out data is not a rule"
+        ],
+        "scoring": {
+          "precision": 0.21821036106750394,
+          "recall": 0.8034682080924855,
+          "f1": 0.3432098765432099,
+          "tp": 139,
+          "fp": 498,
+          "fn": 34,
+          "tn": 3249,
+          "degenerate": false
+        }
+      },
+      "direct": {
+        "clauses": [
+          [
+            "both_inactive",
+            "close"
+          ]
+        ],
+        "stop_reason": "select_once abstained",
+        "scoring": {
+          "precision": 0.0,
+          "recall": 0.0,
+          "f1": 0.0,
+          "tp": 0,
+          "fp": 53,
+          "fn": 173,
+          "tn": 3694,
+          "degenerate": true
+        }
+      },
+      "wall_clock_s": {
+        "convert": 0.28571979999833275,
+        "init_search": 2.7422331999987364,
+        "term_search": 0.8619902999998885,
+        "direct_search": 0.4013924000028055
+      }
+    },
+    {
+      "fold": 5,
+      "n_train_segments": 23,
+      "n_test_segments": 3,
+      "n_train_pt": 29840,
+      "n_test_pt": 2520,
+      "ec": {
+        "n_init_train": 12,
+        "n_term_train": 11,
+        "n_init_test": 1,
+        "n_term_test": 1,
+        "init_min_fit": 0.04545454545454545,
+        "term_min_fit": 0.14828042328042315,
+        "init_null_summary": {
+          "threshold": 0.04545454545454545,
+          "pool_max_samples_summary": {
+            "min": 0.0005147619158793186,
+            "median": 0.002187052045912235,
+            "p95": 0.04545454545454545,
+            "max": 0.16666666666666666
+          },
+          "n_permutations": 1000,
+          "quantile": 0.95,
+          "perm_seed": 7
+        },
+        "term_null_summary": {
+          "threshold": 0.14828042328042315,
+          "pool_max_samples_summary": {
+            "min": 0.02105496453900709,
+            "median": 0.05355788968692194,
+            "p95": 0.14828042328042315,
+            "max": 0.3333333333333333
+          },
+          "n_permutations": 1000,
+          "quantile": 0.95,
+          "perm_seed": 7
+        },
+        "init_clauses": [
+          [
+            "both_active",
+            "close"
+          ]
+        ],
+        "term_clauses": [],
+        "init_stop_reason": "select_once abstained",
+        "term_stop_reason": "select_once abstained",
+        "init_selection_reasons": [
+          "won by 0.05000",
+          "holdout tie among 3 bodies clustering into 2 genuinely different covers: Occam licenses narrowing an identical-cover tie to its simplest description, not choosing among bodies that actually disagree on some fact"
+        ],
+        "term_selection_reasons": [
+          "no body passed the fit gate (min_fit=0.14828042328042315): a body that cannot fit held-out data is not a rule"
+        ],
+        "scoring": {
+          "precision": 0.9965034965034965,
+          "recall": 1.0,
+          "f1": 0.9982486865148862,
+          "tp": 855,
+          "fp": 3,
+          "fn": 0,
+          "tn": 1662,
+          "degenerate": false
+        }
+      },
+      "direct": {
+        "clauses": [],
+        "stop_reason": "select_once abstained",
+        "scoring": {
+          "precision": 0.0,
+          "recall": 0.0,
+          "f1": 0.0,
+          "tp": 0,
+          "fp": 0,
+          "fn": 855,
+          "tn": 1665,
+          "degenerate": true
+        }
+      },
+      "wall_clock_s": {
+        "convert": 0.1949813000028371,
+        "init_search": 3.3086001000046963,
+        "term_search": 0.6411503999988781,
+        "direct_search": 0.2091643000021577
+      }
+    },
+    {
+      "fold": 6,
+      "n_train_segments": 24,
+      "n_test_segments": 2,
+      "n_train_pt": 24746,
+      "n_test_pt": 7614,
+      "ec": {
+        "n_init_train": 11,
+        "n_term_train": 10,
+        "n_init_test": 2,
+        "n_term_test": 2,
+        "init_min_fit": 0.045454545454545456,
+        "term_min_fit": 0.125,
+        "init_null_summary": {
+          "threshold": 0.045454545454545456,
+          "pool_max_samples_summary": {
+            "min": 0.0004001600640256102,
+            "median": 0.002067370947547375,
+            "p95": 0.045454545454545456,
+            "max": 0.16666666666666666
+          },
+          "n_permutations": 1000,
+          "quantile": 0.95,
+          "perm_seed": 7
+        },
+        "term_null_summary": {
+          "threshold": 0.125,
+          "pool_max_samples_summary": {
+            "min": 0.009095473674963866,
+            "median": 0.03333333333333333,
+            "p95": 0.125,
+            "max": 0.35555555555555557
+          },
+          "n_permutations": 1000,
+          "quantile": 0.95,
+          "perm_seed": 7
+        },
+        "init_clauses": [
+          [
+            "both_active",
+            "close"
+          ]
+        ],
+        "term_clauses": [],
+        "init_stop_reason": "select_once abstained",
+        "term_stop_reason": "select_once abstained",
+        "init_selection_reasons": [
+          "won by 0.19074",
+          "holdout tie among 3 bodies clustering into 2 genuinely different covers: Occam licenses narrowing an identical-cover tie to its simplest description, not choosing among bodies that actually disagree on some fact"
+        ],
+        "term_selection_reasons": [
+          "no body passed the fit gate (min_fit=0.125): a body that cannot fit held-out data is not a rule"
+        ],
+        "scoring": {
+          "precision": 0.0,
+          "recall": 0.0,
+          "f1": 0.0,
+          "tp": 0,
+          "fp": 0,
+          "fn": 21,
+          "tn": 7593,
+          "degenerate": true
+        }
+      },
+      "direct": {
+        "clauses": [
+          [
+            "both_inactive",
+            "close"
+          ]
+        ],
+        "stop_reason": "select_once abstained",
+        "scoring": {
+          "precision": 0.0,
+          "recall": 0.0,
+          "f1": 0.0,
+          "tp": 0,
+          "fp": 0,
+          "fn": 21,
+          "tn": 7593,
+          "degenerate": true
+        }
+      },
+      "wall_clock_s": {
+        "convert": 0.20548910000070464,
+        "init_search": 2.5609519999998156,
+        "term_search": 0.6896068999994895,
+        "direct_search": 0.3142874000041047
+      }
+    },
+    {
+      "fold": 7,
+      "n_train_segments": 23,
+      "n_test_segments": 3,
+      "n_train_pt": 31703,
+      "n_test_pt": 657,
+      "ec": {
+        "n_init_train": 12,
+        "n_term_train": 11,
+        "n_init_test": 1,
+        "n_term_test": 1,
+        "init_min_fit": 0.041666666666666664,
+        "term_min_fit": 0.125,
+        "init_null_summary": {
+          "threshold": 0.041666666666666664,
+          "pool_max_samples_summary": {
+            "min": 0.000523135060640813,
+            "median": 0.0022441760623311347,
+            "p95": 0.041666666666666664,
+            "max": 0.25
+          },
+          "n_permutations": 1000,
+          "quantile": 0.95,
+          "perm_seed": 7
+        },
+        "term_null_summary": {
+          "threshold": 0.125,
+          "pool_max_samples_summary": {
+            "min": 0.010869565217391306,
+            "median": 0.03492826735878352,
+            "p95": 0.125,
+            "max": 0.25
+          },
+          "n_permutations": 1000,
+          "quantile": 0.95,
+          "perm_seed": 7
+        },
+        "init_clauses": [
+          [
+            "both_active",
+            "close"
+          ]
+        ],
+        "term_clauses": [],
+        "init_stop_reason": "select_once abstained",
+        "term_stop_reason": "select_once abstained",
+        "init_selection_reasons": [
+          "won by 0.09924",
+          "holdout tie among 3 bodies clustering into 2 genuinely different covers: Occam licenses narrowing an identical-cover tie to its simplest description, not choosing among bodies that actually disagree on some fact"
+        ],
+        "term_selection_reasons": [
+          "no body passed the fit gate (min_fit=0.125): a body that cannot fit held-out data is not a rule"
+        ],
+        "scoring": {
+          "precision": 0.125,
+          "recall": 0.8,
+          "f1": 0.21621621621621623,
+          "tp": 20,
+          "fp": 140,
+          "fn": 5,
+          "tn": 492,
+          "degenerate": false
+        }
+      },
+      "direct": {
+        "clauses": [
+          [
+            "both_inactive",
+            "close"
+          ]
+        ],
+        "stop_reason": "select_once abstained",
+        "scoring": {
+          "precision": 0.0,
+          "recall": 0.0,
+          "f1": 0.0,
+          "tp": 0,
+          "fp": 0,
+          "fn": 25,
+          "tn": 632,
+          "degenerate": true
+        }
+      },
+      "wall_clock_s": {
+        "convert": 0.22399350000341656,
+        "init_search": 3.376894300003187,
+        "term_search": 0.7869144000069355,
+        "direct_search": 0.456833899996127
+      }
+    },
+    {
+      "fold": 8,
+      "n_train_segments": 24,
+      "n_test_segments": 2,
+      "n_train_pt": 26247,
+      "n_test_pt": 6113,
+      "ec": {
+        "n_init_train": 12,
+        "n_term_train": 11,
+        "n_init_test": 1,
+        "n_term_test": 1,
+        "init_min_fit": 0.045454545454545456,
+        "term_min_fit": 0.125,
+        "init_null_summary": {
+          "threshold": 0.045454545454545456,
+          "pool_max_samples_summary": {
+            "min": 0.0005864912687858326,
+            "median": 0.002131791157965352,
+            "p95": 0.045454545454545456,
+            "max": 0.16666666666666666
+          },
+          "n_permutations": 1000,
+          "quantile": 0.95,
+          "perm_seed": 7
+        },
+        "term_null_summary": {
+          "threshold": 0.125,
+          "pool_max_samples_summary": {
+            "min": 0.010924141333619613,
+            "median": 0.03571428571428572,
+            "p95": 0.125,
+            "max": 0.25
+          },
+          "n_permutations": 1000,
+          "quantile": 0.95,
+          "perm_seed": 7
+        },
+        "init_clauses": [
+          [
+            "both_active",
+            "close"
+          ]
+        ],
+        "term_clauses": [],
+        "init_stop_reason": "select_once abstained",
+        "term_stop_reason": "select_once abstained",
+        "init_selection_reasons": [
+          "won by 0.18413",
+          "holdout tie among 3 bodies clustering into 2 genuinely different covers: Occam licenses narrowing an identical-cover tie to its simplest description, not choosing among bodies that actually disagree on some fact"
+        ],
+        "term_selection_reasons": [
+          "no body passed the fit gate (min_fit=0.125): a body that cannot fit held-out data is not a rule"
+        ],
+        "scoring": {
+          "precision": 0.0,
+          "recall": 0.0,
+          "f1": 0.0,
+          "tp": 0,
+          "fp": 0,
+          "fn": 20,
+          "tn": 6093,
+          "degenerate": true
+        }
+      },
+      "direct": {
+        "clauses": [
+          [
+            "both_inactive",
+            "close"
+          ]
+        ],
+        "stop_reason": "select_once abstained",
+        "scoring": {
+          "precision": 0.0,
+          "recall": 0.0,
+          "f1": 0.0,
+          "tp": 0,
+          "fp": 53,
+          "fn": 20,
+          "tn": 6040,
+          "degenerate": true
+        }
+      },
+      "wall_clock_s": {
+        "convert": 0.2102121999996598,
+        "init_search": 2.9336315999971703,
+        "term_search": 0.7496396999995341,
+        "direct_search": 0.5198589999999967
+      }
+    },
+    {
+      "fold": 9,
+      "n_train_segments": 24,
+      "n_test_segments": 2,
+      "n_train_pt": 29919,
+      "n_test_pt": 2441,
+      "ec": {
+        "n_init_train": 12,
+        "n_term_train": 11,
+        "n_init_test": 1,
+        "n_term_test": 1,
+        "init_min_fit": 0.045454545454545456,
+        "term_min_fit": 0.125,
+        "init_null_summary": {
+          "threshold": 0.045454545454545456,
+          "pool_max_samples_summary": {
+            "min": 0.0005668948831462988,
+            "median": 0.0024793903005765113,
+            "p95": 0.045454545454545456,
+            "max": 0.16666666666666666
+          },
+          "n_permutations": 1000,
+          "quantile": 0.95,
+          "perm_seed": 7
+        },
+        "term_null_summary": {
+          "threshold": 0.125,
+          "pool_max_samples_summary": {
+            "min": 0.0093126750502829,
+            "median": 0.03571428571428571,
+            "p95": 0.125,
+            "max": 0.31746031746031744
+          },
+          "n_permutations": 1000,
+          "quantile": 0.95,
+          "perm_seed": 7
+        },
+        "init_clauses": [
+          [
+            "both_active",
+            "close"
+          ]
+        ],
+        "term_clauses": [],
+        "init_stop_reason": "select_once abstained",
+        "term_stop_reason": "select_once abstained",
+        "init_selection_reasons": [
+          "won by 0.10417",
+          "holdout tie among 3 bodies clustering into 2 genuinely different covers: Occam licenses narrowing an identical-cover tie to its simplest description, not choosing among bodies that actually disagree on some fact"
+        ],
+        "term_selection_reasons": [
+          "no body passed the fit gate (min_fit=0.125): a body that cannot fit held-out data is not a rule"
+        ],
+        "scoring": {
+          "precision": 0.0,
+          "recall": 0.0,
+          "f1": 0.0,
+          "tp": 0,
+          "fp": 0,
+          "fn": 22,
+          "tn": 2419,
+          "degenerate": true
+        }
+      },
+      "direct": {
+        "clauses": [
+          [
+            "both_inactive",
+            "close"
+          ]
+        ],
+        "stop_reason": "select_once abstained",
+        "scoring": {
+          "precision": 0.0,
+          "recall": 0.0,
+          "f1": 0.0,
+          "tp": 0,
+          "fp": 0,
+          "fn": 22,
+          "tn": 2419,
+          "degenerate": true
+        }
+      },
+      "wall_clock_s": {
+        "convert": 0.21410689999902388,
+        "init_search": 2.924802499997895,
+        "term_search": 0.7627139999967767,
+        "direct_search": 0.4336602999974275
+      }
+    }
+  ],
+  "micro": {
+    "ec": {
+      "precision": 0.6579861111111112,
+      "recall": 0.8270594653573377,
+      "f1": 0.7328982354363064,
+      "tp": 1516,
+      "fp": 788,
+      "fn": 317
+    },
+    "direct": {
+      "precision": 0.6863905325443787,
+      "recall": 0.1265684669939989,
+      "f1": 0.2137263933671119,
+      "tp": 232,
+      "fp": 106,
+      "fn": 1601
+    }
+  },
+  "wall_clock_s_total": 44.99532580000232
+}
