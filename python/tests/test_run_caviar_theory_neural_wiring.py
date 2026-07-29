@@ -66,8 +66,9 @@ def test_min_fit_defaults_to_0_75_forwarded_to_kfold_select():
 
     def fake_kfold_select(prog_factory, mask_name, facts, is_positive, make_network,
                            features, *, neural_relations, folds, seed, steps, topology,
-                           tie_tolerance, min_fit=0.75):
+                           tie_tolerance, min_fit=0.75, holdout_score="accuracy"):
         captured["min_fit"] = min_fit
+        captured["holdout_score"] = holdout_score
         return _FakeSelection(rule=None)
 
     theory, nets = run_caviar_theory._induce_neural_theory_for_target(
@@ -78,6 +79,7 @@ def test_min_fit_defaults_to_0_75_forwarded_to_kfold_select():
         target_labels=[True, False, True, False], wall={}, wall_key="theory_loop_init",
     )
     assert captured["min_fit"] == 0.75
+    assert captured["holdout_score"] == "accuracy"
     assert theory["clauses"] == []
     assert theory["stop_reason"] == "select_once abstained"
     assert nets == {}
@@ -88,8 +90,9 @@ def test_explicit_min_fit_is_forwarded_to_kfold_select_instead_of_the_default():
 
     def fake_kfold_select(prog_factory, mask_name, facts, is_positive, make_network,
                            features, *, neural_relations, folds, seed, steps, topology,
-                           tie_tolerance, min_fit=0.75):
+                           tie_tolerance, min_fit=0.75, holdout_score="accuracy"):
         captured["min_fit"] = min_fit
+        captured["holdout_score"] = holdout_score
         return _FakeSelection(rule=None)
 
     run_caviar_theory._induce_neural_theory_for_target(
@@ -101,20 +104,47 @@ def test_explicit_min_fit_is_forwarded_to_kfold_select_instead_of_the_default():
         min_fit=0.321,
     )
     assert captured["min_fit"] == 0.321
+    assert captured["holdout_score"] == "accuracy"
 
 
-def test_min_fit_keyword_is_the_only_new_argument_kfold_select_sees():
-    # A caller that predates `min_fit` (a fake matching the OLD call
-    # signature, no min_fit parameter at all) would TypeError if
-    # `_induce_neural_theory_for_target` started passing min_fit
-    # unconditionally in a way that broke every existing caller -- this
-    # pins that every OTHER keyword forwarded to kfold_select is untouched
-    # by the min_fit addition.
+def test_explicit_holdout_score_is_forwarded_to_kfold_select_instead_of_the_default():
+    # Mirrors the two min_fit tests just above, for the SECOND parameter
+    # `_induce_neural_theory_for_target` forwards unchanged to `kfold_select`
+    # -- `run_caviar_cv.py`'s neural init path passes holdout_score="f1" to
+    # match its own F1-axis permutation-null min_fit threshold (see
+    # `kfold_select`'s own docstring for why an accuracy-scored holdout
+    # cannot be gated by an F1-axis threshold).
     captured = {}
 
     def fake_kfold_select(prog_factory, mask_name, facts, is_positive, make_network,
                            features, *, neural_relations, folds, seed, steps, topology,
-                           tie_tolerance, min_fit=0.75):
+                           tie_tolerance, min_fit=0.75, holdout_score="accuracy"):
+        captured["holdout_score"] = holdout_score
+        return _FakeSelection(rule=None)
+
+    run_caviar_theory._induce_neural_theory_for_target(
+        torch, fake_kfold_select, _never_called_train_engine_mode, prog=None,
+        make_network=lambda: _FakeNetModule(), features_train=torch.zeros(4, 2),
+        neural_relations={"close_nn": object()}, activity_sets_train={"both_active": {(0, 1)}},
+        args=_base_args(), facts=[(0, 1), (1, 1), (2, 1), (3, 1)],
+        target_labels=[True, False, True, False], wall={}, wall_key="theory_loop_init",
+        holdout_score="f1",
+    )
+    assert captured["holdout_score"] == "f1"
+
+
+def test_min_fit_and_holdout_score_are_the_only_new_arguments_kfold_select_sees():
+    # A caller that predates `min_fit`/`holdout_score` (a fake matching the
+    # OLD call signature, neither parameter present) would TypeError if
+    # `_induce_neural_theory_for_target` started passing them unconditionally
+    # in a way that broke every existing caller -- this pins that every
+    # OTHER keyword forwarded to kfold_select is untouched by either
+    # addition.
+    captured = {}
+
+    def fake_kfold_select(prog_factory, mask_name, facts, is_positive, make_network,
+                           features, *, neural_relations, folds, seed, steps, topology,
+                           tie_tolerance, min_fit=0.75, holdout_score="accuracy"):
         captured.update(
             folds=folds, seed=seed, steps=steps, topology=topology,
             tie_tolerance=tie_tolerance, neural_relations=neural_relations,

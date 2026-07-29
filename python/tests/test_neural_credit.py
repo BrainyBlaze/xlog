@@ -1524,3 +1524,215 @@ def test_kfold_select_refuses_non_positive_tie_tolerance() -> None:
             lambda: None, "W", [(0, 1)], [True], lambda: None,
             None, {}, folds=1, tie_tolerance=-0.01,
         )
+
+
+# ---------------------------------------------------------------------------
+# holdout_score: kfold_select's F1-axis holdout metric (the fix this task
+# exists for). Ported from relational_search.kfold_scores(score="f1") -- see
+# that module's own docstring for the recall-aware-vs-accuracy-plateau
+# motivation this section's tests exercise at the ENGINE level. All CPU-only:
+# _FakeProg*-style fixtures, plain (non-CUDA) networks, mirroring exactly
+# what test_kfold_select_seeds_network_construction_not_ambient_rng and
+# test_kfold_select_pools_coverage_across_folds_under_a_witness_mask already
+# do without a real engine/CUDA.
+#
+# ENVIRONMENT NOTE (matches this suite's existing 4 env-fails baseline --
+# test_kfold_select_seeds_network_construction_not_ambient_rng,
+# test_kfold_select_pools_coverage_across_folds_under_a_witness_mask,
+# test_train_engine_mode_threads_witness_mask_into_masked_facts_accounting,
+# test_kfold_select_compiles_the_program_once_not_per_fold): THIS torch
+# install's `Optimizer.add_param_group` unconditionally imports
+# `torch._dynamo`, which needs `sympy` -- not installed here -- so
+# `train_engine_mode`'s `torch.optim.Adam(...)` construction raises
+# `ModuleNotFoundError` on ANY CPU run, independent of anything this task
+# changed. The two tests below that need a full `kfold_select` fold loop
+# therefore stub OUT `train_engine_mode` only (`_stub_train_engine_mode`,
+# just below) -- kfold_select's own held-out scoring reads a RELATIONAL
+# spec's `binary_cover` directly, never the trained network, so an
+# untrained network scores identically to a trained one for these
+# fixtures, and the code actually under test here (kfold_select's own
+# per-fold scoring/aggregation, changed by this task) still runs for real.
+# ---------------------------------------------------------------------------
+
+
+def _stub_train_engine_mode(prog, mask_name, facts, is_positive, network,
+                            features, neural_relations, **train_kw):
+    """Test-only stand-in avoiding the broken `torch.optim.Adam` construction
+    (see this section's own ENVIRONMENT NOTE) -- returns the CALLER's own
+    untrained network, unchanged, exactly as `EngineModeResult.network`
+    would after a real (but here-impossible) training pass."""
+    from pyxlog.ilp.neural_credit import EngineModeResult
+
+    return EngineModeResult(cand_probs={}, specs=[], network=network, losses=[])
+
+
+def test_kfold_select_refuses_invalid_holdout_score() -> None:
+    """holdout_score must be 'accuracy' or 'f1' -- validated up front, before
+    any fold trains, mirroring tie_tolerance's identical up-front refusal
+    just above."""
+    from pyxlog.ilp.neural_credit import kfold_select
+
+    with pytest.raises(ValueError, match="holdout_score"):
+        kfold_select(
+            lambda: None, "W", [(0, 1)], [True], lambda: None,
+            None, {}, folds=1, holdout_score="bogus",
+        )
+
+
+def test_kfold_select_holdout_score_accuracy_default_is_byte_identical(monkeypatch) -> None:
+    """holdout_score="accuracy" is the default; passing it explicitly must
+    produce THE SAME HoldoutSelection as omitting the parameter entirely, on
+    an existing synthetic scenario (mirrors test_kfold_select_seeds_network_
+    construction_not_ambient_rng's own fixture) -- same rule, same tied set,
+    same margin/top_weight/reason/coverage, not merely "close"."""
+    import pyxlog.ilp.neural_credit as neural_credit
+
+    monkeypatch.setattr(neural_credit, "train_engine_mode", _stub_train_engine_mode)
+
+    features = torch.tensor([[0.1], [0.2], [0.3]])
+    facts = [(0, 1), (1, 0), (2, 1)]
+    is_positive = [True, False, True]
+
+    def make_network():
+        return torch.nn.Sequential(torch.nn.Linear(1, 2), torch.nn.Softmax(dim=-1))
+
+    def run(**kw):
+        return neural_credit.kfold_select(
+            _FakeProg, "W", facts, is_positive, make_network,
+            features, neural_relations={"sal": 3}, folds=3,
+            steps=2, seed=0, **kw)
+
+    default_sel = run()
+    explicit_sel = run(holdout_score="accuracy")
+    assert default_sel == explicit_sel
+
+
+class _FakeProgTwoStarBodies:
+    """Exactly two star candidates, no cross-product noise: a 'real' body
+    (genuine, if imperfect, signal) and an 'empty' body (predicts nothing,
+    ever) -- the engine-level analogue of relational_search's own
+    test_ranking_inversion_accuracy_vs_f1_on_rare_positive_holdout. Unlike
+    _FakeProg/_FakeProgAllRelational, valid_candidates returns ONLY these two
+    dicts directly (no cross product to filter/dedup), so the star-mode
+    mirror/diagonal canonicalization never enters into it."""
+
+    def __init__(self, relations: dict) -> None:
+        self._facts = relations
+
+    def valid_candidates(self, mask_name):
+        return [
+            {"id": 0, "i": 0, "j": 0, "k": 0,
+             "left_name": "real_a", "right_name": "real_b", "head_name": "plastic"},
+            {"id": 1, "i": 0, "j": 0, "k": 0,
+             "left_name": "empty_a", "right_name": "empty_b", "head_name": "plastic"},
+        ]
+
+    def relation_facts(self, name):
+        if name not in self._facts:
+            raise ValueError(f"Relation '{name}' not found")
+        return self._facts[name]
+
+
+def test_kfold_select_holdout_score_f1_separates_where_accuracy_plateaus(monkeypatch) -> None:
+    """THE POINT of holdout_score="f1" (see kfold_select's own docstring,
+    and relational_search.kfold_scores's identical motivation): on a
+    rare-positive-class holdout, plain accuracy sits on the all-negative
+    plateau and cannot separate a genuine (if imperfect) detector from a
+    candidate that predicts nothing at all -- k-fold holdout then gates
+    nothing, a mass tie every time. F1 fixes this.
+
+    2000 pair-times, 10 positives (0.5% base rate). 'real' covers 3 true
+    positives plus 8 false positives (15 total mistakes out of 2000 --
+    98.25% accuracy); 'empty' predicts nothing (10 mistakes -- 99.5%
+    accuracy). The two accuracies differ by 0.0025, below the default
+    tie_tolerance floor (0.01): under holdout_score="accuracy" the two are a
+    TIE (both relational, Occam narrows nothing among a tie of exactly one
+    relational candidate each -- an abstention, not a decision). Under
+    holdout_score="f1", 'empty' scores exactly 0.0 (no predicted positives,
+    ever) while 'real' scores well above zero on any fold that holds out
+    one of its true positives, clearing tie_tolerance outright -- a decisive
+    win for 'real'."""
+    n_facts = 2000
+    facts = [(i, 1) for i in range(n_facts)]
+    positive_idx = set(range(10))
+    is_positive = [i in positive_idx for i in range(n_facts)]
+
+    real_cover_idx = {0, 1, 2} | set(range(1000, 1008))   # tp={0,1,2}, fp=8, fn=7
+    relations = {
+        "real_a": [(i, 1) for i in real_cover_idx],
+        "real_b": [(i, 1) for i in range(n_facts)],
+        "empty_a": [],
+        "empty_b": [(i, 1) for i in range(n_facts)],
+    }
+
+    def make_network():
+        return torch.nn.Sequential(torch.nn.Linear(1, 2), torch.nn.Softmax(dim=-1))
+
+    features = torch.zeros(4, 1)
+    real_body = ("real_a", "real_b")
+    empty_body = ("empty_a", "empty_b")
+
+    import pyxlog.ilp.neural_credit as neural_credit
+    real_select = neural_credit._select_from_holdout
+    captured = []
+
+    def spy(scores, *args, **kwargs):
+        captured.append(dict(scores))
+        return real_select(scores, *args, **kwargs)
+
+    monkeypatch.setattr(neural_credit, "_select_from_holdout", spy)
+    monkeypatch.setattr(neural_credit, "train_engine_mode", _stub_train_engine_mode)
+
+    def run(holdout_score):
+        sel = neural_credit.kfold_select(
+            lambda: _FakeProgTwoStarBodies(relations), "W", facts, is_positive,
+            make_network, features, neural_relations={}, folds=4, seed=7,
+            steps=1, topology="star", min_fit=0.0, holdout_score=holdout_score,
+        )
+        return sel, captured[-1]
+
+    sel_acc, scores_acc = run("accuracy")
+    sel_f1, scores_f1 = run("f1")
+
+    # Accuracy: the two scores are within tie_tolerance of each other (both
+    # sit on the plateau) -- gates nothing, an abstention.
+    assert abs(scores_acc[real_body] - scores_acc[empty_body]) <= 0.01, scores_acc
+    assert sel_acc.rule is None, sel_acc
+
+    # F1: 'empty' is exactly 0.0 (degenerate -- no predicted positives on any
+    # measurable fold); 'real' clears it by more than tie_tolerance, and is
+    # the decided rule.
+    assert scores_f1[empty_body] == pytest.approx(0.0)
+    assert scores_f1[real_body] > scores_f1[empty_body] + 0.01, scores_f1
+    assert sel_f1.rule == real_body, sel_f1
+
+
+def test_f1_matches_scorer_prf1_on_a_grid_of_counts() -> None:
+    """Cross-check: neural_credit._f1's byte-for-byte parity claim against
+    examples/caviar_woled/scorer.py's prf1, pinned over a grid of (tp, fp,
+    fn) cases -- including the degenerate tp==0 cases prf1's own docstring
+    calls out (no predicted positives, no actual positives, both). Built
+    from pred/gold lists (tp true positives, fp false positives, fn false
+    negatives, no true negatives needed for either formula) so this is a
+    genuine cross-check against scorer.prf1's own computation, not a second
+    copy of the same formula."""
+    import sys
+    from pathlib import Path
+
+    from pyxlog.ilp.neural_credit import _f1
+
+    example_dir = Path(__file__).resolve().parents[2] / "examples" / "caviar_woled"
+    if str(example_dir) not in sys.path:
+        sys.path.insert(0, str(example_dir))
+    from scorer import prf1
+
+    grid = [
+        (0, 0, 0), (1, 0, 0), (0, 1, 0), (0, 0, 1), (0, 1, 1),
+        (3, 0, 0), (0, 5, 0), (0, 0, 5), (5, 5, 5), (3, 8, 7),
+        (1, 0, 9), (10, 1, 0), (2, 3, 4),
+    ]
+    for tp, fp, fn in grid:
+        pred = [True] * tp + [True] * fp + [False] * fn
+        gold = [True] * tp + [False] * fp + [True] * fn
+        expected = prf1(pred, gold)["f1"]
+        assert _f1(tp, fp, fn) == pytest.approx(expected), (tp, fp, fn)
