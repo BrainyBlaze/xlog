@@ -605,6 +605,7 @@ def _build_symmetric_mlp(hidden: int, device):
 def _induce_neural_theory_for_target(
     torch, kfold_select, train_engine_mode, prog, make_network, features_train,
     neural_relations, activity_sets_train, args, facts, target_labels, wall, wall_key,
+    min_fit=0.75,
 ):
     """Neural-mode theory induction for ONE target label sequence aligned
     with ``facts`` -- the exact per-clause-retrain mechanism `_run_neural_
@@ -614,6 +615,15 @@ def _induce_neural_theory_for_target(
     network (never a network shared across clauses, or across target
     calls -- see the module docstring's "each theory gets its own nets"
     note).
+
+    ``min_fit`` (default ``0.75``, `kfold_select`'s own default -- BYTE-
+    IDENTICAL to every existing caller, none of which ever passes this
+    parameter): forwarded, unchanged, to every `kfold_select` call this
+    function makes, replacing that function's own hardcoded 0.75 fit gate.
+    Added for `run_caviar_cv.py`'s ``--mode neural`` initiation search,
+    which derives its OWN per-fold threshold (a permutation-null quantile
+    over its relational sub-pool -- see that script's own
+    ``_neural_init_fit_gate``) rather than accepting the arbitrary constant.
 
     Returns ``(theory, nets_by_clause_idx)``: ``theory`` is `theory_loop.
     induce_theory`'s own result dict; ``nets_by_clause_idx`` maps each
@@ -637,7 +647,7 @@ def _induce_neural_theory_for_target(
             lambda: prog, MASK_NAME, residual_facts, residual_is_positive,
             make_network, features_train, neural_relations=neural_relations,
             folds=args.k, seed=args.seed, steps=args.steps, topology="star",
-            tie_tolerance=args.tie_tolerance,
+            tie_tolerance=args.tie_tolerance, min_fit=min_fit,
         )
         net = None
         if selection.rule is not None:
