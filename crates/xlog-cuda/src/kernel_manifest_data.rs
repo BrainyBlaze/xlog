@@ -593,6 +593,7 @@ pub const KERNEL_MODULES: &[KernelModuleSpec] = &[
             "joint_label_feasibility",
             "joint_label_top2",
             "joint_component_enumerate",
+            "joint_label_memoized",
         ],
     },
 ];
