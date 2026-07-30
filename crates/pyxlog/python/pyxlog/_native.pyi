@@ -661,6 +661,8 @@ class EvalResult:
     """DLPack f64 tensor of per-query log-probabilities."""
     num_vars: int
     """Number of probabilistic variables in the compiled circuit."""
+    log_z_e: Optional[float]
+    """Exact log-evidence log Z_E (natural log). None for Monte Carlo results."""
     grad_true: Optional[list[Any]]
     """Per-query gradients for the true label (exact engine, return_grads=True)."""
     grad_false: Optional[list[Any]]
