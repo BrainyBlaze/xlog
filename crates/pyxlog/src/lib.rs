@@ -712,6 +712,9 @@ pub struct EvalResult {
     pub log_prob: PyObject,
     #[pyo3(get)]
     pub num_vars: usize,
+    /// Exact log-evidence `log Z_E` (natural log). `None` for Monte Carlo results.
+    #[pyo3(get)]
+    pub log_z_e: Option<f64>,
     #[pyo3(get)]
     pub grad_true: Option<Vec<PyObject>>,
     #[pyo3(get)]

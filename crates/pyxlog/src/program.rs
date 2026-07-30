@@ -289,6 +289,7 @@ impl CompiledProgram {
         &self,
         py: Python<'_>,
         query_probs: Vec<QueryProbability>,
+        log_z_e: f64,
     ) -> PyResult<EvalResult> {
         let mut atoms: Vec<String> = Vec::with_capacity(query_probs.len());
         let mut probs: Vec<f64> = Vec::with_capacity(query_probs.len());
@@ -326,6 +327,7 @@ impl CompiledProgram {
             prob: dlpack_capsule_from_tensor(py, prob_tensor)?,
             log_prob: dlpack_capsule_from_tensor(py, log_prob_tensor)?,
             num_vars: self.program.num_vars(),
+            log_z_e: Some(log_z_e),
             grad_true: None,
             grad_false: None,
             approx: false,
@@ -361,6 +363,7 @@ impl CompiledProgram {
         let schema = Schema::new(vec![("col0".to_string(), ScalarType::F64)]);
 
         let num_vars = self.program.num_vars();
+        let log_z_e = result.log_z_e;
         for q in result.query_grads {
             atoms.push(atom_to_string(&q.atom));
             probs.push(q.prob);
@@ -415,6 +418,7 @@ impl CompiledProgram {
             prob: dlpack_capsule_from_tensor(py, prob_tensor)?,
             log_prob: dlpack_capsule_from_tensor(py, log_prob_tensor)?,
             num_vars,
+            log_z_e: Some(log_z_e),
             grad_true: Some(grad_true_caps),
             grad_false: Some(grad_false_caps),
             approx: false,
@@ -509,6 +513,7 @@ impl CompiledProgram {
             prob: dlpack_capsule_from_tensor(py, prob_tensor)?,
             log_prob: dlpack_capsule_from_tensor(py, log_prob_tensor)?,
             num_vars: self.program.num_vars(),
+            log_z_e: None,
             grad_true: None,
             grad_false: None,
             approx: true,
@@ -568,7 +573,7 @@ impl CompiledProgram {
                         self.pack_result_with_grads(_py, result)
                     } else {
                         let result = _program.evaluate().map_err(types::xlog_err)?;
-                        self.pack_result_probs(_py, result.query_probs)
+                        self.pack_result_probs(_py, result.query_probs, result.log_z_e)
                     }
                 }
                 #[cfg(not(feature = "host-io"))]
