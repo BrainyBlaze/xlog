@@ -73,6 +73,25 @@ filtering step capable of leaking one fold's row into another's, because
 the row is never created for the wrong fold's conversion in the first
 place.
 
+`--data-source {dump,xml}` (default `dump`, BYTE-IDENTICAL to every behavior
+that predates this flag): `dump` is the combined continuous corpus above,
+meeting-only. `xml` folds instead over `caviar_xml_corpus.py`'s 30 CAVIAR
+ground-truth videos (directory from `--xml-dir` or `$CAVIAR_XML_DIR`),
+target fluent from `--fluent {meeting,moving}` (default `meeting`; the dump
+source rejects `--fluent moving` outright, since it has no such target).
+`stratified_segment_folds` runs UNCHANGED over this source too -- one
+"segment" per real video, its own positive-mass count read via
+`_xml_video_as_segment`'s adapter view rather than a dump segment's own
+`"meeting"` set. Per-fold induction, scoring, and micro-averaging are the
+SAME calls either way: `run_fold` only branches on which converter
+(`convert_continuous` vs `caviar_xml_corpus.convert_xml_corpus`) builds
+`train`/`test`, and on which segment-shaped view feeds
+`derive_ec_targets_continuous`/`derive_ec_masks_continuous`/
+`reconstruct_holds_continuous` (a dump segment itself for `dump`,
+`_xml_video_as_segment`'s adapter for `xml` -- see that function's own
+docstring for why the adapter's row order is guaranteed, not merely
+observed, to match `convert_xml_corpus`'s own `pt` numbering).
+
 `--mode {relational,neural}` (default `relational`, BYTE-IDENTICAL to every
 behavior that predates this flag -- see `python/tests/test_caviar_cv.py`'s
 own byte-identity guard). `--mode neural` replaces ONLY the INITIATION
@@ -144,6 +163,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import time
 from pathlib import Path
@@ -248,14 +268,65 @@ def stratified_segment_folds(
     return fold_of_segment
 
 
-def _segment_positive_counts(segments: list[dict]) -> list[int]:
-    """One count per segment: its own annotated meeting-frame total
-    (``len(segment["meeting"])``) -- the ground-truth positive mass
-    stratification balances over, read directly off `load_continuous`'s own
-    per-segment dict, before any pair-time conversion happens (so
-    stratification never depends on which pairs end up co-visible, only on
-    the raw annotation)."""
-    return [len(seg["meeting"]) for seg in segments]
+def _segment_positive_counts(segments: list[dict], fluent: str = "meeting") -> list[int]:
+    """One count per segment: its own annotated ``fluent``-frame total
+    (``len(segment[fluent])``) -- the ground-truth positive mass
+    stratification balances over, read directly off the segment dict's own
+    already-canonical-paired, deduplicated set for that fluent, before any
+    pair-time conversion happens (so stratification never depends on which
+    pairs end up co-visible, only on the raw annotation).
+
+    ``fluent`` defaults to ``"meeting"`` -- BYTE-IDENTICAL to every call
+    site that predates this parameter (`load_continuous`'s own per-segment
+    dict only ever has a ``"meeting"`` key, and the dump source is
+    meeting-only, so it always calls this with the default). The XML-native
+    source is what supplies a value other than ``"meeting"``, paired with
+    `_xml_video_as_segment`'s adapter dict, which carries that same
+    fluent-named key instead."""
+    return [len(seg[fluent]) for seg in segments]
+
+
+def _xml_video_as_segment(video: dict, fluent: str) -> dict:
+    """Present one `caviar_xml_corpus.load_xml_corpus` video dict as a
+    lightweight "segment" for the segment-shaped functions the dump source
+    already feeds: `_segment_positive_counts` (fold stratification) and
+    `caviar_continuous`'s shared `_group_pts_by_pair` (inside
+    `derive_ec_targets_continuous`/`derive_ec_masks_continuous`/
+    `reconstruct_holds_continuous`, for EC target/mask derivation and
+    holdsAt reconstruction).
+
+    * ``"persons"``/``"timestamps"`` pass through unchanged.
+    * ``"activity"`` is bound to the video's own ``"tracked"`` set, not its
+      narrower per-object movement-label dict -- co-visibility, in
+      `caviar_continuous._iter_pair_rows`'s own membership test
+      (``(pid, t) in seg["activity"]``), only ever inspects KEYS, so
+      pointing it at the SAME ``"tracked"`` set `caviar_xml_corpus`'s own
+      pair-row walk uses guarantees row order IDENTICAL to
+      `convert_xml_corpus`'s own ``pt`` numbering, structurally -- not
+      merely an empirically observed coincidence between the two
+      structures (which the XML corpus module's own docstring notes holds
+      on the real ground truth, but does not rely on here).
+    * ``fluent`` (``"meeting"`` or ``"moving"``) names the one extra key
+      this dict carries: that fluent's own canonical-paired, deduplicated
+      ``{(min_id, max_id, t)}`` positive-frame set -- the same shape
+      `caviar_continuous.load_continuous`'s own ``"meeting"`` set has, so
+      `_segment_positive_counts(adapted, fluent=fluent)` reads it
+      identically regardless of data source.
+
+    The video's own richer keys (``"tracked"``, ``"holds"``, ``"coords"``,
+    the narrower ``"activity"``) are not copied here -- this dict is only
+    ever handed to the segment-shaped functions above, never to
+    `convert_xml_corpus`, which reads the ORIGINAL, unmodified video dict
+    directly."""
+    from caviar_xml_corpus import _canonical_pair
+
+    positive = {(*_canonical_pair(p1, p2), t) for p1, p2, t in video["holds"].get(fluent, ())}
+    return {
+        "persons": video["persons"],
+        "timestamps": video["timestamps"],
+        "activity": video["tracked"],
+        fluent: positive,
+    }
 
 
 def _fold_segment_split(
@@ -616,7 +687,7 @@ def _run_init_search(
 
 def run_fold(
     fold_index: int, train_segments: list[dict], test_segments: list[dict], seed: int,
-    mode: str = "relational",
+    mode: str = "relational", data_source: str = "dump", fluent: str = "meeting",
 ) -> dict:
     """Run one fold of the pre-registered protocol end to end: fold-local
     conversion (see FOLD ISOLATION in the module docstring), EC init/term
@@ -628,24 +699,58 @@ def run_fold(
     `_run_init_search` -- see the module docstring's own NEURAL MODE
     section. Every other computation here (termination search, direct-
     protocol reference theory, scoring, reconstruction) is UNCHANGED in
-    both modes."""
-    from caviar_continuous import (
-        convert_continuous,
-        derive_ec_masks_continuous,
-        derive_ec_targets_continuous,
-        reconstruct_holds_continuous,
-    )
+    both modes.
+
+    ``data_source`` (default ``"dump"``, BYTE-IDENTICAL to every call site
+    that predates this parameter) selects only how ``train_segments``/
+    ``test_segments`` get converted into ``train``/``test`` and which
+    segment-shaped view feeds `derive_ec_targets_continuous`/
+    `derive_ec_masks_continuous`/`reconstruct_holds_continuous`:
+    ``"dump"`` calls `caviar_continuous.convert_continuous` on the segments
+    themselves (today's only path); ``"xml"`` calls
+    `caviar_xml_corpus.convert_xml_corpus` (target fluent from ``fluent``,
+    ``"meeting"`` by default) on ``train_segments``/``test_segments`` as
+    RAW `caviar_xml_corpus.load_xml_corpus` video dicts, and derives the EC
+    functions' own segment-shaped view via `_xml_video_as_segment` instead
+    of using the video dicts directly. Every other computation below this
+    branch -- vocabulary building, induction, scoring, reconstruction -- is
+    the SAME code, reading only ``train``/``test``'s shared output contract
+    and the resulting EC segment view, never ``data_source`` itself."""
     from relational_search import make_predict_clause
     from scorer import prf1, theory_predictions
 
     t0 = time.perf_counter()
-    train = convert_continuous(train_segments)
-    test = convert_continuous(test_segments)
+    if data_source == "dump":
+        from caviar_continuous import (
+            convert_continuous,
+            derive_ec_masks_continuous,
+            derive_ec_targets_continuous,
+            reconstruct_holds_continuous,
+        )
+
+        train = convert_continuous(train_segments)
+        test = convert_continuous(test_segments)
+        train_ec_segments = train_segments
+        test_ec_segments = test_segments
+    elif data_source == "xml":
+        from caviar_continuous import (
+            derive_ec_masks_continuous,
+            derive_ec_targets_continuous,
+            reconstruct_holds_continuous,
+        )
+        from caviar_xml_corpus import convert_xml_corpus
+
+        train = convert_xml_corpus(train_segments, fluent=fluent)
+        test = convert_xml_corpus(test_segments, fluent=fluent)
+        train_ec_segments = [_xml_video_as_segment(v, fluent) for v in train_segments]
+        test_ec_segments = [_xml_video_as_segment(v, fluent) for v in test_segments]
+    else:
+        raise ValueError(f"data_source must be 'dump' or 'xml' (got {data_source!r}).")
     wall_convert = time.perf_counter() - t0
 
-    ec_train = derive_ec_targets_continuous(train_segments, train)
-    ec_test = derive_ec_targets_continuous(test_segments, test)
-    ec_masks = derive_ec_masks_continuous(train_segments, train)
+    ec_train = derive_ec_targets_continuous(train_ec_segments, train)
+    ec_test = derive_ec_targets_continuous(test_ec_segments, test)
+    ec_masks = derive_ec_masks_continuous(train_ec_segments, train)
 
     train_ec_relations = _ec_relations(train)
     test_ec_relations = _ec_relations(test)
@@ -674,7 +779,7 @@ def run_fold(
     )
     init_pred_test = theory_predictions(init_result["clauses"], init_predict_clause, test["num_pt"])
     term_pred_test = theory_predictions(term_theory["clauses"], predict_clause_test_ec, test["num_pt"])
-    holds_pred_test = reconstruct_holds_continuous(init_pred_test, term_pred_test, test_segments, test)
+    holds_pred_test = reconstruct_holds_continuous(init_pred_test, term_pred_test, test_ec_segments, test)
     ec_scoring = prf1(holds_pred_test, test["is_positive"])
 
     t0 = time.perf_counter()
@@ -687,6 +792,8 @@ def run_fold(
     return {
         "fold": fold_index,
         "mode": mode,
+        "data_source": data_source,
+        "fluent": fluent,
         "n_train_segments": len(train_segments),
         "n_test_segments": len(test_segments),
         "n_train_pt": train["num_pt"],
@@ -725,12 +832,34 @@ def run_fold(
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(
-        description="10-fold cross-validation over the combined CAVIAR "
-        "continuous corpus, under the pre-registered EC/direct protocol "
-        "(see this module's own docstring) -- CPU-only, no CUDA needed.",
+        description="10-fold cross-validation over the CAVIAR corpus, "
+        "under the pre-registered EC/direct protocol (see this module's "
+        "own docstring) -- CPU-only, no CUDA needed.",
     )
-    p.add_argument("--train-json", required=True, help="path to caviar-train.json")
-    p.add_argument("--test-json", required=True, help="path to caviar-test.json")
+    p.add_argument(
+        "--data-source", default="dump", choices=("dump", "xml"),
+        help="'dump' (default, BYTE-IDENTICAL to every behavior that "
+        "predates this flag): the combined caviar-train.json/"
+        "caviar-test.json continuous corpus, meeting-only. 'xml': "
+        "caviar_xml_corpus.py's 30 CAVIAR ground-truth videos, folded over "
+        "real video boundaries instead of reconstructed dump segments -- "
+        "target fluent from --fluent, directory from --xml-dir or "
+        "$CAVIAR_XML_DIR.",
+    )
+    p.add_argument("--train-json", default=None, help="path to caviar-train.json (required for --data-source dump)")
+    p.add_argument("--test-json", default=None, help="path to caviar-test.json (required for --data-source dump)")
+    p.add_argument(
+        "--xml-dir", default=None,
+        help="directory of CAVIAR ground-truth XML files, for --data-source "
+        "xml only (falls back to $CAVIAR_XML_DIR if omitted; one of the "
+        "two is required for --data-source xml).",
+    )
+    p.add_argument(
+        "--fluent", default="meeting", choices=("meeting", "moving"),
+        help="target fluent, for --data-source xml only (default: "
+        "meeting). The dump source is meeting-only: --fluent moving "
+        "together with --data-source dump is a usage error.",
+    )
     p.add_argument("--folds", type=int, default=10, help="number of CV folds (default: 10)")
     p.add_argument("--seed", type=int, default=7, help="seed for fold assignment, inner holdout, and the permutation RNG (default: 7)")
     p.add_argument(
@@ -745,7 +874,28 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "unaffected by this flag in either mode.",
     )
     p.add_argument("--out", required=True, help="path to write RESULT.json")
-    return p.parse_args(argv)
+    args = p.parse_args(argv)
+
+    if args.data_source == "dump":
+        if args.fluent != "meeting":
+            p.error(
+                "--fluent moving is not supported with --data-source dump "
+                "(the continuous dump corpus is meeting-only) -- use "
+                "--data-source xml for the moving fluent."
+            )
+        missing = [
+            name for name, value in (("--train-json", args.train_json), ("--test-json", args.test_json))
+            if value is None
+        ]
+        if missing:
+            p.error(f"{' and '.join(missing)} required for --data-source dump")
+    else:
+        if args.xml_dir is None:
+            args.xml_dir = os.environ.get("CAVIAR_XML_DIR")
+        if not args.xml_dir:
+            p.error("--xml-dir (or $CAVIAR_XML_DIR) required for --data-source xml")
+
+    return args
 
 
 def _prepare_out_path(out: str) -> Path:
@@ -762,22 +912,34 @@ def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     out_path = _prepare_out_path(args.out)
 
-    from caviar_continuous import load_continuous
-
     t_start = time.perf_counter()
-    train_file_segments = load_continuous(args.train_json)
-    test_file_segments = load_continuous(args.test_json)
-    all_segments = train_file_segments + test_file_segments
+    if args.data_source == "dump":
+        from caviar_continuous import load_continuous
 
-    counts = _segment_positive_counts(all_segments)
+        train_file_segments = load_continuous(args.train_json)
+        test_file_segments = load_continuous(args.test_json)
+        all_segments = train_file_segments + test_file_segments
+        counts = _segment_positive_counts(all_segments)
+        print(
+            f"CAVIAR CV: {len(all_segments)} segments "
+            f"({len(train_file_segments)} from --train-json, {len(test_file_segments)} from --test-json), "
+            f"{args.folds} folds, seed={args.seed}",
+            flush=True,
+        )
+    else:
+        from caviar_xml_corpus import load_xml_corpus
+
+        all_segments = load_xml_corpus(args.xml_dir)
+        counts = _segment_positive_counts(
+            [_xml_video_as_segment(v, args.fluent) for v in all_segments], fluent=args.fluent,
+        )
+        print(
+            f"CAVIAR CV: {len(all_segments)} XML ground-truth videos from "
+            f"--xml-dir (fluent={args.fluent}), {args.folds} folds, seed={args.seed}",
+            flush=True,
+        )
+
     fold_of_segment = stratified_segment_folds(counts, args.folds, args.seed)
-
-    print(
-        f"CAVIAR CV: {len(all_segments)} segments "
-        f"({len(train_file_segments)} from --train-json, {len(test_file_segments)} from --test-json), "
-        f"{args.folds} folds, seed={args.seed}",
-        flush=True,
-    )
 
     fold_results = []
     for fold_index in range(args.folds):
@@ -787,7 +949,10 @@ def main(argv: list[str] | None = None) -> int:
             f"test_segments={len(test_segments)}",
             flush=True,
         )
-        result = run_fold(fold_index, train_segments, test_segments, args.seed, mode=args.mode)
+        result = run_fold(
+            fold_index, train_segments, test_segments, args.seed,
+            mode=args.mode, data_source=args.data_source, fluent=args.fluent,
+        )
         fold_results.append(result)
         ec_s, direct_s = result["ec"]["scoring"], result["direct"]["scoring"]
         print(
@@ -803,8 +968,11 @@ def main(argv: list[str] | None = None) -> int:
     total_wall = time.perf_counter() - t_start
 
     result = {
+        "data_source": args.data_source,
         "train_json": args.train_json,
         "test_json": args.test_json,
+        "xml_dir": args.xml_dir,
+        "fluent": args.fluent,
         "folds": args.folds,
         "seed": args.seed,
         "mode": args.mode,
