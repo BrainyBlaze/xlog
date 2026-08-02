@@ -654,8 +654,8 @@ def test_real_xml_corpus_family_fold_assembly_ec_totals_match_corpus_totals(flue
     }
 
     # Every family maps to exactly one fold, and every video of that family
-    # inherits it -- true of ALL families in the table (not just the two
-    # named in the brief), so check the whole table, not a hand-picked pair.
+    # inherits it -- checked over the WHOLE table, not a hand-picked pair,
+    # since a single split family is enough to reopen same-scene leakage.
     families_present = set()
     for family, stems in run_caviar_cv.XML_SCENE_FAMILIES.items():
         folds_in_family = {fold_by_stem[stem] for stem in stems}
@@ -664,7 +664,8 @@ def test_real_xml_corpus_family_fold_assembly_ec_totals_match_corpus_totals(flue
     assert families_present == set(run_caviar_cv.XML_SCENE_FAMILIES)
     assert set(fold_of) <= set(range(10))
 
-    # The two multi-video families the brief calls out by name explicitly.
+    # The two families with the most recordings, pinned by name: wk carries
+    # 73% of all meeting positives, so splitting it would matter most.
     assert len({fold_by_stem["wk1gt"], fold_by_stem["wk2gt"], fold_by_stem["wk3gt"]}) == 1
     assert len({fold_by_stem["mwt1gt"], fold_by_stem["mwt2gt"], fold_by_stem["mws1gt"]}) == 1
 
