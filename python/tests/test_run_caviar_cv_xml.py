@@ -261,6 +261,174 @@ def test_synthetic_xml_corpus_fold_assignment_varies_with_unequal_positive_count
 
 
 # ---------------------------------------------------------------------------
+# XML_SCENE_FAMILIES -- table coverage validation against a loaded corpus's
+# own file stems (`_validate_xml_scene_family_coverage`, exercised here via
+# `_xml_family_fold_assignment`, its only caller).
+# ---------------------------------------------------------------------------
+
+
+def test_xml_scene_families_covers_exactly_the_30_real_stems():
+    all_stems = {stem for stems in run_caviar_cv.XML_SCENE_FAMILIES.values() for stem in stems}
+    assert len(all_stems) == 30
+    # Every stem belongs to exactly one family.
+    assert sum(len(stems) for stems in run_caviar_cv.XML_SCENE_FAMILIES.values()) == 30
+
+
+def test_xml_family_fold_assignment_rejects_a_video_stem_missing_from_the_table():
+    videos = [{"video": "totally_unknown_stem.xml"}]
+    with pytest.raises(ValueError, match="unknown"):
+        run_caviar_cv._xml_family_fold_assignment(videos, "meeting", n_folds=2, seed=7)
+
+
+def test_xml_family_fold_assignment_rejects_a_corpus_missing_a_table_stem():
+    # A corpus that only has ONE of wk1gt/wk2gt/wk3gt is missing the other
+    # two table entries -- the table's own family membership can never be
+    # verified against a corpus that does not carry every stem it names.
+    video = _xml_video(
+        persons=["id0"], timestamps=[0], tracked={("id0", 0)}, holds={},
+    )
+    video["video"] = "wk1gt.xml"
+    with pytest.raises(ValueError, match="missing"):
+        run_caviar_cv._xml_family_fold_assignment([video], "meeting", n_folds=2, seed=7)
+
+
+def test_xml_stem_strips_xml_and_xml_underscore_extensions():
+    assert run_caviar_cv._xml_stem("wk2gt.xml") == "wk2gt"
+    assert run_caviar_cv._xml_stem("fomdgt1.xml_") == "fomdgt1"
+
+
+# ---------------------------------------------------------------------------
+# _xml_family_fold_assignment -- fold unit is the SCENE FAMILY, not the
+# video: every video of one family always inherits that family's fold, and
+# the family-level round-robin matches the pre-existing segment-path
+# pattern for equal family totals.
+# ---------------------------------------------------------------------------
+
+
+def _family_corpus(family_video_counts: dict) -> list[dict]:
+    """Build one synthetic video per stem named in `run_caviar_cv.
+    XML_SCENE_FAMILIES` (so the real table's own coverage validates
+    cleanly), each carrying `family_video_counts[family]` meeting frames
+    split evenly, one meeting frame per video where possible -- just enough
+    structure for `_segment_positive_counts` to read a real, nonzero count
+    off each one."""
+    videos = []
+    for family, stems in run_caviar_cv.XML_SCENE_FAMILIES.items():
+        n_meeting = family_video_counts.get(family, 0)
+        for i, stem in enumerate(stems):
+            has_meeting = i < n_meeting
+            video = _xml_video(
+                persons=["id0", "id1"], timestamps=[0],
+                tracked={("id0", 0), ("id1", 0)},
+                holds={"meeting": {("id0", "id1", 0), ("id1", "id0", 0)}} if has_meeting else {"meeting": set()},
+            )
+            video["video"] = f"{stem}.xml"
+            videos.append(video)
+    return videos
+
+
+def test_xml_family_fold_assignment_every_video_of_a_family_lands_in_that_familys_fold():
+    videos = _family_corpus({"wk": 2, "br": 3, "mw": 1})
+    fold_of_video = run_caviar_cv._xml_family_fold_assignment(videos, "meeting", n_folds=4, seed=7)
+
+    fold_by_stem = {
+        run_caviar_cv._xml_stem(v["video"]): f for v, f in zip(videos, fold_of_video)
+    }
+    for stems in run_caviar_cv.XML_SCENE_FAMILIES.values():
+        folds_in_family = {fold_by_stem[stem] for stem in stems}
+        assert len(folds_in_family) == 1, f"family {stems} split across folds: {folds_in_family}"
+
+
+def test_xml_family_fold_assignment_round_robin_matches_segment_path_for_equal_family_totals():
+    # Every video meeting-free: every family's own summed positive count is
+    # 0, so the family-level round-robin over `XML_SCENE_FAMILIES`'s 15
+    # equal-weight rows (sorted family-name order) must match calling
+    # `stratified_segment_folds` directly on 15 equal counts -- the same
+    # equivalence `test_synthetic_xml_corpus_fold_assignment_matches_
+    # segment_path_for_equal_sizes` pins for the per-video path above.
+    videos = _family_corpus({})
+    fold_of_video = run_caviar_cv._xml_family_fold_assignment(videos, "meeting", n_folds=5, seed=7)
+
+    family_names = sorted(run_caviar_cv.XML_SCENE_FAMILIES)
+    fold_of_family_reference = run_caviar_cv.stratified_segment_folds(
+        [0] * len(family_names), n_folds=5, seed=7,
+    )
+    expected_fold_by_family = dict(zip(family_names, fold_of_family_reference))
+
+    stem_to_family = {
+        stem: family for family, stems in run_caviar_cv.XML_SCENE_FAMILIES.items() for stem in stems
+    }
+    for video, fold in zip(videos, fold_of_video):
+        stem = run_caviar_cv._xml_stem(video["video"])
+        assert fold == expected_fold_by_family[stem_to_family[stem]]
+
+
+def test_xml_family_fold_assignment_uses_the_familys_summed_positive_count():
+    # Two families, deliberately unbalanced (one family carries ALL the
+    # positive mass): the round-robin dealing must be driven by the
+    # FAMILY's own summed count, not any single member video's count, or
+    # this pair of families would be indistinguishable from the equal-mass
+    # case above.
+    videos = _family_corpus({"wk": 3, "br": 0})
+    fold_of_video = run_caviar_cv._xml_family_fold_assignment(videos, "meeting", n_folds=2, seed=7)
+    fold_by_stem = {
+        run_caviar_cv._xml_stem(v["video"]): f for v, f in zip(videos, fold_of_video)
+    }
+    wk_folds = {fold_by_stem[s] for s in run_caviar_cv.XML_SCENE_FAMILIES["wk"]}
+    br_folds = {fold_by_stem[s] for s in run_caviar_cv.XML_SCENE_FAMILIES["br"]}
+    assert len(wk_folds) == 1
+    assert len(br_folds) == 1
+
+
+# ---------------------------------------------------------------------------
+# EC target derivation on the XML path never bridges a fluent interval
+# across a video boundary, even when two videos of the same family (hence
+# the same fold, by construction now) sit side by side in one fold's own
+# segment list.
+# ---------------------------------------------------------------------------
+
+
+def test_derive_ec_targets_never_bridges_an_interval_across_an_xml_video_boundary():
+    from caviar_continuous import derive_ec_targets_continuous
+    from caviar_xml_corpus import convert_xml_corpus
+
+    # Video A: the pair is NOT meeting at its own last observed frame.
+    video_a = _xml_video(
+        persons=["id0", "id1"], timestamps=[0, 40],
+        tracked={("id0", 0), ("id1", 0), ("id0", 40), ("id1", 40)},
+        holds={"meeting": set()},
+    )
+    video_a["activity"] = {}
+    video_a["coords"] = {}
+    # Video B: the pair IS ALREADY meeting at its own first observed frame.
+    # Under the "first-observed-holding is an interval but never an
+    # initiation" convention this must NOT count as an init -- even though
+    # video A's own LAST state for this pair was not-holding, so a walk
+    # that failed to reset per video boundary would wrongly read this as a
+    # genuine 0->1 transition and count a spurious initiation.
+    video_b = _xml_video(
+        persons=["id0", "id1"], timestamps=[1000, 1040],
+        tracked={("id0", 1000), ("id1", 1000), ("id0", 1040), ("id1", 1040)},
+        holds={
+            "meeting": {
+                ("id0", "id1", 1000), ("id1", "id0", 1000),
+                ("id0", "id1", 1040), ("id1", "id0", 1040),
+            },
+        },
+    )
+    video_b["activity"] = {}
+    video_b["coords"] = {}
+
+    videos = [video_a, video_b]
+    converted = convert_xml_corpus(videos, fluent="meeting")
+    ec_segments = [run_caviar_cv._xml_video_as_segment(v, "meeting") for v in videos]
+    ec = derive_ec_targets_continuous(ec_segments, converted)
+
+    assert ec["n_init"] == 0
+    assert ec["n_term"] == 0
+
+
+# ---------------------------------------------------------------------------
 # run_fold(data_source="xml") wiring: mirrors `test_caviar_cv.py`'s own
 # `run_fold` wiring tests -- `_run_init_search`/`_induce_ec_target`/
 # `_induce_direct_theory` are monkeypatched (a fixture this small is not a
@@ -438,6 +606,67 @@ def test_real_xml_corpus_fold_assembly_ec_totals_match_corpus_totals(fluent, exp
 
     assert len(fold_of) == 30
     assert set(fold_of) == set(range(10))
+
+    seen_videos: set[str] = set()
+    total_init = 0
+    total_term = 0
+    for fold_index in range(10):
+        _, test_videos = run_caviar_cv._fold_segment_split(videos, fold_of, fold_index)
+        for v in test_videos:
+            assert v["video"] not in seen_videos  # every video held out exactly once
+            seen_videos.add(v["video"])
+
+        test_converted = convert_xml_corpus(test_videos, fluent=fluent)
+        test_ec_segments = [run_caviar_cv._xml_video_as_segment(v, fluent) for v in test_videos]
+        ec_test = derive_ec_targets_continuous(test_ec_segments, test_converted)
+        total_init += ec_test["n_init"]
+        total_term += ec_test["n_term"]
+
+    assert seen_videos == {v["video"] for v in videos}
+    assert total_init == expected_n_init
+    assert total_term == expected_n_term
+
+
+@requires_xml_dir
+@pytest.mark.parametrize(
+    "fluent,expected_n_init,expected_n_term", [("meeting", 11, 10), ("moving", 5, 8)],
+)
+def test_real_xml_corpus_family_fold_assembly_ec_totals_match_corpus_totals(fluent, expected_n_init, expected_n_term):
+    # Same smoke test as `test_real_xml_corpus_fold_assembly_ec_totals_
+    # match_corpus_totals` above, but through `_xml_family_fold_assignment`
+    # -- the actual fold-assembly path `run_caviar_cv.main()` now uses for
+    # `--data-source xml` -- rather than calling `stratified_segment_folds`
+    # directly on per-video counts.
+    from caviar_continuous import derive_ec_targets_continuous
+    from caviar_xml_corpus import convert_xml_corpus, load_xml_corpus
+
+    videos = load_xml_corpus(CAVIAR_XML_DIR)
+    assert len(videos) == 30
+
+    fold_of = run_caviar_cv._xml_family_fold_assignment(videos, fluent, n_folds=10, seed=7)
+    assert len(fold_of) == 30
+
+    stem_to_family = {
+        stem: family for family, stems in run_caviar_cv.XML_SCENE_FAMILIES.items() for stem in stems
+    }
+    fold_by_stem = {
+        run_caviar_cv._xml_stem(v["video"]): f for v, f in zip(videos, fold_of)
+    }
+
+    # Every family maps to exactly one fold, and every video of that family
+    # inherits it -- true of ALL families in the table (not just the two
+    # named in the brief), so check the whole table, not a hand-picked pair.
+    families_present = set()
+    for family, stems in run_caviar_cv.XML_SCENE_FAMILIES.items():
+        folds_in_family = {fold_by_stem[stem] for stem in stems}
+        assert len(folds_in_family) == 1, f"family {family!r} ({stems}) split across folds: {folds_in_family}"
+        families_present.add(family)
+    assert families_present == set(run_caviar_cv.XML_SCENE_FAMILIES)
+    assert set(fold_of) <= set(range(10))
+
+    # The two multi-video families the brief calls out by name explicitly.
+    assert len({fold_by_stem["wk1gt"], fold_by_stem["wk2gt"], fold_by_stem["wk3gt"]}) == 1
+    assert len({fold_by_stem["mwt1gt"], fold_by_stem["mwt2gt"], fold_by_stem["mws1gt"]}) == 1
 
     seen_videos: set[str] = set()
     total_init = 0
