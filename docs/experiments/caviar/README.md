@@ -262,6 +262,14 @@ direct-protocol reference of 0.214 reflects pre-registered defaults
 fold's total abstain), NOT that protocol's ceiling; sections A/B show
 what the direct protocol reaches under its own studied settings.
 
+**Integrity note (retroactive).** The dump this section folds over
+duplicates two videos across its train and test files and carries
+near-identical recordings of one scene as separate segments, so
+segment-level folds still permit same-scene train/test transfer. Section
+F quantifies the consequence: under a deduplicated, scene-family-grouped
+protocol the meeting result collapses to zero. This row remains valid as
+the dump-protocol figure — the regime the published numbers share.
+
 Files: `results/e10_cv/caviar-e10-cv10.json`.
 
 ### E.1 Termination-signature vocabulary: the termination theory is learned
@@ -305,6 +313,75 @@ abstains contribute identically to both runs (the baseline clause never
 fired on them: tp/fp 0/0 in both). Files:
 `results/e11_cv10_termination.json`.
 
+## F. Leak-free protocol: XML-native corpus, scene-family folds (meeting AND moving)
+
+Sections B–E run on the OLED dump. Frame-level reconciliation of that
+dump against the original CAVIAR ground-truth XML exposed two integrity
+defects in the dump itself: two videos (`wk2gt`, `fomdgt2`) are present
+in BOTH its train and test files, and near-identical recordings of the
+same staged scene enter the corpus as separate units — so segment-level
+folds (section E) still place one recording of a scene in train while
+testing on another recording of the same scene. This section removes
+both defects: the corpus is rebuilt directly from the 30 CAVIAR
+ground-truth XML files (a mapping that reproduces the dump's meeting
+annotation exactly on person-matched segments — zero spurious atoms),
+deduplicated by construction, and cross-validated 10-fold with folds
+drawn over the 15 SCENE FAMILIES (every recording of one staged scene
+shares a fold). All gates are as pre-registered in section E
+(per-fold permutation-null fit thresholds, F1 holdout, seed 7). The run
+is CPU-only and deterministic: a full independent replay reproduced
+every value in the shipped result files exactly.
+
+| fluent, protocol (10-fold scene-family CV micro) | P | R | F1 |
+|---|---|---|---|
+| meeting, EC + inertia | 0.000 | 0.000 | **0.000** |
+| meeting, direct reference | 0.000 | 0.000 | 0.000 |
+| moving, direct reference | 0.593 | 0.413 | **0.487** |
+| moving, EC + inertia | 0.000 | 0.000 | 0.000 |
+
+**The meeting zero is a property of the data under the stricter
+protocol, not a harness failure.** Training still selects the familiar
+initiation clause `both_inactive & close` on 9 of 10 folds; applied
+directly to the held-out wk-scene fold it scores frame F1 0.890
+(tp=1060, fp=0) — the machinery is sound. What fails is transfer:
+
+- the wk scene family carries 1,323 of 1,812 meeting-positive frames
+  (73%) and, with honest scene grouping, sits in exactly ONE fold;
+- `both_inactive & close` holds ONLY on wk scenes. A per-segment
+  coverage census over meeting positives: `wk1gt` 232/468, `wk2gt`
+  828/855, and **zero out of 489 on all eight remaining
+  meeting-bearing segments**; on two of them (`lb1gt`, `rffgt`) even
+  `close` never holds on a positive frame — meeting is annotated there
+  at pair distances above 25;
+- so training WITH wk scenes learns a clause that transfers nowhere
+  else, and training WITHOUT them (the wk fold's train side: the same
+  clause covers 0 of 489 positives and 106 negatives) cannot learn it
+  at all. CAVIAR meeting is two disjoint regimes, and after
+  deduplication one regime lives in a single scene family.
+
+**Integrity consequence for sections E/E.1.** Their 0.733/0.778 rest
+materially on same-scene transfer plus the dump's train/test
+duplication — defects the published numbers inherit too (OLED
+cross-validates the same dump, without scene grouping). Sections E/E.1
+therefore remain the dump-protocol rows, comparable to the published
+figures on those figures' own terms; this section is the leak-free
+floor, and under it a 2-literal state vocabulary does not transfer
+across meeting regimes at all.
+
+**Moving.** The direct-protocol reference selects the canonical
+published rule `both_walking & close` on every fold with a non-empty
+theory (micro F1 0.487; up to 0.938 on a single fold). The EC theory is
+empty everywhere for a counted reason: the whole corpus contains only
+5 observable moving initiations (13 of its 18 moving intervals begin
+before observation starts), so initiation search has nothing to clear
+its null gate with. The termination search does repeatedly select
+`both_active & close` (7/10 folds) — semantically coherent (a moving
+pair stops and starts interacting) — but with no initiation clauses
+inertia never starts, so the EC score stays degenerate.
+
+Files: `results/f_xml_scene_cv/caviar-f-xml-meeting-cv10.json`,
+`results/f_xml_scene_cv/caviar-f-xml-moving-cv10.json`.
+
 ## Reproduction
 
 ```
@@ -328,10 +405,20 @@ python examples/caviar_woled/run_caviar_theory.py --mode relational --protocol e
   --data continuous --pkl caviar-train.json --test-json caviar-test.json \
   --k 4 --seed 7 --min-new-covered 2 --max-body-literals 3 \
   --holdout-score f1 --ec-fit-mode permutation-null --out RESULT.json
+
+# 10-fold CV over the whole corpus, EC protocol (section E; CPU-only)
+python examples/caviar_woled/run_caviar_cv.py \
+  --train-json caviar-train.json --test-json caviar-test.json \
+  --folds 10 --seed 7 --out RESULT.json
+
+# 10-fold scene-family CV on the XML-native corpus (section F; CPU-only)
+python examples/caviar_woled/run_caviar_cv.py --data-source xml \
+  --xml-dir <dir with the 30 CAVIAR ground-truth XML files> \
+  --fluent meeting --folds 10 --seed 7 --out RESULT.json
+python examples/caviar_woled/run_caviar_cv.py --data-source xml \
+  --xml-dir <dir with the 30 CAVIAR ground-truth XML files> \
+  --fluent moving --folds 10 --seed 7 --out RESULT.json
 ```
 
 GPU runs need CUDA (see each script's docstring); the 3-literal EC search
-runs on CPU.
-
-# 10-fold CV over the whole corpus, EC protocol (section E; CPU-only)
-python examples/caviar_woled/run_caviar_cv.py   --train-json caviar-train.json --test-json caviar-test.json   --folds 10 --seed 7 --out RESULT.json
+and both CV harness paths run on CPU.
