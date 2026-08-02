@@ -79,18 +79,29 @@ meeting-only. `xml` folds instead over `caviar_xml_corpus.py`'s 30 CAVIAR
 ground-truth videos (directory from `--xml-dir` or `$CAVIAR_XML_DIR`),
 target fluent from `--fluent {meeting,moving}` (default `meeting`; the dump
 source rejects `--fluent moving` outright, since it has no such target).
-`stratified_segment_folds` runs UNCHANGED over this source too -- one
-"segment" per real video, its own positive-mass count read via
-`_xml_video_as_segment`'s adapter view rather than a dump segment's own
-`"meeting"` set. Per-fold induction, scoring, and micro-averaging are the
-SAME calls either way: `run_fold` only branches on which converter
+`stratified_segment_folds` runs UNCHANGED over this source too, but not over
+one row per video: `xml`'s own fold unit is the SCENE FAMILY
+(`XML_SCENE_FAMILIES`, `_xml_family_fold_assignment`) -- several of the 30
+ground-truth videos are repeat recordings of the same staged scene with the
+same actors, so every video of a family is dealt to the SAME fold, its own
+positive-mass count read via `_xml_video_as_segment`'s adapter view and
+summed across the family before dealing (see `XML_SCENE_FAMILIES`'s own
+docstring for the full rationale). This is the ONLY fold-assignment
+behavior for `--data-source xml` -- there is no flag to opt out of it, by
+design: two near-duplicate recordings landing on opposite sides of a
+train/test split is a leakage risk this script should not let a caller
+reintroduce. Per-fold induction, scoring, and micro-averaging are the SAME
+calls either way: `run_fold` only branches on which converter
 (`convert_continuous` vs `caviar_xml_corpus.convert_xml_corpus`) builds
 `train`/`test`, and on which segment-shaped view feeds
 `derive_ec_targets_continuous`/`derive_ec_masks_continuous`/
 `reconstruct_holds_continuous` (a dump segment itself for `dump`,
 `_xml_video_as_segment`'s adapter for `xml` -- see that function's own
 docstring for why the adapter's row order is guaranteed, not merely
-observed, to match `convert_xml_corpus`'s own `pt` numbering).
+observed, to match `convert_xml_corpus`'s own `pt` numbering). Each video
+is still its own segment/EC-reconstruction unit either way -- family
+grouping changes only which fold id a video is assigned to, never how many
+videos exist or how each is converted/reconstructed.
 
 `--mode {relational,neural}` (default `relational`, BYTE-IDENTICAL to every
 behavior that predates this flag -- see `python/tests/test_caviar_cv.py`'s
@@ -327,6 +338,118 @@ def _xml_video_as_segment(video: dict, fluent: str) -> dict:
         "activity": video["tracked"],
         fluent: positive,
     }
+
+
+# `--data-source xml` only: scene-family table for the 30 CAVIAR
+# ground-truth files (keys = file stems, `_xml_stem`'s own output). Several
+# of these files are repeat recordings of the SAME staged scene with the
+# SAME actors -- the OLED dump itself recognizes this at the source: its
+# own video-concatenation step glues consecutive same-scene recordings
+# together into one spliced timeline rather than treating them as
+# unrelated clips (see `caviar_xml_corpus.py`'s own module docstring for
+# that splicing convention). Two near-duplicate recordings of one scene
+# split across a train/test fold boundary would let a fold "test" on
+# footage whose actors, blocking, and much of its frame-by-frame motion the
+# model already saw, uncontested, in training -- a leakage risk fold
+# assignment should remove structurally, not rely on luck to avoid. Every
+# one of the 30 stems appears in EXACTLY ONE family here; the eight scenes
+# with no known repeat recording are each their own singleton family.
+XML_SCENE_FAMILIES: dict[str, tuple[str, ...]] = {
+    "wk": ("wk1gt", "wk2gt", "wk3gt"),
+    "br": ("br1gt", "br2gt", "br3gt", "br4gt"),
+    "bww": ("bww1gt", "bww2gt"),
+    "fra": ("fra1gt", "fra2gt"),
+    "fomd": ("fomdgt1", "fomdgt2", "fomdgt3"),
+    "lb": ("lbgt", "lb1gt", "lb2gt", "lbbcgt", "lbpugt"),
+    "mw": ("mwt1gt", "mwt2gt", "mws1gt"),
+    "fc": ("fcgt",),
+    "mc1": ("mc1gt",),
+    "ms3g": ("ms3ggt",),
+    "rff": ("rffgt",),
+    "ric": ("ricgt",),
+    "rsf": ("rsfgt",),
+    "rw": ("rwgt",),
+    "sp": ("spgt",),
+}
+
+_XML_STEM_TO_FAMILY: dict[str, str] = {
+    stem: family for family, stems in XML_SCENE_FAMILIES.items() for stem in stems
+}
+
+
+def _xml_stem(video_filename: str) -> str:
+    """A `caviar_xml_corpus.load_xml_corpus` video dict's own ``"video"``
+    field (e.g. ``"wk2gt.xml"``, ``"fomdgt1.xml_"``) reduced to the bare
+    file stem `XML_SCENE_FAMILIES`'s own keys use (``"wk2gt"``,
+    ``"fomdgt1"``) -- strips a trailing ``.xml_`` OR ``.xml`` extension,
+    the two real extensions `load_xml_corpus` itself globs for (checking
+    the longer suffix first, since every ``.xml_`` name also ends in
+    ``.xml`` as a substring), leaving the name unchanged if neither is
+    present."""
+    if video_filename.endswith(".xml_"):
+        return video_filename[: -len(".xml_")]
+    if video_filename.endswith(".xml"):
+        return video_filename[: -len(".xml")]
+    return video_filename
+
+
+def _validate_xml_scene_family_coverage(stems: list[str]) -> None:
+    """Cross-check `XML_SCENE_FAMILIES` against one loaded XML corpus's own
+    file stems: every stem in ``stems`` must appear in the table (an
+    "unknown" stem otherwise -- e.g. a new or renamed ground-truth file the
+    table has not been updated for), and every stem the table names must
+    appear in ``stems`` (a "missing" stem otherwise -- e.g. a stale or
+    typo'd table entry with no matching file). Either mismatch is a fold
+    unit silently built from the wrong membership, so both raise ONE
+    `ValueError` naming every offending stem on both sides, rather than
+    silently dropping or ignoring either one."""
+    table_stems = set(_XML_STEM_TO_FAMILY)
+    corpus_stems = set(stems)
+    unknown = sorted(corpus_stems - table_stems)
+    missing = sorted(table_stems - corpus_stems)
+    if unknown or missing:
+        raise ValueError(
+            "XML_SCENE_FAMILIES does not match this corpus's own file stems -- "
+            f"unknown (in the corpus, not in the table): {unknown}; "
+            f"missing (in the table, not in the corpus): {missing}."
+        )
+
+
+def _xml_family_fold_assignment(
+    videos: list[dict], fluent: str, n_folds: int, seed: int,
+) -> list[int]:
+    """Fold index (0..n_folds-1) per VIDEO, for the XML path -- one fold
+    unit per SCENE FAMILY (`XML_SCENE_FAMILIES`), not per video (see that
+    table's own docstring for why). Mechanism: `stratified_segment_folds`
+    (UNCHANGED) runs exactly once, over one row per FAMILY -- a family's
+    own positive-frame count is the SUM of its member videos' own counts
+    (`_segment_positive_counts` on each video's `_xml_video_as_segment`
+    view), family rows ordered by sorted family name (a fixed order,
+    independent of directory listing order or any other incidental
+    ordering) -- and every video then simply inherits its own family's
+    resulting fold. Every video belonging to one family therefore always
+    lands in the SAME fold; segments/EC-reconstruction units are untouched
+    by this (each video is still converted and reconstructed on its own,
+    exactly as `_xml_video_as_segment`'s own docstring already describes --
+    only which fold id a whole video is assigned to changes here).
+
+    Raises whatever `ValueError` `_validate_xml_scene_family_coverage` or
+    `stratified_segment_folds` itself raises (too few families for
+    ``n_folds``, ``n_folds < 2``, ...)."""
+    stems = [_xml_stem(v["video"]) for v in videos]
+    _validate_xml_scene_family_coverage(stems)
+
+    family_names = sorted(XML_SCENE_FAMILIES)
+    family_index = {name: i for i, name in enumerate(family_names)}
+    video_counts = _segment_positive_counts(
+        [_xml_video_as_segment(v, fluent) for v in videos], fluent=fluent,
+    )
+    family_positive_counts = [0] * len(family_names)
+    for stem, count in zip(stems, video_counts):
+        family_positive_counts[family_index[_XML_STEM_TO_FAMILY[stem]]] += count
+
+    fold_of_family = stratified_segment_folds(family_positive_counts, n_folds, seed)
+    return [fold_of_family[family_index[_XML_STEM_TO_FAMILY[stem]]] for stem in stems]
 
 
 def _fold_segment_split(
@@ -842,9 +965,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "predates this flag): the combined caviar-train.json/"
         "caviar-test.json continuous corpus, meeting-only. 'xml': "
         "caviar_xml_corpus.py's 30 CAVIAR ground-truth videos, folded over "
-        "real video boundaries instead of reconstructed dump segments -- "
-        "target fluent from --fluent, directory from --xml-dir or "
-        "$CAVIAR_XML_DIR.",
+        "real video boundaries instead of reconstructed dump segments, one "
+        "fold unit per SCENE FAMILY rather than per video (see "
+        "XML_SCENE_FAMILIES) -- target fluent from --fluent, directory "
+        "from --xml-dir or $CAVIAR_XML_DIR.",
     )
     p.add_argument("--train-json", default=None, help="path to caviar-train.json (required for --data-source dump)")
     p.add_argument("--test-json", default=None, help="path to caviar-test.json (required for --data-source dump)")
@@ -920,6 +1044,7 @@ def main(argv: list[str] | None = None) -> int:
         test_file_segments = load_continuous(args.test_json)
         all_segments = train_file_segments + test_file_segments
         counts = _segment_positive_counts(all_segments)
+        fold_of_segment = stratified_segment_folds(counts, args.folds, args.seed)
         print(
             f"CAVIAR CV: {len(all_segments)} segments "
             f"({len(train_file_segments)} from --train-json, {len(test_file_segments)} from --test-json), "
@@ -933,13 +1058,13 @@ def main(argv: list[str] | None = None) -> int:
         counts = _segment_positive_counts(
             [_xml_video_as_segment(v, args.fluent) for v in all_segments], fluent=args.fluent,
         )
+        fold_of_segment = _xml_family_fold_assignment(all_segments, args.fluent, args.folds, args.seed)
         print(
             f"CAVIAR CV: {len(all_segments)} XML ground-truth videos from "
-            f"--xml-dir (fluent={args.fluent}), {args.folds} folds, seed={args.seed}",
+            f"--xml-dir (fluent={args.fluent}), grouped into "
+            f"{len(XML_SCENE_FAMILIES)} scene families, {args.folds} folds, seed={args.seed}",
             flush=True,
         )
-
-    fold_of_segment = stratified_segment_folds(counts, args.folds, args.seed)
 
     fold_results = []
     for fold_index in range(args.folds):
