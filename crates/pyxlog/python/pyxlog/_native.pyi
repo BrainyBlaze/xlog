@@ -309,6 +309,27 @@ class CompiledProgram:
         """
         ...
 
+    def prob_var_map(self) -> list[dict]:
+        """Which probabilistic fact each CNF variable stands for.
+
+        Entry ``i`` describes CNF variable ``i`` — the same position ``i`` that
+        the ``grad_true`` / ``grad_false`` vectors of
+        ``evaluate(return_grads=True)`` use (index ``0`` is unused padding,
+        since CNF variables are 1-indexed). Each entry is one of:
+
+        - ``{"kind": "fact", "atom": str, "prob": float}`` for a plain
+          probabilistic fact.
+        - ``{"kind": "choice", "atoms": list[str], "probs": list[float],
+          "choice_index": int}`` for one Bernoulli decision of an annotated
+          disjunction's chain.
+        - ``{"kind": "other"}`` for a variable introduced by compilation that
+          is not a source of randomness.
+
+        Only available for the exact engine; raises ``ValueError`` for
+        Monte Carlo programs.
+        """
+        ...
+
     def evaluate_device(
         self,
         samples: Optional[int] = None,

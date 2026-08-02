@@ -1074,6 +1074,7 @@ result.log_z_e       # Optional[float]: exact log-evidence log Z_E (None for Mon
 # Exact-only (when return_grads=True):
 result.grad_true     # Optional[list[PyCapsule]]: per-query DLPack f64 vector (len = num_vars)
 result.grad_false    # Optional[list[PyCapsule]]: per-query DLPack f64 vector (len = num_vars)
+program.prob_var_map() # list[dict]: entry i names the fact/choice at grad_true/grad_false position i (index 0 is unused padding)
 
 # Monte Carlo only:
 result.stderr        # Optional[PyCapsule]: DLPack f64 vector (len = num_queries)

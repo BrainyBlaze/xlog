@@ -53,7 +53,7 @@ pub use compilation::{
     compile_gpu_d4_and_verify, compile_gpu_d4_and_verify_cached, CircuitCompileProfile,
     GpuCompileConfig,
 };
-pub use exact::{ExactDdnnfProgram, ExactResult, GpuConfig};
+pub use exact::{ExactDdnnfProgram, ExactResult, GpuConfig, ProbVarInfo};
 pub use mc::{
     EvidenceForcing, ForceabilityReason, McCountStrategy, McDeviceResult, McEvalConfig,
     McHotLoopTransfers, McProgram, McResult, McSamplingMethod,

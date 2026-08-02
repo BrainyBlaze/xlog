@@ -613,6 +613,67 @@ impl CompiledProgram {
         }
     }
 
+    /// Which probabilistic fact each CNF variable stands for.
+    ///
+    /// Entry `i` describes CNF variable `i` — the same position `i` that the
+    /// `grad_true` / `grad_false` vectors of `evaluate(return_grads=True)` use
+    /// (index `0` is unused padding, since CNF variables are 1-indexed).
+    pub fn prob_var_map(&self, py: Python<'_>) -> PyResult<Vec<PyObject>> {
+        #[cfg(feature = "host-io")]
+        {
+            use xlog_prob::exact::ProbVarInfo;
+
+            let entries = match &self.program {
+                CompiledProbProgram::Exact(p) => p.prob_var_map(),
+                CompiledProbProgram::Mc(_) => {
+                    return Err(PyValueError::new_err(
+                        "prob_var_map is only available for the exact engine",
+                    ))
+                }
+            };
+
+            let mut out: Vec<PyObject> = Vec::with_capacity(entries.len());
+            for entry in entries {
+                let d = PyDict::new(py);
+                match entry {
+                    ProbVarInfo::Fact { atom, prob } => {
+                        d.set_item("kind", "fact")?;
+                        d.set_item("atom", atom_to_string(atom))?;
+                        d.set_item("prob", *prob)?;
+                    }
+                    ProbVarInfo::Choice {
+                        choices,
+                        choice_index,
+                    } => {
+                        d.set_item("kind", "choice")?;
+                        d.set_item(
+                            "atoms",
+                            choices
+                                .iter()
+                                .map(|(a, _)| atom_to_string(a))
+                                .collect::<Vec<_>>(),
+                        )?;
+                        d.set_item(
+                            "probs",
+                            choices.iter().map(|(_, p)| *p).collect::<Vec<f64>>(),
+                        )?;
+                        d.set_item("choice_index", *choice_index)?;
+                    }
+                    ProbVarInfo::Other => {
+                        d.set_item("kind", "other")?;
+                    }
+                }
+                out.push(d.into());
+            }
+            Ok(out)
+        }
+        #[cfg(not(feature = "host-io"))]
+        {
+            let _ = py;
+            Err(types::host_io_disabled_pyerr())
+        }
+    }
+
     /// Evaluate Monte Carlo programs and return device-only result counts via DLPack.
     ///
     /// This is the primary GPU-native API surface for MC inference. It never performs
