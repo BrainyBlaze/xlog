@@ -12,9 +12,9 @@ use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 
-use xlog_core::{ScalarType, Schema};
 #[cfg(feature = "host-io")]
 use xlog_core::symbol;
+use xlog_core::{ScalarType, Schema};
 use xlog_logic::ast::Term;
 use xlog_prob::exact::ExactDdnnfProgram;
 #[cfg(feature = "host-io")]
