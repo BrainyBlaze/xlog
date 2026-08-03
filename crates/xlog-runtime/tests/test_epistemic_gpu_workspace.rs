@@ -38,11 +38,11 @@ use xlog_logic::epistemic::{
 #[cfg(feature = "epistemic-logic-tests")]
 use xlog_logic::{parse_program, Compiler};
 #[cfg(feature = "epistemic-logic-tests")]
-use xlog_runtime::EpistemicGpuRejectionReason;
-#[cfg(feature = "epistemic-logic-tests")]
 use xlog_runtime::executor::road_not_taken::{
     decode_accepted_bitsets, export_from_accepted_world_views,
 };
+#[cfg(feature = "epistemic-logic-tests")]
+use xlog_runtime::EpistemicGpuRejectionReason;
 #[cfg(feature = "epistemic-logic-tests")]
 use xlog_stats::{
     ColumnStats, JoinSelectivity, KeyHeatStats, PrefixDegreeStats, RelationStats, StatsSnapshot,
@@ -9634,8 +9634,8 @@ fn explore_grounded_marginal_export_over_gpu_world_views() {
     )
     .expect("parse g91 distinct-candidate modal program");
 
-    let executable =
-        compile_epistemic_gpu_execution(&program).expect("g91 distinct-candidate modal must compile");
+    let executable = compile_epistemic_gpu_execution(&program)
+        .expect("g91 distinct-candidate modal must compile");
     let literal_count = executable.gpu_plan.epistemic_literals.len();
 
     let mut executor = Executor::new(Arc::clone(&fixture.provider));
@@ -9675,8 +9675,9 @@ fn explore_grounded_marginal_export_over_gpu_world_views() {
         .expect("untracked readback of world_views");
 
     let bitsets = decode_accepted_bitsets(&host_buf, &accepted, literal_count, max_worlds);
-    let literal_atoms: Vec<(u32, u32, u32)> =
-        (0..literal_count).map(|i| (1000u32, i as u32, 0u32)).collect();
+    let literal_atoms: Vec<(u32, u32, u32)> = (0..literal_count)
+        .map(|i| (1000u32, i as u32, 0u32))
+        .collect();
     let export = export_from_accepted_world_views(&bitsets, literal_count, &literal_atoms);
     eprintln!(
         "EXPLORE marginals={:?} possible_not_known={:?} no_substrate={:?}",

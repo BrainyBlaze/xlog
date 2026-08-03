@@ -340,7 +340,10 @@ mod tests {
             !result.contains(&Y),
             "Y ∈ request.positive_facts => not net-new => excluded; got {result:?}"
         );
-        assert!(result.is_empty(), "only Y was possible-not-known; got {result:?}");
+        assert!(
+            result.is_empty(),
+            "only Y was possible-not-known; got {result:?}"
+        );
     }
 
     /// No accepted world-views (no consistent model) => empty road-not-taken set.
@@ -469,7 +472,10 @@ mod tests {
             "grounded world-fraction: X=2/2, Y=1/2, Z=0/2; got {:?}",
             result.marginals
         );
-        assert!(result.no_substrate_reason.is_none(), "2 accepted worlds, 3 candidates => substrate present");
+        assert!(
+            result.no_substrate_reason.is_none(),
+            "2 accepted worlds, 3 candidates => substrate present"
+        );
     }
 
     /// TIER-2 export — ONE accepted-world-view set yields BOTH coupling surfaces:
@@ -487,7 +493,12 @@ mod tests {
         // conditions-direction: Y carries genuine uncertainty (0.5), X is committed (1.0).
         assert_eq!(result.marginals[1], 0.5, "Y world-fraction");
         // proposes-direction: §1 road-not-taken = {Y} (X committed, Z absent).
-        assert_eq!(result.possible_not_known, vec![Y], "§1 road-not-taken; got {:?}", result.possible_not_known);
+        assert_eq!(
+            result.possible_not_known,
+            vec![Y],
+            "§1 road-not-taken; got {:?}",
+            result.possible_not_known
+        );
     }
 
     /// TIER-2 export — the engine returns the grounded `⋃−⋂` with NO positives
@@ -517,7 +528,10 @@ mod tests {
     fn export_empty_accepted_is_loud_no_substrate() {
         let accepted: Vec<&[u8]> = Vec::new();
         let result = export_from_accepted_world_views(&accepted, 3, &lits());
-        assert!(result.no_substrate_reason.is_some(), "empty accepted => LOUD no-substrate");
+        assert!(
+            result.no_substrate_reason.is_some(),
+            "empty accepted => LOUD no-substrate"
+        );
         assert!(result.possible_not_known.is_empty());
     }
 
@@ -552,7 +566,11 @@ mod tests {
         let accepted = [0usize, 2];
         let bitsets = decode_accepted_bitsets(&buf, &accepted, 3, 4);
         assert_eq!(bitsets.len(), 2);
-        assert_eq!(bitsets[0], &[0b011u8], "candidate 0 bitset-prefix (padding skipped)");
+        assert_eq!(
+            bitsets[0],
+            &[0b011u8],
+            "candidate 0 bitset-prefix (padding skipped)"
+        );
         assert_eq!(
             bitsets[1],
             &[0b100u8],
@@ -567,7 +585,10 @@ mod tests {
         let buf: Vec<u8> = vec![0b011, 0b001, 0b100];
         let accepted = [0usize, 1, 2];
         let bitsets = decode_accepted_bitsets(&buf, &accepted, 3, 1);
-        assert_eq!(bitsets, vec![&[0b011u8][..], &[0b001u8][..], &[0b100u8][..]]);
+        assert_eq!(
+            bitsets,
+            vec![&[0b011u8][..], &[0b001u8][..], &[0b100u8][..]]
+        );
     }
 
     /// TIER-2 readback → export roundtrip over a PADDED-stride buffer: the decoded
@@ -602,9 +623,22 @@ mod tests {
         let buf: Vec<u8> = vec![0b011, 0xFF, 0xFF, 0xFF, 0b001, 0xFF, 0xFF, 0xFF];
         let accepted = [0usize, 1];
         let result = epistemic_export_from_host_buffer(&buf, &accepted, 3, 4, &lits());
-        assert_eq!(result.marginals, vec![1.0, 0.5, 0.0], "grounded marginals; got {:?}", result.marginals);
-        assert_eq!(result.possible_not_known, vec![Y], "§1 ⋃−⋂; got {:?}", result.possible_not_known);
-        assert!(result.no_substrate_reason.is_none(), "2 accepted, 3 candidates => substrate present");
+        assert_eq!(
+            result.marginals,
+            vec![1.0, 0.5, 0.0],
+            "grounded marginals; got {:?}",
+            result.marginals
+        );
+        assert_eq!(
+            result.possible_not_known,
+            vec![Y],
+            "§1 ⋃−⋂; got {:?}",
+            result.possible_not_known
+        );
+        assert!(
+            result.no_substrate_reason.is_none(),
+            "2 accepted, 3 candidates => substrate present"
+        );
     }
 
     /// TIER-2 compact-readback (scaling follow-up, decode-side) — the per-accepted-index
@@ -629,6 +663,10 @@ mod tests {
             "compact-readback decode → same grounded marginals; got {:?}",
             result.marginals
         );
-        assert_eq!(result.possible_not_known, vec![Y], "§1 ⋃−⋂ unchanged under compact readback");
+        assert_eq!(
+            result.possible_not_known,
+            vec![Y],
+            "§1 ⋃−⋂ unchanged under compact readback"
+        );
     }
 }

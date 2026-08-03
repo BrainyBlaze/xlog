@@ -79,7 +79,10 @@ fn run_probe(
     positives: &[Atom],
 ) -> ProbeResult {
     let n = candidate_atoms.len();
-    assert!(n <= 31, "probe literal-count {n} exceeds the ≤31 hard bound (no chunking)");
+    assert!(
+        n <= 31,
+        "probe literal-count {n} exceeds the ≤31 hard bound (no chunking)"
+    );
     let total = 1usize << n;
     let all_bits = total - 1;
 
@@ -104,7 +107,9 @@ fn run_probe(
     let outcome = run_generate_propagate_test(
         program,
         candidates,
-        GeneratePropagateTestConfig { max_candidates: total },
+        GeneratePropagateTestConfig {
+            max_candidates: total,
+        },
     )
     .expect("generate-propagate-test run");
     let accepted = &outcome.accepted_candidate_indices;
@@ -195,7 +200,10 @@ fn no_constraint_background_is_flagged_trivial() {
         result.trivial_suspect,
         "all-accepted => vacuous all-possible => trivial false-positive must be flagged"
     );
-    assert_eq!(result.known_count, 0, "nothing forces a candidate true in all worlds");
+    assert_eq!(
+        result.known_count, 0,
+        "nothing forces a candidate true in all worlds"
+    );
 }
 
 /// Net-additivity: a candidate already in request positives is subtracted (the 2b
@@ -217,6 +225,12 @@ fn positives_are_subtracted_for_net_additivity() {
         "b(1) is still net-new road-not-taken; got {:?}",
         result.road_not_taken
     );
-    assert_eq!(result.net_new, 1, "only b(1) remains after subtracting positive a(1)");
-    assert_eq!(result.literal_count, 2, "literal-count = |candidate_atoms| (tractability 2^2)");
+    assert_eq!(
+        result.net_new, 1,
+        "only b(1) remains after subtracting positive a(1)"
+    );
+    assert_eq!(
+        result.literal_count, 2,
+        "literal-count = |candidate_atoms| (tractability 2^2)"
+    );
 }
