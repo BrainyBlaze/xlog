@@ -13,6 +13,8 @@ use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 
 use xlog_core::{ScalarType, Schema};
+#[cfg(feature = "host-io")]
+use xlog_core::symbol;
 use xlog_logic::ast::Term;
 use xlog_prob::exact::ExactDdnnfProgram;
 #[cfg(feature = "host-io")]
@@ -184,7 +186,9 @@ fn atom_to_string(atom: &xlog_prob::provenance::GroundAtom) -> String {
         match arg {
             Value::I64(v) => s.push_str(&v.to_string()),
             Value::F64(bits) => s.push_str(&f64::from_bits(*bits).to_string()),
-            Value::Symbol(sym) => s.push_str(&format!("sym#{}", sym)),
+            Value::Symbol(sym) => {
+                s.push_str(&symbol::resolve_checked(*sym).unwrap_or_else(|| format!("sym#{}", sym)))
+            }
             Value::String(v) => s.push_str(v),
         }
     }
