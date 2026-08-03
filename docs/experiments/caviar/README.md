@@ -266,9 +266,10 @@ what the direct protocol reaches under its own studied settings.
 duplicates two videos across its train and test files and carries
 near-identical recordings of one scene as separate segments, so
 segment-level folds still permit same-scene train/test transfer. Section
-F quantifies the consequence: under a deduplicated, scene-family-grouped
-protocol the meeting result collapses to zero. This row remains valid as
-the dump-protocol figure — the regime the published numbers share.
+F audits exactly how much of the corpus this touches; section G quantifies
+the consequence: under a deduplicated, scene-family-grouped protocol the
+meeting result collapses to zero. This row remains valid as the
+dump-protocol figure — the regime the published numbers share.
 
 Files: `results/e10_cv/caviar-e10-cv10.json`.
 
@@ -313,31 +314,130 @@ abstains contribute identically to both runs (the baseline clause never
 fired on them: tp/fp 0/0 in both). Files:
 `results/e11_cv10_termination.json`.
 
-## F. Leak-free protocol: XML-native corpus, scene-family folds (meeting AND moving)
+**Integrity caveat.** Like section E, this 0.778 headline is measured on
+the duplication-affected combined corpus, not a clean split — section F
+audits exactly what that duplication is and how much of the corpus it
+touches, and section G re-runs this same protocol on a deduplicated,
+leakage-free corpus.
 
-Sections B–E run on the OLED dump. Frame-level reconciliation of that
-dump against the original CAVIAR ground-truth XML exposed two integrity
-defects in the dump itself: two videos (`wk2gt`, `fomdgt2`) are present
-in BOTH its train and test files, and near-identical recordings of the
-same staged scene enter the corpus as separate units — so segment-level
-folds (section E) still place one recording of a scene in train while
-testing on another recording of the same scene. This section removes
-both defects: the corpus is rebuilt directly from the 30 CAVIAR
-ground-truth XML files (a mapping that reproduces the dump's meeting
-annotation exactly on person-matched segments — zero spurious atoms),
-deduplicated by construction, and cross-validated 10-fold with folds
-drawn over the 15 SCENE FAMILIES (every recording of one staged scene
-shares a fold). All gates are as pre-registered in section E
-(per-fold permutation-null fit thresholds, F1 holdout, seed 7). The run
-is CPU-only and deterministic: a full independent replay reproduced
-every value in the shipped result files exactly.
+### E.2 Neural closeness detector, 10-fold cross-validation (dump corpus): honest negative
 
-| fluent, protocol (10-fold scene-family CV micro) | P | R | F1 |
-|---|---|---|---|
-| meeting, EC + inertia | 0.000 | 0.000 | **0.000** |
-| meeting, direct reference | 0.000 | 0.000 | 0.000 |
-| moving, direct reference | 0.593 | 0.413 | **0.487** |
-| moving, EC + inertia | 0.000 | 0.000 | 0.000 |
+The learned `close_nn` proximity detector (jointly trained through the
+logic credit, as in sections A and B — no distance labels shown to the
+network) was substituted for the precomputed `close` predicate in the
+initiation search of the same pre-registered 10-fold EC cross-validation
+as sections E/E.1 (dump corpus, 26 combined video segments, per-fold
+permutation-null fit gates, seed 7); the termination search is unchanged.
+
+| protocol (10-fold CV micro, neural close_nn initiation) | P | R | F1 | tp/fp/fn |
+|---|---|---|---|---|
+| EC + inertia | 0.125 | 0.0005 | **0.0011** | 1/7/1832 |
+
+Only fold 0 commits an initiation clause — `both_active & close_nn` — the
+same clause the precomputed-threshold (`close`) detector selects on that
+fold, at matching held-out geometry: probed directly against ground-truth
+`close` on the fold's held-out rows, the trained net's clause scores
+precision 1.0 / recall 0.27 as a standalone frame-level classifier — the
+network has genuinely learned the geometric relation. Folds 1–9 all
+reject the same candidate as insufficient new coverage: the trained
+gate's above-0.5 coverage clears only 2–4 of each fold's transition
+positives, short of the minimum-new-covered floor combined with that
+fold's permutation-null fit gate.
+
+**Diagnosis: a coverage-scale mismatch, not a failed detector.** The
+relational EC search evaluates a candidate's coverage against transition
+EVENTS — a handful per fold — while `both_active & close_nn` covers
+hundreds of raw frames; a probability-thresholded network's count of
+transition events it newly covers is inherently sparser at this
+granularity than a deterministic geometric predicate's, so the same
+selection rule that lets `close` commit on 8 of 10 folds (see section
+E.1's diagnosis of the dump-protocol corpus) starves on `close_nn` at
+this event count. File: `results/caviar-e12-neural-cv10.json`.
+
+## F. Data integrity audit of the distributed corpus
+
+A frame-level audit cross-matched every meeting transition event in the
+OLED dump (the combined train+test corpus sections A–E.2 run on) against
+the original 30 CAVIAR ground-truth XML files, independently re-deriving
+transitions from each real video's own frame sequence — never bridging
+across a splice or a train/test duplicate — and matching by exact local
+frame number.
+
+Of the dump's 25 meeting transition events (13 initiations, 12
+terminations):
+
+- **21 are real**, mapping 1:1 onto an XML ground-truth annotation change
+  (11 initiations, 10 terminations — with no event on either side left
+  unmatched);
+- **3 are duplicates**: the videos `wk2gt` and `fomdgt2` each appear in
+  BOTH the dump's train file and its test file, so the same real event is
+  counted twice (2 initiations + 1 termination);
+- **1 is a splice phantom**: a termination created by an invisible,
+  exactly-40-millisecond bridge that the dump's segment-joining rule
+  draws between two different videos it treats as one contiguous
+  recording — no such event exists in either video's own ground truth.
+
+**Consequence for sections E and E.1.** Under the combined-corpus 10-fold
+split those sections cross-validate over, the two `wk2gt` copies land in
+different folds: the same video sits in the training set while it (or
+its duplicate) is being tested, duplicating on the order of 855 gold
+meeting pair-frames — roughly half the corpus's total positive mass.
+Sections E and E.1's headline numbers should be read with this caveat
+attached: they are not a clean-split result. The learned theory in both
+sections is a single, generic 2-literal clause (`both_active & close`,
+plus `became_far & distance_increasing` for termination in E.1) rather
+than anything fit to the duplicated video specifically, which limits —
+but does not eliminate — a memorization interpretation of those scores.
+Section G re-runs the same protocol on a corpus with both defects removed
+by construction.
+
+## G. Clean corpus (XML-native): canonical protocol and results
+
+Section F's audit documents two integrity defects in the OLED dump that
+sections B–E run on: two videos (`wk2gt`, `fomdgt2`) present in BOTH its
+train and test files, and near-identical recordings of the same staged
+scene entered as separate units — so segment-level folds (section E)
+still place one recording of a scene in train while testing on another
+recording of the same scene. This section removes both defects: the
+corpus is rebuilt directly from the 30 CAVIAR ground-truth XML files —
+alignment proof: the meeting fluent derived from XML reproduces the
+dump's own annotation with zero extra atoms on every person-matched
+video (e.g. the fully person-matched video yields 855/855 matching
+frames) — deduplicated by construction (no video counted twice), with
+real per-video boundaries (no splices), and cross-validated 10-fold with
+folds drawn over the 15 SCENE FAMILIES (every recording of one staged
+scene shares a fold, closing the same-scene leakage section F
+describes). All gates are otherwise exactly as pre-registered in section
+E (per-fold permutation-null fit thresholds, F1 holdout, seed 7). The
+relational search path is fully deterministic, so CPU and GPU execution
+of this protocol are byte-identical; the run is CPU-only, and a full
+independent replay reproduced every value in the shipped result files
+exactly.
+
+**Corpus composition (event counts, post-deduplication).** Meeting: 12
+intervals, 11 initiations, 10 terminations, 1,812 gold pair-frames.
+Moving: 18 intervals, 5 initiations, 8 terminations, 3,136 gold
+pair-frames.
+
+| fluent, protocol (10-fold scene-family CV micro) | P | R | F1 | tp/fp/fn |
+|---|---|---|---|---|
+| meeting, EC + inertia | 0.000 | 0.000 | **0.000** | 0/120/1812 |
+| meeting, direct reference | 0.000 | 0.000 | 0.000 | 0/106/1812 |
+| moving, direct reference | 0.5927 | 0.4129 | **0.4868** | 1295/890/1841 |
+| moving, EC + inertia | 0.000 | 0.000 | 0.000 | 0/0/3136 |
+
+**Why the EC search abstains everywhere.** With only 11 (meeting) and 5
+(moving) observed initiations once duplicates and splices are removed,
+each fold's training pool is smaller and less inflated than the
+duplication-affected dump protocol's — and the permutation-null gates
+rise accordingly: the meeting initiation fit gate moves from the dump
+protocol's per-fold 0.035–0.046 range to 0.056–0.071 here, a ~40–60%
+tightening on every fold, with no exception. No candidate clears the
+higher, honestly-derived gate on enough folds. This is a principled
+abstention at low event count — the harness's own call, not a search
+failure — not evidence that no rule exists; sections E/E.1's dump-corpus
+result shows the same 2-literal candidate CAN clear a lower, but
+duplication-inflated, gate.
 
 **The meeting zero is a property of the data under the stricter
 protocol, not a harness failure.** Training still selects the familiar
@@ -382,6 +482,42 @@ inertia never starts, so the EC score stays degenerate.
 Files: `results/f_xml_scene_cv/caviar-f-xml-meeting-cv10.json`,
 `results/f_xml_scene_cv/caviar-f-xml-moving-cv10.json`.
 
+## H. Claims summary: what this benchmark does and does not establish
+
+| system, protocol | meeting F1 | moving F1 |
+|---|---|---|
+| OLED (published, tuned hyperparameters) | 0.792 | 0.732 |
+| WOLED-ASP (published, ibid.) | 0.887 | 0.821 |
+| Hand-crafted rules (published, ibid.) | 0.735 | 0.637 |
+| This work, distributed-corpus protocol (carries the duplication caveat — sections E.1/F) | 0.7782 | not run |
+| This work, clean protocol (deduplicated, leakage-free — section G) | 0.0 (abstains) | 0.0 (abstains) |
+
+The moving column is from the same papers and tables cited for meeting in
+section C (OLED Table 1(b); WOLED Table 2), not independently re-verified
+against the downloaded PDFs the way the meeting numbers are above.
+
+**What may be claimed:** a meeting F1 in the published systems' own
+parity range on the distributed-corpus protocol (0.7782, inside the
+0.735–0.887 band above), under the duplication caveat documented in
+section F; a reproducible, independently-verified integrity audit of the
+distributed benchmark corpus itself (section F); and principled
+abstention — the harness's own call, not a forced or tuned answer — at
+the clean protocol's actual event count (11 meeting / 5 moving
+initiations, section G).
+
+**What may NOT be claimed:** any ranking against OLED, WOLED-ASP, or
+hand-crafted rules on this benchmark. The clean protocol has too few
+events (11 meeting / 5 moving initiations) for a cross-validated
+comparison to mean anything either way; the distributed-corpus protocol's
+0.7782 carries the duplication/splice caveat above and is not evaluated
+on a clean split. Nor is the distributed-corpus comparison apples-to-apples
+even setting duplication aside: the published point estimates were
+obtained by the authors' own selection of "the best among several other
+parameter settings that we tried" (OLED paper, Sect. 5) on the same
+distributed corpus this audit finds flawed, under their own richer rule
+language and windowed evaluation — not under a pre-registered protocol
+fixed before looking at results.
+
 ## Reproduction
 
 ```
@@ -411,7 +547,13 @@ python examples/caviar_woled/run_caviar_cv.py \
   --train-json caviar-train.json --test-json caviar-test.json \
   --folds 10 --seed 7 --out RESULT.json
 
-# 10-fold scene-family CV on the XML-native corpus (section F; CPU-only)
+# 10-fold CV over the whole corpus, neural close_nn initiation search
+# (section E.2; CUDA required)
+python examples/caviar_woled/run_caviar_cv.py --mode neural \
+  --train-json caviar-train.json --test-json caviar-test.json \
+  --folds 10 --seed 7 --out RESULT.json
+
+# 10-fold scene-family CV on the XML-native corpus (section G; CPU-only)
 python examples/caviar_woled/run_caviar_cv.py --data-source xml \
   --xml-dir <dir with the 30 CAVIAR ground-truth XML files> \
   --fluent meeting --folds 10 --seed 7 --out RESULT.json

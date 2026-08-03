@@ -1,0 +1,1070 @@
+{
+  "train_json": "/workspace/caviar-train.json",
+  "test_json": "/workspace/caviar-test.json",
+  "folds": 10,
+  "seed": 7,
+  "mode": "neural",
+  "n_segments_total": 26,
+  "fold_of_segment": [
+    5,
+    2,
+    5,
+    0,
+    3,
+    4,
+    1,
+    7,
+    3,
+    9,
+    6,
+    8,
+    2,
+    7,
+    5,
+    4,
+    9,
+    1,
+    0,
+    3,
+    6,
+    0,
+    4,
+    1,
+    7,
+    8
+  ],
+  "segment_positive_counts": [
+    855,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    188,
+    0,
+    0,
+    0,
+    0,
+    25,
+    0,
+    173,
+    22,
+    60,
+    0,
+    0,
+    21,
+    469,
+    0,
+    0,
+    0,
+    20
+  ],
+  "fold_results": [
+    {
+      "fold": 0,
+      "mode": "neural",
+      "n_train_segments": 23,
+      "n_test_segments": 3,
+      "n_train_pt": 29433,
+      "n_test_pt": 2927,
+      "ec": {
+        "n_init_train": 11,
+        "n_term_train": 12,
+        "n_init_test": 2,
+        "n_term_test": 0,
+        "init_min_fit": 0.03333333333333333,
+        "term_min_fit": 0.13333333333333333,
+        "init_null_summary": {
+          "threshold": 0.03333333333333333,
+          "pool_max_samples_summary": {
+            "min": 0.0,
+            "median": 0.0,
+            "p95": 0.03333333333333333,
+            "max": 0.13333333333333333
+          },
+          "n_permutations": 1000,
+          "quantile": 0.95,
+          "perm_seed": 7
+        },
+        "term_null_summary": {
+          "threshold": 0.13333333333333333,
+          "pool_max_samples_summary": {
+            "min": 0.012499999999999999,
+            "median": 0.05555555555555555,
+            "p95": 0.13333333333333333,
+            "max": 0.25
+          },
+          "n_permutations": 1000,
+          "quantile": 0.95,
+          "perm_seed": 7
+        },
+        "init_clauses": [
+          [
+            "both_active",
+            "close_nn"
+          ]
+        ],
+        "term_clauses": [
+          [
+            "became_far",
+            "distance_increasing"
+          ],
+          [
+            "both_walking",
+            "close"
+          ]
+        ],
+        "init_stop_reason": "insufficient new coverage",
+        "term_stop_reason": "select_once abstained",
+        "init_selection_reasons": [
+          "committed",
+          "rejected: newly covered positives below min_new_covered"
+        ],
+        "term_selection_reasons": [
+          "holdout tie broken by Occam: every tied body covers an IDENTICAL fact set (indistinguishable on this training data), so the shortest/lexicographically-first body (became_far&distance_increasing) is kept -- generalizes _select_from_holdout's relational-over-neural tie-break (equal generalization, simpler explanation) to 'simpler description, provably equal cover'",
+          "won by 0.13333",
+          "no body passed the fit gate (min_fit=0.13333333333333333): a body that cannot fit held-out data is not a rule"
+        ],
+        "init_detector_probe": {
+          "clause0:both_active|close_nn": {
+            "probe_test": {
+              "num_rows": 2927,
+              "num_excluded": 0,
+              "no_close_rows": false,
+              "accuracy": 0.8015032456440041,
+              "prf1": {
+                "precision": 1.0,
+                "recall": 0.2746566791510612,
+                "f1": 0.4309500489715965,
+                "tp": 220,
+                "fp": 0,
+                "fn": 581,
+                "tn": 2126,
+                "degenerate": false
+              },
+              "bins": [
+                {
+                  "label": "0-5",
+                  "count": 14,
+                  "mean_score": 0.6177074866635459
+                },
+                {
+                  "label": "5-10",
+                  "count": 105,
+                  "mean_score": 0.5525282646928514
+                },
+                {
+                  "label": "10-15",
+                  "count": 332,
+                  "mean_score": 0.43502716217414444
+                },
+                {
+                  "label": "15-20",
+                  "count": 235,
+                  "mean_score": 0.3451233009074597
+                },
+                {
+                  "label": "20-25",
+                  "count": 114,
+                  "mean_score": 0.3447015225364451
+                },
+                {
+                  "label": "25-30",
+                  "count": 42,
+                  "mean_score": 0.2587379204730193
+                },
+                {
+                  "label": "30-35",
+                  "count": 21,
+                  "mean_score": 0.06377207898046999
+                },
+                {
+                  "label": "35-40",
+                  "count": 25,
+                  "mean_score": 0.004539939792593941
+                },
+                {
+                  "label": "40-45",
+                  "count": 13,
+                  "mean_score": 0.020003875428021553
+                },
+                {
+                  "label": "45-50",
+                  "count": 16,
+                  "mean_score": 0.00024651042153678304
+                },
+                {
+                  "label": "50+",
+                  "count": 2010,
+                  "mean_score": 1.1842750429130688e-06
+                }
+              ]
+            },
+            "pair_swap_asymmetry": 0.0
+          }
+        },
+        "scoring": {
+          "precision": 0.125,
+          "recall": 0.0021321961620469083,
+          "f1": 0.0041928721174004195,
+          "tp": 1,
+          "fp": 7,
+          "fn": 468,
+          "tn": 2451,
+          "degenerate": false
+        }
+      },
+      "direct": {
+        "clauses": [
+          [
+            "both_inactive",
+            "close"
+          ]
+        ],
+        "stop_reason": "select_once abstained",
+        "scoring": {
+          "precision": 1.0,
+          "recall": 0.4946695095948827,
+          "f1": 0.6619115549215406,
+          "tp": 232,
+          "fp": 0,
+          "fn": 237,
+          "tn": 2458,
+          "degenerate": false
+        }
+      },
+      "wall_clock_s": {
+        "convert": 0.13726858096197248,
+        "init_search": 151.9203920410946,
+        "term_search": 0.6454823749372736,
+        "direct_search": 0.1452265699626878
+      }
+    },
+    {
+      "fold": 1,
+      "mode": "neural",
+      "n_train_segments": 23,
+      "n_test_segments": 3,
+      "n_train_pt": 30073,
+      "n_test_pt": 2287,
+      "ec": {
+        "n_init_train": 12,
+        "n_term_train": 11,
+        "n_init_test": 1,
+        "n_term_test": 1,
+        "init_min_fit": 0.02777777777777778,
+        "term_min_fit": 0.13333333333333333,
+        "init_null_summary": {
+          "threshold": 0.02777777777777778,
+          "pool_max_samples_summary": {
+            "min": 0.0,
+            "median": 0.0,
+            "p95": 0.02777777777777778,
+            "max": 0.16666666666666666
+          },
+          "n_permutations": 1000,
+          "quantile": 0.95,
+          "perm_seed": 7
+        },
+        "term_null_summary": {
+          "threshold": 0.13333333333333333,
+          "pool_max_samples_summary": {
+            "min": 0.011904761904761904,
+            "median": 0.045454545454545456,
+            "p95": 0.13333333333333333,
+            "max": 0.38888888888888884
+          },
+          "n_permutations": 1000,
+          "quantile": 0.95,
+          "perm_seed": 7
+        },
+        "init_clauses": [],
+        "term_clauses": [
+          [
+            "became_far",
+            "distance_increasing"
+          ]
+        ],
+        "init_stop_reason": "insufficient new coverage",
+        "term_stop_reason": "select_once abstained",
+        "init_selection_reasons": [
+          "rejected: newly covered positives below min_new_covered"
+        ],
+        "term_selection_reasons": [
+          "holdout tie broken by Occam: every tied body covers an IDENTICAL fact set (indistinguishable on this training data), so the shortest/lexicographically-first body (became_far&distance_increasing) is kept -- generalizes _select_from_holdout's relational-over-neural tie-break (equal generalization, simpler explanation) to 'simpler description, provably equal cover'",
+          "no body passed the fit gate (min_fit=0.13333333333333333): a body that cannot fit held-out data is not a rule"
+        ],
+        "init_detector_probe": {},
+        "scoring": {
+          "precision": 0.0,
+          "recall": 0.0,
+          "f1": 0.0,
+          "tp": 0,
+          "fp": 0,
+          "fn": 60,
+          "tn": 2227,
+          "degenerate": true
+        }
+      },
+      "direct": {
+        "clauses": [
+          [
+            "both_inactive",
+            "close"
+          ]
+        ],
+        "stop_reason": "select_once abstained",
+        "scoring": {
+          "precision": 0.0,
+          "recall": 0.0,
+          "f1": 0.0,
+          "tp": 0,
+          "fp": 0,
+          "fn": 60,
+          "tn": 2227,
+          "degenerate": true
+        }
+      },
+      "wall_clock_s": {
+        "convert": 0.12881378596648574,
+        "init_search": 74.66480660799425,
+        "term_search": 0.7914192799944431,
+        "direct_search": 0.16737740498501807
+      }
+    },
+    {
+      "fold": 2,
+      "mode": "neural",
+      "n_train_segments": 24,
+      "n_test_segments": 2,
+      "n_train_pt": 30324,
+      "n_test_pt": 2036,
+      "ec": {
+        "n_init_train": 13,
+        "n_term_train": 12,
+        "n_init_test": 0,
+        "n_term_test": 0,
+        "init_min_fit": 0.027838164251207678,
+        "term_min_fit": 0.125,
+        "init_null_summary": {
+          "threshold": 0.027838164251207678,
+          "pool_max_samples_summary": {
+            "min": 0.0,
+            "median": 0.0,
+            "p95": 0.027838164251207678,
+            "max": 0.16666666666666666
+          },
+          "n_permutations": 1000,
+          "quantile": 0.95,
+          "perm_seed": 7
+        },
+        "term_null_summary": {
+          "threshold": 0.125,
+          "pool_max_samples_summary": {
+            "min": 0.010941040875405449,
+            "median": 0.045454545454545456,
+            "p95": 0.125,
+            "max": 0.29166666666666663
+          },
+          "n_permutations": 1000,
+          "quantile": 0.95,
+          "perm_seed": 7
+        },
+        "init_clauses": [],
+        "term_clauses": [
+          [
+            "became_far",
+            "distance_increasing"
+          ]
+        ],
+        "init_stop_reason": "insufficient new coverage",
+        "term_stop_reason": "select_once abstained",
+        "init_selection_reasons": [
+          "rejected: newly covered positives below min_new_covered"
+        ],
+        "term_selection_reasons": [
+          "holdout tie broken by Occam: every tied body covers an IDENTICAL fact set (indistinguishable on this training data), so the shortest/lexicographically-first body (became_far&distance_increasing) is kept -- generalizes _select_from_holdout's relational-over-neural tie-break (equal generalization, simpler explanation) to 'simpler description, provably equal cover'",
+          "no body passed the fit gate (min_fit=0.125): a body that cannot fit held-out data is not a rule"
+        ],
+        "init_detector_probe": {},
+        "scoring": {
+          "precision": 0.0,
+          "recall": 0.0,
+          "f1": 0.0,
+          "tp": 0,
+          "fp": 0,
+          "fn": 0,
+          "tn": 2036,
+          "degenerate": true
+        }
+      },
+      "direct": {
+        "clauses": [
+          [
+            "both_inactive",
+            "close"
+          ]
+        ],
+        "stop_reason": "select_once abstained",
+        "scoring": {
+          "precision": 0.0,
+          "recall": 0.0,
+          "f1": 0.0,
+          "tp": 0,
+          "fp": 0,
+          "fn": 0,
+          "tn": 2036,
+          "degenerate": true
+        }
+      },
+      "wall_clock_s": {
+        "convert": 0.14006726897787303,
+        "init_search": 70.66797652991954,
+        "term_search": 0.7733260330278426,
+        "direct_search": 0.16310163389425725
+      }
+    },
+    {
+      "fold": 3,
+      "mode": "neural",
+      "n_train_segments": 23,
+      "n_test_segments": 3,
+      "n_train_pt": 30515,
+      "n_test_pt": 1845,
+      "ec": {
+        "n_init_train": 12,
+        "n_term_train": 10,
+        "n_init_test": 1,
+        "n_term_test": 2,
+        "init_min_fit": 0.03342105263157887,
+        "term_min_fit": 0.12719742063492043,
+        "init_null_summary": {
+          "threshold": 0.03342105263157887,
+          "pool_max_samples_summary": {
+            "min": 0.0,
+            "median": 0.0,
+            "p95": 0.03342105263157887,
+            "max": 0.16666666666666666
+          },
+          "n_permutations": 1000,
+          "quantile": 0.95,
+          "perm_seed": 7
+        },
+        "term_null_summary": {
+          "threshold": 0.12719742063492043,
+          "pool_max_samples_summary": {
+            "min": 0.010101010101010102,
+            "median": 0.0392156862745098,
+            "p95": 0.12719742063492043,
+            "max": 0.25
+          },
+          "n_permutations": 1000,
+          "quantile": 0.95,
+          "perm_seed": 7
+        },
+        "init_clauses": [],
+        "term_clauses": [],
+        "init_stop_reason": "insufficient new coverage",
+        "term_stop_reason": "select_once abstained",
+        "init_selection_reasons": [
+          "rejected: newly covered positives below min_new_covered"
+        ],
+        "term_selection_reasons": [
+          "holdout tie among 4 bodies clustering into 2 genuinely different covers: Occam licenses narrowing an identical-cover tie to its simplest description, not choosing among bodies that actually disagree on some fact"
+        ],
+        "init_detector_probe": {},
+        "scoring": {
+          "precision": 0.0,
+          "recall": 0.0,
+          "f1": 0.0,
+          "tp": 0,
+          "fp": 0,
+          "fn": 188,
+          "tn": 1657,
+          "degenerate": true
+        }
+      },
+      "direct": {
+        "clauses": [
+          [
+            "both_inactive",
+            "close"
+          ]
+        ],
+        "stop_reason": "select_once abstained",
+        "scoring": {
+          "precision": 0.0,
+          "recall": 0.0,
+          "f1": 0.0,
+          "tp": 0,
+          "fp": 0,
+          "fn": 188,
+          "tn": 1657,
+          "degenerate": true
+        }
+      },
+      "wall_clock_s": {
+        "convert": 0.1323350069578737,
+        "init_search": 73.25389539008029,
+        "term_search": 0.6951389000751078,
+        "direct_search": 0.15397469804156572
+      }
+    },
+    {
+      "fold": 4,
+      "mode": "neural",
+      "n_train_segments": 23,
+      "n_test_segments": 3,
+      "n_train_pt": 28440,
+      "n_test_pt": 3920,
+      "ec": {
+        "n_init_train": 10,
+        "n_term_train": 9,
+        "n_init_test": 3,
+        "n_term_test": 3,
+        "init_min_fit": 0.027859477124182932,
+        "term_min_fit": 0.16666666666666666,
+        "init_null_summary": {
+          "threshold": 0.027859477124182932,
+          "pool_max_samples_summary": {
+            "min": 0.0,
+            "median": 0.0,
+            "p95": 0.027859477124182932,
+            "max": 0.125
+          },
+          "n_permutations": 1000,
+          "quantile": 0.95,
+          "perm_seed": 7
+        },
+        "term_null_summary": {
+          "threshold": 0.16666666666666666,
+          "pool_max_samples_summary": {
+            "min": 0.01020408163265306,
+            "median": 0.047619047619047616,
+            "p95": 0.16666666666666666,
+            "max": 0.3333333333333333
+          },
+          "n_permutations": 1000,
+          "quantile": 0.95,
+          "perm_seed": 7
+        },
+        "init_clauses": [],
+        "term_clauses": [],
+        "init_stop_reason": "insufficient new coverage",
+        "term_stop_reason": "select_once abstained",
+        "init_selection_reasons": [
+          "rejected: newly covered positives below min_new_covered"
+        ],
+        "term_selection_reasons": [
+          "no body passed the fit gate (min_fit=0.16666666666666666): a body that cannot fit held-out data is not a rule"
+        ],
+        "init_detector_probe": {},
+        "scoring": {
+          "precision": 0.0,
+          "recall": 0.0,
+          "f1": 0.0,
+          "tp": 0,
+          "fp": 0,
+          "fn": 173,
+          "tn": 3747,
+          "degenerate": true
+        }
+      },
+      "direct": {
+        "clauses": [
+          [
+            "both_inactive",
+            "close"
+          ]
+        ],
+        "stop_reason": "select_once abstained",
+        "scoring": {
+          "precision": 0.0,
+          "recall": 0.0,
+          "f1": 0.0,
+          "tp": 0,
+          "fp": 53,
+          "fn": 173,
+          "tn": 3694,
+          "degenerate": true
+        }
+      },
+      "wall_clock_s": {
+        "convert": 0.12332643498666584,
+        "init_search": 70.55302402493544,
+        "term_search": 0.6797637930139899,
+        "direct_search": 0.1430842310655862
+      }
+    },
+    {
+      "fold": 5,
+      "mode": "neural",
+      "n_train_segments": 23,
+      "n_test_segments": 3,
+      "n_train_pt": 29840,
+      "n_test_pt": 2520,
+      "ec": {
+        "n_init_train": 12,
+        "n_term_train": 11,
+        "n_init_test": 1,
+        "n_term_test": 1,
+        "init_min_fit": 0.029411764705882353,
+        "term_min_fit": 0.16666666666666666,
+        "init_null_summary": {
+          "threshold": 0.029411764705882353,
+          "pool_max_samples_summary": {
+            "min": 0.0,
+            "median": 0.0,
+            "p95": 0.029411764705882353,
+            "max": 0.16666666666666666
+          },
+          "n_permutations": 1000,
+          "quantile": 0.95,
+          "perm_seed": 7
+        },
+        "term_null_summary": {
+          "threshold": 0.16666666666666666,
+          "pool_max_samples_summary": {
+            "min": 0.0225,
+            "median": 0.07142857142857144,
+            "p95": 0.16666666666666666,
+            "max": 0.3333333333333333
+          },
+          "n_permutations": 1000,
+          "quantile": 0.95,
+          "perm_seed": 7
+        },
+        "init_clauses": [],
+        "term_clauses": [],
+        "init_stop_reason": "insufficient new coverage",
+        "term_stop_reason": "select_once abstained",
+        "init_selection_reasons": [
+          "rejected: newly covered positives below min_new_covered"
+        ],
+        "term_selection_reasons": [
+          "no body passed the fit gate (min_fit=0.16666666666666666): a body that cannot fit held-out data is not a rule"
+        ],
+        "init_detector_probe": {},
+        "scoring": {
+          "precision": 0.0,
+          "recall": 0.0,
+          "f1": 0.0,
+          "tp": 0,
+          "fp": 0,
+          "fn": 855,
+          "tn": 1665,
+          "degenerate": true
+        }
+      },
+      "direct": {
+        "clauses": [],
+        "stop_reason": "select_once abstained",
+        "scoring": {
+          "precision": 0.0,
+          "recall": 0.0,
+          "f1": 0.0,
+          "tp": 0,
+          "fp": 0,
+          "fn": 855,
+          "tn": 1665,
+          "degenerate": true
+        }
+      },
+      "wall_clock_s": {
+        "convert": 0.12936947599519044,
+        "init_search": 73.18035978905391,
+        "term_search": 0.7000254479935393,
+        "direct_search": 0.07657221599947661
+      }
+    },
+    {
+      "fold": 6,
+      "mode": "neural",
+      "n_train_segments": 24,
+      "n_test_segments": 2,
+      "n_train_pt": 24746,
+      "n_test_pt": 7614,
+      "ec": {
+        "n_init_train": 11,
+        "n_term_train": 10,
+        "n_init_test": 2,
+        "n_term_test": 2,
+        "init_min_fit": 0.035119047619047584,
+        "term_min_fit": 0.16666666666666666,
+        "init_null_summary": {
+          "threshold": 0.035119047619047584,
+          "pool_max_samples_summary": {
+            "min": 0.0,
+            "median": 0.0,
+            "p95": 0.035119047619047584,
+            "max": 0.16666666666666666
+          },
+          "n_permutations": 1000,
+          "quantile": 0.95,
+          "perm_seed": 7
+        },
+        "term_null_summary": {
+          "threshold": 0.16666666666666666,
+          "pool_max_samples_summary": {
+            "min": 0.009095473674963866,
+            "median": 0.047619047619047616,
+            "p95": 0.16666666666666666,
+            "max": 0.35555555555555557
+          },
+          "n_permutations": 1000,
+          "quantile": 0.95,
+          "perm_seed": 7
+        },
+        "init_clauses": [],
+        "term_clauses": [
+          [
+            "became_far",
+            "distance_increasing"
+          ]
+        ],
+        "init_stop_reason": "insufficient new coverage",
+        "term_stop_reason": "select_once abstained",
+        "init_selection_reasons": [
+          "rejected: newly covered positives below min_new_covered"
+        ],
+        "term_selection_reasons": [
+          "holdout tie broken by Occam: every tied body covers an IDENTICAL fact set (indistinguishable on this training data), so the shortest/lexicographically-first body (became_far&distance_increasing) is kept -- generalizes _select_from_holdout's relational-over-neural tie-break (equal generalization, simpler explanation) to 'simpler description, provably equal cover'",
+          "no body passed the fit gate (min_fit=0.16666666666666666): a body that cannot fit held-out data is not a rule"
+        ],
+        "init_detector_probe": {},
+        "scoring": {
+          "precision": 0.0,
+          "recall": 0.0,
+          "f1": 0.0,
+          "tp": 0,
+          "fp": 0,
+          "fn": 21,
+          "tn": 7593,
+          "degenerate": true
+        }
+      },
+      "direct": {
+        "clauses": [
+          [
+            "both_inactive",
+            "close"
+          ]
+        ],
+        "stop_reason": "select_once abstained",
+        "scoring": {
+          "precision": 0.0,
+          "recall": 0.0,
+          "f1": 0.0,
+          "tp": 0,
+          "fp": 0,
+          "fn": 21,
+          "tn": 7593,
+          "degenerate": true
+        }
+      },
+      "wall_clock_s": {
+        "convert": 0.13902996096294373,
+        "init_search": 72.76862497103866,
+        "term_search": 0.6638793959282339,
+        "direct_search": 0.13736396096646786
+      }
+    },
+    {
+      "fold": 7,
+      "mode": "neural",
+      "n_train_segments": 23,
+      "n_test_segments": 3,
+      "n_train_pt": 31703,
+      "n_test_pt": 657,
+      "ec": {
+        "n_init_train": 12,
+        "n_term_train": 11,
+        "n_init_test": 1,
+        "n_term_test": 1,
+        "init_min_fit": 0.03125,
+        "term_min_fit": 0.12509920634920627,
+        "init_null_summary": {
+          "threshold": 0.03125,
+          "pool_max_samples_summary": {
+            "min": 0.0,
+            "median": 0.0,
+            "p95": 0.03125,
+            "max": 0.25
+          },
+          "n_permutations": 1000,
+          "quantile": 0.95,
+          "perm_seed": 7
+        },
+        "term_null_summary": {
+          "threshold": 0.12509920634920627,
+          "pool_max_samples_summary": {
+            "min": 0.010869565217391306,
+            "median": 0.05,
+            "p95": 0.12509920634920627,
+            "max": 0.26666666666666666
+          },
+          "n_permutations": 1000,
+          "quantile": 0.95,
+          "perm_seed": 7
+        },
+        "init_clauses": [],
+        "term_clauses": [
+          [
+            "became_far",
+            "distance_increasing"
+          ]
+        ],
+        "init_stop_reason": "insufficient new coverage",
+        "term_stop_reason": "select_once abstained",
+        "init_selection_reasons": [
+          "rejected: newly covered positives below min_new_covered"
+        ],
+        "term_selection_reasons": [
+          "holdout tie broken by Occam: every tied body covers an IDENTICAL fact set (indistinguishable on this training data), so the shortest/lexicographically-first body (became_far&distance_increasing) is kept -- generalizes _select_from_holdout's relational-over-neural tie-break (equal generalization, simpler explanation) to 'simpler description, provably equal cover'",
+          "no body passed the fit gate (min_fit=0.12509920634920627): a body that cannot fit held-out data is not a rule"
+        ],
+        "init_detector_probe": {},
+        "scoring": {
+          "precision": 0.0,
+          "recall": 0.0,
+          "f1": 0.0,
+          "tp": 0,
+          "fp": 0,
+          "fn": 25,
+          "tn": 632,
+          "degenerate": true
+        }
+      },
+      "direct": {
+        "clauses": [
+          [
+            "both_inactive",
+            "close"
+          ]
+        ],
+        "stop_reason": "select_once abstained",
+        "scoring": {
+          "precision": 0.0,
+          "recall": 0.0,
+          "f1": 0.0,
+          "tp": 0,
+          "fp": 0,
+          "fn": 25,
+          "tn": 632,
+          "degenerate": true
+        }
+      },
+      "wall_clock_s": {
+        "convert": 0.12864792300388217,
+        "init_search": 75.07806079892907,
+        "term_search": 0.7860234410036355,
+        "direct_search": 0.1697270069271326
+      }
+    },
+    {
+      "fold": 8,
+      "mode": "neural",
+      "n_train_segments": 24,
+      "n_test_segments": 2,
+      "n_train_pt": 26247,
+      "n_test_pt": 6113,
+      "ec": {
+        "n_init_train": 12,
+        "n_term_train": 11,
+        "n_init_test": 1,
+        "n_term_test": 1,
+        "init_min_fit": 0.03571428571428572,
+        "term_min_fit": 0.125,
+        "init_null_summary": {
+          "threshold": 0.03571428571428572,
+          "pool_max_samples_summary": {
+            "min": 0.0,
+            "median": 0.0,
+            "p95": 0.03571428571428572,
+            "max": 0.16666666666666666
+          },
+          "n_permutations": 1000,
+          "quantile": 0.95,
+          "perm_seed": 7
+        },
+        "term_null_summary": {
+          "threshold": 0.125,
+          "pool_max_samples_summary": {
+            "min": 0.010924141333619613,
+            "median": 0.05,
+            "p95": 0.125,
+            "max": 0.25
+          },
+          "n_permutations": 1000,
+          "quantile": 0.95,
+          "perm_seed": 7
+        },
+        "init_clauses": [],
+        "term_clauses": [
+          [
+            "became_far",
+            "distance_increasing"
+          ]
+        ],
+        "init_stop_reason": "insufficient new coverage",
+        "term_stop_reason": "select_once abstained",
+        "init_selection_reasons": [
+          "rejected: newly covered positives below min_new_covered"
+        ],
+        "term_selection_reasons": [
+          "holdout tie broken by Occam: every tied body covers an IDENTICAL fact set (indistinguishable on this training data), so the shortest/lexicographically-first body (became_far&distance_increasing) is kept -- generalizes _select_from_holdout's relational-over-neural tie-break (equal generalization, simpler explanation) to 'simpler description, provably equal cover'",
+          "no body passed the fit gate (min_fit=0.125): a body that cannot fit held-out data is not a rule"
+        ],
+        "init_detector_probe": {},
+        "scoring": {
+          "precision": 0.0,
+          "recall": 0.0,
+          "f1": 0.0,
+          "tp": 0,
+          "fp": 0,
+          "fn": 20,
+          "tn": 6093,
+          "degenerate": true
+        }
+      },
+      "direct": {
+        "clauses": [
+          [
+            "both_inactive",
+            "close"
+          ]
+        ],
+        "stop_reason": "select_once abstained",
+        "scoring": {
+          "precision": 0.0,
+          "recall": 0.0,
+          "f1": 0.0,
+          "tp": 0,
+          "fp": 53,
+          "fn": 20,
+          "tn": 6040,
+          "degenerate": true
+        }
+      },
+      "wall_clock_s": {
+        "convert": 0.13643405900802463,
+        "init_search": 72.16772081400268,
+        "term_search": 0.7089568180963397,
+        "direct_search": 0.14506762195378542
+      }
+    },
+    {
+      "fold": 9,
+      "mode": "neural",
+      "n_train_segments": 24,
+      "n_test_segments": 2,
+      "n_train_pt": 29919,
+      "n_test_pt": 2441,
+      "ec": {
+        "n_init_train": 12,
+        "n_term_train": 11,
+        "n_init_test": 1,
+        "n_term_test": 1,
+        "init_min_fit": 0.03571428571428571,
+        "term_min_fit": 0.13333333333333333,
+        "init_null_summary": {
+          "threshold": 0.03571428571428571,
+          "pool_max_samples_summary": {
+            "min": 0.0,
+            "median": 0.0,
+            "p95": 0.03571428571428571,
+            "max": 0.16666666666666666
+          },
+          "n_permutations": 1000,
+          "quantile": 0.95,
+          "perm_seed": 7
+        },
+        "term_null_summary": {
+          "threshold": 0.13333333333333333,
+          "pool_max_samples_summary": {
+            "min": 0.0093126750502829,
+            "median": 0.047619047619047616,
+            "p95": 0.13333333333333333,
+            "max": 0.31746031746031744
+          },
+          "n_permutations": 1000,
+          "quantile": 0.95,
+          "perm_seed": 7
+        },
+        "init_clauses": [],
+        "term_clauses": [
+          [
+            "became_far",
+            "distance_increasing"
+          ]
+        ],
+        "init_stop_reason": "insufficient new coverage",
+        "term_stop_reason": "select_once abstained",
+        "init_selection_reasons": [
+          "rejected: newly covered positives below min_new_covered"
+        ],
+        "term_selection_reasons": [
+          "holdout tie broken by Occam: every tied body covers an IDENTICAL fact set (indistinguishable on this training data), so the shortest/lexicographically-first body (became_far&distance_increasing) is kept -- generalizes _select_from_holdout's relational-over-neural tie-break (equal generalization, simpler explanation) to 'simpler description, provably equal cover'",
+          "holdout tie among 2 bodies clustering into 2 genuinely different covers: Occam licenses narrowing an identical-cover tie to its simplest description, not choosing among bodies that actually disagree on some fact"
+        ],
+        "init_detector_probe": {},
+        "scoring": {
+          "precision": 0.0,
+          "recall": 0.0,
+          "f1": 0.0,
+          "tp": 0,
+          "fp": 0,
+          "fn": 22,
+          "tn": 2419,
+          "degenerate": true
+        }
+      },
+      "direct": {
+        "clauses": [
+          [
+            "both_inactive",
+            "close"
+          ]
+        ],
+        "stop_reason": "select_once abstained",
+        "scoring": {
+          "precision": 0.0,
+          "recall": 0.0,
+          "f1": 0.0,
+          "tp": 0,
+          "fp": 0,
+          "fn": 22,
+          "tn": 2419,
+          "degenerate": true
+        }
+      },
+      "wall_clock_s": {
+        "convert": 0.15488926705438644,
+        "init_search": 74.19158442295156,
+        "term_search": 0.7885008740704507,
+        "direct_search": 0.19497728301212192
+      }
+    }
+  ],
+  "micro": {
+    "ec": {
+      "precision": 0.125,
+      "recall": 0.0005455537370430987,
+      "f1": 0.0010863661053775121,
+      "tp": 1,
+      "fp": 7,
+      "fn": 1832
+    },
+    "direct": {
+      "precision": 0.6863905325443787,
+      "recall": 0.1265684669939989,
+      "f1": 0.2137263933671119,
+      "tp": 232,
+      "fp": 106,
+      "fn": 1601
+    }
+  },
+  "wall_clock_s_total": 820.0941512780264
+}
