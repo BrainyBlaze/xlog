@@ -73,7 +73,7 @@ def test_min_fit_defaults_to_0_75_forwarded_to_kfold_select():
 
     theory, nets = run_caviar_theory._induce_neural_theory_for_target(
         torch, fake_kfold_select, _never_called_train_engine_mode, prog=None,
-        make_network=lambda: _FakeNetModule(), features_train=torch.zeros(4, 2),
+        make_network=_FakeNetModule, features_train=torch.zeros(4, 2),
         neural_relations={"close_nn": object()}, activity_sets_train={"both_active": {(0, 1)}},
         args=_base_args(), facts=[(0, 1), (1, 1), (2, 1), (3, 1)],
         target_labels=[True, False, True, False], wall={}, wall_key="theory_loop_init",
@@ -97,7 +97,7 @@ def test_explicit_min_fit_is_forwarded_to_kfold_select_instead_of_the_default():
 
     run_caviar_theory._induce_neural_theory_for_target(
         torch, fake_kfold_select, _never_called_train_engine_mode, prog=None,
-        make_network=lambda: _FakeNetModule(), features_train=torch.zeros(4, 2),
+        make_network=_FakeNetModule, features_train=torch.zeros(4, 2),
         neural_relations={"close_nn": object()}, activity_sets_train={"both_active": {(0, 1)}},
         args=_base_args(), facts=[(0, 1), (1, 1), (2, 1), (3, 1)],
         target_labels=[True, False, True, False], wall={}, wall_key="theory_loop_init",
@@ -124,7 +124,7 @@ def test_explicit_holdout_score_is_forwarded_to_kfold_select_instead_of_the_defa
 
     run_caviar_theory._induce_neural_theory_for_target(
         torch, fake_kfold_select, _never_called_train_engine_mode, prog=None,
-        make_network=lambda: _FakeNetModule(), features_train=torch.zeros(4, 2),
+        make_network=_FakeNetModule, features_train=torch.zeros(4, 2),
         neural_relations={"close_nn": object()}, activity_sets_train={"both_active": {(0, 1)}},
         args=_base_args(), facts=[(0, 1), (1, 1), (2, 1), (3, 1)],
         target_labels=[True, False, True, False], wall={}, wall_key="theory_loop_init",
@@ -154,7 +154,7 @@ def test_min_fit_and_holdout_score_are_the_only_new_arguments_kfold_select_sees(
     args = SimpleNamespace(k=3, seed=11, steps=17, tie_tolerance=0.02, max_clauses=1, min_new_covered=1)
     run_caviar_theory._induce_neural_theory_for_target(
         torch, fake_kfold_select, _never_called_train_engine_mode, prog="PROG",
-        make_network=lambda: _FakeNetModule(), features_train=torch.zeros(3, 2),
+        make_network=_FakeNetModule, features_train=torch.zeros(3, 2),
         neural_relations={"close_nn": "SPEC"}, activity_sets_train={"both_active": {(0, 1)}},
         args=args, facts=[(0, 1), (1, 1), (2, 1)], target_labels=[True, False, True],
         wall={}, wall_key="theory_loop_term", min_fit=0.5,

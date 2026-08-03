@@ -258,6 +258,11 @@ def parse_video(path: str, *, frame_ms: int = FRAME_MS_DEFAULT, time_offset: int
                     try:
                         orientation[(pid, t)] = float(ori_el.text.strip())
                     except ValueError:
+                        # A non-numeric orientation text drops THIS reading
+                        # only (no entry for this (person, frame)) rather than
+                        # inventing a value; orientation is auxiliary here --
+                        # no relation or target is derived from it, so a
+                        # missing entry cannot silently skew the corpus.
                         pass
 
                 box_el = obj_el.find("box")

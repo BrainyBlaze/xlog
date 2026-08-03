@@ -10,6 +10,7 @@ from pyxlog.ilp.join_bodies import prepare_extension
 from pyxlog.ilp.neural_credit import (
     CandidateSpec,
     HoldoutSelection,
+    _select_from_holdout,
     credit_nll,
     kfold_select,
     train_engine_mode,
@@ -1585,9 +1586,9 @@ def test_kfold_select_holdout_score_accuracy_default_is_byte_identical(monkeypat
     an existing synthetic scenario (mirrors test_kfold_select_seeds_network_
     construction_not_ambient_rng's own fixture) -- same rule, same tied set,
     same margin/top_weight/reason/coverage, not merely "close"."""
-    import pyxlog.ilp.neural_credit as neural_credit
-
-    monkeypatch.setattr(neural_credit, "train_engine_mode", _stub_train_engine_mode)
+    monkeypatch.setattr(
+        "pyxlog.ilp.neural_credit.train_engine_mode", _stub_train_engine_mode
+    )
 
     features = torch.tensor([[0.1], [0.2], [0.3]])
     facts = [(0, 1), (1, 0), (2, 1)]
@@ -1597,7 +1598,7 @@ def test_kfold_select_holdout_score_accuracy_default_is_byte_identical(monkeypat
         return torch.nn.Sequential(torch.nn.Linear(1, 2), torch.nn.Softmax(dim=-1))
 
     def run(**kw):
-        return neural_credit.kfold_select(
+        return kfold_select(
             _FakeProg, "W", facts, is_positive, make_network,
             features, neural_relations={"sal": 3}, folds=3,
             steps=2, seed=0, **kw)
@@ -1672,19 +1673,20 @@ def test_kfold_select_holdout_score_f1_separates_where_accuracy_plateaus(monkeyp
     real_body = ("real_a", "real_b")
     empty_body = ("empty_a", "empty_b")
 
-    import pyxlog.ilp.neural_credit as neural_credit
-    real_select = neural_credit._select_from_holdout
+    real_select = _select_from_holdout
     captured = []
 
     def spy(scores, *args, **kwargs):
         captured.append(dict(scores))
         return real_select(scores, *args, **kwargs)
 
-    monkeypatch.setattr(neural_credit, "_select_from_holdout", spy)
-    monkeypatch.setattr(neural_credit, "train_engine_mode", _stub_train_engine_mode)
+    monkeypatch.setattr("pyxlog.ilp.neural_credit._select_from_holdout", spy)
+    monkeypatch.setattr(
+        "pyxlog.ilp.neural_credit.train_engine_mode", _stub_train_engine_mode
+    )
 
     def run(holdout_score):
-        sel = neural_credit.kfold_select(
+        sel = kfold_select(
             lambda: _FakeProgTwoStarBodies(relations), "W", facts, is_positive,
             make_network, features, neural_relations={}, folds=4, seed=7,
             steps=1, topology="star", min_fit=0.0, holdout_score=holdout_score,

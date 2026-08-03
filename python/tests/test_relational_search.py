@@ -17,6 +17,7 @@ if str(EXAMPLE_DIR) not in sys.path:
 from relational_search import (  # noqa: E402
     body_cover,
     enumerate_bodies,
+    holdout_fold_assignment,
     induce_relational_theory,
     kfold_scores,
     make_predict_clause,
@@ -447,16 +448,14 @@ def test_induce_relational_theory_forwards_holdout_score_to_kfold_scores(monkeyp
     # pass its holdout_score parameter straight through to every
     # kfold_scores call it makes (not silently default to "accuracy"
     # regardless of what the caller asked for).
-    import relational_search
-
     seen_scores = []
-    real_kfold_scores = relational_search.kfold_scores
+    real_kfold_scores = kfold_scores
 
     def spy(*args, **kwargs):
         seen_scores.append(kwargs.get("score"))
         return real_kfold_scores(*args, **kwargs)
 
-    monkeypatch.setattr(relational_search, "kfold_scores", spy)
+    monkeypatch.setattr("relational_search.kfold_scores", spy)
 
     relations, facts, is_positive = _three_literal_world()
     induce_relational_theory(
@@ -468,16 +467,14 @@ def test_induce_relational_theory_forwards_holdout_score_to_kfold_scores(monkeyp
 
 
 def test_induce_relational_theory_default_holdout_score_is_accuracy(monkeypatch):
-    import relational_search
-
     seen_scores = []
-    real_kfold_scores = relational_search.kfold_scores
+    real_kfold_scores = kfold_scores
 
     def spy(*args, **kwargs):
         seen_scores.append(kwargs.get("score"))
         return real_kfold_scores(*args, **kwargs)
 
-    monkeypatch.setattr(relational_search, "kfold_scores", spy)
+    monkeypatch.setattr("relational_search.kfold_scores", spy)
 
     relations, facts, is_positive = _three_literal_world()
     induce_relational_theory(
@@ -573,11 +570,9 @@ def test_permutation_null_threshold_computes_fold_split_and_covers_once(monkeypa
     # the function's own docstring) -- pin that they are derived exactly
     # once each, never once per permutation, by counting calls to the
     # shared helpers.
-    import relational_search
-
     calls = {"fold_assignment": 0, "body_cover": 0}
-    real_fold_assignment = relational_search.holdout_fold_assignment
-    real_body_cover = relational_search.body_cover
+    real_fold_assignment = holdout_fold_assignment
+    real_body_cover = body_cover
 
     def spy_fold_assignment(*a, **kw):
         calls["fold_assignment"] += 1
@@ -587,13 +582,13 @@ def test_permutation_null_threshold_computes_fold_split_and_covers_once(monkeypa
         calls["body_cover"] += 1
         return real_body_cover(*a, **kw)
 
-    monkeypatch.setattr(relational_search, "holdout_fold_assignment", spy_fold_assignment)
-    monkeypatch.setattr(relational_search, "body_cover", spy_body_cover)
+    monkeypatch.setattr("relational_search.holdout_fold_assignment", spy_fold_assignment)
+    monkeypatch.setattr("relational_search.body_cover", spy_body_cover)
 
     relations, facts, is_positive = _three_literal_world()
     bodies, _ = enumerate_bodies(relations, max_literals=3)
 
-    relational_search.permutation_null_threshold(
+    permutation_null_threshold(
         bodies, relations, facts, is_positive, folds=4, seed=7,
         n_permutations=50, quantile=0.95, perm_seed=7,
     )
@@ -603,21 +598,19 @@ def test_permutation_null_threshold_computes_fold_split_and_covers_once(monkeypa
 
 
 def test_permutation_null_threshold_accepts_precomputed_covers_without_recomputing(monkeypatch):
-    import relational_search
-
     relations, facts, is_positive = _three_literal_world()
     bodies, _ = enumerate_bodies(relations, max_literals=3)
     covers = {b: body_cover(b, relations) for b in bodies}
 
     calls = {"body_cover": 0}
-    real_body_cover = relational_search.body_cover
+    real_body_cover = body_cover
 
     def spy(*a, **kw):
         calls["body_cover"] += 1
         return real_body_cover(*a, **kw)
 
-    monkeypatch.setattr(relational_search, "body_cover", spy)
-    relational_search.permutation_null_threshold(
+    monkeypatch.setattr("relational_search.body_cover", spy)
+    permutation_null_threshold(
         bodies, relations, facts, is_positive, folds=4, seed=7,
         n_permutations=10, quantile=0.95, perm_seed=7, covers=covers,
     )
