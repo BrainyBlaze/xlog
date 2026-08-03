@@ -286,18 +286,22 @@ between consecutive observed co-visible steps) and `distance_increasing`
 | step 2 (+ termination signature) | **0.736** | 0.826 | **0.778** | 1514/544/319 |
 
 The termination theory is now LEARNED on 7 of 10 folds — the same clause
-`terminatedAt :- became_far & distance_increasing` each time, over each
-fold's own permutation-null gate, at zero false-negative cost on every
-fold where selected. The direct-protocol reference is byte-identical to
-step 1, proving the new relations never reach the direct vocabulary.
+`terminatedAt :- became_far & distance_increasing` on 6 of those folds,
+plus one fold where the search commits that clause alongside a second,
+`both_walking & close` — over each fold's own permutation-null gate, at
+zero false-negative cost on every fold where selected. The
+direct-protocol reference is byte-identical to step 1, proving the new
+relations never reach the direct vocabulary.
 
 **Caveat (supersedes section E's for the headline).** 0.778 micro-F1
 (10-fold CV over video segments, pre-registered gates/seeds): the
-termination theory is now learned on 7 of 10 folds (the same 2-literal
-clause, became_far & distance_increasing, costing zero false negatives
-where selected), but 92% of the remaining 544 false positives come from
-one fold where the termination search abstains under its own null gate
-and one meeting ends without the pair ever separating spatially — a
+termination theory is now learned on 7 of 10 folds (the 2-literal
+clause, became_far & distance_increasing, on 6 of them and alongside a
+second clause, both_walking & close, on the seventh — costing zero
+false negatives where selected), but 92% of the remaining 544 false
+positives come from one fold where the termination search abstains
+under its own null gate and one meeting ends without the pair ever
+separating spatially — a
 termination shape invisible to distance-crossing vocabulary;
 comparability to OLED's 0.792 remains subject to the step-1 protocol
 deltas (folds over segments vs their windowed interpretations with
@@ -431,8 +435,11 @@ pair-frames.
 each fold's training pool is smaller and less inflated than the
 duplication-affected dump protocol's — and the permutation-null gates
 rise accordingly: the meeting initiation fit gate moves from the dump
-protocol's per-fold 0.035–0.046 range to 0.056–0.071 here, a ~40–60%
-tightening on every fold, with no exception. No candidate clears the
+protocol's per-fold 0.035–0.046 range to 0.050–0.071 here. The lowest
+gate under the new protocol (0.050) already exceeds the highest gate
+under the old one (0.0455), so the gate rises on every fold with no
+exception — a tightening of roughly 10% at the narrowest fold-to-fold
+comparison and up to 100% at the widest. No candidate clears the
 higher, honestly-derived gate on enough folds. This is a principled
 abstention at low event count — the harness's own call, not a search
 failure — not evidence that no rule exists; sections E/E.1's dump-corpus
@@ -440,10 +447,12 @@ result shows the same 2-literal candidate CAN clear a lower, but
 duplication-inflated, gate.
 
 **The meeting zero is a property of the data under the stricter
-protocol, not a harness failure.** Training still selects the familiar
-initiation clause `both_inactive & close` on 9 of 10 folds; applied
-directly to the held-out wk-scene fold it scores frame F1 0.890
-(tp=1060, fp=0) — the machinery is sound. What fails is transfer:
+protocol, not a harness failure.** The direct-protocol reference still
+selects `both_inactive & close` on 9 of 10 folds; applied directly to
+the held-out wk-scene fold it scores frame F1 0.890 (tp=1060, fp=0) —
+the machinery is sound. The EC initiation search, run independently
+under the same stricter gates, commits a clause on only 1 of the 10
+folds (`both_active & close`). What fails is transfer:
 
 - the wk scene family carries 1,323 of 1,812 meeting-positive frames
   (73%) and, with honest scene grouping, sits in exactly ONE fold;
