@@ -111,6 +111,9 @@ class NeuralBodySpec:
     # within_set_norm (offset-invariant within-comparison-set RANK) instead of the
     # absolute per-entity sigmoid; the FORWARD hard gate is unchanged. Default off:
     # byte-identical to the absolute _st_neural_gate path.
+    train_phi_gradient: bool = False  # when set, do NOT detach phi(x) on the training
+    # upload, so gradient flows into the entity-feature producer (backbone coupling).
+    # Default off: phi is detached (no gradient past the neural head), byte-identical.
 
 
 @dataclass
@@ -535,6 +538,19 @@ def train_neurosymbolic_program(
     )
 
 
+
+def _phi_for_training(spec: "NeuralBodySpec") -> Any:
+    """Return a candidate's phi(x) for the training upload, honoring train_phi_gradient.
+
+    Default detaches phi, so no gradient flows past the neural head (the entity-feature
+    producer stays frozen). When ``spec.train_phi_gradient`` is set, phi is left
+    attached, so gradient flows into the producer (backbone coupling) -- the xlog half
+    of phi-gradient coupling. Only the autograd linkage changes; the uploaded values
+    are identical either way.
+    """
+    return spec.features if spec.train_phi_gradient else spec.features.detach()
+
+
 def _train_joint_mixture(
     program: Any,
     train_head: str,
@@ -838,7 +854,7 @@ def _train_joint_mixture(
     # Move each neural candidate's phi(x) to device ONCE (it is static; only
     # theta changes across steps). Detached: no backbone gradient by default.
     device_phi = {
-        rule_id: neural_specs[rule_id].features.detach().to(
+        rule_id: _phi_for_training(neural_specs[rule_id]).to(
             device=device, dtype=torch.float32
         )
         for rule_id in neural_modules
