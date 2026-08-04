@@ -1075,6 +1075,11 @@ result.log_z_e       # Optional[float]: exact log-evidence log Z_E (None for Mon
 # Length equals result.num_vars, i.e. the encoder's variable capacity, so entry i lines up
 # with grad_true/grad_false position i when return_grads=True. Index 0 and every slot that
 # holds no assigned variable are padding ("other"); the length is NOT a count of random vars.
+# "choice" entries carry both "probs" (the disjunction's declared, marginal probabilities —
+# display context only) and "prob" (the conditional Bernoulli parameter actually assigned to
+# this variable's weight; use prob*(1-prob), not probs[choice_index]*(1-probs[choice_index]),
+# as the grad_true/grad_false Jacobian). Raises ValueError for MC programs and for exact
+# programs compiled through the GPU count-lift fast path (no CNF encoding is built there).
 program.prob_var_map() # list[dict]: {"kind": "fact"|"choice"|"other", ...} per CNF variable
 
 # Exact-only (when return_grads=True):
