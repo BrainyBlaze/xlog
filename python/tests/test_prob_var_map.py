@@ -28,6 +28,29 @@ seen() :- ctx(left), flag().
 query(seen()).
 """
 
+# Fixed marginals for the first two heads of a 3-head disjunction; only the
+# third head's marginal (pc) is varied by three_head_disjunction(). Their sum
+# is 0.8 < 1, so the disjunction carries a genuine implicit "none" outcome and
+# the chain is the full m-1 = 3 Bernoulli decisions (see
+# test_choice_conditional_probability_lines_up_with_the_gradient for why the
+# third head is the one that isolates a single chain variable's own weight).
+_THREE_HEAD_PA = 0.5
+_THREE_HEAD_PB = 0.2
+_THREE_HEAD_PC = 0.1
+
+
+def three_head_disjunction(pc: float) -> str:
+    """3-head annotated disjunction (red, green, blue) with sum < 1, querying
+    the third head (``blue``) directly. ``pa``/``pb`` are held fixed at
+    module level; only ``pc`` (blue's declared marginal) varies, so
+    ``remaining = 1 - pa - pb`` (the divisor of blue's conditional weight) is
+    constant across recompilations — see the test below for why that matters.
+    """
+    return f"""
+{_THREE_HEAD_PA}::shade(red); {_THREE_HEAD_PB}::shade(green); {pc}::shade(blue).
+query(shade(blue)).
+"""
+
 # Какому именованному аргументу two_facts(r, s) соответствует каждый факт по
 # его строке атома — нужно, чтобы возмущать ровно один факт за раз, оставляя
 # остальные без изменений (см. Требование 1 брифа).
@@ -212,3 +235,129 @@ def test_map_positions_line_up_with_the_gradient_vector():
             "(rain() на позиции 1, sprinkler() на позиции 2) — карта сдвинута "
             "или переставлена относительно grad_true"
         )
+
+
+def test_choice_conditional_probability_lines_up_with_the_gradient():
+    """L2 regression: a "choice" entry's "prob" must be the *conditional*
+    Bernoulli parameter cond_true = p_i / (1 - sum of earlier declared
+    probabilities) — the actual weight the GPU circuit uses for this CNF
+    variable — not the disjunction's declared *marginal* probs[choice_index].
+
+    This uses the THIRD (last) head of a 3-head disjunction (choice_index ==
+    2) with sum < 1, specifically because it is the one position where
+    perturbing a single declared probability (pc) changes exactly one chain
+    variable's own weight and nothing else:
+
+    - head 0 (red)'s conditional is cond_true_0 = pa / 1 == pa itself, so its
+      conditional and marginal always coincide — not useful for catching L2.
+    - head 1 (green)'s conditional is pb / (1 - pa): perturbing pb alone
+      would also change head 2's "remaining" (1 - pa - pb), and hence head
+      2's conditional weight, contaminating a single-variable finite
+      difference.
+    - head 2 (blue)'s conditional is pc / (1 - pa - pb): with pa, pb held
+      fixed, "remaining" = 1 - pa - pb is a constant, so perturbing only pc
+      changes *only* blue's own weight.
+
+    With pa=0.5, pb=0.2, pc=0.1: marginal = probs[2] = pc = 0.1, but
+    conditional = pc / (1 - pa - pb) = 0.1 / 0.3 = 0.3333..., a ~3.3x gap
+    (p*(1-p): 0.09 vs. 0.2222) — using the marginal for the Jacobian would
+    miss the finite-difference check below by a wide margin, not by rounding
+    error.
+    """
+    remaining = 1.0 - _THREE_HEAD_PA - _THREE_HEAD_PB  # = 0.3, constant in pc
+    pc = _THREE_HEAD_PC
+
+    program = pyxlog.Program.compile(three_head_disjunction(pc))
+    result = program.evaluate(return_grads=True)
+    var_map = program.prob_var_map()
+    grads = torch.from_dlpack(result.grad_true[0])
+
+    third_head_entries = [
+        (i, e)
+        for i, e in enumerate(var_map)
+        if e.get("kind") == "choice" and e.get("choice_index") == 2
+    ]
+    assert third_head_entries, (
+        "no choice entry with choice_index == 2 (the 3rd disjunction head, "
+        f"'blue') found in the map; full map: {var_map!r}"
+    )
+    i, entry = third_head_entries[0]
+
+    declared_marginal = entry["probs"][2]
+    assert declared_marginal == pytest.approx(pc), (
+        f"probs[2] = {declared_marginal!r}, expected the declared marginal "
+        f"pc = {pc!r} (0.5::shade(red); 0.2::shade(green); {pc}::shade(blue))"
+    )
+
+    p = entry["prob"]
+    expected_conditional = pc / remaining
+    assert p == pytest.approx(expected_conditional, rel=1e-9), (
+        f"entry['prob'] = {p!r}, expected the conditional pc/remaining = "
+        f"{expected_conditional!r} (remaining = 1 - pa - pb = {remaining!r}). "
+        f"If this instead reads ~{pc!r} (the marginal), prob_var_map is still "
+        "reporting ChoiceSource.choices' declared probability instead of the "
+        "chain variable's own weight from provenance::choice_probs (L2)."
+    )
+    # Sanity: marginal and conditional are far enough apart that using the
+    # wrong one could not accidentally pass the finite-difference check below.
+    assert abs(p - declared_marginal) > 50 * _EPS
+
+    eps_pc = _EPS * remaining  # scaled so the resulting perturbation of
+    # `p` (the conditional weight) is exactly _EPS, matching the other
+    # finite-difference test's step size in weight space.
+    log_p_plus = torch.from_dlpack(
+        pyxlog.Program.compile(three_head_disjunction(pc + eps_pc)).evaluate().log_prob
+    )[0].item()
+    log_p_minus = torch.from_dlpack(
+        pyxlog.Program.compile(three_head_disjunction(pc - eps_pc)).evaluate().log_prob
+    )[0].item()
+    # log_prob was taken wrt the declared pc; rescale to the conditional
+    # weight's units by the same constant factor (remaining) relating the two.
+    finite_diff_wrt_pc = (log_p_plus - log_p_minus) / (2.0 * eps_pc)
+    finite_diff_wrt_p = finite_diff_wrt_pc * remaining
+
+    engine_grad = grads[i].item() / (p * (1.0 - p))
+
+    denom = max(abs(finite_diff_wrt_p), 1e-12)
+    rel_err = abs(engine_grad - finite_diff_wrt_p) / denom
+    assert rel_err <= _REL_TOL, (
+        f"choice entry at position {i} (choice_index=2, atom 'shade(blue)'): "
+        f"engine grad_true[{i}]/(p*(1-p)) = {engine_grad!r} using "
+        f"p=entry['prob']={p!r}, finite difference (rescaled to the same "
+        f"weight space via the constant factor `remaining`={remaining!r}) = "
+        f"{finite_diff_wrt_p!r} (log_p_plus={log_p_plus!r}, "
+        f"log_p_minus={log_p_minus!r}, eps_pc={eps_pc!r}); relative error "
+        f"{rel_err!r} exceeds {_REL_TOL}. If entry['prob'] were the marginal "
+        f"instead of the conditional, engine_grad would be computed with the "
+        "wrong Jacobian denominator and this check would fail by roughly the "
+        "marginal/conditional ratio, not by rounding error."
+    )
+
+
+def test_count_lift_program_raises_value_error_from_prob_var_map():
+    """M2 regression: a program compiled through the GPU count-lift fast path
+    (a `count(...)` aggregate over probabilistic leaves, with no evidence and
+    no annotated disjunctions) never builds a CNF encoding
+    (ExactDdnnfProgram::uses_gpu_native_count_lift() is true), so
+    prob_var_map() must fail loudly with ValueError instead of silently
+    returning `[]` — an empty list would be indistinguishable from "this
+    program has no probabilistic facts", which is false here (there are 5
+    probabilistic `edge(...)` facts).
+    """
+    edges = "\n".join(f"0.5::edge(1, {y})." for y in range(1, 6))
+    source = f"""
+{edges}
+out_degree(X, count(Y)) :- edge(X, Y).
+query(out_degree(1, 3)).
+"""
+    program = pyxlog.Program.compile(source)
+
+    # Sanity: the program really does evaluate (it is not a degenerate/empty
+    # compile), so an empty prob_var_map() result could not be legitimately
+    # read as "no random variables" even before considering the ValueError
+    # contract.
+    result = program.evaluate()
+    assert torch.from_dlpack(result.prob)[0].item() > 0.0
+
+    with pytest.raises(ValueError):
+        program.prob_var_map()
