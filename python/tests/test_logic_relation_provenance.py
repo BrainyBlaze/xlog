@@ -1,4 +1,5 @@
 import hashlib
+import gc
 import os
 import struct
 
@@ -47,6 +48,25 @@ def _transfer_columns(rows=((10, 20, 7, 1_700_000_000), (10, 20, 8, 1_700_000_00
         torch.tensor(columns[2], device="cuda", dtype=torch.int32),
         torch.tensor(columns[3], device="cuda", dtype=torch.int64),
     ]
+
+
+def _empty_transfer_columns():
+    return [
+        torch.empty(0, device="cuda", dtype=torch.int32),
+        torch.empty(0, device="cuda", dtype=torch.int32),
+        torch.empty(0, device="cuda", dtype=torch.int32),
+        torch.empty(0, device="cuda", dtype=torch.int64),
+    ]
+
+
+def _exported_rows(session, relation):
+    columns = [torch.from_dlpack(column).cpu().tolist() for column in session.export_relation(relation)]
+    return sorted(zip(*columns))
+
+
+def _fact_sources(snapshot, values):
+    fact = next(fact for fact in snapshot["facts"] if fact["tuple"] == list(values))
+    return [record["source"] for record in fact["provenance"]]
 
 
 def _record(**overrides):
@@ -166,6 +186,63 @@ def test_native_ternary_and_quaternary_puts_bind_evidence_to_complete_tuples():
         {"name": "time", "sort": None, "type": "i64"},
         {"name": "label", "sort": None, "type": "symbol"},
     ]
+
+
+@pytest.mark.parametrize(
+    "source, relation, columns, roles, fact_values",
+    [
+        (
+            """
+            domain party: u32.
+            domain asset: u32.
+            pred transfer(giver: party, receiver: party, asset: asset, time: i64).
+            pred observed(giver: party, receiver: party, asset: asset, time: i64).
+            observed(G, R, A, T) :- transfer(G, R, A, T).
+            ?- observed(G, R, A, T).
+            """,
+            "transfer",
+            lambda: _transfer_columns(rows=((10, 20, 7, 1_700_000_000),)),
+            TRANSFER_ROLES,
+            (10, 20, 7, 1_700_000_000),
+        ),
+        (
+            """
+            pred positional(u32, i64, symbol).
+            pred observed(u32, i64, symbol).
+            observed(Entity, Time, Label) :- positional(Entity, Time, Label).
+            ?- observed(Entity, Time, Label).
+            """,
+            "positional",
+            lambda: [
+                torch.tensor([1], device="cuda", dtype=torch.int32),
+                torch.tensor([-2], device="cuda", dtype=torch.int64),
+                torch.tensor([9], device="cuda", dtype=torch.int32),
+            ],
+            [{"name": "entity"}, {"name": "time"}, {"name": "label"}],
+            (1, -2, 9),
+        ),
+    ],
+)
+def test_metadata_bearing_high_arity_relations_evaluate_on_cuda(
+    source, relation, columns, roles, fact_values
+):
+    session = _session(source)
+    session.put_relation_with_provenance(
+        relation,
+        columns(),
+        roles=roles,
+        facts=[_fact(fact_values, _record(source="runtime-input"))],
+    )
+    session.reset_host_transfer_stats()
+
+    result = session.evaluate()
+    assert len(result.queries) == 1
+    output = [torch.from_dlpack(tensor) for tensor in result.queries[0].tensors]
+    assert all(tensor.device.type == "cuda" for tensor in output)
+    assert [tensor.cpu().tolist() for tensor in output] == [
+        [value] for value in fact_values
+    ]
+    assert session.host_transfer_stats()["dtoh_calls"] == 0
 
 
 def test_duplicate_relation_rows_and_fact_entries_union_records_without_fabrication():
@@ -514,7 +591,44 @@ def test_nullary_metadata_is_rejected_without_changing_existing_nullary_behavior
                 "ready", columns, roles=[], facts=[]
             )
 
+    metadata_delta_calls = (
+        lambda: session.insert_relation("ready", object(), facts=[]),
+        lambda: session.apply_relation_delta(
+            "ready", insert_columns=object(), insert_facts=[]
+        ),
+        lambda: session.apply_relation_delta_batch(
+            [
+                {
+                    "name": "ready",
+                    "insert_columns": object(),
+                    "insert_facts": [],
+                }
+            ]
+        ),
+        lambda: session.apply_relation_delta_debug(
+            [
+                {
+                    "name": "ready",
+                    "insert_columns": object(),
+                    "insert_facts": [],
+                }
+            ],
+            check_equivalence=True,
+        ),
+    )
+    for apply_delta in metadata_delta_calls:
+        with pytest.raises(_metadata_error(), match="positive arity"):
+            apply_delta()
+
     session.put_relation("ready", [])
+    session.insert_relation("ready", [])
+    session.apply_relation_delta("ready", insert_columns=[])
+    session.apply_relation_delta_batch(
+        [{"name": "ready", "insert_columns": []}]
+    )
+    session.apply_relation_delta_debug(
+        [{"name": "ready", "insert_columns": []}], check_equivalence=True
+    )
     result = session.evaluate()
     assert result.queries[0].is_true is False
 
@@ -658,3 +772,607 @@ def test_invalid_dlpack_replacement_preserves_rows_metadata_stats_and_callbacks(
         [3, 7],
         [4, 8],
     ]
+
+
+def test_insert_relation_unions_existing_and_new_fact_records_without_fabrication():
+    session = _session()
+    existing = (1, 2, 3, 4)
+    added = (5, 6, 7, 8)
+    unannotated = (9, 10, 11, 12)
+    session.put_relation_with_provenance(
+        "transfer",
+        _transfer_columns(rows=(existing,)),
+        roles=TRANSFER_ROLES,
+        facts=[_fact(existing, _record(source="original"))],
+    )
+
+    session.insert_relation(
+        "transfer",
+        _transfer_columns(rows=(existing, added, added)),
+        facts=[
+            _fact(existing, _record(source="later"), _record(source="later")),
+            _fact(added, _record(source="new")),
+            _fact(added, _record(source="new")),
+        ],
+    )
+    snapshot = session.relation("transfer").provenance()
+    assert _fact_sources(snapshot, existing) == ["later", "original"]
+    assert _fact_sources(snapshot, added) == ["new"]
+
+    session.insert_relation("transfer", _transfer_columns(rows=(unannotated,)))
+    snapshot = session.relation("transfer").provenance()
+    assert [fact["tuple"] for fact in snapshot["facts"]] == [list(existing), list(added)]
+    assert _exported_rows(session, "transfer") == [existing, added, unannotated]
+
+    session.reset_host_transfer_stats()
+    session.insert_relation("transfer", _transfer_columns(rows=(added,)), facts=[])
+    assert session.host_transfer_stats()["dtoh_calls"] == 0
+
+    metadata_free = _session()
+    metadata_free.put_relation("transfer", _transfer_columns(rows=(existing,)))
+    with pytest.raises(_metadata_error(), match="registered role"):
+        metadata_free.insert_relation(
+            "transfer", _transfer_columns(rows=(added,)), facts=[]
+        )
+    assert _exported_rows(metadata_free, "transfer") == [existing]
+
+
+def test_empty_provenance_fact_entries_follow_insert_and_batch_cancellation_semantics():
+    session = _session()
+    first = (1, 2, 3, 4)
+    second = (5, 6, 7, 8)
+    canceled = (9, 10, 11, 12)
+    session.put_relation_with_provenance(
+        "transfer", _empty_transfer_columns(), roles=TRANSFER_ROLES, facts=[]
+    )
+
+    session.insert_relation(
+        "transfer",
+        _transfer_columns(rows=(first,)),
+        facts=[{"tuple": list(first), "provenance": []}],
+    )
+    session.apply_relation_delta_batch(
+        [
+            {
+                "name": "transfer",
+                "insert_columns": _transfer_columns(rows=(second,)),
+                "insert_facts": [{"tuple": list(second), "provenance": []}],
+            },
+            {
+                "name": "transfer",
+                "insert_columns": _transfer_columns(rows=(canceled,)),
+                "insert_facts": [{"tuple": list(canceled), "provenance": []}],
+            },
+            {
+                "name": "transfer",
+                "delete_columns": _transfer_columns(rows=(canceled,)),
+            },
+        ]
+    )
+
+    snapshot = session.relation("transfer").provenance()
+    assert [(fact["tuple"], fact["provenance"]) for fact in snapshot["facts"]] == [
+        (list(first), []),
+        (list(second), []),
+    ]
+
+
+def test_delete_and_raw_combined_delta_use_complete_tuple_delete_then_insert_semantics():
+    session = _session()
+    earlier = (1, 2, 3, 4)
+    later = (1, 2, 3, 5)
+    session.put_relation_with_provenance(
+        "transfer",
+        _transfer_columns(rows=(earlier, later)),
+        roles=TRANSFER_ROLES,
+        facts=[
+            _fact(earlier, _record(source="earlier")),
+            _fact(later, _record(source="later")),
+        ],
+    )
+
+    session.delete_relation("transfer", _transfer_columns(rows=(later,)))
+    after_delete = session.relation("transfer").provenance()
+    assert [fact["tuple"] for fact in after_delete["facts"]] == [list(earlier)]
+
+    stats = session.apply_relation_delta(
+        "transfer",
+        insert_columns=_transfer_columns(rows=(earlier,)),
+        delete_columns=_transfer_columns(rows=(earlier,)),
+        insert_facts=[_fact(earlier, _record(source="replacement"))],
+    )
+    assert stats["insert_rows"] == 1
+    assert stats["delete_rows"] == 1
+    assert stats["canceled_rows"] == 0
+    assert _fact_sources(session.relation("transfer").provenance(), earlier) == [
+        "replacement"
+    ]
+
+    session.apply_relation_delta(
+        "transfer",
+        insert_columns=_transfer_columns(rows=(earlier,)),
+        delete_columns=_transfer_columns(rows=(earlier,)),
+    )
+    final = session.relation("transfer").provenance()
+    assert final["metadata_present"] is True
+    assert final["facts"] == []
+    assert _exported_rows(session, "transfer") == [earlier]
+
+
+def test_batch_complete_cancellation_is_a_data_metadata_generation_noop():
+    session = _session()
+    row = (1, 2, 3, 4)
+    session.put_relation_with_provenance(
+        "transfer",
+        _empty_transfer_columns(),
+        roles=TRANSFER_ROLES,
+        facts=[],
+    )
+    events = []
+    session.register_relation_callback(events.append)
+    before = session.evidence()
+
+    stats = session.apply_relation_delta_batch(
+        [
+            {
+                "name": "transfer",
+                "insert_columns": _transfer_columns(rows=(row,)),
+                "insert_facts": [_fact(row, _record(source="canceled"))],
+            },
+            {"name": "transfer", "delete_columns": _transfer_columns(rows=(row,))},
+        ]
+    )
+
+    assert stats["changed_relations"] == 0
+    assert stats["insert_rows"] == 0
+    assert stats["delete_rows"] == 0
+    assert stats["canceled_rows"] == 1
+    assert session.evidence() == before
+    assert _exported_rows(session, "transfer") == []
+    assert events == []
+
+    session.insert_relation("transfer", _transfer_columns(rows=(row,)))
+    assert [event["generation"] for event in events] == [1]
+
+
+def test_batch_occurrence_trace_keeps_only_surviving_insert_lineage():
+    row = (1, 2, 3, 4)
+
+    insert_delete_insert = _session()
+    insert_delete_insert.put_relation_with_provenance(
+        "transfer", _empty_transfer_columns(), roles=TRANSFER_ROLES, facts=[]
+    )
+    events = []
+    insert_delete_insert.register_relation_callback(events.append)
+    stats = insert_delete_insert.apply_relation_delta_batch(
+        [
+            {
+                "name": "transfer",
+                "insert_columns": _transfer_columns(rows=(row,)),
+                "insert_facts": [_fact(row, _record(source="first"))],
+            },
+            {"name": "transfer", "delete_columns": _transfer_columns(rows=(row,))},
+            {
+                "name": "transfer",
+                "insert_columns": _transfer_columns(rows=(row,)),
+                "insert_facts": [_fact(row, _record(source="last"))],
+            },
+        ]
+    )
+    assert stats["canceled_rows"] == 1
+    assert _fact_sources(
+        insert_delete_insert.relation("transfer").provenance(), row
+    ) == ["last"]
+    assert [event["generation"] for event in events] == [1]
+
+    delete_insert_insert = _session()
+    delete_insert_insert.put_relation_with_provenance(
+        "transfer",
+        _transfer_columns(rows=(row,)),
+        roles=TRANSFER_ROLES,
+        facts=[_fact(row, _record(source="original"))],
+    )
+    delete_insert_insert.apply_relation_delta_batch(
+        [
+            {"name": "transfer", "delete_columns": _transfer_columns(rows=(row,))},
+            {
+                "name": "transfer",
+                "insert_columns": _transfer_columns(rows=(row,)),
+                "insert_facts": [_fact(row, _record(source="canceled"))],
+            },
+            {
+                "name": "transfer",
+                "insert_columns": _transfer_columns(rows=(row,)),
+                "insert_facts": [_fact(row, _record(source="surviving"))],
+            },
+        ]
+    )
+    assert _fact_sources(
+        delete_insert_insert.relation("transfer").provenance(), row
+    ) == ["original", "surviving"]
+
+
+def test_repeated_batch_inserts_union_lineage_and_emit_one_relation_event():
+    session = _session()
+    first_row = (1, 2, 3, 4)
+    second_row = (5, 6, 7, 8)
+    session.put_relation_with_provenance(
+        "transfer", _empty_transfer_columns(), roles=TRANSFER_ROLES, facts=[]
+    )
+    events = []
+    session.register_relation_callback(events.append)
+
+    session.apply_relation_delta_batch(
+        [
+            {
+                "name": "transfer",
+                "insert_columns": _transfer_columns(rows=(first_row,)),
+                "insert_facts": [_fact(first_row, _record(source="first"))],
+            },
+            {
+                "name": "transfer",
+                "insert_columns": _transfer_columns(rows=(first_row, second_row)),
+                "insert_facts": [
+                    _fact(first_row, _record(source="second")),
+                    _fact(second_row, _record(source="third")),
+                ],
+            },
+        ]
+    )
+    snapshot = session.relation("transfer").provenance()
+    assert _fact_sources(snapshot, first_row) == ["first", "second"]
+    assert _fact_sources(snapshot, second_row) == ["third"]
+    assert [(event["relation"], event["generation"]) for event in events] == [
+        ("transfer", 1)
+    ]
+
+
+def test_batch_prevalidates_every_entry_and_rejects_unknown_shapes_atomically():
+    session = _session()
+    original = (1, 2, 3, 4)
+    first_insert = (5, 6, 7, 8)
+    invalid_insert = (9, 10, 11, 12)
+    session.put_relation_with_provenance(
+        "transfer",
+        _transfer_columns(rows=(original,)),
+        roles=TRANSFER_ROLES,
+        facts=[_fact(original, _record(source="original"))],
+    )
+    events = []
+    session.register_relation_callback(events.append)
+    session.insert_relation("transfer", _transfer_columns(rows=(first_insert,)))
+    before_rows = _exported_rows(session, "transfer")
+    before_evidence = session.evidence()
+    before_stats = session.delta_stats()
+    before_events = list(events)
+
+    with pytest.raises(_metadata_error(), match="not present"):
+        session.apply_relation_delta_batch(
+            [
+                {
+                    "name": "transfer",
+                    "insert_columns": _transfer_columns(rows=((13, 14, 15, 16),)),
+                    "insert_facts": [
+                        _fact((13, 14, 15, 16), _record(source="valid"))
+                    ],
+                },
+                {
+                    "name": "transfer",
+                    "insert_columns": _transfer_columns(rows=(invalid_insert,)),
+                    "insert_facts": [
+                        _fact((9, 10, 11, 13), _record(source="invalid"))
+                    ],
+                },
+            ]
+        )
+    assert _exported_rows(session, "transfer") == before_rows
+    assert session.evidence() == before_evidence
+    assert session.delta_stats() == before_stats
+    assert events == before_events
+
+    with pytest.raises(ValueError, match="unknown"):
+        session.apply_relation_delta_batch(
+            [
+                {
+                    "name": "transfer",
+                    "insert_columns": _transfer_columns(rows=(invalid_insert,)),
+                    "unexpected": True,
+                }
+            ]
+        )
+    with pytest.raises(_metadata_error(), match="insert_facts.*insert_columns"):
+        session.apply_relation_delta_batch(
+            [{"name": "transfer", "insert_facts": []}]
+        )
+    with pytest.raises(_metadata_error(), match="insert_facts.*insert_columns"):
+        session.apply_relation_delta("transfer", insert_facts=[])
+
+    session.insert_relation(
+        "transfer", _transfer_columns(rows=(invalid_insert,)), facts=[]
+    )
+    assert [event["generation"] for event in events] == [1, 2]
+
+
+def test_strict_deterministic_d2h_fails_metadata_before_mutation_but_allows_plain_delta():
+    session = _session()
+    original = (1, 2, 3, 4)
+    added = (5, 6, 7, 8)
+    session.put_relation_with_provenance(
+        "transfer",
+        _transfer_columns(rows=(original,)),
+        roles=TRANSFER_ROLES,
+        facts=[_fact(original, _record(source="original"))],
+    )
+    events = []
+    session.register_relation_callback(events.append)
+    before_rows = _exported_rows(session, "transfer")
+    before_evidence = session.evidence()
+    before_stats = session.delta_stats()
+    session.reset_deterministic_d2h_violations()
+    session.set_strict_deterministic_d2h(True)
+    assert session.strict_deterministic_d2h_enabled() is True
+    try:
+        with pytest.raises(RuntimeError, match=r"deterministic D2H gate.*1 bytes"):
+            session.insert_relation(
+                "transfer",
+                _transfer_columns(rows=(added,)),
+                facts=[_fact(added, _record(source="blocked"))],
+            )
+        assert session.deterministic_d2h_violation_count() == 1
+        assert _exported_rows(session, "transfer") == before_rows
+        assert session.evidence() == before_evidence
+        assert session.delta_stats() == before_stats
+        assert events == []
+    finally:
+        session.set_strict_deterministic_d2h(False)
+    assert session.strict_deterministic_d2h_enabled() is False
+
+    plain = _session()
+    plain.reset_deterministic_d2h_violations()
+    plain.set_strict_deterministic_d2h(True)
+    try:
+        plain.insert_relation("transfer", _transfer_columns(rows=(original,)))
+    finally:
+        plain.set_strict_deterministic_d2h(False)
+    assert plain.deterministic_d2h_violation_count() == 0
+    assert _exported_rows(plain, "transfer") == [original]
+
+
+def test_debug_uses_precommit_equivalence_for_updates_and_fully_canceled_batches():
+    row = (1, 2, 3, 4)
+    session = _session()
+    session.put_relation_with_provenance(
+        "transfer", _empty_transfer_columns(), roles=TRANSFER_ROLES, facts=[]
+    )
+    events = []
+    session.register_relation_callback(events.append)
+
+    canceled = session.apply_relation_delta_debug(
+        [
+            {
+                "name": "transfer",
+                "insert_columns": _transfer_columns(rows=(row,)),
+                "insert_facts": [_fact(row, _record(source="canceled"))],
+            },
+            {"name": "transfer", "delete_columns": _transfer_columns(rows=(row,))},
+        ],
+        check_equivalence=True,
+    )
+    assert canceled["changed_relations"] == 0
+    assert canceled["equivalent_to_full_recompute"] is True
+    assert session.relation("transfer").provenance()["facts"] == []
+    assert events == []
+
+    updated = session.apply_relation_delta_debug(
+        [
+            {
+                "name": "transfer",
+                "insert_columns": _transfer_columns(rows=(row,)),
+                "insert_facts": [_fact(row, _record(source="surviving"))],
+            }
+        ],
+        check_equivalence=True,
+    )
+    assert updated["equivalent_to_full_recompute"] is True
+    assert _fact_sources(session.relation("transfer").provenance(), row) == [
+        "surviving"
+    ]
+
+    second = (5, 6, 7, 8)
+    unchecked = session.apply_relation_delta_debug(
+        [
+            {
+                "name": "transfer",
+                "insert_columns": _transfer_columns(rows=(second,)),
+                "insert_facts": [_fact(second, _record(source="unchecked"))],
+            }
+        ],
+        check_equivalence=False,
+    )
+    assert unchecked["equivalent_to_full_recompute"] is None
+    assert _fact_sources(session.relation("transfer").provenance(), second) == [
+        "unchecked"
+    ]
+
+
+def test_late_full_recompute_budget_failure_rolls_back_all_session_state():
+    source = """
+    pred alpha(value: i32).
+    pred stable(value: i32).
+    pred out(value: i32).
+    out(X) :- alpha(X).
+    ?- out(X).
+    """
+
+    def prepared_session():
+        session = pyxlog.LogicProgram.compile(
+            source, device=0, memory_mb=1
+        ).session()
+        stable = torch.arange(53_000, device="cuda", dtype=torch.int32)
+        session.put_relation("stable", [stable])
+        session.put_relation_with_provenance(
+            "alpha",
+            [torch.empty(0, device="cuda", dtype=torch.int32)],
+            roles=[{"name": "value"}],
+            facts=[],
+        )
+        initial = session.evaluate()
+        assert initial.queries[0].num_rows == 0
+        return session, stable
+
+    def update():
+        return [
+            {
+                "name": "alpha",
+                "insert_columns": [torch.tensor([1], device="cuda", dtype=torch.int32)],
+                "insert_facts": [_fact((1,), _record(source="prepared"))],
+            }
+        ]
+
+    control, control_stable = prepared_session()
+    control_stats = control.apply_relation_delta_debug(
+        update(), check_equivalence=False
+    )
+    assert control_stats["insert_rows"] == 1
+    assert _fact_sources(control.relation("alpha").provenance(), (1,)) == [
+        "prepared"
+    ]
+    del control, control_stable
+    gc.collect()
+    torch.cuda.empty_cache()
+
+    session, stable = prepared_session()
+    events = []
+    session.register_relation_callback(events.append)
+    before_evidence = session.evidence()
+    before_stats = session.delta_stats()
+    before_memory = session.memory_stats()["allocated_bytes"]
+
+    with pytest.raises(
+        RuntimeError,
+        match=r"Resource exhausted: GPU memory allocation, estimated 212000 bytes",
+    ):
+        session.apply_relation_delta_debug(update(), check_equivalence=True)
+
+    assert session.evidence() == before_evidence
+    assert session.delta_stats() == before_stats
+    assert session.relation("alpha").provenance()["row_count"] == 0
+    assert session.relation("stable").provenance()["row_count"] == 53_000
+    assert session.memory_stats()["allocated_bytes"] <= before_memory
+    assert events == []
+
+    after_failure = session.evaluate()
+    assert after_failure.queries[0].num_rows == 0
+    committed = session.apply_relation_delta_debug(update(), check_equivalence=False)
+    assert committed["insert_rows"] == 1
+    assert _fact_sources(session.relation("alpha").provenance(), (1,)) == [
+        "prepared"
+    ]
+    assert [event["generation"] for event in events] == [1]
+    assert stable.numel() == 53_000
+
+
+def test_runtime_constraint_failure_discards_prepared_metadata_and_callback_state():
+    session = _session(
+        """
+        pred forbidden(value: i32).
+        pred allowed(value: i32).
+        pred out(value: i32).
+        out(X) :- allowed(X).
+        :- forbidden(X).
+        ?- out(X).
+        """
+    )
+    session.put_relation_with_provenance(
+        "forbidden",
+        [torch.empty(0, device="cuda", dtype=torch.int32)],
+        roles=[{"name": "value"}],
+        facts=[],
+    )
+    events = []
+    session.register_relation_callback(events.append)
+    before = session.evidence()
+    before_stats = session.delta_stats()
+
+    with pytest.raises(RuntimeError, match="[Cc]onstraint"):
+        session.insert_relation(
+            "forbidden",
+            [torch.tensor([1], device="cuda", dtype=torch.int32)],
+            facts=[_fact((1,), _record(source="rejected"))],
+        )
+    assert session.evidence() == before
+    assert session.delta_stats() == before_stats
+    assert events == []
+    assert _exported_rows(session, "forbidden") == []
+
+
+def test_callback_exception_observes_already_committed_data_metadata_and_stats():
+    session = _session()
+    row = (1, 2, 3, 4)
+    session.put_relation_with_provenance(
+        "transfer", _empty_transfer_columns(), roles=TRANSFER_ROLES, facts=[]
+    )
+
+    def reject_event(_payload):
+        raise LookupError("observer failed")
+
+    callback_id = session.register_relation_callback(reject_event)
+    with pytest.raises(LookupError, match="observer failed"):
+        session.insert_relation(
+            "transfer",
+            _transfer_columns(rows=(row,)),
+            facts=[_fact(row, _record(source="committed"))],
+        )
+
+    assert _exported_rows(session, "transfer") == [row]
+    assert _fact_sources(session.relation("transfer").provenance(), row) == [
+        "committed"
+    ]
+    assert session.delta_stats()["insert_rows"] == 1
+
+    assert session.unregister_relation_callback(callback_id) is True
+    events = []
+    session.register_relation_callback(events.append)
+    session.insert_relation("transfer", _transfer_columns(rows=((5, 6, 7, 8),)))
+    assert [event["generation"] for event in events] == [2]
+
+
+def test_remove_clear_and_replacement_keep_metadata_and_generations_consistent():
+    session = _session()
+    transfer = (1, 2, 3, 4)
+    session.put_relation_with_provenance(
+        "transfer",
+        _transfer_columns(rows=(transfer,)),
+        roles=TRANSFER_ROLES,
+        facts=[_fact(transfer, _record(source="transfer"))],
+    )
+    session.put_relation_with_provenance(
+        "alpha",
+        [torch.tensor([9], device="cuda", dtype=torch.int32)],
+        roles=[{"name": "value"}],
+        facts=[_fact((9,), _record(source="alpha"))],
+    )
+    alpha_before = session.relation("alpha").provenance()
+
+    events = []
+    session.register_relation_callback(events.append)
+    session.delete_relation("transfer", _transfer_columns(rows=(transfer,)))
+    assert events[-1]["generation"] == 1
+    assert session.relation("alpha").provenance() == alpha_before
+    session.put_relation("transfer", _transfer_columns(rows=((5, 6, 7, 8),)))
+    assert session.relation("transfer").provenance()["metadata_present"] is False
+
+    session.insert_relation("transfer", _transfer_columns(rows=((9, 10, 11, 12),)))
+    assert events[-1]["generation"] == 2
+    assert session.remove_relation("transfer") is True
+    assert session.delta_stats()["status"] == "unavailable"
+    with pytest.raises(KeyError, match="transfer"):
+        session.relation("transfer")
+    assert session.relation("alpha").provenance() == alpha_before
+
+    session.clear_relations()
+    assert session.delta_stats()["status"] == "unavailable"
+    with pytest.raises(KeyError, match="alpha"):
+        session.relation("alpha")
+    session.insert_relation("transfer", _transfer_columns(rows=((13, 14, 15, 16),)))
+    assert events[-1]["generation"] == 3

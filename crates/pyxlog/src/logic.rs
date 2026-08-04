@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -18,7 +18,8 @@ use std::collections::HashMap as StdHashMap;
 
 use super::neural_registry::NeuralPredicateRegistry;
 use super::relation_metadata::{
-    pack_session_evidence, relation_schema_fingerprint, require_positive_metadata_arity,
+    metadata_error, pack_session_evidence, relation_schema_fingerprint,
+    require_positive_metadata_arity, PreparedInsertEvidence, PreparedRelationMetadataUpdate,
     RelationEvidence, RelationMetadataStore, RelationSnapshot,
 };
 use super::{
@@ -27,6 +28,12 @@ use super::{
     CompiledLogicProgram, CompiledProbProgram, CompiledProgram, LogicDeltaStats, LogicEvalResult,
     LogicProgram, LogicQueryResult, LogicRelationSession, Program, RelationChangeCallback,
 };
+
+struct ParsedRelationDeltaUpdate {
+    name: String,
+    delta: RelationDelta,
+    insert_evidence: Option<PreparedInsertEvidence>,
+}
 
 #[pymethods]
 impl Program {
@@ -356,14 +363,18 @@ impl LogicRelationSession {
         pack_logic_result_with_provider(py, &self.provider, result)
     }
 
+    #[pyo3(signature = (name, dlpack_columns, *, facts=None))]
     pub fn insert_relation(
         &mut self,
         py: Python<'_>,
         name: String,
         dlpack_columns: &Bound<'_, PyAny>,
+        facts: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PyObject> {
+        self.require_insert_metadata_arity(&name, facts)?;
         let insert = self.relation_delta_buffer(&name, dlpack_columns)?;
-        self.apply_single_relation_delta(py, name, Some(insert), None)
+        let insert_evidence = self.prepare_insert_evidence(&name, &insert, facts)?;
+        self.apply_single_relation_delta(py, name, Some(insert), None, insert_evidence)
     }
 
     pub fn delete_relation(
@@ -373,29 +384,40 @@ impl LogicRelationSession {
         dlpack_columns: &Bound<'_, PyAny>,
     ) -> PyResult<PyObject> {
         let delete = self.relation_delta_buffer(&name, dlpack_columns)?;
-        self.apply_single_relation_delta(py, name, None, Some(delete))
+        self.apply_single_relation_delta(py, name, None, Some(delete), None)
     }
 
-    #[pyo3(signature = (name, insert_columns=None, delete_columns=None))]
+    #[pyo3(signature = (name, insert_columns=None, delete_columns=None, *, insert_facts=None))]
     pub fn apply_relation_delta(
         &mut self,
         py: Python<'_>,
         name: String,
         insert_columns: Option<&Bound<'_, PyAny>>,
         delete_columns: Option<&Bound<'_, PyAny>>,
+        insert_facts: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PyObject> {
+        if insert_facts.is_some() && insert_columns.is_none() {
+            return Err(metadata_error(
+                "apply_relation_delta insert_facts requires insert_columns".to_string(),
+            ));
+        }
         if insert_columns.is_none() && delete_columns.is_none() {
             return Err(PyValueError::new_err(
                 "apply_relation_delta requires insert_columns, delete_columns, or both",
             ));
         }
+        self.require_insert_metadata_arity(&name, insert_facts)?;
         let insert = insert_columns
             .map(|columns| self.relation_delta_buffer(&name, columns))
             .transpose()?;
         let delete = delete_columns
             .map(|columns| self.relation_delta_buffer(&name, columns))
             .transpose()?;
-        self.apply_single_relation_delta(py, name, insert, delete)
+        let insert_evidence = match insert.as_ref() {
+            Some(insert) => self.prepare_insert_evidence(&name, insert, insert_facts)?,
+            None => None,
+        };
+        self.apply_single_relation_delta(py, name, insert, delete, insert_evidence)
     }
 
     pub fn apply_relation_delta_batch(
@@ -403,19 +425,31 @@ impl LogicRelationSession {
         py: Python<'_>,
         updates: &Bound<'_, PyAny>,
     ) -> PyResult<PyObject> {
-        let (batch, relation_names) =
-            self.parse_relation_delta_batch("apply_relation_delta_batch", updates)?;
-
-        let report = self
+        let parsed = self.parse_relation_delta_batch("apply_relation_delta_batch", updates)?;
+        let (batch, metadata_updates, relation_names, schemas, capture_cancellations) =
+            split_parsed_relation_updates(&self.program, parsed)?;
+        let prepared_batch = self
             .program
-            .apply_relation_delta_batch_with_session_runtime(
+            .prepare_relation_delta_batch(self.provider.as_ref(), batch, capture_cancellations)
+            .map_err(types::xlog_err)?;
+        let metadata_transition = self.relation_metadata.prepare_batch_transition(
+            &self.provider,
+            &schemas,
+            metadata_updates,
+            &prepared_batch,
+        )?;
+        let data_commit = self
+            .program
+            .prepare_relation_delta_commit_with_session_runtime(
                 self.provider.clone(),
                 &mut self.relation_store,
                 &mut self.evaluation_store,
                 &mut self.session_runtime,
-                batch,
+                prepared_batch,
             )
             .map_err(types::xlog_err)?;
+        let report = data_commit.commit();
+        metadata_transition.commit(&mut self.relation_metadata);
         let stats = logic_delta_stats_from_report(report);
         self.last_delta_stats = Some(stats.clone());
         self.fire_relation_callbacks(py, &relation_names, &stats)?;
@@ -429,44 +463,68 @@ impl LogicRelationSession {
         updates: &Bound<'_, PyAny>,
         check_equivalence: bool,
     ) -> PyResult<PyObject> {
-        let (batch, relation_names) =
-            self.parse_relation_delta_batch("apply_relation_delta_debug", updates)?;
+        let parsed = self.parse_relation_delta_batch("apply_relation_delta_debug", updates)?;
+        let (batch, metadata_updates, relation_names, schemas, capture_cancellations) =
+            split_parsed_relation_updates(&self.program, parsed)?;
+        let had_derived_state = self.evaluation_store.is_some() || self.session_runtime.is_some();
         let delta_start = Instant::now();
-        let report = self
+        let prepared_batch = self
             .program
-            .apply_relation_delta_batch_with_session_runtime(
+            .prepare_relation_delta_batch(self.provider.as_ref(), batch, capture_cancellations)
+            .map_err(types::xlog_err)?;
+        let coalesced_no_op = prepared_batch.net_deltas().is_empty();
+        let metadata_transition = self.relation_metadata.prepare_batch_transition(
+            &self.provider,
+            &schemas,
+            metadata_updates,
+            &prepared_batch,
+        )?;
+        let data_commit = self
+            .program
+            .prepare_relation_delta_commit_with_session_runtime(
                 self.provider.clone(),
                 &mut self.relation_store,
                 &mut self.evaluation_store,
                 &mut self.session_runtime,
-                batch,
+                prepared_batch,
             )
             .map_err(types::xlog_err)?;
         let delta_micros = delta_start.elapsed().as_micros().max(1) as u64;
-        let mut stats = logic_delta_stats_from_report(report);
+        let mut equivalent_to_full_recompute = None;
+        let mut measured_full_micros = None;
         if check_equivalence {
             let full_start = Instant::now();
+            let prospective_base = data_commit
+                .clone_prospective_base_store()
+                .map_err(types::xlog_err)?;
             let (_, full_store) = self
                 .program
                 .evaluate_with_relation_store_and_cache(
                     self.provider.clone(),
-                    &self.relation_store,
+                    &prospective_base,
                     false,
                 )
                 .map_err(types::xlog_err)?;
             let full_micros = full_start.elapsed().as_micros() as u64;
-            let cached_store = self.evaluation_store.as_ref().ok_or_else(|| {
-                PyRuntimeError::new_err("delta debug missing cached store after delta application")
-            })?;
-            stats.equivalent_to_full_recompute = Some(
+            let equivalent = if coalesced_no_op && !had_derived_state {
+                true
+            } else {
                 self.program
                     .relation_stores_query_equivalent(
                         self.provider.as_ref(),
                         &full_store,
-                        cached_store,
+                        data_commit.prospective_derived_store(),
                     )
-                    .map_err(types::xlog_err)?,
-            );
+                    .map_err(types::xlog_err)?
+            };
+            equivalent_to_full_recompute = Some(equivalent);
+            measured_full_micros = Some(full_micros);
+        }
+        let report = data_commit.commit();
+        metadata_transition.commit(&mut self.relation_metadata);
+        let mut stats = logic_delta_stats_from_report(report);
+        stats.equivalent_to_full_recompute = equivalent_to_full_recompute;
+        if let Some(full_micros) = measured_full_micros {
             let speedup = full_micros as f64 / delta_micros as f64;
             stats.planner_telemetry.measured_delta_speedup = Some(speedup);
             if speedup >= 1.0 {
@@ -615,6 +673,26 @@ impl LogicRelationSession {
         self.provider.reset_host_transfer_stats()
     }
 
+    pub fn set_strict_deterministic_d2h(&self, enabled: bool) {
+        if enabled {
+            self.provider.enable_strict_deterministic_d2h();
+        } else {
+            self.provider.disable_strict_deterministic_d2h();
+        }
+    }
+
+    pub fn strict_deterministic_d2h_enabled(&self) -> bool {
+        self.provider.strict_deterministic_d2h_enabled()
+    }
+
+    pub fn deterministic_d2h_violation_count(&self) -> u64 {
+        self.provider.deterministic_d2h_violation_count()
+    }
+
+    pub fn reset_deterministic_d2h_violations(&self) {
+        self.provider.reset_deterministic_d2h_violations();
+    }
+
     /// Return memory diagnostics including allocated_bytes and memory_limit_bytes.
     pub fn memory_stats(&self, py: Python<'_>) -> PyResult<PyObject> {
         provider_memory_stats(py, &self.provider)
@@ -641,6 +719,7 @@ impl LogicRelationSession {
     pub fn remove_relation(&mut self, name: &str) -> bool {
         let removed = self.relation_store.remove(name).is_some();
         if removed {
+            self.relation_metadata.clear_relation(name);
             self.evaluation_store = None;
             self.session_runtime = None;
             self.last_delta_stats = None;
@@ -650,6 +729,7 @@ impl LogicRelationSession {
 
     pub fn clear_relations(&mut self) {
         self.relation_store.clear();
+        self.relation_metadata.clear();
         self.evaluation_store = None;
         self.session_runtime = None;
         self.last_delta_stats = None;
@@ -709,38 +789,93 @@ impl LogicRelationSession {
         &self,
         method_name: &str,
         updates: &Bound<'_, PyAny>,
-    ) -> PyResult<(Vec<(String, RelationDelta)>, Vec<String>)> {
+    ) -> PyResult<Vec<ParsedRelationDeltaUpdate>> {
         let seq = updates.downcast::<PySequence>().map_err(|_| {
             PyValueError::new_err(format!(
                 "{method_name} expects a sequence of update dictionaries"
             ))
         })?;
-        let mut batch: Vec<(String, RelationDelta)> = Vec::with_capacity(seq.len()? as usize);
-        let mut relation_names: Vec<String> = Vec::new();
-        for item in seq.try_iter()? {
+        let mut parsed = Vec::with_capacity(seq.len()?);
+        for (update_index, item) in seq.try_iter()?.enumerate() {
             let item = item?;
             let dict = item.downcast::<PyDict>().map_err(|_| {
                 PyValueError::new_err(format!("{method_name} updates must be dictionaries"))
             })?;
+            reject_unknown_delta_update_keys(dict, method_name, update_index)?;
             let name_obj = dict.get_item("name")?.ok_or_else(|| {
                 PyValueError::new_err(format!("{method_name} update missing 'name'"))
             })?;
             let name: String = name_obj.extract()?;
-            let insert = optional_delta_columns(dict, "insert_columns")
-                .map(|columns| self.relation_delta_buffer(&name, &columns))
-                .transpose()?;
-            let delete = optional_delta_columns(dict, "delete_columns")
-                .map(|columns| self.relation_delta_buffer(&name, &columns))
-                .transpose()?;
-            if insert.is_none() && delete.is_none() {
+            let insert_columns = optional_delta_columns(dict, "insert_columns");
+            let delete_columns = optional_delta_columns(dict, "delete_columns");
+            let insert_facts = dict
+                .get_item("insert_facts")?
+                .filter(|value| !value.is_none());
+            if insert_facts.is_some() && insert_columns.is_none() {
+                return Err(metadata_error(format!(
+                    "{method_name} update {update_index} insert_facts requires insert_columns"
+                )));
+            }
+            if insert_columns.is_none() && delete_columns.is_none() {
                 return Err(PyValueError::new_err(format!(
                     "{method_name} updates require insert_columns, delete_columns, or both"
                 )));
             }
-            relation_names.push(name.clone());
-            batch.push((name, RelationDelta::new(insert, delete)));
+            self.require_insert_metadata_arity(&name, insert_facts.as_ref())?;
+            let insert = insert_columns
+                .map(|columns| self.relation_delta_buffer(&name, &columns))
+                .transpose()?;
+            let delete = delete_columns
+                .map(|columns| self.relation_delta_buffer(&name, &columns))
+                .transpose()?;
+            let insert_evidence = match insert.as_ref() {
+                Some(insert) => {
+                    self.prepare_insert_evidence(&name, insert, insert_facts.as_ref())?
+                }
+                None => None,
+            };
+            parsed.push(ParsedRelationDeltaUpdate {
+                name,
+                delta: RelationDelta::new(insert, delete),
+                insert_evidence,
+            });
         }
-        Ok((batch, relation_names))
+        Ok(parsed)
+    }
+
+    fn require_insert_metadata_arity(
+        &self,
+        name: &str,
+        facts: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<()> {
+        if facts.is_none() {
+            return Ok(());
+        }
+        require_positive_metadata_arity(name, self.relation_delta_schema(name)?)
+    }
+
+    fn prepare_insert_evidence(
+        &self,
+        name: &str,
+        insert: &xlog_cuda::CudaBuffer,
+        facts: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<Option<PreparedInsertEvidence>> {
+        let Some(facts) = facts else {
+            return Ok(None);
+        };
+        let schema = self.program.schema(name).ok_or_else(|| {
+            PyValueError::new_err(format!(
+                "Unknown relation {name} (not present in compiled schemas)"
+            ))
+        })?;
+        let arguments = self.program.argument_schema(name).ok_or_else(|| {
+            PyRuntimeError::new_err(format!(
+                "Relation '{name}' compiled argument contract is unavailable"
+            ))
+        })?;
+        self.relation_metadata
+            .prepare_insert_evidence(name, &arguments, schema, &self.provider, insert, facts)
+            .map(Some)
     }
 
     fn relation_delta_buffer(
@@ -748,18 +883,7 @@ impl LogicRelationSession {
         name: &str,
         dlpack_columns: &Bound<'_, PyAny>,
     ) -> PyResult<xlog_cuda::CudaBuffer> {
-        if name.starts_with("__") {
-            return Err(PyValueError::new_err(format!(
-                "Relation {} is internal and cannot be updated in a persistent session",
-                name
-            )));
-        }
-        let schema = self.program.schema(name).ok_or_else(|| {
-            PyValueError::new_err(format!(
-                "Unknown relation {} (not present in compiled schemas)",
-                name
-            ))
-        })?;
+        let schema = self.relation_delta_schema(name)?;
         let tensors = collect_dlpack_columns(
             dlpack_columns,
             &format!(
@@ -772,19 +896,48 @@ impl LogicRelationSession {
             .map_err(types::xlog_err)
     }
 
+    fn relation_delta_schema(&self, name: &str) -> PyResult<&xlog_core::Schema> {
+        if name.starts_with("__") {
+            return Err(PyValueError::new_err(format!(
+                "Relation {} is internal and cannot be updated in a persistent session",
+                name
+            )));
+        }
+        let schema = self.program.schema(name).ok_or_else(|| {
+            PyValueError::new_err(format!(
+                "Unknown relation {} (not present in compiled schemas)",
+                name
+            ))
+        })?;
+        Ok(schema)
+    }
+
     fn apply_single_relation_delta(
         &mut self,
         py: Python<'_>,
         name: String,
         insert: Option<xlog_cuda::CudaBuffer>,
         delete: Option<xlog_cuda::CudaBuffer>,
+        insert_evidence: Option<PreparedInsertEvidence>,
     ) -> PyResult<PyObject> {
         let relation_names = vec![name.clone()];
+        let schema = self.program.schema(&name).ok_or_else(|| {
+            PyValueError::new_err(format!(
+                "Unknown relation {name} (not present in compiled schemas)"
+            ))
+        })?;
+        let metadata_transition = self.relation_metadata.prepare_delta_transition(
+            &name,
+            schema,
+            &self.provider,
+            delete.as_ref(),
+            insert_evidence,
+        )?;
         let mut deltas = HashMap::new();
         deltas.insert(name, RelationDelta::new(insert, delete));
-        let report = self
+        let data_commit = self
             .program
-            .apply_relation_deltas_with_session_runtime(
+            .prepare_relation_deltas_commit_with_session_runtime(
                 self.provider.clone(),
                 &mut self.relation_store,
                 &mut self.evaluation_store,
@@ -792,23 +945,9 @@ impl LogicRelationSession {
                 deltas,
             )
             .map_err(types::xlog_err)?;
-        let stats = LogicDeltaStats {
-            input_delta_count: report.input_delta_count,
-            changed_relations: report.changed_relations,
-            changed_relation_names: report.changed_relation_names,
-            insert_rows: report.insert_rows,
-            delete_rows: report.delete_rows,
-            has_deletes: report.has_deletes,
-            affected_sccs: report.affected_sccs,
-            recomputed_sccs: report.recomputed_sccs,
-            incremental_sccs: report.incremental_sccs,
-            coalesced_insert_rows: report.coalesced_insert_rows,
-            coalesced_delete_rows: report.coalesced_delete_rows,
-            canceled_rows: report.canceled_rows,
-            equivalent_to_full_recompute: None,
-            planner_telemetry: report.planner_telemetry,
-            debug_trace: report.debug_trace,
-        };
+        let report = data_commit.commit();
+        metadata_transition.commit(&mut self.relation_metadata);
+        let stats = logic_delta_stats_from_report(report);
         self.last_delta_stats = Some(stats.clone());
         self.fire_relation_callbacks(py, &relation_names, &stats)?;
         pack_delta_stats(py, &stats)
@@ -824,10 +963,15 @@ impl LogicRelationSession {
             return Ok(());
         }
 
+        let effective_relations = stats
+            .changed_relation_names
+            .iter()
+            .map(String::as_str)
+            .collect::<HashSet<_>>();
         let mut seen = HashSet::new();
         let mut events: Vec<(String, u64)> = Vec::new();
         for relation in relation_names {
-            if seen.insert(relation.clone()) {
+            if effective_relations.contains(relation.as_str()) && seen.insert(relation.clone()) {
                 let generation = self
                     .relation_generations
                     .entry(relation.clone())
@@ -881,6 +1025,76 @@ fn optional_delta_columns<'py>(dict: &Bound<'py, PyDict>, key: &str) -> Option<B
         Ok(Some(value)) if !value.is_none() => Some(value),
         _ => None,
     }
+}
+
+fn reject_unknown_delta_update_keys(
+    dict: &Bound<'_, PyDict>,
+    method_name: &str,
+    update_index: usize,
+) -> PyResult<()> {
+    for key in dict.keys().iter() {
+        let key = key.extract::<String>().map_err(|_| {
+            PyValueError::new_err(format!(
+                "{method_name} update {update_index} keys must be strings"
+            ))
+        })?;
+        if !matches!(
+            key.as_str(),
+            "name" | "insert_columns" | "delete_columns" | "insert_facts"
+        ) {
+            return Err(PyValueError::new_err(format!(
+                "{method_name} update {update_index} has unknown key '{key}'"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn split_parsed_relation_updates(
+    program: &gpu_logic::LogicProgram,
+    parsed: Vec<ParsedRelationDeltaUpdate>,
+) -> PyResult<(
+    Vec<(String, RelationDelta)>,
+    Vec<PreparedRelationMetadataUpdate>,
+    Vec<String>,
+    BTreeMap<String, xlog_core::Schema>,
+    bool,
+)> {
+    let mut batch = Vec::with_capacity(parsed.len());
+    let mut metadata_updates = Vec::with_capacity(parsed.len());
+    let mut relation_names = Vec::with_capacity(parsed.len());
+    let mut schemas = BTreeMap::new();
+    let mut capture_cancellations = false;
+
+    for update in parsed {
+        capture_cancellations |= update
+            .insert_evidence
+            .as_ref()
+            .is_some_and(PreparedInsertEvidence::has_fact_keys);
+        let schema = program.schema(&update.name).ok_or_else(|| {
+            PyRuntimeError::new_err(format!(
+                "Relation '{}' schema disappeared while preparing its delta batch",
+                update.name
+            ))
+        })?;
+        schemas
+            .entry(update.name.clone())
+            .or_insert_with(|| schema.clone());
+        relation_names.push(update.name.clone());
+        metadata_updates.push(PreparedRelationMetadataUpdate::new(
+            update.name.clone(),
+            update.insert_evidence,
+        ));
+        batch.push((update.name, update.delta));
+    }
+
+    Ok((
+        batch,
+        metadata_updates,
+        relation_names,
+        schemas,
+        capture_cancellations,
+    ))
 }
 
 fn logic_delta_stats_from_report(report: gpu_logic::LogicDeltaReport) -> LogicDeltaStats {

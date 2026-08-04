@@ -1039,6 +1039,31 @@ impl LogicProgram {
         Ok(prepared.commit())
     }
 
+    /// Prepare raw relation deltas without ordered-batch coalescing.
+    ///
+    /// This preserves the runtime's delete-then-insert semantics when one
+    /// relation delta contains both directions. Callers that accept an ordered
+    /// batch must use [`LogicProgram::prepare_relation_delta_batch`] exactly
+    /// once and pass its result to
+    /// [`LogicProgram::prepare_relation_delta_commit_with_session_runtime`].
+    pub fn prepare_relation_deltas_commit_with_session_runtime<'a>(
+        &self,
+        provider: Arc<CudaKernelProvider>,
+        relation_store: &'a mut RelationStore,
+        cached_store: &'a mut Option<RelationStore>,
+        session_runtime: &'a mut Option<LogicSessionRuntime>,
+        deltas: HashMap<String, RelationDelta>,
+    ) -> Result<PreparedRelationDeltaCommit<'a>> {
+        self.prepare_relation_delta_commit(
+            provider,
+            relation_store,
+            cached_store,
+            session_runtime,
+            deltas,
+            None,
+        )
+    }
+
     /// Coalesce an ordered batch on the device and optionally retain cancellation tuples.
     pub fn prepare_relation_delta_batch(
         &self,
@@ -4095,6 +4120,82 @@ mod relation_delta_preparation_tests {
     }
 
     #[test]
+    fn raw_combined_delta_preserves_delete_then_insert_while_batch_cancels() -> Result<()> {
+        let Some(provider) = test_provider() else {
+            return Ok(());
+        };
+        let program = LogicProgram::compile("pred fact(u32).")?;
+
+        let mut raw_store = program.create_relation_store(provider.clone())?;
+        raw_store.put("fact", test_buffer(&provider, &[7]));
+        let mut raw_cache = None;
+        let mut raw_runtime = None;
+        let mut raw_delta = HashMap::new();
+        raw_delta.insert(
+            "fact".to_string(),
+            RelationDelta::new(
+                Some(test_buffer(&provider, &[7])),
+                Some(test_buffer(&provider, &[7])),
+            ),
+        );
+
+        let raw_commit = program.prepare_relation_deltas_commit_with_session_runtime(
+            provider.clone(),
+            &mut raw_store,
+            &mut raw_cache,
+            &mut raw_runtime,
+            raw_delta,
+        )?;
+        let raw_report = raw_commit.commit();
+        assert_eq!(
+            sorted_u32(&provider, raw_store.get("fact").unwrap()),
+            vec![7]
+        );
+        assert_eq!(raw_report.insert_rows, 1);
+        assert_eq!(raw_report.delete_rows, 1);
+        assert_eq!(raw_report.canceled_rows, 0);
+        assert_eq!(raw_report.changed_relations, 1);
+
+        let mut batch_store = program.create_relation_store(provider.clone())?;
+        batch_store.put("fact", test_buffer(&provider, &[7]));
+        let before_batch_version = batch_store.version("fact");
+        let mut batch_cache = None;
+        let mut batch_runtime = None;
+        let batch = program.prepare_relation_delta_batch(
+            provider.as_ref(),
+            vec![
+                (
+                    "fact".to_string(),
+                    RelationDelta::new(Some(test_buffer(&provider, &[7])), None),
+                ),
+                (
+                    "fact".to_string(),
+                    RelationDelta::new(None, Some(test_buffer(&provider, &[7]))),
+                ),
+            ],
+            true,
+        )?;
+        let batch_commit = program.prepare_relation_delta_commit_with_session_runtime(
+            provider.clone(),
+            &mut batch_store,
+            &mut batch_cache,
+            &mut batch_runtime,
+            batch,
+        )?;
+        let batch_report = batch_commit.commit();
+        assert_eq!(batch_store.version("fact"), before_batch_version);
+        assert_eq!(
+            sorted_u32(&provider, batch_store.get("fact").unwrap()),
+            vec![7]
+        );
+        assert_eq!(batch_report.insert_rows, 0);
+        assert_eq!(batch_report.delete_rows, 0);
+        assert_eq!(batch_report.canceled_rows, 1);
+        assert_eq!(batch_report.changed_relations, 0);
+        Ok(())
+    }
+
+    #[test]
     fn disabled_cancellation_capture_preserves_net_data_and_stats_without_trace_work() -> Result<()>
     {
         let Some(provider) = test_provider() else {
@@ -4568,6 +4669,183 @@ mod relation_delta_preparation_tests {
                 prospective_base.get("fact").expect("prospective fact")
             ),
             vec![1]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn prospective_base_clone_budget_failure_discards_prepared_transaction() -> Result<()> {
+        let Some(calibration_provider) = test_provider() else {
+            return Ok(());
+        };
+        let program = LogicProgram::compile(
+            r#"
+                pred alpha_input(u32).
+                pred stable_input(u32).
+            "#,
+        )?;
+        let stable_rows = (10_000..75_536).collect::<Vec<u32>>();
+
+        let mut calibration_store = program.create_relation_store(calibration_provider.clone())?;
+        calibration_store.put(
+            "stable_input",
+            test_buffer(&calibration_provider, &stable_rows),
+        );
+        let mut calibration_runtime = Some(program.create_session_runtime(
+            calibration_provider.clone(),
+            &calibration_store,
+            false,
+        )?);
+        let (_, calibration_cache) = program.evaluate_with_session_runtime(
+            calibration_provider.clone(),
+            calibration_runtime.as_mut().expect("calibration runtime"),
+        )?;
+        let mut calibration_cache = Some(calibration_cache);
+        let calibration_batch = program.prepare_relation_delta_batch(
+            calibration_provider.as_ref(),
+            vec![(
+                "alpha_input".to_string(),
+                RelationDelta::new(Some(test_buffer(&calibration_provider, &[1])), None),
+            )],
+            false,
+        )?;
+        calibration_provider.memory().reset_peak();
+        let calibration_commit = program.prepare_relation_delta_commit_with_session_runtime(
+            calibration_provider.clone(),
+            &mut calibration_store,
+            &mut calibration_cache,
+            &mut calibration_runtime,
+            calibration_batch,
+        )?;
+        assert_eq!(calibration_commit.staged_base_updates.len(), 1);
+        assert_eq!(calibration_commit.staged_base_updates[0].0, "alpha_input");
+        assert_eq!(calibration_commit.staged_base_updates[0].1.num_rows(), 1);
+        let preparation_peak = calibration_provider.memory().peak_bytes();
+        drop(calibration_commit);
+        drop(calibration_store);
+        drop(calibration_cache);
+        drop(calibration_runtime);
+        drop(calibration_provider);
+
+        let tight_budget = preparation_peak
+            .checked_add(4096)
+            .expect("calibrated preparation budget must fit in u64");
+        let tight_provider = test_provider_with_budget(tight_budget)
+            .expect("calibrated byte budget must construct a CUDA provider");
+        let mut base_store = program.create_relation_store(tight_provider.clone())?;
+        base_store.put("stable_input", test_buffer(&tight_provider, &stable_rows));
+        let authoritative_gpu_bytes = tight_provider.memory().allocated_bytes();
+        let alpha_version = base_store.version("alpha_input").expect("alpha version");
+        let stable_version = base_store.version("stable_input").expect("stable version");
+        let mut runtime =
+            Some(program.create_session_runtime(tight_provider.clone(), &base_store, false)?);
+        let (_, initial_cache) = program.evaluate_with_session_runtime(
+            tight_provider.clone(),
+            runtime.as_mut().expect("initial runtime"),
+        )?;
+        let mut cache = Some(initial_cache);
+        let prepared_batch = program.prepare_relation_delta_batch(
+            tight_provider.as_ref(),
+            vec![(
+                "alpha_input".to_string(),
+                RelationDelta::new(Some(test_buffer(&tight_provider, &[1])), None),
+            )],
+            false,
+        )?;
+        tight_provider.memory().reset_peak();
+        let prepared_commit = program.prepare_relation_delta_commit_with_session_runtime(
+            tight_provider.clone(),
+            &mut base_store,
+            &mut cache,
+            &mut runtime,
+            prepared_batch,
+        )?;
+        assert_eq!(prepared_commit.staged_base_updates.len(), 1);
+        assert_eq!(prepared_commit.staged_base_updates[0].0, "alpha_input");
+        assert_eq!(prepared_commit.staged_base_updates[0].1.num_rows(), 1);
+        assert!(
+            tight_provider.memory().peak_bytes() <= preparation_peak,
+            "identical preparation must fit within the calibrated peak"
+        );
+
+        let stable_clone_bytes = u64::try_from(stable_rows.len())
+            .expect("stable row count must fit in u64")
+            .checked_mul(u64::try_from(std::mem::size_of::<u32>()).expect("u32 width fits in u64"))
+            .and_then(|bytes| {
+                bytes.checked_add(
+                    u64::try_from(std::mem::size_of::<u32>())
+                        .expect("device row-count width fits in u64"),
+                )
+            })
+            .expect("stable clone size must fit in u64");
+        let staged_column_bytes =
+            u64::try_from(std::mem::size_of::<u32>()).expect("staged column width fits in u64");
+        let clone_headroom = stable_clone_bytes
+            .checked_add(staged_column_bytes - 1)
+            .expect("clone headroom must fit in u64");
+        let pressure_bytes = tight_provider
+            .memory()
+            .remaining_bytes()
+            .checked_sub(clone_headroom)
+            .expect("calibrated provider must have room for the authoritative clone");
+        let pressure_len = usize::try_from(pressure_bytes)
+            .expect("calibrated pressure allocation must fit in usize");
+        let pressure_guard = tight_provider.memory().alloc::<u8>(pressure_len)?;
+
+        let error = match prepared_commit.clone_prospective_base_store() {
+            Ok(_) => panic!("one-byte-tight prospective base cloning must fail"),
+            Err(error) => error,
+        };
+        let XlogError::ResourceExhausted {
+            context,
+            estimated_bytes,
+            budget_bytes,
+        } = &error
+        else {
+            panic!("expected GPU resource exhaustion, got {error}");
+        };
+        assert_eq!(*budget_bytes, tight_budget);
+        assert_eq!(*estimated_bytes, staged_column_bytes);
+        assert_eq!(
+            context,
+            "cloning staged prospective base relation 'alpha_input': GPU memory allocation",
+            "the authoritative base clone must complete before the staged overlay exhausts memory"
+        );
+        drop(prepared_commit);
+
+        assert!(cache.is_none(), "failed diagnostic must discard its cache");
+        assert!(
+            runtime.is_none(),
+            "failed diagnostic must discard its retained runtime"
+        );
+        assert_eq!(
+            tight_provider.memory().allocated_bytes(),
+            authoritative_gpu_bytes + pressure_bytes,
+            "dropping the prepared transaction must release every prospective buffer while preserving external memory pressure"
+        );
+        drop(pressure_guard);
+        assert_eq!(
+            tight_provider.memory().allocated_bytes(),
+            authoritative_gpu_bytes,
+            "releasing the pressure allocation must leave only authoritative data"
+        );
+        assert_eq!(base_store.version("alpha_input"), Some(alpha_version));
+        assert_eq!(base_store.version("stable_input"), Some(stable_version));
+        assert_eq!(
+            base_store
+                .get("alpha_input")
+                .expect("authoritative alpha")
+                .num_rows(),
+            0
+        );
+        assert_eq!(
+            sorted_u32(
+                &tight_provider,
+                base_store
+                    .get("stable_input")
+                    .expect("authoritative stable input")
+            ),
+            stable_rows
         );
         Ok(())
     }

@@ -9,7 +9,7 @@ use sha2::{Digest, Sha256};
 
 use xlog_core::{ScalarType, Schema};
 use xlog_cuda::{CudaBuffer, CudaKernelProvider};
-use xlog_gpu::logic::LogicArgumentSchema;
+use xlog_gpu::logic::{LogicArgumentSchema, PreparedRelationDeltaBatch, RelationDeltaDirection};
 
 use super::types;
 
@@ -84,6 +84,27 @@ struct RelationMetadata {
 #[derive(Clone, Debug, Default)]
 pub(crate) struct RelationMetadataStore {
     relations: BTreeMap<String, Arc<RelationMetadata>>,
+}
+
+/// Parsed, schema-bound evidence for one original insert occurrence.
+///
+/// Values of this type own every Python-derived value and have already passed
+/// full-row membership validation against that occurrence's insert buffer.
+#[derive(Debug)]
+pub(crate) struct PreparedInsertEvidence {
+    relation: String,
+    facts: BTreeMap<FactKey, BTreeSet<ProvenanceRecord>>,
+}
+
+#[derive(Debug)]
+pub(crate) struct PreparedRelationMetadataUpdate {
+    relation: String,
+    insert_evidence: Option<PreparedInsertEvidence>,
+}
+
+#[must_use = "prepared relation metadata has no effect until it is committed"]
+pub(crate) struct PreparedRelationMetadataTransition {
+    prospective_store: Option<RelationMetadataStore>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -167,8 +188,221 @@ impl RelationMetadataStore {
         Ok((prospective, snapshot))
     }
 
+    pub(crate) fn prepare_insert_evidence(
+        &self,
+        relation: &str,
+        arguments: &[LogicArgumentSchema],
+        schema: &Schema,
+        provider: &Arc<CudaKernelProvider>,
+        insert_buffer: &CudaBuffer,
+        facts: &Bound<'_, PyAny>,
+    ) -> PyResult<PreparedInsertEvidence> {
+        require_positive_metadata_arity(relation, schema)?;
+        if !self.relations.contains_key(relation) {
+            return Err(metadata_error(format!(
+                "Relation '{relation}' insert_facts requires an existing registered role contract"
+            )));
+        }
+        if arguments.len() != schema.arity() {
+            return Err(PyRuntimeError::new_err(format!(
+                "Relation '{relation}' compiled argument metadata has arity {} but its schema has arity {}",
+                arguments.len(),
+                schema.arity()
+            )));
+        }
+
+        let schema_sha256 = relation_schema_fingerprint(relation, arguments)?;
+        let parsed_facts = parse_facts(relation, schema, schema_sha256, facts)?;
+        validate_fact_membership(relation, schema, provider, insert_buffer, &parsed_facts)?;
+        Ok(PreparedInsertEvidence {
+            relation: relation.to_string(),
+            facts: parsed_facts,
+        })
+    }
+
+    pub(crate) fn prepare_delta_transition(
+        &self,
+        relation: &str,
+        schema: &Schema,
+        provider: &Arc<CudaKernelProvider>,
+        delete_buffer: Option<&CudaBuffer>,
+        insert_evidence: Option<PreparedInsertEvidence>,
+    ) -> PyResult<PreparedRelationMetadataTransition> {
+        if insert_evidence
+            .as_ref()
+            .is_some_and(|evidence| evidence.relation != relation)
+        {
+            return Err(PyRuntimeError::new_err(format!(
+                "Prepared insert evidence for another relation was supplied while updating '{relation}'"
+            )));
+        }
+
+        let Some(existing) = self.relations.get(relation) else {
+            if insert_evidence.is_some() {
+                return Err(PyRuntimeError::new_err(format!(
+                    "Relation '{relation}' lost its registered role contract during delta preparation"
+                )));
+            }
+            return Ok(PreparedRelationMetadataTransition::unchanged());
+        };
+
+        let mut facts = existing.facts.clone();
+        if let Some(delete_buffer) = delete_buffer {
+            remove_matching_facts(relation, schema, provider, delete_buffer, &mut facts)?;
+        }
+        if let Some(insert_evidence) = insert_evidence {
+            union_fact_records(&mut facts, insert_evidence.facts);
+        }
+
+        if facts == existing.facts {
+            return Ok(PreparedRelationMetadataTransition::unchanged());
+        }
+        let mut prospective = self.clone();
+        let metadata = prospective.relations.get_mut(relation).ok_or_else(|| {
+            PyRuntimeError::new_err(format!(
+                "Relation '{relation}' metadata disappeared during delta preparation"
+            ))
+        })?;
+        Arc::make_mut(metadata).facts = facts;
+        Ok(PreparedRelationMetadataTransition::replace(prospective))
+    }
+
+    pub(crate) fn prepare_batch_transition(
+        &self,
+        provider: &Arc<CudaKernelProvider>,
+        schemas: &BTreeMap<String, Schema>,
+        updates: Vec<PreparedRelationMetadataUpdate>,
+        prepared_batch: &PreparedRelationDeltaBatch,
+    ) -> PyResult<PreparedRelationMetadataTransition> {
+        let mut pending_inserts =
+            BTreeMap::<String, BTreeMap<FactKey, BTreeSet<ProvenanceRecord>>>::new();
+
+        for (update_index, update) in updates.into_iter().enumerate() {
+            let schema = schemas.get(&update.relation).ok_or_else(|| {
+                PyRuntimeError::new_err(format!(
+                    "Relation '{}' schema disappeared during batch metadata preparation",
+                    update.relation
+                ))
+            })?;
+            let cancellations = prepared_batch
+                .cancellations()
+                .get(&update.relation)
+                .into_iter()
+                .flatten()
+                .filter(|cancellation| cancellation.update_index() == update_index)
+                .collect::<Vec<_>>();
+
+            if let Some(insert_evidence) = update.insert_evidence {
+                if insert_evidence.relation != update.relation {
+                    return Err(PyRuntimeError::new_err(format!(
+                        "Prepared insert evidence relation '{}' does not match batch update relation '{}'",
+                        insert_evidence.relation, update.relation
+                    )));
+                }
+                let mut incoming_facts = insert_evidence.facts;
+                for cancellation in cancellations.iter().filter(|cancellation| {
+                    cancellation.incoming_direction() == RelationDeltaDirection::Insert
+                }) {
+                    remove_matching_facts(
+                        &update.relation,
+                        schema,
+                        provider,
+                        cancellation.tuples(),
+                        &mut incoming_facts,
+                    )?;
+                }
+                if !incoming_facts.is_empty() {
+                    union_fact_records(
+                        pending_inserts.entry(update.relation.clone()).or_default(),
+                        incoming_facts,
+                    );
+                }
+            }
+
+            for cancellation in cancellations.iter().filter(|cancellation| {
+                cancellation.incoming_direction() == RelationDeltaDirection::Delete
+            }) {
+                let Some(pending) = pending_inserts.get_mut(&update.relation) else {
+                    continue;
+                };
+                remove_matching_facts(
+                    &update.relation,
+                    schema,
+                    provider,
+                    cancellation.tuples(),
+                    pending,
+                )?;
+            }
+        }
+
+        let mut prospective_store: Option<RelationMetadataStore> = None;
+        let mut relation_names = prepared_batch
+            .net_deltas()
+            .keys()
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        relation_names.sort_unstable();
+        for relation in relation_names {
+            let Some(existing) = self.relations.get(relation) else {
+                if pending_inserts
+                    .get(relation)
+                    .is_some_and(|facts| !facts.is_empty())
+                {
+                    return Err(PyRuntimeError::new_err(format!(
+                        "Relation '{relation}' lost its registered role contract during batch preparation"
+                    )));
+                }
+                continue;
+            };
+            let schema = schemas.get(relation).ok_or_else(|| {
+                PyRuntimeError::new_err(format!(
+                    "Relation '{relation}' schema disappeared during batch metadata preparation"
+                ))
+            })?;
+            let delta = prepared_batch
+                .net_deltas()
+                .get(relation)
+                .expect("relation name came from the prepared net deltas");
+            let mut facts = existing.facts.clone();
+            if let Some(delete) = delta.delete.as_ref() {
+                remove_matching_facts(relation, schema, provider, delete, &mut facts)?;
+            }
+            if let Some(inserts) = pending_inserts.remove(relation) {
+                if delta.insert.is_none() && !inserts.is_empty() {
+                    return Err(PyRuntimeError::new_err(format!(
+                        "Relation '{relation}' has surviving provenance without a net insert"
+                    )));
+                }
+                union_fact_records(&mut facts, inserts);
+            }
+            if facts == existing.facts {
+                continue;
+            }
+
+            let prospective = prospective_store.get_or_insert_with(|| self.clone());
+            let metadata = prospective.relations.get_mut(relation).ok_or_else(|| {
+                PyRuntimeError::new_err(format!(
+                    "Relation '{relation}' metadata disappeared while staging the batch transition"
+                ))
+            })?;
+            Arc::make_mut(metadata).facts = facts;
+        }
+
+        if pending_inserts.values().any(|facts| !facts.is_empty()) {
+            return Err(PyRuntimeError::new_err(
+                "Batch cancellation trace left provenance without a net relation insert",
+            ));
+        }
+
+        Ok(PreparedRelationMetadataTransition { prospective_store })
+    }
+
     pub(crate) fn clear_relation(&mut self, relation: &str) {
         self.relations.remove(relation);
+    }
+
+    pub(crate) fn clear(&mut self) {
+        self.relations.clear();
     }
 
     pub(crate) fn snapshot(
@@ -184,6 +418,41 @@ impl RelationMetadataStore {
             schema_sha256,
             schema_arity,
             metadata: self.relations.get(relation).cloned(),
+        }
+    }
+}
+
+impl PreparedInsertEvidence {
+    pub(crate) fn has_fact_keys(&self) -> bool {
+        !self.facts.is_empty()
+    }
+}
+
+impl PreparedRelationMetadataUpdate {
+    pub(crate) fn new(relation: String, insert_evidence: Option<PreparedInsertEvidence>) -> Self {
+        Self {
+            relation,
+            insert_evidence,
+        }
+    }
+}
+
+impl PreparedRelationMetadataTransition {
+    fn unchanged() -> Self {
+        Self {
+            prospective_store: None,
+        }
+    }
+
+    fn replace(prospective_store: RelationMetadataStore) -> Self {
+        Self {
+            prospective_store: Some(prospective_store),
+        }
+    }
+
+    pub(crate) fn commit(self, store: &mut RelationMetadataStore) {
+        if let Some(prospective_store) = self.prospective_store {
+            *store = prospective_store;
         }
     }
 }
@@ -637,13 +906,53 @@ fn validate_fact_membership(
         return Ok(());
     }
 
+    let keys = facts.keys().collect::<Vec<_>>();
+    let membership = fact_membership_mask(relation, schema, provider, relation_buffer, &keys)?;
+    if let Some(index) = membership.iter().position(|present| !present) {
+        let key = keys[index];
+        return Err(metadata_error(format!(
+            "Relation '{relation}' evidence fact {} is not present in the uploaded relation",
+            format_cells(&key.cells)
+        )));
+    }
+    Ok(())
+}
+
+fn fact_membership_mask(
+    relation: &str,
+    schema: &Schema,
+    provider: &Arc<CudaKernelProvider>,
+    relation_buffer: &CudaBuffer,
+    facts: &[&FactKey],
+) -> PyResult<Vec<bool>> {
+    if facts.is_empty() {
+        return Ok(Vec::new());
+    }
+
     let mut columns: Vec<Vec<u8>> = schema
         .columns
         .iter()
         .map(|(_, scalar_type)| Vec::with_capacity(facts.len() * scalar_type.size_bytes()))
         .collect();
-    for key in facts.keys() {
+    for (fact_index, key) in facts.iter().enumerate() {
+        if key.cells.len() != schema.arity() {
+            return Err(PyRuntimeError::new_err(format!(
+                "Relation '{relation}' prepared fact {fact_index} has arity {} but schema arity is {}",
+                key.cells.len(),
+                schema.arity()
+            )));
+        }
         for (column, cell) in key.cells.iter().enumerate() {
+            let expected = schema.column_type(column).ok_or_else(|| {
+                PyRuntimeError::new_err(format!(
+                    "Relation '{relation}' schema is missing column {column}"
+                ))
+            })?;
+            if cell.scalar_type() != expected || cell.bytes.len() != expected.size_bytes() {
+                return Err(PyRuntimeError::new_err(format!(
+                    "Relation '{relation}' prepared fact {fact_index} column {column} does not match the compiled scalar type"
+                )));
+            }
             columns[column].extend_from_slice(&cell.bytes);
         }
     }
@@ -662,17 +971,40 @@ fn validate_fact_membership(
             facts.len()
         )));
     }
-    if let Some(index) = membership.iter().position(|present| !present) {
-        let key = facts
-            .keys()
-            .nth(index)
-            .expect("membership mask length matches the prepared fact keys");
-        return Err(metadata_error(format!(
-            "Relation '{relation}' evidence fact {} is not present in the uploaded relation",
-            format_cells(&key.cells)
-        )));
+    Ok(membership)
+}
+
+fn remove_matching_facts(
+    relation: &str,
+    schema: &Schema,
+    provider: &Arc<CudaKernelProvider>,
+    tuples: &CudaBuffer,
+    facts: &mut BTreeMap<FactKey, BTreeSet<ProvenanceRecord>>,
+) -> PyResult<()> {
+    if facts.is_empty() {
+        return Ok(());
+    }
+    let keys = facts.keys().collect::<Vec<_>>();
+    let membership = fact_membership_mask(relation, schema, provider, tuples, &keys)?;
+    let removed = keys
+        .into_iter()
+        .zip(membership)
+        .filter(|(_, present)| *present)
+        .map(|(key, _)| key.clone())
+        .collect::<Vec<_>>();
+    for key in removed {
+        facts.remove(&key);
     }
     Ok(())
+}
+
+fn union_fact_records(
+    destination: &mut BTreeMap<FactKey, BTreeSet<ProvenanceRecord>>,
+    incoming: BTreeMap<FactKey, BTreeSet<ProvenanceRecord>>,
+) {
+    for (key, records) in incoming {
+        destination.entry(key).or_default().extend(records);
+    }
 }
 
 fn pack_role(py: Python<'_>, role: &RelationRole) -> PyResult<PyObject> {
@@ -1016,7 +1348,7 @@ fn format_cells(cells: &[TypedCell]) -> String {
     format!("[{cells}]")
 }
 
-fn metadata_error(message: String) -> PyErr {
+pub(crate) fn metadata_error(message: String) -> PyErr {
     RelationMetadataError::new_err(message)
 }
 
