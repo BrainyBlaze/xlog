@@ -89,8 +89,13 @@ def test_exact_result_exposes_log_evidence_with_multiple_evidence_atoms():
     #   = 0.7 * 1.0 * 0.6 = 0.42   (wet is deterministically true given rain)
     # and P(rain=true | evidence) = P(rain=true, evidence) / P(evidence)
     #   = 0.42 / 0.456
+    # prob comes back from GPU-WMC in log-space and is then divided by Z_E,
+    # so it inherits the same abs=1e-6 tolerance as
+    # test_log_evidence_is_zero_when_nothing_is_observed's result.prob check
+    # (log_z_e itself, checked above, is an exact log-space quantity and keeps
+    # the file's tighter 1e-9 convention).
     rain_given_evidence = torch.from_dlpack(result.prob)[0].item()
-    assert rain_given_evidence == pytest.approx(0.42 / 0.456, abs=1e-9)
+    assert rain_given_evidence == pytest.approx(0.42 / 0.456, abs=1e-6)
 
 
 def test_monte_carlo_result_has_no_log_evidence():

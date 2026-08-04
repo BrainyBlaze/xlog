@@ -313,9 +313,16 @@ pub struct ExactDdnnfProgram {
     last_compile_profile: Option<CircuitCompileProfile>,
     /// Sparse storage for what each CNF variable stands for: only variables that
     /// were actually assigned to a probabilistic fact or annotated-disjunction
-    /// choice are present, as `(var, info)` pairs sorted by `var`. CNF variables
-    /// are 1-indexed. Call `prob_var_map()` to materialize the dense,
-    /// `grad_true`/`grad_false`-aligned view on demand. Populated only when
+    /// choice are present, as `(var, info)` pairs sorted by `var`. The sort is
+    /// by `var` (not construction order) so entries are laid out in the same
+    /// order `prob_var_map()` materializes them in, which makes the vector
+    /// itself directly inspectable/debuggable as a CNF-var-indexed sequence.
+    /// `var` may repeat (a leaf and a choice can be assigned the same CNF
+    /// variable in principle); when it does, the *last* matching entry wins
+    /// during materialization (see the ordering note on the `sort_by_key` call
+    /// in `compile_provenance_with_gpu`, which documents which entry that is).
+    /// CNF variables are 1-indexed. Call `prob_var_map()` to materialize the
+    /// dense, `grad_true`/`grad_false`-aligned view on demand. Populated only when
     /// compiled with the "host-io" feature (empty otherwise); also empty when
     /// compiled through the GPU count-lift fast path, since that path never
     /// builds a CNF encoding (see `uses_gpu_native_count_lift()` and
@@ -379,8 +386,9 @@ impl ExactDdnnfProgram {
     /// padding (CNF variables are 1-indexed), and so is any other slot with no
     /// variable assigned to it — those padding slots are indistinguishable
     /// from `ProbVarInfo::Other`. Do not treat `len()` of the result as a
-    /// variable count or a random-variable count; use [`Self::num_vars`] or
-    /// [`Self::random_var_indices`] for that.
+    /// variable count or a random-variable count; use
+    /// [`Self::random_var_indices`] for that ([`Self::num_vars`] returns this
+    /// same capacity, not a count, so it is not a substitute here).
     ///
     /// What *is* guaranteed is alignment with `evaluate_gpu_with_grads`'s
     /// `grad_true`/`grad_false` vectors, which are allocated with the same
@@ -406,6 +414,15 @@ impl ExactDdnnfProgram {
         };
         let mut dense = vec![ProbVarInfo::Other; capacity];
         for (var, info) in &self.prob_var_entries {
+            debug_assert!(
+                (*var as usize) < capacity,
+                "prob_var_entries contains CNF var {} but capacity is only {} \
+                 (max_var {}); entries must never exceed the encoder's own \
+                 variable capacity",
+                var,
+                capacity,
+                self.max_var
+            );
             if let Some(slot) = dense.get_mut(*var as usize) {
                 *slot = info.clone();
             }
@@ -487,6 +504,12 @@ impl ExactDdnnfProgram {
         })
     }
 
+    /// Returns the CNF encoder's variable *capacity* (`max_var + 1`), i.e. the
+    /// same quantity as `prob_var_map().len()` — **not** the number of CNF
+    /// variables actually assigned, and not the number of random variables in
+    /// the program (most CNF variables are auxiliary Tseitin variables with
+    /// no probabilistic meaning). Use [`Self::random_var_indices`] to count or
+    /// enumerate random variables instead.
     pub fn num_vars(&self) -> usize {
         if self.max_var == 0 {
             0
@@ -1645,20 +1668,48 @@ impl ExactDdnnfProgram {
                 // not the disjunction's declared marginal probabilities
                 // (`ChoiceSource::choices`), which only serve as display context.
                 // See ProbVarInfo::Choice::prob's doc for why the two differ.
-                if let (Some(source), Some(&(cond_true, _cond_false))) = (
+                match (
                     provenance.choice_sources.get(&choice),
                     provenance.choice_probs.get(&choice),
                 ) {
-                    entries.push((
-                        var,
-                        ProbVarInfo::Choice {
-                            choices: source.choices.clone(),
-                            choice_index: source.choice_index,
-                            prob: cond_true,
-                        },
-                    ));
+                    (Some(source), Some(&(cond_true, _cond_false))) => {
+                        entries.push((
+                            var,
+                            ProbVarInfo::Choice {
+                                choices: source.choices.clone(),
+                                choice_index: source.choice_index,
+                                prob: cond_true,
+                            },
+                        ));
+                    }
+                    _ => {
+                        // `choice_sources` and `choice_probs` are populated in
+                        // lock-step in `provenance.rs` (see the choice-handling
+                        // arm around lines 708-717) and remapped in lock-step in
+                        // `decision_order.rs` (lines 115-123); a `choice_var_host`
+                        // entry pointing at a `ChoiceVarId` missing from either map
+                        // means that invariant broke upstream. Silently falling
+                        // back to `ProbVarInfo::Other` would make a real
+                        // compilation bug look like "this CNF variable is just an
+                        // auxiliary Tseitin variable" to every caller of
+                        // `prob_var_map()`, so fail loudly instead.
+                        return Err(XlogError::Compilation(format!(
+                            "Exact inference error: choice_sources/choice_probs are out of \
+                             sync for {:?} (CNF var {var}); expected both maps to contain \
+                             this ChoiceVarId",
+                            choice
+                        )));
+                    }
                 }
             }
+            // `entries` is built leaf-first, then choice-second (the two loops
+            // above), so on a `var` collision the leaf entry comes first and the
+            // choice entry comes second. `sort_by_key` is STABLE, so it preserves
+            // that relative order; `prob_var_map()`'s materialization loop then
+            // overwrites earlier entries with later ones for the same slot
+            // (last-write-wins), so choice wins over leaf on collision. Do not
+            // change this to `sort_unstable_by_key`: it makes no such ordering
+            // guarantee and would silently flip which entry wins.
             entries.sort_by_key(|(var, _)| *var);
             entries
         };

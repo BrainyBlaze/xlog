@@ -46,8 +46,14 @@ def three_head_disjunction(pc: float) -> str:
     ``remaining = 1 - pa - pb`` (the divisor of blue's conditional weight) is
     constant across recompilations — see the test below for why that matters.
     """
+    # Format explicitly with fixed-point notation, not the default repr: xlog's
+    # grammar (crates/xlog-logic/src/grammar.pest) does not accept scientific
+    # notation for floats, and pc is perturbed by callers (pc +/- eps_pc) with
+    # values small enough that Python's repr could pick exponential notation
+    # for some future eps/pc combination, turning a numeric mismatch into a
+    # parse error instead.
     return f"""
-{_THREE_HEAD_PA}::shade(red); {_THREE_HEAD_PB}::shade(green); {pc}::shade(blue).
+{_THREE_HEAD_PA}::shade(red); {_THREE_HEAD_PB}::shade(green); {pc:.17f}::shade(blue).
 query(shade(blue)).
 """
 
@@ -271,6 +277,11 @@ def test_choice_conditional_probability_lines_up_with_the_gradient():
     result = program.evaluate(return_grads=True)
     var_map = program.prob_var_map()
     grads = torch.from_dlpack(result.grad_true[0])
+    assert grads.shape[0] == len(var_map), (
+        f"grad_true[0] имеет длину {grads.shape[0]}, а var_map — {len(var_map)}; "
+        "обе структуры обязаны индексироваться одним и тем же номером CNF-"
+        "переменной, иначе сравнение по позициям бессмысленно"
+    )
 
     third_head_entries = [
         (i, e)
@@ -280,6 +291,12 @@ def test_choice_conditional_probability_lines_up_with_the_gradient():
     assert third_head_entries, (
         "no choice entry with choice_index == 2 (the 3rd disjunction head, "
         f"'blue') found in the map; full map: {var_map!r}"
+    )
+    assert len(third_head_entries) == 1, (
+        f"expected exactly one choice entry with choice_index == 2, found "
+        f"{len(third_head_entries)}: {third_head_entries!r}; a consumer "
+        "indexing [0] without this check would silently ignore the "
+        "duplicates and use an arbitrary one"
     )
     i, entry = third_head_entries[0]
 
