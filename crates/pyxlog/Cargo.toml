@@ -18,6 +18,7 @@ doctest = false
 pyo3 = { workspace = true, features = ["multiple-pymethods"] }
 cudarc = { workspace = true }
 rand = "0.8"
+sha2 = "0.10"
 xlog-core.workspace = true
 xlog-cuda.workspace = true
 xlog-gpu.workspace = true

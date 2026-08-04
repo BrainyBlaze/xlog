@@ -44,12 +44,14 @@ mod joint_carrier;
 mod logic;
 mod neural;
 mod program;
+mod relation_metadata;
 mod training;
 mod types;
 pub(crate) use program::{
     CachedCircuit, CompiledProbProgram, HardFilter, InputSource, JoinPlan, NeuralGroup,
     QuerySignature,
 };
+use relation_metadata::RelationMetadataStore;
 
 const DLPACK_CAPSULE_NAME: &[u8] = b"dltensor\0";
 const USED_DLPACK_CAPSULE_NAME: &[u8] = b"used_dltensor\0";
@@ -594,6 +596,7 @@ pub struct LogicRelationSession {
     pub(crate) relation_callbacks: Vec<RelationChangeCallback>,
     pub(crate) next_relation_callback_id: u64,
     pub(crate) relation_generations: HashMap<String, u64>,
+    pub(crate) relation_metadata: RelationMetadataStore,
 }
 
 pub(crate) struct RelationChangeCallback {
@@ -826,6 +829,7 @@ fn pyxlog(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<LogicProgram>()?;
     m.add_class::<CompiledLogicProgram>()?;
     m.add_class::<LogicRelationSession>()?;
+    m.add_class::<relation_metadata::RelationEvidence>()?;
     m.add_class::<LogicQueryResult>()?;
     m.add_class::<LogicEvalResult>()?;
     m.add_class::<McDeviceEvalResult>()?;
@@ -855,6 +859,10 @@ fn pyxlog(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add(
         "SolverResourceExhausted",
         _py.get_type::<joint_carrier::SolverResourceExhausted>(),
+    )?;
+    m.add(
+        "RelationMetadataError",
+        _py.get_type::<relation_metadata::RelationMetadataError>(),
     )?;
     m.add("SOLVER_ABI_IDENTITY", xlog_cuda::SOLVER_ABI_IDENTITY)?;
     Ok(())

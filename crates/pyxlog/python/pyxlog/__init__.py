@@ -150,24 +150,6 @@ class LogicQueryChunk:
         self.is_true = is_true
 
 
-class RelationEvidence:
-    """Stable relation evidence view for pyxlog sessions."""
-
-    def __init__(self, session: Any, name: str):
-        self._session = session
-        self._name = name
-
-    def provenance(self) -> dict[str, Any]:
-        """Return relation schema, source hashes, row hashes, and decision counts."""
-
-        return dict(_RELATION_EVIDENCE.get(id(self._session), {}).get(self._name, {}))
-
-
-# Public monkey-patched signatures:
-# def evidence(self, name: str | None = None) -> dict[str, Any]: ...
-# def relation(self, name: str) -> RelationEvidence: ...
-
-
 _RUNTIME_API_EXECUTOR = ThreadPoolExecutor(max_workers=4, thread_name_prefix="pyxlog-runtime-api")
 _RUNTIME_API_ORIGINALS: dict[tuple[type, str], Any] = {}
 _RUNTIME_API_PROGRESS: dict[int, dict[str, Any]] = {}
@@ -366,72 +348,6 @@ def temporal_provenance(session: Any, name: str) -> dict[str, Any]:
     return dict(metadata)
 
 
-def _logic_session_put_relation_with_provenance(
-    self: Any,
-    name: str,
-    dlpack_columns: Any,
-    *,
-    relation_schema: list[str] | None = None,
-    source_path: str | None = None,
-    source_hash: str | None = None,
-    row_hashes: list[str] | None = None,
-    field_hashes: dict[str, list[str]] | None = None,
-    accepted_count: int | None = None,
-    rejected_count: int | None = None,
-    output_path: str | None = None,
-    output_hash: str | None = None,
-    decision_counts: dict[str, int] | None = None,
-) -> dict[str, Any]:
-    """Upload a relation and record provenance/evidence metadata."""
-
-    self.put_relation(name, dlpack_columns)
-    if source_hash is None and source_path is not None:
-        source_hash = _hash_path(source_path)
-    if output_hash is None and output_path is not None:
-        output_hash = _hash_path(output_path)
-    metadata = {
-        "relation": name,
-        "relation_schema": list(relation_schema or []),
-        "source_path": source_path,
-        "source_hash": source_hash,
-        "row_hashes": list(row_hashes or []),
-        "field_hashes": dict(field_hashes or {}),
-        "accepted_count": int(accepted_count or 0),
-        "rejected_count": int(rejected_count or 0),
-        "output_path": output_path,
-        "output_hash": output_hash,
-        "decision_counts": dict(decision_counts or {}),
-    }
-    _record_relation_evidence(self, name, metadata)
-    return dict(metadata)
-
-
-def _logic_session_evidence(self: Any, name: str | None = None) -> dict[str, Any]:
-    """Return session evidence, including program hash and relation provenance."""
-
-    records = _RELATION_EVIDENCE.get(id(self), {})
-    if name is not None:
-        records = {name: records.get(name, {})}
-    program_hash = _stable_hash(
-        repr(
-            [
-                (relation, metadata.get("source_hash"), metadata.get("output_hash"))
-                for relation, metadata in sorted(records.items())
-            ]
-        )
-    )
-    return {
-        "program_hash": program_hash,
-        "relations": {relation: dict(metadata) for relation, metadata in records.items()},
-    }
-
-
-def _logic_session_relation(self: Any, name: str) -> RelationEvidence:
-    """Return a relation evidence handle with provenance()."""
-
-    return RelationEvidence(self, name)
-
-
 def _record_relation_evidence(self: Any, name: str, metadata: dict[str, Any]) -> None:
     _RELATION_EVIDENCE.setdefault(id(self), {})[name] = dict(metadata)
 
@@ -587,13 +503,6 @@ def _install_runtime_api_extensions() -> None:
     setattr(LogicRelationSession, "evaluate_stream", _logic_session_evaluate_stream)
     setattr(LogicRelationSession, "put_temporal_relation", _logic_session_put_temporal_relation)
     setattr(LogicRelationSession, "temporal_provenance", _logic_session_temporal_provenance)
-    setattr(
-        LogicRelationSession,
-        "put_relation_with_provenance",
-        _logic_session_put_relation_with_provenance,
-    )
-    setattr(LogicRelationSession, "evidence", _logic_session_evidence)
-    setattr(LogicRelationSession, "relation", _logic_session_relation)
     setattr(CompiledProgram, "nn4_lineage", _compiled_program_nn4_lineage)
     setattr(CompiledProgram, "record_nn4_influence", _compiled_program_record_nn4_influence)
     setattr(LogicQueryResult, "iter_chunks", _logic_query_iter_chunks)
@@ -608,7 +517,6 @@ try:
     __all__ = list(__all__) + [
         "AsyncEvaluation",
         "LogicQueryChunk",
-        "RelationEvidence",
         "put_temporal_relation",
         "temporal_provenance",
     ]

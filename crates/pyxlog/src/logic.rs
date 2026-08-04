@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Instant;
 
-use pyo3::exceptions::{PyRuntimeError, PyValueError};
+use pyo3::exceptions::{PyKeyError, PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList, PySequence};
 
@@ -17,6 +17,10 @@ use xlog_runtime::RelationDelta;
 use std::collections::HashMap as StdHashMap;
 
 use super::neural_registry::NeuralPredicateRegistry;
+use super::relation_metadata::{
+    pack_session_evidence, relation_schema_fingerprint, require_positive_metadata_arity,
+    RelationEvidence, RelationMetadataStore, RelationSnapshot,
+};
 use super::{
     dlpack_capsule_from_tensor, dlpack_from_py, enforce_call_memory_limit,
     parse_prob_engine_override, provider_from_config, provider_memory_stats, types,
@@ -196,6 +200,7 @@ impl CompiledLogicProgram {
             relation_callbacks: Vec::new(),
             next_relation_callback_id: 1,
             relation_generations: HashMap::new(),
+            relation_metadata: RelationMetadataStore::default(),
         })
     }
 
@@ -222,31 +227,101 @@ impl LogicRelationSession {
         name: String,
         dlpack_columns: &Bound<'_, PyAny>,
     ) -> PyResult<()> {
-        if name.starts_with("__") {
-            return Err(PyValueError::new_err(format!(
-                "Relation {} is internal and cannot be stored in a persistent session",
-                name
-            )));
-        }
-        let schema = self.program.schema(&name).ok_or_else(|| {
-            PyValueError::new_err(format!(
-                "Unknown relation {} (not present in compiled schemas)",
-                name
-            ))
-        })?;
-        let tensors = collect_dlpack_columns(
-            dlpack_columns,
-            &format!("Relation {} must be a sequence of DLPack columns", name),
-        )?;
-        let buffer = self
-            .provider
-            .from_dlpack_tensors_with_schema(schema.clone(), tensors)
+        let metadata_name = name.clone();
+        let schema = self.relation_replacement_schema(&name)?;
+        let buffer = self.relation_replacement_buffer(&name, schema, dlpack_columns)?;
+        let additional = usize::from(!self.relation_store.contains(&name));
+        self.relation_store
+            .try_reserve_relations(additional)
             .map_err(types::xlog_err)?;
-        self.relation_store.put(&name, buffer);
+        self.relation_store.put_owned(name, buffer);
+        self.relation_metadata.clear_relation(&metadata_name);
         self.evaluation_store = None;
         self.session_runtime = None;
         self.last_delta_stats = None;
         Ok(())
+    }
+
+    #[pyo3(signature = (name, dlpack_columns, *, roles, facts))]
+    pub fn put_relation_with_provenance(
+        &mut self,
+        py: Python<'_>,
+        name: String,
+        dlpack_columns: &Bound<'_, PyAny>,
+        roles: &Bound<'_, PyAny>,
+        facts: &Bound<'_, PyAny>,
+    ) -> PyResult<PyObject> {
+        let schema = self.relation_replacement_schema(&name)?;
+        require_positive_metadata_arity(&name, schema)?;
+        let arguments = self.program.argument_schema(&name).ok_or_else(|| {
+            PyRuntimeError::new_err(format!(
+                "Relation '{name}' compiled argument contract is unavailable"
+            ))
+        })?;
+        let buffer = self.relation_replacement_buffer(&name, schema, dlpack_columns)?;
+        let row_count = self
+            .provider
+            .validated_logical_row_count(&buffer)
+            .map_err(types::xlog_err)?;
+        let (prospective_metadata, snapshot) = self.relation_metadata.prepare_replacement(
+            &name,
+            &arguments,
+            schema,
+            &self.provider,
+            &buffer,
+            roles,
+            facts,
+            row_count,
+        )?;
+        let packed_snapshot = snapshot.pack(py)?;
+        let additional = usize::from(!self.relation_store.contains(&name));
+        self.relation_store
+            .try_reserve_relations(additional)
+            .map_err(types::xlog_err)?;
+
+        self.relation_store.put_owned(name, buffer);
+        self.relation_metadata = prospective_metadata;
+        self.evaluation_store = None;
+        self.session_runtime = None;
+        self.last_delta_stats = None;
+        Ok(packed_snapshot)
+    }
+
+    pub fn relation(&self, name: &str) -> PyResult<RelationEvidence> {
+        let buffer = self
+            .relation_store
+            .get(name)
+            .ok_or_else(|| PyKeyError::new_err(format!("Relation '{name}' is not stored")))?;
+        Ok(RelationEvidence::new(
+            self.snapshot_stored_relation(name, buffer)?,
+        ))
+    }
+
+    #[pyo3(signature = (name=None))]
+    pub fn evidence(&self, py: Python<'_>, name: Option<&str>) -> PyResult<PyObject> {
+        if let Some(name) = name {
+            if !self.relation_store.contains(name) {
+                return Err(PyKeyError::new_err(format!(
+                    "Relation '{name}' is not stored"
+                )));
+            }
+        }
+        let mut relation_names = self
+            .relation_store
+            .names()
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        relation_names.sort();
+        let mut snapshots = Vec::with_capacity(relation_names.len());
+        for relation_name in relation_names {
+            let buffer = self.relation_store.get(&relation_name).ok_or_else(|| {
+                PyRuntimeError::new_err(format!(
+                    "Relation '{relation_name}' disappeared while preparing evidence"
+                ))
+            })?;
+            snapshots.push(self.snapshot_stored_relation(&relation_name, buffer)?);
+        }
+        pack_session_evidence(py, snapshots, name)
     }
 
     #[pyo3(signature = (memory_mb=None))]
@@ -582,6 +657,54 @@ impl LogicRelationSession {
 }
 
 impl LogicRelationSession {
+    fn snapshot_stored_relation(
+        &self,
+        name: &str,
+        buffer: &xlog_cuda::CudaBuffer,
+    ) -> PyResult<RelationSnapshot> {
+        let arguments = self.program.argument_schema(name).ok_or_else(|| {
+            PyRuntimeError::new_err(format!(
+                "Relation '{name}' compiled argument contract is unavailable"
+            ))
+        })?;
+        let schema_sha256 = relation_schema_fingerprint(name, &arguments)?;
+        let row_count = self
+            .provider
+            .validated_logical_row_count(buffer)
+            .map_err(types::xlog_err)?;
+        Ok(self
+            .relation_metadata
+            .snapshot(name, row_count, schema_sha256, arguments.len()))
+    }
+
+    fn relation_replacement_schema(&self, name: &str) -> PyResult<&xlog_core::Schema> {
+        if name.starts_with("__") {
+            return Err(PyValueError::new_err(format!(
+                "Relation {name} is internal and cannot be stored in a persistent session"
+            )));
+        }
+        self.program.schema(name).ok_or_else(|| {
+            PyValueError::new_err(format!(
+                "Unknown relation {name} (not present in compiled schemas)"
+            ))
+        })
+    }
+
+    fn relation_replacement_buffer(
+        &self,
+        name: &str,
+        schema: &xlog_core::Schema,
+        dlpack_columns: &Bound<'_, PyAny>,
+    ) -> PyResult<xlog_cuda::CudaBuffer> {
+        let tensors = collect_dlpack_columns(
+            dlpack_columns,
+            &format!("Relation {name} must be a sequence of DLPack columns"),
+        )?;
+        self.provider
+            .from_dlpack_tensors_with_schema(schema.clone(), tensors)
+            .map_err(types::xlog_err)
+    }
+
     fn parse_relation_delta_batch(
         &self,
         method_name: &str,

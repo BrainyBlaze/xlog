@@ -1435,6 +1435,7 @@ dependencies = [
  "cudarc",
  "pyo3",
  "rand 0.8.6",
+ "sha2",
  "xlog-core",
  "xlog-cuda",
  "xlog-gpu",
