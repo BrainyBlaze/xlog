@@ -561,13 +561,10 @@ impl Executor {
             return self.clone_buffer(&inputs[0]);
         }
 
-        // Pairwise union using GPU-native operation
-        let mut result = self.clone_buffer(&inputs[0])?;
-        for input in inputs.iter().skip(1) {
-            result = self.provider.union_gpu(&result, input)?;
-        }
-
-        Ok(result)
+        // Multiway union: one concat + sort + dedup over all inputs instead
+        // of re-sorting a growing accumulator per input.
+        let input_refs: Vec<&CudaBuffer> = inputs.iter().collect();
+        self.provider.union_many_gpu(&input_refs)
     }
 
     /// Execute a Distinct node

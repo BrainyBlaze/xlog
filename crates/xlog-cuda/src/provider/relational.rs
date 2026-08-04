@@ -750,10 +750,7 @@ impl super::CudaKernelProvider {
 
     /// GPU-native union (no host roundtrip)
     ///
-    /// Computes the union of two buffers entirely on the GPU using:
-    /// 1. Concatenate arrays using concat_u32 kernel
-    /// 2. Sort the concatenated result
-    /// 3. Deduplicate using existing dedup()
+    /// Delegates to [`Self::union_many_gpu`] with two inputs.
     ///
     /// # Arguments
     /// * `a` - First buffer
@@ -765,49 +762,155 @@ impl super::CudaKernelProvider {
     /// # Errors
     /// Returns `XlogError::Kernel` if schemas don't match or operation fails
     pub fn union_gpu(&self, a: &CudaBuffer, b: &CudaBuffer) -> Result<CudaBuffer> {
+        self.union_many_gpu(&[a, b])
+    }
+
+    /// GPU-native N-way union (no host roundtrip)
+    ///
+    /// Computes the deduplicated union of all inputs entirely on the GPU:
+    /// 1. Concatenate all non-empty inputs once
+    /// 2. Sort the concatenated result
+    /// 3. Deduplicate using existing dedup()
+    ///
+    /// Semantically equivalent to left-folding [`Self::union_gpu`] over
+    /// `inputs`, but sorts and deduplicates the combined relation exactly
+    /// once instead of re-sorting a growing accumulator per input. For R
+    /// inputs of similar size this reduces the total work from O(R² · rows)
+    /// to O(R · rows · log), which is what keeps many-rule predicate heads
+    /// (one contribution per rule) from going quadratic.
+    ///
+    /// # Arguments
+    /// * `inputs` - Buffers to union; at least one is required
+    ///
+    /// # Returns
+    /// A buffer containing the deduplicated union of all inputs, sorted
+    ///
+    /// # Errors
+    /// Returns `XlogError::Kernel` if `inputs` is empty, schemas are
+    /// incompatible, or the operation fails
+    pub fn union_many_gpu(&self, inputs: &[&CudaBuffer]) -> Result<CudaBuffer> {
+        let first = inputs.first().ok_or_else(|| {
+            XlogError::Kernel("union_many_gpu requires at least one input".to_string())
+        })?;
         // Verify schemas have compatible types (ignore column names for Datalog union).
-        if !self.schemas_type_compatible(a.schema(), b.schema()) {
-            return Err(XlogError::Kernel(format!(
-                "Union requires compatible schemas: {:?} vs {:?}",
-                a.schema(),
-                b.schema()
-            )));
+        for other in &inputs[1..] {
+            if !self.schemas_type_compatible(first.schema(), other.schema()) {
+                return Err(XlogError::Kernel(format!(
+                    "Union requires compatible schemas: {:?} vs {:?}",
+                    first.schema(),
+                    other.schema()
+                )));
+            }
         }
 
-        let schema = a.schema().clone();
-        let a_rows = self.device_row_count(a)?;
-        let b_rows = self.device_row_count(b)?;
+        let schema = first.schema().clone();
+        let mut total_rows = 0usize;
+        let mut non_empty: Vec<&CudaBuffer> = Vec::with_capacity(inputs.len());
+        for input in inputs {
+            let rows = self.device_row_count(input)?;
+            if rows > 0 {
+                total_rows = total_rows.saturating_add(rows);
+                non_empty.push(input);
+            }
+        }
+
         if schema.arity() == 0 {
-            // 0-arity set union: empty ∪ empty = empty; otherwise {()}.
-            if a_rows == 0 && b_rows == 0 {
+            // 0-arity set union: all inputs empty = empty; otherwise {()}.
+            if non_empty.is_empty() {
                 return self.create_empty_buffer(schema);
             }
             return self.buffer_from_columns(Vec::new(), 1, schema);
         }
 
-        let key_cols: Vec<usize> = (0..schema.arity()).collect();
-        if a_rows == 0 && b_rows == 0 {
+        if non_empty.is_empty() {
             return self.create_empty_buffer(schema);
         }
 
-        // Set semantics require dedup even when one side is empty.
-        if a_rows == 0 {
-            return self.dedup(b, &key_cols);
-        }
-        if b_rows == 0 {
-            return self.dedup(a, &key_cols);
+        // Set semantics require dedup even for a single non-empty input.
+        let key_cols: Vec<usize> = (0..schema.arity()).collect();
+        if non_empty.len() == 1 {
+            return self.dedup(non_empty[0], &key_cols);
         }
 
-        let concat = self.concat_buffers_gpu(a, b)?;
+        let concat = if non_empty.len() == 2 {
+            self.concat_buffers_gpu(non_empty[0], non_empty[1])?
+        } else {
+            self.concat_many_buffers_gpu(&non_empty, total_rows)?
+        };
         if Self::use_csm_cuda_graph_env()
             && schema.arity() > 1
-            && a_rows.saturating_add(b_rows) <= SMALL_FULL_ROW_SORT_MAX_ROWS
+            && total_rows <= SMALL_FULL_ROW_SORT_MAX_ROWS
         {
             return self.dedup_full_row_deterministic(&concat);
         }
 
         let sorted = self.sort(&concat, &key_cols)?;
         self.dedup_sorted(&sorted, &key_cols)
+    }
+
+    /// Concatenate three or more non-empty buffers into one, column by column.
+    ///
+    /// Allocates each output column once at the combined size and fills it
+    /// with device-to-device copies at row offsets, so the copy volume is
+    /// linear in the total rows regardless of input count (chaining the
+    /// pairwise concat would re-copy the growing prefix per input).
+    ///
+    /// Callers guarantee: at least two inputs, all schemas type-compatible,
+    /// every input non-empty, and `total_rows` equal to the sum of the
+    /// inputs' logical row counts.
+    fn concat_many_buffers_gpu(
+        &self,
+        inputs: &[&CudaBuffer],
+        total_rows: usize,
+    ) -> Result<CudaBuffer> {
+        let schema = inputs[0].schema().clone();
+        if total_rows > u32::MAX as usize {
+            return Err(XlogError::Kernel(format!(
+                "Concat supports at most {} rows, got {}",
+                u32::MAX,
+                total_rows
+            )));
+        }
+
+        let mut input_rows = Vec::with_capacity(inputs.len());
+        for input in inputs {
+            input_rows.push(self.device_row_count(input)?);
+        }
+
+        let device = self.device.inner();
+        let mut result_columns = Vec::with_capacity(schema.arity());
+        for col_idx in 0..schema.arity() {
+            let elem_size = schema
+                .column_type(col_idx)
+                .map(|t| t.size_bytes())
+                .unwrap_or(4);
+            let total_bytes = total_rows
+                .checked_mul(elem_size)
+                .ok_or_else(|| XlogError::Kernel("Concat: total_bytes overflow".to_string()))?;
+
+            let mut out_col = self.memory.alloc::<u8>(total_bytes)?;
+            let mut offset = 0usize;
+            for (input, &rows) in inputs.iter().zip(&input_rows) {
+                let col_bytes = rows
+                    .checked_mul(elem_size)
+                    .ok_or_else(|| XlogError::Kernel("Concat: col_bytes overflow".to_string()))?;
+                let col = input.column(col_idx).ok_or_else(|| {
+                    XlogError::Kernel(format!("Concat: column {} not found", col_idx))
+                })?;
+                let src = self.column_bytes_view(col, col_bytes)?;
+                let mut dst = out_col.slice_mut(offset..offset + col_bytes);
+                device.dtod_copy(&src, &mut dst).map_err(|e| {
+                    XlogError::Kernel(format!("Concat: failed to copy column: {}", e))
+                })?;
+                offset += col_bytes;
+            }
+
+            result_columns.push(out_col.into());
+        }
+
+        self.device.synchronize()?;
+
+        self.buffer_from_columns(result_columns, total_rows as u64, schema)
     }
 
     /// Set difference (a - b) with deterministic set semantics.

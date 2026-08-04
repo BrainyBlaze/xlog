@@ -380,6 +380,181 @@ fn test_union_gpu_uses_device_row_count() {
     assert_eq!(result_data, vec![1, 2]);
 }
 
+// ============== Multiway Union Tests ==============
+
+#[test]
+fn test_union_many_gpu_matches_pairwise_fold() {
+    let Some(provider) = setup_provider() else {
+        eprintln!("Skipping: no CUDA device");
+        return;
+    };
+
+    // Overlapping inputs with internal duplicates: the one-pass multiway
+    // union must produce the same sorted deduplicated relation as folding
+    // union_gpu pairwise.
+    let inputs: Vec<Vec<u32>> = vec![
+        vec![5, 1, 5, 9],
+        vec![2, 9, 3],
+        vec![7, 1, 8, 8],
+        vec![4, 3, 6],
+    ];
+    let schema = Schema::new(vec![("val".to_string(), ScalarType::U32)]);
+    let buffers: Vec<CudaBuffer> = inputs
+        .iter()
+        .map(|data| {
+            provider
+                .create_buffer_from_slice::<u32>(data, schema.clone())
+                .unwrap()
+        })
+        .collect();
+
+    let mut folded = provider.union_gpu(&buffers[0], &buffers[1]).unwrap();
+    for buf in &buffers[2..] {
+        folded = provider.union_gpu(&folded, buf).unwrap();
+    }
+    let folded_data = provider.download_column::<u32>(&folded, 0).unwrap();
+
+    let refs: Vec<&CudaBuffer> = buffers.iter().collect();
+    let many = provider.union_many_gpu(&refs).unwrap();
+    let many_data = provider.download_column::<u32>(&many, 0).unwrap();
+
+    assert_eq!(many_data, folded_data);
+    assert_eq!(many_data, vec![1, 2, 3, 4, 5, 6, 7, 8, 9]);
+}
+
+#[test]
+fn test_union_many_gpu_multi_column() {
+    let Some(provider) = setup_provider() else {
+        eprintln!("Skipping: no CUDA device");
+        return;
+    };
+
+    // Three multi-column inputs with cross-input duplicates exercise the
+    // N-way concat over 8-byte columns.
+    let a = buffer_i64_triples(&provider, &[(3, 30, -1), (-5, 7, 8)]);
+    let b = buffer_i64_triples(&provider, &[(1, 2, 3), (3, 30, -1)]);
+    let c = buffer_i64_triples(&provider, &[(-5, 7, 8), (9, 0, -4), (1, 2, 3)]);
+
+    let folded = provider
+        .union_gpu(&provider.union_gpu(&a, &b).unwrap(), &c)
+        .unwrap();
+    let many = provider.union_many_gpu(&[&a, &b, &c]).unwrap();
+
+    let folded_rows = read_i64_triples(&provider, &folded);
+    let many_rows = read_i64_triples(&provider, &many);
+    assert_eq!(many_rows, folded_rows);
+    assert_eq!(many_rows.len(), 4);
+}
+
+#[test]
+fn test_union_many_gpu_single_input_dedups() {
+    let Some(provider) = setup_provider() else {
+        eprintln!("Skipping: no CUDA device");
+        return;
+    };
+
+    let schema = Schema::new(vec![("val".to_string(), ScalarType::U32)]);
+    let buf = provider
+        .create_buffer_from_slice::<u32>(&[3, 1, 3, 2, 1], schema)
+        .unwrap();
+
+    // Set semantics: a single input is still deduplicated.
+    let result = provider.union_many_gpu(&[&buf]).unwrap();
+    let result_data = provider.download_column::<u32>(&result, 0).unwrap();
+    assert_eq!(result_data, vec![1, 2, 3]);
+}
+
+#[test]
+fn test_union_many_gpu_skips_empty_inputs() {
+    let Some(provider) = setup_provider() else {
+        eprintln!("Skipping: no CUDA device");
+        return;
+    };
+
+    let schema = Schema::new(vec![("val".to_string(), ScalarType::U32)]);
+    let empty = provider.create_empty_buffer(schema.clone()).unwrap();
+    let a = provider
+        .create_buffer_from_slice::<u32>(&[2, 1], schema.clone())
+        .unwrap();
+    let b = provider
+        .create_buffer_from_slice::<u32>(&[3, 2], schema.clone())
+        .unwrap();
+
+    let result = provider.union_many_gpu(&[&empty, &a, &empty, &b]).unwrap();
+    let result_data = provider.download_column::<u32>(&result, 0).unwrap();
+    assert_eq!(result_data, vec![1, 2, 3]);
+
+    let all_empty = provider.union_many_gpu(&[&empty, &empty]).unwrap();
+    let all_empty_data = provider.download_column::<u32>(&all_empty, 0).unwrap();
+    assert!(all_empty_data.is_empty());
+}
+
+#[test]
+fn test_union_many_gpu_zero_arity() {
+    let Some(provider) = setup_provider() else {
+        eprintln!("Skipping: no CUDA device");
+        return;
+    };
+
+    let empty = zero_arity_buffer(&provider, 0);
+    let unit = zero_arity_buffer(&provider, 1);
+
+    let u1 = provider.union_many_gpu(&[&empty, &unit, &empty]).unwrap();
+    assert_eq!(host_row_count(&provider, &u1), 1);
+
+    let u2 = provider.union_many_gpu(&[&empty, &empty, &empty]).unwrap();
+    assert_eq!(host_row_count(&provider, &u2), 0);
+    assert!(u2.is_empty());
+}
+
+#[test]
+fn test_union_many_gpu_no_inputs_is_error() {
+    let Some(provider) = setup_provider() else {
+        eprintln!("Skipping: no CUDA device");
+        return;
+    };
+
+    assert!(provider.union_many_gpu(&[]).is_err());
+}
+
+#[test]
+fn test_union_many_gpu_respects_row_caps() {
+    let Some(provider) = setup_provider() else {
+        eprintln!("Skipping: no CUDA device");
+        return;
+    };
+
+    // Buffers whose row capacity exceeds their logical row count: the N-way
+    // concat must copy logical rows only, never capacity padding.
+    let schema = Schema::new(vec![("val".to_string(), ScalarType::U32)]);
+    let data = vec![1u32, 2, 99, 100];
+    let a = buffer_with_row_cap(&provider, &data, 4, 2, schema.clone());
+    let b = buffer_with_row_cap(&provider, &data, 4, 2, schema.clone());
+    let c = buffer_with_row_cap(&provider, &[3u32, 98, 97], 3, 1, schema.clone());
+
+    let result = provider.union_many_gpu(&[&a, &b, &c]).unwrap();
+    let result_data = provider.download_column::<u32>(&result, 0).unwrap();
+    assert_eq!(result_data, vec![1, 2, 3]);
+}
+
+#[test]
+fn test_union_many_gpu_incompatible_schemas_is_error() {
+    let Some(provider) = setup_provider() else {
+        eprintln!("Skipping: no CUDA device");
+        return;
+    };
+
+    let a = provider
+        .create_buffer_from_slice::<u32>(
+            &[1, 2],
+            Schema::new(vec![("val".to_string(), ScalarType::U32)]),
+        )
+        .unwrap();
+    let b = buffer_i64_triples(&provider, &[(1, 2, 3)]);
+
+    assert!(provider.union_many_gpu(&[&a, &b]).is_err());
+}
+
 // ============== Diff Tests ==============
 
 #[test]
