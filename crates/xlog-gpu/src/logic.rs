@@ -297,6 +297,37 @@ pub struct LogicProgram {
     epistemic_provenance: Option<EpistemicProvenance>,
 }
 
+/// Read-only metadata for one argument of a compiled relation.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LogicArgumentSchema {
+    name: String,
+    source_named: bool,
+    sort: Option<String>,
+    scalar_type: ScalarType,
+}
+
+impl LogicArgumentSchema {
+    /// Return the compiled column name.
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// Return whether the column name was written in the source declaration.
+    pub fn source_named(&self) -> bool {
+        self.source_named
+    }
+
+    /// Return the source domain alias, when the argument used one.
+    pub fn sort(&self) -> Option<&str> {
+        self.sort.as_deref()
+    }
+
+    /// Return the resolved scalar type from the compiled relation schema.
+    pub fn scalar_type(&self) -> ScalarType {
+        self.scalar_type
+    }
+}
+
 impl LogicProgram {
     /// Compile a Datalog source string into a GPU-executable program.
     pub fn compile(source: &str) -> Result<Self> {
@@ -598,6 +629,53 @@ impl LogicProgram {
     /// Return the full schema map (relation name to schema).
     pub fn schemas(&self) -> &HashMap<String, Schema> {
         &self.schemas
+    }
+
+    /// Return ordered argument metadata for a compiled relation.
+    ///
+    /// Column names and scalar types come from the compiled schema. Source
+    /// declarations additionally preserve whether each name was explicit and
+    /// which domain alias, if any, supplied its scalar type.
+    pub fn argument_schema(&self, relation: &str) -> Option<Vec<LogicArgumentSchema>> {
+        let schema = self.schemas.get(relation)?;
+        let source_declaration = self
+            .program
+            .predicates
+            .iter()
+            .rev()
+            .find(|decl| arity_qualified_name(&decl.name, pred_decl_arity(decl)) == relation)
+            .or_else(|| {
+                self.program
+                    .predicates
+                    .iter()
+                    .rev()
+                    .find(|decl| decl.name == relation)
+            });
+        let source_columns = source_declaration.map(pred_columns_for_decl);
+
+        Some(
+            schema
+                .columns
+                .iter()
+                .enumerate()
+                .map(|(index, (name, scalar_type))| {
+                    let source_column = source_columns
+                        .as_ref()
+                        .and_then(|columns| columns.get(index));
+                    LogicArgumentSchema {
+                        name: name.clone(),
+                        source_named: source_column
+                            .and_then(|column| column.name.as_ref())
+                            .is_some(),
+                        sort: source_column.and_then(|column| match &column.typ {
+                            TypeRef::Domain(name) => Some(name.clone()),
+                            _ => None,
+                        }),
+                        scalar_type: *scalar_type,
+                    }
+                })
+                .collect(),
+        )
     }
 
     /// Return stable rule provenance for source-visible rules.
@@ -3018,6 +3096,193 @@ fn epistemic_plan_summary_json(
         units,
         all_zero
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use xlog_core::ScalarType;
+
+    #[test]
+    fn compiled_argument_preserves_declared_names_domains_and_order() -> Result<()> {
+        let program = LogicProgram::compile(
+            r#"
+                domain party: u32.
+                pred transfer(giver: party, receiver: party, asset: u32, time: i64).
+                pred positional(u32, i64, symbol).
+            "#,
+        )?;
+
+        let transfer = program
+            .argument_schema("transfer")
+            .expect("compiled transfer argument schema");
+        assert_eq!(
+            transfer
+                .iter()
+                .map(|argument| (
+                    argument.name(),
+                    argument.source_named(),
+                    argument.sort(),
+                    argument.scalar_type(),
+                ))
+                .collect::<Vec<_>>(),
+            vec![
+                ("giver", true, Some("party"), ScalarType::U32),
+                ("receiver", true, Some("party"), ScalarType::U32),
+                ("asset", true, None, ScalarType::U32),
+                ("time", true, None, ScalarType::I64),
+            ]
+        );
+
+        let positional = program
+            .argument_schema("positional")
+            .expect("compiled positional argument schema");
+        assert_eq!(
+            positional
+                .iter()
+                .map(|argument| (
+                    argument.name(),
+                    argument.source_named(),
+                    argument.sort(),
+                    argument.scalar_type(),
+                ))
+                .collect::<Vec<_>>(),
+            vec![
+                ("c0", false, None, ScalarType::U32),
+                ("c1", false, None, ScalarType::I64),
+                ("c2", false, None, ScalarType::Symbol),
+            ]
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn compiled_argument_uses_schema_metadata_for_inferred_relations() -> Result<()> {
+        let program = LogicProgram::compile(
+            r#"
+                pred source(value: i64).
+                inferred(X) :- source(X).
+            "#,
+        )?;
+
+        let inferred = program
+            .argument_schema("inferred")
+            .expect("compiled inferred argument schema");
+        assert_eq!(
+            inferred
+                .iter()
+                .map(|argument| (
+                    argument.name(),
+                    argument.source_named(),
+                    argument.sort(),
+                    argument.scalar_type(),
+                ))
+                .collect::<Vec<_>>(),
+            vec![("c0", false, None, ScalarType::I64)]
+        );
+        assert!(program.argument_schema("unknown").is_none());
+
+        Ok(())
+    }
+
+    #[test]
+    fn compiled_argument_recovers_source_metadata_for_arity_qualified_relations() -> Result<()> {
+        let program = LogicProgram::compile(
+            r#"
+                domain identity: u32.
+                pred joined(u32, u32).
+                pred seed(u32, u32).
+                pred polymorphic(value: identity).
+                pred polymorphic(left: identity, right: identity).
+
+                joined(X, Y) :- seed(X, Y), know polymorphic(X), possible polymorphic(X, Y).
+            "#,
+        )?;
+
+        let unary = program
+            .argument_schema("polymorphic/1")
+            .expect("compiled arity-qualified argument schema");
+        assert_eq!(
+            unary
+                .iter()
+                .map(|argument| (
+                    argument.name(),
+                    argument.source_named(),
+                    argument.sort(),
+                    argument.scalar_type(),
+                ))
+                .collect::<Vec<_>>(),
+            vec![("value", true, Some("identity"), ScalarType::U32)]
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn compiled_argument_preserves_declared_prefix_when_schema_is_wider() -> Result<()> {
+        let program = LogicProgram::compile(
+            r#"
+                domain identity: u32.
+                pred node(id: identity).
+                pred edge(source: identity, target: identity).
+                pred one_hop(node: identity).
+
+                one_hop(X) :- node(X), know edge(X, Y).
+            "#,
+        )?;
+
+        let one_hop = program
+            .argument_schema("one_hop")
+            .expect("compiled widened argument schema");
+        assert_eq!(
+            one_hop
+                .iter()
+                .map(|argument| (
+                    argument.name(),
+                    argument.source_named(),
+                    argument.sort(),
+                    argument.scalar_type(),
+                ))
+                .collect::<Vec<_>>(),
+            vec![
+                ("node", true, Some("identity"), ScalarType::U32),
+                ("c1", false, None, ScalarType::U32),
+            ]
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn compiled_argument_uses_the_declaration_selected_by_compilation() -> Result<()> {
+        let program = LogicProgram::compile(
+            r#"
+                domain first: u32.
+                domain second: i64.
+                pred duplicate(value: first).
+                pred duplicate(value: second).
+            "#,
+        )?;
+
+        let duplicate = program
+            .argument_schema("duplicate")
+            .expect("compiled duplicate argument schema");
+        assert_eq!(
+            duplicate
+                .iter()
+                .map(|argument| (
+                    argument.name(),
+                    argument.source_named(),
+                    argument.sort(),
+                    argument.scalar_type(),
+                ))
+                .collect::<Vec<_>>(),
+            vec![("value", true, Some("second"), ScalarType::I64)]
+        );
+
+        Ok(())
+    }
 }
 
 #[cfg(test)]
