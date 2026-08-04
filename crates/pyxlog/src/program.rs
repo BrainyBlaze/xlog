@@ -623,6 +623,14 @@ impl CompiledProgram {
     /// `grad_true` / `grad_false` vectors of `evaluate(return_grads=True)` use
     /// (index `0` is unused padding, since CNF variables are 1-indexed).
     ///
+    /// For a `"choice"` entry (one Bernoulli decision of an annotated
+    /// disjunction's chain), `probs[choice_index]` is the disjunction's
+    /// *declared, marginal* probability and is display context only; `prob`
+    /// is the *conditional* Bernoulli parameter actually assigned to this
+    /// variable's weight, and `prob * (1 - prob)` — not
+    /// `probs[choice_index] * (1 - probs[choice_index])` — is the correct
+    /// Jacobian for `grad_true` / `grad_false` at this position.
+    ///
     /// Raises `ValueError` for Monte Carlo programs, and for exact programs
     /// compiled through the GPU count-lift fast path (count aggregates
     /// without evidence or annotated disjunctions), since that path never
@@ -666,6 +674,7 @@ impl CompiledProgram {
                     ProbVarInfo::Choice {
                         choices,
                         choice_index,
+                        prob,
                     } => {
                         d.set_item("kind", "choice")?;
                         d.set_item(
@@ -675,11 +684,20 @@ impl CompiledProgram {
                                 .map(|(a, _)| atom_to_string(a))
                                 .collect::<Vec<_>>(),
                         )?;
+                        // Declared, marginal probabilities of the whole disjunction
+                        // (display context only — probs[choice_index] is NOT this
+                        // variable's own Bernoulli parameter; see "prob" below).
                         d.set_item(
                             "probs",
                             choices.iter().map(|(_, p)| *p).collect::<Vec<f64>>(),
                         )?;
                         d.set_item("choice_index", choice_index)?;
+                        // This chain variable's own (conditional) Bernoulli parameter,
+                        // i.e. the weight actually used by the GPU circuit for this CNF
+                        // variable. Use prob * (1 - prob), not
+                        // probs[choice_index] * (1 - probs[choice_index]), as the
+                        // Jacobian for grad_true/grad_false at this position.
+                        d.set_item("prob", prob)?;
                     }
                     ProbVarInfo::Other => {
                         d.set_item("kind", "other")?;

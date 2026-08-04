@@ -269,12 +269,28 @@ impl GpuCountLiftState {
 /// What a CNF variable stands for, in the order of the gradient vectors.
 #[derive(Debug, Clone)]
 pub enum ProbVarInfo {
-    /// A plain probabilistic fact: one atom, one probability.
+    /// A plain probabilistic fact: one atom, one probability. `prob` is
+    /// exactly the Bernoulli weight `w_true` stored in the GPU weight table
+    /// for this variable, so `p*(1-p)` is the correct Jacobian for
+    /// `grad_true`/`grad_false` at this slot.
     Fact { atom: GroundAtom, prob: f64 },
     /// One Bernoulli decision of an annotated disjunction's chain.
     Choice {
+        /// Declared heads of the whole disjunction with their *marginal*
+        /// probabilities (context/display only — see `prob` below for the
+        /// Jacobian-correct parameter of this specific chain variable).
         choices: Arc<[(GroundAtom, f64)]>,
+        /// Index of this chain variable's head within `choices`.
         choice_index: usize,
+        /// The *conditional* Bernoulli parameter actually assigned to this
+        /// CNF variable's weight (`p_i / (1 - sum of earlier heads'
+        /// probabilities)`), i.e. the same value stored in
+        /// `provenance::Provenance::choice_probs` and used to build the GPU
+        /// weight table for this variable. `prob*(1-prob)` — using *this*
+        /// `prob`, not `choices[choice_index].1` — is the correct Jacobian
+        /// for `grad_true`/`grad_false` at this slot; the two are generally
+        /// different values.
+        prob: f64,
     },
     /// A variable introduced by compilation that is not a source of randomness.
     Other,
@@ -1612,12 +1628,21 @@ impl ExactDdnnfProgram {
                     continue;
                 }
                 let choice = crate::pir::ChoiceVarId::new(choice_idx as u32);
-                if let Some(source) = provenance.choice_sources.get(&choice) {
+                // The map must carry the *conditional* Bernoulli parameter that was
+                // actually assigned to this CNF variable's weight (`choice_probs`),
+                // not the disjunction's declared marginal probabilities
+                // (`ChoiceSource::choices`), which only serve as display context.
+                // See ProbVarInfo::Choice::prob's doc for why the two differ.
+                if let (Some(source), Some(&(cond_true, _cond_false))) = (
+                    provenance.choice_sources.get(&choice),
+                    provenance.choice_probs.get(&choice),
+                ) {
                     entries.push((
                         var,
                         ProbVarInfo::Choice {
                             choices: source.choices.clone(),
                             choice_index: source.choice_index,
+                            prob: cond_true,
                         },
                     ));
                 }

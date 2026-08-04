@@ -318,10 +318,19 @@ class CompiledProgram:
         since CNF variables are 1-indexed). Each entry is one of:
 
         - ``{"kind": "fact", "atom": str, "prob": float}`` for a plain
-          probabilistic fact.
+          probabilistic fact. ``prob`` is the Bernoulli weight actually
+          assigned to this CNF variable, so ``prob * (1 - prob)`` is the
+          correct Jacobian to convert ``grad_true`` / ``grad_false`` at this
+          position into a derivative with respect to ``prob``.
         - ``{"kind": "choice", "atoms": list[str], "probs": list[float],
-          "choice_index": int}`` for one Bernoulli decision of an annotated
-          disjunction's chain.
+          "choice_index": int, "prob": float}`` for one Bernoulli decision of
+          an annotated disjunction's chain. ``atoms`` / ``probs`` are the
+          disjunction's *declared, marginal* probabilities (display context
+          only). ``prob`` is the *conditional* Bernoulli parameter actually
+          assigned to this CNF variable's weight; use
+          ``prob * (1 - prob)`` — not
+          ``probs[choice_index] * (1 - probs[choice_index])`` — as the
+          Jacobian for ``grad_true`` / ``grad_false`` at this position.
         - ``{"kind": "other"}`` for a variable introduced by compilation that
           is not a source of randomness.
 
