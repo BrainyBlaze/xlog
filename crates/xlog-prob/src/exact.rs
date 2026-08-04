@@ -370,10 +370,22 @@ impl ExactDdnnfProgram {
     }
 
     /// Materializes a dense vector describing what each CNF variable stands for.
-    /// Slot `v` describes CNF variable `v` directly (slot `0` is unused padding)
-    /// — the same layout `evaluate_gpu_with_grads` uses for its
-    /// `grad_true`/`grad_false` vectors, so `prob_var_map()[v]` and
-    /// `grad_true[v]` name and value the same variable.
+    ///
+    /// The returned vector's length is the CNF encoder's variable *capacity*
+    /// (`3 * number of PIR nodes` at compile time, see `compilation/gpu_cnf.rs`)
+    /// — **not** the number of CNF variables actually in use, and not the
+    /// number of random variables in the program. Slot `v` describes CNF
+    /// variable `v` directly when `v` was assigned; slot `0` is always unused
+    /// padding (CNF variables are 1-indexed), and so is any other slot with no
+    /// variable assigned to it — those padding slots are indistinguishable
+    /// from `ProbVarInfo::Other`. Do not treat `len()` of the result as a
+    /// variable count or a random-variable count; use [`Self::num_vars`] or
+    /// [`Self::random_var_indices`] for that.
+    ///
+    /// What *is* guaranteed is alignment with `evaluate_gpu_with_grads`'s
+    /// `grad_true`/`grad_false` vectors, which are allocated with the same
+    /// capacity: `prob_var_map()[v]` and `grad_true[v]` name and value the
+    /// same variable `v`.
     ///
     /// Rebuilds the dense vector on every call from the sparse
     /// `prob_var_entries` storage that actually lives for the lifetime of the

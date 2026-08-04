@@ -312,8 +312,12 @@ class CompiledProgram:
     def prob_var_map(self) -> list[dict]:
         """Which probabilistic fact each CNF variable stands for.
 
-        Entry ``i`` describes CNF variable ``i`` — the same position ``i`` that
-        the ``grad_true`` / ``grad_false`` vectors of
+        The returned list's length is the CNF encoder's variable *capacity*,
+        not the number of CNF variables in use and not the number of random
+        variables in the program — a real fraction of entries are
+        ``{"kind": "other"}`` padding (do not use ``len()`` of the result as a
+        variable count). Entry ``i`` describes CNF variable ``i`` — the same
+        position ``i`` that the ``grad_true`` / ``grad_false`` vectors of
         ``evaluate(return_grads=True)`` use (index ``0`` is unused padding,
         since CNF variables are 1-indexed). Each entry is one of:
 
@@ -332,7 +336,8 @@ class CompiledProgram:
           ``probs[choice_index] * (1 - probs[choice_index])`` — as the
           Jacobian for ``grad_true`` / ``grad_false`` at this position.
         - ``{"kind": "other"}`` for a variable introduced by compilation that
-          is not a source of randomness.
+          is not a source of randomness (this also covers unused capacity
+          padding slots — see above; the two are indistinguishable here).
 
         Only available for the exact engine; raises ``ValueError`` for
         Monte Carlo programs, and also for exact programs compiled through

@@ -41,7 +41,16 @@ _EPS = 1e-5
 _REL_TOL = 1e-4
 
 
-def test_map_has_one_entry_per_cnf_variable():
+def test_map_length_matches_the_gradient_vectors():
+    """prob_var_map() and result.num_vars both report the CNF encoder's
+    variable *capacity* (3 * PIR node count at compile time), not the number
+    of CNF variables actually in use and not the number of random variables
+    in the program — most slots in a real program are unused padding. This
+    test only checks that the two report the *same* capacity, i.e. that
+    var_map stays index-aligned with grad_true/grad_false (which are also
+    allocated at that capacity). It is not a claim that len(var_map) counts
+    CNF variables or random variables.
+    """
     program = pyxlog.Program.compile(TWO_FACTS)
     result = program.evaluate()
     var_map = program.prob_var_map()

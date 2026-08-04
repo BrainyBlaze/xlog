@@ -619,9 +619,14 @@ impl CompiledProgram {
 
     /// Which probabilistic fact each CNF variable stands for.
     ///
-    /// Entry `i` describes CNF variable `i` — the same position `i` that the
-    /// `grad_true` / `grad_false` vectors of `evaluate(return_grads=True)` use
-    /// (index `0` is unused padding, since CNF variables are 1-indexed).
+    /// The returned list's length is the CNF encoder's variable *capacity*,
+    /// not the number of CNF variables in use and not the number of random
+    /// variables in the program — a real fraction of entries are
+    /// `{"kind": "other"}` padding (do not use `len()` of the result as a
+    /// variable count). Entry `i` describes CNF variable `i` — the same
+    /// position `i` that the `grad_true` / `grad_false` vectors of
+    /// `evaluate(return_grads=True)` use (index `0` is unused padding, since
+    /// CNF variables are 1-indexed).
     ///
     /// For a `"choice"` entry (one Bernoulli decision of an annotated
     /// disjunction's chain), `probs[choice_index]` is the disjunction's
