@@ -4748,10 +4748,7 @@ impl super::CudaKernelProvider {
             return Ok(Vec::new());
         }
         let mut host_mask = vec![0u8; num_probe];
-        self.device
-            .inner()
-            .dtoh_sync_copy_into(&d_has_match, &mut host_mask)
-            .map_err(|e| XlogError::Kernel(format!("Failed to download membership mask: {}", e)))?;
+        self.dtoh_sync_copy_into_tracked(&d_has_match, &mut host_mask)?;
         Ok(host_mask.into_iter().map(|b| b != 0).collect())
     }
 
