@@ -1003,6 +1003,13 @@ result.atoms         # list[str]: query atoms (stringified)
 result.prob          # PyCapsule: DLPack f64 vector of probabilities (len = num_queries)
 result.log_prob      # PyCapsule: DLPack f64 vector of log-probabilities (len = num_queries)
 result.num_vars      # int: number of CNF variables in the compiled program
+result.log_z_e       # Optional[float]: exact log-evidence log Z_E (None for Monte Carlo)
+
+# Exact-only, independent of return_grads: what each CNF variable stands for.
+# Length equals result.num_vars, i.e. the encoder's variable capacity, so entry i lines up
+# with grad_true/grad_false position i when return_grads=True. Index 0 and every slot that
+# holds no assigned variable are padding ("other"); the length is NOT a count of random vars.
+program.prob_var_map() # list[dict]: {"kind": "fact"|"choice"|"other", ...} per CNF variable
 
 # Exact-only (when return_grads=True):
 result.grad_true     # Optional[list[PyCapsule]]: per-query DLPack f64 vector (len = num_vars)
