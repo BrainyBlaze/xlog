@@ -300,7 +300,11 @@ pub struct ExactDdnnfProgram {
     /// choice are present, as `(var, info)` pairs sorted by `var`. CNF variables
     /// are 1-indexed. Call `prob_var_map()` to materialize the dense,
     /// `grad_true`/`grad_false`-aligned view on demand. Populated only when
-    /// compiled with the "host-io" feature (empty otherwise).
+    /// compiled with the "host-io" feature (empty otherwise); also empty when
+    /// compiled through the GPU count-lift fast path, since that path never
+    /// builds a CNF encoding (see `uses_gpu_native_count_lift()` and
+    /// `prob_var_map()` below — an empty map there does not mean the program
+    /// has no probabilistic facts).
     prob_var_entries: Vec<(u32, ProbVarInfo)>,
 }
 
@@ -358,6 +362,14 @@ impl ExactDdnnfProgram {
     /// Rebuilds the dense vector on every call from the sparse
     /// `prob_var_entries` storage that actually lives for the lifetime of the
     /// program.
+    ///
+    /// On the GPU count-lift fast path (count aggregates without evidence or
+    /// disjunctions — see [`Self::uses_gpu_native_count_lift`]), no CNF
+    /// encoding is ever built, so this returns an **empty** vector even for
+    /// programs that do have probabilistic facts. Callers that need to
+    /// enumerate a program's probabilistic facts must check
+    /// `uses_gpu_native_count_lift()` first and treat an empty map from that
+    /// path as "mapping unavailable", not as "no random variables".
     pub fn prob_var_map(&self) -> Vec<ProbVarInfo> {
         let capacity = if self.max_var == 0 {
             0
@@ -1517,6 +1529,12 @@ impl ExactDdnnfProgram {
 
         let count_lift_gpu = try_build_count_lift_gpu_state(&provenance, &queries, config)?;
         if let Some(count_lift_gpu) = count_lift_gpu {
+            // No CNF encoding is built on this path (count aggregates are
+            // evaluated by a dedicated GPU kernel instead), so there is no
+            // leaf_var/choice_var table to derive a variable map from. Leave
+            // `prob_var_entries` empty and `max_var` at 0 — callers must use
+            // `uses_gpu_native_count_lift()` to tell this apart from "no random
+            // variables in the program" (see the doc on `prob_var_map()`).
             return Ok(Self {
                 gpu: None,
                 count_lift_gpu: Some(count_lift_gpu),

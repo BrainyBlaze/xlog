@@ -1009,6 +1009,8 @@ result.log_z_e       # Optional[float]: exact log-evidence log Z_E (None for Mon
 # Length equals result.num_vars, i.e. the encoder's variable capacity, so entry i lines up
 # with grad_true/grad_false position i when return_grads=True. Index 0 and every slot that
 # holds no assigned variable are padding ("other"); the length is NOT a count of random vars.
+# Raises ValueError for MC programs and for exact programs compiled through the GPU
+# count-lift fast path (no CNF encoding is built on that path).
 program.prob_var_map() # list[dict]: {"kind": "fact"|"choice"|"other", ...} per CNF variable
 
 # Exact-only (when return_grads=True):

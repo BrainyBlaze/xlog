@@ -326,7 +326,11 @@ class CompiledProgram:
           is not a source of randomness.
 
         Only available for the exact engine; raises ``ValueError`` for
-        Monte Carlo programs.
+        Monte Carlo programs, and also for exact programs compiled through
+        the GPU count-lift fast path (count aggregates without evidence or
+        disjunctions), since that path never builds a CNF encoding and has
+        no variable map to report — this does not mean the program has no
+        probabilistic facts.
         """
         ...
 

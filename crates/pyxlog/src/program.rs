@@ -622,13 +622,31 @@ impl CompiledProgram {
     /// Entry `i` describes CNF variable `i` — the same position `i` that the
     /// `grad_true` / `grad_false` vectors of `evaluate(return_grads=True)` use
     /// (index `0` is unused padding, since CNF variables are 1-indexed).
+    ///
+    /// Raises `ValueError` for Monte Carlo programs, and for exact programs
+    /// compiled through the GPU count-lift fast path (count aggregates
+    /// without evidence or annotated disjunctions), since that path never
+    /// builds a CNF encoding and therefore has no variable map to report —
+    /// this is *not* the same as the program having no probabilistic facts.
     pub fn prob_var_map(&self, py: Python<'_>) -> PyResult<Vec<PyObject>> {
         #[cfg(feature = "host-io")]
         {
             use xlog_prob::exact::ProbVarInfo;
 
             let entries = match &self.program {
-                CompiledProbProgram::Exact(p) => p.prob_var_map(),
+                CompiledProbProgram::Exact(p) => {
+                    if p.uses_gpu_native_count_lift() {
+                        return Err(PyValueError::new_err(
+                            "prob_var_map is unavailable: this program was compiled through \
+                             the GPU count-lift fast path (a count aggregate without evidence \
+                             or annotated disjunctions), which evaluates the aggregate with a \
+                             dedicated kernel and never builds a CNF encoding. There is no \
+                             CNF-variable-to-fact map to report. This does not mean the \
+                             program has no probabilistic facts.",
+                        ));
+                    }
+                    p.prob_var_map()
+                }
                 CompiledProbProgram::Mc(_) => {
                     return Err(PyValueError::new_err(
                         "prob_var_map is only available for the exact engine",
