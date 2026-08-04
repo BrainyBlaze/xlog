@@ -7,7 +7,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use xlog_core::Schema;
+use xlog_core::{Schema, XlogError};
 use xlog_cuda::{CudaBuffer, CudaKernelProvider};
 
 /// Storage for named relations as GPU buffers
@@ -107,13 +107,36 @@ impl RelationStore {
     /// * `name` - The name of the relation
     /// * `buffer` - The GPU buffer containing the relation data
     pub fn put(&mut self, name: &str, buffer: CudaBuffer) {
+        self.put_owned(name.to_string(), buffer);
+    }
+
+    /// Store a relation using an already-owned name.
+    ///
+    /// This has the same replacement and versioning behavior as [`Self::put`],
+    /// but avoids allocating a second copy of a name that the caller already
+    /// owns. Call [`Self::try_reserve_relations`] before a sequence of inserts
+    /// when that sequence must not grow the relation map.
+    pub fn put_owned(&mut self, name: String, buffer: CudaBuffer) {
         let version = self
             .relations
-            .get(name)
+            .get(name.as_str())
             .map(|e| e.version.saturating_add(1))
             .unwrap_or(1);
         self.relations
-            .insert(name.to_string(), VersionedCudaBuffer { buffer, version });
+            .insert(name, VersionedCudaBuffer { buffer, version });
+    }
+
+    /// Reserve map capacity for `additional` new relation names.
+    ///
+    /// This operation is fallible and changes capacity only: relation contents
+    /// and versions remain unchanged. Callers should count only names that are
+    /// not already present before choosing `additional`.
+    pub fn try_reserve_relations(&mut self, additional: usize) -> xlog_core::Result<()> {
+        self.relations.try_reserve(additional).map_err(|error| {
+            XlogError::Execution(format!(
+                "Failed to reserve capacity for {additional} relation entries: {error}"
+            ))
+        })
     }
 
     /// Get a relation by name, or insert an empty buffer with the given schema
@@ -514,6 +537,38 @@ mod tests {
         store.put("test", buffer2);
         assert_eq!(device_row_count(&provider, store.get("test").unwrap()), 20);
         assert_eq!(store.len(), 1);
+    }
+
+    #[test]
+    fn reserved_owned_put_reuses_capacity_and_versions_replacements() {
+        let Some((mut store, provider)) = setup_store() else {
+            return;
+        };
+        let capacity_before = store.relations.capacity();
+
+        store
+            .try_reserve_relations(1)
+            .expect("reserve one relation entry");
+        let reserved_capacity = store.relations.capacity();
+        assert!(reserved_capacity > capacity_before);
+
+        store.put_owned(
+            "owned_relation".to_string(),
+            make_buffer(&provider, Schema::new(vec![]), 10),
+        );
+        assert_eq!(store.relations.capacity(), reserved_capacity);
+        assert_eq!(store.version("owned_relation"), Some(1));
+
+        store.put_owned(
+            "owned_relation".to_string(),
+            make_buffer(&provider, Schema::new(vec![]), 20),
+        );
+        assert_eq!(store.relations.capacity(), reserved_capacity);
+        assert_eq!(store.version("owned_relation"), Some(2));
+        assert_eq!(
+            device_row_count(&provider, store.get("owned_relation").unwrap()),
+            20
+        );
     }
 
     #[test]

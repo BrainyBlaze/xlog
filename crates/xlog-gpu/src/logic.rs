@@ -196,13 +196,221 @@ pub struct LogicDeltaReport {
     pub debug_trace: Vec<String>,
 }
 
-struct CoalescedRelationDeltaBatch {
-    deltas: HashMap<String, RelationDelta>,
+/// Direction of an incoming relation-delta occurrence.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RelationDeltaDirection {
+    /// Tuples supplied on the insertion side of an update.
+    Insert,
+    /// Tuples supplied on the deletion side of an update.
+    Delete,
+}
+
+/// Tuples canceled at one ordered merge step of a relation-delta batch.
+pub struct RelationDeltaCancellation {
+    update_index: usize,
+    incoming_direction: RelationDeltaDirection,
+    tuples: CudaBuffer,
+}
+
+impl RelationDeltaCancellation {
+    /// Return the zero-based position of the incoming update in the original batch.
+    pub fn update_index(&self) -> usize {
+        self.update_index
+    }
+
+    /// Return the direction of the incoming occurrence that caused the cancellation.
+    pub fn incoming_direction(&self) -> RelationDeltaDirection {
+        self.incoming_direction
+    }
+
+    /// Borrow the GPU-resident tuples canceled at this merge step.
+    pub fn tuples(&self) -> &CudaBuffer {
+        &self.tuples
+    }
+}
+
+#[derive(Clone, Copy)]
+struct PreparedRelationDeltaReportSeed {
     input_delta_count: usize,
     changed_relations: usize,
     coalesced_insert_rows: u64,
     coalesced_delete_rows: u64,
     canceled_rows: u64,
+}
+
+/// Device-coalesced relation updates prepared for validation and later application.
+///
+/// Dropping this value releases its GPU-resident net-delta and cancellation
+/// buffers without changing any relation store.
+#[must_use = "prepared relation deltas have no effect until they are committed"]
+pub struct PreparedRelationDeltaBatch {
+    deltas: HashMap<String, RelationDelta>,
+    cancellations: HashMap<String, Vec<RelationDeltaCancellation>>,
+    report_seed: PreparedRelationDeltaReportSeed,
+}
+
+impl PreparedRelationDeltaBatch {
+    /// Borrow the final net relation deltas produced by the device coalescer.
+    pub fn net_deltas(&self) -> &HashMap<String, RelationDelta> {
+        &self.deltas
+    }
+
+    /// Borrow per-relation cancellation traces in global update order.
+    pub fn cancellations(&self) -> &HashMap<String, Vec<RelationDeltaCancellation>> {
+        &self.cancellations
+    }
+
+    fn into_application_parts(
+        self,
+    ) -> (
+        HashMap<String, RelationDelta>,
+        PreparedRelationDeltaReportSeed,
+    ) {
+        (self.deltas, self.report_seed)
+    }
+}
+
+/// A fully staged relation update bound to its authoritative and derived state.
+///
+/// The exclusive borrows prevent callers from mutating or substituting the
+/// authoritative store, cache, or runtime between preparation and commit.
+/// Dropping this value discards every staged update and prospective derived
+/// state. The authoritative store remains unchanged, while the borrowed cache
+/// and runtime slots remain empty because their prior values were consumed by
+/// preparation.
+///
+/// A prepared commit has no API for selecting a different destination:
+///
+/// ```compile_fail
+/// use xlog_gpu::logic::PreparedRelationDeltaCommit;
+/// use xlog_runtime::RelationStore;
+///
+/// fn commit_into_another_store(
+///     prepared: PreparedRelationDeltaCommit<'_>,
+///     other: &mut RelationStore,
+/// ) {
+///     prepared.commit(other);
+/// }
+/// ```
+///
+/// The source store also remains exclusively borrowed until commit:
+///
+/// ```compile_fail
+/// use std::sync::Arc;
+/// use xlog_core::Result;
+/// use xlog_cuda::{CudaBuffer, CudaKernelProvider};
+/// use xlog_gpu::logic::{
+///     LogicProgram, LogicSessionRuntime, PreparedRelationDeltaBatch,
+/// };
+/// use xlog_runtime::RelationStore;
+///
+/// fn mutate_after_prepare(
+///     program: &LogicProgram,
+///     provider: Arc<CudaKernelProvider>,
+///     store: &mut RelationStore,
+///     cache: &mut Option<RelationStore>,
+///     runtime: &mut Option<LogicSessionRuntime>,
+///     batch: PreparedRelationDeltaBatch,
+///     replacement: CudaBuffer,
+/// ) -> Result<()> {
+///     let prepared = program.prepare_relation_delta_commit_with_session_runtime(
+///         provider, store, cache, runtime, batch,
+///     )?;
+///     store.put("fact", replacement);
+///     prepared.commit();
+///     Ok(())
+/// }
+/// ```
+#[must_use = "dropping a prepared commit discards its staged relation updates"]
+pub struct PreparedRelationDeltaCommit<'a> {
+    provider: Arc<CudaKernelProvider>,
+    authoritative_relation_store: &'a mut RelationStore,
+    cached_store_slot: &'a mut Option<RelationStore>,
+    session_runtime_slot: &'a mut Option<LogicSessionRuntime>,
+    staged_base_updates: Vec<(String, CudaBuffer)>,
+    prospective_cached_store: Option<RelationStore>,
+    prospective_session_runtime: Option<LogicSessionRuntime>,
+    report: LogicDeltaReport,
+}
+
+impl PreparedRelationDeltaCommit<'_> {
+    /// Borrow the prospective materialized derived/cache store.
+    ///
+    /// This store is suitable for direct query-result comparison. It must not
+    /// seed an independent full recompute because it contains intensional heads
+    /// that an executor may union with newly derived rows. For a no-op batch it
+    /// returns retained derived state when available, or the unchanged
+    /// authoritative store otherwise.
+    pub fn prospective_derived_store(&self) -> &RelationStore {
+        if let Some(store) = self.prospective_cached_store.as_ref() {
+            return store;
+        }
+        if let Some(runtime) = self.prospective_session_runtime.as_ref() {
+            return runtime.executor.store();
+        }
+        &*self.authoritative_relation_store
+    }
+
+    /// Clone the authoritative base snapshot with every staged base update overlaid.
+    ///
+    /// This fallible, on-demand snapshot is the correct seed for an independent
+    /// full recompute. It includes staged relations that were absent from the
+    /// authoritative store and does not mutate authoritative contents or
+    /// versions. Ordinary prepare and commit paths do not pay for these clones.
+    pub fn clone_prospective_base_store(&self) -> Result<RelationStore> {
+        let mut authoritative_names = self
+            .authoritative_relation_store
+            .names()
+            .filter(|name| {
+                !self
+                    .staged_base_updates
+                    .iter()
+                    .any(|(staged_name, _)| staged_name == name)
+            })
+            .collect::<Vec<_>>();
+        authoritative_names.sort_unstable();
+        let mut cloned = RelationStore::new(self.provider.clone());
+        cloned.try_reserve_relations(authoritative_names.len() + self.staged_base_updates.len())?;
+
+        for name in authoritative_names {
+            let buffer = self.authoritative_relation_store.get(name).ok_or_else(|| {
+                XlogError::Execution(format!(
+                    "Authoritative relation {name} disappeared while cloning prospective base state"
+                ))
+            })?;
+            let context = format!("cloning prospective base relation '{name}'");
+            let cloned_buffer = self
+                .provider
+                .clone_buffer(buffer)
+                .map_err(|error| relation_clone_error(context, error))?;
+            cloned.put(name, cloned_buffer);
+        }
+
+        for (name, buffer) in &self.staged_base_updates {
+            let context = format!("cloning staged prospective base relation '{name}'");
+            let cloned_buffer = self
+                .provider
+                .clone_buffer(buffer)
+                .map_err(|error| relation_clone_error(context, error))?;
+            cloned.put(name, cloned_buffer);
+        }
+        Ok(cloned)
+    }
+
+    /// Install every staged base update and derived-state replacement together.
+    ///
+    /// All allocation, destination-capacity reservation, recomputation,
+    /// constraint validation, and buffer cloning has completed before this
+    /// method is available, so committing only moves owned values and is
+    /// infallible.
+    pub fn commit(self) -> LogicDeltaReport {
+        for (name, buffer) in self.staged_base_updates {
+            self.authoritative_relation_store.put_owned(name, buffer);
+        }
+        *self.cached_store_slot = self.prospective_cached_store;
+        *self.session_runtime_slot = self.prospective_session_runtime;
+        self.report
+    }
 }
 
 #[derive(Default)]
@@ -799,56 +1007,16 @@ impl LogicProgram {
         cached_store: &mut Option<RelationStore>,
         deltas: HashMap<String, RelationDelta>,
     ) -> Result<LogicDeltaReport> {
-        let insert_rows = deltas
-            .values()
-            .filter_map(|d| d.insert.as_ref())
-            .map(|b| b.num_rows())
-            .sum();
-        let delete_rows = deltas
-            .values()
-            .filter_map(|d| d.delete.as_ref())
-            .map(|b| b.num_rows())
-            .sum();
-        let cache_reused = cached_store.is_some();
-        let mut changed_relation_names = deltas.keys().cloned().collect::<Vec<_>>();
-        changed_relation_names.sort();
-
-        if cached_store.is_none() {
-            let (_, store) = self.evaluate_with_relation_store_and_cache(
-                provider.clone(),
-                relation_store,
-                false,
-            )?;
-            *cached_store = Some(store);
-        }
-
-        let store_before_delta = cached_store.as_ref().ok_or_else(|| {
-            XlogError::Execution("Missing cached relation store for delta update".to_string())
-        })?;
-        let mut executor =
-            self.executor_from_relation_store(provider.clone(), store_before_delta, false)?;
-        let delta_stats = executor
-            .apply_deltas_and_recompute(self.ordinary_plan("relation-delta recompute")?, &deltas)?;
-        self.enforce_constraints(&provider, &executor)?;
-
-        for name in deltas.keys() {
-            let updated = executor.store().get(name).ok_or_else(|| {
-                XlogError::Execution(format!(
-                    "Delta relation {} missing after runtime recompute",
-                    name
-                ))
-            })?;
-            relation_store.put(name, provider.clone_buffer(updated)?);
-        }
-
-        *cached_store = Some(self.clone_relation_store(&provider, executor.store())?);
-
-        let mut report = logic_delta_report(delta_stats, insert_rows, delete_rows);
-        report.changed_relation_names = changed_relation_names;
-        report.planner_telemetry =
-            DeltaPlannerTelemetry::from_delta_report(&report, cache_reused, None);
-        report.debug_trace = delta_debug_trace(&report);
-        Ok(report)
+        let mut session_runtime = None;
+        let prepared = self.prepare_relation_delta_commit(
+            provider,
+            relation_store,
+            cached_store,
+            &mut session_runtime,
+            deltas,
+            None,
+        )?;
+        Ok(prepared.commit())
     }
 
     /// Apply relation deltas while preserving retained session runtime state.
@@ -860,64 +1028,166 @@ impl LogicProgram {
         session_runtime: &mut Option<LogicSessionRuntime>,
         deltas: HashMap<String, RelationDelta>,
     ) -> Result<LogicDeltaReport> {
+        let prepared = self.prepare_relation_delta_commit(
+            provider,
+            relation_store,
+            cached_store,
+            session_runtime,
+            deltas,
+            None,
+        )?;
+        Ok(prepared.commit())
+    }
+
+    /// Coalesce an ordered batch on the device and optionally retain cancellation tuples.
+    pub fn prepare_relation_delta_batch(
+        &self,
+        provider: &CudaKernelProvider,
+        delta_batch: Vec<(String, RelationDelta)>,
+        capture_cancellations: bool,
+    ) -> Result<PreparedRelationDeltaBatch> {
+        coalesce_relation_delta_batch_with_cancellation_capture(
+            provider,
+            delta_batch,
+            capture_cancellations,
+        )
+    }
+
+    /// Prepare a fully staged retained-runtime commit from a coalesced batch.
+    ///
+    /// The current derived runtime and cache are moved into the transaction. If
+    /// preparation fails, those partially updated values are discarded and the
+    /// caller slots remain empty; the authoritative base store is never changed.
+    pub fn prepare_relation_delta_commit_with_session_runtime<'a>(
+        &self,
+        provider: Arc<CudaKernelProvider>,
+        relation_store: &'a mut RelationStore,
+        cached_store: &'a mut Option<RelationStore>,
+        session_runtime: &'a mut Option<LogicSessionRuntime>,
+        prepared_batch: PreparedRelationDeltaBatch,
+    ) -> Result<PreparedRelationDeltaCommit<'a>> {
+        let (deltas, report_seed) = prepared_batch.into_application_parts();
+        self.prepare_relation_delta_commit(
+            provider,
+            relation_store,
+            cached_store,
+            session_runtime,
+            deltas,
+            Some(report_seed),
+        )
+    }
+
+    fn prepare_relation_delta_commit<'a>(
+        &self,
+        provider: Arc<CudaKernelProvider>,
+        relation_store: &'a mut RelationStore,
+        cached_store: &'a mut Option<RelationStore>,
+        session_runtime: &'a mut Option<LogicSessionRuntime>,
+        deltas: HashMap<String, RelationDelta>,
+        report_seed: Option<PreparedRelationDeltaReportSeed>,
+    ) -> Result<PreparedRelationDeltaCommit<'a>> {
         let insert_rows = deltas
             .values()
-            .filter_map(|d| d.insert.as_ref())
-            .map(|b| b.num_rows())
+            .filter_map(|delta| delta.insert.as_ref())
+            .map(CudaBuffer::num_rows)
             .sum();
         let delete_rows = deltas
             .values()
-            .filter_map(|d| d.delete.as_ref())
-            .map(|b| b.num_rows())
+            .filter_map(|delta| delta.delete.as_ref())
+            .map(CudaBuffer::num_rows)
             .sum();
         let cache_reused = session_runtime.is_some() || cached_store.is_some();
         let mut changed_relation_names = deltas.keys().cloned().collect::<Vec<_>>();
         changed_relation_names.sort();
 
-        if session_runtime.is_none() {
-            let seed_store: &RelationStore = match cached_store.as_ref() {
-                Some(store) => store,
-                None => &*relation_store,
-            };
-            *session_runtime =
-                Some(self.create_session_runtime(provider.clone(), seed_store, false)?);
+        let prior_cached_store = cached_store.take();
+        let prior_session_runtime = session_runtime.take();
+
+        let missing_relation_count = changed_relation_names
+            .iter()
+            .filter(|name| !relation_store.contains(name))
+            .count();
+        relation_store.try_reserve_relations(missing_relation_count)?;
+
+        if deltas.is_empty() {
+            if let Some(seed) = report_seed {
+                return Ok(PreparedRelationDeltaCommit {
+                    provider,
+                    authoritative_relation_store: relation_store,
+                    cached_store_slot: cached_store,
+                    session_runtime_slot: session_runtime,
+                    staged_base_updates: Vec::new(),
+                    prospective_cached_store: prior_cached_store,
+                    prospective_session_runtime: prior_session_runtime,
+                    report: no_op_delta_report(seed),
+                });
+            }
         }
 
-        if cached_store.is_none() {
-            let runtime = session_runtime.as_mut().ok_or_else(|| {
-                XlogError::Execution("Missing session runtime for cached evaluation".to_string())
-            })?;
-            let (_, store) = self.evaluate_with_session_runtime(provider.clone(), runtime)?;
-            *cached_store = Some(store);
+        let mut working_runtime = match prior_session_runtime {
+            Some(runtime) => runtime,
+            None => {
+                let seed_store = prior_cached_store.as_ref().unwrap_or(relation_store);
+                self.create_session_runtime(provider.clone(), seed_store, false)?
+            }
+        };
+
+        if prior_cached_store.is_none() {
+            self.evaluate_with_session_runtime(provider.clone(), &mut working_runtime)?;
         }
 
-        let runtime = session_runtime.as_mut().ok_or_else(|| {
-            XlogError::Execution("Missing session runtime for delta update".to_string())
-        })?;
-        let delta_stats = runtime.executor.apply_deltas_and_recompute(
+        let delta_stats = working_runtime.executor.apply_deltas_and_recompute(
             self.ordinary_plan("session relation-delta recompute")?,
             &deltas,
         )?;
-        self.enforce_constraints(&provider, &runtime.executor)?;
+        self.enforce_constraints(&provider, &working_runtime.executor)?;
 
-        for name in deltas.keys() {
-            let updated = runtime.executor.store().get(name).ok_or_else(|| {
+        let mut staged_base_updates = Vec::with_capacity(changed_relation_names.len());
+        for name in &changed_relation_names {
+            let updated = working_runtime.executor.store().get(name).ok_or_else(|| {
                 XlogError::Execution(format!(
                     "Delta relation {} missing after runtime recompute",
                     name
                 ))
             })?;
-            relation_store.put(name, provider.clone_buffer(updated)?);
+            let context = format!("cloning staged base relation '{name}'");
+            staged_base_updates.push((
+                name.clone(),
+                provider
+                    .clone_buffer(updated)
+                    .map_err(|error| relation_clone_error(context, error))?,
+            ));
         }
-
-        *cached_store = Some(self.clone_relation_store(&provider, runtime.executor.store())?);
+        let prospective_cached_store = Some(
+            self.clone_prepared_relation_snapshot(&provider, working_runtime.executor.store())?,
+        );
 
         let mut report = logic_delta_report(delta_stats, insert_rows, delete_rows);
         report.changed_relation_names = changed_relation_names;
         report.planner_telemetry =
             DeltaPlannerTelemetry::from_delta_report(&report, cache_reused, None);
         report.debug_trace = delta_debug_trace(&report);
-        Ok(report)
+        if let Some(seed) = report_seed {
+            report.input_delta_count = seed.input_delta_count;
+            report.changed_relations = seed.changed_relations;
+            report.coalesced_insert_rows = seed.coalesced_insert_rows;
+            report.coalesced_delete_rows = seed.coalesced_delete_rows;
+            report.canceled_rows = seed.canceled_rows;
+            report.planner_telemetry =
+                DeltaPlannerTelemetry::from_delta_report(&report, true, None);
+            report.debug_trace = delta_debug_trace(&report);
+        }
+
+        Ok(PreparedRelationDeltaCommit {
+            provider,
+            authoritative_relation_store: relation_store,
+            cached_store_slot: cached_store,
+            session_runtime_slot: session_runtime,
+            staged_base_updates,
+            prospective_cached_store,
+            prospective_session_runtime: Some(working_runtime),
+            report,
+        })
     }
 
     /// Apply an ordered batch of relation deltas after device-side coalescing.
@@ -928,39 +1198,17 @@ impl LogicProgram {
         cached_store: &mut Option<RelationStore>,
         delta_batch: Vec<(String, RelationDelta)>,
     ) -> Result<LogicDeltaReport> {
-        let coalesced = coalesce_relation_delta_batch(provider.as_ref(), delta_batch)?;
-        if coalesced.deltas.is_empty() {
-            return Ok(LogicDeltaReport {
-                input_delta_count: coalesced.input_delta_count,
-                changed_relations: 0,
-                changed_relation_names: Vec::new(),
-                insert_rows: 0,
-                delete_rows: 0,
-                has_deletes: false,
-                affected_sccs: 0,
-                recomputed_sccs: 0,
-                incremental_sccs: 0,
-                coalesced_insert_rows: 0,
-                coalesced_delete_rows: 0,
-                canceled_rows: coalesced.canceled_rows,
-                planner_telemetry: DeltaPlannerTelemetry {
-                    fallback_decision: "no_op".to_string(),
-                    ..DeltaPlannerTelemetry::default()
-                },
-                debug_trace: vec![format!("canceled_rows={}", coalesced.canceled_rows)],
-            });
-        }
-
-        let mut report =
-            self.apply_relation_deltas(provider, relation_store, cached_store, coalesced.deltas)?;
-        report.input_delta_count = coalesced.input_delta_count;
-        report.changed_relations = coalesced.changed_relations;
-        report.coalesced_insert_rows = coalesced.coalesced_insert_rows;
-        report.coalesced_delete_rows = coalesced.coalesced_delete_rows;
-        report.canceled_rows = coalesced.canceled_rows;
-        report.planner_telemetry = DeltaPlannerTelemetry::from_delta_report(&report, true, None);
-        report.debug_trace = delta_debug_trace(&report);
-        Ok(report)
+        let prepared_batch =
+            self.prepare_relation_delta_batch(provider.as_ref(), delta_batch, false)?;
+        let mut session_runtime = None;
+        let prepared = self.prepare_relation_delta_commit_with_session_runtime(
+            provider,
+            relation_store,
+            cached_store,
+            &mut session_runtime,
+            prepared_batch,
+        )?;
+        Ok(prepared.commit())
     }
 
     /// Apply an ordered batch of relation deltas while preserving session runtime state.
@@ -972,44 +1220,16 @@ impl LogicProgram {
         session_runtime: &mut Option<LogicSessionRuntime>,
         delta_batch: Vec<(String, RelationDelta)>,
     ) -> Result<LogicDeltaReport> {
-        let coalesced = coalesce_relation_delta_batch(provider.as_ref(), delta_batch)?;
-        if coalesced.deltas.is_empty() {
-            return Ok(LogicDeltaReport {
-                input_delta_count: coalesced.input_delta_count,
-                changed_relations: 0,
-                changed_relation_names: Vec::new(),
-                insert_rows: 0,
-                delete_rows: 0,
-                has_deletes: false,
-                affected_sccs: 0,
-                recomputed_sccs: 0,
-                incremental_sccs: 0,
-                coalesced_insert_rows: 0,
-                coalesced_delete_rows: 0,
-                canceled_rows: coalesced.canceled_rows,
-                planner_telemetry: DeltaPlannerTelemetry {
-                    fallback_decision: "no_op".to_string(),
-                    ..DeltaPlannerTelemetry::default()
-                },
-                debug_trace: vec![format!("canceled_rows={}", coalesced.canceled_rows)],
-            });
-        }
-
-        let mut report = self.apply_relation_deltas_with_session_runtime(
+        let prepared_batch =
+            self.prepare_relation_delta_batch(provider.as_ref(), delta_batch, false)?;
+        let prepared = self.prepare_relation_delta_commit_with_session_runtime(
             provider,
             relation_store,
             cached_store,
             session_runtime,
-            coalesced.deltas,
+            prepared_batch,
         )?;
-        report.input_delta_count = coalesced.input_delta_count;
-        report.changed_relations = coalesced.changed_relations;
-        report.coalesced_insert_rows = coalesced.coalesced_insert_rows;
-        report.coalesced_delete_rows = coalesced.coalesced_delete_rows;
-        report.canceled_rows = coalesced.canceled_rows;
-        report.planner_telemetry = DeltaPlannerTelemetry::from_delta_report(&report, true, None);
-        report.debug_trace = delta_debug_trace(&report);
-        Ok(report)
+        Ok(prepared.commit())
     }
 
     /// Evaluate the program with the given input relations (no profiling).
@@ -1180,6 +1400,30 @@ impl LogicProgram {
                 XlogError::Execution(format!("Relation {} disappeared during clone", name))
             })?;
             cloned.put(name, provider.clone_buffer(buffer)?);
+        }
+        Ok(cloned)
+    }
+
+    fn clone_prepared_relation_snapshot(
+        &self,
+        provider: &Arc<CudaKernelProvider>,
+        source: &RelationStore,
+    ) -> Result<RelationStore> {
+        let mut relation_names = source.names().collect::<Vec<_>>();
+        relation_names.sort_unstable();
+        let mut cloned = RelationStore::new(provider.clone());
+        cloned.try_reserve_relations(relation_names.len())?;
+        for name in relation_names {
+            let buffer = source.get(name).ok_or_else(|| {
+                XlogError::Execution(format!(
+                    "Relation {name} disappeared while cloning prepared snapshot"
+                ))
+            })?;
+            let context = format!("cloning prospective relation snapshot '{name}'");
+            let cloned_buffer = provider
+                .clone_buffer(buffer)
+                .map_err(|error| relation_clone_error(context, error))?;
+            cloned.put(name, cloned_buffer);
         }
         Ok(cloned)
     }
@@ -2432,6 +2676,22 @@ fn is_list_helper_relation(name: &str) -> bool {
     name.starts_with("__xlog_list_")
 }
 
+fn relation_clone_error(context: String, error: XlogError) -> XlogError {
+    match error {
+        XlogError::ResourceExhausted {
+            context: source_context,
+            estimated_bytes,
+            budget_bytes,
+        } => XlogError::ResourceExhausted {
+            context: format!("{context}: {source_context}"),
+            estimated_bytes,
+            budget_bytes,
+        },
+        XlogError::Kernel(message) => XlogError::Kernel(format!("{context}: {message}")),
+        error => error,
+    }
+}
+
 fn logic_delta_report(
     stats: DeltaRecomputeStats,
     insert_rows: u64,
@@ -2452,6 +2712,28 @@ fn logic_delta_report(
         canceled_rows: 0,
         planner_telemetry: DeltaPlannerTelemetry::default(),
         debug_trace: Vec::new(),
+    }
+}
+
+fn no_op_delta_report(seed: PreparedRelationDeltaReportSeed) -> LogicDeltaReport {
+    LogicDeltaReport {
+        input_delta_count: seed.input_delta_count,
+        changed_relations: 0,
+        changed_relation_names: Vec::new(),
+        insert_rows: 0,
+        delete_rows: 0,
+        has_deletes: false,
+        affected_sccs: 0,
+        recomputed_sccs: 0,
+        incremental_sccs: 0,
+        coalesced_insert_rows: 0,
+        coalesced_delete_rows: 0,
+        canceled_rows: seed.canceled_rows,
+        planner_telemetry: DeltaPlannerTelemetry {
+            fallback_decision: "no_op".to_string(),
+            ..DeltaPlannerTelemetry::default()
+        },
+        debug_trace: vec![format!("canceled_rows={}", seed.canceled_rows)],
     }
 }
 
@@ -2496,21 +2778,45 @@ fn buffers_gpu_set_equivalent(
     Ok(provider.device_row_count(&right_minus_left)? == 0)
 }
 
-fn coalesce_relation_delta_batch(
+fn coalesce_relation_delta_batch_with_cancellation_capture(
     provider: &CudaKernelProvider,
     delta_batch: Vec<(String, RelationDelta)>,
-) -> Result<CoalescedRelationDeltaBatch> {
+    capture_cancellations: bool,
+) -> Result<PreparedRelationDeltaBatch> {
     let input_delta_count = delta_batch.len();
     let mut pending_by_relation: HashMap<String, PendingRelationDelta> = HashMap::new();
+    let mut cancellations: HashMap<String, Vec<RelationDeltaCancellation>> = HashMap::new();
     let mut canceled_rows = 0u64;
 
-    for (name, delta) in delta_batch {
+    for (update_index, (name, delta)) in delta_batch.into_iter().enumerate() {
+        let cancellation_relation = capture_cancellations.then(|| name.clone());
+        let mut update_cancellations = capture_cancellations.then(Vec::new);
         let pending = pending_by_relation.entry(name).or_default();
         if let Some(insert) = delta.insert {
-            merge_insert_delta(provider, pending, insert, &mut canceled_rows)?;
+            merge_insert_delta(
+                provider,
+                pending,
+                insert,
+                &mut canceled_rows,
+                update_index,
+                update_cancellations.as_mut(),
+            )?;
         }
         if let Some(delete) = delta.delete {
-            merge_delete_delta(provider, pending, delete, &mut canceled_rows)?;
+            merge_delete_delta(
+                provider,
+                pending,
+                delete,
+                &mut canceled_rows,
+                update_index,
+                update_cancellations.as_mut(),
+            )?;
+        }
+        if let Some(mut captured) = update_cancellations.filter(|trace| !trace.is_empty()) {
+            cancellations
+                .entry(cancellation_relation.expect("capture relation must be retained"))
+                .or_default()
+                .append(&mut captured);
         }
     }
 
@@ -2529,13 +2835,16 @@ fn coalesce_relation_delta_batch(
     }
 
     let changed_relations = deltas.len();
-    Ok(CoalescedRelationDeltaBatch {
+    Ok(PreparedRelationDeltaBatch {
         deltas,
-        input_delta_count,
-        changed_relations,
-        coalesced_insert_rows,
-        coalesced_delete_rows,
-        canceled_rows,
+        cancellations,
+        report_seed: PreparedRelationDeltaReportSeed {
+            input_delta_count,
+            changed_relations,
+            coalesced_insert_rows,
+            coalesced_delete_rows,
+            canceled_rows,
+        },
     })
 }
 
@@ -2544,6 +2853,8 @@ fn merge_insert_delta(
     pending: &mut PendingRelationDelta,
     insert: CudaBuffer,
     canceled_rows: &mut u64,
+    update_index: usize,
+    cancellations: Option<&mut Vec<RelationDeltaCancellation>>,
 ) -> Result<()> {
     let mut incoming = provider.dedup_full_row(&insert)?;
     if let Some(delete) = pending.delete.take().and_then(non_empty_buffer) {
@@ -2551,6 +2862,14 @@ fn merge_insert_delta(
         let delete_after = provider.diff_full_row(&delete, &incoming)?;
         let insert_after = provider.diff_full_row(&incoming, &delete)?;
         *canceled_rows += delete_before.saturating_sub(buffer_rows(&delete_after));
+        capture_canceled_tuples(
+            provider,
+            &incoming,
+            &insert_after,
+            update_index,
+            RelationDeltaDirection::Insert,
+            cancellations,
+        )?;
         pending.delete = non_empty_buffer(delete_after);
         incoming = insert_after;
     }
@@ -2563,6 +2882,8 @@ fn merge_delete_delta(
     pending: &mut PendingRelationDelta,
     delete: CudaBuffer,
     canceled_rows: &mut u64,
+    update_index: usize,
+    cancellations: Option<&mut Vec<RelationDeltaCancellation>>,
 ) -> Result<()> {
     let mut incoming = provider.dedup_full_row(&delete)?;
     if let Some(insert) = pending.insert.take().and_then(non_empty_buffer) {
@@ -2570,10 +2891,40 @@ fn merge_delete_delta(
         let insert_after = provider.diff_full_row(&insert, &incoming)?;
         let delete_after = provider.diff_full_row(&incoming, &insert)?;
         *canceled_rows += insert_before.saturating_sub(buffer_rows(&insert_after));
+        capture_canceled_tuples(
+            provider,
+            &incoming,
+            &delete_after,
+            update_index,
+            RelationDeltaDirection::Delete,
+            cancellations,
+        )?;
         pending.insert = non_empty_buffer(insert_after);
         incoming = delete_after;
     }
     pending.delete = merge_optional_buffer(provider, pending.delete.take(), incoming)?;
+    Ok(())
+}
+
+fn capture_canceled_tuples(
+    provider: &CudaKernelProvider,
+    incoming: &CudaBuffer,
+    incoming_after_cancellation: &CudaBuffer,
+    update_index: usize,
+    incoming_direction: RelationDeltaDirection,
+    cancellations: Option<&mut Vec<RelationDeltaCancellation>>,
+) -> Result<()> {
+    let Some(cancellations) = cancellations else {
+        return Ok(());
+    };
+    let intersection = provider.diff_full_row(incoming, incoming_after_cancellation)?;
+    if let Some(tuples) = non_empty_buffer(intersection) {
+        cancellations.push(RelationDeltaCancellation {
+            update_index,
+            incoming_direction,
+            tuples,
+        });
+    }
     Ok(())
 }
 
@@ -2594,7 +2945,7 @@ fn merge_optional_buffer(
 }
 
 fn non_empty_buffer(buffer: CudaBuffer) -> Option<CudaBuffer> {
-    if buffer.is_empty() {
+    if buffer.cached_row_count() == Some(0) || buffer.is_empty() {
         None
     } else {
         Some(buffer)
@@ -3104,6 +3455,40 @@ mod tests {
     use xlog_core::ScalarType;
 
     #[test]
+    fn relation_clone_context_preserves_cuda_error_variants() {
+        let kernel = relation_clone_error(
+            "cloning relation 'fact'".to_string(),
+            XlogError::Kernel("launch failed".to_string()),
+        );
+        assert!(matches!(
+            kernel,
+            XlogError::Kernel(message)
+                if message == "cloning relation 'fact': launch failed"
+        ));
+
+        let exhausted = relation_clone_error(
+            "cloning relation 'fact'".to_string(),
+            XlogError::ResourceExhausted {
+                context: "GPU memory allocation".to_string(),
+                estimated_bytes: 64,
+                budget_bytes: 32,
+            },
+        );
+        match exhausted {
+            XlogError::ResourceExhausted {
+                context,
+                estimated_bytes,
+                budget_bytes,
+            } => {
+                assert_eq!(context, "cloning relation 'fact': GPU memory allocation");
+                assert_eq!(estimated_bytes, 64);
+                assert_eq!(budget_bytes, 32);
+            }
+            error => panic!("expected resource exhaustion, got {error}"),
+        }
+    }
+
+    #[test]
     fn compiled_argument_preserves_declared_names_domains_and_order() -> Result<()> {
         let program = LogicProgram::compile(
             r#"
@@ -3286,7 +3671,7 @@ mod tests {
 }
 
 #[cfg(test)]
-mod v086_delta_coalesce_tests {
+mod relation_delta_coalesce_tests {
     use super::*;
     use std::collections::HashMap;
     use std::sync::Arc;
@@ -3344,33 +3729,37 @@ mod v086_delta_coalesce_tests {
 
         let batch = vec![
             (
-                "external_consumer_commit".to_string(),
+                "streamed_fact".to_string(),
                 RelationDelta::new(Some(test_buffer(&provider, &[7, 8])), None),
             ),
             (
-                "external_consumer_commit".to_string(),
+                "streamed_fact".to_string(),
                 RelationDelta::new(None, Some(test_buffer(&provider, &[8]))),
             ),
             (
-                "external_consumer_commit".to_string(),
+                "streamed_fact".to_string(),
                 RelationDelta::new(Some(test_buffer(&provider, &[9])), None),
             ),
         ];
 
-        let report = coalesce_relation_delta_batch(provider.as_ref(), batch)
-            .expect("coalesce relation delta batch");
+        let report = coalesce_relation_delta_batch_with_cancellation_capture(
+            provider.as_ref(),
+            batch,
+            false,
+        )
+        .expect("coalesce relation delta batch");
         let delta = report
             .deltas
-            .get("external_consumer_commit")
+            .get("streamed_fact")
             .expect("coalesced relation");
         let insert = delta.insert.as_ref().expect("coalesced insert");
         assert_eq!(read_u32(&provider, insert), vec![7, 9]);
         assert!(delta.delete.as_ref().map(|b| b.is_empty()).unwrap_or(true));
-        assert_eq!(report.input_delta_count, 3);
-        assert_eq!(report.changed_relations, 1);
-        assert_eq!(report.coalesced_insert_rows, 2);
-        assert_eq!(report.coalesced_delete_rows, 0);
-        assert_eq!(report.canceled_rows, 1);
+        assert_eq!(report.report_seed.input_delta_count, 3);
+        assert_eq!(report.report_seed.changed_relations, 1);
+        assert_eq!(report.report_seed.coalesced_insert_rows, 2);
+        assert_eq!(report.report_seed.coalesced_delete_rows, 0);
+        assert_eq!(report.report_seed.canceled_rows, 1);
     }
 
     #[test]
@@ -3381,10 +3770,10 @@ mod v086_delta_coalesce_tests {
         };
 
         let source = r#"
-            pred external_consumer_commit(u32).
+            pred streamed_fact(u32).
             pred out(u32).
 
-            out(X) :- external_consumer_commit(X).
+            out(X) :- streamed_fact(X).
 
             ?- out(X).
         "#;
@@ -3400,15 +3789,15 @@ mod v086_delta_coalesce_tests {
             &mut coalesced_cache,
             vec![
                 (
-                    "external_consumer_commit".to_string(),
+                    "streamed_fact".to_string(),
                     RelationDelta::new(Some(test_buffer(&provider, &[1, 2, 3])), None),
                 ),
                 (
-                    "external_consumer_commit".to_string(),
+                    "streamed_fact".to_string(),
                     RelationDelta::new(None, Some(test_buffer(&provider, &[2]))),
                 ),
                 (
-                    "external_consumer_commit".to_string(),
+                    "streamed_fact".to_string(),
                     RelationDelta::new(Some(test_buffer(&provider, &[4])), None),
                 ),
             ],
@@ -3445,7 +3834,7 @@ mod v086_delta_coalesce_tests {
                 provider.clone(),
                 &mut sequential_store,
                 &mut sequential_cache,
-                HashMap::from([("external_consumer_commit".to_string(), delta)]),
+                HashMap::from([("streamed_fact".to_string(), delta)]),
             )?;
         }
         let sequential = program.evaluate_cached_relation_store(
@@ -3457,10 +3846,7 @@ mod v086_delta_coalesce_tests {
         let sequential_rows = sorted_query_rows(&provider, &sequential);
 
         let mut replacement_store = program.create_relation_store(provider.clone())?;
-        replacement_store.put(
-            "external_consumer_commit",
-            test_buffer(&provider, &[1, 3, 4]),
-        );
+        replacement_store.put("streamed_fact", test_buffer(&provider, &[1, 3, 4]));
         let replacement =
             program.evaluate_with_relation_store(provider.clone(), &replacement_store, false)?;
         let replacement_rows = sorted_query_rows(&provider, &replacement);
@@ -3468,6 +3854,897 @@ mod v086_delta_coalesce_tests {
         assert_eq!(coalesced_rows, vec![1, 3, 4]);
         assert_eq!(coalesced_rows, sequential_rows);
         assert_eq!(coalesced_rows, replacement_rows);
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod relation_delta_preparation_tests {
+    use super::*;
+    use std::sync::Arc;
+
+    use xlog_core::{MemoryBudget, ScalarType};
+    use xlog_cuda::{CudaDevice, GpuMemoryManager};
+
+    fn test_provider_with_budget(limit: u64) -> Option<Arc<CudaKernelProvider>> {
+        let provider = (|| -> Result<Arc<CudaKernelProvider>> {
+            let device = Arc::new(CudaDevice::new(0)?);
+            let budget = MemoryBudget::with_limit(limit);
+            let memory = Arc::new(GpuMemoryManager::new(device.clone(), budget));
+            Ok(Arc::new(CudaKernelProvider::new(device, memory)?))
+        })();
+
+        match provider {
+            Ok(provider) => Some(provider),
+            Err(error) if std::env::var("XLOG_REQUIRE_CUDA").as_deref() == Ok("1") => {
+                panic!(
+                    "XLOG_REQUIRE_CUDA=1 but CUDA provider construction failed: {}",
+                    error
+                )
+            }
+            Err(error) => {
+                eprintln!("Skipping test: no CUDA device available ({error})");
+                None
+            }
+        }
+    }
+
+    fn test_provider() -> Option<Arc<CudaKernelProvider>> {
+        test_provider_with_budget(1024 * 1024 * 1024)
+    }
+
+    fn test_buffer(provider: &CudaKernelProvider, rows: &[u32]) -> CudaBuffer {
+        let schema = Schema::new(vec![("id".to_string(), ScalarType::U32)]);
+        let bytes: Vec<u8> = rows.iter().flat_map(|value| value.to_le_bytes()).collect();
+        let mut column = provider.memory().alloc::<u8>(bytes.len()).expect("alloc");
+        provider
+            .device()
+            .inner()
+            .htod_sync_copy_into(&bytes, &mut column)
+            .expect("upload rows");
+        let mut device_row_count = provider.memory().alloc::<u32>(1).expect("alloc rows");
+        provider
+            .device()
+            .inner()
+            .htod_sync_copy_into(&[rows.len() as u32], &mut device_row_count)
+            .expect("upload row count");
+        CudaBuffer::from_columns(
+            vec![column.into()],
+            rows.len() as u64,
+            device_row_count,
+            schema,
+        )
+    }
+
+    fn sorted_u32(provider: &CudaKernelProvider, buffer: &CudaBuffer) -> Vec<u32> {
+        let mut rows = provider
+            .download_column::<u32>(buffer, 0)
+            .expect("download rows");
+        rows.sort_unstable();
+        rows
+    }
+
+    fn insert_rows(
+        provider: &CudaKernelProvider,
+        prepared: &PreparedRelationDeltaBatch,
+        relation: &str,
+    ) -> Vec<u32> {
+        let delta = prepared
+            .net_deltas()
+            .get(relation)
+            .expect("prepared relation delta");
+        sorted_u32(
+            provider,
+            delta.insert.as_ref().expect("prepared net insert buffer"),
+        )
+    }
+
+    fn cancellation_batch(provider: &CudaKernelProvider) -> Vec<(String, RelationDelta)> {
+        vec![
+            (
+                "fact".to_string(),
+                RelationDelta::new(Some(test_buffer(provider, &[5])), None),
+            ),
+            (
+                "fact".to_string(),
+                RelationDelta::new(None, Some(test_buffer(provider, &[5]))),
+            ),
+            (
+                "fact".to_string(),
+                RelationDelta::new(Some(test_buffer(provider, &[6])), None),
+            ),
+        ]
+    }
+
+    fn report_counts(report: &LogicDeltaReport) -> (usize, usize, u64, u64, u64) {
+        (
+            report.input_delta_count,
+            report.changed_relations,
+            report.coalesced_insert_rows,
+            report.coalesced_delete_rows,
+            report.canceled_rows,
+        )
+    }
+
+    #[test]
+    fn prepared_batch_exposes_net_deltas_and_ordered_cancellation_buffers() -> Result<()> {
+        let Some(provider) = test_provider() else {
+            return Ok(());
+        };
+        let program = LogicProgram::compile("pred fact(u32).")?;
+
+        let prepared = program.prepare_relation_delta_batch(
+            provider.as_ref(),
+            vec![
+                (
+                    "fact".to_string(),
+                    RelationDelta::new(Some(test_buffer(&provider, &[1, 2])), None),
+                ),
+                (
+                    "fact".to_string(),
+                    RelationDelta::new(None, Some(test_buffer(&provider, &[2]))),
+                ),
+                (
+                    "fact".to_string(),
+                    RelationDelta::new(None, Some(test_buffer(&provider, &[3]))),
+                ),
+                (
+                    "fact".to_string(),
+                    RelationDelta::new(Some(test_buffer(&provider, &[3, 4])), None),
+                ),
+            ],
+            true,
+        )?;
+
+        assert_eq!(insert_rows(&provider, &prepared, "fact"), vec![1, 4]);
+        let cancellations = prepared
+            .cancellations()
+            .get("fact")
+            .expect("fact cancellation trace");
+        assert_eq!(cancellations.len(), 2);
+        assert_eq!(cancellations[0].update_index(), 1);
+        assert_eq!(
+            cancellations[0].incoming_direction(),
+            RelationDeltaDirection::Delete
+        );
+        assert_eq!(sorted_u32(&provider, cancellations[0].tuples()), vec![2]);
+        assert_eq!(cancellations[1].update_index(), 3);
+        assert_eq!(
+            cancellations[1].incoming_direction(),
+            RelationDeltaDirection::Insert
+        );
+        assert_eq!(sorted_u32(&provider, cancellations[1].tuples()), vec![3]);
+        Ok(())
+    }
+
+    #[test]
+    fn cancellation_trace_distinguishes_canceled_and_surviving_insert_occurrences() -> Result<()> {
+        let Some(provider) = test_provider() else {
+            return Ok(());
+        };
+        let program = LogicProgram::compile("pred fact(u32).")?;
+
+        let insert_delete_insert = program.prepare_relation_delta_batch(
+            provider.as_ref(),
+            vec![
+                (
+                    "fact".to_string(),
+                    RelationDelta::new(Some(test_buffer(&provider, &[7])), None),
+                ),
+                (
+                    "fact".to_string(),
+                    RelationDelta::new(None, Some(test_buffer(&provider, &[7]))),
+                ),
+                (
+                    "fact".to_string(),
+                    RelationDelta::new(Some(test_buffer(&provider, &[7])), None),
+                ),
+            ],
+            true,
+        )?;
+        assert_eq!(
+            insert_rows(&provider, &insert_delete_insert, "fact"),
+            vec![7]
+        );
+        let first_trace = insert_delete_insert
+            .cancellations()
+            .get("fact")
+            .expect("first cancellation trace");
+        assert_eq!(first_trace.len(), 1);
+        assert_eq!(first_trace[0].update_index(), 1);
+        assert_eq!(
+            first_trace[0].incoming_direction(),
+            RelationDeltaDirection::Delete
+        );
+        assert_eq!(sorted_u32(&provider, first_trace[0].tuples()), vec![7]);
+
+        let delete_insert_insert = program.prepare_relation_delta_batch(
+            provider.as_ref(),
+            vec![
+                (
+                    "fact".to_string(),
+                    RelationDelta::new(None, Some(test_buffer(&provider, &[7]))),
+                ),
+                (
+                    "fact".to_string(),
+                    RelationDelta::new(Some(test_buffer(&provider, &[7])), None),
+                ),
+                (
+                    "fact".to_string(),
+                    RelationDelta::new(Some(test_buffer(&provider, &[7])), None),
+                ),
+            ],
+            true,
+        )?;
+        assert_eq!(
+            insert_rows(&provider, &delete_insert_insert, "fact"),
+            vec![7]
+        );
+        let second_trace = delete_insert_insert
+            .cancellations()
+            .get("fact")
+            .expect("second cancellation trace");
+        assert_eq!(second_trace.len(), 1);
+        assert_eq!(second_trace[0].update_index(), 1);
+        assert_eq!(
+            second_trace[0].incoming_direction(),
+            RelationDeltaDirection::Insert
+        );
+        assert_eq!(sorted_u32(&provider, second_trace[0].tuples()), vec![7]);
+        Ok(())
+    }
+
+    #[test]
+    fn disabled_cancellation_capture_preserves_net_data_and_stats_without_trace_work() -> Result<()>
+    {
+        let Some(provider) = test_provider() else {
+            return Ok(());
+        };
+        let program = LogicProgram::compile(
+            r#"
+                pred fact(u32).
+                pred out(u32).
+                out(X) :- fact(X).
+                ?- out(X).
+            "#,
+        )?;
+        let mut uncaptured_store = program.create_relation_store(provider.clone())?;
+        let mut uncaptured_cache = None;
+        let mut uncaptured_runtime = None;
+        let mut captured_store = program.create_relation_store(provider.clone())?;
+        let mut captured_cache = None;
+        let mut captured_runtime = None;
+
+        let uncaptured_batch = cancellation_batch(&provider);
+        provider.memory().reset_alloc_count();
+        let uncaptured =
+            program.prepare_relation_delta_batch(provider.as_ref(), uncaptured_batch, false)?;
+        let uncaptured_allocations = provider.memory().alloc_count();
+        assert!(uncaptured.cancellations().is_empty());
+        assert_eq!(insert_rows(&provider, &uncaptured, "fact"), vec![6]);
+        let uncaptured_commit = program.prepare_relation_delta_commit_with_session_runtime(
+            provider.clone(),
+            &mut uncaptured_store,
+            &mut uncaptured_cache,
+            &mut uncaptured_runtime,
+            uncaptured,
+        )?;
+        let uncaptured_report = uncaptured_commit.commit();
+
+        let captured_batch = cancellation_batch(&provider);
+        provider.memory().reset_alloc_count();
+        let captured =
+            program.prepare_relation_delta_batch(provider.as_ref(), captured_batch, true)?;
+        let captured_allocations = provider.memory().alloc_count();
+        assert_eq!(insert_rows(&provider, &captured, "fact"), vec![6]);
+        assert_eq!(
+            captured
+                .cancellations()
+                .get("fact")
+                .expect("captured cancellation")
+                .len(),
+            1
+        );
+        assert!(
+            captured_allocations > uncaptured_allocations,
+            "capturing cancellation tuples should add device allocation requests in this fixture: captured={captured_allocations}, uncaptured={uncaptured_allocations}"
+        );
+        let captured_commit = program.prepare_relation_delta_commit_with_session_runtime(
+            provider.clone(),
+            &mut captured_store,
+            &mut captured_cache,
+            &mut captured_runtime,
+            captured,
+        )?;
+        let captured_report = captured_commit.commit();
+
+        assert_eq!(
+            report_counts(&uncaptured_report),
+            report_counts(&captured_report)
+        );
+        assert_eq!(report_counts(&uncaptured_report), (3, 1, 1, 0, 1));
+        assert_eq!(
+            sorted_u32(
+                &provider,
+                uncaptured_store.get("fact").expect("uncaptured base fact")
+            ),
+            vec![6]
+        );
+        assert_eq!(
+            sorted_u32(
+                &provider,
+                captured_store.get("fact").expect("captured base fact")
+            ),
+            vec![6]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn retained_preparation_failure_discards_mutated_runtime_without_base_puts() -> Result<()> {
+        let Some(provider) = test_provider() else {
+            return Ok(());
+        };
+        let program = LogicProgram::compile(
+            r#"
+                pred safe(u32).
+                pred forbidden(u32).
+                pred out(u32).
+                out(X) :- safe(X).
+                :- forbidden(X).
+                ?- out(X).
+            "#,
+        )?;
+        let mut base_store = program.create_relation_store(provider.clone())?;
+        let safe_version = base_store.version("safe").expect("safe version");
+        let forbidden_version = base_store.version("forbidden").expect("forbidden version");
+        let mut runtime =
+            Some(program.create_session_runtime(provider.clone(), &base_store, false)?);
+        let (_, initial_cache) = program.evaluate_with_session_runtime(
+            provider.clone(),
+            runtime.as_mut().expect("initial runtime"),
+        )?;
+        let mut cache = Some(initial_cache);
+        let prepared = program.prepare_relation_delta_batch(
+            provider.as_ref(),
+            vec![
+                (
+                    "safe".to_string(),
+                    RelationDelta::new(Some(test_buffer(&provider, &[1])), None),
+                ),
+                (
+                    "forbidden".to_string(),
+                    RelationDelta::new(Some(test_buffer(&provider, &[9])), None),
+                ),
+            ],
+            false,
+        )?;
+
+        let error = match program.prepare_relation_delta_commit_with_session_runtime(
+            provider.clone(),
+            &mut base_store,
+            &mut cache,
+            &mut runtime,
+            prepared,
+        ) {
+            Ok(_) => panic!("constraint-violating preparation must fail"),
+            Err(error) => error,
+        };
+
+        assert!(
+            error.to_string().contains("Constraint 0 violated"),
+            "unexpected preparation error: {error}"
+        );
+        assert!(cache.is_none(), "failed preparation must discard cache");
+        assert!(runtime.is_none(), "failed preparation must discard runtime");
+        assert_eq!(base_store.version("safe"), Some(safe_version));
+        assert_eq!(base_store.version("forbidden"), Some(forbidden_version));
+        assert_eq!(base_store.get("safe").expect("safe base").num_rows(), 0);
+        assert_eq!(
+            base_store
+                .get("forbidden")
+                .expect("forbidden base")
+                .num_rows(),
+            0
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn successful_preparation_binds_and_stages_all_state_until_infallible_commit() -> Result<()> {
+        let Some(provider) = test_provider() else {
+            return Ok(());
+        };
+        let program = LogicProgram::compile(
+            r#"
+                pred left_input(u32).
+                pred right_input(u32).
+                pred out(u32).
+                out(X) :- left_input(X).
+                out(X) :- right_input(X).
+                ?- out(X).
+            "#,
+        )?;
+        let mut base_store = program.create_relation_store(provider.clone())?;
+        let left_version = base_store
+            .version("left_input")
+            .expect("left input version");
+        let right_version = base_store
+            .version("right_input")
+            .expect("right input version");
+        let mut runtime =
+            Some(program.create_session_runtime(provider.clone(), &base_store, false)?);
+        let (_, initial_cache) = program.evaluate_with_session_runtime(
+            provider.clone(),
+            runtime.as_mut().expect("initial runtime"),
+        )?;
+        let mut cache = Some(initial_cache);
+        let authoritative_store_pointer = &mut base_store as *mut RelationStore;
+        let cache_slot_pointer = &mut cache as *mut Option<RelationStore>;
+        let runtime_slot_pointer = &mut runtime as *mut Option<LogicSessionRuntime>;
+        let prepared = program.prepare_relation_delta_batch(
+            provider.as_ref(),
+            vec![
+                (
+                    "left_input".to_string(),
+                    RelationDelta::new(Some(test_buffer(&provider, &[1])), None),
+                ),
+                (
+                    "right_input".to_string(),
+                    RelationDelta::new(Some(test_buffer(&provider, &[2])), None),
+                ),
+            ],
+            true,
+        )?;
+
+        let commit = program.prepare_relation_delta_commit_with_session_runtime(
+            provider.clone(),
+            &mut base_store,
+            &mut cache,
+            &mut runtime,
+            prepared,
+        )?;
+
+        assert!(
+            std::ptr::eq(
+                &*commit.authoritative_relation_store,
+                authoritative_store_pointer
+            ),
+            "prepared commit must remain bound to its authoritative store"
+        );
+        assert!(
+            std::ptr::eq(&*commit.cached_store_slot, cache_slot_pointer),
+            "prepared commit must remain bound to its cache slot"
+        );
+        assert!(
+            std::ptr::eq(&*commit.session_runtime_slot, runtime_slot_pointer),
+            "prepared commit must remain bound to its runtime slot"
+        );
+        assert!(
+            commit.cached_store_slot.is_none(),
+            "prepared cache must be transaction-owned"
+        );
+        assert!(
+            commit.session_runtime_slot.is_none(),
+            "prepared runtime must be transaction-owned"
+        );
+        assert_eq!(
+            commit.authoritative_relation_store.version("left_input"),
+            Some(left_version)
+        );
+        assert_eq!(
+            commit.authoritative_relation_store.version("right_input"),
+            Some(right_version)
+        );
+        assert_eq!(
+            commit
+                .authoritative_relation_store
+                .get("left_input")
+                .expect("left input base")
+                .num_rows(),
+            0
+        );
+        assert_eq!(
+            commit
+                .authoritative_relation_store
+                .get("right_input")
+                .expect("right input base")
+                .num_rows(),
+            0
+        );
+        assert_eq!(commit.staged_base_updates.len(), 2);
+        assert!(commit.prospective_cached_store.is_some());
+        assert!(commit.prospective_session_runtime.is_some());
+
+        let prospective_store = commit.prospective_derived_store();
+        assert_eq!(
+            sorted_u32(
+                &provider,
+                prospective_store
+                    .get("left_input")
+                    .expect("prospective left input")
+            ),
+            vec![1]
+        );
+        assert_eq!(
+            sorted_u32(
+                &provider,
+                prospective_store
+                    .get("right_input")
+                    .expect("prospective right input")
+            ),
+            vec![2]
+        );
+
+        provider.memory().reset_alloc_count();
+        let report = commit.commit();
+        assert_eq!(
+            provider.memory().alloc_count(),
+            0,
+            "commit must issue zero GPU allocation requests because preparation already staged every buffer"
+        );
+
+        assert_eq!(base_store.version("left_input"), Some(left_version + 1));
+        assert_eq!(base_store.version("right_input"), Some(right_version + 1));
+        assert_eq!(
+            sorted_u32(
+                &provider,
+                base_store.get("left_input").expect("committed left input")
+            ),
+            vec![1]
+        );
+        assert_eq!(
+            sorted_u32(
+                &provider,
+                base_store
+                    .get("right_input")
+                    .expect("committed right input")
+            ),
+            vec![2]
+        );
+        let result = program.evaluate_cached_relation_store(
+            provider.clone(),
+            cache.as_ref().expect("committed cache"),
+        )?;
+        assert_eq!(sorted_u32(&provider, &result.queries[0].buffer), vec![1, 2]);
+        assert!(runtime.is_some(), "commit must install the runtime");
+        assert_eq!(report_counts(&report), (2, 2, 2, 0, 0));
+        Ok(())
+    }
+
+    #[test]
+    fn prospective_base_snapshot_recomputes_deletion_without_stale_derived_rows() -> Result<()> {
+        let Some(provider) = test_provider() else {
+            return Ok(());
+        };
+        let program = LogicProgram::compile(
+            r#"
+                pred fact(u32).
+                pred out(u32).
+                out(X) :- fact(X).
+                ?- out(X).
+            "#,
+        )?;
+        let mut base_store = program.create_relation_store(provider.clone())?;
+        base_store.put("fact", test_buffer(&provider, &[1, 2]));
+        let mut runtime =
+            Some(program.create_session_runtime(provider.clone(), &base_store, false)?);
+        let (_, initial_cache) = program.evaluate_with_session_runtime(
+            provider.clone(),
+            runtime.as_mut().expect("initial runtime"),
+        )?;
+        let mut cache = Some(initial_cache);
+        drop(base_store.remove("fact").expect("authoritative fact"));
+
+        let prepared = program.prepare_relation_delta_batch(
+            provider.as_ref(),
+            vec![(
+                "fact".to_string(),
+                RelationDelta::new(None, Some(test_buffer(&provider, &[2]))),
+            )],
+            false,
+        )?;
+        let commit = program.prepare_relation_delta_commit_with_session_runtime(
+            provider.clone(),
+            &mut base_store,
+            &mut cache,
+            &mut runtime,
+            prepared,
+        )?;
+
+        let prospective_derived = commit.prospective_derived_store();
+        assert_eq!(
+            sorted_u32(
+                &provider,
+                prospective_derived
+                    .get("__xlog_query_0")
+                    .expect("prospective query")
+            ),
+            vec![1]
+        );
+
+        provider.memory().reset_alloc_count();
+        let prospective_base = commit.clone_prospective_base_store()?;
+        assert_eq!(
+            provider.memory().alloc_count(),
+            4,
+            "one-column authoritative and staged relations should each be cloned exactly once"
+        );
+        assert_eq!(
+            sorted_u32(
+                &provider,
+                prospective_base
+                    .get("fact")
+                    .expect("staged missing base relation")
+            ),
+            vec![1]
+        );
+        assert_eq!(
+            prospective_base
+                .get("out")
+                .expect("empty authoritative derived relation")
+                .num_rows(),
+            0
+        );
+        let (_, independently_recomputed) = program.evaluate_with_relation_store_and_cache(
+            provider.clone(),
+            &prospective_base,
+            false,
+        )?;
+        assert!(program.relation_stores_query_equivalent(
+            provider.as_ref(),
+            &independently_recomputed,
+            prospective_derived,
+        )?);
+
+        let mut stale_derived_seed = commit.clone_prospective_base_store()?;
+        stale_derived_seed.put("out", test_buffer(&provider, &[1, 2]));
+        let (_, stale_seed_recompute) = program.evaluate_with_relation_store_and_cache(
+            provider.clone(),
+            &stale_derived_seed,
+            false,
+        )?;
+        assert_eq!(
+            sorted_u32(
+                &provider,
+                stale_seed_recompute
+                    .get("__xlog_query_0")
+                    .expect("stale-seeded query")
+            ),
+            vec![1, 2],
+            "seeding full recompute with an intensional head retains the deleted row"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn prospective_base_snapshot_skips_superseded_authoritative_buffer_clone() -> Result<()> {
+        let Some(provider) = test_provider() else {
+            return Ok(());
+        };
+        let program = LogicProgram::compile(
+            r#"
+                pred fact(u32).
+                pred out(u32).
+                out(X) :- fact(X).
+                ?- out(X).
+            "#,
+        )?;
+        let mut base_store = program.create_relation_store(provider.clone())?;
+        base_store.put("fact", test_buffer(&provider, &[1, 2]));
+        let mut runtime =
+            Some(program.create_session_runtime(provider.clone(), &base_store, false)?);
+        let (_, initial_cache) = program.evaluate_with_session_runtime(
+            provider.clone(),
+            runtime.as_mut().expect("initial runtime"),
+        )?;
+        let mut cache = Some(initial_cache);
+        let prepared = program.prepare_relation_delta_batch(
+            provider.as_ref(),
+            vec![(
+                "fact".to_string(),
+                RelationDelta::new(None, Some(test_buffer(&provider, &[2]))),
+            )],
+            false,
+        )?;
+        let commit = program.prepare_relation_delta_commit_with_session_runtime(
+            provider.clone(),
+            &mut base_store,
+            &mut cache,
+            &mut runtime,
+            prepared,
+        )?;
+
+        provider.memory().reset_alloc_count();
+        let prospective_base = commit.clone_prospective_base_store()?;
+        assert_eq!(
+            provider.memory().alloc_count(),
+            4,
+            "the empty authoritative head and final staged base must each be cloned once"
+        );
+        assert_eq!(
+            sorted_u32(
+                &provider,
+                prospective_base.get("fact").expect("prospective fact")
+            ),
+            vec![1]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn later_snapshot_clone_failure_discards_staged_updates_and_derived_state() -> Result<()> {
+        let Some(calibration_provider) = test_provider() else {
+            return Ok(());
+        };
+        let program = LogicProgram::compile(
+            r#"
+                pred alpha_input(u32).
+                pred omega_input(u32).
+                pred stable_input(u32).
+                pred out(u32).
+                out(X) :- alpha_input(X).
+                out(X) :- omega_input(X).
+                ?- out(X).
+            "#,
+        )?;
+        let alpha_rows = (0..512).collect::<Vec<u32>>();
+        let omega_rows = (10_000..10_512).collect::<Vec<u32>>();
+        let stable_rows = (20_000..85_536).collect::<Vec<u32>>();
+
+        let mut calibration_store = program.create_relation_store(calibration_provider.clone())?;
+        calibration_store.put(
+            "stable_input",
+            test_buffer(&calibration_provider, &stable_rows),
+        );
+        let mut calibration_runtime = Some(program.create_session_runtime(
+            calibration_provider.clone(),
+            &calibration_store,
+            false,
+        )?);
+        let (_, calibration_cache) = program.evaluate_with_session_runtime(
+            calibration_provider.clone(),
+            calibration_runtime.as_mut().expect("calibration runtime"),
+        )?;
+        let mut calibration_cache = Some(calibration_cache);
+        let calibration_batch = program.prepare_relation_delta_batch(
+            calibration_provider.as_ref(),
+            vec![
+                (
+                    "alpha_input".to_string(),
+                    RelationDelta::new(Some(test_buffer(&calibration_provider, &alpha_rows)), None),
+                ),
+                (
+                    "omega_input".to_string(),
+                    RelationDelta::new(Some(test_buffer(&calibration_provider, &omega_rows)), None),
+                ),
+            ],
+            false,
+        )?;
+        calibration_provider.memory().reset_peak();
+        calibration_provider.memory().reset_alloc_count();
+        let calibration_commit = program.prepare_relation_delta_commit_with_session_runtime(
+            calibration_provider.clone(),
+            &mut calibration_store,
+            &mut calibration_cache,
+            &mut calibration_runtime,
+            calibration_batch,
+        )?;
+        let successful_peak = calibration_provider.memory().peak_bytes();
+        let successful_preparation_allocations = calibration_provider.memory().alloc_count();
+        assert!(
+            successful_peak >= calibration_provider.memory().allocated_bytes(),
+            "the calibrated peak must cover every live staged GPU allocation"
+        );
+        drop(calibration_commit);
+        drop(calibration_store);
+        drop(calibration_cache);
+        drop(calibration_runtime);
+        drop(calibration_provider);
+
+        let tight_budget = successful_peak
+            .checked_sub(1)
+            .expect("successful preparation must allocate GPU memory");
+        let tight_provider = test_provider_with_budget(tight_budget)
+            .expect("calibrated budget must still construct a CUDA provider");
+        let mut base_store = program.create_relation_store(tight_provider.clone())?;
+        base_store.put("stable_input", test_buffer(&tight_provider, &stable_rows));
+        let authoritative_gpu_bytes = tight_provider.memory().allocated_bytes();
+        let alpha_version = base_store.version("alpha_input").expect("alpha version");
+        let omega_version = base_store.version("omega_input").expect("omega version");
+        let stable_version = base_store.version("stable_input").expect("stable version");
+        let mut runtime =
+            Some(program.create_session_runtime(tight_provider.clone(), &base_store, false)?);
+        let (_, initial_cache) = program.evaluate_with_session_runtime(
+            tight_provider.clone(),
+            runtime.as_mut().expect("initial runtime"),
+        )?;
+        let mut cache = Some(initial_cache);
+        let prepared = program.prepare_relation_delta_batch(
+            tight_provider.as_ref(),
+            vec![
+                (
+                    "alpha_input".to_string(),
+                    RelationDelta::new(Some(test_buffer(&tight_provider, &alpha_rows)), None),
+                ),
+                (
+                    "omega_input".to_string(),
+                    RelationDelta::new(Some(test_buffer(&tight_provider, &omega_rows)), None),
+                ),
+            ],
+            false,
+        )?;
+
+        tight_provider.memory().reset_alloc_count();
+        let error = match program.prepare_relation_delta_commit_with_session_runtime(
+            tight_provider.clone(),
+            &mut base_store,
+            &mut cache,
+            &mut runtime,
+            prepared,
+        ) {
+            Ok(_) => panic!("one-byte-tight preparation must fail during the final clone"),
+            Err(error) => error,
+        };
+        let XlogError::ResourceExhausted {
+            context,
+            budget_bytes,
+            ..
+        } = &error
+        else {
+            panic!("expected GPU resource exhaustion, got {error}");
+        };
+        assert_eq!(*budget_bytes, tight_budget);
+        assert_eq!(
+            context,
+            "cloning prospective relation snapshot 'stable_input': GPU memory allocation"
+        );
+        let failed_preparation_allocations = tight_provider.memory().alloc_count();
+        assert!(
+            successful_preparation_allocations > 4,
+            "calibration must include both staged-base and snapshot clones"
+        );
+        assert_eq!(
+            failed_preparation_allocations,
+            successful_preparation_allocations,
+            "the one-byte-tight run must reach the final calibrated clone allocation after every earlier staged clone succeeds"
+        );
+        assert!(cache.is_none(), "failed preparation must discard its cache");
+        assert!(
+            runtime.is_none(),
+            "failed preparation must discard its runtime"
+        );
+        assert_eq!(
+            tight_provider.memory().allocated_bytes(),
+            authoritative_gpu_bytes,
+            "failed preparation must release every transaction-owned GPU allocation"
+        );
+        assert_eq!(base_store.version("alpha_input"), Some(alpha_version));
+        assert_eq!(base_store.version("omega_input"), Some(omega_version));
+        assert_eq!(base_store.version("stable_input"), Some(stable_version));
+        assert_eq!(
+            base_store
+                .get("alpha_input")
+                .expect("authoritative alpha")
+                .num_rows(),
+            0
+        );
+        assert_eq!(
+            base_store
+                .get("omega_input")
+                .expect("authoritative omega")
+                .num_rows(),
+            0
+        );
+        assert_eq!(
+            sorted_u32(
+                &tight_provider,
+                base_store
+                    .get("stable_input")
+                    .expect("authoritative stable input")
+            ),
+            stable_rows
+        );
         Ok(())
     }
 }
