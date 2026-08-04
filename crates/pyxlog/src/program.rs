@@ -642,8 +642,8 @@ impl CompiledProgram {
                 match entry {
                     ProbVarInfo::Fact { atom, prob } => {
                         d.set_item("kind", "fact")?;
-                        d.set_item("atom", atom_to_string(atom))?;
-                        d.set_item("prob", *prob)?;
+                        d.set_item("atom", atom_to_string(&atom))?;
+                        d.set_item("prob", prob)?;
                     }
                     ProbVarInfo::Choice {
                         choices,
@@ -661,7 +661,7 @@ impl CompiledProgram {
                             "probs",
                             choices.iter().map(|(_, p)| *p).collect::<Vec<f64>>(),
                         )?;
-                        d.set_item("choice_index", *choice_index)?;
+                        d.set_item("choice_index", choice_index)?;
                     }
                     ProbVarInfo::Other => {
                         d.set_item("kind", "other")?;
