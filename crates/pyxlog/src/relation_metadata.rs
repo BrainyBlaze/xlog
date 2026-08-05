@@ -981,7 +981,7 @@ fn remove_matching_facts(
     tuples: &CudaBuffer,
     facts: &mut BTreeMap<FactKey, BTreeSet<ProvenanceRecord>>,
 ) -> PyResult<()> {
-    if facts.is_empty() {
+    if facts.is_empty() || tuples.is_empty() || tuples.cached_row_count() == Some(0) {
         return Ok(());
     }
     let keys = facts.keys().collect::<Vec<_>>();

@@ -1138,6 +1138,47 @@ def test_strict_deterministic_d2h_fails_metadata_before_mutation_but_allows_plai
     assert _exported_rows(plain, "transfer") == [original]
 
 
+def test_empty_typed_delete_preserves_delta_publication_without_provenance_d2h():
+    def columns(values):
+        return [torch.tensor(values, device="cuda", dtype=torch.int32)]
+
+    session = _session()
+    session.put_relation_with_provenance(
+        "alpha",
+        columns([7]),
+        roles=[{"name": "value"}],
+        facts=[_fact((7,), _record(source="original"))],
+    )
+    events = []
+    session.register_relation_callback(events.append)
+    before_evidence = session.evidence()
+    session.reset_host_transfer_stats()
+    session.reset_deterministic_d2h_violations()
+    session.set_strict_deterministic_d2h(True)
+    try:
+        stats = session.delete_relation("alpha", columns([]))
+    finally:
+        session.set_strict_deterministic_d2h(False)
+
+    assert session.host_transfer_stats()["dtoh_calls"] == 0
+    assert session.host_transfer_stats()["dtoh_bytes"] == 0
+    assert session.deterministic_d2h_violation_count() == 0
+    assert session.evidence() == before_evidence
+    assert _exported_rows(session, "alpha") == [(7,)]
+    assert session.delta_stats() == stats
+
+    control = _session()
+    control.put_relation("alpha", columns([7]))
+    control_events = []
+    control.register_relation_callback(control_events.append)
+    control_stats = control.delete_relation("alpha", columns([]))
+    assert stats["insert_rows"] == 0
+    assert stats["delete_rows"] == 0
+    assert len(events) == 1
+    assert stats == control_stats
+    assert events == control_events
+
+
 def test_debug_uses_precommit_equivalence_for_updates_and_fully_canceled_batches():
     row = (1, 2, 3, 4)
     session = _session()
