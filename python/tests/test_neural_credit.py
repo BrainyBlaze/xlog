@@ -1580,6 +1580,46 @@ def test_kfold_select_refuses_invalid_holdout_score() -> None:
         )
 
 
+def test_kfold_select_refuses_witness_mask_with_f1_holdout_score() -> None:
+    """witness_mask x holdout_score='f1' is a TYPED refusal, up front, before
+    any fold trains: the F1 fold-skip rule derives a fold's measurability
+    from the RAW held-out labels (one candidate-independent skip set), but a
+    witness mask can mask away a fold's only positives for some candidates,
+    so their per-fold F1 would be computed on a positive-free CERTAIN subset
+    -- exactly the undefined-recall case the skip rule exists to exclude.
+    Until a witness-aware measurability rule is designed, the combination
+    must fail loudly, not silently mis-score."""
+    from pyxlog.ilp.neural_credit import kfold_select
+
+    mask = torch.zeros((3, 2), dtype=torch.bool)
+    with pytest.raises(ValueError, match="witness_mask"):
+        kfold_select(
+            lambda: None, "W", [(0, 1), (1, 0), (2, 1)], [True, False, True],
+            lambda: None, None, {}, folds=2,
+            witness_mask=mask, holdout_score="f1",
+        )
+
+
+def test_kfold_select_witness_mask_with_accuracy_holdout_score_still_validates_clean() -> None:
+    """The refusal is scoped to the F1 axis ONLY: witness_mask with the
+    default/explicit 'accuracy' holdout_score must sail past the new guard
+    (this call fails LATER, inside the fold loop, for fixture reasons --
+    what matters here is that no witness_mask ValueError fires up front)."""
+    from pyxlog.ilp.neural_credit import kfold_select
+
+    mask = torch.zeros((3, 2), dtype=torch.bool)
+    try:
+        kfold_select(
+            lambda: None, "W", [(0, 1), (1, 0), (2, 1)], [True, False, True],
+            lambda: None, None, {}, folds=2,
+            witness_mask=mask, holdout_score="accuracy",
+        )
+    except ValueError as exc:
+        assert "witness_mask" not in str(exc)
+    except Exception:
+        pass  # downstream fixture failure, not the up-front guard
+
+
 def test_kfold_select_holdout_score_accuracy_default_is_byte_identical(monkeypatch) -> None:
     """holdout_score="accuracy" is the default; passing it explicitly must
     produce THE SAME HoldoutSelection as omitting the parameter entirely, on

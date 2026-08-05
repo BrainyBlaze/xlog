@@ -972,7 +972,16 @@ def kfold_select(prog_factory, mask_name, facts, is_positive, make_network,
       fold, not merely 0: such a fold is SKIPPED from that candidate's mean
       entirely, rather than diluting it with a substituted 0.0. If NO fold
       has a held-out positive at all, every candidate's F1 score is
-      reported as ``0.0`` (an empty mean is otherwise undefined)."""
+      reported as ``0.0`` (an empty mean is otherwise undefined).
+
+      ``"f1"`` REFUSES a ``witness_mask`` (typed ``ValueError``, up
+      front): the skip rule's rationale rests on fold measurability being
+      derived from the RAW labels, one skip set for every candidate -- a
+      witness mask can mask away a fold's only positives for some
+      candidates, whose F1 would then be computed on a positive-free
+      CERTAIN subset, the very case the skip rule exists to exclude.
+      ``witness_mask`` remains fully supported on the ``"accuracy"``
+      axis."""
     import torch
 
     if holdout_score not in ("accuracy", "f1"):
@@ -980,6 +989,19 @@ def kfold_select(prog_factory, mask_name, facts, is_positive, make_network,
             f"holdout_score must be 'accuracy' or 'f1' (got "
             f"{holdout_score!r}); kfold_select implements only these two "
             "per-fold metrics -- see this function's own docstring."
+        )
+    if witness_mask is not None and holdout_score == "f1":
+        raise ValueError(
+            "witness_mask together with holdout_score='f1' is not "
+            "supported: the F1 fold-skip rule derives a fold's "
+            "measurability from the RAW held-out labels (one "
+            "candidate-independent skip set -- see this function's own "
+            "docstring), but a witness mask can mask away a fold's only "
+            "positives for some candidates, whose per-fold F1 would then "
+            "be computed on a positive-free CERTAIN subset -- exactly the "
+            "undefined-recall case the skip rule exists to exclude. "
+            "Combining the two needs a witness-aware measurability rule "
+            "first; refusing loudly beats silently mis-scoring."
         )
     if tie_tolerance is not None and not (
         isinstance(tie_tolerance, (int, float)) and tie_tolerance > 0.0
