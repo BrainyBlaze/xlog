@@ -15,7 +15,21 @@ every number below was produced by a run whose full JSON output is in
 | Continuous narrative, train (`caviar-train.json`) | users.iit.demokritos.gr/~nkatz/oled/caviar-data.zip (the OLED paper's own data) | `5ba64bf80f135e5a874c3bac2fd0af73` |
 | Continuous narrative, test (`caviar-test.json`) | same archive | `08cba3f04c2f528356cd70dd23360d5b` |
 
-Hardware: NVIDIA A40 (RunPod), seed 7, k=4 holdout folds throughout.
+Hardware, per artifact (each result JSON self-reports its input paths,
+which is how the two environments are told apart):
+
+- **NVIDIA A40 (RunPod)** — the GPU runs: `caviar-s6-*` (section A),
+  `caviar-e3-*`/`caviar-e5-*` (sections B-D), and
+  `caviar-e12-neural-cv10.json` (section E.2). Their artifacts record
+  `/workspace/...` inputs.
+- **Windows dev box, CPU only** — the deterministic CPU runs:
+  `e9_permutation_null/*` (section D.1), `e10_cv/caviar-e10-cv10.json`
+  (section E), `e11_cv10_termination.json` (section E.1), and
+  `f_xml_scene_cv/*` (section G). Their artifacts record
+  `C:\Users\...` inputs. These runs are CPU-deterministic (see
+  section G), so the numbers do not depend on the host.
+
+Seed 7 and k=4 inner holdout folds throughout.
 
 **Continuous-narrative loader evidence.** `caviar_continuous.py`'s own
 module docstring documents, in prose, exactly how the annotation timestamp
