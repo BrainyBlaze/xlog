@@ -32,7 +32,7 @@ def test_python_package_installs_v080_async_streaming_wrappers() -> None:
         "iter_chunks",
         "iter_query_chunks",
         "progress_stats",
-        "_install_v080_runtime_api()",
+        "_install_runtime_api_extensions()",
     ]:
         assert needle in init_py
 
