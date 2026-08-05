@@ -498,6 +498,44 @@ pub struct Directives {
 }
 
 impl Directives {
+    /// Names of the pragmas explicitly set on this program, using the
+    /// source spelling (`#pragma <name> = ...`), in declaration-struct
+    /// order.
+    pub fn set_pragma_names(&self) -> Vec<&'static str> {
+        let mut names = Vec::new();
+        if self.prob_engine.is_some() {
+            names.push("prob_engine");
+        }
+        if self.prob_cache.is_some() {
+            names.push("prob_cache");
+        }
+        if self.prob_samples.is_some() {
+            names.push("prob_samples");
+        }
+        if self.prob_seed.is_some() {
+            names.push("prob_seed");
+        }
+        if self.prob_confidence.is_some() {
+            names.push("prob_confidence");
+        }
+        if self.prob_method.is_some() {
+            names.push("prob_method");
+        }
+        if self.prob_max_nonmonotone_iterations.is_some() {
+            names.push("prob_max_nonmonotone_iterations");
+        }
+        if self.max_recursion_depth.is_some() {
+            names.push("max_recursion_depth");
+        }
+        if self.epistemic_mode.is_some() {
+            names.push("epistemic_mode");
+        }
+        if self.magic_sets.is_some() {
+            names.push("magic_sets");
+        }
+        names
+    }
+
     /// Return the configured prob engine, defaulting to ExactDdnnf.
     pub fn prob_engine_or_default(&self) -> ProbEngine {
         self.prob_engine.unwrap_or(ProbEngine::ExactDdnnf)
@@ -900,6 +938,19 @@ impl Program {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_directives_set_pragma_names() {
+        let mut directives = Directives::default();
+        assert!(directives.set_pragma_names().is_empty());
+
+        directives.prob_seed = Some(7);
+        directives.magic_sets = Some(MagicSetsMode::Auto);
+        assert_eq!(
+            directives.set_pragma_names(),
+            vec!["prob_seed", "magic_sets"]
+        );
+    }
 
     #[test]
     fn test_term_variable() {

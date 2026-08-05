@@ -7,6 +7,34 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
+/// A `#pragma` directive declared in an imported module.
+///
+/// Pragmas are entry-file-scoped: a directive declared in an imported
+/// module never affects compilation. These records exist so callers can
+/// surface the dropped pragmas as warnings instead of ignoring them
+/// silently.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct IgnoredImportPragma {
+    /// Module path string (e.g. `corpus/yoreh_deah/base`).
+    pub module: String,
+    /// Pragma key as written in source (e.g. `magic_sets`).
+    pub pragma: &'static str,
+}
+
+impl std::fmt::Display for IgnoredImportPragma {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        writeln!(
+            f,
+            "warning[W0510]: `#pragma {}` in imported module `{}` is ignored",
+            self.pragma, self.module
+        )?;
+        write!(
+            f,
+            "  = note: pragmas apply only when declared in the entry file"
+        )
+    }
+}
+
 /// Resolves and loads modules
 pub struct ModuleResolver {
     /// Directories to search for modules
@@ -15,6 +43,10 @@ pub struct ModuleResolver {
     loaded: HashMap<String, LoadedModule>,
     /// Currently loading (for cycle detection)
     loading: Vec<ModulePath>,
+    /// Path key of the entry module, when known. The entry module's own
+    /// pragmas are authoritative and excluded from the ignored-pragma
+    /// listing.
+    entry_module: Option<String>,
 }
 
 impl ModuleResolver {
@@ -24,7 +56,39 @@ impl ModuleResolver {
             search_paths,
             loaded: HashMap::new(),
             loading: Vec::new(),
+            entry_module: None,
         }
+    }
+
+    /// Record which loaded module is the compilation entry point.
+    ///
+    /// The entry module's pragmas are the ones the compiler honors;
+    /// [`Self::ignored_import_pragmas`] skips it.
+    pub fn mark_entry_module(&mut self, path_key: &str) {
+        self.entry_module = Some(path_key.to_string());
+    }
+
+    /// List `#pragma` directives declared in imported (non-entry) modules.
+    ///
+    /// Pragmas are entry-file-scoped, so anything an imported module
+    /// declares is dropped at merge time. Callers surface these records as
+    /// warnings so the scoping is never silent. The result is sorted by
+    /// module path, then pragma name, for deterministic output.
+    pub fn ignored_import_pragmas(&self) -> Vec<IgnoredImportPragma> {
+        let mut ignored: Vec<IgnoredImportPragma> = Vec::new();
+        for (path_key, module) in &self.loaded {
+            if self.entry_module.as_deref() == Some(path_key.as_str()) {
+                continue;
+            }
+            for pragma in module.program.directives.set_pragma_names() {
+                ignored.push(IgnoredImportPragma {
+                    module: path_key.clone(),
+                    pragma,
+                });
+            }
+        }
+        ignored.sort();
+        ignored
     }
 
     /// Find the file for a module path
@@ -497,5 +561,85 @@ mod tests {
         // Both predicate and function exports should be present
         assert!(module.exports.contains("value"));
         assert!(module.function_exports.contains("double"));
+    }
+
+    #[test]
+    fn test_ignored_import_pragmas_lists_imported_module_pragmas_only() {
+        let tmp = TempDir::new().unwrap();
+        create_test_module(
+            tmp.path(),
+            "entry",
+            r#"
+            #pragma magic_sets = auto
+            use lib.
+            result(1).
+        "#,
+        );
+        create_test_module(
+            tmp.path(),
+            "lib",
+            r#"
+            #pragma magic_sets = auto
+            #pragma prob_seed = 7
+            helper(1).
+        "#,
+        );
+
+        let mut resolver = ModuleResolver::new(vec![]);
+        resolver
+            .load_module(tmp.path(), &["entry".into()])
+            .expect("load entry");
+        resolver.mark_entry_module("entry");
+
+        // The entry file's own pragma is authoritative and excluded; the
+        // imported module's pragmas are listed sorted by module then name.
+        let ignored = resolver.ignored_import_pragmas();
+        assert_eq!(
+            ignored,
+            vec![
+                IgnoredImportPragma {
+                    module: "lib".to_string(),
+                    pragma: "magic_sets",
+                },
+                IgnoredImportPragma {
+                    module: "lib".to_string(),
+                    pragma: "prob_seed",
+                },
+            ]
+        );
+
+        let rendered = ignored[0].to_string();
+        assert!(rendered.contains("warning[W0510]"), "{rendered}");
+        assert!(
+            rendered.contains("`#pragma magic_sets` in imported module `lib` is ignored"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("pragmas apply only when declared in the entry file"),
+            "{rendered}"
+        );
+    }
+
+    #[test]
+    fn test_ignored_import_pragmas_empty_without_module_pragmas() {
+        let tmp = TempDir::new().unwrap();
+        create_test_module(
+            tmp.path(),
+            "entry",
+            r#"
+            #pragma magic_sets = on
+            use quiet.
+            result(1).
+        "#,
+        );
+        create_test_module(tmp.path(), "quiet", "helper(1).");
+
+        let mut resolver = ModuleResolver::new(vec![]);
+        resolver
+            .load_module(tmp.path(), &["entry".into()])
+            .expect("load entry");
+        resolver.mark_entry_module("entry");
+
+        assert!(resolver.ignored_import_pragmas().is_empty());
     }
 }

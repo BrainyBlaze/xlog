@@ -576,6 +576,7 @@ pub fn load_modules(
 
     // Load entry module (recursively loads dependencies)
     resolver.load_module(base_dir, &[module_name.to_string()])?;
+    resolver.mark_entry_module(module_name);
 
     Ok(resolver)
 }

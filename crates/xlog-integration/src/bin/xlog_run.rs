@@ -396,6 +396,11 @@ fn main() -> Result<()> {
     if !program.imports.is_empty() {
         let resolver = load_modules(entry_path, module_search_paths(entry_path))
             .map_err(|e| XlogError::Compilation(format!("Module resolution failed: {}", e)))?;
+        // Pragmas are entry-file-scoped; surface anything an imported
+        // module declared instead of dropping it silently (issue #184).
+        for warning in resolver.ignored_import_pragmas() {
+            eprintln!("{}", warning);
+        }
         program = resolver
             .merge_imports(program)
             .map_err(|e| XlogError::Compilation(format!("Module merge failed: {}", e)))?;

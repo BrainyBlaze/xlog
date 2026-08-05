@@ -385,6 +385,11 @@ fn parse_program_with_modules(source_path: &Path, source: &str) -> Result<Progra
     }
     let resolver = load_modules(source_path, Vec::new())
         .map_err(|err| XlogError::Compilation(format!("Module resolution failed: {err}")))?;
+    // Pragmas are entry-file-scoped; surface anything an imported module
+    // declared instead of dropping it silently (issue #184).
+    for warning in resolver.ignored_import_pragmas() {
+        eprintln!("{warning}");
+    }
     resolver
         .merge_imports(program)
         .map_err(|err| XlogError::Compilation(format!("Module merge failed: {err}")))
