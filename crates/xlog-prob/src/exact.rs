@@ -266,6 +266,36 @@ impl GpuCountLiftState {
     }
 }
 
+/// What a CNF variable stands for, in the order of the gradient vectors.
+#[derive(Debug, Clone)]
+pub enum ProbVarInfo {
+    /// A plain probabilistic fact: one atom, one probability. `prob` is
+    /// exactly the Bernoulli weight `w_true` stored in the GPU weight table
+    /// for this variable, so `p*(1-p)` is the correct Jacobian for
+    /// `grad_true`/`grad_false` at this slot.
+    Fact { atom: GroundAtom, prob: f64 },
+    /// One Bernoulli decision of an annotated disjunction's chain.
+    Choice {
+        /// Declared heads of the whole disjunction with their *marginal*
+        /// probabilities (context/display only — see `prob` below for the
+        /// Jacobian-correct parameter of this specific chain variable).
+        choices: Arc<[(GroundAtom, f64)]>,
+        /// Index of this chain variable's head within `choices`.
+        choice_index: usize,
+        /// The *conditional* Bernoulli parameter actually assigned to this
+        /// CNF variable's weight (`p_i / (1 - sum of earlier heads'
+        /// probabilities)`), i.e. the same value stored in
+        /// `provenance::Provenance::choice_probs` and used to build the GPU
+        /// weight table for this variable. `prob*(1-prob)` — using *this*
+        /// `prob`, not `choices[choice_index].1` — is the correct Jacobian
+        /// for `grad_true`/`grad_false` at this slot; the two are generally
+        /// different values.
+        prob: f64,
+    },
+    /// A variable introduced by compilation that is not a source of randomness.
+    Other,
+}
+
 #[derive(Clone)]
 pub struct ExactDdnnfProgram {
     gpu: Option<Arc<GpuExactState>>,
@@ -281,6 +311,24 @@ pub struct ExactDdnnfProgram {
     gpu_config: GpuConfig,
     /// Latest circuit compilation profile (populated on cache miss when profiling).
     last_compile_profile: Option<CircuitCompileProfile>,
+    /// Sparse storage for what each CNF variable stands for: only variables that
+    /// were actually assigned to a probabilistic fact or annotated-disjunction
+    /// choice are present, as `(var, info)` pairs sorted by `var`. The sort is
+    /// by `var` (not construction order) so entries are laid out in the same
+    /// order `prob_var_map()` materializes them in, which makes the vector
+    /// itself directly inspectable/debuggable as a CNF-var-indexed sequence.
+    /// `var` may repeat (a leaf and a choice can be assigned the same CNF
+    /// variable in principle); when it does, the *last* matching entry wins
+    /// during materialization (see the ordering note on the `sort_by_key` call
+    /// in `compile_provenance_with_gpu`, which documents which entry that is).
+    /// CNF variables are 1-indexed. Call `prob_var_map()` to materialize the
+    /// dense, `grad_true`/`grad_false`-aligned view on demand. Populated only when
+    /// compiled with the "host-io" feature (empty otherwise); also empty when
+    /// compiled through the GPU count-lift fast path, since that path never
+    /// builds a CNF encoding (see `uses_gpu_native_count_lift()` and
+    /// `prob_var_map()` below — an empty map there does not mean the program
+    /// has no probabilistic facts).
+    prob_var_entries: Vec<(u32, ProbVarInfo)>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -326,6 +374,60 @@ impl ExactDdnnfProgram {
     /// Get the latest circuit compilation profile (populated when XLOG_WARMUP_PROFILE=1).
     pub fn last_compile_profile(&self) -> Option<&CircuitCompileProfile> {
         self.last_compile_profile.as_ref()
+    }
+
+    /// Materializes a dense vector describing what each CNF variable stands for.
+    ///
+    /// The returned vector's length is the CNF encoder's variable *capacity*
+    /// (`3 * number of PIR nodes` at compile time, see `compilation/gpu_cnf.rs`)
+    /// — **not** the number of CNF variables actually in use, and not the
+    /// number of random variables in the program. Slot `v` describes CNF
+    /// variable `v` directly when `v` was assigned; slot `0` is always unused
+    /// padding (CNF variables are 1-indexed), and so is any other slot with no
+    /// variable assigned to it — those padding slots are indistinguishable
+    /// from `ProbVarInfo::Other`. Do not treat `len()` of the result as a
+    /// variable count or a random-variable count; use
+    /// [`Self::random_var_indices`] for that ([`Self::num_vars`] returns this
+    /// same capacity, not a count, so it is not a substitute here).
+    ///
+    /// What *is* guaranteed is alignment with `evaluate_gpu_with_grads`'s
+    /// `grad_true`/`grad_false` vectors, which are allocated with the same
+    /// capacity: `prob_var_map()[v]` and `grad_true[v]` name and value the
+    /// same variable `v`.
+    ///
+    /// Rebuilds the dense vector on every call from the sparse
+    /// `prob_var_entries` storage that actually lives for the lifetime of the
+    /// program.
+    ///
+    /// On the GPU count-lift fast path (count aggregates without evidence or
+    /// disjunctions — see [`Self::uses_gpu_native_count_lift`]), no CNF
+    /// encoding is ever built, so this returns an **empty** vector even for
+    /// programs that do have probabilistic facts. Callers that need to
+    /// enumerate a program's probabilistic facts must check
+    /// `uses_gpu_native_count_lift()` first and treat an empty map from that
+    /// path as "mapping unavailable", not as "no random variables".
+    pub fn prob_var_map(&self) -> Vec<ProbVarInfo> {
+        let capacity = if self.max_var == 0 {
+            0
+        } else {
+            self.max_var as usize + 1
+        };
+        let mut dense = vec![ProbVarInfo::Other; capacity];
+        for (var, info) in &self.prob_var_entries {
+            debug_assert!(
+                (*var as usize) < capacity,
+                "prob_var_entries contains CNF var {} but capacity is only {} \
+                 (max_var {}); entries must never exceed the encoder's own \
+                 variable capacity",
+                var,
+                capacity,
+                self.max_var
+            );
+            if let Some(slot) = dense.get_mut(*var as usize) {
+                *slot = info.clone();
+            }
+        }
+        dense
     }
 
     #[doc(hidden)]
@@ -402,6 +504,12 @@ impl ExactDdnnfProgram {
         })
     }
 
+    /// Returns the CNF encoder's variable *capacity* (`max_var + 1`), i.e. the
+    /// same quantity as `prob_var_map().len()` — **not** the number of CNF
+    /// variables actually assigned, and not the number of random variables in
+    /// the program (most CNF variables are auxiliary Tseitin variables with
+    /// no probabilistic meaning). Use [`Self::random_var_indices`] to count or
+    /// enumerate random variables instead.
     pub fn num_vars(&self) -> usize {
         if self.max_var == 0 {
             0
@@ -1466,11 +1574,18 @@ impl ExactDdnnfProgram {
                 origin,
                 gpu_config: config,
                 last_compile_profile: None,
+                prob_var_entries: Vec::new(),
             });
         }
 
         let count_lift_gpu = try_build_count_lift_gpu_state(&provenance, &queries, config)?;
         if let Some(count_lift_gpu) = count_lift_gpu {
+            // No CNF encoding is built on this path (count aggregates are
+            // evaluated by a dedicated GPU kernel instead), so there is no
+            // leaf_var/choice_var table to derive a variable map from. Leave
+            // `prob_var_entries` empty and `max_var` at 0 — callers must use
+            // `uses_gpu_native_count_lift()` to tell this apart from "no random
+            // variables in the program" (see the doc on `prob_var_map()`).
             return Ok(Self {
                 gpu: None,
                 count_lift_gpu: Some(count_lift_gpu),
@@ -1480,6 +1595,7 @@ impl ExactDdnnfProgram {
                 origin,
                 gpu_config: config,
                 last_compile_profile: None,
+                prob_var_entries: Vec::new(),
             });
         }
 
@@ -1500,6 +1616,105 @@ impl ExactDdnnfProgram {
                 encoding.cnf.var_cap, encoding.vars.max_var
             )));
         }
+
+        // Which probabilistic fact (or choice) each CNF variable stands for, stored
+        // sparsely as `(var, info)` pairs (see the doc on `prob_var_entries`).
+        // `leaf_var`/`choice_var` are GPU-resident dense tables keyed by
+        // LeafId/ChoiceVarId; a value of 0 means the leaf/choice was not reachable
+        // from the compiled roots.
+        #[cfg(feature = "host-io")]
+        let prob_var_entries = {
+            let mut leaf_var_host = vec![0u32; encoding.vars.leaf_var.len()];
+            provider
+                .device()
+                .inner()
+                .dtoh_sync_copy_into(&encoding.vars.leaf_var, &mut leaf_var_host)
+                .map_err(|e| XlogError::Kernel(format!("Failed to read leaf_var table: {}", e)))?;
+            let mut choice_var_host = vec![0u32; encoding.vars.choice_var.len()];
+            provider
+                .device()
+                .inner()
+                .dtoh_sync_copy_into(&encoding.vars.choice_var, &mut choice_var_host)
+                .map_err(|e| {
+                    XlogError::Kernel(format!("Failed to read choice_var table: {}", e))
+                })?;
+
+            let mut entries: Vec<(u32, ProbVarInfo)> = Vec::new();
+            for (leaf_idx, &var) in leaf_var_host.iter().enumerate() {
+                if var == 0 {
+                    continue;
+                }
+                let leaf = crate::pir::LeafId::new(leaf_idx as u32);
+                if let (Some(atom), Some(prob)) = (
+                    provenance.leaf_atoms.get(&leaf),
+                    provenance.leaf_probs.get(&leaf),
+                ) {
+                    entries.push((
+                        var,
+                        ProbVarInfo::Fact {
+                            atom: atom.clone(),
+                            prob: *prob,
+                        },
+                    ));
+                }
+            }
+            for (choice_idx, &var) in choice_var_host.iter().enumerate() {
+                if var == 0 {
+                    continue;
+                }
+                let choice = crate::pir::ChoiceVarId::new(choice_idx as u32);
+                // The map must carry the *conditional* Bernoulli parameter that was
+                // actually assigned to this CNF variable's weight (`choice_probs`),
+                // not the disjunction's declared marginal probabilities
+                // (`ChoiceSource::choices`), which only serve as display context.
+                // See ProbVarInfo::Choice::prob's doc for why the two differ.
+                match (
+                    provenance.choice_sources.get(&choice),
+                    provenance.choice_probs.get(&choice),
+                ) {
+                    (Some(source), Some(&(cond_true, _cond_false))) => {
+                        entries.push((
+                            var,
+                            ProbVarInfo::Choice {
+                                choices: source.choices.clone(),
+                                choice_index: source.choice_index,
+                                prob: cond_true,
+                            },
+                        ));
+                    }
+                    _ => {
+                        // `choice_sources` and `choice_probs` are populated in
+                        // lock-step in `provenance.rs` (see the choice-handling
+                        // arm around lines 708-717) and remapped in lock-step in
+                        // `decision_order.rs` (lines 115-123); a `choice_var_host`
+                        // entry pointing at a `ChoiceVarId` missing from either map
+                        // means that invariant broke upstream. Silently falling
+                        // back to `ProbVarInfo::Other` would make a real
+                        // compilation bug look like "this CNF variable is just an
+                        // auxiliary Tseitin variable" to every caller of
+                        // `prob_var_map()`, so fail loudly instead.
+                        return Err(XlogError::Compilation(format!(
+                            "Exact inference error: choice_sources/choice_probs are out of \
+                             sync for {:?} (CNF var {var}); expected both maps to contain \
+                             this ChoiceVarId",
+                            choice
+                        )));
+                    }
+                }
+            }
+            // `entries` is built leaf-first, then choice-second (the two loops
+            // above), so on a `var` collision the leaf entry comes first and the
+            // choice entry comes second. `sort_by_key` is STABLE, so it preserves
+            // that relative order; `prob_var_map()`'s materialization loop then
+            // overwrites earlier entries with later ones for the same slot
+            // (last-write-wins), so choice wins over leaf on collision. Do not
+            // change this to `sort_unstable_by_key`: it makes no such ordering
+            // guarantee and would silently flip which entry wins.
+            entries.sort_by_key(|(var, _)| *var);
+            entries
+        };
+        #[cfg(not(feature = "host-io"))]
+        let prob_var_entries: Vec<(u32, ProbVarInfo)> = Vec::new();
 
         let (leaf_probs_host, choice_true_host, choice_false_host) =
             build_weight_sources(&provenance)?;
@@ -1617,6 +1832,7 @@ impl ExactDdnnfProgram {
             origin,
             gpu_config: config,
             last_compile_profile: compile_profile,
+            prob_var_entries,
         })
     }
 

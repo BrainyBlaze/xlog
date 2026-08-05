@@ -2,6 +2,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::hash::{Hash, Hasher};
+use std::sync::Arc;
 
 use xlog_core::{Result, XlogError};
 use xlog_logic::ast::{
@@ -60,9 +61,12 @@ impl GroundAtom {
 /// Metadata for a single Bernoulli decision stage in an annotated disjunction.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ChoiceSource {
-    /// Explicit heads of the annotated disjunction, paired with probabilities.
-    /// Does not include the synthetic implicit "none" branch.
-    pub choices: Vec<(GroundAtom, f64)>,
+    /// Explicit heads of the annotated disjunction, paired with their declared
+    /// (marginal) probabilities. Does not include the synthetic implicit "none"
+    /// branch. Shared (`Arc`) across every Bernoulli chain variable of the same
+    /// disjunction so that a k-head disjunction pays for one k-length vector,
+    /// not O(k) independent clones of it.
+    pub choices: Arc<[(GroundAtom, f64)]>,
     /// Position of this ChoiceVarId in the m-1 Bernoulli decision chain.
     pub choice_index: usize,
     /// Enclosing annotated-disjunction identity. `None` in v1.
@@ -651,14 +655,18 @@ fn compile_annotated_disjunction(
         let _ = atom_key_from_ground_atom(&pf.atom)?;
     }
 
-    let explicit_choices: Vec<(GroundAtom, f64)> = ad
+    // Built once per disjunction and shared (Arc) across all m-1 chain variables
+    // below, instead of being deep-cloned per variable (which would be O(k^2)
+    // GroundAtom clones for a k-head disjunction).
+    let explicit_choices: Arc<[(GroundAtom, f64)]> = ad
         .choices
         .iter()
         .map(|pf| {
             let atom = atom_key_from_ground_atom(&pf.atom).unwrap();
             (atom, pf.prob)
         })
-        .collect();
+        .collect::<Vec<_>>()
+        .into();
 
     let mut probs: Vec<f64> = ad.choices.iter().map(|pf| pf.prob).collect();
     let sum: f64 = probs.iter().copied().sum();

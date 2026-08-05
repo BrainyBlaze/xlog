@@ -1069,6 +1069,18 @@ result.atoms         # list[str]: query atoms (stringified)
 result.prob          # PyCapsule: DLPack f64 vector of probabilities (len = num_queries)
 result.log_prob      # PyCapsule: DLPack f64 vector of log-probabilities (len = num_queries)
 result.num_vars      # int: number of CNF variables in the compiled program
+result.log_z_e       # Optional[float]: exact log-evidence log Z_E (None for Monte Carlo)
+
+# Exact-only, independent of return_grads: what each CNF variable stands for.
+# Length equals result.num_vars, i.e. the encoder's variable capacity, so entry i lines up
+# with grad_true/grad_false position i when return_grads=True. Index 0 and every slot that
+# holds no assigned variable are padding ("other"); the length is NOT a count of random vars.
+# "choice" entries carry both "probs" (the disjunction's declared, marginal probabilities —
+# display context only) and "prob" (the conditional Bernoulli parameter actually assigned to
+# this variable's weight; use prob*(1-prob), not probs[choice_index]*(1-probs[choice_index]),
+# as the grad_true/grad_false Jacobian). Raises ValueError for MC programs and for exact
+# programs compiled through the GPU count-lift fast path (no CNF encoding is built there).
+program.prob_var_map() # list[dict]: {"kind": "fact"|"choice"|"other", ...} per CNF variable
 
 # Exact-only (when return_grads=True):
 result.grad_true     # Optional[list[PyCapsule]]: per-query DLPack f64 vector (len = num_vars)

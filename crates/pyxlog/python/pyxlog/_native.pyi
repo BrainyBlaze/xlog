@@ -309,6 +309,45 @@ class CompiledProgram:
         """
         ...
 
+    def prob_var_map(self) -> list[dict]:
+        """Which probabilistic fact each CNF variable stands for.
+
+        The returned list's length is the CNF encoder's variable *capacity*,
+        not the number of CNF variables in use and not the number of random
+        variables in the program — a real fraction of entries are
+        ``{"kind": "other"}`` padding (do not use ``len()`` of the result as a
+        variable count). Entry ``i`` describes CNF variable ``i`` — the same
+        position ``i`` that the ``grad_true`` / ``grad_false`` vectors of
+        ``evaluate(return_grads=True)`` use (index ``0`` is unused padding,
+        since CNF variables are 1-indexed). Each entry is one of:
+
+        - ``{"kind": "fact", "atom": str, "prob": float}`` for a plain
+          probabilistic fact. ``prob`` is the Bernoulli weight actually
+          assigned to this CNF variable, so ``prob * (1 - prob)`` is the
+          correct Jacobian to convert ``grad_true`` / ``grad_false`` at this
+          position into a derivative with respect to ``prob``.
+        - ``{"kind": "choice", "atoms": list[str], "probs": list[float],
+          "choice_index": int, "prob": float}`` for one Bernoulli decision of
+          an annotated disjunction's chain. ``atoms`` / ``probs`` are the
+          disjunction's *declared, marginal* probabilities (display context
+          only). ``prob`` is the *conditional* Bernoulli parameter actually
+          assigned to this CNF variable's weight; use
+          ``prob * (1 - prob)`` — not
+          ``probs[choice_index] * (1 - probs[choice_index])`` — as the
+          Jacobian for ``grad_true`` / ``grad_false`` at this position.
+        - ``{"kind": "other"}`` for a variable introduced by compilation that
+          is not a source of randomness (this also covers unused capacity
+          padding slots — see above; the two are indistinguishable here).
+
+        Only available for the exact engine; raises ``ValueError`` for
+        Monte Carlo programs, and also for exact programs compiled through
+        the GPU count-lift fast path (count aggregates without evidence or
+        disjunctions), since that path never builds a CNF encoding and has
+        no variable map to report — this does not mean the program has no
+        probabilistic facts.
+        """
+        ...
+
     def evaluate_device(
         self,
         samples: Optional[int] = None,
@@ -661,6 +700,8 @@ class EvalResult:
     """DLPack f64 tensor of per-query log-probabilities."""
     num_vars: int
     """Number of probabilistic variables in the compiled circuit."""
+    log_z_e: Optional[float]
+    """Exact log-evidence log Z_E (natural log). None for Monte Carlo results."""
     grad_true: Optional[list[Any]]
     """Per-query gradients for the true label (exact engine, return_grads=True)."""
     grad_false: Optional[list[Any]]

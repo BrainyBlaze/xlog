@@ -12,6 +12,8 @@ use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 
+#[cfg(feature = "host-io")]
+use xlog_core::symbol;
 use xlog_core::{ScalarType, Schema};
 use xlog_logic::ast::Term;
 use xlog_prob::exact::ExactDdnnfProgram;
@@ -184,7 +186,9 @@ fn atom_to_string(atom: &xlog_prob::provenance::GroundAtom) -> String {
         match arg {
             Value::I64(v) => s.push_str(&v.to_string()),
             Value::F64(bits) => s.push_str(&f64::from_bits(*bits).to_string()),
-            Value::Symbol(sym) => s.push_str(&format!("sym#{}", sym)),
+            Value::Symbol(sym) => {
+                s.push_str(&symbol::resolve_checked(*sym).unwrap_or_else(|| format!("sym#{}", sym)))
+            }
             Value::String(v) => s.push_str(v),
         }
     }
@@ -289,6 +293,7 @@ impl CompiledProgram {
         &self,
         py: Python<'_>,
         query_probs: Vec<QueryProbability>,
+        log_z_e: f64,
     ) -> PyResult<EvalResult> {
         let mut atoms: Vec<String> = Vec::with_capacity(query_probs.len());
         let mut probs: Vec<f64> = Vec::with_capacity(query_probs.len());
@@ -326,6 +331,7 @@ impl CompiledProgram {
             prob: dlpack_capsule_from_tensor(py, prob_tensor)?,
             log_prob: dlpack_capsule_from_tensor(py, log_prob_tensor)?,
             num_vars: self.program.num_vars(),
+            log_z_e: Some(log_z_e),
             grad_true: None,
             grad_false: None,
             approx: false,
@@ -361,6 +367,7 @@ impl CompiledProgram {
         let schema = Schema::new(vec![("col0".to_string(), ScalarType::F64)]);
 
         let num_vars = self.program.num_vars();
+        let log_z_e = result.log_z_e;
         for q in result.query_grads {
             atoms.push(atom_to_string(&q.atom));
             probs.push(q.prob);
@@ -415,6 +422,7 @@ impl CompiledProgram {
             prob: dlpack_capsule_from_tensor(py, prob_tensor)?,
             log_prob: dlpack_capsule_from_tensor(py, log_prob_tensor)?,
             num_vars,
+            log_z_e: Some(log_z_e),
             grad_true: Some(grad_true_caps),
             grad_false: Some(grad_false_caps),
             approx: false,
@@ -509,6 +517,7 @@ impl CompiledProgram {
             prob: dlpack_capsule_from_tensor(py, prob_tensor)?,
             log_prob: dlpack_capsule_from_tensor(py, log_prob_tensor)?,
             num_vars: self.program.num_vars(),
+            log_z_e: None,
             grad_true: None,
             grad_false: None,
             approx: true,
@@ -568,7 +577,7 @@ impl CompiledProgram {
                         self.pack_result_with_grads(_py, result)
                     } else {
                         let result = _program.evaluate().map_err(types::xlog_err)?;
-                        self.pack_result_probs(_py, result.query_probs)
+                        self.pack_result_probs(_py, result.query_probs, result.log_z_e)
                     }
                 }
                 #[cfg(not(feature = "host-io"))]
@@ -605,6 +614,108 @@ impl CompiledProgram {
                     Err(types::host_io_disabled_pyerr())
                 }
             }
+        }
+    }
+
+    /// Which probabilistic fact each CNF variable stands for.
+    ///
+    /// The returned list's length is the CNF encoder's variable *capacity*,
+    /// not the number of CNF variables in use and not the number of random
+    /// variables in the program — a real fraction of entries are
+    /// `{"kind": "other"}` padding (do not use `len()` of the result as a
+    /// variable count). Entry `i` describes CNF variable `i` — the same
+    /// position `i` that the `grad_true` / `grad_false` vectors of
+    /// `evaluate(return_grads=True)` use (index `0` is unused padding, since
+    /// CNF variables are 1-indexed).
+    ///
+    /// For a `"choice"` entry (one Bernoulli decision of an annotated
+    /// disjunction's chain), `probs[choice_index]` is the disjunction's
+    /// *declared, marginal* probability and is display context only; `prob`
+    /// is the *conditional* Bernoulli parameter actually assigned to this
+    /// variable's weight, and `prob * (1 - prob)` — not
+    /// `probs[choice_index] * (1 - probs[choice_index])` — is the correct
+    /// Jacobian for `grad_true` / `grad_false` at this position.
+    ///
+    /// Raises `ValueError` for Monte Carlo programs, and for exact programs
+    /// compiled through the GPU count-lift fast path (count aggregates
+    /// without evidence or annotated disjunctions), since that path never
+    /// builds a CNF encoding and therefore has no variable map to report —
+    /// this is *not* the same as the program having no probabilistic facts.
+    pub fn prob_var_map(&self, py: Python<'_>) -> PyResult<Vec<PyObject>> {
+        #[cfg(feature = "host-io")]
+        {
+            use xlog_prob::exact::ProbVarInfo;
+
+            let entries = match &self.program {
+                CompiledProbProgram::Exact(p) => {
+                    if p.uses_gpu_native_count_lift() {
+                        return Err(PyValueError::new_err(
+                            "prob_var_map is unavailable: this program was compiled through \
+                             the GPU count-lift fast path (a count aggregate without evidence \
+                             or annotated disjunctions), which evaluates the aggregate with a \
+                             dedicated kernel and never builds a CNF encoding. There is no \
+                             CNF-variable-to-fact map to report. This does not mean the \
+                             program has no probabilistic facts.",
+                        ));
+                    }
+                    p.prob_var_map()
+                }
+                CompiledProbProgram::Mc(_) => {
+                    return Err(PyValueError::new_err(
+                        "prob_var_map is only available for the exact engine",
+                    ))
+                }
+            };
+
+            let mut out: Vec<PyObject> = Vec::with_capacity(entries.len());
+            for entry in entries {
+                let d = PyDict::new(py);
+                match entry {
+                    ProbVarInfo::Fact { atom, prob } => {
+                        d.set_item("kind", "fact")?;
+                        d.set_item("atom", atom_to_string(&atom))?;
+                        d.set_item("prob", prob)?;
+                    }
+                    ProbVarInfo::Choice {
+                        choices,
+                        choice_index,
+                        prob,
+                    } => {
+                        d.set_item("kind", "choice")?;
+                        d.set_item(
+                            "atoms",
+                            choices
+                                .iter()
+                                .map(|(a, _)| atom_to_string(a))
+                                .collect::<Vec<_>>(),
+                        )?;
+                        // Declared, marginal probabilities of the whole disjunction
+                        // (display context only — probs[choice_index] is NOT this
+                        // variable's own Bernoulli parameter; see "prob" below).
+                        d.set_item(
+                            "probs",
+                            choices.iter().map(|(_, p)| *p).collect::<Vec<f64>>(),
+                        )?;
+                        d.set_item("choice_index", choice_index)?;
+                        // This chain variable's own (conditional) Bernoulli parameter,
+                        // i.e. the weight actually used by the GPU circuit for this CNF
+                        // variable. Use prob * (1 - prob), not
+                        // probs[choice_index] * (1 - probs[choice_index]), as the
+                        // Jacobian for grad_true/grad_false at this position.
+                        d.set_item("prob", prob)?;
+                    }
+                    ProbVarInfo::Other => {
+                        d.set_item("kind", "other")?;
+                    }
+                }
+                out.push(d.into());
+            }
+            Ok(out)
+        }
+        #[cfg(not(feature = "host-io"))]
+        {
+            let _ = py;
+            Err(types::host_io_disabled_pyerr())
         }
     }
 
