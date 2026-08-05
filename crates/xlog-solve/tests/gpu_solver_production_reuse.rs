@@ -389,7 +389,7 @@ fn production_solver_metric_gate_rejects_impossible_maxsat_accounting() {
     let err = data_plane_bytes_without_calls
         .require_production_metric_eligibility()
         .expect_err("encoded MaxSAT data-plane H2D bytes require matching H2D calls");
-    assert!(format!("{err}").contains("CNF upload bytes require matching H2D calls"));
+    assert!(format!("{err}").contains("CNF upload bytes require matching host-to-device calls"));
 
     let launch_metadata_bytes_without_calls = GpuSolverProductionTrace {
         gpu_maxsat_candidate_cnf_launch_metadata_htod_bytes: 64,
@@ -398,7 +398,7 @@ fn production_solver_metric_gate_rejects_impossible_maxsat_accounting() {
     let err = launch_metadata_bytes_without_calls
         .require_production_metric_eligibility()
         .expect_err("encoded MaxSAT launch-metadata H2D bytes require matching H2D calls");
-    assert!(format!("{err}").contains("CNF upload bytes require matching H2D calls"));
+    assert!(format!("{err}").contains("CNF upload bytes require matching host-to-device calls"));
 
     let data_plane_calls_without_bytes = GpuSolverProductionTrace {
         gpu_maxsat_candidate_cnf_data_plane_htod_calls: 1,
@@ -407,7 +407,7 @@ fn production_solver_metric_gate_rejects_impossible_maxsat_accounting() {
     let err = data_plane_calls_without_bytes
         .require_production_metric_eligibility()
         .expect_err("encoded MaxSAT data-plane H2D calls require matching H2D bytes");
-    assert!(format!("{err}").contains("CNF upload calls require matching H2D bytes"));
+    assert!(format!("{err}").contains("CNF upload calls require matching host-to-device bytes"));
 
     let launch_metadata_calls_without_bytes = GpuSolverProductionTrace {
         gpu_maxsat_candidate_cnf_launch_metadata_htod_calls: 1,
@@ -416,7 +416,7 @@ fn production_solver_metric_gate_rejects_impossible_maxsat_accounting() {
     let err = launch_metadata_calls_without_bytes
         .require_production_metric_eligibility()
         .expect_err("encoded MaxSAT launch-metadata H2D calls require matching H2D bytes");
-    assert!(format!("{err}").contains("CNF upload calls require matching H2D bytes"));
+    assert!(format!("{err}").contains("CNF upload calls require matching host-to-device bytes"));
 }
 
 #[test]
