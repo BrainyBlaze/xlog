@@ -199,13 +199,16 @@ comma-separated rows. `arrow` writes one Arrow IPC file per query into `--output
 
 ## Environment variables
 
-The CLI itself reads no environment variables. Two variables affect the layers beneath
-it:
+The CLI itself reads no environment variables. The commonly relevant variables
+affecting the layers beneath it are listed below; see
+[Environment variables](/reference/environment-variables) for the full runtime
+index.
 
 | Variable | Read by | Effect |
 |---|---|---|
 | `XLOG_CUBIN_DIR` | kernel loader | Directory of pre-built CUDA artifacts, preferred over the embedded PTX (portable GPU assembly). |
 | `CUDA_VISIBLE_DEVICES` | CUDA driver | Restricts which GPUs are visible. |
+| `XLOG_UNION_CHUNK_BYTES` | runtime | Byte budget per chunk for the multiway union that merges same-head rule outputs. Default 1 GiB. |
 
 ## Exit codes
 

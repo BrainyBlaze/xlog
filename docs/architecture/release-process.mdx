@@ -131,6 +131,9 @@ gloss follows each internal name:
   ("Stage B" is an internal phase label);
 - grouped forward/backward neural-symbolic training — training that mixes neural
   and symbolic components, processed in grouped forward and backward passes;
+- batched multiway unions — same-head rule outputs merged in one chunked
+  multiway union per evaluation pass instead of one two-way union per rule
+  (chunk budget overridable via `XLOG_UNION_CHUNK_BYTES`);
 - ignored-pragma warnings — `warning[W0510]` emitted on stderr when a pragma is
   declared in an imported module; pragmas apply only when declared in the entry
   file.
