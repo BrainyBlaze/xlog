@@ -177,10 +177,14 @@ def kfold_scores(
       folds where F1 means something. The alternative (counting a
       zero-positive fold's F1 as 0.0) would be a body-INDEPENDENT constant
       rescale of every mean -- the skip set depends only on the fold/label
-      split -- so the choice cannot change any ranking or selection; skip
-      is preferred only because the reported number then means "mean F1
-      where F1 is defined" rather than a value diluted by unmeasurable
-      folds. In the degenerate case where NO fold has any held-out
+      split -- so the choice cannot change any RANKING (relative order is
+      preserved). It CAN change a selection, because `select_body` gates
+      on the ABSOLUTE `min_fit` threshold, not on rank: the uniform
+      downward rescale can drag every mean below `min_fit` (turning a
+      commit into an abstention) even though no body's rank moved. Skip
+      is preferred both for that reason and because the reported number
+      then means "mean F1 where F1 is defined" rather than a value
+      diluted by unmeasurable folds. In the degenerate case where NO fold has any held-out
       positive at all (recall is unmeasurable everywhere), every body's
       score is reported as `0.0` (empty-mean is otherwise undefined) --
       this can only happen if the residual holds zero positives overall,
