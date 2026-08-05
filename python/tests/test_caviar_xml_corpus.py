@@ -143,6 +143,7 @@ def test_parse_video_time_offset_shifts_the_whole_timeline(tmp_path):
 
 
 def test_load_xml_corpus_keeps_each_video_as_its_own_independent_segment(tmp_path):
+    pytest.importorskip("torch")  # convert_xml_corpus builds a feature tensor
     one_frame = _dataset_xml(
         _frame_xml(0, _obj_xml(0, 0, 0) + _obj_xml(1, 10, 10), _grp_xml(0, [0, 1], "interacting"))
     )
@@ -179,6 +180,7 @@ def test_parse_video_box_center_reads_xc_yc_directly(tmp_path):
 
 
 def test_tracked_entry_present_even_without_a_movement_label(tmp_path):
+    pytest.importorskip("torch")  # convert_xml_corpus builds a feature tensor
     obj_no_hypothesis = _obj_xml(0, 10, 10, with_hypothesis=False)
     obj_with_hypothesis = _obj_xml(1, 20, 20)
     frames = _frame_xml(0, obj_no_hypothesis + obj_with_hypothesis)
@@ -196,6 +198,7 @@ def test_tracked_entry_present_even_without_a_movement_label(tmp_path):
 
 
 def test_a_person_absent_from_the_whole_video_is_never_a_pair_row(tmp_path):
+    pytest.importorskip("torch")  # convert_xml_corpus builds a feature tensor
     # id2 never has a single <object> entry anywhere in the file.
     frames = _frame_xml(0, _obj_xml(0, 0, 0) + _obj_xml(1, 10, 10))
     path = tmp_path / "v.xml"
@@ -346,6 +349,7 @@ def test_count_fluent_transitions_rejects_unmapped_fluent(tmp_path):
 
 
 def test_convert_xml_corpus_output_keys_match_convert_continuous_contract(tmp_path):
+    pytest.importorskip("torch")  # convert_xml_corpus builds a feature tensor
     frames = _frame_xml(0, _obj_xml(0, 0, 0) + _obj_xml(1, 10, 10), _grp_xml(0, [0, 1], "interacting"))
     path = tmp_path / "v.xml"
     _write(path, _dataset_xml(frames))
@@ -360,6 +364,7 @@ def test_convert_xml_corpus_output_keys_match_convert_continuous_contract(tmp_pa
 
 
 def test_convert_xml_corpus_fluent_parameter_switches_is_positive(tmp_path):
+    pytest.importorskip("torch")  # convert_xml_corpus builds a feature tensor
     objs = _obj_xml(0, 0, 0) + _obj_xml(1, 10, 10)
     frames = _frame_xml(0, objs, _grp_xml(0, [0, 1], "moving"))
     path = tmp_path / "v.xml"
@@ -381,6 +386,7 @@ def test_convert_xml_corpus_rejects_unsupported_fluent(tmp_path):
 
 
 def test_convert_xml_corpus_missing_coords_row(tmp_path):
+    pytest.importorskip("torch")  # convert_xml_corpus builds a feature tensor
     obj0 = _obj_xml(0, 0, 0)
     # id1 tracked (appearance present) but WITHOUT a <box> at all.
     obj1 = """
