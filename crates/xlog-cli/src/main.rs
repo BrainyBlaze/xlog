@@ -221,10 +221,20 @@ fn resolve_explain_imports(
     }
     let resolver = load_modules(source_path, module_path)
         .map_err(|e| XlogError::Execution(format!("Module resolution failed: {}", e)))?;
+    warn_ignored_import_pragmas(&resolver);
     parsed.program = resolver
         .merge_imports(parsed.program)
         .map_err(|e| XlogError::Execution(format!("Module resolution failed: {}", e)))?;
     Ok(parsed)
+}
+
+/// Surface pragmas declared in imported modules on stderr. Pragmas are
+/// entry-file-scoped, so these directives are dropped at merge time; the
+/// warning keeps that scoping from being silent (issue #184).
+fn warn_ignored_import_pragmas(resolver: &xlog_logic::resolver::ModuleResolver) {
+    for warning in resolver.ignored_import_pragmas() {
+        eprintln!("{}", warning);
+    }
 }
 
 fn repl(args: ReplArgs) -> Result<()> {
@@ -1508,6 +1518,7 @@ fn run_deterministic(args: RunArgs) -> Result<()> {
     let program = if has_imports {
         let resolver = load_modules(&args.source, args.module_path.clone())
             .map_err(|e| XlogError::Execution(format!("Module resolution failed: {}", e)))?;
+        warn_ignored_import_pragmas(&resolver);
         LogicProgram::compile_with_resolver(&source, &resolver)?
     } else {
         LogicProgram::compile(&source)?
@@ -1615,8 +1626,18 @@ fn run_probabilistic(args: ProbArgs) -> Result<()> {
 
         // Validate module imports if any search paths are provided
         if !args.module_path.is_empty() {
-            let _ = load_modules(&args.source, args.module_path.clone())
+            let resolver = load_modules(&args.source, args.module_path.clone())
                 .map_err(|e| XlogError::Execution(format!("Module resolution failed: {}", e)))?;
+            warn_ignored_import_pragmas(&resolver);
+        } else if source.contains("use ") {
+            // No search paths, but the entry imports sibling modules:
+            // resolve best-effort purely to surface ignored pragmas.
+            // Failures stay non-fatal here because the probabilistic
+            // engines do not merge imports, so a hard error would reject
+            // programs that previously ran.
+            if let Ok(resolver) = load_modules(&args.source, Vec::new()) {
+                warn_ignored_import_pragmas(&resolver);
+            }
         }
 
         let mut config = GpuConfig::default();

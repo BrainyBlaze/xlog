@@ -106,3 +106,50 @@ query(rain()).
     assert!(stdout.contains("\"ci_low\""), "{stdout}");
     assert!(stdout.contains("\"evidence_samples\""), "{stdout}");
 }
+
+#[test]
+fn test_xlog_prob_warns_on_ignored_imported_module_pragma_without_module_path() {
+    if CudaDevice::new(0).is_err() {
+        eprintln!("Skipping test: CUDA runtime unavailable");
+        return;
+    }
+
+    // Sibling import, no --module-path: the prob engines never merge
+    // imports, so the W0510 warning is the only signal the user gets that
+    // the imported module's pragma is dropped.
+    let root = std::env::temp_dir().join(format!("xlog_prob_import_pragma_{}", std::process::id()));
+    std::fs::create_dir_all(&root).expect("create fixture dir");
+    std::fs::write(
+        root.join("helper.xlog"),
+        "#pragma prob_seed = 9\nhelper_fact(1).\n",
+    )
+    .expect("write helper module");
+    let program = root.join("main.xlog");
+    std::fs::write(
+        &program,
+        "use helper.\n0.6::rain().\n0.7::sprinkler().\nwet() :- rain().\nwet() :- sprinkler().\nquery(wet()).\n",
+    )
+    .expect("write main program");
+
+    let output = Command::cargo_bin("xlog")
+        .expect("xlog binary")
+        .args([
+            "prob",
+            program.to_str().expect("valid path"),
+            "--prob-engine",
+            "exact_ddnnf",
+        ])
+        .output()
+        .expect("run xlog prob with imported-module pragma");
+    assert!(
+        output.status.success(),
+        "xlog prob failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8(output.stderr).expect("utf8 stderr");
+    assert!(
+        stderr
+            .contains("warning[W0510]: `#pragma prob_seed` in imported module `helper` is ignored"),
+        "{stderr}"
+    );
+}

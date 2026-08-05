@@ -498,6 +498,59 @@ pub struct Directives {
 }
 
 impl Directives {
+    /// Names of the pragmas explicitly set on this program, using the
+    /// source spelling (`#pragma <name> = ...`), in declaration-struct
+    /// order.
+    pub fn set_pragma_names(&self) -> Vec<&'static str> {
+        // Destructure so adding a `Directives` field without extending this
+        // list is a compile error, not a pragma that silently vanishes from
+        // the ignored-import warnings.
+        let Directives {
+            prob_engine,
+            prob_cache,
+            prob_samples,
+            prob_seed,
+            prob_confidence,
+            prob_method,
+            prob_max_nonmonotone_iterations,
+            max_recursion_depth,
+            epistemic_mode,
+            magic_sets,
+        } = self;
+        let mut names = Vec::new();
+        if prob_engine.is_some() {
+            names.push("prob_engine");
+        }
+        if prob_cache.is_some() {
+            names.push("prob_cache");
+        }
+        if prob_samples.is_some() {
+            names.push("prob_samples");
+        }
+        if prob_seed.is_some() {
+            names.push("prob_seed");
+        }
+        if prob_confidence.is_some() {
+            names.push("prob_confidence");
+        }
+        if prob_method.is_some() {
+            names.push("prob_method");
+        }
+        if prob_max_nonmonotone_iterations.is_some() {
+            names.push("prob_max_nonmonotone_iterations");
+        }
+        if max_recursion_depth.is_some() {
+            names.push("max_recursion_depth");
+        }
+        if epistemic_mode.is_some() {
+            names.push("epistemic_mode");
+        }
+        if magic_sets.is_some() {
+            names.push("magic_sets");
+        }
+        names
+    }
+
     /// Return the configured prob engine, defaulting to ExactDdnnf.
     pub fn prob_engine_or_default(&self) -> ProbEngine {
         self.prob_engine.unwrap_or(ProbEngine::ExactDdnnf)
@@ -900,6 +953,50 @@ impl Program {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_directives_set_pragma_names() {
+        let mut directives = Directives::default();
+        assert!(directives.set_pragma_names().is_empty());
+
+        directives.prob_seed = Some(7);
+        directives.magic_sets = Some(MagicSetsMode::Auto);
+        assert_eq!(
+            directives.set_pragma_names(),
+            vec!["prob_seed", "magic_sets"]
+        );
+    }
+
+    #[test]
+    fn test_directives_set_pragma_names_covers_all_ten_pragmas() {
+        let directives = Directives {
+            prob_engine: Some(ProbEngine::Mc),
+            prob_cache: Some(ProbCache::On),
+            prob_samples: Some(20000),
+            prob_seed: Some(7),
+            prob_confidence: Some(0.9),
+            prob_method: Some(ProbMethod::Rejection),
+            prob_max_nonmonotone_iterations: Some(64),
+            max_recursion_depth: Some(100),
+            epistemic_mode: Some(EpistemicMode::G91),
+            magic_sets: Some(MagicSetsMode::Auto),
+        };
+        assert_eq!(
+            directives.set_pragma_names(),
+            vec![
+                "prob_engine",
+                "prob_cache",
+                "prob_samples",
+                "prob_seed",
+                "prob_confidence",
+                "prob_method",
+                "prob_max_nonmonotone_iterations",
+                "max_recursion_depth",
+                "epistemic_mode",
+                "magic_sets",
+            ]
+        );
+    }
 
     #[test]
     fn test_term_variable() {

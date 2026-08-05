@@ -41,6 +41,24 @@ So the in-program directive sets what the program wants, and the invocation gets
 the final say. This lets you override a program's baked-in choice for one run
 without editing the file.
 
+## Pragmas apply only in the entry file
+
+Pragmas are **entry-file-scoped**. The file you pass to `xlog run`, `xlog prob`, or
+`xlog explain` is the entry file, and only its pragmas configure the engine. A
+pragma written in an imported module never affects compilation — the directive
+is dropped when the module is merged, and the CLI reports it on stderr:
+
+```text
+warning[W0510]: `#pragma magic_sets` in imported module `corpus/base` is ignored
+  = note: pragmas apply only when declared in the entry file
+```
+
+This scoping is deliberate: pragmas set program-global engine behavior — the
+inference engine, the sampling seed, the rewrite strategy — and a library
+module should not silently reconfigure every program that imports it. If an
+imported module's pragma matters for your program, restate it in the entry
+file.
+
 ## The ten pragmas
 
 | Pragma | Values | Default |

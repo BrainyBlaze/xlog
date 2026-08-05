@@ -1481,3 +1481,54 @@ fn test_xlog_run_faeel_unfounded_self_support_executes_to_empty_extension() {
          difference:\nstdout:\n{g91_stdout}\nstderr:\n{g91_stderr}"
     );
 }
+
+#[test]
+fn test_xlog_run_warns_on_ignored_imported_module_pragma() {
+    let _device = match CudaDevice::new(0) {
+        Ok(d) => d,
+        Err(_) => {
+            println!("SKIPPED: CUDA runtime unavailable (no GPU or driver not loaded)");
+            return;
+        }
+    };
+
+    let root = std::env::temp_dir().join(format!("xlog_run_import_pragma_{}", std::process::id()));
+    let modules = root.join("modules");
+    std::fs::create_dir_all(&modules).expect("create module dir");
+    std::fs::write(
+        modules.join("inputs.xlog"),
+        "#pragma magic_sets = auto\npred edge(u32, u32).\nedge(1, 2).\n",
+    )
+    .expect("write inputs module");
+    let program = root.join("main.xlog");
+    std::fs::write(
+        &program,
+        "use inputs.\npred reach(u32, u32).\nreach(X, Y) :- edge(X, Y).\n?- reach(X, Y).\n",
+    )
+    .expect("write main program");
+
+    let output = cargo_bin_cmd!("xlog")
+        .args([
+            "run",
+            program.to_str().expect("valid path"),
+            "--module-path",
+            modules.to_str().expect("valid module path"),
+            "--memory-mb",
+            "1024",
+        ])
+        .output()
+        .expect("run xlog with imported-module pragma");
+    assert!(
+        output.status.success(),
+        "xlog run failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8(output.stderr).expect("utf8 stderr");
+    assert!(
+        stderr.contains(
+            "warning[W0510]: `#pragma magic_sets` in imported module `inputs` is ignored"
+        ),
+        "{stderr}"
+    );
+    assert_eq!(stderr.matches("warning[W0510]").count(), 1, "{stderr}");
+}

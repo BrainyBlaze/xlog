@@ -253,3 +253,62 @@ gated(X) :- know know support(X).
         "{stdout}"
     );
 }
+
+#[test]
+fn test_xlog_explain_warns_on_ignored_imported_module_pragma() {
+    let root =
+        std::env::temp_dir().join(format!("xlog_explain_import_pragma_{}", std::process::id()));
+    let modules = root.join("modules");
+    std::fs::create_dir_all(&modules).expect("create module dir");
+    let module = modules.join("corpus.xlog");
+    std::fs::write(
+        &module,
+        r#"
+#pragma magic_sets = auto
+pred edge(u32, u32).
+edge(1, 2).
+"#,
+    )
+    .expect("write corpus module");
+    let program = root.join("main.xlog");
+    std::fs::write(
+        &program,
+        r#"
+#pragma magic_sets = on
+use corpus.
+pred reach(u32, u32).
+reach(X, Y) :- edge(X, Y).
+reach(X, Z) :- reach(X, Y), edge(Y, Z).
+?- reach(1, Y).
+"#,
+    )
+    .expect("write main program");
+
+    let output = cargo_bin_cmd!("xlog")
+        .args([
+            "explain",
+            "--module-path",
+            modules.to_str().expect("valid module path"),
+            program.to_str().expect("valid program path"),
+        ])
+        .output()
+        .expect("run xlog explain with imported-module pragma");
+    assert!(
+        output.status.success(),
+        "xlog explain failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8(output.stderr).expect("utf8 stderr");
+    assert!(
+        stderr.contains(
+            "warning[W0510]: `#pragma magic_sets` in imported module `corpus` is ignored"
+        ),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("pragmas apply only when declared in the entry file"),
+        "{stderr}"
+    );
+    // The entry file's own pragma is authoritative and must not warn.
+    assert_eq!(stderr.matches("warning[W0510]").count(), 1, "{stderr}");
+}
