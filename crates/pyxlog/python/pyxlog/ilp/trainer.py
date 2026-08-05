@@ -9,6 +9,7 @@ See docs/plans/2026-02-26-dilp-hardening-design.md.
 from __future__ import annotations
 
 import math
+import os
 import time
 
 import torch
@@ -291,6 +292,7 @@ def _set_deterministic_cuda(seed: int | None) -> None:
         if torch.cuda.is_available():
             torch.cuda.manual_seed_all(seed)
 
+    os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
     torch.use_deterministic_algorithms(True)
 
     if hasattr(torch, "set_float32_matmul_precision"):
