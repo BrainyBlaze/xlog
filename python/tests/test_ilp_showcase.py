@@ -9,6 +9,7 @@ attempts before reporting failure.
 
 import subprocess
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -18,6 +19,8 @@ if not torch.cuda.is_available():
 
 MAX_ATTEMPTS = 2
 
+ROOT = Path(__file__).resolve().parents[2]
+
 
 def _run_showcase() -> subprocess.CompletedProcess:
     """Run the showcase script once."""
@@ -26,7 +29,7 @@ def _run_showcase() -> subprocess.CompletedProcess:
         capture_output=True,
         text=True,
         timeout=300,
-        cwd="/home/dev/projects/xlog",
+        cwd=ROOT,
     )
 
 
