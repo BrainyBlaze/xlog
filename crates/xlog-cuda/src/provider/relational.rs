@@ -34,6 +34,12 @@ const XLOG_TY_F64: u8 = 5;
 const XLOG_TY_BOOL: u8 = 6;
 const XLOG_TY_SYMBOL: u8 = 7;
 const SMALL_FULL_ROW_SORT_MAX_ROWS: usize = 1024;
+// Per-chunk byte budget for the multiway union fold. Bounds peak device
+// memory (the concat and sort workspace scale with one chunk plus the
+// deduplicated accumulator, not with the sum of all raw contributions) and
+// keeps every per-column chunk concat far inside the u32 byte range the
+// copy/permutation kernels index with.
+const UNION_MANY_CHUNK_BYTES: usize = 1 << 30;
 
 #[inline]
 fn scalar_type_code_dedup(ty: ScalarType) -> u8 {
@@ -746,14 +752,49 @@ impl super::CudaKernelProvider {
 
         self.buffer_from_columns(result_columns, diff_count, schema)
     }
+    /// Fail closed when any column's logical byte span exceeds the `u32`
+    /// range the byte-level sort/permutation kernels index with
+    /// (`gid * elem_size` wraps at 2^32). A column past 4 GiB must be a
+    /// clean error, never a silent scatter.
+    fn ensure_column_bytes_kernel_indexable(&self, input: &CudaBuffer) -> Result<()> {
+        let rows = self.device_row_count(input)?;
+        for col_idx in 0..input.arity() {
+            let elem_size = input
+                .schema()
+                .column_type(col_idx)
+                .map(|t| t.size_bytes())
+                .unwrap_or(4);
+            let col_bytes = rows
+                .checked_mul(elem_size)
+                .ok_or_else(|| XlogError::Kernel("Sort: column byte size overflow".to_string()))?;
+            if u32::try_from(col_bytes).is_err() {
+                return Err(XlogError::Kernel(format!(
+                    "Sort supports at most {} bytes per column, got {} (column {})",
+                    u32::MAX,
+                    col_bytes,
+                    col_idx
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    /// Per-chunk byte budget for the multiway union fold. Overridable via
+    /// `XLOG_UNION_CHUNK_BYTES` so tests can pin the multi-pass fold with
+    /// tiny budgets; production tuning is possible but rarely needed.
+    fn union_many_chunk_bytes() -> usize {
+        std::env::var("XLOG_UNION_CHUNK_BYTES")
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .filter(|&value| value > 0)
+            .unwrap_or(UNION_MANY_CHUNK_BYTES)
+    }
+
     // ============== GPU-Native Set Operations ==============
 
     /// GPU-native union (no host roundtrip)
     ///
-    /// Computes the union of two buffers entirely on the GPU using:
-    /// 1. Concatenate arrays using concat_u32 kernel
-    /// 2. Sort the concatenated result
-    /// 3. Deduplicate using existing dedup()
+    /// Delegates to [`Self::union_many_gpu`] with two inputs.
     ///
     /// # Arguments
     /// * `a` - First buffer
@@ -765,49 +806,231 @@ impl super::CudaKernelProvider {
     /// # Errors
     /// Returns `XlogError::Kernel` if schemas don't match or operation fails
     pub fn union_gpu(&self, a: &CudaBuffer, b: &CudaBuffer) -> Result<CudaBuffer> {
+        self.union_many_gpu(&[a, b])
+    }
+
+    /// GPU-native N-way union (no host roundtrip)
+    ///
+    /// Computes the deduplicated union of all inputs entirely on the GPU:
+    /// concatenate the non-empty inputs, then sort and deduplicate the
+    /// combined relation once per chunk.
+    ///
+    /// Semantically equivalent to left-folding [`Self::union_gpu`] over
+    /// `inputs`, but sorts and deduplicates each combined chunk exactly
+    /// once instead of re-sorting a growing accumulator per input. For R
+    /// inputs of similar size this reduces the total work from O(R² · rows)
+    /// to O(R · rows · log), which is what keeps many-rule predicate heads
+    /// (one contribution per rule) from going quadratic.
+    ///
+    /// Inputs are processed in byte-bounded chunks
+    /// ([`UNION_MANY_CHUNK_BYTES`], plus the deduplicated accumulator per
+    /// chunk): peak device memory is bounded by the chunk budget rather than
+    /// the sum of all raw contributions, and every per-chunk concat stays
+    /// far inside the `u32` byte range the copy/permutation kernels index
+    /// with. A batch that fits the budget — the common case — is one chunk
+    /// and behaves exactly like a single concat + sort + dedup. In the
+    /// degenerate regime where the deduplicated accumulator alone exceeds
+    /// the budget, every pass takes one input and the fold degrades to the
+    /// pairwise re-sort cost profile — the memory bound holds throughout.
+    ///
+    /// # Arguments
+    /// * `inputs` - Buffers to union; at least one is required
+    ///
+    /// # Returns
+    /// A buffer containing the deduplicated union of all inputs, sorted
+    ///
+    /// # Errors
+    /// Returns `XlogError::Kernel` if `inputs` is empty, schemas are
+    /// incompatible, or the operation fails
+    pub fn union_many_gpu(&self, inputs: &[&CudaBuffer]) -> Result<CudaBuffer> {
+        let first = inputs.first().ok_or_else(|| {
+            XlogError::Kernel("union_many_gpu requires at least one input".to_string())
+        })?;
         // Verify schemas have compatible types (ignore column names for Datalog union).
-        if !self.schemas_type_compatible(a.schema(), b.schema()) {
-            return Err(XlogError::Kernel(format!(
-                "Union requires compatible schemas: {:?} vs {:?}",
-                a.schema(),
-                b.schema()
-            )));
+        for other in &inputs[1..] {
+            if !self.schemas_type_compatible(first.schema(), other.schema()) {
+                return Err(XlogError::Kernel(format!(
+                    "Union requires compatible schemas: {:?} vs {:?}",
+                    first.schema(),
+                    other.schema()
+                )));
+            }
         }
 
-        let schema = a.schema().clone();
-        let a_rows = self.device_row_count(a)?;
-        let b_rows = self.device_row_count(b)?;
+        let schema = first.schema().clone();
+        let mut non_empty: Vec<(&CudaBuffer, usize)> = Vec::with_capacity(inputs.len());
+        for input in inputs {
+            let rows = self.device_row_count(input)?;
+            if rows > 0 {
+                non_empty.push((input, rows));
+            }
+        }
+
         if schema.arity() == 0 {
-            // 0-arity set union: empty ∪ empty = empty; otherwise {()}.
-            if a_rows == 0 && b_rows == 0 {
+            // 0-arity set union: all inputs empty = empty; otherwise {()}.
+            if non_empty.is_empty() {
                 return self.create_empty_buffer(schema);
             }
             return self.buffer_from_columns(Vec::new(), 1, schema);
         }
 
-        let key_cols: Vec<usize> = (0..schema.arity()).collect();
-        if a_rows == 0 && b_rows == 0 {
+        if non_empty.is_empty() {
             return self.create_empty_buffer(schema);
         }
 
-        // Set semantics require dedup even when one side is empty.
-        if a_rows == 0 {
-            return self.dedup(b, &key_cols);
-        }
-        if b_rows == 0 {
-            return self.dedup(a, &key_cols);
+        // Set semantics require dedup even for a single non-empty input.
+        let key_cols: Vec<usize> = (0..schema.arity()).collect();
+        if non_empty.len() == 1 {
+            return self.dedup(non_empty[0].0, &key_cols);
         }
 
-        let concat = self.concat_buffers_gpu(a, b)?;
-        if Self::use_csm_cuda_graph_env()
-            && schema.arity() > 1
-            && a_rows.saturating_add(b_rows) <= SMALL_FULL_ROW_SORT_MAX_ROWS
-        {
+        let row_bytes: usize = (0..schema.arity())
+            .map(|c| schema.column_type(c).map(|t| t.size_bytes()).unwrap_or(4))
+            .sum::<usize>()
+            .max(1);
+        let budget_rows = (Self::union_many_chunk_bytes() / row_bytes).max(1);
+
+        // Fold byte-bounded chunks: each pass unions the accumulated result
+        // with the next slice of inputs. The accumulator is deduplicated
+        // between passes, so peak memory tracks |dedup| + chunk budget, not
+        // the sum of raw contributions.
+        let mut acc: Option<CudaBuffer> = None;
+        let mut idx = 0usize;
+        while idx < non_empty.len() {
+            let mut chunk: Vec<&CudaBuffer> = Vec::new();
+            let mut chunk_rows = 0usize;
+            if let Some(acc_buf) = acc.as_ref() {
+                chunk_rows = self.device_row_count(acc_buf)?;
+                chunk.push(acc_buf);
+            }
+            // Always take at least one input per pass so the fold advances
+            // even when a single contribution exceeds the budget.
+            let mut taken = 0usize;
+            while idx < non_empty.len() {
+                let (input, rows) = non_empty[idx];
+                if taken > 0 && chunk_rows.saturating_add(rows) > budget_rows {
+                    break;
+                }
+                chunk.push(input);
+                chunk_rows = chunk_rows.saturating_add(rows);
+                idx += 1;
+                taken += 1;
+            }
+            acc = Some(self.union_chunk_gpu(&chunk, chunk_rows, &key_cols)?);
+        }
+        Ok(acc.expect("at least one non-empty input was folded"))
+    }
+
+    /// Union one chunk of non-empty, type-compatible buffers: concatenate,
+    /// then sort + dedup once. Callers guarantee at least one input and
+    /// `chunk_rows` equal to the sum of the inputs' logical row counts.
+    fn union_chunk_gpu(
+        &self,
+        inputs: &[&CudaBuffer],
+        chunk_rows: usize,
+        key_cols: &[usize],
+    ) -> Result<CudaBuffer> {
+        if inputs.len() == 1 {
+            return self.dedup(inputs[0], key_cols);
+        }
+        let concat = if inputs.len() == 2 {
+            self.concat_buffers_gpu(inputs[0], inputs[1])?
+        } else {
+            self.concat_many_buffers_gpu(inputs, chunk_rows)?
+        };
+        if inputs[0].schema().arity() > 1 {
+            // Full-row dedup sorts internally (including the env-gated
+            // small-row CUDA-graph path that `dedup_sorted` would route
+            // multi-column full-row keys through anyway); a pre-sort here
+            // would be computed and then discarded.
             return self.dedup_full_row_deterministic(&concat);
         }
+        let sorted = self.sort(&concat, key_cols)?;
+        self.dedup_sorted(&sorted, key_cols)
+    }
 
-        let sorted = self.sort(&concat, &key_cols)?;
-        self.dedup_sorted(&sorted, &key_cols)
+    /// Concatenate three or more non-empty buffers into one, column by column.
+    ///
+    /// Allocates each output column once at the combined size and fills it
+    /// with async device-to-device copies at row offsets (one synchronize
+    /// after all columns are enqueued), so the copy volume is linear in the
+    /// total rows regardless of input count (chaining the pairwise concat
+    /// would re-copy the growing prefix per input).
+    ///
+    /// Per-column byte counts are checked through `u32::try_from`, mirroring
+    /// the pairwise concat's fail-closed cap: downstream sort/permutation
+    /// kernels index bytes with `u32`, so a column past 4 GiB must be a
+    /// clean error, never a silent wrap.
+    ///
+    /// Callers guarantee: at least two inputs, all schemas type-compatible,
+    /// every input non-empty, and `total_rows` equal to the sum of the
+    /// inputs' logical row counts.
+    fn concat_many_buffers_gpu(
+        &self,
+        inputs: &[&CudaBuffer],
+        total_rows: usize,
+    ) -> Result<CudaBuffer> {
+        let schema = inputs[0].schema().clone();
+        if total_rows > u32::MAX as usize {
+            return Err(XlogError::Kernel(format!(
+                "Concat supports at most {} rows, got {}",
+                u32::MAX,
+                total_rows
+            )));
+        }
+
+        let mut input_rows = Vec::with_capacity(inputs.len());
+        for input in inputs {
+            input_rows.push(self.device_row_count(input)?);
+        }
+
+        let device = self.device.inner();
+        let mut result_columns = Vec::with_capacity(schema.arity());
+        let enqueue_result = (|| -> Result<()> {
+            for col_idx in 0..schema.arity() {
+                let elem_size = schema
+                    .column_type(col_idx)
+                    .map(|t| t.size_bytes())
+                    .unwrap_or(4);
+                let total_bytes = total_rows
+                    .checked_mul(elem_size)
+                    .ok_or_else(|| XlogError::Kernel("Concat: total_bytes overflow".to_string()))?;
+                u32::try_from(total_bytes).map_err(|_| {
+                    XlogError::Kernel(format!("Concat: total_bytes too large: {}", total_bytes))
+                })?;
+
+                let mut out_col = self.memory.alloc::<u8>(total_bytes)?;
+                let mut offset = 0usize;
+                for (input, &rows) in inputs.iter().zip(&input_rows) {
+                    let col_bytes = rows.checked_mul(elem_size).ok_or_else(|| {
+                        XlogError::Kernel("Concat: col_bytes overflow".to_string())
+                    })?;
+                    u32::try_from(col_bytes).map_err(|_| {
+                        XlogError::Kernel(format!("Concat: col_bytes too large: {}", col_bytes))
+                    })?;
+                    let col = input.column(col_idx).ok_or_else(|| {
+                        XlogError::Kernel(format!("Concat: column {} not found", col_idx))
+                    })?;
+                    let src = self.column_bytes_view(col, col_bytes)?;
+                    let mut dst = out_col.slice_mut(offset..offset + col_bytes);
+                    device.dtod_copy_async(&src, &mut dst).map_err(|e| {
+                        XlogError::Kernel(format!("Concat: failed to copy column: {}", e))
+                    })?;
+                    offset += col_bytes;
+                }
+
+                result_columns.push(out_col.into());
+            }
+            Ok(())
+        })();
+
+        // Quiesce enqueued async copies before returning on either path, so
+        // an error never escapes while copies are still in flight against
+        // buffers this frame is about to drop.
+        self.device.synchronize()?;
+        enqueue_result?;
+
+        self.buffer_from_columns(result_columns, total_rows as u64, schema)
     }
 
     /// Set difference (a - b) with deterministic set semantics.
@@ -1277,6 +1500,10 @@ impl super::CudaKernelProvider {
     /// Replaces the host-side `BTreeSet<Vec<u8>>` fallback that the
     /// strict deterministic-Datalog D2H gate flags as a violator.
     fn dedup_full_row_deterministic(&self, input: &CudaBuffer) -> Result<CudaBuffer> {
+        // Same u32 byte-indexing boundary as `sort` (which the large-input
+        // path below routes through); checked here too so the small-row
+        // path and any future direct caller stay fail-closed.
+        self.ensure_column_bytes_kernel_indexable(input)?;
         let row_count = self.device_row_count(input)?;
         if row_count == 0 {
             return self.create_empty_buffer(input.schema().clone());
@@ -1590,6 +1817,12 @@ impl super::CudaKernelProvider {
     /// - Input has more than `u32::MAX` rows
     /// - Download/upload or kernel execution fails
     pub fn sort(&self, input: &CudaBuffer, key_cols: &[usize]) -> Result<CudaBuffer> {
+        // Fail closed before any dispatch: the permutation kernels index
+        // column bytes with u32, so an over-4GiB column must error here,
+        // never scatter silently. Guarded at this chokepoint so every sort
+        // caller (unions, dedups, plans) is covered at once.
+        self.ensure_column_bytes_kernel_indexable(input)?;
+
         // Env-gated recorded dispatch. Eligibility check
         // mirrors `sort_recorded`'s validation:
         // U32 / Symbol key columns only. Other types fall

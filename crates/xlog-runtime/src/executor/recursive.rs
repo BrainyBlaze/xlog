@@ -4,8 +4,10 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use std::time::Instant;
 
 use xlog_core::{RelId, Result, Schema, XlogError};
-use xlog_cuda::CudaBuffer;
+use xlog_cuda::{CudaBuffer, CudaKernelProvider};
 use xlog_ir::{ExecutionPlan, RirNode, Stratum};
+
+use crate::profiler::Profiler;
 
 use super::delta::DeltaRelationTracker;
 use super::Executor;
@@ -13,6 +15,28 @@ use super::Executor;
 impl Executor {
     /// Maximum iterations for fixpoint computation to prevent infinite loops
     const MAX_FIXPOINT_ITERATIONS: usize = 1000;
+
+    /// Union a batch of same-head contributions in one multiway pass,
+    /// recording a single profiled "union" op for the whole batch.
+    ///
+    /// Takes the provider and profiler as explicit arguments (instead of
+    /// `&mut self`) so call sites can hold `self.store` borrows across the
+    /// call; the field borrows stay disjoint.
+    fn union_batch_profiled(
+        provider: &CudaKernelProvider,
+        profiler: &mut Profiler,
+        inputs: &[&CudaBuffer],
+    ) -> Result<CudaBuffer> {
+        let union_input: u64 = inputs.iter().map(|b| b.num_rows()).sum();
+        let start = profiler.start_op();
+        let merged = provider.union_many_gpu(inputs)?;
+        if let Some(start) = start {
+            let mem = provider.memory().allocated_bytes();
+            profiler.record_op("union", union_input, merged.num_rows(), start, mem);
+            profiler.record_peak_memory(mem);
+        }
+        Ok(merged)
+    }
 
     /// For a `MultiWayJoin` or `ChainJoin` body, try the specialized WCOJ
     /// dispatchers first; on decline, fall back to the embedded fallback
@@ -132,25 +156,147 @@ impl Executor {
     }
 
     /// Execute all rules in a non-recursive strongly connected component once.
+    ///
+    /// Each contiguous run of same-head rules is merged into the store with
+    /// one multiway union instead of one union per rule, so many-rule heads
+    /// stay linear in their total rows. Flushing on every head switch (not
+    /// once per SCC group) preserves rule-order dataflow: promoter-generated
+    /// helper rules share an SCC group with their consumer, so a helper's
+    /// head must be installed before the next rule reads it.
     pub fn execute_non_recursive_scc(&mut self, rules: &[xlog_ir::CompiledRule]) -> Result<()> {
+        let mut pending_head: Option<&str> = None;
+        let mut pending: Vec<CudaBuffer> = Vec::new();
         for rule in rules {
-            let result = self.execute_node(&rule.body)?;
-
-            if let Some(existing) = self.store.get(&rule.head) {
-                if result.is_empty() {
-                    continue;
+            if pending_head != Some(rule.head.as_str()) {
+                if let Some(head) = pending_head.take() {
+                    let batch = std::mem::take(&mut pending);
+                    self.install_plain_head_batch(head, batch)?;
                 }
-                let merged = self.provider.union_gpu(existing, &result)?;
-                self.store_put(&rule.head, merged);
-            } else {
-                let key_cols: Vec<usize> = (0..result.arity()).collect();
-                let deduped = if result.is_empty() {
-                    result
-                } else {
-                    self.provider.dedup(&result, &key_cols)?
-                };
-                self.store_put(&rule.head, deduped);
+                pending_head = Some(rule.head.as_str());
+            } else if !pending.is_empty() && self.body_reads_own_head(rule) {
+                // A same-head rule that reads its own head (a non-monotone
+                // singleton SCC, admitted under the probabilistic profile)
+                // must observe prior same-head contributions exactly as the
+                // sequential per-rule path did: flush before evaluating it.
+                let batch = std::mem::take(&mut pending);
+                self.install_plain_head_batch(&rule.head, batch)?;
             }
+            let result = self.execute_node(&rule.body)?;
+            pending.push(result);
+        }
+        if let Some(head) = pending_head {
+            self.install_plain_head_batch(head, pending)?;
+        }
+        Ok(())
+    }
+
+    /// Whether the rule's body reads its own head relation in a way that is
+    /// sensitive to same-pass installs. A body that IS a bare scan of the
+    /// head (`h :- h`, the planner's identity/carry rule for fact
+    /// predicates) is exempt: its scan result is always a subset of the
+    /// final merged relation, so batching cannot change the outcome. Any
+    /// other self-reading shape (negation, joins, or projections over the
+    /// head — possible only for non-monotone singleton SCCs admitted under
+    /// the probabilistic profile) must flush for sequential parity.
+    fn body_reads_own_head(&self, rule: &xlog_ir::CompiledRule) -> bool {
+        if let RirNode::Scan { rel } = &rule.body {
+            if self.get_rel_name(*rel).is_some_and(|n| n == rule.head) {
+                return false;
+            }
+        }
+        let mut scans = Vec::new();
+        Self::collect_scan_rels(&rule.body, &mut scans);
+        scans
+            .into_iter()
+            .any(|rel| self.get_rel_name(rel).is_some_and(|n| n == rule.head))
+    }
+
+    /// Install one head's batched results, skipping empty contributions.
+    /// Mirrors the pre-batching per-rule behavior: an existing relation is
+    /// left untouched when every contribution is empty, and a lone fresh
+    /// non-empty result records a single-input union (internally one dedup)
+    /// like the dispatched install path, so `--stats` accounting stays
+    /// uniform across both installers. The store is only mutated after the
+    /// merge succeeds, so a failed union leaves the existing relation
+    /// intact.
+    fn install_plain_head_batch(&mut self, head: &str, results: Vec<CudaBuffer>) -> Result<()> {
+        let non_empty: Vec<&CudaBuffer> = results.iter().filter(|r| !r.is_empty()).collect();
+
+        // An existing empty relation (e.g. a pre-seeded schema buffer)
+        // carries no rows to merge, so it takes the fresh-install path,
+        // matching the dispatched installer.
+        let existing = self.store.get(head).filter(|buf| !buf.is_empty());
+        if let Some(existing) = existing {
+            if non_empty.is_empty() {
+                // No new rows for this head: leave the relation untouched.
+                return Ok(());
+            }
+            let mut union_inputs = Vec::with_capacity(non_empty.len() + 1);
+            union_inputs.push(existing);
+            union_inputs.extend(non_empty);
+            let merged =
+                Self::union_batch_profiled(&self.provider, &mut self.profiler, &union_inputs)?;
+            self.store_put(head, merged);
+        } else if non_empty.is_empty() {
+            // All contributions are empty: an absent head gets an empty
+            // relation with the result schema; an existing (empty) head is
+            // left untouched.
+            if self.store.get(head).is_none() {
+                let first = results.into_iter().next().ok_or_else(|| {
+                    XlogError::Execution(format!("No results collected for head {}", head))
+                })?;
+                self.store_put(head, first);
+            }
+        } else {
+            let merged =
+                Self::union_batch_profiled(&self.provider, &mut self.profiler, &non_empty)?;
+            self.store_put(head, merged);
+        }
+        Ok(())
+    }
+
+    /// Install one head's batched non-recursive results with a single
+    /// profiled multiway union. Each entry's flag records whether the
+    /// route's output is already sorted+deduped, so a lone fresh WCOJ
+    /// result installs without a redundant dedup pass, mirroring the
+    /// per-route install behavior. The store is only mutated after the
+    /// merge succeeds, so a failed union leaves the existing relation
+    /// intact.
+    fn install_dispatched_head_batch(
+        &mut self,
+        head: &str,
+        results: Vec<(CudaBuffer, bool)>,
+    ) -> Result<()> {
+        // Union with existing result if the predicate already has rows. An
+        // existing empty relation (e.g. a pre-seeded schema buffer)
+        // contributes nothing, so it takes the fresh-install path — which
+        // is what lets a lone already-deduped WCOJ result skip the
+        // redundant dedup in production runs.
+        let existing = self.store.get(head).filter(|buf| !buf.is_empty());
+        if let Some(existing) = existing {
+            let mut union_inputs: Vec<&CudaBuffer> = Vec::with_capacity(results.len() + 1);
+            union_inputs.push(existing);
+            union_inputs.extend(results.iter().map(|(buf, _)| buf));
+            let merged =
+                Self::union_batch_profiled(&self.provider, &mut self.profiler, &union_inputs)?;
+            self.store_put(head, merged);
+        } else if results.len() == 1 {
+            let (result, already_deduped) = results.into_iter().next().expect("len checked");
+            if already_deduped || result.is_empty() {
+                self.store_put(head, result);
+            } else {
+                // Set semantics for a lone raw result: a single-input
+                // multiway union (internally one dedup), recorded as a
+                // "union" op like the union-with-empty install it replaces.
+                let merged =
+                    Self::union_batch_profiled(&self.provider, &mut self.profiler, &[&result])?;
+                self.store_put(head, merged);
+            }
+        } else {
+            let union_inputs: Vec<&CudaBuffer> = results.iter().map(|(buf, _)| buf).collect();
+            let merged =
+                Self::union_batch_profiled(&self.provider, &mut self.profiler, &union_inputs)?;
+            self.store_put(head, merged);
         }
         Ok(())
     }
@@ -180,203 +326,109 @@ impl Executor {
                     // shape is eligible.
                     self.execute_recursive_scc(rules)?;
                 } else {
-                    // Non-recursive SCC: execute rules once, union results for same predicate.
+                    // Non-recursive SCC: execute rules once, merging each
+                    // contiguous run of same-head results with one multiway
+                    // union instead of one union per rule, so many-rule heads
+                    // stay linear in their total rows. Flushing on every head
+                    // switch (not once per SCC group) preserves rule-order
+                    // dataflow: promoter-generated helper rules share an SCC
+                    // group with their consumer, so a helper's head must be
+                    // installed before the next rule dispatches against it.
+                    let mut pending_head: Option<&str> = None;
+                    let mut pending: Vec<(CudaBuffer, bool)> = Vec::new();
                     for rule in rules {
+                        if pending_head != Some(rule.head.as_str()) {
+                            if let Some(head) = pending_head.take() {
+                                let batch = std::mem::take(&mut pending);
+                                self.install_dispatched_head_batch(head, batch)?;
+                            }
+                            pending_head = Some(rule.head.as_str());
+                        } else if !pending.is_empty() && self.body_reads_own_head(rule) {
+                            // A same-head rule that reads its own head (a
+                            // non-monotone singleton SCC, admitted under the
+                            // probabilistic profile) must observe prior
+                            // same-head contributions exactly as the
+                            // sequential per-rule path did: flush before
+                            // evaluating it.
+                            let batch = std::mem::take(&mut pending);
+                            self.install_dispatched_head_batch(&rule.head, batch)?;
+                        }
+
                         // Route two-atom ChainJoin bodies before the
                         // triangle/4-cycle/KC attempts. The dispatcher
                         // silently declines on non-chain bodies or when
                         // the env gate disables the route.
-                        if let Some(chain_result) = self.try_dispatch_chain_on_body(&rule.body)? {
-                            if let Some(existing) = self.store.get(&rule.head) {
-                                let merged = self.provider.union_gpu(existing, &chain_result)?;
-                                self.store_put(&rule.head, merged);
-                            } else {
-                                let key_cols: Vec<usize> = (0..chain_result.arity()).collect();
-                                let deduped = if chain_result.is_empty() {
-                                    chain_result
-                                } else {
-                                    let dedup_input_rows = chain_result.num_rows();
-                                    let start = self.profiler.start_op();
-                                    let deduped = self.provider.dedup(&chain_result, &key_cols)?;
-                                    if let Some(start) = start {
-                                        let mem = self.provider.memory().allocated_bytes();
-                                        self.profiler.record_op(
-                                            "dedup",
-                                            dedup_input_rows,
-                                            deduped.num_rows(),
-                                            start,
-                                            mem,
-                                        );
-                                        self.profiler.record_peak_memory(mem);
-                                    }
-                                    deduped
-                                };
-                                self.store_put(&rule.head, deduped);
-                            }
-                            continue;
+                        let entry = if let Some(chain_result) =
+                            self.try_dispatch_chain_on_body(&rule.body)?
+                        {
+                            (chain_result, false)
                         }
-
                         // WCOJ triangle dispatch, gated by runtime configuration.
                         // Try to short-circuit the rule via the GPU
-                        // 3-way kernel. On Some(_), install the
-                        // result and skip the binary-join path for
-                        // this rule. On None (gate off, shape
-                        // mismatch, missing input, kernel error),
-                        // fall through silently. See
-                        // `wcoj_dispatch::try_dispatch_wcoj_triangle`
-                        // for the full match contract.
-                        if let Some(wcoj_result) = self.try_dispatch_wcoj_triangle(rule)? {
-                            // Mirrors the binary-join arm below:
-                            // union with existing result if predicate
-                            // already has data; otherwise install
-                            // directly. WCOJ output is already
-                            // sorted+deduped, so the dedup pass on
-                            // the else branch is unnecessary here.
-                            if let Some(existing) = self.store.get(&rule.head) {
-                                let merged = self.provider.union_gpu(existing, &wcoj_result)?;
-                                self.store_put(&rule.head, merged);
-                            } else {
-                                self.store_put(&rule.head, wcoj_result);
-                            }
-                            continue;
+                        // 3-way kernel. On Some(_), record the result
+                        // and skip the binary-join path for this rule.
+                        // On None (gate off, shape mismatch, missing
+                        // input, kernel error), fall through silently.
+                        // See `wcoj_dispatch::try_dispatch_wcoj_triangle`
+                        // for the full match contract. WCOJ output is
+                        // already sorted+deduped, so a lone fresh
+                        // install needs no dedup pass.
+                        else if let Some(wcoj_result) = self.try_dispatch_wcoj_triangle(rule)? {
+                            (wcoj_result, true)
                         }
-
                         // WCOJ 4-cycle dispatch.
                         // Same pattern as triangle. Order is a doc
                         // anchor — a body cannot match both shapes
                         // (different atom counts), so triangle's
                         // earlier attempt always returns None on a
                         // 4-cycle body and vice versa.
-                        if let Some(wcoj_result) = self.try_dispatch_wcoj_4cycle(rule)? {
-                            if let Some(existing) = self.store.get(&rule.head) {
-                                let merged = self.provider.union_gpu(existing, &wcoj_result)?;
-                                self.store_put(&rule.head, merged);
-                            } else {
-                                self.store_put(&rule.head, wcoj_result);
-                            }
-                            continue;
+                        else if let Some(wcoj_result) = self.try_dispatch_wcoj_4cycle(rule)? {
+                            (wcoj_result, true)
                         }
-
                         // K-clique dispatch for k=5..k=8.
                         // Same shape-gated default-dispatch
                         // pattern as triangle / 4-cycle; silent
                         // fallback to MultiWayJoin.fallback on
                         // dispatcher decline or kernel error.
-                        if let Some(wcoj_result) = self.try_dispatch_wcoj_clique5(rule)? {
-                            if let Some(existing) = self.store.get(&rule.head) {
-                                let merged = self.provider.union_gpu(existing, &wcoj_result)?;
-                                self.store_put(&rule.head, merged);
-                            } else {
-                                self.store_put(&rule.head, wcoj_result);
-                            }
-                            continue;
+                        else if let Some(wcoj_result) = self.try_dispatch_wcoj_clique5(rule)? {
+                            (wcoj_result, true)
+                        } else if let Some(wcoj_result) = self.try_dispatch_wcoj_clique6(rule)? {
+                            (wcoj_result, true)
+                        } else if let Some(wcoj_result) = self.try_dispatch_wcoj_clique7(rule)? {
+                            (wcoj_result, true)
+                        } else if let Some(wcoj_result) = self.try_dispatch_wcoj_clique8(rule)? {
+                            (wcoj_result, true)
                         }
-                        if let Some(wcoj_result) = self.try_dispatch_wcoj_clique6(rule)? {
-                            if let Some(existing) = self.store.get(&rule.head) {
-                                let merged = self.provider.union_gpu(existing, &wcoj_result)?;
-                                self.store_put(&rule.head, merged);
-                            } else {
-                                self.store_put(&rule.head, wcoj_result);
-                            }
-                            continue;
-                        }
-                        if let Some(wcoj_result) = self.try_dispatch_wcoj_clique7(rule)? {
-                            if let Some(existing) = self.store.get(&rule.head) {
-                                let merged = self.provider.union_gpu(existing, &wcoj_result)?;
-                                self.store_put(&rule.head, merged);
-                            } else {
-                                self.store_put(&rule.head, wcoj_result);
-                            }
-                            continue;
-                        }
-                        if let Some(wcoj_result) = self.try_dispatch_wcoj_clique8(rule)? {
-                            if let Some(existing) = self.store.get(&rule.head) {
-                                let merged = self.provider.union_gpu(existing, &wcoj_result)?;
-                                self.store_put(&rule.head, merged);
-                            } else {
-                                self.store_put(&rule.head, wcoj_result);
-                            }
-                            continue;
-                        }
-
                         // Generalized Free Join dispatch for every multiway
                         // shape the dedicated dispatchers above declined. The
                         // dispatcher re-checks those shapes structurally, so
                         // it only fires on general bodies. Unlike the
                         // dedicated kernels, the frontier engine emits one row
-                        // per derivation path, so the install mirrors the
-                        // binary-join arm below: `union_gpu` dedups, and
-                        // fresh installs dedup explicitly.
-                        if let Some(fj_result) = self.try_dispatch_free_join(&rule.body)? {
-                            if let Some(existing) = self.store.get(&rule.head) {
-                                let merged = self.provider.union_gpu(existing, &fj_result)?;
-                                self.store_put(&rule.head, merged);
-                            } else {
-                                let key_cols: Vec<usize> = (0..fj_result.arity()).collect();
-                                let deduped = if fj_result.is_empty() {
-                                    fj_result
-                                } else {
-                                    self.provider.dedup(&fj_result, &key_cols)?
-                                };
-                                self.store_put(&rule.head, deduped);
-                            }
-                            continue;
-                        }
-
-                        // When WCOJ dispatch declines on a `MultiWayJoin`
-                        // body (gate off, kernel error, adaptive score below
-                        // threshold, ...), execute the embedded `fallback`,
-                        // the post-optimizer binary-join tree the promoter
-                        // captured. `execute_node`'s `MultiWayJoin` arm is the
-                        // defensive safety net; explicit destructuring here
-                        // keeps the intent visible at the dispatch site.
-                        let body_to_execute = match &rule.body {
-                            xlog_ir::RirNode::MultiWayJoin { fallback, .. }
-                            | xlog_ir::RirNode::ChainJoin { fallback, .. } => fallback.as_ref(),
-                            other => other,
-                        };
-                        let result = self.execute_node(body_to_execute)?;
-
-                        // Union with existing result if predicate already has data
-                        if let Some(existing) = self.store.get(&rule.head) {
-                            let union_input_rows = existing.num_rows() + result.num_rows();
-                            let start = self.profiler.start_op();
-                            let merged = self.provider.union_gpu(existing, &result)?;
-                            if let Some(start) = start {
-                                let mem = self.provider.memory().allocated_bytes();
-                                self.profiler.record_op(
-                                    "union",
-                                    union_input_rows,
-                                    merged.num_rows(),
-                                    start,
-                                    mem,
-                                );
-                                self.profiler.record_peak_memory(mem);
-                            }
-                            self.store_put(&rule.head, merged);
+                        // per derivation path, so its output still needs the
+                        // dedup the per-head merge (or the fresh-install
+                        // dedup) provides.
+                        else if let Some(fj_result) = self.try_dispatch_free_join(&rule.body)? {
+                            (fj_result, false)
                         } else {
-                            let key_cols: Vec<usize> = (0..result.arity()).collect();
-                            let deduped = if result.is_empty() {
-                                result
-                            } else {
-                                let dedup_input_rows = result.num_rows();
-                                let start = self.profiler.start_op();
-                                let deduped = self.provider.dedup(&result, &key_cols)?;
-                                if let Some(start) = start {
-                                    let mem = self.provider.memory().allocated_bytes();
-                                    self.profiler.record_op(
-                                        "dedup",
-                                        dedup_input_rows,
-                                        deduped.num_rows(),
-                                        start,
-                                        mem,
-                                    );
-                                    self.profiler.record_peak_memory(mem);
-                                }
-                                deduped
+                            // When WCOJ dispatch declines on a `MultiWayJoin`
+                            // body (gate off, kernel error, adaptive score below
+                            // threshold, ...), execute the embedded `fallback`,
+                            // the post-optimizer binary-join tree the promoter
+                            // captured. `execute_node`'s `MultiWayJoin` arm is the
+                            // defensive safety net; explicit destructuring here
+                            // keeps the intent visible at the dispatch site.
+                            let body_to_execute = match &rule.body {
+                                xlog_ir::RirNode::MultiWayJoin { fallback, .. }
+                                | xlog_ir::RirNode::ChainJoin { fallback, .. } => fallback.as_ref(),
+                                other => other,
                             };
-                            self.store_put(&rule.head, deduped);
-                        }
+                            (self.execute_node(body_to_execute)?, false)
+                        };
+
+                        pending.push(entry);
+                    }
+                    if let Some(head) = pending_head {
+                        self.install_dispatched_head_batch(head, pending)?;
                     }
                 }
             }
@@ -461,23 +513,13 @@ impl Executor {
         // 4-cycles get a chance at WCOJ dispatch on the seeding pass. Stable
         // rules with zero recursive scans only run here, so without this hook
         // they would never see a kernel.
-        let mut derived_initial: HashMap<String, CudaBuffer> = HashMap::new();
+        let mut derived_initial: HashMap<String, Vec<CudaBuffer>> = HashMap::new();
         for rule in rules {
             let result = self.execute_wcoj_or_fallback_node(&rule.body)?;
-            if let Some(acc) = derived_initial.get_mut(&rule.head) {
-                let union_input = acc.num_rows() + result.num_rows();
-                let start = self.profiler.start_op();
-                let merged = self.provider.union_gpu(acc, &result)?;
-                if let Some(start) = start {
-                    let mem = self.provider.memory().allocated_bytes();
-                    self.profiler
-                        .record_op("union", union_input, merged.num_rows(), start, mem);
-                    self.profiler.record_peak_memory(mem);
-                }
-                *acc = merged;
-            } else {
-                derived_initial.insert(rule.head.clone(), result);
-            }
+            derived_initial
+                .entry(rule.head.clone())
+                .or_default()
+                .push(result);
         }
 
         // Initialize delta from the newly-derived tuples only.
@@ -486,31 +528,30 @@ impl Executor {
         // the delta relations start with only the *new* tuples, not a full rescan of the current
         // fixed point.
         for pred in &recursive_preds {
+            // Read the prior full relation in place: the store is only
+            // mutated after the merge succeeds, so a failed union leaves the
+            // relation (and its version counter) intact.
             let full_old = self
                 .store
-                .remove(pred)
+                .get(pred)
                 .ok_or_else(|| XlogError::Execution(format!("Missing relation: {}", pred)))?;
 
-            let derived = match derived_initial.remove(pred) {
-                Some(buf) => buf,
-                None => self.create_empty_buffer(full_old.schema().clone())?,
-            };
+            let derived = derived_initial.remove(pred).unwrap_or_default();
 
-            let union_input = full_old.num_rows() + derived.num_rows();
-            let start = self.profiler.start_op();
-            let merged = self.provider.union_gpu(&full_old, &derived)?;
-            if let Some(start) = start {
-                let mem = self.provider.memory().allocated_bytes();
-                self.profiler
-                    .record_op("union", union_input, merged.num_rows(), start, mem);
-                self.profiler.record_peak_memory(mem);
-            }
-
-            let full_new = merged;
+            // One multiway union per head: the prior full relation and every
+            // same-head seed contribution are concatenated, sorted, and
+            // deduplicated in a single pass instead of one union per rule.
+            let mut union_inputs: Vec<&CudaBuffer> = Vec::with_capacity(derived.len() + 1);
+            union_inputs.push(full_old);
+            union_inputs.extend(derived.iter());
+            let full_new =
+                Self::union_batch_profiled(&self.provider, &mut self.profiler, &union_inputs)?;
+            drop(union_inputs);
+            drop(derived);
 
             let delta_name = delta_tracker.delta_name(pred)?;
 
-            let full_old_rows = self.buffer_row_count(&full_old)?;
+            let full_old_rows = self.buffer_row_count(full_old)?;
             let full_new_rows = self.buffer_row_count(&full_new)?;
             let delta_initial = if full_new_rows == 0 {
                 self.create_empty_buffer(full_new.schema().clone())?
@@ -519,7 +560,7 @@ impl Executor {
             } else {
                 let diff_input = full_new.num_rows() + full_old.num_rows();
                 let start = self.profiler.start_op();
-                let diffed = self.provider.diff_gpu(&full_new, &full_old)?;
+                let diffed = self.provider.diff_gpu(&full_new, full_old)?;
                 if let Some(start) = start {
                     let mem = self.provider.memory().allocated_bytes();
                     self.profiler
@@ -578,12 +619,15 @@ impl Executor {
         for _iteration in 0..max_iterations {
             iteration_count += 1;
             // Compute delta_new_raw per head by evaluating each rule once per recursive Scan occurrence.
-            let mut delta_new_raw_by_head: HashMap<String, CudaBuffer> = HashMap::new();
+            // Contributions are collected unmerged; the per-head finalize
+            // below unions each head's batch in one multiway pass instead of
+            // one union per rule.
+            let mut delta_new_raw_by_head: HashMap<String, Vec<CudaBuffer>> = HashMap::new();
             // D3 — factorized novel sets per head: already diffed
             // against the stable relation and full-row deduped at
             // dispatch time. Kept separate from the raw accumulator so
             // all-factorized heads can skip the legacy diff entirely.
-            let mut delta_novel_by_head: HashMap<String, CudaBuffer> = HashMap::new();
+            let mut delta_novel_by_head: HashMap<String, Vec<CudaBuffer>> = HashMap::new();
 
             for rule in rules {
                 let mut scans = Vec::new();
@@ -624,8 +668,8 @@ impl Executor {
                     continue;
                 }
 
-                let mut rule_delta_raw: Option<CudaBuffer> = None;
-                let mut rule_delta_novel: Option<CudaBuffer> = None;
+                let mut rule_delta_raw: Vec<CudaBuffer> = Vec::new();
+                let mut rule_delta_novel: Vec<CudaBuffer> = Vec::new();
                 for (rel_id, occ, pred_name) in variants {
                     let delta_rel_id = delta_tracker.delta_rel_id(&pred_name)?;
 
@@ -651,10 +695,7 @@ impl Executor {
                         &recursive_pred_lookup,
                         &mut fd_ctx,
                     )? {
-                        rule_delta_novel = Some(match rule_delta_novel {
-                            Some(acc) => self.provider.union_gpu(&acc, &novel)?,
-                            None => novel,
-                        });
+                        rule_delta_novel.push(novel);
                         continue;
                     }
 
@@ -666,65 +707,25 @@ impl Executor {
                     // entry transparently, no special-case dispatch
                     // logic needed.
                     let out = self.execute_wcoj_or_fallback_node(&variant_node)?;
-                    rule_delta_raw = Some(if let Some(acc) = rule_delta_raw {
-                        let union_input = acc.num_rows() + out.num_rows();
-                        let start = self.profiler.start_op();
-                        let merged = self.provider.union_gpu(&acc, &out)?;
-                        if let Some(start) = start {
-                            let mem = self.provider.memory().allocated_bytes();
-                            self.profiler.record_op(
-                                "union",
-                                union_input,
-                                merged.num_rows(),
-                                start,
-                                mem,
-                            );
-                            self.profiler.record_peak_memory(mem);
-                        }
-                        merged
-                    } else {
-                        out
-                    });
+                    rule_delta_raw.push(out);
                 }
 
                 // D3 — a rule with BOTH factorized and legacy variant
-                // outputs folds its novel set into the raw accumulator
+                // outputs folds its novel rows into the raw batch
                 // (the legacy diff is a no-op on novel rows, so this is
-                // sound); an all-factorized rule keeps its novel set on
+                // sound); an all-factorized rule keeps its novel rows on
                 // the diff-free track.
-                if rule_delta_raw.is_some() {
-                    if let Some(novel) = rule_delta_novel.take() {
-                        let raw = rule_delta_raw.as_ref().expect("checked above");
-                        rule_delta_raw = Some(self.provider.union_gpu(raw, &novel)?);
-                    }
-                }
-                if let Some(rule_out) = rule_delta_raw {
-                    if let Some(acc) = delta_new_raw_by_head.get_mut(&rule.head) {
-                        let union_input = acc.num_rows() + rule_out.num_rows();
-                        let start = self.profiler.start_op();
-                        let merged = self.provider.union_gpu(acc, &rule_out)?;
-                        if let Some(start) = start {
-                            let mem = self.provider.memory().allocated_bytes();
-                            self.profiler.record_op(
-                                "union",
-                                union_input,
-                                merged.num_rows(),
-                                start,
-                                mem,
-                            );
-                            self.profiler.record_peak_memory(mem);
-                        }
-                        *acc = merged;
-                    } else {
-                        delta_new_raw_by_head.insert(rule.head.clone(), rule_out);
-                    }
-                }
-                if let Some(rule_novel) = rule_delta_novel {
-                    if let Some(acc) = delta_novel_by_head.get_mut(&rule.head) {
-                        *acc = self.provider.union_gpu(acc, &rule_novel)?;
-                    } else {
-                        delta_novel_by_head.insert(rule.head.clone(), rule_novel);
-                    }
+                if !rule_delta_raw.is_empty() {
+                    rule_delta_raw.append(&mut rule_delta_novel);
+                    delta_new_raw_by_head
+                        .entry(rule.head.clone())
+                        .or_default()
+                        .append(&mut rule_delta_raw);
+                } else if !rule_delta_novel.is_empty() {
+                    delta_novel_by_head
+                        .entry(rule.head.clone())
+                        .or_default()
+                        .append(&mut rule_delta_novel);
                 }
             }
 
@@ -743,23 +744,44 @@ impl Executor {
                 #[cfg(feature = "recursive-stats-trace")]
                 let pre_phase4_full_rows = self.buffer_row_count(full)? as u64;
 
-                let delta_raw = delta_new_raw_by_head.remove(pred);
-                let delta_novel = delta_novel_by_head.remove(pred);
+                let mut raw_bufs = delta_new_raw_by_head.remove(pred).unwrap_or_default();
+                let mut novel_bufs = delta_novel_by_head.remove(pred).unwrap_or_default();
                 // D3 — when a head received both raw and factorized
-                // contributions (different rules), fold the novel set
-                // into the raw side before the legacy diff (sound: the
+                // contributions (different rules), fold the novel rows
+                // into the raw batch before the legacy diff (sound: the
                 // diff is a no-op on novel rows). An all-factorized
-                // head skips the diff entirely — its novel set is
+                // head skips the diff entirely — its novel rows are
                 // already diffed and deduped by construction.
-                let (delta_raw, delta_novel) = match (delta_raw, delta_novel) {
-                    (Some(raw), Some(novel)) => {
-                        (Some(self.provider.union_gpu(&raw, &novel)?), None)
+                if !raw_bufs.is_empty() {
+                    raw_bufs.append(&mut novel_bufs);
+                }
+                let delta_new = if !novel_bufs.is_empty() {
+                    if novel_bufs.len() == 1 {
+                        novel_bufs.pop().expect("len checked")
+                    } else {
+                        // Novel sets are deduped per rule, not across rules,
+                        // so a multi-rule head still unions its novel batch.
+                        let union_inputs: Vec<&CudaBuffer> = novel_bufs.iter().collect();
+                        Self::union_batch_profiled(
+                            &self.provider,
+                            &mut self.profiler,
+                            &union_inputs,
+                        )?
                     }
-                    other => other,
-                };
-                let delta_new = if let Some(novel) = delta_novel {
-                    novel
-                } else if let Some(delta_raw) = delta_raw {
+                } else if !raw_bufs.is_empty() {
+                    let delta_raw = if raw_bufs.len() == 1 {
+                        raw_bufs.pop().expect("len checked")
+                    } else {
+                        // One multiway union per head instead of one union
+                        // per rule contribution.
+                        let union_inputs: Vec<&CudaBuffer> = raw_bufs.iter().collect();
+                        Self::union_batch_profiled(
+                            &self.provider,
+                            &mut self.profiler,
+                            &union_inputs,
+                        )?
+                    };
+                    drop(raw_bufs);
                     if self.buffer_row_count(&delta_raw)? == 0 {
                         self.create_empty_buffer(full.schema().clone())?
                     } else {
@@ -844,28 +866,31 @@ impl Executor {
 
             // Merge deltas into full relations.
             for pred in &recursive_preds {
+                let dn = delta_tracker.delta_name(pred)?.to_string();
+                // Read both relations in place: the store is only mutated
+                // after the merge succeeds, so a failed union leaves the
+                // full relation (and its version counter) intact, and the
+                // unchanged delta never needs a remove/re-put round trip.
                 let full_old = self
                     .store
-                    .remove(pred)
+                    .get(pred)
                     .ok_or_else(|| XlogError::Execution(format!("Missing relation: {}", pred)))?;
-                let dn = delta_tracker.delta_name(pred)?.to_string();
                 let delta = self
-                    .store_remove(&dn)
+                    .store
+                    .get(&dn)
                     .ok_or_else(|| XlogError::Execution(format!("Missing relation: {}", dn)))?;
 
-                if self.buffer_row_count(&delta)? == 0 {
+                if self.buffer_row_count(delta)? == 0 {
                     // Zero-delta short-circuit: full and delta are unchanged
                     // this iteration. The delta relation record with zero
                     // rows stands, and the full relation record from the prior
                     // merge stands. No additional update is needed.
-                    self.store_put(pred, full_old);
-                    self.store_put(&dn, delta);
                     continue;
                 }
 
                 let union_input = full_old.num_rows() + delta.num_rows();
                 let start = self.profiler.start_op();
-                let merged = self.provider.union_gpu(&full_old, &delta)?;
+                let merged = self.provider.union_gpu(full_old, delta)?;
                 if let Some(start) = start {
                     let mem = self.provider.memory().allocated_bytes();
                     self.profiler
@@ -880,12 +905,11 @@ impl Executor {
                 // used by the trace under the `recursive-stats-trace` feature.
                 let full_new_rows_phase4 = self.buffer_row_count(&full_new)? as u64;
                 #[cfg(feature = "recursive-stats-trace")]
-                let delta_rows_phase4 = self.buffer_row_count(&delta)? as u64;
+                let delta_rows_phase4 = self.buffer_row_count(delta)? as u64;
                 let full_rel_opt = self.name_to_rel_id(pred);
                 #[cfg(feature = "recursive-stats-trace")]
                 let delta_rel = delta_tracker.delta_rel_id(pred)?;
                 self.store_put(pred, full_new);
-                self.store_put(&dn, delta);
 
                 // Record the full relation's new cardinality. The delta
                 // relation was already recorded for this iteration.
