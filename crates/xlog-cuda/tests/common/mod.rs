@@ -9,25 +9,32 @@ use xlog_cuda::{CudaDevice, CudaKernelProvider, GpuMemoryManager};
 /// Canonical CUDA provider for tests. Returns None if CUDA is unavailable.
 #[allow(dead_code)] // not all integration test binaries use this fixture
 pub fn setup_provider() -> Option<Arc<CudaKernelProvider>> {
-    let device = match CudaDevice::new(0) {
-        Ok(d) => Arc::new(d),
-        Err(e) => {
-            eprintln!("Skipping: CUDA runtime unavailable: {}", e);
-            return None;
+    let result = CudaDevice::new(0).and_then(|device| {
+        let device = Arc::new(device);
+        let memory = Arc::new(GpuMemoryManager::new(
+            Arc::clone(&device),
+            MemoryBudget::with_limit(1024 * 1024 * 1024),
+        ));
+        CudaKernelProvider::new(device, memory).map(Arc::new)
+    });
+
+    match result {
+        Ok(provider) => Some(provider),
+        Err(error) if std::env::var("XLOG_REQUIRE_CUDA").as_deref() == Ok("1") => {
+            panic!("XLOG_REQUIRE_CUDA=1 but CUDA provider construction failed: {error}")
         }
-    };
-    let memory = Arc::new(GpuMemoryManager::new(
-        device.clone(),
-        MemoryBudget::with_limit(1024 * 1024 * 1024),
-    ));
-    CudaKernelProvider::new(device, memory).ok().map(Arc::new)
+        Err(error) => {
+            eprintln!("Skipping: CUDA provider unavailable: {error}");
+            None
+        }
+    }
 }
 
 /// Handles produced by [`setup_provider_with_runtime`]. Exposes the
 /// provider plus the underlying [`XlogDeviceRuntime`] and the
 /// [`InMemorySink`] that captured every alloc/dealloc/reap record,
 /// so tests can both run real provider operations and inspect the
-/// resulting routing through the v0.6 stack.
+/// resulting routing through the runtime-attached allocator stack.
 #[allow(dead_code)] // not all integration test binaries use every field
 pub struct RuntimeProviderHandles {
     pub provider: Arc<CudaKernelProvider>,
@@ -36,7 +43,7 @@ pub struct RuntimeProviderHandles {
     pub sink: Arc<InMemorySink>,
 }
 
-/// Opt-in v0.6 variant of [`setup_provider`].
+/// Runtime-attached variant of [`setup_provider`].
 ///
 /// Constructs the canonical recommended runtime stack —
 /// `GlobalDeviceBudget(LoggingResource(AsyncCudaResource))` — wires
@@ -45,7 +52,7 @@ pub struct RuntimeProviderHandles {
 /// [`CudaKernelProvider::with_runtime`] (the opt-in constructor
 /// that requires a runtime-attached manager).
 ///
-/// [`setup_provider`] remains the legacy default; existing tests
+/// [`setup_provider`] remains the default; existing tests
 /// that do not need to observe runtime routing are unaffected.
 /// Tests that opt into this fixture get the same
 /// `Arc<CudaKernelProvider>` shape they are used to, plus the

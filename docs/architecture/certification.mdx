@@ -19,17 +19,21 @@ over a bare number.
 
 ## Validation Layers
 
-The four layers below run in different places and prove different things.
+The layers below run in different places and prove different things.
 
 | Layer | Where it runs | What it proves |
 | --- | --- | --- |
 | GitHub CI | GitHub-hosted runners | Formatting, workflow hygiene, package metadata, no-GPU CUDA build, and non-GPU checks. |
+| Targeted native Python CI | Self-hosted CUDA runner after pushes to `main`, or a maintainer dispatch from `main` for a reviewed full commit SHA | Installed-wheel relation provenance and membership-mask behavior on a real GPU without exposing the persistent host to automatic pull-request code. |
 | Docs site CI | GitHub Actions for `docs/**` | Mintlify validation, broken-link checks, and static export publication. |
 | GPU release validation | Maintainer-run CUDA host | Actual CUDA behavior through `scripts/validate_release_gpu.sh`. |
 | Subsystem reliability gates | Subsystem-specific suites | Statistical or staged reliability for neural-symbolic and other higher-level engines. |
 
-Green GitHub CI does not certify GPU correctness. GPU certification requires a
-CUDA machine.
+Green GitHub-hosted CI does not certify GPU correctness. The targeted
+self-hosted job exercises a focused native Python surface after merge or an
+explicit reviewed-SHA dispatch; it never runs pull-request head code
+automatically. Release certification still requires the complete manual gate on
+a CUDA machine.
 
 ## GPU Release Gate
 
@@ -50,6 +54,8 @@ The script does the following:
 - builds the workspace and `xlog-cli` release binary;
 - stages Python and CLI kernel artifacts;
 - builds the `pyxlog` wheel and CLI archive;
+- installs that exact wheel into an isolated environment and runs the native
+  relation-provenance, public-API, and callback suites with CUDA required;
 - runs `xlog-cuda-tests` certification in release mode;
 - runs a basic `xlog run` smoke command;
 - verifies that packaged artifacts include the expected kernel files.

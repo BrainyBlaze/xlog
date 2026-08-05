@@ -118,7 +118,9 @@ answered.
 
 | Exception | Raised for |
 |---|---|
-| `ValueError` | Invalid parameters: an unknown `prob_engine` (expected `exact_ddnnf` or `mc`), an unknown `sampling_method` (expected `rejection` or `evidence_clamping`), `memory_mb=0`, row counts exceeding `u32` range, and neural input shape or value validation. |
+| `ValueError` | Invalid parameters: an unknown `prob_engine` (expected `exact_ddnnf` or `mc`), an unknown `sampling_method` (expected `rejection` or `evidence_clamping`), `memory_mb=0`, row counts exceeding `u32` range, neural input shape or value validation, and exporting provenance for an unstored relation. |
+| `RelationMetadataError` (a `ValueError` subclass) | Invalid ordered roles, whole-fact provenance, insert evidence, or relation-provenance manifests. |
+| `KeyError` | `LogicRelationSession.relation(name)` or `evidence(name)` when the named relation is not currently stored. |
 | `MemoryError` | The per-call memory limit: when `memory_mb` is passed to an evaluation and the provider's allocated bytes already exceed it, the call raises before evaluating. |
 | `RuntimeError` | Any `XlogError` propagated from the engine (parse, compilation, kernel, execution, resource exhaustion — including the resident MC rejection and aggregate cap messages above), and host-output calls on a build without the `host-io` feature. |
 | `IlpConfigError` (a `ValueError` subclass) | `induce_exact(backend="python")` without `XLOG_ALLOW_PYTHON_ILP_REFERENCE=1`. The Python reference scorer exists only to cross-check results (parity-only) and is never a production path. |

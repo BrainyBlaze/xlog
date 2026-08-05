@@ -10,7 +10,13 @@ The first public support contract is:
 - NVIDIA GPU
 - CUDA Toolkit 13.x
 
-GitHub-hosted CI is non-GPU only. GPU validation happens outside GitHub Actions on a real CUDA machine. If you change CUDA kernels, GPU execution paths, packaging, or installation flows, validate on supported hardware before asking for review.
+GitHub-hosted pull-request CI is non-GPU only. The targeted CUDA workflow runs
+after qualifying changes reach `main`; a maintainer can also dispatch the
+workflow from `main` for an explicitly reviewed full commit SHA. Pull-request
+head code never runs automatically on the persistent runner. Fork code must be
+validated on an isolated CUDA host. If you change CUDA kernels, GPU execution
+paths, packaging, or installation flows, validate on supported hardware before
+asking for review.
 
 ## Local Setup
 

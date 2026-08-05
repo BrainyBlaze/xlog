@@ -11,7 +11,7 @@ use std::collections::{HashMap, HashSet};
 use std::os::raw::{c_char, c_void};
 use std::sync::Arc;
 
-use pyo3::exceptions::{PyMemoryError, PyRuntimeError, PyValueError};
+use pyo3::exceptions::{PyBufferError, PyMemoryError, PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 
@@ -44,15 +44,20 @@ mod joint_carrier;
 mod logic;
 mod neural;
 mod program;
+mod relation_metadata;
 mod training;
 mod types;
 pub(crate) use program::{
     CachedCircuit, CompiledProbProgram, HardFilter, InputSource, JoinPlan, NeuralGroup,
     QuerySignature,
 };
+use relation_metadata::RelationMetadataStore;
 
 const DLPACK_CAPSULE_NAME: &[u8] = b"dltensor\0";
 const USED_DLPACK_CAPSULE_NAME: &[u8] = b"used_dltensor\0";
+// Every pyxlog DLPack import is consumed on CudaDevice's legacy default
+// stream. The Python Array API reserves integer 1 for that CUDA stream.
+const DLPACK_CUDA_LEGACY_DEFAULT_STREAM: i64 = 1;
 
 #[cfg(feature = "arrow-device-import")]
 const ARROW_DEVICE_ARRAY_CAPSULE_NAME: &[u8] = b"arrow_device_array\0";
@@ -340,16 +345,21 @@ pub(crate) fn dlpack_from_py(obj: &Bound<'_, PyAny>) -> PyResult<DlpackManagedTe
     {
         obj.clone()
     } else if obj.hasattr("__dlpack__")? {
-        match obj.call_method0("__dlpack__") {
-            Ok(v) => v,
-            Err(err) => {
-                if err.is_instance_of::<pyo3::exceptions::PyTypeError>(py) {
-                    obj.call_method1("__dlpack__", (py.None(),))?
-                } else {
-                    return Err(err);
-                }
-            }
+        let (device_type, device_id): (i32, i32) =
+            obj.call_method0("__dlpack_device__")?.extract()?;
+        if device_type != xlog_cuda::dlpack::K_DLCUDA {
+            return Err(PyBufferError::new_err(format!(
+                "Unsupported DLPack producer device type {device_type} (device {device_id}); \
+                 XLOG requires CUDA device memory (kDLCUDA=2)"
+            )));
         }
+        // Passing the consumer stream makes the producer order any pending
+        // non-default-stream writes before XLOG reads the tensor. A raw
+        // capsule cannot negotiate synchronization and must already be ready
+        // for the legacy default stream when supplied by the caller.
+        let kwargs = PyDict::new(py);
+        kwargs.set_item("stream", DLPACK_CUDA_LEGACY_DEFAULT_STREAM)?;
+        obj.call_method("__dlpack__", (), Some(&kwargs))?
     } else {
         return Err(PyValueError::new_err(
             "Expected a DLPack capsule or an object with __dlpack__",
@@ -594,6 +604,7 @@ pub struct LogicRelationSession {
     pub(crate) relation_callbacks: Vec<RelationChangeCallback>,
     pub(crate) next_relation_callback_id: u64,
     pub(crate) relation_generations: HashMap<String, u64>,
+    pub(crate) relation_metadata: RelationMetadataStore,
 }
 
 pub(crate) struct RelationChangeCallback {
@@ -829,6 +840,7 @@ fn pyxlog(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<LogicProgram>()?;
     m.add_class::<CompiledLogicProgram>()?;
     m.add_class::<LogicRelationSession>()?;
+    m.add_class::<relation_metadata::RelationEvidence>()?;
     m.add_class::<LogicQueryResult>()?;
     m.add_class::<LogicEvalResult>()?;
     m.add_class::<McDeviceEvalResult>()?;
@@ -858,6 +870,10 @@ fn pyxlog(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add(
         "SolverResourceExhausted",
         _py.get_type::<joint_carrier::SolverResourceExhausted>(),
+    )?;
+    m.add(
+        "RelationMetadataError",
+        _py.get_type::<relation_metadata::RelationMetadataError>(),
     )?;
     m.add("SOLVER_ABI_IDENTITY", xlog_cuda::SOLVER_ABI_IDENTITY)?;
     Ok(())

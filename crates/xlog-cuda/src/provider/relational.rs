@@ -4968,6 +4968,11 @@ impl super::CudaKernelProvider {
     /// a matching row exists in `build` (by the specified key columns).
     /// Returns a `Vec<bool>` of length = probe row count.
     /// This downloads only num_probe bytes (the mask), NOT column data.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when membership computation fails or when strict
+    /// deterministic device-to-host policy rejects the mask download.
     pub fn membership_mask(
         &self,
         probe: &CudaBuffer,
@@ -4981,10 +4986,7 @@ impl super::CudaKernelProvider {
             return Ok(Vec::new());
         }
         let mut host_mask = vec![0u8; num_probe];
-        self.device
-            .inner()
-            .dtoh_sync_copy_into(&d_has_match, &mut host_mask)
-            .map_err(|e| XlogError::Kernel(format!("Failed to download membership mask: {}", e)))?;
+        self.dtoh_sync_copy_into_tracked(&d_has_match, &mut host_mask)?;
         Ok(host_mask.into_iter().map(|b| b != 0).collect())
     }
 

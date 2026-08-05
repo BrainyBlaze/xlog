@@ -1,4 +1,7 @@
 """Shared test fixtures for ILP tests."""
+
+import os
+
 import pytest
 
 
@@ -11,15 +14,18 @@ def _cuda_available_for_pyxlog() -> bool:
     """
     try:
         import torch
+
         if not torch.cuda.is_available():
             return False
     except ImportError:
         return False
     try:
         import pyxlog
+
         prog = pyxlog.IlpProgramFactory.compile(
             "edge(1,2). learnable(W) :: r(X,Y) :- b1(X,Z), b2(Z,Y).",
-            device=0, memory_mb=64,
+            device=0,
+            memory_mb=64,
         )
         _ = prog.ilp_schema_size()
         return True
@@ -34,4 +40,8 @@ _PYXLOG_CUDA_OK = _cuda_available_for_pyxlog()
 def skip_unless_pyxlog_cuda():
     """Call at module level to skip the entire file if CUDA is not usable."""
     if not _PYXLOG_CUDA_OK:
+        if os.environ.get("XLOG_REQUIRE_CUDA") == "1":
+            raise RuntimeError(
+                "XLOG_REQUIRE_CUDA=1 but CUDA is not available to pyxlog"
+            )
         pytest.skip("CUDA not available for pyxlog (cudarc)", allow_module_level=True)
