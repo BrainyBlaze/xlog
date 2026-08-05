@@ -7,9 +7,21 @@
 //! and an externally-owned column offered as a carrier buffer is a
 //! typed refusal, not a silent downgrade.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 
 use xlog_cuda::{CarrierError, CudaDevice, JointConstraintCarrier};
+
+/// Serializes the tests in this binary. `mem_get_info` is device-wide:
+/// a sibling test's first-touch module load (context-lifetime driver
+/// memory) or transient carrier buffers landing inside the drop-leak
+/// test's measured window read as leaks, so that measurement is only
+/// sound without concurrent GPU work in this process.
+fn carrier_test_lock() -> MutexGuard<'static, ()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
 
 /// Domain/score buffer allocation is runtime-backed: every column the
 /// carrier exposes carries a device-runtime block, which is exactly
@@ -17,6 +29,7 @@ use xlog_cuda::{CarrierError, CudaDevice, JointConstraintCarrier};
 /// the launch.
 #[test]
 fn carrier_buffers_are_runtime_backed_and_recordable() {
+    let _carrier_test_guard = carrier_test_lock();
     let Some(device) = CudaDevice::new(0).ok().map(Arc::new) else {
         eprintln!("Skipping: CUDA runtime unavailable");
         return;
@@ -51,6 +64,7 @@ fn carrier_buffers_are_runtime_backed_and_recordable() {
 /// silently rebind live buffers).
 #[test]
 fn duplicate_schema_registration_refuses_typed() {
+    let _carrier_test_guard = carrier_test_lock();
     let Some(device) = CudaDevice::new(0).ok().map(Arc::new) else {
         eprintln!("Skipping: CUDA runtime unavailable");
         return;
@@ -86,6 +100,7 @@ fn duplicate_schema_registration_refuses_typed() {
 /// so only the budget guard produces `ResourceExhausted`.
 #[test]
 fn over_budget_allocation_refuses_typed_and_leaves_device_clean() {
+    let _carrier_test_guard = carrier_test_lock();
     use xlog_core::XlogError;
 
     let Some(device) = CudaDevice::new(0).ok().map(Arc::new) else {
@@ -120,6 +135,7 @@ fn over_budget_allocation_refuses_typed_and_leaves_device_clean() {
 /// participate in a solve, and clamping would hide the caller's bug.
 #[test]
 fn zero_capacity_dimension_refuses_typed() {
+    let _carrier_test_guard = carrier_test_lock();
     let Some(device) = CudaDevice::new(0).ok().map(Arc::new) else {
         eprintln!("Skipping: CUDA runtime unavailable");
         return;
@@ -155,6 +171,7 @@ fn zero_capacity_dimension_refuses_typed() {
 /// after the cycles must recover to the pre-cycle level.
 #[test]
 fn dropping_carrier_releases_all_device_memory() {
+    let _carrier_test_guard = carrier_test_lock();
     use cudarc::driver::result::mem_get_info;
 
     let Some(device) = CudaDevice::new(0).ok().map(Arc::new) else {
@@ -243,6 +260,7 @@ fn dropping_carrier_releases_all_device_memory() {
 /// scaffolding.
 #[test]
 fn solve_label_feasibility_is_existential_on_device() {
+    let _carrier_test_guard = carrier_test_lock();
     use xlog_cuda::{FuelMeter, SOLVER_ABI_IDENTITY};
 
     let Some(device) = CudaDevice::new(0).ok().map(Arc::new) else {
@@ -312,6 +330,7 @@ fn solve_label_feasibility_is_existential_on_device() {
 /// outside the label universe. No path silently proceeds.
 #[test]
 fn solve_prerequisites_refuse_typed_in_order() {
+    let _carrier_test_guard = carrier_test_lock();
     use xlog_cuda::{FuelMeter, SOLVER_ABI_IDENTITY};
 
     let Some(device) = CudaDevice::new(0).ok().map(Arc::new) else {
@@ -374,6 +393,7 @@ fn solve_prerequisites_refuse_typed_in_order() {
 /// — no partial emission of any kind.
 #[test]
 fn solve_beyond_fuel_refuses_without_partial_emission() {
+    let _carrier_test_guard = carrier_test_lock();
     use xlog_cuda::{FuelMeter, SolverError, SOLVER_ABI_IDENTITY};
 
     let Some(device) = CudaDevice::new(0).ok().map(Arc::new) else {
@@ -441,6 +461,7 @@ fn solve_beyond_fuel_refuses_without_partial_emission() {
 /// margin is best minus runner-up, and fuel accounts both stages.
 #[test]
 fn top2_consumes_feasibility_across_streams_exactly() {
+    let _carrier_test_guard = carrier_test_lock();
     use xlog_cuda::{FuelMeter, SOLVER_ABI_IDENTITY};
 
     let Some(device) = CudaDevice::new(0).ok().map(Arc::new) else {
@@ -514,6 +535,7 @@ fn top2_consumes_feasibility_across_streams_exactly() {
 /// a tied maximum is exactly the ID-tie-break the law prohibits.
 #[test]
 fn tied_maximum_flags_ambiguity_never_unique() {
+    let _carrier_test_guard = carrier_test_lock();
     use xlog_cuda::{FuelMeter, SOLVER_ABI_IDENTITY};
 
     let Some(device) = CudaDevice::new(0).ok().map(Arc::new) else {
@@ -574,6 +596,7 @@ fn tied_maximum_flags_ambiguity_never_unique() {
 /// claimed authority.
 #[test]
 fn fresh_session_buffers_read_back_zero() {
+    let _carrier_test_guard = carrier_test_lock();
     let Some(device) = CudaDevice::new(0).ok().map(Arc::new) else {
         eprintln!("Skipping: CUDA runtime unavailable");
         return;
@@ -619,6 +642,7 @@ fn fresh_session_buffers_read_back_zero() {
 /// component-exact. A per-candidate argmax substitute dies here.
 #[test]
 fn component_solve_rejects_jointly_infeasible_greedy_maximum() {
+    let _carrier_test_guard = carrier_test_lock();
     use xlog_cuda::{candidate_components, FuelMeter, SOLVER_ABI_IDENTITY};
 
     let Some(device) = CudaDevice::new(0).ok().map(Arc::new) else {
@@ -719,6 +743,7 @@ fn component_solve_rejects_jointly_infeasible_greedy_maximum() {
 /// stream handle refuses typed.
 #[test]
 fn noted_producer_stream_orders_async_writes_before_solve() {
+    let _carrier_test_guard = carrier_test_lock();
     use xlog_cuda::{FuelMeter, SOLVER_ABI_IDENTITY};
 
     let Some(device) = CudaDevice::new(0).ok().map(Arc::new) else {
@@ -818,6 +843,7 @@ fn noted_producer_stream_orders_async_writes_before_solve() {
 /// and a null stream handle refuses typed.
 #[test]
 fn consumer_stream_registration_is_one_shot_and_cleared_on_failure() {
+    let _carrier_test_guard = carrier_test_lock();
     use xlog_cuda::{FuelMeter, SOLVER_ABI_IDENTITY};
 
     let Some(device) = CudaDevice::new(0).ok().map(Arc::new) else {
@@ -910,6 +936,7 @@ fn consumer_stream_registration_is_one_shot_and_cleared_on_failure() {
 /// device memory. Healthy rows in the same batch stay unaffected.
 #[test]
 fn corrupt_pair_index_poisons_its_row_only() {
+    let _carrier_test_guard = carrier_test_lock();
     use xlog_cuda::{FuelMeter, SOLVER_ABI_IDENTITY};
 
     let Some(device) = CudaDevice::new(0).ok().map(Arc::new) else {
@@ -986,6 +1013,7 @@ fn corrupt_pair_index_poisons_its_row_only() {
 /// not populated the feasible sets it consumes.
 #[test]
 fn top2_before_feasibility_refuses_typed() {
+    let _carrier_test_guard = carrier_test_lock();
     use xlog_cuda::{FuelMeter, SOLVER_ABI_IDENTITY};
 
     let Some(device) = CudaDevice::new(0).ok().map(Arc::new) else {
@@ -1012,6 +1040,7 @@ fn top2_before_feasibility_refuses_typed() {
 /// metadata, never a new owner.
 #[test]
 fn export_shares_allocation_identity_and_stays_recorder_acceptable() {
+    let _carrier_test_guard = carrier_test_lock();
     use xlog_cuda::{CarrierBufferId, CudaColumn, DlpackManagedTensor};
 
     let Some(device) = CudaDevice::new(0).ok().map(Arc::new) else {
@@ -1072,6 +1101,7 @@ fn export_shares_allocation_identity_and_stays_recorder_acceptable() {
 /// assertions above are vacuous.
 #[test]
 fn external_column_shows_inverse_ownership_signature() {
+    let _carrier_test_guard = carrier_test_lock();
     use xlog_cuda::DlpackManagedTensor;
 
     let Some(device) = CudaDevice::new(0).ok().map(Arc::new) else {
@@ -1102,6 +1132,7 @@ fn external_column_shows_inverse_ownership_signature() {
 /// joint reasoning produces the wrong optimum and fails the oracle.
 #[test]
 fn memoized_solve_matches_oracle_beyond_enumeration_capacity() {
+    let _carrier_test_guard = carrier_test_lock();
     use xlog_cuda::{candidate_components, FuelMeter, SOLVER_ABI_IDENTITY};
 
     let Some(device) = CudaDevice::new(0).ok().map(Arc::new) else {
@@ -1353,6 +1384,7 @@ fn brute_force_chain_oracle(domains: &[u64], pairs: &[(u32, u32)], scores: &[f32
 /// the registered consumer stream, consuming the registration.
 #[test]
 fn memoized_stage_clears_and_hands_off_consumer_registrations() {
+    let _carrier_test_guard = carrier_test_lock();
     use xlog_cuda::{FuelMeter, SOLVER_ABI_IDENTITY};
 
     let Some(device) = CudaDevice::new(0).ok().map(Arc::new) else {

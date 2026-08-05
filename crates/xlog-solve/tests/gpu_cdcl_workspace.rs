@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 
 use xlog_core::MemoryBudget;
 use xlog_cuda::{CudaDevice, CudaKernelProvider, GpuMemoryManager};
@@ -7,6 +7,18 @@ use xlog_solve::{
     Clause, GpuCdclConfig, GpuCdclSolver, GpuCnf, GpuSolverProductionAdapter, Literal,
     SolveInstance,
 };
+
+/// Serializes the tests in this binary. Concurrent CDCL solves from
+/// parallel test threads share one CUDA context and interleave on the
+/// solver launch path; measured on an A40, that intermittently corrupts
+/// a sibling's status readback (expected 0, observed 511). One solve at
+/// a time keeps each workspace's status channel unambiguous.
+fn solver_test_lock() -> MutexGuard<'static, ()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
 
 fn try_provider() -> Option<Arc<CudaKernelProvider>> {
     let device = match CudaDevice::new(0) {
@@ -34,6 +46,7 @@ fn try_provider() -> Option<Arc<CudaKernelProvider>> {
 /// the same device buffers (no reallocation).
 #[test]
 fn test_workspace_reuse_two_solves() {
+    let _solver_test_guard = solver_test_lock();
     let Some(provider) = try_provider() else {
         return;
     };
@@ -91,6 +104,7 @@ fn test_workspace_reuse_two_solves() {
 /// a CNF that exceeds its var_cap.
 #[test]
 fn test_workspace_capacity_overflow() {
+    let _solver_test_guard = solver_test_lock();
     let Some(provider) = try_provider() else {
         return;
     };
@@ -126,6 +140,7 @@ fn test_workspace_capacity_overflow() {
 /// returns UNSAT on a trivially unsatisfiable CNF.
 #[test]
 fn test_workspace_decision_ranges_ws() {
+    let _solver_test_guard = solver_test_lock();
     let Some(provider) = try_provider() else {
         return;
     };
@@ -168,6 +183,7 @@ fn test_workspace_decision_ranges_ws() {
 /// without performing any CDCL work. The workspace buffers remain untouched.
 #[test]
 fn test_workspace_gated_ws_compile_not_needed() {
+    let _solver_test_guard = solver_test_lock();
     let Some(provider) = try_provider() else {
         return;
     };
@@ -205,6 +221,7 @@ fn test_workspace_gated_ws_compile_not_needed() {
 
 #[test]
 fn production_adapter_counts_real_gpu_sat_unsat_workspace_paths() {
+    let _solver_test_guard = solver_test_lock();
     let Some(provider) = try_provider() else {
         return;
     };
