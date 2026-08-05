@@ -34,6 +34,12 @@ const XLOG_TY_F64: u8 = 5;
 const XLOG_TY_BOOL: u8 = 6;
 const XLOG_TY_SYMBOL: u8 = 7;
 const SMALL_FULL_ROW_SORT_MAX_ROWS: usize = 1024;
+// Per-chunk byte budget for the multiway union fold. Bounds peak device
+// memory (the concat and sort workspace scale with one chunk plus the
+// deduplicated accumulator, not with the sum of all raw contributions) and
+// keeps every per-column chunk concat far inside the u32 byte range the
+// copy/permutation kernels index with.
+const UNION_MANY_CHUNK_BYTES: usize = 1 << 30;
 
 #[inline]
 fn scalar_type_code_dedup(ty: ScalarType) -> u8 {
@@ -768,16 +774,23 @@ impl super::CudaKernelProvider {
     /// GPU-native N-way union (no host roundtrip)
     ///
     /// Computes the deduplicated union of all inputs entirely on the GPU:
-    /// 1. Concatenate all non-empty inputs once
-    /// 2. Sort the concatenated result
-    /// 3. Deduplicate using existing dedup()
+    /// concatenate the non-empty inputs, then sort and deduplicate the
+    /// combined relation once per chunk.
     ///
     /// Semantically equivalent to left-folding [`Self::union_gpu`] over
-    /// `inputs`, but sorts and deduplicates the combined relation exactly
+    /// `inputs`, but sorts and deduplicates each combined chunk exactly
     /// once instead of re-sorting a growing accumulator per input. For R
     /// inputs of similar size this reduces the total work from O(R² · rows)
     /// to O(R · rows · log), which is what keeps many-rule predicate heads
     /// (one contribution per rule) from going quadratic.
+    ///
+    /// Inputs are processed in byte-bounded chunks
+    /// ([`UNION_MANY_CHUNK_BYTES`], plus the deduplicated accumulator per
+    /// chunk): peak device memory is bounded by the chunk budget rather than
+    /// the sum of all raw contributions, and every per-chunk concat stays
+    /// far inside the `u32` byte range the copy/permutation kernels index
+    /// with. A batch that fits the budget — the common case — is one chunk
+    /// and behaves exactly like a single concat + sort + dedup.
     ///
     /// # Arguments
     /// * `inputs` - Buffers to union; at least one is required
@@ -804,13 +817,11 @@ impl super::CudaKernelProvider {
         }
 
         let schema = first.schema().clone();
-        let mut total_rows = 0usize;
-        let mut non_empty: Vec<&CudaBuffer> = Vec::with_capacity(inputs.len());
+        let mut non_empty: Vec<(&CudaBuffer, usize)> = Vec::with_capacity(inputs.len());
         for input in inputs {
             let rows = self.device_row_count(input)?;
             if rows > 0 {
-                total_rows = total_rows.saturating_add(rows);
-                non_empty.push(input);
+                non_empty.push((input, rows));
             }
         }
 
@@ -829,31 +840,86 @@ impl super::CudaKernelProvider {
         // Set semantics require dedup even for a single non-empty input.
         let key_cols: Vec<usize> = (0..schema.arity()).collect();
         if non_empty.len() == 1 {
-            return self.dedup(non_empty[0], &key_cols);
+            return self.dedup(non_empty[0].0, &key_cols);
         }
 
-        let concat = if non_empty.len() == 2 {
-            self.concat_buffers_gpu(non_empty[0], non_empty[1])?
+        let row_bytes: usize = (0..schema.arity())
+            .map(|c| schema.column_type(c).map(|t| t.size_bytes()).unwrap_or(4))
+            .sum::<usize>()
+            .max(1);
+        let budget_rows = (UNION_MANY_CHUNK_BYTES / row_bytes).max(1);
+
+        // Fold byte-bounded chunks: each pass unions the accumulated result
+        // with the next slice of inputs. The accumulator is deduplicated
+        // between passes, so peak memory tracks |dedup| + chunk budget, not
+        // the sum of raw contributions.
+        let mut acc: Option<CudaBuffer> = None;
+        let mut idx = 0usize;
+        while idx < non_empty.len() {
+            let mut chunk: Vec<&CudaBuffer> = Vec::new();
+            let mut chunk_rows = 0usize;
+            if let Some(acc_buf) = acc.as_ref() {
+                chunk_rows = self.device_row_count(acc_buf)?;
+                chunk.push(acc_buf);
+            }
+            // Always take at least one input per pass so the fold advances
+            // even when a single contribution exceeds the budget.
+            let mut taken = 0usize;
+            while idx < non_empty.len() {
+                let (input, rows) = non_empty[idx];
+                if taken > 0 && chunk_rows.saturating_add(rows) > budget_rows {
+                    break;
+                }
+                chunk.push(input);
+                chunk_rows = chunk_rows.saturating_add(rows);
+                idx += 1;
+                taken += 1;
+            }
+            acc = Some(self.union_chunk_gpu(&chunk, chunk_rows, &key_cols)?);
+        }
+        Ok(acc.expect("at least one non-empty input was folded"))
+    }
+
+    /// Union one chunk of non-empty, type-compatible buffers: concatenate,
+    /// then sort + dedup once. Callers guarantee at least one input and
+    /// `chunk_rows` equal to the sum of the inputs' logical row counts.
+    fn union_chunk_gpu(
+        &self,
+        inputs: &[&CudaBuffer],
+        chunk_rows: usize,
+        key_cols: &[usize],
+    ) -> Result<CudaBuffer> {
+        if inputs.len() == 1 {
+            return self.dedup(inputs[0], key_cols);
+        }
+        let concat = if inputs.len() == 2 {
+            self.concat_buffers_gpu(inputs[0], inputs[1])?
         } else {
-            self.concat_many_buffers_gpu(&non_empty, total_rows)?
+            self.concat_many_buffers_gpu(inputs, chunk_rows)?
         };
-        if Self::use_csm_cuda_graph_env()
-            && schema.arity() > 1
-            && total_rows <= SMALL_FULL_ROW_SORT_MAX_ROWS
-        {
+        if inputs[0].schema().arity() > 1 {
+            // Full-row dedup sorts internally (including the env-gated
+            // small-row CUDA-graph path that `dedup_sorted` would route
+            // multi-column full-row keys through anyway); a pre-sort here
+            // would be computed and then discarded.
             return self.dedup_full_row_deterministic(&concat);
         }
-
-        let sorted = self.sort(&concat, &key_cols)?;
-        self.dedup_sorted(&sorted, &key_cols)
+        let sorted = self.sort(&concat, key_cols)?;
+        self.dedup_sorted(&sorted, key_cols)
     }
 
     /// Concatenate three or more non-empty buffers into one, column by column.
     ///
     /// Allocates each output column once at the combined size and fills it
-    /// with device-to-device copies at row offsets, so the copy volume is
-    /// linear in the total rows regardless of input count (chaining the
-    /// pairwise concat would re-copy the growing prefix per input).
+    /// with async device-to-device copies at row offsets (one synchronize
+    /// after all columns are enqueued), so the copy volume is linear in the
+    /// total rows regardless of input count (chaining the pairwise concat
+    /// would re-copy the growing prefix per input).
+    ///
+    /// Per-column byte counts are checked through `u32::try_from`, mirroring
+    /// the pairwise concat's fail-closed cap: downstream sort/permutation
+    /// kernels index bytes with `u32`, so a column past 4 GiB must be a
+    /// clean error, never a silent wrap.
     ///
     /// Callers guarantee: at least two inputs, all schemas type-compatible,
     /// every input non-empty, and `total_rows` equal to the sum of the
@@ -887,6 +953,9 @@ impl super::CudaKernelProvider {
             let total_bytes = total_rows
                 .checked_mul(elem_size)
                 .ok_or_else(|| XlogError::Kernel("Concat: total_bytes overflow".to_string()))?;
+            u32::try_from(total_bytes).map_err(|_| {
+                XlogError::Kernel(format!("Concat: total_bytes too large: {}", total_bytes))
+            })?;
 
             let mut out_col = self.memory.alloc::<u8>(total_bytes)?;
             let mut offset = 0usize;
@@ -894,12 +963,15 @@ impl super::CudaKernelProvider {
                 let col_bytes = rows
                     .checked_mul(elem_size)
                     .ok_or_else(|| XlogError::Kernel("Concat: col_bytes overflow".to_string()))?;
+                u32::try_from(col_bytes).map_err(|_| {
+                    XlogError::Kernel(format!("Concat: col_bytes too large: {}", col_bytes))
+                })?;
                 let col = input.column(col_idx).ok_or_else(|| {
                     XlogError::Kernel(format!("Concat: column {} not found", col_idx))
                 })?;
                 let src = self.column_bytes_view(col, col_bytes)?;
                 let mut dst = out_col.slice_mut(offset..offset + col_bytes);
-                device.dtod_copy(&src, &mut dst).map_err(|e| {
+                device.dtod_copy_async(&src, &mut dst).map_err(|e| {
                     XlogError::Kernel(format!("Concat: failed to copy column: {}", e))
                 })?;
                 offset += col_bytes;

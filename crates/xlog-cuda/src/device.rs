@@ -415,6 +415,18 @@ impl CudaDeviceInner {
         self.stream.synchronize()
     }
 
+    /// Enqueue a device-to-device copy without synchronizing the stream.
+    ///
+    /// Callers batching many copies must synchronize once after the last
+    /// enqueue and before reading any destination.
+    pub fn dtod_copy_async<T, Src: DevicePtr<T>, Dst: DevicePtrMut<T>>(
+        &self,
+        src: &Src,
+        dst: &mut Dst,
+    ) -> std::result::Result<(), DriverError> {
+        self.stream.memcpy_dtod(src, dst)
+    }
+
     /// Wrap an existing CUDA device pointer in a typed cudarc slice.
     ///
     /// # Safety

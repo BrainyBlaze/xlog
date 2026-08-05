@@ -443,7 +443,89 @@ fn test_union_many_gpu_multi_column() {
     let folded_rows = read_i64_triples(&provider, &folded);
     let many_rows = read_i64_triples(&provider, &many);
     assert_eq!(many_rows, folded_rows);
-    assert_eq!(many_rows.len(), 4);
+    // Hand-pinned expectation: the full-row deterministic order sorts the
+    // four distinct triples numerically, independent of input order.
+    assert_eq!(
+        many_rows,
+        vec![(-5, 7, 8), (1, 2, 3), (3, 30, -1), (9, 0, -4)]
+    );
+}
+
+#[test]
+fn test_union_many_gpu_many_inputs_high_multiplicity() {
+    let Some(provider) = setup_provider() else {
+        eprintln!("Skipping: no CUDA device");
+        return;
+    };
+
+    // Eight inputs where every value appears in at least three of them:
+    // exercises the N-way concat with more inputs than any pairwise-shaped
+    // path and pins the exact deduplicated result by hand.
+    let inputs: Vec<Vec<u32>> = vec![
+        vec![1, 2, 3],
+        vec![2, 3, 4],
+        vec![3, 4, 5],
+        vec![4, 5, 1],
+        vec![5, 1, 2],
+        vec![1, 3, 5],
+        vec![2, 4, 1],
+        vec![5, 2, 3],
+    ];
+    let schema = Schema::new(vec![("val".to_string(), ScalarType::U32)]);
+    let buffers: Vec<CudaBuffer> = inputs
+        .iter()
+        .map(|data| {
+            provider
+                .create_buffer_from_slice::<u32>(data, schema.clone())
+                .unwrap()
+        })
+        .collect();
+
+    let refs: Vec<&CudaBuffer> = buffers.iter().collect();
+    let many = provider.union_many_gpu(&refs).unwrap();
+    let many_data = provider.download_column::<u32>(&many, 0).unwrap();
+    assert_eq!(many_data, vec![1, 2, 3, 4, 5]);
+
+    let mut folded = provider.union_gpu(&buffers[0], &buffers[1]).unwrap();
+    for buf in &buffers[2..] {
+        folded = provider.union_gpu(&folded, buf).unwrap();
+    }
+    let folded_data = provider.download_column::<u32>(&folded, 0).unwrap();
+    assert_eq!(many_data, folded_data);
+}
+
+#[test]
+fn bounded_cuda_graph_union_many_matches_baseline() {
+    let Some(provider) = setup_provider() else {
+        eprintln!("Skipping: no CUDA device");
+        return;
+    };
+
+    // Three small multi-column inputs: in graph mode the batched union must
+    // route through the bounded CUDA-graph small-sort path and still match
+    // the baseline result byte for byte.
+    let a = buffer_i64_triples(&provider, &[(3, 30, -1), (-5, 7, 8), (3, 30, -1)]);
+    let b = buffer_i64_triples(&provider, &[(1, 2, 3), (9, 0, -4)]);
+    let c = buffer_i64_triples(&provider, &[(-5, 7, 8), (4, 4, 4), (1, 2, 3)]);
+
+    let baseline = provider.union_many_gpu(&[&a, &b, &c]).expect("baseline");
+    let baseline_rows = read_i64_triples(&provider, &baseline);
+
+    let _guard = EnvGuard::graph_mode();
+    let before = provider.small_full_row_sort_invocations();
+    let graph = provider.union_many_gpu(&[&a, &b, &c]).expect("graph union");
+    let after = provider.small_full_row_sort_invocations();
+
+    assert_eq!(read_i64_triples(&provider, &graph), baseline_rows);
+    assert_eq!(
+        baseline_rows,
+        vec![(-5, 7, 8), (1, 2, 3), (3, 30, -1), (4, 4, 4), (9, 0, -4)]
+    );
+    assert!(
+        after > before,
+        "graph-mode multiway union should route through the bounded CUDA \
+         Graph small-sort path; before={before} after={after}"
+    );
 }
 
 #[test]

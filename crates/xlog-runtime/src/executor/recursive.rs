@@ -173,6 +173,13 @@ impl Executor {
                     self.install_plain_head_batch(head, batch)?;
                 }
                 pending_head = Some(rule.head.as_str());
+            } else if !pending.is_empty() && self.body_reads_own_head(rule) {
+                // A same-head rule that reads its own head (a non-monotone
+                // singleton SCC, admitted under the probabilistic profile)
+                // must observe prior same-head contributions exactly as the
+                // sequential per-rule path did: flush before evaluating it.
+                let batch = std::mem::take(&mut pending);
+                self.install_plain_head_batch(&rule.head, batch)?;
             }
             let result = self.execute_node(&rule.body)?;
             pending.push(result);
@@ -183,23 +190,65 @@ impl Executor {
         Ok(())
     }
 
+    /// Dedup one buffer on its full row, recording a profiled "dedup" op.
+    /// Same split-borrow shape as [`Self::union_batch_profiled`].
+    fn dedup_profiled(
+        provider: &CudaKernelProvider,
+        profiler: &mut Profiler,
+        input: &CudaBuffer,
+    ) -> Result<CudaBuffer> {
+        let key_cols: Vec<usize> = (0..input.arity()).collect();
+        let input_rows = input.num_rows();
+        let start = profiler.start_op();
+        let deduped = provider.dedup(input, &key_cols)?;
+        if let Some(start) = start {
+            let mem = provider.memory().allocated_bytes();
+            profiler.record_op("dedup", input_rows, deduped.num_rows(), start, mem);
+            profiler.record_peak_memory(mem);
+        }
+        Ok(deduped)
+    }
+
+    /// Whether the rule's body reads its own head relation in a way that is
+    /// sensitive to same-pass installs. A body that IS a bare scan of the
+    /// head (`h :- h`, the planner's identity/carry rule for fact
+    /// predicates) is exempt: its scan result is always a subset of the
+    /// final merged relation, so batching cannot change the outcome. Any
+    /// other self-reading shape (negation, joins, or projections over the
+    /// head — possible only for non-monotone singleton SCCs admitted under
+    /// the probabilistic profile) must flush for sequential parity.
+    fn body_reads_own_head(&self, rule: &xlog_ir::CompiledRule) -> bool {
+        if let RirNode::Scan { rel } = &rule.body {
+            if self.get_rel_name(*rel).is_some_and(|n| n == rule.head) {
+                return false;
+            }
+        }
+        let mut scans = Vec::new();
+        Self::collect_scan_rels(&rule.body, &mut scans);
+        scans
+            .into_iter()
+            .any(|rel| self.get_rel_name(rel).is_some_and(|n| n == rule.head))
+    }
+
     /// Install one head's batched results, skipping empty contributions.
     /// Mirrors the pre-batching per-rule behavior: an existing relation is
     /// left untouched when every contribution is empty, and a lone fresh
-    /// non-empty result is deduped before install.
+    /// non-empty result is deduped before install. The store is only
+    /// mutated after the merge succeeds, so a failed union leaves the
+    /// existing relation intact.
     fn install_plain_head_batch(&mut self, head: &str, results: Vec<CudaBuffer>) -> Result<()> {
         let non_empty: Vec<&CudaBuffer> = results.iter().filter(|r| !r.is_empty()).collect();
 
-        if let Some(existing) = self.store.remove(head) {
+        if let Some(existing) = self.store.get(head) {
             if non_empty.is_empty() {
                 // No new rows for this head: leave the relation untouched.
-                self.store_put(head, existing);
                 return Ok(());
             }
             let mut union_inputs = Vec::with_capacity(non_empty.len() + 1);
-            union_inputs.push(&existing);
+            union_inputs.push(existing);
             union_inputs.extend(non_empty);
-            let merged = self.provider.union_many_gpu(&union_inputs)?;
+            let merged =
+                Self::union_batch_profiled(&self.provider, &mut self.profiler, &union_inputs)?;
             self.store_put(head, merged);
         } else if non_empty.is_empty() {
             // All contributions are empty: install an empty relation with
@@ -209,11 +258,11 @@ impl Executor {
             })?;
             self.store_put(head, first);
         } else if non_empty.len() == 1 {
-            let key_cols: Vec<usize> = (0..non_empty[0].arity()).collect();
-            let deduped = self.provider.dedup(non_empty[0], &key_cols)?;
+            let deduped = Self::dedup_profiled(&self.provider, &mut self.profiler, non_empty[0])?;
             self.store_put(head, deduped);
         } else {
-            let merged = self.provider.union_many_gpu(&non_empty)?;
+            let merged =
+                Self::union_batch_profiled(&self.provider, &mut self.profiler, &non_empty)?;
             self.store_put(head, merged);
         }
         Ok(())
@@ -223,16 +272,23 @@ impl Executor {
     /// profiled multiway union. Each entry's flag records whether the
     /// route's output is already sorted+deduped, so a lone fresh WCOJ
     /// result installs without a redundant dedup pass, mirroring the
-    /// per-route install behavior.
+    /// per-route install behavior. The store is only mutated after the
+    /// merge succeeds, so a failed union leaves the existing relation
+    /// intact.
     fn install_dispatched_head_batch(
         &mut self,
         head: &str,
         results: Vec<(CudaBuffer, bool)>,
     ) -> Result<()> {
-        // Union with existing result if predicate already has data
-        if let Some(existing) = self.store.remove(head) {
+        // Union with existing result if the predicate already has rows. An
+        // existing empty relation (e.g. a pre-seeded schema buffer)
+        // contributes nothing, so it takes the fresh-install path — which
+        // is what lets a lone already-deduped WCOJ result skip the
+        // redundant dedup in production runs.
+        let existing = self.store.get(head).filter(|buf| !buf.is_empty());
+        if let Some(existing) = existing {
             let mut union_inputs: Vec<&CudaBuffer> = Vec::with_capacity(results.len() + 1);
-            union_inputs.push(&existing);
+            union_inputs.push(existing);
             union_inputs.extend(results.iter().map(|(buf, _)| buf));
             let merged =
                 Self::union_batch_profiled(&self.provider, &mut self.profiler, &union_inputs)?;
@@ -242,22 +298,12 @@ impl Executor {
             if already_deduped || result.is_empty() {
                 self.store_put(head, result);
             } else {
-                let key_cols: Vec<usize> = (0..result.arity()).collect();
-                let dedup_input_rows = result.num_rows();
-                let start = self.profiler.start_op();
-                let deduped = self.provider.dedup(&result, &key_cols)?;
-                if let Some(start) = start {
-                    let mem = self.provider.memory().allocated_bytes();
-                    self.profiler.record_op(
-                        "dedup",
-                        dedup_input_rows,
-                        deduped.num_rows(),
-                        start,
-                        mem,
-                    );
-                    self.profiler.record_peak_memory(mem);
-                }
-                self.store_put(head, deduped);
+                // Set semantics for a lone raw result: a single-input
+                // multiway union (internally one dedup), recorded as a
+                // "union" op like the union-with-empty install it replaces.
+                let merged =
+                    Self::union_batch_profiled(&self.provider, &mut self.profiler, &[&result])?;
+                self.store_put(head, merged);
             }
         } else {
             let union_inputs: Vec<&CudaBuffer> = results.iter().map(|(buf, _)| buf).collect();
@@ -310,6 +356,15 @@ impl Executor {
                                 self.install_dispatched_head_batch(head, batch)?;
                             }
                             pending_head = Some(rule.head.as_str());
+                        } else if !pending.is_empty() && self.body_reads_own_head(rule) {
+                            // A same-head rule that reads its own head (a
+                            // non-monotone singleton SCC, admitted under the
+                            // probabilistic profile) must observe prior
+                            // same-head contributions exactly as the
+                            // sequential per-rule path did: flush before
+                            // evaluating it.
+                            let batch = std::mem::take(&mut pending);
+                            self.install_dispatched_head_batch(&rule.head, batch)?;
                         }
 
                         // Route two-atom ChainJoin bodies before the
@@ -717,7 +772,11 @@ impl Executor {
                         // Novel sets are deduped per rule, not across rules,
                         // so a multi-rule head still unions its novel batch.
                         let union_inputs: Vec<&CudaBuffer> = novel_bufs.iter().collect();
-                        self.provider.union_many_gpu(&union_inputs)?
+                        Self::union_batch_profiled(
+                            &self.provider,
+                            &mut self.profiler,
+                            &union_inputs,
+                        )?
                     }
                 } else if !raw_bufs.is_empty() {
                     let delta_raw = if raw_bufs.len() == 1 {

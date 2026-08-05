@@ -112,11 +112,11 @@ out(X) :- in7(X).
     let stats = result.stats.expect("stats");
     let totals = op_totals(&stats);
     let union_ops = totals.get("union").copied().unwrap_or_default().0;
-    // Every declared relation is pre-seeded with an empty buffer, so each
-    // single-rule SCC (8 fact predicates + 1 query rule) records one union
-    // when it merges into its pre-seeded relation, and the eight-rule `out`
-    // head records exactly one multiway union. Before batching, `out` alone
-    // recorded eight unions (17 total).
+    // Every declared relation is pre-seeded with an empty buffer, which the
+    // install path treats as row-free: each single-rule SCC (8 fact
+    // predicates + 1 query rule) records one single-input union on its lone
+    // fresh result, and the eight-rule `out` head records exactly one
+    // multiway union. Before batching, `out` alone recorded eight unions.
     assert_eq!(
         union_ops,
         8 + 1 + 1,
@@ -214,12 +214,12 @@ path(X, Z) :- path(X, Y), e2(Y, Z).
     let num_rules = recursive_stratum.num_rules;
     let iterations = recursive_stratum.iterations;
     // The stratum holds 26 rules: 12 facts, 13 `path` rules, 1 query rule.
-    // Each single-rule SCC (12 facts + 1 query) merges once into its
-    // pre-seeded relation; the recursive `path` SCC seeds all 13 rule
-    // contributions in one multiway union and then merges one non-empty
-    // delta per productive iteration (the final iteration converges without
-    // a merge). Before batching, the seeding pass alone recorded one union
-    // per `path` rule (~27 total).
+    // Each single-rule SCC (12 facts + 1 query) records one single-input
+    // union on its lone fresh result; the recursive `path` SCC seeds all 13
+    // rule contributions in one multiway union and then merges one
+    // non-empty delta per productive iteration (the final iteration
+    // converges without a merge). Before batching, the seeding pass alone
+    // recorded one union per `path` rule.
     assert_eq!(
         union_ops,
         12 + 1 + 1 + (iterations - 1),

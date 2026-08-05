@@ -765,20 +765,11 @@ impl Executor {
         for (k, buffers) in bufs_by_k {
             let (_, target_name) = &rel_index[k as usize];
 
-            // Chain-union all buffers (union_gpu takes &CudaBuffer refs)
-            let union_buf = if buffers.len() == 1 {
-                // Single buffer: union with an empty buffer to produce a copy
-                let empty = self
-                    .provider
-                    .create_empty_buffer(buffers[0].schema().clone())?;
-                self.provider.union_gpu(buffers[0], &empty)?
-            } else {
-                let mut acc = self.provider.union_gpu(buffers[0], buffers[1])?;
-                for buf in &buffers[2..] {
-                    acc = self.provider.union_gpu(&acc, buf)?;
-                }
-                acc
-            };
+            // One multiway union per head instead of one union per buffer:
+            // re-sorting a growing accumulator per rule goes quadratic in
+            // rules per head. A single buffer deduplicates the same way the
+            // old union-with-empty did.
+            let union_buf = self.provider.union_many_gpu(&buffers)?;
 
             // Diff against existing and merge
             if let Some(existing) = self.store.get(target_name) {
