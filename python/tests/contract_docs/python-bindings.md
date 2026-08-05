@@ -214,8 +214,18 @@ nested `planner_telemetry`. Planner telemetry reports `cache_reused`,
 `equivalent_to_full_recompute` is `None` unless the caller opts into
 `check_equivalence=True`.
 Batch updates coalesce repeated relation mutations before runtime recompute
-using existing device-resident set operations; callback or diagnostic code must
-not materialize relation rows on the host.
+using existing device-resident set operations. Update dictionaries reject
+unknown keys before any relation is changed. A batch whose inserts and deletes
+cancel completely is a semantic no-op: `changed_relations` is `0`, no runtime
+version or callback generation advances, and no callback fires for the canceled
+relation. Callback or diagnostic code must not materialize relation rows on the
+host.
+
+If delta preparation fails after taking ownership of the derived evaluation
+cache, XLOG discards that cache and its retained session runtime. The
+authoritative relation rows and evidence remain unchanged, and the next
+`evaluate()` rebuilds derived state. This makes failure recovery safe at the
+cost of losing cache-hit and incremental-planner continuity for that attempt.
 Direct `put_relation`, `remove_relation`, or `clear_relations` calls invalidate
 the cached runtime store and make the next `evaluate()` perform a full plan
 run before later deltas can reuse it.
@@ -254,9 +264,11 @@ Callbacks are invoked synchronously while the pyxlog method holds the Python
 GIL. Registration order is callback order, and relation events are emitted in
 the caller's update order after duplicate relation names are coalesced. The
 relation-callback ordering fixture records 100 replays with identical callback
-sequences. Callback payload construction does not export DLPack tensors or
-download relation data-plane rows; use explicit `evaluate()` or
-`export_relation()` when row materialization is actually requested.
+sequences. Relations whose net batch update cancels completely are omitted from
+mixed-batch callback sequences and do not consume a generation number. Callback
+payload construction does not export DLPack tensors or download relation
+data-plane rows; use explicit `evaluate()` or `export_relation()` when row
+materialization is actually requested.
 
 #### Rule, proof, temporal, and relation provenance
 
@@ -361,6 +373,18 @@ replacement clears previous evidence, and relation removal or a session clear
 removes it. Every schema, fact-membership, and batch check completes before the
 rows, evidence, diagnostics, or callbacks mutate. Nullary provenance is rejected.
 
+Persistent replacement methods take a device-to-device snapshot of imported
+DLPack columns before committing them. Mutating a retained producer tensor after
+`put_relation`, `put_relation_with_provenance`, or
+`put_relation_from_manifest` therefore cannot change stored rows behind the
+session's versions, callbacks, or evidence. Transient evaluation inputs remain
+zero-copy.
+
+For tensor-like inputs, XLOG calls `__dlpack__(stream=1)` so a producer orders
+pending work before XLOG consumes it on CUDA's legacy default stream. Callers
+that supply a raw capsule must create it for stream `1` or synchronize its
+producer first; an already-created capsule cannot negotiate stream ordering.
+
 Membership validation runs over complete tuples on the GPU and downloads one
 boolean mask—one byte per distinct evidence fact—in one device-to-host call.
 Role-only metadata performs no membership transfer. The
@@ -372,6 +396,11 @@ a rejected mask transfer is atomic.
 `relation(name)` returns the native `RelationEvidence` snapshot.
 `evidence(name=None)` returns a deterministic `program_hash` and `relations`
 mapping. Temporal metadata remains separate from these native snapshots.
+Invalid role, whole-fact provenance, insert-evidence, or manifest input raises
+`pyxlog.RelationMetadataError`, a `ValueError` subclass. Looking up an unstored
+relation with `relation(name)` or `evidence(name)` raises `KeyError`. These
+native-backed types and operations require the bundled `pyxlog._native`
+extension.
 
 #### Provenance manifest round trips
 
@@ -389,16 +418,33 @@ The exact manifest has format `xlog.relation-provenance` and version `1`. Its
 required fields are `format`, `version`, `predicate`, `row_count`,
 `metadata_present`, `roles`, and `facts`. The predicate has `name`, `arity`, and
 the compiled `schema_sha256`. Each manifest fact has `identity`, exact `cells`,
-and fixed-shape `provenance`; friendly tuples are intentionally omitted. Missing
-and unknown dictionary fields are rejected recursively. A metadata-free manifest
+and fixed-shape `provenance`; friendly tuples are intentionally omitted. Each
+cell's `hex` value encodes the scalar's exact little-endian bytes. Missing and
+unknown dictionary fields are rejected recursively. A metadata-free manifest
 requires empty `roles` and `facts`.
 
-Import validates static manifest structure before consuming DLPack, then checks
-column shape and type, row count, and complete-fact membership before atomic
-replacement. Fact and record order and exact duplicates normalize
-deterministically. The DLPack columns are process-local, single-consumer objects;
-the JSON-compatible manifest does not contain row data and is not a
-cross-process persistence format.
+Import validates static manifest structure, compiled schema identity, and column
+count before consuming a DLPack capsule. Once column import starts, all supplied
+capsules are consumed before dtype, equal-column-length, manifest row-count, and
+whole-fact membership validation completes. A failure at any of those stages
+still leaves the target relation and evidence unchanged, but the spent source
+capsules cannot be reused. Successful import consumes every column once.
+Fact and record order and exact duplicates normalize deterministically. The
+DLPack columns are process-local, single-consumer objects; the JSON-compatible
+manifest does not contain row data and is not a cross-process persistence
+format.
+
+#### Migrating from Python-side relation evidence
+
+The native API replaces the earlier Python helper contract. The old
+`relation_schema`, source/output hash, row-hash, and decision-count keyword
+arguments are not accepted by `put_relation_with_provenance`. Pass ordered
+`roles` and complete `facts` instead; attach source, document, content hash,
+kind, and polarity to each fact's provenance records. Aggregate acceptance,
+rejection, and output counters remain application-level data rather than native
+whole-fact evidence. The returned snapshot and `evidence()` payload now contain
+native roles and facts, and unknown named reads now raise `KeyError` instead of
+returning an empty sidecar record.
 
 #### Runtime controls and diagnostics
 
@@ -1089,12 +1135,21 @@ Python exceptions are raised for errors:
 
 ```python
 try:
-    program = pyxlog.LogicProgram.compile(invalid_source)
+    session.put_relation_with_provenance(
+        "transfer", columns, roles=roles, facts=facts
+    )
+except pyxlog.RelationMetadataError as e:
+    print(f"Relation metadata rejected: {e}")
+except KeyError as e:
+    print(f"Stored relation not found: {e}")
 except ValueError as e:
     print(f"Invalid input: {e}")
 except RuntimeError as e:
     print(f"XLOG error: {e}")
 ```
+
+`relation(name)` and `evidence(name)` use `KeyError` for an unstored relation.
+`export_relation_with_provenance(name)` uses `ValueError` for the same condition.
 
 ## Memory Management
 
@@ -1166,7 +1221,10 @@ Current limitations:
 - Async evaluation, per-call memory APIs, and diagnostics APIs require this
   workspace build until the next tagged wheel publishes those surfaces
 - Pure-Python helper modules can import without `pyxlog._native`, but
-  native-backed compile/evaluate APIs still require the PyO3 extension
+  native-backed compile/evaluate APIs still require the PyO3 extension.
+  `RelationEvidence` and `RelationMetadataError` are native exports and are not
+  present in that source-only helper mode; the package stubs describe an
+  installed wheel with the extension.
 
 ## See Also
 

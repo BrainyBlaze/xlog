@@ -241,7 +241,7 @@ impl LogicRelationSession {
         dlpack_columns: &Bound<'_, PyAny>,
     ) -> PyResult<()> {
         let schema = self.relation_replacement_schema(&name)?;
-        let buffer = self.relation_replacement_buffer(&name, schema, dlpack_columns)?;
+        let buffer = self.detached_relation_replacement_buffer(&name, schema, dlpack_columns)?;
         self.commit_relation_replacement(name, buffer, RelationReplacementMetadata::Clear)
     }
 
@@ -261,7 +261,7 @@ impl LogicRelationSession {
                 "Relation '{name}' compiled argument contract is unavailable"
             ))
         })?;
-        let buffer = self.relation_replacement_buffer(&name, schema, dlpack_columns)?;
+        let buffer = self.detached_relation_replacement_buffer(&name, schema, dlpack_columns)?;
         let row_count = self
             .provider
             .validated_logical_row_count(&buffer)
@@ -302,7 +302,7 @@ impl LogicRelationSession {
         let prepared_manifest = self
             .relation_metadata
             .parse_manifest(&name, &arguments, &schema, manifest)?;
-        let buffer = self.relation_replacement_buffer(&name, &schema, dlpack_columns)?;
+        let buffer = self.detached_relation_replacement_buffer(&name, &schema, dlpack_columns)?;
         let row_count = self
             .provider
             .validated_logical_row_count(&buffer)
@@ -871,6 +871,21 @@ impl LogicRelationSession {
         )?;
         self.provider
             .from_dlpack_tensors_with_schema(schema.clone(), tensors)
+            .map_err(types::xlog_err)
+    }
+
+    fn detached_relation_replacement_buffer(
+        &self,
+        name: &str,
+        schema: &xlog_core::Schema,
+        dlpack_columns: &Bound<'_, PyAny>,
+    ) -> PyResult<xlog_cuda::CudaBuffer> {
+        // Persistent sessions own a stable snapshot. Keeping a producer-backed
+        // DLPack pointer here would let later producer writes bypass relation
+        // versions and invalidate whole-fact evidence.
+        let imported = self.relation_replacement_buffer(name, schema, dlpack_columns)?;
+        self.provider
+            .clone_buffer(&imported)
             .map_err(types::xlog_err)
     }
 

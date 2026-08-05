@@ -19,7 +19,8 @@ computation pays a device-to-host-to-device round trip before it can start.
 
 | Path | Direction | Data movement | Status |
 |---|---|---|---|
-| DLPack (per column) | Export and import | Zero-copy, stays on GPU | Stable |
+| DLPack (per column) | Export and transient import | Zero-copy, stays on GPU | Stable |
+| DLPack (per column) | Persistent session replacement | Device-to-device ownership snapshot | Stable |
 | Arrow C Device interface | Export | Zero-copy, stays on GPU | Stable |
 | Arrow C Device interface | Import | Zero-copy, stays on GPU | Experimental, feature-gated |
 | Arrow IPC stream | Export and import | Host copy — GPU to host, host to GPU | Stable |
@@ -82,6 +83,20 @@ The Rust surface mirrors this with `to_dlpack_table` for export and
 `from_dlpack_tensors` / `from_dlpack_tensors_with_schema` for import — the latter
 validates the incoming columns against a declared schema instead of inferring it.
 
+Persistent `LogicRelationSession` replacements (`put_relation`,
+`put_relation_with_provenance`, and `put_relation_from_manifest`) take one
+device-to-device snapshot after DLPack import. The session must own stable rows:
+a producer tensor remains usable under the DLPack sharing contract, so retaining
+its pointer would let later in-place writes bypass relation versions, callbacks,
+and evidence validation. Transient `evaluate(dlpack_inputs=...)` inputs remain
+zero-copy.
+
+When given a tensor-like object, XLOG requests its DLPack capsule with CUDA
+consumer stream `1`, the legacy default stream, so pending work on a producer
+stream completes before XLOG reads it. A raw capsule cannot perform that
+handshake: create it for stream `1` or synchronize its producer before passing
+it to XLOG. Capsules exported by XLOG are already ready for this consumer stream.
+
 <Warning>
 DLPack columns are contiguous 1-D device buffers. A 2-D tensor, a non-contiguous view,
 or a strided slice is not a valid column — materialize a contiguous copy on your side
@@ -117,6 +132,13 @@ snapshot = target.put_relation_from_manifest(
     exported["manifest"],
 )
 ```
+
+`target.relation("edge")` returns a native `RelationEvidence` snapshot after the
+import. Invalid role, whole-fact provenance, insert-evidence, or manifest input raises
+`pyxlog.RelationMetadataError`, a `ValueError` subclass. `relation(name)` and
+`evidence(name)` raise `KeyError` for an unstored relation, while
+`export_relation_with_provenance(name)` raises `ValueError`. These types and operations
+require the bundled `pyxlog._native` extension.
 
 The manifest has a strict, versioned shape:
 
@@ -176,10 +198,15 @@ preserved. A failed import leaves the target rows and evidence unchanged.
 
 <Warning>
 The manifest is JSON-compatible metadata, but the paired DLPack columns are process-local
-ownership objects. Each capsule can be consumed once; do not first pass the exported
-columns to another DLPack consumer and then try to import them. The capsules retain the
-device buffers even if the source session is released, but they are not cross-process or
-on-disk persistence. Use Arrow IPC when portability matters, accepting its host copy.
+ownership objects. Static manifest, schema, and column-count validation happens before
+capsule consumption. Once column import starts, every supplied capsule is consumed
+before dtype, equal-column-length, manifest row-count, and membership validation
+completes. Target replacement remains atomic on failure, but spent source capsules
+cannot be reused. Successful import consumes each capsule exactly once, so do not first
+pass the exported columns to another DLPack consumer and then try to import them. The
+capsules retain the device buffers even if the source session is released, but they are
+not cross-process or on-disk persistence. Use Arrow IPC when portability matters,
+accepting its host copy.
 </Warning>
 
 ## Arrow C Device interface — zero-copy Arrow

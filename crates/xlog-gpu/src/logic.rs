@@ -1000,6 +1000,10 @@ impl LogicProgram {
     }
 
     /// Apply relation deltas to a persistent session store through the runtime delta path.
+    ///
+    /// If preparation fails, the authoritative relation store is unchanged but
+    /// any prior derived cache consumed by preparation is discarded. The caller
+    /// must rebuild that cache on its next evaluation.
     pub fn apply_relation_deltas(
         &self,
         provider: Arc<CudaKernelProvider>,
@@ -1020,6 +1024,10 @@ impl LogicProgram {
     }
 
     /// Apply relation deltas while preserving retained session runtime state.
+    ///
+    /// If preparation fails, the authoritative relation store is unchanged but
+    /// the derived cache and retained runtime slots are left empty. The caller
+    /// must rebuild them on its next evaluation.
     pub fn apply_relation_deltas_with_session_runtime(
         &self,
         provider: Arc<CudaKernelProvider>,
@@ -1046,6 +1054,9 @@ impl LogicProgram {
     /// batch must use [`LogicProgram::prepare_relation_delta_batch`] exactly
     /// once and pass its result to
     /// [`LogicProgram::prepare_relation_delta_commit_with_session_runtime`].
+    /// The current derived cache and runtime are consumed during preparation;
+    /// on error their caller slots remain empty while the authoritative store
+    /// remains unchanged.
     pub fn prepare_relation_deltas_commit_with_session_runtime<'a>(
         &self,
         provider: Arc<CudaKernelProvider>,
@@ -1217,6 +1228,11 @@ impl LogicProgram {
     }
 
     /// Apply an ordered batch of relation deltas after device-side coalescing.
+    ///
+    /// A fully canceled batch returns a no-op report without changing the
+    /// authoritative store or advancing derived runtime state. If preparation
+    /// fails, the authoritative store remains unchanged and any consumed
+    /// derived cache is discarded.
     pub fn apply_relation_delta_batch(
         &self,
         provider: Arc<CudaKernelProvider>,
@@ -1238,6 +1254,11 @@ impl LogicProgram {
     }
 
     /// Apply an ordered batch of relation deltas while preserving session runtime state.
+    ///
+    /// A fully canceled batch returns a no-op report without changing the
+    /// authoritative store or advancing derived runtime state. If preparation
+    /// fails, the authoritative store remains unchanged while the derived cache
+    /// and retained runtime slots are left empty.
     pub fn apply_relation_delta_batch_with_session_runtime(
         &self,
         provider: Arc<CudaKernelProvider>,

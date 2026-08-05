@@ -243,6 +243,126 @@ def test_native_ternary_and_quaternary_puts_bind_evidence_to_complete_tuples():
     ]
 
 
+@pytest.mark.parametrize("method", ["plain", "provenance", "manifest"])
+def test_persistent_replacement_detaches_from_retained_dlpack_producer(method):
+    row = (1, 2, 3, 4)
+    columns = _transfer_columns(rows=(row,))
+    target = _session()
+
+    if method == "plain":
+        target.put_relation("transfer", columns)
+        expected = target.relation("transfer").provenance()
+    elif method == "provenance":
+        expected = target.put_relation_with_provenance(
+            "transfer",
+            columns,
+            roles=TRANSFER_ROLES,
+            facts=[_fact(row)],
+        )
+    elif method == "manifest":
+        source = _session()
+        expected = source.put_relation_with_provenance(
+            "transfer",
+            _transfer_columns(rows=(row,)),
+            roles=TRANSFER_ROLES,
+            facts=[_fact(row)],
+        )
+        manifest = source.export_relation_with_provenance("transfer")["manifest"]
+        assert (
+            target.put_relation_from_manifest("transfer", columns, manifest) == expected
+        )
+    else:
+        raise AssertionError(f"unhandled method {method}")
+
+    columns[0].fill_(99)
+    torch.cuda.synchronize()
+
+    assert _exported_rows(target, "transfer") == [row]
+    assert target.relation("transfer").provenance() == expected
+
+
+@pytest.mark.parametrize("method", ["plain", "provenance", "manifest"])
+def test_persistent_replacement_waits_for_non_default_dlpack_producer_stream(method):
+    program = pyxlog.LogicProgram.compile(
+        "pred value(value: i32).", device=0, memory_mb=128
+    )
+    target = program.session()
+    tensor = torch.zeros(1, device="cuda", dtype=torch.int32)
+
+    manifest = None
+    if method == "manifest":
+        source = program.session()
+        source.put_relation_with_provenance(
+            "value",
+            [torch.tensor([7], device="cuda", dtype=torch.int32)],
+            roles=[{"name": "value"}],
+            facts=[_fact((7,))],
+        )
+        manifest = source.export_relation_with_provenance("value")["manifest"]
+
+    producer = torch.cuda.Stream()
+    try:
+        with torch.cuda.stream(producer):
+            torch.cuda._sleep(1_000_000_000)
+            tensor.fill_(7)
+
+            if method == "plain":
+                target.put_relation("value", [tensor])
+            elif method == "provenance":
+                target.put_relation_with_provenance(
+                    "value",
+                    [tensor],
+                    roles=[{"name": "value"}],
+                    facts=[_fact((7,))],
+                )
+            elif method == "manifest":
+                target.put_relation_from_manifest("value", [tensor], manifest)
+            else:
+                raise AssertionError(f"unhandled method {method}")
+    finally:
+        producer.synchronize()
+
+    assert tensor.item() == 7
+    assert _exported_rows(target, "value") == [(7,)]
+
+
+def test_dlpack_object_import_requests_the_legacy_default_stream_once():
+    class Producer:
+        def __init__(self, tensor):
+            self.tensor = tensor
+            self.streams = []
+
+        def __dlpack__(self, *, stream=None):
+            self.streams.append(stream)
+            return self.tensor.__dlpack__(stream=stream)
+
+    target = _session("pred value(value: i32).")
+    producer = Producer(torch.tensor([7], device="cuda", dtype=torch.int32))
+
+    target.put_relation("value", [producer])
+
+    assert producer.streams == [1]
+    assert _exported_rows(target, "value") == [(7,)]
+
+
+def test_dlpack_object_stream_rejection_is_not_retried_without_synchronization():
+    class RejectingProducer:
+        def __init__(self):
+            self.streams = []
+
+        def __dlpack__(self, *, stream=None):
+            self.streams.append(stream)
+            raise TypeError("consumer stream rejected")
+
+    target = _session("pred value(value: i32).")
+    producer = RejectingProducer()
+
+    with pytest.raises(TypeError, match="consumer stream rejected"):
+        target.put_relation("value", [producer])
+
+    assert producer.streams == [1]
+
+
 @pytest.mark.parametrize(
     "source, relation, columns, roles, fact_values",
     [
@@ -359,6 +479,33 @@ def test_role_arity_uses_the_values_actually_iterated(iterated_count):
             "transfer", _transfer_columns(), roles=roles, facts=[]
         )
     assert session.relation("transfer").provenance()["row_count"] == 0
+
+
+def test_role_contract_failure_preserves_complete_existing_metadata_snapshot():
+    session = _session()
+    session.put_relation_with_provenance(
+        "transfer",
+        _transfer_columns(),
+        roles=TRANSFER_ROLES,
+        facts=[_fact((10, 20, 7, 1_700_000_000))],
+    )
+    before = session.relation("transfer").provenance()
+    before_rows = _exported_rows(session, "transfer")
+
+    with pytest.raises(_metadata_error(), match="expected 4 roles"):
+        session.put_relation_with_provenance(
+            "transfer",
+            _transfer_columns(rows=((90, 91, 92, 93),)),
+            roles=TRANSFER_ROLES[:-1],
+            facts=[],
+        )
+
+    after = session.relation("transfer").provenance()
+    assert after == before
+    assert after["metadata_present"] is True
+    assert after["roles"] == before["roles"]
+    assert after["facts"] == before["facts"]
+    assert _exported_rows(session, "transfer") == before_rows
 
 
 def test_positional_roles_are_stable_until_metadata_free_replacement_resets_them():
@@ -567,6 +714,43 @@ def test_float_infinity_and_f64_signed_zero_preserve_ieee_bits():
         fact for fact in f64["facts"] if fact["cells"][0]["hex"] == "0000000000000080"
     )
     assert struct.pack("<d", negative_zero["tuple"][0]) == struct.pack("<d", -0.0)
+
+
+@pytest.mark.parametrize(
+    ("tensor_bits", "fact_bits"),
+    [
+        (0x8000000000000000, 0x0000000000000000),
+        (0x7FF8000000000001, 0x7FF8000000000002),
+    ],
+)
+def test_float_membership_rejects_value_equal_different_bit_patterns_atomically(
+    tensor_bits, fact_bits
+):
+    session = _session()
+    session.put_relation_with_provenance(
+        "float64_value",
+        [torch.tensor([1.0], device="cuda", dtype=torch.float64)],
+        roles=[{"name": "value"}],
+        facts=[_fact((1.0,))],
+    )
+    before = session.relation("float64_value").provenance()
+    before_rows = _exported_rows(session, "float64_value")
+
+    signed_tensor_bits = tensor_bits if tensor_bits < 2**63 else tensor_bits - 2**64
+    tensor = torch.tensor([signed_tensor_bits], device="cuda", dtype=torch.int64).view(
+        torch.float64
+    )
+    fact = {
+        "cells": [{"type": "f64", "hex": struct.pack("<Q", fact_bits).hex()}],
+        "provenance": [_record()],
+    }
+    with pytest.raises(_metadata_error(), match="not present"):
+        session.put_relation_with_provenance(
+            "float64_value", [tensor], roles=[{"name": "value"}], facts=[fact]
+        )
+
+    assert session.relation("float64_value").provenance() == before
+    assert _exported_rows(session, "float64_value") == before_rows
 
 
 def test_integer_boundaries_and_bool_cells_round_trip_exactly():
@@ -1133,7 +1317,7 @@ def test_repeated_batch_inserts_union_lineage_and_emit_one_relation_event():
     ]
 
 
-def test_batch_prevalidates_every_entry_and_rejects_unknown_shapes_atomically():
+def test_batch_and_debug_prevalidate_entries_and_reject_unknown_shapes_atomically():
     session = _session()
     original = (1, 2, 3, 4)
     first_insert = (5, 6, 7, 8)
@@ -1172,16 +1356,21 @@ def test_batch_prevalidates_every_entry_and_rejects_unknown_shapes_atomically():
     assert session.delta_stats() == before_stats
     assert events == before_events
 
-    with pytest.raises(ValueError, match="unknown"):
-        session.apply_relation_delta_batch(
-            [
-                {
-                    "name": "transfer",
-                    "insert_columns": _transfer_columns(rows=(invalid_insert,)),
-                    "unexpected": True,
-                }
-            ]
-        )
+    for method_name in ("apply_relation_delta_batch", "apply_relation_delta_debug"):
+        with pytest.raises(ValueError, match="unknown"):
+            getattr(session, method_name)(
+                [
+                    {
+                        "name": "transfer",
+                        "insert_columns": _transfer_columns(rows=(invalid_insert,)),
+                        "unexpected": True,
+                    }
+                ]
+            )
+        assert _exported_rows(session, "transfer") == before_rows
+        assert session.evidence() == before_evidence
+        assert session.delta_stats() == before_stats
+        assert events == before_events
     with pytest.raises(_metadata_error(), match="insert_facts.*insert_columns"):
         session.apply_relation_delta_batch([{"name": "transfer", "insert_facts": []}])
     with pytest.raises(_metadata_error(), match="insert_facts.*insert_columns"):
@@ -2044,6 +2233,25 @@ def test_manifest_static_validation_does_not_consume_dlpack_capsules():
     assert list(zip(*recovered)) == [(1, 2, 3, 4)]
 
 
+def _assert_dlpack_capsules_are_consumed(columns):
+    for column in columns:
+        with pytest.raises(RuntimeError, match="capsules can be consumed only once"):
+            torch.from_dlpack(column)
+
+
+def test_successful_manifest_import_consumes_each_column_capsule_once():
+    _source, expected, exported = _transfer_manifest_export()
+    target = _session()
+
+    assert (
+        target.put_relation_from_manifest(
+            "transfer", exported["columns"], exported["manifest"]
+        )
+        == expected
+    )
+    _assert_dlpack_capsules_are_consumed(exported["columns"])
+
+
 @pytest.mark.parametrize("case", ["missing", "extra"])
 def test_manifest_column_arity_failures_do_not_consume_dlpack_capsules(case):
     _source, expected, exported = _transfer_manifest_export()
@@ -2067,6 +2275,37 @@ def test_manifest_column_arity_failures_do_not_consume_dlpack_capsules(case):
         == expected
     )
     assert _exported_rows(target, "transfer") == [(1, 2, 3, 4)]
+
+
+@pytest.mark.parametrize(
+    ("case", "message"),
+    [("dtype", "dtype"), ("row_lengths", "row counts")],
+)
+def test_manifest_column_validation_failure_is_atomic_and_consumes_all_capsules(
+    case, message
+):
+    _source, _snapshot, exported = _transfer_manifest_export()
+    tensors = _transfer_columns(rows=((1, 2, 3, 4),))
+    if case == "dtype":
+        tensors[0] = torch.tensor([1.0], device="cuda", dtype=torch.float32)
+    elif case == "row_lengths":
+        tensors[0] = torch.tensor([1, 2], device="cuda", dtype=torch.int32)
+    else:
+        raise AssertionError(f"unhandled case {case}")
+    capsules = [tensor.__dlpack__() for tensor in tensors]
+
+    target, events = _seed_manifest_import_target()
+    before_rows = _exported_rows(target, "transfer")
+    before_evidence = target.evidence()
+    before_stats = target.delta_stats()
+    with pytest.raises(RuntimeError, match=message):
+        target.put_relation_from_manifest("transfer", capsules, exported["manifest"])
+
+    assert _exported_rows(target, "transfer") == before_rows
+    assert target.evidence() == before_evidence
+    assert target.delta_stats() == before_stats
+    assert events == []
+    _assert_dlpack_capsules_are_consumed(capsules)
 
 
 @pytest.mark.parametrize("case", ["role", "identity", "nested_unknown"])
@@ -2151,6 +2390,45 @@ def test_manifest_absent_fact_membership_is_rejected_atomically():
         ],
     )
     _assert_manifest_failure_is_atomic(manifest, columns, "not present")
+
+
+@pytest.mark.parametrize(
+    ("case", "message"),
+    [("row_count", "row count"), ("membership", "not present")],
+)
+def test_manifest_failures_after_column_import_preserve_target_and_consume_capsules(
+    case, message
+):
+    _source, _snapshot, exported = _transfer_manifest_export()
+    manifest = copy.deepcopy(exported["manifest"])
+    if case == "row_count":
+        manifest["row_count"] += 1
+    elif case == "membership":
+        manifest["facts"][0]["cells"][3]["hex"] = struct.pack("<q", 5).hex()
+        manifest["facts"][0]["identity"] = _fact_identity(
+            "transfer",
+            [
+                (0, struct.pack("<I", 1)),
+                (0, struct.pack("<I", 2)),
+                (0, struct.pack("<I", 3)),
+                (3, struct.pack("<q", 5)),
+            ],
+        )
+    else:
+        raise AssertionError(f"unhandled case {case}")
+
+    target, events = _seed_manifest_import_target()
+    before_rows = _exported_rows(target, "transfer")
+    before_evidence = target.evidence()
+    before_stats = target.delta_stats()
+    with pytest.raises(_metadata_error(), match=message):
+        target.put_relation_from_manifest("transfer", exported["columns"], manifest)
+
+    assert _exported_rows(target, "transfer") == before_rows
+    assert target.evidence() == before_evidence
+    assert target.delta_stats() == before_stats
+    assert events == []
+    _assert_dlpack_capsules_are_consumed(exported["columns"])
 
 
 def test_manifest_strict_membership_gate_fails_before_any_session_mutation():

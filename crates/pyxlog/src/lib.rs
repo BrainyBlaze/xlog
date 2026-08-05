@@ -55,6 +55,9 @@ use relation_metadata::RelationMetadataStore;
 
 const DLPACK_CAPSULE_NAME: &[u8] = b"dltensor\0";
 const USED_DLPACK_CAPSULE_NAME: &[u8] = b"used_dltensor\0";
+// Every pyxlog DLPack import is consumed on CudaDevice's legacy default
+// stream. The Python Array API reserves integer 1 for that CUDA stream.
+const DLPACK_CUDA_LEGACY_DEFAULT_STREAM: i64 = 1;
 
 #[cfg(feature = "arrow-device-import")]
 const ARROW_DEVICE_ARRAY_CAPSULE_NAME: &[u8] = b"arrow_device_array\0";
@@ -342,16 +345,13 @@ pub(crate) fn dlpack_from_py(obj: &Bound<'_, PyAny>) -> PyResult<DlpackManagedTe
     {
         obj.clone()
     } else if obj.hasattr("__dlpack__")? {
-        match obj.call_method0("__dlpack__") {
-            Ok(v) => v,
-            Err(err) => {
-                if err.is_instance_of::<pyo3::exceptions::PyTypeError>(py) {
-                    obj.call_method1("__dlpack__", (py.None(),))?
-                } else {
-                    return Err(err);
-                }
-            }
-        }
+        // Passing the consumer stream makes the producer order any pending
+        // non-default-stream writes before XLOG reads the tensor. A raw
+        // capsule cannot negotiate synchronization and must already be ready
+        // for the legacy default stream when supplied by the caller.
+        let kwargs = PyDict::new(py);
+        kwargs.set_item("stream", DLPACK_CUDA_LEGACY_DEFAULT_STREAM)?;
+        obj.call_method("__dlpack__", (), Some(&kwargs))?
     } else {
         return Err(PyValueError::new_err(
             "Expected a DLPack capsule or an object with __dlpack__",

@@ -191,7 +191,12 @@ delta speedups when available, and free-text planner advice about the
 incremental-versus-full tradeoff.
 
 Relation callbacks receive the same changed-relation names and debug trace in their
-metadata payload; that path stays metadata-only too.
+metadata payload; that path stays metadata-only too. Batch update dictionaries reject
+unknown keys before mutation. If all rows for a relation cancel during coalescing,
+`changed_relations` is `0`, no callback or generation increment is emitted for that
+relation, and the retained runtime version does not advance. A preparation failure
+preserves authoritative rows and evidence but discards the derived cache and retained
+runtime, so the next evaluation rebuilds them.
 
 ## Host-transfer audits
 
@@ -249,7 +254,7 @@ session.put_relation_with_provenance(
 )
 
 session.evidence()                              # program hash + relation snapshots
-session.relation("observed_edge").provenance() # roles + complete facts + records
+session.relation("observed_edge").provenance() # native RelationEvidence snapshot
 ```
 
 **How do I know it worked.** The relation snapshot reports `metadata_present`,
@@ -263,6 +268,17 @@ deletes remove the records for the complete deleted fact; coalesced batch update
 leave evidence for canceled inserts. Plain replacement clears prior evidence, and
 relation removal or a session clear removes it. Validation failures change neither data
 nor evidence.
+
+Persistent replacement methods snapshot imported DLPack columns with a
+device-to-device copy. Later writes through a retained producer tensor cannot bypass
+relation versions or make the validated `RelationEvidence` stale; transient evaluation
+inputs remain zero-copy.
+
+Invalid role, whole-fact provenance, insert-evidence, or manifest input raises
+`pyxlog.RelationMetadataError`, a `ValueError` subclass. `session.relation(name)` and
+`session.evidence(name)` raise `KeyError` when the relation is not stored. The native
+`RelationEvidence` type, this exception, and the session operations require the bundled
+`pyxlog._native` extension.
 
 Whole-fact membership validation stays on the GPU except for one boolean result mask.
 `host_transfer_stats()` accounts for that mask as one device-to-host call and one byte
@@ -295,5 +311,6 @@ deterministic validation transfer is acceptable.
 <Note>
 The native evidence store is session-local and in-memory. Use
 `export_relation_with_provenance()` for an exact version-1 manifest paired with
-in-process DLPack columns; the manifest alone is not relation persistence.
+in-process DLPack columns, and reconstruct it with
+`put_relation_from_manifest()`. The manifest alone is not relation persistence.
 </Note>

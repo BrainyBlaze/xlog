@@ -4735,6 +4735,11 @@ impl super::CudaKernelProvider {
     /// a matching row exists in `build` (by the specified key columns).
     /// Returns a `Vec<bool>` of length = probe row count.
     /// This downloads only num_probe bytes (the mask), NOT column data.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when membership computation fails or when strict
+    /// deterministic device-to-host policy rejects the mask download.
     pub fn membership_mask(
         &self,
         probe: &CudaBuffer,

@@ -83,8 +83,9 @@ fi
 
 wheel_dir="${TMPDIR:-/tmp}/xlog-wheel-validation"
 bundle_dir="${TMPDIR:-/tmp}/xlog-cli-validation"
+python_env_dir="${TMPDIR:-/tmp}/xlog-python-validation-env"
 
-rm -rf "$wheel_dir" "$bundle_dir"
+rm -rf "$wheel_dir" "$bundle_dir" "$python_env_dir"
 mkdir -p "$wheel_dir" "$bundle_dir"
 
 cd "$repo_root"
@@ -109,6 +110,15 @@ run_cmd cargo build --workspace --locked --release --exclude pyxlog
 run_cmd cargo build --locked --release -p xlog-cli --features host-io
 run_cmd bash scripts/stage_pyxlog_kernels.sh
 run_cmd maturin build -m crates/pyxlog/Cargo.toml --release --compatibility linux --out "$wheel_dir"
+run_cmd python3 -m venv --system-site-packages "$python_env_dir"
+python_env="$python_env_dir/bin/python"
+run_cmd "$python_env" -m pip install --force-reinstall --no-deps "$wheel_dir"/pyxlog-*.whl
+run_cmd "$python_env" -c 'import pathlib, pyxlog, pytest, torch; assert torch.cuda.is_available(), "PyTorch cannot access CUDA"; native_path = pathlib.Path(pyxlog._native.__file__).resolve(); print(f"validated wheel import: native={native_path} torch={torch.__version__} cuda={torch.version.cuda} gpu={torch.cuda.get_device_name(0)} pytest={pytest.__version__}")'
+run_cmd "$python_env" -m pytest -q \
+  python/tests/test_logic_relation_provenance.py \
+  python/tests/test_relation_provenance_contract.py \
+  python/tests/test_relation_provenance_public_api.py \
+  python/tests/test_relation_callbacks_runtime.py
 run_cmd bash scripts/package_cli_release.sh --output "$bundle_dir"
 
 if [[ "$mode" == "smoke" ]]; then

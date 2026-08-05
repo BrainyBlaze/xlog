@@ -209,7 +209,7 @@ class LogicRelationSession:
     """Persistent relation session for incremental Datalog evaluation."""
 
     def put_relation(self, name: str, dlpack_columns: Any) -> None:
-        """Upload a relation as a sequence of DLPack column capsules."""
+        """Snapshot DLPack columns into a persistent session relation."""
         ...
 
     def put_relation_with_provenance(
@@ -220,7 +220,7 @@ class LogicRelationSession:
         roles: Sequence[_RelationRoleInput],
         facts: Sequence[_RelationFactInput],
     ) -> _RelationSnapshot:
-        """Replace a relation and atomically bind roles and whole-fact evidence."""
+        """Snapshot a relation and atomically bind roles and whole-fact evidence."""
         ...
 
     def put_relation_from_manifest(
@@ -229,15 +229,15 @@ class LogicRelationSession:
         dlpack_columns: Any,
         manifest: _RelationProvenanceManifest,
     ) -> _RelationSnapshot:
-        """Replace a relation from DLPack columns and an exact version-1 manifest."""
+        """Snapshot from a version-1 manifest, consuming imported DLPack capsules."""
         ...
 
     def relation(self, name: str) -> RelationEvidence:
-        """Return a stable evidence snapshot for one stored relation."""
+        """Return a stable evidence snapshot; raise KeyError when not stored."""
         ...
 
     def evidence(self, name: Optional[str] = None) -> _RelationSessionEvidence:
-        """Return deterministic evidence for one or all stored relations."""
+        """Return deterministic evidence; a missing named relation raises KeyError."""
         ...
 
     def evaluate(self, memory_mb: Optional[int] = None) -> LogicEvalResult:
@@ -276,7 +276,8 @@ class LogicRelationSession:
 
         Each update dictionary contains ``name`` plus optional
         ``insert_columns`` and ``delete_columns`` DLPack column sequences. The
-        returned stats include ``input_delta_count``,
+        dictionaries reject unknown keys. A fully canceled batch is a no-op and
+        emits no callback or generation increment. Returned stats include ``input_delta_count``,
         ``coalesced_insert_rows``, ``coalesced_delete_rows``, and
         ``canceled_rows``.
         """

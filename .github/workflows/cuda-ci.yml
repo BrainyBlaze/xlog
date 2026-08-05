@@ -1,33 +1,144 @@
 name: cuda-ci
 
 on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/cuda-ci.yml"
+      - "Cargo.lock"
+      - "Cargo.toml"
+      - "crates/**"
+      - "python/tests/conftest.py"
+      - "python/tests/test_logic_relation_provenance.py"
+      - "python/tests/test_relation_callbacks_runtime.py"
+      - "python/tests/test_relation_provenance_contract.py"
+      - "python/tests/test_relation_provenance_public_api.py"
+      - "scripts/validate_release_gpu.sh"
   workflow_dispatch:
+    inputs:
+      reviewed_sha:
+        description: Full commit SHA reviewed for execution on the persistent CUDA runner
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cuda-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  XLOG_REQUIRE_CUDA: "1"
+  TARGET_SHA: ${{ github.event_name == 'workflow_dispatch' && inputs.reviewed_sha || github.sha }}
 
 jobs:
   rust-tests:
+    if: >-
+      github.event_name == 'workflow_dispatch' &&
+      github.ref == 'refs/heads/main'
     runs-on: [self-hosted, linux, x64, cuda]
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ env.TARGET_SHA }}
+          persist-credentials: false
+      - name: Verify the reviewed commit
+        if: github.event_name == 'workflow_dispatch'
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ ! "$TARGET_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "reviewed_sha must be a full lowercase commit SHA" >&2
+            exit 1
+          fi
+          test "$(git rev-parse HEAD)" = "$TARGET_SHA"
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
       - name: Cargo test (release)
         run: cargo test --workspace --all-targets --release
 
   python-wheel:
+    if: >-
+      github.event_name == 'push' ||
+      (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')
     runs-on: [self-hosted, linux, x64, cuda]
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ env.TARGET_SHA }}
+          persist-credentials: false
+      - name: Verify the reviewed commit
+        if: github.event_name == 'workflow_dispatch'
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ ! "$TARGET_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "reviewed_sha must be a full lowercase commit SHA" >&2
+            exit 1
+          fi
+          test "$(git rev-parse HEAD)" = "$TARGET_SHA"
       - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6
         with:
           python-version: "3.11"
+      - name: Create isolated Python environment
+        run: |
+          python_env="$RUNNER_TEMP/xlog-python-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          python -m venv "$python_env"
+          echo "$python_env/bin" >> "$GITHUB_PATH"
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
-      - name: Install maturin
-        run: python -m pip install --upgrade pip maturin
-      - name: Build wheel
-        working-directory: crates/pyxlog
-        run: maturin build --release --out dist
-      - name: Install wheel
-        working-directory: crates/pyxlog
-        run: python -m pip install --force-reinstall dist/*.whl
+      - name: Install Python test dependencies
+        run: python -m pip install --upgrade pip maturin pytest pytest-timeout torch
+      - name: Require CUDA from the configured Python runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          nvidia-smi -L
+          python - <<'PY'
+          import torch
+
+          if not torch.cuda.is_available():
+              raise RuntimeError("XLOG_REQUIRE_CUDA=1 but PyTorch cannot access CUDA")
+          print("torch version:", torch.__version__)
+          print("torch CUDA:", torch.version.cuda)
+          print("GPU:", torch.cuda.get_device_name(0))
+          PY
+      - name: Build exact wheel
+        id: build-wheel
+        shell: bash
+        run: |
+          set -euo pipefail
+          wheel_dir="$RUNNER_TEMP/pyxlog-wheel-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          mkdir -p "$wheel_dir"
+          find "$wheel_dir" -maxdepth 1 -type f -name 'pyxlog-*.whl' -delete
+          maturin build \
+            --manifest-path crates/pyxlog/Cargo.toml \
+            --release \
+            --locked \
+            --out "$wheel_dir"
+          mapfile -t wheels < <(find "$wheel_dir" -maxdepth 1 -type f -name 'pyxlog-*.whl')
+          if ((${#wheels[@]} != 1)); then
+            echo "expected one pyxlog wheel, found ${#wheels[@]}" >&2
+            exit 1
+          fi
+          echo "wheel=${wheels[0]}" >> "$GITHUB_OUTPUT"
+      - name: Install exact wheel
+        run: python -m pip install --force-reinstall --no-deps "${{ steps.build-wheel.outputs.wheel }}"
+      - name: Report native module provenance
+        run: python -c 'import pathlib, pyxlog; print(pathlib.Path(pyxlog._native.__file__).resolve())'
+      - name: Run native relation provenance tests
+        run: |
+          mkdir -p test-results
+          python -m pytest -q \
+            python/tests/test_logic_relation_provenance.py \
+            python/tests/test_relation_provenance_contract.py \
+            python/tests/test_relation_provenance_public_api.py \
+            python/tests/test_relation_callbacks_runtime.py \
+            --timeout=300 \
+            --junitxml=test-results/relation-provenance.xml
+      - name: Run membership-mask transfer tests
+        run: cargo test -p xlog-cuda --test test_membership_mask --release -- --nocapture
       - name: Smoke test import + evaluate
         shell: bash
         run: |
@@ -129,3 +240,10 @@ jobs:
           assert mc_oracle_res.ci_high is not None
           assert mc_oracle_res.samples == 20000
           PY
+      - name: Upload provenance test report
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: relation-provenance-test-report
+          path: test-results/relation-provenance.xml
+          if-no-files-found: warn

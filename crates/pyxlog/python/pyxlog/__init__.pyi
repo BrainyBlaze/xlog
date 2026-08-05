@@ -1,7 +1,8 @@
 """Type stubs for the top-level ``pyxlog`` package.
 
-Everything is re-exported from :mod:`pyxlog._native`; this file exists so that
-``import pyxlog`` surfaces the same names as ``from pyxlog._native import *``.
+Installed wheels re-export everything from :mod:`pyxlog._native`; this file
+describes that complete native-backed surface. A source-only import without the
+extension exposes helper modules only and omits native types.
 """
 
 from __future__ import annotations
