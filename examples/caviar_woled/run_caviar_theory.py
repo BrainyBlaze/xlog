@@ -1184,6 +1184,13 @@ def _run_relational_ec(
             over THIS target's own (post-don't-care-exclusion) facts/labels
             -- init and term therefore get their OWN null distribution, not
             a shared one, since their label vectors and exclusions differ.
+            Residual approximation (same as `run_caviar_cv._induce_ec_target`,
+            see its docstring for the full statement): the threshold is
+            derived once from the FULL facts/labels and then applied
+            unchanged at every sequential-covering iteration, so it is
+            null-calibrated exactly for iteration 1 and a (directionally
+            conservative) approximation for residual-scored iterations
+            >= 2 -- the null is deliberately not re-derived per residual.
             Returns ``(min_fit, null_summary)``; ``null_summary`` is ``None``
             in fixed mode (nothing was derived)."""
             if args.ec_fit_mode == "fixed":

@@ -613,7 +613,14 @@ def induce_relational_theory(
     newly covers) and, by the caller, for final held-out scoring.
 
     `min_fit` defaults to 0.75, matching `kfold_select`'s own default -- the
-    two searches are meant to be compared on equal footing.
+    two searches are meant to be compared on equal footing. It is ONE
+    constant, applied unchanged at EVERY iteration -- including iterations
+    >= 2, whose scores are computed on the RESIDUAL facts (the positives
+    already covered are removed). A caller that DERIVES `min_fit` from the
+    full training labels (e.g. `permutation_null_threshold`) should know
+    this is exact only for iteration 1; for later iterations the same
+    threshold is a deliberate approximation -- the null distribution is not
+    re-derived per residual (see the derivation sites' own docstrings).
 
     `holdout_score` (default `"accuracy"`, byte-identical to this function's
     pre-`holdout_score`-parameter behavior): forwarded, unchanged, to every

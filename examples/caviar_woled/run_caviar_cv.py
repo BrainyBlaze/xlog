@@ -721,7 +721,21 @@ def _induce_ec_target(train_relations: dict, facts, labels, seed: int):
     mirrors `run_caviar_theory.py`'s own `resolve_min_fit`/`induce_for`
     pairing for ``--ec-fit-mode permutation-null``, reimplemented directly
     against `relational_search`'s public functions (this script does not
-    import `run_caviar_theory.py` at all -- see the module docstring)."""
+    import `run_caviar_theory.py` at all -- see the module docstring).
+
+    Residual approximation, stated explicitly: the null threshold is
+    derived ONCE, from the FULL (don't-care-excluded) training
+    facts/labels, and `induce_relational_theory` then applies that same
+    constant at every sequential-covering iteration -- including
+    iterations >= 2, which score bodies on the RESIDUAL facts (covered
+    positives removed). The gate is therefore null-calibrated exactly for
+    iteration 1 and an approximation afterwards; re-deriving the null per
+    residual (1000 permutations per iteration) is deliberately not done.
+    Directionally conservative (not proven tight): removing
+    already-covered positives makes the residual's positive class rarer,
+    which in expectation shrinks a permutation-lucky body's pool-max F1,
+    so the full-train threshold tends to err toward rejecting, not
+    admitting, later clauses."""
     from relational_search import (
         body_cover,
         enumerate_bodies,
