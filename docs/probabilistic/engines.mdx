@@ -90,7 +90,10 @@ the facts, and the engine propagates it through the derivations.
 
 <Note>
 Select the engine with `#pragma prob_engine = exact_ddnnf` or
-`#pragma prob_engine = mc`. From Python, the `prob_engine` argument to
+`#pragma prob_engine = mc`, declared
+in the entry file — a pragma in an imported module is ignored and reported as
+`warning[W0510]` (see the
+[pragmas guide](/language-guide/pragmas#pragmas-apply-only-in-the-entry-file)). From Python, the `prob_engine` argument to
 `Program.compile(...)` takes precedence over the pragma.
 </Note>
 

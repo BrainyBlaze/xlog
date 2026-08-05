@@ -54,6 +54,7 @@ behind exact probabilistic inference) and exists only in debug builds.
 | Variable | Effect | Values / Default |
 |---|---|---|
 | `XLOG_WCOJ_POOL_MB_PER_STREAM` | Device memory pool budget per CUDA stream, in MiB. | positive integer; default `256` |
+| `XLOG_UNION_CHUNK_BYTES` | Byte budget per chunk of the multiway-union fold that merges same-head rule outputs. Bounds peak device memory for many-rule heads to the chunk budget plus the deduplicated accumulator. **(unreleased)** | positive integer bytes; default `1073741824` (1 GiB) |
 | `XLOG_WARMUP_PROFILE` | Diagnostic: collect per-module PTX load timing and compile-warmup profiling stats. | `1` to enable; default off |
 | `XLOG_DEBUG_POISON_ALLOC` | Debug probe: fill fresh legacy allocations with `0xDD` so reads of unwritten memory surface deterministically. Read once per process. | `1` to enable; default off |
 | `XLOG_DEBUG_POISON_FREE` | Debug probe: poison legacy allocations with `0xDD` at drop so live aliases of freed memory become visually distinct. Read once per process. | `1` to enable; default off |

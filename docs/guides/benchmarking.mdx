@@ -255,6 +255,7 @@ last two are diagnostics for forcing or disabling the WCOJ triangle route.
 | `WCOJ_BENCH_FULL` | Run the full WCOJ triangle matrix (adds 100K + 250K row sizes) | `0` |
 | `XLOG_USE_WCOJ_TRIANGLE_U32` | Force-on WCOJ triangle dispatch (bypasses the adaptive classifier) | unset |
 | `XLOG_DISABLE_WCOJ_TRIANGLE` | Hard kill switch — pins all triangle WCOJ off, beats every other flag | unset |
+| `XLOG_UNION_CHUNK_BYTES` | Chunk budget in bytes for the multiway union that merges same-head rule outputs; bounds peak device memory for many-rule heads | `1073741824` (1 GiB) |
 
 ## See also
 

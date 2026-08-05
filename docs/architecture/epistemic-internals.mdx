@@ -46,6 +46,10 @@ intent survives parsing:
 
 - `#pragma epistemic_mode = faeel`
 - `#pragma epistemic_mode = g91`
+
+Pragmas, including `epistemic_mode`, apply only when declared in the entry file; a
+declaration in an imported module is ignored with `warning[W0510]` (see the
+[pragmas guide](/language-guide/pragmas#pragmas-apply-only-in-the-entry-file)).
 - `know atom(...)`
 - `possible atom(...)`
 - `not know atom(...)`

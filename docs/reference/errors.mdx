@@ -86,6 +86,16 @@ aggregate domain`. The Monte Carlo engine has no such cap because it samples
 worlds instead of enumerating outcome formulas. See
 [Probabilistic engines](/probabilistic/engines) for choosing between the two.
 
+### Multiway union size caps (unreleased)
+
+The GPU sort and dedup steps that merge same-head rule outputs index column
+bytes with 32-bit arithmetic, so they reject any column whose logical bytes
+exceed `4294967295` (`u32::MAX`) with a typed error of the form
+`Sort supports at most 4294967295 bytes per column, got ... (column N)`; the
+concatenation step applies analogous `Concat: ... too large` caps. These are
+fail-closed declines, never silent truncation: a relation column past 4 GiB
+stops the run instead of scattering rows.
+
 ### Compile and verify budgets (unreleased)
 
 These two budgets let the engine refuse an oversized problem cleanly instead of
