@@ -289,11 +289,35 @@ def test_null_knobs_default_values():
 
 
 def test_ec_fit_mode_accepts_permutation_null_with_max_body_literals_3():
+    # --holdout-score f1 is REQUIRED alongside permutation-null: the derived
+    # threshold is an F1-axis quantile, so the holdout scores it gates must
+    # be F1 too (see the refusal test below for the mismatch case).
     args = run_caviar_theory.parse_args(
         REQUIRED + ["--protocol", "ec", "--max-body-literals", "3",
-                    "--ec-fit-mode", "permutation-null"]
+                    "--holdout-score", "f1", "--ec-fit-mode", "permutation-null"]
     )
     assert args.ec_fit_mode == "permutation-null"
+    assert args.holdout_score == "f1"
+
+
+def test_ec_fit_mode_permutation_null_refused_with_accuracy_holdout():
+    # The permutation-null threshold is a quantile of PER-FOLD F1 samples;
+    # gated against accuracy-axis holdout scores (plateau ~0.9996 on a
+    # rare-positive holdout, vs an F1-quantile gate of ~0.04-0.17) it
+    # decides nothing while the JSON still records
+    # ec_fit_mode: permutation-null. Both the default holdout score and an
+    # explicit --holdout-score accuracy must be refused.
+    with pytest.raises(SystemExit):
+        run_caviar_theory.parse_args(
+            REQUIRED + ["--protocol", "ec", "--max-body-literals", "3",
+                        "--ec-fit-mode", "permutation-null"]
+        )
+    with pytest.raises(SystemExit):
+        run_caviar_theory.parse_args(
+            REQUIRED + ["--protocol", "ec", "--max-body-literals", "3",
+                        "--ec-fit-mode", "permutation-null",
+                        "--holdout-score", "accuracy"]
+        )
 
 
 def test_ec_fit_mode_rejects_an_unknown_value():
@@ -359,7 +383,7 @@ def test_null_knobs_accepted_with_permutation_null_mode():
     args = run_caviar_theory.parse_args(
         REQUIRED + [
             "--protocol", "ec", "--max-body-literals", "3",
-            "--ec-fit-mode", "permutation-null",
+            "--holdout-score", "f1", "--ec-fit-mode", "permutation-null",
             "--null-permutations", "500", "--null-quantile", "0.9",
             "--null-perm-seed", "1",
         ]

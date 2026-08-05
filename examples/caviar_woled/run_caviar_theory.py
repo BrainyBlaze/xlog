@@ -274,7 +274,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "'permutation-null': the --null-quantile quantile of "
         "--null-permutations label-permutation pool-max F1 samples -- a "
         "pre-registered, data-derived threshold rather than a hand-picked "
-        "constant. Scoped to '--max-body-literals 3' ONLY.",
+        "constant. Scoped to '--max-body-literals 3' ONLY, and requires "
+        "'--holdout-score f1' (the derived threshold is an F1-axis "
+        "quantile; gating accuracy-axis scores with it decides nothing).",
     )
     p.add_argument(
         "--null-permutations", type=int, default=1000,
@@ -342,6 +344,18 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "constant threshold, incompatible with '--ec-fit-mode "
             f"{args.ec_fit_mode!r}', which DERIVES the threshold from the "
             "data instead."
+        )
+    if args.ec_fit_mode == "permutation-null" and args.holdout_score != "f1":
+        p.error(
+            "'--ec-fit-mode permutation-null' requires '--holdout-score "
+            f"f1' (got --holdout-score {args.holdout_score!r}): the "
+            "derived min_fit is a quantile of PER-FOLD F1 samples, so the "
+            "holdout scores it gates must live on the same F1 axis. Gated "
+            "against accuracy-axis scores (which sit on the all-negative "
+            "base-rate plateau, ~0.9996 on a rare-positive holdout, far "
+            "above any F1-quantile threshold) the null-calibrated gate "
+            "decides nothing while the result JSON still records "
+            "ec_fit_mode: permutation-null."
         )
     if (
         (args.null_permutations != 1000 or args.null_quantile != 0.95
