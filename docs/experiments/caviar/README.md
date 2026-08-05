@@ -541,14 +541,16 @@ python examples/caviar_woled/run_caviar_theory.py --mode relational --protocol d
   --k 4 --seed 7 --steps 400 --max-clauses 4 --tie-tolerance 0.001 --out RESULT.json
 
 # continuous, EC protocol, 3-literal relational search (CPU-only)
+# (--steps is a required flag; relational mode clamps it to 25 internally,
+# so the value does not affect the EC search)
 python examples/caviar_woled/run_caviar_theory.py --mode relational --protocol ec \
   --data continuous --pkl caviar-train.json --test-json caviar-test.json \
-  --k 4 --seed 7 --min-new-covered 2 --max-body-literals 3 --out RESULT.json
+  --k 4 --seed 7 --steps 400 --min-new-covered 2 --max-body-literals 3 --out RESULT.json
 
 # continuous, EC protocol, F1 holdout + permutation-null fit gate (section D.1; CPU-only)
 python examples/caviar_woled/run_caviar_theory.py --mode relational --protocol ec \
   --data continuous --pkl caviar-train.json --test-json caviar-test.json \
-  --k 4 --seed 7 --min-new-covered 2 --max-body-literals 3 \
+  --k 4 --seed 7 --steps 400 --min-new-covered 2 --max-body-literals 3 \
   --holdout-score f1 --ec-fit-mode permutation-null --out RESULT.json
 
 # 10-fold CV over the whole corpus, EC protocol (section E; CPU-only)
