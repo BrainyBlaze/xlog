@@ -43,7 +43,7 @@ without editing the file.
 
 ## Pragmas apply only in the entry file
 
-Pragmas are **entry-file-scoped**. The file you pass to `xlog run` or
+Pragmas are **entry-file-scoped**. The file you pass to `xlog run`, `xlog prob`, or
 `xlog explain` is the entry file, and only its pragmas configure the engine. A
 pragma written in an imported module never affects compilation — the directive
 is dropped when the module is merged, and the CLI reports it on stderr:

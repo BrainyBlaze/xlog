@@ -483,6 +483,12 @@ impl LogicProgram {
     /// This method resolves all imports using the provided resolver and merges
     /// imported predicates, functions, and rules into the main program.
     ///
+    /// Pragmas are entry-file-scoped: directives declared in imported modules
+    /// are dropped at merge time. This library entry point does not surface
+    /// them — embedders that want the CLI's `warning[W0510]` behavior should
+    /// call `resolver.ignored_import_pragmas()` before compiling and report
+    /// the returned records on their own diagnostics channel.
+    ///
     /// # Arguments
     /// * `source` - The source code of the main program
     /// * `resolver` - A pre-loaded ModuleResolver with all dependencies resolved

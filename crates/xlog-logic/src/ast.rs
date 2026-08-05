@@ -502,35 +502,50 @@ impl Directives {
     /// source spelling (`#pragma <name> = ...`), in declaration-struct
     /// order.
     pub fn set_pragma_names(&self) -> Vec<&'static str> {
+        // Destructure so adding a `Directives` field without extending this
+        // list is a compile error, not a pragma that silently vanishes from
+        // the ignored-import warnings.
+        let Directives {
+            prob_engine,
+            prob_cache,
+            prob_samples,
+            prob_seed,
+            prob_confidence,
+            prob_method,
+            prob_max_nonmonotone_iterations,
+            max_recursion_depth,
+            epistemic_mode,
+            magic_sets,
+        } = self;
         let mut names = Vec::new();
-        if self.prob_engine.is_some() {
+        if prob_engine.is_some() {
             names.push("prob_engine");
         }
-        if self.prob_cache.is_some() {
+        if prob_cache.is_some() {
             names.push("prob_cache");
         }
-        if self.prob_samples.is_some() {
+        if prob_samples.is_some() {
             names.push("prob_samples");
         }
-        if self.prob_seed.is_some() {
+        if prob_seed.is_some() {
             names.push("prob_seed");
         }
-        if self.prob_confidence.is_some() {
+        if prob_confidence.is_some() {
             names.push("prob_confidence");
         }
-        if self.prob_method.is_some() {
+        if prob_method.is_some() {
             names.push("prob_method");
         }
-        if self.prob_max_nonmonotone_iterations.is_some() {
+        if prob_max_nonmonotone_iterations.is_some() {
             names.push("prob_max_nonmonotone_iterations");
         }
-        if self.max_recursion_depth.is_some() {
+        if max_recursion_depth.is_some() {
             names.push("max_recursion_depth");
         }
-        if self.epistemic_mode.is_some() {
+        if epistemic_mode.is_some() {
             names.push("epistemic_mode");
         }
-        if self.magic_sets.is_some() {
+        if magic_sets.is_some() {
             names.push("magic_sets");
         }
         names
@@ -949,6 +964,37 @@ mod tests {
         assert_eq!(
             directives.set_pragma_names(),
             vec!["prob_seed", "magic_sets"]
+        );
+    }
+
+    #[test]
+    fn test_directives_set_pragma_names_covers_all_ten_pragmas() {
+        let directives = Directives {
+            prob_engine: Some(ProbEngine::Mc),
+            prob_cache: Some(ProbCache::On),
+            prob_samples: Some(20000),
+            prob_seed: Some(7),
+            prob_confidence: Some(0.9),
+            prob_method: Some(ProbMethod::Rejection),
+            prob_max_nonmonotone_iterations: Some(64),
+            max_recursion_depth: Some(100),
+            epistemic_mode: Some(EpistemicMode::G91),
+            magic_sets: Some(MagicSetsMode::Auto),
+        };
+        assert_eq!(
+            directives.set_pragma_names(),
+            vec![
+                "prob_engine",
+                "prob_cache",
+                "prob_samples",
+                "prob_seed",
+                "prob_confidence",
+                "prob_method",
+                "prob_max_nonmonotone_iterations",
+                "max_recursion_depth",
+                "epistemic_mode",
+                "magic_sets",
+            ]
         );
     }
 

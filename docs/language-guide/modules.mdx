@@ -57,7 +57,7 @@ later change to the underlying type is made in one place.
 ## Pragma scoping
 
 `#pragma` directives are honored only in the **entry file** — the file passed to
-`xlog run` or `xlog explain`. A pragma inside an imported module is ignored at
+`xlog run`, `xlog prob`, or `xlog explain`. A pragma inside an imported module is ignored at
 merge time, and the CLI emits `warning[W0510]` naming the module and the dropped
 directive. Restate the pragma in the entry file if the program needs it. See
 [Pragmas apply only in the entry file](/language-guide/pragmas#pragmas-apply-only-in-the-entry-file).

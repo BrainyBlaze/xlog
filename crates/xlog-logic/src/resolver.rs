@@ -74,20 +74,50 @@ impl ModuleResolver {
     /// declares is dropped at merge time. Callers surface these records as
     /// warnings so the scoping is never silent. The result is sorted by
     /// module path, then pragma name, for deterministic output.
+    ///
+    /// Nested imports resolve relative to the importer's directory, so one
+    /// file can be loaded under several module-path spellings. Warnings are
+    /// deduplicated on the canonical source file (one warning per file per
+    /// pragma), keeping the alphabetically-first module label; the entry
+    /// file itself never warns under any spelling.
     pub fn ignored_import_pragmas(&self) -> Vec<IgnoredImportPragma> {
-        let mut ignored: Vec<IgnoredImportPragma> = Vec::new();
+        let canonical_source = |module: &LoadedModule| {
+            fs::canonicalize(&module.source_file).unwrap_or_else(|_| module.source_file.clone())
+        };
+        let entry_source = self
+            .entry_module
+            .as_deref()
+            .and_then(|key| self.loaded.get(key))
+            .map(canonical_source);
+
+        let mut candidates: Vec<(PathBuf, IgnoredImportPragma)> = Vec::new();
         for (path_key, module) in &self.loaded {
             if self.entry_module.as_deref() == Some(path_key.as_str()) {
                 continue;
             }
+            let source = canonical_source(module);
+            if entry_source.as_deref() == Some(source.as_path()) {
+                continue;
+            }
             for pragma in module.program.directives.set_pragma_names() {
-                ignored.push(IgnoredImportPragma {
-                    module: path_key.clone(),
-                    pragma,
-                });
+                candidates.push((
+                    source.clone(),
+                    IgnoredImportPragma {
+                        module: path_key.clone(),
+                        pragma,
+                    },
+                ));
             }
         }
-        ignored.sort();
+
+        candidates.sort_by(|a, b| a.1.cmp(&b.1));
+        let mut seen: HashSet<(PathBuf, &'static str)> = HashSet::new();
+        let mut ignored = Vec::with_capacity(candidates.len());
+        for (source, warning) in candidates {
+            if seen.insert((source, warning.pragma)) {
+                ignored.push(warning);
+            }
+        }
         ignored
     }
 
@@ -608,15 +638,11 @@ mod tests {
             ]
         );
 
-        let rendered = ignored[0].to_string();
-        assert!(rendered.contains("warning[W0510]"), "{rendered}");
-        assert!(
-            rendered.contains("`#pragma magic_sets` in imported module `lib` is ignored"),
-            "{rendered}"
-        );
-        assert!(
-            rendered.contains("pragmas apply only when declared in the entry file"),
-            "{rendered}"
+        // Verbatim: the rendered warning format is part of the contract.
+        assert_eq!(
+            ignored[0].to_string(),
+            "warning[W0510]: `#pragma magic_sets` in imported module `lib` is ignored\n  \
+             = note: pragmas apply only when declared in the entry file"
         );
     }
 
@@ -641,5 +667,105 @@ mod tests {
         resolver.mark_entry_module("entry");
 
         assert!(resolver.ignored_import_pragmas().is_empty());
+    }
+
+    #[test]
+    fn test_ignored_import_pragmas_sorted_across_modules() {
+        let tmp = TempDir::new().unwrap();
+        create_test_module(
+            tmp.path(),
+            "entry",
+            r#"
+            use zeta.
+            use alpha.
+            result(1).
+        "#,
+        );
+        create_test_module(
+            tmp.path(),
+            "zeta",
+            r#"
+            #pragma prob_seed = 3
+            z(1).
+        "#,
+        );
+        create_test_module(
+            tmp.path(),
+            "alpha",
+            r#"
+            #pragma magic_sets = off
+            a(1).
+        "#,
+        );
+
+        let mut resolver = ModuleResolver::new(vec![]);
+        resolver
+            .load_module(tmp.path(), &["entry".into()])
+            .expect("load entry");
+        resolver.mark_entry_module("entry");
+
+        // Deterministic cross-module order: sorted by module path first.
+        assert_eq!(
+            resolver.ignored_import_pragmas(),
+            vec![
+                IgnoredImportPragma {
+                    module: "alpha".to_string(),
+                    pragma: "magic_sets",
+                },
+                IgnoredImportPragma {
+                    module: "zeta".to_string(),
+                    pragma: "prob_seed",
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn test_ignored_import_pragmas_dedups_two_spellings_of_one_file() {
+        let tmp = TempDir::new().unwrap();
+        let util = tmp.path().join("util");
+        fs::create_dir_all(&util).unwrap();
+        create_test_module(
+            tmp.path(),
+            "entry",
+            r#"
+            use util/b.
+            use util/helpers.
+            result(1).
+        "#,
+        );
+        create_test_module(
+            tmp.path(),
+            "util/b",
+            r#"
+            use helpers.
+            b_pred(1).
+        "#,
+        );
+        create_test_module(
+            tmp.path(),
+            "util/helpers",
+            r#"
+            #pragma magic_sets = auto
+            helper(1).
+        "#,
+        );
+
+        let mut resolver = ModuleResolver::new(vec![]);
+        resolver
+            .load_module(tmp.path(), &["entry".into()])
+            .expect("load entry");
+        resolver.mark_entry_module("entry");
+
+        // The nested `use helpers.` (resolved relative to util/) loads the
+        // same file under a second path key; one file must warn once, under
+        // the alphabetically-first label.
+        assert_eq!(
+            resolver.ignored_import_pragmas(),
+            vec![IgnoredImportPragma {
+                module: "helpers".to_string(),
+                pragma: "magic_sets",
+            }]
+        );
     }
 }

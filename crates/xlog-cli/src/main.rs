@@ -1629,6 +1629,15 @@ fn run_probabilistic(args: ProbArgs) -> Result<()> {
             let resolver = load_modules(&args.source, args.module_path.clone())
                 .map_err(|e| XlogError::Execution(format!("Module resolution failed: {}", e)))?;
             warn_ignored_import_pragmas(&resolver);
+        } else if source.contains("use ") {
+            // No search paths, but the entry imports sibling modules:
+            // resolve best-effort purely to surface ignored pragmas.
+            // Failures stay non-fatal here because the probabilistic
+            // engines do not merge imports, so a hard error would reject
+            // programs that previously ran.
+            if let Ok(resolver) = load_modules(&args.source, Vec::new()) {
+                warn_ignored_import_pragmas(&resolver);
+            }
         }
 
         let mut config = GpuConfig::default();
