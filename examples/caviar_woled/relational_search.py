@@ -49,6 +49,7 @@ from dataclasses import dataclass
 
 from pyxlog.ilp.discovery import select_rule
 from pyxlog.ilp.neural_credit import holdout_fold_assignment
+from scorer import prf1
 from theory_loop import induce_theory
 
 Body = tuple[str, ...]
@@ -123,8 +124,9 @@ def kfold_scores(
     folds: int,
     seed: int,
     covers: dict[Body, set] | None = None,
+    score: str = "accuracy",
 ) -> dict[Body, float]:
-    """Held-out accuracy of each body's fixed cover-membership prediction,
+    """Held-out score of each body's fixed cover-membership prediction,
     k-fold, using the EXACT SAME fold-assignment convention `pyxlog.ilp.
     neural_credit.kfold_select` uses -- both call the shared
     `pyxlog.ilp.neural_credit.holdout_fold_assignment(n_facts, folds, seed)`
@@ -132,13 +134,62 @@ def kfold_scores(
     module's own usage matches that shared function's output).
 
     Because a body's prediction is a FIXED set-membership test (see this
-    module's own KEY INSIGHT), no training happens per fold: a fold's score
-    is simply the fraction of that fold's held-out facts whose cover
-    membership matches their label, and the reported score is the mean of
-    that fraction across all `folds` folds -- the same "sum of per-fold
-    accuracy, divided by fold count" reading `kfold_select` computes for a
-    trained candidate, specialized to the case where every fold's "training"
-    step is a no-op.
+    module's own KEY INSIGHT), no training happens per fold: each fold's
+    score is computed directly from the fixed cover, and the reported score
+    is the mean across folds -- the same "sum of per-fold score, divided by
+    fold count" reading `kfold_select` computes for a trained candidate,
+    specialized to the case where every fold's "training" step is a no-op.
+
+    `score` (default `"accuracy"`, byte-identical to this function's
+    pre-`score`-parameter behavior): the per-fold metric being averaged.
+
+    * `"accuracy"`: a fold's score is the fraction of that fold's held-out
+      facts whose cover membership matches their label. On a task with a
+      rare positive class and a large held-out set (e.g. 10 EC-initiation
+      positives against ~23,000 rows), this sits on the all-false base-rate
+      plateau and can rank a body that predicts nothing at all ABOVE the
+      best real detector -- the accuracy metric does not distinguish "always
+      right by predicting nothing" from "right for the right reason". This
+      is not a hypothetical: it is exactly the failure this module's own
+      task (the "recall-aware" `score="f1"` option below) exists to fix.
+    * `"f1"`: a fold's score is `scorer.prf1`'s F1 of that fold's cover-
+      membership prediction against that fold's held-out labels -- the SAME
+      F1 arithmetic `run_caviar_theory.py`'s own scoring uses, reused (not
+      re-derived) so the two never drift apart. F1 is RECALL-AWARE: a body
+      that predicts nothing scores F1 0.0 on any fold with a real positive,
+      instead of accuracy's near-1.0, so a real detector's few true
+      positives can outrank the empty predictor even against a heavily
+      imbalanced holdout.
+
+      A fold with ZERO held-out positives makes every body's recall (and
+      therefore its F1) UNDEFINED, not merely 0 -- `prf1` substitutes 0.0
+      for an undefined ratio and flags `degenerate=True`, but averaging that
+      substituted 0.0 in here would penalize EVERY body identically for a
+      fact about the fold split, not about the body. Such a fold is
+      therefore SKIPPED from the mean entirely -- the reported score is the
+      mean F1 over folds that can actually measure recall (folds with at
+      least one held-out positive), not over all `folds` folds. Tradeoff,
+      stated honestly: a body's reported "f1" score can therefore average
+      over FEWER than `folds` folds (and different bodies always see the
+      same skip set, since it depends only on the fold/label split, not on
+      any body's cover), so it is not literally "k-fold F1" for k=`folds`
+      when some folds are unmeasurable -- it is the honest mean over the
+      folds where F1 means something. The alternative (counting a
+      zero-positive fold's F1 as 0.0) would be a body-INDEPENDENT constant
+      rescale of every mean -- the skip set depends only on the fold/label
+      split -- so the choice cannot change any RANKING (relative order is
+      preserved). It CAN change a selection, because `select_body` gates
+      on the ABSOLUTE `min_fit` threshold, not on rank: the uniform
+      downward rescale can drag every mean below `min_fit` (turning a
+      commit into an abstention) even though no body's rank moved. Skip
+      is preferred both for that reason and because the reported number
+      then means "mean F1 where F1 is defined" rather than a value
+      diluted by unmeasurable folds. In the degenerate case where NO fold has any held-out
+      positive at all (recall is unmeasurable everywhere), every body's
+      score is reported as `0.0` (empty-mean is otherwise undefined) --
+      this can only happen if the residual holds zero positives overall,
+      which `theory_loop.induce_theory` does not call `select_once` for
+      (see its own stop condition).
 
     `covers` (default `None`, recomputed from `relations` here): callers that
     already hold a per-body cover dict (e.g. `induce_relational_theory`,
@@ -146,6 +197,10 @@ def kfold_scores(
     only the residual facts do) should pass it, to avoid re-deriving the
     same set-intersection on every iteration.
     """
+    if score not in ("accuracy", "f1"):
+        raise ValueError(
+            f"score must be 'accuracy' or 'f1' (got {score!r})."
+        )
     if not 2 <= folds <= len(facts):
         raise ValueError(
             f"folds={folds} with {len(facts)} facts: every fold needs at "
@@ -163,20 +218,248 @@ def kfold_scores(
         covers = {body: body_cover(body, relations) for body in bodies}
 
     fold_of = holdout_fold_assignment(len(facts), folds, seed)
+    fold_held_ids = [
+        [i for i in range(len(facts)) if fold_of[i] == fold]
+        for fold in range(folds)
+    ]
+
+    if score == "accuracy":
+        sums = {body: 0.0 for body in bodies}
+        for held_ids in fold_held_ids:
+            n_held = len(held_ids)
+            for body in bodies:
+                cover = covers[body]
+                correct = sum(
+                    1 for i in held_ids
+                    if (facts[i] in cover) == bool(labels[i])
+                )
+                sums[body] += correct / n_held
+        return {body: sums[body] / folds for body in bodies}
+
+    # score == "f1": see this function's own docstring for why a
+    # zero-positive fold is skipped from the mean rather than counted as 0.
+    measurable_folds = [
+        held_ids for held_ids in fold_held_ids
+        if any(bool(labels[i]) for i in held_ids)
+    ]
+    if not measurable_folds:
+        return {body: 0.0 for body in bodies}
 
     sums = {body: 0.0 for body in bodies}
-    for fold in range(folds):
-        held_ids = [i for i in range(len(facts)) if fold_of[i] == fold]
-        n_held = len(held_ids)
+    for held_ids in measurable_folds:
+        gold = [bool(labels[i]) for i in held_ids]
         for body in bodies:
             cover = covers[body]
-            correct = sum(
-                1 for i in held_ids
-                if (facts[i] in cover) == bool(labels[i])
-            )
-            sums[body] += correct / n_held
+            pred = [facts[i] in cover for i in held_ids]
+            sums[body] += prf1(pred, gold)["f1"]
+    return {body: sums[body] / len(measurable_folds) for body in bodies}
 
-    return {body: sums[body] / folds for body in bodies}
+
+def _f1_from_counts(tp: int, fp: int, fn: int) -> float:
+    """The F1 arithmetic `scorer.prf1` computes from a `pred`/`gold` pair,
+    read straight off the raw tp/fp/fn counts instead -- byte-identical
+    formula (same zero-division-to-0.0 substitutions), used where a
+    permutation's per-fold counts are already in hand as set sizes and
+    materializing a `pred`/`gold` list per body per fold per permutation
+    would be the whole cost `permutation_null_threshold`'s precomputation
+    exists to avoid."""
+    precision = 0.0 if tp + fp == 0 else tp / (tp + fp)
+    recall = 0.0 if tp + fn == 0 else tp / (tp + fn)
+    if precision + recall == 0:
+        return 0.0
+    return 2 * precision * recall / (precision + recall)
+
+
+def _quantile(sorted_values: list[float], q: float) -> float:
+    """Linear-interpolation quantile (the same convention `numpy.quantile`/
+    `torch.quantile` default to) over an ALREADY-SORTED list -- kept as a
+    tiny pure-Python function rather than a `torch.quantile` call so a
+    hand-built test can recompute the exact same value with a pocket
+    calculator, not merely re-derive it from another tensor op."""
+    n = len(sorted_values)
+    if n == 1:
+        return sorted_values[0]
+    idx = q * (n - 1)
+    lo = int(idx)
+    hi = min(lo + 1, n - 1)
+    frac = idx - lo
+    return sorted_values[lo] + (sorted_values[hi] - sorted_values[lo]) * frac
+
+
+def permutation_null_threshold(
+    bodies: list[Body],
+    relations: dict[str, list],
+    facts: list,
+    labels: list[bool],
+    folds: int,
+    seed: int,
+    n_permutations: int = 1000,
+    quantile: float = 0.95,
+    perm_seed: int = 7,
+    covers: dict[Body, set] | None = None,
+) -> dict:
+    """A pre-registered, data-derived `min_fit` threshold for `select_body`'s
+    fit gate: the ``quantile`` (default 0.95) of the POOL MAXIMUM per-fold-
+    mean F1 seen across ``n_permutations`` (default 1000) label permutations
+    -- "how good can the BEST of these bodies look, by chance alone, if the
+    label/fact pairing carries no real signal". A body's real holdout F1
+    clearing this threshold is therefore evidence it beats the pool's own
+    chance ceiling, not merely a hand-picked constant like `select_body`'s
+    0.75 default.
+
+    THE PERMUTATION. One `torch.Generator` seeded with ``perm_seed``
+    (independent of ``seed``, which -- exactly as in `kfold_scores` -- only
+    ever determines the FOLD split) draws ``n_permutations`` SEQUENTIAL
+    `torch.randperm(len(facts))` draws; permutation ``p``'s labels are
+    ``labels[perm[i]]`` for each position ``i`` -- the label VECTOR is
+    reshuffled across the SAME fact list, exactly the null `select_body`'s
+    fit gate is meant to be judged against (a real rule's cover is a fact
+    about the geometry/activity vocabulary, not about which label happened
+    to land where).
+
+    THE FOLD SPLIT IS PERMUTATION-INVARIANT, computed ONCE: `holdout_fold_
+    assignment(len(facts), folds, seed)` never changes across permutations
+    (a permutation reshuffles WHICH FACT carries which label, not which fold
+    a fact was assigned to), so it -- and each body's cover, and each body's
+    per-fold PREDICTED-positive fact set -- are derived exactly once, before
+    the permutation loop starts, not re-derived per permutation.
+
+    THE EFFICIENT ARITHMETIC (why this needs no per-permutation, per-body
+    O(facts) pass). A permutation only moves WHICH fact positions count as
+    positive -- it never changes a body's cover, and it never changes how
+    many facts a fold holds out. So, per permutation, only the (typically
+    tiny) set of positive positions needs to be recomputed: the inverse of
+    the drawn permutation, gathered at the ORIGINAL positive positions,
+    gives exactly ``{i : labels[perm[i]] is True}`` (see this function's own
+    derivation below for why the inverse-gather is algebraically identical
+    to reshuffling the whole label array and reading off the True
+    positions). From there, per fold, per body: ``tp = |held-out predicted-
+    positive positions (precomputed) INTERSECT this permutation's held-out
+    positive positions|`` -- a set intersection over the SMALLER of the two
+    sides, never an ``O(facts)`` rescan.
+
+    THE ZERO-POSITIVE-FOLD SKIP RULE APPLIES PER PERMUTATION, exactly as
+    `kfold_scores(score="f1")` applies it to the real (unpermuted) labels: a
+    fold with no held-out positive UNDER THIS PERMUTATION contributes to no
+    body's mean for THIS permutation (a different permutation can, and
+    generally will, make a different fold set measurable). If NO fold is
+    measurable under a permutation (only possible when the real label
+    vector itself holds zero positives, since permutation never changes
+    the total positive COUNT), every body's mean is undefined for that
+    permutation and its pool-max sample is reported as ``0.0`` -- the same
+    substitution `kfold_scores` makes for the analogous real-run case.
+
+    Returns ``{"threshold": float, "pool_max_samples_summary": {"min",
+    "median", "p95", "max"}, "n_permutations": int, "quantile": float,
+    "perm_seed": int}``. ``"threshold"`` is `_quantile` at ``quantile``;
+    ``"pool_max_samples_summary"``'s own ``"p95"`` is ALWAYS the literal
+    95th percentile (a fixed diagnostic), independent of whatever
+    ``quantile`` the caller passed -- so a caller who deliberately chose a
+    non-default ``quantile`` can still see where their chosen threshold
+    sits relative to the conventional 95th-percentile reading.
+    """
+    if not 2 <= folds <= len(facts):
+        raise ValueError(
+            f"folds={folds} with {len(facts)} facts: every fold needs at "
+            "least one held-out fact -- mirrors kfold_scores's identical "
+            "guard."
+        )
+    if len(labels) != len(facts):
+        raise ValueError(
+            f"labels has {len(labels)} entries for {len(facts)} facts -- a "
+            "mismatched pair would silently permute against misaligned "
+            "facts."
+        )
+    if n_permutations < 1:
+        raise ValueError(f"n_permutations must be >= 1 (got {n_permutations!r}).")
+    if not 0.0 < quantile <= 1.0:
+        raise ValueError(f"quantile must be in (0.0, 1.0] (got {quantile!r}).")
+
+    import torch
+
+    if covers is None:
+        covers = {body: body_cover(body, relations) for body in bodies}
+
+    n = len(facts)
+    fold_of = holdout_fold_assignment(n, folds, seed)
+    fold_held_ids = [
+        [i for i in range(n) if fold_of[i] == fold] for fold in range(folds)
+    ]
+    held_ids_set = [set(ids) for ids in fold_held_ids]
+
+    # Per body, per fold: the FIXED (permutation-invariant) held-out
+    # predicted-positive position set and its size -- computed once here,
+    # never inside the permutation loop.
+    pred_pos_set: dict[Body, list[set]] = {}
+    pred_pos_count: dict[Body, list[int]] = {}
+    for body in bodies:
+        cover = covers[body]
+        pred_pos_set[body] = [
+            {i for i in held_ids if facts[i] in cover} for held_ids in fold_held_ids
+        ]
+        pred_pos_count[body] = [len(s) for s in pred_pos_set[body]]
+
+    original_positive_idx = torch.tensor(
+        [i for i, y in enumerate(labels) if bool(y)], dtype=torch.long,
+    )
+
+    rng = torch.Generator().manual_seed(perm_seed)
+    pool_max_samples: list[float] = []
+    for _ in range(n_permutations):
+        perm = torch.randperm(n, generator=rng)
+        # Inverse-gather: perm_inv[perm[i]] = i, so perm_inv[original
+        # positive index j] is the position i with perm[i] == j, i.e. the
+        # position whose PERMUTED label reads labels[j] -- exactly the set
+        # {i : labels[perm[i]] is True} a literal reshuffle-then-scan would
+        # produce, without ever materializing the full permuted label array.
+        perm_inv = torch.empty(n, dtype=torch.long)
+        perm_inv[perm] = torch.arange(n)
+        positive_positions = set(perm_inv[original_positive_idx].tolist())
+
+        held_pos_by_fold = []
+        for held_set in held_ids_set:
+            if len(positive_positions) <= len(held_set):
+                hp = {i for i in positive_positions if i in held_set}
+            else:
+                hp = {i for i in held_set if i in positive_positions}
+            held_pos_by_fold.append(hp)
+        measurable = [f for f, hp in enumerate(held_pos_by_fold) if hp]
+
+        if not measurable:
+            pool_max_samples.append(0.0)
+            continue
+
+        pool_max = 0.0
+        for body in bodies:
+            total = 0.0
+            for f in measurable:
+                hp = held_pos_by_fold[f]
+                pset = pred_pos_set[body][f]
+                if len(hp) <= len(pset):
+                    tp = sum(1 for i in hp if i in pset)
+                else:
+                    tp = sum(1 for i in pset if i in hp)
+                fp = pred_pos_count[body][f] - tp
+                fn = len(hp) - tp
+                total += _f1_from_counts(tp, fp, fn)
+            body_score = total / len(measurable)
+            if body_score > pool_max:
+                pool_max = body_score
+        pool_max_samples.append(pool_max)
+
+    sorted_samples = sorted(pool_max_samples)
+    return {
+        "threshold": _quantile(sorted_samples, quantile),
+        "pool_max_samples_summary": {
+            "min": sorted_samples[0],
+            "median": _quantile(sorted_samples, 0.5),
+            "p95": _quantile(sorted_samples, 0.95),
+            "max": sorted_samples[-1],
+        },
+        "n_permutations": n_permutations,
+        "quantile": quantile,
+        "perm_seed": perm_seed,
+    }
 
 
 @dataclass(frozen=True)
@@ -316,6 +599,7 @@ def induce_relational_theory(
     tie_tolerance: float | None = None,
     max_clauses: int = 4,
     min_new_covered: int = 10,
+    holdout_score: str = "accuracy",
 ) -> dict:
     """The CPU-only, up-to-`max_literals`-literal relational counterpart to
     `run_caviar_theory.py`'s `kfold_select`-backed relational search: wires
@@ -329,7 +613,21 @@ def induce_relational_theory(
     newly covers) and, by the caller, for final held-out scoring.
 
     `min_fit` defaults to 0.75, matching `kfold_select`'s own default -- the
-    two searches are meant to be compared on equal footing.
+    two searches are meant to be compared on equal footing. It is ONE
+    constant, applied unchanged at EVERY iteration -- including iterations
+    >= 2, whose scores are computed on the RESIDUAL facts (the positives
+    already covered are removed). A caller that DERIVES `min_fit` from the
+    full training labels (e.g. `permutation_null_threshold`) should know
+    this is exact only for iteration 1; for later iterations the same
+    threshold is a deliberate approximation -- the null distribution is not
+    re-derived per residual (see the derivation sites' own docstrings).
+
+    `holdout_score` (default `"accuracy"`, byte-identical to this function's
+    pre-`holdout_score`-parameter behavior): forwarded, unchanged, to every
+    `kfold_scores` call this function makes -- see that function's own
+    docstring for `"accuracy"` vs `"f1"`'s semantics (and, in particular, why
+    `"f1"` exists: on a rare-positive-class holdout, accuracy can rank the
+    empty predictor above the best real detector).
 
     `tie_tolerance=None` (default) resolves, EVERY iteration, to
     `kfold_select`'s identical derivation (`max(0.01, 1 / len(residual_
@@ -353,6 +651,10 @@ def induce_relational_theory(
     * `"scores_per_iteration"`: one `dict[Body, float]` PER `select_once`
       call, in call order -- so a caller whose search abstained can still
       report the top-N scores it came closest with, without a second search.
+    * `"selection_reasons_per_iteration"`: the underlying selection's own
+      `reason` string per `select_once` call (e.g. the fit-gate rejection
+      message) -- the loop's iteration record alone cannot distinguish a
+      fit-gate abstain from a tie abstain.
     """
     if max_literals not in (2, 3):
         raise ValueError(
@@ -365,6 +667,7 @@ def induce_relational_theory(
     predict_clause = make_predict_clause(relations)
 
     scores_per_iteration: list[dict[Body, float]] = []
+    selection_reasons_per_iteration: list[str] = []
 
     def select_once(residual_facts, residual_is_positive):
         resolved_tt = (
@@ -373,10 +676,15 @@ def induce_relational_theory(
         )
         scores = kfold_scores(
             all_bodies, relations, residual_facts, residual_is_positive,
-            folds, seed, covers=covers,
+            folds, seed, covers=covers, score=holdout_score,
         )
         scores_per_iteration.append(scores)
-        return select_body(scores, covers, min_fit, resolved_tt)
+        sel = select_body(scores, covers, min_fit, resolved_tt)
+        # The select-level reason (fit-gate rejection vs tie vs win) is the
+        # diagnostic a result reader actually needs on an abstain; the theory
+        # loop's own iteration record only says that select_once abstained.
+        selection_reasons_per_iteration.append(sel.reason)
+        return sel
 
     theory = induce_theory(
         select_once, predict_clause, facts, is_positive,
@@ -393,4 +701,5 @@ def induce_relational_theory(
             "skipped_empty_cover": skip_counts,
         },
         "scores_per_iteration": scores_per_iteration,
+        "selection_reasons_per_iteration": selection_reasons_per_iteration,
     }

@@ -145,6 +145,33 @@ ACTIVITY_RELATIONS: tuple[str, ...] = (
     "both_active", "both_inactive", "both_walking", "mixed_active_walking",
 )
 
+# `caviar_continuous.TRANSITION_RELATION_NAMES`'s two DISTANCE-based members:
+# computed directly from the precomputed pair distance (convert_continuous's
+# frame-difference pass), so admitting them to `--mode neural`'s candidate
+# pool would break the module docstring's "no precomputed geometry reaches
+# the candidate pool at all" guarantee. Named here (not imported from
+# caviar_continuous) to keep module-level imports torch-free -- mirrors
+# `run_caviar_cv.NEURAL_INIT_ACTIVITY_TRANSITIONS`'s identical, inverse
+# hardcoding, and `_neural_ec_extra_relation_names` below derives the
+# admitted set structurally from the data dict, so a NEW transition relation
+# defaults to admitted (activity-like) only if it is not named here.
+DISTANCE_DERIVED_TRANSITIONS: tuple[str, ...] = ("became_far", "distance_increasing")
+
+
+def _neural_ec_extra_relation_names(train: dict) -> tuple[str, ...]:
+    """`--mode neural --protocol ec`'s admitted transition relations: every
+    name `convert_continuous` actually produced EXCEPT the distance-derived
+    ones (`DISTANCE_DERIVED_TRANSITIONS`) -- the neural pool's "geometry is
+    learned, never given" guarantee extends to `--data continuous`'s
+    transition vocabulary, exactly as `run_caviar_cv._neural_init_vocab`
+    already enforces for its own neural initiation search. `--data pkl`
+    carries no transition relations at all: empty tuple, byte-identical to
+    the pre-transition behavior."""
+    return tuple(
+        n for n in train.get("transition_relations", ())
+        if n not in DISTANCE_DERIVED_TRANSITIONS
+    )
+
 # The theory loop's own coverage-acceptance floor's DEFAULT value
 # (overridable via --min-new-covered; see parse_args -- a caller running
 # --protocol ec --data continuous should lower it explicitly, since that
@@ -239,6 +266,64 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "'--mode relational --protocol ec' ONLY: refused (with '--mode "
         "neural' or '--protocol direct') at parse time, below.",
     )
+    p.add_argument(
+        "--holdout-score", default="accuracy", choices=("accuracy", "f1"),
+        help="per-fold holdout metric for the '--max-body-literals 3' "
+        "relational_search.py search (default: 'accuracy', byte-identical "
+        "to every behavior that predates this flag). 'f1' selects "
+        "relational_search.kfold_scores's recall-aware per-fold F1 instead "
+        "-- see that function's own docstring for why plain accuracy can "
+        "rank an empty predictor above the best real detector on a "
+        "rare-positive-class holdout (this is the fix that flag exists "
+        "for). Scoped to '--mode relational --protocol ec "
+        "--max-body-literals 3' ONLY: refused (with any other combination) "
+        "at parse time, below -- the '--max-body-literals 2' engine path's "
+        "own scoring (kfold_select's holdout accuracy) is untouched by this "
+        "flag.",
+    )
+    p.add_argument(
+        "--min-fit", type=float, default=None,
+        help="explicit fit-gate threshold for the '--max-body-literals 3' "
+        "relational_search.py search's '--ec-fit-mode fixed' path "
+        "(default: None, resolves to induce_relational_theory's own 0.75 "
+        "default -- byte-identical to every behavior that predates this "
+        "flag). Scoped to '--max-body-literals 3 --ec-fit-mode fixed' "
+        "ONLY: refused (with any other combination) at parse time, below.",
+    )
+    p.add_argument(
+        "--ec-fit-mode", default="fixed", choices=("fixed", "permutation-null"),
+        help="how the '--max-body-literals 3' relational_search.py "
+        "search's min_fit threshold is derived, separately per target "
+        "(init/term each get their OWN null distribution -- see "
+        "relational_search.permutation_null_threshold). 'fixed' (default, "
+        "byte-identical to every behavior that predates this flag): "
+        "--min-fit (or its own 0.75 default), a constant. "
+        "'permutation-null': the --null-quantile quantile of "
+        "--null-permutations label-permutation pool-max F1 samples -- a "
+        "pre-registered, data-derived threshold rather than a hand-picked "
+        "constant. Scoped to '--max-body-literals 3' ONLY, and requires "
+        "'--holdout-score f1' (the derived threshold is an F1-axis "
+        "quantile; gating accuracy-axis scores with it decides nothing).",
+    )
+    p.add_argument(
+        "--null-permutations", type=int, default=1000,
+        help="'--ec-fit-mode permutation-null' only: number of label "
+        "permutations sampled per target (default: 1000). Scoped to "
+        "'--ec-fit-mode permutation-null' ONLY.",
+    )
+    p.add_argument(
+        "--null-quantile", type=float, default=0.95,
+        help="'--ec-fit-mode permutation-null' only: the quantile of the "
+        "permutation pool-max F1 distribution used as min_fit (default: "
+        "0.95). Scoped to '--ec-fit-mode permutation-null' ONLY.",
+    )
+    p.add_argument(
+        "--null-perm-seed", type=int, default=7,
+        help="'--ec-fit-mode permutation-null' only: RNG seed for the "
+        "label permutations themselves (default: 7, independent of "
+        "--seed, which still determines the fold split every permutation "
+        "shares). Scoped to '--ec-fit-mode permutation-null' ONLY.",
+    )
     p.add_argument("--out", required=True, help="path to write RESULT.json")
     args = p.parse_args(argv)
     if args.data == "continuous" and args.test_json is None:
@@ -260,6 +345,55 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                 "the ec protocol's init/term searches route through "
                 "relational_search.py."
             )
+    if args.holdout_score != "accuracy" and args.max_body_literals != 3:
+        p.error(
+            f"--holdout-score {args.holdout_score!r} is scoped to "
+            "'--max-body-literals 3' ONLY (got --max-body-literals "
+            f"{args.max_body_literals!r}): the '--max-body-literals 2' "
+            "engine path's scoring is kfold_select's own holdout accuracy, "
+            "not touched by this flag -- there is no F1 option to select "
+            "there."
+        )
+    if args.ec_fit_mode != "fixed" and args.max_body_literals != 3:
+        p.error(
+            f"--ec-fit-mode {args.ec_fit_mode!r} is scoped to "
+            "'--max-body-literals 3' ONLY (got --max-body-literals "
+            f"{args.max_body_literals!r})."
+        )
+    if args.min_fit is not None and args.max_body_literals != 3:
+        p.error(
+            "--min-fit is scoped to '--max-body-literals 3' ONLY (got "
+            f"--max-body-literals {args.max_body_literals!r})."
+        )
+    if args.min_fit is not None and args.ec_fit_mode != "fixed":
+        p.error(
+            "--min-fit is scoped to '--ec-fit-mode fixed' ONLY: it names a "
+            "constant threshold, incompatible with '--ec-fit-mode "
+            f"{args.ec_fit_mode!r}', which DERIVES the threshold from the "
+            "data instead."
+        )
+    if args.ec_fit_mode == "permutation-null" and args.holdout_score != "f1":
+        p.error(
+            "'--ec-fit-mode permutation-null' requires '--holdout-score "
+            f"f1' (got --holdout-score {args.holdout_score!r}): the "
+            "derived min_fit is a quantile of PER-FOLD F1 samples, so the "
+            "holdout scores it gates must live on the same F1 axis. Gated "
+            "against accuracy-axis scores (which sit on the all-negative "
+            "base-rate plateau, ~0.9996 on a rare-positive holdout, far "
+            "above any F1-quantile threshold) the null-calibrated gate "
+            "decides nothing while the result JSON still records "
+            "ec_fit_mode: permutation-null."
+        )
+    if (
+        (args.null_permutations != 1000 or args.null_quantile != 0.95
+         or args.null_perm_seed != 7)
+        and args.ec_fit_mode != "permutation-null"
+    ):
+        p.error(
+            "--null-permutations/--null-quantile/--null-perm-seed are "
+            "scoped to '--ec-fit-mode permutation-null' ONLY (got "
+            f"--ec-fit-mode {args.ec_fit_mode!r})."
+        )
     return args
 
 
@@ -278,12 +412,18 @@ def _require_cuda() -> None:
 
 
 def _prepare_out_path(out: str) -> Path:
-    """Create --out's parent directory and write a tiny probe file BEFORE
-    any expensive work starts (mirrors `run_caviar_star.py`'s/
-    `run_caviar_neural.py`'s fail-fast fix)."""
+    """Create --out's parent directory and prove it is writable BEFORE any
+    expensive work starts (mirrors `run_caviar_star.py`'s/
+    `run_caviar_neural.py`'s fail-fast probe) -- WITHOUT touching an
+    existing --out file: the probe is written to a sibling temp file and
+    removed immediately, so a run that later fails can never have replaced
+    a previous run's results with a probe stub. The only write to --out
+    itself is the final result write at the end of a successful run."""
     out_path = Path(out)
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    out_path.write_text("started\n")
+    probe_path = out_path.with_name(out_path.name + ".probe.tmp")
+    probe_path.write_text("started\n")
+    probe_path.unlink()
     return out_path
 
 
@@ -512,6 +652,7 @@ def _build_symmetric_mlp(hidden: int, device):
 def _induce_neural_theory_for_target(
     torch, kfold_select, train_engine_mode, prog, make_network, features_train,
     neural_relations, activity_sets_train, args, facts, target_labels, wall, wall_key,
+    min_fit=0.75, holdout_score="accuracy",
 ):
     """Neural-mode theory induction for ONE target label sequence aligned
     with ``facts`` -- the exact per-clause-retrain mechanism `_run_neural_
@@ -521,6 +662,25 @@ def _induce_neural_theory_for_target(
     network (never a network shared across clauses, or across target
     calls -- see the module docstring's "each theory gets its own nets"
     note).
+
+    ``min_fit`` (default ``0.75``, `kfold_select`'s own default -- BYTE-
+    IDENTICAL to every existing caller, none of which ever passes this
+    parameter): forwarded, unchanged, to every `kfold_select` call this
+    function makes, replacing that function's own hardcoded 0.75 fit gate.
+    Added for `run_caviar_cv.py`'s ``--mode neural`` initiation search,
+    which derives its OWN per-fold threshold (a permutation-null quantile
+    over its relational sub-pool -- see that script's own
+    ``_neural_init_fit_gate``) rather than accepting the arbitrary constant.
+
+    ``holdout_score`` (default ``"accuracy"`` -- BYTE-IDENTICAL to every
+    existing caller, none of which passes this parameter): forwarded,
+    unchanged, to every `kfold_select` call this function makes, exactly
+    like ``min_fit`` above. Added for the same `run_caviar_cv.py` initiation
+    search, whose `_neural_init_fit_gate` threshold lives on the F1 axis
+    (`relational_search.permutation_null_threshold`'s own per-fold-F1 pool)
+    -- passing it as `min_fit` into an ACCURACY-scored `kfold_select` would
+    gate a threshold from one axis against scores from another, which is
+    exactly the mismatch this parameter exists to close.
 
     Returns ``(theory, nets_by_clause_idx)``: ``theory`` is `theory_loop.
     induce_theory`'s own result dict; ``nets_by_clause_idx`` maps each
@@ -544,7 +704,8 @@ def _induce_neural_theory_for_target(
             lambda: prog, MASK_NAME, residual_facts, residual_is_positive,
             make_network, features_train, neural_relations=neural_relations,
             folds=args.k, seed=args.seed, steps=args.steps, topology="star",
-            tie_tolerance=args.tie_tolerance,
+            tie_tolerance=args.tie_tolerance, min_fit=min_fit,
+            holdout_score=holdout_score,
         )
         net = None
         if selection.rule is not None:
@@ -1007,7 +1168,13 @@ def _run_relational_ec(
     train_relations_ec, test_relations_ec = _ec_relations_with_transitions(train, test)
 
     if args.max_body_literals == 3:
-        from relational_search import induce_relational_theory, make_predict_clause
+        from relational_search import (
+            body_cover,
+            enumerate_bodies,
+            induce_relational_theory,
+            make_predict_clause,
+            permutation_null_threshold,
+        )
 
         print(
             "NOTE: --max-body-literals 3 -- the init/term searches below "
@@ -1034,18 +1201,55 @@ def _run_relational_ec(
         predict_clause_train = make_predict_clause(train_relations_search)
         predict_clause_test = make_predict_clause(test_relations_search)
 
+        def resolve_min_fit(facts_for_search, labels_for_search, wall_key):
+            """The fit-gate threshold `induce_relational_theory` is called
+            with for THIS target -- `args.ec_fit_mode`'s two readings (see
+            parse_args's own help text): 'fixed' names a constant (--min-fit,
+            or induce_relational_theory's own 0.75 default, byte-identical to
+            every behavior that predates --ec-fit-mode); 'permutation-null'
+            DERIVES it from `relational_search.permutation_null_threshold`
+            over THIS target's own (post-don't-care-exclusion) facts/labels
+            -- init and term therefore get their OWN null distribution, not
+            a shared one, since their label vectors and exclusions differ.
+            Residual approximation (same as `run_caviar_cv._induce_ec_target`,
+            see its docstring for the full statement): the threshold is
+            derived once from the FULL facts/labels and then applied
+            unchanged at every sequential-covering iteration, so it is
+            null-calibrated exactly for iteration 1 and a (directionally
+            conservative) approximation for residual-scored iterations
+            >= 2 -- the null is deliberately not re-derived per residual.
+            Returns ``(min_fit, null_summary)``; ``null_summary`` is ``None``
+            in fixed mode (nothing was derived)."""
+            if args.ec_fit_mode == "fixed":
+                return (args.min_fit if args.min_fit is not None else 0.75), None
+            null_bodies, _ = enumerate_bodies(train_relations_search, max_literals=3)
+            null_covers = {b: body_cover(b, train_relations_search) for b in null_bodies}
+            t0 = time.perf_counter()
+            null = permutation_null_threshold(
+                null_bodies, train_relations_search, facts_for_search, labels_for_search,
+                folds=args.k, seed=args.seed, n_permutations=args.null_permutations,
+                quantile=args.null_quantile, perm_seed=args.null_perm_seed,
+                covers=null_covers,
+            )
+            wall[f"{wall_key}_null"] = time.perf_counter() - t0
+            return null["threshold"], null
+
         def induce_for(target_train_labels, dontcare, wall_key):
             facts_for_search, labels_for_search = _exclude_dontcare(
                 train["facts"], target_train_labels, dontcare
             )
+            min_fit, null_summary = resolve_min_fit(facts_for_search, labels_for_search, wall_key)
             t0 = time.perf_counter()
             result = induce_relational_theory(
                 train_relations_search, facts_for_search, labels_for_search,
                 max_literals=3, folds=args.k, seed=args.seed,
                 tie_tolerance=args.tie_tolerance,
                 max_clauses=args.max_clauses, min_new_covered=args.min_new_covered,
+                holdout_score=args.holdout_score, min_fit=min_fit,
             )
             wall[wall_key] = time.perf_counter() - t0
+            result["min_fit"] = min_fit
+            result["null_summary"] = null_summary
             return result
 
         init_theory = induce_for(
@@ -1162,6 +1366,24 @@ def _run_relational_ec(
                 _top5_scores(term_theory["scores_per_iteration"][-1])
                 if args.max_body_literals == 3 else None
             ),
+            "init_selection_reasons": (
+                init_theory["selection_reasons_per_iteration"]
+                if args.max_body_literals == 3 else None
+            ),
+            "term_selection_reasons": (
+                term_theory["selection_reasons_per_iteration"]
+                if args.max_body_literals == 3 else None
+            ),
+            # Non-null ONLY at --max-body-literals 3 (see resolve_min_fit's
+            # own construction above): the actual fit-gate threshold each
+            # target's search ran with, and -- '--ec-fit-mode
+            # permutation-null' only -- the null distribution it was derived
+            # from (None in 'fixed' mode: nothing was derived).
+            "ec_fit_mode": args.ec_fit_mode if args.max_body_literals == 3 else None,
+            "init_min_fit": init_theory.get("min_fit") if args.max_body_literals == 3 else None,
+            "term_min_fit": term_theory.get("min_fit") if args.max_body_literals == 3 else None,
+            "init_null_summary": init_theory.get("null_summary") if args.max_body_literals == 3 else None,
+            "term_null_summary": term_theory.get("null_summary") if args.max_body_literals == 3 else None,
         },
         "direct_context": direct_result,
         "detector_probe": None,
@@ -1192,10 +1414,15 @@ def _run_neural_ec(
     don't-care facts it names are excluded from BOTH searches' own
     ``facts``/``target_labels`` before `_induce_neural_theory_for_target`
     (and, through it, `kfold_select`) ever sees them; ``--data continuous``'s
-    transition relations are merged into this function's OWN activity-set
-    vocabulary and final predict-clause closures the same way
-    `_run_relational_ec` merges them into its relational one -- never into
-    the ``direct_context`` run above, which already finished."""
+    ACTIVITY-based transition relations are merged into this function's OWN
+    activity-set vocabulary and final predict-clause closures the same way
+    `_run_relational_ec` merges the full set into its relational one --
+    never into the ``direct_context`` run above, which already finished.
+    The DISTANCE-derived transitions (`DISTANCE_DERIVED_TRANSITIONS`) are
+    excluded from this mode's pool entirely -- see
+    `_neural_ec_extra_relation_names` -- because they are precomputed
+    geometry, which `--mode neural`'s stated methodology withholds (the
+    relational EC search keeps them; only the neural pool refuses)."""
     from pyxlog.ilp.neural_credit import NeuralRelationSpec, train_engine_mode
 
     direct_result = None
@@ -1207,14 +1434,15 @@ def _run_neural_ec(
         wall["direct_context_wall_clock_s"] = direct_wall
 
     train_relations_ec, test_relations_ec = _ec_relations_with_transitions(train, test)
-    # Derived from the data dict itself, not imported from
-    # `caviar_continuous.TRANSITION_RELATION_NAMES`: this keeps
-    # run_caviar_theory.py's module-level imports torch-free (see the
-    # module docstring's CUDA-ONLY paragraph) and can never drift out of
-    # sync with whatever convert_continuous actually produced.
-    extra_relation_names = (
-        tuple(train["transition_relations"]) if "transition_relations" in train else ()
-    )
+    # Derived from the data dict itself (torch-free, can never drift out of
+    # sync with whatever convert_continuous actually produced), MINUS the
+    # distance-derived transitions: `became_far`/`distance_increasing` read
+    # the precomputed pair distance, and this mode's guarantee is that no
+    # precomputed geometry reaches the candidate pool -- see
+    # `_neural_ec_extra_relation_names` (this filter feeds the compiled
+    # schema, the activity-set vocabulary, AND the final predict-clause
+    # closures below, so the exclusion is total, not cosmetic).
+    extra_relation_names = _neural_ec_extra_relation_names(train)
     prog = _compile_and_ingest_neural(
         pyxlog, dict(train, relations=train_relations_ec), extra_relation_names=extra_relation_names,
     )
@@ -1288,7 +1516,10 @@ def _run_neural_ec(
         "candidate_vocabulary": {
             "relational": sorted(set(ACTIVITY_RELATIONS) | set(extra_relation_names)),
             "neural": [CLOSE_NN_NAME],
-            "excluded": ["close", "far", "coords_missing"],
+            "excluded": ["close", "far", "coords_missing"] + [
+                n for n in train.get("transition_relations", ())
+                if n in DISTANCE_DERIVED_TRANSITIONS
+            ],
         },
         "steps_requested": args.steps,
         "steps_effective": args.steps,
@@ -1437,6 +1668,12 @@ def main(argv: list[str] | None = None) -> int:
         "max_clauses": args.max_clauses,
         "min_new_covered": args.min_new_covered,
         "max_body_literals": args.max_body_literals,
+        "holdout_score": args.holdout_score,
+        "ec_fit_mode": args.ec_fit_mode,
+        "min_fit": args.min_fit,
+        "null_permutations": args.null_permutations,
+        "null_quantile": args.null_quantile,
+        "null_perm_seed": args.null_perm_seed,
         "tie_tolerance": args.tie_tolerance,
         "num_pt": {"train": train["num_pt"], "test": test["num_pt"]},
         "n_pos": {
@@ -1472,6 +1709,13 @@ def main(argv: list[str] | None = None) -> int:
             f"{result['direct_context']['scoring']['theory_prf1']['test'] if result['direct_context'] else 'skipped (--no-direct-context or --max-body-literals 3)'}"
         )
         if args.max_body_literals == 3:
+            print(f"  holdout_score: {args.holdout_score}")
+            print(f"  ec_fit_mode: {ec['ec_fit_mode']}")
+            print(f"  init min_fit: {ec['init_min_fit']}  term min_fit: {ec['term_min_fit']}")
+            if ec["init_null_summary"] is not None:
+                print(f"  init null summary: {ec['init_null_summary']}")
+            if ec["term_null_summary"] is not None:
+                print(f"  term null summary: {ec['term_null_summary']}")
             print(f"  relational search pool (init): {ec['relational_search_pool']['init']}")
             print(f"  relational search pool (term): {ec['relational_search_pool']['term']}")
             if not ec["init_theory"]["clauses"]:

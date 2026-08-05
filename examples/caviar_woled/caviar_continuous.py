@@ -31,10 +31,12 @@ each function's own docstring for the full reasoning): `derive_ec_masks_
 continuous` builds per-target DON'T-CARE masks (frames where firing
 `is_init`/`is_term`'s own event predicate is semantically harmless under
 inertia, so scoring it as an ordinary error is dishonest); `convert_continuous` also returns a
-`"transition_relations"` key (four frame-DIFFERENCE relations, kept
-deliberately separate from `"relations"` so no direct-protocol vocabulary
-builder can pick them up by accident -- only `run_caviar_theory.py`'s own
-`--protocol ec` code reads that key).
+`"transition_relations"` key (six frame-DIFFERENCE relations -- four
+activity-based, plus two distance-based, `became_far`/`distance_increasing`;
+see `convert_continuous`'s own docstring -- kept deliberately separate from
+`"relations"` so no direct-protocol vocabulary builder can pick them up by
+accident -- only `run_caviar_theory.py`'s own `--protocol ec` code reads that
+key).
 
 DATA SHAPE. One JSON document per line; keys `_id`, `time`, `narrative`
 (list of atom strings), `annotation` (list of atom strings) -- `_id`/`time`
@@ -285,6 +287,7 @@ def _iter_pair_rows(segments: list[dict]):
 
 TRANSITION_RELATION_NAMES: tuple[str, ...] = (
     "any_became_active", "any_became_inactive", "any_became_walking", "any_stopped_walking",
+    "became_far", "distance_increasing",
 )
 
 
@@ -304,10 +307,11 @@ def convert_continuous(segments: list[dict], close_threshold: float = 25.0) -> d
     checking this list, exactly as `derive_ec_targets_continuous` and
     `reconstruct_holds_continuous` do internally via `_group_pts_by_pair`.
     PLUS ``"transition_relations"``: ``dict[str, list[tuple[int, int]]]``,
-    the same ``(pt, 1)``-row shape as ``"relations"`` but for FOUR
-    frame-DIFFERENCE relations computed from per-person activity CHANGES
-    between a pair's own consecutive observed co-visible pair-times (see the
-    per-relation docstring below) -- kept in a SEPARATE dict key, deliberately
+    the same ``(pt, 1)``-row shape as ``"relations"`` but for SIX
+    frame-DIFFERENCE relations -- four computed from per-person activity
+    CHANGES, two from the pair's own distance CHANGE -- between a pair's own
+    consecutive observed co-visible pair-times (see the per-relation
+    docstring below) -- kept in a SEPARATE dict key, deliberately
     NEVER merged into ``"relations"``, so that any caller reading
     ``"relations"`` alone (every existing direct-protocol vocabulary builder
     in `run_caviar_theory.py`: ``_filtered_relation_names``,
@@ -349,6 +353,19 @@ def convert_continuous(segments: list[dict], close_threshold: float = 25.0) -> d
     # required. A key absent here means "first observed pair-time in this
     # segment" -- see the per-relation note below on what that implies.
     prev_activity: dict[tuple[int, str, str], tuple[str, str]] = {}
+    # Same "immediately preceding observed co-visible pair-time" bookkeeping
+    # as `prev_activity`, but for `became_far`/`distance_increasing` (see
+    # their own comment below): a key ABSENT means "first observed" (same
+    # convention as `prev_activity`); a key present but mapped to ``None``
+    # means the immediately preceding pair-time had MISSING coords (so its
+    # own distance was never computed to compare against) -- distinct from
+    # "first observed" because this pair HAS been visited in this segment
+    # before, just not with a usable distance. Both cases exclude the
+    # current pair-time from both distance relations, but are tracked
+    # separately (``None`` vs. absent) so a caller inspecting this dict mid-
+    # walk could tell them apart, even though the two relations below treat
+    # them identically.
+    prev_dist: dict[tuple[int, str, str], tuple[float, bool] | None] = {}
     feature_rows: list[tuple[float, float]] = []
     segment_of_pt: list[int] = []
     n_coords_missing = 0
@@ -400,22 +417,58 @@ def convert_continuous(segments: list[dict], close_threshold: float = 25.0) -> d
                 transition_relations["any_stopped_walking"].append((pt, 1))
         prev_activity[(seg_idx, p1, p2)] = (a1, a2)
 
+        pair_seg_key = (seg_idx, p1, p2)
         c1 = seg["coords"].get((p1, t))
         c2 = seg["coords"].get((p2, t))
         if c1 is None or c2 is None:
             n_coords_missing += 1
             relations["coords_missing"].append((pt, 1))
             feature_rows.append((0.0, 0.0))
+            prev_dist[pair_seg_key] = None
         else:
             dx = c1[0] - c2[0]
             dy = c1[1] - c2[1]
             feature_rows.append((dx / FEATURE_SCALE, dy / FEATURE_SCALE))
             dist = (dx * dx + dy * dy) ** 0.5
             # Tie rule matches convert_split's own: dist == threshold is close.
-            if dist <= close_threshold:
+            is_close = dist <= close_threshold
+            if is_close:
                 relations["close"].append((pt, 1))
             else:
                 relations["far"].append((pt, 1))
+
+            # FRAME-DIFFERENCE relations: became_far/distance_increasing --
+            # unlike the four activity-based transition relations above,
+            # these read this pair's own DISTANCE (not activity) at its
+            # immediately preceding observed co-visible pair-time in the
+            # SAME segment. ``became_far`` is true iff that previous
+            # pair-time was close (dist <= close_threshold -- the SAME tie
+            # rule as `relations["close"]` above, applied on both sides of
+            # the comparison since both readings reuse this same
+            # ``is_close``/``dist <= close_threshold`` test) and this one is
+            # far (dist > close_threshold); a dist==threshold->dist==
+            # threshold "transition" is therefore never became_far on either
+            # side of the tie. ``distance_increasing`` is true iff this
+            # pair-time's dist is STRICTLY greater than the previous one's
+            # (an unchanged or decreasing distance is never
+            # distance_increasing). Excluded (belongs to NEITHER relation),
+            # same as the activity-based relations' own first-observed rule:
+            # a pair's very first observed co-visible pair-time in a segment
+            # (``pair_seg_key`` absent from `prev_dist`) -- no earlier
+            # distance exists to compare against at all; ALSO excluded, a
+            # pair-time whose immediately preceding observed co-visible
+            # pair-time had MISSING coords (`prev_dist[pair_seg_key] is
+            # None`) -- that previous pair-time's own distance was never
+            # computed, so there is nothing honest to compare against
+            # either, even though an earlier-still distance may exist
+            # further back in this pair's history.
+            if pair_seg_key in prev_dist and prev_dist[pair_seg_key] is not None:
+                prev_dist_val, prev_was_close = prev_dist[pair_seg_key]
+                if prev_was_close and not is_close:
+                    transition_relations["became_far"].append((pt, 1))
+                if dist > prev_dist_val:
+                    transition_relations["distance_increasing"].append((pt, 1))
+            prev_dist[pair_seg_key] = (dist, is_close)
 
     num_pt = len(facts)
     features = torch.tensor(feature_rows, dtype=torch.float32).reshape(num_pt, 2)

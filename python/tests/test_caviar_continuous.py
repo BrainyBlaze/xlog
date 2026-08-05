@@ -440,6 +440,138 @@ def test_transition_relations_direct_protocol_vocabulary_guard(two_segment_file)
 
 
 # ---------------------------------------------------------------------------
+# became_far / distance_increasing: the two DISTANCE-based transition
+# relations (same "ec-mode only" vocabulary scoping as the four
+# activity-based ones above, already covered generically by the three tests
+# just above since they iterate `TRANSITION_RELATION_NAMES`). One pair
+# (id0, id1), id1 held fixed at the origin throughout so every distance
+# below is just id0's own x-coordinate; each fixture isolates one property.
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture()
+def distance_transition_fixture_file(tmp_path):
+    # id0's distance from id1 over 5 frames: 20 (close), 25 (close, tie),
+    # 25 (close, tie again), 26 (far, crosses the tie right at the
+    # threshold), 20 (close again) -- isolates the exact tie-crossing
+    # boundary (25 -> 26, not some arbitrary close -> far gap) and the
+    # strict "> previous", not ">=", reading of distance_increasing.
+    dists = [20, 25, 25, 26, 20]
+    ts = [0, 40, 80, 120, 160]
+    docs = [{
+        "_id": 0, "time": "0",
+        "narrative": [
+            atom
+            for t, d in zip(ts, dists)
+            for atom in (
+                f"happensAt(inactive(id0),{t})", f"coords(id0,{d},0,{t})",
+                f"happensAt(inactive(id1),{t})", f"coords(id1,0,0,{t})",
+            )
+        ],
+        "annotation": [],
+    }]
+    path = tmp_path / "mini.json"
+    _write_docs(path, docs)
+    return path
+
+
+def test_became_far_exact_threshold_crossing(distance_transition_fixture_file):
+    segments = load_continuous(str(distance_transition_fixture_file))
+    out = convert_continuous(segments)
+    tr = out["transition_relations"]
+    # pt0=t0 dist20 (first observed, excluded from both);
+    # pt1=t40 dist25 (prev close(20) -> still close(25,tie): NOT became_far);
+    # pt2=t80 dist25 (prev close-tie(25) -> still close-tie(25): NOT became_far,
+    #   tie-to-tie never crosses);
+    # pt3=t120 dist26 (prev close-tie(25) -> far(26): CROSSES right at the
+    #   threshold -> became_far fires -- "close is <=25, so becoming far
+    #   means crossing to >25", pinned exactly at the boundary);
+    # pt4=t160 dist20 (prev far(26) -> close(20): the REVERSE direction,
+    #   never became_far).
+    assert tr["became_far"] == [(3, 1)]
+
+
+def test_distance_increasing_is_strict(distance_transition_fixture_file):
+    segments = load_continuous(str(distance_transition_fixture_file))
+    out = convert_continuous(segments)
+    tr = out["transition_relations"]
+    # pt0: first observed, excluded.
+    # pt1: 25 > 20 -- a real increase -> fires.
+    # pt2: 25 > 25 is False (tie, not an increase) -- must NOT fire, pinning
+    #   strict "> previous", not ">=".
+    # pt3: 26 > 25 -- a real increase -> fires.
+    # pt4: 20 > 26 is False (a decrease) -- must NOT fire.
+    assert tr["distance_increasing"] == [(1, 1), (3, 1)]
+
+
+def test_distance_relations_first_observed_pt_excluded(distance_transition_fixture_file):
+    segments = load_continuous(str(distance_transition_fixture_file))
+    out = convert_continuous(segments)
+    tr = out["transition_relations"]
+    assert (0, 1) not in tr["became_far"]
+    assert (0, 1) not in tr["distance_increasing"]
+
+
+@pytest.fixture()
+def distance_missing_coords_fixture_file(tmp_path):
+    # t=0: dist=20 (close, first observed). t=40: id1 has an activity event
+    # (so the pair stays co-visible) but NO coords atom -- a missing-coords
+    # pair-time. t=80: dist=30 (far). Naively comparing t=80 straight back
+    # to t=0's dist=20 (skipping the missing-coords row in between) would
+    # wrongly read this as both became_far (close -> far) AND
+    # distance_increasing (30 > 20); the correct reading excludes t=80 from
+    # both, because its OWN immediately preceding observed co-visible
+    # pair-time (t=40) had missing coords, not because there is no earlier
+    # distance anywhere in this pair's history.
+    docs = [{
+        "_id": 0, "time": "0",
+        "narrative": [
+            "happensAt(inactive(id0),0)", "coords(id0,20,0,0)",
+            "happensAt(inactive(id1),0)", "coords(id1,0,0,0)",
+            "happensAt(inactive(id0),40)", "coords(id0,20,0,40)",
+            "happensAt(inactive(id1),40)",  # id1: no coords atom at t=40
+            "happensAt(inactive(id0),80)", "coords(id0,30,0,80)",
+            "happensAt(inactive(id1),80)", "coords(id1,0,0,80)",
+        ],
+        "annotation": [],
+    }]
+    path = tmp_path / "mini.json"
+    _write_docs(path, docs)
+    return path
+
+
+def test_distance_relations_excluded_when_previous_step_missing_coords(
+    distance_missing_coords_fixture_file,
+):
+    segments = load_continuous(str(distance_missing_coords_fixture_file))
+    out = convert_continuous(segments)
+    tr = out["transition_relations"]
+    assert out["n_coords_missing"] == 1
+    assert out["relations"]["coords_missing"] == [(1, 1)]
+    # pt2 (t=80, dist=30, far): its own immediately preceding observed
+    # co-visible pair-time (pt1, t=40) had missing coords -- excluded from
+    # BOTH relations, even though pt0's dist (20, close) would otherwise
+    # make this look like a became_far + distance_increasing transition.
+    assert (2, 1) not in tr["became_far"]
+    assert (2, 1) not in tr["distance_increasing"]
+    assert tr["became_far"] == []
+    assert tr["distance_increasing"] == []
+
+
+def test_distance_relations_ec_only_vocabulary_guard(distance_transition_fixture_file):
+    # The two new distance-based relations follow the SAME "ec-mode only"
+    # scoping as the four activity-based ones -- explicit, name-level pin
+    # (the generic tests above already cover this for every name in
+    # TRANSITION_RELATION_NAMES, including these two).
+    segments = load_continuous(str(distance_transition_fixture_file))
+    out = convert_continuous(segments)
+    assert "became_far" not in out["relations"]
+    assert "distance_increasing" not in out["relations"]
+    assert "became_far" in out["transition_relations"]
+    assert "distance_increasing" in out["transition_relations"]
+
+
+# ---------------------------------------------------------------------------
 # derive_ec_masks_continuous: the don't-care truth table
 # ---------------------------------------------------------------------------
 

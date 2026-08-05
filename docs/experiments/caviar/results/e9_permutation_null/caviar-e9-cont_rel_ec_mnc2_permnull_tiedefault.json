@@ -1,0 +1,284 @@
+{
+  "pkl": "C:\\Users\\User\\flt-workspace\\projects\\xlog\\runs\\r_djwq4hnn0dqoi4e2\\caviar_data_continuous\\caviar-data\\caviar-train.json",
+  "test_json": "C:\\Users\\User\\flt-workspace\\projects\\xlog\\runs\\r_djwq4hnn0dqoi4e2\\caviar_data_continuous\\caviar-data\\caviar-test.json",
+  "data": "continuous",
+  "fold": null,
+  "mode": "relational",
+  "protocol": "ec",
+  "close_threshold": 25.0,
+  "k": 4,
+  "seed": 7,
+  "hidden": 16,
+  "max_clauses": 4,
+  "min_new_covered": 2,
+  "max_body_literals": 3,
+  "holdout_score": "f1",
+  "ec_fit_mode": "permutation-null",
+  "min_fit": null,
+  "null_permutations": 1000,
+  "null_quantile": 0.95,
+  "null_perm_seed": 7,
+  "tie_tolerance": null,
+  "num_pt": {
+    "train": 24312,
+    "test": 8048
+  },
+  "n_pos": {
+    "train": 1344,
+    "test": 489
+  },
+  "wall_clock_s": {
+    "convert": 0.33843849999993836,
+    "theory_loop_init_null": 0.48245959999985644,
+    "theory_loop_init": 0.3846843000001172,
+    "theory_loop_term_null": 0.23571140000058222,
+    "theory_loop_term": 0.06514120000065304,
+    "mode_total": 1.3048554999995758,
+    "total": 1.69187409999995
+  },
+  "candidate_vocabulary": {
+    "relational": [
+      "any_became_active",
+      "any_became_inactive",
+      "any_became_walking",
+      "any_stopped_walking",
+      "both_active",
+      "both_inactive",
+      "both_walking",
+      "close",
+      "far",
+      "mixed_active_walking"
+    ],
+    "neural": [],
+    "excluded": [
+      "coords_missing"
+    ]
+  },
+  "steps_requested": null,
+  "steps_effective": null,
+  "steps_clamped": false,
+  "ec": {
+    "n_init": {
+      "train": 10,
+      "test": 3
+    },
+    "n_term": {
+      "train": 11,
+      "test": 1
+    },
+    "n_init_dontcare_train": 1334,
+    "n_term_dontcare_train": 22957,
+    "init_theory": {
+      "clauses": [
+        [
+          "both_active",
+          "close"
+        ]
+      ],
+      "iterations": [
+        {
+          "rule": [
+            "both_active",
+            "close"
+          ],
+          "reason": "committed",
+          "margin": 0.13809523809523808,
+          "n_residual_pos_before": 10,
+          "n_newly_covered": 3
+        },
+        {
+          "rule": null,
+          "reason": "select_once abstained",
+          "margin": 0.0,
+          "n_residual_pos_before": 7,
+          "n_newly_covered": 0
+        }
+      ],
+      "stop_reason": "select_once abstained"
+    },
+    "term_theory": {
+      "clauses": [],
+      "iterations": [
+        {
+          "rule": null,
+          "reason": "select_once abstained",
+          "margin": 0.0,
+          "n_residual_pos_before": 11,
+          "n_newly_covered": 0
+        }
+      ],
+      "stop_reason": "select_once abstained"
+    },
+    "init_scoring": {
+      "theory_prf1": {
+        "train": {
+          "precision": 0.017045454545454544,
+          "recall": 0.3,
+          "f1": 0.03225806451612903,
+          "tp": 3,
+          "fp": 173,
+          "fn": 7,
+          "tn": 24129,
+          "degenerate": false
+        },
+        "test": {
+          "precision": 0.009174311926605505,
+          "recall": 0.3333333333333333,
+          "f1": 0.01785714285714286,
+          "tp": 1,
+          "fp": 108,
+          "fn": 2,
+          "tn": 7937,
+          "degenerate": false
+        }
+      },
+      "marginal_contribution": [
+        {
+          "clause": [
+            "both_active",
+            "close"
+          ],
+          "test_f1_without": 0.0,
+          "marginal_test_f1": 0.01785714285714286
+        }
+      ]
+    },
+    "term_scoring": {
+      "theory_prf1": {
+        "train": {
+          "precision": 0.0,
+          "recall": 0.0,
+          "f1": 0.0,
+          "tp": 0,
+          "fp": 0,
+          "fn": 11,
+          "tn": 24301,
+          "degenerate": true
+        },
+        "test": {
+          "precision": 0.0,
+          "recall": 0.0,
+          "f1": 0.0,
+          "tp": 0,
+          "fp": 0,
+          "fn": 1,
+          "tn": 8047,
+          "degenerate": true
+        }
+      },
+      "marginal_contribution": []
+    },
+    "frame_f1": {
+      "precision": 0.9844097995545658,
+      "recall": 0.9038854805725971,
+      "f1": 0.9424307036247335,
+      "tp": 442,
+      "fp": 7,
+      "fn": 47,
+      "tn": 7552,
+      "degenerate": false
+    },
+    "relational_search_pool": {
+      "init": {
+        "bodies_by_size": {
+          "2": 30,
+          "3": 29
+        },
+        "skipped_empty_cover": {
+          "2": 15,
+          "3": 91
+        }
+      },
+      "term": {
+        "bodies_by_size": {
+          "2": 30,
+          "3": 29
+        },
+        "skipped_empty_cover": {
+          "2": 15,
+          "3": 91
+        }
+      }
+    },
+    "init_scores_last_iteration_top5": [
+      [
+        "any_became_active&any_stopped_walking&mixed_active_walking",
+        0.08333333333333333
+      ],
+      [
+        "any_stopped_walking&far&mixed_active_walking",
+        0.08333333333333333
+      ],
+      [
+        "any_stopped_walking&mixed_active_walking",
+        0.08333333333333333
+      ],
+      [
+        "any_became_active&any_stopped_walking&far",
+        0.06060606060606061
+      ],
+      [
+        "any_became_active&any_stopped_walking",
+        0.05555555555555555
+      ]
+    ],
+    "term_scores_last_iteration_top5": [
+      [
+        "any_became_inactive&any_became_walking",
+        0.1
+      ],
+      [
+        "any_became_inactive&any_became_walking&far",
+        0.1
+      ],
+      [
+        "any_became_inactive&far",
+        0.1
+      ],
+      [
+        "any_became_walking&far",
+        0.1
+      ],
+      [
+        "both_walking&close",
+        0.1
+      ]
+    ],
+    "init_selection_reasons": [
+      "won by 0.13810",
+      "holdout tie among 3 bodies clustering into 2 genuinely different covers: Occam licenses narrowing an identical-cover tie to its simplest description, not choosing among bodies that actually disagree on some fact"
+    ],
+    "term_selection_reasons": [
+      "no body passed the fit gate (min_fit=0.125): a body that cannot fit held-out data is not a rule"
+    ],
+    "ec_fit_mode": "permutation-null",
+    "init_min_fit": 0.04444444444444445,
+    "term_min_fit": 0.125,
+    "init_null_summary": {
+      "threshold": 0.04444444444444445,
+      "pool_max_samples_summary": {
+        "min": 0.0004078303425774878,
+        "median": 0.0022053960473078123,
+        "p95": 0.04444444444444445,
+        "max": 0.16666666666666666
+      },
+      "n_permutations": 1000,
+      "quantile": 0.95,
+      "perm_seed": 7
+    },
+    "term_null_summary": {
+      "threshold": 0.125,
+      "pool_max_samples_summary": {
+        "min": 0.011904761904761904,
+        "median": 0.03846153846153846,
+        "p95": 0.125,
+        "max": 0.25
+      },
+      "n_permutations": 1000,
+      "quantile": 0.95,
+      "perm_seed": 7
+    }
+  },
+  "direct_context": null,
+  "detector_probe": null
+}
