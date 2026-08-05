@@ -161,6 +161,29 @@ def test_load_xml_corpus_keeps_each_video_as_its_own_independent_segment(tmp_pat
     assert out["num_pt"] == 2
 
 
+def test_parse_video_strips_whitespace_padded_object_ids(tmp_path):
+    # Group <members> entries are stripped when parsed; the <object id=...>
+    # attribute must be stripped the same way, or a whitespace-padded id
+    # (<object id=" 1">) silently splits one person into two identities and
+    # orphans every group annotation naming that person.
+    objs = _obj_xml(0, 0, 0) + _obj_xml(" 1", 10, 10)
+    frames = _frame_xml(0, objs, _grp_xml(0, [0, 1], "interacting"))
+    path = tmp_path / "v.xml"
+    _write(path, _dataset_xml(frames))
+    video = parse_video(str(path))
+    assert video["persons"] == ["id0", "id1"]
+    assert ("id1", 0) in video["tracked"]
+    assert video["holds"]["meeting"] == {("id0", "id1", 0), ("id1", "id0", 0)}
+
+
+def test_parse_video_object_without_id_raises_naming_file_and_frame(tmp_path):
+    frames = _frame_xml(3, "<object><appearance>visible</appearance></object>")
+    path = tmp_path / "v.xml"
+    _write(path, _dataset_xml(frames))
+    with pytest.raises(ValueError, match=r"v\.xml.*frame 3"):
+        parse_video(str(path))
+
+
 # ---------------------------------------------------------------------------
 # box-center computation: box xc/yc read directly as the center pixel
 # ---------------------------------------------------------------------------

@@ -244,8 +244,18 @@ def parse_video(path: str, *, frame_ms: int = FRAME_MS_DEFAULT, time_offset: int
             for obj_el in objectlist.findall("object"):
                 objid = obj_el.get("id")
                 if objid is None:
-                    continue
-                pid = f"id{objid}"
+                    raise ValueError(
+                        f"<object> entry with no 'id' attribute in {path!r} "
+                        f"at frame {fnum}: an unidentifiable tracked object "
+                        "cannot be assigned to a person, and silently "
+                        "dropping it would understate co-visibility."
+                    )
+                # `.strip()` matches the group-<members> parsing below: a
+                # whitespace-padded id attribute must still name the SAME
+                # person a group's member list names, or one person silently
+                # splits into two identities and every group annotation
+                # naming them is orphaned.
+                pid = f"id{objid.strip()}"
                 persons.add(pid)
                 tracked.add((pid, t))
 
