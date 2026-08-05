@@ -18,8 +18,10 @@ verification, and differentiable neural-symbolic training — with zero tracked 
 transfers in production data planes.
 
 Implemented in Rust with custom CUDA kernels, XLOG caches compiled circuits across training
-iterations and exposes GPU-resident results zero-copy through DLPack and the Arrow C Device
-interface to PyTorch, JAX, and cuDF (Arrow IPC covers host-side interchange). On the MNIST-addition neural-symbolic benchmark, circuit caching
+iterations and exposes GPU-resident results as zero-copy DLPack and Arrow C Device
+views to PyTorch, JAX, and cuDF; persistent Python relation replacements instead take owned
+device-to-device snapshots (Arrow IPC covers host-side interchange). On the MNIST-addition
+neural-symbolic benchmark, circuit caching
 yields a measured **2.74× end-to-end training speedup** (95% CI `[2.29, 3.18]`) in a
 cached-vs-uncached ablation of XLOG's own pipeline, and steady epochs run **2.80× faster than
 Scallop** at matched accuracy under an identical protocol.
@@ -34,7 +36,9 @@ XLOG is not a DSL bolted onto a tensor framework. It is a full typed logic progr
 - **User-defined functions, modules and imports, stratified aggregation, and integrity constraints**, so programs decompose cleanly instead of collapsing into flat rule lists.
 - **One syntax for four paradigms:** probabilistic facts (`p::f.`), annotated disjunctions, neural predicate declarations (`nn/k`), and SAT constraints share the same syntactic core with deterministic Datalog.
 - **GPU-resident semantics:** relational operators, circuit evaluation, and verification paths run on the device instead of bouncing through the host.
-- **A runtime inside your training loop, not a service:** DLPack capsules and the Arrow C Device interface expose GPU-resident query results and gradient tensors directly; Arrow IPC handles host-side interchange.
+- **A runtime inside your training loop, not a service:** CUDA-backed DLPack producers provide
+  zero-copy transient inputs, while DLPack capsules and the Arrow C Device interface expose
+  zero-copy device views of query results and gradients; Arrow IPC handles host-side interchange.
 
 ## When to use XLOG
 
@@ -107,7 +111,7 @@ magic sets, probabilistic aggregates, approximate inference, epistemic reasoning
 | **GPU execution** | Custom CUDA kernels for hash joins, radix sort, filter, dedup, union, difference, group-by; worst-case-optimal joins; delta coalescing; runtime CSE; adaptive re-optimization; persistent hash-index reuse |
 | **Float semantics** | IEEE 754 total ordering for `f32`/`f64` (`NaN > Inf > nums > +0 > -0 > -Inf`) |
 | **Diagnostics & provenance** | Rule and fact provenance, proof traces, planner telemetry, host-transfer audits, module-boundary diagnostics, `--stats` per-stratum timing and memory accounting |
-| **Interop** | DLPack capsules and Arrow C Device interface (zero-copy device export), Arrow IPC (host serialization), PyTorch, JAX, cuDF, Python bindings (`pyxlog`) |
+| **Interop** | CUDA-backed DLPack producers and capsules, Arrow C Device interface (zero-copy transient/device views; owned device snapshots for persistent Python relations), Arrow IPC (host serialization), PyTorch, JAX, cuDF, Python bindings (`pyxlog`) |
 
 ---
 
@@ -173,7 +177,8 @@ cargo build --release
 
 The release binary is `./target/release/xlog`.
 
-Published artifacts follow tagged releases and may lag the current `main` branch.
+Published artifacts correspond to tagged releases. Check the selected artifact's
+release notes for its API surface; build from source for later source-tree APIs.
 
 ### GitHub release binary install
 
@@ -198,22 +203,23 @@ importing `pyxlog`:
 export XLOG_CUBIN_DIR=/path/to/xlog/crates/pyxlog/python/pyxlog/kernels
 ```
 
-For unreleased `main` branch features, use the local development install below instead of
-expecting PyPI to match the current `main` branch.
+For an API present in a source checkout but absent from the selected wheel, use
+the local development install below.
 
 ### crates.io install
 
-Install the latest published CLI crate from crates.io:
+Install a published CLI crate from crates.io:
 
 ```bash
 cargo install xlog-cli --features host-io
 ```
 
-As with the GitHub and PyPI artifacts, published crate versions follow tagged releases and may lag
-the current `main` branch. The Cargo-installed binary embeds portable PTX for all runtime
-kernels, so it can run without a sidecar `kernels/` directory. If a staged `kernels/` directory or
-`XLOG_CUBIN_DIR` is present, xlog still prefers those filesystem artifacts so release archives and
-local builds can use architecture-specific cubins first.
+As with the GitHub and PyPI artifacts, published crate versions correspond to
+tagged releases. Their release notes define the included API surface. The
+Cargo-installed binary embeds portable PTX for all runtime kernels, so it can run
+without a sidecar `kernels/` directory. If a staged `kernels/` directory or
+`XLOG_CUBIN_DIR` is present, xlog still prefers those filesystem artifacts so
+release archives and local builds can use architecture-specific cubins first.
 
 ### CUDA kernel artifact model
 
@@ -292,7 +298,7 @@ The documentation website is **[xlog.md](https://xlog.md)**. Key references in t
 | [WCOJ architecture guide](https://xlog.md/architecture/wcoj) | Worst-case-optimal joins: RIR, promoter, dispatch, cost model, recursive integration |
 | [WCOJ user guide](https://xlog.md/guides/wcoj-tuning) | Eligibility, fallback behavior, performance tuning, troubleshooting |
 | [CLI reference](https://xlog.md/reference/cli) | Full flag and subcommand reference |
-| [Arrow / DLPack interop](https://xlog.md/guides/interop) | Zero-copy device interop (DLPack, Arrow C Device) and Arrow IPC interchange with cuDF, PyTorch, and JAX |
+| [Arrow / DLPack interop](https://xlog.md/guides/interop) | Zero-copy transient and result handoff, owned persistent relation snapshots, and Arrow IPC interchange with cuDF, PyTorch, and JAX |
 | [Python bindings](https://xlog.md/reference/python) | `pyxlog` API surface |
 | [CUDA certification](https://xlog.md/architecture/certification) | Kernel certification suite coverage |
 | [Roadmap](ROADMAP.md) | Feature status and planned work |

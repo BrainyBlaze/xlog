@@ -1,6 +1,6 @@
 ---
 title: "Factorized Execution"
-description: "Architecture reference for contributors: XLOG's main-branch factorized routes (aggregate-fused WCOJ, Free Join, and recursive-delta) that avoid materializing large intermediate joins. Unreleased beyond 0.9.2."
+description: "Architecture reference for contributors: XLOG's factorized routes (aggregate-fused WCOJ, Free Join, and recursive delta) that avoid materializing large intermediate joins. Available since 0.10.0."
 ---
 
 <Note>
@@ -14,8 +14,7 @@ step: when a compact representation is enough to compute the answer, XLOG uses i
 instead of materializing every intermediate row. "Materializing" here means
 writing out the full set of joined rows in memory.
 
-These routes live on the `main` branch and are unreleased beyond 0.9.2. Packages
-installed from the 0.9.2 release do not include them.
+These routes have been available since 0.10.0.
 
 <Frame caption="Both routes return the identical row set: the ordinary path materializes every intermediate row, while a factorized route computes the answer from a compact per-key structure — gated by dispatch counters and kill switches (environment variables that force a route off).">
   <img className="block dark:hidden" src="/assets/diagrams/factorized-execution-light.svg" alt="Factorized execution: the materialized fallback joins R with S into a full intermediate row set before joining T and aggregating, while the factorized route builds a compact GPU per-key structure over R, S, and T and aggregates from it; both converge on the identical answer, with routes controlled by dispatch counters and XLOG_DISABLE kill switches." />
@@ -106,8 +105,8 @@ groupby route, or returns the same error that the fallback would return.
 
 ## Free Join
 
-Free Join is the main-only generalized multiway route. It handles eligible bodies
-with three or more atoms that do not use a dedicated triangle, 4-cycle, or clique
+Free Join is the generalized multiway route. It handles eligible bodies with
+three or more atoms that do not use a dedicated triangle, 4-cycle, or clique
 kernel.
 
 The planner has three options for such a body. It can keep the source order,
@@ -134,6 +133,5 @@ To demonstrate that a route did what it claims, pin down all four of these:
 3. the dispatch counter that proves it fired;
 4. the kill-switch parity check (route on vs. route off, same row set).
 
-Keep the release status attached to any such example: these routes are on `main`
-and unreleased beyond 0.9.2, so they are not the default behavior for anyone
-running the 0.9.2 packages.
+Record the runtime version with any such example. These routes have been available
+since 0.10.0; earlier packages do not include them.

@@ -43,7 +43,7 @@ If a page cannot answer all three, it is not user-facing yet.
 
 If any of these appears, the section is not "rough" — it is **not yet written for
 a reader**. Do not patch; rewrite from the reader's point of view. Each rule is
-followed by a real example pulled from the current docs.
+followed by a real example from a past documentation review.
 
 - **R1 — Notes addressed to the doc author, not the reader.**
   > 🔴 *"Do not describe them as available in the 0.9.2 release artifacts."*
@@ -54,7 +54,7 @@ followed by a real example pulled from the current docs.
   A page must not open with a `<Warning>` about branch/version or a list of
   counters. The reader does not yet know what the feature *is* or why they want
   it. Value first; status and internals later.
-  > 🔴 factorized-execution opens with a release `<Warning>` and a table whose
+  > 🔴 factorized-execution opened with a release `<Warning>` and a table whose
   > "user-visible signal" column is `wcoj_groupby_fusion_dispatch_count`.
 
 - **R3 — An internal symbol as the headline concept.**

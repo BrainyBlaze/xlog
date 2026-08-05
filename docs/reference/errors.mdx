@@ -21,8 +21,8 @@ variants may be added without a breaking change.
 | `StratificationCycle` | Stratification failed: a cycle through negation, reported with the predicates involved. |
 | `UnsafeVariable` | Domain safety violation: a variable is not bound in any positive body literal. |
 | `ResourceExhausted` | GPU memory budget exceeded; carries the operation context, the estimated bytes, and the budget. |
-| `CompileCapacityExceeded` | The knowledge-compilation phase (the step, named D4, that turns the program into a compiled Boolean circuit) declined the input: the Boolean formula it was asked to compile — a formula in conjunctive normal form, or CNF — was too large to compile safely. Compiling it anyway would overrun the fixed-capacity output buffers and trigger a CUDA launch error that leaves the GPU unusable for the rest of the process. Means "too big to compile"; catchable; distinct from the verify-phase signal below. **(unreleased)** |
-| `VerifyBudgetExceeded` | The GPU verifier that checks whether two formulas are equivalent declined. Its conflict-driven SAT search (CDCL) ran out of the per-verify conflict budget before reaching a definite answer. An indeterminate result is never trusted as a proof. **(unreleased)** |
+| `CompileCapacityExceeded` | The knowledge-compilation phase (the step, named D4, that turns the program into a compiled Boolean circuit) declined the input: the Boolean formula it was asked to compile — a formula in conjunctive normal form, or CNF — was too large to compile safely. Compiling it anyway would overrun the fixed-capacity output buffers and trigger a CUDA launch error that leaves the GPU unusable for the rest of the process. Means "too big to compile"; catchable; distinct from the verify-phase signal below. Available since 0.10.0. |
+| `VerifyBudgetExceeded` | The GPU verifier that checks whether two formulas are equivalent declined. Its conflict-driven SAT search (CDCL) ran out of the per-verify conflict budget before reaching a definite answer. An indeterminate result is never trusted as a proof. Available since 0.10.0. |
 | `Kernel` | GPU kernel launch or execution error. |
 | `Type` | Type checking or inference error. |
 | `Compilation` | Compilation pipeline error (also carries the resident MC rejections and the exact aggregate cap declines described below). |
@@ -86,7 +86,7 @@ aggregate domain`. The Monte Carlo engine has no such cap because it samples
 worlds instead of enumerating outcome formulas. See
 [Probabilistic engines](/probabilistic/engines) for choosing between the two.
 
-### Multiway union size caps (unreleased)
+### Multiway union size caps
 
 The GPU sort and dedup steps that merge same-head rule outputs index column
 bytes with 32-bit arithmetic, so they reject any column whose logical bytes
@@ -96,13 +96,12 @@ concatenation step applies analogous `Concat: ... too large` caps. These are
 fail-closed declines, never silent truncation: a relation column past 4 GiB
 stops the run instead of scattering rows.
 
-### Compile and verify budgets (unreleased)
+### Compile and verify budgets
 
 These two budgets let the engine refuse an oversized problem cleanly instead of
-crashing the GPU. They currently live on the `main` branch and are not yet in a
-published release. The knowledge-compilation phase (D4) and the verify phase
-decline oversized instances rather than risk a CUDA launch failure that would
-leave the GPU unusable for the rest of the process:
+crashing the GPU. Available since 0.10.0, the knowledge-compilation phase (D4)
+and verify-phase controls decline oversized instances rather than risk a CUDA
+launch failure that would leave the GPU unusable for the rest of the process:
 
 - A CNF (Boolean formula in conjunctive normal form) whose variable or clause
   capacity exceeds `XLOG_D4_VERIFY_MAX_VARS` / `XLOG_D4_VERIFY_MAX_CLAUSES`
@@ -131,9 +130,15 @@ answered.
 | `ValueError` | Invalid parameters: an unknown `prob_engine` (expected `exact_ddnnf` or `mc`), an unknown `sampling_method` (expected `rejection` or `evidence_clamping`), `memory_mb=0`, row counts exceeding `u32` range, neural input shape or value validation, and exporting provenance for an unstored relation. |
 | `RelationMetadataError` (a `ValueError` subclass) | Invalid ordered roles, whole-fact provenance, insert evidence, or relation-provenance manifests. |
 | `KeyError` | `LogicRelationSession.relation(name)` or `evidence(name)` when the named relation is not currently stored. |
+| `BufferError` | A tensor-like DLPack producer reports a non-CUDA device from `__dlpack_device__()`. XLOG raises before calling `__dlpack__()` or consuming a capsule. |
 | `MemoryError` | The per-call memory limit: when `memory_mb` is passed to an evaluation and the provider's allocated bytes already exceed it, the call raises before evaluating. |
-| `RuntimeError` | Any `XlogError` propagated from the engine (parse, compilation, kernel, execution, resource exhaustion — including the resident MC rejection and aggregate cap messages above), and host-output calls on a build without the `host-io` feature. |
+| `RuntimeError` | Any `XlogError` propagated from the engine (parse, compilation, kernel, execution, resource exhaustion — including the resident MC rejection and aggregate cap messages above), host-output calls on a build without the `host-io` feature, and construction of fallback `RelationEvidence` when `pyxlog._native` is unavailable. |
 | `IlpConfigError` (a `ValueError` subclass) | `induce_exact(backend="python")` without `XLOG_ALLOW_PYTHON_ILP_REFERENCE=1`. The Python reference scorer exists only to cross-check results (parity-only) and is never a production path. |
+
+In a source-only import without `pyxlog._native`, package-level
+`RelationMetadataError` and `RelationEvidence` remain importable. The fallback
+metadata error still subclasses `ValueError`; only native evidence instances and
+session operations require the extension.
 
 ## See also
 

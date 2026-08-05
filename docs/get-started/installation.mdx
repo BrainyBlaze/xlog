@@ -9,7 +9,7 @@ There are four ways to install, depending on what you are doing:
 
 <CardGroup cols={2}>
   <Card title="Build from source" icon="hammer">
-    You want the latest `main`-branch code, or you plan to change xlog itself.
+    You want the source-tree API, or you plan to change xlog itself.
   </Card>
   <Card title="GitHub release binary" icon="download">
     You want a ready-to-run `xlog` command and don't want to compile anything.
@@ -23,7 +23,11 @@ There are four ways to install, depending on what you are doing:
 </CardGroup>
 
 <Note>
-Published artifacts (GitHub releases, PyPI, crates.io) follow tagged releases and may lag the current `main` branch. To use unreleased features, [build from source](#build-from-source) or use the [local Python development install](#local-python-development-install).
+Published artifacts (GitHub releases, PyPI, crates.io) correspond to tagged
+releases. Check the selected artifact's release notes for its API surface. To use
+an API present in a source checkout but absent from that artifact, [build from
+source](#build-from-source) or use the [local Python development
+install](#local-python-development-install).
 </Note>
 
 ## Before you install: supported platform
@@ -50,7 +54,7 @@ Fix anything it flags before continuing. (The source clone below includes this s
 
 ## Build from source
 
-Use this when you want the latest `main`-branch code or plan to modify xlog.
+Use this when you want the source-tree API or plan to modify xlog.
 
 ```bash
 git clone https://github.com/BrainyBlaze/xlog.git
@@ -77,7 +81,7 @@ Public release archives are already built with `host-io`, so `xlog prob` prints 
 
 ## PyPI install
 
-Use this when you want to call xlog from Python. Install the latest published `pyxlog` wheel:
+Use this when you want to call xlog from Python. Install a published `pyxlog` wheel:
 
 ```bash
 pip install pyxlog
@@ -91,7 +95,8 @@ You only set `XLOG_CUBIN_DIR` yourself when you run outside that packaged layout
 export XLOG_CUBIN_DIR=/path/to/xlog/crates/pyxlog/python/pyxlog/kernels
 ```
 
-For unreleased `main` branch features, use the [local development install](#local-python-development-install) below instead of expecting PyPI to match the current `main` branch.
+For an API present in a source checkout but absent from the selected wheel, use
+the [local development install](#local-python-development-install) below.
 
 ## crates.io install
 
@@ -107,11 +112,13 @@ This binary works without any separate kernel files. It embeds portable PTX — 
 
 If a staged `kernels/` directory or `XLOG_CUBIN_DIR` is present, xlog still prefers those files. They hold cubins (kernels already compiled for a specific GPU architecture), which start faster than compiling the portable PTX on the fly. So release archives and local builds can use their architecture-specific kernels first.
 
-As with the GitHub and PyPI artifacts, published crate versions follow tagged releases and may lag the current `main` branch.
+As with the GitHub and PyPI artifacts, published crate versions correspond to
+tagged releases. Their release notes define the included API surface.
 
 ## Local Python development install
 
-Use this when you want unreleased `main`-branch features available from Python, or when you need `pyxlog` installed into a specific Python interpreter.
+Use this when you want the source-tree API available from Python, or when you need
+`pyxlog` installed into a specific Python interpreter.
 
 Install into the exact Python interpreter used by your downstream project:
 

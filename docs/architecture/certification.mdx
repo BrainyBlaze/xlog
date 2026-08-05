@@ -25,7 +25,7 @@ The layers below run in different places and prove different things.
 | --- | --- | --- |
 | GitHub CI | GitHub-hosted runners | Formatting, workflow hygiene, package metadata, no-GPU CUDA build, and non-GPU checks. |
 | Targeted native Python CI | Self-hosted CUDA runner after pushes to `main`, or a maintainer dispatch from `main` for a reviewed full commit SHA | Installed-wheel relation provenance and membership-mask behavior on a real GPU without exposing the persistent host to automatic pull-request code. |
-| Docs site CI | GitHub Actions for `docs/**` | Mintlify validation, broken-link checks, and static export publication. |
+| Docs site CI | GitHub Actions for documentation and documentation-build inputs | Mintlify validation, broken-link checks, and static export; pushes to `main` also publish `docs-dist`. |
 | GPU release validation | Maintainer-run CUDA host | Actual CUDA behavior through `scripts/validate_release_gpu.sh`. |
 | Subsystem reliability gates | Subsystem-specific suites | Statistical or staged reliability for neural-symbolic and other higher-level engines. |
 
@@ -54,8 +54,10 @@ The script does the following:
 - builds the workspace and `xlog-cli` release binary;
 - stages Python and CLI kernel artifacts;
 - builds the `pyxlog` wheel and CLI archive;
-- installs that exact wheel into an isolated environment and runs the native
-  relation-provenance, public-API, and callback suites with CUDA required;
+- creates a fresh virtual environment with the host's site packages visible,
+  force-installs that exact wheel without resolving dependencies, verifies the
+  imported native module, and runs the native relation-provenance, contract,
+  public-API, and callback suites with CUDA required;
 - runs `xlog-cuda-tests` certification in release mode;
 - runs a basic `xlog run` smoke command;
 - verifies that packaged artifacts include the expected kernel files.
@@ -65,9 +67,10 @@ inspect the command sequence; it does not certify GPU behavior.
 
 ## Docs Gate
 
-This gate validates the documentation site. It triggers on edits under
-`docs/**` or on changes to the workflow itself. It uses Node 22, installs
-`mint@4.2.666`, and runs:
+This gate validates the documentation site. It triggers when documentation or a
+documentation-build input changes, including the docs tree, build scripts and
+deployment configuration, workspace manifests and crates, or the workflow
+itself. It uses Node 22, installs `mint@4.2.666`, and runs:
 
 ```bash
 mint validate

@@ -1,6 +1,6 @@
 ---
 title: "Roadmap"
-description: "A concise release-state roadmap for the 0.10.0 line, main-only work, and the next XLOG architecture priorities."
+description: "A concise capability roadmap for XLOG's implemented architecture and future engineering priorities."
 ---
 
 <Note>
@@ -8,16 +8,18 @@ For contributors — how xlog's release state and architecture priorities are
 organized internally. This is a roadmap, not a user guide.
 </Note>
 
-This roadmap is a release-state view, not a historical task board. It separates
-three things: what is in the 0.10.0 release artifacts, what exists only on the
-`main` branch, and forward-looking architecture priorities.
+This roadmap describes implemented capabilities and forward-looking architecture
+priorities. It does not duplicate a mutable package version. Use
+`CHANGELOG.md` and the selected artifact's release notes to determine packaged
+availability.
 
-## Released Baseline: 0.10.0
+## Released capabilities
 
-The 0.10.0 line is the current public release baseline. It includes the shared
-Rust workspace, CUDA-backed deterministic execution (GPU-accelerated evaluation
-that returns the same result every run), probabilistic and epistemic surfaces,
-solver services, Python packaging, and the `xlog` CLI.
+Tagged artifacts include the shared Rust workspace, CUDA-backed deterministic
+execution, probabilistic and epistemic surfaces, solver services, Python
+packaging, and the `xlog` CLI. Aggregate-fused worst-case-optimal joins (WCOJ),
+GPU Free Join, factorized recursive deltas, joint neural-symbolic mixtures, and
+grouped training are available in tagged artifacts beginning with 0.10.0.
 
 The public Rust release boundary is the set of publishable crates listed in
 [Release Process](/architecture/release-process). `pyxlog` is shipped through
@@ -43,41 +45,33 @@ the architecture:
 - **Route counters and telemetry**: dispatch counts that record which optimized
   execution path actually fired.
 
-## Main-Only Work Beyond 0.10.0
+## Implemented source-tree capabilities
 
-The 0.10.0 release absorbed a feature set that had previously lived only on the
-`main` branch. Those features are:
+The source tree includes the released architecture above and additional public
+contracts. Release notes identify the first packaged artifact that contains each
+new contract. Implemented capabilities include:
 
-- **Aggregate-fused WCOJ** — worst-case-optimal join, a strategy that computes
-  multiway patterns (such as triangles) without first building a large
-  intermediate table, here fused with an aggregation step.
-- **GPU Free Join** — a GPU join-execution strategy that mixes binary-join and
-  worst-case-optimal steps.
-- **Factorized recursive deltas** — the newly derived facts produced on each
-  round of recursion, stored in a compact, factorized form.
-- **Joint mixtures with graded masses** — probabilistic outputs where the
-  possible outcomes carry graded weights.
-- **Stage-B existential joins** — a join form that handles existentially
-  quantified variables.
-- **Grouped training** — training run over grouped batches of examples.
-- **Both provenance-engine fixes** — fixes to the subsystem that tracks how each
-  derived fact was produced.
-
-New main-only work is tracked here as it lands. Currently on `main` beyond the
-0.10.0 artifacts:
-
-- **Batched multiway unions** — same-head rule outputs are merged with one
-  chunked multiway union per evaluation pass instead of one union per rule
-  (chunk budget overridable via `XLOG_UNION_CHUNK_BYTES`).
-- **Ignored-pragma warnings** — `warning[W0510]` on stderr when a pragma appears
-  in an imported module; pragmas apply only when declared in the entry file.
+- **Native relation evidence** — ordered semantic roles and provenance records
+  bind to complete facts of any positive arity and follow every relation mutation
+  atomically.
+- **Exact relation manifests** — versioned metadata and DLPack columns reconstruct
+  persistent rows, roles, and whole-fact evidence in another compatible session.
+- **Owned persistent relation snapshots** — persistent DLPack imports are copied
+  device-to-device into session-owned storage, while transient evaluation imports
+  remain zero-copy.
+- **Deterministic delta behavior** — canceled updates do not advance relation
+  versions or emit callbacks, and invalid batch keys are rejected before mutation.
+- **Batched multiway unions** — same-head rule outputs merge through one chunked
+  multiway union per evaluation pass, with the byte budget controlled by
+  `XLOG_UNION_CHUNK_BYTES`.
+- **Ignored-pragma warnings** — an imported-module pragma produces
+  `warning[W0510]` on stderr because pragmas apply only in the entry file.
 
 ## Near-Term Documentation Priorities
 
 The documentation roadmap is:
 
 - keep `docs/` as the public source of truth for xlog.md;
-- keep local agent reports, plans, evidence, and superpower notes out of Git;
 - replace internal milestone prose with source-backed product documentation;
 - add accurate diagrams that show the host/device boundary and the boundaries
   between the internal representations (RIR, EIR, PIR, SIR);

@@ -3,13 +3,17 @@
 `pyxlog` provides Python bindings for the XLOG GPU-accelerated probabilistic
 logic programming runtime:
 
-- **GPU-resident Datalog** evaluation with zero-copy DLPack interop (PyTorch, JAX, cuDF).
+- **GPU-resident Datalog** evaluation with CUDA-backed DLPack producers and
+  zero-copy transient inputs and exported views (PyTorch, JAX, cuDF); persistent
+  relation replacements take owned device-to-device snapshots.
 - **Probabilistic inference**: exact weighted model counting via knowledge
   compilation to device-resident arithmetic circuits, plus seeded Monte Carlo
   sampling with confidence intervals.
 - **Neural-symbolic training**: neural predicates, circuit caching across
   iterations, and PyTorch autograd integration.
 - **Differentiable ILP** rule learning with GPU-resident credit assignment.
+- **Native relation evidence** with ordered roles, whole-fact provenance, and
+  exact versioned manifest export/import paired with DLPack relation columns.
 
 Requires Linux x86_64 with an NVIDIA GPU and CUDA 13.x.
 

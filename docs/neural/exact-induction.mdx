@@ -126,8 +126,9 @@ error rather than coerced into one type.
 The scoring sweep does no host round-trips — nothing is copied back from the GPU to
 the CPU while scoring runs.
 
-The setup uploads (a small candidate-offset array, and a device-to-device column
-concatenation) are constant-size, and they stay on the device — they are not
+The setup work scales with the input: the candidate-offset upload has one entry
+per candidate boundary, and device-to-device concatenation scales with the
+candidate rows. These operations prepare device buffers; they are not
 device-to-host (GPU-to-CPU) transfers.
 
 The production `induce_exact` call copies results back from the GPU exactly
@@ -146,10 +147,10 @@ device-to-host transfer.
 ## Availability
 
 <Note>
-Bounded exact induction ships in the `pyxlog` PyPI wheel that tracks the `v0.9.2`
-release, alongside the rest of the neural-symbolic surface. Its CUDA kernel is not yet
-in the formal certification registry, because its compiled GPU code (PTX) is not
-committed — see [CUDA certification](/architecture/certification).
+Published `pyxlog` wheels beginning with 0.9.2 contain native bounded exact
+induction. The supported pair types are `u64`, `u32`, and `symbol`. Its CUDA
+kernel is not yet in the formal certification registry, because its compiled GPU
+code (PTX) is not committed. See [CUDA certification](/architecture/certification).
 </Note>
 
 ## See also
