@@ -29,6 +29,7 @@ jobs:
         working-directory: crates/pyxlog
         run: python -m pip install --force-reinstall dist/*.whl
       - name: Smoke test import + evaluate
+        shell: bash
         run: |
           python - <<'PY'
           import pyxlog
@@ -65,7 +66,32 @@ jobs:
           prob_res = prob.evaluate(return_grads=False)
           assert len(prob_res.atoms) == 2
 
-          mc_src = r"""
+          # MC stage 1: a monotone program must run on the resident
+          # GPU engine and carry the "gpu-resident" label.
+          mc_monotone_src = r"""
+          #pragma prob_engine = mc
+
+          0.7::rain().
+          0.2::sprinkler().
+
+          wet() :- rain().
+          wet() :- sprinkler().
+
+          query(wet()).
+          query(rain()).
+          """.strip()
+
+          mc = pyxlog.Program.compile(mc_monotone_src, device=0, memory_mb=1024)
+          mc_res = mc.evaluate(return_grads=False, samples=20000, seed=123, confidence=0.95)
+          assert mc_res.mc_engine == "gpu-resident", mc_res.mc_engine
+          assert len(mc_res.atoms) == 2
+          assert mc_res.approx is True
+          assert mc_res.stderr is not None
+          assert mc_res.ci_low is not None
+          assert mc_res.ci_high is not None
+          assert mc_res.samples == 20000
+
+          mc_nonmonotone_src = r"""
           #pragma prob_engine = mc
 
           0.5::flip().
@@ -78,12 +104,28 @@ jobs:
           query(flip()).
           """.strip()
 
-          mc = pyxlog.Program.compile(mc_src, device=0, memory_mb=1024)
-          mc_res = mc.evaluate(return_grads=False, samples=20000, seed=123, confidence=0.95, max_nonmonotone_iterations=256)
-          assert len(mc_res.atoms) == 2
-          assert mc_res.approx is True
-          assert mc_res.stderr is not None
-          assert mc_res.ci_low is not None
-          assert mc_res.ci_high is not None
-          assert mc_res.samples == 20000
+          # MC stage 2: negation is resident-rejected, so the default
+          # configuration must fail closed with the typed rejection —
+          # assert the exact reason, not just "it raised".
+          mc_rej = pyxlog.Program.compile(mc_nonmonotone_src, device=0, memory_mb=1024)
+          try:
+              mc_rej.evaluate(return_grads=False, samples=20000, seed=123, confidence=0.95, max_nonmonotone_iterations=256)
+          except RuntimeError as e:
+              msg = str(e)
+              assert "resident MC engine rejected program" in msg, msg
+              assert "kind=negation" in msg, msg
+          else:
+              raise AssertionError("non-monotone MC program must fail closed without allow_cpu_oracle")
+
+          # MC stage 3: the explicit opt-in must run the labeled CPU
+          # oracle and still produce the full MC result surface.
+          mc_oracle = pyxlog.Program.compile(mc_nonmonotone_src, device=0, memory_mb=1024)
+          mc_oracle_res = mc_oracle.evaluate(return_grads=False, samples=20000, seed=123, confidence=0.95, max_nonmonotone_iterations=256, allow_cpu_oracle=True)
+          assert mc_oracle_res.mc_engine == "cpu-oracle", mc_oracle_res.mc_engine
+          assert len(mc_oracle_res.atoms) == 2
+          assert mc_oracle_res.approx is True
+          assert mc_oracle_res.stderr is not None
+          assert mc_oracle_res.ci_low is not None
+          assert mc_oracle_res.ci_high is not None
+          assert mc_oracle_res.samples == 20000
           PY
