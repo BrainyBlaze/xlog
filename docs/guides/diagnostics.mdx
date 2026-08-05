@@ -223,32 +223,77 @@ fake zero.
 
 ## Relation evidence
 
-**When to use it.** You load relations with provenance and later want to audit what was
-accepted, what was rejected, and against which hashes.
+**When to use it.** You need to audit the semantic role of each relation column and the
+source records attached to a complete fact, including ternary and higher-arity facts.
 
-**How.** For relations loaded with provenance, the session retains a separate evidence
-record — schema, source and output hashes, row hashes, and accepted/rejected decision
-counts:
+**How.** Load roles and whole-fact provenance through the native session API:
 
 ```python
+columns = [subject, predicate, object_id]
+roles = [
+    {"name": "subject"},
+    {"name": "predicate"},
+    {"name": "object_id"},
+]
 session.put_relation_with_provenance(
-    "edge",
+    "observed_edge",
     columns,
-    relation_schema=["subject", "predicate", "object"],
-    source_hash="sha256:...",
-    row_hashes=["..."],
-    decision_counts={"accepted": 10, "rejected": 2},
+    roles=roles,
+    facts=[{
+        "tuple": [12, 4, 91],
+        "provenance": [
+            {"source": "extractor", "document": "record-17"},
+            {"source": "review", "kind": "confirmation"},
+        ],
+    }],
 )
 
-session.evidence()                        # program_hash + per-relation evidence
-session.relation("edge").provenance()     # schema, hashes, decision counts
+session.evidence()                              # program hash + relation snapshots
+session.relation("observed_edge").provenance() # roles + complete facts + records
 ```
 
-**How do I know it worked.** `evidence()` returns a `program_hash` plus one evidence
-entry per relation; `relation("edge").provenance()` returns that relation's schema,
-hashes, and decision counts.
+**How do I know it worked.** The relation snapshot reports `metadata_present`,
+`row_count`, ordered `roles`, and canonical `facts`. Each fact has a stable `identity`,
+a friendly `tuple`, exact typed `cells`, and all distinct provenance records. Repeating
+the same fact or record does not change the result order: fact entries merge by their
+complete typed tuple and exact duplicate records collapse.
+
+The evidence is updated with the relation. Provenance-bearing inserts add records;
+deletes remove the records for the complete deleted fact; coalesced batch updates do not
+leave evidence for canceled inserts. Plain replacement clears prior evidence, and
+relation removal or a session clear removes it. Validation failures change neither data
+nor evidence.
+
+Whole-fact membership validation stays on the GPU except for one boolean result mask.
+`host_transfer_stats()` accounts for that mask as one device-to-host call and one byte
+per distinct evidence fact. A relation with roles but no facts performs no membership
+transfer. To audit a zero-transfer path, enable the deterministic transfer gate before
+the operation:
+
+```python
+session.reset_host_transfer_stats()
+session.reset_deterministic_d2h_violations()
+session.set_strict_deterministic_d2h(True)
+try:
+    session.put_relation_with_provenance(
+        "observed_edge",
+        columns,
+        roles=roles,
+        facts=[],
+    )
+finally:
+    session.set_strict_deterministic_d2h(False)
+
+assert session.host_transfer_stats()["dtoh_bytes"] == 0
+assert session.deterministic_d2h_violation_count() == 0
+```
+
+If evidence facts are present, strict mode rejects the membership-mask transfer before
+the relation or evidence changes. Use the normal accounting mode when that bounded,
+deterministic validation transfer is acceptable.
 
 <Note>
-The evidence store is session-local and in-memory — an audit companion to the relation
-store, not a persistence format.
+The native evidence store is session-local and in-memory. Use
+`export_relation_with_provenance()` for an exact version-1 manifest paired with
+in-process DLPack columns; the manifest alone is not relation persistence.
 </Note>

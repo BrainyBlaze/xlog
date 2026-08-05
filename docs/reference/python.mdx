@@ -207,26 +207,26 @@ SCC) reuse previously computed output where the plan allows. Updates that delete
 rows clear and recompute the affected groups so results stay correct.
 
 ```python
-session.put_relation("external_consumer_commit", [row_id, parent_id])
+session.put_relation("edge", [row_id, parent_id])
 session.evaluate()
 
-delta = session.insert_relation("external_consumer_commit", [new_row_id, new_parent_id])
+delta = session.insert_relation("edge", [new_row_id, new_parent_id])
 result = session.evaluate()          # returns the delta-updated cached store
 print(session.delta_stats(), delta)
 
 session.apply_relation_delta(
-    "external_consumer_commit",
+    "edge",
     insert_columns=[added_row_id, added_parent_id],
     delete_columns=[removed_row_id, removed_parent_id],
 )
 
 session.apply_relation_delta_batch([
-    {"name": "external_consumer_commit", "insert_columns": [row_a, parent_a]},
-    {"name": "external_consumer_commit", "delete_columns": [row_b, parent_b]},
+    {"name": "edge", "insert_columns": [row_a, parent_a]},
+    {"name": "edge", "delete_columns": [row_b, parent_b]},
 ])
 
 debug = session.apply_relation_delta_debug(
-    [{"name": "external_consumer_commit", "insert_columns": [row_c, parent_c]}],
+    [{"name": "edge", "insert_columns": [row_c, parent_c]}],
     check_equivalence=True,
 )
 ```
@@ -268,7 +268,7 @@ def unregister_relation_callback(callback_id: int) -> bool: ...
 events = []
 callback_id = session.register_relation_callback(events.append)
 session.apply_relation_delta_batch([
-    {"name": "external_consumer_commit", "insert_columns": [row_a, parent_a]},
+    {"name": "edge", "insert_columns": [row_a, parent_a]},
 ])
 session.unregister_relation_callback(callback_id)
 ```
@@ -288,7 +288,7 @@ produce identical callback sequences. Building a callback payload does not expor
 DLPack tensors or download relation data rows; use explicit `evaluate()` or
 `export_relation()` when you actually need the rows materialized.
 
-#### Rule, Proof, And Temporal Provenance
+#### Rule, proof, temporal, and relation provenance
 
 Compiled logic/probabilistic programs and sessions can report where their results
 came from (provenance):
@@ -342,42 +342,127 @@ pyxlog.temporal_provenance(session, "stream_row_copy")
 
 The temporal metadata shape preserves `timestamp_column`, `dataset_id`,
 `row_hashes`, `field_hashes`, `uncertainty`, `stream_id`, `source`,
-`order_column`, `process_boundary`, and `temporal_order`.
+`order_column`, `process_boundary`, and `temporal_order`. Temporal metadata is a
+Python helper facility; it is separate from the native whole-fact evidence API
+below.
 
-General relation evidence uses the same session-side provenance store without
-requiring temporal columns:
+Native relation evidence binds ordered semantic roles and provenance records to
+complete facts of any positive arity. The role order must match the compiled
+predicate argument order, and each fact is identified by all of its cells:
 
 ```python
-session.put_relation_with_provenance(
-    "biokg_edge",
-    columns,
-    relation_schema=["subject", "predicate", "object"],
-    source_path="primekg_edges.jsonl",
-    source_hash="sha256:...",
-    row_hashes=row_hashes,
-    accepted_count=len(row_hashes),
-    rejected_count=0,
-    output_path="evidence/biokg_edge.arrow",
-    output_hash="sha256:...",
+program = pyxlog.LogicProgram.compile("""
+    domain party: u32.
+    domain asset: u32.
+    pred transfer(giver: party, receiver: party, asset: asset, event_time: i64).
+""")
+session = program.session()
+
+snapshot = session.put_relation_with_provenance(
+    "transfer",
+    [giver, receiver, asset, event_time],
+    roles=[
+        {"name": "giver", "sort": "party", "type": "u32"},
+        {"name": "receiver", "sort": "party", "type": "u32"},
+        {"name": "asset", "sort": "asset", "type": "u32"},
+        {"name": "event_time", "type": "i64"},
+    ],
+    facts=[{
+        "tuple": [10, 20, 7, 1_700_000_000],
+        "provenance": [
+            {
+                "source": "extractor-output",
+                "document": "document-42",
+                "span": {"start": 18, "end": 41},
+                "content_hash": "sha256:...",
+                "kind": "assertion",
+                "polarity": "positive",
+            },
+            {"source": "manual-review", "kind": "confirmation"},
+        ],
+    }],
 )
-session.evidence()
-session.relation("biokg_edge").provenance()
+same_snapshot = session.relation("transfer").provenance()
+all_evidence = session.evidence()
 ```
+
+Each role input requires `name`; optional `sort` and `type` fields, when present,
+must match the compiled schema. Returned snapshots resolve all three fields.
+Source-named predicate arguments require their compiled names. Positional
+arguments accept application-defined role names on the first metadata-bearing
+load, then enforce that role contract on later replacements and manifest imports.
+
+A fact supplies exactly one of `tuple` or `cells`. `tuple` is the convenient
+Python representation. `cells` is a sequence of exact
+`{"type": ..., "hex": ...}` values for bit-preserving values such as NaNs and
+signed zero. Provenance records may contain `source`, `document`, `span`,
+`content_hash`, `kind`, and `polarity`; at least one field must be non-null. Two
+different records for the same complete tuple remain distinct. Repeated fact
+entries are merged by exact typed tuple, exact duplicate records are collapsed,
+and facts and records are returned in deterministic canonical order.
+
+Evidence follows the native relation lifecycle atomically:
+
+- `put_relation_with_provenance` replaces both rows and evidence;
+- plain `put_relation` replaces the rows and clears old evidence;
+- `insert_relation(..., facts=...)` and
+  `apply_relation_delta(..., insert_facts=...)` add evidence for inserted facts;
+- batch and debug updates accept `insert_facts` in each update dictionary;
+- deleting a complete fact deletes its evidence, and coalesced or canceled batch
+  updates cannot leave stale evidence; and
+- `remove_relation` and `clear_relations` remove the matching evidence.
+
+All role, type, arity, evidence-tuple membership, and batch validation completes
+before mutation. A validation or pre-commit preparation failure leaves relation
+rows, evidence, delta statistics, callback generations, and callbacks unchanged.
+Nullary relations do not accept relation provenance.
+
+Membership is checked as complete tuples on the GPU. For a non-empty evidence
+set, the runtime downloads one boolean membership mask in a single transfer—one
+byte per distinct fact—not the relation rows. Role-only metadata and
+metadata-free manifests need no membership transfer. Use
+`set_strict_deterministic_d2h(True)` to reject even this deterministic mask
+transfer; `deterministic_d2h_violation_count()` reports rejected attempts, and a
+rejection is atomic.
+
+`relation(name)` returns a native `RelationEvidence` snapshot.
+`evidence(name=None)` returns a deterministic `program_hash` and a `relations`
+mapping of native snapshots. These are not Python package sidecar records.
+
+#### Provenance manifest round trips
+
+Use the paired DLPack-and-manifest API to reconstruct rows and native evidence in
+another compatible session:
 
 ```python
-def evidence(name: str | None = None) -> dict: ...
-def relation(name: str) -> RelationEvidence: ...
-class RelationEvidence:
-    def provenance(self) -> dict: ...
+exported = session.export_relation_with_provenance("transfer")
+
+fresh = program.session()
+restored = fresh.put_relation_from_manifest(
+    "transfer",
+    exported["columns"],
+    exported["manifest"],
+)
 ```
 
-`Session.evidence()` returns a `program_hash` and per-relation dictionaries.
-`Relation.provenance()` / `RelationEvidence.provenance()` returns the stored
-`relation_schema`, `source_hash`, `row_hashes`, `field_hashes`,
-`accepted_count`, `rejected_count`, `output_path`, `output_hash`, and
-`decision_counts` fields.
+The manifest is the exact `xlog.relation-provenance` version `1` shape. Its
+required top-level fields are `format`, `version`, `predicate`, `row_count`,
+`metadata_present`, `roles`, and `facts`. `predicate` contains `name`, `arity`,
+and the compiled `schema_sha256`. Manifest facts contain `identity`, exact
+`cells`, and fixed-shape `provenance` records; they intentionally omit the
+friendly `tuple`. Every dictionary level rejects missing or unknown fields. If
+`metadata_present` is false, both `roles` and `facts` must be empty.
 
-#### Runtime Controls And Diagnostics
+Import validates the manifest, compiled schema, DLPack column shape and types,
+row count, and complete-fact membership before replacing the target. Fact and
+record order and exact duplicates are normalized deterministically. The DLPack
+columns are process-local, single-consumer ownership objects; the manifest may
+be serialized as data, but it does not contain the relation columns and is not a
+cross-process persistence format. Keep the exported columns alive until import
+consumes them. For portable storage, use a host-serialized relation format and
+treat native manifest reconstruction as a separate in-process operation.
+
+#### Runtime controls and diagnostics
 
 Long-running callers can submit logic or probabilistic evaluations to a
 background Python worker with `evaluate_async(...)`. The returned

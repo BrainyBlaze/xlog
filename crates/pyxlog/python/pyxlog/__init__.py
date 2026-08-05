@@ -6,9 +6,7 @@ configure_kernel_search_path()
 # Re-export everything from the native Rust module
 import asyncio
 import ctypes
-import hashlib
 from concurrent.futures import Future, ThreadPoolExecutor
-from pathlib import Path
 from typing import Any, Iterator
 
 try:
@@ -38,6 +36,10 @@ elif _native is None:
             raise RuntimeError("pyxlog._native is not available")
 
     IlpProgramFactory = _NativeUnavailableIlpProgramFactory
+
+if _native is not None:
+    RelationEvidence = _native.RelationEvidence
+    RelationMetadataError = _native.RelationMetadataError
 
 
 _DLPACK_CAPSULE_NAME = b"dltensor"
@@ -154,7 +156,6 @@ _RUNTIME_API_EXECUTOR = ThreadPoolExecutor(max_workers=4, thread_name_prefix="py
 _RUNTIME_API_ORIGINALS: dict[tuple[type, str], Any] = {}
 _RUNTIME_API_PROGRESS: dict[int, dict[str, Any]] = {}
 _TEMPORAL_PROVENANCE: dict[int, dict[str, dict[str, Any]]] = {}
-_RELATION_EVIDENCE: dict[int, dict[str, dict[str, Any]]] = {}
 _NN4_LINEAGE: dict[int, dict[str, dict[str, Any]]] = {}
 _NN4_INFLUENCE: dict[int, dict[str, list[dict[str, Any]]]] = {}
 
@@ -271,24 +272,6 @@ def _logic_session_put_temporal_relation(
         "temporal_order": temporal_order,
     }
     _TEMPORAL_PROVENANCE.setdefault(id(self), {})[name] = metadata
-    _record_relation_evidence(
-        self,
-        name,
-        {
-            "relation": name,
-            "relation_schema": [],
-            "source_hash": source,
-            "source_path": source,
-            "row_hashes": list(row_hashes or []),
-            "field_hashes": dict(field_hashes or {}),
-            "accepted_count": len(row_hashes or []),
-            "rejected_count": 0,
-            "decision_counts": {
-                "accepted": len(row_hashes or []),
-                "rejected": 0,
-            },
-        },
-    )
     return dict(metadata)
 
 
@@ -346,22 +329,6 @@ def temporal_provenance(session: Any, name: str) -> dict[str, Any]:
             "reason": "no temporal provenance recorded for relation",
         }
     return dict(metadata)
-
-
-def _record_relation_evidence(self: Any, name: str, metadata: dict[str, Any]) -> None:
-    _RELATION_EVIDENCE.setdefault(id(self), {})[name] = dict(metadata)
-
-
-def _hash_path(path: str) -> str:
-    digest = hashlib.sha256()
-    with Path(path).open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
-def _stable_hash(value: str) -> str:
-    return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
 def _logic_program_evaluate(self: Any, *args: Any, **kwargs: Any) -> Any:

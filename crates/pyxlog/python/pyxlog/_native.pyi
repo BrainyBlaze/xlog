@@ -9,13 +9,116 @@ importable from Python.
 
 from __future__ import annotations
 
-from typing import Any, Optional, Sequence
+from typing import Any, Literal, Optional, Sequence, TypedDict, Union
 
 # ---------------------------------------------------------------------------
 # Module-level constant
 # ---------------------------------------------------------------------------
 
 __version__: str
+
+# ---------------------------------------------------------------------------
+# Native relation provenance
+# ---------------------------------------------------------------------------
+
+_RelationScalarType = Literal[
+    "u32", "u64", "i32", "i64", "f32", "f64", "bool", "symbol"
+]
+_RelationScalarValue = Union[int, float, bool]
+
+class _RelationRole(TypedDict):
+    name: str
+    sort: Optional[str]
+    type: _RelationScalarType
+
+class _OptionalRelationRoleFields(TypedDict, total=False):
+    sort: Optional[str]
+    type: _RelationScalarType
+
+class _RelationRoleInput(_OptionalRelationRoleFields):
+    name: str
+
+class _RelationProvenanceSpan(TypedDict):
+    start: int
+    end: int
+
+class _RelationProvenanceRecord(TypedDict):
+    source: Optional[str]
+    document: Optional[str]
+    span: Optional[_RelationProvenanceSpan]
+    content_hash: Optional[str]
+    kind: Optional[str]
+    polarity: Optional[str]
+
+class _RelationProvenanceRecordInput(TypedDict, total=False):
+    source: Optional[str]
+    document: Optional[str]
+    span: Optional[_RelationProvenanceSpan]
+    content_hash: Optional[str]
+    kind: Optional[str]
+    polarity: Optional[str]
+
+class _RelationExactCell(TypedDict):
+    type: _RelationScalarType
+    hex: str
+
+class _RelationTupleFactInput(TypedDict):
+    tuple: Sequence[_RelationScalarValue]
+    provenance: Sequence[_RelationProvenanceRecordInput]
+
+class _RelationExactFactInput(TypedDict):
+    cells: Sequence[_RelationExactCell]
+    provenance: Sequence[_RelationProvenanceRecordInput]
+
+_RelationFactInput = Union[_RelationTupleFactInput, _RelationExactFactInput]
+
+class _RelationFact(TypedDict):
+    identity: str
+    tuple: list[_RelationScalarValue]
+    cells: list[_RelationExactCell]
+    provenance: list[_RelationProvenanceRecord]
+
+class _RelationSnapshot(TypedDict):
+    relation: str
+    metadata_present: bool
+    row_count: int
+    roles: list[_RelationRole]
+    facts: list[_RelationFact]
+
+class _RelationSessionEvidence(TypedDict):
+    program_hash: str
+    relations: dict[str, _RelationSnapshot]
+
+class _RelationManifestPredicate(TypedDict):
+    name: str
+    arity: int
+    schema_sha256: str
+
+class _RelationManifestFact(TypedDict):
+    identity: str
+    cells: list[_RelationExactCell]
+    provenance: list[_RelationProvenanceRecord]
+
+class _RelationProvenanceManifest(TypedDict):
+    format: Literal["xlog.relation-provenance"]
+    version: Literal[1]
+    predicate: _RelationManifestPredicate
+    row_count: int
+    metadata_present: bool
+    roles: list[_RelationRole]
+    facts: list[_RelationManifestFact]
+
+class _RelationProvenanceExport(TypedDict):
+    columns: list[Any]
+    manifest: _RelationProvenanceManifest
+
+class _OptionalRelationDeltaFields(TypedDict, total=False):
+    insert_columns: Any
+    delete_columns: Any
+    insert_facts: Sequence[_RelationFactInput]
+
+class _RelationDeltaUpdate(_OptionalRelationDeltaFields):
+    name: str
 
 # ---------------------------------------------------------------------------
 # Joint constraint carrier
@@ -26,6 +129,10 @@ SOLVER_ABI_IDENTITY: str
 class CarrierRefused(RuntimeError): ...
 
 class SolverResourceExhausted(RuntimeError): ...
+
+class RelationMetadataError(ValueError):
+    """A relation role or fact provenance value violates the compiled schema."""
+    ...
 
 class JointConstraintCarrier:
     def __init__(
@@ -105,11 +212,45 @@ class LogicRelationSession:
         """Upload a relation as a sequence of DLPack column capsules."""
         ...
 
+    def put_relation_with_provenance(
+        self,
+        name: str,
+        dlpack_columns: Any,
+        *,
+        roles: Sequence[_RelationRoleInput],
+        facts: Sequence[_RelationFactInput],
+    ) -> _RelationSnapshot:
+        """Replace a relation and atomically bind roles and whole-fact evidence."""
+        ...
+
+    def put_relation_from_manifest(
+        self,
+        name: str,
+        dlpack_columns: Any,
+        manifest: _RelationProvenanceManifest,
+    ) -> _RelationSnapshot:
+        """Replace a relation from DLPack columns and an exact version-1 manifest."""
+        ...
+
+    def relation(self, name: str) -> RelationEvidence:
+        """Return a stable evidence snapshot for one stored relation."""
+        ...
+
+    def evidence(self, name: Optional[str] = None) -> _RelationSessionEvidence:
+        """Return deterministic evidence for one or all stored relations."""
+        ...
+
     def evaluate(self, memory_mb: Optional[int] = None) -> LogicEvalResult:
         """Evaluate the program against all currently stored relations."""
         ...
 
-    def insert_relation(self, name: str, dlpack_columns: Any) -> dict[str, Any]:
+    def insert_relation(
+        self,
+        name: str,
+        dlpack_columns: Any,
+        *,
+        facts: Optional[Sequence[_RelationFactInput]] = None,
+    ) -> dict[str, Any]:
         """Insert DLPack rows into a stored relation through the delta path."""
         ...
 
@@ -122,11 +263,15 @@ class LogicRelationSession:
         name: str,
         insert_columns: Optional[Any] = None,
         delete_columns: Optional[Any] = None,
+        *,
+        insert_facts: Optional[Sequence[_RelationFactInput]] = None,
     ) -> dict[str, Any]:
         """Apply insert and/or delete rows to a stored relation."""
         ...
 
-    def apply_relation_delta_batch(self, updates: list[dict[str, Any]]) -> dict[str, Any]:
+    def apply_relation_delta_batch(
+        self, updates: Sequence[_RelationDeltaUpdate]
+    ) -> dict[str, Any]:
         """Apply a batch of relation deltas with device-side coalescing.
 
         Each update dictionary contains ``name`` plus optional
@@ -139,7 +284,7 @@ class LogicRelationSession:
 
     def apply_relation_delta_debug(
         self,
-        updates: list[dict[str, Any]],
+        updates: Sequence[_RelationDeltaUpdate],
         check_equivalence: bool = False,
     ) -> dict[str, Any]:
         """Apply a delta batch and return changed_relation_names, debug_trace, and optional equivalent_to_full_recompute."""
@@ -192,6 +337,22 @@ class LogicRelationSession:
         """Reset all host-transfer statistics."""
         ...
 
+    def set_strict_deterministic_d2h(self, enabled: bool) -> None:
+        """Reject deterministic device-to-host transfers while enabled."""
+        ...
+
+    def strict_deterministic_d2h_enabled(self) -> bool:
+        """Return whether the deterministic transfer gate is enabled."""
+        ...
+
+    def deterministic_d2h_violation_count(self) -> int:
+        """Return the number of transfers rejected by the deterministic gate."""
+        ...
+
+    def reset_deterministic_d2h_violations(self) -> None:
+        """Reset the deterministic transfer-gate violation counter."""
+        ...
+
     def cuda_graph_stats(self) -> dict[str, int]:
         """Return CUDA Graph capture, launch, fallback, and cache-hit counters."""
         ...
@@ -213,12 +374,25 @@ class LogicRelationSession:
         """Export the named relation as a list of DLPack column capsules."""
         ...
 
+    def export_relation_with_provenance(
+        self, name: str
+    ) -> _RelationProvenanceExport:
+        """Export DLPack columns with their exact version-1 provenance manifest."""
+        ...
+
     def remove_relation(self, name: str) -> bool:
         """Remove the named relation.  Returns True if it existed."""
         ...
 
     def clear_relations(self) -> None:
         """Remove all stored relations from the session."""
+        ...
+
+class RelationEvidence:
+    """Immutable native evidence snapshot for one relation."""
+
+    def provenance(self) -> _RelationSnapshot:
+        """Return the relation snapshot captured when this object was created."""
         ...
 
 class LogicQueryResult:
