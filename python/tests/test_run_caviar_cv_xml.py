@@ -112,6 +112,26 @@ def test_parse_args_rejects_unknown_data_source():
         run_caviar_cv.parse_args(REQUIRED + ["--data-source", "bogus"])
 
 
+def test_parse_args_xml_source_rejects_train_or_test_json():
+    # Cross-source flags must be a usage error, not silently ignored and
+    # recorded into the result JSON as (false) provenance.
+    with pytest.raises(SystemExit):
+        run_caviar_cv.parse_args(
+            ["--data-source", "xml", "--xml-dir", "some/dir",
+             "--train-json", "train.json", "--out", "o.json"],
+        )
+    with pytest.raises(SystemExit):
+        run_caviar_cv.parse_args(
+            ["--data-source", "xml", "--xml-dir", "some/dir",
+             "--test-json", "test.json", "--out", "o.json"],
+        )
+
+
+def test_parse_args_dump_source_rejects_xml_dir():
+    with pytest.raises(SystemExit):
+        run_caviar_cv.parse_args(REQUIRED + ["--xml-dir", "some/dir"])
+
+
 def test_run_fold_data_source_parameter_defaults_to_dump():
     import inspect
 

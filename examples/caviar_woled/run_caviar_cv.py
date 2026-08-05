@@ -1023,6 +1023,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                 "(the continuous dump corpus is meeting-only) -- use "
                 "--data-source xml for the moving fluent."
             )
+        if args.xml_dir is not None:
+            p.error(
+                "--xml-dir is only meaningful with --data-source xml; with "
+                "--data-source dump it would be silently ignored yet "
+                "recorded into the result JSON as provenance -- refused "
+                "instead (mirrors the --fluent moving refusal above)."
+            )
         missing = [
             name for name, value in (("--train-json", args.train_json), ("--test-json", args.test_json))
             if value is None
@@ -1030,6 +1037,18 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         if missing:
             p.error(f"{' and '.join(missing)} required for --data-source dump")
     else:
+        cross = [
+            name for name, value in (("--train-json", args.train_json), ("--test-json", args.test_json))
+            if value is not None
+        ]
+        if cross:
+            p.error(
+                f"{' and '.join(cross)} only meaningful with --data-source "
+                "dump; with --data-source xml they would be silently "
+                "ignored yet recorded into the result JSON as provenance -- "
+                "refused instead (mirrors the --fluent moving refusal for "
+                "the dump source)."
+            )
         if args.xml_dir is None:
             args.xml_dir = os.environ.get("CAVIAR_XML_DIR")
         if not args.xml_dir:
