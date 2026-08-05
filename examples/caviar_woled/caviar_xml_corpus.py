@@ -220,6 +220,11 @@ def parse_video(path: str, *, frame_ms: int = FRAME_MS_DEFAULT, time_offset: int
     ``.xml_``-suffixed files (two of the 30 real ground-truth files carry
     this trailing-underscore extension) parse identically to ``.xml``
     files: the extension carries no meaning to the XML content itself.
+
+    Raises ``ValueError`` on a well-formed document with zero ``<frame>``
+    elements: that is what a default-``xmlns`` (namespaced) or otherwise
+    non-CAVIAR file parses to here, and an all-empty video must fail
+    loudly, not silently shrink the corpus.
     """
     tree = ET.parse(path)
     root = tree.getroot()
@@ -326,6 +331,17 @@ def parse_video(path: str, *, frame_ms: int = FRAME_MS_DEFAULT, time_offset: int
                             if i != j:
                                 holds[pred].add((members[i], members[j], t))
 
+    if not timestamps:
+        raise ValueError(
+            f"{path!r} parsed as well-formed XML but contains zero <frame> "
+            "elements -- not a CAVIAR ground-truth document as this parser "
+            "reads it. A default xmlns namespace produces exactly this "
+            "(ElementTree then names every tag '{uri}frame', which "
+            "findall('frame') cannot match), as does handing a non-CAVIAR "
+            "file to this loader; silently returning an all-empty video "
+            "would understate the corpus instead of failing loudly."
+        )
+
     return {
         "video": video_name,
         "frame_ms": frame_ms,
@@ -349,7 +365,10 @@ def load_xml_corpus(xml_dir: str, *, frame_ms: int = FRAME_MS_DEFAULT) -> list[d
     align onto and no splicing of any kind between files.
 
     Raises ``ValueError`` if no matching file is found (an empty corpus is
-    never silently accepted -- almost always a wrong path)."""
+    never silently accepted -- almost always a wrong path), and propagates
+    `parse_video`'s own refusal of a zero-``<frame>`` (e.g. namespaced)
+    file -- one wrong file fails the load rather than shrinking the
+    corpus."""
     paths = sorted(
         set(glob.glob(os.path.join(xml_dir, "*.xml"))) | set(glob.glob(os.path.join(xml_dir, "*.xml_")))
     )

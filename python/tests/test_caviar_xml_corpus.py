@@ -114,6 +114,44 @@ def test_load_xml_corpus_raises_on_empty_directory(tmp_path):
         load_xml_corpus(str(tmp_path))
 
 
+def test_parse_video_rejects_well_formed_xml_with_zero_frames(tmp_path):
+    # Well-formed XML whose root simply contains no <frame> elements (a
+    # non-CAVIAR file handed to the wrong loader): silently returning an
+    # all-empty video would let a wrong path/file understate the corpus
+    # instead of failing loudly.
+    path = tmp_path / "v.xml"
+    _write(path, '<?xml version="1.0"?><dataset name="Test"></dataset>')
+    with pytest.raises(ValueError, match="zero <frame>"):
+        parse_video(str(path))
+
+
+def test_parse_video_rejects_namespaced_caviar_document(tmp_path):
+    # The namespace case: a default xmlns makes ElementTree name every tag
+    # '{uri}frame', so findall('frame') matches NOTHING even though the
+    # document is a real CAVIAR ground truth in every other respect --
+    # exactly the silent all-empty parse the guard exists to catch.
+    frames = _frame_xml(0, _obj_xml(0, 10, 10) + _obj_xml(1, 20, 20))
+    content = (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        f'<dataset name="Test" xmlns="http://example.org/caviar">{frames}\n</dataset>'
+    )
+    path = tmp_path / "v.xml"
+    _write(path, content)
+    with pytest.raises(ValueError, match="zero <frame>"):
+        parse_video(str(path))
+
+
+def test_load_xml_corpus_propagates_the_zero_frame_refusal(tmp_path):
+    # The corpus loader must not swallow the per-file refusal: one
+    # namespaced/frameless file fails the whole load, it does not shrink
+    # the corpus.
+    good = _dataset_xml(_frame_xml(0, _obj_xml(0, 10, 10) + _obj_xml(1, 20, 20)))
+    _write(tmp_path / "a.xml", good)
+    _write(tmp_path / "b.xml", '<?xml version="1.0"?><dataset name="Test"></dataset>')
+    with pytest.raises(ValueError, match="zero <frame>"):
+        load_xml_corpus(str(tmp_path))
+
+
 # ---------------------------------------------------------------------------
 # Frame -> timestamp: frame*40ms default, per-video independence, offset
 # ---------------------------------------------------------------------------
