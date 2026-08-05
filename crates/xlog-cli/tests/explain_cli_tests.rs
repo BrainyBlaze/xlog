@@ -1,4 +1,5 @@
 use assert_cmd::cargo::cargo_bin_cmd;
+use tempfile::TempDir;
 
 #[test]
 fn test_xlog_explain_magic_sets_text() {
@@ -252,6 +253,48 @@ gated(X) :- know know support(X).
             || stdout.contains("\"predicate\": \"support\""),
         "{stdout}"
     );
+}
+
+#[test]
+fn test_xlog_explain_unions_compatible_predicates_from_separate_modules() {
+    let fixture = TempDir::new().expect("create fixture directory");
+    std::fs::write(
+        fixture.path().join("first.xlog"),
+        "pred shared(symbol).\nshared(from_first).\n",
+    )
+    .expect("write first module");
+    std::fs::write(
+        fixture.path().join("second.xlog"),
+        "pred shared(symbol).\nshared(from_second).\n",
+    )
+    .expect("write second module");
+    let program = fixture.path().join("main.xlog");
+    std::fs::write(&program, "use first.\nuse second.\n?- shared(X).\n")
+        .expect("write main program");
+
+    let output = cargo_bin_cmd!("xlog")
+        .args([
+            "explain",
+            "--format",
+            "json",
+            "--module-path",
+            fixture.path().to_str().expect("valid module path"),
+            program.to_str().expect("valid program path"),
+        ])
+        .output()
+        .expect("run xlog explain with compatible predicate contributions");
+
+    assert!(
+        output.status.success(),
+        "xlog explain failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).expect("utf8 stdout");
+    let payload: serde_json::Value = serde_json::from_str(&stdout).expect("valid explain json");
+    assert_eq!(payload["ast"]["rules"], 2, "{stdout}");
+    assert_eq!(payload["stratification"]["status"], "ok", "{stdout}");
+    assert_eq!(payload["rir"]["status"], "ok", "{stdout}");
+    assert_eq!(payload["optimizer"]["status"], "ok", "{stdout}");
 }
 
 #[test]

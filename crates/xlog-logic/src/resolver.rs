@@ -157,8 +157,7 @@ struct ImportScope {
     hidden: ModuleItems,
 }
 
-/// Predicate and function providers that a resolved import branch contributes
-/// to the flattened program.
+/// Function provider contributed by a resolved import branch.
 #[derive(Clone)]
 struct ImportProvider {
     module: ModulePath,
@@ -185,7 +184,6 @@ struct ImportedDomainDeclaration {
 
 #[derive(Default)]
 struct ImportProviders {
-    predicates: BTreeMap<String, ImportProvider>,
     functions: BTreeMap<String, ImportProvider>,
     predicate_declarations: BTreeMap<String, ImportedPredicateDeclaration>,
     domain_declarations: BTreeMap<String, ImportedDomainDeclaration>,
@@ -219,7 +217,7 @@ struct ImportMergeKey {
 /// silently.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct IgnoredImportPragma {
-    /// Module path string (e.g. `corpus/yoreh_deah/base`).
+    /// Module path string (e.g. `rules/common/base`).
     pub module: String,
     /// Pragma key as written in source (e.g. `magic_sets`).
     pub pragma: &'static str,
@@ -641,7 +639,9 @@ impl ModuleResolver {
     /// when its declarations match `program`. A context-free request is accepted
     /// only when every logical path identifies one loaded source file.
     ///
-    /// Returns (predicate imports, function imports) mapped to their source modules.
+    /// Returns predicate and function names with the first resolved source module
+    /// retained as a representative. Compatible predicate clauses from every
+    /// resolved source still participate in validation and merging.
     #[allow(clippy::type_complexity)]
     pub fn validate_imports(
         &self,
@@ -660,7 +660,6 @@ impl ModuleResolver {
     ) -> Result<(HashMap<String, ModulePath>, HashMap<String, ModulePath>), ModuleError> {
         let mut imported_predicates: HashMap<String, ModulePath> = HashMap::new();
         let mut imported_functions: HashMap<String, ModulePath> = HashMap::new();
-        let mut predicate_providers: HashMap<String, ImportProvider> = HashMap::new();
         let mut function_providers: HashMap<String, ImportProvider> = HashMap::new();
 
         for resolved_import in imports {
@@ -690,11 +689,6 @@ impl ModuleResolver {
                 // Check if name exists as predicate or function
                 let is_predicate = module.exports.contains(&name);
                 let is_function = module.function_exports.contains(&name);
-                let defines_predicate = module
-                    .program
-                    .rules
-                    .iter()
-                    .any(|rule| rule.head.predicate == name);
 
                 if !is_predicate && !is_function {
                     return Err(ModuleError::PredicateNotFound {
@@ -703,33 +697,12 @@ impl ModuleResolver {
                     });
                 }
 
-                // Check for conflicts with predicates
                 if is_predicate {
-                    if defines_predicate {
-                        if let Some(previous) = predicate_providers.get(&name) {
-                            if previous.source != resolved_import.source {
-                                return Err(ModuleError::ImportConflict {
-                                    name,
-                                    module1: previous.module.clone(),
-                                    module2: resolved_import.module_path.clone(),
-                                });
-                            }
-                        } else {
-                            predicate_providers.insert(
-                                name.clone(),
-                                ImportProvider {
-                                    module: resolved_import.module_path.clone(),
-                                    source: resolved_import.source.clone(),
-                                },
-                            );
-                        }
-                    }
                     imported_predicates
                         .entry(name.clone())
                         .or_insert_with(|| resolved_import.module_path.clone());
                 }
 
-                // Check for conflicts with functions
                 if is_function {
                     if let Some(previous) = function_providers.get(&name) {
                         if previous.source != resolved_import.source {
@@ -904,6 +877,25 @@ impl ModuleResolver {
             .collect()
     }
 
+    fn hidden_local_function_names(
+        program: &Program,
+        imported_items: Option<&HashSet<String>>,
+    ) -> HashSet<String> {
+        let private_functions = program
+            .functions
+            .iter()
+            .filter(|function| function.is_private)
+            .map(|function| function.name.clone())
+            .collect::<HashSet<_>>();
+        Self::local_function_names(program)
+            .into_iter()
+            .filter(|name| {
+                private_functions.contains(name)
+                    || imported_items.is_some_and(|items| !items.contains(name))
+            })
+            .collect()
+    }
+
     fn hidden_local_items(
         program: &Program,
         imported_items: Option<&HashSet<String>>,
@@ -922,19 +914,7 @@ impl ModuleResolver {
             })
             .collect();
 
-        let private_functions = program
-            .functions
-            .iter()
-            .filter(|function| function.is_private)
-            .map(|function| function.name.clone())
-            .collect::<HashSet<_>>();
-        let functions = Self::local_function_names(program)
-            .into_iter()
-            .filter(|name| {
-                private_functions.contains(name)
-                    || imported_items.is_some_and(|items| !items.contains(name))
-            })
-            .collect();
+        let functions = Self::hidden_local_function_names(program, imported_items);
 
         ModuleItems {
             predicates,
@@ -942,32 +922,18 @@ impl ModuleResolver {
         }
     }
 
-    fn local_predicate_definition_names(program: &Program) -> HashSet<String> {
-        program
-            .rules
-            .iter()
-            .map(|rule| rule.head.predicate.clone())
+    fn visible_local_functions(
+        program: &Program,
+        imported_items: Option<&HashSet<String>>,
+    ) -> HashSet<String> {
+        let hidden = Self::hidden_local_function_names(program, imported_items);
+        Self::local_function_names(program)
+            .difference(&hidden)
+            .cloned()
             .collect()
     }
 
-    fn visible_local_providers(
-        program: &Program,
-        imported_items: Option<&HashSet<String>>,
-    ) -> ModuleItems {
-        let hidden = Self::hidden_local_items(program, imported_items);
-        ModuleItems {
-            predicates: Self::local_predicate_definition_names(program)
-                .difference(&hidden.predicates)
-                .cloned()
-                .collect(),
-            functions: Self::local_function_names(program)
-                .difference(&hidden.functions)
-                .cloned()
-                .collect(),
-        }
-    }
-
-    fn merge_provider_map(
+    fn merge_function_providers(
         providers: &mut BTreeMap<String, ImportProvider>,
         incoming: BTreeMap<String, ImportProvider>,
     ) -> Result<(), ModuleError> {
@@ -1178,21 +1144,8 @@ impl ModuleResolver {
                 },
             )?;
         }
-        let local = Self::visible_local_providers(&loaded_module.program, imported_items);
-        // Rules and facts with one predicate name form one relation, so a
-        // module may intentionally extend a predicate imported in its own
-        // lexical branch.
-        for name in local.predicates {
-            providers.predicates.insert(
-                name,
-                ImportProvider {
-                    module: module_path.to_vec(),
-                    source: source.to_path_buf(),
-                },
-            );
-        }
         let mut local_functions = BTreeMap::new();
-        for name in local.functions {
+        for name in Self::visible_local_functions(&loaded_module.program, imported_items) {
             local_functions.insert(
                 name,
                 ImportProvider {
@@ -1204,7 +1157,7 @@ impl ModuleResolver {
         // Functions have one body. Keeping the earlier merged definition
         // would silently discard this module's body, so distinct providers
         // are an import conflict even within one branch.
-        Self::merge_provider_map(&mut providers.functions, local_functions)?;
+        Self::merge_function_providers(&mut providers.functions, local_functions)?;
         Ok(providers)
     }
 
@@ -1227,8 +1180,7 @@ impl ModuleResolver {
                 &mut providers.predicate_declarations,
                 incoming.predicate_declarations,
             )?;
-            Self::merge_provider_map(&mut providers.predicates, incoming.predicates)?;
-            Self::merge_provider_map(&mut providers.functions, incoming.functions)?;
+            Self::merge_function_providers(&mut providers.functions, incoming.functions)?;
         }
         Ok(providers)
     }
@@ -1564,8 +1516,9 @@ impl ModuleResolver {
     /// Resolution follows the importer-scoped edges recorded by the matching
     /// entry file or root module. Without that anchor, every logical path must
     /// identify one loaded source. Imported entry-only content and incomplete
-    /// exports, incompatible schemas, and ambiguous definitions are rejected
-    /// rather than silently omitted.
+    /// exports, incompatible schemas, and conflicting function definitions are
+    /// rejected rather than silently omitted. Compatible predicate clauses
+    /// from separate import branches are merged into one relation.
     ///
     /// # Arguments
     /// * `program` - The main program with imports to resolve
@@ -1676,7 +1629,7 @@ mod tests {
     }
 
     #[test]
-    fn merge_imports_rejects_ambiguous_exports_in_one_scope() {
+    fn merge_imports_unions_compatible_predicates_from_separate_modules() {
         let tmp = TempDir::new().unwrap();
         create_test_module(tmp.path(), "first", "pred shared(u32). shared(1).");
         create_test_module(tmp.path(), "second", "pred shared(u32). shared(2).");
@@ -1686,27 +1639,87 @@ mod tests {
         let mut resolver = ModuleResolver::new(vec![]);
         resolver.load_module(tmp.path(), &["entry".into()]).unwrap();
 
-        let result = resolver.merge_imports(parse_program(entry_source).unwrap());
+        let (predicate_imports, function_imports) = resolver
+            .validate_imports(&parse_program(entry_source).unwrap())
+            .unwrap();
+        assert_eq!(predicate_imports.get("shared"), Some(&vec!["first".into()]));
+        assert!(function_imports.is_empty());
 
-        assert!(matches!(
-            result,
-            Err(ModuleError::ImportConflict {
-                name,
-                module1,
-                module2,
-            }) if name == "shared"
-                && module1 == vec!["first"]
-                && module2 == vec!["second"]
-        ));
+        let merged = resolver
+            .merge_imports(parse_program(entry_source).unwrap())
+            .unwrap();
+        let shared_facts = merged
+            .rules
+            .iter()
+            .filter(|rule| rule.head.predicate == "shared" && rule.is_fact())
+            .collect::<Vec<_>>();
+
+        assert_eq!(shared_facts.len(), 2);
+        assert!(shared_facts
+            .iter()
+            .any(|rule| rule.head.terms == vec![Term::Integer(1)]));
+        assert!(shared_facts
+            .iter()
+            .any(|rule| rule.head.terms == vec![Term::Integer(2)]));
+        assert_eq!(
+            merged
+                .predicates
+                .iter()
+                .filter(|declaration| declaration.name == "shared")
+                .count(),
+            1
+        );
     }
 
     #[test]
-    fn merge_imports_rejects_ambiguous_providers_across_wrapper_branches() {
+    fn merge_imports_unions_selectively_imported_compatible_predicates() {
+        let tmp = TempDir::new().unwrap();
+        create_test_module(
+            tmp.path(),
+            "first",
+            "pred shared(u32). pred first_only(u32). shared(1). first_only(10).",
+        );
+        create_test_module(
+            tmp.path(),
+            "second",
+            "pred shared(u32). pred second_only(u32). shared(2). second_only(20).",
+        );
+        let entry_source = "use first::{shared}.\nuse second::{shared}.\n";
+        create_test_module(tmp.path(), "entry", entry_source);
+
+        let mut resolver = ModuleResolver::new(vec![]);
+        resolver.load_module(tmp.path(), &["entry".into()]).unwrap();
+
+        let merged = resolver
+            .merge_imports(parse_program(entry_source).unwrap())
+            .unwrap();
+        let shared_facts = merged
+            .rules
+            .iter()
+            .filter(|rule| rule.head.predicate == "shared" && rule.is_fact())
+            .count();
+
+        assert_eq!(shared_facts, 2);
+        assert!(!merged.rules.iter().any(|rule| {
+            rule.head.predicate == "first_only" || rule.head.predicate == "second_only"
+        }));
+        assert!(!merged.predicates.iter().any(|declaration| {
+            declaration.name == "first_only" || declaration.name == "second_only"
+        }));
+    }
+
+    #[test]
+    fn merge_imports_unions_compatible_predicates_across_wrapper_branches() {
         let tmp = TempDir::new().unwrap();
         create_test_module(
             tmp.path(),
             "left_provider",
-            "pred shared(symbol). shared(left).",
+            concat!(
+                "pred left_source(symbol).\n",
+                "pred shared(symbol).\n",
+                "left_source(left).\n",
+                "shared(X) :- left_source(X).",
+            ),
         );
         create_test_module(
             tmp.path(),
@@ -1716,7 +1729,12 @@ mod tests {
         create_test_module(
             tmp.path(),
             "right_provider",
-            "pred shared(symbol). shared(right).",
+            concat!(
+                "pred right_source(symbol).\n",
+                "pred shared(symbol).\n",
+                "right_source(right).\n",
+                "shared(X) :- right_source(X).",
+            ),
         );
         create_test_module(
             tmp.path(),
@@ -1729,18 +1747,24 @@ mod tests {
         let mut resolver = ModuleResolver::new(vec![]);
         resolver.load_module(tmp.path(), &["entry".into()]).unwrap();
 
-        let result = resolver.merge_imports(parse_program(entry_source).unwrap());
+        let merged = resolver
+            .merge_imports(parse_program(entry_source).unwrap())
+            .unwrap();
+        let shared_rules = merged
+            .rules
+            .iter()
+            .filter(|rule| rule.head.predicate == "shared" && !rule.is_fact())
+            .collect::<Vec<_>>();
 
-        assert!(matches!(
-            result,
-            Err(ModuleError::ImportConflict {
-                name,
-                module1,
-                module2,
-            }) if name == "shared"
-                && module1 == vec!["left_provider"]
-                && module2 == vec!["right_provider"]
-        ));
+        assert_eq!(shared_rules.len(), 2);
+        assert!(merged
+            .rules
+            .iter()
+            .any(|rule| rule.head.predicate == "left_result"));
+        assert!(merged
+            .rules
+            .iter()
+            .any(|rule| rule.head.predicate == "right_result"));
     }
 
     #[test]
@@ -1796,6 +1820,58 @@ mod tests {
             }) if name == "shared"
                 && module1 == vec!["base"]
                 && module2 == vec!["wrapper"]
+        ));
+    }
+
+    #[test]
+    fn merge_imports_rejects_function_definitions_in_separate_branches() {
+        let tmp = TempDir::new().unwrap();
+        create_test_module(tmp.path(), "first", "func shared(X) = X + 1.");
+        create_test_module(tmp.path(), "second", "func shared(X) = X + 2.");
+        let entry_source = "use first.\nuse second.\n";
+        create_test_module(tmp.path(), "entry", entry_source);
+
+        let mut resolver = ModuleResolver::new(vec![]);
+        resolver.load_module(tmp.path(), &["entry".into()]).unwrap();
+
+        let result = resolver.merge_imports(parse_program(entry_source).unwrap());
+
+        assert!(matches!(
+            result,
+            Err(ModuleError::ImportConflict {
+                name,
+                module1,
+                module2,
+            }) if name == "shared"
+                && module1 == vec!["first"]
+                && module2 == vec!["second"]
+        ));
+    }
+
+    #[test]
+    fn merge_imports_rejects_function_definitions_across_wrapper_branches() {
+        let tmp = TempDir::new().unwrap();
+        create_test_module(tmp.path(), "left_provider", "func shared(X) = X + 1.");
+        create_test_module(tmp.path(), "left_wrapper", "use left_provider.\n");
+        create_test_module(tmp.path(), "right_provider", "func shared(X) = X + 2.");
+        create_test_module(tmp.path(), "right_wrapper", "use right_provider.\n");
+        let entry_source = "use left_wrapper.\nuse right_wrapper.\n";
+        create_test_module(tmp.path(), "entry", entry_source);
+
+        let mut resolver = ModuleResolver::new(vec![]);
+        resolver.load_module(tmp.path(), &["entry".into()]).unwrap();
+
+        let result = resolver.merge_imports(parse_program(entry_source).unwrap());
+
+        assert!(matches!(
+            result,
+            Err(ModuleError::ImportConflict {
+                name,
+                module1,
+                module2,
+            }) if name == "shared"
+                && module1 == vec!["left_provider"]
+                && module2 == vec!["right_provider"]
         ));
     }
 
@@ -1859,8 +1935,12 @@ mod tests {
     #[test]
     fn merge_imports_rejects_incompatible_predicate_declarations() {
         let tmp = TempDir::new().unwrap();
-        create_test_module(tmp.path(), "first", "pred external(u32).");
-        create_test_module(tmp.path(), "second", "pred external(symbol).");
+        create_test_module(tmp.path(), "first", "pred external(u32). external(1).");
+        create_test_module(
+            tmp.path(),
+            "second",
+            "pred external(symbol). external(value).",
+        );
         let entry_source = "use first.\nuse second.\n";
         create_test_module(tmp.path(), "entry", entry_source);
 

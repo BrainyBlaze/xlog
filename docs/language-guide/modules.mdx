@@ -28,21 +28,25 @@ The selective form imports the named predicates and functions. Domain aliases fr
 module are also merged. If an imported rule or function needs another public item from
 the same module, include that dependency in the list as well. Selections from repeated
 `use` declarations for the same module are combined before its exports are merged. If
-different providers in separate resolved import branches supply the same predicate or
-function name to the flattened program, resolution rejects the ambiguity with
-`error[E0402]`; use selective imports to choose one provider. A module can add facts or
-rules to a predicate imported within that same branch because predicate clauses form one
-relation. Functions have one body, so redefining an imported function is also `E0402`.
-An imported module that defines a function name more than once while exporting that name
-is rejected with `error[E0410]`.
+separate resolved import branches contribute public facts or rules to the same predicate,
+their compatible clauses are merged into one relation. This also applies when selective
+imports name that predicate in more than one module. Repeated predicate declarations must
+have compatible schemas, as described below.
+
+Functions have one body. If separate import branches define the same function, or a
+module or entry file redefines an imported function, resolution rejects the conflict with
+`error[E0402]`; use selective imports so that only one function definition is visible. An
+imported module that defines a function name more than once while exporting that name is
+rejected with `error[E0410]`.
 
 Each `use` is resolved in the context of the file that contains it. In the entry file,
 resolution first checks the entry path's directory. Within an imported module, it first
 checks that module's canonical source directory. Configured module search paths follow in
-both cases. Two files reached through the same written path remain distinct providers,
-while different paths that resolve to the same canonical source file are merged only once.
+both cases. Two files reached through the same written path remain distinct source
+modules, while different paths that resolve to the same canonical source file are merged
+only once.
 
-The entry program and imported modules may repeat an identical predicate declaration,
+The entry program and imported modules may repeat compatible predicate declarations,
 including a declaration for facts supplied at runtime. If declarations with one name
 differ in arity, column names, or resolved types, resolution rejects them with
 `error[E0408]` instead of retaining whichever schema happened to merge first.

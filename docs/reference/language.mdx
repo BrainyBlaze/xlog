@@ -1220,15 +1220,18 @@ edges throughout validation and merging. Distinct files are not conflated merely
 their imports use the same spelling, and aliases of one canonical source file do not
 duplicate its definitions.
 
-Separate import branches cannot provide competing definitions under one predicate or
-function name. Predicate clauses may extend an imported predicate within the same module;
-functions have one body and cannot be redefined after import. An imported module that
-defines an exported function name more than once is rejected with `error[E0410]`.
+Compatible public facts and rules for the same predicate are merged across resolved import
+branches into one relation. The same union semantics apply when selective imports name
+that predicate in multiple modules. Functions have one body: separate branches cannot
+define the same imported function, and a module or entry file cannot redefine an imported
+function. Those function conflicts produce `error[E0402]`. An imported module that defines
+an exported function name more than once is rejected with `error[E0410]`.
 
-Repeated public declarations for one predicate must be identical. A difference in arity,
-column names, or resolved types is rejected with `error[E0408]`. Domain-backed types are
-compared using the scalar type to which each local alias resolves. Reusing one domain alias
-name for different scalar types in the entry program or import closure is `error[E0409]`.
+Repeated public declarations for one predicate must resolve to the same schema. A
+difference in arity, column names, or resolved types is rejected with `error[E0408]`.
+Domain-backed types are compared using the scalar type to which each local alias resolves.
+Reusing one domain alias name for different scalar types in the entry program or import
+closure is `error[E0409]`.
 Within an imported module, every declaration of one predicate must use the same visibility;
 mixing public and `private` declarations is rejected with `error[E0411]`.
 

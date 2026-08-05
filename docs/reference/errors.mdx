@@ -47,7 +47,7 @@ behavior:
 |---|---|
 | `E0400` | A direct or transitive `use` path cannot be resolved to a module file. |
 | `E0401` | Direct or transitive imports form a cycle. |
-| `E0402` | Distinct providers in separate resolved import branches supply the same predicate or function name, or a module redefines a function imported within its own branch. |
+| `E0402` | Separate resolved import branches define the same function, or a module or entry program redefines an imported function. |
 | `E0404` | A selective import names an item that the module does not export. |
 | `E0405` | An imported module contains program-level content that must be declared in the entry file: probabilistic facts, annotated disjunctions, evidence, integrity constraints, neural predicate declarations, or learnable rule templates. |
 | `E0406` | An exported rule or function depends on a private item or an item omitted by a selective import. |

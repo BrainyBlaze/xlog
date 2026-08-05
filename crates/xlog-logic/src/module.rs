@@ -63,13 +63,13 @@ pub enum ModuleError {
         /// Ordered import cycle that was discovered.
         cycle: Vec<ModulePath>,
     },
-    /// Name conflict between imports
+    /// Conflicting definitions for an imported function.
     ImportConflict {
-        /// Imported symbol name that collided.
+        /// Function name that has multiple definitions.
         name: String,
-        /// First module providing the name.
+        /// Module containing the first definition.
         module1: ModulePath,
-        /// Second module providing the same name.
+        /// Module containing the conflicting definition.
         module2: ModulePath,
     },
     /// Attempted to import private predicate
@@ -109,7 +109,8 @@ pub enum ModuleError {
         /// Canonical source files registered for the logical path.
         candidates: Vec<PathBuf>,
     },
-    /// Imported modules declare one predicate with incompatible schemas.
+    /// The entry program or imported modules declare one predicate with
+    /// incompatible schemas.
     IncompatiblePredicateDeclaration {
         /// Predicate whose declarations differ.
         name: String,
@@ -118,7 +119,8 @@ pub enum ModuleError {
         /// Module containing the incompatible declaration.
         module2: ModulePath,
     },
-    /// Imported modules define one domain alias with incompatible scalar types.
+    /// The entry program or imported modules define one domain alias with
+    /// incompatible scalar types.
     IncompatibleDomainDeclaration {
         /// Domain alias whose declarations differ.
         name: String,
@@ -187,23 +189,25 @@ impl std::fmt::Display for ModuleError {
                 module1,
                 module2,
             } => {
-                writeln!(f, "error[E0402]: ambiguous import `{}`", name)?;
                 writeln!(
                     f,
-                    "  `{}` first imported from {}",
+                    "error[E0402]: conflicting definitions for imported function `{name}`"
+                )?;
+                writeln!(
+                    f,
+                    "  function `{}` is defined by module `{}`",
                     name,
                     module_path_to_string(module1)
                 )?;
                 writeln!(
                     f,
-                    "  `{}` also exported by {}",
+                    "  function `{}` is also defined by module `{}`",
                     name,
                     module_path_to_string(module2)
                 )?;
                 write!(
                     f,
-                    "  = help: use selective imports: `use {}::{{...}}.`",
-                    module_path_to_string(module1)
+                    "  = help: import only one definition of function `{name}` with selective `use` declarations"
                 )
             }
             ModuleError::PrivatePredicate { name, module } => {
@@ -270,7 +274,7 @@ impl std::fmt::Display for ModuleError {
             } => {
                 writeln!(
                     f,
-                    "error[E0408]: incompatible declarations for imported predicate `{name}`"
+                    "error[E0408]: incompatible declarations for predicate `{name}`"
                 )?;
                 writeln!(
                     f,
@@ -280,7 +284,7 @@ impl std::fmt::Display for ModuleError {
                 )?;
                 write!(
                     f,
-                    "  = help: imported declarations must use identical arity, column names, and types"
+                    "  = help: all declarations in the entry program and resolved import closure must use identical arity, column names, and resolved types"
                 )
             }
             ModuleError::IncompatibleDomainDeclaration {
@@ -300,7 +304,7 @@ impl std::fmt::Display for ModuleError {
                 )?;
                 write!(
                     f,
-                    "  = help: a domain alias must resolve to one scalar type throughout the import closure"
+                    "  = help: a domain alias must resolve to one scalar type throughout the entry program and resolved import closure"
                 )
             }
             ModuleError::DuplicateImportedFunction { name, module } => {
@@ -501,6 +505,23 @@ mod tests {
             parse_internal_name("__single__pred"),
             (vec!["single".to_string()], "pred".to_string())
         );
+    }
+
+    #[test]
+    fn imported_function_conflict_error_names_both_definitions() {
+        let err = ModuleError::ImportConflict {
+            name: "normalize".to_string(),
+            module1: vec!["first".to_string()],
+            module2: vec!["second".to_string()],
+        };
+
+        let message = err.to_string();
+
+        assert!(message
+            .contains("error[E0402]: conflicting definitions for imported function `normalize`"));
+        assert!(message.contains("function `normalize` is defined by module `first`"));
+        assert!(message.contains("function `normalize` is also defined by module `second`"));
+        assert!(message.contains("import only one definition of function `normalize`"));
     }
 
     #[test]

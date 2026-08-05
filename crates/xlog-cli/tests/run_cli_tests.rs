@@ -1,6 +1,7 @@
 use assert_cmd::cargo::cargo_bin_cmd;
 use cudarc::driver::result::mem_get_info;
 use std::path::Path;
+use tempfile::TempDir;
 use xlog_cuda::CudaDevice;
 
 #[test]
@@ -1531,4 +1532,54 @@ fn test_xlog_run_warns_on_ignored_imported_module_pragma() {
         "{stderr}"
     );
     assert_eq!(stderr.matches("warning[W0510]").count(), 1, "{stderr}");
+}
+
+#[test]
+fn test_xlog_run_unions_compatible_predicates_from_separate_modules() {
+    let _device = match CudaDevice::new(0) {
+        Ok(device) => device,
+        Err(error) if std::env::var("XLOG_REQUIRE_CUDA").as_deref() == Ok("1") => {
+            panic!("XLOG_REQUIRE_CUDA=1 but CUDA initialization failed: {error}")
+        }
+        Err(error) => {
+            eprintln!("Skipping test: CUDA runtime unavailable: {error}");
+            return;
+        }
+    };
+
+    let fixture = TempDir::new().expect("create fixture directory");
+    std::fs::write(
+        fixture.path().join("first.xlog"),
+        "pred shared(symbol).\nshared(from_first).\n",
+    )
+    .expect("write first module");
+    std::fs::write(
+        fixture.path().join("second.xlog"),
+        "pred shared(symbol).\nshared(from_second).\n",
+    )
+    .expect("write second module");
+    let program = fixture.path().join("main.xlog");
+    std::fs::write(&program, "use first.\nuse second.\n?- shared(X).\n")
+        .expect("write main program");
+
+    let output = cargo_bin_cmd!("xlog")
+        .args([
+            "run",
+            program.to_str().expect("valid program path"),
+            "--module-path",
+            fixture.path().to_str().expect("valid module path"),
+            "--memory-mb",
+            "1024",
+        ])
+        .output()
+        .expect("run xlog with compatible predicate contributions");
+
+    assert!(
+        output.status.success(),
+        "xlog run failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).expect("utf8 stdout");
+    assert_eq!(stdout.matches("from_first").count(), 1, "{stdout}");
+    assert_eq!(stdout.matches("from_second").count(), 1, "{stdout}");
 }
