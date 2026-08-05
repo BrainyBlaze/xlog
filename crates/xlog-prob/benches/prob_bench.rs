@@ -35,7 +35,28 @@ fn make_mc_config(samples: usize, seed: u64) -> McEvalConfig {
     config.samples = samples;
     config.seed = seed;
     config.confidence = 0.95;
+    // Some bench programs (grid comparison literals, >256-var
+    // domains) are resident-rejected; opt into the labeled CPU
+    // oracle so those points measure real MC inference instead of
+    // failing closed. These are host-facing timing benches, never
+    // GPU-native acceptance evidence (see the module header).
+    config.allow_cpu_oracle_fallback = true;
     config
+}
+
+/// One evaluation outside the timed loop: a point whose config cannot
+/// run at all (e.g. its memory estimate exceeds the declared budget)
+/// skips loudly instead of being measured, while errors inside the
+/// timed loop stay fatal — a regression must never be silently
+/// benchmarked as if it were inference.
+fn preflight_mc(program: &McProgram, config: &McEvalConfig, point: &str) -> bool {
+    match program.evaluate(config.clone()) {
+        Ok(_) => true,
+        Err(e) => {
+            eprintln!("Skipping {}: {}", point, e);
+            false
+        }
+    }
 }
 
 /// Simple LCG random number generator state
@@ -167,9 +188,9 @@ fn generate_annotated_disjunction_program(num_ads: usize) -> String {
     source.push_str("result(I) :- choice(I, b).\n");
 
     // Count results
-    source.push_str("\nhas_result :- result(_).\n");
+    source.push_str("\nhas_result() :- result(I).\n");
 
-    source.push_str("\nquery(has_result).\n");
+    source.push_str("\nquery(has_result()).\n");
 
     source
 }
@@ -200,7 +221,7 @@ fn bench_exact_path(c: &mut Criterion) {
 
         group.throughput(Throughput::Elements(num_vars as u64));
         group.bench_with_input(BenchmarkId::new("vars", num_vars), &path_len, |b, _| {
-            b.iter(|| program.evaluate());
+            b.iter(|| program.evaluate().expect("exact evaluate"));
         });
     }
 
@@ -230,7 +251,7 @@ fn bench_exact_grid(c: &mut Criterion) {
 
         group.throughput(Throughput::Elements(num_cells as u64));
         group.bench_with_input(BenchmarkId::new("cells", num_cells), &grid_size, |b, _| {
-            b.iter(|| program.evaluate());
+            b.iter(|| program.evaluate().expect("exact evaluate"));
         });
 
         // Log circuit complexity
@@ -272,7 +293,7 @@ fn bench_exact_bayesian(c: &mut Criterion) {
 
         group.throughput(Throughput::Elements(*num_vars as u64));
         group.bench_with_input(BenchmarkId::new("config", label), &label, |b, _| {
-            b.iter(|| program.evaluate());
+            b.iter(|| program.evaluate().expect("exact evaluate"));
         });
 
         // Log circuit size for analysis
@@ -304,13 +325,21 @@ fn bench_mc_samples_scaling(c: &mut Criterion) {
 
     for num_samples in [1000, 5000, 10000, 50000, 100000].iter() {
         let mc_config = make_mc_config(*num_samples, 42);
+        let point = format!("mc_samples {}", num_samples);
+        if !preflight_mc(&program, &mc_config, &point) {
+            continue;
+        }
 
         group.throughput(Throughput::Elements(*num_samples as u64));
         group.bench_with_input(
             BenchmarkId::new("samples", num_samples),
             &num_samples,
             |b, _| {
-                b.iter(|| program.evaluate(black_box(mc_config.clone())));
+                b.iter(|| {
+                    program
+                        .evaluate(black_box(mc_config.clone()))
+                        .expect("mc evaluate")
+                });
             },
         );
     }
@@ -337,12 +366,20 @@ fn bench_mc_vars_scaling(c: &mut Criterion) {
                 continue;
             }
         };
+        let point = format!("mc_vars {}", num_ads);
+        if !preflight_mc(&program, &mc_config, &point) {
+            continue;
+        }
 
         let num_vars = program.num_vars();
 
         group.throughput(Throughput::Elements(num_vars as u64));
         group.bench_with_input(BenchmarkId::new("vars", num_vars), &num_ads, |b, _| {
-            b.iter(|| program.evaluate(black_box(mc_config.clone())));
+            b.iter(|| {
+                program
+                    .evaluate(black_box(mc_config.clone()))
+                    .expect("mc evaluate")
+            });
         });
     }
 
@@ -367,12 +404,20 @@ fn bench_mc_path(c: &mut Criterion) {
                 continue;
             }
         };
+        let point = format!("mc_path {}", path_len);
+        if !preflight_mc(&program, &mc_config, &point) {
+            continue;
+        }
 
         let num_vars = program.num_vars();
 
         group.throughput(Throughput::Elements((mc_config.samples * num_vars) as u64));
         group.bench_with_input(BenchmarkId::new("path_len", path_len), &path_len, |b, _| {
-            b.iter(|| program.evaluate(black_box(mc_config.clone())));
+            b.iter(|| {
+                program
+                    .evaluate(black_box(mc_config.clone()))
+                    .expect("mc evaluate")
+            });
         });
     }
 
@@ -397,13 +442,21 @@ fn bench_mc_grid(c: &mut Criterion) {
                 continue;
             }
         };
+        let point = format!("mc_grid {}x{}", grid_size, grid_size);
+        if !preflight_mc(&program, &mc_config, &point) {
+            continue;
+        }
 
         let num_vars = program.num_vars();
         let num_cells = grid_size * grid_size;
 
         group.throughput(Throughput::Elements((mc_config.samples * num_cells) as u64));
         group.bench_with_input(BenchmarkId::new("grid", grid_size), &grid_size, |b, _| {
-            b.iter(|| program.evaluate(black_box(mc_config.clone())));
+            b.iter(|| {
+                program
+                    .evaluate(black_box(mc_config.clone()))
+                    .expect("mc evaluate")
+            });
         });
 
         // Log stats
@@ -441,6 +494,10 @@ fn bench_mc_bayesian(c: &mut Criterion) {
                 continue;
             }
         };
+        let point = format!("mc_bayesian {}", label);
+        if !preflight_mc(&program, &mc_config, &point) {
+            continue;
+        }
 
         let actual_vars = program.num_vars();
 
@@ -448,7 +505,11 @@ fn bench_mc_bayesian(c: &mut Criterion) {
             (mc_config.samples * actual_vars) as u64,
         ));
         group.bench_with_input(BenchmarkId::new("config", label), &label, |b, _| {
-            b.iter(|| program.evaluate(black_box(mc_config.clone())));
+            b.iter(|| {
+                program
+                    .evaluate(black_box(mc_config.clone()))
+                    .expect("mc evaluate")
+            });
         });
 
         // Log actual complexity
@@ -489,7 +550,11 @@ fn bench_exact_gradients(c: &mut Criterion) {
 
         group.throughput(Throughput::Elements(num_vars as u64));
         group.bench_with_input(BenchmarkId::new("vars", num_vars), &path_len, |b, _| {
-            b.iter(|| program.evaluate_gpu_with_grads());
+            b.iter(|| {
+                program
+                    .evaluate_gpu_with_grads()
+                    .expect("exact evaluate with grads")
+            });
         });
     }
 
