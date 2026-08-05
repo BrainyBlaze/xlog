@@ -105,7 +105,9 @@ the program admits — that is knowledge, not mere possibility. Swapping `know` 
 ## Choosing a semantics: `faeel` vs `g91`
 
 Two semantics decide when a `know` or `possible` fact counts. You pick one with a
-pragma:
+pragma, declared in your entry file — a `#pragma epistemic_mode` in an imported
+module is ignored and reported as `warning[W0510]` (see the
+[pragmas guide](/language-guide/pragmas#pragmas-apply-only-in-the-entry-file)):
 
 ```xlog
 #pragma epistemic_mode = faeel

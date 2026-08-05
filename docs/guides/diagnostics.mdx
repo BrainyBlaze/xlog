@@ -38,6 +38,7 @@ Throughout this page, a few recurring terms:
 | Why was a mined or induced rule kept, and what did it beat? | Induced-rule provenance | `InducedRuleProvenance` |
 | Did my incremental update stay incremental? | Relation-delta debugging | `apply_relation_delta_debug(...)`, `delta_stats()` |
 | Is the neural hot loop actually host-free? | Host-transfer audits | `neural_hot_loop_diagnostics()` |
+| Was a pragma in an imported module ignored? | Ignored-pragma warnings | `warning[W0510]` on stderr from `xlog run` / `xlog prob` / `xlog explain`; `ModuleResolver::ignored_import_pragmas()` |
 
 ## Rule provenance and proof traces
 

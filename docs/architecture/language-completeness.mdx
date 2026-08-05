@@ -79,7 +79,9 @@ Magic-set rewriting is a query-optimization technique. It pushes the bound
 arguments of a recursive query into the recursion, so the program computes only
 the facts relevant to that query instead of the whole relation. The
 `#pragma magic_sets = auto|on|off` pragma controls this rewrite for the supported
-deterministic subset:
+deterministic subset. Like all pragmas it applies only when declared in the entry
+file; a declaration in an imported module is ignored with `warning[W0510]` (see
+the [pragmas guide](/language-guide/pragmas#pragmas-apply-only-in-the-entry-file)):
 
 - `auto` rewrites only when the compiler can prove the query has a supported shape.
 - `on` fails closed: if the requested rewrite is unsafe or unsupported, compilation
@@ -132,7 +134,9 @@ The CLI explain path reuses the same parser and compiler surfaces. It reports:
 - strata and deterministic-negation safety;
 - magic-set rewrite status;
 - normalized and optimized plan shape;
-- probabilistic-aggregate and approximate-inference metadata, where applicable.
+- probabilistic-aggregate and approximate-inference metadata, where applicable;
+- ignored-pragma warnings (`W0510`) on stderr when imported modules declare
+  pragmas, since pragmas apply only when declared in the entry file.
 
 Explain output is an observability surface: it describes the same compiler path a
 program actually runs, not a separate documentation-only model.
