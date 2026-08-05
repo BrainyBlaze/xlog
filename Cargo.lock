@@ -2319,6 +2319,7 @@ dependencies = [
  "clap",
  "cudarc",
  "serde_json",
+ "tempfile",
  "thiserror",
  "xlog-core",
  "xlog-cuda",

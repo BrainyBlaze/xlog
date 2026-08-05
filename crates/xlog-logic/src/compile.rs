@@ -545,16 +545,15 @@ pub fn compile(source: &str) -> Result<ExecutionPlan> {
     compiler.compile(source)
 }
 
-/// Load and validate modules for a source file.
+/// Load modules for an entry source file.
 ///
 /// This function:
-/// 1. Determines the module path from the entry file name
-/// 2. Loads the entry module and all its dependencies
-/// 3. Validates imports (checks for conflicts, private predicates, etc.)
+/// 1. Loads the entry module from the exact supplied path
+/// 2. Loads all direct and transitive `.xlog` module dependencies
 ///
 /// # Arguments
 ///
-/// * `entry_file` - Path to the main .xlog file
+/// * `entry_file` - Path to the entry source file
 /// * `search_paths` - Additional directories to search for modules
 ///
 /// # Returns
@@ -566,17 +565,7 @@ pub fn load_modules(
     search_paths: Vec<PathBuf>,
 ) -> std::result::Result<ModuleResolver, ModuleError> {
     let mut resolver = ModuleResolver::new(search_paths);
-
-    // Determine base directory and module path
-    let base_dir = entry_file.parent().unwrap_or(Path::new("."));
-    let module_name = entry_file
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("main");
-
-    // Load entry module (recursively loads dependencies)
-    resolver.load_module(base_dir, &[module_name.to_string()])?;
-    resolver.mark_entry_module(module_name);
+    resolver.load_entry_file(entry_file)?;
 
     Ok(resolver)
 }

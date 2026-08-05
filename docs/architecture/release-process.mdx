@@ -10,8 +10,10 @@ and use XLOG, you do not need this page.
 
 This page explains how a release is built, validated, and published. It covers
 release mechanics only, not promises about which features are available.
-`CHANGELOG.md` records which release first contains a change; entries under
-`[Unreleased]` describe source-tree work that has not entered a tagged artifact.
+`CHANGELOG.md` records which tagged release first contains a change. Contributor
+pull requests do not edit it. `release-plz` generates package-specific entries from
+Conventional Commit history in the rolling release pull request and keeps
+`[Unreleased]` as the boundary above the generated release sections.
 
 XLOG uses a split release model. GitHub Actions check source hygiene and package
 metadata automatically, and a targeted workflow can exercise trusted commits on

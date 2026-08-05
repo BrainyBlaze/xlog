@@ -216,21 +216,29 @@ fn resolve_explain_imports(
     source_path: &Path,
     module_path: Vec<PathBuf>,
 ) -> Result<IncrementalParseResult> {
-    if parsed.program.imports.is_empty() {
-        return Ok(parsed);
+    parsed.program = resolve_program_imports(parsed.program, source_path, module_path)?;
+    Ok(parsed)
+}
+
+fn resolve_program_imports(
+    program: Program,
+    source_path: &Path,
+    module_path: Vec<PathBuf>,
+) -> Result<Program> {
+    if program.imports.is_empty() {
+        return Ok(program);
     }
     let resolver = load_modules(source_path, module_path)
         .map_err(|e| XlogError::Execution(format!("Module resolution failed: {}", e)))?;
     warn_ignored_import_pragmas(&resolver);
-    parsed.program = resolver
-        .merge_imports(parsed.program)
-        .map_err(|e| XlogError::Execution(format!("Module resolution failed: {}", e)))?;
-    Ok(parsed)
+    resolver
+        .merge_imports(program)
+        .map_err(|e| XlogError::Execution(format!("Module resolution failed: {}", e)))
 }
 
 /// Surface pragmas declared in imported modules on stderr. Pragmas are
 /// entry-file-scoped, so these directives are dropped at merge time; the
-/// warning keeps that scoping from being silent (issue #184).
+/// warning keeps that scoping from being silent.
 fn warn_ignored_import_pragmas(resolver: &xlog_logic::resolver::ModuleResolver) {
     for warning in resolver.ignored_import_pragmas() {
         eprintln!("{}", warning);
@@ -1623,36 +1631,22 @@ fn run_probabilistic(args: ProbArgs) -> Result<()> {
             XlogError::Execution(format!("Failed to read {}: {}", args.source.display(), e))
         })?;
         let parsed_program = parse_program(&source)?;
-
-        // Validate module imports if any search paths are provided
-        if !args.module_path.is_empty() {
-            let resolver = load_modules(&args.source, args.module_path.clone())
-                .map_err(|e| XlogError::Execution(format!("Module resolution failed: {}", e)))?;
-            warn_ignored_import_pragmas(&resolver);
-        } else if source.contains("use ") {
-            // No search paths, but the entry imports sibling modules:
-            // resolve best-effort purely to surface ignored pragmas.
-            // Failures stay non-fatal here because the probabilistic
-            // engines do not merge imports, so a hard error would reject
-            // programs that previously ran.
-            if let Ok(resolver) = load_modules(&args.source, Vec::new()) {
-                warn_ignored_import_pragmas(&resolver);
-            }
-        }
+        let program =
+            resolve_program_imports(parsed_program, &args.source, args.module_path.clone())?;
 
         let mut config = GpuConfig::default();
         config.device_ordinal = args.device;
         config.memory_bytes = args.memory_mb * 1024 * 1024;
 
-        match resolve_prob_engine(&args, &parsed_program) {
+        match resolve_prob_engine(&args, &program) {
             ProbEngineCli::ExactDdnnf => {
-                let prog = ExactDdnnfProgram::compile_source_with_gpu(&source, config)?;
+                let prog = ExactDdnnfProgram::compile_from_program(&program, config)?;
                 let result = prog.evaluate()?;
                 emit_prob_exact(result, args.output, args.output_dir.as_deref())
             }
             ProbEngineCli::Mc => {
-                let prog = McProgram::compile_source_with_gpu(&source, config)?;
-                let mut cfg = McEvalConfig::from_directives(&parsed_program.directives)?;
+                let prog = McProgram::compile_from_program(&program, config)?;
+                let mut cfg = McEvalConfig::from_directives(&program.directives)?;
                 apply_mc_cli_overrides(&args, &mut cfg)?;
                 // `evaluate` runs the GPU-native device hot loop and then
                 // materializes the result on the host (downloads the final

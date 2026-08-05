@@ -352,6 +352,10 @@ impl ExactDdnnfProgram {
         Self::compile_provenance_with_gpu(provenance, config, ExactProgramOrigin::Source)
     }
 
+    /// Compile an already parsed program with the requested GPU configuration.
+    ///
+    /// Imports must already be resolved and merged. This method does not load
+    /// unresolved `use` declarations from the filesystem.
     pub fn compile_from_program(program: &Program, config: GpuConfig) -> Result<Self> {
         let provenance = extract_from_program(program)?;
         Self::compile_provenance_with_gpu(provenance, config, ExactProgramOrigin::Program)

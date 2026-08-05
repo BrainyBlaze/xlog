@@ -89,6 +89,19 @@ xlog prob [OPTIONS] <SOURCE>
 | `--memory-mb <MB>` | GPU memory budget in mebibytes. | `1024` |
 | `--module-path <DIR[:DIR...]>` | Extra module search paths. | — |
 
+`xlog prob` loads the entry file from the exact path supplied, then resolves its
+direct and transitive `use` imports before compiling either engine. Imported module
+paths resolve to `.xlog` files. Public deterministic facts and rules from resolved
+modules participate in probabilistic derivations; a missing module is an error.
+
+Program-level probabilistic constructs are entry-file-scoped. An imported module
+that contains probabilistic facts, annotated disjunctions, evidence, integrity
+constraints, neural predicate declarations, or learnable rule templates is rejected
+with `error[E0405]`. An exported rule or function that depends on a private item, or
+on an item omitted by a selective import, is rejected with `error[E0406]`. Put the
+program-level constructs in the entry file and include every public dependency in a
+selective import. See [Modules](/language-guide/modules) for the full import contract.
+
 <Note>
 Pragmas apply only when declared in the entry file. If an imported module declares a
 `#pragma`, `xlog run`, `xlog prob`, and `xlog explain` print `warning[W0510]` on
