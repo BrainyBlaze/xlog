@@ -371,12 +371,18 @@ def _require_cuda() -> None:
 
 
 def _prepare_out_path(out: str) -> Path:
-    """Create --out's parent directory and write a tiny probe file BEFORE
-    any expensive work starts (mirrors `run_caviar_star.py`'s/
-    `run_caviar_neural.py`'s fail-fast fix)."""
+    """Create --out's parent directory and prove it is writable BEFORE any
+    expensive work starts (mirrors `run_caviar_star.py`'s/
+    `run_caviar_neural.py`'s fail-fast probe) -- WITHOUT touching an
+    existing --out file: the probe is written to a sibling temp file and
+    removed immediately, so a run that later fails can never have replaced
+    a previous run's results with a probe stub. The only write to --out
+    itself is the final result write at the end of a successful run."""
     out_path = Path(out)
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    out_path.write_text("started\n")
+    probe_path = out_path.with_name(out_path.name + ".probe.tmp")
+    probe_path.write_text("started\n")
+    probe_path.unlink()
     return out_path
 
 

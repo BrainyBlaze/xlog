@@ -63,6 +63,35 @@ def test_parse_args_requires_out():
 
 
 # ---------------------------------------------------------------------------
+# _prepare_out_path -- the fail-fast writability probe must never replace an
+# existing results file: a run that then fails early would otherwise have
+# destroyed the previous run's output.
+# ---------------------------------------------------------------------------
+
+
+def test_prepare_out_path_probe_does_not_destroy_an_existing_out_file(tmp_path):
+    out = tmp_path / "RESULT.json"
+    out.write_text("ORIGINAL RESULT BYTES")
+    returned = run_caviar_cv._prepare_out_path(str(out))
+    assert returned == out
+    assert out.read_text() == "ORIGINAL RESULT BYTES"
+    # The probe file itself must not be left behind either.
+    assert list(tmp_path.iterdir()) == [out]
+
+
+def test_main_early_failure_leaves_existing_out_file_bytes_intact(tmp_path):
+    out = tmp_path / "RESULT.json"
+    out.write_text("ORIGINAL RESULT BYTES")
+    with pytest.raises(FileNotFoundError):
+        run_caviar_cv.main([
+            "--train-json", str(tmp_path / "no-such-train.json"),
+            "--test-json", str(tmp_path / "no-such-test.json"),
+            "--out", str(out),
+        ])
+    assert out.read_text() == "ORIGINAL RESULT BYTES"
+
+
+# ---------------------------------------------------------------------------
 # stratified_segment_folds -- determinism + stratification property
 # ---------------------------------------------------------------------------
 

@@ -380,6 +380,19 @@ def test_omitting_ec_fit_mode_knobs_leaves_every_other_default_unchanged():
     assert vars(omitted) == vars(explicit)
 
 
+def test_prepare_out_path_probe_does_not_destroy_an_existing_out_file(tmp_path):
+    # The fail-fast writability probe must never replace an existing results
+    # file: a run that then fails early would otherwise have destroyed the
+    # previous run's output.
+    out = tmp_path / "RESULT.json"
+    out.write_text("ORIGINAL RESULT BYTES")
+    returned = run_caviar_theory._prepare_out_path(str(out))
+    assert returned == out
+    assert out.read_text() == "ORIGINAL RESULT BYTES"
+    # The probe file itself must not be left behind either.
+    assert list(tmp_path.iterdir()) == [out]
+
+
 def test_filtered_relation_names_never_sees_transition_relations():
     # `_filtered_relation_names` is the DIRECT-protocol (relational mode)
     # vocabulary builder; it must only ever be handed a "relations" dict,
