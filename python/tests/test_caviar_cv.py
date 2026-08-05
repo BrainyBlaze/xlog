@@ -106,17 +106,17 @@ def test_stratified_segment_folds_matches_the_documented_algorithm_by_hand():
 
 
 def test_stratified_segment_folds_rejects_too_few_folds():
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="n_folds must be >= 2"):
         run_caviar_cv.stratified_segment_folds([1, 2, 3], n_folds=1, seed=7)
 
 
 def test_stratified_segment_folds_rejects_more_folds_than_segments():
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="fewer than n_folds"):
         run_caviar_cv.stratified_segment_folds([1, 2], n_folds=3, seed=7)
 
 
 def test_stratified_segment_folds_rejects_negative_counts():
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="non-negative"):
         run_caviar_cv.stratified_segment_folds([1, -1, 2], n_folds=2, seed=7)
 
 
@@ -444,7 +444,7 @@ def test_neural_init_vocab_raises_on_missing_transition_relation():
         "relations": {"both_active": [(0, 1)]},
         "transition_relations": {"any_became_active": [(0, 1)]},  # missing the other 3
     }
-    with pytest.raises(KeyError):
+    with pytest.raises(KeyError, match="transition_relations is missing"):
         run_caviar_cv._neural_init_vocab(converted)
 
 

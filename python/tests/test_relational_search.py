@@ -66,9 +66,9 @@ def test_enumerate_bodies_max_literals_2_only_returns_pairs():
 
 
 def test_enumerate_bodies_rejects_bad_max_literals():
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="max_literals must be 2 or 3"):
         enumerate_bodies(_ENUM_RELATIONS, max_literals=4)
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="max_literals must be 2 or 3"):
         enumerate_bodies(_ENUM_RELATIONS, max_literals=1)
 
 
@@ -168,7 +168,7 @@ def test_kfold_scores_rejects_unknown_score_value():
     facts = [(i, 1) for i in range(4)]
     labels = [True, False, True, False]
     relations = {"a": facts, "b": facts}
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="score must be 'accuracy' or 'f1'"):
         kfold_scores([("a", "b")], relations, facts, labels, folds=2, seed=0, score="bogus")
 
 
@@ -311,14 +311,14 @@ def test_kfold_scores_rejects_folds_out_of_range():
     facts = [(i, 1) for i in range(3)]
     labels = [True, False, True]
     relations = {"a": facts, "b": facts}
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="folds=5 with 3 facts"):
         kfold_scores([("a", "b")], relations, facts, labels, folds=5, seed=0)
 
 
 def test_kfold_scores_rejects_mismatched_labels_length():
     facts = [(i, 1) for i in range(4)]
     relations = {"a": facts, "b": facts}
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="labels has 2 entries for 4 facts"):
         kfold_scores([("a", "b")], relations, facts, [True, False], folds=2, seed=0)
 
 
@@ -374,14 +374,14 @@ def test_select_body_occam_lexicographic_tiebreak_among_equal_length_identical_c
 def test_select_body_rejects_ampersand_in_relation_names():
     scores = {("a&b", "c"): 0.9}
     covers = {("a&b", "c"): {1}}
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="internal key separator"):
         select_body(scores, covers, min_fit=0.75, tie_tolerance=0.01)
 
 
 def test_select_body_rejects_non_positive_tie_tolerance():
     scores = {("a", "b"): 0.9}
     covers = {("a", "b"): {1}}
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="tie_tolerance must be a positive number"):
         select_body(scores, covers, min_fit=0.75, tie_tolerance=0.0)
 
 
@@ -439,7 +439,7 @@ def test_induce_relational_theory_cannot_reach_the_rule_with_2_literals_only():
 
 def test_induce_relational_theory_rejects_bad_max_literals():
     relations, facts, is_positive = _three_literal_world()
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="max_literals must be 2 or 3"):
         induce_relational_theory(relations, facts, is_positive, max_literals=5)
 
 
@@ -657,7 +657,7 @@ def test_permutation_null_threshold_rejects_folds_out_of_range():
     facts = [(i, 1) for i in range(3)]
     labels = [True, False, True]
     relations = {"a": facts, "b": facts}
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="folds=5 with 3 facts"):
         permutation_null_threshold(
             [("a", "b")], relations, facts, labels, folds=5, seed=0,
             n_permutations=2,
@@ -667,7 +667,7 @@ def test_permutation_null_threshold_rejects_folds_out_of_range():
 def test_permutation_null_threshold_rejects_mismatched_labels_length():
     facts = [(i, 1) for i in range(4)]
     relations = {"a": facts, "b": facts}
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="labels has 2 entries for 4 facts"):
         permutation_null_threshold(
             [("a", "b")], relations, facts, [True, False], folds=2, seed=0,
             n_permutations=2,
@@ -677,7 +677,7 @@ def test_permutation_null_threshold_rejects_mismatched_labels_length():
 def test_permutation_null_threshold_rejects_non_positive_permutation_count():
     relations, facts, is_positive = _three_literal_world()
     bodies, _ = enumerate_bodies(relations, max_literals=3)
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="n_permutations must be >= 1"):
         permutation_null_threshold(
             bodies, relations, facts, is_positive, folds=4, seed=7,
             n_permutations=0,
@@ -687,12 +687,12 @@ def test_permutation_null_threshold_rejects_non_positive_permutation_count():
 def test_permutation_null_threshold_rejects_quantile_out_of_range():
     relations, facts, is_positive = _three_literal_world()
     bodies, _ = enumerate_bodies(relations, max_literals=3)
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="quantile must be in"):
         permutation_null_threshold(
             bodies, relations, facts, is_positive, folds=4, seed=7,
             n_permutations=5, quantile=0.0,
         )
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="quantile must be in"):
         permutation_null_threshold(
             bodies, relations, facts, is_positive, folds=4, seed=7,
             n_permutations=5, quantile=1.5,
