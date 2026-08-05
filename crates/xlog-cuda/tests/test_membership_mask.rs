@@ -1,31 +1,10 @@
 // crates/xlog-cuda/tests/test_membership_mask.rs
 //! Tests for the GPU-side membership_mask primitive on CudaKernelProvider.
 
-use std::sync::Arc;
-use xlog_core::{MemoryBudget, ScalarType, Schema, XlogError};
-use xlog_cuda::{CudaDevice, CudaKernelProvider, GpuMemoryManager};
-
-fn setup_provider() -> Option<Arc<CudaKernelProvider>> {
-    let result = CudaDevice::new(0).and_then(|device| {
-        let device = Arc::new(device);
-        let memory = Arc::new(GpuMemoryManager::new(
-            Arc::clone(&device),
-            MemoryBudget::with_limit(1024 * 1024 * 1024),
-        ));
-        CudaKernelProvider::new(device, memory).map(Arc::new)
-    });
-
-    match result {
-        Ok(provider) => Some(provider),
-        Err(error) if std::env::var("XLOG_REQUIRE_CUDA").as_deref() == Ok("1") => {
-            panic!("XLOG_REQUIRE_CUDA=1 but CUDA provider construction failed: {error}")
-        }
-        Err(error) => {
-            eprintln!("Skipping: CUDA provider unavailable: {error}");
-            None
-        }
-    }
-}
+mod common;
+use common::setup_provider;
+use xlog_core::{ScalarType, Schema, XlogError};
+use xlog_cuda::CudaKernelProvider;
 
 struct StrictDeterministicD2hGuard<'a> {
     provider: &'a CudaKernelProvider,
