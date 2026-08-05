@@ -6,9 +6,12 @@ changelog_path = "CHANGELOG.md"
 max_analyze_commits = 5000
 pr_branch_prefix = "release-plz-"
 pr_labels = ["release"]
-# Keep merged release commits from immediately generating the next release PR.
-# Generic `chore:` commits are treated as non-release maintenance in this repo.
-release_commits = '^(feat|fix|perf|refactor|docs|build|ci|test|revert)(\([^)]+\))?:'
+# Release worthiness is enforced as ONE workspace-level gate in
+# .github/workflows/release-plz.yml, not per package: a per-package
+# `release_commits` filter over a shared [workspace.package].version
+# produces a partial release set, and a minor bump then breaks the
+# excluded crates' `^x.y.z` workspace-dependency requirements inside
+# release-plz's own cargo update.
 git_release_enable = false
 git_tag_enable = false
 
