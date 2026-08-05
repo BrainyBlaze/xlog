@@ -459,27 +459,41 @@ requires_xml_and_continuous_dirs = pytest.mark.skipif(
 @requires_xml_dir
 class TestRealCorpusFluentCounts:
     """Corpus-level interval/init/term/pair-frame counts over all 30 real
-    CAVIAR ground-truth videos, independently re-derivable from the public
-    XML alone (co-visible = both objects tracked; a transition is a real
-    0->1/1->0 change between consecutive co-visible frames within one
-    video; a fluent already holding at a pair's first co-visible frame
-    counts as an interval but not an initiation)."""
+    CAVIAR ground-truth videos (co-visible = both objects tracked; a
+    transition is a real 0->1/1->0 change between consecutive co-visible
+    frames within one video; a fluent already holding at a pair's first
+    co-visible frame counts as an interval but not an initiation).
+
+    Evidence status, stated honestly: only the MEETING counts are
+    corroborated by an independent real-data cross-check (the wk2gt
+    splice test below reproduces the OLED dump's own atoms from first
+    principles). The MOVING and FIGHTING literals were first produced by
+    `count_fluent_transitions` itself on this corpus -- they are
+    REGRESSION PINS (the numbers freeze current behavior so silent
+    parser/counting drift is caught), not independently-verified
+    canonical counts. Anyone may re-derive them from the public XML by
+    the definition above, but nobody has yet done so by a route that
+    does not go through this module."""
 
     @pytest.fixture(scope="class")
     def videos(self):
         return load_xml_corpus(CAVIAR_XML_DIR)
 
     def test_meeting_counts(self, videos):
+        """Corroborated: the wk2gt cross-check below independently ties
+        this module's meeting derivation to the published OLED dump."""
         assert count_fluent_transitions(videos, "meeting") == {
             "n_intervals": 12, "n_init": 11, "n_term": 10, "n_pairframes": 1812,
         }
 
     def test_moving_counts(self, videos):
+        """Regression pin: self-derived literals (see class docstring)."""
         assert count_fluent_transitions(videos, "moving") == {
             "n_intervals": 18, "n_init": 5, "n_term": 8, "n_pairframes": 3136,
         }
 
     def test_fighting_counts(self, videos):
+        """Regression pin: self-derived literals (see class docstring)."""
         assert count_fluent_transitions(videos, "fighting") == {
             "n_intervals": 6, "n_init": 6, "n_term": 6, "n_pairframes": 630,
         }
