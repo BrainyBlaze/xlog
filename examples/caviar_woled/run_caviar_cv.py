@@ -402,7 +402,23 @@ def _validate_xml_scene_family_coverage(stems: list[str]) -> None:
     typo'd table entry with no matching file). Either mismatch is a fold
     unit silently built from the wrong membership, so both raise ONE
     `ValueError` naming every offending stem on both sides, rather than
-    silently dropping or ignoring either one."""
+    silently dropping or ignoring either one.
+
+    ``stems`` must also be duplicate-free: the same stem appearing twice
+    (e.g. a video present as BOTH ``wk2gt.xml`` and ``wk2gt.xml_``, both of
+    which `load_xml_corpus` globs) would pass a purely set-based comparison
+    while counting that video twice in fold stratification AND test
+    scoring -- raises `ValueError` naming every duplicated stem."""
+    stem_counts: dict[str, int] = {}
+    for s in stems:
+        stem_counts[s] = stem_counts.get(s, 0) + 1
+    duplicated = sorted(s for s, c in stem_counts.items() if c > 1)
+    if duplicated:
+        raise ValueError(
+            f"duplicate file stems in this corpus: {duplicated} -- the same "
+            "video would be counted twice in fold stratification and test "
+            "scoring (e.g. one video present as both .xml and .xml_)."
+        )
     table_stems = set(_XML_STEM_TO_FAMILY)
     corpus_stems = set(stems)
     unknown = sorted(corpus_stems - table_stems)

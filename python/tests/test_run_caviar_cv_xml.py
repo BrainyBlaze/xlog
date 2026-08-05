@@ -292,6 +292,21 @@ def test_xml_family_fold_assignment_rejects_a_corpus_missing_a_table_stem():
         run_caviar_cv._xml_family_fold_assignment([video], "meeting", n_folds=2, seed=7)
 
 
+def test_xml_family_fold_assignment_rejects_a_duplicated_video_stem():
+    # The same stem present under BOTH extensions (wk2gt.xml AND wk2gt.xml_)
+    # globs as two files; a set-based coverage comparison alone would pass,
+    # silently counting that video twice in fold stratification and test
+    # scoring. The multiplicity check must refuse, naming the stem.
+    videos = _family_corpus({})
+    dup = _xml_video(
+        persons=["id0"], timestamps=[0], tracked={("id0", 0)}, holds={"meeting": set()},
+    )
+    dup["video"] = "wk2gt.xml_"
+    videos.append(dup)
+    with pytest.raises(ValueError, match=r"duplicate.*wk2gt"):
+        run_caviar_cv._xml_family_fold_assignment(videos, "meeting", n_folds=4, seed=7)
+
+
 def test_xml_stem_strips_xml_and_xml_underscore_extensions():
     assert run_caviar_cv._xml_stem("wk2gt.xml") == "wk2gt"
     assert run_caviar_cv._xml_stem("fomdgt1.xml_") == "fomdgt1"
