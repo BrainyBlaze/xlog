@@ -37,6 +37,32 @@ with a descriptive message on stderr. There are no other exit codes.
 
 ## Fail-closed rejections you may hit
 
+### Module import rejection
+
+Module resolution completes before deterministic or probabilistic compilation. It
+reports these typed diagnostics rather than compiling a program with missing imported
+behavior:
+
+| Code | Trigger |
+|---|---|
+| `E0400` | A direct or transitive `use` path cannot be resolved to a module file. |
+| `E0401` | Direct or transitive imports form a cycle. |
+| `E0402` | Distinct providers in separate resolved import branches supply the same predicate or function name, or a module redefines a function imported within its own branch. |
+| `E0404` | A selective import names an item that the module does not export. |
+| `E0405` | An imported module contains program-level content that must be declared in the entry file: probabilistic facts, annotated disjunctions, evidence, integrity constraints, neural predicate declarations, or learnable rule templates. |
+| `E0406` | An exported rule or function depends on a private item or an item omitted by a selective import. |
+| `E0407` | A context-free library request refers to a logical module path that identifies more than one loaded source file. Load the entry file or root module before validating or merging imports. |
+| `E0408` | The entry program or imported modules declare the same predicate with different arity, column names, or resolved types. |
+| `E0409` | The entry program or imported modules declare one domain alias name with different scalar types. |
+| `E0410` | An imported module defines an exported function name more than once. |
+| `E0411` | An imported module declares the same predicate as both public and private. |
+
+The entry file is loaded from the exact path supplied to the CLI. Imported module paths
+continue to resolve to `.xlog` files. Queries and probabilistic queries in imported
+modules are entry-file-scoped and are not merged; imported pragmas are ignored with
+`warning[W0510]`. See [Modules](/language-guide/modules) for examples and visibility
+rules.
+
 ### Resident Monte Carlo rejection
 
 The production Monte Carlo engine — which estimates probabilities by sampling

@@ -1103,6 +1103,25 @@ fn static_pred_name(term: &Term) -> Result<String> {
     }
 }
 
+/// Return the statically referenced predicate used by a safe meta-predicate.
+///
+/// Invalid or dynamic forms are diagnosed by the normalizer itself. This
+/// helper exposes only references that the accepted finite forms resolve.
+pub(crate) fn static_meta_predicate_dependency(atom: &Atom) -> Option<String> {
+    match atom.predicate.as_str() {
+        "findall" => atom
+            .terms
+            .get(1)
+            .and_then(|term| compound_goal_atom(term, "findall/3").ok())
+            .map(|goal| goal.predicate),
+        "maplist" => atom
+            .terms
+            .first()
+            .and_then(|term| static_pred_name(term).ok()),
+        _ => None,
+    }
+}
+
 fn infer_type_ref_from_terms(items: &[Term]) -> TypeRef {
     if let Some(first) = items.first() {
         match first {

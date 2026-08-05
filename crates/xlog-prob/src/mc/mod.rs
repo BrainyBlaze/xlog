@@ -368,13 +368,22 @@ pub struct McProgram {
 impl McProgram {
     pub fn compile_source(source: &str) -> Result<Self> {
         let program = xlog_logic::parse_program(source)?;
-        Self::compile_program(&program)
+        Self::compile_from_program(&program, GpuConfig::default())
     }
 
     pub fn compile_source_with_gpu(source: &str, config: GpuConfig) -> Result<Self> {
-        let mut program = Self::compile_source(source)?;
-        program.gpu_config = config;
-        Ok(program)
+        let program = xlog_logic::parse_program(source)?;
+        Self::compile_from_program(&program, config)
+    }
+
+    /// Compile an already parsed program with the requested GPU configuration.
+    ///
+    /// Imports must already be resolved and merged. This method does not load
+    /// unresolved `use` declarations from the filesystem.
+    pub fn compile_from_program(program: &Program, config: GpuConfig) -> Result<Self> {
+        let mut compiled = Self::compile_program(program)?;
+        compiled.gpu_config = config;
+        Ok(compiled)
     }
 
     pub fn num_vars(&self) -> usize {

@@ -179,7 +179,7 @@ reach(X, Y) :- edge(X, Y).   // Rule
 | Query | `?- atom.` | Specifies output relations |
 | Constraint | `:- body.` | Asserts that body must have no solutions |
 | Function | `func name(params) = expr.` | Defines a user function |
-| Use | `use module.` | Imports predicates from a module |
+| Use | `use module.` | Imports a module's public deterministic definitions |
 | Domain | `domain name: type.` | Declares a domain type |
 | Pragma | `#pragma key = value` | Sets compiler/runtime options |
 
@@ -371,8 +371,13 @@ private pred helper(u32).      // Not visible outside this module
 pred public_api(u32).          // Visible to other modules
 
 helper(X) :- internal(X).
-public_api(X) :- helper(X).
+public_api(X) :- source(X).
 ```
+
+Private predicates may support other local definitions when the file is used as the
+entry file. An exported rule cannot depend on a private predicate because private
+definitions are not merged into importing programs; such an import is rejected with
+`error[E0406]`.
 
 ### Domain Declarations
 
@@ -1143,7 +1148,7 @@ func celsius_to_fahrenheit(C: f64) -> f64 = C * 1.8 + 32.0.
 
 ### Private Functions
 
-Functions can be marked private:
+Functions can be marked private and used by other definitions in the same entry file:
 
 ```xlog
 private func helper(X) = X * X + 1.
@@ -1158,7 +1163,9 @@ XLOG supports organizing code into modules for reusability and encapsulation.
 
 ### Creating Modules
 
-A module is a `.xlog` file. The filename (without extension) becomes the module name:
+Imported modules are `.xlog` files, and the filename without its extension becomes the
+module name. The entry file is loaded from the exact path supplied to the CLI and may use
+another extension:
 
 ```xlog
 // File: graph.xlog
@@ -1173,13 +1180,13 @@ reach(A, C) :- edge(A, B), reach(B, C).
 
 ### Importing Modules
 
-Use the `use` statement to import predicates from modules:
+Use the `use` statement to import public deterministic definitions from modules:
 
 ```xlog
-// Import all public predicates
+// Import all public predicates and functions
 use graph.
 
-// Import specific predicates
+// Import specific predicates or functions
 use graph::{edge, reach}.
 
 // Import from nested module path
@@ -1201,10 +1208,29 @@ project/
 ```
 
 ```xlog
-// In main.xl
+// In main.xlog
 use graph.
 use utils/math.
 ```
+
+A `use` in the entry file first resolves relative to the entry path's directory. A nested
+`use` first resolves relative to the importing module's canonical source directory, then
+through the configured module search paths. Resolution follows those importer-specific
+edges throughout validation and merging. Distinct files are not conflated merely because
+their imports use the same spelling, and aliases of one canonical source file do not
+duplicate its definitions.
+
+Separate import branches cannot provide competing definitions under one predicate or
+function name. Predicate clauses may extend an imported predicate within the same module;
+functions have one body and cannot be redefined after import. An imported module that
+defines an exported function name more than once is rejected with `error[E0410]`.
+
+Repeated public declarations for one predicate must be identical. A difference in arity,
+column names, or resolved types is rejected with `error[E0408]`. Domain-backed types are
+compared using the scalar type to which each local alias resolves. Reusing one domain alias
+name for different scalar types in the entry program or import closure is `error[E0409]`.
+Within an imported module, every declaration of one predicate must use the same visibility;
+mixing public and `private` declarations is rejected with `error[E0411]`.
 
 ### Visibility and Encapsulation
 
@@ -1217,20 +1243,23 @@ Predicates and functions are **public by default**. Use `private` to hide implem
 pred edge(u32, u32).
 pred reach(u32, u32).
 
-// Private helper (not visible outside this module)
-private pred internal_cache(u32, u32).
-
 reach(A, B) :- edge(A, B).
-reach(A, C) :- internal_cache(A, C).  // Uses private helper
-internal_cache(A, C) :- edge(A, B), reach(B, C).
+reach(A, C) :- edge(A, B), reach(B, C).
 ```
 
-Private predicates cannot be imported by other modules:
+Private predicates are not exported. Naming one in a selective `use` fails with
+`error[E0404]`; it does not make the predicate visible to the importing program.
 
-```xlog
-// ERROR: internal_cache is private
-use graph::{internal_cache}.
-```
+An exported rule or function that depends on a private item, or on a public item omitted
+by a selective import, is rejected with `error[E0406]`. Include every public dependency
+in a selective import.
+
+Imports merge public deterministic predicates, functions, facts, and rules, together
+with domain aliases. Probabilistic facts, annotated disjunctions, evidence, integrity
+constraints, neural predicate declarations, and learnable rule templates belong in the
+entry file; an imported module containing one is rejected with `error[E0405]`. Queries,
+probabilistic queries, and pragmas are entry-file-scoped. Imported queries are not merged,
+and imported pragmas are ignored with `warning[W0510]`.
 
 ---
 

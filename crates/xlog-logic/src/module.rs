@@ -16,9 +16,15 @@ pub(crate) fn module_path_to_string(path: &[String]) -> String {
 /// A loaded module with metadata
 #[derive(Debug)]
 pub struct LoadedModule {
-    /// Module path
+    /// Logical path recorded when this canonical source was first loaded.
+    ///
+    /// A later alias returned by `ModuleResolver::get_module` can differ from
+    /// this representative path.
     pub path: ModulePath,
-    /// Source file location
+    /// Filesystem spelling used when this canonical source was first loaded.
+    ///
+    /// This path is not guaranteed to be canonical when the module was reached
+    /// through a relative path or symbolic link.
     pub source_file: PathBuf,
     /// Public predicate names
     pub exports: HashSet<String>,
@@ -73,11 +79,66 @@ pub enum ModuleError {
         /// Module that owns the private predicate.
         module: ModulePath,
     },
-    /// Predicate not found in module
+    /// Selected item not exported by a module
     PredicateNotFound {
-        /// Predicate name that could not be found.
+        /// Predicate or function name that is not exported.
         name: String,
-        /// Module that was expected to export the predicate.
+        /// Module that was expected to export the item.
+        module: ModulePath,
+    },
+    /// An imported module contains program-level constructs that are entry-only.
+    UnsupportedImportedContent {
+        /// Module containing the unsupported constructs.
+        module: ModulePath,
+        /// Deterministically ordered construct categories.
+        constructs: Vec<String>,
+    },
+    /// An exported item depends on module-local support that the import filters out.
+    HiddenDependency {
+        /// Module containing the exported item.
+        module: ModulePath,
+        /// Exported predicate or function whose implementation is incomplete.
+        export: String,
+        /// Private or selectively omitted dependency.
+        dependency: String,
+    },
+    /// A context-free API request used a logical path that names several loaded files.
+    AmbiguousModulePath {
+        /// Logical module path whose source cannot be inferred.
+        path: ModulePath,
+        /// Canonical source files registered for the logical path.
+        candidates: Vec<PathBuf>,
+    },
+    /// Imported modules declare one predicate with incompatible schemas.
+    IncompatiblePredicateDeclaration {
+        /// Predicate whose declarations differ.
+        name: String,
+        /// Module containing the first declaration.
+        module1: ModulePath,
+        /// Module containing the incompatible declaration.
+        module2: ModulePath,
+    },
+    /// Imported modules define one domain alias with incompatible scalar types.
+    IncompatibleDomainDeclaration {
+        /// Domain alias whose declarations differ.
+        name: String,
+        /// Module containing the first declaration.
+        module1: ModulePath,
+        /// Module containing the incompatible declaration.
+        module2: ModulePath,
+    },
+    /// An imported module defines one exported function name more than once.
+    DuplicateImportedFunction {
+        /// Duplicate function name.
+        name: String,
+        /// Module containing the duplicate definitions.
+        module: ModulePath,
+    },
+    /// An imported module declares one predicate as both public and private.
+    ConflictingPredicateVisibility {
+        /// Predicate with contradictory visibility declarations.
+        name: String,
+        /// Module containing the declarations.
         module: ModulePath,
     },
     /// Parse error in module
@@ -156,9 +217,109 @@ impl std::fmt::Display for ModuleError {
             ModuleError::PredicateNotFound { name, module } => {
                 write!(
                     f,
-                    "error[E0404]: predicate `{}` not found in module {}",
+                    "error[E0404]: item `{}` is not exported by module {}",
                     name,
                     module_path_to_string(module)
+                )
+            }
+            ModuleError::UnsupportedImportedContent { module, constructs } => {
+                writeln!(
+                    f,
+                    "error[E0405]: imported module `{}` contains unsupported program-level constructs: {}",
+                    module_path_to_string(module),
+                    constructs.join(", ")
+                )?;
+                write!(f, "  = help: declare these constructs in the entry file")
+            }
+            ModuleError::HiddenDependency {
+                module,
+                export,
+                dependency,
+            } => {
+                writeln!(
+                    f,
+                    "error[E0406]: exported item `{}` in module `{}` depends on hidden item `{}`",
+                    export,
+                    module_path_to_string(module),
+                    dependency
+                )?;
+                write!(
+                    f,
+                    "  = help: imported exports cannot depend on private or selectively omitted module items"
+                )
+            }
+            ModuleError::AmbiguousModulePath { path, candidates } => {
+                writeln!(
+                    f,
+                    "error[E0407]: module path `{}` identifies multiple loaded files",
+                    module_path_to_string(path)
+                )?;
+                writeln!(f, "  = note: loaded candidates:")?;
+                for candidate in candidates {
+                    writeln!(f, "          - {}", candidate.display())?;
+                }
+                write!(
+                    f,
+                    "  = help: load the entry file or root module before validating or merging its imports"
+                )
+            }
+            ModuleError::IncompatiblePredicateDeclaration {
+                name,
+                module1,
+                module2,
+            } => {
+                writeln!(
+                    f,
+                    "error[E0408]: incompatible declarations for imported predicate `{name}`"
+                )?;
+                writeln!(
+                    f,
+                    "  `{name}` is declared by {} and {} with different schemas",
+                    module_path_to_string(module1),
+                    module_path_to_string(module2)
+                )?;
+                write!(
+                    f,
+                    "  = help: imported declarations must use identical arity, column names, and types"
+                )
+            }
+            ModuleError::IncompatibleDomainDeclaration {
+                name,
+                module1,
+                module2,
+            } => {
+                writeln!(
+                    f,
+                    "error[E0409]: incompatible declarations for domain alias `{name}`"
+                )?;
+                writeln!(
+                    f,
+                    "  `{name}` is declared by {} and {} with different scalar types",
+                    module_path_to_string(module1),
+                    module_path_to_string(module2)
+                )?;
+                write!(
+                    f,
+                    "  = help: a domain alias must resolve to one scalar type throughout the import closure"
+                )
+            }
+            ModuleError::DuplicateImportedFunction { name, module } => {
+                writeln!(
+                    f,
+                    "error[E0410]: imported module `{}` defines function `{name}` more than once",
+                    module_path_to_string(module)
+                )?;
+                write!(f, "  = help: keep exactly one definition for each function")
+            }
+            ModuleError::ConflictingPredicateVisibility { name, module } => {
+                writeln!(
+                    f,
+                    "error[E0411]: imported module `{}` declares predicate `{name}` as both public and private",
+                    module_path_to_string(module)
+                )?;
+                write!(
+                    f,
+                    "  = help: use one visibility for every declaration of a predicate"
                 )
             }
             ModuleError::ParseError { path, message } => {
@@ -237,6 +398,83 @@ mod tests {
         let msg = err.to_string();
         assert!(msg.contains("module not found"));
         assert!(msg.contains("missing"));
+    }
+
+    #[test]
+    fn ambiguous_module_path_error_lists_candidates() {
+        let err = ModuleError::AmbiguousModulePath {
+            path: vec!["support".to_string()],
+            candidates: vec![
+                PathBuf::from("/modules/left/support.xlog"),
+                PathBuf::from("/modules/right/support.xlog"),
+            ],
+        };
+
+        let message = err.to_string();
+
+        assert!(message.contains("error[E0407]"));
+        assert!(message.contains("module path `support`"));
+        assert!(message.contains("/modules/left/support.xlog"));
+        assert!(message.contains("/modules/right/support.xlog"));
+    }
+
+    #[test]
+    fn incompatible_predicate_declaration_error_names_both_modules() {
+        let err = ModuleError::IncompatiblePredicateDeclaration {
+            name: "external".to_string(),
+            module1: vec!["first".to_string()],
+            module2: vec!["second".to_string()],
+        };
+
+        let message = err.to_string();
+
+        assert!(message.contains("error[E0408]"));
+        assert!(message.contains("predicate `external`"));
+        assert!(message.contains("first and second"));
+    }
+
+    #[test]
+    fn incompatible_domain_declaration_error_names_both_modules() {
+        let err = ModuleError::IncompatibleDomainDeclaration {
+            name: "key".to_string(),
+            module1: vec!["first".to_string()],
+            module2: vec!["second".to_string()],
+        };
+
+        let message = err.to_string();
+
+        assert!(message.contains("error[E0409]"));
+        assert!(message.contains("domain alias `key`"));
+        assert!(message.contains("first and second"));
+    }
+
+    #[test]
+    fn duplicate_imported_function_error_names_module() {
+        let err = ModuleError::DuplicateImportedFunction {
+            name: "normalize".to_string(),
+            module: vec!["library".to_string()],
+        };
+
+        let message = err.to_string();
+
+        assert!(message.contains("error[E0410]"));
+        assert!(message.contains("function `normalize`"));
+        assert!(message.contains("module `library`"));
+    }
+
+    #[test]
+    fn conflicting_predicate_visibility_error_names_module() {
+        let err = ModuleError::ConflictingPredicateVisibility {
+            name: "shared".to_string(),
+            module: vec!["library".to_string()],
+        };
+
+        let message = err.to_string();
+
+        assert!(message.contains("error[E0411]"));
+        assert!(message.contains("predicate `shared`"));
+        assert!(message.contains("module `library`"));
+        assert!(message.contains("both public and private"));
     }
 
     #[test]

@@ -139,6 +139,8 @@ jobs:
             --junitxml=test-results/relation-provenance.xml
       - name: Run membership-mask transfer tests
         run: cargo test -p xlog-cuda --test test_membership_mask --release -- --nocapture
+      - name: Run host-IO probabilistic CLI tests
+        run: cargo test --locked --release -p xlog-cli --features host-io --test prob_cli_tests -- --nocapture --test-threads=1
       - name: Smoke test import + evaluate
         shell: bash
         run: |
