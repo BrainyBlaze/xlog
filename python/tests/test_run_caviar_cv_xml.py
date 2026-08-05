@@ -506,6 +506,11 @@ def _fake_ec_theory(clauses, stop_reason="max_clauses reached"):
         "min_fit": 0.5,
         "null_summary": {"threshold": 0.5},
         "selection_reasons_per_iteration": ["committed"] if clauses else [],
+        "iterations": [
+            {"rule": c, "reason": "committed", "margin": 0.2,
+             "n_residual_pos_before": 2, "n_newly_covered": 2}
+            for c in clauses
+        ],
     }
 
 
@@ -517,6 +522,7 @@ def test_run_fold_xml_source_converts_via_convert_xml_corpus_and_derives_ec_targ
         lambda mode, train, test, train_ec_relations, init_facts, init_labels, seed: {
             "clauses": [], "stop_reason": "no positives remain in the residual",
             "min_fit": 0.5, "null_summary": None, "selection_reasons": [],
+            "iterations": [],
             "predict_clause_test": None, "detector_probe": None, "wall_s": 0.0,
         },
     )
@@ -526,7 +532,10 @@ def test_run_fold_xml_source_converts_via_convert_xml_corpus_and_derives_ec_targ
     )
     monkeypatch.setattr(
         run_caviar_cv, "_induce_direct_theory",
-        lambda train_relations, facts, labels, seed: {"clauses": [], "stop_reason": "no positives remain in the residual"},
+        lambda train_relations, facts, labels, seed: {
+            "clauses": [], "stop_reason": "no positives remain in the residual",
+            "iterations": [],
+        },
     )
 
     result = run_caviar_cv.run_fold(
@@ -572,6 +581,7 @@ def test_run_fold_xml_source_moving_fluent_reads_a_different_holds_set(monkeypat
         lambda mode, train, test, train_ec_relations, init_facts, init_labels, seed: {
             "clauses": [], "stop_reason": "no positives remain in the residual",
             "min_fit": 0.5, "null_summary": None, "selection_reasons": [],
+            "iterations": [],
             "predict_clause_test": None, "detector_probe": None, "wall_s": 0.0,
         },
     )
@@ -581,7 +591,10 @@ def test_run_fold_xml_source_moving_fluent_reads_a_different_holds_set(monkeypat
     )
     monkeypatch.setattr(
         run_caviar_cv, "_induce_direct_theory",
-        lambda train_relations, facts, labels, seed: {"clauses": [], "stop_reason": "no positives remain in the residual"},
+        lambda train_relations, facts, labels, seed: {
+            "clauses": [], "stop_reason": "no positives remain in the residual",
+            "iterations": [],
+        },
     )
 
     result = run_caviar_cv.run_fold(

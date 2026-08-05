@@ -761,6 +761,22 @@ def _induce_ec_target(train_relations: dict, facts, labels, seed: int):
     return result
 
 
+def _iterations_json(iterations: list[dict]) -> list[dict]:
+    """`theory_loop.induce_theory`'s per-iteration records, JSON-safe (rule
+    tuples -> lists) -- the SAME conversion `run_caviar_theory._theory_json`
+    already applies to its own result. Serialized IN FULL (``rule``,
+    ``reason``, ``margin``, ``n_residual_pos_before``, ``n_newly_covered``),
+    never reduced to the reason strings alone: a result reader must be able
+    to answer, from the artifact by itself, WHAT each iteration proposed and
+    HOW MANY new positives it covered (e.g. a rejected clause's own
+    newly-covered count -- exactly the per-fold figure section E.2's prose
+    cites)."""
+    return [
+        {**it, "rule": (list(it["rule"]) if it["rule"] is not None else None)}
+        for it in iterations
+    ]
+
+
 def _induce_direct_theory(train_relations: dict, facts, labels, seed: int):
     """The direct-protocol reference theory for one fold -- see the module
     docstring's "Direct-protocol reference theory" paragraph for exactly
@@ -785,7 +801,9 @@ def _run_init_search(
     affected by ``mode`` and is induced separately, unconditionally, by
     `run_fold`. Returns a dict with the SAME keys regardless of ``mode``:
     ``"clauses"``, ``"stop_reason"``, ``"min_fit"``, ``"null_summary"``,
-    ``"selection_reasons"``, ``"predict_clause_test"`` (``None`` in
+    ``"selection_reasons"``, ``"iterations"`` (the theory loop's FULL
+    per-iteration records, JSON-safe -- see `_iterations_json`),
+    ``"predict_clause_test"`` (``None`` in
     relational mode -- `run_fold` already has, and reuses, the shared
     relational ``predict_clause`` closure for both init and term there;
     a real closure in neural mode, since the trained nets' own gated
@@ -808,6 +826,7 @@ def _run_init_search(
             "min_fit": theory["min_fit"],
             "null_summary": theory["null_summary"],
             "selection_reasons": theory["selection_reasons_per_iteration"],
+            "iterations": _iterations_json(theory["iterations"]),
             "predict_clause_test": None,
             "detector_probe": None,
             "wall_s": wall_s,
@@ -832,6 +851,7 @@ def _run_init_search(
         "min_fit": null["threshold"],
         "null_summary": null,
         "selection_reasons": [it["reason"] for it in theory["iterations"]],
+        "iterations": _iterations_json(theory["iterations"]),
         "predict_clause_test": neural_result["predict_clause_test"],
         "detector_probe": neural_result["detector_probe"],
         "wall_s": wall_s,
@@ -966,12 +986,15 @@ def run_fold(
             "term_stop_reason": term_theory["stop_reason"],
             "init_selection_reasons": init_result["selection_reasons"],
             "term_selection_reasons": term_theory["selection_reasons_per_iteration"],
+            "init_iterations": init_result["iterations"],
+            "term_iterations": _iterations_json(term_theory["iterations"]),
             "init_detector_probe": init_result["detector_probe"],
             "scoring": ec_scoring,
         },
         "direct": {
             "clauses": [list(c) for c in direct_theory["clauses"]],
             "stop_reason": direct_theory["stop_reason"],
+            "iterations": _iterations_json(direct_theory["iterations"]),
             "scoring": direct_scoring,
         },
         "wall_clock_s": {

@@ -540,6 +540,38 @@ def test_run_init_search_relational_mode_matches_induce_ec_target_directly():
     assert result["detector_probe"] is None
 
 
+def test_run_init_search_relational_mode_returns_json_safe_full_iterations():
+    # The full per-iteration record (rule + n_newly_covered included), not
+    # merely the reason strings: a result reader must be able to see WHAT
+    # each iteration proposed and HOW MANY new positives it covered --
+    # `theory_loop.induce_theory` already records all of it; dropping it at
+    # serialization is what left E.2-style rejection counts unrecoverable
+    # from the shipped artifact.
+    relations = {
+        "both_active": [(0, 1), (1, 1), (4, 1), (5, 1)],
+        "close": [(0, 1), (2, 1), (4, 1), (6, 1)],
+    }
+    facts = [(i, 1) for i in range(8)]
+    labels = [True, True, False, False, True, False, False, True]
+
+    result = run_caviar_cv._run_init_search(
+        "relational", train={}, test={}, train_ec_relations=relations,
+        init_facts=facts, init_labels=labels, seed=7,
+    )
+    direct = run_caviar_cv._induce_ec_target(relations, facts, labels, seed=7)
+
+    assert result["iterations"] == [
+        {**it, "rule": (list(it["rule"]) if it["rule"] is not None else None)}
+        for it in direct["iterations"]
+    ]
+    assert len(result["iterations"]) == len(direct["iterations"]) >= 1
+    for it in result["iterations"]:
+        assert set(it) == {
+            "rule", "reason", "margin", "n_residual_pos_before", "n_newly_covered",
+        }
+        assert it["rule"] is None or isinstance(it["rule"], list)
+
+
 # ---------------------------------------------------------------------------
 # `run_fold` wiring -- `mode` reaches `_run_init_search` unchanged, and the
 # returned `predict_clause_test`/`detector_probe` are threaded into the
@@ -587,6 +619,11 @@ def _fake_ec_theory(clauses, stop_reason="max_clauses reached"):
         "min_fit": 0.5,
         "null_summary": {"threshold": 0.5},
         "selection_reasons_per_iteration": ["committed"] if clauses else [],
+        "iterations": [
+            {"rule": c, "reason": "committed", "margin": 0.2,
+             "n_residual_pos_before": 2, "n_newly_covered": 2}
+            for c in clauses
+        ],
     }
 
 
@@ -599,6 +636,7 @@ def test_run_fold_forwards_mode_to_run_init_search_and_defaults_to_relational(mo
         return {
             "clauses": [], "stop_reason": "no positives remain in the residual",
             "min_fit": 0.5, "null_summary": None, "selection_reasons": [],
+            "iterations": [],
             "predict_clause_test": None, "detector_probe": None, "wall_s": 0.0,
         }
 
@@ -609,7 +647,10 @@ def test_run_fold_forwards_mode_to_run_init_search_and_defaults_to_relational(mo
     )
     monkeypatch.setattr(
         run_caviar_cv, "_induce_direct_theory",
-        lambda train_relations, facts, labels, seed: {"clauses": [], "stop_reason": "no positives remain in the residual"},
+        lambda train_relations, facts, labels, seed: {
+            "clauses": [], "stop_reason": "no positives remain in the residual",
+            "iterations": [],
+        },
     )
 
     result = run_caviar_cv.run_fold(0, train_segments, test_segments, seed=7)
@@ -635,6 +676,10 @@ def test_run_fold_neural_mode_uses_its_own_predict_clause_and_surfaces_detector_
             "min_fit": 0.3,
             "null_summary": {"threshold": 0.3},
             "selection_reasons": ["committed"],
+            "iterations": [
+                {"rule": ["both_active", "close_nn"], "reason": "committed",
+                 "margin": 0.2, "n_residual_pos_before": 2, "n_newly_covered": 2},
+            ],
             "predict_clause_test": neural_predict_clause,
             "detector_probe": {
                 "clause0:both_active|close_nn": {
@@ -651,7 +696,10 @@ def test_run_fold_neural_mode_uses_its_own_predict_clause_and_surfaces_detector_
     )
     monkeypatch.setattr(
         run_caviar_cv, "_induce_direct_theory",
-        lambda train_relations, facts, labels, seed: {"clauses": [], "stop_reason": "no positives remain in the residual"},
+        lambda train_relations, facts, labels, seed: {
+            "clauses": [], "stop_reason": "no positives remain in the residual",
+            "iterations": [],
+        },
     )
 
     result = run_caviar_cv.run_fold(0, train_segments, test_segments, seed=7, mode="neural")
@@ -664,3 +712,69 @@ def test_run_fold_neural_mode_uses_its_own_predict_clause_and_surfaces_detector_
     # The RETURNED predict_clause_test, not the shared relational closure,
     # must be the one actually used for init scoring.
     assert used_neural_predict_clause["called"] is True
+
+
+def test_run_fold_serializes_full_iterations_for_init_term_and_direct(monkeypatch):
+    # Position: full theory-loop iteration serialization. The fold record
+    # must carry each search's COMPLETE per-iteration records (rule,
+    # reason, margin, n_residual_pos_before, n_newly_covered), JSON-safe
+    # (rule tuples -> lists) -- not only the final clause list and reason
+    # strings, which cannot answer "which clause was rejected, covering
+    # how many new positives?" from the artifact alone.
+    train_segments, test_segments = _tiny_two_row_segments()
+
+    init_iterations = [
+        {"rule": ["both_active", "close"], "reason": "committed",
+         "margin": 0.3, "n_residual_pos_before": 3, "n_newly_covered": 3},
+    ]
+
+    def fake_run_init_search(mode, train, test, train_ec_relations, init_facts, init_labels, seed):
+        return {
+            "clauses": [("both_active", "close")],
+            "stop_reason": "max_clauses reached",
+            "min_fit": 0.5, "null_summary": {"threshold": 0.5},
+            "selection_reasons": ["committed"],
+            "iterations": init_iterations,
+            "predict_clause_test": None, "detector_probe": None, "wall_s": 0.0,
+        }
+
+    monkeypatch.setattr(run_caviar_cv, "_run_init_search", fake_run_init_search)
+    monkeypatch.setattr(
+        run_caviar_cv, "_induce_ec_target",
+        lambda train_relations, facts, labels, seed: dict(
+            _fake_ec_theory([("both_walking", "far")]),
+            iterations=[
+                {"rule": ("both_walking", "far"), "reason": "committed",
+                 "margin": 0.1, "n_residual_pos_before": 1, "n_newly_covered": 1},
+                {"rule": ("both_active", "far"),
+                 "reason": "rejected: newly covered positives below min_new_covered",
+                 "margin": 0.05, "n_residual_pos_before": 1, "n_newly_covered": 0},
+            ],
+        ),
+    )
+    monkeypatch.setattr(
+        run_caviar_cv, "_induce_direct_theory",
+        lambda train_relations, facts, labels, seed: {
+            "clauses": [], "stop_reason": "select_once abstained",
+            "iterations": [
+                {"rule": None, "reason": "select_once abstained", "margin": None,
+                 "n_residual_pos_before": 2, "n_newly_covered": 0},
+            ],
+        },
+    )
+
+    result = run_caviar_cv.run_fold(0, train_segments, test_segments, seed=7)
+
+    assert result["ec"]["init_iterations"] == init_iterations
+    # Rule tuples must come out as JSON-safe lists.
+    assert result["ec"]["term_iterations"] == [
+        {"rule": ["both_walking", "far"], "reason": "committed",
+         "margin": 0.1, "n_residual_pos_before": 1, "n_newly_covered": 1},
+        {"rule": ["both_active", "far"],
+         "reason": "rejected: newly covered positives below min_new_covered",
+         "margin": 0.05, "n_residual_pos_before": 1, "n_newly_covered": 0},
+    ]
+    assert result["direct"]["iterations"] == [
+        {"rule": None, "reason": "select_once abstained", "margin": None,
+         "n_residual_pos_before": 2, "n_newly_covered": 0},
+    ]
