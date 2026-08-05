@@ -1,66 +1,14 @@
 # XLOG Development Roadmap
 
-Last updated: June 2, 2026
-Current release: v0.11.0 (WCOJ observability, residency-ablation hook, whitepaper neural sections, and the docs-site promotion; see CHANGELOG.md). v0.10.0 shipped the neural-symbolic training expansion (joint multi-rule mixtures, Stage-B existential-join trainable bodies, graded per-binding candidate masses) and the provenance-engine fixes (two-sided recursive SCC convergence, self-healing circuit disk cache). v0.9.2 shipped the epistemic executor semantic
-completion under the exact GPU-backed WFS contract: accepted cyclic
-negated-modal recursion uses the `xlog-gpu` GPU-backed WFS plan without the
-old `xlog_prob` host-WFS solver, but this is not a device-resident/no-host
-WFS residency claim. v0.6.0 shipped the stream-safe runtime
-and recorded launch discipline. v0.6.1 shipped recorded CSM hash-join
-dispatch and explicit CSM cert-mode labeling. v0.6.2 shipped the first
-productized WCOJ slice: hypergraph planner / oracle foundations plus
-default-on adaptive GPU triangle WCOJ for `U32`, `Symbol`, and `U64`
-inputs. v0.7.0 ships the completed WCOJ expansion pack: first-class
-multiway RIR, WCOJ cost and variable-ordering models, recursive/SCC
-integration, K-clique production planning, K5-K8 CUDA coverage, CUDA
-Graph hot-loop support, and external consumer end-to-end validation. v0.8.0 ships
-the external consumer ML/Python productization pack: stable `pyxlog` runtime/session
-contracts, async and streaming evaluation, relation deltas, diagnostics,
-registered neural top-k/deterministic modes, Belnap bridge helpers, native
-exact-induction integration, and external-consumer-focused examples. v0.8.5 ships the
-language-completeness pack: finite typed lists and terms, safe meta-predicates,
-deterministic NAF, magic-set planning, probabilistic aggregate inference with
-GPU-native count-lift exact evaluation, approximate inference controls,
-incremental parsing, and explain/REPL/watch developer workflows. v0.8.6 ships
-the external consumer runtime completion and GPU-native optimizer pack: device-resident
-delta coalescing, relation-change callbacks, typed exact induction,
-profile-gated chain shared-memory scoring, runtime CSE, adaptive
-re-optimization, persistent hash-index reuse, and behavior-probe-backed
-consumer certification. The v0.9.0 release-candidate branch now integrates the
-predecessor external diagnostic packs: initial v0.8.7 generated-rule and
-biomedical graph diagnostics, v0.8.8 external world-model provenance refinements, and
-an external diagnostic pack with joint `nn/4` plus symbolic
-rule-weight training, differentiable proof traces, learned-rule inventories,
-CUDA host-transfer audits, module-boundary diagnostics, grouped transfer
-metrics, and an external diagnostic validation package.
+Release history and packaged feature availability are recorded in
+`CHANGELOG.md` and the tagged release notes. This roadmap records implemented
+capabilities and future work without copying a moving package version into
+prose.
 
-Branch checkpoint (May 31, 2026): the MC resident engine now includes a bounded
-sparse/WCOJ production slice for generic positive joins. `evaluate_gpu_device*`
-continues to route through the resident no-host engine; exact resident pilots
-cover single joins, multiway joins, arity-3 relation input, rule chaining,
-recursive device-side fixpoint traces, device sparse row counts/offsets,
-kernel-written convergence/overflow diagnostics, cooperative multi-block-per-world
-recursion with fenced cooperative barriers and atomic device change/continue
-reads, constant no-host counters, and fail-closed preallocation budget
-diagnostics. The dense bitset remains a
-bounded device-side membership index, not the final unbounded out-of-core
-sparse columnar engine.
-
-This roadmap is version-oriented so planned work is not hidden inside subsystem
-sections. Historical and current-main work uses checked boxes. Future work uses
-unchecked boxes and is assigned to a concrete future version.
-After the tagged v0.8.0 feature pack, v0.8.5 completed the Language
-Completeness and Developer Experience train. v0.8.6 closed the deferred
-external consumer runtime / GPU-native optimizer completion backlog that v0.9.0 needs as
-runtime substrate. v0.8.7-v0.8.9 are integrated predecessor diagnostics
-surfaces in the v0.9.0 Epistemic/Solver Semantics train. v0.9.1 completes the
-bounded epistemic executor into a load-bearing surface (EIR-derived candidate
-enumeration, value-level modal membership, per-tuple-key FAEEL foundedness,
-epistemic constraints, safe split equivalence, and joint multi-epistemic
-solving), and v0.12.0 is the Multi-GPU / Out-of-Core train (renumbered:
-v0.11.0 is claimed by the released observability/whitepaper feature
-batch merged in PR #148 — release-plz computes the next minor from
-conventional commits on main).
+Completed work uses checked boxes. Future work uses unchecked boxes and remains
+unversioned until release tooling assigns it to a concrete release. Historical
+sections retain their release headings when the version is part of the shipped
+record.
 
 ## v0.0.1 - Workspace Foundation
 
@@ -582,7 +530,7 @@ conventional commits on main).
 - [x] dILP general-availability reliability gate.
 - [x] dILP performance and transfer smoke test.
 
-## main after v0.5.2 - Determinism Closure
+## Determinism closure after v0.5.2
 
 ### xlog-runtime
 
@@ -600,7 +548,7 @@ conventional commits on main).
 ### Whitepaper and Public Docs
 
 - [x] Whitepaper corrected against current code architecture.
-- [x] README aligned with the audit branch publication-ready narrative and current release/setup data.
+- [x] README aligned with the release and setup guidance recorded at the time.
 
 ## v0.5.5 - Consolidated Deterministic Hardening
 
@@ -788,15 +736,15 @@ execution.
       (already in tree) covers the device-mask case for
       runtime-backed callers. **Re-open trigger**: a
       runtime-backed recorded release path begins consuming
-      host-provided masks. No current v0.6.x consumer.
+      host-provided masks. No v0.6.x runtime-backed consumer was identified.
 - [x] **Decision: defer ILP / ILP-exact recorded migration.**
       Legacy ILP / ILP-exact path stays as-is; runtime block
       identity is not propagated through ILP view helpers.
       **Re-open trigger**: tensorized ILP / exact-induction
       downstream consumer work resumes (v0.8.0 native exact-induction
       consumer gate) and requires runtime-backed stream
-      safety. Without that consumer, the current legacy path
-      is correct and migration would add complexity for no
+      safety. Without that consumer, the legacy path was correct
+      at that release boundary and migration would add complexity for no
       observable gain.
 - [x] Migrate sort operator surface to recorded launches against
       `launch_stream`.
@@ -969,10 +917,7 @@ blockers later.
       (`AsyncCudaResource` / `LoggingResource` /
       `GlobalDeviceBudget`) and the `LaunchRecorder` preflight +
       commit contract, including the access-aware prepare/finish
-      semantics introduced in PR #72.
-      → [`docs/architecture/device-runtime.md`](architecture/device-runtime.md);
-      linked from `docs/ARCHITECTURE.md` Memory Management
-      section.
+      semantics in the [device runtime guide](docs/architecture/device-runtime.mdx).
 - [x] Add migration guidance for operator authors:
       `read` / `write` / `read_column` BEFORE preflight (no
       `write_post_preflight_fresh` — that API is gone);
@@ -980,13 +925,12 @@ blockers later.
       for helper scratch that runs raw CUDA work ahead of any
       recorder; `cu_stream.synchronize()` before host scalar
       reads; external-column rejection in strict mode.
-      → [`docs/architecture/recorded-launch-migration.md`](architecture/recorded-launch-migration.md);
-      linked from `docs/ARCHITECTURE.md` Memory Management
-      section.
+      The [recorded-launch lifecycle](docs/architecture/device-runtime.mdx#recorded-launches)
+      records the durable ordering contract.
 - [x] **Decision: defer non-blocker docs to the v0.6.x docs
       backlog.** The two release-blocker docs landed in v0.6.0
       (device-runtime architecture + recorded-launch migration
-      guidance, both linked above). The remaining narrative
+      guidance). The remaining narrative
       docs — deterministic Datalog tuning guide, general
       performance tuning guide, getting-started tutorial,
       deployment guide, operator-author migration guide
@@ -1020,8 +964,8 @@ blockers later.
       reads inside the chain explicitly ordered against
       `launch_stream` (non-blocking streams do not get
       default-stream implicit synchronization) — is now the
-      ongoing operator-author contract documented in
-      `docs/architecture/recorded-launch-migration.md`.
+      ongoing operator-author contract described by the
+      [recorded-launch lifecycle](docs/architecture/device-runtime.mdx#recorded-launches).
 - [x] Public release only after the cert suite passes against a
       runtime-backed manager with the recorded launch paths
       exercised. (Closed by `3361785b`: 206/206 under
@@ -1052,14 +996,14 @@ blockers later.
 3. ~~Operator-author migration docs + runtime-stack docs.~~
    **DONE — commit `1b267dbf`.** Both items in the v0.6.0
    Documentation subsection are checked.
-   `docs/architecture/device-runtime.md` covers the runtime
-   stack; `docs/architecture/recorded-launch-migration.md`
-   covers the operator-author checklist. Linked from
-   `docs/ARCHITECTURE.md`.
+   The [device runtime guide](docs/architecture/device-runtime.mdx) covers the
+   runtime stack, and its [recorded-launch
+   lifecycle](docs/architecture/device-runtime.mdx#recorded-launches) records
+   the durable operator-author contract.
 4. ~~Decisions on host-mask compact migration and ILP /
    ILP-exact recorded migration.~~
    **DEFERRED with named consumer triggers (post-v0.6.0).**
-   Neither has a current v0.6.0 consumer; pulling either in
+   Neither had an identified v0.6.0 consumer; pulling either in
    adds risk without improving the release evidence chain.
      * Host-mask compact (`compact_buffer_by_mask` recorded
        migration) re-opens **when a runtime-backed recorded
@@ -2088,12 +2032,11 @@ fail-closed:
 - [x] FAEEL-unfounded self-support (`p() :- possible p()`) executes to the defined
       empty extension, while explicit G91 accepts the same self-supporting program.
 
-## main after v0.9.2 - Factorized WCOJ Execution Pack
+## Factorized WCOJ execution
 
-Completed on main, unreleased. A set of factorized GPU join routes that avoid
-materializing witness-multiplied intermediates, each gated to fire only where it
-wins and falling back to the binary plan otherwise. Design and measured gate
-evidence live under `docs/plans/2026-06-*`.
+Available in tagged artifacts since 0.10.0. These factorized GPU join routes
+avoid materializing witness-multiplied intermediates. Each route runs only for a
+supported shape and falls back to the binary plan when its dispatch gate declines.
 
 - [x] Aggregate-fused WCOJ: count/sum/min/max-by-root over triangle bodies
       evaluated as a fused aggregate (no materialized join rows). Kill switch
@@ -2121,19 +2064,16 @@ evidence live under `docs/plans/2026-06-*`.
       input is large, so measured wins are preserved.
 - [x] Consumer observability: pyxlog `wcoj_dispatch_stats()` exposes the
       Free Join, aggregate-fusion, factorized-delta, and error-decline counters.
-- Parked (verified negative): factorized provenance into the d-DNNF path. The
-  dominant exact-inference cost is CDCL verification (treewidth-exponential),
-  not the compile frontier, so factorized provenance does not address it.
-  Evidence retained under `docs/plans/2026-06-*`.
+- [ ] Factorized provenance in the decision-DNNF path remains deferred. The
+      dominant exact-inference cost is CDCL verification (treewidth-exponential),
+      not the compile frontier, so factorizing the compile frontier does not address
+      the measured bottleneck.
 
-## main after v0.9.2 - Neuro-Symbolic Trainable-Rule & Joint-Mixture Pack
+## Neural-symbolic trainable rules and joint mixtures
 
-Completed on main, unreleased. The engine surface for learning logical rules by
-gradient descent (the consumer's "learn new rules, not validate a hard-coded
-base" goal). Every probability comes from the real compiled circuit or its
-faithful guard-only shortcut; no surrogate scoring path. Design and evidence
-under `docs/plans/2026-06-*`; `[Unreleased]` CHANGELOG entries carry the surface
-details.
+Available in tagged artifacts since 0.10.0. This surface learns logical rules by
+gradient descent. Every probability comes from the compiled circuit or its
+guard-only equivalent; there is no separate surrogate scoring path.
 
 - [x] Mixed trainable-rule bodies: `trainable_rule` bodies joining `nn/k`
       predicates with ordinary relations and builtins. Fact atoms are hard join
@@ -2163,90 +2103,59 @@ details.
       on the train split reproduces the trained probabilities. Selection among
       train-covering candidates is guard-free held-out coverage (the guards tie
       on a train-perfect correlate); admission reads only the selected winner.
-- Demonstration (consumer evidence, not an engine claim): the consumer
-      exercised this surface end-to-end on real WMIR state through a production
-      admission gate and reported a discovered-and-promoted novel rule with the
-      held-out gate rejecting a planted spurious correlate, honest caveats
-      intact. The "learn new rules" goal is realized as that consumer result;
-      this section records only the landed engine capability.
-- Driver-gated follow-up (no engine prerequisite for the guard-only path):
-      candidates whose bodies carry neural predicates beyond the guard need two
-      plumbing slices — a union-signature circuit forward_backward and a
-      per-candidate held-out circuit readout — and no new CUDA kernel (the fused
-      neural backward is already general over N groups). Admitted only on a
-      concrete neural-body driver. Feasibility read under `docs/plans/2026-06-*`.
+- [ ] Candidates whose bodies carry neural predicates beyond the guard need a
+      union-signature circuit forward/backward path and a per-candidate held-out
+      circuit readout. The existing fused neural backward path already supports
+      multiple groups, so this extension does not require another CUDA kernel.
 
-## v0.9.3 - Consumer Runtime Pack (external consumer-driven; ordering pending maintainer decision)
+## Native relation roles and whole-fact provenance
 
-Sourced from the external consumer consolidated requirements package
-(2026-06-12 requirements package;
-desk `#xlog` thread `msg-20260612-112404-c782`). The highest-priority engine defects
-from that package are closed (`703a2cc2`, production-validated by the
-consumer's pure-engine validation campaign). The ordering below is the proposed
-priority — mixed trainable-rule body support gates the consumer's training endgame and selective query evaluation doubles
-as a mitigation for the WSL export-stage corruption residual — but the
-final ordering is a maintainer decision.
+The source tree implements native ordered roles and provenance for complete
+relation tuples. Packaged availability is recorded in release notes rather than
+duplicated here.
 
-### Neural-Symbolic Training
+- [x] Validate role count, order, names, sorts, and scalar types against the
+      compiled predicate before mutation.
+- [x] Identify a fact from its predicate, arity, ordered scalar types, and exact
+      cell bytes, preserving signed zero and NaN payloads.
+- [x] Keep rows and evidence aligned across replacement, insert, delete, delta,
+      batch, removal, and session-clear operations.
+- [x] Return immutable native evidence snapshots and reconstruct rows, roles,
+      and evidence through a strict versioned manifest.
+- [x] Snapshot persistent DLPack inputs into session-owned device buffers while
+      retaining zero-copy imports for transient evaluation.
+- [x] Negotiate CUDA producer streams through the DLPack object protocol and
+      reject unsupported devices before requesting a capsule.
 
-- [x] Mixed trainable-rule bodies (consumer training endgame): `trainable_rule` bodies
-      joining `nn/k` predicates with ordinary relations and builtins.
-      Required semantics: fact atoms are hard join conditions; probability
-      mass comes only from nn-predicates × σ(w); gradients flow to the
-      network and w, never through fact atoms. Canonical example in the
-      requirements doc (contrary_value_pair over nn_slot_competition +
-      claim_fact + F1 != F2). Landed on main — see the "Neuro-Symbolic
-      Trainable-Rule & Joint-Mixture Pack" section above; it grew into the
-      full joint-mixture surface the consumer's training endgame needed.
+## Future session and reasoning capabilities
 
-### Session API and Performance
+- [ ] Add selective query evaluation through `evaluate(query_indices=[...])` so
+      callers can compute only the requested closure.
+- [ ] Maintain semi-naive deltas across persistent-session evaluations.
+- [ ] Add copy-on-write `session.fork()` with shared base relations and private
+      deltas for counterfactual branches.
+- [ ] Specify and test the multiplicity guarantee for `evaluate()` output while
+      allowing row order to remain unspecified.
+- [ ] Document supported in-body arithmetic forms and support cast-then-compare
+      expressions in one rule body.
+- [ ] Evaluate `known(F)` and `possible(F)` across a set of forked session worlds
+      with cross-world aggregate queries.
+- [ ] Support `f32` query columns so callers do not need fixed-point integer
+      mirror rules for probabilities and rule weights.
 
-- [ ] Selective query evaluation (selective evaluation): `evaluate(query_indices=[...])`
-      computing only the requested closure. Also reduces the multi-query
-      export clone storm implicated in the WSL defect-#2 residual.
-- [ ] Incremental evaluation across evaluates (incremental evaluation): semi-naive
-      maintenance across persistent-session evaluates (delta-puts in,
-      delta-results out). Consumer-measured as their dominant
-      step-latency cost; builds on the v0.8.6 delta-coalescing substrate.
-- [ ] Cheap session forking (cheap session forking): copy-on-write `session.fork()` with
-      shared base relations + private deltas, making counterfactual
-      branch evaluation O(delta). Enabler for the consumer's branch-quantified modality
-      branch-quantified modality milestone.
-- [ ] Documented determinism contract (determinism contract): stated and CI-tested
-      multiplicity guarantee for `evaluate()` outputs (ordering may stay
-      unspecified). Consumer evidence: raw RecursiveSupportResult row-count
-      variance across identical inputs (their previous roadmap finding).
-- [ ] In-body arithmetic ergonomics (arithmetic ergonomics): document supported expression
-      forms; support cast-then-compare in one body
-      (`X is cast(count_result, i64)` followed by comparison).
-
-### Epistemic and Typed Outputs
-
-- [ ] Multi-world epistemic evaluation (multi-world epistemic evaluation after cheap session forking): `known(F)` /
-      `possible(F)` quantified over session-set world branches with
-      cross-world aggregate queries, instead of N full evaluations plus
-      host aggregation.
-- [ ] Float-typed query outputs (float-typed query outputs): bless f32 query columns
-      (document + test) so consumers can drop fixed-point `_i64` mirror
-      rules for Belnap channel masses, slot probabilities, and rule weights.
-
-## v0.12.0 - Multi-GPU and Out-of-Core Execution
+## Future multi-GPU and out-of-core execution
 
 ### Runtime and Memory
 
 - [ ] Certify same-process multi-executor concurrency against one CUDA primary
-      context. Surfaced by the v0.6.0 A3/A4 stress harness
-      (`crates/xlog-integration/tests/test_a3_a4_stress.rs`, commit
-      `27ec3bd9`): A3 in-process thread-of-N drift (~3% on recursive Datalog
-      workloads) is reproducible against the legacy default path (no
-      `XLOG_USE_DEVICE_RUNTIME`, no `XLOG_USE_RECORDED_OPS`), so it is not a
-      v0.6.0 stream-safety bug. Re-target candidates:
+      context. The thread-of-N stress test reproduces result drift on recursive
+      Datalog workloads through the legacy default path, which isolates the
+      investigation from recorded-launch stream safety. Candidate causes are
       `xlog-runtime::Executor` mutability under thread contention,
       `xlog-cuda::CudaKernelProvider` shared kernel/index caches, and cudarc
-      primary-context module-load semantics under concurrent first-launch. Pass
-      criterion: A3 thread-of-N drift drops to zero on the harness's
-      `per_thread` and `shared` fixture modes (matrix run via
-      `XLOG_A3_FIXTURE_MODE=...`).
+      primary-context module-load semantics during concurrent first launch. The
+      gate passes only when both per-thread and shared-executor fixture modes are
+      deterministic.
 - [ ] Add out-of-core execution for relations exceeding GPU memory.
 - [ ] Add checkpointing and recovery.
 - [ ] Add out-of-core spilling.
@@ -2284,7 +2193,7 @@ final ordering is a maintainer decision.
 - [ ] Add PyTorch integration tests.
 - [ ] Add multi-GPU partitioning, skew, and recovery certification.
 
-## Cross-Version Risk Register
+## Risk register
 
 ### v0.5.5 Risks
 
@@ -2295,7 +2204,11 @@ final ordering is a maintainer decision.
 
 - [ ] Stream-safety migration scope can expand beyond the release window if every operator family is migrated in one cut. Mitigated by per-operator slices behind sibling `*_recorded` entry points; legacy paths remain until the recorded path is certified.
 - [ ] Composing recorded primitives currently relies on the runtime's record-all + wait-all event semantics (`last_use_events: Vec<CudaEvent>` in `AsyncCudaResource`). If composition depth grows materially, a future event-coalescing optimization may be needed to keep `deallocate` cost bounded.
-- [ ] DLPack / Arrow external-memory consumers must coordinate cross-stream synchronization themselves; strict-mode rejection at preflight is loud, but downstream consumers depending on permissive recorders need explicit migration guidance.
+- [ ] DLPack object producers negotiate ordering when XLOG requests a capsule for
+      consumer stream `1`. Raw capsules cannot negotiate and must already be
+      ordered for that stream, while Arrow external-memory paths retain their own
+      synchronization contract. Documentation and validation must keep these
+      responsibilities distinct.
 
 ### v0.6.2 Risks
 
@@ -2307,6 +2220,6 @@ final ordering is a maintainer decision.
 - [ ] Epistemic semantics can introduce high complexity and must remain isolated from stable Datalog execution.
 - [ ] decision-DNNF compiler and solver integration must preserve deterministic certification paths.
 
-### v0.12.0 Risks
+### Future distributed-execution risks
 
 - [ ] Multi-GPU synchronization and skew handling can dominate performance if partitioning policy is not benchmark-driven.

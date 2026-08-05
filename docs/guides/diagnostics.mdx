@@ -5,18 +5,21 @@ description: "Inspect why XLOG produced a result — rule and induced-rule prove
 
 When XLOG returns an answer, these tools tell you *why*: which rule fired, which
 facts supported it, why one learned rule was kept over another, and whether an
-incremental update stayed fast. You get that explanation without pulling relation
-data back off the GPU and without changing the behavior you are trying to observe.
+incremental update stayed fast. Most surfaces return metadata without downloading
+relation rows. Relation evidence additionally returns the annotated facts stored in
+its native snapshot; validating their membership downloads one bounded boolean mask,
+one byte per distinct annotated fact, rather than the relation columns.
 
 Reach for this page when a result surprises you, when a rule you expected did not
 fire, or when an update that should have been cheap suddenly got slow — and you
 want an audit trail rather than a guess.
 
 <Note>
-Every surface here reports **metadata, hashes, counters, and runtime state** — never
-relation rows. Turning diagnostics on does not move data to the host or alter the
-production data path, unless you separately call a host-readable API. XLOG keeps its
-working state on the GPU, so observability is built to respect that boundary.
+Rule, delta, and hot-loop diagnostics report metadata, hashes, counters, and runtime
+state rather than relation rows. Relation evidence returns caller-annotated complete
+facts and may perform the bounded membership-mask transfer described above. It still
+does not download the stored relation columns; use an explicit export when you need
+those rows.
 </Note>
 
 Throughout this page, a few recurring terms:
@@ -39,6 +42,7 @@ Throughout this page, a few recurring terms:
 | Did my incremental update stay incremental? | Relation-delta debugging | `apply_relation_delta_debug(...)`, `delta_stats()` |
 | Is the neural hot loop actually host-free? | Host-transfer audits | `neural_hot_loop_diagnostics()` |
 | Was a pragma in an imported module ignored? | Ignored-pragma warnings | `warning[W0510]` on stderr from `xlog run` / `xlog prob` / `xlog explain`; `ModuleResolver::ignored_import_pragmas()` |
+| Which roles and source records annotate a stored complete fact? | Relation evidence | `relation(name)`, `evidence(name=None)` |
 
 ## Rule provenance and proof traces
 
@@ -263,13 +267,24 @@ session.relation("observed_edge").provenance() # native RelationEvidence snapsho
 `row_count`, ordered `roles`, and canonical `facts`. Each fact has a stable `identity`,
 a friendly `tuple`, exact typed `cells`, and all distinct provenance records. Repeating
 the same fact or record does not change the result order: fact entries merge by their
-complete typed tuple and exact duplicate records collapse.
+complete typed tuple and exact duplicate records collapse. Duplicate stored rows still
+count separately in `row_count`, but share the one evidence entry for that typed tuple.
+The opaque identity is a domain-separated SHA-256 digest of the predicate name, arity,
+and each ordered cell's scalar type and exact little-endian bytes. It is independent of
+row position, role labels, and provenance records.
 
 The evidence is updated with the relation. Provenance-bearing inserts add records;
 deletes remove the records for the complete deleted fact; coalesced batch updates do not
-leave evidence for canceled inserts. Plain replacement clears prior evidence, and
-relation removal or a session clear removes it. Validation failures change neither data
-nor evidence.
+leave evidence for canceled inserts. Plain replacement, metadata-free manifest
+replacement, relation removal, and session clear remove prior evidence and reset a
+positional role contract. Validation failures change neither data nor evidence.
+Insert evidence requires accompanying insert columns, positive arity, and an existing
+registered role contract; each annotated fact must occur in that specific insert buffer.
+An empty `facts` or `insert_facts` list still invokes those preconditions.
+
+Nullary relations support metadata-free storage and deltas, but reject provenance-aware
+replacement, every provenance-manifest import/export, and any insert or delta that
+supplies `facts` or `insert_facts`, including an empty list.
 
 Persistent replacement methods snapshot imported DLPack columns with a
 device-to-device copy. Later writes through a retained producer tensor cannot bypass
@@ -278,9 +293,18 @@ inputs remain zero-copy.
 
 Invalid role, whole-fact provenance, insert-evidence, or manifest input raises
 `pyxlog.RelationMetadataError`, a `ValueError` subclass. `session.relation(name)` and
-`session.evidence(name)` raise `KeyError` when the relation is not stored. The native
-`RelationEvidence` type, this exception, and the session operations require the bundled
-`pyxlog._native` extension.
+`session.evidence(name)` raise `KeyError` when the relation is not stored. A
+`RelationEvidence` object is an immutable snapshot: later session changes do not alter
+it, and mutating a dictionary returned by `provenance()` does not alter the snapshot.
+`evidence(name)` filters only the returned `relations` mapping; its `program_hash` is
+still computed over every stored relation, so it matches an unfiltered read at the same
+session state.
+
+Without `pyxlog._native`, `RelationEvidence` and `RelationMetadataError` remain
+importable at package level. The fallback metadata error subclasses `ValueError`, while
+constructing fallback `RelationEvidence` raises `RuntimeError`. Native evidence
+instances and session operations require the extension. Source builds with the
+extension expose the API; packaged availability is determined by release notes.
 
 Whole-fact membership validation stays on the GPU except for one boolean result mask.
 `host_transfer_stats()` accounts for that mask as one device-to-host call and one byte

@@ -79,8 +79,9 @@ bulk data stays on the device.
 ## Fail-Closed Budgets
 
 Hard instances can run indefinitely, so the CDCL config can cap the work with a
-conflict budget. This bound is available on `main` and has not shipped in a
-release beyond 0.9.2.
+conflict budget. This budget and its typed `VerifyBudgetExceeded` error have been
+available since 0.10.0. The same release added the compile-capacity
+`CompileCapacityExceeded` error for oversized D4 compilations.
 
 The bound is the config field `max_conflicts`. A nonzero value limits how much
 work a hard verification instance may do. If the kernel hits the budget before it

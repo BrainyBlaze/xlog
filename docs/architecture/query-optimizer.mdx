@@ -82,7 +82,7 @@ statistics, variable-order settings, and shape rules. This lets the runtime late
 choose between:
 
 - dedicated WCOJ (worst-case-optimal join) kernels;
-- main-only Free Join routes;
+- Free Join routes;
 - ordinary binary-join fallback.
 
 Promotion is not the same as dispatch. The runtime can still decline a promoted
@@ -99,9 +99,9 @@ The executor adds runtime information the compiler cannot know:
 - kill switches (runtime flags that force a route off);
 - route-specific counters and error-decline counts.
 
-For main-only factorized routes, `wcoj_cost_model` also plans Free Join order. It
-applies a factorized-loss veto: a route can decline itself when the known
-workload would lose the intended benefit.
+For factorized routes, `wcoj_cost_model` also plans Free Join order. It applies a
+factorized-loss veto: a route can decline itself when the known workload would
+lose the intended benefit.
 
 ## Statistics Layer
 

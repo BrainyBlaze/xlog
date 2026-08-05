@@ -21,11 +21,6 @@ every row.
 Boolean knobs generally accept `1`/`true` to enable and `0`/`false` to disable;
 per-variable parsing is noted where it differs.
 
-<Note>
-Variables tagged **(unreleased)** exist on `main` but are not part of the latest
-published release. They apply only when building from source.
-</Note>
-
 ## Kernel artifacts and build
 
 These control where XLOG finds its compiled GPU kernel files (the `.cubin` and
@@ -54,7 +49,7 @@ behind exact probabilistic inference) and exists only in debug builds.
 | Variable | Effect | Values / Default |
 |---|---|---|
 | `XLOG_WCOJ_POOL_MB_PER_STREAM` | Device memory pool budget per CUDA stream, in MiB. | positive integer; default `256` |
-| `XLOG_UNION_CHUNK_BYTES` | Byte budget per chunk of the multiway-union fold that merges same-head rule outputs. Bounds peak device memory for many-rule heads to the chunk budget plus the deduplicated accumulator. **(unreleased)** | positive integer bytes; default `1073741824` (1 GiB) |
+| `XLOG_UNION_CHUNK_BYTES` | Byte budget per chunk of the multiway-union fold that merges same-head rule outputs. Bounds peak device memory for many-rule heads to the chunk budget plus the deduplicated accumulator. | positive integer bytes; default `1073741824` (1 GiB) |
 | `XLOG_WARMUP_PROFILE` | Diagnostic: collect per-module PTX load timing and compile-warmup profiling stats. | `1` to enable; default off |
 | `XLOG_DEBUG_POISON_ALLOC` | Debug probe: fill fresh legacy allocations with `0xDD` so reads of unwritten memory surface deterministically. Read once per process. | `1` to enable; default off |
 | `XLOG_DEBUG_POISON_FREE` | Debug probe: poison legacy allocations with `0xDD` at drop so live aliases of freed memory become visually distinct. Read once per process. | `1` to enable; default off |
@@ -71,6 +66,8 @@ the rule shapes each dispatch handles. A *cost model* estimates which route will
 be cheaper for a given rule, and a *variable-order heuristic* chooses the order
 in which join variables are bound.
 
+The 4-cycle controls in this table have been available since 0.7.0.
+
 | Variable | Effect | Values / Default |
 |---|---|---|
 | `XLOG_CSE` | Enable runtime common-subexpression elimination. | `1`/`true`/`on`/`yes`; default off |
@@ -80,8 +77,8 @@ in which join variables are bound.
 | `XLOG_PERSISTENT_HASH_INDEX_BACKGROUND_BUILD` | Background-build telemetry for persistent hash indexes. | `1`/`true`/`on`/`yes`; default off |
 | `XLOG_WCOJ_COST_MODEL` | Select the WCOJ cost model: `cardinality` or `skew` (alias `skewclassifier`; any other non-empty value also resolves to the skew classifier). | default `cardinality` |
 | `XLOG_USE_WCOJ_TRIANGLE_U32` | Force the WCOJ triangle dispatch on. When unset, the adaptive cost model decides per rule (adaptive is on by default). | `1`/`true`; default off (adaptive) |
-| `XLOG_USE_WCOJ_4CYCLE` | Force the WCOJ 4-cycle dispatch on (width-neutral: u32, u64, Symbol). **(unreleased)** | `1`/`true`; default off |
-| `XLOG_USE_WCOJ_4CYCLE_ADAPTIVE` | Opt in to adaptive cost-model dispatch for 4-cycles. Unlike triangle, 4-cycle adaptive dispatch is off by default. **(unreleased)** | `1`/`true`; default off |
+| `XLOG_USE_WCOJ_4CYCLE` | Force the WCOJ 4-cycle dispatch on (width-neutral: u32, u64, Symbol). | `1`/`true`; default off |
+| `XLOG_USE_WCOJ_4CYCLE_ADAPTIVE` | Opt in to adaptive cost-model dispatch for 4-cycles. Unlike triangle, 4-cycle adaptive dispatch is off by default. | `1`/`true`; default off |
 | `XLOG_WCOJ_CHAIN_ENABLE` | Chain-shaped rule dispatcher. On by default; set `0`/`false` for A/B measurements against the binary-join path. | default on |
 | `XLOG_WCOJ_BLOCK_WORK_UNIT` | WCOJ block work-unit size. Out-of-range or unparsable values log a warning and use the default. | `1..=8192`; default `1024` |
 | `XLOG_BURIED_SKEW_THRESHOLD` | Skew threshold used by the hypergraph variable-order heuristic; non-finite or non-positive values are ignored. | float `> 0`; default `3.0` |
@@ -99,16 +96,20 @@ which combines several relations at once rather than one pair at a time. The
 round of a recursive query derives only the newly-available facts (the *delta*),
 and "factorized" keeps that step compressed instead of listing every row.
 
+The Free Join, factorized-delta, aggregate-fusion, and strict-mode controls below
+have been available since 0.10.0. The 4-cycle kill switch has been available
+since 0.7.0.
+
 | Variable | Effect | Values / Default |
 |---|---|---|
-| `XLOG_DISABLE_FREE_JOIN` | Force every general multiway body through the embedded binary-join fallback instead of the generalized Free Join dispatch. **(unreleased)** | `1`/`true`; default off |
-| `XLOG_DISABLE_FACTORIZED_DELTA` | Force every recursive delta step through the legacy hash-join and diff path instead of the factorized recursive-delta dispatch. **(unreleased)** | `1`/`true`; default off |
-| `XLOG_FACTORIZED_DELTA_MAX_DOMAIN` | Raise the dense-domain dispatch cap for the factorized delta, up to the provider hard bound of `2^16`. **(unreleased)** | integer; default `2^14` |
-| `XLOG_FACTORIZED_DELTA_MAX_TABLE_BYTES` | Byte ceiling for the sparse route's conservative hash table; above it the sparse entry declines to the legacy path. **(unreleased)** | integer bytes; default half the device budget |
-| `XLOG_FACTORIZED_DELTA_WORK_DIVISOR` | Per-iteration work floor: dispatch only when estimated candidate work is at least the bitmap word count divided by this value, protecting sparse long-chain fixpoints from the popcount-and-scan floor. **(unreleased)** | integer `>= 1`; default `8` |
-| `XLOG_DISABLE_WCOJ_GROUPBY_FUSION` | Force every group-by over a WCOJ triangle through the materialize-then-groupby path instead of the aggregate-fused dispatch. **(unreleased)** | `1`/`true`; default off |
-| `XLOG_DISABLE_WCOJ_4CYCLE` | Kill switch for the 4-cycle dispatch, overriding both force and adaptive gates. **(unreleased)** | `1`/`true`; default off |
-| `XLOG_WCOJ_STRICT` | Diagnostic: propagate WCOJ pipeline errors instead of the default counted-and-logged decline to the binary-join fallback. **(unreleased)** | `1`/`true`; default off |
+| `XLOG_DISABLE_FREE_JOIN` | Force every general multiway body through the embedded binary-join fallback instead of the generalized Free Join dispatch. | `1`/`true`; default off |
+| `XLOG_DISABLE_FACTORIZED_DELTA` | Force every recursive delta step through the legacy hash-join and diff path instead of the factorized recursive-delta dispatch. | `1`/`true`; default off |
+| `XLOG_FACTORIZED_DELTA_MAX_DOMAIN` | Raise the dense-domain dispatch cap for the factorized delta, up to the provider hard bound of `2^16`. | integer; default `2^14` |
+| `XLOG_FACTORIZED_DELTA_MAX_TABLE_BYTES` | Byte ceiling for the sparse route's conservative hash table; above it the sparse entry declines to the legacy path. | integer bytes; default half the device budget |
+| `XLOG_FACTORIZED_DELTA_WORK_DIVISOR` | Per-iteration work floor: dispatch only when estimated candidate work is at least the bitmap word count divided by this value, protecting sparse long-chain fixpoints from the popcount-and-scan floor. | integer `>= 1`; default `8` |
+| `XLOG_DISABLE_WCOJ_GROUPBY_FUSION` | Force every group-by over a WCOJ triangle through the materialize-then-groupby path instead of the aggregate-fused dispatch. | `1`/`true`; default off |
+| `XLOG_DISABLE_WCOJ_4CYCLE` | Kill switch for the 4-cycle dispatch, overriding both force and adaptive gates. | `1`/`true`; default off |
+| `XLOG_WCOJ_STRICT` | Diagnostic: propagate WCOJ pipeline errors instead of the default counted-and-logged decline to the binary-join fallback. | `1`/`true`; default off |
 
 <Note>
 A WCOJ layout or kernel error never corrupts the relation store: by default it is
@@ -125,14 +126,17 @@ engine works over Boolean formulas in CNF (conjunctive normal form — an AND of
 OR-clauses) and can check its own result with the built-in SAT solver; the size
 bounds below keep that step from overrunning GPU memory.
 
+The D4 compile and verification budget controls have been available since
+0.10.0.
+
 | Variable | Effect | Values / Default |
 |---|---|---|
 | `XLOG_MC_RESIDENT_MEMORY_BUDGET_BYTES` | Memory budget for the GPU-resident Monte Carlo engine's launch planning. An unparsable value is a typed error, not a silent default. | integer bytes; unset = provider budget |
 | `XLOG_MC_RESIDENT_BLOCKS_PER_WORLD` | Blocks launched per sampled world in the resident MC engine. Zero or unparsable values are typed errors. | integer `>= 1`; default `1` |
-| `XLOG_D4_VERIFY_MAX_CONFLICTS` | Per-verify conflict budget for the GPU CDCL equivalence verifier. When the budget runs out, the verify declines with the typed `VerifyBudgetExceeded` error rather than trusting an unfinished search. Read once per process. **(unreleased)** | integer; default `0` = unlimited |
-| `XLOG_D4_VERIFY_MAX_VARS` | Size bound on CNF variable capacity before the D4 compile and verify launch; an over-bound program declines with the typed `CompileCapacityExceeded` error instead of risking a context-poisoning CUDA launch failure. **(unreleased)** | integer; default unbounded |
-| `XLOG_D4_VERIFY_MAX_CLAUSES` | Same size bound, on CNF clause capacity. **(unreleased)** | integer; default unbounded |
-| `XLOG_DEBUG_VERIFY_SIZE` | Diagnostic: log the CNF variable/clause capacities the size bound sees, so safe values for the two bounds above can be read off a real workload. **(unreleased)** | `1` to enable; default off |
+| `XLOG_D4_VERIFY_MAX_CONFLICTS` | Per-verify conflict budget for the GPU CDCL equivalence verifier. When the budget runs out, the verify declines with the typed `VerifyBudgetExceeded` error rather than trusting an unfinished search. Read once per process. | integer; default `0` = unlimited |
+| `XLOG_D4_VERIFY_MAX_VARS` | Size bound on CNF variable capacity before the D4 compile and verify launch; an over-bound program declines with the typed `CompileCapacityExceeded` error instead of risking a context-poisoning CUDA launch failure. | integer; default unbounded |
+| `XLOG_D4_VERIFY_MAX_CLAUSES` | Same size bound, on CNF clause capacity. | integer; default unbounded |
+| `XLOG_DEBUG_VERIFY_SIZE` | Diagnostic: log the CNF variable/clause capacities the size bound sees, so safe values for the two bounds above can be read off a real workload. | `1` to enable; default off |
 | `XLOG_CIRCUIT_CACHE_DIR` | Directory for the compiled-circuit disk cache. | path; default `$XDG_CACHE_HOME/xlog/circuits`, else `$HOME/.cache/xlog/circuits` |
 | `XLOG_CIRCUIT_CACHE_MAX_MB` | Disk-cache size limit; oldest entries are evicted beyond it. | integer MiB; default `512` |
 

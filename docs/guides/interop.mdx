@@ -4,23 +4,27 @@ description: "Move relation columns between XLOG and the GPU tensor ecosystem �
 ---
 
 XLOG's query results and input relations are columnar tensors that live in device
-memory. To use them from PyTorch, JAX, cuDF, or any other GPU framework, you need an
-interchange format — and the format you pick decides whether the data stays on the GPU
-or takes a detour through host memory. XLOG's CUDA backend (`crates/xlog-cuda`) offers
-three: DLPack, the Arrow C Device interface, and Arrow IPC. Two are zero-copy; the
-third is not.
+memory. To use them from PyTorch, JAX, cuDF, or another GPU framework, you need an
+interchange format. DLPack query-result handoff and transient evaluation input are
+zero-copy. Persistent session replacement is deliberately different: it makes one
+device-to-device copy into session-owned storage. Neither path uses host row data.
+XLOG's CUDA backend (`crates/xlog-cuda`) also offers the Arrow C Device interface and
+host-serialized Arrow IPC.
 
 ## Zero-copy versus copy at a glance
 
 The distinction is the whole point of this page. A **zero-copy** path hands the
 consumer a pointer to the same device buffer XLOG already holds — no bytes move. A
-**copy** path serializes the buffer to host memory and back, so a downstream GPU
-computation pays a device-to-host-to-device round trip before it can start.
+**copy** path moves bytes into a different allocation. Persistent DLPack ownership
+and retention copies stay on the GPU; Arrow IPC instead serializes through host
+memory and pays a device-to-host-to-device round trip for GPU-to-GPU interchange.
 
 | Path | Direction | Data movement | Status |
 |---|---|---|---|
-| DLPack (per column) | Export and transient import | Zero-copy, stays on GPU | Stable |
-| DLPack (per column) | Persistent session replacement | Device-to-device ownership snapshot | Stable |
+| DLPack query results (per column) | Export | Zero-copy handoff, stays on GPU | Stable |
+| DLPack transient evaluation input (per column) | Import | Zero-copy, stays on GPU | Stable |
+| DLPack persistent session replacement | Import | One device-to-device ownership snapshot; no host copy | Stable |
+| DLPack persistent stored-relation export | Export | One device-to-device retention copy, then a zero-copy capsule handoff; no host copy | Stable |
 | Arrow C Device interface | Export | Zero-copy, stays on GPU | Stable |
 | Arrow C Device interface | Import | Zero-copy, stays on GPU | Experimental, feature-gated |
 | Arrow IPC stream | Export and import | Host copy — GPU to host, host to GPU | Stable |
@@ -33,7 +37,7 @@ needs host-side Arrow (a `pyarrow.Table`, a file on disk); reach for the C Devic
 interface or DLPack when the data must stay on the GPU.
 </Note>
 
-## DLPack — the default zero-copy path
+## DLPack — zero-copy handoff and owned persistence
 
 DLPack is the most direct way to share a column with a tensor framework. XLOG exports
 each relation column as a contiguous 1-D device tensor and consumes DLPack tensors the
@@ -89,17 +93,20 @@ device-to-device snapshot after DLPack import. The session must own stable rows:
 a producer tensor remains usable under the DLPack sharing contract, so retaining
 its pointer would let later in-place writes bypass relation versions, callbacks,
 and evidence validation. Transient `evaluate(dlpack_inputs=...)` inputs remain
-zero-copy.
+zero-copy, as does wrapping a query-result capsule in the consumer framework.
+Exporting a stored persistent relation first leaves a device-to-device clone in
+the session so it can transfer ownership of the exported buffer; consuming the
+returned capsule itself adds no further copy.
 
-When given a tensor-like object, XLOG calls `__dlpack_device__()` before export.
-Only CUDA device memory (`kDLCUDA`) is accepted; another device raises
-`BufferError` without requesting or consuming a capsule. XLOG requests a CUDA
-capsule with consumer stream `1`, the legacy default stream, so pending producer
-work completes before XLOG reads it. A raw capsule bypasses device discovery and
-cannot perform that handshake: create it for stream `1` or synchronize its
-producer before passing it to XLOG. The native importer still validates its
-device header. Capsules exported by XLOG are already ready for this consumer
-stream.
+For each tensor-like input, XLOG calls `__dlpack_device__()` exactly once. Only
+CUDA device memory (`kDLCUDA`) is accepted; another device raises `BufferError`
+before any capsule request. XLOG then calls `__dlpack__(stream=1)` exactly once,
+using the legacy default stream so pending producer work completes before XLOG
+reads it. If that call fails, XLOG propagates the exception without retrying.
+A raw capsule bypasses both calls and cannot perform the handshake: create it for
+stream `1` or synchronize its producer before passing it to XLOG. Raw capsules
+are single-consumer objects, and the native importer still validates the device
+header. Capsules exported by XLOG are already ready for this consumer stream.
 
 <Warning>
 DLPack columns are contiguous 1-D device buffers. A 2-D tensor, a non-contiguous view,
@@ -141,8 +148,11 @@ snapshot = target.put_relation_from_manifest(
 import. Invalid role, whole-fact provenance, insert-evidence, or manifest input raises
 `pyxlog.RelationMetadataError`, a `ValueError` subclass. `relation(name)` and
 `evidence(name)` raise `KeyError` for an unstored relation, while
-`export_relation_with_provenance(name)` raises `ValueError`. These types and operations
-require the bundled `pyxlog._native` extension.
+`export_relation_with_provenance(name)` raises `ValueError`. Without `pyxlog._native`,
+both package-level type names remain importable: the fallback metadata error subclasses
+`ValueError`, and constructing fallback `RelationEvidence` raises `RuntimeError`.
+Native instances and session operations require the extension. Source builds with the
+extension expose this API; packaged availability is determined by release notes.
 
 The manifest has a strict, versioned shape:
 
@@ -189,12 +199,23 @@ The manifest has a strict, versioned shape:
 }
 ```
 
-All displayed fields are required, and every dictionary rejects unknown fields. A
-metadata-free manifest sets `metadata_present` to `False` and uses empty `roles` and
-`facts`. Manifest facts use exact little-endian cell bytes instead of friendly Python
-tuples, so floating-point NaN payloads and signed zero survive reconstruction. Import
-checks the predicate name, arity, compiled schema fingerprint, DLPack column contract,
-row count, and complete-fact membership before replacing the target relation.
+All displayed fields are required, and every dictionary rejects unknown fields.
+`metadata_present` must be a Python `bool`; when false, `roles` and `facts` are empty and
+the import resets any positional role contract. Each exact cell has only `type` and
+`hex`: the type matches the compiled column, the lowercase hex has exactly the scalar's
+byte width, and a boolean is `00` or `01`. A non-null span has only non-negative integer
+`start` and `end` values (not booleans), both representable as `u64`, with
+`start <= end`. Nullary relations reject both provenance-manifest import and export.
+Import checks the predicate name, arity,
+compiled schema fingerprint, fact identities, DLPack column contract, row count, and
+complete-fact membership before replacing the target relation.
+
+The schema fingerprint is a domain-separated SHA-256 digest of the predicate name and
+arity plus each compiled argument's ordered name, scalar type, and optional source-domain
+alias. Each fact identity separately hashes the predicate name and arity plus every
+ordered cell's scalar type, byte length, and exact little-endian bytes. It is independent
+of row position, role labels, and provenance records, and import recomputes it rather
+than trusting the manifest string.
 
 Fact order, record order, repeated fact entries, and exact duplicate records are
 normalized deterministically. Different records attached to the same complete tuple are

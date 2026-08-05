@@ -1,4 +1,4 @@
-<!-- xlog diagram: factorized execution (dark). Source: architecture/factorized-execution.mdx. Materialized binary chain blows up intermediates; factorized routes compute the same answer from a compact per-key representation. Main-only (unreleased beyond 0.9.2). -->
+<!-- xlog diagram: factorized execution (dark). Source: architecture/factorized-execution.mdx. Materialized binary chain blows up intermediates; factorized routes compute the same answer from a compact per-key representation. Available in releases beginning with 0.10.0. -->
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 300" font-family="Inter, system-ui, sans-serif">
   <rect width="900" height="300" fill="#0E0E16"/>
   <defs>

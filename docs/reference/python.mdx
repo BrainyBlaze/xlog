@@ -3,11 +3,11 @@ title: "Python API (pyxlog)"
 description: "Reference for the pyxlog Python bindings: deterministic and probabilistic program APIs, DLPack interop, neural-symbolic training, and ILP rule learning."
 ---
 
-`pyxlog` lets you compile and run XLOG programs from Python and hand GPU tensors
-back and forth with PyTorch, CuPy, JAX, and TensorFlow without copying them. It is
-built with PyO3 (a framework for exposing Rust code to Python) and moves GPU
-tensors across the boundary using DLPack (a framework-neutral standard for sharing
-a tensor's device memory without a copy).
+`pyxlog` lets you compile and run XLOG programs from Python and exchange CUDA
+tensors with PyTorch, CuPy, JAX, and TensorFlow through DLPack. Transient inputs
+and query-result handoffs share device allocations; persistent relation imports
+and stored-relation exports make device-to-device ownership copies so session
+state cannot be mutated through an external tensor.
 
 <Note>
 Always `import pyxlog`, never `pyxlog._native`. The package has two layers: a native
@@ -30,11 +30,12 @@ The `pyxlog` Python module provides:
 - Reusable diagnostics for downstream applications ("external consumers"):
   learned-rule inventories, audits of the tight GPU inner loop ("hot loop"), and
   grouped transfer metrics
-- Zero-copy GPU tensor exchange via DLPack (the primary interop boundary)
+- DLPack GPU tensor exchange, with zero-copy transient inputs and query-result
+  handoffs plus owned persistent relation storage
 - Optional, experimental Apache Arrow C Device interop (enabled by a build feature)
 - Runtime introspection surfaces ("living-world diagnostics"): rule provenance,
   proof traces, incremental relation-change ("delta") debugging, temporal relation
-  metadata, and neural hot-loop audits
+  metadata, native whole-fact relation evidence, and neural hot-loop audits
 
 Convenience outputs that must be read on the host CPU (probabilities, gradients,
 confidence intervals) are behind a `host-io` Cargo build feature. Keeping them
@@ -44,7 +45,7 @@ surfaces, see [Living-World Diagnostics](/guides/diagnostics).
 
 ## Installation
 
-For the latest published release:
+To install a published wheel:
 
 ```bash
 pip install pyxlog
@@ -61,11 +62,12 @@ export XLOG_CUBIN_DIR=/path/to/xlog/crates/pyxlog/python/pyxlog/kernels
 python your_probe.py
 ```
 
-This matters most for `pipeline_run`-style execution on saved
-artifacts: cold starts without `XLOG_CUBIN_DIR` can fail if the active install
-does not contain `pyxlog/kernels/`.
+This matters most for cold-start execution on saved inputs: without
+`XLOG_CUBIN_DIR`, startup can fail if the active install does not contain
+`pyxlog/kernels/`.
 
-For unreleased `main` branch features or local development:
+For local development or an API present in this checkout but absent from the
+selected wheel:
 
 ```bash
 python scripts/install_pyxlog_for_python.py --python /usr/local/bin/python --user
@@ -402,47 +404,74 @@ Each role input requires `name`; optional `sort` and `type` fields, when present
 must match the compiled schema. Returned snapshots resolve all three fields.
 Source-named predicate arguments require their compiled names. Positional
 arguments accept application-defined role names on the first metadata-bearing
-load, then enforce that role contract on later replacements and manifest imports.
+load, then enforce that role contract on later metadata-bearing replacements and
+manifest imports. A plain `put_relation`, a manifest import with
+`metadata_present=False`, `remove_relation`, or `clear_relations` removes that
+positional role contract. A later metadata-bearing load may then register new
+positional names. Source-named arguments always remain bound to their compiled
+names.
 
 A fact supplies exactly one of `tuple` or `cells`. `tuple` is the convenient
 Python representation. `cells` is a sequence of exact
 `{"type": ..., "hex": ...}` values for bit-preserving values such as NaNs and
 signed zero. Provenance records may contain `source`, `document`, `span`,
 `content_hash`, `kind`, and `polarity`; at least one field must be non-null. Two
-different records for the same complete tuple remain distinct. Repeated fact
-entries are merged by exact typed tuple, exact duplicate records are collapsed,
-and facts and records are returned in deterministic canonical order.
+different records for the same complete tuple remain distinct. Replacement rows
+retain their stored multiplicity, so `row_count` includes duplicate rows. Evidence
+is keyed by the distinct complete typed tuple rather than by row offset: duplicate
+stored rows share one fact entry, repeated fact entries merge their records, exact
+duplicate records collapse, and facts and records are returned in deterministic
+canonical order.
 
 Evidence follows the native relation lifecycle atomically:
 
 - `put_relation_with_provenance` replaces both rows and evidence;
-- plain `put_relation` replaces the rows and clears old evidence;
+- plain `put_relation` replaces the rows and clears old evidence and any
+  positional role contract;
 - `insert_relation(..., facts=...)` and
   `apply_relation_delta(..., insert_facts=...)` add evidence for inserted facts;
 - batch and debug updates accept `insert_facts` in each update dictionary;
 - deleting a complete fact deletes its evidence, and coalesced or canceled batch
   updates cannot leave stale evidence; and
-- `remove_relation` and `clear_relations` remove the matching evidence.
+- metadata-free manifest replacement, `remove_relation`, and `clear_relations`
+  remove the matching evidence and positional role contract.
+
+Insert evidence has stricter preconditions than a metadata-free insert. `facts`
+or `insert_facts` requires insert columns for the same update, a positive-arity
+relation, and a role contract previously registered by a metadata-bearing
+replacement or manifest import. Every annotated fact must occur in that specific
+insert buffer; being present only in the session's existing rows is not enough.
+Passing an empty `facts=[]` or `insert_facts=[]` still opts into these contract
+checks, although it performs no membership-mask transfer. Duplicate or already
+stored inserted rows may add distinct provenance records when the annotated fact
+is present in the insert buffer.
 
 All role, type, arity, evidence-tuple membership, and batch validation completes
 before mutation. A validation or pre-commit preparation failure leaves relation
 rows, evidence, delta statistics, callback generations, and callbacks unchanged.
-Nullary relations do not accept relation provenance.
+Nullary relations support plain `put_relation`, metadata-free inserts, deletes,
+deltas, evaluation, `relation`, and `evidence`. They reject
+`put_relation_with_provenance`, every `put_relation_from_manifest` and
+`export_relation_with_provenance` call, and any insert, combined delta, batch, or
+debug update that supplies `facts` or `insert_facts` (including an empty list).
 
 Persistent replacement methods take a device-to-device snapshot of imported
 DLPack columns before committing them. Mutating a retained producer tensor after
 `put_relation`, `put_relation_with_provenance`, or
 `put_relation_from_manifest` therefore cannot change stored rows behind the
-session's versions, callbacks, or evidence. Transient evaluation inputs remain
-zero-copy.
+session's versions, callbacks, or evidence. This is an owned GPU snapshot, not a
+zero-copy persistent import. Transient `evaluate(dlpack_inputs=...)` inputs and
+the handoff of query-result buffers to a DLPack consumer remain zero-copy.
 
-For tensor-like inputs, XLOG first calls `__dlpack_device__()`. Only CUDA device
-memory (`kDLCUDA`) is accepted; another device raises `BufferError` before XLOG
-requests or consumes a capsule. XLOG then calls `__dlpack__(stream=1)` so the
-CUDA producer orders pending work before consumption on the legacy default
-stream. Raw capsules bypass device discovery: callers must create them for
-stream `1` or synchronize their producer first, and the native importer still
-validates the capsule's device header.
+For each tensor-like input, XLOG calls `__dlpack_device__()` exactly once. Only
+CUDA device memory (`kDLCUDA`) is accepted; another device raises `BufferError`
+before XLOG requests or consumes a capsule. XLOG then calls
+`__dlpack__(stream=1)` exactly once so the CUDA producer orders pending work
+before consumption on the legacy default stream. If the producer rejects that
+stream argument, the exception propagates; XLOG does not retry without a stream.
+Raw capsules bypass both protocol calls. The caller must create each capsule for
+stream `1` or synchronize its producer first, and must pass it to only one
+consumer. The native importer still validates the capsule's device header.
 
 Membership is checked as complete tuples on the GPU. For a non-empty evidence
 set, the runtime downloads one boolean membership mask in a single transfer—one
@@ -452,14 +481,26 @@ metadata-free manifests need no membership transfer. Use
 transfer; `deterministic_d2h_violation_count()` reports rejected attempts, and a
 rejection is atomic.
 
-`relation(name)` returns a native `RelationEvidence` snapshot.
-`evidence(name=None)` returns a deterministic `program_hash` and a `relations`
-mapping of native snapshots. These are not Python package sidecar records.
+`relation(name)` returns a frozen native `RelationEvidence` captured at that
+call. Later session changes do not alter it, and each `provenance()` call returns
+fresh Python dictionaries and lists whose mutation cannot change the captured
+snapshot. `evidence(name=None)` returns a deterministic `program_hash` and a
+`relations` mapping of packed snapshot dictionaries. With `evidence(name)`, XLOG
+still computes `program_hash` over every stored relation in the session and only
+then filters the returned `relations` mapping to `name`; named and unfiltered
+reads therefore share the same hash at the same session state. These are native
+session snapshots, not Python package sidecar records.
+
 Invalid role, whole-fact provenance, insert-evidence, or manifest input raises
 `pyxlog.RelationMetadataError`, a `ValueError` subclass. Looking up an unstored
-relation with `relation(name)` or `evidence(name)` raises `KeyError`. These
-native-backed types and operations require the bundled `pyxlog._native`
-extension.
+relation with `relation(name)` or `evidence(name)` raises `KeyError`. Without
+`pyxlog._native`, the package-level `RelationMetadataError` and
+`RelationEvidence` names remain importable. The fallback metadata error still
+subclasses `ValueError`; constructing the fallback `RelationEvidence` raises
+`RuntimeError` because it has no native snapshot. Native evidence instances and
+all session operations require the extension. Source builds that compile the
+extension expose this API; for a packaged build, determine availability from that
+release's notes.
 
 #### Provenance manifest round trips
 
@@ -482,9 +523,28 @@ required top-level fields are `format`, `version`, `predicate`, `row_count`,
 `metadata_present`, `roles`, and `facts`. `predicate` contains `name`, `arity`,
 and the compiled `schema_sha256`. Manifest facts contain `identity`, exact
 `cells`, and fixed-shape `provenance` records; they intentionally omit the
-friendly `tuple`. Each cell's `hex` value encodes the scalar's exact
-little-endian bytes. Every dictionary level rejects missing or unknown fields.
-If `metadata_present` is false, both `roles` and `facts` must be empty.
+friendly `tuple`. Every dictionary level rejects missing or unknown fields.
+`version`, `arity`, and `row_count` must be non-negative Python integers, not
+booleans, and `metadata_present` must be an actual Python `bool`. If it is false,
+both `roles` and `facts` must be empty and importing the manifest resets any
+registered positional role contract.
+
+Each exact cell contains only `type` and `hex`. Its type must match the compiled
+column, and its lowercase hexadecimal value must encode exactly that scalar
+type's little-endian byte width; a boolean cell is exactly `00` or `01`. Manifest
+provenance records contain all six fields (`source`, `document`, `span`,
+`content_hash`, `kind`, and `polarity`), using `None` for absent values. A
+non-null span contains exactly `start` and `end`; both are non-negative Python
+integers rather than booleans, both must be representable as `u64`, and
+`start <= end`.
+
+The schema fingerprint includes the predicate name and arity plus every compiled
+column's name, scalar type, and optional source-domain sort. A fact identity
+includes the predicate name and arity plus each cell's type code, byte length,
+and exact bytes; it does not include provenance records. Both hashes use
+domain-separated SHA-256 inputs. Fact identity is independent of row position
+and role labels, and import recomputes both hashes instead of trusting the
+supplied strings.
 
 Import validates static manifest structure, compiled schema identity, and column
 count before consuming a DLPack capsule. Once column import starts, all supplied
@@ -503,14 +563,17 @@ operation.
 #### Migrating from Python-side relation evidence
 
 The native API replaces the earlier Python helper contract. The old
-`relation_schema`, source/output hash, row-hash, and decision-count keyword
-arguments are not accepted by `put_relation_with_provenance`. Pass ordered
-`roles` and complete `facts` instead; attach source, document, content hash,
-kind, and polarity to each fact's provenance records. Aggregate acceptance,
-rejection, and output counters remain application-level data rather than native
-whole-fact evidence. The returned snapshot and `evidence()` payload now contain
-native roles and facts, and unknown named reads now raise `KeyError` instead of
-returning an empty sidecar record.
+`relation_schema`, `source_path`, `source_hash`, `row_hashes`, `field_hashes`,
+`accepted_count`, `rejected_count`, `output_path`, `output_hash`, and
+`decision_counts` keyword arguments are not accepted by
+`put_relation_with_provenance`. Pass ordered `roles` and complete `facts`
+instead. A per-fact source location can map to a record's `source` or `document`,
+and a per-fact source digest can map to `content_hash`; XLOG derives exact fact
+identities from the typed cells. Row/field hash collections, output locations and
+hashes, and aggregate acceptance, rejection, and decision counters remain
+application-level data rather than native whole-fact evidence. The returned
+snapshot and `evidence()` payload contain native roles and facts, and unknown
+named reads raise `KeyError` instead of returning an empty sidecar record.
 
 #### Runtime controls and diagnostics
 
@@ -1060,10 +1123,9 @@ pass. The Python reference can be used for parity checks with
 at its default preserves legacy prototype behavior and is not semantically
 equivalent to native scoring.
 
-Current type policy is intentionally narrow: exact induction supports
-`u64` pair relations. `U32` and `Symbol` exact-induction dispatch are deferred
-until a downstream consumer requires them. Generated `ilp_exact.portable.ptx`
-and `.cubin` files are packaged build artifacts, not checked-in source files.
+Exact induction accepts pair relations whose two columns share one of these
+scalar types: `u64`, `u32`, or `symbol`. Generated `ilp_exact.portable.ptx` and
+`.cubin` files are packaged build artifacts, not checked-in source files.
 
 ### Sparse Mask APIs
 
@@ -1102,15 +1164,20 @@ For Python consumers that need an auditable GPU-native ILP inner loop, the inten
 
 ---
 
-## DLPack Integration
+## DLPack integration
 
-All GPU data is exchanged via DLPack capsules, enabling zero-copy interop with:
+XLOG accepts CUDA-backed DLPack producer objects and returns single-consumer
+capsules. Transient input imports and framework wrapping of query-result capsules
+are zero-copy. Persistent relation replacement takes an owned device-to-device
+snapshot, and stored-relation export leaves a device-to-device clone in the
+session before transferring the exported allocation. Compatible CUDA-backed
+producers include:
 
 - PyTorch
 - CuPy
 - JAX
 - TensorFlow
-- Any DLPack-compatible library
+- Any CUDA-backed DLPack-compatible library
 
 ### Input via DLPack
 
@@ -1266,10 +1333,15 @@ except RuntimeError as e:
 
 ## Memory Management
 
-- DLPack capsules own their GPU memory
-- Memory is freed when the capsule is garbage collected
-- Converting to PyTorch/CuPy shares memory (no copy)
-- Explicit cleanup: `del capsule`
+- An unconsumed output capsule owns its exported GPU buffer and releases it when
+  garbage collected.
+- A framework conversion such as `torch.from_dlpack(capsule)` consumes that
+  capsule exactly once and takes over its managed-tensor ownership.
+- Passing a CUDA tensor object lets XLOG request a fresh capsule through the
+  producer protocol. Do not manufacture or reuse raw input capsules unless you
+  also satisfy the stream-ordering and single-consumer contract.
+- Persistent relation replacement and stored-relation export use owned
+  device-to-device copies rather than mutable views of session storage.
 
 ## Thread Safety
 
@@ -1319,25 +1391,27 @@ print(float(loss.item()))
 ```python
 # Process multiple inputs
 for batch in data_loader:
-    edge_tensor = batch['edges'].cuda()
+    edge_rows = batch["edges"].to(device="cuda")
+    edge_src = edge_rows[:, 0].contiguous()
+    edge_dst = edge_rows[:, 1].contiguous()
     results = program.evaluate(dlpack_inputs={
-        'edge': edge_tensor.__dlpack__()
+        "edge": [edge_src, edge_dst],
     })
     # Process results...
 ```
 
 ## Limitations
 
-Current limitations:
 - Linux x86_64 + CUDA only
-- Published PyPI wheels follow tagged releases and may lag the current `main` branch workspace version
-- Async evaluation, per-call memory APIs, and diagnostics APIs require this
-  workspace build until the next tagged wheel publishes those surfaces
+- Source builds that compile the PyO3 extension expose the documented native
+  API. For prebuilt packages, use the release notes for that package version to
+  determine which surfaces it contains.
 - Pure-Python helper modules can import without `pyxlog._native`, but
-  native-backed compile/evaluate APIs still require the PyO3 extension.
-  `RelationEvidence` and `RelationMetadataError` remain importable for
-  annotations and exception handling in source-only mode; evidence objects
-  cannot be constructed there because their state is native-owned.
+  native-backed compile, evaluate, and session APIs still require the extension.
+  `RelationEvidence` and `RelationMetadataError` remain importable for annotations
+  and exception handling in source-only mode. The fallback
+  `RelationMetadataError` is a `ValueError` subclass, while constructing fallback
+  `RelationEvidence` raises `RuntimeError` because its state is native-owned.
 
 ## See Also
 

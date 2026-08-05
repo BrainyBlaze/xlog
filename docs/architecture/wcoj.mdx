@@ -29,9 +29,8 @@ Two properties are worth stating up front:
 
 ## Route families
 
-XLOG has a family of WCOJ routes. The right-hand column marks where each is
-available: the `0.9.2` release line, or `main` only (built but not yet in a
-release beyond `0.9.2`).
+XLOG has a family of WCOJ routes. The right-hand column records the release line
+where each route first became available.
 
 A few terms used in the table below: RIR is XLOG's *relational intermediate
 representation* — the internal form a rule body is lowered into before execution.
@@ -43,12 +42,12 @@ per-route ordering hints the clique kernel needs.
 
 | Route | Availability | What it does |
 | --- | --- | --- |
-| Triangle WCOJ | Released in the 0.9.2 line | Dedicated route for recognized triangle bodies over supported key widths. |
-| 4-cycle WCOJ | Released in the 0.9.2 line | Dedicated route for recognized 4-cycle bodies. |
-| K-clique WCOJ | Released in the 0.9.2 line | Planned clique routes with variable-order metadata and helper-split support. |
-| Aggregate-fused WCOJ | On main, unreleased beyond 0.9.2 | Computes selected grouped aggregates without materializing the full join output. |
-| Free Join | On main, unreleased beyond 0.9.2 | Generalized GPU multiway route for eligible bodies that do not match a dedicated shape. |
-| Factorized recursive deltas | On main, unreleased beyond 0.9.2 | Computes novel recursive tuples without materializing witness-multiplied delta joins. |
+| Triangle WCOJ | Available since 0.6.2 | Dedicated route for recognized triangle bodies over supported key widths. |
+| 4-cycle WCOJ | Available since 0.7.0 | Dedicated route for recognized 4-cycle bodies. |
+| K-clique WCOJ | Available since 0.7.0 | Dedicated clique routes with variable-order metadata and helper-split support. |
+| Aggregate-fused WCOJ | Available since 0.10.0 | Computes selected grouped aggregates without materializing the full join output. |
+| Free Join | Available since 0.10.0 | Generalized GPU multiway route for eligible bodies that do not match a dedicated shape. |
+| Factorized recursive deltas | Available since 0.10.0 | Computes novel recursive tuples without materializing witness-multiplied delta joins. |
 
 ## Planning pipeline
 
@@ -79,8 +78,8 @@ The counters are:
 - triangle, 4-cycle, and clique WCOJ dispatch counts;
 - WCOJ error-decline count;
 - aggregate-fused groupby dispatch count;
-- Free Join dispatch count (on main);
-- factorized recursive-delta dispatch count (on main).
+- Free Join dispatch count;
+- factorized recursive-delta dispatch count.
 
 Pair the counters with a kill-switch parity check. Toggle a route's kill switch
 and rerun: if only which route fired changed and the result did not, that route is
@@ -89,7 +88,7 @@ preserving semantics for that workload.
 ## Aggregate fusion
 
 Aggregate fusion computes grouped aggregates without first building the joined
-table. It is a `main`-only route, unreleased beyond `0.9.2`.
+table. It has been available since 0.10.0.
 
 Ordinarily XLOG would materialize every joined tuple and then group them. Instead,
 this route reduces by a root variable directly inside the kernel, skipping that
@@ -103,7 +102,7 @@ that path would have returned.
 ## Free Join
 
 Free Join is the general multiway route for bodies that do not match a dedicated
-triangle or 4-cycle kernel. It is a `main`-only route, unreleased beyond `0.9.2`.
+triangle or 4-cycle kernel. It has been available since 0.10.0.
 
 Instead of a shape-specific kernel, it uses a frontier-based GPU algorithm that
 handles a broader set of multiway bodies.
@@ -117,8 +116,8 @@ dedicated; Free Join is the fallback general route for everything else.
 
 ## Factorized recursive deltas
 
-This route speeds up recursive rules shaped like transitive closure. It is
-`main`-only, unreleased beyond `0.9.2`.
+This route speeds up recursive rules shaped like transitive closure. It has been
+available since 0.10.0.
 
 In such rules, each iteration's *delta step* computes newly derived tuples. The
 factorized route computes those novel tuples grouped by root, rather than
@@ -138,8 +137,7 @@ recursive evaluation path.
 
 - WCOJ is not a universal join engine. It is a set of routes for specific
   multiway shapes; everything else runs on the ordinary path.
-- Free Join and factorized recursive deltas are `main`-only. They are not part of
-  the `0.9.2` release.
+- Free Join and factorized recursive deltas have been available since 0.10.0.
 - Result equality does not imply an optimized route ran. Use the dispatch counters
   above to confirm.
 - A fallback is not a failure. When a route's gate declines cleanly, that is the
@@ -149,4 +147,4 @@ recursive evaluation path.
 
 - [Factorized Execution](/architecture/factorized-execution) — the user guide.
 - [Factorized Execution Internals](/architecture/factorized-execution-internals) —
-  `main`-only implementation details.
+  implementation details for the factorized routes.

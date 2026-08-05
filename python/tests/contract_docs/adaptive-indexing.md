@@ -1,6 +1,6 @@
 # Adaptive Indexing Architecture
 
-> **Implementation status (current as of v0.9.2; shipped in v0.8.6):** statistics gathering and the persistent
+> **Implementation status (available since v0.8.6):** statistics gathering and the persistent
 > build-side hash index manager are implemented. `Executor` reuses the existing
 > join-index cache across repeated session evaluations, keyed by relation ID,
 > relation generation, schema signature, key columns, and CUDA device ordinal.
@@ -13,7 +13,7 @@ budget allows it.
 
 ## Components
 
-### 1. StatsManager (Current)
+### 1. StatsManager
 - Tracks per-relation heat + cardinality/bytes
 - Caches join selectivities + observed join keys
 - Location: `crates/xlog-stats`
@@ -21,8 +21,10 @@ budget allows it.
 ### 2. JoinStrategy
 - Selects optimal join algorithm
 - Options: Hash, NestedLoop, SortMerge, IndexNestedLoop
-- Current runtime dispatch remains Hash-join oriented; the broader strategy
-  space is future work.
+- The executor routes eligible small, single-key `u32` and `symbol` inner joins
+  through its nested-loop path. Other executor joins remain hash-oriented,
+  including persistent-index reuse. The provider also implements sort-merge for
+  the embedded binary path, but the general executor does not select it.
 
 ### 3. Executor Integration
 
@@ -33,7 +35,7 @@ budget allows it.
   stale rejections, and background-build mode request/completion/deferred
   counters
 
-See: `crates/xlog-runtime/src/executor.rs`
+See: `crates/xlog-runtime/src/executor/`
 
 ## Persistent Hash Index Manager
 
@@ -89,7 +91,8 @@ fn maybe_build_index(&mut self, relation: RelId, right: &CudaBuffer, keys: &[usi
 
 ## Future Work
 
-1. Implement NestedLoop and SortMerge joins
-2. Add a dedicated timing fixture if v0.8.6 needs a >=1.5x persistent-index
-   speedup claim rather than the current observed-reuse claim.
+1. Extend cost-based executor selection beyond the certified small-key
+   nested-loop route, and select sort-merge where measurements justify it.
+2. Add dedicated timing coverage before making a persistent-index speedup claim
+   beyond observed reuse.
 3. Integrate statistics into fixpoint loop (recursive SCCs)

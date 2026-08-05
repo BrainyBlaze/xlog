@@ -35,10 +35,11 @@ want the engine to find the clause that explains them, rather than writing it by
 hand.
 
 <Note>
-This whole surface — neural predicates, differentiable ILP, and exact induction —
-ships only through the `pyxlog` PyPI wheel, which tracks the `v0.10.0` release. It
-is a Python-first API. The crates published on crates.io do not expose it, so
-install `pyxlog` to use anything on this page.
+Neural predicates, differentiable ILP, and exact induction are distributed
+through the `pyxlog` PyPI wheel. The additions described under “New in the 0.10.0
+wheel” have been available since 0.10.0. This is a Python-first API; the crates
+published on crates.io do not expose it, so install `pyxlog` to use anything on
+this page.
 </Note>
 
 ## Neural predicates
@@ -256,9 +257,9 @@ plateau, so Adam is the practical default.
 
 ## New in the 0.10.0 wheel
 
-These extend the neural-symbolic surface and ship in the `pyxlog` 0.10.0 wheel.
+These additions have been available in `pyxlog` since 0.10.0.
 
-- **Existential-join trainable bodies (Stage B).** A trainable body may join a
+- **Existential-join trainable bodies.** A trainable body may join a
   neural predicate to an ordinary relation on a variable that is not in the head. The
   neural predicate is grounded over the real join domain inside the circuit, then
   combined at the head with a logical OR. Per-event features arrive through a
@@ -287,7 +288,7 @@ These extend the neural-symbolic surface and ship in the `pyxlog` 0.10.0 wheel.
 <Note>
 The higher-level neuro-symbolic driver
 (`pyxlog.ilp.neurosymbolic.train_neurosymbolic_program`, with declarative
-`trainable_rule(...)` / `train(...)` in-source) is where the Stage-B `domain_inputs=`
+`trainable_rule(...)` / `train(...)` in-source) is where the existential-join `domain_inputs=`
 channel is exposed.
 </Note>
 

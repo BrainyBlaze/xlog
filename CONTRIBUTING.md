@@ -55,11 +55,25 @@ Recommended checks when your change affects examples, docs that reference comman
 python scripts/validate_examples.py --mode ci
 ```
 
-Required on a supported CUDA machine when your change affects GPU behavior, CUDA kernels, or release validation:
+Required on a supported CUDA machine when your change affects CUDA kernels or
+low-level GPU execution:
 
 ```bash
 cargo test -p xlog-cuda-tests --test certification_suite --release
 ```
+
+When your change affects `pyxlog`, persistent relations, DLPack ownership or
+stream ordering, Python packaging, or the release path, run the complete release
+validator instead:
+
+```bash
+bash scripts/validate_release_gpu.sh --mode release
+```
+
+That validator builds the distributable artifacts, installs the exact wheel it
+produced, runs the native relation and callback suites with CUDA required, and
+then runs the CUDA certification suite. The focused certification command is not
+a substitute for this package-level gate.
 
 If you build `pyxlog` wheels or run ad-hoc Python probes against saved artifacts, keep the kernel
 path explicit. The packaged wheel should ship `pyxlog/kernels/`, but source-tree and probe

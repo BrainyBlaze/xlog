@@ -9,13 +9,14 @@ and use XLOG, you do not need this page.
 </Note>
 
 This page explains how a release is built, validated, and published. It covers
-release mechanics only, not promises about which features are available. Anything
-listed in `CHANGELOG.md` under `[Unreleased]` lives on `main` and is not in any
-shipped release artifact yet.
+release mechanics only, not promises about which features are available.
+`CHANGELOG.md` records which release first contains a change; entries under
+`[Unreleased]` describe source-tree work that has not entered a tagged artifact.
 
 XLOG uses a split release model. GitHub Actions check source hygiene and package
-metadata automatically. The heavier CUDA validation is run by hand on a real GPU
-host before anything is published.
+metadata automatically, and a targeted workflow can exercise trusted commits on
+a self-hosted CUDA runner. A maintainer still runs the complete CUDA release gate
+on a real GPU host before publication.
 
 ## Published Artifacts
 
@@ -27,7 +28,9 @@ Public releases target:
 - `pyxlog` Python wheels;
 - GitHub release CLI archives for `xlog`.
 
-The workspace version is currently `0.9.2`.
+Release tooling reads package versions from the workspace manifests. Do not copy
+that value into documentation: use the changelog and tagged release metadata as
+the authoritative record.
 
 ## Rust Package Boundary
 
@@ -87,11 +90,13 @@ Before publication a maintainer runs the validation script on a real GPU host:
 scripts/validate_release_gpu.sh --mode release
 ```
 
-This script requires CUDA hardware. It sets `XLOG_REQUIRE_CUDA=1`, builds and
-installs the exact release wheel in an isolated environment, runs the native
-relation-provenance Python suites and CUDA certification suite, and checks that
-kernels are laid out correctly in the package. A green GitHub-hosted CI run does
-not satisfy this gate — only a passing complete GPU run does.
+This script requires CUDA hardware. It sets `XLOG_REQUIRE_CUDA=1`, builds the
+release artifacts, creates a fresh virtual environment with the host's site
+packages visible, and force-installs the exact wheel without resolving
+dependencies. It verifies the imported native module, runs the native relation
+provenance, contract, public-API, and callback suites, runs CUDA certification,
+and checks the packaged kernel layout. A green GitHub-hosted CI run does not
+satisfy this gate — only a passing complete GPU run does.
 
 ## Docs Deployment
 
@@ -111,42 +116,26 @@ The generated static HTML is never hand-edited in the source tree. To change the
 docs, edit the MDX in `docs/`, then let validation, export, and the workflow
 publish `docs-dist`.
 
-## Main-Only Feature Boundary
+## Source and package availability
 
-The features below are built and living on `main`, but they are unreleased beyond
-`0.9.2` — no shipped release artifact contains them yet. A short plain-language
-gloss follows each internal name:
+The documentation site follows the source tree, while crates, wheels, and CLI
+archives are immutable release artifacts. A documented API can therefore appear
+in a source build before every package index contains it. Check `CHANGELOG.md`
+or the selected artifact's release notes before depending on a newly documented
+surface. Feature pages use factual "available since" statements where a stable
+first release is known instead of maintaining a duplicate list on this page.
 
-- aggregate-fused WCOJ — worst-case-optimal join (a join strategy that avoids
-  large intermediate tables) fused with aggregation;
-- GPU Free Join and factorized count-by-root — Free Join is a generalized
-  multiway join executed on the GPU; count-by-root counts results grouped by a
-  root variable using a compact factorized representation;
-- factorized recursive deltas — incremental fixpoint updates that keep results in
-  that same compact factorized form;
-- factorized non-count aggregate folding — folding aggregates other than counting
-  into the factorized representation;
-- joint multi-rule mixtures — evaluating several rules together as one mixture;
-- Stage-B existential joins — joins that check whether a matching row exists
-  ("Stage B" is an internal phase label);
-- grouped forward/backward neural-symbolic training — training that mixes neural
-  and symbolic components, processed in grouped forward and backward passes;
-- batched multiway unions — same-head rule outputs merged in one chunked
-  multiway union per evaluation pass instead of one two-way union per rule
-  (chunk budget overridable via `XLOG_UNION_CHUNK_BYTES`);
-- ignored-pragma warnings — `warning[W0510]` emitted on stderr when a pragma is
-  declared in an imported module; pragmas apply only when declared in the entry
-  file.
-
-Because these are main-only, docs that mention them mark them with the main-only
-label until a release artifact ships that includes them.
+The source tree also implements chunked multiway unions for same-head rule
+outputs, with a byte budget controlled by `XLOG_UNION_CHUNK_BYTES`. Imported
+module pragmas produce `warning[W0510]` on stderr because pragmas apply only in
+the entry file. Check the selected artifact's release notes before depending on
+either behavior in a packaged build.
 
 ## Required Secrets
 
-Release workflows read repository secrets to publish to crates.io and PyPI, to
-automate GitHub releases, and to hold DigitalOcean deployment metadata. Store
-those secrets in GitHub Actions settings. Do not commit tokens or generated
-credentials to the repository.
+Release workflows read repository secrets to publish to crates.io and PyPI and
+to automate GitHub releases. Store those secrets in GitHub Actions settings. Do
+not commit tokens or generated credentials to the repository.
 
 ## Release Checklist
 
