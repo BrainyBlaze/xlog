@@ -23,14 +23,19 @@ def main() -> None:
     """.strip()
 
     prog = Program.compile(source, device=0, memory_mb=memory_mb)
+    # Negation is rejected by the GPU-resident MC engine, so a
+    # non-monotone program needs the explicit opt-in to run on the
+    # labeled CPU oracle; without it, evaluate() fails closed.
     result = prog.evaluate(
         return_grads=False,
         samples=samples,
         seed=123,
         confidence=0.95,
         max_nonmonotone_iterations=256,
+        allow_cpu_oracle=True,
     )
 
+    assert result.mc_engine == "cpu-oracle", result.mc_engine
     assert result.approx
     assert result.stderr is not None
     assert result.ci_low is not None
@@ -45,6 +50,7 @@ def main() -> None:
     print(
         f"samples={result.samples} evidence_samples={result.evidence_samples} seed={result.seed} confidence={result.confidence}"
     )
+    print("mc_engine:", result.mc_engine)
     print("nonmonotone_semantics:", result.nonmonotone_semantics)
 
     for atom, p, lp, se, lo, hi in zip(
