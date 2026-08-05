@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -457,11 +457,15 @@ impl LogicRelationSession {
         updates: &Bound<'_, PyAny>,
     ) -> PyResult<PyObject> {
         let parsed = self.parse_relation_delta_batch("apply_relation_delta_batch", updates)?;
-        let (batch, metadata_updates, relation_names, schemas, capture_cancellations) =
+        let (batch, metadata_updates, relation_names, schemas, cancellation_capture_relations) =
             split_parsed_relation_updates(&self.program, parsed)?;
         let prepared_batch = self
             .program
-            .prepare_relation_delta_batch(self.provider.as_ref(), batch, capture_cancellations)
+            .prepare_relation_delta_batch(
+                self.provider.as_ref(),
+                batch,
+                &cancellation_capture_relations,
+            )
             .map_err(types::xlog_err)?;
         let metadata_transition = self.relation_metadata.prepare_batch_transition(
             &self.provider,
@@ -495,13 +499,17 @@ impl LogicRelationSession {
         check_equivalence: bool,
     ) -> PyResult<PyObject> {
         let parsed = self.parse_relation_delta_batch("apply_relation_delta_debug", updates)?;
-        let (batch, metadata_updates, relation_names, schemas, capture_cancellations) =
+        let (batch, metadata_updates, relation_names, schemas, cancellation_capture_relations) =
             split_parsed_relation_updates(&self.program, parsed)?;
         let had_derived_state = self.evaluation_store.is_some() || self.session_runtime.is_some();
         let delta_start = Instant::now();
         let prepared_batch = self
             .program
-            .prepare_relation_delta_batch(self.provider.as_ref(), batch, capture_cancellations)
+            .prepare_relation_delta_batch(
+                self.provider.as_ref(),
+                batch,
+                &cancellation_capture_relations,
+            )
             .map_err(types::xlog_err)?;
         let coalesced_no_op = prepared_batch.net_deltas().is_empty();
         let metadata_transition = self.relation_metadata.prepare_batch_transition(
@@ -1140,19 +1148,22 @@ fn split_parsed_relation_updates(
     Vec<PreparedRelationMetadataUpdate>,
     Vec<String>,
     BTreeMap<String, xlog_core::Schema>,
-    bool,
+    BTreeSet<String>,
 )> {
     let mut batch = Vec::with_capacity(parsed.len());
     let mut metadata_updates = Vec::with_capacity(parsed.len());
     let mut relation_names = Vec::with_capacity(parsed.len());
     let mut schemas = BTreeMap::new();
-    let mut capture_cancellations = false;
+    let mut cancellation_capture_relations = BTreeSet::new();
 
     for update in parsed {
-        capture_cancellations |= update
+        if update
             .insert_evidence
             .as_ref()
-            .is_some_and(PreparedInsertEvidence::has_fact_keys);
+            .is_some_and(PreparedInsertEvidence::has_fact_keys)
+        {
+            cancellation_capture_relations.insert(update.name.clone());
+        }
         let schema = program.schema(&update.name).ok_or_else(|| {
             PyRuntimeError::new_err(format!(
                 "Relation '{}' schema disappeared while preparing its delta batch",
@@ -1175,7 +1186,7 @@ fn split_parsed_relation_updates(
         metadata_updates,
         relation_names,
         schemas,
-        capture_cancellations,
+        cancellation_capture_relations,
     ))
 }
 

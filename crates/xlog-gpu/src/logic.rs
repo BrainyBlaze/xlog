@@ -1064,17 +1064,18 @@ impl LogicProgram {
         )
     }
 
-    /// Coalesce an ordered batch on the device and optionally retain cancellation tuples.
+    /// Coalesce an ordered batch on the device and retain cancellation tuples
+    /// for selected relations.
     pub fn prepare_relation_delta_batch(
         &self,
         provider: &CudaKernelProvider,
         delta_batch: Vec<(String, RelationDelta)>,
-        capture_cancellations: bool,
+        cancellation_capture_relations: &BTreeSet<String>,
     ) -> Result<PreparedRelationDeltaBatch> {
         coalesce_relation_delta_batch_with_cancellation_capture(
             provider,
             delta_batch,
-            capture_cancellations,
+            cancellation_capture_relations,
         )
     }
 
@@ -1224,7 +1225,7 @@ impl LogicProgram {
         delta_batch: Vec<(String, RelationDelta)>,
     ) -> Result<LogicDeltaReport> {
         let prepared_batch =
-            self.prepare_relation_delta_batch(provider.as_ref(), delta_batch, false)?;
+            self.prepare_relation_delta_batch(provider.as_ref(), delta_batch, &BTreeSet::new())?;
         let mut session_runtime = None;
         let prepared = self.prepare_relation_delta_commit_with_session_runtime(
             provider,
@@ -1246,7 +1247,7 @@ impl LogicProgram {
         delta_batch: Vec<(String, RelationDelta)>,
     ) -> Result<LogicDeltaReport> {
         let prepared_batch =
-            self.prepare_relation_delta_batch(provider.as_ref(), delta_batch, false)?;
+            self.prepare_relation_delta_batch(provider.as_ref(), delta_batch, &BTreeSet::new())?;
         let prepared = self.prepare_relation_delta_commit_with_session_runtime(
             provider,
             relation_store,
@@ -2806,7 +2807,7 @@ fn buffers_gpu_set_equivalent(
 fn coalesce_relation_delta_batch_with_cancellation_capture(
     provider: &CudaKernelProvider,
     delta_batch: Vec<(String, RelationDelta)>,
-    capture_cancellations: bool,
+    cancellation_capture_relations: &BTreeSet<String>,
 ) -> Result<PreparedRelationDeltaBatch> {
     let input_delta_count = delta_batch.len();
     let mut pending_by_relation: HashMap<String, PendingRelationDelta> = HashMap::new();
@@ -2814,6 +2815,7 @@ fn coalesce_relation_delta_batch_with_cancellation_capture(
     let mut canceled_rows = 0u64;
 
     for (update_index, (name, delta)) in delta_batch.into_iter().enumerate() {
+        let capture_cancellations = cancellation_capture_relations.contains(&name);
         let cancellation_relation = capture_cancellations.then(|| name.clone());
         let mut update_cancellations = capture_cancellations.then(Vec::new);
         let pending = pending_by_relation.entry(name).or_default();
@@ -3704,11 +3706,40 @@ mod relation_delta_coalesce_tests {
     use xlog_core::{MemoryBudget, ScalarType};
     use xlog_cuda::{CudaDevice, GpuMemoryManager};
 
+    fn finish_test_provider_setup<T>(provider: Result<T>, require_cuda: bool) -> Option<T> {
+        match provider {
+            Ok(provider) => Some(provider),
+            Err(error) if require_cuda => {
+                panic!("XLOG_REQUIRE_CUDA=1 but CUDA provider construction failed: {error}")
+            }
+            Err(error) => {
+                eprintln!("Skipping test: no CUDA device available ({error})");
+                None
+            }
+        }
+    }
+
     fn test_provider() -> Option<Arc<CudaKernelProvider>> {
-        let device = Arc::new(CudaDevice::new(0).ok()?);
-        let budget = MemoryBudget::with_limit(1024 * 1024 * 1024);
-        let memory = Arc::new(GpuMemoryManager::new(device.clone(), budget));
-        Some(Arc::new(CudaKernelProvider::new(device, memory).ok()?))
+        let provider = (|| -> Result<Arc<CudaKernelProvider>> {
+            let device = Arc::new(CudaDevice::new(0)?);
+            let budget = MemoryBudget::with_limit(1024 * 1024 * 1024);
+            let memory = Arc::new(GpuMemoryManager::new(device.clone(), budget));
+            Ok(Arc::new(CudaKernelProvider::new(device, memory)?))
+        })();
+
+        finish_test_provider_setup(
+            provider,
+            std::env::var("XLOG_REQUIRE_CUDA").as_deref() == Ok("1"),
+        )
+    }
+
+    #[test]
+    #[should_panic(expected = "XLOG_REQUIRE_CUDA=1 but CUDA provider construction failed")]
+    fn required_cuda_provider_failure_is_not_silently_skipped() {
+        finish_test_provider_setup::<()>(
+            Err(XlogError::Execution("forced provider failure".to_string())),
+            true,
+        );
     }
 
     fn test_buffer(provider: &CudaKernelProvider, rows: &[u32]) -> CudaBuffer {
@@ -3770,7 +3801,7 @@ mod relation_delta_coalesce_tests {
         let report = coalesce_relation_delta_batch_with_cancellation_capture(
             provider.as_ref(),
             batch,
-            false,
+            &BTreeSet::new(),
         )
         .expect("coalesce relation delta batch");
         let delta = report
@@ -4018,7 +4049,7 @@ mod relation_delta_preparation_tests {
                     RelationDelta::new(Some(test_buffer(&provider, &[3, 4])), None),
                 ),
             ],
-            true,
+            &BTreeSet::from(["fact".to_string()]),
         )?;
 
         assert_eq!(insert_rows(&provider, &prepared, "fact"), vec![1, 4]);
@@ -4065,7 +4096,7 @@ mod relation_delta_preparation_tests {
                     RelationDelta::new(Some(test_buffer(&provider, &[7])), None),
                 ),
             ],
-            true,
+            &BTreeSet::from(["fact".to_string()]),
         )?;
         assert_eq!(
             insert_rows(&provider, &insert_delete_insert, "fact"),
@@ -4099,7 +4130,7 @@ mod relation_delta_preparation_tests {
                     RelationDelta::new(Some(test_buffer(&provider, &[7])), None),
                 ),
             ],
-            true,
+            &BTreeSet::from(["fact".to_string()]),
         )?;
         assert_eq!(
             insert_rows(&provider, &delete_insert_insert, "fact"),
@@ -4173,7 +4204,7 @@ mod relation_delta_preparation_tests {
                     RelationDelta::new(None, Some(test_buffer(&provider, &[7]))),
                 ),
             ],
-            true,
+            &BTreeSet::from(["fact".to_string()]),
         )?;
         let batch_commit = program.prepare_relation_delta_commit_with_session_runtime(
             provider.clone(),
@@ -4192,6 +4223,71 @@ mod relation_delta_preparation_tests {
         assert_eq!(batch_report.delete_rows, 0);
         assert_eq!(batch_report.canceled_rows, 1);
         assert_eq!(batch_report.changed_relations, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn cancellation_capture_is_scoped_to_selected_relations() -> Result<()> {
+        let Some(provider) = test_provider() else {
+            return Ok(());
+        };
+        let program = LogicProgram::compile(
+            r#"
+                pred evidenced(u32).
+                pred positional(u32).
+            "#,
+        )?;
+        let prepared = program.prepare_relation_delta_batch(
+            provider.as_ref(),
+            vec![
+                (
+                    "evidenced".to_string(),
+                    RelationDelta::new(Some(test_buffer(&provider, &[1])), None),
+                ),
+                (
+                    "positional".to_string(),
+                    RelationDelta::new(Some(test_buffer(&provider, &[2])), None),
+                ),
+                (
+                    "evidenced".to_string(),
+                    RelationDelta::new(None, Some(test_buffer(&provider, &[1]))),
+                ),
+                (
+                    "positional".to_string(),
+                    RelationDelta::new(None, Some(test_buffer(&provider, &[2]))),
+                ),
+                (
+                    "evidenced".to_string(),
+                    RelationDelta::new(None, Some(test_buffer(&provider, &[3]))),
+                ),
+                (
+                    "evidenced".to_string(),
+                    RelationDelta::new(Some(test_buffer(&provider, &[3])), None),
+                ),
+            ],
+            &BTreeSet::from(["evidenced".to_string()]),
+        )?;
+
+        assert_eq!(
+            prepared
+                .cancellations()
+                .keys()
+                .map(String::as_str)
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from(["evidenced"])
+        );
+        let evidenced = prepared
+            .cancellations()
+            .get("evidenced")
+            .expect("selected relation cancellation trace");
+        assert_eq!(
+            evidenced
+                .iter()
+                .map(RelationDeltaCancellation::update_index)
+                .collect::<Vec<_>>(),
+            vec![2, 5]
+        );
+        assert_eq!(prepared.report_seed.canceled_rows, 3);
         Ok(())
     }
 
@@ -4218,8 +4314,11 @@ mod relation_delta_preparation_tests {
 
         let uncaptured_batch = cancellation_batch(&provider);
         provider.memory().reset_alloc_count();
-        let uncaptured =
-            program.prepare_relation_delta_batch(provider.as_ref(), uncaptured_batch, false)?;
+        let uncaptured = program.prepare_relation_delta_batch(
+            provider.as_ref(),
+            uncaptured_batch,
+            &BTreeSet::new(),
+        )?;
         let uncaptured_allocations = provider.memory().alloc_count();
         assert!(uncaptured.cancellations().is_empty());
         assert_eq!(insert_rows(&provider, &uncaptured, "fact"), vec![6]);
@@ -4234,8 +4333,11 @@ mod relation_delta_preparation_tests {
 
         let captured_batch = cancellation_batch(&provider);
         provider.memory().reset_alloc_count();
-        let captured =
-            program.prepare_relation_delta_batch(provider.as_ref(), captured_batch, true)?;
+        let captured = program.prepare_relation_delta_batch(
+            provider.as_ref(),
+            captured_batch,
+            &BTreeSet::from(["fact".to_string()]),
+        )?;
         let captured_allocations = provider.memory().alloc_count();
         assert_eq!(insert_rows(&provider, &captured, "fact"), vec![6]);
         assert_eq!(
@@ -4318,7 +4420,7 @@ mod relation_delta_preparation_tests {
                     RelationDelta::new(Some(test_buffer(&provider, &[9])), None),
                 ),
             ],
-            false,
+            &BTreeSet::new(),
         )?;
 
         let error = match program.prepare_relation_delta_commit_with_session_runtime(
@@ -4395,7 +4497,7 @@ mod relation_delta_preparation_tests {
                     RelationDelta::new(Some(test_buffer(&provider, &[2])), None),
                 ),
             ],
-            true,
+            &BTreeSet::new(),
         )?;
 
         let commit = program.prepare_relation_delta_commit_with_session_runtime(
@@ -4543,7 +4645,7 @@ mod relation_delta_preparation_tests {
                 "fact".to_string(),
                 RelationDelta::new(None, Some(test_buffer(&provider, &[2]))),
             )],
-            false,
+            &BTreeSet::new(),
         )?;
         let commit = program.prepare_relation_delta_commit_with_session_runtime(
             provider.clone(),
@@ -4646,7 +4748,7 @@ mod relation_delta_preparation_tests {
                 "fact".to_string(),
                 RelationDelta::new(None, Some(test_buffer(&provider, &[2]))),
             )],
-            false,
+            &BTreeSet::new(),
         )?;
         let commit = program.prepare_relation_delta_commit_with_session_runtime(
             provider.clone(),
@@ -4707,7 +4809,7 @@ mod relation_delta_preparation_tests {
                 "alpha_input".to_string(),
                 RelationDelta::new(Some(test_buffer(&calibration_provider, &[1])), None),
             )],
-            false,
+            &BTreeSet::new(),
         )?;
         calibration_provider.memory().reset_peak();
         let calibration_commit = program.prepare_relation_delta_commit_with_session_runtime(
@@ -4750,7 +4852,7 @@ mod relation_delta_preparation_tests {
                 "alpha_input".to_string(),
                 RelationDelta::new(Some(test_buffer(&tight_provider, &[1])), None),
             )],
-            false,
+            &BTreeSet::new(),
         )?;
         tight_provider.memory().reset_peak();
         let prepared_commit = program.prepare_relation_delta_commit_with_session_runtime(
@@ -4897,7 +4999,7 @@ mod relation_delta_preparation_tests {
                     RelationDelta::new(Some(test_buffer(&calibration_provider, &omega_rows)), None),
                 ),
             ],
-            false,
+            &BTreeSet::new(),
         )?;
         calibration_provider.memory().reset_peak();
         calibration_provider.memory().reset_alloc_count();
@@ -4950,7 +5052,7 @@ mod relation_delta_preparation_tests {
                     RelationDelta::new(Some(test_buffer(&tight_provider, &omega_rows)), None),
                 ),
             ],
-            false,
+            &BTreeSet::new(),
         )?;
 
         tight_provider.memory().reset_alloc_count();
