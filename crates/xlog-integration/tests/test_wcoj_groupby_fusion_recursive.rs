@@ -12,6 +12,14 @@
 //! provider entry's binary-search work plan requires; these tests lock
 //! that end-to-end behavior.
 //!
+//! The cardinality cost model's fail-open loss veto declines the fused
+//! path when EVERY body slot has a published cardinality and the largest
+//! is provably small. The fixpoint publishes the recursive head's
+//! cardinality, so a self-join body (all slots = the recursive head) is
+//! always fully measured; the self-join tests pin both sides of the
+//! boundary — a closure above it fuses, one below it declines to the
+//! materialize+groupby fallback.
+//!
 //! Fused/kill-switch phases run inside ONE test because the kill switch
 //! is a process-global env var.
 
@@ -324,6 +332,16 @@ fn groupby_fusion_fires_over_recursive_stratum_inputs() {
     assert_recursive_fusion_parity(&fix, source, &inputs, &expected);
 }
 
+/// Path edges 1->2->...->100 for the fusing self-join test: the closure
+/// has C(100, 2) = 4950 rows, above the cardinality model's small-join
+/// boundary (4096). All three slots of the self-join body are the
+/// recursive head, whose cardinality the fixpoint publishes, so the
+/// loss veto sees a fully measured join — the fixture must exceed the
+/// boundary or the fused path (correctly) declines.
+fn self_join_path_edges() -> Vec<(u32, u32)> {
+    (1..100u32).map(|i| (i, i + 1)).collect()
+}
+
 #[test]
 fn groupby_fusion_fires_over_recursive_self_join_body() {
     let Some(fix) = make_fixture() else {
@@ -333,7 +351,48 @@ fn groupby_fusion_fires_over_recursive_self_join_body() {
 
     // Edge case: every body atom is the SAME recursive predicate — the
     // promoter's inside-aggregate descent sees a body whose scans all
-    // point at the recursive stratum's RelId.
+    // point at the recursive stratum's RelId. The closure must stay
+    // above the loss-veto boundary so the fused dispatch is the
+    // production route for this shape; the small-closure side of the
+    // boundary is locked by
+    // `groupby_fusion_small_recursive_self_join_declines_to_unfused`.
+    let source = "pred e(u32, u32).\n\
+                  pred tc(u32, u32).\n\
+                  tc(X, Y) :- e(X, Y).\n\
+                  tc(X, Y) :- tc(X, Z), e(Z, Y).\n\
+                  deg(X, count(Z)) :- tc(X, Y), tc(Y, Z), tc(X, Z).";
+    let e = self_join_path_edges();
+    let tc = host_transitive_closure(&e);
+    assert!(
+        tc.len() >= 4096,
+        "fixture closure fell below the cost-model small-join boundary: {}",
+        tc.len()
+    );
+    let expected = host_group_counts(&tc, &tc, &tc);
+    // Path-closure oracle shape: X in 1..=98 each contributes
+    // C(100 - X, 2) ordered (Y, Z) pairs; the grand total is C(100, 3).
+    assert_eq!(expected.len(), 98, "oracle sanity: group count");
+    let total: u64 = expected.iter().map(|(_, c)| *c).sum();
+    assert_eq!(total, 161_700, "oracle sanity: triangle total");
+
+    let mut inputs: BTreeMap<&str, Vec<(u32, u32)>> = BTreeMap::new();
+    inputs.insert("e", e);
+    assert_recursive_fusion_parity(&fix, source, &inputs, &expected);
+}
+
+/// Below the small-join boundary the fail-open loss veto must decline
+/// the fused triangle aggregate: the self-join body's slots are all the
+/// recursive head (cardinality published by the fixpoint), the closure
+/// is provably small, and the materialize+groupby fallback wins. Locks
+/// the boundary behavior: correct rows, fused counter 0, no error
+/// declines.
+#[test]
+fn groupby_fusion_small_recursive_self_join_declines_to_unfused() {
+    let Some(fix) = make_fixture() else {
+        eprintln!("Skipping: CUDA runtime unavailable");
+        return;
+    };
+
     let source = "pred e(u32, u32).\n\
                   pred tc(u32, u32).\n\
                   tc(X, Y) :- e(X, Y).\n\
@@ -341,12 +400,29 @@ fn groupby_fusion_fires_over_recursive_self_join_body() {
                   deg(X, count(Z)) :- tc(X, Y), tc(Y, Z), tc(X, Z).";
     let e = base_edges();
     let tc = host_transitive_closure(&e);
+    assert!(
+        tc.len() < 4096,
+        "fixture must stay below the small-join boundary: {}",
+        tc.len()
+    );
     let expected = host_group_counts(&tc, &tc, &tc);
     assert_eq!(expected, vec![(1, 3), (2, 1), (5, 1)], "oracle sanity");
 
     let mut inputs: BTreeMap<&str, Vec<(u32, u32)>> = BTreeMap::new();
     inputs.insert("e", e);
-    assert_recursive_fusion_parity(&fix, source, &inputs, &expected);
+
+    let _guard = env_lock();
+    let (rows, fused_count, fused_errors) = run_program(&fix, source, &inputs);
+    assert_eq!(rows, expected, "small self-join row set: {source}");
+    assert_eq!(
+        fused_count, 0,
+        "loss veto must decline the fused path for a provably small \
+         triangle: {source}"
+    );
+    assert_eq!(
+        fused_errors, 0,
+        "decline must be structural, not an error: {source}"
+    );
 }
 
 #[test]
