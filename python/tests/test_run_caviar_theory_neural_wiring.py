@@ -165,3 +165,35 @@ def test_min_fit_and_holdout_score_are_the_only_new_arguments_kfold_select_sees(
     assert captured["topology"] == "star"
     assert captured["tie_tolerance"] == 0.02
     assert captured["neural_relations"] == {"close_nn": "SPEC"}
+
+
+def test_neural_ec_transition_pool_excludes_distance_derived_relations():
+    # `--mode neural`'s promise ("no precomputed geometry reaches the
+    # candidate pool at all") extends to `--data continuous`'s transition
+    # relations: `became_far`/`distance_increasing` are computed directly
+    # from the precomputed pair distance, so the neural EC pool must admit
+    # only the ACTIVITY-based transitions -- mirroring
+    # `run_caviar_cv._neural_init_vocab`'s identical exclusion.
+    train = {
+        "transition_relations": {
+            "any_became_active": [(0, 1)],
+            "any_became_inactive": [(1, 1)],
+            "any_became_walking": [(2, 1)],
+            "any_stopped_walking": [(3, 1)],
+            "became_far": [(4, 1)],
+            "distance_increasing": [(5, 1)],
+        }
+    }
+    names = run_caviar_theory._neural_ec_extra_relation_names(train)
+    assert names == (
+        "any_became_active", "any_became_inactive",
+        "any_became_walking", "any_stopped_walking",
+    )
+    assert "became_far" not in names
+    assert "distance_increasing" not in names
+
+
+def test_neural_ec_transition_pool_is_empty_for_pkl_data():
+    # `--data pkl` has no transition relations at all -- the helper must
+    # return an empty tuple, byte-identical to the pre-transition behavior.
+    assert run_caviar_theory._neural_ec_extra_relation_names({}) == ()

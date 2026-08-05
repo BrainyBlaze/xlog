@@ -145,6 +145,33 @@ ACTIVITY_RELATIONS: tuple[str, ...] = (
     "both_active", "both_inactive", "both_walking", "mixed_active_walking",
 )
 
+# `caviar_continuous.TRANSITION_RELATION_NAMES`'s two DISTANCE-based members:
+# computed directly from the precomputed pair distance (convert_continuous's
+# frame-difference pass), so admitting them to `--mode neural`'s candidate
+# pool would break the module docstring's "no precomputed geometry reaches
+# the candidate pool at all" guarantee. Named here (not imported from
+# caviar_continuous) to keep module-level imports torch-free -- mirrors
+# `run_caviar_cv.NEURAL_INIT_ACTIVITY_TRANSITIONS`'s identical, inverse
+# hardcoding, and `_neural_ec_extra_relation_names` below derives the
+# admitted set structurally from the data dict, so a NEW transition relation
+# defaults to admitted (activity-like) only if it is not named here.
+DISTANCE_DERIVED_TRANSITIONS: tuple[str, ...] = ("became_far", "distance_increasing")
+
+
+def _neural_ec_extra_relation_names(train: dict) -> tuple[str, ...]:
+    """`--mode neural --protocol ec`'s admitted transition relations: every
+    name `convert_continuous` actually produced EXCEPT the distance-derived
+    ones (`DISTANCE_DERIVED_TRANSITIONS`) -- the neural pool's "geometry is
+    learned, never given" guarantee extends to `--data continuous`'s
+    transition vocabulary, exactly as `run_caviar_cv._neural_init_vocab`
+    already enforces for its own neural initiation search. `--data pkl`
+    carries no transition relations at all: empty tuple, byte-identical to
+    the pre-transition behavior."""
+    return tuple(
+        n for n in train.get("transition_relations", ())
+        if n not in DISTANCE_DERIVED_TRANSITIONS
+    )
+
 # The theory loop's own coverage-acceptance floor's DEFAULT value
 # (overridable via --min-new-covered; see parse_args -- a caller running
 # --protocol ec --data continuous should lower it explicitly, since that
@@ -1387,10 +1414,15 @@ def _run_neural_ec(
     don't-care facts it names are excluded from BOTH searches' own
     ``facts``/``target_labels`` before `_induce_neural_theory_for_target`
     (and, through it, `kfold_select`) ever sees them; ``--data continuous``'s
-    transition relations are merged into this function's OWN activity-set
-    vocabulary and final predict-clause closures the same way
-    `_run_relational_ec` merges them into its relational one -- never into
-    the ``direct_context`` run above, which already finished."""
+    ACTIVITY-based transition relations are merged into this function's OWN
+    activity-set vocabulary and final predict-clause closures the same way
+    `_run_relational_ec` merges the full set into its relational one --
+    never into the ``direct_context`` run above, which already finished.
+    The DISTANCE-derived transitions (`DISTANCE_DERIVED_TRANSITIONS`) are
+    excluded from this mode's pool entirely -- see
+    `_neural_ec_extra_relation_names` -- because they are precomputed
+    geometry, which `--mode neural`'s stated methodology withholds (the
+    relational EC search keeps them; only the neural pool refuses)."""
     from pyxlog.ilp.neural_credit import NeuralRelationSpec, train_engine_mode
 
     direct_result = None
@@ -1402,14 +1434,15 @@ def _run_neural_ec(
         wall["direct_context_wall_clock_s"] = direct_wall
 
     train_relations_ec, test_relations_ec = _ec_relations_with_transitions(train, test)
-    # Derived from the data dict itself, not imported from
-    # `caviar_continuous.TRANSITION_RELATION_NAMES`: this keeps
-    # run_caviar_theory.py's module-level imports torch-free (see the
-    # module docstring's CUDA-ONLY paragraph) and can never drift out of
-    # sync with whatever convert_continuous actually produced.
-    extra_relation_names = (
-        tuple(train["transition_relations"]) if "transition_relations" in train else ()
-    )
+    # Derived from the data dict itself (torch-free, can never drift out of
+    # sync with whatever convert_continuous actually produced), MINUS the
+    # distance-derived transitions: `became_far`/`distance_increasing` read
+    # the precomputed pair distance, and this mode's guarantee is that no
+    # precomputed geometry reaches the candidate pool -- see
+    # `_neural_ec_extra_relation_names` (this filter feeds the compiled
+    # schema, the activity-set vocabulary, AND the final predict-clause
+    # closures below, so the exclusion is total, not cosmetic).
+    extra_relation_names = _neural_ec_extra_relation_names(train)
     prog = _compile_and_ingest_neural(
         pyxlog, dict(train, relations=train_relations_ec), extra_relation_names=extra_relation_names,
     )
@@ -1483,7 +1516,10 @@ def _run_neural_ec(
         "candidate_vocabulary": {
             "relational": sorted(set(ACTIVITY_RELATIONS) | set(extra_relation_names)),
             "neural": [CLOSE_NN_NAME],
-            "excluded": ["close", "far", "coords_missing"],
+            "excluded": ["close", "far", "coords_missing"] + [
+                n for n in train.get("transition_relations", ())
+                if n in DISTANCE_DERIVED_TRANSITIONS
+            ],
         },
         "steps_requested": args.steps,
         "steps_effective": args.steps,
