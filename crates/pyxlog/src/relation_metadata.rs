@@ -23,6 +23,8 @@ create_exception!(
 const FACT_IDENTITY_DOMAIN: &[u8] = b"xlog.fact.identity.v1\0";
 const SCHEMA_IDENTITY_DOMAIN: &[u8] = b"xlog.relation.schema.v1\0";
 const PROGRAM_EVIDENCE_DOMAIN: &[u8] = b"xlog.program.evidence.v1\0";
+const RELATION_MANIFEST_FORMAT: &str = "xlog.relation-provenance";
+const RELATION_MANIFEST_VERSION: usize = 1;
 
 pub(crate) fn require_positive_metadata_arity(relation: &str, schema: &Schema) -> PyResult<()> {
     if schema.arity() == 0 {
@@ -107,6 +109,15 @@ pub(crate) struct PreparedRelationMetadataTransition {
     prospective_store: Option<RelationMetadataStore>,
 }
 
+/// Fully parsed version-1 manifest state that is independent of its paired
+/// DLPack relation until row-count and full-row membership validation.
+pub(crate) struct PreparedRelationManifest {
+    row_count: usize,
+    schema_sha256: [u8; 32],
+    schema_arity: usize,
+    metadata: Option<Arc<RelationMetadata>>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct RelationSnapshot {
     relation: String,
@@ -147,24 +158,10 @@ impl RelationMetadataStore {
         row_count: usize,
     ) -> PyResult<(Self, RelationSnapshot)> {
         require_positive_metadata_arity(relation, schema)?;
-        if arguments.len() != schema.arity() {
-            return Err(PyRuntimeError::new_err(format!(
-                "Relation '{relation}' compiled argument metadata has arity {} but its schema has arity {}",
-                arguments.len(),
-                schema.arity()
-            )));
-        }
+        validate_argument_contract(relation, arguments, schema)?;
 
         let parsed_roles = parse_roles(relation, arguments, roles)?;
-        if arguments.iter().any(|argument| !argument.source_named()) {
-            if let Some(existing) = self.relations.get(relation) {
-                if existing.roles != parsed_roles {
-                    return Err(metadata_error(format!(
-                        "Relation '{relation}' roles do not match the registered role contract"
-                    )));
-                }
-            }
-        }
+        self.validate_registered_roles(relation, arguments, &parsed_roles)?;
 
         let schema_sha256 = relation_schema_fingerprint(relation, arguments)?;
         let parsed_facts = parse_facts(relation, schema, schema_sha256, facts)?;
@@ -174,18 +171,69 @@ impl RelationMetadataStore {
             roles: parsed_roles,
             facts: parsed_facts,
         });
-        let mut prospective = self.clone();
-        prospective
-            .relations
-            .insert(relation.to_string(), Arc::clone(&metadata));
-        let snapshot = RelationSnapshot {
-            relation: relation.to_string(),
-            row_count,
-            schema_sha256,
-            schema_arity: schema.arity(),
-            metadata: Some(metadata),
-        };
-        Ok((prospective, snapshot))
+        Ok(self.stage_replacement(relation, row_count, schema_sha256, schema.arity(), metadata))
+    }
+
+    pub(crate) fn parse_manifest(
+        &self,
+        relation: &str,
+        arguments: &[LogicArgumentSchema],
+        schema: &Schema,
+        value: &Bound<'_, PyAny>,
+    ) -> PyResult<PreparedRelationManifest> {
+        require_positive_metadata_arity(relation, schema)?;
+        validate_argument_contract(relation, arguments, schema)?;
+        let parsed = parse_relation_manifest(relation, arguments, schema, value)?;
+        if let Some(metadata) = &parsed.metadata {
+            self.validate_registered_roles(relation, arguments, &metadata.roles)?;
+        }
+        Ok(parsed)
+    }
+
+    pub(crate) fn prepare_manifest_replacement(
+        &self,
+        relation: &str,
+        schema: &Schema,
+        provider: &Arc<CudaKernelProvider>,
+        relation_buffer: &CudaBuffer,
+        actual_row_count: usize,
+        manifest: PreparedRelationManifest,
+    ) -> PyResult<(Option<Self>, RelationSnapshot)> {
+        if actual_row_count != manifest.row_count {
+            return Err(metadata_error(format!(
+                "Relation '{relation}' manifest row count mismatch: expected {}, paired relation has {actual_row_count}",
+                manifest.row_count
+            )));
+        }
+        match manifest.metadata {
+            Some(metadata) => {
+                validate_fact_membership(
+                    relation,
+                    schema,
+                    provider,
+                    relation_buffer,
+                    &metadata.facts,
+                )?;
+                let (prospective, snapshot) = self.stage_replacement(
+                    relation,
+                    actual_row_count,
+                    manifest.schema_sha256,
+                    manifest.schema_arity,
+                    metadata,
+                );
+                Ok((Some(prospective), snapshot))
+            }
+            None => Ok((
+                None,
+                RelationSnapshot {
+                    relation: relation.to_string(),
+                    row_count: actual_row_count,
+                    schema_sha256: manifest.schema_sha256,
+                    schema_arity: manifest.schema_arity,
+                    metadata: None,
+                },
+            )),
+        }
     }
 
     pub(crate) fn prepare_insert_evidence(
@@ -420,6 +468,62 @@ impl RelationMetadataStore {
             metadata: self.relations.get(relation).cloned(),
         }
     }
+
+    fn validate_registered_roles(
+        &self,
+        relation: &str,
+        arguments: &[LogicArgumentSchema],
+        roles: &[RelationRole],
+    ) -> PyResult<()> {
+        if arguments.iter().any(|argument| !argument.source_named())
+            && self
+                .relations
+                .get(relation)
+                .is_some_and(|existing| existing.roles != roles)
+        {
+            return Err(metadata_error(format!(
+                "Relation '{relation}' roles do not match the registered role contract"
+            )));
+        }
+        Ok(())
+    }
+
+    fn stage_replacement(
+        &self,
+        relation: &str,
+        row_count: usize,
+        schema_sha256: [u8; 32],
+        schema_arity: usize,
+        metadata: Arc<RelationMetadata>,
+    ) -> (Self, RelationSnapshot) {
+        let mut prospective = self.clone();
+        prospective
+            .relations
+            .insert(relation.to_string(), Arc::clone(&metadata));
+        let snapshot = RelationSnapshot {
+            relation: relation.to_string(),
+            row_count,
+            schema_sha256,
+            schema_arity,
+            metadata: Some(metadata),
+        };
+        (prospective, snapshot)
+    }
+}
+
+fn validate_argument_contract(
+    relation: &str,
+    arguments: &[LogicArgumentSchema],
+    schema: &Schema,
+) -> PyResult<()> {
+    if arguments.len() != schema.arity() {
+        return Err(PyRuntimeError::new_err(format!(
+            "Relation '{relation}' compiled argument metadata has arity {} but its schema has arity {}",
+            arguments.len(),
+            schema.arity()
+        )));
+    }
+    Ok(())
 }
 
 impl PreparedInsertEvidence {
@@ -481,6 +585,40 @@ impl RelationSnapshot {
         snapshot.set_item("facts", facts)?;
         Ok(snapshot.into())
     }
+
+    pub(crate) fn pack_manifest(&self, py: Python<'_>) -> PyResult<PyObject> {
+        let manifest = PyDict::new(py);
+        manifest.set_item("format", RELATION_MANIFEST_FORMAT)?;
+        manifest.set_item("version", RELATION_MANIFEST_VERSION)?;
+
+        let predicate = PyDict::new(py);
+        predicate.set_item("name", &self.relation)?;
+        predicate.set_item("arity", self.schema_arity)?;
+        predicate.set_item("schema_sha256", prefixed_digest_bytes(&self.schema_sha256))?;
+        manifest.set_item("predicate", predicate)?;
+        manifest.set_item("row_count", self.row_count)?;
+        manifest.set_item("metadata_present", self.metadata.is_some())?;
+
+        let roles = PyList::empty(py);
+        let facts = PyList::empty(py);
+        if let Some(metadata) = &self.metadata {
+            for role in &metadata.roles {
+                roles.append(pack_role(py, role)?)?;
+            }
+            for (key, records) in &metadata.facts {
+                if key.schema_sha256 != self.schema_sha256 {
+                    return Err(PyRuntimeError::new_err(format!(
+                        "Relation '{}' contains provenance for another compiled schema",
+                        self.relation
+                    )));
+                }
+                facts.append(pack_manifest_fact(py, &self.relation, key, records)?)?;
+            }
+        }
+        manifest.set_item("roles", roles)?;
+        manifest.set_item("facts", facts)?;
+        Ok(manifest.into())
+    }
 }
 
 pub(crate) fn pack_session_evidence(
@@ -502,31 +640,182 @@ pub(crate) fn pack_session_evidence(
     Ok(result.into())
 }
 
+fn parse_relation_manifest(
+    relation: &str,
+    arguments: &[LogicArgumentSchema],
+    schema: &Schema,
+    value: &Bound<'_, PyAny>,
+) -> PyResult<PreparedRelationManifest> {
+    let context = format!("Relation '{relation}' manifest");
+    let manifest = dictionary(value, &context)?;
+
+    let format = required_string(manifest, "format", &context)?;
+    if format != RELATION_MANIFEST_FORMAT {
+        return Err(metadata_error(format!(
+            "{context} format mismatch: expected '{RELATION_MANIFEST_FORMAT}', received '{format}'"
+        )));
+    }
+    let version = required_usize(manifest, "version", &context)?;
+    if version != RELATION_MANIFEST_VERSION {
+        return Err(metadata_error(format!(
+            "{context} has unsupported manifest version {version}; expected {RELATION_MANIFEST_VERSION}"
+        )));
+    }
+
+    require_exact_keys(
+        manifest,
+        &[
+            "format",
+            "version",
+            "predicate",
+            "row_count",
+            "metadata_present",
+            "roles",
+            "facts",
+        ],
+        &context,
+    )?;
+
+    let predicate_value = required_item(manifest, "predicate", &context)?;
+    let predicate_context = format!("{context} predicate");
+    let predicate = dictionary(&predicate_value, &predicate_context)?;
+    require_exact_keys(
+        predicate,
+        &["name", "arity", "schema_sha256"],
+        &predicate_context,
+    )?;
+    let predicate_name = required_string(predicate, "name", &predicate_context)?;
+    if predicate_name != relation {
+        return Err(metadata_error(format!(
+            "{context} predicate mismatch: expected '{relation}', received '{predicate_name}'"
+        )));
+    }
+    let arity = required_usize(predicate, "arity", &predicate_context)?;
+    if arity != schema.arity() {
+        return Err(metadata_error(format!(
+            "{context} predicate arity mismatch: expected {}, received {arity}",
+            schema.arity()
+        )));
+    }
+    let schema_sha256 = relation_schema_fingerprint(relation, arguments)?;
+    let supplied_schema = required_string(predicate, "schema_sha256", &predicate_context)?;
+    let expected_schema = prefixed_digest_bytes(&schema_sha256);
+    if supplied_schema != expected_schema {
+        return Err(metadata_error(format!(
+            "{context} compiled schema mismatch: expected '{expected_schema}', received '{supplied_schema}'"
+        )));
+    }
+
+    let row_count = required_usize(manifest, "row_count", &context)?;
+    let metadata_present = required_bool(manifest, "metadata_present", &context)?;
+    let roles_value = required_item(manifest, "roles", &context)?;
+    let facts_value = required_item(manifest, "facts", &context)?;
+
+    let metadata = if metadata_present {
+        let roles = parse_manifest_roles(relation, arguments, &roles_value)?;
+        let facts = parse_manifest_facts(relation, schema, schema_sha256, &facts_value)?;
+        Some(Arc::new(RelationMetadata { roles, facts }))
+    } else {
+        let roles_present =
+            sequence_has_item(sequence(&roles_value, &format!("{context} roles"))?)?;
+        let facts_present =
+            sequence_has_item(sequence(&facts_value, &format!("{context} facts"))?)?;
+        if roles_present || facts_present {
+            return Err(metadata_error(format!(
+                "{context} metadata_present is false but roles or facts are not empty"
+            )));
+        }
+        None
+    };
+
+    Ok(PreparedRelationManifest {
+        row_count,
+        schema_sha256,
+        schema_arity: arity,
+        metadata,
+    })
+}
+
+fn parse_manifest_roles(
+    relation: &str,
+    arguments: &[LogicArgumentSchema],
+    value: &Bound<'_, PyAny>,
+) -> PyResult<Vec<RelationRole>> {
+    parse_roles_with_contract(relation, arguments, value, true)
+}
+
+fn parse_manifest_facts(
+    relation: &str,
+    schema: &Schema,
+    schema_sha256: [u8; 32],
+    value: &Bound<'_, PyAny>,
+) -> PyResult<BTreeMap<FactKey, BTreeSet<ProvenanceRecord>>> {
+    let sequence = sequence(value, &format!("Relation '{relation}' manifest facts"))?;
+    let mut facts = BTreeMap::<FactKey, BTreeSet<ProvenanceRecord>>::new();
+    for (fact_index, item) in sequence.try_iter()?.enumerate() {
+        let item = item?;
+        let context = format!("Relation '{relation}' manifest fact {fact_index}");
+        let fact = dictionary(&item, &context)?;
+        require_exact_keys(fact, &["identity", "cells", "provenance"], &context)?;
+        let supplied_identity = required_string(fact, "identity", &context)?;
+        let cells_value = required_item(fact, "cells", &context)?;
+        let cells = parse_exact_cells(relation, fact_index, schema, &cells_value)?;
+        let expected_identity = fact_identity(relation, &cells)?;
+        if supplied_identity != expected_identity {
+            return Err(metadata_error(format!(
+                "{context} identity mismatch: expected '{expected_identity}', received '{supplied_identity}'"
+            )));
+        }
+        let provenance = required_item(fact, "provenance", &context)?;
+        let records = parse_records_with_contract(relation, fact_index, &provenance, true)?;
+        facts
+            .entry(FactKey {
+                schema_sha256,
+                cells,
+            })
+            .or_default()
+            .extend(records);
+    }
+    Ok(facts)
+}
+
 fn parse_roles(
     relation: &str,
     arguments: &[LogicArgumentSchema],
     value: &Bound<'_, PyAny>,
 ) -> PyResult<Vec<RelationRole>> {
+    parse_roles_with_contract(relation, arguments, value, false)
+}
+
+fn parse_roles_with_contract(
+    relation: &str,
+    arguments: &[LogicArgumentSchema],
+    value: &Bound<'_, PyAny>,
+    require_resolved_fields: bool,
+) -> PyResult<Vec<RelationRole>> {
     let sequence = sequence(value, &format!("Relation '{relation}' roles"))?;
-    let items = sequence.try_iter()?.collect::<PyResult<Vec<_>>>()?;
-    let actual = items.len();
-    if actual != arguments.len() {
-        return Err(metadata_error(format!(
+    let items = collect_exact_sequence_items(sequence, arguments.len(), |actual| {
+        metadata_error(format!(
             "Relation '{relation}' expected {} roles but received {actual}",
             arguments.len()
-        )));
-    }
+        ))
+    })?;
 
-    let mut parsed = Vec::with_capacity(actual);
+    let mut parsed = Vec::with_capacity(arguments.len());
     let mut names = BTreeSet::new();
     for (index, item) in items.iter().enumerate() {
-        let dict = dictionary(item, &format!("Relation '{relation}' role {index}"))?;
-        reject_unknown_keys(
-            dict,
-            &["name", "sort", "type"],
-            &format!("Relation '{relation}' role {index}"),
-        )?;
-        let name = required_string(dict, "name", &format!("Relation '{relation}' role {index}"))?;
+        let context = if require_resolved_fields {
+            format!("Relation '{relation}' manifest role {index}")
+        } else {
+            format!("Relation '{relation}' role {index}")
+        };
+        let dict = dictionary(item, &context)?;
+        if require_resolved_fields {
+            require_exact_keys(dict, &["name", "sort", "type"], &context)?;
+        } else {
+            reject_unknown_keys(dict, &["name", "sort", "type"], &context)?;
+        }
+        let name = required_string(dict, "name", &context)?;
         if name.is_empty() {
             return Err(metadata_error(format!(
                 "Relation '{relation}' role {index} name must be non-empty"
@@ -546,25 +835,54 @@ fn parse_roles(
             )));
         }
 
-        let supplied_sort =
-            optional_string(dict, "sort", &format!("Relation '{relation}' role {index}"))?;
-        if let Some(supplied) = supplied_sort.as_deref() {
-            if Some(supplied) != argument.sort() {
-                return Err(metadata_error(format!(
-                    "Relation '{relation}' role {index} sort mismatch: expected {:?}, received '{supplied}'",
-                    argument.sort()
-                )));
+        if require_resolved_fields {
+            let supplied_sort = required_item(dict, "sort", &context)?;
+            match argument.sort() {
+                None if !supplied_sort.is_none() => {
+                    return Err(metadata_error(format!(
+                        "{context} sort mismatch: expected None"
+                    )));
+                }
+                Some(expected) => {
+                    let supplied = supplied_sort.extract::<String>().map_err(|_| {
+                        metadata_error(format!("{context} sort mismatch: expected '{expected}'"))
+                    })?;
+                    if supplied != expected {
+                        return Err(metadata_error(format!(
+                            "{context} sort mismatch: expected '{expected}', received '{supplied}'"
+                        )));
+                    }
+                }
+                None => {}
+            }
+        } else {
+            let supplied_sort = optional_string(dict, "sort", &context)?;
+            if let Some(supplied) = supplied_sort.as_deref() {
+                if Some(supplied) != argument.sort() {
+                    return Err(metadata_error(format!(
+                        "Relation '{relation}' role {index} sort mismatch: expected {:?}, received '{supplied}'",
+                        argument.sort()
+                    )));
+                }
             }
         }
 
         let expected_type = types::scalar_type_name(&argument.scalar_type());
-        let supplied_type =
-            optional_string(dict, "type", &format!("Relation '{relation}' role {index}"))?;
-        if let Some(supplied) = supplied_type.as_deref() {
+        if require_resolved_fields {
+            let supplied = required_string(dict, "type", &context)?;
             if supplied != expected_type {
                 return Err(metadata_error(format!(
-                    "Relation '{relation}' role {index} type mismatch: expected '{expected_type}', received '{supplied}'"
+                    "{context} type mismatch: expected '{expected_type}', received '{supplied}'"
                 )));
+            }
+        } else {
+            let supplied_type = optional_string(dict, "type", &context)?;
+            if let Some(supplied) = supplied_type.as_deref() {
+                if supplied != expected_type {
+                    return Err(metadata_error(format!(
+                        "Relation '{relation}' role {index} type mismatch: expected '{expected_type}', received '{supplied}'"
+                    )));
+                }
             }
         }
 
@@ -632,15 +950,13 @@ fn parse_friendly_tuple(
         value,
         &format!("Relation '{relation}' fact {fact_index} tuple"),
     )?;
-    let items = sequence.try_iter()?.collect::<PyResult<Vec<_>>>()?;
-    let actual = items.len();
-    if actual != schema.arity() {
-        return Err(metadata_error(format!(
+    let items = collect_exact_sequence_items(sequence, schema.arity(), |actual| {
+        metadata_error(format!(
             "Relation '{relation}' fact {fact_index} tuple arity mismatch: expected {}, received {actual}",
             schema.arity()
-        )));
-    }
-    let mut cells = Vec::with_capacity(actual);
+        ))
+    })?;
+    let mut cells = Vec::with_capacity(schema.arity());
     for (column, item) in items.iter().enumerate() {
         let scalar_type = schema.column_type(column).ok_or_else(|| {
             PyRuntimeError::new_err(format!(
@@ -758,16 +1074,14 @@ fn parse_exact_cells(
         value,
         &format!("Relation '{relation}' fact {fact_index} cells"),
     )?;
-    let items = sequence.try_iter()?.collect::<PyResult<Vec<_>>>()?;
-    let actual = items.len();
-    if actual != schema.arity() {
-        return Err(metadata_error(format!(
+    let items = collect_exact_sequence_items(sequence, schema.arity(), |actual| {
+        metadata_error(format!(
             "Relation '{relation}' fact {fact_index} cells arity mismatch: expected {}, received {actual}",
             schema.arity()
-        )));
-    }
+        ))
+    })?;
 
-    let mut cells = Vec::with_capacity(actual);
+    let mut cells = Vec::with_capacity(schema.arity());
     for (column, item) in items.iter().enumerate() {
         let context = format!("Relation '{relation}' fact {fact_index} cell {column}");
         let dict = dictionary(item, &context)?;
@@ -784,29 +1098,40 @@ fn parse_exact_cells(
                 "{context} type mismatch: expected '{expected_name}', received '{supplied_type}'"
             )));
         }
-        let encoded = required_string(dict, "hex", &context)?;
-        if encoded.bytes().any(|byte| byte.is_ascii_uppercase()) {
-            return Err(metadata_error(format!(
-                "{context} hex must use lowercase characters"
-            )));
-        }
+        let encoded_value = required_item(dict, "hex", &context)?;
+        let encoded = encoded_value
+            .downcast::<PyString>()
+            .map_err(|_| metadata_error(format!("{context} field 'hex' must be a string")))?
+            .to_str()
+            .map_err(|_| metadata_error(format!("{context} field 'hex' must be valid UTF-8")))?;
         if encoded.len() % 2 != 0 {
             return Err(metadata_error(format!(
                 "{context} hex must contain an even number of characters"
             )));
         }
-        let bytes = decode_hex(&encoded).ok_or_else(|| {
+        let expected_hex_len = expected_type.size_bytes() * 2;
+        if encoded.len() != expected_hex_len {
+            return Err(metadata_error(format!(
+                "{context} must encode exactly {} bytes for {expected_name}, received {} bytes",
+                expected_type.size_bytes(),
+                encoded.len() / 2
+            )));
+        }
+        if encoded.bytes().any(|byte| byte.is_ascii_uppercase()) {
+            return Err(metadata_error(format!(
+                "{context} hex must use lowercase characters"
+            )));
+        }
+        if encoded.bytes().any(|byte| !byte.is_ascii_hexdigit()) {
+            return Err(metadata_error(format!(
+                "{context} hex must contain only lowercase hexadecimal characters"
+            )));
+        }
+        let bytes = decode_hex(encoded).ok_or_else(|| {
             metadata_error(format!(
                 "{context} hex must contain only lowercase hexadecimal characters"
             ))
         })?;
-        if bytes.len() != expected_type.size_bytes() {
-            return Err(metadata_error(format!(
-                "{context} must encode exactly {} bytes for {expected_name}, received {} bytes",
-                expected_type.size_bytes(),
-                bytes.len()
-            )));
-        }
         if expected_type == ScalarType::Bool && !matches!(bytes.as_slice(), [0] | [1]) {
             return Err(metadata_error(format!(
                 "{context} bool hex must encode 00 or 01"
@@ -825,6 +1150,15 @@ fn parse_records(
     fact_index: usize,
     value: &Bound<'_, PyAny>,
 ) -> PyResult<BTreeSet<ProvenanceRecord>> {
+    parse_records_with_contract(relation, fact_index, value, false)
+}
+
+fn parse_records_with_contract(
+    relation: &str,
+    fact_index: usize,
+    value: &Bound<'_, PyAny>,
+    require_fixed_fields: bool,
+) -> PyResult<BTreeSet<ProvenanceRecord>> {
     let sequence = sequence(
         value,
         &format!("Relation '{relation}' fact {fact_index} provenance"),
@@ -832,21 +1166,27 @@ fn parse_records(
     let mut records = BTreeSet::new();
     for (record_index, item) in sequence.try_iter()?.enumerate() {
         let item = item?;
-        let context =
-            format!("Relation '{relation}' fact {fact_index} provenance record {record_index}");
+        let context = if require_fixed_fields {
+            format!(
+                "Relation '{relation}' manifest fact {fact_index} provenance record {record_index}"
+            )
+        } else {
+            format!("Relation '{relation}' fact {fact_index} provenance record {record_index}")
+        };
         let dict = dictionary(&item, &context)?;
-        reject_unknown_keys(
-            dict,
-            &[
-                "source",
-                "document",
-                "span",
-                "content_hash",
-                "kind",
-                "polarity",
-            ],
-            &context,
-        )?;
+        let fields = [
+            "source",
+            "document",
+            "span",
+            "content_hash",
+            "kind",
+            "polarity",
+        ];
+        if require_fixed_fields {
+            require_exact_keys(dict, &fields, &context)?;
+        } else {
+            reject_unknown_keys(dict, &fields, &context)?;
+        }
         let source = optional_string(dict, "source", &context)?;
         let document = optional_string(dict, "document", &context)?;
         let content_hash = optional_string(dict, "content_hash", &context)?;
@@ -1028,23 +1368,49 @@ fn pack_fact(
     dict.set_item("identity", fact_identity(relation, &key.cells)?)?;
 
     let tuple = PyList::empty(py);
-    let cells = PyList::empty(py);
     for cell in &key.cells {
         append_friendly_cell(&tuple, cell)?;
+    }
+    dict.set_item("tuple", tuple)?;
+    dict.set_item("cells", pack_exact_cells(py, &key.cells)?)?;
+
+    dict.set_item("provenance", pack_records(py, records)?)?;
+    Ok(dict.into())
+}
+
+fn pack_manifest_fact(
+    py: Python<'_>,
+    relation: &str,
+    key: &FactKey,
+    records: &BTreeSet<ProvenanceRecord>,
+) -> PyResult<PyObject> {
+    let fact = PyDict::new(py);
+    fact.set_item("identity", fact_identity(relation, &key.cells)?)?;
+    fact.set_item("cells", pack_exact_cells(py, &key.cells)?)?;
+    fact.set_item("provenance", pack_records(py, records)?)?;
+    Ok(fact.into())
+}
+
+fn pack_exact_cells<'py>(py: Python<'py>, cells: &[TypedCell]) -> PyResult<Bound<'py, PyList>> {
+    let packed = PyList::empty(py);
+    for cell in cells {
         let exact = PyDict::new(py);
         exact.set_item("type", types::scalar_type_name(&cell.scalar_type()))?;
         exact.set_item("hex", encode_hex(&cell.bytes))?;
-        cells.append(exact)?;
+        packed.append(exact)?;
     }
-    dict.set_item("tuple", tuple)?;
-    dict.set_item("cells", cells)?;
+    Ok(packed)
+}
 
-    let provenance = PyList::empty(py);
+fn pack_records<'py>(
+    py: Python<'py>,
+    records: &BTreeSet<ProvenanceRecord>,
+) -> PyResult<Bound<'py, PyList>> {
+    let packed = PyList::empty(py);
     for record in records {
-        provenance.append(pack_record(py, record)?)?;
+        packed.append(pack_record(py, record)?)?;
     }
-    dict.set_item("provenance", provenance)?;
-    Ok(dict.into())
+    Ok(packed)
 }
 
 fn append_friendly_cell(list: &Bound<'_, PyList>, cell: &TypedCell) -> PyResult<()> {
@@ -1222,6 +1588,32 @@ fn sequence<'py>(
         .map_err(|_| metadata_error(format!("{context} must be a sequence")))
 }
 
+fn sequence_has_item(sequence: &Bound<'_, PySequence>) -> PyResult<bool> {
+    Ok(sequence.try_iter()?.next().transpose()?.is_some())
+}
+
+fn collect_exact_sequence_items<'py>(
+    sequence: &'py Bound<'py, PySequence>,
+    expected: usize,
+    cardinality_error: impl Fn(&str) -> PyErr,
+) -> PyResult<Vec<Bound<'py, PyAny>>> {
+    let mut iterator = sequence.try_iter()?;
+    let mut items = Vec::with_capacity(expected);
+    while items.len() < expected {
+        let Some(item) = iterator.next().transpose()? else {
+            return Err(cardinality_error(&items.len().to_string()));
+        };
+        items.push(item);
+    }
+    if iterator.next().transpose()?.is_some() {
+        return Err(cardinality_error(&format!(
+            "{} or more",
+            expected.saturating_add(1)
+        )));
+    }
+    Ok(items)
+}
+
 fn dictionary<'py>(
     value: &'py Bound<'py, PyAny>,
     context: &str,
@@ -1243,6 +1635,56 @@ fn reject_unknown_keys(dict: &Bound<'_, PyDict>, allowed: &[&str], context: &str
         }
     }
     Ok(())
+}
+
+fn require_exact_keys(dict: &Bound<'_, PyDict>, required: &[&str], context: &str) -> PyResult<()> {
+    reject_unknown_keys(dict, required, context)?;
+    for key in required {
+        if !dict.contains(key)? {
+            return Err(metadata_error(format!(
+                "{context} is missing required '{key}'"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn required_item<'py>(
+    dict: &Bound<'py, PyDict>,
+    key: &str,
+    context: &str,
+) -> PyResult<Bound<'py, PyAny>> {
+    dict.get_item(key)?
+        .ok_or_else(|| metadata_error(format!("{context} is missing required '{key}'")))
+}
+
+fn required_usize(dict: &Bound<'_, PyDict>, key: &str, context: &str) -> PyResult<usize> {
+    let value = required_item(dict, key, context)?;
+    if value.is_instance_of::<PyBool>() || !value.is_instance_of::<PyInt>() {
+        return Err(metadata_error(format!(
+            "{context} field '{key}' must be a non-negative integer"
+        )));
+    }
+    let value = value.extract::<u64>().map_err(|_| {
+        metadata_error(format!(
+            "{context} field '{key}' must be a non-negative integer representable as u64"
+        ))
+    })?;
+    usize::try_from(value).map_err(|_| {
+        metadata_error(format!(
+            "{context} field '{key}' exceeds the native row-count range"
+        ))
+    })
+}
+
+fn required_bool(dict: &Bound<'_, PyDict>, key: &str, context: &str) -> PyResult<bool> {
+    let value = required_item(dict, key, context)?;
+    if !value.is_instance_of::<PyBool>() {
+        return Err(metadata_error(format!(
+            "{context} field '{key}' must be a Python bool"
+        )));
+    }
+    value.extract::<bool>()
 }
 
 fn required_string(dict: &Bound<'_, PyDict>, key: &str, context: &str) -> PyResult<String> {
@@ -1331,6 +1773,10 @@ fn encode_hex(bytes: &[u8]) -> String {
 
 fn prefixed_digest(digest: Sha256) -> String {
     format!("sha256:{}", encode_hex(&digest.finalize()))
+}
+
+fn prefixed_digest_bytes(digest: &[u8; 32]) -> String {
+    format!("sha256:{}", encode_hex(digest))
 }
 
 fn format_cells(cells: &[TypedCell]) -> String {

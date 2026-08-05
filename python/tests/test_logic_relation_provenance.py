@@ -1,5 +1,7 @@
-import hashlib
+import copy
 import gc
+import hashlib
+import math
 import os
 import struct
 
@@ -95,6 +97,30 @@ class _IteratesAs(list):
         return iter(self._iterated_values)
 
 
+class _LiesAboutLength(list):
+    def __len__(self):
+        return (1 << 63) - 1
+
+
+class _HugeLengthHintIterator:
+    def __init__(self, values):
+        self._values = iter(values)
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        return next(self._values)
+
+    def __length_hint__(self):
+        return (1 << 63) - 1
+
+
+class _LiesAboutIteratorLength(list):
+    def __iter__(self):
+        return _HugeLengthHintIterator(super().__iter__())
+
+
 def _metadata_error():
     return pyxlog.RelationMetadataError
 
@@ -109,6 +135,30 @@ def _fact_identity(relation: str, typed_cells: list[tuple[int, bytes]]) -> str:
         payload += bytes([type_code])
         payload += struct.pack("<I", len(cell))
         payload += cell
+    return "sha256:" + hashlib.sha256(payload).hexdigest()
+
+
+def _schema_identity(
+    relation: str,
+    columns: list[tuple[str, int, str | None]],
+) -> str:
+    payload = bytearray(b"xlog.relation.schema.v1\0")
+    encoded_name = relation.encode("utf-8")
+    payload += struct.pack("<I", len(encoded_name))
+    payload += encoded_name
+    payload += struct.pack("<I", len(columns))
+    for name, type_code, sort in columns:
+        encoded_column = name.encode("utf-8")
+        payload += struct.pack("<I", len(encoded_column))
+        payload += encoded_column
+        payload += bytes([type_code])
+        if sort is None:
+            payload += b"\0"
+        else:
+            encoded_sort = sort.encode("utf-8")
+            payload += b"\1"
+            payload += struct.pack("<I", len(encoded_sort))
+            payload += encoded_sort
     return "sha256:" + hashlib.sha256(payload).hexdigest()
 
 
@@ -1417,3 +1467,995 @@ def test_remove_clear_and_replacement_keep_metadata_and_generations_consistent()
         session.relation("alpha")
     session.insert_relation("transfer", _transfer_columns(rows=((13, 14, 15, 16),)))
     assert events[-1]["generation"] == 3
+
+
+def _manifest_node(manifest, path):
+    node = manifest
+    for component in path:
+        node = node[component]
+    return node
+
+
+def _transfer_manifest_export(rows=((1, 2, 3, 4),)):
+    source = _session()
+    snapshot = source.put_relation_with_provenance(
+        "transfer",
+        _transfer_columns(rows=rows),
+        roles=TRANSFER_ROLES,
+        facts=[
+            _fact(
+                rows[0],
+                _record(source="first-source", document=None, span=None),
+                _record(source="second-source", document="review", span={"start": 2, "end": 5}),
+            )
+        ],
+    )
+    exported = source.export_relation_with_provenance("transfer")
+    return source, snapshot, exported
+
+
+def _seed_manifest_import_target():
+    target = _session()
+    original = (90, 91, 92, 93)
+    target.put_relation_with_provenance(
+        "transfer",
+        _transfer_columns(rows=(original,)),
+        roles=TRANSFER_ROLES,
+        facts=[_fact(original, _record(source="preserved"))],
+    )
+    events = []
+    target.register_relation_callback(events.append)
+    return target, events
+
+
+def _assert_manifest_failure_is_atomic(manifest, columns, match):
+    target, events = _seed_manifest_import_target()
+    before_rows = _exported_rows(target, "transfer")
+    before_evidence = target.evidence()
+    before_stats = target.delta_stats()
+
+    with pytest.raises(_metadata_error(), match=match):
+        target.put_relation_from_manifest("transfer", columns, manifest)
+
+    assert _exported_rows(target, "transfer") == before_rows
+    assert target.evidence() == before_evidence
+    assert target.delta_stats() == before_stats
+    assert events == []
+    target.insert_relation(
+        "transfer", _transfer_columns(rows=((94, 95, 96, 97),))
+    )
+    assert [event["generation"] for event in events] == [1]
+
+
+def test_manifest_quaternary_direct_dlpack_round_trip_is_exact_and_lifetime_safe():
+    source_program = SOURCE + "\n?- transfer(Giver, Receiver, Asset, Time).\n"
+    source = _session(source_program)
+    rows = ((1, 2, 3, 4), (5, 6, 7, 8))
+    snapshot = source.put_relation_with_provenance(
+        "transfer",
+        _transfer_columns(rows=rows),
+        roles=TRANSFER_ROLES,
+        facts=[
+            _fact(
+                rows[0],
+                _record(source="manual", document=None, span=None, kind="confirmation"),
+                _record(source="extractor", document="document", span={"start": 1, "end": 9}),
+            )
+        ],
+    )
+
+    exported = source.export_relation_with_provenance("transfer")
+    assert set(exported) == {"columns", "manifest"}
+    assert isinstance(exported["columns"], list)
+    assert len(exported["columns"]) == 4
+    manifest = exported["manifest"]
+    assert set(manifest) == {
+        "format",
+        "version",
+        "predicate",
+        "row_count",
+        "metadata_present",
+        "roles",
+        "facts",
+    }
+    assert manifest["format"] == "xlog.relation-provenance"
+    assert manifest["version"] == 1
+    assert manifest["predicate"] == {
+        "name": "transfer",
+        "arity": 4,
+        "schema_sha256": _schema_identity(
+            "transfer",
+            [
+                ("giver", 0, "party"),
+                ("receiver", 0, "party"),
+                ("asset", 0, "asset"),
+                ("time", 3, None),
+            ],
+        ),
+    }
+    assert manifest["row_count"] == 2
+    assert manifest["metadata_present"] is True
+    assert manifest["roles"] == snapshot["roles"]
+    assert len(manifest["facts"]) == 1
+    assert set(manifest["facts"][0]) == {"identity", "cells", "provenance"}
+    assert "tuple" not in manifest["facts"][0]
+    assert manifest["facts"][0]["identity"] == snapshot["facts"][0]["identity"]
+    assert manifest["facts"][0]["cells"] == snapshot["facts"][0]["cells"]
+    assert manifest["facts"][0]["provenance"] == snapshot["facts"][0]["provenance"]
+    assert "program_hash" not in manifest
+
+    fresh = _session(source_program)
+    reconstructed = fresh.put_relation_from_manifest(
+        "transfer", exported["columns"], manifest
+    )
+    assert reconstructed == snapshot
+    assert fresh.relation("transfer").provenance() == snapshot
+    assert _exported_rows(source, "transfer") == sorted(rows)
+
+    del exported
+    del source
+    gc.collect()
+    torch.cuda.synchronize()
+    fresh.reset_host_transfer_stats()
+    query = fresh.evaluate().queries[0]
+    assert all(pyxlog.dlpack_is_cuda(column) for column in query.tensors)
+    assert fresh.host_transfer_stats()["dtoh_bytes"] == 0
+    query_columns = [torch.from_dlpack(column).cpu().tolist() for column in query.tensors]
+    assert sorted(zip(*query_columns)) == sorted(rows)
+
+
+def test_manifest_metadata_free_ternary_round_trip_has_no_membership_transfer():
+    program = "pred positional(u32, i64, symbol). ?- positional(A, B, C)."
+    source = _session(program)
+    columns = [
+        torch.tensor([1, 2], device="cuda", dtype=torch.int32),
+        torch.tensor([-3, 4], device="cuda", dtype=torch.int64),
+        torch.tensor([7, 9], device="cuda", dtype=torch.int32),
+    ]
+    source.put_relation("positional", columns)
+    exported = source.export_relation_with_provenance("positional")
+    manifest = exported["manifest"]
+    assert manifest == {
+        "format": "xlog.relation-provenance",
+        "version": 1,
+        "predicate": {
+            "name": "positional",
+            "arity": 3,
+            "schema_sha256": _schema_identity(
+                "positional",
+                [("c0", 0, None), ("c1", 3, None), ("c2", 7, None)],
+            ),
+        },
+        "row_count": 2,
+        "metadata_present": False,
+        "roles": [],
+        "facts": [],
+    }
+
+    fresh = _session(program)
+    fresh.reset_host_transfer_stats()
+    fresh.reset_deterministic_d2h_violations()
+    fresh.set_strict_deterministic_d2h(True)
+    try:
+        snapshot = fresh.put_relation_from_manifest(
+            "positional", exported["columns"], manifest
+        )
+    finally:
+        fresh.set_strict_deterministic_d2h(False)
+    assert snapshot == {
+        "relation": "positional",
+        "metadata_present": False,
+        "row_count": 2,
+        "roles": [],
+        "facts": [],
+    }
+    assert fresh.host_transfer_stats()["dtoh_calls"] == 0
+    assert fresh.host_transfer_stats()["dtoh_bytes"] == 0
+    assert fresh.deterministic_d2h_violation_count() == 0
+    query = fresh.evaluate().queries[0]
+    query_columns = [torch.from_dlpack(column).cpu().tolist() for column in query.tensors]
+    assert sorted(zip(*query_columns)) == [(1, -3, 7), (2, 4, 9)]
+
+
+def test_manifest_reconstruction_is_row_order_independent_sparse_and_symbol_numeric():
+    program = "pred positional(u32, i64, symbol). ?- positional(A, B, C)."
+    source = _session(program)
+    rows = ((1, 10, 7), (2, 20, 9), (3, 30, 11))
+    source_snapshot = source.put_relation_with_provenance(
+        "positional",
+        [
+            torch.tensor([row[0] for row in rows], device="cuda", dtype=torch.int32),
+            torch.tensor([row[1] for row in rows], device="cuda", dtype=torch.int64),
+            torch.tensor([row[2] for row in rows], device="cuda", dtype=torch.int32),
+        ],
+        roles=[{"name": "entity"}, {"name": "time"}, {"name": "label"}],
+        facts=[_fact(rows[1], _record(source="sparse"))],
+    )
+    exported = source.export_relation_with_provenance("positional")
+    tensors = [torch.from_dlpack(column) for column in exported["columns"]]
+    order = torch.tensor([2, 0, 1], device="cuda")
+    reordered = [column.index_select(0, order) for column in tensors]
+
+    fresh = _session(program)
+    snapshot = fresh.put_relation_from_manifest(
+        "positional", reordered, exported["manifest"]
+    )
+    assert snapshot == source_snapshot
+    assert snapshot["row_count"] == 3
+    assert snapshot["roles"] == [
+        {"name": "entity", "sort": None, "type": "u32"},
+        {"name": "time", "sort": None, "type": "i64"},
+        {"name": "label", "sort": None, "type": "symbol"},
+    ]
+    assert [fact["tuple"] for fact in snapshot["facts"]] == [[2, 20, 9]]
+    assert snapshot["facts"][0]["cells"][2] == {
+        "type": "symbol",
+        "hex": "09000000",
+    }
+    query = fresh.evaluate().queries[0]
+    query_columns = [torch.from_dlpack(column).cpu().tolist() for column in query.tensors]
+    assert sorted(zip(*query_columns)) == sorted(rows)
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        (),
+        ("predicate",),
+        ("roles", 0),
+        ("facts", 0),
+        ("facts", 0, "cells", 0),
+        ("facts", 0, "provenance", 1),
+        ("facts", 0, "provenance", 1, "span"),
+    ],
+)
+def test_manifest_unknown_keys_are_rejected_at_every_dictionary_level(path):
+    _source, _snapshot, exported = _transfer_manifest_export()
+    columns = [torch.from_dlpack(column) for column in exported["columns"]]
+    manifest = copy.deepcopy(exported["manifest"])
+    _manifest_node(manifest, path)["unexpected"] = "value"
+    _assert_manifest_failure_is_atomic(manifest, columns, "unknown key")
+
+
+@pytest.mark.parametrize(
+    "path, key",
+    [
+        ((), "format"),
+        ((), "version"),
+        ((), "predicate"),
+        ((), "row_count"),
+        ((), "metadata_present"),
+        ((), "roles"),
+        ((), "facts"),
+        (("predicate",), "name"),
+        (("predicate",), "arity"),
+        (("predicate",), "schema_sha256"),
+        (("roles", 0), "name"),
+        (("roles", 0), "sort"),
+        (("roles", 0), "type"),
+        (("facts", 0), "identity"),
+        (("facts", 0), "cells"),
+        (("facts", 0), "provenance"),
+        (("facts", 0, "cells", 0), "type"),
+        (("facts", 0, "cells", 0), "hex"),
+        (("facts", 0, "provenance", 1), "source"),
+        (("facts", 0, "provenance", 1), "document"),
+        (("facts", 0, "provenance", 1), "span"),
+        (("facts", 0, "provenance", 1), "content_hash"),
+        (("facts", 0, "provenance", 1), "kind"),
+        (("facts", 0, "provenance", 1), "polarity"),
+        (("facts", 0, "provenance", 1, "span"), "start"),
+        (("facts", 0, "provenance", 1, "span"), "end"),
+    ],
+)
+def test_manifest_required_keys_are_rejected_at_every_dictionary_level(path, key):
+    _source, _snapshot, exported = _transfer_manifest_export()
+    columns = [torch.from_dlpack(column) for column in exported["columns"]]
+    manifest = copy.deepcopy(exported["manifest"])
+    del _manifest_node(manifest, path)[key]
+    _assert_manifest_failure_is_atomic(manifest, columns, "missing required")
+
+
+@pytest.mark.parametrize(
+    "case, match",
+    [
+        ("wrong_format", "format"),
+        ("unsupported_version", "version"),
+        ("boolean_version", "version"),
+        ("wrong_predicate", "predicate"),
+        ("wrong_arity", "arity"),
+        ("boolean_arity", "arity"),
+        ("wrong_schema", "schema"),
+        ("wrong_row_count", "row count"),
+        ("boolean_row_count", "row_count"),
+        ("integer_metadata_present", "metadata_present"),
+        ("metadata_absent_with_roles", "metadata_present"),
+        ("changed_identity", "identity"),
+        ("uppercase_cell", "lowercase"),
+        ("changed_role_name", "role 0"),
+        ("reordered_roles", "role 0"),
+        ("changed_role_sort", "sort"),
+        ("changed_role_type", "type"),
+        ("null_role_sort", "sort"),
+        ("null_role_type", "type"),
+        ("changed_cell_type", "type"),
+        ("short_cell", "4 bytes"),
+        ("oversized_cell", "4 bytes"),
+        ("nonhex_cell", "hex"),
+        ("record_value_type", "source"),
+        ("span_negative", "non-negative"),
+        ("span_bool", "non-negative"),
+        ("span_reversed", "start"),
+    ],
+)
+def test_manifest_static_mismatches_are_atomic(case, match):
+    _source, _snapshot, exported = _transfer_manifest_export()
+    columns = [torch.from_dlpack(column) for column in exported["columns"]]
+    manifest = copy.deepcopy(exported["manifest"])
+    if case == "wrong_format":
+        manifest["format"] = "other"
+    elif case == "unsupported_version":
+        manifest["version"] = 2
+    elif case == "boolean_version":
+        manifest["version"] = True
+    elif case == "wrong_predicate":
+        manifest["predicate"]["name"] = "other"
+    elif case == "wrong_arity":
+        manifest["predicate"]["arity"] = 3
+    elif case == "boolean_arity":
+        manifest["predicate"]["arity"] = True
+    elif case == "wrong_schema":
+        manifest["predicate"]["schema_sha256"] = "sha256:" + "0" * 64
+    elif case == "wrong_row_count":
+        manifest["row_count"] += 1
+    elif case == "boolean_row_count":
+        manifest["row_count"] = True
+    elif case == "integer_metadata_present":
+        manifest["metadata_present"] = 1
+    elif case == "metadata_absent_with_roles":
+        manifest["metadata_present"] = False
+    elif case == "changed_identity":
+        manifest["facts"][0]["identity"] = "sha256:" + "f" * 64
+    elif case == "uppercase_cell":
+        manifest["facts"][0]["cells"][0]["hex"] = "0100000A"
+    elif case == "changed_role_name":
+        manifest["roles"][0]["name"] = "other"
+    elif case == "reordered_roles":
+        manifest["roles"][0], manifest["roles"][1] = (
+            manifest["roles"][1],
+            manifest["roles"][0],
+        )
+    elif case == "changed_role_sort":
+        manifest["roles"][0]["sort"] = "asset"
+    elif case == "changed_role_type":
+        manifest["roles"][0]["type"] = "i32"
+    elif case == "null_role_sort":
+        manifest["roles"][0]["sort"] = None
+    elif case == "null_role_type":
+        manifest["roles"][0]["type"] = None
+    elif case == "changed_cell_type":
+        manifest["facts"][0]["cells"][0]["type"] = "i32"
+    elif case == "short_cell":
+        manifest["facts"][0]["cells"][0]["hex"] = "01"
+    elif case == "oversized_cell":
+        manifest["facts"][0]["cells"][0]["hex"] = "00" * (1024 * 1024)
+    elif case == "nonhex_cell":
+        manifest["facts"][0]["cells"][0]["hex"] = "nothex00"
+    elif case == "record_value_type":
+        manifest["facts"][0]["provenance"][0]["source"] = 7
+    elif case == "span_negative":
+        manifest["facts"][0]["provenance"][1]["span"]["start"] = -1
+    elif case == "span_bool":
+        manifest["facts"][0]["provenance"][1]["span"]["start"] = True
+    elif case == "span_reversed":
+        manifest["facts"][0]["provenance"][1]["span"] = {"start": 6, "end": 5}
+    else:
+        raise AssertionError(f"unhandled case {case}")
+    _assert_manifest_failure_is_atomic(manifest, columns, match)
+
+
+@pytest.mark.parametrize(
+    "case, match",
+    [
+        ("top", "dictionary"),
+        ("predicate", "predicate.*dictionary"),
+        ("roles", "roles.*sequence"),
+        ("facts", "facts.*sequence"),
+        ("cells", "cells.*sequence"),
+        ("provenance", "provenance.*sequence"),
+        ("span", "span.*dictionary"),
+    ],
+)
+def test_manifest_wrong_container_types_are_rejected_atomically(case, match):
+    _source, _snapshot, exported = _transfer_manifest_export()
+    columns = [torch.from_dlpack(column) for column in exported["columns"]]
+    manifest = copy.deepcopy(exported["manifest"])
+    if case == "top":
+        manifest = []
+    elif case == "predicate":
+        manifest["predicate"] = []
+    elif case == "roles":
+        manifest["roles"] = {}
+    elif case == "facts":
+        manifest["facts"] = {}
+    elif case == "cells":
+        manifest["facts"][0]["cells"] = {}
+    elif case == "provenance":
+        manifest["facts"][0]["provenance"] = {}
+    elif case == "span":
+        manifest["facts"][0]["provenance"][1]["span"] = []
+    else:
+        raise AssertionError(f"unhandled case {case}")
+    _assert_manifest_failure_is_atomic(manifest, columns, match)
+
+
+@pytest.mark.parametrize(
+    "case, match",
+    [
+        ("missing_role", "expected 4 roles"),
+        ("extra_role", "expected 4 roles"),
+        ("role_element", "role 0.*dictionary"),
+        ("missing_cell", "cells arity mismatch"),
+        ("extra_cell", "cells arity mismatch"),
+        ("cell_element", "cell 0.*dictionary"),
+        ("fact_element", "fact 0.*dictionary"),
+        ("record_element", "record 0.*dictionary"),
+    ],
+)
+def test_manifest_sequence_arities_and_element_types_are_strict(case, match):
+    _source, _snapshot, exported = _transfer_manifest_export()
+    columns = [torch.from_dlpack(column) for column in exported["columns"]]
+    manifest = copy.deepcopy(exported["manifest"])
+    if case == "missing_role":
+        manifest["roles"].pop()
+    elif case == "extra_role":
+        manifest["roles"].append(copy.deepcopy(manifest["roles"][-1]))
+    elif case == "role_element":
+        manifest["roles"][0] = 1
+    elif case == "missing_cell":
+        manifest["facts"][0]["cells"].pop()
+    elif case == "extra_cell":
+        manifest["facts"][0]["cells"].append(
+            copy.deepcopy(manifest["facts"][0]["cells"][-1])
+        )
+    elif case == "cell_element":
+        manifest["facts"][0]["cells"][0] = 1
+    elif case == "fact_element":
+        manifest["facts"][0] = 1
+    elif case == "record_element":
+        manifest["facts"][0]["provenance"][0] = 1
+    else:
+        raise AssertionError(f"unhandled case {case}")
+    _assert_manifest_failure_is_atomic(manifest, columns, match)
+
+
+def test_unsupported_manifest_version_takes_precedence_over_future_shape():
+    _source, _snapshot, exported = _transfer_manifest_export()
+    future_manifest = {
+        "format": "xlog.relation-provenance",
+        "version": 2,
+        "future_only": object(),
+    }
+    target = _session()
+    with pytest.raises(_metadata_error(), match="unsupported.*version 2"):
+        target.put_relation_from_manifest(
+            "transfer", exported["columns"], future_manifest
+        )
+    recovered = [torch.from_dlpack(column).cpu().tolist() for column in exported["columns"]]
+    assert list(zip(*recovered)) == [(1, 2, 3, 4)]
+
+
+def test_manifest_import_normalizes_fact_and_record_order_and_exact_duplicates():
+    source = _session()
+    rows = ((1, 2, 3, 4), (5, 6, 7, 8))
+    expected = source.put_relation_with_provenance(
+        "transfer",
+        _transfer_columns(rows=rows),
+        roles=TRANSFER_ROLES,
+        facts=[
+            _fact(rows[0], _record(source="a"), _record(source="b")),
+            _fact(rows[1], _record(source="c"), _record(source="d")),
+        ],
+    )
+    exported = source.export_relation_with_provenance("transfer")
+    manifest = copy.deepcopy(exported["manifest"])
+    manifest["facts"].reverse()
+    for fact in manifest["facts"]:
+        fact["provenance"].reverse()
+        fact["provenance"].append(copy.deepcopy(fact["provenance"][0]))
+    manifest["facts"].append(copy.deepcopy(manifest["facts"][0]))
+
+    fresh = _session()
+    fresh.reset_host_transfer_stats()
+    reconstructed = fresh.put_relation_from_manifest(
+        "transfer", exported["columns"], manifest
+    )
+    assert reconstructed == expected
+    assert fresh.host_transfer_stats()["dtoh_calls"] == 1
+    assert fresh.host_transfer_stats()["dtoh_bytes"] == 2
+
+
+def test_manifest_static_validation_does_not_consume_dlpack_capsules():
+    _source, _snapshot, exported = _transfer_manifest_export()
+    manifest = copy.deepcopy(exported["manifest"])
+    manifest["version"] = 2
+    target = _session()
+    with pytest.raises(_metadata_error(), match="version"):
+        target.put_relation_from_manifest("transfer", exported["columns"], manifest)
+    recovered = [torch.from_dlpack(column).cpu().tolist() for column in exported["columns"]]
+    assert list(zip(*recovered)) == [(1, 2, 3, 4)]
+
+
+@pytest.mark.parametrize("case", ["missing", "extra"])
+def test_manifest_column_arity_failures_do_not_consume_dlpack_capsules(case):
+    _source, expected, exported = _transfer_manifest_export()
+    columns = list(exported["columns"])
+    if case == "missing":
+        invalid_columns = columns[:-1]
+    elif case == "extra":
+        invalid_columns = [*columns, columns[0]]
+    else:
+        raise AssertionError(f"unhandled case {case}")
+
+    target = _session()
+    with pytest.raises(RuntimeError, match="tensor count"):
+        target.put_relation_from_manifest(
+            "transfer", invalid_columns, exported["manifest"]
+        )
+    assert (
+        target.put_relation_from_manifest(
+            "transfer", exported["columns"], exported["manifest"]
+        )
+        == expected
+    )
+    assert _exported_rows(target, "transfer") == [(1, 2, 3, 4)]
+
+
+@pytest.mark.parametrize("case", ["role", "identity", "nested_unknown"])
+def test_manifest_late_static_failures_do_not_consume_dlpack_capsules(case):
+    _source, _snapshot, exported = _transfer_manifest_export()
+    manifest = copy.deepcopy(exported["manifest"])
+    if case == "role":
+        manifest["roles"][0]["name"] = "other"
+    elif case == "identity":
+        manifest["facts"][0]["identity"] = "sha256:" + "f" * 64
+    elif case == "nested_unknown":
+        manifest["facts"][0]["provenance"][0]["unexpected"] = 1
+    else:
+        raise AssertionError(f"unhandled case {case}")
+
+    target = _session()
+    with pytest.raises(_metadata_error()):
+        target.put_relation_from_manifest("transfer", exported["columns"], manifest)
+    recovered = [torch.from_dlpack(column).cpu().tolist() for column in exported["columns"]]
+    assert list(zip(*recovered)) == [(1, 2, 3, 4)]
+
+
+def test_manifest_schema_identity_mismatch_is_rejected_before_dlpack_import():
+    source = _session("pred item(value: i32).")
+    source.put_relation_with_provenance(
+        "item",
+        [torch.tensor([1], device="cuda", dtype=torch.int32)],
+        roles=[{"name": "value"}],
+        facts=[_fact((1,))],
+    )
+    exported = source.export_relation_with_provenance("item")
+    target = _session("pred item(other: i32).")
+    with pytest.raises(_metadata_error(), match="schema"):
+        target.put_relation_from_manifest(
+            "item", exported["columns"], exported["manifest"]
+        )
+    assert torch.from_dlpack(exported["columns"][0]).cpu().tolist() == [1]
+    assert target.relation("item").provenance()["row_count"] == 0
+
+
+@pytest.mark.parametrize("case", ["dtype", "column_count", "row_lengths"])
+def test_manifest_dlpack_failures_preserve_target_state(case):
+    _source, _snapshot, exported = _transfer_manifest_export()
+    columns = _transfer_columns(rows=((1, 2, 3, 4),))
+    if case == "dtype":
+        columns[0] = torch.tensor([1.0], device="cuda", dtype=torch.float32)
+    elif case == "column_count":
+        columns.pop()
+    elif case == "row_lengths":
+        columns[0] = torch.tensor([1, 2], device="cuda", dtype=torch.int32)
+    else:
+        raise AssertionError(f"unhandled case {case}")
+
+    target, events = _seed_manifest_import_target()
+    before_rows = _exported_rows(target, "transfer")
+    before_evidence = target.evidence()
+    before_stats = target.delta_stats()
+    with pytest.raises(RuntimeError):
+        target.put_relation_from_manifest(
+            "transfer", columns, exported["manifest"]
+        )
+    assert _exported_rows(target, "transfer") == before_rows
+    assert target.evidence() == before_evidence
+    assert target.delta_stats() == before_stats
+    assert events == []
+    target.insert_relation(
+        "transfer", _transfer_columns(rows=((94, 95, 96, 97),))
+    )
+    assert [event["generation"] for event in events] == [1]
+
+
+def test_manifest_absent_fact_membership_is_rejected_atomically():
+    _source, _snapshot, exported = _transfer_manifest_export()
+    columns = [torch.from_dlpack(column) for column in exported["columns"]]
+    manifest = copy.deepcopy(exported["manifest"])
+    manifest["facts"][0]["cells"][3]["hex"] = struct.pack("<q", 5).hex()
+    manifest["facts"][0]["identity"] = _fact_identity(
+        "transfer",
+        [
+            (0, struct.pack("<I", 1)),
+            (0, struct.pack("<I", 2)),
+            (0, struct.pack("<I", 3)),
+            (3, struct.pack("<q", 5)),
+        ],
+    )
+    _assert_manifest_failure_is_atomic(manifest, columns, "not present")
+
+
+def test_manifest_strict_membership_gate_fails_before_any_session_mutation():
+    _source, _snapshot, exported = _transfer_manifest_export()
+    columns = [torch.from_dlpack(column) for column in exported["columns"]]
+    target, events = _seed_manifest_import_target()
+    before_rows = _exported_rows(target, "transfer")
+    before_evidence = target.evidence()
+    before_stats = target.delta_stats()
+    target.reset_deterministic_d2h_violations()
+    target.set_strict_deterministic_d2h(True)
+    try:
+        with pytest.raises(RuntimeError, match=r"deterministic D2H gate.*1 bytes"):
+            target.put_relation_from_manifest(
+                "transfer", columns, exported["manifest"]
+            )
+    finally:
+        target.set_strict_deterministic_d2h(False)
+    assert target.deterministic_d2h_violation_count() == 1
+    assert _exported_rows(target, "transfer") == before_rows
+    assert target.evidence() == before_evidence
+    assert target.delta_stats() == before_stats
+    assert events == []
+
+
+def test_manifest_role_only_and_empty_provenance_fact_round_trip_without_fabrication():
+    role_only = _session()
+    role_only.put_relation_with_provenance(
+        "transfer",
+        _transfer_columns(rows=((1, 2, 3, 4),)),
+        roles=TRANSFER_ROLES,
+        facts=[],
+    )
+    exported = role_only.export_relation_with_provenance("transfer")
+    fresh = _session()
+    fresh.reset_host_transfer_stats()
+    fresh.reset_deterministic_d2h_violations()
+    fresh.set_strict_deterministic_d2h(True)
+    try:
+        snapshot = fresh.put_relation_from_manifest(
+            "transfer", exported["columns"], exported["manifest"]
+        )
+    finally:
+        fresh.set_strict_deterministic_d2h(False)
+    assert snapshot["metadata_present"] is True
+    assert snapshot["roles"] == [
+        *TRANSFER_ROLES[:3],
+        {"name": "time", "sort": None, "type": "i64"},
+    ]
+    assert snapshot["facts"] == []
+    assert fresh.host_transfer_stats()["dtoh_bytes"] == 0
+    assert fresh.deterministic_d2h_violation_count() == 0
+
+    empty_records = _session()
+    empty_records.put_relation_with_provenance(
+        "transfer",
+        _transfer_columns(rows=((5, 6, 7, 8),)),
+        roles=TRANSFER_ROLES,
+        facts=[{"tuple": [5, 6, 7, 8], "provenance": []}],
+    )
+    exported = empty_records.export_relation_with_provenance("transfer")
+    reconstructed = _session().put_relation_from_manifest(
+        "transfer", exported["columns"], exported["manifest"]
+    )
+    assert reconstructed["facts"][0]["tuple"] == [5, 6, 7, 8]
+    assert reconstructed["facts"][0]["provenance"] == []
+
+
+def test_manifest_success_replaces_old_rows_and_metadata_free_import_clears_evidence():
+    source, expected, exported = _transfer_manifest_export(rows=((1, 2, 3, 4),))
+    target, events = _seed_manifest_import_target()
+    reconstructed = target.put_relation_from_manifest(
+        "transfer", exported["columns"], exported["manifest"]
+    )
+    assert reconstructed == expected
+    assert _exported_rows(target, "transfer") == [(1, 2, 3, 4)]
+    assert target.relation("transfer").provenance() == expected
+    assert events == []
+    assert _exported_rows(source, "transfer") == [(1, 2, 3, 4)]
+
+    plain = _session()
+    plain.put_relation("transfer", _transfer_columns(rows=((20, 21, 22, 23),)))
+    plain_export = plain.export_relation_with_provenance("transfer")
+    cleared = target.put_relation_from_manifest(
+        "transfer", plain_export["columns"], plain_export["manifest"]
+    )
+    assert cleared["metadata_present"] is False
+    assert cleared["roles"] == []
+    assert cleared["facts"] == []
+    assert _exported_rows(target, "transfer") == [(20, 21, 22, 23)]
+
+
+def test_manifest_positional_import_respects_existing_role_contract_atomically():
+    program = "pred positional(u32, i64, symbol)."
+    target = _session(program)
+    columns = [
+        torch.tensor([1], device="cuda", dtype=torch.int32),
+        torch.tensor([2], device="cuda", dtype=torch.int64),
+        torch.tensor([3], device="cuda", dtype=torch.int32),
+    ]
+    target.put_relation_with_provenance(
+        "positional",
+        columns,
+        roles=[{"name": "entity"}, {"name": "time"}, {"name": "label"}],
+        facts=[],
+    )
+    before = target.relation("positional").provenance()
+
+    source = _session(program)
+    source.put_relation_with_provenance(
+        "positional",
+        columns,
+        roles=[{"name": "subject"}, {"name": "instant"}, {"name": "category"}],
+        facts=[],
+    )
+    exported = source.export_relation_with_provenance("positional")
+    with pytest.raises(_metadata_error(), match="registered role contract"):
+        target.put_relation_from_manifest(
+            "positional", exported["columns"], exported["manifest"]
+        )
+    assert target.relation("positional").provenance() == before
+    assert [torch.from_dlpack(column).cpu().tolist() for column in exported["columns"]] == [
+        [1],
+        [2],
+        [3],
+    ]
+
+
+def test_manifest_repeated_exports_have_identical_canonical_ordering():
+    source = _session()
+    rows = ((5, 6, 7, 8), (1, 2, 3, 4))
+    source.put_relation_with_provenance(
+        "transfer",
+        _transfer_columns(rows=rows),
+        roles=TRANSFER_ROLES,
+        facts=[
+            _fact(rows[0], _record(source="z"), _record(source="a")),
+            _fact(rows[1], _record(source="y"), _record(source="b")),
+        ],
+    )
+    first = source.export_relation_with_provenance("transfer")["manifest"]
+    second = source.export_relation_with_provenance("transfer")["manifest"]
+    assert first == second
+    assert [fact["cells"] for fact in first["facts"]] == [
+        fact["cells"] for fact in second["facts"]
+    ]
+    assert [record["source"] for record in first["facts"][0]["provenance"]] == [
+        "b",
+        "y",
+    ]
+    assert _exported_rows(source, "transfer") == sorted(rows)
+
+
+def test_manifest_export_capsules_outlive_their_source_session_until_import():
+    source, expected, exported = _transfer_manifest_export()
+    del source
+    gc.collect()
+    torch.cuda.synchronize()
+    fresh = _session()
+    assert (
+        fresh.put_relation_from_manifest(
+            "transfer", exported["columns"], exported["manifest"]
+        )
+        == expected
+    )
+    assert _exported_rows(fresh, "transfer") == [(1, 2, 3, 4)]
+
+
+def test_manifest_and_legacy_put_ignore_untrusted_sequence_length_hints():
+    source, _snapshot, exported = _transfer_manifest_export()
+    exported_tensors = [torch.from_dlpack(column) for column in exported["columns"]]
+    fresh = _session()
+    reconstructed = fresh.put_relation_from_manifest(
+        "transfer",
+        _LiesAboutLength(exported_tensors),
+        exported["manifest"],
+    )
+    assert reconstructed["row_count"] == 1
+    assert _exported_rows(fresh, "transfer") == [(1, 2, 3, 4)]
+
+    legacy = _session()
+    legacy.put_relation(
+        "transfer",
+        _LiesAboutLength(_transfer_columns(rows=((5, 6, 7, 8),))),
+    )
+    assert _exported_rows(legacy, "transfer") == [(5, 6, 7, 8)]
+    assert _exported_rows(source, "transfer") == [(1, 2, 3, 4)]
+
+    batch = _session()
+    batch.apply_relation_delta_batch(
+        _LiesAboutLength(
+            [
+                {
+                    "name": "transfer",
+                    "insert_columns": _transfer_columns(rows=((9, 10, 11, 12),)),
+                }
+            ]
+        )
+    )
+    assert _exported_rows(batch, "transfer") == [(9, 10, 11, 12)]
+
+    debug = _session()
+    result = debug.apply_relation_delta_debug(
+        _LiesAboutLength(
+            [
+                {
+                    "name": "transfer",
+                    "insert_columns": _transfer_columns(rows=((13, 14, 15, 16),)),
+                }
+            ]
+        ),
+        check_equivalence=True,
+    )
+    assert result["equivalent_to_full_recompute"] is True
+    assert _exported_rows(debug, "transfer") == [(13, 14, 15, 16)]
+
+
+def test_structured_and_manifest_sequences_ignore_untrusted_iterator_length_hints():
+    row = (1, 2, 3, 4)
+    structured = _session()
+    structured.put_relation_with_provenance(
+        "transfer",
+        _LiesAboutIteratorLength(_transfer_columns(rows=(row,))),
+        roles=_LiesAboutIteratorLength(TRANSFER_ROLES),
+        facts=_LiesAboutIteratorLength(
+            [
+                {
+                    "tuple": _LiesAboutIteratorLength(row),
+                    "provenance": _LiesAboutIteratorLength([_record()]),
+                }
+            ]
+        ),
+    )
+    assert _exported_rows(structured, "transfer") == [row]
+
+    source, expected, exported = _transfer_manifest_export()
+    manifest = copy.deepcopy(exported["manifest"])
+    manifest["roles"] = _LiesAboutIteratorLength(manifest["roles"])
+    manifest["facts"] = _LiesAboutIteratorLength(manifest["facts"])
+    for fact in manifest["facts"]:
+        fact["cells"] = _LiesAboutIteratorLength(fact["cells"])
+        fact["provenance"] = _LiesAboutIteratorLength(fact["provenance"])
+    restored = _session()
+    assert (
+        restored.put_relation_from_manifest(
+            "transfer",
+            _LiesAboutIteratorLength(exported["columns"]),
+            manifest,
+        )
+        == expected
+    )
+    assert _exported_rows(restored, "transfer") == [row]
+    assert _exported_rows(source, "transfer") == [row]
+
+    metadata_free_source = _session()
+    metadata_free_source.put_relation(
+        "transfer", _transfer_columns(rows=((5, 6, 7, 8),))
+    )
+    metadata_free = metadata_free_source.export_relation_with_provenance("transfer")
+    metadata_free["manifest"]["roles"] = _LiesAboutIteratorLength([])
+    metadata_free["manifest"]["facts"] = _LiesAboutIteratorLength([])
+    metadata_free_target = _session()
+    metadata_free_target.put_relation_from_manifest(
+        "transfer",
+        _LiesAboutIteratorLength(metadata_free["columns"]),
+        metadata_free["manifest"],
+    )
+    assert _exported_rows(metadata_free_target, "transfer") == [(5, 6, 7, 8)]
+
+
+def test_manifest_import_feeds_a_derived_high_arity_gpu_rule_without_host_rows():
+    program = """
+    domain party: u32.
+    domain asset: u32.
+    pred transfer(giver: party, receiver: party, asset: asset, time: i64).
+    pred observed(giver: party, receiver: party, asset: asset, time: i64).
+    observed(Giver, Receiver, Asset, Time) :- transfer(Giver, Receiver, Asset, Time).
+    ?- observed(Giver, Receiver, Asset, Time).
+    """
+    source = _session(program)
+    rows = ((1, 2, 3, 4), (5, 6, 7, 8))
+    source.put_relation_with_provenance(
+        "transfer",
+        _transfer_columns(rows=rows),
+        roles=TRANSFER_ROLES,
+        facts=[_fact(rows[0])],
+    )
+    exported = source.export_relation_with_provenance("transfer")
+    fresh = _session(program)
+    fresh.put_relation_from_manifest(
+        "transfer", exported["columns"], exported["manifest"]
+    )
+    fresh.reset_host_transfer_stats()
+    query = fresh.evaluate().queries[0]
+    assert query.relation_name == "__xlog_query_0"
+    assert all(pyxlog.dlpack_is_cuda(column) for column in query.tensors)
+    assert fresh.host_transfer_stats()["dtoh_bytes"] == 0
+    values = [torch.from_dlpack(column).cpu().tolist() for column in query.tensors]
+    assert sorted(zip(*values)) == sorted(rows)
+
+
+def test_manifest_exact_cells_round_trip_nan_signed_zero_u64_and_bool():
+    program = "pred exact_value(single: f32, double: f64, wide: u64, flag: bool)."
+    nan_bits = 0x7FC01234
+    wide = 2**63 + 5
+    columns = [
+        torch.tensor([nan_bits], device="cuda", dtype=torch.uint32).view(torch.float32),
+        torch.tensor([-0.0], device="cuda", dtype=torch.float64),
+        torch.tensor([wide], device="cuda", dtype=torch.uint64),
+        torch.tensor([True], device="cuda", dtype=torch.bool),
+    ]
+    cells = [
+        {"type": "f32", "hex": struct.pack("<I", nan_bits).hex()},
+        {"type": "f64", "hex": struct.pack("<d", -0.0).hex()},
+        {"type": "u64", "hex": struct.pack("<Q", wide).hex()},
+        {"type": "bool", "hex": "01"},
+    ]
+    source = _session(program)
+    expected = source.put_relation_with_provenance(
+        "exact_value",
+        columns,
+        roles=[
+            {"name": "single"},
+            {"name": "double"},
+            {"name": "wide"},
+            {"name": "flag"},
+        ],
+        facts=[{"cells": cells, "provenance": [_record(source="exact")]}],
+    )
+    exported = source.export_relation_with_provenance("exact_value")
+    assert exported["manifest"]["facts"][0]["cells"] == cells
+    fresh = _session(program)
+    reconstructed = fresh.put_relation_from_manifest(
+        "exact_value", exported["columns"], exported["manifest"]
+    )
+    assert reconstructed["relation"] == expected["relation"]
+    assert reconstructed["metadata_present"] == expected["metadata_present"]
+    assert reconstructed["row_count"] == expected["row_count"]
+    assert reconstructed["roles"] == expected["roles"]
+    reconstructed_fact = reconstructed["facts"][0]
+    expected_fact = expected["facts"][0]
+    assert reconstructed_fact["identity"] == expected_fact["identity"]
+    assert reconstructed_fact["cells"] == expected_fact["cells"] == cells
+    assert reconstructed_fact["provenance"] == expected_fact["provenance"]
+    assert math.isnan(reconstructed_fact["tuple"][0])
+    assert struct.pack("<d", reconstructed_fact["tuple"][1]) == struct.pack("<d", -0.0)
+    assert reconstructed_fact["tuple"][2:] == [wide, True]
+
+    relation_columns = [
+        torch.from_dlpack(column) for column in fresh.export_relation("exact_value")
+    ]
+    assert relation_columns[0].view(torch.uint32).cpu().tolist() == [nan_bits]
+    assert struct.pack("<d", relation_columns[1].cpu().item()) == struct.pack("<d", -0.0)
+    assert relation_columns[2].cpu().tolist() == [wide]
+    assert relation_columns[3].cpu().tolist() == [True]
+
+
+def test_manifest_nullary_export_and_import_are_explicitly_rejected():
+    session = _session("pred ready().")
+    session.put_relation("ready", [])
+    with pytest.raises(_metadata_error(), match="positive arity"):
+        session.export_relation_with_provenance("ready")
+    with pytest.raises(_metadata_error(), match="positive arity"):
+        session.put_relation_from_manifest("ready", [], {})

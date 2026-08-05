@@ -35,6 +35,11 @@ struct ParsedRelationDeltaUpdate {
     insert_evidence: Option<PreparedInsertEvidence>,
 }
 
+enum RelationReplacementMetadata {
+    Clear,
+    Replace(RelationMetadataStore),
+}
+
 #[pymethods]
 impl Program {
     #[staticmethod]
@@ -170,6 +175,7 @@ impl CompiledLogicProgram {
 
                 let tensors = collect_dlpack_columns(
                     &v,
+                    schema.arity(),
                     &format!(
                         "Input relation {} must be a sequence of DLPack columns",
                         name
@@ -234,19 +240,9 @@ impl LogicRelationSession {
         name: String,
         dlpack_columns: &Bound<'_, PyAny>,
     ) -> PyResult<()> {
-        let metadata_name = name.clone();
         let schema = self.relation_replacement_schema(&name)?;
         let buffer = self.relation_replacement_buffer(&name, schema, dlpack_columns)?;
-        let additional = usize::from(!self.relation_store.contains(&name));
-        self.relation_store
-            .try_reserve_relations(additional)
-            .map_err(types::xlog_err)?;
-        self.relation_store.put_owned(name, buffer);
-        self.relation_metadata.clear_relation(&metadata_name);
-        self.evaluation_store = None;
-        self.session_runtime = None;
-        self.last_delta_stats = None;
-        Ok(())
+        self.commit_relation_replacement(name, buffer, RelationReplacementMetadata::Clear)
     }
 
     #[pyo3(signature = (name, dlpack_columns, *, roles, facts))]
@@ -281,16 +277,51 @@ impl LogicRelationSession {
             row_count,
         )?;
         let packed_snapshot = snapshot.pack(py)?;
-        let additional = usize::from(!self.relation_store.contains(&name));
-        self.relation_store
-            .try_reserve_relations(additional)
-            .map_err(types::xlog_err)?;
+        self.commit_relation_replacement(
+            name,
+            buffer,
+            RelationReplacementMetadata::Replace(prospective_metadata),
+        )?;
+        Ok(packed_snapshot)
+    }
 
-        self.relation_store.put_owned(name, buffer);
-        self.relation_metadata = prospective_metadata;
-        self.evaluation_store = None;
-        self.session_runtime = None;
-        self.last_delta_stats = None;
+    pub fn put_relation_from_manifest(
+        &mut self,
+        py: Python<'_>,
+        name: String,
+        dlpack_columns: &Bound<'_, PyAny>,
+        manifest: &Bound<'_, PyAny>,
+    ) -> PyResult<PyObject> {
+        let schema = self.relation_replacement_schema(&name)?.clone();
+        require_positive_metadata_arity(&name, &schema)?;
+        let arguments = self.program.argument_schema(&name).ok_or_else(|| {
+            PyRuntimeError::new_err(format!(
+                "Relation '{name}' compiled argument contract is unavailable"
+            ))
+        })?;
+        let prepared_manifest = self
+            .relation_metadata
+            .parse_manifest(&name, &arguments, &schema, manifest)?;
+        let buffer = self.relation_replacement_buffer(&name, &schema, dlpack_columns)?;
+        let row_count = self
+            .provider
+            .validated_logical_row_count(&buffer)
+            .map_err(types::xlog_err)?;
+        let (prospective_metadata, snapshot) =
+            self.relation_metadata.prepare_manifest_replacement(
+                &name,
+                &schema,
+                &self.provider,
+                &buffer,
+                row_count,
+                prepared_manifest,
+            )?;
+        let packed_snapshot = snapshot.pack(py)?;
+        let metadata = prospective_metadata.map_or(
+            RelationReplacementMetadata::Clear,
+            RelationReplacementMetadata::Replace,
+        );
+        self.commit_relation_replacement(name, buffer, metadata)?;
         Ok(packed_snapshot)
     }
 
@@ -709,11 +740,34 @@ impl LogicRelationSession {
             .provider
             .clone_buffer(existing)
             .map_err(types::xlog_err)?;
-        let buffer = self.relation_store.remove(name).ok_or_else(|| {
+        let stored = self.relation_store.get_mut(name).ok_or_else(|| {
             PyRuntimeError::new_err(format!("Relation '{}' disappeared during export", name))
         })?;
-        self.relation_store.put(name, replacement);
+        let buffer = std::mem::replace(stored, replacement);
         export_buffer_columns(py, &self.provider, buffer)
+    }
+
+    pub fn export_relation_with_provenance(
+        &mut self,
+        py: Python<'_>,
+        name: &str,
+    ) -> PyResult<PyObject> {
+        let schema = self.relation_replacement_schema(name)?;
+        require_positive_metadata_arity(name, schema)?;
+        let existing = self.relation_store.get(name).ok_or_else(|| {
+            PyValueError::new_err(format!(
+                "Relation '{}' not found in persistent session",
+                name
+            ))
+        })?;
+        let manifest = self
+            .snapshot_stored_relation(name, existing)?
+            .pack_manifest(py)?;
+        let columns = self.export_relation(py, name)?;
+        let exported = PyDict::new(py);
+        exported.set_item("columns", columns)?;
+        exported.set_item("manifest", manifest)?;
+        Ok(exported.into())
     }
 
     pub fn remove_relation(&mut self, name: &str) -> bool {
@@ -737,6 +791,32 @@ impl LogicRelationSession {
 }
 
 impl LogicRelationSession {
+    fn commit_relation_replacement(
+        &mut self,
+        name: String,
+        buffer: xlog_cuda::CudaBuffer,
+        metadata: RelationReplacementMetadata,
+    ) -> PyResult<()> {
+        let additional = usize::from(!self.relation_store.contains(&name));
+        self.relation_store
+            .try_reserve_relations(additional)
+            .map_err(types::xlog_err)?;
+        match metadata {
+            RelationReplacementMetadata::Clear => {
+                self.relation_metadata.clear_relation(&name);
+                self.relation_store.put_owned(name, buffer);
+            }
+            RelationReplacementMetadata::Replace(prospective) => {
+                self.relation_store.put_owned(name, buffer);
+                self.relation_metadata = prospective
+            }
+        }
+        self.evaluation_store = None;
+        self.session_runtime = None;
+        self.last_delta_stats = None;
+        Ok(())
+    }
+
     fn snapshot_stored_relation(
         &self,
         name: &str,
@@ -778,6 +858,7 @@ impl LogicRelationSession {
     ) -> PyResult<xlog_cuda::CudaBuffer> {
         let tensors = collect_dlpack_columns(
             dlpack_columns,
+            schema.arity(),
             &format!("Relation {name} must be a sequence of DLPack columns"),
         )?;
         self.provider
@@ -795,7 +876,7 @@ impl LogicRelationSession {
                 "{method_name} expects a sequence of update dictionaries"
             ))
         })?;
-        let mut parsed = Vec::with_capacity(seq.len()?);
+        let mut parsed = Vec::new();
         for (update_index, item) in seq.try_iter()?.enumerate() {
             let item = item?;
             let dict = item.downcast::<PyDict>().map_err(|_| {
@@ -886,6 +967,7 @@ impl LogicRelationSession {
         let schema = self.relation_delta_schema(name)?;
         let tensors = collect_dlpack_columns(
             dlpack_columns,
+            schema.arity(),
             &format!(
                 "Relation {} delta must be a sequence of DLPack columns",
                 name
@@ -1205,18 +1287,29 @@ fn pack_proof_traces(
 
 fn collect_dlpack_columns(
     obj: &Bound<'_, PyAny>,
+    expected_arity: usize,
     type_error_message: &str,
 ) -> PyResult<Vec<DlpackManagedTensor>> {
     let seq = obj
         .downcast::<PySequence>()
         .map_err(|_| PyValueError::new_err(type_error_message.to_string()))?;
 
-    let mut tensors: Vec<DlpackManagedTensor> = Vec::with_capacity(seq.len()?);
-    for item in seq.try_iter()? {
-        let item = item?;
-        tensors.push(dlpack_from_py(&item)?);
+    let mut iterator = seq.try_iter()?;
+    let mut items = Vec::with_capacity(expected_arity);
+    for column in 0..expected_arity {
+        let item = iterator.next().transpose()?.ok_or_else(|| {
+            PyRuntimeError::new_err(format!(
+                "Schema arity {expected_arity} does not match tensor count {column}"
+            ))
+        })?;
+        items.push(item);
     }
-    Ok(tensors)
+    if iterator.next().transpose()?.is_some() {
+        return Err(PyRuntimeError::new_err(format!(
+            "Schema arity {expected_arity} does not match tensor count greater than {expected_arity}"
+        )));
+    }
+    items.iter().map(dlpack_from_py).collect()
 }
 
 fn export_buffer_columns(
