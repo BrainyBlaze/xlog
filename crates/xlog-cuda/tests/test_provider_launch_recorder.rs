@@ -65,11 +65,118 @@ impl LoggingSink for DiscardSink {
     }
 }
 
-fn recorder_test_lock() -> MutexGuard<'static, ()> {
+/// Pins the device default mempool's release threshold for the
+/// duration of one test and restores the previous value (plus a
+/// trim back to zero retained bytes) on drop.
+///
+/// Why: the drop-and-reuse tests in this file assert fail-closed
+/// that at least one probe allocation lands on a just-freed
+/// address (`reuse_observed > 0`). The stream-ordered allocator
+/// only *may* recycle a pending free; with the default release
+/// threshold of 0, every per-iteration synchronize returns freed
+/// pool memory to the OS, so on a large-VRAM GPU the driver can
+/// satisfy every probe from freshly carved chunks and the
+/// provocation never observes reuse (measured 0/512 iterations
+/// on a 48 GB A40). Retaining freed blocks in the pool keeps a
+/// small hot working set that new same-stream allocations are
+/// served from, making the reuse precondition hold regardless of
+/// how much free VRAM the device has.
+///
+/// The default mempool is process-global state shared by every
+/// test in this binary, so the threshold is only changed while
+/// the recorder test lock is held and is always restored on drop.
+struct MempoolRetentionGuard {
+    pool: sys::CUmemoryPool,
+    prev_threshold: u64,
+}
+
+impl MempoolRetentionGuard {
+    /// Returns `None` when no CUDA driver/device is available —
+    /// the tests skip themselves in that case. On a live device
+    /// the pool-attribute calls must succeed: the allocator under
+    /// test is the stream-ordered pool itself.
+    fn install() -> Option<Self> {
+        unsafe {
+            if sys::cuInit(0) != sys::cudaError_enum::CUDA_SUCCESS {
+                return None;
+            }
+            let mut dev: sys::CUdevice = 0;
+            if sys::cuDeviceGet(&mut dev, 0) != sys::cudaError_enum::CUDA_SUCCESS {
+                return None;
+            }
+            let mut pool: sys::CUmemoryPool = std::ptr::null_mut();
+            let res = sys::cuDeviceGetDefaultMemPool(&mut pool, dev);
+            assert_eq!(
+                res,
+                sys::cudaError_enum::CUDA_SUCCESS,
+                "cuDeviceGetDefaultMemPool: {:?}",
+                res
+            );
+            let mut prev_threshold: u64 = 0;
+            let res = sys::cuMemPoolGetAttribute(
+                pool,
+                sys::CUmemPool_attribute::CU_MEMPOOL_ATTR_RELEASE_THRESHOLD,
+                &mut prev_threshold as *mut u64 as *mut _,
+            );
+            assert_eq!(
+                res,
+                sys::cudaError_enum::CUDA_SUCCESS,
+                "cuMemPoolGetAttribute(RELEASE_THRESHOLD): {:?}",
+                res
+            );
+            let mut retain_all: u64 = u64::MAX;
+            let res = sys::cuMemPoolSetAttribute(
+                pool,
+                sys::CUmemPool_attribute::CU_MEMPOOL_ATTR_RELEASE_THRESHOLD,
+                &mut retain_all as *mut u64 as *mut _,
+            );
+            assert_eq!(
+                res,
+                sys::cudaError_enum::CUDA_SUCCESS,
+                "cuMemPoolSetAttribute(RELEASE_THRESHOLD): {:?}",
+                res
+            );
+            Some(Self {
+                pool,
+                prev_threshold,
+            })
+        }
+    }
+}
+
+impl Drop for MempoolRetentionGuard {
+    fn drop(&mut self) {
+        unsafe {
+            let mut prev = self.prev_threshold;
+            let _ = sys::cuMemPoolSetAttribute(
+                self.pool,
+                sys::CUmemPool_attribute::CU_MEMPOOL_ATTR_RELEASE_THRESHOLD,
+                &mut prev as *mut u64 as *mut _,
+            );
+            let _ = sys::cuMemPoolTrimTo(self.pool, 0);
+        }
+    }
+}
+
+/// Serializes the tests in this binary and scopes the mempool
+/// retention the drop-and-reuse provocation depends on. Field
+/// order matters: `_retention` must drop (restore + trim the
+/// shared pool) before the lock is released.
+struct RecorderTestGuard {
+    _retention: Option<MempoolRetentionGuard>,
+    _lock: MutexGuard<'static, ()>,
+}
+
+fn recorder_test_lock() -> RecorderTestGuard {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(()))
+    let lock = LOCK
+        .get_or_init(|| Mutex::new(()))
         .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    RecorderTestGuard {
+        _retention: MempoolRetentionGuard::install(),
+        _lock: lock,
+    }
 }
 
 unsafe fn dtoh_sync(dst: &mut [u8], src: u64) {
