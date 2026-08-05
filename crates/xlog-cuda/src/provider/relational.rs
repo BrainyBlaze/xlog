@@ -752,6 +752,44 @@ impl super::CudaKernelProvider {
 
         self.buffer_from_columns(result_columns, diff_count, schema)
     }
+    /// Fail closed when any column's logical byte span exceeds the `u32`
+    /// range the byte-level sort/permutation kernels index with
+    /// (`gid * elem_size` wraps at 2^32). A column past 4 GiB must be a
+    /// clean error, never a silent scatter.
+    fn ensure_column_bytes_kernel_indexable(&self, input: &CudaBuffer) -> Result<()> {
+        let rows = self.device_row_count(input)?;
+        for col_idx in 0..input.arity() {
+            let elem_size = input
+                .schema()
+                .column_type(col_idx)
+                .map(|t| t.size_bytes())
+                .unwrap_or(4);
+            let col_bytes = rows
+                .checked_mul(elem_size)
+                .ok_or_else(|| XlogError::Kernel("Sort: column byte size overflow".to_string()))?;
+            if u32::try_from(col_bytes).is_err() {
+                return Err(XlogError::Kernel(format!(
+                    "Sort supports at most {} bytes per column, got {} (column {})",
+                    u32::MAX,
+                    col_bytes,
+                    col_idx
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    /// Per-chunk byte budget for the multiway union fold. Overridable via
+    /// `XLOG_UNION_CHUNK_BYTES` so tests can pin the multi-pass fold with
+    /// tiny budgets; production tuning is possible but rarely needed.
+    fn union_many_chunk_bytes() -> usize {
+        std::env::var("XLOG_UNION_CHUNK_BYTES")
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .filter(|&value| value > 0)
+            .unwrap_or(UNION_MANY_CHUNK_BYTES)
+    }
+
     // ============== GPU-Native Set Operations ==============
 
     /// GPU-native union (no host roundtrip)
@@ -790,7 +828,10 @@ impl super::CudaKernelProvider {
     /// the sum of all raw contributions, and every per-chunk concat stays
     /// far inside the `u32` byte range the copy/permutation kernels index
     /// with. A batch that fits the budget — the common case — is one chunk
-    /// and behaves exactly like a single concat + sort + dedup.
+    /// and behaves exactly like a single concat + sort + dedup. In the
+    /// degenerate regime where the deduplicated accumulator alone exceeds
+    /// the budget, every pass takes one input and the fold degrades to the
+    /// pairwise re-sort cost profile — the memory bound holds throughout.
     ///
     /// # Arguments
     /// * `inputs` - Buffers to union; at least one is required
@@ -847,7 +888,7 @@ impl super::CudaKernelProvider {
             .map(|c| schema.column_type(c).map(|t| t.size_bytes()).unwrap_or(4))
             .sum::<usize>()
             .max(1);
-        let budget_rows = (UNION_MANY_CHUNK_BYTES / row_bytes).max(1);
+        let budget_rows = (Self::union_many_chunk_bytes() / row_bytes).max(1);
 
         // Fold byte-bounded chunks: each pass unions the accumulated result
         // with the next slice of inputs. The accumulator is deduplicated
@@ -945,42 +986,49 @@ impl super::CudaKernelProvider {
 
         let device = self.device.inner();
         let mut result_columns = Vec::with_capacity(schema.arity());
-        for col_idx in 0..schema.arity() {
-            let elem_size = schema
-                .column_type(col_idx)
-                .map(|t| t.size_bytes())
-                .unwrap_or(4);
-            let total_bytes = total_rows
-                .checked_mul(elem_size)
-                .ok_or_else(|| XlogError::Kernel("Concat: total_bytes overflow".to_string()))?;
-            u32::try_from(total_bytes).map_err(|_| {
-                XlogError::Kernel(format!("Concat: total_bytes too large: {}", total_bytes))
-            })?;
-
-            let mut out_col = self.memory.alloc::<u8>(total_bytes)?;
-            let mut offset = 0usize;
-            for (input, &rows) in inputs.iter().zip(&input_rows) {
-                let col_bytes = rows
+        let enqueue_result = (|| -> Result<()> {
+            for col_idx in 0..schema.arity() {
+                let elem_size = schema
+                    .column_type(col_idx)
+                    .map(|t| t.size_bytes())
+                    .unwrap_or(4);
+                let total_bytes = total_rows
                     .checked_mul(elem_size)
-                    .ok_or_else(|| XlogError::Kernel("Concat: col_bytes overflow".to_string()))?;
-                u32::try_from(col_bytes).map_err(|_| {
-                    XlogError::Kernel(format!("Concat: col_bytes too large: {}", col_bytes))
+                    .ok_or_else(|| XlogError::Kernel("Concat: total_bytes overflow".to_string()))?;
+                u32::try_from(total_bytes).map_err(|_| {
+                    XlogError::Kernel(format!("Concat: total_bytes too large: {}", total_bytes))
                 })?;
-                let col = input.column(col_idx).ok_or_else(|| {
-                    XlogError::Kernel(format!("Concat: column {} not found", col_idx))
-                })?;
-                let src = self.column_bytes_view(col, col_bytes)?;
-                let mut dst = out_col.slice_mut(offset..offset + col_bytes);
-                device.dtod_copy_async(&src, &mut dst).map_err(|e| {
-                    XlogError::Kernel(format!("Concat: failed to copy column: {}", e))
-                })?;
-                offset += col_bytes;
+
+                let mut out_col = self.memory.alloc::<u8>(total_bytes)?;
+                let mut offset = 0usize;
+                for (input, &rows) in inputs.iter().zip(&input_rows) {
+                    let col_bytes = rows.checked_mul(elem_size).ok_or_else(|| {
+                        XlogError::Kernel("Concat: col_bytes overflow".to_string())
+                    })?;
+                    u32::try_from(col_bytes).map_err(|_| {
+                        XlogError::Kernel(format!("Concat: col_bytes too large: {}", col_bytes))
+                    })?;
+                    let col = input.column(col_idx).ok_or_else(|| {
+                        XlogError::Kernel(format!("Concat: column {} not found", col_idx))
+                    })?;
+                    let src = self.column_bytes_view(col, col_bytes)?;
+                    let mut dst = out_col.slice_mut(offset..offset + col_bytes);
+                    device.dtod_copy_async(&src, &mut dst).map_err(|e| {
+                        XlogError::Kernel(format!("Concat: failed to copy column: {}", e))
+                    })?;
+                    offset += col_bytes;
+                }
+
+                result_columns.push(out_col.into());
             }
+            Ok(())
+        })();
 
-            result_columns.push(out_col.into());
-        }
-
+        // Quiesce enqueued async copies before returning on either path, so
+        // an error never escapes while copies are still in flight against
+        // buffers this frame is about to drop.
         self.device.synchronize()?;
+        enqueue_result?;
 
         self.buffer_from_columns(result_columns, total_rows as u64, schema)
     }
@@ -1452,6 +1500,10 @@ impl super::CudaKernelProvider {
     /// Replaces the host-side `BTreeSet<Vec<u8>>` fallback that the
     /// strict deterministic-Datalog D2H gate flags as a violator.
     fn dedup_full_row_deterministic(&self, input: &CudaBuffer) -> Result<CudaBuffer> {
+        // Same u32 byte-indexing boundary as `sort` (which the large-input
+        // path below routes through); checked here too so the small-row
+        // path and any future direct caller stay fail-closed.
+        self.ensure_column_bytes_kernel_indexable(input)?;
         let row_count = self.device_row_count(input)?;
         if row_count == 0 {
             return self.create_empty_buffer(input.schema().clone());
@@ -1765,6 +1817,12 @@ impl super::CudaKernelProvider {
     /// - Input has more than `u32::MAX` rows
     /// - Download/upload or kernel execution fails
     pub fn sort(&self, input: &CudaBuffer, key_cols: &[usize]) -> Result<CudaBuffer> {
+        // Fail closed before any dispatch: the permutation kernels index
+        // column bytes with u32, so an over-4GiB column must error here,
+        // never scatter silently. Guarded at this chokepoint so every sort
+        // caller (unions, dedups, plans) is covered at once.
+        self.ensure_column_bytes_kernel_indexable(input)?;
+
         // Env-gated recorded dispatch. Eligibility check
         // mirrors `sort_recorded`'s validation:
         // U32 / Symbol key columns only. Other types fall

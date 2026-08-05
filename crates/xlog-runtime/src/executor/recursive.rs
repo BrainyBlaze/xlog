@@ -190,25 +190,6 @@ impl Executor {
         Ok(())
     }
 
-    /// Dedup one buffer on its full row, recording a profiled "dedup" op.
-    /// Same split-borrow shape as [`Self::union_batch_profiled`].
-    fn dedup_profiled(
-        provider: &CudaKernelProvider,
-        profiler: &mut Profiler,
-        input: &CudaBuffer,
-    ) -> Result<CudaBuffer> {
-        let key_cols: Vec<usize> = (0..input.arity()).collect();
-        let input_rows = input.num_rows();
-        let start = profiler.start_op();
-        let deduped = provider.dedup(input, &key_cols)?;
-        if let Some(start) = start {
-            let mem = provider.memory().allocated_bytes();
-            profiler.record_op("dedup", input_rows, deduped.num_rows(), start, mem);
-            profiler.record_peak_memory(mem);
-        }
-        Ok(deduped)
-    }
-
     /// Whether the rule's body reads its own head relation in a way that is
     /// sensitive to same-pass installs. A body that IS a bare scan of the
     /// head (`h :- h`, the planner's identity/carry rule for fact
@@ -233,13 +214,19 @@ impl Executor {
     /// Install one head's batched results, skipping empty contributions.
     /// Mirrors the pre-batching per-rule behavior: an existing relation is
     /// left untouched when every contribution is empty, and a lone fresh
-    /// non-empty result is deduped before install. The store is only
-    /// mutated after the merge succeeds, so a failed union leaves the
-    /// existing relation intact.
+    /// non-empty result records a single-input union (internally one dedup)
+    /// like the dispatched install path, so `--stats` accounting stays
+    /// uniform across both installers. The store is only mutated after the
+    /// merge succeeds, so a failed union leaves the existing relation
+    /// intact.
     fn install_plain_head_batch(&mut self, head: &str, results: Vec<CudaBuffer>) -> Result<()> {
         let non_empty: Vec<&CudaBuffer> = results.iter().filter(|r| !r.is_empty()).collect();
 
-        if let Some(existing) = self.store.get(head) {
+        // An existing empty relation (e.g. a pre-seeded schema buffer)
+        // carries no rows to merge, so it takes the fresh-install path,
+        // matching the dispatched installer.
+        let existing = self.store.get(head).filter(|buf| !buf.is_empty());
+        if let Some(existing) = existing {
             if non_empty.is_empty() {
                 // No new rows for this head: leave the relation untouched.
                 return Ok(());
@@ -251,15 +238,15 @@ impl Executor {
                 Self::union_batch_profiled(&self.provider, &mut self.profiler, &union_inputs)?;
             self.store_put(head, merged);
         } else if non_empty.is_empty() {
-            // All contributions are empty: install an empty relation with
-            // the result schema.
-            let first = results.into_iter().next().ok_or_else(|| {
-                XlogError::Execution(format!("No results collected for head {}", head))
-            })?;
-            self.store_put(head, first);
-        } else if non_empty.len() == 1 {
-            let deduped = Self::dedup_profiled(&self.provider, &mut self.profiler, non_empty[0])?;
-            self.store_put(head, deduped);
+            // All contributions are empty: an absent head gets an empty
+            // relation with the result schema; an existing (empty) head is
+            // left untouched.
+            if self.store.get(head).is_none() {
+                let first = results.into_iter().next().ok_or_else(|| {
+                    XlogError::Execution(format!("No results collected for head {}", head))
+                })?;
+                self.store_put(head, first);
+            }
         } else {
             let merged =
                 Self::union_batch_profiled(&self.provider, &mut self.profiler, &non_empty)?;
@@ -541,9 +528,12 @@ impl Executor {
         // the delta relations start with only the *new* tuples, not a full rescan of the current
         // fixed point.
         for pred in &recursive_preds {
+            // Read the prior full relation in place: the store is only
+            // mutated after the merge succeeds, so a failed union leaves the
+            // relation (and its version counter) intact.
             let full_old = self
                 .store
-                .remove(pred)
+                .get(pred)
                 .ok_or_else(|| XlogError::Execution(format!("Missing relation: {}", pred)))?;
 
             let derived = derived_initial.remove(pred).unwrap_or_default();
@@ -552,7 +542,7 @@ impl Executor {
             // same-head seed contribution are concatenated, sorted, and
             // deduplicated in a single pass instead of one union per rule.
             let mut union_inputs: Vec<&CudaBuffer> = Vec::with_capacity(derived.len() + 1);
-            union_inputs.push(&full_old);
+            union_inputs.push(full_old);
             union_inputs.extend(derived.iter());
             let full_new =
                 Self::union_batch_profiled(&self.provider, &mut self.profiler, &union_inputs)?;
@@ -561,7 +551,7 @@ impl Executor {
 
             let delta_name = delta_tracker.delta_name(pred)?;
 
-            let full_old_rows = self.buffer_row_count(&full_old)?;
+            let full_old_rows = self.buffer_row_count(full_old)?;
             let full_new_rows = self.buffer_row_count(&full_new)?;
             let delta_initial = if full_new_rows == 0 {
                 self.create_empty_buffer(full_new.schema().clone())?
@@ -570,7 +560,7 @@ impl Executor {
             } else {
                 let diff_input = full_new.num_rows() + full_old.num_rows();
                 let start = self.profiler.start_op();
-                let diffed = self.provider.diff_gpu(&full_new, &full_old)?;
+                let diffed = self.provider.diff_gpu(&full_new, full_old)?;
                 if let Some(start) = start {
                     let mem = self.provider.memory().allocated_bytes();
                     self.profiler
@@ -876,28 +866,31 @@ impl Executor {
 
             // Merge deltas into full relations.
             for pred in &recursive_preds {
+                let dn = delta_tracker.delta_name(pred)?.to_string();
+                // Read both relations in place: the store is only mutated
+                // after the merge succeeds, so a failed union leaves the
+                // full relation (and its version counter) intact, and the
+                // unchanged delta never needs a remove/re-put round trip.
                 let full_old = self
                     .store
-                    .remove(pred)
+                    .get(pred)
                     .ok_or_else(|| XlogError::Execution(format!("Missing relation: {}", pred)))?;
-                let dn = delta_tracker.delta_name(pred)?.to_string();
                 let delta = self
-                    .store_remove(&dn)
+                    .store
+                    .get(&dn)
                     .ok_or_else(|| XlogError::Execution(format!("Missing relation: {}", dn)))?;
 
-                if self.buffer_row_count(&delta)? == 0 {
+                if self.buffer_row_count(delta)? == 0 {
                     // Zero-delta short-circuit: full and delta are unchanged
                     // this iteration. The delta relation record with zero
                     // rows stands, and the full relation record from the prior
                     // merge stands. No additional update is needed.
-                    self.store_put(pred, full_old);
-                    self.store_put(&dn, delta);
                     continue;
                 }
 
                 let union_input = full_old.num_rows() + delta.num_rows();
                 let start = self.profiler.start_op();
-                let merged = self.provider.union_gpu(&full_old, &delta)?;
+                let merged = self.provider.union_gpu(full_old, delta)?;
                 if let Some(start) = start {
                     let mem = self.provider.memory().allocated_bytes();
                     self.profiler
@@ -912,12 +905,11 @@ impl Executor {
                 // used by the trace under the `recursive-stats-trace` feature.
                 let full_new_rows_phase4 = self.buffer_row_count(&full_new)? as u64;
                 #[cfg(feature = "recursive-stats-trace")]
-                let delta_rows_phase4 = self.buffer_row_count(&delta)? as u64;
+                let delta_rows_phase4 = self.buffer_row_count(delta)? as u64;
                 let full_rel_opt = self.name_to_rel_id(pred);
                 #[cfg(feature = "recursive-stats-trace")]
                 let delta_rel = delta_tracker.delta_rel_id(pred)?;
                 self.store_put(pred, full_new);
-                self.store_put(&dn, delta);
 
                 // Record the full relation's new cardinality. The delta
                 // relation was already recorded for this iteration.

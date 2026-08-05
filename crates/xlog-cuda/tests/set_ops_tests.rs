@@ -39,6 +39,32 @@ impl Drop for EnvGuard {
     }
 }
 
+struct ChunkBudgetGuard {
+    _lock: MutexGuard<'static, ()>,
+    old_budget: Option<String>,
+}
+
+impl ChunkBudgetGuard {
+    fn with_budget(bytes: &str) -> Self {
+        let lock = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let old_budget = std::env::var("XLOG_UNION_CHUNK_BYTES").ok();
+        std::env::set_var("XLOG_UNION_CHUNK_BYTES", bytes);
+        Self {
+            _lock: lock,
+            old_budget,
+        }
+    }
+}
+
+impl Drop for ChunkBudgetGuard {
+    fn drop(&mut self) {
+        match &self.old_budget {
+            Some(value) => std::env::set_var("XLOG_UNION_CHUNK_BYTES", value),
+            None => std::env::remove_var("XLOG_UNION_CHUNK_BYTES"),
+        }
+    }
+}
+
 fn device_row_count(
     provider: &CudaKernelProvider,
     rows: u32,
@@ -492,6 +518,69 @@ fn test_union_many_gpu_many_inputs_high_multiplicity() {
     }
     let folded_data = provider.download_column::<u32>(&folded, 0).unwrap();
     assert_eq!(many_data, folded_data);
+}
+
+#[test]
+fn test_union_many_gpu_multi_chunk_fold_matches_single_chunk() {
+    let Some(provider) = setup_provider() else {
+        eprintln!("Skipping: no CUDA device");
+        return;
+    };
+
+    // Same inputs as the high-multiplicity test, but with the chunk budget
+    // forced to one byte so every input becomes its own fold pass. The
+    // multi-chunk fold must produce exactly the single-chunk result.
+    let inputs: Vec<Vec<u32>> = vec![
+        vec![1, 2, 3],
+        vec![2, 3, 4],
+        vec![3, 4, 5],
+        vec![4, 5, 1],
+        vec![5, 1, 2],
+        vec![1, 3, 5],
+        vec![2, 4, 1],
+        vec![5, 2, 3],
+    ];
+    let schema = Schema::new(vec![("val".to_string(), ScalarType::U32)]);
+    let buffers: Vec<CudaBuffer> = inputs
+        .iter()
+        .map(|data| {
+            provider
+                .create_buffer_from_slice::<u32>(data, schema.clone())
+                .unwrap()
+        })
+        .collect();
+    let refs: Vec<&CudaBuffer> = buffers.iter().collect();
+
+    let single_chunk = provider.union_many_gpu(&refs).unwrap();
+    let single_chunk_data = provider.download_column::<u32>(&single_chunk, 0).unwrap();
+
+    let _guard = ChunkBudgetGuard::with_budget("1");
+    let multi_chunk = provider.union_many_gpu(&refs).unwrap();
+    let multi_chunk_data = provider.download_column::<u32>(&multi_chunk, 0).unwrap();
+
+    assert_eq!(multi_chunk_data, single_chunk_data);
+    assert_eq!(multi_chunk_data, vec![1, 2, 3, 4, 5]);
+}
+
+#[test]
+fn test_union_many_gpu_multi_chunk_fold_multi_column() {
+    let Some(provider) = setup_provider() else {
+        eprintln!("Skipping: no CUDA device");
+        return;
+    };
+
+    // Multi-column inputs through the forced multi-pass fold: cross-input
+    // duplicates must still collapse to the hand-pinned deterministic set.
+    let a = buffer_i64_triples(&provider, &[(3, 30, -1), (-5, 7, 8)]);
+    let b = buffer_i64_triples(&provider, &[(1, 2, 3), (3, 30, -1)]);
+    let c = buffer_i64_triples(&provider, &[(-5, 7, 8), (9, 0, -4), (1, 2, 3)]);
+
+    let _guard = ChunkBudgetGuard::with_budget("1");
+    let many = provider.union_many_gpu(&[&a, &b, &c]).unwrap();
+    assert_eq!(
+        read_i64_triples(&provider, &many),
+        vec![(-5, 7, 8), (1, 2, 3), (3, 30, -1), (9, 0, -4)]
+    );
 }
 
 #[test]
