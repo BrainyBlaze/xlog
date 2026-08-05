@@ -33,7 +33,9 @@ def test_relation_callbacks_fire_after_success_skip_failed_delta_and_unregister(
     events = []
     callback_id = session.register_relation_callback(events.append)
 
-    stats = session.apply_relation_delta("callback_input", insert_columns=[_col([1, 2])])
+    stats = session.apply_relation_delta(
+        "callback_input", insert_columns=[_col([1, 2])]
+    )
 
     assert stats["insert_rows"] == 2
     assert len(events) == 1

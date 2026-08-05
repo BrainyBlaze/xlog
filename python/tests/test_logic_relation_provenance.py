@@ -62,7 +62,10 @@ def _empty_transfer_columns():
 
 
 def _exported_rows(session, relation):
-    columns = [torch.from_dlpack(column).cpu().tolist() for column in session.export_relation(relation)]
+    columns = [
+        torch.from_dlpack(column).cpu().tolist()
+        for column in session.export_relation(relation)
+    ]
     return sorted(zip(*columns))
 
 
@@ -165,7 +168,9 @@ def _schema_identity(
 def test_native_ternary_and_quaternary_puts_bind_evidence_to_complete_tuples():
     session = _session()
     records = [
-        _record(source="manual-review", document="review-9", span=None, kind="confirmation"),
+        _record(
+            source="manual-review", document="review-9", span=None, kind="confirmation"
+        ),
         _record(),
         _record(),
     ]
@@ -359,11 +364,14 @@ def test_role_arity_uses_the_values_actually_iterated(iterated_count):
 def test_positional_roles_are_stable_until_metadata_free_replacement_resets_them():
     session = _session()
     first_roles = [{"name": "entity"}, {"name": "time"}, {"name": "label"}]
-    columns = lambda: [
-        torch.tensor([1], device="cuda", dtype=torch.int32),
-        torch.tensor([2], device="cuda", dtype=torch.int64),
-        torch.tensor([3], device="cuda", dtype=torch.int32),
-    ]
+
+    def columns():
+        return [
+            torch.tensor([1], device="cuda", dtype=torch.int32),
+            torch.tensor([2], device="cuda", dtype=torch.int64),
+            torch.tensor([3], device="cuda", dtype=torch.int32),
+        ]
+
     session.put_relation_with_provenance(
         "positional", columns(), roles=first_roles, facts=[_fact((1, 2, 3))]
     )
@@ -408,12 +416,46 @@ def test_positional_roles_are_stable_until_metadata_free_replacement_resets_them
         ({"tuple": [-1, 20, 7, 1_700_000_000], "provenance": [_record()]}, "u32"),
         ({"tuple": [2**32, 20, 7, 1_700_000_000], "provenance": [_record()]}, "u32"),
         ({"tuple": [10, 20, 7, 2**63], "provenance": [_record()]}, "i64"),
-        ({"tuple": [10, 20, 7, 1_700_000_000], "provenance": [_record()], "extra": 1}, "unknown"),
-        ({"tuple": [10, 20, 7, 1_700_000_000], "provenance": [{"source": None}]}, "non-null"),
-        ({"tuple": [10, 20, 7, 1_700_000_000], "provenance": [{"source": "a", "extra": 1}]}, "unknown"),
-        ({"tuple": [10, 20, 7, 1_700_000_000], "provenance": [{"span": {"start": -1, "end": 2}}]}, "non-negative"),
-        ({"tuple": [10, 20, 7, 1_700_000_000], "provenance": [{"span": {"start": 3, "end": 2}}]}, "start"),
-        ({"tuple": [10, 20, 7, 1_700_000_000], "provenance": [{"span": {"start": 1, "end": 2, "extra": 3}}]}, "unknown"),
+        (
+            {
+                "tuple": [10, 20, 7, 1_700_000_000],
+                "provenance": [_record()],
+                "extra": 1,
+            },
+            "unknown",
+        ),
+        (
+            {"tuple": [10, 20, 7, 1_700_000_000], "provenance": [{"source": None}]},
+            "non-null",
+        ),
+        (
+            {
+                "tuple": [10, 20, 7, 1_700_000_000],
+                "provenance": [{"source": "a", "extra": 1}],
+            },
+            "unknown",
+        ),
+        (
+            {
+                "tuple": [10, 20, 7, 1_700_000_000],
+                "provenance": [{"span": {"start": -1, "end": 2}}],
+            },
+            "non-negative",
+        ),
+        (
+            {
+                "tuple": [10, 20, 7, 1_700_000_000],
+                "provenance": [{"span": {"start": 3, "end": 2}}],
+            },
+            "start",
+        ),
+        (
+            {
+                "tuple": [10, 20, 7, 1_700_000_000],
+                "provenance": [{"span": {"start": 1, "end": 2, "extra": 3}}],
+            },
+            "unknown",
+        ),
     ],
 )
 def test_fact_and_record_validation_is_strict_and_atomic(fact, message):
@@ -451,7 +493,8 @@ def test_fact_arity_uses_the_values_actually_iterated(iterated_count, representa
     }
 
     with pytest.raises(
-        _metadata_error(), match=rf"arity mismatch: expected 4, received {iterated_count}"
+        _metadata_error(),
+        match=rf"arity mismatch: expected 4, received {iterated_count}",
     ):
         session.put_relation_with_provenance(
             "transfer", _transfer_columns(), roles=TRANSFER_ROLES, facts=[fact]
@@ -473,7 +516,9 @@ def test_friendly_float_conversion_and_exact_nan_cells_preserve_bits():
     assert snapshot["facts"][0]["tuple"] == [struct.unpack("<f", rounded)[0]]
 
     nan_bits = 0x7FC01234
-    nan_tensor = torch.tensor([nan_bits], device="cuda", dtype=torch.uint32).view(torch.float32)
+    nan_tensor = torch.tensor([nan_bits], device="cuda", dtype=torch.uint32).view(
+        torch.float32
+    )
     exact = session.put_relation_with_provenance(
         "float_value",
         [nan_tensor],
@@ -495,7 +540,11 @@ def test_float_infinity_and_f64_signed_zero_preserve_ieee_bits():
     session = _session()
     f32 = session.put_relation_with_provenance(
         "float_value",
-        [torch.tensor([float("inf"), float("-inf")], device="cuda", dtype=torch.float32)],
+        [
+            torch.tensor(
+                [float("inf"), float("-inf")], device="cuda", dtype=torch.float32
+            )
+        ],
         roles=[{"name": "value"}],
         facts=[_fact((float("inf"),)), _fact((float("-inf"),))],
     )
@@ -563,7 +612,9 @@ def test_integer_boundaries_and_bool_cells_round_trip_exactly():
         ((0, 0, 0, 0), "Python bool"),
     ],
 )
-def test_integer_and_bool_friendly_values_reject_wrong_types_and_ranges(values, message):
+def test_integer_and_bool_friendly_values_reject_wrong_types_and_ranges(
+    values, message
+):
     session = _session()
     columns = [
         torch.tensor([0], device="cuda", dtype=torch.uint64),
@@ -608,7 +659,10 @@ def test_exact_cells_reject_noncanonical_input(cell, message):
 
 def test_symbol_ids_are_strict_integers_and_validate_full_row_membership():
     session = _session()
-    columns = lambda: [torch.tensor([3], device="cuda", dtype=torch.int32)]
+
+    def columns():
+        return [torch.tensor([3], device="cuda", dtype=torch.int32)]
+
     snapshot = session.put_relation_with_provenance(
         "symbol_value", columns(), roles=[{"name": "value"}], facts=[_fact((3,))]
     )
@@ -637,9 +691,7 @@ def test_nullary_metadata_is_rejected_without_changing_existing_nullary_behavior
 
     for columns in ([], object(), [object()]):
         with pytest.raises(_metadata_error(), match="positive arity"):
-            session.put_relation_with_provenance(
-                "ready", columns, roles=[], facts=[]
-            )
+            session.put_relation_with_provenance("ready", columns, roles=[], facts=[])
 
     metadata_delta_calls = (
         lambda: session.insert_relation("ready", object(), facts=[]),
@@ -673,9 +725,7 @@ def test_nullary_metadata_is_rejected_without_changing_existing_nullary_behavior
     session.put_relation("ready", [])
     session.insert_relation("ready", [])
     session.apply_relation_delta("ready", insert_columns=[])
-    session.apply_relation_delta_batch(
-        [{"name": "ready", "insert_columns": []}]
-    )
+    session.apply_relation_delta_batch([{"name": "ready", "insert_columns": []}])
     session.apply_relation_delta_debug(
         [{"name": "ready", "insert_columns": []}], check_equivalence=True
     )
@@ -781,7 +831,12 @@ def test_absent_evidence_tuple_fails_before_relation_and_metadata_replacement():
 
     assert session.relation("transfer").provenance() == before
     exported = session.export_relation("transfer")
-    assert [torch.from_dlpack(column).cpu().tolist() for column in exported] == [[1], [2], [3], [4]]
+    assert [torch.from_dlpack(column).cpu().tolist() for column in exported] == [
+        [1],
+        [2],
+        [3],
+        [4],
+    ]
 
 
 def test_invalid_dlpack_replacement_preserves_rows_metadata_stats_and_callbacks():
@@ -794,9 +849,7 @@ def test_invalid_dlpack_replacement_preserves_rows_metadata_stats_and_callbacks(
         roles=TRANSFER_ROLES,
         facts=[_fact((1, 2, 3, 4))],
     )
-    session.insert_relation(
-        "transfer", _transfer_columns(rows=((5, 6, 7, 8),))
-    )
+    session.insert_relation("transfer", _transfer_columns(rows=((5, 6, 7, 8),)))
     before_metadata = session.relation("transfer").provenance()
     before_stats = session.delta_stats()
     before_events = list(events)
@@ -851,7 +904,10 @@ def test_insert_relation_unions_existing_and_new_fact_records_without_fabricatio
 
     session.insert_relation("transfer", _transfer_columns(rows=(unannotated,)))
     snapshot = session.relation("transfer").provenance()
-    assert [fact["tuple"] for fact in snapshot["facts"]] == [list(existing), list(added)]
+    assert [fact["tuple"] for fact in snapshot["facts"]] == [
+        list(existing),
+        list(added),
+    ]
     assert _exported_rows(session, "transfer") == [existing, added, unannotated]
 
     session.reset_host_transfer_stats()
@@ -1102,16 +1158,12 @@ def test_batch_prevalidates_every_entry_and_rejects_unknown_shapes_atomically():
                 {
                     "name": "transfer",
                     "insert_columns": _transfer_columns(rows=((13, 14, 15, 16),)),
-                    "insert_facts": [
-                        _fact((13, 14, 15, 16), _record(source="valid"))
-                    ],
+                    "insert_facts": [_fact((13, 14, 15, 16), _record(source="valid"))],
                 },
                 {
                     "name": "transfer",
                     "insert_columns": _transfer_columns(rows=(invalid_insert,)),
-                    "insert_facts": [
-                        _fact((9, 10, 11, 13), _record(source="invalid"))
-                    ],
+                    "insert_facts": [_fact((9, 10, 11, 13), _record(source="invalid"))],
                 },
             ]
         )
@@ -1131,9 +1183,7 @@ def test_batch_prevalidates_every_entry_and_rejects_unknown_shapes_atomically():
             ]
         )
     with pytest.raises(_metadata_error(), match="insert_facts.*insert_columns"):
-        session.apply_relation_delta_batch(
-            [{"name": "transfer", "insert_facts": []}]
-        )
+        session.apply_relation_delta_batch([{"name": "transfer", "insert_facts": []}])
     with pytest.raises(_metadata_error(), match="insert_facts.*insert_columns"):
         session.apply_relation_delta("transfer", insert_facts=[])
 
@@ -1296,9 +1346,7 @@ def test_late_full_recompute_budget_failure_rolls_back_all_session_state():
     """
 
     def prepared_session():
-        session = pyxlog.LogicProgram.compile(
-            source, device=0, memory_mb=1
-        ).session()
+        session = pyxlog.LogicProgram.compile(source, device=0, memory_mb=1).session()
         stable = torch.arange(53_000, device="cuda", dtype=torch.int32)
         session.put_relation("stable", [stable])
         session.put_relation_with_provenance(
@@ -1325,9 +1373,7 @@ def test_late_full_recompute_budget_failure_rolls_back_all_session_state():
         update(), check_equivalence=False
     )
     assert control_stats["insert_rows"] == 1
-    assert _fact_sources(control.relation("alpha").provenance(), (1,)) == [
-        "prepared"
-    ]
+    assert _fact_sources(control.relation("alpha").provenance(), (1,)) == ["prepared"]
     del control, control_stable
     gc.collect()
     torch.cuda.empty_cache()
@@ -1356,9 +1402,7 @@ def test_late_full_recompute_budget_failure_rolls_back_all_session_state():
     assert after_failure.queries[0].num_rows == 0
     committed = session.apply_relation_delta_debug(update(), check_equivalence=False)
     assert committed["insert_rows"] == 1
-    assert _fact_sources(session.relation("alpha").provenance(), (1,)) == [
-        "prepared"
-    ]
+    assert _fact_sources(session.relation("alpha").provenance(), (1,)) == ["prepared"]
     assert [event["generation"] for event in events] == [1]
     assert stable.numel() == 53_000
 
@@ -1486,7 +1530,11 @@ def _transfer_manifest_export(rows=((1, 2, 3, 4),)):
             _fact(
                 rows[0],
                 _record(source="first-source", document=None, span=None),
-                _record(source="second-source", document="review", span={"start": 2, "end": 5}),
+                _record(
+                    source="second-source",
+                    document="review",
+                    span={"start": 2, "end": 5},
+                ),
             )
         ],
     )
@@ -1521,9 +1569,7 @@ def _assert_manifest_failure_is_atomic(manifest, columns, match):
     assert target.evidence() == before_evidence
     assert target.delta_stats() == before_stats
     assert events == []
-    target.insert_relation(
-        "transfer", _transfer_columns(rows=((94, 95, 96, 97),))
-    )
+    target.insert_relation("transfer", _transfer_columns(rows=((94, 95, 96, 97),)))
     assert [event["generation"] for event in events] == [1]
 
 
@@ -1539,7 +1585,9 @@ def test_manifest_quaternary_direct_dlpack_round_trip_is_exact_and_lifetime_safe
             _fact(
                 rows[0],
                 _record(source="manual", document=None, span=None, kind="confirmation"),
-                _record(source="extractor", document="document", span={"start": 1, "end": 9}),
+                _record(
+                    source="extractor", document="document", span={"start": 1, "end": 9}
+                ),
             )
         ],
     )
@@ -1600,7 +1648,9 @@ def test_manifest_quaternary_direct_dlpack_round_trip_is_exact_and_lifetime_safe
     query = fresh.evaluate().queries[0]
     assert all(pyxlog.dlpack_is_cuda(column) for column in query.tensors)
     assert fresh.host_transfer_stats()["dtoh_bytes"] == 0
-    query_columns = [torch.from_dlpack(column).cpu().tolist() for column in query.tensors]
+    query_columns = [
+        torch.from_dlpack(column).cpu().tolist() for column in query.tensors
+    ]
     assert sorted(zip(*query_columns)) == sorted(rows)
 
 
@@ -1653,7 +1703,9 @@ def test_manifest_metadata_free_ternary_round_trip_has_no_membership_transfer():
     assert fresh.host_transfer_stats()["dtoh_bytes"] == 0
     assert fresh.deterministic_d2h_violation_count() == 0
     query = fresh.evaluate().queries[0]
-    query_columns = [torch.from_dlpack(column).cpu().tolist() for column in query.tensors]
+    query_columns = [
+        torch.from_dlpack(column).cpu().tolist() for column in query.tensors
+    ]
     assert sorted(zip(*query_columns)) == [(1, -3, 7), (2, 4, 9)]
 
 
@@ -1693,7 +1745,9 @@ def test_manifest_reconstruction_is_row_order_independent_sparse_and_symbol_nume
         "hex": "09000000",
     }
     query = fresh.evaluate().queries[0]
-    query_columns = [torch.from_dlpack(column).cpu().tolist() for column in query.tensors]
+    query_columns = [
+        torch.from_dlpack(column).cpu().tolist() for column in query.tensors
+    ]
     assert sorted(zip(*query_columns)) == sorted(rows)
 
 
@@ -1941,7 +1995,9 @@ def test_unsupported_manifest_version_takes_precedence_over_future_shape():
         target.put_relation_from_manifest(
             "transfer", exported["columns"], future_manifest
         )
-    recovered = [torch.from_dlpack(column).cpu().tolist() for column in exported["columns"]]
+    recovered = [
+        torch.from_dlpack(column).cpu().tolist() for column in exported["columns"]
+    ]
     assert list(zip(*recovered)) == [(1, 2, 3, 4)]
 
 
@@ -1982,7 +2038,9 @@ def test_manifest_static_validation_does_not_consume_dlpack_capsules():
     target = _session()
     with pytest.raises(_metadata_error(), match="version"):
         target.put_relation_from_manifest("transfer", exported["columns"], manifest)
-    recovered = [torch.from_dlpack(column).cpu().tolist() for column in exported["columns"]]
+    recovered = [
+        torch.from_dlpack(column).cpu().tolist() for column in exported["columns"]
+    ]
     assert list(zip(*recovered)) == [(1, 2, 3, 4)]
 
 
@@ -2027,7 +2085,9 @@ def test_manifest_late_static_failures_do_not_consume_dlpack_capsules(case):
     target = _session()
     with pytest.raises(_metadata_error()):
         target.put_relation_from_manifest("transfer", exported["columns"], manifest)
-    recovered = [torch.from_dlpack(column).cpu().tolist() for column in exported["columns"]]
+    recovered = [
+        torch.from_dlpack(column).cpu().tolist() for column in exported["columns"]
+    ]
     assert list(zip(*recovered)) == [(1, 2, 3, 4)]
 
 
@@ -2067,16 +2127,12 @@ def test_manifest_dlpack_failures_preserve_target_state(case):
     before_evidence = target.evidence()
     before_stats = target.delta_stats()
     with pytest.raises(RuntimeError):
-        target.put_relation_from_manifest(
-            "transfer", columns, exported["manifest"]
-        )
+        target.put_relation_from_manifest("transfer", columns, exported["manifest"])
     assert _exported_rows(target, "transfer") == before_rows
     assert target.evidence() == before_evidence
     assert target.delta_stats() == before_stats
     assert events == []
-    target.insert_relation(
-        "transfer", _transfer_columns(rows=((94, 95, 96, 97),))
-    )
+    target.insert_relation("transfer", _transfer_columns(rows=((94, 95, 96, 97),)))
     assert [event["generation"] for event in events] == [1]
 
 
@@ -2108,9 +2164,7 @@ def test_manifest_strict_membership_gate_fails_before_any_session_mutation():
     target.set_strict_deterministic_d2h(True)
     try:
         with pytest.raises(RuntimeError, match=r"deterministic D2H gate.*1 bytes"):
-            target.put_relation_from_manifest(
-                "transfer", columns, exported["manifest"]
-            )
+            target.put_relation_from_manifest("transfer", columns, exported["manifest"])
     finally:
         target.set_strict_deterministic_d2h(False)
     assert target.deterministic_d2h_violation_count() == 1
@@ -2216,7 +2270,9 @@ def test_manifest_positional_import_respects_existing_role_contract_atomically()
             "positional", exported["columns"], exported["manifest"]
         )
     assert target.relation("positional").provenance() == before
-    assert [torch.from_dlpack(column).cpu().tolist() for column in exported["columns"]] == [
+    assert [
+        torch.from_dlpack(column).cpu().tolist() for column in exported["columns"]
+    ] == [
         [1],
         [2],
         [3],
@@ -2263,7 +2319,7 @@ def test_manifest_export_capsules_outlive_their_source_session_until_import():
     assert _exported_rows(fresh, "transfer") == [(1, 2, 3, 4)]
 
 
-def test_manifest_and_legacy_put_ignore_untrusted_sequence_length_hints():
+def test_relation_inputs_ignore_untrusted_sequence_length_hints():
     source, _snapshot, exported = _transfer_manifest_export()
     exported_tensors = [torch.from_dlpack(column) for column in exported["columns"]]
     fresh = _session()
@@ -2275,12 +2331,12 @@ def test_manifest_and_legacy_put_ignore_untrusted_sequence_length_hints():
     assert reconstructed["row_count"] == 1
     assert _exported_rows(fresh, "transfer") == [(1, 2, 3, 4)]
 
-    legacy = _session()
-    legacy.put_relation(
+    plain_session = _session()
+    plain_session.put_relation(
         "transfer",
         _LiesAboutLength(_transfer_columns(rows=((5, 6, 7, 8),))),
     )
-    assert _exported_rows(legacy, "transfer") == [(5, 6, 7, 8)]
+    assert _exported_rows(plain_session, "transfer") == [(5, 6, 7, 8)]
     assert _exported_rows(source, "transfer") == [(1, 2, 3, 4)]
 
     batch = _session()
@@ -2447,7 +2503,9 @@ def test_manifest_exact_cells_round_trip_nan_signed_zero_u64_and_bool():
         torch.from_dlpack(column) for column in fresh.export_relation("exact_value")
     ]
     assert relation_columns[0].view(torch.uint32).cpu().tolist() == [nan_bits]
-    assert struct.pack("<d", relation_columns[1].cpu().item()) == struct.pack("<d", -0.0)
+    assert struct.pack("<d", relation_columns[1].cpu().item()) == struct.pack(
+        "<d", -0.0
+    )
     assert relation_columns[2].cpu().tolist() == [wide]
     assert relation_columns[3].cpu().tolist() == [True]
 
