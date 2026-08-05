@@ -11,7 +11,7 @@ use std::collections::{HashMap, HashSet};
 use std::os::raw::{c_char, c_void};
 use std::sync::Arc;
 
-use pyo3::exceptions::{PyMemoryError, PyRuntimeError, PyValueError};
+use pyo3::exceptions::{PyBufferError, PyMemoryError, PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 
@@ -345,6 +345,14 @@ pub(crate) fn dlpack_from_py(obj: &Bound<'_, PyAny>) -> PyResult<DlpackManagedTe
     {
         obj.clone()
     } else if obj.hasattr("__dlpack__")? {
+        let (device_type, device_id): (i32, i32) =
+            obj.call_method0("__dlpack_device__")?.extract()?;
+        if device_type != xlog_cuda::dlpack::K_DLCUDA {
+            return Err(PyBufferError::new_err(format!(
+                "Unsupported DLPack producer device type {device_type} (device {device_id}); \
+                 XLOG requires CUDA device memory (kDLCUDA=2)"
+            )));
+        }
         // Passing the consumer stream makes the producer order any pending
         // non-default-stream writes before XLOG reads the tensor. A raw
         // capsule cannot negotiate synchronization and must already be ready

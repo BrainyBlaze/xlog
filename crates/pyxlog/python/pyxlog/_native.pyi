@@ -206,7 +206,13 @@ class CompiledLogicProgram:
         ...
 
 class LogicRelationSession:
-    """Persistent relation session for incremental Datalog evaluation."""
+    """Persistent relation session for incremental Datalog evaluation.
+
+    If a delta operation fails before commit but after preparation takes ownership
+    of cached derived state, the authoritative relation rows and evidence remain
+    unchanged, but XLOG discards the derived cache and retained runtime. The next
+    `evaluate()` rebuilds them.
+    """
 
     def put_relation(self, name: str, dlpack_columns: Any) -> None:
         """Snapshot DLPack columns into a persistent session relation."""

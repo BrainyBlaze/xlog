@@ -330,7 +330,12 @@ def test_dlpack_object_import_requests_the_legacy_default_stream_once():
     class Producer:
         def __init__(self, tensor):
             self.tensor = tensor
+            self.device_queries = 0
             self.streams = []
+
+        def __dlpack_device__(self):
+            self.device_queries += 1
+            return self.tensor.__dlpack_device__()
 
         def __dlpack__(self, *, stream=None):
             self.streams.append(stream)
@@ -341,14 +346,45 @@ def test_dlpack_object_import_requests_the_legacy_default_stream_once():
 
     target.put_relation("value", [producer])
 
+    assert producer.device_queries == 1
     assert producer.streams == [1]
     assert _exported_rows(target, "value") == [(7,)]
+
+
+def test_cpu_dlpack_object_is_rejected_before_export():
+    class CpuProducer:
+        def __init__(self):
+            self.tensor = torch.tensor([7], dtype=torch.int32)
+            self.device_queries = 0
+            self.streams = []
+
+        def __dlpack_device__(self):
+            self.device_queries += 1
+            return self.tensor.__dlpack_device__()
+
+        def __dlpack__(self, *, stream=None):
+            self.streams.append(stream)
+            return self.tensor.__dlpack__(stream=stream)
+
+    target = _session("pred value(value: i32).")
+    producer = CpuProducer()
+
+    with pytest.raises(BufferError, match="device type 1.*requires CUDA"):
+        target.put_relation("value", [producer])
+
+    assert producer.device_queries == 1
+    assert producer.streams == []
 
 
 def test_dlpack_object_stream_rejection_is_not_retried_without_synchronization():
     class RejectingProducer:
         def __init__(self):
+            self.device_queries = 0
             self.streams = []
+
+        def __dlpack_device__(self):
+            self.device_queries += 1
+            return 2, torch.cuda.current_device()
 
         def __dlpack__(self, *, stream=None):
             self.streams.append(stream)
@@ -360,6 +396,7 @@ def test_dlpack_object_stream_rejection_is_not_retried_without_synchronization()
     with pytest.raises(TypeError, match="consumer stream rejected"):
         target.put_relation("value", [producer])
 
+    assert producer.device_queries == 1
     assert producer.streams == [1]
 
 

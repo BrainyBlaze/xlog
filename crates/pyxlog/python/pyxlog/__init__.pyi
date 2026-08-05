@@ -1,8 +1,10 @@
 """Type stubs for the top-level ``pyxlog`` package.
 
 Installed wheels re-export everything from :mod:`pyxlog._native`; this file
-describes that complete native-backed surface. A source-only import without the
-extension exposes helper modules only and omits native types.
+describes that complete native-backed surface. Source-only imports retain the
+``RelationEvidence`` and ``RelationMetadataError`` names for annotations and
+exception handling, while native evidence values and operations still require
+the extension.
 """
 
 from __future__ import annotations

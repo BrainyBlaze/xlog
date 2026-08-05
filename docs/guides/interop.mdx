@@ -91,11 +91,15 @@ its pointer would let later in-place writes bypass relation versions, callbacks,
 and evidence validation. Transient `evaluate(dlpack_inputs=...)` inputs remain
 zero-copy.
 
-When given a tensor-like object, XLOG requests its DLPack capsule with CUDA
-consumer stream `1`, the legacy default stream, so pending work on a producer
-stream completes before XLOG reads it. A raw capsule cannot perform that
-handshake: create it for stream `1` or synchronize its producer before passing
-it to XLOG. Capsules exported by XLOG are already ready for this consumer stream.
+When given a tensor-like object, XLOG calls `__dlpack_device__()` before export.
+Only CUDA device memory (`kDLCUDA`) is accepted; another device raises
+`BufferError` without requesting or consuming a capsule. XLOG requests a CUDA
+capsule with consumer stream `1`, the legacy default stream, so pending producer
+work completes before XLOG reads it. A raw capsule bypasses device discovery and
+cannot perform that handshake: create it for stream `1` or synchronize its
+producer before passing it to XLOG. The native importer still validates its
+device header. Capsules exported by XLOG are already ready for this consumer
+stream.
 
 <Warning>
 DLPack columns are contiguous 1-D device buffers. A 2-D tensor, a non-contiguous view,

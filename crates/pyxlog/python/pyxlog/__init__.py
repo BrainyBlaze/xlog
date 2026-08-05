@@ -30,12 +30,22 @@ if _native is not None and hasattr(_native, "__all__"):
     LogicEvalResult = _native.LogicEvalResult
     DifferentiableProofTraceMap = _native.DifferentiableProofTraceMap
 elif _native is None:
+    class RelationMetadataError(ValueError):
+        """Relation metadata error type retained for source-only imports."""
+
+    class RelationEvidence:
+        """Opaque native evidence type retained for source-only imports."""
+
+        def __new__(cls, *_args: Any, **_kwargs: Any) -> "RelationEvidence":
+            raise RuntimeError("pyxlog._native is not available")
+
     class _NativeUnavailableIlpProgramFactory:
         @staticmethod
         def compile(*args: Any, **kwargs: Any) -> Any:
             raise RuntimeError("pyxlog._native is not available")
 
     IlpProgramFactory = _NativeUnavailableIlpProgramFactory
+    __all__.extend(["RelationEvidence", "RelationMetadataError"])
 
 if _native is not None:
     RelationEvidence = _native.RelationEvidence

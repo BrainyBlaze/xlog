@@ -221,11 +221,11 @@ version or callback generation advances, and no callback fires for the canceled
 relation. Callback or diagnostic code must not materialize relation rows on the
 host.
 
-If delta preparation fails after taking ownership of the derived evaluation
-cache, XLOG discards that cache and its retained session runtime. The
-authoritative relation rows and evidence remain unchanged, and the next
-`evaluate()` rebuilds derived state. This makes failure recovery safe at the
-cost of losing cache-hit and incremental-planner continuity for that attempt.
+If a delta operation fails before commit but after preparation takes ownership
+of cached derived state, the authoritative relation rows and evidence remain
+unchanged, but XLOG discards the derived cache and retained runtime. The next
+`evaluate()` rebuilds them. This makes failure recovery safe at the cost of
+losing cache-hit and incremental-planner continuity for that attempt.
 Direct `put_relation`, `remove_relation`, or `clear_relations` calls invalidate
 the cached runtime store and make the next `evaluate()` perform a full plan
 run before later deltas can reuse it.
@@ -380,10 +380,13 @@ DLPack columns before committing them. Mutating a retained producer tensor after
 session's versions, callbacks, or evidence. Transient evaluation inputs remain
 zero-copy.
 
-For tensor-like inputs, XLOG calls `__dlpack__(stream=1)` so a producer orders
-pending work before XLOG consumes it on CUDA's legacy default stream. Callers
-that supply a raw capsule must create it for stream `1` or synchronize its
-producer first; an already-created capsule cannot negotiate stream ordering.
+For tensor-like inputs, XLOG first calls `__dlpack_device__()`. Only CUDA device
+memory (`kDLCUDA`) is accepted; another device raises `BufferError` before XLOG
+requests or consumes a capsule. XLOG then calls `__dlpack__(stream=1)` so the
+CUDA producer orders pending work before consumption on the legacy default
+stream. Raw capsules bypass device discovery: callers must create them for
+stream `1` or synchronize their producer first, and the native importer still
+validates the capsule's device header.
 
 Membership validation runs over complete tuples on the GPU and downloads one
 boolean mask—one byte per distinct evidence fact—in one device-to-host call.
@@ -1222,9 +1225,9 @@ Current limitations:
   workspace build until the next tagged wheel publishes those surfaces
 - Pure-Python helper modules can import without `pyxlog._native`, but
   native-backed compile/evaluate APIs still require the PyO3 extension.
-  `RelationEvidence` and `RelationMetadataError` are native exports and are not
-  present in that source-only helper mode; the package stubs describe an
-  installed wheel with the extension.
+  `RelationEvidence` and `RelationMetadataError` remain importable for
+  annotations and exception handling in source-only mode; evidence objects
+  cannot be constructed there because their state is native-owned.
 
 ## See Also
 

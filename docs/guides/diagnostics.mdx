@@ -194,9 +194,10 @@ Relation callbacks receive the same changed-relation names and debug trace in th
 metadata payload; that path stays metadata-only too. Batch update dictionaries reject
 unknown keys before mutation. If all rows for a relation cancel during coalescing,
 `changed_relations` is `0`, no callback or generation increment is emitted for that
-relation, and the retained runtime version does not advance. A preparation failure
-preserves authoritative rows and evidence but discards the derived cache and retained
-runtime, so the next evaluation rebuilds them.
+relation, and the retained runtime version does not advance. If a delta operation fails
+before commit but after preparation takes ownership of cached derived state, the
+authoritative relation rows and evidence remain unchanged, but XLOG discards the derived
+cache and retained runtime. The next `evaluate()` rebuilds them.
 
 ## Host-transfer audits
 
