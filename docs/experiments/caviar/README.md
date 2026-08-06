@@ -493,10 +493,16 @@ holdout F1 up.
 **The meeting zero is a property of the data under the stricter
 protocol, not a harness failure.** The direct-protocol reference still
 selects `both_inactive & close` on 9 of 10 folds; applied directly to
-the held-out wk-scene fold it scores frame F1 0.890 (tp=1060, fp=0) —
-the machinery is sound. The EC initiation search, run independently
-under the same stricter gates, commits a clause on only 1 of the 10
-folds (`both_active & close`). What fails is transfer:
+the held-out wk-scene fold it scores frame F1 0.890 (tp=1060, fp=0,
+fn=263) — the machinery is sound. Every number in this paragraph and
+the census below is artifact-backed:
+`results/f_xml_scene_cv/caviar-g-meeting-census.json`, produced by the
+shipped tool `examples/caviar_woled/xml_meeting_census.py` (which
+imports the CV harness's own `_xml_family_fold_assignment` for the fold
+split — same table, same seed, never a re-implementation). The EC
+initiation search, run independently under the same stricter gates,
+commits a clause on only 1 of the 10 folds (`both_active & close`).
+What fails is transfer:
 
 - the wk scene family carries 1,323 of 1,812 meeting-positive frames
   (73%) and, with honest scene grouping, sits in exactly ONE fold;
@@ -533,7 +539,10 @@ pair stops and starts interacting) — but with no initiation clauses
 inertia never starts, so the EC score stays degenerate.
 
 Files: `results/f_xml_scene_cv/caviar-f-xml-meeting-cv10.json`,
-`results/f_xml_scene_cv/caviar-f-xml-moving-cv10.json`.
+`results/f_xml_scene_cv/caviar-f-xml-moving-cv10.json`,
+`results/f_xml_scene_cv/caviar-g-meeting-census.json` (the wk-fold
+clause application and per-segment census; tool:
+`examples/caviar_woled/xml_meeting_census.py`).
 
 ## H. Claims summary: what this benchmark does and does not establish
 
