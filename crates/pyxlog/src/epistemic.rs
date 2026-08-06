@@ -3,7 +3,6 @@
 //
 // The #[pyclass] struct definitions remain in lib.rs, matching program.rs.
 
-#[cfg(feature = "host-io")]
 use std::collections::HashMap;
 #[cfg(feature = "host-io")]
 use std::sync::Arc;
@@ -27,7 +26,7 @@ use xlog_prob::exact::{ExactResult, GpuConfig};
 use super::program::atom_to_string;
 #[cfg(feature = "host-io")]
 use super::{dlpack_capsule_from_tensor, enforce_call_memory_limit};
-use super::{types, CompiledLogicProgram, EpistemicEvalResult};
+use super::{types, CompiledLogicProgram, EpistemicEvalResult, EpistemicEvidence};
 
 #[pymethods]
 impl CompiledLogicProgram {
@@ -90,6 +89,27 @@ impl CompiledLogicProgram {
     ) -> PyResult<EpistemicEvalResult> {
         let _ = (prob_source, memory_mb);
         Err(types::host_io_disabled_pyerr())
+    }
+
+    /// Run this epistemic program on the GPU and report what it accepted.
+    ///
+    /// Diagnostic counterpart of `evaluate_conditioned`: it answers whether the
+    /// `know`-broadcast happened at all, without involving the probabilistic tier.
+    pub fn epistemic_evidence(&self) -> PyResult<EpistemicEvidence> {
+        let result = self
+            .program
+            .execute_epistemic_evidence(self.provider.clone(), HashMap::new())
+            .map_err(types::xlog_err)?;
+        Ok(EpistemicEvidence {
+            epistemic_mode: format!("{:?}", result.prepared.preflight.epistemic_mode)
+                .to_lowercase(),
+            know_operator_count: result.prepared.preflight.know_operator_count,
+            possible_operator_count: result.prepared.preflight.possible_operator_count,
+            accepted_candidates: result.semantic_trace.accepted_candidates,
+            rejected_candidates: result.semantic_trace.rejected_candidates,
+            accepted_world_views: result.semantic_trace.accepted_world_views,
+            final_output_rows: result.final_result_transfer.final_output_rows,
+        })
     }
 }
 

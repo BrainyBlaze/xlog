@@ -783,6 +783,28 @@ pub struct EpistemicEvalResult {
     pub trace: PyObject,
 }
 
+/// Summary of one accepted epistemic GPU execution.
+///
+/// `accepted_world_views == 0` means the program ran but nothing was accepted —
+/// conditioning a probabilistic query on it will not add any evidence.
+#[pyclass]
+pub struct EpistemicEvidence {
+    #[pyo3(get)]
+    pub epistemic_mode: String,
+    #[pyo3(get)]
+    pub know_operator_count: usize,
+    #[pyo3(get)]
+    pub possible_operator_count: usize,
+    #[pyo3(get)]
+    pub accepted_candidates: usize,
+    #[pyo3(get)]
+    pub rejected_candidates: usize,
+    #[pyo3(get)]
+    pub accepted_world_views: usize,
+    #[pyo3(get)]
+    pub final_output_rows: usize,
+}
+
 // =========================================================================
 // Training Infrastructure
 // =========================================================================
@@ -870,6 +892,7 @@ fn pyxlog(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<McDeviceEvalResult>()?;
     m.add_class::<EvalResult>()?;
     m.add_class::<EpistemicEvalResult>()?;
+    m.add_class::<EpistemicEvidence>()?;
     // Training infrastructure
     m.add_class::<PyDifferentiableProofTraceMap>()?;
     m.add_class::<EpochStats>()?;
