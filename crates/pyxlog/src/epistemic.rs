@@ -56,7 +56,17 @@ impl CompiledLogicProgram {
             .execute_epistemic_evidence(self.provider.clone(), HashMap::new())
             .map_err(types::xlog_err)?;
 
-        let mut adapter = EpistemicProbProductionAdapter::new(GpuConfig::default());
+        // ВАЖНО: not `GpuConfig::default()`. The adapter does not reuse our provider —
+        // `ExactDdnnfProgram::compile_provenance_with_gpu` (crates/xlog-prob/src/exact.rs:1606)
+        // builds its OWN device from `config.device_ordinal` and `config.memory_bytes`.
+        //
+        // `GpuConfig` is `#[non_exhaustive]`, so it cannot be built with a struct
+        // literal naming every field from outside `xlog-prob`; start from
+        // `Default::default()` and overwrite the two fields we need to match.
+        let mut config = GpuConfig::default();
+        config.device_ordinal = self.provider.device().ordinal();
+        config.memory_bytes = self.provider.memory().budget().device_bytes;
+        let mut adapter = EpistemicProbProductionAdapter::new(config);
         let exact = adapter
             .compile_and_evaluate_conditioned_source_with_gpu_execution_result(
                 prob_source,
