@@ -37,6 +37,7 @@ use xlog_runtime::{Executor, RelationStore};
 mod neural_registry;
 use neural_registry::NeuralPredicateRegistry;
 mod dlpack;
+mod epistemic;
 mod ilp;
 mod ilp_exact;
 mod ilp_gpu;
@@ -763,6 +764,25 @@ pub struct EvalResult {
     pub mc_engine: Option<String>,
 }
 
+/// Exact probabilities conditioned on an accepted epistemic world view.
+///
+/// `prob`/`log_prob` are DLPack capsules over device memory, like `EvalResult`.
+/// `trace` carries the production-path counters of the epistemic->probability
+/// adapter: they are the evidence that conditioning actually happened on the GPU.
+#[pyclass]
+pub struct EpistemicEvalResult {
+    #[pyo3(get)]
+    pub atoms: Vec<String>,
+    #[pyo3(get)]
+    pub prob: PyObject,
+    #[pyo3(get)]
+    pub log_prob: PyObject,
+    #[pyo3(get)]
+    pub log_z_e: f64,
+    #[pyo3(get)]
+    pub trace: PyObject,
+}
+
 // =========================================================================
 // Training Infrastructure
 // =========================================================================
@@ -849,6 +869,7 @@ fn pyxlog(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<LogicEvalResult>()?;
     m.add_class::<McDeviceEvalResult>()?;
     m.add_class::<EvalResult>()?;
+    m.add_class::<EpistemicEvalResult>()?;
     // Training infrastructure
     m.add_class::<PyDifferentiableProofTraceMap>()?;
     m.add_class::<EpochStats>()?;

@@ -1,0 +1,168 @@
+// Epistemic evidence handoff: run a `know`/`possible` program on the GPU and
+// condition an exact probabilistic query on the accepted world view.
+//
+// The #[pyclass] struct definitions remain in lib.rs, matching program.rs.
+
+#[cfg(feature = "host-io")]
+use std::collections::HashMap;
+#[cfg(feature = "host-io")]
+use std::sync::Arc;
+
+use pyo3::prelude::*;
+#[cfg(feature = "host-io")]
+use pyo3::types::PyDict;
+
+#[cfg(feature = "host-io")]
+use xlog_core::{ScalarType, Schema};
+#[cfg(feature = "host-io")]
+use xlog_cuda::CudaKernelProvider;
+#[cfg(feature = "host-io")]
+use xlog_prob::epistemic_production::{
+    EpistemicProbProductionAdapter, EpistemicProbProductionTrace,
+};
+#[cfg(feature = "host-io")]
+use xlog_prob::exact::{ExactResult, GpuConfig};
+
+#[cfg(feature = "host-io")]
+use super::program::atom_to_string;
+#[cfg(feature = "host-io")]
+use super::{dlpack_capsule_from_tensor, enforce_call_memory_limit};
+use super::{types, CompiledLogicProgram, EpistemicEvalResult};
+
+#[pymethods]
+impl CompiledLogicProgram {
+    /// Run this epistemic program on the GPU and condition `prob_source` on what it knows.
+    ///
+    /// The compiled program must contain epistemic operators (`know`, `possible`, ...):
+    /// ordinary Datalog programs are rejected, because there is no accepted world view
+    /// to condition on. Facts declared in the epistemic program's source are loaded
+    /// automatically; no relation upload is required.
+    ///
+    /// The returned trace must show `cpu_only_probability_recomputations == 0` and a
+    /// non-zero `gpu_conditioned_know_evidence_facts` — otherwise the conditioning did
+    /// not reach the GPU exact path.
+    #[cfg(feature = "host-io")]
+    #[pyo3(signature = (prob_source, memory_mb=None))]
+    pub fn evaluate_conditioned(
+        &self,
+        py: Python<'_>,
+        prob_source: &str,
+        memory_mb: Option<u64>,
+    ) -> PyResult<EpistemicEvalResult> {
+        enforce_call_memory_limit(&self.provider, memory_mb)?;
+
+        let evidence = self
+            .program
+            .execute_epistemic_evidence(self.provider.clone(), HashMap::new())
+            .map_err(types::xlog_err)?;
+
+        let mut adapter = EpistemicProbProductionAdapter::new(GpuConfig::default());
+        let exact = adapter
+            .compile_and_evaluate_conditioned_source_with_gpu_execution_result(
+                prob_source,
+                &self.provider,
+                &evidence,
+                Vec::new(),
+            )
+            .map_err(types::xlog_err)?;
+        let trace = adapter.trace();
+
+        pack_epistemic_eval_result(py, &self.provider, exact, &trace)
+    }
+
+    #[cfg(not(feature = "host-io"))]
+    #[pyo3(signature = (prob_source, memory_mb=None))]
+    pub fn evaluate_conditioned(
+        &self,
+        _py: Python<'_>,
+        prob_source: &str,
+        memory_mb: Option<u64>,
+    ) -> PyResult<EpistemicEvalResult> {
+        let _ = (prob_source, memory_mb);
+        Err(types::host_io_disabled_pyerr())
+    }
+}
+
+#[cfg(feature = "host-io")]
+fn pack_epistemic_eval_result(
+    py: Python<'_>,
+    provider: &Arc<CudaKernelProvider>,
+    result: ExactResult,
+    trace: &EpistemicProbProductionTrace,
+) -> PyResult<EpistemicEvalResult> {
+    let mut atoms: Vec<String> = Vec::with_capacity(result.query_probs.len());
+    let mut probs: Vec<f64> = Vec::with_capacity(result.query_probs.len());
+    let mut log_probs: Vec<f64> = Vec::with_capacity(result.query_probs.len());
+
+    for q in result.query_probs {
+        atoms.push(atom_to_string(&q.atom));
+        probs.push(q.prob);
+        log_probs.push(q.log_prob);
+    }
+
+    let schema = Schema::new(vec![("col0".to_string(), ScalarType::F64)]);
+    let prob_buf = provider
+        .create_buffer_from_slice::<f64>(&probs, schema.clone())
+        .map_err(types::xlog_err)?;
+    let log_prob_buf = provider
+        .create_buffer_from_slice::<f64>(&log_probs, schema)
+        .map_err(types::xlog_err)?;
+    let prob_tensor = provider
+        .to_dlpack_table(prob_buf)
+        .column(0)
+        .map_err(types::xlog_err)?;
+    let log_prob_tensor = provider
+        .to_dlpack_table(log_prob_buf)
+        .column(0)
+        .map_err(types::xlog_err)?;
+
+    let dict = PyDict::new(py);
+    dict.set_item(
+        "accepted_world_view_evidence_consumed",
+        trace.accepted_world_view_evidence_consumed,
+    )?;
+    dict.set_item(
+        "accepted_faeel_world_view_evidence_consumed",
+        trace.accepted_faeel_world_view_evidence_consumed,
+    )?;
+    dict.set_item(
+        "accepted_evidence_assumptions_consumed",
+        trace.accepted_evidence_assumptions_consumed,
+    )?;
+    dict.set_item(
+        "gpu_conditioned_evidence_facts",
+        trace.gpu_conditioned_evidence_facts,
+    )?;
+    dict.set_item(
+        "gpu_conditioned_know_evidence_facts",
+        trace.gpu_conditioned_know_evidence_facts,
+    )?;
+    dict.set_item(
+        "gpu_exact_query_evaluations",
+        trace.gpu_exact_query_evaluations,
+    )?;
+    dict.set_item(
+        "gpu_knowledge_compilation_end_to_end_runs",
+        trace.gpu_knowledge_compilation_end_to_end_runs,
+    )?;
+    dict.set_item(
+        "accepted_gpu_production_path_events",
+        trace.accepted_gpu_production_path_events,
+    )?;
+    dict.set_item(
+        "cpu_only_probability_recomputations",
+        trace.cpu_only_probability_recomputations,
+    )?;
+    dict.set_item(
+        "fixture_circuit_evaluations",
+        trace.fixture_circuit_evaluations,
+    )?;
+
+    Ok(EpistemicEvalResult {
+        atoms,
+        prob: dlpack_capsule_from_tensor(py, prob_tensor)?,
+        log_prob: dlpack_capsule_from_tensor(py, log_prob_tensor)?,
+        log_z_e: result.log_z_e,
+        trace: dict.into(),
+    })
+}
