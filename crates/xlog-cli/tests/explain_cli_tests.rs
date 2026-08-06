@@ -1,4 +1,5 @@
 use assert_cmd::cargo::cargo_bin_cmd;
+use tempfile::TempDir;
 
 #[test]
 fn test_xlog_explain_magic_sets_text() {
@@ -252,6 +253,215 @@ gated(X) :- know know support(X).
             || stdout.contains("\"predicate\": \"support\""),
         "{stdout}"
     );
+}
+
+#[test]
+fn test_xlog_explain_unions_compatible_predicates_from_separate_modules() {
+    let fixture = TempDir::new().expect("create fixture directory");
+    std::fs::write(
+        fixture.path().join("first.xlog"),
+        "pred shared(symbol).\nshared(from_first).\n",
+    )
+    .expect("write first module");
+    std::fs::write(
+        fixture.path().join("second.xlog"),
+        "pred shared(symbol).\nshared(from_second).\n",
+    )
+    .expect("write second module");
+    let program = fixture.path().join("main.xlog");
+    std::fs::write(&program, "use first.\nuse second.\n?- shared(X).\n")
+        .expect("write main program");
+
+    let output = cargo_bin_cmd!("xlog")
+        .args([
+            "explain",
+            "--format",
+            "json",
+            "--module-path",
+            fixture.path().to_str().expect("valid module path"),
+            program.to_str().expect("valid program path"),
+        ])
+        .output()
+        .expect("run xlog explain with compatible predicate contributions");
+
+    assert!(
+        output.status.success(),
+        "xlog explain failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).expect("utf8 stdout");
+    let payload: serde_json::Value = serde_json::from_str(&stdout).expect("valid explain json");
+    assert_eq!(payload["ast"]["rules"], 2, "{stdout}");
+    assert_eq!(payload["stratification"]["status"], "ok", "{stdout}");
+    assert_eq!(payload["rir"]["status"], "ok", "{stdout}");
+    assert_eq!(payload["optimizer"]["status"], "ok", "{stdout}");
+}
+
+#[test]
+fn test_xlog_explain_rejects_incompatible_undeclared_predicate_schemas() {
+    let fixture = TempDir::new().expect("create fixture directory");
+    std::fs::write(fixture.path().join("first.xlog"), "shared(1).\n").expect("write first module");
+    std::fs::write(fixture.path().join("second.xlog"), "shared(from_second).\n")
+        .expect("write second module");
+    let program = fixture.path().join("main.xlog");
+    std::fs::write(&program, "use first.\nuse second.\n?- shared(X).\n")
+        .expect("write main program");
+
+    let output = cargo_bin_cmd!("xlog")
+        .args([
+            "explain",
+            "--format",
+            "json",
+            "--module-path",
+            fixture.path().to_str().expect("valid module path"),
+            program.to_str().expect("valid program path"),
+        ])
+        .output()
+        .expect("run xlog explain with incompatible predicate contributions");
+
+    assert!(
+        !output.status.success(),
+        "xlog explain unexpectedly succeeded"
+    );
+    let stderr = String::from_utf8(output.stderr).expect("utf8 stderr");
+    assert!(stderr.contains("error[E0412]"), "{stderr}");
+    assert!(stderr.contains("shared/1"), "{stderr}");
+    assert!(stderr.contains("first"), "{stderr}");
+    assert!(stderr.contains("second"), "{stderr}");
+    assert!(!stderr.contains("Type mismatch in fact"), "{stderr}");
+    assert!(!stderr.contains("Symbol("), "{stderr}");
+}
+
+#[test]
+fn test_xlog_explain_attributes_inferred_expression_schema_conflicts() {
+    let cases = [
+        (
+            "arithmetic",
+            "shared(X) :- X is cast(1, u32).\n",
+            "shared(X) :- X is cast(1, u64).\n",
+            "u32",
+            "u64",
+        ),
+        (
+            "aggregate",
+            "first_source(1).\nshared(min(X)) :- first_source(X).\n",
+            "second_source(1.0).\nshared(logsumexp(X)) :- second_source(X).\n",
+            "u32",
+            "f64",
+        ),
+    ];
+
+    for (case, first_source, second_source, first_type, second_type) in cases {
+        let fixture = TempDir::new().expect("create fixture directory");
+        std::fs::write(fixture.path().join("first.xlog"), first_source)
+            .expect("write first module");
+        std::fs::write(fixture.path().join("second.xlog"), second_source)
+            .expect("write second module");
+        let program = fixture.path().join("main.xlog");
+        std::fs::write(&program, "use first.\nuse second.\n?- shared(X).\n")
+            .expect("write main program");
+
+        let output = cargo_bin_cmd!("xlog")
+            .args([
+                "explain",
+                "--format",
+                "json",
+                "--module-path",
+                fixture.path().to_str().expect("valid module path"),
+                program.to_str().expect("valid program path"),
+            ])
+            .output()
+            .expect("run xlog explain with incompatible expression-derived schemas");
+
+        assert!(
+            !output.status.success(),
+            "xlog explain unexpectedly succeeded for {case} inference"
+        );
+        let stderr = String::from_utf8(output.stderr).expect("utf8 stderr");
+        assert!(stderr.contains("error[E0412]"), "{case}: {stderr}");
+        assert!(stderr.contains("shared/1"), "{case}: {stderr}");
+        assert!(stderr.contains("module `first`"), "{case}: {stderr}");
+        assert!(stderr.contains("module `second`"), "{case}: {stderr}");
+        assert!(stderr.contains(first_type), "{case}: {stderr}");
+        assert!(stderr.contains(second_type), "{case}: {stderr}");
+    }
+}
+
+#[test]
+fn test_xlog_explain_retains_schema_evidence_beside_user_functions() {
+    let fixture = TempDir::new().expect("create fixture directory");
+    std::fs::write(
+        fixture.path().join("first.xlog"),
+        "func first_value(X) = cast(X, u32).\nshared(1, X) :- X is first_value(1).\n",
+    )
+    .expect("write first module");
+    std::fs::write(
+        fixture.path().join("second.xlog"),
+        "func second_value(X) = cast(X, u32).\nshared(from_second, X) :- X is second_value(1).\n",
+    )
+    .expect("write second module");
+    let program = fixture.path().join("main.xlog");
+    std::fs::write(&program, "use first.\nuse second.\n?- shared(X, Y).\n")
+        .expect("write main program");
+
+    let output = cargo_bin_cmd!("xlog")
+        .args([
+            "explain",
+            "--format",
+            "json",
+            "--module-path",
+            fixture.path().to_str().expect("valid module path"),
+            program.to_str().expect("valid program path"),
+        ])
+        .output()
+        .expect("run xlog explain with mixed inferred schema evidence");
+
+    assert!(
+        !output.status.success(),
+        "xlog explain unexpectedly accepted incompatible independent schema evidence"
+    );
+    let stderr = String::from_utf8(output.stderr).expect("utf8 stderr");
+    assert!(stderr.contains("error[E0412]"), "{stderr}");
+    assert!(stderr.contains("shared/2"), "{stderr}");
+    assert!(stderr.contains("module `first`"), "{stderr}");
+    assert!(stderr.contains("module `second`"), "{stderr}");
+    assert!(stderr.contains("u32"), "{stderr}");
+    assert!(stderr.contains("symbol"), "{stderr}");
+}
+
+#[test]
+fn test_xlog_explain_attributes_an_entry_schema_conflict() {
+    let fixture = TempDir::new().expect("create fixture directory");
+    std::fs::write(fixture.path().join("library.xlog"), "shared(1).\n")
+        .expect("write library module");
+    let program = fixture.path().join("main.xlog");
+    std::fs::write(
+        &program,
+        "use library.\nshared(from_entry).\n?- shared(X).\n",
+    )
+    .expect("write main program");
+
+    let output = cargo_bin_cmd!("xlog")
+        .args([
+            "explain",
+            "--format",
+            "json",
+            "--module-path",
+            fixture.path().to_str().expect("valid module path"),
+            program.to_str().expect("valid program path"),
+        ])
+        .output()
+        .expect("run xlog explain with an incompatible entry contribution");
+
+    assert!(
+        !output.status.success(),
+        "xlog explain unexpectedly succeeded"
+    );
+    let stderr = String::from_utf8(output.stderr).expect("utf8 stderr");
+    assert!(stderr.contains("error[E0412]"), "{stderr}");
+    assert!(stderr.contains("shared/1"), "{stderr}");
+    assert!(stderr.contains("module `library`"), "{stderr}");
+    assert!(stderr.contains("module `main`"), "{stderr}");
 }
 
 #[test]

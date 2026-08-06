@@ -11,8 +11,12 @@ first use.
 
 XLOG is a CUDA-backed logic engine. It has one language frontend and several
 execution backends. Source programs enter through the `xlog-logic` crate. They
-are lowered into a relational intermediate representation and a few
-domain-specific ones. Host-side control code then launches CUDA kernels over
+fan out from the normalized frontend into three reasoning intermediate
+representations: RIR for deterministic relational execution, PIR for
+probabilistic provenance, and EIR for epistemic semantics. Neural-symbolic
+training composes with the applicable reasoning route. SAT/MaxSAT and
+verification use the shared `GpuCnf` and CDCL solver service rather than another
+reasoning IR. Host-side control code then launches CUDA kernels over
 device-resident relation, circuit, and solver state.
 
 The important boundary is simple. The compiler and executor live on the host.
@@ -31,16 +35,20 @@ The engine is organized into five layers, each owned by a small set of crates.
 
 | Layer | Crates | Responsibility |
 | --- | --- | --- |
-| Language frontend | `xlog-logic`, `xlog-ir` | Parse XLOG source, normalize safe language constructs, stratify dependencies, lower to RIR/EIR, and build execution plans. |
+| Language frontend | `xlog-logic`, `xlog-ir` | Parse XLOG source, normalize safe language constructs, analyze dependencies, lower deterministic and epistemic programs to RIR/EIR, and build execution plans. |
 | Runtime control | `xlog-runtime`, `xlog-stats` | Interpret RIR, maintain relation state, collect statistics, choose opportunistic dispatch routes (an optimized kernel is used only when a rule's shape makes it applicable), and expose telemetry. |
 | CUDA substrate | `xlog-cuda` | Own device buffers, load CUDA artifacts, launch recorded kernels, and provide join/groupby/WCOJ/solver primitives. |
-| Probabilistic and epistemic engines | `xlog-prob`, `xlog-gpu`, `xlog-solve` | Encode probabilistic circuits, epistemic execution plans, and SAT/UNSAT solver workloads over the shared CUDA substrate. |
+| Reasoning engines and solver service | `xlog-prob`, `xlog-gpu`, `xlog-solve` | Build and evaluate PIR/XGCF, execute EIR-backed plans, and provide the shared `GpuCnf`/CDCL service over the CUDA substrate. |
 | User surfaces | `xlog-cli`, `pyxlog` | Provide CLI commands and Python bindings. `pyxlog` is distributed as a Python package, not as a crates.io package. |
 
-Two abbreviations appear in the table above. RIR is the relational intermediate
-representation — the plan form the runtime interprets. EIR is the epistemic
+Three reasoning-IR abbreviations appear above. RIR is the relational
+intermediate representation — the plan form the deterministic runtime
+interprets. PIR is the probabilistic intermediate representation — the
+provenance graph used by probabilistic execution. EIR is the epistemic
 intermediate representation — a separate plan form for epistemic (knowledge-and-
-belief) queries. Both are glossed again below where they matter.
+belief) queries. XGCF is the downstream GPU circuit format produced by
+probabilistic knowledge compilation, while `GpuCnf` is the input representation
+for the shared CDCL solver service; neither is another reasoning IR.
 
 Three optimized join routes appear in the sections below (the table names WCOJ
 directly); here is what each name means. WCOJ (worst-case-optimal join) computes multiway graph patterns —
@@ -74,10 +82,12 @@ implemented in `xlog-logic`:
    predicate-pushdown, selectivity, and multiway-promotion. (Helper-split breaks
    a plan node into smaller helper nodes the optimizer can specialize.)
 
-Epistemic execution builds its own plan form, EIR, directly from the parsed AST.
-It is not a branch taken after RIR. Probabilistic and solver paths also share the
-frontend, but each introduces its own planning artifacts after parsing and
-normalization.
+Epistemic execution builds EIR directly from the parsed AST. Probabilistic
+execution builds PIR from provenance over the normalized program. Neither route
+branches from RIR. Neural predicates compose with the applicable symbolic route
+rather than introducing another reasoning IR. Features that require SAT/MaxSAT
+search or verification supply a device-resident `GpuCnf` to the shared CDCL
+service; the solver does not introduce an IR or compile into XGCF.
 
 ## Runtime Boundary
 

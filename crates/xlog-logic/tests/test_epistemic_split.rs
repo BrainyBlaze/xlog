@@ -2,10 +2,11 @@ use xlog_core::XlogError;
 use xlog_ir::ExecutionPlan;
 use xlog_logic::epistemic::{
     build_epistemic_dependency_graph, classify_recursive_epistemic_program,
-    compile_epistemic_gpu_split_execution, plan_epistemic_gpu_execution,
+    compile_epistemic_gpu_split_execution, plan_epistemic_gpu_execution, prepare_epistemic_program,
     reduce_case_a_epistemic_program_to_ordinary, reduce_epistemic_program_to_ordinary,
-    split_epistemic_program, try_reduce_case_a_recursive_epistemic_program,
-    EpistemicComponentMergeReason, RecursiveEpistemicClass,
+    split_epistemic_program, try_prepare_g91_compatibility_reduction,
+    try_reduce_case_a_recursive_epistemic_program, EpistemicComponentMergeReason,
+    RecursiveEpistemicClass,
 };
 use xlog_logic::{parse_program, BodyLiteral};
 
@@ -63,6 +64,40 @@ fn positive_modal_over_co_evolving_relation_is_accepted_case_b() {
         plan_epistemic_gpu_execution(&program),
         Err(XlogError::UnsupportedEpistemicConstruct { .. })
     ));
+}
+
+#[test]
+fn recursive_reducer_excludes_exact_unfounded_rule_from_relation_identity() {
+    let program = parse_program(
+        r#"
+        #pragma epistemic_mode = faeel
+        p(a, b).
+        p(X) :- p(X), possible p(X).
+        ?- p(X, Y).
+        "#,
+    )
+    .unwrap();
+
+    assert_eq!(
+        classify_recursive_epistemic_program(&program).unwrap(),
+        RecursiveEpistemicClass::CaseB
+    );
+    let reduced = try_reduce_case_a_recursive_epistemic_program(&program)
+        .expect("exact circular support must not create a live relation-identity conflict")
+        .expect("the authored program contains ordinary recursion");
+
+    assert!(
+        reduced.rules.iter().all(|rule| rule.head.arity() != 1),
+        "the exact circular p/1 rule must be absent from the founded reduction: {:?}",
+        reduced.rules
+    );
+    assert!(
+        reduced
+            .rules
+            .iter()
+            .any(|rule| rule.head.predicate == "p" && rule.head.arity() == 2),
+        "the extensional p/2 fact must remain executable"
+    );
 }
 
 #[test]
@@ -410,9 +445,11 @@ fn negated_stratified_modal_with_g91_possible_cycle_is_accepted_case_b() {
         RecursiveEpistemicClass::CaseB,
         "G91 possible recursion plus stratified negated modal remains admissible Case B"
     );
-    let reduced = try_reduce_case_a_recursive_epistemic_program(&program)
-        .unwrap()
-        .expect("G91 possible recursion plus stratified negated modal reduces");
+    let prepared = prepare_epistemic_program(&program).expect("validate G91 source");
+    let compatibility = try_prepare_g91_compatibility_reduction(&prepared)
+        .expect("prepare G91 compatibility")
+        .expect("G91 possible recursion must use tuple compatibility iteration");
+    let reduced = compatibility.refinement_program();
     assert!(
         reduced.rules.iter().any(|rule| {
             rule.head.predicate == "linked"
@@ -438,9 +475,8 @@ fn negated_stratified_modal_with_g91_possible_cycle_is_accepted_case_b() {
 fn g91_possible_over_co_evolving_relation_is_accepted_as_self_supporting_case_b() {
     // Under G91, a positive `possible` modal over a relation that
     // CO-EVOLVES with recursion is the compatibility self-support assumption. The
-    // recursive path admits it as Case B and the reduction drops that non-invariant
-    // positive `possible` conjunct to a tautology instead of resolving it to the FAEEL
-    // founded least-fixpoint atom.
+    // recursive path admits it as Case B and builds an explicit upper-bound plus
+    // frozen-snapshot refinement rather than deleting the gate from final execution.
     let program = parse_program(
         r#"
         #pragma epistemic_mode = g91
@@ -458,16 +494,21 @@ fn g91_possible_over_co_evolving_relation_is_accepted_as_self_supporting_case_b(
         classify_recursive_epistemic_program(&program).unwrap(),
         RecursiveEpistemicClass::CaseB
     );
-    let reduced = reduce_case_a_epistemic_program_to_ordinary(&program);
+    let prepared = prepare_epistemic_program(&program).expect("validate G91 source");
+    let compatibility = try_prepare_g91_compatibility_reduction(&prepared)
+        .expect("prepare G91 compatibility")
+        .expect("G91 possible recursion must use tuple compatibility iteration");
     assert!(
-        reduced.rules.iter().any(|rule| {
+        compatibility.refinement_program().rules.iter().any(|rule| {
             rule.head.predicate == "linked"
                 && rule
                     .body
                     .iter()
-                    .all(|lit| !matches!(lit, BodyLiteral::Epistemic(_)))
+                    .any(|literal| {
+                        matches!(literal, BodyLiteral::Positive(atom) if atom.predicate.starts_with("__xlog_g91_snapshot_"))
+                    })
         }),
-        "G91 possible-recursion should reduce to ordinary GPU recursion without modal residue"
+        "G91 refinement must read the preceding tuple snapshot"
     );
 }
 
@@ -538,10 +579,11 @@ fn case_a_recursive_epistemic_program_is_accepted_and_reduced() {
 }
 
 #[test]
-fn modal_self_support_is_not_treated_as_ordinary_recursion() {
-    // Modal self-support through a modal literal (`founded() :- possible founded().`)
-    // is not ordinary recursion and is handled by FAEEL foundedness; with an
-    // independent founded support it must NOT be rejected by the recursion guard.
+fn modal_self_support_with_foundation_routes_through_modal_fixpoint() {
+    // A modal dependency on the rule's own head is a co-evolving fixpoint even when
+    // an independent rule already founds the relation. The single-pass planner must
+    // decline it, while the recursive reducer preserves the founded rule and resolves
+    // the modal edge for ordinary fixpoint evaluation.
     let program = parse_program(
         r#"
         pred base().
@@ -552,30 +594,39 @@ fn modal_self_support_is_not_treated_as_ordinary_recursion() {
         "#,
     )
     .unwrap();
-    plan_epistemic_gpu_execution(&program)
-        .expect("modal self-support with independent foundation must not be rejected as recursion");
+    assert_eq!(
+        classify_recursive_epistemic_program(&program).unwrap(),
+        RecursiveEpistemicClass::ModalCycle
+    );
+    assert!(plan_epistemic_gpu_execution(&program).is_err());
+    let reduced = try_reduce_case_a_recursive_epistemic_program(&program)
+        .unwrap()
+        .expect("modal cycle must reduce to an ordinary fixpoint");
+    assert!(reduced.rules.iter().any(|rule| {
+        rule.head.predicate == "founded"
+            && rule
+                .body
+                .iter()
+                .any(|literal| matches!(literal, BodyLiteral::Positive(atom) if atom.predicate == "base"))
+    }));
 }
 
 #[test]
-fn bare_modal_self_support_stays_non_recursive_not_case_b() {
-    // Bare modal self-support regression: a bare modal self-support (`p() :- know p()` /
-    // `p() :- possible p()`) has NO ordinary recursion edge -- the only self-dependency
-    // is through the modal literal, which contributes no recursion edge. It must stay
-    // `NonRecursive` (handled by the single-pass founded-extension path: rows:0
-    // FAEEL / rows:1 G91) and NEVER be rerouted into Case-B by the relaxation.
+fn bare_modal_self_support_is_classified_as_modal_cycle() {
+    // A bare modal self-dependency is solved as a fixpoint. FAEEL reaches the empty
+    // founded extension; G91 applies its compatibility rule during reduction.
     for source in ["p() :- know p().", "p() :- possible p()."] {
         let program = parse_program(source).unwrap();
         assert_eq!(
             classify_recursive_epistemic_program(&program).unwrap(),
-            RecursiveEpistemicClass::NonRecursive,
-            "bare modal self-support `{source}` must stay NonRecursive, not Case-B"
+            RecursiveEpistemicClass::ModalCycle,
+            "bare modal self-support `{source}` must be a modal dependency cycle"
         );
-        // try_reduce returns None (no ordinary recursion to route to the engine).
         assert!(
             try_reduce_case_a_recursive_epistemic_program(&program)
                 .unwrap()
-                .is_none(),
-            "bare modal self-support `{source}` must not produce a Case-A/B reduction"
+                .is_some(),
+            "bare modal self-support `{source}` must produce a fixpoint reduction"
         );
     }
 }
@@ -931,7 +982,8 @@ fn cross_arity_modal_coupling_over_invariant_relations_resolves_soundly() {
 
     // The reduced program resolves BOTH positive-invariant modals into positive atoms
     // that range-restrict X (and Y), so no unsafe head variable remains.
-    let reduced = reduce_epistemic_program_to_ordinary(&program);
+    let reduced = reduce_epistemic_program_to_ordinary(&program)
+        .expect("cross-arity invariant-modal program must reduce");
     let a_rule = reduced
         .rules
         .iter()
@@ -977,7 +1029,8 @@ fn cross_arity_modal_coupling_over_invariant_relations_resolves_soundly() {
     // split path here is exercised only to confirm the unsound *unstratified* compile
     // does not silently accept: a non-invariant modal target never becomes a positive
     // binding atom in the reduced program.
-    let unsound_reduced = reduce_epistemic_program_to_ordinary(&unsound);
+    let unsound_reduced = reduce_epistemic_program_to_ordinary(&unsound)
+        .expect("non-invariant modal fixture must reach ordinary safety validation");
     let a_unsound_rule = unsound_reduced
         .rules
         .iter()

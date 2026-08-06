@@ -774,7 +774,7 @@ fn load_external_relation_rows(
         let Some((relation_path, columns)) = external_relation_source(source_path, decl) else {
             continue;
         };
-        if columns.len() != decl.columns.len() {
+        if columns.len() != decl.arity() {
             continue;
         }
         let Ok(source) = std::fs::read_to_string(&relation_path) else {
@@ -859,7 +859,7 @@ fn external_relation_source_from_manifest(
         else {
             continue;
         };
-        if columns.len() != decl.columns.len() {
+        if columns.len() != decl.arity() {
             continue;
         }
         let Some(path_value) = json
@@ -885,9 +885,9 @@ fn external_relation_source_from_manifest(
 }
 
 fn declared_column_names(decl: &xlog_logic::ast::PredDecl) -> Option<Vec<String>> {
-    decl.columns
-        .iter()
-        .map(|column| column.name.clone())
+    decl.schema_columns()
+        .into_iter()
+        .map(|column| column.name)
         .collect()
 }
 

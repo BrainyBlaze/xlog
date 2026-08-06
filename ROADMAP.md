@@ -10,6 +10,28 @@ unversioned until release tooling assigns it to a concrete release. Historical
 sections retain their release headings when the version is part of the shipped
 record.
 
+## Implemented epistemic execution
+
+Epistemic source is preserved in EIR before dependency classification selects an
+execution route:
+
+- acyclic modal programs use the GPU Generate-Propagate-Test workspace;
+- positive modal dependency cycles use mode-specific fixpoints: FAEEL computes
+  the founded least fixpoint, while supported exact-tuple Gelfond-1991
+  `possible` cycles start from a GPU-computed upper bound and descend through
+  frozen-snapshot refinements to the greatest compatible tuple fixpoint;
+- supported cycles through negation run through the GPU-backed WFS alternating
+  fixpoint.
+
+An independently founded predecessor propagates through a positive cycle. An
+unseeded FAEEL tuple cycle, including `p() :- possible p().`, executes to an empty
+extension rather than a rejection. Finite nested modal chains and finite typed
+structured tuple keys also execute through these routes. Remaining typed
+boundaries include recursive epistemic programs with modal integrity constraints,
+Gelfond-1991 compatibility components with recursive negation or aggregation,
+cyclic WFS shapes outside the supported negated-modal plan, unbounded or untyped
+tuple keys, and unsafe unbound negated modal variables.
+
 ## v0.0.1 - Workspace Foundation
 
 ### Repository
@@ -1929,11 +1951,10 @@ engines, typed fail-closed, real runtime/device pilots). Status summary:
       possible recursion, and WFS negated-modal recursion, plus `xlog-cuda` and
       `xlog-integration` gates.
 
-### In-spec typed fail-closed (REQUIRED by the goal — rejection-by-design, not debt)
+### Epistemic execution boundaries recorded for this milestone
 
-Mandated by each bundle's "Expected Rejected Behavior" and cross-cutting lock #5;
-verified by negative pilots. Accepting these would violate the no-fake / no-CPU-
-fallback locks.
+Accepted finite forms executed through production paths; forms that could not be
+lowered without changing their semantics returned typed diagnostics.
 
 - [x] Nested modal **semantics** are solved for finite two-operator chains:
       leading/interior/atom-adjacent negation normalizes by parity/duality and the
@@ -1944,93 +1965,89 @@ fallback locks.
 - [x] Variable-keyed, diagonal, shared-variable join, and range-restricted negated
       epistemic constraints execute on the device path; unsafe unbound negated
       variables and CPU-only world-view scans fail closed.
-- [x] Same-name multi-arity modal coupling is SOLVED in v0.9.2 : distinct
+- [x] Same-name multi-arity modal coupling was implemented: distinct
       arities are distinct relations, so the modal tuple-source resolution
       disambiguates by arity (arity-qualified store key `p/1`/`p/2`, bare-name
       fallback). Joint-solves on device to exact tuples per arity, identical
       split-vs-unsplit, zero CPU fallback, and the committed `42a*`/`42b*`
       examples exhaust the single-literal and cross-arity modal truth tables
-      through production `xlog run`. Genuinely-cyclic modal coupling
-      (`a:-know b. b:-know a.`, no founded order) stays typed fail-closed
-      end-to-end.
+      through production `xlog run`. At this historical milestone, a modal-only
+      mutual positive cycle such as `a() :- know b(). b() :- know a().` still
+      returned a typed diagnostic. The implemented founded positive-cycle route
+      described above supersedes that boundary.
 - [x] Recursive epistemic execution covers invariant-modal and
       determined-head stratification, positive modal recursion with founded semantics, G91
       positive `possible` recursion, stratified negated-modal recursion, and
       cyclic negated-modal recursion through the `xlog-gpu` GPU-backed WFS plan.
-      Fresh focused and full gates passed under the no-old-host-WFS-solver
-      contract. This is not a device-resident/no-host-interaction WFS residency
-      claim.
+      The WFS route is GPU-backed but may use host orchestration and metadata reads;
+      it does not fall back to the former host WFS solver.
       The WFS example surface covers the finite mode x negated-modal operator x
       seed-state matrix, both with and without ordinary EDB negation in the same
-      reduced SCC, plus a load-bearing EDB target-state matrix. Host WFS is not an accepted production fallback. Unsupported
-      modal cycles without a founded order remain typed fail-closed.
+      reduced SCC, plus a load-bearing EDB target-state matrix. Host WFS was not
+      an accepted production fallback.
 
-### Genuine follow-up (NOT goal-mandated; tracked)
+### Subsequent implementation
 
-- [x] constraint-specific rejection reasons — CLOSED (commit `e39bcd33`).
-- [x] Mixed per-row + global modal literals in a single rule — CLOSED in v0.9.2
-      (mixed-literal modal membership): the two gate classes compose conjunctively on the GPU path.
-- [x] recursive epistemic fixpoint execution — CLOSED in v0.9.2 (invariant
+- [x] Constraint-specific rejection reasons report the unsupported semantic shape.
+- [x] Mixed per-row and global modal literals in a single rule compose
+      conjunctively on the GPU path.
+- [x] Recursive epistemic fixpoint execution: invariant
       modal atoms reduce to gated relations, reduced ordinary recursion runs through
-      the GPU recursive engine).
-- [x] Multi-epistemic-output-head cross-component joint solving — CLOSED in v0.9.2
-      (SharedModalPredicate-over-base fragment joint-solved with multi-output
-      materialization, incl. heads of differing arity via per-head projection).
-- [x] Coupling/recursion over an epistemic-DERIVED head — CLOSED in v0.9.2 by
-      STRATIFIED epistemic execution: a modal over a DETERMINED derived head (its
-      modals bottom out in invariant/EDB relations, acyclically; transitive,
-      multi-column, binding) is gated once and materialized into the store as a lower
-      stratum, and the higher stratum gates against it via the existing filter — the
+      the GPU recursive engine.
+- [x] Cross-component joint solving for multiple epistemic output heads sharing a
+      base modal predicate, including heads of differing arity via per-head
+      projection.
+- [x] Coupling or recursion over an epistemic-derived head uses stratified
+      execution when the modal target is determined. Its modal dependencies bottom
+      out in invariant or already-determined relations without a cycle. The target
+      is gated once and materialized into the store as a lower stratum, and the
+      higher stratum gates against it via the existing filter — the
       `know R ≡ R` theorem applied at the store boundary (no resolve-into-body, no
-      double-gating). The determined-modal family is now complete under the exact
-      v0.9.2 contract: determined targets resolve; positive modal and G91 recursion,
-      FAEEL-unfounded self-support, finite nested modal chains, and WFS-defined
-      negated-modal recursion execute with their defined semantics; only forms with
-      no founded, G91, WFS, finite-key, or safe-variable interpretation stay
-      fail-closed.
+      double-gating). Determined targets resolve through ordered materialization;
+      non-determined targets follow founded positive-cycle reduction, the
+      greatest compatibility fixpoint for supported exact-tuple Gelfond-1991
+      positive `possible` cycles, or WFS when their dependency shape is
+      supported.
+      Finite nested modal chains and finite typed structured keys execute through
+      those paths, while unsupported forms return typed diagnostics.
 
 ## v0.9.2 - Epistemic Executor Semantic Completion
 
-Closes the three honest semantic gaps from v0.9.1, all validated on the
-production `xlog run` path. Status:
-`docs/plans/2026-05-31-v092-epistemic-semantic-completion-status.md`.
+This historical milestone closed three semantic gaps on the production
+`xlog run` path.
 
-- [x] mixed-literal modal membership: global modal gate + per-row bound
-      tuple-key gate compose conjunctively on the GPU device path. Evidence: 8
-      value-level pilots (exact tuples) + mutation proof + `examples/epistemic/14-mixed-literal-membership.xlog`.
+- [x] Mixed-literal modal membership: a global modal gate and per-row bound
+      tuple-key gate compose conjunctively on the GPU path, as demonstrated by
+      `examples/epistemic/14-mixed-literal-membership.xlog`.
 - [x] recursive epistemic fixpoint: recursive ordinary predicates whose modal
       atoms range over invariant relations evaluate to fixpoint via the existing GPU
       recursive engine. Evidence: `examples/epistemic/15-recursive-epistemic-closure.xlog`
       ({(1,2),(2,3),(1,3)}) and `15-recursive-epistemic-chain.xlog` (3-hop (1,4)).
-- [x] Cross-component epistemic coupling: a coalesced component with >1 epistemic
-      output head sharing a base modal predicate is JOINT-SOLVED with multi-output
+- [x] Cross-component epistemic coupling: a coalesced component with multiple epistemic
+      output heads sharing a base modal predicate is solved jointly with multi-output
       materialization (each head materialized against one shared accepted world
       view), including heads of differing arity via per-head projection. Evidence:
       `examples/epistemic/18-cross-component-joint-shared-modal.xlog` (both heads
       `known={1,2}`, `maybe={2}`), `21` (three heads), `27` (augmented differing-arity)
-      + K2 split-vs-unsplit equivalence.
-- [x] Stratified epistemic execution (coupling/recursion over a DETERMINED derived
+      with split-vs-unsplit equivalence coverage.
+- [x] Stratified epistemic execution (coupling or recursion over a determined derived
       head): the determined head is gated once and materialized into the store as a
       lower stratum; the higher stratum gates against it via the existing filter
       (`know R ≡ R` at the store boundary). Transitive, multi-column, binding; negated
       modal over an invariant relation reduces to ordinary negation. Evidence:
       `17` (chained), `24` (transitive determined-ordinary), `25` (recursion over a
       determined head), `26` (negated-modal-over-invariant), `28` (determined-epistemic
-      multi-column binding). The determined-modal family is COMPLETE.
+      multi-column binding).
 
-### Remaining genuinely-undefined boundaries (correct fail-closed cases)
+### Boundaries recorded for this historical milestone
 
-Every modal target is either DETERMINED (resolved above) or NON-DETERMINED and
-handled by founded/G91/WFS semantics when those semantics are defined. Only forms
-with no founded, G91, WFS, finite-key, or safe-variable interpretation stay
-fail-closed:
-
-- [x] Genuinely cyclic modal coupling with no founded/WFS order
-      (`a() :- know b(). b() :- know a().`) remains typed fail-closed.
-- [x] Unbounded/untyped modal tuple keys and unsafe unbound negated epistemic
-      variables remain typed fail-closed.
-- [x] FAEEL-unfounded self-support (`p() :- possible p()`) executes to the defined
-      empty extension, while explicit G91 accepts the same self-supporting program.
+At this milestone, modal-only mutual positive cycles returned a typed diagnostic;
+the founded positive-cycle route described in
+[Implemented epistemic execution](#implemented-epistemic-execution) later replaced
+that boundary. Unbounded or untyped modal tuple keys and unsafe unbound negated
+epistemic variables remained typed boundaries. FAEEL-unfounded exact self-support
+already executed to an empty extension, while explicit Gelfond-1991 mode admitted
+the same self-supporting tuple.
 
 ## Factorized WCOJ execution
 

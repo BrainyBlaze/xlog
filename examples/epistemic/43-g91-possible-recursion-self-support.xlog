@@ -1,8 +1,10 @@
 #pragma epistemic_mode = g91
 
-// Positive possible-recursion under G91 is compatibility self-support. The modal
-// assumption is tautological for the co-evolving recursive target, so every
-// vertex-pair is linked and queried:
+// G91 compatibility starts from the program with the selected possible gate
+// relaxed, then reevaluates against a frozen snapshot of the preceding reach
+// relation. Every candidate survives here because reach(X,Y) :- linked(X,Y)
+// returns the same concrete tuple required by possible reach(X,Y), so every
+// vertex pair is linked and queried:
 //   linked = {1,2,3} x {1,2,3}
 
 pred vertex(u32).

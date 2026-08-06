@@ -1,6 +1,6 @@
 ---
 title: "Epistemic reasoning"
-description: "Reason about what is known and what is possible across the stable models of a program — modal operators, world-view semantics, FAEEL and Gelfond-1991 modes, and a GPU Generate-Propagate-Test executor."
+description: "Reason about what is known and what is possible across the stable models of a program — modal operators, world-view semantics, FAEEL and Gelfond-1991 modes, and GPU-backed execution paths."
 ---
 
 Epistemic reasoning lets your program ask not just *what is true*, but *what is
@@ -118,10 +118,18 @@ module is ignored and reported as `warning[W0510]` (see the
 counts only if the program actually derives it, not if it merely asserts itself.
 Under `faeel`, both `know p` and `possible p` demand that `p` be founded, so a
 purely self-supporting rule like `p() :- possible p().` collapses to the empty
-founded extension — nothing is concluded.
+founded extension — nothing is concluded. Modal tuple transitions participate in
+the same least fixpoint: a transition from an independently founded predecessor can
+derive new tuples, while an unseeded cycle between tuples remains empty.
 
 `g91` selects **Gelfond-1991** semantics, the classical 1991 definition, under
-which that same self-support *is* accepted.
+which that same self-support *is* accepted. For a supported positive
+exact-tuple `possible` cycle, compatibility is checked per concrete tuple. XLOG
+starts from an upper bound and repeatedly filters it against the preceding
+iteration's relation snapshots. A mutual predicate cycle therefore preserves a
+tuple only when the rules can support that same tuple around the cycle; two
+rules ranging over disjoint domains do not support one another merely because
+their predicate names are recursive.
 
 Choose `faeel` when you want knowledge grounded in derivation. Choose `g91` for
 classical Gelfond-1991 compatibility.
@@ -132,13 +140,18 @@ XLOG first compiles your program into an **epistemic IR** — an internal form
 built specifically for modal reasoning. Accepted programs always go through this
 form; a bare modal lowering that skips it is rejected.
 
-It then runs **Generate-Propagate-Test** on the GPU: it enumerates candidate
-world views, prunes the inconsistent ones, and tests the rest, accepting the
-founded world views.
+For acyclic modal programs, XLOG then runs **Generate-Propagate-Test** on the GPU:
+it enumerates candidate world views, prunes the inconsistent ones, and tests the
+rest. Ordinary or modal dependency cycles are classified before that single-pass
+boundary. Positive FAEEL cycles use an ordinary founded reduction and run to their
+least fixpoint. Supported exact-tuple G91 possibility cycles run a GPU upper-bound
+pass followed by descending frozen-snapshot refinements to the greatest compatible
+tuple fixpoint. Supported cycles through negation use the GPU-backed well-founded
+plan.
 
-<Frame caption="Generate-Propagate-Test runs on the GPU: candidate world views are enumerated, pruned to the consistent ones, and tested; the founded world views are accepted.">
-  <img className="block dark:hidden" src="/assets/diagrams/epistemic-gpt-light.svg" alt="Epistemic Generate-Propagate-Test: on the GPU, Generate enumerates candidate world views, Propagate prunes inconsistent ones, Test applies brave and cautious checks, and the founded world views are accepted." />
-  <img className="hidden dark:block" src="/assets/diagrams/epistemic-gpt-dark.svg" alt="Epistemic Generate-Propagate-Test: on the GPU, Generate enumerates candidate world views, Propagate prunes inconsistent ones, Test applies brave and cautious checks, and the founded world views are accepted." />
+<Frame caption="For acyclic modal programs, Generate-Propagate-Test runs on the GPU: candidate world views are enumerated, pruned to the consistent ones, and tested under the selected semantics.">
+  <img className="block dark:hidden" src="/assets/diagrams/epistemic-gpt-light.svg" alt="Epistemic Generate-Propagate-Test for acyclic modal programs: on the GPU, Generate enumerates candidate world views, Propagate prunes inconsistent ones, and Test applies brave and cautious checks under the selected semantics." />
+  <img className="hidden dark:block" src="/assets/diagrams/epistemic-gpt-dark.svg" alt="Epistemic Generate-Propagate-Test for acyclic modal programs: on the GPU, Generate enumerates candidate world views, Propagate prunes inconsistent ones, and Test applies brave and cautious checks under the selected semantics." />
 </Frame>
 
 <Steps>
@@ -149,7 +162,7 @@ founded world views.
     Immediate known-or-rejected contradictions are pruned before any candidate is tested.
   </Step>
   <Step title="Test">
-    Each surviving candidate is evaluated under the selected semantics, and the founded
+    Each surviving candidate is evaluated under the selected semantics, and valid
     world views are accepted.
   </Step>
 </Steps>
@@ -166,34 +179,39 @@ order once the pieces are recombined.
 
 ## Limits
 
-The number of candidate world views is `2^(number of epistemic literals)` — one
-candidate per truth assignment to the program's epistemic literals. Every extra
-epistemic literal doubles the search, so this layer is for programs with a small
-number of them.
+For a program that reaches the Generate-Propagate-Test path, the number of
+candidate world views is `2^(number of epistemic literals)` — one candidate per
+truth assignment to the program's epistemic literals. Every extra epistemic
+literal doubles this search. Positive-cycle and WFS reductions do not enumerate
+this single-pass candidate lattice.
 
-A per-reduction cap, `MAX_MODELS_PER_REDUCTION = 1024`, bounds how many models any
-single reduction may produce.
+A per-reduction cap, `MAX_MODELS_PER_REDUCTION = 1024`, bounds how many models a
+Generate-Propagate-Test reduction may produce.
 
-Some programs have modal coupling that is genuinely cyclic, with no order in which
-the founded (or well-founded) values can be worked out. Rather than guessing an
-answer, XLOG **fails closed**: it stops and returns a typed diagnostic — a
-structured error identifying the problem — instead of a result.
+Positive modal dependency cycles are not blanket rejection cases: FAEEL evaluates
+them through a founded least fixpoint, and supported exact-tuple Gelfond-1991
+possibility cycles use the greatest compatibility fixpoint. The number of
+compatibility refinements is bounded by `#pragma max_recursion_depth`. An
+unrelated negative cycle can execute through the GPU-backed well-founded evaluator
+inside those passes, but recursive negation or aggregation in the compatibility
+component itself is rejected because the descending operator would not be
+monotone. XLOG returns a typed diagnostic when no supported route can preserve
+the program's semantics, such as a recursive epistemic program that also contains
+a modal integrity constraint or a cyclic WFS shape outside the supported
+negated-modal plan. The complete list is in the
+[language reference](/reference/language#epistemic-support-and-boundaries).
 
 <Note>
-The bound is not a fixed candidate ceiling. There is no `k <= 24` limit and no
-`50000`-candidate limit. The real bound is `2^(number of epistemic literals)`
-candidates, capped per reduction by `MAX_MODELS_PER_REDUCTION = 1024`.
+The Generate-Propagate-Test bound is not a fixed candidate ceiling. There is no
+`k <= 24` limit and no `50000`-candidate limit. Its candidate space is
+`2^(number of epistemic literals)`, with at most
+`MAX_MODELS_PER_REDUCTION = 1024` models per reduction.
 </Note>
 
 ## Reference
 
-<Note>
-The epistemic capability described here — the modal operators, `faeel` and `g91`
-modes, GPU Generate-Propagate-Test, and epistemic splitting — shipped in XLOG
-v0.9.2.
-</Note>
-
 <Card title="How XLOG works" icon="diagram-project" href="/core-concepts/how-xlog-works">
-  Epistemic reasoning reuses the same parser, stratifier, and CUDA runtime as every other
-  XLOG paradigm — see how a program travels from source to GPU.
+  Epistemic reasoning reuses the shared parser, normalization, type and dependency
+  analysis, and CUDA runtime; EIR then selects its route-specific execution plan — see
+  how a program travels from source to GPU.
 </Card>

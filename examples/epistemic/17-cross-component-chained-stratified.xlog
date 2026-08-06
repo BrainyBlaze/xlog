@@ -23,10 +23,10 @@
 // node 2 is not vetted -> not trusted -> not flagged: the gate genuinely FILTERS
 // (the result strictly OMITS node 2, differing from the ungated `node` relation).
 //
-// Contrast with example 22 (recursion through a modal over a relation entangled
-// in the recursive SCC): that has NO lower stratum to materialize and stays
-// FAIL-CLOSED. Stratification admits ONLY chains that bottom out in invariant
-// relations.
+// Contrast with example 22, where a modal target co-evolves with an ordinary
+// recursive component. There is no lower determined stratum to materialize in
+// that program, so the positive modal is reduced into the ordinary recursive
+// body and evaluated to its founded least fixpoint instead.
 
 #pragma epistemic_mode = faeel
 

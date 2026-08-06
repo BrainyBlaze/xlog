@@ -3,18 +3,43 @@ use std::collections::BTreeMap;
 use xlog_core::{RelId, ScalarType};
 use xlog_ir::rir::MultiwayPlan;
 use xlog_ir::{
-    EirEpistemicMode, EirEpistemicOp, EirTerm, EpistemicSolverCapability,
-    EpistemicSolverStatusKind, ExecutionPlan, RirNode,
+    EirEpistemicOp, EirTerm, EpistemicSolverCapability, EpistemicSolverStatusKind, ExecutionPlan,
+    RirNode,
 };
 use xlog_logic::epistemic::{
-    compile_epistemic_gpu_execution, compile_epistemic_gpu_execution_with_stats_snapshot,
-    compile_epistemic_gpu_split_execution, plan_epistemic_gpu_execution,
-    reduce_epistemic_program_to_ordinary,
+    classify_recursive_epistemic_program, compile_epistemic_gpu_execution,
+    compile_epistemic_gpu_execution_with_stats_snapshot, plan_epistemic_gpu_execution,
+    prepare_epistemic_program, reduce_epistemic_program_to_ordinary,
+    try_prepare_g91_compatibility_reduction, try_reduce_case_a_recursive_epistemic_program,
+    RecursiveEpistemicClass,
 };
-use xlog_logic::{parse_program, Compiler};
+use xlog_logic::{parse_program, BodyLiteral, Compiler, Program};
 use xlog_stats::{
     ColumnStats, JoinSelectivity, KeyHeatStats, PrefixDegreeStats, RelationStats, StatsSnapshot,
 };
+
+fn compile_modal_fixpoint(program: &Program) -> (Program, ExecutionPlan) {
+    assert_eq!(
+        classify_recursive_epistemic_program(program).unwrap(),
+        RecursiveEpistemicClass::ModalCycle
+    );
+    assert!(
+        plan_epistemic_gpu_execution(program).is_err(),
+        "modal cycles must not reach the single-pass GPU planner"
+    );
+    let reduced = try_reduce_case_a_recursive_epistemic_program(program)
+        .unwrap()
+        .expect("modal cycle must reduce to an ordinary fixpoint");
+    assert!(reduced
+        .rules
+        .iter()
+        .flat_map(|rule| &rule.body)
+        .all(|literal| !matches!(literal, BodyLiteral::Epistemic(_))));
+    let plan = Compiler::new()
+        .compile_program(&reduced)
+        .expect("modal fixpoint reduction must compile");
+    (reduced, plan)
+}
 
 #[test]
 fn epistemic_executable_plan_lowers_reduced_program_through_runtime_plan() {
@@ -164,13 +189,13 @@ fn epistemic_kclique_reduction_reuses_planner_layout_and_helper_split_surface() 
 }
 
 #[test]
-fn faeel_gpu_execution_excludes_unfounded_self_support_from_founded_base() {
+fn faeel_modal_fixpoint_excludes_unfounded_self_support_from_founded_base() {
     // `p() :- possible p()` is supported only by circular self-support. Under FAEEL it
     // is UNFOUNDED, so the founded model is EMPTY and the program EXECUTES to that
     // empty extension (it is NOT rejected). The accepted lowering drops the circular
     // self-support rule from the reduced ordinary base, so `p` has no founding rule and
-    // is absent from the founded model. Exact `rows: 0` on device:
-    // `parsed_faeel_unfounded_zero_arity_self_support_materializes_empty_on_gpu`.
+    // is absent from the founded model. High-level production GPU/CLI coverage
+    // asserts the exact `rows: 0` result.
     let program = parse_program(
         r#"
         pred p().
@@ -179,17 +204,13 @@ fn faeel_gpu_execution_excludes_unfounded_self_support_from_founded_base() {
     )
     .unwrap();
 
-    // No foundedness rejection: the program plans and compiles.
-    plan_epistemic_gpu_execution(&program)
-        .expect("FAEEL unfounded self-support is a defined empty result, not a rejection");
-    let executable = compile_epistemic_gpu_execution(&program)
-        .expect("FAEEL unfounded self-support must compile to its empty founded extension");
-    assert_eq!(executable.gpu_plan.mode, EirEpistemicMode::Faeel);
-    assert!(executable.gpu_plan.cpu_fallbacks.is_zero());
+    let (recursive_reduced, _) = compile_modal_fixpoint(&program);
 
     // The circular self-support rule is excluded from the reduced founded base, so `p`
     // has no founding (non-fact) rule.
-    let reduced = reduce_epistemic_program_to_ordinary(&program);
+    let reduced = reduce_epistemic_program_to_ordinary(&program)
+        .expect("FAEEL unfounded self-support fixture must reduce");
+    assert_eq!(recursive_reduced.rules, reduced.rules);
     assert_eq!(
         reduced
             .rules
@@ -202,66 +223,74 @@ fn faeel_gpu_execution_excludes_unfounded_self_support_from_founded_base() {
     );
 }
 
-/// Assert a multi-head modal cycle fails closed at the pre-existing cross-component
-/// coupling boundary IDENTICALLY in FAEEL and G91.
-///
-/// A modal cycle (e.g. `p :- possible q. q :- possible p`) is mathematically empty
-/// under FAEEL, but its empty extension is NOT delivered by the single-head
-/// founded-extension path: the cycle couples 2+ epistemic output heads through
-/// nested modality, so it is routed to split execution and fails closed at
-/// `cross-component epistemic coupling` BEFORE any foundedness/world-view reasoning.
-/// This boundary is orthogonal to foundedness and mode-independent — G91 hits the
-/// EXACT same rejection — so the founded-extension work is leak-neutral here: the
-/// (wrong) stripped-to-true reduced base never executes. Delivering these as empty
-/// requires nested-modality support, outside the single-head scope.
-fn assert_multi_head_modal_cycle_fails_closed_both_modes(body: &str) {
+/// Assert that a multi-relation modal cycle uses the recursive modal reduction in both
+/// semantic modes. FAEEL computes the founded least fixpoint; G91 applies its
+/// compatibility treatment while resolving the same cycle.
+fn assert_multi_relation_modal_cycle_reduces_both_modes(body: &str) {
     for (mode, prefix) in [("FAEEL", ""), ("G91", "#pragma epistemic_mode = g91\n")] {
         let src = format!("{prefix}{body}");
         let program = parse_program(&src).unwrap();
-        // The single-pass plan itself no longer rejects (foundedness does not reject):
-        // the fail-closed is the routing/coupling boundary on the split path.
-        plan_epistemic_gpu_execution(&program).unwrap_or_else(|e| {
-            panic!("{mode}: single-pass plan must not reject the cycle on foundedness grounds, got: {e}")
-        });
-        let err = compile_epistemic_gpu_split_execution(&program).expect_err(&format!(
-            "{mode}: multi-head modal cycle must fail closed at cross-component coupling"
-        ));
-        match err {
-            xlog_core::XlogError::UnsupportedEpistemicConstruct { construct, .. } => {
-                assert_eq!(
-                    construct, "cross-component epistemic coupling",
-                    "{mode}: cycle must fail at the cross-component coupling boundary, not a \
-                     foundedness rejection"
-                );
+        assert_eq!(
+            classify_recursive_epistemic_program(&program).unwrap(),
+            RecursiveEpistemicClass::ModalCycle,
+            "{mode}"
+        );
+        assert!(plan_epistemic_gpu_execution(&program).is_err(), "{mode}");
+        if mode == "G91" {
+            let prepared = prepare_epistemic_program(&program)
+                .unwrap_or_else(|error| panic!("{mode}: source must validate: {error}"));
+            let compatibility = try_prepare_g91_compatibility_reduction(&prepared)
+                .unwrap_or_else(|error| panic!("{mode}: compatibility must prepare: {error}"))
+                .expect("G91 cycle must select tuple compatibility iteration");
+            for reduced in [
+                compatibility.upper_bound_program(),
+                compatibility.refinement_program(),
+            ] {
+                assert!(reduced
+                    .rules
+                    .iter()
+                    .flat_map(|rule| &rule.body)
+                    .all(|literal| !matches!(literal, BodyLiteral::Epistemic(_))));
+                Compiler::new()
+                    .compile_program(reduced)
+                    .unwrap_or_else(|error| {
+                        panic!("{mode}: compatibility pass must compile: {error}")
+                    });
             }
-            other => panic!("{mode}: expected cross-component coupling rejection, got {other:?}"),
+        } else {
+            let reduced = try_reduce_case_a_recursive_epistemic_program(&program)
+                .unwrap_or_else(|error| panic!("{mode}: modal cycle must be admitted: {error}"))
+                .expect("modal cycle must reduce to an ordinary fixpoint");
+            Compiler::new()
+                .compile_program(&reduced)
+                .unwrap_or_else(|error| panic!("{mode}: modal fixpoint must compile: {error}"));
         }
     }
 }
 
 #[test]
-fn multi_head_mutual_possible_cycle_fails_closed_at_cross_component_coupling_both_modes() {
-    assert_multi_head_modal_cycle_fails_closed_both_modes(
+fn multi_relation_mutual_possible_cycle_reduces_in_both_modes() {
+    assert_multi_relation_modal_cycle_reduces_both_modes(
         "pred p().\npred q().\np() :- possible q().\nq() :- possible p().",
     );
 }
 
 #[test]
-fn multi_head_longer_possible_cycle_fails_closed_at_cross_component_coupling_both_modes() {
-    assert_multi_head_modal_cycle_fails_closed_both_modes(
+fn longer_multi_relation_possible_cycle_reduces_in_both_modes() {
+    assert_multi_relation_modal_cycle_reduces_both_modes(
         "pred p().\npred q().\npred r().\np() :- possible q().\nq() :- possible r().\nr() :- possible p().",
     );
 }
 
 #[test]
-fn multi_head_mixed_modal_cycle_fails_closed_at_cross_component_coupling_both_modes() {
-    assert_multi_head_modal_cycle_fails_closed_both_modes(
+fn mixed_multi_relation_modal_cycle_reduces_in_both_modes() {
+    assert_multi_relation_modal_cycle_reduces_both_modes(
         "pred p().\npred q().\np() :- know q().\nq() :- possible p().",
     );
 }
 
 #[test]
-fn faeel_gpu_execution_allows_longer_possible_cycle_with_independent_support() {
+fn faeel_modal_fixpoint_allows_longer_possible_cycle_with_independent_support() {
     let program = parse_program(
         r#"
         pred seed().
@@ -279,11 +308,7 @@ fn faeel_gpu_execution_allows_longer_possible_cycle_with_independent_support() {
     )
     .unwrap();
 
-    let gpu_plan = plan_epistemic_gpu_execution(&program)
-        .expect("default FAEEL planning should allow independently founded modal cycles");
-
-    assert_eq!(gpu_plan.epistemic_literals.len(), 3);
-    assert!(gpu_plan.cpu_fallbacks.is_zero());
+    compile_modal_fixpoint(&program);
 }
 
 #[test]
@@ -359,7 +384,8 @@ fn epistemic_gpu_execution_resolves_modal_only_bound_output_over_invariant_relat
 
     // The reduced ordinary program resolves `possible q(X)` into a POSITIVE `q(X)`
     // atom, so `X` is range-restricted (no longer an unsafe head variable).
-    let reduced = reduce_epistemic_program_to_ordinary(&program);
+    let reduced = reduce_epistemic_program_to_ordinary(&program)
+        .expect("positive invariant-modal fixture must reduce");
     let p_rule = reduced
         .rules
         .iter()
@@ -394,7 +420,7 @@ fn epistemic_gpu_execution_resolves_modal_only_bound_output_over_invariant_relat
 }
 
 #[test]
-fn faeel_gpu_execution_allows_self_possible_with_independent_founded_support() {
+fn faeel_modal_fixpoint_allows_self_possible_with_independent_founded_support() {
     let program = parse_program(
         r#"
         pred seed().
@@ -406,15 +432,18 @@ fn faeel_gpu_execution_allows_self_possible_with_independent_founded_support() {
     )
     .unwrap();
 
-    let executable = compile_epistemic_gpu_execution(&program)
-        .expect("independently founded FAEEL support should permit self possible");
-
-    assert_eq!(executable.gpu_plan.mode, EirEpistemicMode::Faeel);
-    assert_eq!(executable.gpu_plan.epistemic_literals.len(), 1);
+    let (reduced, _) = compile_modal_fixpoint(&program);
+    assert!(reduced.rules.iter().any(|rule| {
+        rule.head.predicate == "p"
+            && rule
+                .body
+                .iter()
+                .any(|literal| matches!(literal, BodyLiteral::Positive(atom) if atom.predicate == "seed"))
+    }));
 }
 
 #[test]
-fn faeel_gpu_execution_allows_nonzero_self_possible_with_tuple_founded_support() {
+fn faeel_modal_fixpoint_allows_nonzero_self_possible_with_tuple_founded_support() {
     let program = parse_program(
         r#"
         pred seed(u32).
@@ -426,17 +455,11 @@ fn faeel_gpu_execution_allows_nonzero_self_possible_with_tuple_founded_support()
     )
     .unwrap();
 
-    let executable = compile_epistemic_gpu_execution(&program)
-        .expect("tuple-founded FAEEL support should permit nonzero self possible");
-
-    assert_eq!(executable.gpu_plan.mode, EirEpistemicMode::Faeel);
-    assert_eq!(executable.gpu_plan.epistemic_literals.len(), 1);
-    assert_eq!(executable.gpu_plan.tuple_membership_bindings.len(), 1);
-    assert!(executable.gpu_plan.cpu_fallbacks.is_zero());
+    compile_modal_fixpoint(&program);
 }
 
 #[test]
-fn faeel_gpu_execution_allows_ground_nonzero_self_possible_with_tuple_founded_support() {
+fn faeel_modal_fixpoint_allows_ground_nonzero_self_possible_with_tuple_founded_support() {
     let program = parse_program(
         r#"
         pred seed(u32).
@@ -448,17 +471,11 @@ fn faeel_gpu_execution_allows_ground_nonzero_self_possible_with_tuple_founded_su
     )
     .unwrap();
 
-    let executable = compile_epistemic_gpu_execution(&program)
-        .expect("ground tuple-founded FAEEL support should permit nonzero self possible");
-
-    assert_eq!(executable.gpu_plan.mode, EirEpistemicMode::Faeel);
-    assert_eq!(executable.gpu_plan.epistemic_literals.len(), 1);
-    assert_eq!(executable.gpu_plan.tuple_membership_bindings.len(), 1);
-    assert!(executable.gpu_plan.cpu_fallbacks.is_zero());
+    compile_modal_fixpoint(&program);
 }
 
 #[test]
-fn faeel_gpu_execution_allows_ground_possible_with_variable_headed_independent_support() {
+fn faeel_modal_fixpoint_allows_ground_possible_with_variable_headed_independent_support() {
     let program = parse_program(
         r#"
         pred seed(u32).
@@ -470,24 +487,18 @@ fn faeel_gpu_execution_allows_ground_possible_with_variable_headed_independent_s
     )
     .unwrap();
 
-    let executable = compile_epistemic_gpu_execution(&program)
-        .expect("ground FAEEL tuple should inherit independent support from p(X) :- seed(X)");
-
-    assert_eq!(executable.gpu_plan.mode, EirEpistemicMode::Faeel);
-    assert_eq!(executable.gpu_plan.epistemic_literals.len(), 1);
-    assert_eq!(executable.gpu_plan.tuple_membership_bindings.len(), 1);
-    assert!(executable.gpu_plan.cpu_fallbacks.is_zero());
+    compile_modal_fixpoint(&program);
 }
 
 #[test]
-fn faeel_gpu_execution_excludes_unfounded_tuples_keeping_founded_split() {
+fn faeel_modal_fixpoint_excludes_unfounded_tuples_keeping_founded_split() {
     // p(X) has an independent founding rule `p(X) :- seed(X)` (founds p(1) via seed)
     // AND a circular self-support rule `p(X) :- node(X), possible p(X)` over the wider
     // node domain {1,2}. p(2) is supported ONLY by self-support (no seed) and is
     // therefore UNFOUNDED: the founded model excludes it while keeping the founded p(1).
     // The reduced base drops the unfounded self-support rule and keeps the founded
-    // `p :- seed` rule, so the founded model is exactly {p(1)}. Exact tuple {1} asserted
-    // on device in `parsed_faeel_partial_tuple_split_materializes_founded_subset_on_gpu`.
+    // `p :- seed` rule, so the founded model is exactly {p(1)}. High-level production
+    // GPU/CLI coverage asserts the exact tuple {1}.
     let program = parse_program(
         r#"
         pred seed(u32).
@@ -502,12 +513,10 @@ fn faeel_gpu_execution_excludes_unfounded_tuples_keeping_founded_split() {
     )
     .unwrap();
 
-    // No rejection: the founded subset executes.
-    let executable = compile_epistemic_gpu_execution(&program)
-        .expect("partial-founded FAEEL self-support must compile to its founded subset");
-    assert!(executable.gpu_plan.cpu_fallbacks.is_zero());
+    compile_modal_fixpoint(&program);
 
-    let reduced = reduce_epistemic_program_to_ordinary(&program);
+    let reduced = reduce_epistemic_program_to_ordinary(&program)
+        .expect("partial-founded FAEEL fixture must reduce");
     // Founded `p :- seed` rule survives.
     assert!(
         reduced.rules.iter().any(|rule| rule.head.predicate == "p"
@@ -531,7 +540,7 @@ fn faeel_gpu_execution_excludes_unfounded_tuples_keeping_founded_split() {
 }
 
 #[test]
-fn g91_gpu_execution_allows_self_supported_possible_compatibility_fixture() {
+fn g91_modal_fixpoint_allows_self_supported_possible_compatibility_fixture() {
     let program = parse_program(
         r#"
         #pragma epistemic_mode = g91
@@ -541,12 +550,14 @@ fn g91_gpu_execution_allows_self_supported_possible_compatibility_fixture() {
     )
     .unwrap();
 
-    let executable = compile_epistemic_gpu_execution(&program)
-        .expect("G91 compatibility mode permits self-supported possible fixtures");
-
-    assert_eq!(executable.gpu_plan.mode, EirEpistemicMode::G91);
-    assert_eq!(executable.gpu_plan.epistemic_literals.len(), 1);
-    assert_eq!(compiled_rule_count(&executable.reduced_runtime_plan), 1);
+    let prepared = prepare_epistemic_program(&program).expect("validate G91 source");
+    let compatibility = try_prepare_g91_compatibility_reduction(&prepared)
+        .expect("prepare G91 compatibility")
+        .expect("G91 self-support must select tuple compatibility iteration");
+    let plan = Compiler::new()
+        .compile_program(compatibility.upper_bound_program())
+        .expect("G91 upper bound must compile");
+    assert_eq!(compiled_rule_count(&plan), 1);
 }
 
 const EPISTEMIC_K5_SRC: &str = r#"

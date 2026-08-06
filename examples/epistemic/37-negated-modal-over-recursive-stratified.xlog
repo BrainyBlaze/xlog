@@ -4,8 +4,8 @@
 // program" case -- and it EXECUTES on the GPU production path.
 //
 // WHY IT IS ADMISSIBLE (stratified, not a negation cycle):
-//   `reach` is the recursive transitive closure of `know link` (a Case-B founded
-//   recursion). `unreachable` negates `know reach`. The dependency shape is
+//   `reach` is the recursive transitive closure of `know link` under the founded
+//   positive-cycle semantics. `unreachable` negates `know reach`. The dependency shape is
 //       reach   -> reach        (positive, recursive)
 //       reach   -> link         (modal, resolves to positive `link`)
 //       unreach -> not reach    (the ONLY negation edge)
@@ -17,9 +17,9 @@
 //   fallback.
 //
 // CONTRAST: example 33 is the genuinely NON-stratified twin (`reach -> linked ->
-// not reach` is a cycle through negation), which needs the host-only well-founded
-// solver and stays bounded by the no-host-solver lock. 37 (this file, stratified,
-// EXECUTES) vs 33 (cyclic, formal WFS bound) is the exact A1 boundary.
+// not reach` is a cycle through negation). It executes through the GPU-backed WFS
+// alternating fixpoint, while this stratified program uses ordinary anti-join after
+// the lower recursive relation is materialized.
 //
 // EXACT founded answer. With nodes {1,2,3} and `link` = {(1,2),(2,3)}:
 //   reach (transitive closure) = {(1,2),(2,3),(1,3)}  -- 3 tuples.

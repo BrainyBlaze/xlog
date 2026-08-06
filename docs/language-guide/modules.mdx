@@ -28,24 +28,41 @@ The selective form imports the named predicates and functions. Domain aliases fr
 module are also merged. If an imported rule or function needs another public item from
 the same module, include that dependency in the list as well. Selections from repeated
 `use` declarations for the same module are combined before its exports are merged. If
-different providers in separate resolved import branches supply the same predicate or
-function name to the flattened program, resolution rejects the ambiguity with
-`error[E0402]`; use selective imports to choose one provider. A module can add facts or
-rules to a predicate imported within that same branch because predicate clauses form one
-relation. Functions have one body, so redefining an imported function is also `E0402`.
-An imported module that defines a function name more than once while exporting that name
-is rejected with `error[E0410]`.
+separate resolved import branches contribute public facts or rules to the same predicate,
+their clauses are merged into one relation. This also applies when selective imports name
+that predicate in more than one module. Resolution checks schemas separately. Predicate
+declarations that participate in the merge are compared under `error[E0408]`. When no
+participating declaration supplies a schema, inferred clause-head column types contributed
+by different source programs—either the entry program and a selected import, or two selected
+imports—are compared by predicate name and arity. Head constants, head variables typed by
+ordinary body atoms or built-in arithmetic bindings, and aggregate result types supply
+evidence; unanchored variables do not. Resolution propagates known types through rule chains.
+Conflicting types are rejected with `error[E0412]`. If a contributing clause's built-in
+arithmetic or aggregate evidence is itself ill-typed, resolution reports `error[E0413]` with
+the source module and file. For import schema validation, different arities remain distinct
+predicate signatures.
+
+Functions have one body. If separate import branches define the same function, or a
+module or entry file redefines an imported function, resolution rejects the conflict with
+`error[E0402]`; use selective imports so that only one function definition is visible. An
+imported module that defines a function name more than once while exporting that name is
+rejected with `error[E0410]`.
 
 Each `use` is resolved in the context of the file that contains it. In the entry file,
 resolution first checks the entry path's directory. Within an imported module, it first
 checks that module's canonical source directory. Configured module search paths follow in
-both cases. Two files reached through the same written path remain distinct providers,
-while different paths that resolve to the same canonical source file are merged only once.
+both cases. Two files reached through the same written path remain distinct source
+modules, while different paths that resolve to the same canonical source file are merged
+only once.
 
-The entry program and imported modules may repeat an identical predicate declaration,
-including a declaration for facts supplied at runtime. If declarations with one name
-differ in arity, column names, or resolved types, resolution rejects them with
-`error[E0408]` instead of retaining whichever schema happened to merge first.
+The entry program and imported modules may repeat compatible predicate declarations,
+including a declaration for facts supplied at runtime. Every declaration in the entry
+program and every public declaration selected by the resolved imports participates in
+compatibility checking. If participating declarations with one name differ in arity,
+column names, or resolved types, resolution rejects them with `error[E0408]` instead of
+retaining whichever schema happened to merge first. Private declarations in imported
+modules and public declarations omitted by a selective import are not merged and do not
+participate in this comparison.
 Every declaration of one predicate within an imported module must also use the same
 visibility. Mixing public and `private` declarations is rejected with `error[E0411]`
 instead of exporting a predicate without its rules.

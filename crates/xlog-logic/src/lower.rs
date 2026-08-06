@@ -19,8 +19,8 @@ use xlog_ir::{
 };
 
 use crate::ast::{
-    AggOp, ArithExpr, Atom, BodyLiteral, CompOp, Comparison, IsExpr, LearnableRule, PredColumn,
-    Program, Rule, Term, TypeRef,
+    AggOp, ArithExpr, Atom, BodyLiteral, CompOp, Comparison, IsExpr, LearnableRule, Program, Rule,
+    Term, TypeRef,
 };
 use crate::stratify::{build_dependency_graph, find_sccs_for_lowering, DepType};
 
@@ -34,17 +34,10 @@ struct JoinPlan<'a> {
     total_cost: f64,
 }
 
-fn pred_columns_for_decl(pred_decl: &crate::ast::PredDecl) -> Vec<PredColumn> {
-    if pred_decl.columns.is_empty() {
-        pred_decl
-            .types
-            .iter()
-            .cloned()
-            .map(|typ| PredColumn { name: None, typ })
-            .collect()
-    } else {
-        pred_decl.columns.clone()
-    }
+#[derive(Clone, Copy)]
+enum UserFunctionTypeEvidence {
+    RequireExpansion,
+    Defer,
 }
 
 fn resolve_pred_column_type(
@@ -192,9 +185,6 @@ fn term_kind_for_lowering_error(term: &Term) -> &'static str {
 pub struct Lowerer {
     /// Inferred or declared schemas for each predicate
     schemas: HashMap<String, Schema>,
-    /// Predicates whose schema comes from an explicit `pred` declaration;
-    /// only these participate in cross-predicate type validation.
-    declared_preds: std::collections::HashSet<String>,
     /// Stratification result (predicates grouped by strata)
     strata: Vec<Vec<String>>,
     /// Estimated cardinality per predicate (for join ordering)
@@ -222,7 +212,6 @@ impl Lowerer {
     pub fn new() -> Self {
         Self {
             schemas: HashMap::new(),
-            declared_preds: std::collections::HashSet::new(),
             strata: Vec::new(),
             est_cardinality: HashMap::new(),
             cardinality_hints: HashMap::new(),
@@ -285,86 +274,299 @@ impl Lowerer {
     /// here would surface later as an internal kernel schema error
     /// instead of a source-level diagnostic.
     fn validate_rule_types(&self, program: &Program) -> Result<()> {
+        let declared_predicates = program
+            .predicates
+            .iter()
+            .map(|declaration| declaration.name.as_str())
+            .collect::<HashSet<_>>();
         for rule in &program.rules {
-            // variable -> (type, source predicate, source position)
-            let mut var_types: HashMap<String, (ScalarType, String, usize)> = HashMap::new();
-            for lit in &rule.body {
-                let atom = match lit {
-                    BodyLiteral::Positive(atom) | BodyLiteral::Negated(atom) => atom,
-                    _ => continue,
-                };
-                if !self.declared_preds.contains(&atom.predicate) {
-                    continue;
-                }
-                let Some(schema) = self.schemas.get(&atom.predicate) else {
-                    continue;
-                };
-                for (i, term) in atom.terms.iter().enumerate() {
-                    let Term::Variable(name) = term else {
-                        continue;
-                    };
-                    let Some((_, ty)) = schema.columns.get(i) else {
-                        continue;
-                    };
-                    match var_types.get(name) {
-                        Some((prev_ty, prev_pred, prev_pos)) if prev_ty != ty => {
-                            return Err(XlogError::Compilation(format!(
-                                "Type mismatch in rule for '{}': variable {} is {:?} \
-                                 (from {} position {}) but {} declares {:?} at position {}",
-                                rule.head.predicate,
-                                name,
-                                prev_ty,
-                                prev_pred,
-                                prev_pos,
-                                atom.predicate,
-                                ty,
-                                i
-                            )));
-                        }
-                        Some(_) => {}
-                        None => {
-                            var_types.insert(name.clone(), (*ty, atom.predicate.clone(), i));
-                        }
-                    }
-                }
-            }
-            if !self.declared_preds.contains(&rule.head.predicate) {
-                continue;
-            }
+            let var_types = self.infer_rule_variable_types(rule, |atom, index| {
+                self.schemas
+                    .get(&atom.predicate)
+                    .and_then(|schema| schema.column_type(index))
+            })?;
             let Some(head_schema) = self.schemas.get(&rule.head.predicate) else {
                 continue;
             };
             for (j, term) in rule.head.terms.iter().enumerate() {
-                let Term::Variable(name) = term else {
-                    continue;
-                };
-                let Some((body_ty, src_pred, src_pos)) = var_types.get(name) else {
-                    continue;
-                };
                 let Some((_, head_ty)) = head_schema.columns.get(j) else {
                     continue;
                 };
-                if body_ty != head_ty {
-                    return Err(XlogError::Compilation(format!(
-                        "Type mismatch in rule for '{}': variable {} is {:?} \
-                         (from {} position {}) but {} declares {:?} at position {}",
-                        rule.head.predicate,
-                        name,
-                        body_ty,
-                        src_pred,
-                        src_pos,
-                        rule.head.predicate,
-                        head_ty,
-                        j
-                    )));
+                match term {
+                    Term::Variable(name) => {
+                        let Some((body_ty, source)) = var_types.get(name) else {
+                            continue;
+                        };
+                        if body_ty != head_ty {
+                            return Err(XlogError::Compilation(format!(
+                                "Type mismatch in rule for '{}': variable {} is {:?} \
+                                 (from {}) but {} declares {:?} at position {}",
+                                rule.head.predicate,
+                                name,
+                                body_ty,
+                                source,
+                                rule.head.predicate,
+                                head_ty,
+                                j
+                            )));
+                        }
+                    }
+                    Term::Anonymous => {}
+                    Term::Aggregate(aggregate) => {
+                        let aggregate_ty =
+                            Self::infer_aggregate_result_type(rule, aggregate, &var_types)?
+                                .ok_or_else(|| {
+                                    XlogError::UnsafeVariable(aggregate.variable.clone())
+                                })?;
+                        if aggregate_ty != *head_ty {
+                            return Err(XlogError::Compilation(format!(
+                                "Type mismatch in rule for '{}': aggregate {:?} over {} produces \
+                                 {:?}, but the predicate schema requires {:?} at position {}",
+                                rule.head.predicate,
+                                aggregate.op,
+                                aggregate.variable,
+                                aggregate_ty,
+                                head_ty,
+                                j
+                            )));
+                        }
+                    }
+                    Term::Integer(_) | Term::Float(_) | Term::String(_) | Term::Symbol(_) => {
+                        if declared_predicates.contains(rule.head.predicate.as_str()) {
+                            term_to_typed_const_value(term, *head_ty).map_err(|error| {
+                                XlogError::Compilation(format!(
+                                    "Type mismatch in rule for '{}': head term at position {} is \
+                                     not compatible with {:?}: {}",
+                                    rule.head.predicate, j, head_ty, error
+                                ))
+                            })?;
+                        } else if term.inferred_scalar_type() != *head_ty {
+                            return Err(XlogError::Compilation(format!(
+                                "Type mismatch in rule for '{}': undeclared head term at position \
+                                 {} has inferred type {:?}, but another clause requires {:?}",
+                                rule.head.predicate,
+                                j,
+                                term.inferred_scalar_type(),
+                                head_ty
+                            )));
+                        }
+                    }
+                    _ if term.inferred_scalar_type() != *head_ty => {
+                        return Err(XlogError::Compilation(format!(
+                            "Type mismatch in rule for '{}': head term at position {} has type \
+                             {:?}, but the predicate schema requires {:?}",
+                            rule.head.predicate,
+                            j,
+                            term.inferred_scalar_type(),
+                            head_ty
+                        )));
+                    }
+                    _ => {}
                 }
             }
         }
         Ok(())
     }
 
+    fn infer_aggregate_result_type(
+        rule: &Rule,
+        aggregate: &crate::ast::AggExpr,
+        variable_types: &HashMap<String, (ScalarType, String)>,
+    ) -> Result<Option<ScalarType>> {
+        let Some((input_type, source)) = variable_types.get(&aggregate.variable) else {
+            return Ok(aggregate.input_independent_result_type());
+        };
+        aggregate
+            .result_type_for_input(*input_type)
+            .map(Some)
+            .ok_or_else(|| {
+                let required = match aggregate.op {
+                    AggOp::Count => "any scalar input",
+                    AggOp::Sum | AggOp::Min | AggOp::Max => "U32 or U64 input",
+                    AggOp::LogSumExp => "F64 input",
+                };
+                XlogError::Compilation(format!(
+                    "Unsupported aggregate input in rule for '{}': {:?}({}) receives {:?} from \
+                     {}, but the execution provider requires {}",
+                    rule.head.predicate,
+                    aggregate.op,
+                    aggregate.variable,
+                    input_type,
+                    source,
+                    required
+                ))
+            })
+    }
+
+    fn record_rule_variable_type(
+        rule: &Rule,
+        variable_types: &mut HashMap<String, (ScalarType, String)>,
+        variable: &str,
+        typ: ScalarType,
+        source: String,
+    ) -> Result<()> {
+        match variable_types.get(variable) {
+            Some((existing, existing_source)) if *existing != typ => {
+                Err(XlogError::Compilation(format!(
+                    "Type mismatch in rule for '{}': variable {} is {:?} (from {}) but {:?} \
+                     is required by {}",
+                    rule.head.predicate, variable, existing, existing_source, typ, source
+                )))
+            }
+            Some(_) => Ok(()),
+            None => {
+                variable_types.insert(variable.to_string(), (typ, source));
+                Ok(())
+            }
+        }
+    }
+
+    /// Collect all type evidence available inside a rule.
+    ///
+    /// Ordinary body atoms are considered together because lowering joins them
+    /// before evaluating arithmetic bindings. Arithmetic bindings are then
+    /// processed in source order so chained `is` expressions can propagate their
+    /// result types. Unknown inputs defer an arithmetic result until a later
+    /// schema-inference iteration; known incompatible evidence is rejected here.
+    fn infer_rule_variable_types_with_user_functions<F>(
+        &self,
+        rule: &Rule,
+        mut column_type: F,
+        user_functions: UserFunctionTypeEvidence,
+    ) -> Result<HashMap<String, (ScalarType, String)>>
+    where
+        F: FnMut(&Atom, usize) -> Option<ScalarType>,
+    {
+        let mut variable_types = HashMap::new();
+
+        for literal in &rule.body {
+            let atom = match literal {
+                BodyLiteral::Positive(atom) | BodyLiteral::Negated(atom) => atom,
+                BodyLiteral::Epistemic(_)
+                | BodyLiteral::Comparison(_)
+                | BodyLiteral::IsExpr(_)
+                | BodyLiteral::Univ(_) => continue,
+            };
+            for (index, term) in atom.terms.iter().enumerate() {
+                let Term::Variable(variable) = term else {
+                    continue;
+                };
+                let Some(typ) = column_type(atom, index) else {
+                    continue;
+                };
+                Self::record_rule_variable_type(
+                    rule,
+                    &mut variable_types,
+                    variable,
+                    typ,
+                    format!("{} position {}", atom.predicate, index),
+                )?;
+            }
+        }
+
+        for literal in &rule.body {
+            let BodyLiteral::IsExpr(is_expr) = literal else {
+                continue;
+            };
+            let result_type = Self::infer_arith_type_from_known_variables(
+                &is_expr.expr,
+                &|variable| variable_types.get(variable).map(|(typ, _)| *typ),
+                user_functions,
+            )?;
+            if let Some(result_type) = result_type {
+                Self::record_rule_variable_type(
+                    rule,
+                    &mut variable_types,
+                    &is_expr.target,
+                    result_type,
+                    "an arithmetic binding".to_string(),
+                )?;
+            }
+        }
+
+        Ok(variable_types)
+    }
+
+    pub(crate) fn infer_rule_variable_types<F>(
+        &self,
+        rule: &Rule,
+        column_type: F,
+    ) -> Result<HashMap<String, (ScalarType, String)>>
+    where
+        F: FnMut(&Atom, usize) -> Option<ScalarType>,
+    {
+        self.infer_rule_variable_types_with_user_functions(
+            rule,
+            column_type,
+            UserFunctionTypeEvidence::RequireExpansion,
+        )
+    }
+
+    fn infer_rule_head_column_types_with_user_functions<F>(
+        &self,
+        rule: &Rule,
+        column_type: F,
+        user_functions: UserFunctionTypeEvidence,
+    ) -> Result<Vec<Option<ScalarType>>>
+    where
+        F: FnMut(&Atom, usize) -> Option<ScalarType>,
+    {
+        let variable_types =
+            self.infer_rule_variable_types_with_user_functions(rule, column_type, user_functions)?;
+        rule.head
+            .terms
+            .iter()
+            .map(|term| match term {
+                Term::Variable(name) => Ok(variable_types.get(name).map(|(typ, _)| *typ)),
+                Term::Aggregate(aggregate) => {
+                    Self::infer_aggregate_result_type(rule, aggregate, &variable_types)
+                }
+                Term::Anonymous => Ok(None),
+                _ => Ok(Some(term.inferred_scalar_type())),
+            })
+            .collect()
+    }
+
+    /// Infer each rule-head column from the same body, arithmetic, and aggregate
+    /// evidence used by schema inference during lowering.
+    ///
+    /// A `None` column has no statically known evidence yet. This path requires
+    /// user-defined function calls to have been expanded.
+    pub(crate) fn infer_rule_head_column_types<F>(
+        &self,
+        rule: &Rule,
+        column_type: F,
+    ) -> Result<Vec<Option<ScalarType>>>
+    where
+        F: FnMut(&Atom, usize) -> Option<ScalarType>,
+    {
+        self.infer_rule_head_column_types_with_user_functions(
+            rule,
+            column_type,
+            UserFunctionTypeEvidence::RequireExpansion,
+        )
+    }
+
+    /// Infer rule-head columns before user-defined functions have been expanded.
+    /// Function-call results remain unknown, while independent body, arithmetic,
+    /// aggregate, and head-term evidence is still validated and propagated.
+    pub(crate) fn infer_rule_head_column_types_before_function_expansion<F>(
+        &self,
+        rule: &Rule,
+        column_type: F,
+    ) -> Result<Vec<Option<ScalarType>>>
+    where
+        F: FnMut(&Atom, usize) -> Option<ScalarType>,
+    {
+        self.infer_rule_head_column_types_with_user_functions(
+            rule,
+            column_type,
+            UserFunctionTypeEvidence::Defer,
+        )
+    }
+
     /// Infer schemas from facts and predicate declarations
-    fn infer_schemas(&mut self, program: &Program) -> Result<()> {
+    pub(crate) fn infer_schemas(&mut self, program: &Program) -> Result<()> {
         let domains: HashMap<String, ScalarType> = program
             .domains
             .iter()
@@ -373,7 +575,7 @@ impl Lowerer {
 
         // First, use explicit predicate declarations
         for pred_decl in &program.predicates {
-            let declared_columns = pred_columns_for_decl(pred_decl);
+            let declared_columns = pred_decl.schema_columns();
             let columns: Vec<(String, ScalarType)> = declared_columns
                 .iter()
                 .enumerate()
@@ -383,7 +585,6 @@ impl Lowerer {
                         .map(|ty| (name, ty))
                 })
                 .collect::<Result<Vec<_>>>()?;
-            self.declared_preds.insert(pred_decl.name.clone());
             self.schemas
                 .insert(pred_decl.name.clone(), Schema::new(columns));
         }
@@ -398,7 +599,7 @@ impl Lowerer {
                     .iter()
                     .enumerate()
                     .map(|(i, term)| {
-                        let ty = infer_term_type(term);
+                        let ty = term.inferred_scalar_type();
                         (format!("c{}", i), ty)
                     })
                     .collect();
@@ -406,34 +607,16 @@ impl Lowerer {
             }
         }
 
-        // Finally, infer from rule heads if we still don't have a schema
-        for rule in &program.rules {
-            let pred = &rule.head.predicate;
-            if !self.schemas.contains_key(pred) {
-                // Use default U64 type for variables
-                let columns: Vec<(String, ScalarType)> = rule
-                    .head
-                    .terms
-                    .iter()
-                    .enumerate()
-                    .map(|(i, term)| {
-                        let ty = match term {
-                            Term::Variable(name) => self
-                                .infer_head_term_type_from_body(rule, name)
-                                .unwrap_or_else(|| infer_term_type(term)),
-                            _ => infer_term_type(term),
-                        };
-                        (format!("c{}", i), ty)
-                    })
-                    .collect();
-                let schema = Schema::new(columns)
-                    .with_sort_labels(sort_labels_from_terms(&rule.head.terms))
-                    .expect("rule head sort labels match inferred schema arity");
-                self.schemas.insert(pred.clone(), schema);
-            }
-        }
-
-        // Also infer from rule bodies for EDB predicates that only appear in bodies
+        // Infer schemas for extensional predicates that occur only in rule bodies
+        // before propagating rule-head types. This lets aggregates and ordinary
+        // head variables consume the same body-column types that execution will
+        // use, while leaving derived predicates to the fixed-point pass below.
+        let derived_predicates = program
+            .rules
+            .iter()
+            .filter(|rule| !rule.body.is_empty())
+            .map(|rule| rule.head.predicate.as_str())
+            .collect::<HashSet<_>>();
         for rule in &program.rules {
             for lit in &rule.body {
                 let atom = match lit {
@@ -444,18 +627,114 @@ impl Lowerer {
                     | BodyLiteral::Univ(_) => continue,
                 };
                 let pred = &atom.predicate;
-                if self.schemas.contains_key(pred) {
+                if self.schemas.contains_key(pred) || derived_predicates.contains(pred.as_str()) {
                     continue;
                 }
                 let columns: Vec<(String, ScalarType)> = atom
                     .terms
                     .iter()
                     .enumerate()
-                    .map(|(i, term)| (format!("c{}", i), infer_term_type(term)))
+                    .map(|(i, term)| (format!("c{}", i), term.inferred_scalar_type()))
                     .collect();
                 let schema = Schema::new(columns)
                     .with_sort_labels(sort_labels_from_terms(&atom.terms))
                     .expect("body sort labels match inferred schema arity");
+                self.schemas.insert(pred.clone(), schema);
+            }
+        }
+
+        // Propagate body-derived rule-head types to a fixed point before
+        // defaulting variables that have no type anchor. Columns converge
+        // independently so an unresolved sibling cannot hide known evidence.
+        let mut inferred_rule_columns: HashMap<String, Vec<Option<ScalarType>>> = HashMap::new();
+        for rule in &program.rules {
+            if self.schemas.contains_key(&rule.head.predicate) {
+                continue;
+            }
+            inferred_rule_columns
+                .entry(rule.head.predicate.clone())
+                .or_insert_with(|| vec![None; rule.head.terms.len()]);
+        }
+
+        loop {
+            let mut changed = false;
+            for rule in &program.rules {
+                let pred = &rule.head.predicate;
+                if self.schemas.contains_key(pred) {
+                    continue;
+                }
+
+                let Some(current_columns) = inferred_rule_columns.get(pred) else {
+                    continue;
+                };
+                if current_columns.len() != rule.head.terms.len() {
+                    continue;
+                }
+
+                let resolved_columns = self.infer_rule_head_column_types(rule, |atom, index| {
+                    self.schemas
+                        .get(&atom.predicate)
+                        .and_then(|schema| schema.column_type(index))
+                        .or_else(|| {
+                            inferred_rule_columns
+                                .get(&atom.predicate)
+                                .and_then(|columns| columns.get(index))
+                                .copied()
+                                .flatten()
+                        })
+                })?;
+
+                let columns = inferred_rule_columns
+                    .get_mut(pred)
+                    .expect("rule-head inference entry exists");
+                for (index, (column, resolved)) in
+                    columns.iter_mut().zip(resolved_columns).enumerate()
+                {
+                    match (*column, resolved) {
+                        (None, Some(resolved)) => {
+                            *column = Some(resolved);
+                            changed = true;
+                        }
+                        (Some(existing), Some(resolved)) if existing != resolved => {
+                            return Err(XlogError::Compilation(format!(
+                                "Conflicting inferred schema for predicate '{}': column {} is \
+                                 {:?} in one rule and {:?} in another",
+                                pred,
+                                index + 1,
+                                existing,
+                                resolved
+                            )));
+                        }
+                        (None, None) | (Some(_), None) | (Some(_), Some(_)) => {}
+                    }
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
+        for rule in &program.rules {
+            let pred = &rule.head.predicate;
+            if !self.schemas.contains_key(pred) {
+                let inferred_columns = inferred_rule_columns
+                    .get(pred)
+                    .expect("undeclared rule head has an inference entry");
+                let columns = rule
+                    .head
+                    .terms
+                    .iter()
+                    .zip(inferred_columns)
+                    .enumerate()
+                    .map(|(index, (term, inferred))| {
+                        (
+                            format!("c{index}"),
+                            inferred.unwrap_or_else(|| term.inferred_scalar_type()),
+                        )
+                    })
+                    .collect();
+                let schema = Schema::new(columns)
+                    .with_sort_labels(sort_labels_from_terms(&rule.head.terms))
+                    .expect("rule head sort labels match inferred schema arity");
                 self.schemas.insert(pred.clone(), schema);
             }
         }
@@ -471,7 +750,7 @@ impl Lowerer {
                 .terms
                 .iter()
                 .enumerate()
-                .map(|(i, term)| (format!("c{}", i), infer_term_type(term)))
+                .map(|(i, term)| (format!("c{}", i), term.inferred_scalar_type()))
                 .collect();
             self.schemas.insert(pred.clone(), Schema::new(columns));
         }
@@ -487,36 +766,13 @@ impl Lowerer {
                     .terms
                     .iter()
                     .enumerate()
-                    .map(|(i, term)| (format!("c{}", i), infer_term_type(term)))
+                    .map(|(i, term)| (format!("c{}", i), term.inferred_scalar_type()))
                     .collect();
                 self.schemas.insert(pred.clone(), Schema::new(columns));
             }
         }
 
         Ok(())
-    }
-
-    fn infer_head_term_type_from_body(&self, rule: &Rule, var_name: &str) -> Option<ScalarType> {
-        for lit in &rule.body {
-            let atom = match lit {
-                BodyLiteral::Positive(atom) | BodyLiteral::Negated(atom) => atom,
-                BodyLiteral::Epistemic(_)
-                | BodyLiteral::Comparison(_)
-                | BodyLiteral::IsExpr(_)
-                | BodyLiteral::Univ(_) => continue,
-            };
-            let schema = self.schemas.get(&atom.predicate)?;
-            for (idx, term) in atom.terms.iter().enumerate() {
-                if let Term::Variable(name) = term {
-                    if name == var_name {
-                        if let Some(ty) = schema.column_type(idx) {
-                            return Some(ty);
-                        }
-                    }
-                }
-            }
-        }
-        None
     }
 
     fn infer_cardinalities(&mut self, program: &Program) {
@@ -566,10 +822,8 @@ impl Lowerer {
         }
     }
 
-    /// Lower an entire program to an execution plan
-    pub fn lower_program(&mut self, program: &Program) -> Result<ExecutionPlan> {
+    fn prepare_program_for_lowering(&mut self, program: &Program) -> Result<()> {
         validate_lowerable_terms(program)?;
-        // Infer schemas
         self.infer_schemas(program)?;
         self.validate_rule_types(program)?;
         self.infer_cardinalities(program);
@@ -581,6 +835,45 @@ impl Lowerer {
         for pred_decl in &program.predicates {
             self.get_or_create_rel_id(&pred_decl.name);
         }
+
+        Ok(())
+    }
+
+    /// Validate every source-level contract enforced while lowering, without
+    /// requiring a stratification or constructing an execution plan.
+    ///
+    /// Epistemic preparation uses this after replacing modal literals with their
+    /// validation-only ordinary counterparts. It intentionally exercises the same
+    /// schema inference, rule type checks, constant conversion, arithmetic ordering,
+    /// negation lowering, and head projection as production lowering.
+    pub(crate) fn validate_program_without_plan(&mut self, program: &Program) -> Result<()> {
+        self.prepare_program_for_lowering(program)?;
+
+        for rule in program.proper_rules() {
+            self.lower_rule(rule)?;
+        }
+
+        // Match the relation allocation and validation performed by `lower_program`
+        // for learnable rules as well. These rules cannot contain modal literals, but
+        // they may share declarations and schemas with the authored program.
+        for learnable in &program.learnable_rules {
+            self.get_or_create_rel_id(&learnable.head.predicate);
+            for lit in &learnable.body {
+                if let BodyLiteral::Positive(atom) = lit {
+                    self.get_or_create_rel_id(&atom.predicate);
+                }
+            }
+        }
+        for learnable in &program.learnable_rules {
+            self.lower_learnable_rule(learnable)?;
+        }
+
+        Ok(())
+    }
+
+    /// Lower an entire program to an execution plan
+    pub fn lower_program(&mut self, program: &Program) -> Result<ExecutionPlan> {
+        self.prepare_program_for_lowering(program)?;
 
         // Build SCCs
         self.build_sccs(program);
@@ -1732,12 +2025,39 @@ impl Lowerer {
         }
 
         if input_cols.is_empty() {
-            // No shared variables - this is an existence check
-            // If the negated relation is non-empty, result is empty
-            // This is a special case we handle with anti-join
-            Ok(RirNode::Diff {
-                left: Box::new(input),
-                right: Box::new(neg_filtered),
+            // A negated atom with no shared variables is a Boolean existence gate over
+            // the entire positive input, not a tuple difference. Give both sides the
+            // same synthetic key, anti-join on that key, then remove it. If the
+            // negated atom has any matching row, every input row is rejected; if it is
+            // empty, the anti-join returns the input unchanged. This also preserves
+            // arbitrary input schemas, including the zero-arity unit used by
+            // negation-only rules.
+            let input_width = var_env.column_count();
+            let join_key =
+                || ProjectExpr::Computed(Expr::Const(ConstValue::U32(0)), ScalarType::U32);
+
+            let mut keyed_input_columns: Vec<ProjectExpr> =
+                (0..input_width).map(ProjectExpr::Column).collect();
+            keyed_input_columns.push(join_key());
+            let keyed_input = RirNode::Project {
+                input: Box::new(input),
+                columns: keyed_input_columns,
+            };
+            let keyed_negation = RirNode::Project {
+                input: Box::new(neg_filtered),
+                columns: vec![join_key()],
+            };
+            let gated_input = RirNode::Join {
+                left: Box::new(keyed_input),
+                right: Box::new(keyed_negation),
+                left_keys: vec![input_width],
+                right_keys: vec![0],
+                join_type: JoinType::Anti,
+            };
+
+            Ok(RirNode::Project {
+                input: Box::new(gated_input),
+                columns: (0..input_width).map(ProjectExpr::Column).collect(),
             })
         } else {
             // Project the negated atom to only the shared variable columns
@@ -1806,7 +2126,7 @@ impl Lowerer {
     ) -> Result<Vec<ProjectExpr>> {
         let mut cols = Vec::with_capacity(head.terms.len());
 
-        for term in &head.terms {
+        for (index, term) in head.terms.iter().enumerate() {
             match term {
                 Term::Variable(name) => {
                     let col = var_env
@@ -1825,8 +2145,20 @@ impl Lowerer {
                     ));
                 }
                 Term::Integer(_) | Term::Float(_) | Term::String(_) | Term::Symbol(_) => {
-                    let (expr, typ) = term_to_project_const_expr(term)?;
-                    cols.push(ProjectExpr::Computed(expr, typ));
+                    let typ = self
+                        .schemas
+                        .get(&head.predicate)
+                        .and_then(|schema| schema.column_type(index))
+                        .ok_or_else(|| {
+                            XlogError::Compilation(format!(
+                                "Missing schema type for '{}' column {}",
+                                head.predicate, index
+                            ))
+                        })?;
+                    let value = term_to_typed_const_value(term, typ)?.ok_or_else(|| {
+                        XlogError::Compilation("Expected constant term".to_string())
+                    })?;
+                    cols.push(ProjectExpr::Computed(Expr::Const(value), typ));
                 }
                 Term::List(_) | Term::Cons { .. } | Term::Compound { .. } | Term::PredRef(_) => {
                     return Err(term_not_lowerable_error(
@@ -1977,7 +2309,7 @@ impl Lowerer {
         };
 
         let mut final_proj: Vec<ProjectExpr> = Vec::with_capacity(head.terms.len());
-        for term in &head.terms {
+        for (index, term) in head.terms.iter().enumerate() {
             match term {
                 Term::Variable(name) => {
                     let idx = if key_src_cols.is_empty() {
@@ -2003,8 +2335,20 @@ impl Lowerer {
                     ));
                 }
                 Term::Integer(_) | Term::Float(_) | Term::String(_) | Term::Symbol(_) => {
-                    let (expr, typ) = term_to_project_const_expr(term)?;
-                    final_proj.push(ProjectExpr::Computed(expr, typ));
+                    let typ = self
+                        .schemas
+                        .get(&head.predicate)
+                        .and_then(|schema| schema.column_type(index))
+                        .ok_or_else(|| {
+                            XlogError::Compilation(format!(
+                                "Missing schema type for '{}' column {}",
+                                head.predicate, index
+                            ))
+                        })?;
+                    let value = term_to_typed_const_value(term, typ)?.ok_or_else(|| {
+                        XlogError::Compilation("Expected constant term".to_string())
+                    })?;
+                    final_proj.push(ProjectExpr::Computed(Expr::Const(value), typ));
                 }
                 Term::List(_) | Term::Cons { .. } | Term::Compound { .. } | Term::PredRef(_) => {
                     return Err(term_not_lowerable_error(
@@ -2027,116 +2371,194 @@ impl Lowerer {
         })
     }
 
-    /// Infer the result type of an arithmetic expression (strict same-type)
-    pub(crate) fn infer_arith_type(
-        &self,
+    /// Infer an arithmetic result when every type needed for that result is
+    /// currently known. An explicit cast fixes its result type independently of
+    /// the operand, which lets schema inference propagate the target type before
+    /// all upstream variable schemas have converged.
+    fn infer_binary_arith_types<F>(
+        left: &ArithExpr,
+        right: &ArithExpr,
+        variable_type: &F,
+        user_functions: UserFunctionTypeEvidence,
+    ) -> Result<(Option<ScalarType>, Option<ScalarType>)>
+    where
+        F: Fn(&str) -> Option<ScalarType>,
+    {
+        let left_type =
+            Self::infer_arith_type_from_known_variables(left, variable_type, user_functions)?;
+        let right_type =
+            Self::infer_arith_type_from_known_variables(right, variable_type, user_functions)?;
+        Ok((left_type, right_type))
+    }
+
+    fn infer_arith_type_from_known_variables<F>(
         expr: &ArithExpr,
-        var_env: &VariableEnv,
-    ) -> Result<ScalarType> {
+        variable_type: &F,
+        user_functions: UserFunctionTypeEvidence,
+    ) -> Result<Option<ScalarType>>
+    where
+        F: Fn(&str) -> Option<ScalarType>,
+    {
         match expr {
-            ArithExpr::Variable(name) => var_env.get_type(name).ok_or_else(|| {
-                XlogError::Compilation(format!("Unknown variable {} in arithmetic", name))
-            }),
-            ArithExpr::Integer(_) => Ok(ScalarType::I64),
-            ArithExpr::Float(_) => Ok(ScalarType::F64),
+            ArithExpr::Variable(name) => Ok(variable_type(name)),
+            ArithExpr::Integer(_) => Ok(Some(ScalarType::I64)),
+            ArithExpr::Float(_) => Ok(Some(ScalarType::F64)),
 
             ArithExpr::Add(l, r)
             | ArithExpr::Sub(l, r)
             | ArithExpr::Mul(l, r)
             | ArithExpr::Div(l, r) => {
-                let lt = self.infer_arith_type(l, var_env)?;
-                let rt = self.infer_arith_type(r, var_env)?;
+                let (lt, rt) = Self::infer_binary_arith_types(l, r, variable_type, user_functions)?;
 
-                if lt != rt {
-                    return Err(XlogError::Compilation(format!(
-                        "Type mismatch in arithmetic: {:?} vs {:?}. Use cast() for conversion.",
-                        lt, rt
-                    )));
+                if let (Some(left), Some(right)) = (lt, rt) {
+                    if left != right {
+                        return Err(XlogError::Compilation(format!(
+                            "Type mismatch in arithmetic: {:?} vs {:?}. Use cast() for conversion.",
+                            left, right
+                        )));
+                    }
                 }
 
-                if !Self::is_numeric_type(&lt) {
-                    return Err(XlogError::Compilation(format!(
-                        "Arithmetic requires numeric type, got {:?}",
-                        lt
-                    )));
+                for typ in [lt, rt].into_iter().flatten() {
+                    if !Self::is_numeric_type(&typ) {
+                        return Err(XlogError::Compilation(format!(
+                            "Arithmetic requires numeric type, got {:?}",
+                            typ
+                        )));
+                    }
                 }
 
-                Ok(lt)
+                let (Some(lt), Some(_)) = (lt, rt) else {
+                    return Ok(None);
+                };
+                Ok(Some(lt))
             }
 
             ArithExpr::Mod(l, r) => {
-                let lt = self.infer_arith_type(l, var_env)?;
-                let rt = self.infer_arith_type(r, var_env)?;
+                let (lt, rt) = Self::infer_binary_arith_types(l, r, variable_type, user_functions)?;
 
-                if lt != rt {
-                    return Err(XlogError::Compilation(format!(
-                        "Type mismatch in mod: {:?} vs {:?}",
-                        lt, rt
-                    )));
+                if let (Some(left), Some(right)) = (lt, rt) {
+                    if left != right {
+                        return Err(XlogError::Compilation(format!(
+                            "Type mismatch in mod: {:?} vs {:?}",
+                            left, right
+                        )));
+                    }
                 }
 
-                if matches!(lt, ScalarType::F32 | ScalarType::F64) {
-                    return Err(XlogError::Compilation(
-                        "Modulo (%) not supported for floating point".into(),
-                    ));
+                for typ in [lt, rt].into_iter().flatten() {
+                    if matches!(typ, ScalarType::F32 | ScalarType::F64) {
+                        return Err(XlogError::Compilation(
+                            "Modulo (%) not supported for floating point".into(),
+                        ));
+                    }
+                    if !Self::is_numeric_type(&typ) {
+                        return Err(XlogError::Compilation(format!(
+                            "Modulo (%) requires integer operands, got {:?}",
+                            typ
+                        )));
+                    }
                 }
 
-                Ok(lt)
+                let (Some(lt), Some(_)) = (lt, rt) else {
+                    return Ok(None);
+                };
+                Ok(Some(lt))
             }
 
             ArithExpr::Abs(inner) => {
-                let t = self.infer_arith_type(inner, var_env)?;
+                let Some(t) = Self::infer_arith_type_from_known_variables(
+                    inner,
+                    variable_type,
+                    user_functions,
+                )?
+                else {
+                    return Ok(None);
+                };
                 if !Self::is_numeric_type(&t) {
                     return Err(XlogError::Compilation(format!(
                         "abs requires numeric type, got {:?}",
                         t
                     )));
                 }
-                Ok(t)
+                Ok(Some(t))
             }
 
             ArithExpr::Min(l, r) | ArithExpr::Max(l, r) => {
-                let lt = self.infer_arith_type(l, var_env)?;
-                let rt = self.infer_arith_type(r, var_env)?;
+                let (lt, rt) = Self::infer_binary_arith_types(l, r, variable_type, user_functions)?;
 
-                if lt != rt {
-                    return Err(XlogError::Compilation(format!(
-                        "Type mismatch in min/max: {:?} vs {:?}",
-                        lt, rt
-                    )));
+                if let (Some(left), Some(right)) = (lt, rt) {
+                    if left != right {
+                        return Err(XlogError::Compilation(format!(
+                            "Type mismatch in min/max: {:?} vs {:?}",
+                            left, right
+                        )));
+                    }
                 }
 
-                if !Self::is_numeric_type(&lt) {
-                    return Err(XlogError::Compilation(format!(
-                        "min/max requires numeric type, got {:?}",
-                        lt
-                    )));
+                for typ in [lt, rt].into_iter().flatten() {
+                    if !Self::is_numeric_type(&typ) {
+                        return Err(XlogError::Compilation(format!(
+                            "min/max requires numeric type, got {:?}",
+                            typ
+                        )));
+                    }
                 }
 
-                Ok(lt)
+                let (Some(lt), Some(_)) = (lt, rt) else {
+                    return Ok(None);
+                };
+                Ok(Some(lt))
             }
 
             ArithExpr::Pow(base, exp) => {
-                let base_t = self.infer_arith_type(base, var_env)?;
-                let exp_t = self.infer_arith_type(exp, var_env)?;
+                let (base_t, exp_t) =
+                    Self::infer_binary_arith_types(base, exp, variable_type, user_functions)?;
 
-                if !Self::is_numeric_type(&base_t) || !Self::is_numeric_type(&exp_t) {
+                if let Some(invalid) = [base_t, exp_t]
+                    .into_iter()
+                    .flatten()
+                    .find(|typ| !Self::is_numeric_type(typ))
+                {
+                    let detail = match (base_t, exp_t) {
+                        (Some(base_t), Some(exp_t)) => {
+                            format!("{:?} and {:?}", base_t, exp_t)
+                        }
+                        _ => format!("{:?}", invalid),
+                    };
                     return Err(XlogError::Compilation(format!(
-                        "pow requires numeric operands, got {:?} and {:?}",
-                        base_t, exp_t
+                        "pow requires numeric operands, got {detail}"
                     )));
                 }
 
+                if base_t.is_none() || exp_t.is_none() {
+                    return Ok(None);
+                }
                 // pow always returns f64 (standard math behavior)
-                Ok(ScalarType::F64)
+                Ok(Some(ScalarType::F64))
             }
 
-            ArithExpr::Cast(_, target) => Ok(*target),
+            ArithExpr::Cast(inner, target) => {
+                Self::infer_arith_type_from_known_variables(inner, variable_type, user_functions)?;
+                Ok(Some(*target))
+            }
 
-            ArithExpr::FuncCall { name, .. } => Err(XlogError::Compilation(format!(
-                "User-defined function '{}' must be inlined before lowering",
-                name
-            ))),
+            ArithExpr::FuncCall { name, args } => match user_functions {
+                UserFunctionTypeEvidence::RequireExpansion => Err(XlogError::Compilation(format!(
+                    "User-defined function '{}' must be inlined before lowering",
+                    name
+                ))),
+                UserFunctionTypeEvidence::Defer => {
+                    for argument in args {
+                        Self::infer_arith_type_from_known_variables(
+                            argument,
+                            variable_type,
+                            user_functions,
+                        )?;
+                    }
+                    Ok(None)
+                }
+            },
 
             ArithExpr::Conditional {
                 then_expr,
@@ -2144,17 +2566,49 @@ impl Lowerer {
                 ..
             } => {
                 // Both branches must have the same type
-                let then_type = self.infer_arith_type(then_expr, var_env)?;
-                let else_type = self.infer_arith_type(else_expr, var_env)?;
+                let (then_type, else_type) = Self::infer_binary_arith_types(
+                    then_expr,
+                    else_expr,
+                    variable_type,
+                    user_functions,
+                )?;
+                let (Some(then_type), Some(else_type)) = (then_type, else_type) else {
+                    return Ok(None);
+                };
                 if then_type != else_type {
                     return Err(XlogError::Compilation(format!(
                         "Conditional branches have different types: {:?} vs {:?}",
                         then_type, else_type
                     )));
                 }
-                Ok(then_type)
+                Ok(Some(then_type))
             }
         }
+    }
+
+    /// Infer the result type of an arithmetic expression (strict same-type).
+    pub(crate) fn infer_arith_type(
+        &self,
+        expr: &ArithExpr,
+        var_env: &VariableEnv,
+    ) -> Result<ScalarType> {
+        if let Some(typ) = Self::infer_arith_type_from_known_variables(
+            expr,
+            &|variable| var_env.get_type(variable),
+            UserFunctionTypeEvidence::RequireExpansion,
+        )? {
+            return Ok(typ);
+        }
+
+        let variable = expr
+            .variables()
+            .into_iter()
+            .find(|variable| var_env.get_type(variable).is_none())
+            .unwrap_or("<unknown>");
+        Err(XlogError::Compilation(format!(
+            "Unknown variable {} in arithmetic",
+            variable
+        )))
     }
 
     fn is_numeric_type(t: &ScalarType) -> bool {
@@ -2372,31 +2826,6 @@ impl VariableEnv {
     }
 }
 
-/// Infer the type of a term
-fn infer_term_type(term: &Term) -> ScalarType {
-    match term {
-        Term::Variable(_) | Term::Anonymous => ScalarType::U64, // Default for variables
-        Term::Integer(i) => {
-            if *i >= 0 && *i <= u32::MAX as i64 {
-                ScalarType::U32
-            } else {
-                ScalarType::I64
-            }
-        }
-        Term::Float(_) => ScalarType::F64,
-        Term::String(_) | Term::Symbol(_) => ScalarType::Symbol,
-        Term::List(_) | Term::Cons { .. } | Term::Compound { .. } | Term::PredRef(_) => {
-            ScalarType::U64
-        }
-        Term::Aggregate(agg) => match agg.op {
-            AggOp::Count => ScalarType::U32,
-            AggOp::Sum => ScalarType::U64,
-            AggOp::Min | AggOp::Max => ScalarType::U32,
-            AggOp::LogSumExp => ScalarType::F64,
-        },
-    }
-}
-
 fn sort_labels_from_terms(terms: &[Term]) -> Vec<String> {
     terms
         .iter()
@@ -2532,14 +2961,18 @@ fn term_to_typed_const_value(term: &Term, expected: ScalarType) -> Result<Option
             }
         }
         Term::Symbol(id) => {
-            if expected == ScalarType::Symbol {
-                ConstValue::Symbol(symbol::resolve(*id))
-            } else {
-                return Err(XlogError::Compilation(format!(
-                    "Symbol literal {} not valid for {:?}",
-                    symbol::resolve(*id),
-                    expected
-                )));
+            let value = symbol::resolve(*id);
+            match expected {
+                ScalarType::Symbol => ConstValue::Symbol(value),
+                ScalarType::Bool if matches!(value.as_str(), "true" | "false") => {
+                    ConstValue::Bool(value == "true")
+                }
+                _ => {
+                    return Err(XlogError::Compilation(format!(
+                        "Symbol literal {} not valid for {:?}",
+                        value, expected
+                    )));
+                }
             }
         }
         Term::Variable(_)
@@ -2552,34 +2985,6 @@ fn term_to_typed_const_value(term: &Term, expected: ScalarType) -> Result<Option
     };
 
     Ok(Some(const_val))
-}
-
-fn term_to_project_const_expr(term: &Term) -> Result<(Expr, ScalarType)> {
-    match term {
-        Term::Integer(i) => {
-            if *i >= 0 && *i <= u32::MAX as i64 {
-                Ok((Expr::Const(ConstValue::U32(*i as u32)), ScalarType::U32))
-            } else {
-                Ok((Expr::Const(ConstValue::I64(*i)), ScalarType::I64))
-            }
-        }
-        Term::Float(f) => Ok((Expr::Const(ConstValue::F64(*f)), ScalarType::F64)),
-        Term::String(s) => Ok((
-            Expr::Const(ConstValue::Symbol(s.clone())),
-            ScalarType::Symbol,
-        )),
-        Term::Symbol(id) => Ok((
-            Expr::Const(ConstValue::Symbol(symbol::resolve(*id))),
-            ScalarType::Symbol,
-        )),
-        Term::Variable(_)
-        | Term::Anonymous
-        | Term::Aggregate(_)
-        | Term::List(_)
-        | Term::Cons { .. }
-        | Term::Compound { .. }
-        | Term::PredRef(_) => Err(XlogError::Compilation("Expected constant term".to_string())),
-    }
 }
 
 /// Convert AST AggOp to core AggOp
@@ -2716,6 +3121,49 @@ mod tests {
         assert!(lowerer.schemas.contains_key("edge"));
         let schema = lowerer.schemas.get("edge").unwrap();
         assert_eq!(schema.arity(), 2);
+    }
+
+    #[test]
+    fn test_infer_schemas_propagates_through_reversed_rule_chains() {
+        let mut program = Program::new();
+        program.rules.push(Rule {
+            head: Atom {
+                predicate: "shared".to_string(),
+                terms: vec![Term::Variable("X".to_string())],
+            },
+            body: vec![BodyLiteral::Positive(Atom {
+                predicate: "intermediate".to_string(),
+                terms: vec![Term::Variable("X".to_string())],
+            })],
+        });
+        program.rules.push(Rule {
+            head: Atom {
+                predicate: "intermediate".to_string(),
+                terms: vec![Term::Variable("X".to_string())],
+            },
+            body: vec![BodyLiteral::Positive(Atom {
+                predicate: "source".to_string(),
+                terms: vec![Term::Variable("X".to_string())],
+            })],
+        });
+        program.rules.push(Rule {
+            head: Atom {
+                predicate: "source".to_string(),
+                terms: vec![Term::Symbol(symbol::intern("value"))],
+            },
+            body: vec![],
+        });
+
+        let mut lowerer = Lowerer::new();
+        lowerer.infer_schemas(&program).unwrap();
+
+        assert_eq!(
+            lowerer
+                .schemas
+                .get("shared")
+                .and_then(|schema| schema.column_type(0)),
+            Some(ScalarType::Symbol)
+        );
     }
 
     #[test]
@@ -2916,6 +3364,51 @@ mod tests {
     }
 
     #[test]
+    fn test_lower_ground_negation_preserves_the_positive_input_schema() {
+        // ok(X) :- x(X), not p(3).
+        let rule = Rule {
+            head: Atom {
+                predicate: "ok".to_string(),
+                terms: vec![Term::Variable("X".to_string())],
+            },
+            body: vec![
+                BodyLiteral::Positive(Atom {
+                    predicate: "x".to_string(),
+                    terms: vec![Term::Variable("X".to_string())],
+                }),
+                BodyLiteral::Negated(Atom {
+                    predicate: "p".to_string(),
+                    terms: vec![Term::Integer(3)],
+                }),
+            ],
+        };
+
+        let mut lowerer = Lowerer::new();
+        for predicate in ["ok", "x", "p"] {
+            lowerer.schemas.insert(
+                predicate.to_string(),
+                Schema::new(vec![("c0".to_string(), ScalarType::U32)]),
+            );
+        }
+
+        let node = lowerer.lower_rule(&rule).expect("lower ground negation");
+
+        let RirNode::Project { input, columns } = node else {
+            panic!("ground negation must project away its internal existence key");
+        };
+        assert_eq!(columns, vec![ProjectExpr::Column(0)]);
+        assert!(matches!(
+            *input,
+            RirNode::Join {
+                left_keys,
+                right_keys,
+                join_type: JoinType::Anti,
+                ..
+            } if left_keys == vec![1] && right_keys == vec![0]
+        ));
+    }
+
+    #[test]
     fn test_lower_comparison() {
         // greater(X, Y) :- pair(X, Y), X > Y.
         let rule = Rule {
@@ -3112,16 +3605,19 @@ mod tests {
     }
 
     #[test]
-    fn test_infer_term_type() {
+    fn test_inferred_scalar_type() {
         assert_eq!(
-            infer_term_type(&Term::Variable("X".to_string())),
+            Term::Variable("X".to_string()).inferred_scalar_type(),
             ScalarType::U64
         );
-        assert_eq!(infer_term_type(&Term::Integer(42)), ScalarType::U32);
-        assert_eq!(infer_term_type(&Term::Integer(i64::MAX)), ScalarType::I64);
-        assert_eq!(infer_term_type(&Term::Float(3.25)), ScalarType::F64);
+        assert_eq!(Term::Integer(42).inferred_scalar_type(), ScalarType::U32);
         assert_eq!(
-            infer_term_type(&Term::Symbol(symbol::intern("foo"))),
+            Term::Integer(i64::MAX).inferred_scalar_type(),
+            ScalarType::I64
+        );
+        assert_eq!(Term::Float(3.25).inferred_scalar_type(), ScalarType::F64);
+        assert_eq!(
+            Term::Symbol(symbol::intern("foo")).inferred_scalar_type(),
             ScalarType::Symbol
         );
     }
@@ -3522,6 +4018,39 @@ mod tests {
             ConstValue::U64(v) => assert_eq!(*v, 2, "Value should be 2"),
             other => panic!("Expected U64(2), got {:?}", other),
         }
+    }
+
+    #[test]
+    fn declared_head_constant_is_projected_with_the_schema_type() {
+        let program = crate::parse_program(
+            r#"
+            pred real(f64).
+            seed().
+            real(1) :- seed().
+        "#,
+        )
+        .expect("parse typed head-constant fixture");
+        let mut lowerer = Lowerer::new();
+        lowerer
+            .infer_schemas(&program)
+            .expect("infer declared schemas");
+        lowerer
+            .validate_rule_types(&program)
+            .expect("validate supported literal conversion");
+
+        let node = lowerer
+            .lower_rule(&program.rules[1])
+            .expect("lower typed head constant");
+        let RirNode::Project { columns, .. } = node else {
+            panic!("constant rule head should lower to a projection");
+        };
+        assert_eq!(
+            columns,
+            vec![ProjectExpr::Computed(
+                Expr::Const(ConstValue::F64(1.0)),
+                ScalarType::F64,
+            )]
+        );
     }
 }
 

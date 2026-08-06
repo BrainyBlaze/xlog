@@ -47,16 +47,21 @@ Its semantic rules are also complete for:
   to a single operator by parity/duality;
 - predicates that share a name but differ in arity, told apart by their
   arity-qualified tuple sources;
-- recursion — covering determined **stratification** (layering the program so no
-  predicate depends on its own negation), positive Gelfond 1991 compatibility
-  recursion (Gelfond 1991 is an alternative epistemic semantics, selectable as a
-  compatibility mode), stratified negated modals, and cyclic negated modals. All
-  of these run through the `xlog-gpu` GPU-backed Well-Founded Semantics (WFS)
-  plan — a fixpoint that assigns each atom true, false, or undefined — which
-  replaces the older `xlog_prob` host-side WFS solver.
+- recursion — covering determined **stratification** (ordered evaluation after a
+  modal target is materialized), positive FAEEL dependency cycles through an
+  ordinary founded least fixpoint, supported positive exact-tuple Gelfond-1991
+  `possible` cycles through a greatest compatibility fixpoint,
+  stratified negated modals, and cyclic negated modals. Supported cycles through
+  negation use the `xlog-gpu` GPU-backed Well-Founded Semantics (WFS) plan — a
+  fixpoint that assigns each atom true, false, or undefined — which replaces the
+  older `xlog_prob` host-side WFS solver. A positive compatibility component does
+  not itself use WFS, although an unrelated nonmonotone component may use WFS
+  within the same upper-bound or refinement pass.
 
-Only genuinely unbounded, unsafe, or unfounded modal cycles still fail closed:
-they are rejected with a diagnostic instead of being executed.
+Programs outside the executor's finite-key, relation-identity, tuple-shape, or
+materialization contracts fail closed with a diagnostic instead of being
+executed. The concrete boundaries are listed under
+[Epistemic support and boundaries](#epistemic-support-and-boundaries).
 
 ---
 
@@ -230,14 +235,23 @@ false
 
 ### Type Inference
 
-Types are inferred from predicate declarations. All uses of a predicate must be consistent with its declared types.
+Predicate declarations set column types explicitly. Without a declaration, compilation
+infers a schema from available facts and rule information. When different source
+programs—either the entry program and a selected import, or two selected imports—contribute
+clauses for the same undeclared predicate name and arity, module resolution compares inferred
+head-column types before merging them. Head constants, head variables typed by ordinary body
+atoms or built-in arithmetic bindings, and aggregate result types supply evidence, including
+through rule chains; unanchored variables do not. Conflicts produce `error[E0412]`. Invalid
+built-in arithmetic or aggregate evidence produces `error[E0413]` with its source module and
+file; user-defined function calls are expanded after imports merge and validated during
+compilation.
 
 ```xlog
 pred temperature(u32, f64).   // sensor_id: u32, temp: f64
 
 temperature(1, 22.5).         // Correct: u32, f64
-temperature(1, 22).           // Error: 22 inferred as i64, not f64
-temperature(1, cast(22, f64)). // Correct: explicit cast
+temperature(1, 22).           // Correct: the declaration converts 22 to f64
+temperature(1, invalid).      // Error: a symbol is not valid for f64
 ```
 
 ### Language-Completeness Type Forms
@@ -292,7 +306,7 @@ using a hidden CPU-only fallback for a GPU-claimed path.
 | Probabilistic aggregates | Aggregate heads and aggregate outputs in `query`/`evidence` | Finite aggregate outcomes in exact and MC inference | `query(out_degree(1, 2)).` over probabilistic `edge` facts | Exact aggregate domains over cap, unsupported numeric operator/domain pairs | Exact provenance/PIR or MC sampling plus deterministic aggregate execution |
 | Aggregate lifting | Finite-domain aggregate metadata and caps | Use lifted compact-domain computation when identical to finite exact enumeration | Small count/sum domains avoid naive enumeration | Domain cap exceeded, non-finite domains, unsupported floating tolerance | Probabilistic aggregate planner and exact/MC engines |
 | Approximate inference | `#pragma prob_engine = mc`, samples, seed, confidence, method | MC estimates are reproducible under fixed seed and report uncertainty | `#pragma prob_samples = 10000` with `query(rain).` | Invalid confidence ranges, unsupported methods, hidden default override ambiguity | Existing MC engine with documented source/CLI precedence |
-| Epistemic literals | `know atom(...)`, `possible atom(...)`, `not know atom(...)`, `not possible atom(...)`, finite nested modal chains, `#pragma epistemic_mode = faeel\|g91` | Modal literals are preserved in EIR; the epistemic executor derives candidate worlds from EIR, checks value-level tuple-key membership, normalizes finite nested chains by parity/duality, solves same-name multi-arity by arity-qualified tuple sources, supports determined-head stratification, positive Gelfond 1991 compatibility recursion, stratified negated-modal recursion, and cyclic negated-modal recursion through the `xlog-gpu` GPU-backed WFS plan without the old `xlog_prob` host-WFS solver. This is not a device-resident/no-host-interaction WFS residency claim; host orchestration and metadata convergence reads may still occur. | `accepted() :- know fact().` | Direct raw RIR lowering, genuinely unbounded/untyped modal tuple keys, unsafe unbound negated epistemic variables, CPU-only world-view scans, and genuine modal cycles without a founded order | Parser/AST -> EIR -> epistemic GPU executable plans, reduced ordinary plans, or GPU-backed WFS alternating-fixpoint plans through high-level `xlog run` dispatch |
+| Epistemic literals | `know atom(...)`, `possible atom(...)`, `not know atom(...)`, `not possible atom(...)`, finite nested modal chains, `#pragma epistemic_mode = faeel\|g91` | Modal literals are preserved in EIR. The single-pass route derives candidate worlds from EIR and checks value-level tuple-key membership. Across all routes, the executor normalizes finite nested chains by parity/duality, solves same-name multi-arity by arity-qualified tuple sources, supports determined-head stratification, positive FAEEL modal dependency cycles through founded least-fixpoint reduction, supported Gelfond-1991 positive exact-tuple `possible` cycles through a greatest compatibility fixpoint, stratified negated-modal recursion, and cyclic negated-modal recursion through the `xlog-gpu` GPU-backed WFS plan without the old `xlog_prob` host-WFS solver. Gelfond-1991 refinement and WFS convergence may be host-orchestrated while relation evaluation, snapshots, and set comparison remain GPU-backed. | `accepted() :- know fact().` | Direct raw RIR lowering, genuinely unbounded/untyped modal tuple keys, unsafe unbound negated epistemic variables, CPU-only world-view scans, recursive epistemic programs that also carry modal integrity constraints, and a Gelfond-1991 compatibility component with recursive negation or aggregation | Parser/AST -> EIR -> single-pass epistemic GPU plans, reduced ordinary least-fixpoint plans, descending Gelfond-1991 compatibility plans, or GPU-backed WFS alternating-fixpoint plans through high-level `xlog run` dispatch |
 | CLI explain | `xlog explain --format text\|json\|dot file.xlog` | Show parse, strata, RIR, optimized RIR, magic-set, WCOJ, and probability sections when applicable | `xlog explain --format json reach.xlog` | Unknown output formats or unavailable sections without a typed reason | CLI orchestration plus compiler/explain APIs |
 | CLI REPL | `xlog repl` | Interactive multiline fact/rule/query session using parser cache | Add facts, then query relation state | GPU execution before a command requests it, unsupported mutation semantics | CLI session cache plus normal compile/run on submitted programs |
 | CLI watch | `xlog watch file.xlog` | Rerun or re-explain changed files with debounce and typed diagnostics | Edit a rule and see updated diagnostics/output | Silent stale cache reuse after file/module change | CLI file watcher plus parser/session cache and normal commands |
@@ -319,9 +333,9 @@ prob_aggregate error at program.xlog:17: exact probabilistic aggregate domain ca
 epistemic error at program.xlog:9: unbounded modal tuple key [H|T] has no finite GPU key-column set; use a fixed-arity typed list or bind the tail to a finite relation.
 ```
 
-### Current epistemic support and boundaries
+### Epistemic support and boundaries
 
-The current source accepts the epistemic literals and the `epistemic_mode`
+The source language accepts the epistemic literals and the `epistemic_mode`
 pragma listed here, and routes accepted epistemic examples through `xlog run`.
 The epistemic executor supports:
 
@@ -333,7 +347,9 @@ The epistemic executor supports:
 - same-name, multi-arity disambiguation;
 - finite nested-chain normalization;
 - determined-head stratification;
-- positive Gelfond 1991 compatibility recursion;
+- positive FAEEL modal dependency cycles through founded least-fixpoint reduction;
+- supported positive exact-tuple Gelfond-1991 `possible` cycles through a
+  greatest compatibility fixpoint;
 - stratified negated-modal recursion;
 - cyclic negated-modal recursion through the `xlog-gpu` GPU-backed WFS plan,
   which replaces the old `xlog_prob` host-side WFS solver.
@@ -345,7 +361,16 @@ The remaining unsupported epistemic forms are:
 - unsafe unbound negated epistemic variables;
 - CPU-only world-view scans;
 - cyclic WFS shapes outside the `xlog-gpu` GPU-backed negated-modal WFS plan;
-- modal cycles without a founded order.
+- recursive epistemic programs that also carry modal integrity constraints;
+- Gelfond-1991 compatibility components with recursive negation or aggregation;
+- one derived epistemic predicate name authored at multiple source arities
+  (pure extensional predicates may still share a name across arities);
+- sibling clauses for an augmented epistemic head that lower to different
+  hidden tuple shapes;
+- queries over an augmented epistemic head whose arguments are not a tuple of
+  distinct named variables; and
+- single-pass clause unions whose modal conjunctions differ and are not proven
+  redundant for every row of the combined relation.
 
 ---
 
@@ -775,9 +800,9 @@ Aggregations compute summary values over groups of tuples.
 | Aggregate | Description | Input Types | Output Type |
 |-----------|-------------|-------------|-------------|
 | `count(X)` | Count of values | Any | `u64` |
-| `sum(X)` | Sum of values | `u32` | `u64` |
-| `min(X)` | Minimum value | `u32` | `u32` |
-| `max(X)` | Maximum value | `u32` | `u32` |
+| `sum(X)` | Sum of values | `u32`, `u64` | `u64` |
+| `min(X)` | Minimum value | `u32`, `u64` | Same as input |
+| `max(X)` | Maximum value | `u32`, `u64` | Same as input |
 | `logsumexp(X)` | Log-sum-exp (numerically stable) | `f64` | `f64` |
 
 ### Syntax
@@ -792,7 +817,7 @@ head(GroupKeys, aggregate(AggVar)) :- body(GroupKeys, AggVar, ...).
 
 ```xlog
 pred edge(u32, u32).
-pred out_degree(u32, u32).
+pred out_degree(u32, u64).
 
 edge(1, 2). edge(1, 3). edge(2, 4).
 
@@ -838,7 +863,7 @@ XLOG does not have a built-in `avg` aggregate. Compute it using `sum` and `count
 ```xlog
 pred txn(u32, u32).         // user_id, amount
 pred total(u32, u64).
-pred cnt(u32, u32).
+pred cnt(u32, u64).
 pred avg(u32, f64).
 
 txn(1, 10). txn(1, 5). txn(1, 7).
@@ -1220,15 +1245,31 @@ edges throughout validation and merging. Distinct files are not conflated merely
 their imports use the same spelling, and aliases of one canonical source file do not
 duplicate its definitions.
 
-Separate import branches cannot provide competing definitions under one predicate or
-function name. Predicate clauses may extend an imported predicate within the same module;
-functions have one body and cannot be redefined after import. An imported module that
-defines an exported function name more than once is rejected with `error[E0410]`.
+Public facts and rules for the same predicate are merged across resolved import branches
+into one relation. The same union semantics apply when selective imports name that
+predicate in multiple modules. Participating declarations are checked under
+`error[E0408]`. Without a participating declaration, inferred clause-head column types from
+different source programs—either the entry program and a selected import, or two selected
+imports—are compared by predicate name and arity. Constants, head variables typed by ordinary
+body atoms or built-in arithmetic bindings, and aggregate result types supply evidence;
+unanchored variables do not. Conflicting types for one signature produce `error[E0412]`. For
+invalid built-in arithmetic or aggregate evidence, resolution reports `error[E0413]` with the
+contributing module and source file. User-defined function calls are expanded after import
+resolution. For import schema validation, different arities remain distinct. Functions have one body:
+separate branches cannot
+define the same imported function, and a module or entry file cannot redefine an imported
+function. Those function conflicts produce `error[E0402]`. An imported module that defines
+an exported function name more than once is rejected with `error[E0410]`.
 
-Repeated public declarations for one predicate must be identical. A difference in arity,
-column names, or resolved types is rejected with `error[E0408]`. Domain-backed types are
-compared using the scalar type to which each local alias resolves. Reusing one domain alias
-name for different scalar types in the entry program or import closure is `error[E0409]`.
+Every declaration in the entry program and every public declaration selected by the
+resolved imports participates in declaration compatibility checking. Participating
+declarations for one predicate must have identical arity, column names, and resolved
+types; otherwise resolution reports `error[E0408]`. Private declarations in imported
+modules and public declarations omitted by a selective import are not merged and do not
+participate in that comparison.
+Domain-backed types are compared using the scalar type to which each local alias resolves.
+Reusing one domain alias name for different scalar types in the entry program or import
+closure is `error[E0409]`.
 Within an imported module, every declaration of one predicate must use the same visibility;
 mixing public and `private` declarations is rejected with `error[E0411]`.
 
@@ -1643,9 +1684,51 @@ explicit compatibility mode for programs that need Gelfond 1991 possibility beha
 
 Accepted epistemic programs enter EIR through `xlog_logic::build_eir` and run
 through the high-level `xlog run` / `xlog_gpu::LogicProgram` dispatch path. That
-path lowers accepted programs into epistemic GPU executable plans. Direct
-ordinary RIR lowering of raw epistemic body literals remains a rejection
-boundary and must report `UnsupportedEpistemicConstruct`.
+path classifies dependencies before selecting a single-pass epistemic GPU plan,
+an ordinary FAEEL founded least-fixpoint reduction, a Gelfond-1991 positive
+exact-tuple `possible` greatest compatibility fixpoint, or a GPU-backed WFS
+alternating-fixpoint plan. Direct ordinary RIR lowering of raw epistemic body
+literals remains a rejection boundary and must report
+`UnsupportedEpistemicConstruct`.
+
+The Gelfond-1991 compatibility plan relaxes the selected gates once to compute a
+GPU upper bound. It then reevaluates the program from its extensional inputs,
+reading each selected modal target from a frozen copy of the preceding
+iteration. GPU set comparison over the intensional relations detects the
+greatest compatible tuple fixpoint. This is a tuple-level contract: a positive
+non-invariant `possible` literal qualifies when its key exactly matches its rule
+head and its head and target share a recursive dependency component. Predicate
+recursion without compatible concrete tuples is not sufficient. Ordinary
+integrity constraints are evaluated after tuple convergence. When a pass uses
+WFS, a positive constraint atom is true only in the lower extension, while a
+negated atom is true only when its tuple is absent from the upper extension; an
+undefined atom satisfies neither polarity. Modal integrity constraints in a
+recursive epistemic program remain unsupported. An unrelated negative cycle may
+use GPU-backed WFS inside a pass; recursive negation or aggregation within the
+compatibility component is unsupported because the descending operator would be
+non-monotone.
+
+Single-pass epistemic output materialization does not retain the defining
+clause that supplied each row. One active clause per predicate signature is
+always unambiguous. Multiple clauses are also accepted when their normalized
+modal conjunctions are identical relative to the output columns, because the
+shared filter distributes over the clause union. For an invariant modal target,
+`know` and `possible` normalize to the same fixed-extension test.
+
+A single epistemic clause may coexist with ordinary sibling clauses when each
+of its positive modal gates is proven to be a no-op for every union row. This
+includes ground atoms derived from explicit ordinary facts or rules, bijective
+all-variable exact-head tuples with independent founded support, and positive
+exact-head `possible` self-support in G91 compatibility mode. Repeated-variable,
+constant, or wildcard heads do not qualify as bijective tuple keys.
+
+Other mixed or differently filtered clause unions are rejected with
+`epistemic rule-union materialization`; applying every clause's modal gate to
+the combined relation would otherwise lose valid sibling rows. Admissible
+recursive epistemic programs are not subject to this single-pass restriction.
+FAEEL positive-cycle literals resolve into ordinary rule bodies before
+least-fixpoint execution. Selected Gelfond-1991 gates instead become reads from
+frozen relation snapshots during descending refinement.
 
 ### Examples
 
@@ -1688,7 +1771,7 @@ left() :- know left_fact().
 right() :- possible right_fact().
 ```
 
-Run the shipped pilots:
+Run the shipped examples:
 
 ```bash
 xlog run examples/epistemic/03-faeel-default.xlog
@@ -1948,7 +2031,7 @@ is dropped at merge time and reported with `warning[W0510]`. See
 | `prob_engine` | `exact_ddnnf`, `mc` | Select probabilistic inference engine |
 | `prob_cache` | `on`, `off` | Enable/disable probability caching |
 | `epistemic_mode` | `faeel`, `g91` | Select FAEEL default or Gelfond 1991 compatibility epistemic semantics |
-| `max_recursion_depth` | integer | Maximum recursion iterations |
+| `max_recursion_depth` | integer | Maximum configured recursion depth; also bounds Gelfond-1991 compatibility refinements and GPU WFS alternating-fixpoint iterations |
 | `magic_sets` | `auto`, `on`, `off` | Control bound-recursive magic-set rewriting |
 | `prob_samples` | integer | Monte Carlo sample count |
 | `prob_seed` | integer | Monte Carlo random seed |

@@ -47,15 +47,17 @@ behavior:
 |---|---|
 | `E0400` | A direct or transitive `use` path cannot be resolved to a module file. |
 | `E0401` | Direct or transitive imports form a cycle. |
-| `E0402` | Distinct providers in separate resolved import branches supply the same predicate or function name, or a module redefines a function imported within its own branch. |
+| `E0402` | Separate resolved import branches define the same function, or a module or entry program redefines an imported function. |
 | `E0404` | A selective import names an item that the module does not export. |
 | `E0405` | An imported module contains program-level content that must be declared in the entry file: probabilistic facts, annotated disjunctions, evidence, integrity constraints, neural predicate declarations, or learnable rule templates. |
 | `E0406` | An exported rule or function depends on a private item or an item omitted by a selective import. |
 | `E0407` | A context-free library request refers to a logical module path that identifies more than one loaded source file. Load the entry file or root module before validating or merging imports. |
-| `E0408` | The entry program or imported modules declare the same predicate with different arity, column names, or resolved types. |
+| `E0408` | A declaration in the entry program or a selected public declaration in its resolved imports conflicts with another participating declaration for the same predicate in arity, column names, or resolved types. |
 | `E0409` | The entry program or imported modules declare one domain alias name with different scalar types. |
 | `E0410` | An imported module defines an exported function name more than once. |
 | `E0411` | An imported module declares the same predicate as both public and private. |
+| `E0412` | Clauses from different source programs—either the entry program and a selected import, or two selected imports—supply conflicting inferred head-column types for the same undeclared predicate name-and-arity signature. Constants, head variables typed by ordinary body atoms or built-in arithmetic bindings, and aggregate result types provide evidence; unanchored variables do not. |
+| `E0413` | A clause contains invalid built-in arithmetic or aggregate type evidence while module resolution is inferring an undeclared predicate signature. The diagnostic identifies the predicate, module, and source file. User-defined function calls are expanded after imports merge and are validated during compilation. |
 
 The entry file is loaded from the exact path supplied to the CLI. Imported module paths
 continue to resolve to `.xlog` files. Queries and probabilistic queries in imported

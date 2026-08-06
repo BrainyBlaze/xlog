@@ -20,10 +20,12 @@
 //
 // Previously this failed closed with a `cross-component epistemic coupling`
 // diagnostic (the modal target `r` is an ordinary head, not a direct epistemic head).
-// That scope limit is now closed; finite nested modal chains, FAEEL-unfounded
-// self-support, and finite structured tuple keys have defined behavior.
-// Only genuinely cyclic modal coupling with no founded/WFS order, unbounded tuple
-// keys, and unsafe unbound variables remain fail-closed.
+// That scope limit is closed. Finite nested modal chains and finite structured tuple
+// keys execute through their normal modal paths. Positive FAEEL dependency cycles
+// execute through a founded least fixpoint, so an independently founded predecessor
+// propagates and an unseeded FAEEL cycle has an empty extension. Rejections are
+// reserved for concrete unsupported forms such as unbounded tuple keys, unsafe
+// unbound variables, and recursive epistemic programs with modal integrity constraints.
 //
 // GATE LOAD-BEARING: dropping the modal would give b = node = {1, 2}; the `know r`
 // gate restricts b to r's extension. With node = {1, 2}, p = {1}:

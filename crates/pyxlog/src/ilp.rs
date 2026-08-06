@@ -1829,7 +1829,11 @@ use train_only(..., strict_gpu_native=True) or export an explicit compatibility 
             .predicates
             .iter()
             .map(|pred| {
-                let types = pred.types.iter().map(type_ref_name).collect();
+                let types = pred
+                    .schema_columns()
+                    .iter()
+                    .map(|column| type_ref_name(&column.typ))
+                    .collect();
                 (pred.name.clone(), types)
             })
             .collect()

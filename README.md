@@ -13,9 +13,10 @@
 Neural-symbolic systems today keep symbolic reasoning on the CPU while neural computation runs
 on the GPU, and every training iteration pays a PCIe round-trip that dominates wall-clock time
 at scale. XLOG closes that gap: one compiler and one CUDA runtime span four reasoning
-paradigms — deterministic Datalog, exact and approximate probabilistic inference, SAT/MaxSAT
-verification, and differentiable neural-symbolic training — with zero tracked host–device
-transfers in production data planes.
+paradigms — deterministic Datalog, exact and approximate probabilistic inference,
+epistemic reasoning, and differentiable neural-symbolic training — with SAT/MaxSAT
+verification available as a shared solver service and zero tracked host–device transfers
+in production data planes.
 
 Implemented in Rust with custom CUDA kernels, XLOG caches compiled circuits across training
 iterations and exposes GPU-resident results as zero-copy DLPack and Arrow C Device
@@ -34,7 +35,8 @@ XLOG is not a DSL bolted onto a tensor framework. It is a full typed logic progr
 
 - **Typed predicates** over a closed scalar set (`u32`, `u64`, `i32`, `i64`, `f32`, `f64`, `bool`, `symbol`) with single-pass type inference that rejects ill-typed programs before any GPU kernel runs.
 - **User-defined functions, modules and imports, stratified aggregation, and integrity constraints**, so programs decompose cleanly instead of collapsing into flat rule lists.
-- **One syntax for four paradigms:** probabilistic facts (`p::f.`), annotated disjunctions, neural predicate declarations (`nn/k`), and SAT constraints share the same syntactic core with deterministic Datalog.
+- **One syntax for four paradigms:** deterministic rules, probabilistic facts and annotated disjunctions, epistemic operators, and neural predicate declarations (`nn/k`) share the same typed language.
+- **Shared solver services:** SAT/MaxSAT features and verification use the GPU-resident `GpuCnf` representation and CDCL service rather than defining another reasoning paradigm.
 - **GPU-resident semantics:** relational operators, circuit evaluation, and verification paths run on the device instead of bouncing through the host.
 - **A runtime inside your training loop, not a service:** CUDA-backed DLPack producers provide
   zero-copy transient inputs, while DLPack capsules and the Arrow C Device interface expose
@@ -104,7 +106,7 @@ magic sets, probabilistic aggregates, approximate inference, epistemic reasoning
 | **Lists & meta-predicates** | Finite `list<T>` and `term` values, safe `findall` / `maplist` / term-inspection predicates, deterministic negation-as-failure |
 | **Aggregation** | Head-positional `count`, `sum`, `min`, `max`, `logsumexp`, aggregate lifting |
 | **Probabilistic inference** | Exact inference via knowledge compilation (decision-DNNF → GPU arithmetic circuits), Monte Carlo sampling, well-founded-semantics negation, approximate-inference pragmas |
-| **Epistemic reasoning** | Epistemic operators with finite nested modal chains, recursive epistemic execution over the GPU-backed WFS contract, epistemic splitting, probabilistic epistemic evidence |
+| **Epistemic reasoning** | Epistemic operators with finite nested modal chains, Generate-Propagate-Test for acyclic programs, FAEEL founded positive-cycle reduction, a GPU-backed greatest compatible tuple fixpoint for supported Gelfond-1991 `possible` cycles, GPU-backed WFS for supported negative cycles, epistemic splitting, probabilistic epistemic evidence |
 | **SAT / MaxSAT** | GPU CDCL verifier with on-device model and proof validation, MaxSAT, portfolio solving, continuous local search |
 | **Neural-symbolic training** | Neural predicates (`nn/k`), PyTorch autograd integration, circuit caching across iterations, term embeddings, joint neural + symbolic rule-weight training |
 | **Rule induction** | Differentiable ILP with sparse GPU masks, deterministic mode, promotion pipeline, holdout validation, and bounded exact induction (`xlog-induce`) with top-K CUDA scoring |
@@ -117,15 +119,24 @@ magic sets, probabilistic aggregates, approximate inference, epistemic reasoning
 
 ## How it works
 
-XLOG programs are **stratified logic programs with typed predicates**. The compilation pipeline
-is: parse (PEG) → stratify via SCC analysis of the predicate dependency graph → lower to a
-relational IR (`RIR`) → cost-aware optimization → dispatch to a GPU backend. Four backends share
-this frontend:
+XLOG programs are **typed logic programs**. The shared frontend parses and
+normalizes source into an AST, validates schemas and safety, and analyzes strongly
+connected components (SCCs) in the dependency graph. Three purpose-built reasoning
+IRs then fan out from the normalized AST; there is no universal AST-to-RIR lowering
+step. The execution paths are:
 
-- deterministic evaluation via semi-naive fixpoint (`xlog-runtime`),
-- probabilistic inference via knowledge compilation to device-resident arithmetic circuits (`xlog-prob`),
-- SAT/MaxSAT verification (`xlog-solve`),
-- differentiable training via PyTorch autograd integration (`xlog-neural` + `pyxlog`).
+- deterministic RIR evaluation via semi-naive fixpoints (`xlog-runtime` and
+  `xlog-gpu`);
+- probabilistic PIR inference via knowledge compilation to device-resident
+  arithmetic circuits (`xlog-prob`);
+- epistemic EIR dispatch to Generate-Propagate-Test, a FAEEL founded least
+  fixpoint, a descending Gelfond-1991 tuple-compatibility fixpoint, or GPU-backed
+  WFS (`xlog-logic` and `xlog-gpu`);
+- differentiable training via PyTorch autograd integration (`xlog-neural` and
+  `pyxlog`), composing neural predicates with the relevant reasoning IR.
+
+SAT/MaxSAT features and circuit verification use the shared GPU-resident `GpuCnf`
+and CDCL solver service in `xlog-solve`; the service is not another reasoning IR.
 
 Language features worth naming:
 

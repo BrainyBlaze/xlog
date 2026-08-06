@@ -502,6 +502,22 @@ impl Executor {
             return self.create_empty_buffer(projected_schema);
         }
 
+        if columns.is_empty() {
+            // A zero-column projection preserves row existence. Combining an empty
+            // list of column buffers would manufacture a zero-row relation and make
+            // ground negation treat every matching atom as absent.
+            let projected_schema = self.project_schema(input.schema(), columns)?;
+            let rows = self.provider.device_row_count(input)?;
+            let rows = u32::try_from(rows).map_err(|_| {
+                XlogError::Execution(format!(
+                    "zero-column projection row count {rows} exceeds the GPU range"
+                ))
+            })?;
+            return self
+                .provider
+                .create_zero_arity_buffer(projected_schema, rows);
+        }
+
         // Build result columns as single-column CudaBuffers
         let mut result_buffers: Vec<CudaBuffer> = Vec::with_capacity(columns.len());
         let mut result_types: Vec<ScalarType> = Vec::with_capacity(columns.len());

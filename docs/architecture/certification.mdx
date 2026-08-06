@@ -96,18 +96,24 @@ certification. The staged reliability labels used in the repository are:
 These labels belong only to the subsystem that defines and runs that gate. They
 are not global CUDA test counts, so do not reuse them that way.
 
-## Epistemic Candidate Bounds
+## Single-pass epistemic candidate bounds
 
-"Epistemic execution" is XLOG's mode for reasoning about what a program can and
-cannot conclude — it enumerates candidate answers over the program's epistemic
-literals (the atoms whose truth the reasoning is uncertain about). This mode has
-no public fixed-literal limit and no large hardcoded candidate-count bound.
-Instead, the source computes two concrete bounds:
+The Generate-Propagate-Test route enumerates candidate answers over a program's
+epistemic literals (the atoms whose truth the reasoning is uncertain about).
+This single-pass route has no public fixed-literal limit and no large hardcoded
+candidate-count bound. Instead, it computes two concrete bounds:
 
 - `max_candidates = 2^(number of epistemic literals)`;
 - a per-reduction cap of `MAX_MODELS_PER_REDUCTION = 1024` models.
 
-Those are the actual limits that apply to epistemic planning.
+These limits apply to Generate-Propagate-Test reductions. Positive FAEEL cycles
+run through an ordinary founded least-fixpoint reduction. Supported exact-tuple
+Gelfond-1991 `possible` cycles use a GPU upper-bound pass followed by descending
+frozen-snapshot refinements to the greatest compatible tuple fixpoint. Supported
+cycles through negation run through GPU-backed WFS. None of those routes
+enumerates the single-pass candidate lattice. The Gelfond-1991 and WFS routes
+keep relation evaluation and set comparison on the GPU while the host
+orchestrates fixpoint iterations.
 
 ## Evidence Requirements
 

@@ -1,8 +1,8 @@
 //! Transitive type inference across SCC predicates.
 //!
-//! Closes the PR 5 policy gap: where a join-key vertex was anchored
-//! only through SCC-recursive atoms, the typed gate previously left
-//! it untyped under "unknown ≠ unsupported." This module propagates
+//! When a join-key vertex is anchored only through strongly connected
+//! component (SCC) recursion, the typed gate cannot obtain its type
+//! from a base relation directly. This module propagates
 //! types through the rule graph — body atoms type variables, head
 //! atoms back-propagate to head-predicate columns, iterate to
 //! fixpoint — so the typed gate has full type information when it
@@ -151,7 +151,6 @@ pub fn infer_scc_predicate_schemas(
         let mut changed = false;
         for (predicate, group) in rules.iter() {
             for (rule_index, rule) in group.iter().enumerate() {
-                let var_types = derive_rule_var_types(rule, base_relations, &schemas);
                 // Back-propagate from head terms to head-predicate
                 // columns.
                 for (col, term) in rule.head.terms.iter().enumerate() {
@@ -163,7 +162,21 @@ pub fn infer_scc_predicate_schemas(
                         // itself at evaluation time.
                         _ => continue,
                     };
-                    let Some(&derived) = var_types.get(name) else {
+                    let Some(derived) =
+                        rule.inferred_head_variable_type(name, |atom, index, negated| {
+                            if negated {
+                                return None;
+                            }
+                            base_relations
+                                .get(&atom.predicate)
+                                .and_then(|relation| relation.schema.get(index).copied())
+                                .or_else(|| {
+                                    schemas
+                                        .get(&atom.predicate)
+                                        .and_then(|schema| schema.get(index).copied().flatten())
+                                })
+                        })
+                    else {
                         continue;
                     };
                     let schema = schemas
@@ -218,56 +231,6 @@ pub fn infer_scc_predicate_schemas(
          (monotonicity invariant violated)"
     );
     Ok(schemas)
-}
-
-/// Derive the per-variable type map for a single rule, consulting
-/// both `base_relations` and currently-inferred SCC schemas.
-///
-/// Body conflicts (a variable typed two different ways across
-/// body atoms within this rule) are NOT surfaced here — that is
-/// the responsibility of [`super::typed::derive_vertex_types`],
-/// which the typed gate calls before evaluation. This helper is
-/// a *forward* propagation pass that prefers the first type seen
-/// (in source order) and silently skips later disagreements; the
-/// typed gate later catches the disagreement on the same rule
-/// using its own walk.
-fn derive_rule_var_types(
-    rule: &Rule,
-    base_relations: &RefRelationStore,
-    inferred: &InferredSchemas,
-) -> BTreeMap<String, ScalarType> {
-    let mut var_types: BTreeMap<String, ScalarType> = BTreeMap::new();
-    for literal in &rule.body {
-        let body_atom = match literal {
-            BodyLiteral::Positive(a) => a,
-            _ => continue,
-        };
-        let schema_opt: Option<&[Option<ScalarType>]> =
-            if let Some(rel) = base_relations.get(&body_atom.predicate) {
-                // Build a transient "all-Some" view of the base schema.
-                // We don't actually need to allocate — handle directly.
-                let limit = body_atom.terms.len().min(rel.schema.len());
-                for (pos, term) in body_atom.terms[..limit].iter().enumerate() {
-                    if let Term::Variable(name) = term {
-                        var_types.entry(name.clone()).or_insert(rel.schema[pos]);
-                    }
-                }
-                None
-            } else {
-                inferred.get(&body_atom.predicate).map(|v| v.as_slice())
-            };
-        if let Some(schema) = schema_opt {
-            let limit = body_atom.terms.len().min(schema.len());
-            for (pos, term) in body_atom.terms[..limit].iter().enumerate() {
-                if let Term::Variable(name) = term {
-                    if let Some(ty) = schema[pos] {
-                        var_types.entry(name.clone()).or_insert(ty);
-                    }
-                }
-            }
-        }
-    }
-    var_types
 }
 
 /// Build the typed-gate input map for a single rule using

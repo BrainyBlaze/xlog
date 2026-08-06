@@ -4,6 +4,7 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 
 use crate::ast::Program;
+use xlog_core::ScalarType;
 
 /// A module path like ["utils", "math"]
 pub(crate) type ModulePath = Vec<String>;
@@ -63,13 +64,13 @@ pub enum ModuleError {
         /// Ordered import cycle that was discovered.
         cycle: Vec<ModulePath>,
     },
-    /// Name conflict between imports
+    /// Conflicting definitions for an imported function.
     ImportConflict {
-        /// Imported symbol name that collided.
+        /// Function name that has multiple definitions.
         name: String,
-        /// First module providing the name.
+        /// Module containing the first definition.
         module1: ModulePath,
-        /// Second module providing the same name.
+        /// Module containing the conflicting definition.
         module2: ModulePath,
     },
     /// Attempted to import private predicate
@@ -109,7 +110,8 @@ pub enum ModuleError {
         /// Canonical source files registered for the logical path.
         candidates: Vec<PathBuf>,
     },
-    /// Imported modules declare one predicate with incompatible schemas.
+    /// A declaration in the entry program or a selected public declaration in
+    /// its resolved imports conflicts with another participating declaration.
     IncompatiblePredicateDeclaration {
         /// Predicate whose declarations differ.
         name: String,
@@ -118,7 +120,8 @@ pub enum ModuleError {
         /// Module containing the incompatible declaration.
         module2: ModulePath,
     },
-    /// Imported modules define one domain alias with incompatible scalar types.
+    /// The entry program or imported modules define one domain alias with
+    /// incompatible scalar types.
     IncompatibleDomainDeclaration {
         /// Domain alias whose declarations differ.
         name: String,
@@ -140,6 +143,44 @@ pub enum ModuleError {
         name: String,
         /// Module containing the declarations.
         module: ModulePath,
+    },
+    /// Separate source programs contribute clauses for one undeclared
+    /// predicate signature with incompatible inferred column types.
+    IncompatibleInferredPredicateSchema {
+        /// Predicate whose inferred schemas differ.
+        name: String,
+        /// Predicate arity used to distinguish same-name signatures.
+        arity: usize,
+        /// One-based index of the incompatible column.
+        column: usize,
+        /// Type inferred from the first contribution.
+        type1: ScalarType,
+        /// Type inferred from the conflicting contribution.
+        type2: ScalarType,
+        /// Module containing the first contribution.
+        module1: ModulePath,
+        /// Module containing the conflicting contribution.
+        module2: ModulePath,
+        /// Source identity for the first contribution, or `<program>` when no
+        /// loaded source anchors the caller's program.
+        source1: Box<PathBuf>,
+        /// Source identity for the conflicting contribution, or `<program>`
+        /// when no loaded source anchors the caller's program.
+        source2: Box<PathBuf>,
+    },
+    /// A clause contains invalid type evidence while module resolution is
+    /// inferring an undeclared predicate signature.
+    PredicateSchemaInferenceFailed {
+        /// Predicate whose contribution could not be inferred.
+        name: String,
+        /// Predicate arity used to identify the signature.
+        arity: usize,
+        /// Module containing the invalid contribution.
+        module: ModulePath,
+        /// Source containing the invalid contribution.
+        source: Box<PathBuf>,
+        /// Diagnostic produced by the authoritative schema inference path.
+        message: String,
     },
     /// Parse error in module
     ParseError {
@@ -187,23 +228,25 @@ impl std::fmt::Display for ModuleError {
                 module1,
                 module2,
             } => {
-                writeln!(f, "error[E0402]: ambiguous import `{}`", name)?;
                 writeln!(
                     f,
-                    "  `{}` first imported from {}",
+                    "error[E0402]: conflicting definitions for imported function `{name}`"
+                )?;
+                writeln!(
+                    f,
+                    "  function `{}` is defined by module `{}`",
                     name,
                     module_path_to_string(module1)
                 )?;
                 writeln!(
                     f,
-                    "  `{}` also exported by {}",
+                    "  function `{}` is also defined by module `{}`",
                     name,
                     module_path_to_string(module2)
                 )?;
                 write!(
                     f,
-                    "  = help: use selective imports: `use {}::{{...}}.`",
-                    module_path_to_string(module1)
+                    "  = help: import only one definition of function `{name}` with selective `use` declarations"
                 )
             }
             ModuleError::PrivatePredicate { name, module } => {
@@ -270,7 +313,7 @@ impl std::fmt::Display for ModuleError {
             } => {
                 writeln!(
                     f,
-                    "error[E0408]: incompatible declarations for imported predicate `{name}`"
+                    "error[E0408]: incompatible declarations for predicate `{name}`"
                 )?;
                 writeln!(
                     f,
@@ -280,7 +323,7 @@ impl std::fmt::Display for ModuleError {
                 )?;
                 write!(
                     f,
-                    "  = help: imported declarations must use identical arity, column names, and types"
+                    "  = help: every declaration in the entry program and every public declaration selected by the resolved imports must use identical arity, column names, and resolved types"
                 )
             }
             ModuleError::IncompatibleDomainDeclaration {
@@ -300,7 +343,7 @@ impl std::fmt::Display for ModuleError {
                 )?;
                 write!(
                     f,
-                    "  = help: a domain alias must resolve to one scalar type throughout the import closure"
+                    "  = help: a domain alias must resolve to one scalar type throughout the entry program and resolved import closure"
                 )
             }
             ModuleError::DuplicateImportedFunction { name, module } => {
@@ -322,10 +365,82 @@ impl std::fmt::Display for ModuleError {
                     "  = help: use one visibility for every declaration of a predicate"
                 )
             }
+            ModuleError::IncompatibleInferredPredicateSchema {
+                name,
+                arity,
+                column,
+                type1,
+                type2,
+                module1,
+                module2,
+                source1,
+                source2,
+            } => {
+                writeln!(
+                    f,
+                    "error[E0412]: incompatible inferred schemas for undeclared predicate `{name}/{arity}`"
+                )?;
+                if module1 == module2 {
+                    writeln!(
+                        f,
+                        "  column {column} is inferred as {} by `{}` and {} by `{}` (both resolved as module `{}`)",
+                        scalar_type_name(*type1),
+                        source1.display(),
+                        scalar_type_name(*type2),
+                        source2.display(),
+                        module_path_to_string(module1)
+                    )?;
+                } else {
+                    writeln!(
+                        f,
+                        "  column {column} is inferred as {} by module `{}` and {} by module `{}`",
+                        scalar_type_name(*type1),
+                        module_path_to_string(module1),
+                        scalar_type_name(*type2),
+                        module_path_to_string(module2)
+                    )?;
+                }
+                write!(
+                    f,
+                    "  = help: add a `pred {name}(...)` declaration that defines the shared schema, or make the contributing clauses use the same column types"
+                )
+            }
+            ModuleError::PredicateSchemaInferenceFailed {
+                name,
+                arity,
+                module,
+                source,
+                message,
+            } => {
+                writeln!(
+                    f,
+                    "error[E0413]: cannot infer schema for predicate `{name}/{arity}` from module `{}`",
+                    module_path_to_string(module)
+                )?;
+                writeln!(f, "  source: {}", source.display())?;
+                writeln!(f, "  cause: {message}")?;
+                write!(
+                    f,
+                    "  = help: fix the clause's type error or add a `pred {name}(...)` declaration with the intended schema"
+                )
+            }
             ModuleError::ParseError { path, message } => {
                 write!(f, "error: parse error in {:?}: {}", path, message)
             }
         }
+    }
+}
+
+fn scalar_type_name(typ: ScalarType) -> &'static str {
+    match typ {
+        ScalarType::U32 => "u32",
+        ScalarType::U64 => "u64",
+        ScalarType::I32 => "i32",
+        ScalarType::I64 => "i64",
+        ScalarType::F32 => "f32",
+        ScalarType::F64 => "f64",
+        ScalarType::Bool => "bool",
+        ScalarType::Symbol => "symbol",
     }
 }
 
@@ -431,6 +546,9 @@ mod tests {
         assert!(message.contains("error[E0408]"));
         assert!(message.contains("predicate `external`"));
         assert!(message.contains("first and second"));
+        assert!(message.contains(
+            "every declaration in the entry program and every public declaration selected by the resolved imports"
+        ));
     }
 
     #[test]
@@ -478,6 +596,49 @@ mod tests {
     }
 
     #[test]
+    fn incompatible_inferred_predicate_schema_error_explains_the_conflict() {
+        let err = ModuleError::IncompatibleInferredPredicateSchema {
+            name: "shared".to_string(),
+            arity: 2,
+            column: 2,
+            type1: ScalarType::U32,
+            type2: ScalarType::Symbol,
+            module1: vec!["first".to_string()],
+            module2: vec!["second".to_string()],
+            source1: Box::new(PathBuf::from("first.xlog")),
+            source2: Box::new(PathBuf::from("second.xlog")),
+        };
+
+        let message = err.to_string();
+
+        assert!(message.contains("error[E0412]"));
+        assert!(message.contains("undeclared predicate `shared/2`"));
+        assert!(message.contains("column 2"));
+        assert!(message.contains("u32 by module `first`"));
+        assert!(message.contains("symbol by module `second`"));
+        assert!(message.contains("add a `pred shared(...)` declaration"));
+    }
+
+    #[test]
+    fn predicate_schema_inference_error_names_its_source() {
+        let err = ModuleError::PredicateSchemaInferenceFailed {
+            name: "shared".to_string(),
+            arity: 1,
+            module: vec!["library".to_string()],
+            source: Box::new(PathBuf::from("library.xlog")),
+            message: "Type mismatch in arithmetic: U32 vs U64".to_string(),
+        };
+
+        let message = err.to_string();
+
+        assert!(message.contains("error[E0413]"));
+        assert!(message.contains("predicate `shared/1`"));
+        assert!(message.contains("module `library`"));
+        assert!(message.contains("library.xlog"));
+        assert!(message.contains("Type mismatch in arithmetic"));
+    }
+
+    #[test]
     fn test_internal_name() {
         assert_eq!(internal_name(&[], "foo"), "foo");
         assert_eq!(
@@ -501,6 +662,23 @@ mod tests {
             parse_internal_name("__single__pred"),
             (vec!["single".to_string()], "pred".to_string())
         );
+    }
+
+    #[test]
+    fn imported_function_conflict_error_names_both_definitions() {
+        let err = ModuleError::ImportConflict {
+            name: "normalize".to_string(),
+            module1: vec!["first".to_string()],
+            module2: vec!["second".to_string()],
+        };
+
+        let message = err.to_string();
+
+        assert!(message
+            .contains("error[E0402]: conflicting definitions for imported function `normalize`"));
+        assert!(message.contains("function `normalize` is defined by module `first`"));
+        assert!(message.contains("function `normalize` is also defined by module `second`"));
+        assert!(message.contains("import only one definition of function `normalize`"));
     }
 
     #[test]

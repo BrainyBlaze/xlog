@@ -29,11 +29,16 @@
 // data, so there is NO double-gating and NO resolve-into-body against a still-modal
 // relation.
 //
-// The genuinely-undefined cases stay fail-closed: a modal over a NON-determined
-// (recursive / through-the-SCC) multi-column head is NOT resolved (example 22 and a
-// recursive `know s(X,Y)` both reject with "recursive epistemic program" / "not
-// invariant"); nested modals (13), compound tuple-key modals (23), and
-// FAEEL-unfounded self-support stay rejected.
+// A modal over a non-determined recursive head follows the recursive execution
+// routes rather than this stratified one. Positive FAEEL cycles reduce to ordinary
+// rules and run to a founded least fixpoint; supported exact-tuple Gelfond-1991
+// positive `possible` cycles use a descending greatest compatibility fixpoint;
+// supported cycles through negation use the GPU-backed well-founded plan. Finite
+// nested modals and finite typed structured
+// tuple keys execute normally, while an unseeded FAEEL self-support cycle produces
+// an empty extension. Unsupported forms still report precise diagnostics, including
+// unbounded tuple keys, unsafe variables, and recursive programs that also contain
+// modal integrity constraints.
 //
 // GATE LOAD-BEARING: dropping the modal LITERAL gives out = node = {1, 2, 3}; the
 // `know r` gate restricts `out` to the projection of `r`'s extension onto its first

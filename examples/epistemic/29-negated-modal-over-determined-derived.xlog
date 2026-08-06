@@ -24,9 +24,12 @@
 // Dropping the negated literal entirely gives q = node = {1,2,3}; treating it as
 // always-false gives q = {} . Only the SOUND `not a` reading yields {3}.
 //
-// This is the negated-over-determined-DERIVED cell of the determined-modal family:
-// together with the positive cells (17/24/25/28) it closes the family -- every modal
-// target is either DETERMINED (resolved) or NON-DETERMINED (correctly fail-closed).
+// This is the negated-over-determined-DERIVED form of stratified execution. A
+// determined target is materialized and resolved as shown here. A non-determined
+// target instead follows its defined recursive semantics: founded positive-cycle
+// reduction, a descending Gelfond-1991 greatest compatibility fixpoint for a
+// supported exact-tuple positive `possible` cycle, or GPU-backed WFS for supported
+// negative cycles. Only shapes outside those contracts fail with a typed diagnostic.
 
 #pragma epistemic_mode = faeel
 

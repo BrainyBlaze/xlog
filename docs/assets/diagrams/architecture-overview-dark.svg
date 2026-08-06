@@ -1,4 +1,4 @@
-<!-- xlog diagram: architecture overview (dark). Source of truth: docs ARCHITECTURE.md reasoning stack + crate structure. One shared frontend fans into four paradigm IRs; all execute on the GPU kernel provider. -->
+<!-- xlog diagram: architecture overview (dark). One shared frontend fans into three reasoning IR routes plus a shared GPU CNF/CDCL solver service. -->
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 400" font-family="Inter, system-ui, sans-serif">
   <rect width="900" height="400" fill="#0E0E16"/>
   <defs>
@@ -8,7 +8,7 @@
   </defs>
 
   <text x="28" y="38" font-size="16" font-weight="600" fill="#E7E6F0">XLOG architecture</text>
-  <text x="28" y="56" font-size="11" fill="#9B98B4">One typed frontend fans into four reasoning paradigms; all of them execute on a shared GPU kernel provider.</text>
+  <text x="28" y="56" font-size="11" fill="#9B98B4">Three reasoning IR routes share one frontend; SAT/MaxSAT uses the GPU CNF/CDCL service.</text>
 
   <rect x="390" y="76" width="120" height="38" rx="7" fill="#171626" stroke="#E7E6F0" stroke-width="1.25"/>
   <text x="450" y="100" text-anchor="middle" font-size="12.5" font-weight="500" fill="#E7E6F0">Source</text>
@@ -16,7 +16,7 @@
 
   <rect x="90" y="134" width="720" height="46" rx="8" fill="#171626" stroke="#E7E6F0" stroke-width="1.25"/>
   <text x="450" y="156" text-anchor="middle" font-size="12.5" font-weight="500" fill="#E7E6F0">Shared frontend</text>
-  <text x="450" y="171" text-anchor="middle" font-size="10" fill="#9B98B4" font-family="'JetBrains Mono','SF Mono',ui-monospace,Menlo,monospace">parser &#183; stratifier &#183; lowerer &#183; optimizer</text>
+  <text x="450" y="171" text-anchor="middle" font-size="10" fill="#9B98B4" font-family="'JetBrains Mono','SF Mono',ui-monospace,Menlo,monospace">parsing &#183; normalization &#183; type/dependency analysis</text>
 
   <g stroke="#9B98B4" stroke-width="1.5" fill="none" marker-end="url(#aad)">
     <path d="M135,180 V212"/><path d="M345,180 V212"/><path d="M555,180 V212"/><path d="M765,180 V212"/>
@@ -25,7 +25,7 @@
   <g>
     <rect x="40" y="214" width="190" height="78" rx="7" fill="#171626" stroke="#E7E6F0" stroke-width="1.25"/>
     <rect x="41.5" y="216" width="3.5" height="74" rx="1.75" fill="#8B83F0"/>
-    <text x="60" y="238" font-size="12.5" font-weight="600" fill="#E7E6F0">Deterministic</text>
+    <text x="60" y="238" font-size="12.5" font-weight="600" fill="#E7E6F0">Deterministic route</text>
     <text x="60" y="255" font-size="10.5" fill="#9B98B4">Datalog &amp; recursion</text>
     <rect x="60" y="264" width="52" height="17" rx="8.5" fill="#8B83F0" fill-opacity="0.2"/>
     <text x="86" y="276" text-anchor="middle" font-size="9.5" font-weight="600" fill="#A9A2F5" font-family="'JetBrains Mono','SF Mono',ui-monospace,Menlo,monospace">RIR</text>
@@ -33,7 +33,7 @@
   <g>
     <rect x="250" y="214" width="190" height="78" rx="7" fill="#171626" stroke="#E7E6F0" stroke-width="1.25"/>
     <rect x="251.5" y="216" width="3.5" height="74" rx="1.75" fill="#A78BFA"/>
-    <text x="270" y="238" font-size="12.5" font-weight="600" fill="#E7E6F0">Probabilistic</text>
+    <text x="270" y="238" font-size="12.5" font-weight="600" fill="#E7E6F0">Probabilistic route</text>
     <text x="270" y="255" font-size="10.5" fill="#9B98B4">exact &amp; Monte Carlo</text>
     <rect x="270" y="264" width="96" height="17" rx="8.5" fill="#A78BFA" fill-opacity="0.2"/>
     <text x="318" y="276" text-anchor="middle" font-size="9.5" font-weight="600" fill="#C4B5FD" font-family="'JetBrains Mono','SF Mono',ui-monospace,Menlo,monospace">PIR &#8594; XGCF</text>
@@ -41,7 +41,7 @@
   <g>
     <rect x="460" y="214" width="190" height="78" rx="7" fill="#171626" stroke="#E7E6F0" stroke-width="1.25"/>
     <rect x="461.5" y="216" width="3.5" height="74" rx="1.75" fill="#22D3EE"/>
-    <text x="480" y="238" font-size="12.5" font-weight="600" fill="#E7E6F0">Epistemic</text>
+    <text x="480" y="238" font-size="12.5" font-weight="600" fill="#E7E6F0">Epistemic route</text>
     <text x="480" y="255" font-size="10.5" fill="#9B98B4">world views</text>
     <rect x="480" y="264" width="52" height="17" rx="8.5" fill="#22D3EE" fill-opacity="0.2"/>
     <text x="506" y="276" text-anchor="middle" font-size="9.5" font-weight="600" fill="#67E8F9" font-family="'JetBrains Mono','SF Mono',ui-monospace,Menlo,monospace">EIR</text>
@@ -49,10 +49,10 @@
   <g>
     <rect x="670" y="214" width="190" height="78" rx="7" fill="#171626" stroke="#E7E6F0" stroke-width="1.25"/>
     <rect x="671.5" y="216" width="3.5" height="74" rx="1.75" fill="#FBBF24"/>
-    <text x="690" y="238" font-size="12.5" font-weight="600" fill="#E7E6F0">Solver</text>
-    <text x="690" y="255" font-size="10.5" fill="#9B98B4">SAT &amp; MaxSAT</text>
+    <text x="690" y="238" font-size="12.5" font-weight="600" fill="#E7E6F0">Solver service</text>
+    <text x="690" y="255" font-size="10.5" fill="#9B98B4">shared SAT &amp; MaxSAT</text>
     <rect x="690" y="264" width="52" height="17" rx="8.5" fill="#FBBF24" fill-opacity="0.2"/>
-    <text x="716" y="276" text-anchor="middle" font-size="9.5" font-weight="600" fill="#FCD34D" font-family="'JetBrains Mono','SF Mono',ui-monospace,Menlo,monospace">SIR</text>
+    <text x="716" y="276" text-anchor="middle" font-size="9.5" font-weight="600" fill="#FCD34D" font-family="'JetBrains Mono','SF Mono',ui-monospace,Menlo,monospace">GpuCnf</text>
   </g>
 
   <g stroke="#9B98B4" stroke-width="1.5" fill="none" marker-end="url(#aad)">
@@ -65,5 +65,5 @@
   <text x="450" y="356" text-anchor="middle" font-size="12.5" font-weight="600" fill="#E7E6F0">GPU kernel provider</text>
   <text x="450" y="371" text-anchor="middle" font-size="10" fill="#9B98B4" font-family="'JetBrains Mono','SF Mono',ui-monospace,Menlo,monospace">joins &#183; sort &#183; group-by &#183; circuits &#183; CDCL</text>
 
-  <text x="28" y="394" font-size="10.5" fill="#9B98B4">Neural-symbolic training runs over the deterministic and probabilistic paths, learning rule weights and neural predicates end-to-end.</text>
+  <text x="28" y="394" font-size="10.5" fill="#9B98B4">Neural-symbolic training composes neural predicates with the relevant symbolic route; it does not introduce a separate IR.</text>
 </svg>

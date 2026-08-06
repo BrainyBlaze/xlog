@@ -76,6 +76,27 @@ impl Term {
         }
     }
 
+    /// Infer the scalar storage type used when no predicate declaration
+    /// supplies a schema for this term.
+    pub fn inferred_scalar_type(&self) -> ScalarType {
+        match self {
+            Term::Variable(_) | Term::Anonymous => ScalarType::U64,
+            Term::Integer(value) => {
+                if *value >= 0 && *value <= u32::MAX as i64 {
+                    ScalarType::U32
+                } else {
+                    ScalarType::I64
+                }
+            }
+            Term::Float(_) => ScalarType::F64,
+            Term::String(_) | Term::Symbol(_) => ScalarType::Symbol,
+            Term::List(_) | Term::Cons { .. } | Term::Compound { .. } | Term::PredRef(_) => {
+                ScalarType::U64
+            }
+            Term::Aggregate(aggregate) => aggregate.default_result_type(),
+        }
+    }
+
     /// Return all named variables referenced by this term.
     pub fn variables(&self) -> Vec<&str> {
         match self {
@@ -105,6 +126,40 @@ pub struct AggExpr {
     pub op: AggOp,
     /// The variable being aggregated.
     pub variable: String,
+}
+
+impl AggExpr {
+    /// Return the runtime result type for a known aggregate input type.
+    ///
+    /// `None` means the execution provider does not support that operator for the
+    /// supplied input type.
+    pub(crate) fn result_type_for_input(&self, input: ScalarType) -> Option<ScalarType> {
+        match self.op {
+            AggOp::Count => Some(ScalarType::U64),
+            AggOp::Sum if matches!(input, ScalarType::U32 | ScalarType::U64) => {
+                Some(ScalarType::U64)
+            }
+            AggOp::Min | AggOp::Max if matches!(input, ScalarType::U32 | ScalarType::U64) => {
+                Some(input)
+            }
+            AggOp::LogSumExp if input == ScalarType::F64 => Some(ScalarType::F64),
+            AggOp::Sum | AggOp::Min | AggOp::Max | AggOp::LogSumExp => None,
+        }
+    }
+
+    /// Return a result type that is independent of a not-yet-known input.
+    pub(crate) fn input_independent_result_type(&self) -> Option<ScalarType> {
+        match self.op {
+            AggOp::Count | AggOp::Sum => Some(ScalarType::U64),
+            AggOp::LogSumExp => Some(ScalarType::F64),
+            AggOp::Min | AggOp::Max => None,
+        }
+    }
+
+    fn default_result_type(&self) -> ScalarType {
+        self.input_independent_result_type()
+            .unwrap_or(ScalarType::U64)
+    }
 }
 
 /// Aggregation operator
@@ -408,6 +463,40 @@ impl Rule {
     /// Collect all named variables from the body.
     pub fn body_variables(&self) -> Vec<&str> {
         self.body.iter().flat_map(|l| l.variables()).collect()
+    }
+
+    /// Infer a head variable's type from ordinary body atoms in source order.
+    ///
+    /// The caller supplies a column lookup so each compilation context can use
+    /// its own predicate identity and decide whether negated atoms provide type
+    /// evidence. The first known type from an accepted body occurrence is
+    /// returned; other literal kinds are not considered here.
+    pub(crate) fn inferred_head_variable_type<F>(
+        &self,
+        variable: &str,
+        mut column_type: F,
+    ) -> Option<ScalarType>
+    where
+        F: FnMut(&Atom, usize, bool) -> Option<ScalarType>,
+    {
+        for literal in &self.body {
+            let (atom, negated) = match literal {
+                BodyLiteral::Positive(atom) => (atom, false),
+                BodyLiteral::Negated(atom) => (atom, true),
+                BodyLiteral::Epistemic(_)
+                | BodyLiteral::Comparison(_)
+                | BodyLiteral::IsExpr(_)
+                | BodyLiteral::Univ(_) => continue,
+            };
+            for (index, term) in atom.terms.iter().enumerate() {
+                if matches!(term, Term::Variable(name) if name == variable) {
+                    if let Some(typ) = column_type(atom, index, negated) {
+                        return Some(typ);
+                    }
+                }
+            }
+        }
+        None
     }
 }
 
@@ -728,6 +817,33 @@ pub struct PredDecl {
     pub is_private: bool,
 }
 
+impl PredDecl {
+    /// Return the effective declared columns, including optional source names.
+    ///
+    /// Parsed declarations populate `columns`; callers constructing the AST
+    /// directly may supply the equivalent unnamed schema through `types`.
+    pub fn schema_columns(&self) -> Vec<PredColumn> {
+        if self.columns.is_empty() {
+            self.types
+                .iter()
+                .cloned()
+                .map(|typ| PredColumn { name: None, typ })
+                .collect()
+        } else {
+            self.columns.clone()
+        }
+    }
+
+    /// Return the arity of the effective declared schema.
+    pub fn arity(&self) -> usize {
+        if self.columns.is_empty() {
+            self.types.len()
+        } else {
+            self.columns.len()
+        }
+    }
+}
+
 /// Function parameter with optional type annotation
 #[derive(Debug, Clone, PartialEq)]
 pub struct FuncParam {
@@ -1029,6 +1145,42 @@ mod tests {
         };
         let vars = atom.variables();
         assert_eq!(vars, vec!["X"]);
+    }
+
+    #[test]
+    fn predicate_declaration_uses_its_effective_schema_representation() {
+        let types_only = PredDecl {
+            name: "types_only".to_string(),
+            types: vec![TypeRef::Scalar(ScalarType::U64)],
+            columns: vec![],
+            is_private: false,
+        };
+        assert_eq!(types_only.arity(), 1);
+        assert_eq!(
+            types_only.schema_columns(),
+            vec![PredColumn {
+                name: None,
+                typ: TypeRef::Scalar(ScalarType::U64),
+            }]
+        );
+
+        let columns_only = PredDecl {
+            name: "columns_only".to_string(),
+            types: vec![],
+            columns: vec![PredColumn {
+                name: Some("value".to_string()),
+                typ: TypeRef::Scalar(ScalarType::Symbol),
+            }],
+            is_private: false,
+        };
+        assert_eq!(columns_only.arity(), 1);
+        assert_eq!(
+            columns_only.schema_columns(),
+            vec![PredColumn {
+                name: Some("value".to_string()),
+                typ: TypeRef::Scalar(ScalarType::Symbol),
+            }]
+        );
     }
 
     #[test]

@@ -5454,8 +5454,8 @@ impl Executor {
     /// candidate enumeration + world-view validation runs ONCE over the combined
     /// modal literals (so the accepted world view in `workspace` is shared by every
     /// head), then this method is called once per distinct head with that head's
-    /// reduction indices. Only the row-filter bindings whose `reduction_index` is
-    /// in the filter drive that head's output filtering; the full joint plan
+    /// reduction indices. Only modal bindings whose `reduction_index` is in the
+    /// filter drive that head's row-level or global output gates; the full joint plan
     /// (`gpu_plan`) is still validated and the joint workspace dimensions are
     /// preserved, so each head is materialized against the SAME accepted world
     /// view. `None` materializes against every binding (the single-head path).
@@ -5988,6 +5988,9 @@ impl Executor {
             if !binding.bound_output_columns.iter().any(Option::is_some)
                 && binding.literal_index < literal_count
                 && !is_constraint_literal[binding.literal_index]
+                && head_reduction_filter
+                    .map(|reductions| reductions.contains(&binding.reduction_index))
+                    .unwrap_or(true)
             {
                 gate_literal_required_host[binding.literal_index] = 1u8;
             }
