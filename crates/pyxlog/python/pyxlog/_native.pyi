@@ -210,14 +210,34 @@ class CompiledLogicProgram:
     ) -> EpistemicEvalResult:
         """Run this epistemic program and condition an exact query on what it knows.
 
+        Only facts declared in this program's own source feed the world view.
+        Unlike :meth:`evaluate`, this method does NOT accept ``dlpack_inputs``:
+        caller-supplied input relations are not consulted. A program that relies
+        on such a relation ends up with an empty world view here
+        (``accepted_world_views == 0``, every trace counter ``0``), and the
+        returned query falls back to its unconditioned prior without raising.
+
         The trace of the returned result reports
         ``gpu_conditioned_know_evidence_facts`` and
         ``cpu_only_probability_recomputations``.
+
+        ``log_z_e`` is the exact log-evidence of what is known: the natural log
+        of the product of the priors of the atoms the world view conditioned
+        on. Measured on GPU: conditioning ``0.6::fact(). query(fact()).`` on
+        ``know fact()`` gives ``log_z_e == ln(0.6)``; conditioning on two known
+        atoms each with prior 0.5 gives ``log_z_e == ln(0.25)``.
         """
         ...
 
     def epistemic_evidence(self) -> EpistemicEvidence:
-        """Run this epistemic program and report what its world view accepted."""
+        """Run this epistemic program and report what its world view accepted.
+
+        Like :meth:`evaluate_conditioned`, this only ever sees facts declared
+        in the program's own source; it does not accept caller-supplied input
+        relations. A program that depends on such a relation reports
+        ``accepted_world_views == 0`` and every other counter at ``0`` here
+        too, not an error.
+        """
         ...
 
 class LogicRelationSession:
@@ -455,7 +475,10 @@ class EpistemicEvalResult:
     log_prob: Any
     """DLPack f64 tensor of per-query log-probabilities."""
     log_z_e: float
-    """Exact log-evidence log Z_E (natural log) of the conditioned query program."""
+    """Exact log-evidence log Z_E (natural log) of the conditioned query program:
+    the log of the product of the priors of the atoms the world view
+    conditioned on. Measured on GPU: ``ln(0.6)`` for one known atom at prior
+    0.6; ``ln(0.25)`` for two known atoms each at prior 0.5."""
     trace: dict[str, int]
     """Production-path counters, including ``gpu_conditioned_know_evidence_facts``
     and ``cpu_only_probability_recomputations``."""

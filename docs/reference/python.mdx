@@ -738,8 +738,18 @@ refused, because embeddings carry no registration metadata. Available since
 
 `CompiledLogicProgram.evaluate_conditioned(prob_source)` runs a compiled epistemic
 program (`know` / `possible`) on the GPU and conditions an exact probabilistic query
-on its accepted world view. Facts declared in the epistemic source are loaded
-automatically; no relation upload is needed.
+on its accepted world view. Only facts declared in the epistemic program's own
+source feed that world view.
+
+**Limitation:** unlike `evaluate`, this method does not accept `dlpack_inputs`.
+Caller-supplied input relations are NOT consulted. If the epistemic program depends
+on a relation that would normally be supplied at call time via
+`evaluate(dlpack_inputs=...)`, the world view it produces here is empty
+(`accepted_world_views == 0`), every counter in `result.trace` is `0`, and the
+conditioned query silently falls back to its unconditioned prior -- this does not
+raise. Check `accepted_world_views` (via `epistemic_evidence()`) or the trace
+counters before trusting a result from a program that relies on caller-supplied
+facts.
 
 ```python
 import pyxlog
@@ -764,13 +774,22 @@ On a CUDA device, conditioning `0.6::fact(). query(fact()).` on `know fact()` ra
 already accepted `fact()` into its world view before the probabilistic query ran, so
 `result.log_z_e` is `ln(0.6)`, not `0.0`.
 
+`result.log_z_e` is the log-evidence of what is known: the natural log of the
+product of the priors of the atoms the world view conditioned on, not of the whole
+query program. Measured on GPU: one known atom at prior 0.6 gives `log_z_e ==
+ln(0.6)`; conditioning on two known atoms each at prior 0.5 gives `log_z_e ==
+ln(0.25)`.
+
 `EpistemicEvalResult` carries `atoms`, `prob` and `log_prob` (DLPack capsules, like
 `EvalResult`), `log_z_e`, and `trace`. `CompiledLogicProgram.epistemic_evidence()`
 runs the same epistemic program and returns an `EpistemicEvidence` with the
 accepted-world-view counters alone (`epistemic_mode`, `know_operator_count`,
 `possible_operator_count`, `accepted_candidates`, `rejected_candidates`,
 `accepted_world_views`, `final_output_rows`), without touching the probabilistic
-tier.
+tier. Like `evaluate_conditioned`, it only ever sees facts declared in the
+program's own source -- a program that depends on a caller-supplied relation
+reports `accepted_world_views == 0` and every other counter at `0` here too, not
+an error.
 
 Only single-component epistemic plans are supported; split, stratified and WFS plans
 raise instead of being silently reduced. A real CUDA device is required.

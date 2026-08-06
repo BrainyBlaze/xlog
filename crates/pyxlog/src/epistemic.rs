@@ -34,8 +34,18 @@ impl CompiledLogicProgram {
     ///
     /// The compiled program must contain epistemic operators (`know`, `possible`, ...):
     /// ordinary Datalog programs are rejected, because there is no accepted world view
-    /// to condition on. Facts declared in the epistemic program's source are loaded
-    /// automatically; no relation upload is required.
+    /// to condition on. Only facts declared in the epistemic program's own source are
+    /// used to build that world view.
+    ///
+    /// LIMITATION: unlike `evaluate`, this method does not accept `dlpack_inputs`.
+    /// Caller-supplied input relations are NOT consulted — if the epistemic program
+    /// depends on a relation that is normally supplied at call time via
+    /// `evaluate(dlpack_inputs=...)`, that relation is empty here, the world view it
+    /// would have produced is empty (`accepted_world_views == 0`), every evidence
+    /// counter in the returned trace is `0`, and the conditioned query silently falls
+    /// back to its unconditioned prior. This does not raise: check
+    /// `accepted_world_views` (via `epistemic_evidence()`) or the trace counters below
+    /// before trusting the result of a program that relies on caller-supplied facts.
     ///
     /// The returned trace must show `cpu_only_probability_recomputations == 0` and a
     /// non-zero `gpu_conditioned_know_evidence_facts` — otherwise the conditioning did
@@ -55,7 +65,7 @@ impl CompiledLogicProgram {
             .execute_epistemic_evidence(self.provider.clone(), HashMap::new())
             .map_err(types::xlog_err)?;
 
-        // ВАЖНО: not `GpuConfig::default()`. The adapter does not reuse our provider —
+        // IMPORTANT: not `GpuConfig::default()`. The adapter does not reuse our provider —
         // `ExactDdnnfProgram::compile_provenance_with_gpu` (crates/xlog-prob/src/exact.rs:1606)
         // builds its OWN device from `config.device_ordinal` and `config.memory_bytes`.
         //
@@ -95,14 +105,24 @@ impl CompiledLogicProgram {
     ///
     /// Diagnostic counterpart of `evaluate_conditioned`: it answers whether the
     /// `know`-broadcast happened at all, without involving the probabilistic tier.
+    ///
+    /// LIMITATION: like `evaluate_conditioned`, this only ever sees facts declared in
+    /// the epistemic program's own source; it does not accept caller-supplied input
+    /// relations. A program that depends on such a relation reports
+    /// `accepted_world_views == 0` and every other counter at `0` here too, not an
+    /// error.
     pub fn epistemic_evidence(&self) -> PyResult<EpistemicEvidence> {
         let result = self
             .program
             .execute_epistemic_evidence(self.provider.clone(), HashMap::new())
             .map_err(types::xlog_err)?;
+        let epistemic_mode = match result.prepared.preflight.epistemic_mode {
+            xlog_ir::EirEpistemicMode::G91 => "g91",
+            xlog_ir::EirEpistemicMode::Faeel => "faeel",
+        }
+        .to_string();
         Ok(EpistemicEvidence {
-            epistemic_mode: format!("{:?}", result.prepared.preflight.epistemic_mode)
-                .to_lowercase(),
+            epistemic_mode,
             know_operator_count: result.prepared.preflight.know_operator_count,
             possible_operator_count: result.prepared.preflight.possible_operator_count,
             accepted_candidates: result.semantic_trace.accepted_candidates,
