@@ -543,42 +543,85 @@ fixed before looking at results.
 
 ## Reproduction
 
+One vocabulary flag matters for replaying the EC rows and is therefore
+spelled explicitly in every command below: `--transition-vocab`. The
+sections D/D.1/E artifacts (`caviar-e5-*_ec_*`, `e9_permutation_null/*`,
+`e10_cv/*`) were generated when the EC candidate pool carried only the
+four ACTIVITY-based transition relations; the pool later gained
+`became_far`/`distance_increasing` (the section E.1 step), and the
+default (`--transition-vocab full`) reproduces THAT enlarged pool.
+Replaying the shipped D/D.1/E results requires `--transition-vocab
+activity` -- with the default, the "section E" command below produces
+section E.1's 0.778 configuration, not section E's 0.733. Every result
+JSON records the vocabulary it actually searched (`transition_vocab` +
+`candidate_vocabulary`), so a replayed artifact can be checked against a
+shipped one directly.
+
 ```
-# windowed folds, direct protocol
+# windowed folds, direct protocol (section A; CUDA required)
 python examples/caviar_woled/run_caviar_theory.py --mode neural --protocol direct \
   --pkl caviar_folds.pkl --fold fold1 --k 4 --seed 7 --steps 400 --hidden 16 \
   --max-clauses 4 --out RESULT.json
 
-# continuous OLED split, direct protocol, tie tolerance pre-declared for the re-run (see section B)
+# continuous OLED split, direct protocol, tie tolerance pre-declared for
+# the re-run (section B; CUDA required). The direct protocol's vocabulary
+# never contains transition relations, so no vocabulary flag applies.
 python examples/caviar_woled/run_caviar_theory.py --mode relational --protocol direct \
   --data continuous --pkl caviar-train.json --test-json caviar-test.json \
   --k 4 --seed 7 --steps 400 --max-clauses 4 --tie-tolerance 0.001 --out RESULT.json
 
-# continuous, EC protocol, 3-literal relational search (CPU-only)
+# continuous, EC protocol, 3-literal relational search (section D's
+# 3-literal rows, the caviar-e5-*_ec_* artifacts; CPU-only).
 # (--steps is a required flag; relational mode clamps it to 25 internally,
 # so the value does not affect the EC search)
 python examples/caviar_woled/run_caviar_theory.py --mode relational --protocol ec \
   --data continuous --pkl caviar-train.json --test-json caviar-test.json \
-  --k 4 --seed 7 --steps 400 --min-new-covered 2 --max-body-literals 3 --out RESULT.json
+  --k 4 --seed 7 --steps 400 --min-new-covered 2 --max-body-literals 3 \
+  --transition-vocab activity --out RESULT.json
 
-# continuous, EC protocol, F1 holdout + permutation-null fit gate (section D.1; CPU-only)
+# continuous, EC protocol, F1 holdout + fixed 0.75 fit gate (section D.1
+# item 1; CPU-only) -- the run that shows the field spreading under F1
+# while every body still fails the accuracy-era gate
 python examples/caviar_woled/run_caviar_theory.py --mode relational --protocol ec \
   --data continuous --pkl caviar-train.json --test-json caviar-test.json \
   --k 4 --seed 7 --steps 400 --min-new-covered 2 --max-body-literals 3 \
-  --holdout-score f1 --ec-fit-mode permutation-null --out RESULT.json
+  --holdout-score f1 --transition-vocab activity --out RESULT.json
 
-# 10-fold CV over the whole corpus, EC protocol (section E; CPU-only)
+# continuous, EC protocol, F1 holdout + permutation-null fit gate
+# (section D.1 item 2, the e9 artifacts; CPU-only). The shipped
+# tie-tolerance-0.001 variant adds --tie-tolerance 0.001.
+python examples/caviar_woled/run_caviar_theory.py --mode relational --protocol ec \
+  --data continuous --pkl caviar-train.json --test-json caviar-test.json \
+  --k 4 --seed 7 --steps 400 --min-new-covered 2 --max-body-literals 3 \
+  --holdout-score f1 --ec-fit-mode permutation-null \
+  --transition-vocab activity --out RESULT.json
+
+# 10-fold CV over the whole corpus, EC protocol, STATE vocabulary
+# (section E, the 0.733 row / e10 artifact; CPU-only)
 python examples/caviar_woled/run_caviar_cv.py \
   --train-json caviar-train.json --test-json caviar-test.json \
-  --folds 10 --seed 7 --out RESULT.json
+  --folds 10 --seed 7 --transition-vocab activity --out RESULT.json
+
+# 10-fold CV over the whole corpus, EC protocol, + termination-signature
+# vocabulary (section E.1, the 0.778 row / e11 artifact; CPU-only).
+# --transition-vocab full is the default, spelled out here because the
+# flag is exactly what separates this command from section E's.
+python examples/caviar_woled/run_caviar_cv.py \
+  --train-json caviar-train.json --test-json caviar-test.json \
+  --folds 10 --seed 7 --transition-vocab full --out RESULT.json
 
 # 10-fold CV over the whole corpus, neural close_nn initiation search
-# (section E.2; CUDA required)
+# (section E.2, the e12 artifact; CUDA required). Run under the full
+# (default) vocabulary: the neural initiation pool excludes the
+# distance-derived transitions in either setting, and the always-
+# relational termination search saw the full pool in the shipped run.
 python examples/caviar_woled/run_caviar_cv.py --mode neural \
   --train-json caviar-train.json --test-json caviar-test.json \
   --folds 10 --seed 7 --out RESULT.json
 
-# 10-fold scene-family CV on the XML-native corpus (section G; CPU-only)
+# 10-fold scene-family CV on the XML-native corpus (section G, the
+# f_xml_scene_cv artifacts; CPU-only). Full (default) vocabulary, as in
+# the shipped run.
 python examples/caviar_woled/run_caviar_cv.py --data-source xml \
   --xml-dir <dir with the 30 CAVIAR ground-truth XML files> \
   --fluent meeting --folds 10 --seed 7 --out RESULT.json
