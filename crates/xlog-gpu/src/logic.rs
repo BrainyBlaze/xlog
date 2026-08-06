@@ -1386,32 +1386,7 @@ impl LogicProgram {
         inputs: HashMap<String, CudaBuffer>,
         profiling: bool,
     ) -> Result<LogicEvalResult> {
-        let mut executor = Executor::new(provider.clone());
-        executor.set_profiling(profiling);
-        for (name, rel_id) in &self.rel_ids {
-            executor.register_relation(*rel_id, name);
-        }
-
-        for (name, schema) in &self.schemas {
-            executor
-                .store_mut()
-                .put(name, provider.create_empty_buffer(schema.clone())?);
-        }
-
-        for (name, buffer) in inputs {
-            let schema = self.schemas.get(&name).ok_or_else(|| {
-                XlogError::Execution(format!(
-                    "Input relation {} not declared in program schemas",
-                    name
-                ))
-            })?;
-            ensure_schema_type_compatible(schema, buffer.schema()).map_err(|e| {
-                XlogError::Execution(format!("Input relation {} schema mismatch: {}", name, e))
-            })?;
-            executor.store_mut().put(&name, buffer);
-        }
-
-        self.load_facts(&provider, &mut executor)?;
+        let mut executor = self.prepare_executor(&provider, inputs, profiling)?;
 
         if let LogicExecutionPlan::EpistemicG91Compatibility(g91_plan) = &self.plan {
             return self
@@ -1461,6 +1436,78 @@ impl LogicProgram {
         };
 
         Ok(LogicEvalResult { queries, stats })
+    }
+
+    /// Build an executor seeded with declared schemas, caller inputs and program facts.
+    ///
+    /// Shared by ordinary evaluation and by the epistemic evidence handoff so both
+    /// paths seed relations identically.
+    fn prepare_executor(
+        &self,
+        provider: &Arc<CudaKernelProvider>,
+        inputs: HashMap<String, CudaBuffer>,
+        profiling: bool,
+    ) -> Result<Executor> {
+        let mut executor = Executor::new(provider.clone());
+        executor.set_profiling(profiling);
+        for (name, rel_id) in &self.rel_ids {
+            executor.register_relation(*rel_id, name);
+        }
+
+        for (name, schema) in &self.schemas {
+            executor
+                .store_mut()
+                .put(name, provider.create_empty_buffer(schema.clone())?);
+        }
+
+        for (name, buffer) in inputs {
+            let schema = self.schemas.get(&name).ok_or_else(|| {
+                XlogError::Execution(format!(
+                    "Input relation {} not declared in program schemas",
+                    name
+                ))
+            })?;
+            ensure_schema_type_compatible(schema, buffer.schema()).map_err(|e| {
+                XlogError::Execution(format!("Input relation {} schema mismatch: {}", name, e))
+            })?;
+            executor.store_mut().put(&name, buffer);
+        }
+
+        self.load_facts(provider, &mut executor)?;
+        Ok(executor)
+    }
+
+    /// Execute an epistemic program and return its accepted GPU execution evidence.
+    ///
+    /// `evaluate` reduces the epistemic result to query rows and drops the accepted
+    /// world-view evidence with it. The probabilistic production adapter needs that
+    /// evidence itself, so this entry point keeps the raw execution result.
+    ///
+    /// Only single-component epistemic plans are supported: split, stratified and WFS
+    /// plans produce several world views whose probabilistic conditioning contract is
+    /// not settled yet, so they are rejected loudly rather than silently reduced.
+    pub fn execute_epistemic_evidence(
+        &self,
+        provider: Arc<CudaKernelProvider>,
+        inputs: HashMap<String, CudaBuffer>,
+    ) -> Result<EpistemicGpuExecutionResult> {
+        let LogicExecutionPlan::EpistemicSingle(executable) = &self.plan else {
+            return Err(XlogError::UnsupportedEpistemicConstruct {
+                construct: "epistemic accepted-evidence handoff".to_string(),
+                context: "execute_epistemic_evidence requires a single-component epistemic \
+                          plan; ordinary, split, stratified, G91-compatibility and WFS plans \
+                          are not supported"
+                    .to_string(),
+            });
+        };
+
+        let mut executor = self.prepare_executor(&provider, inputs, false)?;
+        let result = executor.execute_epistemic_gpu_execution(
+            executable,
+            capacities_for_epistemic_executable(executable)?,
+        )?;
+        result.require_runtime_dispatch_certification()?;
+        Ok(result)
     }
 
     /// Compare query result relations between two stores using GPU set difference.
