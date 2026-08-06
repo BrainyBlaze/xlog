@@ -10,6 +10,8 @@ on:
       - "crates/**"
       - "python/tests/conftest.py"
       - "python/tests/test_logic_relation_provenance.py"
+      - "python/tests/test_pyxlog_epistemic_api.py"
+      - "python/tests/test_pyxlog_epistemic_gpu.py"
       - "python/tests/test_relation_callbacks_runtime.py"
       - "python/tests/test_relation_provenance_contract.py"
       - "python/tests/test_relation_provenance_public_api.py"
@@ -132,6 +134,8 @@ jobs:
           mkdir -p test-results
           python -m pytest -q \
             python/tests/test_logic_relation_provenance.py \
+            python/tests/test_pyxlog_epistemic_api.py \
+            python/tests/test_pyxlog_epistemic_gpu.py \
             python/tests/test_relation_provenance_contract.py \
             python/tests/test_relation_provenance_public_api.py \
             python/tests/test_relation_callbacks_runtime.py \
