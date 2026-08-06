@@ -444,21 +444,30 @@ pair-frames.
 | moving, direct reference | 0.5927 | 0.4129 | **0.4868** | 1295/890/1841 |
 | moving, EC + inertia | 0.000 | 0.000 | 0.000 | 0/0/3136 |
 
-**Why the EC search abstains everywhere.** With only 11 (meeting) and 5
-(moving) observed initiations once duplicates and splices are removed,
-each fold's training pool is smaller and less inflated than the
-duplication-affected dump protocol's — and the permutation-null gates
-rise accordingly: the meeting initiation fit gate moves from the dump
-protocol's per-fold 0.035–0.046 range to 0.050–0.071 here. The lowest
-gate under the new protocol (0.050) already exceeds the highest gate
-under the old one (0.0455), so the gate rises on every fold with no
-exception — a tightening of roughly 10% at the narrowest fold-to-fold
-comparison and up to 100% at the widest. No candidate clears the
-higher, honestly-derived gate on enough folds. This is a principled
-abstention at low event count — the harness's own call, not a search
-failure — not evidence that no rule exists; sections E/E.1's dump-corpus
-result shows the same 2-literal candidate CAN clear a lower, but
-duplication-inflated, gate.
+**Why the EC search abstains everywhere: the holdout collapses, not the
+gate.** The like-for-like comparison is against section E.1 (the same
+enlarged vocabulary this section runs — the candidate pool sets the
+permutation-null distribution, so gates are only comparable at equal
+pools): the dump protocol's per-fold meeting initiation gates there are
+0.050–0.0625, and this section's are 0.050–0.0714 — the minima are
+IDENTICAL (0.050) and the maximum rises 14%. Deduplication barely moved
+the statistical bar. (An earlier revision of this paragraph quoted the
+dump range as 0.035–0.046 and concluded the gate "rises on every fold,
+up to 100%"; that range is section E's, measured under the SMALLER
+state-only vocabulary, so the rise it showed was a vocabulary-pool
+effect misattributed to corpus deduplication.) What actually changes on
+the clean corpus is the score being gated: under scene-family folds the
+candidate's own holdout F1 collapses, because the two-regime transfer
+failure the next paragraph documents — `both_inactive & close` holds
+only on wk scenes, which sit in one fold — leaves every training side
+without cross-regime support, and a clause that cannot cover held-out
+positives scores near zero against even an unchanged gate. The
+abstention is still the harness's own principled call at 11/5 observed
+initiations, not a search failure — but its mechanism is a collapsed
+holdout score under leak-free folds, not a raised gate: on the dump
+corpus the same 2-literal candidate clears essentially the SAME gates
+on 8 of 10 folds because same-scene transfer and duplication hold its
+holdout F1 up.
 
 **The meeting zero is a property of the data under the stricter
 protocol, not a harness failure.** The direct-protocol reference still
