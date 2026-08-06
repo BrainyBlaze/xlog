@@ -32,6 +32,16 @@ use xlog_prob::provenance::Value;
 use xlog_runtime::EpistemicGpuBatchExecutionResult;
 use xlog_runtime::{EpistemicGpuWorkspaceCapacities, Executor};
 
+#[cfg(feature = "host-io")]
+const G91_ACCEPTED_PROBABILITY_EVIDENCE_SOURCE: &str = r#"
+    #pragma epistemic_mode = g91
+    pred seed(u32).
+    pred p(u32).
+    pred accepted(u32).
+
+    accepted(X) :- seed(X), possible p(X).
+"#;
+
 struct LockedCudaProvider {
     _guard: MutexGuard<'static, ()>,
     provider: Arc<CudaKernelProvider>,
@@ -56,6 +66,9 @@ fn try_provider() -> Option<LockedCudaProvider> {
     let guard = gpu_exact_test_lock();
     let device = match CudaDevice::new(0) {
         Ok(d) => Arc::new(d),
+        Err(e) if std::env::var("XLOG_REQUIRE_CUDA").as_deref() == Ok("1") => {
+            panic!("XLOG_REQUIRE_CUDA=1 but CUDA runtime initialization failed: {e}")
+        }
         Err(e) => {
             eprintln!("Skipping test: CUDA runtime unavailable: {e}");
             return None;
@@ -68,11 +81,33 @@ fn try_provider() -> Option<LockedCudaProvider> {
             _guard: guard,
             provider: Arc::new(p),
         }),
+        Err(e) if std::env::var("XLOG_REQUIRE_CUDA").as_deref() == Ok("1") => {
+            panic!("XLOG_REQUIRE_CUDA=1 but CUDA kernel provider initialization failed: {e}")
+        }
         Err(e) => {
             eprintln!("Skipping test: failed to create CUDA kernel provider: {e}");
             None
         }
     }
+}
+
+#[test]
+#[cfg(feature = "host-io")]
+fn g91_probability_evidence_fixture_compiles_for_single_pass_execution() {
+    let program = parse_program(G91_ACCEPTED_PROBABILITY_EVIDENCE_SOURCE)
+        .expect("parse G91 probability evidence program");
+    let executable = compile_epistemic_gpu_execution(&program)
+        .expect("acyclic G91 probability evidence must use the single-pass planner");
+
+    assert_eq!(executable.gpu_plan.mode, EirEpistemicMode::G91);
+    assert_eq!(executable.gpu_plan.epistemic_literals.len(), 1);
+    assert_eq!(executable.gpu_plan.reductions.len(), 1);
+    assert_eq!(executable.gpu_plan.reductions[0].head_predicate, "accepted");
+    assert_eq!(executable.gpu_plan.tuple_membership_bindings.len(), 1);
+    let binding = &executable.gpu_plan.tuple_membership_bindings[0];
+    assert_eq!(binding.predicate, "p");
+    assert_eq!(binding.op, EirEpistemicOp::Possible);
+    assert_eq!(binding.bound_output_columns, vec![Some(0)]);
 }
 
 #[test]
@@ -2760,16 +2795,8 @@ fn execute_accepted_quaternary_bound_literal(
 fn execute_accepted_g91_possible_literal(
     provider: &Arc<CudaKernelProvider>,
 ) -> xlog_runtime::EpistemicGpuExecutionResult {
-    let program = parse_program(
-        r#"
-        #pragma epistemic_mode = g91
-        pred seed(u32).
-        pred p(u32).
-
-        p(X) :- seed(X), possible p(X).
-        "#,
-    )
-    .expect("parse G91 accepted probability evidence program");
+    let program = parse_program(G91_ACCEPTED_PROBABILITY_EVIDENCE_SOURCE)
+        .expect("parse G91 accepted probability evidence program");
     let executable =
         compile_epistemic_gpu_execution(&program).expect("compile G91 epistemic GPU plan");
     let mut executor = Executor::new(provider.clone());
@@ -2778,6 +2805,7 @@ fn execute_accepted_g91_possible_literal(
         executor.register_relation(*rel, name);
     }
     executor.put_relation("seed", upload_unary_u32(provider, &[7], "x"));
+    executor.put_relation("p", upload_unary_u32(provider, &[7], "x"));
 
     let result = executor
         .execute_epistemic_gpu_execution(

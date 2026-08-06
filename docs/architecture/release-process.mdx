@@ -82,11 +82,12 @@ consumers run GPU code without recompiling kernels the first time.
 ## GPU Release Validation
 
 GitHub-hosted CI cannot prove the GPU path works because those runners have no
-CUDA hardware. A targeted workflow runs native Python relation tests on the
-self-hosted CUDA runner after pushes to `main`, or when a maintainer dispatches
-the workflow from `main` for an explicitly reviewed full commit SHA. It never
-runs pull-request head code automatically, and it is not the release gate.
-Before publication a maintainer runs the validation script on a real GPU host:
+CUDA hardware. A targeted workflow runs native Python relation tests and focused
+Rust GPU suites on the self-hosted CUDA runner after pushes to `main`, or when a
+maintainer dispatches the workflow from `main` for an explicitly reviewed full
+commit SHA. It never runs pull-request head code automatically, and it is not the
+release gate. Before publication a maintainer runs the validation script on a
+real GPU host:
 
 ```bash
 scripts/validate_release_gpu.sh --mode release
@@ -96,9 +97,10 @@ This script requires CUDA hardware. It sets `XLOG_REQUIRE_CUDA=1`, builds the
 release artifacts, creates a fresh virtual environment with the host's site
 packages visible, and force-installs the exact wheel without resolving
 dependencies. It verifies the imported native module, runs the native relation
-provenance, contract, public-API, and callback suites, runs CUDA certification,
-and checks the packaged kernel layout. A green GitHub-hosted CI run does not
-satisfy this gate — only a passing complete GPU run does.
+provenance, contract, public-API, and callback suites, runs the host-readable
+probabilistic CLI and accepted epistemic GPU evidence adapter suites, runs CUDA
+certification, and checks the packaged kernel layout. A green GitHub-hosted CI
+run does not satisfy this gate — only a passing complete GPU run does.
 
 ## Docs Deployment
 
