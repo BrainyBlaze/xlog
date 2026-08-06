@@ -67,15 +67,14 @@ consumes:
 | Aggregate | Input type | Result type |
 |---|---|---|
 | `count` | any type | `u64` |
-| `sum` | `u32` | `u64` |
-| `min` | `u32` | `u32` |
-| `max` | `u32` | `u32` |
+| `sum` | `u32` or `u64` | `u64` |
+| `min` | `u32` or `u64` | Same as input |
+| `max` | `u32` or `u64` | Same as input |
 | `logsumexp` | `f64` | `f64` |
 
-`count` always returns a `u64` regardless of what it counts. `sum` widens a `u32` column
-to `u64` so a large total cannot overflow the count of narrow inputs, while `min` and
-`max` return the same type they consume — they only select an existing value, so no
-widening is needed.
+`count` always returns a `u64` regardless of what it counts. `sum` emits `u64`, widening
+`u32` inputs and preserving `u64` storage. `min` and `max` return the same type they
+consume because they select an existing value rather than producing a widened total.
 
 ## Aggregation is stratified
 

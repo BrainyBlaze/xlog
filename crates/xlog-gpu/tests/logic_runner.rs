@@ -486,6 +486,177 @@ fn test_cyclic_negated_modal_wfs_plan_kind_matrix_compiles_without_cuda() -> Res
 }
 
 #[test]
+fn undeclared_nullary_negative_modal_cycle_uses_inferred_wfs_schema() -> Result<()> {
+    let source = r#"
+        #pragma epistemic_mode = faeel
+
+        p() :- not possible p().
+
+        ?- p().
+    "#;
+
+    let program = xlog_gpu::logic::LogicProgram::compile(source)?;
+    let plan_json = program
+        .epistemic_plan_json()
+        .expect("negative modal cycle must carry a WFS provenance summary");
+    assert!(
+        plan_json.contains("\"plan_kind\":\"epistemic_wfs_gpu\""),
+        "undeclared nullary cycle must use GPU-backed WFS: {plan_json}"
+    );
+
+    let Some(provider) = create_test_provider() else {
+        if std::env::var("XLOG_REQUIRE_CUDA").as_deref() == Ok("1") {
+            panic!("XLOG_REQUIRE_CUDA=1 but CUDA initialization failed");
+        }
+        eprintln!("Skipping runtime assertion: no CUDA device");
+        return Ok(());
+    };
+    let result = program.evaluate(provider, std::collections::HashMap::new())?;
+    assert_eq!(result.queries.len(), 1);
+    assert_eq!(result.queries[0].buffer.arity(), 0);
+    assert_eq!(result.queries[0].buffer.num_rows(), 0);
+
+    Ok(())
+}
+
+#[test]
+fn wfs_constraints_use_three_valued_truth_after_convergence() -> Result<()> {
+    let Some(provider) = create_test_provider() else {
+        if std::env::var("XLOG_REQUIRE_CUDA").as_deref() == Ok("1") {
+            panic!("XLOG_REQUIRE_CUDA=1 but CUDA initialization failed");
+        }
+        eprintln!("Skipping runtime assertion: no CUDA device");
+        return Ok(());
+    };
+
+    let undefined_negation = xlog_gpu::logic::LogicProgram::compile(
+        r#"
+            #pragma epistemic_mode = faeel
+            pred left().
+            pred right().
+            left() :- not possible right().
+            right() :- not possible left().
+            :- not left().
+            ?- left().
+        "#,
+    )?;
+    undefined_negation.evaluate(provider.clone(), std::collections::HashMap::new())?;
+
+    for (name, constraint) in [
+        ("positive true atom", "fact()"),
+        ("negated false atom", "not definitely_false()"),
+    ] {
+        let source = format!(
+            r#"
+                #pragma epistemic_mode = faeel
+                pred left().
+                pred right().
+                pred fact().
+                pred definitely_false().
+                fact().
+                left() :- not possible right().
+                right() :- not possible left().
+                :- {constraint}.
+                ?- left().
+            "#,
+        );
+        let program = xlog_gpu::logic::LogicProgram::compile(&source)?;
+        let error = match program.evaluate(provider.clone(), std::collections::HashMap::new()) {
+            Ok(_) => panic!("{name} must violate the WFS constraint"),
+            Err(error) => error,
+        };
+        assert!(
+            error.to_string().contains("Constraint 0 violated"),
+            "{error}"
+        );
+    }
+
+    Ok(())
+}
+
+#[test]
+fn iterative_epistemic_plans_return_collected_profiling_stats() -> Result<()> {
+    let Some(provider) = create_test_provider() else {
+        if std::env::var("XLOG_REQUIRE_CUDA").as_deref() == Ok("1") {
+            panic!("XLOG_REQUIRE_CUDA=1 but CUDA initialization failed");
+        }
+        eprintln!("Skipping runtime assertion: no CUDA device");
+        return Ok(());
+    };
+
+    for (name, source, expected_rows) in [
+        (
+            "Gelfond-1991 compatibility",
+            r#"
+                #pragma epistemic_mode = g91
+                pred base(u32).
+                pred p(u32).
+                base(1).
+                p(X) :- base(X), possible p(X).
+                ?- p(X).
+            "#,
+            1,
+        ),
+        (
+            "well-founded negation",
+            r#"
+                #pragma epistemic_mode = faeel
+                pred p().
+                p() :- not possible p().
+                ?- p().
+            "#,
+            0,
+        ),
+    ] {
+        let program = xlog_gpu::logic::LogicProgram::compile(source)?;
+        let result = program.evaluate_with_options(
+            provider.clone(),
+            std::collections::HashMap::new(),
+            true,
+        )?;
+        let stats = result
+            .stats
+            .unwrap_or_else(|| panic!("{name} must return profiling statistics"));
+        assert!(!stats.strata.is_empty(), "{name}: {stats:?}");
+        assert_eq!(stats.total_output_rows, expected_rows, "{name}: {stats:?}");
+    }
+
+    Ok(())
+}
+
+#[test]
+fn g91_constraint_errors_preserve_authored_predicate_names() -> Result<()> {
+    let Some(provider) = create_test_provider() else {
+        if std::env::var("XLOG_REQUIRE_CUDA").as_deref() == Ok("1") {
+            panic!("XLOG_REQUIRE_CUDA=1 but CUDA initialization failed");
+        }
+        eprintln!("Skipping runtime assertion: no CUDA device");
+        return Ok(());
+    };
+    let program = xlog_gpu::logic::LogicProgram::compile(
+        r#"
+            #pragma epistemic_mode = g91
+            p(a).
+            p(a, b).
+            cycle() :- possible cycle().
+            :- p(a).
+            ?- cycle().
+        "#,
+    )?;
+    let error = match program.evaluate(provider, std::collections::HashMap::new()) {
+        Ok(_) => panic!("the authored p(a) constraint must be violated"),
+        Err(error) => error,
+    };
+    let message = error.to_string();
+    assert!(
+        message.contains("Constraint 0 violated: :- p(a)."),
+        "{message}"
+    );
+    assert!(!message.contains("p/1"), "{message}");
+    Ok(())
+}
+
+#[test]
 fn test_cyclic_negated_modal_wfs_plan_clamps_zero_iteration_bound_without_cuda() -> Result<()> {
     let source = r#"
         #pragma epistemic_mode = faeel
@@ -1039,33 +1210,37 @@ fn test_derived_head_coupling_ungated_mutation_flips_result() -> Result<()> {
     Ok(())
 }
 
-/// True cyclic modal coupling rejection: a genuinely cyclic modal coupling
-/// (`a :- know b. b :- know a.`) has no founded stratum order; the modal truth of each
-/// head depends on the other's accepted world view, a circular modality. It is correctly
-/// rejected end-to-end through the full production dispatch (stratification yields no
-/// stratum order, the ordinary recursive modal reduction does not apply, and the split
-/// layer fails closed with a precise diagnostic naming both coupled heads). This is the
-/// rejection boundary; it must not be silently accepted.
+/// A positive FAEEL modal cycle has a founded least-fixpoint interpretation even when
+/// neither predicate has independent support. The production dispatcher must route the
+/// cycle through recursive modal reduction and return the empty founded extension.
 #[test]
-fn test_true_cyclic_modal_coupling_rejected_end_to_end() -> Result<()> {
-    if create_test_provider().is_none() {
+fn test_positive_faeel_modal_cycle_computes_empty_founded_extension() -> Result<()> {
+    let Some(provider) = create_test_provider() else {
         eprintln!("Skipping: no CUDA device");
         return Ok(());
-    }
-
-    let err = match xlog_gpu::logic::LogicProgram::compile("a() :- know b(). b() :- know a().") {
-        Ok(_) => panic!("genuinely-cyclic modal coupling must fail closed end-to-end"),
-        Err(err) => err,
     };
-    let msg = format!("{err:?}");
+    let program = xlog_gpu::logic::LogicProgram::compile(
+        "#pragma epistemic_mode = faeel\n\
+         pred a(). pred b().\n\
+         a() :- know b().\n\
+         b() :- know a().\n\
+         ?- a(). ?- b().\n",
+    )?;
+    let plan_json = program
+        .epistemic_plan_json()
+        .expect("recursive modal reduction provenance");
     assert!(
-        msg.contains("cross-component epistemic coupling"),
-        "cyclic coupling must fail with the cross-component coupling diagnostic, got: {msg}"
+        plan_json.contains("ordinary_recursive_modal_reduction"),
+        "positive FAEEL cycle must use founded recursive reduction: {plan_json}"
     );
-    assert!(
-        msg.contains('a') && msg.contains('b'),
-        "diagnostic must name both coupled heads a and b, got: {msg}"
-    );
+    let result = program.evaluate(provider, std::collections::HashMap::new())?;
+    assert_eq!(result.queries.len(), 2);
+    assert_eq!(result.queries[0].relation_name, "a");
+    assert_eq!(result.queries[1].relation_name, "b");
+    assert!(result
+        .queries
+        .iter()
+        .all(|query| query.buffer.num_rows() == 0));
 
     Ok(())
 }

@@ -1,4 +1,4 @@
-//! Epistemic mode helpers for compatibility fixtures.
+//! Epistemic validation, reduction, and executable planning.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -17,6 +17,8 @@ use crate::ast::{
 };
 use crate::build_eir;
 use crate::compile::Compiler;
+use crate::eir::convert_term;
+use crate::lower::Lowerer;
 
 /// Boolean truth value for bounded epistemic fixture evaluation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -325,13 +327,11 @@ impl EpistemicWorldView {
 /// counters.
 pub fn plan_epistemic_gpu_execution(program: &Program) -> Result<EpistemicGpuPlan> {
     reject_recursive_epistemic_program(program)?;
+    validate_epistemic_relation_shapes(program, &BTreeSet::new())?;
     let eir = build_eir(program)?;
-    // FAEEL unfounded modal self-support is NOT rejected here: it is a defined FAEEL
-    // result (the unfounded head is simply absent from the founded model). The
-    // structural foundedness decision drives the reduced-base drop in
-    // `faeel_unfounded_self_support_rule_indices`; the founded extension is then
-    // computed by the GPU world-view validation over the reduced base. See
-    // `reduce_epistemic_program_to_ordinary_inner`.
+    // Modal dependency cycles are intercepted by the recursive reduction before this
+    // single-pass boundary. The remaining EIR has no co-evolving cycle, so one
+    // candidate enumeration and world-view validation is sufficient.
     let mut epistemic_literals = Vec::new();
     let mut reductions = Vec::new();
     let mut tuple_membership_bindings = Vec::new();
@@ -676,8 +676,8 @@ fn lower_epistemic_constraints(
 /// recursive/semi-naive engine.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RecursiveEpistemicClass {
-    /// The program has no ordinary recursion among epistemic rules; the existing
-    /// single-pass epistemic world-view executor handles it.
+    /// The program has no ordinary or modal dependency cycle; the single-pass
+    /// epistemic world-view executor handles it.
     NonRecursive,
     /// Case A: ordinary recursion with every recursion-participating modal atom over
     /// an invariant relation. Routed to the ordinary recursive engine after a
@@ -699,51 +699,52 @@ pub enum RecursiveEpistemicClass {
     /// [`classify_recursive_epistemic_program`]): a NEGATED modal over a non-invariant
     /// target is admitted when the reduced ordinary program is stratified; a genuine
     /// negation cycle is delegated to the high-level GPU-backed WFS alternating-fixpoint
-    /// executor. A `possible` modal over a co-evolving target is
-    /// admitted under FAEEL as the founded least fixpoint and under G91 as the
-    /// compatibility self-support assumption.
+    /// executor. A `possible` modal over a co-evolving target is admitted under FAEEL
+    /// as the founded least fixpoint. Under G91, exact head-tuple cycles are
+    /// intercepted by [`try_prepare_g91_compatibility_reduction`] and evaluated by an
+    /// explicit descending compatibility fixpoint.
     CaseB,
+    /// Recursion arises entirely through modal dependencies rather than an ordinary
+    /// body cycle. FAEEL resolves the modal edges into an ordinary founded least
+    /// fixpoint. G91 exact head-tuple `possible` cycles use the explicit descending
+    /// compatibility plan; other admitted modal edges resolve to ordinary atoms. This
+    /// class cannot use the single-pass planner, which cannot distinguish a founded
+    /// predecessor chain from an unfounded tuple cycle.
+    ModalCycle,
 }
 
-/// Reject epistemic programs that contain ordinary (non-modal) recursion before the
-/// SINGLE-PASS GPU world-view planner.
+/// Reject epistemic programs that contain an ordinary or modal dependency cycle before
+/// the single-pass GPU world-view planner.
 ///
 /// [`plan_epistemic_gpu_execution`] builds a single-pass plan that evaluates each
-/// candidate world view exactly once; it cannot iterate a recursive fixpoint, so ANY
-/// ordinary recursion fails closed here — including the admissible Case-A fragment,
-/// which is handled by a SEPARATE path
-/// ([`try_reduce_case_a_recursive_epistemic_program`]) that delegates to the ordinary
-/// recursive engine and intercepts Case-A programs before this planner is reached. In
-/// production this guard therefore only ever sees non-recursive programs; it remains
-/// defense-in-depth for direct callers of the single-pass planner.
-///
-/// Self-support THROUGH a modal literal (e.g. `p() :- possible p().`) is NOT ordinary
-/// recursion: the modal edge is excluded from the dependency walk, so FAEEL/G91
-/// foundedness still governs those cases. Under FAEEL the unfounded head is excluded
-/// from the founded model by [`faeel_unfounded_self_support_rule_indices`] (the reduced
-/// base drops the circular self-support rule); under G91 the circular form is accepted.
+/// candidate world view exactly once; it cannot iterate a fixpoint. Admissible cycles
+/// are intercepted by recursive source preparation and delegated to either the
+/// ordinary recursive engine, GPU-backed WFS, or the explicit G91 compatibility
+/// fixpoint. This guard remains defense-in-depth for direct callers of the single-pass
+/// planner.
 fn reject_recursive_epistemic_program(program: &Program) -> Result<()> {
     match classify_recursive_epistemic_program(program) {
         Ok(RecursiveEpistemicClass::NonRecursive) => Ok(()),
-        Ok(RecursiveEpistemicClass::CaseA | RecursiveEpistemicClass::CaseB) => {
-            Err(recursive_epistemic_rejection(
-                "an epistemic program contains ordinary recursion; the single-pass epistemic GPU \
-                 planner cannot iterate a recursive fixpoint. Case-A/Case-B recursive epistemic \
-                 programs are executed through the ordinary recursive engine via \
-                 `try_reduce_case_a_recursive_epistemic_program`, not this planner.",
-            ))
-        }
+        Ok(
+            RecursiveEpistemicClass::CaseA
+            | RecursiveEpistemicClass::CaseB
+            | RecursiveEpistemicClass::ModalCycle,
+        ) => Err(recursive_epistemic_rejection(
+            "an epistemic program contains an ordinary or modal dependency cycle; the \
+                 single-pass epistemic GPU planner cannot iterate a fixpoint. Admissible \
+                 recursive epistemic programs require recursive source preparation and an \
+                 iterative execution plan, not this planner.",
+        )),
         // Recursive shapes outside the admissible fragment already carry a specific
         // typed diagnostic.
         Err(err) => Err(err),
     }
 }
 
-/// Classify an epistemic program's ordinary recursion as non-recursive or Case A.
+/// Classify ordinary and modal dependency cycles in an epistemic program.
 ///
-/// Returns a typed [`XlogError::UnsupportedEpistemicConstruct`] for any recursive
-/// shape outside Case A (recursion through a derived/recursive or epistemic relation,
-/// a negated modal literal in a recursion-participating rule, etc.).
+/// Returns a typed [`XlogError::UnsupportedEpistemicConstruct`] for a recursive shape
+/// outside the supported ordinary, co-evolving, or modal-cycle fragments.
 pub fn classify_recursive_epistemic_program(program: &Program) -> Result<RecursiveEpistemicClass> {
     let has_epistemic = program.rules.iter().any(|rule| {
         rule.body
@@ -755,49 +756,32 @@ pub fn classify_recursive_epistemic_program(program: &Program) -> Result<Recursi
         return Ok(RecursiveEpistemicClass::NonRecursive);
     }
 
-    // Dependency edges from ORDINARY (positive/negated) body literals only; modal,
-    // comparison, and arithmetic literals do not contribute recursion edges here.
-    let mut deps: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
-    for rule in &program.rules {
-        let entry = deps.entry(rule.head.predicate.as_str()).or_default();
-        for lit in &rule.body {
-            if let BodyLiteral::Positive(atom) | BodyLiteral::Negated(atom) = lit {
-                entry.insert(atom.predicate.as_str());
-            }
-        }
-    }
+    // Keep the ordinary graph separately from the full co-evolution graph. Positive
+    // and negated ordinary atoms participate in both. Modal atoms participate in the
+    // co-evolution graph because a modal dependency cycle must be solved as a
+    // fixpoint: treating it as single-pass either fabricates an unfounded tuple cycle
+    // or drops a valid transition from a founded predecessor.
+    let (ordinary_deps, deps) = epistemic_dependency_graphs(program);
 
-    fn reaches<'a>(
-        start: &'a str,
-        target: &str,
-        deps: &BTreeMap<&'a str, BTreeSet<&'a str>>,
-        seen: &mut BTreeSet<&'a str>,
-    ) -> bool {
-        let Some(next) = deps.get(start) else {
-            return false;
-        };
-        for &pred in next {
-            if pred == target {
-                return true;
-            }
-            if seen.insert(pred) && reaches(pred, target, deps, seen) {
-                return true;
-            }
-        }
-        false
-    }
+    let ordinary_recursive_predicates: BTreeSet<&str> = ordinary_deps
+        .keys()
+        .copied()
+        .filter(|pred| {
+            predicate_dependency_reaches(pred, pred, &ordinary_deps, &mut BTreeSet::new())
+        })
+        .collect();
 
-    // Collect the set of ordinary-recursive predicates (predicates that ordinarily
-    // depend on themselves through positive/negated body literals).
+    // Collect every predicate in an ordinary-or-modal dependency cycle.
     let recursive_predicates: BTreeSet<&str> = deps
         .keys()
         .copied()
-        .filter(|pred| reaches(pred, pred, &deps, &mut BTreeSet::new()))
+        .filter(|pred| predicate_dependency_reaches(pred, pred, &deps, &mut BTreeSet::new()))
         .collect();
 
     if recursive_predicates.is_empty() {
         return Ok(RecursiveEpistemicClass::NonRecursive);
     }
+    let modal_only_recursion = ordinary_recursive_predicates.is_empty();
 
     // Recursion is present. Two admissible classes (anything else fails closed):
     //
@@ -815,21 +799,23 @@ pub fn classify_recursive_epistemic_program(program: &Program) -> Result<Recursi
     //   self-support is excluded by construction (no separate foundedness drop needed),
     //   and a program with no founding simply yields the exact empty extension.
     //
-    // Both classes use the SAME reduction (positive modal → positive ordinary atom,
-    // `reduce_case_a_epistemic_program_to_ordinary`), so the only structural difference
-    // is whether the resolved relation is fixed (A) or part of the SCC (B). The whole
-    // program is scanned (not only recursion-participating rules) because that blanket
-    // reduction rewrites EVERY modal literal.
+    // FAEEL and non-compatibility G91 edges use the same positive-modal-to-positive-
+    // atom reduction, so the structural difference between Case A and Case B is whether
+    // the resolved relation is fixed or part of the SCC. Exact G91 head-tuple
+    // `possible` cycles are intercepted first and use the upper-bound/frozen-snapshot
+    // reduction. The whole program is scanned because either reduction rewrites every
+    // remaining modal literal.
     //
     // SOUNDNESS FLOOR:
     //   * a NEGATED modal over a non-invariant target is admitted as Case B. If the
     //     reduced program is stratified, ordinary stratified negation is enough; if it
     //     contains a reduced cycle through negation, the high-level executor routes it
     //     to GPU-backed WFS rather than host WFS.
-    //   * a `possible` modal over a co-evolving target under G91 is admitted as the
-    //     compatibility self-support assumption. FAEEL `possible` remains the founded
-    //     least fixpoint. (A non-recursive `possible` self-support stays NonRecursive
-    //     and is handled by the single-pass founded-extension path — item B.)
+    //   * an exact head-tuple `possible` modal over a co-evolving target under G91 is
+    //     admitted only through the explicit descending compatibility reduction. FAEEL
+    //     `possible` remains the founded least fixpoint. A cycle carried only by modal
+    //     dependencies is classified as `ModalCycle`; execution then selects the
+    //     semantic reduction before it can reach the single-pass path.
     let invariant = InvariantRelations::analyze(program);
     let mut saw_case_b = false;
     // A NEGATED modal over a NON-invariant target is admissible after reduction. The
@@ -860,7 +846,7 @@ pub fn classify_recursive_epistemic_program(program: &Program) -> Result<Recursi
                 // 2-valued model makes every modal target R 2-valued, so under FAEEL
                 // `know R == possible R == R` and `not know R == not possible R == not
                 // R` (the modal op stops mattering once R is determined -- the same
-                // equivalence example 29 proves for DETERMINED targets, generalized
+                // equivalence established for DETERMINED targets, generalized
                 // here to STRATIFIED targets). Replacing each modal by its ordinary
                 // atom therefore preserves truth values, so the stratified perfect
                 // model of the reduced program IS the FAEEL model. The 2-valued
@@ -878,8 +864,9 @@ pub fn classify_recursive_epistemic_program(program: &Program) -> Result<Recursi
 
             // POSITIVE `know` (any mode), FAEEL `possible`, or G91 `possible` over a
             // co-evolving target: admissible Case B. FAEEL/know resolve to the
-            // ordinary atom; G91 non-invariant `possible` is handled in the reduction
-            // as the compatibility self-support assumption.
+            // ordinary atom. Exact G91 head-tuple `possible` cycles are intercepted by
+            // the compatibility reduction; remaining admitted modal edges resolve to
+            // ordinary atoms.
             saw_case_b = true;
         }
     }
@@ -904,8 +891,8 @@ pub fn classify_recursive_epistemic_program(program: &Program) -> Result<Recursi
     // SILENTLY IGNORED, yielding a result that includes rows a valid world view forbids.
     // That is an UNSOUND admission (worse than a rejection), so fail closed when an
     // epistemic constraint co-occurs with recursion. (Non-recursive epistemic-constraint
-    // programs -- examples 10/34/35/36 -- never reach here; they classify NonRecursive
-    // and run the constraint kernel on the single-pass path.)
+    // Non-recursive epistemic-constraint programs never reach here; they run the
+    // constraint kernel on the single-pass path.)
     let has_epistemic_constraint = program.constraints.iter().any(|constraint| {
         constraint
             .body
@@ -915,21 +902,103 @@ pub fn classify_recursive_epistemic_program(program: &Program) -> Result<Recursi
     if has_epistemic_constraint {
         return Err(recursive_epistemic_rejection(
             "a recursive epistemic program carries an epistemic integrity constraint \
-             (`:- know ...` / `:- not know ...`). Recursive epistemic programs execute \
-             through the ordinary semi-naive engine, which does not run the world-view \
-             constraint kernel, and the recursive reduction would silently DROP the \
-             modal constraint -- yielding a result that ignores it. To keep results \
-             sound this fails closed rather than silently dropping the constraint. \
+             (`:- know ...` / `:- not know ...`). Recursive reductions do not run the \
+             single-pass world-view constraint kernel and would otherwise drop the \
+             modal constraint, yielding a result that ignores it. To keep results sound \
+             this fails closed rather than silently dropping the constraint. \
              Remove the recursion or express the integrity constraint over a \
              non-recursive (single-pass) epistemic relation.",
         ));
     }
 
-    if saw_case_b {
+    if modal_only_recursion {
+        debug_assert!(
+            saw_case_b,
+            "a modal-only cycle must have a co-evolving target"
+        );
+        Ok(RecursiveEpistemicClass::ModalCycle)
+    } else if saw_case_b {
         Ok(RecursiveEpistemicClass::CaseB)
     } else {
         Ok(RecursiveEpistemicClass::CaseA)
     }
+}
+
+type PredicateDependencyMap<'a> = BTreeMap<&'a str, BTreeSet<&'a str>>;
+
+fn epistemic_dependency_graphs(
+    program: &Program,
+) -> (PredicateDependencyMap<'_>, PredicateDependencyMap<'_>) {
+    let mut ordinary_dependencies = BTreeMap::new();
+    let mut all_dependencies = BTreeMap::new();
+    for rule in &program.rules {
+        let head = rule.head.predicate.as_str();
+        let all = all_dependencies.entry(head).or_insert_with(BTreeSet::new);
+        let ordinary = ordinary_dependencies
+            .entry(head)
+            .or_insert_with(BTreeSet::new);
+        for literal in &rule.body {
+            match literal {
+                BodyLiteral::Positive(atom) | BodyLiteral::Negated(atom) => {
+                    all.insert(atom.predicate.as_str());
+                    ordinary.insert(atom.predicate.as_str());
+                }
+                BodyLiteral::Epistemic(modal) => {
+                    all.insert(modal.atom.predicate.as_str());
+                }
+                BodyLiteral::Comparison(_) | BodyLiteral::IsExpr(_) | BodyLiteral::Univ(_) => {}
+            }
+        }
+    }
+    (ordinary_dependencies, all_dependencies)
+}
+
+fn predicate_dependency_reaches<'a>(
+    start: &'a str,
+    target: &str,
+    dependencies: &BTreeMap<&'a str, BTreeSet<&'a str>>,
+    seen: &mut BTreeSet<&'a str>,
+) -> bool {
+    let Some(next) = dependencies.get(start) else {
+        return false;
+    };
+    for &predicate in next {
+        if predicate == target {
+            return true;
+        }
+        if seen.insert(predicate)
+            && predicate_dependency_reaches(predicate, target, dependencies, seen)
+        {
+            return true;
+        }
+    }
+    false
+}
+
+/// Modal dependency edges whose head and target belong to the same recursive
+/// component. The modal literal itself supplies the head-to-target edge; a return
+/// path from target to head proves SCC membership.
+fn recursive_modal_dependency_edges(program: &Program) -> BTreeSet<(String, String)> {
+    let (_, dependencies) = epistemic_dependency_graphs(program);
+    let mut edges = BTreeSet::new();
+    for rule in &program.rules {
+        for literal in &rule.body {
+            let BodyLiteral::Epistemic(modal) = literal else {
+                continue;
+            };
+            if modal.atom.predicate == rule.head.predicate
+                || predicate_dependency_reaches(
+                    modal.atom.predicate.as_str(),
+                    rule.head.predicate.as_str(),
+                    &dependencies,
+                    &mut BTreeSet::new(),
+                )
+            {
+                edges.insert((rule.head.predicate.clone(), modal.atom.predicate.clone()));
+            }
+        }
+    }
+    edges
 }
 
 fn recursive_epistemic_rejection(context: &str) -> XlogError {
@@ -999,18 +1068,23 @@ impl<'a> InvariantRelations<'a> {
             // A cycle reaching `predicate` means recursion: not invariant.
             return false;
         }
-        if !self.derived_heads.contains(predicate) {
+        let invariant = if !self.derived_heads.contains(predicate) {
             // Pure EDB relation: invariant by construction.
-            return true;
-        }
-        if self.epistemic_heads.contains(predicate) {
+            true
+        } else if self.epistemic_heads.contains(predicate) {
             // Definition itself uses a modal literal: not a fixed lower stratum.
-            return false;
-        }
-        match self.ordinary_deps.get(predicate) {
-            None => true,
-            Some(deps) => deps.iter().all(|dep| self.is_invariant_inner(dep, seen)),
-        }
+            false
+        } else {
+            match self.ordinary_deps.get(predicate) {
+                None => true,
+                Some(deps) => deps.iter().all(|dep| self.is_invariant_inner(dep, seen)),
+            }
+        };
+        // `seen` is the active recursion stack, not a global visited set. Leaving a
+        // completed dependency in it would mistake a shared acyclic dependency in a
+        // diamond for a back edge when a sibling branch reaches the same predicate.
+        seen.remove(predicate);
+        invariant
     }
 }
 
@@ -1030,6 +1104,57 @@ fn has_independent_founded_support(eir: &EirProgram, atom: &xlog_ir::EirAtom) ->
 
     let mut support_stack = Vec::new();
     has_independent_founded_support_inner(eir, atom, &mut support_stack)
+}
+
+/// Whether a ground atom is unconditionally derived by the authored ordinary rules.
+///
+/// Unlike `has_independent_founded_support`, this proof does not treat an undeclared
+/// runtime EDB tuple as present merely because the predicate has no defining rule.
+/// It is therefore suitable for proving that a global modal output gate is a no-op:
+/// every positive dependency must itself be derivable from an explicit fact or an
+/// ordinary rule, and constraints/bindings are rejected because EIR intentionally
+/// erases the expression needed to prove them at this boundary.
+fn has_unconditional_ground_founded_support(eir: &EirProgram, atom: &xlog_ir::EirAtom) -> bool {
+    if !atom.terms.iter().all(eir_term_is_ground) {
+        return false;
+    }
+
+    let mut support_stack = Vec::new();
+    has_unconditional_ground_founded_support_inner(eir, atom, &mut support_stack)
+}
+
+fn has_unconditional_ground_founded_support_inner(
+    eir: &EirProgram,
+    atom: &xlog_ir::EirAtom,
+    support_stack: &mut Vec<(String, Vec<EirTerm>)>,
+) -> bool {
+    let key = (atom.predicate.clone(), atom.terms.clone());
+    if support_stack.iter().any(|ancestor| ancestor == &key) {
+        return false;
+    }
+    support_stack.push(key);
+
+    let supported = eir.rules.iter().any(|rule| {
+        let Some(substitution) = head_substitution_to_atom(&rule.head, atom) else {
+            return false;
+        };
+        rule.body.iter().all(|literal| match literal {
+            EirBodyLiteral::Relational {
+                negated: false,
+                atom,
+            } => substitute_eir_atom(atom, &substitution).is_some_and(|atom| {
+                atom.terms.iter().all(eir_term_is_ground)
+                    && has_unconditional_ground_founded_support_inner(eir, &atom, support_stack)
+            }),
+            EirBodyLiteral::Epistemic(_)
+            | EirBodyLiteral::Relational { negated: true, .. }
+            | EirBodyLiteral::Constraint
+            | EirBodyLiteral::Binding => false,
+        })
+    });
+
+    support_stack.pop();
+    supported
 }
 
 fn has_tuple_level_independent_founded_support(
@@ -1245,7 +1370,13 @@ fn eir_rule_has_independent_founded_body_with_substitution(
             }
             has_independent_founded_support_inner(eir, &atom, support_stack)
         }
-        EirBodyLiteral::Constraint | EirBodyLiteral::Binding => true,
+        // EIR preserves only the presence of comparisons and bindings, not the
+        // expression needed to prove that they hold for every tuple in the modal
+        // rule's domain. Treating them as unconditional would let a restricted
+        // support rule (for example `X = 1`) found unrelated tuples. A richer proof
+        // may admit such rules later; this structural foundedness check must remain
+        // conservative until then.
+        EirBodyLiteral::Constraint | EirBodyLiteral::Binding => false,
     })
 }
 
@@ -1312,7 +1443,7 @@ fn compile_epistemic_gpu_execution_inner(
     // projects every head's public tuple shape soundly, including coupled heads of
     // DIFFERING arity. The former blanket fail-closed guard on
     // `final_output_columns.is_some()` over multiple heads is no longer needed.
-    let reduced_program = reduce_epistemic_program_to_ordinary(program);
+    let reduced_program = reduce_epistemic_program_to_ordinary(program)?;
     let mut compiler = Compiler::new();
     let reduced_runtime_plan =
         compiler.compile_program_with_stats_snapshot(&reduced_program, stats_snapshot)?;
@@ -1329,35 +1460,412 @@ fn compile_epistemic_gpu_execution_inner(
     })
 }
 
-/// Validate a Case-A recursive epistemic program and return its ordinary reduction.
+/// Authored epistemic source after static validation and exact FAEEL foundedness
+/// filtering, ready for dependency classification and executable planning.
+#[derive(Debug, Clone)]
+pub struct PreparedEpistemicProgram {
+    active_program: Program,
+    removed_unfounded_rule_count: usize,
+}
+
+/// Modal-free programs and frozen-relation bindings for a Gelfond-1991
+/// compatibility greatest fixpoint.
 ///
-/// This is the Case-A counterpart to [`compile_epistemic_gpu_execution`]: instead of
-/// building a single-pass GPU world-view plan, it proves the program is admissible
-/// Case A and resolves it to an ordinary recursive program for the existing fixpoint
-/// engine. Validation still flows through the EIR boundary ([`build_eir`]) via
-/// [`classify_recursive_epistemic_program`], which already requires EVERY modal literal
-/// to range over an INVARIANT relation. A direct modal self-support over the recursive
-/// head (`possible p` with `p` the recursive/derived head) ranges over a NON-invariant
-/// relation and is therefore rejected as non-Case-A upstream — so unfounded modal
-/// self-support never reaches this reduction. Only EXECUTION routes through the
-/// ordinary engine.
-///
-/// Returns `Ok(Some(reduced))` when the program is admissible Case A, `Ok(None)` when
-/// the program has no ordinary recursion (the caller should use the single-pass
-/// epistemic path), and a typed error for any non-Case-A recursive shape.
-pub fn try_reduce_case_a_recursive_epistemic_program(program: &Program) -> Result<Option<Program>> {
-    match classify_recursive_epistemic_program(program)? {
-        RecursiveEpistemicClass::NonRecursive => Ok(None),
-        // Case A and Case B share the same reduction: each positive `know`/`possible`
-        // modal is resolved to its ordinary atom. In Case A that atom is invariant (a
-        // fixed gated relation); in Case B it co-evolves inside the recursive SCC, so
-        // the semi-naive least fixpoint computes the founded co-evolving result. The
-        // reduction is identical — only the dependency shape of the resolved relation
-        // differs — so both route through the ordinary recursive engine.
-        RecursiveEpistemicClass::CaseA | RecursiveEpistemicClass::CaseB => {
-            Ok(Some(reduce_case_a_epistemic_program_to_ordinary(program)))
+/// The upper-bound program removes only selected positive `possible` gates in a
+/// recursive component. The refinement program replaces those same gates with
+/// reads from frozen snapshots of the preceding iteration. Re-evaluating the
+/// refinement from the original extensional inputs until the selected relations
+/// stop changing computes compatibility per concrete tuple instead of assuming
+/// that predicate-level strongly connected component membership is sufficient.
+#[derive(Debug, Clone)]
+pub struct G91CompatibilityReduction {
+    upper_bound_program: Program,
+    refinement_program: Program,
+    snapshot_relations: BTreeMap<String, String>,
+    convergence_predicates: Vec<String>,
+}
+
+impl G91CompatibilityReduction {
+    /// Program whose selected compatibility gates are removed to establish the
+    /// finite initial upper bound.
+    pub fn upper_bound_program(&self) -> &Program {
+        &self.upper_bound_program
+    }
+
+    /// Program whose selected compatibility gates read the preceding iteration's
+    /// frozen relation snapshots.
+    pub fn refinement_program(&self) -> &Program {
+        &self.refinement_program
+    }
+
+    /// Source relation to collision-free frozen snapshot relation name.
+    pub fn snapshot_relations(&self) -> &BTreeMap<String, String> {
+        &self.snapshot_relations
+    }
+
+    /// Intensional relations compared for convergence after each refinement.
+    pub fn convergence_predicates(&self) -> &[String] {
+        &self.convergence_predicates
+    }
+}
+
+impl PreparedEpistemicProgram {
+    /// Program remaining after exact foundedness filtering.
+    pub fn active_program(&self) -> &Program {
+        &self.active_program
+    }
+
+    /// Whether preparation removed at least one unfounded rule.
+    pub fn removed_unfounded_rules(&self) -> bool {
+        self.removed_unfounded_rule_count != 0
+    }
+}
+
+/// Validate authored contracts before semantics can remove a rule, then exclude only
+/// positive exact-tuple FAEEL self-support with no independent founded support.
+pub fn prepare_epistemic_program(program: &Program) -> Result<PreparedEpistemicProgram> {
+    validate_epistemic_source_program(program)?;
+    let removed_rule_indices = faeel_unfounded_exact_tuple_self_support_rule_indices(program);
+    Ok(PreparedEpistemicProgram {
+        active_program: program_without_rule_indices(program, &removed_rule_indices),
+        removed_unfounded_rule_count: removed_rule_indices.len(),
+    })
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct G91CompatibilityLiteralLocation {
+    rule_index: usize,
+    literal_index: usize,
+}
+
+/// Build the explicit tuple-level Gelfond-1991 compatibility reduction, when the
+/// prepared program contains a supported positive `possible` dependency cycle.
+pub fn try_prepare_g91_compatibility_reduction(
+    prepared: &PreparedEpistemicProgram,
+) -> Result<Option<G91CompatibilityReduction>> {
+    let program = prepared.active_program();
+    if program.directives.epistemic_mode_or_default() != EpistemicMode::G91 {
+        return Ok(None);
+    }
+    if classify_recursive_epistemic_program(program)? == RecursiveEpistemicClass::NonRecursive {
+        return Ok(None);
+    }
+
+    validate_epistemic_derived_relation_identity(program, &BTreeSet::new())?;
+    let recursive_modal_edges = recursive_modal_dependency_edges(program);
+    let invariant = InvariantRelations::analyze(program);
+    let mut locations = BTreeSet::new();
+    let mut target_arities = BTreeMap::new();
+    for (rule_index, rule) in program.rules.iter().enumerate() {
+        for (literal_index, literal) in rule.body.iter().enumerate() {
+            let BodyLiteral::Epistemic(modal) = literal else {
+                continue;
+            };
+            if !is_g91_compatibility_literal(rule, modal, &invariant, &recursive_modal_edges) {
+                continue;
+            }
+            locations.insert(G91CompatibilityLiteralLocation {
+                rule_index,
+                literal_index,
+            });
+            target_arities
+                .entry(modal.atom.predicate.clone())
+                .and_modify(|arity| {
+                    debug_assert_eq!(*arity, modal.atom.arity());
+                })
+                .or_insert(modal.atom.arity());
         }
     }
+    if locations.is_empty() {
+        return Ok(None);
+    }
+
+    reject_nonmonotone_g91_compatibility_components(program, &locations)?;
+    let snapshot_relations = g91_snapshot_relation_names(program, target_arities.keys());
+    let upper_bound_program = transform_g91_compatibility_program(
+        program,
+        &locations,
+        G91CompatibilityTransform::UpperBound,
+    );
+    let mut refinement_program = transform_g91_compatibility_program(
+        program,
+        &locations,
+        G91CompatibilityTransform::Snapshot(&snapshot_relations),
+    );
+    add_declared_g91_snapshot_relations(
+        &mut refinement_program,
+        program,
+        &snapshot_relations,
+        &target_arities,
+    );
+
+    let convergence_predicates = program
+        .proper_rules()
+        .map(|rule| rule.head.predicate.clone())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    Ok(Some(G91CompatibilityReduction {
+        upper_bound_program,
+        refinement_program,
+        snapshot_relations,
+        convergence_predicates,
+    }))
+}
+
+fn is_g91_compatibility_literal(
+    rule: &crate::ast::Rule,
+    modal: &EpistemicLiteral,
+    invariant: &InvariantRelations<'_>,
+    recursive_modal_edges: &BTreeSet<(String, String)>,
+) -> bool {
+    modal.op == EpistemicOp::Possible
+        && !modal.negated
+        && !invariant.is_invariant(&modal.atom.predicate)
+        && recursive_modal_edges
+            .contains(&(rule.head.predicate.clone(), modal.atom.predicate.clone()))
+        && modal.atom.terms == rule.head.terms
+}
+
+enum G91CompatibilityTransform<'a> {
+    UpperBound,
+    Snapshot(&'a BTreeMap<String, String>),
+}
+
+fn transform_g91_compatibility_program(
+    program: &Program,
+    locations: &BTreeSet<G91CompatibilityLiteralLocation>,
+    transform: G91CompatibilityTransform<'_>,
+) -> Program {
+    let mut reduced = program.clone();
+    for (rule_index, rule) in reduced.rules.iter_mut().enumerate() {
+        for (literal_index, literal) in rule.body.iter_mut().enumerate() {
+            let BodyLiteral::Epistemic(modal) = literal else {
+                continue;
+            };
+            if locations.contains(&G91CompatibilityLiteralLocation {
+                rule_index,
+                literal_index,
+            }) {
+                *literal = match &transform {
+                    G91CompatibilityTransform::UpperBound => BodyLiteral::Comparison(Comparison {
+                        left: Term::Integer(1),
+                        op: CompOp::Eq,
+                        right: Term::Integer(1),
+                    }),
+                    G91CompatibilityTransform::Snapshot(snapshot_relations) => {
+                        let mut atom = modal.atom.clone();
+                        atom.predicate = snapshot_relations
+                            .get(&atom.predicate)
+                            .expect("selected compatibility target has a snapshot name")
+                            .clone();
+                        BodyLiteral::Positive(atom)
+                    }
+                };
+            } else {
+                *literal = if modal.negated {
+                    BodyLiteral::Negated(modal.atom.clone())
+                } else {
+                    BodyLiteral::Positive(modal.atom.clone())
+                };
+            }
+        }
+    }
+    reduced.constraints.retain(|constraint| {
+        !constraint
+            .body
+            .iter()
+            .any(|literal| matches!(literal, BodyLiteral::Epistemic(_)))
+    });
+    qualify_extensional_multi_arity_predicates(&mut reduced, program, &BTreeSet::new());
+    reduced
+}
+
+fn g91_snapshot_relation_names<'a>(
+    program: &Program,
+    targets: impl Iterator<Item = &'a String>,
+) -> BTreeMap<String, String> {
+    let mut reserved = collect_epistemic_relation_identities(program, &BTreeSet::new())
+        .0
+        .into_keys()
+        .collect::<BTreeSet<_>>();
+    let mut names = BTreeMap::new();
+    for target in targets {
+        let stem = target
+            .chars()
+            .map(|character| {
+                if character.is_ascii_alphanumeric() || character == '_' {
+                    character
+                } else {
+                    '_'
+                }
+            })
+            .collect::<String>();
+        let base = format!("__xlog_g91_snapshot_{stem}");
+        let mut candidate = base.clone();
+        let mut suffix = 0usize;
+        while reserved.contains(&candidate) {
+            candidate = format!("{base}_{suffix}");
+            suffix += 1;
+        }
+        reserved.insert(candidate.clone());
+        names.insert(target.clone(), candidate);
+    }
+    names
+}
+
+fn add_declared_g91_snapshot_relations(
+    refinement: &mut Program,
+    source: &Program,
+    snapshots: &BTreeMap<String, String>,
+    target_arities: &BTreeMap<String, usize>,
+) {
+    for (target, snapshot) in snapshots {
+        let expected_arity = target_arities
+            .get(target)
+            .expect("snapshot target has an authored arity");
+        if let Some(declaration) = source.predicates.iter().find(|declaration| {
+            declaration.name == *target && declaration.arity() == *expected_arity
+        }) {
+            let mut declaration = declaration.clone();
+            declaration.name = snapshot.clone();
+            declaration.is_private = false;
+            refinement.predicates.push(declaration);
+        }
+    }
+}
+
+fn reject_nonmonotone_g91_compatibility_components(
+    program: &Program,
+    locations: &BTreeSet<G91CompatibilityLiteralLocation>,
+) -> Result<()> {
+    let (_, dependencies) = epistemic_dependency_graphs(program);
+    let selected_heads = locations
+        .iter()
+        .map(|location| program.rules[location.rule_index].head.predicate.as_str())
+        .collect::<BTreeSet<_>>();
+    for rule in &program.rules {
+        let in_selected_component = selected_heads.iter().any(|selected| {
+            rule.head.predicate == **selected
+                || (predicate_dependency_reaches(
+                    selected,
+                    &rule.head.predicate,
+                    &dependencies,
+                    &mut BTreeSet::new(),
+                ) && predicate_dependency_reaches(
+                    &rule.head.predicate,
+                    selected,
+                    &dependencies,
+                    &mut BTreeSet::new(),
+                ))
+        });
+        if !in_selected_component {
+            continue;
+        }
+        if rule.has_aggregation() {
+            return Err(XlogError::UnsupportedEpistemicConstruct {
+                construct: "Gelfond-1991 compatibility cycle through aggregation".to_string(),
+                context: format!(
+                    "aggregate predicate `{}` belongs to a positive `possible` compatibility \
+                     component; the tuple-level greatest fixpoint requires every dependency in \
+                     that component to be monotone",
+                    rule.head.predicate
+                ),
+            });
+        }
+        if rule
+            .body
+            .iter()
+            .filter_map(|literal| match literal {
+                BodyLiteral::Negated(atom) => Some(atom),
+                BodyLiteral::Epistemic(modal) if modal.negated => Some(&modal.atom),
+                BodyLiteral::Positive(_)
+                | BodyLiteral::Epistemic(_)
+                | BodyLiteral::Comparison(_)
+                | BodyLiteral::IsExpr(_)
+                | BodyLiteral::Univ(_) => None,
+            })
+            .any(|atom| {
+                predicate_dependency_reaches(
+                    &atom.predicate,
+                    &rule.head.predicate,
+                    &dependencies,
+                    &mut BTreeSet::new(),
+                )
+            })
+        {
+            return Err(XlogError::UnsupportedEpistemicConstruct {
+                construct: "Gelfond-1991 compatibility cycle through negation".to_string(),
+                context: format!(
+                    "predicate `{}` belongs to a positive `possible` compatibility component \
+                     that also has a recursive negated dependency; the tuple-level greatest \
+                     fixpoint requires a monotone component",
+                    rule.head.predicate
+                ),
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Return the ordinary fixpoint reduction selected for a prepared epistemic program.
+pub fn try_reduce_prepared_recursive_epistemic_program(
+    prepared: &PreparedEpistemicProgram,
+) -> Result<Option<Program>> {
+    if try_prepare_g91_compatibility_reduction(prepared)?.is_some() {
+        return Err(XlogError::UnsupportedEpistemicConstruct {
+            construct: "Gelfond-1991 tuple compatibility ordinary reduction".to_string(),
+            context: "positive `possible` compatibility cycles require the explicit upper-bound \
+                      and frozen-snapshot greatest-fixpoint plan returned by \
+                      `try_prepare_g91_compatibility_reduction`; they cannot be represented by \
+                      one ordinary least-fixpoint program"
+                .to_string(),
+        });
+    }
+    let active_program = prepared.active_program();
+    let recursive_class = classify_recursive_epistemic_program(active_program)?;
+    if recursive_class == RecursiveEpistemicClass::NonRecursive
+        && !prepared.removed_unfounded_rules()
+    {
+        return Ok(None);
+    }
+
+    validate_epistemic_derived_relation_identity(active_program, &BTreeSet::new())?;
+    match recursive_class {
+        RecursiveEpistemicClass::NonRecursive => Ok(Some(
+            reduce_founded_epistemic_program_to_ordinary(active_program),
+        )),
+        // After explicit G91 compatibility cycles have been intercepted above, every
+        // remaining admitted class shares the same reduction: each positive
+        // `know`/`possible` modal resolves to its ordinary atom. That atom is either
+        // invariant or co-evolves inside an ordinary-or-modal dependency cycle. The
+        // semi-naive least fixpoint computes the founded co-evolving result.
+        RecursiveEpistemicClass::CaseA
+        | RecursiveEpistemicClass::CaseB
+        | RecursiveEpistemicClass::ModalCycle => Ok(Some(
+            reduce_case_a_epistemic_program_to_ordinary(active_program),
+        )),
+    }
+}
+
+/// Validate an admissible recursive epistemic program and return its ordinary
+/// fixpoint reduction.
+///
+/// This is the recursive counterpart to [`compile_epistemic_gpu_execution`]. It first
+/// validates the complete authored source, removes only exact tuple-level circular
+/// FAEEL support, and classifies the remaining dependency graph. Predecessor and tuple-
+/// permutation edges therefore remain part of recursive-path selection. Surviving
+/// positive modal literals resolve to ordinary joins and execute through the existing
+/// least-fixpoint engine. Exact G91 compatibility cycles return a typed error because
+/// callers must execute the upper-bound/frozen-snapshot reduction returned by
+/// [`try_prepare_g91_compatibility_reduction`].
+///
+/// Returns `Ok(Some(reduced))` for an admitted recursive class, `Ok(None)` when the
+/// program has no dependency cycle (the caller should use the single-pass epistemic
+/// path), and a typed error for a recursive shape outside the supported fragment.
+pub fn try_reduce_case_a_recursive_epistemic_program(program: &Program) -> Result<Option<Program>> {
+    let prepared = prepare_epistemic_program(program)?;
+    try_reduce_prepared_recursive_epistemic_program(&prepared)
 }
 
 fn require_single_epistemic_output_relation(gpu_plan: &EpistemicGpuPlan) -> Result<()> {
@@ -1635,12 +2143,13 @@ fn final_output_columns_for_eir(eir: &EirProgram) -> Option<Vec<usize>> {
     }
 }
 
-/// Indices (into `program.rules`) of FAEEL rules that are unfounded by circular modal
-/// self-support and must be excluded from the reduced founded-model base.
+/// Indices (into `program.rules`) of exact tuple-level FAEEL rules that are unfounded
+/// by circular modal self-support and must be excluded from the reduced founded-model
+/// base without removing predecessor or tuple-permutation edges.
 ///
 /// A rule qualifies when (a) the program is in FAEEL mode, (b) the rule body contains a
-/// modal literal `possible p`/`know p` over the rule's OWN head predicate/arity
-/// (direct self-support), (c) that head has NO independent founded support
+/// modal literal `possible p`/`know p` over the rule's head predicate and arity,
+/// (c) that head has NO independent founded support
 /// ([`has_independent_founded_support`]) and NO tuple-level founded support
 /// ([`has_tuple_level_independent_founded_support`]), and (d) excluding the rule does
 /// NOT silently elide a mode-independent safety failure — i.e. the head carries no
@@ -1648,15 +2157,10 @@ fn final_output_columns_for_eir(eir: &EirProgram) -> Option<Vec<usize>> {
 /// `UnsafeVariable` honest-exit for pure nonzero self-support (`p(X) :- possible p(X)`)
 /// in EVERY mode (G91 rejects it identically): dropping such a rule would replace a
 /// precise safety diagnostic with a confusing materialization error.
-///
-/// Returns indices in ASCENDING order; callers must remove in DESCENDING order to keep
-/// the remaining indices stable.
-///
-/// This is the structural foundedness DECISION; the founded EXTENSION is then computed
-/// by the existing GPU world-view validation over the reduced base (no CPU semantic
-/// solver). G91 mode never drops, so circular self-support stays accepted there — the
-/// drop is exactly the FAEEL-vs-G91 mode difference.
-fn faeel_unfounded_self_support_rule_indices(program: &Program) -> Vec<usize> {
+/// Every schema census, shape check, stratified plan, and executable reduction uses
+/// this same decision so no broader predicate-level approximation can erase live
+/// support.
+fn faeel_unfounded_exact_tuple_self_support_rule_indices(program: &Program) -> Vec<usize> {
     let Ok(eir) = build_eir(program) else {
         return Vec::new();
     };
@@ -1670,9 +2174,10 @@ fn faeel_unfounded_self_support_rule_indices(program: &Program) -> Vec<usize> {
             let EirBodyLiteral::Epistemic(modal) = lit else {
                 return false;
             };
-            // Direct modal self-support over the rule's own head.
-            if modal.atom.predicate != eir_rule.head.predicate
+            if modal.negated
+                || modal.atom.predicate != eir_rule.head.predicate
                 || modal.atom.arity != eir_rule.head.arity
+                || modal.atom.terms != eir_rule.head.terms
             {
                 return false;
             }
@@ -1703,11 +2208,314 @@ fn faeel_unfounded_self_support_rule_indices(program: &Program) -> Vec<usize> {
     indices
 }
 
-/// Return the ordinary runtime program produced after epistemic GPU planning.
+fn program_without_rule_indices(program: &Program, removed_rule_indices: &[usize]) -> Program {
+    if removed_rule_indices.is_empty() {
+        return program.clone();
+    }
+
+    let removed_rule_indices = removed_rule_indices
+        .iter()
+        .copied()
+        .collect::<BTreeSet<_>>();
+    let mut filtered = program.clone();
+    filtered.rules = program
+        .rules
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| !removed_rule_indices.contains(index))
+        .map(|(_, rule)| rule.clone())
+        .collect();
+    filtered
+}
+
+/// Validate the complete authored epistemic program before foundedness can elide a rule.
 ///
-/// Epistemic literals are removed only for the reduced production runtime
-/// dispatch; callers must still plan and validate the explicit epistemic GPU
-/// contract before using this reduced program.
+/// Every authored predicate signature receives a temporary name-and-arity identity. This
+/// keeps a semantically dead `p/1` clause from colliding with a live `p/2` relation while
+/// preserving all declaration, clause, arithmetic, and modal type evidence within each
+/// signature. Modal range restriction is checked against the executable contract first;
+/// the validation clone then reaches the ordinary compiler's production preprocessing and
+/// lowering checks without requiring ordinary stratification, because supported negated
+/// modal cycles are dispatched to well-founded execution later.
+pub fn validate_epistemic_source_program(program: &Program) -> Result<()> {
+    validate_authored_modal_key_shapes(program)?;
+    let invariant = InvariantRelations::analyze(program);
+    let determined = EpistemicallyDeterminedPredicates::analyze(program);
+    for rule in &program.rules {
+        validate_modal_variable_bindings(&rule.body, &invariant, &determined)?;
+    }
+    for constraint in &program.constraints {
+        validate_modal_variable_bindings(&constraint.body, &invariant, &determined)?;
+    }
+
+    let mut validation = program.clone();
+    for rule in &mut validation.rules {
+        rewrite_modal_literals_for_source_validation(&mut rule.body, &invariant, &determined);
+    }
+    for constraint in &mut validation.constraints {
+        rewrite_modal_literals_for_source_validation(&mut constraint.body, &invariant, &determined);
+    }
+
+    let multi_arity_predicates = all_multi_arity_predicates(program);
+    qualify_predicate_signatures(&mut validation, &multi_arity_predicates);
+    Compiler::new().validate_program_without_stratification(&validation)
+}
+
+/// Validate every authored modal tuple key against the relation signatures it can
+/// address before foundedness or dependency reduction can remove the containing rule.
+///
+/// Structured keys are syntax for a flat tuple: `p([X, Y])` addresses `p/2`, not
+/// `p/1`. The ordinary AST arity is therefore not the runtime key arity. Derive the
+/// target signatures from declarations and non-modal relation occurrences, flatten
+/// each EIR modal key through the production normalizer, and reject a mismatch at the
+/// source boundary. This also preserves the precise finiteness diagnostic for an
+/// unbounded structured key instead of allowing semantic elision to hide it.
+fn validate_authored_modal_key_shapes(program: &Program) -> Result<()> {
+    let target_arities = non_modal_relation_arities(program);
+    let eir = build_eir(program)?;
+    for modal in eir
+        .rules
+        .iter()
+        .flat_map(|rule| &rule.body)
+        .chain(
+            eir.constraints
+                .iter()
+                .flat_map(|constraint| &constraint.body),
+        )
+        .filter_map(|literal| match literal {
+            EirBodyLiteral::Epistemic(modal) => Some(modal),
+            EirBodyLiteral::Relational { .. }
+            | EirBodyLiteral::Constraint
+            | EirBodyLiteral::Binding => None,
+        })
+    {
+        let flattened = flatten_epistemic_literal(modal)?;
+        let Some(expected) = target_arities.get(&flattened.atom.predicate) else {
+            // An undeclared relation with no non-modal occurrence may be supplied as
+            // an external relation. Its schema is established by the caller.
+            continue;
+        };
+        if expected.contains(&flattened.atom.arity) {
+            continue;
+        }
+
+        let expected_description = if expected.len() == 1 {
+            format!(
+                "target arity {}",
+                expected.first().expect("one target arity")
+            )
+        } else {
+            format!("target arities {expected:?}")
+        };
+        return Err(XlogError::UnsupportedEpistemicConstruct {
+            construct: "epistemic modal tuple key".to_string(),
+            context: format!(
+                "modal target `{}` has {expected_description}, but its tuple key flattens to \
+                 binding arity {}; use one scalar key term per target column",
+                flattened.atom.predicate, flattened.atom.arity
+            ),
+        });
+    }
+    Ok(())
+}
+
+fn non_modal_relation_arities(program: &Program) -> BTreeMap<String, BTreeSet<usize>> {
+    let mut arities = BTreeMap::new();
+    for declaration in &program.predicates {
+        arities
+            .entry(declaration.name.clone())
+            .or_insert_with(BTreeSet::new)
+            .insert(declaration.arity());
+    }
+    for rule in &program.rules {
+        record_predicate_signature(&mut arities, &rule.head);
+        record_non_modal_body_signatures(&mut arities, &rule.body);
+    }
+    for constraint in &program.constraints {
+        record_non_modal_body_signatures(&mut arities, &constraint.body);
+    }
+    for query in &program.queries {
+        record_predicate_signature(&mut arities, &query.atom);
+    }
+    for fact in &program.prob_facts {
+        record_predicate_signature(&mut arities, &fact.atom);
+    }
+    for disjunction in &program.annotated_disjunctions {
+        for choice in &disjunction.choices {
+            record_predicate_signature(&mut arities, &choice.atom);
+        }
+    }
+    for evidence in &program.evidence {
+        record_predicate_signature(&mut arities, &evidence.atom);
+    }
+    for query in &program.prob_queries {
+        record_predicate_signature(&mut arities, &query.atom);
+    }
+    for declaration in &program.neural_predicates {
+        record_predicate_signature(&mut arities, &declaration.predicate);
+    }
+    for rule in &program.learnable_rules {
+        record_predicate_signature(&mut arities, &rule.head);
+        record_non_modal_body_signatures(&mut arities, &rule.body);
+    }
+    arities
+}
+
+fn record_non_modal_body_signatures(
+    signatures: &mut BTreeMap<String, BTreeSet<usize>>,
+    body: &[BodyLiteral],
+) {
+    for literal in body {
+        if let BodyLiteral::Positive(atom) | BodyLiteral::Negated(atom) = literal {
+            record_predicate_signature(signatures, atom);
+        }
+    }
+}
+
+/// Replace modals for validation without changing the authored ordinary literal order.
+/// Positive modals over invariant or acyclically determined targets remain binders.
+/// Every other scalar-key modal is appended as an ordinary negated atom so it
+/// contributes schema and type evidence while the compiler independently verifies that
+/// all of its variables already have a finite source.
+fn rewrite_modal_literals_for_source_validation(
+    body: &mut Vec<BodyLiteral>,
+    invariant: &InvariantRelations<'_>,
+    determined: &EpistemicallyDeterminedPredicates,
+) {
+    let mut non_binding_modals = Vec::new();
+    body.retain_mut(|literal| {
+        let BodyLiteral::Epistemic(modal) = literal else {
+            return true;
+        };
+        if modal.atom.terms.iter().any(|term| {
+            !matches!(
+                term,
+                Term::Variable(_)
+                    | Term::Anonymous
+                    | Term::Integer(_)
+                    | Term::Float(_)
+                    | Term::String(_)
+                    | Term::Symbol(_)
+            )
+        }) {
+            // Structured modal keys have a dedicated finite-key normalization and
+            // diagnostic path. Ordinary list lowering cannot represent an unbounded
+            // `cons` key and would preempt that precise epistemic diagnostic.
+            *literal = BodyLiteral::Comparison(Comparison {
+                left: Term::Integer(1),
+                op: CompOp::Eq,
+                right: Term::Integer(1),
+            });
+            return true;
+        }
+        if !modal.negated
+            && (invariant.is_invariant(&modal.atom.predicate)
+                || determined.contains(&modal.atom.predicate))
+        {
+            *literal = BodyLiteral::Positive(modal.atom.clone());
+            true
+        } else {
+            non_binding_modals.push(BodyLiteral::Negated(modal.atom.clone()));
+            false
+        }
+    });
+    body.extend(non_binding_modals);
+}
+
+/// Variables with an ordinary finite source, matching the Lowerer's binding order:
+/// every positive atom is joined first, then deterministic `is` expressions are applied
+/// once in source order. A reversed arithmetic dependency is therefore not accepted by a
+/// fixed-point approximation.
+fn non_epistemic_bound_variables(body: &[BodyLiteral]) -> BTreeSet<String> {
+    let mut bound = BTreeSet::new();
+    for literal in body {
+        let BodyLiteral::Positive(atom) = literal else {
+            continue;
+        };
+        bound.extend(
+            atom.variables()
+                .into_iter()
+                .filter(|name| *name != "_")
+                .map(str::to_string),
+        );
+    }
+
+    for literal in body {
+        let BodyLiteral::IsExpr(binding) = literal else {
+            continue;
+        };
+        if binding
+            .expr
+            .variables()
+            .iter()
+            .all(|name| bound.contains(*name))
+        {
+            bound.insert(binding.target.clone());
+        }
+    }
+
+    bound
+}
+
+/// Enforce the modal binding contract before a reduction turns modal atoms into ordinary
+/// joins. A co-evolving or negated modal may filter an already-bound tuple but may not
+/// invent a finite domain; only a positive modal over an invariant or acyclically
+/// determined relation can bind.
+fn validate_modal_variable_bindings(
+    body: &[BodyLiteral],
+    invariant: &InvariantRelations<'_>,
+    determined: &EpistemicallyDeterminedPredicates,
+) -> Result<()> {
+    let mut bound = non_epistemic_bound_variables(body);
+
+    // A rule body is a conjunction, so positive finite modal sources bind
+    // independently of their textual order. Collect every such binder before
+    // checking co-evolving or negated modal filters; only deterministic `is`
+    // expressions retain the Lowerer's source-order contract.
+    for literal in body {
+        let BodyLiteral::Epistemic(modal) = literal else {
+            continue;
+        };
+        let may_bind = !modal.negated
+            && (invariant.is_invariant(&modal.atom.predicate)
+                || determined.contains(&modal.atom.predicate));
+        if may_bind {
+            bound.extend(
+                modal
+                    .atom
+                    .variables()
+                    .into_iter()
+                    .filter(|name| *name != "_")
+                    .map(str::to_string),
+            );
+        }
+    }
+
+    for literal in body {
+        let BodyLiteral::Epistemic(modal) = literal else {
+            continue;
+        };
+        let may_bind = !modal.negated
+            && (invariant.is_invariant(&modal.atom.predicate)
+                || determined.contains(&modal.atom.predicate));
+        for variable in modal.atom.variables() {
+            if variable == "_" {
+                continue;
+            }
+            if !may_bind && !bound.contains(variable) {
+                return Err(XlogError::UnsafeVariable(variable.to_string()));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Return the ordinary runtime program selected by epistemic dependency
+/// classification.
+///
+/// Admissible ordinary or modal dependency cycles resolve their modal edges into an
+/// ordinary fixpoint program. Acyclic programs use the single-pass reduction; callers
+/// must validate its explicit epistemic GPU contract before execution.
 ///
 /// The augmenting positive-modal resolve is gated on INVARIANT targets only (see the
 /// body comment): for an invariant `R`, `know R`/`possible R` ranges exactly over
@@ -1718,19 +2526,22 @@ fn faeel_unfounded_self_support_rule_indices(program: &Program) -> Vec<usize> {
 /// unbound and the reduced program fails closed at this strict (execution) entry
 /// point. See [`reduce_epistemic_program_to_ordinary_for_stratified_schema`] for the
 /// schema-only relaxation used by the stratified driver.
-pub fn reduce_epistemic_program_to_ordinary(program: &Program) -> Program {
-    reduce_epistemic_program_to_ordinary_inner(program, &BTreeSet::new())
+pub fn reduce_epistemic_program_to_ordinary(program: &Program) -> Result<Program> {
+    if let Some(reduced) = try_reduce_case_a_recursive_epistemic_program(program)? {
+        return Ok(reduced);
+    }
+    reduce_epistemic_program_to_ordinary_inner(program, &BTreeSet::new(), &BTreeMap::new())
 }
 
 /// Schema-only reduction for the stratified epistemic driver.
 ///
 /// Identical to [`reduce_epistemic_program_to_ordinary`] EXCEPT it also resolves an
-/// augmenting positive modal whose target is epistemically DETERMINED (per
-/// [`EpistemicallyDeterminedPredicates::analyze`]) but not invariant — e.g. a
+/// augmenting positive modal whose target is epistemically DETERMINED (as classified
+/// by the internal determined-predicate analysis) but not invariant — e.g. a
 /// multi-column determined head `r` in `out(X) :- node(X), know r(X, Y)`, where the
 /// modal binds the augmented output column `Y`. This is used SOLELY to compute the
 /// plan-wide relation SCHEMAS (column types/arities) for an
-/// [`crate::EpistemicStratifiedPlan`]; the resolved positive atom over `r` supplies
+/// [`EpistemicStratifiedPlan`]; the resolved positive atom over `r` supplies
 /// `Y`'s declared column type so the schema compiler does not reject the augmented
 /// `out(X, Y)` head as unsafe.
 ///
@@ -1743,9 +2554,16 @@ pub fn reduce_epistemic_program_to_ordinary(program: &Program) -> Program {
 /// resolve here therefore NEVER drives runtime data: it only types columns. It is not
 /// used by the single/joint or Case-A EXECUTION reduce, so it cannot resolve a modal
 /// into a join over an UN-gated candidate relation.
-pub fn reduce_epistemic_program_to_ordinary_for_stratified_schema(program: &Program) -> Program {
+pub fn reduce_epistemic_program_to_ordinary_for_stratified_schema(
+    program: &Program,
+) -> Result<Program> {
     let determined = EpistemicallyDeterminedPredicates::analyze(program);
-    reduce_epistemic_program_to_ordinary_inner(program, &determined.determined)
+    let path_specific_rules = stratified_schema_reduction_overrides(program)?;
+    reduce_epistemic_program_to_ordinary_inner(
+        program,
+        &determined.determined,
+        &path_specific_rules,
+    )
 }
 
 /// Shared body of the epistemic-to-ordinary reduction.
@@ -1757,8 +2575,10 @@ pub fn reduce_epistemic_program_to_ordinary_for_stratified_schema(program: &Prog
 fn reduce_epistemic_program_to_ordinary_inner(
     program: &Program,
     schema_only_determined_resolve: &BTreeSet<String>,
-) -> Program {
-    let mut reduced = program.clone();
+    path_specific_rules: &BTreeMap<usize, crate::ast::Rule>,
+) -> Result<Program> {
+    let path_specific_rule_indices = path_specific_rules.keys().copied().collect::<BTreeSet<_>>();
+    validate_epistemic_relation_shapes(program, &path_specific_rule_indices)?;
 
     // FAEEL FOUNDED-MODEL EXTENSION: a rule whose head is supported ONLY by circular
     // modal self-support (`possible p`/`know p` over its own head, with no independent
@@ -1769,7 +2589,7 @@ fn reduce_epistemic_program_to_ordinary_inner(
     //
     // This is the structural foundedness DECISION (compile-time, reusing the exact
     // `has_independent_founded_support` / `has_tuple_level_independent_founded_support`
-    // predicates the legacy guard used) driving the EXTENSION COMPUTATION on the
+    // structural support predicates) driving the EXTENSION COMPUTATION on the
     // GPU/runtime path: the dropped rule simply removes the unfounded head's founding
     // base, and the existing GPU world-view validation then accepts the empty/founded
     // candidate. G91 keeps the filler (no drop), so `possible p` stays accepted —
@@ -1780,12 +2600,15 @@ fn reduce_epistemic_program_to_ordinary_inner(
     // stripped that variable is genuinely unbound (`UnsafeVariable`) in EVERY mode
     // (G91 included), so it must fall through to the existing safety path rather than
     // be silently elided. Dropping it would mask a mode-independent safety failure.
-    for index in faeel_unfounded_self_support_rule_indices(program)
-        .into_iter()
-        .rev()
-    {
-        reduced.rules.remove(index);
-    }
+    let removed_rule_indices = faeel_unfounded_exact_tuple_self_support_rule_indices(program);
+    let removed_rule_index_set = removed_rule_indices
+        .iter()
+        .copied()
+        .collect::<BTreeSet<_>>();
+    let active_original_rule_indices = (0..program.rules.len())
+        .filter(|index| !removed_rule_index_set.contains(index))
+        .collect::<Vec<_>>();
+    let mut reduced = program_without_rule_indices(program, &removed_rule_indices);
 
     // AUGMENTING positive modals over INVARIANT relations are resolved into positive
     // ordinary join atoms (instead of being stripped) so the augmented head columns
@@ -1808,21 +2631,28 @@ fn reduce_epistemic_program_to_ordinary_inner(
     // anti-join that does NOT range-restrict, so it is never resolved) over INVARIANT
     // targets (a still-modal / epistemic-derived target is NOT invariant, so it is
     // never resolved — its augmenting variable stays unbound and the reduced program
-    // fails closed). Non-augmenting modals keep the original strip-and-gate path, so
-    // every existing single/joint pilot (16/18/09/19/21) is untouched.
+    // fails closed). Non-augmenting modals keep the existing single- and joint-solver
+    // strip-and-gate path.
     let invariant = InvariantRelations::analyze(program);
 
-    // Heads where a positive-invariant modal was ACTUALLY resolved into a positive
-    // ordinary atom (i.e. a modal-only-bound output variable was genuinely augmented).
-    // ONLY these heads' declarations/queries are reconciled to the augmented arity.
-    // `append_body_local_tuple_key_variables_to_head` may spuriously append a
-    // modal-local variable that is ALSO positively bound (e.g. `Y` in the recursive
-    // `reach(X,Z) :- reach(X,Y), vertex(Z), know a(Y,Z)`), which must NOT trigger a
-    // declaration bump — that head is materialized at its original arity by the
-    // (Case-A) recursive engine, so bumping its declaration would corrupt the schema.
-    let mut resolved_augmented_heads: BTreeSet<String> = BTreeSet::new();
+    // Every rule whose internal head gains tuple-key columns must use a widened
+    // declaration. The recursive epistemic path has its own non-augmenting reducer;
+    // this single-pass reduction records the actual head transformation, including
+    // columns that an ordinary atom already binds. Rule indices retain the exact
+    // source signature because the head arity changes before reconciliation.
+    let mut augmented_rule_original_arities = BTreeMap::new();
 
-    for rule in &mut reduced.rules {
+    for ((rule_index, rule), original_rule_index) in reduced
+        .rules
+        .iter_mut()
+        .enumerate()
+        .zip(active_original_rule_indices)
+    {
+        if let Some(path_specific_rule) = path_specific_rules.get(&original_rule_index) {
+            *rule = path_specific_rule.clone();
+            continue;
+        }
+        let original_head_arity = rule.head.arity();
         // Head variables that NO non-epistemic positive body literal binds. After the
         // modal is stripped, an output (head) variable bound ONLY by the modal would
         // be unsafe in the reduced ordinary program. Computed BEFORE the head is
@@ -1832,6 +2662,9 @@ fn reduce_epistemic_program_to_ordinary_inner(
         // variables like `Y` in `one_hop(X) :- ..know edge(X,Y)` are covered here.)
         let modal_only_output_variables = modal_only_bound_output_variables(rule);
         append_body_local_tuple_key_variables_to_head(rule);
+        if rule.head.arity() > original_head_arity {
+            augmented_rule_original_arities.insert(rule_index, original_head_arity);
+        }
         let was_fact = rule.body.is_empty();
         let had_epistemic_body = rule
             .body
@@ -1846,7 +2679,6 @@ fn reduce_epistemic_program_to_ordinary_inner(
         // world view. A NEGATED modal (anti-join) never binds and is never resolved; a
         // still-modal / epistemic-derived target is NOT invariant and is never
         // resolved, so its unbound output variable correctly fails closed downstream.
-        let mut resolved_here = false;
         for lit in &mut rule.body {
             if let BodyLiteral::Epistemic(modal) = lit {
                 // The target is resolvable when it is INVARIANT (always — proven-sound
@@ -1854,19 +2686,15 @@ fn reduce_epistemic_program_to_ordinary_inner(
                 // it is epistemically DETERMINED. The determined relaxation is empty for
                 // the strict execution reduce, so an execution-path reduce never
                 // resolves a modal over a still-derived (un-gated) relation.
-                let resolvable_target = invariant.is_invariant(&modal.atom.predicate)
-                    || schema_only_determined_resolve.contains(&modal.atom.predicate);
-                if !modal.negated
-                    && resolvable_target
-                    && modal_atom_binds_output_variable(modal, &modal_only_output_variables)
-                {
+                if resolves_augmented_head_variable(
+                    modal,
+                    &modal_only_output_variables,
+                    &invariant,
+                    schema_only_determined_resolve,
+                ) {
                     *lit = BodyLiteral::Positive(modal.atom.clone());
-                    resolved_here = true;
                 }
             }
-        }
-        if resolved_here {
-            resolved_augmented_heads.insert(rule.head.predicate.clone());
         }
         rule.body
             .retain(|lit| !matches!(lit, BodyLiteral::Epistemic(_)));
@@ -1883,11 +2711,12 @@ fn reduce_epistemic_program_to_ordinary_inner(
     // augmented columns needed for the GPU tuple-key membership gate. The predicate
     // DECLARATION must be widened to the augmented arity, or the runtime would union
     // the augmented rule output against the narrow declared (empty) stub and fail with
-    // a schema mismatch. SCOPED to heads where the resolve actually fired (so a
-    // spuriously-appended-but-positively-bound recursive head like `reach` is NOT
-    // bumped). Infer each appended column's type from the resolved body atom.
-    let augmented_heads =
-        reconcile_augmented_head_declarations(&mut reduced, &resolved_augmented_heads);
+    // a schema mismatch. Infer each appended column's type from the positive body
+    // atom that binds it; modal-only columns use the resolved invariant atom.
+    qualify_extensional_multi_arity_predicates(&mut reduced, program, &removed_rule_index_set);
+
+    let augmented_signatures =
+        reconcile_augmented_head_declarations(&mut reduced, &augmented_rule_original_arities)?;
 
     // Drop reduced-program queries that reference an AUGMENTED head: the reduced
     // relation is now arity-bumped, so an original arity-N query over it would union
@@ -1898,10 +2727,10 @@ fn reduce_epistemic_program_to_ordinary_inner(
     // (`queried_predicates`) reads the ORIGINAL program's queries, so dropping the
     // redundant reduced query here is inert for display and only removes the crash.
     // Non-augmented epistemic heads keep their arity-matched reduced queries untouched.
-    if !augmented_heads.is_empty() {
-        reduced
-            .queries
-            .retain(|query| !augmented_heads.contains(&query.atom.predicate));
+    if !augmented_signatures.is_empty() {
+        reduced.queries.retain(|query| {
+            !augmented_signatures.contains_key(&(query.atom.predicate.clone(), query.atom.arity()))
+        });
     }
 
     // Constraints that contain epistemic literals are world-view integrity
@@ -1917,58 +2746,33 @@ fn reduce_epistemic_program_to_ordinary_inner(
             .any(|lit| matches!(lit, BodyLiteral::Epistemic(_)))
     });
 
-    reduced
+    Ok(reduced)
 }
 
-/// Reduce a Case-A recursive epistemic program to an equivalent ordinary recursive
-/// program for the existing fixpoint engine.
+/// Reduce an admitted recursive epistemic program to an ordinary program for the
+/// existing fixpoint engine.
 ///
 /// Unlike [`reduce_epistemic_program_to_ordinary`] (which strips modal literals and
 /// gates the single-pass result post hoc), this RESOLVES each positive `know`/
 /// `possible` literal to its gated relation by rewriting it into an ordinary positive
-/// body atom over the same predicate. Because the modal relation is invariant (EDB or
-/// a lower non-recursive, non-epistemic stratum — proved by
-/// [`classify_recursive_epistemic_program`]), its extension is the accepted world
-/// view's extension, so the rewrite preserves modal semantics while letting the
-/// recursive/semi-naive engine join the recursion against the gated relation at every
-/// iteration. The modal atom's variables become ordinary join variables (no hidden
-/// head columns are appended), which fixes both the missing in-loop gate and the
-/// arity mismatch that make the post-hoc reduction single-pass-only.
+/// body atom over the same predicate. An invariant modal target becomes a fixed join;
+/// a co-evolving FAEEL target becomes a recursive join whose least fixpoint is its
+/// founded extension. Gelfond-1991 compatibility cycles are intercepted by
+/// [`try_prepare_g91_compatibility_reduction`] and require their explicit descending
+/// tuple fixpoint; this ordinary reducer never deletes those gates. Modal variables
+/// become ordinary join variables, so tuple transitions remain inside the fixpoint
+/// instead of being approximated by a post-hoc single-pass gate.
 ///
-/// Callers MUST first prove the program is Case A via
-/// [`classify_recursive_epistemic_program`]; this function assumes that contract.
+/// Callers MUST first admit the program through
+/// [`classify_recursive_epistemic_program`]; this function assumes that contract for
+/// every supported recursive class.
 pub fn reduce_case_a_epistemic_program_to_ordinary(program: &Program) -> Program {
     let mut reduced = program.clone();
-    let mode = program.directives.epistemic_mode_or_default();
-    let invariant = InvariantRelations::analyze(program);
     for rule in &mut reduced.rules {
-        for lit in &mut rule.body {
-            if let BodyLiteral::Epistemic(modal) = lit {
-                // Case A admits modal literals over invariant relations. Case B also
-                // routes here: FAEEL positive co-evolving modals resolve to ordinary
-                // recursive atoms (founded least fixpoint), while G91 positive
-                // `possible` over a NON-invariant target is the compatibility
-                // self-support assumption and drops to a tautological conjunct.
-                *lit = if mode == EpistemicMode::G91
-                    && modal.op == EpistemicOp::Possible
-                    && !modal.negated
-                    && !invariant.is_invariant(&modal.atom.predicate)
-                {
-                    BodyLiteral::Comparison(Comparison {
-                        left: Term::Integer(1),
-                        op: CompOp::Eq,
-                        right: Term::Integer(1),
-                    })
-                } else if modal.negated {
-                    BodyLiteral::Negated(modal.atom.clone())
-                } else {
-                    BodyLiteral::Positive(modal.atom.clone())
-                };
-            }
-        }
+        resolve_recursive_epistemic_rule_modals(rule);
     }
-    // World-view integrity constraints have no place in a Case-A ordinary program: the
-    // recursion already joins against the gated relations. Drop any constraint that
+    // World-view integrity constraints have no place in this ordinary recursive
+    // program: the recursion already joins against the resolved relations. Drop any constraint that
     // still references a modal literal (purely relational constraints are retained).
     reduced.constraints.retain(|constraint| {
         !constraint
@@ -1976,7 +2780,50 @@ pub fn reduce_case_a_epistemic_program_to_ordinary(program: &Program) -> Program
             .iter()
             .any(|lit| matches!(lit, BodyLiteral::Epistemic(_)))
     });
+    qualify_extensional_multi_arity_predicates(&mut reduced, program, &BTreeSet::new());
     reduced
+}
+
+/// Reduce the surviving acyclic portion of a FAEEL program after exact unfounded
+/// self-support has been removed.
+///
+/// The removed cycle established that this source entered the founded recursive
+/// route, but the remaining rules no longer need iteration through a modal edge.
+/// Resolving their modal literals to ordinary atoms preserves the now-determined
+/// founded extension and, unlike the single-pass candidate reducer, keeps every
+/// surviving gate load-bearing. Modal integrity constraints are resolved as ordinary
+/// constraints because the surviving program has a single determined model.
+fn reduce_founded_epistemic_program_to_ordinary(program: &Program) -> Program {
+    let mut reduced = program.clone();
+    for rule in &mut reduced.rules {
+        resolve_recursive_epistemic_rule_modals(rule);
+    }
+    for constraint in &mut reduced.constraints {
+        for literal in &mut constraint.body {
+            let BodyLiteral::Epistemic(modal) = literal else {
+                continue;
+            };
+            *literal = if modal.negated {
+                BodyLiteral::Negated(modal.atom.clone())
+            } else {
+                BodyLiteral::Positive(modal.atom.clone())
+            };
+        }
+    }
+    qualify_extensional_multi_arity_predicates(&mut reduced, program, &BTreeSet::new());
+    reduced
+}
+
+fn resolve_recursive_epistemic_rule_modals(rule: &mut crate::ast::Rule) {
+    for literal in &mut rule.body {
+        if let BodyLiteral::Epistemic(modal) = literal {
+            *literal = if modal.negated {
+                BodyLiteral::Negated(modal.atom.clone())
+            } else {
+                BodyLiteral::Positive(modal.atom.clone())
+            };
+        }
+    }
 }
 
 /// Output (head) variables of `rule` that are bound ONLY by epistemic literals, i.e.
@@ -1990,19 +2837,7 @@ pub fn reduce_case_a_epistemic_program_to_ordinary(program: &Program) -> Program
 /// it is resolved into a positive ordinary atom. Computed from the ORIGINAL rule,
 /// before the head is mutated by augmentation.
 fn modal_only_bound_output_variables(rule: &crate::ast::Rule) -> BTreeSet<String> {
-    // Variables bound by a positive non-epistemic body literal (positive atoms,
-    // `is`-expressions, and univ all introduce bindings; comparisons and negated atoms
-    // do not range-restrict).
-    let mut positively_bound: BTreeSet<&str> = BTreeSet::new();
-    for lit in &rule.body {
-        if let BodyLiteral::Positive(atom) = lit {
-            for term in &atom.terms {
-                if let Term::Variable(name) = term {
-                    positively_bound.insert(name.as_str());
-                }
-            }
-        }
-    }
+    let positively_bound = non_epistemic_bound_variables(&rule.body);
 
     // Candidate output variables: every variable occurring in the user-visible head
     // plus every modal-local variable (which augmentation will append to the head).
@@ -2041,6 +2876,587 @@ fn modal_atom_binds_output_variable(
     )
 }
 
+fn resolves_augmented_head_variable(
+    modal: &EpistemicLiteral,
+    modal_only_output_variables: &BTreeSet<String>,
+    invariant: &InvariantRelations,
+    schema_only_determined_resolve: &BTreeSet<String>,
+) -> bool {
+    !modal.negated
+        && (invariant.is_invariant(&modal.atom.predicate)
+            || schema_only_determined_resolve.contains(&modal.atom.predicate))
+        && modal_atom_binds_output_variable(modal, modal_only_output_variables)
+}
+
+fn record_predicate_signature(
+    signatures: &mut BTreeMap<String, BTreeSet<usize>>,
+    atom: &crate::ast::Atom,
+) {
+    signatures
+        .entry(atom.predicate.clone())
+        .or_default()
+        .insert(atom.arity());
+}
+
+fn record_body_predicate_signatures(
+    signatures: &mut BTreeMap<String, BTreeSet<usize>>,
+    body: &[BodyLiteral],
+) {
+    for literal in body {
+        match literal {
+            BodyLiteral::Positive(atom) | BodyLiteral::Negated(atom) => {
+                record_predicate_signature(signatures, atom);
+            }
+            BodyLiteral::Epistemic(modal) => {
+                let eir_terms = modal
+                    .atom
+                    .terms
+                    .iter()
+                    .map(convert_term)
+                    .collect::<Vec<_>>();
+                // Structured-key validation owns the typed error for unsupported
+                // shapes. Keep this identity census total for reducers that inspect
+                // the source before lowering; valid keys use the exact same
+                // production flattener as planning, while an invalid key retains its
+                // source arity until validation rejects it.
+                let arity = flatten_structured_key_terms(&modal.atom.predicate, &eir_terms)
+                    .map(|(arity, _, _)| arity)
+                    .unwrap_or_else(|_| modal.atom.arity());
+                signatures
+                    .entry(modal.atom.predicate.clone())
+                    .or_default()
+                    .insert(arity);
+            }
+            BodyLiteral::Comparison(_) | BodyLiteral::IsExpr(_) | BodyLiteral::Univ(_) => {}
+        }
+    }
+}
+
+fn collect_epistemic_relation_identities(
+    program: &Program,
+    removed_rules: &BTreeSet<usize>,
+) -> (BTreeMap<String, BTreeSet<usize>>, BTreeSet<String>) {
+    let mut source_arities: BTreeMap<String, BTreeSet<usize>> = BTreeMap::new();
+    for declaration in &program.predicates {
+        source_arities
+            .entry(declaration.name.clone())
+            .or_default()
+            .insert(declaration.arity());
+    }
+
+    let mut derived_predicates = BTreeSet::new();
+    for (index, rule) in program.rules.iter().enumerate() {
+        if removed_rules.contains(&index) {
+            continue;
+        }
+        record_predicate_signature(&mut source_arities, &rule.head);
+        record_body_predicate_signatures(&mut source_arities, &rule.body);
+        if !rule.body.is_empty() {
+            derived_predicates.insert(rule.head.predicate.clone());
+        }
+    }
+    for constraint in &program.constraints {
+        record_body_predicate_signatures(&mut source_arities, &constraint.body);
+    }
+    for query in &program.queries {
+        record_predicate_signature(&mut source_arities, &query.atom);
+    }
+    for fact in &program.prob_facts {
+        record_predicate_signature(&mut source_arities, &fact.atom);
+    }
+    for disjunction in &program.annotated_disjunctions {
+        for choice in &disjunction.choices {
+            record_predicate_signature(&mut source_arities, &choice.atom);
+        }
+    }
+    for evidence in &program.evidence {
+        record_predicate_signature(&mut source_arities, &evidence.atom);
+    }
+    for query in &program.prob_queries {
+        record_predicate_signature(&mut source_arities, &query.atom);
+    }
+    for declaration in &program.neural_predicates {
+        record_predicate_signature(&mut source_arities, &declaration.predicate);
+    }
+    for rule in &program.learnable_rules {
+        record_predicate_signature(&mut source_arities, &rule.head);
+        record_body_predicate_signatures(&mut source_arities, &rule.body);
+        if !rule.body.is_empty() {
+            derived_predicates.insert(rule.head.predicate.clone());
+        }
+    }
+
+    (source_arities, derived_predicates)
+}
+
+fn all_multi_arity_predicates(program: &Program) -> BTreeSet<String> {
+    collect_epistemic_relation_identities(program, &BTreeSet::new())
+        .0
+        .into_iter()
+        .filter_map(|(predicate, arities)| (arities.len() > 1).then_some(predicate))
+        .collect()
+}
+
+fn qualify_atom_for_extensional_multi_arity(
+    atom: &mut crate::ast::Atom,
+    predicates: &BTreeSet<String>,
+) {
+    if predicates.contains(&atom.predicate) {
+        atom.predicate = format!("{}/{}", atom.predicate, atom.arity());
+    }
+}
+
+fn qualify_body_for_extensional_multi_arity(
+    body: &mut [BodyLiteral],
+    predicates: &BTreeSet<String>,
+) {
+    for literal in body {
+        match literal {
+            BodyLiteral::Positive(atom) | BodyLiteral::Negated(atom) => {
+                qualify_atom_for_extensional_multi_arity(atom, predicates);
+            }
+            BodyLiteral::Epistemic(modal) => {
+                qualify_atom_for_extensional_multi_arity(&mut modal.atom, predicates);
+            }
+            BodyLiteral::Comparison(_) | BodyLiteral::IsExpr(_) | BodyLiteral::Univ(_) => {}
+        }
+    }
+}
+
+/// Return extensional predicate names whose runtime identity must include arity.
+///
+/// The census covers every source surface that can name a relation, including
+/// constraints, probabilistic constructs, neural declarations, and learnable
+/// rules. FAEEL rules removed as unfounded support do not make a predicate derived
+/// or add a live signature. Reducers and fact upload must use this same set so a
+/// source fact and its compiled scan always receive the same runtime name.
+pub fn epistemic_extensional_multi_arity_predicates(program: &Program) -> BTreeSet<String> {
+    let removed_rules = faeel_unfounded_exact_tuple_self_support_rule_indices(program)
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+    extensional_multi_arity_predicates(program, &removed_rules)
+}
+
+fn extensional_multi_arity_predicates(
+    program: &Program,
+    removed_rules: &BTreeSet<usize>,
+) -> BTreeSet<String> {
+    let (source_arities, derived_predicates) =
+        collect_epistemic_relation_identities(program, removed_rules);
+    source_arities
+        .into_iter()
+        .filter_map(|(predicate, arities)| {
+            (arities.len() > 1 && !derived_predicates.contains(&predicate)).then_some(predicate)
+        })
+        .collect()
+}
+
+/// Give each extensional source signature the same arity-qualified runtime name
+/// used by the GPU fact loader.
+///
+/// This transformation is limited to predicates with no active defining rule.
+/// Derived predicates are validated separately because their public output and
+/// recursive relation identity remain name-keyed.
+fn qualify_extensional_multi_arity_predicates(
+    reduced: &mut Program,
+    source: &Program,
+    removed_rules: &BTreeSet<usize>,
+) {
+    let predicates = extensional_multi_arity_predicates(source, removed_rules);
+    qualify_predicate_signatures(reduced, &predicates);
+}
+
+/// Apply canonical name-and-arity identities to every AST surface naming one of
+/// `predicates`. Runtime reduction calls this only for extensional multi-arity names;
+/// source validation calls it for every multi-arity name so each authored signature
+/// retains its own declarations and clauses while being checked.
+fn qualify_predicate_signatures(reduced: &mut Program, predicates: &BTreeSet<String>) {
+    if predicates.is_empty() {
+        return;
+    }
+
+    for declaration in &mut reduced.predicates {
+        if predicates.contains(&declaration.name) {
+            declaration.name = format!("{}/{}", declaration.name, declaration.arity());
+        }
+    }
+    for rule in &mut reduced.rules {
+        qualify_atom_for_extensional_multi_arity(&mut rule.head, predicates);
+        qualify_body_for_extensional_multi_arity(&mut rule.body, predicates);
+    }
+    for constraint in &mut reduced.constraints {
+        qualify_body_for_extensional_multi_arity(&mut constraint.body, predicates);
+    }
+    for query in &mut reduced.queries {
+        qualify_atom_for_extensional_multi_arity(&mut query.atom, predicates);
+    }
+    for fact in &mut reduced.prob_facts {
+        qualify_atom_for_extensional_multi_arity(&mut fact.atom, predicates);
+    }
+    for disjunction in &mut reduced.annotated_disjunctions {
+        for choice in &mut disjunction.choices {
+            qualify_atom_for_extensional_multi_arity(&mut choice.atom, predicates);
+        }
+    }
+    for evidence in &mut reduced.evidence {
+        qualify_atom_for_extensional_multi_arity(&mut evidence.atom, predicates);
+    }
+    for query in &mut reduced.prob_queries {
+        qualify_atom_for_extensional_multi_arity(&mut query.atom, predicates);
+    }
+    for declaration in &mut reduced.neural_predicates {
+        qualify_atom_for_extensional_multi_arity(&mut declaration.predicate, predicates);
+    }
+    for rule in &mut reduced.learnable_rules {
+        qualify_atom_for_extensional_multi_arity(&mut rule.head, predicates);
+        qualify_body_for_extensional_multi_arity(&mut rule.body, predicates);
+    }
+}
+
+/// Validate the name-keyed runtime identity used for derived epistemic
+/// relations and return every authored predicate signature.
+///
+/// Pure extensional predicates may use the same name at multiple arities because
+/// their reduced runtime identities are arity-qualified. Once a predicate is
+/// derived, however, the ordinary compiler and output materializer assign one
+/// relation identity to its name. Every occurrence is included here so a query,
+/// body atom, declaration, or auxiliary probabilistic construct cannot alias a
+/// derived relation at a different arity.
+fn validate_epistemic_derived_relation_identity(
+    program: &Program,
+    removed_rules: &BTreeSet<usize>,
+) -> Result<BTreeMap<String, BTreeSet<usize>>> {
+    let (source_arities, derived_predicates) =
+        collect_epistemic_relation_identities(program, removed_rules);
+    for predicate in derived_predicates {
+        let arities = source_arities
+            .get(&predicate)
+            .expect("derived predicate has a source signature");
+        if arities.len() > 1 {
+            return Err(XlogError::UnsupportedEpistemicConstruct {
+                construct: "epistemic derived predicate schema".to_string(),
+                context: format!(
+                    "derived predicate `{predicate}` uses multiple source arities {arities:?}; \
+                     epistemic derived relations require one source signature per predicate name"
+                ),
+            });
+        }
+    }
+
+    Ok(source_arities)
+}
+
+/// Ensure every clause for an augmented predicate signature lowers to one internal
+/// relation arity.
+///
+/// A modal-local output variable adds hidden tuple-key columns to a rule head. If a
+/// sibling clause for the same original signature produces a different number of
+/// columns, the clauses cannot be unioned into one relation without inventing values
+/// that the shorter clause does not bind. Reject that unsupported shape before any
+/// reduced program reaches schema inference.
+fn validate_epistemic_relation_shapes(
+    program: &Program,
+    non_augmenting_rule_indices: &BTreeSet<usize>,
+) -> Result<()> {
+    let removed_rules = faeel_unfounded_exact_tuple_self_support_rule_indices(program)
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+    let active_rules = program
+        .rules
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| {
+            !removed_rules.contains(index) && !non_augmenting_rule_indices.contains(index)
+        })
+        .collect::<Vec<_>>();
+
+    validate_epistemic_derived_relation_identity(program, &removed_rules)?;
+
+    let mut reduced_rule_arities = Vec::with_capacity(active_rules.len());
+    let mut augmented_targets: BTreeMap<(String, usize), usize> = BTreeMap::new();
+
+    for (_, rule) in &active_rules {
+        let original_signature = (rule.head.predicate.clone(), rule.head.arity());
+        let mut reduced_rule = (*rule).clone();
+        append_body_local_tuple_key_variables_to_head(&mut reduced_rule);
+        let reduced_arity = reduced_rule.head.arity();
+
+        if reduced_arity > original_signature.1 {
+            augmented_targets
+                .entry(original_signature.clone())
+                .and_modify(|target| *target = (*target).max(reduced_arity))
+                .or_insert(reduced_arity);
+        }
+        reduced_rule_arities.push((original_signature, reduced_arity));
+    }
+
+    for ((predicate, original_arity), target_arity) in augmented_targets {
+        let arities = reduced_rule_arities
+            .iter()
+            .filter(|((candidate, arity), _)| candidate == &predicate && *arity == original_arity)
+            .map(|(_, arity)| *arity)
+            .collect::<BTreeSet<_>>();
+        if arities.len() != 1 || !arities.contains(&target_arity) {
+            return Err(XlogError::UnsupportedEpistemicConstruct {
+                construct: "epistemic augmented predicate schema".to_string(),
+                context: format!(
+                    "rules defining `{predicate}/{original_arity}` lower to incompatible \
+                     internal arities {arities:?}; every clause for one predicate signature \
+                     must bind the same augmented tuple shape"
+                ),
+            });
+        }
+
+        for query in program.queries.iter().filter(|query| {
+            query.atom.predicate == predicate && query.atom.arity() == original_arity
+        }) {
+            let mut variables = BTreeSet::new();
+            let unconstrained = query.atom.terms.iter().all(|term| match term {
+                Term::Variable(name) => name != "_" && variables.insert(name.as_str()),
+                Term::Anonymous
+                | Term::Integer(_)
+                | Term::Float(_)
+                | Term::String(_)
+                | Term::Symbol(_)
+                | Term::List(_)
+                | Term::Cons { .. }
+                | Term::Compound { .. }
+                | Term::PredRef(_)
+                | Term::Aggregate(_) => false,
+            });
+            if !unconstrained {
+                return Err(XlogError::UnsupportedEpistemicConstruct {
+                    construct: "epistemic augmented head query".to_string(),
+                    context: format!(
+                        "query `{predicate}/{original_arity}` is not a tuple of distinct named \
+                         variables; an augmented epistemic head can currently surface only \
+                         queries whose arguments are distinct named variables"
+                    ),
+                });
+            }
+        }
+    }
+
+    let eir = build_eir(program)?;
+    let mut clauses_by_signature: BTreeMap<(String, usize), Vec<(usize, &crate::ast::Rule)>> =
+        BTreeMap::new();
+    for (rule_index, rule) in active_rules {
+        clauses_by_signature
+            .entry((rule.head.predicate.clone(), rule.head.arity()))
+            .or_default()
+            .push((rule_index, rule));
+    }
+    for ((predicate, arity), clauses) in clauses_by_signature {
+        if clauses.len() > 1
+            && clauses.iter().any(|(_, rule)| {
+                rule.body
+                    .iter()
+                    .any(|literal| matches!(literal, BodyLiteral::Epistemic(_)))
+            })
+            && !epistemic_rule_union_gates_are_redundant(program, &eir, &clauses)
+        {
+            return Err(XlogError::UnsupportedEpistemicConstruct {
+                construct: "epistemic rule-union materialization".to_string(),
+                context: format!(
+                    "predicate `{predicate}/{arity}` has multiple defining clauses and at least \
+                     one epistemic clause; single-pass materialization cannot preserve \
+                     per-clause modal provenance, so it cannot safely filter the clause union"
+                ),
+            });
+        }
+    }
+
+    Ok(())
+}
+
+/// Prove that applying one clause's modal filters to an already-unioned relation
+/// cannot remove rows contributed by its ordinary sibling clauses.
+///
+/// The single-pass materializer has no per-clause provenance. A multi-clause head is
+/// therefore admitted only when either every clause has the same normalized modal
+/// conjunction relative to its output columns, or there is exactly one epistemic
+/// clause and every one of its modal gates is positive and provably true for every
+/// candidate row:
+///
+/// - a ground atom has unconditional ordinary support from explicit facts/rules; or
+/// - the modal atom is exactly a bijective all-variable clause head tuple and that
+///   tuple has independent founded support under the clause's positive relational
+///   domain; or
+/// - G91 admits that same exact tuple under a positive `possible` self-support gate.
+///
+/// Equal conjunctions distribute over a union. The exact-head proofs are safe because
+/// ordinary sibling clauses derive each head tuple directly, while the epistemic
+/// clause's own rows are founded or explicitly self-supported under G91. Repeated
+/// variables, constants, and wildcards are not bijective: they can map a sibling row
+/// to a different modal key and therefore remain unsupported unless every clause has
+/// the same normalized filter.
+fn epistemic_rule_union_gates_are_redundant(
+    program: &Program,
+    eir: &EirProgram,
+    clauses: &[(usize, &crate::ast::Rule)],
+) -> bool {
+    let invariant = InvariantRelations::analyze(program);
+    let mut normalized_conjunctions = clauses.iter().map(|(rule_index, _)| {
+        eir.rules
+            .get(*rule_index)
+            .and_then(|rule| normalized_rule_union_gates(rule, &invariant))
+    });
+    if let Some(Some(first)) = normalized_conjunctions.next() {
+        if !first.is_empty()
+            && normalized_conjunctions.all(|candidate| {
+                candidate.is_some_and(|candidate| rule_union_gate_sets_equal(&first, &candidate))
+            })
+        {
+            return true;
+        }
+    }
+
+    let epistemic_clauses = clauses
+        .iter()
+        .filter(|(_, rule)| {
+            rule.body
+                .iter()
+                .any(|literal| matches!(literal, BodyLiteral::Epistemic(_)))
+        })
+        .collect::<Vec<_>>();
+    if epistemic_clauses.is_empty() {
+        return true;
+    }
+
+    // Every modal filter is redundant when it is a positive ground atom with an
+    // unconditional founded proof. This remains distributive even when several
+    // sibling clauses use different ground modal atoms: every gate is true before
+    // the clause outputs are unioned, so no per-clause provenance is needed later.
+    let every_gate_is_unconditionally_true = epistemic_clauses.iter().all(|(rule_index, _)| {
+        eir.rules.get(*rule_index).is_some_and(|eir_rule| {
+            let modal_literals = eir_rule
+                .body
+                .iter()
+                .filter_map(|literal| match literal {
+                    EirBodyLiteral::Epistemic(modal) => Some(modal),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            !modal_literals.is_empty()
+                && modal_literals.iter().all(|modal| {
+                    !modal.negated && has_unconditional_ground_founded_support(eir, &modal.atom)
+                })
+        })
+    });
+    if every_gate_is_unconditionally_true {
+        return true;
+    }
+
+    if epistemic_clauses.len() != 1 {
+        return false;
+    }
+
+    let (rule_index, _) = epistemic_clauses[0];
+    let Some(eir_rule) = eir.rules.get(*rule_index) else {
+        return false;
+    };
+    let modal_literals = eir_rule
+        .body
+        .iter()
+        .filter_map(|literal| match literal {
+            EirBodyLiteral::Epistemic(modal) => Some(modal),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+
+    !modal_literals.is_empty()
+        && modal_literals.iter().all(|modal| {
+            !modal.negated
+                && (has_unconditional_ground_founded_support(eir, &modal.atom)
+                    || (modal.atom == eir_rule.head
+                        && eir_head_is_bijective_variable_tuple(&eir_rule.head)
+                        && ((eir.mode == EirEpistemicMode::G91
+                            && modal.op == EirEpistemicOp::Possible)
+                            || has_tuple_level_independent_founded_support(
+                                eir,
+                                eir_rule,
+                                &modal.atom,
+                            ))))
+        })
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum RuleUnionGateTerm {
+    OutputColumn(usize),
+    Literal(EirTerm),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RuleUnionGate {
+    predicate: String,
+    arity: usize,
+    terms: Vec<RuleUnionGateTerm>,
+    op: Option<EirEpistemicOp>,
+    negated: bool,
+}
+
+/// Normalize a clause's modal conjunction to the exact tuple-key binding that the
+/// materializer applies. Variable names are replaced by output-column positions, and
+/// `know`/`possible` are identified over invariant relations because those relations
+/// have one fixed extension in every accepted world.
+fn normalized_rule_union_gates(
+    rule: &xlog_ir::EirRule,
+    invariant: &InvariantRelations<'_>,
+) -> Option<Vec<RuleUnionGate>> {
+    let output_terms = augmented_eir_head_terms(rule);
+    let mut gates = Vec::new();
+    for literal in &rule.body {
+        let EirBodyLiteral::Epistemic(modal) = literal else {
+            continue;
+        };
+        let bound_columns = bound_output_columns_for_terms(&modal.atom.terms, &output_terms);
+        let terms = modal
+            .atom
+            .terms
+            .iter()
+            .zip(bound_columns)
+            .map(|(term, output_column)| match (term, output_column) {
+                (EirTerm::Variable(_), Some(column)) => {
+                    Some(RuleUnionGateTerm::OutputColumn(column))
+                }
+                (
+                    term @ (EirTerm::Anonymous
+                    | EirTerm::Integer(_)
+                    | EirTerm::FloatBits(_)
+                    | EirTerm::String(_)
+                    | EirTerm::Symbol(_)
+                    | EirTerm::PredRef(_)),
+                    None,
+                ) => Some(RuleUnionGateTerm::Literal(term.clone())),
+                _ => None,
+            })
+            .collect::<Option<Vec<_>>>()?;
+        let gate = RuleUnionGate {
+            predicate: modal.atom.predicate.clone(),
+            arity: modal.atom.arity,
+            terms,
+            op: (!invariant.is_invariant(&modal.atom.predicate)).then_some(modal.op),
+            negated: modal.negated,
+        };
+        if !gates.contains(&gate) {
+            gates.push(gate);
+        }
+    }
+    Some(gates)
+}
+
+fn rule_union_gate_sets_equal(left: &[RuleUnionGate], right: &[RuleUnionGate]) -> bool {
+    left.len() == right.len() && left.iter().all(|gate| right.contains(gate))
+}
+
+fn eir_head_is_bijective_variable_tuple(head: &xlog_ir::EirAtom) -> bool {
+    let mut variables = BTreeSet::new();
+    head.terms.iter().all(|term| match term {
+        EirTerm::Variable(name) => variables.insert(name),
+        _ => false,
+    })
+}
+
 /// Widen each predicate's declaration to the maximum arity of its (now possibly
 /// augmented) defining rule heads, inferring appended column types from the positive
 /// body atoms that bind the augmented head variables.
@@ -2049,54 +3465,64 @@ fn modal_atom_binds_output_variable(
 /// matching `PredDecl`, the runtime would union the augmented rule output against the
 /// narrow declared (empty) relation stub and fail with a schema mismatch.
 ///
-/// Only heads in `resolved_augmented_heads` (where a positive-invariant modal was
-/// genuinely resolved into a positive atom, range-restricting a modal-only-bound
-/// output variable) are reconciled; a head that merely had a positively-bound
-/// modal-local variable spuriously appended is NOT widened.
+/// Only rules in `augmented_rule_original_arities` are reconciled. Original arity is
+/// retained separately because augmentation has already changed the rule head by the
+/// time reconciliation runs.
 ///
-/// Returns the set of head predicates whose declaration was widened (i.e. whose rule
-/// heads were augmented beyond the original declared arity).
+/// Returns each original predicate signature that was augmented and its resulting
+/// arity, whether or not that signature has an explicit declaration.
 fn reconcile_augmented_head_declarations(
     reduced: &mut Program,
-    resolved_augmented_heads: &BTreeSet<String>,
-) -> BTreeSet<String> {
+    augmented_rule_original_arities: &BTreeMap<usize, usize>,
+) -> Result<BTreeMap<(String, usize), usize>> {
     use crate::ast::{PredColumn, TypeRef};
 
-    let mut augmented_heads = BTreeSet::new();
+    // Per original head signature: the maximum augmented rule-head arity and, per
+    // column position, an inferred type from a positive body atom (the resolved modal
+    // or any binder).
+    let mut augmented_signatures: BTreeMap<(String, usize), usize> = BTreeMap::new();
+    let mut inferred_types: BTreeMap<(String, usize), Vec<Option<TypeRef>>> = BTreeMap::new();
 
-    // Per head predicate: the maximum rule-head arity and, per column position, an
-    // inferred type from a positive body atom (the resolved modal or any binder).
-    let mut max_arity: BTreeMap<String, usize> = BTreeMap::new();
-    let mut inferred_types: BTreeMap<String, Vec<Option<TypeRef>>> = BTreeMap::new();
+    // Use the ordinary lowerer's fixed-point schema inference after extensional
+    // multi-arity names have been qualified. This is the same source of truth used
+    // by production compilation, so undeclared facts, transitive rule chains,
+    // declarations, domains, and arithmetic bindings all contribute their real
+    // scalar types instead of falling through to a guessed hidden-column type.
+    let mut lowerer = Lowerer::new();
+    lowerer.infer_schemas(reduced)?;
+    let schemas = lowerer.schemas().clone();
 
-    // Map predicate -> declared column types (for type inference of body atom columns).
-    let declared_types: BTreeMap<String, Vec<TypeRef>> = reduced
-        .predicates
-        .iter()
-        .map(|decl| (decl.name.clone(), decl.types.clone()))
-        .collect();
-
-    for rule in &reduced.rules {
+    for (rule_index, rule) in reduced.rules.iter().enumerate() {
         if rule.body.is_empty() {
             continue;
         }
-        // Only heads where the invariant-resolve genuinely fired are reconciled.
-        if !resolved_augmented_heads.contains(&rule.head.predicate) {
+        // Only rules where the invariant-resolve genuinely fired are reconciled.
+        let Some(&original_arity) = augmented_rule_original_arities.get(&rule_index) else {
+            continue;
+        };
+        let arity = rule.head.terms.len();
+        if arity <= original_arity {
             continue;
         }
-        let head = rule.head.predicate.as_str();
-        let arity = rule.head.terms.len();
-        let entry = max_arity.entry(head.to_string()).or_insert(0);
+        let signature = (rule.head.predicate.clone(), original_arity);
+        let entry = augmented_signatures.entry(signature.clone()).or_insert(0);
         if arity > *entry {
             *entry = arity;
         }
         let types = inferred_types
-            .entry(head.to_string())
+            .entry(signature)
             .or_insert_with(|| vec![None; arity]);
         if types.len() < arity {
             types.resize(arity, None);
         }
-        // Infer each head variable's type from a positive body atom that binds it.
+        let variable_types = lowerer.infer_rule_variable_types(rule, |atom, index| {
+            schemas
+                .get(&atom.predicate)
+                .and_then(|schema| schema.column_type(index))
+        })?;
+
+        // Infer each head variable's type from every binding form understood by
+        // ordinary lowering, including body atoms and deterministic `is` results.
         for (col, term) in rule.head.terms.iter().enumerate() {
             if types[col].is_some() {
                 continue;
@@ -2104,48 +3530,35 @@ fn reconcile_augmented_head_declarations(
             let Term::Variable(head_var) = term else {
                 continue;
             };
-            for lit in &rule.body {
-                let BodyLiteral::Positive(atom) = lit else {
-                    continue;
-                };
-                let Some(pos) = atom
-                    .terms
-                    .iter()
-                    .position(|t| matches!(t, Term::Variable(name) if name == head_var))
-                else {
-                    continue;
-                };
-                if let Some(decl_types) = declared_types.get(&atom.predicate) {
-                    if let Some(typ) = decl_types.get(pos) {
-                        types[col] = Some(typ.clone());
-                        break;
-                    }
-                }
+            if let Some((typ, _)) = variable_types.get(head_var) {
+                types[col] = Some(TypeRef::Scalar(*typ));
             }
         }
     }
 
     for decl in &mut reduced.predicates {
-        let Some(&target_arity) = max_arity.get(&decl.name) else {
+        let signature = (decl.name.clone(), decl.arity());
+        let Some(&target_arity) = augmented_signatures.get(&signature) else {
             continue;
         };
-        if target_arity <= decl.types.len() {
+        let mut columns = decl.schema_columns();
+        if target_arity <= columns.len() {
             continue;
         }
-        let inferred = inferred_types.get(&decl.name);
-        for col in decl.types.len()..target_arity {
+        let inferred = inferred_types.get(&signature);
+        for col in columns.len()..target_arity {
             let typ = inferred
                 .and_then(|types| types.get(col))
                 .and_then(|t| t.clone())
                 // Default appended columns to U32 (the modal relation key column type).
                 .unwrap_or(TypeRef::Scalar(xlog_core::ScalarType::U32));
-            decl.types.push(typ.clone());
-            decl.columns.push(PredColumn { name: None, typ });
+            columns.push(PredColumn { name: None, typ });
         }
-        augmented_heads.insert(decl.name.clone());
+        decl.types = columns.iter().map(|column| column.typ.clone()).collect();
+        decl.columns = columns;
     }
 
-    augmented_heads
+    Ok(augmented_signatures)
 }
 
 fn append_body_local_tuple_key_variables_to_head(rule: &mut crate::ast::Rule) {
@@ -2862,7 +4275,7 @@ impl EpistemicallyDeterminedPredicates {
         // base `r` via the existing membership filter. The acyclicity guard in
         // `head_is_determined` (self-reference returns false) plus the fixpoint's
         // monotonicity keep every recursive predicate OUT of `determined`, so a
-        // circular `know reach` in a recursive SCC (example 22) is never determined
+        // circular `know reach` in a recursive SCC is never determined
         // and stays fail-closed.
         let mut determined: BTreeSet<String> = BTreeSet::new();
         let mut changed = true;
@@ -2948,8 +4361,8 @@ impl EpistemicallyDeterminedPredicates {
 ///   at least one modal literal ranges over an epistemically-determined derived
 ///   head, and a sound stratification exists.
 /// - `Ok(None)` when no modal ranges over a determined derived head (the existing
-///   joint/split/single paths own the program — e.g. example 18's shared base
-///   modal, where the modal target `q` is EDB, not a determined derived head), OR
+///   joint/split/single paths own the program — for example, a shared modal whose
+///   target is extensional data rather than a determined derived head), OR
 ///   when the nested target is NOT determined (circular modality / recursion /
 ///   unfounded self-support is handed back to the recursive + FAEEL/G91 guards,
 ///   which keep ownership and fail closed there).
@@ -2960,7 +4373,7 @@ pub fn try_plan_stratified_epistemic_program(
 
     // A stratification is needed only when some modal literal ranges over a
     // DETERMINED epistemic-derived head. (A modal over a base/EDB predicate is the
-    // ordinary single/joint path — example 18 — and must NOT be intercepted.)
+    // ordinary single/joint path and must NOT be intercepted.)
     let mut needs_stratification = false;
     for rule in &program.rules {
         for lit in &rule.body {
@@ -2976,6 +4389,10 @@ pub fn try_plan_stratified_epistemic_program(
     if !needs_stratification {
         return Ok(None);
     }
+    let removed_rules = faeel_unfounded_exact_tuple_self_support_rule_indices(program)
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+    validate_epistemic_derived_relation_identity(program, &removed_rules)?;
 
     // Assign each epistemic-derived head a stratum level = longest modal-dependency
     // chain to a determined head it gates over. Heads not determined cannot be
@@ -3028,7 +4445,49 @@ pub fn try_plan_stratified_epistemic_program(
         });
     }
 
+    // Validate each stratum according to the reducer that will execute it. An
+    // admissible recursive stratum resolves modal literals into ordinary rule bodies
+    // and never appends hidden head columns; non-recursive strata use the single-pass
+    // materializer and therefore require its union/shape checks.
+    for stratum in &strata {
+        if try_reduce_case_a_recursive_epistemic_program(&stratum.program)?.is_none() {
+            validate_epistemic_relation_shapes(&stratum.program, &BTreeSet::new())?;
+        }
+    }
+
     Ok(Some(EpistemicStratifiedPlan { strata }))
+}
+
+/// Build the rule rewrites used only for plan-wide schema inference in a
+/// stratified program.
+///
+/// Each recursive stratum must contribute schemas from the same recursive epistemic
+/// reducer selected for its executable plan. Applying the generic single-pass reducer
+/// to those rules would append hidden tuple-key columns that their actual recursive
+/// plan never produces.
+fn stratified_schema_reduction_overrides(
+    program: &Program,
+) -> Result<BTreeMap<usize, crate::ast::Rule>> {
+    let Some(plan) = try_plan_stratified_epistemic_program(program)? else {
+        return Ok(BTreeMap::new());
+    };
+
+    let mut overrides = BTreeMap::new();
+    for stratum in plan.strata {
+        if try_reduce_case_a_recursive_epistemic_program(&stratum.program)?.is_none() {
+            continue;
+        }
+        for rule_index in stratum.rule_indices {
+            let mut rule = program.rules.get(rule_index).cloned().ok_or_else(|| {
+                XlogError::Compilation(format!(
+                    "stratified epistemic rule index {rule_index} is outside the source program"
+                ))
+            })?;
+            resolve_recursive_epistemic_rule_modals(&mut rule);
+            overrides.insert(rule_index, rule);
+        }
+    }
+    Ok(overrides)
 }
 
 /// Assign each epistemic-derived head an integer stratum level.
@@ -3357,6 +4816,7 @@ pub fn compile_epistemic_gpu_split_execution_with_stats_snapshot(
     program: &Program,
     stats_snapshot: Option<&StatsSnapshot>,
 ) -> Result<EpistemicSplitExecutablePlan> {
+    validate_epistemic_relation_shapes(program, &BTreeSet::new())?;
     reject_epistemic_constraints(program)?;
     let split_plan = split_epistemic_program(program)?;
     let mut components = Vec::new();
@@ -3677,7 +5137,1082 @@ fn split_component_program(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ast::{PredColumn, PredDecl, TypeRef};
     use crate::parse_program;
+
+    #[test]
+    fn augmented_head_reconciliation_preserves_columns_only_declarations() {
+        let symbol = TypeRef::Scalar(xlog_core::ScalarType::Symbol);
+        let wide_integer = TypeRef::Scalar(xlog_core::ScalarType::I64);
+        let mut program = Program::new();
+        program.predicates = vec![
+            PredDecl {
+                name: "result".to_string(),
+                types: Vec::new(),
+                columns: vec![PredColumn {
+                    name: Some("key".to_string()),
+                    typ: symbol.clone(),
+                }],
+                is_private: false,
+            },
+            PredDecl {
+                name: "source".to_string(),
+                types: Vec::new(),
+                columns: vec![
+                    PredColumn {
+                        name: Some("key".to_string()),
+                        typ: symbol.clone(),
+                    },
+                    PredColumn {
+                        name: Some("value".to_string()),
+                        typ: wide_integer.clone(),
+                    },
+                ],
+                is_private: false,
+            },
+        ];
+        program.rules.push(crate::ast::Rule {
+            head: Atom {
+                predicate: "result".to_string(),
+                terms: vec![
+                    Term::Variable("Key".to_string()),
+                    Term::Variable("Value".to_string()),
+                ],
+            },
+            body: vec![BodyLiteral::Positive(Atom {
+                predicate: "source".to_string(),
+                terms: vec![
+                    Term::Variable("Key".to_string()),
+                    Term::Variable("Value".to_string()),
+                ],
+            })],
+        });
+        let resolved = BTreeMap::from([(0, 1)]);
+
+        let widened = reconcile_augmented_head_declarations(&mut program, &resolved)
+            .expect("reconcile augmented declaration");
+        let declaration = program
+            .predicates
+            .iter()
+            .find(|declaration| declaration.name == "result")
+            .unwrap();
+
+        assert_eq!(widened.get(&("result".to_string(), 1)), Some(&2));
+        assert_eq!(declaration.arity(), 2);
+        assert_eq!(
+            declaration.types,
+            vec![symbol.clone(), wide_integer.clone()]
+        );
+        assert_eq!(
+            declaration
+                .columns
+                .iter()
+                .map(|column| column.typ.clone())
+                .collect::<Vec<_>>(),
+            vec![symbol, wide_integer]
+        );
+    }
+
+    #[test]
+    fn augmented_head_reconciliation_uses_body_declarations_by_name_and_arity() {
+        let program = parse_program(
+            r#"
+            #pragma epistemic_mode = faeel
+            pred node(symbol).
+            pred source(symbol, i64).
+            pred source(u32).
+            pred result(symbol).
+            node(key).
+            source(key, 5000000000).
+            source(1).
+            result(X) :- node(X), know source(X, Y).
+            "#,
+        )
+        .expect("parse same-name multi-arity schema fixture");
+
+        let reduced = reduce_epistemic_program_to_ordinary_for_stratified_schema(&program)
+            .expect("same-name body declarations should reduce");
+        let result = reduced
+            .predicates
+            .iter()
+            .find(|declaration| declaration.name == "result")
+            .expect("missing result declaration");
+        let types = result
+            .schema_columns()
+            .into_iter()
+            .map(|column| column.typ)
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            types,
+            vec![
+                TypeRef::Scalar(xlog_core::ScalarType::Symbol),
+                TypeRef::Scalar(xlog_core::ScalarType::I64),
+            ]
+        );
+        assert!(reduced
+            .predicates
+            .iter()
+            .any(|declaration| declaration.name == "source/2"));
+        assert!(reduced
+            .predicates
+            .iter()
+            .any(|declaration| declaration.name == "source/1"));
+        crate::compile::Compiler::new()
+            .compile_program(&reduced)
+            .expect("arity-qualified reduced program should compile");
+        compile_epistemic_gpu_execution(&program)
+            .expect("production epistemic compilation should use the exact source signature");
+    }
+
+    #[test]
+    fn augmented_head_reconciliation_uses_undeclared_fixed_point_schemas() {
+        let sources = [
+            r#"
+                #pragma epistemic_mode = faeel
+                pred node(symbol).
+                pred result(symbol).
+                node(key).
+                edge(key, 5000000000).
+                result(X) :- node(X), know edge(X, Y).
+            "#,
+            r#"
+                #pragma epistemic_mode = faeel
+                pred node(symbol).
+                pred result(symbol).
+                node(key).
+                raw(key, 5000000000).
+                edge(X, Y) :- raw(X, Y).
+                result(X) :- node(X), know edge(X, Y).
+            "#,
+        ];
+
+        for source in sources {
+            let program = parse_program(source).expect("parse inferred-schema fixture");
+            let reduced = reduce_epistemic_program_to_ordinary(&program)
+                .expect("inferred modal source should reduce");
+            let result = reduced
+                .predicates
+                .iter()
+                .find(|declaration| declaration.name == "result")
+                .expect("missing result declaration");
+            assert_eq!(
+                result
+                    .schema_columns()
+                    .into_iter()
+                    .map(|column| column.typ)
+                    .collect::<Vec<_>>(),
+                vec![
+                    TypeRef::Scalar(xlog_core::ScalarType::Symbol),
+                    TypeRef::Scalar(xlog_core::ScalarType::I64),
+                ]
+            );
+            crate::compile::Compiler::new()
+                .compile_program(&reduced)
+                .expect("fixed-point inferred hidden-column type should compile");
+        }
+    }
+
+    #[test]
+    fn augmented_head_reconciliation_uses_arithmetic_binding_type() {
+        let program = parse_program(
+            r#"
+                #pragma epistemic_mode = faeel
+                pred node(symbol).
+                pred allowed(u64).
+                pred result(symbol).
+                node(key).
+                allowed(1).
+                result(X) :- node(X), Y is cast(1, u64), not know allowed(Y).
+            "#,
+        )
+        .expect("parse arithmetic-binding fixture");
+
+        let reduced = reduce_epistemic_program_to_ordinary(&program)
+            .expect("arithmetic-bound hidden column should reduce");
+        let result = reduced
+            .predicates
+            .iter()
+            .find(|declaration| declaration.name == "result")
+            .expect("missing result declaration");
+        assert_eq!(
+            result
+                .schema_columns()
+                .into_iter()
+                .map(|column| column.typ)
+                .collect::<Vec<_>>(),
+            vec![
+                TypeRef::Scalar(xlog_core::ScalarType::Symbol),
+                TypeRef::Scalar(xlog_core::ScalarType::U64),
+            ]
+        );
+        crate::compile::Compiler::new()
+            .compile_program(&reduced)
+            .expect("arithmetic-bound hidden-column type should compile");
+    }
+
+    #[test]
+    fn augmented_head_reconciliation_widens_only_the_original_signature() {
+        let mut reduced = parse_program(
+            r#"
+            pred edge(symbol, i64).
+            pred triple(symbol, i64, u32).
+            pred result(symbol, i64, u32).
+            pred result(symbol).
+            result(X, Y, Z) :- triple(X, Y, Z).
+            result(X, Y) :- edge(X, Y).
+            ?- result(A, B, C).
+            ?- result(X).
+            "#,
+        )
+        .expect("parse exact-signature reconciliation fixture");
+
+        let augmented =
+            reconcile_augmented_head_declarations(&mut reduced, &BTreeMap::from([(1, 1)]))
+                .expect("reconcile exact augmented signature");
+        let declaration_arities = reduced
+            .predicates
+            .iter()
+            .filter(|declaration| declaration.name == "result")
+            .map(PredDecl::arity)
+            .collect::<Vec<_>>();
+        let rule_arities = reduced
+            .rules
+            .iter()
+            .filter(|rule| rule.head.predicate == "result")
+            .map(|rule| rule.head.arity())
+            .collect::<Vec<_>>();
+        let query_arities = reduced
+            .queries
+            .iter()
+            .filter(|query| query.atom.predicate == "result")
+            .map(|query| query.atom.arity())
+            .collect::<Vec<_>>();
+
+        assert_eq!(augmented.get(&("result".to_string(), 1)), Some(&2));
+        assert_eq!(declaration_arities, vec![3, 2]);
+        assert_eq!(rule_arities, vec![3, 2]);
+        assert_eq!(query_arities, vec![3, 1]);
+    }
+
+    #[test]
+    fn augmented_undeclared_head_removes_its_original_query() {
+        let program = parse_program(
+            r#"
+            #pragma epistemic_mode = faeel
+            node(key).
+            edge(key, 5000000000).
+            result(X) :- node(X), know edge(X, Y).
+            ?- result(X).
+            "#,
+        )
+        .expect("parse undeclared augmented-head fixture");
+
+        let reduced = reduce_epistemic_program_to_ordinary_for_stratified_schema(&program)
+            .expect("undeclared augmented head should reduce");
+
+        assert!(reduced
+            .rules
+            .iter()
+            .any(|rule| rule.head.predicate == "result" && rule.head.arity() == 2));
+        assert!(!reduced
+            .queries
+            .iter()
+            .any(|query| query.atom.predicate == "result" && query.atom.arity() == 1));
+    }
+
+    #[test]
+    fn divergent_augmented_head_arities_are_rejected_before_reduction() {
+        let different_modal_widths = r#"
+            #pragma epistemic_mode = faeel
+            pred node(symbol).
+            pred edge(symbol, i64).
+            pred triple(symbol, i64, u32).
+            pred result(symbol).
+            node(key).
+            edge(key, 5000000000).
+            triple(key, 5000000000, 1).
+            result(X) :- node(X), know edge(X, Y).
+            result(X) :- node(X), know triple(X, Y, Z).
+        "#;
+        let ordinary_sibling = r#"
+            #pragma epistemic_mode = faeel
+            pred base(symbol).
+            pred node(symbol).
+            pred edge(symbol, i64).
+            pred result(symbol).
+            base(key).
+            node(key).
+            edge(key, 5000000000).
+            result(X) :- base(X).
+            result(X) :- node(X), know edge(X, Y).
+        "#;
+
+        for source in [different_modal_widths, ordinary_sibling] {
+            let program = parse_program(source).expect("parse divergent augmented-head fixture");
+            let errors = [
+                plan_epistemic_gpu_execution(&program)
+                    .expect_err("GPU planning must reject divergent reduced arities"),
+                reduce_epistemic_program_to_ordinary(&program)
+                    .expect_err("execution reduction must reject divergent arities"),
+                reduce_epistemic_program_to_ordinary_for_stratified_schema(&program)
+                    .expect_err("schema reduction must reject divergent arities"),
+            ];
+
+            for error in errors {
+                let message = error.to_string();
+                assert!(message.contains("epistemic augmented predicate schema"));
+                assert!(message.contains("result/1"), "{message}");
+                assert!(
+                    message.contains("incompatible internal arities"),
+                    "{message}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn single_pass_epistemic_rule_unions_without_clause_provenance_are_rejected() {
+        let fixtures = [
+            r#"
+                #pragma epistemic_mode = faeel
+                pred p().
+                pred q().
+                pred result(symbol).
+                q().
+                result(a) :- know p().
+                result(b) :- know q().
+                ?- result(X).
+            "#,
+            r#"
+                #pragma epistemic_mode = faeel
+                pred q().
+                pred result(symbol).
+                result(a).
+                result(b) :- know q().
+                ?- result(X).
+            "#,
+        ];
+
+        for source in fixtures {
+            let program = parse_program(source).expect("parse epistemic rule-union fixture");
+            let errors = [
+                plan_epistemic_gpu_execution(&program)
+                    .expect_err("GPU planning must reject a provenance-free rule union"),
+                reduce_epistemic_program_to_ordinary(&program)
+                    .expect_err("execution reduction must reject a provenance-free rule union"),
+                reduce_epistemic_program_to_ordinary_for_stratified_schema(&program)
+                    .expect_err("schema reduction must reject a provenance-free rule union"),
+            ];
+            for error in errors {
+                let message = error.to_string();
+                assert!(message.contains("epistemic rule-union materialization"));
+                assert!(message.contains("result/1"), "{message}");
+                assert!(message.contains("per-clause modal provenance"), "{message}");
+            }
+        }
+    }
+
+    #[test]
+    fn equivalent_epistemic_rule_union_filters_are_distributive() {
+        let program = parse_program(
+            r#"
+                #pragma epistemic_mode = faeel
+                pred target(u32).
+                pred left(u32).
+                pred right(u32).
+                pred result(u32).
+                target(1).
+                target(2).
+                left(1).
+                right(2).
+                result(X) :- left(X), know target(X).
+                result(Y) :- right(Y), possible target(Y).
+                ?- result(Value).
+            "#,
+        )
+        .expect("parse equivalent-filter rule union");
+
+        plan_epistemic_gpu_execution(&program)
+            .expect("equivalent invariant modal filters must distribute over the rule union");
+        reduce_epistemic_program_to_ordinary(&program)
+            .expect("execution reduction must preserve an equivalent-filter rule union");
+        reduce_epistemic_program_to_ordinary_for_stratified_schema(&program)
+            .expect("schema reduction must preserve an equivalent-filter rule union");
+    }
+
+    #[test]
+    fn independently_founded_ground_gates_are_distributive_across_rule_union() {
+        let program = parse_program(
+            r#"
+                #pragma epistemic_mode = g91
+                pred left(u32).
+                pred right(u32).
+                pred result(u32).
+                left(1).
+                right(1).
+                result(1) :- possible left(1).
+                result(2) :- possible right(1).
+                ?- result(Value).
+            "#,
+        )
+        .expect("parse independently founded ground-gate rule union");
+
+        plan_epistemic_gpu_execution(&program)
+            .expect("independently founded ground gates must distribute over the rule union");
+        reduce_epistemic_program_to_ordinary(&program)
+            .expect("execution reduction must preserve independently founded ground gates");
+    }
+
+    #[test]
+    fn g91_exact_head_possible_union_preserves_compatibility_self_support() {
+        let program = parse_program(
+            r#"
+                #pragma epistemic_mode = g91
+                pred seed(u32).
+                pred node(u32).
+                pred p(u32).
+                seed(1).
+                node(2).
+                p(X) :- seed(X).
+                p(X) :- node(X), possible p(X).
+                ?- p(X).
+            "#,
+        )
+        .expect("parse G91 exact-head possibility union");
+
+        assert_eq!(
+            classify_recursive_epistemic_program(&program).unwrap(),
+            RecursiveEpistemicClass::ModalCycle
+        );
+        let prepared = prepare_epistemic_program(&program).expect("validate G91 source");
+        let compatibility = try_prepare_g91_compatibility_reduction(&prepared)
+            .expect("G91 modal cycle must be admitted")
+            .expect("G91 modal cycle must use an explicit compatibility fixpoint");
+        Compiler::new()
+            .compile_program(compatibility.upper_bound_program())
+            .expect("G91 upper-bound program must compile");
+        Compiler::new()
+            .compile_program(compatibility.refinement_program())
+            .expect("declared G91 snapshot program must compile");
+        assert_eq!(compatibility.snapshot_relations().len(), 1);
+    }
+
+    #[test]
+    fn g91_compatibility_applies_to_exact_tuples_across_one_recursive_component() {
+        let program = parse_program(
+            r#"
+                #pragma epistemic_mode = g91
+                pred domain(u32).
+                pred p(u32).
+                pred q(u32).
+                domain(1).
+                p(X) :- domain(X), possible q(X).
+                q(X) :- domain(X), possible p(X).
+                ?- p(X).
+                ?- q(X).
+            "#,
+        )
+        .expect("parse mutual G91 modal component");
+
+        let prepared = prepare_epistemic_program(&program).expect("validate mutual G91 source");
+        let compatibility = try_prepare_g91_compatibility_reduction(&prepared)
+            .expect("mutual G91 modal component must be admitted")
+            .expect("mutual G91 modal component must use compatibility iteration");
+        for rule in compatibility
+            .upper_bound_program()
+            .rules
+            .iter()
+            .filter(|rule| matches!(rule.head.predicate.as_str(), "p" | "q"))
+        {
+            assert!(
+                rule.body
+                    .iter()
+                    .any(|literal| matches!(literal, BodyLiteral::Comparison(_))),
+                "the exact tuple compatibility edge must become a tautological conjunct: {rule:?}"
+            );
+            assert!(
+                !rule.body.iter().any(|literal| {
+                    matches!(literal, BodyLiteral::Positive(atom) if atom.predicate == "p" || atom.predicate == "q")
+                }),
+                "a compatibility edge must not become an ordinary recursive join: {rule:?}"
+            );
+        }
+        for rule in compatibility
+            .refinement_program()
+            .rules
+            .iter()
+            .filter(|rule| matches!(rule.head.predicate.as_str(), "p" | "q"))
+        {
+            assert!(rule.body.iter().any(|literal| {
+                matches!(literal, BodyLiteral::Positive(atom) if atom.predicate.starts_with("__xlog_g91_snapshot_"))
+            }));
+            assert!(!rule
+                .body
+                .iter()
+                .any(|literal| matches!(literal, BodyLiteral::Epistemic(_))));
+        }
+    }
+
+    #[test]
+    fn g91_snapshot_names_avoid_programmatic_relation_collisions() {
+        let mut program = parse_program("pred p(u32).").expect("parse source relation");
+        program.predicates.push(PredDecl {
+            name: "__xlog_g91_snapshot_p".to_string(),
+            types: vec![TypeRef::Scalar(xlog_core::ScalarType::U32)],
+            columns: vec![PredColumn {
+                name: None,
+                typ: TypeRef::Scalar(xlog_core::ScalarType::U32),
+            }],
+            is_private: false,
+        });
+        let target = "p".to_string();
+        let names = g91_snapshot_relation_names(&program, std::iter::once(&target));
+        assert_eq!(
+            names.get("p").map(String::as_str),
+            Some("__xlog_g91_snapshot_p_0")
+        );
+    }
+
+    #[test]
+    fn g91_compatibility_rejects_recursive_aggregation_in_the_selected_component() {
+        let program = parse_program(
+            r#"
+                #pragma epistemic_mode = g91
+                pred seed(u32).
+                pred p(u32).
+                pred totals(u64).
+                seed(1).
+                p(X) :- seed(X), possible p(X).
+                p(X) :- seed(X), totals(_).
+                totals(count(X)) :- p(X).
+                ?- p(X).
+            "#,
+        )
+        .expect("parse recursive aggregate compatibility fixture");
+
+        let prepared = prepare_epistemic_program(&program).expect("validate G91 source");
+        let error = try_prepare_g91_compatibility_reduction(&prepared)
+            .expect_err("recursive aggregation makes compatibility refinement non-monotone");
+        let message = error.to_string();
+        assert!(message.contains("Gelfond-1991 compatibility"), "{message}");
+        assert!(message.contains("aggregate"), "{message}");
+        assert!(message.contains("totals"), "{message}");
+    }
+
+    #[test]
+    fn g91_compatibility_rejects_recursive_negation_in_the_selected_component() {
+        for negated_dependency in [
+            "not blocked(X)",
+            "not possible blocked(X)",
+            "not know blocked(X)",
+        ] {
+            let program = parse_program(&format!(
+                r#"
+                    #pragma epistemic_mode = g91
+                    pred seed(u32).
+                    pred p(u32).
+                    pred blocked(u32).
+                    seed(1).
+                    p(X) :- seed(X), possible p(X).
+                    p(X) :- seed(X), {negated_dependency}.
+                    blocked(X) :- p(X).
+                    ?- p(X).
+                "#,
+            ))
+            .expect("parse recursive negation compatibility fixture");
+
+            let prepared = prepare_epistemic_program(&program).expect("validate G91 source");
+            let error = match try_prepare_g91_compatibility_reduction(&prepared) {
+                Err(error) => error,
+                Ok(_) => panic!(
+                    "recursive dependency `{negated_dependency}` must make compatibility \
+                     refinement non-monotone"
+                ),
+            };
+            let message = error.to_string();
+            assert!(message.contains("Gelfond-1991 compatibility"), "{message}");
+            assert!(message.contains("negation"), "{message}");
+            assert!(message.contains("p"), "{message}");
+        }
+    }
+
+    #[test]
+    fn source_validation_combines_modal_and_arithmetic_type_evidence_before_elision() {
+        let program = parse_program(
+            r#"
+                #pragma epistemic_mode = faeel
+                pred p(u32).
+                p(X) :- X is cast(1, u64), possible p(X).
+                ?- p(X).
+            "#,
+        )
+        .expect("parse arithmetic and modal type-conflict fixture");
+
+        let error = prepare_epistemic_program(&program)
+            .expect_err("foundedness must not hide the authored type conflict");
+        let message = error.to_string();
+        assert!(message.contains("Type mismatch"), "{message}");
+        assert!(
+            message.contains("U32") && message.contains("U64"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn source_validation_uses_lowerer_arithmetic_order_before_elision() {
+        let program = parse_program(
+            r#"
+                #pragma epistemic_mode = faeel
+                pred p(i64).
+                p(X) :- X is Y + 1, Y is 1, possible p(X).
+            "#,
+        )
+        .expect("parse reversed arithmetic dependency fixture");
+
+        let error = prepare_epistemic_program(&program)
+            .expect_err("a later arithmetic binding cannot retroactively validate an earlier one");
+        assert!(
+            error.to_string().contains("variable X not bound"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn source_validation_rejects_structured_modal_arity_before_rule_elision() {
+        for mode in ["faeel", "g91"] {
+            let program = parse_program(&format!(
+                r#"
+                    #pragma epistemic_mode = {mode}
+                    pred p(list<symbol>).
+                    p([a, b]) :- possible p([a, b]).
+                    ?- p(X).
+                "#
+            ))
+            .expect("parse structured exact-self-support fixture");
+
+            let error = prepare_epistemic_program(&program)
+                .expect_err("a flattened modal key must match its authored target arity");
+            let message = error.to_string();
+            assert!(message.contains("epistemic modal tuple key"), "{message}");
+            assert!(message.contains("target arity 1"), "{message}");
+            assert!(message.contains("binding arity 2"), "{message}");
+        }
+    }
+
+    #[test]
+    fn source_validation_accepts_structured_key_matching_flat_target_arity() {
+        let program = parse_program(
+            r#"
+                #pragma epistemic_mode = faeel
+                pred host(u32, u32).
+                pred watched(u32, u32).
+                pred out(u32, u32).
+                host(1, 2).
+                watched(1, 2).
+                out(X, Y) :- host(X, Y), know watched([X, Y]).
+                ?- out(X, Y).
+            "#,
+        )
+        .expect("parse matching structured modal key fixture");
+
+        validate_epistemic_source_program(&program)
+            .expect("a two-element structured key must address a binary target");
+
+        let multi_arity = epistemic_extensional_multi_arity_predicates(&program);
+        assert!(
+            !multi_arity.contains("watched"),
+            "a two-column structured modal key and watched/2 are one signature"
+        );
+    }
+
+    #[test]
+    fn invariant_analysis_treats_shared_acyclic_dependencies_as_a_diamond() {
+        let program = parse_program(
+            r#"
+                pred base(u32).
+                pred left(u32).
+                pred right(u32).
+                pred joined(u32).
+                pred out(u32).
+                base(1).
+                left(X) :- base(X).
+                right(X) :- base(X).
+                joined(X) :- left(X), right(X).
+                out(X) :- possible joined(X).
+                ?- out(X).
+            "#,
+        )
+        .expect("parse invariant diamond fixture");
+
+        let invariant = InvariantRelations::analyze(&program);
+        assert!(invariant.is_invariant("joined"));
+        validate_epistemic_source_program(&program)
+            .expect("the positive modal over an acyclic diamond must bind its output");
+        reduce_epistemic_program_to_ordinary(&program)
+            .expect("the invariant modal binder must reduce to an ordinary join");
+    }
+
+    #[test]
+    fn positive_modal_binders_are_independent_of_conjunct_order() {
+        for mode in ["faeel", "g91"] {
+            for modal_body in [
+                "possible p(X), possible base(X)",
+                "possible base(X), possible p(X)",
+            ] {
+                let program = parse_program(&format!(
+                    r#"
+                        #pragma epistemic_mode = {mode}
+                        pred base(u32).
+                        pred p(u32).
+                        base(1).
+                        p(X) :- {modal_body}.
+                        ?- p(X).
+                    "#
+                ))
+                .expect("parse modal binder ordering fixture");
+
+                validate_epistemic_source_program(&program).unwrap_or_else(|error| {
+                    panic!("{mode} body `{modal_body}` must be range-restricted: {error}")
+                });
+            }
+        }
+    }
+
+    #[test]
+    fn negated_exact_modal_cycles_are_never_removed_as_foundedness_elision() {
+        let program = parse_program(
+            r#"
+                #pragma epistemic_mode = faeel
+                pred p().
+                p() :- not possible p().
+                ?- p().
+            "#,
+        )
+        .expect("parse negated exact modal cycle");
+
+        let prepared = prepare_epistemic_program(&program)
+            .expect("negated modal cycle must survive source preparation");
+        assert!(!prepared.removed_unfounded_rules());
+        assert!(prepared.active_program().rules.iter().any(|rule| {
+            rule.body
+                .iter()
+                .any(|literal| matches!(literal, BodyLiteral::Epistemic(modal) if modal.negated))
+        }));
+    }
+
+    #[test]
+    fn modal_fixpoint_reduction_preserves_non_bijective_sibling_unions() {
+        let fixtures = [
+            r#"
+                #pragma epistemic_mode = faeel
+                pred domain(symbol).
+                pred other(symbol, symbol).
+                pred p(symbol, symbol).
+                domain(a).
+                other(c, d).
+                p(X, X) :- domain(X).
+                p(A, B) :- other(A, B).
+                p(X, X) :- domain(X), know p(X, X).
+                ?- p(A, B).
+            "#,
+            r#"
+                #pragma epistemic_mode = faeel
+                pred left(symbol).
+                pred right(symbol).
+                pred p(symbol, symbol).
+                left(x).
+                right(y).
+                p(a, X) :- left(X).
+                p(b, Y) :- right(Y).
+                p(a, X) :- left(X), know p(a, X).
+                ?- p(A, B).
+            "#,
+        ];
+
+        for source in fixtures {
+            let program = parse_program(source).expect("parse non-bijective rule union");
+            assert_eq!(
+                classify_recursive_epistemic_program(&program).unwrap(),
+                RecursiveEpistemicClass::ModalCycle
+            );
+            let reduced = try_reduce_case_a_recursive_epistemic_program(&program)
+                .expect("modal-cycle sibling union must be admitted")
+                .expect("modal-cycle sibling union must reduce to a fixpoint");
+            Compiler::new()
+                .compile_program(&reduced)
+                .expect("ordinary fixpoint preserves per-clause sibling rows");
+        }
+    }
+
+    #[test]
+    fn constrained_support_does_not_found_a_wider_modal_domain() {
+        let program = parse_program(
+            r#"
+                #pragma epistemic_mode = faeel
+                pred seed(u32).
+                pred p(u32).
+                seed(1).
+                seed(2).
+                p(X) :- seed(X), X = 1.
+                p(X) :- seed(X), possible p(X).
+                ?- p(X).
+            "#,
+        )
+        .expect("parse constrained foundedness program");
+
+        let reduced = reduce_epistemic_program_to_ordinary(&program)
+            .expect("the unfounded modal clause must be removed, not rejected");
+        assert_eq!(
+            reduced
+                .rules
+                .iter()
+                .filter(|rule| rule.head.predicate == "p" && !rule.body.is_empty())
+                .count(),
+            1,
+            "a constrained support clause cannot found the wider self-support domain"
+        );
+    }
+
+    #[test]
+    fn derived_predicate_source_arity_collisions_are_rejected() {
+        let fixtures = [
+            r#"
+                #pragma epistemic_mode = faeel
+                unary(a).
+                binary(a, b).
+                result(X) :- unary(X), know unary(X).
+                result(X, Y) :- binary(X, Y), know binary(X, Y).
+            "#,
+            r#"
+                #pragma epistemic_mode = faeel
+                node(key).
+                edge(key, 5000000000).
+                result(X) :- node(X), know edge(X, Y).
+                ?- result(A, B).
+            "#,
+            r#"
+                #pragma epistemic_mode = faeel
+                node(key).
+                edge(key, 5000000000).
+                result(X) :- node(X), know edge(X, Y).
+                observer(X) :- result(X, Y).
+            "#,
+        ];
+
+        for source in fixtures {
+            let program = parse_program(source).expect("parse source-arity collision fixture");
+            let errors = [
+                plan_epistemic_gpu_execution(&program)
+                    .expect_err("GPU planning must reject derived source-arity collisions"),
+                reduce_epistemic_program_to_ordinary(&program)
+                    .expect_err("execution reduction must reject source-arity collisions"),
+                reduce_epistemic_program_to_ordinary_for_stratified_schema(&program)
+                    .expect_err("schema reduction must reject source-arity collisions"),
+            ];
+            for error in errors {
+                let message = error.to_string();
+                assert!(
+                    message.contains("epistemic derived predicate schema"),
+                    "{message}"
+                );
+                assert!(message.contains("result"), "{message}");
+                assert!(message.contains("{1, 2}"), "{message}");
+            }
+        }
+    }
+
+    #[test]
+    fn constrained_augmented_head_queries_are_rejected() {
+        let fixtures = [
+            r#"
+                #pragma epistemic_mode = faeel
+                node(key).
+                edge(key, 5000000000).
+                result(X) :- node(X), know edge(X, Y).
+                ?- result(other).
+            "#,
+            r#"
+                #pragma epistemic_mode = faeel
+                pair(left, right).
+                edge(left, 5000000000).
+                result(X, Y) :- pair(X, Y), know edge(X, Z).
+                ?- result(Value, Value).
+            "#,
+            r#"
+                #pragma epistemic_mode = faeel
+                node(key).
+                edge(key, 5000000000).
+                allowed(5000000000).
+                result(X) :- node(X), edge(X, Y), know allowed(Y).
+                ?- result(key).
+            "#,
+        ];
+
+        for source in fixtures {
+            let program = parse_program(source).expect("parse constrained-query fixture");
+            let errors = [
+                plan_epistemic_gpu_execution(&program)
+                    .expect_err("GPU planning must reject a constrained augmented query"),
+                reduce_epistemic_program_to_ordinary(&program)
+                    .expect_err("execution reduction must reject a constrained augmented query"),
+                reduce_epistemic_program_to_ordinary_for_stratified_schema(&program)
+                    .expect_err("schema reduction must reject a constrained augmented query"),
+            ];
+            for error in errors {
+                let message = error.to_string();
+                assert!(
+                    message.contains("epistemic augmented head query"),
+                    "{message}"
+                );
+                assert!(message.contains("distinct named variables"), "{message}");
+            }
+        }
+    }
+
+    #[test]
+    fn removed_unfounded_sibling_does_not_create_an_augmented_arity_conflict() {
+        let program = parse_program(
+            r#"
+                #pragma epistemic_mode = faeel
+                pred node(symbol).
+                pred edge(symbol, i64).
+                pred result(symbol).
+                node(key).
+                edge(key, 5000000000).
+                result(X) :- node(X), know edge(X, Y).
+                result(key) :- possible result(key).
+            "#,
+        )
+        .expect("parse foundedness fixture");
+
+        let reduced = reduce_epistemic_program_to_ordinary(&program)
+            .expect("removed unfounded support must not affect the surviving relation shape");
+        let result_rules = reduced
+            .rules
+            .iter()
+            .filter(|rule| rule.head.predicate == "result")
+            .collect::<Vec<_>>();
+        assert_eq!(result_rules.len(), 1);
+        assert_eq!(result_rules[0].head.arity(), 1);
+    }
+
+    #[test]
+    fn ordinary_bound_appended_columns_participate_in_shape_validation() {
+        let program = parse_program(
+            r#"
+                #pragma epistemic_mode = faeel
+                pred node(symbol).
+                pred edge(symbol, i64).
+                pred allowed(i64).
+                pred result(symbol).
+                node(key).
+                edge(key, 5000000000).
+                allowed(5000000000).
+                result(X) :- node(X).
+                result(X) :- node(X), edge(X, Y), know allowed(Y).
+                ?- result(X).
+            "#,
+        )
+        .expect("parse ordinary-bound augmentation fixture");
+
+        let errors = [
+            plan_epistemic_gpu_execution(&program)
+                .expect_err("GPU planning must reject divergent internal arities"),
+            reduce_epistemic_program_to_ordinary(&program)
+                .expect_err("execution reduction must reject divergent internal arities"),
+            reduce_epistemic_program_to_ordinary_for_stratified_schema(&program)
+                .expect_err("schema reduction must reject divergent internal arities"),
+        ];
+        for error in errors {
+            let message = error.to_string();
+            assert!(
+                message.contains("epistemic augmented predicate schema"),
+                "{message}"
+            );
+            assert!(message.contains("result/1"), "{message}");
+            assert!(message.contains("{1, 2}"), "{message}");
+        }
+    }
+
+    #[test]
+    fn ordinary_bound_appended_columns_widen_the_internal_declaration() {
+        let program = parse_program(
+            r#"
+                #pragma epistemic_mode = faeel
+                pred node(symbol).
+                pred edge(symbol, i64).
+                pred allowed(i64).
+                pred result(symbol).
+                node(key).
+                edge(key, 5000000000).
+                allowed(5000000000).
+                result(X) :- node(X), edge(X, Y), know allowed(Y).
+                ?- result(X).
+            "#,
+        )
+        .expect("parse ordinary-bound declaration fixture");
+
+        let reduced = reduce_epistemic_program_to_ordinary(&program)
+            .expect("uniform ordinary-bound augmentation should reduce");
+        let declaration = reduced
+            .predicates
+            .iter()
+            .find(|declaration| declaration.name == "result")
+            .expect("missing result declaration");
+        assert_eq!(declaration.arity(), 2);
+        crate::compile::Compiler::new()
+            .compile_program(&reduced)
+            .expect("reconciled ordinary-bound augmentation should compile");
+    }
+
+    #[test]
+    fn stratified_schema_reduction_uses_the_recursive_stratum_reducer() {
+        let program = parse_program(
+            r#"
+                #pragma epistemic_mode = faeel
+                pred node(u32).
+                pred edge(u32, u32).
+                pred accepted_edge(u32, u32).
+                pred reach(u32, u32).
+                node(1).
+                node(2).
+                node(3).
+                edge(1, 2).
+                edge(2, 3).
+                accepted_edge(X, Y) :- node(X), node(Y), know edge(X, Y).
+                reach(X, Y) :- node(X), node(Y), know accepted_edge(X, Y).
+                reach(X, Z) :- reach(X, Y), node(Z), know accepted_edge(Y, Z).
+                ?- reach(X, Z).
+            "#,
+        )
+        .expect("parse stratified recursive fixture");
+
+        let plan = try_plan_stratified_epistemic_program(&program)
+            .expect("stratified planning should succeed")
+            .expect("fixture requires stratified execution");
+        assert_eq!(plan.strata.len(), 2);
+
+        let reduced = reduce_epistemic_program_to_ordinary_for_stratified_schema(&program)
+            .expect("schema reduction should follow each stratum's executable reducer");
+        assert!(reduced
+            .rules
+            .iter()
+            .filter(|rule| rule.head.predicate == "reach")
+            .all(|rule| rule.head.arity() == 2));
+        assert_eq!(
+            reduced
+                .predicates
+                .iter()
+                .find(|declaration| declaration.name == "reach")
+                .expect("missing reach declaration")
+                .arity(),
+            2
+        );
+        crate::compile::Compiler::new()
+            .compile_program(&reduced)
+            .expect("path-aligned stratified schema program should compile");
+    }
 
     #[test]
     fn high_arity_epistemic_adapter_reduction_is_not_wcoj_required() {

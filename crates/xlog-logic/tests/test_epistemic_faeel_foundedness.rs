@@ -3,39 +3,32 @@
 //! Under default FAEEL, an atom/tuple supported ONLY by circular modal self-support
 //! (`possible p`/`know p` with no independent founded derivation) is NOT in the founded
 //! model: it is simply ABSENT. This is the standard founded/equilibrium semantics, and
-//! it is executed (the program plans and compiles, then materializes the founded
-//! extension on the GPU runtime), NOT rejected with an unsupported-construct error.
+//! it is executed through the recursive modal reduction and materializes the founded
+//! extension on the GPU runtime, NOT rejected with an unsupported-construct error.
 //!
-//! These tests run through `plan_epistemic_gpu_execution` /
-//! `compile_epistemic_gpu_execution` (the accepted-execution boundary) and inspect the
-//! reduced ordinary base produced by `reduce_epistemic_program_to_ordinary`, which is
-//! the structural foundedness DECISION boundary: an unfounded circular self-support
-//! rule is DROPPED from the reduced base (so its head is absent from the founded model),
-//! while a founded rule is KEPT. The founded EXTENSION itself (exact tuples / exact
-//! `rows: 0` empty result) is asserted on device in
-//! `crates/xlog-runtime/tests/test_epistemic_gpu_workspace.rs`. The FAEEL-vs-G91 mode
-//! difference (empty vs accepted) is verified in `test_epistemic_g91.rs`.
+//! These tests inspect the reduced ordinary base: an unfounded exact circular
+//! self-support rule is dropped, while a founded rule is kept. Tuple-transition cycles
+//! are retained and solved by the least-fixpoint engine. Device tests assert the exact
+//! resulting extensions and the FAEEL-versus-G91 behavior.
 
 use xlog_logic::ast::BodyLiteral;
 use xlog_logic::epistemic::{
-    compile_epistemic_gpu_execution, plan_epistemic_gpu_execution,
-    reduce_epistemic_program_to_ordinary,
+    reduce_epistemic_program_to_ordinary, try_reduce_case_a_recursive_epistemic_program,
 };
-use xlog_logic::parse_program;
+use xlog_logic::{parse_program, Compiler};
 
 /// Plan + compile a FAEEL program (it must NOT be rejected) and return its reduced
 /// ordinary base for structural foundedness inspection.
 fn reduced_base(src: &str) -> xlog_logic::ast::Program {
     let program = parse_program(src).unwrap();
-    // The unfounded circular self-support case is now a DEFINED FAEEL result (empty
-    // founded model), so planning + compiling must succeed, not raise a foundedness
-    // rejection.
-    plan_epistemic_gpu_execution(&program)
-        .unwrap_or_else(|e| panic!("FAEEL founded-extension program must plan, got: {e}\n{src}"));
-    compile_epistemic_gpu_execution(&program).unwrap_or_else(|e| {
-        panic!("FAEEL founded-extension program must compile, got: {e}\n{src}")
-    });
+    let reduced = try_reduce_case_a_recursive_epistemic_program(&program)
+        .unwrap_or_else(|e| panic!("FAEEL founded-extension program must reduce: {e}\n{src}"))
+        .expect("self-modal dependency must route through the fixpoint reduction");
+    Compiler::new()
+        .compile_program(&reduced)
+        .unwrap_or_else(|e| panic!("FAEEL founded fixpoint must compile: {e}\n{src}"));
     reduce_epistemic_program_to_ordinary(&program)
+        .unwrap_or_else(|e| panic!("FAEEL founded-extension program must reduce, got: {e}\n{src}"))
 }
 
 /// Count reduced ordinary rules that derive `predicate` from a NON-empty body (i.e.
@@ -62,21 +55,22 @@ fn has_residual_modal(program: &xlog_logic::ast::Program, predicate: &str) -> bo
 
 fn accepts(src: &str) {
     let program = parse_program(src).unwrap();
-    plan_epistemic_gpu_execution(&program)
-        .unwrap_or_else(|e| panic!("expected FAEEL acceptance for:\n{src}\ngot: {e}"));
-    compile_epistemic_gpu_execution(&program)
-        .unwrap_or_else(|e| panic!("expected FAEEL compile acceptance for:\n{src}\ngot: {e}"));
+    let reduced = try_reduce_case_a_recursive_epistemic_program(&program)
+        .unwrap_or_else(|e| panic!("expected FAEEL acceptance for:\n{src}\ngot: {e}"))
+        .expect("self-modal dependency must route through the fixpoint reduction");
+    Compiler::new()
+        .compile_program(&reduced)
+        .unwrap_or_else(|e| panic!("expected FAEEL fixpoint compile:\n{src}\ngot: {e}"));
 }
 
 // === Zero-arity foundedness ===
 
 #[test]
-fn k1_faeel_unfounded_zero_arity_self_support_is_dropped_from_founded_base() {
+fn faeel_unfounded_zero_arity_self_support_is_dropped_from_founded_base() {
     // `p() :- possible p()` is supported only by circular self-support: under FAEEL it
     // is UNFOUNDED, so the founded model is EMPTY. The reduced base drops the rule
     // entirely (no founding rule remains for p), making `p` absent from the model.
-    // Exact `rows: 0` is asserted on device in
-    // `parsed_faeel_unfounded_zero_arity_self_support_materializes_empty_on_gpu`.
+    // High-level production GPU/CLI coverage asserts the exact `rows: 0` result.
     let reduced = reduced_base("p() :- possible p().");
     assert_eq!(
         founding_rule_count(&reduced, "p"),
@@ -89,7 +83,7 @@ fn k1_faeel_unfounded_zero_arity_self_support_is_dropped_from_founded_base() {
 }
 
 #[test]
-fn k1_faeel_accepts_zero_arity_self_support_with_independent_foundation() {
+fn faeel_accepts_zero_arity_self_support_with_independent_foundation() {
     // possible p() is self-supporting, but p() also has an independent, non-circular
     // foundation via base(). The founded model contains p, so the founding rule is
     // KEPT in the reduced base. Exact `rows: 1` is asserted on device.
@@ -106,7 +100,7 @@ fn k1_faeel_accepts_zero_arity_self_support_with_independent_foundation() {
 // === Nonzero-arity foundedness per tuple key ===
 
 #[test]
-fn k2_faeel_accepts_nonzero_self_support_when_support_subsumes_modal_domain() {
+fn faeel_accepts_nonzero_self_support_when_support_subsumes_modal_domain() {
     // Support rule body { dom(X) } subsumes the modal rule's tuple-key domain
     // { dom(X) }: every modal tuple key has an independent founded proof, so the
     // self-support rule is FOUNDED and KEPT. Exact founded tuples on device.
@@ -121,12 +115,12 @@ fn k2_faeel_accepts_nonzero_self_support_when_support_subsumes_modal_domain() {
 }
 
 #[test]
-fn k2_faeel_accepts_nonzero_self_support_with_multi_atom_subsuming_support() {
+fn faeel_accepts_nonzero_self_support_with_multi_atom_subsuming_support() {
     accepts("p(X) :- dom(X), base(X), possible p(X).\np(X) :- dom(X), base(X).\ndom(1).\nbase(1).");
 }
 
 #[test]
-fn k2_faeel_predicate_level_support_keeps_only_the_founded_tuple_rule() {
+fn faeel_predicate_level_support_keeps_only_the_founded_tuple_rule() {
     // Support exists for p(c) only, but the modal rule self-supports p(X) for every X
     // in dom. Predicate-level support must NOT found the open tuple key: the unfounded
     // open self-support rule is DROPPED, and the founded `p(c) :- base(c)` rule is
@@ -166,7 +160,7 @@ fn k2_faeel_predicate_level_support_keeps_only_the_founded_tuple_rule() {
 }
 
 #[test]
-fn k2_faeel_support_more_restrictive_keeps_only_the_founded_rule() {
+fn faeel_support_more_restrictive_keeps_only_the_founded_rule() {
     // Support body { dom(X), base(X) } is strictly more restrictive than the modal body
     // { dom(X) }: the modal can conclude p(X) for dom(X) tuples that have no independent
     // foundation (base(X) false). The unfounded open self-support rule is DROPPED; the
@@ -187,7 +181,7 @@ fn k2_faeel_support_more_restrictive_keeps_only_the_founded_rule() {
 }
 
 #[test]
-fn k2_faeel_unfounded_nonzero_self_support_with_domain_is_dropped() {
+fn faeel_unfounded_nonzero_self_support_with_domain_is_dropped() {
     // No founding rule for p at all: pure modal self-support over a bound domain
     // (`p(X) :- dom(X), possible p(X)`, X bound by dom so safe). The founded model is
     // EMPTY: the unfounded rule is dropped, leaving p with no founding rule. Exact

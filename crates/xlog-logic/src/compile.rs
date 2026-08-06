@@ -167,6 +167,25 @@ impl Compiler {
         )
     }
 
+    /// Validate a parsed program through the production lowering contracts without
+    /// requiring the dependency graph to be stratifiable.
+    ///
+    /// This is used by epistemic preparation, where a supported negated modal cycle
+    /// must reach well-founded execution rather than fail ordinary stratification.
+    /// The normal preprocessing, negation-safety, schema/type, constant, arithmetic,
+    /// and projection checks still run unchanged.
+    pub(crate) fn validate_program_without_stratification(
+        &mut self,
+        program: &Program,
+    ) -> Result<()> {
+        let program = desugar_queries_and_constraints(program);
+        let program = normalize_meta_builtins(&program)?;
+        let program = normalize_list_builtins(&program)?;
+        let program = rewrite_magic_sets(&program)?.program;
+        validate_negation_safety(&program)?;
+        self.lowerer.validate_program_without_plan(&program)
+    }
+
     /// Composable program-level entry point.
     ///
     /// `config` is currently consumed only by the promoter when it wires the
@@ -674,6 +693,7 @@ mod tests {
         let mut compiler = Compiler::new();
         let result = compiler.compile(
             r#"
+            path(X, Y) :- reach(X, Y).
             edge(1, 2).
             edge(2, 3).
             reach(X, Y) :- edge(X, Y).
@@ -699,6 +719,197 @@ mod tests {
             Some(ScalarType::U32),
             "reach column 1 should match edge column type"
         );
+
+        let schema = compiler.schemas().get("path").expect("missing path schema");
+        assert_eq!(
+            schema.column_type(0),
+            Some(ScalarType::U32),
+            "path column 0 should inherit the transitive body type"
+        );
+        assert_eq!(
+            schema.column_type(1),
+            Some(ScalarType::U32),
+            "path column 1 should inherit the transitive body type"
+        );
+    }
+
+    #[test]
+    fn test_schema_propagates_known_columns_when_a_sibling_column_is_unresolved() {
+        let mut compiler = Compiler::new();
+        let result = compiler.compile(
+            r#"
+            path(X) :- intermediate(X, Z).
+            intermediate(X, Z) :- source(X), unresolved(Z).
+            unresolved(Z) :- unresolved(Z).
+            source(value).
+        "#,
+        );
+        assert!(
+            result.is_ok(),
+            "Failed to compile partial rule-head schema inference: {:?}",
+            result.err()
+        );
+
+        let schema = compiler.schemas().get("path").expect("missing path schema");
+        assert_eq!(
+            schema.column_type(0),
+            Some(ScalarType::Symbol),
+            "path should inherit the known intermediate column independently of its sibling"
+        );
+    }
+
+    #[test]
+    fn test_schema_rejects_conflicting_rule_head_evidence_in_either_order() {
+        let symbol_first = r#"
+            pred symbols(symbol).
+            pred integers(i64).
+            symbols(value).
+            integers(5000000000).
+            mixed(X) :- symbols(X).
+            mixed(X) :- integers(X).
+        "#;
+        let integer_first = r#"
+            pred symbols(symbol).
+            pred integers(i64).
+            symbols(value).
+            integers(5000000000).
+            mixed(X) :- integers(X).
+            mixed(X) :- symbols(X).
+        "#;
+
+        for source in [symbol_first, integer_first] {
+            let error = Compiler::new()
+                .compile(source)
+                .expect_err("conflicting inferred rule-head types must be rejected");
+            let message = error.to_string();
+            assert!(message.contains("mixed"), "{message}");
+            assert!(message.contains("column 1"), "{message}");
+        }
+    }
+
+    #[test]
+    fn test_schema_rejects_conflicting_body_evidence_in_either_order() {
+        let first_body_order = r#"
+            source_number(1).
+            source_symbol(value).
+            mixed(X) :- source_number(X), source_symbol(X).
+            mixed(1) :- source_number(1).
+        "#;
+        let reversed_body_order = r#"
+            source_number(1).
+            source_symbol(value).
+            mixed(X) :- source_symbol(X), source_number(X).
+            mixed(1) :- source_number(1).
+        "#;
+
+        for source in [first_body_order, reversed_body_order] {
+            let error = Compiler::new()
+                .compile(source)
+                .expect_err("conflicting body-column types must be rejected");
+            let message = error.to_string();
+            assert!(message.contains("mixed"), "{message}");
+            assert!(message.contains("variable X"), "{message}");
+        }
+    }
+
+    #[test]
+    fn test_schema_infers_arithmetic_binding_result_type() {
+        let mut compiler = Compiler::new();
+        compiler
+            .compile(
+                r#"
+                computed(X) :- X is cast(1, u64).
+            "#,
+            )
+            .expect("an arithmetic binding should determine its head-column type");
+
+        let schema = compiler
+            .schemas()
+            .get("computed")
+            .expect("missing computed schema");
+        assert_eq!(schema.column_type(0), Some(ScalarType::U64));
+    }
+
+    #[test]
+    fn test_schema_rejects_arithmetic_and_atom_evidence_in_either_rule_order() {
+        let arithmetic_first = r#"
+            pred integers(i64).
+            integers(5000000000).
+            mixed(X) :- X is cast(1, u64).
+            mixed(X) :- integers(X).
+        "#;
+        let atom_first = r#"
+            pred integers(i64).
+            integers(5000000000).
+            mixed(X) :- integers(X).
+            mixed(X) :- X is cast(1, u64).
+        "#;
+
+        for source in [arithmetic_first, atom_first] {
+            let error = Compiler::new()
+                .compile(source)
+                .expect_err("conflicting arithmetic and atom types must be rejected");
+            let message = error.to_string();
+            assert!(message.contains("mixed"), "{message}");
+            assert!(message.contains("column 1"), "{message}");
+        }
+    }
+
+    #[test]
+    fn test_schema_rejects_incompatible_constant_heads_before_runtime() {
+        let sources = [
+            r#"
+                pred p(u32).
+                seed().
+                p(value) :- seed().
+            "#,
+            r#"
+                p(1).
+                p(value).
+            "#,
+            r#"
+                p(value).
+                p(1).
+            "#,
+            r#"
+                p(1).
+                p(5000000000).
+            "#,
+            r#"
+                p(5000000000).
+                p(1).
+            "#,
+        ];
+
+        for source in sources {
+            let error = Compiler::new()
+                .compile(source)
+                .expect_err("incompatible constant head types must fail during compilation");
+            let message = error.to_string();
+            assert!(message.contains("p"), "{message}");
+            assert!(message.contains("head term at position 0"), "{message}");
+        }
+    }
+
+    #[test]
+    fn test_declared_scalar_schemas_accept_supported_literal_conversions() {
+        Compiler::new()
+            .compile(
+                r#"
+                pred signed(i64).
+                pred wide(u64).
+                pred real(f64).
+                pred flag(bool).
+                seed().
+                signed(1).
+                wide(1).
+                real(1).
+                real(2) :- seed().
+                flag(true).
+                flag(false) :- seed().
+            "#,
+            )
+            .expect("representable literals should use declared scalar storage types");
     }
 
     #[test]
@@ -830,6 +1041,99 @@ mod tests {
                 );
             }
             other => panic!("Expected Project(GroupBy(..)), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_aggregate_schemas_match_runtime_result_types() {
+        let mut compiler = Compiler::new();
+        compiler
+            .compile(
+                r#"
+                pred edge(u32, u64).
+                pred score(u32, f64).
+                pred counted(u32, u64).
+                pred summed(u32, u64).
+                pred minimum(u32, u64).
+                pred maximum(u32, u64).
+                pred combined(u32, f64).
+                edge(1, 5000000000).
+                score(1, 2.5).
+                counted(X, count(Y)) :- edge(X, Y).
+                summed(X, sum(Y)) :- edge(X, Y).
+                minimum(X, min(Y)) :- edge(X, Y).
+                maximum(X, max(Y)) :- edge(X, Y).
+                combined(X, logsumexp(Y)) :- score(X, Y).
+            "#,
+            )
+            .expect("aggregate declarations should match provider result schemas");
+
+        for predicate in ["counted", "summed", "minimum", "maximum"] {
+            assert_eq!(
+                compiler
+                    .schemas()
+                    .get(predicate)
+                    .expect("missing aggregate schema")
+                    .column_type(1),
+                Some(ScalarType::U64),
+                "unexpected result type for {predicate}"
+            );
+        }
+        assert_eq!(
+            compiler
+                .schemas()
+                .get("combined")
+                .expect("missing log-sum-exp schema")
+                .column_type(1),
+            Some(ScalarType::F64)
+        );
+    }
+
+    #[test]
+    fn test_undeclared_count_schema_is_u64() {
+        let mut compiler = Compiler::new();
+        compiler
+            .compile(
+                r#"
+                edge(1, 5000000000).
+                degree(X, count(Y)) :- edge(X, Y).
+            "#,
+            )
+            .expect("undeclared count result should compile with its runtime type");
+        assert_eq!(
+            compiler
+                .schemas()
+                .get("degree")
+                .expect("missing inferred count schema")
+                .column_type(1),
+            Some(ScalarType::U64)
+        );
+    }
+
+    #[test]
+    fn test_unsupported_aggregate_inputs_are_rejected_before_runtime() {
+        let fixtures = [
+            r#"
+                pred source(u32, i32).
+                pred result(u32, u64).
+                source(1, 2).
+                result(X, sum(Y)) :- source(X, Y).
+            "#,
+            r#"
+                pred source(u32, u32).
+                pred result(u32, f64).
+                source(1, 2).
+                result(X, logsumexp(Y)) :- source(X, Y).
+            "#,
+        ];
+
+        for source in fixtures {
+            let error = Compiler::new()
+                .compile(source)
+                .expect_err("unsupported aggregate input must fail during compilation");
+            let message = error.to_string();
+            assert!(message.contains("Unsupported aggregate input"), "{message}");
+            assert!(message.contains("execution provider requires"), "{message}");
         }
     }
 

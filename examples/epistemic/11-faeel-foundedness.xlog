@@ -1,7 +1,8 @@
-// FAEEL accepts self-supporting modal rules only when an
-// independent founded support exists. founded() is supported both by base() and
-// by `possible founded()`; the independent base() foundation makes the
-// self-support founded, so FAEEL accepts it. Expect: founded with rows: 1.
+// FAEEL derives a tuple involved in modal self-support only when an independent
+// foundation exists. founded() is supported both by base() and by
+// `possible founded()`; the independent base() derivation makes founded() part
+// of the founded extension. Without that derivation, the program still executes
+// but the circular tuple is absent. Expect: founded with rows: 1.
 
 #pragma epistemic_mode = faeel
 

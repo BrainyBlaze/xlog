@@ -1,12 +1,16 @@
 //! Module resolution for XLOG programs.
 
-use crate::ast::{ArithExpr, BodyLiteral, DomainDecl, FuncBody, PredDecl, Program, Term, TypeRef};
+use crate::ast::{
+    ArithExpr, BodyLiteral, DomainDecl, FuncBody, PredDecl, Program, Rule, Term, TypeRef,
+};
+use crate::lower::Lowerer;
 use crate::meta_normalize::static_meta_predicate_dependency;
 use crate::module::{module_path_to_string, LoadedModule, ModuleError, ModulePath};
 use crate::parser::parse_program;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
+use xlog_core::{ScalarType, XlogError};
 
 fn collect_term_predicate_dependencies(term: &Term, predicates: &mut HashSet<String>) {
     match term {
@@ -172,8 +176,26 @@ struct ImportedPredicateDeclaration {
 
 #[derive(Clone, PartialEq, Eq)]
 struct PredicateDeclarationSchema {
-    types: Vec<TypeRef>,
     columns: Vec<(Option<String>, TypeRef)>,
+}
+
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct PredicateKey {
+    name: String,
+    arity: usize,
+}
+
+#[derive(Clone)]
+struct InferredPredicateContribution {
+    provider: ImportProvider,
+    rule: Rule,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum InferredColumn {
+    Unknown,
+    Known(ScalarType),
+    Conflicting,
 }
 
 #[derive(Clone)]
@@ -186,6 +208,7 @@ struct ImportedDomainDeclaration {
 struct ImportProviders {
     functions: BTreeMap<String, ImportProvider>,
     predicate_declarations: BTreeMap<String, ImportedPredicateDeclaration>,
+    inferred_predicate_contributions: BTreeMap<PredicateKey, Vec<InferredPredicateContribution>>,
     domain_declarations: BTreeMap<String, ImportedDomainDeclaration>,
 }
 
@@ -640,8 +663,13 @@ impl ModuleResolver {
     /// only when every logical path identifies one loaded source file.
     ///
     /// Returns predicate and function names with the first resolved source module
-    /// retained as a representative. Compatible predicate clauses from every
-    /// resolved source still participate in validation and merging.
+    /// retained as a representative. Entry declarations and selected public
+    /// import declarations participate in declaration compatibility checks. For
+    /// signatures without a participating declaration, inferred head-column
+    /// types from entry and selected public import clauses are validated before
+    /// merging. Constants, head variables typed by ordinary body atoms or
+    /// built-in arithmetic bindings, and aggregate result types supply evidence;
+    /// unanchored variables do not.
     #[allow(clippy::type_complexity)]
     pub fn validate_imports(
         &self,
@@ -933,6 +961,241 @@ impl ModuleResolver {
             .collect()
     }
 
+    fn local_inferred_predicate_contributions(
+        program: &Program,
+        excluded_predicates: &HashSet<String>,
+        provider: ImportProvider,
+    ) -> BTreeMap<PredicateKey, Vec<InferredPredicateContribution>> {
+        let mut contributions = BTreeMap::<PredicateKey, Vec<InferredPredicateContribution>>::new();
+
+        for rule in &program.rules {
+            let key = PredicateKey {
+                name: rule.head.predicate.clone(),
+                arity: rule.head.arity(),
+            };
+            if excluded_predicates.contains(&key.name)
+                || program.predicates.iter().any(|declaration| {
+                    declaration.name == key.name && declaration.arity() == key.arity
+                })
+            {
+                continue;
+            }
+
+            let contribution = InferredPredicateContribution {
+                provider: provider.clone(),
+                rule: rule.clone(),
+            };
+            let existing = contributions.entry(key).or_default();
+            if !existing.iter().any(|candidate| {
+                candidate.provider.source == contribution.provider.source
+                    && candidate.rule == contribution.rule
+            }) {
+                existing.push(contribution);
+            }
+        }
+
+        contributions
+    }
+
+    fn merge_inferred_predicate_contributions(
+        contributions: &mut BTreeMap<PredicateKey, Vec<InferredPredicateContribution>>,
+        incoming: BTreeMap<PredicateKey, Vec<InferredPredicateContribution>>,
+    ) {
+        for (key, incoming_contributions) in incoming {
+            let existing = contributions.entry(key).or_default();
+            for contribution in incoming_contributions {
+                if !existing.iter().any(|candidate| {
+                    candidate.provider.source == contribution.provider.source
+                        && candidate.rule == contribution.rule
+                }) {
+                    existing.push(contribution);
+                }
+            }
+        }
+    }
+
+    fn storage_scalar_type(typ: &TypeRef) -> Option<ScalarType> {
+        match typ {
+            TypeRef::Scalar(typ) => Some(*typ),
+            TypeRef::List(_) | TypeRef::Term | TypeRef::Compound | TypeRef::PredRef => {
+                Some(ScalarType::U64)
+            }
+            TypeRef::Domain(_) => None,
+        }
+    }
+
+    fn inferred_rule_columns(
+        schema_inference: &Lowerer,
+        rule: &Rule,
+        schemas: &BTreeMap<PredicateKey, Vec<InferredColumn>>,
+    ) -> xlog_core::Result<Vec<Option<ScalarType>>> {
+        schema_inference.infer_rule_head_column_types_before_function_expansion(
+            rule,
+            |atom, index| {
+                schemas
+                    .get(&PredicateKey {
+                        name: atom.predicate.clone(),
+                        arity: atom.arity(),
+                    })
+                    .and_then(|columns| columns.get(index))
+                    .and_then(|column| match column {
+                        InferredColumn::Known(typ) => Some(*typ),
+                        InferredColumn::Unknown | InferredColumn::Conflicting => None,
+                    })
+            },
+        )
+    }
+
+    fn predicate_schema_inference_error(
+        key: &PredicateKey,
+        contribution: &InferredPredicateContribution,
+        error: XlogError,
+    ) -> ModuleError {
+        ModuleError::PredicateSchemaInferenceFailed {
+            name: key.name.clone(),
+            arity: key.arity,
+            module: contribution.provider.module.clone(),
+            source: Box::new(contribution.provider.source.clone()),
+            message: error.to_string(),
+        }
+    }
+
+    fn inferred_predicate_schemas(
+        providers: &ImportProviders,
+    ) -> Result<BTreeMap<PredicateKey, Vec<InferredColumn>>, ModuleError> {
+        let mut schemas = BTreeMap::<PredicateKey, Vec<InferredColumn>>::new();
+        let mut declared = BTreeSet::<PredicateKey>::new();
+
+        for (name, declaration) in &providers.predicate_declarations {
+            let key = PredicateKey {
+                name: name.clone(),
+                arity: declaration.schema.columns.len(),
+            };
+            let columns = declaration
+                .schema
+                .columns
+                .iter()
+                .map(|(_, typ)| {
+                    Self::storage_scalar_type(typ)
+                        .map(InferredColumn::Known)
+                        .unwrap_or(InferredColumn::Unknown)
+                })
+                .collect();
+            declared.insert(key.clone());
+            schemas.insert(key, columns);
+        }
+
+        let total_columns = providers
+            .inferred_predicate_contributions
+            .keys()
+            .filter(|key| !declared.contains(*key))
+            .map(|key| key.arity)
+            .sum::<usize>();
+        let max_iterations = total_columns.saturating_mul(2).saturating_add(1);
+        let schema_inference = Lowerer::new();
+        let mut converged = false;
+        for _ in 0..max_iterations {
+            let mut changed = false;
+            for (key, contributions) in &providers.inferred_predicate_contributions {
+                if declared.contains(key) {
+                    continue;
+                }
+                for contribution in contributions {
+                    let columns = Self::inferred_rule_columns(
+                        &schema_inference,
+                        &contribution.rule,
+                        &schemas,
+                    )
+                    .map_err(|error| {
+                        Self::predicate_schema_inference_error(key, contribution, error)
+                    })?;
+                    let schema = schemas
+                        .entry(key.clone())
+                        .or_insert_with(|| vec![InferredColumn::Unknown; key.arity]);
+                    for (slot, inferred) in schema.iter_mut().zip(columns) {
+                        let Some(inferred) = inferred else {
+                            continue;
+                        };
+                        let updated = match *slot {
+                            InferredColumn::Unknown => InferredColumn::Known(inferred),
+                            InferredColumn::Known(existing) if existing != inferred => {
+                                InferredColumn::Conflicting
+                            }
+                            InferredColumn::Known(_) | InferredColumn::Conflicting => continue,
+                        };
+                        *slot = updated;
+                        changed = true;
+                    }
+                }
+            }
+            if !changed {
+                converged = true;
+                break;
+            }
+        }
+        debug_assert!(
+            converged,
+            "predicate schema inference exceeded its monotonic transition bound"
+        );
+
+        Ok(schemas)
+    }
+
+    fn validate_inferred_predicate_contributions(
+        providers: &ImportProviders,
+    ) -> Result<(), ModuleError> {
+        let schemas = Self::inferred_predicate_schemas(providers)?;
+        let schema_inference = Lowerer::new();
+        for (key, contributions) in &providers.inferred_predicate_contributions {
+            if providers
+                .predicate_declarations
+                .get(&key.name)
+                .is_some_and(|declaration| declaration.schema.columns.len() == key.arity)
+            {
+                continue;
+            }
+
+            let inferred = contributions
+                .iter()
+                .map(|contribution| {
+                    Self::inferred_rule_columns(&schema_inference, &contribution.rule, &schemas)
+                        .map(|columns| (contribution, columns))
+                        .map_err(|error| {
+                            Self::predicate_schema_inference_error(key, contribution, error)
+                        })
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            for (left_index, (left, left_columns)) in inferred.iter().enumerate() {
+                for (right, right_columns) in inferred.iter().skip(left_index + 1) {
+                    if left.provider.source == right.provider.source {
+                        continue;
+                    }
+                    for (column_index, (left_type, right_type)) in
+                        left_columns.iter().zip(right_columns).enumerate()
+                    {
+                        if let (Some(type1), Some(type2)) = (left_type, right_type) {
+                            if type1 != type2 {
+                                return Err(ModuleError::IncompatibleInferredPredicateSchema {
+                                    name: key.name.clone(),
+                                    arity: key.arity,
+                                    column: column_index + 1,
+                                    type1: *type1,
+                                    type2: *type2,
+                                    module1: left.provider.module.clone(),
+                                    module2: right.provider.module.clone(),
+                                    source1: Box::new(left.provider.source.clone()),
+                                    source2: Box::new(right.provider.source.clone()),
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+
     fn merge_function_providers(
         providers: &mut BTreeMap<String, ImportProvider>,
         incoming: BTreeMap<String, ImportProvider>,
@@ -993,13 +1256,8 @@ impl ModuleResolver {
         declaration: &PredDecl,
     ) -> PredicateDeclarationSchema {
         PredicateDeclarationSchema {
-            types: declaration
-                .types
-                .iter()
-                .map(|typ| Self::normalized_type_ref(domains, typ))
-                .collect(),
             columns: declaration
-                .columns
+                .schema_columns()
                 .iter()
                 .map(|column| {
                     (
@@ -1144,6 +1402,20 @@ impl ModuleResolver {
                 },
             )?;
         }
+        let excluded_predicates =
+            Self::hidden_local_items(&loaded_module.program, imported_items).predicates;
+        let local_contributions = Self::local_inferred_predicate_contributions(
+            &loaded_module.program,
+            &excluded_predicates,
+            ImportProvider {
+                module: module_path.to_vec(),
+                source: source.to_path_buf(),
+            },
+        );
+        Self::merge_inferred_predicate_contributions(
+            &mut providers.inferred_predicate_contributions,
+            local_contributions,
+        );
         let mut local_functions = BTreeMap::new();
         for name in Self::visible_local_functions(&loaded_module.program, imported_items) {
             local_functions.insert(
@@ -1180,25 +1452,41 @@ impl ModuleResolver {
                 &mut providers.predicate_declarations,
                 incoming.predicate_declarations,
             )?;
+            Self::merge_inferred_predicate_contributions(
+                &mut providers.inferred_predicate_contributions,
+                incoming.inferred_predicate_contributions,
+            );
             Self::merge_function_providers(&mut providers.functions, incoming.functions)?;
         }
         Ok(providers)
     }
 
-    fn module_path_for_program(&self, program: &Program) -> ModulePath {
+    fn provider_for_program(&self, program: &Program) -> ImportProvider {
         if let Some(entry) = &self.entry {
             if entry.program.imports == program.imports {
-                return entry.path.clone();
+                return ImportProvider {
+                    module: entry.path.clone(),
+                    source: self
+                        .entry_source
+                        .clone()
+                        .unwrap_or_else(|| entry.source_file.clone()),
+                };
             }
         }
         if let Some(root_source) = &self.root_module {
             if let Some(root) = self.loaded.get(root_source) {
                 if root.program.imports == program.imports {
-                    return root.path.clone();
+                    return ImportProvider {
+                        module: root.path.clone(),
+                        source: root_source.clone(),
+                    };
                 }
             }
         }
-        vec!["<program>".to_string()]
+        ImportProvider {
+            module: vec!["<program>".to_string()],
+            source: PathBuf::from("<program>"),
+        }
     }
 
     fn validate_program_against_imports(
@@ -1206,7 +1494,8 @@ impl ModuleResolver {
         program: &Program,
         imports: &[ResolvedImport],
     ) -> Result<(), ModuleError> {
-        let module_path = self.module_path_for_program(program);
+        let program_provider = self.provider_for_program(program);
+        let module_path = program_provider.module.clone();
         let mut providers = self.import_providers_from_imports(imports)?;
 
         for declaration in &program.domains {
@@ -1231,6 +1520,15 @@ impl ModuleResolver {
                 },
             )?;
         }
+        let entry_contributions = Self::local_inferred_predicate_contributions(
+            program,
+            &HashSet::new(),
+            program_provider,
+        );
+        Self::merge_inferred_predicate_contributions(
+            &mut providers.inferred_predicate_contributions,
+            entry_contributions,
+        );
         for function in &program.functions {
             if let Some(imported) = providers.functions.get(&function.name) {
                 return Err(ModuleError::ImportConflict {
@@ -1240,6 +1538,8 @@ impl ModuleResolver {
                 });
             }
         }
+
+        Self::validate_inferred_predicate_contributions(&providers)?;
 
         Ok(())
     }
@@ -1515,10 +1815,12 @@ impl ModuleResolver {
     ///
     /// Resolution follows the importer-scoped edges recorded by the matching
     /// entry file or root module. Without that anchor, every logical path must
-    /// identify one loaded source. Imported entry-only content and incomplete
-    /// exports, incompatible schemas, and conflicting function definitions are
-    /// rejected rather than silently omitted. Compatible predicate clauses
-    /// from separate import branches are merged into one relation.
+    /// identify one loaded source. Imported entry-only content, incomplete
+    /// exports, incompatible participating declarations, conflicting inferred
+    /// head-column types for undeclared predicate signatures, and conflicting
+    /// function definitions are rejected rather than silently omitted. Selected
+    /// public predicate clauses from separate import branches are then merged
+    /// into one relation.
     ///
     /// # Arguments
     /// * `program` - The main program with imports to resolve
@@ -1669,6 +1971,726 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    #[test]
+    fn merge_imports_unions_compatible_undeclared_predicates() {
+        let tmp = TempDir::new().unwrap();
+        create_test_module(tmp.path(), "first", "shared(from_first).");
+        create_test_module(tmp.path(), "second", "shared(from_second).");
+        let entry_source = "use first.\nuse second.\n";
+        create_test_module(tmp.path(), "entry", entry_source);
+
+        let mut resolver = ModuleResolver::new(vec![]);
+        resolver.load_module(tmp.path(), &["entry".into()]).unwrap();
+
+        let merged = resolver
+            .merge_imports(parse_program(entry_source).unwrap())
+            .unwrap();
+        let shared_facts = merged
+            .rules
+            .iter()
+            .filter(|rule| rule.head.predicate == "shared" && rule.is_fact())
+            .collect::<Vec<_>>();
+
+        assert_eq!(shared_facts.len(), 2);
+        assert!(shared_facts
+            .iter()
+            .any(|rule| rule.head.terms
+                == vec![Term::Symbol(xlog_core::symbol::intern("from_first"))]));
+        assert!(shared_facts
+            .iter()
+            .any(|rule| rule.head.terms
+                == vec![Term::Symbol(xlog_core::symbol::intern("from_second"))]));
+        assert!(!merged
+            .predicates
+            .iter()
+            .any(|declaration| declaration.name == "shared"));
+    }
+
+    #[test]
+    fn merge_import_validation_keeps_undeclared_predicate_arities_distinct() {
+        let tmp = TempDir::new().unwrap();
+        create_test_module(tmp.path(), "unary", "shared(1).");
+        create_test_module(tmp.path(), "binary", "shared(one, two).");
+        let entry_source = "use unary.\nuse binary.\n";
+        create_test_module(tmp.path(), "entry", entry_source);
+
+        let mut resolver = ModuleResolver::new(vec![]);
+        resolver.load_module(tmp.path(), &["entry".into()]).unwrap();
+
+        let merged = resolver
+            .merge_imports(parse_program(entry_source).unwrap())
+            .unwrap();
+        let arities = merged
+            .rules
+            .iter()
+            .filter(|rule| rule.head.predicate == "shared")
+            .map(|rule| rule.head.arity())
+            .collect::<Vec<_>>();
+
+        assert_eq!(arities, vec![1, 2]);
+    }
+
+    #[test]
+    fn merge_imports_rejects_incompatible_undeclared_predicate_schemas() {
+        let tmp = TempDir::new().unwrap();
+        create_test_module(tmp.path(), "first", "shared(row, 1).");
+        create_test_module(tmp.path(), "second", "shared(row, from_second).");
+        let entry_source = "use first.\nuse second.\n";
+        create_test_module(tmp.path(), "entry", entry_source);
+
+        let mut resolver = ModuleResolver::new(vec![]);
+        resolver.load_module(tmp.path(), &["entry".into()]).unwrap();
+
+        let program = parse_program(entry_source).unwrap();
+        let errors = [
+            resolver
+                .validate_imports(&program)
+                .expect_err("validation must reject different inferred column types"),
+            resolver
+                .merge_imports(program)
+                .expect_err("merge must reject different inferred column types"),
+        ];
+
+        for error in errors {
+            let message = error.to_string();
+            assert!(message.contains("error[E0412]"), "{message}");
+            assert!(message.contains("shared/2"), "{message}");
+            assert!(message.contains("column 2"), "{message}");
+            assert!(message.contains("first"), "{message}");
+            assert!(message.contains("second"), "{message}");
+            assert!(message.contains("u32"), "{message}");
+            assert!(message.contains("symbol"), "{message}");
+        }
+    }
+
+    #[test]
+    fn merge_imports_rejects_numeric_inference_conflicts_in_either_import_order() {
+        let tmp = TempDir::new().unwrap();
+        create_test_module(tmp.path(), "small", "shared(1).");
+        create_test_module(tmp.path(), "wide", "shared(5000000000).");
+
+        for (entry_name, entry_source) in [
+            ("small_first", "use small.\nuse wide.\n"),
+            ("wide_first", "use wide.\nuse small.\n"),
+        ] {
+            create_test_module(tmp.path(), entry_name, entry_source);
+            let mut resolver = ModuleResolver::new(vec![]);
+            resolver
+                .load_module(tmp.path(), &[entry_name.into()])
+                .unwrap();
+
+            let error = resolver
+                .merge_imports(parse_program(entry_source).unwrap())
+                .expect_err("numeric inference must not depend on import order");
+            let message = error.to_string();
+
+            assert!(message.contains("error[E0412]"), "{message}");
+            assert!(message.contains("shared/1"), "{message}");
+            assert!(message.contains("module `small`"), "{message}");
+            assert!(message.contains("module `wide`"), "{message}");
+            assert!(message.contains("u32"), "{message}");
+            assert!(message.contains("i64"), "{message}");
+        }
+    }
+
+    #[test]
+    fn merge_imports_uses_an_explicit_schema_for_undeclared_contributions() {
+        let tmp = TempDir::new().unwrap();
+        create_test_module(tmp.path(), "small", "shared(1).");
+        create_test_module(tmp.path(), "wide", "shared(5000000000).");
+        let entry_source = "use small.\nuse wide.\npred shared(i64).\n";
+        create_test_module(tmp.path(), "entry", entry_source);
+
+        let mut resolver = ModuleResolver::new(vec![]);
+        resolver.load_module(tmp.path(), &["entry".into()]).unwrap();
+
+        let merged = resolver
+            .merge_imports(parse_program(entry_source).unwrap())
+            .expect("the explicit schema controls both imported facts");
+
+        assert_eq!(
+            merged
+                .rules
+                .iter()
+                .filter(|rule| rule.head.predicate == "shared")
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn merge_imports_rejects_transitive_inferred_schema_conflicts() {
+        let tmp = TempDir::new().unwrap();
+        create_test_module(tmp.path(), "left_provider", "shared(1).");
+        create_test_module(tmp.path(), "left_wrapper", "use left_provider.\n");
+        create_test_module(tmp.path(), "right_provider", "shared(from_right).");
+        create_test_module(tmp.path(), "right_wrapper", "use right_provider.\n");
+        let entry_source = "use left_wrapper.\nuse right_wrapper.\n";
+        create_test_module(tmp.path(), "entry", entry_source);
+
+        let mut resolver = ModuleResolver::new(vec![]);
+        resolver.load_module(tmp.path(), &["entry".into()]).unwrap();
+
+        let error = resolver
+            .merge_imports(parse_program(entry_source).unwrap())
+            .expect_err("transitive contributions must be schema-compatible");
+        let message = error.to_string();
+
+        assert!(message.contains("error[E0412]"), "{message}");
+        assert!(message.contains("shared/1"), "{message}");
+        assert!(message.contains("left_provider"), "{message}");
+        assert!(message.contains("right_provider"), "{message}");
+    }
+
+    #[test]
+    fn merge_imports_rejects_constant_head_rule_schema_conflicts() {
+        let tmp = TempDir::new().unwrap();
+        create_test_module(
+            tmp.path(),
+            "first",
+            "first_source(ready).\nshared(1) :- first_source(ready).",
+        );
+        create_test_module(
+            tmp.path(),
+            "second",
+            "second_source(ready).\nshared(from_second) :- second_source(ready).",
+        );
+        let entry_source = "use first.\nuse second.\n";
+        create_test_module(tmp.path(), "entry", entry_source);
+
+        let mut resolver = ModuleResolver::new(vec![]);
+        resolver.load_module(tmp.path(), &["entry".into()]).unwrap();
+
+        let error = resolver
+            .merge_imports(parse_program(entry_source).unwrap())
+            .expect_err("known constant head types must agree across modules");
+
+        assert!(error.to_string().contains("error[E0412]"));
+    }
+
+    #[test]
+    fn merge_imports_rejects_body_inferred_rule_head_conflicts() {
+        let tmp = TempDir::new().unwrap();
+        create_test_module(
+            tmp.path(),
+            "first",
+            "first_source(1).\nshared(X) :- first_source(X).",
+        );
+        create_test_module(
+            tmp.path(),
+            "second",
+            "second_source(from_second).\nshared(X) :- second_source(X).",
+        );
+        let entry_source = "use first.\nuse second.\n";
+        create_test_module(tmp.path(), "entry", entry_source);
+
+        let mut resolver = ModuleResolver::new(vec![]);
+        resolver.load_module(tmp.path(), &["entry".into()]).unwrap();
+
+        let error = resolver
+            .merge_imports(parse_program(entry_source).unwrap())
+            .expect_err("body-derived head types must agree across modules");
+
+        let message = error.to_string();
+        assert!(message.contains("error[E0412]"), "{message}");
+        assert!(message.contains("shared/1"), "{message}");
+        assert!(message.contains("u32"), "{message}");
+        assert!(message.contains("symbol"), "{message}");
+    }
+
+    #[test]
+    fn merge_imports_rejects_arithmetic_inferred_rule_head_conflicts() {
+        let tmp = TempDir::new().unwrap();
+        create_test_module(tmp.path(), "first", "shared(X) :- X is cast(1, u32).");
+        create_test_module(tmp.path(), "second", "shared(X) :- X is cast(1, u64).");
+        let entry_source = "use first.\nuse second.\n";
+        create_test_module(tmp.path(), "entry", entry_source);
+
+        let mut resolver = ModuleResolver::new(vec![]);
+        resolver.load_module(tmp.path(), &["entry".into()]).unwrap();
+
+        let error = resolver
+            .merge_imports(parse_program(entry_source).unwrap())
+            .expect_err("arithmetic-derived head types must agree across modules");
+        let message = error.to_string();
+
+        assert!(message.contains("error[E0412]"), "{message}");
+        assert!(message.contains("shared/1"), "{message}");
+        assert!(message.contains("module `first`"), "{message}");
+        assert!(message.contains("module `second`"), "{message}");
+        assert!(message.contains("u32"), "{message}");
+        assert!(message.contains("u64"), "{message}");
+    }
+
+    #[test]
+    fn merge_imports_rejects_aggregate_inferred_rule_head_conflicts() {
+        let tmp = TempDir::new().unwrap();
+        create_test_module(
+            tmp.path(),
+            "first",
+            "first_source(1).\nshared(min(X)) :- first_source(X).",
+        );
+        create_test_module(
+            tmp.path(),
+            "second",
+            "second_source(1.0).\nshared(logsumexp(X)) :- second_source(X).",
+        );
+        let entry_source = "use first.\nuse second.\n";
+        create_test_module(tmp.path(), "entry", entry_source);
+
+        let mut resolver = ModuleResolver::new(vec![]);
+        resolver.load_module(tmp.path(), &["entry".into()]).unwrap();
+
+        let error = resolver
+            .merge_imports(parse_program(entry_source).unwrap())
+            .expect_err("aggregate-derived head types must agree across modules");
+        let message = error.to_string();
+
+        assert!(message.contains("error[E0412]"), "{message}");
+        assert!(message.contains("shared/1"), "{message}");
+        assert!(message.contains("module `first`"), "{message}");
+        assert!(message.contains("module `second`"), "{message}");
+        assert!(message.contains("u32"), "{message}");
+        assert!(message.contains("f64"), "{message}");
+    }
+
+    #[test]
+    fn merge_imports_attributes_invalid_schema_inference_to_its_module() {
+        let tmp = TempDir::new().unwrap();
+        create_test_module(
+            tmp.path(),
+            "library",
+            "shared(X) :- X is cast(1, u32) + cast(1, u64).",
+        );
+        let entry_source = "use library.\n";
+        create_test_module(tmp.path(), "entry", entry_source);
+
+        let mut resolver = ModuleResolver::new(vec![]);
+        resolver.load_module(tmp.path(), &["entry".into()]).unwrap();
+
+        let error = resolver
+            .merge_imports(parse_program(entry_source).unwrap())
+            .expect_err("invalid arithmetic evidence must fail during schema inference");
+        let message = error.to_string();
+
+        assert!(message.contains("error[E0413]"), "{message}");
+        assert!(message.contains("shared/1"), "{message}");
+        assert!(message.contains("module `library`"), "{message}");
+        assert!(message.contains("Type mismatch in arithmetic"), "{message}");
+    }
+
+    #[test]
+    fn merge_imports_defers_user_function_schema_evidence_until_expansion() {
+        let tmp = TempDir::new().unwrap();
+        create_test_module(
+            tmp.path(),
+            "first",
+            "func first_value(X) = cast(X, u32).\nshared(X) :- X is first_value(1).",
+        );
+        create_test_module(
+            tmp.path(),
+            "second",
+            "func second_value(X) = cast(X, u64).\nshared(X) :- X is second_value(1).",
+        );
+        let entry_source = "use first.\nuse second.\n";
+        create_test_module(tmp.path(), "entry", entry_source);
+
+        let mut resolver = ModuleResolver::new(vec![]);
+        resolver.load_module(tmp.path(), &["entry".into()]).unwrap();
+
+        let merged = resolver
+            .merge_imports(parse_program(entry_source).unwrap())
+            .expect("user-defined calls are expanded after module resolution");
+
+        assert_eq!(
+            merged
+                .rules
+                .iter()
+                .filter(|rule| rule.head.predicate == "shared")
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn merge_imports_retains_independent_schema_evidence_beside_user_functions() {
+        let tmp = TempDir::new().unwrap();
+        create_test_module(
+            tmp.path(),
+            "first",
+            "func first_value(X) = cast(X, u32).\nshared(1, X) :- X is first_value(1).",
+        );
+        create_test_module(
+            tmp.path(),
+            "second",
+            "func second_value(X) = cast(X, u32).\nshared(from_second, X) :- X is second_value(1).",
+        );
+        let entry_source = "use first.\nuse second.\n";
+        create_test_module(tmp.path(), "entry", entry_source);
+
+        let mut resolver = ModuleResolver::new(vec![]);
+        resolver.load_module(tmp.path(), &["entry".into()]).unwrap();
+
+        let error = resolver
+            .merge_imports(parse_program(entry_source).unwrap())
+            .expect_err("a user function must not hide independent head-column evidence");
+        let message = error.to_string();
+
+        assert!(message.contains("error[E0412]"), "{message}");
+        assert!(message.contains("shared/2"), "{message}");
+        assert!(message.contains("module `first`"), "{message}");
+        assert!(message.contains("module `second`"), "{message}");
+        assert!(message.contains("u32"), "{message}");
+        assert!(message.contains("symbol"), "{message}");
+    }
+
+    #[test]
+    fn merge_imports_reports_invalid_builtin_evidence_beside_user_functions() {
+        let tmp = TempDir::new().unwrap();
+        create_test_module(
+            tmp.path(),
+            "library",
+            "func value(X) = cast(X, u32).\nshared(X, Y) :- X is value(1), Y is cast(1, u32) + cast(1, u64).",
+        );
+        let entry_source = "use library.\n";
+        create_test_module(tmp.path(), "entry", entry_source);
+
+        let mut resolver = ModuleResolver::new(vec![]);
+        resolver.load_module(tmp.path(), &["entry".into()]).unwrap();
+
+        let error = resolver
+            .merge_imports(parse_program(entry_source).unwrap())
+            .expect_err("a user function must not hide invalid built-in arithmetic evidence");
+        let message = error.to_string();
+
+        assert!(message.contains("error[E0413]"), "{message}");
+        assert!(message.contains("shared/2"), "{message}");
+        assert!(message.contains("module `library`"), "{message}");
+        assert!(message.contains("Type mismatch in arithmetic"), "{message}");
+    }
+
+    #[test]
+    fn merge_imports_reports_invalid_builtin_subexpressions_beside_user_functions() {
+        let tmp = TempDir::new().unwrap();
+        create_test_module(
+            tmp.path(),
+            "library",
+            "func value(X) = cast(X, u32).\nshared(Y) :- Y is value(1) + (cast(1, u32) + cast(1, u64)).",
+        );
+        let entry_source = "use library.\n";
+        create_test_module(tmp.path(), "entry", entry_source);
+
+        let mut resolver = ModuleResolver::new(vec![]);
+        resolver.load_module(tmp.path(), &["entry".into()]).unwrap();
+
+        let error = resolver
+            .merge_imports(parse_program(entry_source).unwrap())
+            .expect_err("an unknown user-function operand must not hide an invalid sibling");
+        let message = error.to_string();
+
+        assert!(message.contains("error[E0413]"), "{message}");
+        assert!(message.contains("shared/1"), "{message}");
+        assert!(message.contains("module `library`"), "{message}");
+        assert!(message.contains("Type mismatch in arithmetic"), "{message}");
+    }
+
+    #[test]
+    fn merge_imports_reports_invalid_user_function_argument_evidence() {
+        let tmp = TempDir::new().unwrap();
+        create_test_module(
+            tmp.path(),
+            "library",
+            "func value(X) = cast(X, u32).\nshared(Y) :- Y is value(cast(1, u32) + cast(1, u64)).",
+        );
+        let entry_source = "use library.\n";
+        create_test_module(tmp.path(), "entry", entry_source);
+
+        let mut resolver = ModuleResolver::new(vec![]);
+        resolver.load_module(tmp.path(), &["entry".into()]).unwrap();
+
+        let error = resolver
+            .merge_imports(parse_program(entry_source).unwrap())
+            .expect_err("invalid built-in arithmetic inside a user-function argument must fail");
+        let message = error.to_string();
+
+        assert!(message.contains("error[E0413]"), "{message}");
+        assert!(message.contains("shared/1"), "{message}");
+        assert!(message.contains("module `library`"), "{message}");
+        assert!(message.contains("Type mismatch in arithmetic"), "{message}");
+    }
+
+    #[test]
+    fn merge_imports_reports_invalid_partial_arithmetic_evidence() {
+        let cases = [
+            (
+                "symbols(foo).\nshared(Y) :- symbols(S), Y is value(1) + S.",
+                "Arithmetic requires numeric type",
+            ),
+            (
+                "floats(1.0).\nshared(Y) :- floats(F), Y is value(1) % F.",
+                "Modulo (%) not supported for floating point",
+            ),
+            (
+                "symbols(foo).\nshared(Y) :- symbols(S), Y is value(1) % S.",
+                "Modulo (%) requires integer operands",
+            ),
+        ];
+
+        for (body, expected_detail) in cases {
+            let tmp = TempDir::new().unwrap();
+            create_test_module(
+                tmp.path(),
+                "library",
+                &format!("func value(X) = cast(X, u32).\n{body}"),
+            );
+            let entry_source = "use library.\n";
+            create_test_module(tmp.path(), "entry", entry_source);
+
+            let mut resolver = ModuleResolver::new(vec![]);
+            resolver.load_module(tmp.path(), &["entry".into()]).unwrap();
+
+            let error = resolver
+                .merge_imports(parse_program(entry_source).unwrap())
+                .expect_err("a deferred operand must not hide an invalid known operand");
+            let message = error.to_string();
+
+            assert!(message.contains("error[E0413]"), "{message}");
+            assert!(message.contains("shared/1"), "{message}");
+            assert!(message.contains("module `library`"), "{message}");
+            assert!(message.contains(expected_detail), "{message}");
+        }
+    }
+
+    #[test]
+    fn merge_imports_propagates_signature_types_through_rule_chains() {
+        let tmp = TempDir::new().unwrap();
+        create_test_module(
+            tmp.path(),
+            "first",
+            "shared(X) :- first_mid(X).\nfirst_mid(X) :- z_typed(X).\nz_typed(1).",
+        );
+        create_test_module(
+            tmp.path(),
+            "second",
+            "shared(X) :- second_mid(X).\nsecond_mid(X) :- z_typed(prefix, X).\nz_typed(prefix, from_second).",
+        );
+        let entry_source = "use first.\nuse second.\n";
+        create_test_module(tmp.path(), "entry", entry_source);
+
+        let mut resolver = ModuleResolver::new(vec![]);
+        resolver.load_module(tmp.path(), &["entry".into()]).unwrap();
+
+        let error = resolver
+            .merge_imports(parse_program(entry_source).unwrap())
+            .expect_err("transitive body-derived types must agree across modules");
+        let message = error.to_string();
+
+        assert!(message.contains("error[E0412]"), "{message}");
+        assert!(message.contains("shared/1"), "{message}");
+        assert!(message.contains("u32"), "{message}");
+        assert!(message.contains("symbol"), "{message}");
+    }
+
+    #[test]
+    fn merge_imports_leaves_unanchored_rule_head_variables_unconstrained() {
+        let tmp = TempDir::new().unwrap();
+        create_test_module(
+            tmp.path(),
+            "first",
+            "first_cycle(X) :- first_cycle(X).\nshared(X) :- first_cycle(X).",
+        );
+        create_test_module(
+            tmp.path(),
+            "second",
+            "second_cycle(X) :- second_cycle(X).\nshared(X) :- second_cycle(X).",
+        );
+        let entry_source = "use first.\nuse second.\n";
+        create_test_module(tmp.path(), "entry", entry_source);
+
+        let mut resolver = ModuleResolver::new(vec![]);
+        resolver.load_module(tmp.path(), &["entry".into()]).unwrap();
+
+        let merged = resolver
+            .merge_imports(parse_program(entry_source).unwrap())
+            .expect("unanchored variables do not supply concrete schema evidence");
+
+        assert_eq!(
+            merged
+                .rules
+                .iter()
+                .filter(|rule| rule.head.predicate == "shared")
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn merge_imports_uses_column_schema_arity_for_programmatic_declarations() {
+        let tmp = TempDir::new().unwrap();
+        create_test_module(tmp.path(), "small", "shared(1).");
+        create_test_module(tmp.path(), "wide", "shared(5000000000).");
+        let entry_source = "use small.\nuse wide.\n";
+        create_test_module(tmp.path(), "entry", entry_source);
+
+        let mut resolver = ModuleResolver::new(vec![]);
+        resolver.load_module(tmp.path(), &["entry".into()]).unwrap();
+        let mut program = parse_program(entry_source).unwrap();
+        program.predicates.push(PredDecl {
+            name: "shared".to_string(),
+            types: Vec::new(),
+            columns: vec![crate::ast::PredColumn {
+                name: Some("value".to_string()),
+                typ: TypeRef::Scalar(ScalarType::I64),
+            }],
+            is_private: false,
+        });
+
+        let merged = resolver
+            .merge_imports(program)
+            .expect("the effective declaration schema must control imported facts");
+
+        assert_eq!(
+            merged
+                .rules
+                .iter()
+                .filter(|rule| rule.head.predicate == "shared")
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn merge_imports_distinguishes_same_stem_entry_and_import_in_schema_errors() {
+        let tmp = TempDir::new().unwrap();
+        create_test_module(tmp.path(), "main", "shared(1).");
+        let entry = tmp.path().join("main.datalog");
+        fs::write(&entry, "use main.\nshared(from_entry).\n").unwrap();
+
+        let mut resolver = ModuleResolver::new(vec![]);
+        let program = resolver.load_entry_file(&entry).unwrap().program.clone();
+
+        let error = resolver
+            .merge_imports(program)
+            .expect_err("same-stem sources with different schemas must be distinguishable");
+        let message = error.to_string();
+
+        assert!(message.contains("error[E0412]"), "{message}");
+        assert!(message.contains("main.datalog"), "{message}");
+        assert!(message.contains("main.xlog"), "{message}");
+    }
+
+    #[test]
+    fn merge_imports_excludes_selectively_omitted_schema_conflicts() {
+        let tmp = TempDir::new().unwrap();
+        create_test_module(tmp.path(), "first", "shared(from_first).\nomitted(1).");
+        create_test_module(
+            tmp.path(),
+            "second",
+            "shared(from_second).\nomitted(from_second).",
+        );
+        let entry_source = "use first::{shared}.\nuse second::{shared}.\n";
+        create_test_module(tmp.path(), "entry", entry_source);
+
+        let mut resolver = ModuleResolver::new(vec![]);
+        resolver.load_module(tmp.path(), &["entry".into()]).unwrap();
+
+        let merged = resolver
+            .merge_imports(parse_program(entry_source).unwrap())
+            .expect("omitted predicates do not participate in schema validation");
+
+        assert_eq!(
+            merged
+                .rules
+                .iter()
+                .filter(|rule| rule.head.predicate == "shared")
+                .count(),
+            2
+        );
+        assert!(!merged
+            .rules
+            .iter()
+            .any(|rule| rule.head.predicate == "omitted"));
+    }
+
+    #[test]
+    fn merge_imports_rejects_selected_inferred_schema_conflicts() {
+        let tmp = TempDir::new().unwrap();
+        create_test_module(tmp.path(), "first", "shared(1).\nfirst_only(ok).");
+        create_test_module(
+            tmp.path(),
+            "second",
+            "shared(from_second).\nsecond_only(ok).",
+        );
+        let entry_source = "use first::{shared}.\nuse second::{shared}.\n";
+        create_test_module(tmp.path(), "entry", entry_source);
+
+        let mut resolver = ModuleResolver::new(vec![]);
+        resolver.load_module(tmp.path(), &["entry".into()]).unwrap();
+
+        let error = resolver
+            .merge_imports(parse_program(entry_source).unwrap())
+            .expect_err("selected incompatible contributions must be rejected");
+
+        assert!(error.to_string().contains("error[E0412]"));
+    }
+
+    #[test]
+    fn merge_imports_excludes_private_schema_conflicts() {
+        let tmp = TempDir::new().unwrap();
+        create_test_module(
+            tmp.path(),
+            "first",
+            "private pred hidden(u32).\nhidden(1).\nshared(from_first).",
+        );
+        create_test_module(
+            tmp.path(),
+            "second",
+            "private pred hidden(symbol).\nhidden(from_second).\nshared(from_second).",
+        );
+        let entry_source = "use first.\nuse second.\n";
+        create_test_module(tmp.path(), "entry", entry_source);
+
+        let mut resolver = ModuleResolver::new(vec![]);
+        resolver.load_module(tmp.path(), &["entry".into()]).unwrap();
+
+        let merged = resolver
+            .merge_imports(parse_program(entry_source).unwrap())
+            .expect("private predicates do not participate in import validation");
+
+        assert_eq!(
+            merged
+                .rules
+                .iter()
+                .filter(|rule| rule.head.predicate == "shared")
+                .count(),
+            2
+        );
+        assert!(!merged
+            .rules
+            .iter()
+            .any(|rule| rule.head.predicate == "hidden"));
+    }
+
+    #[test]
+    fn merge_imports_validates_entry_clause_schema_against_imports() {
+        let tmp = TempDir::new().unwrap();
+        create_test_module(tmp.path(), "library", "shared(1).");
+        let entry_source = "use library.\nshared(from_entry).\n";
+        create_test_module(tmp.path(), "entry", entry_source);
+
+        let mut resolver = ModuleResolver::new(vec![]);
+        resolver.load_module(tmp.path(), &["entry".into()]).unwrap();
+
+        let error = resolver
+            .merge_imports(parse_program(entry_source).unwrap())
+            .expect_err("entry and imported contributions must agree");
+        let message = error.to_string();
+
+        assert!(message.contains("error[E0412]"), "{message}");
+        assert!(message.contains("library"), "{message}");
+        assert!(message.contains("entry"), "{message}");
     }
 
     #[test]
@@ -1941,6 +2963,31 @@ mod tests {
             "second",
             "pred external(symbol). external(value).",
         );
+        let entry_source = "use first.\nuse second.\n";
+        create_test_module(tmp.path(), "entry", entry_source);
+
+        let mut resolver = ModuleResolver::new(vec![]);
+        resolver.load_module(tmp.path(), &["entry".into()]).unwrap();
+
+        let result = resolver.merge_imports(parse_program(entry_source).unwrap());
+
+        assert!(matches!(
+            result,
+            Err(ModuleError::IncompatiblePredicateDeclaration {
+                name,
+                module1,
+                module2,
+            }) if name == "external"
+                && module1 == vec!["first"]
+                && module2 == vec!["second"]
+        ));
+    }
+
+    #[test]
+    fn merge_imports_rejects_incompatible_declaration_only_modules() {
+        let tmp = TempDir::new().unwrap();
+        create_test_module(tmp.path(), "first", "pred external(u32).");
+        create_test_module(tmp.path(), "second", "pred external(symbol).");
         let entry_source = "use first.\nuse second.\n";
         create_test_module(tmp.path(), "entry", entry_source);
 

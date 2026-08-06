@@ -87,16 +87,7 @@ impl ListNormalizer {
 
         let mut list_columns = HashMap::new();
         for pred in &program.predicates {
-            let columns = if pred.columns.is_empty() {
-                pred.types
-                    .iter()
-                    .cloned()
-                    .map(|typ| PredColumn { name: None, typ })
-                    .collect()
-            } else {
-                pred.columns.clone()
-            };
-            for (idx, col) in columns.iter().enumerate() {
+            for (idx, col) in pred.schema_columns().iter().enumerate() {
                 if let TypeRef::List(inner) = &col.typ {
                     let elem_type = Self::storage_type_for_type_ref(inner, &domains)?;
                     list_columns.insert((pred.name.clone(), idx), ListColumn { elem_type });

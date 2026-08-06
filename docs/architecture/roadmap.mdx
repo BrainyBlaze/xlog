@@ -32,12 +32,14 @@ commitments — not old milestone labels or implementation-board names — defin
 the architecture:
 
 - **One frontend** for deterministic, probabilistic, epistemic, and
-  solver-backed programs.
+  neural-symbolic programs.
 - **An explicit boundary** between host-side control logic and the GPU
   data plane.
-- **Inspectable subsystem contracts** carried by internal intermediate
-  representations of a program (named RIR, EIR, PIR, and SIR). Each subsystem
-  consumes one of these forms, so its contract can be examined.
+- **Inspectable reasoning contracts** carried by three internal intermediate
+  representations: RIR for deterministic relational execution, PIR for
+  probabilistic provenance, and EIR for epistemic semantics. SAT/MaxSAT and
+  verification use the separate shared `GpuCnf` representation and CDCL solver
+  service.
 - **CUDA kernels** that operate over device-resident buffers (data that stays on
   the GPU).
 - **Fail-closed behavior**: when a proof, route, or capacity contract is not
@@ -73,8 +75,9 @@ The documentation roadmap is:
 
 - keep `docs/` as the public source of truth for xlog.md;
 - replace internal milestone prose with source-backed product documentation;
-- add accurate diagrams that show the host/device boundary and the boundaries
-  between the internal representations (RIR, EIR, PIR, SIR);
+- keep diagrams accurate as they distinguish the three reasoning
+  representations (RIR, PIR, and EIR) from the shared `GpuCnf` and CDCL solver
+  service;
 - keep generated static HTML in the `docs-dist` deployment branch, not in the
   source docs.
 

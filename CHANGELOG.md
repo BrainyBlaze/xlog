@@ -4,6 +4,19 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+### Changed
+
+- Epistemic execution classifies modal dependencies before single-pass planning.
+  Acyclic programs use Generate-Propagate-Test; positive FAEEL cycles run to an
+  ordinary founded least fixpoint; supported positive exact-tuple
+  Gelfond-1991 possibility cycles run to a greatest compatible tuple fixpoint;
+  and supported cycles through negation use the GPU-backed WFS plan. The
+  Gelfond-1991 route computes a GPU upper bound, then reevaluates against frozen
+  relation snapshots until the concrete tuples converge, so predicate-level
+  recursion cannot manufacture support across disjoint tuple domains.
+- An unseeded FAEEL modal cycle, including `p() :- possible p().`, executes to an
+  empty founded extension instead of returning an unsupported-construct error.
+
 ## [0.11.0](https://github.com/BrainyBlaze/xlog/compare/xlog-cli-v0.10.0...xlog-cli-v0.11.0) - 2026-07-29
 
 ### Added
@@ -2156,7 +2169,7 @@ Category-B semantic gaps tracked after v0.9.1, all validated on the production
   constraint variable (`:- know p(X).`) lowers to an Anonymous wildcard and ranges
   existentially on device; multi-literal distinct-variable conjunctions
   (`:- know p(X), know q(Y).`) AND the independent existentials. Examples `34`/`35`/`36`.
-- Shared-variable epistemic constraint joins (item E1): the join
+- Shared-variable epistemic constraint joins: the join
   `:- know p(X), possible q(X).`, the diagonal `:- know p(X,X).`, and the
   negated-difference `:- q(X), not know p(X).` are resolved by a sound program-level
   desugaring at normalization — `:- L1,…,Ln.` ⟶ `__epi_join_N(Vars) :- ord(L1),…,ord(Ln).`
@@ -2167,13 +2180,13 @@ Category-B semantic gaps tracked after v0.9.1, all validated on the production
   through the existing variable-keyed prune-to-empty path — no new kernel. Guarded to
   non-modal-derived targets. Examples `38`/`39` (diagonal), `40` (join), `41`
   (negated-difference).
-- Stratified negated-modal recursion (item A1): a negated modal `not know R` over a
+- Stratified negated-modal recursion: a negated modal `not know R` over a
   recursive relation in a strictly-lower stratum executes on GPU as ordinary stratified
   negation (`not know R ≡ not R` once R is materialized). Example `37`.
-- Same-name multi-arity modal coupling (item F): distinct arities of the same predicate
+- Same-name multi-arity modal coupling: distinct arities of the same predicate
   name are treated as distinct relations (arity-qualified modal tuple-source resolution);
-  derived-head coupling stratifies with a split-vs-unsplit equivalence proof; a genuine
-  cyclic modal coupling stays rejected with a precise diagnostic.
+  derived-head coupling stratifies with a split-vs-unsplit equivalence proof; positive
+  modal cycles use their mode-specific founded or compatibility fixpoint.
 
 ### Changed (v0.9.2)
 
@@ -2182,7 +2195,7 @@ Category-B semantic gaps tracked after v0.9.1, all validated on the production
   Datalog (`:- not r(X).`, "unbound variable … in negated atom") instead of a misleading
   "unimplemented" diagnostic — the variable is not range-restricted, so the program is
   ill-formed, not a missing feature. The meaningful negated form `:- q(X), not know p(X).`
-  (X positively bound) is the shared-variable join above (item E1).
+  (X positively bound) is the shared-variable join above.
 
 - Recursive epistemic programs are no longer uniformly fail-closed: the recursive epistemic fixpoint
   invariant-modal fragment AND recursion/coupling over any DETERMINED head (via
@@ -2200,25 +2213,18 @@ recursion) or NON-DETERMINED and handled by the appropriate recursive semantics 
 typed boundary:
 
 - Positive co-evolving modal-recursion case `know` recursion computes the FAEEL founded least fixpoint.
-- Positive G91 `possible` recursion applies the G91 compatibility self-support
-  assumption.
+- Supported positive G91 `possible` recursion computes the greatest compatible set of
+  concrete tuples from an upper bound and frozen snapshots.
 - Negated-modal recursion that is stratified reduces to ordinary anti-join after
   the lower fixpoint materializes; cyclic negated-modal recursion routes through
   GPU-backed WFS alternating fixpoint rather than host WFS, with committed
   examples covering mode `{FAEEL,G91}` x modal `{not know,not possible}` x seed
   `{present,absent}` for both plain WFS and WFS plus ordinary EDB negation.
-- Genuinely cyclic modal coupling with no founded/WFS order remains typed
-  fail-closed.
-
-Remaining genuinely-undefined cases are CI-enforced as over-broadening gates
-(for example cyclic modal coupling with no founded/WFS order and unbounded
-tuple-key pilots such as `23b`): because determined-closure acceptance is
-permissive, they assert no undefined program leaks a wrong-but-non-empty answer.
-Defined recursive/self-support cases execute instead: examples `22`, `31`, `32`,
-`33`, and `43` cover FAEEL founded recursion, empty FAEEL self-support, G91
-self-support, cyclic negated-modal WFS, and G91 positive possible recursion.
-
-Full v0.9.2 status: `docs/plans/2026-05-31-v092-epistemic-semantic-completion-status.md`.
+Remaining unsupported cases include unbounded tuple keys, recursive modal integrity
+constraints, and non-monotone Gelfond-1991 compatibility components. Defined
+recursive/self-support cases execute through their semantic fixpoints: examples `22`,
+`31`, `32`, `33`, and `43` cover FAEEL founded recursion, empty FAEEL self-support,
+G91 self-support, cyclic negated-modal WFS, and G91 positive possible recursion.
 
 ---
 
@@ -2229,8 +2235,7 @@ is value-level on the device, FAEEL foundedness is checked per tuple key,
 epistemic integrity constraints prune candidate world views, splits are
 equivalence-checked, and rules coupling multiple distinct epistemic predicates
 are solved jointly. EIR remains the semantic boundary and direct raw RIR
-lowering stays a rejection boundary. Completed-vs-scoped-out semantics are
-recorded in `docs/plans/2026-05-29-v091-epistemic-executor-completion-status.md`.
+lowering stays a rejection boundary.
 
 ### Added (v0.9.1)
 
@@ -2312,28 +2317,26 @@ recorded in `docs/plans/2026-05-29-v091-epistemic-executor-completion-status.md`
   EDB target-state axis where `not banned(2)` flips the seed-founded reach tuple.
   Host WFS is not an accepted production fallback.
 
-- **Same-name multi-arity modal coupling:** _SOLVED in v0.9.2 (ITEM F)_ — a
+- **Same-name multi-arity modal coupling:** a
   program using the same predicate name at two arities in modal literals
   (`know p(X)`, `possible p(X,Y)`) is no longer rejected. Distinct arities are
   distinct relations, so the modal tuple-source resolution disambiguates by arity
   (arity-qualified store key `p/1`/`p/2`, bare-name fallback). The coupling
   joint-solves on device to exact tuples per arity with zero CPU fallback.
-- **Derived-head modal coupling:** modal coupling over an epistemically-DETERMINED
-  derived head is solved by STRATIFICATION (the stratified joint result equals the
-  per-stratum independent reference exactly); a genuinely-CYCLIC modal coupling
-  (`a:-know b. b:-know a.`) has no founded order and stays typed fail-closed
-  end-to-end with a precise diagnostic naming both coupled heads.
+- **Derived-head modal coupling:** modal coupling over an epistemically determined
+  derived head is solved by stratification (the stratified joint result equals the
+  per-stratum independent reference exactly). Positive cycles use the FAEEL founded
+  least fixpoint or the supported Gelfond-1991 compatibility fixpoint according to
+  the selected mode and modal operator.
 
-Goal-mandated typed fail-closed fragments (aggregate/compound/list/predref modal
-keys, unsafe variable-keyed or CPU-scan epistemic constraints, genuinely-cyclic
-modal coupling with no founded order) remain rejection-by-design per the bundle
-spec and lock #5 — verified by negative pilots, not debt. Finite nested modal
+Typed fail-closed fragments include unbounded aggregate/compound/list/predref modal
+keys, unsafe variable-keyed or CPU-scan epistemic constraints, recursive modal
+integrity constraints, and non-monotone Gelfond-1991 compatibility components.
+Finite nested modal
 semantics are no longer in this rejection bucket in v0.9.2: examples 13/13b/13c
 execute, 13f plus its companions prove the interior-negation duality in both target states and
 both modes, 13g-13v cover all 64
 two-operator negation cells under FAEEL, and 13w* replays those cells under explicit G91.
-Historical v0.9.1 rejection list:
-`docs/plans/2026-05-29-v091-epistemic-executor-completion-status.md`.
 
 v0.9.0 Epistemic Solver Release Candidate. This branch layers the v0.8.7-v0.8.9
 external diagnostic provenance pack into the v0.9.0 GPU-native epistemic,

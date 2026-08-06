@@ -3,10 +3,11 @@ title: "How XLOG works"
 description: "One compiler and one CUDA runtime span four reasoning paradigms — here is the path a program takes from source to GPU."
 ---
 
-XLOG lets you write logic programs — Datalog rules, probabilistic models,
-epistemic reasoning, and SAT/MaxSAT solving — and run them directly on the GPU.
-You write in one typed language, and a single compiler plus one CUDA runtime handle
-all four styles of reasoning.
+XLOG lets you write deterministic Datalog programs, probabilistic models, epistemic
+programs, and differentiable neural-symbolic training programs, then run their
+symbolic computation directly on the GPU. SAT/MaxSAT verification is available
+through a shared solver service. You write in one typed language, and a shared
+compiler plus one CUDA runtime support all four user-facing paradigms.
 
 Because the results stay on the GPU, you can feed them straight into a PyTorch
 training loop instead of copying data back and forth. This page follows the path a
@@ -15,7 +16,7 @@ program takes from source text to running GPU code.
 ## When this matters
 
 Read this page when you want a correct mental model of what happens after you write
-a program: how it is compiled, why all four reasoning styles share one frontend, and
+a program: how it is compiled, why all four user-facing paradigms share one frontend, and
 why the output is cheap to hand to a tensor framework.
 
 You do not need it to write your first program. You do need it to reason about
@@ -28,13 +29,16 @@ hands-on start with real output, see the [quickstart](/get-started/quickstart).
 
 ## The pipeline
 
-Every program — whichever reasoning style it uses — takes the same path from source
-to GPU. The host machine compiles and orchestrates the work. The GPU holds the data
-and runs the actual computation as CUDA kernels.
+Every program shares frontend parsing, normalization, type checking, and dependency
+analysis. The host machine then compiles and orchestrates the appropriate backend path.
+The GPU holds the data and runs the actual computation as CUDA kernels.
 
-<Frame caption="A program is parsed, stratified, lowered to a relational IR, optimized, and executed by dispatching CUDA kernels over device-resident relations.">
-  <img className="block dark:hidden" src="/assets/diagrams/compilation-pipeline-light.svg" alt="XLOG compilation pipeline: Source, Parser, Stratifier, Lowerer, Optimizer, and Executor run on the host; CUDA kernels and the relation store are GPU-resident." />
-  <img className="hidden dark:block" src="/assets/diagrams/compilation-pipeline-dark.svg" alt="XLOG compilation pipeline: Source, Parser, Stratifier, Lowerer, Optimizer, and Executor run on the host; CUDA kernels and the relation store are GPU-resident." />
+The diagram below follows the deterministic relational path. Other reasoning styles
+branch from the normalized frontend into their own intermediate forms, as shown later.
+
+<Frame caption="A deterministic program is parsed, stratified, lowered to relational IR, optimized, and executed by dispatching CUDA kernels over device-resident relations.">
+  <img className="block dark:hidden" src="/assets/diagrams/compilation-pipeline-light.svg" alt="Deterministic XLOG compilation pipeline: Source, Parser, Stratifier, Lowerer, Optimizer, and Executor run on the host; CUDA kernels and the relation store are GPU-resident." />
+  <img className="hidden dark:block" src="/assets/diagrams/compilation-pipeline-dark.svg" alt="Deterministic XLOG compilation pipeline: Source, Parser, Stratifier, Lowerer, Optimizer, and Executor run on the host; CUDA kernels and the relation store are GPU-resident." />
 </Frame>
 
 <Steps>
@@ -47,16 +51,16 @@ and runs the actual computation as CUDA kernels.
     appear in it, it does not parse.
   </Step>
   <Step title="Stratify">
-    XLOG splits the program into ordered layers, called *strata*, so that negation and
-    aggregation are computed in a safe order.
+    For the deterministic relational path, XLOG splits the program into ordered layers,
+    called *strata*, so that negation and aggregation are computed in a safe order.
 
     It does this by finding cycles in the predicate dependency graph
     (strongly-connected-component analysis). If a use of negation or aggregation cannot
     be placed in such an order, XLOG rejects the program.
   </Step>
   <Step title="Lower">
-    The stratified program is rewritten into a relational intermediate representation
-    (`RIR`) — your program expressed as database-style operations.
+    The stratified deterministic program is rewritten into a relational intermediate
+    representation (`RIR`) — your program expressed as database-style operations.
 
     Those operations are joins, filters, projections, aggregations, and recursive loops
     (fixpoints).
@@ -78,20 +82,26 @@ and runs the actual computation as CUDA kernels.
   </Step>
 </Steps>
 
-## Four paradigms, one frontend
+## Four paradigms, shared backend routes
 
-XLOG supports four reasoning styles, and all four share the same parsing and
-stratification stages. Only after those shared stages does each style branch into its
-own intermediate representation.
+XLOG presents four user-facing paradigms — deterministic, probabilistic, epistemic,
+and neural-symbolic — and all four share parsing, normalization, type checking, and
+dependency analysis. They do not map one-to-one to intermediate representations.
+The normalized program fans into three reasoning IR routes: deterministic `RIR`,
+probabilistic `PIR`, and epistemic `EIR`. Neural-symbolic training composes neural
+predicates with the relevant reasoning route instead of introducing a separate IR.
+SAT/MaxSAT features and verification use the shared GPU-resident `GpuCnf` and CDCL
+solver service rather than another IR.
 
-Each branch is built from the normalized program — the parsed, stratified rules put
-into a common standard form — not from the deterministic `RIR`. So the probabilistic,
-epistemic, and solver paths are siblings of the deterministic path, not layers on top
-of it.
+Each reasoning branch is built from the normalized program — the parsed and analyzed
+rules put into a common standard form — not from the deterministic `RIR`. The
+probabilistic and epistemic routes are therefore siblings of the deterministic route,
+not layers on top of it. The solver service consumes GPU-resident CNF supplied by
+features that need verification or SAT/MaxSAT search.
 
-<Frame caption="One typed frontend fans into four reasoning paradigms, each with its own IR, all executing on the shared GPU kernel provider.">
-  <img className="block dark:hidden" src="/assets/diagrams/architecture-overview-light.svg" alt="XLOG architecture: Source feeds a shared frontend that fans into Deterministic (RIR), Probabilistic (PIR to XGCF), Epistemic (EIR), and Solver (SIR) paradigms, all executing on a GPU-resident kernel provider." />
-  <img className="hidden dark:block" src="/assets/diagrams/architecture-overview-dark.svg" alt="XLOG architecture: Source feeds a shared frontend that fans into Deterministic (RIR), Probabilistic (PIR to XGCF), Epistemic (EIR), and Solver (SIR) paradigms, all executing on a GPU-resident kernel provider." />
+<Frame caption="One typed frontend fans into three reasoning IR routes plus a shared GPU CNF/CDCL solver service.">
+  <img className="block dark:hidden" src="/assets/diagrams/architecture-overview-light.svg" alt="XLOG architecture: Source feeds a shared frontend that fans into deterministic RIR, probabilistic PIR to XGCF, and epistemic EIR reasoning routes, alongside a shared GPU-resident GpuCnf and CDCL solver service." />
+  <img className="hidden dark:block" src="/assets/diagrams/architecture-overview-dark.svg" alt="XLOG architecture: Source feeds a shared frontend that fans into deterministic RIR, probabilistic PIR to XGCF, and epistemic EIR reasoning routes, alongside a shared GPU-resident GpuCnf and CDCL solver service." />
 </Frame>
 
 Here is what each style computes and where to learn to use it. The glosses below the
@@ -115,15 +125,24 @@ table explain the terms in plain language.
 ## How the paradigms map to intermediate forms
 
 The pieces above become concrete once you see how each path is represented internally.
-Everything starts from the relational intermediate representation (`RIR`).
+The normalized AST is the shared source for each reasoning IR; the probabilistic and
+epistemic paths do not branch from deterministic RIR.
 
-From there the probabilistic and solver paths compile one step further, into a
-GPU-evaluable circuit format called `XGCF`. The epistemic path instead drives
-world-view execution on the GPU directly.
+RIR represents deterministic relational execution. PIR represents probabilistic
+execution and compiles into the GPU-evaluable circuit format called `XGCF`. EIR
+preserves modal meaning while the high-level dispatcher classifies dependencies.
+Neural-symbolic training supplies neural predicate values to, and consumes
+differentiable results from, these symbolic routes rather than using a fourth
+reasoning IR. SAT/MaxSAT and verification features submit GPU-resident `GpuCnf`
+inputs to the shared CDCL solver service. Acyclic modal programs use the
+Generate-Propagate-Test workspace, positive FAEEL cycles use an ordinary founded
+least-fixpoint reduction, supported Gelfond-1991 exact-tuple possibility cycles use
+a greatest compatibility fixpoint over concrete tuple snapshots, and supported
+cycles through negation use the GPU-backed WFS plan.
 
-<Frame caption="The IR stack: AST lowers to RIR; PIR and SIR compile to the XGCF circuit format; EIR drives GPU world-view execution.">
-  <img className="block dark:hidden" src="/assets/diagrams/ir-stack-light.svg" alt="XLOG IR stack: AST to RIR, which branches into PIR (provenance), EIR (epistemic), and SIR (solver); PIR and SIR compile to the XGCF circuit format and EIR drives GPU epistemic execution." />
-  <img className="hidden dark:block" src="/assets/diagrams/ir-stack-dark.svg" alt="XLOG IR stack: AST to RIR, which branches into PIR (provenance), EIR (epistemic), and SIR (solver); PIR and SIR compile to the XGCF circuit format and EIR drives GPU epistemic execution." />
+<Frame caption="The normalized AST fans into RIR, PIR, and EIR. SAT/MaxSAT and verification use a separate shared GpuCnf/CDCL service.">
+  <img className="block dark:hidden" src="/assets/diagrams/ir-stack-light.svg" alt="XLOG intermediate forms: the normalized AST fans into deterministic RIR and a relational plan, probabilistic PIR and the XGCF circuit format, and epistemic EIR with route dispatch. A separate shared GpuCnf and CDCL service supports SAT, MaxSAT, and verification." />
+  <img className="hidden dark:block" src="/assets/diagrams/ir-stack-dark.svg" alt="XLOG intermediate forms: the normalized AST fans into deterministic RIR and a relational plan, probabilistic PIR and the XGCF circuit format, and epistemic EIR with route dispatch. A separate shared GpuCnf and CDCL service supports SAT, MaxSAT, and verification." />
 </Frame>
 
 <Note>
@@ -135,10 +154,12 @@ world-view execution on the GPU directly.
     and fixpoints.
   - `PIR` — probabilistic IR; tracks which facts and probabilities contributed to each
     result (its provenance), and compiles to `XGCF`.
-  - `SIR` — solver IR for SAT/MaxSAT; compiles to `XGCF`.
-  - `EIR` — epistemic IR; drives GPU world-view execution.
-  - `XGCF` — the GPU-evaluable circuit format that the probabilistic and solver paths
-    compile into.
+  - `EIR` — epistemic IR; preserves modal semantics and drives execution-route
+    classification.
+  - `GpuCnf` — the GPU-resident CNF representation consumed by the shared CDCL solver
+    service.
+  - `XGCF` — the GPU-evaluable circuit format produced by probabilistic knowledge
+    compilation.
 </Note>
 
 ## Compile once, evaluate many

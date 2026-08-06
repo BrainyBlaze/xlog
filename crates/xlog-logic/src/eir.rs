@@ -62,7 +62,7 @@ fn convert_atom(atom: &Atom) -> EirAtom {
     }
 }
 
-fn convert_term(term: &Term) -> EirTerm {
+pub(crate) fn convert_term(term: &Term) -> EirTerm {
     match term {
         Term::Variable(name) => EirTerm::Variable(name.clone()),
         Term::Anonymous => EirTerm::Anonymous,

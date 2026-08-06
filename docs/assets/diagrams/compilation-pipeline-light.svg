@@ -81,5 +81,5 @@
   <!-- kernels <-> relations -->
   <path d="M685,259 H699" stroke="#6B6880" stroke-width="1.5" fill="none" marker-start="url(#ah)" marker-end="url(#ah)"/>
 
-  <text x="28" y="304" font-size="10.5" fill="#6B6880">Deterministic path shown; probabilistic, epistemic, and solver paths branch into their own IRs (PIR / EIR / SIR) from the normalized program, not from RIR.</text>
+  <text x="28" y="304" font-size="10.5" fill="#6B6880">Deterministic route shown; PIR and EIR branch from the normalized program. SAT/MaxSAT and verification use the shared GpuCnf/CDCL service.</text>
 </svg>

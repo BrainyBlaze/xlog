@@ -2294,6 +2294,25 @@ mod tests {
     }
 
     #[test]
+    fn test_execute_zero_column_project_preserves_row_existence() {
+        let executor = match create_test_executor() {
+            Some(e) => e,
+            None => {
+                eprintln!("Skipping test: no CUDA device available");
+                return;
+            }
+        };
+
+        let input = create_test_buffer(&executor, &[1, 2, 3], "key");
+        let result = executor
+            .execute_project(&input, &[])
+            .expect("zero-column projection must execute");
+
+        assert_eq!(result.arity(), 0);
+        assert_eq!(buffer_row_count(&executor, &result), 3);
+    }
+
+    #[test]
     fn test_execute_project_reorder() {
         let executor = match create_test_executor() {
             Some(e) => e,

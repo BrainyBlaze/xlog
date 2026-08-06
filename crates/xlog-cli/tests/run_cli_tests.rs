@@ -84,30 +84,22 @@ fn test_xlog_run_epistemic_examples() {
         // 3-vertex closure: base (1,2),(2,3) plus DERIVED (1,3).
         (
             "15-recursive-epistemic-closure.xlog",
-            "__xlog_query_0",
+            "reach",
             "| 1  | 2  |",
         ),
         (
             "15-recursive-epistemic-closure.xlog",
-            "__xlog_query_0",
+            "reach",
             "| 2  | 3  |",
         ),
         (
             "15-recursive-epistemic-closure.xlog",
-            "__xlog_query_0",
+            "reach",
             "| 1  | 3  |",
         ),
         // 4-chain: base hops plus 2-hop (1,3),(2,4) and the 3-hop DERIVED (1,4).
-        (
-            "15-recursive-epistemic-chain.xlog",
-            "__xlog_query_0",
-            "| 1  | 4  |",
-        ),
-        (
-            "15-recursive-epistemic-chain.xlog",
-            "__xlog_query_0",
-            "| 2  | 4  |",
-        ),
+        ("15-recursive-epistemic-chain.xlog", "reach", "| 1  | 4  |"),
+        ("15-recursive-epistemic-chain.xlog", "reach", "| 2  | 4  |"),
         // Cross-component epistemic coupling in the accepted safe case.
         // The ordinary head `report` consumes the epistemic-derived head `trusted`,
         // coupling two locally-splittable components through a derived dependency.
@@ -136,7 +128,7 @@ fn test_xlog_run_epistemic_examples() {
         // coalesced multi-head component is JOINT-SOLVED: one candidate enumeration
         // + world-view validation over the COMBINED modals (`know q`, `possible q`),
         // then BOTH heads materialized against the SAME accepted world view. Unlike
-        // example 16 (single producer head), this pilot materializes and DISPLAYS
+        // the single-producer case, this program materializes and DISPLAYS
         // MULTIPLE coupled epistemic heads through `xlog run`:
         //   known(X) :- node(X),  know q(X).      -> {1, 2}
         //   maybe(X) :- color(X), possible q(X).  -> {2}
@@ -169,12 +161,12 @@ fn test_xlog_run_epistemic_examples() {
         // fully gated out (no `| 6  |` row; absence checked below).
         (
             "20-supply-chain-recursive-reach.xlog",
-            "__xlog_query_0",
+            "sources_from",
             "| 1  | 5  |",
         ),
         (
             "20-supply-chain-recursive-reach.xlog",
-            "__xlog_query_0",
+            "sources_from",
             "| 2  | 5  |",
         ),
         // Incident-triage joint solving: three epistemic heads share the base modal
@@ -218,12 +210,12 @@ fn test_xlog_run_epistemic_examples() {
         // node 3 severs the chain -> reach = {(1,2),(3,4)}.
         (
             "26-negated-modal-over-invariant-recursive.xlog",
-            "__xlog_query_0",
+            "reach",
             "| 1  | 2  |",
         ),
         (
             "26-negated-modal-over-invariant-recursive.xlog",
-            "__xlog_query_0",
+            "reach",
             "| 3  | 4  |",
         ),
         // Augmented multi-head coupling with per-head output projection at differing
@@ -288,7 +280,7 @@ fn test_xlog_run_epistemic_examples() {
             "q_poss",
             "| 3  |",
         ),
-        // The `possible` twin of example 28: a binding `possible r(X, Y)` over a
+        // The `possible` counterpart: a binding `possible r(X, Y)` over a
         // determined multi-column epistemic head. Proves the
         // modal operator is irrelevant for a determined target (`possible r == know r ==
         // r`); stratifies identically to 28. out = {1} (gate load-bearing: ungated node
@@ -607,15 +599,15 @@ fn test_xlog_run_epistemic_examples() {
         // transitive closure of link {(1,2),(2,3)} = {(1,2),(2,3),(1,3)}; unreachable =
         // node x node MINUS reach = 6 pairs. (1,1) is a self-pair excluded from reach
         // (modal gate load-bearing); (3,1) confirms the anti-join against the recursive
-        // closure. Contrast example 33 (the cyclic twin) which stays WFS-bounded.
+        // closure. The cyclic counterpart stays bounded by well-founded semantics.
         (
             "37-negated-modal-over-recursive-stratified.xlog",
-            "__xlog_query_0",
+            "unreachable",
             "| 1  | 1  |",
         ),
         (
             "37-negated-modal-over-recursive-stratified.xlog",
-            "__xlog_query_0",
+            "unreachable",
             "| 3  | 1  |",
         ),
         // Same-name multi-arity modal predicates resolve through full `xlog run`
@@ -643,47 +635,47 @@ fn test_xlog_run_epistemic_examples() {
         // `xlog run` path returns the complete 3 x 3 vertex relation.
         (
             "43-g91-possible-recursion-self-support.xlog",
-            "__xlog_query_0",
+            "linked",
             "| 1  | 1  |",
         ),
         (
             "43-g91-possible-recursion-self-support.xlog",
-            "__xlog_query_0",
+            "linked",
             "| 1  | 2  |",
         ),
         (
             "43-g91-possible-recursion-self-support.xlog",
-            "__xlog_query_0",
+            "linked",
             "| 1  | 3  |",
         ),
         (
             "43-g91-possible-recursion-self-support.xlog",
-            "__xlog_query_0",
+            "linked",
             "| 2  | 1  |",
         ),
         (
             "43-g91-possible-recursion-self-support.xlog",
-            "__xlog_query_0",
+            "linked",
             "| 2  | 2  |",
         ),
         (
             "43-g91-possible-recursion-self-support.xlog",
-            "__xlog_query_0",
+            "linked",
             "| 2  | 3  |",
         ),
         (
             "43-g91-possible-recursion-self-support.xlog",
-            "__xlog_query_0",
+            "linked",
             "| 3  | 1  |",
         ),
         (
             "43-g91-possible-recursion-self-support.xlog",
-            "__xlog_query_0",
+            "linked",
             "| 3  | 2  |",
         ),
         (
             "43-g91-possible-recursion-self-support.xlog",
-            "__xlog_query_0",
+            "linked",
             "| 3  | 3  |",
         ),
     ];
@@ -1458,7 +1450,7 @@ fn test_xlog_run_faeel_unfounded_self_support_executes_to_empty_extension() {
     );
     // Exact empty founded extension.
     assert!(
-        stdout.contains("rows: 0"),
+        stdout.contains("p\nrows: 0"),
         "FAEEL unfounded self-support must materialize the EMPTY founded extension \
          (rows: 0):\nstdout:\n{stdout}\nstderr:\n{stderr}"
     );
@@ -1548,16 +1540,10 @@ fn test_xlog_run_unions_compatible_predicates_from_separate_modules() {
     };
 
     let fixture = TempDir::new().expect("create fixture directory");
-    std::fs::write(
-        fixture.path().join("first.xlog"),
-        "pred shared(symbol).\nshared(from_first).\n",
-    )
-    .expect("write first module");
-    std::fs::write(
-        fixture.path().join("second.xlog"),
-        "pred shared(symbol).\nshared(from_second).\n",
-    )
-    .expect("write second module");
+    std::fs::write(fixture.path().join("first.xlog"), "shared(from_first).\n")
+        .expect("write first module");
+    std::fs::write(fixture.path().join("second.xlog"), "shared(from_second).\n")
+        .expect("write second module");
     let program = fixture.path().join("main.xlog");
     std::fs::write(&program, "use first.\nuse second.\n?- shared(X).\n")
         .expect("write main program");
@@ -1582,4 +1568,1623 @@ fn test_xlog_run_unions_compatible_predicates_from_separate_modules() {
     let stdout = String::from_utf8(output.stdout).expect("utf8 stdout");
     assert_eq!(stdout.matches("from_first").count(), 1, "{stdout}");
     assert_eq!(stdout.matches("from_second").count(), 1, "{stdout}");
+}
+
+#[test]
+fn test_xlog_run_unions_body_inferred_predicates_from_separate_modules() {
+    let _device = match CudaDevice::new(0) {
+        Ok(device) => device,
+        Err(error) if std::env::var("XLOG_REQUIRE_CUDA").as_deref() == Ok("1") => {
+            panic!("XLOG_REQUIRE_CUDA=1 but CUDA initialization failed: {error}")
+        }
+        Err(error) => {
+            eprintln!("Skipping test: CUDA runtime unavailable: {error}");
+            return;
+        }
+    };
+
+    let fixture = TempDir::new().expect("create fixture directory");
+    std::fs::write(
+        fixture.path().join("first.xlog"),
+        "shared(X) :- first_mid(X).\n\
+         first_mid(X) :- first_source(X).\n\
+         first_source(from_first).\n",
+    )
+    .expect("write first module");
+    std::fs::write(
+        fixture.path().join("second.xlog"),
+        "shared(X) :- second_mid(X).\n\
+         second_mid(X) :- second_source(X).\n\
+         second_source(from_second).\n",
+    )
+    .expect("write second module");
+    let program = fixture.path().join("main.xlog");
+    std::fs::write(&program, "use first.\nuse second.\n?- shared(X).\n")
+        .expect("write main program");
+
+    let output = cargo_bin_cmd!("xlog")
+        .args([
+            "run",
+            program.to_str().expect("valid program path"),
+            "--module-path",
+            fixture.path().to_str().expect("valid module path"),
+            "--memory-mb",
+            "1024",
+        ])
+        .output()
+        .expect("run xlog with body-inferred predicate contributions");
+
+    assert!(
+        output.status.success(),
+        "xlog run failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).expect("utf8 stdout");
+    assert_eq!(stdout.matches("from_first").count(), 1, "{stdout}");
+    assert_eq!(stdout.matches("from_second").count(), 1, "{stdout}");
+}
+
+#[test]
+fn test_xlog_run_uses_imported_schema_for_undeclared_contributions() {
+    let _device = match CudaDevice::new(0) {
+        Ok(device) => device,
+        Err(error) if std::env::var("XLOG_REQUIRE_CUDA").as_deref() == Ok("1") => {
+            panic!("XLOG_REQUIRE_CUDA=1 but CUDA initialization failed: {error}")
+        }
+        Err(error) => {
+            eprintln!("Skipping test: CUDA runtime unavailable: {error}");
+            return;
+        }
+    };
+
+    let fixture = TempDir::new().expect("create fixture directory");
+    std::fs::write(fixture.path().join("schema.xlog"), "pred shared(i64).\n")
+        .expect("write schema module");
+    std::fs::write(fixture.path().join("small.xlog"), "shared(1).\n")
+        .expect("write small-value module");
+    std::fs::write(fixture.path().join("wide.xlog"), "shared(5000000000).\n")
+        .expect("write wide-value module");
+    let program = fixture.path().join("main.xlog");
+    std::fs::write(
+        &program,
+        "use schema.\nuse small.\nuse wide.\n?- shared(X).\n",
+    )
+    .expect("write main program");
+
+    let output = cargo_bin_cmd!("xlog")
+        .args([
+            "run",
+            program.to_str().expect("valid program path"),
+            "--module-path",
+            fixture.path().to_str().expect("valid module path"),
+            "--memory-mb",
+            "1024",
+        ])
+        .output()
+        .expect("run xlog with an imported predicate schema");
+
+    assert!(
+        output.status.success(),
+        "xlog run failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).expect("utf8 stdout");
+    let mut values = stdout
+        .lines()
+        .filter_map(|line| line.trim().trim_matches('|').trim().parse::<i64>().ok())
+        .collect::<Vec<_>>();
+    values.sort_unstable();
+    assert_eq!(values, vec![1, 5_000_000_000], "{stdout}");
+}
+
+#[test]
+fn test_xlog_run_epistemic_imports_keep_undeclared_predicate_arities_distinct() {
+    let _device = match CudaDevice::new(0) {
+        Ok(device) => device,
+        Err(error) if std::env::var("XLOG_REQUIRE_CUDA").as_deref() == Ok("1") => {
+            panic!("XLOG_REQUIRE_CUDA=1 but CUDA initialization failed: {error}")
+        }
+        Err(error) => {
+            eprintln!("Skipping test: CUDA runtime unavailable: {error}");
+            return;
+        }
+    };
+
+    let fixture = TempDir::new().expect("create fixture directory");
+    std::fs::write(fixture.path().join("unary.xlog"), "shared(1).\n").expect("write unary module");
+    std::fs::write(fixture.path().join("binary.xlog"), "shared(one, two).\n")
+        .expect("write binary module");
+    let program = fixture.path().join("main.xlog");
+    std::fs::write(
+        &program,
+        "#pragma epistemic_mode = faeel\n\
+         use unary.\n\
+         use binary.\n\
+         accepted() :- know shared(1), know shared(one, two).\n\
+         ?- accepted().\n",
+    )
+    .expect("write main program");
+
+    let output = cargo_bin_cmd!("xlog")
+        .args([
+            "run",
+            program.to_str().expect("valid program path"),
+            "--module-path",
+            fixture.path().to_str().expect("valid module path"),
+            "--memory-mb",
+            "1024",
+        ])
+        .output()
+        .expect("run xlog with imported multi-arity predicates");
+
+    assert!(
+        output.status.success(),
+        "xlog run failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).expect("utf8 stdout");
+    assert!(stdout.contains("accepted"), "{stdout}");
+    assert!(stdout.contains("rows: 1"), "{stdout}");
+}
+
+#[test]
+fn test_xlog_run_projects_declared_head_constants_with_the_relation_schema() {
+    let _device = match CudaDevice::new(0) {
+        Ok(device) => device,
+        Err(error) if std::env::var("XLOG_REQUIRE_CUDA").as_deref() == Ok("1") => {
+            panic!("XLOG_REQUIRE_CUDA=1 but CUDA initialization failed: {error}")
+        }
+        Err(error) => {
+            eprintln!("Skipping test: CUDA runtime unavailable: {error}");
+            return;
+        }
+    };
+
+    let fixture = TempDir::new().expect("create fixture directory");
+    let program = fixture.path().join("typed_head_constant.xlog");
+    std::fs::write(
+        &program,
+        "pred source(f64).\n\
+         pred real(f64).\n\
+         seed().\n\
+         source(2.0).\n\
+         real(1) :- seed().\n\
+         real(X) :- source(X).\n\
+         ?- real(X).\n",
+    )
+    .expect("write typed head-constant program");
+
+    let output = cargo_bin_cmd!("xlog")
+        .args([
+            "run",
+            program.to_str().expect("valid program path"),
+            "--memory-mb",
+            "1024",
+        ])
+        .output()
+        .expect("run xlog with a typed rule-head constant");
+
+    assert!(
+        output.status.success(),
+        "xlog run failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).expect("utf8 stdout");
+    let mut values = stdout
+        .lines()
+        .filter_map(|line| line.trim().trim_matches('|').trim().parse::<f64>().ok())
+        .collect::<Vec<_>>();
+    values.sort_by(f64::total_cmp);
+    assert_eq!(values, vec![1.0, 2.0], "{stdout}");
+}
+
+#[test]
+fn test_xlog_run_uses_exact_multi_arity_schema_for_augmented_epistemic_head() {
+    let _device = match CudaDevice::new(0) {
+        Ok(device) => device,
+        Err(error) if std::env::var("XLOG_REQUIRE_CUDA").as_deref() == Ok("1") => {
+            panic!("XLOG_REQUIRE_CUDA=1 but CUDA initialization failed: {error}")
+        }
+        Err(error) => {
+            eprintln!("Skipping test: CUDA runtime unavailable: {error}");
+            return;
+        }
+    };
+
+    let fixture = TempDir::new().expect("create fixture directory");
+    let program = fixture.path().join("exact_epistemic_schema.xlog");
+    std::fs::write(
+        &program,
+        "#pragma epistemic_mode = faeel\n\
+         pred node(symbol).\n\
+         pred source(symbol, i64).\n\
+         pred source(u32).\n\
+         pred result(symbol).\n\
+         node(key).\n\
+         source(key, 5000000000).\n\
+         source(1).\n\
+         result(X) :- node(X), know source(X, Y).\n\
+         ?- result(X).\n",
+    )
+    .expect("write exact epistemic schema program");
+
+    let output = cargo_bin_cmd!("xlog")
+        .args([
+            "run",
+            program.to_str().expect("valid program path"),
+            "--memory-mb",
+            "1024",
+        ])
+        .output()
+        .expect("run xlog with an augmented epistemic head");
+
+    assert!(
+        output.status.success(),
+        "xlog run failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).expect("utf8 stdout");
+    assert!(stdout.contains("result"), "{stdout}");
+    assert_eq!(stdout.matches("key").count(), 1, "{stdout}");
+}
+
+#[test]
+fn test_xlog_run_epistemic_schema_identity_and_stratum_regressions() {
+    let _device = match CudaDevice::new(0) {
+        Ok(device) => device,
+        Err(error) if std::env::var("XLOG_REQUIRE_CUDA").as_deref() == Ok("1") => {
+            panic!("XLOG_REQUIRE_CUDA=1 but CUDA initialization failed: {error}")
+        }
+        Err(error) => {
+            eprintln!("Skipping test: CUDA runtime unavailable: {error}");
+            return;
+        }
+    };
+
+    let fixtures = [
+        (
+            "inferred_hidden_column.xlog",
+            "#pragma epistemic_mode = faeel\n\
+             pred node(symbol).\n\
+             pred result(symbol).\n\
+             node(key).\n\
+             raw(key, 5000000000).\n\
+             edge(X, Y) :- raw(X, Y).\n\
+             result(X) :- node(X), know edge(X, Y).\n\
+             ?- result(X).\n",
+            vec!["result", "key"],
+        ),
+        (
+            "arithmetic_hidden_column.xlog",
+            "#pragma epistemic_mode = faeel\n\
+             pred node(symbol).\n\
+             pred allowed(u64).\n\
+             pred result(symbol).\n\
+             node(key).\n\
+             allowed(2).\n\
+             result(X) :- node(X), Y is cast(1, u64), not know allowed(Y).\n\
+             ?- result(X).\n",
+            vec!["result", "key"],
+        ),
+        (
+            "constraint_arity_census.xlog",
+            "#pragma epistemic_mode = faeel\n\
+             p(a).\n\
+             result(X) :- p(X), know p(X).\n\
+             :- p(X, Y).\n\
+             ?- result(X).\n",
+            vec!["result", "a"],
+        ),
+        (
+            "recursive_stratum_schema.xlog",
+            "#pragma epistemic_mode = faeel\n\
+             pred node(u32).\n\
+             pred edge(u32, u32).\n\
+             pred accepted_edge(u32, u32).\n\
+             pred reach(u32, u32).\n\
+             node(1). node(2). node(3).\n\
+             edge(1, 2). edge(2, 3).\n\
+             accepted_edge(X, Y) :- node(X), node(Y), know edge(X, Y).\n\
+             reach(X, Y) :- node(X), node(Y), know accepted_edge(X, Y).\n\
+             reach(X, Z) :- reach(X, Y), node(Z), know accepted_edge(Y, Z).\n\
+             ?- reach(X, Z).\n",
+            vec!["| 1  | 2  |", "| 2  | 3  |", "| 1  | 3  |"],
+        ),
+    ];
+
+    let fixture = TempDir::new().expect("create fixture directory");
+    for (name, source, expected) in fixtures {
+        let program = fixture.path().join(name);
+        std::fs::write(&program, source).expect("write epistemic regression program");
+        let output = cargo_bin_cmd!("xlog")
+            .args([
+                "run",
+                program.to_str().expect("valid program path"),
+                "--memory-mb",
+                "1024",
+            ])
+            .output()
+            .expect("run epistemic regression program");
+        assert!(
+            output.status.success(),
+            "xlog run failed for {name}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stdout = String::from_utf8(output.stdout).expect("utf8 stdout");
+        for marker in expected {
+            assert!(
+                stdout.contains(marker),
+                "missing {marker:?} in {name}:\n{stdout}"
+            );
+        }
+    }
+}
+
+#[test]
+fn test_xlog_run_scopes_joint_ground_modal_gates_to_their_output_heads() {
+    let _device = match CudaDevice::new(0) {
+        Ok(device) => device,
+        Err(error) if std::env::var("XLOG_REQUIRE_CUDA").as_deref() == Ok("1") => {
+            panic!("XLOG_REQUIRE_CUDA=1 but CUDA initialization failed: {error}")
+        }
+        Err(error) => {
+            eprintln!("Skipping test: CUDA runtime unavailable: {error}");
+            return;
+        }
+    };
+
+    let fixture = TempDir::new().expect("create fixture directory");
+    let program = fixture.path().join("scoped_joint_ground_gates.xlog");
+    std::fs::write(
+        &program,
+        "#pragma epistemic_mode = faeel\n\
+         p(b).\n\
+         a() :- know p(a).\n\
+         b() :- know p(b).\n\
+         ?- a().\n\
+         ?- b().\n",
+    )
+    .expect("write scoped ground-gate program");
+
+    let output = cargo_bin_cmd!("xlog")
+        .args([
+            "run",
+            program.to_str().expect("valid program path"),
+            "--memory-mb",
+            "1024",
+        ])
+        .output()
+        .expect("run scoped ground-gate program");
+    assert!(
+        output.status.success(),
+        "xlog run failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).expect("utf8 stdout");
+    assert!(stdout.contains("a\nrows: 0"), "{stdout}");
+    assert!(stdout.contains("b\nrows: 1"), "{stdout}");
+}
+
+#[test]
+fn test_xlog_run_equivalent_modal_filters_preserve_union_rows() {
+    let _device = match CudaDevice::new(0) {
+        Ok(device) => device,
+        Err(error) if std::env::var("XLOG_REQUIRE_CUDA").as_deref() == Ok("1") => {
+            panic!("XLOG_REQUIRE_CUDA=1 but CUDA initialization failed: {error}")
+        }
+        Err(error) => {
+            eprintln!("Skipping test: CUDA runtime unavailable: {error}");
+            return;
+        }
+    };
+
+    let fixture = TempDir::new().expect("create fixture directory");
+    let program = fixture.path().join("equivalent_modal_filter_union.xlog");
+    std::fs::write(
+        &program,
+        "#pragma epistemic_mode = faeel\n\
+         pred target(u32).\n\
+         pred left(u32).\n\
+         pred right(u32).\n\
+         pred result(u32).\n\
+         target(1).\n\
+         target(2).\n\
+         left(1).\n\
+         right(2).\n\
+         result(X) :- left(X), know target(X).\n\
+         result(Y) :- right(Y), possible target(Y).\n\
+         ?- result(Value).\n",
+    )
+    .expect("write equivalent modal-filter union program");
+
+    let output = cargo_bin_cmd!("xlog")
+        .args([
+            "run",
+            program.to_str().expect("valid program path"),
+            "--memory-mb",
+            "1024",
+        ])
+        .output()
+        .expect("run equivalent modal-filter union program");
+    assert!(
+        output.status.success(),
+        "xlog run failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).expect("utf8 stdout");
+    assert!(stdout.contains("| 1  |"), "{stdout}");
+    assert!(stdout.contains("| 2  |"), "{stdout}");
+}
+
+#[test]
+fn test_xlog_run_ignores_removed_unfounded_arity_in_relation_identity() {
+    let _device = match CudaDevice::new(0) {
+        Ok(device) => device,
+        Err(error) if std::env::var("XLOG_REQUIRE_CUDA").as_deref() == Ok("1") => {
+            panic!("XLOG_REQUIRE_CUDA=1 but CUDA initialization failed: {error}")
+        }
+        Err(error) => {
+            eprintln!("Skipping test: CUDA runtime unavailable: {error}");
+            return;
+        }
+    };
+
+    let fixture = TempDir::new().expect("create fixture directory");
+    let program = fixture.path().join("removed_unfounded_arity.xlog");
+    std::fs::write(
+        &program,
+        "#pragma epistemic_mode = faeel\n\
+         dom(a).\n\
+         p(a, b).\n\
+         p(X) :- dom(X), possible p(X).\n\
+         ?- p(X, Y).\n",
+    )
+    .expect("write removed-unfounded-arity program");
+
+    let output = cargo_bin_cmd!("xlog")
+        .args([
+            "run",
+            program.to_str().expect("valid program path"),
+            "--memory-mb",
+            "1024",
+        ])
+        .output()
+        .expect("run removed-unfounded-arity program");
+    assert!(
+        output.status.success(),
+        "xlog run failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).expect("utf8 stdout");
+    assert!(stdout.contains("| a  | b  |"), "{stdout}");
+}
+
+#[test]
+fn test_xlog_run_excludes_removed_unfounded_rules_from_active_gpu_plan() {
+    let _device = match CudaDevice::new(0) {
+        Ok(device) => device,
+        Err(error) if std::env::var("XLOG_REQUIRE_CUDA").as_deref() == Ok("1") => {
+            panic!("XLOG_REQUIRE_CUDA=1 but CUDA initialization failed: {error}")
+        }
+        Err(error) => {
+            eprintln!("Skipping test: CUDA runtime unavailable: {error}");
+            return;
+        }
+    };
+
+    let fixture = TempDir::new().expect("create fixture directory");
+    let program = fixture.path().join("active_plan_after_foundedness.xlog");
+    std::fs::write(
+        &program,
+        "#pragma epistemic_mode = faeel\n\
+         dom(a).\n\
+         p(a, b).\n\
+         q(c).\n\
+         p(X) :- dom(X), possible p(X).\n\
+         result(X) :- q(X), know q(X).\n\
+         ?- result(X).\n",
+    )
+    .expect("write active plan foundedness program");
+
+    let output = cargo_bin_cmd!("xlog")
+        .args([
+            "run",
+            program.to_str().expect("valid program path"),
+            "--memory-mb",
+            "1024",
+        ])
+        .output()
+        .expect("run active plan foundedness program");
+    assert!(
+        output.status.success(),
+        "xlog run failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).expect("utf8 stdout");
+    assert!(stdout.contains("| c  |"), "{stdout}");
+}
+
+#[test]
+fn test_xlog_run_preserves_predecessor_supported_recursive_modal_rule() {
+    let _device = match CudaDevice::new(0) {
+        Ok(device) => device,
+        Err(error) if std::env::var("XLOG_REQUIRE_CUDA").as_deref() == Ok("1") => {
+            panic!("XLOG_REQUIRE_CUDA=1 but CUDA initialization failed: {error}")
+        }
+        Err(error) => {
+            eprintln!("Skipping test: CUDA runtime unavailable: {error}");
+            return;
+        }
+    };
+
+    let fixture = TempDir::new().expect("create fixture directory");
+    let program = fixture
+        .path()
+        .join("predecessor_supported_recursive_modal.xlog");
+    std::fs::write(
+        &program,
+        "#pragma epistemic_mode = faeel\n\
+         pred edge(u32, u32).\n\
+         pred p(u32).\n\
+         edge(1, 2).\n\
+         p(1).\n\
+         p(Y) :- p(X), edge(X, Y), possible p(X).\n\
+         ?- p(Y).\n",
+    )
+    .expect("write predecessor-supported recursive modal program");
+
+    let output = cargo_bin_cmd!("xlog")
+        .args([
+            "run",
+            program.to_str().expect("valid program path"),
+            "--memory-mb",
+            "1024",
+        ])
+        .output()
+        .expect("run predecessor-supported recursive modal program");
+    assert!(
+        output.status.success(),
+        "xlog run failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).expect("utf8 stdout");
+    assert!(stdout.contains("| 1  |"), "{stdout}");
+    assert!(stdout.contains("| 2  |"), "{stdout}");
+}
+
+#[test]
+fn test_xlog_run_propagates_founded_modal_predecessor() {
+    let _device = match CudaDevice::new(0) {
+        Ok(device) => device,
+        Err(error) if std::env::var("XLOG_REQUIRE_CUDA").as_deref() == Ok("1") => {
+            panic!("XLOG_REQUIRE_CUDA=1 but CUDA initialization failed: {error}")
+        }
+        Err(error) => {
+            eprintln!("Skipping test: CUDA runtime unavailable: {error}");
+            return;
+        }
+    };
+
+    let fixture = TempDir::new().expect("create fixture directory");
+    let program = fixture.path().join("founded_modal_predecessor.xlog");
+    std::fs::write(
+        &program,
+        "#pragma epistemic_mode = faeel\n\
+         pred edge(u32, u32).\n\
+         pred p(u32).\n\
+         edge(1, 2).\n\
+         p(1).\n\
+         p(Y) :- edge(X, Y), possible p(X).\n\
+         ?- p(Y).\n",
+    )
+    .expect("write founded modal-predecessor program");
+
+    let output = cargo_bin_cmd!("xlog")
+        .args([
+            "run",
+            program.to_str().expect("valid program path"),
+            "--memory-mb",
+            "1024",
+        ])
+        .output()
+        .expect("run founded modal-predecessor program");
+    assert!(
+        output.status.success(),
+        "xlog run failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).expect("utf8 stdout");
+    assert!(stdout.contains("| 1  |"), "{stdout}");
+    assert!(stdout.contains("| 2  |"), "{stdout}");
+}
+
+#[test]
+fn test_xlog_run_excludes_unfounded_modal_tuple_cycle() {
+    let _device = match CudaDevice::new(0) {
+        Ok(device) => device,
+        Err(error) if std::env::var("XLOG_REQUIRE_CUDA").as_deref() == Ok("1") => {
+            panic!("XLOG_REQUIRE_CUDA=1 but CUDA initialization failed: {error}")
+        }
+        Err(error) => {
+            eprintln!("Skipping test: CUDA runtime unavailable: {error}");
+            return;
+        }
+    };
+
+    let fixture = TempDir::new().expect("create fixture directory");
+    let program = fixture.path().join("unfounded_modal_tuple_cycle.xlog");
+    std::fs::write(
+        &program,
+        "#pragma epistemic_mode = faeel\n\
+         pred pair(u32, u32).\n\
+         pred p(u32, u32).\n\
+         pair(1, 2).\n\
+         pair(2, 1).\n\
+         p(X, Y) :- pair(X, Y), possible p(Y, X).\n\
+         ?- p(X, Y).\n",
+    )
+    .expect("write unfounded modal tuple-cycle program");
+
+    let output = cargo_bin_cmd!("xlog")
+        .args([
+            "run",
+            program.to_str().expect("valid program path"),
+            "--memory-mb",
+            "1024",
+        ])
+        .output()
+        .expect("run unfounded modal tuple-cycle program");
+    assert!(
+        output.status.success(),
+        "xlog run failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).expect("utf8 stdout");
+    assert!(stdout.starts_with("p\n"), "{stdout}");
+    assert!(!stdout.contains("| 1  | 2  |"), "{stdout}");
+    assert!(!stdout.contains("| 2  | 1  |"), "{stdout}");
+}
+
+#[test]
+fn test_xlog_run_solves_multi_relation_modal_cycle_from_founded_seed() {
+    let _device = match CudaDevice::new(0) {
+        Ok(device) => device,
+        Err(error) if std::env::var("XLOG_REQUIRE_CUDA").as_deref() == Ok("1") => {
+            panic!("XLOG_REQUIRE_CUDA=1 but CUDA initialization failed: {error}")
+        }
+        Err(error) => {
+            eprintln!("Skipping test: CUDA runtime unavailable: {error}");
+            return;
+        }
+    };
+
+    let fixture = TempDir::new().expect("create fixture directory");
+    let program = fixture
+        .path()
+        .join("founded_multi_relation_modal_cycle.xlog");
+    std::fs::write(
+        &program,
+        "#pragma epistemic_mode = faeel\n\
+         pred seed().\n\
+         pred p().\n\
+         pred q().\n\
+         seed().\n\
+         p() :- seed().\n\
+         q() :- possible p().\n\
+         p() :- possible q().\n\
+         ?- p().\n\
+         ?- q().\n",
+    )
+    .expect("write founded multi-relation modal-cycle program");
+
+    let output = cargo_bin_cmd!("xlog")
+        .args([
+            "run",
+            program.to_str().expect("valid program path"),
+            "--memory-mb",
+            "1024",
+        ])
+        .output()
+        .expect("run founded multi-relation modal-cycle program");
+    assert!(
+        output.status.success(),
+        "xlog run failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).expect("utf8 stdout");
+    assert!(stdout.contains("p\nrows: 1"), "{stdout}");
+    assert!(stdout.contains("q\nrows: 1"), "{stdout}");
+}
+
+#[test]
+fn test_xlog_run_aggregate_outputs_match_declared_runtime_schemas() {
+    let _device = match CudaDevice::new(0) {
+        Ok(device) => device,
+        Err(error) if std::env::var("XLOG_REQUIRE_CUDA").as_deref() == Ok("1") => {
+            panic!("XLOG_REQUIRE_CUDA=1 but CUDA initialization failed: {error}")
+        }
+        Err(error) => {
+            eprintln!("Skipping test: CUDA runtime unavailable: {error}");
+            return;
+        }
+    };
+
+    let fixture = TempDir::new().expect("create fixture directory");
+    let program = fixture.path().join("aggregate_runtime_schemas.xlog");
+    std::fs::write(
+        &program,
+        "pred edge(u32, u64).\n\
+         pred summary(u32, u64, u64, u64).\n\
+         edge(1, 5000000000).\n\
+         edge(1, 6000000000).\n\
+         summary(X, count(Y), min(Y), max(Y)) :- edge(X, Y).\n\
+         ?- summary(X, Count, Minimum, Maximum).\n",
+    )
+    .expect("write aggregate schema program");
+
+    let output = cargo_bin_cmd!("xlog")
+        .args([
+            "run",
+            program.to_str().expect("valid program path"),
+            "--memory-mb",
+            "1024",
+        ])
+        .output()
+        .expect("run aggregate schema program");
+    assert!(
+        output.status.success(),
+        "xlog run failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).expect("utf8 stdout");
+    assert!(
+        stdout.lines().any(|line| {
+            line.split('|')
+                .any(|field| field.trim().parse::<u64>() == Ok(2))
+        }),
+        "{stdout}"
+    );
+    assert!(stdout.contains("5000000000"), "{stdout}");
+    assert!(stdout.contains("6000000000"), "{stdout}");
+}
+
+#[test]
+fn test_xlog_run_g91_exact_head_possible_union_preserves_self_supported_rows() {
+    let _device = match CudaDevice::new(0) {
+        Ok(device) => device,
+        Err(error) if std::env::var("XLOG_REQUIRE_CUDA").as_deref() == Ok("1") => {
+            panic!("XLOG_REQUIRE_CUDA=1 but CUDA initialization failed: {error}")
+        }
+        Err(error) => {
+            eprintln!("Skipping test: CUDA runtime unavailable: {error}");
+            return;
+        }
+    };
+
+    let fixture = TempDir::new().expect("create fixture directory");
+    let program = fixture.path().join("g91_exact_head_possible_union.xlog");
+    std::fs::write(
+        &program,
+        "#pragma epistemic_mode = g91\n\
+         pred seed(u32).\n\
+         pred node(u32).\n\
+         pred p(u32).\n\
+         seed(1).\n\
+         node(2).\n\
+         p(X) :- seed(X).\n\
+         p(X) :- node(X), possible p(X).\n\
+         ?- p(X).\n",
+    )
+    .expect("write G91 exact-head possibility program");
+
+    let output = cargo_bin_cmd!("xlog")
+        .args([
+            "run",
+            program.to_str().expect("valid program path"),
+            "--memory-mb",
+            "1024",
+        ])
+        .output()
+        .expect("run G91 exact-head possibility program");
+    assert!(
+        output.status.success(),
+        "xlog run failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).expect("utf8 stdout");
+    assert!(stdout.contains("| 1  |"), "{stdout}");
+    assert!(stdout.contains("| 2  |"), "{stdout}");
+}
+
+#[test]
+fn test_xlog_run_faeel_constrained_support_excludes_unfounded_union_rows() {
+    let _device = match CudaDevice::new(0) {
+        Ok(device) => device,
+        Err(error) if std::env::var("XLOG_REQUIRE_CUDA").as_deref() == Ok("1") => {
+            panic!("XLOG_REQUIRE_CUDA=1 but CUDA initialization failed: {error}")
+        }
+        Err(error) => {
+            eprintln!("Skipping test: CUDA runtime unavailable: {error}");
+            return;
+        }
+    };
+
+    let fixture = TempDir::new().expect("create fixture directory");
+    let program = fixture.path().join("constrained_founded_support.xlog");
+    std::fs::write(
+        &program,
+        "#pragma epistemic_mode = faeel\n\
+         pred seed(u32).\n\
+         pred p(u32).\n\
+         seed(1).\n\
+         seed(2).\n\
+         p(X) :- seed(X), X = 1.\n\
+         p(X) :- seed(X), possible p(X).\n\
+         ?- p(X).\n",
+    )
+    .expect("write constrained founded-support program");
+
+    let output = cargo_bin_cmd!("xlog")
+        .args([
+            "run",
+            program.to_str().expect("valid program path"),
+            "--memory-mb",
+            "1024",
+        ])
+        .output()
+        .expect("run constrained founded-support program");
+    assert!(
+        output.status.success(),
+        "xlog run failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).expect("utf8 stdout");
+    assert!(stdout.contains("| 1  |"), "{stdout}");
+    assert!(!stdout.contains("| 2  |"), "{stdout}");
+}
+
+#[test]
+fn test_xlog_run_preserves_non_bijective_modal_union_rows_in_fixpoint() {
+    let _device = match CudaDevice::new(0) {
+        Ok(device) => device,
+        Err(error) if std::env::var("XLOG_REQUIRE_CUDA").as_deref() == Ok("1") => {
+            panic!("XLOG_REQUIRE_CUDA=1 but CUDA initialization failed: {error}")
+        }
+        Err(error) => {
+            eprintln!("Skipping test: CUDA runtime unavailable: {error}");
+            return;
+        }
+    };
+
+    let fixture = TempDir::new().expect("create fixture directory");
+    let program = fixture.path().join("repeated_head_variable_union.xlog");
+    std::fs::write(
+        &program,
+        "#pragma epistemic_mode = faeel\n\
+         pred domain(symbol).\n\
+         pred other(symbol, symbol).\n\
+         pred p(symbol, symbol).\n\
+         domain(a).\n\
+         other(c, d).\n\
+         p(X, X) :- domain(X).\n\
+         p(A, B) :- other(A, B).\n\
+         p(X, X) :- domain(X), know p(X, X).\n\
+         ?- p(A, B).\n",
+    )
+    .expect("write non-bijective modal-union program");
+
+    let output = cargo_bin_cmd!("xlog")
+        .args([
+            "run",
+            program.to_str().expect("valid program path"),
+            "--memory-mb",
+            "1024",
+        ])
+        .output()
+        .expect("run non-bijective modal-union program");
+    assert!(
+        output.status.success(),
+        "xlog run failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).expect("utf8 stdout");
+    assert!(stdout.contains("| a  | a  |"), "{stdout}");
+    assert!(stdout.contains("| c  | d  |"), "{stdout}");
+}
+
+fn run_inline_xlog_program(
+    fixture: &TempDir,
+    filename: &str,
+    source: &str,
+) -> std::process::Output {
+    let program = fixture.path().join(filename);
+    std::fs::write(&program, source).expect("write inline XLOG program");
+    cargo_bin_cmd!("xlog")
+        .args([
+            "run",
+            program.to_str().expect("valid program path"),
+            "--memory-mb",
+            "1024",
+        ])
+        .output()
+        .expect("run inline XLOG program")
+}
+
+#[test]
+fn test_xlog_run_validates_source_before_founded_rule_elision() {
+    let _device = match CudaDevice::new(0) {
+        Ok(device) => device,
+        Err(error) if std::env::var("XLOG_REQUIRE_CUDA").as_deref() == Ok("1") => {
+            panic!("XLOG_REQUIRE_CUDA=1 but CUDA initialization failed: {error}")
+        }
+        Err(error) => {
+            eprintln!("Skipping test: CUDA runtime unavailable: {error}");
+            return;
+        }
+    };
+    let fixture = TempDir::new().expect("create fixture directory");
+
+    for (filename, source, expected) in [
+        (
+            "unbounded_modal_variable.xlog",
+            "#pragma epistemic_mode = faeel\npred p(u32).\np(X) :- possible p(X).\n?- p(X).\n",
+            "UnsafeVariable(\"X\")",
+        ),
+        (
+            "unsafe_negation_before_elision.xlog",
+            "pred p().\npred q(u32).\np() :- possible p(), not q(X).\n?- p().\n",
+            "unbound variable X in negated atom",
+        ),
+        (
+            "type_error_before_elision.xlog",
+            "pred p().\npred q(u32).\np() :- possible p(), q(a).\n?- p().\n",
+            "Symbol literal",
+        ),
+    ] {
+        let output = run_inline_xlog_program(&fixture, filename, source);
+        assert!(
+            !output.status.success(),
+            "{filename} must fail static validation before foundedness elision"
+        );
+        let stderr = String::from_utf8(output.stderr).expect("utf8 stderr");
+        assert!(stderr.contains(expected), "{filename}: {stderr}");
+    }
+
+    let output = run_inline_xlog_program(
+        &fixture,
+        "arithmetic_bound_dead_signature.xlog",
+        "#pragma epistemic_mode = faeel\n\
+         p(a, b).\n\
+         p(X) :- X is 1, possible p(X).\n\
+         ?- p(X, Y).\n",
+    );
+    assert!(
+        output.status.success(),
+        "arithmetic-bound dead signature must not block p/2: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).expect("utf8 stdout");
+    assert!(stdout.contains("| a  | b  |"), "{stdout}");
+}
+
+#[test]
+fn test_xlog_run_preserves_active_gates_and_constraints_after_founded_elision() {
+    let _device = match CudaDevice::new(0) {
+        Ok(device) => device,
+        Err(error) if std::env::var("XLOG_REQUIRE_CUDA").as_deref() == Ok("1") => {
+            panic!("XLOG_REQUIRE_CUDA=1 but CUDA initialization failed: {error}")
+        }
+        Err(error) => {
+            eprintln!("Skipping test: CUDA runtime unavailable: {error}");
+            return;
+        }
+    };
+    let fixture = TempDir::new().expect("create fixture directory");
+    let output = run_inline_xlog_program(
+        &fixture,
+        "active_modal_contract_after_elision.xlog",
+        "#pragma epistemic_mode = faeel\n\
+         pred missing().\n\
+         pred present().\n\
+         pred circular().\n\
+         pred blocked().\n\
+         pred allowed().\n\
+         present().\n\
+         circular() :- possible circular().\n\
+         blocked() :- know missing().\n\
+         allowed() :- know present().\n\
+         :- know missing().\n\
+         ?- circular().\n\
+         ?- blocked().\n\
+         ?- allowed().\n",
+    );
+    assert!(
+        output.status.success(),
+        "founded dispatch must retain active gates and the satisfied constraint: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).expect("utf8 stdout");
+    assert!(stdout.contains("circular\nrows: 0"), "{stdout}");
+    assert!(stdout.contains("blocked\nrows: 0"), "{stdout}");
+    assert!(stdout.contains("allowed\nrows: 1"), "{stdout}");
+
+    let output = run_inline_xlog_program(
+        &fixture,
+        "violated_modal_constraint_after_elision.xlog",
+        "#pragma epistemic_mode = faeel\n\
+         pred present().\n\
+         pred circular().\n\
+         present().\n\
+         circular() :- possible circular().\n\
+         :- know present().\n\
+         ?- circular().\n",
+    );
+    assert!(
+        !output.status.success(),
+        "an active modal constraint must still reject the founded model"
+    );
+    let stderr = String::from_utf8(output.stderr).expect("utf8 stderr");
+    assert!(stderr.contains("Constraint 0 violated"), "{stderr}");
+}
+
+#[test]
+fn test_xlog_run_scopes_g91_compatibility_to_exact_tuple_support() {
+    let _device = match CudaDevice::new(0) {
+        Ok(device) => device,
+        Err(error) if std::env::var("XLOG_REQUIRE_CUDA").as_deref() == Ok("1") => {
+            panic!("XLOG_REQUIRE_CUDA=1 but CUDA initialization failed: {error}")
+        }
+        Err(error) => {
+            eprintln!("Skipping test: CUDA runtime unavailable: {error}");
+            return;
+        }
+    };
+    let fixture = TempDir::new().expect("create fixture directory");
+    let output = run_inline_xlog_program(
+        &fixture,
+        "tuple_scoped_g91_compatibility.xlog",
+        "#pragma epistemic_mode = g91\n\
+         pred edge(u32, u32).\n\
+         pred p(u32).\n\
+         pred missing().\n\
+         pred q().\n\
+         pred result().\n\
+         pred cycle().\n\
+         pred domain(u32).\n\
+         pred left(u32).\n\
+         pred right(u32).\n\
+         edge(1, 2).\n\
+         p(99).\n\
+         domain(7).\n\
+         p(Y) :- edge(X, Y), possible p(X).\n\
+         q() :- know missing().\n\
+         result() :- possible q().\n\
+         cycle() :- possible cycle().\n\
+         left(X) :- domain(X), possible right(X).\n\
+         right(X) :- domain(X), possible left(X).\n\
+         ?- p(X).\n\
+         ?- result().\n\
+         ?- cycle().\n\
+         ?- left(X).\n\
+         ?- right(X).\n",
+    );
+    assert!(
+        output.status.success(),
+        "tuple-scoped G91 program must execute: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).expect("utf8 stdout");
+    assert!(stdout.contains("| 99 |"), "{stdout}");
+    assert!(!stdout.contains("| 2  |"), "{stdout}");
+    assert!(stdout.contains("result\nrows: 0"), "{stdout}");
+    assert!(stdout.contains("cycle\nrows: 1"), "{stdout}");
+    assert_eq!(stdout.matches("| 7  |").count(), 2, "{stdout}");
+}
+
+#[test]
+fn test_xlog_run_preserves_authored_queries_through_modal_cycle_reduction() {
+    let _device = match CudaDevice::new(0) {
+        Ok(device) => device,
+        Err(error) if std::env::var("XLOG_REQUIRE_CUDA").as_deref() == Ok("1") => {
+            panic!("XLOG_REQUIRE_CUDA=1 but CUDA initialization failed: {error}")
+        }
+        Err(error) => {
+            eprintln!("Skipping test: CUDA runtime unavailable: {error}");
+            return;
+        }
+    };
+    let fixture = TempDir::new().expect("create fixture directory");
+    let output = run_inline_xlog_program(
+        &fixture,
+        "authored_query_metadata.xlog",
+        "#pragma epistemic_mode = faeel\n\
+         p(a).\n\
+         p(a, b).\n\
+         q() :- possible q().\n\
+         ordinary_loop() :- ordinary_loop().\n\
+         ?- p(X).\n\
+         ?- p(X, Y).\n\
+         ?- q().\n",
+    );
+    assert!(
+        output.status.success(),
+        "multi-arity modal-cycle query program must execute: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).expect("utf8 stdout");
+    assert!(
+        !stdout.contains("p/1") && !stdout.contains("p/2"),
+        "{stdout}"
+    );
+    assert!(!stdout.contains("computed_0"), "{stdout}");
+    assert_eq!(stdout.matches("p\n").count(), 2, "{stdout}");
+    assert!(stdout.contains("q\nrows: 0"), "{stdout}");
+
+    let output = run_inline_xlog_program(
+        &fixture,
+        "authored_query_metadata_case_a.xlog",
+        "#pragma epistemic_mode = faeel\n\
+         p(a).\n\
+         p(a, b).\n\
+         base().\n\
+         recursive() :- know base().\n\
+         recursive() :- recursive().\n\
+         ?- p(X).\n\
+         ?- p(X, Y).\n\
+         ?- recursive().\n",
+    );
+    assert!(
+        output.status.success(),
+        "Case-A query presentation must execute: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).expect("utf8 stdout");
+    assert!(
+        !stdout.contains("p/1") && !stdout.contains("p/2"),
+        "{stdout}"
+    );
+    assert!(!stdout.contains("computed_0"), "{stdout}");
+    assert_eq!(stdout.matches("p\n").count(), 2, "{stdout}");
+    assert!(stdout.contains("recursive\nrows: 1"), "{stdout}");
+}
+
+#[test]
+fn test_xlog_run_nullary_negative_modal_cycles_use_well_founded_truth() {
+    let _device = match CudaDevice::new(0) {
+        Ok(device) => device,
+        Err(error) if std::env::var("XLOG_REQUIRE_CUDA").as_deref() == Ok("1") => {
+            panic!("XLOG_REQUIRE_CUDA=1 but CUDA initialization failed: {error}")
+        }
+        Err(error) => {
+            eprintln!("Skipping test: CUDA runtime unavailable: {error}");
+            return;
+        }
+    };
+    let fixture = TempDir::new().expect("create fixture directory");
+    for (mode, pragma) in [
+        ("faeel", "#pragma epistemic_mode = faeel\n"),
+        ("g91", "#pragma epistemic_mode = g91\n"),
+    ] {
+        let source = format!(
+            "{pragma}pred p().\npred q().\npred self_cycle().\npred dependent().\n\
+             p() :- not possible q().\nq() :- not possible p().\n\
+             self_cycle() :- not possible self_cycle().\n\
+             dependent() :- not self_cycle().\n\
+             ?- p().\n?- q().\n?- self_cycle().\n?- dependent().\n"
+        );
+        let output = run_inline_xlog_program(
+            &fixture,
+            &format!("nullary_negative_cycle_{mode}.xlog"),
+            &source,
+        );
+        assert!(
+            output.status.success(),
+            "{mode} nullary WFS program must execute: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stdout = String::from_utf8(output.stdout).expect("utf8 stdout");
+        assert!(stdout.contains("p\nrows: 0"), "{mode}: {stdout}");
+        assert!(stdout.contains("q\nrows: 0"), "{mode}: {stdout}");
+        assert!(stdout.contains("self_cycle\nrows: 0"), "{mode}: {stdout}");
+        assert!(stdout.contains("dependent\nrows: 0"), "{mode}: {stdout}");
+    }
+}
+
+#[test]
+fn test_xlog_run_validates_structured_modal_arity_before_exact_elision() {
+    let _device = match CudaDevice::new(0) {
+        Ok(device) => device,
+        Err(error) if std::env::var("XLOG_REQUIRE_CUDA").as_deref() == Ok("1") => {
+            panic!("XLOG_REQUIRE_CUDA=1 but CUDA initialization failed: {error}")
+        }
+        Err(error) => {
+            eprintln!("Skipping test: CUDA runtime unavailable: {error}");
+            return;
+        }
+    };
+    let fixture = TempDir::new().expect("create fixture directory");
+
+    for mode in ["faeel", "g91"] {
+        let source = format!(
+            "#pragma epistemic_mode = {mode}\n\
+             pred p(list<symbol>).\n\
+             p([a, b]) :- possible p([a, b]).\n\
+             ?- p(X).\n"
+        );
+        let output = run_inline_xlog_program(
+            &fixture,
+            &format!("structured_modal_arity_{mode}.xlog"),
+            &source,
+        );
+        assert!(
+            !output.status.success(),
+            "{mode} must reject the authored structured-key mismatch before reduction"
+        );
+        let stderr = String::from_utf8(output.stderr).expect("utf8 stderr");
+        assert!(stderr.contains("epistemic modal tuple key"), "{stderr}");
+        assert!(stderr.contains("target arity 1"), "{stderr}");
+        assert!(stderr.contains("binding arity 2"), "{stderr}");
+    }
+}
+
+#[test]
+fn test_xlog_run_accepts_modal_binder_over_acyclic_dependency_diamond() {
+    let _device = match CudaDevice::new(0) {
+        Ok(device) => device,
+        Err(error) if std::env::var("XLOG_REQUIRE_CUDA").as_deref() == Ok("1") => {
+            panic!("XLOG_REQUIRE_CUDA=1 but CUDA initialization failed: {error}")
+        }
+        Err(error) => {
+            eprintln!("Skipping test: CUDA runtime unavailable: {error}");
+            return;
+        }
+    };
+    let fixture = TempDir::new().expect("create fixture directory");
+    let output = run_inline_xlog_program(
+        &fixture,
+        "invariant_dependency_diamond.xlog",
+        "pred base(u32).\n\
+         pred left(u32).\n\
+         pred right(u32).\n\
+         pred joined(u32).\n\
+         pred out(u32).\n\
+         base(1).\n\
+         left(X) :- base(X).\n\
+         right(X) :- base(X).\n\
+         joined(X) :- left(X), right(X).\n\
+         out(X) :- possible joined(X).\n\
+         ?- out(X).\n",
+    );
+    assert!(
+        output.status.success(),
+        "the shared acyclic dependency must remain invariant: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).expect("utf8 stdout");
+    assert!(stdout.contains("out\n"), "{stdout}");
+    assert!(stdout.contains("| 1  |"), "{stdout}");
+}
+
+#[test]
+fn test_xlog_run_g91_compatibility_is_scoped_to_concrete_cycle_tuples() {
+    let _device = match CudaDevice::new(0) {
+        Ok(device) => device,
+        Err(error) if std::env::var("XLOG_REQUIRE_CUDA").as_deref() == Ok("1") => {
+            panic!("XLOG_REQUIRE_CUDA=1 but CUDA initialization failed: {error}")
+        }
+        Err(error) => {
+            eprintln!("Skipping test: CUDA runtime unavailable: {error}");
+            return;
+        }
+    };
+    let fixture = TempDir::new().expect("create fixture directory");
+
+    let disjoint = run_inline_xlog_program(
+        &fixture,
+        "g91_disjoint_mutual_domains.xlog",
+        "#pragma epistemic_mode = g91\n\
+         pred domain_p(u32).\n\
+         pred domain_q(u32).\n\
+         pred p(u32).\n\
+         pred q(u32).\n\
+         domain_p(1).\n\
+         domain_q(2).\n\
+         p(X) :- domain_p(X), possible q(X).\n\
+         q(X) :- domain_q(X), possible p(X).\n\
+         ?- p(X).\n\
+         ?- q(X).\n",
+    );
+    assert!(
+        disjoint.status.success(),
+        "disjoint compatibility cycle must execute: {}",
+        String::from_utf8_lossy(&disjoint.stderr)
+    );
+    let stdout = String::from_utf8(disjoint.stdout).expect("utf8 stdout");
+    assert!(stdout.starts_with("p\n"), "{stdout}");
+    assert!(stdout.contains("\nq\n"), "{stdout}");
+    assert!(!stdout.contains("| 1  |"), "{stdout}");
+    assert!(!stdout.contains("| 2  |"), "{stdout}");
+
+    let shared = run_inline_xlog_program(
+        &fixture,
+        "g91_shared_mutual_domain.xlog",
+        "#pragma epistemic_mode = g91\n\
+         pred domain(u32).\n\
+         pred p(u32).\n\
+         pred q(u32).\n\
+         domain(7).\n\
+         p(X) :- domain(X), possible q(X).\n\
+         q(X) :- domain(X), possible p(X).\n\
+         ?- p(X).\n\
+         ?- q(X).\n",
+    );
+    assert!(
+        shared.status.success(),
+        "shared compatibility tuple must execute: {}",
+        String::from_utf8_lossy(&shared.stderr)
+    );
+    let stdout = String::from_utf8(shared.stdout).expect("utf8 stdout");
+    assert_eq!(stdout.matches("| 7  |").count(), 2, "{stdout}");
+
+    let tuple_changing_return = run_inline_xlog_program(
+        &fixture,
+        "g91_tuple_changing_return_path.xlog",
+        "#pragma epistemic_mode = g91\n\
+         pred domain(u32).\n\
+         pred edge(u32, u32).\n\
+         pred p(u32).\n\
+         pred q(u32).\n\
+         domain(1).\n\
+         edge(2, 1).\n\
+         p(X) :- domain(X), possible q(X).\n\
+         q(Y) :- edge(X, Y), possible p(X).\n\
+         ?- p(X).\n\
+         ?- q(X).\n",
+    );
+    assert!(
+        tuple_changing_return.status.success(),
+        "tuple-changing return path must execute: {}",
+        String::from_utf8_lossy(&tuple_changing_return.stderr)
+    );
+    let stdout = String::from_utf8(tuple_changing_return.stdout).expect("utf8 stdout");
+    assert!(!stdout.contains("| 1  |"), "{stdout}");
+    assert!(!stdout.contains("| 2  |"), "{stdout}");
+
+    let founded_union = run_inline_xlog_program(
+        &fixture,
+        "g91_founded_union_and_incompatible_cycle.xlog",
+        "#pragma epistemic_mode = g91\n\
+         pred domain_p(u32).\n\
+         pred domain_q(u32).\n\
+         pred p(u32).\n\
+         pred q(u32).\n\
+         domain_p(1).\n\
+         domain_q(2).\n\
+         p(9).\n\
+         p(X) :- domain_p(X), possible q(X).\n\
+         q(X) :- domain_q(X), possible p(X).\n\
+         ?- p(X).\n\
+         ?- q(X).\n",
+    );
+    assert!(
+        founded_union.status.success(),
+        "founded rule union must execute: {}",
+        String::from_utf8_lossy(&founded_union.stderr)
+    );
+    let stdout = String::from_utf8(founded_union.stdout).expect("utf8 stdout");
+    assert!(stdout.contains("| 9  |"), "{stdout}");
+    assert!(!stdout.contains("| 1  |"), "{stdout}");
+    assert!(!stdout.contains("| 2  |"), "{stdout}");
+}
+
+#[test]
+fn test_xlog_run_g91_compatibility_iterates_to_the_greatest_tuple_fixpoint() {
+    let _device = match CudaDevice::new(0) {
+        Ok(device) => device,
+        Err(error) if std::env::var("XLOG_REQUIRE_CUDA").as_deref() == Ok("1") => {
+            panic!("XLOG_REQUIRE_CUDA=1 but CUDA initialization failed: {error}")
+        }
+        Err(error) => {
+            eprintln!("Skipping test: CUDA runtime unavailable: {error}");
+            return;
+        }
+    };
+    let fixture = TempDir::new().expect("create fixture directory");
+    let output = run_inline_xlog_program(
+        &fixture,
+        "g91_three_relation_descending_fixpoint.xlog",
+        "#pragma epistemic_mode = g91\n\
+         pred domain_p(u32).\n\
+         pred domain_q(u32).\n\
+         pred domain_r(u32).\n\
+         pred p(u32).\n\
+         pred q(u32).\n\
+         pred r(u32).\n\
+         domain_p(1). domain_p(2). domain_p(3).\n\
+         domain_q(1). domain_q(2).\n\
+         domain_r(1).\n\
+         p(X) :- domain_p(X), possible q(X).\n\
+         q(X) :- domain_q(X), possible r(X).\n\
+         r(X) :- domain_r(X), possible p(X).\n\
+         ?- p(X).\n\
+         ?- q(X).\n\
+         ?- r(X).\n",
+    );
+    assert!(
+        output.status.success(),
+        "descending compatibility fixpoint must execute: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).expect("utf8 stdout");
+    assert_eq!(stdout.matches("| 1  |").count(), 3, "{stdout}");
+    assert!(!stdout.contains("| 2  |"), "{stdout}");
+    assert!(!stdout.contains("| 3  |"), "{stdout}");
+
+    let limited = run_inline_xlog_program(
+        &fixture,
+        "g91_compatibility_iteration_limit.xlog",
+        "#pragma epistemic_mode = g91\n\
+         #pragma max_recursion_depth = 1\n\
+         pred domain_p(u32).\n\
+         pred domain_q(u32).\n\
+         pred domain_r(u32).\n\
+         pred p(u32).\n\
+         pred q(u32).\n\
+         pred r(u32).\n\
+         domain_p(1). domain_p(2). domain_p(3).\n\
+         domain_q(1). domain_q(2).\n\
+         domain_r(1).\n\
+         p(X) :- domain_p(X), possible q(X).\n\
+         q(X) :- domain_q(X), possible r(X).\n\
+         r(X) :- domain_r(X), possible p(X).\n\
+         ?- p(X).\n",
+    );
+    assert!(!limited.status.success());
+    let stderr = String::from_utf8(limited.stderr).expect("utf8 stderr");
+    assert!(
+        stderr.contains("did not converge within 1 refinement iterations"),
+        "{stderr}"
+    );
+}
+
+#[test]
+fn test_xlog_run_g91_modal_binder_order_does_not_change_compatibility() {
+    let _device = match CudaDevice::new(0) {
+        Ok(device) => device,
+        Err(error) if std::env::var("XLOG_REQUIRE_CUDA").as_deref() == Ok("1") => {
+            panic!("XLOG_REQUIRE_CUDA=1 but CUDA initialization failed: {error}")
+        }
+        Err(error) => {
+            eprintln!("Skipping test: CUDA runtime unavailable: {error}");
+            return;
+        }
+    };
+    let fixture = TempDir::new().expect("create fixture directory");
+    for (name, body) in [
+        ("recursive_first", "possible p(X), possible base(X)"),
+        ("finite_first", "possible base(X), possible p(X)"),
+    ] {
+        let source = format!(
+            "#pragma epistemic_mode = g91\n\
+             pred base(u32).\n\
+             pred p(u32).\n\
+             base(1).\n\
+             p(X) :- {body}.\n\
+             ?- p(X).\n"
+        );
+        let output =
+            run_inline_xlog_program(&fixture, &format!("g91_modal_binder_{name}.xlog"), &source);
+        assert!(
+            output.status.success(),
+            "{name} must execute: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stdout = String::from_utf8(output.stdout).expect("utf8 stdout");
+        assert!(stdout.contains("| 1  |"), "{name}: {stdout}");
+    }
+
+    let constrained = run_inline_xlog_program(
+        &fixture,
+        "g91_compatibility_ordinary_constraint.xlog",
+        "#pragma epistemic_mode = g91\n\
+         pred base(u32).\n\
+         pred p(u32).\n\
+         base(1).\n\
+         p(X) :- base(X), possible p(X).\n\
+         :- p(1).\n\
+         ?- p(X).\n",
+    );
+    assert!(
+        !constrained.status.success(),
+        "the converged compatibility result must still enforce ordinary constraints"
+    );
+    let stderr = String::from_utf8(constrained.stderr).expect("utf8 stderr");
+    assert!(stderr.contains("Constraint 0 violated"), "{stderr}");
+}
+
+#[test]
+fn test_xlog_run_combines_g91_compatibility_with_unrelated_gpu_wfs() {
+    let _device = match CudaDevice::new(0) {
+        Ok(device) => device,
+        Err(error) if std::env::var("XLOG_REQUIRE_CUDA").as_deref() == Ok("1") => {
+            panic!("XLOG_REQUIRE_CUDA=1 but CUDA initialization failed: {error}")
+        }
+        Err(error) => {
+            eprintln!("Skipping test: CUDA runtime unavailable: {error}");
+            return;
+        }
+    };
+    let fixture = TempDir::new().expect("create fixture directory");
+    let output = run_inline_xlog_program(
+        &fixture,
+        "g91_compatibility_with_wfs.xlog",
+        "#pragma epistemic_mode = g91\n\
+         pred base(u32).\n\
+         pred p(u32).\n\
+         pred left().\n\
+         pred right().\n\
+         base(1).\n\
+         p(X) :- base(X), possible p(X).\n\
+         left() :- not possible right().\n\
+         right() :- not possible left().\n\
+         :- p(2).\n\
+         :- not left().\n\
+         ?- p(X).\n\
+         ?- left().\n\
+         ?- right().\n",
+    );
+    assert!(
+        output.status.success(),
+        "positive compatibility and unrelated WFS must compose: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).expect("utf8 stdout");
+    assert!(stdout.contains("| 1  |"), "{stdout}");
+    assert!(stdout.contains("left\nrows: 0"), "{stdout}");
+    assert!(stdout.contains("right\nrows: 0"), "{stdout}");
+
+    let violated = run_inline_xlog_program(
+        &fixture,
+        "g91_compatibility_with_wfs_constraint_violation.xlog",
+        "#pragma epistemic_mode = g91\n\
+         pred base(u32).\n\
+         pred p(u32).\n\
+         pred left().\n\
+         pred right().\n\
+         base(1).\n\
+         p(X) :- base(X), possible p(X).\n\
+         left() :- not possible right().\n\
+         right() :- not possible left().\n\
+         :- p(1).\n\
+         ?- p(X).\n",
+    );
+    assert!(
+        !violated.status.success(),
+        "a constraint violated after nested WFS convergence must fail"
+    );
+    let stderr = String::from_utf8(violated.stderr).expect("utf8 stderr");
+    assert!(stderr.contains("Constraint 0 violated"), "{stderr}");
+
+    let false_negation = run_inline_xlog_program(
+        &fixture,
+        "g91_compatibility_with_wfs_false_negation_constraint.xlog",
+        "#pragma epistemic_mode = g91\n\
+         pred base(u32).\n\
+         pred p(u32).\n\
+         pred left().\n\
+         pred right().\n\
+         pred definitely_false().\n\
+         base(1).\n\
+         p(X) :- base(X), possible p(X).\n\
+         left() :- not possible right().\n\
+         right() :- not possible left().\n\
+         :- not definitely_false().\n\
+         ?- p(X).\n",
+    );
+    assert!(
+        !false_negation.status.success(),
+        "negation of a WFS-false atom makes the constraint body true"
+    );
+    let stderr = String::from_utf8(false_negation.stderr).expect("utf8 stderr");
+    assert!(stderr.contains("Constraint 0 violated"), "{stderr}");
 }

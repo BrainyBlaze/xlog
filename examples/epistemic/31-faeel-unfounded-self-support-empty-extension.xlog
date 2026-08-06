@@ -9,10 +9,10 @@
 // simply absent. This is the standard founded/equilibrium semantics; the model
 // where unfounded-by-circular-possibility atoms are false is the founded model.
 //
-// The program is executed rather than rejected: the founded extension is
-// computed on the GPU/runtime path (the circular self-support rule is excluded
-// from the reduced founded base, and the GPU world-view validation then materializes the empty
-// extension). `?- p()` therefore prints `rows: 0` and `xlog run` exits 0.
+// The program is executed rather than rejected. Its modal self-dependency is
+// classified as a recursive dependency, the exact circular rule contributes no
+// foundation, and the ordinary GPU fixpoint materializes the empty extension.
+// `?- p()` therefore prints `rows: 0` and `xlog run` exits 0.
 //
 // A case that is mathematically false under a semantics mode executes to its
 // semantic result, which is the empty extension under FAEEL, instead of being
