@@ -618,6 +618,57 @@ The lineage payload contains `checkpoint_hash`, `split_hashes`,
 `calibration_metrics`, `cuda_device`, `influence_audit`, and
 `changed_acceptance` evidence recorded through `record_nn4_influence(...)`.
 
+#### Epistemic evidence -> exact probability
+
+`CompiledLogicProgram.evaluate_conditioned(prob_source)` runs a compiled epistemic
+program (`know` / `possible`) on the GPU and conditions an exact probabilistic query
+on its accepted world view. Only facts declared in the epistemic program's own
+source feed that world view.
+
+Unlike `evaluate`, this method does not accept `dlpack_inputs`: caller-supplied
+input relations are NOT consulted. If the epistemic program depends on a relation
+that would normally be supplied at call time via `evaluate(dlpack_inputs=...)`, the
+world view produced here is empty (`accepted_world_views == 0`), every counter in
+`result.trace` is `0`, and the conditioned query silently falls back to its
+unconditioned prior instead of raising.
+
+```python
+import pyxlog
+
+known = pyxlog.LogicProgram.compile("""
+pred fact().
+pred accepted().
+
+fact().
+
+accepted() :- know fact().
+""")
+
+result = known.evaluate_conditioned("0.6::fact().\nquery(fact()).\n")
+result.log_z_e                                       # ln(0.6) ~= -0.5108256, the exact log-evidence of the query program
+result.trace["gpu_conditioned_know_evidence_facts"]   # >= 1 when know-evidence conditioned the circuit
+result.trace["cpu_only_probability_recomputations"]   # must be 0
+```
+
+On a CUDA device, conditioning `0.6::fact(). query(fact()).` on `know fact()` raises
+`P(fact())` from the unconditioned `0.6` to the exact `1.0`. `result.log_z_e` is the
+log-evidence of what is known: the natural log of the product of the priors of the
+atoms the world view conditioned on, not of the whole query program. Measured on
+GPU: one known atom at prior 0.6 gives `log_z_e == ln(0.6)`; two known atoms each at
+prior 0.5 give `log_z_e == ln(0.25)`.
+
+`EpistemicEvalResult` carries `atoms`, `prob` and `log_prob` (DLPack capsules, like
+`EvalResult`), `log_z_e`, and `trace`. `CompiledLogicProgram.epistemic_evidence()`
+runs the same epistemic program and returns an `EpistemicEvidence` with the
+accepted-world-view counters alone (`epistemic_mode`, `know_operator_count`,
+`possible_operator_count`, `accepted_candidates`, `rejected_candidates`,
+`accepted_world_views`, `final_output_rows`), without touching the probabilistic
+tier. It has the same caller-supplied-relation limitation as
+`evaluate_conditioned`.
+
+Only single-component epistemic plans are supported; split, stratified and WFS plans
+raise instead of being silently reduced. A real CUDA device is required.
+
 ### Program (Probabilistic)
 
 ```python
