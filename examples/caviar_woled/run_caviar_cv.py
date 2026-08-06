@@ -206,6 +206,15 @@ NEURAL_INIT_ACTIVITY_TRANSITIONS: tuple[str, ...] = (
     "any_became_active", "any_became_inactive", "any_became_walking", "any_stopped_walking",
 )
 
+# `caviar_continuous.TRANSITION_RELATION_NAMES`'s two DISTANCE-based members
+# -- the pair `--transition-vocab activity` excludes from the EC candidate
+# pool (see `_ec_relations`): the shipped e9/e10 artifacts were generated
+# BEFORE these two relations existed, so the four-activity-transition pool
+# is the only one that can replay them. Named here (not imported from
+# `caviar_continuous`) to keep module-level imports torch-free -- mirrors
+# `run_caviar_theory.DISTANCE_DERIVED_TRANSITIONS`'s identical hardcoding.
+DISTANCE_DERIVED_TRANSITIONS: tuple[str, ...] = ("became_far", "distance_increasing")
+
 
 def stratified_segment_folds(
     segment_positive_counts: list[int], n_folds: int, seed: int,
@@ -496,7 +505,7 @@ def _exclude_dontcare(facts, labels, dontcare):
     return kept_facts, kept_labels
 
 
-def _ec_relations(converted: dict) -> dict:
+def _ec_relations(converted: dict, transition_vocab: str = "full") -> dict:
     """EC-search candidate vocabulary for one fold's side (train or test):
     every base relation EXCEPT the data-quality flag ``coords_missing``,
     PLUS the frame-difference transition relations -- mirrors
@@ -504,8 +513,26 @@ def _ec_relations(converted: dict) -> dict:
     `_filtered_relation_names`'s exclusion, done in one step (this script
     never runs the direct protocol through this vocabulary, so there is no
     separate un-merged reading to keep byte-identical here, unlike that
-    module)."""
-    merged = {**converted["relations"], **converted["transition_relations"]}
+    module).
+
+    ``transition_vocab`` selects WHICH transition relations are admitted:
+    ``"full"`` (default, byte-identical to every call that predates the
+    parameter) admits all of ``converted["transition_relations"]``;
+    ``"activity"`` admits only the activity-based ones, excluding
+    `DISTANCE_DERIVED_TRANSITIONS` -- the exact pool the shipped e9/e10
+    artifacts were generated with (see that constant's own comment).
+    Any other value raises ``ValueError`` (never silently treated as one
+    of the two real vocabularies)."""
+    if transition_vocab not in ("activity", "full"):
+        raise ValueError(
+            f"transition_vocab must be 'activity' or 'full' (got {transition_vocab!r})."
+        )
+    transitions = converted["transition_relations"]
+    if transition_vocab == "activity":
+        transitions = {
+            n: v for n, v in transitions.items() if n not in DISTANCE_DERIVED_TRANSITIONS
+        }
+    merged = {**converted["relations"], **transitions}
     return {n: v for n, v in merged.items() if n != "coords_missing"}
 
 
@@ -861,6 +888,7 @@ def _run_init_search(
 def run_fold(
     fold_index: int, train_segments: list[dict], test_segments: list[dict], seed: int,
     mode: str = "relational", data_source: str = "dump", fluent: str = "meeting",
+    transition_vocab: str = "full",
 ) -> dict:
     """Run one fold of the pre-registered protocol end to end: fold-local
     conversion (see FOLD ISOLATION in the module docstring), EC init/term
@@ -888,7 +916,16 @@ def run_fold(
     of using the video dicts directly. Every other computation below this
     branch -- vocabulary building, induction, scoring, reconstruction -- is
     the SAME code, reading only ``train``/``test``'s shared output contract
-    and the resulting EC segment view, never ``data_source`` itself."""
+    and the resulting EC segment view, never ``data_source`` itself.
+
+    ``transition_vocab`` (default ``"full"``, BYTE-IDENTICAL to every call
+    site that predates this parameter) selects the EC candidate pool's
+    transition-relation subset -- see `_ec_relations`. The vocabulary each
+    search actually ran over is recorded in the returned fold record
+    (``"ec"``/``"direct"`` each carry a ``"candidate_vocabulary"`` key, and
+    the record's own top level carries ``"transition_vocab"``), so a
+    replayer can read the searched pool off the artifact instead of
+    reverse-engineering it from the gate values."""
     from relational_search import make_predict_clause
     from scorer import prf1, theory_predictions
 
@@ -925,8 +962,8 @@ def run_fold(
     ec_test = derive_ec_targets_continuous(test_ec_segments, test)
     ec_masks = derive_ec_masks_continuous(train_ec_segments, train)
 
-    train_ec_relations = _ec_relations(train)
-    test_ec_relations = _ec_relations(test)
+    train_ec_relations = _ec_relations(train, transition_vocab=transition_vocab)
+    test_ec_relations = _ec_relations(test, transition_vocab=transition_vocab)
     train_direct_relations = _direct_relations(train)
     test_direct_relations = _direct_relations(test)
 
@@ -967,11 +1004,13 @@ def run_fold(
         "mode": mode,
         "data_source": data_source,
         "fluent": fluent,
+        "transition_vocab": transition_vocab,
         "n_train_segments": len(train_segments),
         "n_test_segments": len(test_segments),
         "n_train_pt": train["num_pt"],
         "n_test_pt": test["num_pt"],
         "ec": {
+            "candidate_vocabulary": sorted(train_ec_relations),
             "n_init_train": ec_train["n_init"],
             "n_term_train": ec_train["n_term"],
             "n_init_test": ec_test["n_init"],
@@ -992,6 +1031,7 @@ def run_fold(
             "scoring": ec_scoring,
         },
         "direct": {
+            "candidate_vocabulary": sorted(train_direct_relations),
             "clauses": [list(c) for c in direct_theory["clauses"]],
             "stop_reason": direct_theory["stop_reason"],
             "iterations": _iterations_json(direct_theory["iterations"]),
@@ -1049,6 +1089,20 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "module's own docstring's NEURAL MODE section) -- needs a CUDA "
         "device at run time; --help does not. The termination search is "
         "unaffected by this flag in either mode.",
+    )
+    p.add_argument(
+        "--transition-vocab", default="full", choices=("activity", "full"),
+        help="which transition relations enter the EC candidate pool. "
+        "'full' (default, BYTE-IDENTICAL to every behavior that predates "
+        "this flag): all six of the converter's transition relations. "
+        "'activity': only the four ACTIVITY-based ones "
+        "(any_became_active/any_became_inactive/any_became_walking/"
+        "any_stopped_walking), excluding the distance-derived pair "
+        "(became_far/distance_increasing) -- the exact pool the shipped "
+        "e9/e10 artifacts were generated with, required to replay them "
+        "(README section E's 0.733 row). The direct-protocol reference "
+        "never sees transition relations in either setting; the "
+        "vocabulary actually searched is recorded in the result JSON.",
     )
     p.add_argument("--out", required=True, help="path to write RESULT.json")
     args = p.parse_args(argv)
@@ -1155,6 +1209,7 @@ def main(argv: list[str] | None = None) -> int:
         result = run_fold(
             fold_index, train_segments, test_segments, args.seed,
             mode=args.mode, data_source=args.data_source, fluent=args.fluent,
+            transition_vocab=args.transition_vocab,
         )
         fold_results.append(result)
         ec_s, direct_s = result["ec"]["scoring"], result["direct"]["scoring"]
@@ -1179,6 +1234,7 @@ def main(argv: list[str] | None = None) -> int:
         "folds": args.folds,
         "seed": args.seed,
         "mode": args.mode,
+        "transition_vocab": args.transition_vocab,
         "n_segments_total": len(all_segments),
         "fold_of_segment": fold_of_segment,
         "segment_positive_counts": counts,

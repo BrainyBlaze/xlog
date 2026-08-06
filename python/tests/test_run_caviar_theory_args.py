@@ -427,3 +427,110 @@ def test_filtered_relation_names_never_sees_transition_relations():
         "transition_relations": {"any_became_active": [(0, 1)]},
     }
     assert run_caviar_theory._filtered_relation_names(converted) == ["close"]
+
+
+# ---------------------------------------------------------------------------
+# --transition-vocab -- the EC candidate pool's transition-relation subset.
+# 'full' (default, byte-identical to every behavior that predates the flag)
+# admits all six of `convert_continuous`'s transition relations; 'activity'
+# admits only the four ACTIVITY-based ones -- the exact pool the shipped
+# e5/e9 artifacts were generated with, before `became_far`/
+# `distance_increasing` were added -- restoring replayability of those
+# results. Scoped to '--protocol ec --data continuous' (the only
+# combination whose candidate pool contains transition relations at all).
+# ---------------------------------------------------------------------------
+
+EC_CONTINUOUS = REQUIRED + [
+    "--protocol", "ec", "--data", "continuous", "--test-json", "t.json",
+]
+
+
+def test_transition_vocab_defaults_to_full():
+    assert run_caviar_theory.parse_args(REQUIRED).transition_vocab == "full"
+
+
+def test_transition_vocab_accepts_activity_with_ec_continuous():
+    args = run_caviar_theory.parse_args(EC_CONTINUOUS + ["--transition-vocab", "activity"])
+    assert args.transition_vocab == "activity"
+
+
+def test_transition_vocab_rejects_an_unknown_value():
+    with pytest.raises(SystemExit):
+        run_caviar_theory.parse_args(EC_CONTINUOUS + ["--transition-vocab", "bogus"])
+
+
+def test_transition_vocab_activity_refused_with_protocol_direct():
+    # The direct protocol's vocabulary never contains transition relations
+    # (see convert_continuous's own docstring), so 'activity' would be a
+    # silent no-op there -- refused instead, matching this CLI's own
+    # refusal pattern for every other mis-scoped combination.
+    with pytest.raises(SystemExit):
+        run_caviar_theory.parse_args(
+            REQUIRED + ["--data", "continuous", "--test-json", "t.json",
+                        "--transition-vocab", "activity"]
+        )
+
+
+def test_transition_vocab_activity_refused_with_data_pkl():
+    # --data pkl's converted dicts carry no transition relations at all.
+    with pytest.raises(SystemExit):
+        run_caviar_theory.parse_args(
+            REQUIRED + ["--protocol", "ec", "--transition-vocab", "activity"]
+        )
+
+
+def test_omitting_transition_vocab_leaves_every_other_default_unchanged():
+    omitted = run_caviar_theory.parse_args(EC_CONTINUOUS)
+    explicit = run_caviar_theory.parse_args(EC_CONTINUOUS + ["--transition-vocab", "full"])
+    assert vars(omitted) == vars(explicit)
+
+
+_SIX_TRANSITION_TRAIN = {
+    "relations": {"close": [(0, 1)]},
+    "transition_relations": {
+        "any_became_active": [(0, 1)], "any_became_inactive": [],
+        "any_became_walking": [], "any_stopped_walking": [(1, 1)],
+        "became_far": [(2, 1)], "distance_increasing": [(3, 1)],
+    },
+}
+_SIX_TRANSITION_TEST = {
+    "relations": {"close": [(1, 1)]},
+    "transition_relations": {
+        "any_became_active": [], "any_became_inactive": [(0, 1)],
+        "any_became_walking": [], "any_stopped_walking": [],
+        "became_far": [(1, 1)], "distance_increasing": [],
+    },
+}
+
+
+def test_ec_relations_with_transitions_default_full_admits_every_transition():
+    train_rel, test_rel = run_caviar_theory._ec_relations_with_transitions(
+        _SIX_TRANSITION_TRAIN, _SIX_TRANSITION_TEST,
+    )
+    assert set(train_rel) == set(test_rel) == {
+        "close",
+        "any_became_active", "any_became_inactive",
+        "any_became_walking", "any_stopped_walking",
+        "became_far", "distance_increasing",
+    }
+
+
+def test_ec_relations_with_transitions_activity_excludes_the_distance_derived_pair():
+    train_rel, test_rel = run_caviar_theory._ec_relations_with_transitions(
+        _SIX_TRANSITION_TRAIN, _SIX_TRANSITION_TEST, transition_vocab="activity",
+    )
+    assert set(train_rel) == set(test_rel) == {
+        "close",
+        "any_became_active", "any_became_inactive",
+        "any_became_walking", "any_stopped_walking",
+    }
+    # Base relations pass through untouched on both sides.
+    assert train_rel["close"] == [(0, 1)]
+    assert test_rel["close"] == [(1, 1)]
+
+
+def test_ec_relations_with_transitions_rejects_an_unknown_vocab():
+    with pytest.raises(ValueError, match="transition_vocab"):
+        run_caviar_theory._ec_relations_with_transitions(
+            _SIX_TRANSITION_TRAIN, _SIX_TRANSITION_TEST, transition_vocab="bogus",
+        )
