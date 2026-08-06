@@ -1225,12 +1225,26 @@ def main(argv: list[str] | None = None) -> int:
     direct_micro = _micro_prf1([r["direct"]["scoring"] for r in fold_results])
     total_wall = time.perf_counter() - t_start
 
+    if args.data_source == "dump":
+        # `convert_continuous`'s own fixed default -- the dump path never
+        # parameterizes it.
+        close_threshold = 25.0
+    else:
+        from caviar_xml_corpus import CANONICAL_CLOSE_THRESHOLDS
+
+        # `run_fold` calls `convert_xml_corpus` with its default, which
+        # resolves through this same table -- recorded here so the
+        # artifact names the threshold its `close` relation was built
+        # with (meeting 25, moving 34; see the table's own comment).
+        close_threshold = CANONICAL_CLOSE_THRESHOLDS[args.fluent]
+
     result = {
         "data_source": args.data_source,
         "train_json": args.train_json,
         "test_json": args.test_json,
         "xml_dir": args.xml_dir,
         "fluent": args.fluent,
+        "close_threshold": close_threshold,
         "folds": args.folds,
         "seed": args.seed,
         "mode": args.mode,

@@ -458,12 +458,26 @@ intervals, 11 initiations, 10 terminations, 1,812 gold pair-frames.
 Moving: 18 intervals, 5 initiations, 8 terminations, 3,136 gold
 pair-frames.
 
+**Close-threshold semantics (per fluent, canonical).** The canonical
+CAVIAR event definitions (RTEC's `rules.prolog`) define the two fluents
+over DIFFERENT proximity predicates: meeting over `close_25`, moving
+over `close_34`. The converter resolves its `close` relation through
+exactly this table (`caviar_xml_corpus.CANONICAL_CLOSE_THRESHOLDS`;
+each CV artifact records the threshold it ran with as
+`close_threshold`), so the moving rows below are measured under
+`close_34` — the predicate the published moving rules and scores
+actually use. An earlier revision of this section measured moving under
+the meeting threshold (25) without disclosing it; that measurement
+(micro F1 0.4868) is preserved unchanged as
+`results/f_xml_scene_cv/caviar-f-xml-moving-cv10-threshold25.json` —
+history, not the canonical row.
+
 | fluent, protocol (10-fold scene-family CV micro) | P | R | F1 | tp/fp/fn |
 |---|---|---|---|---|
 | meeting, EC + inertia | 0.000 | 0.000 | **0.000** | 0/120/1812 |
 | meeting, direct reference | 0.000 | 0.000 | 0.000 | 0/106/1812 |
-| moving, direct reference | 0.5927 | 0.4129 | **0.4868** | 1295/890/1841 |
-| moving, EC + inertia | 0.000 | 0.000 | 0.000 | 0/0/3136 |
+| moving, direct reference (close_34) | 0.5334 | 0.3817 | **0.4450** | 1197/1047/1939 |
+| moving, EC + inertia (close_34) | 0.000 | 0.000 | 0.000 | 0/0/3136 |
 
 **Why the EC search abstains everywhere: the holdout collapses, not the
 gate.** The like-for-like comparison is against section E.1 (the same
@@ -527,19 +541,34 @@ figures on those figures' own terms; this section is the leak-free
 floor, and under it a 2-literal state vocabulary does not transfer
 across meeting regimes at all.
 
-**Moving.** The direct-protocol reference selects the canonical
-published rule `both_walking & close` on every fold with a non-empty
-theory (micro F1 0.487; up to 0.938 on a single fold). The EC theory is
-empty everywhere for a counted reason: the whole corpus contains only
-5 observable moving initiations (13 of its 18 moving intervals begin
-before observation starts), so initiation search has nothing to clear
-its null gate with. The termination search does repeatedly select
-`both_active & close` (7/10 folds) — semantically coherent (a moving
-pair stops and starts interacting) — but with no initiation clauses
-inertia never starts, so the EC score stays degenerate.
+**Moving.** Under the canonical `close_34` the direct-protocol
+reference selects the canonical published rule — now literally
+`both_walking & close_34`, the same predicate the published rules use —
+on every fold with a non-empty theory, 8 of 10 (micro F1 0.4450; up to
+0.938 on a single fold). Where the clause is selected, widening close
+from 25 to 34 behaves exactly as the threshold semantics predict —
+recall up, precision down (e.g. fold 3: F1 0.286 → 0.504) — but the
+micro number is LOWER than the threshold-25 measurement's 0.4868 for a
+selection-level reason, not a scoring one: on the fold holding the fomd
+and mc1 scene families (1,546 of the 3,136 gold moving frames), the
+`close_34` training pool puts the top two candidates inside the
+selection tie band (margin 0.0093 against the 0.01 tie floor) and the
+search honestly abstains where the threshold-25 run had committed the
+clause. The canonical threshold does not "fix" moving — it exposes that
+the threshold-25 micro figure leaned on a fold whose selection was
+tie-fragile. The EC theory is empty everywhere for a counted reason:
+the whole corpus contains only 5 observable moving initiations (13 of
+its 18 moving intervals begin before observation starts), so initiation
+search has nothing to clear its null gate with. The termination search
+does repeatedly select `both_active & close` (7/10 folds) —
+semantically coherent (a moving pair stops and starts interacting) —
+but with no initiation clauses inertia never starts, so the EC score
+stays degenerate.
 
 Files: `results/f_xml_scene_cv/caviar-f-xml-meeting-cv10.json`,
-`results/f_xml_scene_cv/caviar-f-xml-moving-cv10.json`,
+`results/f_xml_scene_cv/caviar-f-xml-moving-cv10.json` (canonical
+`close_34`; the superseded threshold-25 measurement is kept as
+`caviar-f-xml-moving-cv10-threshold25.json`),
 `results/f_xml_scene_cv/caviar-g-meeting-census.json` (the wk-fold
 clause application and per-segment census; tool:
 `examples/caviar_woled/xml_meeting_census.py`).
@@ -671,7 +700,9 @@ python examples/caviar_woled/run_caviar_cv.py --mode neural \
 
 # 10-fold scene-family CV on the XML-native corpus (section G, the
 # f_xml_scene_cv artifacts; CPU-only). Full (default) vocabulary, as in
-# the shipped run.
+# the shipped run; the close threshold resolves per fluent to the
+# canonical value (meeting 25, moving 34 -- see section G's own
+# close-threshold paragraph) and is recorded in the result JSON.
 python examples/caviar_woled/run_caviar_cv.py --data-source xml \
   --xml-dir <dir with the 30 CAVIAR ground-truth XML files> \
   --fluent meeting --folds 10 --seed 7 --out RESULT.json
