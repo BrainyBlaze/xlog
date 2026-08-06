@@ -1,15 +1,22 @@
 """GPU-only: accepted epistemic evidence must condition the exact probability path.
 
-Without CUDA these tests skip. A skipped run proves nothing: the acceptance
-protocol counts skip markers separately.
+Without CUDA these tests skip via the repo's `skip_unless_pyxlog_cuda()` gate
+(see conftest.py): it raises instead of skipping when XLOG_REQUIRE_CUDA=1, the
+environment variable `.github/workflows/cuda-ci.yml` sets globally. A skipped
+run proves nothing: the acceptance protocol counts skip markers separately, and
+a bare skip on that runner would misreport a real failure as an environment gap.
 """
 
 import math
 
 import pytest
 
+torch = pytest.importorskip("torch")
 pyxlog = pytest.importorskip("pyxlog")
-pytest.importorskip("torch")
+
+from conftest import skip_unless_pyxlog_cuda
+
+skip_unless_pyxlog_cuda()
 
 KNOWN_FACT = """
 pred fact().
@@ -26,13 +33,6 @@ query(fact()).
 """
 
 
-def _compile_or_skip(source: str):
-    try:
-        return pyxlog.LogicProgram.compile(source)
-    except Exception as exc:  # noqa: BLE001
-        pytest.skip(f"CUDA runtime unavailable: {exc!r}")
-
-
 def _first_prob(result) -> float:
     from torch.utils.dlpack import from_dlpack
 
@@ -40,7 +40,7 @@ def _first_prob(result) -> float:
 
 
 def test_epistemic_evidence_reports_an_accepted_world_view() -> None:
-    program = _compile_or_skip(KNOWN_FACT)
+    program = pyxlog.LogicProgram.compile(KNOWN_FACT)
     evidence = program.epistemic_evidence()
 
     assert evidence.epistemic_mode == "faeel"
@@ -49,7 +49,7 @@ def test_epistemic_evidence_reports_an_accepted_world_view() -> None:
 
 
 def test_know_evidence_conditions_the_exact_query() -> None:
-    program = _compile_or_skip(KNOWN_FACT)
+    program = pyxlog.LogicProgram.compile(KNOWN_FACT)
     result = program.evaluate_conditioned(PROB_SOURCE)
 
     # The unconditioned program gives 0.6; conditioning on `know fact()` must
@@ -103,7 +103,7 @@ def test_only_known_atoms_are_conditioned() -> None:
     at 1.0 the adapter would be conditioning on everything; if all three stayed
     at 0.5 it would be conditioning on nothing. Measured on GPU: 1.0, 1.0, 0.5.
     """
-    program = _compile_or_skip(TUPLE_KEY)
+    program = pyxlog.LogicProgram.compile(TUPLE_KEY)
     result = program.evaluate_conditioned(TUPLE_KEY_PROB)
 
     from torch.utils.dlpack import from_dlpack
@@ -122,13 +122,10 @@ def test_only_known_atoms_are_conditioned() -> None:
 
 def test_unconditioned_baseline_differs() -> None:
     """The same probabilistic program, without evidence, must give 0.6."""
-    # Only compile goes inside the try: it is what requires a live CUDA device.
-    # Wrapping evaluate() here too would turn a real computation failure into
-    # "SKIPPED: CUDA unavailable" on the single paid GPU run.
-    try:
-        plain = pyxlog.Program.compile(PROB_SOURCE)
-    except Exception as exc:  # noqa: BLE001
-        pytest.skip(f"CUDA runtime unavailable: {exc!r}")
+    # skip_unless_pyxlog_cuda() already confirmed a live CUDA device at module
+    # import time, so compile() and evaluate() run unconditionally here: a real
+    # failure in either must raise, not be relabeled as a CUDA skip.
+    plain = pyxlog.Program.compile(PROB_SOURCE)
     baseline = plain.evaluate()
 
     from torch.utils.dlpack import from_dlpack
@@ -138,6 +135,6 @@ def test_unconditioned_baseline_differs() -> None:
 
 
 def test_ordinary_program_is_rejected() -> None:
-    program = _compile_or_skip("pred a(u32).\na(1).\n?- a(X).\n")
+    program = pyxlog.LogicProgram.compile("pred a(u32).\na(1).\n?- a(X).\n")
     with pytest.raises(RuntimeError, match="epistemic"):
         program.epistemic_evidence()
