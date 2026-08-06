@@ -122,11 +122,14 @@ def test_only_known_atoms_are_conditioned() -> None:
 
 def test_unconditioned_baseline_differs() -> None:
     """The same probabilistic program, without evidence, must give 0.6."""
+    # Only compile goes inside the try: it is what requires a live CUDA device.
+    # Wrapping evaluate() here too would turn a real computation failure into
+    # "SKIPPED: CUDA unavailable" on the single paid GPU run.
     try:
         plain = pyxlog.Program.compile(PROB_SOURCE)
-        baseline = plain.evaluate()
     except Exception as exc:  # noqa: BLE001
         pytest.skip(f"CUDA runtime unavailable: {exc!r}")
+    baseline = plain.evaluate()
 
     from torch.utils.dlpack import from_dlpack
 
