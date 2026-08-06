@@ -383,7 +383,14 @@ OLED dump (the combined train+test corpus sections A–E.2 run on) against
 the original 30 CAVIAR ground-truth XML files, independently re-deriving
 transitions from each real video's own frame sequence — never bridging
 across a splice or a train/test duplicate — and matching by exact local
-frame number.
+frame number. The audit is a shipped, re-runnable tool:
+`examples/caviar_woled/audit_dump_vs_xml.py` (dump segments are matched
+to source videos by exact pixel-trajectory agreement with iterative
+peeling, so one dump segment splicing two videos resolves into two
+`(video, offset)` clusters — see the script's own docstring); its full
+event-by-event output, including the segment-to-video map and each
+event's classification, is
+`results/f_audit/caviar-f-dump-vs-xml-audit.json`.
 
 Of the dump's 25 meeting transition events (13 initiations, 12
 terminations):
@@ -393,11 +400,17 @@ terminations):
   unmatched);
 - **3 are duplicates**: the videos `wk2gt` and `fomdgt2` each appear in
   BOTH the dump's train file and its test file, so the same real event is
-  counted twice (2 initiations + 1 termination);
+  counted twice (2 initiations + 1 termination: `wk2gt`'s initiation at
+  local frame 71, `fomdgt2`'s initiation/termination at local frames
+  475/495 — the audit JSON names each one). The audit also finds `wk3gt`
+  and `fomdgt3` shipped in both files, but both carry zero meeting
+  pair-frames, so they duplicate no meeting evidence;
 - **1 is a splice phantom**: a termination created by an invisible,
   exactly-40-millisecond bridge that the dump's segment-joining rule
   draws between two different videos it treats as one contiguous
-  recording — no such event exists in either video's own ground truth.
+  recording (`mwt2gt`'s last co-visible pair frame bridged straight into
+  `mws1gt`'s own timeline, dump timestamp 833520) — no such event exists
+  in either video's own ground truth.
 
 **Consequence for sections E and E.1.** Under the combined-corpus 10-fold
 split those sections cross-validate over, the two `wk2gt` copies land in
@@ -412,6 +425,10 @@ than anything fit to the duplicated video specifically, which limits —
 but does not eliminate — a memorization interpretation of those scores.
 Section G re-runs the same protocol on a corpus with both defects removed
 by construction.
+
+Files: `results/f_audit/caviar-f-dump-vs-xml-audit.json` (tool:
+`examples/caviar_woled/audit_dump_vs_xml.py`; the 855 figure above is
+the artifact's own `duplicated_gold_pairframes` entry for `wk2gt`).
 
 ## G. Clean corpus (XML-native): canonical protocol and results
 
