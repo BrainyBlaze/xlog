@@ -205,6 +205,21 @@ class CompiledLogicProgram:
         """Create a stateful session for incremental relation updates."""
         ...
 
+    def evaluate_conditioned(
+        self, prob_source: str, memory_mb: Optional[int] = None
+    ) -> EpistemicEvalResult:
+        """Run this epistemic program and condition an exact query on what it knows.
+
+        The trace of the returned result reports
+        ``gpu_conditioned_know_evidence_facts`` and
+        ``cpu_only_probability_recomputations``.
+        """
+        ...
+
+    def epistemic_evidence(self) -> EpistemicEvidence:
+        """Run this epistemic program and report what its world view accepted."""
+        ...
+
 class LogicRelationSession:
     """Persistent relation session for incremental Datalog evaluation.
 
@@ -422,6 +437,45 @@ class LogicEvalResult:
     """Aggregated result from one :meth:`CompiledLogicProgram.evaluate` call."""
 
     queries: list[LogicQueryResult]
+
+class EpistemicEvalResult:
+    """Exact probabilities conditioned on an accepted epistemic world view.
+
+    Result of :meth:`CompiledLogicProgram.evaluate_conditioned`. ``prob`` and
+    ``log_prob`` are DLPack capsules over device memory, like
+    :class:`EvalResult`. ``trace`` carries the production-path counters of the
+    epistemic-to-probability adapter: they are the evidence that conditioning
+    actually happened on the GPU.
+    """
+
+    atoms: list[str]
+    """Query atom strings in evaluation order."""
+    prob: Any
+    """DLPack f64 tensor of per-query probabilities."""
+    log_prob: Any
+    """DLPack f64 tensor of per-query log-probabilities."""
+    log_z_e: float
+    """Exact log-evidence log Z_E (natural log) of the conditioned query program."""
+    trace: dict[str, int]
+    """Production-path counters, including ``gpu_conditioned_know_evidence_facts``
+    and ``cpu_only_probability_recomputations``."""
+
+class EpistemicEvidence:
+    """Counters of one accepted epistemic GPU execution.
+
+    Result of :meth:`CompiledLogicProgram.epistemic_evidence`.
+    ``accepted_world_views == 0`` means the program ran but nothing was
+    accepted -- conditioning a probabilistic query on it will not add any
+    evidence.
+    """
+
+    epistemic_mode: str
+    know_operator_count: int
+    possible_operator_count: int
+    accepted_candidates: int
+    rejected_candidates: int
+    accepted_world_views: int
+    final_output_rows: int
 
 # ---------------------------------------------------------------------------
 # Program (probabilistic / neural-symbolic)
