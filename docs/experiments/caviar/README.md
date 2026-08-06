@@ -205,9 +205,12 @@ configurations were executed on the real data):
 
 1. **Per-fold-F1 holdout** (`--holdout-score f1`) removes the base-rate
    plateau: the initiation field spreads (top `both_active & close` at
-   F1 0.238 with a real 0.138 margin) — but every body still fails the
-   accuracy-era fit gate (0.75), which under F1 semantics on 10 positives
-   demands near-perfection.
+   F1 0.238 with a real 0.138 margin over the 0.100 runner-up) — but
+   every body still fails the accuracy-era fit gate (0.75), which under
+   F1 semantics on 10 positives demands near-perfection. Artifact:
+   `results/e9_f1_holdout/caviar-e9-cont_rel_ec_mnc2_f1holdout_fixed075.json`
+   (its `init_scores_last_iteration_top5` records the 0.238 top score
+   and the field under it; both searches abstain under the 0.75 gate).
 2. **Permutation-null fit gate** (`--ec-fit-mode permutation-null`,
    1000 label permutations, permutation seed 7, 95th percentile of the
    POOL-MAXIMUM mean per-fold F1, per target, same fold split): derived
@@ -234,7 +237,8 @@ to ~0.50 over its 455 post-meeting frames). The score is therefore not
 evidence that terminations are learned, and is comparable to the
 published OLED/WOLED numbers only if their evaluation shares this frame
 universe (co-visible pair-frames) and tolerates a persistence-only
-termination model. Files: `results/e9_permutation_null/*.json`.
+termination model. Files: `results/e9_permutation_null/*.json` (item 2);
+`results/e9_f1_holdout/*.json` (item 1).
 
 ## E. 10-fold cross-validation over the whole corpus (protocol-matched)
 
