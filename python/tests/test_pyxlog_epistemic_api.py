@@ -18,6 +18,8 @@ def test_xlog_pyxlog_004_epistemic_conditioned_api() -> None:
     init_stub = (ROOT / "crates/pyxlog/python/pyxlog/__init__.pyi").read_text()
     docs = DOCS_PATH.read_text()
 
+    # `_native.pyi` is the sole authoritative declaration site, so the full list is
+    # checked there and in the live reference.
     for needle in [
         "EpistemicEvalResult",
         "EpistemicEvidence",
@@ -28,5 +30,9 @@ def test_xlog_pyxlog_004_epistemic_conditioned_api() -> None:
         "cpu_only_probability_recomputations",
     ]:
         assert needle in native_stub, f"{needle} missing from _native.pyi"
-        assert needle in init_stub, f"{needle} missing from __init__.pyi"
         assert needle in docs, f"{needle} missing from {DOCS_PATH}"
+
+    # `__init__.pyi` only re-exports names from `_native`; it carries no method
+    # signatures, and asserting method names there would only ever check a comment.
+    for needle in ["EpistemicEvalResult", "EpistemicEvidence"]:
+        assert needle in init_stub, f"{needle} missing from __init__.pyi"
