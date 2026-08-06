@@ -557,6 +557,17 @@ JSON records the vocabulary it actually searched (`transition_vocab` +
 `candidate_vocabulary`), so a replayed artifact can be checked against a
 shipped one directly.
 
+The activity-vocabulary commands were replay-verified after the flag was
+introduced: the section E command reproduces
+`e10_cv/caviar-e10-cv10.json` exactly (micro P/R/F1
+0.6580/0.8271/0.7329, tp/fp/fn 1516/788/317, plus every per-fold gate,
+clause list, and scoring block), and the section D.1 item-2 command
+reproduces both `e9_permutation_null/*.json` files exactly (gates
+init 0.0444 / term 0.125, the single `both_active & close` initiation
+clause, frame F1 0.9424 at tp/fp/fn 442/7/47, and the full null
+summaries), in both tie-tolerance variants. These runs are
+CPU-deterministic, so the check is bit-for-bit, not approximate.
+
 ```
 # windowed folds, direct protocol (section A; CUDA required)
 python examples/caviar_woled/run_caviar_theory.py --mode neural --protocol direct \
