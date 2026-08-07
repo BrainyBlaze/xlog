@@ -289,3 +289,41 @@ def test_pair_transition_walk_matches_the_pipelines_own_derivation():
         {t for (_p1, _p2, t) in seg["meeting"]},
     )
     assert walk_events == pipeline_events == [(80, "init"), (240, "term")]
+
+
+def test_a_dump_that_misses_a_ground_truth_meeting_reports_it_unclaimed():
+    # The "0 unclaimed XML events" headline is only evidence if the miss
+    # detector can FIRE: strip the b-carrying dump segment's meeting
+    # annotations, so b.xml's ground-truth initiation has no dump event
+    # left to claim it -- the detector must name it, not stay empty.
+    video_a = _xml_video("a.xml", 10, 30, meeting_frames=range(2, 6))
+    video_b = _xml_video("b.xml", 100, 130, meeting_frames=range(6, 10))
+    video_c = _xml_video("c.xml", 200, 230, meeting_frames=())
+    videos = [video_a, video_b, video_c]
+
+    train_segments = [
+        _dump_segment_from([(video_a, 1000)], {f * 40 + 1000 for f in range(2, 6)}),
+        _dump_segment_from([(video_b, 2000), (video_c, 2400)], set()),
+    ]
+    test_segments = [
+        _dump_segment_from([(video_a, 5000)], {f * 40 + 5000 for f in range(2, 6)}),
+    ]
+
+    traj, index = audit_dump_vs_xml.build_xml_xy_index(videos)
+    seg_matches = {
+        "train": audit_dump_vs_xml.match_segments(train_segments, videos, traj, index),
+        "test": audit_dump_vs_xml.match_segments(test_segments, videos, traj, index),
+    }
+    dump_events = (
+        audit_dump_vs_xml.dump_meeting_events(train_segments, "train")
+        + audit_dump_vs_xml.dump_meeting_events(test_segments, "test")
+    )
+    xml_events = audit_dump_vs_xml.xml_meeting_events(videos)
+    audit = audit_dump_vs_xml.classify_events(dump_events, xml_events, seg_matches, videos)
+
+    # b's meeting runs to the end of the window, so its ground truth is a
+    # single observed initiation at frame 6 -- and exactly that one event
+    # must surface as unclaimed, named by video, kind and frame.
+    assert audit["xml_events_unclaimed"] == [
+        {"video": "b.xml", "pair": ["id1", "id2"], "frame": 6, "kind": "init"},
+    ]
