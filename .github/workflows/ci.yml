@@ -95,6 +95,37 @@ jobs:
       - name: Validate Python provenance stubs and documentation
         run: python -m pytest -q python/tests/test_relation_provenance_contract.py
 
+  # The CAVIAR example suites on CPU (review follow-up: previously no
+  # workflow ran any of them). CPU torch makes the audit/census/corpus
+  # suites run for real instead of module-skipping; the dataset-gated
+  # tests inside them self-skip (no corpus data ships in the repo), and
+  # the GPU-only suites stay local per the hardware table in
+  # docs/experiments/caviar/README.md.
+  caviar-examples:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6
+        with:
+          python-version: "3.11"
+
+      - name: Install pytest and CPU torch
+        run: |
+          python -m pip install --upgrade pip pytest
+          python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
+
+      - name: Run CAVIAR example suites
+        env:
+          PYTHONPATH: crates/pyxlog/python
+        run: >-
+          python -m pytest -q
+          python/tests/test_theory_loop.py
+          python/tests/test_caviar_xml_corpus.py
+          python/tests/test_audit_dump_vs_xml.py
+          python/tests/test_xml_meeting_census.py
+          python/tests/test_audit_tool_torch_free.py
+
   fmt:
     runs-on: ubuntu-latest
     steps:
