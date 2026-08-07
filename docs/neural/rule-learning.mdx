@@ -36,10 +36,8 @@ hand.
 
 <Note>
 Neural predicates, differentiable ILP, and exact induction are distributed
-through the `pyxlog` PyPI wheel. The additions described under “New in the 0.10.0
-wheel” have been available since 0.10.0. This is a Python-first API; the crates
-published on crates.io do not expose it, so install `pyxlog` to use anything on
-this page.
+through the `pyxlog` PyPI wheel. This is a Python-first API; the crates published
+on crates.io do not expose it, so install `pyxlog` to use anything on this page.
 </Note>
 
 ## Neural predicates
@@ -90,6 +88,34 @@ automatic-differentiation (autograd) machinery so gradients can flow through it.
 - `register_embedding(name, module_or_tensor, trainable=True)` binds an `nn/3`
   embedding — either a module or a plain tensor of vectors. Set `trainable=False` to
   freeze it.
+
+### Declaring the network's shape
+
+`register_network` takes three more keyword-only arguments that record what shape the
+network is: `arity=`, `arg_sorts=` and `artifact_hash=`.
+
+xlog does not take `arity=` on trust. It checks the number you pass against every
+`nn/4` declaration bound to that name in your program, and a mismatch is a
+`ValueError` naming the predicate that disagreed. `arg_sorts=` needs one entry per
+declared argument, and passing it without `arity=` is refused — the sorts name the
+arguments, so there has to be an arity for them to name.
+
+`program.network_metadata(name)` reads the registration back together with the
+declarations it was checked against. For the coin classifier in the
+[runnable example](#a-runnable-nn-4-example) below:
+
+```python
+program.register_network("coin_net", net, opt, arity=2)
+program.network_metadata("coin_net")
+# {'arity': 2, 'arg_sorts': None, 'artifact_hash': None,
+#  'declared': [{'predicate': 'coin', 'predicate_arity': 2,
+#                'input_arity': 1, 'labels': ['heads', 'tails']}]}
+```
+
+That is how you compare your own idea of a network's shape against the program's
+actual declarations, instead of trusting a naming convention. It raises `ValueError`
+if the name is not declared in the program, is declared as an embedding, or has not
+been registered yet.
 
 Once a network is registered, evaluating a query that touches the predicate does
 three things. It runs the network. It converts the output into probabilities on the
@@ -180,13 +206,7 @@ subsystem matures. A gate like `5/5` means "five consecutive runs must all succe
 |---|---|---|
 | Alpha | `5/5` | Five consecutive `train_only` runs must all converge. |
 | Beta | `20/20` | 5 seeds across each of 4 stages (reach, grandparent, colleague, plus-2) on the sparse backend — all 20 converge. |
-| GA | `50/50` | 50 seeds pass with a Clopper–Pearson lower bound on the success rate. |
-
-<Note>
-The GA gate is `50/50` evaluated with a **Clopper–Pearson** lower confidence bound —
-a conservative statistical bound on the true success rate, not a loose "50-seed run."
-There is no `200/200` gate anywhere in the suite.
-</Note>
+| GA | `50/50` | 50 seeds run against each of the 4 stages — 200 runs — scored with a **Clopper–Pearson** lower confidence bound on the success rate, a conservative statistical bound rather than a raw pass count. |
 
 ## A runnable `nn/4` example
 
@@ -204,6 +224,7 @@ lose(X, Y) :- coin(Y, tails).
 ```
 
 ```python
+import math
 import torch
 import torch.nn as nn
 import pyxlog
@@ -241,33 +262,40 @@ queries = [f"coin({i}, {classes[y]})" for i, y in enumerate(labels)]
 for epoch in range(10):
     program.train_epoch(queries, batch_size=8)
 
-# Inference: query a derived symbolic head backed by the trained network.
-print(program.query("win(0, 2)"))   # both even -> both heads -> fires high
-print(program.query("lose(1, 3)"))  # odd -> tails -> lose fires high
+# Inference: read a derived symbolic head's probability.
+# nll_loss(q) is -log P(q), so exp(-nll_loss(q)) is P(q). It only evaluates —
+# no gradient, no optimizer step.
+def prob(query):
+    return math.exp(-program.nll_loss(query))
+
+print(prob("win(0, 2)"))   # both even -> both heads -> win fires high
+print(prob("lose(1, 3)"))  # odd -> tails -> lose fires high
 ```
 
-**How you know it worked.** After training, `program.query("win(0, 2)")` returns a
-high probability (both inputs are even, so both classify as heads, so `win` fires),
-and `program.query("lose(1, 3)")` also returns a high probability (odd inputs
-classify as tails, so `lose` fires). If both queries stay near their untrained
-values, the network did not learn the coin signal.
+**How you know it worked.** After training, `prob("win(0, 2)")` is close to `1.0`
+— both inputs are even, so both classify as heads, so `win` fires. `prob("lose(1, 3)")`
+is close to `1.0` too, because odd inputs classify as tails. If both stay near their
+untrained values, the network did not learn the coin signal.
+
+`nll_loss` is the same quantity `train_epoch` minimizes, so you can also read it
+directly: a loss near `0` means the head is nearly certain, and a large loss means it
+is nearly impossible. Use `evaluate_loss(queries)` for the mean over a whole list.
 
 The optimizer here is Adam. On this multiplicative loss surface plain SGD tends to
 plateau, so Adam is the practical default.
 
-## New in the 0.10.0 wheel
+## Existential joins, mixtures, and graded masses
 
-These additions have been available in `pyxlog` since 0.10.0.
-
-- **Existential-join trainable bodies.** A trainable body may join a
+- **Existential-join trainable bodies** (v0.10.0). A trainable body may join a
   neural predicate to an ordinary relation on a variable that is not in the head. The
   neural predicate is grounded over the real join domain inside the circuit, then
   combined at the head with a logical OR. Per-event features arrive through a
   `domain_inputs=` channel and `register_domain_tensor_source`. The join domain must
-  be ground facts, head-binding ids must be `0..N-1`, and only a single join network
-  is supported. The planted graph is bounded (roughly six to seven events) by a fixed
-  circuit buffer.
-- **Joint multi-rule mixtures.** Several trainable clauses that share a head can be
+  be ground facts, and only a single join network is supported. Head-binding ids must
+  be `0..N-1`, row-aligned with your targets; the join domain's own ids need not be
+  dense — see `domain_ids` below. The planted graph is bounded (roughly six to seven
+  events) by a fixed circuit buffer.
+- **Joint multi-rule mixtures** (v0.10.0). Several trainable clauses that share a head can be
   learned jointly as a noisy-OR mixture — a standard way to combine independent
   pieces of evidence into one probability. `evaluate_joint_mixture` reads the
   held-out result. A candidate may be guard-only, or it may carry a neural conjunct
@@ -275,15 +303,27 @@ These additions have been available in `pyxlog` since 0.10.0.
   hard-thresholded (using a straight-through estimator, which passes gradients as if
   the threshold were smooth). The thresholded output acts as an on/off gate on the
   candidate's eligibility, so it stays a derivation gate rather than soft truth mass.
-- **Graded per-binding candidate masses.** `train_neurosymbolic_program(...,
+- **Graded per-binding candidate masses** (v0.10.0). `train_neurosymbolic_program(...,
   candidate_masses={rule_id: tensor})` supplies per-binding confidences in `[0, 1]`.
   Each confidence multiplies into a candidate's eligibility, so the head probability
   becomes the noisy-OR over graded evidence masses. Map head bindings to world steps
   and masses to a fact's per-step confidence, and the guards train against an
   evolving trajectory. Omit the argument and the plain binary behavior is unchanged.
-- **GPU-resident zero-host training step.** `forward_backward_grouped(queries,
+- **GPU-resident zero-host training step** (v0.10.0). `forward_backward_grouped(queries,
   expected)` performs one host synchronization per step instead of a per-query
   round-trip, keeping the training loop resident on the device.
+- **Row-addressed join domains** (v0.11.0). `train_neurosymbolic_program(...,
+  domain_ids={net: [...]})` states which domain constant occupies each row of
+  `domain_inputs[net]`. The ids may be given in any order but must be distinct, and
+  the same list is handed to the engine and to the torch path, so both resolve a
+  constant to its row the same way. Omit it and xlog assumes the dense identity
+  `0..D-1`, which it accepts only when the join relation's domain is exactly that
+  range.
+- **Backbone coupling** (v0.12.0). Set `train_phi_gradient=True` on a
+  `NeuralBodySpec` and the entity features `phi(x)` are no longer detached on the
+  training upload, so gradient reaches the feature producer too. It is off by
+  default, and off is byte-identical to the previous path — only the autograd
+  linkage changes, never the uploaded values.
 
 <Note>
 The higher-level neuro-symbolic driver

@@ -37,8 +37,12 @@ query(sprinkler()).
 Run it with the exact engine:
 
 ```bash
-xlog run wet-grass.xlog
+xlog prob wet-grass.xlog
 ```
+
+Probabilistic programs go through `xlog prob`. `xlog run` is the deterministic
+runner — it will not produce a probability. The exact engine is the default, so
+`--prob-engine exact_ddnnf` is optional.
 
 **What you should see.** Because the grass is wet, both causes come back more
 likely than their starting probabilities (`0.7` and `0.2`), and `rain()` — the
@@ -88,6 +92,22 @@ query(rain()).
 Rules are written exactly as in a deterministic program. The probability lives on
 the facts, and the engine propagates it through the derivations.
 
+Rules can also come from another module, imported with `use`. Pass `--module-path`
+so `xlog prob` can find those modules:
+
+```bash
+xlog prob wet-grass.xlog --module-path ./lib
+```
+
+<Warning>
+Before 0.12.0, `--module-path` only checked that the modules loaded — the imported
+rules were never merged into the program that was actually evaluated, so a
+probabilistic program that imported its rules reported the wrong probabilities. If
+you are pinned to an older wheel or binary, keep the rules a probabilistic program
+depends on in the entry file. See the
+[CLI reference](/reference/cli) for the full note.
+</Warning>
+
 <Note>
 Select the engine with `#pragma prob_engine = exact_ddnnf` or
 `#pragma prob_engine = mc`, declared
@@ -133,6 +153,24 @@ The whole path runs on the GPU:
     conditional probability `log P(Q | E)`.
   </Step>
 </Steps>
+
+### Reading the exact result from Python
+
+From Python, `result = program.evaluate()` carries the same two quantities the
+circuit produced:
+
+- `result.log_z_e` is the exact log-evidence — the `log P(E)` above, as a natural
+  log. It is `None` for Monte Carlo results.
+- `program.prob_var_map()` says what each position in `result.grad_true` /
+  `result.grad_false` stands for: `{"kind": "fact", ...}` for a probabilistic fact,
+  `{"kind": "choice", ...}` for one branch of an annotated disjunction, or
+  `{"kind": "other"}` for a variable that is not a source of randomness. That is how
+  you attribute a gradient back to the fact that produced it.
+
+`prob_var_map()` is exact-engine only. It raises `ValueError` for Monte Carlo
+programs, and also for exact programs compiled through the GPU count-lift fast path,
+which never builds the encoding the map describes. See the
+[Python reference](/reference/python#probabilistic-results) for the full field list.
 
 Gradients flow back through the same circuit, so a probabilistic program stays
 differentiable end to end and can sit inside a training loop. This works through

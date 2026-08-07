@@ -1,6 +1,6 @@
 ---
 title: "Epistemic reasoning"
-description: "Reason about what is known and what is possible across the stable models of a program — modal operators, world-view semantics, FAEEL and Gelfond-1991 modes, and GPU-backed execution paths."
+description: "Reason about what is known and what is possible across the stable models of a program — modal operators, world-view semantics, the faeel and g91 modes, and GPU-backed execution paths."
 ---
 
 Epistemic reasoning lets your program ask not just *what is true*, but *what is
@@ -89,6 +89,33 @@ logical equivalences for nesting (parity and duality).
 For example, `know possible p` reduces to `possible p`, and `know possible not p`
 reduces to `not know p`.
 
+### Ruling out worlds
+
+A headless rule that starts with `:-` is a **constraint**. It throws away any world
+view in which its body holds. Add these lines to `safe.xlog`:
+
+```xlog
+pred quarantined().
+
+quarantined().
+
+:- know quarantined().
+```
+
+Now the query returns no rows at all. `quarantined()` is a plain fact, so
+`know quarantined()` holds in the one world view the program admits, and the
+constraint discards it. Pruning every candidate is a semantic result — an empty
+answer — not a runtime failure.
+
+**Limits.** A constraint body must be `know`/`possible` literals only; mixing in an
+ordinary or comparison literal, as in `:- p(X), know q(X).`, is rejected. Each
+variable may appear in exactly one modal literal, and only once inside it — so
+`:- know p(X).` is fine, but `:- know p(X), possible q(X).` and `:- know p(X, X).`
+are not. Key positions take ground integers or symbols, or a single-occurrence
+variable or `_`; lists, compound terms, floats and strings are refused. Finally, the
+program needs at least one `know`/`possible` rule for the constraint to be checked
+against — a constraint on its own has no world view to prune.
+
 ## World-view semantics
 
 An epistemic program is evaluated against its world view rather than a single
@@ -143,11 +170,12 @@ form; a bare modal lowering that skips it is rejected.
 For acyclic modal programs, XLOG then runs **Generate-Propagate-Test** on the GPU:
 it enumerates candidate world views, prunes the inconsistent ones, and tests the
 rest. Ordinary or modal dependency cycles are classified before that single-pass
-boundary. Positive FAEEL cycles use an ordinary founded reduction and run to their
-least fixpoint. Supported exact-tuple G91 possibility cycles run a GPU upper-bound
-pass followed by descending frozen-snapshot refinements to the greatest compatible
-tuple fixpoint. Supported cycles through negation use the GPU-backed well-founded
-plan.
+boundary. Positive modal cycles under `faeel` use an ordinary founded reduction and
+run to their least fixpoint. Supported exact-tuple `possible` cycles under `g91` run
+a GPU upper-bound pass followed by descending frozen-snapshot refinements to the
+greatest compatible tuple fixpoint. Cycles that also involve negation run on the
+**well-founded** plan — an evaluation that assigns each fact true, false, or
+undefined instead of forcing a choice — computed on the GPU.
 
 <Frame caption="For acyclic modal programs, Generate-Propagate-Test runs on the GPU: candidate world views are enumerated, pruned to the consistent ones, and tested under the selected semantics.">
   <img className="block dark:hidden" src="/assets/diagrams/epistemic-gpt-light.svg" alt="Epistemic Generate-Propagate-Test for acyclic modal programs: on the GPU, Generate enumerates candidate world views, Propagate prunes inconsistent ones, and Test applies brave and cautious checks under the selected semantics." />
@@ -177,41 +205,66 @@ unions those into a single piece and solves them jointly, as one modal
 conjunction over the candidate world view. It then restores the original rule
 order once the pieces are recombined.
 
+One shape it cannot solve jointly: two epistemic heads in the same piece where one
+head's `know`/`possible` literal ranges over the *other* epistemic head. The truth
+of that inner modal literal depends on a world view that is itself still being
+decided, so XLOG rejects the program rather than guess. Break the two heads apart —
+have the inner one range over a plain relation instead of an epistemic-derived one.
+
 ## Limits
 
 For a program that reaches the Generate-Propagate-Test path, the number of
 candidate world views is `2^(number of epistemic literals)` — one candidate per
 truth assignment to the program's epistemic literals. Every extra epistemic
-literal doubles this search. Positive-cycle and WFS reductions do not enumerate
-this single-pass candidate lattice.
+literal doubles this search. This doubling applies only to the single-pass path.
+Programs whose modal predicates depend on each other in a cycle take a different
+route — a repeated-derivation fixpoint — and never enumerate candidate world views
+at all.
 
-A per-reduction cap, `MAX_MODELS_PER_REDUCTION = 1024`, bounds how many models a
-Generate-Propagate-Test reduction may produce.
+A single Generate-Propagate-Test reduction produces at most `1024` models. Nothing
+you can pass to `xlog run` changes that number.
 
-Positive modal dependency cycles are not blanket rejection cases: FAEEL evaluates
-them through a founded least fixpoint, and supported exact-tuple Gelfond-1991
-possibility cycles use the greatest compatibility fixpoint. The number of
-compatibility refinements is bounded by `#pragma max_recursion_depth`. An
-unrelated negative cycle can execute through the GPU-backed well-founded evaluator
-inside those passes, but recursive negation or aggregation in the compatibility
-component itself is rejected because the descending operator would not be
-monotone. XLOG returns a typed diagnostic when no supported route can preserve
-the program's semantics, such as a recursive epistemic program that also contains
-a modal integrity constraint or a cyclic WFS shape outside the supported
-negated-modal plan. The complete list is in the
-[language reference](/reference/language#epistemic-support-and-boundaries).
+Positive modal dependency cycles are not blanket rejection cases: `faeel` evaluates
+them through a founded least fixpoint, and supported exact-tuple `possible` cycles
+under `g91` use the greatest compatibility fixpoint. The number of compatibility
+refinements is bounded by `#pragma max_recursion_depth`. An unrelated negative cycle
+can execute through the well-founded plan inside those passes. Recursive negation or
+aggregation *inside* the compatibility cycle itself is rejected: the refinement only
+ever removes tuples, and negation and aggregation can make a predicate grow when
+their inputs shrink.
 
-<Note>
-The Generate-Propagate-Test bound is not a fixed candidate ceiling. There is no
-`k <= 24` limit and no `50000`-candidate limit. Its candidate space is
-`2^(number of epistemic literals)`, with at most
-`MAX_MODELS_PER_REDUCTION = 1024` models per reduction.
-</Note>
+Some shapes have no supported route at all. XLOG rejects those at compile time with
+an `UnsupportedEpistemicConstruct` error naming the construct — it never silently
+mis-evaluates them. The ones you are most likely to write:
+
+| You wrote | Why it is rejected |
+|---|---|
+| A second clause for a head whose other clause uses `know`/`possible` | XLOG materializes the clause union in one pass and cannot tell which clause a row came from, so it cannot apply one clause's modal filter to the union. |
+| Recursion plus an epistemic constraint such as `:- know p(X).` | Recursive programs run through the ordinary engine, which never runs the constraint kernel — so XLOG refuses rather than drop the constraint. |
+| An epistemic constraint mixing ordinary and modal literals, e.g. `:- p(X), know q(X).` | Constraints support only pure `know`/`possible` conjunctions. |
+| An epistemic constraint sharing a variable across two modal literals, e.g. `:- know p(X), possible q(X).` | Only single-occurrence variable keys, such as `:- know p(X).`, are supported. |
+| Two epistemic heads where one's modal literal ranges over the other | One joint world-view enumeration would mis-evaluate the nesting. |
+| The same predicate name defined as an epistemic-derived relation at two arities | A derived epistemic relation needs exactly one signature per name. |
+
+The first one catches most people. This page's own rule is fine on its own:
+
+```xlog
+safe(P) :- person(P), know vaccinated(P).
+```
+
+but adding a second clause for the same head — `safe(P) :- staff(P).` — is rejected
+at compile time, unless the modal filters are provably redundant across the clauses.
+
+For the complete enumeration of these rejections, with the exact `construct` string
+each one reports, see
+[Epistemic rejections](/reference/errors#epistemic-rejections). The same boundaries
+are stated as language rules under
+[Epistemic support and boundaries](/reference/language#epistemic-support-and-boundaries).
 
 ## Reference
 
 <Card title="How XLOG works" icon="diagram-project" href="/core-concepts/how-xlog-works">
-  Epistemic reasoning reuses the shared parser, normalization, type and dependency
-  analysis, and CUDA runtime; EIR then selects its route-specific execution plan — see
-  how a program travels from source to GPU.
+  Epistemic reasoning reuses the same parser, type checking and CUDA runtime as any
+  other XLOG program; only the execution plan is chosen differently — see how a
+  program travels from source to GPU.
 </Card>
