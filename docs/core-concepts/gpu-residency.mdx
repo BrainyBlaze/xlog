@@ -33,6 +33,28 @@ PyTorch or JAX computation consumes them without a copy. You can confirm residen
 on a run: the tensor XLOG hands back reports a CUDA device (`tensor.device`), which means
 the data was never copied to the host.
 
+### Enforce it, don't just observe it
+
+Checking `tensor.device` tells you where one result ended up. If you want the runtime to
+*enforce* the contract instead, a Python session can turn on a strict gate:
+
+```python
+session.set_strict_deterministic_d2h(True)
+```
+
+While the gate is on, any attempt to read relation data back to the host fails instead of
+copying — including the small, ordinarily-permitted deterministic reads, such as the
+one-byte-per-fact membership mask used to validate evidence. Bounded metadata reads stay
+exempt: the scalar counts that drive control flow never trip the gate, because the
+guarantee is about semantic data.
+
+Two calls let you inspect the gate: `session.strict_deterministic_d2h_enabled()` reports
+whether it is on, and `session.deterministic_d2h_violation_count()` reports how many reads
+it has rejected — `session.reset_deterministic_d2h_violations()` clears that count. A
+rejection is atomic: the operation leaves the relation and its evidence unchanged. See the
+[Python reference](/reference/python) for the full API and
+[diagnostics](/guides/diagnostics) for a worked zero-transfer audit.
+
 ## Strict residency, and what happens when it fails
 
 By default XLOG runs in **strict GPU-resident mode**: the entire plan must execute

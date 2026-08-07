@@ -105,8 +105,8 @@ magic sets, probabilistic aggregates, approximate inference, epistemic reasoning
 | **Arithmetic** | `is` expressions, `+ - * / %`, builtins (`abs`, `min`, `max`, `pow`, `cast`), `if/then/else` |
 | **Lists & meta-predicates** | Finite `list<T>` and `term` values, safe `findall` / `maplist` / term-inspection predicates, deterministic negation-as-failure |
 | **Aggregation** | Head-positional `count`, `sum`, `min`, `max`, `logsumexp`, aggregate lifting |
-| **Probabilistic inference** | Exact inference via knowledge compilation (decision-DNNF → GPU arithmetic circuits), Monte Carlo sampling, well-founded-semantics negation, approximate-inference pragmas |
-| **Epistemic reasoning** | Epistemic operators with finite nested modal chains, Generate-Propagate-Test for acyclic programs, FAEEL founded positive-cycle reduction, a GPU-backed greatest compatible tuple fixpoint for supported Gelfond-1991 `possible` cycles, GPU-backed WFS for supported negative cycles, epistemic splitting, probabilistic epistemic evidence |
+| **Probabilistic inference** | Exact inference via knowledge compilation (compiling the program to decision-DNNF — a circuit form that turns exact probability into one arithmetic pass — then evaluating it as a GPU arithmetic circuit), Monte Carlo sampling, well-founded-semantics negation, approximate-inference pragmas |
+| **Epistemic reasoning** | Epistemic operators with finite nested modal chains; two selectable semantics — `faeel` (the default: a fact counts only if the program derives it) and `g91` (the classical 1991 reading, which also accepts a self-supporting cycle); Generate-Propagate-Test for acyclic programs; a GPU-backed descending tuple-compatibility fixpoint for supported `g91` `possible` cycles; GPU-backed well-founded evaluation for supported cycles through negation; epistemic splitting; probabilistic epistemic evidence |
 | **SAT / MaxSAT** | GPU CDCL verifier with on-device model and proof validation, MaxSAT, portfolio solving, continuous local search |
 | **Neural-symbolic training** | Neural predicates (`nn/k`), PyTorch autograd integration, circuit caching across iterations, term embeddings, joint neural + symbolic rule-weight training |
 | **Rule induction** | Differentiable ILP with sparse GPU masks, deterministic mode, promotion pipeline, holdout validation, and bounded exact induction (`xlog-induce`) with top-K CUDA scoring |
@@ -129,9 +129,10 @@ step. The execution paths are:
   `xlog-gpu`);
 - probabilistic PIR inference via knowledge compilation to device-resident
   arithmetic circuits (`xlog-prob`);
-- epistemic EIR dispatch to Generate-Propagate-Test, a FAEEL founded least
-  fixpoint, a descending Gelfond-1991 tuple-compatibility fixpoint, or GPU-backed
-  WFS (`xlog-logic` and `xlog-gpu`);
+- epistemic EIR dispatch — chosen from the program's dependency shape — to
+  Generate-Propagate-Test, a founded least fixpoint (`faeel`), a descending
+  tuple-compatibility fixpoint (`g91`), or GPU-backed well-founded evaluation
+  (`xlog-logic` and `xlog-gpu`);
 - differentiable training via PyTorch autograd integration (`xlog-neural` and
   `pyxlog`), composing neural predicates with the relevant reasoning IR.
 
