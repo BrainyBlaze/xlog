@@ -34,15 +34,17 @@ the designed behaviour and it is the point, not a bug.
 
 ## The runners
 
-Each writes a complete `RESULT.json`; `--out` is required on all four. Every result quoted
-anywhere came from one of these.
+Each writes a complete result JSON; `--out` is required on every one of them. Every result
+quoted anywhere came from one of these.
 
 | script | what it does | device |
 |---|---|---|
-| `run_caviar_theory.py` | The main entrypoint. Multi-clause **theory** induction by sequential covering, in either vocabulary (`--mode relational` uses precomputed geometry, `--mode neural` trains `close_nn` instead) and under either protocol (`--protocol direct` for a per-timestep target, `--protocol ec` for `initiatedAt`/`terminatedAt` + inertia). Also `--data continuous` for the OLED narrative split, and `--max-body-literals 3` for the CPU-only 3-literal search. | CUDA, except `--max-body-literals 3` |
-| `run_caviar_cv.py` | 10-fold cross-validation over a whole corpus, with every gate re-derived inside each fold. `--data-source dump` folds over video segments; `--data-source xml` rebuilds the corpus from the 30 ground-truth XML files and folds over **scene families**, so no two recordings of one staged scene are split across train and test. `--fluent {meeting,moving}`. | CPU in `--mode relational`; CUDA in `--mode neural` |
+| `run_caviar_theory.py` | The main entrypoint. Multi-clause **theory** induction by sequential covering, in either vocabulary (`--mode relational` uses precomputed geometry, `--mode neural` trains `close_nn` instead) and under either protocol (`--protocol direct` for a per-timestep target, `--protocol ec` for `initiatedAt`/`terminatedAt` + inertia). Also `--data continuous` for the OLED narrative split, `--max-body-literals 3` for the CPU-only 3-literal search, and `--transition-vocab` to pick the EC candidate pool's transition relations. | CUDA, except `--max-body-literals 3` |
+| `run_caviar_cv.py` | 10-fold cross-validation over a whole corpus, with every gate re-derived inside each fold. `--data-source dump` folds over video segments; `--data-source xml` rebuilds the corpus from the 30 ground-truth XML files and folds over **scene families**, so no two recordings of one staged scene are split across train and test. `--fluent {meeting,moving}`, `--transition-vocab {activity,full}`, `--close-threshold` (XML source only). | CPU in `--mode relational`; CUDA in `--mode neural` |
 | `run_caviar_star.py` | The original probe: one **single** star clause, all-relational vocabulary. Kept as the baseline the theory loop improves on. | CUDA |
 | `run_caviar_neural.py` | One single star clause, but with `close_nn` trained in place of the geometry. The narrowest demonstration that the detector learns without labels. | CUDA |
+| `audit_dump_vs_xml.py` | The corpus-integrity audit: cross-matches every meeting transition event in the OLED dump against the 30 ground-truth XML videos by exact pixel-trajectory agreement and classifies each as real, train/test duplicate, or splice phantom. `--train-json --test-json --xml-dir --out`. | CPU |
+| `xml_meeting_census.py` | The meeting census: applies the fixed `both_inactive & close` clause to the held-out wk-scene fold and counts, per video, how many gold meeting frames that clause and plain `close` actually cover — the evidence that the clean-corpus zero is a two-regime data property. `--xml-dir --folds --seed --out`. | CPU |
 | `verify_conversion.py` | Manual eyeball check of the pkl→relations conversion. **No argparse** — positional only: `python verify_conversion.py <pkl> [fold] [split] [seed] [n]`. Prints nothing to disk. | CPU |
 
 Several flags are **scoped and enforced at argument-parse time** — a mis-scoped
@@ -50,9 +52,29 @@ combination exits with a usage error before any work starts. `--max-body-literal
 requires `--mode relational --protocol ec`; `--holdout-score` and `--ec-fit-mode` require
 `--max-body-literals 3`; `--ec-fit-mode permutation-null` additionally requires
 `--holdout-score f1`; `--min-fit` requires `--ec-fit-mode fixed`; `--data continuous`
-requires `--test-json`. On `run_caviar_cv.py`, `--train-json`/`--test-json` belong to
+requires `--test-json`; and `--transition-vocab activity` requires
+`--mode relational --protocol ec --data continuous` (the direct protocol's vocabulary has no
+transition relations, `--data pkl` has none to select from, and neural EC mode's initiation
+pool is activity-based already, so anywhere else the flag would be a silent no-op recorded
+as if it mattered). On `run_caviar_cv.py`, `--train-json`/`--test-json` belong to
 `--data-source dump` and `--xml-dir` to `--data-source xml`; crossing them is refused
-rather than silently ignored, and `--fluent moving` needs the XML source.
+rather than silently ignored, `--fluent moving` needs the XML source, and
+`--close-threshold` is XML-only. `--transition-vocab` is unscoped there — that runner only
+ever runs the EC protocol.
+
+**Transition vocabulary.** `--transition-vocab full` (the default on both runners) admits
+all six of the converter's transition relations to the EC candidate pool. `activity` admits
+only the four ACTIVITY-derived ones (`any_became_active`, `any_became_inactive`,
+`any_became_walking`, `any_stopped_walking`) and excludes the distance-derived pair
+(`became_far`, `distance_increasing`). Use `activity` to replay the shipped sections D/D.1/E
+artifacts, which were generated before that pair existed — under the default, section E's
+command produces section E.1's 0.778 configuration rather than section E's 0.733. The
+vocabulary a run actually searched is recorded in its result JSON.
+
+**Close threshold.** `run_caviar_cv.py --data-source xml` resolves the `close` predicate's
+pixel threshold through the canonical per-fluent table the published CAVIAR event
+definitions use — **meeting 25, moving 34**. `--close-threshold` overrides it; the value
+used is recorded in the result JSON.
 
 ## The supporting modules
 

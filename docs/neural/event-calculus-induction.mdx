@@ -193,16 +193,25 @@ at this exact event count. The 95th percentile of it becomes the floor. A rule h
 what chance alone would produce, 19 times out of 20, before it is reported.
 
 The gate is re-derived **inside every fold**, from that fold's own training data, so it is
-not a constant. Per-fold meeting-initiation gates:
+not a constant. Two gate ranges are only comparable when the two runs searched the *same*
+candidate pool, because the pool is what the permutation draws its maximum from. Per-fold
+meeting-initiation gates:
 
-| corpus, artifact | gate range across the 10 folds |
-|---|---|
-| distributed corpus, `results/e10_cv/caviar-e10-cv10.json` | 0.0357 – 0.0455 |
-| deduplicated corpus, `results/f_xml_scene_cv/caviar-f-xml-meeting-cv10.json` | 0.0500 – 0.0714 |
+| corpus, artifact | candidate pool | gate range across the 10 folds |
+|---|---|---|
+| distributed, `results/e11_cv10_termination.json` | full transition vocabulary | 0.0500 – 0.0625 |
+| deduplicated, `results/f_xml_scene_cv/caviar-f-xml-meeting-cv10.json` | full transition vocabulary | 0.0500 – 0.0714 |
+| distributed, `results/e10_cv/caviar-e10-cv10.json` | activity-only, a smaller pool | 0.0357 – 0.0455 |
 
-Every fold of the deduplicated corpus carries a higher bar than every fold of the
-distributed one. Fewer events honestly earn a stricter gate — which is exactly why the
-next section reports an abstention rather than a score.
+Read the first two rows against each other. The minima are **identical** and the maximum
+rises by 14%: deduplicating the corpus barely moved the statistical bar. The third row sits
+lower because its pool is smaller, not because its corpus is dirtier — comparing it against
+row two would charge a vocabulary change to the corpus.
+
+That matters for how you read the next section. The abstention on the clean protocol is
+**not** the gate rising out of reach. It is the other term collapsing: under leakage-free
+folds the candidates' own holdout scores fall to near zero, so they fail a bar that has
+hardly moved.
 
 ### Abstention
 
@@ -250,7 +259,7 @@ python examples/caviar_woled/run_caviar_theory.py \
   --data continuous --pkl caviar-train.json --test-json caviar-test.json \
   --k 4 --seed 7 --steps 400 --min-new-covered 2 \
   --max-body-literals 3 --holdout-score f1 --ec-fit-mode permutation-null \
-  --out RESULT.json
+  --transition-vocab activity --out RESULT.json
 ```
 
 Several of those flags are **scoped**, and the script refuses a mis-scoped combination at
@@ -262,6 +271,7 @@ argument-parse time, before doing any work:
 | `--holdout-score f1` | `--max-body-literals 3` |
 | `--ec-fit-mode permutation-null` | `--max-body-literals 3` **and** `--holdout-score f1` |
 | `--min-fit` | `--max-body-literals 3` **and** `--ec-fit-mode fixed` |
+| `--transition-vocab activity` | `--mode relational` **and** `--protocol ec` **and** `--data continuous` |
 | `--data continuous` | requires `--test-json` |
 
 `--min-fit` names a constant threshold, which is why it is incompatible with the mode that
@@ -269,9 +279,36 @@ argument-parse time, before doing any work:
 set-intersection search with no engine and no GPU, which is why it is the one path that
 skips the CUDA check.
 
+#### Choosing the transition vocabulary
+
+Under `--protocol ec --data continuous`, the converter contributes six **transition**
+relations — things that are true at the moment something changes — to the candidate pool on
+top of the ordinary state relations. `--transition-vocab` selects how many of them get in:
+
+- `full` (the default) admits all six.
+- `activity` admits only the four derived from the ACTIVITY annotation
+  (`any_became_active`, `any_became_inactive`, `any_became_walking`, `any_stopped_walking`)
+  and excludes the two derived from pair distance, `became_far` and `distance_increasing`.
+
+Choose `activity` for one concrete reason: **it is the pool the shipped results on this
+page were produced under.** The distance-derived pair was added later, and the evidence
+package's sections D and D.1 — including the permutation-null gates and the tied top-five
+candidates quoted above — were generated before it existed. Under the default `full`, the
+same command searches the enlarged pool and gives you a different, later configuration.
+`activity` also happens to be the pool that withholds precomputed geometry from the search,
+which is what `--mode neural` does by construction.
+
+Watch the scope. The guard fires only on `--transition-vocab activity`, and it rejects it
+with a distinct reason in each case: under `--protocol direct` that vocabulary never
+contains transition relations at all; under `--data pkl` no transition relations exist to
+select from; and under `--mode neural` the EC initiation pool is already activity-based, so
+the flag would be an inert no-op recorded in the result JSON as if it had mattered. Passing
+`--transition-vocab full` is accepted everywhere, because it is the default and changes
+nothing.
+
 For cross-validation over the whole corpus, use the other runner. Its flags are a different
-and much smaller set — `--data-source --fluent --folds --mode --out --seed --test-json
---train-json --xml-dir`, with `--out` required:
+and much smaller set — `--close-threshold --data-source --fluent --folds --mode --out
+--seed --test-json --train-json --transition-vocab --xml-dir`, with `--out` required:
 
 ```bash
 # distributed ("dump") corpus, 10-fold CV over video segments — CPU-only
@@ -290,6 +327,14 @@ python examples/caviar_woled/run_caviar_cv.py --data-source xml \
 moving` requires `--data-source xml`, because the dump corpus is meeting-only. `--xml-dir`
 falls back to the [`CAVIAR_XML_DIR`](/reference/environment-variables) environment variable
 when omitted.
+
+Two more flags on this runner. `--transition-vocab` means the same thing it does above, but
+here it is **not** scoped — this runner only ever runs the EC protocol, so both values are
+legal on both data sources. `--close-threshold` sets the pixel distance the `close` relation
+uses and is accepted with `--data-source xml` only; omitted, it resolves through the
+canonical per-fluent table the published CAVIAR event definitions use — **meeting 25, moving
+34**. The threshold each run actually used is written into the result JSON, so you never
+have to infer it.
 
 A **scene family** groups every recording of the same staged scene. The XML protocol draws
 its folds over the 15 scene families rather than over the 30 individual video files, so a
@@ -347,28 +392,45 @@ returns **no meeting rule and no moving rule at all**. Frame F1 is 0.0 for both.
 | meeting, EC + inertia | 0.000 | 0.000 | **0.000** | 0/120/1812 |
 | meeting, direct-protocol reference | 0.000 | 0.000 | 0.000 | 0/106/1812 |
 | moving, EC + inertia | 0.000 | 0.000 | 0.000 | 0/0/3136 |
-| moving, direct-protocol reference | 0.5927 | 0.4129 | **0.4868** | 1295/890/1841 |
+| moving, direct-protocol reference | 0.5334 | 0.3817 | **0.4450** | 1197/1047/1939 |
 
-(`results/f_xml_scene_cv/caviar-f-xml-meeting-cv10.json` and `-moving-cv10.json`.)
+(`results/f_xml_scene_cv/caviar-f-xml-meeting-cv10.json` and `-moving-cv10.json`. The
+moving rows are measured under `close_34`, the proximity predicate the published moving
+rules use; meeting uses `close_25`. An earlier revision measured moving under the meeting
+threshold and scored 0.4868 — that measurement is preserved as
+`-moving-cv10-threshold25.json` and is history, not the canonical row. The higher of the
+two is the *wrong-threshold* one, and the difference is a selection effect: under
+`close_34` the top two candidates on the fold holding 1,546 of the 3,136 moving-positive
+frames land inside the tie band, and the search abstains where the threshold-25 run had
+committed.)
 
 The reason is counted, not guessed. Once duplicate videos and splice artifacts are removed,
 the whole corpus holds **11 observed meeting initiations and 5 moving initiations** — you
-can add them up per fold in the artifacts. Gates rise accordingly, and the meeting
-initiation search commits a clause on **1 of 10 folds**; the moving one on **0 of 10**.
+can add them up per fold in the artifacts. The meeting initiation search commits a clause on
+**1 of 10 folds**; the moving one on **0 of 10**. As the gate table above shows, that is not
+the bar being raised — it is the candidates' holdout scores collapsing under folds that no
+longer leak.
 
 The machinery is not broken. The direct-protocol reference still names the same familiar
-clauses — `both_inactive & close` on 9 of the 10 meeting folds, `both_walking & close`
-(the canonical published moving rule) on all 10 moving folds. What fails is **transfer**.
-One scene family carries 1,323 of the corpus's 1,812 meeting-positive frames — 73% of the
-positive mass — and honest scene grouping puts it entirely inside a single fold. On that
-one fold the direct search does not merely score badly; it **abstains outright**, having
-been trained on everything except the scenes where its clause actually holds. On the other
-nine folds the clause is selected and then scores zero true positives. The evidence
-package's per-segment coverage census spells out why: outside that one family,
-`both_inactive & close` holds on none of the remaining meeting-positive frames, and on two
-segments even plain `close` never holds on a positive frame — meeting is annotated there at
-pair distances beyond the 25-unit threshold. CAVIAR meeting is two disjoint regimes, and
-after deduplication one of them lives in exactly one place.
+clauses — `both_inactive & close` on 9 of the 10 meeting folds, and `both_walking & close`
+(the canonical published moving rule, now literally over the published `close_34`) on 9 of
+the 10 moving folds. And the meeting clause works where its scenes are: applied directly to
+the held-out fold that holds them, it scores **frame F1 0.8896** at tp 1060, **fp 0**, fn 263
+(`results/f_xml_scene_cv/caviar-g-meeting-census.json`, produced by
+`examples/caviar_woled/xml_meeting_census.py`).
+
+What fails is **transfer**. One scene family carries 1,323 of the corpus's 1,812
+meeting-positive frames — 73% of the positive mass — and honest scene grouping puts it
+entirely inside a single fold. On that one fold the direct search does not merely score
+badly; it **abstains outright**, having been trained on everything except the scenes where
+its clause actually holds — on that fold's training side the clause covers 0 of 489
+positives and 106 negatives. On the other nine folds the clause is selected and then scores
+zero true positives. The same census spells out why: `both_inactive & close` covers 232 of
+`wk1gt`'s 468 positive frames and 828 of `wk2gt`'s 855, and **zero of the 489 positives on
+all eight remaining meeting-bearing segments**; on two of them (`lb1gt`, `rffgt`) even plain
+`close` never holds on a positive frame — meeting is annotated there at pair distances
+beyond the 25-unit threshold. CAVIAR meeting is two disjoint regimes, and after
+deduplication one of them lives in exactly one place.
 
 Abstention at that event count is the correct behaviour. It is not evidence that no rule
 exists; it is the harness refusing to manufacture one.
@@ -380,8 +442,11 @@ exists; it is the harness refusing to manufacture one.
 | OLED (published, tuned hyperparameters) | 0.792 | 0.732 |
 | WOLED-ASP (published) | 0.887 | 0.821 |
 | Hand-crafted rules (published) | 0.735 | 0.637 |
-| This work, distributed-corpus protocol (duplication caveat) | 0.7782 | not run |
+| This work, distributed-corpus protocol (duplication caveat; second-iteration vocabulary) | 0.7782 | not run |
 | This work, clean protocol (deduplicated, leakage-free) | 0.0 (abstains) | 0.0 (abstains) |
+
+The published moving column comes from the same papers and tables as the meeting column,
+but unlike the meeting figures it has not been re-verified against the downloaded PDFs.
 
 The 0.7782 is real and is read from `results/e11_cv10_termination.json`. It is
 *micro*-averaged — the folds' true/false positive and negative counts are pooled and the
@@ -389,19 +454,31 @@ score computed once over the pool (tp 1514, fp 544, fn 319), the same way the pa
 report. It sits inside the published systems' own
 0.735–0.887 band. It is **not** a win over them, and this page does not claim one:
 
-- It is measured on the distributed corpus, which a frame-level audit found to contain two
-  videos duplicated across the train/test files and one termination event that exists only
-  as an artifact of how the dump splices segments together. It is not a clean-split result.
+- It is measured on the distributed corpus. A reproducible frame-level audit
+  (`examples/caviar_woled/audit_dump_vs_xml.py`, artifact
+  `results/f_audit/caviar-f-dump-vs-xml-audit.json`) cross-matched all **25** of that
+  corpus's meeting transition events against the original ground-truth videos and
+  classified them: **21 real, 3 duplicates, 1 splice phantom**. Two videos ship in both the
+  train and the test file, duplicating **855** gold meeting pair-frames — roughly half the
+  corpus's positive mass — and one termination exists only because the dump's
+  segment-joining rule bridges two different videos as if they were one recording. It is
+  not a clean-split result.
 - The clean protocol has too few events for a cross-validated comparison to mean anything
   in *either* direction.
 - The published point estimates come from the authors' own selection of "the best among
   several other parameter settings that we tried", on the same corpus this audit finds
   flawed, under a richer rule language and a different evaluation window — not under a
   protocol fixed before looking at results.
+- **And our own 0.7782 is one step short of that standard too.** Its gates, seeds and folds
+  were fixed in advance, but its candidate vocabulary is a second iteration, chosen after
+  the first run's failure mode on those same folds was known. The honest contrast is "one
+  disclosed adaptive step" against "an unreported number of tuning trials" — not
+  "pre-registered" against "tuned".
 
 What can honestly be claimed is narrower and, arguably, more interesting: perception can be
 learned through logic credit alone; the abstention is principled and statistically grounded;
-and the corpus audit itself is reproducible.
+and the corpus audit itself is reproducible — it ships as a tool and a committed artifact,
+not as prose.
 
 ### The neural detector does not survive the EC cross-validation
 
@@ -450,8 +527,10 @@ branch.
   are in the evidence package.
 - **Availability.** The star-topology and theory-loop track and the Event-Calculus protocol
   track are both contained in the `xlog-cli-v0.11.0` tag. The recall-aware holdout, the
-  learned-termination vocabulary, the moving fluent and the scene-family clean protocol are
-  on `main` and are **not in any tagged release yet**.
+  learned-termination vocabulary, the moving fluent, the scene-family clean protocol, the
+  `--transition-vocab` and `--close-threshold` flags, and the two corpus-integrity tools
+  (`audit_dump_vs_xml.py`, `xml_meeting_census.py`) are on `main` and are **not in any
+  tagged release yet**.
 
 ## See also
 
