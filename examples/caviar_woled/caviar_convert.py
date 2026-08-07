@@ -66,7 +66,11 @@ import pickle
 import re
 from typing import Any
 
-import torch
+# torch is imported lazily inside `convert_split` (features tensor) and
+# `put_caviar_relations` (CUDA columns) -- the only two functions that
+# need it -- so that torch-free consumers (`caviar_continuous`'s loader
+# path and, through it, the section F audit tool) can import this module
+# on a minimal interpreter with no torch install.
 
 # Read from caviar_folds.pkl's own top-level ``simple_label_encoder`` /
 # ``complex_label_encoder`` -- see the module docstring for why these are
@@ -193,6 +197,8 @@ def convert_split(
       * ``"n_coords_missing"``: ``int``, count of pair-times flagged
         ``"coords_missing"``.
     """
+    import torch  # lazy: keeps the module importable torch-free (see top)
+
     simple_names = simple_label_names or SIMPLE_LABEL_NAMES
     T = _shared_window_length(datapoints, "convert_split")
 
@@ -355,6 +361,8 @@ def put_caviar_relations(prog, converted: dict, n_labels: int = 2) -> str:
     at CALL TIME rather than a cryptic backend error partway through the
     first `put_relation`.
     """
+    import torch  # lazy: keeps the module importable torch-free (see top)
+
     if not torch.cuda.is_available():
         raise RuntimeError(
             "put_caviar_relations builds CUDA tensor columns for "

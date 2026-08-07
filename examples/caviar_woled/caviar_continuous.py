@@ -98,8 +98,10 @@ from __future__ import annotations
 import json
 import re
 
-import torch
-
+# torch is imported lazily inside `convert_continuous` (the only function
+# that needs it, for the features tensor) so that torch-free consumers --
+# the section F audit tool's `load_continuous`/`_person_num` imports in
+# particular -- can run on a minimal interpreter with no torch install.
 from caviar_convert import FEATURE_SCALE
 
 ACTIVITY_NAMES = frozenset({"walking", "active", "inactive", "running", "abrupt"})
@@ -328,6 +330,8 @@ def convert_continuous(segments: list[dict], close_threshold: float = 25.0) -> d
     here potentially MANY pairs are co-visible at one timestep, so there is
     no single stride to derive it from.
     """
+    import torch  # lazy: keeps the module importable torch-free (see top)
+
     facts: list[tuple[int, int]] = []
     is_positive: list[bool] = []
     relations: dict[str, list[tuple[int, int]]] = {
