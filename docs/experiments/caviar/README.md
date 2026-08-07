@@ -23,9 +23,13 @@ which is how the two environments are told apart):
   `caviar-e12-neural-cv10.json` (section E.2). Their artifacts record
   `/workspace/...` inputs.
 - **Windows dev box, CPU only** — the deterministic CPU runs:
-  `e9_permutation_null/*` (section D.1), `e10_cv/caviar-e10-cv10.json`
-  (section E), `e11_cv10_termination.json` (section E.1), and
-  `f_xml_scene_cv/*` (section G). Their artifacts record
+  `e9_permutation_null/*` (section D.1 item 2),
+  `e9_f1_holdout/*` (section D.1 item 1),
+  `e10_cv/caviar-e10-cv10.json` (section E),
+  `e11_cv10_termination.json` (section E.1),
+  `f_audit/caviar-f-dump-vs-xml-audit.json` (the section F audit
+  tool's JSON), and `f_xml_scene_cv/*` (section G, including the
+  `caviar-g-meeting-census.json` census). Their artifacts record
   `C:\Users\...` inputs. These runs are CPU-deterministic (see
   section G), so the numbers do not depend on the host.
 
@@ -755,6 +759,24 @@ python examples/caviar_woled/run_caviar_cv.py --data-source xml \
 python examples/caviar_woled/run_caviar_cv.py --data-source xml \
   --xml-dir <dir with the 30 CAVIAR ground-truth XML files> \
   --fluent moving --folds 10 --seed 7 --out RESULT.json
+
+# dump-vs-XML integrity audit (section F, regenerates
+# results/f_audit/caviar-f-dump-vs-xml-audit.json; CPU-only). Expected
+# headline values: 21 real / 3 duplicate / 1 splice, 855 duplicated
+# wk2gt gold pair-frames, 0 unclaimed XML events.
+python examples/caviar_woled/audit_dump_vs_xml.py \
+  --train-json caviar-train.json --test-json caviar-test.json \
+  --xml-dir <dir with the 30 CAVIAR ground-truth XML files> \
+  --out RESULT.json
+
+# meeting clause-application census on the XML-native corpus (section
+# G's meeting paragraph, regenerates
+# results/f_xml_scene_cv/caviar-g-meeting-census.json; CPU-only).
+# Expected headline values: wk-fold tp/fp/fn 1060/0/263 (frame F1
+# 0.8896) and the per-segment coverage census.
+python examples/caviar_woled/xml_meeting_census.py \
+  --xml-dir <dir with the 30 CAVIAR ground-truth XML files> \
+  --folds 10 --seed 7 --out RESULT.json
 ```
 
 GPU runs need CUDA (see each script's docstring); the 3-literal EC search
