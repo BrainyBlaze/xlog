@@ -1,0 +1,481 @@
+---
+title: "Event-Calculus rule induction"
+description: "Learn rules for when a situation starts and stops from timestamped data, while a neural detector learns to perceive the raw input through the logic alone — and abstains, by design, when the evidence is too thin."
+---
+
+You have timestamped observations — the coordinates of two people in a video, sensor
+readings, log lines — and annotations saying that some situation was true over certain
+stretches of time. Event-Calculus rule induction learns two short logical rules from
+that: one for what makes the situation **start**, one for what makes it **stop**.
+
+At the same time, a small PyTorch network learns to read the raw observations. It is
+trained **only** through the logic. It is never shown a label for the thing it learns to
+detect — no distance label, no "these two are close" annotation — and it still recovers
+the geometric relation the rules depend on.
+
+The third thing this page is about is what happens when the data is too thin. The search
+is gated against a statistical null: if no candidate rule beats what label-shuffling
+alone would produce, the harness returns **no rule at all**. That is called abstaining,
+and it is a designed outcome, not a crash and not a failure. On the leakage-free version
+of the reference benchmark, the meeting rule search abstains — and this page says so
+before it says anything else.
+
+<Note>
+The runnable material here lives in the repository's
+[`examples/caviar_woled/`](https://github.com/BrainyBlaze/xlog/tree/main/examples/caviar_woled)
+directory, not in the published `pyxlog` wheel. The scripts need a CUDA device for the
+neural paths and the real CAVIAR corpus, which is not redistributed here. Every number
+on this page is read out of a committed result file — see
+[the evidence package](https://github.com/BrainyBlaze/xlog/blob/main/docs/experiments/caviar/README.md).
+</Note>
+
+## The smallest runnable example
+
+One fold of the CAVIAR video-surveillance benchmark, learning when a pair of people is
+"meeting" straight from per-frame annotations, with the proximity detector learned rather
+than given. Needs a CUDA device and `caviar_folds.pkl`
+(md5 `6aa3cf0f89b595db74430f12bc64f0b3`, provenance in the evidence package).
+
+```bash
+python examples/caviar_woled/run_caviar_theory.py \
+  --mode neural --protocol direct \
+  --pkl caviar_folds.pkl --fold fold1 \
+  --k 4 --seed 7 --steps 400 --hidden 16 --max-clauses 4 \
+  --out RESULT.json
+```
+
+`--mode`, `--pkl`, `--steps` and `--out` are all required, and the parser takes no
+positional arguments at all. The run takes about **2.5 minutes** on an NVIDIA A40.
+
+It writes `RESULT.json`. These are the fields that matter, verbatim from the committed
+artifact `results/caviar-s6-neural_direct_fold1.json` (other keys omitted):
+
+```json
+{
+  "mode": "neural",
+  "protocol": "direct",
+  "candidate_vocabulary": {
+    "relational": ["both_active", "both_inactive", "both_walking", "mixed_active_walking"],
+    "neural": ["close_nn"],
+    "excluded": ["close", "far", "coords_missing"]
+  },
+  "theory": {
+    "clauses": [["both_inactive", "close_nn"], ["both_active", "close_nn"]],
+    "stop_reason": "select_once abstained"
+  },
+  "scoring": {
+    "theory_prf1": {
+      "test": {
+        "precision": 0.9972144846796658,
+        "recall": 0.8564593301435407,
+        "f1": 0.9214929214929215,
+        "tp": 358, "fp": 1, "fn": 60, "tn": 3277
+      }
+    }
+  }
+}
+```
+
+Read it in three parts.
+
+**The rules it found.** Two clauses, which spell out as: a pair is meeting when both
+people are inactive and the detector says they are close, *or* when both are active and
+the detector says they are close.
+
+```
+meeting(Pair, T) :- both_inactive(Pair, T), close_nn(Pair, T).
+meeting(Pair, T) :- both_active(Pair, T),   close_nn(Pair, T).
+```
+
+**The detector was never told what "close" means.** `excluded` lists the ground-truth
+geometry relations — `close`, `far`, `coords_missing`. They are never declared in the
+compiled program and never uploaded. The only thing `close_nn` ever receives is the raw
+pair coordinates and the gradient that comes back through the logic.
+
+**It stopped on its own.** `stop_reason` is `select_once abstained`: after two clauses
+the search looked for a third, found no candidate that clearly won its held-out
+comparison, and stopped rather than pad the theory. Two clauses is what the data
+supported.
+
+## When to use this
+
+Reach for this when all of the following hold.
+
+- Your data is a **timeline**, and your annotations mark **intervals** — a situation that
+  begins, persists, and ends — rather than independent per-row labels.
+- You want the result to be a **short, readable rule** you can argue with, not a weight
+  vector.
+- Part of the input is **raw and unlabelled** — coordinates, a waveform, an embedding —
+  and you have no annotation for the intermediate concept the rule needs. The logic
+  supplies the training signal instead.
+- You would rather be told **"not enough evidence"** than handed a rule the search cannot
+  actually stand behind.
+
+Do not reach for this if you want a general-purpose library call. The induction control
+logic is reusable — `theory_loop.induce_theory` is pure Python with no engine import, and
+`relational_search.py` runs entirely on CPU — but the data loading, the candidate
+vocabulary and the scoring harness in `examples/caviar_woled/` are written for the CAVIAR
+corpus. Porting to your own data means writing your own converter against those modules.
+
+If your target is a plain per-row relation with no temporal structure, use
+[differentiable ILP](/neural/rule-learning) or
+[bounded exact induction](/neural/exact-induction) instead.
+
+## How it works
+
+### Fluents, and the two protocols
+
+A **fluent** is a property that is either true or false at each moment and stays that way
+over stretches of time — "these two people are meeting" is a fluent. There are two ways to
+learn one.
+
+The **direct protocol** (`--protocol direct`) predicts the fluent's truth at every single
+timestep independently. That is what the example above does. It is the easier target and
+it produces the highest scores on this benchmark, but it learns nothing about *change*.
+
+The **Event Calculus protocol** (`--protocol ec`) is the classical alternative. Instead of
+one theory over "is it true now", it induces **two** theories over events:
+
+- `initiatedAt` — what makes the fluent **start** holding;
+- `terminatedAt` — what makes it **stop**.
+
+Between those two events nothing needs to be said, because of **inertia**: once initiated,
+a fluent keeps holding until something terminates it. The evaluation then replays the
+learned events forward under inertia to reconstruct a per-frame answer and scores that
+against the same gold labels the direct protocol uses, so the two protocols are directly
+comparable.
+
+Inertia is load-bearing, not decorative. On the continuous split
+(`results/e9_permutation_null/caviar-e9-cont_rel_ec_mnc2_permnull_tiedefault.json`) the
+learned initiation clause, scored directly as *events*, looks terrible — precision
+0.0092, recall 0.3333, F1 0.0179 on test, one true positive against 108 false ones.
+Replayed forward under inertia and scored per frame, the very same clause gives precision
+0.9844, recall 0.9039, **frame F1 0.9424** (tp 442, fp 7, fn 47). The events are noisy;
+the intervals they imply are not.
+
+<Warning>
+That 0.9424 is a single train/test split, and it is **not** the headline result — the
+cross-validated numbers below supersede it. Its termination theory is empty, so once the
+fluent starts it persists to the end of the run; that happens to cost almost nothing on
+this particular split and costs a great deal under cross-validation. Quote 0.9424 as an
+illustration of what inertia does, never as a score.
+</Warning>
+
+The EC protocol is much harder for a simple reason: **events are rare**. The same
+continuous split has 24,312 training pair-times but only **10 initiation events and 11
+termination events** in them (`n_init`, `n_term` in that artifact). The direct protocol
+gets thousands of training rows; the EC search gets a double-digit count of events.
+Everything difficult on this page follows from that.
+
+### How a theory gets built
+
+The loop is **sequential covering**. Search for the single best body; commit it; delete
+the positive examples it already explains; search again on what is left; stop when nothing
+new clears the bar. Negatives are never deleted, so every later clause is still penalized
+for firing where it should not — precision stays a real constraint for clause two and
+beyond, not just clause one.
+
+Each search step is decided by **holdout arbitration**: candidates are scored on inner
+folds of the training data they were not fit on (`--k 4` here), never on the test set. A
+candidate is only committed when it both wins its holdout comparison by a clear margin and
+clears a *fit gate* — an absolute floor on how good it has to be at all. Ties and
+near-ties abstain instead of picking arbitrarily.
+
+### The permutation-null fit gate
+
+The hard question is where that floor should sit. Set it by hand and you are tuning on the
+answer. So the harness derives it from the data instead.
+
+A **permutation-null fit gate** (`--ec-fit-mode permutation-null`) shuffles the labels
+1000 times, and each time records the best score any candidate in the pool achieves on the
+shuffled data. That distribution is what "winning by luck" looks like on this exact dataset
+at this exact event count. The 95th percentile of it becomes the floor. A rule has to beat
+what chance alone would produce, 19 times out of 20, before it is reported.
+
+The gate is re-derived **inside every fold**, from that fold's own training data, so it is
+not a constant. Per-fold meeting-initiation gates:
+
+| corpus, artifact | gate range across the 10 folds |
+|---|---|
+| distributed corpus, `results/e10_cv/caviar-e10-cv10.json` | 0.0357 – 0.0455 |
+| deduplicated corpus, `results/f_xml_scene_cv/caviar-f-xml-meeting-cv10.json` | 0.0500 – 0.0714 |
+
+Every fold of the deduplicated corpus carries a higher bar than every fold of the
+distributed one. Fewer events honestly earn a stricter gate — which is exactly why the
+next section reports an abstention rather than a score.
+
+### Abstention
+
+When no candidate clears the gate, the search returns an **empty theory** — no clause at
+all — and records exactly what it saw. The termination search on the continuous split is a
+clean illustration; this is from
+`results/e9_permutation_null/caviar-e9-cont_rel_ec_mnc2_permnull_tiedefault.json`:
+
+```json
+"term_min_fit": 0.125,
+"term_null_summary": {
+  "threshold": 0.125,
+  "pool_max_samples_summary": {"min": 0.012499999999999999,
+                               "median": 0.03892146939747559,
+                               "p95": 0.125, "max": 0.25},
+  "n_permutations": 1000, "quantile": 0.95, "perm_seed": 7
+},
+"term_theory": { "clauses": [], "stop_reason": "select_once abstained" },
+"term_scores_last_iteration_top5": [
+  ["any_became_inactive&any_became_walking", 0.1],
+  ["any_became_inactive&any_became_walking&far", 0.1],
+  ["any_became_inactive&far", 0.1],
+  ["any_became_walking&far", 0.1],
+  ["both_walking&close", 0.1]
+]
+```
+
+Five candidates tied at 0.100. The bar derived from 1000 label shufflings was 0.125.
+Nothing cleared it, so nothing was reported — and the run still tells you what the near
+misses were, so you can judge for yourself.
+
+That is not an error condition and not a bug to work around. It is the harness declining to
+report a rule it cannot distinguish from noise, and on the cleanest version of this
+benchmark it is the outcome for *every* target. See [Limits](#limits) — it is the single
+most important thing on this page.
+
+### The Event-Calculus commands
+
+Two theories, three-literal bodies, F1-based holdout and the permutation-null gate, on the
+continuous OLED data split. This path is **CPU-only** — it needs no CUDA device:
+
+```bash
+python examples/caviar_woled/run_caviar_theory.py \
+  --mode relational --protocol ec \
+  --data continuous --pkl caviar-train.json --test-json caviar-test.json \
+  --k 4 --seed 7 --steps 400 --min-new-covered 2 \
+  --max-body-literals 3 --holdout-score f1 --ec-fit-mode permutation-null \
+  --out RESULT.json
+```
+
+Several of those flags are **scoped**, and the script refuses a mis-scoped combination at
+argument-parse time, before doing any work:
+
+| Flag | Only valid with |
+|---|---|
+| `--max-body-literals 3` | `--mode relational` **and** `--protocol ec` |
+| `--holdout-score f1` | `--max-body-literals 3` |
+| `--ec-fit-mode permutation-null` | `--max-body-literals 3` **and** `--holdout-score f1` |
+| `--min-fit` | `--max-body-literals 3` **and** `--ec-fit-mode fixed` |
+| `--data continuous` | requires `--test-json` |
+
+`--min-fit` names a constant threshold, which is why it is incompatible with the mode that
+*derives* the threshold from the data. `--max-body-literals 3` runs through a pure-Python
+set-intersection search with no engine and no GPU, which is why it is the one path that
+skips the CUDA check.
+
+For cross-validation over the whole corpus, use the other runner. Its flags are a different
+and much smaller set — `--data-source --fluent --folds --mode --out --seed --test-json
+--train-json --xml-dir`, with `--out` required:
+
+```bash
+# distributed ("dump") corpus, 10-fold CV over video segments — CPU-only
+python examples/caviar_woled/run_caviar_cv.py \
+  --train-json caviar-train.json --test-json caviar-test.json \
+  --folds 10 --seed 7 --out RESULT.json
+
+# deduplicated XML-native corpus, 10-fold CV over scene families — CPU-only
+python examples/caviar_woled/run_caviar_cv.py --data-source xml \
+  --xml-dir <directory of the 30 CAVIAR ground-truth XML files> \
+  --fluent meeting --folds 10 --seed 7 --out RESULT.json
+```
+
+`--train-json`/`--test-json` belong to `--data-source dump` and `--xml-dir` belongs to
+`--data-source xml`; crossing them is refused rather than silently ignored. `--fluent
+moving` requires `--data-source xml`, because the dump corpus is meeting-only. `--xml-dir`
+falls back to the [`CAVIAR_XML_DIR`](/reference/environment-variables) environment variable
+when omitted.
+
+A **scene family** groups every recording of the same staged scene. The XML protocol draws
+its folds over the 15 scene families rather than over the 30 individual video files, so a
+second take of a scene can never sit in the training set while the first take is being
+tested. That grouping is what makes it the leakage-free protocol — and, as the results
+below show, what makes the meeting result collapse.
+
+## Confirm it worked
+
+Four signals, all read from `RESULT.json`.
+
+**1. A theory came back.** `theory.clauses` (direct protocol) or `ec.init_clauses` /
+`ec.term_clauses` (EC protocol) is a non-empty list of bodies. An empty list means the
+search abstained — read `*_stop_reason` and `*_min_fit` to see against what.
+
+**2. It stopped for a reason you can read.** `stop_reason` is `select_once abstained` when
+no further clause won its comparison, and `insufficient new coverage` when the best
+remaining candidate did not explain enough new positives to be worth a clause. Both are
+normal terminations.
+
+**3. Held-out score.** `scoring.theory_prf1.test` carries precision, recall, F1 and the raw
+tp/fp/fn/tn counts. Look at the counts, not just the F1 — on the fold above, precision
+0.9972 is one false positive out of 359 predictions, and the recall shortfall is 60 missed
+frames.
+
+**4. The detector genuinely learned the concept.** This is the one to check if you take
+nothing else. After all training has finished, `detector_probe` compares the learned
+`close_nn` against the ground-truth `close` relation it was never shown, on the fold's
+**held-out** rows:
+
+| clause | probe precision | probe recall | probe F1 | rows |
+|---|---|---|---|---|
+| `both_inactive & close_nn` | 0.9733 | 1.0 | 0.9865 | 3696 |
+| `both_active & close_nn` | 1.0 | 0.9830 | 0.9914 | 3696 |
+
+Two independently trained networks, both recovering the same 25-unit geometric threshold
+from coordinates and logic credit alone. If your probe numbers sit near the base rate
+instead, the network learned nothing and the clause is being carried by its relational
+partner.
+
+The artifact records the guarantee in its own `note` field: *"close/far were never fed to
+any close_nn training in any form."*
+
+## Limits
+
+### On the clean protocol, this abstains
+
+This is the headline, not a caveat.
+
+Under the deduplicated, leakage-free scene-family protocol, the Event-Calculus search
+returns **no meeting rule and no moving rule at all**. Frame F1 is 0.0 for both.
+
+| fluent, clean 10-fold scene-family CV | P | R | F1 | tp/fp/fn |
+|---|---|---|---|---|
+| meeting, EC + inertia | 0.000 | 0.000 | **0.000** | 0/120/1812 |
+| meeting, direct-protocol reference | 0.000 | 0.000 | 0.000 | 0/106/1812 |
+| moving, EC + inertia | 0.000 | 0.000 | 0.000 | 0/0/3136 |
+| moving, direct-protocol reference | 0.5927 | 0.4129 | **0.4868** | 1295/890/1841 |
+
+(`results/f_xml_scene_cv/caviar-f-xml-meeting-cv10.json` and `-moving-cv10.json`.)
+
+The reason is counted, not guessed. Once duplicate videos and splice artifacts are removed,
+the whole corpus holds **11 observed meeting initiations and 5 moving initiations** — you
+can add them up per fold in the artifacts. Gates rise accordingly, and the meeting
+initiation search commits a clause on **1 of 10 folds**; the moving one on **0 of 10**.
+
+The machinery is not broken. The direct-protocol reference still names the same familiar
+clauses — `both_inactive & close` on 9 of the 10 meeting folds, `both_walking & close`
+(the canonical published moving rule) on all 10 moving folds. What fails is **transfer**.
+One scene family carries 1,323 of the corpus's 1,812 meeting-positive frames — 73% of the
+positive mass — and honest scene grouping puts it entirely inside a single fold. On that
+one fold the direct search does not merely score badly; it **abstains outright**, having
+been trained on everything except the scenes where its clause actually holds. On the other
+nine folds the clause is selected and then scores zero true positives. The evidence
+package's per-segment coverage census spells out why: outside that one family,
+`both_inactive & close` holds on none of the remaining meeting-positive frames, and on two
+segments even plain `close` never holds on a positive frame — meeting is annotated there at
+pair distances beyond the 25-unit threshold. CAVIAR meeting is two disjoint regimes, and
+after deduplication one of them lives in exactly one place.
+
+Abstention at that event count is the correct behaviour. It is not evidence that no rule
+exists; it is the harness refusing to manufacture one.
+
+### No ranking against the published systems may be claimed
+
+| system, protocol | meeting F1 | moving F1 |
+|---|---|---|
+| OLED (published, tuned hyperparameters) | 0.792 | 0.732 |
+| WOLED-ASP (published) | 0.887 | 0.821 |
+| Hand-crafted rules (published) | 0.735 | 0.637 |
+| This work, distributed-corpus protocol (duplication caveat) | 0.7782 | not run |
+| This work, clean protocol (deduplicated, leakage-free) | 0.0 (abstains) | 0.0 (abstains) |
+
+The 0.7782 is real and is read from `results/e11_cv10_termination.json`. It is
+*micro*-averaged — the folds' true/false positive and negative counts are pooled and the
+score computed once over the pool (tp 1514, fp 544, fn 319), the same way the papers
+report. It sits inside the published systems' own
+0.735–0.887 band. It is **not** a win over them, and this page does not claim one:
+
+- It is measured on the distributed corpus, which a frame-level audit found to contain two
+  videos duplicated across the train/test files and one termination event that exists only
+  as an artifact of how the dump splices segments together. It is not a clean-split result.
+- The clean protocol has too few events for a cross-validated comparison to mean anything
+  in *either* direction.
+- The published point estimates come from the authors' own selection of "the best among
+  several other parameter settings that we tried", on the same corpus this audit finds
+  flawed, under a richer rule language and a different evaluation window — not under a
+  protocol fixed before looking at results.
+
+What can honestly be claimed is narrower and, arguably, more interesting: perception can be
+learned through logic credit alone; the abstention is principled and statistically grounded;
+and the corpus audit itself is reproducible.
+
+### The neural detector does not survive the EC cross-validation
+
+Substituting the learned `close_nn` for the precomputed `close` predicate in the EC
+initiation search, under the same 10-fold protocol, is a **negative result**. Reported as
+one:
+
+| 10-fold CV micro, neural `close_nn` initiation | P | R | F1 | tp/fp/fn |
+|---|---|---|---|---|
+| EC + inertia | 0.125 | 0.0005 | **0.0011** | 1/7/1832 |
+
+(`results/caviar-e12-neural-cv10.json`, 10 folds, seed 7, 26 segments, 820 s on an A40.)
+
+Only fold 0 commits a clause, and it is the same `both_active & close_nn` that the
+precomputed detector selects there. The network itself is fine: probed against ground-truth
+`close` on that fold's 2,927 held-out rows it scores precision 1.0, recall 0.2747, tp 220,
+**fp 0** — conservative, but never wrong when it fires. The failure is a
+**coverage-scale mismatch**: the EC search counts how many *transition events* a candidate
+newly covers, and there are only a handful per fold, while a probability-thresholded
+network's above-0.5 region covers hundreds of raw frames but clears only 2–4 of those
+events. The same selection rule that lets the deterministic `close` commit on most folds
+starves on `close_nn` at this granularity.
+
+This is a limitation of the selection criterion at low event counts, not evidence that the
+learned detector is bad — sections A and B of the evidence package show the same detector
+matching or beating ground-truth geometry under the direct protocol. It is unfixed on this
+branch.
+
+### Smaller bounds
+
+- **The direct protocol beats the EC protocol on this benchmark**, and by a lot. Windowed
+  folds, direct protocol, per-timestep target — mean test F1 0.7905 with precomputed
+  geometry and 0.8276 with the learned detector (`results/caviar-s6-*_direct_fold*.json`).
+  If you only need "is it true now", the EC machinery buys you nothing.
+- **Body length is capped at three literals**, and only on the relational CPU path. The
+  neural path is capped at two.
+- **`--steps` is required but has no effect in relational mode**, where it is clamped
+  internally — `caviar-s6-relational_direct_fold1.json` records `steps_requested: 400`,
+  `steps_effective: 25`, `steps_clamped: true`. A purely relational candidate's prediction
+  is a set-intersection test that reads no trained parameter, so training it changes
+  nothing. You still have to pass the flag.
+- **CUDA is required** for `--mode neural` and for every `run_caviar_theory.py` path except
+  `--max-body-literals 3`. The CV runner is CPU-only in `--mode relational`.
+- **The corpus is not redistributed.** You supply `caviar_folds.pkl`, the OLED
+  train/test JSON pair, or the 30 CAVIAR ground-truth XML files yourself; md5s and sources
+  are in the evidence package.
+- **Availability.** The star-topology and theory-loop track and the Event-Calculus protocol
+  track are both contained in the `xlog-cli-v0.11.0` tag. The recall-aware holdout, the
+  learned-termination vocabulary, the moving fluent and the scene-family clean protocol are
+  on `main` and are **not in any tagged release yet**.
+
+## See also
+
+<Card title="CAVIAR evidence package" icon="folder-open" href="https://github.com/BrainyBlaze/xlog/blob/main/docs/experiments/caviar/README.md">
+  The full results record: every protocol, every committed result JSON, the corpus
+  integrity audit, verbatim published-paper sources, and the complete claims summary.
+</Card>
+
+<Card title="Runner scripts" icon="terminal" href="https://github.com/BrainyBlaze/xlog/tree/main/examples/caviar_woled">
+  `run_caviar_theory.py`, `run_caviar_cv.py` and the CPU-only search modules, with a README
+  describing what each one does.
+</Card>
+
+<Card title="Rule learning (differentiable ILP)" icon="brain" href="/neural/rule-learning">
+  The gradient path this builds on — neural predicates, trainable clauses, and how a loss on
+  a symbolic query reaches a PyTorch network's weights.
+</Card>
+
+<Card title="Bounded exact induction" icon="magnifying-glass" href="/neural/exact-induction">
+  The deterministic enumerator for short 2-body rules, when you want reproducibility rather
+  than a temporal theory.
+</Card>
+
+<Card title="Environment variables" icon="gear" href="/reference/environment-variables">
+  `CAVIAR_XML_DIR` and `CAVIAR_CONTINUOUS_DIR`, the two corpus-location variables these
+  scripts and their tests read.
+</Card>
