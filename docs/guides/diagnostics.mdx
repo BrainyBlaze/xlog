@@ -41,9 +41,18 @@ Throughout this page, a few recurring terms:
 | Why was a mined or induced rule kept, and what did it beat? | Induced-rule provenance | `InducedRuleProvenance` |
 | Did my incremental update stay incremental? | Relation-delta debugging | `apply_relation_delta_debug(...)`, `delta_stats()` |
 | Is the neural hot loop actually host-free? | Host-transfer audits | `neural_hot_loop_diagnostics()` |
-| Why was a module import rejected? | Module diagnostics | `error[E0400]` for a missing module, `error[E0401]` for a cycle, `error[E0402]` for conflicting imported function definitions, `error[E0404]` for an item the module does not export, `error[E0405]` for entry-file-only content, `error[E0406]` for a hidden dependency, `error[E0407]` for an unanchored logical path that identifies multiple loaded files, `error[E0408]` for incompatible predicate declarations, `error[E0409]` for a conflicting domain alias, `error[E0410]` for multiple definitions of an exported function name, `error[E0411]` for mixed predicate visibility within an imported module, `error[E0412]` for conflicting inferred head-column types of undeclared predicate contributions, or `error[E0413]` when a contributing clause contains invalid resolver-time type evidence |
+| Why was a module import rejected? | Module diagnostics | `error[E0400]` for a missing module, `error[E0401]` for a cycle, `error[E0402]` for conflicting imported function definitions, `error[E0403]` for importing a predicate its source module keeps private, `error[E0404]` for an item the module does not export, `error[E0405]` for entry-file-only content, `error[E0406]` for a hidden dependency, `error[E0407]` for an unanchored logical path that identifies multiple loaded files, `error[E0408]` for incompatible predicate declarations, `error[E0409]` for a conflicting domain alias, `error[E0410]` for multiple definitions of an exported function name, `error[E0411]` for mixed predicate visibility within an imported module, `error[E0412]` for conflicting inferred head-column types of undeclared predicate contributions, or `error[E0413]` when a contributing clause contains invalid resolver-time type evidence |
 | Was a pragma in an imported module ignored? | Ignored-pragma warnings | `warning[W0510]` on stderr from `xlog run` / `xlog prob` / `xlog explain`; `ModuleResolver::ignored_import_pragmas()` |
 | Which roles and source records annotate a stored complete fact? | Relation evidence | `relation(name)`, `evidence(name=None)` |
+| How long did each stratum take, and which fast join route fired? | Execution stats | `xlog run --stats` |
+
+<Note>
+If you embed the Rust crate rather than calling the CLI: `ExecutionStats` and
+`StratumStats` — the structs behind `xlog run --stats` — are `#[non_exhaustive]`
+(`crates/xlog-runtime/src/profiler.rs`). You cannot build them with a struct literal
+or exhaustively match their fields from outside the crate; read the fields you need.
+The field names and values `--stats` prints are unaffected.
+</Note>
 
 ## Rule provenance and proof traces
 
@@ -232,6 +241,14 @@ counts tell you exactly where a transfer crept in.
 When the runtime cannot supply a particular counter, its value is `None` and the matching
 status field explains why. An unavailable probe is reported as unavailable, never as a
 fake zero.
+
+**Seeing what the transfers would have cost.** A zero-traffic report is easier to trust
+once you have seen the counters move. Set `XLOG_FORCE_HOST_ROUNDTRIP=1` before the run
+and XLOG pushes each neural-output tensor GPU → host → GPU at the neural-to-symbolic
+handoff instead of passing it straight through. The round trip preserves every value, so
+your results do not change; only the data path does. Run once with the variable set and
+once without, and the difference is the per-iteration transfer bill a host-resident
+reasoner would pay.
 
 ## Relation evidence
 

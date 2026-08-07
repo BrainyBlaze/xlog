@@ -29,54 +29,85 @@ Reach for this page when you want to:
 
 ## Measured results
 
-These are the only benchmark numbers in this repository backed by a committed,
-source-verified run. Each came from the Criterion harness described under
-[Methodology](#methodology) below.
+Exactly one published speedup in this repository is backed by a committed,
+source-verified run: the neural-symbolic cache ablation. Its per-seed timings and
+confidence interval sit in a checked-in JSON file you can open and recompute from.
 
-| Result | Speedup | Fixture / setup | Notes |
+The two WCOJ rows are different. The comparison each one describes is real and the
+harness (where one exists) ships in this repository — but **XLOG publishes no
+speedup figure for them**, because no committed run backs one and the result swings
+with GPU, fixture size, and key width. Each row tells you what to run so you can
+measure the number on your own hardware.
+
+| Result | Published speedup | Fixture / setup | How you get a number |
 |---|---|---|---|
-| WCOJ super-hub | `10.5x` to `33.8x` | Deterministic super-hub triangle fixtures (`wcoj_triangle_bench`) | Worst-case-optimal join versus binary-join chain on skewed graphs |
-| Aggregate-fused WCOJ | `6.05x` / `5.37x` | Hub fixtures | count/sum/min/max-by-root fused over a triangle body |
-| Neural-symbolic cache ablation | `2.74x` | `01_minimal` MNIST addition, end-to-end | Circuit caching vs no caching; 95% CI `[2.29, 3.18]`, measured 2026-02-18 |
+| WCOJ super-hub | None — measure locally | Deterministic super-hub triangle fixtures, `crates/xlog-integration/benches/wcoj_triangle_bench.rs` | Run `cargo bench -p xlog-integration --bench wcoj_triangle_bench -- wcoj_triangle/superhub`, then divide the `off` cell's time by the `force` cell's time at the same width and row count (for example `u32-50K-off` over `u32-50K-force`). |
+| Aggregate-fused WCOJ | None — measure locally | Your own skewed hub data; no benchmark for this route ships in the repository | Time your own count/sum/min/max-by-root query over a triangle body twice: once normally, and once with `XLOG_DISABLE_WCOJ_GROUPBY_FUSION=1`, which forces the materialize-then-group-by path. |
+| Neural-symbolic cache ablation | `2.74x` | `01_minimal` MNIST addition, end-to-end | Committed evidence: `examples/neural/results/evidence/cache_ablation_20260218.json`. Circuit caching vs no caching; 95% CI `[2.29, 3.18]`, measured 2026-02-18. |
 
 A **worst-case-optimal join (WCOJ)** computes multi-way patterns — such as
 triangles in a graph — directly, instead of joining two tables at a time and
 building a large intermediate result on the way to a small answer. That is why
 it can be many times faster on skewed graphs.
 
+**Aggregate fusion** folds a `count`/`sum`/`min`/`max` directly into the join
+instead of computing the join first and aggregating after. It has been available
+since 0.10.0 and applies automatically to the shapes it covers, so the only way to
+see its cost is to turn it off and compare — which is what the row above asks you
+to do.
+
 **Circuit caching** reuses the compiled inference circuit across training steps
 instead of rebuilding it each time; the `2.74x` above is the speedup from turning
 that reuse on.
 
 <Note>
-The WCOJ super-hub result reflects the released triangle route. The
-**aggregate-fused WCOJ** result was measured on the development branch. Aggregate
-fusion — folding a `count`/`sum`/`min`/`max` directly into the join instead of
-computing the join first and aggregating after — has been available since 0.10.0.
-Treat its speedup as a development-branch measurement collected before release,
-not as a measurement collected from a release artifact.
+Do not quote a WCOJ speedup from this page or from XLOG's release notes as if it
+were a measured result you can rely on. Numbers that appeared in earlier notes came
+from runs whose evidence is not in this repository, so no one — including us — can
+re-derive them. Measure on the hardware and fixture you actually care about, and
+cite that.
 </Note>
 
 ### Neural-symbolic training detail
 
-The cache-ablation result above was measured on development hardware with the
-`01_minimal` example (MNIST addition, 512 images, 5 epochs, `batch_size=64`).
-These are the per-run timings behind it:
+Two different committed runs sit behind the neural-symbolic numbers on this page.
+They used different settings, so read each number against its own artifact rather
+than mixing them.
 
-| Metric | Value | Notes |
+**The cache ablation** — the run the `2.74x` comes from — used the `01_minimal`
+example (MNIST addition) over 512 training images for 3 epochs, repeated across 3
+seeds (7, 42, 123), once with circuit caching on and once off:
+
+| Configuration | Mean wall time | Per-seed wall times |
 |---|---|---|
-| `PTX JIT (cold)` | 0.02 s | Cubin loading |
-| `first_epoch_sec` | ~75 s | Cold start (Decision-DNNF compile + verify); warm starts drop to ~0.26 s |
-| `steady_epoch_sec_mean` | ~0.25 s | Epochs 2–5 after warm-up, batched evaluation |
-| `per_query_ms` | ~1.0 ms | Per-query forward + backward through the circuit |
-| Cache speedup | `2.74x` | Circuit caching vs no caching, 95% CI `[2.29, 3.18]` |
+| Caching on | `88.89 s` | 85.02 s, 91.77 s, 89.89 s |
+| Caching off | `242.90 s` | 249.88 s, 244.94 s, 233.88 s |
 
-The first epoch is slow because XLOG compiles the logic program into a
+The published `2.74x` is the mean of the three per-seed ratios (`2.94`, `2.67`,
+`2.60`), which is why it is not exactly `242.90 / 88.89`. Its 95% confidence
+interval is `[2.29, 3.18]`. Evidence:
+`examples/neural/results/evidence/cache_ablation_20260218.json`.
+
+**Where the time goes within a run.** A separate committed run — 512 images, 5
+epochs, `batch_size=64`, 2 seeds, on the RTX PRO 3000 Blackwell laptop GPU —
+records the per-epoch shape:
+
+| Metric | seed 7 | seed 42 | What it measures |
+|---|---|---|---|
+| `compile_api_sec` | 0.012 s | 0.013 s | The `pyxlog` compile call itself, before training starts |
+| `first_epoch_sec` | 83.12 s | 77.66 s | Epoch 1, which pays the circuit compile and verify |
+| `steady_epoch_sec_mean` | 2.90 s | 2.92 s | Mean of epochs 2–5, after the circuit is cached |
+| `total_train_sec` | 94.72 s | 89.33 s | All five epochs end to end |
+| `per_query_ms` | 74.0 ms | 69.8 ms | Total training time ÷ (queries × epochs) — an amortized figure, not the cost of one forward pass |
+
+Evidence:
+`examples/neural/results/track_a/20260218T_postfix_v040alpha_batched/01_minimal/seed_7/metrics.json`
+and the matching `seed_42/metrics.json`.
+
+The first epoch dominates because XLOG compiles the logic program into a
 **Decision-DNNF** — a circuit form that makes exact probability counting cheap to
-evaluate — and verifies it. Once that circuit is cached, later epochs skip the
-compile and run in a fraction of a second.
-
-Evidence: `examples/neural/results/evidence/cache_ablation_20260218.json`.
+evaluate — and verifies it. Once that circuit is cached, each later epoch costs
+about 3 seconds instead of 80. That gap is what the cache ablation measures.
 
 ## Aspirational targets — not measured
 
@@ -150,7 +181,14 @@ cargo bench
 cargo bench -p xlog-gpu    # Transitive closure, joins, aggregation
 cargo bench -p xlog-prob   # Exact inference, Monte Carlo
 cargo bench -p xlog-solve  # SAT solver
+
+# Run one benchmark target, filtered to one Criterion group
+cargo bench -p xlog-integration --bench wcoj_triangle_bench -- wcoj_triangle/superhub
 ```
+
+The WCOJ benchmarks need a CUDA device. Without one they print a `Skipping …: No
+CUDA device` line and exit successfully rather than failing, so check for that line
+before concluding a run produced nothing.
 
 </Step>
 <Step title="Save and compare a baseline">
@@ -222,10 +260,10 @@ measured number reproducible rather than a one-off.
 
 ### The WCOJ triangle harness
 
-The measured WCOJ result comes from
-`crates/xlog-integration/benches/wcoj_triangle_bench.rs`. It compares the GPU
-3-way worst-case-optimal join against the ordinary binary-join chain on identical
-fixtures across `u32`, `u64`, and a `Symbol` sanity case.
+`crates/xlog-integration/benches/wcoj_triangle_bench.rs` is the harness you run to
+measure WCOJ for yourself. It compares the GPU 3-way worst-case-optimal join
+against the ordinary binary-join chain on identical fixtures across `u32`, `u64`,
+and a `Symbol` sanity case.
 
 Each case runs three modes: `Off` (binary join), `Force` (WCOJ always), and
 `Adaptive` (classifier-gated, the default). The mode is set explicitly via
@@ -241,7 +279,12 @@ Two guards keep the numbers honest:
   reporting the wrong path's time.
 
 The super-hub fixture — which concentrates roughly half the edges on a single key —
-is where the `10.5x` to `33.8x` speedups are measured.
+is the one where WCOJ has the most to gain, so it is the family to time first. It
+runs at 10K and 50K rows per relation by default; set `WCOJ_BENCH_FULL=1` to add
+the 100K and 250K sizes. Criterion names each cell `<width>-<rows>-<mode>`, for
+example `u32-50K-off` and `u32-50K-force`, so the ratio of those two reported times
+is your local speedup. Nothing about that ratio is portable: report it with the GPU
+and the fixture size you ran it on.
 
 ## Reference: benchmark environment variables
 

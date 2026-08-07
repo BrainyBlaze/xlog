@@ -6,10 +6,11 @@ description: "Move relation columns between XLOG and the GPU tensor ecosystem �
 XLOG's query results and input relations are columnar tensors that live in device
 memory. To use them from PyTorch, JAX, cuDF, or another GPU framework, you need an
 interchange format. DLPack query-result handoff and transient evaluation input are
-zero-copy. Persistent session replacement is deliberately different: it makes one
-device-to-device copy into session-owned storage. Neither path uses host row data.
-XLOG's CUDA backend (`crates/xlog-cuda`) also offers the Arrow C Device interface and
-host-serialized Arrow IPC.
+zero-copy, as is exporting a buffer from the joint-constraint solver's carrier.
+Persistent session replacement is deliberately different: it makes one
+device-to-device copy into session-owned storage. None of these paths use host row
+data. XLOG's CUDA backend (`crates/xlog-cuda`) also offers the Arrow C Device
+interface and host-serialized Arrow IPC.
 
 ## Zero-copy versus copy at a glance
 
@@ -25,6 +26,7 @@ memory and pays a device-to-host-to-device round trip for GPU-to-GPU interchange
 | DLPack transient evaluation input (per column) | Import | Zero-copy, stays on GPU | Stable |
 | DLPack persistent session replacement | Import | One device-to-device ownership snapshot; no host copy | Stable |
 | DLPack persistent stored-relation export | Export | One device-to-device retention copy, then a zero-copy capsule handoff; no host copy | Stable |
+| DLPack joint-solver carrier buffer | Export | Zero-copy view of the solver's own device allocation; XLOG stays the owner | Stable |
 | Arrow C Device interface | Export | Zero-copy, stays on GPU | Stable |
 | Arrow C Device interface | Import | Zero-copy, stays on GPU | Experimental, feature-gated |
 | Arrow IPC stream | Export and import | Host copy — GPU to host, host to GPU | Stable |
@@ -233,6 +235,66 @@ capsules retain the device buffers even if the source session is released, but t
 not cross-process or on-disk persistence. Use Arrow IPC when portability matters,
 accepting its host copy.
 </Warning>
+
+## Joint-solver carrier buffers — writing into XLOG's own allocation
+
+The paths above move *relation columns*. `pyxlog.JointConstraintCarrier` is a different
+shape of interop: it is a device-resident workspace for XLOG's joint constraint solver,
+and it lets a model write scores straight into the buffers the solver will read, with no
+intermediate relation and no copy.
+
+Create the carrier, register a schema, bind the per-label signature masks, then export
+the buffer you want to fill:
+
+```python
+import pyxlog
+import torch
+from torch.utils.dlpack import from_dlpack
+
+# device, entities, domain_lanes, candidates, labels, fuel_limit
+carrier = pyxlog.JointConstraintCarrier(0, 3, 1, 2, 4, 64)
+carrier.register_schema(catalog_sha, pyxlog.SOLVER_ABI_IDENTITY)
+carrier.bind_signatures(head_masks, tail_masks)
+
+scores = from_dlpack(carrier.export_buffer("scores"))   # (candidates, labels) float32
+scores.copy_(model_logits)                              # lands in the solver's memory
+carrier.solve_label_feasibility(3)                      # 3 = the abstain label
+```
+
+**Confirm it stayed zero-copy.** Export the same buffer twice and write through the
+first view: the second view sees the write, because both alias one allocation. A copying
+path would not.
+
+`export_buffer(name)` accepts `domains`, `scores`, `constraints`, `outputs`,
+`feasible_sets`, `logical_counts`, `map_results`, and `solve_status`; any other name
+raises `ValueError`. XLOG owns every one of these allocations, so a view is valid only
+while the carrier is alive — this is the opposite of the relation-export capsules above,
+which keep their buffers alive on their own.
+
+<Warning>
+Writes you make through an exported view happen on **your** stream, not XLOG's. Either
+call `note_producer_stream(...)` with that stream's handle after the writes — the next
+solve then waits for it on the device — or synchronize on the host before solving.
+Pass a dedicated `torch.cuda.Stream()`: torch's default stream carries raw handle `0`,
+which XLOG cannot tell apart from a null handle and refuses. `note_consumer_stream(...)`
+is the mirror image, making a successful solve enqueue a wait on your stream rather than
+forcing a host barrier; those registrations are one-shot and are cleared if the solve
+fails.
+</Warning>
+
+Two exceptions belong to this surface, both `RuntimeError` subclasses:
+
+- `pyxlog.CarrierRefused` — a typed refusal whose message names the exact precondition
+  you broke and its values. It covers registering a schema twice, a zero-valued capacity
+  dimension, binding signatures or solving before `register_schema`, rebinding
+  already-bound masks, a mask whose word count does not match the carrier's capacity,
+  running the top-two stage before feasibility, a malformed component plan, an
+  out-of-range abstain label, and a joint-solve kernel that would not load on this device.
+- `pyxlog.SolverResourceExhausted` — the fuel budget you passed to the constructor ran
+  out, reported as `solver fuel exhausted: spent {spent} of {limit} node expansions`. The
+  meter lives in the carrier session and saturates, so a retry repeats the identical
+  refusal instead of slipping more work past the budget. Read the running total from the
+  `fuel_spent` property.
 
 ## Arrow C Device interface — zero-copy Arrow
 
