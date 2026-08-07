@@ -688,7 +688,15 @@ python examples/caviar_woled/run_caviar_theory.py --mode relational --protocol d
   --k 4 --seed 7 --steps 400 --max-clauses 4 --tie-tolerance 0.001 --out RESULT.json
 
 # continuous, EC protocol, 3-literal relational search (section D's
-# 3-literal rows, the caviar-e5-*_ec_* artifacts; CPU-only).
+# 3-literal relational rows; CPU-only). This reproduces the
+# CONFIGURATION of the historical caviar-e5-cont_rel_ec_mnc2.json, not
+# its exact schema: the shipped e5 artifacts predate several provenance
+# fields (max_body_literals, transition_vocab, the enlarged ec block),
+# so a replay JSON is a structural superset and no committed runner
+# version reproduces the historical files byte-for-byte. The mnc3 row
+# (caviar-e5-cont_rel_ec_mnc3.json) is the same command with
+# --min-new-covered 3. caviar-e5-cont_neu_ec_mnc2.json is a
+# CUDA-required neural run and is NOT covered by this CPU-only command.
 # (--steps is a required flag; relational mode clamps it to 25 internally,
 # so the value does not affect the EC search)
 python examples/caviar_woled/run_caviar_theory.py --mode relational --protocol ec \
