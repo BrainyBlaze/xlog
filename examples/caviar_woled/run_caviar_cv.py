@@ -206,6 +206,15 @@ NEURAL_INIT_ACTIVITY_TRANSITIONS: tuple[str, ...] = (
     "any_became_active", "any_became_inactive", "any_became_walking", "any_stopped_walking",
 )
 
+# `caviar_continuous.TRANSITION_RELATION_NAMES`'s two DISTANCE-based members
+# -- the pair `--transition-vocab activity` excludes from the EC candidate
+# pool (see `_ec_relations`): the shipped e9/e10 artifacts were generated
+# BEFORE these two relations existed, so the four-activity-transition pool
+# is the only one that can replay them. Named here (not imported from
+# `caviar_continuous`) to keep module-level imports torch-free -- mirrors
+# `run_caviar_theory.DISTANCE_DERIVED_TRANSITIONS`'s identical hardcoding.
+DISTANCE_DERIVED_TRANSITIONS: tuple[str, ...] = ("became_far", "distance_increasing")
+
 
 def stratified_segment_folds(
     segment_positive_counts: list[int], n_folds: int, seed: int,
@@ -496,7 +505,7 @@ def _exclude_dontcare(facts, labels, dontcare):
     return kept_facts, kept_labels
 
 
-def _ec_relations(converted: dict) -> dict:
+def _ec_relations(converted: dict, transition_vocab: str = "full") -> dict:
     """EC-search candidate vocabulary for one fold's side (train or test):
     every base relation EXCEPT the data-quality flag ``coords_missing``,
     PLUS the frame-difference transition relations -- mirrors
@@ -504,8 +513,26 @@ def _ec_relations(converted: dict) -> dict:
     `_filtered_relation_names`'s exclusion, done in one step (this script
     never runs the direct protocol through this vocabulary, so there is no
     separate un-merged reading to keep byte-identical here, unlike that
-    module)."""
-    merged = {**converted["relations"], **converted["transition_relations"]}
+    module).
+
+    ``transition_vocab`` selects WHICH transition relations are admitted:
+    ``"full"`` (default, byte-identical to every call that predates the
+    parameter) admits all of ``converted["transition_relations"]``;
+    ``"activity"`` admits only the activity-based ones, excluding
+    `DISTANCE_DERIVED_TRANSITIONS` -- the exact pool the shipped e9/e10
+    artifacts were generated with (see that constant's own comment).
+    Any other value raises ``ValueError`` (never silently treated as one
+    of the two real vocabularies)."""
+    if transition_vocab not in ("activity", "full"):
+        raise ValueError(
+            f"transition_vocab must be 'activity' or 'full' (got {transition_vocab!r})."
+        )
+    transitions = converted["transition_relations"]
+    if transition_vocab == "activity":
+        transitions = {
+            n: v for n, v in transitions.items() if n not in DISTANCE_DERIVED_TRANSITIONS
+        }
+    merged = {**converted["relations"], **transitions}
     return {n: v for n, v in merged.items() if n != "coords_missing"}
 
 
@@ -861,6 +888,7 @@ def _run_init_search(
 def run_fold(
     fold_index: int, train_segments: list[dict], test_segments: list[dict], seed: int,
     mode: str = "relational", data_source: str = "dump", fluent: str = "meeting",
+    transition_vocab: str = "full", close_threshold: float | None = None,
 ) -> dict:
     """Run one fold of the pre-registered protocol end to end: fold-local
     conversion (see FOLD ISOLATION in the module docstring), EC init/term
@@ -888,12 +916,44 @@ def run_fold(
     of using the video dicts directly. Every other computation below this
     branch -- vocabulary building, induction, scoring, reconstruction -- is
     the SAME code, reading only ``train``/``test``'s shared output contract
-    and the resulting EC segment view, never ``data_source`` itself."""
+    and the resulting EC segment view, never ``data_source`` itself.
+
+    ``transition_vocab`` (default ``"full"``, BYTE-IDENTICAL to every call
+    site that predates this parameter) selects the EC candidate pool's
+    transition-relation subset -- see `_ec_relations`. The vocabulary each
+    search actually ran over is recorded in the returned fold record
+    (``"ec"``/``"direct"`` each carry a ``"candidate_vocabulary"`` key, and
+    the record's own top level carries ``"transition_vocab"``), so a
+    replayer can read the searched pool off the artifact instead of
+    reverse-engineering it from the gate values. In ``mode == "neural"``
+    the ``"ec"`` key is the structured
+    ``{"init": {"relational", "neural", "excluded"}, "term": [...]}``
+    form (same shape as `run_caviar_theory`'s neural-EC record), because
+    the neural initiation search's pool (`_neural_init_vocab` +
+    ``close_nn``) differs from the always-relational termination
+    search's.
+
+    ``close_threshold`` (default ``None``, BYTE-IDENTICAL to every call
+    site that predates this parameter) is forwarded to
+    `convert_xml_corpus` on the XML path only: ``None`` resolves through
+    `CANONICAL_CLOSE_THRESHOLDS` per fluent, an explicit value overrides
+    it -- the entry point that regenerates the historical threshold-25
+    moving measurement. Rejected on the dump path, whose conversion
+    never parameterized the threshold (fixed 25 default) -- an explicit
+    value there would be a silent no-op."""
     from relational_search import make_predict_clause
     from scorer import prf1, theory_predictions
 
     t0 = time.perf_counter()
     if data_source == "dump":
+        if close_threshold is not None:
+            raise ValueError(
+                "close_threshold is an XML-path parameter only (got "
+                f"{close_threshold!r} with data_source='dump'): the dump "
+                "path's convert_continuous call never parameterized the "
+                "threshold, so an explicit value here would be silently "
+                "ignored."
+            )
         from caviar_continuous import (
             convert_continuous,
             derive_ec_masks_continuous,
@@ -913,8 +973,8 @@ def run_fold(
         )
         from caviar_xml_corpus import convert_xml_corpus
 
-        train = convert_xml_corpus(train_segments, fluent=fluent)
-        test = convert_xml_corpus(test_segments, fluent=fluent)
+        train = convert_xml_corpus(train_segments, fluent=fluent, close_threshold=close_threshold)
+        test = convert_xml_corpus(test_segments, fluent=fluent, close_threshold=close_threshold)
         train_ec_segments = [_xml_video_as_segment(v, fluent) for v in train_segments]
         test_ec_segments = [_xml_video_as_segment(v, fluent) for v in test_segments]
     else:
@@ -925,8 +985,8 @@ def run_fold(
     ec_test = derive_ec_targets_continuous(test_ec_segments, test)
     ec_masks = derive_ec_masks_continuous(train_ec_segments, train)
 
-    train_ec_relations = _ec_relations(train)
-    test_ec_relations = _ec_relations(test)
+    train_ec_relations = _ec_relations(train, transition_vocab=transition_vocab)
+    test_ec_relations = _ec_relations(test, transition_vocab=transition_vocab)
     train_direct_relations = _direct_relations(train)
     test_direct_relations = _direct_relations(test)
 
@@ -962,16 +1022,48 @@ def run_fold(
     direct_pred_test = theory_predictions(direct_theory["clauses"], predict_clause_test_direct, test["num_pt"])
     direct_scoring = prf1(direct_pred_test, test["is_positive"])
 
+    if mode == "neural":
+        from run_caviar_theory import CLOSE_NN_NAME
+
+        # The initiation search's ACTUAL pool (see `_run_init_search` /
+        # `_neural_init_vocab`): activity relations + the four
+        # ACTIVITY-based transitions + the trained `close_nn` detector --
+        # never `train_ec_relations`, whose `close`/`far`/`became_far`/
+        # `distance_increasing` members the neural init search excludes
+        # by design. A flat `train_ec_relations` listing here would name
+        # relations the init search never saw and omit the one neural
+        # relation it did search. Same structured form as
+        # `run_caviar_theory`'s neural-EC path; the always-relational
+        # termination search keeps its own flat pool listing.
+        ec_candidate_vocabulary = {
+            "init": {
+                "relational": sorted(_neural_init_vocab(train)),
+                "neural": [CLOSE_NN_NAME],
+                "excluded": ["close", "far", "coords_missing"] + [
+                    n for n in sorted(train.get("transition_relations", ()))
+                    if n in DISTANCE_DERIVED_TRANSITIONS
+                ],
+            },
+            "term": sorted(train_ec_relations),
+        }
+    else:
+        # Relational mode: BYTE-IDENTICAL flat listing, exactly as every
+        # artifact this recording first shipped with -- in this mode both
+        # searches really do run over the same pool.
+        ec_candidate_vocabulary = sorted(train_ec_relations)
+
     return {
         "fold": fold_index,
         "mode": mode,
         "data_source": data_source,
         "fluent": fluent,
+        "transition_vocab": transition_vocab,
         "n_train_segments": len(train_segments),
         "n_test_segments": len(test_segments),
         "n_train_pt": train["num_pt"],
         "n_test_pt": test["num_pt"],
         "ec": {
+            "candidate_vocabulary": ec_candidate_vocabulary,
             "n_init_train": ec_train["n_init"],
             "n_term_train": ec_train["n_term"],
             "n_init_test": ec_test["n_init"],
@@ -992,6 +1084,7 @@ def run_fold(
             "scoring": ec_scoring,
         },
         "direct": {
+            "candidate_vocabulary": sorted(train_direct_relations),
             "clauses": [list(c) for c in direct_theory["clauses"]],
             "stop_reason": direct_theory["stop_reason"],
             "iterations": _iterations_json(direct_theory["iterations"]),
@@ -1050,9 +1143,43 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "device at run time; --help does not. The termination search is "
         "unaffected by this flag in either mode.",
     )
+    p.add_argument(
+        "--transition-vocab", default="full", choices=("activity", "full"),
+        help="which transition relations enter the EC candidate pool. "
+        "'full' (default, BYTE-IDENTICAL to every behavior that predates "
+        "this flag): all six of the converter's transition relations. "
+        "'activity': only the four ACTIVITY-based ones "
+        "(any_became_active/any_became_inactive/any_became_walking/"
+        "any_stopped_walking), excluding the distance-derived pair "
+        "(became_far/distance_increasing) -- the exact pool the shipped "
+        "e9/e10 artifacts were generated with, required to replay them "
+        "(README section E's 0.733 row). The direct-protocol reference "
+        "never sees transition relations in either setting; the "
+        "vocabulary actually searched is recorded in the result JSON.",
+    )
+    p.add_argument(
+        "--close-threshold", type=float, default=None,
+        help="explicit close-relation pixel threshold, for --data-source "
+        "xml only (default: None, BYTE-IDENTICAL to every behavior that "
+        "predates this flag -- the canonical per-fluent value from "
+        "caviar_xml_corpus.CANONICAL_CLOSE_THRESHOLDS: meeting 25, "
+        "moving 34). An explicit value overrides the canonical table -- "
+        "the entry point that regenerates the historical threshold-25 "
+        "moving measurement (caviar-f-xml-moving-cv10-threshold25.json, "
+        "README section G). Refused with --data-source dump, whose "
+        "conversion never parameterized the threshold.",
+    )
     p.add_argument("--out", required=True, help="path to write RESULT.json")
     args = p.parse_args(argv)
 
+    if args.close_threshold is not None and args.data_source != "xml":
+        p.error(
+            "--close-threshold is only meaningful with --data-source xml; "
+            "with --data-source dump the conversion's threshold is a fixed "
+            "25 default the flag cannot reach -- it would be silently "
+            "ignored yet recorded into the result JSON as provenance, so "
+            "it is refused instead (mirrors the --xml-dir refusal below)."
+        )
     if args.data_source == "dump":
         if args.fluent != "meeting":
             p.error(
@@ -1155,6 +1282,8 @@ def main(argv: list[str] | None = None) -> int:
         result = run_fold(
             fold_index, train_segments, test_segments, args.seed,
             mode=args.mode, data_source=args.data_source, fluent=args.fluent,
+            transition_vocab=args.transition_vocab,
+            close_threshold=args.close_threshold,
         )
         fold_results.append(result)
         ec_s, direct_s = result["ec"]["scoring"], result["direct"]["scoring"]
@@ -1170,15 +1299,34 @@ def main(argv: list[str] | None = None) -> int:
     direct_micro = _micro_prf1([r["direct"]["scoring"] for r in fold_results])
     total_wall = time.perf_counter() - t_start
 
+    if args.data_source == "dump":
+        # `convert_continuous`'s own fixed default -- the dump path never
+        # parameterizes it (parse_args refuses --close-threshold there).
+        close_threshold = 25.0
+    elif args.close_threshold is not None:
+        # Explicit --close-threshold: `run_fold` forwarded exactly this
+        # value to every conversion, so it is the value to record.
+        close_threshold = args.close_threshold
+    else:
+        from caviar_xml_corpus import CANONICAL_CLOSE_THRESHOLDS
+
+        # `run_fold` calls `convert_xml_corpus` with its default, which
+        # resolves through this same table -- recorded here so the
+        # artifact names the threshold its `close` relation was built
+        # with (meeting 25, moving 34; see the table's own comment).
+        close_threshold = CANONICAL_CLOSE_THRESHOLDS[args.fluent]
+
     result = {
         "data_source": args.data_source,
         "train_json": args.train_json,
         "test_json": args.test_json,
         "xml_dir": args.xml_dir,
         "fluent": args.fluent,
+        "close_threshold": close_threshold,
         "folds": args.folds,
         "seed": args.seed,
         "mode": args.mode,
+        "transition_vocab": args.transition_vocab,
         "n_segments_total": len(all_segments),
         "fold_of_segment": fold_of_segment,
         "segment_positive_counts": counts,

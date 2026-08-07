@@ -465,6 +465,59 @@ def test_convert_xml_corpus_missing_coords_row(tmp_path):
     assert out["features"][0].tolist() == pytest.approx([0.0, 0.0])
 
 
+# ---------------------------------------------------------------------------
+# Per-fluent canonical close threshold: the canonical CAVIAR event
+# definitions (RTEC's rules.prolog) define meeting over close_25 but
+# moving over close_34 -- one fluent-independent 25px default silently
+# mislabels every moving pair walking together at distance in (25, 34]
+# as far. `convert_xml_corpus`'s default must resolve per fluent;
+# an explicit threshold must still win.
+# ---------------------------------------------------------------------------
+
+
+def _two_person_video_at_distance(tmp_path, dist):
+    frames = _frame_xml(0, _obj_xml(0, 0, 0) + _obj_xml(1, dist, 0))
+    path = tmp_path / "v.xml"
+    _write(path, _dataset_xml(frames))
+    return load_xml_corpus(str(tmp_path))
+
+
+def test_canonical_close_thresholds_name_the_rtec_values():
+    from caviar_xml_corpus import CANONICAL_CLOSE_THRESHOLDS
+
+    assert CANONICAL_CLOSE_THRESHOLDS == {"meeting": 25.0, "moving": 34.0}
+
+
+def test_close_threshold_default_resolves_per_fluent(tmp_path):
+    pytest.importorskip("torch")
+    videos = _two_person_video_at_distance(tmp_path, 30)
+    # Distance 30: beyond meeting's canonical 25, inside moving's 34.
+    meeting_out = convert_xml_corpus(videos, fluent="meeting")
+    moving_out = convert_xml_corpus(videos, fluent="moving")
+    assert meeting_out["relations"]["close"] == []
+    assert meeting_out["relations"]["far"] == [(0, 1)]
+    assert moving_out["relations"]["close"] == [(0, 1)]
+    assert moving_out["relations"]["far"] == []
+
+
+def test_close_threshold_tie_rule_holds_at_exactly_34_for_moving(tmp_path):
+    pytest.importorskip("torch")
+    videos = _two_person_video_at_distance(tmp_path, 34)
+    # dist == threshold is close -- the same tie rule as the 25px path.
+    moving_out = convert_xml_corpus(videos, fluent="moving")
+    assert moving_out["relations"]["close"] == [(0, 1)]
+
+
+def test_explicit_close_threshold_still_overrides_the_canonical(tmp_path):
+    pytest.importorskip("torch")
+    videos = _two_person_video_at_distance(tmp_path, 30)
+    # The historical measurement (threshold 25 for moving) stays exactly
+    # reproducible by passing the override.
+    moving_25 = convert_xml_corpus(videos, fluent="moving", close_threshold=25.0)
+    assert moving_25["relations"]["close"] == []
+    assert moving_25["relations"]["far"] == [(0, 1)]
+
+
 # ===========================================================================
 # REAL DATA -- everything below is DATA-GATED (see module docstring).
 # ===========================================================================

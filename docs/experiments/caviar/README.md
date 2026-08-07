@@ -23,9 +23,13 @@ which is how the two environments are told apart):
   `caviar-e12-neural-cv10.json` (section E.2). Their artifacts record
   `/workspace/...` inputs.
 - **Windows dev box, CPU only** — the deterministic CPU runs:
-  `e9_permutation_null/*` (section D.1), `e10_cv/caviar-e10-cv10.json`
-  (section E), `e11_cv10_termination.json` (section E.1), and
-  `f_xml_scene_cv/*` (section G). Their artifacts record
+  `e9_permutation_null/*` (section D.1 item 2),
+  `e9_f1_holdout/*` (section D.1 item 1),
+  `e10_cv/caviar-e10-cv10.json` (section E),
+  `e11_cv10_termination.json` (section E.1),
+  `f_audit/caviar-f-dump-vs-xml-audit.json` (the section F audit
+  tool's JSON), and `f_xml_scene_cv/*` (section G, including the
+  `caviar-g-meeting-census.json` census). Their artifacts record
   `C:\Users\...` inputs. These runs are CPU-deterministic (see
   section G), so the numbers do not depend on the host.
 
@@ -205,9 +209,12 @@ configurations were executed on the real data):
 
 1. **Per-fold-F1 holdout** (`--holdout-score f1`) removes the base-rate
    plateau: the initiation field spreads (top `both_active & close` at
-   F1 0.238 with a real 0.138 margin) — but every body still fails the
-   accuracy-era fit gate (0.75), which under F1 semantics on 10 positives
-   demands near-perfection.
+   F1 0.238 with a real 0.138 margin over the 0.100 runner-up) — but
+   every body still fails the accuracy-era fit gate (0.75), which under
+   F1 semantics on 10 positives demands near-perfection. Artifact:
+   `results/e9_f1_holdout/caviar-e9-cont_rel_ec_mnc2_f1holdout_fixed075.json`
+   (its `init_scores_last_iteration_top5` records the 0.238 top score
+   and the field under it; both searches abstain under the 0.75 gate).
 2. **Permutation-null fit gate** (`--ec-fit-mode permutation-null`,
    1000 label permutations, permutation seed 7, 95th percentile of the
    POOL-MAXIMUM mean per-fold F1, per target, same fold split): derived
@@ -234,7 +241,8 @@ to ~0.50 over its 455 post-meeting frames). The score is therefore not
 evidence that terminations are learned, and is comparable to the
 published OLED/WOLED numbers only if their evaluation shares this frame
 universe (co-visible pair-frames) and tolerates a persistence-only
-termination model. Files: `results/e9_permutation_null/*.json`.
+termination model. Files: `results/e9_permutation_null/*.json` (item 2);
+`results/e9_f1_holdout/*.json` (item 1).
 
 ## E. 10-fold cross-validation over the whole corpus (protocol-matched)
 
@@ -289,10 +297,19 @@ Files: `results/e10_cv/caviar-e10-cv10.json`.
 
 ### E.1 Termination-signature vocabulary: the termination theory is learned
 
-Adding exactly two pre-declared pair-level transition relations to the EC
-vocabulary — `became_far` (the pair crosses the 25-unit threshold outward
-between consecutive observed co-visible steps) and `distance_increasing`
-(strictly growing distance) — and re-running the same pre-registered CV:
+Adding exactly two pair-level transition relations to the EC vocabulary
+— `became_far` (the pair crosses the 25-unit threshold outward between
+consecutive observed co-visible steps) and `distance_increasing`
+(strictly growing distance) — and re-running the CV. **What this step is,
+stated plainly: a SECOND ITERATION whose vocabulary was informed by the
+step-1 error analysis on the SAME folds.** The folds, seeds, per-fold
+gate derivation, and inner-holdout settings are unchanged from section
+E's pre-registration, and the two relations were declared before this
+run was executed — but they were chosen AFTER step 1's test-side
+failure mode was known (the 788 false positives concentrated in
+unterminated persistence), so the vocabulary itself is not
+pre-registered in the fixed-before-any-result sense, and test-fold
+rows influenced its construction:
 
 | 10-fold CV micro | P | R | F1 | tp/fp/fn |
 |---|---|---|---|---|
@@ -308,7 +325,9 @@ direct-protocol reference is byte-identical to step 1, proving the new
 relations never reach the direct vocabulary.
 
 **Caveat (supersedes section E's for the headline).** 0.778 micro-F1
-(10-fold CV over video segments, pre-registered gates/seeds): the
+(10-fold CV over video segments; gates/seeds/folds as pre-registered in
+section E, vocabulary a second iteration informed by step-1 error
+analysis on the same folds — see above): the
 termination theory is now learned on 7 of 10 folds (the 2-literal
 clause, became_far & distance_increasing, on 6 of them and alongside a
 second clause, both_walking & close, on the seventh — costing zero
@@ -319,8 +338,9 @@ separating spatially — a
 termination shape invisible to distance-crossing vocabulary;
 comparability to OLED's 0.792 remains subject to the step-1 protocol
 deltas (folds over segments vs their windowed interpretations with
-subsampled negatives, co-visible pair-frame universe, pre-registered vs
-tuned settings, and a rule language still without full termination
+subsampled negatives, co-visible pair-frame universe, our fixed
+gates/seeds — with the second-iteration vocabulary caveat above — vs
+their tuned settings, and a rule language still without full termination
 programs on 3 of 10 folds), and the direct-protocol reference of 0.214
 reflects pre-registered defaults, not that protocol's ceiling.
 
@@ -379,7 +399,14 @@ OLED dump (the combined train+test corpus sections A–E.2 run on) against
 the original 30 CAVIAR ground-truth XML files, independently re-deriving
 transitions from each real video's own frame sequence — never bridging
 across a splice or a train/test duplicate — and matching by exact local
-frame number.
+frame number. The audit is a shipped, re-runnable tool:
+`examples/caviar_woled/audit_dump_vs_xml.py` (dump segments are matched
+to source videos by exact pixel-trajectory agreement with iterative
+peeling, so one dump segment splicing two videos resolves into two
+`(video, offset)` clusters — see the script's own docstring); its full
+event-by-event output, including the segment-to-video map and each
+event's classification, is
+`results/f_audit/caviar-f-dump-vs-xml-audit.json`.
 
 Of the dump's 25 meeting transition events (13 initiations, 12
 terminations):
@@ -389,11 +416,17 @@ terminations):
   unmatched);
 - **3 are duplicates**: the videos `wk2gt` and `fomdgt2` each appear in
   BOTH the dump's train file and its test file, so the same real event is
-  counted twice (2 initiations + 1 termination);
+  counted twice (2 initiations + 1 termination: `wk2gt`'s initiation at
+  local frame 71, `fomdgt2`'s initiation/termination at local frames
+  475/495 — the audit JSON names each one). The audit also finds `wk3gt`
+  and `fomdgt3` shipped in both files, but both carry zero meeting
+  pair-frames, so they duplicate no meeting evidence;
 - **1 is a splice phantom**: a termination created by an invisible,
   exactly-40-millisecond bridge that the dump's segment-joining rule
   draws between two different videos it treats as one contiguous
-  recording — no such event exists in either video's own ground truth.
+  recording (`mwt2gt`'s last co-visible pair frame bridged straight into
+  `mws1gt`'s own timeline, dump timestamp 833520) — no such event exists
+  in either video's own ground truth.
 
 **Consequence for sections E and E.1.** Under the combined-corpus 10-fold
 split those sections cross-validate over, the two `wk2gt` copies land in
@@ -408,6 +441,10 @@ than anything fit to the duplicated video specifically, which limits —
 but does not eliminate — a memorization interpretation of those scores.
 Section G re-runs the same protocol on a corpus with both defects removed
 by construction.
+
+Files: `results/f_audit/caviar-f-dump-vs-xml-audit.json` (tool:
+`examples/caviar_woled/audit_dump_vs_xml.py`; the 855 figure above is
+the artifact's own `duplicated_gold_pairframes` entry for `wk2gt`).
 
 ## G. Clean corpus (XML-native): canonical protocol and results
 
@@ -428,45 +465,84 @@ scene shares a fold, closing the same-scene leakage section F
 describes). All gates are otherwise exactly as pre-registered in section
 E (per-fold permutation-null fit thresholds, F1 holdout, seed 7). The
 relational search path is fully deterministic, so CPU and GPU execution
-of this protocol are byte-identical; the run is CPU-only, and a full
-independent replay reproduced every value in the shipped result files
-exactly.
+of this protocol are byte-identical; the run is CPU-only. A full
+independent replay reproduced every value exactly for the two artifacts
+it covered — `caviar-f-xml-meeting-cv10.json` and the threshold-25
+moving measurement (now preserved as
+`caviar-f-xml-moving-cv10-threshold25.json`); the regenerated
+`close_34` moving run and the meeting census postdate that replay and
+carry no independent-replay attestation.
 
 **Corpus composition (event counts, post-deduplication).** Meeting: 12
 intervals, 11 initiations, 10 terminations, 1,812 gold pair-frames.
 Moving: 18 intervals, 5 initiations, 8 terminations, 3,136 gold
 pair-frames.
 
+**Close-threshold semantics (per fluent, canonical).** The canonical
+CAVIAR event definitions (RTEC's `rules.prolog`) define the two fluents
+over DIFFERENT proximity predicates: meeting over `close_25`, moving
+over `close_34`. The converter resolves its `close` relation through
+exactly this table (`caviar_xml_corpus.CANONICAL_CLOSE_THRESHOLDS`;
+runs made with the current runner record the threshold they ran with as
+`close_threshold` — the regenerated `caviar-f-xml-moving-cv10.json`
+carries `close_threshold: 34.0`, while `caviar-f-xml-meeting-cv10.json`
+predates the key, its threshold being the pre-change fixed default of
+25, and the preserved threshold-25 artifact encodes its value in the
+filename), so the moving rows below are measured under
+`close_34` — the predicate the published moving rules and scores
+actually use. An earlier revision of this section measured moving under
+the meeting threshold (25) without disclosing it; that measurement
+(micro F1 0.4868) is preserved unchanged as
+`results/f_xml_scene_cv/caviar-f-xml-moving-cv10-threshold25.json` —
+history, not the canonical row.
+
 | fluent, protocol (10-fold scene-family CV micro) | P | R | F1 | tp/fp/fn |
 |---|---|---|---|---|
 | meeting, EC + inertia | 0.000 | 0.000 | **0.000** | 0/120/1812 |
 | meeting, direct reference | 0.000 | 0.000 | 0.000 | 0/106/1812 |
-| moving, direct reference | 0.5927 | 0.4129 | **0.4868** | 1295/890/1841 |
-| moving, EC + inertia | 0.000 | 0.000 | 0.000 | 0/0/3136 |
+| moving, direct reference (close_34) | 0.5334 | 0.3817 | **0.4450** | 1197/1047/1939 |
+| moving, EC + inertia (close_34) | 0.000 | 0.000 | 0.000 | 0/0/3136 |
 
-**Why the EC search abstains everywhere.** With only 11 (meeting) and 5
-(moving) observed initiations once duplicates and splices are removed,
-each fold's training pool is smaller and less inflated than the
-duplication-affected dump protocol's — and the permutation-null gates
-rise accordingly: the meeting initiation fit gate moves from the dump
-protocol's per-fold 0.035–0.046 range to 0.050–0.071 here. The lowest
-gate under the new protocol (0.050) already exceeds the highest gate
-under the old one (0.0455), so the gate rises on every fold with no
-exception — a tightening of roughly 10% at the narrowest fold-to-fold
-comparison and up to 100% at the widest. No candidate clears the
-higher, honestly-derived gate on enough folds. This is a principled
-abstention at low event count — the harness's own call, not a search
-failure — not evidence that no rule exists; sections E/E.1's dump-corpus
-result shows the same 2-literal candidate CAN clear a lower, but
-duplication-inflated, gate.
+**Why the EC search abstains everywhere: the holdout collapses, not the
+gate.** The like-for-like comparison is against section E.1 (the same
+enlarged vocabulary this section runs — the candidate pool sets the
+permutation-null distribution, so gates are only comparable at equal
+pools): the dump protocol's per-fold meeting initiation gates there are
+0.050–0.0625, and this section's are 0.050–0.0714 — the minima are
+IDENTICAL (0.050) and the maximum rises 14%. Deduplication barely moved
+the statistical bar. (An earlier revision of this paragraph quoted the
+dump range as 0.035–0.046 and concluded the gate "rises on every fold,
+up to 100%"; that range is section E's, measured under the SMALLER
+state-only vocabulary, so the rise it showed was a vocabulary-pool
+effect misattributed to corpus deduplication.) What actually changes on
+the clean corpus is the score being gated: under scene-family folds the
+candidate's own holdout F1 collapses, because the two-regime transfer
+failure the next paragraph documents — `both_inactive & close` holds
+only on wk scenes, which sit in one fold — leaves every training side
+without cross-regime support, and a clause that cannot cover held-out
+positives scores near zero against even an unchanged gate. The
+abstention is still the harness's own principled call at 11/5 observed
+initiations, not a search failure — but its mechanism is a collapsed
+holdout score under leak-free folds, not a raised gate: on the dump
+corpus the same 2-literal candidate clears essentially the SAME gates
+on 8 of 10 folds because same-scene transfer and duplication hold its
+holdout F1 up.
 
 **The meeting zero is a property of the data under the stricter
 protocol, not a harness failure.** The direct-protocol reference still
 selects `both_inactive & close` on 9 of 10 folds; applied directly to
-the held-out wk-scene fold it scores frame F1 0.890 (tp=1060, fp=0) —
-the machinery is sound. The EC initiation search, run independently
-under the same stricter gates, commits a clause on only 1 of the 10
-folds (`both_active & close`). What fails is transfer:
+the held-out wk-scene fold it scores frame F1 0.890 (tp=1060, fp=0,
+fn=263) — the machinery is sound. Every number in this paragraph and
+the census below is artifact-backed:
+`results/f_xml_scene_cv/caviar-g-meeting-census.json`, produced by the
+shipped tool `examples/caviar_woled/xml_meeting_census.py` (which
+imports the CV harness's own `_xml_family_fold_assignment` for the fold
+split — same table, same seed, never a re-implementation). The EC
+initiation search, run independently under the same scene-family
+protocol (whose gates, per the paragraph above, are essentially
+unchanged — the collapse is in the holdout score), commits a clause on
+only 1 of the 10 folds (`both_active & close`).
+What fails is transfer:
 
 - the wk scene family carries 1,323 of 1,812 meeting-positive frames
   (73%) and, with honest scene grouping, sits in exactly ONE fold;
@@ -491,19 +567,37 @@ figures on those figures' own terms; this section is the leak-free
 floor, and under it a 2-literal state vocabulary does not transfer
 across meeting regimes at all.
 
-**Moving.** The direct-protocol reference selects the canonical
-published rule `both_walking & close` on every fold with a non-empty
-theory (micro F1 0.487; up to 0.938 on a single fold). The EC theory is
-empty everywhere for a counted reason: the whole corpus contains only
-5 observable moving initiations (13 of its 18 moving intervals begin
-before observation starts), so initiation search has nothing to clear
-its null gate with. The termination search does repeatedly select
-`both_active & close` (7/10 folds) — semantically coherent (a moving
-pair stops and starts interacting) — but with no initiation clauses
-inertia never starts, so the EC score stays degenerate.
+**Moving.** Under the canonical `close_34` the direct-protocol
+reference selects the canonical published rule — now literally
+`both_walking & close_34`, the same predicate the published rules use —
+on every fold with a non-empty theory, 9 of 10 (micro F1 0.4450; up to
+0.938 on a single fold). Where the clause is selected, widening close
+from 25 to 34 behaves exactly as the threshold semantics predict —
+recall up, precision down (e.g. fold 3: F1 0.286 → 0.504) — but the
+micro number is LOWER than the threshold-25 measurement's 0.4868 for a
+selection-level reason, not a scoring one: on the fold holding the fomd
+and mc1 scene families (1,546 of the 3,136 gold moving frames), the
+`close_34` training pool puts the top two candidates inside the
+selection tie band (margin 0.0093 against the 0.01 tie floor) and the
+search honestly abstains where the threshold-25 run had committed the
+clause. The canonical threshold does not "fix" moving — it exposes that
+the threshold-25 micro figure leaned on a fold whose selection was
+tie-fragile. The EC theory is empty everywhere for a counted reason:
+the whole corpus contains only 5 observable moving initiations (13 of
+its 18 moving intervals begin before observation starts), so initiation
+search has nothing to clear its null gate with. The termination search
+does repeatedly select `both_active & close` (7/10 folds) —
+semantically coherent (a moving pair stops and starts interacting) —
+but with no initiation clauses inertia never starts, so the EC score
+stays degenerate.
 
 Files: `results/f_xml_scene_cv/caviar-f-xml-meeting-cv10.json`,
-`results/f_xml_scene_cv/caviar-f-xml-moving-cv10.json`.
+`results/f_xml_scene_cv/caviar-f-xml-moving-cv10.json` (canonical
+`close_34`; the superseded threshold-25 measurement is kept as
+`caviar-f-xml-moving-cv10-threshold25.json`),
+`results/f_xml_scene_cv/caviar-g-meeting-census.json` (the wk-fold
+clause application and per-segment census; tool:
+`examples/caviar_woled/xml_meeting_census.py`).
 
 ## H. Claims summary: what this benchmark does and does not establish
 
@@ -512,7 +606,7 @@ Files: `results/f_xml_scene_cv/caviar-f-xml-meeting-cv10.json`,
 | OLED (published, tuned hyperparameters) | 0.792 | 0.732 |
 | WOLED-ASP (published, ibid.) | 0.887 | 0.821 |
 | Hand-crafted rules (published, ibid.) | 0.735 | 0.637 |
-| This work, distributed-corpus protocol (carries the duplication caveat — sections E.1/F) | 0.7782 | not run |
+| This work, distributed-corpus protocol (duplication caveat, sections E.1/F; vocabulary a second iteration informed by step-1 error analysis on the same folds, section E.1) | 0.7782 | not run |
 | This work, clean protocol (deduplicated, leakage-free — section G) | 0.0 (abstains) | 0.0 (abstains) |
 
 The moving column is from the same papers and tables cited for meeting in
@@ -522,7 +616,9 @@ against the downloaded PDFs the way the meeting numbers are above.
 **What may be claimed:** a meeting F1 in the published systems' own
 parity range on the distributed-corpus protocol (0.7782, inside the
 0.735–0.887 band above), under the duplication caveat documented in
-section F; a reproducible, independently-verified integrity audit of the
+section F and with its vocabulary honestly labeled a second iteration
+informed by step-1 error analysis on the same folds (section E.1);
+a reproducible, independently-verified integrity audit of the
 distributed benchmark corpus itself (section F); and principled
 abstention — the harness's own call, not a forced or tuned answer — at
 the clean protocol's actual event count (11 meeting / 5 moving
@@ -538,53 +634,163 @@ even setting duplication aside: the published point estimates were
 obtained by the authors' own selection of "the best among several other
 parameter settings that we tried" (OLED paper, Sect. 5) on the same
 distributed corpus this audit finds flawed, under their own richer rule
-language and windowed evaluation — not under a pre-registered protocol
-fixed before looking at results.
+language and windowed evaluation — not under a protocol fixed before
+looking at results. Our own 0.7782 is one step short of that standard
+too: its gates/seeds/folds were fixed in advance, but its vocabulary is
+the second, error-analysis-informed iteration section E.1 discloses —
+the honest contrast is "one disclosed adaptive step" against "an
+unreported number of tuning trials", not "pre-registered" against
+"tuned".
 
 ## Reproduction
 
+One vocabulary flag matters for replaying the EC rows and is therefore
+spelled explicitly in every command below: `--transition-vocab`. The
+sections D/D.1/E artifacts (`caviar-e5-*_ec_*`, `e9_permutation_null/*`,
+`e10_cv/*`) were generated when the EC candidate pool carried only the
+four ACTIVITY-based transition relations; the pool later gained
+`became_far`/`distance_increasing` (the section E.1 step), and the
+default (`--transition-vocab full`) reproduces THAT enlarged pool.
+Replaying the shipped D/D.1/E results requires `--transition-vocab
+activity` -- with the default, the "section E" command below produces
+section E.1's 0.778 configuration, not section E's 0.733. (Exception:
+the one neural EC artifact in that glob,
+`caviar-e5-cont_neu_ec_mnc2.json` — the neural initiation pool is
+activity-based by construction in either setting, so the flag decides
+nothing there and the runner refuses it in neural EC mode.) Result JSONs
+written by the CURRENT runners record the vocabulary the search actually
+ran over (`transition_vocab` + `candidate_vocabulary`). The pre-flag
+shipped artifacts (`caviar-e5-*_ec_*`, `e9_permutation_null/*`,
+`e10_cv/caviar-e10-cv10.json`, `e11_cv10_termination.json`) predate the
+`transition_vocab` field and do not carry it; for those, the check is
+that a replay matches every field the shipped artifact DOES contain
+(verified for e10 and both e9 permutation-null variants), with the
+replay JSON a strict superset — the extra fields are the new provenance
+keys only.
+
+The activity-vocabulary commands were replay-verified after the flag was
+introduced: the section E command reproduces
+`e10_cv/caviar-e10-cv10.json` exactly (micro P/R/F1
+0.6580/0.8271/0.7329, tp/fp/fn 1516/788/317, plus every per-fold gate,
+clause list, and scoring block), and the section D.1 item-2 command
+reproduces both `e9_permutation_null/*.json` files exactly (gates
+init 0.0444 / term 0.125, the single `both_active & close` initiation
+clause, frame F1 0.9424 at tp/fp/fn 442/7/47, and the full null
+summaries), in both tie-tolerance variants. These runs are
+CPU-deterministic, so the check is bit-for-bit on every field the
+shipped artifact records, not approximate (at whole-file level the
+replay JSON is a superset: it adds the provenance fields the pre-flag
+artifacts lack).
+
 ```
-# windowed folds, direct protocol
+# windowed folds, direct protocol (section A; CUDA required)
 python examples/caviar_woled/run_caviar_theory.py --mode neural --protocol direct \
   --pkl caviar_folds.pkl --fold fold1 --k 4 --seed 7 --steps 400 --hidden 16 \
   --max-clauses 4 --out RESULT.json
 
-# continuous OLED split, direct protocol, tie tolerance pre-declared for the re-run (see section B)
+# continuous OLED split, direct protocol, tie tolerance pre-declared for
+# the re-run (section B; CUDA required). The direct protocol's vocabulary
+# never contains transition relations, so no vocabulary flag applies.
 python examples/caviar_woled/run_caviar_theory.py --mode relational --protocol direct \
   --data continuous --pkl caviar-train.json --test-json caviar-test.json \
   --k 4 --seed 7 --steps 400 --max-clauses 4 --tie-tolerance 0.001 --out RESULT.json
 
-# continuous, EC protocol, 3-literal relational search (CPU-only)
+# continuous, EC protocol, 3-literal relational search (section D's
+# 3-literal relational rows; CPU-only). This reproduces the
+# CONFIGURATION of the historical caviar-e5-cont_rel_ec_mnc2.json, not
+# its exact schema: the shipped e5 artifacts predate several provenance
+# fields (max_body_literals, transition_vocab, the enlarged ec block),
+# so a replay JSON is a structural superset and no committed runner
+# version reproduces the historical files byte-for-byte. The mnc3 row
+# (caviar-e5-cont_rel_ec_mnc3.json) is the same command with
+# --min-new-covered 3. caviar-e5-cont_neu_ec_mnc2.json is a
+# CUDA-required neural run and is NOT covered by this CPU-only command.
 # (--steps is a required flag; relational mode clamps it to 25 internally,
 # so the value does not affect the EC search)
 python examples/caviar_woled/run_caviar_theory.py --mode relational --protocol ec \
   --data continuous --pkl caviar-train.json --test-json caviar-test.json \
-  --k 4 --seed 7 --steps 400 --min-new-covered 2 --max-body-literals 3 --out RESULT.json
+  --k 4 --seed 7 --steps 400 --min-new-covered 2 --max-body-literals 3 \
+  --transition-vocab activity --out RESULT.json
 
-# continuous, EC protocol, F1 holdout + permutation-null fit gate (section D.1; CPU-only)
+# continuous, EC protocol, F1 holdout + fixed 0.75 fit gate (section D.1
+# item 1; CPU-only) -- the run that shows the field spreading under F1
+# while every body still fails the accuracy-era gate
 python examples/caviar_woled/run_caviar_theory.py --mode relational --protocol ec \
   --data continuous --pkl caviar-train.json --test-json caviar-test.json \
   --k 4 --seed 7 --steps 400 --min-new-covered 2 --max-body-literals 3 \
-  --holdout-score f1 --ec-fit-mode permutation-null --out RESULT.json
+  --holdout-score f1 --transition-vocab activity --out RESULT.json
 
-# 10-fold CV over the whole corpus, EC protocol (section E; CPU-only)
+# continuous, EC protocol, F1 holdout + permutation-null fit gate
+# (section D.1 item 2, the e9 artifacts; CPU-only). The shipped
+# tie-tolerance-0.001 variant adds --tie-tolerance 0.001.
+python examples/caviar_woled/run_caviar_theory.py --mode relational --protocol ec \
+  --data continuous --pkl caviar-train.json --test-json caviar-test.json \
+  --k 4 --seed 7 --steps 400 --min-new-covered 2 --max-body-literals 3 \
+  --holdout-score f1 --ec-fit-mode permutation-null \
+  --transition-vocab activity --out RESULT.json
+
+# 10-fold CV over the whole corpus, EC protocol, STATE vocabulary
+# (section E, the 0.733 row / e10 artifact; CPU-only)
 python examples/caviar_woled/run_caviar_cv.py \
   --train-json caviar-train.json --test-json caviar-test.json \
-  --folds 10 --seed 7 --out RESULT.json
+  --folds 10 --seed 7 --transition-vocab activity --out RESULT.json
+
+# 10-fold CV over the whole corpus, EC protocol, + termination-signature
+# vocabulary (section E.1, the 0.778 row / e11 artifact; CPU-only).
+# --transition-vocab full is the default, spelled out here because the
+# flag is exactly what separates this command from section E's.
+python examples/caviar_woled/run_caviar_cv.py \
+  --train-json caviar-train.json --test-json caviar-test.json \
+  --folds 10 --seed 7 --transition-vocab full --out RESULT.json
 
 # 10-fold CV over the whole corpus, neural close_nn initiation search
-# (section E.2; CUDA required)
+# (section E.2, the e12 artifact; CUDA required). Run under the full
+# (default) vocabulary: the neural initiation pool excludes the
+# distance-derived transitions in either setting, and the always-
+# relational termination search saw the full pool in the shipped run.
 python examples/caviar_woled/run_caviar_cv.py --mode neural \
   --train-json caviar-train.json --test-json caviar-test.json \
   --folds 10 --seed 7 --out RESULT.json
 
-# 10-fold scene-family CV on the XML-native corpus (section G; CPU-only)
+# 10-fold scene-family CV on the XML-native corpus (section G, the
+# f_xml_scene_cv artifacts; CPU-only). Full (default) vocabulary, as in
+# the shipped run; the close threshold resolves per fluent to the
+# canonical value (meeting 25, moving 34 -- see section G's own
+# close-threshold paragraph) and is recorded in the result JSON.
 python examples/caviar_woled/run_caviar_cv.py --data-source xml \
   --xml-dir <dir with the 30 CAVIAR ground-truth XML files> \
   --fluent meeting --folds 10 --seed 7 --out RESULT.json
 python examples/caviar_woled/run_caviar_cv.py --data-source xml \
   --xml-dir <dir with the 30 CAVIAR ground-truth XML files> \
   --fluent moving --folds 10 --seed 7 --out RESULT.json
+
+# the HISTORICAL threshold-25 moving measurement (micro F1 0.4868,
+# superseded by the canonical close_34 row; preserved as
+# caviar-f-xml-moving-cv10-threshold25.json). --close-threshold
+# overrides the canonical per-fluent table. The preserved artifact
+# predates the provenance fields (see the pre-flag note above), so a
+# replay matches every field it does contain and adds the new keys.
+python examples/caviar_woled/run_caviar_cv.py --data-source xml \
+  --xml-dir <dir with the 30 CAVIAR ground-truth XML files> \
+  --fluent moving --close-threshold 25 --folds 10 --seed 7 --out RESULT.json
+
+# dump-vs-XML integrity audit (section F, regenerates
+# results/f_audit/caviar-f-dump-vs-xml-audit.json; CPU-only). Expected
+# headline values: 21 real / 3 duplicate / 1 splice, 855 duplicated
+# wk2gt gold pair-frames, 0 unclaimed XML events.
+python examples/caviar_woled/audit_dump_vs_xml.py \
+  --train-json caviar-train.json --test-json caviar-test.json \
+  --xml-dir <dir with the 30 CAVIAR ground-truth XML files> \
+  --out RESULT.json
+
+# meeting clause-application census on the XML-native corpus (section
+# G's meeting paragraph, regenerates
+# results/f_xml_scene_cv/caviar-g-meeting-census.json; CPU-only).
+# Expected headline values: wk-fold tp/fp/fn 1060/0/263 (frame F1
+# 0.8896) and the per-segment coverage census.
+python examples/caviar_woled/xml_meeting_census.py \
+  --xml-dir <dir with the 30 CAVIAR ground-truth XML files> \
+  --folds 10 --seed 7 --out RESULT.json
 ```
 
 GPU runs need CUDA (see each script's docstring); the 3-literal EC search

@@ -605,6 +605,80 @@ def test_run_fold_xml_source_moving_fluent_reads_a_different_holds_set(monkeypat
     assert result["ec"]["n_init_train"] == 0  # video B has no "moving" holds at all
 
 
+def test_parse_args_close_threshold_defaults_to_none():
+    args = run_caviar_cv.parse_args(
+        ["--data-source", "xml", "--xml-dir", "d", "--out", "o.json"],
+    )
+    assert args.close_threshold is None
+
+
+def test_parse_args_close_threshold_accepted_with_xml_source():
+    # The entry point that regenerates the historical threshold-25 moving
+    # measurement (caviar-f-xml-moving-cv10-threshold25.json) -- see
+    # CANONICAL_CLOSE_THRESHOLDS's explicit-wins comment.
+    args = run_caviar_cv.parse_args(
+        ["--data-source", "xml", "--xml-dir", "d", "--fluent", "moving",
+         "--close-threshold", "25", "--out", "o.json"],
+    )
+    assert args.close_threshold == 25.0
+
+
+def test_parse_args_close_threshold_refused_with_dump_source():
+    # The dump path's conversion never parameterized the threshold (fixed
+    # 25 default); accepting the flag there would be a silent no-op.
+    with pytest.raises(SystemExit):
+        run_caviar_cv.parse_args(REQUIRED + ["--close-threshold", "25"])
+
+
+def test_run_fold_xml_source_passes_explicit_close_threshold_to_conversion(monkeypatch):
+    import caviar_xml_corpus
+
+    train_videos, test_videos = _tiny_two_video_corpus()
+    seen = []
+    real_convert = caviar_xml_corpus.convert_xml_corpus
+
+    def spy(videos, fluent="meeting", close_threshold=None):
+        seen.append(close_threshold)
+        return real_convert(videos, fluent=fluent, close_threshold=close_threshold)
+
+    monkeypatch.setattr(caviar_xml_corpus, "convert_xml_corpus", spy)
+    monkeypatch.setattr(
+        run_caviar_cv, "_run_init_search",
+        lambda mode, train, test, train_ec_relations, init_facts, init_labels, seed: {
+            "clauses": [], "stop_reason": "no positives remain in the residual",
+            "min_fit": 0.5, "null_summary": None, "selection_reasons": [],
+            "iterations": [],
+            "predict_clause_test": None, "detector_probe": None, "wall_s": 0.0,
+        },
+    )
+    monkeypatch.setattr(
+        run_caviar_cv, "_induce_ec_target",
+        lambda train_relations, facts, labels, seed: _fake_ec_theory([]),
+    )
+    monkeypatch.setattr(
+        run_caviar_cv, "_induce_direct_theory",
+        lambda train_relations, facts, labels, seed: {
+            "clauses": [], "stop_reason": "no positives remain in the residual",
+            "iterations": [],
+        },
+    )
+
+    run_caviar_cv.run_fold(
+        0, train_videos, test_videos, seed=7, data_source="xml",
+        fluent="meeting", close_threshold=25.0,
+    )
+    # Both the train-side and the test-side conversion saw the explicit
+    # threshold (None would mean "canonical table", losing the override).
+    assert seen == [25.0, 25.0]
+
+
+def test_run_fold_dump_source_rejects_an_explicit_close_threshold():
+    with pytest.raises(ValueError, match="close_threshold"):
+        run_caviar_cv.run_fold(
+            0, [], [], seed=7, data_source="dump", close_threshold=25.0,
+        )
+
+
 def test_run_fold_dump_source_default_is_unaffected_by_the_new_parameters():
     # Regression guard: the dump-source default path (data_source="dump")
     # is exercised end to end by `test_caviar_cv.py`'s own `run_fold`

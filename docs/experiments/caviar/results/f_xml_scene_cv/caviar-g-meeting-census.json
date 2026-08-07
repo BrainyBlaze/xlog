@@ -1,0 +1,249 @@
+{
+  "xml_dir": "C:/Users/User/flt-workspace/projects/xlog/runs/r_djwq4hnn0dqoi4e2/caviar_xml/neurASP-caviar/prepare_data/xml_caviar",
+  "folds": 10,
+  "seed": 7,
+  "fluent": "meeting",
+  "close_threshold": 25.0,
+  "clause": [
+    "both_inactive",
+    "close"
+  ],
+  "wk_fold": 5,
+  "fold_of_video": {
+    "br1gt.xml": 6,
+    "br2gt.xml": 6,
+    "br3gt.xml": 6,
+    "br4gt.xml": 6,
+    "bww1gt.xml": 8,
+    "bww2gt.xml": 8,
+    "fcgt.xml": 2,
+    "fomdgt1.xml_": 9,
+    "fomdgt2.xml_": 9,
+    "fomdgt3.xml": 9,
+    "fra1gt.xml": 5,
+    "fra2gt.xml": 5,
+    "lb1gt.xml": 3,
+    "lb2gt.xml": 3,
+    "lbbcgt.xml": 3,
+    "lbgt.xml": 3,
+    "lbpugt.xml": 3,
+    "mc1gt.xml": 0,
+    "ms3ggt.xml": 7,
+    "mws1gt.xml": 0,
+    "mwt1gt.xml": 0,
+    "mwt2gt.xml": 0,
+    "rffgt.xml": 4,
+    "ricgt.xml": 3,
+    "rsfgt.xml": 4,
+    "rwgt.xml": 1,
+    "spgt.xml": 1,
+    "wk1gt.xml": 5,
+    "wk2gt.xml": 5,
+    "wk3gt.xml": 5
+  },
+  "wk_fold_scoring": {
+    "fold": 5,
+    "test_videos": [
+      "fra1gt.xml",
+      "fra2gt.xml",
+      "wk1gt.xml",
+      "wk2gt.xml",
+      "wk3gt.xml"
+    ],
+    "clause_applied_to_test_fold": {
+      "precision": 1.0,
+      "recall": 0.8012093726379441,
+      "f1": 0.8896349139739824,
+      "tp": 1060,
+      "fp": 0,
+      "fn": 263
+    },
+    "train_side": {
+      "n_positives_total": 489,
+      "n_positives_covered_by_clause": 0,
+      "n_negatives_covered_by_clause": 106
+    }
+  },
+  "census_by_video": [
+    {
+      "video": "br1gt.xml",
+      "n_meeting_positive_pairframes": 0,
+      "n_covered_by_clause": 0,
+      "n_close_on_positives": 0
+    },
+    {
+      "video": "br2gt.xml",
+      "n_meeting_positive_pairframes": 0,
+      "n_covered_by_clause": 0,
+      "n_close_on_positives": 0
+    },
+    {
+      "video": "br3gt.xml",
+      "n_meeting_positive_pairframes": 0,
+      "n_covered_by_clause": 0,
+      "n_close_on_positives": 0
+    },
+    {
+      "video": "br4gt.xml",
+      "n_meeting_positive_pairframes": 0,
+      "n_covered_by_clause": 0,
+      "n_close_on_positives": 0
+    },
+    {
+      "video": "bww1gt.xml",
+      "n_meeting_positive_pairframes": 0,
+      "n_covered_by_clause": 0,
+      "n_close_on_positives": 0
+    },
+    {
+      "video": "bww2gt.xml",
+      "n_meeting_positive_pairframes": 0,
+      "n_covered_by_clause": 0,
+      "n_close_on_positives": 0
+    },
+    {
+      "video": "fcgt.xml",
+      "n_meeting_positive_pairframes": 0,
+      "n_covered_by_clause": 0,
+      "n_close_on_positives": 0
+    },
+    {
+      "video": "fomdgt1.xml_",
+      "n_meeting_positive_pairframes": 0,
+      "n_covered_by_clause": 0,
+      "n_close_on_positives": 0
+    },
+    {
+      "video": "fomdgt2.xml_",
+      "n_meeting_positive_pairframes": 21,
+      "n_covered_by_clause": 0,
+      "n_close_on_positives": 21
+    },
+    {
+      "video": "fomdgt3.xml",
+      "n_meeting_positive_pairframes": 0,
+      "n_covered_by_clause": 0,
+      "n_close_on_positives": 0
+    },
+    {
+      "video": "fra1gt.xml",
+      "n_meeting_positive_pairframes": 0,
+      "n_covered_by_clause": 0,
+      "n_close_on_positives": 0
+    },
+    {
+      "video": "fra2gt.xml",
+      "n_meeting_positive_pairframes": 0,
+      "n_covered_by_clause": 0,
+      "n_close_on_positives": 0
+    },
+    {
+      "video": "lb1gt.xml",
+      "n_meeting_positive_pairframes": 123,
+      "n_covered_by_clause": 0,
+      "n_close_on_positives": 0
+    },
+    {
+      "video": "lb2gt.xml",
+      "n_meeting_positive_pairframes": 0,
+      "n_covered_by_clause": 0,
+      "n_close_on_positives": 0
+    },
+    {
+      "video": "lbbcgt.xml",
+      "n_meeting_positive_pairframes": 0,
+      "n_covered_by_clause": 0,
+      "n_close_on_positives": 0
+    },
+    {
+      "video": "lbgt.xml",
+      "n_meeting_positive_pairframes": 0,
+      "n_covered_by_clause": 0,
+      "n_close_on_positives": 0
+    },
+    {
+      "video": "lbpugt.xml",
+      "n_meeting_positive_pairframes": 0,
+      "n_covered_by_clause": 0,
+      "n_close_on_positives": 0
+    },
+    {
+      "video": "mc1gt.xml",
+      "n_meeting_positive_pairframes": 0,
+      "n_covered_by_clause": 0,
+      "n_close_on_positives": 0
+    },
+    {
+      "video": "ms3ggt.xml",
+      "n_meeting_positive_pairframes": 22,
+      "n_covered_by_clause": 0,
+      "n_close_on_positives": 22
+    },
+    {
+      "video": "mws1gt.xml",
+      "n_meeting_positive_pairframes": 26,
+      "n_covered_by_clause": 0,
+      "n_close_on_positives": 26
+    },
+    {
+      "video": "mwt1gt.xml",
+      "n_meeting_positive_pairframes": 25,
+      "n_covered_by_clause": 0,
+      "n_close_on_positives": 20
+    },
+    {
+      "video": "mwt2gt.xml",
+      "n_meeting_positive_pairframes": 147,
+      "n_covered_by_clause": 0,
+      "n_close_on_positives": 147
+    },
+    {
+      "video": "rffgt.xml",
+      "n_meeting_positive_pairframes": 65,
+      "n_covered_by_clause": 0,
+      "n_close_on_positives": 0
+    },
+    {
+      "video": "ricgt.xml",
+      "n_meeting_positive_pairframes": 0,
+      "n_covered_by_clause": 0,
+      "n_close_on_positives": 0
+    },
+    {
+      "video": "rsfgt.xml",
+      "n_meeting_positive_pairframes": 0,
+      "n_covered_by_clause": 0,
+      "n_close_on_positives": 0
+    },
+    {
+      "video": "rwgt.xml",
+      "n_meeting_positive_pairframes": 0,
+      "n_covered_by_clause": 0,
+      "n_close_on_positives": 0
+    },
+    {
+      "video": "spgt.xml",
+      "n_meeting_positive_pairframes": 60,
+      "n_covered_by_clause": 0,
+      "n_close_on_positives": 60
+    },
+    {
+      "video": "wk1gt.xml",
+      "n_meeting_positive_pairframes": 468,
+      "n_covered_by_clause": 232,
+      "n_close_on_positives": 468
+    },
+    {
+      "video": "wk2gt.xml",
+      "n_meeting_positive_pairframes": 855,
+      "n_covered_by_clause": 828,
+      "n_close_on_positives": 855
+    },
+    {
+      "video": "wk3gt.xml",
+      "n_meeting_positive_pairframes": 0,
+      "n_covered_by_clause": 0,
+      "n_close_on_positives": 0
+    }
+  ]
+}

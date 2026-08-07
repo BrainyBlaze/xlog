@@ -170,6 +170,26 @@ TRANSITION_RELATION_NAMES: tuple[str, ...] = (
     "became_far", "distance_increasing",
 )
 
+# The canonical close threshold PER FLUENT, from the canonical CAVIAR
+# event definitions (RTEC, `examples/caviar/resources/patterns/
+# rules.prolog` in aartikis/RTEC): meeting initiates over `close(P1, P2,
+# 25)`, moving over `close(P1, P2, 34)` -- the two fluents are defined
+# over DIFFERENT proximity predicates, not one shared "close". A single
+# fluent-independent 25px threshold (this module's original behavior)
+# therefore labels every moving pair at pixel distance in (25, 34] as
+# `far`, structurally starving any `... & close` moving rule of exactly
+# those gold frames. `convert_xml_corpus`'s `close_threshold=None`
+# default resolves through this table; an explicit value still wins --
+# `run_caviar_cv.py --data-source xml --fluent moving
+# --close-threshold 25` is the shipped entry point that regenerates the
+# historical threshold-25 moving measurement (see
+# docs/experiments/caviar/README.md section G and its Reproduction
+# block).
+CANONICAL_CLOSE_THRESHOLDS: dict[str, float] = {
+    "meeting": 25.0,
+    "moving": 34.0,
+}
+
 
 def _person_num(pid: str) -> int:
     """``idN`` -> ``N``, so persons/pairs sort numerically regardless of
@@ -460,7 +480,9 @@ def count_fluent_transitions(videos: list[dict], fluent: str) -> dict:
     return totals
 
 
-def convert_xml_corpus(videos: list[dict], fluent: str = "meeting", close_threshold: float = 25.0) -> dict:
+def convert_xml_corpus(
+    videos: list[dict], fluent: str = "meeting", close_threshold: float | None = None,
+) -> dict:
     """Flatten a list of `load_xml_corpus` per-video dicts into the SAME
     pair-time relation-space contract `caviar_continuous.convert_continuous`
     builds over the OLED dump's own continuous timeline -- same keys
@@ -477,6 +499,14 @@ def convert_xml_corpus(videos: list[dict], fluent: str = "meeting", close_thresh
         REAL, un-spliced video, never a dump segment that might silently
         splice more than one source video together.
 
+    ``close_threshold=None`` (the default) resolves to the CANONICAL
+    per-fluent threshold (`CANONICAL_CLOSE_THRESHOLDS`: meeting 25,
+    moving 34 -- see that table's own comment for the RTEC provenance);
+    passing an explicit value overrides the canonical one, which is how
+    a historical measurement made under a non-canonical threshold stays
+    reproducible. For ``fluent="meeting"`` the resolution is
+    byte-identical to the previous fixed 25.0 default.
+
     Raises ``ValueError`` for a ``fluent`` outside ``{"meeting",
     "moving"}`` (the two targets this project benchmarks; `fluent` values
     covering ``fighting``/``leavingObject`` corpus statistics are available
@@ -484,6 +514,8 @@ def convert_xml_corpus(videos: list[dict], fluent: str = "meeting", close_thresh
     flattening at all)."""
     if fluent not in ("meeting", "moving"):
         raise ValueError(f"fluent must be 'meeting' or 'moving' (got {fluent!r}).")
+    if close_threshold is None:
+        close_threshold = CANONICAL_CLOSE_THRESHOLDS[fluent]
 
     facts: list[tuple[int, int]] = []
     is_positive: list[bool] = []

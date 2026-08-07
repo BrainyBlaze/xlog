@@ -1,0 +1,1510 @@
+{
+  "train_json": "C:/Users/User/flt-workspace/projects/xlog/runs/r_djwq4hnn0dqoi4e2/caviar_data_continuous/caviar-data/caviar-train.json",
+  "test_json": "C:/Users/User/flt-workspace/projects/xlog/runs/r_djwq4hnn0dqoi4e2/caviar_data_continuous/caviar-data/caviar-test.json",
+  "xml_dir": "C:/Users/User/flt-workspace/projects/xlog/runs/r_djwq4hnn0dqoi4e2/caviar_xml/neurASP-caviar/prepare_data/xml_caviar",
+  "match_min_points": 10,
+  "dump_events": [
+    {
+      "seg_label": "train#0",
+      "split": "train",
+      "seg_idx": 0,
+      "pair": [
+        "id1",
+        "id2"
+      ],
+      "t": 27280,
+      "kind": "init",
+      "mapped": {
+        "video": "wk2gt.xml",
+        "video_idx": 28,
+        "offset": 24440,
+        "xml_pair": [
+          "id1",
+          "id2"
+        ],
+        "frame": 71,
+        "t_pixel_matched": true
+      },
+      "classification": "real"
+    },
+    {
+      "seg_label": "train#0",
+      "split": "train",
+      "seg_idx": 0,
+      "pair": [
+        "id1",
+        "id2"
+      ],
+      "t": 61480,
+      "kind": "term",
+      "mapped": {
+        "video": "wk2gt.xml",
+        "video_idx": 28,
+        "offset": 24440,
+        "xml_pair": [
+          "id1",
+          "id2"
+        ],
+        "frame": 926,
+        "t_pixel_matched": true
+      },
+      "classification": "real"
+    },
+    {
+      "seg_label": "train#8",
+      "split": "train",
+      "seg_idx": 8,
+      "pair": [
+        "id0",
+        "id1"
+      ],
+      "t": 509720,
+      "kind": "term",
+      "mapped": {
+        "video": "rffgt.xml",
+        "video_idx": 22,
+        "offset": 507120,
+        "xml_pair": [
+          "id0",
+          "id1"
+        ],
+        "frame": 65,
+        "t_pixel_matched": true
+      },
+      "classification": "real"
+    },
+    {
+      "seg_label": "train#8",
+      "split": "train",
+      "seg_idx": 8,
+      "pair": [
+        "id1",
+        "id2"
+      ],
+      "t": 559200,
+      "kind": "init",
+      "mapped": {
+        "video": "lb1gt.xml",
+        "video_idx": 12,
+        "offset": 547400,
+        "xml_pair": [
+          "id1",
+          "id2"
+        ],
+        "frame": 295,
+        "t_pixel_matched": true
+      },
+      "classification": "real"
+    },
+    {
+      "seg_label": "train#8",
+      "split": "train",
+      "seg_idx": 8,
+      "pair": [
+        "id1",
+        "id2"
+      ],
+      "t": 564120,
+      "kind": "term",
+      "mapped": {
+        "video": "lb1gt.xml",
+        "video_idx": 12,
+        "offset": 547400,
+        "xml_pair": [
+          "id1",
+          "id2"
+        ],
+        "frame": 418,
+        "t_pixel_matched": true
+      },
+      "classification": "real"
+    },
+    {
+      "seg_label": "train#13",
+      "split": "train",
+      "seg_idx": 13,
+      "pair": [
+        "id1",
+        "id2"
+      ],
+      "t": 785240,
+      "kind": "init",
+      "mapped": {
+        "video": "mwt1gt.xml",
+        "video_idx": 20,
+        "offset": 772120,
+        "xml_pair": [
+          "id1",
+          "id2"
+        ],
+        "frame": 328,
+        "t_pixel_matched": true
+      },
+      "classification": "real"
+    },
+    {
+      "seg_label": "train#13",
+      "split": "train",
+      "seg_idx": 13,
+      "pair": [
+        "id1",
+        "id2"
+      ],
+      "t": 786240,
+      "kind": "term",
+      "mapped": {
+        "video": "mwt1gt.xml",
+        "video_idx": 20,
+        "offset": 772120,
+        "xml_pair": [
+          "id1",
+          "id2"
+        ],
+        "frame": 353,
+        "t_pixel_matched": true
+      },
+      "classification": "real"
+    },
+    {
+      "seg_label": "train#15",
+      "split": "train",
+      "seg_idx": 15,
+      "pair": [
+        "id1",
+        "id2"
+      ],
+      "t": 813080,
+      "kind": "init",
+      "mapped": {
+        "video": "mwt2gt.xml",
+        "video_idx": 21,
+        "offset": 800400,
+        "xml_pair": [
+          "id1",
+          "id2"
+        ],
+        "frame": 317,
+        "t_pixel_matched": true
+      },
+      "classification": "real"
+    },
+    {
+      "seg_label": "train#15",
+      "split": "train",
+      "seg_idx": 15,
+      "pair": [
+        "id1",
+        "id2"
+      ],
+      "t": 814880,
+      "kind": "term",
+      "mapped": {
+        "video": "mwt2gt.xml",
+        "video_idx": 21,
+        "offset": 800400,
+        "xml_pair": [
+          "id1",
+          "id2"
+        ],
+        "frame": 362,
+        "t_pixel_matched": true
+      },
+      "classification": "real"
+    },
+    {
+      "seg_label": "train#15",
+      "split": "train",
+      "seg_idx": 15,
+      "pair": [
+        "id1",
+        "id2"
+      ],
+      "t": 829400,
+      "kind": "init",
+      "mapped": {
+        "video": "mwt2gt.xml",
+        "video_idx": 21,
+        "offset": 800400,
+        "xml_pair": [
+          "id1",
+          "id2"
+        ],
+        "frame": 725,
+        "t_pixel_matched": true
+      },
+      "classification": "real"
+    },
+    {
+      "seg_label": "train#15",
+      "split": "train",
+      "seg_idx": 15,
+      "pair": [
+        "id1",
+        "id2"
+      ],
+      "t": 833520,
+      "kind": "term",
+      "mapped": {
+        "video": "mws1gt.xml",
+        "video_idx": 19,
+        "offset": 833480,
+        "xml_pair": [
+          "id1",
+          "id2"
+        ],
+        "frame": 1,
+        "t_pixel_matched": true
+      },
+      "classification": "splice_artifact"
+    },
+    {
+      "seg_label": "train#15",
+      "split": "train",
+      "seg_idx": 15,
+      "pair": [
+        "id1",
+        "id3"
+      ],
+      "t": 840240,
+      "kind": "init",
+      "mapped": {
+        "video": "mws1gt.xml",
+        "video_idx": 19,
+        "offset": 833480,
+        "xml_pair": [
+          "id1",
+          "id3"
+        ],
+        "frame": 169,
+        "t_pixel_matched": true
+      },
+      "classification": "real"
+    },
+    {
+      "seg_label": "train#15",
+      "split": "train",
+      "seg_idx": 15,
+      "pair": [
+        "id1",
+        "id3"
+      ],
+      "t": 841280,
+      "kind": "term",
+      "mapped": {
+        "video": "mws1gt.xml",
+        "video_idx": 19,
+        "offset": 833480,
+        "xml_pair": [
+          "id1",
+          "id3"
+        ],
+        "frame": 195,
+        "t_pixel_matched": true
+      },
+      "classification": "real"
+    },
+    {
+      "seg_label": "train#16",
+      "split": "train",
+      "seg_idx": 16,
+      "pair": [
+        "id0",
+        "id1"
+      ],
+      "t": 867600,
+      "kind": "init",
+      "mapped": {
+        "video": "ms3ggt.xml",
+        "video_idx": 18,
+        "offset": 858400,
+        "xml_pair": [
+          "id0",
+          "id1"
+        ],
+        "frame": 230,
+        "t_pixel_matched": true
+      },
+      "classification": "real"
+    },
+    {
+      "seg_label": "train#16",
+      "split": "train",
+      "seg_idx": 16,
+      "pair": [
+        "id0",
+        "id1"
+      ],
+      "t": 868480,
+      "kind": "term",
+      "mapped": {
+        "video": "ms3ggt.xml",
+        "video_idx": 18,
+        "offset": 858400,
+        "xml_pair": [
+          "id0",
+          "id1"
+        ],
+        "frame": 252,
+        "t_pixel_matched": true
+      },
+      "classification": "real"
+    },
+    {
+      "seg_label": "train#17",
+      "split": "train",
+      "seg_idx": 17,
+      "pair": [
+        "id0",
+        "id1"
+      ],
+      "t": 917360,
+      "kind": "init",
+      "mapped": {
+        "video": "spgt.xml",
+        "video_idx": 26,
+        "offset": 910400,
+        "xml_pair": [
+          "id0",
+          "id1"
+        ],
+        "frame": 174,
+        "t_pixel_matched": true
+      },
+      "classification": "real"
+    },
+    {
+      "seg_label": "train#17",
+      "split": "train",
+      "seg_idx": 17,
+      "pair": [
+        "id0",
+        "id1"
+      ],
+      "t": 919760,
+      "kind": "term",
+      "mapped": {
+        "video": "spgt.xml",
+        "video_idx": 26,
+        "offset": 910400,
+        "xml_pair": [
+          "id0",
+          "id1"
+        ],
+        "frame": 234,
+        "t_pixel_matched": true
+      },
+      "classification": "real"
+    },
+    {
+      "seg_label": "train#20",
+      "split": "train",
+      "seg_idx": 20,
+      "pair": [
+        "id5",
+        "id6"
+      ],
+      "t": 1030680,
+      "kind": "init",
+      "mapped": {
+        "video": "fomdgt2.xml_",
+        "video_idx": 8,
+        "offset": 1014920,
+        "xml_pair": [
+          "id5",
+          "id6"
+        ],
+        "frame": 394,
+        "t_pixel_matched": true
+      },
+      "classification": "real"
+    },
+    {
+      "seg_label": "train#20",
+      "split": "train",
+      "seg_idx": 20,
+      "pair": [
+        "id5",
+        "id6"
+      ],
+      "t": 1030720,
+      "kind": "term",
+      "mapped": {
+        "video": "fomdgt2.xml_",
+        "video_idx": 8,
+        "offset": 1014920,
+        "xml_pair": [
+          "id5",
+          "id6"
+        ],
+        "frame": 395,
+        "t_pixel_matched": true
+      },
+      "classification": "real"
+    },
+    {
+      "seg_label": "train#20",
+      "split": "train",
+      "seg_idx": 20,
+      "pair": [
+        "id2",
+        "id6"
+      ],
+      "t": 1033920,
+      "kind": "init",
+      "mapped": {
+        "video": "fomdgt2.xml_",
+        "video_idx": 8,
+        "offset": 1014920,
+        "xml_pair": [
+          "id2",
+          "id6"
+        ],
+        "frame": 475,
+        "t_pixel_matched": true
+      },
+      "classification": "real"
+    },
+    {
+      "seg_label": "train#20",
+      "split": "train",
+      "seg_idx": 20,
+      "pair": [
+        "id2",
+        "id6"
+      ],
+      "t": 1034720,
+      "kind": "term",
+      "mapped": {
+        "video": "fomdgt2.xml_",
+        "video_idx": 8,
+        "offset": 1014920,
+        "xml_pair": [
+          "id2",
+          "id6"
+        ],
+        "frame": 495,
+        "t_pixel_matched": true
+      },
+      "classification": "real"
+    },
+    {
+      "seg_label": "test#0",
+      "split": "test",
+      "seg_idx": 0,
+      "pair": [
+        "id4",
+        "id5"
+      ],
+      "t": 5720,
+      "kind": "init",
+      "mapped": {
+        "video": "wk1gt.xml",
+        "video_idx": 27,
+        "offset": 0,
+        "xml_pair": [
+          "id4",
+          "id5"
+        ],
+        "frame": 143,
+        "t_pixel_matched": true
+      },
+      "classification": "real"
+    },
+    {
+      "seg_label": "test#0",
+      "split": "test",
+      "seg_idx": 0,
+      "pair": [
+        "id1",
+        "id2"
+      ],
+      "t": 27280,
+      "kind": "init",
+      "mapped": {
+        "video": "wk2gt.xml",
+        "video_idx": 28,
+        "offset": 24440,
+        "xml_pair": [
+          "id1",
+          "id2"
+        ],
+        "frame": 71,
+        "t_pixel_matched": true
+      },
+      "classification": "duplicate"
+    },
+    {
+      "seg_label": "test#4",
+      "split": "test",
+      "seg_idx": 4,
+      "pair": [
+        "id2",
+        "id6"
+      ],
+      "t": 1033920,
+      "kind": "init",
+      "mapped": {
+        "video": "fomdgt2.xml_",
+        "video_idx": 8,
+        "offset": 1014920,
+        "xml_pair": [
+          "id2",
+          "id6"
+        ],
+        "frame": 475,
+        "t_pixel_matched": true
+      },
+      "classification": "duplicate"
+    },
+    {
+      "seg_label": "test#4",
+      "split": "test",
+      "seg_idx": 4,
+      "pair": [
+        "id2",
+        "id6"
+      ],
+      "t": 1034720,
+      "kind": "term",
+      "mapped": {
+        "video": "fomdgt2.xml_",
+        "video_idx": 8,
+        "offset": 1014920,
+        "xml_pair": [
+          "id2",
+          "id6"
+        ],
+        "frame": 495,
+        "t_pixel_matched": true
+      },
+      "classification": "duplicate"
+    }
+  ],
+  "xml_events": [
+    {
+      "video": "fomdgt2.xml_",
+      "video_idx": 8,
+      "pair": [
+        "id2",
+        "id6"
+      ],
+      "frame": 475,
+      "kind": "init",
+      "claimed_by": [
+        {
+          "seg_label": "train#20",
+          "t": 1033920
+        },
+        {
+          "seg_label": "test#4",
+          "t": 1033920
+        }
+      ]
+    },
+    {
+      "video": "fomdgt2.xml_",
+      "video_idx": 8,
+      "pair": [
+        "id2",
+        "id6"
+      ],
+      "frame": 495,
+      "kind": "term",
+      "claimed_by": [
+        {
+          "seg_label": "train#20",
+          "t": 1034720
+        },
+        {
+          "seg_label": "test#4",
+          "t": 1034720
+        }
+      ]
+    },
+    {
+      "video": "fomdgt2.xml_",
+      "video_idx": 8,
+      "pair": [
+        "id5",
+        "id6"
+      ],
+      "frame": 394,
+      "kind": "init",
+      "claimed_by": [
+        {
+          "seg_label": "train#20",
+          "t": 1030680
+        }
+      ]
+    },
+    {
+      "video": "fomdgt2.xml_",
+      "video_idx": 8,
+      "pair": [
+        "id5",
+        "id6"
+      ],
+      "frame": 395,
+      "kind": "term",
+      "claimed_by": [
+        {
+          "seg_label": "train#20",
+          "t": 1030720
+        }
+      ]
+    },
+    {
+      "video": "lb1gt.xml",
+      "video_idx": 12,
+      "pair": [
+        "id1",
+        "id2"
+      ],
+      "frame": 295,
+      "kind": "init",
+      "claimed_by": [
+        {
+          "seg_label": "train#8",
+          "t": 559200
+        }
+      ]
+    },
+    {
+      "video": "lb1gt.xml",
+      "video_idx": 12,
+      "pair": [
+        "id1",
+        "id2"
+      ],
+      "frame": 418,
+      "kind": "term",
+      "claimed_by": [
+        {
+          "seg_label": "train#8",
+          "t": 564120
+        }
+      ]
+    },
+    {
+      "video": "ms3ggt.xml",
+      "video_idx": 18,
+      "pair": [
+        "id0",
+        "id1"
+      ],
+      "frame": 230,
+      "kind": "init",
+      "claimed_by": [
+        {
+          "seg_label": "train#16",
+          "t": 867600
+        }
+      ]
+    },
+    {
+      "video": "ms3ggt.xml",
+      "video_idx": 18,
+      "pair": [
+        "id0",
+        "id1"
+      ],
+      "frame": 252,
+      "kind": "term",
+      "claimed_by": [
+        {
+          "seg_label": "train#16",
+          "t": 868480
+        }
+      ]
+    },
+    {
+      "video": "mws1gt.xml",
+      "video_idx": 19,
+      "pair": [
+        "id1",
+        "id3"
+      ],
+      "frame": 169,
+      "kind": "init",
+      "claimed_by": [
+        {
+          "seg_label": "train#15",
+          "t": 840240
+        }
+      ]
+    },
+    {
+      "video": "mws1gt.xml",
+      "video_idx": 19,
+      "pair": [
+        "id1",
+        "id3"
+      ],
+      "frame": 195,
+      "kind": "term",
+      "claimed_by": [
+        {
+          "seg_label": "train#15",
+          "t": 841280
+        }
+      ]
+    },
+    {
+      "video": "mwt1gt.xml",
+      "video_idx": 20,
+      "pair": [
+        "id1",
+        "id2"
+      ],
+      "frame": 328,
+      "kind": "init",
+      "claimed_by": [
+        {
+          "seg_label": "train#13",
+          "t": 785240
+        }
+      ]
+    },
+    {
+      "video": "mwt1gt.xml",
+      "video_idx": 20,
+      "pair": [
+        "id1",
+        "id2"
+      ],
+      "frame": 353,
+      "kind": "term",
+      "claimed_by": [
+        {
+          "seg_label": "train#13",
+          "t": 786240
+        }
+      ]
+    },
+    {
+      "video": "mwt2gt.xml",
+      "video_idx": 21,
+      "pair": [
+        "id1",
+        "id2"
+      ],
+      "frame": 317,
+      "kind": "init",
+      "claimed_by": [
+        {
+          "seg_label": "train#15",
+          "t": 813080
+        }
+      ]
+    },
+    {
+      "video": "mwt2gt.xml",
+      "video_idx": 21,
+      "pair": [
+        "id1",
+        "id2"
+      ],
+      "frame": 362,
+      "kind": "term",
+      "claimed_by": [
+        {
+          "seg_label": "train#15",
+          "t": 814880
+        }
+      ]
+    },
+    {
+      "video": "mwt2gt.xml",
+      "video_idx": 21,
+      "pair": [
+        "id1",
+        "id2"
+      ],
+      "frame": 725,
+      "kind": "init",
+      "claimed_by": [
+        {
+          "seg_label": "train#15",
+          "t": 829400
+        }
+      ]
+    },
+    {
+      "video": "rffgt.xml",
+      "video_idx": 22,
+      "pair": [
+        "id0",
+        "id1"
+      ],
+      "frame": 65,
+      "kind": "term",
+      "claimed_by": [
+        {
+          "seg_label": "train#8",
+          "t": 509720
+        }
+      ]
+    },
+    {
+      "video": "spgt.xml",
+      "video_idx": 26,
+      "pair": [
+        "id0",
+        "id1"
+      ],
+      "frame": 174,
+      "kind": "init",
+      "claimed_by": [
+        {
+          "seg_label": "train#17",
+          "t": 917360
+        }
+      ]
+    },
+    {
+      "video": "spgt.xml",
+      "video_idx": 26,
+      "pair": [
+        "id0",
+        "id1"
+      ],
+      "frame": 234,
+      "kind": "term",
+      "claimed_by": [
+        {
+          "seg_label": "train#17",
+          "t": 919760
+        }
+      ]
+    },
+    {
+      "video": "wk1gt.xml",
+      "video_idx": 27,
+      "pair": [
+        "id4",
+        "id5"
+      ],
+      "frame": 143,
+      "kind": "init",
+      "claimed_by": [
+        {
+          "seg_label": "test#0",
+          "t": 5720
+        }
+      ]
+    },
+    {
+      "video": "wk2gt.xml",
+      "video_idx": 28,
+      "pair": [
+        "id1",
+        "id2"
+      ],
+      "frame": 71,
+      "kind": "init",
+      "claimed_by": [
+        {
+          "seg_label": "train#0",
+          "t": 27280
+        },
+        {
+          "seg_label": "test#0",
+          "t": 27280
+        }
+      ]
+    },
+    {
+      "video": "wk2gt.xml",
+      "video_idx": 28,
+      "pair": [
+        "id1",
+        "id2"
+      ],
+      "frame": 926,
+      "kind": "term",
+      "claimed_by": [
+        {
+          "seg_label": "train#0",
+          "t": 61480
+        }
+      ]
+    }
+  ],
+  "classification_counts": {
+    "real": 21,
+    "splice_artifact": 1,
+    "duplicate": 3
+  },
+  "n_dump_events": {
+    "init": 13,
+    "term": 12
+  },
+  "n_xml_events": {
+    "init": 11,
+    "term": 10
+  },
+  "xml_events_unclaimed": [],
+  "duplicated_gold_pairframes": {
+    "fomdgt2.xml_": 21,
+    "fomdgt3.xml": 0,
+    "wk2gt.xml": 855,
+    "wk3gt.xml": 0
+  },
+  "segment_video_map": {
+    "train": [
+      [
+        {
+          "video": "wk2gt.xml",
+          "offset": 24440,
+          "n_matched_points": 2347,
+          "persons": {
+            "id1": "id1",
+            "id2": "id2",
+            "id3": "id3",
+            "id4": "id4",
+            "id5": "id5"
+          }
+        }
+      ],
+      [
+        {
+          "video": "br1gt.xml",
+          "offset": 121800,
+          "n_matched_points": 2237,
+          "persons": {
+            "id0": "id0",
+            "id1": "id1",
+            "id2": "id2",
+            "id3": "id3"
+          }
+        },
+        {
+          "video": "br2gt.xml",
+          "offset": 163520,
+          "n_matched_points": 336,
+          "persons": {
+            "id0": "id0",
+            "id1": "id1",
+            "id2": "id2"
+          }
+        },
+        {
+          "video": "wk3gt.xml",
+          "offset": 66640,
+          "n_matched_points": 283,
+          "persons": {
+            "id3": "id3"
+          }
+        }
+      ],
+      [
+        {
+          "video": "br2gt.xml",
+          "offset": 163520,
+          "n_matched_points": 561,
+          "persons": {
+            "id3": "id3"
+          }
+        },
+        {
+          "video": "br3gt.xml",
+          "offset": 197880,
+          "n_matched_points": 1001,
+          "persons": {
+            "id0": "id0",
+            "id1": "id1",
+            "id2": "id2",
+            "id3": "id3"
+          }
+        },
+        {
+          "video": "br4gt.xml",
+          "offset": 231800,
+          "n_matched_points": 610,
+          "persons": {
+            "id0": "id0",
+            "id1": "id1"
+          }
+        }
+      ],
+      [
+        {
+          "video": "br4gt.xml",
+          "offset": 231800,
+          "n_matched_points": 271,
+          "persons": {
+            "id2": "id2"
+          }
+        }
+      ],
+      [
+        {
+          "video": "bww1gt.xml",
+          "offset": 275400,
+          "n_matched_points": 1306,
+          "persons": {
+            "id0": "id0",
+            "id1": "id1",
+            "id2": "id2"
+          }
+        }
+      ],
+      [
+        {
+          "video": "bww2gt.xml",
+          "offset": 307040,
+          "n_matched_points": 1075,
+          "persons": {
+            "id0": "id0"
+          }
+        },
+        {
+          "video": "ricgt.xml",
+          "offset": 382840,
+          "n_matched_points": 618,
+          "persons": {
+            "id0": "id0",
+            "id3": "id3",
+            "id4": "id4",
+            "id5": "id5"
+          }
+        }
+      ],
+      [
+        {
+          "video": "ricgt.xml",
+          "offset": 382840,
+          "n_matched_points": 758,
+          "persons": {
+            "id1": "id1"
+          }
+        },
+        {
+          "video": "rsfgt.xml",
+          "offset": 423120,
+          "n_matched_points": 1205,
+          "persons": {
+            "id0": "id0",
+            "id1": "id1",
+            "id2": "id2",
+            "id5": "id5"
+          }
+        }
+      ],
+      [
+        {
+          "video": "rwgt.xml",
+          "offset": 459560,
+          "n_matched_points": 1404,
+          "persons": {
+            "id0": "id0",
+            "id1": "id1",
+            "id2": "id2"
+          }
+        }
+      ],
+      [
+        {
+          "video": "lb1gt.xml",
+          "offset": 547400,
+          "n_matched_points": 1337,
+          "persons": {
+            "id0": "id0",
+            "id1": "id1",
+            "id2": "id2"
+          }
+        },
+        {
+          "video": "rffgt.xml",
+          "offset": 507120,
+          "n_matched_points": 1196,
+          "persons": {
+            "id0": "id0",
+            "id1": "id1",
+            "id2": "id2"
+          }
+        }
+      ],
+      [
+        {
+          "video": "lb1gt.xml",
+          "offset": 547400,
+          "n_matched_points": 952,
+          "persons": {
+            "id3": "id3",
+            "id4": "id4",
+            "id5": "id5"
+          }
+        },
+        {
+          "video": "lb2gt.xml",
+          "offset": 604240,
+          "n_matched_points": 1939,
+          "persons": {
+            "id0": "id0",
+            "id1": "id1",
+            "id2": "id2",
+            "id3": "id3",
+            "id4": "id4",
+            "id5": "id5",
+            "id6": "id6",
+            "id7": "id7"
+          }
+        },
+        {
+          "video": "lbbcgt.xml",
+          "offset": 648840,
+          "n_matched_points": 768,
+          "persons": {
+            "id0": "id0",
+            "id1": "id1",
+            "id2": "id2"
+          }
+        }
+      ],
+      [
+        {
+          "video": "lbbcgt.xml",
+          "offset": 648840,
+          "n_matched_points": 755,
+          "persons": {
+            "id3": "id3",
+            "id4": "id4",
+            "id5": "id5",
+            "id6": "id6"
+          }
+        },
+        {
+          "video": "lbgt.xml",
+          "offset": 691520,
+          "n_matched_points": 1376,
+          "persons": {
+            "id0": "id0",
+            "id1": "id1",
+            "id3": "id3",
+            "id4": "id4"
+          }
+        },
+        {
+          "video": "lbpugt.xml",
+          "offset": 726040,
+          "n_matched_points": 123,
+          "persons": {
+            "id0": "id0"
+          }
+        }
+      ],
+      [
+        {
+          "video": "lbpugt.xml",
+          "offset": 726040,
+          "n_matched_points": 56,
+          "persons": {
+            "id1": "id1"
+          }
+        }
+      ],
+      [
+        {
+          "video": "lbpugt.xml",
+          "offset": 726040,
+          "n_matched_points": 1396,
+          "persons": {
+            "id2": "id2",
+            "id4": "id4"
+          }
+        }
+      ],
+      [
+        {
+          "video": "mwt1gt.xml",
+          "offset": 772120,
+          "n_matched_points": 650,
+          "persons": {
+            "id1": "id1",
+            "id2": "id2"
+          }
+        }
+      ],
+      [
+        {
+          "video": "mwt1gt.xml",
+          "offset": 772120,
+          "n_matched_points": 197,
+          "persons": {
+            "id3": "id3",
+            "id4": "id4",
+            "id5": "id5",
+            "id6": "id6"
+          }
+        },
+        {
+          "video": "mwt2gt.xml",
+          "offset": 800400,
+          "n_matched_points": 121,
+          "persons": {
+            "id0": "id0"
+          }
+        }
+      ],
+      [
+        {
+          "video": "mws1gt.xml",
+          "offset": 833480,
+          "n_matched_points": 1788,
+          "persons": {
+            "id0": "id0",
+            "id1": "id1",
+            "id2": "id2",
+            "id3": "id3",
+            "id4": "id4",
+            "id5": "id5",
+            "id6": "id6",
+            "id7": "id7",
+            "id8": "id8"
+          }
+        },
+        {
+          "video": "mwt2gt.xml",
+          "offset": 800400,
+          "n_matched_points": 1362,
+          "persons": {
+            "id1": "id1",
+            "id2": "id2"
+          }
+        }
+      ],
+      [
+        {
+          "video": "ms3ggt.xml",
+          "offset": 858400,
+          "n_matched_points": 1733,
+          "persons": {
+            "id0": "id0",
+            "id1": "id1",
+            "id2": "id2",
+            "id3": "id3",
+            "id4": "id4"
+          }
+        }
+      ],
+      [
+        {
+          "video": "mc1gt.xml",
+          "offset": 895320,
+          "n_matched_points": 1164,
+          "persons": {
+            "id0": "id0",
+            "id1": "id1",
+            "id2": "id2",
+            "id3": "id3"
+          }
+        },
+        {
+          "video": "spgt.xml",
+          "offset": 910400,
+          "n_matched_points": 778,
+          "persons": {
+            "id0": "id0",
+            "id1": "id1"
+          }
+        }
+      ],
+      [
+        {
+          "video": "fomdgt1.xml_",
+          "offset": 976560,
+          "n_matched_points": 173,
+          "persons": {
+            "id0": "id0",
+            "id1": "id1",
+            "id3": "id3"
+          }
+        },
+        {
+          "video": "fra1gt.xml",
+          "offset": 932480,
+          "n_matched_points": 1109,
+          "persons": {
+            "id0": "id0",
+            "id1": "id1",
+            "id3": "id3",
+            "id6": "id6",
+            "id7": "id7"
+          }
+        },
+        {
+          "video": "fra2gt.xml",
+          "offset": 954520,
+          "n_matched_points": 1151,
+          "persons": {
+            "id0": "id0",
+            "id3": "id3",
+            "id4": "id4",
+            "id5": "id5",
+            "id6": "id6"
+          }
+        },
+        {
+          "video": "spgt.xml",
+          "offset": 910400,
+          "n_matched_points": 21,
+          "persons": {
+            "id2": "id2"
+          }
+        }
+      ],
+      [
+        {
+          "video": "fomdgt1.xml_",
+          "offset": 976560,
+          "n_matched_points": 362,
+          "persons": {
+            "id5": "id5",
+            "id6": "id6",
+            "id8": "id8"
+          }
+        }
+      ],
+      [
+        {
+          "video": "fomdgt1.xml_",
+          "offset": 976560,
+          "n_matched_points": 20,
+          "persons": {
+            "id9": "id9"
+          }
+        },
+        {
+          "video": "fomdgt2.xml_",
+          "offset": 1014920,
+          "n_matched_points": 3211,
+          "persons": {
+            "id0": "id0",
+            "id1": "id1",
+            "id2": "id2",
+            "id3": "id3",
+            "id4": "id4",
+            "id5": "id5",
+            "id6": "id6",
+            "id7": "id7",
+            "id8": "id8",
+            "id9": "id9"
+          }
+        },
+        {
+          "video": "fomdgt3.xml",
+          "offset": 1053280,
+          "n_matched_points": 1749,
+          "persons": {
+            "id0": "id0",
+            "id1": "id1",
+            "id2": "id2",
+            "id3": "id3",
+            "id6": "id6",
+            "id7": "id7"
+          }
+        }
+      ]
+    ],
+    "test": [
+      [
+        {
+          "video": "wk1gt.xml",
+          "offset": 0,
+          "n_matched_points": 1559,
+          "persons": {
+            "id0": "id0",
+            "id1": "id1",
+            "id4": "id4",
+            "id5": "id5"
+          }
+        },
+        {
+          "video": "wk2gt.xml",
+          "offset": 24440,
+          "n_matched_points": 190,
+          "persons": {
+            "id0": "id0",
+            "id1": "id1",
+            "id2": "id2"
+          }
+        }
+      ],
+      [
+        {
+          "video": "wk2gt.xml",
+          "offset": 24440,
+          "n_matched_points": 387,
+          "persons": {
+            "id1": "id1",
+            "id2": "id2",
+            "id5": "id5"
+          }
+        }
+      ],
+      [
+        {
+          "video": "wk3gt.xml",
+          "offset": 66640,
+          "n_matched_points": 173,
+          "persons": {
+            "id0": "id0"
+          }
+        }
+      ],
+      [
+        {
+          "video": "wk3gt.xml",
+          "offset": 66640,
+          "n_matched_points": 583,
+          "persons": {
+            "id1": "id1",
+            "id2": "id2",
+            "id4": "id4"
+          }
+        }
+      ],
+      [
+        {
+          "video": "fcgt.xml",
+          "offset": 1085400,
+          "n_matched_points": 1541,
+          "persons": {
+            "id0": "id0",
+            "id1": "id1",
+            "id2": "id2",
+            "id3": "id3",
+            "id4": "id4"
+          }
+        },
+        {
+          "video": "fomdgt2.xml_",
+          "offset": 1014920,
+          "n_matched_points": 1434,
+          "persons": {
+            "id2": "id2",
+            "id4": "id4",
+            "id6": "id6",
+            "id7": "id7",
+            "id8": "id8",
+            "id9": "id9"
+          }
+        },
+        {
+          "video": "fomdgt3.xml",
+          "offset": 1053280,
+          "n_matched_points": 2039,
+          "persons": {
+            "id0": "id0",
+            "id1": "id1",
+            "id2": "id2",
+            "id3": "id3",
+            "id6": "id6",
+            "id7": "id7"
+          }
+        }
+      ]
+    ]
+  }
+}

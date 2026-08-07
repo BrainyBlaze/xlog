@@ -324,10 +324,39 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--seed, which still determines the fold split every permutation "
         "shares). Scoped to '--ec-fit-mode permutation-null' ONLY.",
     )
+    p.add_argument(
+        "--transition-vocab", default="full", choices=("activity", "full"),
+        help="which of `convert_continuous`'s transition relations enter "
+        "the EC candidate pool ('--protocol ec --data continuous' only). "
+        "'full' (default, byte-identical to every behavior that predates "
+        "this flag): all six. 'activity': only the four ACTIVITY-based "
+        "ones, excluding the distance-derived pair (became_far/"
+        "distance_increasing) -- the exact pool the shipped e5/e9 "
+        "artifacts (README sections D/D.1) were generated with, required "
+        "to replay them. Refused with '--protocol direct' (that "
+        "vocabulary never contains transition relations), '--data pkl' "
+        "(no transition relations exist there at all), or '--mode "
+        "neural' (the neural EC initiation pool is activity-based by "
+        "construction; the flag would be inert but recorded).",
+    )
     p.add_argument("--out", required=True, help="path to write RESULT.json")
     args = p.parse_args(argv)
     if args.data == "continuous" and args.test_json is None:
         p.error("--data continuous requires --test-json (path to caviar-test.json).")
+    if args.transition_vocab != "full" and (
+        args.protocol != "ec" or args.data != "continuous" or args.mode != "relational"
+    ):
+        p.error(
+            f"--transition-vocab {args.transition_vocab!r} is scoped to "
+            "'--mode relational --protocol ec --data continuous' ONLY "
+            f"(got --mode {args.mode!r}, --protocol {args.protocol!r}, "
+            f"--data {args.data!r}): the direct protocol's vocabulary "
+            "never contains transition relations, '--data pkl' has none "
+            "to select from, and neural EC mode's initiation pool is "
+            "activity-based by construction with no downstream consumer "
+            "of the flag-filtered subset -- anywhere else the flag would "
+            "be a silent no-op recorded as if it mattered."
+        )
     if args.max_body_literals == 3:
         if args.mode != "relational":
             p.error(
@@ -1080,7 +1109,7 @@ def _exclude_dontcare(facts, labels, dontcare):
     return kept_facts, kept_labels
 
 
-def _ec_relations_with_transitions(train, test):
+def _ec_relations_with_transitions(train, test, transition_vocab="full"):
     """Merge `caviar_continuous.convert_continuous`'s ``"transition_
     relations"`` into a COPY of ``train``/``test``'s own ``"relations"``
     dict, for the EC-search-only candidate pool -- ``--data pkl`` (no
@@ -1088,12 +1117,31 @@ def _ec_relations_with_transitions(train, test):
     are untouched, since neither ever calls this function; see
     `caviar_continuous.convert_continuous`'s docstring for why the merge
     lives here, at the ec-protocol call site, rather than inside
-    `convert_continuous` itself."""
+    `convert_continuous` itself.
+
+    ``transition_vocab`` (``--transition-vocab``): ``"full"`` (default,
+    byte-identical to every call that predates the parameter) merges ALL
+    transition relations; ``"activity"`` merges only the activity-based
+    ones, excluding `DISTANCE_DERIVED_TRANSITIONS` -- the exact pool the
+    shipped e5/e9 artifacts were generated with, before the
+    distance-derived pair existed (see parse_args's own help text). Any
+    other value raises ``ValueError`` (never silently treated as one of
+    the two real vocabularies)."""
+    if transition_vocab not in ("activity", "full"):
+        raise ValueError(
+            f"transition_vocab must be 'activity' or 'full' (got {transition_vocab!r})."
+        )
     if "transition_relations" not in train:
         return train["relations"], test["relations"]
+
+    def _admitted(transitions):
+        if transition_vocab == "full":
+            return transitions
+        return {n: v for n, v in transitions.items() if n not in DISTANCE_DERIVED_TRANSITIONS}
+
     return (
-        {**train["relations"], **train["transition_relations"]},
-        {**test["relations"], **test["transition_relations"]},
+        {**train["relations"], **_admitted(train["transition_relations"])},
+        {**test["relations"], **_admitted(test["transition_relations"])},
     )
 
 
@@ -1165,7 +1213,9 @@ def _run_relational_ec(
             wall["direct_context"] = time.perf_counter() - t_direct
             wall["direct_context_wall_clock_s"] = direct_wall
 
-    train_relations_ec, test_relations_ec = _ec_relations_with_transitions(train, test)
+    train_relations_ec, test_relations_ec = _ec_relations_with_transitions(
+        train, test, transition_vocab=args.transition_vocab,
+    )
 
     if args.max_body_literals == 3:
         from relational_search import (
@@ -1433,7 +1483,9 @@ def _run_neural_ec(
         wall["direct_context"] = time.perf_counter() - t_direct
         wall["direct_context_wall_clock_s"] = direct_wall
 
-    train_relations_ec, test_relations_ec = _ec_relations_with_transitions(train, test)
+    train_relations_ec, test_relations_ec = _ec_relations_with_transitions(
+        train, test, transition_vocab=args.transition_vocab,
+    )
     # Derived from the data dict itself (torch-free, can never drift out of
     # sync with whatever convert_continuous actually produced), MINUS the
     # distance-derived transitions: `became_far`/`distance_increasing` read
@@ -1669,6 +1721,7 @@ def main(argv: list[str] | None = None) -> int:
         "min_new_covered": args.min_new_covered,
         "max_body_literals": args.max_body_literals,
         "holdout_score": args.holdout_score,
+        "transition_vocab": args.transition_vocab,
         "ec_fit_mode": args.ec_fit_mode,
         "min_fit": args.min_fit,
         "null_permutations": args.null_permutations,
