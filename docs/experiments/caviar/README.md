@@ -475,8 +475,12 @@ CAVIAR event definitions (RTEC's `rules.prolog`) define the two fluents
 over DIFFERENT proximity predicates: meeting over `close_25`, moving
 over `close_34`. The converter resolves its `close` relation through
 exactly this table (`caviar_xml_corpus.CANONICAL_CLOSE_THRESHOLDS`;
-each CV artifact records the threshold it ran with as
-`close_threshold`), so the moving rows below are measured under
+runs made with the current runner record the threshold they ran with as
+`close_threshold` — the regenerated `caviar-f-xml-moving-cv10.json`
+carries `close_threshold: 34.0`, while `caviar-f-xml-meeting-cv10.json`
+predates the key, its threshold being the pre-change fixed default of
+25, and the preserved threshold-25 artifact encodes its value in the
+filename), so the moving rows below are measured under
 `close_34` — the predicate the published moving rules and scores
 actually use. An earlier revision of this section measured moving under
 the meeting threshold (25) without disclosing it; that measurement
