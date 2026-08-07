@@ -3,6 +3,7 @@
   "folds": 10,
   "seed": 7,
   "fluent": "meeting",
+  "close_threshold": 25.0,
   "clause": [
     "both_inactive",
     "close"

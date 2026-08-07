@@ -95,3 +95,40 @@ def test_fold_scoring_scores_test_side_and_counts_train_side_coverage():
         "n_positives_covered_by_clause": 0,
         "n_negatives_covered_by_clause": 0,
     }
+
+
+def test_main_records_canonical_close_threshold(tmp_path, monkeypatch):
+    """Every number the census reports depends on the `close` threshold,
+    so the artifact must record it -- the recording convention the CV
+    artifacts follow (`close_threshold`, resolved through
+    `CANONICAL_CLOSE_THRESHOLDS`)."""
+    import json
+
+    import caviar_xml_corpus
+    import run_caviar_cv
+
+    # A synthetic two-video corpus whose first video carries the wk1gt
+    # stem `main` locates the wk fold by.
+    wk = _video(
+        "wk1gt.xml", "inactive",
+        {0: (10, 0), 1: (10, 0), 2: (100, 0), 3: (100, 0)},
+        meeting_frames=[0, 1, 2],
+    )
+    apart = _video(
+        "apart.xml", "walking",
+        {0: (60, 0), 1: (60, 0), 2: (60, 0), 3: (60, 0)},
+        meeting_frames=[0, 1],
+    )
+    monkeypatch.setattr(caviar_xml_corpus, "load_xml_corpus", lambda d: [wk, apart])
+    monkeypatch.setattr(
+        run_caviar_cv, "_xml_family_fold_assignment",
+        lambda videos, fluent, folds, seed: [0, 1],
+    )
+    out = tmp_path / "census.json"
+    rc = xml_meeting_census.main(
+        ["--xml-dir", "ignored", "--folds", "2", "--seed", "7", "--out", str(out)]
+    )
+    assert rc == 0
+    result = json.loads(out.read_text())
+    assert result["close_threshold"] == \
+        caviar_xml_corpus.CANONICAL_CLOSE_THRESHOLDS["meeting"]

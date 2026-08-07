@@ -142,7 +142,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
-    from caviar_xml_corpus import load_xml_corpus
+    from caviar_xml_corpus import CANONICAL_CLOSE_THRESHOLDS, load_xml_corpus
     from run_caviar_cv import _xml_family_fold_assignment, _xml_stem
 
     videos = load_xml_corpus(args.xml_dir)
@@ -162,6 +162,10 @@ def main(argv: list[str] | None = None) -> int:
         "folds": args.folds,
         "seed": args.seed,
         "fluent": FLUENT,
+        # Every count below depends on the `close` predicate's threshold;
+        # record it, same convention as the CV artifacts (resolved through
+        # the canonical per-fluent table, never hardcoded here).
+        "close_threshold": CANONICAL_CLOSE_THRESHOLDS[FLUENT],
         "clause": list(CLAUSE),
         "wk_fold": wk_fold,
         "fold_of_video": {
