@@ -97,6 +97,23 @@ def test_fold_scoring_scores_test_side_and_counts_train_side_coverage():
     }
 
 
+def test_clause_rows_matches_relational_search_body_cover():
+    # `_clause_rows` documents itself as `relational_search.body_cover`'s
+    # reading, inlined -- pin that equivalence so the census's cover logic
+    # cannot silently drift from the pipeline's own.
+    from relational_search import body_cover
+
+    relations = {
+        "both_inactive": [(0, 1), (1, 1), (2, 1)],
+        "close": [(1, 1), (2, 1), (3, 1)],
+    }
+    got = xml_meeting_census._clause_rows(
+        {"relations": relations}, ("both_inactive", "close"),
+    )
+    expected = {pt for pt, _ in body_cover(("both_inactive", "close"), relations)}
+    assert got == expected == {1, 2}
+
+
 def test_main_records_canonical_close_threshold(tmp_path, monkeypatch):
     """Every number the census reports depends on the `close` threshold,
     so the artifact must record it -- the recording convention the CV

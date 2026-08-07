@@ -71,6 +71,17 @@ FRAME_MS = 40
 # fraction low while the absolute evidence stays overwhelming.
 MATCH_MIN_POINTS = 10
 
+# `load_continuous`'s own verified real-file counts (see its docstring:
+# train 22366 timepoints / 21 segments, test 3248 / 5). The audit is a
+# claim about THE distributed OLED dump specifically, so it opts into the
+# loader's refuse-loudly guard: a truncated or drifted dump file dies
+# with the loader's typed error instead of degrading into wrong audit
+# counts.
+EXPECTED_DUMP_COUNTS: dict[str, dict[str, int]] = {
+    "train": {"expected_num_timepoints": 22366, "expected_num_segments": 21},
+    "test": {"expected_num_timepoints": 3248, "expected_num_segments": 5},
+}
+
 
 def pair_transition_events(co_visible_ts: list[int], holds_ts: set) -> list[tuple[int, str]]:
     """``(t, "init"|"term")`` events for ONE unordered pair walked over its
@@ -163,6 +174,16 @@ def build_xml_xy_index(videos: list[dict]):
     for v_idx, video in enumerate(videos):
         frame_ms = video["frame_ms"]
         offset = video["time_offset"]
+        if frame_ms != FRAME_MS or offset != 0:
+            raise ValueError(
+                f"{video['video']}: frame_ms={frame_ms}, "
+                f"time_offset={offset} -- the trajectory-vote arithmetic "
+                "(`_multi_match_person`'s `t - frame * FRAME_MS` hypothesis "
+                "key) and the event mapping assume the corpus-wide 40ms, "
+                "zero-offset frame grid; a different time base would "
+                "misalign SILENTLY, so it is refused loudly instead (all "
+                "30 real CAVIAR ground-truth files use 40ms / offset 0)."
+            )
         for (pid, t), xy in video["coords"].items():
             frame = (t - offset) // frame_ms
             traj[(v_idx, pid)][frame] = xy
@@ -255,7 +276,17 @@ def _map_event_to_xml(event: dict, seg_match: dict, videos: list[dict]):
         return None
     _, v_idx, offset, members = best
     video = videos[v_idx]
-    frame = (event["t"] - offset - video["time_offset"]) // video["frame_ms"]
+    rem_t = event["t"] - offset - video["time_offset"]
+    if rem_t % video["frame_ms"] != 0:
+        raise ValueError(
+            f"event at t={event['t']} does not land on the matched "
+            f"cluster's frame grid (cluster offset={offset}, "
+            f"time_offset={video['time_offset']}, "
+            f"frame_ms={video['frame_ms']}): a non-unit-stride or "
+            "misaligned segment -- integer division would silently round "
+            "it onto a neighboring frame, so it is refused loudly instead."
+        )
+    frame = rem_t // video["frame_ms"]
     xml_pair = _canonical_pair(members[p1]["xml_pid"], members[p2]["xml_pid"])
     return {
         "video": video["video"], "video_idx": v_idx, "offset": offset,
@@ -382,8 +413,8 @@ def main(argv: list[str] | None = None) -> int:
     from caviar_continuous import load_continuous
     from caviar_xml_corpus import load_xml_corpus
 
-    train_segments = load_continuous(args.train_json)
-    test_segments = load_continuous(args.test_json)
+    train_segments = load_continuous(args.train_json, **EXPECTED_DUMP_COUNTS["train"])
+    test_segments = load_continuous(args.test_json, **EXPECTED_DUMP_COUNTS["test"])
     videos = load_xml_corpus(args.xml_dir)
 
     traj, index = build_xml_xy_index(videos)

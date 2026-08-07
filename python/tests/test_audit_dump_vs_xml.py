@@ -195,3 +195,97 @@ def test_splice_resolves_into_two_clusters_for_the_same_segment():
     spliced = seg_matches["train"][1]["clusters"]
     matched_videos = {v_idx for (v_idx, _offset) in spliced}
     assert matched_videos == {1, 2}  # b.xml AND c.xml -- the splice is visible
+
+
+# ---------------------------------------------------------------------------
+# Robustness: the tool's authority is exactness, so a time base its
+# arithmetic cannot represent must refuse loudly, never misalign silently.
+# ---------------------------------------------------------------------------
+
+
+def test_xy_index_refuses_a_video_with_a_nonzero_time_offset():
+    video = _xml_video("a.xml", 10, 30, meeting_frames=range(2, 6))
+    video["time_offset"] = 40
+    with pytest.raises(ValueError, match="time_offset"):
+        audit_dump_vs_xml.build_xml_xy_index([video])
+
+
+def test_xy_index_refuses_a_video_with_a_non_40ms_frame_grid():
+    video = _xml_video("a.xml", 10, 30, meeting_frames=range(2, 6))
+    video["frame_ms"] = 80
+    with pytest.raises(ValueError, match="frame_ms"):
+        audit_dump_vs_xml.build_xml_xy_index([video])
+
+
+def test_map_event_to_xml_refuses_an_off_grid_event_timestamp():
+    # An event timestamp that does not land on the matched cluster's frame
+    # grid means a non-unit-stride or misaligned segment: integer division
+    # would silently round it onto a neighboring frame.
+    video = _xml_video("a.xml", 10, 30, meeting_frames=range(2, 6))
+    seg_match = {
+        "clusters": {
+            (0, 1000): {
+                "id1": {"xml_pid": "id1", "ts": {1000, 1040, 1023}},
+                "id2": {"xml_pid": "id2", "ts": {1000, 1040, 1023}},
+            },
+        },
+    }
+    event = {"pair": ["id1", "id2"], "t": 1023}
+    with pytest.raises(ValueError, match="grid"):
+        audit_dump_vs_xml._map_event_to_xml(event, seg_match, [video])
+
+
+def test_main_opts_into_the_loaders_verified_real_file_counts(monkeypatch, tmp_path):
+    # The audit is a claim about THE distributed OLED dump; it must pass
+    # `load_continuous`'s verified real-file counts (train 22366/21) so a
+    # truncated or drifted dump dies with the loader's typed error instead
+    # of degrading into wrong audit counts.
+    import caviar_continuous
+
+    seen = {}
+
+    class _Stop(Exception):
+        pass
+
+    def fake_load(path, *, expected_num_timepoints=None, expected_num_segments=None):
+        seen[path] = (expected_num_timepoints, expected_num_segments)
+        raise _Stop()
+
+    monkeypatch.setattr(caviar_continuous, "load_continuous", fake_load)
+    with pytest.raises(_Stop):
+        audit_dump_vs_xml.main([
+            "--train-json", "tr.json", "--test-json", "te.json",
+            "--xml-dir", "d", "--out", str(tmp_path / "o.json"),
+        ])
+    assert seen == {"tr.json": (22366, 21)}
+
+
+def test_pair_transition_walk_matches_the_pipelines_own_derivation():
+    # The audit's transition walk is documented as the SAME convention
+    # `derive_ec_targets_continuous` uses -- pin that equivalence on a
+    # synthetic segment so the audit cannot silently drift from the
+    # pipeline it audits.
+    from caviar_continuous import (
+        _iter_pair_rows,
+        convert_continuous,
+        derive_ec_targets_continuous,
+    )
+
+    video = _xml_video("a.xml", 10, 30, meeting_frames=range(2, 6))
+    seg = _dump_segment_from([(video, 0)], {f * 40 for f in range(2, 6)})
+    segments = [seg]
+    converted = convert_continuous(segments)
+    ec = derive_ec_targets_continuous(segments, converted)
+
+    pipeline_events = []
+    for pt, (_seg_idx, t, _p1, _p2) in enumerate(_iter_pair_rows(segments)):
+        if ec["is_init"][pt]:
+            pipeline_events.append((t, "init"))
+        if ec["is_term"][pt]:
+            pipeline_events.append((t, "term"))
+
+    walk_events = audit_dump_vs_xml.pair_transition_events(
+        sorted(seg["timestamps"]),
+        {t for (_p1, _p2, t) in seg["meeting"]},
+    )
+    assert walk_events == pipeline_events == [(80, "init"), (240, "term")]
