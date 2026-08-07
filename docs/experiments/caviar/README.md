@@ -461,9 +461,13 @@ scene shares a fold, closing the same-scene leakage section F
 describes). All gates are otherwise exactly as pre-registered in section
 E (per-fold permutation-null fit thresholds, F1 holdout, seed 7). The
 relational search path is fully deterministic, so CPU and GPU execution
-of this protocol are byte-identical; the run is CPU-only, and a full
-independent replay reproduced every value in the shipped result files
-exactly.
+of this protocol are byte-identical; the run is CPU-only. A full
+independent replay reproduced every value exactly for the two artifacts
+it covered — `caviar-f-xml-meeting-cv10.json` and the threshold-25
+moving measurement (now preserved as
+`caviar-f-xml-moving-cv10-threshold25.json`); the regenerated
+`close_34` moving run and the meeting census postdate that replay and
+carry no independent-replay attestation.
 
 **Corpus composition (event counts, post-deduplication).** Meeting: 12
 intervals, 11 initiations, 10 terminations, 1,812 gold pair-frames.
