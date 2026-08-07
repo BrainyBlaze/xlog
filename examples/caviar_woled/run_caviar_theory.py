@@ -334,21 +334,28 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "distance_increasing) -- the exact pool the shipped e5/e9 "
         "artifacts (README sections D/D.1) were generated with, required "
         "to replay them. Refused with '--protocol direct' (that "
-        "vocabulary never contains transition relations) or '--data pkl' "
-        "(no transition relations exist there at all).",
+        "vocabulary never contains transition relations), '--data pkl' "
+        "(no transition relations exist there at all), or '--mode "
+        "neural' (the neural EC initiation pool is activity-based by "
+        "construction; the flag would be inert but recorded).",
     )
     p.add_argument("--out", required=True, help="path to write RESULT.json")
     args = p.parse_args(argv)
     if args.data == "continuous" and args.test_json is None:
         p.error("--data continuous requires --test-json (path to caviar-test.json).")
-    if args.transition_vocab != "full" and (args.protocol != "ec" or args.data != "continuous"):
+    if args.transition_vocab != "full" and (
+        args.protocol != "ec" or args.data != "continuous" or args.mode != "relational"
+    ):
         p.error(
             f"--transition-vocab {args.transition_vocab!r} is scoped to "
-            "'--protocol ec --data continuous' ONLY (got --protocol "
-            f"{args.protocol!r}, --data {args.data!r}): the direct "
-            "protocol's vocabulary never contains transition relations, "
-            "and '--data pkl' has none to select from -- anywhere else "
-            "the flag would be a silent no-op."
+            "'--mode relational --protocol ec --data continuous' ONLY "
+            f"(got --mode {args.mode!r}, --protocol {args.protocol!r}, "
+            f"--data {args.data!r}): the direct protocol's vocabulary "
+            "never contains transition relations, '--data pkl' has none "
+            "to select from, and neural EC mode's initiation pool is "
+            "activity-based by construction with no downstream consumer "
+            "of the flag-filtered subset -- anywhere else the flag would "
+            "be a silent no-op recorded as if it mattered."
         )
     if args.max_body_literals == 3:
         if args.mode != "relational":

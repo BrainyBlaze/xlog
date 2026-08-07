@@ -479,6 +479,23 @@ def test_transition_vocab_activity_refused_with_data_pkl():
         )
 
 
+def test_transition_vocab_activity_refused_in_neural_ec_mode():
+    # Neural EC mode's initiation pool is activity-based BY CONSTRUCTION
+    # (close/far and the distance-derived transitions never enter it), and
+    # no downstream consumer of the neural path reads the flag-filtered
+    # subset -- two runs differing only in the flag would produce
+    # identical results while recording different transition_vocab
+    # values, a false provenance distinction. Refused instead, matching
+    # this CLI's own refusal pattern for every other silent-no-op
+    # combination.
+    with pytest.raises(SystemExit):
+        run_caviar_theory.parse_args(
+            ["--mode", "neural", "--pkl", "x.pkl", "--steps", "5",
+             "--out", "o.json", "--protocol", "ec", "--data", "continuous",
+             "--test-json", "t.json", "--transition-vocab", "activity"]
+        )
+
+
 def test_omitting_transition_vocab_leaves_every_other_default_unchanged():
     omitted = run_caviar_theory.parse_args(EC_CONTINUOUS)
     explicit = run_caviar_theory.parse_args(EC_CONTINUOUS + ["--transition-vocab", "full"])

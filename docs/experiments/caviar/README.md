@@ -653,7 +653,11 @@ four ACTIVITY-based transition relations; the pool later gained
 default (`--transition-vocab full`) reproduces THAT enlarged pool.
 Replaying the shipped D/D.1/E results requires `--transition-vocab
 activity` -- with the default, the "section E" command below produces
-section E.1's 0.778 configuration, not section E's 0.733. Result JSONs
+section E.1's 0.778 configuration, not section E's 0.733. (Exception:
+the one neural EC artifact in that glob,
+`caviar-e5-cont_neu_ec_mnc2.json` — the neural initiation pool is
+activity-based by construction in either setting, so the flag decides
+nothing there and the runner refuses it in neural EC mode.) Result JSONs
 written by the CURRENT runners record the vocabulary the search actually
 ran over (`transition_vocab` + `candidate_vocabulary`). The pre-flag
 shipped artifacts (`caviar-e5-*_ec_*`, `e9_permutation_null/*`,
