@@ -910,6 +910,64 @@ def test_run_fold_records_candidate_vocabulary_and_transition_vocab(monkeypatch)
     })
 
 
+def test_run_fold_neural_mode_records_the_init_searchs_actual_pool(monkeypatch):
+    # Under --mode neural the initiation search runs over
+    # _neural_init_vocab (activity relations + the four ACTIVITY-based
+    # transitions) plus the trained close_nn detector -- NEVER over
+    # train_ec_relations, whose close/far/became_far/distance_increasing
+    # members it excludes by design. The fold record must say so: a flat
+    # train_ec_relations listing names four relations the init search
+    # never saw and omits the one neural relation it did search -- the
+    # exact provenance ambiguity the vocabulary recording exists to
+    # eliminate. Same structured {relational, neural, excluded} form as
+    # run_caviar_theory's neural-EC path; the always-relational
+    # termination search keeps its own flat pool listing.
+    train_segments, test_segments = _tiny_two_row_segments()
+
+    monkeypatch.setattr(
+        run_caviar_cv, "_run_init_search",
+        lambda mode, train, test, train_ec_relations, init_facts, init_labels, seed: {
+            "clauses": [], "stop_reason": "no positives remain in the residual",
+            "min_fit": 0.5, "null_summary": None, "selection_reasons": [],
+            "iterations": [],
+            "predict_clause_test": None, "detector_probe": None, "wall_s": 0.0,
+        },
+    )
+    monkeypatch.setattr(
+        run_caviar_cv, "_induce_ec_target",
+        lambda train_relations, facts, labels, seed: _fake_ec_theory([]),
+    )
+    monkeypatch.setattr(
+        run_caviar_cv, "_induce_direct_theory",
+        lambda train_relations, facts, labels, seed: {
+            "clauses": [], "stop_reason": "no positives remain in the residual",
+            "iterations": [],
+        },
+    )
+
+    result = run_caviar_cv.run_fold(
+        0, train_segments, test_segments, seed=7, mode="neural",
+    )
+    vocab = result["ec"]["candidate_vocabulary"]
+    assert vocab["init"]["neural"] == ["close_nn"]
+    assert vocab["init"]["relational"] == sorted({
+        "both_active", "both_walking", "both_inactive", "mixed_active_walking",
+        "any_became_active", "any_became_inactive",
+        "any_became_walking", "any_stopped_walking",
+    })
+    assert set(vocab["init"]["excluded"]) == {
+        "close", "far", "coords_missing", "became_far", "distance_increasing",
+    }
+    # The termination search DID run over the full EC pool.
+    assert vocab["term"] == sorted({
+        "both_active", "both_walking", "both_inactive", "mixed_active_walking",
+        "close", "far",
+        "any_became_active", "any_became_inactive",
+        "any_became_walking", "any_stopped_walking",
+        "became_far", "distance_increasing",
+    })
+
+
 def test_run_fold_default_full_vocab_records_all_six_transition_relations(monkeypatch):
     train_segments, test_segments = _tiny_two_row_segments()
 

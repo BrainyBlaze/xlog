@@ -925,7 +925,13 @@ def run_fold(
     (``"ec"``/``"direct"`` each carry a ``"candidate_vocabulary"`` key, and
     the record's own top level carries ``"transition_vocab"``), so a
     replayer can read the searched pool off the artifact instead of
-    reverse-engineering it from the gate values."""
+    reverse-engineering it from the gate values. In ``mode == "neural"``
+    the ``"ec"`` key is the structured
+    ``{"init": {"relational", "neural", "excluded"}, "term": [...]}``
+    form (same shape as `run_caviar_theory`'s neural-EC record), because
+    the neural initiation search's pool (`_neural_init_vocab` +
+    ``close_nn``) differs from the always-relational termination
+    search's."""
     from relational_search import make_predict_clause
     from scorer import prf1, theory_predictions
 
@@ -999,6 +1005,36 @@ def run_fold(
     direct_pred_test = theory_predictions(direct_theory["clauses"], predict_clause_test_direct, test["num_pt"])
     direct_scoring = prf1(direct_pred_test, test["is_positive"])
 
+    if mode == "neural":
+        from run_caviar_theory import CLOSE_NN_NAME
+
+        # The initiation search's ACTUAL pool (see `_run_init_search` /
+        # `_neural_init_vocab`): activity relations + the four
+        # ACTIVITY-based transitions + the trained `close_nn` detector --
+        # never `train_ec_relations`, whose `close`/`far`/`became_far`/
+        # `distance_increasing` members the neural init search excludes
+        # by design. A flat `train_ec_relations` listing here would name
+        # relations the init search never saw and omit the one neural
+        # relation it did search. Same structured form as
+        # `run_caviar_theory`'s neural-EC path; the always-relational
+        # termination search keeps its own flat pool listing.
+        ec_candidate_vocabulary = {
+            "init": {
+                "relational": sorted(_neural_init_vocab(train)),
+                "neural": [CLOSE_NN_NAME],
+                "excluded": ["close", "far", "coords_missing"] + [
+                    n for n in sorted(train.get("transition_relations", ()))
+                    if n in DISTANCE_DERIVED_TRANSITIONS
+                ],
+            },
+            "term": sorted(train_ec_relations),
+        }
+    else:
+        # Relational mode: BYTE-IDENTICAL flat listing, exactly as every
+        # artifact this recording first shipped with -- in this mode both
+        # searches really do run over the same pool.
+        ec_candidate_vocabulary = sorted(train_ec_relations)
+
     return {
         "fold": fold_index,
         "mode": mode,
@@ -1010,7 +1046,7 @@ def run_fold(
         "n_train_pt": train["num_pt"],
         "n_test_pt": test["num_pt"],
         "ec": {
-            "candidate_vocabulary": sorted(train_ec_relations),
+            "candidate_vocabulary": ec_candidate_vocabulary,
             "n_init_train": ec_train["n_init"],
             "n_term_train": ec_train["n_term"],
             "n_init_test": ec_test["n_init"],
