@@ -526,8 +526,10 @@ the census below is artifact-backed:
 shipped tool `examples/caviar_woled/xml_meeting_census.py` (which
 imports the CV harness's own `_xml_family_fold_assignment` for the fold
 split — same table, same seed, never a re-implementation). The EC
-initiation search, run independently under the same stricter gates,
-commits a clause on only 1 of the 10 folds (`both_active & close`).
+initiation search, run independently under the same scene-family
+protocol (whose gates, per the paragraph above, are essentially
+unchanged — the collapse is in the holdout score), commits a clause on
+only 1 of the 10 folds (`both_active & close`).
 What fails is transfer:
 
 - the wk scene family carries 1,323 of 1,812 meeting-positive frames
