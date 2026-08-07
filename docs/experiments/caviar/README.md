@@ -556,7 +556,7 @@ across meeting regimes at all.
 **Moving.** Under the canonical `close_34` the direct-protocol
 reference selects the canonical published rule — now literally
 `both_walking & close_34`, the same predicate the published rules use —
-on every fold with a non-empty theory, 8 of 10 (micro F1 0.4450; up to
+on every fold with a non-empty theory, 9 of 10 (micro F1 0.4450; up to
 0.938 on a single fold). Where the clause is selected, widening close
 from 25 to 34 behaves exactly as the threshold semantics predict —
 recall up, precision down (e.g. fold 3: F1 0.286 → 0.504) — but the
