@@ -21,6 +21,15 @@ packaging, and the `xlog` CLI. Aggregate-fused worst-case-optimal joins (WCOJ),
 GPU Free Join, factorized recursive deltas, joint neural-symbolic mixtures, and
 grouped training are available in tagged artifacts beginning with 0.10.0.
 
+Two releases have shipped since. 0.11.0 added a device-resident joint-constraint
+solver — a GPU handle that picks one label per entity under pairwise constraints
+and hands its result buffers back without a host copy — plus a memoized
+dynamic-programming solve stage for chain components too large to enumerate.
+0.12.0 added exact log-evidence and the CNF-variable-to-fact map on probabilistic
+results (`EvalResult.log_z_e`, `CompiledProgram.prob_var_map`), native n-ary
+relation provenance, batched same-head rule unions, and imported-module pragma
+warnings.
+
 The public Rust release boundary is the set of publishable crates listed in
 [Release Process](/architecture/release-process). `pyxlog` is shipped through
 Python packaging, not through crates.io.
@@ -47,15 +56,18 @@ the architecture:
 - **Route counters and telemetry**: dispatch counts that record which optimized
   execution path actually fired.
 
-## Implemented source-tree capabilities
+## Available since 0.12.0
 
-The source tree includes the released architecture above and additional public
-contracts. Release notes identify the first packaged artifact that contains each
-new contract. Implemented capabilities include:
+These public contracts are in tagged artifacts from 0.12.0 onward:
 
-- **Native relation evidence** — ordered semantic roles and provenance records
-  bind to complete facts of any positive arity and follow every relation mutation
-  atomically.
+- **Native relation evidence** (breaking change) — ordered semantic roles and
+  provenance records bind to complete facts of any positive arity and follow every
+  relation mutation atomically. This *replaced* the Python sidecar API rather than
+  extending it: `evidence()` no longer returns `source_path`, `source_hash`,
+  `row_hashes`, `accepted_count`, `rejected_count`, `output_hash`, or
+  `decision_counts`; `evidence()` and `relation()` raise `KeyError` for an unknown
+  relation instead of returning an empty dict; and `RelationEvidence` is an
+  immutable native class with no `RelationEvidence(session, name)` constructor.
 - **Exact relation manifests** — versioned metadata and DLPack columns reconstruct
   persistent rows, roles, and whole-fact evidence in another compatible session.
 - **Owned persistent relation snapshots** — persistent DLPack imports are copied

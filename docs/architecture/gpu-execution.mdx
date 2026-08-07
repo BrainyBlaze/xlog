@@ -58,6 +58,7 @@ buffer:
 | Project | Select, reorder, or compute output columns. |
 | Join | Dispatch hash join, nested-loop join, WCOJ (worst-case-optimal join — computes multiway patterns directly instead of building large intermediates), Free Join (a multiway join algorithm), or a fallback route depending on shape and runtime gates. |
 | Groupby | Run recorded aggregate kernels for supported key/value widths. |
+| Rule union | Merge every rule that writes the same head through one chunked multiway concat-and-dedup fold, into a single deduplicated accumulator. Each chunk's byte budget is `XLOG_UNION_CHUNK_BYTES` (default 1 GiB), so peak device memory tracks one chunk plus the accumulator rather than the sum of all contributions. A pass declines fail-closed above 4294967295 rows, or when an output or per-column byte count would overflow a `u32`. |
 | Recursive SCC | Execute semi-naive seed and delta variants until convergence or a configured iteration limit. |
 
 "Semi-naive" here means each recursive round processes only the rows newly

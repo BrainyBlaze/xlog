@@ -5,8 +5,8 @@ description: "How XLOG recognizes multiway join shapes, promotes them into RIR, 
 
 <Note>
 For contributors — how XLOG's worst-case-optimal join routes work internally.
-If you just want to turn these speedups on, start with the user guide:
-[Factorized Execution](/architecture/factorized-execution).
+If you just want to turn these speedups on and confirm they fired, start with the
+user guide: [Worst-case-optimal join tuning](/guides/wcoj-tuning).
 </Note>
 
 Some queries join three or more relations at once — counting triangles or cycles
@@ -145,6 +145,9 @@ recursive evaluation path.
 
 ## See also
 
-- [Factorized Execution](/architecture/factorized-execution) — the user guide.
+- [Worst-case-optimal join tuning](/guides/wcoj-tuning) — the user guide: turning
+  these routes on, forcing one off, and confirming which one fired.
+- [Factorized Execution](/architecture/factorized-execution) — contributor
+  overview of the factorized routes.
 - [Factorized Execution Internals](/architecture/factorized-execution-internals) —
   implementation details for the factorized routes.

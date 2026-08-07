@@ -35,21 +35,25 @@ The route then depends on the classified program:
 
 - An acyclic modal program builds a single-pass GPU plan and runs
   Generate-Propagate-Test workspace phases.
-- A positive modal dependency cycle uses a mode-specific fixpoint. Before
-  compilation, FAEEL excludes positive exact-tuple unfounded self-support and
-  then computes the founded least fixpoint. A supported Gelfond-1991
-  exact-tuple `possible` cycle computes a greatest compatibility fixpoint over
-  concrete relation tuples.
+- A positive modal dependency cycle uses whichever fixpoint the program's semantic
+  mode selects, set by `#pragma epistemic_mode`.
+  - **`faeel`** (the mode's internal name is FAEEL) is the default and is
+    *founded*: a fact counts as known only when some rule actually derives it, so
+    a tuple that supports only itself does not survive. Before compilation the
+    reducer drops that unfounded exact-tuple self-support, then computes the
+    least fixpoint — the smallest set of facts every rule supports.
+  - **`g91`** (Gelfond's 1991 epistemic-specification semantics) instead admits a
+    self-supporting tuple. For a supported exact-tuple `possible` cycle it
+    computes the *greatest* set of tuples that stay mutually compatible,
+    descending from a GPU-computed over-approximation.
 - A supported cycle through negation reduces to a non-monotone ordinary program
-  and runs through the GPU-backed WFS alternating fixpoint.
+  and runs through the GPU-backed **well-founded semantics** (WFS) alternating
+  fixpoint — the standard three-valued treatment of a rule that negates something
+  it depends on, where a fact can be true, false, or undefined.
 
 Determined-head stratification may combine these routes in order: a lower stratum
 is materialized first, then a higher stratum reads that relation through its local
 execution plan.
-
-Two terms above are xlog internals. **Helper splitting** breaks a complex rule
-into smaller helper rules. **WCOJ** is worst-case-optimal join, a join strategy
-that computes multiway patterns directly to keep peak memory flat.
 
 ## Source surface
 
@@ -121,9 +125,12 @@ into the GPU-backed WFS plan rather than the ordinary semi-naive plan.
 That reuse is load-bearing:
 
 - statistics snapshots still feed the compiler;
-- helper splitting stays owned by the ordinary optimizer path;
-- WCOJ promotion and route gates (the checks deciding whether a specialized
-  execution route such as WCOJ fires) are shared with deterministic execution;
+- *helper splitting* — breaking a complex rule into smaller helper rules — stays
+  owned by the ordinary optimizer path;
+- WCOJ promotion and route gates are shared with deterministic execution. A
+  *WCOJ* (worst-case-optimal join) computes a multiway pattern directly instead
+  of chaining two-way joins; a *route gate* is the runtime check that decides
+  whether such a specialized route actually fires.
 - reduced positive plans do not get a private epistemic join planner.
 
 ## Gelfond-1991 tuple compatibility
@@ -211,6 +218,24 @@ For acyclic components, split execution reuses
 `compile_epistemic_gpu_execution_with_stats_snapshot` for each executable
 component. There is no separate split-only runtime. Recursive programs are
 classified before the single-pass split planner.
+
+## Boundaries added with the recursive rewrite
+
+The 0.12.0 rewrite that preserved predicate unions and recursive epistemic
+semantics also closed five shapes that previously compiled. Each now fails closed
+at compile time with a typed `UnsupportedEpistemicConstruct`:
+
+| Construct | Trigger | Source |
+| --- | --- | --- |
+| `epistemic rule-union materialization` | A predicate has more than one defining clause, at least one clause is epistemic, and the modal filters are not provably redundant across clauses. Single-pass materialization keeps no per-clause modal provenance, so it cannot safely filter the clause union. | `epistemic.rs:3258` |
+| `epistemic derived predicate schema` | The same derived epistemic predicate name is defined at two arities. A derived epistemic relation gets one runtime identity per name, so it needs one source signature. | `epistemic.rs:3136` |
+| `epistemic augmented predicate schema` | Clauses for one head signature lower to different internal arities, because a modal-local (body-only) variable adds hidden output columns in some clauses but not others. | `epistemic.rs:3200` |
+| `epistemic augmented head query` | A query against an augmented epistemic head whose arguments are not all distinct named variables — a constant, `_`, a repeated variable, or a compound term. | `epistemic.rs:3228` |
+| `epistemic modal tuple key` | A modal literal's tuple key flattens to a binding arity that does not match the target's declared arity. Use one scalar key term per target column. | `epistemic.rs:2310` |
+
+The first is the one a program author is most likely to hit: writing two rule
+clauses for one epistemic head is ordinary Datalog style, and it is now rejected
+rather than silently mis-filtered.
 
 ## Invariants and diagnostics
 

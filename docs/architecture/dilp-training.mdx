@@ -3,8 +3,22 @@ title: "dILP Training"
 description: "Differentiable ILP on the tensorized super-graph: candidate masks, tagged credit, the neurosymbolic joint mixture, and the neural join-body path with its measured limits."
 ---
 
-This document describes the dILP training subsystem: a GPU-accelerated differentiable Inductive Logic
-Programming engine that learns Datalog rules from positive/negative examples via gradient descent.
+<Note>
+For contributors — how the rule-learning trainer works internally. If you want to
+learn rules from data, read [Rule learning](/neural/rule-learning) instead.
+</Note>
+
+XLOG can learn Datalog rules from labelled examples by gradient descent rather
+than by searching over programs. This page describes how that trainer — the
+**dILP** (differentiable Inductive Logic Programming) subsystem — is built.
+
+The idea in one paragraph. Compiling every candidate rule into an executable
+program is too slow to do per training step. So xlog compiles all candidates
+*once* into a single program and attaches a learnable weight to each one. During
+training those weights are turned into a soft on/off mask with **Gumbel-Softmax**
+— a way to sample a near-discrete choice that still passes gradients — and the
+mask is annealed toward picking exactly one rule. At the end, the
+highest-weighted candidate is the learned rule.
 
 ## Design Goals
 
@@ -17,8 +31,9 @@ Programming engine that learns Datalog rules from positive/negative examples via
 ## Core Idea: Tensorized Super-Graph Masking
 
 Traditional ILP systems compile candidate rules into executable programs — impossible at millisecond
-timescales. XLOG's approach pre-compiles a "super-graph" of all candidate rules and activates them
-via continuous mask tensors optimized with Gumbel-Softmax:
+timescales. XLOG instead pre-compiles a *super-graph* — one program holding every candidate rule at
+once — and activates individual candidates through continuous mask tensors optimized with
+Gumbel-Softmax:
 
 ```
 Candidate rules          Logit tensor W (C floats)
@@ -37,9 +52,6 @@ Candidate rules          Logit tensor W (C floats)
 
 At convergence, `argmax(W)` picks the winning rule. Temperature annealing (τ → τ_floor) drives the
 soft mask toward a one-hot selection.
-
-For the full mathematical treatment and the resolved design decisions that led
-to the shipped trainer, see `rfc-tensorized-ilp` (internal RFC, retired from the docs site).
 
 ## Architecture Overview
 
@@ -202,6 +214,24 @@ The source owns declarative `nn(...)`, `trainable_rule(...)`, and `train(...)`
 declarations. The result reports neural gradient norms, symbolic gradients,
 final symbolic weights, and a `RuleInventory` suitable for transfer audits.
 
+**Backbone coupling (since 0.12.0).** By default a neural body spec detaches the
+entity features `phi(x)` before uploading them for training, so gradient stops at
+the feature producer. Setting `NeuralBodySpec.train_phi_gradient = True` leaves
+`phi` attached, so gradient flows back into whatever computed the features. Only
+the autograd linkage changes — the uploaded values are byte-identical either way
+(`crates/pyxlog/python/pyxlog/ilp/neurosymbolic.py:114`).
+
+**Typed network registration (since 0.11.0).** `CompiledProgram.register_network`
+accepts keyword-only `arity=`, `arg_sorts=`, and `artifact_hash=`. The arity is
+*validated* against every `nn/4` declaration bound to that network name in the
+program rather than trusted: a mismatch raises `ValueError` naming both the
+declared and the passed arity (`crates/pyxlog/src/neural.rs:290`). Passing
+`arg_sorts` without `arity` is rejected, as is an `arg_sorts` whose length differs
+from `arity`, or one containing a bool or a non-int element.
+`CompiledProgram.network_metadata(name)` reads the registration back as
+`{arity, arg_sorts, artifact_hash, declared}`; embedding-declared names are
+refused, since they carry no registration metadata.
+
 #### Existential-join trainable bodies (Stage B)
 
 A `trainable_rule` body may join a neural predicate to an ordinary relation on an
@@ -227,7 +257,9 @@ id lookup), the trained predicate generalizes to unseen events.
 Constraints: the join domain must be ground facts (a derived relation is rejected,
 since its extension is not materialized); head-binding ids must be `0..N-1`
 row-aligned with `targets`; a single join network is supported; and the exact
-d-DNNF compiler builds one circuit over all head-binding queries, so the planted
+**d-DNNF** compiler — d-DNNF is a circuit form of a Boolean formula whose
+satisfying assignments can be weighted and summed in one pass instead of
+enumerated — builds one circuit over all head-binding queries, so the planted
 graph must stay within the compiler's fixed buffer (empirically ~6–7 events).
 Worked example + CUDA-gated recovery test:
 [`examples/plasticity_incircuit/`](https://github.com/BrainyBlaze/xlog/tree/main/examples/plasticity_incircuit) and
@@ -248,18 +280,24 @@ trainable_rule(cand_post_before_pre, weight=0.0) :: plastic(E) :- saliency(Ev, s
 trainable_rule(cand_co_occurs,       weight=0.0) :: plastic(E) :- saliency(Ev, strengthen), co_occurs(Ev, E).
 ```
 
-Each candidate's mask is the OR, over the join extension **read from the engine**
-(`relation_facts` — never a caller-supplied binding→constants hint), of the network's
-**per-constant** probability, computed in log space:
+For one candidate rule, xlog needs the probability that its head fires. It gets
+there in three steps.
+
+First, it asks the engine which domain constants actually join to each head
+binding — the candidate's *join extension*. This always comes from the engine's
+own relation facts (`relation_facts`); a caller cannot supply the
+binding-to-constants map by hand.
+
+Second, it runs the network on each of those constants to get a per-constant
+probability.
+
+Third, it combines them. The head fires if *any* joined constant does, so the
+mask is one minus the product of the complements — a **noisy-OR**. xlog computes
+this in log space for numerical stability:
 
 ```
 mask_k[h] = 1 − ∏_{e ∈ ext_k(h)} (1 − p_net(e))
 ```
-
-This is the engine proposal's long-deferred **Change 2** ("multi-rule same-head with
-neural bodies"), delivered by **route (A)** — extend the mixture to carry neural join
-masks. Route (B) — un-fusing the circuit backward so the mixture could be pushed back
-into the compiled program — is **not needed for this goal** and is not pursued.
 
 **The `domain_ids` contract.** `domain_ids` is the **one** map from a domain constant
 to its feature row, and **both** engines — the exact d-DNNF circuit and the torch-side
@@ -374,48 +412,15 @@ Worked example + CUDA-gated tests:
    caught and abstained on rather than confidently misreported
    (`python/tests/test_join_identifiability.py`, formerly the last `xfail(strict)`).
 
+6. **A neural predicate cannot ride in the dILP enumerator's own candidate space.**
+   The mixture's candidate vocabulary is supplied by the caller. The engine-side
+   enumerator (`valid_candidates`) and this mixture remain disjoint induction
+   paths.
+
 `train_and_promote(...)` also accepts `training_fold`, `held_out_domains`,
 `base_kernel_checksum_before`, and `base_kernel_checksum_after`. These fields are
 recorded on `PromotionResult.rule_inventory`, along with selected and rejected
 candidate clauses and gate outcomes.
-
-#### Toward a neural body literal in the engine's own candidate space (spike finding)
-
-The mixture above is candidate *selection* over a caller-supplied vocabulary; it does not
-touch the engine's dILP enumerator, so the two induction paths stay disjoint. A natural
-next step is to let a neural predicate ride in the enumerator's *own* candidate space, so
-that `valid_candidates` — with its chain template `head(X, Y) :- L(X, Z), R(Z, Y)`, its
-`|R|²` breadth and its recursion — searches neural-bodied rules directly. The following is
-**measured by a spike, not implemented in this branch**; it records what is already true
-and what the one remaining obstacle is, so the work is not restarted from scratch.
-
-**Already true — no enumerator change needed.** The chain template's join variable `Z` is
-existential (it is absent from `head_projection`). A relation with **no tuples** is still a
-legal body slot: `candidate_triples_for_mask` prunes a pair only when *both* slots are
-empty, and `rel_index` is keyed by relation *name*, not extension. So a candidate whose
-body puts a neural predicate on `Z` is *already enumerated*. Given the neural predicate its
-domain as ground tuples, the engine also *derives* it: activated alone, the triple
-`(has_event, sal, plastic)` produced its head facts with the expected labels and every
-query fact was covered. The structural half of the bridge exists today.
-
-**The one obstacle — the credit is linear coverage.** `compute_ilp_loss_grad_gpu` builds a
-**binary** coverage matrix (`ilp_credit.cu`: `credit[f] = Σ_c A[f,c]·p_c`, `A ∈ {0,1}`,
-CSR with column indices and no value array), and its gradient is hand-injected into torch
-(`cand_probs.detach()` in, `cand_probs.backward(credit_grad)` out). To carry a per-event
-neural probability the credit must become real-valued —
-`s_c(f) = 1 − Π_{z ∈ ext_c(f)} (1 − p_net(z))` for a neural candidate, `A[f,c]` otherwise —
-where `ext_c(f)` is read from the engine exactly as Stage B already does
-(`join_bodies.read_join_extension`). A host-side torch reimplementation of that credit
-trains end to end. But because the combination is a **sum**, a crisp relational rule
-(`s ∈ {0,1}`) dominates a soft neural rule (`s < 1`) whenever both explain the data: in the
-spike, with the true join isolated the neural rule won (weight 0.9995, detector separation
-0.81), but adding one perfect relational competitor flipped selection to it (0.997 vs
-0.0007) even though the detector still learned. **The open design question — make the
-neural score enter as a product, or calibrate the credit so a soft-but-correct rule is not
-dominated by a crisp coincidental one — must be settled before any Rust credit-value
-kernel work.** Crossing onto this path also inherits the enumerator path's entropy
-regularization, temperature schedule and holdout arbiter — the Occam pressure the mixture
-lacks (see limit 5).
 
 ## Artifact Persistence
 
@@ -431,7 +436,9 @@ precision/recall, metadata (timestamp, schema version, candidate map hash).
 
 ## GPU Contract
 
-The training step loop obeys XLOG's GPU-resident contract:
+The training step loop obeys XLOG's GPU-resident contract. *Tagged credit* below
+means: for each derived fact, which candidate rules derived it — the coverage
+matrix the loss gradient is built from.
 
 - `evaluate_device()` — no host reads for semantic results
 - `batch_fact_membership_device()` — returns a CUDA bool mask via DLPack with zero semantic-loop device-to-host transfer
@@ -450,17 +457,6 @@ The training step loop obeys XLOG's GPU-resident contract:
 - **Dense/sparse parity**: every sparse-path test has a `debug_dense_mask=True` variant
 - Rust-side: `ilp_integration_tests.rs`, `ilp_kernel_tests.rs`
 - CUDA certification: `extract_nonzero_indices` covered by kernel test suite
-
-## Design Documents
-
-The dILP design went through many internal iterations before converging on the
-RFC. The live references are:
-
-| Document | Content |
-|----------|---------|
-| `rfc-tensorized-ilp` (internal RFC, retired from the docs site) | Full RFC: mathematical foundation, hardware rationale, implementation map, and resolved design decisions |
-| `dilp-showcase-report` (internal validation report, retired) | Validation: four-stage showcase run analysis |
-| `external-consumer-diagnostics` (retired) | External-consumer issue resolutions and reusable diagnostics |
 
 ## See Also
 

@@ -12,25 +12,47 @@ record.
 
 ## Implemented epistemic execution
 
-Epistemic source is preserved in EIR before dependency classification selects an
-execution route:
+Epistemic source is preserved in EIR — the epistemic intermediate representation,
+a plan form that keeps `know` and `possible` literals explicit — before dependency
+classification selects an execution route:
 
 - acyclic modal programs use the GPU Generate-Propagate-Test workspace;
-- positive modal dependency cycles use mode-specific fixpoints: FAEEL computes
-  the founded least fixpoint, while supported exact-tuple Gelfond-1991
-  `possible` cycles start from a GPU-computed upper bound and descend through
-  frozen-snapshot refinements to the greatest compatible tuple fixpoint;
-- supported cycles through negation run through the GPU-backed WFS alternating
-  fixpoint.
+- positive modal dependency cycles use whichever fixpoint the program's semantic
+  mode asks for. `faeel`, the default mode (internally FAEEL), is *founded*: a
+  fact counts as known only if a rule actually derives it, so xlog computes the
+  smallest set of facts every rule supports. `g91` (Gelfond's 1991 semantics)
+  admits a tuple that merely supports itself: for supported exact-tuple
+  `possible` cycles xlog starts from a GPU-computed upper bound and descends
+  through frozen-snapshot refinements to the greatest compatible tuple fixpoint;
+- supported cycles through negation run through the GPU-backed well-founded
+  semantics (WFS) alternating fixpoint — the standard three-valued treatment of
+  a rule that negates something it depends on, where a fact can be true, false,
+  or undefined.
 
 An independently founded predecessor propagates through a positive cycle. An
-unseeded FAEEL tuple cycle, including `p() :- possible p().`, executes to an empty
+unseeded `faeel` tuple cycle, including `p() :- possible p().`, executes to an empty
 extension rather than a rejection. Finite nested modal chains and finite typed
 structured tuple keys also execute through these routes. Remaining typed
 boundaries include recursive epistemic programs with modal integrity constraints,
-Gelfond-1991 compatibility components with recursive negation or aggregation,
+`g91` compatibility components with recursive negation or aggregation,
 cyclic WFS shapes outside the supported negated-modal plan, unbounded or untyped
 tuple keys, and unsafe unbound negated modal variables.
+
+Since v0.12.0 the compiler also rejects five further shapes with a typed
+`UnsupportedEpistemicConstruct`:
+
+- `epistemic rule-union materialization` — a predicate with more than one defining
+  clause where at least one clause is epistemic and the modal filters are not
+  provably redundant across clauses (`crates/xlog-logic/src/epistemic.rs:3258`);
+- `epistemic derived predicate schema` — the same derived epistemic predicate name
+  defined at two arities (`epistemic.rs:3136`);
+- `epistemic augmented predicate schema` — clauses for one head that lower to
+  different internal arities, because a modal-local variable adds hidden output
+  columns in some clauses but not others (`epistemic.rs:3200`);
+- `epistemic augmented head query` — a query against an augmented epistemic head
+  whose arguments are not all distinct named variables (`epistemic.rs:3228`);
+- `epistemic modal tuple key` — a modal tuple key whose flattened binding arity
+  does not match the target's declared arity (`epistemic.rs:2310`).
 
 ## v0.0.1 - Workspace Foundation
 
@@ -74,7 +96,12 @@ tuple keys, and unsafe unbound negated modal variables.
 ### xlog-ir and Optimizer
 
 - [x] Predicate pushdown.
-- [x] Cost-based join planning with dynamic programming for up to 10 atoms.
+- [x] `dp_threshold` cost configuration and a greedy join-ordering helper.
+      Dynamic-programming join ordering was scaffolded but never became the active
+      planner: `Optimizer::optimize` applies predicate pushdown only, and
+      `should_use_greedy` has no production caller
+      (`crates/xlog-logic/src/optimizer.rs:234`). See
+      `docs/architecture/query-optimizer.mdx`.
 - [x] Greedy bushy join planning fallback.
 - [x] Build/probe cost model.
 - [x] Statistics-seeded optimization through `StatsSnapshot`.
@@ -198,11 +225,14 @@ tuple keys, and unsafe unbound negated modal variables.
 - [x] Provenance extraction from positive Datalog.
 - [x] PIR graph construction.
 - [x] Tseitin CNF with stable variable mapping.
-- [x] GPU decision-DNNF compiler integration.
+- [x] GPU decision-DNNF compiler integration. A *decision-DNNF* is a circuit form
+      of a Boolean formula whose models can be counted in one pass over the
+      circuit instead of by enumeration.
 - [x] GPU CDCL equivalence verifier.
 - [x] Decision-DNNF parsing retained for tests and fixtures.
 - [x] XGCF construction.
-- [x] GPU forward pass weighted model counting.
+- [x] GPU forward pass weighted model counting — summing the probability of every
+      satisfying assignment by evaluating that circuit once.
 - [x] GPU backward pass gradients.
 - [x] Conditional probability `P(Query|Evidence)`.
 - [x] Per-query gradient output.
@@ -2127,9 +2157,20 @@ guard-only equivalent; there is no separate surrogate scoring path.
 
 ## Native relation roles and whole-fact provenance
 
-The source tree implements native ordered roles and provenance for complete
-relation tuples. Packaged availability is recorded in release notes rather than
-duplicated here.
+Available in tagged artifacts since 0.12.0. Ordered roles and provenance for
+complete relation tuples are now native rather than a Python sidecar.
+
+**This replaced the previous Python API, it did not extend it.**
+`LogicRelationSession.evidence()` returns `{program_hash, relations}` and no longer
+carries `source_path`, `source_hash`, `row_hashes`, `accepted_count`,
+`rejected_count`, `output_hash`, or `decision_counts`. `evidence()` and
+`relation()` raise `KeyError` for an unknown relation instead of returning an empty
+dict. `put_relation_with_provenance` is native and requires keyword-only `roles=`
+and `facts=`, returning a relation snapshot rather than the old flat sidecar dict.
+`RelationEvidence` is an immutable native class; the old
+`RelationEvidence(session, name)` constructor is gone.
+`apply_relation_delta_batch` now rejects unknown keys in an update dict instead of
+ignoring them.
 
 - [x] Validate role count, order, names, sorts, and scalar types against the
       compiled predicate before mutation.
@@ -2143,6 +2184,49 @@ duplicated here.
       retaining zero-copy imports for transient evaluation.
 - [x] Negotiate CUDA producer streams through the DLPack object protocol and
       reject unsupported devices before requesting a capsule.
+
+## v0.11.0 - Device-resident joint constraint solving
+
+Available in tagged artifacts since 0.11.0. A joint-constraint carrier holds a
+label-assignment problem — one label per entity subject to pairwise constraints —
+on the GPU and hands its result buffers back to the caller without a host copy.
+
+- [x] Joint-constraint carrier with zero-copy DLPack binding:
+      `JointConstraintCarrier` (`register_schema`, `bind_signatures`,
+      `solve_label_feasibility`, `solve_label_map_top2`, `solve_components_exact`,
+      `export_buffer`) plus the `SOLVER_ABI_IDENTITY` string it validates against.
+- [x] Consumer-event handoff with drop-leak hardening: `note_producer_stream` and
+      `note_consumer_stream` order the exported buffer against the caller's CUDA
+      stream instead of forcing a host synchronize.
+- [x] Memoized-DP stage for chain components beyond enumeration capacity
+      (`crates/xlog-cuda/src/joint_constraint.rs:1158`), registered in the kernel
+      manifest as `joint_label_memoized`. Rust-only; the Python carrier exposes
+      `solve_components_exact`, which marks an over-capacity component refused.
+- [x] Fail-closed refusals: `CarrierRefused` for schema, ABI, binding, plan, and
+      kernel faults, and `SolverResourceExhausted` when a solve would exceed its
+      `fuel_limit`.
+
+## v0.12.0 - Import fidelity, batched unions, and stats-struct stability
+
+- [x] `xlog prob --module-path` now merges the imported `use` modules into the
+      program that is compiled and evaluated; previously the flag only validated
+      that the modules could load (`crates/xlog-cli/src/main.rs:1635`).
+- [x] `xlog run`, `xlog explain`, and `xlog prob` print
+      ``warning[W0510]: `#pragma <name>` in imported module `<module>` is ignored``
+      to stderr for each pragma declared outside the entry file
+      (`crates/xlog-cli/src/main.rs:242`).
+- [x] Same-head rule outputs merge through one chunked multiway concat-and-dedup
+      fold per head, bounded by `XLOG_UNION_CHUNK_BYTES` (default 1 GiB). A pass
+      declines fail-closed above 4294967295 rows or on a `u32` byte overflow
+      (`crates/xlog-cuda/src/provider/relational.rs:975`).
+- [x] Compilation rejects a rule whose variables draw incompatible column types
+      from two declared predicates, instead of surfacing later as an internal GPU
+      union-schema error (`crates/xlog-logic/src/lower.rs:276`).
+- [x] **Breaking:** `ExecutionStats` and `StratumStats` — the structs behind
+      `xlog run --stats` — are now `#[non_exhaustive]`. Downstream Rust code
+      outside `xlog-runtime` can no longer build them with a struct literal or
+      match them exhaustively. The field names and values `--stats` prints are
+      unchanged (`crates/xlog-runtime/src/profiler.rs:128`).
 
 ## Future session and reasoning capabilities
 

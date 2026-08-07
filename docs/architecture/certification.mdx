@@ -108,14 +108,22 @@ candidate-count bound. Instead, it computes two concrete bounds:
 - `max_candidates = 2^(number of epistemic literals)`;
 - a per-reduction cap of `MAX_MODELS_PER_REDUCTION = 1024` models.
 
-These limits apply to Generate-Propagate-Test reductions. Positive FAEEL cycles
-run through an ordinary founded least-fixpoint reduction. Supported exact-tuple
-Gelfond-1991 `possible` cycles use a GPU upper-bound pass followed by descending
-frozen-snapshot refinements to the greatest compatible tuple fixpoint. Supported
-cycles through negation run through GPU-backed WFS. None of those routes
-enumerates the single-pass candidate lattice. The Gelfond-1991 and WFS routes
-keep relation evaluation and set comparison on the GPU while the host
-orchestrates fixpoint iterations.
+These limits apply to Generate-Propagate-Test reductions only. Three other
+epistemic routes never enumerate the candidate lattice, so these bounds do not
+constrain them:
+
+- the default `faeel` reduction, which is *founded* — a fact is known only if
+  some rule derives it — and computes an ordinary least fixpoint;
+- the `g91` route for supported exact-tuple `possible` cycles, which runs a GPU
+  upper-bound pass and then descends through frozen-snapshot refinements to the
+  greatest set of mutually compatible tuples;
+- the well-founded-semantics route for cycles through negation, the standard
+  three-valued treatment where a fact can be true, false, or undefined.
+
+The `g91` and well-founded routes keep relation evaluation and set comparison on
+the GPU while the host orchestrates fixpoint iterations. For what those routes do
+and where they stop, see
+[Epistemic Execution Internals](/architecture/epistemic-internals).
 
 ## Evidence Requirements
 
