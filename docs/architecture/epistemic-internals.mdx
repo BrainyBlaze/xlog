@@ -179,9 +179,10 @@ Production single-pass planning derives the candidate space from the EIR program
 itself. It computes the full candidate lattice (the ordered space of candidate
 knowledge states) from the number of epistemic literals. It is not a fixed
 literal count or a large hardcoded bound. Models per Generate-Propagate-Test
-reduction are capped at `MAX_MODELS_PER_REDUCTION = 1024`. FAEEL founded
-positive-cycle, Gelfond-1991 tuple-compatibility, and WFS routes do not enumerate
-this lattice.
+reduction are capped by the configurable `max_models_per_reduction` field,
+which defaults to `DEFAULT_EPISTEMIC_MAX_MODELS_PER_REDUCTION = 1024`. FAEEL
+founded positive-cycle, Gelfond-1991 tuple-compatibility, and WFS routes do not
+enumerate this lattice.
 
 ## Single-pass workspace phases
 

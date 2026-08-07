@@ -106,7 +106,9 @@ This single-pass route has no public fixed-literal limit and no large hardcoded
 candidate-count bound. Instead, it computes two concrete bounds:
 
 - `max_candidates = 2^(number of epistemic literals)`;
-- a per-reduction cap of `MAX_MODELS_PER_REDUCTION = 1024` models.
+- a per-reduction limit held in the configurable `max_models_per_reduction`
+  field, which defaults to `DEFAULT_EPISTEMIC_MAX_MODELS_PER_REDUCTION = 1024`
+  models.
 
 These limits apply to Generate-Propagate-Test reductions only. Three other
 epistemic routes never enumerate the candidate lattice, so these bounds do not
