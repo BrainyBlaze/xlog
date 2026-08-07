@@ -764,6 +764,16 @@ python examples/caviar_woled/run_caviar_cv.py --data-source xml \
   --xml-dir <dir with the 30 CAVIAR ground-truth XML files> \
   --fluent moving --folds 10 --seed 7 --out RESULT.json
 
+# the HISTORICAL threshold-25 moving measurement (micro F1 0.4868,
+# superseded by the canonical close_34 row; preserved as
+# caviar-f-xml-moving-cv10-threshold25.json). --close-threshold
+# overrides the canonical per-fluent table. The preserved artifact
+# predates the provenance fields (see the pre-flag note above), so a
+# replay matches every field it does contain and adds the new keys.
+python examples/caviar_woled/run_caviar_cv.py --data-source xml \
+  --xml-dir <dir with the 30 CAVIAR ground-truth XML files> \
+  --fluent moving --close-threshold 25 --folds 10 --seed 7 --out RESULT.json
+
 # dump-vs-XML integrity audit (section F, regenerates
 # results/f_audit/caviar-f-dump-vs-xml-audit.json; CPU-only). Expected
 # headline values: 21 real / 3 duplicate / 1 splice, 855 duplicated

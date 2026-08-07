@@ -179,9 +179,12 @@ TRANSITION_RELATION_NAMES: tuple[str, ...] = (
 # therefore labels every moving pair at pixel distance in (25, 34] as
 # `far`, structurally starving any `... & close` moving rule of exactly
 # those gold frames. `convert_xml_corpus`'s `close_threshold=None`
-# default resolves through this table; an explicit value still wins
-# (which is how the historical threshold-25 moving measurement stays
-# reproducible -- see docs/experiments/caviar/README.md section G).
+# default resolves through this table; an explicit value still wins --
+# `run_caviar_cv.py --data-source xml --fluent moving
+# --close-threshold 25` is the shipped entry point that regenerates the
+# historical threshold-25 moving measurement (see
+# docs/experiments/caviar/README.md section G and its Reproduction
+# block).
 CANONICAL_CLOSE_THRESHOLDS: dict[str, float] = {
     "meeting": 25.0,
     "moving": 34.0,

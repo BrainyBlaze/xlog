@@ -888,7 +888,7 @@ def _run_init_search(
 def run_fold(
     fold_index: int, train_segments: list[dict], test_segments: list[dict], seed: int,
     mode: str = "relational", data_source: str = "dump", fluent: str = "meeting",
-    transition_vocab: str = "full",
+    transition_vocab: str = "full", close_threshold: float | None = None,
 ) -> dict:
     """Run one fold of the pre-registered protocol end to end: fold-local
     conversion (see FOLD ISOLATION in the module docstring), EC init/term
@@ -931,12 +931,29 @@ def run_fold(
     form (same shape as `run_caviar_theory`'s neural-EC record), because
     the neural initiation search's pool (`_neural_init_vocab` +
     ``close_nn``) differs from the always-relational termination
-    search's."""
+    search's.
+
+    ``close_threshold`` (default ``None``, BYTE-IDENTICAL to every call
+    site that predates this parameter) is forwarded to
+    `convert_xml_corpus` on the XML path only: ``None`` resolves through
+    `CANONICAL_CLOSE_THRESHOLDS` per fluent, an explicit value overrides
+    it -- the entry point that regenerates the historical threshold-25
+    moving measurement. Rejected on the dump path, whose conversion
+    never parameterized the threshold (fixed 25 default) -- an explicit
+    value there would be a silent no-op."""
     from relational_search import make_predict_clause
     from scorer import prf1, theory_predictions
 
     t0 = time.perf_counter()
     if data_source == "dump":
+        if close_threshold is not None:
+            raise ValueError(
+                "close_threshold is an XML-path parameter only (got "
+                f"{close_threshold!r} with data_source='dump'): the dump "
+                "path's convert_continuous call never parameterized the "
+                "threshold, so an explicit value here would be silently "
+                "ignored."
+            )
         from caviar_continuous import (
             convert_continuous,
             derive_ec_masks_continuous,
@@ -956,8 +973,8 @@ def run_fold(
         )
         from caviar_xml_corpus import convert_xml_corpus
 
-        train = convert_xml_corpus(train_segments, fluent=fluent)
-        test = convert_xml_corpus(test_segments, fluent=fluent)
+        train = convert_xml_corpus(train_segments, fluent=fluent, close_threshold=close_threshold)
+        test = convert_xml_corpus(test_segments, fluent=fluent, close_threshold=close_threshold)
         train_ec_segments = [_xml_video_as_segment(v, fluent) for v in train_segments]
         test_ec_segments = [_xml_video_as_segment(v, fluent) for v in test_segments]
     else:
@@ -1140,9 +1157,29 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "never sees transition relations in either setting; the "
         "vocabulary actually searched is recorded in the result JSON.",
     )
+    p.add_argument(
+        "--close-threshold", type=float, default=None,
+        help="explicit close-relation pixel threshold, for --data-source "
+        "xml only (default: None, BYTE-IDENTICAL to every behavior that "
+        "predates this flag -- the canonical per-fluent value from "
+        "caviar_xml_corpus.CANONICAL_CLOSE_THRESHOLDS: meeting 25, "
+        "moving 34). An explicit value overrides the canonical table -- "
+        "the entry point that regenerates the historical threshold-25 "
+        "moving measurement (caviar-f-xml-moving-cv10-threshold25.json, "
+        "README section G). Refused with --data-source dump, whose "
+        "conversion never parameterized the threshold.",
+    )
     p.add_argument("--out", required=True, help="path to write RESULT.json")
     args = p.parse_args(argv)
 
+    if args.close_threshold is not None and args.data_source != "xml":
+        p.error(
+            "--close-threshold is only meaningful with --data-source xml; "
+            "with --data-source dump the conversion's threshold is a fixed "
+            "25 default the flag cannot reach -- it would be silently "
+            "ignored yet recorded into the result JSON as provenance, so "
+            "it is refused instead (mirrors the --xml-dir refusal below)."
+        )
     if args.data_source == "dump":
         if args.fluent != "meeting":
             p.error(
@@ -1246,6 +1283,7 @@ def main(argv: list[str] | None = None) -> int:
             fold_index, train_segments, test_segments, args.seed,
             mode=args.mode, data_source=args.data_source, fluent=args.fluent,
             transition_vocab=args.transition_vocab,
+            close_threshold=args.close_threshold,
         )
         fold_results.append(result)
         ec_s, direct_s = result["ec"]["scoring"], result["direct"]["scoring"]
@@ -1263,8 +1301,12 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.data_source == "dump":
         # `convert_continuous`'s own fixed default -- the dump path never
-        # parameterizes it.
+        # parameterizes it (parse_args refuses --close-threshold there).
         close_threshold = 25.0
+    elif args.close_threshold is not None:
+        # Explicit --close-threshold: `run_fold` forwarded exactly this
+        # value to every conversion, so it is the value to record.
+        close_threshold = args.close_threshold
     else:
         from caviar_xml_corpus import CANONICAL_CLOSE_THRESHOLDS
 
