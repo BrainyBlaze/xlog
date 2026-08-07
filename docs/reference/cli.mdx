@@ -53,17 +53,32 @@ format, used to exchange tables between tools.
 | `--output-dir <DIR>` | Directory for Arrow output files (with `--output arrow`). | — |
 | `--device <N>` | CUDA device index. | `0` |
 | `--memory-mb <MB>` | GPU memory budget in mebibytes. | `1024` |
-| `--stats` | Emit per-stratum timing and memory statistics to stderr. | off |
+| `--stats` | Emit per-stratum timing and memory statistics to stderr, followed by a `WCOJ dispatch:` line carrying the triangle, 4-cycle, group-by-fusion, free-join, and factorized-delta dispatch counts plus the decline count. Under `--stats-format json` those same counts appear in a `wcoj` object as `triangle_dispatch`, `four_cycle_dispatch`, `groupby_fusion_dispatch`, `free_join_dispatch`, `factorized_delta_dispatch`, and `error_decline`. | off |
 | `--stats-format <FORMAT>` | `human` or `json` (written to stderr). | `human` |
 | `--module-path <DIR[:DIR...]>` | Extra module search paths. | — |
 | `--epistemic-plan-json <PATH>` | Write the compiled epistemic execution plan as JSON. The plan describes how the program reasons about what it knows and does not know. | — |
+| `--wcoj` | Turn on the worst-case-optimal join routes (triangle and 4-cycle) for eligible multiway rules. A worst-case-optimal join computes a multi-way graph pattern — a triangle, a 4-cycle — in one step instead of joining two relations at a time, so it never builds the large intermediate table a binary-join chain would on a skewed cyclic query. Combine with `--stats` to confirm a route actually fired. | off |
 
 ```bash
 xlog run examples/xlog/00-basics/01_tc_reachability.xlog
 xlog run --input edge=graph.arrow program.xlog
 xlog run --output arrow --output-dir ./results program.xlog
 xlog run --device 1 --memory-mb 2048 --stats program.xlog
+xlog run triangles.xlog --wcoj --stats
 ```
+
+**Confirming `--wcoj`.** The flag only opens the route; whether a kernel fires
+depends on the rule shape. With `--wcoj` set, xlog prints
+`WCOJ dispatch gates set (triangle + 4-cycle); run with --stats to confirm a kernel fired`
+on stderr as it starts. If you also pass `--stats` and at least one route fired,
+it then prints a `WCOJ kernels dispatched: ...` line with the per-route counts.
+If nothing fired, it prints instead:
+
+```text
+WARNING: --wcoj set but no WCOJ kernel dispatched (declines 0); the run fell back to binary joins
+```
+
+The answer is the same either way — only the execution route differs.
 
 ## xlog prob
 
@@ -94,6 +109,15 @@ direct and transitive `use` imports before compiling either engine. Imported mod
 paths resolve to `.xlog` files. Public deterministic facts and rules from resolved
 modules participate in probabilistic derivations; a missing module is an error.
 
+<Warning>
+Imported rules have taken part in probabilistic evaluation only since 0.12.0.
+Before 0.12.0, `--module-path` on `xlog prob` checked that the imported modules
+could be loaded, but their rules were never merged into the program that was
+actually compiled and evaluated. A program that imports deterministic rules can
+therefore report different probabilities on 0.12.0 than it did on 0.11.0. The
+0.12.0 numbers are the correct ones.
+</Warning>
+
 Program-level probabilistic constructs are entry-file-scoped. An imported module
 that contains probabilistic facts, annotated disjunctions, evidence, integrity
 constraints, neural predicate declarations, or learnable rule templates is rejected
@@ -106,7 +130,8 @@ selective import. See [Modules](/language-guide/modules) for the full import con
 Pragmas apply only when declared in the entry file. If an imported module declares a
 `#pragma`, `xlog run`, `xlog prob`, and `xlog explain` print `warning[W0510]` on
 stderr naming the module and the dropped directive (once per source file) and ignore
-the pragma; the exit code is unaffected. See
+the pragma; the exit code is unaffected. This warning is new in 0.12.0 — before
+that the pragma was dropped with no diagnostic at all. See
 [Pragmas](/language-guide/pragmas#pragmas-apply-only-in-the-entry-file).
 </Note>
 
@@ -212,7 +237,10 @@ comma-separated rows. `arrow` writes one Arrow IPC file per query into `--output
 
 ## Environment variables
 
-The CLI itself reads no environment variables. The commonly relevant variables
+The CLI reads no environment variables of its own, but it does *write* two:
+`xlog run --wcoj` sets `XLOG_USE_WCOJ_TRIANGLE_U32=1` and `XLOG_USE_WCOJ_4CYCLE=1`
+for the process before compiling, so the flag and that pair of variables are
+equivalent. The commonly relevant variables
 affecting the layers beneath it are listed below; see
 [Environment variables](/reference/environment-variables) for the full runtime
 index.

@@ -254,6 +254,21 @@ temperature(1, 22).           // Correct: the declaration converts 22 to f64
 temperature(1, invalid).      // Error: a symbol is not valid for f64
 ```
 
+Within a single program, compilation also rejects a rule whose variables draw
+incompatible column types from the declared schemas of the predicates they touch
+— whether the conflict is between two body atoms or between a body atom and the
+head. The error names the rule, the variable, both types, and where each came
+from:
+
+```text
+Type mismatch in rule for '<head>': variable <V> is <Type> (from <predicate/position>) but <head> declares <Type> at position <N>
+```
+
+The check applies only to predicates that carry an explicit `pred` declaration —
+an undeclared predicate has no schema to contradict. Available since 0.12.0;
+before that the same program compiled here and failed later with an internal GPU
+schema error that did not name the rule.
+
 ### Language-Completeness Type Forms
 
 The language-completeness contract extends the type model with finite language-level terms that must lower
@@ -1507,8 +1522,10 @@ XLOG supports two inference engines:
 and `logsumexp` aggregate programs are supported for exact and MC inference in
 the finite probabilistic-aggregate subset. Exact mode enumerates finite aggregate
 outcomes into provenance/PIR formulas, so `query` and `evidence` may reference
-aggregate output tuples. Exact enumeration is capped at 16 uncertain
-contributing rows per group; cap excess fails with a typed
+aggregate output tuples. Exact enumeration is capped per group by the operators
+in the head: a head whose aggregate expressions are all `count` accepts up to 64
+uncertain contributing rows per group, while `sum`, `min`, `max`, and `logsumexp`
+accept up to 16. Cap excess fails with a typed
 `prob_aggregate error` that recommends MC or reducing the finite domain.
 
 **Monte Carlo** supports probabilistic rules and non-monotone recursion.
@@ -1937,9 +1954,8 @@ learnable(W_col) :: colleague(X, Y)   :- bL(X, Z), bR(Y, Z).
 
 ### Cross-References
 
-- [`architecture/dilp-training.md`](/neural/rule-learning)
-- `architecture/rfc-tensorized-ilp.md`
-- [`architecture/python-bindings.md`](/reference/python)
+- [Rule learning (dILP)](/neural/rule-learning)
+- [Python API (pyxlog)](/reference/python)
 
 ---
 

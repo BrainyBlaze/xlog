@@ -1,6 +1,6 @@
 ---
 title: "Environment variables"
-description: "Every environment variable the XLOG runtime, build, and probabilistic engines read — tuning knobs, parity kill switches, and build-time controls."
+description: "Every environment variable the XLOG runtime, build, and probabilistic engines read — tuning knobs, parity kill switches, and build-time controls — plus the bench, test, and example-script variables listed separately at the end."
 ---
 
 XLOG reads environment variables for tuning, debugging, and parity checking. The
@@ -56,6 +56,7 @@ behind exact probabilistic inference) and exists only in debug builds.
 | `XLOG_DEBUG_ALLOC_GUARD` | Debug probe: track live allocation ranges and panic if the allocator hands out a region overlapping a live one (double-hand-out / use-after-free detector). | `1` to enable; default off |
 | `XLOG_DEBUG_VERIFY_CLONES` | Debug probe: byte-compare every on-device buffer clone against its source immediately after the copy, to discriminate transport faults from source corruption. | `1` to enable; default off |
 | `XLOG_CDCL_TRACE` | Debug-build-only trace of the GPU CDCL solver (compiled in only with debug assertions; release binaries ignore it). | set to any value; default off |
+| `XLOG_FORCE_HOST_ROUNDTRIP` | Measurement hook read by `pyxlog`. Normally a neural network's output tensor is handed to the GPU-resident reasoner without leaving the device. Set this and every such tensor is copied GPU → host → GPU first. The copy is an identity, so answers do not change; only the data path does. Timing the same job with and without it therefore measures the per-iteration transfer cost a CPU-reasoning hybrid would pay. Available since 0.11.0. | exactly `1` to enable — `true`/`on` are **not** accepted; default off |
 
 ## Join and optimizer knobs
 
@@ -176,17 +177,36 @@ parse as "set and non-empty and not `0`" and each is also implied by the umbrell
 | `XLOG_USE_CUDA_GRAPHS` | Broader graph opt-in that also enables the CSM graph path. | same; default off |
 | `XLOG_CSM_CUDA_GRAPH_AUTO_OUTPUT_CAP` | Worst-case output-row cap below which the CSM graph path auto-selects a capacity class. | integer; default `1000000` |
 
-## Test-only variables
+## Bench, test, and developer-tool variables
 
-A few variables appear only in test binaries, benches, or release validation and
-are not production knobs: `XLOG_REQUIRE_CUDA=1` makes CUDA-initialization failures
-in the certification suite panic instead of skipping (exported by
-`scripts/validate_release_gpu.sh` so a CPU-only machine can never satisfy the
-release gate); `XLOG_DETERMINISTIC`, `XLOG_CNF_OUTPUT_PATH`,
+These variables are read only by test binaries, Criterion benchmarks, release
+validation, or one-off developer tools. None of them affects a normal `xlog` or
+`pyxlog` run, and none is a production knob.
+
+Release validation and determinism tests: `XLOG_REQUIRE_CUDA=1` makes
+CUDA-initialization failures in the certification suite panic instead of skipping
+(exported by `scripts/validate_release_gpu.sh` so a CPU-only machine can never
+satisfy the release gate); `XLOG_DETERMINISTIC`, `XLOG_CNF_OUTPUT_PATH`,
 `XLOG_GPU_HASH_OUTPUT_PATH`, and the `XLOG_A3`/`XLOG_A3A4` family drive
 cross-process determinism and stress tests.
 
+| Variable | Read by | Effect | Values / Default |
+|---|---|---|---|
+| `WCOJ_BENCH_FULL` | the WCOJ triangle Criterion benchmark | Run the full input-size sweep instead of the reduced default. | `1` or `true` (case-insensitive); default off |
+| `XLOG_SKEWED_MULTIWAY_ONLY_CELL` | the skewed-multiway Criterion benchmark | Run only the named benchmark cases instead of the whole sweep. | comma-separated cell names; unset runs every cell |
+| `CAVIAR_CONTINUOUS_DIR` | the CAVIAR pytest modules | Directory holding local `caviar-train.json` / `caviar-test.json`. `test_caviar_alignment_evidence.py` and `test_caviar_xml_corpus.py` skip themselves unless both files are found there. | path; default `../caviar_data` relative to the test file |
+| `XLOG_NVRTC_ARCH` | the `xlog-cuda` `nvrtc_ptx` helper binary | Target GPU architecture passed to NVRTC when that one-shot tool compiles a single named kernel for inspection. This is **not** the production kernel build path — that is `crates/xlog-cuda/build.rs`, which uses `XLOG_CUBIN_ARCHS` above. | e.g. `sm_75`; default `sm_75` |
+
+## Example scripts
+
+The shipped CAVIAR example reads one variable of its own. It is not part of the
+runtime.
+
+| Variable | Effect | Values / Default |
+|---|---|---|
+| `CAVIAR_XML_DIR` | Directory holding the CAVIAR XML corpus, used by `examples/caviar_woled/run_caviar_cv.py` with `--data-source xml` when `--xml-dir` is not passed. The script stops with an error if neither is supplied. | path; unset by default |
+
 ## See also
 
-- [CLI reference](/reference/cli) — the CLI itself reads no environment variables
+- [CLI reference](/reference/cli) — the CLI reads no environment variables of its own, though `xlog run --wcoj` sets two for the process
 - [Probabilistic engines](/probabilistic/engines) — exact and Monte Carlo inference
