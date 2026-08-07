@@ -641,10 +641,16 @@ four ACTIVITY-based transition relations; the pool later gained
 default (`--transition-vocab full`) reproduces THAT enlarged pool.
 Replaying the shipped D/D.1/E results requires `--transition-vocab
 activity` -- with the default, the "section E" command below produces
-section E.1's 0.778 configuration, not section E's 0.733. Every result
-JSON records the vocabulary it actually searched (`transition_vocab` +
-`candidate_vocabulary`), so a replayed artifact can be checked against a
-shipped one directly.
+section E.1's 0.778 configuration, not section E's 0.733. Result JSONs
+written by the CURRENT runners record the vocabulary the search actually
+ran over (`transition_vocab` + `candidate_vocabulary`). The pre-flag
+shipped artifacts (`caviar-e5-*_ec_*`, `e9_permutation_null/*`,
+`e10_cv/caviar-e10-cv10.json`, `e11_cv10_termination.json`) predate the
+`transition_vocab` field and do not carry it; for those, the check is
+that a replay matches every field the shipped artifact DOES contain
+(verified for e10 and both e9 permutation-null variants), with the
+replay JSON a strict superset — the extra fields are the new provenance
+keys only.
 
 The activity-vocabulary commands were replay-verified after the flag was
 introduced: the section E command reproduces
@@ -655,7 +661,10 @@ reproduces both `e9_permutation_null/*.json` files exactly (gates
 init 0.0444 / term 0.125, the single `both_active & close` initiation
 clause, frame F1 0.9424 at tp/fp/fn 442/7/47, and the full null
 summaries), in both tie-tolerance variants. These runs are
-CPU-deterministic, so the check is bit-for-bit, not approximate.
+CPU-deterministic, so the check is bit-for-bit on every field the
+shipped artifact records, not approximate (at whole-file level the
+replay JSON is a superset: it adds the provenance fields the pre-flag
+artifacts lack).
 
 ```
 # windowed folds, direct protocol (section A; CUDA required)
