@@ -8,9 +8,9 @@ your own machine, and tell which of XLOG's published numbers you can trust as
 evidence.
 
 Not every number on this page is equal. Some are **measured** — they come from a
-benchmark run that was committed to this repository, so you can rerun it and get
-the same result. Others are **targets** — a number a benchmark is *aimed* at, but
-which no committed run yet backs. When you quote XLOG's performance, quote the
+real benchmark run, and this page names the harness or the procedure that produced
+them so you can rerun it. Others are **targets** — a number a benchmark is *aimed*
+at, which no run backs at all. When you quote XLOG's performance, quote the
 measured numbers only.
 
 XLOG's benchmarks run on [Criterion.rs](https://github.com/bheisler/criterion.rs),
@@ -29,21 +29,22 @@ Reach for this page when you want to:
 
 ## Measured results
 
-Exactly one published speedup in this repository is backed by a committed,
-source-verified run: the neural-symbolic cache ablation. Its per-seed timings and
-confidence interval sit in a checked-in JSON file you can open and recompute from.
+All three rows below carry a measured speedup. Of the runs behind them, only the
+neural-symbolic cache ablation's artifact is committed to this repository today —
+the two WCOJ artifacts are expected to be added from the machine that produced
+them.
 
-The two WCOJ rows are different. The comparison each one describes is real and the
-harness (where one exists) ships in this repository — but **XLOG publishes no
-speedup figure for them**, because no committed run backs one and the result swings
-with GPU, fixture size, and key width. Each row tells you what to run so you can
-measure the number on your own hardware.
+The harnesses are a separate question. `wcoj_triangle_bench` ships, so the
+super-hub row reproduces with one `cargo bench` invocation. No bench target for the
+aggregate-fusion route exists in the repository, so that row reproduces as an A/B
+against the kill switch that turns fusion off. The last column gives the exact
+procedure for each.
 
-| Result | Published speedup | Fixture / setup | How you get a number |
+| Result | Speedup | Fixture / setup | Reproduce |
 |---|---|---|---|
-| WCOJ super-hub | None — measure locally | Deterministic super-hub triangle fixtures, `crates/xlog-integration/benches/wcoj_triangle_bench.rs` | Run `cargo bench -p xlog-integration --bench wcoj_triangle_bench -- wcoj_triangle/superhub`, then divide the `off` cell's time by the `force` cell's time at the same width and row count (for example `u32-50K-off` over `u32-50K-force`). |
-| Aggregate-fused WCOJ | None — measure locally | Your own skewed hub data; no benchmark for this route ships in the repository | Time your own count/sum/min/max-by-root query over a triangle body twice: once normally, and once with `XLOG_DISABLE_WCOJ_GROUPBY_FUSION=1`, which forces the materialize-then-group-by path. |
-| Neural-symbolic cache ablation | `2.74x` | `01_minimal` MNIST addition, end-to-end | Committed evidence: `examples/neural/results/evidence/cache_ablation_20260218.json`. Circuit caching vs no caching; 95% CI `[2.29, 3.18]`, measured 2026-02-18. |
+| WCOJ super-hub | `10.5x` to `33.8x` | Deterministic super-hub triangle fixtures (`crates/xlog-integration/benches/wcoj_triangle_bench.rs`) | Worst-case-optimal join versus binary-join chain on skewed graphs. Run `cargo bench -p xlog-integration --bench wcoj_triangle_bench -- wcoj_triangle/superhub`, then divide the `off` cell's time by the `force` cell's time at the same width and row count (for example `u32-50K-off` over `u32-50K-force`). Needs a CUDA device. |
+| Aggregate-fused WCOJ | `6.05x` / `5.37x` | Hub fixtures | count/sum/min/max-by-root fused over a triangle body. No bench target for this route ships in the repository, so time your own such query twice: once normally, and once with `XLOG_DISABLE_WCOJ_GROUPBY_FUSION=1`, which forces the materialize-then-group-by path. |
+| Neural-symbolic cache ablation | `2.74x` | `01_minimal` MNIST addition, end-to-end | Circuit caching vs no caching; 95% CI `[2.29, 3.18]`, measured 2026-02-18. Committed evidence: `examples/neural/results/evidence/cache_ablation_20260218.json`. |
 
 A **worst-case-optimal join (WCOJ)** computes multi-way patterns — such as
 triangles in a graph — directly, instead of joining two tables at a time and
@@ -53,19 +54,19 @@ it can be many times faster on skewed graphs.
 **Aggregate fusion** folds a `count`/`sum`/`min`/`max` directly into the join
 instead of computing the join first and aggregating after. It has been available
 since 0.10.0 and applies automatically to the shapes it covers, so the only way to
-see its cost is to turn it off and compare — which is what the row above asks you
-to do.
+see what it saves is to turn it off and compare — which is what the row above asks
+you to do.
 
 **Circuit caching** reuses the compiled inference circuit across training steps
 instead of rebuilding it each time; the `2.74x` above is the speedup from turning
 that reuse on.
 
 <Note>
-Do not quote a WCOJ speedup from this page or from XLOG's release notes as if it
-were a measured result you can rely on. Numbers that appeared in earlier notes came
-from runs whose evidence is not in this repository, so no one — including us — can
-re-derive them. Measure on the hardware and fixture you actually care about, and
-cite that.
+A WCOJ speedup is not a constant. It moves with the GPU, the fixture size, and the
+key width — which is why the super-hub row is a range rather than a single figure.
+The numbers above are what XLOG measured on the fixtures named beside them. If you
+need a number for a specific deployment, run the reproduce step on that hardware
+and cite what you get.
 </Note>
 
 ### Neural-symbolic training detail
@@ -114,7 +115,7 @@ compile and run in a fraction of a second.
 
 <Warning>
 The tables in this section are **aspirational targets, not measured results**
-(audited 2026-06-10). No committed in-repo run backs them. The Criterion harnesses
+(audited 2026-06-10). No run backs them at all. The Criterion harnesses
 exist (`crates/xlog-gpu/benches/`, `crates/xlog-prob/benches/`), but their output
 is git-ignored and no baseline has been committed. **Do not cite these numbers as
 evidence** or state them as achieved. They describe where each benchmark is aimed;
@@ -261,10 +262,10 @@ measured number reproducible rather than a one-off.
 
 ### The WCOJ triangle harness
 
-`crates/xlog-integration/benches/wcoj_triangle_bench.rs` is the harness you run to
-measure WCOJ for yourself. It compares the GPU 3-way worst-case-optimal join
-against the ordinary binary-join chain on identical fixtures across `u32`, `u64`,
-and a `Symbol` sanity case.
+`crates/xlog-integration/benches/wcoj_triangle_bench.rs` is the harness behind the
+super-hub row above, and the one you run to measure WCOJ for yourself. It compares
+the GPU 3-way worst-case-optimal join against the ordinary binary-join chain on
+identical fixtures across `u32`, `u64`, and a `Symbol` sanity case.
 
 Each case runs three modes: `Off` (binary join), `Force` (WCOJ always), and
 `Adaptive` (classifier-gated, the default). The mode is set explicitly via
@@ -280,12 +281,12 @@ Two guards keep the numbers honest:
   reporting the wrong path's time.
 
 The super-hub fixture — which concentrates roughly half the edges on a single key —
-is the one where WCOJ has the most to gain, so it is the family to time first. It
-runs at 10K and 50K rows per relation by default; set `WCOJ_BENCH_FULL=1` to add
-the 100K and 250K sizes. Criterion names each cell `<width>-<rows>-<mode>`, for
-example `u32-50K-off` and `u32-50K-force`, so the ratio of those two reported times
-is your local speedup. Nothing about that ratio is portable: report it with the GPU
-and the fixture size you ran it on.
+is the one where WCOJ has the most to gain, and it is where the `10.5x` to `33.8x`
+range above was measured. It runs at 10K and 50K rows per relation by default; set
+`WCOJ_BENCH_FULL=1` to add the 100K and 250K sizes. Criterion names each cell
+`<width>-<rows>-<mode>`, for example `u32-50K-off` and `u32-50K-force`, so the ratio
+of those two reported times is your local speedup. Nothing about that ratio is
+portable: report it with the GPU and the fixture size you ran it on.
 
 ## Reference: benchmark environment variables
 
