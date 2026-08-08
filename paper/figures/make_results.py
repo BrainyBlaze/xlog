@@ -1,6 +1,8 @@
 """Generate results.pdf: WCOJ speedup over the binary-join baseline.
 
-Artifact-backed numbers (single-system ablation); see https://xlog.md/guides/benchmarking.
+Single-system ablation; see https://xlog.md/guides/benchmarking. The figures below
+are transcribed from the measured run, whose artifact is not committed to this
+repository (paper Sec. "Worst-Case Optimal Joins" states this).
 Run: python make_results.py  ->  results.pdf
 """
 import matplotlib
@@ -30,7 +32,7 @@ fixtures = [
     ("disassembly (ddisasm)", 28.79),
     ("NeSy mining analog", 26.60),
 ]
-geomean = 27.96  # artifact-backed geometric mean
+geomean = 27.96  # geometric mean of the four fixtures above
 
 names = [f[0] for f in fixtures]
 speedup = [f[1] for f in fixtures]
