@@ -70,9 +70,9 @@ cite that.
 
 ### Neural-symbolic training detail
 
-Two different committed runs sit behind the neural-symbolic numbers on this page.
-They used different settings, so read each number against its own artifact rather
-than mixing them.
+Two different runs sit behind the neural-symbolic numbers on this page. They used
+different settings, so read each number against its own run rather than mixing
+them.
 
 **The cache ablation** — the run the `2.74x` comes from — used the `01_minimal`
 example (MNIST addition) over 512 training images for 3 epochs, repeated across 3
@@ -88,26 +88,27 @@ The published `2.74x` is the mean of the three per-seed ratios (`2.94`, `2.67`,
 interval is `[2.29, 3.18]`. Evidence:
 `examples/neural/results/evidence/cache_ablation_20260218.json`.
 
-**Where the time goes within a run.** A separate committed run — 512 images, 5
-epochs, `batch_size=64`, 2 seeds, on the RTX PRO 3000 Blackwell laptop GPU —
-records the per-epoch shape:
+**Where the time goes within a run.** A separate timing run — the same
+`01_minimal` example over 512 images, but 5 epochs at `batch_size=64`, on
+development hardware — records the per-epoch shape:
 
-| Metric | seed 7 | seed 42 | What it measures |
-|---|---|---|---|
-| `compile_api_sec` | 0.012 s | 0.013 s | The `pyxlog` compile call itself, before training starts |
-| `first_epoch_sec` | 83.12 s | 77.66 s | Epoch 1, which pays the circuit compile and verify |
-| `steady_epoch_sec_mean` | 2.90 s | 2.92 s | Mean of epochs 2–5, after the circuit is cached |
-| `total_train_sec` | 94.72 s | 89.33 s | All five epochs end to end |
-| `per_query_ms` | 74.0 ms | 69.8 ms | Total training time ÷ (queries × epochs) — an amortized figure, not the cost of one forward pass |
+| Metric | Value | What it measures |
+|---|---|---|
+| `PTX JIT (cold)` | 0.02 s | Cubin loading |
+| `first_epoch_sec` | ~75 s | Epoch 1, which pays the Decision-DNNF compile and verify; warm starts drop to ~0.26 s |
+| `steady_epoch_sec_mean` | ~0.25 s | Mean of epochs 2–5, after the circuit is cached; batched evaluation |
+| `per_query_ms` | ~1.0 ms | **Steady-state** cost of one query's forward and backward pass — a steady epoch divided by its 256 pairs. Not to be confused with the amortized `per_query_ms` written into the run artifacts, which divides *total* training time by queries × epochs and so carries the cold first epoch. |
 
-Evidence:
-`examples/neural/results/track_a/20260218T_postfix_v040alpha_batched/01_minimal/seed_7/metrics.json`
-and the matching `seed_42/metrics.json`.
+These timings describe the current pipeline, and the run behind them is not among
+this repository's committed neural artifacts, which all record an earlier
+generation of the code. They have since been reproduced under the same protocol on
+different hardware (an RTX 3090), where the steady epoch landed within 7% of the
+`~0.25 s` above.
 
-The first epoch dominates because XLOG compiles the logic program into a
+The first epoch is slow because XLOG compiles the logic program into a
 **Decision-DNNF** — a circuit form that makes exact probability counting cheap to
-evaluate — and verifies it. Once that circuit is cached, each later epoch costs
-about 3 seconds instead of 80. That gap is what the cache ablation measures.
+evaluate — and verifies it. Once that circuit is cached, later epochs skip the
+compile and run in a fraction of a second.
 
 ## Aspirational targets — not measured
 
