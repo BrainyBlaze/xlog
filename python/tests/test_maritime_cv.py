@@ -103,3 +103,225 @@ def test_pair_counts_from_converted_corpus():
     pos_counts, pt_counts = run_maritime_cv.pair_counts(converted, n_pairs=3)
     assert pt_counts == [3, 2, 4]
     assert pos_counts == [2, 0, 1]
+
+
+# ---------------------------------------------------------------------------
+# Synthetic mini-corpus (shape of `maritime_convert.convert`'s output):
+# planted rule is_positive == r1 AND r2, perfectly reconstructible --
+# positive pairs fire both at t % 6 == 0, negative pairs never fire r2.
+# ---------------------------------------------------------------------------
+
+
+def _synthetic_converted(n_pos=6, n_neg=6, pts_per_pair=30):
+    pairs = [(f"P{i:02d}a", f"P{i:02d}b") for i in range(n_pos)] + [
+        (f"N{j:02d}a", f"N{j:02d}b") for j in range(n_neg)
+    ]
+    pt_pair_index, pt_time, is_positive, segments = [], [], [], []
+    relations = {"r1": [], "r2": [], "r3": []}
+    for pair_idx in range(n_pos + n_neg):
+        lo = len(pt_time)
+        for t in range(pts_per_pair):
+            pt = len(pt_time)
+            pt_pair_index.append(pair_idx)
+            pt_time.append(1000 * pair_idx + t)
+            r1 = t % 2 == 0
+            r2 = (t % 3 == 0) and pair_idx < n_pos
+            if r1:
+                relations["r1"].append(pt)
+            if r2:
+                relations["r2"].append(pt)
+            if t % 5 == 0:
+                relations["r3"].append(pt)
+            is_positive.append(r1 and r2)
+        segments.append((lo, len(pt_time)))
+    return {
+        "pairs": pairs,
+        "pt_pair_index": pt_pair_index,
+        "pt_time": pt_time,
+        "segments": segments,
+        "relations": relations,
+        "is_positive": is_positive,
+        "counts": {
+            "n_positive_pairs": n_pos,
+            "n_negative_pairs": n_neg,
+            "n_pairs": n_pos + n_neg,
+            "n_pt": len(pt_time),
+        },
+    }
+
+
+# ---------------------------------------------------------------------------
+# Fold slicing: pt-level partition induced by the pair-level assignment
+# ---------------------------------------------------------------------------
+
+
+def test_fold_pt_indices_partition_and_pair_atomicity():
+    conv = _synthetic_converted()
+    pos_counts, pt_counts = run_maritime_cv.pair_counts(conv, len(conv["pairs"]))
+    folds = run_maritime_cv.stratified_pair_folds(
+        pos_counts[: conv["counts"]["n_positive_pairs"]], pt_counts,
+        conv["counts"]["n_positive_pairs"], 3,
+    )
+    seen = set()
+    for fold in range(3):
+        train_pts, test_pts = run_maritime_cv.fold_pt_indices(conv, folds, fold)
+        assert not (set(train_pts) & set(test_pts))
+        assert sorted(set(train_pts) | set(test_pts)) == list(range(conv["counts"]["n_pt"]))
+        # pair atomicity: a pair's rows are entirely on one side
+        test_pairs = {conv["pt_pair_index"][i] for i in test_pts}
+        train_pairs = {conv["pt_pair_index"][i] for i in train_pts}
+        assert not (test_pairs & train_pairs)
+        seen |= set(test_pts)
+    assert seen == set(range(conv["counts"]["n_pt"]))
+
+
+def test_restrict_relations_keeps_all_names_and_only_member_pts():
+    relations = {"a": [0, 1, 5], "b": [], "c": [2, 5]}
+    out = run_maritime_cv.restrict_relations(relations, {0, 2, 5})
+    assert sorted(out) == ["a", "b", "c"]
+    assert out["a"] == [0, 5]
+    assert out["b"] == []
+    assert out["c"] == [2, 5]
+
+
+# ---------------------------------------------------------------------------
+# Interval-level scoring (pre-registered definition: maximal runs within a
+# segment, overlap >= 1 pt row)
+# ---------------------------------------------------------------------------
+
+
+def test_interval_prf1_run_overlap_matching():
+    #                0      1      2     3     4      5      6      7     8     9
+    gold = [False, False, True, True, True, False, False, True, False, False]
+    pred = [False, False, False, True, False, False, False, False, True, True]
+    out = run_maritime_cv.interval_prf1(pred, gold, [(0, 10)])
+    # gold runs: [2,5), [7,8); pred runs: [3,4), [8,10)
+    assert out["n_gold_intervals"] == 2
+    assert out["n_pred_intervals"] == 2
+    assert out["n_matched_gold"] == 1
+    assert out["n_matched_pred"] == 1
+    assert out["precision"] == pytest.approx(0.5)
+    assert out["recall"] == pytest.approx(0.5)
+    assert out["f1"] == pytest.approx(0.5)
+
+
+def test_interval_prf1_never_bridges_segments():
+    gold = [False, False, True, True, False, False]
+    pred = list(gold)
+    out = run_maritime_cv.interval_prf1(pred, gold, [(0, 3), (3, 6)])
+    # the True run at rows 2,3 straddles the segment boundary: two intervals
+    assert out["n_gold_intervals"] == 2
+    assert out["n_pred_intervals"] == 2
+    assert out["f1"] == pytest.approx(1.0)
+
+
+def test_interval_prf1_empty_predictions_degenerate():
+    out = run_maritime_cv.interval_prf1([False] * 4, [False, True, True, False], [(0, 4)])
+    assert out["n_pred_intervals"] == 0
+    assert out["precision"] == 0.0
+    assert out["recall"] == 0.0
+    assert out["f1"] == 0.0
+
+
+# ---------------------------------------------------------------------------
+# run_fold: permutation-null gate + relational search + point/interval
+# scoring on the held-out fold
+# ---------------------------------------------------------------------------
+
+
+def test_run_fold_recovers_planted_rule_and_scores_heldout():
+    pytest.importorskip("torch")
+    conv = _synthetic_converted()
+    n_pos = conv["counts"]["n_positive_pairs"]
+    pos_counts, pt_counts = run_maritime_cv.pair_counts(conv, len(conv["pairs"]))
+    folds = run_maritime_cv.stratified_pair_folds(pos_counts[:n_pos], pt_counts, n_pos, 3)
+    record = run_maritime_cv.run_fold(0, conv, folds, seed=7, min_new_covered=2, tie_tolerance=None)
+
+    assert record["fold"] == 0
+    assert ["r1", "r2"] in record["clauses"]
+    assert record["scoring"]["point"]["f1"] == pytest.approx(1.0)
+    assert record["scoring"]["interval"]["f1"] == pytest.approx(1.0)
+    # provenance inside the fold record
+    assert record["min_fit"] == record["null_summary"]["threshold"]
+    assert record["n_test_pt"] + record["n_train_pt"] == conv["counts"]["n_pt"]
+    assert record["test_pairs"], "fold record must name its held-out pairs"
+    assert record["stop_reason"]
+    assert record["iterations"]
+
+
+# ---------------------------------------------------------------------------
+# Verifier smoke: pinned md5 + pinned counts + hard invariants
+# ---------------------------------------------------------------------------
+
+HLE_LINES = "\n".join([
+    "rendezVous|B|A|true|1000|2000",
+    "lowSpeed|A| |true|900|2100",
+    "lowSpeed|B| |true|900|1500",
+    "stopped|B| |farFromPorts|1500|2100",
+])
+
+LLE_LINES = "\n".join([
+    "proximity|2200|900|2200|true|B|A",
+    "proximity|9000|100|9000|true|C|D",
+    "proximity|9000|100|9000|true|E|F",
+])
+
+
+def _tar(tmp_path):
+    p = tmp_path / "hle.tar.gz"
+    data = HLE_LINES.encode()
+    with tarfile.open(p, "w:gz") as tf:
+        info = tarfile.TarInfo("Maritime Composite Events/CEs/recognised_CEs.csv")
+        info.size = len(data)
+        tf.addfile(info, io.BytesIO(data))
+    return str(p)
+
+
+def _zip(tmp_path):
+    p = tmp_path / "lle.zip"
+    with zipfile.ZipFile(p, "w") as z:
+        z.writestr("brest_critical.csv", LLE_LINES)
+    return str(p)
+
+
+def test_verify_smoke_rejects_synthetic_archives(tmp_path):
+    from maritime_convert import convert
+
+    tar_path, zip_path = _tar(tmp_path), _zip(tmp_path)
+    converted = convert(tar_path, zip_path)
+    report = run_maritime_cv.verify_smoke(converted, tar_path, zip_path)
+    assert report["ok"] is False
+    assert report["md5"]["ok"] is False
+    assert report["counts"]["ok"] is False
+    # structural invariants still hold on this tiny, well-formed corpus
+    assert report["hard_invariants"]["pair_contiguity_ok"] is True
+
+
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
+
+REQUIRED_ARGS = ["--tar", "a.tar.gz", "--zip", "b.zip", "--out", "o.json"]
+
+
+def test_parse_args_defaults_match_pre_registration():
+    args = run_maritime_cv.parse_args(REQUIRED_ARGS)
+    assert args.folds == 5
+    assert args.seed == 7
+    assert args.min_new_covered == 2
+    assert args.tie_tolerance is None
+    assert args.smoke is False
+    assert args.skip_verify is False
+
+
+def test_parse_args_requires_tar_zip_out():
+    with pytest.raises(SystemExit):
+        run_maritime_cv.parse_args(["--zip", "b.zip", "--out", "o.json"])
+    with pytest.raises(SystemExit):
+        run_maritime_cv.parse_args(["--tar", "a.tar.gz", "--out", "o.json"])
+    with pytest.raises(SystemExit):
+        run_maritime_cv.parse_args(["--tar", "a.tar.gz", "--zip", "b.zip"])
+
+
+def test_module_import_is_torch_free():
+    assert not hasattr(run_maritime_cv, "torch")
