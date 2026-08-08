@@ -1,7 +1,26 @@
 from pathlib import Path
 
+import pytest
+
 
 ROOT = Path(__file__).resolve().parents[2]
+EVIDENCE_ROOT = ROOT / "docs-internal/evidence"
+
+# EVIDENCE-GATED: only the certified-runtime-evidence test below needs this
+# tree; the other tests in this module are pure source-contract checks and must
+# keep running on a clean clone, so the gate is per-test, not a module-level
+# `pytestmark`.
+_EVIDENCE_SKIP_REASON = (
+    "no local evidence workspace at docs-internal/evidence -- that tree is a "
+    "local-only agent workspace excluded by .gitignore (the '/docs-internal/' "
+    "entry, labelled 'Local-only agent workspaces'), so it is deliberately not "
+    "shipped and is absent on a clean clone. When it IS present this test "
+    "checks that some 'docs-internal/evidence/*-delta' directory holds a "
+    "README.md naming RelationDelta next to a runtime_probe.json, and that the "
+    "README records the API coverage, equivalence, delete-correctness, "
+    "monotone-insert-path and delta-fixture results. Re-run the delta evidence "
+    "job locally to recreate the package and exercise it."
+)
 
 
 def test_delta_api_is_exposed_in_stubs_and_python_docs() -> None:
@@ -39,13 +58,21 @@ def test_delta_routes_through_runtime_relation_delta() -> None:
     assert "incremental_sccs" in rewrite_rs
 
 
+@pytest.mark.skipif(not EVIDENCE_ROOT.is_dir(), reason=_EVIDENCE_SKIP_REASON)
 def test_delta_has_certified_runtime_evidence() -> None:
-    evidence_root = ROOT / "docs-internal/evidence"
     evidence = next(
-        path / "README.md"
-        for path in sorted(evidence_root.glob("*-delta"))
-        if (path / "README.md").exists()
-        and "RelationDelta" in (path / "README.md").read_text()
+        (
+            path / "README.md"
+            for path in sorted(EVIDENCE_ROOT.glob("*-delta"))
+            if (path / "README.md").exists()
+            and "RelationDelta" in (path / "README.md").read_text()
+        ),
+        None,
+    )
+    assert evidence is not None, (
+        "docs-internal/evidence exists but holds no '*-delta' directory with a "
+        "README.md mentioning RelationDelta -- the delta evidence package is "
+        "missing or incomplete in this local workspace"
     )
     probe = evidence.parent / "runtime_probe.json"
 

@@ -1,7 +1,26 @@
 from pathlib import Path
 
+import pytest
+
 
 ROOT = Path(__file__).resolve().parents[2]
+EVIDENCE_ROOT = ROOT / "docs-internal/evidence"
+
+# EVIDENCE-GATED: only the evidence-package test below needs this tree; the
+# other tests in this module are pure source-contract checks and must keep
+# running on a clean clone, so the gate is per-test, not a module-level
+# `pytestmark`.
+_EVIDENCE_SKIP_REASON = (
+    "no local evidence workspace at docs-internal/evidence -- that tree is a "
+    "local-only agent workspace excluded by .gitignore (the '/docs-internal/' "
+    "entry, labelled 'Local-only agent workspaces'), so it is deliberately not "
+    "shipped and is absent on a clean clone. When it IS present this test "
+    "checks that some 'docs-internal/evidence/*-bridge' directory holds a "
+    "README.md naming LearnedBridge next to a runtime_probe.json, and that the "
+    "README records the gradient smoke, Belnap helper, deterministic top-k, "
+    "neural cache telemetry and repeated-query speedup results. Re-run the "
+    "bridge evidence job locally to recreate the package and exercise it."
+)
 
 
 def test_bridge_public_surface_is_stubbed_and_documented() -> None:
@@ -66,13 +85,21 @@ def test_bridge_reuses_registered_network_output_modes() -> None:
         assert "apply_network_output_mode(py" in body
 
 
+@pytest.mark.skipif(not EVIDENCE_ROOT.is_dir(), reason=_EVIDENCE_SKIP_REASON)
 def test_bridge_has_evidence_package() -> None:
-    evidence_root = ROOT / "docs-internal/evidence"
     evidence = next(
-        path / "README.md"
-        for path in sorted(evidence_root.glob("*-bridge"))
-        if (path / "README.md").exists()
-        and "LearnedBridge" in (path / "README.md").read_text()
+        (
+            path / "README.md"
+            for path in sorted(EVIDENCE_ROOT.glob("*-bridge"))
+            if (path / "README.md").exists()
+            and "LearnedBridge" in (path / "README.md").read_text()
+        ),
+        None,
+    )
+    assert evidence is not None, (
+        "docs-internal/evidence exists but holds no '*-bridge' directory with a "
+        "README.md mentioning LearnedBridge -- the bridge evidence package is "
+        "missing or incomplete in this local workspace"
     )
     probe = evidence.parent / "runtime_probe.json"
 
