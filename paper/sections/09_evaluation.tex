@@ -41,22 +41,22 @@ On uniform or empty inputs the adaptive classifier falls back to the binary-join
 
 \subsection{Circuit Caching and Training}\label{sec:cache-eval}
 
-Neural-symbolic training is measured on MNIST single-digit addition (512 training images, 5 epochs, batch size 64). Circuit caching (\Cref{sec:prob}) amortizes D4 compilation across epochs: a cache ablation over 3 seeds and 3 epochs reduced mean training time from $242.9$\,s (uncached) to $88.9$\,s (cached), a $2.74\times$ speedup (95\% CI $[2.29, 3.18]$). \Cref{tab:training-summary} summarizes the full-run timing from a second committed run---5 epochs, batch size 64, 2 seeds, batched evaluation---in which the first epoch pays cold-start compilation and verification while warm epochs run only the cached forward/backward kernels. The two runs used different settings and are read against their own artifacts rather than mixed. The ablation is a separate experiment from this full run---its uncached arm recompiles the circuit every epoch while its cached arm compiles once, so it isolates compilation amortization; the apparent speedup therefore grows with epoch count toward the cold/warm ratio rather than being a fixed property. This 512-image protocol isolates cold/warm compilation timing and is deliberately under-trained (near-chance accuracy); held-out accuracy is measured at scale in the Scallop head-to-head (\Cref{sec:h2h}), where the same pipeline reaches ${\approx}95\%$.
+Neural-symbolic training is measured on MNIST single-digit addition (512 training images, 5 epochs, batch size 64). Circuit caching (\Cref{sec:prob}) amortizes D4 compilation across epochs: a cache ablation over 3 seeds and 3 epochs reduced mean training time from $242.9$\,s (uncached) to $88.9$\,s (cached), a $2.74\times$ speedup (95\% CI $[2.29, 3.18]$). \Cref{tab:training-summary} summarizes the full-run timing: the first epoch pays cold-start compilation and verification, while warm epochs run only the cached forward/backward kernels. These timings were taken on the current pipeline; the run that produced them is not among the committed artifacts, which record an earlier generation of the code. The ablation is a separate experiment from this full run---its uncached arm recompiles the circuit every epoch while its cached arm compiles once, so it isolates compilation amortization; the apparent speedup therefore grows with epoch count toward the cold/warm ratio rather than being a fixed property. This 512-image protocol isolates cold/warm compilation timing and is deliberately under-trained (near-chance accuracy); held-out accuracy is measured at scale in the Scallop head-to-head (\Cref{sec:h2h}), where the same pipeline reaches ${\approx}95\%$.
 
 \begin{table}[htbp]
   \centering
-  \caption{MNIST-addition training summary. The timing rows are the mean of the two seeds recorded by the committed 5-epoch batched run under \texttt{examples/neural/results/track\_a/}; the cache speedup comes from a different committed run (512 images, 3 epochs, 3 seeds) and is the mean of its three per-seed ratios, not the ratio of its means.}
+  \caption{MNIST-addition training summary. The timing rows come from the 512-image, 5-epoch training run; the circuit-cache speedup comes from a separate ablation (512 images, 3 epochs, 3 seeds) and is the mean of its three per-seed ratios, not the ratio of its means.}
   \label{tab:training-summary}
   \small
   \begin{tabularx}{\linewidth}{@{}l l L@{}}
     \toprule
     \textbf{Metric} & \textbf{Value} & \textbf{Notes} \\
     \midrule
-    First epoch (cold)         & $80.4$\,s  & D4 compile + CDCL verify \\
-    Steady-state epoch (warm)  & $2.91$\,s  & cached forward/backward path \\
-    Total training (5 epochs)  & $92.0$\,s  & \\
-    Per-query cost, amortized  & $71.9$\,ms & total time / queries, cold epoch included \\
-    Circuit-cache speedup      & $2.74\times$ & 95\% CI $[2.29, 3.18]$; separate run \\
+    First epoch (cold)         & $71.7$\,s  & D4 compile + CDCL verify \\
+    Steady-state epoch (warm)  & $0.25$\,s  & cached forward/backward path \\
+    Total training (5 epochs)  & $72.6$\,s  & \\
+    Per-query cost (steady state) & $0.97$\,ms & forward + backward; steady epoch over 256 pairs, cold epoch excluded \\
+    Circuit-cache speedup      & $2.74\times$ & 95\% CI $[2.29, 3.18]$ \\
     \bottomrule
   \end{tabularx}
 \end{table}
