@@ -504,8 +504,8 @@ starves on `close_nn` at this granularity.
 
 This is a limitation of the selection criterion at low event counts, not evidence that the
 learned detector is bad — sections A and B of the evidence package show the same detector
-matching or beating ground-truth geometry under the direct protocol. It is unfixed on this
-branch.
+matching or beating ground-truth geometry under the direct protocol. It is unfixed in the
+current implementation.
 
 ### Smaller bounds
 
@@ -529,8 +529,8 @@ branch.
   track are both contained in the `xlog-cli-v0.11.0` tag. The recall-aware holdout, the
   learned-termination vocabulary, the moving fluent, the scene-family clean protocol, the
   `--transition-vocab` and `--close-threshold` flags, and the two corpus-integrity tools
-  (`audit_dump_vs_xml.py`, `xml_meeting_census.py`) are on `main` and are **not in any
-  tagged release yet**.
+  (`audit_dump_vs_xml.py`, `xml_meeting_census.py`) are **not in any tagged release**:
+  they ship in the source tree, so building from source is how you get them.
 
 ## See also
 

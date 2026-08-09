@@ -29,16 +29,20 @@ Reach for this page when you want to:
 
 ## Measured results
 
-All three rows below carry a measured speedup. Of the runs behind them, only the
-neural-symbolic cache ablation's artifact is committed to this repository today —
-the two WCOJ artifacts are expected to be added from the machine that produced
-them.
+All three rows below carry a measured speedup. They differ in how much of the
+underlying run you can inspect. The neural-symbolic cache ablation publishes its
+per-run data in this repository at
+`examples/neural/results/evidence/cache_ablation_20260218.json`, so you can open
+that file and recompute the ratio yourself. The two WCOJ rows are reported from
+measured runs whose per-run data is not published, so the way to check those two is
+to measure them yourself.
 
-The harnesses are a separate question. `wcoj_triangle_bench` ships, so the
-super-hub row reproduces with one `cargo bench` invocation. No bench target for the
+How you reproduce a row differs too. `wcoj_triangle_bench` ships, so the super-hub row
+reproduces with one `cargo bench` invocation. No bench target for the
 aggregate-fusion route exists in the repository, so that row reproduces as an A/B
 against the kill switch that turns fusion off. The last column gives the exact
-procedure for each.
+procedure for each row, and a speedup you measure that way on your own hardware is
+the one to trust for your own deployment.
 
 | Result | Speedup | Fixture / setup | Reproduce |
 |---|---|---|---|
@@ -64,9 +68,8 @@ that reuse on.
 <Note>
 A WCOJ speedup is not a constant. It moves with the GPU, the fixture size, and the
 key width — which is why the super-hub row is a range rather than a single figure.
-The numbers above are what XLOG measured on the fixtures named beside them. If you
-need a number for a specific deployment, run the reproduce step on that hardware
-and cite what you get.
+The numbers above are what XLOG measured on the fixtures named beside them; a
+number for any other hardware has to be measured on that hardware.
 </Note>
 
 ### Neural-symbolic training detail

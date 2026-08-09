@@ -97,8 +97,7 @@ This gathers each `Y` for which `edge(1, Y)` holds and binds `Xs` to the resulti
 `findall/3` is **limited to finite source facts**. Its inner goal must range over stored
 facts, not over relations produced by other rules.
 
-A goal that depends on a rule head is rejected. Collecting over derived goals is reserved
-for a later aggregate-backed collection path.
+A goal that depends on a rule head is rejected.
 
 When you need to fold data that rules produce, reach for head aggregates like `count` and
 `sum` instead.

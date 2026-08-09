@@ -196,8 +196,8 @@ W (N×N×N logits) → Gumbel-Softmax(τ) → 3D soft mask
 
 ### External Consumer Training Surface
 
-External consumer validation work added a higher-level training entry point for
-sources that mix neural predicates and trainable symbolic clauses:
+A higher-level training entry point covers sources that mix neural predicates and
+trainable symbolic clauses:
 
 ```python
 from pyxlog.ilp.neurosymbolic import NeuroSymbolicTrainingConfig, train_neurosymbolic_program
@@ -410,7 +410,7 @@ Worked example + CUDA-gated tests:
    seed's winner fits at ~1.0 and is selected exactly as before; the seed that used to
    derail selects `co_occurs` at weight 0.955 but fit 0.500 — a coin flip — and is now
    caught and abstained on rather than confidently misreported
-   (`python/tests/test_join_identifiability.py`, formerly the last `xfail(strict)`).
+   (`python/tests/test_join_identifiability.py`).
 
 6. **A neural predicate cannot ride in the dILP enumerator's own candidate space.**
    The mixture's candidate vocabulary is supplied by the caller. The engine-side

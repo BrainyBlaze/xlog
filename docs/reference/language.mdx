@@ -956,10 +956,9 @@ than simulated by a CPU term evaluator.
 
 Current implementation limits:
 
-- `append(A, B, C)` accepts finite first and second list literals in this node;
-  split generation such as `append(A, B, [1,2,3])` is rejected as unbounded;
-- `sort`, `msort`, and `list_to_set` require a finite input literal in this
-  node;
+- `append(A, B, C)` accepts finite first and second list literals; split
+  generation such as `append(A, B, [1,2,3])` is rejected as unbounded;
+- `sort`, `msort`, and `list_to_set` require a finite input literal;
 - `term`, `compound`, and `predref` list elements lower to finite `u64` meta
   term IDs when they appear in declared `list<term>`, `list<compound>`, or
   `list<predref>` contexts.
@@ -1006,8 +1005,8 @@ before stratification and lowering into ordinary helper relations such as
 columns lower to `u64` term IDs; compound metadata and univ parts are stored in
 typed helper relations. `findall` and `maplist` currently accept finite source
 facts and finite list literals only; derived-goal collection and non-literal
-maplist inputs are explicitly rejected until an aggregate-backed collection
-path lands.
+maplist inputs are explicitly rejected. Use head aggregates such as `count` and
+`sum` to fold data that rules produce.
 
 ### Supported Meta-Predicates
 
@@ -2023,9 +2022,8 @@ Pragmas configure compiler and runtime behavior.
 
 The current source grammar accepts `prob_engine`, `prob_cache`,
 `epistemic_mode`, `max_recursion_depth`, `magic_sets`, and the MC configuration
-pragmas below. The language-completeness rows remain contract-backed where they depend on
-finite-list, safe-meta, magic-set, probability, and CLI nodes; the epistemic mode pragma is accepted for the epistemic
-solver surface.
+pragmas below. The `epistemic_mode` pragma is accepted for the epistemic solver
+surface.
 
 ### Syntax
 
