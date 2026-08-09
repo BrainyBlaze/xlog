@@ -1,8 +1,8 @@
 """Generate results.pdf: WCOJ speedup over the binary-join baseline.
 
 Single-system ablation; see https://xlog.md/guides/benchmarking. The figures below
-are transcribed from the measured run, whose artifact is not committed to this
-repository (paper Sec. "Worst-Case Optimal Joins" states this).
+are transcribed from the measured run reported in paper Sec. "Worst-Case Optimal
+Joins"; per-run data for that run is not distributed with the paper.
 Run: python make_results.py  ->  results.pdf
 """
 import matplotlib
