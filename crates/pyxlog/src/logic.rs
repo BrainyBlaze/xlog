@@ -218,15 +218,15 @@ impl CompiledLogicProgram {
     }
 
     /// Return memory diagnostics including allocated_bytes and memory_limit_bytes.
-    pub fn memory_stats(&self, py: Python<'_>) -> PyResult<PyObject> {
+    pub fn memory_stats(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         provider_memory_stats(py, &self.provider)
     }
 
-    pub fn rule_provenance(&self, py: Python<'_>) -> PyResult<PyObject> {
+    pub fn rule_provenance(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         pack_rule_provenance(py, &self.program.rule_provenance())
     }
 
-    pub fn proof_traces(&self, py: Python<'_>) -> PyResult<PyObject> {
+    pub fn proof_traces(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         pack_proof_traces(py, &self.program.proof_traces())
     }
 }
@@ -253,7 +253,7 @@ impl LogicRelationSession {
         dlpack_columns: &Bound<'_, PyAny>,
         roles: &Bound<'_, PyAny>,
         facts: &Bound<'_, PyAny>,
-    ) -> PyResult<PyObject> {
+    ) -> PyResult<Py<PyAny>> {
         let schema = self.relation_replacement_schema(&name)?;
         require_positive_metadata_arity(&name, schema)?;
         let arguments = self.program.argument_schema(&name).ok_or_else(|| {
@@ -291,7 +291,7 @@ impl LogicRelationSession {
         name: String,
         dlpack_columns: &Bound<'_, PyAny>,
         manifest: &Bound<'_, PyAny>,
-    ) -> PyResult<PyObject> {
+    ) -> PyResult<Py<PyAny>> {
         let schema = self.relation_replacement_schema(&name)?.clone();
         require_positive_metadata_arity(&name, &schema)?;
         let arguments = self.program.argument_schema(&name).ok_or_else(|| {
@@ -336,7 +336,7 @@ impl LogicRelationSession {
     }
 
     #[pyo3(signature = (name=None))]
-    pub fn evidence(&self, py: Python<'_>, name: Option<&str>) -> PyResult<PyObject> {
+    pub fn evidence(&self, py: Python<'_>, name: Option<&str>) -> PyResult<Py<PyAny>> {
         if let Some(name) = name {
             if !self.relation_store.contains(name) {
                 return Err(PyKeyError::new_err(format!(
@@ -401,7 +401,7 @@ impl LogicRelationSession {
         name: String,
         dlpack_columns: &Bound<'_, PyAny>,
         facts: Option<&Bound<'_, PyAny>>,
-    ) -> PyResult<PyObject> {
+    ) -> PyResult<Py<PyAny>> {
         self.require_insert_metadata_arity(&name, facts)?;
         let insert = self.relation_delta_buffer(&name, dlpack_columns)?;
         let insert_evidence = self.prepare_insert_evidence(&name, &insert, facts)?;
@@ -413,7 +413,7 @@ impl LogicRelationSession {
         py: Python<'_>,
         name: String,
         dlpack_columns: &Bound<'_, PyAny>,
-    ) -> PyResult<PyObject> {
+    ) -> PyResult<Py<PyAny>> {
         let delete = self.relation_delta_buffer(&name, dlpack_columns)?;
         self.apply_single_relation_delta(py, name, None, Some(delete), None)
     }
@@ -426,7 +426,7 @@ impl LogicRelationSession {
         insert_columns: Option<&Bound<'_, PyAny>>,
         delete_columns: Option<&Bound<'_, PyAny>>,
         insert_facts: Option<&Bound<'_, PyAny>>,
-    ) -> PyResult<PyObject> {
+    ) -> PyResult<Py<PyAny>> {
         if insert_facts.is_some() && insert_columns.is_none() {
             return Err(metadata_error(
                 "apply_relation_delta insert_facts requires insert_columns".to_string(),
@@ -455,7 +455,7 @@ impl LogicRelationSession {
         &mut self,
         py: Python<'_>,
         updates: &Bound<'_, PyAny>,
-    ) -> PyResult<PyObject> {
+    ) -> PyResult<Py<PyAny>> {
         let parsed = self.parse_relation_delta_batch("apply_relation_delta_batch", updates)?;
         let (batch, metadata_updates, relation_names, schemas, cancellation_capture_relations) =
             split_parsed_relation_updates(&self.program, parsed)?;
@@ -497,7 +497,7 @@ impl LogicRelationSession {
         py: Python<'_>,
         updates: &Bound<'_, PyAny>,
         check_equivalence: bool,
-    ) -> PyResult<PyObject> {
+    ) -> PyResult<Py<PyAny>> {
         let parsed = self.parse_relation_delta_batch("apply_relation_delta_debug", updates)?;
         let (batch, metadata_updates, relation_names, schemas, cancellation_capture_relations) =
             split_parsed_relation_updates(&self.program, parsed)?;
@@ -582,7 +582,7 @@ impl LogicRelationSession {
         pack_delta_stats(py, &stats)
     }
 
-    pub fn delta_stats(&self, py: Python<'_>) -> PyResult<PyObject> {
+    pub fn delta_stats(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         match &self.last_delta_stats {
             Some(stats) => pack_delta_stats(py, stats),
             None => {
@@ -594,18 +594,18 @@ impl LogicRelationSession {
         }
     }
 
-    pub fn rule_provenance(&self, py: Python<'_>) -> PyResult<PyObject> {
+    pub fn rule_provenance(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         pack_rule_provenance(py, &self.program.rule_provenance())
     }
 
-    pub fn proof_traces(&self, py: Python<'_>) -> PyResult<PyObject> {
+    pub fn proof_traces(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         pack_proof_traces(py, &self.program.proof_traces())
     }
 
     pub fn register_relation_callback(
         &mut self,
         py: Python<'_>,
-        callback: PyObject,
+        callback: Py<PyAny>,
     ) -> PyResult<u64> {
         if !callback.bind(py).is_callable() {
             return Err(PyValueError::new_err(
@@ -626,7 +626,7 @@ impl LogicRelationSession {
         before != self.relation_callbacks.len()
     }
 
-    pub fn cuda_graph_stats(&self, py: Python<'_>) -> PyResult<PyObject> {
+    pub fn cuda_graph_stats(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let dict = PyDict::new(py);
         dict.set_item(
             "csm_cuda_graph_captures",
@@ -647,7 +647,7 @@ impl LogicRelationSession {
         Ok(dict.into())
     }
 
-    pub fn host_transfer_stats(&self, py: Python<'_>) -> PyResult<PyObject> {
+    pub fn host_transfer_stats(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let stats = self.provider.host_transfer_stats();
         let dict = PyDict::new(py);
         dict.set_item("dtoh_bytes", stats.dtoh_bytes)?;
@@ -657,7 +657,7 @@ impl LogicRelationSession {
         Ok(dict.into())
     }
 
-    pub fn join_index_cache_stats(&self, py: Python<'_>) -> PyResult<PyObject> {
+    pub fn join_index_cache_stats(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let dict = PyDict::new(py);
         let stats = self
             .session_runtime
@@ -688,7 +688,7 @@ impl LogicRelationSession {
     /// Multiway/Free-Join dispatch telemetry for the retained session
     /// executor. Counters accumulate across evaluates within this session;
     /// all zeros before the first evaluate.
-    pub fn wcoj_dispatch_stats(&self, py: Python<'_>) -> PyResult<PyObject> {
+    pub fn wcoj_dispatch_stats(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let dict = PyDict::new(py);
         let stats = self
             .session_runtime
@@ -733,11 +733,11 @@ impl LogicRelationSession {
     }
 
     /// Return memory diagnostics including allocated_bytes and memory_limit_bytes.
-    pub fn memory_stats(&self, py: Python<'_>) -> PyResult<PyObject> {
+    pub fn memory_stats(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         provider_memory_stats(py, &self.provider)
     }
 
-    pub fn export_relation(&mut self, py: Python<'_>, name: &str) -> PyResult<Vec<PyObject>> {
+    pub fn export_relation(&mut self, py: Python<'_>, name: &str) -> PyResult<Vec<Py<PyAny>>> {
         let existing = self.relation_store.get(name).ok_or_else(|| {
             PyValueError::new_err(format!(
                 "Relation '{}' not found in persistent session",
@@ -759,7 +759,7 @@ impl LogicRelationSession {
         &mut self,
         py: Python<'_>,
         name: &str,
-    ) -> PyResult<PyObject> {
+    ) -> PyResult<Py<PyAny>> {
         let schema = self.relation_replacement_schema(name)?;
         require_positive_metadata_arity(name, schema)?;
         let existing = self.relation_store.get(name).ok_or_else(|| {
@@ -894,7 +894,7 @@ impl LogicRelationSession {
         method_name: &str,
         updates: &Bound<'_, PyAny>,
     ) -> PyResult<Vec<ParsedRelationDeltaUpdate>> {
-        let seq = updates.downcast::<PySequence>().map_err(|_| {
+        let seq = updates.cast::<PySequence>().map_err(|_| {
             PyValueError::new_err(format!(
                 "{method_name} expects a sequence of update dictionaries"
             ))
@@ -902,7 +902,7 @@ impl LogicRelationSession {
         let mut parsed = Vec::new();
         for (update_index, item) in seq.try_iter()?.enumerate() {
             let item = item?;
-            let dict = item.downcast::<PyDict>().map_err(|_| {
+            let dict = item.cast::<PyDict>().map_err(|_| {
                 PyValueError::new_err(format!("{method_name} updates must be dictionaries"))
             })?;
             reject_unknown_delta_update_keys(dict, method_name, update_index)?;
@@ -1024,7 +1024,7 @@ impl LogicRelationSession {
         insert: Option<xlog_cuda::CudaBuffer>,
         delete: Option<xlog_cuda::CudaBuffer>,
         insert_evidence: Option<PreparedInsertEvidence>,
-    ) -> PyResult<PyObject> {
+    ) -> PyResult<Py<PyAny>> {
         let relation_names = vec![name.clone()];
         let schema = self.program.schema(&name).ok_or_else(|| {
             PyValueError::new_err(format!(
@@ -1102,7 +1102,7 @@ fn relation_callback_payload(
     relation: &str,
     generation: u64,
     stats: &LogicDeltaStats,
-) -> PyResult<PyObject> {
+) -> PyResult<Py<PyAny>> {
     let dict = PyDict::new(py);
     dict.set_item("relation", relation)?;
     dict.set_item("generation", generation)?;
@@ -1225,7 +1225,7 @@ fn logic_delta_stats_from_report(report: gpu_logic::LogicDeltaReport) -> LogicDe
     }
 }
 
-fn pack_delta_stats(py: Python<'_>, stats: &LogicDeltaStats) -> PyResult<PyObject> {
+fn pack_delta_stats(py: Python<'_>, stats: &LogicDeltaStats) -> PyResult<Py<PyAny>> {
     let dict = PyDict::new(py);
     dict.set_item("status", "ok")?;
     dict.set_item("input_delta_count", stats.input_delta_count)?;
@@ -1258,7 +1258,7 @@ fn pack_delta_stats(py: Python<'_>, stats: &LogicDeltaStats) -> PyResult<PyObjec
 fn pack_delta_planner_telemetry(
     py: Python<'_>,
     telemetry: &gpu_logic::DeltaPlannerTelemetry,
-) -> PyResult<PyObject> {
+) -> PyResult<Py<PyAny>> {
     let dict = PyDict::new(py);
     dict.set_item("cache_reused", telemetry.cache_reused)?;
     dict.set_item("fallback_decision", telemetry.fallback_decision.clone())?;
@@ -1274,7 +1274,7 @@ fn pack_delta_planner_telemetry(
 fn pack_rule_provenance(
     py: Python<'_>,
     entries: &[xlog_logic::RuleProvenance],
-) -> PyResult<PyObject> {
+) -> PyResult<Py<PyAny>> {
     let list = PyList::empty(py);
     for entry in entries {
         let dict = PyDict::new(py);
@@ -1296,7 +1296,7 @@ fn pack_rule_provenance(
 fn pack_proof_traces(
     py: Python<'_>,
     entries: &[xlog_logic::QueryProofTrace],
-) -> PyResult<PyObject> {
+) -> PyResult<Py<PyAny>> {
     let list = PyList::empty(py);
     for entry in entries {
         let dict = PyDict::new(py);
@@ -1317,7 +1317,7 @@ fn collect_dlpack_columns(
     type_error_message: &str,
 ) -> PyResult<Vec<DlpackManagedTensor>> {
     let seq = obj
-        .downcast::<PySequence>()
+        .cast::<PySequence>()
         .map_err(|_| PyValueError::new_err(type_error_message.to_string()))?;
 
     let mut iterator = seq.try_iter()?;
@@ -1342,10 +1342,10 @@ fn export_buffer_columns(
     py: Python<'_>,
     provider: &Arc<xlog_cuda::CudaKernelProvider>,
     buffer: xlog_cuda::CudaBuffer,
-) -> PyResult<Vec<PyObject>> {
+) -> PyResult<Vec<Py<PyAny>>> {
     let arity = buffer.arity();
     let table = provider.to_dlpack_table(buffer);
-    let mut tensors: Vec<PyObject> = Vec::with_capacity(arity);
+    let mut tensors: Vec<Py<PyAny>> = Vec::with_capacity(arity);
     for col_idx in 0..arity {
         let tensor = table.column(col_idx).map_err(types::xlog_err)?;
         tensors.push(dlpack_capsule_from_tensor(py, tensor)?);

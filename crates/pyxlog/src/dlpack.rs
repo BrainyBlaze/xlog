@@ -25,7 +25,7 @@ pub(crate) fn export_arrow_device(
     dlpack_columns: &Bound<'_, PyAny>,
     device: usize,
     memory_mb: u64,
-) -> PyResult<PyObject> {
+) -> PyResult<Py<PyAny>> {
     if memory_mb == 0 {
         return Err(PyValueError::new_err("memory_mb must be > 0"));
     }
@@ -35,7 +35,7 @@ pub(crate) fn export_arrow_device(
     config.memory_bytes = memory_mb * 1024 * 1024;
     let provider = provider_from_config(config).map_err(types::xlog_err)?;
 
-    let tensors = match dlpack_columns.downcast::<PySequence>() {
+    let tensors = match dlpack_columns.cast::<PySequence>() {
         Ok(seq) => {
             let mut out = Vec::with_capacity(seq.len()?);
             for item in seq.try_iter()? {
@@ -66,7 +66,7 @@ pub(crate) fn import_arrow_device(
     device_array: &Bound<'_, PyAny>,
     device: usize,
     memory_mb: u64,
-) -> PyResult<(Vec<PyObject>, Vec<String>, usize)> {
+) -> PyResult<(Vec<Py<PyAny>>, Vec<String>, usize)> {
     if memory_mb == 0 {
         return Err(PyValueError::new_err("memory_mb must be > 0"));
     }
@@ -94,7 +94,7 @@ pub(crate) fn import_arrow_device(
     let arity = buffer.arity();
 
     let table = provider.to_dlpack_table(buffer);
-    let mut tensors: Vec<PyObject> = Vec::with_capacity(arity);
+    let mut tensors: Vec<Py<PyAny>> = Vec::with_capacity(arity);
     for col_idx in 0..arity {
         let tensor = table.column(col_idx).map_err(types::xlog_err)?;
         tensors.push(dlpack_capsule_from_tensor(py, tensor)?);
@@ -109,7 +109,7 @@ pub(crate) fn dlpack_roundtrip(
     tensor: &Bound<'_, PyAny>,
     device: usize,
     memory_mb: u64,
-) -> PyResult<PyObject> {
+) -> PyResult<Py<PyAny>> {
     if memory_mb == 0 {
         return Err(PyValueError::new_err("memory_mb must be > 0"));
     }

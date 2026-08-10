@@ -7,12 +7,12 @@
 //! - Configuration flags for batching, caching, etc.
 
 #[cfg(feature = "python")]
-use pyo3::PyObject;
+use pyo3::{Py, PyAny};
 
 /// Handle to a registered neural network.
 ///
 /// This struct holds the PyTorch module and associated training state.
-/// When the `python` feature is enabled, it can hold PyO3 PyObject references.
+/// When the `python` feature is enabled, it can hold PyO3 `Py<PyAny>` references.
 #[derive(Debug)]
 pub struct NetworkHandle {
     /// Unique name identifying this network
@@ -21,17 +21,17 @@ pub struct NetworkHandle {
     /// The PyTorch nn.Module (set via Python API)
     /// Only available with the `python` feature
     #[cfg(feature = "python")]
-    pub module: Option<PyObject>,
+    pub module: Option<Py<PyAny>>,
 
     /// The optimizer for training (e.g., Adam, SGD)
     /// Only available with the `python` feature
     #[cfg(feature = "python")]
-    pub optimizer: Option<PyObject>,
+    pub optimizer: Option<Py<PyAny>>,
 
     /// Learning rate scheduler
     /// Only available with the `python` feature
     #[cfg(feature = "python")]
-    pub scheduler: Option<PyObject>,
+    pub scheduler: Option<Py<PyAny>>,
 
     /// Whether to batch inputs for efficient GPU processing
     pub batching: bool,
@@ -152,37 +152,37 @@ impl NetworkHandle {
 
     /// Set the PyTorch module.
     #[cfg(feature = "python")]
-    pub fn set_module(&mut self, module: PyObject) {
+    pub fn set_module(&mut self, module: Py<PyAny>) {
         self.module = Some(module);
     }
 
     /// Set the optimizer.
     #[cfg(feature = "python")]
-    pub fn set_optimizer(&mut self, optimizer: PyObject) {
+    pub fn set_optimizer(&mut self, optimizer: Py<PyAny>) {
         self.optimizer = Some(optimizer);
     }
 
     /// Set the learning rate scheduler.
     #[cfg(feature = "python")]
-    pub fn set_scheduler(&mut self, scheduler: PyObject) {
+    pub fn set_scheduler(&mut self, scheduler: Py<PyAny>) {
         self.scheduler = Some(scheduler);
     }
 
     /// Get a reference to the PyTorch module.
     #[cfg(feature = "python")]
-    pub fn module(&self) -> Option<&PyObject> {
+    pub fn module(&self) -> Option<&Py<PyAny>> {
         self.module.as_ref()
     }
 
     /// Get a reference to the optimizer.
     #[cfg(feature = "python")]
-    pub fn optimizer(&self) -> Option<&PyObject> {
+    pub fn optimizer(&self) -> Option<&Py<PyAny>> {
         self.optimizer.as_ref()
     }
 
     /// Get a reference to the scheduler.
     #[cfg(feature = "python")]
-    pub fn scheduler(&self) -> Option<&PyObject> {
+    pub fn scheduler(&self) -> Option<&Py<PyAny>> {
         self.scheduler.as_ref()
     }
 
@@ -213,7 +213,7 @@ pub struct EmbeddingHandle {
 
     /// The PyTorch nn.Embedding or tensor
     #[cfg(feature = "python")]
-    pub module: Option<PyObject>,
+    pub module: Option<Py<PyAny>>,
 
     /// Whether gradients flow through this embedding
     pub trainable: bool,
@@ -253,13 +253,13 @@ impl EmbeddingHandle {
 
     /// Set the PyTorch module/tensor.
     #[cfg(feature = "python")]
-    pub fn set_module(&mut self, module: PyObject) {
+    pub fn set_module(&mut self, module: Py<PyAny>) {
         self.module = Some(module);
     }
 
     /// Get a reference to the PyTorch module/tensor.
     #[cfg(feature = "python")]
-    pub fn module(&self) -> Option<&PyObject> {
+    pub fn module(&self) -> Option<&Py<PyAny>> {
         self.module.as_ref()
     }
 }

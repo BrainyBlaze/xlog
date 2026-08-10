@@ -40,7 +40,7 @@ use std::collections::HashMap;
 use thiserror::Error;
 
 #[cfg(feature = "python")]
-use pyo3::PyObject;
+use pyo3::{Py, PyAny};
 
 /// Errors from tensor source operations.
 #[derive(Error, Debug)]
@@ -108,7 +108,7 @@ impl TensorMetadata {
 #[cfg(feature = "python")]
 struct TensorSource {
     /// The actual PyTorch tensor
-    tensor: PyObject,
+    tensor: Py<PyAny>,
 }
 
 /// Registry for managing tensor sources.
@@ -160,7 +160,7 @@ impl TensorSourceRegistry {
 
     /// Add a tensor source with PyTorch tensor.
     #[cfg(feature = "python")]
-    pub fn add(&mut self, name: &str, tensor: PyObject, metadata: TensorMetadata) {
+    pub fn add(&mut self, name: &str, tensor: Py<PyAny>, metadata: TensorMetadata) {
         let source = TensorSource { tensor };
         self.sources.insert(name.to_string(), source);
         self.metadata.insert(name.to_string(), metadata);
@@ -209,7 +209,7 @@ impl TensorSourceRegistry {
 
     /// Get the PyTorch tensor for the active source.
     #[cfg(feature = "python")]
-    pub fn get_active(&self) -> Result<&PyObject, TensorSourceError> {
+    pub fn get_active(&self) -> Result<&Py<PyAny>, TensorSourceError> {
         match &self.active {
             Some(name) => self
                 .sources
@@ -225,7 +225,7 @@ impl TensorSourceRegistry {
     /// reads the per-event feature batch from a fixed `nsr_domain` source while
     /// the per-query examples source stays active.
     #[cfg(feature = "python")]
-    pub fn get_named(&self, name: &str) -> Result<&PyObject, TensorSourceError> {
+    pub fn get_named(&self, name: &str) -> Result<&Py<PyAny>, TensorSourceError> {
         self.sources
             .get(name)
             .map(|s| &s.tensor)

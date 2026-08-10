@@ -361,8 +361,8 @@ impl CompiledProgram {
         let mut probs: Vec<f64> = Vec::with_capacity(result.query_grads.len());
         let mut log_probs: Vec<f64> = Vec::with_capacity(result.query_grads.len());
 
-        let mut grad_true_caps: Vec<PyObject> = Vec::with_capacity(result.query_grads.len());
-        let mut grad_false_caps: Vec<PyObject> = Vec::with_capacity(result.query_grads.len());
+        let mut grad_true_caps: Vec<Py<PyAny>> = Vec::with_capacity(result.query_grads.len());
+        let mut grad_false_caps: Vec<Py<PyAny>> = Vec::with_capacity(result.query_grads.len());
 
         let schema = Schema::new(vec![("col0".to_string(), ScalarType::F64)]);
 
@@ -641,7 +641,7 @@ impl CompiledProgram {
     /// without evidence or annotated disjunctions), since that path never
     /// builds a CNF encoding and therefore has no variable map to report —
     /// this is *not* the same as the program having no probabilistic facts.
-    pub fn prob_var_map(&self, py: Python<'_>) -> PyResult<Vec<PyObject>> {
+    pub fn prob_var_map(&self, py: Python<'_>) -> PyResult<Vec<Py<PyAny>>> {
         #[cfg(feature = "host-io")]
         {
             use xlog_prob::exact::ProbVarInfo;
@@ -667,7 +667,7 @@ impl CompiledProgram {
                 }
             };
 
-            let mut out: Vec<PyObject> = Vec::with_capacity(entries.len());
+            let mut out: Vec<Py<PyAny>> = Vec::with_capacity(entries.len());
             for entry in entries {
                 let d = PyDict::new(py);
                 match entry {
@@ -784,7 +784,7 @@ impl CompiledProgram {
         let schema_i32 = Schema::new(vec![("col0".to_string(), ScalarType::I32)]);
 
         let make_count_tensor =
-            |counts: xlog_cuda::memory::TrackedCudaSlice<u32>, rows: u64| -> PyResult<PyObject> {
+            |counts: xlog_cuda::memory::TrackedCudaSlice<u32>, rows: u64| -> PyResult<Py<PyAny>> {
                 let rows_u32 = u32::try_from(rows).map_err(|_| {
                     PyValueError::new_err(format!("Row count {} exceeds u32::MAX", rows))
                 })?;
@@ -929,7 +929,7 @@ impl CompiledProgram {
     ///
     /// # Returns
     /// PyTorch scalar tensor containing the loss value
-    fn nll_loss_tensor(&self, py: Python<'_>, query: &str) -> PyResult<PyObject> {
+    fn nll_loss_tensor(&self, py: Python<'_>, query: &str) -> PyResult<Py<PyAny>> {
         let loss = self.nll_loss(query)?;
         types::create_torch_tensor(py, loss)
     }
@@ -941,7 +941,7 @@ impl CompiledProgram {
     ///
     /// # Returns
     /// PyTorch scalar tensor containing the sum of losses
-    fn nll_loss_batch_tensor(&self, py: Python<'_>, queries: Vec<String>) -> PyResult<PyObject> {
+    fn nll_loss_batch_tensor(&self, py: Python<'_>, queries: Vec<String>) -> PyResult<Py<PyAny>> {
         let loss = self.nll_loss_batch(queries)?;
         types::create_torch_tensor(py, loss)
     }
@@ -1161,7 +1161,7 @@ impl CompiledProgram {
     ///   - "ptx": PTX load timing breakdown
     ///   - "circuit": circuit compilation timing breakdown
     /// Returns None if profiling is not enabled or no data is available.
-    fn warmup_breakdown(&self, py: Python<'_>) -> PyResult<Option<PyObject>> {
+    fn warmup_breakdown(&self, py: Python<'_>) -> PyResult<Option<Py<PyAny>>> {
         let ptx_profile = self.output_provider.ptx_load_profile();
         // The neural forward path records `self.last_compile_profile`. For a
         // purely probabilistic/deterministic program no neural forward runs,
@@ -1220,22 +1220,22 @@ impl CompiledProgram {
     }
 
     /// Return memory diagnostics including allocated_bytes and memory_limit_bytes.
-    pub fn memory_stats(&self, py: Python<'_>) -> PyResult<PyObject> {
+    pub fn memory_stats(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         provider_memory_stats(py, &self.output_provider)
     }
 
-    pub fn rule_provenance(&self, py: Python<'_>) -> PyResult<PyObject> {
+    pub fn rule_provenance(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let provenance = xlog_logic::rule_provenance(&self.ast, None);
         pack_rule_provenance(py, &provenance)
     }
 
-    pub fn proof_traces(&self, py: Python<'_>) -> PyResult<PyObject> {
+    pub fn proof_traces(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let provenance = xlog_logic::rule_provenance(&self.ast, None);
         let traces = xlog_logic::query_proof_traces(&self.ast, &provenance);
         pack_proof_traces(py, &traces)
     }
 
-    pub fn host_transfer_stats(&self, py: Python<'_>) -> PyResult<PyObject> {
+    pub fn host_transfer_stats(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let stats = self.output_provider.host_transfer_stats();
         let dict = PyDict::new(py);
         dict.set_item("dtoh_bytes", stats.dtoh_bytes)?;
@@ -1249,7 +1249,7 @@ impl CompiledProgram {
         self.output_provider.reset_host_transfer_stats()
     }
 
-    pub fn neural_hot_loop_diagnostics(&self, py: Python<'_>) -> PyResult<PyObject> {
+    pub fn neural_hot_loop_diagnostics(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let transfers = self.output_provider.host_transfer_stats();
         let dict = PyDict::new(py);
         dict.set_item("post_load_dtoh_bytes", transfers.dtoh_bytes)?;
@@ -1300,7 +1300,7 @@ impl CompiledProgram {
         Ok(dict.into())
     }
 
-    pub fn cuda_graph_stats(&self, py: Python<'_>) -> PyResult<PyObject> {
+    pub fn cuda_graph_stats(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let dict = PyDict::new(py);
         dict.set_item(
             "csm_cuda_graph_captures",
@@ -1325,7 +1325,7 @@ impl CompiledProgram {
 fn pack_rule_provenance(
     py: Python<'_>,
     entries: &[xlog_logic::RuleProvenance],
-) -> PyResult<PyObject> {
+) -> PyResult<Py<PyAny>> {
     let list = PyList::empty(py);
     for entry in entries {
         let dict = PyDict::new(py);
@@ -1347,7 +1347,7 @@ fn pack_rule_provenance(
 fn pack_proof_traces(
     py: Python<'_>,
     entries: &[xlog_logic::QueryProofTrace],
-) -> PyResult<PyObject> {
+) -> PyResult<Py<PyAny>> {
     let list = PyList::empty(py);
     for entry in entries {
         let dict = PyDict::new(py);

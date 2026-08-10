@@ -339,7 +339,7 @@ pub(crate) fn forward_backward_reduce(
     num_facts: u32,
     num_cands: u32,
     is_f64: bool,
-) -> PyResult<(PyObject, PyObject)> {
+) -> PyResult<(Py<PyAny>, Py<PyAny>)> {
     if is_f64 {
         let eps_f64 = 1e-8f64;
 
@@ -432,7 +432,7 @@ pub(crate) fn export_loss_grad_device<T: GpuScalar>(
     d_grad: TrackedCudaSlice<T>,
     num_cands: u32,
     scalar_type: ScalarType,
-) -> PyResult<(PyObject, PyObject)> {
+) -> PyResult<(Py<PyAny>, Py<PyAny>)> {
     let schema = Schema::new(vec![("col_0".to_string(), scalar_type)]);
 
     let mut d_loss_nrows = provider
