@@ -25,7 +25,8 @@ MUTED = "#5a626e"
 BAR = "#1b804f"      # figgreen
 ACCENT = "#b02a2a"   # figaccent
 
-# Fixture display names (paper Sec. 8.2), artifact order preserved.
+# Fixture display names (paper Sec. "Worst-Case Optimal Joins"), artifact order
+# preserved.
 fixtures = [
     ("call-graph edges", 29.62),
     ("Andersen points-to", 26.96),
