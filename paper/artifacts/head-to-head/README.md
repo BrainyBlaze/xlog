@@ -1,7 +1,7 @@
 # Head-to-head and overhead-isolation artifacts
 
 Benchmark artifacts backing the head-to-head and overhead-isolation claims in
-`sections/08_evaluation.tex`. These were collected on **ephemeral cloud GPUs**
+`sections/09_evaluation.tex`. These were collected on **ephemeral cloud GPUs**
 (RunPod), separate from the single-system ablations in the rest of the
 Evaluation section, which run on the development RTX PRO 3000. Each artifact
 records its own hardware, protocol, and per-cell measurements; hardware is not
