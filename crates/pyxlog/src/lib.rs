@@ -782,13 +782,13 @@ pub struct EpistemicEvalResult {
     #[pyo3(get)]
     pub atoms: Vec<String>,
     #[pyo3(get)]
-    pub prob: PyObject,
+    pub prob: Py<PyAny>,
     #[pyo3(get)]
-    pub log_prob: PyObject,
+    pub log_prob: Py<PyAny>,
     #[pyo3(get)]
     pub log_z_e: f64,
     #[pyo3(get)]
-    pub trace: PyObject,
+    pub trace: Py<PyAny>,
 }
 
 /// Summary of one accepted epistemic GPU execution.
