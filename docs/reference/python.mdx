@@ -364,6 +364,30 @@ Native relation evidence binds ordered semantic roles and provenance records to
 complete facts of any positive arity. The role order must match the compiled
 predicate argument order, and each fact is identified by all of its cells:
 
+<Warning>
+**Breaking in 0.12.0.** Five relation APIs changed shape, so code written against
+0.11.0 needs edits:
+
+- `put_relation_with_provenance` is now native and requires keyword-only `roles=`
+  and `facts=`. The old `source_path`, `source_hash`, `row_hashes`,
+  `accepted_count`, and `decision_counts` keyword arguments are gone, and the
+  call returns a native snapshot instead of that flat sidecar dictionary.
+- `evidence()` returns `{program_hash, relations}` and raises `KeyError` for a
+  name it does not hold, instead of returning `{}`.
+- `relation(name)` returns a frozen native `RelationEvidence` and raises
+  `KeyError` for an unstored relation, instead of a wrapper whose `provenance()`
+  returned `{}`.
+- `RelationEvidence` is an immutable native class. The old
+  `RelationEvidence(session, name)` constructor no longer exists.
+- `apply_relation_delta_batch` and `apply_relation_delta_debug` reject unknown
+  keys in an update dictionary that they previously ignored. Both route through
+  the same parser, so both raise `ValueError` where 0.11.0 silently dropped the
+  extra key.
+
+See [Migrating from Python-side relation evidence](#migrating-from-python-side-relation-evidence)
+for the field-by-field mapping.
+</Warning>
+
 ```python
 program = pyxlog.LogicProgram.compile("""
     domain party: u32.
@@ -472,6 +496,11 @@ stream argument, the exception propagates; XLOG does not retry without a stream.
 Raw capsules bypass both protocol calls. The caller must create each capsule for
 stream `1` or synchronize its producer first, and must pass it to only one
 consumer. The native importer still validates the capsule's device header.
+
+**Breaking in 0.12.0.** This device gate is new, and it applies to every pyxlog
+entry point that accepts a `__dlpack__` object. A CPU tensor that previously
+travelled some distance into XLOG before failing now raises `BufferError`
+immediately, at import.
 
 Membership is checked as complete tuples on the GPU. For a non-empty evidence
 set, the runtime downloads one boolean membership mask in a single transfer—one
@@ -669,6 +698,42 @@ The lineage payload contains `checkpoint_hash`, `split_hashes`,
 `calibration_metrics`, `cuda_device`, `influence_audit`, and
 `changed_acceptance` evidence recorded through `record_nn4_influence(...)`.
 
+`register_network` also accepts three keyword-only arguments that record and
+check the network's typed signature. All three are available since 0.11.0:
+
+```python
+program.register_network(
+    "mnist_net",
+    net,
+    optimizer,
+    arity=2,
+    arg_sorts=[3, 9],
+    artifact_hash="sha256:...",
+)
+```
+
+- `arity=` is the declared argument count. XLOG validates it against every `nn/4`
+  declaration bound to that network name in the program rather than trusting it;
+  a disagreement raises `ValueError`.
+- `arg_sorts=` is a sequence of integer sort ids, one per argument. It requires
+  `arity` and must have exactly that length. A `bool` element is rejected
+  outright — Python's `bool` is an `int` subclass, so `True` would otherwise be
+  read as sort id `1`.
+- `artifact_hash=` records the checkpoint identity.
+
+`program.network_metadata("mnist_net")` reads that back, together with what the
+program itself declares:
+
+```python
+program.network_metadata("mnist_net")
+# {"arity": ..., "arg_sorts": [...], "artifact_hash": ...,
+#  "declared": [{"predicate": ..., "predicate_arity": ..., "input_arity": ..., "labels": [...]}]}
+```
+
+It covers classification networks only. A name declared as an embedding is
+refused, because embeddings carry no registration metadata. Available since
+0.11.0.
+
 ### Program (Probabilistic)
 
 Compiles and runs a probabilistic Datalog program — facts and rules annotated
@@ -771,6 +836,47 @@ exposes:
 
 This is experimental and currently rejects nulls; import does not yet support bit-packed
 `Bool`.
+
+### JointConstraintCarrier (joint constraint solving)
+
+`pyxlog.JointConstraintCarrier` picks one label per entity subject to pairwise
+constraints, entirely on the GPU. Its result buffers are handed back as DLPack
+capsules, so a caller never copies them to the host. Available since 0.11.0.
+
+```python
+import pyxlog
+
+carrier = pyxlog.JointConstraintCarrier(
+    device=0,
+    entities=1024,
+    domain_lanes=4,
+    candidates=16,
+    labels=8,
+    fuel_limit=1_000_000,
+)
+carrier.register_schema(catalog_sha, pyxlog.SOLVER_ABI_IDENTITY)
+carrier.bind_signatures(head_masks, tail_masks)
+
+carrier.solve_label_feasibility(abstain_label=7)
+carrier.solve_label_map_top2()
+carrier.solve_components_exact(comp_offsets, comp_indices)
+
+buffer = carrier.export_buffer("map_results") # zero-copy DLPack capsule
+print(carrier.fuel_spent)                     # property, not a call
+```
+
+- `register_schema(catalog_sha, solver_identity)` must be given
+  `pyxlog.SOLVER_ABI_IDENTITY` — a module-level string naming the solver ABI this
+  build speaks — so a carrier cannot be driven by a mismatched client.
+- `bind_signatures(head_masks, tail_masks)` must run before any solve.
+- `note_producer_stream(...)` and `note_consumer_stream(...)` perform the CUDA
+  stream handoff when the buffers cross into or out of another library's stream.
+- `fuel_spent` is a read-only property reporting how much of `fuel_limit` the
+  solves consumed.
+
+Every precondition is enforced, not assumed: a violated one raises
+`pyxlog.CarrierRefused`, and running out of `fuel_limit` raises
+`pyxlog.SolverResourceExhausted`. See [Error Handling](#error-handling).
 
 ## Term Embeddings
 
@@ -1045,14 +1151,18 @@ diagnostics = compute_transfer_diagnostics(
 assert diagnostics.passed
 ```
 
+A `NeuralBodySpec` carries an opt-in `train_phi_gradient` flag, default `False`.
+Left at the default, the entity features φ(x) are detached on the training
+upload, and the uploaded values are byte-identical to earlier releases. Set it to
+`True` to leave φ(x) attached, so gradients flow back into whatever produced the
+features (backbone coupling). Only the autograd linkage changes — never the
+values that are uploaded. Available since 0.12.0.
+
 `train_and_promote(...)` accepts transfer-audit metadata through
 `training_fold`, `held_out_domains`, `base_kernel_checksum_before`, and
 `base_kernel_checksum_after`. The returned `PromotionResult.rule_inventory`
 records those values with selected and rejected clauses, scores, and gate
 outcomes.
-
-For the full architecture map, see the external-consumer diagnostics
-documentation.
 
 ### Device Query APIs
 
@@ -1331,6 +1441,21 @@ except RuntimeError as e:
 `relation(name)` and `evidence(name)` use `KeyError` for an unstored relation.
 `export_relation_with_provenance(name)` uses `ValueError` for the same condition.
 
+The joint-constraint carrier raises two exceptions of its own, both
+`RuntimeError` subclasses, available since 0.11.0:
+
+- `pyxlog.CarrierRefused` — every typed refusal: a schema or ABI mismatch, a
+  zero-capacity dimension, use before `register_schema`, rebinding already-bound
+  signature masks, a signature-mask shape mismatch, solving before
+  `bind_signatures`, running the top-two stage before feasibility has solved, a
+  malformed component plan, an out-of-range abstain label index, or an
+  unavailable joint-solve kernel.
+- `pyxlog.SolverResourceExhausted` — a solve used up its `fuel_limit`, with the
+  message `solver fuel exhausted: spent {fuel_spent} of {fuel_limit} node
+  expansions`. The fuel meter lives in the carrier session, so a retry reproduces
+  the identical refusal instead of making partial progress; build a new carrier
+  with a larger `fuel_limit`.
+
 ## Memory Management
 
 - An unconsumed output capsule owns its exported GPU buffer and releases it when
@@ -1419,8 +1544,6 @@ for batch in data_loader:
   provenance, proof traces, delta debug, temporal metadata, and nn/4 hot-loop
   audit surface
 - [dILP Training Architecture](/neural/rule-learning) — System design, mask backends, promotion pipeline
-- External Consumer Diagnostics — reusable
-  audit surfaces for external-consumer validation
 - [Data Interoperability](/guides/interop) — DLPack and Arrow details
 - [Probabilistic Tier](/probabilistic/engines) — Inference engine details
 - [CLI Reference](/reference/cli) — Command-line alternative

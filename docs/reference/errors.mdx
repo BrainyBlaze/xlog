@@ -25,8 +25,8 @@ variants may be added without a breaking change.
 | `VerifyBudgetExceeded` | The GPU verifier that checks whether two formulas are equivalent declined. Its conflict-driven SAT search (CDCL) ran out of the per-verify conflict budget before reaching a definite answer. An indeterminate result is never trusted as a proof. Available since 0.10.0. |
 | `Kernel` | GPU kernel launch or execution error. |
 | `Type` | Type checking or inference error. |
-| `Compilation` | Compilation pipeline error (also carries the resident MC rejections and the exact aggregate cap declines described below). |
-| `UnsupportedEpistemicConstruct` | An epistemic construct known to the frontend but unsupported in the given context; names the construct and the context. |
+| `Compilation` | Compilation pipeline error (also carries the resident MC rejections, the exact aggregate cap declines, and the cross-predicate type mismatch described below). |
+| `UnsupportedEpistemicConstruct` | An epistemic construct known to the frontend but unsupported in the given context; names the construct and the context. Every construct name is listed under [Epistemic rejections](#epistemic-rejections). |
 | `Execution` | Runtime execution error. |
 
 ## Exit codes
@@ -48,6 +48,7 @@ behavior:
 | `E0400` | A direct or transitive `use` path cannot be resolved to a module file. |
 | `E0401` | Direct or transitive imports form a cycle. |
 | `E0402` | Separate resolved import branches define the same function, or a module or entry program redefines an imported function. |
+| `E0403` | A `use` import selects a predicate the source module has not declared public. The message reads `error[E0403]: cannot import private predicate ... from ...`, naming the predicate and its source module. Make the predicate public in its own module, or import something else. |
 | `E0404` | A selective import names an item that the module does not export. |
 | `E0405` | An imported module contains program-level content that must be declared in the entry file: probabilistic facts, annotated disjunctions, evidence, integrity constraints, neural predicate declarations, or learnable rule templates. |
 | `E0406` | An exported rule or function depends on a private item or an item omitted by a selective import. |
@@ -64,6 +65,59 @@ continue to resolve to `.xlog` files. Queries and probabilistic queries in impor
 modules are entry-file-scoped and are not merged; imported pragmas are ignored with
 `warning[W0510]`. See [Modules](/language-guide/modules) for examples and visibility
 rules.
+
+### Cross-predicate type mismatch
+
+Compilation rejects a rule whose variables draw incompatible column types from
+the declared schemas of the predicates they touch. The conflict may be between
+two body atoms, or between a body atom and the head. Both forms are
+`Compilation` errors that name the rule, the variable, both types, and where each
+came from:
+
+```text
+Type mismatch in rule for '<head>': variable <V> is <Type> (from <predicate/position>) but <Type> is required by <predicate/position>
+Type mismatch in rule for '<head>': variable <V> is <Type> (from <predicate/position>) but <head> declares <Type> at position <N>
+```
+
+The check applies only to predicates that carry an explicit `pred` declaration;
+an undeclared predicate has no schema to contradict. Available since 0.12.0 —
+before that the same program was accepted here and failed later with an internal
+GPU schema error that did not name the rule.
+
+### Epistemic rejections
+
+`UnsupportedEpistemicConstruct` is one error type covering many distinct
+rejections. The `construct` field in the message tells you which one you hit;
+find it in the left column below. (A *modal* literal is one written with `know`
+or `possible`. A *world view* is the set of models the program considers possible
+at once. A *tuple key* is the argument list that identifies which tuple a modal
+literal is talking about.)
+
+| `construct` | Trigger |
+|---|---|
+| `epistemic tuple key` | A tuple-key epistemic fact whose key contains a variable, `_`, or an aggregate. These facts require ground terms. |
+| `world view boundary` | The program admits no stable model at all, so there is no world view to reason over. |
+| `epistemic GPU execution plan` | The program declares `know`/`possible`, but after reduction no rule body actually contains a modal literal, so there is nothing to build a world-view plan from. |
+| `epistemic GPU world-view constraint` | Four cases, all in epistemic integrity constraints such as `:- know p(X).` — (a) the program has no epistemic rule for the constraint to be checked against; (b) the constraint body mixes ordinary or comparison literals with modal literals, e.g. `:- p(X), know q(X).`; (c) a variable is shared across two modal literals or repeated inside one, e.g. `:- know p(X), possible q(X).` or `:- know p(X, X).`; (d) a key position uses a list, compound, float, or string term. Single-occurrence variable keys like `:- know p(X).` are fine. |
+| `recursive epistemic program` | Three cases — a dependency cycle the single-pass epistemic planner cannot iterate; a recursive epistemic program that also carries an epistemic integrity constraint (the recursive path never runs the constraint kernel, so it refuses rather than drop the constraint); or a modal dependency cycle reaching the stratified planner. |
+| `epistemic GPU final output relation` | An epistemic program compiled through the single (non-split) GPU path produces more than one distinct output head. Single-plan execution can materialize only one final relation; use split execution for independent epistemic outputs. |
+| `epistemic GPU constraint` | Split epistemic execution combined with any epistemic integrity constraint, including forms the single-plan path accepts. |
+| `epistemic GPU split execution` | Split execution was selected but no split component contains an epistemic rule — that is, the program has no `know`/`possible` rules at all. |
+| `cross-component epistemic coupling` | Two or more epistemic output heads land in one dependency component, and a modal literal in that component ranges over another epistemic-derived head from the same component. A single joint world-view enumeration would mis-evaluate that nesting. |
+| `epistemic modal tuple key` | A modal literal's tuple key does not flatten to exactly one scalar term per target column. Use one scalar key term per column of the modal target. New in 0.12.0. |
+| `epistemic derived predicate schema` | The same predicate name is defined as a rule-derived epistemic relation at more than one arity. A derived epistemic relation needs exactly one source signature per name. New in 0.12.0. |
+| `epistemic augmented predicate schema` | Sibling clauses for one head bind different hidden columns. A variable that appears only inside a modal literal adds hidden columns to the head, so every clause for one predicate signature must bind the same shape. New in 0.12.0. |
+| `epistemic augmented head query` | A query against a head that carries those hidden modal-bound columns, where the query's arguments are not all distinct named variables. A constant, `_`, a repeated variable, or a compound term is refused. New in 0.12.0. |
+| `epistemic rule-union materialization` | A rule-derived epistemic predicate has more than one defining clause, at least one clause is epistemic, and the modal filters are not provably the same across clauses. Merging the clauses in one pass would lose which clause each row came from, so the modal filter could not be applied correctly. New in 0.12.0. |
+| `Gelfond-1991 compatibility cycle through aggregation` | Under `g91` semantics, an aggregate predicate takes part in a positive `possible` compatibility cycle. The tuple-level fixpoint that class needs requires every predicate in the cycle to be monotone, and aggregation is not. New in 0.12.0. |
+| `Gelfond-1991 compatibility cycle through negation` | The same cycle, but routed through a negated literal instead of an aggregate, with the same monotonicity requirement. New in 0.12.0. |
+| `Gelfond-1991 tuple compatibility ordinary reduction` | A `g91` program whose positive `possible` predicates form an exact tuple-level compatibility cycle reached the one-shot reduction step. Such cycles need the explicit upper-bound fixpoint plan and cannot be rewritten as a single ordinary least-fixpoint program. New in 0.12.0. |
+
+`g91` and `faeel` are the two epistemic semantics you pick between with
+`#pragma epistemic_mode`; `faeel` is the default. See
+[Epistemic support and boundaries](/reference/language#epistemic-support-and-boundaries)
+for the same boundaries stated as language rules, and
+[Epistemic reasoning](/epistemic/overview) for what the two modes mean.
 
 ### Resident Monte Carlo rejection
 
@@ -120,9 +174,12 @@ The GPU sort and dedup steps that merge same-head rule outputs index column
 bytes with 32-bit arithmetic, so they reject any column whose logical bytes
 exceed `4294967295` (`u32::MAX`) with a typed error of the form
 `Sort supports at most 4294967295 bytes per column, got ... (column N)`; the
-concatenation step applies analogous `Concat: ... too large` caps. These are
-fail-closed declines, never silent truncation: a relation column past 4 GiB
-stops the run instead of scattering rows.
+concatenation step applies analogous byte caps, `Concat: total_bytes too large: ...`
+and `Concat: col_bytes too large: ...`. Since 0.12.0 the clauses of one head merge
+in a single batched concat pass, and that pass additionally rejects more than
+4294967295 total rows with `Concat supports at most 4294967295 rows, got ...`.
+These are all fail-closed declines, never silent truncation: a relation column
+past 4 GiB stops the run instead of scattering rows.
 
 ### Compile and verify budgets
 
@@ -155,13 +212,15 @@ answered.
 
 | Exception | Raised for |
 |---|---|
-| `ValueError` | Invalid parameters: an unknown `prob_engine` (expected `exact_ddnnf` or `mc`), an unknown `sampling_method` (expected `rejection` or `evidence_clamping`), `memory_mb=0`, row counts exceeding `u32` range, neural input shape or value validation, and exporting provenance for an unstored relation. |
+| `ValueError` | Invalid parameters: an unknown `prob_engine` (expected `exact_ddnnf` or `mc`), an unknown `sampling_method` (expected `rejection` or `evidence_clamping`), `memory_mb=0`, row counts exceeding `u32` range, neural input validation, and exporting provenance for an unstored relation. Neural input validation covers tensor shape and value checks, an undersized tensor source (in a complex query each neural atom reads its own source row — atom *k* reads row *k* — so a body with *N* neural atoms needs at least *N* rows in the active source), and `register_network` signature validation: `arg_sorts` passed without `arity`, an `arg_sorts` length that does not equal `arity`, a `bool` or non-int `arg_sorts` element, or an `arity` that disagrees with the `nn/4` declaration bound to that network name in the program. |
 | `RelationMetadataError` (a `ValueError` subclass) | Invalid ordered roles, whole-fact provenance, insert evidence, or relation-provenance manifests. |
 | `KeyError` | `LogicRelationSession.relation(name)` or `evidence(name)` when the named relation is not currently stored. |
 | `BufferError` | A tensor-like DLPack producer reports a non-CUDA device from `__dlpack_device__()`. XLOG raises before calling `__dlpack__()` or consuming a capsule. |
 | `MemoryError` | The per-call memory limit: when `memory_mb` is passed to an evaluation and the provider's allocated bytes already exceed it, the call raises before evaluating. |
 | `RuntimeError` | Any `XlogError` propagated from the engine (parse, compilation, kernel, execution, resource exhaustion — including the resident MC rejection and aggregate cap messages above), host-output calls on a build without the `host-io` feature, and construction of fallback `RelationEvidence` when `pyxlog._native` is unavailable. |
 | `IlpConfigError` (a `ValueError` subclass) | `induce_exact(backend="python")` without `XLOG_ALLOW_PYTHON_ILP_REFERENCE=1`. The Python reference scorer exists only to cross-check results (parity-only) and is never a production path. |
+| `CarrierRefused` (a `RuntimeError` subclass) | Every typed refusal from the device-resident joint-constraint solver (`JointConstraintCarrier`) except running out of fuel: registering a schema twice, a zero-capacity dimension, using the carrier before `register_schema`, rebinding already-bound signature masks, a signature-mask shape mismatch, solving before `bind_signatures`, running the top-two stage before feasibility has solved, a malformed component plan, an out-of-range abstain label index, or an unavailable joint-solve kernel. Available since 0.11.0. |
+| `SolverResourceExhausted` (a `RuntimeError` subclass) | The joint-constraint solver used up its device fuel budget — a cap on how many search nodes it may expand — during `solve_label_feasibility`. The message is `solver fuel exhausted: spent {fuel_spent} of {fuel_limit} node expansions`. The fuel meter lives in the carrier session, so retrying reproduces the identical refusal instead of making partial progress; raise `fuel_limit` on a new carrier. Available since 0.11.0. |
 
 In a source-only import without `pyxlog._native`, package-level
 `RelationMetadataError` and `RelationEvidence` remain importable. The fallback

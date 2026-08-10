@@ -91,6 +91,55 @@ surfaces that as a typed `VerifyBudgetExceeded` error.
 A budget-exhausted result is *indeterminate*: the solver ran out of budget before
 deciding. It is never a proof of either SAT or UNSAT.
 
+## Joint Constraint Carrier
+
+Available since 0.11.0. Alongside the CNF/CDCL substrate, `xlog-cuda` carries a
+second device-resident solver for *joint label assignment*: picking one label per
+entity subject to pairwise constraints between candidate pairs. It is exposed to
+Python as `pyxlog.JointConstraintCarrier`.
+
+A carrier is constructed with `(device, entities, domain_lanes, candidates,
+labels, fuel_limit)`. `register_schema(catalog_sha, solver_identity)` pins it to a
+schema and to the ABI string `pyxlog.SOLVER_ABI_IDENTITY`, once per session;
+`bind_signatures(head_masks, tail_masks)` installs the constraint masks, also once.
+Two solve stages then run on device in order — `solve_label_feasibility(abstain_label)`
+narrows each entity's feasible label set, then `solve_label_map_top2()` computes the
+per-candidate top-two scores — followed by `solve_components_exact(comp_offsets,
+comp_indices)`, which solves each listed multi-candidate component by complete
+enumeration.
+
+`export_buffer(name)` hands one named result buffer back as a zero-copy DLPack
+capsule (`domains`, `scores`, `constraints`, `outputs`, `feasible_sets`,
+`logical_counts`, `map_results`, or `solve_status`). Because the buffer stays on
+the device and xlog stays its owner, ordering is explicit: `note_producer_stream`
+records an external CUDA stream whose writes the next solve must wait on, and
+`note_consumer_stream` records a stream the carrier signals after a stage
+completes. Without one of those — or a host synchronize — writes made through an
+exported view race the launch.
+
+Refusals are typed and fail-closed, matching the rest of the solver contract.
+`pyxlog.CarrierRefused` (a `RuntimeError` subclass) covers a schema or ABI
+mismatch, a re-registration, a zero capacity dimension, binding or solving before
+`register_schema`, rebinding already-bound masks, a mask shape mismatch, solving
+before signatures are bound, running the top-two stage before feasibility solved,
+a malformed component plan, an out-of-range abstain label, and an unavailable or
+unloadable kernel. `pyxlog.SolverResourceExhausted` is raised only when a solve
+would exceed `fuel_limit`; the overflowing charge is never applied, so the
+session's `fuel_spent` is unchanged and an identical retry refuses identically.
+
+Two limits are worth stating plainly:
+
+- `solve_components_exact` enumerates. A component past the stage's capacity is
+  not solved — it is marked refused in `solve_status` (row value `3`), leaving
+  those rows on top-two authority rather than exact. The exact memoized
+  dynamic-programming stage for chain-order components
+  (`xlog_cuda::JointConstraintCarrier::solve_components_memoized`, backed by the
+  `joint_label_memoized` kernel) exists in the Rust carrier only; it is not
+  reachable from `pyxlog.JointConstraintCarrier`.
+- `map_results` is the global max-marginal label only for single-candidate
+  components. For a multi-candidate component the top-two stage's answer is not
+  authoritative until `solve_components_exact` has covered it.
+
 ## Consumers
 
 Several higher-level engines call the solver services:
@@ -100,6 +149,7 @@ Several higher-level engines call the solver services:
 | `xlog-prob` | Verification around probabilistic circuit and knowledge-compilation paths. |
 | `xlog-gpu` | Epistemic GPU planning and split-execution certification surfaces. |
 | `xlog-cli` | Diagnostic plan dumps and release validation flows. |
+| `pyxlog` | Direct Python access to the joint-constraint carrier: constructs it, runs the feasibility, top-two, and component solves, and imports the exported device buffers through DLPack. |
 
 Responsibility splits cleanly. The consumer owns the *semantic contract* — what a
 SAT or UNSAT answer means for its problem. The solver service owns the mechanism:

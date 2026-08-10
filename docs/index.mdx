@@ -5,7 +5,8 @@ description: "A GPU-native logic programming language for unified symbolic reaso
 
 XLOG is a full typed logic programming language with one compiler and one CUDA runtime spanning
 four reasoning paradigms: deterministic Datalog, exact and approximate probabilistic inference,
-SAT/MaxSAT verification, and differentiable neural-symbolic training.
+epistemic reasoning, and differentiable neural-symbolic training. SAT/MaxSAT verification is
+available to all four through a shared GPU-resident solver service, not as a paradigm of its own.
 
 Neural-symbolic systems today keep symbolic reasoning on the CPU while neural computation runs
 on the GPU, and every training iteration pays a PCIe round-trip that dominates wall-clock time

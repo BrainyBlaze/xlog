@@ -80,14 +80,22 @@ promoted(X, Z) :- ints(X), Z is cast(X, f64).
 Arithmetic on real hardware has boundaries, and XLOG's are defined rather than
 undefined:
 
-- **Division by zero.** Integer division by zero yields `INT64_MAX` (the largest signed
-  64-bit value). Float division by zero yields `NaN` or `Inf` per IEEE-754.
+- **Division by zero.** Integer division by zero yields the largest value of the
+  operand's **own** type — not one fixed constant. The sentinel therefore depends on the
+  column you divide: `2147483647` for `i32`, `9223372036854775807` for `i64`,
+  `4294967295` for `u32`, and `18446744073709551615` for `u64`. Float division by zero
+  follows IEEE-754: `0.0 / 0.0` is `NaN`, and any other numerator over `0.0` is `+Inf`
+  or `-Inf`.
+- **Remainder by zero.** Integer `X % 0` yields `0` — an ordinary-looking value that you
+  cannot tell apart from a genuine zero remainder. Float `X % 0.0` yields `NaN`.
 - **Integer overflow** wraps around (two's-complement), rather than trapping.
 
 None of these raise an error mid-evaluation — the engine keeps running and produces the
 defined sentinel. That means a divisor column containing a stray `0`, or an overflowing
-product, silently seeds these values into your results. The idiomatic guard is to
-**filter the bad inputs out** in the body before computing:
+product, silently seeds these values into your results. Because the integer
+division-by-zero sentinel is type-dependent, do not test for one hard-coded number
+downstream. The idiomatic guard is to **filter the bad inputs out** in the body before
+computing:
 
 ```xlog
 ratio(X, Y, R) :- pair(X, Y), Y != 0, R is X / Y.

@@ -134,11 +134,22 @@ preserves modal meaning while the high-level dispatcher classifies dependencies.
 Neural-symbolic training supplies neural predicate values to, and consumes
 differentiable results from, these symbolic routes rather than using a fourth
 reasoning IR. SAT/MaxSAT and verification features submit GPU-resident `GpuCnf`
-inputs to the shared CDCL solver service. Acyclic modal programs use the
-Generate-Propagate-Test workspace, positive FAEEL cycles use an ordinary founded
-least-fixpoint reduction, supported Gelfond-1991 exact-tuple possibility cycles use
-a greatest compatibility fixpoint over concrete tuple snapshots, and supported
-cycles through negation use the GPU-backed WFS plan.
+inputs to the shared CDCL solver service.
+
+Inside the epistemic route, one more choice is made for you. XLOG looks at the shape
+of the program's dependencies — whether the modal rules form a cycle, and what kind —
+and picks how to evaluate it:
+
+| Program shape | How XLOG evaluates it |
+|---|---|
+| No cycle among the modal rules | *Generate-Propagate-Test*: enumerate the candidate world views, prune the inconsistent ones, then test what is left. |
+| A positive cycle, under the default `faeel` semantics | An ordinary least-fixpoint loop over the rewritten rules. It derives only facts the program actually founds, so a rule that merely supports itself concludes nothing. |
+| A positive `possible` cycle under `g91` semantics, where each concrete tuple must be checked | Start from an upper bound of candidate tuples and repeatedly filter it against the previous round's snapshot until it stops shrinking. |
+| A cycle that runs through negation | The GPU-backed *well-founded* plan: the standard three-valued reading of recursive negation, which leaves a genuinely circular fact undefined instead of guessing it true or false. |
+
+`faeel` and `g91` are the two epistemic semantics you choose between with
+`#pragma epistemic_mode`; the [epistemic overview](/epistemic/overview) explains what
+each one accepts and when to pick it.
 
 <Frame caption="The normalized AST fans into RIR, PIR, and EIR. SAT/MaxSAT and verification use a separate shared GpuCnf/CDCL service.">
   <img className="block dark:hidden" src="/assets/diagrams/ir-stack-light.svg" alt="XLOG intermediate forms: the normalized AST fans into deterministic RIR and a relational plan, probabilistic PIR and the XGCF circuit format, and epistemic EIR with route dispatch. A separate shared GpuCnf and CDCL service supports SAT, MaxSAT, and verification." />

@@ -81,7 +81,8 @@
             "group": "Neural-Symbolic",
             "pages": [
               "neural/rule-learning",
-              "neural/exact-induction"
+              "neural/exact-induction",
+              "neural/event-calculus-induction"
             ]
           },
           {
@@ -211,10 +212,6 @@
     {
       "source": "/architecture/xlog-prob",
       "destination": "/probabilistic/engines"
-    },
-    {
-      "source": "/architecture/dilp-training",
-      "destination": "/neural/rule-learning"
     },
     {
       "source": "/architecture/bounded-exact-induction",
