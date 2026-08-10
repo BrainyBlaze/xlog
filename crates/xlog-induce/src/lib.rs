@@ -14,6 +14,7 @@
 
 pub mod index;
 pub mod nary;
+pub mod nary_reference;
 pub mod provenance;
 pub mod reduce;
 pub mod score;
