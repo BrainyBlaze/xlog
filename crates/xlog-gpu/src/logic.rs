@@ -1486,18 +1486,36 @@ impl LogicProgram {
     /// Only single-component epistemic plans are supported: split, stratified and WFS
     /// plans produce several world views whose probabilistic conditioning contract is
     /// not settled yet, so they are rejected loudly rather than silently reduced.
+    ///
+    /// "Ordinary" here names a plan kind, not the source. An admissible recursive modal
+    /// program (`reach(X, Z) :- reach(X, Y), know link(Y, Z).`) is lowered by the Case-A
+    /// reduction to ordinary recursion: the world-view machinery is erased, so no
+    /// accepted world view survives to hand over and the program is rejected here
+    /// despite being full of `know`. The rejection names the `epistemic_provenance`
+    /// reduction class so the message explains the lowering instead of reading as a
+    /// misclassification.
     pub fn execute_epistemic_evidence(
         &self,
         provider: Arc<CudaKernelProvider>,
         inputs: HashMap<String, CudaBuffer>,
     ) -> Result<EpistemicGpuExecutionResult> {
         let LogicExecutionPlan::EpistemicSingle(executable) = &self.plan else {
+            let reduction = self
+                .epistemic_provenance
+                .as_ref()
+                .map(|provenance| provenance.reduction)
+                .unwrap_or("none");
             return Err(XlogError::UnsupportedEpistemicConstruct {
                 construct: "epistemic accepted-evidence handoff".to_string(),
-                context: "execute_epistemic_evidence requires a single-component epistemic \
-                          plan; ordinary, split, stratified, G91-compatibility and WFS plans \
-                          are not supported"
-                    .to_string(),
+                context: format!(
+                    "execute_epistemic_evidence requires a single-component epistemic plan; \
+                     ordinary, split, stratified, recursive G91-compatibility and WFS plans \
+                     are not supported (epistemic_provenance reduction: {reduction}). A \
+                     recursive modal program reduced to ordinary recursion \
+                     (ordinary_recursive_modal_reduction) is rejected here by design: the \
+                     reduction erases the world-view machinery, so no accepted world view \
+                     survives to condition on"
+                ),
             });
         };
 

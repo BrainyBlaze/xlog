@@ -57,8 +57,9 @@ def test_know_evidence_conditions_the_exact_query() -> None:
     # circuit and the whole surface is decorative.
     assert abs(_first_prob(result) - 1.0) < 1e-9
 
-    # log Z_E of the conditioned program is the log-evidence of what is known:
-    # fact() had prior 0.6, so ln(0.6). Measured, not predicted.
+    # log Z_E is log P(evidence) by weighted model counting over the circuit.
+    # fact() is an independent root at prior 0.6, so here that is ln(0.6).
+    # Measured, not predicted.
     assert abs(result.log_z_e - math.log(0.6)) < 1e-9
 
     trace = result.trace
@@ -108,15 +109,35 @@ def test_only_known_atoms_are_conditioned() -> None:
 
     from torch.utils.dlpack import from_dlpack
 
+    # Pin the atom order instead of assuming it: without this, a consistent
+    # reorder of the query results would fail the probability assertions below
+    # for the wrong reason, and an atoms-vs-probabilities desync would not fail
+    # them at all.
+    assert [atom.replace(" ", "") for atom in result.atoms] == [
+        "link(1,2)",
+        "link(3,3)",
+        "link(9,9)",
+    ]
+
     probs = [float(x) for x in from_dlpack(result.prob).cpu().reshape(-1).tolist()]
     assert len(probs) == 3
     assert abs(probs[0] - 1.0) < 1e-9
     assert abs(probs[1] - 1.0) < 1e-9
     assert abs(probs[2] - 0.5) < 1e-9
 
+    # `log_prob` comes out of a second device buffer and a second DLPack column
+    # extraction: read it, or a swapped capsule ships green.
+    log_probs = [
+        float(x) for x in from_dlpack(result.log_prob).cpu().reshape(-1).tolist()
+    ]
+    assert len(log_probs) == 3
+    for prob, log_prob in zip(probs, log_probs):
+        assert abs(log_prob - math.log(prob)) < 1e-9
+
     # Two known facts at prior 0.5 each: ln(0.25) = -2 ln 2.
     assert abs(result.log_z_e - math.log(0.25)) < 1e-9
     assert result.trace["gpu_conditioned_know_evidence_facts"] == 2
+    assert result.trace["gpu_conditioned_evidence_facts"] == 2
     assert result.trace["cpu_only_probability_recomputations"] == 0
 
 
@@ -136,5 +157,115 @@ def test_unconditioned_baseline_differs() -> None:
 
 def test_ordinary_program_is_rejected() -> None:
     program = pyxlog.LogicProgram.compile("pred a(u32).\na(1).\n?- a(X).\n")
-    with pytest.raises(RuntimeError, match="epistemic"):
+    # Match the typed reason, not the bare word "epistemic": a G91 or recursion
+    # rejection would also contain "epistemic" and would pass a substring check
+    # while proving the wrong thing.
+    reason = "Unsupported epistemic construct"
+    with pytest.raises(RuntimeError, match=reason) as excinfo:
         program.epistemic_evidence()
+    message = str(excinfo.value)
+    assert "epistemic accepted-evidence handoff" in message
+    assert "ordinary" in message
+
+
+SPLIT_PROGRAM = """
+pred fact().
+pred accepted_a().
+pred accepted_b().
+
+fact().
+
+accepted_a() :- know fact().
+accepted_b() :- know fact().
+"""
+
+
+def test_multi_head_epistemic_program_is_rejected() -> None:
+    """Two epistemic output heads compile to a split plan, which has no single
+    accepted world view to hand to the probabilistic tier."""
+    program = pyxlog.LogicProgram.compile(SPLIT_PROGRAM)
+    reason = "Unsupported epistemic construct"
+    with pytest.raises(RuntimeError, match=reason) as excinfo:
+        program.epistemic_evidence()
+    assert "single-component epistemic plan" in str(excinfo.value)
+
+
+G91_KNOWN_FACT = """
+#pragma epistemic_mode = g91
+
+pred fact().
+pred accepted().
+
+fact().
+
+accepted() :- know fact().
+"""
+
+
+def test_non_recursive_g91_program_conditions_and_names_its_mode() -> None:
+    """The surface is not FAEEL-only: a non-recursive `#pragma epistemic_mode =
+    g91` program lowers to a single-component epistemic plan and conditions
+    exactly like its FAEEL twin. Only the recursive G91 shapes (positive
+    `possible` cycles needing tuple-level compatibility) get a dedicated
+    G91-compatibility plan and are rejected at planning. The two mode counters
+    are what let a caller tell which mode supplied the evidence.
+    """
+    program = pyxlog.LogicProgram.compile(G91_KNOWN_FACT)
+
+    evidence = program.epistemic_evidence()
+    assert evidence.epistemic_mode == "g91"
+    assert evidence.accepted_world_views >= 1
+
+    result = program.evaluate_conditioned(PROB_SOURCE)
+    assert abs(_first_prob(result) - 1.0) < 1e-9
+    assert abs(result.log_z_e - math.log(0.6)) < 1e-9
+
+    trace = result.trace
+    assert trace["accepted_g91_world_view_evidence_consumed"] == 1
+    assert trace["accepted_faeel_world_view_evidence_consumed"] == 0
+    assert trace["gpu_conditioned_evidence_facts"] == 1
+    assert trace["cpu_only_probability_recomputations"] == 0
+
+
+MISSING_CALLER_RELATION = """
+pred input_rel(u32).
+pred flag().
+pred accepted().
+
+flag() :- input_rel(1).
+
+accepted() :- know flag().
+"""
+
+MISSING_CALLER_RELATION_PROB = """
+0.6::flag().
+query(flag()).
+"""
+
+
+def test_empty_world_view_reports_zero_then_fails_closed() -> None:
+    """`evaluate_conditioned` does NOT fall back to the unconditioned prior.
+
+    `input_rel` is never supplied (this surface takes no `dlpack_inputs`), so no
+    world view is accepted. `epistemic_evidence()` reports that without raising;
+    `evaluate_conditioned()` raises rather than quietly returning the 0.6 prior.
+    Fail-closed is the contract: a conditioned query that silently became
+    unconditioned would be indistinguishable from a successful one, which is the
+    failure the trace counters exist to expose.
+    """
+    program = pyxlog.LogicProgram.compile(MISSING_CALLER_RELATION)
+
+    evidence = program.epistemic_evidence()
+    assert evidence.accepted_world_views == 0
+    assert evidence.accepted_candidates == 0
+    assert evidence.final_output_rows == 0
+    # The operator census comes from the plan, not the execution, so it stays
+    # non-zero: "every counter at 0" was never the right check.
+    assert evidence.know_operator_count == 1
+
+    reason = "Unsupported epistemic construct"
+    with pytest.raises(RuntimeError, match=reason) as excinfo:
+        program.evaluate_conditioned(MISSING_CALLER_RELATION_PROB)
+    message = str(excinfo.value)
+    assert "accepted GPU world-view evidence" in message
+    assert "non-empty accepted GPU final output" in message

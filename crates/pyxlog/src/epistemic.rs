@@ -32,24 +32,44 @@ use super::{types, CompiledLogicProgram, EpistemicEvalResult, EpistemicEvidence}
 impl CompiledLogicProgram {
     /// Run this epistemic program on the GPU and condition `prob_source` on what it knows.
     ///
-    /// The compiled program must contain epistemic operators (`know`, `possible`, ...):
-    /// ordinary Datalog programs are rejected, because there is no accepted world view
-    /// to condition on. Only facts declared in the epistemic program's own source are
-    /// used to build that world view.
+    /// The compiled program must contain epistemic operators (`know`, `possible`, ...)
+    /// AND lower to a single-component epistemic plan: ordinary Datalog programs are
+    /// rejected, because there is no accepted world view to condition on. Only facts
+    /// declared in the epistemic program's own source are used to build that world view.
+    ///
+    /// Both epistemic modes are reachable here. FAEEL programs and non-recursive
+    /// G91-compatibility programs (`#pragma epistemic_mode = g91`) both lower to a
+    /// single-component epistemic plan and condition normally;
+    /// `epistemic_evidence().epistemic_mode` names the mode, and the trace's
+    /// `accepted_faeel_world_view_evidence_consumed` /
+    /// `accepted_g91_world_view_evidence_consumed` pair says which one actually supplied
+    /// the evidence. Only the *recursive* G91 shapes (positive `possible` cycles that
+    /// need tuple-level compatibility) compile to a dedicated G91-compatibility plan and
+    /// are rejected at plan level, alongside split, stratified and WFS plans.
     ///
     /// LIMITATION: unlike `evaluate`, this method does not accept `dlpack_inputs`.
     /// Caller-supplied input relations are NOT consulted — if the epistemic program
     /// depends on a relation that is normally supplied at call time via
-    /// `evaluate(dlpack_inputs=...)`, that relation is empty here, the world view it
-    /// would have produced is empty (`accepted_world_views == 0`), every evidence
-    /// counter in the returned trace is `0`, and the conditioned query silently falls
-    /// back to its unconditioned prior. This does not raise: check
-    /// `accepted_world_views` (via `epistemic_evidence()`) or the trace counters below
-    /// before trusting the result of a program that relies on caller-supplied facts.
+    /// `evaluate(dlpack_inputs=...)`, that relation is empty here and no world view is
+    /// accepted. This method then RAISES `RuntimeError` ("Unsupported epistemic
+    /// construct: accepted GPU world-view evidence ... probabilistic evidence requires
+    /// non-empty accepted GPU final output"); it does NOT fall back to the unconditioned
+    /// prior. That is fail-closed by design: a conditioned query that silently became
+    /// unconditioned would be indistinguishable from a successful one, which is exactly
+    /// the failure the trace counters exist to make visible. To test for the case
+    /// without catching an exception, call `epistemic_evidence()` first — it reports
+    /// `accepted_world_views == 0` without raising.
     ///
     /// The returned trace must show `cpu_only_probability_recomputations == 0` and a
-    /// non-zero `gpu_conditioned_know_evidence_facts` — otherwise the conditioning did
-    /// not reach the GPU exact path.
+    /// non-zero `gpu_conditioned_evidence_facts` — otherwise the conditioning did not
+    /// reach the GPU exact path. `gpu_conditioned_evidence_facts` is the total the
+    /// engine itself validates; the per-class counters
+    /// (`gpu_conditioned_know_evidence_facts`,
+    /// `gpu_conditioned_possible_evidence_facts`,
+    /// `gpu_conditioned_not_known_evidence_facts`,
+    /// `gpu_conditioned_not_possible_evidence_facts`) break it down. A `possible`-only
+    /// or negated-evidence program conditions correctly with the `know` counter at `0`,
+    /// so check the total, not the `know` class alone.
     #[cfg(feature = "host-io")]
     #[pyo3(signature = (prob_source, memory_mb=None))]
     pub fn evaluate_conditioned(
@@ -109,8 +129,13 @@ impl CompiledLogicProgram {
     /// LIMITATION: like `evaluate_conditioned`, this only ever sees facts declared in
     /// the epistemic program's own source; it does not accept caller-supplied input
     /// relations. A program that depends on such a relation reports
-    /// `accepted_world_views == 0` and every other counter at `0` here too, not an
-    /// error.
+    /// `accepted_world_views == 0`, `accepted_candidates == 0` and
+    /// `final_output_rows == 0` here — without raising. The operator censuses
+    /// (`know_operator_count`, `possible_operator_count`) are read off the plan, not the
+    /// execution, so they stay non-zero: it is the accepted/consumed family that goes to
+    /// zero, not "every counter". Calling `evaluate_conditioned()` on that same program
+    /// RAISES rather than returning an unconditioned result, so this method is the
+    /// non-raising way to probe for the case first.
     pub fn epistemic_evidence(&self) -> PyResult<EpistemicEvidence> {
         let result = self
             .program
@@ -175,6 +200,13 @@ fn pack_epistemic_eval_result(
         "accepted_faeel_world_view_evidence_consumed",
         trace.accepted_faeel_world_view_evidence_consumed,
     )?;
+    // Both modes reach this surface: a non-recursive `#pragma epistemic_mode = g91`
+    // program conditions through the G91 counter with its FAEEL twin at 0. Exposing
+    // only one of the pair would leave the trace unable to prove which mode ran.
+    dict.set_item(
+        "accepted_g91_world_view_evidence_consumed",
+        trace.accepted_g91_world_view_evidence_consumed,
+    )?;
     dict.set_item(
         "accepted_evidence_assumptions_consumed",
         trace.accepted_evidence_assumptions_consumed,
@@ -183,9 +215,26 @@ fn pack_epistemic_eval_result(
         "gpu_conditioned_evidence_facts",
         trace.gpu_conditioned_evidence_facts,
     )?;
+    // The full evidence-class family. `gpu_conditioned_evidence_facts` above is the
+    // total the engine's own `require_conditioned_evidence_trace` validates; the four
+    // classes below decompose it. A `possible`-only or negated-evidence program
+    // conditions with `gpu_conditioned_know_evidence_facts == 0`, so a caller checking
+    // only the `know` class would misread a correct run as unconditioned.
     dict.set_item(
         "gpu_conditioned_know_evidence_facts",
         trace.gpu_conditioned_know_evidence_facts,
+    )?;
+    dict.set_item(
+        "gpu_conditioned_possible_evidence_facts",
+        trace.gpu_conditioned_possible_evidence_facts,
+    )?;
+    dict.set_item(
+        "gpu_conditioned_not_known_evidence_facts",
+        trace.gpu_conditioned_not_known_evidence_facts,
+    )?;
+    dict.set_item(
+        "gpu_conditioned_not_possible_evidence_facts",
+        trace.gpu_conditioned_not_possible_evidence_facts,
     )?;
     dict.set_item(
         "gpu_exact_query_evaluations",

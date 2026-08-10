@@ -627,10 +627,15 @@ source feed that world view.
 
 Unlike `evaluate`, this method does not accept `dlpack_inputs`: caller-supplied
 input relations are NOT consulted. If the epistemic program depends on a relation
-that would normally be supplied at call time via `evaluate(dlpack_inputs=...)`, the
-world view produced here is empty (`accepted_world_views == 0`), every counter in
-`result.trace` is `0`, and the conditioned query silently falls back to its
-unconditioned prior instead of raising.
+that would normally be supplied at call time via `evaluate(dlpack_inputs=...)`, that
+relation is empty here, no world view is accepted, and `evaluate_conditioned` raises
+`RuntimeError: Unsupported epistemic construct: accepted GPU world-view evidence
+(probabilistic evidence requires non-empty accepted GPU final output)` instead of
+falling back to the unconditioned prior. This is fail-closed by design: a conditioned
+query that silently became unconditioned would return a plausible number with nothing
+in the result marking it as unconditioned, which is exactly the failure the trace
+counters exist to prevent. `epistemic_evidence()` is the non-raising probe -- it
+reports `accepted_world_views == 0`.
 
 ```python
 import pyxlog
@@ -645,17 +650,33 @@ accepted() :- know fact().
 """)
 
 result = known.evaluate_conditioned("0.6::fact().\nquery(fact()).\n")
-result.log_z_e                                       # ln(0.6) ~= -0.5108256, the exact log-evidence of the query program
-result.trace["gpu_conditioned_know_evidence_facts"]   # >= 1 when know-evidence conditioned the circuit
+result.log_z_e                                       # ln(0.6) ~= -0.5108256, log P(evidence)
+result.trace["gpu_conditioned_evidence_facts"]        # >= 1 when evidence conditioned the circuit
+result.trace["gpu_conditioned_know_evidence_facts"]   # the `know` share of that total
 result.trace["cpu_only_probability_recomputations"]   # must be 0
 ```
 
 On a CUDA device, conditioning `0.6::fact(). query(fact()).` on `know fact()` raises
-`P(fact())` from the unconditioned `0.6` to the exact `1.0`. `result.log_z_e` is the
-log-evidence of what is known: the natural log of the product of the priors of the
-atoms the world view conditioned on, not of the whole query program. Measured on
-GPU: one known atom at prior 0.6 gives `log_z_e == ln(0.6)`; two known atoms each at
-prior 0.5 give `log_z_e == ln(0.25)`.
+`P(fact())` from the unconditioned `0.6` to the exact `1.0`. `result.log_z_e` is
+log P(evidence): the exact log-probability of the conditioned evidence under the
+probabilistic program's distribution, computed by weighted model counting over the
+compiled circuit, not the log-evidence of the whole query program. Query probabilities
+are `exp(log_z_eq - log_z_e)`. When the conditioned atoms are independent root facts it
+coincides with the log of the product of their priors -- measured on GPU, one known
+atom at prior 0.6 gives `log_z_e == ln(0.6)` and two known atoms each at prior 0.5 give
+`log_z_e == ln(0.25)` -- but that is the independent-root special case, not the
+definition. Evidence on a derived atom (`0.6::a(). b() :- a().` with `know b()` gives
+`ln(0.6)` though `b` has no prior), on atoms sharing an ancestor, or negated evidence
+all depart from the product form.
+
+Conditioning reached the GPU exact path when `gpu_conditioned_evidence_facts` -- the
+total the engine itself validates -- is non-zero and
+`cpu_only_probability_recomputations == 0`. The four evidence classes
+(`gpu_conditioned_know_evidence_facts`, `gpu_conditioned_possible_evidence_facts`,
+`gpu_conditioned_not_known_evidence_facts`,
+`gpu_conditioned_not_possible_evidence_facts`) decompose that total; a `possible`-only
+or negated-evidence program conditions correctly with the `know` class at `0`, so check
+the total rather than the `know` class alone.
 
 `EpistemicEvalResult` carries `atoms`, `prob` and `log_prob` (DLPack capsules, like
 `EvalResult`), `log_z_e`, and `trace`. `CompiledLogicProgram.epistemic_evidence()`
@@ -663,11 +684,26 @@ runs the same epistemic program and returns an `EpistemicEvidence` with the
 accepted-world-view counters alone (`epistemic_mode`, `know_operator_count`,
 `possible_operator_count`, `accepted_candidates`, `rejected_candidates`,
 `accepted_world_views`, `final_output_rows`), without touching the probabilistic
-tier. It has the same caller-supplied-relation limitation as
-`evaluate_conditioned`.
+tier. It sees the same source-only facts as `evaluate_conditioned`, but a program that
+depends on a caller-supplied relation reports `accepted_world_views == 0` (with
+`accepted_candidates` and `final_output_rows` at `0`) here rather than raising.
+`know_operator_count` and `possible_operator_count` are plan-level censuses and stay
+non-zero even then, so the state to check is the accepted/consumed family, not "every
+counter".
 
 Only single-component epistemic plans are supported; split, stratified and WFS plans
-raise instead of being silently reduced. A real CUDA device is required.
+raise instead of being silently reduced. Both epistemic modes reach this surface:
+FAEEL programs and non-recursive `#pragma epistemic_mode = g91` programs both lower to
+a single-component epistemic plan and condition normally, with
+`accepted_faeel_world_view_evidence_consumed` /
+`accepted_g91_world_view_evidence_consumed` in the trace saying which mode supplied the
+evidence. Only the recursive G91 shapes (positive `possible` cycles needing tuple-level
+compatibility) compile to a dedicated G91-compatibility plan and are rejected at
+planning. Rejection also covers an admissible recursive modal program such as
+`reach(X, Z) :- reach(X, Y), know link(Y, Z).`, which is reduced to ordinary recursion
+at compile time (the `ordinary_recursive_modal_reduction` provenance class): the
+reduction erases the world-view machinery, so it is rejected as "ordinary" despite
+being full of `know`. A real CUDA device is required.
 
 ### Program (Probabilistic)
 

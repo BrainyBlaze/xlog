@@ -769,6 +769,14 @@ pub struct EvalResult {
 /// `prob`/`log_prob` are DLPack capsules over device memory, like `EvalResult`.
 /// `trace` carries the production-path counters of the epistemic->probability
 /// adapter: they are the evidence that conditioning actually happened on the GPU.
+///
+/// `log_z_e` is log P(evidence): the exact log-probability of the conditioned
+/// evidence under the probabilistic program's distribution, computed by weighted
+/// model counting over the compiled circuit. Query probabilities are
+/// `exp(log_z_eq - log_z_e)`. When the conditioned atoms are independent root
+/// facts it coincides with the log of the product of their priors, but that is a
+/// special case, not the definition: evidence on a derived atom, on atoms sharing
+/// an ancestor, or negated evidence all diverge from the product form.
 #[pyclass]
 pub struct EpistemicEvalResult {
     #[pyo3(get)]
@@ -785,8 +793,11 @@ pub struct EpistemicEvalResult {
 
 /// Summary of one accepted epistemic GPU execution.
 ///
-/// `accepted_world_views == 0` means the program ran but nothing was accepted —
-/// conditioning a probabilistic query on it will not add any evidence.
+/// `accepted_world_views == 0` means the program ran but nothing was accepted.
+/// `evaluate_conditioned` on that same program RAISES `RuntimeError` rather than
+/// returning an unconditioned result — this method is the non-raising way to detect
+/// the state. `know_operator_count`/`possible_operator_count` are plan-level
+/// censuses and stay non-zero even when nothing is accepted.
 #[pyclass]
 pub struct EpistemicEvidence {
     #[pyo3(get)]
