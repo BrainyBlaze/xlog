@@ -27,6 +27,8 @@ from pyxlog._native import (
     LogicQueryResult as LogicQueryResult,
     LogicEvalResult as LogicEvalResult,
     RelationEvidence as RelationEvidence,
+    EpistemicEvalResult as EpistemicEvalResult,
+    EpistemicEvidence as EpistemicEvidence,
     # Probabilistic / neural-symbolic
     Program as Program,
     CompiledProgram as CompiledProgram,

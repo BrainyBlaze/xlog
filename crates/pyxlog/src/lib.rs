@@ -37,6 +37,7 @@ use xlog_runtime::{Executor, RelationStore};
 mod neural_registry;
 use neural_registry::NeuralPredicateRegistry;
 mod dlpack;
+mod epistemic;
 mod ilp;
 mod ilp_exact;
 mod ilp_gpu;
@@ -763,6 +764,58 @@ pub struct EvalResult {
     pub mc_engine: Option<String>,
 }
 
+/// Exact probabilities conditioned on an accepted epistemic world view.
+///
+/// `prob`/`log_prob` are DLPack capsules over device memory, like `EvalResult`.
+/// `trace` carries the production-path counters of the epistemic->probability
+/// adapter: they are the evidence that conditioning actually happened on the GPU.
+///
+/// `log_z_e` is log P(evidence): the exact log-probability of the conditioned
+/// evidence under the probabilistic program's distribution, computed by weighted
+/// model counting over the compiled circuit. Query probabilities are
+/// `exp(log_z_eq - log_z_e)`. When the conditioned atoms are independent root
+/// facts it coincides with the log of the product of their priors, but that is a
+/// special case, not the definition: evidence on a derived atom, on atoms sharing
+/// an ancestor, or negated evidence all diverge from the product form.
+#[pyclass]
+pub struct EpistemicEvalResult {
+    #[pyo3(get)]
+    pub atoms: Vec<String>,
+    #[pyo3(get)]
+    pub prob: Py<PyAny>,
+    #[pyo3(get)]
+    pub log_prob: Py<PyAny>,
+    #[pyo3(get)]
+    pub log_z_e: f64,
+    #[pyo3(get)]
+    pub trace: Py<PyAny>,
+}
+
+/// Summary of one accepted epistemic GPU execution.
+///
+/// `accepted_world_views == 0` means the program ran but nothing was accepted.
+/// `evaluate_conditioned` on that same program RAISES `RuntimeError` rather than
+/// returning an unconditioned result — this method is the non-raising way to detect
+/// the state. `know_operator_count`/`possible_operator_count` are plan-level
+/// censuses and stay non-zero even when nothing is accepted.
+#[pyclass]
+pub struct EpistemicEvidence {
+    #[pyo3(get)]
+    pub epistemic_mode: String,
+    #[pyo3(get)]
+    pub know_operator_count: usize,
+    #[pyo3(get)]
+    pub possible_operator_count: usize,
+    #[pyo3(get)]
+    pub accepted_candidates: usize,
+    #[pyo3(get)]
+    pub rejected_candidates: usize,
+    #[pyo3(get)]
+    pub accepted_world_views: usize,
+    #[pyo3(get)]
+    pub final_output_rows: usize,
+}
+
 // =========================================================================
 // Training Infrastructure
 // =========================================================================
@@ -849,6 +902,8 @@ fn pyxlog(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<LogicEvalResult>()?;
     m.add_class::<McDeviceEvalResult>()?;
     m.add_class::<EvalResult>()?;
+    m.add_class::<EpistemicEvalResult>()?;
+    m.add_class::<EpistemicEvidence>()?;
     // Training infrastructure
     m.add_class::<PyDifferentiableProofTraceMap>()?;
     m.add_class::<EpochStats>()?;

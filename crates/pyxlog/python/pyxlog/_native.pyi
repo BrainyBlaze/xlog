@@ -205,6 +205,74 @@ class CompiledLogicProgram:
         """Create a stateful session for incremental relation updates."""
         ...
 
+    def evaluate_conditioned(
+        self, prob_source: str, memory_mb: Optional[int] = None
+    ) -> EpistemicEvalResult:
+        """Run this epistemic program and condition an exact query on what it knows.
+
+        Only facts declared in this program's own source feed the world view.
+        Unlike :meth:`evaluate`, this method does NOT accept ``dlpack_inputs``:
+        caller-supplied input relations are not consulted. A program that relies
+        on such a relation ends up with no accepted world view here, and this
+        method **raises** ``RuntimeError`` ("Unsupported epistemic construct:
+        accepted GPU world-view evidence ... probabilistic evidence requires
+        non-empty accepted GPU final output"). It does **not** fall back to the
+        unconditioned prior. The guard is fail-closed by design: a conditioned
+        query that silently became unconditioned would be indistinguishable from
+        a successful one, which is the exact failure the trace counters exist to
+        expose. Call :meth:`epistemic_evidence` first to detect the state without
+        catching an exception -- it reports ``accepted_world_views == 0`` and
+        does not raise.
+
+        Both epistemic modes reach this surface: FAEEL programs and
+        non-recursive ``#pragma epistemic_mode = g91`` programs both lower to a
+        single-component epistemic plan and condition normally. Recursive G91
+        shapes (positive ``possible`` cycles needing tuple-level compatibility)
+        compile to a dedicated G91-compatibility plan and are rejected at
+        planning, as are split, stratified and WFS plans.
+
+        The trace of the returned result reports
+        ``gpu_conditioned_evidence_facts`` (the total the engine validates), its
+        per-class breakdown (``gpu_conditioned_know_evidence_facts``,
+        ``gpu_conditioned_possible_evidence_facts``,
+        ``gpu_conditioned_not_known_evidence_facts``,
+        ``gpu_conditioned_not_possible_evidence_facts``),
+        ``accepted_faeel_world_view_evidence_consumed`` /
+        ``accepted_g91_world_view_evidence_consumed``, and
+        ``cpu_only_probability_recomputations``. Conditioning reached the GPU
+        exact path when the *total* is non-zero and
+        ``cpu_only_probability_recomputations == 0``; a ``possible``-only or
+        negated-evidence program conditions correctly with the ``know`` class at
+        ``0``.
+
+        ``log_z_e`` is log P(evidence): the exact log-probability of the
+        conditioned evidence, obtained by weighted model counting over the
+        compiled circuit. Query probabilities are ``exp(log_z_eq - log_z_e)``.
+        For independent root facts this coincides with the log of the product of
+        their priors -- measured on GPU, conditioning ``0.6::fact().
+        query(fact()).`` on ``know fact()`` gives ``log_z_e == ln(0.6)``, and two
+        known atoms each with prior 0.5 give ``log_z_e == ln(0.25)`` -- but those
+        are illustrations of the independent-root case, not the definition.
+        Evidence on a derived atom, on atoms sharing an ancestor, or negated
+        evidence all depart from the product form.
+        """
+        ...
+
+    def epistemic_evidence(self) -> EpistemicEvidence:
+        """Run this epistemic program and report what its world view accepted.
+
+        Like :meth:`evaluate_conditioned`, this only ever sees facts declared
+        in the program's own source; it does not accept caller-supplied input
+        relations. A program that depends on such a relation reports
+        ``accepted_world_views == 0`` (along with ``accepted_candidates == 0``
+        and ``final_output_rows == 0``) here, without raising -- while
+        :meth:`evaluate_conditioned` on that same program raises. The operator
+        censuses ``know_operator_count`` and ``possible_operator_count`` come
+        from the plan rather than the execution, so they stay non-zero: it is the
+        accepted/consumed family that goes to zero, not every counter.
+        """
+        ...
+
 class LogicRelationSession:
     """Persistent relation session for incremental Datalog evaluation.
 
@@ -422,6 +490,61 @@ class LogicEvalResult:
     """Aggregated result from one :meth:`CompiledLogicProgram.evaluate` call."""
 
     queries: list[LogicQueryResult]
+
+class EpistemicEvalResult:
+    """Exact probabilities conditioned on an accepted epistemic world view.
+
+    Result of :meth:`CompiledLogicProgram.evaluate_conditioned`. ``prob`` and
+    ``log_prob`` are DLPack capsules over device memory, like
+    :class:`EvalResult`. ``trace`` carries the production-path counters of the
+    epistemic-to-probability adapter: they are the evidence that conditioning
+    actually happened on the GPU.
+    """
+
+    atoms: list[str]
+    """Query atom strings in evaluation order."""
+    prob: Any
+    """DLPack f64 tensor of per-query probabilities."""
+    log_prob: Any
+    """DLPack f64 tensor of per-query log-probabilities."""
+    log_z_e: float
+    """Exact log Z_E (natural log): log P(evidence), the log-probability of the
+    conditioned evidence under the probabilistic program's distribution, computed
+    by weighted model counting over the compiled circuit. Query probabilities are
+    ``exp(log_z_eq - log_z_e)``. For independent root facts this coincides with
+    the log of the product of their priors -- measured on GPU, ``ln(0.6)`` for one
+    known atom at prior 0.6 and ``ln(0.25)`` for two known atoms each at prior 0.5
+    -- but that is the independent-root special case, not the definition."""
+    trace: dict[str, int]
+    """Production-path counters, including ``gpu_conditioned_evidence_facts``
+    (the validated total), its per-class breakdown
+    (``gpu_conditioned_know_evidence_facts``,
+    ``gpu_conditioned_possible_evidence_facts``,
+    ``gpu_conditioned_not_known_evidence_facts``,
+    ``gpu_conditioned_not_possible_evidence_facts``),
+    ``accepted_faeel_world_view_evidence_consumed`` /
+    ``accepted_g91_world_view_evidence_consumed``, and
+    ``cpu_only_probability_recomputations``."""
+
+class EpistemicEvidence:
+    """Counters of one accepted epistemic GPU execution.
+
+    Result of :meth:`CompiledLogicProgram.epistemic_evidence`.
+    ``accepted_world_views == 0`` means the program ran but nothing was
+    accepted; :meth:`CompiledLogicProgram.evaluate_conditioned` on that same
+    program raises ``RuntimeError`` rather than returning an unconditioned
+    result, so this class is the non-raising way to detect the state.
+    ``know_operator_count`` and ``possible_operator_count`` are plan-level
+    censuses and stay non-zero even when nothing is accepted.
+    """
+
+    epistemic_mode: str
+    know_operator_count: int
+    possible_operator_count: int
+    accepted_candidates: int
+    rejected_candidates: int
+    accepted_world_views: int
+    final_output_rows: int
 
 # ---------------------------------------------------------------------------
 # Program (probabilistic / neural-symbolic)

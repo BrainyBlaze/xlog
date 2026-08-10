@@ -169,7 +169,7 @@ impl CompiledProbProgram {
 // =========================================================================
 
 #[cfg(feature = "host-io")]
-fn atom_to_string(atom: &xlog_prob::provenance::GroundAtom) -> String {
+pub(crate) fn atom_to_string(atom: &xlog_prob::provenance::GroundAtom) -> String {
     use xlog_prob::provenance::Value;
 
     if atom.args.is_empty() {
