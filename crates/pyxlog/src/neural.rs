@@ -78,9 +78,9 @@ fn const_key(term: &Term) -> Option<ConstKey> {
 /// sync happens here — the total is read back once by the caller.
 fn accumulate_device_loss(
     py: Python<'_>,
-    total: Option<PyObject>,
-    loss: PyObject,
-) -> PyResult<PyObject> {
+    total: Option<Py<PyAny>>,
+    loss: Py<PyAny>,
+) -> PyResult<Py<PyAny>> {
     let detached = loss
         .bind(py)
         .call_method0("detach")?
@@ -99,7 +99,7 @@ fn apply_network_output_mode(
     py: Python<'_>,
     values: &Bound<'_, PyAny>,
     handle: &NetworkHandle,
-) -> PyResult<PyObject> {
+) -> PyResult<Py<PyAny>> {
     let take = if handle.det { Some(1) } else { handle.k };
     let Some(k) = take else {
         return Ok(values.clone().unbind());
@@ -197,16 +197,16 @@ impl CompiledProgram {
         &mut self,
         py: Python<'_>,
         name: String,
-        module: PyObject,
-        optimizer: PyObject,
-        scheduler: Option<PyObject>,
+        module: Py<PyAny>,
+        optimizer: Py<PyAny>,
+        scheduler: Option<Py<PyAny>>,
         batching: bool,
         k: Option<usize>,
         det: bool,
         cache: bool,
         cache_size: usize,
         arity: Option<usize>,
-        arg_sorts: Option<Vec<PyObject>>,
+        arg_sorts: Option<Vec<Py<PyAny>>>,
         artifact_hash: Option<String>,
     ) -> PyResult<()> {
         if k == Some(0) {
@@ -336,7 +336,7 @@ impl CompiledProgram {
         &mut self,
         py: Python<'_>,
         name: String,
-        module_or_tensor: PyObject,
+        module_or_tensor: Py<PyAny>,
         trainable: bool,
     ) -> PyResult<()> {
         // Validate network name exists
@@ -460,7 +460,12 @@ impl CompiledProgram {
     /// For frozen torch.Tensor: tensor has requires_grad=False.
     ///
     /// This is the only gradient-carrying embedding API in v0.5.
-    fn forward_embedding(&self, py: Python<'_>, name: String, ids: Vec<i64>) -> PyResult<PyObject> {
+    fn forward_embedding(
+        &self,
+        py: Python<'_>,
+        name: String,
+        ids: Vec<i64>,
+    ) -> PyResult<Py<PyAny>> {
         let handle = self.network_registry.get_embedding(&name).ok_or_else(|| {
             PyValueError::new_err(format!(
                 "Embedding '{}' not registered. Did you call register_embedding()?",
@@ -518,7 +523,7 @@ impl CompiledProgram {
     }
 
     /// Return neural bridge cache and deterministic-mode telemetry.
-    fn neural_cache_stats(&self, py: Python<'_>) -> PyResult<PyObject> {
+    fn neural_cache_stats(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let stats = PyDict::new(py);
         stats.set_item("circuit_cache_size", self.circuit_cache.len())?;
         stats.set_item("circuit_cache_hits", self.circuit_cache_hits)?;
@@ -550,7 +555,7 @@ impl CompiledProgram {
         py: Python<'_>,
         values: &Bound<'_, PyAny>,
         k: usize,
-    ) -> PyResult<PyObject> {
+    ) -> PyResult<Py<PyAny>> {
         if k == 0 {
             return Err(PyValueError::new_err("k must be > 0"));
         }
@@ -589,7 +594,7 @@ impl CompiledProgram {
     }
 
     /// Get neural predicate metadata (network name + labels).
-    fn neural_predicate_info(&self, py: Python<'_>, predicate: &str) -> PyResult<PyObject> {
+    fn neural_predicate_info(&self, py: Python<'_>, predicate: &str) -> PyResult<Py<PyAny>> {
         let infos = self.neural_registry.get(predicate).ok_or_else(|| {
             PyValueError::new_err(format!("Unknown neural predicate '{}'", predicate))
         })?;
@@ -634,7 +639,7 @@ impl CompiledProgram {
     ///   Out of scope by design.
     /// * `PyValueError` if `name` is declared (as a classification network)
     ///   but not yet registered — call `register_network()` first.
-    fn network_metadata(&self, py: Python<'_>, name: &str) -> PyResult<PyObject> {
+    fn network_metadata(&self, py: Python<'_>, name: &str) -> PyResult<Py<PyAny>> {
         if !self.declared_networks.contains(name) {
             return Err(PyValueError::new_err(format!(
                 "Network '{}' not declared in program. Declared networks: {:?}",
@@ -753,7 +758,7 @@ impl CompiledProgram {
         &mut self,
         py: Python<'_>,
         name: String,
-        tensor: PyObject,
+        tensor: Py<PyAny>,
     ) -> PyResult<()> {
         // Extract size from tensor.shape[0]
         // In PyO3 0.21, use .bind(py) to get Bound<PyAny> for method calls
@@ -801,7 +806,7 @@ impl CompiledProgram {
         &mut self,
         py: Python<'_>,
         name: String,
-        tensor: PyObject,
+        tensor: Py<PyAny>,
         ids: Vec<i64>,
     ) -> PyResult<()> {
         // Validate HERE, at the public boundary, not only in the Python wrapper: a
@@ -906,7 +911,7 @@ impl CompiledProgram {
         py: Python<'_>,
         query: &str,
         expected: bool,
-    ) -> PyResult<PyObject> {
+    ) -> PyResult<Py<PyAny>> {
         self.forward_backward_tensor_internal(py, query, expected)
     }
 
@@ -957,7 +962,7 @@ impl CompiledProgram {
         // Eligible (batched + direct) losses accumulate on device; ineligible
         // queries contribute a host-side constant that carries no gradient, so
         // it never enters the device path (and never costs a sync).
-        let mut device_loss: Option<PyObject> = None;
+        let mut device_loss: Option<Py<PyAny>> = None;
         let mut host_const_loss: f64 = 0.0;
 
         for (query, &exp) in queries.iter().zip(expected.iter()) {
@@ -1177,7 +1182,7 @@ impl CompiledProgram {
         contra_penalty: f64,
         quarantine_penalty: f64,
         reduction: &str,
-    ) -> PyResult<PyObject> {
+    ) -> PyResult<Py<PyAny>> {
         let pro_term = pro.call_method1("__mul__", (pro_reward,))?.unbind();
         let contra_term = contra.call_method1("__mul__", (contra_penalty,))?.unbind();
         let quarantine_term = quarantine
@@ -1228,7 +1233,7 @@ impl CompiledProgram {
         violations: &Bound<'_, PyAny>,
         weight: f64,
         reduction: &str,
-    ) -> PyResult<PyObject> {
+    ) -> PyResult<Py<PyAny>> {
         let kwargs = PyDict::new(py);
         kwargs.set_item("min", 0.0)?;
         let clipped = violations.call_method("clamp", (), Some(&kwargs))?;
@@ -1245,7 +1250,7 @@ impl CompiledProgram {
         target: &Bound<'_, PyAny>,
         weight: f64,
         reduction: &str,
-    ) -> PyResult<PyObject> {
+    ) -> PyResult<Py<PyAny>> {
         let diff = pred.call_method1("__sub__", (target,))?;
         let sq = diff.call_method1("pow", (2.0f64,))?;
         let weighted = sq.call_method1("__mul__", (weight,))?.unbind();
@@ -1261,7 +1266,7 @@ impl CompiledProgram {
         weight: f64,
         eps: f64,
         reduction: &str,
-    ) -> PyResult<PyObject> {
+    ) -> PyResult<Py<PyAny>> {
         let kwargs = PyDict::new(py);
         kwargs.set_item("min", eps)?;
         let clamped = prob.call_method("clamp", (), Some(&kwargs))?;
@@ -1282,7 +1287,7 @@ impl CompiledProgram {
         py: Python<'_>,
         query: &str,
         expected: bool,
-    ) -> PyResult<PyObject> {
+    ) -> PyResult<Py<PyAny>> {
         // Try to parse as a direct neural predicate query first.
         match self.try_parse_direct_neural_query(query) {
             Ok((predicate, network_name, input_idx, target_label)) => self
@@ -1390,7 +1395,7 @@ impl CompiledProgram {
             self.zero_grad(py)?;
 
             // Accumulate loss on device — no .item() per query
-            let mut batch_loss_tensor: Option<PyObject> = None;
+            let mut batch_loss_tensor: Option<Py<PyAny>> = None;
 
             if self.batch_queries {
                 // -- Batched path: group queries by template -----
@@ -1636,7 +1641,7 @@ impl CompiledProgram {
     /// `-log(eps)` when the example expects it true, else 0. Returned as a plain
     /// constant tensor — detached from every network graph, so the backward pass
     /// flows no gradient through a filtered-out query (gradient isolation).
-    fn zero_probability_loss(&self, py: Python<'_>, expected: bool) -> PyResult<PyObject> {
+    fn zero_probability_loss(&self, py: Python<'_>, expected: bool) -> PyResult<Py<PyAny>> {
         let loss_value = if expected {
             -(types::NLL_EPSILON.ln())
         } else {
@@ -1660,7 +1665,7 @@ impl CompiledProgram {
         input_idx: usize,
         target_label: &str,
         expected: bool,
-    ) -> PyResult<PyObject> {
+    ) -> PyResult<Py<PyAny>> {
         // Get the network handle
         let handle = self.network_registry.get(network_name).ok_or_else(|| {
             PyValueError::new_err(format!("Network '{}' not registered", network_name))
@@ -1736,7 +1741,7 @@ impl CompiledProgram {
         py: Python<'_>,
         atom: &Atom,
         expected: bool,
-    ) -> PyResult<PyObject> {
+    ) -> PyResult<Py<PyAny>> {
         let signature = self
             .get_or_build_query_signature(&atom.predicate, atom.terms.len())?
             .clone();
@@ -1811,10 +1816,10 @@ impl CompiledProgram {
                 });
         }
 
-        let mut out_tensors: Vec<Option<PyObject>> = std::iter::repeat_with(|| None)
+        let mut out_tensors: Vec<Option<Py<PyAny>>> = std::iter::repeat_with(|| None)
             .take(input_indices.len())
             .collect();
-        let mut grad_tensors: Vec<Option<PyObject>> = std::iter::repeat_with(|| None)
+        let mut grad_tensors: Vec<Option<Py<PyAny>>> = std::iter::repeat_with(|| None)
             .take(input_indices.len())
             .collect();
         let mut prob_bufs: Vec<Option<xlog_cuda::CudaBuffer>> = std::iter::repeat_with(|| None)
@@ -1833,7 +1838,7 @@ impl CompiledProgram {
                 PyValueError::new_err(format!("Network '{}' has no module", network_name))
             })?;
 
-            let mut inputs: Vec<PyObject> = Vec::with_capacity(calls.len());
+            let mut inputs: Vec<Py<PyAny>> = Vec::with_capacity(calls.len());
             for call in &calls {
                 inputs.push(self.resolve_input_tensor(py, &call.fetch)?);
             }
@@ -1880,11 +1885,11 @@ impl CompiledProgram {
             }
         }
 
-        let out_tensors: Vec<PyObject> = out_tensors
+        let out_tensors: Vec<Py<PyAny>> = out_tensors
             .into_iter()
             .map(|v| v.ok_or_else(|| PyRuntimeError::new_err("Missing output tensor")))
             .collect::<PyResult<_>>()?;
-        let grad_tensors: Vec<PyObject> = grad_tensors
+        let grad_tensors: Vec<Py<PyAny>> = grad_tensors
             .into_iter()
             .map(|v| v.ok_or_else(|| PyRuntimeError::new_err("Missing grad tensor")))
             .collect::<PyResult<_>>()?;
@@ -1950,7 +1955,7 @@ impl CompiledProgram {
         // Release the GIL during GPU circuit evaluation + backward pass.
         // This lets Python threads (e.g. data loaders) run while CUDA kernels execute.
         let loss_dev = py
-            .allow_threads(|| {
+            .detach(|| {
                 cached.program.neural_backward_nll_buffers_with_device_loss(
                     &cached.slots,
                     query_idx,
@@ -2030,7 +2035,7 @@ impl CompiledProgram {
         py: Python<'_>,
         atoms: &[Atom],
         expected: bool,
-    ) -> PyResult<PyObject> {
+    ) -> PyResult<Py<PyAny>> {
         let n_queries = atoms.len();
         if n_queries == 0 {
             return Err(PyRuntimeError::new_err(
@@ -2150,8 +2155,8 @@ impl CompiledProgram {
         let mut prob_map: StdHashMap<(usize, usize), xlog_cuda::CudaBuffer> = StdHashMap::new();
         let mut grad_map: StdHashMap<(usize, usize), xlog_cuda::CudaBuffer> = StdHashMap::new();
         // All output rows + grad tensors for the batched backward.
-        let mut all_out_tensors: Vec<PyObject> = Vec::new();
-        let mut all_grad_tensors: Vec<PyObject> = Vec::new();
+        let mut all_out_tensors: Vec<Py<PyAny>> = Vec::new();
+        let mut all_grad_tensors: Vec<Py<PyAny>> = Vec::new();
 
         for (net_name, calls) in &calls_by_network {
             let handle = self.network_registry.get(net_name).ok_or_else(|| {
@@ -2162,7 +2167,7 @@ impl CompiledProgram {
             })?;
 
             // Stack all inputs for this network into a single batch.
-            let mut inputs: Vec<PyObject> = Vec::with_capacity(calls.len());
+            let mut inputs: Vec<Py<PyAny>> = Vec::with_capacity(calls.len());
             for c in calls {
                 inputs.push(self.resolve_input_tensor(py, &c.fetch)?);
             }
@@ -2281,7 +2286,7 @@ impl CompiledProgram {
             .get(&cache_key)
             .expect("cache populated above");
 
-        let batched_loss_dev = py.allow_threads(|| {
+        let batched_loss_dev = py.detach(|| {
             cached
                 .program
                 .neural_backward_nll_buffers_batch_with_device_loss(
@@ -2311,7 +2316,7 @@ impl CompiledProgram {
 
         // -- 7b. Export losses via DLPack and accumulate on device ----
         let schema_f64 = prob_schema(ScalarType::F64);
-        let batch_loss_tensor: PyObject = match batched_loss_dev {
+        let batch_loss_tensor: Py<PyAny> = match batched_loss_dev {
             Ok(loss_dev) => {
                 let mut d_num_rows = self
                     .output_provider
@@ -2346,10 +2351,10 @@ impl CompiledProgram {
                 // Fallback path: preserve prior semantics if batched circuit path
                 // is unavailable for this circuit. Collect per-query 1D losses and
                 // concatenate so the return shape matches the batched path.
-                let mut per_query_losses: Vec<PyObject> = Vec::with_capacity(n_queries);
+                let mut per_query_losses: Vec<Py<PyAny>> = Vec::with_capacity(n_queries);
                 for q in 0..n_queries {
                     let loss_dev = py
-                        .allow_threads(|| {
+                        .detach(|| {
                             cached.program.neural_backward_nll_buffers_with_device_loss(
                                 &cached.slots,
                                 per_query_idx[q],
@@ -3394,7 +3399,7 @@ impl CompiledProgram {
     }
 
     /// Get input tensor for a given index from the active tensor source.
-    fn get_input_tensor(&self, py: Python<'_>, index: usize) -> PyResult<PyObject> {
+    fn get_input_tensor(&self, py: Python<'_>, index: usize) -> PyResult<Py<PyAny>> {
         let tensor = self
             .tensor_sources
             .get_active()
@@ -3431,7 +3436,7 @@ impl CompiledProgram {
         py: Python<'_>,
         source: &str,
         index: usize,
-    ) -> PyResult<PyObject> {
+    ) -> PyResult<Py<PyAny>> {
         let tensor = self
             .tensor_sources
             .get_named(source)
@@ -3444,7 +3449,7 @@ impl CompiledProgram {
     /// domain/dummy fetches read the Stage-B join-domain source whose NAME was
     /// supplied by the Python driver (`register_domain_tensor_source`); the engine
     /// holds no hardcoded source name.
-    fn resolve_input_tensor(&self, py: Python<'_>, fetch: &Fetch) -> PyResult<PyObject> {
+    fn resolve_input_tensor(&self, py: Python<'_>, fetch: &Fetch) -> PyResult<Py<PyAny>> {
         match fetch {
             Fetch::Active(idx) => self.get_input_tensor(py, *idx),
             Fetch::Domain(idx) => self.get_input_tensor_named(py, self.domain_source_name()?, *idx),
@@ -3472,7 +3477,7 @@ impl CompiledProgram {
     }
 }
 
-fn reduce_tensor_obj(py: Python<'_>, tensor: PyObject, reduction: &str) -> PyResult<PyObject> {
+fn reduce_tensor_obj(py: Python<'_>, tensor: Py<PyAny>, reduction: &str) -> PyResult<Py<PyAny>> {
     match reduction {
         "none" => Ok(tensor),
         "sum" => Ok(tensor.bind(py).call_method0("sum")?.unbind()),

@@ -54,7 +54,7 @@ pub(crate) fn nll_loss_value(probability: f64) -> f64 {
 pub(crate) fn create_torch_tensor(
     py: pyo3::Python<'_>,
     value: f64,
-) -> pyo3::PyResult<pyo3::PyObject> {
+) -> pyo3::PyResult<pyo3::Py<pyo3::PyAny>> {
     let torch = py.import("torch")?;
     let tensor = torch.call_method1("tensor", (value,))?;
     Ok(tensor.into())

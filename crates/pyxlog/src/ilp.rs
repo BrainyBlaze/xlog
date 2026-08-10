@@ -51,7 +51,7 @@ fn collect_dlpack_columns(
     err_msg: &str,
 ) -> PyResult<Vec<xlog_cuda::DlpackManagedTensor>> {
     let seq = dlpack_columns
-        .downcast::<PySequence>()
+        .cast::<PySequence>()
         .map_err(|_| PyValueError::new_err(err_msg.to_string()))?;
     let mut tensors = Vec::with_capacity(seq.len()?);
     for item in seq.try_iter()? {
@@ -67,7 +67,7 @@ fn build_zero_typed<T>(
     py: Python<'_>,
     num_cands: u32,
     scalar_type: ScalarType,
-) -> PyResult<(PyObject, PyObject)>
+) -> PyResult<(Py<PyAny>, Py<PyAny>)>
 where
     T: GpuScalar + cudarc::driver::ValidAsZeroBits,
 {
@@ -99,7 +99,7 @@ fn export_device_bool_tensor(
     py: Python<'_>,
     values: xlog_cuda::memory::TrackedCudaSlice<u8>,
     rows: usize,
-) -> PyResult<PyObject> {
+) -> PyResult<Py<PyAny>> {
     let rows_u32 = u32::try_from(rows)
         .map_err(|_| PyValueError::new_err(format!("Row count {} exceeds u32::MAX", rows)))?;
 
@@ -128,7 +128,7 @@ fn export_device_u32_tensor_as_i32(
     py: Python<'_>,
     values: xlog_cuda::memory::TrackedCudaSlice<u32>,
     rows: usize,
-) -> PyResult<PyObject> {
+) -> PyResult<Py<PyAny>> {
     let rows_u32 = u32::try_from(rows)
         .map_err(|_| PyValueError::new_err(format!("Row count {} exceeds u32::MAX", rows)))?;
 
@@ -735,7 +735,7 @@ impl CompiledIlpProgram {
         positives: Vec<(String, Vec<i64>)>,
         negatives: Vec<(String, Vec<i64>)>,
         cand_probs_obj: &Bound<'py, PyAny>,
-    ) -> PyResult<(PyObject, PyObject)> {
+    ) -> PyResult<(Py<PyAny>, Py<PyAny>)> {
         // Validate inputs and import candidate probabilities via DLPack.
         let candidate_map = self.candidate_map.clone().ok_or_else(|| {
             PyRuntimeError::new_err(
@@ -1027,7 +1027,7 @@ impl CompiledIlpProgram {
         positives_by_relation: &Bound<'py, PyAny>,
         negatives_by_relation: &Bound<'py, PyAny>,
         cand_probs_obj: &Bound<'py, PyAny>,
-    ) -> PyResult<(PyObject, PyObject)> {
+    ) -> PyResult<(Py<PyAny>, Py<PyAny>)> {
         let candidate_map = self.candidate_map.clone().ok_or_else(|| {
             PyRuntimeError::new_err(
                 "candidate_map not set — call set_candidate_map() before compute_ilp_loss_grad_gpu_relations()",
@@ -1498,7 +1498,7 @@ use train_only(..., strict_gpu_native=True) or export an explicit compatibility 
     /// After reset, the program is in the same state as a fresh compile()
     /// with the same source — ready for set_rule_mask / evaluate cycles.
     pub fn reset_runtime(&mut self, py: Python<'_>) -> PyResult<()> {
-        let _result: xlog_core::Result<()> = py.allow_threads(|| {
+        let _result: xlog_core::Result<()> = py.detach(|| {
             // 1. Clear all mutable state (ILP registry, store, caches, stats)
             self.executor.reset_for_ilp();
 
@@ -1856,14 +1856,14 @@ use train_only(..., strict_gpu_native=True) or export an explicit compatibility 
         py: Python<'_>,
         mask_name: String,
         allow_recursive: bool,
-    ) -> PyResult<Vec<StdHashMap<String, PyObject>>> {
+    ) -> PyResult<Vec<StdHashMap<String, Py<PyAny>>>> {
         let candidates = self.candidate_triples_for_mask(&mask_name, allow_recursive)?;
 
-        let result: Vec<StdHashMap<String, PyObject>> = candidates
+        let result: Vec<StdHashMap<String, Py<PyAny>>> = candidates
             .iter()
             .enumerate()
             .map(
-                |(id, &(i, j, k))| -> PyResult<StdHashMap<String, PyObject>> {
+                |(id, &(i, j, k))| -> PyResult<StdHashMap<String, Py<PyAny>>> {
                     let mut d = StdHashMap::new();
                     d.insert("id".into(), id.into_pyobject(py)?.into_any().unbind());
                     d.insert("i".into(), i.into_pyobject(py)?.into_any().unbind());
@@ -1951,7 +1951,7 @@ use train_only(..., strict_gpu_native=True) or export an explicit compatibility 
         py: Python<'_>,
         relation: &str,
         facts: Vec<Vec<i64>>,
-    ) -> PyResult<PyObject> {
+    ) -> PyResult<Py<PyAny>> {
         let buf =
             self.executor.store().get(relation).ok_or_else(|| {
                 PyValueError::new_err(format!("Relation '{}' not found", relation))
@@ -2314,7 +2314,7 @@ use train_only(..., strict_gpu_native=True) or export an explicit compatibility 
         self.provider.reset_d2h_transfer_count()
     }
 
-    pub fn host_transfer_stats(&self, py: Python<'_>) -> PyResult<PyObject> {
+    pub fn host_transfer_stats(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let stats = self.provider.host_transfer_stats();
         let dict = PyDict::new(py);
         dict.set_item("dtoh_bytes", stats.dtoh_bytes)?;
@@ -2340,7 +2340,7 @@ impl CompiledIlpProgram {
         err_msg: &str,
     ) -> PyResult<Vec<RelationExampleGroup>> {
         let dict = relations_obj
-            .downcast::<PyDict>()
+            .cast::<PyDict>()
             .map_err(|_| PyValueError::new_err(err_msg.to_string()))?;
         let mut groups = Vec::with_capacity(dict.len());
         for (name_obj, columns_obj) in dict.iter() {
@@ -2384,7 +2384,7 @@ impl CompiledIlpProgram {
     }
 
     fn evaluate_ilp_plan(&mut self, py: Python<'_>) -> PyResult<()> {
-        let result: xlog_core::Result<xlog_cuda::CudaBuffer> = py.allow_threads(|| {
+        let result: xlog_core::Result<xlog_cuda::CudaBuffer> = py.detach(|| {
             self.executor.reset_for_mc();
             for (name, schema) in &self.schemas {
                 let empty = self.provider.create_empty_buffer(schema.clone())?;
@@ -2492,7 +2492,7 @@ impl CompiledIlpProgram {
         py: Python<'_>,
         num_cands: u32,
         is_f64: bool,
-    ) -> PyResult<(PyObject, PyObject)> {
+    ) -> PyResult<(Py<PyAny>, Py<PyAny>)> {
         if is_f64 {
             build_zero_typed::<f64>(&self.provider, py, num_cands, ScalarType::F64)
         } else {
@@ -2510,7 +2510,7 @@ impl CompiledIlpProgram {
         num_facts: u32,
         num_cands: u32,
         is_f64: bool,
-    ) -> PyResult<(PyObject, PyObject)> {
+    ) -> PyResult<(Py<PyAny>, Py<PyAny>)> {
         // Build CSR with all-zero row_offsets (every row has 0 non-zeros)
         let row_offsets = vec![0u32; (num_facts + 1) as usize];
         let mut d_row_offsets = self

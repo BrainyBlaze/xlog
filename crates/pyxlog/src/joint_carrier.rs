@@ -116,7 +116,7 @@ impl JointConstraintCarrier {
     /// `note_producer_stream` with that stream's handle after the
     /// writes (the solve then waits on device — the measured-region
     /// path), or synchronize on the host before solving.
-    fn export_buffer(&self, py: Python<'_>, name: &str) -> PyResult<PyObject> {
+    fn export_buffer(&self, py: Python<'_>, name: &str) -> PyResult<Py<PyAny>> {
         let (id, dtype) = match name {
             "domains" => (
                 CarrierBufferId::Domains,

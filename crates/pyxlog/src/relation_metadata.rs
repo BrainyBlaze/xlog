@@ -134,7 +134,7 @@ pub struct RelationEvidence {
 
 #[pymethods]
 impl RelationEvidence {
-    pub fn provenance(&self, py: Python<'_>) -> PyResult<PyObject> {
+    pub fn provenance(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         self.snapshot.pack(py)
     }
 }
@@ -562,7 +562,7 @@ impl PreparedRelationMetadataTransition {
 }
 
 impl RelationSnapshot {
-    pub(crate) fn pack(&self, py: Python<'_>) -> PyResult<PyObject> {
+    pub(crate) fn pack(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let snapshot = PyDict::new(py);
         snapshot.set_item("relation", &self.relation)?;
         snapshot.set_item("metadata_present", self.metadata.is_some())?;
@@ -586,7 +586,7 @@ impl RelationSnapshot {
         Ok(snapshot.into())
     }
 
-    pub(crate) fn pack_manifest(&self, py: Python<'_>) -> PyResult<PyObject> {
+    pub(crate) fn pack_manifest(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let manifest = PyDict::new(py);
         manifest.set_item("format", RELATION_MANIFEST_FORMAT)?;
         manifest.set_item("version", RELATION_MANIFEST_VERSION)?;
@@ -625,7 +625,7 @@ pub(crate) fn pack_session_evidence(
     py: Python<'_>,
     mut snapshots: Vec<RelationSnapshot>,
     selected_relation: Option<&str>,
-) -> PyResult<PyObject> {
+) -> PyResult<Py<PyAny>> {
     snapshots.sort_by(|left, right| left.relation.cmp(&right.relation));
     let result = PyDict::new(py);
     result.set_item("program_hash", program_hash(&snapshots)?)?;
@@ -1100,7 +1100,7 @@ fn parse_exact_cells(
         }
         let encoded_value = required_item(dict, "hex", &context)?;
         let encoded = encoded_value
-            .downcast::<PyString>()
+            .cast::<PyString>()
             .map_err(|_| metadata_error(format!("{context} field 'hex' must be a string")))?
             .to_str()
             .map_err(|_| metadata_error(format!("{context} field 'hex' must be valid UTF-8")))?;
@@ -1347,7 +1347,7 @@ fn union_fact_records(
     }
 }
 
-fn pack_role(py: Python<'_>, role: &RelationRole) -> PyResult<PyObject> {
+fn pack_role(py: Python<'_>, role: &RelationRole) -> PyResult<Py<PyAny>> {
     let dict = PyDict::new(py);
     dict.set_item("name", &role.name)?;
     match &role.sort {
@@ -1363,7 +1363,7 @@ fn pack_fact(
     relation: &str,
     key: &FactKey,
     records: &BTreeSet<ProvenanceRecord>,
-) -> PyResult<PyObject> {
+) -> PyResult<Py<PyAny>> {
     let dict = PyDict::new(py);
     dict.set_item("identity", fact_identity(relation, &key.cells)?)?;
 
@@ -1383,7 +1383,7 @@ fn pack_manifest_fact(
     relation: &str,
     key: &FactKey,
     records: &BTreeSet<ProvenanceRecord>,
-) -> PyResult<PyObject> {
+) -> PyResult<Py<PyAny>> {
     let fact = PyDict::new(py);
     fact.set_item("identity", fact_identity(relation, &key.cells)?)?;
     fact.set_item("cells", pack_exact_cells(py, &key.cells)?)?;
@@ -1425,7 +1425,7 @@ fn append_friendly_cell(list: &Bound<'_, PyList>, cell: &TypedCell) -> PyResult<
     }
 }
 
-fn pack_record(py: Python<'_>, record: &ProvenanceRecord) -> PyResult<PyObject> {
+fn pack_record(py: Python<'_>, record: &ProvenanceRecord) -> PyResult<Py<PyAny>> {
     let dict = PyDict::new(py);
     set_optional_string(&dict, py, "source", record.source.as_deref())?;
     set_optional_string(&dict, py, "document", record.document.as_deref())?;
@@ -1584,7 +1584,7 @@ fn sequence<'py>(
         return Err(metadata_error(format!("{context} must be a sequence")));
     }
     value
-        .downcast::<PySequence>()
+        .cast::<PySequence>()
         .map_err(|_| metadata_error(format!("{context} must be a sequence")))
 }
 
@@ -1619,7 +1619,7 @@ fn dictionary<'py>(
     context: &str,
 ) -> PyResult<&'py Bound<'py, PyDict>> {
     value
-        .downcast::<PyDict>()
+        .cast::<PyDict>()
         .map_err(|_| metadata_error(format!("{context} must be a dictionary")))
 }
 

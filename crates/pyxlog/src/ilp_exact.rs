@@ -4,7 +4,7 @@
 //! so the native exact-induction binding seam has its own testable surface.
 //! Converts the Python-visible `induce_exact_native(...)` call into an
 //! [`xlog_induce::InduceExactRequest`] and maps the result back to a
-//! `dict`-shaped `PyObject` that the Python wrapper
+//! `dict`-shaped `Py<PyAny>` that the Python wrapper
 //! (`crates/pyxlog/python/pyxlog/ilp/exact_induce.py`) packages into
 //! `ExactInductionResult` / `ScoredCandidate` dataclass instances.
 //!
@@ -77,7 +77,7 @@ impl CompiledIlpProgram {
         negative_arg1: Option<&Bound<'py, PyAny>>,
         k_per_topology: u32,
         deterministic: bool,
-    ) -> PyResult<PyObject> {
+    ) -> PyResult<Py<PyAny>> {
         // ── 1. Resolve head_relation → RelId ───────────────────────────────
         // Python reference silently returns an empty result when the head
         // isn't in the ILP schema — mirror that behavior here.
@@ -164,7 +164,7 @@ impl CompiledIlpProgram {
     }
 }
 
-fn empty_result_dict(py: Python<'_>) -> PyResult<PyObject> {
+fn empty_result_dict(py: Python<'_>) -> PyResult<Py<PyAny>> {
     let d = PyDict::new(py);
     let empty_candidates = PyList::empty(py);
     d.set_item("candidates", empty_candidates)?;
@@ -180,7 +180,7 @@ fn result_to_py_dict(
     result: &ExactInductionResult,
     head_relation: &str,
     rel_index: &[(RelId, String)],
-) -> PyResult<PyObject> {
+) -> PyResult<Py<PyAny>> {
     let name_of = |rid: RelId| -> PyResult<&str> {
         rel_index
             .iter()

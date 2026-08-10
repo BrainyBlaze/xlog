@@ -89,7 +89,7 @@ unsafe extern "C" fn dlpack_capsule_destructor(capsule: *mut pyo3::ffi::PyObject
 pub(crate) fn dlpack_capsule_from_tensor(
     py: Python<'_>,
     tensor: DlpackManagedTensor,
-) -> PyResult<PyObject> {
+) -> PyResult<Py<PyAny>> {
     let raw = tensor.into_raw();
     let ptr = raw as *mut c_void;
     // SAFETY: capsule validity was checked immediately before this call; pointer lifetime is managed by the capsule
@@ -108,7 +108,7 @@ pub(crate) fn dlpack_capsule_from_tensor(
         return Err(PyRuntimeError::new_err("Failed to create DLPack capsule"));
     }
     // SAFETY: capsule is a non-null owned pointer returned by PyCapsule_New; PyO3 takes ownership
-    let obj: Py<PyAny> = unsafe { Py::from_owned_ptr(py, capsule) };
+    let obj: Py<PyAny> = unsafe { Bound::from_owned_ptr(py, capsule) }.unbind();
     Ok(obj)
 }
 
@@ -144,7 +144,7 @@ unsafe extern "C" fn arrow_device_array_capsule_destructor(capsule: *mut pyo3::f
 pub(crate) fn arrow_device_capsule_from_device_array(
     py: Python<'_>,
     device_array: ArrowDeviceArrayOwned,
-) -> PyResult<PyObject> {
+) -> PyResult<Py<PyAny>> {
     let raw = device_array.into_raw();
     let ptr = raw as *mut c_void;
     // SAFETY: capsule validity was checked immediately before this call; pointer lifetime is managed by the capsule
@@ -265,7 +265,7 @@ pub(crate) fn enforce_call_memory_limit(
 pub(crate) fn provider_memory_stats(
     py: Python<'_>,
     provider: &Arc<CudaKernelProvider>,
-) -> PyResult<PyObject> {
+) -> PyResult<Py<PyAny>> {
     let dict = PyDict::new(py);
     let memory = provider.memory();
     dict.set_item("allocated_bytes", memory.allocated_bytes())?;
@@ -279,7 +279,7 @@ pub(crate) fn provider_memory_stats(
 pub(crate) fn pack_rule_provenance(
     py: Python<'_>,
     entries: &[xlog_logic::RuleProvenance],
-) -> PyResult<PyObject> {
+) -> PyResult<Py<PyAny>> {
     let list = PyList::empty(py);
     for entry in entries {
         let dict = PyDict::new(py);
@@ -308,7 +308,7 @@ pub(crate) fn pack_rule_provenance(
 pub(crate) fn pack_query_proof_traces(
     py: Python<'_>,
     entries: &[xlog_logic::QueryProofTrace],
-) -> PyResult<PyObject> {
+) -> PyResult<Py<PyAny>> {
     let list = PyList::empty(py);
     for entry in entries {
         let dict = PyDict::new(py);
@@ -439,7 +439,7 @@ pub struct PyDifferentiableProofTraceMap {
 fn pack_differentiable_proof_trace(
     py: Python<'_>,
     trace: &xlog_logic::ProofTrace,
-) -> PyResult<PyObject> {
+) -> PyResult<Py<PyAny>> {
     let dict = PyDict::new(py);
     dict.set_item("proof_id", trace.proof_id)?;
     dict.set_item("answer_key", &trace.answer_key)?;
@@ -479,14 +479,14 @@ impl PyDifferentiableProofTraceMap {
         }))
     }
 
-    fn trace(&self, py: Python<'_>, proof_id: u64) -> PyResult<Option<PyObject>> {
+    fn trace(&self, py: Python<'_>, proof_id: u64) -> PyResult<Option<Py<PyAny>>> {
         self.inner
             .trace(proof_id)
             .map(|trace| pack_differentiable_proof_trace(py, trace))
             .transpose()
     }
 
-    fn traces(&self, py: Python<'_>) -> PyResult<PyObject> {
+    fn traces(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let list = PyList::empty(py);
         for trace in self.inner.traces() {
             list.append(pack_differentiable_proof_trace(py, trace)?)?;
@@ -609,7 +609,7 @@ pub struct LogicRelationSession {
 
 pub(crate) struct RelationChangeCallback {
     pub id: u64,
-    pub callback: PyObject,
+    pub callback: Py<PyAny>,
 }
 
 #[derive(Clone, Debug)]
@@ -640,7 +640,7 @@ pub struct LogicQueryResult {
     #[pyo3(get)]
     pub sort_labels: Vec<String>,
     #[pyo3(get)]
-    pub tensors: Vec<PyObject>,
+    pub tensors: Vec<Py<PyAny>>,
     #[pyo3(get)]
     pub num_rows: usize,
     #[pyo3(get)]
@@ -656,25 +656,25 @@ pub struct LogicEvalResult {
 #[pyclass]
 pub struct IlpTaggedCreditDeviceResult {
     #[pyo3(get)]
-    pub fact_row_offsets: PyObject,
+    pub fact_row_offsets: Py<PyAny>,
     #[pyo3(get)]
-    pub entry_indices: PyObject,
+    pub entry_indices: Py<PyAny>,
     #[pyo3(get)]
-    pub entry_i: PyObject,
+    pub entry_i: Py<PyAny>,
     #[pyo3(get)]
-    pub entry_j: PyObject,
+    pub entry_j: Py<PyAny>,
     #[pyo3(get)]
-    pub entry_k: PyObject,
+    pub entry_k: Py<PyAny>,
 }
 
 #[pyclass]
 pub struct McDeviceEvalResult {
     /// Per-query satisfying-sample counts. DLPack int32 tensor on CUDA.
     #[pyo3(get)]
-    pub query_counts: PyObject,
+    pub query_counts: Py<PyAny>,
     /// Evidence satisfying-sample count. DLPack int32 tensor with shape [1] on CUDA.
     #[pyo3(get)]
-    pub evidence_count: PyObject,
+    pub evidence_count: Py<PyAny>,
     #[pyo3(get)]
     pub total_samples: usize,
     #[pyo3(get)]
@@ -718,26 +718,26 @@ pub struct EvalResult {
     #[pyo3(get)]
     pub atoms: Vec<String>,
     #[pyo3(get)]
-    pub prob: PyObject,
+    pub prob: Py<PyAny>,
     #[pyo3(get)]
-    pub log_prob: PyObject,
+    pub log_prob: Py<PyAny>,
     #[pyo3(get)]
     pub num_vars: usize,
     /// Exact log-evidence `log Z_E` (natural log). `None` for Monte Carlo results.
     #[pyo3(get)]
     pub log_z_e: Option<f64>,
     #[pyo3(get)]
-    pub grad_true: Option<Vec<PyObject>>,
+    pub grad_true: Option<Vec<Py<PyAny>>>,
     #[pyo3(get)]
-    pub grad_false: Option<Vec<PyObject>>,
+    pub grad_false: Option<Vec<Py<PyAny>>>,
     #[pyo3(get)]
     pub approx: bool,
     #[pyo3(get)]
-    pub stderr: Option<PyObject>,
+    pub stderr: Option<Py<PyAny>>,
     #[pyo3(get)]
-    pub ci_low: Option<PyObject>,
+    pub ci_low: Option<Py<PyAny>>,
     #[pyo3(get)]
-    pub ci_high: Option<PyObject>,
+    pub ci_high: Option<Py<PyAny>>,
     #[pyo3(get)]
     pub samples: Option<usize>,
     #[pyo3(get)]
@@ -768,7 +768,9 @@ pub struct EvalResult {
 // =========================================================================
 
 /// Statistics for a single training epoch.
-#[pyclass]
+// Result-only class: nothing extracts it back from Python, so the
+// Clone-derived automatic `FromPyObject` is explicitly skipped.
+#[pyclass(skip_from_py_object)]
 #[derive(Clone)]
 pub struct EpochStats {
     /// Average loss across all batches in the epoch
@@ -783,7 +785,9 @@ pub struct EpochStats {
 }
 
 /// Training history tracking loss over epochs and batches.
-#[pyclass]
+// Result-only class: nothing extracts it back from Python, so the
+// Clone-derived automatic `FromPyObject` is explicitly skipped.
+#[pyclass(skip_from_py_object)]
 #[derive(Clone)]
 pub struct TrainingHistory {
     /// Loss at the end of each epoch
