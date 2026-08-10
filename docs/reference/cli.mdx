@@ -75,8 +75,12 @@ it then prints a `WCOJ kernels dispatched: ...` line with the per-route counts.
 If nothing fired, it prints instead:
 
 ```text
-WARNING: --wcoj set but no WCOJ kernel dispatched (declines 0); the run fell back to binary joins
+WARNING: --wcoj set but no WCOJ kernel dispatched (declines <n>); the run fell back to binary joins
 ```
+
+`<n>` is a live count of the routes that were entered and then declined on an
+error, so it is often non-zero on exactly the runs that print this warning. Both
+lines carry it; only the `dispatched` line means a kernel fired.
 
 The answer is the same either way — only the execution route differs.
 

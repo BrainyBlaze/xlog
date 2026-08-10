@@ -102,7 +102,7 @@ arguments, so there has to be an arity for them to name.
 
 `program.network_metadata(name)` reads the registration back together with the
 declarations it was checked against. For the coin classifier in the
-[runnable example](#a-runnable-nn-4-example) below:
+[runnable example](#a-runnable-neural-predicate-example) below:
 
 ```python
 program.register_network("coin_net", net, opt, arity=2)
@@ -208,9 +208,10 @@ subsystem matures. A gate like `5/5` means "five consecutive runs must all succe
 | Beta | `20/20` | 5 seeds across each of 4 stages (reach, grandparent, colleague, plus-2) on the sparse backend — all 20 converge. |
 | GA | `50/50` | 50 seeds run against each of the 4 stages — 200 runs — scored with a **Clopper–Pearson** lower confidence bound on the success rate, a conservative statistical bound rather than a raw pass count. |
 
-## A runnable `nn/4` example
+## A runnable neural-predicate example
 
-This is a self-contained DeepProbLog-style program. A small classifier decides
+This is a self-contained DeepProbLog-style program built on a single `nn/4`
+declaration. A small classifier decides
 whether each coin image shows heads or tails, symbolic rules define winning and
 losing, and the network is trained purely from the derived symbolic queries. The
 synthetic tensors let it run without a dataset download.

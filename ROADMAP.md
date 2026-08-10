@@ -2157,7 +2157,7 @@ guard-only equivalent; there is no separate surrogate scoring path.
 
 ## Native relation roles and whole-fact provenance
 
-Available in tagged artifacts since 0.12.0. Ordered roles and provenance for
+Available since 0.12.0. Ordered roles and provenance for
 complete relation tuples are now native rather than a Python sidecar.
 
 **This replaced the previous Python API, it did not extend it.**

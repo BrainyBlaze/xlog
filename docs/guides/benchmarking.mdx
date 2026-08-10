@@ -105,9 +105,7 @@ development hardware — records the per-epoch shape:
 
 These timings describe the current pipeline, and the run behind them is not among
 this repository's committed neural artifacts, which all record an earlier
-generation of the code. They have since been reproduced under the same protocol on
-different hardware (an RTX 3090), where the steady epoch landed within 7% of the
-`~0.25 s` above.
+generation of the code.
 
 The first epoch is slow because XLOG compiles the logic program into a
 **Decision-DNNF** — a circuit form that makes exact probability counting cheap to

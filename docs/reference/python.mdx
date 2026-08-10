@@ -379,8 +379,10 @@ predicate argument order, and each fact is identified by all of its cells:
   returned `{}`.
 - `RelationEvidence` is an immutable native class. The old
   `RelationEvidence(session, name)` constructor no longer exists.
-- `apply_relation_delta_batch` rejects unknown keys in an update dictionary that
-  it previously ignored.
+- `apply_relation_delta_batch` and `apply_relation_delta_debug` reject unknown
+  keys in an update dictionary that they previously ignored. Both route through
+  the same parser, so both raise `ValueError` where 0.11.0 silently dropped the
+  extra key.
 
 See [Migrating from Python-side relation evidence](#migrating-from-python-side-relation-evidence)
 for the field-by-field mapping.
@@ -859,7 +861,7 @@ carrier.solve_label_feasibility(abstain_label=7)
 carrier.solve_label_map_top2()
 carrier.solve_components_exact(comp_offsets, comp_indices)
 
-buffer = carrier.export_buffer("label_map")   # zero-copy DLPack capsule
+buffer = carrier.export_buffer("map_results") # zero-copy DLPack capsule
 print(carrier.fuel_spent)                     # property, not a call
 ```
 

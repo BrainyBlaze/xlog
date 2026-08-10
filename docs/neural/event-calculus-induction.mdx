@@ -224,8 +224,8 @@ clean illustration; this is from
 "term_min_fit": 0.125,
 "term_null_summary": {
   "threshold": 0.125,
-  "pool_max_samples_summary": {"min": 0.012499999999999999,
-                               "median": 0.03892146939747559,
+  "pool_max_samples_summary": {"min": 0.011904761904761904,
+                               "median": 0.03846153846153846,
                                "p95": 0.125, "max": 0.25},
   "n_permutations": 1000, "quantile": 0.95, "perm_seed": 7
 },
@@ -290,11 +290,14 @@ top of the ordinary state relations. `--transition-vocab` selects how many of th
   (`any_became_active`, `any_became_inactive`, `any_became_walking`, `any_stopped_walking`)
   and excludes the two derived from pair distance, `became_far` and `distance_increasing`.
 
-Choose `activity` for one concrete reason: **it is the pool the shipped results on this
-page were produced under.** The distance-derived pair was added later, and the evidence
-package's sections D and D.1 — including the permutation-null gates and the tied top-five
-candidates quoted above — were generated before it existed. Under the default `full`, the
-same command searches the enlarged pool and gives you a different, later configuration.
+Choose `activity` for one concrete reason: **it is the pool the sections D, D.1, and E
+artifacts were produced under**, and replaying them requires it. The distance-derived pair
+was added later, and the `e5`/`e9` theory runs and the `e10` cross-validation — including
+the permutation-null gates and the tied top-five candidates quoted above — were generated
+before it existed. Under the default `full`, the same command searches the enlarged pool
+and gives you a different, later configuration: section E's command becomes section E.1's.
+The page's other numbers were produced under `full`, as the gate table above records — the
+headline 0.7782 from `e11` and both clean-protocol `f_xml` runs.
 `activity` also happens to be the pool that withholds precomputed geometry from the search,
 which is what `--mode neural` does by construction.
 
@@ -458,9 +461,10 @@ report. It sits inside the published systems' own
   (`examples/caviar_woled/audit_dump_vs_xml.py`, artifact
   `results/f_audit/caviar-f-dump-vs-xml-audit.json`) cross-matched all **25** of that
   corpus's meeting transition events against the original ground-truth videos and
-  classified them: **21 real, 3 duplicates, 1 splice phantom**. Two videos ship in both the
-  train and the test file, duplicating **855** gold meeting pair-frames — roughly half the
-  corpus's positive mass — and one termination exists only because the dump's
+  classified them: **21 real, 3 duplicates, 1 splice phantom**. Four videos ship in both the
+  train and the test file (`fomdgt2`, `fomdgt3`, `wk2gt`, `wk3gt`), duplicating **876** gold
+  meeting pair-frames between them — roughly half the corpus's positive mass, and 855 of
+  them `wk2gt`'s alone — and one termination exists only because the dump's
   segment-joining rule bridges two different videos as if they were one recording. It is
   not a clean-split result.
 - The clean protocol has too few events for a cross-validated comparison to mean anything
@@ -471,9 +475,12 @@ report. It sits inside the published systems' own
   protocol fixed before looking at results.
 - **And our own 0.7782 is one step short of that standard too.** Its gates, seeds and folds
   were fixed in advance, but its candidate vocabulary is a second iteration, chosen after
-  the first run's failure mode on those same folds was known. The honest contrast is "one
-  disclosed adaptive step" against "an unreported number of tuning trials" — not
-  "pre-registered" against "tuned".
+  the first run's failure mode on those same folds was known. The fully pre-registered
+  first iteration is `e10`, under the activity-only vocabulary: meeting F1 **0.7329**
+  (`results/e10_cv/caviar-e10-cv10.json`, tp 1516, fp 788, fn 317). Adding the
+  termination-signature relations bought **+0.045**. The honest contrast is "one disclosed
+  adaptive step" against "an unreported number of tuning trials" — not "pre-registered"
+  against "tuned"; and 0.7329 is the cleaner of the two claims.
 
 What can honestly be claimed is narrower and, arguably, more interesting: perception can be
 learned through logic credit alone; the abstention is principled and statistically grounded;

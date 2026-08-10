@@ -194,13 +194,14 @@ cross-process determinism and stress tests.
 |---|---|---|---|
 | `WCOJ_BENCH_FULL` | the WCOJ triangle Criterion benchmark | Run the full input-size sweep instead of the reduced default. | `1` or `true` (case-insensitive); default off |
 | `XLOG_SKEWED_MULTIWAY_ONLY_CELL` | the skewed-multiway Criterion benchmark | Run only the named benchmark cases instead of the whole sweep. | comma-separated cell names; unset runs every cell |
-| `CAVIAR_CONTINUOUS_DIR` | the CAVIAR pytest modules | Directory holding local `caviar-train.json` / `caviar-test.json`. `test_caviar_alignment_evidence.py` and `test_caviar_xml_corpus.py` skip themselves unless both files are found there. | path; default `../caviar_data` relative to the test file |
+| `CAVIAR_CONTINUOUS_DIR` | `python/tests/test_caviar_alignment_evidence.py` and `python/tests/test_caviar_xml_corpus.py` | Directory holding local `caviar-train.json` / `caviar-test.json`, neither of which is shipped in this repo. `test_caviar_alignment_evidence.py` skips its whole module unless both files are found there. `test_caviar_xml_corpus.py` uses it only to gate its dump cross-check test, and checks that the path names an existing directory rather than checking for the two files. | path. `test_caviar_alignment_evidence.py` falls back to `../caviar_data` resolved against the **current working directory** pytest is invoked from — not the repository root and not the test file's own directory. `test_caviar_xml_corpus.py` has no default: unset means skip |
+| `CAVIAR_XML_DIR` | `python/tests/test_caviar_xml_corpus.py` | Directory holding the 30 CAVIAR ground-truth XML files. The module's real-data tests skip unless it names an existing directory; the dump cross-check additionally needs `CAVIAR_CONTINUOUS_DIR`. The shipped example script reads the same variable — see [Example scripts](#example-scripts). | path; unset by default |
 | `XLOG_NVRTC_ARCH` | the `xlog-cuda` `nvrtc_ptx` helper binary | Target GPU architecture passed to NVRTC when that one-shot tool compiles a single named kernel for inspection. This is **not** the production kernel build path — that is `crates/xlog-cuda/build.rs`, which uses `XLOG_CUBIN_ARCHS` above. | e.g. `sm_75`; default `sm_75` |
 
 ## Example scripts
 
-The shipped CAVIAR example reads one variable of its own. It is not part of the
-runtime.
+The shipped CAVIAR example reads one variable, the same `CAVIAR_XML_DIR` its
+tests read. It is not part of the runtime.
 
 | Variable | Effect | Values / Default |
 |---|---|---|

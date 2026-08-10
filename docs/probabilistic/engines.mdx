@@ -165,7 +165,9 @@ circuit produced:
   `result.grad_false` stands for: `{"kind": "fact", ...}` for a probabilistic fact,
   `{"kind": "choice", ...}` for one branch of an annotated disjunction, or
   `{"kind": "other"}` for a variable that is not a source of randomness. That is how
-  you attribute a gradient back to the fact that produced it.
+  you attribute a gradient back to the fact that produced it. Those two vectors are
+  filled in only by `program.evaluate(return_grads=True)`; the plain `evaluate()`
+  above leaves both `None`.
 
 `prob_var_map()` is exact-engine only. It raises `ValueError` for Monte Carlo
 programs, and also for exact programs compiled through the GPU count-lift fast path,

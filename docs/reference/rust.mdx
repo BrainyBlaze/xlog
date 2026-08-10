@@ -64,6 +64,59 @@ In exchange, later releases can add counter fields without breaking the API
 again. The field names and values that `--stats` prints are unchanged, so
 anything that only reads the CLI output is unaffected.
 
+### 0.12.0 — `xlog-logic`
+
+Two public functions in `xlog_logic::epistemic` now return a fallible result
+instead of a bare `Program`:
+
+- `reduce_epistemic_program_to_ordinary(&Program) -> Result<Program>`
+- `reduce_epistemic_program_to_ordinary_for_stratified_schema(&Program) -> Result<Program>`
+
+Both previously returned `Program` directly. The reduction can now fail — for
+example when an augmenting modal cannot be resolved — and reports that instead of
+producing a program that would fail later. `Result` here is
+`xlog_core::Result`, whose error type is `XlogError`.
+
+One edit fixes a call site:
+
+```rust
+// Before: the reduced program came back directly.
+let reduced = reduce_epistemic_program_to_ordinary(&program);
+
+// After: propagate the error, or handle it.
+let reduced = reduce_epistemic_program_to_ordinary(&program)?;
+```
+
+### 0.12.0 — `xlog-prob`
+
+`ChoiceSource::choices` — on the struct re-exported at the `xlog_prob` crate
+root — is retyped from `Vec<(GroundAtom, f64)>` to
+`Arc<[(GroundAtom, f64)]>`. A k-head annotated disjunction now pays for one
+shared k-length slice rather than one clone per Bernoulli chain variable.
+
+Struct literals and any `Vec`-only method call (`push`, `truncate`,
+`extend`) stop compiling. Indexing, `len()`, `iter()`, and slice patterns are
+unaffected.
+
+Two edits fix a call site:
+
+```rust
+use std::sync::Arc;
+
+// Construct: convert the vector into the shared slice.
+let source = ChoiceSource {
+    choices: Arc::from(pairs),          // pairs: Vec<(GroundAtom, f64)>
+    choice_index,
+    source_id,
+};
+
+// Mutate: build the full vector first, then share it — the field is no
+// longer growable in place.
+let mut pairs = Vec::new();
+pairs.push((atom, p));
+let choices: Arc<[(GroundAtom, f64)]> = Arc::from(pairs);
+```
+
 ## Published Crates
 
 These crates are published on crates.io and also have hosted docs.rs pages:
