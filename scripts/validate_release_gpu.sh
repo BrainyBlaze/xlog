@@ -115,6 +115,14 @@ run_cmd cargo test --locked --release \
   -- \
   --nocapture \
   --test-threads=1
+run_cmd cargo test --locked --release \
+  -p xlog-prob \
+  --features host-io \
+  --test epistemic_prob_gpu_accepted_evidence \
+  --test epistemic_prob_production_reuse \
+  -- \
+  --nocapture \
+  --test-threads=1
 run_cmd bash scripts/stage_pyxlog_kernels.sh
 run_cmd maturin build -m crates/pyxlog/Cargo.toml --release --compatibility linux --out "$wheel_dir"
 run_cmd python3 -m venv --system-site-packages "$python_env_dir"

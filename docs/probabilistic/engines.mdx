@@ -138,6 +138,36 @@ Gradients flow back through the same circuit, so a probabilistic program stays
 differentiable end to end and can sit inside a training loop. This works through
 negation too: a negated literal contributes with the correct sign flip.
 
+### Conditioning on accepted epistemic evidence
+
+Rust integrations can condition exact inference on a world view accepted by the
+epistemic GPU runtime. `EpistemicProbProductionAdapter` validates the runtime
+provider identity, semantic trace, tuple-membership evidence, final tuple
+materialization, and zero-CPU-fallback contract before it passes that evidence to
+the exact source or parsed-program path. The same accepted-evidence boundary covers
+PIR and CNF encoding, knowledge compilation, query evaluation, and gradients. The
+bounded `EpistemicCircuit` test fixture is excluded from production-path metrics.
+Methods with `conditioned` in their name translate accepted assumptions into
+probabilistic `evidence(...)` clauses, so they can change the returned probabilities;
+the other accepted-evidence methods use the world view as an admission gate without
+modifying the probabilistic model.
+
+`production_capabilities()` is a static inventory of backend stages implemented by
+the adapter. It is not a CUDA probe, a Cargo-feature report, or a claim that every
+epistemic planner returns compatible evidence. Likewise, the zero-CPU-fallback
+contract rules out CPU semantic recomputation; it does not claim zero host traffic,
+because concrete tuple evidence is read from accepted output columns.
+
+This handoff consumes `EpistemicGpuExecutionResult` records produced by the
+single-pass Generate-Propagate-Test route, including split batches. Recursive
+epistemic programs take a different route: the high-level `LogicProgram` evaluator
+runs the applicable founded, Gelfond-1991 compatibility, or well-founded fixpoint
+and returns a `LogicEvalResult` containing relation results. That result type is not
+an input to `EpistemicProbProductionAdapter`, so backend availability does not claim
+recursive-world-view conditioning. A recursive source must use the high-level
+evaluator; it cannot be sent to `compile_epistemic_gpu_execution`, whose contract is
+intentionally limited to acyclic single-pass programs.
+
 <Frame caption="The XGCF circuit is a levelized DAG: literal leaves feed AND and OR nodes evaluated one level per kernel launch in log space, and adjoints propagate back down to produce gradients at the leaves.">
   <img className="block dark:hidden" src="/assets/diagrams/xgcf-circuit-light.svg" alt="XGCF circuit structure: LIT leaf nodes at level 0 feed AND nodes at level 1 and an OR root using logsumexp at level 2, producing the log probability of the query; a dashed backward path carries adjoints from the root back to gradients at the leaves." />
   <img className="hidden dark:block" src="/assets/diagrams/xgcf-circuit-dark.svg" alt="XGCF circuit structure: LIT leaf nodes at level 0 feed AND nodes at level 1 and an OR root using logsumexp at level 2, producing the log probability of the query; a dashed backward path carries adjoints from the root back to gradients at the leaves." />

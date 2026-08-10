@@ -55,7 +55,7 @@ macro_rules! checked_prob_trace_counter_inc {
     }};
 }
 
-/// Production capability status for probabilistic paths required by v0.9.
+/// Production capability status for probabilistic adapter paths.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EpistemicProbProductionCapabilityStatus {
     /// Existing GPU-native production path is available.
@@ -81,7 +81,11 @@ pub struct EpistemicProbProductionCapabilities {
     pub gpu_knowledge_compilation_blocker: &'static str,
 }
 
-/// Return the current probabilistic production capability report.
+/// Return a static inventory of implemented probabilistic backend stages.
+///
+/// This does not probe CUDA availability, reflect Cargo feature selection, or
+/// assert that every epistemic execution route produces a compatible evidence
+/// record.
 pub fn production_capabilities() -> EpistemicProbProductionCapabilities {
     EpistemicProbProductionCapabilities {
         gpu_exact_provenance: EpistemicProbProductionCapabilityStatus::Available,
@@ -914,10 +918,12 @@ impl EpistemicProbProductionTrace {
         Ok(())
     }
 
-    /// Require that this trace is eligible for v0.9 production probability metrics.
+    /// Require that this trace is eligible for production probability metrics.
     ///
-    /// This gate only proves fixture containment for an accepted probabilistic
-    /// path. It does not claim the broader probabilistic production goal is complete.
+    /// This gate proves accepted-evidence admission and fixture containment for
+    /// this adapter path. It does not establish that every epistemic execution
+    /// route produces a compatible evidence record or that accepted assumptions
+    /// conditioned the probabilistic model.
     pub fn require_production_metric_eligibility(&self) -> Result<()> {
         let capabilities = production_capabilities();
         if capabilities.fixture_circuit_allowed {
