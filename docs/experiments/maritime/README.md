@@ -1,10 +1,13 @@
 # Maritime (Brest AIS) rendezVous: cross-validated rule reconstruction
 
-Status: **pre-registered, not yet run.** This document is committed BEFORE
-`examples/maritime_woled/run_maritime_cv.py` executes on the real corpus;
-every parameter, metric, and interpretive constraint below is fixed in
-advance. The real-data run is a separate, manual job whose result JSON must
-match this protocol exactly.
+Status: **pre-registered; the run has completed.** The pre-registration
+below was committed BEFORE `examples/maritime_woled/run_maritime_cv.py`
+executed on the real corpus (commit `90d44107`); every parameter, metric,
+and interpretive constraint was fixed in advance and none has been
+amended since. The run executed on 2026-08-08 with zero protocol
+deviations; results are in the "Results" section at the end of this
+document, and the shipped artifact is
+`results/baseline_cv5/MARITIME_CV_BASELINE.json`.
 
 ## Corpus and provenance
 
@@ -169,3 +172,84 @@ py -3.13 examples/maritime_woled/run_maritime_cv.py \
 Results will be appended to this document only after the pre-registered
 run completes; any deviation from the protocol above must be recorded as
 a deviation, not silently amended.
+
+## Results (pre-registered run of 2026-08-08)
+
+Shipped artifact: [`results/baseline_cv5/MARITIME_CV_BASELINE.json`](results/baseline_cv5/MARITIME_CV_BASELINE.json)
+(byte-exact runner output, md5 `1d3b7fcc56b0032083759100793b743e`).
+
+### Provenance
+
+- Code revision: `73a6a041` (this branch's tip at run time; converter
+  `e16defed` and verifier `0fbf449a` as pre-registered above). The
+  working tree was clean.
+- Invocation: `run_maritime_cv.main(["--tar", <A>, "--zip", <B>,
+  "--out", <artifact>])` — the CLI defaults for every remaining flag
+  equal the section-(f) values, and the artifact's `params` block
+  records the resolved configuration (`folds=5, seed=7,
+  min_new_covered=2, tie_tolerance=null, holdout_score="f1",
+  inner_folds=4, max_literals=3, max_clauses=4,
+  null_permutations=1000, null_quantile=0.95, smoke=false`), which
+  matches section (f) field-for-field.
+- `verify_smoke` gate: passed before the search ran (both archive md5s
+  matched the pins above; pair-contiguity, segment-boundary and
+  EC-label invariants all held; converted-corpus counts matched the
+  pre-registered constants).
+- Wall time: conversion 1,437 s; search ~2.2 min per fold (CPU only).
+- **Protocol deviations: none.**
+
+### Headline numbers
+
+| Metric (5-fold CV, pair-atom folds) | Value |
+|---|---|
+| micro pointwise F1 (positive class) | **0.6746** |
+| micro pointwise precision / recall | 0.5109 / 0.9925 |
+| micro pointwise tp / fp / fn | 3,552 / 3,400 / 27 |
+| micro interval F1 | 0.6772 (3,545 of 3,548 gold intervals matched) |
+| per-fold pointwise F1 | 0.9933 / 0.4690 / 0.6685 / 0.5699 / 0.6596 |
+| per-fold median (min–max) | **0.6596** (0.4690–0.9933) |
+
+### Reconstructed theory
+
+Sequential covering reconstructed the gold rule's definitional body on
+**every** fold, decomposed into its disjunctive branches as separate
+clauses (all bodies conjoin `proximity` and `both_open_sea` with a
+speed/stopped condition):
+
+- `both_open_sea AND both_stopped_far AND proximity` — committed on all
+  5 folds (the "stopped" branch);
+- `both_lowspeed AND both_open_sea AND proximity` — committed on all
+  5 folds (the "lowSpeed" branch);
+- folds 0 and 2 additionally committed
+  `both_low_or_stopped AND both_open_sea AND proximity` as a residual
+  mop-up clause (the union relation subsumes both branches);
+- fold 4 committed a transition-flavoured variant of the stopped
+  branch first (`became_proximate AND both_open_sea AND
+  both_stopped_far`), then the two canonical branches.
+
+Stop reasons were the honest ones: "no positives remain in the
+residual" (folds 0, 2) and `select_once` tie-abstention on the residual
+tail (folds 1, 3, 4) — no clause was ever committed below its fold's
+permutation-null gate.
+
+### Reading against the pre-registered ceiling
+
+Section (a) declared, before the run, a vocabulary ceiling of ~0.66
+pointwise F1 with the mechanism "precision ~0.49 at recall ~1.0,
+because the 240 s duration threshold and the tug/pilot exclusion are
+absent from the vocabulary". Measured: precision 0.5109, recall
+0.9925, F1 0.6746 — the prediction is confirmed quantitatively, and
+only 27 of 3,579 positive pair-times were missed. The search extracted
+what the vocabulary can express; the residual false positives (3,400)
+are the pre-identified inexpressible discriminators, not a search
+failure. Per section (a), this number must NOT be compared with the
+published dense-grid figure (0.98). The fold spread (0.469–0.993) is
+the declared pair-concentration effect: the fold holding the top pair
+(33.4% of positive mass, long clean encounters) scores 0.993, while
+folds dominated by many small pairs concentrate the
+duration-threshold false positives.
+
+Any improvement past this baseline must come from added
+expressiveness (duration discriminators in the vocabulary, or
+soft/weighted clauses), not from tuning the search — that is the
+pre-registered interpretation of "ceiling reached".
