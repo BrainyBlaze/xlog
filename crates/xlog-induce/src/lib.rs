@@ -13,12 +13,17 @@
 //! selection, and compact selected-row transfers.
 
 pub mod index;
+pub mod nary;
 pub mod provenance;
 pub mod reduce;
 pub mod score;
 pub mod types;
 mod validate;
 
+pub use nary::{
+    BodyAtomPattern, NaryEnumerationConfig, NaryRulePattern, PatternVar,
+    canonical_binary_pattern, enumerate_patterns,
+};
 pub use provenance::InductionProvenanceRegistry;
 pub use reduce::{reduce_per_topology, ScoredPair};
 pub use types::{
