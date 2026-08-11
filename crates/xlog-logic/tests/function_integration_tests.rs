@@ -4,6 +4,7 @@ use xlog_logic::ast::{ArithExpr, CompOp, CondExpr, FuncBody, FuncDef, FuncParam}
 use xlog_logic::expand::ExpansionContext;
 use xlog_logic::function::{FunctionError, FunctionRegistry};
 use xlog_logic::parse_program as parse;
+use xlog_logic::{expand_program_functions, Compiler};
 
 #[test]
 fn test_full_function_pipeline() {
@@ -35,6 +36,26 @@ fn test_full_function_pipeline() {
 }
 
 #[test]
+fn test_predicate_function_expands_and_compiles() {
+    let src = r#"
+        pred parent(u32, u32).
+        pred answer(u32).
+
+        func get_parent(Child) = P :- parent(Child, P).
+
+        parent(1, 2).
+        answer(P) :- P is get_parent(1).
+        ?- answer(P).
+    "#;
+
+    let program = parse(src).unwrap();
+    let expanded = expand_program_functions(&program, 100).unwrap();
+    let mut compiler = Compiler::new();
+
+    compiler.compile_program(&expanded).unwrap();
+}
+
+#[test]
 fn test_recursive_function_with_base_case() {
     let src = r#"
         func factorial(N) = if N <= 1 then 1 else N * factorial(N - 1).
@@ -59,11 +80,99 @@ fn test_recursive_without_base_case_fails() {
     let result = FunctionRegistry::from_program(&program);
 
     assert!(result.is_err());
-    match result.unwrap_err() {
+    let error = result.unwrap_err();
+    assert!(error.to_string().starts_with("error[E0502]:"), "{error}");
+    match error {
         FunctionError::RecursionWithoutBaseCase { name } => {
             assert_eq!(name, "bad");
         }
         e => panic!("Expected RecursionWithoutBaseCase, got {:?}", e),
+    }
+}
+
+#[test]
+fn wholly_unguarded_recursive_component_reports_first_declaration() {
+    let program = parse(
+        r#"
+        func first(Value) = second(Value).
+        func second(Value) = first(Value).
+        "#,
+    )
+    .unwrap();
+    let error = FunctionRegistry::from_program(&program)
+        .expect_err("unguarded recursive component must fail strict validation");
+
+    assert!(
+        matches!(&error, FunctionError::RecursionWithoutBaseCase { name } if name == "first"),
+        "unexpected error: {error:?}"
+    );
+    assert!(error.to_string().starts_with("error[E0502]:"), "{error}");
+}
+
+#[test]
+fn recursive_component_accepts_a_conditional_member() {
+    let program = parse(
+        r#"
+        func first(Value) = if Value = 0 then 0 else second(Value).
+        func second(Value) = first(Value).
+        "#,
+    )
+    .unwrap();
+
+    FunctionRegistry::from_program(&program)
+        .expect("a recursive component with conditional base-case syntax is valid");
+}
+
+#[test]
+fn test_predicate_body_calls_participate_in_recursion_validation() {
+    let src = r#"
+        func repeat(Value) = Result :- Result is repeat(Value).
+    "#;
+
+    let program = parse(src).unwrap();
+    let result = FunctionRegistry::from_program(&program);
+
+    assert!(matches!(
+        result,
+        Err(FunctionError::RecursionWithoutBaseCase { name }) if name == "repeat"
+    ));
+}
+
+#[test]
+fn test_predicate_body_calls_participate_in_undefined_function_validation() {
+    let src = r#"
+        func lookup(Value) = Result :- Result is missing(Value).
+    "#;
+
+    let program = parse(src).unwrap();
+    let result = FunctionRegistry::from_program(&program);
+
+    let error = result.expect_err("strict validation must reject an undefined call");
+    assert!(matches!(
+        &error,
+        FunctionError::UndefinedFunction { name } if name == "missing"
+    ));
+    assert!(error.to_string().starts_with("error[E0503]:"), "{error}");
+}
+
+#[test]
+fn strict_validation_reports_undefined_calls_in_source_order() {
+    let program = parse(
+        r#"
+        func first(Value) = missing_first(Value) + missing_second(Value).
+        func second(Value) = missing_third(Value).
+        "#,
+    )
+    .unwrap();
+
+    for _ in 0..32 {
+        let error = FunctionRegistry::from_program(&program)
+            .expect_err("strict validation must reject the first undefined callee");
+        assert!(
+            matches!(&error, FunctionError::UndefinedFunction { name } if name == "missing_first"),
+            "unexpected error: {error:?}"
+        );
+        assert!(error.to_string().starts_with("error[E0503]:"), "{error}");
     }
 }
 
@@ -78,7 +187,9 @@ fn test_function_name_conflict_with_predicate() {
     let result = FunctionRegistry::from_program(&program);
 
     assert!(result.is_err());
-    match result.unwrap_err() {
+    let error = result.unwrap_err();
+    assert!(error.to_string().starts_with("error[E0505]:"), "{error}");
+    match error {
         FunctionError::NameConflict { name } => {
             assert_eq!(name, "foo");
         }
@@ -159,7 +270,9 @@ fn test_duplicate_function_error() {
     let result = FunctionRegistry::from_program(&program);
 
     assert!(result.is_err());
-    match result.unwrap_err() {
+    let error = result.unwrap_err();
+    assert!(error.to_string().starts_with("error[E0501]:"), "{error}");
+    match error {
         FunctionError::DuplicateDefinition { name } => {
             assert_eq!(name, "foo");
         }
