@@ -117,29 +117,45 @@ __device__ inline uint32_t ilp_exact_nary_covers(
 
 // Score every pattern of the batch: block = pattern, threads stride the
 // positive and negative example tuples, block-reduce the local counts.
+//
+// The pattern batch rides as ONE packed u32 buffer (the launch ABI caps
+// the argument tuple, and six parallel arrays would blow it). Section
+// layout, with P = params[0] patterns and A = params[1] atoms:
+//   batch[0        .. P)        body_offset
+//   batch[P        .. 2P)       body_len
+//   batch[2P       .. 2P+A)     atom_candidate_slot
+//   batch[2P+A     .. 2P+2A)    atom_arity
+//   batch[2P+2A    .. 2P+3A)    atom_binding_offset
+//   batch[2P+3A    .. ]         binding_codes
+// params = [num_patterns, num_atoms, num_pos, num_neg, head_arity].
+// The host launcher (provider/ilp_exact_nary.rs) packs exactly this.
 extern "C" __global__ void ilp_exact_nary_score(
-    // Pattern batch (flattened; see nary_layout.rs).
-    const uint32_t* body_offset,
-    const uint32_t* body_len,
-    const uint32_t* atom_candidate_slot,
-    const uint32_t* atom_arity,
-    const uint32_t* atom_binding_offset,
-    const uint32_t* binding_codes,
-    uint32_t num_patterns,
+    const uint32_t* batch,
+    const uint32_t* params,
     // Candidate relations (concatenated row-major u64 rows).
     const uint64_t* cand_values,
     const uint32_t* cand_value_offset,
     const uint32_t* cand_rows,
     // Example tuples (row-major, stride = head_arity).
     const uint64_t* pos_values,
-    uint32_t num_pos,
     const uint64_t* neg_values,
-    uint32_t num_neg,
-    uint32_t head_arity,
     // Outputs, one slot per pattern.
     uint32_t* pos_covered,
     uint32_t* neg_covered
 ) {
+    uint32_t num_patterns = params[0];
+    uint32_t num_atoms = params[1];
+    uint32_t num_pos = params[2];
+    uint32_t num_neg = params[3];
+    uint32_t head_arity = params[4];
+
+    const uint32_t* body_offset = batch;
+    const uint32_t* body_len = batch + num_patterns;
+    const uint32_t* atom_candidate_slot = batch + 2u * num_patterns;
+    const uint32_t* atom_arity = atom_candidate_slot + num_atoms;
+    const uint32_t* atom_binding_offset = atom_arity + num_atoms;
+    const uint32_t* binding_codes = atom_binding_offset + num_atoms;
+
     uint32_t pattern = blockIdx.x;
     if (pattern >= num_patterns) return;
     uint32_t tid = threadIdx.x;

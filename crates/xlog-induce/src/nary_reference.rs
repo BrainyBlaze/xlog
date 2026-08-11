@@ -155,12 +155,8 @@ mod tests {
             for left in 0..2u32 {
                 for right in 0..2u32 {
                     let pattern = canonical_binary_pattern(topology, left, right);
-                    let coverage = score_pattern_reference(
-                        &pattern,
-                        &candidates,
-                        &positives,
-                        &negatives,
-                    );
+                    let coverage =
+                        score_pattern_reference(&pattern, &candidates, &positives, &negatives);
                     assert_eq!(
                         coverage.negatives_covered, 0,
                         "{topology:?}({left},{right}) covered a negative"
@@ -218,12 +214,7 @@ mod tests {
         // L(X,Z), R(X,Y) — L's second column can be anything.
         let l = pairs(&[(1, 999)]);
         let r = pairs(&[(1, 5)]);
-        let coverage = score_pattern_reference(
-            &pattern,
-            &[l, r],
-            &[vec![1u64, 5u64]],
-            &[],
-        );
+        let coverage = score_pattern_reference(&pattern, &[l, r], &[vec![1u64, 5u64]], &[]);
         assert_eq!(coverage.positives_covered, 1);
     }
 
@@ -249,8 +240,7 @@ mod tests {
         };
         let t = pairs(&[(1, 8), (1, 9)]);
         let p = pairs(&[(9, 2)]);
-        let coverage =
-            score_pattern_reference(&pattern, &[t, p], &[vec![1u64, 2u64]], &[]);
+        let coverage = score_pattern_reference(&pattern, &[t, p], &[vec![1u64, 2u64]], &[]);
         assert_eq!(coverage.positives_covered, 1);
     }
 }

@@ -78,11 +78,7 @@ impl NaryRulePattern {
     ///    body — a head position no body atom touches cannot be scored by
     ///    coverage and is refused as an unsafe variable rather than scored
     ///    vacuously.
-    pub fn validate(
-        &self,
-        candidate_arities: &[u8],
-        config: &NaryEnumerationConfig,
-    ) -> Result<()> {
+    pub fn validate(&self, candidate_arities: &[u8], config: &NaryEnumerationConfig) -> Result<()> {
         if self.head_arity == 0 {
             return Err(XlogError::Type(
                 "nary pattern: head arity must be at least 1".into(),
@@ -351,7 +347,9 @@ fn enumerate_bindings(
     // Canonical growth: a join slot may reuse any join already introduced or
     // introduce exactly the next unused index, never a later one.
     let introduced_so_far = joins_used.max(bindings_join_watermark(bindings, joins_used));
-    let reachable = introduced_so_far.saturating_add(1).min(config.max_join_vars);
+    let reachable = introduced_so_far
+        .saturating_add(1)
+        .min(config.max_join_vars);
     for join in 0..reachable {
         bindings.push(PatternVar::Join(join));
         enumerate_bindings(

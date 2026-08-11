@@ -30,6 +30,7 @@ mod fj_delta_sparse;
 mod groupby;
 mod ilp;
 mod ilp_exact;
+mod ilp_exact_nary;
 mod io;
 mod kernel_loading;
 pub mod kernel_paths;
@@ -656,6 +657,11 @@ pub mod ilp_exact_kernels {
     pub const ILP_EXACT_SCORE_CHAIN_SMEM: &str = "ilp_exact_score_chain_smem";
     pub const ILP_EXACT_SCORE_CHAIN_SMEM_U32: &str = "ilp_exact_score_chain_smem_u32";
     pub const ILP_EXACT_SELECT_TOPK: &str = "ilp_exact_select_topk";
+}
+
+/// Kernel function names in the n-ary exact-induction module.
+pub mod ilp_exact_nary_kernels {
+    pub const ILP_EXACT_NARY_SCORE: &str = "ilp_exact_nary_score";
 }
 
 /// Kernel function names in the PIR interning module.

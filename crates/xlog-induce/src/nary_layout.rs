@@ -33,11 +33,28 @@ const JOIN_FLAG: u32 = 1 << 31;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NaryLayoutError {
     EmptyBatch,
-    EmptyBody { pattern: usize },
-    TooManyBodyAtoms { pattern: usize, atoms: usize },
-    AtomArityOutOfRange { pattern: usize, atom: usize, arity: usize },
-    JoinIndexOutOfRange { pattern: usize, atom: usize, join: u8 },
-    HeadIndexOutOfRange { pattern: usize, atom: usize, head: u8 },
+    EmptyBody {
+        pattern: usize,
+    },
+    TooManyBodyAtoms {
+        pattern: usize,
+        atoms: usize,
+    },
+    AtomArityOutOfRange {
+        pattern: usize,
+        atom: usize,
+        arity: usize,
+    },
+    JoinIndexOutOfRange {
+        pattern: usize,
+        atom: usize,
+        join: u8,
+    },
+    HeadIndexOutOfRange {
+        pattern: usize,
+        atom: usize,
+        head: u8,
+    },
 }
 
 impl std::fmt::Display for NaryLayoutError {
@@ -52,17 +69,29 @@ impl std::fmt::Display for NaryLayoutError {
                 "pattern {pattern} has {atoms} body atoms; device bound is \
                  {NARY_MAX_BODY_ATOMS}"
             ),
-            Self::AtomArityOutOfRange { pattern, atom, arity } => write!(
+            Self::AtomArityOutOfRange {
+                pattern,
+                atom,
+                arity,
+            } => write!(
                 f,
                 "pattern {pattern} atom {atom} arity {arity} outside \
                  1..={NARY_MAX_ATOM_ARITY}"
             ),
-            Self::JoinIndexOutOfRange { pattern, atom, join } => write!(
+            Self::JoinIndexOutOfRange {
+                pattern,
+                atom,
+                join,
+            } => write!(
                 f,
                 "pattern {pattern} atom {atom} join index {join} >= device \
                  bound {NARY_MAX_JOIN_VARS}"
             ),
-            Self::HeadIndexOutOfRange { pattern, atom, head } => write!(
+            Self::HeadIndexOutOfRange {
+                pattern,
+                atom,
+                head,
+            } => write!(
                 f,
                 "pattern {pattern} atom {atom} head index {head} >= the \
                  pattern's head arity"
@@ -316,9 +345,7 @@ pub fn score_pattern_flat_coverage(
     let count = |examples: &[Vec<u64>]| -> u32 {
         examples
             .iter()
-            .filter(|example| {
-                score_pattern_flat(layout, pattern_index, candidates, example)
-            })
+            .filter(|example| score_pattern_flat(layout, pattern_index, candidates, example))
             .count() as u32
     };
     (count(positives), count(negatives))
@@ -381,12 +408,8 @@ mod tests {
         }
         let layout = flatten_patterns(&patterns).expect("bounded batch flattens");
         for (index, pattern) in patterns.iter().enumerate() {
-            let reference = score_pattern_reference(
-                pattern,
-                &host_candidates,
-                &positives,
-                &negatives,
-            );
+            let reference =
+                score_pattern_reference(pattern, &host_candidates, &positives, &negatives);
             let (pos, neg) = score_pattern_flat_coverage(
                 &layout,
                 index,
@@ -430,16 +453,16 @@ mod tests {
             flat_pairs(&binary_rows),
         ];
         let host_candidates = vec![
-            HostRelation { rows: ternary_rows.clone() },
+            HostRelation {
+                rows: ternary_rows.clone(),
+            },
             host_pairs(&binary_rows),
         ];
         let positives = vec![vec![1u64, 2, 3], vec![4, 5, 6], vec![1, 2, 7]];
 
         let layout = flatten_patterns(std::slice::from_ref(&pattern)).unwrap();
-        let reference =
-            score_pattern_reference(&pattern, &host_candidates, &positives, &[]);
-        let (pos, neg) =
-            score_pattern_flat_coverage(&layout, 0, &flat_candidates, &positives, &[]);
+        let reference = score_pattern_reference(&pattern, &host_candidates, &positives, &[]);
+        let (pos, neg) = score_pattern_flat_coverage(&layout, 0, &flat_candidates, &positives, &[]);
         assert_eq!(pos, reference.positives_covered);
         assert_eq!(neg, reference.negatives_covered);
         assert_eq!(pos, 1);
@@ -495,7 +518,10 @@ mod tests {
         use PatternVar::{Head, Join};
         assert_eq!(flatten_patterns(&[]), Err(NaryLayoutError::EmptyBatch));
 
-        let empty_body = NaryRulePattern { head_arity: 2, body: vec![] };
+        let empty_body = NaryRulePattern {
+            head_arity: 2,
+            body: vec![],
+        };
         assert_eq!(
             flatten_patterns(std::slice::from_ref(&empty_body)),
             Err(NaryLayoutError::EmptyBody { pattern: 0 })
@@ -553,7 +579,7 @@ mod tests {
 
     /// Offsets must tile the flat arrays exactly (no gaps, no overlap).
     #[test]
-    fn layout_offsets_tile_the_flat_arrays()  {
+    fn layout_offsets_tile_the_flat_arrays() {
         let patterns = vec![
             canonical_binary_pattern(Topology::Chain, 0, 1),
             canonical_binary_pattern(Topology::Star, 1, 0),

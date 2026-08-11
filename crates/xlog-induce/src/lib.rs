@@ -23,8 +23,8 @@ pub mod types;
 mod validate;
 
 pub use nary::{
-    BodyAtomPattern, NaryEnumerationConfig, NaryRulePattern, PatternVar,
-    canonical_binary_pattern, enumerate_patterns,
+    canonical_binary_pattern, enumerate_patterns, BodyAtomPattern, NaryEnumerationConfig,
+    NaryRulePattern, PatternVar,
 };
 pub use provenance::InductionProvenanceRegistry;
 pub use reduce::{reduce_per_topology, ScoredPair};
