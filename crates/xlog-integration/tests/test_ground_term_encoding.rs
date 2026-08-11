@@ -1,4 +1,5 @@
-use std::fs;
+use std::fs::{self, OpenOptions};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -11,13 +12,24 @@ struct TempProgram {
 
 impl TempProgram {
     fn new(source: &str) -> Self {
-        let id = NEXT_PROGRAM_ID.fetch_add(1, Ordering::Relaxed);
-        let path = std::env::temp_dir().join(format!(
-            "xlog-ground-term-encoding-{}-{id}.xlog",
-            std::process::id()
-        ));
-        fs::write(&path, source).expect("write temporary XLOG program");
-        Self { path }
+        loop {
+            let id = NEXT_PROGRAM_ID.fetch_add(1, Ordering::Relaxed);
+            let path = std::env::temp_dir().join(format!(
+                "xlog-ground-term-encoding-{}-{id}.xlog",
+                std::process::id()
+            ));
+            let mut file = match OpenOptions::new().write(true).create_new(true).open(&path) {
+                Ok(file) => file,
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(error) => panic!("create temporary XLOG program: {error}"),
+            };
+            if let Err(error) = file.write_all(source.as_bytes()) {
+                drop(file);
+                let _ = fs::remove_file(&path);
+                panic!("write temporary XLOG program: {error}");
+            }
+            return Self { path };
+        }
     }
 
     fn path(&self) -> &Path {
