@@ -1,7 +1,8 @@
 use tempfile::TempDir;
 use xlog_ir::eir::{EirBodyLiteral, EirTerm};
-use xlog_logic::ast::{ArithExpr, BodyLiteral, Program, Rule, Term};
-use xlog_logic::function::FunctionError;
+use xlog_logic::ast::{ArithExpr, BodyLiteral, FuncBody, Program, Rule, Term};
+use xlog_logic::expand::ExpansionContext;
+use xlog_logic::function::{FunctionError, FunctionRegistry};
 use xlog_logic::resolver::ModuleResolver;
 use xlog_logic::{build_eir, expand_program_functions, parse_program, Compiler};
 
@@ -31,6 +32,38 @@ fn variable(term: &Term) -> &str {
         Term::Variable(name) => name,
         other => panic!("expected variable, got {other:?}"),
     }
+}
+
+fn compile_acyclic_function_chain(step_body: impl Fn(usize) -> String) {
+    use std::fmt::Write as _;
+
+    const LAST_FUNCTION: usize = 999;
+    let mut source = String::from(
+        "pred input(i64).\n\
+         pred answer(i64).\n\
+         input(1).\n\
+         func chain_0(X) = X.\n",
+    );
+    for index in 1..=LAST_FUNCTION {
+        writeln!(source, "func chain_{index}(X) = {}.", step_body(index))
+            .expect("write generated function");
+    }
+    writeln!(
+        source,
+        "answer(Y) :- input(X), Y is chain_{LAST_FUNCTION}(X).\n?- answer(Y)."
+    )
+    .expect("write chain caller");
+
+    let program = parse_program(&source).expect("parse a 1000-call acyclic chain");
+    let expanded =
+        expand_program_functions(&program, 1000).expect("expand a 1000-call acyclic chain");
+    let mut compiler = Compiler::new();
+    compiler
+        .compile_program(&expanded)
+        .expect("compile a 1000-call acyclic chain");
+    drop(compiler);
+    drop(expanded);
+    drop(program);
 }
 
 #[test]
@@ -214,6 +247,46 @@ fn predicate_function_substitution_reaches_nested_terms() {
 }
 
 #[test]
+fn predicate_function_substitutes_deep_compound_terms_without_stack_growth() {
+    const TERM_DEPTH: usize = 999;
+    let mut program = parse_program(
+        r#"
+        func lookup(Value) = Result :- wrapped(Value, Result).
+        output(Result) :- Result is lookup(7).
+        "#,
+    )
+    .expect("parse predicate function");
+    let FuncBody::Predicate { body, .. } = &mut program.functions[0].body else {
+        panic!("expected predicate function body")
+    };
+    let BodyLiteral::Positive(atom) = &mut body[0] else {
+        panic!("expected relational predicate body")
+    };
+    let mut nested = Term::Variable("Value".to_string());
+    for _ in 0..TERM_DEPTH {
+        nested = Term::Compound {
+            functor: "node".to_string(),
+            args: vec![nested],
+        };
+    }
+    atom.terms[0] = nested;
+
+    let expanded = expand_program_functions(&program, 100).expect("substitute deep compound term");
+    let BodyLiteral::Positive(atom) = &proper_rule(&expanded, "output").body[0] else {
+        panic!("expected inserted relational literal")
+    };
+    let mut term = &atom.terms[0];
+    for _ in 0..TERM_DEPTH {
+        let Term::Compound { functor, args } = term else {
+            panic!("expected nested compound term")
+        };
+        assert_eq!(functor, "node");
+        term = &args[0];
+    }
+    assert!(matches!(term, Term::Integer(7)));
+}
+
+#[test]
 fn parameter_result_alias_preserves_the_call_argument() {
     let expanded = compile_expanded(
         r#"
@@ -256,6 +329,7 @@ fn complex_predicate_argument_in_a_relational_term_is_rejected() {
         ),
         "{error}"
     );
+    assert!(error.to_string().starts_with("error[E0510]:"), "{error}");
 }
 
 #[test]
@@ -277,6 +351,7 @@ fn predicate_call_in_a_conditional_branch_is_rejected() {
             .contains("cannot be expanded inside a conditional branch"),
         "{error}"
     );
+    assert!(error.to_string().starts_with("error[E0511]:"), "{error}");
 }
 
 #[test]
@@ -296,6 +371,7 @@ fn non_variable_predicate_binding_target_is_rejected() {
             .contains("cannot substitute a non-variable argument for binding target `Value`"),
         "{error}"
     );
+    assert!(error.to_string().starts_with("error[E0512]:"), "{error}");
 }
 
 #[test]
@@ -336,6 +412,88 @@ fn indirect_predicate_function_recursion_obeys_the_expansion_limit() {
 }
 
 #[test]
+fn conditional_recursion_still_obeys_the_expansion_limit() {
+    let error = expand(
+        r#"
+        func repeat(Value) = if Value = 0 then 0 else repeat(Value).
+        answer(Result) :- Result is repeat(1).
+        "#,
+        3,
+    )
+    .expect_err("eager conditional recursion must hit expansion limit");
+
+    assert!(matches!(
+        &error,
+        FunctionError::MaxRecursionDepth { name, depth }
+            if name == "repeat" && *depth == 3
+    ));
+    assert!(error.to_string().starts_with("error[E0504]:"), "{error}");
+}
+
+#[test]
+fn indirect_conditional_recursion_reports_the_call_at_the_configured_limit() {
+    let error = expand(
+        r#"
+        func first(Value) = if Value = 0 then 0 else second(Value).
+        func second(Value) = first(Value).
+        answer(Result) :- Result is first(1).
+        "#,
+        3,
+    )
+    .expect_err("eager indirect recursion must hit the expansion limit");
+
+    assert!(matches!(
+        error,
+        FunctionError::MaxRecursionDepth { name, depth }
+            if name == "second" && depth == 3
+    ));
+}
+
+#[test]
+fn expansion_context_is_reusable_after_a_cycle_error() {
+    let program = parse_program(
+        r#"
+        func repeat(Value) = if Value = 0 then 0 else repeat(Value).
+        func identity(Value) = Value.
+        "#,
+    )
+    .expect("parse functions");
+    let registry = FunctionRegistry::from_program(&program).expect("validate functions");
+    let mut context = ExpansionContext::new(&registry, 1000);
+
+    let error = context
+        .expand_call("repeat", &[ArithExpr::Integer(1)])
+        .expect_err("cycle must fail");
+    assert!(matches!(error, FunctionError::MaxRecursionDepth { .. }));
+    assert_eq!(
+        context
+            .expand_call("identity", &[ArithExpr::Integer(7)])
+            .expect("context state must be restored"),
+        ArithExpr::Integer(7)
+    );
+}
+
+#[test]
+fn forwarding_chain_at_the_configured_limit_compiles_without_stack_growth() {
+    compile_acyclic_function_chain(|index| format!("chain_{}(X)", index - 1));
+}
+
+#[test]
+fn non_tail_chain_at_the_configured_limit_compiles_without_stack_growth() {
+    compile_acyclic_function_chain(|index| format!("chain_{}(X) + 1", index - 1));
+}
+
+#[test]
+fn nested_argument_chain_at_the_configured_limit_compiles_without_stack_growth() {
+    compile_acyclic_function_chain(|index| format!("chain_{}(X + 1)", index - 1));
+}
+
+#[test]
+fn conditional_chain_at_the_configured_limit_compiles_without_stack_growth() {
+    compile_acyclic_function_chain(|index| format!("if X = 0 then X else chain_{}(X)", index - 1));
+}
+
+#[test]
 fn predicate_function_arity_mismatch_is_reported() {
     let error = expand(
         r#"
@@ -352,6 +510,7 @@ fn predicate_function_arity_mismatch_is_reported() {
             .contains("function `get_parent` expects 1 argument but received 2"),
         "{error}"
     );
+    assert!(error.to_string().starts_with("error[E0508]:"), "{error}");
 }
 
 #[test]
@@ -377,6 +536,62 @@ fn arity_is_checked_before_expanding_function_arguments() {
         ),
         "unexpected error: {error:?}"
     );
+}
+
+#[test]
+fn expression_only_api_rejects_predicate_bodies_with_e0509() {
+    let program = parse_program(
+        r#"
+        func get_parent(Child) = Parent :- parent(Child, Parent).
+        "#,
+    )
+    .expect("parse predicate function");
+    let mut registry = FunctionRegistry::new();
+    registry
+        .register(program.functions[0].clone())
+        .expect("register predicate function");
+    let mut context = ExpansionContext::new(&registry, 100);
+    let error = context
+        .expand_call("get_parent", &[ArithExpr::Integer(1)])
+        .expect_err("expression-only expansion must reject relational literals");
+
+    assert!(
+        matches!(&error, FunctionError::PredicateBodyRequiresRuleContext { name } if name == "get_parent"),
+        "unexpected error: {error:?}"
+    );
+    assert!(error.to_string().starts_with("error[E0509]:"), "{error}");
+}
+
+#[test]
+fn unused_invalid_function_definitions_do_not_block_expansion() {
+    let source = r#"
+        pred conflict(u32).
+        func first(Value) = missing_first(Value).
+        func second(Value) = missing_second(Value).
+        func repeat(Value) = repeat(Value).
+        func conflict(Value) = Value.
+        answer(1).
+    "#;
+
+    expand(source, 100).expect("unused invalid definitions are validated only by the registry API");
+}
+
+#[test]
+fn used_undefined_function_reports_e0503() {
+    let error = expand(
+        r#"
+        func lookup(Value) = missing(Value).
+        answer(Result) :- Result is lookup(1).
+        "#,
+        100,
+    )
+    .expect_err("a called undefined function must fail expansion");
+
+    assert!(
+        matches!(&error, FunctionError::UndefinedFunction { name } if name == "missing"),
+        "unexpected error: {error:?}"
+    );
+    assert!(error.to_string().starts_with("error[E0503]:"), "{error}");
 }
 
 #[test]

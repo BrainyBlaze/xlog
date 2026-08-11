@@ -168,11 +168,24 @@ private func helper(X: i64) -> i64 = X + 1.
 
 ### Expansion limits
 
-Every expansion is bounded by `#pragma max_recursion_depth`. Function normalization
-expands both conditional branches before execution; it does not evaluate a
-data-dependent base case while expanding. A cyclic call chain therefore fails at the
-configured depth instead of acting as a runtime loop, even when its syntax contains a
-conditional branch that looks like a base case.
+Production compilation registers function declarations in source order, then expands
+only functions reached from calls in ordinary rules or constraints. Unused definitions
+whose bodies are recursive, call an undefined function, or share a name with a predicate
+do not block this demand-driven path. Duplicate function declarations are still rejected.
+
+Every call-site expansion is bounded by `#pragma max_recursion_depth`. When expansion
+tries to enter another user-defined call while already at that depth, it reports
+`error[E0504]`. Function normalization expands both conditional branches before
+execution; it does not evaluate a data-dependent base case while expanding. A reachable
+cycle therefore reaches `E0504` instead of acting as a runtime loop, whether its source
+is wholly unguarded or includes a conditional branch that looks like a base case.
+
+Rust callers that need to audit every declaration can use
+`FunctionRegistry::from_program`. This strict validation walks definitions and their
+callees in source order. It rejects a wholly unguarded recursive strongly connected
+component (SCC) with `error[E0502]`; an SCC passes that check when at least one member has
+a conditional body. Passing strict validation does not make expansion data-dependent, so
+a used guarded cycle can still reach `E0504`.
 
 ### Calling a function
 

@@ -1178,9 +1178,23 @@ changing guarded semantics.
 
 ### Recursive definitions
 
-Expansion is eager across both conditional branches rather than data-dependent, so a
-cyclic call chain reaches the configured expansion-depth error even when a conditional
-branch looks like a base case. Function recursion is not a runtime looping construct.
+Production compilation registers function declarations in source order and expands only
+definitions reachable from ordinary rule or constraint calls. It rejects duplicate
+function declarations, but unused definitions with recursion, undefined callees, or a
+predicate-name conflict do not block this demand-driven path.
+
+Expansion is eager across both conditional branches rather than data-dependent. If it
+tries to enter another user-defined call while already at the depth configured by
+`#pragma max_recursion_depth`, it reports `error[E0504]`. A reachable cyclic call chain
+therefore reaches `E0504` whether it is wholly unguarded or contains a conditional branch
+that looks like a base case. Function recursion is not a runtime looping construct.
+
+The Rust library also exposes strict whole-program validation through
+`FunctionRegistry::from_program`. It visits every definition in declaration order and
+callees in source order. A recursive strongly connected component (SCC) with no
+conditional-bodied member is rejected with `error[E0502]`; a conditional-bodied member
+lets the SCC pass that structural check. Because later expansion still visits both
+branches, a used guarded SCC can pass strict validation and then reach `E0504`.
 
 ### Using Functions in Rules
 
