@@ -279,6 +279,10 @@ fn test_xlog_prob_rejects_imported_export_with_hidden_support() {
     assert!(!output.status.success(), "xlog prob unexpectedly succeeded");
     assert!(output.stdout.is_empty(), "unexpected stdout: {output:?}");
     let stderr = String::from_utf8(output.stderr).expect("utf8 stderr");
+    assert!(
+        stderr.contains("Error: Execution(\"Module resolution failed"),
+        "{stderr}"
+    );
     assert!(stderr.contains("Module resolution failed"), "{stderr}");
     assert!(stderr.contains("error[E0406]"), "{stderr}");
     assert!(stderr.contains("`visible`"), "{stderr}");

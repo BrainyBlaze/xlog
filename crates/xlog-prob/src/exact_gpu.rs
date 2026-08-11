@@ -1,6 +1,6 @@
 //! GPU-only exact compilation helpers (no host reads in this module).
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 
 use cudarc::driver::DeviceSlice;
@@ -18,7 +18,7 @@ use crate::compilation::{
 };
 use crate::exact::{
     build_weight_sources, collect_random_vars_device, default_cache_config, default_compile_config,
-    upload_f64, upload_u32, upload_u8, GpuConfig,
+    upload_f64, upload_u32, upload_u8, validated_evidence_entries, GpuConfig,
 };
 use crate::provenance::{GroundAtom, Provenance};
 
@@ -137,25 +137,15 @@ pub(crate) fn compile_provenance_gpu_only(
 
     let mut roots_set: HashSet<crate::pir::PirNodeId> = HashSet::new();
     let mut evidence_formulas: Vec<(crate::pir::PirNodeId, bool, GroundAtom)> = Vec::new();
-    let mut evidence_atoms: HashMap<GroundAtom, bool> = HashMap::new();
-    for (atom, value) in &provenance.evidence {
-        if let Some(prev) = evidence_atoms.insert(atom.clone(), *value) {
-            if prev != *value {
-                return Err(XlogError::Execution(format!(
-                    "Exact inference error: conflicting evidence for {}",
-                    display_atom(atom)
-                )));
-            }
-        }
-
+    for (atom, value) in validated_evidence_entries(provenance)? {
         let formula = provenance.query_formula(&atom.predicate, &atom.args);
         match formula {
             Some(id) => {
                 roots_set.insert(id);
-                evidence_formulas.push((id, *value, atom.clone()));
+                evidence_formulas.push((id, value, atom.clone()));
             }
             None => {
-                if *value {
+                if value {
                     return Err(XlogError::Execution(format!(
                         "Exact inference error: evidence atom is never derivable: {}",
                         display_atom(atom)

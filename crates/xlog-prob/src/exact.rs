@@ -1504,26 +1504,15 @@ impl ExactDdnnfProgram {
         let mut roots_set: HashSet<crate::pir::PirNodeId> = HashSet::new();
 
         let mut evidence_formulas: Vec<(crate::pir::PirNodeId, bool, GroundAtom)> = Vec::new();
-        let mut evidence_atoms: std::collections::HashMap<GroundAtom, bool> =
-            std::collections::HashMap::new();
-        for (atom, value) in &provenance.evidence {
-            if let Some(prev) = evidence_atoms.insert(atom.clone(), *value) {
-                if prev != *value {
-                    return Err(XlogError::Execution(format!(
-                        "Exact inference error: conflicting evidence for {}",
-                        display_atom(atom)
-                    )));
-                }
-            }
-
+        for (atom, value) in validated_evidence_entries(&provenance)? {
             let formula = provenance.query_formula(&atom.predicate, &atom.args);
             match formula {
                 Some(id) => {
                     roots_set.insert(id);
-                    evidence_formulas.push((id, *value, atom.clone()));
+                    evidence_formulas.push((id, value, atom.clone()));
                 }
                 None => {
-                    if *value {
+                    if value {
                         return Err(XlogError::Execution(format!(
                             "Exact inference error: evidence atom is never derivable: {}",
                             display_atom(atom)
@@ -2543,10 +2532,46 @@ fn display_atom(atom: &GroundAtom) -> String {
     }
 }
 
+pub(crate) fn validated_evidence_entries(
+    provenance: &Provenance,
+) -> Result<Vec<(&GroundAtom, bool)>> {
+    let mut evidence_atoms: HashMap<GroundAtom, bool> = HashMap::new();
+    let mut entries = Vec::with_capacity(provenance.evidence.len());
+    for (atom, value) in &provenance.evidence {
+        let canonical_atom = provenance.canonical_atom(atom)?;
+        if let Some(previous) = evidence_atoms.insert(canonical_atom, *value) {
+            if previous != *value {
+                return Err(XlogError::Execution(format!(
+                    "Exact inference error: conflicting evidence for {}",
+                    display_atom(atom)
+                )));
+            }
+            continue;
+        }
+        entries.push((atom, *value));
+    }
+    Ok(entries)
+}
+
 #[cfg(all(test, feature = "host-io"))]
 mod tests {
     use super::*;
     use xlog_cuda::CudaDevice;
+
+    #[test]
+    fn exact_evidence_entries_deduplicate_schema_equivalent_values() {
+        let provenance = extract_from_source(
+            "0.5::gate(\"alpha\").\n\
+             evidence(gate(\"alpha\"), true).\n\
+             evidence(gate(alpha), true).\n\
+             query(gate(\"alpha\")).\n",
+        )
+        .expect("extract equivalent symbol evidence");
+
+        let evidence = validated_evidence_entries(&provenance).expect("validate evidence");
+        assert_eq!(evidence.len(), 1);
+        assert!(evidence[0].1);
+    }
 
     #[test]
     fn test_exact_negation_probability() {

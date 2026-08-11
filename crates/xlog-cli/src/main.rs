@@ -9,9 +9,9 @@ use arrow::csv::WriterBuilder;
 use arrow::util::pretty::pretty_format_batches;
 use xlog_core::{symbol, MemoryBudget, Result, XlogError};
 use xlog_cuda::{CudaDevice, CudaKernelProvider, GpuMemoryManager};
-use xlog_gpu::logic::LogicProgram;
+use xlog_gpu::logic::{normalize_program_for_execution, LogicProgram};
 use xlog_ir::{EirBodyLiteral, EirTerm};
-use xlog_logic::ast::{BodyLiteral, CompOp, ProbEngine, Program, Term};
+use xlog_logic::ast::{BodyLiteral, ProbEngine, Program};
 use xlog_logic::compile::load_modules;
 #[cfg(feature = "host-io")]
 use xlog_logic::parse_program;
@@ -26,6 +26,13 @@ use xlog_prob::exact::GpuConfig;
 #[cfg(feature = "host-io")]
 use xlog_prob::mc::{McEvalConfig, McProgram, McSamplingMethod};
 use xlog_prob::provenance::{AggregateLiftReport, Value};
+
+mod generated_rule_diagnostics;
+
+use generated_rule_diagnostics::{
+    explain_generated_rule_diagnostics, print_generated_rule_diagnostics_json,
+    GeneratedRuleDiagnostic,
+};
 
 #[derive(Parser)]
 #[command(author, version, about = "XLOG CLI")]
@@ -146,6 +153,9 @@ struct WatchArgs {
     explain: bool,
     #[arg(long)]
     once: bool,
+    /// Additional directories to search for modules (colon-separated)
+    #[arg(long, value_delimiter = ':')]
+    module_path: Vec<PathBuf>,
 }
 
 #[derive(Copy, Clone, ValueEnum)]
@@ -216,14 +226,26 @@ fn resolve_explain_imports(
     source_path: &Path,
     module_path: Vec<PathBuf>,
 ) -> Result<IncrementalParseResult> {
-    parsed.program = resolve_program_imports(parsed.program, source_path, module_path)?;
+    parsed.program = resolve_program_imports(
+        parsed.program,
+        source_path,
+        module_path,
+        ModuleMergeErrorKind::Execution,
+    )?;
     Ok(parsed)
+}
+
+#[derive(Clone, Copy)]
+enum ModuleMergeErrorKind {
+    Execution,
+    Compilation,
 }
 
 fn resolve_program_imports(
     program: Program,
     source_path: &Path,
     module_path: Vec<PathBuf>,
+    merge_error_kind: ModuleMergeErrorKind,
 ) -> Result<Program> {
     if program.imports.is_empty() {
         return Ok(program);
@@ -233,7 +255,14 @@ fn resolve_program_imports(
     warn_ignored_import_pragmas(&resolver);
     resolver
         .merge_imports(program)
-        .map_err(|e| XlogError::Execution(format!("Module resolution failed: {}", e)))
+        .map_err(|error| match merge_error_kind {
+            ModuleMergeErrorKind::Execution => {
+                XlogError::Execution(format!("Module resolution failed: {error}"))
+            }
+            ModuleMergeErrorKind::Compilation => {
+                XlogError::Compilation(format!("Module resolution failed: {error}"))
+            }
+        })
 }
 
 /// Surface pragmas declared in imported modules on stderr. Pragmas are
@@ -273,6 +302,11 @@ fn watch(args: WatchArgs) -> Result<()> {
             XlogError::Execution(format!("Failed to read {}: {}", args.source.display(), e))
         })?;
         let parsed = parser_session.parse_path(&args.source, &source)?;
+        let parsed = if args.explain {
+            resolve_explain_imports(parsed, &args.source, args.module_path.clone())?
+        } else {
+            parsed
+        };
         println!(
             "watch: statements={} cache_hits={} cache_misses={}",
             parsed.stats.statement_count, parsed.stats.hits, parsed.stats.misses
@@ -296,59 +330,183 @@ struct ExplainReport {
     magic_sets: MagicSetReport,
     aggregate_lifting: Vec<AggregateLiftReport>,
     generated_rule_diagnostics: Vec<GeneratedRuleDiagnostic>,
+    generated_rule_diagnostics_status: String,
+    generated_rule_diagnostics_reason: Option<String>,
     rule_provenance: Vec<RuleProvenance>,
     proof_traces: Vec<QueryProofTrace>,
     stratification_status: String,
+    stratification_reason: Option<String>,
     stratification_count: usize,
+    aggregate_lifting_status: String,
+    aggregate_lifting_reason: Option<String>,
     rir_status: String,
+    rir_reason: Option<String>,
     rir_sccs: usize,
     optimizer_status: String,
+    optimizer_reason: Option<String>,
     optimizer_memory_peak: u64,
+    wcoj_status: String,
+    wcoj_reason: Option<String>,
 }
 
 fn build_explain_report(
     parsed: xlog_logic::IncrementalParseResult,
     source_path: Option<&Path>,
 ) -> Result<ExplainReport> {
-    let program = parsed.program;
-    let magic_rewrite = rewrite_magic_sets(&program)?;
-    let rule_provenance = xlog_logic::rule_provenance(&program, Some(&magic_rewrite.program));
-    let proof_traces = xlog_logic::query_proof_traces(&program, &rule_provenance);
-    let magic_sets = magic_rewrite.report;
-    let aggregate_lifting = explain_aggregate_lifting(&program)?;
-    let generated_rule_diagnostics = explain_generated_rule_diagnostics(&program, source_path);
-    let epistemic = explain_epistemic(&program);
-    let (stratification_status, stratification_count) = match stratify(&program) {
-        Ok(strata) => ("ok".to_string(), strata.len()),
-        Err(err) => (format!("error: {}", err), 0),
-    };
-    let mut compiler = Compiler::new();
-    let (rir_status, rir_sccs, optimizer_status, optimizer_memory_peak) =
-        match compiler.compile_program(&program) {
-            Ok(plan) => (
-                "ok".to_string(),
-                plan.sccs.len(),
-                "ok".to_string(),
-                plan.est_memory_peak,
-            ),
-            Err(err) => (format!("error: {}", err), 0, "not_available".to_string(), 0),
-        };
-    Ok(ExplainReport {
-        program,
-        parse_stats: parsed.stats,
-        epistemic,
-        magic_sets,
-        aggregate_lifting,
-        generated_rule_diagnostics,
-        rule_provenance,
-        proof_traces,
-        stratification_status,
-        stratification_count,
-        rir_status,
-        rir_sccs,
-        optimizer_status,
-        optimizer_memory_peak,
+    let source_program = parsed.program;
+    match normalize_program_for_execution(source_program.clone()) {
+        Ok(analysis_program) => {
+            let magic_rewrite = rewrite_magic_sets(&analysis_program)?;
+            let (rule_provenance, proof_traces) = explain_source_diagnostics(
+                &source_program,
+                &analysis_program,
+                &magic_rewrite.program,
+            );
+            let aggregate_lifting = explain_aggregate_lifting(&analysis_program)?;
+            let epistemic = explain_epistemic(&analysis_program);
+            let (stratification_status, stratification_count) = match stratify(&analysis_program) {
+                Ok(strata) => ("ok".to_string(), strata.len()),
+                Err(error) => (format!("error: {error}"), 0),
+            };
+            let mut compiler = Compiler::new();
+            let (
+                rir_status,
+                rir_reason,
+                rir_sccs,
+                optimizer_status,
+                optimizer_reason,
+                optimizer_memory_peak,
+            ) = match compiler.compile_program(&analysis_program) {
+                Ok(plan) => (
+                    "ok".to_string(),
+                    None,
+                    plan.sccs.len(),
+                    "ok".to_string(),
+                    None,
+                    plan.est_memory_peak,
+                ),
+                Err(error) => {
+                    let reason = format!("RIR compilation failed: {error}");
+                    (
+                        format!("error: {error}"),
+                        Some(reason.clone()),
+                        0,
+                        "not_available".to_string(),
+                        Some(reason),
+                        0,
+                    )
+                }
+            };
+            let (
+                generated_rule_diagnostics,
+                generated_rule_diagnostics_status,
+                generated_rule_diagnostics_reason,
+            ) = if let Some(reason) = &rir_reason {
+                (
+                    Vec::new(),
+                    "not_available".to_string(),
+                    Some(reason.clone()),
+                )
+            } else {
+                match explain_generated_rule_diagnostics(
+                    &source_program,
+                    &analysis_program,
+                    source_path,
+                ) {
+                    Ok(diagnostics) => (diagnostics, "ok".to_string(), None),
+                    Err(error) => {
+                        let reason = format!("generated-rule diagnostics failed: {error}");
+                        (Vec::new(), "not_available".to_string(), Some(reason))
+                    }
+                }
+            };
+            let (wcoj_status, wcoj_reason) = if let Some(reason) = &rir_reason {
+                ("not_available".to_string(), Some(reason.clone()))
+            } else {
+                ("reported".to_string(), None)
+            };
+            Ok(ExplainReport {
+                program: source_program,
+                parse_stats: parsed.stats,
+                epistemic,
+                magic_sets: magic_rewrite.report,
+                aggregate_lifting,
+                generated_rule_diagnostics,
+                generated_rule_diagnostics_status,
+                generated_rule_diagnostics_reason,
+                rule_provenance,
+                proof_traces,
+                stratification_status,
+                stratification_reason: None,
+                stratification_count,
+                aggregate_lifting_status: "ok".to_string(),
+                aggregate_lifting_reason: None,
+                rir_status,
+                rir_reason,
+                rir_sccs,
+                optimizer_status,
+                optimizer_reason,
+                optimizer_memory_peak,
+                wcoj_status,
+                wcoj_reason,
+            })
+        }
+        Err(error) => {
+            let normalization_reason = format!("execution normalization failed: {error}");
+            let rule_provenance = xlog_logic::rule_provenance(&source_program, None);
+            let proof_traces = xlog_logic::query_proof_traces(&source_program, &rule_provenance);
+            Ok(ExplainReport {
+                program: source_program,
+                parse_stats: parsed.stats,
+                epistemic: unavailable_epistemic_analysis(&normalization_reason),
+                magic_sets: MagicSetReport {
+                    status: MagicSetStatus::Declined,
+                    generated_predicates: Vec::new(),
+                    adorned_predicates: Vec::new(),
+                    declined_reasons: vec![normalization_reason.clone()],
+                },
+                aggregate_lifting: Vec::new(),
+                generated_rule_diagnostics: Vec::new(),
+                generated_rule_diagnostics_status: "not_available".to_string(),
+                generated_rule_diagnostics_reason: Some(normalization_reason.clone()),
+                rule_provenance,
+                proof_traces,
+                stratification_status: "not_available".to_string(),
+                stratification_reason: Some(normalization_reason.clone()),
+                stratification_count: 0,
+                aggregate_lifting_status: "not_available".to_string(),
+                aggregate_lifting_reason: Some(normalization_reason.clone()),
+                rir_status: "not_available".to_string(),
+                rir_reason: Some(normalization_reason.clone()),
+                rir_sccs: 0,
+                optimizer_status: "not_available".to_string(),
+                optimizer_reason: Some(normalization_reason.clone()),
+                optimizer_memory_peak: 0,
+                wcoj_status: "not_available".to_string(),
+                wcoj_reason: Some(normalization_reason),
+            })
+        }
+    }
+}
+
+fn unavailable_epistemic_analysis(reason: &str) -> serde_json::Value {
+    let unavailable = serde_json::json!({
+        "status": "not_available",
+        "reason": reason,
+    });
+    serde_json::json!({
+        "eir": unavailable.clone(),
+        "gpu_plan": unavailable.clone(),
+        "executable_plan": unavailable,
     })
+}
+
+fn explain_source_diagnostics(
+    source_program: &Program,
+    analysis_program: &Program,
+    rewritten_program: &Program,
+) -> (Vec<RuleProvenance>, Vec<QueryProofTrace>) {
+    xlog_logic::source_diagnostics(source_program, analysis_program, Some(rewritten_program))
 }
 
 fn explain_epistemic(program: &Program) -> serde_json::Value {
@@ -574,475 +732,6 @@ fn explain_aggregate_lifting(program: &Program) -> Result<Vec<AggregateLiftRepor
     Ok(xlog_prob::provenance::extract_from_program(program)?.aggregate_lifting)
 }
 
-struct GeneratedRuleDiagnostic {
-    rule_head: String,
-    source_relation: String,
-    row_decisions: Vec<GeneratedRuleRowDecision>,
-}
-
-struct GeneratedRuleRowDecision {
-    row_key: String,
-    accepted: bool,
-    failed_predicates: Vec<String>,
-    threshold_comparisons: Vec<ThresholdComparison>,
-    aggregate_inputs: Vec<String>,
-}
-
-struct ThresholdComparison {
-    predicate: String,
-    left: String,
-    op: String,
-    right: String,
-    left_value: String,
-    right_value: String,
-    passed: bool,
-}
-
-fn explain_generated_rule_diagnostics(
-    program: &Program,
-    source_path: Option<&Path>,
-) -> Vec<GeneratedRuleDiagnostic> {
-    let external_rows = source_path
-        .map(|path| load_external_relation_rows(program, path))
-        .unwrap_or_default();
-    let mut diagnostics = Vec::new();
-    for rule in program
-        .rules
-        .iter()
-        .filter(|rule| !rule.body.is_empty() && generated_rule_candidate(rule))
-    {
-        let Some(source_atom) = diagnostic_source_atom(rule) else {
-            continue;
-        };
-        let mut row_decisions = Vec::new();
-        for source_row in source_rows_for_atom(program, &external_rows, source_atom) {
-            let Some(bindings) = bindings_for_source_row(source_atom, &source_row) else {
-                continue;
-            };
-
-            let mut threshold_comparisons = Vec::new();
-            for comparison in rule.body.iter().filter_map(|literal| match literal {
-                BodyLiteral::Comparison(comparison) => Some(comparison),
-                _ => None,
-            }) {
-                let left_value = bound_term(&comparison.left, &bindings);
-                let right_value = bound_term(&comparison.right, &bindings);
-                let passed = left_value
-                    .as_ref()
-                    .zip(right_value.as_ref())
-                    .and_then(|(left, right)| compare_terms(left, comparison.op, right))
-                    .unwrap_or(false);
-                threshold_comparisons.push(ThresholdComparison {
-                    predicate: format!(
-                        "{} {} {}",
-                        term_label(&comparison.left),
-                        comp_op_label(comparison.op),
-                        term_label(&comparison.right)
-                    ),
-                    left: term_label(&comparison.left),
-                    op: comp_op_label(comparison.op).to_string(),
-                    right: term_label(&comparison.right),
-                    left_value: left_value
-                        .as_ref()
-                        .map(term_label)
-                        .unwrap_or_else(|| "unbound".to_string()),
-                    right_value: right_value
-                        .as_ref()
-                        .map(term_label)
-                        .unwrap_or_else(|| "unbound".to_string()),
-                    passed,
-                });
-            }
-            let mut failed_predicates = predicate_failures(program, rule, source_atom, &bindings);
-            failed_predicates.extend(
-                threshold_comparisons
-                    .iter()
-                    .filter(|comparison| !comparison.passed)
-                    .map(|comparison| comparison.predicate.clone()),
-            );
-            row_decisions.push(GeneratedRuleRowDecision {
-                row_key: source_row
-                    .first()
-                    .map(term_label)
-                    .unwrap_or_else(|| source_atom.predicate.clone()),
-                accepted: failed_predicates.is_empty(),
-                failed_predicates,
-                threshold_comparisons,
-                aggregate_inputs: vec![format!(
-                    "{}({})",
-                    source_atom.predicate,
-                    source_row
-                        .iter()
-                        .map(term_label)
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                )],
-            });
-        }
-
-        if !row_decisions.is_empty() {
-            diagnostics.push(GeneratedRuleDiagnostic {
-                rule_head: rule.head.predicate.clone(),
-                source_relation: source_atom.predicate.clone(),
-                row_decisions,
-            });
-        }
-    }
-    diagnostics
-}
-
-fn generated_rule_candidate(rule: &xlog_logic::ast::Rule) -> bool {
-    rule.head.predicate.starts_with("generated_")
-        || rule.head.predicate.starts_with("xlog_accepted_")
-        || rule.head.predicate.starts_with("xlog_rejected_")
-        || rule.body.iter().any(|literal| match literal {
-            BodyLiteral::Positive(atom) | BodyLiteral::Negated(atom) => {
-                diagnostic_source_predicate(&atom.predicate)
-            }
-            BodyLiteral::Epistemic(_) => false,
-            BodyLiteral::Comparison(_) | BodyLiteral::IsExpr(_) | BodyLiteral::Univ(_) => false,
-        })
-}
-
-fn diagnostic_source_atom(rule: &xlog_logic::ast::Rule) -> Option<&xlog_logic::ast::Atom> {
-    rule.body.iter().find_map(|literal| match literal {
-        BodyLiteral::Positive(atom) if diagnostic_source_predicate(&atom.predicate) => Some(atom),
-        _ => None,
-    })
-}
-
-fn diagnostic_source_predicate(predicate: &str) -> bool {
-    predicate.starts_with("generated_")
-        || predicate.ends_with("_candidate_input")
-        || (predicate.contains("candidate") && predicate.ends_with("_input"))
-}
-
-fn source_rows_for_atom(
-    program: &Program,
-    external_rows: &HashMap<String, Vec<Vec<Term>>>,
-    atom: &xlog_logic::ast::Atom,
-) -> Vec<Vec<Term>> {
-    let mut rows = program
-        .rules
-        .iter()
-        .filter(|fact| {
-            fact.body.is_empty()
-                && fact.head.predicate == atom.predicate
-                && fact.head.terms.len() == atom.terms.len()
-        })
-        .map(|fact| fact.head.terms.clone())
-        .collect::<Vec<_>>();
-    if let Some(external) = external_rows.get(&atom.predicate) {
-        rows.extend(external.clone());
-    }
-    rows
-}
-
-fn bindings_for_source_row(
-    atom: &xlog_logic::ast::Atom,
-    row: &[Term],
-) -> Option<HashMap<String, Term>> {
-    if atom.terms.len() != row.len() {
-        return None;
-    }
-    let mut bindings = HashMap::new();
-    for (pattern, value) in atom.terms.iter().zip(row) {
-        match pattern {
-            Term::Variable(name) => {
-                if let Some(existing) = bindings.get(name) {
-                    if existing != value {
-                        return None;
-                    }
-                } else {
-                    bindings.insert(name.clone(), value.clone());
-                }
-            }
-            Term::Anonymous => {}
-            _ if pattern == value => {}
-            _ => return None,
-        }
-    }
-    Some(bindings)
-}
-
-fn load_external_relation_rows(
-    program: &Program,
-    source_path: &Path,
-) -> HashMap<String, Vec<Vec<Term>>> {
-    let mut loaded = HashMap::new();
-    for decl in &program.predicates {
-        let Some((relation_path, columns)) = external_relation_source(source_path, decl) else {
-            continue;
-        };
-        if columns.len() != decl.arity() {
-            continue;
-        }
-        let Ok(source) = std::fs::read_to_string(&relation_path) else {
-            continue;
-        };
-        let Ok(json) = serde_json::from_str::<serde_json::Value>(&source) else {
-            continue;
-        };
-        let Some(rows) = json.get("rows").and_then(serde_json::Value::as_array) else {
-            continue;
-        };
-        let mut relation_rows = Vec::new();
-        for row in rows {
-            let Some(object) = row.as_object() else {
-                continue;
-            };
-            let mut terms = Vec::with_capacity(columns.len());
-            let mut complete = true;
-            for column in &columns {
-                match object.get(column).and_then(json_value_to_term) {
-                    Some(term) => terms.push(term),
-                    None => {
-                        complete = false;
-                        break;
-                    }
-                }
-            }
-            if complete {
-                relation_rows.push(terms);
-            }
-        }
-        if !relation_rows.is_empty() {
-            loaded.insert(decl.name.clone(), relation_rows);
-        }
-    }
-    loaded
-}
-
-fn external_relation_source(
-    source_path: &Path,
-    decl: &xlog_logic::ast::PredDecl,
-) -> Option<(PathBuf, Vec<String>)> {
-    if let Some(from_manifest) = external_relation_source_from_manifest(source_path, decl) {
-        return Some(from_manifest);
-    }
-    let columns = declared_column_names(decl)?;
-    let source_dir = source_path.parent()?;
-    for candidate in relation_json_candidates(source_dir, &decl.name) {
-        if candidate.exists() {
-            return Some((candidate, columns));
-        }
-    }
-    None
-}
-
-fn external_relation_source_from_manifest(
-    source_path: &Path,
-    decl: &xlog_logic::ast::PredDecl,
-) -> Option<(PathBuf, Vec<String>)> {
-    let source_dir = source_path.parent()?;
-    let mut manifests = vec![source_dir.join("xlog_hypothesis_execution.json")];
-    if let Some(parent) = source_dir.parent() {
-        manifests.push(parent.join("xlog_hypothesis_execution.json"));
-    }
-    for manifest_path in manifests {
-        let Ok(source) = std::fs::read_to_string(&manifest_path) else {
-            continue;
-        };
-        let Ok(json) = serde_json::from_str::<serde_json::Value>(&source) else {
-            continue;
-        };
-        let Some(columns) = json
-            .get("relation_input_columns")
-            .and_then(serde_json::Value::as_array)
-            .map(|items| {
-                items
-                    .iter()
-                    .filter_map(serde_json::Value::as_str)
-                    .map(ToString::to_string)
-                    .collect::<Vec<_>>()
-            })
-        else {
-            continue;
-        };
-        if columns.len() != decl.arity() {
-            continue;
-        }
-        let Some(path_value) = json
-            .get("relation_input_path")
-            .and_then(serde_json::Value::as_str)
-        else {
-            continue;
-        };
-        let relation_path = PathBuf::from(path_value);
-        let relation_path = if relation_path.is_absolute() {
-            relation_path
-        } else {
-            manifest_path
-                .parent()
-                .unwrap_or_else(|| Path::new("."))
-                .join(relation_path)
-        };
-        if relation_path.exists() {
-            return Some((relation_path, columns));
-        }
-    }
-    None
-}
-
-fn declared_column_names(decl: &xlog_logic::ast::PredDecl) -> Option<Vec<String>> {
-    decl.schema_columns()
-        .into_iter()
-        .map(|column| column.name)
-        .collect()
-}
-
-fn relation_json_candidates(source_dir: &Path, predicate: &str) -> Vec<PathBuf> {
-    let mut candidates = vec![source_dir.join(format!("{predicate}.json"))];
-    if let Some(stem) = predicate.strip_suffix("_input") {
-        candidates.push(source_dir.join(format!("{stem}_relation.json")));
-    }
-    candidates
-}
-
-fn json_value_to_term(value: &serde_json::Value) -> Option<Term> {
-    if let Some(value) = value.as_i64() {
-        Some(Term::Integer(value))
-    } else if let Some(value) = value.as_u64() {
-        i64::try_from(value).ok().map(Term::Integer)
-    } else if let Some(value) = value.as_str() {
-        Some(Term::String(value.to_string()))
-    } else {
-        value
-            .as_bool()
-            .map(|value| Term::Integer(if value { 1 } else { 0 }))
-    }
-}
-
-fn predicate_failures(
-    program: &Program,
-    rule: &xlog_logic::ast::Rule,
-    source_atom: &xlog_logic::ast::Atom,
-    bindings: &HashMap<String, Term>,
-) -> Vec<String> {
-    let mut failures = Vec::new();
-    for literal in &rule.body {
-        match literal {
-            BodyLiteral::Positive(atom) if atom.predicate != source_atom.predicate => {
-                if !matching_fact_exists(program, atom, bindings) {
-                    failures.push(atom_label(atom));
-                }
-            }
-            BodyLiteral::Negated(atom) => {
-                if matching_fact_exists(program, atom, bindings) {
-                    failures.push(format!("not {}", atom_label(atom)));
-                }
-            }
-            BodyLiteral::Positive(_)
-            | BodyLiteral::Epistemic(_)
-            | BodyLiteral::Comparison(_)
-            | BodyLiteral::IsExpr(_)
-            | BodyLiteral::Univ(_) => {}
-        }
-    }
-    failures
-}
-
-fn matching_fact_exists(
-    program: &Program,
-    atom: &xlog_logic::ast::Atom,
-    bindings: &HashMap<String, Term>,
-) -> bool {
-    program.rules.iter().any(|fact| {
-        fact.body.is_empty()
-            && fact.head.predicate == atom.predicate
-            && fact.head.terms.len() == atom.terms.len()
-            && atom
-                .terms
-                .iter()
-                .zip(&fact.head.terms)
-                .all(|(pattern, value)| match bound_term(pattern, bindings) {
-                    Some(bound) => bound == *value,
-                    None => false,
-                })
-    })
-}
-
-fn atom_label(atom: &xlog_logic::ast::Atom) -> String {
-    format!(
-        "{}({})",
-        atom.predicate,
-        atom.terms
-            .iter()
-            .map(term_label)
-            .collect::<Vec<_>>()
-            .join(", ")
-    )
-}
-
-fn bound_term(term: &Term, bindings: &HashMap<String, Term>) -> Option<Term> {
-    match term {
-        Term::Variable(name) => bindings.get(name).cloned(),
-        _ => Some(term.clone()),
-    }
-}
-
-fn compare_terms(left: &Term, op: CompOp, right: &Term) -> Option<bool> {
-    match (left, right) {
-        (Term::Integer(left), Term::Integer(right)) => Some(compare_i64(*left, op, *right)),
-        (Term::String(left), Term::String(right)) => match op {
-            CompOp::Eq => Some(left == right),
-            CompOp::Ne => Some(left != right),
-            _ => None,
-        },
-        (Term::Symbol(left), Term::Symbol(right)) => match op {
-            CompOp::Eq => Some(left == right),
-            CompOp::Ne => Some(left != right),
-            _ => None,
-        },
-        _ => None,
-    }
-}
-
-fn compare_i64(left: i64, op: CompOp, right: i64) -> bool {
-    match op {
-        CompOp::Eq => left == right,
-        CompOp::Ne => left != right,
-        CompOp::Lt => left < right,
-        CompOp::Le => left <= right,
-        CompOp::Gt => left > right,
-        CompOp::Ge => left >= right,
-    }
-}
-
-fn comp_op_label(op: CompOp) -> &'static str {
-    match op {
-        CompOp::Eq => "==",
-        CompOp::Ne => "!=",
-        CompOp::Lt => "<",
-        CompOp::Le => "<=",
-        CompOp::Gt => ">",
-        CompOp::Ge => ">=",
-    }
-}
-
-fn term_label(term: &Term) -> String {
-    match term {
-        Term::Variable(name) => name.clone(),
-        Term::Anonymous => "_".to_string(),
-        Term::Integer(value) => value.to_string(),
-        Term::Float(value) => value.to_string(),
-        Term::String(value) => value.clone(),
-        Term::Symbol(id) => symbol::resolve(*id),
-        Term::List(items) => format!(
-            "[{}]",
-            items.iter().map(term_label).collect::<Vec<_>>().join(", ")
-        ),
-        Term::Cons { head, tail } => format!("{}|{}", term_label(head), term_label(tail)),
-        Term::Compound { functor, args } => format!(
-            "{}({})",
-            functor,
-            args.iter().map(term_label).collect::<Vec<_>>().join(", ")
-        ),
-        Term::PredRef(name) => name.clone(),
-        Term::Aggregate(agg) => format!("{:?}({})", agg.op, agg.variable),
-    }
-}
-
 fn print_explain_text(report: &ExplainReport) {
     println!("parse:");
     println!("  statements: {}", report.parse_stats.statement_count);
@@ -1051,40 +740,49 @@ fn print_explain_text(report: &ExplainReport) {
     println!("  queries: {}", report.program.queries.len());
     println!("stratification:");
     println!("  status: {}", report.stratification_status);
+    if let Some(reason) = &report.stratification_reason {
+        println!("  reason: {reason}");
+    }
     println!("  strata: {}", report.stratification_count);
     println!("rir:");
     println!("  status: {}", report.rir_status);
+    if let Some(reason) = &report.rir_reason {
+        println!("  reason: {reason}");
+    }
     println!("  sccs: {}", report.rir_sccs);
     println!("optimizer:");
     println!("  status: {}", report.optimizer_status);
+    if let Some(reason) = &report.optimizer_reason {
+        println!("  reason: {reason}");
+    }
     println!("  est_memory_peak: {}", report.optimizer_memory_peak);
     println!("wcoj:");
-    println!("  status: reported");
+    println!("  status: {}", report.wcoj_status);
+    if let Some(reason) = &report.wcoj_reason {
+        println!("  reason: {reason}");
+    }
     println!("epistemic:");
-    let eir_status = report
-        .epistemic
-        .get("eir")
-        .and_then(|value| value.get("status"))
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or("not_available");
-    let gpu_plan_status = report
-        .epistemic
-        .get("gpu_plan")
-        .and_then(|value| value.get("status"))
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or("not_available");
-    let executable_status = report
-        .epistemic
-        .get("executable_plan")
-        .and_then(|value| value.get("status"))
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or("not_available");
-    println!("  eir: {}", eir_status);
-    println!("  gpu_plan: {}", gpu_plan_status);
-    println!("  executable_plan: {}", executable_status);
+    for section in ["eir", "gpu_plan", "executable_plan"] {
+        let analysis = report.epistemic.get(section);
+        let status = analysis
+            .and_then(|value| value.get("status"))
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("not_available");
+        println!("  {section}: {status}");
+        if let Some(reason) = analysis
+            .and_then(|value| value.get("reason"))
+            .and_then(serde_json::Value::as_str)
+        {
+            println!("  {section}_reason: {reason}");
+        }
+    }
     print_magic_text(&report.magic_sets);
-    if !report.aggregate_lifting.is_empty() {
+    if report.aggregate_lifting_status != "ok" || !report.aggregate_lifting.is_empty() {
         println!("aggregate_lifting:");
+        println!("  status: {}", report.aggregate_lifting_status);
+        if let Some(reason) = &report.aggregate_lifting_reason {
+            println!("  reason: {reason}");
+        }
         for entry in &report.aggregate_lifting {
             println!(
                 "  - predicate: {} operator: {} status: {} domain: {} uncertain: {} cap: {}",
@@ -1119,6 +817,12 @@ fn print_explain_text(report: &ExplainReport) {
             );
         }
     }
+    println!("generated_rule_diagnostics:");
+    println!("  status: {}", report.generated_rule_diagnostics_status);
+    if let Some(reason) = &report.generated_rule_diagnostics_reason {
+        println!("  reason: {reason}");
+    }
+    println!("  rules: {}", report.generated_rule_diagnostics.len());
 }
 
 fn print_magic_text(report: &MagicSetReport) {
@@ -1167,10 +871,18 @@ fn print_explain_json(report: &ExplainReport) {
         "    \"status\": \"{}\",",
         json_escape(&report.stratification_status)
     );
+    println!(
+        "    \"reason\": {},",
+        json_optional_string(report.stratification_reason.as_deref())
+    );
     println!("    \"strata\": {}", report.stratification_count);
     println!("  }},");
     println!("  \"rir\": {{");
     println!("    \"status\": \"{}\",", json_escape(&report.rir_status));
+    println!(
+        "    \"reason\": {},",
+        json_optional_string(report.rir_reason.as_deref())
+    );
     println!("    \"sccs\": {}", report.rir_sccs);
     println!("  }},");
     println!("  \"optimizer\": {{");
@@ -1178,10 +890,18 @@ fn print_explain_json(report: &ExplainReport) {
         "    \"status\": \"{}\",",
         json_escape(&report.optimizer_status)
     );
+    println!(
+        "    \"reason\": {},",
+        json_optional_string(report.optimizer_reason.as_deref())
+    );
     println!("    \"est_memory_peak\": {}", report.optimizer_memory_peak);
     println!("  }},");
     println!("  \"wcoj\": {{");
-    println!("    \"status\": \"reported\"");
+    println!("    \"status\": \"{}\",", json_escape(&report.wcoj_status));
+    println!(
+        "    \"reason\": {}",
+        json_optional_string(report.wcoj_reason.as_deref())
+    );
     println!("  }},");
     println!("  \"epistemic\": {},", report.epistemic);
     println!("  \"magic_sets\": {{");
@@ -1209,6 +929,14 @@ fn print_explain_json(report: &ExplainReport) {
             ProbEngine::ExactDdnnf => "exact_ddnnf",
             ProbEngine::Mc => "mc",
         }
+    );
+    println!(
+        "    \"aggregate_lifting_status\": \"{}\",",
+        json_escape(&report.aggregate_lifting_status)
+    );
+    println!(
+        "    \"aggregate_lifting_reason\": {},",
+        json_optional_string(report.aggregate_lifting_reason.as_deref())
     );
     println!(
         "    \"aggregate_lifting_count\": {}",
@@ -1257,6 +985,14 @@ fn print_explain_json(report: &ExplainReport) {
     println!(",");
     print_proof_traces_json(&report.proof_traces);
     println!(",");
+    println!(
+        "  \"generated_rule_diagnostics_status\": \"{}\",",
+        json_escape(&report.generated_rule_diagnostics_status)
+    );
+    println!(
+        "  \"generated_rule_diagnostics_reason\": {},",
+        json_optional_string(report.generated_rule_diagnostics_reason.as_deref())
+    );
     print_generated_rule_diagnostics_json(&report.generated_rule_diagnostics);
     println!("}}");
 }
@@ -1321,78 +1057,6 @@ fn print_proof_traces_json(entries: &[QueryProofTrace]) {
     println!("  ]");
 }
 
-fn print_generated_rule_diagnostics_json(entries: &[GeneratedRuleDiagnostic]) {
-    println!("  \"generated_rule_diagnostics\": [");
-    for (idx, entry) in entries.iter().enumerate() {
-        let suffix = if idx + 1 == entries.len() { "" } else { "," };
-        println!("    {{");
-        println!(
-            "      \"rule_head\": \"{}\",",
-            json_escape(&entry.rule_head)
-        );
-        println!(
-            "      \"source_relation\": \"{}\",",
-            json_escape(&entry.source_relation)
-        );
-        println!("      \"row_decisions\": [");
-        for (row_idx, row) in entry.row_decisions.iter().enumerate() {
-            let row_suffix = if row_idx + 1 == entry.row_decisions.len() {
-                ""
-            } else {
-                ","
-            };
-            println!("        {{");
-            println!("          \"row_key\": \"{}\",", json_escape(&row.row_key));
-            println!("          \"accepted\": {},", row.accepted);
-            println!(
-                "          \"failed_predicates\": {},",
-                json_string_array(&row.failed_predicates)
-            );
-            println!("          \"threshold_comparisons\": [");
-            for (comparison_idx, comparison) in row.threshold_comparisons.iter().enumerate() {
-                let comparison_suffix = if comparison_idx + 1 == row.threshold_comparisons.len() {
-                    ""
-                } else {
-                    ","
-                };
-                println!("            {{");
-                println!(
-                    "              \"predicate\": \"{}\",",
-                    json_escape(&comparison.predicate)
-                );
-                println!(
-                    "              \"left\": \"{}\",",
-                    json_escape(&comparison.left)
-                );
-                println!("              \"op\": \"{}\",", json_escape(&comparison.op));
-                println!(
-                    "              \"right\": \"{}\",",
-                    json_escape(&comparison.right)
-                );
-                println!(
-                    "              \"left_value\": \"{}\",",
-                    json_escape(&comparison.left_value)
-                );
-                println!(
-                    "              \"right_value\": \"{}\",",
-                    json_escape(&comparison.right_value)
-                );
-                println!("              \"passed\": {}", comparison.passed);
-                println!("            }}{}", comparison_suffix);
-            }
-            println!("          ],");
-            println!(
-                "          \"aggregate_inputs\": {}",
-                json_string_array(&row.aggregate_inputs)
-            );
-            println!("        }}{}", row_suffix);
-        }
-        println!("      ]");
-        println!("    }}{}", suffix);
-    }
-    println!("  ]");
-}
-
 fn print_magic_dot(report: &MagicSetReport) {
     println!("digraph xlog_magic_sets {{");
     println!(
@@ -1404,6 +1068,13 @@ fn print_magic_dot(report: &MagicSetReport) {
     }
     for pred in &report.adorned_predicates {
         println!("  \"{}\" [shape=ellipse];", dot_escape(pred));
+    }
+    for (index, reason) in report.declined_reasons.iter().enumerate() {
+        println!(
+            "  reason_{index} [shape=note,label=\"reason: {}\"];",
+            dot_escape(reason)
+        );
+        println!("  status -> reason_{index} [style=dashed];");
     }
     println!("}}");
 }
@@ -1454,7 +1125,8 @@ fn json_optional_string(value: Option<&str>) -> String {
 }
 
 fn json_escape(value: &str) -> String {
-    value.replace('\\', "\\\\").replace('"', "\\\"")
+    let serialized = serde_json::to_string(value).expect("serializing a string cannot fail");
+    serialized[1..serialized.len() - 1].to_string()
 }
 
 fn dot_escape(value: &str) -> String {
@@ -1519,18 +1191,14 @@ fn run_deterministic(args: RunArgs) -> Result<()> {
         XlogError::Execution(format!("Failed to read {}: {}", args.source.display(), e))
     })?;
 
-    // Check if the source has any imports that need resolution
-    let has_imports = source.contains("use ");
-
-    // Load and merge modules if there are imports
-    let program = if has_imports {
-        let resolver = load_modules(&args.source, args.module_path.clone())
-            .map_err(|e| XlogError::Execution(format!("Module resolution failed: {}", e)))?;
-        warn_ignored_import_pragmas(&resolver);
-        LogicProgram::compile_with_resolver(&source, &resolver)?
-    } else {
-        LogicProgram::compile(&source)?
-    };
+    let parsed = xlog_logic::parse_program(&source)?;
+    let resolved = resolve_program_imports(
+        parsed,
+        &args.source,
+        args.module_path.clone(),
+        ModuleMergeErrorKind::Compilation,
+    )?;
+    let program = LogicProgram::compile_program(resolved)?;
     let mut inputs = HashMap::new();
     for (name, path) in parse_inputs(&args.input)? {
         let buf = provider.read_arrow_ipc_stream_file(&path)?;
@@ -1631,8 +1299,12 @@ fn run_probabilistic(args: ProbArgs) -> Result<()> {
             XlogError::Execution(format!("Failed to read {}: {}", args.source.display(), e))
         })?;
         let parsed_program = parse_program(&source)?;
-        let program =
-            resolve_program_imports(parsed_program, &args.source, args.module_path.clone())?;
+        let program = resolve_program_imports(
+            parsed_program,
+            &args.source,
+            args.module_path.clone(),
+            ModuleMergeErrorKind::Execution,
+        )?;
 
         let mut config = GpuConfig::default();
         config.device_ordinal = args.device;

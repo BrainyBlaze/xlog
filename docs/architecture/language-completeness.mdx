@@ -17,24 +17,39 @@ Two ideas drive the whole contract:
 
 - The frontend only accepts a richer construct if that construct has a **finite**
   representation the compiler can build or reject at compile time.
-- Every accepted construct flows through the **same** compiler and runtime path as
-  an ordinary XLOG program — no side interpreter, no special-case runtime.
+- Each accepted construct is normalized or lowered by its supported execution
+  engine; none runs through a hidden source-language interpreter.
 
 ## Pipeline Position
 
-Accepted source flows through the same compiler path as ordinary XLOG programs, in
-this order:
+The deterministic frontend used by `xlog run` and inspected by `xlog explain`
+begins with this common normalization sequence:
 
-1. parse source into the frontend AST (the parsed syntax tree);
-2. desugar queries and constraints (rewrite convenience syntax into core forms);
+1. parse source into the frontend AST (the parsed syntax tree) and merge imports;
+2. expand user-defined function calls in ordinary rule and integrity constraint
+   bodies after imports are merged, using the entry program's configured recursion
+   limit;
 3. normalize safe meta builtins (see [Safe Meta Subset](#safe-meta-subset));
 4. normalize finite list builtins (turn finite lists into ordinary relations);
-5. apply eligible magic-set rewrites (see [Magic Sets](#magic-sets));
-6. validate deterministic negation safety (see [Deterministic Negation](#deterministic-negation));
-7. stratify dependencies — sort the rules into layers so that negation is
+5. desugar supported shared-variable epistemic constraints before choosing an
+   execution route.
+
+Ordinary deterministic programs, including epistemic programs reduced to ordinary
+deterministic form, then enter the deterministic compiler in this order:
+
+6. desugar queries and constraints;
+7. reapply meta normalization inside the compiler; this pass is idempotent;
+8. reapply list normalization inside the compiler; this pass is also idempotent;
+9. apply eligible magic-set rewrites (see [Magic Sets](#magic-sets));
+10. validate deterministic negation safety (see [Deterministic Negation](#deterministic-negation));
+11. stratify dependencies — sort the rules into layers so that negation is
    evaluated only after the relations it reads are fully computed;
-8. lower to RIR — xlog's internal typed intermediate representation — and continue
+12. lower to RIR — xlog's internal typed intermediate representation — and continue
    through the optimizer and runtime.
+
+Programs routed to dedicated epistemic GPU, well-founded semantics (WFS), or G91
+plans do not universally enter steps 6–12. The probabilistic engines have separate
+compilation pipelines and do not enter this deterministic normalization sequence.
 
 This ordering matters. Meta constructs and list constructs must first become
 finite helper relations, or finite typed scalar values, before the stratification
@@ -130,16 +145,18 @@ re-parsing only the statements that changed.
 
 The CLI explain path reuses the same parser and compiler surfaces. It reports:
 
-- parse and schema summaries;
-- strata and deterministic-negation safety;
-- magic-set rewrite status;
-- normalized and optimized plan shape;
-- probabilistic-aggregate and approximate-inference metadata, where applicable;
+- parse-cache and AST counts;
+- stratification, relational compilation, optimizer, and WCOJ reporting status;
+- magic-set rewrite and epistemic lowering status;
+- aggregate lifting summaries, provenance, proof traces, and generated-row diagnostics;
 - ignored-pragma warnings (`W0510`) on stderr when imported modules declare
   pragmas, since pragmas apply only when declared in the entry file.
 
-Explain output is an observability surface: it describes the same compiler path a
-program actually runs, not a separate documentation-only model.
+Explain output is an observability surface: for each supported execution route, it
+reports that route's normalization and compiler or plan analysis, not a separate
+documentation-only model. Probabilistic execution remains a separate pipeline;
+probability metadata in deterministic explain output does not replace that engine's
+own compilation path.
 
 ## Construct Classification
 

@@ -113,15 +113,6 @@ direct and transitive `use` imports before compiling either engine. Imported mod
 paths resolve to `.xlog` files. Public deterministic facts and rules from resolved
 modules participate in probabilistic derivations; a missing module is an error.
 
-<Warning>
-Imported rules have taken part in probabilistic evaluation only since 0.12.0.
-Before 0.12.0, `--module-path` on `xlog prob` checked that the imported modules
-could be loaded, but their rules were never merged into the program that was
-actually compiled and evaluated. A program that imports deterministic rules can
-therefore report different probabilities on 0.12.0 than it did on 0.11.0. The
-0.12.0 numbers are the correct ones.
-</Warning>
-
 Program-level probabilistic constructs are entry-file-scoped. An imported module
 that contains probabilistic facts, annotated disjunctions, evidence, integrity
 constraints, neural predicate declarations, or learnable rule templates is rejected
@@ -133,9 +124,8 @@ selective import. See [Modules](/language-guide/modules) for the full import con
 <Note>
 Pragmas apply only when declared in the entry file. If an imported module declares a
 `#pragma`, `xlog run`, `xlog prob`, and `xlog explain` print `warning[W0510]` on
-stderr naming the module and the dropped directive (once per source file) and ignore
-the pragma; the exit code is unaffected. This warning is new in 0.12.0 — before
-that the pragma was dropped with no diagnostic at all. See
+stderr naming the module and the dropped directive once per source file, then ignore
+the pragma; the exit code is unaffected. See
 [Pragmas](/language-guide/pragmas#pragmas-apply-only-in-the-entry-file).
 </Note>
 
@@ -164,6 +154,10 @@ xlog prob program.xlog --prob-engine mc --confidence 0.99 --output json
 Inspect how a source file compiles, and see its diagnostics, without running it on the
 GPU.
 
+Explain resolves imports and completes execution normalization before it runs
+stratification, rewrite, compiler, optimizer, WCOJ, aggregate, epistemic, or
+generated-row analysis. Source provenance and proof traces remain source-formatted.
+
 ```bash
 xlog explain [OPTIONS] <SOURCE>
 ```
@@ -175,18 +169,28 @@ xlog explain [OPTIONS] <SOURCE>
 
 `text` prints compact sections for the following, in order:
 
-- **parse stats** — counts from reading the program;
-- **stratification** — how the program is split into evaluation layers so that negation is well-defined;
-- **negation safety** — a check that negated conditions are used in a safe way;
-- **the relational IR and its optimized form** — the internal query plan xlog compiles the program to (IR = intermediate representation), before and after optimization;
-- **magic-set rewrites** — a query optimization that specializes rules to the actual question being asked;
-- **WCOJ eligibility** — whether a rule qualifies for a worst-case-optimal join, a join method that avoids building large intermediate tables;
-- **aggregate lifting** — how aggregates such as count or sum are folded into the plan;
-- **rule provenance** — which source rule each generated rule came from;
-- **proof traces** — step-by-step derivations of results.
+- **parse and AST summaries** — statement-cache statistics and source-program counts;
+- **stratification** — status and number of evaluation layers;
+- **RIR compilation** — relational intermediate representation status and strongly connected component count;
+- **optimizer** — status and estimated peak memory;
+- **WCOJ reporting** — whether worst-case-optimal join reporting was available for the compiled program;
+- **epistemic lowering** — status of the epistemic intermediate form, GPU plan, and executable plan;
+- **magic-set rewrites** — status, adorned predicates, generated predicates, and decline reasons;
+- **aggregate lifting** — status and per-aggregate input summary when present;
+- **rule provenance** — stable rule identifiers, source or generated origin, and support relations;
+- **proof traces** — source rules, facts, and rejected alternatives associated with each query;
+- **generated-rule diagnostics** — whether per-row acceptance diagnostics are
+  available and how many generated rules they cover.
 
 `json` emits full `rule_provenance`, `proof_traces`, and `generated_rule_diagnostics`
-arrays. `dot` prints the magic-set dependency graph.
+arrays. The generated-rule array has sibling `generated_rule_diagnostics_status` and
+`generated_rule_diagnostics_reason` fields. When execution normalization fails,
+analyses that require normalized input report `not_available` with the normalization
+error as their reason; their result collections remain empty. For schema compatibility,
+the magic-set section represents the same condition as `declined` and carries the
+normalization error in `declined_reasons`. `dot` prints a magic-set summary graph
+with rewrite status, generated/adorned predicates, and decline reasons when the
+rewrite was not attempted.
 
 ```bash
 xlog explain program.xlog
@@ -197,7 +201,7 @@ For the shared generated-rule diagnostics model, see [Diagnostics and provenance
 
 ## xlog repl
 
-Read a program from standard input, compile it, and print a summary.
+Read a program from standard input, parse it, and print a summary.
 
 ```bash
 xlog repl [OPTIONS]
@@ -209,8 +213,8 @@ xlog repl [OPTIONS]
 
 <Note>
 `repl` reads all of standard input to end-of-file, parses it once, and prints a
-compilation summary. It is not an interactive line-by-line session and does not
-evaluate queries.
+parse and cache summary. It does not run normalization or compilation, is not an
+interactive line-by-line session, and does not evaluate queries.
 </Note>
 
 ## xlog watch
@@ -225,9 +229,12 @@ xlog watch [OPTIONS] <SOURCE>
 |---|---|---|
 | `--debounce-ms <MS>` | Interval between re-reads. | `250` |
 | `--explain` | Print explain output on each pass. | off |
+| `--module-path <DIR[:DIR...]>` | Extra module search paths used by `--explain`. | — |
 | `--once` | Run a single pass and exit. | off |
 
 `watch` re-reads the file on each interval; it is not driven by filesystem events.
+With `--explain`, it resolves sibling and `--module-path` imports again on every
+pass before building the report.
 
 ## Input and output
 
@@ -257,9 +264,12 @@ index.
 
 ## Exit codes
 
-`xlog` returns `0` on success and `1` on any error — a parse or compile failure, an
-execution error, an I/O error, or an exhausted memory budget all surface as `1` with a
-descriptive message. There are no other exit codes.
+`xlog` returns `0` when a command completes and `1` when command processing fails,
+including input, parsing, import-resolution, compilation, execution, I/O, and memory
+budget failures. `xlog explain` is report-oriented: after a program has been parsed and
+its imports resolved, normalization or compiler failures are recorded as unavailable
+report sections and the command still returns `0`. Command-line usage and argument
+errors are reported by the argument parser with exit code `2`.
 
 ## See also
 

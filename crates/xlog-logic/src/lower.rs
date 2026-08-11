@@ -644,6 +644,42 @@ impl Lowerer {
             }
         }
 
+        // Probabilistic facts and annotated-disjunction choices are also
+        // ground schema evidence. Register them before the body-only fallback
+        // so a rule variable does not default an otherwise typed predicate to
+        // U64 merely because its facts live in a probabilistic AST collection.
+        for pf in &program.prob_facts {
+            let pred = &pf.atom.predicate;
+            if self.schemas.contains_key(pred) {
+                continue;
+            }
+            let columns: Vec<(String, ScalarType)> = pf
+                .atom
+                .terms
+                .iter()
+                .enumerate()
+                .map(|(i, term)| (format!("c{}", i), term.inferred_scalar_type()))
+                .collect();
+            self.schemas.insert(pred.clone(), Schema::new(columns));
+        }
+
+        for ad in &program.annotated_disjunctions {
+            for choice in &ad.choices {
+                let pred = &choice.atom.predicate;
+                if self.schemas.contains_key(pred) {
+                    continue;
+                }
+                let columns: Vec<(String, ScalarType)> = choice
+                    .atom
+                    .terms
+                    .iter()
+                    .enumerate()
+                    .map(|(i, term)| (format!("c{}", i), term.inferred_scalar_type()))
+                    .collect();
+                self.schemas.insert(pred.clone(), Schema::new(columns));
+            }
+        }
+
         // Infer schemas for extensional predicates that occur only in rule bodies
         // before propagating rule-head types. This lets aggregates and ordinary
         // head variables consume the same body-column types that execution will
@@ -776,40 +812,18 @@ impl Lowerer {
             }
         }
 
-        // Ensure schemas exist for probabilistic facts and annotated disjunctions
-        for pf in &program.prob_facts {
-            let pred = &pf.atom.predicate;
-            if self.schemas.contains_key(pred) {
-                continue;
-            }
-            let columns: Vec<(String, ScalarType)> = pf
-                .atom
-                .terms
-                .iter()
-                .enumerate()
-                .map(|(i, term)| (format!("c{}", i), term.inferred_scalar_type()))
-                .collect();
-            self.schemas.insert(pred.clone(), Schema::new(columns));
-        }
-
-        for ad in &program.annotated_disjunctions {
-            for choice in &ad.choices {
-                let pred = &choice.atom.predicate;
-                if self.schemas.contains_key(pred) {
-                    continue;
-                }
-                let columns: Vec<(String, ScalarType)> = choice
-                    .atom
-                    .terms
-                    .iter()
-                    .enumerate()
-                    .map(|(i, term)| (format!("c{}", i), term.inferred_scalar_type()))
-                    .collect();
-                self.schemas.insert(pred.clone(), Schema::new(columns));
-            }
-        }
-
         Ok(())
+    }
+
+    /// Infer predicate schemas and validate the type flow within every rule.
+    ///
+    /// This applies the schema/type contract shared by execution routes without
+    /// preprocessing, stratifying, validating unrelated term forms, or building
+    /// an execution plan. The inferred schemas remain available through
+    /// [`Lowerer::schemas`].
+    pub fn infer_and_validate_schemas(&mut self, program: &Program) -> Result<()> {
+        self.infer_schemas(program)?;
+        self.validate_rule_types(program)
     }
 
     fn infer_cardinalities(&mut self, program: &Program) {
@@ -861,8 +875,7 @@ impl Lowerer {
 
     fn prepare_program_for_lowering(&mut self, program: &Program) -> Result<()> {
         validate_lowerable_terms(program)?;
-        self.infer_schemas(program)?;
-        self.validate_rule_types(program)?;
+        self.infer_and_validate_schemas(program)?;
         self.infer_cardinalities(program);
 
         // Pre-allocate RelIds for declared predicates so schema-only programs
@@ -3001,7 +3014,10 @@ fn term_to_const_value(term: &Term) -> Option<ConstValue> {
     }
 }
 
-fn term_to_typed_const_value(term: &Term, expected: ScalarType) -> Result<Option<ConstValue>> {
+pub(crate) fn term_to_typed_const_value(
+    term: &Term,
+    expected: ScalarType,
+) -> Result<Option<ConstValue>> {
     let const_val = match term {
         Term::Integer(i) => match expected {
             ScalarType::U32 => {
@@ -4261,6 +4277,52 @@ bridge(A, B) :- connected(A, B), node(A, _).
         lowerer
             .lower_program(&program)
             .expect("well-typed program lowers");
+    }
+
+    #[test]
+    fn probabilistic_fact_schema_precedes_body_only_variable_defaults() {
+        let source = r#"
+0.5::possible(0).
+observed(0).
+accepted(X) :- possible(X), observed(X).
+?- accepted(X).
+"#;
+        let program = crate::parse_program(source).expect("probabilistic join parses");
+        let mut lowerer = Lowerer::new();
+        lowerer
+            .lower_program(&program)
+            .expect("probabilistic facts provide body predicate schemas");
+        assert_eq!(
+            lowerer
+                .schemas()
+                .get("possible")
+                .expect("possible schema")
+                .column_type(0),
+            Some(ScalarType::U32)
+        );
+    }
+
+    #[test]
+    fn annotated_disjunction_schema_precedes_body_only_variable_defaults() {
+        let source = r#"
+0.5::possible(0); 0.5::possible(1).
+observed(0).
+accepted(X) :- possible(X), observed(X).
+?- accepted(X).
+"#;
+        let program = crate::parse_program(source).expect("annotated-disjunction join parses");
+        let mut lowerer = Lowerer::new();
+        lowerer
+            .lower_program(&program)
+            .expect("annotated-disjunction choices provide body predicate schemas");
+        assert_eq!(
+            lowerer
+                .schemas()
+                .get("possible")
+                .expect("possible schema")
+                .column_type(0),
+            Some(ScalarType::U32)
+        );
     }
 
     #[test]

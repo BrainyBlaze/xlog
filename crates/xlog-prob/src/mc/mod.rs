@@ -23,12 +23,15 @@ pub use resident::{
     ResidentRejection,
 };
 
+use std::collections::BTreeMap;
 #[cfg(feature = "host-io")]
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 #[cfg(feature = "host-io")]
 use cudarc::driver::DeviceSlice;
+#[cfg(feature = "host-io")]
+use xlog_core::Schema;
 use xlog_core::{MemoryBudget, Result, XlogError};
 use xlog_cuda::memory::TrackedCudaSlice;
 use xlog_cuda::{CudaDevice, CudaKernelProvider, GpuMemoryManager};
@@ -39,7 +42,10 @@ use xlog_logic::ast::{Directives, Evidence, ProbMethod, ProbQuery, Program};
 use crate::exact::GpuConfig;
 #[cfg(feature = "host-io")]
 use crate::provenance::Value;
-use crate::provenance::{atom_key_from_ground_atom, GroundAtom};
+use crate::provenance::{
+    atom_key_from_ground_atom, canonicalize_probabilistic_program,
+    presentation_atom_from_canonical, GroundAtom,
+};
 
 /// Sampling method for Monte Carlo inference.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -358,7 +364,11 @@ pub struct McProgram {
     pub(super) base_store: HashMap<String, Relation>,
     #[cfg(feature = "host-io")]
     pub(super) scc_plans: Vec<SccPlan>,
+    #[cfg(feature = "host-io")]
+    pub(super) arithmetic_schemas: HashMap<String, Schema>,
     pub(super) queries: Vec<GroundAtom>,
+    #[cfg_attr(not(feature = "host-io"), allow(dead_code))]
+    query_presentations: Vec<GroundAtom>,
     pub(super) evidence: Vec<(GroundAtom, bool)>,
     pub(super) bernoulli_probs: Vec<f32>,
     pub(super) prob_facts: Vec<ProbFactSpec>,
@@ -467,7 +477,7 @@ impl McProgram {
 
         let z = results::normal_quantile(0.5 + cfg.confidence / 2.0);
         let mut query_estimates: Vec<McQueryEstimate> = Vec::with_capacity(self.queries.len());
-        for (i, atom) in self.queries.iter().enumerate() {
+        for (i, atom) in self.query_presentations.iter().enumerate() {
             let k = host_counts.get(i).copied().unwrap_or(0) as usize;
             let (p, stderr, ci_low, ci_high) = results::binomial_estimate(k, evidence_samples, z);
             let log_prob = if p == 0.0 { f64::NEG_INFINITY } else { p.ln() };
@@ -606,6 +616,7 @@ impl McProgram {
                 &self.scc_plans,
                 &mut store,
                 cfg.max_nonmonotone_iterations,
+                &self.arithmetic_schemas,
             )?;
             stats.nonmonotone_sccs += sample_stats.nonmonotone_sccs;
             stats.nonmonotone_cycles += sample_stats.nonmonotone_cycles;
@@ -641,7 +652,7 @@ impl McProgram {
         let z = results::normal_quantile(0.5 + cfg.confidence / 2.0);
 
         let mut query_estimates: Vec<McQueryEstimate> = Vec::with_capacity(self.queries.len());
-        for (i, atom) in self.queries.iter().enumerate() {
+        for (i, atom) in self.query_presentations.iter().enumerate() {
             let k = n_query_true[i];
             let (p, stderr, ci_low, ci_high) = results::binomial_estimate(k, denom, z);
             let log_prob = if p == 0.0 { f64::NEG_INFINITY } else { p.ln() };
@@ -742,14 +753,45 @@ impl McProgram {
     }
 
     fn compile_program(program: &Program) -> Result<Self> {
+        let source_program = program;
+        let arithmetic_schemas = crate::provenance::arithmetic_schemas(program)?;
+        let canonical_program = canonicalize_probabilistic_program(program, &arithmetic_schemas)?;
+        let program = &canonical_program;
+
         let mut queries: Vec<GroundAtom> = Vec::new();
-        for ProbQuery { atom } in &program.prob_queries {
+        let mut query_presentations: Vec<GroundAtom> = Vec::new();
+        for (ProbQuery { atom }, ProbQuery { atom: source_atom }) in program
+            .prob_queries
+            .iter()
+            .zip(&source_program.prob_queries)
+        {
             queries.push(atom_key_from_ground_atom(atom)?);
+            query_presentations.push(presentation_atom_from_canonical(
+                source_atom,
+                atom,
+                &arithmetic_schemas,
+            )?);
         }
 
         let mut evidence: Vec<(GroundAtom, bool)> = Vec::new();
+        let mut evidence_values: BTreeMap<GroundAtom, bool> = BTreeMap::new();
         for Evidence { atom, value } in &program.evidence {
-            evidence.push((atom_key_from_ground_atom(atom)?, *value));
+            let atom = atom_key_from_ground_atom(atom)?;
+            match evidence_values.entry(atom.clone()) {
+                std::collections::btree_map::Entry::Occupied(previous)
+                    if previous.get() != value =>
+                {
+                    return Err(XlogError::Execution(format!(
+                        "Monte Carlo inference error: conflicting evidence for {}",
+                        atom.predicate
+                    )));
+                }
+                std::collections::btree_map::Entry::Occupied(_) => continue,
+                std::collections::btree_map::Entry::Vacant(entry) => {
+                    entry.insert(*value);
+                    evidence.push((atom, *value));
+                }
+            }
         }
 
         let mut prob_facts = program.prob_facts.clone();
@@ -814,7 +856,6 @@ impl McProgram {
 
         #[cfg(feature = "host-io")]
         let scc_plans = results::build_scc_plans(program)?;
-
         Ok(Self {
             gpu_config: GpuConfig::default(),
             program: program.clone(),
@@ -822,7 +863,10 @@ impl McProgram {
             base_store,
             #[cfg(feature = "host-io")]
             scc_plans,
+            #[cfg(feature = "host-io")]
+            arithmetic_schemas,
             queries,
+            query_presentations,
             evidence,
             bernoulli_probs,
             prob_facts,

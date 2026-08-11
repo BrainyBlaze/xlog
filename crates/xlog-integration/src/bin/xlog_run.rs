@@ -11,9 +11,9 @@ use std::sync::Arc;
 
 use xlog_core::{symbol, MemoryBudget, Result, ScalarType, XlogError};
 use xlog_cuda::{CudaDevice, CudaKernelProvider, GpuMemoryManager};
+use xlog_gpu::logic::normalize_program_for_execution;
 use xlog_logic::{
-    compile::load_modules, expand_program_functions, parse_program, BodyLiteral, Compiler,
-    EpistemicOp, Query, Term,
+    compile::load_modules, parse_program, BodyLiteral, Compiler, EpistemicOp, Query, Term,
 };
 use xlog_runtime::Executor;
 
@@ -396,8 +396,8 @@ fn main() -> Result<()> {
     if !program.imports.is_empty() {
         let resolver = load_modules(entry_path, module_search_paths(entry_path))
             .map_err(|e| XlogError::Compilation(format!("Module resolution failed: {}", e)))?;
-        // Pragmas are entry-file-scoped; surface anything an imported
-        // module declared instead of dropping it silently (issue #184).
+        // Pragmas are entry-file-scoped; surface imported declarations instead
+        // of dropping them silently.
         for warning in resolver.ignored_import_pragmas() {
             eprintln!("{}", warning);
         }
@@ -406,12 +406,7 @@ fn main() -> Result<()> {
             .map_err(|e| XlogError::Compilation(format!("Module merge failed: {}", e)))?;
     }
 
-    // Expand user-defined functions (inline UDF calls in rules)
-    if !program.functions.is_empty() {
-        let max_depth = program.directives.max_recursion_depth.unwrap_or(1000);
-        program = expand_program_functions(&program, max_depth)
-            .map_err(|e| XlogError::Compilation(format!("Function expansion failed: {}", e)))?;
-    }
+    program = normalize_program_for_execution(program)?;
 
     let mut compiler = Compiler::new();
     let plan = compiler.compile_program(&program)?;

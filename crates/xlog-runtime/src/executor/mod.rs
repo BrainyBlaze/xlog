@@ -205,9 +205,9 @@ enum CommonSubexpressionKey {
         input: Box<CommonSubexpressionKey>,
         predicate: String,
     },
-    Project {
+    ProjectChain {
         input: Box<CommonSubexpressionKey>,
-        columns: Vec<String>,
+        projections: Vec<Vec<String>>,
     },
     Join {
         left: Box<CommonSubexpressionKey>,
@@ -945,13 +945,7 @@ impl Executor {
                     predicate: Self::expr_cse_key(predicate),
                 })
             }
-            RirNode::Project { input, columns } => {
-                let input = self.common_subexpression_key(input)?;
-                Some(CommonSubexpressionKey::Project {
-                    input: Box::new(input),
-                    columns: columns.iter().map(Self::project_expr_cse_key).collect(),
-                })
-            }
+            RirNode::Project { .. } => self.common_subexpression_project_chain_key(node),
             RirNode::Join {
                 left,
                 right,
@@ -1009,102 +1003,159 @@ impl Executor {
         }
     }
 
-    fn expr_cse_key(expr: &Expr) -> String {
-        match expr {
-            Expr::Column(idx) => format!("col:{idx}"),
-            Expr::Const(value) => format!("const:{}", Self::const_cse_key(value)),
-            Expr::Compare { left, op, right } => format!(
-                "cmp:{}:{}:{}",
-                Self::expr_cse_key(left),
-                Self::compare_op_cse_key(*op),
-                Self::expr_cse_key(right)
-            ),
-            Expr::And(items) => format!(
-                "and:[{}]",
-                items
-                    .iter()
-                    .map(Self::expr_cse_key)
-                    .collect::<Vec<_>>()
-                    .join(",")
-            ),
-            Expr::Or(items) => format!(
-                "or:[{}]",
-                items
-                    .iter()
-                    .map(Self::expr_cse_key)
-                    .collect::<Vec<_>>()
-                    .join(",")
-            ),
-            Expr::Not(inner) => format!("not:{}", Self::expr_cse_key(inner)),
-            Expr::Add(left, right) => {
-                format!(
-                    "add:{}:{}",
-                    Self::expr_cse_key(left),
-                    Self::expr_cse_key(right)
-                )
-            }
-            Expr::Sub(left, right) => {
-                format!(
-                    "sub:{}:{}",
-                    Self::expr_cse_key(left),
-                    Self::expr_cse_key(right)
-                )
-            }
-            Expr::Mul(left, right) => {
-                format!(
-                    "mul:{}:{}",
-                    Self::expr_cse_key(left),
-                    Self::expr_cse_key(right)
-                )
-            }
-            Expr::Div(left, right) => {
-                format!(
-                    "div:{}:{}",
-                    Self::expr_cse_key(left),
-                    Self::expr_cse_key(right)
-                )
-            }
-            Expr::Mod(left, right) => {
-                format!(
-                    "mod:{}:{}",
-                    Self::expr_cse_key(left),
-                    Self::expr_cse_key(right)
-                )
-            }
-            Expr::Abs(inner) => format!("abs:{}", Self::expr_cse_key(inner)),
-            Expr::Min(left, right) => {
-                format!(
-                    "min:{}:{}",
-                    Self::expr_cse_key(left),
-                    Self::expr_cse_key(right)
-                )
-            }
-            Expr::Max(left, right) => {
-                format!(
-                    "max:{}:{}",
-                    Self::expr_cse_key(left),
-                    Self::expr_cse_key(right)
-                )
-            }
-            Expr::Pow(left, right) => {
-                format!(
-                    "pow:{}:{}",
-                    Self::expr_cse_key(left),
-                    Self::expr_cse_key(right)
-                )
-            }
-            Expr::Cast(inner, ty) => format!("cast:{:?}:{}", ty, Self::expr_cse_key(inner)),
-            Expr::Conditional {
-                condition,
-                then_expr,
-                else_expr,
-            } => format!(
-                "if:{}:{}:{}",
-                Self::expr_cse_key(condition),
-                Self::expr_cse_key(then_expr),
-                Self::expr_cse_key(else_expr)
-            ),
+    fn common_subexpression_project_chain_key(
+        &mut self,
+        node: &RirNode,
+    ) -> Option<CommonSubexpressionKey> {
+        // Treat a consecutive projection chain as one cacheable subplan. Predicate-bodied
+        // function expansion can produce widening chains, and retaining every prefix would
+        // keep every intermediate GPU buffer alive for the rest of the execution.
+        let mut project_columns = Vec::new();
+        let mut base = node;
+        while let RirNode::Project { input, columns } = base {
+            project_columns.push(columns);
+            base = input;
         }
+
+        let input = Box::new(self.common_subexpression_key(base)?);
+        let projections = project_columns
+            .into_iter()
+            .rev()
+            .map(|columns| columns.iter().map(Self::project_expr_cse_key).collect())
+            .collect();
+
+        Some(CommonSubexpressionKey::ProjectChain { input, projections })
+    }
+
+    fn expr_cse_key(expr: &Expr) -> String {
+        enum KeyTask<'a> {
+            Expression(&'a Expr),
+            FinishUnary(&'static str),
+            FinishBinary(&'static str),
+            FinishComparison(xlog_ir::CompareOp),
+            FinishList {
+                prefix: &'static str,
+                item_count: usize,
+            },
+            FinishCast(xlog_core::ScalarType),
+            FinishConditional,
+        }
+
+        fn schedule_binary<'a>(
+            tasks: &mut Vec<KeyTask<'a>>,
+            left: &'a Expr,
+            right: &'a Expr,
+            prefix: &'static str,
+        ) {
+            tasks.push(KeyTask::FinishBinary(prefix));
+            tasks.push(KeyTask::Expression(right));
+            tasks.push(KeyTask::Expression(left));
+        }
+
+        let mut tasks = vec![KeyTask::Expression(expr)];
+        let mut values = Vec::new();
+        while let Some(task) = tasks.pop() {
+            match task {
+                KeyTask::Expression(expression) => match expression {
+                    Expr::Column(index) => values.push(format!("col:{index}")),
+                    Expr::Const(value) => {
+                        values.push(format!("const:{}", Self::const_cse_key(value)));
+                    }
+                    Expr::Compare { left, op, right } => {
+                        tasks.push(KeyTask::FinishComparison(*op));
+                        tasks.push(KeyTask::Expression(right));
+                        tasks.push(KeyTask::Expression(left));
+                    }
+                    Expr::And(items) => {
+                        tasks.push(KeyTask::FinishList {
+                            prefix: "and",
+                            item_count: items.len(),
+                        });
+                        for item in items.iter().rev() {
+                            tasks.push(KeyTask::Expression(item));
+                        }
+                    }
+                    Expr::Or(items) => {
+                        tasks.push(KeyTask::FinishList {
+                            prefix: "or",
+                            item_count: items.len(),
+                        });
+                        for item in items.iter().rev() {
+                            tasks.push(KeyTask::Expression(item));
+                        }
+                    }
+                    Expr::Not(inner) => {
+                        tasks.push(KeyTask::FinishUnary("not"));
+                        tasks.push(KeyTask::Expression(inner));
+                    }
+                    Expr::Add(left, right) => schedule_binary(&mut tasks, left, right, "add"),
+                    Expr::Sub(left, right) => schedule_binary(&mut tasks, left, right, "sub"),
+                    Expr::Mul(left, right) => schedule_binary(&mut tasks, left, right, "mul"),
+                    Expr::Div(left, right) => schedule_binary(&mut tasks, left, right, "div"),
+                    Expr::Mod(left, right) => schedule_binary(&mut tasks, left, right, "mod"),
+                    Expr::Abs(inner) => {
+                        tasks.push(KeyTask::FinishUnary("abs"));
+                        tasks.push(KeyTask::Expression(inner));
+                    }
+                    Expr::Min(left, right) => schedule_binary(&mut tasks, left, right, "min"),
+                    Expr::Max(left, right) => schedule_binary(&mut tasks, left, right, "max"),
+                    Expr::Pow(left, right) => schedule_binary(&mut tasks, left, right, "pow"),
+                    Expr::Cast(inner, target) => {
+                        tasks.push(KeyTask::FinishCast(*target));
+                        tasks.push(KeyTask::Expression(inner));
+                    }
+                    Expr::Conditional {
+                        condition,
+                        then_expr,
+                        else_expr,
+                    } => {
+                        tasks.push(KeyTask::FinishConditional);
+                        tasks.push(KeyTask::Expression(else_expr));
+                        tasks.push(KeyTask::Expression(then_expr));
+                        tasks.push(KeyTask::Expression(condition));
+                    }
+                },
+                KeyTask::FinishUnary(prefix) => {
+                    let value = values.pop().expect("unary CSE operand is serialized");
+                    values.push(format!("{prefix}:{value}"));
+                }
+                KeyTask::FinishBinary(prefix) => {
+                    let right = values.pop().expect("right CSE operand is serialized");
+                    let left = values.pop().expect("left CSE operand is serialized");
+                    values.push(format!("{prefix}:{left}:{right}"));
+                }
+                KeyTask::FinishComparison(op) => {
+                    let right = values.pop().expect("right comparison is serialized");
+                    let left = values.pop().expect("left comparison is serialized");
+                    values.push(format!(
+                        "cmp:{left}:{}:{right}",
+                        Self::compare_op_cse_key(op)
+                    ));
+                }
+                KeyTask::FinishList { prefix, item_count } => {
+                    let start = values
+                        .len()
+                        .checked_sub(item_count)
+                        .expect("CSE list items are serialized");
+                    let items = values.split_off(start);
+                    values.push(format!("{prefix}:[{}]", items.join(",")));
+                }
+                KeyTask::FinishCast(target) => {
+                    let value = values.pop().expect("cast CSE operand is serialized");
+                    values.push(format!("cast:{target:?}:{value}"));
+                }
+                KeyTask::FinishConditional => {
+                    let else_value = values.pop().expect("else CSE branch is serialized");
+                    let then_value = values.pop().expect("then CSE branch is serialized");
+                    let condition = values.pop().expect("CSE condition is serialized");
+                    values.push(format!("if:{condition}:{then_value}:{else_value}"));
+                }
+            }
+        }
+
+        let key = values.pop().expect("expression produces one CSE key");
+        debug_assert!(values.is_empty());
+        key
     }
 
     fn project_expr_cse_key(expr: &ProjectExpr) -> String {
@@ -2476,6 +2527,83 @@ mod tests {
         }
     }
 
+    #[test]
+    fn arithmetic_expression_evaluation_reports_left_operand_error_first() {
+        let executor = match create_test_executor() {
+            Some(executor) => executor,
+            None => {
+                eprintln!("Skipping test: no CUDA device available");
+                return;
+            }
+        };
+        let input = create_test_buffer(&executor, &[1], "key");
+        let expression = Expr::Add(Box::new(Expr::Column(99)), Box::new(Expr::Column(98)));
+
+        let error = match executor.evaluate_arith_expr(&expression, &input) {
+            Ok(_) => panic!("invalid left operand must fail"),
+            Err(error) => error,
+        };
+
+        assert!(error.to_string().contains("Column 99 not found"), "{error}");
+    }
+
+    #[test]
+    fn conditional_expression_evaluation_reports_condition_error_before_branches() {
+        let executor = match create_test_executor() {
+            Some(executor) => executor,
+            None => {
+                eprintln!("Skipping test: no CUDA device available");
+                return;
+            }
+        };
+        let input = create_test_buffer(&executor, &[1], "key");
+        let expression = Expr::Conditional {
+            condition: Box::new(Expr::Column(99)),
+            then_expr: Box::new(Expr::Column(98)),
+            else_expr: Box::new(Expr::Column(97)),
+        };
+
+        let error = match executor.evaluate_arith_expr(&expression, &input) {
+            Ok(_) => panic!("invalid condition must fail"),
+            Err(error) => error,
+        };
+
+        assert!(error.to_string().contains("Column 99 not found"), "{error}");
+    }
+
+    #[test]
+    fn conditional_expression_eagerly_evaluates_then_before_else() {
+        let executor = match create_test_executor() {
+            Some(executor) => executor,
+            None => {
+                eprintln!("Skipping test: no CUDA device available");
+                return;
+            }
+        };
+        let input = create_test_buffer(&executor, &[1], "key");
+        let invalid_then = Expr::Conditional {
+            condition: Box::new(Expr::Const(ConstValue::Bool(false))),
+            then_expr: Box::new(Expr::Column(98)),
+            else_expr: Box::new(Expr::Column(97)),
+        };
+        let error = match executor.evaluate_arith_expr(&invalid_then, &input) {
+            Ok(_) => panic!("eager invalid then branch must fail"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("Column 98 not found"), "{error}");
+
+        let invalid_else = Expr::Conditional {
+            condition: Box::new(Expr::Const(ConstValue::Bool(true))),
+            then_expr: Box::new(Expr::Column(0)),
+            else_expr: Box::new(Expr::Column(97)),
+        };
+        let error = match executor.evaluate_arith_expr(&invalid_else, &input) {
+            Ok(_) => panic!("eager invalid else branch must fail"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("Column 97 not found"), "{error}");
+    }
+
     // ============== Union Node Tests ==============
 
     #[test]
@@ -3143,6 +3271,48 @@ mod tests {
         assert_eq!(values, vec![3, 4, 5]);
     }
 
+    #[test]
+    fn test_project_profiling_observes_input_and_output_allocations() {
+        let mut executor = match create_test_executor_with_config(
+            RuntimeConfig::default().with_common_subexpression_elimination(Some(false)),
+        ) {
+            Some(executor) => executor,
+            None => {
+                eprintln!("Skipping test: no CUDA device available");
+                return;
+            }
+        };
+        let buffer = create_test_buffer(&executor, &[1, 2, 3, 4], "key");
+        executor.store_mut().put("input", buffer);
+        executor.register_relation(RelId(1), "input");
+        let columns = vec![ProjectExpr::Column(0)];
+
+        let baseline = executor.provider.memory().allocated_bytes();
+        let input = executor.execute_scan(RelId(1)).expect("clone scan input");
+        let output = executor
+            .execute_project(&input, &columns)
+            .expect("project while retaining input");
+        let expected_observation = executor.provider.memory().allocated_bytes();
+        drop(output);
+        drop(input);
+        assert_eq!(executor.provider.memory().allocated_bytes(), baseline);
+
+        executor.set_profiling(true);
+        let node = RirNode::Project {
+            input: Box::new(RirNode::Scan { rel: RelId(1) }),
+            columns,
+        };
+        let _result = executor
+            .execute_node(&node)
+            .expect("execute profiled project");
+        let observed_peak = executor.execution_stats(0).peak_memory_bytes;
+
+        assert!(
+            observed_peak >= expected_observation,
+            "profiled project peak {observed_peak} omitted live input allocation; expected at least {expected_observation}"
+        );
+    }
+
     // ============== Common Subexpression Elimination Tests ==============
 
     fn duplicate_join_union_plan() -> RirNode {
@@ -3189,6 +3359,56 @@ mod tests {
         assert_eq!(stats.hits, 1);
         assert!(stats.misses >= 1);
         assert_eq!(stats.unsafe_rejections, 0);
+    }
+
+    #[test]
+    fn test_common_subexpression_cache_treats_project_chains_atomically() {
+        let mut executor = match create_test_executor_with_config(
+            RuntimeConfig::default().with_common_subexpression_elimination(Some(true)),
+        ) {
+            Some(executor) => executor,
+            None => {
+                eprintln!("Skipping test: no CUDA device available");
+                return;
+            }
+        };
+        executor.register_relation(RelId(1), "input");
+        let input = create_test_buffer(&executor, &[1, 2, 3], "key");
+        executor.put_relation("input", input);
+
+        let inner = RirNode::Project {
+            input: Box::new(RirNode::Scan { rel: RelId(1) }),
+            columns: vec![ProjectExpr::Column(0)],
+        };
+        let passthrough = RirNode::Project {
+            input: Box::new(inner.clone()),
+            columns: vec![ProjectExpr::Column(0)],
+        };
+        let computed = RirNode::Project {
+            input: Box::new(inner),
+            columns: vec![ProjectExpr::Computed(
+                Expr::Add(
+                    Box::new(Expr::Column(0)),
+                    Box::new(Expr::Const(ConstValue::U32(1))),
+                ),
+                ScalarType::U32,
+            )],
+        };
+
+        executor
+            .execute_node(&passthrough)
+            .expect("first project chain executes");
+        let result = executor
+            .execute_node(&computed)
+            .expect("second project chain executes");
+
+        assert_eq!(read_buffer_u32(&executor, &result, 0), vec![2, 3, 4]);
+        executor
+            .execute_node(&computed)
+            .expect("duplicate full project chain executes");
+        let stats = executor.common_subexpression_stats();
+        assert_eq!(stats.hits, 1);
+        assert_eq!(stats.misses, 2);
     }
 
     #[test]

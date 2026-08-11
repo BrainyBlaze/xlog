@@ -514,14 +514,14 @@ struct EpistemicProvenance {
     /// Whether ordinary-plan query results retain the source epistemic relation name
     /// and logical zero-column shape instead of exposing compiler projection details.
     surface_source_queries: bool,
-    /// Authored normalized program retained before execution-only rewrites mutate
-    /// predicate names, modal literals, queries, constraints, or rule bodies.
-    source_program: Program,
 }
 
 /// A compiled Datalog program ready for GPU evaluation.
 #[derive(Clone)]
 pub struct LogicProgram {
+    /// Merged authored program retained for public diagnostics and result labels.
+    source_program: Program,
+    /// Normalized or reduced program used by compilation and execution.
     program: Program,
     /// Integrity constraints as authored before normalization, retained only when
     /// their order matches the source-order constraint provenance used by the plan.
@@ -569,26 +569,37 @@ impl LogicProgram {
     /// Compile a Datalog source string into a GPU-executable program.
     pub fn compile(source: &str) -> Result<Self> {
         let program = xlog_logic::parse_program(source)?;
-        let authored_constraints = program.constraints.clone();
-        let normalized = normalize_program(program)?;
-        Self::compile_normalized_program(normalized, authored_constraints)
+        Self::compile_program(program)
     }
 
-    fn compile_normalized_program(
-        normalized: Program,
-        authored_constraints: Vec<Constraint>,
-    ) -> Result<Self> {
+    /// Compile an already parsed program into a GPU-executable program.
+    ///
+    /// This method does not resolve imports; import-aware callers merge them
+    /// first. The program enters the canonical execution normalizer once here.
+    pub fn compile_program(program: Program) -> Result<Self> {
+        let source_program = program.clone();
+        let normalized = normalize_program_for_execution(program)?;
+        Self::compile_normalized_program(normalized, source_program)
+    }
+
+    fn compile_normalized_program(normalized: Program, source_program: Program) -> Result<Self> {
         // Function, meta-term, list, and shared-variable normalization preserve
         // constraint count and source order. Keep the authored snapshot only
         // while that one-to-one invariant remains observable.
-        let authored_constraints = (authored_constraints.len() == normalized.constraints.len())
-            .then_some(authored_constraints);
+        let authored_constraints = (source_program.constraints.len()
+            == normalized.constraints.len())
+        .then(|| source_program.constraints.clone());
         if program_has_epistemic_literals(&normalized) {
-            return Self::compile_epistemic_program(normalized, authored_constraints);
+            return Self::compile_epistemic_program(
+                normalized,
+                source_program,
+                authored_constraints,
+            );
         }
         let mut compiler = Compiler::new();
         let plan = compiler.compile_program(&normalized)?;
         Ok(Self {
+            source_program,
             program: normalized,
             authored_constraints,
             plan: LogicExecutionPlan::Ordinary(Box::new(plan)),
@@ -600,6 +611,7 @@ impl LogicProgram {
 
     fn compile_epistemic_program(
         normalized: Program,
+        source_program: Program,
         authored_constraints: Option<Vec<Constraint>>,
     ) -> Result<Self> {
         // Capture epistemic provenance up front: the source-EIR modal literals are
@@ -607,7 +619,6 @@ impl LogicProgram {
         // Ordinary executable plan, so the epistemic plan dump can still emit a stable id
         // for a recursive epistemic fixpoint.
         let provenance_literals = collect_eir_epistemic_literals(&normalized);
-        let source_program = normalized.clone();
         let prepared = prepare_epistemic_program(&normalized)?;
         let active_program = prepared.active_program();
 
@@ -621,6 +632,7 @@ impl LogicProgram {
             let schemas = g91_plan_combined_schemas(&plan);
             let rel_ids = g91_plan_combined_rel_ids(&plan);
             return Ok(Self {
+                source_program,
                 program: reduction.refinement_program().clone(),
                 authored_constraints,
                 plan: LogicExecutionPlan::EpistemicG91Compatibility(Box::new(plan)),
@@ -630,7 +642,6 @@ impl LogicProgram {
                     reduction: "g91_tuple_compatibility",
                     literals: provenance_literals,
                     surface_source_queries: true,
-                    source_program,
                 }),
             });
         }
@@ -675,6 +686,7 @@ impl LogicProgram {
             let plan = LogicExecutionPlan::EpistemicStratified(strata);
             let rel_ids = epistemic_relation_ids(&plan)?;
             return Ok(Self {
+                source_program,
                 program: normalized,
                 authored_constraints,
                 plan,
@@ -684,7 +696,6 @@ impl LogicProgram {
                     reduction: "stratified",
                     literals: provenance_literals,
                     surface_source_queries: false,
-                    source_program,
                 }),
             });
         }
@@ -702,6 +713,7 @@ impl LogicProgram {
                 let schemas = wfs_plan_combined_schemas(&wfs_plan);
                 let rel_ids = wfs_plan_combined_rel_ids(&wfs_plan);
                 return Ok(Self {
+                    source_program,
                     program: recursive_reduced,
                     authored_constraints,
                     plan: LogicExecutionPlan::EpistemicWfsGpu(Box::new(wfs_plan)),
@@ -711,13 +723,13 @@ impl LogicProgram {
                         reduction: "wfs_gpu_recursive",
                         literals: provenance_literals,
                         surface_source_queries: true,
-                        source_program,
                     }),
                 });
             }
             let mut compiler = Compiler::new();
             let plan = compiler.compile_program(&recursive_reduced)?;
             return Ok(Self {
+                source_program,
                 program: recursive_reduced,
                 authored_constraints,
                 plan: LogicExecutionPlan::Ordinary(Box::new(plan)),
@@ -727,7 +739,6 @@ impl LogicProgram {
                     reduction: "ordinary_recursive_modal_reduction",
                     literals: provenance_literals,
                     surface_source_queries: true,
-                    source_program,
                 }),
             });
         }
@@ -757,6 +768,7 @@ impl LogicProgram {
         };
         let rel_ids = epistemic_relation_ids(&plan)?;
         Ok(Self {
+            source_program,
             program: normalized,
             authored_constraints,
             plan,
@@ -766,7 +778,6 @@ impl LogicProgram {
                 reduction: "epistemic_executable",
                 literals: provenance_literals,
                 surface_source_queries: false,
-                source_program,
             }),
         })
     }
@@ -830,9 +841,7 @@ impl LogicProgram {
             .merge_imports(program)
             .map_err(|e| XlogError::Compilation(format!("Module resolution failed: {}", e)))?;
 
-        let authored_constraints = merged.constraints.clone();
-        let normalized = normalize_program(merged)?;
-        Self::compile_normalized_program(normalized, authored_constraints)
+        Self::compile_program(merged)
     }
 
     /// Serialize the compiled epistemic execution plan to a JSON summary.
@@ -989,20 +998,16 @@ impl LogicProgram {
 
     /// Return stable rule provenance for source-visible rules.
     pub fn rule_provenance(&self) -> Vec<xlog_logic::RuleProvenance> {
-        xlog_logic::rule_provenance(self.presentation_program(), None)
+        xlog_logic::source_diagnostics(&self.source_program, &self.program, None).0
     }
 
     /// Return direct proof traces for source queries.
     pub fn proof_traces(&self) -> Vec<xlog_logic::QueryProofTrace> {
-        let provenance = self.rule_provenance();
-        xlog_logic::query_proof_traces(self.presentation_program(), &provenance)
+        xlog_logic::source_diagnostics(&self.source_program, &self.program, None).1
     }
 
     fn presentation_program(&self) -> &Program {
-        self.epistemic_provenance
-            .as_ref()
-            .map(|provenance| &provenance.source_program)
-            .unwrap_or(&self.program)
+        &self.source_program
     }
 
     /// Create a persistent user-visible relation store initialized with inline facts.
@@ -1712,8 +1717,9 @@ impl LogicProgram {
         let provenance = self.epistemic_provenance.as_ref();
         let surface_source_query = provenance.is_some_and(|value| value.surface_source_queries);
         let presentation_query = if surface_source_query {
-            provenance
-                .and_then(|value| value.source_program.queries.get(query_index))
+            self.source_program
+                .queries
+                .get(query_index)
                 .ok_or_else(|| {
                     XlogError::Execution(format!(
                         "missing authored metadata for query {query_index}"
@@ -2344,11 +2350,7 @@ impl LogicProgram {
             .authored_constraints
             .as_ref()
             .and_then(|constraints| constraints.get(constraint_index))
-            .or_else(|| {
-                self.epistemic_provenance.as_ref().and_then(|provenance| {
-                    provenance.source_program.constraints.get(constraint_index)
-                })
-            })
+            .or_else(|| self.source_program.constraints.get(constraint_index))
             .unwrap_or(&self.program.constraints[constraint_index]);
         XlogError::Execution(format!(
             "Constraint {} violated: {}",
@@ -2441,8 +2443,13 @@ fn finalize_iterative_execution_stats(stats: &mut Option<ExecutionStats>, total_
 
 const DEFAULT_EPISTEMIC_MAX_MODELS_PER_REDUCTION: usize = 1024;
 
-fn normalize_program(program: Program) -> Result<Program> {
-    let max_recursion = program.directives.max_recursion_depth.unwrap_or(100);
+/// Normalize a parsed program through the pre-compilation passes used by execution.
+///
+/// This helper does not resolve imports; import-aware callers merge them first. It
+/// expands user-defined functions with the entry program's recursion limit, normalizes
+/// meta and list builtins, and desugars shared-variable epistemic constraints.
+pub fn normalize_program_for_execution(program: Program) -> Result<Program> {
+    let max_recursion = program.directives.max_recursion_depth_or_default();
     let expanded = xlog_logic::expand_program_functions(&program, max_recursion)
         .map_err(|e| XlogError::Compilation(e.to_string()))?;
     let normalized = xlog_logic::normalize_meta_builtins(&expanded)?;
@@ -4223,6 +4230,56 @@ mod tests {
         assert_eq!(traces.len(), 1);
         assert_eq!(traces[0].query, "p(X)");
         assert!(traces[0].source_facts.iter().any(|fact| fact == "base(1)."));
+        Ok(())
+    }
+
+    #[test]
+    fn predicate_function_proof_traces_preserve_source_names_and_normalized_support() -> Result<()>
+    {
+        let program = LogicProgram::compile(
+            r#"
+                pred candidate(i32, i32).
+                pred blocked(i32).
+                pred forbidden(i32).
+                pred answer(i32).
+                candidate(1, 2).
+                func visible(X) = Y :- candidate(X, Y), not blocked(Y).
+                answer(Y) :- Y is visible(1), not forbidden(Y).
+                ?- answer(Y).
+            "#,
+        )?;
+
+        let provenance = program.rule_provenance();
+        let answer_rule = provenance
+            .iter()
+            .find(|rule| rule.head == "answer(Y)")
+            .expect("answer rule provenance");
+        assert!(
+            ["candidate", "blocked", "forbidden"]
+                .iter()
+                .all(|relation| answer_rule
+                    .support_relation_ids
+                    .iter()
+                    .any(|id| id == relation)),
+            "{:?}",
+            answer_rule.support_relation_ids
+        );
+
+        let traces = program.proof_traces();
+        assert_eq!(traces.len(), 1);
+        assert!(traces[0]
+            .rejected_alternatives
+            .iter()
+            .any(|alternative| alternative == "not blocked(Y)"));
+        assert!(traces[0]
+            .rejected_alternatives
+            .iter()
+            .any(|alternative| alternative == "not forbidden(Y)"));
+        assert!(traces[0]
+            .source_facts
+            .iter()
+            .any(|fact| fact == "candidate(1, 2)."));
+        assert!(!format!("{provenance:?}{traces:?}").contains("__XLOG_FUNCTION"));
         Ok(())
     }
 

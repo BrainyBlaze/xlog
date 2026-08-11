@@ -1,10 +1,11 @@
 //! Stable diagnostic records for rule provenance and query proof traces.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use xlog_core::{symbol, ScalarType};
 
 use crate::ast::{AggOp, ArithExpr, Atom, BodyLiteral, CompOp, Program, Rule, Term};
+use crate::expand::generated_function_variable_source;
 
 /// Origin class for a rule visible through diagnostic introspection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -174,6 +175,224 @@ pub fn build_query_proof_traces(program: &Program) -> Vec<QueryProofTrace> {
     query_proof_traces(program, &provenance)
 }
 
+/// Build source-facing provenance and proof traces from authored and normalized programs.
+///
+/// Normalized support relations and rejected alternatives are merged only while rule and
+/// query order still align with the authored program. Compiler-generated predicates and
+/// variables are removed or mapped back to their authored function-local names.
+pub fn source_diagnostics(
+    source_program: &Program,
+    analysis_program: &Program,
+    rewritten_program: Option<&Program>,
+) -> (Vec<RuleProvenance>, Vec<QueryProofTrace>) {
+    let mut provenance = rule_provenance(source_program, None);
+    let rules_align = analysis_program.rules.len() >= source_program.rules.len()
+        && source_program
+            .rules
+            .iter()
+            .zip(&analysis_program.rules)
+            .all(|(source, normalized)| {
+                source.head.predicate == normalized.head.predicate
+                    && source.head.arity() == normalized.head.arity()
+            });
+    if rules_align {
+        let normalized = rule_provenance(analysis_program, None);
+        for (source, normalized) in provenance.iter_mut().zip(normalized) {
+            source.support_relation_ids = source
+                .support_relation_ids
+                .iter()
+                .chain(&normalized.support_relation_ids)
+                .filter(|name| !name.starts_with("__"))
+                .cloned()
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect();
+        }
+    }
+
+    if let Some(rewritten_program) = rewritten_program {
+        provenance.extend(
+            rule_provenance(analysis_program, Some(rewritten_program))
+                .into_iter()
+                .filter(|entry| entry.source_kind == RuleSourceKind::Generated),
+        );
+    }
+
+    let mut proof_traces = query_proof_traces(source_program, &provenance);
+    let queries_align = source_program.queries.len() == analysis_program.queries.len()
+        && source_program
+            .queries
+            .iter()
+            .zip(&analysis_program.queries)
+            .all(|(source, normalized)| {
+                source.atom.predicate == normalized.atom.predicate
+                    && source.atom.arity() == normalized.atom.arity()
+            });
+    if rules_align && queries_align {
+        let normalized_provenance = rule_provenance(analysis_program, None);
+        let normalized_traces = query_proof_traces(analysis_program, &normalized_provenance);
+        let function_variable_sources =
+            generated_function_variable_sources(source_program, analysis_program);
+        let authored_facts = source_program
+            .facts()
+            .map(|rule| format!("{}.", format_atom(&rule.head)))
+            .collect::<BTreeSet<_>>();
+        for (source, normalized) in proof_traces.iter_mut().zip(normalized_traces) {
+            source.source_facts = source
+                .source_facts
+                .iter()
+                .chain(&normalized.source_facts)
+                .filter(|fact| authored_facts.contains(*fact) && !fact.starts_with("__"))
+                .cloned()
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect();
+            source.rejected_alternatives = source
+                .rejected_alternatives
+                .iter()
+                .cloned()
+                .chain(normalized.rejected_alternatives.iter().map(|alternative| {
+                    source_format_normalized_alternative(alternative, &function_variable_sources)
+                }))
+                .filter(|alternative| {
+                    !alternative
+                        .strip_prefix("not ")
+                        .unwrap_or(alternative)
+                        .starts_with("__")
+                })
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect();
+        }
+    }
+    (provenance, proof_traces)
+}
+
+/// Map generated predicate-function variables to their authored local names.
+pub fn generated_function_variable_sources(
+    source_program: &Program,
+    analysis_program: &Program,
+) -> HashMap<String, String> {
+    let authored_variables = program_variable_names(source_program);
+    let mut function_locals = source_program
+        .functions
+        .iter()
+        .filter_map(|function| {
+            let crate::ast::FuncBody::Predicate { result, body } = &function.body else {
+                return None;
+            };
+            let parameters = function
+                .params
+                .iter()
+                .map(|parameter| parameter.name.as_str())
+                .collect::<HashSet<_>>();
+            let mut locals = body
+                .iter()
+                .flat_map(BodyLiteral::variables)
+                .filter(|name| !parameters.contains(name))
+                .map(ToOwned::to_owned)
+                .collect::<HashSet<_>>();
+            if !parameters.contains(result.as_str()) {
+                locals.insert(result.clone());
+            }
+            Some((function.name.clone(), locals))
+        })
+        .collect::<Vec<_>>();
+    function_locals.sort_by_key(|(function, _)| std::cmp::Reverse(function.len()));
+
+    program_variable_names(analysis_program)
+        .into_iter()
+        .filter(|name| !authored_variables.contains(name))
+        .filter_map(|name| {
+            let source_name = function_locals.iter().find_map(|(function, locals)| {
+                let source_name = generated_function_variable_source(&name, function)?;
+                locals
+                    .contains(source_name)
+                    .then(|| source_name.to_string())
+            })?;
+            Some((name, source_name))
+        })
+        .collect()
+}
+
+fn program_variable_names(program: &Program) -> HashSet<String> {
+    let mut variables = HashSet::new();
+    for rule in &program.rules {
+        variables.extend(rule.head.variables().into_iter().map(ToOwned::to_owned));
+        variables.extend(
+            rule.body
+                .iter()
+                .flat_map(BodyLiteral::variables)
+                .map(ToOwned::to_owned),
+        );
+    }
+    for constraint in &program.constraints {
+        variables.extend(
+            constraint
+                .body
+                .iter()
+                .flat_map(BodyLiteral::variables)
+                .map(ToOwned::to_owned),
+        );
+    }
+    for query in &program.queries {
+        variables.extend(query.atom.variables().into_iter().map(ToOwned::to_owned));
+    }
+    variables
+}
+
+/// Replace generated predicate-function variable tokens with authored local names.
+pub fn source_format_normalized_alternative(
+    alternative: &str,
+    function_variable_sources: &HashMap<String, String>,
+) -> String {
+    let characters = alternative.chars().collect::<Vec<_>>();
+    let mut output = String::with_capacity(alternative.len());
+    let mut index = 0;
+    let mut quoted = false;
+    let mut escaped = false;
+    while index < characters.len() {
+        let character = characters[index];
+        if quoted {
+            output.push(character);
+            if escaped {
+                escaped = false;
+            } else if character == '\\' {
+                escaped = true;
+            } else if character == '"' {
+                quoted = false;
+            }
+            index += 1;
+            continue;
+        }
+        if character == '"' {
+            quoted = true;
+            output.push(character);
+            index += 1;
+            continue;
+        }
+        if character.is_ascii_alphanumeric() || character == '_' {
+            let start = index;
+            while index < characters.len()
+                && (characters[index].is_ascii_alphanumeric() || characters[index] == '_')
+            {
+                index += 1;
+            }
+            let token = characters[start..index].iter().collect::<String>();
+            output.push_str(
+                function_variable_sources
+                    .get(&token)
+                    .map(String::as_str)
+                    .unwrap_or(&token),
+            );
+            continue;
+        }
+        output.push(character);
+        index += 1;
+    }
+    output
+}
+
 fn rule_record(idx: usize, rule: &Rule, source_kind: RuleSourceKind) -> RuleProvenance {
     let head = format_atom(&rule.head);
     let prefix = source_kind.as_str();
@@ -292,13 +511,14 @@ fn format_epistemic_literal(lit: &crate::ast::EpistemicLiteral) -> String {
     }
 }
 
-fn format_term(term: &Term) -> String {
+/// Format a term in source-like syntax.
+pub fn format_term(term: &Term) -> String {
     match term {
         Term::Variable(name) => name.clone(),
         Term::Anonymous => "_".to_string(),
         Term::Integer(value) => value.to_string(),
         Term::Float(value) => value.to_string(),
-        Term::String(value) => format!("\"{}\"", value),
+        Term::String(value) => format!("\"{}\"", escape_string_contents(value)),
         Term::Symbol(id) => symbol::resolve(*id),
         Term::List(items) => {
             let values = items.iter().map(format_term).collect::<Vec<_>>().join(", ");
@@ -314,6 +534,22 @@ fn format_term(term: &Term) -> String {
         Term::PredRef(name) => name.clone(),
         Term::Aggregate(agg) => format!("{}({})", format_agg_op(agg.op), agg.variable),
     }
+}
+
+fn escape_string_contents(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for character in value.chars() {
+        match character {
+            '\\' => escaped.push_str("\\\\"),
+            '"' => escaped.push_str("\\\""),
+            '\n' => escaped.push_str("\\n"),
+            '\r' => escaped.push_str("\\r"),
+            '\t' => escaped.push_str("\\t"),
+            character if character.is_control() => escaped.extend(character.escape_default()),
+            character => escaped.push(character),
+        }
+    }
+    escaped
 }
 
 fn format_arith_expr(expr: &ArithExpr) -> String {
@@ -455,7 +691,12 @@ fn stable_hash(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::format_constraint_body;
+    use std::collections::HashMap;
+
+    use super::{
+        format_constraint_body, generated_function_variable_sources,
+        source_format_normalized_alternative,
+    };
 
     #[test]
     fn constraint_formatter_uses_source_syntax_for_function_expressions() {
@@ -469,5 +710,70 @@ mod tests {
             format_constraint_body(&program.constraints[0].body),
             ":- Parent is cast(get_parent(1), u64)."
         );
+    }
+
+    #[test]
+    fn generated_variable_mapping_handles_overlapping_function_names_and_underscores() {
+        let source = crate::parse_program(
+            "pred first(i32, i32).\n\
+             pred second(i32, i32).\n\
+             pred answer(i32, i32).\n\
+             first(1, 2).\n\
+             second(1, 3).\n\
+             func get(X) = Parent_Value :- first(X, Parent_Value).\n\
+             func get_parent(X) = Value_With_Underscore :- second(X, Value_With_Underscore).\n\
+             answer(A, B) :- A is get(1), B is get_parent(1).\n\
+             ?- answer(A, B).",
+        )
+        .expect("parse predicate functions");
+        let expanded =
+            crate::expand_program_functions(&source, 1_000).expect("expand predicate functions");
+        let mapping = generated_function_variable_sources(&source, &expanded);
+        assert!(mapping.values().any(|name| name == "Parent_Value"));
+        assert!(mapping.values().any(|name| name == "Value_With_Underscore"));
+    }
+
+    #[test]
+    fn normalized_alternative_mapping_does_not_rewrite_quoted_tokens() {
+        let generated = "__XLOG_FUNCTION_VISIBLE_Result_Value_7";
+        let mapping = HashMap::from([(generated.to_string(), "Result_Value".to_string())]);
+        assert_eq!(
+            source_format_normalized_alternative(
+                &format!("not blocked({generated}, \"{generated}\")"),
+                &mapping,
+            ),
+            format!("not blocked(Result_Value, \"{generated}\")")
+        );
+    }
+
+    #[test]
+    fn normalized_alternative_mapping_preserves_escaped_string_boundaries() {
+        let generated = "__XLOG_FUNCTION_VISIBLE_Result_Value_7";
+        let mapping = HashMap::from([(generated.to_string(), "Result_Value".to_string())]);
+        let mut literal = format!("quoted \" {generated} ");
+        literal.push('\\');
+        literal.push('\n');
+        literal.push('\r');
+        literal.push('\t');
+        literal.push('\u{0007}');
+        let atom = crate::ast::Atom {
+            predicate: "blocked".to_string(),
+            terms: vec![crate::ast::Term::String(literal)],
+        };
+        let formatted = super::format_atom(&atom);
+
+        assert_eq!(
+            source_format_normalized_alternative(&formatted, &mapping),
+            formatted
+        );
+        assert!(formatted.contains("\\\\"));
+        assert!(formatted.contains("\\n"));
+        assert!(formatted.contains("\\r"));
+        assert!(formatted.contains("\\t"));
+        assert!(formatted.contains("\\u{7}"));
+        assert!(!formatted.contains('\n'));
+        assert!(!formatted.contains('\r'));
+        assert!(!formatted.contains('\t'));
+        assert!(formatted.contains(&format!("\\\" {generated} \\\\\\n")));
     }
 }

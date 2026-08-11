@@ -28,6 +28,7 @@
 //! - [`lower`] - Lowering from AST to Relational IR
 //! - [`mod@compile`] - Full compilation pipeline
 
+pub mod arithmetic_eval;
 pub mod ast;
 pub mod compile;
 pub mod compiler_config;
@@ -55,6 +56,9 @@ pub mod typeinfer;
 pub mod wcoj_var_ordering;
 
 // Re-export main types
+pub use arithmetic_eval::{
+    compare_arithmetic_values, evaluate_arithmetic_expression, ArithmeticValue,
+};
 pub use ast::{
     AnnotatedDisjunction, Atom, BodyLiteral, Constraint, Directives, EpistemicLiteral,
     EpistemicMode, EpistemicOp, Evidence, MagicSetsMode, ProbCache, ProbEngine, ProbFact,
@@ -63,7 +67,9 @@ pub use ast::{
 pub use compile::{compile, Compiler};
 pub use diagnostics::{
     build_query_proof_traces, build_rule_provenance, format_atom, format_constraint_body,
-    query_proof_traces, rule_provenance, QueryProofTrace, RuleProvenance, RuleSourceKind,
+    format_term, generated_function_variable_sources, query_proof_traces, rule_provenance,
+    source_diagnostics, source_format_normalized_alternative, QueryProofTrace, RuleProvenance,
+    RuleSourceKind,
 };
 pub use eir::build_eir;
 pub use expand::expand_program_functions;

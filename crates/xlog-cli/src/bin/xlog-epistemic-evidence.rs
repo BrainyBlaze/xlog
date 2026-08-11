@@ -380,13 +380,13 @@ fn load_relations(path: &PathBuf) -> Result<BTreeMap<String, (usize, Vec<Vec<u32
 
 fn parse_program_with_modules(source_path: &Path, source: &str) -> Result<Program> {
     let program = parse_program(source)?;
-    if !source.contains("use ") {
+    if program.imports.is_empty() {
         return Ok(program);
     }
     let resolver = load_modules(source_path, Vec::new())
         .map_err(|err| XlogError::Compilation(format!("Module resolution failed: {err}")))?;
-    // Pragmas are entry-file-scoped; surface anything an imported module
-    // declared instead of dropping it silently (issue #184).
+    // Pragmas are entry-file-scoped; surface imported declarations instead of
+    // dropping them silently.
     for warning in resolver.ignored_import_pragmas() {
         eprintln!("{warning}");
     }
@@ -1235,7 +1235,8 @@ mod tests {
             ))
         })?;
         let entry_source = r#"
-            use modules/closure::{imported_reach}.
+            use
+            modules/closure::{imported_reach}.
 
             pred imported_edge(u32, u32).
             pred merged_result(u32, u32).

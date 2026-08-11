@@ -367,11 +367,27 @@ impl Optimizer {
                 }
             }
 
-            // Project: recursively optimize input
-            RirNode::Project { input, columns } => RirNode::Project {
-                input: Box::new(self.predicate_pushdown(*input)),
-                columns,
-            },
+            // Project: unwrap consecutive projections before visiting the base.
+            // Function expansion can produce one projection per generated
+            // binding, so recursing through this unary chain can exhaust the
+            // native stack at the supported expansion-depth boundary.
+            RirNode::Project { input, columns } => {
+                let mut projections = vec![columns];
+                let mut base = *input;
+                while let RirNode::Project { input, columns } = base {
+                    projections.push(columns);
+                    base = *input;
+                }
+
+                let mut optimized = self.predicate_pushdown(base);
+                for columns in projections.into_iter().rev() {
+                    optimized = RirNode::Project {
+                        input: Box::new(optimized),
+                        columns,
+                    };
+                }
+                optimized
+            }
 
             // Join: recursively optimize both sides
             RirNode::Join {

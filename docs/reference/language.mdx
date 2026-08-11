@@ -255,19 +255,19 @@ temperature(1, invalid).      // Error: a symbol is not valid for f64
 ```
 
 Within a single program, compilation also rejects a rule whose variables draw
-incompatible column types from the declared schemas of the predicates they touch
+incompatible column types from the available schemas of the predicates they touch
 — whether the conflict is between two body atoms or between a body atom and the
-head. The error names the rule, the variable, both types, and where each came
-from:
+head. Schemas inferred from facts and rules participate in the same check as
+explicit declarations. The error names the rule, the variable, both types, and
+where each came from:
 
 ```text
 Type mismatch in rule for '<head>': variable <V> is <Type> (from <predicate/position>) but <head> declares <Type> at position <N>
 ```
 
-The check applies only to predicates that carry an explicit `pred` declaration —
-an undeclared predicate has no schema to contradict. Available since 0.12.0;
-before that the same program compiled here and failed later with an internal GPU
-schema error that did not name the rule.
+An explicit `pred` declaration makes the expected schema stable and visible at the
+source boundary. Without one, compilation infers the predicate schema from the
+available program evidence and still rejects conflicting type flows.
 
 ### Language-Completeness Type Forms
 
@@ -290,10 +290,13 @@ runtime execution starts.
 
 ## Language Completeness Contract
 
-The language-completeness contract is a language-surface expansion over the core runtime. New syntax is
-accepted only when it can be normalized into the existing typed AST, RIR
-(XLOG's internal relational intermediate representation), probabilistic IR
-(PIR), optimizer, runtime, WCOJ (worst-case-optimal join), and CLI paths.
+The language-completeness contract is a language-surface expansion over the core
+runtime. New syntax is accepted only when it has a typed normalization and
+lowering path for every execution route that supports it. Deterministic programs
+flow through RIR (XLOG's internal relational intermediate representation), the
+optimizer, and runtime; probabilistic and epistemic constructs use their own
+typed IR and execution routes. CLI commands report the route that was actually
+analyzed rather than implying that every construct traverses every subsystem.
 
 ### Execution Responsibilities
 
@@ -322,9 +325,9 @@ using a hidden CPU-only fallback for a GPU-claimed path.
 | Aggregate lifting | Finite-domain aggregate metadata and caps | Use lifted compact-domain computation when identical to finite exact enumeration | Small count/sum domains avoid naive enumeration | Domain cap exceeded, non-finite domains, unsupported floating tolerance | Probabilistic aggregate planner and exact/MC engines |
 | Approximate inference | `#pragma prob_engine = mc`, samples, seed, confidence, method | MC estimates are reproducible under fixed seed and report uncertainty | `#pragma prob_samples = 10000` with `query(rain).` | Invalid confidence ranges, unsupported methods, hidden default override ambiguity | Existing MC engine with documented source/CLI precedence |
 | Epistemic literals | `know atom(...)`, `possible atom(...)`, `not know atom(...)`, `not possible atom(...)`, finite nested modal chains, `#pragma epistemic_mode = faeel\|g91` | Modal literals are preserved in EIR. The single-pass route derives candidate worlds from EIR and checks value-level tuple-key membership. Across all routes, the executor normalizes finite nested chains by parity/duality, solves same-name multi-arity by arity-qualified tuple sources, supports determined-head stratification, positive FAEEL modal dependency cycles through founded least-fixpoint reduction, supported Gelfond-1991 positive exact-tuple `possible` cycles through a greatest compatibility fixpoint, stratified negated-modal recursion, and cyclic negated-modal recursion through the `xlog-gpu` GPU-backed WFS plan without the old `xlog_prob` host-WFS solver. Gelfond-1991 refinement and WFS convergence may be host-orchestrated while relation evaluation, snapshots, and set comparison remain GPU-backed. | `accepted() :- know fact().` | Direct raw RIR lowering, genuinely unbounded/untyped modal tuple keys, unsafe unbound negated epistemic variables, CPU-only world-view scans, recursive epistemic programs that also carry modal integrity constraints, and a Gelfond-1991 compatibility component with recursive negation or aggregation | Parser/AST -> EIR -> single-pass epistemic GPU plans, reduced ordinary least-fixpoint plans, descending Gelfond-1991 compatibility plans, or GPU-backed WFS alternating-fixpoint plans through high-level `xlog run` dispatch |
-| CLI explain | `xlog explain --format text\|json\|dot file.xlog` | Show parse, strata, RIR, optimized RIR, magic-set, WCOJ, and probability sections when applicable | `xlog explain --format json reach.xlog` | Unknown output formats or unavailable sections without a typed reason | CLI orchestration plus compiler/explain APIs |
-| CLI REPL | `xlog repl` | Interactive multiline fact/rule/query session using parser cache | Add facts, then query relation state | GPU execution before a command requests it, unsupported mutation semantics | CLI session cache plus normal compile/run on submitted programs |
-| CLI watch | `xlog watch file.xlog` | Rerun or re-explain changed files with debounce and typed diagnostics | Edit a rule and see updated diagnostics/output | Silent stale cache reuse after file/module change | CLI file watcher plus parser/session cache and normal commands |
+| CLI explain | `xlog explain --format text\|json\|dot file.xlog` | Report parse-cache and AST counts, analysis status and summaries, provenance, proof traces, and generated-row diagnostics | `xlog explain --format json reach.xlog` | Unknown output formats; unsupported analyses report an unavailable status and reason | CLI orchestration plus compiler/explain APIs |
+| CLI REPL | `xlog repl` | Read standard input to end-of-file, parse it once, and print a parse summary | Pipe a complete program to `xlog repl` | Compilation, interactive mutation, and query evaluation | Parser session |
+| CLI watch | `xlog watch file.xlog` | Re-read and parse a file at a fixed interval; optionally rebuild its explain report | `xlog watch --explain --once file.xlog` | Filesystem-event subscriptions, mutation semantics, and program execution | Parser session and optional explain analysis |
 
 ### Diagnostic Contract
 
@@ -1480,6 +1483,12 @@ wet :- rain.
 wet :- sprinkler.
 ```
 
+Arithmetic values bound by `is` in probabilistic rules must be representable by
+the probabilistic tuple value model. In particular, a `u64` result greater than
+`i64::MAX` is rejected with a range error before it can be used by another
+literal or emitted in a derived tuple. Deterministic execution continues to use
+the full declared `u64` range.
+
 ### Evidence
 
 Evidence constrains the probabilistic model to worlds consistent with observations:
@@ -1597,9 +1606,10 @@ executes the shared deterministic aggregate path for each accepted sample batch.
 ### Aggregate Lifting
 
 Small-domain aggregate lifting is permitted only when the lifted computation is
-semantically identical to finite exact enumeration. Explain output must report
-the detected finite domain, cap, operator, and whether lifting fired, declined,
-or fell back to supported exact enumeration.
+semantically identical to finite exact enumeration. For each successful lift,
+explain output reports the detected finite domain, cap, operator, and `fired`
+status. Unsupported operators and type, domain, or cap violations return typed
+compilation errors instead of aggregate-lifting report entries.
 
 In the aggregate-lifting subset, finite probabilistic `count` aggregate heads use
 exact cardinality dynamic programming when every aggregate expression in the
@@ -1608,12 +1618,12 @@ rows over the same row-presence formulas used by finite enumeration, so it does
 not change exact semantics. The count lift accepts up to 64 uncertain rows per
 group; larger count domains fail closed with a typed `agg_lift error`.
 
-`sum`, `min`, `max`, and `logsumexp` remain on exact finite outcome enumeration
-in this subset. Their explain entries report `fallback_exact_enumeration` with a
-per-operator rationale and continue to use the 16-uncertain-row exact aggregate
-cap. `xlog explain --format json` emits an `aggregate_lifting` array containing
-the predicate, group key, operator, finite-domain source, domain size, cap,
-status, reason, naive outcome count, and dynamic-programming state count.
+`sum`, `min`, `max`, and `logsumexp` use factorized aggregate-state dynamic
+programming with a cap of 16 uncertain rows per group. Successful count and
+numeric lifts both report `fired`. `xlog explain --format json` emits an
+`aggregate_lifting` array containing the predicate, group key, operator,
+finite-domain source, domain size, cap, status, reason, naive outcome count, and
+dynamic-programming state count for those successful lifts.
 
 ### Monte Carlo Sampling Methods
 
@@ -2123,20 +2133,13 @@ and interactive without changing the runtime execution contract.
 xlog explain [--format text|json|dot] <FILE>
 ```
 
-The CLI explain subset reports deterministic parse, AST,
-stratification, RIR, optimizer, WCOJ, magic-set, and probability sections
-without requiring GPU execution. JSON output is deterministic for fixed input.
-
-Full explain output must include deterministic sections when applicable:
-
-- parse and AST summary;
-- predicate declarations and schema metadata;
-- stratification and negation safety;
-- RIR and optimized RIR summaries;
-- magic-set adornments, generated predicates, and declined reasons;
-- WCOJ eligibility and selected execution path;
-- probabilistic engine, aggregate, and approximate-inference sections for
-  probabilistic programs.
+The CLI explain report includes parse-cache and AST counts, stratification status,
+relational compilation and optimizer status, WCOJ reporting availability, magic-set
+rewrite results, epistemic lowering status, aggregate lifting summaries, provenance,
+proof traces, and generated-rule diagnostics without requiring GPU execution.
+Unavailable analyses include a reason instead of a derived plan or decision. The JSON
+representation includes the corresponding status, counts, summaries, and diagnostic
+records and is deterministic for fixed input.
 
 JSON output must be deterministic for fixed input. Unknown formats are rejected
 before compilation.
@@ -2159,24 +2162,22 @@ line/column and byte span before forwarding the underlying parser error.
 xlog repl [--module-path DIR[:DIR...]]
 ```
 
-The REPL accepts multiline facts, rules, declarations, pragmas, and queries.
-It shares the incremental parser/session cache and does not require GPU access
-until the user submits a command that needs execution.
-The CLI smoke implementation reads a multiline stdin session, preserves
-the accumulated parser state, and reports statement/rule/query counts.
+The command reads a multiline source session from standard input until EOF,
+parses it through the incremental parser/session cache, reports
+statement/rule/query counts, and exits. It does not compile or execute the
+session and therefore does not initialize GPU execution.
 
 ### `xlog watch`
 
 ```bash
-xlog watch [--debounce-ms N] [--explain] <FILE>
+xlog watch [--debounce-ms N] [--explain] [--once] [--module-path DIR[:DIR...]] <FILE>
 ```
 
-Watch mode reruns compilation, execution, or explanation after file changes.
-It must debounce rapid writes, invalidate changed statements and dependent
-module state, and display typed diagnostics without reusing stale parse
-results.
-The CLI smoke implementation supports `--once`, `--explain`, and
-`--debounce-ms`, using the shared parser session before any execution path.
+Watch mode re-reads and reparses the entry file at a fixed interval. Each pass
+prints parser statistics; `--explain` also builds a fresh explain report. Explain
+passes resolve sibling imports and imports from `--module-path` again after each
+re-read. `--once` runs one pass and exits, and `--debounce-ms` controls the interval
+between repeated passes.
 
 Unsupported REPL/watch mutation semantics, such as dynamic `assert` or
 `retract`, remain outside the language.

@@ -66,6 +66,25 @@ fn compile_acyclic_function_chain(step_body: impl Fn(usize) -> String) {
     drop(program);
 }
 
+fn predicate_function_chain_source(step_body: impl Fn(usize) -> String) -> String {
+    use std::fmt::Write as _;
+
+    let mut source = String::from(
+        "pred parent(u32, u32).\npred answer(u32).\nparent(1, 2).\n\
+         func lookup0(X) = Parent :- parent(X, Parent).\n",
+    );
+    for index in 1..=999 {
+        writeln!(
+            source,
+            "func lookup{index}(X) = Result :- Result is {}.",
+            step_body(index)
+        )
+        .expect("write predicate function");
+    }
+    source.push_str("answer(Y) :- Y is lookup999(1).\n?- answer(Y).\n");
+    source
+}
+
 #[test]
 fn predicate_function_locals_do_not_capture_caller_variables() {
     let expanded = compile_expanded(
@@ -186,13 +205,106 @@ fn nested_predicate_calls_expand_before_their_containing_binding() {
     );
     let body = &proper_rule(&expanded, "answer").body;
 
-    assert_eq!(body.len(), 4);
+    assert_eq!(body.len(), 3);
     assert!(
         matches!(&body[0], BodyLiteral::Positive(atom) if matches!(atom.terms[0], Term::Integer(1)))
     );
     assert!(matches!(&body[1], BodyLiteral::Positive(atom) if atom.predicate == "parent"));
-    assert!(matches!(&body[2], BodyLiteral::IsExpr(_)));
-    assert!(matches!(&body[3], BodyLiteral::IsExpr(binding) if binding.target == "Result"));
+    assert!(matches!(&body[2], BodyLiteral::IsExpr(binding) if binding.target == "Result"));
+}
+
+#[test]
+fn trailing_predicate_result_binding_is_inlined_into_the_caller() {
+    let expanded = compile_expanded(
+        r#"
+        pred parent(u32, u32).
+        pred answer(u32).
+
+        func get_parent(Child) = Parent :- parent(Child, Parent).
+        func lookup(Child) = Result :- Result is get_parent(Child).
+
+        parent(1, 2).
+        answer(Result) :- Result is lookup(1).
+        "#,
+    );
+    let body = &proper_rule(&expanded, "answer").body;
+
+    assert_eq!(body.len(), 2, "redundant predicate-result alias: {body:?}");
+    assert!(matches!(
+        &body[0],
+        BodyLiteral::Positive(atom) if atom.predicate == "parent"
+    ));
+    assert!(
+        matches!(
+            &body[1],
+            BodyLiteral::IsExpr(binding)
+                if binding.target == "Result"
+                    && matches!(&binding.expr, ArithExpr::Variable(name)
+                        if name.starts_with("__XLOG_FUNCTION_GET_PARENT_Parent_"))
+        ),
+        "unexpected caller binding: {body:?}"
+    );
+}
+
+#[test]
+fn trailing_predicate_arithmetic_binding_keeps_its_evaluation_point() {
+    let expanded = compile_expanded(
+        r#"
+        pred parent(u32, u32).
+        pred answer(u32).
+        func get_parent(Child) = Parent :- parent(Child, Parent).
+        func divide_by_parent(Child) = Result :-
+            Parent is get_parent(Child), Result is cast(1, u32) / Parent.
+        parent(1, 2).
+        answer(Result) :- Result is divide_by_parent(1).
+        "#,
+    );
+    let body = &proper_rule(&expanded, "answer").body;
+
+    assert_eq!(body.len(), 4, "arithmetic binding moved: {body:?}");
+    assert!(matches!(
+        &body[0],
+        BodyLiteral::Positive(atom) if atom.predicate == "parent"
+    ));
+    assert!(matches!(
+        &body[1],
+        BodyLiteral::IsExpr(binding)
+            if binding.target.starts_with("__XLOG_FUNCTION_DIVIDE_BY_PARENT_Parent_")
+                && matches!(binding.expr, ArithExpr::Variable(_))
+    ));
+    assert!(matches!(
+        &body[2],
+        BodyLiteral::IsExpr(binding)
+            if binding.target.starts_with("__XLOG_FUNCTION_DIVIDE_BY_PARENT_Result_")
+                && matches!(binding.expr, ArithExpr::Div(_, _))
+    ));
+    assert!(matches!(
+        &body[3],
+        BodyLiteral::IsExpr(binding)
+            if binding.target == "Result"
+                && matches!(binding.expr, ArithExpr::Variable(_))
+    ));
+}
+
+#[test]
+fn trailing_alias_does_not_move_a_read_before_its_binding() {
+    let source = r#"
+        func read(Value) = Result :- Result is Value.
+        func bind(Output) = Result :- Output is 1, Result is Output.
+        answer(Result) :- Result is read(Value) + bind(Value).
+    "#;
+    let expanded = expand(source, 100).expect("expand ordered predicate bindings");
+
+    let error = Compiler::new()
+        .compile_program(&expanded)
+        .expect_err("read before binding must remain invalid");
+
+    assert!(
+        error
+            .to_string()
+            .contains("Variable Value used in arithmetic but not bound"),
+        "{error}"
+    );
 }
 
 #[test]
@@ -491,6 +603,85 @@ fn nested_argument_chain_at_the_configured_limit_compiles_without_stack_growth()
 #[test]
 fn conditional_chain_at_the_configured_limit_compiles_without_stack_growth() {
     compile_acyclic_function_chain(|index| format!("if X = 0 then X else chain_{}(X)", index - 1));
+}
+
+#[test]
+fn predicate_function_chain_at_the_configured_limit_compiles_without_stack_growth() {
+    const CHILD_ENV: &str = "XLOG_PREDICATE_FUNCTION_STACK_CHILD";
+    if std::env::var_os(CHILD_ENV).is_some() {
+        let source = predicate_function_chain_source(|index| format!("lookup{}(X)", index - 1));
+        let program = parse_program(&source).expect("parse predicate function chain");
+        let expanded =
+            expand_program_functions(&program, 1000).expect("expand predicate function chain");
+        let mut compiler = Compiler::new();
+        let plan = compiler
+            .compile_program(&expanded)
+            .expect("compile predicate function chain");
+        drop(plan);
+        drop(compiler);
+        drop(expanded);
+        drop(program);
+        return;
+    }
+
+    let output = std::process::Command::new(
+        std::env::current_exe().expect("resolve predicate-function test binary"),
+    )
+    .args([
+        "--exact",
+        "predicate_function_chain_at_the_configured_limit_compiles_without_stack_growth",
+        "--nocapture",
+    ])
+    .env(CHILD_ENV, "1")
+    .output()
+    .expect("run predicate-function stack child");
+    assert!(
+        output.status.success(),
+        "predicate-function compile child failed with {status}:\n{stderr}",
+        status = output.status,
+        stderr = String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn predicate_function_arithmetic_chain_at_the_configured_limit_compiles_and_drops_without_stack_growth(
+) {
+    const CHILD_ENV: &str = "XLOG_PREDICATE_FUNCTION_ARITHMETIC_STACK_CHILD";
+    if std::env::var_os(CHILD_ENV).is_some() {
+        let source = predicate_function_chain_source(|index| {
+            format!("lookup{}(X) + cast(0, u32)", index - 1)
+        });
+        let program = parse_program(&source).expect("parse predicate function arithmetic chain");
+        let expanded = expand_program_functions(&program, 1000)
+            .expect("expand predicate function arithmetic chain");
+        let mut compiler = Compiler::new();
+        let plan = compiler
+            .compile_program(&expanded)
+            .expect("compile predicate function arithmetic chain");
+        drop(plan);
+        drop(compiler);
+        drop(expanded);
+        drop(program);
+        return;
+    }
+
+    let output = std::process::Command::new(
+        std::env::current_exe().expect("resolve predicate-function test binary"),
+    )
+    .args([
+        "--exact",
+        "predicate_function_arithmetic_chain_at_the_configured_limit_compiles_and_drops_without_stack_growth",
+        "--nocapture",
+    ])
+    .env(CHILD_ENV, "1")
+    .output()
+    .expect("run predicate-function arithmetic stack child");
+    assert!(
+        output.status.success(),
+        "predicate-function arithmetic compile child failed with {status}:\n{stderr}",
+        status = output.status,
+        stderr = String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 #[test]

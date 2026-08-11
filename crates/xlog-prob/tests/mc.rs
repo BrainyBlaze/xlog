@@ -52,6 +52,316 @@ fn mc_config(
 }
 
 #[test]
+fn test_mc_cpu_results_preserve_declared_and_sequential_arithmetic_widths() {
+    let program = McProgram::compile_source(
+        "pred input(u32).\n\
+         pred cast_input(i64).\n\
+         pred input_float(f32).\n\
+         pred out_from_input(u32).\n\
+         pred out_from_cast(u32).\n\
+         pred input_at_least_one(u32).\n\
+         pred float_at_least_one(f32).\n\
+         input(1).\n\
+         cast_input(1).\n\
+         input_float(1.5).\n\
+         out_from_input(Y) :- input(X), Y is X + cast(1, u32).\n\
+         out_from_cast(Z) :- cast_input(X), Y is cast(X, u32), Z is Y + cast(1, u32).\n\
+         input_at_least_one(X) :- input(X), X >= 1.\n\
+         float_at_least_one(X) :- input_float(X), X >= 1.0.\n\
+         query(out_from_input(2)).\n\
+         query(out_from_cast(2)).\n\
+         query(input_at_least_one(1)).\n\
+         query(float_at_least_one(1.5)).\n",
+    )
+    .expect("compile typed arithmetic MC program");
+    let result = program
+        .evaluate_cpu(mc_config(1, 0, 128, None))
+        .expect("evaluate typed arithmetic through the host MC result path");
+
+    for (predicate, expected) in [
+        ("out_from_input", 2),
+        ("out_from_cast", 2),
+        ("input_at_least_one", 1),
+    ] {
+        let estimate = result
+            .query_estimates
+            .iter()
+            .find(|estimate| {
+                estimate.atom.predicate == predicate && estimate.atom.args == [Value::I64(expected)]
+            })
+            .unwrap_or_else(|| panic!("missing {predicate}({expected}) estimate"));
+        assert_eq!(estimate.prob, 1.0, "{predicate}");
+    }
+    let float_estimate = result
+        .query_estimates
+        .iter()
+        .find(|estimate| {
+            estimate.atom.predicate == "float_at_least_one"
+                && estimate.atom.args == [Value::F64(1.5_f64.to_bits())]
+        })
+        .expect("missing float_at_least_one(1.5) estimate");
+    assert_eq!(float_estimate.prob, 1.0);
+}
+
+#[test]
+fn test_mc_cpu_results_reject_arithmetic_results_outside_public_value_range() {
+    let program = McProgram::compile_source(
+        "pred seed().\n\
+         pred wrapped_u64(u64).\n\
+         seed().\n\
+         wrapped_u64(Z) :- seed(), Y is cast(0 - 1, u64), Z is Y + cast(1, u64).\n\
+         query(wrapped_u64(0)).\n",
+    )
+    .expect("compile u64 range-boundary MC program");
+    let error = program
+        .evaluate_cpu(mc_config(1, 0, 128, None))
+        .expect_err("host MC must reject non-representable arithmetic bindings");
+
+    assert!(
+        error
+            .to_string()
+            .contains("u64 arithmetic result exceeds i64"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn test_mc_cpu_canonicalizes_declared_ground_value_types() {
+    let program = McProgram::compile_source(
+        r#"
+pred deterministic_float(f32).
+pred deterministic_float_out(f32).
+pred float_input(f32).
+pred float_out(f32).
+pred float_choice(f32).
+pred float_choice_out(f32).
+pred bool_input(bool).
+pred bool_out(bool).
+pred symbol_input(symbol).
+pred symbol_out(symbol).
+pred narrow_input(i32).
+pred narrow_out(i32).
+
+deterministic_float(0.1).
+0.5::float_input(0.1).
+0.5::float_choice(0.1); 0.5::float_choice(0.2).
+0.5::bool_input(true).
+0.5::symbol_input("alpha").
+0.5::narrow_input(2147483647).
+
+deterministic_float_out(Y) :- deterministic_float(X), Y is X + cast(0.0, f32).
+float_out(Y) :- float_input(X), Y is X + cast(0.0, f32).
+float_choice_out(Y) :- float_choice(X), Y is X + cast(0.0, f32).
+bool_out(Y) :- bool_input(X), Y is cast(X, bool).
+symbol_out(Y) :- symbol_input(X), Y is cast(X, symbol).
+narrow_out(Y) :- narrow_input(X), Y is X + cast(0, i32).
+
+evidence(float_out(0.1), true).
+query(deterministic_float_out(0.1)).
+query(float_input(0.1)).
+query(float_choice_out(0.1)).
+query(bool_out(true)).
+query(symbol_out("alpha")).
+query(narrow_out(2147483647)).
+"#,
+    )
+    .expect("compile schema-canonical host MC program");
+    let result = program
+        .evaluate_cpu(mc_config(8192, 7, 128, None))
+        .expect("evaluate schema-canonical host MC program");
+    let rounded_float = Value::F64(f64::from(0.1_f32).to_bits());
+
+    let probability = |predicate: &str, expected: &[Value]| {
+        result
+            .query_estimates
+            .iter()
+            .find(|estimate| estimate.atom.predicate == predicate && estimate.atom.args == expected)
+            .unwrap_or_else(|| panic!("missing {predicate}{expected:?} estimate"))
+            .prob
+    };
+
+    assert_eq!(
+        probability(
+            "deterministic_float_out",
+            std::slice::from_ref(&rounded_float),
+        ),
+        1.0
+    );
+    assert_eq!(
+        probability("float_input", std::slice::from_ref(&rounded_float)),
+        1.0
+    );
+    assert!(
+        (probability("float_choice_out", std::slice::from_ref(&rounded_float),) - 0.5).abs() < 0.05
+    );
+    assert!((probability("bool_out", &[Value::I64(1)]) - 0.5).abs() < 0.05);
+    assert!((probability("symbol_out", &[Value::String("alpha".to_string())],) - 0.5).abs() < 0.05);
+    assert!((probability("narrow_out", &[Value::I64(i64::from(i32::MAX))],) - 0.5).abs() < 0.05);
+}
+
+#[test]
+fn test_mc_rejects_schema_incompatible_ground_values() {
+    for (source, expected) in [
+        (
+            "pred small(i32).\n0.5::small(2147483648).\nquery(small(0)).\n",
+            "out of range for I32",
+        ),
+        (
+            "pred flag(bool).\n0.5::flag(2).\nquery(flag(0)).\n",
+            "not valid for Bool",
+        ),
+    ] {
+        let error = match McProgram::compile_source(source) {
+            Ok(_) => panic!("schema-incompatible probabilistic atom must be rejected"),
+            Err(error) => error,
+        };
+        assert!(
+            error.to_string().contains(expected),
+            "expected {expected:?}, got {error}"
+        );
+    }
+}
+
+#[test]
+fn test_mc_preserves_closed_world_query_and_evidence_only_predicates() {
+    let program = McProgram::compile_source(
+        "0.5::rain().\n\
+         evidence(frost(), false).\n\
+         evidence(snow(0.1), false).\n\
+         query(rain()).\n\
+         query(frost()).\n\
+         query(snow(0.1)).\n",
+    )
+    .expect("compile closed-world host MC program");
+    let result = program
+        .evaluate_cpu(mc_config(4096, 11, 128, None))
+        .expect("evaluate closed-world host MC program");
+
+    assert!((prob_of_atom(&result, "rain") - 0.5).abs() < 0.05);
+    assert_eq!(prob_of_atom(&result, "frost"), 0.0);
+    let snow = result
+        .query_estimates
+        .iter()
+        .find(|estimate| {
+            estimate.atom.predicate == "snow"
+                && estimate.atom.args == [Value::F64(0.1_f64.to_bits())]
+        })
+        .expect("missing closed-world snow(0.1) estimate");
+    assert_eq!(snow.prob, 0.0);
+}
+
+#[test]
+fn test_mc_rejects_cross_width_rule_bindings() {
+    for (source, expected) in [
+        (
+            "pred input(f32).\npred output(f64).\n0.5::input(0.1).\noutput(X) :- input(X).\nquery(output(0.1)).\n",
+            "Type mismatch in rule for 'output'",
+        ),
+        (
+            "pred input(u32).\npred output(u64).\n0.5::input(1).\noutput(X) :- input(X).\nquery(output(1)).\n",
+            "Type mismatch in rule for 'output'",
+        ),
+        (
+            "pred left(f32).\npred right(f64).\npred output(f32).\n0.5::left(0.1).\nright(0.1).\noutput(X) :- left(X), right(X).\nquery(output(0.1)).\n",
+            "variable X is F32",
+        ),
+    ] {
+        let error = match McProgram::compile_source(source) {
+            Ok(_) => panic!("cross-width rule binding must be rejected"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains(expected), "unexpected error: {error}");
+    }
+}
+
+#[test]
+fn test_mc_infers_probabilistic_body_predicate_widths_from_ground_choices() {
+    let source = r#"
+0.5::probable(0).
+0.5::exclusive(0); 0.5::exclusive(1).
+observed(0).
+from_fact(X) :- probable(X), observed(X).
+from_choice(X) :- exclusive(X), observed(X).
+query(from_fact(0)).
+query(from_choice(0)).
+"#;
+    let result = McProgram::compile_source(source)
+        .expect("compile inferred-width host MC joins")
+        .evaluate_cpu(mc_config(8_192, 17, 128, None))
+        .expect("evaluate inferred-width host MC joins");
+
+    for predicate in ["from_fact", "from_choice"] {
+        let probability = result
+            .query_estimates
+            .iter()
+            .find(|estimate| {
+                estimate.atom.predicate == predicate && estimate.atom.args == [Value::I64(0)]
+            })
+            .unwrap_or_else(|| panic!("missing {predicate}(0) estimate"))
+            .prob;
+        assert!(
+            (probability - 0.5).abs() < 0.05,
+            "{predicate}: {probability}"
+        );
+    }
+}
+
+#[test]
+fn test_mc_cpu_preserves_quoted_string_query_values() {
+    let program = McProgram::compile_source("0.5::gate(\"alpha\").\nquery(gate(\"alpha\")).\n")
+        .expect("compile quoted-string host MC program");
+    let result = program
+        .evaluate_cpu(mc_config(2_048, 7, 128, None))
+        .expect("evaluate quoted-string host MC program");
+    let estimate = result
+        .query_estimates
+        .iter()
+        .find(|estimate| {
+            estimate.atom.predicate == "gate"
+                && estimate.atom.args == [Value::String("alpha".to_string())]
+        })
+        .expect("missing quoted-string gate query estimate");
+    assert!((estimate.prob - 0.5).abs() < 0.05, "p={}", estimate.prob);
+}
+
+#[test]
+fn test_mc_cpu_materializes_runtime_f32_nan_and_infinity() {
+    let program = McProgram::compile_source(
+        "pred seed().\n\
+         pred nan_value(f32).\n\
+         pred infinite_value(f32).\n\
+         pred accepted().\n\
+         0.5::seed().\n\
+         nan_value(Y) :- seed(), Y is cast(0.0, f32) / cast(0.0, f32).\n\
+         infinite_value(Y) :- seed(), Y is cast(1.0, f32) / cast(0.0, f32).\n\
+         accepted() :- nan_value(_), infinite_value(_).\n\
+         query(accepted()).\n",
+    )
+    .expect("compile non-finite f32 host MC program");
+    let result = program
+        .evaluate_cpu(mc_config(2_048, 7, 128, None))
+        .expect("evaluate non-finite f32 host MC program");
+    assert!((prob_of_atom(&result, "accepted") - 0.5).abs() < 0.05);
+}
+
+#[test]
+fn test_mc_rejects_conflicting_quoted_and_bare_symbol_evidence() {
+    let error = match McProgram::compile_source(
+        "0.5::gate(\"alpha\").\n\
+         evidence(gate(\"alpha\"), true).\n\
+         evidence(gate(alpha), false).\n\
+         query(gate(\"alpha\")).\n",
+    ) {
+        Ok(_) => panic!("contradictory symbol evidence must be rejected"),
+        Err(error) => error,
+    };
+    assert!(
+        error.to_string().contains("conflicting evidence for gate"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
 fn test_mc_probabilistic_fact_marginal_is_reasonable() {
     if !has_cuda_device() {
         eprintln!("Skipping test: no CUDA device available");

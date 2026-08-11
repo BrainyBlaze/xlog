@@ -1,14 +1,17 @@
 //! Compilation pipeline for XLOG programs
 //!
-//! This module provides the main entry point for compiling XLOG source code
-//! into execution plans. The compilation process consists of:
+//! This module compiles the core XLOG AST into execution plans. The compilation
+//! process consists of:
 //!
 //! 1. **Parsing**: Convert source text to AST (`parser::parse_program`)
 //! 2. **Stratification**: Analyze negation/aggregation dependencies (`stratify::stratify`)
 //! 3. **Lowering**: Transform AST to Relational IR (`lower::Lowerer::lower_program`)
 //!
-//! The `Compiler` struct orchestrates these phases and provides a single
-//! entry point via the `compile` method.
+//! The `Compiler` struct orchestrates these phases and provides a single entry
+//! point via the `compile` method. User-defined functions are a source-level
+//! normalization step: callers using this low-level compiler must expand them
+//! before compilation. Execution-facing `LogicProgram` APIs perform that
+//! normalization for parsed and source inputs.
 
 use std::path::{Path, PathBuf};
 
@@ -29,6 +32,10 @@ use crate::stratify::stratify;
 use crate::{BodyLiteral, Program, Query, Rule as AstRule, Term};
 
 /// The XLOG compiler orchestrates the full compilation pipeline.
+///
+/// This is the core AST-to-RIR compiler. It does not resolve imports or expand
+/// user-defined functions; callers must perform those source-level steps first,
+/// or use the execution-facing `LogicProgram` compilation APIs.
 ///
 /// # Example
 ///
@@ -72,10 +79,14 @@ impl Compiler {
 
     /// Compile XLOG source code into an execution plan.
     ///
-    /// This is the main entry point for compilation. It chains together:
+    /// This is the main entry point for core compilation. It chains together:
     /// 1. Parsing (source → AST)
     /// 2. Stratification (analyze dependencies, check for cycles)
     /// 3. Lowering (AST → Relational IR execution plan)
+    ///
+    /// Function definitions and calls must already be expanded into the core
+    /// language. Use an execution-facing `LogicProgram` API when source-level
+    /// import resolution and function normalization are required.
     ///
     /// # Arguments
     ///
@@ -146,7 +157,8 @@ impl Compiler {
     /// Compile a parsed XLOG program into an execution plan.
     ///
     /// This is useful for callers that want to inspect the AST (facts, queries,
-    /// constraints) while compiling without reparsing.
+    /// constraints) while compiling without reparsing. The parsed program must
+    /// already be normalized to the core language, including function expansion.
     pub fn compile_program(&mut self, program: &Program) -> Result<ExecutionPlan> {
         self.compile_program_with_stats_snapshot(program, None)
     }
@@ -552,6 +564,8 @@ fn naf_error(message: impl Into<String>) -> XlogError {
 ///
 /// This creates a short-lived compiler and compiles the source.
 /// For multiple compilations, prefer creating a `Compiler` instance directly.
+/// Function definitions and calls must already be expanded; execution-facing
+/// `LogicProgram` APIs own source normalization and import resolution.
 ///
 /// # Example
 ///
