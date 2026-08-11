@@ -132,14 +132,20 @@ __device__ inline uint32_t ilp_exact_nary_covers(
 //   batch[2P+3A    .. ]         binding_codes
 // params = [num_patterns, num_atoms, num_pos, num_neg, head_arity].
 // The host launcher (provider/ilp_exact_nary.rs) packs exactly this.
+//
+// Example tuples are COLUMNAR too (device buffers are columnar, so the
+// production ingest is a plain D2D copy per column): the value of head
+// position i for example q is pos_values[(size_t)i * num_pos + q]. Each
+// thread gathers its example into a local array (head_arity <= 8,
+// enforced host-side) before running the walk.
 extern "C" __global__ void ilp_exact_nary_score(
     const uint32_t* batch,
     const uint32_t* params,
-    // Candidate relations (concatenated row-major u64 rows).
+    // Candidate relations (concatenated COLUMN-MAJOR u64 values).
     const uint64_t* cand_values,
     const uint32_t* cand_value_offset,
     const uint32_t* cand_rows,
-    // Example tuples (row-major, stride = head_arity).
+    // Example tuples (COLUMNAR: position i of example q at i*count + q).
     const uint64_t* pos_values,
     const uint64_t* neg_values,
     // Outputs, one slot per pattern.
@@ -166,23 +172,33 @@ extern "C" __global__ void ilp_exact_nary_score(
     uint32_t p_body_offset = body_offset[pattern];
     uint32_t p_body_len = body_len[pattern];
 
+    // Examples are columnar: gather this thread's tuple locally
+    // (head_arity <= 8 is enforced host-side).
+    uint64_t example[8];
+
     uint32_t local_pos = 0u;
     for (uint32_t q = tid; q < num_pos; q += blockDim.x) {
+        for (uint32_t i = 0; i < head_arity; i++) {
+            example[i] = pos_values[(size_t)i * num_pos + q];
+        }
         local_pos += ilp_exact_nary_covers(
             p_body_offset, p_body_len,
             atom_candidate_slot, atom_arity, atom_binding_offset,
             binding_codes,
             cand_values, cand_value_offset, cand_rows,
-            pos_values + (size_t)q * head_arity);
+            example);
     }
     uint32_t local_neg = 0u;
     for (uint32_t q = tid; q < num_neg; q += blockDim.x) {
+        for (uint32_t i = 0; i < head_arity; i++) {
+            example[i] = neg_values[(size_t)i * num_neg + q];
+        }
         local_neg += ilp_exact_nary_covers(
             p_body_offset, p_body_len,
             atom_candidate_slot, atom_arity, atom_binding_offset,
             binding_codes,
             cand_values, cand_value_offset, cand_rows,
-            neg_values + (size_t)q * head_arity);
+            example);
     }
 
     __shared__ uint32_t pos_scratch[ILP_EXACT_NARY_BLOCK_SIZE];
