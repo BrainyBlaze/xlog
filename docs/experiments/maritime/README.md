@@ -18,7 +18,9 @@ document, and the shipped artifact is
 - Converter: `examples/maritime_woled/maritime_convert.py` (commit
   `e16defed`). Verifier: `examples/maritime_woled/
   verify_maritime_conversion.py` (commit `0fbf449a`) — the exact revision
-  that produced the committed `MARITIME_VERIFY.json` real-data report.
+  that produced the real-data verification report shipped at
+  [`results/verification/MARITIME_VERIFY.json`](results/verification/MARITIME_VERIFY.json)
+  (md5 of the committed bytes: `c17b82672bc5144a61eeddf66b9ca21c`).
 - Converted-corpus constants (verified, adversarially re-derived by an
   independent rebuild — see the task-2 adversarial review): **454,858**
   pair-time rows; **806** vessel pairs = **302** positive (>=1 rendezVous
@@ -197,6 +199,15 @@ Shipped artifact: [`results/baseline_cv5/MARITIME_CV_BASELINE.json`](results/bas
   pre-registered constants).
 - Wall time: conversion 1,437 s; search ~2.2 min per fold (CPU only).
 - **Protocol deviations: none.**
+- **Provenance correction (2026-08-11):** as of commit `10b180d6` this
+  document called the `MARITIME_VERIFY.json` real-data report
+  "committed". That was false — the file had never been committed in any
+  revision and existed only on the runner's machine, while carrying the
+  sole backing for the alignment fractions of 1.0 and the zero
+  episode-boundary violations cited in §(d) and §(e). The report is
+  shipped by the commit that adds this note, byte-exact as produced by
+  the run (md5 `c17b82672bc5144a61eeddf66b9ca21c`), at
+  [`results/verification/MARITIME_VERIFY.json`](results/verification/MARITIME_VERIFY.json).
 
 ### Headline numbers
 
