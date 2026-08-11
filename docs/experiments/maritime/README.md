@@ -11,6 +11,19 @@ document, and the shipped artifact is
 
 ## Corpus and provenance
 
+Both input archives are public; the exact distributions matching the
+md5 pins below (the CAVIAR-README convention that makes an independent
+replay possible):
+
+| Archive | Source | md5 |
+|---|---|---|
+| A — `MaritimeCompositeEvents.tar.gz` (HLE composite events: RTEC output over the Brest AIS critical points) | Zenodo record 2557290: <https://zenodo.org/api/records/2557290/files/MaritimeCompositeEvents.tar.gz/content> | `05e23621b87fcec211a7ff4ed4397b94` |
+| B — `brest_critical.zip` (LLE critical events: the RTEC input export) | <https://owncloud.skel.iit.demokritos.gr/index.php/s/67dJSuymyIw1Mng> (the link published in `github.com/aartikis/RTEC`, `examples/maritime/dataset/csv/dataset_download.txt`) | `0b239b8eb212dc433e67de6a599b2d10` |
+
+(The underlying raw AIS data is the Brest dataset, Zenodo record
+1167595; neither archive above is the raw AIS — A and B are the
+RTEC-pipeline exports this experiment consumes directly.)
+
 - Archive A (HLE composite events): `MaritimeCompositeEvents.tar.gz`,
   md5 `05e23621b87fcec211a7ff4ed4397b94`.
 - Archive B (LLE critical events): `brest_critical.zip`,
