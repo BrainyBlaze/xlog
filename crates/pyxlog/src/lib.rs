@@ -276,7 +276,6 @@ pub(crate) fn provider_memory_stats(
     Ok(dict.into())
 }
 
-#[allow(dead_code)]
 pub(crate) fn pack_rule_provenance(
     py: Python<'_>,
     entries: &[xlog_logic::RuleProvenance],
@@ -285,8 +284,8 @@ pub(crate) fn pack_rule_provenance(
     for entry in entries {
         let dict = PyDict::new(py);
         dict.set_item("rule_id", &entry.rule_id)?;
-        dict.set_item("source_kind", entry.source_kind.as_str())?;
         dict.set_item("head", &entry.head)?;
+        dict.set_item("source_kind", entry.source_kind.as_str())?;
         match &entry.source_span {
             Some(source_span) => dict.set_item("source_span", source_span)?,
             None => dict.set_item("source_span", py.None())?,
@@ -305,7 +304,6 @@ pub(crate) fn pack_rule_provenance(
     Ok(list.into())
 }
 
-#[allow(dead_code)]
 pub(crate) fn pack_query_proof_traces(
     py: Python<'_>,
     entries: &[xlog_logic::QueryProofTrace],

@@ -4,7 +4,7 @@ use std::time::Instant;
 
 use pyo3::exceptions::{PyKeyError, PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyList, PySequence};
+use pyo3::types::{PyDict, PySequence};
 
 use xlog_cuda::DlpackManagedTensor;
 use xlog_gpu::logic as gpu_logic;
@@ -23,10 +23,11 @@ use super::relation_metadata::{
     RelationEvidence, RelationMetadataStore, RelationSnapshot,
 };
 use super::{
-    dlpack_capsule_from_tensor, dlpack_from_py, enforce_call_memory_limit,
-    parse_prob_engine_override, provider_from_config, provider_memory_stats, types,
-    CompiledLogicProgram, CompiledProbProgram, CompiledProgram, LogicDeltaStats, LogicEvalResult,
-    LogicProgram, LogicQueryResult, LogicRelationSession, Program, RelationChangeCallback,
+    dlpack_capsule_from_tensor, dlpack_from_py, enforce_call_memory_limit, pack_query_proof_traces,
+    pack_rule_provenance, parse_prob_engine_override, provider_from_config, provider_memory_stats,
+    types, CompiledLogicProgram, CompiledProbProgram, CompiledProgram, LogicDeltaStats,
+    LogicEvalResult, LogicProgram, LogicQueryResult, LogicRelationSession, Program,
+    RelationChangeCallback,
 };
 
 struct ParsedRelationDeltaUpdate {
@@ -227,7 +228,7 @@ impl CompiledLogicProgram {
     }
 
     pub fn proof_traces(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        pack_proof_traces(py, &self.program.proof_traces())
+        pack_query_proof_traces(py, &self.program.proof_traces())
     }
 }
 
@@ -599,7 +600,7 @@ impl LogicRelationSession {
     }
 
     pub fn proof_traces(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        pack_proof_traces(py, &self.program.proof_traces())
+        pack_query_proof_traces(py, &self.program.proof_traces())
     }
 
     pub fn register_relation_callback(
@@ -1269,46 +1270,6 @@ fn pack_delta_planner_telemetry(
     dict.set_item("measured_delta_speedup", telemetry.measured_delta_speedup)?;
     dict.set_item("planner_advice", telemetry.planner_advice.clone())?;
     Ok(dict.into())
-}
-
-fn pack_rule_provenance(
-    py: Python<'_>,
-    entries: &[xlog_logic::RuleProvenance],
-) -> PyResult<Py<PyAny>> {
-    let list = PyList::empty(py);
-    for entry in entries {
-        let dict = PyDict::new(py);
-        dict.set_item("rule_id", &entry.rule_id)?;
-        dict.set_item("head", &entry.head)?;
-        dict.set_item("source_kind", entry.source_kind.as_str())?;
-        dict.set_item("source_span", entry.source_span.clone())?;
-        dict.set_item("generation_trace_hash", entry.generation_trace_hash.clone())?;
-        dict.set_item("support_relation_ids", entry.support_relation_ids.clone())?;
-        dict.set_item(
-            "counterexample_relation_ids",
-            entry.counterexample_relation_ids.clone(),
-        )?;
-        list.append(dict)?;
-    }
-    Ok(list.into())
-}
-
-fn pack_proof_traces(
-    py: Python<'_>,
-    entries: &[xlog_logic::QueryProofTrace],
-) -> PyResult<Py<PyAny>> {
-    let list = PyList::empty(py);
-    for entry in entries {
-        let dict = PyDict::new(py);
-        dict.set_item("query_id", &entry.query_id)?;
-        dict.set_item("query", &entry.query)?;
-        dict.set_item("answer_relation", &entry.answer_relation)?;
-        dict.set_item("rule_ids", entry.rule_ids.clone())?;
-        dict.set_item("source_facts", entry.source_facts.clone())?;
-        dict.set_item("rejected_alternatives", entry.rejected_alternatives.clone())?;
-        list.append(dict)?;
-    }
-    Ok(list.into())
 }
 
 fn collect_dlpack_columns(
