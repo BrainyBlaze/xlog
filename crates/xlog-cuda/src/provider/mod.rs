@@ -411,12 +411,13 @@ pub const WEIGHTS_MODULE: &str = "xlog_weights";
 pub const ILP_MODULE: &str = "xlog_ilp";
 pub const ILP_CREDIT_MODULE: &str = "xlog_ilp_credit";
 pub const ILP_EXACT_MODULE: &str = "xlog_ilp_exact";
+pub const ILP_EXACT_NARY_MODULE: &str = "xlog_ilp_exact_nary";
 pub const EPISTEMIC_MODULE: &str = "xlog_epistemic";
 pub const WCOJ_MODULE: &str = "xlog_wcoj";
 pub const JOINT_SOLVE_MODULE: &str = "xlog_joint_solve";
 
-// Compile-time check: kernel manifest lists exactly 26 modules.
-const _: () = assert!(crate::kernel_manifest_data::KERNEL_CU_NAMES.len() == 26);
+// Compile-time check: kernel manifest lists exactly 27 modules.
+const _: () = assert!(crate::kernel_manifest_data::KERNEL_CU_NAMES.len() == 27);
 
 /// Kernel function names in the GPU WCOJ module.
 pub mod wcoj_kernels {
