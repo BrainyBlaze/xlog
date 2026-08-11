@@ -325,7 +325,7 @@ fn build_explain_report(
     );
     let proof_traces = xlog_logic::query_proof_traces(&source_program, &rule_provenance);
     let magic_sets = magic_rewrite.report;
-    let aggregate_lifting = explain_aggregate_lifting(&source_program)?;
+    let aggregate_lifting = explain_aggregate_lifting(&analysis_program)?;
     let generated_rule_diagnostics =
         explain_generated_rule_diagnostics(&source_program, source_path);
     let epistemic = explain_epistemic(&analysis_program);

@@ -167,6 +167,57 @@ query(out_degree(1, 2)).
 }
 
 #[test]
+fn test_xlog_explain_normalizes_udfs_before_probabilistic_aggregate_analysis() {
+    let fixture = TempDir::new().expect("create fixture directory");
+    let program = fixture.path().join("probabilistic_aggregate_udf.xlog");
+    std::fs::write(
+        &program,
+        r#"
+pred edge(u64, u64).
+pred scaled(u64, u64).
+pred total(u64, u64).
+0.5::edge(1, 2).
+0.25::edge(1, 3).
+func double(X) = X * cast(2, u64).
+scaled(X, Z) :- edge(X, Y), Z is double(Y).
+total(X, sum(Z)) :- scaled(X, Z).
+query(total(1, 10)).
+"#,
+    )
+    .expect("write probabilistic aggregate UDF fixture");
+
+    let output = cargo_bin_cmd!("xlog")
+        .args([
+            "explain",
+            "--format",
+            "json",
+            program.to_str().expect("valid program path"),
+        ])
+        .output()
+        .expect("run xlog explain json");
+    assert!(
+        output.status.success(),
+        "xlog explain failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).expect("utf8 stdout");
+    let payload: serde_json::Value = serde_json::from_str(&stdout).expect("valid explain json");
+    assert_eq!(payload["rir"]["status"], "ok", "{stdout}");
+    assert_eq!(payload["optimizer"]["status"], "ok", "{stdout}");
+    let aggregate_lifting = payload["aggregate_lifting"]
+        .as_array()
+        .expect("aggregate lifting array");
+    assert!(
+        aggregate_lifting.iter().any(|entry| {
+            entry["predicate"] == "total"
+                && entry["operator"] == "sum"
+                && entry["status"] == "fired"
+        }),
+        "{stdout}"
+    );
+}
+
+#[test]
 fn test_xlog_explain_keeps_normalized_helpers_out_of_source_provenance() {
     let fixture = TempDir::new().expect("create fixture directory");
     let program = fixture.path().join("list_member.xlog");
