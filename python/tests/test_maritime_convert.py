@@ -1,11 +1,10 @@
 import tarfile, zipfile, io, os, sys
-import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "examples", "maritime_woled"))
 
 from maritime_convert import (
-    EPISODE_GAP_S, PAD_S, parse_hle_archive, parse_lle_proximity,
-    select_pairs, build_pair_timeline, convert,
+    EPISODE_GAP_S, parse_hle_archive, parse_lle_proximity,
+    select_pairs, convert,
 )
 
 HLE_LINES = "\n".join([
