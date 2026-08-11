@@ -168,19 +168,7 @@ impl Executor {
                 Ok(result)
             }
 
-            RirNode::Project { input, columns } => {
-                let input_buf = self.execute_node(input)?;
-                let input_rows = input_buf.num_rows();
-                let start = self.profiler.start_op();
-                let result = self.execute_project(&input_buf, columns)?;
-                if let Some(start) = start {
-                    let mem = self.provider.memory().allocated_bytes();
-                    self.profiler
-                        .record_op("project", input_rows, result.num_rows(), start, mem);
-                    self.profiler.record_peak_memory(mem);
-                }
-                Ok(result)
-            }
+            RirNode::Project { .. } => self.execute_project_chain(node),
 
             RirNode::Join {
                 left,
@@ -328,6 +316,36 @@ impl Executor {
                 self.execute_node(fallback)
             }
         }
+    }
+
+    fn project_chain_parts(node: &RirNode) -> (&RirNode, Vec<&[ProjectExpr]>) {
+        let mut projections = Vec::new();
+        let mut base = node;
+        while let RirNode::Project { input, columns } = base {
+            projections.push(columns.as_slice());
+            base = input;
+        }
+        projections.reverse();
+        (base, projections)
+    }
+
+    fn execute_project_chain(&mut self, node: &RirNode) -> Result<CudaBuffer> {
+        let (base, projections) = Self::project_chain_parts(node);
+        let mut result = self.execute_node(base)?;
+        for columns in projections {
+            let input = result;
+            let input_rows = input.num_rows();
+            let start = self.profiler.start_op();
+            let projected = self.execute_project(&input, columns)?;
+            if let Some(start) = start {
+                let mem = self.provider.memory().allocated_bytes();
+                self.profiler
+                    .record_op("project", input_rows, projected.num_rows(), start, mem);
+                self.profiler.record_peak_memory(mem);
+            }
+            result = projected;
+        }
+        Ok(result)
     }
 
     /// Execute a Join node

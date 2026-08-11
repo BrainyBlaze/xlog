@@ -12,29 +12,90 @@ use xlog_ir::{CompareOp, ConstValue, Expr, ProjectExpr};
 
 use super::Executor;
 
+#[derive(Clone, Copy)]
+enum ArithmeticBinaryOperation {
+    Add,
+    Subtract,
+    Multiply,
+    Divide,
+    Modulo,
+    Minimum,
+    Maximum,
+    Power,
+}
+
+#[derive(Clone, Copy)]
+enum MaskBinaryOperation {
+    And,
+    Or,
+}
+
+enum ExpressionTask<'a> {
+    Arithmetic(&'a Expr),
+    Predicate(&'a Expr),
+    FinishArithmeticBinary(ArithmeticBinaryOperation),
+    FinishAbsoluteValue,
+    FinishCast(ScalarType),
+    FinishComparison {
+        op: CompareOp,
+        use_float: bool,
+    },
+    ContinueMaskFold {
+        expressions: &'a [Expr],
+        next_index: usize,
+        operation: MaskBinaryOperation,
+    },
+    FinishMaskFold {
+        expressions: &'a [Expr],
+        next_index: usize,
+        operation: MaskBinaryOperation,
+    },
+    FinishMaskNot,
+    PrepareConditional {
+        then_expr: &'a Expr,
+        else_expr: &'a Expr,
+    },
+    FinishConditional,
+}
+
+enum ExpressionValue {
+    Arithmetic(CudaBuffer),
+    Predicate(TrackedCudaSlice<u8>),
+    SelectionMask(CudaBuffer),
+}
+
 impl Executor {
     /// Check if an expression may produce a floating-point result.
     pub(crate) fn expr_may_be_float(expr: &Expr, schema: &Schema) -> bool {
-        match expr {
-            Expr::Column(col_idx) => matches!(
-                schema.column_type(*col_idx),
-                Some(ScalarType::F32 | ScalarType::F64)
-            ),
-            Expr::Const(ConstValue::F32(_) | ConstValue::F64(_)) => true,
-            Expr::Cast(_, ScalarType::F32 | ScalarType::F64) => true,
-            Expr::Add(l, r)
-            | Expr::Sub(l, r)
-            | Expr::Mul(l, r)
-            | Expr::Div(l, r)
-            | Expr::Mod(l, r)
-            | Expr::Min(l, r)
-            | Expr::Max(l, r)
-            | Expr::Pow(l, r) => {
-                Self::expr_may_be_float(l, schema) || Self::expr_may_be_float(r, schema)
+        let mut pending = vec![expr];
+        while let Some(current) = pending.pop() {
+            match current {
+                Expr::Column(col_idx)
+                    if matches!(
+                        schema.column_type(*col_idx),
+                        Some(ScalarType::F32 | ScalarType::F64)
+                    ) =>
+                {
+                    return true;
+                }
+                Expr::Const(ConstValue::F32(_) | ConstValue::F64(_))
+                | Expr::Cast(_, ScalarType::F32 | ScalarType::F64) => return true,
+                Expr::Add(left, right)
+                | Expr::Sub(left, right)
+                | Expr::Mul(left, right)
+                | Expr::Div(left, right)
+                | Expr::Mod(left, right)
+                | Expr::Min(left, right)
+                | Expr::Max(left, right)
+                | Expr::Pow(left, right) => {
+                    pending.push(right);
+                    pending.push(left);
+                }
+                Expr::Abs(inner) | Expr::Cast(inner, _) => pending.push(inner),
+                _ => {}
             }
-            Expr::Abs(inner) | Expr::Cast(inner, _) => Self::expr_may_be_float(inner, schema),
-            _ => false,
         }
+        false
     }
 
     /// Execute a Filter node using GPU predicate evaluation.
@@ -52,87 +113,10 @@ impl Executor {
         expr: &Expr,
         input: &CudaBuffer,
     ) -> Result<TrackedCudaSlice<u8>> {
-        if input.num_rows() > u32::MAX as u64 {
-            return Err(XlogError::Execution(format!(
-                "Predicate evaluation supports at most {} rows, got {}",
-                u32::MAX,
-                input.num_rows()
-            )));
-        }
-        let n = input.num_rows() as u32;
-
-        match expr {
-            Expr::Column(col_idx) => {
-                let col_type = input
-                    .schema()
-                    .column_type(*col_idx)
-                    .ok_or_else(|| XlogError::Execution(format!("Column {} not found", col_idx)))?;
-                if col_type == ScalarType::Bool {
-                    let col_buf = self.wrap_single_column(input, *col_idx)?;
-                    let zero = self.provider.create_constant_column_with_device_count(
-                        &[0u8],
-                        ScalarType::Bool,
-                        input.num_rows(),
-                        input.num_rows_device(),
-                    )?;
-                    return self.compare_buffers_mask(&col_buf, &zero, CompareOp::Ne);
-                }
-                self.mask_filled(n, 1)
-            }
-            Expr::Const(ConstValue::Bool(b)) => self.mask_filled(n, if *b { 1 } else { 0 }),
-            Expr::Const(_) => self.mask_filled(n, 1),
-            Expr::Compare { left, op, right } => {
-                let use_float = Self::expr_may_be_float(left, input.schema())
-                    || Self::expr_may_be_float(right, input.schema());
-
-                let mut left_buf = self.evaluate_arith_expr(left, input)?;
-                let mut right_buf = self.evaluate_arith_expr(right, input)?;
-
-                if use_float {
-                    left_buf = self.provider.cast_column(&left_buf, ScalarType::F64)?;
-                    right_buf = self.provider.cast_column(&right_buf, ScalarType::F64)?;
-                }
-
-                self.compare_buffers_mask(&left_buf, &right_buf, *op)
-            }
-            Expr::And(exprs) => {
-                if exprs.is_empty() {
-                    return self.mask_filled(n, 1);
-                }
-                let mut mask = self.eval_predicate_mask_gpu(&exprs[0], input)?;
-                for expr in &exprs[1..] {
-                    let next = self.eval_predicate_mask_gpu(expr, input)?;
-                    mask = self.mask_and(&mask, &next, n)?;
-                }
-                Ok(mask)
-            }
-            Expr::Or(exprs) => {
-                if exprs.is_empty() {
-                    return self.mask_filled(n, 0);
-                }
-                let mut mask = self.eval_predicate_mask_gpu(&exprs[0], input)?;
-                for expr in &exprs[1..] {
-                    let next = self.eval_predicate_mask_gpu(expr, input)?;
-                    mask = self.mask_or(&mask, &next, n)?;
-                }
-                Ok(mask)
-            }
-            Expr::Not(inner) => {
-                let mask = self.eval_predicate_mask_gpu(inner, input)?;
-                self.mask_not(&mask, n)
-            }
-            Expr::Add(_, _)
-            | Expr::Sub(_, _)
-            | Expr::Mul(_, _)
-            | Expr::Div(_, _)
-            | Expr::Mod(_, _)
-            | Expr::Abs(_)
-            | Expr::Min(_, _)
-            | Expr::Max(_, _)
-            | Expr::Pow(_, _)
-            | Expr::Cast(_, _)
-            | Expr::Conditional { .. } => Err(XlogError::Execution(
-                "Arithmetic expression cannot be evaluated as boolean predicate".into(),
+        match self.evaluate_expression(expr, input, true)? {
+            ExpressionValue::Predicate(mask) => Ok(mask),
+            _ => Err(Self::expression_state_error(
+                "predicate evaluation produced an arithmetic value",
             )),
         }
     }
@@ -366,108 +350,409 @@ impl Executor {
         ))
     }
 
-    /// Evaluate an arithmetic expression on a buffer, producing a single-column result
+    /// Evaluate an arithmetic expression on a buffer, producing a single-column result.
     ///
-    /// This method recursively evaluates arithmetic expressions (Add, Sub, Mul, Div, etc.)
-    /// by delegating to the CUDA kernel provider for GPU-accelerated operations.
+    /// The explicit task stack preserves source-order evaluation without consuming
+    /// one native stack frame per nested expression.
     pub(crate) fn evaluate_arith_expr(
         &self,
         expr: &Expr,
         input: &CudaBuffer,
     ) -> Result<CudaBuffer> {
-        match expr {
-            Expr::Column(idx) => {
-                // Extract the column as a single-column buffer without host round-trip
-                self.wrap_single_column(input, *idx)
-            }
-            Expr::Const(val) => {
-                // Create a column filled with the constant value
-                let (bytes, col_type) = self.const_to_bytes_and_type(val);
-                self.provider.create_constant_column_with_device_count(
-                    &bytes,
-                    col_type,
-                    input.num_rows(),
-                    input.num_rows_device(),
-                )
-            }
-            Expr::Add(l, r) => {
-                let left = self.evaluate_arith_expr(l, input)?;
-                let right = self.evaluate_arith_expr(r, input)?;
-                self.provider.add_columns(&left, &right)
-            }
-            Expr::Sub(l, r) => {
-                let left = self.evaluate_arith_expr(l, input)?;
-                let right = self.evaluate_arith_expr(r, input)?;
-                self.provider.sub_columns(&left, &right)
-            }
-            Expr::Mul(l, r) => {
-                let left = self.evaluate_arith_expr(l, input)?;
-                let right = self.evaluate_arith_expr(r, input)?;
-                self.provider.mul_columns(&left, &right)
-            }
-            Expr::Div(l, r) => {
-                let left = self.evaluate_arith_expr(l, input)?;
-                let right = self.evaluate_arith_expr(r, input)?;
-                self.provider.div_columns(&left, &right)
-            }
-            Expr::Mod(l, r) => {
-                let left = self.evaluate_arith_expr(l, input)?;
-                let right = self.evaluate_arith_expr(r, input)?;
-                self.provider.mod_columns(&left, &right)
-            }
-            Expr::Abs(inner) => {
-                let val = self.evaluate_arith_expr(inner, input)?;
-                self.provider.abs_column(&val)
-            }
-            Expr::Min(l, r) => {
-                let left = self.evaluate_arith_expr(l, input)?;
-                let right = self.evaluate_arith_expr(r, input)?;
-                self.provider.min_columns(&left, &right)
-            }
-            Expr::Max(l, r) => {
-                let left = self.evaluate_arith_expr(l, input)?;
-                let right = self.evaluate_arith_expr(r, input)?;
-                self.provider.max_columns(&left, &right)
-            }
-            Expr::Pow(base, exp) => {
-                let base_buf = self.evaluate_arith_expr(base, input)?;
-                let exp_buf = self.evaluate_arith_expr(exp, input)?;
-                self.provider.pow_columns(&base_buf, &exp_buf)
-            }
-            Expr::Cast(inner, target_type) => {
-                let val = self.evaluate_arith_expr(inner, input)?;
-                self.provider.cast_column(&val, *target_type)
-            }
-            Expr::Conditional {
-                condition,
-                then_expr,
-                else_expr,
-            } => {
-                // Evaluate condition to get boolean mask
-                let mask_slice = self.eval_predicate_mask_gpu(condition, input)?;
-
-                // Convert mask slice to a CudaBuffer for select_columns
-                let d_num_rows = self.clone_device_row_count(input)?;
-                let mask_buffer = CudaBuffer::from_columns(
-                    vec![mask_slice.into()],
-                    input.num_rows(),
-                    d_num_rows,
-                    Schema::new(vec![("mask".to_string(), ScalarType::Bool)]),
-                );
-
-                // Evaluate both branches
-                let then_buf = self.evaluate_arith_expr(then_expr, input)?;
-                let else_buf = self.evaluate_arith_expr(else_expr, input)?;
-
-                // Select based on mask
-                self.provider
-                    .select_columns(&mask_buffer, &then_buf, &else_buf)
-            }
-            _ => Err(XlogError::Execution(format!(
-                "Unsupported expression in arithmetic evaluation: {:?}",
-                expr
-            ))),
+        match self.evaluate_expression(expr, input, false)? {
+            ExpressionValue::Arithmetic(buffer) => Ok(buffer),
+            _ => Err(Self::expression_state_error(
+                "arithmetic evaluation produced a predicate value",
+            )),
         }
+    }
+
+    fn evaluate_expression(
+        &self,
+        expression: &Expr,
+        input: &CudaBuffer,
+        predicate: bool,
+    ) -> Result<ExpressionValue> {
+        let mut tasks = vec![if predicate {
+            ExpressionTask::Predicate(expression)
+        } else {
+            ExpressionTask::Arithmetic(expression)
+        }];
+        let mut values = Vec::new();
+
+        while let Some(task) = tasks.pop() {
+            match task {
+                ExpressionTask::Arithmetic(expression) => match expression {
+                    Expr::Column(index) => {
+                        values.push(ExpressionValue::Arithmetic(
+                            self.wrap_single_column(input, *index)?,
+                        ));
+                    }
+                    Expr::Const(value) => {
+                        let (bytes, column_type) = self.const_to_bytes_and_type(value);
+                        values.push(ExpressionValue::Arithmetic(
+                            self.provider.create_constant_column_with_device_count(
+                                &bytes,
+                                column_type,
+                                input.num_rows(),
+                                input.num_rows_device(),
+                            )?,
+                        ));
+                    }
+                    Expr::Add(left, right) => Self::schedule_arithmetic_binary(
+                        &mut tasks,
+                        left,
+                        right,
+                        ArithmeticBinaryOperation::Add,
+                    ),
+                    Expr::Sub(left, right) => Self::schedule_arithmetic_binary(
+                        &mut tasks,
+                        left,
+                        right,
+                        ArithmeticBinaryOperation::Subtract,
+                    ),
+                    Expr::Mul(left, right) => Self::schedule_arithmetic_binary(
+                        &mut tasks,
+                        left,
+                        right,
+                        ArithmeticBinaryOperation::Multiply,
+                    ),
+                    Expr::Div(left, right) => Self::schedule_arithmetic_binary(
+                        &mut tasks,
+                        left,
+                        right,
+                        ArithmeticBinaryOperation::Divide,
+                    ),
+                    Expr::Mod(left, right) => Self::schedule_arithmetic_binary(
+                        &mut tasks,
+                        left,
+                        right,
+                        ArithmeticBinaryOperation::Modulo,
+                    ),
+                    Expr::Min(left, right) => Self::schedule_arithmetic_binary(
+                        &mut tasks,
+                        left,
+                        right,
+                        ArithmeticBinaryOperation::Minimum,
+                    ),
+                    Expr::Max(left, right) => Self::schedule_arithmetic_binary(
+                        &mut tasks,
+                        left,
+                        right,
+                        ArithmeticBinaryOperation::Maximum,
+                    ),
+                    Expr::Pow(left, right) => Self::schedule_arithmetic_binary(
+                        &mut tasks,
+                        left,
+                        right,
+                        ArithmeticBinaryOperation::Power,
+                    ),
+                    Expr::Abs(inner) => {
+                        tasks.push(ExpressionTask::FinishAbsoluteValue);
+                        tasks.push(ExpressionTask::Arithmetic(inner));
+                    }
+                    Expr::Cast(inner, target) => {
+                        tasks.push(ExpressionTask::FinishCast(*target));
+                        tasks.push(ExpressionTask::Arithmetic(inner));
+                    }
+                    Expr::Conditional {
+                        condition,
+                        then_expr,
+                        else_expr,
+                    } => {
+                        tasks.push(ExpressionTask::PrepareConditional {
+                            then_expr,
+                            else_expr,
+                        });
+                        tasks.push(ExpressionTask::Predicate(condition));
+                    }
+                    Expr::Compare { .. } | Expr::And(_) | Expr::Or(_) | Expr::Not(_) => {
+                        return Err(XlogError::Execution(format!(
+                            "Unsupported expression in arithmetic evaluation: {:?}",
+                            expression
+                        )));
+                    }
+                },
+                ExpressionTask::Predicate(expression) => {
+                    if input.num_rows() > u32::MAX as u64 {
+                        return Err(XlogError::Execution(format!(
+                            "Predicate evaluation supports at most {} rows, got {}",
+                            u32::MAX,
+                            input.num_rows()
+                        )));
+                    }
+                    let row_count = input.num_rows() as u32;
+                    match expression {
+                        Expr::Column(column_index) => {
+                            let column_type =
+                                input.schema().column_type(*column_index).ok_or_else(|| {
+                                    XlogError::Execution(format!(
+                                        "Column {} not found",
+                                        column_index
+                                    ))
+                                })?;
+                            let mask = if column_type == ScalarType::Bool {
+                                let column = self.wrap_single_column(input, *column_index)?;
+                                let zero = self.provider.create_constant_column_with_device_count(
+                                    &[0u8],
+                                    ScalarType::Bool,
+                                    input.num_rows(),
+                                    input.num_rows_device(),
+                                )?;
+                                self.compare_buffers_mask(&column, &zero, CompareOp::Ne)?
+                            } else {
+                                self.mask_filled(row_count, 1)?
+                            };
+                            values.push(ExpressionValue::Predicate(mask));
+                        }
+                        Expr::Const(ConstValue::Bool(value)) => {
+                            values.push(ExpressionValue::Predicate(
+                                self.mask_filled(row_count, u8::from(*value))?,
+                            ))
+                        }
+                        Expr::Const(_) => {
+                            values.push(ExpressionValue::Predicate(self.mask_filled(row_count, 1)?))
+                        }
+                        Expr::Compare { left, op, right } => {
+                            let use_float = Self::expr_may_be_float(left, input.schema())
+                                || Self::expr_may_be_float(right, input.schema());
+                            tasks.push(ExpressionTask::FinishComparison { op: *op, use_float });
+                            tasks.push(ExpressionTask::Arithmetic(right));
+                            tasks.push(ExpressionTask::Arithmetic(left));
+                        }
+                        Expr::And(expressions) => Self::schedule_mask_fold(
+                            &mut tasks,
+                            &mut values,
+                            expressions,
+                            row_count,
+                            MaskBinaryOperation::And,
+                            self,
+                        )?,
+                        Expr::Or(expressions) => Self::schedule_mask_fold(
+                            &mut tasks,
+                            &mut values,
+                            expressions,
+                            row_count,
+                            MaskBinaryOperation::Or,
+                            self,
+                        )?,
+                        Expr::Not(inner) => {
+                            tasks.push(ExpressionTask::FinishMaskNot);
+                            tasks.push(ExpressionTask::Predicate(inner));
+                        }
+                        Expr::Add(_, _)
+                        | Expr::Sub(_, _)
+                        | Expr::Mul(_, _)
+                        | Expr::Div(_, _)
+                        | Expr::Mod(_, _)
+                        | Expr::Abs(_)
+                        | Expr::Min(_, _)
+                        | Expr::Max(_, _)
+                        | Expr::Pow(_, _)
+                        | Expr::Cast(_, _)
+                        | Expr::Conditional { .. } => {
+                            return Err(XlogError::Execution(
+                                "Arithmetic expression cannot be evaluated as boolean predicate"
+                                    .into(),
+                            ));
+                        }
+                    }
+                }
+                ExpressionTask::FinishArithmeticBinary(operation) => {
+                    let right = Self::pop_arithmetic_value(&mut values)?;
+                    let left = Self::pop_arithmetic_value(&mut values)?;
+                    let result = match operation {
+                        ArithmeticBinaryOperation::Add => self.provider.add_columns(&left, &right),
+                        ArithmeticBinaryOperation::Subtract => {
+                            self.provider.sub_columns(&left, &right)
+                        }
+                        ArithmeticBinaryOperation::Multiply => {
+                            self.provider.mul_columns(&left, &right)
+                        }
+                        ArithmeticBinaryOperation::Divide => {
+                            self.provider.div_columns(&left, &right)
+                        }
+                        ArithmeticBinaryOperation::Modulo => {
+                            self.provider.mod_columns(&left, &right)
+                        }
+                        ArithmeticBinaryOperation::Minimum => {
+                            self.provider.min_columns(&left, &right)
+                        }
+                        ArithmeticBinaryOperation::Maximum => {
+                            self.provider.max_columns(&left, &right)
+                        }
+                        ArithmeticBinaryOperation::Power => {
+                            self.provider.pow_columns(&left, &right)
+                        }
+                    }?;
+                    values.push(ExpressionValue::Arithmetic(result));
+                }
+                ExpressionTask::FinishAbsoluteValue => {
+                    let value = Self::pop_arithmetic_value(&mut values)?;
+                    values.push(ExpressionValue::Arithmetic(
+                        self.provider.abs_column(&value)?,
+                    ));
+                }
+                ExpressionTask::FinishCast(target) => {
+                    let value = Self::pop_arithmetic_value(&mut values)?;
+                    values.push(ExpressionValue::Arithmetic(
+                        self.provider.cast_column(&value, target)?,
+                    ));
+                }
+                ExpressionTask::FinishComparison { op, use_float } => {
+                    let mut right = Self::pop_arithmetic_value(&mut values)?;
+                    let mut left = Self::pop_arithmetic_value(&mut values)?;
+                    if use_float {
+                        left = self.provider.cast_column(&left, ScalarType::F64)?;
+                        right = self.provider.cast_column(&right, ScalarType::F64)?;
+                    }
+                    values.push(ExpressionValue::Predicate(
+                        self.compare_buffers_mask(&left, &right, op)?,
+                    ));
+                }
+                ExpressionTask::ContinueMaskFold {
+                    expressions,
+                    next_index,
+                    operation,
+                } => {
+                    if next_index < expressions.len() {
+                        tasks.push(ExpressionTask::FinishMaskFold {
+                            expressions,
+                            next_index: next_index + 1,
+                            operation,
+                        });
+                        tasks.push(ExpressionTask::Predicate(&expressions[next_index]));
+                    }
+                }
+                ExpressionTask::FinishMaskFold {
+                    expressions,
+                    next_index,
+                    operation,
+                } => {
+                    let right = Self::pop_predicate_value(&mut values)?;
+                    let left = Self::pop_predicate_value(&mut values)?;
+                    let row_count = input.num_rows() as u32;
+                    let combined = match operation {
+                        MaskBinaryOperation::And => self.mask_and(&left, &right, row_count),
+                        MaskBinaryOperation::Or => self.mask_or(&left, &right, row_count),
+                    }?;
+                    values.push(ExpressionValue::Predicate(combined));
+                    tasks.push(ExpressionTask::ContinueMaskFold {
+                        expressions,
+                        next_index,
+                        operation,
+                    });
+                }
+                ExpressionTask::FinishMaskNot => {
+                    let mask = Self::pop_predicate_value(&mut values)?;
+                    values.push(ExpressionValue::Predicate(
+                        self.mask_not(&mask, input.num_rows() as u32)?,
+                    ));
+                }
+                ExpressionTask::PrepareConditional {
+                    then_expr,
+                    else_expr,
+                } => {
+                    let mask = Self::pop_predicate_value(&mut values)?;
+                    let device_row_count = self.clone_device_row_count(input)?;
+                    values.push(ExpressionValue::SelectionMask(CudaBuffer::from_columns(
+                        vec![mask.into()],
+                        input.num_rows(),
+                        device_row_count,
+                        Schema::new(vec![("mask".to_string(), ScalarType::Bool)]),
+                    )));
+                    tasks.push(ExpressionTask::FinishConditional);
+                    tasks.push(ExpressionTask::Arithmetic(else_expr));
+                    tasks.push(ExpressionTask::Arithmetic(then_expr));
+                }
+                ExpressionTask::FinishConditional => {
+                    let else_value = Self::pop_arithmetic_value(&mut values)?;
+                    let then_value = Self::pop_arithmetic_value(&mut values)?;
+                    let mask = match values.pop() {
+                        Some(ExpressionValue::SelectionMask(mask)) => mask,
+                        _ => {
+                            return Err(Self::expression_state_error(
+                                "conditional evaluation is missing its selection mask",
+                            ));
+                        }
+                    };
+                    values.push(ExpressionValue::Arithmetic(self.provider.select_columns(
+                        &mask,
+                        &then_value,
+                        &else_value,
+                    )?));
+                }
+            }
+        }
+
+        if values.len() != 1 {
+            return Err(Self::expression_state_error(
+                "expression evaluation did not produce exactly one value",
+            ));
+        }
+        values
+            .pop()
+            .ok_or_else(|| Self::expression_state_error("expression evaluation produced no value"))
+    }
+
+    fn schedule_arithmetic_binary<'a>(
+        tasks: &mut Vec<ExpressionTask<'a>>,
+        left: &'a Expr,
+        right: &'a Expr,
+        operation: ArithmeticBinaryOperation,
+    ) {
+        tasks.push(ExpressionTask::FinishArithmeticBinary(operation));
+        tasks.push(ExpressionTask::Arithmetic(right));
+        tasks.push(ExpressionTask::Arithmetic(left));
+    }
+
+    fn schedule_mask_fold<'a>(
+        tasks: &mut Vec<ExpressionTask<'a>>,
+        values: &mut Vec<ExpressionValue>,
+        expressions: &'a [Expr],
+        row_count: u32,
+        operation: MaskBinaryOperation,
+        executor: &Self,
+    ) -> Result<()> {
+        if expressions.is_empty() {
+            let identity = match operation {
+                MaskBinaryOperation::And => 1,
+                MaskBinaryOperation::Or => 0,
+            };
+            values.push(ExpressionValue::Predicate(
+                executor.mask_filled(row_count, identity)?,
+            ));
+        } else {
+            tasks.push(ExpressionTask::ContinueMaskFold {
+                expressions,
+                next_index: 1,
+                operation,
+            });
+            tasks.push(ExpressionTask::Predicate(&expressions[0]));
+        }
+        Ok(())
+    }
+
+    fn pop_arithmetic_value(values: &mut Vec<ExpressionValue>) -> Result<CudaBuffer> {
+        match values.pop() {
+            Some(ExpressionValue::Arithmetic(value)) => Ok(value),
+            _ => Err(Self::expression_state_error(
+                "arithmetic operation is missing an operand",
+            )),
+        }
+    }
+
+    fn pop_predicate_value(values: &mut Vec<ExpressionValue>) -> Result<TrackedCudaSlice<u8>> {
+        match values.pop() {
+            Some(ExpressionValue::Predicate(value)) => Ok(value),
+            _ => Err(Self::expression_state_error(
+                "predicate operation is missing an operand",
+            )),
+        }
+    }
+
+    fn expression_state_error(message: &str) -> XlogError {
+        XlogError::Execution(format!("Internal expression evaluator error: {message}"))
     }
 
     /// Convert a ConstValue to raw bytes and ScalarType
