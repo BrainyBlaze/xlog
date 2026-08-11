@@ -74,6 +74,81 @@ fn predicate_function_returns_every_relation_value_through_xlog_run() {
 }
 
 #[test]
+fn predicate_function_result_keeps_the_existing_csv_header() {
+    let Some(_device) = cuda_device_or_skip() else {
+        return;
+    };
+
+    let fixture = TempDir::new().expect("create fixture directory");
+    let program = fixture.path().join("predicate_function_header.xlog");
+    std::fs::write(
+        &program,
+        "pred parent(u32, u32).\n\
+         pred answer(u32).\n\
+         func get_parent(Child) = Parent :- parent(Child, Parent).\n\
+         parent(1, 2).\n\
+         answer(Parent) :- Parent is get_parent(1).\n\
+         ?- answer(Parent).\n",
+    )
+    .expect("write predicate-function header program");
+
+    let output = cargo_bin_cmd!("xlog")
+        .args([
+            "run",
+            program.to_str().expect("valid program path"),
+            "--output",
+            "csv",
+        ])
+        .output()
+        .expect("run predicate-function header program");
+    assert!(
+        output.status.success(),
+        "xlog run failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).expect("utf8 stdout");
+    assert_eq!(stdout, "__xlog_query_0\ncomputed_2\n2\n\n");
+}
+
+#[test]
+fn predicate_function_wrapper_omits_the_redundant_result_column() {
+    let Some(_device) = cuda_device_or_skip() else {
+        return;
+    };
+
+    let fixture = TempDir::new().expect("create fixture directory");
+    let program = fixture.path().join("predicate_function_wrapper.xlog");
+    std::fs::write(
+        &program,
+        "pred parent(u32, u32).\n\
+         pred answer(u32).\n\
+         func get_parent(Child) = Parent :- parent(Child, Parent).\n\
+         func lookup(Child) = Result :- Result is get_parent(Child).\n\
+         parent(1, 2).\n\
+         answer(Result) :- Result is lookup(1).\n\
+         ?- answer(Result).\n",
+    )
+    .expect("write predicate-function wrapper program");
+
+    let output = cargo_bin_cmd!("xlog")
+        .args([
+            "run",
+            program.to_str().expect("valid program path"),
+            "--output",
+            "csv",
+        ])
+        .output()
+        .expect("run predicate-function wrapper program");
+    assert!(
+        output.status.success(),
+        "xlog run failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).expect("utf8 stdout");
+    assert_eq!(stdout, "__xlog_query_0\ncomputed_2\n2\n\n");
+}
+
+#[test]
 fn violated_predicate_function_constraint_reports_the_authored_body() {
     let Some(_device) = cuda_device_or_skip() else {
         return;
