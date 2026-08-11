@@ -334,6 +334,11 @@ def run_fold(
         "fold": fold,
         "clauses": [list(c) for c in theory["clauses"]],
         "stop_reason": theory["stop_reason"],
+        # Kept verbatim: the iteration record alone cannot distinguish a
+        # fit-gate abstain from a tie abstain (the field's own raison
+        # d'etre) — dropping it made the README's tie-abstention
+        # attribution underivable from the artifact.
+        "selection_reasons_per_iteration": theory["selection_reasons_per_iteration"],
         "iterations": [
             {**it, "rule": (list(it["rule"]) if it.get("rule") is not None else None)}
             for it in theory["iterations"]

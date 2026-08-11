@@ -262,7 +262,12 @@ speed/stopped condition):
 Stop reasons were the honest ones: "no positives remain in the
 residual" (folds 0, 2) and `select_once` tie-abstention on the residual
 tail (folds 1, 3, 4) — no clause was ever committed below its fold's
-permutation-null gate.
+permutation-null gate. Attribution caveat: the shipped artifact
+predates the fold records' `selection_reasons_per_iteration` field
+(the runner now keeps it), so the margin 0.0 recorded for folds 1/3/4
+is indirect evidence of tie-abstention — it is guaranteed under a gate
+stop and merely possible under a tie; future runs carry the field and
+make the attribution directly checkable.
 
 ### Reading against the pre-registered ceiling
 

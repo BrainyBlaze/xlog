@@ -247,6 +247,10 @@ def test_run_fold_recovers_planted_rule_and_scores_heldout():
     assert record["test_pairs"], "fold record must name its held-out pairs"
     assert record["stop_reason"]
     assert record["iterations"]
+    # tie-vs-gate abstention must be derivable from the record itself
+    assert isinstance(record["selection_reasons_per_iteration"], list)
+    assert record["selection_reasons_per_iteration"]
+    assert all(isinstance(r, str) for r in record["selection_reasons_per_iteration"])
 
 
 # ---------------------------------------------------------------------------
