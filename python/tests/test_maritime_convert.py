@@ -102,6 +102,48 @@ def test_episode_split_and_pad(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# Verifier: a conversion with ZERO positives must fail loudly, never pass
+# vacuously with alignment 1.0 (deep-review finding #6). md5 pins are
+# monkeypatched to the synthetic archives so the failure isolates the
+# positive-support invariant, not the archive pin.
+# ---------------------------------------------------------------------------
+
+import hashlib
+
+import verify_maritime_conversion as vm
+
+
+def test_verifier_fails_loudly_on_zero_positive_conversion(tmp_path, monkeypatch):
+    hle_lines = "\n".join([
+        "lowSpeed|A| |true|900|2100",
+        "lowSpeed|B| |true|900|1500",
+    ])  # proximity exists, but NOT ONE rendezVous interval
+    tar_p = tmp_path / "zero_pos.tar.gz"
+    data = hle_lines.encode()
+    with tarfile.open(tar_p, "w:gz") as tf:
+        info = tarfile.TarInfo("Maritime Composite Events/CEs/recognised_CEs.csv")
+        info.size = len(data)
+        tf.addfile(info, io.BytesIO(data))
+    zip_p = tmp_path / "zero_pos.zip"
+    with zipfile.ZipFile(zip_p, "w") as z:
+        z.writestr("brest_critical.csv", "proximity|2200|900|2200|true|B|A")
+
+    monkeypatch.setattr(vm, "EXPECTED_TAR_MD5", hashlib.md5(tar_p.read_bytes()).hexdigest())
+    monkeypatch.setattr(vm, "EXPECTED_ZIP_MD5", hashlib.md5(zip_p.read_bytes()).hexdigest())
+
+    report = vm.run(str(tar_p), str(zip_p))
+    assert report["ok"] is False, "zero-positive conversion must never verify ok"
+    assert report["hard_invariants"]["positive_support_ok"] is False
+    support = report["positive_support"]
+    assert support["n_positive_pts"] == 0
+    assert support["n_positive_pairs"] == 0
+    assert "zero" in support["reason"]
+    # the vacuous-perfect cosmetic must be gone too
+    assert report["alignment"]["proximity_fraction"] == 0.0
+    assert report["alignment"]["both_low_or_stopped_fraction"] == 0.0
+
+
+# ---------------------------------------------------------------------------
 # ceiling_probe: committed derivation of the vocabulary ceiling (deep-review
 # finding #4) — definitional-body pointwise stats, FP decomposition, and the
 # archive-A nested/overlap interval census. Torch-free, synthetic only.

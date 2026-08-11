@@ -260,8 +260,29 @@ def run(tar_path: str, zip_path: str) -> dict:
     n_positive_pts = sum(1 for p in is_positive if p)
     prox_covered = sum(1 for pos, pr in zip(is_positive, is_prox) if pos and pr)
     blos_covered = sum(1 for pos, bl in zip(is_positive, is_blos) if pos and bl)
-    proximity_fraction = prox_covered / n_positive_pts if n_positive_pts else 1.0
-    both_low_or_stopped_fraction = blos_covered / n_positive_pts if n_positive_pts else 1.0
+    # An empty denominator reports 0.0, NEVER a vacuous 1.0: a zero-positive
+    # conversion is a hard failure (positive_support below), and its
+    # alignment must look broken, not perfect.
+    proximity_fraction = prox_covered / n_positive_pts if n_positive_pts else 0.0
+    both_low_or_stopped_fraction = blos_covered / n_positive_pts if n_positive_pts else 0.0
+
+    # HARD invariant 5 (positive support): the corpus this verifier exists
+    # for HAS positives; a conversion with none means an upstream
+    # regression (e.g. a fluent-key change in parse_hle_archive), and every
+    # positive-side check above passed vacuously. Fail loudly by name.
+    positive_support_ok = n_positive_pts > 0 and n_positive_pairs > 0
+    positive_support = {
+        "n_positive_pts": n_positive_pts,
+        "n_positive_pairs": n_positive_pairs,
+        "ok": positive_support_ok,
+        "reason": None if positive_support_ok else (
+            f"zero-positive conversion: n_positive_pts={n_positive_pts}, "
+            f"n_positive_pairs={n_positive_pairs} — every positive-side check "
+            "(alignment fractions, episode boundaries) passed vacuously, which "
+            "verifies nothing; an upstream parsing/labeling regression is the "
+            "likely cause"
+        ),
+    }
 
     alignment_warning = None
     if proximity_fraction < ALIGNMENT_WARNING_THRESHOLD or both_low_or_stopped_fraction < ALIGNMENT_WARNING_THRESHOLD:
@@ -284,6 +305,7 @@ def run(tar_path: str, zip_path: str) -> dict:
         "segment_pair_boundary_violations": segment_pair_violations,
         "ec_label_consistency_ok": len(ec_violations) == 0,
         "ec_label_consistency_violations": ec_violations,
+        "positive_support_ok": positive_support_ok,
     }
     hard_ok = (
         hard["md5_ok"]
@@ -291,6 +313,7 @@ def run(tar_path: str, zip_path: str) -> dict:
         and hard["pair_contiguity_ok"]
         and hard["segment_pair_boundary_ok"]
         and hard["ec_label_consistency_ok"]
+        and hard["positive_support_ok"]
     )
 
     report = {
@@ -306,6 +329,7 @@ def run(tar_path: str, zip_path: str) -> dict:
             "zip_md5_ok": zip_md5_ok,
         },
         "hard_invariants": hard,
+        "positive_support": positive_support,
         "alignment": {
             "n_positive_pts": n_positive_pts,
             "proximity_fraction": proximity_fraction,
@@ -356,6 +380,8 @@ def main() -> None:
     )
     if report["alignment_warning"]:
         print(f"ALIGNMENT WARNING: {report['alignment_warning']}")
+    if not report["positive_support"]["ok"]:
+        print(f"POSITIVE SUPPORT FAILED: {report['positive_support']['reason']}")
     print(
         f"totals: n_pt={report['totals']['n_pt']} n_pairs={report['totals']['n_pairs']} "
         f"n_segments={report['totals']['n_segments']} "
