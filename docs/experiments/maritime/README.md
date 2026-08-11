@@ -212,8 +212,11 @@ artifacts are committed byte-exact and this failure class is closed.
   records the resolved configuration (`folds=5, seed=7,
   min_new_covered=2, tie_tolerance=null, holdout_score="f1",
   inner_folds=4, max_literals=3, max_clauses=4,
-  null_permutations=1000, null_quantile=0.95, smoke=false`), which
-  matches section (f) field-for-field.
+  null_permutations=1000, null_quantile=0.95, smoke=false`). All 10
+  pre-registered section-(f) parameters match field-for-field; `params`
+  additionally records `smoke=false`, which is not a section-(f) row —
+  it is the runner's own stamp that the full corpus, not the test
+  subset, was used.
 - `verify_smoke` gate: passed before the search ran (both archive md5s
   matched the pins above; pair-contiguity, segment-boundary and
   EC-label invariants all held; converted-corpus counts matched the
