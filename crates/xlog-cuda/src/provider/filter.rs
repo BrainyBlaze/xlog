@@ -601,14 +601,12 @@ impl super::CudaKernelProvider {
     ///   is enqueued.
     /// * `d_mask` is freshly allocated through the same
     ///   runtime-backed manager. By construction its
-    ///   `runtime_block()` is `Some`, so its write recording
-    ///   cannot strict-reject. The write is therefore noted
-    ///   AFTER the kernel is enqueued — this sidesteps the
-    ///   borrow conflict between `&mut d_mask` (cudarc kernel
-    ///   param) and `&d_mask` (recorder). A future migration
-    ///   that may write to a buffer of unknown provenance must
-    ///   instead capture identity pre-launch (e.g. via a raw
-    ///   view) so strict rejection happens at preflight.
+    ///   `runtime_block()` is `Some`. Its owning slice is
+    ///   recorded as a write before preflight, which snapshots
+    ///   the allocation identity without retaining the borrow;
+    ///   the kernel can then borrow `&mut d_mask` when it is
+    ///   enqueued. Future recorded launchers must likewise
+    ///   register each owning slice or column before preflight.
     ///
     /// # Errors
     ///   * `XlogError::Kernel` if the manager has no runtime,
@@ -1177,7 +1175,6 @@ impl super::CudaKernelProvider {
             ptr,
             len: num_elements,
             stream: col.stream().clone(),
-            source_block: col.runtime_block(),
             _marker: PhantomData,
         })
     }

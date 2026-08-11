@@ -309,19 +309,6 @@ impl LaunchRecorder {
         )
     }
 
-    /// Record a [`crate::provider::RawCudaView`]-style view that
-    /// borrows a region of a runtime-backed allocation. The
-    /// view must carry its source block via `runtime_block()`;
-    /// strict mode rejects views built from legacy / external
-    /// paths.
-    ///
-    /// Public API placeholder for the upcoming filter-class
-    /// migration; no production caller exists yet.
-    #[allow(dead_code)]
-    pub(crate) fn read_view_runtime(&mut self, block: Option<&DeviceBlock>) -> &mut Self {
-        self.note("read_view", block, Access::Read, false)
-    }
-
     /// Number of recorded runtime-backed uses. Diagnostic.
     pub fn recorded_count(&self) -> usize {
         self.uses.len()
