@@ -303,12 +303,34 @@ absent from the vocabulary". Measured: precision 0.5109, recall
 0.9925, F1 0.6746 — the aggregate operating point landed where the
 pre-declared ceiling mechanism predicted, and only 27 of 3,579
 positive pair-times were missed. That agreement is aggregate-level
-evidence only: whether the residual 3,400 false positives decompose
-into the two pre-identified inexpressible discriminators is measured
+evidence only: whether the residual false positives decompose into the
+two pre-identified inexpressible discriminators is measured
 component-wise by
-[`examples/maritime_woled/ceiling_probe.py`](../../../examples/maritime_woled/ceiling_probe.py)
-(its real-corpus JSON lands here after the probe's separate run), not
-asserted from the aggregate. Note also that the learned theory is NOT
+[`examples/maritime_woled/ceiling_probe.py`](../../../examples/maritime_woled/ceiling_probe.py),
+whose real-corpus output is shipped as
+[`results/ceiling_probe/CEILING_PROBE.json`](results/ceiling_probe/CEILING_PROBE.json)
+(committed bytes md5 `194df1be215208cb4cc84b5b535c9211`). The probe's
+measurements:
+
+- **The ceiling's declared basis reproduces exactly**: the definitional
+  body `proximity AND both_low_or_stopped AND both_open_sea` scores
+  TP 3,579 / FP 3,689 / FN 0 → P 0.4924 / R 1.0 / F1 0.6599 — the same
+  numbers section (a) cited from the pre-run review, now derived by a
+  committed tool from the pinned archives.
+- **The FP composition is now measured, not asserted**: of the
+  definitional body's 3,689 false positives, 733 lie in negative pairs
+  (the pair-level exclusion class) and 2,956 lie in predicted runs
+  shorter than the 240 s duration threshold — **and 0 fall outside the
+  two pre-identified discriminators**.
+- **The interval-merge fix is behavior-preserving on this corpus**: a
+  census of all 3,970,370 HLE intervals finds 0 strictly-nested,
+  0 overlapping and 0 duplicate same-key intervals, so merging interval
+  lists before coverage checks cannot change any label here, and the
+  shipped baseline stands unmodified. The probe's converter counts
+  also reproduce the pre-registered corpus constants (454,858 pt rows;
+  806 pairs = 302 + 504; 8,807 segments).
+
+Note also that the learned theory is NOT
 literally the definitional body: its micro-precision 0.5109 differs
 from the exact body's predicted 0.4924 — the per-branch decomposition
 plus the folds' mop-up clauses yield a measurably different operator,
