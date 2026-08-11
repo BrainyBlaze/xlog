@@ -219,21 +219,31 @@ pub fn flatten_patterns(
     Ok(layout)
 }
 
-/// One candidate relation as the flat row-major buffer the kernel reads.
+/// One candidate relation as the flat COLUMN-MAJOR buffer the kernel reads.
+///
+/// Column-major is the device law: production relations live as columnar
+/// device buffers, so device ingest is a plain D2D copy per column (no
+/// host round-trip, no transpose), and threads walking rows of one
+/// position read contiguous memory. The cell for (row, position) is
+/// `values[position * row_count + row]` — the SAME indexing formula the
+/// CUDA kernel uses; all offsets are in u64 ELEMENTS, never bytes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FlatRelation {
     pub arity: u32,
     pub row_count: u32,
-    /// Row-major values; length == `arity * row_count`.
+    /// Column-major values; length == `arity * row_count`.
     pub values: Vec<u64>,
 }
 
 impl FlatRelation {
+    /// Build from row-shaped input (transposes into the columnar law).
     pub fn from_rows(rows: &[Vec<u64>], arity: u32) -> Self {
-        let mut values = Vec::with_capacity(rows.len() * arity as usize);
-        for row in rows {
+        let mut values = vec![0u64; rows.len() * arity as usize];
+        for (row_index, row) in rows.iter().enumerate() {
             assert_eq!(row.len(), arity as usize, "row arity mismatch");
-            values.extend_from_slice(row);
+            for (position, value) in row.iter().enumerate() {
+                values[position * rows.len() + row_index] = *value;
+            }
         }
         Self {
             arity,
@@ -277,6 +287,7 @@ pub fn score_pattern_flat(
         let binding_offset = layout.atom_binding_offset[atom] as usize;
         debug_assert_eq!(relation.arity as usize, arity);
 
+        let rows = relation.row_count as usize;
         let mut descended = false;
         while row_cursor[depth] < relation.row_count {
             let row = row_cursor[depth] as usize;
@@ -286,7 +297,8 @@ pub fn score_pattern_flat(
             let mut mask: u32 = 0;
             let mut matched = true;
             for position in 0..arity {
-                let value = relation.values[row * arity + position];
+                // Column-major: identical to the device kernel's formula.
+                let value = relation.values[position * rows + row];
                 let code = layout.binding_codes[binding_offset + position];
                 if code & JOIN_FLAG != 0 {
                     let j = (code & 0xFF) as usize;
@@ -381,6 +393,18 @@ mod tests {
         ] {
             assert_eq!(decode_binding(binding_code(var)), var);
         }
+    }
+
+    /// The columnar law, pinned explicitly: rows {(1,2),(3,4),(5,6)}
+    /// serialize as column 0 then column 1, and the (row, position)
+    /// formula reads back the original cells.
+    #[test]
+    fn flat_relation_is_column_major() {
+        let relation = FlatRelation::from_rows(&[vec![1, 2], vec![3, 4], vec![5, 6]], 2);
+        assert_eq!(relation.values, vec![1, 3, 5, 2, 4, 6]);
+        let rows = relation.row_count as usize;
+        assert_eq!(relation.values[1], 3); // position 0 * rows + row 1
+        assert_eq!(relation.values[rows + 2], 6); // position 1 * rows + row 2
     }
 
     /// The flat iterative walk must agree with the recursive reference on

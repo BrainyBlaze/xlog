@@ -69,17 +69,20 @@ __device__ inline uint32_t ilp_exact_nary_covers(
         uint32_t slot = atom_candidate_slot[atom];
         uint32_t arity = atom_arity[atom];
         uint32_t bindings = atom_binding_offset[atom];
-        const uint64_t* rows = cand_values + cand_value_offset[slot];
+        // Column-major per relation (the columnar-device-buffer law):
+        // cell (row, position) = relation[(size_t)position * row_count +
+        // row], element units — the same formula the host flat
+        // interpreter runs. size_t arithmetic keeps huge relations safe.
+        const uint64_t* relation = cand_values + cand_value_offset[slot];
         uint32_t row_count = cand_rows[slot];
 
         uint32_t descended = 0u;
         while (row_cursor[depth] < row_count) {
             uint32_t row = row_cursor[depth];
-            const uint64_t* values = rows + (size_t)row * arity;
             uint32_t mask = 0u;
             uint32_t matched = 1u;
             for (uint32_t position = 0; position < arity; position++) {
-                uint64_t value = values[position];
+                uint64_t value = relation[(size_t)position * row_count + row];
                 uint32_t code = binding_codes[bindings + position];
                 uint32_t index = code & ILP_EXACT_NARY_INDEX_MASK;
                 if (code & ILP_EXACT_NARY_JOIN_FLAG) {

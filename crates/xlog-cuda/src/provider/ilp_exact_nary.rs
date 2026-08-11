@@ -37,7 +37,10 @@ pub struct IlpExactNaryRequest<'a> {
     pub atom_arity: &'a [u32],
     pub atom_binding_offset: &'a [u32],
     pub binding_codes: &'a [u32],
-    /// Concatenated row-major u64 relation rows.
+    /// Concatenated COLUMN-MAJOR u64 relation values: within a
+    /// relation, cell (row, position) sits at `cand_value_offset[slot]
+    /// + position * cand_rows[slot] + row`. All offsets are u32
+    /// ELEMENT indexes, never bytes.
     pub cand_values: &'a [u64],
     /// Element offset of each relation's first row in `cand_values`.
     pub cand_value_offset: &'a [u32],
@@ -314,7 +317,8 @@ mod tests {
             atom_binding_offset: &[0, 2],
             // L(Head0, Join0), R(Join0, Head1)
             binding_codes: &[0, JOIN, JOIN, 1],
-            cand_values: &[1, 2, 2, 3, 2, 4, 3, 5, 4, 6],
+            // Columnar: p_B cols [1,2],[2,3]; p_C cols [2,3,4],[4,5,6].
+            cand_values: &[1, 2, 2, 3, 2, 3, 4, 4, 5, 6],
             cand_value_offset: &[0, 4],
             cand_rows: &[2, 3],
             pos_values: &[1, 4, 2, 5],
@@ -341,7 +345,8 @@ mod tests {
             atom_arity: &[3, 2],
             atom_binding_offset: &[0, 3],
             binding_codes: &[0, 1, JOIN, JOIN, 2],
-            cand_values: &[1, 2, 9, 4, 5, 8, 9, 3, 8, 7],
+            // Columnar: T cols [1,4],[2,5],[9,8]; P cols [9,8],[3,7].
+            cand_values: &[1, 4, 2, 5, 9, 8, 9, 8, 3, 7],
             cand_value_offset: &[0, 6],
             cand_rows: &[2, 2],
             pos_values: &[1, 2, 3, 4, 5, 6, 1, 2, 7],
@@ -367,7 +372,8 @@ mod tests {
             atom_arity: &[2, 2],
             atom_binding_offset: &[0, 2],
             binding_codes: &[0, JOIN, JOIN, 1],
-            cand_values: &[1, 8, 1, 9, 9, 2],
+            // Columnar: T cols [1,1],[8,9]; P single row [9,2].
+            cand_values: &[1, 1, 8, 9, 9, 2],
             cand_value_offset: &[0, 4],
             cand_rows: &[2, 1],
             pos_values: &[1, 2, 1, 3],
