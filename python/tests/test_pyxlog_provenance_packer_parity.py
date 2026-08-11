@@ -1,4 +1,11 @@
-import pyxlog
+import pytest
+
+pytest.importorskip("torch")
+pyxlog = pytest.importorskip("pyxlog")
+
+from conftest import skip_unless_pyxlog_cuda
+
+skip_unless_pyxlog_cuda()
 
 
 SOURCE = """
