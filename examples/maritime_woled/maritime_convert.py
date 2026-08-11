@@ -127,7 +127,10 @@ def parse_hle_archive(tar_path: str) -> dict:
     "bad_lines": Counter, "n_lines": int}. fluent_key follows the census convention:
     plain fluent name when Value is "true", else f"{fluent}={value}" (e.g.
     "stopped=farFromPorts"). entity is a canonical pair tuple for pair fluents,
-    (mmsi, area_type) for withinArea, else (mmsi,). Interval lists sorted by st."""
+    (mmsi, area_type) for withinArea, else (mmsi,). Interval lists sorted by st.
+    Fail-closed: CRLF content and non-integer interval bounds RAISE (on the
+    md5-pinned archives both mean corruption); only wrong-field-count rows are
+    counted in bad_lines and skipped."""
     intervals: dict[str, dict[tuple, list[tuple[int, int]]]] = {}
     bad_lines: Counter = Counter()
     n_lines = 0
@@ -137,9 +140,17 @@ def parse_hle_archive(tar_path: str) -> dict:
         fh = tf.extractfile(member)
         if fh is None:
             raise ValueError(f"{tar_path}: member {member!r} is not a regular file")
-        text = io.TextIOWrapper(fh, encoding="utf-8")
+        text = io.TextIOWrapper(fh, encoding="utf-8", newline="")
         for raw_line in text:
-            line = raw_line.rstrip("\n").rstrip("\r")
+            # Fail-closed EOL check: the pinned archives are LF-only, so a
+            # CR anywhere means the bytes are not the pinned bytes.
+            if "\r" in raw_line:
+                raise ValueError(
+                    f"{tar_path}: CRLF line ending in {member!r} near line "
+                    f"{n_lines + 1}: the pinned archives are LF-only; refusing "
+                    "to parse EOL-mangled content"
+                )
+            line = raw_line.rstrip("\n")
             if not line:
                 continue
             n_lines += 1
@@ -151,8 +162,14 @@ def parse_hle_archive(tar_path: str) -> dict:
             try:
                 st, et = int(st_s), int(et_s)
             except ValueError:
-                bad_lines["bad_interval"] += 1
-                continue
+                # Fail closed: a full-width row whose interval bounds do not
+                # parse is corruption, not archive cruft — skipping it would
+                # silently convert a wrong corpus.
+                raise ValueError(
+                    f"{tar_path}: non-integer interval bounds "
+                    f"{st_s!r}/{et_s!r} in {member!r} (line {n_lines}): "
+                    "refusing to skip a corrupt row"
+                ) from None
 
             if fluent == "withinArea":
                 entity = (arg1, arg2)
@@ -189,7 +206,9 @@ def parse_lle_proximity(zip_path: str) -> dict:
     """Stream archive B; keep ONLY proximity rows. Returns
     {"proximity": {pair: [(st, et), ...]}, "bad_proximity_lines": int,
     "n_lines": int, "n_proximity_rows": int}. Pairs canonical, lists sorted+merged
-    (overlapping/adjacent [st,et) intervals coalesced)."""
+    (overlapping/adjacent [st,et) intervals coalesced). Fail-closed: CRLF
+    content and non-integer bounds on a proximity row RAISE; only
+    wrong-field-count proximity rows are counted and skipped."""
     raw: dict[tuple[str, str], list[tuple[int, int]]] = {}
     bad_proximity_lines = 0
     n_lines = 0
@@ -198,9 +217,17 @@ def parse_lle_proximity(zip_path: str) -> dict:
     with zipfile.ZipFile(zip_path) as zf:
         member = _find_member(zf.namelist(), _LLE_MEMBER_SUFFIX)
         with zf.open(member) as fh:
-            text = io.TextIOWrapper(fh, encoding="utf-8")
+            text = io.TextIOWrapper(fh, encoding="utf-8", newline="")
             for raw_line in text:
-                line = raw_line.rstrip("\n").rstrip("\r")
+                # Same fail-closed EOL rule as parse_hle_archive: the pinned
+                # archive is LF-only, a CR means these are not the pinned bytes.
+                if "\r" in raw_line:
+                    raise ValueError(
+                        f"{zip_path}: CRLF line ending in {member!r} near line "
+                        f"{n_lines + 1}: the pinned archives are LF-only; "
+                        "refusing to parse EOL-mangled content"
+                    )
+                line = raw_line.rstrip("\n")
                 if not line:
                     continue
                 n_lines += 1
@@ -215,8 +242,13 @@ def parse_lle_proximity(zip_path: str) -> dict:
                 try:
                     st, et = int(st_s), int(et_s)
                 except ValueError:
-                    bad_proximity_lines += 1
-                    continue
+                    # Fail closed, as in parse_hle_archive: unparseable bounds
+                    # on a full-width proximity row are corruption.
+                    raise ValueError(
+                        f"{zip_path}: non-integer interval bounds "
+                        f"{st_s!r}/{et_s!r} in {member!r} (line {n_lines}): "
+                        "refusing to skip a corrupt row"
+                    ) from None
                 pair = _canonical_pair(e1, e2)
                 raw.setdefault(pair, []).append((st, et))
 

@@ -21,7 +21,7 @@ LLE_LINES = "\n".join([
     "proximity|2200|900|2200|true|B|A",
     "proximity|2500|2200|2500|true|A|B",        # adjacent -> must coalesce with prev
     "coord|900|900|A|-4.3|48.1",                # ignored kind
-    "proximity|9|bad|row|true|A|B",             # malformed -> counted, not raised
+    "proximity|9|900|2200|true|A",              # wrong field count -> counted, not raised
 ])
 
 
@@ -292,3 +292,168 @@ def test_negative_pair_subsample_is_deterministic():
     assert sel1 == sel2
     assert len(sel1["negative_pairs"]) <= 604
     assert sel1["n_negative_pool"] == 1500
+
+
+def test_negative_pair_subsample_exact_count_and_membership_at_real_pool_size():
+    # The real corpus's pre-registered arithmetic: pool of 2,014 pairs,
+    # stride = ceil(2014/604) = 4, pool[::4] -> exactly 504 pairs. A
+    # len <= 604 assertion alone would pass with zero negatives or a wrong
+    # stride; pin the count and spot-check the stride membership.
+    hle = {"intervals": {"rendezVous": {("A", "B"): [(0, 10)]}}}
+    pool_pairs = {(f"N{i:04d}", f"M{i:04d}"): [(0, 5)] for i in range(2014)}
+    prox = {"proximity": {("A", "B"): [(0, 10)], **pool_pairs}}
+    sel = select_pairs(hle, prox)
+    assert sel["n_negative_pool"] == 2014
+    assert len(sel["negative_pairs"]) == 504
+    pool = sorted(pool_pairs)
+    assert sel["negative_pairs"][0] == pool[0]        # stride starts at 0
+    assert sel["negative_pairs"][1] == pool[4]        # every 4th
+    assert sel["negative_pairs"][-1] == pool[2012]    # last stride element
+    assert set(sel["negative_pairs"]) <= set(pool)
+
+
+# ---------------------------------------------------------------------------
+# Parser fail-closed paths (deep-review finding #16(2)): a missing archive
+# member, a non-integer interval, a truncated archive and CRLF content must
+# each fail loudly — on md5-pinned archives every one of them means
+# corruption, and a silent skip would convert a wrong corpus.
+# ---------------------------------------------------------------------------
+
+
+def _tar_with_lines(tmp_path, lines, name="custom.tar.gz",
+                    member="Maritime Composite Events/CEs/recognised_CEs.csv"):
+    p = tmp_path / name
+    data = lines.encode() if isinstance(lines, str) else lines
+    with tarfile.open(p, "w:gz") as tf:
+        info = tarfile.TarInfo(member)
+        info.size = len(data)
+        tf.addfile(info, io.BytesIO(data))
+    return str(p)
+
+
+def test_parser_fails_on_missing_archive_member(tmp_path):
+    tar_p = _tar_with_lines(tmp_path, HLE_LINES, member="something/else.csv")
+    try:
+        parse_hle_archive(tar_p)
+        raise AssertionError("missing member must raise")
+    except ValueError as e:
+        assert "recognised_CEs.csv" in str(e)
+
+    p = tmp_path / "wrong.zip"
+    with zipfile.ZipFile(p, "w") as z:
+        z.writestr("not_the_member.csv", "proximity|1|2|3|true|A|B")
+    try:
+        parse_lle_proximity(str(p))
+        raise AssertionError("missing member must raise")
+    except ValueError as e:
+        assert "brest_critical.csv" in str(e)
+
+
+def test_parser_fails_on_non_integer_interval(tmp_path):
+    tar_p = _tar_with_lines(tmp_path, "rendezVous|A|B|true|xx|2000")
+    try:
+        parse_hle_archive(tar_p)
+        raise AssertionError("non-integer HLE interval must raise")
+    except ValueError as e:
+        assert "non-integer" in str(e)
+
+    p = tmp_path / "badint.zip"
+    with zipfile.ZipFile(p, "w") as z:
+        z.writestr("brest_critical.csv", "proximity|9|bad|row|true|A|B")
+    try:
+        parse_lle_proximity(str(p))
+        raise AssertionError("non-integer LLE interval must raise")
+    except ValueError as e:
+        assert "non-integer" in str(e)
+
+
+def test_parser_fails_on_truncated_archives(tmp_path):
+    tar_p = _tar_with_lines(tmp_path, HLE_LINES * 50)
+    blob = open(tar_p, "rb").read()
+    trunc_tar = tmp_path / "trunc.tar.gz"
+    trunc_tar.write_bytes(blob[: len(blob) // 2])
+    try:
+        parse_hle_archive(str(trunc_tar))
+        raise AssertionError("truncated tar.gz must raise")
+    except Exception:
+        pass
+
+    zp = tmp_path / "full.zip"
+    with zipfile.ZipFile(zp, "w") as z:
+        z.writestr("brest_critical.csv", LLE_LINES * 50)
+    blob = zp.read_bytes()
+    trunc_zip = tmp_path / "trunc.zip"
+    trunc_zip.write_bytes(blob[: len(blob) // 2])
+    try:
+        parse_lle_proximity(str(trunc_zip))
+        raise AssertionError("truncated zip must raise")
+    except Exception:
+        pass
+
+
+def test_parser_fails_on_crlf_content(tmp_path):
+    crlf_hle = "rendezVous|A|B|true|1000|2000\r\nlowSpeed|A| |true|900|2100\r\n"
+    tar_p = _tar_with_lines(tmp_path, crlf_hle)
+    try:
+        parse_hle_archive(tar_p)
+        raise AssertionError("CRLF HLE content must raise")
+    except ValueError as e:
+        assert "CRLF" in str(e)
+
+    p = tmp_path / "crlf.zip"
+    with zipfile.ZipFile(p, "w") as z:
+        z.writestr("brest_critical.csv", "proximity|2200|900|2200|true|B|A\r\n")
+    try:
+        parse_lle_proximity(str(p))
+        raise AssertionError("CRLF LLE content must raise")
+    except ValueError as e:
+        assert "CRLF" in str(e)
+
+
+# ---------------------------------------------------------------------------
+# EC truth table, pinned cell by cell (deep-review finding #16(3)): all six
+# (position, holds, previously-held) combinations across two episodes.
+# ---------------------------------------------------------------------------
+
+
+def test_ec_truth_table_every_transition_combination(tmp_path):
+    hle_lines = "\n".join([
+        "rendezVous|A|B|true|1000|3000",
+        "rendezVous|A|B|true|4000|5000",
+        "rendezVous|A|B|true|10000|10800",
+        "lowSpeed|A| |true|1500|2000",     # interior boundaries inside [1000,3000)
+    ])
+    tar_p = _tar_with_lines(tmp_path, hle_lines)
+    zp = tmp_path / "ec.zip"
+    with zipfile.ZipFile(zp, "w") as z:
+        z.writestr(
+            "brest_critical.csv",
+            "proximity|1|500|6000|true|A|B\nproximity|1|10000|11000|true|A|B",
+        )
+
+    conv = convert(tar_p, str(zp))
+    times, ec = conv["pt_time"], conv["ec"]
+    # Episode 1: 500,1000,1500,2000,3000,4000,5000,6000; the 6000->10000 gap
+    # (> EPISODE_GAP_S) starts episode 2: 10000,10800,11000.
+    assert times == [500, 1000, 1500, 2000, 3000, 4000, 5000, 6000, 10000, 10800, 11000]
+    assert conv["segments"] == [(0, 8), (8, 11)]
+
+    def cell(t):
+        i = times.index(t)
+        return (
+            ec["init_labels"][i], ec["init_dontcare"][i],
+            ec["term_labels"][i], ec["term_dontcare"][i],
+        )
+
+    # (init, init_dc, term, term_dc) per cell of the truth table:
+    assert cell(500) == (False, False, False, True)     # first pt, not holding
+    assert cell(1000) == (True, False, False, False)    # F -> T initiation
+    assert cell(1500) == (False, True, False, False)    # T -> T re-init dontcare
+    assert cell(2000) == (False, True, False, False)    # T -> T again
+    assert cell(3000) == (False, False, True, False)    # T -> F termination
+    assert cell(4000) == (True, False, False, False)    # F -> T re-initiation
+    assert cell(5000) == (False, False, True, False)    # T -> F again
+    assert cell(6000) == (False, False, False, True)    # F -> F dontcare
+    assert cell(10000) == (True, False, False, False)   # first pt HOLDING: init
+    assert cell(10800) == (False, False, True, False)   # T -> F in episode 2
+    assert cell(11000) == (False, False, False, True)   # F -> F in episode 2
