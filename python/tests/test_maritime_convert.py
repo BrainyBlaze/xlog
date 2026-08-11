@@ -246,6 +246,43 @@ def test_ceiling_probe_main_end_to_end_on_synthetic_archives(tmp_path):
     assert "rendezVous" in report["nested_interval_census"]["per_key"]
 
 
+def test_covers_handles_nested_same_key_intervals(tmp_path):
+    # Deep-review finding #8: a strictly NESTED same-key interval (here
+    # lowSpeed A (1000,2000) inside (0,5000)) must not falsify coverage.
+    # At t=2000 the rightmost-start interval is the nested one, which has
+    # already ended — but (0,5000) still covers t, so both_lowspeed and
+    # the gold rendezVous label must hold there.
+    hle_lines = "\n".join([
+        "rendezVous|A|B|true|0|5000",
+        "rendezVous|A|B|true|1000|2000",   # nested gold interval too
+        "lowSpeed|A| |true|0|5000",
+        "lowSpeed|A| |true|1000|2000",     # strictly nested same-key interval
+        "lowSpeed|B| |true|0|5000",
+    ])
+    tar_p = tmp_path / "nested.tar.gz"
+    data = hle_lines.encode()
+    with tarfile.open(tar_p, "w:gz") as tf:
+        info = tarfile.TarInfo("Maritime Composite Events/CEs/recognised_CEs.csv")
+        info.size = len(data)
+        tf.addfile(info, io.BytesIO(data))
+    zip_p = tmp_path / "nested.zip"
+    with zipfile.ZipFile(zip_p, "w") as z:
+        z.writestr("brest_critical.csv", "proximity|9|0|5000|true|A|B")
+
+    conv = convert(str(tar_p), str(zip_p))
+    times = conv["pt_time"]
+    i = times.index(2000)
+    assert i in set(conv["relations"]["both_lowspeed"]), (
+        "nested lowSpeed interval falsified both_lowspeed inside the covering interval"
+    )
+    assert conv["is_positive"][i] is True, (
+        "nested rendezVous interval falsified the gold label inside the covering interval"
+    )
+    # the merged reading agrees with the per-branch relations everywhere
+    blos = set(conv["relations"]["both_low_or_stopped"])
+    assert set(conv["relations"]["both_lowspeed"]) <= blos
+
+
 def test_negative_pair_subsample_is_deterministic():
     hle = {"intervals": {"rendezVous": {("A", "B"): [(0, 10)]}}}
     pool_pairs = {(f"N{i:03d}", f"M{i:03d}"): [(0, 5)] for i in range(1500)}

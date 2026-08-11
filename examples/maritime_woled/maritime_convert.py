@@ -394,15 +394,31 @@ def convert(tar_path: str, zip_path: str) -> dict:
         timeline = build_pair_timeline(pair, hle, prox)
         n_dropped_outside_pad += timeline["n_dropped_outside_pad"]
 
+        # EVERY interval list handed to `_covers` must be merged, not just
+        # sorted: `_covers` inspects only the rightmost interval with
+        # st <= t, so a strictly NESTED same-key interval (e.g.
+        # [(0, 100), (10, 20)] at t = 50) would otherwise falsify coverage
+        # inside the covering interval. parse_lle_proximity pre-merges
+        # proximity; the HLE lists are merged here.
         prox_ivs = sorted(prox.get("proximity", {}).get(pair, []))
-        rendez_ivs = sorted(hle.get("intervals", {}).get("rendezVous", {}).get(pair, []))
+        rendez_ivs = _merge_sorted_intervals(
+            sorted(hle.get("intervals", {}).get("rendezVous", {}).get(pair, []))
+        )
 
         v1_low_stop = _vessel_low_or_stopped_intervals(hle, v1)
         v2_low_stop = _vessel_low_or_stopped_intervals(hle, v2)
-        v1_low = sorted(hle.get("intervals", {}).get("lowSpeed", {}).get((v1,), []))
-        v2_low = sorted(hle.get("intervals", {}).get("lowSpeed", {}).get((v2,), []))
-        v1_stop_far = sorted(hle.get("intervals", {}).get("stopped=farFromPorts", {}).get((v1,), []))
-        v2_stop_far = sorted(hle.get("intervals", {}).get("stopped=farFromPorts", {}).get((v2,), []))
+        v1_low = _merge_sorted_intervals(
+            sorted(hle.get("intervals", {}).get("lowSpeed", {}).get((v1,), []))
+        )
+        v2_low = _merge_sorted_intervals(
+            sorted(hle.get("intervals", {}).get("lowSpeed", {}).get((v2,), []))
+        )
+        v1_stop_far = _merge_sorted_intervals(
+            sorted(hle.get("intervals", {}).get("stopped=farFromPorts", {}).get((v1,), []))
+        )
+        v2_stop_far = _merge_sorted_intervals(
+            sorted(hle.get("intervals", {}).get("stopped=farFromPorts", {}).get((v2,), []))
+        )
         v1_near_ports = _vessel_near_ports_intervals(hle, v1)
         v2_near_ports = _vessel_near_ports_intervals(hle, v2)
 
