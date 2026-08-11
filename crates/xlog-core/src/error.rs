@@ -79,6 +79,19 @@ pub enum XlogError {
         context: String,
     },
 
+    /// A compiler-generated integrity-constraint relation contains witness rows.
+    #[error(
+        "Constraint {constraint_index} violated: {relation_name} produced {witness_rows} witness row(s)"
+    )]
+    ConstraintViolation {
+        /// Source-order constraint index encoded by the compiler-generated relation.
+        constraint_index: usize,
+        /// Compiler-generated relation that contains the violation witnesses.
+        relation_name: String,
+        /// Number of materialized violation witnesses.
+        witness_rows: usize,
+    },
+
     /// Runtime execution error.
     #[error("Execution error: {0}")]
     Execution(String),
@@ -130,6 +143,19 @@ mod tests {
         };
         assert!(err.to_string().contains("1024"));
         assert!(err.to_string().contains("512"));
+    }
+
+    #[test]
+    fn test_constraint_violation_display() {
+        let err = XlogError::ConstraintViolation {
+            constraint_index: 3,
+            relation_name: "__xlog_constraint_3".to_string(),
+            witness_rows: 2,
+        };
+        assert_eq!(
+            err.to_string(),
+            "Constraint 3 violated: __xlog_constraint_3 produced 2 witness row(s)"
+        );
     }
 
     #[test]

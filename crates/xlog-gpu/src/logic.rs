@@ -1520,10 +1520,12 @@ impl LogicProgram {
         };
 
         let mut executor = self.prepare_executor(&provider, inputs, false)?;
-        let result = executor.execute_epistemic_gpu_execution(
-            executable,
-            capacities_for_epistemic_executable(executable)?,
-        )?;
+        let result = executor
+            .execute_epistemic_gpu_execution(
+                executable,
+                capacities_for_epistemic_executable(executable)?,
+            )
+            .map_err(|error| self.present_epistemic_constraint_violation(error))?;
         result.require_runtime_dispatch_certification()?;
         Ok(result)
     }
@@ -2106,10 +2108,12 @@ impl LogicProgram {
         let mut queries = Vec::new();
         match &self.plan {
             LogicExecutionPlan::EpistemicSingle(executable) => {
-                let result = executor.execute_epistemic_gpu_execution(
-                    executable,
-                    capacities_for_epistemic_executable(executable)?,
-                )?;
+                let result = executor
+                    .execute_epistemic_gpu_execution(
+                        executable,
+                        capacities_for_epistemic_executable(executable)?,
+                    )
+                    .map_err(|error| self.present_epistemic_constraint_violation(error))?;
                 result.require_runtime_dispatch_certification()?;
                 queries.extend(epistemic_result_to_query_results(
                     epistemic_output_relation_name(executable)?,
@@ -2313,6 +2317,30 @@ impl LogicProgram {
         self.enforce_constraints_in_store(provider, executor.store())
     }
 
+    fn constraint_violation_error(&self, constraint_index: usize) -> XlogError {
+        let presentation_constraint = self
+            .epistemic_provenance
+            .as_ref()
+            .and_then(|provenance| provenance.source_program.constraints.get(constraint_index))
+            .unwrap_or(&self.program.constraints[constraint_index]);
+        XlogError::Execution(format!(
+            "Constraint {} violated: {}",
+            constraint_index,
+            format_constraint(&presentation_constraint.body)
+        ))
+    }
+
+    fn present_epistemic_constraint_violation(&self, error: XlogError) -> XlogError {
+        match error {
+            XlogError::ConstraintViolation {
+                constraint_index, ..
+            } if constraint_index < self.program.constraints.len() => {
+                self.constraint_violation_error(constraint_index)
+            }
+            other => other,
+        }
+    }
+
     fn enforce_constraints_in_store(
         &self,
         provider: &CudaKernelProvider,
@@ -2336,16 +2364,7 @@ impl LogicProgram {
                 continue;
             }
 
-            let presentation_constraint = self
-                .epistemic_provenance
-                .as_ref()
-                .and_then(|provenance| provenance.source_program.constraints.get(i))
-                .unwrap_or(&self.program.constraints[i]);
-            return Err(XlogError::Execution(format!(
-                "Constraint {} violated: {}",
-                i,
-                format_constraint(&presentation_constraint.body)
-            )));
+            return Err(self.constraint_violation_error(i));
         }
 
         Ok(())
