@@ -6232,15 +6232,26 @@ impl Executor {
             row_count_device_reads += u32::from(!row_count_was_cached);
             if rows > 0 {
                 violated_constraint_relations += 1;
-                violations.push(format!("{relation_name}={rows}"));
+                let constraint_index = relation_name
+                    .strip_prefix(XLOG_CONSTRAINT_RELATION_PREFIX)
+                    .and_then(|suffix| suffix.parse::<usize>().ok())
+                    .ok_or_else(|| {
+                        XlogError::Execution(format!(
+                            "invalid compiler-generated constraint relation {relation_name}"
+                        ))
+                    })?;
+                violations.push((constraint_index, relation_name.to_string(), rows));
             }
         }
 
-        if !violations.is_empty() {
-            return Err(XlogError::Execution(format!(
-                "epistemic GPU reduced constraint violation: {}",
-                violations.join(", ")
-            )));
+        if let Some((constraint_index, relation_name, witness_rows)) =
+            violations.into_iter().min_by_key(|(index, _, _)| *index)
+        {
+            return Err(XlogError::ConstraintViolation {
+                constraint_index,
+                relation_name,
+                witness_rows,
+            });
         }
 
         Ok(EpistemicGpuConstraintValidationTrace {
@@ -6441,6 +6452,7 @@ impl Executor {
         };
         let transfer_budget_end = self.provider.host_transfer_stats();
         let launch_metadata_transfer_end = self.provider.host_launch_metadata_transfer_stats();
+        let constraint_validation = self.validate_epistemic_gpu_reduced_constraints(executable)?;
         let transfer_budget =
             EpistemicGpuTransferBudgetTrace::from_host_transfer_stats_with_launch_metadata(
                 candidate_count,
@@ -6455,7 +6467,6 @@ impl Executor {
             "epistemic GPU final tuple materialization",
             final_result_transfer.final_output_rows,
         )?;
-        let constraint_validation = self.validate_epistemic_gpu_reduced_constraints(executable)?;
         let semantic_trace = EpistemicGpuSemanticTrace::from_device_rejection_reasons(
             &self.provider,
             &prepared.workspace,

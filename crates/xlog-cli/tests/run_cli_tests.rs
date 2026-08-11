@@ -2628,6 +2628,57 @@ fn test_xlog_run_preserves_active_gates_and_constraints_after_founded_elision() 
 }
 
 #[test]
+fn test_xlog_run_reports_ordinary_constraint_violation_after_modal_evaluation() {
+    let _device = match CudaDevice::new(0) {
+        Ok(device) => device,
+        Err(error) if std::env::var("XLOG_REQUIRE_CUDA").as_deref() == Ok("1") => {
+            panic!("XLOG_REQUIRE_CUDA=1 but CUDA initialization failed: {error}")
+        }
+        Err(error) => {
+            eprintln!("Skipping test: CUDA runtime unavailable: {error}");
+            return;
+        }
+    };
+    let fixture = TempDir::new().expect("create fixture directory");
+    let output = run_inline_xlog_program(
+        &fixture,
+        "ordinary_constraint_after_modal_evaluation.xlog",
+        "#pragma epistemic_mode = faeel\n\
+         pred observed(symbol, symbol, symbol, symbol).\n\
+         pred normative(symbol, symbol, symbol, symbol).\n\
+         pred modal_actual(symbol, symbol, symbol, symbol, symbol).\n\
+         pred expected(symbol, symbol, symbol, symbol, symbol).\n\
+         pred actual(symbol, symbol, symbol, symbol, symbol).\n\
+         pred missing(symbol, symbol, symbol, symbol, symbol).\n\
+         observed(world, item, present, claim).\n\
+         expected(known, world, item, absent, claim).\n\
+         normative(W, I, O, C) :- observed(W, I, O, C).\n\
+         modal_actual(known, W, I, O, C) :-\n\
+           normative(W, I, O, C),\n\
+           know normative(W, I, O, C).\n\
+         actual(M, W, I, O, C) :- modal_actual(M, W, I, O, C).\n\
+         missing(M, W, I, O, C) :-\n\
+           expected(M, W, I, O, C),\n\
+           not actual(M, W, I, O, C).\n\
+         :- missing(M, W, I, O, C).\n\
+         ?- modal_actual(M, W, I, O, C).\n",
+    );
+    assert!(
+        !output.status.success(),
+        "an ordinary constraint over modal output must reject a missing expectation"
+    );
+    let stderr = String::from_utf8(output.stderr).expect("utf8 stderr");
+    assert!(
+        stderr.contains("Constraint 0 violated: :- missing(M, W, I, O, C)."),
+        "{stderr}"
+    );
+    assert!(
+        !stderr.contains("epistemic GPU transfer budget"),
+        "the constraint failure must not be replaced by a transfer-budget diagnostic: {stderr}"
+    );
+}
+
+#[test]
 fn test_xlog_run_scopes_g91_compatibility_to_exact_tuple_support() {
     let _device = match CudaDevice::new(0) {
         Ok(device) => device,
