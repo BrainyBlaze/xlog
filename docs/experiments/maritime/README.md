@@ -257,11 +257,20 @@ Section (a) declared, before the run, a vocabulary ceiling of ~0.66
 pointwise F1 with the mechanism "precision ~0.49 at recall ~1.0,
 because the 240 s duration threshold and the tug/pilot exclusion are
 absent from the vocabulary". Measured: precision 0.5109, recall
-0.9925, F1 0.6746 — the prediction is confirmed quantitatively, and
-only 27 of 3,579 positive pair-times were missed. The search extracted
-what the vocabulary can express; the residual false positives (3,400)
-are the pre-identified inexpressible discriminators, not a search
-failure. Per section (a), this number must NOT be compared with the
+0.9925, F1 0.6746 — the aggregate operating point landed where the
+pre-declared ceiling mechanism predicted, and only 27 of 3,579
+positive pair-times were missed. That agreement is aggregate-level
+evidence only: whether the residual 3,400 false positives decompose
+into the two pre-identified inexpressible discriminators is measured
+component-wise by
+[`examples/maritime_woled/ceiling_probe.py`](../../../examples/maritime_woled/ceiling_probe.py)
+(its real-corpus JSON lands here after the probe's separate run), not
+asserted from the aggregate. Note also that the learned theory is NOT
+literally the definitional body: its micro-precision 0.5109 differs
+from the exact body's predicted 0.4924 — the per-branch decomposition
+plus the folds' mop-up clauses yield a measurably different operator,
+so the ceiling reading is about the mechanism, not about operator
+identity. Per section (a), this number must NOT be compared with the
 published dense-grid figure (0.98). The fold spread (0.469–0.993) is
 the declared pair-concentration effect: the fold holding the top pair
 (33.4% of positive mass, long clean encounters) scores 0.993, while
