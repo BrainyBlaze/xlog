@@ -4,6 +4,7 @@ use xlog_logic::ast::{ArithExpr, CompOp, CondExpr, FuncBody, FuncDef, FuncParam}
 use xlog_logic::expand::ExpansionContext;
 use xlog_logic::function::{FunctionError, FunctionRegistry};
 use xlog_logic::parse_program as parse;
+use xlog_logic::{expand_program_functions, Compiler};
 
 #[test]
 fn test_full_function_pipeline() {
@@ -32,6 +33,26 @@ fn test_full_function_pipeline() {
     // Verify quadruple is not recursive (calls double, not itself)
     assert!(!registry.is_recursive("double"));
     assert!(!registry.is_recursive("quadruple"));
+}
+
+#[test]
+fn test_predicate_function_expands_and_compiles() {
+    let src = r#"
+        pred parent(u32, u32).
+        pred answer(u32).
+
+        func get_parent(Child) = P :- parent(Child, P).
+
+        parent(1, 2).
+        answer(P) :- P is get_parent(1).
+        ?- answer(P).
+    "#;
+
+    let program = parse(src).unwrap();
+    let expanded = expand_program_functions(&program, 100).unwrap();
+    let mut compiler = Compiler::new();
+
+    compiler.compile_program(&expanded).unwrap();
 }
 
 #[test]
@@ -65,6 +86,36 @@ fn test_recursive_without_base_case_fails() {
         }
         e => panic!("Expected RecursionWithoutBaseCase, got {:?}", e),
     }
+}
+
+#[test]
+fn test_predicate_body_calls_participate_in_recursion_validation() {
+    let src = r#"
+        func repeat(Value) = Result :- Result is repeat(Value).
+    "#;
+
+    let program = parse(src).unwrap();
+    let result = FunctionRegistry::from_program(&program);
+
+    assert!(matches!(
+        result,
+        Err(FunctionError::RecursionWithoutBaseCase { name }) if name == "repeat"
+    ));
+}
+
+#[test]
+fn test_predicate_body_calls_participate_in_undefined_function_validation() {
+    let src = r#"
+        func lookup(Value) = Result :- Result is missing(Value).
+    "#;
+
+    let program = parse(src).unwrap();
+    let result = FunctionRegistry::from_program(&program);
+
+    assert!(matches!(
+        result,
+        Err(FunctionError::UndefinedFunction { name }) if name == "missing"
+    ));
 }
 
 #[test]

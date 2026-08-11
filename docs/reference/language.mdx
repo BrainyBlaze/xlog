@@ -1122,7 +1122,7 @@ uncertain. It must not create a runtime side engine.
 
 ## User-Defined Functions
 
-XLOG supports user-defined functions for reusable calculations.
+XLOG supports user-defined functions for reusable arithmetic and relational lookups.
 
 ### Basic Functions
 
@@ -1150,40 +1150,58 @@ func sign(X) =
     else 0.
 ```
 
-### Recursive Functions
+### Predicate-bodied functions
 
-Functions can be recursive but must have a base case:
+A predicate-bodied function derives its result through a relational body:
 
 ```xlog
-func factorial(N) = if N <= 1 then 1 else N * factorial(N - 1).
-
-func fib(N) = if N <= 1 then N else fib(N - 1) + fib(N - 2).
-
-func gcd(A, B) = if B = 0 then A else gcd(B, A % B).
+func get_parent(Child) = Parent :- parent(Child, Parent).
+answer(Parent) :- Parent is get_parent(1).
 ```
+
+Predicate-bodied calls are supported in `is` expressions in ordinary rules and
+constraints. The relational literals are inserted immediately before the source `is`
+binding. Multiple calls within one expression are inserted from left to right. Each
+invocation receives fresh names for its non-parameter result and body-local variables,
+and nested calls are expanded recursively up to `#pragma max_recursion_depth`.
+
+The relational body may match zero, one, or many rows. Each match contributes a caller
+row; predicate-bodied function syntax does not enforce a unique scalar result. Ordinary
+set semantics deduplicates identical projected caller tuples even when multiple body
+witnesses derive them.
+
+When a parameter is used as a relational term, its argument must be a variable or
+numeric literal. Materialize a compound arithmetic expression with an earlier `is`
+binding before passing it. Predicate-bodied calls in conditional result branches are
+rejected because their relational literals cannot be hoisted without changing guarded
+semantics.
+
+### Recursive definitions
+
+Expansion is eager across both conditional branches rather than data-dependent, so a
+cyclic call chain reaches the configured expansion-depth error even when a conditional
+branch looks like a base case. Function recursion is not a runtime looping construct.
 
 ### Using Functions in Rules
 
-Functions can be called in rule bodies using the `is` expression or direct call syntax:
+Functions are called on the right side of an `is` expression:
 
 ```xlog
-// Using 'is' expression
 pred doubled_value(u32, u32).
 doubled_value(X, Y) :- input(X, V), Y is double(V).
-
-// Direct call syntax (function result assigned to variable)
-pred result(u32, u32).
-result(X, Y) :- input(X, V), double(V) = Y.
 ```
 
 ### Type Annotations
 
-Optional type annotations for documentation and checking:
+Optional parameter and return annotations are parsed and preserved as function metadata:
 
 ```xlog
 func add(X: f64, Y: f64) -> f64 = X + Y.
 func celsius_to_fahrenheit(C: f64) -> f64 = C * 1.8 + 32.0.
 ```
+
+Executable types are inferred from predicate schemas and expressions. Function
+parameter and return annotations are not independently enforced as call signatures.
 
 ### Private Functions
 
@@ -2403,10 +2421,15 @@ evidence_stmt = { "evidence" ~ "(" ~ atom ~ "," ~ bool_lit ~ ")" ~ "." }
 pred_decl = { private_mod? ~ "pred" ~ ident ~ "(" ~ type_list? ~ ")" ~ "." }
 domain_decl = { "domain" ~ ident ~ ":" ~ type_spec ~ "." }
 
+private_mod = { "private" }
+type_annotation = { ":" ~ type_spec }
 func_param = { variable ~ type_annotation? }
 func_params = { func_param ~ ("," ~ func_param)* }
 return_type = { "->" ~ type_spec }
+cond_test = { arith_expr ~ cmp_op ~ arith_expr }
 cond_expr = { "if" ~ cond_test ~ "then" ~ func_body ~ "else" ~ func_body }
+func_body_arith = { cond_expr | arith_expr }
+func_body_pred = { variable ~ ":-" ~ body }
 func_body = { func_body_pred | func_body_arith }
 func_def = {
     private_mod? ~ "func" ~ ident ~ "(" ~ func_params? ~ ")" ~ return_type?

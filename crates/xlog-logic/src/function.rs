@@ -1,6 +1,6 @@
 //! Function registry and validation for user-defined functions.
 
-use crate::ast::{ArithExpr, CompOp, CondExpr, FuncBody, FuncDef, Program};
+use crate::ast::{ArithExpr, BodyLiteral, CompOp, CondExpr, FuncBody, FuncDef, Program};
 use std::collections::{HashMap, HashSet};
 use xlog_core::ScalarType;
 
@@ -34,6 +34,39 @@ pub enum FunctionError {
     NameConflict {
         /// Name reused by both a function and a predicate.
         name: String,
+    },
+    /// Function call supplied the wrong number of arguments.
+    ArityMismatch {
+        /// Function being called.
+        name: String,
+        /// Declared parameter count.
+        expected: usize,
+        /// Supplied argument count.
+        received: usize,
+    },
+    /// A predicate body was expanded without an ordinary rule or constraint body.
+    PredicateBodyRequiresRuleContext {
+        /// Predicate-bodied function being called.
+        name: String,
+    },
+    /// A non-term arithmetic argument cannot be represented in a relational term.
+    UnsupportedPredicateArgument {
+        /// Predicate-bodied function being called.
+        name: String,
+        /// Parameter used in a relational term.
+        parameter: String,
+    },
+    /// A predicate-bodied call appeared in a conditional result branch.
+    PredicateCallInConditionalBranch {
+        /// Predicate-bodied function being called.
+        name: String,
+    },
+    /// A non-variable argument was substituted into an `is` target.
+    InvalidPredicateBindingTarget {
+        /// Predicate-bodied function being called.
+        name: String,
+        /// Parameter used as the binding target.
+        parameter: String,
     },
 }
 
@@ -71,6 +104,33 @@ impl std::fmt::Display for FunctionError {
                     name
                 )
             }
+            FunctionError::ArityMismatch {
+                name,
+                expected,
+                received,
+            } => {
+                let argument = if *expected == 1 { "argument" } else { "arguments" };
+                write!(
+                    f,
+                    "error[E0508]: function `{name}` expects {expected} {argument} but received {received}"
+                )
+            }
+            FunctionError::PredicateBodyRequiresRuleContext { name } => write!(
+                f,
+                "error[E0509]: predicate-bodied function `{name}` requires a surrounding rule or constraint body"
+            ),
+            FunctionError::UnsupportedPredicateArgument { name, parameter } => write!(
+                f,
+                "error[E0510]: predicate-bodied function `{name}` cannot substitute an arithmetic expression for relational parameter `{parameter}`"
+            ),
+            FunctionError::PredicateCallInConditionalBranch { name } => write!(
+                f,
+                "error[E0511]: predicate-bodied function `{name}` cannot be expanded inside a conditional branch"
+            ),
+            FunctionError::InvalidPredicateBindingTarget { name, parameter } => write!(
+                f,
+                "error[E0512]: predicate-bodied function `{name}` cannot substitute a non-variable argument for binding target `{parameter}`"
+            ),
         }
     }
 }
@@ -202,8 +262,12 @@ impl FunctionRegistry {
                 Self::extract_calls_from_body(&cond.then_branch, calls);
                 Self::extract_calls_from_body(&cond.else_branch, calls);
             }
-            FuncBody::Predicate { .. } => {
-                // Predicate bodies don't contain function calls in expressions
+            FuncBody::Predicate { body, .. } => {
+                for literal in body {
+                    if let BodyLiteral::IsExpr(binding) = literal {
+                        Self::extract_calls_from_expr(&binding.expr, calls);
+                    }
+                }
             }
         }
     }
@@ -378,7 +442,13 @@ impl FunctionRegistry {
                 calls.extend(Self::find_recursive_calls_in_body(name, &cond.then_branch));
                 calls.extend(Self::find_recursive_calls_in_body(name, &cond.else_branch));
             }
-            FuncBody::Predicate { .. } => {}
+            FuncBody::Predicate { body, .. } => {
+                for literal in body {
+                    if let BodyLiteral::IsExpr(binding) = literal {
+                        Self::find_recursive_calls_in_expr(name, &binding.expr, &mut calls);
+                    }
+                }
+            }
         }
         calls
     }
