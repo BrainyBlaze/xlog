@@ -37,6 +37,7 @@ pub mod eir;
 pub mod epistemic;
 pub mod expand;
 pub mod function;
+pub mod ground_term_encoding;
 pub mod hypergraph;
 pub mod incremental_parse;
 pub mod list_normalize;

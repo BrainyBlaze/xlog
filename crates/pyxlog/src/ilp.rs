@@ -10,10 +10,11 @@ use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PySequence};
 
-use xlog_core::{symbol, RelId, ScalarType, Schema};
+use xlog_core::{RelId, ScalarType, Schema};
 use xlog_cuda::{CudaKernelProvider, JoinType};
 use xlog_ir::{ExecutionPlan, RirNode};
 use xlog_logic::ast::{Program as AstProgram, Term, TypeRef};
+use xlog_logic::ground_term_encoding::append_ground_term_bytes;
 use xlog_prob::exact::GpuConfig;
 use xlog_runtime::ilp_registry::IlpMask;
 use xlog_runtime::{read_device_row_count, Executor};
@@ -33,6 +34,94 @@ struct RelationExampleGroup {
     relation: String,
     query_buf: xlog_cuda::CudaBuffer,
     num_rows: u32,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use xlog_core::{symbol, XlogError};
+
+    fn loader_fixture(
+        source: &str,
+    ) -> xlog_core::Result<(
+        AstProgram,
+        Arc<CudaKernelProvider>,
+        Executor,
+        HashMap<String, Schema>,
+    )> {
+        let ast = xlog_logic::parse_program(source)?;
+        let mut compiler = xlog_logic::Compiler::new();
+        compiler.compile_program(&ast)?;
+        let schemas = compiler.schemas().clone();
+        let mut config = GpuConfig::default();
+        config.memory_bytes = 256 * 1024 * 1024;
+        let provider = Arc::new(provider_from_config(config)?);
+        let mut executor = Executor::new(provider.clone());
+        for (name, rel_id) in compiler.rel_ids() {
+            executor.register_relation(*rel_id, name);
+        }
+        for (name, schema) in &schemas {
+            executor
+                .store_mut()
+                .put(name, provider.create_empty_buffer(schema.clone())?);
+        }
+        Ok((ast, provider, executor, schemas))
+    }
+
+    #[test]
+    fn ilp_fact_loader_uses_shared_ground_term_encoding() -> xlog_core::Result<()> {
+        let (ast, provider, mut executor, schemas) = loader_fixture(
+            r#"
+                pred encoded(u32, u64, i32, i64, f32, f64, bool, bool, symbol, symbol).
+                encoded(42, 43, -44, -45, 1.5, 2.25, true, 0, "hello", world).
+            "#,
+        )?;
+        load_facts_into_store(&ast, &provider, &mut executor, &schemas)?;
+        let encoded = executor
+            .store()
+            .get("encoded")
+            .ok_or_else(|| XlogError::Execution("missing encoded fact buffer".to_string()))?;
+
+        assert_eq!(provider.download_column::<u32>(encoded, 0)?, vec![42]);
+        assert_eq!(provider.download_column::<u64>(encoded, 1)?, vec![43]);
+        assert_eq!(provider.download_column::<i32>(encoded, 2)?, vec![-44]);
+        assert_eq!(provider.download_column::<i64>(encoded, 3)?, vec![-45]);
+        assert_eq!(provider.download_column::<f32>(encoded, 4)?, vec![1.5]);
+        assert_eq!(provider.download_column::<f64>(encoded, 5)?, vec![2.25]);
+        assert_eq!(provider.download_column::<bool>(encoded, 6)?, vec![true]);
+        assert_eq!(provider.download_column::<bool>(encoded, 7)?, vec![false]);
+        assert_eq!(
+            provider.download_column::<u32>(encoded, 8)?,
+            vec![symbol::intern("hello")]
+        );
+        assert_eq!(
+            provider.download_column::<u32>(encoded, 9)?,
+            vec![symbol::intern("world")]
+        );
+
+        let (invalid_ast, invalid_provider, mut invalid_executor, invalid_schemas) =
+            loader_fixture(
+                r#"
+                    pred invalid(u32).
+                    invalid(X).
+                "#,
+            )?;
+        let error = load_facts_into_store(
+            &invalid_ast,
+            &invalid_provider,
+            &mut invalid_executor,
+            &invalid_schemas,
+        )
+        .expect_err("a variable in a fact must be rejected");
+        let XlogError::Execution(message) = error else {
+            panic!("fact encoding must remain an Execution error, got {error:?}");
+        };
+        assert_eq!(
+            message,
+            "Failed to encode fact for predicate invalid at column 0: Fact cannot contain variable X"
+        );
+        Ok(())
+    }
 }
 
 fn type_ref_name(typ: &TypeRef) -> String {
@@ -184,93 +273,6 @@ fn empty_tagged_credit_device_result(
         entry_j: export_device_u32_tensor_as_i32(provider, py, d_empty_j, 0)?,
         entry_k: export_device_u32_tensor_as_i32(provider, py, d_empty_k, 0)?,
     })
-}
-
-fn push_term_bytes(out: &mut Vec<u8>, term: &Term, typ: ScalarType) -> xlog_core::Result<()> {
-    use xlog_core::XlogError;
-    match (typ, term) {
-        (ScalarType::U32, Term::Integer(v)) => {
-            let v = u32::try_from(*v)
-                .map_err(|_| XlogError::Execution(format!("u32 out of range: {}", v)))?;
-            out.extend_from_slice(&v.to_le_bytes());
-        }
-        (ScalarType::U64, Term::Integer(v)) => {
-            let v = u64::try_from(*v)
-                .map_err(|_| XlogError::Execution(format!("u64 out of range: {}", v)))?;
-            out.extend_from_slice(&v.to_le_bytes());
-        }
-        (ScalarType::I32, Term::Integer(v)) => {
-            let v = i32::try_from(*v)
-                .map_err(|_| XlogError::Execution(format!("i32 out of range: {}", v)))?;
-            out.extend_from_slice(&v.to_le_bytes());
-        }
-        (ScalarType::I64, Term::Integer(v)) => {
-            out.extend_from_slice(&v.to_le_bytes());
-        }
-        (ScalarType::F32, Term::Float(v)) => {
-            out.extend_from_slice(&(*v as f32).to_le_bytes());
-        }
-        (ScalarType::F64, Term::Float(v)) => {
-            out.extend_from_slice(&v.to_le_bytes());
-        }
-        (ScalarType::F32, Term::Integer(v)) => {
-            out.extend_from_slice(&(*v as f32).to_le_bytes());
-        }
-        (ScalarType::F64, Term::Integer(v)) => {
-            out.extend_from_slice(&(*v as f64).to_le_bytes());
-        }
-        (ScalarType::Bool, Term::Integer(v)) => {
-            let b = match *v {
-                0 => 0u8,
-                1 => 1u8,
-                other => {
-                    return Err(XlogError::Execution(format!(
-                        "bool expects 0/1, got {}",
-                        other
-                    )));
-                }
-            };
-            out.push(b);
-        }
-        (ScalarType::Bool, Term::Symbol(id)) => {
-            let s = symbol::resolve(*id);
-            if s == "true" || s == "false" {
-                out.push(if s == "true" { 1u8 } else { 0u8 });
-            } else {
-                return Err(XlogError::Execution(format!(
-                    "Expected boolean symbol, got '{}'",
-                    s
-                )));
-            }
-        }
-        (ScalarType::Symbol, Term::String(s)) => {
-            out.extend_from_slice(&symbol::intern(s).to_le_bytes());
-        }
-        (ScalarType::Symbol, Term::Symbol(id)) => {
-            out.extend_from_slice(&id.to_le_bytes());
-        }
-        (_, Term::Variable(v)) => {
-            return Err(XlogError::Execution(format!(
-                "Fact cannot contain variable {}",
-                v
-            )));
-        }
-        (_, Term::Anonymous) => {
-            return Err(XlogError::Execution(
-                "Fact cannot contain anonymous wildcard '_'".into(),
-            ));
-        }
-        (_, Term::Aggregate(_)) => {
-            return Err(XlogError::Execution("Fact cannot contain aggregate".into()));
-        }
-        (expected, got) => {
-            return Err(XlogError::Execution(format!(
-                "Type mismatch: expected {:?}, got {:?}",
-                expected, got
-            )));
-        }
-    }
-    Ok(())
 }
 
 /// Pack `i64` fact values into typed byte columns according to schema.
@@ -425,7 +427,11 @@ pub(crate) fn load_facts_into_store(
                 let typ = schema.column_type(col_idx).ok_or_else(|| {
                     XlogError::Execution(format!("Missing type for col {}", col_idx))
                 })?;
-                push_term_bytes(&mut columns[col_idx], term, typ)?;
+                append_ground_term_bytes(&mut columns[col_idx], term, typ).map_err(|error| {
+                    xlog_core::XlogError::Execution(format!(
+                        "Failed to encode fact for predicate {pred} at column {col_idx}: {error}"
+                    ))
+                })?;
             }
         }
 

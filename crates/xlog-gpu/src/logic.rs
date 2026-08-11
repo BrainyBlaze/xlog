@@ -16,6 +16,7 @@ use xlog_logic::epistemic::{
     try_reduce_case_a_recursive_epistemic_program, try_reduce_prepared_recursive_epistemic_program,
     EpistemicSplitExecutablePlan, G91CompatibilityReduction,
 };
+use xlog_logic::ground_term_encoding::append_ground_term_bytes;
 use xlog_logic::{
     format_constraint_body, Atom, BodyLiteral, Compiler, Constraint, EpistemicLiteral, EpistemicOp,
     Program, Query, Rule, Term,
@@ -1805,7 +1806,11 @@ impl LogicProgram {
                     let typ = schema.column_type(col_idx).ok_or_else(|| {
                         XlogError::Execution(format!("Missing type for column {}", col_idx))
                     })?;
-                    push_term_bytes(&mut columns[col_idx], term, typ)?;
+                    append_ground_term_bytes(&mut columns[col_idx], term, typ).map_err(|error| {
+                        XlogError::Execution(format!(
+                            "Failed to encode fact for predicate {pred} at column {col_idx}: {error}"
+                        ))
+                    })?;
                 }
             }
 
@@ -3669,99 +3674,6 @@ fn ensure_schema_type_compatible(expected: &Schema, actual: &Schema) -> Result<(
     Ok(())
 }
 
-fn push_term_bytes(out: &mut Vec<u8>, term: &Term, typ: xlog_core::ScalarType) -> Result<()> {
-    use xlog_core::symbol;
-    use xlog_core::ScalarType;
-
-    match (typ, term) {
-        (ScalarType::U32, Term::Integer(v)) => {
-            let v = u32::try_from(*v)
-                .map_err(|_| XlogError::Execution(format!("u32 out of range: {}", v)))?;
-            out.extend_from_slice(&v.to_le_bytes());
-        }
-        (ScalarType::U64, Term::Integer(v)) => {
-            let v = u64::try_from(*v)
-                .map_err(|_| XlogError::Execution(format!("u64 out of range: {}", v)))?;
-            out.extend_from_slice(&v.to_le_bytes());
-        }
-        (ScalarType::I32, Term::Integer(v)) => {
-            let v = i32::try_from(*v)
-                .map_err(|_| XlogError::Execution(format!("i32 out of range: {}", v)))?;
-            out.extend_from_slice(&v.to_le_bytes());
-        }
-        (ScalarType::I64, Term::Integer(v)) => {
-            out.extend_from_slice(&v.to_le_bytes());
-        }
-        (ScalarType::F32, Term::Float(v)) => {
-            out.extend_from_slice(&(*v as f32).to_le_bytes());
-        }
-        (ScalarType::F64, Term::Float(v)) => {
-            out.extend_from_slice(&v.to_le_bytes());
-        }
-        (ScalarType::F32, Term::Integer(v)) => {
-            out.extend_from_slice(&(*v as f32).to_le_bytes());
-        }
-        (ScalarType::F64, Term::Integer(v)) => {
-            out.extend_from_slice(&(*v as f64).to_le_bytes());
-        }
-        (ScalarType::Bool, Term::Integer(v)) => {
-            let b = match *v {
-                0 => 0u8,
-                1 => 1u8,
-                other => {
-                    return Err(XlogError::Execution(format!(
-                        "bool expects 0/1, got {}",
-                        other
-                    )));
-                }
-            };
-            out.push(b);
-        }
-        (ScalarType::Bool, Term::Symbol(id)) => {
-            let s = symbol::resolve(*id);
-            if s == "true" || s == "false" {
-                out.push(if s == "true" { 1u8 } else { 0u8 });
-            } else {
-                return Err(XlogError::Execution(format!(
-                    "Expected boolean symbol 'true' or 'false', got '{}'",
-                    s
-                )));
-            }
-        }
-        (ScalarType::Symbol, Term::String(s)) => {
-            out.extend_from_slice(&symbol::intern(s).to_le_bytes());
-        }
-        (ScalarType::Symbol, Term::Symbol(id)) => {
-            // Symbol is already interned, just use the ID directly
-            out.extend_from_slice(&id.to_le_bytes());
-        }
-        (_, Term::Variable(v)) => {
-            return Err(XlogError::Execution(format!(
-                "Fact cannot contain variable {}",
-                v
-            )));
-        }
-        (_, Term::Anonymous) => {
-            return Err(XlogError::Execution(
-                "Fact cannot contain anonymous wildcard '_'".to_string(),
-            ));
-        }
-        (_, Term::Aggregate(_)) => {
-            return Err(XlogError::Execution(
-                "Fact cannot contain aggregate".to_string(),
-            ));
-        }
-        (expected, got) => {
-            return Err(XlogError::Execution(format!(
-                "Type mismatch in fact: expected {:?}, got {:?}",
-                expected, got
-            )));
-        }
-    }
-
-    Ok(())
-}
-
 fn query_output_vars(Query { atom }: &Query) -> Vec<String> {
     let mut out = Vec::new();
     let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
@@ -4117,7 +4029,70 @@ fn epistemic_plan_summary_json(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use xlog_core::ScalarType;
+    use std::sync::Arc;
+
+    use xlog_core::{symbol, MemoryBudget, ScalarType};
+    use xlog_cuda::{CudaDevice, GpuMemoryManager};
+
+    fn ground_term_encoding_test_provider() -> Result<Arc<CudaKernelProvider>> {
+        let device = Arc::new(CudaDevice::new(0)?);
+        let memory = Arc::new(GpuMemoryManager::new(
+            device.clone(),
+            MemoryBudget::with_limit(256 * 1024 * 1024),
+        ));
+        Ok(Arc::new(CudaKernelProvider::new(device, memory)?))
+    }
+
+    #[test]
+    fn program_fact_loader_uses_shared_ground_term_encoding() -> Result<()> {
+        let provider = ground_term_encoding_test_provider()?;
+        let program = LogicProgram::compile(
+            r#"
+                pred encoded(u32, u64, i32, i64, f32, f64, bool, bool, symbol, symbol).
+                encoded(42, 43, -44, -45, 1.5, 2.25, true, 0, "hello", world).
+            "#,
+        )?;
+        let store = program.create_relation_store(provider.clone())?;
+        let encoded = store
+            .get("encoded")
+            .ok_or_else(|| XlogError::Execution("missing encoded fact buffer".to_string()))?;
+
+        assert_eq!(provider.download_column::<u32>(encoded, 0)?, vec![42]);
+        assert_eq!(provider.download_column::<u64>(encoded, 1)?, vec![43]);
+        assert_eq!(provider.download_column::<i32>(encoded, 2)?, vec![-44]);
+        assert_eq!(provider.download_column::<i64>(encoded, 3)?, vec![-45]);
+        assert_eq!(provider.download_column::<f32>(encoded, 4)?, vec![1.5]);
+        assert_eq!(provider.download_column::<f64>(encoded, 5)?, vec![2.25]);
+        assert_eq!(provider.download_column::<bool>(encoded, 6)?, vec![true]);
+        assert_eq!(provider.download_column::<bool>(encoded, 7)?, vec![false]);
+        assert_eq!(
+            provider.download_column::<u32>(encoded, 8)?,
+            vec![symbol::intern("hello")]
+        );
+        assert_eq!(
+            provider.download_column::<u32>(encoded, 9)?,
+            vec![symbol::intern("world")]
+        );
+
+        let invalid = LogicProgram::compile(
+            r#"
+                pred invalid(u32).
+                invalid(X).
+            "#,
+        )?;
+        let error = match invalid.create_relation_store(provider) {
+            Ok(_) => panic!("a variable in a fact must be rejected"),
+            Err(error) => error,
+        };
+        let XlogError::Execution(message) = error else {
+            panic!("fact encoding must remain an Execution error, got {error:?}");
+        };
+        assert_eq!(
+            message,
+            "Failed to encode fact for predicate invalid at column 0: Fact cannot contain variable X"
+        );
+        Ok(())
+    }
 
     #[test]
     fn g91_compatibility_plan_records_gpu_upper_and_refinement_passes() -> Result<()> {
