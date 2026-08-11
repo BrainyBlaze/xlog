@@ -3,17 +3,23 @@ use std::collections::BTreeSet;
 use tempfile::TempDir;
 use xlog_cuda::CudaDevice;
 
-#[test]
-fn predicate_function_returns_every_relation_value_through_xlog_run() {
-    let _device = match CudaDevice::new(0) {
-        Ok(device) => device,
+fn cuda_device_or_skip() -> Option<CudaDevice> {
+    match CudaDevice::new(0) {
+        Ok(device) => Some(device),
         Err(error) if std::env::var("XLOG_REQUIRE_CUDA").as_deref() == Ok("1") => {
             panic!("XLOG_REQUIRE_CUDA=1 but CUDA initialization failed: {error}")
         }
         Err(error) => {
             eprintln!("Skipping test: CUDA runtime unavailable: {error}");
-            return;
+            None
         }
+    }
+}
+
+#[test]
+fn predicate_function_returns_every_relation_value_through_xlog_run() {
+    let Some(_device) = cuda_device_or_skip() else {
+        return;
     };
 
     let fixture = TempDir::new().expect("create fixture directory");
@@ -65,4 +71,87 @@ fn predicate_function_returns_every_relation_value_through_xlog_run() {
         BTreeSet::from([(1, 2), (1, 3), (2, 4)]),
         "{stdout}"
     );
+}
+
+#[test]
+fn violated_predicate_function_constraint_reports_the_authored_body() {
+    let Some(_device) = cuda_device_or_skip() else {
+        return;
+    };
+
+    let fixture = TempDir::new().expect("create fixture directory");
+    let program = fixture.path().join("predicate_function_constraint.xlog");
+    std::fs::write(
+        &program,
+        "pred parent(u32, u32).\n\
+         func get_parent(Child) = Parent :- parent(Child, Parent).\n\
+         parent(1, 2).\n\
+         :- parent(9, Missing).\n\
+         :- Parent is get_parent(1).\n",
+    )
+    .expect("write predicate-function constraint program");
+
+    let output = cargo_bin_cmd!("xlog")
+        .args([
+            "run",
+            program.to_str().expect("valid program path"),
+            "--memory-mb",
+            "1024",
+        ])
+        .output()
+        .expect("run predicate-function constraint program");
+
+    assert!(!output.status.success(), "violated constraint must fail");
+    let stderr = String::from_utf8(output.stderr).expect("utf8 stderr");
+    assert!(
+        stderr.contains("Constraint 1 violated: :- Parent is get_parent(1)."),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("__XLOG_FUNCTION"), "{stderr}");
+    assert!(!stderr.contains("Variable("), "{stderr}");
+}
+
+#[test]
+fn epistemic_predicate_function_constraint_reports_the_authored_body() {
+    let Some(_device) = cuda_device_or_skip() else {
+        return;
+    };
+
+    let fixture = TempDir::new().expect("create fixture directory");
+    let program = fixture
+        .path()
+        .join("epistemic_predicate_function_constraint.xlog");
+    std::fs::write(
+        &program,
+        "#pragma epistemic_mode = faeel\n\
+         pred parent(u32, u32).\n\
+         pred visible(u32, u32).\n\
+         func get_parent(Child) = Parent :- parent(Child, Parent).\n\
+         parent(1, 2).\n\
+         visible(Child, Parent) :-\n\
+           parent(Child, Parent), know parent(Child, Parent).\n\
+         :- parent(9, Missing).\n\
+         :- Parent is get_parent(1).\n\
+         ?- visible(Child, Parent).\n",
+    )
+    .expect("write epistemic predicate-function constraint program");
+
+    let output = cargo_bin_cmd!("xlog")
+        .args([
+            "run",
+            program.to_str().expect("valid program path"),
+            "--memory-mb",
+            "1024",
+        ])
+        .output()
+        .expect("run epistemic predicate-function constraint program");
+
+    assert!(!output.status.success(), "violated constraint must fail");
+    let stderr = String::from_utf8(output.stderr).expect("utf8 stderr");
+    assert!(
+        stderr.contains("Constraint 1 violated: :- Parent is get_parent(1)."),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("__XLOG_FUNCTION"), "{stderr}");
+    assert!(!stderr.contains("Variable("), "{stderr}");
 }
