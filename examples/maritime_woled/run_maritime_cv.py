@@ -110,7 +110,8 @@ EXPECTED_COUNTS = {
 
 # --smoke: the deterministic tiny subset (first N positive + first N
 # negative pairs in the converter's own sorted pair order) used to exercise
-# the full fold->gate->search->score->JSON cycle quickly in tests.
+# the full fold->gate->search->score->JSON cycle quickly in tests
+# (test_maritime_cv.py::test_main_end_to_end_smoke_on_synthetic_archives).
 SMOKE_N_POS = 6
 SMOKE_N_NEG = 6
 

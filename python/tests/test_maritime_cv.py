@@ -298,6 +298,98 @@ def test_verify_smoke_rejects_synthetic_archives(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# main(): end-to-end cycle on synthetic archives (deep-review finding #7) —
+# the verify-gate abort, the --skip-verify warning stamp, --smoke, and the
+# micro aggregation, all previously untested.
+# ---------------------------------------------------------------------------
+
+
+def _multi_pair_archives(tmp_path, n_pos=6, n_neg=6):
+    """Synthetic tar/zip with enough pairs for real fold assignment:
+    n_pos positive pairs (rendezVous + both vessels lowSpeed + proximity)
+    and n_neg negative pairs (proximity only)."""
+    hle_lines, lle_lines = [], []
+    for i in range(n_pos):
+        a, b = f"P{i:02d}a", f"P{i:02d}b"
+        hle_lines += [
+            f"rendezVous|{a}|{b}|true|1000|2000",
+            f"lowSpeed|{a}| |true|900|2100",
+            f"lowSpeed|{b}| |true|900|2100",
+        ]
+        lle_lines.append(f"proximity|2200|900|2200|true|{a}|{b}")
+    for j in range(n_neg):
+        a, b = f"N{j:02d}a", f"N{j:02d}b"
+        lle_lines.append(f"proximity|2200|900|2200|true|{a}|{b}")
+
+    tar_p = tmp_path / "multi.tar.gz"
+    data = "\n".join(hle_lines).encode()
+    with tarfile.open(tar_p, "w:gz") as tf:
+        info = tarfile.TarInfo("Maritime Composite Events/CEs/recognised_CEs.csv")
+        info.size = len(data)
+        tf.addfile(info, io.BytesIO(data))
+    zip_p = tmp_path / "multi.zip"
+    with zipfile.ZipFile(zip_p, "w") as z:
+        z.writestr("brest_critical.csv", "\n".join(lle_lines))
+    return str(tar_p), str(zip_p)
+
+
+def test_main_aborts_when_verify_gate_fails(tmp_path):
+    # Without --skip-verify the pre-run gate must reject synthetic archives
+    # (md5 pins cannot match) BEFORE any search runs: exit 2, no output JSON.
+    tar_p, zip_p = _multi_pair_archives(tmp_path)
+    out = tmp_path / "out.json"
+    rc = run_maritime_cv.main(["--tar", tar_p, "--zip", zip_p, "--out", str(out)])
+    assert rc == 2
+    assert not out.exists()
+
+
+def test_main_end_to_end_smoke_on_synthetic_archives(tmp_path):
+    pytest.importorskip("torch")
+    tar_p, zip_p = _multi_pair_archives(tmp_path)
+    out = tmp_path / "out.json"
+    rc = run_maritime_cv.main([
+        "--tar", tar_p, "--zip", zip_p, "--out", str(out),
+        "--smoke", "--skip-verify", "--folds", "3",
+    ])
+    assert rc == 0
+
+    result = json.loads(out.read_text(encoding="utf-8"))
+    # the skip stamp can never masquerade as a passed gate
+    assert result["verify_smoke"]["skipped"] is True
+    assert "warning" in result["verify_smoke"]
+    assert result["params"]["smoke"] is True
+    assert len(result["folds"]) == 3
+
+    # micro aggregation: summed per-fold counts ARE the micro counts, and
+    # micro P/R/F1 recompute from those sums
+    for key in ("tp", "fp", "fn"):
+        assert result["micro"]["point"][key] == sum(
+            f["scoring"]["point"][key] for f in result["folds"]
+        )
+    tp = result["micro"]["point"]["tp"]
+    fp = result["micro"]["point"]["fp"]
+    fn = result["micro"]["point"]["fn"]
+    precision = tp / (tp + fp) if tp + fp else 0.0
+    recall = tp / (tp + fn) if tp + fn else 0.0
+    f1 = (2 * precision * recall / (precision + recall)) if precision + recall else 0.0
+    assert result["micro"]["point"]["precision"] == pytest.approx(precision)
+    assert result["micro"]["point"]["recall"] == pytest.approx(recall)
+    assert result["micro"]["point"]["f1"] == pytest.approx(f1)
+
+    # interval micro aggregation sums the per-fold interval counts the same way
+    for key in ("n_matched_gold", "n_gold_intervals", "n_matched_pred", "n_pred_intervals"):
+        assert result["micro"]["interval"][key] == sum(
+            f["scoring"]["interval"][key] for f in result["folds"]
+        )
+
+    # per-fold spread block mirrors the fold records
+    fold_f1s = [f["scoring"]["point"]["f1"] for f in result["folds"]]
+    assert result["per_fold_point_f1"]["values"] == fold_f1s
+    assert result["per_fold_point_f1"]["min"] == min(fold_f1s)
+    assert result["per_fold_point_f1"]["max"] == max(fold_f1s)
+
+
+# ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 
