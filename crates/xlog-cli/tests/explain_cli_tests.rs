@@ -1,5 +1,15 @@
 use assert_cmd::cargo::cargo_bin_cmd;
 use tempfile::TempDir;
+use xlog_cuda::CudaDevice;
+
+const ARITHMETIC_UDF_PROGRAM: &str = r#"
+pred input(i64).
+pred answer(i64).
+func double(X) = X * 2.
+input(1).
+answer(Y) :- input(X), Y is double(X).
+?- answer(Y).
+"#;
 
 #[test]
 fn test_xlog_explain_magic_sets_text() {
@@ -41,6 +51,61 @@ reach(X, Z) :- reach(X, Y), edge(Y, Z).
     assert!(stdout.contains("status: applied"), "{stdout}");
     assert!(stdout.contains("reach/bf"), "{stdout}");
     assert!(stdout.contains("__xlog_magic_reach_bf"), "{stdout}");
+}
+
+#[test]
+fn test_xlog_run_and_explain_compile_the_same_arithmetic_udf() {
+    let fixture = TempDir::new().expect("create fixture directory");
+    let program = fixture.path().join("arithmetic_udf.xlog");
+    std::fs::write(&program, ARITHMETIC_UDF_PROGRAM).expect("write arithmetic UDF fixture");
+
+    let explain_output = cargo_bin_cmd!("xlog")
+        .args([
+            "explain",
+            "--format",
+            "json",
+            program.to_str().expect("valid program path"),
+        ])
+        .output()
+        .expect("run xlog explain json");
+    assert!(
+        explain_output.status.success(),
+        "xlog explain failed: {}",
+        String::from_utf8_lossy(&explain_output.stderr)
+    );
+    let explain_stdout = String::from_utf8(explain_output.stdout).expect("utf8 stdout");
+    let payload: serde_json::Value =
+        serde_json::from_str(&explain_stdout).expect("valid explain json");
+    assert_eq!(payload["rir"]["status"], "ok", "{explain_stdout}");
+    assert_eq!(payload["optimizer"]["status"], "ok", "{explain_stdout}");
+
+    let _device = match CudaDevice::new(0) {
+        Ok(device) => device,
+        Err(error) if std::env::var("XLOG_REQUIRE_CUDA").as_deref() == Ok("1") => {
+            panic!("XLOG_REQUIRE_CUDA=1 but CUDA initialization failed: {error}")
+        }
+        Err(error) => {
+            eprintln!("SKIPPED runtime parity: CUDA unavailable; explain parity passed: {error}");
+            return;
+        }
+    };
+
+    let run_output = cargo_bin_cmd!("xlog")
+        .args([
+            "run",
+            program.to_str().expect("valid program path"),
+            "--output",
+            "csv",
+        ])
+        .output()
+        .expect("run xlog arithmetic UDF");
+    assert!(
+        run_output.status.success(),
+        "xlog run failed: {}",
+        String::from_utf8_lossy(&run_output.stderr)
+    );
+    let run_stdout = String::from_utf8(run_output.stdout).expect("utf8 stdout");
+    assert_eq!(run_stdout, "__xlog_query_0\ncomputed_1\n2\n\n");
 }
 
 #[test]
@@ -99,6 +164,74 @@ query(out_degree(1, 2)).
         payload["epistemic"]["executable_plan"]["status"], "not_applicable",
         "{stdout}"
     );
+}
+
+#[test]
+fn test_xlog_explain_keeps_normalized_helpers_out_of_source_provenance() {
+    let fixture = TempDir::new().expect("create fixture directory");
+    let program = fixture.path().join("list_member.xlog");
+    std::fs::write(&program, "ok(X) :- member(X, [1, 2]).\n?- ok(X).\n")
+        .expect("write list member fixture");
+
+    let output = cargo_bin_cmd!("xlog")
+        .args([
+            "explain",
+            "--format",
+            "json",
+            program.to_str().expect("valid program path"),
+        ])
+        .output()
+        .expect("run xlog explain json");
+    assert!(
+        output.status.success(),
+        "xlog explain failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).expect("utf8 stdout");
+    let payload: serde_json::Value = serde_json::from_str(&stdout).expect("valid explain json");
+    assert_eq!(payload["ast"]["rules"], 1, "{stdout}");
+    let source_rules = payload["rule_provenance"]
+        .as_array()
+        .expect("rule provenance array")
+        .iter()
+        .filter(|entry| entry["source_kind"] == "source")
+        .collect::<Vec<_>>();
+    assert_eq!(source_rules.len(), 1, "{stdout}");
+    assert_eq!(source_rules[0]["head"], "ok(X)", "{stdout}");
+    assert!(!stdout.contains("__xlog_list_"), "{stdout}");
+}
+
+#[test]
+fn test_xlog_explain_reports_execution_normalization_errors_in_json() {
+    let fixture = TempDir::new().expect("create fixture directory");
+    let program = fixture.path().join("invalid_meta.xlog");
+    std::fs::write(&program, "bad(F, A) :- functor(T, F, A).\n?- bad(F, A).\n")
+        .expect("write invalid meta fixture");
+
+    let output = cargo_bin_cmd!("xlog")
+        .args([
+            "explain",
+            "--format",
+            "json",
+            program.to_str().expect("valid program path"),
+        ])
+        .output()
+        .expect("run xlog explain json");
+    assert!(
+        output.status.success(),
+        "xlog explain did not emit its diagnostic report: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).expect("utf8 stdout");
+    let payload: serde_json::Value = serde_json::from_str(&stdout).expect("valid explain json");
+    assert!(
+        payload["rir"]["status"]
+            .as_str()
+            .expect("RIR status string")
+            .contains("meta normalization error"),
+        "{stdout}"
+    );
+    assert_eq!(payload["optimizer"]["status"], "not_available", "{stdout}");
 }
 
 #[test]
@@ -253,6 +386,43 @@ gated(X) :- know know support(X).
             || stdout.contains("\"predicate\": \"support\""),
         "{stdout}"
     );
+}
+
+#[test]
+fn test_xlog_explain_json_compiles_an_imported_arithmetic_udf() {
+    let fixture = TempDir::new().expect("create fixture directory");
+    std::fs::write(
+        fixture.path().join("arithmetic.xlog"),
+        "pred input(i64).\nfunc double(X) = X * 2.\ninput(1).\n",
+    )
+    .expect("write arithmetic module");
+    let program = fixture.path().join("main.xlog");
+    std::fs::write(
+        &program,
+        "use arithmetic.\npred answer(i64).\nanswer(Y) :- input(X), Y is double(X).\n?- answer(Y).\n",
+    )
+    .expect("write main program");
+
+    let output = cargo_bin_cmd!("xlog")
+        .args([
+            "explain",
+            "--format",
+            "json",
+            "--module-path",
+            fixture.path().to_str().expect("valid module path"),
+            program.to_str().expect("valid program path"),
+        ])
+        .output()
+        .expect("run xlog explain with imported UDF");
+    assert!(
+        output.status.success(),
+        "xlog explain failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).expect("utf8 stdout");
+    let payload: serde_json::Value = serde_json::from_str(&stdout).expect("valid explain json");
+    assert_eq!(payload["rir"]["status"], "ok", "{stdout}");
+    assert_eq!(payload["optimizer"]["status"], "ok", "{stdout}");
 }
 
 #[test]

@@ -570,7 +570,7 @@ impl LogicProgram {
     pub fn compile(source: &str) -> Result<Self> {
         let program = xlog_logic::parse_program(source)?;
         let authored_constraints = program.constraints.clone();
-        let normalized = normalize_program(program)?;
+        let normalized = normalize_program_for_execution(program)?;
         Self::compile_normalized_program(normalized, authored_constraints)
     }
 
@@ -831,7 +831,7 @@ impl LogicProgram {
             .map_err(|e| XlogError::Compilation(format!("Module resolution failed: {}", e)))?;
 
         let authored_constraints = merged.constraints.clone();
-        let normalized = normalize_program(merged)?;
+        let normalized = normalize_program_for_execution(merged)?;
         Self::compile_normalized_program(normalized, authored_constraints)
     }
 
@@ -2441,7 +2441,12 @@ fn finalize_iterative_execution_stats(stats: &mut Option<ExecutionStats>, total_
 
 const DEFAULT_EPISTEMIC_MAX_MODELS_PER_REDUCTION: usize = 1024;
 
-fn normalize_program(program: Program) -> Result<Program> {
+/// Normalize a parsed program through the pre-compilation passes used by execution.
+///
+/// Callers must merge imports first. This expands user-defined functions with the
+/// entry program's recursion limit, normalizes meta and list builtins, and desugars
+/// shared-variable epistemic constraints.
+pub fn normalize_program_for_execution(program: Program) -> Result<Program> {
     let max_recursion = program.directives.max_recursion_depth.unwrap_or(100);
     let expanded = xlog_logic::expand_program_functions(&program, max_recursion)
         .map_err(|e| XlogError::Compilation(e.to_string()))?;

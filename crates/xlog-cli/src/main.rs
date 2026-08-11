@@ -9,7 +9,7 @@ use arrow::csv::WriterBuilder;
 use arrow::util::pretty::pretty_format_batches;
 use xlog_core::{symbol, MemoryBudget, Result, XlogError};
 use xlog_cuda::{CudaDevice, CudaKernelProvider, GpuMemoryManager};
-use xlog_gpu::logic::LogicProgram;
+use xlog_gpu::logic::{normalize_program_for_execution, LogicProgram};
 use xlog_ir::{EirBodyLiteral, EirTerm};
 use xlog_logic::ast::{BodyLiteral, CompOp, ProbEngine, Program, Term};
 use xlog_logic::compile::load_modules;
@@ -18,7 +18,7 @@ use xlog_logic::parse_program;
 use xlog_logic::IncrementalParseResult;
 use xlog_logic::{rewrite_magic_sets, MagicSetReport, MagicSetStatus, ParserSession};
 use xlog_logic::{stratify, Compiler};
-use xlog_logic::{QueryProofTrace, RuleProvenance};
+use xlog_logic::{QueryProofTrace, RuleProvenance, RuleSourceKind};
 #[cfg(feature = "host-io")]
 use xlog_prob::exact::ExactDdnnfProgram;
 #[cfg(feature = "host-io")]
@@ -310,31 +310,43 @@ fn build_explain_report(
     parsed: xlog_logic::IncrementalParseResult,
     source_path: Option<&Path>,
 ) -> Result<ExplainReport> {
-    let program = parsed.program;
-    let magic_rewrite = rewrite_magic_sets(&program)?;
-    let rule_provenance = xlog_logic::rule_provenance(&program, Some(&magic_rewrite.program));
-    let proof_traces = xlog_logic::query_proof_traces(&program, &rule_provenance);
+    let source_program = parsed.program;
+    let (analysis_program, normalization_error) =
+        match normalize_program_for_execution(source_program.clone()) {
+            Ok(program) => (program, None),
+            Err(error) => (source_program.clone(), Some(error)),
+        };
+    let magic_rewrite = rewrite_magic_sets(&analysis_program)?;
+    let mut rule_provenance = xlog_logic::rule_provenance(&source_program, None);
+    rule_provenance.extend(
+        xlog_logic::rule_provenance(&analysis_program, Some(&magic_rewrite.program))
+            .into_iter()
+            .filter(|entry| entry.source_kind == RuleSourceKind::Generated),
+    );
+    let proof_traces = xlog_logic::query_proof_traces(&source_program, &rule_provenance);
     let magic_sets = magic_rewrite.report;
-    let aggregate_lifting = explain_aggregate_lifting(&program)?;
-    let generated_rule_diagnostics = explain_generated_rule_diagnostics(&program, source_path);
-    let epistemic = explain_epistemic(&program);
-    let (stratification_status, stratification_count) = match stratify(&program) {
+    let aggregate_lifting = explain_aggregate_lifting(&source_program)?;
+    let generated_rule_diagnostics =
+        explain_generated_rule_diagnostics(&source_program, source_path);
+    let epistemic = explain_epistemic(&analysis_program);
+    let (stratification_status, stratification_count) = match stratify(&analysis_program) {
         Ok(strata) => ("ok".to_string(), strata.len()),
         Err(err) => (format!("error: {}", err), 0),
     };
     let mut compiler = Compiler::new();
-    let (rir_status, rir_sccs, optimizer_status, optimizer_memory_peak) =
-        match compiler.compile_program(&program) {
-            Ok(plan) => (
-                "ok".to_string(),
-                plan.sccs.len(),
-                "ok".to_string(),
-                plan.est_memory_peak,
-            ),
-            Err(err) => (format!("error: {}", err), 0, "not_available".to_string(), 0),
-        };
+    let (rir_status, rir_sccs, optimizer_status, optimizer_memory_peak) = match normalization_error
+        .map_or_else(|| compiler.compile_program(&analysis_program), Err)
+    {
+        Ok(plan) => (
+            "ok".to_string(),
+            plan.sccs.len(),
+            "ok".to_string(),
+            plan.est_memory_peak,
+        ),
+        Err(err) => (format!("error: {}", err), 0, "not_available".to_string(), 0),
+    };
     Ok(ExplainReport {
-        program,
+        program: source_program,
         parse_stats: parsed.stats,
         epistemic,
         magic_sets,

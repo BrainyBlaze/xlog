@@ -1,4 +1,5 @@
 use assert_cmd::Command;
+use tempfile::TempDir;
 
 #[test]
 fn test_xlog_repl_parses_multiline_session_without_gpu() {
@@ -58,4 +59,41 @@ reach(X, Y) :- edge(X, Y).
     let stdout = String::from_utf8(output.stdout).expect("utf8 stdout");
     assert!(stdout.contains("watch:"), "{stdout}");
     assert!(stdout.contains("magic_sets:"), "{stdout}");
+}
+
+#[test]
+fn test_xlog_watch_once_explain_compiles_arithmetic_udf() {
+    let fixture = TempDir::new().expect("create fixture directory");
+    let program = fixture.path().join("arithmetic_udf.xlog");
+    std::fs::write(
+        &program,
+        r#"
+pred input(i64).
+pred answer(i64).
+func double(X) = X * 2.
+input(1).
+answer(Y) :- input(X), Y is double(X).
+?- answer(Y).
+"#,
+    )
+    .expect("write watch UDF fixture");
+
+    let output = Command::cargo_bin("xlog")
+        .expect("xlog binary")
+        .args([
+            "watch",
+            "--once",
+            "--explain",
+            program.to_str().expect("valid path"),
+        ])
+        .output()
+        .expect("run xlog watch");
+    assert!(
+        output.status.success(),
+        "xlog watch failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).expect("utf8 stdout");
+    assert!(stdout.contains("rir:\n  status: ok"), "{stdout}");
+    assert!(stdout.contains("optimizer:\n  status: ok"), "{stdout}");
 }
