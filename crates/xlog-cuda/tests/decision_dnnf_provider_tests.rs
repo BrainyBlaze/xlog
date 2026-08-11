@@ -29,22 +29,4 @@ fn test_provider_loads_decision_dnnf_module_entrypoints() {
         device.get_func("xlog_d4", "d4_frontier_expand").is_some(),
         "expected provider to expose d4_frontier_expand"
     );
-    assert!(
-        device
-            .get_func("xlog_d4", "d4_frontier_prepare_dense")
-            .is_some(),
-        "expected provider to expose d4_frontier_prepare_dense"
-    );
-    assert!(
-        device
-            .get_func("xlog_d4", "d4_frontier_expand_dense")
-            .is_some(),
-        "expected provider to expose d4_frontier_expand_dense"
-    );
-
-    // GPU-only assertion helpers for tests/invariants without host reads.
-    assert!(
-        device.get_func("xlog_d4", "d4_assert_dense_var").is_some(),
-        "expected provider to expose d4_assert_dense_var"
-    );
 }

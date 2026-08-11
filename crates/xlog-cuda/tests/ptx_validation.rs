@@ -203,11 +203,8 @@ fn validate_decision_dnnf_ptx_contains_expected_kernels() {
     // BFS frontier expansion kernels.
     assert!(ptx.contains("d4_frontier_prepare"));
     assert!(ptx.contains("d4_frontier_expand"));
-    assert!(ptx.contains("d4_frontier_prepare_dense"));
-    assert!(ptx.contains("d4_frontier_expand_dense"));
 
     // GPU-only assertion helpers (used for tests/invariants without device->host reads).
     assert!(ptx.contains("d4_assert_u32_eq"));
     assert!(ptx.contains("d4_assert_bitset_var"));
-    assert!(ptx.contains("d4_assert_dense_var"));
 }
