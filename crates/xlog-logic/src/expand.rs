@@ -6,10 +6,102 @@ use crate::ast::{
 use crate::function::{is_builtin, FunctionError, FunctionRegistry};
 use std::collections::{HashMap, HashSet};
 
+const GENERATED_FUNCTION_VARIABLE_PREFIX: &str = "__XLOG_FUNCTION_";
+
+pub(crate) fn generated_function_variable_name(
+    function_name: &str,
+    source_name: &str,
+    counter: usize,
+) -> String {
+    format!(
+        "{GENERATED_FUNCTION_VARIABLE_PREFIX}{}_{}_{}",
+        function_name.to_ascii_uppercase(),
+        source_name,
+        counter
+    )
+}
+
+pub(crate) fn generated_function_variable_source<'a>(
+    generated_name: &'a str,
+    function_name: &str,
+) -> Option<&'a str> {
+    let prefix = format!(
+        "{GENERATED_FUNCTION_VARIABLE_PREFIX}{}_",
+        function_name.to_ascii_uppercase()
+    );
+    let (source_name, counter) = generated_name.strip_prefix(&prefix)?.rsplit_once('_')?;
+    (!source_name.is_empty()
+        && !counter.is_empty()
+        && counter.chars().all(|character| character.is_ascii_digit()))
+    .then_some(source_name)
+}
+
 #[derive(Debug)]
 struct ExpandedExpression {
     generated_literals: Vec<BodyLiteral>,
     expression: ArithExpr,
+}
+
+fn inline_trailing_predicate_result_binding(
+    mut literals: Vec<BodyLiteral>,
+    result: ArithExpr,
+) -> (Vec<BodyLiteral>, ArithExpr) {
+    let ArithExpr::Variable(result_name) = &result else {
+        return (literals, result);
+    };
+    let Some(BodyLiteral::IsExpr(binding)) = literals.last() else {
+        return (literals, result);
+    };
+    let ArithExpr::Variable(source_name) = &binding.expr else {
+        return (literals, result);
+    };
+    if !predicate_prefix_binds_variable(&literals[..literals.len() - 1], source_name)
+        || binding.target != *result_name
+        || binding
+            .expr
+            .variables()
+            .into_iter()
+            .any(|name| name == result_name)
+        || literals[..literals.len() - 1].iter().any(|literal| {
+            literal
+                .variables()
+                .into_iter()
+                .any(|name| name == result_name)
+        })
+    {
+        return (literals, result);
+    }
+
+    let Some(BodyLiteral::IsExpr(binding)) = literals.pop() else {
+        unreachable!("trailing predicate result binding was checked above")
+    };
+    (literals, binding.expr)
+}
+
+fn predicate_prefix_binds_variable(literals: &[BodyLiteral], wanted: &str) -> bool {
+    let mut bound = HashSet::new();
+    for literal in literals {
+        match literal {
+            BodyLiteral::Positive(atom) => {
+                bound.extend(atom.variables().into_iter().map(ToOwned::to_owned));
+            }
+            BodyLiteral::IsExpr(binding)
+                if binding
+                    .expr
+                    .variables()
+                    .into_iter()
+                    .all(|name| bound.contains(name)) =>
+            {
+                bound.insert(binding.target.clone());
+            }
+            BodyLiteral::Negated(_)
+            | BodyLiteral::Epistemic(_)
+            | BodyLiteral::Comparison(_)
+            | BodyLiteral::IsExpr(_)
+            | BodyLiteral::Univ(_) => {}
+        }
+    }
+    bound.contains(wanted)
 }
 
 impl ExpandedExpression {
@@ -156,12 +248,8 @@ impl<'a> ExpansionContext<'a> {
         used_variables: &mut HashSet<String>,
     ) -> String {
         loop {
-            let candidate = format!(
-                "__XLOG_FUNCTION_{}_{}_{}",
-                function_name.to_ascii_uppercase(),
-                source_name,
-                self.fresh_counter
-            );
+            let candidate =
+                generated_function_variable_name(function_name, source_name, self.fresh_counter);
             self.fresh_counter += 1;
             if used_variables.insert(candidate.clone()) {
                 return candidate;
@@ -816,6 +904,8 @@ impl<'a> ExpansionContext<'a> {
                         .into_iter()
                         .flatten()
                         .collect();
+                    let (generated_literals, result) =
+                        inline_trailing_predicate_result_binding(generated_literals, result);
                     values.push(ExpandedExpression {
                         generated_literals,
                         expression: result,
@@ -1459,5 +1549,20 @@ mod tests {
         assert!(!ctx.is_predicate_func("double"));
         assert!(ctx.is_predicate_func("get_parent"));
         assert!(!ctx.is_predicate_func("nonexistent"));
+    }
+
+    #[test]
+    fn generated_variable_names_round_trip_underscored_identifiers() {
+        let generated = generated_function_variable_name("get_parent", "Parent_Value", 42);
+        assert_eq!(
+            generated_function_variable_source(&generated, "get_parent"),
+            Some("Parent_Value")
+        );
+        assert_eq!(generated, "__XLOG_FUNCTION_GET_PARENT_Parent_Value_42");
+        assert!(generated_function_variable_source(
+            "__XLOG_FUNCTION_GET_PARENT_Parent_Value_not_a_counter",
+            "get_parent"
+        )
+        .is_none());
     }
 }
