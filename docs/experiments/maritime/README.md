@@ -256,6 +256,16 @@ pre-registered; extracted from the shipped artifact's
 | 3 | 0.4015 | 0.9815 | 0.5699 | 585 | 872 | 11 |
 | 4 | 0.4941 | 0.9916 | 0.6596 | 591 | 605 | 5 |
 
+Erratum (§(f) wording; the pre-registration text above is left
+unedited per its own append-only rule): §(f)'s five-fold rationale
+says "each fold must retain non-top positive pairs". Under the plain
+held-out reading that is contradicted by the shipped assignment —
+held-out fold 0 is exactly the top pair plus one negative pair, the
+concentration §(b) itself discloses. The sentence is accurate only in
+the training-complement reading: what greedy LPT actually guarantees
+is that every TRAINING set retains the non-top positive pairs. The
+§(f) formulation was imprecise.
+
 ### Reconstructed theory
 
 Sequential covering reconstructed the gold rule's definitional body on
