@@ -92,10 +92,6 @@ would not reach.
 | `E0511` | A predicate-bodied call appears in a conditional result branch, where inserting its relational body unconditionally would change guarded semantics. |
 | `E0512` | A non-variable argument would have to become the target of an `is` binding inside a predicate body. |
 
-`E0506` and `E0507` are reserved for an internal function-annotation type-inference
-module. That module is not wired into production compilation or the CLI, so these codes
-are not CLI behavior.
-
 Strict validation accepts a recursive SCC when at least one member has a conditional
 body. That is a structural validation result, not a runtime termination guarantee:
 function normalization expands both branches eagerly, and a used cycle can still reach

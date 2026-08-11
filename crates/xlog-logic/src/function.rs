@@ -2,7 +2,6 @@
 
 use crate::ast::{ArithExpr, BodyLiteral, CompOp, CondExpr, FuncBody, FuncDef, Program};
 use std::collections::{HashMap, HashSet};
-use xlog_core::ScalarType;
 
 /// Errors related to functions
 #[derive(Debug, Clone)]
@@ -137,49 +136,9 @@ impl std::fmt::Display for FunctionError {
 
 impl std::error::Error for FunctionError {}
 
-/// Type errors
-#[derive(Debug, Clone)]
-#[allow(dead_code)] // reserved API: type inference not yet wired to main pipeline
-pub(crate) enum TypeError {
-    /// Type mismatch
-    Mismatch {
-        expected: ScalarType,
-        found: ScalarType,
-        location: String,
-    },
-    /// Cannot infer type
-    CannotInfer { name: String },
-}
-
-impl std::fmt::Display for TypeError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            TypeError::Mismatch {
-                expected,
-                found,
-                location,
-            } => {
-                writeln!(f, "error[E0506]: type mismatch in {}", location)?;
-                write!(f, "  expected {:?}, found {:?}", expected, found)
-            }
-            TypeError::CannotInfer { name } => {
-                write!(f, "error[E0507]: cannot infer type for `{}`", name)
-            }
-        }
-    }
-}
-
-impl std::error::Error for TypeError {}
-
 impl From<FunctionError> for xlog_core::XlogError {
     fn from(e: FunctionError) -> Self {
         xlog_core::XlogError::Compilation(e.to_string())
-    }
-}
-
-impl From<TypeError> for xlog_core::XlogError {
-    fn from(e: TypeError) -> Self {
-        xlog_core::XlogError::Type(e.to_string())
     }
 }
 
@@ -551,16 +510,6 @@ mod tests {
         assert!(msg.contains("foo"), "Expected 'foo' in: {msg}");
     }
 
-    #[test]
-    fn test_type_error_into_xlog() {
-        let err = TypeError::CannotInfer {
-            name: "X".to_string(),
-        };
-        let xlog_err: XlogError = err.into();
-        let msg = xlog_err.to_string();
-        assert!(msg.contains("X"), "Expected 'X' in: {msg}");
-    }
-
     fn make_arith_func(name: &str, body: ArithExpr) -> FuncDef {
         FuncDef {
             name: name.to_string(),
@@ -728,25 +677,6 @@ mod tests {
         assert!(names.contains("f1"));
         assert!(names.contains("f2"));
         assert_eq!(names.len(), 2);
-    }
-
-    #[test]
-    fn test_type_error_display() {
-        let err = TypeError::Mismatch {
-            expected: ScalarType::I64,
-            found: ScalarType::F64,
-            location: "function f".to_string(),
-        };
-        let msg = err.to_string();
-        assert!(msg.contains("E0506"));
-        assert!(msg.contains("type mismatch"));
-
-        let err2 = TypeError::CannotInfer {
-            name: "X".to_string(),
-        };
-        let msg2 = err2.to_string();
-        assert!(msg2.contains("E0507"));
-        assert!(msg2.contains("cannot infer"));
     }
 
     #[test]
