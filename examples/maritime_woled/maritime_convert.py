@@ -51,6 +51,36 @@ timepoints are then cut into episodes wherever a gap exceeds
 `became_proximate`, `any_slow_ended`, and the EC targets below) to never
 compare across a long silence.
 
+RELATION VOCABULARY -- name -> EXACT HLE fluent set. The vocabulary is
+pre-registered by NAME, and several names under-describe their semantics;
+this table, not the names, is normative:
+
+    proximity             archive B `proximity` covers t (merged intervals)
+    far                   NOT proximity
+    both_lowspeed         `lowSpeed` covers t for BOTH vessels
+    both_stopped_far      `stopped=farFromPorts` covers t for BOTH vessels
+    both_low_or_stopped   (`lowSpeed` UNION `stopped=farFromPorts`) covers t
+                          for BOTH vessels
+    either_low_or_stopped same union, for AT LEAST ONE vessel
+    any_near_ports        (`withinArea`@nearPorts UNION `withinArea`@nearCoast)
+                          covers t for at least one vessel -- NOTE: includes
+                          nearCoast, NOT just ports, despite the name
+    both_open_sea         NOT any_near_ports -- i.e. `withinArea` of ANY OTHER
+                          area type (anchorages, fishing/protected areas, ...)
+                          still counts as OPEN SEA here; only
+                          nearPorts/nearCoast negate it
+    became_far            far at t AND proximity at the previous pt (same episode)
+    became_proximate      proximity at t AND NOT proximity at the previous pt
+    any_slow_ended        some (`lowSpeed` UNION `stopped=farFromPorts`)
+                          interval of either vessel ends in (prev_t, t]
+
+INVERTED INTERVALS (et <= st) are skipped WITH a count in both parsers
+(`bad_lines["inverted_interval"]` for archive A,
+`inverted_proximity_lines` for archive B; both surface in `convert`'s
+"counts" and hence in the verifier report): an empty half-open [st, et)
+can never cover a timepoint, but its boundaries would otherwise leak into
+pair timelines.
+
 EC TARGET SEMANTICS -- MIRRORS `examples/caviar_woled/caviar_continuous.py`
 EXACTLY, not the windowed `caviar_convert.derive_ec_targets`. That file's
 `derive_ec_targets_continuous(treat_first_observed_as_init=True)` plus
@@ -178,6 +208,13 @@ def parse_hle_archive(tar_path: str) -> dict:
             else:
                 entity = (arg1,)
 
+            if et <= st:
+                # Inverted/zero-length: half-open [st, et) is empty, so the
+                # row can never cover a timepoint, but its boundaries would
+                # still leak into pair timelines — skip WITH a count.
+                bad_lines["inverted_interval"] += 1
+                continue
+
             fluent_key = fluent if value == "true" else f"{fluent}={value}"
             intervals.setdefault(fluent_key, {}).setdefault(entity, []).append((st, et))
 
@@ -211,6 +248,7 @@ def parse_lle_proximity(zip_path: str) -> dict:
     wrong-field-count proximity rows are counted and skipped."""
     raw: dict[tuple[str, str], list[tuple[int, int]]] = {}
     bad_proximity_lines = 0
+    inverted_proximity_lines = 0
     n_lines = 0
     n_proximity_rows = 0
 
@@ -249,6 +287,12 @@ def parse_lle_proximity(zip_path: str) -> dict:
                         f"{st_s!r}/{et_s!r} in {member!r} (line {n_lines}): "
                         "refusing to skip a corrupt row"
                     ) from None
+                if et <= st:
+                    # Same skip-with-count rule as parse_hle_archive's
+                    # inverted_interval counter: an empty [st, et) covers
+                    # nothing but would leak boundary timepoints.
+                    inverted_proximity_lines += 1
+                    continue
                 pair = _canonical_pair(e1, e2)
                 raw.setdefault(pair, []).append((st, et))
 
@@ -259,6 +303,7 @@ def parse_lle_proximity(zip_path: str) -> dict:
     return {
         "proximity": proximity,
         "bad_proximity_lines": bad_proximity_lines,
+        "inverted_proximity_lines": inverted_proximity_lines,
         "n_lines": n_lines,
         "n_proximity_rows": n_proximity_rows,
     }
@@ -569,6 +614,7 @@ def convert(tar_path: str, zip_path: str) -> dict:
         "n_lines_lle": prox["n_lines"],
         "n_proximity_rows": prox["n_proximity_rows"],
         "bad_proximity_lines": prox["bad_proximity_lines"],
+        "inverted_proximity_lines": prox["inverted_proximity_lines"],
         "n_negative_pool": sel["n_negative_pool"],
         "n_positive_pairs": len(sel["positive_pairs"]),
         "n_negative_pairs": len(sel["negative_pairs"]),

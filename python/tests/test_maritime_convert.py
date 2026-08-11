@@ -410,6 +410,39 @@ def test_parser_fails_on_crlf_content(tmp_path):
         assert "CRLF" in str(e)
 
 
+def test_inverted_intervals_are_skipped_with_count(tmp_path):
+    # Deep-review finding: intervals with et <= st were accepted silently —
+    # they can never cover a timepoint (half-open [st, et) is empty), yet
+    # their boundaries leaked into pair timelines. They must be skipped AND
+    # counted, in both parsers.
+    hle_lines = "\n".join([
+        "rendezVous|A|B|true|1000|2000",
+        "lowSpeed|A| |true|2100|900",      # inverted: et < st
+        "lowSpeed|B| |true|1000|1000",     # zero-length: et == st
+    ])
+    tar_p = _tar_with_lines(tmp_path, hle_lines)
+    hle = parse_hle_archive(tar_p)
+    assert hle["bad_lines"]["inverted_interval"] == 2
+    assert (("A",) not in hle["intervals"].get("lowSpeed", {})), (
+        "inverted interval must not enter the interval lists"
+    )
+    assert (("B",) not in hle["intervals"].get("lowSpeed", {}))
+
+    zp = tmp_path / "inv.zip"
+    with zipfile.ZipFile(zp, "w") as z:
+        z.writestr(
+            "brest_critical.csv",
+            "proximity|9|900|2200|true|A|B\nproximity|9|2200|900|true|C|D",
+        )
+    lle = parse_lle_proximity(str(zp))
+    assert lle["inverted_proximity_lines"] == 1
+    assert ("C", "D") not in lle["proximity"]
+
+    conv = convert(tar_p, str(zp))
+    assert conv["counts"]["bad_lines_hle"]["inverted_interval"] == 2
+    assert conv["counts"]["inverted_proximity_lines"] == 1
+
+
 # ---------------------------------------------------------------------------
 # EC truth table, pinned cell by cell (deep-review finding #16(3)): all six
 # (position, holds, previously-held) combinations across two episodes.
