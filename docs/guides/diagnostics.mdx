@@ -93,7 +93,7 @@ These methods are available on `CompiledLogicProgram`, `LogicRelationSession`, a
 `QueryProofTrace` reconstructs the derivation behind a query answer.
 
 ```rust
-pub enum RuleSourceKind { Source, Generated, Imported, RuntimeInjected }
+pub enum RuleSourceKind { Source, Generated, Mined, Imported, RuntimeInjected }
 
 pub struct RuleProvenance {
     pub rule_id: String,
@@ -121,16 +121,28 @@ helper rules. Duplicate generated rules whose text matches a source rule are
 suppressed, so the report names only genuinely new rules.
 
 For generated-rule candidates, the JSON output adds a `generated_rule_diagnostics`
-block. Its `row_decisions` explain each row that was accepted or rejected. For each
+array. Its `row_decisions` explain each row that was accepted or rejected. The sibling
+`generated_rule_diagnostics_status` and `generated_rule_diagnostics_reason` fields
+state whether those decisions were available. Per-row analysis runs only after
+execution normalization and relational compilation succeed, while its rule and
+predicate names remain in source form. It reads deterministic extensional facts and
+discovered external JSON rows using each predicate's declared scalar types. For each
 row you get:
 
 - `failed_predicates` — the predicates that did not hold,
 - `threshold_comparisons` — the left/right values and pass/fail status of each
   threshold check,
-- `aggregate_inputs` — the inputs to any aggregate.
+- `aggregate_inputs` — the candidate source row used for the decision.
 
-That covers both accepted rows and rows rejected because a predicate or threshold
-check failed.
+The analyzer searches extensional matches lazily in source order. It stops at the
+first accepting witness and exhausts the available matches when a row is rejected, so
+intermediate search state stays bounded without changing the decision. The section is
+`not_available`, with an explanatory reason and an empty diagnostics array, when
+normalization or relational compilation fails, an external row is invalid, a required
+support predicate is derived by rules, or a candidate or support relation is
+probabilistic or supplied by an annotated disjunction. Those cases require execution
+or probabilistic semantics rather than deterministic fact matching and are never
+presented as completed row decisions.
 
 ## Induced-rule provenance
 
