@@ -254,6 +254,88 @@ def test_run_fold_recovers_planted_rule_and_scores_heldout():
 
 
 # ---------------------------------------------------------------------------
+# Pre-registered search constants pinned by VALUE (deep-review finding #15):
+# without these, a quantile off-by-one or a permutation-count edit passes
+# every other test. min_new_covered=2, seed=7 and folds=5 are CLI defaults,
+# value-pinned in test_parse_args_defaults_match_pre_registration.
+# ---------------------------------------------------------------------------
+
+
+def test_pre_registered_search_constants_are_value_pinned():
+    assert run_maritime_cv.INNER_FOLDS == 4
+    assert run_maritime_cv.MAX_LITERALS == 3
+    assert run_maritime_cv.MAX_CLAUSES == 4
+    assert run_maritime_cv.NULL_PERMUTATIONS == 1000
+    assert run_maritime_cv.NULL_QUANTILE == 0.95
+
+
+def test_null_gate_threshold_recomputed_independently():
+    # The old provenance check (min_fit == null_summary.threshold) is true
+    # for ANY threshold value — both keys copy the same variable. Here the
+    # expected threshold is recomputed by a deliberately naive reference:
+    # literally reshuffle the label vector per permutation, rescan every
+    # body and fold, take the pool max, then the linear-interpolation
+    # quantile — and compared against permutation_null_threshold's output
+    # on the same synthetic fixture.
+    pytest.importorskip("torch")
+    import torch
+    from relational_search import body_cover, enumerate_bodies, permutation_null_threshold
+    from pyxlog.ilp.neural_credit import holdout_fold_assignment
+
+    conv = _synthetic_converted()
+    relations = conv["relations"]
+    n = conv["counts"]["n_pt"]
+    facts = list(range(n))
+    labels = list(conv["is_positive"])
+    bodies, _skipped = enumerate_bodies(relations, max_literals=2)
+    folds, seed, n_perm, quantile, perm_seed = 3, 7, 60, 0.95, 11
+
+    out = permutation_null_threshold(
+        bodies, relations, facts, labels,
+        folds=folds, seed=seed, n_permutations=n_perm,
+        quantile=quantile, perm_seed=perm_seed,
+    )
+
+    fold_of = holdout_fold_assignment(n, folds, seed)
+    covers = {body: body_cover(body, relations) for body in bodies}
+    rng = torch.Generator().manual_seed(perm_seed)
+    samples = []
+    for _ in range(n_perm):
+        perm = torch.randperm(n, generator=rng).tolist()
+        permuted = [labels[perm[i]] for i in range(n)]
+        measurable = [
+            f for f in range(folds)
+            if any(permuted[i] for i in range(n) if fold_of[i] == f)
+        ]
+        if not measurable:
+            samples.append(0.0)
+            continue
+        pool_max = 0.0
+        for body in bodies:
+            total = 0.0
+            for f in measurable:
+                held = [i for i in range(n) if fold_of[i] == f]
+                tp = sum(1 for i in held if permuted[i] and facts[i] in covers[body])
+                fp = sum(1 for i in held if not permuted[i] and facts[i] in covers[body])
+                fn = sum(1 for i in held if permuted[i] and facts[i] not in covers[body])
+                precision = tp / (tp + fp) if tp + fp else 0.0
+                recall = tp / (tp + fn) if tp + fn else 0.0
+                total += (2 * precision * recall / (precision + recall)) if precision + recall else 0.0
+            pool_max = max(pool_max, total / len(measurable))
+        samples.append(pool_max)
+
+    samples.sort()
+    idx = quantile * (len(samples) - 1)
+    lo = int(idx)
+    hi = min(lo + 1, len(samples) - 1)
+    expected = samples[lo] + (samples[hi] - samples[lo]) * (idx - lo)
+
+    assert out["threshold"] == pytest.approx(expected)
+    assert out["pool_max_samples_summary"]["max"] == pytest.approx(samples[-1])
+    assert out["pool_max_samples_summary"]["min"] == pytest.approx(samples[0])
+
+
+# ---------------------------------------------------------------------------
 # Verifier smoke: pinned md5 + pinned counts + hard invariants
 # ---------------------------------------------------------------------------
 
