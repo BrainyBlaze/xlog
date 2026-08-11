@@ -178,7 +178,15 @@ a deviation, not silently amended.
 ## Results (pre-registered run of 2026-08-08)
 
 Shipped artifact: [`results/baseline_cv5/MARITIME_CV_BASELINE.json`](results/baseline_cv5/MARITIME_CV_BASELINE.json)
-(byte-exact runner output, md5 `1d3b7fcc56b0032083759100793b743e`).
+(md5 of the committed bytes: `ac650dc5eb293d1f9f55df4bec6ae1bf`).
+EOL provenance: the Windows runner wrote the file with CRLF line
+endings and the previous pin (`1d3b7fcc56b0032083759100793b743e`) was
+computed on that CRLF original; git normalized the line endings to LF
+at commit, so the committed bytes hash differently while the content is
+identical — the reviewer's diagnosis, confirmed by reconstructing the
+CRLF bytes and matching the old pin exactly. Shipped artifacts under
+`results/` are now marked `-text` in `.gitattributes`, so future
+artifacts are committed byte-exact and this failure class is closed.
 
 ### Provenance
 
