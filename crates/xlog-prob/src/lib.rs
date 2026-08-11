@@ -11,9 +11,6 @@ pub mod epistemic;
 pub mod epistemic_production;
 #[allow(missing_docs)]
 pub mod exact;
-#[allow(dead_code)] // reserved: GPU-only exact compilation path (not yet wired to main pipeline)
-#[allow(missing_docs)]
-pub mod exact_gpu;
 #[allow(missing_docs)]
 pub mod gpu;
 #[allow(missing_docs)]

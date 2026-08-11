@@ -1286,18 +1286,6 @@ impl GpuXgcf {
         &self.var_log_false
     }
 
-    /// Mutable access to device-resident log(true-weight) table.
-    #[allow(dead_code)] // reserved: individual mutable weight access for exact_gpu path
-    pub(crate) fn var_log_true_mut(&mut self) -> &mut TrackedCudaSlice<f64> {
-        &mut self.var_log_true
-    }
-
-    /// Mutable access to device-resident log(false-weight) table.
-    #[allow(dead_code)] // reserved: individual mutable weight access for exact_gpu path
-    pub(crate) fn var_log_false_mut(&mut self) -> &mut TrackedCudaSlice<f64> {
-        &mut self.var_log_false
-    }
-
     /// Mutable access to both log-weight tables (true/false) at once.
     ///
     /// This is useful when passing both slices to a single CUDA kernel launch, avoiding
