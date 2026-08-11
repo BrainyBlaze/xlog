@@ -18,6 +18,7 @@ pub mod exact_gpu;
 pub mod gpu;
 #[allow(missing_docs)]
 pub mod kc;
+mod logsumexp;
 #[allow(missing_docs)]
 pub mod mc;
 #[allow(missing_docs)]
