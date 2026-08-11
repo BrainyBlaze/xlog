@@ -2443,9 +2443,9 @@ const DEFAULT_EPISTEMIC_MAX_MODELS_PER_REDUCTION: usize = 1024;
 
 /// Normalize a parsed program through the pre-compilation passes used by execution.
 ///
-/// Callers must merge imports first. This expands user-defined functions with the
-/// entry program's recursion limit, normalizes meta and list builtins, and desugars
-/// shared-variable epistemic constraints.
+/// This helper does not resolve imports; import-aware callers merge them first. It
+/// expands user-defined functions with the entry program's recursion limit, normalizes
+/// meta and list builtins, and desugars shared-variable epistemic constraints.
 pub fn normalize_program_for_execution(program: Program) -> Result<Program> {
     let max_recursion = program.directives.max_recursion_depth.unwrap_or(100);
     let expanded = xlog_logic::expand_program_functions(&program, max_recursion)
