@@ -244,6 +244,18 @@ artifacts are committed byte-exact and this failure class is closed.
 | per-fold pointwise F1 | 0.9933 / 0.4690 / 0.6685 / 0.5699 / 0.6596 |
 | per-fold median (min–max) | **0.6596** (0.4690–0.9933) |
 
+Per-fold pointwise P/R/F1 (the full per-fold table section (b)
+pre-registered; extracted from the shipped artifact's
+`folds[].scoring.point`):
+
+| Fold | Precision | Recall | F1 | tp | fp | fn |
+|---|---|---|---|---|---|---|
+| 0 | 0.9868 | 1.0000 | 0.9933 | 1,194 | 16 | 0 |
+| 1 | 0.3081 | 0.9816 | 0.4690 | 586 | 1,316 | 11 |
+| 2 | 0.5021 | 1.0000 | 0.6685 | 596 | 591 | 0 |
+| 3 | 0.4015 | 0.9815 | 0.5699 | 585 | 872 | 11 |
+| 4 | 0.4941 | 0.9916 | 0.6596 | 591 | 605 | 5 |
+
 ### Reconstructed theory
 
 Sequential covering reconstructed the gold rule's definitional body on
