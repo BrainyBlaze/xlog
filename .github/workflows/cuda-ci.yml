@@ -145,8 +145,6 @@ jobs:
         run: cargo test -p xlog-cuda --test test_membership_mask --release -- --nocapture
       - name: Run host-IO probabilistic CLI tests
         run: cargo test --locked --release -p xlog-cli --features host-io --test prob_cli_tests -- --nocapture --test-threads=1
-      - name: Run predicate-function CLI tests
-        run: cargo test --locked --release -p xlog-cli --test predicate_function_cli_tests -- --nocapture --test-threads=1
       - name: Run accepted epistemic probability adapter tests
         run: cargo test --locked --release -p xlog-prob --features host-io --test epistemic_prob_gpu_accepted_evidence --test epistemic_prob_production_reuse -- --nocapture --test-threads=1
       - name: Smoke test import + evaluate

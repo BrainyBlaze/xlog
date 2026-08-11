@@ -66,41 +66,6 @@ modules are entry-file-scoped and are not merged; imported pragmas are ignored w
 `warning[W0510]`. See [Modules](/language-guide/modules) for examples and visibility
 rules.
 
-### Function expansion rejection
-
-User-defined functions expand after module resolution. Production compilation registers
-function declarations in source order, then expands only definitions reachable from calls
-in ordinary rules and constraints. An unused definition whose body is recursive, calls an
-undefined function, or shares a name with a predicate does not block that demand-driven
-path.
-
-Rust callers can instead request strict whole-program validation with
-`FunctionRegistry::from_program`. That surface inspects every definition in declaration
-order and every callee in source order, including definitions that production expansion
-would not reach.
-
-| Code | Trigger |
-|---|---|
-| `E0501` | More than one function declaration uses the same name. |
-| `E0502` | Strict `FunctionRegistry::from_program` validation finds a recursive strongly connected component (SCC) in which no function has a conditional body. The demand-driven production path does not perform this whole-program rejection; a reachable cycle is bounded by `E0504` instead. |
-| `E0503` | Production expansion reaches a call to an undefined non-built-in function, or strict registry validation finds such a call in any definition, including an unused one. |
-| `E0504` | Expansion tries to enter a user-defined call while already at the depth set by `#pragma max_recursion_depth`. Expansion visits both conditional branches, so a reachable recursive cycle can produce this diagnostic even when its source contains a conditional base form. |
-| `E0505` | Strict registry validation finds a name used by both a function and a predicate. This whole-program check is not part of demand-driven production expansion. |
-| `E0508` | A function call supplies a different number of arguments than its declaration. |
-| `E0509` | The Rust library's expression-only `ExpansionContext::expand_call` surface tries to expand a predicate-bodied function without an ordinary rule or constraint body to receive its relational literals. CLI compilation expands calls in their rule or constraint context, so it does not emit this code. |
-| `E0510` | An arithmetic expression other than a variable or numeric literal would have to occupy a term position in a predicate body. Bind the arithmetic result first and pass its variable. |
-| `E0511` | A predicate-bodied call appears in a conditional result branch, where inserting its relational body unconditionally would change guarded semantics. |
-| `E0512` | A non-variable argument would have to become the target of an `is` binding inside a predicate body. |
-
-`E0506` and `E0507` are reserved for an internal function-annotation type-inference
-module. That module is not wired into production compilation or the CLI, so these codes
-are not CLI behavior.
-
-Strict validation accepts a recursive SCC when at least one member has a conditional
-body. That is a structural validation result, not a runtime termination guarantee:
-function normalization expands both branches eagerly, and a used cycle can still reach
-`E0504` at the configured depth.
-
 ### Cross-predicate type mismatch
 
 Compilation rejects a rule whose variables draw incompatible column types from

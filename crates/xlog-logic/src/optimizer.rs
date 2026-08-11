@@ -1517,9 +1517,6 @@ pub mod helper_split_pass {
     where
         F: FnMut(Schema) -> (String, RelId),
     {
-        if !matches!(&rule.body, RirNode::MultiWayJoin { .. }) {
-            return None;
-        }
         let mut outer_body = rule.body.clone();
         let RirNode::MultiWayJoin {
             inputs, var_order, ..

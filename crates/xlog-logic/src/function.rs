@@ -1,6 +1,6 @@
 //! Function registry and validation for user-defined functions.
 
-use crate::ast::{ArithExpr, BodyLiteral, CompOp, CondExpr, FuncBody, FuncDef, Program};
+use crate::ast::{ArithExpr, CompOp, CondExpr, FuncBody, FuncDef, Program};
 use std::collections::{HashMap, HashSet};
 use xlog_core::ScalarType;
 
@@ -34,39 +34,6 @@ pub enum FunctionError {
     NameConflict {
         /// Name reused by both a function and a predicate.
         name: String,
-    },
-    /// Function call supplied the wrong number of arguments.
-    ArityMismatch {
-        /// Function being called.
-        name: String,
-        /// Declared parameter count.
-        expected: usize,
-        /// Supplied argument count.
-        received: usize,
-    },
-    /// A predicate body was expanded without an ordinary rule or constraint body.
-    PredicateBodyRequiresRuleContext {
-        /// Predicate-bodied function being called.
-        name: String,
-    },
-    /// A non-term arithmetic argument cannot occupy a predicate-body term position.
-    UnsupportedPredicateTermArgument {
-        /// Predicate-bodied function being called.
-        name: String,
-        /// Parameter used in a term position.
-        parameter: String,
-    },
-    /// A predicate-bodied call appeared in a conditional result branch.
-    PredicateCallInConditionalBranch {
-        /// Predicate-bodied function being called.
-        name: String,
-    },
-    /// A non-variable argument was substituted into an `is` target.
-    InvalidPredicateBindingTarget {
-        /// Predicate-bodied function being called.
-        name: String,
-        /// Parameter used as the binding target.
-        parameter: String,
     },
 }
 
@@ -104,33 +71,6 @@ impl std::fmt::Display for FunctionError {
                     name
                 )
             }
-            FunctionError::ArityMismatch {
-                name,
-                expected,
-                received,
-            } => {
-                let argument = if *expected == 1 { "argument" } else { "arguments" };
-                write!(
-                    f,
-                    "error[E0508]: function `{name}` expects {expected} {argument} but received {received}"
-                )
-            }
-            FunctionError::PredicateBodyRequiresRuleContext { name } => write!(
-                f,
-                "error[E0509]: predicate-bodied function `{name}` requires a surrounding rule or constraint body"
-            ),
-            FunctionError::UnsupportedPredicateTermArgument { name, parameter } => write!(
-                f,
-                "error[E0510]: predicate-bodied function `{name}` cannot use an arithmetic expression argument for parameter `{parameter}` in a term position"
-            ),
-            FunctionError::PredicateCallInConditionalBranch { name } => write!(
-                f,
-                "error[E0511]: predicate-bodied function `{name}` cannot be expanded inside a conditional branch"
-            ),
-            FunctionError::InvalidPredicateBindingTarget { name, parameter } => write!(
-                f,
-                "error[E0512]: predicate-bodied function `{name}` cannot substitute a non-variable argument for binding target `{parameter}`"
-            ),
         }
     }
 }
@@ -211,8 +151,7 @@ impl std::fmt::Display for RecursionWarning {
 #[derive(Debug, Default)]
 pub struct FunctionRegistry {
     functions: HashMap<String, FuncDef>,
-    call_graph: HashMap<String, Vec<String>>,
-    registration_order: Vec<String>,
+    call_graph: HashMap<String, HashSet<String>>,
 }
 
 impl FunctionRegistry {
@@ -230,11 +169,9 @@ impl FunctionRegistry {
         }
 
         // Build call graph
-        let name = func.name.clone();
         let calls = Self::extract_calls(&func.body);
-        self.call_graph.insert(name.clone(), calls);
-        self.functions.insert(name.clone(), func);
-        self.registration_order.push(name);
+        self.call_graph.insert(func.name.clone(), calls);
+        self.functions.insert(func.name.clone(), func);
 
         Ok(())
     }
@@ -250,13 +187,13 @@ impl FunctionRegistry {
     }
 
     /// Extract function calls from a body
-    fn extract_calls(body: &FuncBody) -> Vec<String> {
-        let mut calls = Vec::new();
+    fn extract_calls(body: &FuncBody) -> HashSet<String> {
+        let mut calls = HashSet::new();
         Self::extract_calls_from_body(body, &mut calls);
         calls
     }
 
-    fn extract_calls_from_body(body: &FuncBody, calls: &mut Vec<String>) {
+    fn extract_calls_from_body(body: &FuncBody, calls: &mut HashSet<String>) {
         match body {
             FuncBody::Arithmetic(expr) => Self::extract_calls_from_expr(expr, calls),
             FuncBody::Conditional(cond) => {
@@ -265,22 +202,16 @@ impl FunctionRegistry {
                 Self::extract_calls_from_body(&cond.then_branch, calls);
                 Self::extract_calls_from_body(&cond.else_branch, calls);
             }
-            FuncBody::Predicate { body, .. } => {
-                for literal in body {
-                    if let BodyLiteral::IsExpr(binding) = literal {
-                        Self::extract_calls_from_expr(&binding.expr, calls);
-                    }
-                }
+            FuncBody::Predicate { .. } => {
+                // Predicate bodies don't contain function calls in expressions
             }
         }
     }
 
-    fn extract_calls_from_expr(expr: &ArithExpr, calls: &mut Vec<String>) {
+    fn extract_calls_from_expr(expr: &ArithExpr, calls: &mut HashSet<String>) {
         match expr {
             ArithExpr::FuncCall { name, args } => {
-                if !calls.contains(name) {
-                    calls.push(name.clone());
-                }
+                calls.insert(name.clone());
                 for arg in args {
                     Self::extract_calls_from_expr(arg, calls);
                 }
@@ -317,44 +248,31 @@ impl FunctionRegistry {
 
     /// Check if a function is recursive (calls itself directly or indirectly)
     pub fn is_recursive(&self, name: &str) -> bool {
-        self.reaches(name, name)
+        self.reaches(name, name, &mut HashSet::new())
     }
 
-    fn reaches(&self, from: &str, target: &str) -> bool {
-        let mut pending = vec![from];
-        let mut visited = HashSet::new();
-        while let Some(current) = pending.pop() {
-            if !visited.insert(current) {
-                continue;
+    fn reaches(&self, from: &str, target: &str, visited: &mut HashSet<String>) -> bool {
+        if visited.contains(from) {
+            return false;
+        }
+        visited.insert(from.to_string());
+
+        if let Some(calls) = self.call_graph.get(from) {
+            if calls.contains(target) {
+                return true;
             }
-            let Some(calls) = self.call_graph.get(current) else {
-                continue;
-            };
             for call in calls {
-                if call == target {
+                if self.reaches(call, target, visited) {
                     return true;
-                }
-                if self.functions.contains_key(call) {
-                    pending.push(call);
                 }
             }
         }
         false
     }
 
-    fn recursive_component_has_base_case(&self, name: &str) -> bool {
-        self.registration_order.iter().any(|candidate| {
-            self.functions
-                .get(candidate)
-                .is_some_and(|func| Self::has_base_case(&func.body))
-                && self.reaches(name, candidate)
-                && self.reaches(candidate, name)
-        })
-    }
-
     /// Validate all functions
     pub fn validate(&self) -> Result<(), FunctionError> {
-        for name in &self.registration_order {
+        for (name, func) in &self.functions {
             // Check that all called functions exist
             if let Some(calls) = self.call_graph.get(name) {
                 for call in calls {
@@ -365,7 +283,7 @@ impl FunctionRegistry {
             }
 
             // Check recursive functions have base case
-            if self.is_recursive(name) && !self.recursive_component_has_base_case(name) {
+            if self.is_recursive(name) && !Self::has_base_case(&func.body) {
                 return Err(FunctionError::RecursionWithoutBaseCase { name: name.clone() });
             }
         }
@@ -398,9 +316,7 @@ impl FunctionRegistry {
 
     /// Get all registered functions
     pub fn functions(&self) -> impl Iterator<Item = &FuncDef> {
-        self.registration_order
-            .iter()
-            .filter_map(|name| self.functions.get(name))
+        self.functions.values()
     }
 
     /// Analyze recursive function for potential infinite recursion
@@ -462,13 +378,7 @@ impl FunctionRegistry {
                 calls.extend(Self::find_recursive_calls_in_body(name, &cond.then_branch));
                 calls.extend(Self::find_recursive_calls_in_body(name, &cond.else_branch));
             }
-            FuncBody::Predicate { body, .. } => {
-                for literal in body {
-                    if let BodyLiteral::IsExpr(binding) = literal {
-                        Self::find_recursive_calls_in_expr(name, &binding.expr, &mut calls);
-                    }
-                }
-            }
+            FuncBody::Predicate { .. } => {}
         }
         calls
     }
@@ -520,7 +430,7 @@ impl FunctionRegistry {
     pub fn validate_with_warnings(&self) -> (Result<(), FunctionError>, Vec<RecursionWarning>) {
         let mut warnings = Vec::new();
 
-        for func in self.functions() {
+        for func in self.functions.values() {
             if let Some(warning) = self.analyze_recursion(func) {
                 warnings.push(warning);
             }
@@ -531,7 +441,7 @@ impl FunctionRegistry {
 }
 
 /// Check if a name is a built-in function
-pub(crate) fn is_builtin(name: &str) -> bool {
+fn is_builtin(name: &str) -> bool {
     matches!(name, "abs" | "min" | "max" | "pow" | "cast")
 }
 

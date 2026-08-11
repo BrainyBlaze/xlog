@@ -62,8 +62,8 @@ pub use ast::{
 };
 pub use compile::{compile, Compiler};
 pub use diagnostics::{
-    build_query_proof_traces, build_rule_provenance, format_atom, format_constraint_body,
-    query_proof_traces, rule_provenance, QueryProofTrace, RuleProvenance, RuleSourceKind,
+    build_query_proof_traces, build_rule_provenance, format_atom, query_proof_traces,
+    rule_provenance, QueryProofTrace, RuleProvenance, RuleSourceKind,
 };
 pub use eir::build_eir;
 pub use expand::expand_program_functions;

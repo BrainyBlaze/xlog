@@ -2,7 +2,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use xlog_core::{symbol, ScalarType};
+use xlog_core::symbol;
 
 use crate::ast::{AggOp, ArithExpr, Atom, BodyLiteral, CompOp, Program, Rule, Term};
 
@@ -246,16 +246,6 @@ pub fn format_atom(atom: &Atom) -> String {
     format!("{}({})", atom.predicate, args)
 }
 
-/// Format an integrity-constraint body in source-like syntax.
-pub fn format_constraint_body(body: &[BodyLiteral]) -> String {
-    let literals = body
-        .iter()
-        .map(format_body_literal)
-        .collect::<Vec<_>>()
-        .join(", ");
-    format!(":- {}.", literals)
-}
-
 fn format_body_literal(lit: &BodyLiteral) -> String {
     match lit {
         BodyLiteral::Positive(atom) => format_atom(atom),
@@ -378,13 +368,7 @@ fn format_arith_expr(expr: &ArithExpr) -> String {
                 format_arith_expr(right)
             )
         }
-        ArithExpr::Cast(value, ty) => {
-            format!(
-                "cast({}, {})",
-                format_arith_expr(value),
-                format_scalar_type(*ty)
-            )
-        }
+        ArithExpr::Cast(value, ty) => format!("cast({}, {:?})", format_arith_expr(value), ty),
         ArithExpr::FuncCall { name, args } => {
             let values = args
                 .iter()
@@ -407,19 +391,6 @@ fn format_arith_expr(expr: &ArithExpr) -> String {
             format_arith_expr(then_expr),
             format_arith_expr(else_expr)
         ),
-    }
-}
-
-pub(crate) fn format_scalar_type(typ: ScalarType) -> &'static str {
-    match typ {
-        ScalarType::U32 => "u32",
-        ScalarType::U64 => "u64",
-        ScalarType::I32 => "i32",
-        ScalarType::I64 => "i64",
-        ScalarType::F32 => "f32",
-        ScalarType::F64 => "f64",
-        ScalarType::Bool => "bool",
-        ScalarType::Symbol => "symbol",
     }
 }
 
@@ -451,23 +422,4 @@ fn stable_hash(value: &str) -> String {
         hash = hash.wrapping_mul(0x100000001b3);
     }
     format!("{:016x}", hash)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::format_constraint_body;
-
-    #[test]
-    fn constraint_formatter_uses_source_syntax_for_function_expressions() {
-        let program = crate::parse_program(
-            "func get_parent(Child) = Parent :- parent(Child, Parent).\n\
-             :- Parent is cast(get_parent(1), u64).",
-        )
-        .expect("parse constraint");
-
-        assert_eq!(
-            format_constraint_body(&program.constraints[0].body),
-            ":- Parent is cast(get_parent(1), u64)."
-        );
-    }
 }

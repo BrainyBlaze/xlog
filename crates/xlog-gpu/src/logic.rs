@@ -3,7 +3,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 
-use xlog_core::{RelId, Result, ScalarType, Schema, XlogError};
+use xlog_core::{symbol, RelId, Result, ScalarType, Schema, XlogError};
 use xlog_cuda::{CudaBuffer, CudaKernelProvider};
 use xlog_ir::{EpistemicExecutablePlan, ExecutionPlan};
 use xlog_logic::ast::{PredColumn, PredDecl, TypeRef};
@@ -17,8 +17,7 @@ use xlog_logic::epistemic::{
     EpistemicSplitExecutablePlan, G91CompatibilityReduction,
 };
 use xlog_logic::{
-    format_constraint_body, Atom, BodyLiteral, Compiler, Constraint, EpistemicLiteral, EpistemicOp,
-    Program, Query, Rule, Term,
+    Atom, BodyLiteral, Compiler, EpistemicLiteral, EpistemicOp, Program, Query, Rule, Term,
 };
 use xlog_runtime::executor::JoinIndexCacheStats;
 use xlog_runtime::{
@@ -523,9 +522,6 @@ struct EpistemicProvenance {
 #[derive(Clone)]
 pub struct LogicProgram {
     program: Program,
-    /// Integrity constraints as authored before normalization, retained only when
-    /// their order matches the source-order constraint provenance used by the plan.
-    authored_constraints: Option<Vec<Constraint>>,
     plan: LogicExecutionPlan,
     schemas: HashMap<String, Schema>,
     rel_ids: HashMap<String, RelId>,
@@ -569,28 +565,18 @@ impl LogicProgram {
     /// Compile a Datalog source string into a GPU-executable program.
     pub fn compile(source: &str) -> Result<Self> {
         let program = xlog_logic::parse_program(source)?;
-        let authored_constraints = program.constraints.clone();
         let normalized = normalize_program(program)?;
-        Self::compile_normalized_program(normalized, authored_constraints)
+        Self::compile_normalized_program(normalized)
     }
 
-    fn compile_normalized_program(
-        normalized: Program,
-        authored_constraints: Vec<Constraint>,
-    ) -> Result<Self> {
-        // Function, meta-term, list, and shared-variable normalization preserve
-        // constraint count and source order. Keep the authored snapshot only
-        // while that one-to-one invariant remains observable.
-        let authored_constraints = (authored_constraints.len() == normalized.constraints.len())
-            .then_some(authored_constraints);
+    fn compile_normalized_program(normalized: Program) -> Result<Self> {
         if program_has_epistemic_literals(&normalized) {
-            return Self::compile_epistemic_program(normalized, authored_constraints);
+            return Self::compile_epistemic_program(normalized);
         }
         let mut compiler = Compiler::new();
         let plan = compiler.compile_program(&normalized)?;
         Ok(Self {
             program: normalized,
-            authored_constraints,
             plan: LogicExecutionPlan::Ordinary(Box::new(plan)),
             schemas: compiler.schemas().clone(),
             rel_ids: compiler.rel_ids().clone(),
@@ -598,10 +584,7 @@ impl LogicProgram {
         })
     }
 
-    fn compile_epistemic_program(
-        normalized: Program,
-        authored_constraints: Option<Vec<Constraint>>,
-    ) -> Result<Self> {
+    fn compile_epistemic_program(normalized: Program) -> Result<Self> {
         // Capture epistemic provenance up front: the source-EIR modal literals are
         // retained even when a Case-A recursive reduction lowers the program to an
         // Ordinary executable plan, so the epistemic plan dump can still emit a stable id
@@ -622,7 +605,6 @@ impl LogicProgram {
             let rel_ids = g91_plan_combined_rel_ids(&plan);
             return Ok(Self {
                 program: reduction.refinement_program().clone(),
-                authored_constraints,
                 plan: LogicExecutionPlan::EpistemicG91Compatibility(Box::new(plan)),
                 schemas,
                 rel_ids,
@@ -676,7 +658,6 @@ impl LogicProgram {
             let rel_ids = epistemic_relation_ids(&plan)?;
             return Ok(Self {
                 program: normalized,
-                authored_constraints,
                 plan,
                 schemas,
                 rel_ids,
@@ -703,7 +684,6 @@ impl LogicProgram {
                 let rel_ids = wfs_plan_combined_rel_ids(&wfs_plan);
                 return Ok(Self {
                     program: recursive_reduced,
-                    authored_constraints,
                     plan: LogicExecutionPlan::EpistemicWfsGpu(Box::new(wfs_plan)),
                     schemas,
                     rel_ids,
@@ -719,7 +699,6 @@ impl LogicProgram {
             let plan = compiler.compile_program(&recursive_reduced)?;
             return Ok(Self {
                 program: recursive_reduced,
-                authored_constraints,
                 plan: LogicExecutionPlan::Ordinary(Box::new(plan)),
                 schemas: compiler.schemas().clone(),
                 rel_ids: compiler.rel_ids().clone(),
@@ -756,9 +735,9 @@ impl LogicProgram {
             }
         };
         let rel_ids = epistemic_relation_ids(&plan)?;
+
         Ok(Self {
             program: normalized,
-            authored_constraints,
             plan,
             schemas,
             rel_ids,
@@ -830,9 +809,8 @@ impl LogicProgram {
             .merge_imports(program)
             .map_err(|e| XlogError::Compilation(format!("Module resolution failed: {}", e)))?;
 
-        let authored_constraints = merged.constraints.clone();
         let normalized = normalize_program(merged)?;
-        Self::compile_normalized_program(normalized, authored_constraints)
+        Self::compile_normalized_program(normalized)
     }
 
     /// Serialize the compiled epistemic execution plan to a JSON summary.
@@ -2341,19 +2319,14 @@ impl LogicProgram {
 
     fn constraint_violation_error(&self, constraint_index: usize) -> XlogError {
         let presentation_constraint = self
-            .authored_constraints
+            .epistemic_provenance
             .as_ref()
-            .and_then(|constraints| constraints.get(constraint_index))
-            .or_else(|| {
-                self.epistemic_provenance.as_ref().and_then(|provenance| {
-                    provenance.source_program.constraints.get(constraint_index)
-                })
-            })
+            .and_then(|provenance| provenance.source_program.constraints.get(constraint_index))
             .unwrap_or(&self.program.constraints[constraint_index]);
         XlogError::Execution(format!(
             "Constraint {} violated: {}",
             constraint_index,
-            format_constraint_body(&presentation_constraint.body)
+            format_constraint(&presentation_constraint.body)
         ))
     }
 
@@ -3766,6 +3739,81 @@ fn query_output_vars(Query { atom }: &Query) -> Vec<String> {
         }
     }
     out
+}
+
+fn format_term(term: &Term) -> String {
+    match term {
+        Term::Variable(v) => v.clone(),
+        Term::Anonymous => "_".to_string(),
+        Term::Integer(i) => i.to_string(),
+        Term::Float(f) => f.to_string(),
+        Term::String(s) => format!("{:?}", s),
+        Term::Symbol(id) => symbol::resolve(*id),
+        Term::List(items) => format!(
+            "[{}]",
+            items.iter().map(format_term).collect::<Vec<_>>().join(", ")
+        ),
+        Term::Cons { head, tail } => format!("[{} | {}]", format_term(head), format_term(tail)),
+        Term::Compound { functor, args } => format!(
+            "{}({})",
+            functor,
+            args.iter().map(format_term).collect::<Vec<_>>().join(", ")
+        ),
+        Term::PredRef(name) => format!("predref({})", name),
+        Term::Aggregate(a) => format!("{:?}({})", a.op, a.variable),
+    }
+}
+
+fn format_constraint(body: &[BodyLiteral]) -> String {
+    let lits = body
+        .iter()
+        .map(|lit| match lit {
+            BodyLiteral::Positive(a) => {
+                let args = a
+                    .terms
+                    .iter()
+                    .map(format_term)
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!("{}({})", a.predicate, args)
+            }
+            BodyLiteral::Negated(a) => {
+                let args = a
+                    .terms
+                    .iter()
+                    .map(format_term)
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!("not {}({})", a.predicate, args)
+            }
+            BodyLiteral::Epistemic(lit) => {
+                let args = lit
+                    .atom
+                    .terms
+                    .iter()
+                    .map(format_term)
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let op = match lit.op {
+                    xlog_logic::EpistemicOp::Know => "know",
+                    xlog_logic::EpistemicOp::Possible => "possible",
+                };
+                let prefix = if lit.negated { "not " } else { "" };
+                format!("{prefix}{op} {}({})", lit.atom.predicate, args)
+            }
+            BodyLiteral::Comparison(c) => format!("{:?} {:?} {:?}", c.left, c.op, c.right),
+            BodyLiteral::IsExpr(is) => format!("{} is {:?}", is.target, is.expr),
+            BodyLiteral::Univ(univ) => {
+                format!(
+                    "{} =.. {}",
+                    format_term(&univ.term),
+                    format_term(&univ.parts)
+                )
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(":- {}.", lits)
 }
 
 // --------------------------------------------------------------------------- //

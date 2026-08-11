@@ -4,7 +4,6 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 
 use crate::ast::Program;
-use crate::diagnostics::format_scalar_type;
 use xlog_core::ScalarType;
 
 /// A module path like ["utils", "math"]
@@ -385,9 +384,9 @@ impl std::fmt::Display for ModuleError {
                     writeln!(
                         f,
                         "  column {column} is inferred as {} by `{}` and {} by `{}` (both resolved as module `{}`)",
-                        format_scalar_type(*type1),
+                        scalar_type_name(*type1),
                         source1.display(),
-                        format_scalar_type(*type2),
+                        scalar_type_name(*type2),
                         source2.display(),
                         module_path_to_string(module1)
                     )?;
@@ -395,9 +394,9 @@ impl std::fmt::Display for ModuleError {
                     writeln!(
                         f,
                         "  column {column} is inferred as {} by module `{}` and {} by module `{}`",
-                        format_scalar_type(*type1),
+                        scalar_type_name(*type1),
                         module_path_to_string(module1),
-                        format_scalar_type(*type2),
+                        scalar_type_name(*type2),
                         module_path_to_string(module2)
                     )?;
                 }
@@ -429,6 +428,19 @@ impl std::fmt::Display for ModuleError {
                 write!(f, "error: parse error in {:?}: {}", path, message)
             }
         }
+    }
+}
+
+fn scalar_type_name(typ: ScalarType) -> &'static str {
+    match typ {
+        ScalarType::U32 => "u32",
+        ScalarType::U64 => "u64",
+        ScalarType::I32 => "i32",
+        ScalarType::I64 => "i64",
+        ScalarType::F32 => "f32",
+        ScalarType::F64 => "f64",
+        ScalarType::Bool => "bool",
+        ScalarType::Symbol => "symbol",
     }
 }
 

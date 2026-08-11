@@ -369,8 +369,7 @@ impl Compiler {
         optimizer.set_schemas(schemas_by_rel_id);
         for rules in &mut plan.rules_by_scc {
             for rule in rules {
-                let body = std::mem::replace(&mut rule.body, xlog_ir::RirNode::Unit);
-                rule.body = optimizer.optimize(body);
+                rule.body = optimizer.optimize(rule.body.clone());
             }
         }
 

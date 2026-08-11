@@ -40,43 +40,6 @@ enum UserFunctionTypeEvidence {
     Defer,
 }
 
-#[derive(Clone, Copy)]
-enum ArithmeticTypeOperation {
-    Standard,
-    Modulo,
-    MinMax,
-    Power,
-}
-
-enum ArithmeticTypeTask<'a> {
-    Visit(&'a ArithExpr),
-    FinishBinary(ArithmeticTypeOperation),
-    FinishAbs,
-    FinishCast(ScalarType),
-    FinishFunctionArguments(usize),
-    FinishConditional,
-}
-
-#[derive(Clone, Copy)]
-enum ArithmeticExpressionOperation {
-    Add,
-    Sub,
-    Mul,
-    Div,
-    Mod,
-    Min,
-    Max,
-    Pow,
-}
-
-enum ArithmeticExpressionTask<'a> {
-    Visit(&'a ArithExpr),
-    FinishBinary(ArithmeticExpressionOperation),
-    FinishAbs,
-    FinishCast(ScalarType),
-    FinishConditional(CompOp),
-}
-
 fn resolve_pred_column_type(
     predicate: &str,
     index: usize,
@@ -2412,6 +2375,22 @@ impl Lowerer {
     /// currently known. An explicit cast fixes its result type independently of
     /// the operand, which lets schema inference propagate the target type before
     /// all upstream variable schemas have converged.
+    fn infer_binary_arith_types<F>(
+        left: &ArithExpr,
+        right: &ArithExpr,
+        variable_type: &F,
+        user_functions: UserFunctionTypeEvidence,
+    ) -> Result<(Option<ScalarType>, Option<ScalarType>)>
+    where
+        F: Fn(&str) -> Option<ScalarType>,
+    {
+        let left_type =
+            Self::infer_arith_type_from_known_variables(left, variable_type, user_functions)?;
+        let right_type =
+            Self::infer_arith_type_from_known_variables(right, variable_type, user_functions)?;
+        Ok((left_type, right_type))
+    }
+
     fn infer_arith_type_from_known_variables<F>(
         expr: &ArithExpr,
         variable_type: &F,
@@ -2420,161 +2399,18 @@ impl Lowerer {
     where
         F: Fn(&str) -> Option<ScalarType>,
     {
-        let mut tasks = vec![ArithmeticTypeTask::Visit(expr)];
-        let mut values: Vec<Option<ScalarType>> = Vec::new();
-        while let Some(task) = tasks.pop() {
-            match task {
-                ArithmeticTypeTask::Visit(expression) => match expression {
-                    ArithExpr::Variable(name) => values.push(variable_type(name)),
-                    ArithExpr::Integer(_) => values.push(Some(ScalarType::I64)),
-                    ArithExpr::Float(_) => values.push(Some(ScalarType::F64)),
-                    ArithExpr::Add(left, right)
-                    | ArithExpr::Sub(left, right)
-                    | ArithExpr::Mul(left, right)
-                    | ArithExpr::Div(left, right) => {
-                        tasks.push(ArithmeticTypeTask::FinishBinary(
-                            ArithmeticTypeOperation::Standard,
-                        ));
-                        tasks.push(ArithmeticTypeTask::Visit(right));
-                        tasks.push(ArithmeticTypeTask::Visit(left));
-                    }
-                    ArithExpr::Mod(left, right) => {
-                        tasks.push(ArithmeticTypeTask::FinishBinary(
-                            ArithmeticTypeOperation::Modulo,
-                        ));
-                        tasks.push(ArithmeticTypeTask::Visit(right));
-                        tasks.push(ArithmeticTypeTask::Visit(left));
-                    }
-                    ArithExpr::Min(left, right) | ArithExpr::Max(left, right) => {
-                        tasks.push(ArithmeticTypeTask::FinishBinary(
-                            ArithmeticTypeOperation::MinMax,
-                        ));
-                        tasks.push(ArithmeticTypeTask::Visit(right));
-                        tasks.push(ArithmeticTypeTask::Visit(left));
-                    }
-                    ArithExpr::Pow(left, right) => {
-                        tasks.push(ArithmeticTypeTask::FinishBinary(
-                            ArithmeticTypeOperation::Power,
-                        ));
-                        tasks.push(ArithmeticTypeTask::Visit(right));
-                        tasks.push(ArithmeticTypeTask::Visit(left));
-                    }
-                    ArithExpr::Abs(inner) => {
-                        tasks.push(ArithmeticTypeTask::FinishAbs);
-                        tasks.push(ArithmeticTypeTask::Visit(inner));
-                    }
-                    ArithExpr::Cast(inner, target) => {
-                        tasks.push(ArithmeticTypeTask::FinishCast(*target));
-                        tasks.push(ArithmeticTypeTask::Visit(inner));
-                    }
-                    ArithExpr::FuncCall { name, args } => match user_functions {
-                        UserFunctionTypeEvidence::RequireExpansion => {
-                            return Err(XlogError::Compilation(format!(
-                                "User-defined function '{}' must be inlined before lowering",
-                                name
-                            )));
-                        }
-                        UserFunctionTypeEvidence::Defer => {
-                            tasks.push(ArithmeticTypeTask::FinishFunctionArguments(args.len()));
-                            tasks.extend(args.iter().rev().map(ArithmeticTypeTask::Visit));
-                        }
-                    },
-                    ArithExpr::Conditional {
-                        then_expr,
-                        else_expr,
-                        ..
-                    } => {
-                        tasks.push(ArithmeticTypeTask::FinishConditional);
-                        tasks.push(ArithmeticTypeTask::Visit(else_expr));
-                        tasks.push(ArithmeticTypeTask::Visit(then_expr));
-                    }
-                },
-                ArithmeticTypeTask::FinishBinary(operation) => {
-                    let right = values.pop().expect("right arithmetic type is inferred");
-                    let left = values.pop().expect("left arithmetic type is inferred");
-                    values.push(Self::finish_binary_arithmetic_type(operation, left, right)?);
-                }
-                ArithmeticTypeTask::FinishAbs => {
-                    let inferred = values.pop().expect("absolute-value type is inferred");
-                    if let Some(typ) = inferred {
-                        if !Self::is_numeric_type(&typ) {
-                            return Err(XlogError::Compilation(format!(
-                                "abs requires numeric type, got {:?}",
-                                typ
-                            )));
-                        }
-                    }
-                    values.push(inferred);
-                }
-                ArithmeticTypeTask::FinishCast(target) => {
-                    values.pop().expect("cast operand type is inferred");
-                    values.push(Some(target));
-                }
-                ArithmeticTypeTask::FinishFunctionArguments(argument_count) => {
-                    let start = values
-                        .len()
-                        .checked_sub(argument_count)
-                        .expect("function argument types are inferred");
-                    values.truncate(start);
-                    values.push(None);
-                }
-                ArithmeticTypeTask::FinishConditional => {
-                    let else_type = values.pop().expect("else branch type is inferred");
-                    let then_type = values.pop().expect("then branch type is inferred");
-                    let inferred = match (then_type, else_type) {
-                        (Some(then_type), Some(else_type)) => {
-                            if then_type != else_type {
-                                return Err(XlogError::Compilation(format!(
-                                    "Conditional branches have different types: {:?} vs {:?}",
-                                    then_type, else_type
-                                )));
-                            }
-                            Some(then_type)
-                        }
-                        _ => None,
-                    };
-                    values.push(inferred);
-                }
-            }
-        }
-        let inferred = values
-            .pop()
-            .expect("arithmetic expression produces one inferred type");
-        debug_assert!(values.is_empty());
-        Ok(inferred)
-    }
+        match expr {
+            ArithExpr::Variable(name) => Ok(variable_type(name)),
+            ArithExpr::Integer(_) => Ok(Some(ScalarType::I64)),
+            ArithExpr::Float(_) => Ok(Some(ScalarType::F64)),
 
-    fn finish_binary_arithmetic_type(
-        operation: ArithmeticTypeOperation,
-        left: Option<ScalarType>,
-        right: Option<ScalarType>,
-    ) -> Result<Option<ScalarType>> {
-        let matching_numeric_type = |context: &str| -> Result<Option<ScalarType>> {
-            if let (Some(left), Some(right)) = (left, right) {
-                if left != right {
-                    return Err(XlogError::Compilation(format!(
-                        "Type mismatch in {context}: {:?} vs {:?}",
-                        left, right
-                    )));
-                }
-            }
-            for typ in [left, right].into_iter().flatten() {
-                if !Self::is_numeric_type(&typ) {
-                    return Err(XlogError::Compilation(format!(
-                        "{context} requires numeric type, got {:?}",
-                        typ
-                    )));
-                }
-            }
-            Ok(match (left, right) {
-                (Some(left), Some(_)) => Some(left),
-                _ => None,
-            })
-        };
+            ArithExpr::Add(l, r)
+            | ArithExpr::Sub(l, r)
+            | ArithExpr::Mul(l, r)
+            | ArithExpr::Div(l, r) => {
+                let (lt, rt) = Self::infer_binary_arith_types(l, r, variable_type, user_functions)?;
 
-        match operation {
-            ArithmeticTypeOperation::Standard => {
-                if let (Some(left), Some(right)) = (left, right) {
+                if let (Some(left), Some(right)) = (lt, rt) {
                     if left != right {
                         return Err(XlogError::Compilation(format!(
                             "Type mismatch in arithmetic: {:?} vs {:?}. Use cast() for conversion.",
@@ -2582,7 +2418,8 @@ impl Lowerer {
                         )));
                     }
                 }
-                for typ in [left, right].into_iter().flatten() {
+
+                for typ in [lt, rt].into_iter().flatten() {
                     if !Self::is_numeric_type(&typ) {
                         return Err(XlogError::Compilation(format!(
                             "Arithmetic requires numeric type, got {:?}",
@@ -2590,13 +2427,17 @@ impl Lowerer {
                         )));
                     }
                 }
-                Ok(match (left, right) {
-                    (Some(left), Some(_)) => Some(left),
-                    _ => None,
-                })
+
+                let (Some(lt), Some(_)) = (lt, rt) else {
+                    return Ok(None);
+                };
+                Ok(Some(lt))
             }
-            ArithmeticTypeOperation::Modulo => {
-                if let (Some(left), Some(right)) = (left, right) {
+
+            ArithExpr::Mod(l, r) => {
+                let (lt, rt) = Self::infer_binary_arith_types(l, r, variable_type, user_functions)?;
+
+                if let (Some(left), Some(right)) = (lt, rt) {
                     if left != right {
                         return Err(XlogError::Compilation(format!(
                             "Type mismatch in mod: {:?} vs {:?}",
@@ -2604,7 +2445,8 @@ impl Lowerer {
                         )));
                     }
                 }
-                for typ in [left, right].into_iter().flatten() {
+
+                for typ in [lt, rt].into_iter().flatten() {
                     if matches!(typ, ScalarType::F32 | ScalarType::F64) {
                         return Err(XlogError::Compilation(
                             "Modulo (%) not supported for floating point".into(),
@@ -2617,30 +2459,133 @@ impl Lowerer {
                         )));
                     }
                 }
-                Ok(match (left, right) {
-                    (Some(left), Some(_)) => Some(left),
-                    _ => None,
-                })
+
+                let (Some(lt), Some(_)) = (lt, rt) else {
+                    return Ok(None);
+                };
+                Ok(Some(lt))
             }
-            ArithmeticTypeOperation::MinMax => matching_numeric_type("min/max"),
-            ArithmeticTypeOperation::Power => {
-                if let Some(invalid) = [left, right]
+
+            ArithExpr::Abs(inner) => {
+                let Some(t) = Self::infer_arith_type_from_known_variables(
+                    inner,
+                    variable_type,
+                    user_functions,
+                )?
+                else {
+                    return Ok(None);
+                };
+                if !Self::is_numeric_type(&t) {
+                    return Err(XlogError::Compilation(format!(
+                        "abs requires numeric type, got {:?}",
+                        t
+                    )));
+                }
+                Ok(Some(t))
+            }
+
+            ArithExpr::Min(l, r) | ArithExpr::Max(l, r) => {
+                let (lt, rt) = Self::infer_binary_arith_types(l, r, variable_type, user_functions)?;
+
+                if let (Some(left), Some(right)) = (lt, rt) {
+                    if left != right {
+                        return Err(XlogError::Compilation(format!(
+                            "Type mismatch in min/max: {:?} vs {:?}",
+                            left, right
+                        )));
+                    }
+                }
+
+                for typ in [lt, rt].into_iter().flatten() {
+                    if !Self::is_numeric_type(&typ) {
+                        return Err(XlogError::Compilation(format!(
+                            "min/max requires numeric type, got {:?}",
+                            typ
+                        )));
+                    }
+                }
+
+                let (Some(lt), Some(_)) = (lt, rt) else {
+                    return Ok(None);
+                };
+                Ok(Some(lt))
+            }
+
+            ArithExpr::Pow(base, exp) => {
+                let (base_t, exp_t) =
+                    Self::infer_binary_arith_types(base, exp, variable_type, user_functions)?;
+
+                if let Some(invalid) = [base_t, exp_t]
                     .into_iter()
                     .flatten()
                     .find(|typ| !Self::is_numeric_type(typ))
                 {
-                    let detail = match (left, right) {
-                        (Some(left), Some(right)) => format!("{:?} and {:?}", left, right),
+                    let detail = match (base_t, exp_t) {
+                        (Some(base_t), Some(exp_t)) => {
+                            format!("{:?} and {:?}", base_t, exp_t)
+                        }
                         _ => format!("{:?}", invalid),
                     };
                     return Err(XlogError::Compilation(format!(
                         "pow requires numeric operands, got {detail}"
                     )));
                 }
-                Ok((left.is_some() && right.is_some()).then_some(ScalarType::F64))
+
+                if base_t.is_none() || exp_t.is_none() {
+                    return Ok(None);
+                }
+                // pow always returns f64 (standard math behavior)
+                Ok(Some(ScalarType::F64))
+            }
+
+            ArithExpr::Cast(inner, target) => {
+                Self::infer_arith_type_from_known_variables(inner, variable_type, user_functions)?;
+                Ok(Some(*target))
+            }
+
+            ArithExpr::FuncCall { name, args } => match user_functions {
+                UserFunctionTypeEvidence::RequireExpansion => Err(XlogError::Compilation(format!(
+                    "User-defined function '{}' must be inlined before lowering",
+                    name
+                ))),
+                UserFunctionTypeEvidence::Defer => {
+                    for argument in args {
+                        Self::infer_arith_type_from_known_variables(
+                            argument,
+                            variable_type,
+                            user_functions,
+                        )?;
+                    }
+                    Ok(None)
+                }
+            },
+
+            ArithExpr::Conditional {
+                then_expr,
+                else_expr,
+                ..
+            } => {
+                // Both branches must have the same type
+                let (then_type, else_type) = Self::infer_binary_arith_types(
+                    then_expr,
+                    else_expr,
+                    variable_type,
+                    user_functions,
+                )?;
+                let (Some(then_type), Some(else_type)) = (then_type, else_type) else {
+                    return Ok(None);
+                };
+                if then_type != else_type {
+                    return Err(XlogError::Compilation(format!(
+                        "Conditional branches have different types: {:?} vs {:?}",
+                        then_type, else_type
+                    )));
+                }
+                Ok(Some(then_type))
             }
         }
     }
+
     /// Infer the result type of an arithmetic expression (strict same-type).
     pub(crate) fn infer_arith_type(
         &self,
@@ -2680,184 +2625,97 @@ impl Lowerer {
 
     /// Convert ArithExpr to IR Expr
     fn arith_to_expr(&self, arith: &ArithExpr, var_env: &VariableEnv) -> Result<Expr> {
-        let mut tasks = vec![ArithmeticExpressionTask::Visit(arith)];
-        let mut values = Vec::new();
-        while let Some(task) = tasks.pop() {
-            match task {
-                ArithmeticExpressionTask::Visit(expression) => match expression {
-                    ArithExpr::Variable(name) => {
-                        let column = var_env.get_column(name).ok_or_else(|| {
-                            XlogError::Compilation(format!(
-                                "Variable {} not bound before use in arithmetic",
-                                name
-                            ))
-                        })?;
-                        values.push(Expr::Column(column));
-                    }
-                    ArithExpr::Integer(value) => {
-                        values.push(Expr::Const(ConstValue::I64(*value)));
-                    }
-                    ArithExpr::Float(value) => {
-                        values.push(Expr::Const(ConstValue::F64(*value)));
-                    }
-                    ArithExpr::Add(left, right) => Self::schedule_arithmetic_expression(
-                        &mut tasks,
-                        left,
-                        right,
-                        ArithmeticExpressionOperation::Add,
-                    ),
-                    ArithExpr::Sub(left, right) => Self::schedule_arithmetic_expression(
-                        &mut tasks,
-                        left,
-                        right,
-                        ArithmeticExpressionOperation::Sub,
-                    ),
-                    ArithExpr::Mul(left, right) => Self::schedule_arithmetic_expression(
-                        &mut tasks,
-                        left,
-                        right,
-                        ArithmeticExpressionOperation::Mul,
-                    ),
-                    ArithExpr::Div(left, right) => Self::schedule_arithmetic_expression(
-                        &mut tasks,
-                        left,
-                        right,
-                        ArithmeticExpressionOperation::Div,
-                    ),
-                    ArithExpr::Mod(left, right) => Self::schedule_arithmetic_expression(
-                        &mut tasks,
-                        left,
-                        right,
-                        ArithmeticExpressionOperation::Mod,
-                    ),
-                    ArithExpr::Min(left, right) => Self::schedule_arithmetic_expression(
-                        &mut tasks,
-                        left,
-                        right,
-                        ArithmeticExpressionOperation::Min,
-                    ),
-                    ArithExpr::Max(left, right) => Self::schedule_arithmetic_expression(
-                        &mut tasks,
-                        left,
-                        right,
-                        ArithmeticExpressionOperation::Max,
-                    ),
-                    ArithExpr::Pow(left, right) => Self::schedule_arithmetic_expression(
-                        &mut tasks,
-                        left,
-                        right,
-                        ArithmeticExpressionOperation::Pow,
-                    ),
-                    ArithExpr::Abs(inner) => {
-                        tasks.push(ArithmeticExpressionTask::FinishAbs);
-                        tasks.push(ArithmeticExpressionTask::Visit(inner));
-                    }
-                    ArithExpr::Cast(inner, target) => {
-                        tasks.push(ArithmeticExpressionTask::FinishCast(*target));
-                        tasks.push(ArithmeticExpressionTask::Visit(inner));
-                    }
-                    ArithExpr::FuncCall { name, .. } => {
-                        return Err(XlogError::Compilation(format!(
-                            "User-defined function '{}' must be inlined before lowering",
-                            name
-                        )));
-                    }
-                    ArithExpr::Conditional {
-                        cond_left,
-                        cond_op,
-                        cond_right,
-                        then_expr,
-                        else_expr,
-                    } => {
-                        tasks.push(ArithmeticExpressionTask::FinishConditional(*cond_op));
-                        tasks.push(ArithmeticExpressionTask::Visit(else_expr));
-                        tasks.push(ArithmeticExpressionTask::Visit(then_expr));
-                        tasks.push(ArithmeticExpressionTask::Visit(cond_right));
-                        tasks.push(ArithmeticExpressionTask::Visit(cond_left));
-                    }
-                },
-                ArithmeticExpressionTask::FinishBinary(operation) => {
-                    let right = values
-                        .pop()
-                        .expect("right arithmetic expression is lowered");
-                    let left = values.pop().expect("left arithmetic expression is lowered");
-                    values.push(match operation {
-                        ArithmeticExpressionOperation::Add => {
-                            Expr::Add(Box::new(left), Box::new(right))
-                        }
-                        ArithmeticExpressionOperation::Sub => {
-                            Expr::Sub(Box::new(left), Box::new(right))
-                        }
-                        ArithmeticExpressionOperation::Mul => {
-                            Expr::Mul(Box::new(left), Box::new(right))
-                        }
-                        ArithmeticExpressionOperation::Div => {
-                            Expr::Div(Box::new(left), Box::new(right))
-                        }
-                        ArithmeticExpressionOperation::Mod => {
-                            Expr::Mod(Box::new(left), Box::new(right))
-                        }
-                        ArithmeticExpressionOperation::Min => {
-                            Expr::Min(Box::new(left), Box::new(right))
-                        }
-                        ArithmeticExpressionOperation::Max => {
-                            Expr::Max(Box::new(left), Box::new(right))
-                        }
-                        ArithmeticExpressionOperation::Pow => {
-                            Expr::Pow(Box::new(left), Box::new(right))
-                        }
-                    });
-                }
-                ArithmeticExpressionTask::FinishAbs => {
-                    let inner = values.pop().expect("absolute-value expression is lowered");
-                    values.push(Expr::Abs(Box::new(inner)));
-                }
-                ArithmeticExpressionTask::FinishCast(target) => {
-                    let inner = values.pop().expect("cast expression is lowered");
-                    values.push(Expr::Cast(Box::new(inner), target));
-                }
-                ArithmeticExpressionTask::FinishConditional(op) => {
-                    let else_expr = values.pop().expect("else expression is lowered");
-                    let then_expr = values.pop().expect("then expression is lowered");
-                    let right = values.pop().expect("condition right side is lowered");
-                    let left = values.pop().expect("condition left side is lowered");
-                    let op = match op {
-                        CompOp::Eq => CompareOp::Eq,
-                        CompOp::Ne => CompareOp::Ne,
-                        CompOp::Lt => CompareOp::Lt,
-                        CompOp::Le => CompareOp::Le,
-                        CompOp::Gt => CompareOp::Gt,
-                        CompOp::Ge => CompareOp::Ge,
-                    };
-                    values.push(Expr::Conditional {
-                        condition: Box::new(Expr::Compare {
-                            left: Box::new(left),
-                            op,
-                            right: Box::new(right),
-                        }),
-                        then_expr: Box::new(then_expr),
-                        else_expr: Box::new(else_expr),
-                    });
-                }
+        match arith {
+            ArithExpr::Variable(name) => {
+                let col = var_env.get_column(name).ok_or_else(|| {
+                    XlogError::Compilation(format!(
+                        "Variable {} not bound before use in arithmetic",
+                        name
+                    ))
+                })?;
+                Ok(Expr::Column(col))
+            }
+            ArithExpr::Integer(i) => Ok(Expr::Const(ConstValue::I64(*i))),
+            ArithExpr::Float(f) => Ok(Expr::Const(ConstValue::F64(*f))),
+
+            ArithExpr::Add(l, r) => Ok(Expr::Add(
+                Box::new(self.arith_to_expr(l, var_env)?),
+                Box::new(self.arith_to_expr(r, var_env)?),
+            )),
+            ArithExpr::Sub(l, r) => Ok(Expr::Sub(
+                Box::new(self.arith_to_expr(l, var_env)?),
+                Box::new(self.arith_to_expr(r, var_env)?),
+            )),
+            ArithExpr::Mul(l, r) => Ok(Expr::Mul(
+                Box::new(self.arith_to_expr(l, var_env)?),
+                Box::new(self.arith_to_expr(r, var_env)?),
+            )),
+            ArithExpr::Div(l, r) => Ok(Expr::Div(
+                Box::new(self.arith_to_expr(l, var_env)?),
+                Box::new(self.arith_to_expr(r, var_env)?),
+            )),
+            ArithExpr::Mod(l, r) => Ok(Expr::Mod(
+                Box::new(self.arith_to_expr(l, var_env)?),
+                Box::new(self.arith_to_expr(r, var_env)?),
+            )),
+
+            ArithExpr::Abs(e) => Ok(Expr::Abs(Box::new(self.arith_to_expr(e, var_env)?))),
+            ArithExpr::Min(l, r) => Ok(Expr::Min(
+                Box::new(self.arith_to_expr(l, var_env)?),
+                Box::new(self.arith_to_expr(r, var_env)?),
+            )),
+            ArithExpr::Max(l, r) => Ok(Expr::Max(
+                Box::new(self.arith_to_expr(l, var_env)?),
+                Box::new(self.arith_to_expr(r, var_env)?),
+            )),
+            ArithExpr::Pow(l, r) => Ok(Expr::Pow(
+                Box::new(self.arith_to_expr(l, var_env)?),
+                Box::new(self.arith_to_expr(r, var_env)?),
+            )),
+            ArithExpr::Cast(e, t) => Ok(Expr::Cast(Box::new(self.arith_to_expr(e, var_env)?), *t)),
+
+            ArithExpr::FuncCall { name, .. } => Err(XlogError::Compilation(format!(
+                "User-defined function '{}' must be inlined before lowering",
+                name
+            ))),
+
+            ArithExpr::Conditional {
+                cond_left,
+                cond_op,
+                cond_right,
+                then_expr,
+                else_expr,
+            } => {
+                // Convert AST comparison operator to IR comparison operator
+                let ir_cond_op = match cond_op {
+                    CompOp::Eq => CompareOp::Eq,
+                    CompOp::Ne => CompareOp::Ne,
+                    CompOp::Lt => CompareOp::Lt,
+                    CompOp::Le => CompareOp::Le,
+                    CompOp::Gt => CompareOp::Gt,
+                    CompOp::Ge => CompareOp::Ge,
+                };
+
+                // Build the condition as a Compare expression
+                let condition = Expr::Compare {
+                    left: Box::new(self.arith_to_expr(cond_left, var_env)?),
+                    op: ir_cond_op,
+                    right: Box::new(self.arith_to_expr(cond_right, var_env)?),
+                };
+
+                // Build then and else expressions (recursive for nested conditionals)
+                let then_ir = self.arith_to_expr(then_expr, var_env)?;
+                let else_ir = self.arith_to_expr(else_expr, var_env)?;
+
+                Ok(Expr::Conditional {
+                    condition: Box::new(condition),
+                    then_expr: Box::new(then_ir),
+                    else_expr: Box::new(else_ir),
+                })
             }
         }
-        let expression = values
-            .pop()
-            .expect("arithmetic expression produces one lowered value");
-        debug_assert!(values.is_empty());
-        Ok(expression)
     }
 
-    fn schedule_arithmetic_expression<'a>(
-        tasks: &mut Vec<ArithmeticExpressionTask<'a>>,
-        left: &'a ArithExpr,
-        right: &'a ArithExpr,
-        operation: ArithmeticExpressionOperation,
-    ) {
-        tasks.push(ArithmeticExpressionTask::FinishBinary(operation));
-        tasks.push(ArithmeticExpressionTask::Visit(right));
-        tasks.push(ArithmeticExpressionTask::Visit(left));
-    }
     /// Lower an is-expression to a Project node with computed column
     fn lower_is_expr(
         &mut self,
