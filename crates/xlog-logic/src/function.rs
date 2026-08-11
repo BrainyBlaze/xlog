@@ -49,11 +49,11 @@ pub enum FunctionError {
         /// Predicate-bodied function being called.
         name: String,
     },
-    /// A non-term arithmetic argument cannot be represented in a relational term.
-    UnsupportedPredicateArgument {
+    /// A non-term arithmetic argument cannot occupy a predicate-body term position.
+    UnsupportedPredicateTermArgument {
         /// Predicate-bodied function being called.
         name: String,
-        /// Parameter used in a relational term.
+        /// Parameter used in a term position.
         parameter: String,
     },
     /// A predicate-bodied call appeared in a conditional result branch.
@@ -119,9 +119,9 @@ impl std::fmt::Display for FunctionError {
                 f,
                 "error[E0509]: predicate-bodied function `{name}` requires a surrounding rule or constraint body"
             ),
-            FunctionError::UnsupportedPredicateArgument { name, parameter } => write!(
+            FunctionError::UnsupportedPredicateTermArgument { name, parameter } => write!(
                 f,
-                "error[E0510]: predicate-bodied function `{name}` cannot substitute an arithmetic expression for relational parameter `{parameter}`"
+                "error[E0510]: predicate-bodied function `{name}` cannot use an arithmetic expression argument for parameter `{parameter}` in a term position"
             ),
             FunctionError::PredicateCallInConditionalBranch { name } => write!(
                 f,

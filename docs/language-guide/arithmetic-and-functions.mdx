@@ -144,8 +144,8 @@ row, so function notation does not impose scalar uniqueness on a predicate-bodie
 Ordinary set semantics still deduplicates identical projected caller tuples when
 different body witnesses derive the same tuple.
 
-Arguments used as relational terms must already be variables or numeric literals. Bind
-a compound arithmetic argument first, then pass the bound variable:
+Arguments substituted into predicate-body term positions must already be variables or
+numeric literals. Bind a compound arithmetic argument first, then pass the bound variable:
 
 ```xlog
 shifted_parent(Start, Parent) :-

@@ -230,7 +230,7 @@ impl<'a> ExpansionContext<'a> {
                 Some(ArithExpr::Integer(value)) => Term::Integer(*value),
                 Some(ArithExpr::Float(value)) => Term::Float(*value),
                 Some(_) => {
-                    return Err(FunctionError::UnsupportedPredicateArgument {
+                    return Err(FunctionError::UnsupportedPredicateTermArgument {
                         name: function_name.to_string(),
                         parameter: name.clone(),
                     })

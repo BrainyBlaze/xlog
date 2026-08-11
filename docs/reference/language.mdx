@@ -1170,11 +1170,11 @@ row; predicate-bodied function syntax does not enforce a unique scalar result. O
 set semantics deduplicates identical projected caller tuples even when multiple body
 witnesses derive them.
 
-When a parameter is used as a relational term, its argument must be a variable or
-numeric literal. Materialize a compound arithmetic expression with an earlier `is`
-binding before passing it. Predicate-bodied calls in conditional result branches are
-rejected because their relational literals cannot be hoisted without changing guarded
-semantics.
+When a parameter is used in a predicate-body term position, its argument must be a
+variable or numeric literal. Materialize a compound arithmetic expression with an
+earlier `is` binding before passing it. Predicate-bodied calls in conditional result
+branches are rejected because their relational literals cannot be hoisted without
+changing guarded semantics.
 
 ### Recursive definitions
 

@@ -252,7 +252,7 @@ fn complex_predicate_argument_in_a_relational_term_is_rejected() {
 
     assert!(
         error.to_string().contains(
-            "cannot substitute an arithmetic expression for relational parameter `Child`"
+            "cannot use an arithmetic expression argument for parameter `Child` in a term position"
         ),
         "{error}"
     );
