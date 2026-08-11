@@ -1,47 +1,35 @@
-//! Probabilistic reasoning tier for XLOG (Phase 4).
+//! Probabilistic reasoning tier for XLOG.
 #![warn(missing_docs)]
 
 mod aggregates;
-#[allow(missing_docs)] // TODO(v0.6): document or make pub(crate)
+#[allow(missing_docs)]
 pub mod cnf;
-#[allow(missing_docs)] // TODO(v0.6): document or make pub(crate)
+#[allow(missing_docs)]
 pub mod compilation;
 mod decision_order;
 pub mod epistemic;
 pub mod epistemic_production;
-#[allow(missing_docs)] // TODO(v0.6): document or make pub(crate)
+#[allow(missing_docs)]
 pub mod exact;
 #[allow(dead_code)] // reserved: GPU-only exact compilation path (not yet wired to main pipeline)
 #[allow(missing_docs)]
 pub mod exact_gpu;
-#[allow(missing_docs)] // TODO(v0.6): document or make pub(crate)
+#[allow(missing_docs)]
 pub mod gpu;
-#[allow(missing_docs)] // TODO(v0.6): document or make pub(crate)
+#[allow(missing_docs)]
 pub mod kc;
-#[allow(missing_docs)] // TODO(v0.6): document or make pub(crate)
+#[allow(missing_docs)]
 pub mod mc;
-#[allow(missing_docs)] // TODO(v0.6): document or make pub(crate)
+#[allow(missing_docs)]
 pub mod neural_fast_path;
-#[allow(missing_docs)] // TODO(v0.6): document or make pub(crate)
+#[allow(missing_docs)]
 pub mod pir;
-#[allow(missing_docs)] // TODO(v0.6): document or make pub(crate)
+#[allow(missing_docs)]
 pub mod provenance;
-#[allow(missing_docs)] // TODO(v0.6): document or make pub(crate)
+#[allow(missing_docs)]
 pub mod wfs;
-#[allow(missing_docs)] // TODO(v0.6): document or make pub(crate)
+#[allow(missing_docs)]
 pub mod xgcf;
-
-#[cfg(all(test, feature = "host-io"))]
-pub(crate) mod test_gpu_lock {
-    use std::sync::{Mutex, MutexGuard, OnceLock};
-
-    pub(crate) fn lock() -> MutexGuard<'static, ()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-    }
-}
 
 pub use pir::{ChoiceVarId, LeafId, PirGraph, PirNode, PirNodeId};
 pub use provenance::{
@@ -62,3 +50,15 @@ pub use wfs::{
     evaluate_wfs_rules, evaluate_wfs_with_rules, TruthValue, WfsAtom, WfsConfig, WfsLiteral,
     WfsResult, WfsRule,
 };
+
+#[cfg(test)]
+pub(crate) mod test_gpu_lock {
+    use std::sync::{Mutex, MutexGuard, OnceLock};
+
+    pub(crate) fn lock() -> MutexGuard<'static, ()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+}

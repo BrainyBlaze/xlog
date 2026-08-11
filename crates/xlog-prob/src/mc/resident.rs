@@ -1114,3 +1114,23 @@ fn run_resident(
         no_host,
     })
 }
+
+#[cfg(all(test, feature = "host-io"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resident_plan_deduplicates_schema_equivalent_evidence() {
+        let program = McProgram::compile_source(
+            "0.5::gate(\"alpha\").\n\
+             evidence(gate(\"alpha\"), true).\n\
+             evidence(gate(alpha), true).\n\
+             query(gate(\"alpha\")).\n",
+        )
+        .expect("compile equivalent symbol evidence");
+        let plan = compile_resident_plan(&program).expect("compile resident plan");
+
+        assert_eq!(plan.ev_slot.len(), 1);
+        assert_eq!(plan.ev_expected, [1]);
+    }
+}

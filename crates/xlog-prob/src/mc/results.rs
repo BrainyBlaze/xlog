@@ -13,15 +13,19 @@ use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 
 #[cfg(feature = "host-io")]
-use xlog_core::{Result, XlogError};
+use xlog_core::{Result, Schema, XlogError};
 #[cfg(feature = "host-io")]
 use xlog_logic::ast::{AggExpr, AggOp, Atom, BodyLiteral, Rule, Term};
 #[cfg(feature = "host-io")]
 use xlog_logic::stratify::{build_dependency_graph, find_sccs_for_lowering};
+#[cfg(feature = "host-io")]
+use xlog_logic::ArithmeticValue;
 
 #[cfg(feature = "host-io")]
 use crate::provenance::{
-    eval_arith_expr, eval_comparison, unify_atom, value_from_term, GroundAtom, Value,
+    bind_arithmetic_result, canonicalize_public_values, eval_arithmetic_value,
+    eval_comparison_with_arithmetic_bindings, extend_arithmetic_bindings, unify_atom,
+    value_from_term, GroundAtom, Value,
 };
 
 #[cfg(feature = "host-io")]
@@ -173,6 +177,7 @@ pub(super) fn evaluate_program_inplace(
     scc_plans: &[SccPlan],
     store: &mut HashMap<String, Relation>,
     max_nonmonotone_iterations: usize,
+    schemas: &HashMap<String, Schema>,
 ) -> Result<EvalStats> {
     let mut stats = EvalStats::default();
 
@@ -180,7 +185,7 @@ pub(super) fn evaluate_program_inplace(
         match plan.kind {
             SccKind::MonotoneNonRecursive => {
                 for rule in &plan.rules {
-                    let derived = eval_rule(rule, store, &HashMap::new(), None)?;
+                    let derived = eval_rule(rule, store, &HashMap::new(), None, schemas)?;
                     let rel = store.entry(rule.head.predicate.clone()).or_default();
                     for tuple in derived {
                         rel.insert_tuple(tuple);
@@ -188,7 +193,7 @@ pub(super) fn evaluate_program_inplace(
                 }
             }
             SccKind::MonotoneRecursive => {
-                eval_monotone_recursive_scc(&plan.predicates, &plan.rules, store)?;
+                eval_monotone_recursive_scc(&plan.predicates, &plan.rules, store, schemas)?;
             }
             SccKind::NonMonotone => {
                 stats.nonmonotone_sccs += 1;
@@ -197,6 +202,7 @@ pub(super) fn evaluate_program_inplace(
                     &plan.rules,
                     store,
                     max_nonmonotone_iterations,
+                    schemas,
                 )?;
                 if cycle {
                     stats.nonmonotone_cycles += 1;
@@ -216,6 +222,7 @@ fn eval_monotone_recursive_scc(
     scc: &[String],
     rules: &[Rule],
     store: &mut HashMap<String, Relation>,
+    schemas: &HashMap<String, Schema>,
 ) -> Result<()> {
     const MAX_ITERS: usize = 1024;
 
@@ -229,7 +236,7 @@ fn eval_monotone_recursive_scc(
 
     let mut delta: HashMap<String, Relation> = HashMap::new();
     for rule in rules {
-        let derived = eval_rule(rule, store, &full, None)?;
+        let derived = eval_rule(rule, store, &full, None, schemas)?;
         if derived.is_empty() {
             continue;
         }
@@ -277,7 +284,8 @@ fn eval_monotone_recursive_scc(
 
             let mut derived_all: HashSet<Vec<Value>> = HashSet::new();
             for idx in body_indices {
-                let derived = eval_rule(rule, store, &full_prev, Some((idx, &delta_prev)))?;
+                let derived =
+                    eval_rule(rule, store, &full_prev, Some((idx, &delta_prev)), schemas)?;
                 derived_all.extend(derived);
             }
             if derived_all.is_empty() {
@@ -314,6 +322,7 @@ fn eval_nonmonotone_scc(
     rules: &[Rule],
     store: &mut HashMap<String, Relation>,
     max_iters: usize,
+    schemas: &HashMap<String, Schema>,
 ) -> Result<(bool, bool)> {
     let mut base: HashMap<String, Relation> = HashMap::new();
     for pred in scc {
@@ -332,7 +341,7 @@ fn eval_nonmonotone_scc(
         let mut next: HashMap<String, Relation> = base.clone();
 
         for rule in rules {
-            let derived = eval_rule(rule, store, &current, None)?;
+            let derived = eval_rule(rule, store, &current, None, schemas)?;
             let rel = next.entry(rule.head.predicate.clone()).or_default();
             for tuple in derived {
                 rel.insert_tuple(tuple);
@@ -436,28 +445,37 @@ fn eval_rule(
     global: &HashMap<String, Relation>,
     full_scc: &HashMap<String, Relation>,
     delta_scc: Option<(usize, &HashMap<String, Relation>)>,
+    schemas: &HashMap<String, Schema>,
 ) -> Result<Vec<Vec<Value>>> {
-    let mut states: Vec<HashMap<String, Value>> = vec![HashMap::new()];
+    let mut states: Vec<(HashMap<String, Value>, HashMap<String, ArithmeticValue>)> =
+        vec![(HashMap::new(), HashMap::new())];
 
     for (idx, lit) in rule.body.iter().enumerate() {
-        let mut next_states: Vec<HashMap<String, Value>> = Vec::new();
+        let mut next_states = Vec::new();
         match lit {
             BodyLiteral::Positive(atom) => {
                 let rel = select_relation(atom, idx, global, full_scc, delta_scc)?;
-                for binding in states {
+                for (binding, arithmetic_bindings) in states {
                     for tuple in &rel.tuples {
                         let mut binding2 = binding.clone();
                         if unify_atom(atom, tuple, &mut binding2)? {
-                            next_states.push(binding2);
+                            let mut arithmetic_bindings2 = arithmetic_bindings.clone();
+                            extend_arithmetic_bindings(
+                                atom,
+                                tuple,
+                                schemas,
+                                &mut arithmetic_bindings2,
+                            )?;
+                            next_states.push((binding2, arithmetic_bindings2));
                         }
                     }
                 }
             }
             BodyLiteral::Negated(atom) => {
                 let rel = select_relation(atom, idx, global, full_scc, delta_scc)?;
-                for binding in states {
+                for (binding, arithmetic_bindings) in states {
                     if negated_atom_holds(atom, rel, &binding)? {
-                        next_states.push(binding);
+                        next_states.push((binding, arithmetic_bindings));
                     }
                 }
             }
@@ -468,23 +486,29 @@ fn eval_rule(
                 });
             }
             BodyLiteral::Comparison(cmp) => {
-                for binding in states {
-                    if eval_comparison(cmp.op, &cmp.left, &cmp.right, &binding)? {
-                        next_states.push(binding);
+                for (binding, arithmetic_bindings) in states {
+                    if eval_comparison_with_arithmetic_bindings(
+                        cmp.op,
+                        &cmp.left,
+                        &cmp.right,
+                        &binding,
+                        &arithmetic_bindings,
+                    )? {
+                        next_states.push((binding, arithmetic_bindings));
                     }
                 }
             }
             BodyLiteral::IsExpr(is_expr) => {
-                for mut binding in states {
-                    if binding.contains_key(&is_expr.target) {
-                        return Err(XlogError::Compilation(format!(
-                            "Is-expression target {} is already bound",
-                            is_expr.target
-                        )));
-                    }
-                    let v = eval_arith_expr(&is_expr.expr, &binding)?;
-                    binding.insert(is_expr.target.clone(), v);
-                    next_states.push(binding);
+                for (mut binding, mut arithmetic_bindings) in states {
+                    let arithmetic_value =
+                        eval_arithmetic_value(&is_expr.expr, &binding, &arithmetic_bindings)?;
+                    bind_arithmetic_result(
+                        &is_expr.target,
+                        arithmetic_value,
+                        &mut binding,
+                        &mut arithmetic_bindings,
+                    )?;
+                    next_states.push((binding, arithmetic_bindings));
                 }
             }
             BodyLiteral::Univ(_) => {
@@ -500,16 +524,30 @@ fn eval_rule(
         }
     }
 
-    if rule.has_aggregation() {
-        eval_aggregate_head(&rule.head, states)
+    let states = states
+        .into_iter()
+        .map(|(binding, _)| binding)
+        .collect::<Vec<_>>();
+    let derived = if rule.has_aggregation() {
+        eval_aggregate_head(&rule.head, states)?
     } else {
         let mut out: HashSet<Vec<Value>> = HashSet::new();
         for binding in states {
             let head_tuple = materialize_head_non_aggregate(&rule.head, &binding)?;
             out.insert(head_tuple);
         }
-        Ok(out.into_iter().collect())
+        out.into_iter().collect()
+    };
+
+    let mut canonical = HashSet::new();
+    for tuple in derived {
+        canonical.insert(canonicalize_public_values(
+            &rule.head.predicate,
+            &tuple,
+            schemas,
+        )?);
     }
+    Ok(canonical.into_iter().collect())
 }
 
 #[cfg(feature = "host-io")]

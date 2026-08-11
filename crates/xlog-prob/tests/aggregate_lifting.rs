@@ -90,18 +90,22 @@ query(out_degree(1, 8)).
 #[test]
 fn numeric_operators_report_factorized_fold_with_parity() {
     let source = r#"
+pred obs(u64, u64).
+pred floating_obs(u64, f64).
 0.5::obs(1, 2).
 0.25::obs(1, 3).
+0.5::floating_obs(1, 2.0).
+0.25::floating_obs(1, 3.0).
 score_sum(X, sum(Y)) :- obs(X, Y).
 score_min(X, min(Y)) :- obs(X, Y).
 score_max(X, max(Y)) :- obs(X, Y).
-score_lse(X, logsumexp(Y)) :- obs(X, Y).
+score_lse(X, logsumexp(Y)) :- floating_obs(X, Y).
 query(score_sum(1, 5)).
 query(score_min(1, 2)).
 query(score_max(1, 3)).
 "#;
 
-    let prov = extract_from_source(source).expect("numeric aggregate fallback extraction");
+    let prov = extract_from_source(source).expect("numeric aggregate factorized extraction");
     for (predicate, operator) in [
         ("score_sum", "sum"),
         ("score_min", "min"),

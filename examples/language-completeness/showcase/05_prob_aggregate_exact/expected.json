@@ -15,7 +15,7 @@
       "rir_status": "ok",
       "prob_engine": "exact_ddnnf",
       "aggregate_lifting_count_min": 5,
-      "aggregate_lifting_statuses": ["fired", "fallback_exact_enumeration"]
+      "aggregate_lifting_statuses": ["fired"]
     }
   }
 }

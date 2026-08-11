@@ -4,12 +4,15 @@ use std::collections::{BTreeMap, HashMap};
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
-use xlog_core::{Result, XlogError};
+use xlog_core::{symbol, Result, ScalarType, Schema, XlogError};
 use xlog_logic::ast::{
     AggExpr, AggOp, ArithExpr, Atom, BodyLiteral, CompOp, Evidence, ProbQuery, Program, Rule, Term,
 };
 use xlog_logic::stratify::{
     analyze_stratification, build_dependency_graph, find_sccs_for_lowering, stratify,
+};
+use xlog_logic::{
+    compare_arithmetic_values, evaluate_arithmetic_expression, ArithmeticValue, Lowerer,
 };
 
 use crate::wfs::{evaluate_wfs_rules, WfsAtom, WfsConfig, WfsLiteral, WfsRule};
@@ -24,6 +27,10 @@ pub enum Value {
     Symbol(u32),
     String(String),
 }
+
+type ProvenanceBinding = HashMap<String, Value>;
+type ArithmeticBinding = HashMap<String, ArithmeticValue>;
+type ProvenanceEvaluationState = (ProvenanceBinding, ArithmeticBinding, PirNodeId);
 
 impl From<i64> for Value {
     fn from(v: i64) -> Self {
@@ -391,13 +398,20 @@ pub struct Provenance {
     pub leaf_atoms: BTreeMap<LeafId, GroundAtom>,
     pub choice_sources: BTreeMap<ChoiceVarId, ChoiceSource>,
     pub aggregate_lifting: Vec<AggregateLiftReport>,
+    schemas: HashMap<String, Schema>,
 }
 
 impl Provenance {
     pub fn query_formula(&self, predicate: &str, args: &[Value]) -> Option<PirNodeId> {
-        self.tuple_formulas
-            .get(&GroundAtom::new(predicate, args.to_vec()))
-            .copied()
+        let atom = self
+            .canonical_atom(&GroundAtom::new(predicate, args.to_vec()))
+            .ok()?;
+        self.tuple_formulas.get(&atom).copied()
+    }
+
+    pub(crate) fn canonical_atom(&self, atom: &GroundAtom) -> Result<GroundAtom> {
+        let args = canonicalize_public_values(&atom.predicate, &atom.args, &self.schemas)?;
+        Ok(GroundAtom::new(atom.predicate.clone(), args))
     }
 
     pub fn leaf_atom(&self, leaf: LeafId) -> Option<&GroundAtom> {
@@ -408,6 +422,12 @@ impl Provenance {
         self.choice_sources.get(&var)
     }
 
+    /// Iterate over canonical semantic tuple keys and their provenance formulas.
+    ///
+    /// Unlike source-facing query, evidence, leaf, and choice metadata, these keys
+    /// describe execution identity. Schema-equivalent quoted and bare symbol
+    /// spellings therefore share one key, and derived tuples may have no unique
+    /// source spelling.
     pub fn atoms_with_formulas(&self) -> impl Iterator<Item = (&GroundAtom, PirNodeId)> + '_ {
         self.tuple_formulas.iter().map(|(atom, &id)| (atom, id))
     }
@@ -418,9 +438,193 @@ pub fn extract_from_source(source: &str) -> Result<Provenance> {
     extract_from_program(&program)
 }
 
+pub(crate) fn arithmetic_schemas(program: &Program) -> Result<HashMap<String, Schema>> {
+    let mut lowerer = Lowerer::new();
+    lowerer.infer_and_validate_schemas(program)?;
+    let mut schemas = lowerer.schemas().clone();
+    for Evidence { atom, .. } in &program.evidence {
+        ensure_ground_atom_schema(atom, &mut schemas);
+    }
+    for ProbQuery { atom } in &program.prob_queries {
+        ensure_ground_atom_schema(atom, &mut schemas);
+    }
+    Ok(schemas)
+}
+
+fn ensure_ground_atom_schema(atom: &Atom, schemas: &mut HashMap<String, Schema>) {
+    schemas.entry(atom.predicate.clone()).or_insert_with(|| {
+        Schema::new(
+            atom.terms
+                .iter()
+                .enumerate()
+                .map(|(index, term)| (format!("c{index}"), term.inferred_scalar_type()))
+                .collect(),
+        )
+    });
+}
+
+pub(crate) fn canonicalize_probabilistic_program(
+    program: &Program,
+    schemas: &HashMap<String, Schema>,
+) -> Result<Program> {
+    let mut program = program.clone();
+
+    for rule in &mut program.rules {
+        canonicalize_atom_constants(&mut rule.head, schemas)?;
+        canonicalize_body_constants(&mut rule.body, schemas)?;
+    }
+    for fact in &mut program.prob_facts {
+        canonicalize_atom_constants(&mut fact.atom, schemas)?;
+    }
+    for disjunction in &mut program.annotated_disjunctions {
+        for choice in &mut disjunction.choices {
+            canonicalize_atom_constants(&mut choice.atom, schemas)?;
+        }
+    }
+    for evidence in &mut program.evidence {
+        canonicalize_atom_constants(&mut evidence.atom, schemas)?;
+    }
+    for query in &mut program.prob_queries {
+        canonicalize_atom_constants(&mut query.atom, schemas)?;
+    }
+
+    Ok(program)
+}
+
+fn canonicalize_body_constants(
+    body: &mut [BodyLiteral],
+    schemas: &HashMap<String, Schema>,
+) -> Result<()> {
+    for literal in body {
+        match literal {
+            BodyLiteral::Positive(atom) | BodyLiteral::Negated(atom) => {
+                canonicalize_atom_constants(atom, schemas)?;
+            }
+            BodyLiteral::Epistemic(_)
+            | BodyLiteral::Comparison(_)
+            | BodyLiteral::IsExpr(_)
+            | BodyLiteral::Univ(_) => {}
+        }
+    }
+    Ok(())
+}
+
+fn canonicalize_atom_constants(atom: &mut Atom, schemas: &HashMap<String, Schema>) -> Result<()> {
+    let schema = schemas.get(&atom.predicate).ok_or_else(|| {
+        XlogError::Compilation(format!(
+            "Probabilistic value canonicalization requires a schema for predicate '{}'",
+            atom.predicate
+        ))
+    })?;
+    if schema.arity() != atom.terms.len() {
+        return Err(XlogError::Compilation(format!(
+            "Predicate '{}' has arity {}, but its inferred schema has arity {}",
+            atom.predicate,
+            atom.terms.len(),
+            schema.arity()
+        )));
+    }
+
+    for (index, term) in atom.terms.iter_mut().enumerate() {
+        if !matches!(
+            term,
+            Term::Integer(_) | Term::Float(_) | Term::String(_) | Term::Symbol(_)
+        ) {
+            continue;
+        }
+        let scalar_type = schema.column_type(index).ok_or_else(|| {
+            XlogError::Compilation(format!(
+                "Predicate '{}' has no type for column {}",
+                atom.predicate, index
+            ))
+        })?;
+        let value = ArithmeticValue::from_typed_term(term, scalar_type)?;
+        *term = term_from_public_value(provenance_value_from_arithmetic(value)?);
+    }
+    Ok(())
+}
+
+pub(crate) fn canonicalize_public_values(
+    predicate: &str,
+    args: &[Value],
+    schemas: &HashMap<String, Schema>,
+) -> Result<Vec<Value>> {
+    let schema = schemas.get(predicate).ok_or_else(|| {
+        XlogError::Compilation(format!(
+            "Probabilistic value canonicalization requires a schema for predicate '{predicate}'"
+        ))
+    })?;
+    if schema.arity() != args.len() {
+        return Err(XlogError::Compilation(format!(
+            "Predicate '{predicate}' has arity {}, but received {} values",
+            schema.arity(),
+            args.len()
+        )));
+    }
+
+    args.iter()
+        .enumerate()
+        .map(|(index, value)| {
+            let scalar_type = schema.column_type(index).ok_or_else(|| {
+                XlogError::Compilation(format!(
+                    "Predicate '{predicate}' has no type for column {index}"
+                ))
+            })?;
+            let value = arithmetic_value_from_typed_provenance(value, scalar_type)?;
+            provenance_value_from_arithmetic(value)
+        })
+        .collect()
+}
+
+fn term_from_public_value(value: Value) -> Term {
+    match value {
+        Value::I64(value) => Term::Integer(value),
+        Value::F64(value) => Term::Float(f64::from_bits(value)),
+        Value::Symbol(value) => Term::Symbol(value),
+        Value::String(value) => Term::String(value),
+    }
+}
+
+pub(crate) fn presentation_atom_from_canonical(
+    source: &Atom,
+    canonical: &Atom,
+    schemas: &HashMap<String, Schema>,
+) -> Result<GroundAtom> {
+    if source.predicate != canonical.predicate || source.terms.len() != canonical.terms.len() {
+        return Err(XlogError::Compilation(
+            "Probabilistic source and canonical atoms do not correspond".to_string(),
+        ));
+    }
+
+    let schema = schemas.get(&canonical.predicate).ok_or_else(|| {
+        XlogError::Compilation(format!(
+            "Probabilistic presentation requires a schema for predicate '{}'",
+            canonical.predicate
+        ))
+    })?;
+    let mut atom = atom_key_from_ground_atom(canonical)?;
+    for (index, (value, source_term)) in atom.args.iter_mut().zip(&source.terms).enumerate() {
+        if schema.column_type(index) != Some(ScalarType::Symbol)
+            || !matches!(value, Value::Symbol(_))
+        {
+            continue;
+        }
+        match source_term {
+            Term::String(source) => *value = Value::String(source.clone()),
+            Term::Symbol(source) => *value = Value::Symbol(*source),
+            _ => {}
+        }
+    }
+    Ok(atom)
+}
+
 pub fn extract_from_program(program: &Program) -> Result<Provenance> {
     // Stratify first to fail fast on unsupported recursion patterns.
     let _ = stratify(program)?;
+    let source_program = program;
+    let schemas = arithmetic_schemas(program)?;
+    let canonical_program = canonicalize_probabilistic_program(program, &schemas)?;
+    let program = &canonical_program;
 
     let mut builder = PirBuilder::new();
 
@@ -443,7 +647,7 @@ pub fn extract_from_program(program: &Program) -> Result<Provenance> {
 
     // Probabilistic facts.
     let mut next_leaf: u32 = 0;
-    for pf in &program.prob_facts {
+    for (pf, source_pf) in program.prob_facts.iter().zip(&source_program.prob_facts) {
         validate_prob(pf.prob, "probabilistic fact")?;
         let key = atom_key_from_ground_atom(&pf.atom)?;
         let leaf = LeafId::new(next_leaf);
@@ -451,7 +655,10 @@ pub fn extract_from_program(program: &Program) -> Result<Provenance> {
             XlogError::Compilation("probabilistic fact leaf id overflow".to_string())
         })?;
         leaf_probs.insert(leaf, pf.prob);
-        leaf_atoms.insert(leaf, key.clone());
+        leaf_atoms.insert(
+            leaf,
+            presentation_atom_from_canonical(&source_pf.atom, &pf.atom, &schemas)?,
+        );
 
         let rel = store
             .entry(key.predicate.clone())
@@ -461,7 +668,11 @@ pub fn extract_from_program(program: &Program) -> Result<Provenance> {
 
     // Annotated disjunctions: lower to a chain of Bernoulli decisions.
     let mut next_choice: u32 = 0;
-    for ad in &program.annotated_disjunctions {
+    for (ad, source_ad) in program
+        .annotated_disjunctions
+        .iter()
+        .zip(&source_program.annotated_disjunctions)
+    {
         if ad.choices.is_empty() {
             return Err(XlogError::Compilation(
                 "Annotated disjunction must contain at least one choice".to_string(),
@@ -469,6 +680,8 @@ pub fn extract_from_program(program: &Program) -> Result<Provenance> {
         }
         let (vars, outcome_formulas) = compile_annotated_disjunction(
             ad,
+            source_ad,
+            &schemas,
             &mut next_choice,
             &mut choice_probs,
             &mut choice_sources,
@@ -531,7 +744,7 @@ pub fn extract_from_program(program: &Program) -> Result<Provenance> {
 
         if is_non_monotone {
             // Use WFS for non-monotone SCCs (cycles through negation)
-            eval_non_monotone_scc_with_wfs(&scc, &scc_rules, &mut store, &mut builder)?;
+            eval_non_monotone_scc_with_wfs(&scc, &scc_rules, &mut store, &mut builder, &schemas)?;
         } else {
             let recursive = is_recursive_scc(&scc, &scc_rules);
             if recursive {
@@ -541,6 +754,7 @@ pub fn extract_from_program(program: &Program) -> Result<Provenance> {
                     &mut store,
                     &mut builder,
                     &mut aggregate_lifting,
+                    &schemas,
                 )?;
             } else {
                 eval_non_recursive_scc(
@@ -548,6 +762,7 @@ pub fn extract_from_program(program: &Program) -> Result<Provenance> {
                     &mut store,
                     &mut builder,
                     &mut aggregate_lifting,
+                    &schemas,
                 )?;
             }
         }
@@ -562,13 +777,30 @@ pub fn extract_from_program(program: &Program) -> Result<Provenance> {
     }
 
     let mut queries: Vec<GroundAtom> = Vec::new();
-    for ProbQuery { atom } in &program.prob_queries {
-        queries.push(atom_key_from_ground_atom(atom)?);
+    for (ProbQuery { atom }, ProbQuery { atom: source_atom }) in program
+        .prob_queries
+        .iter()
+        .zip(&source_program.prob_queries)
+    {
+        queries.push(presentation_atom_from_canonical(
+            source_atom,
+            atom,
+            &schemas,
+        )?);
     }
 
     let mut evidence: Vec<(GroundAtom, bool)> = Vec::new();
-    for Evidence { atom, value } in &program.evidence {
-        evidence.push((atom_key_from_ground_atom(atom)?, *value));
+    for (
+        Evidence { atom, value },
+        Evidence {
+            atom: source_atom, ..
+        },
+    ) in program.evidence.iter().zip(&source_program.evidence)
+    {
+        evidence.push((
+            presentation_atom_from_canonical(source_atom, atom, &schemas)?,
+            *value,
+        ));
     }
 
     Ok(Provenance {
@@ -581,6 +813,7 @@ pub fn extract_from_program(program: &Program) -> Result<Provenance> {
         leaf_atoms,
         choice_sources,
         aggregate_lifting,
+        schemas,
     })
 }
 
@@ -645,6 +878,8 @@ fn unsupported_probabilistic_term_error(context: &str, kind: &str) -> XlogError 
 
 fn compile_annotated_disjunction(
     ad: &xlog_logic::ast::AnnotatedDisjunction,
+    source_ad: &xlog_logic::ast::AnnotatedDisjunction,
+    schemas: &HashMap<String, Schema>,
     next_choice: &mut u32,
     choice_probs: &mut BTreeMap<ChoiceVarId, (f64, f64)>,
     choice_sources: &mut BTreeMap<ChoiceVarId, ChoiceSource>,
@@ -661,11 +896,12 @@ fn compile_annotated_disjunction(
     let explicit_choices: Arc<[(GroundAtom, f64)]> = ad
         .choices
         .iter()
-        .map(|pf| {
-            let atom = atom_key_from_ground_atom(&pf.atom).unwrap();
-            (atom, pf.prob)
+        .zip(&source_ad.choices)
+        .map(|(pf, source_pf)| {
+            presentation_atom_from_canonical(&source_pf.atom, &pf.atom, schemas)
+                .map(|atom| (atom, pf.prob))
         })
-        .collect::<Vec<_>>()
+        .collect::<Result<Vec<_>>>()?
         .into();
 
     let mut probs: Vec<f64> = ad.choices.iter().map(|pf| pf.prob).collect();
@@ -763,6 +999,7 @@ fn eval_non_recursive_scc(
     store: &mut BTreeMap<String, Relation>,
     builder: &mut PirBuilder,
     aggregate_lifting: &mut Vec<AggregateLiftReport>,
+    schemas: &HashMap<String, Schema>,
 ) -> Result<()> {
     for rule in rules {
         let derived = eval_rule(
@@ -772,6 +1009,7 @@ fn eval_non_recursive_scc(
             None,
             builder,
             aggregate_lifting,
+            schemas,
         )?;
         let rel = store
             .entry(rule.head.predicate.clone())
@@ -791,6 +1029,7 @@ fn eval_recursive_scc(
     store: &mut BTreeMap<String, Relation>,
     builder: &mut PirBuilder,
     aggregate_lifting: &mut Vec<AggregateLiftReport>,
+    schemas: &HashMap<String, Schema>,
 ) -> Result<()> {
     let scc_set: std::collections::HashSet<&str> = scc.iter().map(|s| s.as_str()).collect();
 
@@ -804,7 +1043,15 @@ fn eval_recursive_scc(
     // Seed: evaluate all rules once against the current full snapshot.
     let mut delta: BTreeMap<String, Relation> = BTreeMap::new();
     for rule in rules {
-        let derived = eval_rule(rule, store, &full, None, builder, aggregate_lifting)?;
+        let derived = eval_rule(
+            rule,
+            store,
+            &full,
+            None,
+            builder,
+            aggregate_lifting,
+            schemas,
+        )?;
         if derived.is_empty() {
             continue;
         }
@@ -861,6 +1108,7 @@ fn eval_recursive_scc(
                     Some((idx, &delta_prev)),
                     builder,
                     aggregate_lifting,
+                    schemas,
                 )?;
                 for (tuple, proof) in derived {
                     let entry = derived_all
@@ -916,6 +1164,7 @@ fn eval_non_monotone_scc_with_wfs(
     rules: &[Rule],
     store: &mut BTreeMap<String, Relation>,
     builder: &mut PirBuilder,
+    schemas: &HashMap<String, Schema>,
 ) -> Result<()> {
     let scc_set: std::collections::HashSet<&str> = scc.iter().map(|s| s.as_str()).collect();
 
@@ -925,7 +1174,7 @@ fn eval_non_monotone_scc_with_wfs(
 
     for rule in rules {
         // Ground this rule against the current store
-        let grounded = ground_rule_for_wfs(rule, store, &scc_set, builder)?;
+        let grounded = ground_rule_for_wfs(rule, store, &scc_set, builder, schemas)?;
         wfs_rules.extend(grounded);
     }
 
@@ -940,10 +1189,11 @@ fn eval_non_monotone_scc_with_wfs(
     // Step 3: Store the results back
     // True atoms get their provenance, false/undefined atoms are not added
     for (wfs_atom, prov) in wfs_result.true_set {
+        let args = canonicalize_public_values(&wfs_atom.predicate, &wfs_atom.args, schemas)?;
         let rel = store
             .entry(wfs_atom.predicate.clone())
             .or_insert_with(Relation::new);
-        rel.insert_or(wfs_atom.args, prov, builder);
+        rel.insert_or(args, prov, builder);
     }
 
     Ok(())
@@ -958,10 +1208,11 @@ fn ground_rule_for_wfs(
     store: &BTreeMap<String, Relation>,
     scc_set: &std::collections::HashSet<&str>,
     builder: &mut PirBuilder,
+    schemas: &HashMap<String, Schema>,
 ) -> Result<Vec<WfsRule>> {
     // Start with empty binding
-    let mut bindings: Vec<(HashMap<String, Value>, PirNodeId)> =
-        vec![(HashMap::new(), builder.const_true())];
+    let mut bindings: Vec<ProvenanceEvaluationState> =
+        vec![(HashMap::new(), HashMap::new(), builder.const_true())];
 
     // Collect body literals that are in the SCC (will become WFS body literals)
     // and non-SCC literals (will be grounded now)
@@ -976,15 +1227,26 @@ fn ground_rule_for_wfs(
                 } else {
                     // Ground now by iterating over existing tuples
                     let rel = store.get(&atom.predicate);
-                    let mut next_bindings: Vec<(HashMap<String, Value>, PirNodeId)> = Vec::new();
+                    let mut next_bindings = Vec::new();
 
-                    for (binding, prov) in bindings {
+                    for (binding, arithmetic_bindings, prov) in bindings {
                         if let Some(rel) = rel {
                             for (tuple, tuple_prov) in &rel.tuples {
                                 let mut new_binding = binding.clone();
                                 if unify_atom(atom, tuple, &mut new_binding)? {
+                                    let mut new_arithmetic_bindings = arithmetic_bindings.clone();
+                                    extend_arithmetic_bindings(
+                                        atom,
+                                        tuple,
+                                        schemas,
+                                        &mut new_arithmetic_bindings,
+                                    )?;
                                     let new_prov = builder.and(vec![prov, *tuple_prov]);
-                                    next_bindings.push((new_binding, new_prov));
+                                    next_bindings.push((
+                                        new_binding,
+                                        new_arithmetic_bindings,
+                                        new_prov,
+                                    ));
                                 }
                             }
                         }
@@ -1003,9 +1265,9 @@ fn ground_rule_for_wfs(
                 } else {
                     // Ground now: negation of non-SCC predicate
                     let rel = store.get(&atom.predicate);
-                    let mut next_bindings: Vec<(HashMap<String, Value>, PirNodeId)> = Vec::new();
+                    let mut next_bindings = Vec::new();
 
-                    for (binding, prov) in bindings {
+                    for (binding, arithmetic_bindings, prov) in bindings {
                         // Check if all variables in the negated atom are bound
                         let all_bound = atom.terms.iter().all(|t| match t {
                             Term::Variable(v) => binding.contains_key(v),
@@ -1029,17 +1291,17 @@ fn ground_rule_for_wfs(
 
                             if matching_provs.is_empty() {
                                 // No matches - closed world: negation succeeds
-                                next_bindings.push((binding, prov));
+                                next_bindings.push((binding, arithmetic_bindings, prov));
                             } else {
                                 // Negate the combined provenance
                                 let combined = builder.or(matching_provs);
                                 let neg_prov = negate_provenance(combined, builder);
                                 let new_prov = builder.and(vec![prov, neg_prov]);
-                                next_bindings.push((binding, new_prov));
+                                next_bindings.push((binding, arithmetic_bindings, new_prov));
                             }
                         } else {
                             // Relation doesn't exist - closed world: negation succeeds
-                            next_bindings.push((binding, prov));
+                            next_bindings.push((binding, arithmetic_bindings, prov));
                         }
                     }
                     bindings = next_bindings;
@@ -1055,10 +1317,16 @@ fn ground_rule_for_wfs(
                 });
             }
             BodyLiteral::Comparison(cmp) => {
-                let mut next_bindings: Vec<(HashMap<String, Value>, PirNodeId)> = Vec::new();
-                for (binding, prov) in bindings {
-                    if eval_comparison(cmp.op, &cmp.left, &cmp.right, &binding)? {
-                        next_bindings.push((binding, prov));
+                let mut next_bindings = Vec::new();
+                for (binding, arithmetic_bindings, prov) in bindings {
+                    if eval_comparison_with_arithmetic_bindings(
+                        cmp.op,
+                        &cmp.left,
+                        &cmp.right,
+                        &binding,
+                        &arithmetic_bindings,
+                    )? {
+                        next_bindings.push((binding, arithmetic_bindings, prov));
                     }
                 }
                 bindings = next_bindings;
@@ -1067,17 +1335,17 @@ fn ground_rule_for_wfs(
                 }
             }
             BodyLiteral::IsExpr(is_expr) => {
-                let mut next_bindings: Vec<(HashMap<String, Value>, PirNodeId)> = Vec::new();
-                for (mut binding, prov) in bindings {
-                    if binding.contains_key(&is_expr.target) {
-                        return Err(XlogError::Compilation(format!(
-                            "Is-expression target {} is already bound",
-                            is_expr.target
-                        )));
-                    }
-                    let v = eval_arith_expr(&is_expr.expr, &binding)?;
-                    binding.insert(is_expr.target.clone(), v);
-                    next_bindings.push((binding, prov));
+                let mut next_bindings = Vec::new();
+                for (mut binding, mut arithmetic_bindings, prov) in bindings {
+                    let arithmetic_value =
+                        eval_arithmetic_value(&is_expr.expr, &binding, &arithmetic_bindings)?;
+                    bind_arithmetic_result(
+                        &is_expr.target,
+                        arithmetic_value,
+                        &mut binding,
+                        &mut arithmetic_bindings,
+                    )?;
+                    next_bindings.push((binding, arithmetic_bindings, prov));
                 }
                 bindings = next_bindings;
                 if bindings.is_empty() {
@@ -1095,7 +1363,7 @@ fn ground_rule_for_wfs(
     // Now create WFS rules for each binding
     let mut result: Vec<WfsRule> = Vec::new();
 
-    for (binding, external_prov) in bindings {
+    for (binding, _, external_prov) in bindings {
         // Build the WFS body from SCC literals
         let mut wfs_body: Vec<WfsLiteral> = Vec::new();
 
@@ -1217,43 +1485,57 @@ fn eval_rule(
     delta_scc: Option<(usize, &BTreeMap<String, Relation>)>,
     builder: &mut PirBuilder,
     aggregate_lifting: &mut Vec<AggregateLiftReport>,
+    schemas: &HashMap<String, Schema>,
 ) -> Result<BTreeMap<Vec<Value>, PirNodeId>> {
-    let mut states: Vec<(HashMap<String, Value>, PirNodeId)> =
-        vec![(HashMap::new(), builder.const_true())];
+    let mut states: Vec<ProvenanceEvaluationState> =
+        vec![(HashMap::new(), HashMap::new(), builder.const_true())];
 
     for (idx, lit) in rule.body.iter().enumerate() {
-        let mut next_states: Vec<(HashMap<String, Value>, PirNodeId)> = Vec::new();
+        let mut next_states = Vec::new();
         match lit {
             BodyLiteral::Positive(atom) => {
                 let rel = select_relation(atom, idx, global, full_scc, delta_scc)?;
-                for (binding, prov) in states {
+                for (binding, arithmetic_bindings, prov) in states {
                     for (tuple, tuple_prov) in &rel.tuples {
                         let mut binding2 = binding.clone();
                         if unify_atom(atom, tuple, &mut binding2)? {
+                            let mut arithmetic_bindings2 = arithmetic_bindings.clone();
+                            extend_arithmetic_bindings(
+                                atom,
+                                tuple,
+                                schemas,
+                                &mut arithmetic_bindings2,
+                            )?;
                             let prov2 = builder.and(vec![prov, *tuple_prov]);
-                            next_states.push((binding2, prov2));
+                            next_states.push((binding2, arithmetic_bindings2, prov2));
                         }
                     }
                 }
             }
             BodyLiteral::Comparison(cmp) => {
-                for (binding, prov) in states {
-                    if eval_comparison(cmp.op, &cmp.left, &cmp.right, &binding)? {
-                        next_states.push((binding, prov));
+                for (binding, arithmetic_bindings, prov) in states {
+                    if eval_comparison_with_arithmetic_bindings(
+                        cmp.op,
+                        &cmp.left,
+                        &cmp.right,
+                        &binding,
+                        &arithmetic_bindings,
+                    )? {
+                        next_states.push((binding, arithmetic_bindings, prov));
                     }
                 }
             }
             BodyLiteral::IsExpr(is_expr) => {
-                for (mut binding, prov) in states {
-                    if binding.contains_key(&is_expr.target) {
-                        return Err(XlogError::Compilation(format!(
-                            "Is-expression target {} is already bound",
-                            is_expr.target
-                        )));
-                    }
-                    let v = eval_arith_expr(&is_expr.expr, &binding)?;
-                    binding.insert(is_expr.target.clone(), v);
-                    next_states.push((binding, prov));
+                for (mut binding, mut arithmetic_bindings, prov) in states {
+                    let arithmetic_value =
+                        eval_arithmetic_value(&is_expr.expr, &binding, &arithmetic_bindings)?;
+                    bind_arithmetic_result(
+                        &is_expr.target,
+                        arithmetic_value,
+                        &mut binding,
+                        &mut arithmetic_bindings,
+                    )?;
+                    next_states.push((binding, arithmetic_bindings, prov));
                 }
             }
             BodyLiteral::Negated(atom) => {
@@ -1269,14 +1551,14 @@ fn eval_rule(
                     r
                 } else {
                     // Predicate not found - closed world assumption: all negations succeed
-                    for (binding, prov) in states {
+                    for (binding, arithmetic_bindings, prov) in states {
                         // Ensure all variables in the negated atom are bound
                         let all_bound = atom.terms.iter().all(|t| match t {
                             Term::Variable(v) => binding.contains_key(v),
                             _ => true,
                         });
                         if all_bound {
-                            next_states.push((binding, prov));
+                            next_states.push((binding, arithmetic_bindings, prov));
                         }
                     }
                     states = next_states;
@@ -1286,7 +1568,7 @@ fn eval_rule(
                     continue;
                 };
 
-                for (binding, prov) in states {
+                for (binding, arithmetic_bindings, prov) in states {
                     // First, check if all variables in the negated atom are bound.
                     // Negation requires all variables to be bound (safety condition).
                     let all_bound = atom.terms.iter().all(|t| match t {
@@ -1310,7 +1592,7 @@ fn eval_rule(
 
                     if matching_provs.is_empty() {
                         // No matching tuples - closed world assumption: negation succeeds trivially
-                        next_states.push((binding, prov));
+                        next_states.push((binding, arithmetic_bindings, prov));
                     } else {
                         // For negation to succeed, ALL matching tuples must be "absent" (negated).
                         // If tuple can exist via multiple provenances (disjunction), we negate that.
@@ -1319,7 +1601,7 @@ fn eval_rule(
                         let combined_tuple_prov = builder.or(matching_provs);
                         let neg_prov = negate_provenance(combined_tuple_prov, builder);
                         let new_prov = builder.and(vec![prov, neg_prov]);
-                        next_states.push((binding, new_prov));
+                        next_states.push((binding, arithmetic_bindings, new_prov));
                     }
                 }
             }
@@ -1341,8 +1623,12 @@ fn eval_rule(
         }
     }
 
-    if rule.has_aggregation() {
-        eval_aggregate_head_provenance(&rule.head, states, builder, aggregate_lifting)
+    let states = states
+        .into_iter()
+        .map(|(binding, _, provenance)| (binding, provenance))
+        .collect::<Vec<_>>();
+    let derived = if rule.has_aggregation() {
+        eval_aggregate_head_provenance(&rule.head, states, builder, aggregate_lifting)?
     } else {
         let mut out: BTreeMap<Vec<Value>, PirNodeId> = BTreeMap::new();
         for (binding, prov) in states {
@@ -1352,8 +1638,18 @@ fn eval_rule(
                 .or_insert_with(|| builder.const_false());
             *entry = builder.or(vec![*entry, prov]);
         }
-        Ok(out)
+        out
+    };
+
+    let mut canonical = BTreeMap::new();
+    for (tuple, provenance) in derived {
+        let tuple = canonicalize_public_values(&rule.head.predicate, &tuple, schemas)?;
+        let entry = canonical
+            .entry(tuple)
+            .or_insert_with(|| builder.const_false());
+        *entry = builder.or(vec![*entry, provenance]);
     }
+    Ok(canonical)
 }
 
 const MAX_EXACT_PROB_AGG_UNCERTAIN_ROWS: usize = 16;
@@ -2066,46 +2362,30 @@ fn materialize_head(head: &Atom, binding: &HashMap<String, Value>) -> Result<Vec
     Ok(out)
 }
 
+#[cfg(test)]
 pub(crate) fn eval_comparison(
     op: CompOp,
     left: &Term,
     right: &Term,
     binding: &HashMap<String, Value>,
 ) -> Result<bool> {
-    let l = resolve_term(left, binding)?;
-    let r = resolve_term(right, binding)?;
-    match (l, r) {
-        (Value::I64(a), Value::I64(b)) => Ok(compare_ord(op, a.cmp(&b))),
-        (Value::F64(a_bits), Value::F64(b_bits)) => {
-            let a = f64::from_bits(a_bits);
-            let b = f64::from_bits(b_bits);
-            match op {
-                CompOp::Eq => Ok(a == b),
-                CompOp::Ne => Ok(a != b),
-                CompOp::Lt => Ok(a < b),
-                CompOp::Le => Ok(a <= b),
-                CompOp::Gt => Ok(a > b),
-                CompOp::Ge => Ok(a >= b),
-            }
-        }
-        (Value::Symbol(a), Value::Symbol(b)) => Ok(compare_ord(op, a.cmp(&b))),
-        (Value::String(a), Value::String(b)) => Ok(compare_ord(op, a.cmp(&b))),
-        _ => Err(XlogError::Compilation(
-            "Comparison between differing types is not supported".to_string(),
-        )),
-    }
+    eval_comparison_with_arithmetic_bindings(op, left, right, binding, &HashMap::new())
 }
 
-pub(crate) fn compare_ord(op: CompOp, ord: std::cmp::Ordering) -> bool {
-    use std::cmp::Ordering;
-    match op {
-        CompOp::Eq => ord == Ordering::Equal,
-        CompOp::Ne => ord != Ordering::Equal,
-        CompOp::Lt => ord == Ordering::Less,
-        CompOp::Le => ord == Ordering::Less || ord == Ordering::Equal,
-        CompOp::Gt => ord == Ordering::Greater,
-        CompOp::Ge => ord == Ordering::Greater || ord == Ordering::Equal,
-    }
+pub(crate) fn eval_comparison_with_arithmetic_bindings(
+    op: CompOp,
+    left: &Term,
+    right: &Term,
+    binding: &HashMap<String, Value>,
+    arithmetic_bindings: &HashMap<String, ArithmeticValue>,
+) -> Result<bool> {
+    let bound_left = bound_arithmetic_value(left, binding, arithmetic_bindings);
+    let bound_right = bound_arithmetic_value(right, binding, arithmetic_bindings);
+    let left_type = bound_left.as_ref().and_then(ArithmeticValue::scalar_type);
+    let right_type = bound_right.as_ref().and_then(ArithmeticValue::scalar_type);
+    let left = resolve_comparison_arithmetic_term(left, binding, bound_left, right_type)?;
+    let right = resolve_comparison_arithmetic_term(right, binding, bound_right, left_type)?;
+    compare_arithmetic_values(&left, op, &right)
 }
 
 pub(crate) fn resolve_term(term: &Term, binding: &HashMap<String, Value>) -> Result<Value> {
@@ -2135,82 +2415,476 @@ pub(crate) fn resolve_term(term: &Term, binding: &HashMap<String, Value>) -> Res
     }
 }
 
+#[cfg(test)]
 pub(crate) fn eval_arith_expr(expr: &ArithExpr, binding: &HashMap<String, Value>) -> Result<Value> {
-    match expr {
-        ArithExpr::Variable(name) => binding.get(name).cloned().ok_or_else(|| {
-            XlogError::Compilation(format!("Unbound variable {} in arithmetic", name))
-        }),
-        ArithExpr::Integer(i) => Ok(Value::I64(*i)),
-        ArithExpr::Float(f) => Ok(Value::F64(f.to_bits())),
-        ArithExpr::Add(l, r) => eval_bin_op(l, r, binding, |a, b| a + b, |a, b| a + b),
-        ArithExpr::Sub(l, r) => eval_bin_op(l, r, binding, |a, b| a - b, |a, b| a - b),
-        ArithExpr::Mul(l, r) => eval_bin_op(l, r, binding, |a, b| a * b, |a, b| a * b),
-        ArithExpr::Div(l, r) => eval_bin_op(l, r, binding, |a, b| a / b, |a, b| a / b),
-        ArithExpr::Mod(l, r) => eval_bin_op(l, r, binding, |a, b| a % b, |a, b| a % b),
-        ArithExpr::Abs(e) => match eval_arith_expr(e, binding)? {
-            Value::I64(i) => Ok(Value::I64(i.abs())),
-            Value::F64(bits) => {
-                let f = f64::from_bits(bits).abs();
-                Ok(Value::F64(f.to_bits()))
-            }
-            _ => Err(XlogError::Compilation(
-                "abs() requires numeric input".to_string(),
-            )),
-        },
-        ArithExpr::Min(l, r) => eval_bin_op(l, r, binding, |a, b| a.min(b), |a, b| a.min(b)),
-        ArithExpr::Max(l, r) => eval_bin_op(l, r, binding, |a, b| a.max(b), |a, b| a.max(b)),
-        ArithExpr::Pow(l, r) => {
-            let a = eval_arith_expr(l, binding)?;
-            let b = eval_arith_expr(r, binding)?;
-            match (a, b) {
-                (Value::I64(a), Value::I64(b)) => {
-                    Ok(Value::I64(a.pow(u32::try_from(b).map_err(|_| {
-                        XlogError::Compilation("pow exponent must fit in u32".to_string())
-                    })?)))
-                }
-                (Value::F64(a), Value::F64(b)) => Ok(Value::F64(
-                    f64::from_bits(a).powf(f64::from_bits(b)).to_bits(),
-                )),
-                _ => Err(XlogError::Compilation(
-                    "pow requires numeric inputs of same type".to_string(),
-                )),
-            }
-        }
-        ArithExpr::Cast(e, _ty) => {
-            // For provenance compilation we preserve the numeric value; the runtime has a full
-            // type system, but provenance needs only deterministic evaluation.
-            eval_arith_expr(e, binding)
-        }
-        ArithExpr::FuncCall { name, .. } => Err(XlogError::Compilation(format!(
-            "Function call `{}` must be expanded before provenance extraction",
-            name
-        ))),
-        ArithExpr::Conditional { .. } => Err(XlogError::Compilation(
-            "Conditional expressions must be expanded before provenance extraction".to_string(),
-        )),
+    let value = eval_arithmetic_value(expr, binding, &HashMap::new())?;
+    provenance_value_from_arithmetic(value)
+}
+
+pub(crate) fn eval_arithmetic_value(
+    expr: &ArithExpr,
+    binding: &HashMap<String, Value>,
+    arithmetic_bindings: &HashMap<String, ArithmeticValue>,
+) -> Result<ArithmeticValue> {
+    let bindings = binding
+        .iter()
+        .map(|(name, value)| (name.clone(), arithmetic_value_from_provenance(value)))
+        .chain(
+            arithmetic_bindings
+                .iter()
+                .map(|(name, value)| (name.clone(), value.clone())),
+        )
+        .collect::<HashMap<_, _>>();
+    evaluate_arithmetic_expression(expr, &bindings)
+}
+
+pub(crate) fn provenance_value_from_arithmetic(value: ArithmeticValue) -> Result<Value> {
+    match value {
+        ArithmeticValue::I32(value) => Ok(Value::I64(i64::from(value))),
+        ArithmeticValue::I64(value) => Ok(Value::I64(value)),
+        ArithmeticValue::U32(value) => Ok(Value::I64(i64::from(value))),
+        ArithmeticValue::U64(value) => i64::try_from(value)
+            .map(Value::I64)
+            .map_err(|_| XlogError::Compilation("u64 arithmetic result exceeds i64".to_string())),
+        ArithmeticValue::F32(value) => Ok(Value::F64(f64::from(value).to_bits())),
+        ArithmeticValue::F64(value) => Ok(Value::F64(value.to_bits())),
+        ArithmeticValue::Bool(value) => Ok(Value::I64(i64::from(value))),
+        ArithmeticValue::Symbol(value) => Ok(Value::Symbol(value)),
+        ArithmeticValue::String(value) => Ok(Value::String(value)),
     }
 }
 
-pub(crate) fn eval_bin_op<FInt, FFloat>(
-    l: &ArithExpr,
-    r: &ArithExpr,
+pub(crate) fn bind_arithmetic_result(
+    target: &str,
+    value: ArithmeticValue,
+    binding: &mut HashMap<String, Value>,
+    arithmetic_bindings: &mut HashMap<String, ArithmeticValue>,
+) -> Result<()> {
+    if binding.contains_key(target) || arithmetic_bindings.contains_key(target) {
+        return Err(XlogError::Compilation(format!(
+            "Is-expression target {target} is already bound"
+        )));
+    }
+    let provenance_value = provenance_value_from_arithmetic(value.clone())?;
+    binding.insert(target.to_string(), provenance_value);
+    arithmetic_bindings.insert(target.to_string(), value);
+    Ok(())
+}
+
+fn bound_arithmetic_value(
+    term: &Term,
     binding: &HashMap<String, Value>,
-    op_int: FInt,
-    op_float: FFloat,
-) -> Result<Value>
-where
-    FInt: FnOnce(i64, i64) -> i64,
-    FFloat: FnOnce(f64, f64) -> f64,
-{
-    let a = eval_arith_expr(l, binding)?;
-    let b = eval_arith_expr(r, binding)?;
-    match (a, b) {
-        (Value::I64(a), Value::I64(b)) => Ok(Value::I64(op_int(a, b))),
-        (Value::F64(a), Value::F64(b)) => Ok(Value::F64(
-            op_float(f64::from_bits(a), f64::from_bits(b)).to_bits(),
-        )),
-        _ => Err(XlogError::Compilation(
-            "Arithmetic operation requires matching numeric types".to_string(),
-        )),
+    arithmetic_bindings: &HashMap<String, ArithmeticValue>,
+) -> Option<ArithmeticValue> {
+    if let Term::Variable(name) = term {
+        if let Some(value) = arithmetic_bindings.get(name) {
+            return Some(value.clone());
+        }
+        return binding.get(name).map(arithmetic_value_from_provenance);
+    }
+    None
+}
+
+fn resolve_comparison_arithmetic_term(
+    term: &Term,
+    binding: &HashMap<String, Value>,
+    bound: Option<ArithmeticValue>,
+    peer_type: Option<ScalarType>,
+) -> Result<ArithmeticValue> {
+    if let Some(bound) = bound {
+        return Ok(bound);
+    }
+    if let Some(peer_type) = peer_type {
+        return ArithmeticValue::from_typed_term(term, peer_type);
+    }
+    resolve_term(term, binding).map(|value| arithmetic_value_from_provenance(&value))
+}
+
+pub(crate) fn extend_arithmetic_bindings(
+    atom: &Atom,
+    tuple: &[Value],
+    schemas: &HashMap<String, Schema>,
+    arithmetic_bindings: &mut HashMap<String, ArithmeticValue>,
+) -> Result<()> {
+    let schema = schemas.get(&atom.predicate).ok_or_else(|| {
+        XlogError::Compilation(format!(
+            "Arithmetic evaluation requires a schema for predicate '{}'",
+            atom.predicate
+        ))
+    })?;
+    if atom.terms.len() != tuple.len() || schema.arity() != tuple.len() {
+        return Err(XlogError::Compilation(format!(
+            "Predicate '{}' row arity does not match its arithmetic schema",
+            atom.predicate
+        )));
+    }
+    for (index, (term, value)) in atom.terms.iter().zip(tuple).enumerate() {
+        let Term::Variable(name) = term else {
+            continue;
+        };
+        let scalar_type = schema.column_type(index).ok_or_else(|| {
+            XlogError::Compilation(format!(
+                "Arithmetic evaluation requires a type for '{}' column {}",
+                atom.predicate,
+                index + 1
+            ))
+        })?;
+        let typed_value = arithmetic_value_from_typed_provenance(value, scalar_type)?;
+        if let Some(existing) = arithmetic_bindings.get(name) {
+            if existing.scalar_type() != typed_value.scalar_type()
+                || !compare_arithmetic_values(existing, CompOp::Eq, &typed_value)?
+            {
+                return Err(XlogError::Compilation(format!(
+                    "Arithmetic binding for variable '{name}' has incompatible predicate types"
+                )));
+            }
+        } else {
+            arithmetic_bindings.insert(name.clone(), typed_value);
+        }
+    }
+    Ok(())
+}
+
+fn arithmetic_value_from_typed_provenance(
+    value: &Value,
+    scalar_type: ScalarType,
+) -> Result<ArithmeticValue> {
+    let mismatch = || {
+        XlogError::Compilation(format!(
+            "Provenance value is incompatible with declared {scalar_type:?} arithmetic type"
+        ))
+    };
+    match (scalar_type, value) {
+        (ScalarType::I32, Value::I64(value)) => i32::try_from(*value)
+            .map(ArithmeticValue::I32)
+            .map_err(|_| mismatch()),
+        (ScalarType::I64, Value::I64(value)) => Ok(ArithmeticValue::I64(*value)),
+        (ScalarType::U32, Value::I64(value)) => u32::try_from(*value)
+            .map(ArithmeticValue::U32)
+            .map_err(|_| mismatch()),
+        (ScalarType::U64, Value::I64(value)) => u64::try_from(*value)
+            .map(ArithmeticValue::U64)
+            .map_err(|_| mismatch()),
+        (ScalarType::F32, Value::F64(bits)) => {
+            Ok(ArithmeticValue::F32(f64::from_bits(*bits) as f32))
+        }
+        (ScalarType::F64, Value::F64(bits)) => Ok(ArithmeticValue::F64(f64::from_bits(*bits))),
+        (ScalarType::Bool, Value::I64(0)) => Ok(ArithmeticValue::Bool(false)),
+        (ScalarType::Bool, Value::I64(1)) => Ok(ArithmeticValue::Bool(true)),
+        (ScalarType::Symbol, Value::Symbol(value)) => Ok(ArithmeticValue::Symbol(*value)),
+        (ScalarType::Symbol, Value::String(value)) => {
+            Ok(ArithmeticValue::Symbol(symbol::intern(value)))
+        }
+        _ => Err(mismatch()),
+    }
+}
+
+fn arithmetic_value_from_provenance(value: &Value) -> ArithmeticValue {
+    match value {
+        Value::I64(value) => ArithmeticValue::I64(*value),
+        Value::F64(bits) => ArithmeticValue::F64(f64::from_bits(*bits)),
+        Value::Symbol(value) => ArithmeticValue::Symbol(*value),
+        Value::String(value) => ArithmeticValue::String(value.clone()),
+    }
+}
+
+#[cfg(test)]
+mod arithmetic_evaluation_tests {
+    use super::*;
+    use xlog_core::ScalarType;
+
+    #[test]
+    fn provenance_uses_shared_cast_conditional_and_power_semantics() {
+        let expression = ArithExpr::Conditional {
+            cond_left: Box::new(ArithExpr::Integer(1)),
+            cond_op: CompOp::Eq,
+            cond_right: Box::new(ArithExpr::Integer(1)),
+            then_expr: Box::new(ArithExpr::Cast(
+                Box::new(ArithExpr::Pow(
+                    Box::new(ArithExpr::Integer(2)),
+                    Box::new(ArithExpr::Integer(3)),
+                )),
+                ScalarType::F32,
+            )),
+            else_expr: Box::new(ArithExpr::Cast(
+                Box::new(ArithExpr::Integer(0)),
+                ScalarType::F32,
+            )),
+        };
+        assert_eq!(
+            eval_arith_expr(&expression, &HashMap::new()).expect("provenance value"),
+            Value::F64(8.0_f64.to_bits())
+        );
+    }
+
+    #[test]
+    fn provenance_preserves_left_to_right_arithmetic_errors() {
+        let expression = ArithExpr::Add(
+            Box::new(ArithExpr::Variable("left_missing".to_string())),
+            Box::new(ArithExpr::Variable("right_missing".to_string())),
+        );
+        let error = eval_arith_expr(&expression, &HashMap::new())
+            .expect_err("unbound arithmetic must fail");
+        assert!(error.to_string().contains("left_missing"), "{error}");
+
+        let error = eval_comparison(
+            CompOp::Eq,
+            &Term::Variable("left_missing".to_string()),
+            &Term::Variable("right_missing".to_string()),
+            &HashMap::new(),
+        )
+        .expect_err("unbound comparison must fail");
+        assert!(error.to_string().contains("left_missing"), "{error}");
+        assert!(!error.to_string().contains("right_missing"), "{error}");
+    }
+
+    #[test]
+    fn provenance_comparisons_share_runtime_nan_ordering_with_conditionals() {
+        let nan_expression = ArithExpr::Div(
+            Box::new(ArithExpr::Float(0.0)),
+            Box::new(ArithExpr::Float(0.0)),
+        );
+        let nan = eval_arith_expr(&nan_expression, &HashMap::new()).expect("canonical NaN");
+        let binding = HashMap::from([("X".to_string(), nan)]);
+        assert!(eval_comparison(
+            CompOp::Gt,
+            &Term::Variable("X".to_string()),
+            &Term::Float(f64::INFINITY),
+            &binding,
+        )
+        .expect("body comparison"));
+
+        let conditional = ArithExpr::Conditional {
+            cond_left: Box::new(ArithExpr::Variable("X".to_string())),
+            cond_op: CompOp::Gt,
+            cond_right: Box::new(ArithExpr::Float(f64::INFINITY)),
+            then_expr: Box::new(ArithExpr::Integer(1)),
+            else_expr: Box::new(ArithExpr::Integer(0)),
+        };
+        assert_eq!(
+            eval_arith_expr(&conditional, &binding).expect("conditional comparison"),
+            Value::I64(1)
+        );
+        assert!(!eval_comparison(
+            CompOp::Eq,
+            &Term::Variable("X".to_string()),
+            &Term::Variable("X".to_string()),
+            &binding,
+        )
+        .expect("NaN equality"));
+    }
+
+    #[test]
+    fn exact_provenance_preserves_declared_and_sequential_arithmetic_widths() {
+        let provenance = extract_from_source(
+            "pred input(u32).\n\
+             pred cast_input(i64).\n\
+             pred input_float(f32).\n\
+             pred wide_input(u32).\n\
+             pred wide_copy(u32).\n\
+             pred out_from_input(u32).\n\
+             pred out_from_cast(u32).\n\
+             pred input_at_least_one(u32).\n\
+             pred float_at_least_one(f32).\n\
+             0.5::input(1).\n\
+             0.5::cast_input(1).\n\
+             0.5::input_float(1.1).\n\
+             0.5::wide_input(4294967295).\n\
+             wide_copy(X) :- wide_input(X).\n\
+             out_from_input(Y) :- input(X), Y is X + cast(1, u32).\n\
+             out_from_cast(Z) :- cast_input(X), Y is cast(X, u32), Z is Y + cast(1, u32).\n\
+             input_at_least_one(X) :- input(X), X >= 1.\n\
+             float_at_least_one(X) :- input_float(X), X >= 1.0.\n\
+             query(out_from_input(2)).\n\
+             query(out_from_cast(2)).\n\
+             query(input_at_least_one(1)).\n\
+             query(float_at_least_one(1.1)).\n\
+             query(wide_copy(4294967295)).\n",
+        )
+        .expect("extract typed arithmetic provenance");
+
+        for (predicate, expected) in [
+            ("out_from_input", 2),
+            ("out_from_cast", 2),
+            ("input_at_least_one", 1),
+        ] {
+            assert!(
+                provenance
+                    .query_formula(predicate, &[Value::I64(expected)])
+                    .is_some(),
+                "missing derived query formula for {predicate}"
+            );
+        }
+        assert!(
+            provenance
+                .query_formula("float_at_least_one", &[Value::F64(1.1_f64.to_bits())])
+                .is_some(),
+            "public lookup must canonicalize an f64 caller value to declared f32"
+        );
+        assert!(
+            provenance
+                .query_formula("wide_copy", &[Value::I64(i64::from(u32::MAX))])
+                .is_some(),
+            "public lookup must retain an in-range u32 boundary"
+        );
+        assert!(
+            provenance
+                .query_formula("wide_copy", &[Value::I64(-1)])
+                .is_none(),
+            "public lookup must reject a value outside the declared u32 range"
+        );
+    }
+
+    #[test]
+    fn provenance_preserves_source_symbol_spelling_in_public_metadata() {
+        let provenance = extract_from_source(
+            "0.25::gate(\"alpha\").\n\
+             0.1::gate(alpha).\n\
+             0.4::route(\"beta\"); 0.6::route(gamma).\n\
+             evidence(gate(\"alpha\"), true).\n\
+             query(gate(\"alpha\")).\n",
+        )
+        .expect("extract quoted-symbol provenance");
+
+        let quoted_alpha = Value::String("alpha".to_string());
+        assert_eq!(
+            provenance.queries[0].args.as_slice(),
+            std::slice::from_ref(&quoted_alpha)
+        );
+        assert_eq!(
+            provenance.evidence[0].0.args.as_slice(),
+            std::slice::from_ref(&quoted_alpha)
+        );
+        let leaf_values = provenance
+            .leaf_atoms
+            .values()
+            .map(|atom| atom.args[0].clone())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            leaf_values,
+            [quoted_alpha.clone(), Value::Symbol(symbol::intern("alpha"))]
+        );
+
+        let choices = &provenance
+            .choice_sources
+            .values()
+            .next()
+            .expect("annotated-disjunction choice metadata")
+            .choices;
+        assert_eq!(choices[0].0.args, [Value::String("beta".to_string())]);
+        assert_eq!(choices[1].0.args, [Value::Symbol(symbol::intern("gamma"))]);
+
+        let quoted_formula = provenance
+            .query_formula("gate", std::slice::from_ref(&quoted_alpha))
+            .expect("quoted symbol lookup");
+        let bare_formula = provenance
+            .query_formula("gate", &[Value::Symbol(symbol::intern("alpha"))])
+            .expect("bare symbol lookup");
+        assert_eq!(quoted_formula, bare_formula);
+
+        let gate_atoms = provenance
+            .atoms_with_formulas()
+            .filter(|(atom, _)| atom.predicate == "gate")
+            .collect::<Vec<_>>();
+        assert_eq!(gate_atoms.len(), 1);
+        assert_eq!(
+            gate_atoms[0].0.args,
+            [Value::Symbol(symbol::intern("alpha"))]
+        );
+    }
+
+    #[test]
+    fn exact_provenance_preserves_stratification_error_precedence() {
+        let error = extract_from_source(
+            "pred input(f32).\n\
+             pred output(f64).\n\
+             input(0.1).\n\
+             output(X) :- input(X).\n\
+             left() :- not right().\n\
+             right() :- not left().\n",
+        )
+        .expect_err("ordinary negation cycle must fail before rule type validation");
+
+        assert!(
+            matches!(error, XlogError::StratificationCycle(_)),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn exact_provenance_indexes_runtime_f32_nan_and_infinity() {
+        let provenance = extract_from_source(
+            "pred seed().\n\
+             pred nan_value(f32).\n\
+             pred infinite_value(f32).\n\
+             0.5::seed().\n\
+             nan_value(Y) :- seed(), Y is cast(0.0, f32) / cast(0.0, f32).\n\
+             infinite_value(Y) :- seed(), Y is cast(1.0, f32) / cast(0.0, f32).\n",
+        )
+        .expect("extract non-finite f32 provenance");
+
+        assert!(provenance
+            .query_formula("nan_value", &[Value::F64(f64::from(f32::NAN).to_bits())])
+            .is_some());
+        assert!(provenance
+            .query_formula(
+                "infinite_value",
+                &[Value::F64(f64::from(f32::INFINITY).to_bits())]
+            )
+            .is_some());
+    }
+
+    #[test]
+    fn exact_provenance_rejects_arithmetic_results_outside_public_value_range() {
+        let error = extract_from_source(
+            "pred seed().\n\
+             pred wrapped_u64(u64).\n\
+             0.5::seed().\n\
+             wrapped_u64(Z) :- seed(), Y is cast(0 - 1, u64), Z is Y + cast(1, u64).\n\
+             query(wrapped_u64(0)).\n",
+        )
+        .expect_err("non-representable u64 intermediate must fail before relational use");
+
+        assert!(
+            error
+                .to_string()
+                .contains("u64 arithmetic result exceeds i64"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn wfs_grounding_preserves_declared_arithmetic_widths() {
+        extract_from_source(
+            "pred input(u32).\n\
+             pred left(u32).\n\
+             pred right(u32).\n\
+             0.5::input(1).\n\
+             left(Y) :- input(X), Y is X + cast(1, u32), not right(Y).\n\
+             right(Y) :- input(X), Y is X + cast(1, u32), not left(Y).\n\
+             query(left(2)).\n",
+        )
+        .expect("ground typed arithmetic before WFS evaluation");
+    }
+
+    #[test]
+    fn wfs_grounding_rejects_arithmetic_results_outside_public_value_range() {
+        let error = extract_from_source(
+            "pred seed().\n\
+             pred left().\n\
+             pred right(u64).\n\
+             0.5::seed().\n\
+             left() :- seed(), Y is cast(0 - 1, u64), not right(Y).\n\
+             right(Y) :- seed(), Y is cast(0 - 1, u64), not left().\n\
+             query(left()).\n",
+        )
+        .expect_err("WFS grounding must reject non-representable arithmetic bindings");
+
+        assert!(
+            error
+                .to_string()
+                .contains("u64 arithmetic result exceeds i64"),
+            "unexpected error: {error}"
+        );
     }
 }

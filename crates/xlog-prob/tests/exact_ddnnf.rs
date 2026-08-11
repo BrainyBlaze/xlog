@@ -120,6 +120,261 @@ query(rain()).
 }
 
 #[test]
+fn test_exact_ddnnf_canonicalizes_declared_ground_value_types() {
+    let _lock = EXACT_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+    let source = r#"
+pred deterministic_float(f32).
+pred deterministic_float_out(f32).
+pred float_input(f32).
+pred float_out(f32).
+pred float_choice(f32).
+pred float_choice_out(f32).
+pred bool_input(bool).
+pred bool_out(bool).
+pred symbol_input(symbol).
+pred symbol_out(symbol).
+pred narrow_input(i32).
+pred narrow_out(i32).
+
+deterministic_float(0.1).
+0.5::float_input(0.1).
+0.5::float_choice(0.1); 0.5::float_choice(0.2).
+0.5::bool_input(true).
+0.5::symbol_input("alpha").
+0.5::narrow_input(2147483647).
+
+deterministic_float_out(Y) :- deterministic_float(X), Y is X + cast(0.0, f32).
+float_out(Y) :- float_input(X), Y is X + cast(0.0, f32).
+float_choice_out(Y) :- float_choice(X), Y is X + cast(0.0, f32).
+bool_out(Y) :- bool_input(X), Y is cast(X, bool).
+symbol_out(Y) :- symbol_input(X), Y is cast(X, symbol).
+narrow_out(Y) :- narrow_input(X), Y is X + cast(0, i32).
+
+evidence(float_out(0.1), true).
+query(deterministic_float_out(0.1)).
+query(float_input(0.1)).
+query(float_choice_out(0.1)).
+query(bool_out(true)).
+query(symbol_out("alpha")).
+query(narrow_out(2147483647)).
+"#;
+
+    let result = ExactDdnnfProgram::compile_source(source)
+        .expect("compile schema-canonical exact program")
+        .evaluate()
+        .expect("evaluate schema-canonical exact program");
+    let rounded_float = Value::F64(f64::from(0.1_f32).to_bits());
+
+    assert_eq!(
+        prob_of(
+            &result,
+            "deterministic_float_out",
+            std::slice::from_ref(&rounded_float),
+        ),
+        1.0
+    );
+    assert_eq!(
+        prob_of(&result, "float_input", std::slice::from_ref(&rounded_float),),
+        1.0
+    );
+    assert!(
+        (prob_of(
+            &result,
+            "float_choice_out",
+            std::slice::from_ref(&rounded_float),
+        ) - 0.5)
+            .abs()
+            < 1e-9
+    );
+    assert!((prob_of(&result, "bool_out", &[Value::I64(1)]) - 0.5).abs() < 1e-9);
+    assert!(
+        (prob_of(&result, "symbol_out", &[Value::String("alpha".to_string())],) - 0.5).abs() < 1e-9
+    );
+    assert!(
+        (prob_of(&result, "narrow_out", &[Value::I64(i64::from(i32::MAX))],) - 0.5).abs() < 1e-9
+    );
+}
+
+#[test]
+fn test_exact_ddnnf_rejects_schema_incompatible_ground_values() {
+    for (source, expected) in [
+        (
+            "pred small(i32).\n0.5::small(2147483648).\nquery(small(0)).\n",
+            "out of range for I32",
+        ),
+        (
+            "pred flag(bool).\n0.5::flag(2).\nquery(flag(0)).\n",
+            "not valid for Bool",
+        ),
+    ] {
+        let error = match ExactDdnnfProgram::compile_source(source) {
+            Ok(_) => panic!("schema-incompatible probabilistic atom must be rejected"),
+            Err(error) => error,
+        };
+        assert!(
+            error.to_string().contains(expected),
+            "expected {expected:?}, got {error}"
+        );
+    }
+}
+
+#[test]
+fn test_exact_ddnnf_preserves_closed_world_query_and_evidence_only_predicates() {
+    let _lock = EXACT_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let source = "0.5::rain().\n\
+                  evidence(frost(), false).\n\
+                  evidence(snow(0.1), false).\n\
+                  query(rain()).\n\
+                  query(frost()).\n\
+                  query(snow(0.1)).\n";
+
+    let result = ExactDdnnfProgram::compile_source(source)
+        .expect("compile closed-world exact program")
+        .evaluate()
+        .expect("evaluate closed-world exact program");
+
+    assert!((prob0(&result, "rain") - 0.5).abs() < 1e-9);
+    assert_eq!(prob0(&result, "frost"), 0.0);
+    assert_eq!(
+        prob_of(&result, "snow", &[Value::F64(0.1_f64.to_bits())]),
+        0.0
+    );
+}
+
+#[test]
+fn test_exact_ddnnf_preserves_quoted_string_query_values() {
+    let _lock = EXACT_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let result =
+        ExactDdnnfProgram::compile_source("0.5::gate(\"alpha\").\nquery(gate(\"alpha\")).\n")
+            .expect("compile quoted-string exact program")
+            .evaluate()
+            .expect("evaluate quoted-string exact program");
+
+    assert_eq!(
+        prob_of(&result, "gate", &[Value::String("alpha".to_string())]),
+        0.5
+    );
+}
+
+#[test]
+fn test_exact_ddnnf_materializes_runtime_f32_nan_and_infinity() {
+    let _lock = EXACT_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let source = "pred seed().\n\
+                  pred nan_value(f32).\n\
+                  pred infinite_value(f32).\n\
+                  pred accepted().\n\
+                  0.5::seed().\n\
+                  nan_value(Y) :- seed(), Y is cast(0.0, f32) / cast(0.0, f32).\n\
+                  infinite_value(Y) :- seed(), Y is cast(1.0, f32) / cast(0.0, f32).\n\
+                  accepted() :- nan_value(_), infinite_value(_).\n\
+                  query(accepted()).\n";
+
+    let result = ExactDdnnfProgram::compile_source(source)
+        .expect("compile non-finite f32 exact program")
+        .evaluate()
+        .expect("evaluate non-finite f32 exact program");
+    assert!((prob0(&result, "accepted") - 0.5).abs() < 1e-9);
+}
+
+#[test]
+fn test_exact_ddnnf_rejects_conflicting_quoted_and_bare_symbol_evidence() {
+    let _lock = EXACT_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let source = "0.5::gate(\"alpha\").\n\
+                  evidence(gate(\"alpha\"), true).\n\
+                  evidence(gate(alpha), false).\n\
+                  query(gate(\"alpha\")).\n";
+
+    let error = match ExactDdnnfProgram::compile_source(source) {
+        Ok(program) => program
+            .evaluate()
+            .expect_err("contradictory symbol evidence must be rejected"),
+        Err(error) => error,
+    };
+    assert!(
+        error.to_string().contains("conflicting evidence for gate"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn test_exact_ddnnf_deduplicates_equivalent_symbol_evidence() {
+    let _lock = EXACT_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let source = "0.5::gate(\"alpha\").\n\
+                  evidence(gate(\"alpha\"), true).\n\
+                  evidence(gate(alpha), true).\n\
+                  query(gate(\"alpha\")).\n";
+
+    let result = ExactDdnnfProgram::compile_source(source)
+        .expect("compile equivalent symbol evidence")
+        .evaluate()
+        .expect("evaluate equivalent symbol evidence");
+    assert_eq!(
+        prob_of(&result, "gate", &[Value::String("alpha".to_string())]),
+        1.0
+    );
+}
+
+#[test]
+fn test_exact_ddnnf_rejects_cross_width_rule_bindings() {
+    for (source, expected) in [
+        (
+            "pred input(f32).\npred output(f64).\n0.5::input(0.1).\noutput(X) :- input(X).\nquery(output(0.1)).\n",
+            "Type mismatch in rule for 'output'",
+        ),
+        (
+            "pred input(u32).\npred output(u64).\n0.5::input(1).\noutput(X) :- input(X).\nquery(output(1)).\n",
+            "Type mismatch in rule for 'output'",
+        ),
+        (
+            "pred left(f32).\npred right(f64).\npred output(f32).\n0.5::left(0.1).\nright(0.1).\noutput(X) :- left(X), right(X).\nquery(output(0.1)).\n",
+            "variable X is F32",
+        ),
+    ] {
+        let error = match ExactDdnnfProgram::compile_source(source) {
+            Ok(_) => panic!("cross-width rule binding must be rejected"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains(expected), "unexpected error: {error}");
+    }
+}
+
+#[test]
+fn test_exact_ddnnf_infers_probabilistic_body_predicate_widths_from_ground_choices() {
+    let _lock = EXACT_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let source = r#"
+0.5::probable(0).
+0.5::exclusive(0); 0.5::exclusive(1).
+observed(0).
+from_fact(X) :- probable(X), observed(X).
+from_choice(X) :- exclusive(X), observed(X).
+query(from_fact(0)).
+query(from_choice(0)).
+"#;
+
+    let result = ExactDdnnfProgram::compile_source(source)
+        .expect("compile inferred-width probabilistic joins")
+        .evaluate()
+        .expect("evaluate inferred-width probabilistic joins");
+    assert!((prob_of(&result, "from_fact", &[Value::I64(0)]) - 0.5).abs() < 1e-9);
+    assert!((prob_of(&result, "from_choice", &[Value::I64(0)]) - 0.5).abs() < 1e-9);
+}
+
+#[test]
 fn test_exact_ddnnf_rejects_zero_probability_evidence() {
     let _lock = EXACT_TEST_LOCK
         .lock()

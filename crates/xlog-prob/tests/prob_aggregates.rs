@@ -84,12 +84,15 @@ query(out_degree(1, 2)).
 #[test]
 fn exact_numeric_aggregate_provenance_matches_finite_oracles() {
     let source = r#"
+pred floating_obs(u32, f64).
 0.5::obs(1, 2).
 0.25::obs(1, 3).
+0.5::floating_obs(1, 2.0).
+0.25::floating_obs(1, 3.0).
 score_sum(X, sum(Y)) :- obs(X, Y).
 score_min(X, min(Y)) :- obs(X, Y).
 score_max(X, max(Y)) :- obs(X, Y).
-score_lse(X, logsumexp(Y)) :- obs(X, Y).
+score_lse(X, logsumexp(Y)) :- floating_obs(X, Y).
 query(score_sum(1, 5)).
 query(score_min(1, 2)).
 query(score_min(1, 3)).
