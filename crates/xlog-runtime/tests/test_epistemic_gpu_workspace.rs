@@ -38,10 +38,6 @@ use xlog_logic::epistemic::{
 #[cfg(feature = "epistemic-logic-tests")]
 use xlog_logic::{parse_program, Compiler};
 #[cfg(feature = "epistemic-logic-tests")]
-use xlog_runtime::executor::road_not_taken::{
-    decode_accepted_bitsets, export_from_accepted_world_views,
-};
-#[cfg(feature = "epistemic-logic-tests")]
 use xlog_runtime::EpistemicGpuRejectionReason;
 #[cfg(feature = "epistemic-logic-tests")]
 use xlog_stats::{
@@ -9222,104 +9218,4 @@ fn anonymous_wildcard_list_modal_key_matches_any_in_position_on_device() {
         vec![(1u32, 2u32)],
         "q = {{(A,B): host(A,B), know watched([A,_])}} = {{(1,2)}} (A=1 matches; second is wildcard)"
     );
-}
-
-/// TIER-2 EXPLORATORY (Phase-1): validate the grounded-uncertainty EXPORT end-to-end
-/// on a REAL GPU result — run the file-proven populated-candidate shape, read the
-/// device `world_views` via untracked DtoH, decode (stride-aware), and compute the
-/// grounded marginals + §1 through the export-lane. Observational (prints marginals)
-/// to empirically ground (a) the export on real GPU and (b) the invariant-marginal
-/// baseline before iterating toward a contested (∈(0,1)) shape.
-#[cfg(feature = "epistemic-logic-tests")]
-#[test]
-fn explore_grounded_marginal_export_over_gpu_world_views() {
-    let Some(fixture) = runtime_fixture() else {
-        return;
-    };
-    let program = parse_program(
-        r#"
-        #pragma epistemic_mode = g91
-        pred consider(u32).
-        pred ca(u32).
-        pred cb(u32).
-        ca(1).
-        cb(1).
-        consider(1) :- possible ca(1).
-        consider(2) :- possible cb(1).
-        "#,
-    )
-    .expect("parse g91 distinct-candidate modal program");
-
-    let executable = compile_epistemic_gpu_execution(&program)
-        .expect("g91 distinct-candidate modal must compile");
-    let literal_count = executable.gpu_plan.epistemic_literals.len();
-
-    let mut executor = Executor::new(Arc::clone(&fixture.provider));
-    for (name, rel) in &executable.relation_ids {
-        executor.register_relation(*rel, name);
-    }
-    // DECISIVE-PROBE finding (FAEEL+G91 x populated+empty): GPU single-component
-    // epistemic yields AT MOST ONE accepted world-view -- populated candidate => 1
-    // accepted (founded/determined, binary marginal); empty-registered candidate => 0
-    // accepted ("no consistent model"). NEVER >1. So contested marginals in (0,1)
-    // (which need >=2 accepted world-views differing on a candidate) are NOT producible
-    // via the epistemic path; they require MC/D4 (a probability distribution over
-    // models). This test retains the populated PATH-GREEN baseline (export validated
-    // end-to-end on real GPU, binary marginal).
-    executor.put_relation("ca", upload_unary_u32(&fixture.memory, &[1], "x"));
-    executor.put_relation("cb", upload_unary_u32(&fixture.memory, &[1], "x"));
-
-    let max_worlds = 4usize;
-    let result = executor
-        .execute_epistemic_gpu_execution(
-            &executable,
-            EpistemicGpuWorkspaceCapacities {
-                max_candidates: 8,
-                max_worlds,
-                max_models_per_reduction: 8,
-            },
-        )
-        .expect("populated-candidate modal must execute on device");
-
-    let accepted = result.semantic_trace.accepted_candidate_indices.clone();
-    eprintln!("EXPLORE literal_count={literal_count} accepted_indices={accepted:?}");
-
-    let ws = &result.prepared.workspace;
-    let host_buf = fixture
-        .provider
-        .dtoh_small_metadata_untracked::<u8>(&ws.world_views, ws.world_views.len())
-        .expect("untracked readback of world_views");
-
-    let bitsets = decode_accepted_bitsets(&host_buf, &accepted, literal_count, max_worlds);
-    let literal_atoms: Vec<(u32, u32, u32)> = (0..literal_count)
-        .map(|i| (1000u32, i as u32, 0u32))
-        .collect();
-    let export = export_from_accepted_world_views(&bitsets, literal_count, &literal_atoms);
-    eprintln!(
-        "EXPLORE marginals={:?} possible_not_known={:?} no_substrate={:?}",
-        export.marginals, export.possible_not_known, export.no_substrate_reason
-    );
-
-    // VALIDATED on real GPU: the populated-candidate shape yields non-empty accepted,
-    // the export decodes the world_views and computes a grounded marginal, and the
-    // LOUD no_substrate diagnostic fires for the single-literal (no-contestation) case.
-    // (Empirical finding: `possible cand(X)` over a populated relation collapses to ONE
-    // predicate-level literal => invariant marginal 1.0; integrity constraints fire at
-    // the REDUCED/global level, not as per-world-view pruning, so contested ∈(0,1)
-    // marginals need a deeper world-view-variation mechanism, tracked separately.)
-    assert!(
-        !accepted.is_empty(),
-        "populated-candidate shape must yield non-empty accepted (PATH-GREEN baseline)"
-    );
-    assert!(
-        export.marginals.iter().all(|m| (0.0..=1.0).contains(m)),
-        "grounded marginals must be valid probabilities; got {:?}",
-        export.marginals
-    );
-    if literal_count < 2 {
-        assert!(
-            export.no_substrate_reason.is_some(),
-            "single-literal case must raise the LOUD no-substrate diagnostic"
-        );
-    }
 }
