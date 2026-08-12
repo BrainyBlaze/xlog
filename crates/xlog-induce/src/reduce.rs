@@ -107,6 +107,70 @@ pub fn reduce_per_topology(
     result
 }
 
+/// One kept n-ary pattern after deterministic reduction.
+///
+/// `pattern_idx` points back into the scored pattern batch (canonical
+/// enumeration order), so the caller can recover the full
+/// [`crate::nary::NaryRulePattern`] and its per-atom relation identities.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct KeptNaryPattern {
+    pub pattern_idx: usize,
+    pub positives_covered: u32,
+    pub negatives_covered: u32,
+    pub local_rank: u32,
+    pub next_positives_covered: u32,
+    pub next_negatives_covered: u32,
+    pub tie_class_size: u32,
+}
+
+/// Reduce per-pattern `(positives_covered, negatives_covered)` counts to
+/// the final ordered top-K.
+///
+/// The binary reduction law with the topology dimension removed and the
+/// canonical enumeration index as the final tie-breaker:
+///
+/// 1. Sort pattern indexes by `(-positives_covered, negatives_covered,
+///    pattern_idx)`. The enumeration is deterministic lexicographic, so
+///    the index tie-break is as stable across calls as the binary
+///    engine's `(left_idx, right_idx)` tie-break.
+/// 2. Filter to `positives_covered > 0`, keep the first `k`.
+/// 3. `local_rank` / `next_*` over the positive-filtered list;
+///    `tie_class_size` over the FULL batch (including zero-coverage).
+pub fn reduce_nary(coverage: &[(u32, u32)], k: u32) -> Vec<KeptNaryPattern> {
+    let mut order: Vec<usize> = (0..coverage.len()).collect();
+    order.sort_by_key(|&i| (std::cmp::Reverse(coverage[i].0), coverage[i].1, i));
+
+    let positives: Vec<usize> = order
+        .iter()
+        .copied()
+        .filter(|&i| coverage[i].0 > 0)
+        .collect();
+
+    let kept_n = std::cmp::min(k as usize, positives.len());
+    let mut result = Vec::with_capacity(kept_n);
+    for (rank, &idx) in positives.iter().take(kept_n).enumerate() {
+        let (pos, neg) = coverage[idx];
+        let (next_pos, next_neg) = positives
+            .get(rank + 1)
+            .map(|&nxt| coverage[nxt])
+            .unwrap_or((0, 0));
+        let tie_count = coverage
+            .iter()
+            .filter(|&&(p, n)| p == pos && n == neg)
+            .count() as u32;
+        result.push(KeptNaryPattern {
+            pattern_idx: idx,
+            positives_covered: pos,
+            negatives_covered: neg,
+            local_rank: rank as u32,
+            next_positives_covered: next_pos,
+            next_negatives_covered: next_neg,
+            tie_class_size: tie_count,
+        });
+    }
+    result
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -328,5 +392,98 @@ mod tests {
         for c in &result {
             assert_eq!(c.head_rel_idx, head);
         }
+    }
+
+    // ── reduce_nary ─────────────────────────────────────────────────────
+
+    #[test]
+    fn nary_empty_input_yields_empty_output() {
+        assert!(reduce_nary(&[], 2).is_empty());
+    }
+
+    #[test]
+    fn nary_zero_k_yields_empty_output() {
+        assert!(reduce_nary(&[(5, 0)], 0).is_empty());
+    }
+
+    #[test]
+    fn nary_zero_coverage_patterns_are_excluded() {
+        assert!(reduce_nary(&[(0, 0), (0, 3)], 2).is_empty());
+    }
+
+    #[test]
+    fn nary_max_positives_wins_over_higher_negatives() {
+        let kept = reduce_nary(&[(3, 0), (5, 2)], 1);
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].pattern_idx, 1);
+        assert_eq!(kept[0].positives_covered, 5);
+        assert_eq!(kept[0].negatives_covered, 2);
+    }
+
+    #[test]
+    fn nary_min_negatives_breaks_positives_tie() {
+        let kept = reduce_nary(&[(5, 3), (5, 1)], 1);
+        assert_eq!(kept[0].pattern_idx, 1);
+        assert_eq!(kept[0].negatives_covered, 1);
+    }
+
+    #[test]
+    fn nary_enumeration_index_breaks_full_ties() {
+        let kept = reduce_nary(&[(5, 1), (5, 1)], 1);
+        assert_eq!(kept[0].pattern_idx, 0);
+    }
+
+    #[test]
+    fn nary_top_k_truncation_preserves_order_and_ranks() {
+        let kept = reduce_nary(&[(3, 0), (5, 0), (4, 0)], 2);
+        assert_eq!(kept.len(), 2);
+        assert_eq!(kept[0].pattern_idx, 1);
+        assert_eq!(kept[0].local_rank, 0);
+        assert_eq!(kept[1].pattern_idx, 2);
+        assert_eq!(kept[1].local_rank, 1);
+    }
+
+    #[test]
+    fn nary_next_diagnostics_point_past_kept_prefix() {
+        // Three positives, K=2: rank 0 sees rank 1, rank 1 sees the
+        // UNKEPT rank 2 — next_* reads the positive-filtered list, not
+        // the kept prefix.
+        let kept = reduce_nary(&[(5, 0), (4, 0), (3, 7)], 2);
+        assert_eq!(kept.len(), 2);
+        assert_eq!(
+            (
+                kept[0].next_positives_covered,
+                kept[0].next_negatives_covered
+            ),
+            (4, 0)
+        );
+        assert_eq!(
+            (
+                kept[1].next_positives_covered,
+                kept[1].next_negatives_covered
+            ),
+            (3, 7)
+        );
+    }
+
+    #[test]
+    fn nary_next_diagnostics_are_zero_when_no_next() {
+        let kept = reduce_nary(&[(5, 0)], 2);
+        assert_eq!(kept[0].next_positives_covered, 0);
+        assert_eq!(kept[0].next_negatives_covered, 0);
+    }
+
+    #[test]
+    fn nary_tie_class_counts_full_batch_including_zero_coverage_ties() {
+        // (5,0) appears three times; the fourth pattern differs.
+        let kept = reduce_nary(&[(5, 0), (5, 0), (3, 0), (5, 0)], 2);
+        assert_eq!(kept[0].tie_class_size, 3);
+        assert_eq!(kept[1].tie_class_size, 3);
+    }
+
+    #[test]
+    fn nary_k_larger_than_positives_returns_all_positives() {
+        let kept = reduce_nary(&[(5, 0), (0, 0), (3, 0)], 10);
+        assert_eq!(kept.len(), 2);
     }
 }

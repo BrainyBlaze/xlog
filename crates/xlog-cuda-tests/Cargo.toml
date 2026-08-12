@@ -11,6 +11,7 @@ publish = false
 [dependencies]
 xlog-cuda.workspace = true
 xlog-core.workspace = true
+xlog-induce.workspace = true
 xlog-logic.workspace = true
 xlog-runtime.workspace = true
 xlog-solve.workspace = true
@@ -65,4 +66,9 @@ harness = true
 [[test]]
 name = "ilp_reduce_sum"
 path = "tests/ilp_reduce_sum.rs"
+harness = true
+
+[[test]]
+name = "ilp_exact_nary_engine"
+path = "tests/ilp_exact_nary_engine.rs"
 harness = true

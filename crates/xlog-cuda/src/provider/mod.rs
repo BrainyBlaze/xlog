@@ -44,6 +44,7 @@ mod wcoj_project;
 
 pub use fj::{FjNode, FjPlan, FjSubAtom};
 pub use fj_delta::{FjDeltaCols, FJ_DELTA_MAX_DOMAIN};
+pub use ilp_exact_nary::{IlpExactNaryPatterns, IlpExactNaryRequest};
 
 /// Per-module PTX load timing (populated only when XLOG_WARMUP_PROFILE=1).
 #[derive(Debug, Clone, Default)]
