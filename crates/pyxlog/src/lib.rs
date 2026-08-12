@@ -273,7 +273,7 @@ pub(crate) fn provider_memory_stats(
     let memory = provider.memory();
     dict.set_item("allocated_bytes", memory.allocated_bytes())?;
     dict.set_item("memory_limit_bytes", memory.budget().device_bytes)?;
-    dict.set_item("peak_memory_bytes", memory.allocated_bytes())?;
+    dict.set_item("peak_memory_bytes", memory.peak_bytes())?;
     dict.set_item("status", "available")?;
     Ok(dict.into())
 }

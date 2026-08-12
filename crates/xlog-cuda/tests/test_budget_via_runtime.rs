@@ -12,8 +12,8 @@
 //! It exercises:
 //!
 //!   * Successful alloc/dealloc/reap through the full stack.
-//!   * Budget enforcement at the outermost decorator: an over-limit
-//!     allocation returns `OutOfBudget { requested, remaining }`
+//!   * Budget enforcement at the outermost decorator: an over-limit allocation
+//!     reports exact current, requested, remaining, and limit values
 //!     without ever calling into the logger or the underlying
 //!     resource.
 //!   * Async pending-free behavior end-to-end: dealloc keeps the
@@ -103,7 +103,9 @@ fn budget_rejects_over_limit_without_calling_inner() {
             err,
             Err(ResourceError::OutOfBudget {
                 requested,
-                remaining: LIMIT
+                current: 0,
+                remaining: LIMIT,
+                limit: LIMIT,
             }) if requested == LIMIT + 1
         ),
         "expected OutOfBudget {{LIMIT+1, LIMIT}}, got {:?}",
@@ -137,8 +139,10 @@ fn budget_rejection_after_partial_use_reports_correct_remaining() {
             err,
             Err(ResourceError::OutOfBudget {
                 requested: 8192,
-                remaining: 4096
-            })
+                current,
+                remaining: 4096,
+                limit: LIMIT,
+            }) if current == LIMIT - 4096
         ),
         "expected OutOfBudget {{8192, 4096}}, got {:?}",
         err

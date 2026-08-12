@@ -1133,10 +1133,22 @@ fn dot_escape(value: &str) -> String {
     value.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
+fn memory_budget_bytes(memory_mb: u64) -> Result<u64> {
+    memory_mb.checked_mul(1024 * 1024).ok_or_else(|| {
+        XlogError::Execution(format!("memory budget {memory_mb} MiB overflows bytes"))
+    })
+}
+
 fn make_provider(device: usize, memory_mb: u64) -> Result<Arc<CudaKernelProvider>> {
     use xlog_cuda::device_runtime::{
         AsyncCudaResource, DeviceMemoryResource, GlobalDeviceBudget, StreamPool, XlogDeviceRuntime,
     };
+    let memory_bytes = memory_budget_bytes(memory_mb)?;
+    let runtime_memory_bytes = usize::try_from(memory_bytes).map_err(|_| {
+        XlogError::Execution(format!(
+            "memory budget {memory_mb} MiB cannot be represented on this platform"
+        ))
+    })?;
     let device = Arc::new(CudaDevice::new(device)?);
     // Runtime-backed memory manager: the recorded GPU primitives (WCOJ
     // triangle/4-cycle/k-clique, Free Join, factorized delta) require a
@@ -1148,7 +1160,7 @@ fn make_provider(device: usize, memory_mb: u64) -> Result<Arc<CudaKernelProvider
         AsyncCudaResource::new(Arc::clone(&device), 0, Arc::clone(&pool)),
     );
     let budget_resource: Box<dyn DeviceMemoryResource + Send + Sync> = Box::new(
-        GlobalDeviceBudget::new(async_resource, (memory_mb * 1024 * 1024) as usize),
+        GlobalDeviceBudget::new(async_resource, runtime_memory_bytes),
     );
     let runtime = Arc::new(XlogDeviceRuntime::with_resource(
         Arc::clone(&device),
@@ -1158,7 +1170,7 @@ fn make_provider(device: usize, memory_mb: u64) -> Result<Arc<CudaKernelProvider
     ));
     let memory = Arc::new(GpuMemoryManager::with_runtime(
         Arc::clone(&device),
-        MemoryBudget::with_limit(memory_mb * 1024 * 1024),
+        MemoryBudget::with_limit(memory_bytes),
         Arc::clone(&runtime),
     ));
     Ok(Arc::new(CudaKernelProvider::with_runtime(device, memory)?))
@@ -1308,7 +1320,7 @@ fn run_probabilistic(args: ProbArgs) -> Result<()> {
 
         let mut config = GpuConfig::default();
         config.device_ordinal = args.device;
-        config.memory_bytes = args.memory_mb * 1024 * 1024;
+        config.memory_bytes = memory_budget_bytes(args.memory_mb)?;
 
         match resolve_prob_engine(&args, &program) {
             ProbEngineCli::ExactDdnnf => {
