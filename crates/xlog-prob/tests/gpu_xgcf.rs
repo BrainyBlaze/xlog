@@ -3,7 +3,7 @@
 
 use std::sync::Arc;
 
-use xlog_core::MemoryBudget;
+use xlog_core::{MemoryBudget, XlogError};
 use xlog_cuda::{CudaDevice, CudaKernelProvider, GpuMemoryManager};
 use xlog_prob::compilation::{gpu_d4::compute_free_var_mask_gpu, DeviceRandomVarList};
 use xlog_prob::gpu::{GpuCircuitBuilder, GpuCircuitLayout, GpuXgcf};
@@ -119,6 +119,281 @@ fn build_device_lit_circuit(
     };
 
     GpuXgcf::from_device(builder, layout, provider).expect("GpuXgcf from_device")
+}
+
+fn binary_circuit(node_type: XgcfNodeType) -> Xgcf {
+    assert!(matches!(node_type, XgcfNodeType::And | XgcfNodeType::Or));
+    Xgcf {
+        node_type: vec![XgcfNodeType::Lit, XgcfNodeType::Lit, node_type],
+        child_offsets: vec![0, 0, 0, 2],
+        child_indices: vec![0, 1],
+        lit: vec![1, 2, 0],
+        decision_var: vec![0, 0, 0],
+        decision_child_false: vec![0, 0, 0],
+        decision_child_true: vec![0, 0, 0],
+        roots: vec![2],
+        level_offsets: vec![0, 2, 3],
+        level_nodes: vec![0, 1, 2],
+    }
+}
+
+fn edge_policy_provider() -> Option<Arc<CudaKernelProvider>> {
+    match try_provider() {
+        Some(provider) => Some(Arc::new(provider)),
+        None if std::env::var("XLOG_REQUIRE_CUDA").as_deref() == Ok("1") => {
+            panic!("XLOG_REQUIRE_CUDA=1 but the XGCF edge-policy provider was unavailable")
+        }
+        None => None,
+    }
+}
+
+fn assert_nan_compilation_error(error: &XlogError) {
+    assert!(
+        matches!(error, XlogError::Compilation(message) if message.contains("NaN")),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn test_gpu_xgcf_positive_infinity_value_parity() {
+    let Some(provider) = edge_policy_provider() else {
+        return;
+    };
+
+    let or_circuit = binary_circuit(XgcfNodeType::Or);
+    let or_weights = vec![(0.0, 0.0), (f64::INFINITY, 0.0), (-2.0, 0.0)];
+    let cpu_or = or_circuit
+        .eval_log_wmc(|var| or_weights[var as usize])
+        .unwrap();
+    let gpu_or = GpuXgcf::upload(&provider, &or_circuit)
+        .unwrap()
+        .eval_log_wmc(&provider, &or_weights)
+        .unwrap();
+
+    let nnf = r#"
+o 1 0
+t 2 0
+f 3 0
+1 2 1 0
+1 3 -1 0
+"#;
+    let decision_circuit = Xgcf::from_ddnnf(&DecisionDnnf::parse_str(nnf).unwrap()).unwrap();
+    let decision_weights = vec![(0.0, 0.0), (f64::INFINITY, -1.0)];
+    let cpu_decision = decision_circuit
+        .eval_log_wmc(|var| decision_weights[var as usize])
+        .unwrap();
+    let gpu_decision = GpuXgcf::upload(&provider, &decision_circuit)
+        .unwrap()
+        .eval_log_wmc(&provider, &decision_weights)
+        .unwrap();
+
+    for (name, cpu, gpu) in [
+        ("OR", cpu_or, gpu_or),
+        ("DECISION", cpu_decision, gpu_decision),
+    ] {
+        assert!(
+            cpu.is_infinite() && cpu.is_sign_positive(),
+            "{name}: CPU expected +inf, got {cpu}"
+        );
+        assert_eq!(gpu, cpu, "{name}: CPU/GPU +inf policy diverged");
+    }
+}
+
+#[test]
+fn test_gpu_xgcf_nan_weight_error_parity() {
+    let Some(provider) = edge_policy_provider() else {
+        return;
+    };
+    let circuit = binary_circuit(XgcfNodeType::Or);
+    let weights = vec![(0.0, 0.0), (f64::NAN, 0.0), (-2.0, 0.0)];
+
+    let cpu_error = circuit
+        .eval_log_wmc(|var| weights[var as usize])
+        .expect_err("CPU must reject NaN log weights");
+    let gpu_error = GpuXgcf::upload(&provider, &circuit)
+        .unwrap()
+        .eval_log_wmc(&provider, &weights)
+        .expect_err("host GPU API must reject NaN log weights");
+
+    assert_nan_compilation_error(&cpu_error);
+    assert_nan_compilation_error(&gpu_error);
+}
+
+#[test]
+fn test_gpu_xgcf_computed_nan_error_parity() {
+    let Some(provider) = edge_policy_provider() else {
+        return;
+    };
+    let circuit = binary_circuit(XgcfNodeType::And);
+    let weights = vec![(0.0, 0.0), (f64::INFINITY, 0.0), (f64::NEG_INFINITY, 0.0)];
+
+    let cpu_error = circuit
+        .eval_log_wmc(|var| weights[var as usize])
+        .expect_err("CPU must reject computed +inf + -inf NaN");
+    let gpu_error = GpuXgcf::upload(&provider, &circuit)
+        .unwrap()
+        .eval_log_wmc(&provider, &weights)
+        .expect_err("host GPU API must reject computed +inf + -inf NaN");
+
+    assert_nan_compilation_error(&cpu_error);
+    assert_nan_compilation_error(&gpu_error);
+}
+
+#[test]
+fn test_gpu_xgcf_normalized_positive_infinity_gradient_error_parity() {
+    let Some(provider) = edge_policy_provider() else {
+        return;
+    };
+    let decision_nnf = r#"
+o 1 0
+t 2 0
+f 3 0
+1 2 1 0
+1 3 -1 0
+"#;
+    let cases = [
+        (
+            "OR",
+            binary_circuit(XgcfNodeType::Or),
+            vec![(0.0, 0.0), (f64::INFINITY, 0.0), (-2.0, 0.0)],
+        ),
+        (
+            "DECISION",
+            Xgcf::from_ddnnf(&DecisionDnnf::parse_str(decision_nnf).unwrap()).unwrap(),
+            vec![(0.0, 0.0), (f64::INFINITY, -1.0)],
+        ),
+    ];
+
+    for (shape, circuit, weights) in cases {
+        let cpu_error = circuit
+            .eval_log_wmc_and_grads(&weights)
+            .expect_err("CPU normalization must reject non-finite gradients");
+        let gpu_error = GpuXgcf::upload(&provider, &circuit)
+            .unwrap()
+            .eval_log_wmc_and_grads(&provider, &weights)
+            .expect_err("GPU normalization must reject non-finite gradients");
+
+        for (backend, error) in [("CPU", cpu_error), ("GPU", gpu_error)] {
+            assert!(
+                matches!(&error, XlogError::Compilation(message) if message.contains("gradient") && message.contains("non-finite")),
+                "{shape} {backend}: unexpected error: {error}"
+            );
+        }
+    }
+}
+
+#[test]
+fn test_gpu_xgcf_deterministic_gradient_allows_positive_infinity() {
+    let Some(provider) = edge_policy_provider() else {
+        return;
+    };
+    let circuit = Xgcf {
+        node_type: vec![XgcfNodeType::Lit],
+        child_offsets: vec![0, 0],
+        child_indices: vec![],
+        lit: vec![3],
+        decision_var: vec![0],
+        decision_child_false: vec![0],
+        decision_child_true: vec![0],
+        roots: vec![0],
+        level_offsets: vec![0, 1],
+        level_nodes: vec![0],
+    };
+    let weights = vec![
+        (0.0, 0.0),
+        (f64::INFINITY, f64::INFINITY),
+        (f64::INFINITY, f64::INFINITY),
+        (f64::INFINITY, f64::INFINITY),
+    ];
+
+    let cpu = circuit
+        .eval_log_wmc_and_grads(&weights)
+        .expect("CPU deterministic gradients must allow finite-output +inf cases");
+    let gpu = GpuXgcf::upload(&provider, &circuit)
+        .unwrap()
+        .eval_log_wmc_and_grads(&provider, &weights)
+        .expect("GPU deterministic gradients must allow finite-output +inf cases");
+
+    assert!(cpu.0.is_infinite() && cpu.0.is_sign_positive());
+    assert_eq!(cpu.1, vec![0.0, 0.0, 0.0, 1.0]);
+    assert_eq!(cpu.2, vec![0.0; 4]);
+    assert_eq!(gpu, cpu);
+}
+
+#[test]
+fn test_gpu_xgcf_reserved_weight_slot_zero_is_ignored() {
+    let Some(provider) = edge_policy_provider() else {
+        return;
+    };
+    let circuit = binary_circuit(XgcfNodeType::Or);
+    let baseline_weights = vec![(0.0, 0.0), (-0.25, -0.75), (-1.0, -0.5)];
+    let reserved_non_finite = vec![
+        (f64::NAN, f64::INFINITY),
+        baseline_weights[1],
+        baseline_weights[2],
+    ];
+
+    let cpu_value = circuit
+        .eval_log_wmc(|var| reserved_non_finite[var as usize])
+        .unwrap();
+    let cpu_grads = circuit
+        .eval_log_wmc_and_grads(&reserved_non_finite)
+        .expect("CPU must ignore reserved slot 0");
+
+    let mut gpu = GpuXgcf::upload(&provider, &circuit).unwrap();
+    let baseline_gpu_value = gpu.eval_log_wmc(&provider, &baseline_weights).unwrap();
+    let baseline_gpu_grads = gpu
+        .eval_log_wmc_and_grads(&provider, &baseline_weights)
+        .unwrap();
+    let reserved_gpu_value = gpu
+        .eval_log_wmc(&provider, &reserved_non_finite)
+        .expect("GPU value path must ignore reserved slot 0");
+    let reserved_gpu_grads = gpu
+        .eval_log_wmc_and_grads(&provider, &reserved_non_finite)
+        .expect("GPU gradient path must ignore reserved slot 0");
+
+    assert_eq!(cpu_value, baseline_gpu_value);
+    assert_eq!(reserved_gpu_value, baseline_gpu_value);
+    assert_eq!(cpu_grads, baseline_gpu_grads);
+    assert_eq!(reserved_gpu_grads, baseline_gpu_grads);
+}
+
+#[test]
+fn test_gpu_xgcf_device_only_nan_sentinel() {
+    let Some(provider) = edge_policy_provider() else {
+        return;
+    };
+    let circuit = binary_circuit(XgcfNodeType::Or);
+    let mut gpu = GpuXgcf::upload(&provider, &circuit).unwrap();
+    let host_true = [0.0, f64::NAN, -2.0];
+    let host_false = [0.0; 3];
+    {
+        let (device_true, device_false) = gpu.var_log_weights_mut();
+        provider
+            .device()
+            .inner()
+            .htod_sync_copy_into(&host_true, device_true)
+            .unwrap();
+        provider
+            .device()
+            .inner()
+            .htod_sync_copy_into(&host_false, device_false)
+            .unwrap();
+    }
+
+    let mut output = provider.memory().alloc::<f64>(1).unwrap();
+    gpu.eval_log_wmc_device_inplace(&provider, &mut output)
+        .unwrap();
+    let mut host_output = [0.0];
+    provider
+        .device()
+        .inner()
+        .dtoh_sync_copy_into(&output, &mut host_output)
+        .unwrap();
+    assert!(
+        host_output[0].is_nan(),
+        "device-only API must emit a NaN sentinel"
+    );
 }
 
 #[test]

@@ -20,6 +20,8 @@ use crate::compilation::{
     compile_gpu_d4_and_verify_cached, encode_cnf_gpu, CircuitCompileProfile, DeviceRandomVarList,
     GpuCompileConfig, GpuPirGraph, GpuPirRoots,
 };
+#[cfg(feature = "host-io")]
+use crate::logsumexp::{validate_circuit_gradient_values, validate_circuit_value};
 use crate::neural_fast_path::{GpuWeightSlots, NeuralFastPathConfig};
 use crate::provenance::{
     extract_from_program, extract_from_source, AggregateLiftStatus, GroundAtom, Provenance, Value,
@@ -1879,7 +1881,7 @@ impl ExactDdnnfProgram {
             .inner()
             .dtoh_sync_copy_into(&out_log_z, &mut host)
             .map_err(|e| XlogError::Kernel(format!("Failed to read logZ: {}", e)))?;
-        Ok(host[0])
+        validate_circuit_value(host[0])
     }
 
     fn gpu_state(&self) -> Result<Arc<GpuExactState>> {
@@ -1951,6 +1953,7 @@ impl ExactDdnnfProgram {
         device
             .dtoh_sync_copy_into(&root_view, &mut log_z)
             .map_err(|e| XlogError::Kernel(format!("Failed to read logZ: {}", e)))?;
+        let log_z = validate_circuit_value(log_z[0])?;
 
         // Gradient buffers are multi-slot: [slot0_var0..slot0_varN, slot1_var0..].
         // Slice into the correct slot to download only this circuit's gradients.
@@ -1966,8 +1969,9 @@ impl ExactDdnnfProgram {
         device
             .dtoh_sync_copy_into(&grad_false_slot, &mut host_grad_false)
             .map_err(|e| XlogError::Kernel(format!("Failed to download grad_false: {}", e)))?;
+        validate_circuit_gradient_values(&host_grad_true, &host_grad_false)?;
 
-        Ok((log_z[0], host_grad_true, host_grad_false))
+        Ok((log_z, host_grad_true, host_grad_false))
     }
 }
 
@@ -2697,6 +2701,53 @@ query(sprinkler()).
             "conditioning on sprinkler should reduce logZ (log_z_e={}, log_z_eq={})",
             log_z_e,
             log_z_eq
+        );
+    }
+
+    #[test]
+    fn cached_gradient_readback_rejects_non_finite_device_output() {
+        let _gpu_guard = crate::test_gpu_lock::lock();
+        match CudaDevice::new(0) {
+            Ok(_) => {}
+            Err(error) if std::env::var("XLOG_REQUIRE_CUDA").as_deref() == Ok("1") => {
+                panic!("XLOG_REQUIRE_CUDA=1 but CUDA runtime initialization failed: {error}")
+            }
+            Err(error) => {
+                eprintln!("Skipping test: CUDA runtime unavailable: {error}");
+                return;
+            }
+        }
+
+        let program = ExactDdnnfProgram::compile_source(
+            "0.5::rain().\n\
+             query(rain()).\n",
+        )
+        .unwrap();
+        let rain_var = program.query_var(0).unwrap() as usize;
+        let state = program.gpu_state().unwrap();
+
+        {
+            let mut cache = state
+                .cache
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let var_stride = cache.var_stride().unwrap() as usize;
+            let slot_start = state.handle().slot_index() as usize * var_stride;
+            let (var_log_true, _) = cache.var_log_weights_mut();
+            let mut rain_true =
+                var_log_true.slice_mut((slot_start + rain_var)..(slot_start + rain_var + 1));
+            state
+                .provider
+                .htod_sync_copy_into_tracked(&[f64::INFINITY], &mut rain_true)
+                .unwrap();
+        }
+
+        let error = program
+            .eval_log_z_and_grads_gpu_cached(None)
+            .expect_err("non-finite downloaded gradients must be rejected");
+        assert!(
+            matches!(error, XlogError::Compilation(ref message) if message.contains("gradient") && message.contains("non-finite")),
+            "unexpected error: {error}"
         );
     }
 }

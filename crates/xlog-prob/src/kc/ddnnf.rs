@@ -4,6 +4,10 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use xlog_core::{Result, XlogError};
 
+use crate::logsumexp::{
+    circuit_logsumexp, validate_circuit_log_weight_pair, validate_circuit_value,
+};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DdnnfNodeKind {
     Or,
@@ -295,23 +299,6 @@ impl DecisionDnnf {
     {
         let mut memo: HashMap<u32, f64> = HashMap::new();
 
-        fn logsumexp(values: &[f64]) -> f64 {
-            let mut max = f64::NEG_INFINITY;
-            for &v in values {
-                if v > max {
-                    max = v;
-                }
-            }
-            if max.is_infinite() {
-                return max;
-            }
-            let mut sum = 0.0;
-            for &v in values {
-                sum += (v - max).exp();
-            }
-            max + sum.ln()
-        }
-
         fn eval_node<F>(
             node_id: u32,
             ddnnf: &DecisionDnnf,
@@ -350,7 +337,7 @@ impl DecisionDnnf {
                         let mut lit_sum = 0.0;
                         for &lit in &edge.lits {
                             let var = lit.unsigned_abs();
-                            let (t, f) = var_log_weights(var);
+                            let (t, f) = validate_circuit_log_weight_pair(var_log_weights(var))?;
                             lit_sum += if lit > 0 { t } else { f };
                         }
                         acc += lit_sum + child;
@@ -372,15 +359,16 @@ impl DecisionDnnf {
                         let mut lit_sum = 0.0;
                         for &lit in &edge.lits {
                             let var = lit.unsigned_abs();
-                            let (t, f) = var_log_weights(var);
+                            let (t, f) = validate_circuit_log_weight_pair(var_log_weights(var))?;
                             lit_sum += if lit > 0 { t } else { f };
                         }
                         branch_vals.push(lit_sum + child);
                     }
-                    logsumexp(&branch_vals)
+                    circuit_logsumexp(&branch_vals)?
                 }
             };
 
+            let value = validate_circuit_value(value)?;
             memo.insert(node_id, value);
             Ok(value)
         }

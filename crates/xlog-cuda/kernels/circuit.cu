@@ -4,7 +4,7 @@
 #include <cmath>
 
 /**
- * XGCF Circuit Evaluation Kernels (Phase 4)
+ * XGCF Circuit Evaluation Kernels
  *
  * This module evaluates Decision-DNNF circuits lowered to XGCF in log-space.
  *
@@ -27,11 +27,41 @@
 #define BLOCK_SIZE 256
 
 __device__ __forceinline__ double logsumexp2(double a, double b) {
+    if (isnan(a) || isnan(b)) {
+        return NAN;
+    }
     double m = (a > b) ? a : b;
-    if (isinf(m) && m < 0.0) {
+    if (isinf(m)) {
         return m;
     }
     return m + log(exp(a - m) + exp(b - m));
+}
+
+__device__ __forceinline__ double circuit_logsumexp_children(
+    const uint32_t* child_indices,
+    uint32_t child_start,
+    uint32_t child_end,
+    const double* values
+) {
+    double maxv = -INFINITY;
+    for (uint32_t i = child_start; i < child_end; i++) {
+        double child_value = values[child_indices[i]];
+        if (isnan(child_value)) {
+            return NAN;
+        }
+        if (child_value > maxv) {
+            maxv = child_value;
+        }
+    }
+    if (isinf(maxv)) {
+        return maxv;
+    }
+
+    double sum = 0.0;
+    for (uint32_t i = child_start; i < child_end; i++) {
+        sum += exp(values[child_indices[i]] - maxv);
+    }
+    return maxv + log(sum);
 }
 
 __device__ __forceinline__ size_t slot_offset(uint32_t slot, uint32_t stride) {
@@ -108,24 +138,7 @@ extern "C" __global__ void xgcf_forward_level(
         case XGCF_OR: {
             uint32_t c0 = child_offsets[node];
             uint32_t c1 = child_offsets[node + 1];
-            double maxv = -INFINITY;
-            for (uint32_t i = c0; i < c1; i++) {
-                uint32_t child = child_indices[i];
-                double cv = values[child];
-                if (cv > maxv) {
-                    maxv = cv;
-                }
-            }
-            if (isinf(maxv) && maxv < 0.0) {
-                v = maxv;
-            } else {
-                double sum = 0.0;
-                for (uint32_t i = c0; i < c1; i++) {
-                    uint32_t child = child_indices[i];
-                    sum += exp(values[child] - maxv);
-                }
-                v = maxv + log(sum);
-            }
+            v = circuit_logsumexp_children(child_indices, c0, c1, values);
             break;
         }
         case XGCF_DECISION: {
@@ -544,24 +557,7 @@ extern "C" __global__ void xgcf_forward_level_cached(
         case XGCF_OR: {
             uint32_t c0 = child_offsets_s[node];
             uint32_t c1 = child_offsets_s[node + 1];
-            double maxv = -INFINITY;
-            for (uint32_t i = c0; i < c1; i++) {
-                uint32_t child = child_indices_s[i];
-                double cv = values_s[child];
-                if (cv > maxv) {
-                    maxv = cv;
-                }
-            }
-            if (isinf(maxv) && maxv < 0.0) {
-                v = maxv;
-            } else {
-                double sum = 0.0;
-                for (uint32_t i = c0; i < c1; i++) {
-                    uint32_t child = child_indices_s[i];
-                    sum += exp(values_s[child] - maxv);
-                }
-                v = maxv + log(sum);
-            }
+            v = circuit_logsumexp_children(child_indices_s, c0, c1, values_s);
             break;
         }
         case XGCF_DECISION: {
@@ -662,24 +658,7 @@ extern "C" __global__ void xgcf_eval_all_levels_cached(
                 case XGCF_OR: {
                     uint32_t c0 = child_offsets_s[node];
                     uint32_t c1 = child_offsets_s[node + 1];
-                    double maxv = -INFINITY;
-                    for (uint32_t i = c0; i < c1; i++) {
-                        uint32_t child = child_indices_s[i];
-                        double cv = values_s[child];
-                        if (cv > maxv) {
-                            maxv = cv;
-                        }
-                    }
-                    if (isinf(maxv) && maxv < 0.0) {
-                        v = maxv;
-                    } else {
-                        double sum = 0.0;
-                        for (uint32_t i = c0; i < c1; i++) {
-                            uint32_t child = child_indices_s[i];
-                            sum += exp(values_s[child] - maxv);
-                        }
-                        v = maxv + log(sum);
-                    }
+                    v = circuit_logsumexp_children(child_indices_s, c0, c1, values_s);
                     break;
                 }
                 case XGCF_DECISION: {
@@ -794,24 +773,7 @@ extern "C" __global__ void xgcf_eval_all_levels_cached_batched(
                 case XGCF_OR: {
                     uint32_t c0 = child_offsets_s[node];
                     uint32_t c1 = child_offsets_s[node + 1];
-                    double maxv = -INFINITY;
-                    for (uint32_t i = c0; i < c1; i++) {
-                        uint32_t child = child_indices_s[i];
-                        double cv = values_q[child];
-                        if (cv > maxv) {
-                            maxv = cv;
-                        }
-                    }
-                    if (isinf(maxv) && maxv < 0.0) {
-                        v = maxv;
-                    } else {
-                        double sum = 0.0;
-                        for (uint32_t i = c0; i < c1; i++) {
-                            uint32_t child = child_indices_s[i];
-                            sum += exp(values_q[child] - maxv);
-                        }
-                        v = maxv + log(sum);
-                    }
+                    v = circuit_logsumexp_children(child_indices_s, c0, c1, values_q);
                     break;
                 }
                 case XGCF_DECISION: {

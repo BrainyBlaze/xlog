@@ -425,8 +425,11 @@ impl TinyXgcfDevice {
 }
 
 fn logsumexp2(a: f64, b: f64) -> f64 {
+    if a.is_nan() || b.is_nan() {
+        return f64::NAN;
+    }
     let m = a.max(b);
-    if m.is_infinite() && m.is_sign_negative() {
+    if m.is_infinite() {
         return m;
     }
     m + ((a - m).exp() + (b - m).exp()).ln()
@@ -1234,4 +1237,31 @@ pub fn numerical_gradient(
         (values_plus[spec.root as usize] - values_minus[spec.root as usize]) / (2.0 * eps);
 
     Ok((grad_true, grad_false))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::logsumexp2;
+
+    #[test]
+    fn circuit_logsumexp2_edge_policy() {
+        for (a, b) in [
+            (f64::INFINITY, -2.0),
+            (-2.0, f64::INFINITY),
+            (f64::INFINITY, f64::NEG_INFINITY),
+        ] {
+            let value = logsumexp2(a, b);
+            assert!(
+                value.is_infinite() && value.is_sign_positive(),
+                "logsumexp2({a}, {b}) expected +inf, got {value}"
+            );
+        }
+
+        for (a, b) in [(f64::NAN, 0.0), (0.0, f64::NAN), (f64::INFINITY, f64::NAN)] {
+            assert!(
+                logsumexp2(a, b).is_nan(),
+                "logsumexp2({a}, {b}) must give NaN precedence"
+            );
+        }
+    }
 }

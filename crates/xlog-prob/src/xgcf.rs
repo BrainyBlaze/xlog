@@ -5,6 +5,10 @@ use std::collections::HashMap;
 use xlog_core::{Result, XlogError};
 
 use crate::kc::ddnnf::{DdnnfEdge, DdnnfNodeKind, DecisionDnnf};
+use crate::logsumexp::{
+    circuit_logsumexp, validate_circuit_gradient_values, validate_circuit_log_weight_pair,
+    validate_circuit_value,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
@@ -86,23 +90,6 @@ impl Xgcf {
             ));
         }
 
-        fn logsumexp(values: &[f64]) -> f64 {
-            let mut max = f64::NEG_INFINITY;
-            for &v in values {
-                if v > max {
-                    max = v;
-                }
-            }
-            if max.is_infinite() {
-                return max;
-            }
-            let mut sum = 0.0;
-            for &v in values {
-                sum += (v - max).exp();
-            }
-            max + sum.ln()
-        }
-
         let mut values: Vec<f64> = vec![0.0; n];
 
         let num_levels = self.level_offsets.len() - 1;
@@ -123,7 +110,7 @@ impl Xgcf {
                             )));
                         }
                         let var = lit.unsigned_abs();
-                        let (t, f) = var_log_weights(var);
+                        let (t, f) = validate_circuit_log_weight_pair(var_log_weights(var))?;
                         if lit > 0 {
                             t
                         } else {
@@ -158,7 +145,7 @@ impl Xgcf {
                         for &child in &self.child_indices[c0..c1] {
                             branch_vals.push(values[child as usize]);
                         }
-                        logsumexp(&branch_vals)
+                        circuit_logsumexp(&branch_vals)?
                     }
                     XgcfNodeType::Decision => {
                         let var = self.decision_var[idx];
@@ -170,11 +157,11 @@ impl Xgcf {
                         }
                         let child_false = self.decision_child_false[idx] as usize;
                         let child_true = self.decision_child_true[idx] as usize;
-                        let (t, f) = var_log_weights(var);
-                        logsumexp(&[f + values[child_false], t + values[child_true]])
+                        let (t, f) = validate_circuit_log_weight_pair(var_log_weights(var))?;
+                        circuit_logsumexp(&[f + values[child_false], t + values[child_true]])?
                     }
                 };
-                values[idx] = v;
+                values[idx] = validate_circuit_value(v)?;
             }
         }
 
@@ -238,24 +225,6 @@ impl Xgcf {
                 var_log_weights.len()
             )));
         }
-
-        fn logsumexp(values: &[f64]) -> f64 {
-            let mut max = f64::NEG_INFINITY;
-            for &v in values {
-                if v > max {
-                    max = v;
-                }
-            }
-            if max.is_infinite() {
-                return max;
-            }
-            let mut sum = 0.0;
-            for &v in values {
-                sum += (v - max).exp();
-            }
-            max + sum.ln()
-        }
-
         let mut values: Vec<f64> = vec![0.0; n];
 
         let num_levels = self.level_offsets.len() - 1;
@@ -276,7 +245,8 @@ impl Xgcf {
                             )));
                         }
                         let var = lit.unsigned_abs();
-                        let (t, f) = var_log_weights[var as usize];
+                        let (t, f) =
+                            validate_circuit_log_weight_pair(var_log_weights[var as usize])?;
                         if lit > 0 {
                             t
                         } else {
@@ -311,7 +281,7 @@ impl Xgcf {
                         for &child in &self.child_indices[c0..c1] {
                             branch_vals.push(values[child as usize]);
                         }
-                        logsumexp(&branch_vals)
+                        circuit_logsumexp(&branch_vals)?
                     }
                     XgcfNodeType::Decision => {
                         let var = self.decision_var[idx];
@@ -323,11 +293,12 @@ impl Xgcf {
                         }
                         let child_false = self.decision_child_false[idx] as usize;
                         let child_true = self.decision_child_true[idx] as usize;
-                        let (t, f) = var_log_weights[var as usize];
-                        logsumexp(&[f + values[child_false], t + values[child_true]])
+                        let (t, f) =
+                            validate_circuit_log_weight_pair(var_log_weights[var as usize])?;
+                        circuit_logsumexp(&[f + values[child_false], t + values[child_true]])?
                     }
                 };
-                values[idx] = v;
+                values[idx] = validate_circuit_value(v)?;
             }
         }
 
@@ -436,6 +407,7 @@ impl Xgcf {
             }
         }
 
+        validate_circuit_gradient_values(&grad_true, &grad_false)?;
         Ok((log_z, grad_true, grad_false))
     }
 }
@@ -1403,5 +1375,193 @@ f 4 0
         let a = ddnnf.eval_log_wmc(w).unwrap();
         let b = xgcf.eval_log_wmc(w).unwrap();
         assert!((a - b).abs() < 1e-9, "ddnnf={} xgcf={}", a, b);
+    }
+
+    #[test]
+    fn circuit_evaluators_share_logsumexp_contract() {
+        let nnf = r#"
+o 1 0
+t 2 0
+f 3 0
+1 2 1 0
+1 3 -1 0
+"#;
+        let ddnnf = DecisionDnnf::parse_str(nnf).unwrap();
+        let xgcf = Xgcf::from_ddnnf(&ddnnf).unwrap();
+
+        let ddnnf_error = ddnnf
+            .eval_log_wmc(|_| (f64::NAN, f64::NEG_INFINITY))
+            .expect_err("Decision-DNNF must reject NaN weights");
+        let xgcf_error = xgcf
+            .eval_log_wmc(|_| (f64::NAN, f64::NEG_INFINITY))
+            .expect_err("XGCF must reject NaN weights");
+        let weights = vec![(0.0, 0.0), (f64::NAN, f64::NEG_INFINITY)];
+        let gradient_error = xgcf
+            .eval_log_wmc_and_grads(&weights)
+            .expect_err("XGCF gradient evaluation must reject NaN weights");
+
+        for (name, error) in [
+            ("Decision-DNNF", ddnnf_error),
+            ("XGCF", xgcf_error),
+            ("XGCF gradients", gradient_error),
+        ] {
+            assert!(
+                matches!(&error, XlogError::Compilation(message) if message.contains("NaN")),
+                "{name}: unexpected error: {error}"
+            );
+        }
+
+        let ddnnf_log_z = ddnnf.eval_log_wmc(|_| (f64::INFINITY, -1.0)).unwrap();
+        let xgcf_log_z = xgcf.eval_log_wmc(|_| (f64::INFINITY, -1.0)).unwrap();
+        let weights = vec![(0.0, 0.0), (f64::INFINITY, -1.0)];
+        let gradient_error = xgcf
+            .eval_log_wmc_and_grads(&weights)
+            .expect_err("Decision normalization must reject non-finite gradients");
+
+        for (name, value) in [("Decision-DNNF", ddnnf_log_z), ("XGCF", xgcf_log_z)] {
+            assert!(
+                value.is_infinite() && value.is_sign_positive(),
+                "{name}: expected positive infinity, got {value}"
+            );
+        }
+        assert!(
+            matches!(&gradient_error, XlogError::Compilation(message) if message.contains("gradient") && message.contains("non-finite")),
+            "XGCF gradients: unexpected error: {gradient_error}"
+        );
+    }
+
+    #[test]
+    fn deterministic_circuit_evaluators_reject_nan_weights() {
+        let nnf = r#"
+a 1 0
+t 2 0
+1 2 1 0
+"#;
+        let ddnnf = DecisionDnnf::parse_str(nnf).unwrap();
+        let xgcf = Xgcf::from_ddnnf(&ddnnf).unwrap();
+
+        let ddnnf_error = ddnnf
+            .eval_log_wmc(|_| (f64::NAN, 0.0))
+            .expect_err("deterministic Decision-DNNF must reject NaN weights");
+        let xgcf_error = xgcf
+            .eval_log_wmc(|_| (f64::NAN, 0.0))
+            .expect_err("deterministic XGCF must reject NaN weights");
+        let gradient_error = xgcf
+            .eval_log_wmc_and_grads(&[(0.0, 0.0), (f64::NAN, 0.0)])
+            .expect_err("deterministic XGCF gradients must reject NaN weights");
+
+        for (name, error) in [
+            ("Decision-DNNF", ddnnf_error),
+            ("XGCF", xgcf_error),
+            ("XGCF gradients", gradient_error),
+        ] {
+            assert!(
+                matches!(&error, XlogError::Compilation(message) if message.contains("NaN")),
+                "{name}: unexpected error: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn deterministic_circuit_evaluators_reject_computed_nan() {
+        let nnf = r#"
+a 1 0
+t 2 0
+1 2 1 -2 0
+"#;
+        let ddnnf = DecisionDnnf::parse_str(nnf).unwrap();
+        let xgcf = Xgcf::from_ddnnf(&ddnnf).unwrap();
+        let weights = [(0.0, 0.0), (f64::INFINITY, 0.0), (0.0, f64::NEG_INFINITY)];
+        let weight = |var: u32| weights[var as usize];
+
+        let ddnnf_error = ddnnf
+            .eval_log_wmc(weight)
+            .expect_err("Decision-DNNF must reject +inf + -inf");
+        let xgcf_error = xgcf
+            .eval_log_wmc(weight)
+            .expect_err("XGCF must reject +inf + -inf");
+        let gradient_error = xgcf
+            .eval_log_wmc_and_grads(&weights)
+            .expect_err("XGCF gradients must reject computed NaN");
+
+        for (name, error) in [("Decision-DNNF", ddnnf_error), ("XGCF", xgcf_error)] {
+            assert!(
+                matches!(&error, XlogError::Compilation(message) if message.contains("NaN")),
+                "{name}: unexpected error: {error}"
+            );
+        }
+        assert!(
+            matches!(&gradient_error, XlogError::Compilation(message) if message.contains("NaN")),
+            "XGCF gradients: unexpected error: {gradient_error}"
+        );
+    }
+
+    #[test]
+    fn gradient_evaluation_rejects_nan_when_another_weight_is_positive_infinity() {
+        let nnf = r#"
+a 1 0
+t 2 0
+1 2 1 2 0
+"#;
+        let ddnnf = DecisionDnnf::parse_str(nnf).unwrap();
+        let xgcf = Xgcf::from_ddnnf(&ddnnf).unwrap();
+        let weights = [(0.0, 0.0), (f64::INFINITY, 0.0), (f64::NAN, 0.0)];
+
+        let error = xgcf
+            .eval_log_wmc_and_grads(&weights)
+            .expect_err("NaN must take precedence over positive infinity");
+        assert!(
+            matches!(&error, XlogError::Compilation(message) if message.contains("NaN")),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn reserved_weight_slot_zero_does_not_affect_value_or_gradients() {
+        let nnf = r#"
+a 1 0
+t 2 0
+1 2 1 0
+"#;
+        let xgcf = Xgcf::from_ddnnf(&DecisionDnnf::parse_str(nnf).unwrap()).unwrap();
+        let baseline_weights = [(0.0, 0.0), (-0.25, -0.75)];
+        let reserved_non_finite = [(f64::NAN, f64::INFINITY), (-0.25, -0.75)];
+
+        let baseline_value = xgcf
+            .eval_log_wmc(|var| baseline_weights[var as usize])
+            .unwrap();
+        let reserved_value = xgcf
+            .eval_log_wmc(|var| reserved_non_finite[var as usize])
+            .unwrap();
+        assert_eq!(reserved_value, baseline_value);
+
+        let baseline_grads = xgcf.eval_log_wmc_and_grads(&baseline_weights).unwrap();
+        let reserved_grads = xgcf
+            .eval_log_wmc_and_grads(&reserved_non_finite)
+            .expect("reserved slot 0 must not be validated or consumed");
+        assert_eq!(reserved_grads, baseline_grads);
+    }
+
+    #[test]
+    fn deterministic_gradient_allows_selected_and_unused_positive_infinity() {
+        let nnf = r#"
+a 1 0
+t 2 0
+1 2 3 0
+"#;
+        let xgcf = Xgcf::from_ddnnf(&DecisionDnnf::parse_str(nnf).unwrap()).unwrap();
+        let weights = [
+            (0.0, 0.0),
+            (f64::INFINITY, f64::INFINITY),
+            (f64::INFINITY, f64::INFINITY),
+            (f64::INFINITY, f64::INFINITY),
+        ];
+
+        let (log_z, grad_true, grad_false) = xgcf
+            .eval_log_wmc_and_grads(&weights)
+            .expect("+inf is valid when deterministic backward outputs stay finite");
+        assert!(log_z.is_infinite() && log_z.is_sign_positive());
+        assert_eq!(grad_true, vec![0.0, 0.0, 0.0, 1.0]);
+        assert_eq!(grad_false, vec![0.0; 4]);
     }
 }

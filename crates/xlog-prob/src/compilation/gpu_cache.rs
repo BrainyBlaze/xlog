@@ -261,6 +261,11 @@ impl GpuCircuitCache {
         &self.provider
     }
 
+    /// Returns mutable device-resident log-weight tables.
+    ///
+    /// Device-only callers are responsible for validating numeric inputs and outputs. Positive
+    /// infinity is valid when it does not enter an undefined normalization; NaN or undefined
+    /// arithmetic that reaches evaluation is represented by a non-finite device result.
     pub fn var_log_weights_mut(
         &mut self,
     ) -> (&mut TrackedCudaSlice<f64>, &mut TrackedCudaSlice<f64>) {
@@ -2363,6 +2368,12 @@ impl GpuCircuitCache {
         })
     }
 
+    /// Evaluates cached logZ without a host transfer.
+    ///
+    /// Callers must ensure evaluated resident weights are NaN-free. NaN or undefined arithmetic
+    /// that reaches evaluation is represented by a NaN sentinel in `out_log_z`; callers must reject
+    /// that sentinel at an existing readback. Positive infinity remains valid for value-only
+    /// evaluation.
     pub fn eval_log_wmc_device_inplace(
         &mut self,
         handle: &GpuCircuitCacheHandle,
@@ -2371,6 +2382,8 @@ impl GpuCircuitCache {
         self.eval_log_wmc_device_only(handle, out_log_z)
     }
 
+    /// Device-only implementation of cached value evaluation; see
+    /// [`Self::eval_log_wmc_device_inplace`] for its numeric preconditions and sentinel contract.
     pub fn eval_log_wmc_device_only(
         &mut self,
         handle: &GpuCircuitCacheHandle,
@@ -2464,6 +2477,12 @@ impl GpuCircuitCache {
         Ok(())
     }
 
+    /// Evaluates cached gradients without a host transfer.
+    ///
+    /// Callers must validate numeric inputs and eventual outputs. Positive infinity is valid when
+    /// the actual backward path remains finite. This asynchronous API cannot return a host-side
+    /// numeric error; NaN or undefined normalization that reaches evaluation is observable as a
+    /// non-finite device result.
     pub fn eval_grads_inplace(&mut self, handle: &GpuCircuitCacheHandle) -> Result<()> {
         let device = self.provider.device().inner();
         let eval_all = device
@@ -2783,6 +2802,7 @@ impl GpuCircuitCache {
     /// with a single launch of `xgcf_backward_all_levels_cached`, and omits the
     /// trailing `device().synchronize()` so that the caller can batch multiple
     /// queries before syncing.
+    /// The same caller-side numeric validation contract applies.
     pub fn eval_grads_inplace_fused(&mut self, handle: &GpuCircuitCacheHandle) -> Result<()> {
         let device = self.provider.device().inner();
         let eval_all = device

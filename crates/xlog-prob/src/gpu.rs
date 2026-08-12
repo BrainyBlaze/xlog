@@ -11,6 +11,9 @@ use xlog_cuda::provider::{
 use xlog_cuda::{circuit_kernels, AsKernelParam, CudaKernelProvider, LaunchAsync, CIRCUIT_MODULE};
 
 use crate::compilation::gpu_d4::exclusive_scan_u32_inplace;
+use crate::logsumexp::validate_circuit_log_weight_pair;
+#[cfg(feature = "host-io")]
+use crate::logsumexp::{validate_circuit_gradient_values, validate_circuit_value};
 use crate::xgcf::{Xgcf, XgcfNodeType};
 
 /// Device-resident circuit buffers produced by the GPU compiler.
@@ -1348,6 +1351,9 @@ impl GpuXgcf {
     ///
     /// This is intended for one-time initialization of static weights (evidence + non-neural facts).
     /// Neural fast-path updates should overwrite only the relevant subset on GPU.
+    /// The 1-based table prefix (1 through `max_var`) is validated before either upload: NaN is
+    /// rejected with a typed compilation error, while positive and negative infinity remain valid
+    /// for value evaluation. Reserved slot 0 is uploaded unchanged but is never consumed.
     pub fn set_base_weights(
         &mut self,
         provider: &CudaKernelProvider,
@@ -1360,6 +1366,9 @@ impl GpuXgcf {
                 weights_len,
                 var_log_weights.len()
             )));
+        }
+        for &weights in &var_log_weights[1..weights_len] {
+            validate_circuit_log_weight_pair(weights)?;
         }
 
         let mut host_true: Vec<f64> = Vec::with_capacity(weights_len);
@@ -1381,7 +1390,11 @@ impl GpuXgcf {
 
     /// Evaluate logZ on the device using the currently loaded weights and write it into `out_log_z`.
     ///
-    /// This method performs no device->host transfers.
+    /// This method performs no device->host transfers. Callers that mutate the device weight
+    /// buffers directly are responsible for numeric validity. NaN or undefined arithmetic that
+    /// reaches circuit evaluation emits a NaN sentinel in `out_log_z`; a host boundary must
+    /// validate that scalar after readback. Positive infinity is supported for value-only
+    /// log-sum-exp evaluation.
     pub fn eval_log_wmc_device_inplace(
         &mut self,
         provider: &CudaKernelProvider,
@@ -1454,6 +1467,9 @@ impl GpuXgcf {
     }
 
     /// Evaluate logZ on the device and write it into `out_log_z` (uploads weights from host).
+    ///
+    /// Host weights are validated before launch. Undefined arithmetic can still produce a NaN
+    /// sentinel in `out_log_z`, which the eventual host readback boundary must reject.
     pub fn eval_log_wmc_device_into(
         &mut self,
         provider: &CudaKernelProvider,
@@ -1465,6 +1481,9 @@ impl GpuXgcf {
     }
 
     /// Evaluate logZ on the device and return a device-resident scalar (uploads weights from host).
+    ///
+    /// The returned scalar uses NaN as the device-only sentinel for undefined circuit arithmetic;
+    /// callers that read it back must convert that sentinel to a typed error.
     pub fn eval_log_wmc_device(
         &mut self,
         provider: &CudaKernelProvider,
@@ -1612,7 +1631,9 @@ impl GpuXgcf {
     /// Evaluate the circuit and populate `grad_true/grad_false` on the device (no host reads).
     ///
     /// Preconditions:
-    /// - `var_log_true/var_log_false` contain the current weights on device.
+    /// - `var_log_true/var_log_false` contain the current weights on device. Callers must validate
+    ///   numeric outputs: NaN or undefined normalization that reaches evaluation is represented by
+    ///   a non-finite device result because this API cannot return a host-side numeric error.
     /// - Caller may read back results for testing/debugging, but this API performs no dtoh transfers.
     pub fn eval_grads_inplace(&mut self, provider: &CudaKernelProvider) -> Result<()> {
         let device = provider.device().inner();
@@ -1822,7 +1843,7 @@ impl GpuXgcf {
         device
             .dtoh_sync_copy_into(&out_log_z, &mut host)
             .map_err(|e| XlogError::Kernel(format!("Failed to read circuit root value: {}", e)))?;
-        Ok(host[0])
+        validate_circuit_value(host[0])
     }
 
     #[cfg(feature = "host-io")]
@@ -1831,12 +1852,19 @@ impl GpuXgcf {
         provider: &CudaKernelProvider,
         var_log_weights: &[(f64, f64)],
     ) -> Result<(f64, Vec<f64>, Vec<f64>)> {
+        let weights_len = (self.max_var as usize) + 1;
+        if var_log_weights.len() < weights_len {
+            return Err(XlogError::Compilation(format!(
+                "GPU XGCF weights init expects weight table len >= {}, got {}",
+                weights_len,
+                var_log_weights.len()
+            )));
+        }
         self.set_base_weights(provider, var_log_weights)?;
         self.eval_grads_inplace(provider)?;
 
         let device = provider.device().inner();
 
-        let weights_len = (self.max_var as usize) + 1;
         let mut host_grad_true: Vec<f64> = vec![0.0; weights_len];
         let mut host_grad_false: Vec<f64> = vec![0.0; weights_len];
 
@@ -1846,6 +1874,7 @@ impl GpuXgcf {
         device
             .dtoh_sync_copy_into(&root_view, &mut log_z)
             .map_err(|e| XlogError::Kernel(format!("Failed to read circuit root value: {}", e)))?;
+        let log_z = validate_circuit_value(log_z[0])?;
 
         device
             .dtoh_sync_copy_into(&self.grad_true, &mut host_grad_true)
@@ -1853,7 +1882,8 @@ impl GpuXgcf {
         device
             .dtoh_sync_copy_into(&self.grad_false, &mut host_grad_false)
             .map_err(|e| XlogError::Kernel(format!("Failed to download grad_false: {}", e)))?;
+        validate_circuit_gradient_values(&host_grad_true, &host_grad_false)?;
 
-        Ok((log_z[0], host_grad_true, host_grad_false))
+        Ok((log_z, host_grad_true, host_grad_false))
     }
 }
