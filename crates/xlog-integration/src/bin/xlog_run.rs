@@ -12,6 +12,7 @@ use std::sync::Arc;
 use xlog_core::{symbol, MemoryBudget, Result, ScalarType, XlogError};
 use xlog_cuda::{CudaDevice, CudaKernelProvider, GpuMemoryManager};
 use xlog_gpu::logic::normalize_program_for_execution;
+use xlog_logic::ground_term_encoding::append_ground_term_bytes;
 use xlog_logic::{
     compile::load_modules, parse_program, BodyLiteral, Compiler, EpistemicOp, Query, Term,
 };
@@ -94,102 +95,6 @@ fn parse_args() -> Result<(String, usize, usize, usize)> {
     }
 
     Ok((path, device, memory_mb, limit))
-}
-
-fn push_term_bytes(out: &mut Vec<u8>, term: &Term, typ: ScalarType) -> Result<()> {
-    match (typ, term) {
-        (ScalarType::U32, Term::Integer(v)) => {
-            if *v < 0 || *v > u32::MAX as i64 {
-                return Err(XlogError::Execution(format!("u32 out of range: {}", v)));
-            }
-            out.extend_from_slice(&(*v as u32).to_le_bytes());
-        }
-        (ScalarType::U64, Term::Integer(v)) => {
-            if *v < 0 {
-                return Err(XlogError::Execution(format!(
-                    "u64 out of range (negative): {}",
-                    v
-                )));
-            }
-            out.extend_from_slice(&(*v as u64).to_le_bytes());
-        }
-        (ScalarType::I32, Term::Integer(v)) => {
-            if *v < i32::MIN as i64 || *v > i32::MAX as i64 {
-                return Err(XlogError::Execution(format!("i32 out of range: {}", v)));
-            }
-            out.extend_from_slice(&(*v as i32).to_le_bytes());
-        }
-        (ScalarType::I64, Term::Integer(v)) => {
-            out.extend_from_slice(&v.to_le_bytes());
-        }
-        (ScalarType::F32, Term::Float(v)) => {
-            out.extend_from_slice(&(*v as f32).to_le_bytes());
-        }
-        (ScalarType::F64, Term::Float(v)) => {
-            out.extend_from_slice(&v.to_le_bytes());
-        }
-        (ScalarType::F32, Term::Integer(v)) => {
-            out.extend_from_slice(&(*v as f32).to_le_bytes());
-        }
-        (ScalarType::F64, Term::Integer(v)) => {
-            out.extend_from_slice(&(*v as f64).to_le_bytes());
-        }
-        (ScalarType::Bool, Term::Integer(v)) => {
-            let b = match *v {
-                0 => 0u8,
-                1 => 1u8,
-                other => {
-                    return Err(XlogError::Execution(format!(
-                        "bool expects 0/1, got {}",
-                        other
-                    )));
-                }
-            };
-            out.push(b);
-        }
-        (ScalarType::Bool, Term::Symbol(id)) => {
-            let s = symbol::resolve(*id);
-            if s == "true" || s == "false" {
-                out.push(if s == "true" { 1u8 } else { 0u8 });
-            } else {
-                return Err(XlogError::Execution(format!(
-                    "Expected boolean symbol 'true' or 'false', got '{}'",
-                    s
-                )));
-            }
-        }
-        (ScalarType::Symbol, Term::String(s)) => {
-            out.extend_from_slice(&symbol::intern(s).to_le_bytes());
-        }
-        (ScalarType::Symbol, Term::Symbol(id)) => {
-            // Symbol is already interned, just use the ID directly
-            out.extend_from_slice(&id.to_le_bytes());
-        }
-        (_, Term::Variable(v)) => {
-            return Err(XlogError::Execution(format!(
-                "Fact cannot contain variable {}",
-                v
-            )));
-        }
-        (_, Term::Anonymous) => {
-            return Err(XlogError::Execution(
-                "Fact cannot contain anonymous wildcard '_'".to_string(),
-            ));
-        }
-        (_, Term::Aggregate(_)) => {
-            return Err(XlogError::Execution(
-                "Fact cannot contain aggregate".to_string(),
-            ));
-        }
-        (expected, got) => {
-            return Err(XlogError::Execution(format!(
-                "Type mismatch in fact: expected {:?}, got {:?}",
-                expected, got
-            )));
-        }
-    }
-
-    Ok(())
 }
 
 fn query_output_vars(Query { atom }: &Query) -> Vec<String> {
@@ -450,7 +355,11 @@ fn main() -> Result<()> {
         for row in &rows {
             for (col_idx, term) in row.iter().enumerate() {
                 let typ = schema.column_type(col_idx).unwrap_or(ScalarType::U64);
-                push_term_bytes(&mut columns[col_idx], term, typ)?;
+                append_ground_term_bytes(&mut columns[col_idx], term, typ).map_err(|error| {
+                    XlogError::Execution(format!(
+                        "Failed to encode fact for predicate {pred} at column {col_idx}: {error}"
+                    ))
+                })?;
             }
         }
 

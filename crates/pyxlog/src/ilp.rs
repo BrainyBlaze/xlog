@@ -10,10 +10,11 @@ use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PySequence};
 
-use xlog_core::{symbol, RelId, ScalarType, Schema};
+use xlog_core::{RelId, ScalarType, Schema};
 use xlog_cuda::{CudaKernelProvider, JoinType};
 use xlog_ir::{ExecutionPlan, RirNode};
 use xlog_logic::ast::{Program as AstProgram, Term, TypeRef};
+use xlog_logic::ground_term_encoding::append_ground_term_bytes;
 use xlog_prob::exact::GpuConfig;
 use xlog_runtime::ilp_registry::IlpMask;
 use xlog_runtime::{read_device_row_count, Executor};
@@ -186,93 +187,6 @@ fn empty_tagged_credit_device_result(
     })
 }
 
-fn push_term_bytes(out: &mut Vec<u8>, term: &Term, typ: ScalarType) -> xlog_core::Result<()> {
-    use xlog_core::XlogError;
-    match (typ, term) {
-        (ScalarType::U32, Term::Integer(v)) => {
-            let v = u32::try_from(*v)
-                .map_err(|_| XlogError::Execution(format!("u32 out of range: {}", v)))?;
-            out.extend_from_slice(&v.to_le_bytes());
-        }
-        (ScalarType::U64, Term::Integer(v)) => {
-            let v = u64::try_from(*v)
-                .map_err(|_| XlogError::Execution(format!("u64 out of range: {}", v)))?;
-            out.extend_from_slice(&v.to_le_bytes());
-        }
-        (ScalarType::I32, Term::Integer(v)) => {
-            let v = i32::try_from(*v)
-                .map_err(|_| XlogError::Execution(format!("i32 out of range: {}", v)))?;
-            out.extend_from_slice(&v.to_le_bytes());
-        }
-        (ScalarType::I64, Term::Integer(v)) => {
-            out.extend_from_slice(&v.to_le_bytes());
-        }
-        (ScalarType::F32, Term::Float(v)) => {
-            out.extend_from_slice(&(*v as f32).to_le_bytes());
-        }
-        (ScalarType::F64, Term::Float(v)) => {
-            out.extend_from_slice(&v.to_le_bytes());
-        }
-        (ScalarType::F32, Term::Integer(v)) => {
-            out.extend_from_slice(&(*v as f32).to_le_bytes());
-        }
-        (ScalarType::F64, Term::Integer(v)) => {
-            out.extend_from_slice(&(*v as f64).to_le_bytes());
-        }
-        (ScalarType::Bool, Term::Integer(v)) => {
-            let b = match *v {
-                0 => 0u8,
-                1 => 1u8,
-                other => {
-                    return Err(XlogError::Execution(format!(
-                        "bool expects 0/1, got {}",
-                        other
-                    )));
-                }
-            };
-            out.push(b);
-        }
-        (ScalarType::Bool, Term::Symbol(id)) => {
-            let s = symbol::resolve(*id);
-            if s == "true" || s == "false" {
-                out.push(if s == "true" { 1u8 } else { 0u8 });
-            } else {
-                return Err(XlogError::Execution(format!(
-                    "Expected boolean symbol, got '{}'",
-                    s
-                )));
-            }
-        }
-        (ScalarType::Symbol, Term::String(s)) => {
-            out.extend_from_slice(&symbol::intern(s).to_le_bytes());
-        }
-        (ScalarType::Symbol, Term::Symbol(id)) => {
-            out.extend_from_slice(&id.to_le_bytes());
-        }
-        (_, Term::Variable(v)) => {
-            return Err(XlogError::Execution(format!(
-                "Fact cannot contain variable {}",
-                v
-            )));
-        }
-        (_, Term::Anonymous) => {
-            return Err(XlogError::Execution(
-                "Fact cannot contain anonymous wildcard '_'".into(),
-            ));
-        }
-        (_, Term::Aggregate(_)) => {
-            return Err(XlogError::Execution("Fact cannot contain aggregate".into()));
-        }
-        (expected, got) => {
-            return Err(XlogError::Execution(format!(
-                "Type mismatch: expected {:?}, got {:?}",
-                expected, got
-            )));
-        }
-    }
-    Ok(())
-}
-
 /// Pack `i64` fact values into typed byte columns according to schema.
 /// Returns one `Vec<u8>` per column with correctly-encoded LE bytes.
 /// Rejects F32/F64 columns (not supported in batch APIs).
@@ -425,7 +339,11 @@ pub(crate) fn load_facts_into_store(
                 let typ = schema.column_type(col_idx).ok_or_else(|| {
                     XlogError::Execution(format!("Missing type for col {}", col_idx))
                 })?;
-                push_term_bytes(&mut columns[col_idx], term, typ)?;
+                append_ground_term_bytes(&mut columns[col_idx], term, typ).map_err(|error| {
+                    xlog_core::XlogError::Execution(format!(
+                        "Failed to encode fact for predicate {pred} at column {col_idx}: {error}"
+                    ))
+                })?;
             }
         }
 
