@@ -4,7 +4,9 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use xlog_core::{Result, XlogError};
 
-use crate::logsumexp::circuit_logsumexp;
+use crate::logsumexp::{
+    circuit_logsumexp, validate_circuit_log_weight_pair, validate_circuit_value,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DdnnfNodeKind {
@@ -335,7 +337,7 @@ impl DecisionDnnf {
                         let mut lit_sum = 0.0;
                         for &lit in &edge.lits {
                             let var = lit.unsigned_abs();
-                            let (t, f) = var_log_weights(var);
+                            let (t, f) = validate_circuit_log_weight_pair(var_log_weights(var))?;
                             lit_sum += if lit > 0 { t } else { f };
                         }
                         acc += lit_sum + child;
@@ -357,7 +359,7 @@ impl DecisionDnnf {
                         let mut lit_sum = 0.0;
                         for &lit in &edge.lits {
                             let var = lit.unsigned_abs();
-                            let (t, f) = var_log_weights(var);
+                            let (t, f) = validate_circuit_log_weight_pair(var_log_weights(var))?;
                             lit_sum += if lit > 0 { t } else { f };
                         }
                         branch_vals.push(lit_sum + child);
@@ -366,6 +368,7 @@ impl DecisionDnnf {
                 }
             };
 
+            let value = validate_circuit_value(value)?;
             memo.insert(node_id, value);
             Ok(value)
         }
