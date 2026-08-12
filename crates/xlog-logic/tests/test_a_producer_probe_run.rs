@@ -61,8 +61,6 @@ struct ProbeResult {
     accepted_count: usize,
     /// |⋂(accepted) ∩ candidates| -- candidate atoms KNOWN (∀, derivation-forced). Info only.
     known_count: usize,
-    /// |⋃(accepted) ∩ candidates| -- candidate atoms POSSIBLE (∃). Info only.
-    possible_count: usize,
     /// Vacuity guard: no world-view pruned (no constraint touched candidates) -> result trivial.
     trivial_suspect: bool,
 }
@@ -128,10 +126,9 @@ fn run_probe(
         positives.iter().map(atom_key).collect();
 
     let mut road_not_taken = Vec::new();
-    for j in 0..n {
-        if possible_not_known & (1 << j) != 0 && !pos_keys.contains(&atom_key(&candidate_atoms[j]))
-        {
-            road_not_taken.push(candidate_atoms[j].clone());
+    for (j, candidate_atom) in candidate_atoms.iter().enumerate() {
+        if possible_not_known & (1 << j) != 0 && !pos_keys.contains(&atom_key(candidate_atom)) {
+            road_not_taken.push(candidate_atom.clone());
         }
     }
 
@@ -142,7 +139,6 @@ fn run_probe(
         generated: total,
         accepted_count: accepted.len(),
         known_count: (in_all & all_bits).count_ones() as usize,
-        possible_count: (in_some & all_bits).count_ones() as usize,
         trivial_suspect: accepted.len() == total,
     }
 }
