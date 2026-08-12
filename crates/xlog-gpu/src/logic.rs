@@ -4027,6 +4027,20 @@ fn epistemic_plan_summary_json(
 }
 
 #[cfg(test)]
+fn finish_test_provider_setup<T>(provider: Result<T>, require_cuda: bool) -> Option<T> {
+    match provider {
+        Ok(provider) => Some(provider),
+        Err(error) if require_cuda => {
+            panic!("XLOG_REQUIRE_CUDA=1 but CUDA provider construction failed: {error}")
+        }
+        Err(error) => {
+            eprintln!("Skipping test: no CUDA device available ({error})");
+            None
+        }
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use std::sync::Arc;
@@ -4034,18 +4048,27 @@ mod tests {
     use xlog_core::{symbol, MemoryBudget, ScalarType};
     use xlog_cuda::{CudaDevice, GpuMemoryManager};
 
-    fn ground_term_encoding_test_provider() -> Result<Arc<CudaKernelProvider>> {
-        let device = Arc::new(CudaDevice::new(0)?);
-        let memory = Arc::new(GpuMemoryManager::new(
-            device.clone(),
-            MemoryBudget::with_limit(256 * 1024 * 1024),
-        ));
-        Ok(Arc::new(CudaKernelProvider::new(device, memory)?))
+    fn ground_term_encoding_test_provider() -> Option<Arc<CudaKernelProvider>> {
+        let provider = (|| -> Result<Arc<CudaKernelProvider>> {
+            let device = Arc::new(CudaDevice::new(0)?);
+            let memory = Arc::new(GpuMemoryManager::new(
+                device.clone(),
+                MemoryBudget::with_limit(256 * 1024 * 1024),
+            ));
+            Ok(Arc::new(CudaKernelProvider::new(device, memory)?))
+        })();
+
+        finish_test_provider_setup(
+            provider,
+            std::env::var("XLOG_REQUIRE_CUDA").as_deref() == Ok("1"),
+        )
     }
 
     #[test]
     fn program_fact_loader_uses_shared_ground_term_encoding() -> Result<()> {
-        let provider = ground_term_encoding_test_provider()?;
+        let Some(provider) = ground_term_encoding_test_provider() else {
+            return Ok(());
+        };
         let program = LogicProgram::compile(
             r#"
                 pred encoded(u32, u64, i32, i64, f32, f64, bool, bool, symbol, symbol).
@@ -4722,19 +4745,6 @@ mod relation_delta_coalesce_tests {
 
     use xlog_core::{MemoryBudget, ScalarType};
     use xlog_cuda::{CudaDevice, GpuMemoryManager};
-
-    fn finish_test_provider_setup<T>(provider: Result<T>, require_cuda: bool) -> Option<T> {
-        match provider {
-            Ok(provider) => Some(provider),
-            Err(error) if require_cuda => {
-                panic!("XLOG_REQUIRE_CUDA=1 but CUDA provider construction failed: {error}")
-            }
-            Err(error) => {
-                eprintln!("Skipping test: no CUDA device available ({error})");
-                None
-            }
-        }
-    }
 
     fn test_provider() -> Option<Arc<CudaKernelProvider>> {
         let provider = (|| -> Result<Arc<CudaKernelProvider>> {
