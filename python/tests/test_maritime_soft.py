@@ -358,3 +358,121 @@ def test_ceiling_probe_default_vocab_has_no_duration_block(tmp_path):
     report = json.loads(out_path.read_text(encoding="utf-8"))
     assert "pointwise_duration" not in report
     assert (report["pointwise"]["tp"], report["pointwise"]["fp"]) == (1, 1)
+
+
+# ---------------------------------------------------------------------------
+# Task 6: the CV runner's pre-registered columns — --column {hard,soft},
+# --vocab {base,duration}; defaults byte-identical to the baseline runner
+# ---------------------------------------------------------------------------
+
+
+def _cv_archives(tmp_path, n_pos=6, n_neg=6):
+    """Planted-rule mini-corpus: per positive pair the pts are
+    900/1000/2000/2100/2200, gold rendezVous [1000, 2000) covers exactly
+    {1000}, and `both_stopped_far` (stopped=farFromPorts 1000-2000 for both
+    vessels) covers exactly {1000} too — a perfect 1-literal soft body.
+    Negative pairs carry proximity only."""
+    hle, lle = [], []
+    for i in range(n_pos):
+        a, b = f"P{i:02d}a", f"P{i:02d}b"
+        hle += [
+            f"rendezVous|{a}|{b}|true|1000|2000",
+            f"lowSpeed|{a}| |true|900|2100",
+            f"lowSpeed|{b}| |true|900|2100",
+            f"stopped|{a}| |farFromPorts|1000|2000",
+            f"stopped|{b}| |farFromPorts|1000|2000",
+        ]
+        lle.append(f"proximity|2200|900|2200|true|{a}|{b}")
+    for j in range(n_neg):
+        a, b = f"N{j:02d}a", f"N{j:02d}b"
+        lle.append(f"proximity|2200|900|2200|true|{a}|{b}")
+    return _archives(tmp_path, hle, lle, stem="cv")
+
+
+CV_ARGS = ["--smoke", "--skip-verify", "--folds", "3"]
+
+
+def _run_cv(tmp_path, extra_args, out_name="out.json"):
+    import json
+
+    import run_maritime_cv
+
+    tar_p, zip_p = _cv_archives(tmp_path)
+    out = tmp_path / out_name
+    rc = run_maritime_cv.main(
+        ["--tar", tar_p, "--zip", zip_p, "--out", str(out)] + CV_ARGS + extra_args
+    )
+    assert rc == 0
+    return json.loads(out.read_text(encoding="utf-8"))
+
+
+def test_cv_defaults_are_byte_identical_to_main_and_params_additive(tmp_path):
+    pytest.importorskip("torch")
+    result = _run_cv(tmp_path, [])
+    # snapshot of the pre-change (main 332a6837) runner on this fixture:
+    assert result["micro"]["point"] == {
+        "tp": 6, "fp": 0, "fn": 0, "precision": 1.0, "recall": 1.0, "f1": 1.0,
+    }
+    assert [f["clauses"] for f in result["folds"]] == [
+        [["both_low_or_stopped", "both_stopped_far"]],
+        [["both_low_or_stopped", "both_stopped_far"]],
+        [["both_low_or_stopped", "both_stopped_far"]],
+    ]
+    assert result["per_fold_point_f1"]["values"] == [1.0, 1.0, 1.0]
+    assert result["fold_of_pair"] == [0, 1, 2, 0, 1, 2, 0, 1, 2, 0, 1, 2]
+    assert result["candidate_vocabulary"] == sorted(BASELINE_VOCABULARY)
+    # the ONLY addition over main's result shape: the params stamp
+    assert result["params"]["column"] == "hard"
+    assert result["params"]["vocab"] == "base"
+
+
+def test_cv_soft_column_recovers_planted_rule(tmp_path):
+    pytest.importorskip("torch")
+    result = _run_cv(tmp_path, ["--column", "soft"], out_name="soft.json")
+    assert result["params"]["column"] == "soft"
+    assert result["micro"]["point"]["f1"] == pytest.approx(1.0)
+    for record in result["folds"]:
+        assert record["column"] == "soft"
+        assert record["vocab"] == "base"
+        # C(11,1) + C(11,2) + C(11,3) over the 11-relation vocabulary
+        assert record["n_bodies_pool"] == 231
+        assert record["n_bodies_gated"] >= 1
+        assert record["soft_params"] == {
+            "steps": 300, "lr": 0.05, "seed": 7, "threshold": 0.5,
+        }
+        assert record["scoring"]["point"]["f1"] == pytest.approx(1.0)
+        # the top-weighted body is (a conjunction containing) the planted
+        # one. Its weight is far below 1.0 BY DESIGN: every conjunction of
+        # both_stopped_far with a superset relation has the identical cover,
+        # so noisy-OR shares the credit evenly across those bodies (their
+        # gradients are identical) — the COMBINED score is what crosses 0.5.
+        top_body, top_weight = next(iter(record["weights_top10"].items()))
+        assert "both_stopped_far" in top_body.split("&")
+        assert top_weight > 0.3
+        # every top-10 body carries the planted literal (nothing else
+        # separates the classes on this fixture)
+        assert all("both_stopped_far" in b.split("&") for b in record["weights_top10"])
+        # provenance: the gate is the same permutation-null construction
+        assert record["min_fit"] == record["null_summary"]["threshold"]
+
+
+def test_cv_duration_vocab_reaches_the_converter(tmp_path):
+    pytest.importorskip("torch")
+    result = _run_cv(tmp_path, ["--vocab", "duration"], out_name="dur.json")
+    assert result["params"]["vocab"] == "duration"
+    assert "sustained_240" in result["candidate_vocabulary"]
+    assert len(result["candidate_vocabulary"]) == 12
+
+
+def test_cv_soft_column_two_runs_identical(tmp_path):
+    pytest.importorskip("torch")
+
+    def strip_walls(result):
+        result.pop("convert_wall_s", None)
+        for record in result["folds"]:
+            record.pop("wall_s", None)
+        return result
+
+    a = strip_walls(_run_cv(tmp_path, ["--column", "soft"], out_name="a.json"))
+    b = strip_walls(_run_cv(tmp_path, ["--column", "soft"], out_name="b.json"))
+    assert a == b
