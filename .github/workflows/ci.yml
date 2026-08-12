@@ -95,12 +95,14 @@ jobs:
       - name: Validate Python provenance stubs and documentation
         run: python -m pytest -q python/tests/test_relation_provenance_contract.py
 
-  # The CAVIAR example suites on CPU (review follow-up: previously no
-  # workflow ran any of them). CPU torch makes the audit/census/corpus
-  # suites run for real instead of module-skipping; the dataset-gated
-  # tests inside them self-skip (no corpus data ships in the repo), and
-  # the GPU-only suites stay local per the hardware table in
-  # docs/experiments/caviar/README.md.
+  # The CAVIAR and maritime example suites on CPU (review follow-up:
+  # previously no workflow ran any of them; the maritime suites were
+  # added after repeating that exact gap one PR later). CPU torch makes
+  # the audit/census/corpus suites run for real instead of
+  # module-skipping; the dataset-gated tests inside them self-skip (no
+  # corpus data ships in the repo), the maritime suites run entirely on
+  # synthetic in-memory archives, and the GPU-only suites stay local per
+  # the hardware table in docs/experiments/caviar/README.md.
   caviar-examples:
     runs-on: ubuntu-latest
     steps:
@@ -115,7 +117,7 @@ jobs:
           python -m pip install --upgrade pip pytest
           python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
 
-      - name: Run CAVIAR example suites
+      - name: Run CAVIAR and maritime example suites
         env:
           PYTHONPATH: crates/pyxlog/python
         run: >-
@@ -125,6 +127,8 @@ jobs:
           python/tests/test_audit_dump_vs_xml.py
           python/tests/test_xml_meeting_census.py
           python/tests/test_audit_tool_torch_free.py
+          python/tests/test_maritime_convert.py
+          python/tests/test_maritime_cv.py
 
   fmt:
     runs-on: ubuntu-latest

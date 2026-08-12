@@ -1,0 +1,272 @@
+{
+  "ok": true,
+  "archives": {
+    "tar_path": "C:/Users/User/flt-workspace/projects/xlog/runs/r_dkefqzow6ba4udiy/maritime_scout/data/MaritimeCompositeEvents.tar.gz",
+    "tar_md5": "05e23621b87fcec211a7ff4ed4397b94",
+    "tar_md5_expected": "05e23621b87fcec211a7ff4ed4397b94",
+    "tar_md5_ok": true,
+    "zip_path": "C:/Users/User/flt-workspace/projects/xlog/runs/r_dkefqzow6ba4udiy/maritime_scout/data/brest_critical.zip",
+    "zip_md5": "0b239b8eb212dc433e67de6a599b2d10",
+    "zip_md5_expected": "0b239b8eb212dc433e67de6a599b2d10",
+    "zip_md5_ok": true
+  },
+  "hard_invariants": {
+    "md5_ok": true,
+    "episode_boundary_ok": true,
+    "episode_boundary_violations": [],
+    "n_episode_boundary_violations": 0,
+    "pair_contiguity_ok": true,
+    "pair_contiguity_first_violation": null,
+    "segment_pair_boundary_ok": true,
+    "segment_pair_boundary_violations": [],
+    "ec_label_consistency_ok": true,
+    "ec_label_consistency_violations": []
+  },
+  "alignment": {
+    "n_positive_pts": 3579,
+    "proximity_fraction": 1.0,
+    "both_low_or_stopped_fraction": 1.0,
+    "n_gold_intervals": 3548,
+    "worst_intervals_by_proximity": [
+      {
+        "pair": [
+          "205204000",
+          "234597000"
+        ],
+        "st": 1444027002,
+        "et": 1444028328,
+        "n_pts": 1,
+        "fraction": 1.0
+      },
+      {
+        "pair": [
+          "205204000",
+          "234597000"
+        ],
+        "st": 1444028510,
+        "et": 1444031928,
+        "n_pts": 1,
+        "fraction": 1.0
+      },
+      {
+        "pair": [
+          "205204000",
+          "234597000"
+        ],
+        "st": 1444032109,
+        "et": 1444035529,
+        "n_pts": 1,
+        "fraction": 1.0
+      },
+      {
+        "pair": [
+          "205204000",
+          "234597000"
+        ],
+        "st": 1444035708,
+        "et": 1444039129,
+        "n_pts": 1,
+        "fraction": 1.0
+      },
+      {
+        "pair": [
+          "205204000",
+          "234597000"
+        ],
+        "st": 1444039308,
+        "et": 1444042728,
+        "n_pts": 1,
+        "fraction": 1.0
+      },
+      {
+        "pair": [
+          "205204000",
+          "234597000"
+        ],
+        "st": 1444042909,
+        "et": 1444046328,
+        "n_pts": 1,
+        "fraction": 1.0
+      },
+      {
+        "pair": [
+          "205204000",
+          "234597000"
+        ],
+        "st": 1444046509,
+        "et": 1444049928,
+        "n_pts": 1,
+        "fraction": 1.0
+      },
+      {
+        "pair": [
+          "205204000",
+          "234597000"
+        ],
+        "st": 1444050109,
+        "et": 1444053529,
+        "n_pts": 1,
+        "fraction": 1.0
+      },
+      {
+        "pair": [
+          "205204000",
+          "234597000"
+        ],
+        "st": 1444053708,
+        "et": 1444056769,
+        "n_pts": 1,
+        "fraction": 1.0
+      },
+      {
+        "pair": [
+          "205204000",
+          "234597000"
+        ],
+        "st": 1444057308,
+        "et": 1444060729,
+        "n_pts": 1,
+        "fraction": 1.0
+      }
+    ],
+    "worst_intervals_by_both_low_or_stopped": [
+      {
+        "pair": [
+          "205204000",
+          "234597000"
+        ],
+        "st": 1444027002,
+        "et": 1444028328,
+        "n_pts": 1,
+        "fraction": 1.0
+      },
+      {
+        "pair": [
+          "205204000",
+          "234597000"
+        ],
+        "st": 1444028510,
+        "et": 1444031928,
+        "n_pts": 1,
+        "fraction": 1.0
+      },
+      {
+        "pair": [
+          "205204000",
+          "234597000"
+        ],
+        "st": 1444032109,
+        "et": 1444035529,
+        "n_pts": 1,
+        "fraction": 1.0
+      },
+      {
+        "pair": [
+          "205204000",
+          "234597000"
+        ],
+        "st": 1444035708,
+        "et": 1444039129,
+        "n_pts": 1,
+        "fraction": 1.0
+      },
+      {
+        "pair": [
+          "205204000",
+          "234597000"
+        ],
+        "st": 1444039308,
+        "et": 1444042728,
+        "n_pts": 1,
+        "fraction": 1.0
+      },
+      {
+        "pair": [
+          "205204000",
+          "234597000"
+        ],
+        "st": 1444042909,
+        "et": 1444046328,
+        "n_pts": 1,
+        "fraction": 1.0
+      },
+      {
+        "pair": [
+          "205204000",
+          "234597000"
+        ],
+        "st": 1444046509,
+        "et": 1444049928,
+        "n_pts": 1,
+        "fraction": 1.0
+      },
+      {
+        "pair": [
+          "205204000",
+          "234597000"
+        ],
+        "st": 1444050109,
+        "et": 1444053529,
+        "n_pts": 1,
+        "fraction": 1.0
+      },
+      {
+        "pair": [
+          "205204000",
+          "234597000"
+        ],
+        "st": 1444053708,
+        "et": 1444056769,
+        "n_pts": 1,
+        "fraction": 1.0
+      },
+      {
+        "pair": [
+          "205204000",
+          "234597000"
+        ],
+        "st": 1444057308,
+        "et": 1444060729,
+        "n_pts": 1,
+        "fraction": 1.0
+      }
+    ]
+  },
+  "alignment_warning": null,
+  "totals": {
+    "n_pt": 454858,
+    "n_pairs": 806,
+    "n_positive_pairs": 302,
+    "n_negative_pairs": 504,
+    "n_segments": 8807,
+    "relation_cover_sizes": {
+      "proximity": 180188,
+      "far": 274670,
+      "both_lowspeed": 21230,
+      "both_stopped_far": 13514,
+      "both_low_or_stopped": 44031,
+      "either_low_or_stopped": 195376,
+      "any_near_ports": 381694,
+      "both_open_sea": 73164,
+      "became_far": 32172,
+      "became_proximate": 30130,
+      "any_slow_ended": 76068
+    },
+    "converter_counts": {
+      "n_lines_hle": 3970370,
+      "bad_lines_hle": {},
+      "n_lines_lle": 15999555,
+      "n_proximity_rows": 62138,
+      "bad_proximity_lines": 0,
+      "n_negative_pool": 2014,
+      "n_positive_pairs": 302,
+      "n_negative_pairs": 504,
+      "n_pairs": 806,
+      "n_pt": 454858,
+      "n_segments": 8807,
+      "n_dropped_outside_pad": 7968231
+    },
+    "convert_wall_time_seconds": 1831.1415766999708,
+    "verify_wall_time_seconds": 14.032609799993224
+  }
+}

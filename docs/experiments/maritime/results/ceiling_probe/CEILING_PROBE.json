@@ -1,0 +1,278 @@
+{
+  "archives": {
+    "tar": "C:/Users/User/flt-workspace/projects/xlog/runs/r_dkefqzow6ba4udiy/maritime_scout/data/MaritimeCompositeEvents.tar.gz",
+    "zip": "C:/Users/User/flt-workspace/projects/xlog/runs/r_dkefqzow6ba4udiy/maritime_scout/data/brest_critical.zip"
+  },
+  "pointwise": {
+    "body": [
+      "proximity",
+      "both_low_or_stopped",
+      "both_open_sea"
+    ],
+    "tp": 3579,
+    "fp": 3689,
+    "fn": 0,
+    "precision": 0.49243258117776556,
+    "recall": 1.0,
+    "f1": 0.6599059647828893
+  },
+  "fp_decomposition": {
+    "duration_threshold_s": 240,
+    "fp_negative_pairs": 733,
+    "fp_positive_pairs_short_run": 2956,
+    "fp_positive_pairs_other": 0,
+    "fp_total": 3689,
+    "n_predicted_runs": 7145,
+    "n_short_runs": 7133
+  },
+  "nested_interval_census": {
+    "per_key": {
+      "anchoredOrMoored": {
+        "n_entities": 462,
+        "n_intervals": 12682,
+        "n_strictly_nested": 0,
+        "n_overlapping": 0,
+        "n_duplicates": 0,
+        "n_entities_with_nested": 0,
+        "nested_examples": []
+      },
+      "changingSpeed": {
+        "n_entities": 1981,
+        "n_intervals": 777154,
+        "n_strictly_nested": 0,
+        "n_overlapping": 0,
+        "n_duplicates": 0,
+        "n_entities_with_nested": 0,
+        "nested_examples": []
+      },
+      "drifting": {
+        "n_entities": 822,
+        "n_intervals": 57281,
+        "n_strictly_nested": 0,
+        "n_overlapping": 0,
+        "n_duplicates": 0,
+        "n_entities_with_nested": 0,
+        "nested_examples": []
+      },
+      "gap=farFromPorts": {
+        "n_entities": 3780,
+        "n_intervals": 47235,
+        "n_strictly_nested": 0,
+        "n_overlapping": 0,
+        "n_duplicates": 0,
+        "n_entities_with_nested": 0,
+        "nested_examples": []
+      },
+      "gap=nearPorts": {
+        "n_entities": 627,
+        "n_intervals": 8549,
+        "n_strictly_nested": 0,
+        "n_overlapping": 0,
+        "n_duplicates": 0,
+        "n_entities_with_nested": 0,
+        "nested_examples": []
+      },
+      "highSpeedNC": {
+        "n_entities": 492,
+        "n_intervals": 44622,
+        "n_strictly_nested": 0,
+        "n_overlapping": 0,
+        "n_duplicates": 0,
+        "n_entities_with_nested": 0,
+        "nested_examples": []
+      },
+      "loitering": {
+        "n_entities": 522,
+        "n_intervals": 7125,
+        "n_strictly_nested": 0,
+        "n_overlapping": 0,
+        "n_duplicates": 0,
+        "n_entities_with_nested": 0,
+        "nested_examples": []
+      },
+      "lowSpeed": {
+        "n_entities": 1192,
+        "n_intervals": 161069,
+        "n_strictly_nested": 0,
+        "n_overlapping": 0,
+        "n_duplicates": 0,
+        "n_entities_with_nested": 0,
+        "nested_examples": []
+      },
+      "movingSpeed=above": {
+        "n_entities": 1421,
+        "n_intervals": 245343,
+        "n_strictly_nested": 0,
+        "n_overlapping": 0,
+        "n_duplicates": 0,
+        "n_entities_with_nested": 0,
+        "nested_examples": []
+      },
+      "movingSpeed=below": {
+        "n_entities": 1964,
+        "n_intervals": 568955,
+        "n_strictly_nested": 0,
+        "n_overlapping": 0,
+        "n_duplicates": 0,
+        "n_entities_with_nested": 0,
+        "nested_examples": []
+      },
+      "movingSpeed=normal": {
+        "n_entities": 2810,
+        "n_intervals": 478782,
+        "n_strictly_nested": 0,
+        "n_overlapping": 0,
+        "n_duplicates": 0,
+        "n_entities_with_nested": 0,
+        "nested_examples": []
+      },
+      "pilotBoarding": {
+        "n_entities": 106,
+        "n_intervals": 730,
+        "n_strictly_nested": 0,
+        "n_overlapping": 0,
+        "n_duplicates": 0,
+        "n_entities_with_nested": 0,
+        "nested_examples": []
+      },
+      "rendezVous": {
+        "n_entities": 302,
+        "n_intervals": 3548,
+        "n_strictly_nested": 0,
+        "n_overlapping": 0,
+        "n_duplicates": 0,
+        "n_entities_with_nested": 0,
+        "nested_examples": []
+      },
+      "sar": {
+        "n_entities": 7,
+        "n_intervals": 150,
+        "n_strictly_nested": 0,
+        "n_overlapping": 0,
+        "n_duplicates": 0,
+        "n_entities_with_nested": 0,
+        "nested_examples": []
+      },
+      "sarMovement": {
+        "n_entities": 20,
+        "n_intervals": 1227,
+        "n_strictly_nested": 0,
+        "n_overlapping": 0,
+        "n_duplicates": 0,
+        "n_entities_with_nested": 0,
+        "nested_examples": []
+      },
+      "sarSpeed": {
+        "n_entities": 19,
+        "n_intervals": 43010,
+        "n_strictly_nested": 0,
+        "n_overlapping": 0,
+        "n_duplicates": 0,
+        "n_entities_with_nested": 0,
+        "nested_examples": []
+      },
+      "stopped=farFromPorts": {
+        "n_entities": 660,
+        "n_intervals": 105280,
+        "n_strictly_nested": 0,
+        "n_overlapping": 0,
+        "n_duplicates": 0,
+        "n_entities_with_nested": 0,
+        "nested_examples": []
+      },
+      "stopped=nearPorts": {
+        "n_entities": 591,
+        "n_intervals": 274038,
+        "n_strictly_nested": 0,
+        "n_overlapping": 0,
+        "n_duplicates": 0,
+        "n_entities_with_nested": 0,
+        "nested_examples": []
+      },
+      "trawlSpeed": {
+        "n_entities": 260,
+        "n_intervals": 98346,
+        "n_strictly_nested": 0,
+        "n_overlapping": 0,
+        "n_duplicates": 0,
+        "n_entities_with_nested": 0,
+        "nested_examples": []
+      },
+      "trawling": {
+        "n_entities": 87,
+        "n_intervals": 432,
+        "n_strictly_nested": 0,
+        "n_overlapping": 0,
+        "n_duplicates": 0,
+        "n_entities_with_nested": 0,
+        "nested_examples": []
+      },
+      "trawlingMovement": {
+        "n_entities": 267,
+        "n_intervals": 14563,
+        "n_strictly_nested": 0,
+        "n_overlapping": 0,
+        "n_duplicates": 0,
+        "n_entities_with_nested": 0,
+        "nested_examples": []
+      },
+      "tugging": {
+        "n_entities": 55,
+        "n_intervals": 127,
+        "n_strictly_nested": 0,
+        "n_overlapping": 0,
+        "n_duplicates": 0,
+        "n_entities_with_nested": 0,
+        "nested_examples": []
+      },
+      "tuggingSpeed": {
+        "n_entities": 3531,
+        "n_intervals": 524144,
+        "n_strictly_nested": 0,
+        "n_overlapping": 0,
+        "n_duplicates": 0,
+        "n_entities_with_nested": 0,
+        "nested_examples": []
+      },
+      "underWay": {
+        "n_entities": 3031,
+        "n_intervals": 349864,
+        "n_strictly_nested": 0,
+        "n_overlapping": 0,
+        "n_duplicates": 0,
+        "n_entities_with_nested": 0,
+        "nested_examples": []
+      },
+      "withinArea": {
+        "n_entities": 6020,
+        "n_intervals": 146114,
+        "n_strictly_nested": 0,
+        "n_overlapping": 0,
+        "n_duplicates": 0,
+        "n_entities_with_nested": 0,
+        "nested_examples": []
+      }
+    },
+    "totals": {
+      "n_intervals": 3970370,
+      "n_strictly_nested": 0,
+      "n_overlapping": 0,
+      "n_duplicates": 0
+    }
+  },
+  "converter_counts": {
+    "n_lines_hle": 3970370,
+    "bad_lines_hle": {},
+    "n_lines_lle": 15999555,
+    "n_proximity_rows": 62138,
+    "bad_proximity_lines": 0,
+    "inverted_proximity_lines": 0,
+    "n_negative_pool": 2014,
+    "n_positive_pairs": 302,
+    "n_negative_pairs": 504,
+    "n_pairs": 806,
+    "n_pt": 454858,
+    "n_segments": 8807,
+    "n_dropped_outside_pad": 7968231
+  }
+}
