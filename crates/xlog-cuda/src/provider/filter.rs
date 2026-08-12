@@ -1011,9 +1011,9 @@ impl super::CudaKernelProvider {
             ))
         })?;
 
-        // Record d_mask write AFTER the launch enqueues, via the
-        // explicit escape hatch — d_mask is the freshly-allocated
-        // runtime-backed output of THIS call.
+        // d_mask was registered as a write before preflight;
+        // preflight waited for dependencies, and the kernel is now
+        // enqueued. Commit publishes the write event for future uses.
         rec.commit(runtime).map_err(|e| {
             XlogError::Kernel(format!(
                 "compare_columns_mask_recorded: launch recorder commit failed: {}",
