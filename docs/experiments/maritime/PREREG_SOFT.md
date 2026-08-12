@@ -73,3 +73,28 @@ column comparisons are internal only, on identical folds.
 The code is committed before any real run; `verify_smoke` gates every
 run; results are byte-exact JSONs in `results/` plus an append to the
 README.
+
+## Ceiling canon for Arm B (derived and committed BEFORE any CV run)
+
+Per section (d), the canonical Arm-B ceiling is the committed output of
+`ceiling_probe.py --vocab duration` on the pinned archives:
+[`results/ceiling_probe_duration/CEILING_PROBE_DURATION.json`](results/ceiling_probe_duration/CEILING_PROBE_DURATION.json).
+
+**Canon: TP 3,579 / FP 22 / FN 0 -> P 0.9939 / R 1.0 / F1 0.9969.**
+
+This deviates (upward) from the pre-declared EXPECTATION of ~0.830/0.907:
+the expectation assumed `sustained_240` removes only the 2,956 short-run
+false positives and leaves the 733 negative-pair ones intact. Measured:
+the duration discriminator also eliminates 711 of the 733 negative-pair
+false positives — the excluded pairs' body-condition episodes are
+themselves almost always shorter than 240 s on the continuous streams —
+leaving 22. Two consequences, recorded before the CV runs:
+
+1. the pair-exclusion discriminator is largely REDUNDANT with duration on
+   this corpus (a finding, not an assumption);
+2. Arm B operates near saturation (ceiling 0.9969), which mirrors the
+   published maritime setting (all published systems ~0.98 on their
+   grid); the non-saturated arena for the soft-vs-hard comparison is
+   therefore Arm A (base vocabulary, ceiling ~0.66), and H-B-delta must
+   be read with saturation in mind. Hypotheses H-A, H-B-delta and all
+   run parameters are unchanged.
