@@ -1,6 +1,5 @@
 import pytest
 
-pytest.importorskip("torch")
 pyxlog = pytest.importorskip("pyxlog")
 
 from conftest import skip_unless_pyxlog_cuda
