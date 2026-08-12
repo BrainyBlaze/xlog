@@ -81,25 +81,30 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from maritime_convert import convert, parse_hle_archive  # noqa: E402
 
 DEFINITIONAL_BODY = ("proximity", "both_low_or_stopped", "both_open_sea")
+# The Arm-B ceiling body (PREREG_SOFT.md, H-B-ceiling): the definitional
+# body strengthened by the duration relation the converter derives from
+# continuous interval intersections.
+DURATION_BODY = DEFINITIONAL_BODY + ("sustained_240",)
 DURATION_THRESHOLD_S = 240
 MAX_NESTED_EXAMPLES = 10
 
 
-def _predicted_rows(converted: dict) -> set[int]:
-    """Global pt indices covered by the definitional body: the
-    intersection of its three relations' memberships."""
+def _predicted_rows(converted: dict, body: tuple[str, ...] = DEFINITIONAL_BODY) -> set[int]:
+    """Global pt indices covered by `body`: the intersection of its
+    relations' memberships."""
     relations = converted["relations"]
-    covered = set(relations[DEFINITIONAL_BODY[0]])
-    for name in DEFINITIONAL_BODY[1:]:
+    covered = set(relations[body[0]])
+    for name in body[1:]:
         covered &= set(relations[name])
     return covered
 
 
-def body_pointwise_stats(converted: dict) -> dict:
-    """(a) Pointwise TP/FP/FN + P/R/F1 of the definitional body against
+def body_pointwise_stats(converted: dict, body: tuple[str, ...] = DEFINITIONAL_BODY) -> dict:
+    """(a) Pointwise TP/FP/FN + P/R/F1 of `body` (default: the definitional
+    body — byte-identical to the pre-`body`-parameter behavior) against
     ``is_positive`` over the whole corpus. Degenerate ratios are 0.0,
     never NaN (the `scorer.prf1` policy)."""
-    predicted = _predicted_rows(converted)
+    predicted = _predicted_rows(converted, body)
     is_positive = converted["is_positive"]
     tp = sum(1 for i in predicted if is_positive[i])
     fp = len(predicted) - tp
@@ -108,7 +113,7 @@ def body_pointwise_stats(converted: dict) -> dict:
     recall = tp / (tp + fn) if tp + fn else 0.0
     f1 = (2 * precision * recall / (precision + recall)) if precision + recall else 0.0
     return {
-        "body": list(DEFINITIONAL_BODY),
+        "body": list(body),
         "tp": tp, "fp": fp, "fn": fn,
         "precision": precision, "recall": recall, "f1": f1,
     }
@@ -265,19 +270,33 @@ def nested_interval_census(hle: dict) -> dict:
     return {"per_key": per_key, "totals": totals}
 
 
-def probe(tar_path: str, zip_path: str) -> dict:
+def probe(tar_path: str, zip_path: str, vocab: str = "base") -> dict:
     """Full probe: one conversion, one archive-A reparse for the census,
     all three result blocks plus the converter's own counters (so the
-    report is self-describing about the corpus it measured)."""
-    converted = convert(tar_path, zip_path)
+    report is self-describing about the corpus it measured).
+
+    `vocab="base"` (default) is byte-identical to the pre-`vocab`
+    behavior. `vocab="duration"` converts with
+    `extra_relations=("sustained_240",)` and adds one block,
+    `"pointwise_duration"`: the same pointwise arithmetic for the
+    4-relation body `DEFINITIONAL_BODY ∧ sustained_240` — the Arm-B
+    ceiling derived BEFORE any CV run (PREREG_SOFT.md, H-B-ceiling)."""
+    if vocab not in ("base", "duration"):
+        raise ValueError(f"vocab must be 'base' or 'duration' (got {vocab!r}).")
+    extra = ("sustained_240",) if vocab == "duration" else ()
+    converted = convert(tar_path, zip_path, extra_relations=extra)
     hle = parse_hle_archive(tar_path)
-    return {
+    report = {
         "archives": {"tar": tar_path, "zip": zip_path},
+        "vocab": vocab,
         "pointwise": body_pointwise_stats(converted),
         "fp_decomposition": fp_decomposition(converted),
         "nested_interval_census": nested_interval_census(hle),
         "converter_counts": converted["counts"],
     }
+    if vocab == "duration":
+        report["pointwise_duration"] = body_pointwise_stats(converted, DURATION_BODY)
+    return report
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -285,9 +304,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--tar", required=True, help="MaritimeCompositeEvents.tar.gz (HLE, archive A)")
     parser.add_argument("--zip", required=True, help="brest_critical.zip (LLE, archive B)")
     parser.add_argument("--out", required=True, help="result JSON path")
+    parser.add_argument("--vocab", choices=("base", "duration"), default="base",
+                        help="'duration' adds the pointwise_duration ceiling block "
+                             "(body ∧ sustained_240)")
     args = parser.parse_args(argv)
 
-    report = probe(args.tar, args.zip)
+    report = probe(args.tar, args.zip, vocab=args.vocab)
 
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -303,6 +325,10 @@ def main(argv: list[str] | None = None) -> int:
           f"short_run={d['fp_positive_pairs_short_run']} other={d['fp_positive_pairs_other']}")
     print(f"census: intervals={c['n_intervals']} nested={c['n_strictly_nested']} "
           f"overlapping={c['n_overlapping']} duplicates={c['n_duplicates']}")
+    if "pointwise_duration" in report:
+        q = report["pointwise_duration"]
+        print(f"duration body: tp={q['tp']} fp={q['fp']} fn={q['fn']} "
+              f"P={q['precision']:.4f} R={q['recall']:.4f} F1={q['f1']:.4f}")
     return 0
 
 

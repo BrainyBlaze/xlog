@@ -297,3 +297,64 @@ def test_convert_rejects_unknown_extra_relation(tmp_path):
     ])
     with pytest.raises(ValueError):
         convert(tar_p, zip_p, extra_relations=("bogus",))
+
+
+# ---------------------------------------------------------------------------
+# Task 5: ceiling_probe --vocab duration — the Arm-B ceiling derived BEFORE
+# any CV run (PREREG_SOFT.md hypothesis H-B-ceiling)
+# ---------------------------------------------------------------------------
+
+
+def _duration_probe_archives(tmp_path):
+    """Hand-computed fixture (the Task-4 geometry plus one gold interval).
+    pts: 900/1000/1300/2000/2100/2200. The base definitional body covers
+    {1000, 2000} (half-open); sustained_240 covers {1000, 1300} (the 300 s
+    component, closed); gold rendezVous [1000, 1300) covers {1000}. So:
+    base body tp=1 fp=1 fn=0; base ∧ sustained_240 tp=1 fp=0 fn=0."""
+    return _archives(tmp_path, [
+        "rendezVous|A|B|true|1000|1300",
+        "lowSpeed|A| |true|900|2200",
+        "lowSpeed|B| |true|900|2200",
+    ], [
+        "proximity|1|1000|1300|true|A|B",
+        "proximity|1|2000|2100|true|A|B",
+    ], stem="probe")
+
+
+def test_ceiling_probe_duration_vocab_adds_pointwise_duration_block(tmp_path):
+    import json
+
+    import ceiling_probe
+
+    tar_p, zip_p = _duration_probe_archives(tmp_path)
+    out_path = tmp_path / "probe_duration.json"
+    rc = ceiling_probe.main([
+        "--tar", tar_p, "--zip", zip_p, "--out", str(out_path),
+        "--vocab", "duration",
+    ])
+    assert rc == 0
+    report = json.loads(out_path.read_text(encoding="utf-8"))
+    base = report["pointwise"]
+    assert (base["tp"], base["fp"], base["fn"]) == (1, 1, 0)
+    dur = report["pointwise_duration"]
+    assert dur["body"] == [
+        "proximity", "both_low_or_stopped", "both_open_sea", "sustained_240",
+    ]
+    assert (dur["tp"], dur["fp"], dur["fn"]) == (1, 0, 0)
+    assert dur["precision"] == 1.0
+    assert dur["recall"] == 1.0
+    assert dur["f1"] == 1.0
+
+
+def test_ceiling_probe_default_vocab_has_no_duration_block(tmp_path):
+    import json
+
+    import ceiling_probe
+
+    tar_p, zip_p = _duration_probe_archives(tmp_path)
+    out_path = tmp_path / "probe_base.json"
+    rc = ceiling_probe.main(["--tar", tar_p, "--zip", zip_p, "--out", str(out_path)])
+    assert rc == 0
+    report = json.loads(out_path.read_text(encoding="utf-8"))
+    assert "pointwise_duration" not in report
+    assert (report["pointwise"]["tp"], report["pointwise"]["fp"]) == (1, 1)
