@@ -23,7 +23,6 @@ pub mod gpu_d4;
 pub mod gpu_pir;
 pub mod gpu_pir_intern;
 pub mod gpu_weights;
-pub mod sparse_matrix;
 pub mod validation;
 
 pub use gpu_cnf::{encode_cnf_gpu, GpuCnfEncoding, GpuCnfVarTables};
@@ -37,7 +36,6 @@ pub use gpu_weights::{
     apply_query_vars_device, build_evidence_by_var_gpu, build_weights_gpu, map_nodes_to_vars_gpu,
     restore_query_vars_device,
 };
-// GpuCsrCnf is currently unused (dead code); remove re-export.
 pub use validation::{
     build_equivalence_queries_gpu, validate_equivalence_gpu, validate_equivalence_gpu_gated,
     GpuEquivalenceConfig, GpuEquivalenceQueries,
