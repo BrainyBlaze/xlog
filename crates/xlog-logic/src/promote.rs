@@ -830,8 +830,8 @@ fn try_promote_clique_inside_aggregate(body: &mut RirNode, stats: &StatsManager)
     let mut first_slot_of_class: HashMap<usize, usize> = HashMap::new();
     for slot in 0..n_slots {
         let root = uf_find_clique(&mut parent, slot);
-        if !first_slot_of_class.contains_key(&root) {
-            first_slot_of_class.insert(root, slot);
+        if let std::collections::hash_map::Entry::Vacant(entry) = first_slot_of_class.entry(root) {
+            entry.insert(slot);
             class_roots.push(root);
         }
     }

@@ -604,6 +604,10 @@ impl CudaKernelProvider {
     ///   columns are not plain U32, the manager has no runtime, the launch
     ///   stream does not resolve, an input is not 2-column U32/Symbol, or
     ///   any kernel launch fails.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "three relation inputs and launch controls mirror the recorded kernel contract"
+    )]
     pub fn wcoj_triangle_groupby_root_agg_u32_recorded(
         &self,
         e_xy: &CudaBuffer,
@@ -1169,6 +1173,10 @@ impl CudaKernelProvider {
     /// * `XlogError::Kernel` if `agg_op` is not Sum/Min/Max, the manager
     ///   has no runtime, the launch stream does not resolve, an input is
     ///   not 2-column U64, or any kernel launch fails.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "three relation inputs and launch controls mirror the recorded kernel contract"
+    )]
     pub fn wcoj_triangle_groupby_root_agg_u64_recorded(
         &self,
         e_xy: &CudaBuffer,

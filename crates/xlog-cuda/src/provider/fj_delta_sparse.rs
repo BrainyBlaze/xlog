@@ -315,7 +315,7 @@ impl CudaKernelProvider {
         // scan counts (u32, cap+1) must fit the caller's budget; over
         // budget → decline so the caller uses the legacy path.
         if max_table_bytes != 0 {
-            let table_bytes = u64::from(cap).saturating_mul(8 + 1 + 4).saturating_add(4);
+            let table_bytes = cap.saturating_mul(8 + 1 + 4).saturating_add(4);
             if table_bytes > max_table_bytes {
                 return Ok(None);
             }

@@ -454,7 +454,7 @@ impl CudaKernelProvider {
             ]),
         };
         // Inner-join semantics: any empty atom empties the result.
-        if n_rows.iter().any(|&n| n == 0) {
+        if n_rows.contains(&0) {
             return self.create_empty_buffer(out_schema);
         }
 
@@ -1165,7 +1165,7 @@ impl CudaKernelProvider {
                     return self.create_empty_buffer(out_schema);
                 }
                 let mut new_frontier: Vec<FrontierCol> = Vec::with_capacity(tags.len());
-                for (tag, col) in tags.into_iter().zip(compacted.columns.into_iter()) {
+                for (tag, col) in tags.into_iter().zip(compacted.columns) {
                     let CudaColumn::Owned(slice) = col else {
                         return Err(XlogError::Kernel(format!(
                             "{ctx}: compaction produced a non-owned column"
