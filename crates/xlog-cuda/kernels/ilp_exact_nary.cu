@@ -21,11 +21,13 @@
 //   * bounds: at most 8 body atoms, 8 join variables, atom arity <= 8.
 //     The host flattener REFUSES anything larger, so fixed-size local
 //     state here is safe by construction.
-//   * candidate relations ride as one concatenated row-major u64 buffer
-//     with per-relation element offsets, arities and row counts.
-//   * example tuples are row-major u64 with stride = head arity, which
-//     is uniform across one launch (one induce call = one target
-//     relation).
+//   * candidate relations ride as one concatenated COLUMN-MAJOR
+//     (columnar) u64 buffer with per-relation element offsets, arities
+//     and row counts: cell (row, position) of a slot sits at
+//     cand_value_offset[slot] + position * cand_rows[slot] + row.
+//   * example tuples are COLUMN-MAJOR u64: position i of tuple q sits at
+//     i * count + q. Head arity is uniform across one launch (one
+//     induce call = one target relation).
 
 #define ILP_EXACT_NARY_BLOCK_SIZE 256u
 

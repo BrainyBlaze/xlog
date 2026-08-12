@@ -14,21 +14,35 @@
 //! is a separate stage that consumes [`NaryRulePattern`] values as its rule
 //! templates.
 //!
-//! Two laws are enforced here rather than documented elsewhere:
+//! Three laws are enforced here rather than documented elsewhere:
 //!
-//! * **Canonical form.** Join variables are numbered densely in first
-//!   appearance order across the body read left to right. Two patterns that
-//!   differ only by join-variable renaming therefore cannot both exist, and
-//!   the ENUMERATOR never produces alpha-duplicates. Note the exact
-//!   scope: canonicality is a property of what `enumerate_patterns`
-//!   EMITS, not of the type. `NaryRulePattern` has public fields, so a
-//!   caller can hand-build a non-canonical alpha-twin and the public
-//!   flatten/score path will score it identically to its canonical form.
-//!   That is safe (the score is the same), but it means duplicates are
-//!   avoided by construction of the generator and REJECTED by
-//!   `validate`, not made unrepresentable by the type.
+//! * **Canonical form (join-variable naming).** Join variables are numbered
+//!   densely in first-appearance order across the body read left to right,
+//!   so the ENUMERATOR never emits two patterns differing only by
+//!   join-variable renaming — it does not need to filter them.
+//!
+//!   Note the exact scope: canonicality is a property of what
+//!   [`enumerate_patterns`] EMITS, not of the type. [`NaryRulePattern`] has
+//!   public fields, so a caller can hand-build a non-canonical alpha-twin,
+//!   and the public flatten/score path will score it identically to its
+//!   canonical form. That is safe (the score is the same), but it means
+//!   alpha-duplicates are avoided by construction of the generator and
+//!   REJECTED by [`NaryRulePattern::validate`] — not made unrepresentable
+//!   by the type. Callers assembling patterns by hand own that obligation.
+//!
+//! * **Canonical form does NOT quotient atom order or multiplicity.**
+//!   `H :- A(x),B(x)` and `H :- B(x),A(x)` are distinct members, as are
+//!   `H :- A(x)` and `H :- A(x),A(x)`. Semantically identical bodies score
+//!   identically, tie perfectly in the reduction, can co-occupy top-K, and
+//!   inflate `total_scored`. This matches the shipped binary engine, whose
+//!   ordered `(topology, L, R)` grid likewise scores both orderings; a
+//!   sorted-body canonical form would be a behavior change, not a bug fix.
+//!
 //! * **No silent truncation.** The enumeration refuses with a typed error
-//!   when the pattern space exceeds `max_patterns`; it never quietly caps.
+//!   when the pattern space exceeds `max_patterns`, and when the SEARCH
+//!   exceeds `max_traversal_nodes`; it never quietly caps. The two bounds
+//!   are separate because the first bounds output and the second bounds
+//!   work — a search that keeps nothing can still be enormous.
 
 use xlog_core::{Result, XlogError};
 
@@ -158,7 +172,17 @@ impl NaryRulePattern {
                             )));
                         }
                         if j == next_join {
-                            next_join += 1;
+                            // checked: with max_join_vars = 255 a crafted
+                            // 256-join pattern would panic in debug and wrap
+                            // to 0 in release, after which the bound check
+                            // reads 0 > 255 and ACCEPTS the over-budget,
+                            // non-canonical pattern.
+                            next_join = next_join.checked_add(1).ok_or_else(|| {
+                                XlogError::Type(
+                                    "nary pattern: join variable count exceeds                                      the representable range"
+                                        .to_string(),
+                                )
+                            })?;
                             if next_join > config.max_join_vars {
                                 return Err(XlogError::Type(format!(
                                     "nary pattern: {} join variables exceed \

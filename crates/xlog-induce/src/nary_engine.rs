@@ -91,6 +91,14 @@ pub struct NaryInductionResult {
 /// materialize the short-lived empty negatives buffer when
 /// `request.negatives` is `None` — the same normalization the binary
 /// engine performs.
+///
+/// Diagnostic asymmetry, stated rather than left to be discovered: the
+/// EMPTY-CANDIDATES early-out returns a fully default result (zero
+/// example counts) because it precedes buffer validation — with no
+/// candidate there is nothing whose arity the examples must agree with.
+/// Every other trivial early-out (`k == 0`, zero positives) validates
+/// first and therefore reports the real `positive_count` /
+/// `negative_count`.
 pub fn induce_exact_nary(
     provider: &CudaKernelProvider,
     request: &InduceExactNaryRequest<'_>,
@@ -144,7 +152,6 @@ pub fn induce_exact_nary(
         &request.config.enumeration,
     )?;
 
-    let trivial = |result: NaryInductionResult| -> Result<NaryInductionResult> { Ok(result) };
     let counts_only = NaryInductionResult {
         candidates: Vec::new(),
         total_scored: 0,
@@ -156,7 +163,7 @@ pub fn induce_exact_nary(
         // No pattern can be kept: nothing to enumerate, nothing requested,
         // or no positive example can ever push coverage above zero. All
         // three are provable host-side without a launch.
-        return trivial(counts_only);
+        return Ok(counts_only);
     }
 
     // ── Flatten into the device layout. The enumeration already

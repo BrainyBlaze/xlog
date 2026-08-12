@@ -26,6 +26,12 @@ use crate::nary::{NaryRulePattern, PatternVar};
 pub const NARY_MAX_BODY_ATOMS: usize = 8;
 pub const NARY_MAX_JOIN_VARS: usize = 8;
 pub const NARY_MAX_ATOM_ARITY: usize = 8;
+/// Head arity the kernel can gather into its fixed per-thread example
+/// array. Published HERE with the rest of the device contract: it was
+/// previously duplicated as private constants in the launcher and the
+/// engine while this module claimed to refuse everything the kernel
+/// could not evaluate.
+pub const NARY_MAX_HEAD_ARITY: usize = 8;
 
 const JOIN_FLAG: u32 = 1 << 31;
 
@@ -54,6 +60,10 @@ pub enum NaryLayoutError {
         pattern: usize,
         atom: usize,
         head: u8,
+    },
+    HeadArityOutOfRange {
+        pattern: usize,
+        head_arity: usize,
     },
 }
 
@@ -95,6 +105,14 @@ impl std::fmt::Display for NaryLayoutError {
                 f,
                 "pattern {pattern} atom {atom} head index {head} >= the \
                  pattern's head arity"
+            ),
+            Self::HeadArityOutOfRange {
+                pattern,
+                head_arity,
+            } => write!(
+                f,
+                "pattern {pattern} head arity {head_arity} exceeds the \
+                 device bound {NARY_MAX_HEAD_ARITY}"
             ),
         }
     }
@@ -169,12 +187,26 @@ pub fn flatten_patterns(
                 atoms: pattern.body.len(),
             });
         }
+        // The kernel gathers one example tuple into fixed per-thread state,
+        // so a wider head is unevaluatable. This module publishes the device
+        // contract, so the refusal belongs here — the launcher and engine
+        // re-check, they are not the only gate.
+        if usize::from(pattern.head_arity) > NARY_MAX_HEAD_ARITY {
+            return Err(NaryLayoutError::HeadArityOutOfRange {
+                pattern: p,
+                head_arity: usize::from(pattern.head_arity),
+            });
+        }
         let mut joins = 0u32;
         layout.head_arity.push(u32::from(pattern.head_arity));
-        layout
-            .body_offset
-            .push(layout.atom_candidate_slot.len() as u32);
-        layout.body_len.push(pattern.body.len() as u32);
+        layout.body_offset.push(
+            u32::try_from(layout.atom_candidate_slot.len())
+                .expect("atom count exceeds u32; the batch bounds make this unreachable"),
+        );
+        layout.body_len.push(
+            u32::try_from(pattern.body.len())
+                .expect("body length is bounded by NARY_MAX_BODY_ATOMS"),
+        );
         for (a, atom) in pattern.body.iter().enumerate() {
             let arity = atom.bindings.len();
             if arity == 0 || arity > NARY_MAX_ATOM_ARITY {
@@ -186,9 +218,10 @@ pub fn flatten_patterns(
             }
             layout.atom_candidate_slot.push(atom.candidate_slot);
             layout.atom_arity.push(arity as u32);
-            layout
-                .atom_binding_offset
-                .push(layout.binding_codes.len() as u32);
+            layout.atom_binding_offset.push(
+                u32::try_from(layout.binding_codes.len())
+                    .expect("binding-code count exceeds u32; unreachable at sane scales"),
+            );
             for binding in &atom.bindings {
                 match *binding {
                     PatternVar::Head(i) => {
@@ -247,7 +280,7 @@ impl FlatRelation {
         }
         Self {
             arity,
-            row_count: rows.len() as u32,
+            row_count: u32::try_from(rows.len()).expect("relation row count exceeds u32"),
             values,
         }
     }
@@ -562,6 +595,20 @@ mod tests {
         assert!(matches!(
             flatten_patterns(std::slice::from_ref(&too_many_atoms)),
             Err(NaryLayoutError::TooManyBodyAtoms { pattern: 0, .. })
+        ));
+
+        // Head arity is the fourth device bound; before this it was
+        // published in the PR contract and enforced only downstream.
+        let wide_head = NaryRulePattern {
+            head_arity: (NARY_MAX_HEAD_ARITY + 1) as u8,
+            body: vec![BodyAtomPattern {
+                candidate_slot: 0,
+                bindings: vec![Head(0), Head(1)],
+            }],
+        };
+        assert!(matches!(
+            flatten_patterns(std::slice::from_ref(&wide_head)),
+            Err(NaryLayoutError::HeadArityOutOfRange { pattern: 0, .. })
         ));
 
         let wide_atom = NaryRulePattern {

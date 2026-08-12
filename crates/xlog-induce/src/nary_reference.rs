@@ -212,6 +212,23 @@ mod tests {
         let positives = vec![vec![1u64, 2, 3], vec![4, 5, 6], vec![1, 2, 7]];
         let coverage = score_pattern_reference(&pattern, &candidates, &positives, &[]);
         assert_eq!(coverage.positives_covered, 1);
+
+        // Pin the COMPOSITION, not just the sum: a count of 1 would also
+        // pass if a compensating defect covered (1,2,7) while missing the
+        // (1,2,3) the hand-derivation names. Scoring each example alone
+        // says WHICH one is covered.
+        let per_example: Vec<u32> = positives
+            .iter()
+            .map(|example| {
+                score_pattern_reference(&pattern, &candidates, std::slice::from_ref(example), &[])
+                    .positives_covered
+            })
+            .collect();
+        assert_eq!(
+            per_example,
+            vec![1, 0, 0],
+            "(1,2,3) must be the covered example; (4,5,6) and (1,2,7) must not be",
+        );
     }
 
     /// A join variable appearing in a single atom is a don't-care position

@@ -48,7 +48,15 @@ use xlog_core::{Result, ScalarType, XlogError};
 
 use super::{ilp_exact_nary_kernels, RawCudaView, ILP_EXACT_NARY_MODULE};
 
+/// MUST equal `ILP_EXACT_NARY_BLOCK_SIZE` in `kernels/ilp_exact_nary.cu`:
+/// the kernel sizes its static `__shared__` scratch from that macro, so a
+/// larger launch dimension would let threads write past it. The block
+/// reduction additionally assumes a power of two.
 const ILP_EXACT_NARY_BLOCK_SIZE: u32 = 256;
+const _: () = assert!(
+    ILP_EXACT_NARY_BLOCK_SIZE.is_power_of_two() && ILP_EXACT_NARY_BLOCK_SIZE <= 256,
+    "block size must stay a power of two within the kernel's shared scratch",
+);
 
 // Device-contract bounds; must equal both the kernel's fixed state and
 // xlog_induce::nary_layout's flattener bounds. Head arity is bounded by
@@ -56,6 +64,11 @@ const ILP_EXACT_NARY_BLOCK_SIZE: u32 = 256;
 const NARY_MAX_BODY_ATOMS: u32 = 8;
 const NARY_MAX_JOIN_VARS: u32 = 8;
 const NARY_MAX_HEAD_ARITY: u32 = 8;
+// The kernel is safe with a wider atom (its position loop is bounded by
+// the binding-code and relation extents), but the contract publishes
+// arity <= 8 and this launcher is exported raw — without this the bound
+// would hold only for callers who came through the flattener.
+const NARY_MAX_ATOM_ARITY: u32 = 8;
 
 const NARY_JOIN_FLAG: u32 = 0x8000_0000;
 const NARY_INDEX_MASK: u32 = 0xFF;
@@ -186,6 +199,12 @@ fn validate_batch(
             let arity = patterns.atom_arity[atom];
             if arity == 0 {
                 return Err(nary_err(format!("atom {atom} has arity 0")));
+            }
+            if arity > NARY_MAX_ATOM_ARITY {
+                return Err(nary_err(format!(
+                    "atom {atom} has arity {arity} > the device contract's \
+                     {NARY_MAX_ATOM_ARITY}"
+                )));
             }
             match slot_arity[slot] {
                 None => slot_arity[slot] = Some(arity),
@@ -400,6 +419,11 @@ impl super::CudaKernelProvider {
                 patterns.head_arity
             )));
         }
+        // Empty negatives are exempt from the arity match on purpose: a
+        // zero-row buffer is never dereferenced by the kernel, and callers
+        // legitimately pass a schema-arbitrary empty placeholder. Positives
+        // are checked unconditionally because an empty positive set is a
+        // real request shape whose head arity still defines the layout.
         if neg_arity != patterns.head_arity && num_neg != 0 {
             return Err(nary_err(format!(
                 "negatives arity {neg_arity} != head arity {}",

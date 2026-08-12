@@ -69,6 +69,15 @@ fn columnar_u64(ctx: &TestContext, rows: &[Vec<u64>], arity: usize) -> CudaBuffe
 
 /// Compute the expected engine result entirely on host: same enumeration,
 /// reference scorer per pattern, same deterministic reduction.
+///
+/// SCOPE, stated so the equality assertion is not over-read: only the
+/// SCORER is independent of the device path here. The engine under test
+/// calls the same `enumerate_patterns` and `reduce_nary` this function
+/// does, so a defect in either shared layer cancels out of the comparison
+/// and cannot be detected by this test. Those layers carry their own unit
+/// tests in xlog-induce (deterministic canonical enumeration; the
+/// `reduce_nary` suite including tie diagnostics). What this test proves
+/// is device-vs-reference SCORING parity plus the transfer budget.
 fn expected_result(
     head_rel_idx: RelId,
     candidates: &[(RelId, HostRelation, u8)],

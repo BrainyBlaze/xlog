@@ -146,6 +146,16 @@ pub fn reduce_nary(coverage: &[(u32, u32)], k: u32) -> Vec<KeptNaryPattern> {
         .filter(|&i| coverage[i].0 > 0)
         .collect();
 
+    // Tie classes are counted ONCE over the whole batch rather than
+    // rescanned per kept pattern: the per-pattern scan is O(k * batch) and
+    // a large n-ary batch makes this diagnostic dominate the reduction it
+    // is only describing.
+    let mut tie_counts: std::collections::HashMap<(u32, u32), u32> =
+        std::collections::HashMap::new();
+    for &pair in coverage {
+        *tie_counts.entry(pair).or_insert(0) += 1;
+    }
+
     let kept_n = std::cmp::min(k as usize, positives.len());
     let mut result = Vec::with_capacity(kept_n);
     for (rank, &idx) in positives.iter().take(kept_n).enumerate() {
@@ -154,10 +164,7 @@ pub fn reduce_nary(coverage: &[(u32, u32)], k: u32) -> Vec<KeptNaryPattern> {
             .get(rank + 1)
             .map(|&nxt| coverage[nxt])
             .unwrap_or((0, 0));
-        let tie_count = coverage
-            .iter()
-            .filter(|&&(p, n)| p == pos && n == neg)
-            .count() as u32;
+        let tie_count = tie_counts.get(&(pos, neg)).copied().unwrap_or(0);
         result.push(KeptNaryPattern {
             pattern_idx: idx,
             positives_covered: pos,
