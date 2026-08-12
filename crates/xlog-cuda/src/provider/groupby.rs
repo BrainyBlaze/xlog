@@ -1688,7 +1688,9 @@ impl super::CudaKernelProvider {
             })?;
         }
 
-        // Record fresh writes via post-preflight escape hatch.
+        // All outputs were registered as writes before preflight;
+        // preflight waited for dependencies, and the kernels are now
+        // enqueued. Commit publishes their write events for future uses.
         rec.commit(runtime).map_err(|e| {
             XlogError::Kernel(format!("groupby_multi_agg_recorded: commit failed: {}", e))
         })?;

@@ -336,14 +336,12 @@ impl super::CudaKernelProvider {
                     ptr: *cand_arg0_buf.device_ptr(),
                     len: total_rows,
                     stream: cand_arg0_buf.stream().clone(),
-                    source_block: None,
                     _marker: PhantomData,
                 };
                 let cand_arg1_view = RawCudaView::<u64> {
                     ptr: *cand_arg1_buf.device_ptr(),
                     len: total_rows,
                     stream: cand_arg1_buf.stream().clone(),
-                    source_block: None,
                     _marker: PhantomData,
                 };
                 let pos_arg0_view = self.column_as_u64_view(pos_col0, pos_rows as usize)?;
@@ -390,14 +388,12 @@ impl super::CudaKernelProvider {
                     ptr: *cand_arg0_buf.device_ptr(),
                     len: total_rows,
                     stream: cand_arg0_buf.stream().clone(),
-                    source_block: None,
                     _marker: PhantomData,
                 };
                 let cand_arg1_view = RawCudaView::<u32> {
                     ptr: *cand_arg1_buf.device_ptr(),
                     len: total_rows,
                     stream: cand_arg1_buf.stream().clone(),
-                    source_block: None,
                     _marker: PhantomData,
                 };
                 let pos_arg0_view = self.column_as_u32_view(pos_col0, pos_rows as usize)?;

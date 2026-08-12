@@ -601,14 +601,14 @@ impl super::CudaKernelProvider {
     ///   is enqueued.
     /// * `d_mask` is freshly allocated through the same
     ///   runtime-backed manager. By construction its
-    ///   `runtime_block()` is `Some`, so its write recording
-    ///   cannot strict-reject. The write is therefore noted
-    ///   AFTER the kernel is enqueued — this sidesteps the
-    ///   borrow conflict between `&mut d_mask` (cudarc kernel
-    ///   param) and `&d_mask` (recorder). A future migration
-    ///   that may write to a buffer of unknown provenance must
-    ///   instead capture identity pre-launch (e.g. via a raw
-    ///   view) so strict rejection happens at preflight.
+    ///   `runtime_block()` is `Some`. Its owning slice is
+    ///   registered as a write before preflight, which snapshots
+    ///   the allocation identity without retaining the borrow.
+    ///   Preflight queues its dependency waits, the kernel is
+    ///   then enqueued with `&mut d_mask`, and commit afterward
+    ///   finalizes the use by publishing the write event. Future
+    ///   recorded launchers must likewise register each owning
+    ///   slice or column before preflight.
     ///
     /// # Errors
     ///   * `XlogError::Kernel` if the manager has no runtime,
@@ -736,11 +736,10 @@ impl super::CudaKernelProvider {
             XlogError::Kernel(format!("compare_const_mask_recorded launch failed: {}", e))
         })?;
 
-        // Record the write AFTER the launch enqueues, using the
-        // explicit escape hatch. d_mask is the freshly-allocated
-        // runtime-backed output of THIS call; the kernel-param
-        // borrow rules force this ordering. See the
-        // "Strict-mode contract" on this method.
+        // Finalize the preflighted write registration AFTER the
+        // launch enqueues: commit publishes the write event for
+        // future dependent uses. See the "Strict-mode contract"
+        // on this method.
         rec.commit(runtime).map_err(|e| {
             XlogError::Kernel(format!(
                 "compare_const_mask_recorded: launch recorder commit failed: {}",
@@ -1012,9 +1011,9 @@ impl super::CudaKernelProvider {
             ))
         })?;
 
-        // Record d_mask write AFTER the launch enqueues, via the
-        // explicit escape hatch — d_mask is the freshly-allocated
-        // runtime-backed output of THIS call.
+        // d_mask was registered as a write before preflight;
+        // preflight waited for dependencies, and the kernel is now
+        // enqueued. Commit publishes the write event for future uses.
         rec.commit(runtime).map_err(|e| {
             XlogError::Kernel(format!(
                 "compare_columns_mask_recorded: launch recorder commit failed: {}",
@@ -1177,7 +1176,6 @@ impl super::CudaKernelProvider {
             ptr,
             len: num_elements,
             stream: col.stream().clone(),
-            source_block: col.runtime_block(),
             _marker: PhantomData,
         })
     }

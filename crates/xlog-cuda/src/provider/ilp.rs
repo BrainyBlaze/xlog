@@ -33,7 +33,6 @@ impl super::CudaKernelProvider {
             ptr,
             len: num_elements,
             stream: col.stream().clone(),
-            source_block: None,
             _marker: PhantomData,
         })
     }
@@ -62,7 +61,6 @@ impl super::CudaKernelProvider {
             ptr,
             len: num_elements,
             stream: col.stream().clone(),
-            source_block: None,
             _marker: PhantomData,
         })
     }
@@ -635,7 +633,6 @@ impl super::CudaKernelProvider {
             ptr: *cand_probs.device_ptr(),
             len: cudarc::driver::DeviceSlice::len(cand_probs) / 4,
             stream: cand_probs.stream().clone(),
-            source_block: None,
             _marker: PhantomData,
         };
         // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
@@ -695,7 +692,6 @@ impl super::CudaKernelProvider {
             ptr: *cand_probs.device_ptr(),
             len: cudarc::driver::DeviceSlice::len(cand_probs) / 8,
             stream: cand_probs.stream().clone(),
-            source_block: None,
             _marker: PhantomData,
         };
         // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
