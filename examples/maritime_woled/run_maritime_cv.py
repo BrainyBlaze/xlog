@@ -451,6 +451,135 @@ def run_fold_soft(
     }
 
 
+def run_fold_online(
+    fold: int,
+    converted: dict,
+    fold_of_pair: list[int],
+    *,
+    seed: int,
+    vocab: str,
+    stream_order: str,
+    stream_window: int,
+) -> dict:
+    """One held-out fold of the pre-registered O-online column
+    (PREREG_ONLINE.md sections 1-3) — deliberately isolated from
+    `run_fold_soft`, which stays byte-identical to the batch column. The
+    pool and the per-fold permutation-null gate are BYTE-THE-SAME
+    construction as the soft column's (exactly one variable is isolated:
+    batch weights vs single-pass weights); the weights are then trained by
+    ONE chronological pass over the train fold — `online_stream.
+    stream_windows` in ascending global `pt_time` (all the fold's pairs
+    interleaved), one `soft_weights.partial_fit` Adam step per window
+    (lr = the batch column's SOFT_LR). The prequential curve records each
+    window's 0/1 error at threshold 0.5 BEFORE that window's update — a
+    diagnostic only, no summary number. Held-out scoring is the soft
+    column's, unchanged."""
+    from enumerate_bodies import coverage_matrix
+    from enumerate_bodies import enumerate_bodies as enumerate_soft_bodies
+    from online_stream import stream_windows
+    from relational_search import body_cover, kfold_scores, permutation_null_threshold
+    from scorer import prf1
+    from soft_weights import (
+        INIT_LOGIT,
+        SOFT_LR,
+        init_soft_state,
+        partial_fit,
+        soft_scores,
+    )
+    import torch
+
+    train_pts, test_pts = fold_pt_indices(converted, fold_of_pair, fold)
+    train_set, test_set = set(train_pts), set(test_pts)
+    train_relations = restrict_relations(converted["relations"], train_set)
+    train_labels = [converted["is_positive"][pt] for pt in train_pts]
+
+    vocabulary = sorted(converted["relations"])
+    pool = enumerate_soft_bodies(vocabulary, max_literals=MAX_LITERALS)
+    covers = {body: body_cover(body, train_relations) for body in pool}
+    null = permutation_null_threshold(
+        pool, train_relations, train_pts, train_labels,
+        folds=INNER_FOLDS, seed=seed,
+        n_permutations=NULL_PERMUTATIONS, quantile=NULL_QUANTILE,
+        perm_seed=seed, covers=covers,
+    )
+    pool_scores = kfold_scores(
+        pool, train_relations, train_pts, train_labels,
+        INNER_FOLDS, seed, covers=covers, score="f1",
+    )
+    gated = [body for body in pool if pool_scores[body] >= null["threshold"]]
+
+    def _local_matrix(pts: list[int], relations: dict[str, list]) -> "torch.Tensor":
+        pos_of = {pt: i for i, pt in enumerate(pts)}
+        local = {
+            name: {pos_of[pt] for pt in members if pt in pos_of}
+            for name, members in relations.items()
+        }
+        return coverage_matrix(gated, local, n_pt=len(pts))
+
+    cover_train = _local_matrix(train_pts, train_relations)
+    y_train = torch.tensor(train_labels, dtype=torch.bool)
+    train_times = [converted["pt_time"][pt] for pt in train_pts]
+
+    # ONE pass: the stream is a permutation of the LOCAL train positions
+    # (columns of cover_train) in global time order; the local-index
+    # tie-break equals the global pt-index tie-break because train_pts
+    # ascends. Prequential error is measured BEFORE each window's update.
+    t_pass = time.monotonic()
+    state = init_soft_state(len(gated))
+    prequential: list[dict] = []
+    for window in stream_windows(
+        list(range(len(train_pts))), train_times,
+        window=stream_window, order=stream_order,
+    ):
+        cover_w = cover_train[:, window]
+        y_w = y_train[window]
+        pred_w = soft_scores(cover_w, state.weights) > 0.5
+        errors = int((pred_w != y_w).sum().item())
+        prequential.append({
+            "n_pt": int(window.shape[0]),
+            "errors": errors,
+            "error_rate": errors / int(window.shape[0]),
+        })
+        state = partial_fit(state, cover_w, y_w, lr=SOFT_LR)
+    wall_s_pass = time.monotonic() - t_pass
+    weights = state.weights
+
+    test_relations = restrict_relations(converted["relations"], test_set)
+    cover_test = _local_matrix(test_pts, test_relations)
+    scores_test = soft_scores(cover_test, weights)
+    pred = (scores_test > 0.5).tolist()
+    gold = [converted["is_positive"][pt] for pt in test_pts]
+    point = prf1(pred, gold)
+    interval = interval_prf1(pred, gold, _test_segment_bounds(converted, test_set))
+
+    sig = torch.sigmoid(weights).tolist()
+    ranked = sorted(zip(gated, sig), key=lambda bw: (-bw[1], bw[0]))
+    weights_top10 = {"&".join(body): weight for body, weight in ranked[:10]}
+
+    return {
+        "fold": fold,
+        "column": "online",
+        "vocab": vocab,
+        "stream_order": stream_order,
+        "stream_windows": len(prequential),
+        "n_bodies_pool": len(pool),
+        "n_bodies_gated": len(gated),
+        "weights_top10": weights_top10,
+        "online_params": {
+            "lr": SOFT_LR, "threshold": 0.5, "init_logit": INIT_LOGIT,
+            "window": stream_window, "order": stream_order, "passes": 1,
+        },
+        "prequential_curve": prequential,
+        "wall_s_pass": wall_s_pass,
+        "min_fit": null["threshold"],
+        "null_summary": null,
+        "n_train_pt": len(train_pts),
+        "n_test_pt": len(test_pts),
+        "test_pairs": [list(converted["pairs"][p]) for p, f in enumerate(fold_of_pair) if f == fold],
+        "scoring": {"point": point, "interval": interval},
+    }
+
+
 def verify_smoke(converted: dict, tar_path: str, zip_path: str) -> dict:
     """The pre-registered pre-run gate, WITHOUT a second 31-minute
     conversion: both archives' md5 against the committed verifier's own
@@ -505,11 +634,21 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=7)
     parser.add_argument("--min-new-covered", type=int, default=2, dest="min_new_covered")
     parser.add_argument("--tie-tolerance", type=float, default=None, dest="tie_tolerance")
-    parser.add_argument("--column", choices=("hard", "soft"), default="hard",
+    parser.add_argument("--column", choices=("hard", "soft", "online"), default="hard",
                         help="'hard' (default, preserves the baseline hard-search path; "
-                             "the result schema additionally records column/vocab) "
-                             "or the pre-registered noisy-OR soft-credit column "
-                             "(PREREG_SOFT.md section (b))")
+                             "the result schema additionally records column/vocab), "
+                             "the pre-registered noisy-OR soft-credit column "
+                             "(PREREG_SOFT.md section (b)), or the single-pass "
+                             "online weights column (PREREG_ONLINE.md)")
+    parser.add_argument("--stream-order", choices=("chrono", "reverse"), default=None,
+                        dest="stream_order",
+                        help="online column only: pass direction over the train "
+                             "stream — 'chrono' (default; PREREG_ONLINE.md section 2) "
+                             "or the 'reverse' order-sensitivity diagnostic (H-O2)")
+    parser.add_argument("--stream-window", type=int, default=None, dest="stream_window",
+                        help="online column only: mini-batch window in pt rows "
+                             "(default 1000, the pre-registered value; override is "
+                             "for synthetic-fixture tests and is stamped into params)")
     parser.add_argument("--vocab", choices=("base", "duration"), default="base",
                         help="'duration' adds sustained_240 to the converter's "
                              "vocabulary (PREREG_SOFT.md section (c)); "
@@ -518,7 +657,20 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                         help=f"first {SMOKE_N_POS}+{SMOKE_N_NEG} pairs only (tests)")
     parser.add_argument("--skip-verify", action="store_true", dest="skip_verify",
                         help="unit tests on synthetic archives ONLY; stamped into the JSON")
-    return parser.parse_args(argv)
+    args = parser.parse_args(argv)
+    if args.column != "online":
+        if args.stream_order is not None or args.stream_window is not None:
+            parser.error("--stream-order/--stream-window apply to --column online only")
+    else:
+        if args.stream_order is None:
+            args.stream_order = "chrono"
+        if args.stream_window is None:
+            from online_stream import STREAM_WINDOW
+
+            args.stream_window = STREAM_WINDOW
+        if args.stream_window < 1:
+            parser.error(f"--stream-window must be >= 1 (got {args.stream_window})")
+    return args
 
 
 def _smoke_subset(converted: dict) -> dict:
@@ -611,6 +763,11 @@ def main(argv: list[str] | None = None) -> int:
             record = run_fold_soft(
                 fold, converted, fold_of_pair, seed=args.seed, vocab=args.vocab,
             )
+        elif args.column == "online":
+            record = run_fold_online(
+                fold, converted, fold_of_pair, seed=args.seed, vocab=args.vocab,
+                stream_order=args.stream_order, stream_window=args.stream_window,
+            )
         else:
             record = run_fold(
                 fold, converted, fold_of_pair,
@@ -622,6 +779,10 @@ def main(argv: list[str] | None = None) -> int:
         point = record["scoring"]["point"]
         if args.column == "soft":
             print(f"fold {fold}: gated={record['n_bodies_gated']}/{record['n_bodies_pool']} "
+                  f"point_f1={point['f1']:.4f}")
+        elif args.column == "online":
+            print(f"fold {fold}: gated={record['n_bodies_gated']}/{record['n_bodies_pool']} "
+                  f"windows={record['stream_windows']} ({record['stream_order']}) "
                   f"point_f1={point['f1']:.4f}")
         else:
             print(f"fold {fold}: clauses={record['clauses']} point_f1={point['f1']:.4f}")
@@ -668,6 +829,7 @@ def main(argv: list[str] | None = None) -> int:
             "null_permutations": NULL_PERMUTATIONS, "null_quantile": NULL_QUANTILE,
             "smoke": args.smoke,
             "column": args.column, "vocab": args.vocab,
+            "stream_order": args.stream_order, "stream_window": args.stream_window,
         },
         "candidate_vocabulary": sorted(converted["relations"]),
         "fold_of_pair": fold_of_pair,

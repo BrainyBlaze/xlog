@@ -200,3 +200,180 @@ def test_partial_fit_rejects_bad_shapes_and_empty_batches():
         partial_fit(state, cover[:1], y)               # C mismatch vs state
     with pytest.raises(ValueError):
         partial_fit(state, cover[:, :0], y[:0])        # empty batch
+
+
+# ---------------------------------------------------------------------------
+# Task 4: run_maritime_cv --column online — the O-online column
+# (PREREG_ONLINE.md sections 1-3): the SAME pool + permutation-null gate as
+# the soft column, then ONE chronological pass of partial_fit over the
+# train fold's stream windows, the prequential curve (window error BEFORE
+# the update) as a diagnostic, and the soft column's held-out scoring.
+# ---------------------------------------------------------------------------
+
+import io
+import math
+import tarfile
+import zipfile
+
+
+def _archives(tmp_path, hle_lines, lle_lines, stem="online"):
+    tar_p = tmp_path / f"{stem}.tar.gz"
+    data = "\n".join(hle_lines).encode()
+    with tarfile.open(tar_p, "w:gz") as tf:
+        info = tarfile.TarInfo("Maritime Composite Events/CEs/recognised_CEs.csv")
+        info.size = len(data)
+        tf.addfile(info, io.BytesIO(data))
+    zip_p = tmp_path / f"{stem}.zip"
+    with zipfile.ZipFile(zip_p, "w") as z:
+        z.writestr("brest_critical.csv", "\n".join(lle_lines))
+    return str(tar_p), str(zip_p)
+
+
+def _cv_archives(tmp_path, n_pos=6, n_neg=6):
+    """The planted-rule mini-corpus of test_maritime_soft: per positive
+    pair the pts are 900/1000/2000/2100/2200, gold rendezVous [1000, 2000)
+    covers exactly {1000}, and `both_stopped_far` covers exactly {1000}
+    too — a perfect 1-literal soft body. Negative pairs carry proximity
+    only. Every pair shares the same clock, so the global chronological
+    stream interleaves all pairs and exercises the time tie-break."""
+    hle, lle = [], []
+    for i in range(n_pos):
+        a, b = f"P{i:02d}a", f"P{i:02d}b"
+        hle += [
+            f"rendezVous|{a}|{b}|true|1000|2000",
+            f"lowSpeed|{a}| |true|900|2100",
+            f"lowSpeed|{b}| |true|900|2100",
+            f"stopped|{a}| |farFromPorts|1000|2000",
+            f"stopped|{b}| |farFromPorts|1000|2000",
+        ]
+        lle.append(f"proximity|2200|900|2200|true|{a}|{b}")
+    for j in range(n_neg):
+        a, b = f"N{j:02d}a", f"N{j:02d}b"
+        lle.append(f"proximity|2200|900|2200|true|{a}|{b}")
+    return _archives(tmp_path, hle, lle, stem="cv")
+
+
+CV_ARGS = ["--smoke", "--skip-verify", "--folds", "3"]
+
+
+def _run_cv(tmp_path, extra_args, out_name="out.json"):
+    import json
+
+    import run_maritime_cv
+
+    tar_p, zip_p = _cv_archives(tmp_path)
+    out = tmp_path / out_name
+    rc = run_maritime_cv.main(
+        ["--tar", tar_p, "--zip", zip_p, "--out", str(out)] + CV_ARGS + extra_args
+    )
+    assert rc == 0
+    return json.loads(out.read_text(encoding="utf-8"))
+
+
+def test_cv_defaults_stay_byte_identical_with_the_online_column_present(tmp_path):
+    pytest.importorskip("torch")
+    result = _run_cv(tmp_path, [])
+    # the same pre-change snapshot test_maritime_soft pins: adding the
+    # online column must not move a single default-path byte.
+    assert result["micro"]["point"] == {
+        "tp": 6, "fp": 0, "fn": 0, "precision": 1.0, "recall": 1.0, "f1": 1.0,
+    }
+    assert [f["clauses"] for f in result["folds"]] == [
+        [["both_low_or_stopped", "both_stopped_far"]],
+        [["both_low_or_stopped", "both_stopped_far"]],
+        [["both_low_or_stopped", "both_stopped_far"]],
+    ]
+    assert result["fold_of_pair"] == [0, 1, 2, 0, 1, 2, 0, 1, 2, 0, 1, 2]
+    # the params stamp is additive: the stream knobs exist but are unset
+    assert result["params"]["column"] == "hard"
+    assert result["params"]["stream_order"] is None
+    assert result["params"]["stream_window"] is None
+
+
+def test_cv_online_column_recovers_planted_rule(tmp_path):
+    pytest.importorskip("torch")
+    result = _run_cv(tmp_path, ["--column", "online"], out_name="online.json")
+    assert result["params"]["column"] == "online"
+    assert result["params"]["stream_order"] == "chrono"
+    assert result["params"]["stream_window"] == 1000
+    assert result["micro"]["point"]["f1"] == pytest.approx(1.0)
+    for record in result["folds"]:
+        assert record["column"] == "online"
+        assert record["stream_order"] == "chrono"
+        # the pool and the gate are the soft column's, byte-the-same
+        assert record["n_bodies_pool"] == 231
+        assert record["n_bodies_gated"] >= 1
+        assert record["min_fit"] == record["null_summary"]["threshold"]
+        assert record["scoring"]["point"]["f1"] == pytest.approx(1.0)
+        assert record["online_params"] == {
+            "lr": 0.05, "threshold": 0.5, "init_logit": -2.0,
+            "window": 1000, "order": "chrono", "passes": 1,
+        }
+        # one window on this tiny fold: the whole train side fits in 1000
+        assert record["stream_windows"] == 1
+        assert len(record["prequential_curve"]) == 1
+        assert record["wall_s_pass"] >= 0.0
+
+
+def test_cv_online_prequential_curve_has_one_entry_per_window(tmp_path):
+    pytest.importorskip("torch")
+    result = _run_cv(
+        tmp_path, ["--column", "online", "--stream-window", "7"],
+        out_name="win7.json",
+    )
+    assert result["params"]["stream_window"] == 7
+    for record in result["folds"]:
+        expected = math.ceil(record["n_train_pt"] / 7)
+        assert record["stream_windows"] == expected
+        assert len(record["prequential_curve"]) == expected
+        for entry in record["prequential_curve"]:
+            assert set(entry) == {"n_pt", "errors", "error_rate"}
+            assert 0 <= entry["errors"] <= entry["n_pt"]
+            assert entry["error_rate"] == pytest.approx(entry["errors"] / entry["n_pt"])
+        # the windows partition the train rows exactly
+        assert sum(e["n_pt"] for e in record["prequential_curve"]) == record["n_train_pt"]
+
+
+def test_cv_online_reverse_runs_and_is_valid(tmp_path):
+    pytest.importorskip("torch")
+    result = _run_cv(
+        tmp_path, ["--column", "online", "--stream-order", "reverse"],
+        out_name="reverse.json",
+    )
+    assert result["params"]["stream_order"] == "reverse"
+    for record in result["folds"]:
+        assert record["stream_order"] == "reverse"
+        assert record["stream_windows"] == len(record["prequential_curve"])
+        point = record["scoring"]["point"]
+        assert 0.0 <= point["f1"] <= 1.0
+
+
+def test_cv_online_two_runs_identical(tmp_path):
+    pytest.importorskip("torch")
+
+    def strip_walls(result):
+        result.pop("convert_wall_s", None)
+        for record in result["folds"]:
+            record.pop("wall_s", None)
+            record.pop("wall_s_pass", None)
+        return result
+
+    a = strip_walls(_run_cv(tmp_path, ["--column", "online"], out_name="a.json"))
+    b = strip_walls(_run_cv(tmp_path, ["--column", "online"], out_name="b.json"))
+    assert a == b
+
+
+def test_cv_stream_flags_refused_without_online_column(tmp_path):
+    import run_maritime_cv
+
+    tar_p, zip_p = _cv_archives(tmp_path)
+    base = ["--tar", tar_p, "--zip", zip_p, "--out", str(tmp_path / "x.json")] + CV_ARGS
+    with pytest.raises(SystemExit) as exc:
+        run_maritime_cv.main(base + ["--stream-order", "reverse"])
+    assert exc.value.code == 2
+    with pytest.raises(SystemExit) as exc:
+        run_maritime_cv.main(base + ["--column", "soft", "--stream-order", "chrono"])
+    assert exc.value.code == 2
+    with pytest.raises(SystemExit) as exc:
+        run_maritime_cv.main(base + ["--stream-window", "500"])
+    assert exc.value.code == 2
