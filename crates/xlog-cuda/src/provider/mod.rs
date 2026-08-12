@@ -30,6 +30,7 @@ mod fj_delta_sparse;
 mod groupby;
 mod ilp;
 mod ilp_exact;
+mod ilp_exact_nary;
 mod io;
 mod kernel_loading;
 pub mod kernel_paths;
@@ -43,6 +44,7 @@ mod wcoj_project;
 
 pub use fj::{FjNode, FjPlan, FjSubAtom};
 pub use fj_delta::{FjDeltaCols, FJ_DELTA_MAX_DOMAIN};
+pub use ilp_exact_nary::{IlpExactNaryPatterns, IlpExactNaryRequest};
 
 /// Per-module PTX load timing (populated only when XLOG_WARMUP_PROFILE=1).
 #[derive(Debug, Clone, Default)]
@@ -411,12 +413,13 @@ pub const WEIGHTS_MODULE: &str = "xlog_weights";
 pub const ILP_MODULE: &str = "xlog_ilp";
 pub const ILP_CREDIT_MODULE: &str = "xlog_ilp_credit";
 pub const ILP_EXACT_MODULE: &str = "xlog_ilp_exact";
+pub const ILP_EXACT_NARY_MODULE: &str = "xlog_ilp_exact_nary";
 pub const EPISTEMIC_MODULE: &str = "xlog_epistemic";
 pub const WCOJ_MODULE: &str = "xlog_wcoj";
 pub const JOINT_SOLVE_MODULE: &str = "xlog_joint_solve";
 
-// Compile-time check: kernel manifest lists exactly 26 modules.
-const _: () = assert!(crate::kernel_manifest_data::KERNEL_CU_NAMES.len() == 26);
+// Compile-time check: kernel manifest lists exactly 27 modules.
+const _: () = assert!(crate::kernel_manifest_data::KERNEL_CU_NAMES.len() == 27);
 
 /// Kernel function names in the GPU WCOJ module.
 pub mod wcoj_kernels {
@@ -655,6 +658,11 @@ pub mod ilp_exact_kernels {
     pub const ILP_EXACT_SCORE_CHAIN_SMEM: &str = "ilp_exact_score_chain_smem";
     pub const ILP_EXACT_SCORE_CHAIN_SMEM_U32: &str = "ilp_exact_score_chain_smem_u32";
     pub const ILP_EXACT_SELECT_TOPK: &str = "ilp_exact_select_topk";
+}
+
+/// Kernel function names in the n-ary exact-induction module.
+pub mod ilp_exact_nary_kernels {
+    pub const ILP_EXACT_NARY_SCORE: &str = "ilp_exact_nary_score";
 }
 
 /// Kernel function names in the PIR interning module.

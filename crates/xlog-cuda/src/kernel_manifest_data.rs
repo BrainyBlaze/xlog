@@ -7,7 +7,7 @@
 // include!() in build.rs would interpret //! as documenting the wrong item.
 
 /// Module names matching the .cu filenames (without extension).
-/// Order matches provider/mod.rs load order. All 24 modules listed.
+/// Order matches provider/mod.rs load order.
 pub const KERNEL_CU_NAMES: &[&str] = &[
     "join",
     "dedup",
@@ -31,6 +31,7 @@ pub const KERNEL_CU_NAMES: &[&str] = &[
     "ilp",
     "ilp_credit",
     "ilp_exact",
+    "ilp_exact_nary",
     "epistemic",
     "wcoj",
     "mc_resident",
@@ -461,6 +462,11 @@ pub const KERNEL_MODULES: &[KernelModuleSpec] = &[
         ],
     },
     KernelModuleSpec {
+        cu_name: "ilp_exact_nary",
+        module_name: "xlog_ilp_exact_nary",
+        kernels: &["ilp_exact_nary_score"],
+    },
+    KernelModuleSpec {
         cu_name: "epistemic",
         module_name: "xlog_epistemic",
         kernels: &[
@@ -618,8 +624,8 @@ mod tests {
     }
 
     #[test]
-    fn kernel_modules_count_is_26() {
-        assert_eq!(KERNEL_MODULES.len(), 26);
+    fn kernel_modules_count_is_27() {
+        assert_eq!(KERNEL_MODULES.len(), 27);
     }
 
     #[test]

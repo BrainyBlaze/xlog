@@ -13,14 +13,26 @@
 //! selection, and compact selected-row transfers.
 
 pub mod index;
+pub mod nary;
+pub mod nary_engine;
+pub mod nary_layout;
+pub mod nary_reference;
 pub mod provenance;
 pub mod reduce;
 pub mod score;
 pub mod types;
 mod validate;
 
+pub use nary::{
+    canonical_binary_pattern, enumerate_patterns, BodyAtomPattern, NaryEnumerationConfig,
+    NaryRulePattern, PatternVar,
+};
+pub use nary_engine::{
+    induce_exact_nary, InduceExactNaryRequest, NaryInductionConfig, NaryInductionResult,
+    ScoredNaryCandidate,
+};
 pub use provenance::InductionProvenanceRegistry;
-pub use reduce::{reduce_per_topology, ScoredPair};
+pub use reduce::{reduce_nary, reduce_per_topology, KeptNaryPattern, ScoredPair};
 pub use types::{
     ExactInductionConfig, ExactInductionResult, InducedRuleProvenance, InducedRuleRegistry,
     InductionAlternative, InductionSupportRow, RuleSourceKind, ScoredCandidate, Topology,

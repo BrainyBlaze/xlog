@@ -2226,6 +2226,7 @@ dependencies = [
  "rand_chacha 0.3.1",
  "xlog-core",
  "xlog-cuda",
+ "xlog-induce",
  "xlog-logic",
  "xlog-runtime",
  "xlog-solve",
