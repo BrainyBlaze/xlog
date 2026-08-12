@@ -98,3 +98,54 @@ leaving 22. Two consequences, recorded before the CV runs:
    therefore Arm A (base vocabulary, ceiling ~0.66), and H-B-delta must
    be read with saturation in mind. Hypotheses H-A, H-B-delta and all
    run parameters are unchanged.
+
+## Results (pre-registered runs of 2026-08-12, zero protocol deviations)
+
+Shipped artifacts (byte-exact runner outputs, `-text` attribute):
+[`results/asoft_cv5/MARITIME_CV_ASOFT.json`](results/asoft_cv5/MARITIME_CV_ASOFT.json),
+[`results/bhard_cv5/MARITIME_CV_BHARD.json`](results/bhard_cv5/MARITIME_CV_BHARD.json),
+[`results/bsoft_cv5/MARITIME_CV_BSOFT.json`](results/bsoft_cv5/MARITIME_CV_BSOFT.json).
+All three ran with the pre-registered parameters (recorded in each
+artifact's `params` block); verify_smoke gated each run.
+
+| column (5-fold CV, pair-atom) | micro point F1 | P / R | interval F1 | per-fold median |
+|---|---|---|---|---|
+| hard baseline (base vocab, shipped earlier) | 0.6746 | 0.5109 / 0.9925 | 0.6772 | 0.6596 |
+| **A-soft** (base vocab, weighted clauses) | **0.7398** | 0.8715 / 0.6426 | 0.7435 | 0.6928 |
+| **B-hard** (duration vocab, crisp) | **0.9968** | 0.9936 / 1.0 | 0.9970 | 0.9942 |
+| **B-soft** (duration vocab, weighted) | **0.9968** | 0.9936 / 1.0 | 0.9970 | 0.9942 |
+
+### Hypothesis verdicts
+
+- **H-A: REJECTED, in the favorable direction.** The expectation band
+  ([0.66, 0.70]) is exceeded: A-soft scores micro 0.7398, +0.0652 over
+  the crisp baseline on the SAME vocabulary, same folds, same gate.
+  The explanation is an expectation error, not a protocol one: the
+  "~0.66 vocabulary ceiling" is the F1 of the definitional-body
+  OPERATING POINT (crisp reconstruction at recall ~1.0). Weighted
+  clauses are not confined to that point — training moved the operating
+  point to precision 0.8715 / recall 0.6426, which carries higher F1.
+  Weights over the same clauses beating the crisp selection is exactly
+  the OLED-to-WOLED published delta, here measured on a corpus with
+  3,548 gold intervals. Honest per-fold nuance: A-soft wins the median
+  (0.6928 vs 0.6596) and the micro, but wins only 2 of 5 individual
+  folds (0.8000 vs 0.6685; 0.6928 vs 0.5699) — the crisp column keeps
+  folds 0, 1, 4. The claim is therefore "weights beat crisp on
+  aggregate and median", not "on every fold".
+- **H-B-ceiling: CONFIRMED.** B-hard lands at 0.9968 against the
+  pre-committed canon 0.9969 (fp 23 vs the canon's 22 — per-fold
+  gating admits one extra false positive that the global definitional
+  body does not).
+- **H-B-delta: holds trivially at saturation.** B-soft equals B-hard on
+  every fold — with `sustained_240` in the vocabulary both columns
+  recover gold nearly perfectly, so there is no headroom for weights to
+  add anything. This is the saturation consequence recorded in the
+  ceiling-canon section before the runs, and it mirrors the published
+  maritime setting (~0.98 for every published system on their grid).
+  The informative weights-vs-crisp comparison on this corpus is Arm A.
+
+Interpretation caveats carried over: no comparison with the published
+0.98 (different grid); soft weights are shared among extensionally
+equivalent bodies (identical-coverage conjunctions split the weight of
+a clause — read `weights_top10` as evidence of which coverage matters,
+not as a unique clause ranking).
