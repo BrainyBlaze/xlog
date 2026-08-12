@@ -10,7 +10,7 @@
 use cudarc::driver::DeviceSlice;
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyList};
+use pyo3::types::PyDict;
 
 #[cfg(feature = "host-io")]
 use xlog_core::symbol;
@@ -24,8 +24,9 @@ use xlog_prob::neural_fast_path::GpuWeightSlots;
 
 use super::neural_registry::NeuralPredicateInfo;
 use super::{
-    dlpack_capsule_from_tensor, enforce_call_memory_limit, provider_memory_stats, types,
-    CompiledProgram, EpochStats, EvalResult, McDeviceEvalResult, TrainingHistory,
+    dlpack_capsule_from_tensor, enforce_call_memory_limit, pack_query_proof_traces,
+    pack_rule_provenance, provider_memory_stats, types, CompiledProgram, EpochStats, EvalResult,
+    McDeviceEvalResult, TrainingHistory,
 };
 
 // =========================================================================
@@ -1232,7 +1233,7 @@ impl CompiledProgram {
     pub fn proof_traces(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let provenance = xlog_logic::rule_provenance(&self.ast, None);
         let traces = xlog_logic::query_proof_traces(&self.ast, &provenance);
-        pack_proof_traces(py, &traces)
+        pack_query_proof_traces(py, &traces)
     }
 
     pub fn host_transfer_stats(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
@@ -1320,44 +1321,4 @@ impl CompiledProgram {
         )?;
         Ok(dict.into())
     }
-}
-
-fn pack_rule_provenance(
-    py: Python<'_>,
-    entries: &[xlog_logic::RuleProvenance],
-) -> PyResult<Py<PyAny>> {
-    let list = PyList::empty(py);
-    for entry in entries {
-        let dict = PyDict::new(py);
-        dict.set_item("rule_id", &entry.rule_id)?;
-        dict.set_item("head", &entry.head)?;
-        dict.set_item("source_kind", entry.source_kind.as_str())?;
-        dict.set_item("source_span", entry.source_span.clone())?;
-        dict.set_item("generation_trace_hash", entry.generation_trace_hash.clone())?;
-        dict.set_item("support_relation_ids", entry.support_relation_ids.clone())?;
-        dict.set_item(
-            "counterexample_relation_ids",
-            entry.counterexample_relation_ids.clone(),
-        )?;
-        list.append(dict)?;
-    }
-    Ok(list.into())
-}
-
-fn pack_proof_traces(
-    py: Python<'_>,
-    entries: &[xlog_logic::QueryProofTrace],
-) -> PyResult<Py<PyAny>> {
-    let list = PyList::empty(py);
-    for entry in entries {
-        let dict = PyDict::new(py);
-        dict.set_item("query_id", &entry.query_id)?;
-        dict.set_item("query", &entry.query)?;
-        dict.set_item("answer_relation", &entry.answer_relation)?;
-        dict.set_item("rule_ids", entry.rule_ids.clone())?;
-        dict.set_item("source_facts", entry.source_facts.clone())?;
-        dict.set_item("rejected_alternatives", entry.rejected_alternatives.clone())?;
-        list.append(dict)?;
-    }
-    Ok(list.into())
 }
