@@ -123,6 +123,15 @@ EPISODE_GAP_S = 3600
 PAD_S = 1800
 N_NEG_PAIRS = 604
 
+# The gold generator's rendezvousTime constant (docs/experiments/maritime/
+# PREREG_SOFT.md section (c)): LANGUAGE parity with RTEC, not a data peek.
+SUSTAINED_MIN_S = 240
+
+# Opt-in relations `convert` can add beyond the pre-registered baseline
+# vocabulary. Anything else in `extra_relations` is refused with a typed
+# error, never silently ignored.
+_KNOWN_EXTRA_RELATIONS = ("sustained_240",)
+
 _HLE_MEMBER_SUFFIX = "recognised_CEs.csv"
 _LLE_MEMBER_SUFFIX = "brest_critical.csv"
 
@@ -354,6 +363,61 @@ def _covers(sorted_ivs: list[tuple[int, int]], t: int) -> bool:
     return st <= t < et
 
 
+def _covers_closed(sorted_ivs: list[tuple[int, int]], t: int) -> bool:
+    """`_covers` with a CLOSED right end: does some `[st, et]` component in
+    `sorted_ivs` (sorted, non-overlapping) contain `t`? Used only by
+    `sustained_240`, whose pre-registered rule grants the relation to every
+    pt inside `[st, et]` of a long-enough intersection component."""
+    if not sorted_ivs:
+        return False
+    starts = [iv[0] for iv in sorted_ivs]
+    idx = bisect_right(starts, t) - 1
+    if idx < 0:
+        return False
+    st, et = sorted_ivs[idx]
+    return st <= t <= et
+
+
+def _intersect_sorted(a: list[tuple[int, int]], b: list[tuple[int, int]]) -> list[tuple[int, int]]:
+    """Intersection of two MERGED sorted half-open interval lists — the
+    classic two-pointer sweep; output is again merged and sorted."""
+    out: list[tuple[int, int]] = []
+    i = j = 0
+    while i < len(a) and j < len(b):
+        st = max(a[i][0], b[j][0])
+        et = min(a[i][1], b[j][1])
+        if st < et:
+            out.append((st, et))
+        if a[i][1] <= b[j][1]:
+            i += 1
+        else:
+            j += 1
+    return out
+
+
+def _subtract_sorted(a: list[tuple[int, int]], b: list[tuple[int, int]]) -> list[tuple[int, int]]:
+    """`a` minus `b` over MERGED sorted half-open interval lists: every part
+    of an `a` interval not covered by some `b` interval survives."""
+    out: list[tuple[int, int]] = []
+    j = 0
+    for st, et in a:
+        cur = st
+        while j < len(b) and b[j][1] <= cur:
+            j += 1
+        k = j
+        while k < len(b) and b[k][0] < et:
+            bst, bet = b[k]
+            if bst > cur:
+                out.append((cur, bst))
+            cur = max(cur, bet)
+            if bet >= et:
+                break
+            k += 1
+        if cur < et:
+            out.append((cur, et))
+    return out
+
+
 def _in_pad_window(t: int, anchor_ivs: list[tuple[int, int]]) -> bool:
     for st, et in anchor_ivs:
         if st - PAD_S <= t < et + PAD_S:
@@ -428,8 +492,19 @@ def _vessel_near_ports_intervals(hle: dict, vessel: str) -> list[tuple[int, int]
     return _merge_sorted_intervals(combined)
 
 
-def convert(tar_path: str, zip_path: str) -> dict:
-    """Full conversion. Returns dict with keys:
+def convert(tar_path: str, zip_path: str, extra_relations: tuple[str, ...] = ()) -> dict:
+    """Full conversion. `extra_relations` (default `()` — byte-identical to
+    the pre-`extra_relations` behavior) opts additional relations into the
+    output vocabulary; the only known name is `"sustained_240"`
+    (PREREG_SOFT.md section (c)): per pair, the intersection of the
+    CONTINUOUS merged interval lists `proximity ∩ both_low_or_stopped ∩
+    both_open_sea` is computed by interval algebra (never from the sparse
+    pt grid — a single-pt gold run inside a long intersection must still
+    count), and every pt lying in `[st, et]` (closed; the `== 240` tie
+    included) of a component with `et - st >= SUSTAINED_MIN_S` receives
+    the relation. An unknown name raises `ValueError`.
+
+    Returns dict with keys:
     - "pairs": [pair, ...] in fixed order (positives sorted, then negatives sorted)
     - "pt_pair_index": [int, ...]   # for each pt row, index into "pairs"
     - "pt_time": [int, ...]         # unix second of the pt row
@@ -441,6 +516,16 @@ def convert(tar_path: str, zip_path: str) -> dict:
              "term_labels": [bool], "term_dontcare": [bool]}
     - "counts": every skip/drop/bad-line counter from the parsers + row totals
     """
+    unknown = [n for n in extra_relations if n not in _KNOWN_EXTRA_RELATIONS]
+    if unknown:
+        raise ValueError(
+            f"unknown extra_relations {unknown!r}: the only names this "
+            f"converter can add are {_KNOWN_EXTRA_RELATIONS!r}."
+        )
+    if len(set(extra_relations)) != len(extra_relations):
+        raise ValueError(f"extra_relations contains duplicates: {extra_relations!r}")
+    with_sustained = "sustained_240" in extra_relations
+
     hle = parse_hle_archive(tar_path)
     prox = parse_lle_proximity(zip_path)
     sel = select_pairs(hle, prox)
@@ -456,7 +541,7 @@ def convert(tar_path: str, zip_path: str) -> dict:
         "proximity", "far", "both_lowspeed", "both_stopped_far",
         "both_low_or_stopped", "either_low_or_stopped", "any_near_ports",
         "both_open_sea", "became_far", "became_proximate", "any_slow_ended",
-    )
+    ) + tuple(extra_relations)
     relations: dict[str, list[int]] = {name: [] for name in relation_names}
 
     init_labels: list[bool] = []
@@ -498,6 +583,21 @@ def convert(tar_path: str, zip_path: str) -> dict:
         )
         v1_near_ports = _vessel_near_ports_intervals(hle, v1)
         v2_near_ports = _vessel_near_ports_intervals(hle, v2)
+
+        if with_sustained:
+            # The CONTINUOUS intersection proximity ∩ both_low_or_stopped ∩
+            # both_open_sea over the pair's already-merged interval lists;
+            # both_open_sea is the complement of either vessel's
+            # nearPorts/nearCoast union, so it is a subtraction here.
+            both_ls_ivs = _intersect_sorted(v1_low_stop, v2_low_stop)
+            inter = _intersect_sorted(prox_ivs, both_ls_ivs)
+            near_union = _merge_sorted_intervals(sorted(v1_near_ports + v2_near_ports))
+            sustained_ivs = [
+                (st, et) for st, et in _subtract_sorted(inter, near_union)
+                if et - st >= SUSTAINED_MIN_S
+            ]
+        else:
+            sustained_ivs = []
 
         local_times = timeline["timepoints"]
         base = len(pt_time)
@@ -545,6 +645,8 @@ def convert(tar_path: str, zip_path: str) -> dict:
                     relations["any_near_ports"].append(pt_idx)
                 if both_open_sea:
                     relations["both_open_sea"].append(pt_idx)
+                if with_sustained and _covers_closed(sustained_ivs, t):
+                    relations["sustained_240"].append(pt_idx)
 
                 if prev_t is None:
                     became_far = False

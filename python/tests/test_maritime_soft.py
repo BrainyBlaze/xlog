@@ -165,3 +165,135 @@ def test_train_soft_weights_is_bitwise_deterministic():
     w1 = train_soft_weights(cover, y, steps=50, seed=7)
     w2 = train_soft_weights(cover, y, steps=50, seed=7)
     assert torch.equal(w1, w2), "same seed must reproduce bitwise-equal weights"
+
+
+# ---------------------------------------------------------------------------
+# Task 4: sustained_240 — the Arm-B relation, computed on CONTINUOUS interval
+# intersections (PREREG_SOFT.md section (c)), never on the sparse pt grid
+# ---------------------------------------------------------------------------
+
+import io
+import tarfile
+import zipfile
+
+
+def _archives(tmp_path, hle_lines, lle_lines, stem="soft"):
+    tar_p = tmp_path / f"{stem}.tar.gz"
+    data = "\n".join(hle_lines).encode()
+    with tarfile.open(tar_p, "w:gz") as tf:
+        info = tarfile.TarInfo("Maritime Composite Events/CEs/recognised_CEs.csv")
+        info.size = len(data)
+        tf.addfile(info, io.BytesIO(data))
+    zip_p = tmp_path / f"{stem}.zip"
+    with zipfile.ZipFile(zip_p, "w") as z:
+        z.writestr("brest_critical.csv", "\n".join(lle_lines))
+    return str(tar_p), str(zip_p)
+
+
+def test_sustained_240_long_component_yes_short_component_no(tmp_path):
+    from maritime_convert import convert
+
+    tar_p, zip_p = _archives(tmp_path, [
+        "lowSpeed|A| |true|900|2200",
+        "lowSpeed|B| |true|900|2200",
+    ], [
+        "proximity|1|1000|1300|true|A|B",   # intersection component: 300 s
+        "proximity|1|2000|2100|true|A|B",   # intersection component: 100 s
+    ])
+    conv = convert(tar_p, zip_p, extra_relations=("sustained_240",))
+    times = conv["pt_time"]
+    assert times == [900, 1000, 1300, 2000, 2100, 2200]
+    # pts inside the 300 s component [1000, 1300] (closed, per PREREG_SOFT)
+    # receive the relation; the 100 s component's pts do not.
+    assert conv["relations"]["sustained_240"] == [times.index(1000), times.index(1300)]
+
+
+def test_sustained_240_exactly_240_is_included(tmp_path):
+    from maritime_convert import convert
+
+    tar_p, zip_p = _archives(tmp_path, [
+        "lowSpeed|A| |true|900|1300",
+        "lowSpeed|B| |true|900|1300",
+    ], [
+        "proximity|1|1000|1240|true|A|B",   # et - st == 240 exactly: the tie
+    ])
+    conv = convert(tar_p, zip_p, extra_relations=("sustained_240",))
+    times = conv["pt_time"]
+    assert conv["relations"]["sustained_240"] == [times.index(1000), times.index(1240)]
+
+
+def test_sustained_240_single_pt_inside_long_intersection_gets_it(tmp_path):
+    # THE pt-grid trap the interval semantics exists for: the grid holds a
+    # single body-covered pt (10000; 20000 is excluded by the half-open
+    # cover), so any run-length reading over the pt grid sees a 0 s run and
+    # kills recall — while the CONTINUOUS intersection is 10,000 s long.
+    from maritime_convert import convert
+
+    tar_p, zip_p = _archives(tmp_path, [
+        "lowSpeed|A| |true|9000|21000",
+        "lowSpeed|B| |true|9000|21000",
+    ], [
+        "proximity|1|10000|20000|true|A|B",
+    ])
+    conv = convert(tar_p, zip_p, extra_relations=("sustained_240",))
+    times = conv["pt_time"]
+    assert times == [9000, 10000, 20000, 21000]
+    body_pts = (
+        set(conv["relations"]["proximity"])
+        & set(conv["relations"]["both_low_or_stopped"])
+        & set(conv["relations"]["both_open_sea"])
+    )
+    assert body_pts == {times.index(10000)}, "the grid must hold exactly one covered pt"
+    assert times.index(10000) in conv["relations"]["sustained_240"]
+
+
+def test_convert_default_has_no_sustained_key_and_matches_main_snapshot(tmp_path):
+    # Byte-identity of the default path: convert() without the flag returns
+    # exactly what the pre-change (main 332a6837) code returned on the
+    # test_maritime_convert fixture — snapshot pinned below by value — and
+    # deep-equals an explicit extra_relations=().
+    from maritime_convert import convert
+
+    tar_p, zip_p = _archives(tmp_path, [
+        "rendezVous|B|A|true|1000|2000",
+        "lowSpeed|A| |true|900|2100",
+        "lowSpeed|B| |true|900|1500",
+        "stopped|B| |farFromPorts|1500|2100",
+        "withinArea|A|nearPorts|true|5000|6000",
+        "garbage line without pipes",
+    ], [
+        "proximity|2200|900|2200|true|B|A",
+        "proximity|2500|2200|2500|true|A|B",
+        "coord|900|900|A|-4.3|48.1",
+        "proximity|9|900|2200|true|A",
+    ])
+    conv = convert(tar_p, zip_p)
+    assert conv == convert(tar_p, zip_p, extra_relations=())
+    assert "sustained_240" not in conv["relations"]
+    # main-code snapshot, captured on 332a6837 before this feature existed:
+    assert conv["pt_time"] == [900, 1000, 1500, 2000, 2100, 2500]
+    assert conv["segments"] == [(0, 6)]
+    assert conv["is_positive"] == [False, True, True, False, False, False]
+    assert conv["relations"] == {
+        "proximity": [0, 1, 2, 3, 4],
+        "far": [5],
+        "both_lowspeed": [0, 1],
+        "both_stopped_far": [],
+        "both_low_or_stopped": [0, 1, 2, 3],
+        "either_low_or_stopped": [0, 1, 2, 3],
+        "any_near_ports": [],
+        "both_open_sea": [0, 1, 2, 3, 4, 5],
+        "became_far": [5],
+        "became_proximate": [],
+        "any_slow_ended": [4],
+    }
+
+
+def test_convert_rejects_unknown_extra_relation(tmp_path):
+    from maritime_convert import convert
+
+    tar_p, zip_p = _archives(tmp_path, ["lowSpeed|A| |true|0|10"], [
+        "proximity|1|0|10|true|A|B",
+    ])
+    with pytest.raises(ValueError):
+        convert(tar_p, zip_p, extra_relations=("bogus",))
