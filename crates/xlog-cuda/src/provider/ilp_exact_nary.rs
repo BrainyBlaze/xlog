@@ -591,8 +591,10 @@ impl super::CudaKernelProvider {
 mod tests {
     //! CUDA-gated correctness tests for the n-ary launcher, pinned to the
     //! same hand-computed fixtures the host reference scorer freezes
-    //! (`xlog_induce::nary_reference`). Skipped silently without a GPU;
-    //! the pod leg runs them for real. All values are COLUMNAR.
+    //! (`xlog_induce::nary_reference`). Skipped without a GPU so the suite
+    //! still runs on a CPU-only host, but never under `XLOG_REQUIRE_CUDA=1`
+    //! (see [`make_provider`]); the pod leg runs them for real. All values
+    //! are COLUMNAR.
 
     use std::sync::Arc;
 
@@ -601,11 +603,47 @@ mod tests {
     use super::{IlpExactNaryPatterns, IlpExactNaryRequest};
     use crate::{CudaDevice, CudaKernelProvider, GpuMemoryManager};
 
+    /// Provider fixture for the launcher tests.
+    ///
+    /// Returns `None` when CUDA is unavailable so a CPU-only host can still
+    /// run the suite — except under `XLOG_REQUIRE_CUDA=1`, where a missing
+    /// device is a hard failure instead of a skip. Without that arm, a test
+    /// that returns early is indistinguishable from a passing one in cargo's
+    /// output, so `cargo test -p xlog-cuda --lib nary` reports five green
+    /// tests on a machine that never touched a GPU — which is how this
+    /// filter gets run when certifying the launcher on a rented device.
+    ///
+    /// Note that `scripts/validate_release_gpu.sh` does not cover this
+    /// filter: it exports `XLOG_REQUIRE_CUDA=1` but runs only the `xlog-cli`,
+    /// `xlog-prob` and `xlog-cuda-tests` legs, so the guard below is the sole
+    /// thing standing between a device-less host and a green launcher claim.
+    ///
+    /// Mirrors `xlog_cuda_tests::harness::enforce_cuda_required`, which
+    /// already covers the integration-level `TestContext`; that crate is a
+    /// dev-dependency of the integration tests only and is not reachable
+    /// from this in-crate unit-test module.
     fn make_provider() -> Option<CudaKernelProvider> {
-        let device = Arc::new(CudaDevice::new(0).ok()?);
+        fn skip_unless_required(
+            context: &str,
+            error: impl std::fmt::Display,
+        ) -> Option<CudaKernelProvider> {
+            if std::env::var("XLOG_REQUIRE_CUDA").as_deref() == Ok("1") {
+                panic!("XLOG_REQUIRE_CUDA=1 but CUDA is unavailable ({context}): {error}");
+            }
+            eprintln!("Skipping n-ary launcher test: CUDA unavailable ({context}): {error}");
+            None
+        }
+
+        let device = match CudaDevice::new(0) {
+            Ok(device) => Arc::new(device),
+            Err(error) => return skip_unless_required("CudaDevice::new", error),
+        };
         let budget = MemoryBudget::with_limit(1024 * 1024 * 1024);
         let memory = Arc::new(GpuMemoryManager::new(device.clone(), budget));
-        CudaKernelProvider::new(device, memory).ok()
+        match CudaKernelProvider::new(device, memory) {
+            Ok(provider) => Some(provider),
+            Err(error) => skip_unless_required("CudaKernelProvider::new", error),
+        }
     }
 
     const JOIN: u32 = 0x8000_0000;
