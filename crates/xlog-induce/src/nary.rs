@@ -19,7 +19,14 @@
 //! * **Canonical form.** Join variables are numbered densely in first
 //!   appearance order across the body read left to right. Two patterns that
 //!   differ only by join-variable renaming therefore cannot both exist, and
-//!   the enumeration never produces alpha-duplicates by construction.
+//!   the ENUMERATOR never produces alpha-duplicates. Note the exact
+//!   scope: canonicality is a property of what `enumerate_patterns`
+//!   EMITS, not of the type. `NaryRulePattern` has public fields, so a
+//!   caller can hand-build a non-canonical alpha-twin and the public
+//!   flatten/score path will score it identically to its canonical form.
+//!   That is safe (the score is the same), but it means duplicates are
+//!   avoided by construction of the generator and REJECTED by
+//!   `validate`, not made unrepresentable by the type.
 //! * **No silent truncation.** The enumeration refuses with a typed error
 //!   when the pattern space exceeds `max_patterns`; it never quietly caps.
 
@@ -62,7 +69,18 @@ pub struct NaryEnumerationConfig {
     pub max_join_vars: u8,
     /// Hard ceiling on the enumerated pattern count. Exceeding it is a typed
     /// refusal, never a silent cap.
+    ///
+    /// This bounds the OUTPUT. It does not bound the work: the search can
+    /// walk an exponential number of dead-end nodes without ever producing
+    /// a keepable pattern, so `max_traversal_nodes` bounds that separately.
     pub max_patterns: u32,
+    /// Hard ceiling on SEARCH NODES visited during enumeration.
+    ///
+    /// Without it an in-contract request (small `max_patterns`, wide
+    /// candidate set) walks billions of nodes and returns an empty result,
+    /// because the pattern cap can only fire when a pattern is KEPT.
+    /// Exceeding this is the same kind of typed refusal.
+    pub max_traversal_nodes: u64,
 }
 
 impl NaryRulePattern {
@@ -203,7 +221,10 @@ pub fn canonical_binary_pattern(
 /// `Head(i)` ordered before `Join(j)` at each position, so two calls with the
 /// same inputs return identical vectors. Canonical join numbering is
 /// generated directly (a join slot may only introduce the next unused join
-/// index), so no alpha-duplicate is ever produced or filtered.
+/// index), so this function never produces an alpha-duplicate — it does
+/// not need to filter them. Callers that construct patterns by hand
+/// bypass that guarantee; `NaryRulePattern::validate` is what rejects a
+/// non-canonical one.
 ///
 /// Refuses with a typed error the moment the pattern count would exceed
 /// `config.max_patterns`.
@@ -222,6 +243,7 @@ pub fn enumerate_patterns(
     }
     let mut patterns: Vec<NaryRulePattern> = Vec::new();
     let mut body: Vec<BodyAtomPattern> = Vec::new();
+    let mut nodes: u64 = 0;
     for body_len in 1..=config.max_body_atoms {
         enumerate_bodies(
             head_arity,
@@ -231,6 +253,7 @@ pub fn enumerate_patterns(
             &mut body,
             0,
             &mut patterns,
+            &mut nodes,
         )?;
     }
     Ok(patterns)
@@ -245,7 +268,9 @@ fn enumerate_bodies(
     body: &mut Vec<BodyAtomPattern>,
     joins_used: u8,
     out: &mut Vec<NaryRulePattern>,
+    nodes: &mut u64,
 ) -> Result<()> {
+    charge_node(config, nodes)?;
     if body.len() == body_len as usize {
         let candidate = NaryRulePattern {
             head_arity,
@@ -292,6 +317,7 @@ fn enumerate_bodies(
             arity,
             &mut bindings,
             out,
+            nodes,
         )?;
     }
     Ok(())
@@ -309,7 +335,9 @@ fn enumerate_bindings(
     arity: u8,
     bindings: &mut Vec<PatternVar>,
     out: &mut Vec<NaryRulePattern>,
+    nodes: &mut u64,
 ) -> Result<()> {
+    charge_node(config, nodes)?;
     if bindings.len() == arity as usize {
         body.push(BodyAtomPattern {
             candidate_slot: slot,
@@ -324,6 +352,7 @@ fn enumerate_bindings(
             body,
             joins_now,
             out,
+            nodes,
         )?;
         body.pop();
         return Ok(());
@@ -341,6 +370,7 @@ fn enumerate_bindings(
             arity,
             bindings,
             out,
+            nodes,
         )?;
         bindings.pop();
     }
@@ -363,8 +393,30 @@ fn enumerate_bindings(
             arity,
             bindings,
             out,
+            nodes,
         )?;
         bindings.pop();
+    }
+    Ok(())
+}
+
+/// Charge one search node against the traversal budget.
+///
+/// The pattern cap can only fire when a pattern is KEPT, so a request with
+/// a small `max_patterns` over a wide candidate set would otherwise walk an
+/// exponential dead-end space and return an empty result after minutes of
+/// work. Bounding nodes makes the refusal reachable on the SEARCH, not just
+/// on the output.
+fn charge_node(config: &NaryEnumerationConfig, nodes: &mut u64) -> Result<()> {
+    *nodes += 1;
+    if *nodes > config.max_traversal_nodes {
+        return Err(XlogError::Execution(format!(
+            "nary enumeration: search exceeded max_traversal_nodes {} \
+             (max_body_atoms {}, max_join_vars {}); the pattern space is \
+             larger than the work budget — narrow the request or raise the \
+             bound explicitly, the engine never truncates silently",
+            config.max_traversal_nodes, config.max_body_atoms, config.max_join_vars,
+        )));
     }
     Ok(())
 }
@@ -404,6 +456,7 @@ mod tests {
             max_body_atoms,
             max_join_vars,
             max_patterns: 1_000_000,
+            max_traversal_nodes: 1_000_000,
         }
     }
 
@@ -535,11 +588,50 @@ mod tests {
             max_body_atoms: 2,
             max_join_vars: 1,
             max_patterns: 3,
+            max_traversal_nodes: 1_000_000,
         };
         let err = enumerate_patterns(2, &arities, &cfg).unwrap_err();
         assert!(
             matches!(err, XlogError::Execution(ref m) if m.contains("max_patterns")),
             "got {err:?}"
         );
+    }
+
+    #[test]
+    fn traversal_guard_fires_on_work_not_only_on_output() {
+        // The reviewer's probe: an IN-CONTRACT request whose pattern cap can
+        // never fire, because the search walks an enormous dead-end space
+        // without keeping anything. Before the node budget this returned
+        // Ok(empty) after millions of nodes; now it refuses.
+        let arities = [2u8; 8];
+        let cfg = NaryEnumerationConfig {
+            max_body_atoms: 8,
+            max_join_vars: 8,
+            max_patterns: 1,
+            max_traversal_nodes: 10_000,
+        };
+        let err = enumerate_patterns(8, &arities, &cfg).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                XlogError::Execution(ref m) if m.contains("max_traversal_nodes")
+            ),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn traversal_budget_does_not_refuse_a_bounded_request() {
+        // The guard must not fire on lawful small requests — a check that
+        // can fail in BOTH directions.
+        let arities = [2u8, 2u8];
+        let cfg = NaryEnumerationConfig {
+            max_body_atoms: 2,
+            max_join_vars: 1,
+            max_patterns: 1_000,
+            max_traversal_nodes: 1_000_000,
+        };
+        let patterns = enumerate_patterns(2, &arities, &cfg).expect("bounded request");
+        assert!(!patterns.is_empty());
     }
 }

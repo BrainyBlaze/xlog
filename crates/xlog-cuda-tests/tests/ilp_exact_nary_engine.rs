@@ -143,6 +143,7 @@ fn engine_matches_reference_over_binary_chain_space() {
             max_body_atoms: 2,
             max_join_vars: 1,
             max_patterns: 10_000,
+            max_traversal_nodes: 1_000_000,
         },
         k: 5,
     };
@@ -194,6 +195,7 @@ fn engine_matches_reference_over_ternary_space() {
             max_body_atoms: 2,
             max_join_vars: 2,
             max_patterns: 1_000_000,
+            max_traversal_nodes: 1_000_000,
         },
         k: 3,
     };
@@ -231,6 +233,7 @@ fn engine_trivial_paths_and_typed_refusals() {
             max_body_atoms: 2,
             max_join_vars: 1,
             max_patterns: 10_000,
+            max_traversal_nodes: 1_000_000,
         },
         k: 2,
     };
@@ -334,6 +337,7 @@ fn engine_trivial_paths_and_typed_refusals() {
             config: NaryInductionConfig {
                 enumeration: NaryEnumerationConfig {
                     max_patterns: 1,
+                    max_traversal_nodes: 1_000_000,
                     ..config.enumeration
                 },
                 ..config

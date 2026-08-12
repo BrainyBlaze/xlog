@@ -72,7 +72,15 @@ fn satisfy(
     };
     let relation = &candidates[atom.candidate_slot as usize];
     'rows: for row in &relation.rows {
-        debug_assert_eq!(row.len(), atom.bindings.len());
+        // assert_eq!, not debug_assert_eq!: this interpreter is the PARITY
+        // ANCHOR, so in release builds a ragged row would let zip() silently
+        // truncate and produce a confident wrong count — the worst failure
+        // mode an oracle can have.
+        assert_eq!(
+            row.len(),
+            atom.bindings.len(),
+            "candidate relation row width does not match the atom's bindings",
+        );
         // Check the row against fixed positions, collecting the join
         // variables this row would newly bind so they can be undone.
         let mut newly_bound: Vec<u8> = Vec::new();

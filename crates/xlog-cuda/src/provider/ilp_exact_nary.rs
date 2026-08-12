@@ -21,6 +21,16 @@
 //! `i * count + q` — the same formulas the flat host interpreter and the
 //! kernel share.
 //!
+//! Example tuples are a BAG, not a set: a duplicated positive counts once
+//! per occurrence, so a caller that passes duplicates inflates coverage.
+//! This is consistent across the reference, flat and device layers and is
+//! the caller's contract to uphold.
+//!
+//! Per-launch runtime is NOT bounded by the pattern cap: one block walks a
+//! backtracking search whose worst case is `rows^body_len`. On a display
+//! GPU a wide relation set can therefore trip the driver watchdog; bound
+//! the inputs, not just the pattern count.
+//!
 //! Layering: pattern arrays are PRIMITIVE flat host slices (the encoding
 //! produced by `xlog_induce::nary_layout::flatten_patterns`), so
 //! xlog-cuda keeps no dependency on xlog-induce. Every structural
@@ -359,6 +369,28 @@ impl super::CudaKernelProvider {
         }
         let num_patterns =
             validate_batch(patterns, &cand_value_offset, &cand_rows, total_elems as u64)?;
+
+        // The batch declares each atom's arity; the buffers know their own
+        // column count. A claimed arity wider than the relation reads
+        // straight past the slot into the NEXT relation's column and scores
+        // real-looking garbage, so the two must agree exactly.
+        for (atom, (&slot, &claimed)) in patterns
+            .atom_candidate_slot
+            .iter()
+            .zip(patterns.atom_arity.iter())
+            .enumerate()
+        {
+            let actual = arities.get(slot as usize).copied().ok_or_else(|| {
+                nary_err(format!("atom {atom}: candidate slot {slot} out of range"))
+            })?;
+            if claimed != actual {
+                return Err(nary_err(format!(
+                    "atom {atom} claims arity {claimed} for candidate slot \
+                     {slot}, but that relation has {actual} columns; the \
+                     kernel would read past the slot into the next relation",
+                )));
+            }
+        }
 
         let (pos_arity, num_pos) = require_u64_columns(positives, "positives")?;
         let (neg_arity, num_neg) = require_u64_columns(negatives, "negatives")?;
