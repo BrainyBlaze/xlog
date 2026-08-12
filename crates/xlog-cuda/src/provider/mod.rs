@@ -748,8 +748,6 @@ pub mod d4_kernels {
     // BFS frontier expansion and unit propagation.
     pub const D4_FRONTIER_PREPARE: &str = "d4_frontier_prepare";
     pub const D4_FRONTIER_EXPAND: &str = "d4_frontier_expand";
-    pub const D4_FRONTIER_PREPARE_DENSE: &str = "d4_frontier_prepare_dense";
-    pub const D4_FRONTIER_EXPAND_DENSE: &str = "d4_frontier_expand_dense";
     // Per-frontier Decision-DNNF DFS worker (count+emit).
     pub const D4_COMPILE_COUNT: &str = "d4_compile_count";
     pub const D4_COMPILE_EMIT: &str = "d4_compile_emit";
@@ -771,7 +769,6 @@ pub mod d4_kernels {
     // GPU-only assertions (tests + invariant enforcement without host reads).
     pub const D4_ASSERT_U32_EQ: &str = "d4_assert_u32_eq";
     pub const D4_ASSERT_BITSET_VAR: &str = "d4_assert_bitset_var";
-    pub const D4_ASSERT_DENSE_VAR: &str = "d4_assert_dense_var";
     pub const D4_ASSERT_LEAF_ROOT_AND_DEGREE: &str = "d4_assert_leaf_root_and_degree";
 }
 
