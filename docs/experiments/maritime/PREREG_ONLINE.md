@@ -73,3 +73,49 @@ on the base vocabulary, where the leak is excluded by construction.
 The code is committed before any real run; `verify_smoke` gates every
 run; results are byte-exact JSONs plus an append to this document under
 its own rule.
+
+## Results (pre-registered runs of 2026-08-12, zero protocol deviations)
+
+Shipped artifacts (byte-exact runner outputs):
+[`results/online_cv5/MARITIME_CV_ONLINE.json`](results/online_cv5/MARITIME_CV_ONLINE.json),
+[`results/online_reverse_cv5/MARITIME_CV_ONLINE_REVERSE.json`](results/online_reverse_cv5/MARITIME_CV_ONLINE_REVERSE.json).
+Both ran with the pre-registered parameters (window 1,000, lr 0.05, base
+vocabulary, one pass); verify_smoke gated each run.
+
+| column (5-fold pair-atom CV) | micro point F1 | P / R | per-fold median |
+|---|---|---|---|
+| A-soft, batch weights (shipped earlier) | 0.7398 | 0.8715 / 0.6426 | 0.6928 |
+| **O-online, chrono single pass** | **0.7398** | 0.8715 / 0.6426 | 0.6928 |
+| O-online, reverse pass (diagnostic) | 0.7398 | 0.8715 / 0.6426 | 0.6928 |
+
+### Hypothesis verdicts
+
+- **H-O1: CONFIRMED at the favorable edge — measured degradation is
+  ZERO.** The single-pass column reproduces the batch column's
+  thresholded predictions exactly (identical tp/fp/fn on every fold:
+  micro 2,300 / 339 / 1,279).
+- **H-O2: CONFIRMED** — |chrono − reverse| = 0.0000 < 0.02.
+- **H-O3: CONFIRMED** — the prequential error rate decreases on all
+  5 folds (first-half vs second-half window means, e.g. fold 0:
+  0.0078 -> 0.0036).
+
+### The identity of predictions is a finding, not a failure to run
+
+The first suspicion any reviewer should have — "did the online path
+actually run, or did it fall through to the batch path?" — is answered
+by the shipped artifacts themselves: the learned WEIGHTS differ
+substantially between the three regimes (fold 0's top body carries
+sigma(w) = 0.6476 in batch, 0.5880 in the chrono pass, 0.8398 in the
+reverse pass), the online fold records carry the stream provenance
+(`stream_order`, `stream_windows`, `prequential_curve`, `wall_s_pass`),
+and the pass wall-times are recorded (155.9 s across all five folds).
+Three different trainings landed in the same 0.5-threshold decision
+region over the same gated pool — the thresholded predictor is robust
+to the training regime on this corpus. The honest scope of the claim:
+prediction-identity holds for THIS pool, corpus and threshold; it is
+not a general theorem.
+
+With this column, the setting parity with the published systems is
+complete on this corpus: enumerated rule search, weighted clauses, and
+single-pass online training, all pre-registered. Comparison caveats are
+unchanged (no comparison with the published dense-grid numbers).
