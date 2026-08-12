@@ -206,14 +206,6 @@ impl GpuCircuitCacheHandle {
     pub(crate) fn slot_index(&self) -> u32 {
         self.slot_host
     }
-
-    #[allow(dead_code)] // reserved API: used by future cache-warming path
-    pub(crate) fn set_meta(&mut self, num_nodes: u32, num_levels: u32, root: u32, max_var: u32) {
-        self.num_nodes = num_nodes;
-        self.num_levels = num_levels;
-        self.root = root;
-        self.max_var = max_var;
-    }
 }
 
 /// Compute a deterministic CNF hash on the GPU.
