@@ -84,3 +84,84 @@ def test_coverage_matrix_empty_intersection_is_a_zero_row():
     m = coverage_matrix([("a", "b")], {"a": {0, 1}, "b": {2}}, n_pt=4)
     assert m.shape == (1, 4)
     assert m.sum().item() == 0
+
+
+# ---------------------------------------------------------------------------
+# Task 3: soft_weights — the noisy-OR BCE trainer (PREREG_SOFT.md section
+# (b): score(pt) = 1 - PROD_c (1 - sigmoid(w_c) * cover_c(pt)), BCE, Adam,
+# steps=300, lr=0.05, seed=7, deterministic CPU, init w = -2.0)
+# ---------------------------------------------------------------------------
+
+
+def test_soft_scores_hand_computed_noisy_or():
+    torch = pytest.importorskip("torch")
+    import math
+
+    from soft_weights import soft_scores
+
+    cover = torch.tensor([[True, True, False], [False, True, False]])
+    # weights are LOGITS: pick them so sigmoid(w) = [0.6, 0.4] exactly
+    weights = torch.tensor([math.log(0.6 / 0.4), math.log(0.4 / 0.6)])
+    scores = soft_scores(cover, weights)
+    # pt0: 1 - (1 - 0.6)            = 0.6
+    # pt1: 1 - (1 - 0.6)(1 - 0.4)   = 1 - 0.4*0.6 = 0.76
+    # pt2: nothing covers it        = 0.0
+    assert scores.tolist() == pytest.approx([0.6, 0.76, 0.0])
+
+
+def _planted_cover_and_labels(torch, n_pt=40):
+    """Body 0 fires exactly on the positives (t % 2 == 0); body 1 is noise
+    (t % 5 == 0: covers some positives AND some negatives)."""
+    cover = torch.zeros((2, n_pt), dtype=torch.bool)
+    y = torch.zeros(n_pt, dtype=torch.bool)
+    for t in range(n_pt):
+        if t % 2 == 0:
+            cover[0, t] = True
+            y[t] = True
+        if t % 5 == 0:
+            cover[1, t] = True
+    return cover, y
+
+
+def test_train_soft_weights_recovers_planted_body_and_mutes_noise():
+    torch = pytest.importorskip("torch")
+    from soft_weights import soft_scores, train_soft_weights
+
+    cover, y = _planted_cover_and_labels(torch)
+    weights = train_soft_weights(cover, y)
+    sig = torch.sigmoid(weights)
+    assert sig[0].item() > 0.9, "the planted body must be turned on"
+    assert sig[1].item() < 0.1, "the noise body must be turned off"
+    # the trained scores separate the classes at the 0.5 threshold
+    scores = soft_scores(cover, weights)
+    assert ((scores > 0.5) == y).all()
+
+
+def test_train_soft_weights_bce_falls_with_training():
+    # The credit_nll parity pin, measured on the shared semantics: the BCE
+    # of the noisy-OR scores against the labels falls as training proceeds
+    # (checkpoints at steps 0 < 10 < 300; deterministic restarts make the
+    # 10-step run a prefix of the 300-step run).
+    torch = pytest.importorskip("torch")
+    from soft_weights import soft_scores, train_soft_weights
+
+    cover, y = _planted_cover_and_labels(torch)
+
+    def bce(weights):
+        scores = soft_scores(cover, weights).clamp(1e-7, 1 - 1e-7)
+        return torch.nn.functional.binary_cross_entropy(scores, y.float()).item()
+
+    bce_init = bce(torch.full((2,), -2.0))
+    bce_10 = bce(train_soft_weights(cover, y, steps=10))
+    bce_300 = bce(train_soft_weights(cover, y, steps=300))
+    assert bce_300 < bce_10 < bce_init
+
+
+def test_train_soft_weights_is_bitwise_deterministic():
+    torch = pytest.importorskip("torch")
+    from soft_weights import train_soft_weights
+
+    cover, y = _planted_cover_and_labels(torch)
+    w1 = train_soft_weights(cover, y, steps=50, seed=7)
+    w2 = train_soft_weights(cover, y, steps=50, seed=7)
+    assert torch.equal(w1, w2), "same seed must reproduce bitwise-equal weights"
