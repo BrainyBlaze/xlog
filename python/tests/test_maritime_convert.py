@@ -368,7 +368,8 @@ def test_parser_fails_on_non_integer_interval(tmp_path):
 
 def test_parser_fails_on_truncated_archives(tmp_path):
     tar_p = _tar_with_lines(tmp_path, HLE_LINES * 50)
-    blob = open(tar_p, "rb").read()
+    with open(tar_p, "rb") as fh:
+        blob = fh.read()
     trunc_tar = tmp_path / "trunc.tar.gz"
     trunc_tar.write_bytes(blob[: len(blob) // 2])
     try:
