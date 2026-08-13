@@ -229,10 +229,6 @@ pub struct EpistemicProbProductionTrace {
     pub gpu_program_conditioned_not_known_evidence_facts: u64,
     /// Number of parsed-program-conditioned false `possible` assumptions compiled as exact evidence facts.
     pub gpu_program_conditioned_not_possible_evidence_facts: u64,
-    /// CPU-only probability recomputations performed by this adapter.
-    pub cpu_only_probability_recomputations: u64,
-    /// Fixture `EpistemicCircuit` evaluations performed by this adapter.
-    pub fixture_circuit_evaluations: u64,
 }
 
 impl EpistemicProbProductionTrace {
@@ -315,20 +311,6 @@ impl EpistemicProbProductionTrace {
             self.gpu_program_cnf_encodes,
             "program",
         )
-    }
-
-    /// Require that no CPU-only probability recomputation counters were used.
-    pub fn require_zero_cpu_recompute(&self) -> Result<()> {
-        if self.cpu_only_probability_recomputations != 0 || self.fixture_circuit_evaluations != 0 {
-            return Err(XlogError::UnsupportedEpistemicConstruct {
-                construct: "epistemic probabilistic production adapter".to_string(),
-                context: format!(
-                    "CPU probabilistic fallback counters must be zero, got recompute={} fixture={}",
-                    self.cpu_only_probability_recomputations, self.fixture_circuit_evaluations
-                ),
-            });
-        }
-        Ok(())
     }
 
     /// Require internally consistent GPU tuple-membership evidence counters.
@@ -1009,7 +991,7 @@ impl EpistemicProbProductionTrace {
         self.require_conditioned_evidence_trace()?;
         self.require_pir_cnf_accounting()?;
         self.require_gpu_path_accounting()?;
-        self.require_zero_cpu_recompute()
+        Ok(())
     }
 
     fn require_conditioned_evidence_metric_witness(&self) -> Result<()> {
@@ -1048,7 +1030,7 @@ impl EpistemicProbProductionTrace {
                 ),
             });
         }
-        self.require_zero_cpu_recompute()
+        Ok(())
     }
 }
 
@@ -1156,11 +1138,7 @@ impl EpistemicProbProductionAdapter {
     pub fn new(config: GpuConfig) -> Self {
         Self {
             config,
-            trace: EpistemicProbProductionTrace {
-                cpu_only_probability_recomputations: 0,
-                fixture_circuit_evaluations: 0,
-                ..EpistemicProbProductionTrace::default()
-            },
+            trace: EpistemicProbProductionTrace::default(),
         }
     }
 
@@ -1171,9 +1149,9 @@ impl EpistemicProbProductionAdapter {
 
     /// Apply accepted world-view evidence to a caller-owned incremental circuit fixture.
     ///
-    /// This records the accepted evidence boundary and zero-CPU guard, but it is not a
-    /// production metric event. Production metric eligibility still requires an
-    /// existing GPU exact/provenance/PIR/CNF/knowledge-compilation path counter.
+    /// This records accepted evidence after the typed `Gpu`/`RejectUnsupported` plan boundary,
+    /// but it is not a production metric event. Production metric eligibility still requires
+    /// observed GPU exact/provenance/PIR/CNF/knowledge-compilation path events.
     pub fn apply_accepted_world_view_to_circuit(
         &mut self,
         circuit: &mut EpistemicCircuit,
@@ -1189,7 +1167,6 @@ impl EpistemicProbProductionAdapter {
                     "accepted_incremental_circuit_updates",
                 )?;
             }
-            self.trace.require_zero_cpu_recompute()?;
             Ok(update)
         })
     }
@@ -1255,11 +1232,6 @@ impl EpistemicProbProductionAdapter {
         let batch_trace = evidence.batch.trace;
         if batch_trace.component_count != evidence.batch.results.len()
             || batch_trace.gpu_runtime_component_executions != evidence.batch.results.len()
-            || batch_trace.cpu_recomposition_steps != 0
-            || batch_trace.cpu_candidate_enumerations != 0
-            || batch_trace.cpu_world_view_validations != 0
-            || batch_trace.cpu_solver_search_fallbacks != 0
-            || batch_trace.cpu_probability_recomputations != 0
             || batch_trace.tracked_dtoh_calls != 0
             || batch_trace.tracked_htod_calls != 0
             || batch_trace.tracked_data_plane_htod_calls != 0
@@ -1271,19 +1243,12 @@ impl EpistemicProbProductionAdapter {
                 construct: construct.to_string(),
                 context: format!(
                     "accepted GPU batch evidence requires complete GPU component execution and \
-                     zero CPU/host fallback counters outside bounded launch metadata plus \
-                     aggregate CUDA-event timing, got \
-                     components={}/{}, recomposition={}, cpu_candidates={}, cpu_world_views={}, \
-                     cpu_solver_search={}, cpu_probability_recompute={}, dtoh_calls={}, \
+                     zero observed hot-path transfers outside bounded launch metadata plus \
+                     aggregate CUDA-event timing, got components={}/{}, dtoh_calls={}, \
                      htod_calls={}, data_plane_htod_calls={}, launch_metadata_htod_calls={}, \
                      round_trips={}, constraint_violations={}, aggregate_timing_recorded={}",
                     batch_trace.gpu_runtime_component_executions,
                     batch_trace.component_count,
-                    batch_trace.cpu_recomposition_steps,
-                    batch_trace.cpu_candidate_enumerations,
-                    batch_trace.cpu_world_view_validations,
-                    batch_trace.cpu_solver_search_fallbacks,
-                    batch_trace.cpu_probability_recomputations,
                     batch_trace.tracked_dtoh_calls,
                     batch_trace.tracked_htod_calls,
                     batch_trace.tracked_data_plane_htod_calls,
@@ -1470,7 +1435,6 @@ impl EpistemicProbProductionAdapter {
             checked_prob_trace_counter_inc!(self, gpu_exact_source_compiles);
             self.record_accepted_gpu_production_path_events_since(production_events_before)?;
             self.record_accepted_evidence(evidence)?;
-            self.trace.require_zero_cpu_recompute()?;
             Ok(program)
         })
     }
@@ -1561,7 +1525,6 @@ impl EpistemicProbProductionAdapter {
             checked_prob_trace_counter_inc!(self, gpu_exact_program_compiles);
             self.record_accepted_gpu_production_path_events_since(production_events_before)?;
             self.record_accepted_evidence(evidence)?;
-            self.trace.require_zero_cpu_recompute()?;
             Ok(exact)
         })
     }
@@ -1658,7 +1621,6 @@ impl EpistemicProbProductionAdapter {
             checked_prob_trace_counter_inc!(self, gpu_source_knowledge_compilation_end_to_end_runs);
             self.record_accepted_gpu_production_path_events_since(production_events_before)?;
             self.record_accepted_evidence(evidence)?;
-            self.trace.require_zero_cpu_recompute()?;
             Ok(result)
         })
     }
@@ -2090,7 +2052,6 @@ impl EpistemicProbProductionAdapter {
         }
         self.record_accepted_gpu_production_path_events_since(production_events_before)?;
         self.record_accepted_evidence(evidence)?;
-        self.trace.require_zero_cpu_recompute()?;
         Ok(result)
     }
 
@@ -2144,7 +2105,6 @@ impl EpistemicProbProductionAdapter {
         }
         self.record_accepted_gpu_production_path_events_since(production_events_before)?;
         self.record_accepted_evidence(evidence)?;
-        self.trace.require_zero_cpu_recompute()?;
         Ok(result)
     }
 
@@ -2471,7 +2431,6 @@ impl EpistemicProbProductionAdapter {
             );
             self.record_accepted_gpu_production_path_events_since(production_events_before)?;
             self.record_accepted_evidence(evidence)?;
-            self.trace.require_zero_cpu_recompute()?;
             Ok(result)
         })
     }
@@ -2863,7 +2822,6 @@ impl EpistemicProbProductionAdapter {
             self.record_gpu_exact_query_evaluation(program)?;
             self.record_accepted_gpu_production_path_events_since(production_events_before)?;
             self.record_accepted_evidence(evidence)?;
-            self.trace.require_zero_cpu_recompute()?;
             Ok(result)
         })
     }
@@ -2958,7 +2916,6 @@ impl EpistemicProbProductionAdapter {
             self.record_gpu_exact_gradient_evaluation(program)?;
             self.record_accepted_gpu_production_path_events_since(production_events_before)?;
             self.record_accepted_evidence(evidence)?;
-            self.trace.require_zero_cpu_recompute()?;
             Ok(result)
         })
     }
@@ -3039,7 +2996,7 @@ impl EpistemicProbProductionAdapter {
     fn consume_accepted_evidence(&mut self, evidence: &AcceptedWorldViewEvidence) -> Result<()> {
         self.require_accepted_evidence(evidence)?;
         self.record_accepted_evidence(evidence)?;
-        self.trace.require_zero_cpu_recompute()
+        Ok(())
     }
 
     fn require_accepted_evidence(&self, evidence: &AcceptedWorldViewEvidence) -> Result<()> {
@@ -3058,7 +3015,7 @@ impl EpistemicProbProductionAdapter {
                     .to_string(),
             });
         }
-        self.trace.require_zero_cpu_recompute()
+        Ok(())
     }
 
     fn record_accepted_evidence(&mut self, evidence: &AcceptedWorldViewEvidence) -> Result<()> {
@@ -3233,7 +3190,6 @@ impl EpistemicProbProductionAdapter {
         };
         self.record_accepted_gpu_production_path_events_since(production_events_before)?;
         self.record_accepted_evidence(evidence)?;
-        self.trace.require_zero_cpu_recompute()?;
         Ok(pir_cnf_evidence)
     }
 }

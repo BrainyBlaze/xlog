@@ -1777,6 +1777,27 @@ gated(X) :- know know support(X).
         "{stdout}"
     );
     assert!(stdout.contains("\"epistemic_literal_count\""), "{stdout}");
+    assert_eq!(payload["epistemic"]["gpu_plan"]["execution_backend"], "gpu");
+    assert_eq!(
+        payload["epistemic"]["gpu_plan"]["fallback_policy"],
+        "reject_unsupported"
+    );
+    assert_eq!(
+        payload["epistemic"]["executable_plan"]["execution_backend"],
+        "gpu"
+    );
+    assert_eq!(
+        payload["epistemic"]["executable_plan"]["fallback_policy"],
+        "reject_unsupported"
+    );
+    for legacy_key in [
+        "cpu_fallbacks",
+        "cpu_fallbacks_zero",
+        "cpu_fallback_is_zero",
+        "cpu_fallback_total_zero",
+    ] {
+        assert!(!stdout.contains(legacy_key), "{legacy_key}: {stdout}");
+    }
     assert!(
         stdout.contains("\"predicate\":\"support\"")
             || stdout.contains("\"predicate\": \"support\""),

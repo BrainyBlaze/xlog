@@ -3,8 +3,8 @@ use std::collections::BTreeMap;
 use xlog_core::{RelId, ScalarType};
 use xlog_ir::rir::MultiwayPlan;
 use xlog_ir::{
-    EirEpistemicOp, EirTerm, EpistemicSolverCapability, EpistemicSolverStatusKind, ExecutionPlan,
-    RirNode,
+    EirEpistemicOp, EirTerm, EpistemicExecutionBackend, EpistemicFallbackPolicy,
+    EpistemicSolverCapability, EpistemicSolverStatusKind, ExecutionPlan, RirNode,
 };
 use xlog_logic::epistemic::{
     classify_recursive_epistemic_program, compile_epistemic_gpu_execution,
@@ -54,7 +54,14 @@ fn epistemic_executable_plan_lowers_reduced_program_through_runtime_plan() {
 
     let executable = compile_epistemic_gpu_execution(&program).unwrap();
 
-    assert!(executable.gpu_plan.cpu_fallbacks.is_zero());
+    assert_eq!(
+        executable.gpu_plan.execution_backend,
+        EpistemicExecutionBackend::Gpu
+    );
+    assert_eq!(
+        executable.gpu_plan.fallback_policy,
+        EpistemicFallbackPolicy::RejectUnsupported
+    );
     assert_eq!(executable.gpu_plan.epistemic_literals.len(), 1);
     assert_eq!(compiled_rule_count(&executable.reduced_runtime_plan), 3);
 }
@@ -126,7 +133,14 @@ fn epistemic_gpu_plan_exports_solver_service_contract_for_all_modal_assumptions(
         assert_eq!(binding.op, op);
         assert_eq!(binding.negated, negated);
     }
-    assert!(executable.gpu_plan.cpu_fallbacks.is_zero());
+    assert_eq!(
+        executable.gpu_plan.execution_backend,
+        EpistemicExecutionBackend::Gpu
+    );
+    assert_eq!(
+        executable.gpu_plan.fallback_policy,
+        EpistemicFallbackPolicy::RejectUnsupported
+    );
 }
 
 #[test]
@@ -355,7 +369,11 @@ fn epistemic_constraint_reaches_typed_gpu_boundary() {
         "epistemic constraint must not be rewritten into an ordinary RIR constraint relation: {:?}",
         executable.relation_ids.keys().collect::<Vec<_>>()
     );
-    assert!(gpu_plan.cpu_fallbacks.is_zero());
+    assert_eq!(gpu_plan.execution_backend, EpistemicExecutionBackend::Gpu);
+    assert_eq!(
+        gpu_plan.fallback_policy,
+        EpistemicFallbackPolicy::RejectUnsupported
+    );
 }
 
 #[test]
@@ -409,14 +427,21 @@ fn epistemic_gpu_execution_resolves_modal_only_bound_output_over_invariant_relat
     );
 
     // The full epistemic plan now compiles (no UnsafeVariable), with `p` carrying its
-    // single tuple-membership gate over `q` and zero CPU fallbacks. Exact accepted
+    // single tuple-membership gate over `q` under the reject-unsupported GPU policy. Exact accepted
     // tuples (`p = q = {1,2,3}`) are asserted on device in
     // `single_head_modal_only_bound_over_invariant_materializes_q_extension_on_device`.
     let executable = compile_epistemic_gpu_execution(&program)
         .expect("modal-only-bound output over an invariant relation must now compile");
     assert_eq!(executable.gpu_plan.epistemic_literals.len(), 1);
     assert_eq!(executable.gpu_plan.tuple_membership_bindings.len(), 1);
-    assert!(executable.gpu_plan.cpu_fallbacks.is_zero());
+    assert_eq!(
+        executable.gpu_plan.execution_backend,
+        EpistemicExecutionBackend::Gpu
+    );
+    assert_eq!(
+        executable.gpu_plan.fallback_policy,
+        EpistemicFallbackPolicy::RejectUnsupported
+    );
 }
 
 #[test]

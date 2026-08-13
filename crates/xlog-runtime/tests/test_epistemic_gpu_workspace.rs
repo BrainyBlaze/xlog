@@ -16,7 +16,7 @@ use xlog_ir::{
         PlannedHashReason, ProjectExpr, RirNode, SortedLayoutSpec, StreamGroupId, VariableOrder,
     },
     CompiledRule, EirAtom, EirEpistemicLiteral, EirEpistemicMode, EirEpistemicOp, EirTerm,
-    EpistemicCpuFallbackCounters, EpistemicExecutablePlan, EpistemicGpuPlan,
+    EpistemicExecutablePlan, EpistemicExecutionBackend, EpistemicFallbackPolicy, EpistemicGpuPlan,
     EpistemicReductionPlan, EpistemicWcojReductionStatus, ExecutionPlan, RirMeta, Scc, Stratum,
 };
 use xlog_runtime::{
@@ -63,6 +63,9 @@ struct RuntimeFixture {
 fn runtime_fixture() -> Option<RuntimeFixture> {
     let device = match CudaDevice::new(0) {
         Ok(device) => Arc::new(device),
+        Err(err) if std::env::var_os("XLOG_REQUIRE_CUDA").is_some() => {
+            panic!("CUDA runtime required by XLOG_REQUIRE_CUDA: {err}")
+        }
         Err(err) => {
             eprintln!("Skipping test: CUDA runtime unavailable: {err}");
             return None;
@@ -92,6 +95,9 @@ fn runtime_fixture() -> Option<RuntimeFixture> {
     let provider = match CudaKernelProvider::with_runtime(Arc::clone(&device), Arc::clone(&memory))
     {
         Ok(provider) => Arc::new(provider),
+        Err(err) if std::env::var_os("XLOG_REQUIRE_CUDA").is_some() => {
+            panic!("CUDA kernel provider required by XLOG_REQUIRE_CUDA: {err}")
+        }
         Err(err) => {
             eprintln!("Skipping test: CUDA kernel provider unavailable: {err}");
             return None;
@@ -226,7 +232,11 @@ fn runtime_preflight_records_workspace_and_wcoj_route_surfaces() {
     assert_eq!(preflight.helper_relation_rule_count, 1);
     assert_eq!(preflight.helper_relation_scan_count, 1);
     assert_eq!(preflight.tuple_membership_binding_count, 1);
-    assert!(preflight.cpu_fallbacks.is_zero());
+    assert_eq!(preflight.execution_backend, EpistemicExecutionBackend::Gpu);
+    assert_eq!(
+        preflight.fallback_policy,
+        EpistemicFallbackPolicy::RejectUnsupported
+    );
 }
 
 #[test]
@@ -262,7 +272,6 @@ fn accepted_gpu_execution_dispatches_kclique_wcoj_reduction_through_runtime_path
     assert_eq!(result.prepared.preflight.helper_relation_rule_count, 1);
     assert_eq!(result.prepared.preflight.helper_relation_scan_count, 1);
     assert_eq!(result.prepared.preflight.tuple_membership_binding_count, 1);
-    assert!(result.prepared.preflight.cpu_fallbacks.is_zero());
     assert_eq!(result.trace.counter_delta.wcoj_clique5_dispatch_count, 1);
     assert_eq!(result.trace.counter_delta.kclique_metadata_build_count, 1);
     assert!(result.trace.counter_delta.kclique_metadata_build_nanos > 0);
@@ -302,8 +311,6 @@ fn accepted_gpu_execution_dispatches_kclique_wcoj_reduction_through_runtime_path
     );
     assert_eq!(result.transfer_budget.per_candidate_host_round_trips, 0);
     assert_eq!(result.final_tuple_materialization.row_filter_count, 1);
-    assert_eq!(result.semantic_trace.cpu_candidate_enumerations, 0);
-    assert_eq!(result.semantic_trace.cpu_world_view_validations, 0);
     result
         .require_runtime_dispatch_certification()
         .expect("runtime result should retain dispatch and semantic certification");
@@ -370,7 +377,6 @@ fn parsed_epistemic_kclique_reduction_dispatches_wcoj_runtime_path() {
     assert_eq!(result.prepared.preflight.helper_relation_rule_count, 1);
     assert_eq!(result.prepared.preflight.helper_relation_scan_count, 1);
     assert_eq!(result.prepared.preflight.tuple_membership_binding_count, 1);
-    assert!(result.prepared.preflight.cpu_fallbacks.is_zero());
     assert_eq!(result.trace.counter_delta.wcoj_clique5_dispatch_count, 1);
     assert_eq!(result.trace.counter_delta.kclique_metadata_build_count, 1);
     assert!(result.trace.counter_delta.kclique_metadata_build_nanos > 0);
@@ -448,8 +454,6 @@ fn parsed_epistemic_kclique_reduction_dispatches_wcoj_runtime_path() {
             .expect("decode typed GPU rejection reason"),
         vec![EpistemicGpuRejectionReason::UnsatisfiedMembership]
     );
-    assert_eq!(result.semantic_trace.cpu_candidate_enumerations, 0);
-    assert_eq!(result.semantic_trace.cpu_world_view_validations, 0);
     result
         .require_runtime_dispatch_certification()
         .expect("parsed K5 runtime result should retain dispatch and semantic certification");
@@ -501,9 +505,6 @@ fn single_head_modal_only_bound_over_invariant_materializes_q_extension_on_devic
     result
         .require_runtime_dispatch_certification()
         .expect("runtime result must retain dispatch certification");
-    assert_eq!(result.semantic_trace.cpu_candidate_enumerations, 0);
-    assert_eq!(result.semantic_trace.cpu_world_view_validations, 0);
-    assert!(result.prepared.preflight.cpu_fallbacks.is_zero());
 
     let mut rows = fixture
         .provider
@@ -519,16 +520,16 @@ fn single_head_modal_only_bound_over_invariant_materializes_q_extension_on_devic
 
 #[cfg(feature = "epistemic-logic-tests")]
 #[test]
-fn nested_modal_chain_collapses_and_materializes_on_device_no_cpu_fallback() {
-    // Nested modal chain execution stays on the GPU path via the sound
-    // KD45/S5 collapse, with NO CPU fallback and NO CPU candidate enumeration.
+fn nested_modal_chain_collapses_and_materializes_with_certified_gpu_dispatch() {
+    // Nested modal chain execution stays on the GPU path under the typed
+    // `Gpu`/`RejectUnsupported` policy after the sound KD45/S5 collapse.
     //
     // `p(X) :- know possible q(X)` collapses (KM == M, inner operator wins) to
     // `p(X) :- possible q(X)`. Over an INVARIANT `q`, `possible q == q`, so the
     // collapsed program routes through the EXACT single-level invariant path:
     //   q = {1, 2, 3}  ->  p = {1, 2, 3}.
-    // The collapse adds no new evaluator and no CPU work: the REAL counters must be
-    // zero, proving the GPU device path is used end-to-end.
+    // The collapse reuses the single-level evaluator; runtime dispatch certification below
+    // checks the executed device path and recorded CUDA-event timing.
     let Some(fixture) = runtime_fixture() else {
         return;
     };
@@ -585,10 +586,8 @@ fn nested_modal_chain_collapses_and_materializes_on_device_no_cpu_fallback() {
     result
         .require_runtime_dispatch_certification()
         .expect("runtime result must retain dispatch certification");
-    // REAL no-fallback counters (NOT the cpu_fallback_total_zero JSON string).
-    assert_eq!(result.semantic_trace.cpu_candidate_enumerations, 0);
-    assert_eq!(result.semantic_trace.cpu_world_view_validations, 0);
-    assert!(result.prepared.preflight.cpu_fallbacks.is_zero());
+    // Runtime dispatch certification and scoped transfer evidence are observed
+    // independently of the structural plan policy.
 
     let mut rows = fixture
         .provider
@@ -668,10 +667,8 @@ fn determined_multicol_binding_modal_materializes_higher_stratum_on_device() {
     result
         .require_runtime_dispatch_certification()
         .expect("runtime result must retain dispatch certification");
-    // ANTI-GAMING: zero CPU fallback / zero CPU candidate enumeration for the binding join.
-    assert_eq!(result.semantic_trace.cpu_candidate_enumerations, 0);
-    assert_eq!(result.semantic_trace.cpu_world_view_validations, 0);
-    assert!(result.prepared.preflight.cpu_fallbacks.is_zero());
+    // Runtime dispatch certification above is the observed device-path evidence for the
+    // binding join.
 
     let mut rows = fixture
         .provider
@@ -773,10 +770,8 @@ fn augmented_multi_head_per_head_projection_materializes_differing_arity_on_devi
     result
         .require_runtime_dispatch_certification()
         .expect("per-head projection runtime result must retain dispatch certification");
-    // ANTI-GAMING: zero CPU fallback for the joint enumeration / validation.
-    assert_eq!(result.semantic_trace.cpu_candidate_enumerations, 0);
-    assert_eq!(result.semantic_trace.cpu_world_view_validations, 0);
-    assert!(result.prepared.preflight.cpu_fallbacks.is_zero());
+    // Runtime dispatch certification plus the scoped DtoH count below cover the joint
+    // projection path.
     assert_eq!(result.transfer_budget.tracked_dtoh_calls, 0);
     assert_eq!(result.additional_head_outputs.len(), 1);
 
@@ -843,7 +838,7 @@ fn shared_modal_two_head_coupling_joint_solves_multi_output_on_device() {
     // JOINT-SOLVED: ONE candidate enumeration + world-view validation over the
     // combined modal literals (`know q`, `possible q`), then EACH head relation is
     // materialized against the SAME accepted world view. `known` and `maybe` must
-    // both yield their exact tuples, with zero CPU fallback.
+    // both yield their exact tuples on the certified device path.
     //
     //   node = {1, 2, 3}, color = {2, 3}, q = {1, 2}.
     //   known(X) :- node(X),  know q(X).      -> {1, 2}
@@ -911,10 +906,8 @@ fn shared_modal_two_head_coupling_joint_solves_multi_output_on_device() {
     result
         .require_runtime_dispatch_certification()
         .expect("joint multi-head runtime result must retain dispatch certification");
-    // ANTI-GAMING: zero CPU fallback for the joint enumeration / validation.
-    assert_eq!(result.semantic_trace.cpu_candidate_enumerations, 0);
-    assert_eq!(result.semantic_trace.cpu_world_view_validations, 0);
-    assert!(result.prepared.preflight.cpu_fallbacks.is_zero());
+    // Runtime dispatch certification plus the scoped DtoH count below cover joint
+    // enumeration and validation.
     assert_eq!(result.transfer_budget.tracked_dtoh_calls, 0);
 
     // Exactly one ADDITIONAL coupled head besides the primary.
@@ -1150,7 +1143,6 @@ fn accepted_gpu_execution_dispatches_triangle_wcoj_reduction_through_runtime_pat
     assert_eq!(result.prepared.preflight.wcoj_triangle_route_count, 1);
     assert_eq!(result.prepared.preflight.kclique_wcoj_plan_count, 0);
     assert_eq!(result.prepared.preflight.tuple_membership_binding_count, 1);
-    assert!(result.prepared.preflight.cpu_fallbacks.is_zero());
     assert_eq!(result.trace.counter_delta.wcoj_triangle_dispatch_count, 1);
     let aggregate_kernel_timing = result.aggregate_kernel_timing();
     assert!(aggregate_kernel_timing.is_recorded());
@@ -1192,8 +1184,6 @@ fn accepted_gpu_execution_dispatches_triangle_wcoj_reduction_through_runtime_pat
     assert_eq!(result.semantic_trace.accepted_candidate_indices, vec![1]);
     assert_eq!(result.semantic_trace.accepted_candidates, 1);
     assert_eq!(result.semantic_trace.rejected_candidates, 1);
-    assert_eq!(result.semantic_trace.cpu_candidate_enumerations, 0);
-    assert_eq!(result.semantic_trace.cpu_world_view_validations, 0);
 
     let xs = fixture
         .provider
@@ -1259,7 +1249,6 @@ fn accepted_gpu_execution_dispatches_4cycle_wcoj_reduction_through_runtime_path(
     assert_eq!(result.prepared.preflight.wcoj_4cycle_route_count, 1);
     assert_eq!(result.prepared.preflight.kclique_wcoj_plan_count, 0);
     assert_eq!(result.prepared.preflight.tuple_membership_binding_count, 1);
-    assert!(result.prepared.preflight.cpu_fallbacks.is_zero());
     assert_eq!(result.trace.counter_delta.wcoj_4cycle_dispatch_count, 1);
     match result.trace.wcoj_certification {
         EpistemicGpuRuntimeWcojCertification::Certified {
@@ -1297,8 +1286,6 @@ fn accepted_gpu_execution_dispatches_4cycle_wcoj_reduction_through_runtime_path(
     assert_eq!(result.semantic_trace.accepted_candidate_indices, vec![1]);
     assert_eq!(result.semantic_trace.accepted_candidates, 1);
     assert_eq!(result.semantic_trace.rejected_candidates, 1);
-    assert_eq!(result.semantic_trace.cpu_candidate_enumerations, 0);
-    assert_eq!(result.semantic_trace.cpu_world_view_validations, 0);
 
     let ws = fixture
         .provider
@@ -1379,8 +1366,6 @@ fn accepted_gpu_execution_dispatches_nondefault_4cycle_wcoj_leader_through_runti
     assert_eq!(result.semantic_trace.accepted_candidate_indices, vec![1]);
     assert_eq!(result.semantic_trace.accepted_candidates, 1);
     assert_eq!(result.semantic_trace.rejected_candidates, 1);
-    assert_eq!(result.semantic_trace.cpu_candidate_enumerations, 0);
-    assert_eq!(result.semantic_trace.cpu_world_view_validations, 0);
 
     let ws = fixture
         .provider
@@ -1469,11 +1454,6 @@ fn batch_execution_runs_split_components_through_gpu_runtime_subplans() {
         .expect("batch trace must be derived from real component results");
     assert_eq!(batch.trace.component_count, 2);
     assert_eq!(batch.trace.gpu_runtime_component_executions, 2);
-    assert_eq!(batch.trace.cpu_recomposition_steps, 0);
-    assert_eq!(batch.trace.cpu_candidate_enumerations, 0);
-    assert_eq!(batch.trace.cpu_world_view_validations, 0);
-    assert_eq!(batch.trace.cpu_solver_search_fallbacks, 0);
-    assert_eq!(batch.trace.cpu_probability_recomputations, 0);
     assert_eq!(batch.trace.tracked_dtoh_calls, 0);
     assert_eq!(batch.trace.per_candidate_host_round_trips, 0);
     assert_eq!(batch.trace.final_output_rows, 2);
@@ -1557,11 +1537,6 @@ fn parsed_split_components_execute_through_gpu_runtime_batch() {
         .expect("parsed split batch trace must be derived from real component results");
     assert_eq!(batch.trace.component_count, 2);
     assert_eq!(batch.trace.gpu_runtime_component_executions, 2);
-    assert_eq!(batch.trace.cpu_recomposition_steps, 0);
-    assert_eq!(batch.trace.cpu_candidate_enumerations, 0);
-    assert_eq!(batch.trace.cpu_world_view_validations, 0);
-    assert_eq!(batch.trace.cpu_solver_search_fallbacks, 0);
-    assert_eq!(batch.trace.cpu_probability_recomputations, 0);
     assert_eq!(batch.trace.final_output_rows, 2);
     assert_eq!(batch.trace.accepted_world_views, 2);
     assert_eq!(batch.trace.know_operator_count, 2);
@@ -1577,8 +1552,6 @@ fn parsed_split_components_execute_through_gpu_runtime_batch() {
         assert_eq!(result.semantic_trace.accepted_candidate_indices, vec![1]);
         assert_eq!(result.semantic_trace.accepted_candidates, 1);
         assert_eq!(result.semantic_trace.rejected_candidates, 1);
-        assert_eq!(result.semantic_trace.cpu_candidate_enumerations, 0);
-        assert_eq!(result.semantic_trace.cpu_world_view_validations, 0);
         result
             .require_runtime_dispatch_certification()
             .expect("parsed split component runtime evidence must remain certified");
@@ -1664,12 +1637,7 @@ fn split_component_outputs_match_unsplit_single_execution_outputs() {
         )
         .expect("split components should execute through GPU runtime batch adapter");
     assert_eq!(batch.results.len(), 2);
-    // Fallback safety: split orchestration must keep CPU fallbacks at zero.
-    assert_eq!(batch.trace.cpu_recomposition_steps, 0);
-    assert_eq!(batch.trace.cpu_candidate_enumerations, 0);
-    assert_eq!(batch.trace.cpu_world_view_validations, 0);
-    assert_eq!(batch.trace.cpu_solver_search_fallbacks, 0);
-    assert_eq!(batch.trace.cpu_probability_recomputations, 0);
+    // Both split results are retained for exact row comparison and certified below.
 
     let mut split_left = fixture
         .provider
@@ -1724,8 +1692,6 @@ fn split_component_outputs_match_unsplit_single_execution_outputs() {
     assert!(!split_right.is_empty());
 
     for result in &batch.results {
-        assert_eq!(result.semantic_trace.cpu_candidate_enumerations, 0);
-        assert_eq!(result.semantic_trace.cpu_world_view_validations, 0);
         result
             .require_runtime_dispatch_certification()
             .expect("split equivalence component evidence must remain certified");
@@ -1805,12 +1771,8 @@ fn accepted_cross_component_coupling_split_matches_unsplit_output() {
         .execute_epistemic_gpu_execution_batch_with_trace(&executables, caps)
         .expect("accepted coupling split component must execute on device");
     assert_eq!(batch.results.len(), 1);
-    // No CPU fallbacks anywhere in the coupled split orchestration.
-    assert_eq!(batch.trace.cpu_recomposition_steps, 0);
-    assert_eq!(batch.trace.cpu_candidate_enumerations, 0);
-    assert_eq!(batch.trace.cpu_world_view_validations, 0);
-    assert_eq!(batch.trace.cpu_solver_search_fallbacks, 0);
-    assert_eq!(batch.trace.cpu_probability_recomputations, 0);
+    // Compare the coalesced split result row-for-row with the independently executed
+    // unsplit path.
     let mut split_output = fixture
         .provider
         .download_column::<u32>(&batch.results[0].final_output, 0)
@@ -1877,8 +1839,6 @@ fn run_unsplit_single_component_output_with_caps(
     let result = executor
         .execute_epistemic_gpu_execution(&executable, capacities)
         .expect("unsplit single-component execution must succeed");
-    assert_eq!(result.semantic_trace.cpu_candidate_enumerations, 0);
-    assert_eq!(result.semantic_trace.cpu_world_view_validations, 0);
     result
         .require_runtime_dispatch_certification()
         .expect("unsplit reference evidence must remain certified");
@@ -1980,11 +1940,6 @@ fn parsed_split_components_project_body_local_tuple_keys_in_gpu_batch() {
     assert_eq!(batch.results.len(), 2);
     assert_eq!(batch.trace.component_count, 2);
     assert_eq!(batch.trace.gpu_runtime_component_executions, 2);
-    assert_eq!(batch.trace.cpu_recomposition_steps, 0);
-    assert_eq!(batch.trace.cpu_candidate_enumerations, 0);
-    assert_eq!(batch.trace.cpu_world_view_validations, 0);
-    assert_eq!(batch.trace.cpu_solver_search_fallbacks, 0);
-    assert_eq!(batch.trace.cpu_probability_recomputations, 0);
     assert_eq!(batch.trace.tracked_dtoh_calls, 0);
     assert_eq!(batch.trace.per_candidate_host_round_trips, 0);
     assert_eq!(batch.trace.final_output_rows, 4);
@@ -2046,8 +2001,6 @@ fn parsed_split_components_project_body_local_tuple_keys_in_gpu_batch() {
         assert_eq!(result.semantic_trace.accepted_candidates, 1);
         assert_eq!(result.semantic_trace.accepted_world_views, 1);
         assert_eq!(result.semantic_trace.rejected_candidates, 1);
-        assert_eq!(result.semantic_trace.cpu_candidate_enumerations, 0);
-        assert_eq!(result.semantic_trace.cpu_world_view_validations, 0);
         result
             .require_runtime_dispatch_certification()
             .expect("body-local split component runtime evidence must remain certified");
@@ -2136,11 +2089,6 @@ fn parsed_split_components_project_modal_body_local_tuple_keys_in_gpu_batch() {
     assert_eq!(batch.results.len(), 2);
     assert_eq!(batch.trace.component_count, 2);
     assert_eq!(batch.trace.gpu_runtime_component_executions, 2);
-    assert_eq!(batch.trace.cpu_recomposition_steps, 0);
-    assert_eq!(batch.trace.cpu_candidate_enumerations, 0);
-    assert_eq!(batch.trace.cpu_world_view_validations, 0);
-    assert_eq!(batch.trace.cpu_solver_search_fallbacks, 0);
-    assert_eq!(batch.trace.cpu_probability_recomputations, 0);
     assert_eq!(batch.trace.tracked_dtoh_calls, 0);
     assert_eq!(batch.trace.per_candidate_host_round_trips, 0);
     assert_eq!(batch.trace.final_output_rows, 4);
@@ -2202,8 +2150,6 @@ fn parsed_split_components_project_modal_body_local_tuple_keys_in_gpu_batch() {
         assert_eq!(result.semantic_trace.accepted_candidates, 1);
         assert_eq!(result.semantic_trace.accepted_world_views, 1);
         assert_eq!(result.semantic_trace.rejected_candidates, 1);
-        assert_eq!(result.semantic_trace.cpu_candidate_enumerations, 0);
-        assert_eq!(result.semantic_trace.cpu_world_view_validations, 0);
         result
             .require_runtime_dispatch_certification()
             .expect("modal body-local split component runtime evidence must remain certified");
@@ -2272,9 +2218,6 @@ fn parsed_split_components_share_extensional_input_without_coalescing_runtime_va
     assert_eq!(batch.results.len(), 2);
     assert_eq!(batch.trace.component_count, 2);
     assert_eq!(batch.trace.gpu_runtime_component_executions, 2);
-    assert_eq!(batch.trace.cpu_recomposition_steps, 0);
-    assert_eq!(batch.trace.cpu_candidate_enumerations, 0);
-    assert_eq!(batch.trace.cpu_world_view_validations, 0);
     assert_eq!(batch.trace.final_output_rows, 4);
     assert_eq!(batch.trace.accepted_world_views, 2);
     assert_eq!(batch.trace.know_operator_count, 2);
@@ -2315,8 +2258,6 @@ fn parsed_split_components_share_extensional_input_without_coalescing_runtime_va
                 },
             )
             .expect("direct component should execute through normal GPU runtime path");
-        assert_eq!(result.semantic_trace.cpu_candidate_enumerations, 0);
-        assert_eq!(result.semantic_trace.cpu_world_view_validations, 0);
         result
             .require_runtime_dispatch_certification()
             .expect("direct component runtime evidence must remain certified");
@@ -2365,8 +2306,6 @@ fn parsed_split_components_share_extensional_input_without_coalescing_runtime_va
         assert_eq!(result.semantic_trace.accepted_candidate_indices, vec![1]);
         assert_eq!(result.semantic_trace.accepted_candidates, 1);
         assert_eq!(result.semantic_trace.rejected_candidates, 1);
-        assert_eq!(result.semantic_trace.cpu_candidate_enumerations, 0);
-        assert_eq!(result.semantic_trace.cpu_world_view_validations, 0);
         result
             .require_runtime_dispatch_certification()
             .expect("shared-input split component runtime evidence must remain certified");
@@ -2433,11 +2372,6 @@ fn parsed_split_recomposes_gpu_component_values_in_source_rule_order() {
     assert_eq!(batch.results.len(), 2);
     assert_eq!(batch.trace.component_count, 2);
     assert_eq!(batch.trace.gpu_runtime_component_executions, 2);
-    assert_eq!(batch.trace.cpu_recomposition_steps, 0);
-    assert_eq!(batch.trace.cpu_candidate_enumerations, 0);
-    assert_eq!(batch.trace.cpu_world_view_validations, 0);
-    assert_eq!(batch.trace.cpu_solver_search_fallbacks, 0);
-    assert_eq!(batch.trace.cpu_probability_recomputations, 0);
     assert_eq!(batch.trace.tracked_dtoh_calls, 0);
     assert_eq!(batch.trace.per_candidate_host_round_trips, 0);
     assert_eq!(batch.trace.final_output_rows, 2);
@@ -2472,8 +2406,6 @@ fn parsed_split_recomposes_gpu_component_values_in_source_rule_order() {
         assert_eq!(result.semantic_trace.accepted_world_views, 1);
         assert_eq!(result.semantic_trace.rejected_candidate_indices, vec![0]);
         assert_eq!(result.semantic_trace.rejected_candidates, 1);
-        assert_eq!(result.semantic_trace.cpu_candidate_enumerations, 0);
-        assert_eq!(result.semantic_trace.cpu_world_view_validations, 0);
         assert!(result.aggregate_kernel_timing().is_recorded());
         result
             .require_runtime_dispatch_certification()
@@ -2630,8 +2562,6 @@ fn runtime_execution_validates_epistemic_operator_mix_on_gpu_values() {
     assert_eq!(result.semantic_trace.accepted_candidates, 1);
     assert_eq!(result.semantic_trace.accepted_candidate_indices, vec![15]);
     assert_eq!(result.semantic_trace.rejected_candidates, 15);
-    assert_eq!(result.semantic_trace.cpu_candidate_enumerations, 0);
-    assert_eq!(result.semantic_trace.cpu_world_view_validations, 0);
     assert_eq!(result.final_result_transfer.final_output_rows, 1);
     result
         .require_runtime_dispatch_certification()
@@ -2934,8 +2864,6 @@ fn parsed_epistemic_program_executes_compiled_gpu_plan_on_runtime_values() {
     assert_eq!(result.semantic_trace.accepted_candidate_indices, vec![15]);
     assert_eq!(result.semantic_trace.accepted_candidates, 1);
     assert_eq!(result.semantic_trace.rejected_candidates, 15);
-    assert_eq!(result.semantic_trace.cpu_candidate_enumerations, 0);
-    assert_eq!(result.semantic_trace.cpu_world_view_validations, 0);
     assert_eq!(result.final_result_transfer.final_output_rows, 1);
     result
         .require_runtime_dispatch_certification()
@@ -3000,8 +2928,6 @@ fn parsed_negated_epistemic_operators_filter_distinct_gpu_tuple_values() {
         result.final_tuple_materialization.negated_row_filter_count,
         2
     );
-    assert_eq!(result.semantic_trace.cpu_candidate_enumerations, 0);
-    assert_eq!(result.semantic_trace.cpu_world_view_validations, 0);
     let rows = fixture
         .provider
         .download_column::<u32>(&result.final_output, 0)
@@ -3129,8 +3055,6 @@ fn parsed_ground_symbol_tuple_key_executes_on_gpu_runtime_values() {
     assert_eq!(result.semantic_trace.accepted_candidate_indices, vec![1]);
     assert_eq!(result.semantic_trace.accepted_candidates, 1);
     assert_eq!(result.semantic_trace.rejected_candidates, 1);
-    assert_eq!(result.semantic_trace.cpu_candidate_enumerations, 0);
-    assert_eq!(result.semantic_trace.cpu_world_view_validations, 0);
     let mut rows = fixture
         .provider
         .download_column::<u32>(&result.final_output, 0)
@@ -3224,8 +3148,6 @@ fn parsed_bound_not_possible_filters_final_gpu_tuple_values() {
             .expect("decode typed GPU not-possible rejection reason"),
         vec![EpistemicGpuRejectionReason::UnsatisfiedMembership]
     );
-    assert_eq!(result.semantic_trace.cpu_candidate_enumerations, 0);
-    assert_eq!(result.semantic_trace.cpu_world_view_validations, 0);
     let rows = fixture
         .provider
         .download_column::<u32>(&result.final_output, 0)
@@ -3317,8 +3239,6 @@ fn parsed_bound_not_know_filters_final_gpu_tuple_values() {
             .expect("decode typed GPU not-know rejection reason"),
         vec![EpistemicGpuRejectionReason::UnsatisfiedMembership]
     );
-    assert_eq!(result.semantic_trace.cpu_candidate_enumerations, 0);
-    assert_eq!(result.semantic_trace.cpu_world_view_validations, 0);
     let rows = fixture
         .provider
         .download_column::<u32>(&result.final_output, 0)
@@ -3399,8 +3319,6 @@ fn parsed_bound_binary_know_filters_final_gpu_tuple_values_beyond_model_slot_win
             .row_filter_row_capacity_outside_model_slot_window,
         2
     );
-    assert_eq!(result.semantic_trace.cpu_candidate_enumerations, 0);
-    assert_eq!(result.semantic_trace.cpu_world_view_validations, 0);
 
     let xs = fixture
         .provider
@@ -3471,8 +3389,6 @@ fn parsed_body_local_tuple_key_filters_before_public_projection_on_gpu() {
         result.model_membership.tuple_source_key_column_device_reads,
         1
     );
-    assert_eq!(result.semantic_trace.cpu_candidate_enumerations, 0);
-    assert_eq!(result.semantic_trace.cpu_world_view_validations, 0);
 
     let ys = fixture
         .provider
@@ -3542,8 +3458,6 @@ fn parsed_body_local_possible_tuple_key_filters_before_public_projection_on_gpu(
         result.model_membership.tuple_source_key_column_device_reads,
         1
     );
-    assert_eq!(result.semantic_trace.cpu_candidate_enumerations, 0);
-    assert_eq!(result.semantic_trace.cpu_world_view_validations, 0);
 
     let ys = fixture
         .provider
@@ -3617,8 +3531,6 @@ fn parsed_body_local_negated_tuple_key_filters_before_public_projection_on_gpu()
         result.final_tuple_materialization.negated_row_filter_count,
         1
     );
-    assert_eq!(result.semantic_trace.cpu_candidate_enumerations, 0);
-    assert_eq!(result.semantic_trace.cpu_world_view_validations, 0);
 
     let ys = fixture
         .provider
@@ -3692,8 +3604,6 @@ fn parsed_body_local_not_possible_tuple_key_filters_before_public_projection_on_
         result.final_tuple_materialization.negated_row_filter_count,
         1
     );
-    assert_eq!(result.semantic_trace.cpu_candidate_enumerations, 0);
-    assert_eq!(result.semantic_trace.cpu_world_view_validations, 0);
 
     let ys = fixture
         .provider
@@ -3753,8 +3663,6 @@ fn parsed_zero_arity_head_with_body_local_tuple_key_projects_empty_public_tuple_
         result.model_membership.tuple_source_key_column_device_reads,
         1
     );
-    assert_eq!(result.semantic_trace.cpu_candidate_enumerations, 0);
-    assert_eq!(result.semantic_trace.cpu_world_view_validations, 0);
     result
         .require_runtime_dispatch_certification()
         .expect("zero-arity projection path should retain GPU semantic certification");
@@ -3824,8 +3732,6 @@ fn parsed_bound_ternary_know_filters_final_gpu_tuple_values() {
         result.final_tuple_materialization.negated_row_filter_count,
         0
     );
-    assert_eq!(result.semantic_trace.cpu_candidate_enumerations, 0);
-    assert_eq!(result.semantic_trace.cpu_world_view_validations, 0);
 
     let xs = fixture
         .provider
@@ -3924,8 +3830,6 @@ fn parsed_bound_quaternary_know_filters_final_gpu_tuple_values() {
         result.final_tuple_materialization.negated_row_filter_count,
         0
     );
-    assert_eq!(result.semantic_trace.cpu_candidate_enumerations, 0);
-    assert_eq!(result.semantic_trace.cpu_world_view_validations, 0);
 
     let ws = fixture
         .provider
@@ -4022,8 +3926,6 @@ fn parsed_know_constraint_does_not_prune_when_constraint_body_false() {
         .rejection_reasons
         .iter()
         .any(|&code| code == EpistemicGpuRejectionReason::WorldViewConstraintViolation.code()));
-    assert_eq!(result.semantic_trace.cpu_candidate_enumerations, 0);
-    assert_eq!(result.semantic_trace.cpu_world_view_validations, 0);
     result
         .require_runtime_dispatch_certification()
         .expect("know-constraint accepted path should retain GPU semantic certification");
@@ -4095,8 +3997,6 @@ fn parsed_know_constraint_prunes_world_view_when_constraint_body_true() {
         .typed_rejection_reasons()
         .expect("rejection reasons decode to typed reasons");
     assert!(typed.contains(&EpistemicGpuRejectionReason::WorldViewConstraintViolation));
-    assert_eq!(result.semantic_trace.cpu_candidate_enumerations, 0);
-    assert_eq!(result.semantic_trace.cpu_world_view_validations, 0);
     result
         .require_runtime_dispatch_certification()
         .expect("all-pruned know-constraint path should retain GPU semantic certification");
@@ -4337,8 +4237,6 @@ fn parsed_possible_constraint_prunes_when_contradiction_possible() {
         .rejection_reasons
         .iter()
         .any(|&code| code == constraint_code));
-    assert_eq!(result.semantic_trace.cpu_candidate_enumerations, 0);
-    assert_eq!(result.semantic_trace.cpu_world_view_validations, 0);
     result
         .require_runtime_dispatch_certification()
         .expect("all-pruned possible-constraint path should retain GPU semantic certification");
@@ -4431,11 +4329,8 @@ fn variable_keyed_constraint_prunes_when_relation_non_empty() {
         "expected firing constraint index Some(0), got {:?}",
         result.semantic_trace.constraint_violation_indices
     );
-    // REAL counters: no CPU fallback, no CPU candidate enumeration / world-view
-    // validation in the accepted path.
-    assert!(result.prepared.preflight.cpu_fallbacks.is_zero());
-    assert_eq!(result.semantic_trace.cpu_candidate_enumerations, 0);
-    assert_eq!(result.semantic_trace.cpu_world_view_validations, 0);
+    // The declaration-indexed constraint trace above and runtime dispatch certification
+    // below are observed evidence for this prune path.
     result
         .require_runtime_dispatch_certification()
         .expect("variable-keyed-constraint prune path should retain GPU semantic certification");
@@ -4502,9 +4397,6 @@ fn variable_keyed_constraint_survives_when_relation_empty() {
         .download_column::<u32>(&result.final_output, 0)
         .expect("download report column for surviving world view");
     assert_eq!(report, vec![1]);
-    assert!(result.prepared.preflight.cpu_fallbacks.is_zero());
-    assert_eq!(result.semantic_trace.cpu_candidate_enumerations, 0);
-    assert_eq!(result.semantic_trace.cpu_world_view_validations, 0);
     result
         .require_runtime_dispatch_certification()
         .expect("variable-keyed-constraint survive path should retain GPU semantic certification");
@@ -4577,9 +4469,6 @@ fn distinct_variable_multi_literal_constraint_prunes_when_both_non_empty() {
         .rejection_reasons
         .iter()
         .any(|&code| code == EpistemicGpuRejectionReason::WorldViewConstraintViolation.code()));
-    assert!(result.prepared.preflight.cpu_fallbacks.is_zero());
-    assert_eq!(result.semantic_trace.cpu_candidate_enumerations, 0);
-    assert_eq!(result.semantic_trace.cpu_world_view_validations, 0);
     result
         .require_runtime_dispatch_certification()
         .expect("distinct-variable multi-literal prune path retains GPU semantic certification");
@@ -4649,9 +4538,6 @@ fn distinct_variable_multi_literal_constraint_survives_when_one_empty() {
         .download_column::<u32>(&result.final_output, 0)
         .expect("download report column for surviving world view");
     assert_eq!(report, vec![1]);
-    assert!(result.prepared.preflight.cpu_fallbacks.is_zero());
-    assert_eq!(result.semantic_trace.cpu_candidate_enumerations, 0);
-    assert_eq!(result.semantic_trace.cpu_world_view_validations, 0);
     result
         .require_runtime_dispatch_certification()
         .expect("distinct-variable multi-literal survive path retains GPU semantic certification");
@@ -4791,8 +4677,6 @@ fn parsed_not_possible_constraint_prunes_when_required_absent() {
         .rejection_reasons
         .iter()
         .any(|&code| code == constraint_code));
-    assert_eq!(result.semantic_trace.cpu_candidate_enumerations, 0);
-    assert_eq!(result.semantic_trace.cpu_world_view_validations, 0);
     result
         .require_runtime_dispatch_certification()
         .expect("all-pruned not-possible-constraint path should retain GPU semantic certification");
@@ -4866,45 +4750,23 @@ fn parsed_constraint_without_epistemic_rule_fails_closed() {
 }
 
 #[test]
-fn runtime_preflight_rejects_nonzero_cpu_fallback_counters() {
-    let cases: [(&str, fn(&mut EpistemicCpuFallbackCounters)); 4] = [
-        ("candidate enumeration", |counters| {
-            counters.candidate_enumeration = 1
-        }),
-        ("world-view validation", |counters| {
-            counters.world_view_validation = 1
-        }),
-        ("solver search", |counters| counters.solver_search = 1),
-        ("probabilistic recompute", |counters| {
-            counters.probabilistic_recompute = 1
-        }),
-    ];
+fn runtime_preflight_carries_gpu_reject_unsupported_policy() {
+    let executable = executable_with_kclique_wcoj_plan();
+    let preflight = EpistemicGpuRuntimePreflight::for_executable_plan(
+        &executable,
+        EpistemicGpuWorkspaceCapacities {
+            max_candidates: 8,
+            max_worlds: 4,
+            max_models_per_reduction: 6,
+        },
+    )
+    .expect("supported plan must pass runtime preflight");
 
-    for (label, set_counter) in cases {
-        let mut executable = executable_with_kclique_wcoj_plan();
-        set_counter(&mut executable.gpu_plan.cpu_fallbacks);
-
-        let err = EpistemicGpuRuntimePreflight::for_executable_plan(
-            &executable,
-            EpistemicGpuWorkspaceCapacities {
-                max_candidates: 8,
-                max_worlds: 4,
-                max_models_per_reduction: 6,
-            },
-        )
-        .expect_err("preflight must reject every nonzero CPU fallback counter");
-
-        match err {
-            xlog_core::XlogError::UnsupportedEpistemicConstruct { construct, context } => {
-                assert_eq!(construct, "epistemic GPU runtime preflight");
-                assert!(
-                    context.contains("nonzero CPU fallback counters"),
-                    "missing fallback context for {label}: {context}"
-                );
-            }
-            other => panic!("expected typed fallback counter error for {label}, got {other:?}"),
-        }
-    }
+    assert_eq!(preflight.execution_backend, EpistemicExecutionBackend::Gpu);
+    assert_eq!(
+        preflight.fallback_policy,
+        EpistemicFallbackPolicy::RejectUnsupported
+    );
 }
 
 #[test]
@@ -6030,7 +5892,7 @@ fn cycle4_epistemic_literal() -> EirEpistemicLiteral {
 //   * global gate true  + per-row tuple true  -> exact rows emitted
 //   * global gate true  + per-row tuple false -> those rows rejected
 //   * global gate false + per-row tuple true  -> ALL rows rejected
-// Pilots assert EXACT output tuples (never non-empty) and 0 CPU fallback.
+// Pilots assert exact output tuples, device membership reads, and certified GPU dispatch/timing.
 // =====================================================================
 
 #[cfg(feature = "epistemic-logic-tests")]
@@ -6073,9 +5935,7 @@ fn run_mixed_modal_pilot(
 }
 
 #[cfg(feature = "epistemic-logic-tests")]
-fn assert_no_cpu_fallback(result: &xlog_runtime::EpistemicGpuExecutionResult) {
-    assert_eq!(result.semantic_trace.cpu_candidate_enumerations, 0);
-    assert_eq!(result.semantic_trace.cpu_world_view_validations, 0);
+fn assert_gpu_membership_dispatch(result: &xlog_runtime::EpistemicGpuExecutionResult) {
     // Membership is device-backed. The single per-row `possible edge(X)`
     // literal drives exactly one tuple-source key column read on the GPU; the
     // nullary global gate (`flag()` / `block()`) drives zero. This is NOT
@@ -6129,7 +5989,7 @@ fn mixed_modal_global_true_row_true_emits_exact_rows() {
         },
     );
     assert_eq!(sorted_output_rows(&fixture, &result), vec![1, 2, 3]);
-    assert_no_cpu_fallback(&result);
+    assert_gpu_membership_dispatch(&result);
 }
 
 // Pilot 2: global gate TRUE + per-row tuple PARTIAL -> only matching rows.
@@ -6150,7 +6010,7 @@ fn mixed_modal_global_true_row_partial_filters_rows() {
     );
     // edge(2) absent -> seed 2's per-row tuple gate fails -> rejected.
     assert_eq!(sorted_output_rows(&fixture, &result), vec![1, 3]);
-    assert_no_cpu_fallback(&result);
+    assert_gpu_membership_dispatch(&result);
 }
 
 // Pilot 3: global gate TRUE + per-row tuple FALSE (no edges) -> all rejected.
@@ -6170,7 +6030,7 @@ fn mixed_modal_global_true_row_false_rejects_all_rows() {
         },
     );
     assert_eq!(sorted_output_rows(&fixture, &result), Vec::<u32>::new());
-    assert_no_cpu_fallback(&result);
+    assert_gpu_membership_dispatch(&result);
 }
 
 // Pilot 4: global gate FALSE + per-row tuple TRUE -> ALL rows rejected,
@@ -6191,7 +6051,7 @@ fn mixed_modal_global_false_row_true_rejects_all_rows() {
         },
     );
     assert_eq!(sorted_output_rows(&fixture, &result), Vec::<u32>::new());
-    assert_no_cpu_fallback(&result);
+    assert_gpu_membership_dispatch(&result);
 }
 
 // Pilot 5: global `possible` gate TRUE + per-row `possible` tuple -> exact.
@@ -6218,7 +6078,7 @@ fn mixed_modal_possible_global_and_row_emits_exact_rows() {
         },
     );
     assert_eq!(sorted_output_rows(&fixture, &result), vec![4, 6]);
-    assert_no_cpu_fallback(&result);
+    assert_gpu_membership_dispatch(&result);
 }
 
 // Pilot 6: global `know` gate TRUE + `not possible` global block + per-row
@@ -6263,7 +6123,7 @@ fn mixed_modal_know_notpossible_and_row_emits_exact_rows() {
         )
         .expect("know + not-possible + per-row mixed rule should execute on GPU");
     assert_eq!(sorted_output_rows(&fixture, &result), vec![7, 9]);
-    assert_no_cpu_fallback(&result);
+    assert_gpu_membership_dispatch(&result);
 }
 
 // Pilot 7: global `know` gate TRUE but `not possible block()` FALSE (block
@@ -6308,7 +6168,7 @@ fn mixed_modal_know_notpossible_global_false_rejects_all_rows() {
         )
         .expect("global-false mixed rule should execute (and reject) on GPU");
     assert_eq!(sorted_output_rows(&fixture, &result), Vec::<u32>::new());
-    assert_no_cpu_fallback(&result);
+    assert_gpu_membership_dispatch(&result);
 }
 
 // Structured-key negative pilot: a mixed rule whose per-row tuple key is a
@@ -7434,8 +7294,8 @@ fn kclique_order_without_edge_permutation() -> KCliqueVariableOrder {
 //
 // Each pilot parses a real epistemic program, compiles it through the
 // production lowering boundary, and executes it on the GPU device path.
-// They assert (a) the exact founded result rows, (b) device-backed
-// tuple-key column reads, and (c) zero forbidden CPU fallback counters.
+// They assert (a) the exact founded result rows, (b) device-backed tuple-key column reads,
+// and (c) certified runtime dispatch with recorded CUDA-event timing.
 // =====================================================================
 
 #[cfg(feature = "epistemic-logic-tests")]
@@ -7478,13 +7338,11 @@ fn run_tuple_key_unary_result(
         )
         .expect("tuple-key membership pilot should execute through GPU runtime path");
 
-    // Device-backed tuple-key reads and zero CPU fallback.
+    // Device-backed tuple-key reads are paired with runtime dispatch/CUDA-event certification.
     assert_eq!(
         result.model_membership.tuple_source_key_column_device_reads, expected_key_column_reads,
         "tuple-key column reads must be device-backed for {source:?}"
     );
-    assert_eq!(result.semantic_trace.cpu_candidate_enumerations, 0);
-    assert_eq!(result.semantic_trace.cpu_world_view_validations, 0);
     result
         .require_runtime_dispatch_certification()
         .expect("tuple-key membership pilot runtime evidence must remain certified");
@@ -7688,8 +7546,6 @@ fn multiple_bound_variables_tuple_key_through_gpu_membership() {
         result.model_membership.tuple_source_key_column_device_reads, 2,
         "two bound columns must read two device key columns"
     );
-    assert_eq!(result.semantic_trace.cpu_candidate_enumerations, 0);
-    assert_eq!(result.semantic_trace.cpu_world_view_validations, 0);
     result
         .require_runtime_dispatch_certification()
         .expect("multi-bound pilot runtime evidence must remain certified");
@@ -7925,8 +7781,6 @@ fn mixed_per_row_and_global_modal_executes_conjunctively() {
                 },
             )
             .expect("mixed per-row + global modal rule should execute on GPU");
-        assert_eq!(result.semantic_trace.cpu_candidate_enumerations, 0);
-        assert_eq!(result.semantic_trace.cpu_world_view_validations, 0);
         result
             .require_runtime_dispatch_certification()
             .expect("mixed per-row + global runtime evidence must remain certified");
@@ -8050,7 +7904,6 @@ fn augmenting_modal_variable_over_invariant_resolves_with_projection() {
     result
         .require_runtime_dispatch_certification()
         .expect("runtime result must retain dispatch certification");
-    assert!(result.prepared.preflight.cpu_fallbacks.is_zero());
 
     let mut rows = fixture
         .provider
@@ -8240,8 +8093,8 @@ fn mixed_bound_and_ground_tuple_key_through_gpu_membership() {
 // full 2^literal_count lattice on device, evaluates each candidate against the
 // reduced stable-model semantics through the production runtime path, and emits
 // the required trace counts. They route through the same single-plan GPU runtime path
-// as every other accepted epistemic execution; nothing here touches the CPU
-// fixture layer (run_generate_propagate_test).
+// as every other accepted epistemic execution, under its typed `Gpu`/`RejectUnsupported`
+// policy rather than the separate fixture helper (`run_generate_propagate_test`).
 // ---------------------------------------------------------------------------
 
 /// A program with multiple epistemic literals derives its full
@@ -8327,10 +8180,8 @@ fn multi_literal_program_enumerates_candidate_space_from_eir() {
             .all(|reason| *reason == EpistemicGpuRejectionReason::UnsatisfiedMembership),
         "rejected candidates fail membership against the EIR-derived assumptions"
     );
-    // No CPU fallback in candidate enumeration or world-view validation.
-    assert_eq!(trace.cpu_candidate_enumerations, 0);
-    assert_eq!(trace.cpu_world_view_validations, 0);
-    assert!(result.prepared.preflight.cpu_fallbacks.is_zero());
+    // The typed rejection reasons above and scoped per-candidate transfer count below are
+    // observed runtime evidence.
     assert_eq!(result.transfer_budget.per_candidate_host_round_trips, 0);
 
     let rows = fixture
@@ -8405,8 +8256,6 @@ fn empty_accepted_world_view_is_distinct_from_failure() {
         4,
         "a rejection reason is emitted for each rejected candidate"
     );
-    assert_eq!(trace.cpu_candidate_enumerations, 0);
-    assert_eq!(trace.cpu_world_view_validations, 0);
 
     // Empty accepted set => empty final output, not an error.
     assert_eq!(result.final_result_transfer.final_output_rows, 0);
@@ -8549,12 +8398,7 @@ fn run_split_single_output(
         .execute_epistemic_gpu_execution_batch_with_trace(&executables, capacities)
         .expect("split single-output component executes through GPU runtime batch");
     assert_eq!(batch.results.len(), 1);
-    // Split orchestration keeps every CPU fallback counter at zero.
-    assert_eq!(batch.trace.cpu_recomposition_steps, 0);
-    assert_eq!(batch.trace.cpu_candidate_enumerations, 0);
-    assert_eq!(batch.trace.cpu_world_view_validations, 0);
-    assert_eq!(batch.trace.cpu_solver_search_fallbacks, 0);
-    assert_eq!(batch.trace.cpu_probability_recomputations, 0);
+    // The split result retains runtime dispatch certification below.
     let result = &batch.results[0];
     result
         .require_runtime_dispatch_certification()
@@ -8635,8 +8479,6 @@ fn distinct_predicate_conjunction_joint_matches_unsplit() {
     assert_eq!(preflight.possible_operator_count, 1);
     assert_eq!(preflight.not_know_operator_count, 0);
     assert_eq!(preflight.not_possible_operator_count, 0);
-    assert_eq!(preflight.cpu_fallbacks.candidate_enumeration, 0);
-    assert_eq!(preflight.cpu_fallbacks.world_view_validation, 0);
 }
 
 /// All-operator joint conjunction including negated modals
@@ -8714,7 +8556,7 @@ fn mixed_operator_conjunction_joint_matches_unsplit() {
 ///
 /// Both the SPLIT and UNSPLIT paths must reach the SAME exact tuples (split-vs-
 /// unsplit equivalence — non-tautological: each path is a distinct compile +
-/// execute), with no CPU fallback or CPU candidate enumeration.
+/// execute), with exact row agreement from both device execution results.
 #[cfg(feature = "epistemic-logic-tests")]
 #[test]
 fn cross_arity_same_name_solved_identically_split_and_unsplit() {
@@ -8782,13 +8624,10 @@ fn cross_arity_same_name_solved_identically_split_and_unsplit() {
     let split_batch = split_executor
         .execute_epistemic_gpu_execution_batch_with_trace(&split_executables, caps)
         .expect("split cross-arity coupling solves with arity-disambiguated sources");
-    assert_eq!(split_batch.trace.cpu_candidate_enumerations, 0);
     let split_result = split_batch
         .results
         .last()
         .expect("split batch yields a result");
-    assert!(split_result.prepared.preflight.cpu_fallbacks.is_zero());
-    assert_eq!(split_result.semantic_trace.cpu_candidate_enumerations, 0);
     assert_eq!(read_a_tuples(&split_result.final_output), expected);
 
     // --- UNSPLIT path: must produce the SAME exact tuples ---
@@ -8803,8 +8642,6 @@ fn cross_arity_same_name_solved_identically_split_and_unsplit() {
     let unsplit_result = unsplit_executor
         .execute_epistemic_gpu_execution(&unsplit, caps)
         .expect("unsplit cross-arity coupling solves with arity-disambiguated sources");
-    assert!(unsplit_result.prepared.preflight.cpu_fallbacks.is_zero());
-    assert_eq!(unsplit_result.semantic_trace.cpu_candidate_enumerations, 0);
     assert_eq!(read_a_tuples(&unsplit_result.final_output), expected);
 
     // Split-vs-unsplit EQUIVALENCE: identical exact tuples from two distinct
@@ -8979,7 +8816,6 @@ fn cross_arity_joint_coupling_over_invariant_resolves_on_device() {
     result
         .require_runtime_dispatch_certification()
         .expect("runtime result must retain dispatch certification");
-    assert!(result.prepared.preflight.cpu_fallbacks.is_zero());
 
     let c0 = fixture
         .provider
@@ -9047,9 +8883,6 @@ fn single_element_list_modal_key_binds_element_against_scalar_column_on_device()
     result
         .require_runtime_dispatch_certification()
         .expect("runtime result must retain dispatch certification");
-    assert_eq!(result.semantic_trace.cpu_candidate_enumerations, 0);
-    assert_eq!(result.semantic_trace.cpu_world_view_validations, 0);
-    assert!(result.prepared.preflight.cpu_fallbacks.is_zero());
 
     let mut rows = fixture
         .provider
@@ -9122,9 +8955,6 @@ fn multi_element_list_modal_key_binds_elements_against_columns_on_device() {
     result
         .require_runtime_dispatch_certification()
         .expect("runtime result must retain dispatch certification");
-    assert_eq!(result.semantic_trace.cpu_candidate_enumerations, 0);
-    assert_eq!(result.semantic_trace.cpu_world_view_validations, 0);
-    assert!(result.prepared.preflight.cpu_fallbacks.is_zero());
 
     let c0 = fixture
         .provider
@@ -9199,9 +9029,6 @@ fn anonymous_wildcard_list_modal_key_matches_any_in_position_on_device() {
     result
         .require_runtime_dispatch_certification()
         .expect("runtime result must retain dispatch certification");
-    assert_eq!(result.semantic_trace.cpu_candidate_enumerations, 0);
-    assert_eq!(result.semantic_trace.cpu_world_view_validations, 0);
-    assert!(result.prepared.preflight.cpu_fallbacks.is_zero());
 
     let c0 = fixture
         .provider

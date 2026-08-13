@@ -10,9 +10,8 @@ use xlog_cuda::device_runtime::{
 use xlog_cuda::memory::TrackedCudaSlice;
 use xlog_cuda::{CudaBuffer, CudaDevice, CudaKernelProvider, GpuMemoryManager};
 use xlog_ir::{
-    EirAtom, EirEpistemicLiteral, EirEpistemicMode, EirEpistemicOp, EirTerm,
-    EpistemicCpuFallbackCounters, EpistemicGpuPlan, EpistemicReductionPlan,
-    EpistemicTupleMembershipBinding, EpistemicWcojReductionStatus,
+    EirAtom, EirEpistemicLiteral, EirEpistemicMode, EirEpistemicOp, EirTerm, EpistemicGpuPlan,
+    EpistemicReductionPlan, EpistemicTupleMembershipBinding, EpistemicWcojReductionStatus,
 };
 use xlog_logic::epistemic::{
     compile_epistemic_gpu_execution_with_stats_snapshot,
@@ -642,75 +641,6 @@ fn execute_split_quaternary_all_operator_batch(
     (split, batch)
 }
 
-fn execute_split_quaternary_possible_and_not_know_batch(
-    fix: &RuntimeBackedFixture,
-) -> (
-    EpistemicSplitExecutablePlan,
-    EpistemicGpuBatchExecutionResult,
-) {
-    let program = parse_program(
-        r#"
-        pred tuple4(u32, u32, u32, u32).
-        pred possible_fact4(u32, u32, u32, u32).
-        pred unknown_fact4(u32, u32, u32, u32).
-        pred possible4(u32, u32, u32, u32).
-        pred unknown4(u32, u32, u32, u32).
-        possible4(A, B, C, D) :- tuple4(A, B, C, D), possible possible_fact4(A, B, C, D).
-        unknown4(A, B, C, D) :- tuple4(A, B, C, D), not know unknown_fact4(A, B, C, D).
-        "#,
-    )
-    .expect("parse split quaternary possible/not-know fixture");
-    let split = compile_epistemic_gpu_split_execution_with_stats_snapshot(&program, None)
-        .expect("compile split quaternary possible/not-know components");
-
-    let mut executor =
-        Executor::new_with_config(Arc::clone(&fix.provider), RuntimeConfig::default());
-    let mut relation_ids = BTreeMap::new();
-    for component in &split.components {
-        for (name, rel_id) in &component.executable.relation_ids {
-            if let Some(previous) = relation_ids.insert(name.clone(), *rel_id) {
-                assert_eq!(
-                    previous, *rel_id,
-                    "split quaternary possible/not-know components must preserve shared relation ids"
-                );
-            }
-        }
-    }
-    for (name, rel_id) in &relation_ids {
-        executor.register_relation(*rel_id, name);
-    }
-    executor.put_relation(
-        "tuple4",
-        upload_quaternary_u32(&fix.memory, &[(1, 2, 3, 4), (2, 3, 4, 5), (9, 9, 9, 9)]),
-    );
-    executor.put_relation(
-        "possible_fact4",
-        upload_quaternary_u32(&fix.memory, &[(2, 3, 4, 5)]),
-    );
-    executor.put_relation(
-        "unknown_fact4",
-        upload_quaternary_u32(&fix.memory, &[(2, 3, 4, 5)]),
-    );
-
-    let executables: Vec<_> = split
-        .components
-        .iter()
-        .map(|component| &component.executable)
-        .collect();
-    let batch = executor
-        .execute_epistemic_gpu_execution_batch_with_trace(
-            &executables,
-            EpistemicGpuWorkspaceCapacities {
-                max_candidates: 2,
-                max_worlds: 1,
-                max_models_per_reduction: 3,
-            },
-        )
-        .expect("execute split quaternary possible/not-know components through GPU batch path");
-
-    (split, batch)
-}
-
 fn execute_all_operator_mixed_membership_fixture(
     fix: &RuntimeBackedFixture,
 ) -> EpistemicGpuExecutionResult {
@@ -1089,7 +1019,6 @@ fn epistemic_k7_k8_reductions_reuse_g39_kclique_planner_preflight_surface() {
                 "K{k} helper-split specs must be consumed by production helper relation scans"
             );
         }
-        assert!(preflight.cpu_fallbacks.is_zero());
     }
 }
 
@@ -2001,9 +1930,6 @@ fn accepted_split_components_execute_gpu_runtime_and_match_component_oracles() {
 
     assert_eq!(batch.trace.component_count, 2);
     assert_eq!(batch.trace.gpu_runtime_component_executions, 2);
-    assert_eq!(batch.trace.cpu_recomposition_steps, 0);
-    assert_eq!(batch.trace.cpu_candidate_enumerations, 0);
-    assert_eq!(batch.trace.cpu_world_view_validations, 0);
     assert_eq!(batch.trace.tracked_dtoh_calls, 0);
     assert_eq!(batch.trace.per_candidate_host_round_trips, 0);
     assert_eq!(
@@ -2065,8 +1991,6 @@ fn accepted_split_components_execute_gpu_runtime_and_match_component_oracles() {
             result.semantic_trace.rejected_candidate_indices,
             oracle.rejected_candidate_indices
         );
-        assert_eq!(result.semantic_trace.cpu_candidate_enumerations, 0);
-        assert_eq!(result.semantic_trace.cpu_world_view_validations, 0);
         assert_eq!(result.transfer_budget.tracked_dtoh_calls, 0);
     }
 }
@@ -2186,9 +2110,6 @@ fn accepted_split_binary_operator_components_match_gpt_oracles() {
 
     assert_eq!(batch.trace.component_count, 2);
     assert_eq!(batch.trace.gpu_runtime_component_executions, 2);
-    assert_eq!(batch.trace.cpu_recomposition_steps, 0);
-    assert_eq!(batch.trace.cpu_candidate_enumerations, 0);
-    assert_eq!(batch.trace.cpu_world_view_validations, 0);
     assert_eq!(batch.trace.tracked_dtoh_calls, 0);
     assert_eq!(batch.trace.per_candidate_host_round_trips, 0);
     assert_eq!(batch.trace.know_operator_count, 0);
@@ -2288,8 +2209,6 @@ fn accepted_split_binary_operator_components_match_gpt_oracles() {
             result.semantic_trace.rejected_candidate_indices,
             oracle.rejected_candidate_indices
         );
-        assert_eq!(result.semantic_trace.cpu_candidate_enumerations, 0);
-        assert_eq!(result.semantic_trace.cpu_world_view_validations, 0);
         assert_eq!(result.transfer_budget.tracked_dtoh_calls, 0);
     }
 }
@@ -2451,9 +2370,6 @@ fn accepted_split_all_binary_operators_match_gpt_oracles() {
 
     assert_eq!(batch.trace.component_count, 4);
     assert_eq!(batch.trace.gpu_runtime_component_executions, 4);
-    assert_eq!(batch.trace.cpu_recomposition_steps, 0);
-    assert_eq!(batch.trace.cpu_candidate_enumerations, 0);
-    assert_eq!(batch.trace.cpu_world_view_validations, 0);
     assert_eq!(batch.trace.tracked_dtoh_calls, 0);
     assert_eq!(batch.trace.per_candidate_host_round_trips, 0);
     assert!(batch.trace.aggregate_kernel_timing.is_recorded());
@@ -2538,8 +2454,6 @@ fn accepted_split_all_binary_operators_match_gpt_oracles() {
             result.semantic_trace.rejected_candidate_indices,
             oracle.rejected_candidate_indices
         );
-        assert_eq!(result.semantic_trace.cpu_candidate_enumerations, 0);
-        assert_eq!(result.semantic_trace.cpu_world_view_validations, 0);
         assert_eq!(result.transfer_budget.tracked_dtoh_calls, 0);
     }
 }
@@ -2558,9 +2472,6 @@ fn accepted_split_all_binary_operator_batch_records_timing_and_workspace_buffers
     assert_eq!(batch.results.len(), 4);
     assert_eq!(batch.trace.component_count, 4);
     assert_eq!(batch.trace.gpu_runtime_component_executions, 4);
-    assert_eq!(batch.trace.cpu_recomposition_steps, 0);
-    assert_eq!(batch.trace.cpu_candidate_enumerations, 0);
-    assert_eq!(batch.trace.cpu_world_view_validations, 0);
     assert_eq!(batch.trace.tracked_dtoh_calls, 0);
     assert_eq!(batch.trace.per_candidate_host_round_trips, 0);
     assert!(batch.trace.aggregate_kernel_timing.is_recorded());
@@ -2933,9 +2844,6 @@ fn accepted_split_quaternary_all_operators_match_gpt_oracles() {
 
     assert_eq!(batch.trace.component_count, 4);
     assert_eq!(batch.trace.gpu_runtime_component_executions, 4);
-    assert_eq!(batch.trace.cpu_recomposition_steps, 0);
-    assert_eq!(batch.trace.cpu_candidate_enumerations, 0);
-    assert_eq!(batch.trace.cpu_world_view_validations, 0);
     assert_eq!(batch.trace.tracked_dtoh_calls, 0);
     assert_eq!(batch.trace.per_candidate_host_round_trips, 0);
     assert!(batch.trace.aggregate_kernel_timing.is_recorded());
@@ -3024,8 +2932,6 @@ fn accepted_split_quaternary_all_operators_match_gpt_oracles() {
             result.semantic_trace.rejected_candidate_indices,
             oracle.rejected_candidate_indices
         );
-        assert_eq!(result.semantic_trace.cpu_candidate_enumerations, 0);
-        assert_eq!(result.semantic_trace.cpu_world_view_validations, 0);
         assert_eq!(result.transfer_budget.tracked_dtoh_calls, 0);
     }
 }
@@ -3150,9 +3056,6 @@ fn accepted_split_quaternary_not_possible_batch_matches_gpt_oracles() {
 
     assert_eq!(batch.trace.component_count, 2);
     assert_eq!(batch.trace.gpu_runtime_component_executions, 2);
-    assert_eq!(batch.trace.cpu_recomposition_steps, 0);
-    assert_eq!(batch.trace.cpu_candidate_enumerations, 0);
-    assert_eq!(batch.trace.cpu_world_view_validations, 0);
     assert_eq!(batch.trace.tracked_dtoh_calls, 0);
     assert_eq!(batch.trace.per_candidate_host_round_trips, 0);
     assert!(batch.trace.aggregate_kernel_timing.is_recorded());
@@ -3239,8 +3142,6 @@ fn accepted_split_quaternary_not_possible_batch_matches_gpt_oracles() {
             result.semantic_trace.rejected_candidate_indices,
             oracle.rejected_candidate_indices
         );
-        assert_eq!(result.semantic_trace.cpu_candidate_enumerations, 0);
-        assert_eq!(result.semantic_trace.cpu_world_view_validations, 0);
         assert_eq!(result.transfer_budget.tracked_dtoh_calls, 0);
     }
 }
@@ -3364,9 +3265,6 @@ fn accepted_split_quaternary_possible_and_not_know_batch_matches_gpt_oracles() {
 
     assert_eq!(batch.trace.component_count, 2);
     assert_eq!(batch.trace.gpu_runtime_component_executions, 2);
-    assert_eq!(batch.trace.cpu_recomposition_steps, 0);
-    assert_eq!(batch.trace.cpu_candidate_enumerations, 0);
-    assert_eq!(batch.trace.cpu_world_view_validations, 0);
     assert_eq!(batch.trace.tracked_dtoh_calls, 0);
     assert_eq!(batch.trace.per_candidate_host_round_trips, 0);
     assert!(batch.trace.aggregate_kernel_timing.is_recorded());
@@ -3453,8 +3351,6 @@ fn accepted_split_quaternary_possible_and_not_know_batch_matches_gpt_oracles() {
             result.semantic_trace.rejected_candidate_indices,
             oracle.rejected_candidate_indices
         );
-        assert_eq!(result.semantic_trace.cpu_candidate_enumerations, 0);
-        assert_eq!(result.semantic_trace.cpu_world_view_validations, 0);
         assert_eq!(result.transfer_budget.tracked_dtoh_calls, 0);
     }
 }
@@ -3716,8 +3612,6 @@ fn accepted_gpu_execution_result_records_kernel_timing() {
         download_unary_u32(&fix.provider, &result.final_output),
         vec![1]
     );
-    assert_eq!(result.semantic_trace.cpu_candidate_enumerations, 0);
-    assert_eq!(result.semantic_trace.cpu_world_view_validations, 0);
     assert_eq!(
         result.model_membership.membership_source,
         EpistemicGpuModelMembershipSource::StableModelTupleBuffer
@@ -3947,9 +3841,6 @@ fn accepted_split_quaternary_all_operator_batch_records_component_kernel_timing(
     assert_eq!(batch.results.len(), 4);
     assert_eq!(batch.trace.component_count, 4);
     assert_eq!(batch.trace.gpu_runtime_component_executions, 4);
-    assert_eq!(batch.trace.cpu_recomposition_steps, 0);
-    assert_eq!(batch.trace.cpu_candidate_enumerations, 0);
-    assert_eq!(batch.trace.cpu_world_view_validations, 0);
     assert_eq!(batch.trace.tracked_dtoh_calls, 0);
     assert_eq!(batch.trace.per_candidate_host_round_trips, 0);
     assert!(batch.trace.aggregate_kernel_timing.is_recorded());
@@ -3998,8 +3889,6 @@ fn accepted_split_quaternary_all_operator_batch_records_component_kernel_timing(
             download_quaternary_u32(&fix.provider, &result.final_output),
             expected_rows
         );
-        assert_eq!(result.semantic_trace.cpu_candidate_enumerations, 0);
-        assert_eq!(result.semantic_trace.cpu_world_view_validations, 0);
         assert_eq!(
             result.model_membership.membership_source,
             EpistemicGpuModelMembershipSource::StableModelTupleBuffer
@@ -4228,9 +4117,6 @@ fn accepted_split_quaternary_all_operator_batch_records_device_workspace_buffers
     assert_eq!(batch.results.len(), 4);
     assert_eq!(batch.trace.component_count, 4);
     assert_eq!(batch.trace.gpu_runtime_component_executions, 4);
-    assert_eq!(batch.trace.cpu_recomposition_steps, 0);
-    assert_eq!(batch.trace.cpu_candidate_enumerations, 0);
-    assert_eq!(batch.trace.cpu_world_view_validations, 0);
 
     for result in &batch.results {
         let layout = result.prepared.preflight.workspace_layout;
@@ -4303,449 +4189,6 @@ fn accepted_split_quaternary_all_operator_batch_records_device_workspace_buffers
 }
 
 #[test]
-fn accepted_split_all_binary_operator_batch_rejects_cpu_fallback_counters() {
-    let Some(fix) = make_runtime_backed_fixture() else {
-        eprintln!("Skipping: CUDA runtime unavailable");
-        return;
-    };
-
-    let (split, mut batch) = execute_split_all_binary_operator_batch(&fix);
-    assert_eq!(batch.trace.cpu_candidate_enumerations, 0);
-    assert_eq!(batch.trace.cpu_world_view_validations, 0);
-    assert_eq!(batch.trace.cpu_solver_search_fallbacks, 0);
-    assert_eq!(batch.trace.cpu_probability_recomputations, 0);
-
-    batch.trace.cpu_candidate_enumerations = 1;
-    batch.trace.cpu_world_view_validations = 1;
-    batch.trace.cpu_solver_search_fallbacks = 1;
-    batch.trace.cpu_probability_recomputations = 1;
-
-    let sat_instance = SolveInstance::new(1, vec![Clause::new(vec![Literal::positive(0)])]);
-    let sat_cnf = GpuCnf::from_host(&sat_instance, &fix.provider).expect("upload SAT CNF");
-    let branch_limit = upload_u32_scalar(&fix.provider, 1);
-    let mut solver_adapter =
-        GpuSolverProductionAdapter::new(Arc::clone(&fix.provider), GpuCdclConfig::default());
-    let mut workspace = solver_adapter
-        .new_workspace(sat_cnf.var_cap, sat_cnf.clause_cap)
-        .expect("new fallback rejection workspace");
-
-    let solver_err = match solver_adapter
-        .solve_assumption_lifecycle_with_gpu_batch_execution_result(
-            &fix.provider,
-            GpuSolverProductionBatchExecutionEvidence { batch: &batch },
-            &mut workspace,
-            &[GpuSolverProductionLifecycleStep {
-                cnf: &sat_cnf,
-                branch_var_limit: &branch_limit,
-                expectation: GpuSolverProductionExpectation::Sat,
-            }],
-        ) {
-        Ok(_) => panic!("solver all-binary batch evidence with CPU fallback counters must reject"),
-        Err(err) => err,
-    };
-    let solver_err = format!("{solver_err}");
-    assert!(solver_err.contains("CPU/host fallback counters"));
-    assert!(solver_err.contains("cpu_candidates=1"));
-    assert!(solver_err.contains("cpu_world_views=1"));
-    assert!(solver_err.contains("cpu_solver_search=1"));
-    assert!(solver_err.contains("cpu_probability_recompute=1"));
-
-    let terms = |a, b| {
-        vec![
-            EpistemicEvidenceTerm::integer(a),
-            EpistemicEvidenceTerm::integer(b),
-        ]
-    };
-    let assumption_groups_owned: Vec<Vec<EpistemicAssumption>> = split
-        .components
-        .iter()
-        .map(
-            |component| match component.component.rule_indices.as_slice() {
-                [0] => vec![EpistemicAssumption::known_tuple("edge", terms(1, 2), true)],
-                [1] => vec![EpistemicAssumption::possible_tuple(
-                    "alt",
-                    terms(2, 3),
-                    true,
-                )],
-                [2] => vec![EpistemicAssumption::possible_tuple(
-                    "blocked",
-                    terms(1, 2),
-                    false,
-                )],
-                [3] => vec![EpistemicAssumption::known_tuple("seen", terms(2, 3), false)],
-                other => panic!("unexpected split all-binary fallback rule indices: {other:?}"),
-            },
-        )
-        .collect();
-    let assumption_groups: Vec<&[EpistemicAssumption]> =
-        assumption_groups_owned.iter().map(Vec::as_slice).collect();
-
-    let mut config = GpuConfig::default();
-    config.device_ordinal = 0;
-    config.memory_bytes = 64 * 1024 * 1024;
-    let mut prob_adapter = EpistemicProbProductionAdapter::new(config);
-    let prob_err = match prob_adapter
-        .compile_and_evaluate_conditioned_source_for_gpu_batch_execution_result(
-            r#"
-        0.4::edge(1, 2).
-        0.5::alt(2, 3).
-        0.7::blocked(1, 2).
-        0.8::seen(2, 3).
-        query(edge(1, 2)).
-        query(alt(2, 3)).
-        query(blocked(1, 2)).
-        query(seen(2, 3)).
-        "#,
-            &fix.provider,
-            EpistemicProbGpuBatchExecutionEvidence {
-                batch: &batch,
-                assumptions_by_component: &assumption_groups,
-            },
-        ) {
-        Ok(_) => {
-            panic!("probabilistic all-binary batch evidence with CPU fallback counters must reject")
-        }
-        Err(err) => err,
-    };
-    let prob_err = format!("{prob_err}");
-    assert!(prob_err.contains("CPU/host fallback counters"));
-    assert!(prob_err.contains("cpu_candidates=1"));
-    assert!(prob_err.contains("cpu_world_views=1"));
-    assert!(prob_err.contains("cpu_solver_search=1"));
-    assert!(prob_err.contains("cpu_probability_recompute=1"));
-}
-
-#[test]
-fn accepted_split_quaternary_possible_and_not_know_batch_rejects_cpu_fallback_counters() {
-    let Some(fix) = make_runtime_backed_fixture() else {
-        eprintln!("Skipping: CUDA runtime unavailable");
-        return;
-    };
-
-    let (split, mut batch) = execute_split_quaternary_possible_and_not_know_batch(&fix);
-    assert_eq!(split.components.len(), 2);
-    assert_eq!(split.recomposed_rule_indices(), vec![0, 1]);
-    assert_eq!(batch.trace.cpu_candidate_enumerations, 0);
-    assert_eq!(batch.trace.cpu_world_view_validations, 0);
-    assert_eq!(batch.trace.cpu_solver_search_fallbacks, 0);
-    assert_eq!(batch.trace.cpu_probability_recomputations, 0);
-
-    batch.trace.cpu_candidate_enumerations = 1;
-    batch.trace.cpu_world_view_validations = 1;
-    batch.trace.cpu_solver_search_fallbacks = 1;
-    batch.trace.cpu_probability_recomputations = 1;
-
-    let sat_instance = SolveInstance::new(1, vec![Clause::new(vec![Literal::positive(0)])]);
-    let sat_cnf = GpuCnf::from_host(&sat_instance, &fix.provider).expect("upload SAT CNF");
-    let branch_limit = upload_u32_scalar(&fix.provider, 1);
-    let mut solver_adapter =
-        GpuSolverProductionAdapter::new(Arc::clone(&fix.provider), GpuCdclConfig::default());
-    let mut workspace = solver_adapter
-        .new_workspace(sat_cnf.var_cap, sat_cnf.clause_cap)
-        .expect("new possible/not-know fallback rejection workspace");
-
-    let solver_err = match solver_adapter
-        .solve_assumption_lifecycle_with_gpu_batch_execution_result(
-            &fix.provider,
-            GpuSolverProductionBatchExecutionEvidence { batch: &batch },
-            &mut workspace,
-            &[GpuSolverProductionLifecycleStep {
-                cnf: &sat_cnf,
-                branch_var_limit: &branch_limit,
-                expectation: GpuSolverProductionExpectation::Sat,
-            }],
-        ) {
-        Ok(_) => {
-            panic!("solver possible/not-know batch evidence with CPU fallback counters must reject")
-        }
-        Err(err) => err,
-    };
-    let solver_err = format!("{solver_err}");
-    assert!(solver_err.contains("CPU/host fallback counters"));
-    assert!(solver_err.contains("cpu_candidates=1"));
-    assert!(solver_err.contains("cpu_world_views=1"));
-    assert!(solver_err.contains("cpu_solver_search=1"));
-    assert!(solver_err.contains("cpu_probability_recompute=1"));
-
-    let terms = |a, b, c, d| {
-        vec![
-            EpistemicEvidenceTerm::integer(a),
-            EpistemicEvidenceTerm::integer(b),
-            EpistemicEvidenceTerm::integer(c),
-            EpistemicEvidenceTerm::integer(d),
-        ]
-    };
-    let assumption_groups_owned: Vec<Vec<EpistemicAssumption>> = split
-        .components
-        .iter()
-        .map(
-            |component| match component.component.rule_indices.as_slice() {
-                [0] => vec![EpistemicAssumption::possible_tuple(
-                    "fact4",
-                    terms(2, 3, 4, 5),
-                    true,
-                )],
-                [1] => vec![EpistemicAssumption::known_tuple(
-                    "fact4",
-                    terms(1, 2, 3, 4),
-                    false,
-                )],
-                other => {
-                    panic!(
-                        "unexpected split quaternary possible/not-know fallback indices: {other:?}"
-                    )
-                }
-            },
-        )
-        .collect();
-    let assumption_groups: Vec<&[EpistemicAssumption]> =
-        assumption_groups_owned.iter().map(Vec::as_slice).collect();
-
-    let mut config = GpuConfig::default();
-    config.device_ordinal = 0;
-    config.memory_bytes = 64 * 1024 * 1024;
-    let mut prob_adapter = EpistemicProbProductionAdapter::new(config);
-    let prob_err = match prob_adapter
-        .compile_and_evaluate_conditioned_source_for_gpu_batch_execution_result(
-            r#"
-        0.8::fact4(2, 3, 4, 5).
-        0.6::fact4(1, 2, 3, 4).
-        query(fact4(2, 3, 4, 5)).
-        query(fact4(1, 2, 3, 4)).
-        "#,
-            &fix.provider,
-            EpistemicProbGpuBatchExecutionEvidence {
-                batch: &batch,
-                assumptions_by_component: &assumption_groups,
-            },
-        ) {
-        Ok(_) => {
-            panic!(
-                "probabilistic possible/not-know batch evidence with CPU fallback counters must reject"
-            )
-        }
-        Err(err) => err,
-    };
-    let prob_err = format!("{prob_err}");
-    assert!(prob_err.contains("CPU/host fallback counters"));
-    assert!(prob_err.contains("cpu_candidates=1"));
-    assert!(prob_err.contains("cpu_world_views=1"));
-    assert!(prob_err.contains("cpu_solver_search=1"));
-    assert!(prob_err.contains("cpu_probability_recompute=1"));
-}
-
-#[test]
-fn accepted_split_quaternary_all_operator_batch_rejects_cpu_fallback_counters() {
-    let Some(fix) = make_runtime_backed_fixture() else {
-        eprintln!("Skipping: CUDA runtime unavailable");
-        return;
-    };
-
-    let (split, mut batch) = execute_split_quaternary_all_operator_batch(&fix);
-    assert_eq!(batch.trace.cpu_candidate_enumerations, 0);
-    assert_eq!(batch.trace.cpu_world_view_validations, 0);
-    assert_eq!(batch.trace.cpu_solver_search_fallbacks, 0);
-    assert_eq!(batch.trace.cpu_probability_recomputations, 0);
-
-    batch.trace.cpu_candidate_enumerations = 1;
-    batch.trace.cpu_world_view_validations = 1;
-    batch.trace.cpu_solver_search_fallbacks = 1;
-    batch.trace.cpu_probability_recomputations = 1;
-
-    let sat_instance = SolveInstance::new(1, vec![Clause::new(vec![Literal::positive(0)])]);
-    let sat_cnf = GpuCnf::from_host(&sat_instance, &fix.provider).expect("upload SAT CNF");
-    let branch_limit = upload_u32_scalar(&fix.provider, 1);
-    let mut solver_adapter =
-        GpuSolverProductionAdapter::new(Arc::clone(&fix.provider), GpuCdclConfig::default());
-    let mut workspace = solver_adapter
-        .new_workspace(sat_cnf.var_cap, sat_cnf.clause_cap)
-        .expect("new fallback rejection workspace");
-
-    let solver_err = match solver_adapter
-        .solve_assumption_lifecycle_with_gpu_batch_execution_result(
-            &fix.provider,
-            GpuSolverProductionBatchExecutionEvidence { batch: &batch },
-            &mut workspace,
-            &[GpuSolverProductionLifecycleStep {
-                cnf: &sat_cnf,
-                branch_var_limit: &branch_limit,
-                expectation: GpuSolverProductionExpectation::Sat,
-            }],
-        ) {
-        Ok(_) => panic!("solver batch evidence with CPU fallback counters must reject"),
-        Err(err) => err,
-    };
-    let solver_err = format!("{solver_err}");
-    assert!(solver_err.contains("CPU/host fallback counters"));
-    assert!(solver_err.contains("cpu_candidates=1"));
-    assert!(solver_err.contains("cpu_world_views=1"));
-    assert!(solver_err.contains("cpu_solver_search=1"));
-    assert!(solver_err.contains("cpu_probability_recompute=1"));
-
-    let terms = |a, b, c, d| {
-        vec![
-            EpistemicEvidenceTerm::integer(a),
-            EpistemicEvidenceTerm::integer(b),
-            EpistemicEvidenceTerm::integer(c),
-            EpistemicEvidenceTerm::integer(d),
-        ]
-    };
-    let assumption_groups_owned: Vec<Vec<EpistemicAssumption>> = split
-        .components
-        .iter()
-        .map(
-            |component| match component.component.rule_indices.as_slice() {
-                [0] => vec![EpistemicAssumption::known_tuple(
-                    "edge4",
-                    terms(2, 3, 4, 5),
-                    true,
-                )],
-                [1] => vec![EpistemicAssumption::possible_tuple(
-                    "alt4",
-                    terms(3, 4, 5, 6),
-                    true,
-                )],
-                [2] => vec![EpistemicAssumption::possible_tuple(
-                    "blocked_fact4",
-                    terms(1, 2, 3, 4),
-                    false,
-                )],
-                [3] => vec![EpistemicAssumption::known_tuple(
-                    "hidden_fact4",
-                    terms(2, 3, 4, 5),
-                    false,
-                )],
-                other => panic!("unexpected split quaternary fallback rule indices: {other:?}"),
-            },
-        )
-        .collect();
-    let assumption_groups: Vec<&[EpistemicAssumption]> =
-        assumption_groups_owned.iter().map(Vec::as_slice).collect();
-
-    let mut config = GpuConfig::default();
-    config.device_ordinal = 0;
-    config.memory_bytes = 64 * 1024 * 1024;
-    let mut prob_adapter = EpistemicProbProductionAdapter::new(config);
-    let prob_err = match prob_adapter
-        .compile_and_evaluate_conditioned_source_for_gpu_batch_execution_result(
-            r#"
-        0.8::edge4(2, 3, 4, 5).
-        0.7::alt4(3, 4, 5, 6).
-        0.6::blocked_fact4(1, 2, 3, 4).
-        0.5::hidden_fact4(2, 3, 4, 5).
-        query(edge4(2, 3, 4, 5)).
-        query(alt4(3, 4, 5, 6)).
-        query(blocked_fact4(1, 2, 3, 4)).
-        query(hidden_fact4(2, 3, 4, 5)).
-        "#,
-            &fix.provider,
-            EpistemicProbGpuBatchExecutionEvidence {
-                batch: &batch,
-                assumptions_by_component: &assumption_groups,
-            },
-        ) {
-        Ok(_) => panic!("probabilistic batch evidence with CPU fallback counters must reject"),
-        Err(err) => err,
-    };
-    let prob_err = format!("{prob_err}");
-    assert!(prob_err.contains("CPU/host fallback counters"));
-    assert!(prob_err.contains("cpu_candidates=1"));
-    assert!(prob_err.contains("cpu_world_views=1"));
-    assert!(prob_err.contains("cpu_solver_search=1"));
-    assert!(prob_err.contains("cpu_probability_recompute=1"));
-}
-
-#[test]
-fn accepted_gpu_execution_result_rejects_cpu_fallback_counters() {
-    let Some(fix) = make_runtime_backed_fixture() else {
-        eprintln!("Skipping: CUDA runtime unavailable");
-        return;
-    };
-
-    let mut result = execute_unary_edge_epistemic_fixture(
-        &fix,
-        r#"
-        pred node(u32).
-        pred edge(u32).
-        pred accepted(u32).
-        accepted(X) :- node(X), know edge(X).
-        "#,
-        &[1, 2],
-        &[1],
-    );
-    assert_eq!(
-        download_unary_u32(&fix.provider, &result.final_output),
-        vec![1]
-    );
-    assert!(result.prepared.preflight.cpu_fallbacks.is_zero());
-    assert_eq!(result.semantic_trace.cpu_candidate_enumerations, 0);
-    assert_eq!(result.semantic_trace.cpu_world_view_validations, 0);
-
-    result.prepared.preflight.cpu_fallbacks = EpistemicCpuFallbackCounters {
-        candidate_enumeration: 1,
-        world_view_validation: 1,
-        solver_search: 1,
-        probabilistic_recompute: 1,
-    };
-
-    let sat_instance = SolveInstance::new(1, vec![Clause::new(vec![Literal::positive(0)])]);
-    let sat_cnf = GpuCnf::from_host(&sat_instance, &fix.provider).expect("upload SAT CNF");
-    let branch_limit = upload_u32_scalar(&fix.provider, 1);
-    let mut solver_adapter =
-        GpuSolverProductionAdapter::new(Arc::clone(&fix.provider), GpuCdclConfig::default());
-    let mut workspace = solver_adapter
-        .new_workspace(sat_cnf.var_cap, sat_cnf.clause_cap)
-        .expect("new single-result fallback rejection workspace");
-
-    let solver_err = match solver_adapter.solve_assumption_lifecycle_with_gpu_execution_result(
-        &fix.provider,
-        &result,
-        &mut workspace,
-        &[GpuSolverProductionLifecycleStep {
-            cnf: &sat_cnf,
-            branch_var_limit: &branch_limit,
-            expectation: GpuSolverProductionExpectation::Sat,
-        }],
-    ) {
-        Ok(_) => panic!("solver evidence with single-result CPU fallbacks must reject"),
-        Err(err) => err,
-    };
-    assert!(format!("{solver_err}").contains("zero epistemic CPU fallback counters"));
-    let solver_trace = solver_adapter.trace();
-    assert_eq!(solver_trace.accepted_gpu_candidate_evidence_consumed, 0);
-    assert_eq!(solver_trace.gpu_assumption_pushes, 0);
-    assert_eq!(solver_trace.cpu_assignment_enumerations, 0);
-
-    let mut config = GpuConfig::default();
-    config.device_ordinal = 0;
-    config.memory_bytes = 64 * 1024 * 1024;
-    let mut prob_adapter = EpistemicProbProductionAdapter::new(config);
-    let prob_err = match prob_adapter
-        .compile_and_evaluate_conditioned_source_with_gpu_execution_result(
-            r#"
-        0.8::edge(1).
-        query(edge(1)).
-        "#,
-            &fix.provider,
-            &result,
-            vec![EpistemicAssumption::known_tuple(
-                "edge",
-                vec![EpistemicEvidenceTerm::integer(1)],
-                true,
-            )],
-        ) {
-        Ok(_) => panic!("probability evidence with single-result CPU fallbacks must reject"),
-        Err(err) => err,
-    };
-    assert!(format!("{prob_err}").contains("zero epistemic CPU fallback counters"));
-    let prob_trace = prob_adapter.trace();
-    assert_eq!(prob_trace.accepted_world_view_evidence_consumed, 0);
-    assert_eq!(prob_trace.gpu_conditioned_evidence_facts, 0);
-    assert_eq!(prob_trace.cpu_only_probability_recomputations, 0);
-    assert_eq!(prob_trace.fixture_circuit_evaluations, 0);
-}
-
-#[test]
 fn accepted_gpu_execution_result_rejects_row_count_only_membership() {
     let Some(fix) = make_runtime_backed_fixture() else {
         eprintln!("Skipping: CUDA runtime unavailable");
@@ -4803,7 +4246,6 @@ fn accepted_gpu_execution_result_rejects_row_count_only_membership() {
     let solver_trace = solver_adapter.trace();
     assert_eq!(solver_trace.accepted_gpu_candidate_evidence_consumed, 0);
     assert_eq!(solver_trace.gpu_assumption_pushes, 0);
-    assert_eq!(solver_trace.cpu_assignment_enumerations, 0);
 
     let mut config = GpuConfig::default();
     config.device_ordinal = 0;
@@ -4832,8 +4274,6 @@ fn accepted_gpu_execution_result_rejects_row_count_only_membership() {
     let prob_trace = prob_adapter.trace();
     assert_eq!(prob_trace.accepted_world_view_evidence_consumed, 0);
     assert_eq!(prob_trace.gpu_conditioned_evidence_facts, 0);
-    assert_eq!(prob_trace.cpu_only_probability_recomputations, 0);
-    assert_eq!(prob_trace.fixture_circuit_evaluations, 0);
 }
 
 #[test]
@@ -4892,7 +4332,6 @@ fn accepted_gpu_execution_result_rejects_missing_nonzero_arity_tuple_key_reads()
     let solver_trace = solver_adapter.trace();
     assert_eq!(solver_trace.accepted_gpu_candidate_evidence_consumed, 0);
     assert_eq!(solver_trace.gpu_assumption_pushes, 0);
-    assert_eq!(solver_trace.cpu_assignment_enumerations, 0);
 
     let mut config = GpuConfig::default();
     config.device_ordinal = 0;
@@ -4920,8 +4359,6 @@ fn accepted_gpu_execution_result_rejects_missing_nonzero_arity_tuple_key_reads()
     let prob_trace = prob_adapter.trace();
     assert_eq!(prob_trace.accepted_world_view_evidence_consumed, 0);
     assert_eq!(prob_trace.gpu_conditioned_evidence_facts, 0);
-    assert_eq!(prob_trace.cpu_only_probability_recomputations, 0);
-    assert_eq!(prob_trace.fixture_circuit_evaluations, 0);
 }
 
 #[test]
@@ -4980,7 +4417,6 @@ fn accepted_gpu_execution_result_rejects_tampered_tuple_membership_binding_metad
     let solver_trace = solver_adapter.trace();
     assert_eq!(solver_trace.accepted_gpu_candidate_evidence_consumed, 0);
     assert_eq!(solver_trace.gpu_assumption_pushes, 0);
-    assert_eq!(solver_trace.cpu_assignment_enumerations, 0);
 
     let mut config = GpuConfig::default();
     config.device_ordinal = 0;
@@ -5007,8 +4443,6 @@ fn accepted_gpu_execution_result_rejects_tampered_tuple_membership_binding_metad
     let prob_trace = prob_adapter.trace();
     assert_eq!(prob_trace.accepted_world_view_evidence_consumed, 0);
     assert_eq!(prob_trace.gpu_conditioned_evidence_facts, 0);
-    assert_eq!(prob_trace.cpu_only_probability_recomputations, 0);
-    assert_eq!(prob_trace.fixture_circuit_evaluations, 0);
 }
 
 #[test]
@@ -5072,7 +4506,6 @@ fn accepted_gpu_execution_result_rejects_non_partitioned_candidate_indices() {
     let solver_trace = solver_adapter.trace();
     assert_eq!(solver_trace.accepted_gpu_candidate_evidence_consumed, 0);
     assert_eq!(solver_trace.gpu_assumption_pushes, 0);
-    assert_eq!(solver_trace.cpu_assignment_enumerations, 0);
 
     let mut config = GpuConfig::default();
     config.device_ordinal = 0;
@@ -5099,8 +4532,6 @@ fn accepted_gpu_execution_result_rejects_non_partitioned_candidate_indices() {
     let prob_trace = prob_adapter.trace();
     assert_eq!(prob_trace.accepted_world_view_evidence_consumed, 0);
     assert_eq!(prob_trace.gpu_conditioned_evidence_facts, 0);
-    assert_eq!(prob_trace.cpu_only_probability_recomputations, 0);
-    assert_eq!(prob_trace.fixture_circuit_evaluations, 0);
 }
 
 #[test]
@@ -5157,7 +4588,6 @@ fn accepted_gpu_execution_result_rejects_missing_rejection_reason_codes() {
     let solver_trace = solver_adapter.trace();
     assert_eq!(solver_trace.accepted_gpu_candidate_evidence_consumed, 0);
     assert_eq!(solver_trace.gpu_assumption_pushes, 0);
-    assert_eq!(solver_trace.cpu_assignment_enumerations, 0);
 
     let mut config = GpuConfig::default();
     config.device_ordinal = 0;
@@ -5184,8 +4614,6 @@ fn accepted_gpu_execution_result_rejects_missing_rejection_reason_codes() {
     let prob_trace = prob_adapter.trace();
     assert_eq!(prob_trace.accepted_world_view_evidence_consumed, 0);
     assert_eq!(prob_trace.gpu_conditioned_evidence_facts, 0);
-    assert_eq!(prob_trace.cpu_only_probability_recomputations, 0);
-    assert_eq!(prob_trace.fixture_circuit_evaluations, 0);
 }
 
 #[test]
@@ -5245,7 +4673,6 @@ fn accepted_gpu_execution_result_rejects_tampered_semantic_phase_counts() {
     let solver_trace = solver_adapter.trace();
     assert_eq!(solver_trace.accepted_gpu_candidate_evidence_consumed, 0);
     assert_eq!(solver_trace.gpu_assumption_pushes, 0);
-    assert_eq!(solver_trace.cpu_assignment_enumerations, 0);
 
     let mut config = GpuConfig::default();
     config.device_ordinal = 0;
@@ -5272,8 +4699,6 @@ fn accepted_gpu_execution_result_rejects_tampered_semantic_phase_counts() {
     let prob_trace = prob_adapter.trace();
     assert_eq!(prob_trace.accepted_world_view_evidence_consumed, 0);
     assert_eq!(prob_trace.gpu_conditioned_evidence_facts, 0);
-    assert_eq!(prob_trace.cpu_only_probability_recomputations, 0);
-    assert_eq!(prob_trace.fixture_circuit_evaluations, 0);
 }
 
 #[test]
@@ -5334,7 +4759,6 @@ fn accepted_gpu_execution_result_rejects_tampered_rejection_metadata_accounting(
     let solver_trace = solver_adapter.trace();
     assert_eq!(solver_trace.accepted_gpu_candidate_evidence_consumed, 0);
     assert_eq!(solver_trace.gpu_assumption_pushes, 0);
-    assert_eq!(solver_trace.cpu_assignment_enumerations, 0);
 
     let mut config = GpuConfig::default();
     config.device_ordinal = 0;
@@ -5361,8 +4785,6 @@ fn accepted_gpu_execution_result_rejects_tampered_rejection_metadata_accounting(
     let prob_trace = prob_adapter.trace();
     assert_eq!(prob_trace.accepted_world_view_evidence_consumed, 0);
     assert_eq!(prob_trace.gpu_conditioned_evidence_facts, 0);
-    assert_eq!(prob_trace.cpu_only_probability_recomputations, 0);
-    assert_eq!(prob_trace.fixture_circuit_evaluations, 0);
 }
 
 #[test]
@@ -5423,7 +4845,6 @@ fn accepted_gpu_execution_result_rejects_tampered_constraint_validation_trace() 
     let solver_trace = solver_adapter.trace();
     assert_eq!(solver_trace.accepted_gpu_candidate_evidence_consumed, 0);
     assert_eq!(solver_trace.gpu_assumption_pushes, 0);
-    assert_eq!(solver_trace.cpu_assignment_enumerations, 0);
 
     let mut config = GpuConfig::default();
     config.device_ordinal = 0;
@@ -5450,8 +4871,6 @@ fn accepted_gpu_execution_result_rejects_tampered_constraint_validation_trace() 
     let prob_trace = prob_adapter.trace();
     assert_eq!(prob_trace.accepted_world_view_evidence_consumed, 0);
     assert_eq!(prob_trace.gpu_conditioned_evidence_facts, 0);
-    assert_eq!(prob_trace.cpu_only_probability_recomputations, 0);
-    assert_eq!(prob_trace.fixture_circuit_evaluations, 0);
 }
 
 #[test]
@@ -5524,7 +4943,6 @@ fn accepted_gpu_execution_result_rejects_tampered_candidate_validation_trace() {
     let solver_trace = solver_adapter.trace();
     assert_eq!(solver_trace.accepted_gpu_candidate_evidence_consumed, 0);
     assert_eq!(solver_trace.gpu_assumption_pushes, 0);
-    assert_eq!(solver_trace.cpu_assignment_enumerations, 0);
 
     let mut config = GpuConfig::default();
     config.device_ordinal = 0;
@@ -5551,8 +4969,6 @@ fn accepted_gpu_execution_result_rejects_tampered_candidate_validation_trace() {
     let prob_trace = prob_adapter.trace();
     assert_eq!(prob_trace.accepted_world_view_evidence_consumed, 0);
     assert_eq!(prob_trace.gpu_conditioned_evidence_facts, 0);
-    assert_eq!(prob_trace.cpu_only_probability_recomputations, 0);
-    assert_eq!(prob_trace.fixture_circuit_evaluations, 0);
 }
 
 #[test]
@@ -5608,7 +5024,6 @@ fn accepted_gpu_execution_result_rejects_tampered_final_result_transfer_accounti
     let solver_trace = solver_adapter.trace();
     assert_eq!(solver_trace.accepted_gpu_candidate_evidence_consumed, 0);
     assert_eq!(solver_trace.gpu_assumption_pushes, 0);
-    assert_eq!(solver_trace.cpu_assignment_enumerations, 0);
 
     let mut config = GpuConfig::default();
     config.device_ordinal = 0;
@@ -5635,8 +5050,6 @@ fn accepted_gpu_execution_result_rejects_tampered_final_result_transfer_accounti
     let prob_trace = prob_adapter.trace();
     assert_eq!(prob_trace.accepted_world_view_evidence_consumed, 0);
     assert_eq!(prob_trace.gpu_conditioned_evidence_facts, 0);
-    assert_eq!(prob_trace.cpu_only_probability_recomputations, 0);
-    assert_eq!(prob_trace.fixture_circuit_evaluations, 0);
 }
 
 #[test]
@@ -5691,7 +5104,6 @@ fn accepted_gpu_execution_result_rejects_tampered_workspace_reset_trace() {
     let solver_trace = solver_adapter.trace();
     assert_eq!(solver_trace.accepted_gpu_candidate_evidence_consumed, 0);
     assert_eq!(solver_trace.gpu_assumption_pushes, 0);
-    assert_eq!(solver_trace.cpu_assignment_enumerations, 0);
 
     let mut config = GpuConfig::default();
     config.device_ordinal = 0;
@@ -5718,8 +5130,6 @@ fn accepted_gpu_execution_result_rejects_tampered_workspace_reset_trace() {
     let prob_trace = prob_adapter.trace();
     assert_eq!(prob_trace.accepted_world_view_evidence_consumed, 0);
     assert_eq!(prob_trace.gpu_conditioned_evidence_facts, 0);
-    assert_eq!(prob_trace.cpu_only_probability_recomputations, 0);
-    assert_eq!(prob_trace.fixture_circuit_evaluations, 0);
 }
 
 #[test]
@@ -5777,7 +5187,6 @@ fn accepted_gpu_execution_result_rejects_tampered_prepared_workspace_layout() {
     let solver_trace = solver_adapter.trace();
     assert_eq!(solver_trace.accepted_gpu_candidate_evidence_consumed, 0);
     assert_eq!(solver_trace.gpu_assumption_pushes, 0);
-    assert_eq!(solver_trace.cpu_assignment_enumerations, 0);
 
     let mut config = GpuConfig::default();
     config.device_ordinal = 0;
@@ -5804,8 +5213,6 @@ fn accepted_gpu_execution_result_rejects_tampered_prepared_workspace_layout() {
     let prob_trace = prob_adapter.trace();
     assert_eq!(prob_trace.accepted_world_view_evidence_consumed, 0);
     assert_eq!(prob_trace.gpu_conditioned_evidence_facts, 0);
-    assert_eq!(prob_trace.cpu_only_probability_recomputations, 0);
-    assert_eq!(prob_trace.fixture_circuit_evaluations, 0);
 }
 
 #[test]
@@ -5863,7 +5270,6 @@ fn accepted_gpu_execution_result_rejects_tampered_workspace_buffer_allocation() 
     let solver_trace = solver_adapter.trace();
     assert_eq!(solver_trace.accepted_gpu_candidate_evidence_consumed, 0);
     assert_eq!(solver_trace.gpu_assumption_pushes, 0);
-    assert_eq!(solver_trace.cpu_assignment_enumerations, 0);
 
     let mut config = GpuConfig::default();
     config.device_ordinal = 0;
@@ -5890,8 +5296,6 @@ fn accepted_gpu_execution_result_rejects_tampered_workspace_buffer_allocation() 
     let prob_trace = prob_adapter.trace();
     assert_eq!(prob_trace.accepted_world_view_evidence_consumed, 0);
     assert_eq!(prob_trace.gpu_conditioned_evidence_facts, 0);
-    assert_eq!(prob_trace.cpu_only_probability_recomputations, 0);
-    assert_eq!(prob_trace.fixture_circuit_evaluations, 0);
 }
 
 #[test]
@@ -5954,7 +5358,6 @@ fn accepted_gpu_execution_result_rejects_hot_path_host_transfers() {
     let solver_trace = solver_adapter.trace();
     assert_eq!(solver_trace.accepted_gpu_candidate_evidence_consumed, 0);
     assert_eq!(solver_trace.gpu_assumption_pushes, 0);
-    assert_eq!(solver_trace.cpu_assignment_enumerations, 0);
 
     let mut config = GpuConfig::default();
     config.device_ordinal = 0;
@@ -5985,8 +5388,6 @@ fn accepted_gpu_execution_result_rejects_hot_path_host_transfers() {
     let prob_trace = prob_adapter.trace();
     assert_eq!(prob_trace.accepted_world_view_evidence_consumed, 0);
     assert_eq!(prob_trace.gpu_conditioned_evidence_facts, 0);
-    assert_eq!(prob_trace.cpu_only_probability_recomputations, 0);
-    assert_eq!(prob_trace.fixture_circuit_evaluations, 0);
 }
 
 #[test]
@@ -6286,9 +5687,6 @@ fn accepted_split_all_binary_operator_batch_conditions_probabilistic_evidence() 
     assert_eq!(batch.trace.possible_operator_count, 1);
     assert_eq!(batch.trace.not_possible_operator_count, 1);
     assert_eq!(batch.trace.not_know_operator_count, 1);
-    assert_eq!(batch.trace.cpu_recomposition_steps, 0);
-    assert_eq!(batch.trace.cpu_candidate_enumerations, 0);
-    assert_eq!(batch.trace.cpu_world_view_validations, 0);
     assert_eq!(batch.trace.tracked_dtoh_calls, 0);
     assert_eq!(batch.trace.per_candidate_host_round_trips, 0);
 
@@ -6394,8 +5792,6 @@ fn accepted_split_all_binary_operator_batch_conditions_probabilistic_evidence() 
     assert_eq!(trace.gpu_exact_source_compiles, 4);
     assert_eq!(trace.gpu_exact_query_evaluations, 4);
     assert_eq!(trace.gpu_source_exact_query_evaluations, 4);
-    assert_eq!(trace.cpu_only_probability_recomputations, 0);
-    assert_eq!(trace.fixture_circuit_evaluations, 0);
     trace
         .require_conditioned_evidence_metric_eligibility()
         .expect("split all-binary operator conditioned trace must satisfy production metrics");
@@ -6412,9 +5808,6 @@ fn accepted_split_all_binary_operator_batch_updates_incremental_probability_circ
     assert_eq!(batch.results.len(), 4);
     assert_eq!(batch.trace.component_count, 4);
     assert_eq!(batch.trace.gpu_runtime_component_executions, 4);
-    assert_eq!(batch.trace.cpu_recomposition_steps, 0);
-    assert_eq!(batch.trace.cpu_candidate_enumerations, 0);
-    assert_eq!(batch.trace.cpu_world_view_validations, 0);
     assert_eq!(batch.trace.tracked_dtoh_calls, 0);
     assert_eq!(batch.trace.per_candidate_host_round_trips, 0);
     assert!(batch.trace.aggregate_kernel_timing.is_recorded());
@@ -6513,8 +5906,6 @@ fn accepted_split_all_binary_operator_batch_updates_incremental_probability_circ
     assert_eq!(trace.gpu_exact_source_compiles, 0);
     assert_eq!(trace.gpu_exact_program_compiles, 0);
     assert_eq!(trace.gpu_exact_query_evaluations, 0);
-    assert_eq!(trace.cpu_only_probability_recomputations, 0);
-    assert_eq!(trace.fixture_circuit_evaluations, 0);
     let metric_err = trace.require_production_metric_eligibility().expect_err(
         "split incremental fixture circuit update alone must not satisfy production metrics",
     );
@@ -6538,9 +5929,6 @@ fn accepted_split_quaternary_all_operator_batch_conditions_probabilistic_evidenc
     assert_eq!(batch.trace.possible_operator_count, 1);
     assert_eq!(batch.trace.not_possible_operator_count, 1);
     assert_eq!(batch.trace.not_know_operator_count, 1);
-    assert_eq!(batch.trace.cpu_recomposition_steps, 0);
-    assert_eq!(batch.trace.cpu_candidate_enumerations, 0);
-    assert_eq!(batch.trace.cpu_world_view_validations, 0);
     assert_eq!(batch.trace.tracked_dtoh_calls, 0);
     assert_eq!(batch.trace.per_candidate_host_round_trips, 0);
     assert!(batch.trace.aggregate_kernel_timing.is_recorded());
@@ -6753,8 +6141,6 @@ fn accepted_split_quaternary_all_operator_batch_conditions_probabilistic_evidenc
     assert_eq!(trace.gpu_knowledge_compilation_end_to_end_runs, 4);
     assert_eq!(trace.gpu_source_knowledge_compilation_end_to_end_runs, 4);
     assert_eq!(trace.gpu_program_knowledge_compilation_end_to_end_runs, 0);
-    assert_eq!(trace.cpu_only_probability_recomputations, 0);
-    assert_eq!(trace.fixture_circuit_evaluations, 0);
     trace
         .require_conditioned_evidence_metric_eligibility()
         .expect("source-conditioned probability trace must satisfy production metrics");
@@ -6776,9 +6162,6 @@ fn accepted_split_quaternary_all_operator_batch_gates_probabilistic_program_and_
     assert_eq!(batch.trace.possible_operator_count, 1);
     assert_eq!(batch.trace.not_possible_operator_count, 1);
     assert_eq!(batch.trace.not_know_operator_count, 1);
-    assert_eq!(batch.trace.cpu_recomposition_steps, 0);
-    assert_eq!(batch.trace.cpu_candidate_enumerations, 0);
-    assert_eq!(batch.trace.cpu_world_view_validations, 0);
     assert_eq!(batch.trace.tracked_dtoh_calls, 0);
     assert_eq!(batch.trace.per_candidate_host_round_trips, 0);
     assert!(batch.trace.aggregate_kernel_timing.is_recorded());
@@ -6933,8 +6316,6 @@ fn accepted_split_quaternary_all_operator_batch_gates_probabilistic_program_and_
         program_trace.gpu_program_knowledge_compilation_end_to_end_runs,
         4
     );
-    assert_eq!(program_trace.cpu_only_probability_recomputations, 0);
-    assert_eq!(program_trace.fixture_circuit_evaluations, 0);
     program_trace
         .require_conditioned_evidence_metric_eligibility()
         .expect("all-binary parsed-program trace must satisfy conditioned probability metrics");
@@ -7037,8 +6418,6 @@ fn accepted_split_quaternary_all_operator_batch_gates_probabilistic_program_and_
         source_gradient_trace.gpu_source_knowledge_compilation_end_to_end_runs,
         4
     );
-    assert_eq!(source_gradient_trace.cpu_only_probability_recomputations, 0);
-    assert_eq!(source_gradient_trace.fixture_circuit_evaluations, 0);
     source_gradient_trace
         .require_conditioned_evidence_metric_eligibility()
         .expect("all-binary source gradient trace must satisfy conditioned probability metrics");
@@ -7142,11 +6521,6 @@ fn accepted_split_quaternary_all_operator_batch_gates_probabilistic_program_and_
         program_gradient_trace.gpu_program_knowledge_compilation_end_to_end_runs,
         4
     );
-    assert_eq!(
-        program_gradient_trace.cpu_only_probability_recomputations,
-        0
-    );
-    assert_eq!(program_gradient_trace.fixture_circuit_evaluations, 0);
     program_gradient_trace
         .require_conditioned_evidence_metric_eligibility()
         .expect("not-possible parsed-program gradient trace must satisfy conditioned probability metrics");
@@ -7172,9 +6546,6 @@ fn accepted_split_quaternary_all_operator_batch_gates_probabilistic_pir_cnf_and_
     assert_eq!(batch.trace.possible_operator_count, 1);
     assert_eq!(batch.trace.not_possible_operator_count, 1);
     assert_eq!(batch.trace.not_know_operator_count, 1);
-    assert_eq!(batch.trace.cpu_recomposition_steps, 0);
-    assert_eq!(batch.trace.cpu_candidate_enumerations, 0);
-    assert_eq!(batch.trace.cpu_world_view_validations, 0);
     assert_eq!(batch.trace.tracked_dtoh_calls, 0);
     assert_eq!(batch.trace.per_candidate_host_round_trips, 0);
     assert!(batch.trace.aggregate_kernel_timing.is_recorded());
@@ -7279,8 +6650,6 @@ fn accepted_split_quaternary_all_operator_batch_gates_probabilistic_pir_cnf_and_
     assert_eq!(source_pir_trace.gpu_cnf_encodes, 4);
     assert_eq!(source_pir_trace.gpu_source_cnf_encodes, 4);
     assert_eq!(source_pir_trace.gpu_program_cnf_encodes, 0);
-    assert_eq!(source_pir_trace.cpu_only_probability_recomputations, 0);
-    assert_eq!(source_pir_trace.fixture_circuit_evaluations, 0);
     source_pir_trace
         .require_production_metric_eligibility()
         .expect("all-binary source PIR/CNF trace must satisfy production probability metrics");
@@ -7325,8 +6694,6 @@ fn accepted_split_quaternary_all_operator_batch_gates_probabilistic_pir_cnf_and_
     assert_eq!(program_pir_trace.gpu_cnf_encodes, 4);
     assert_eq!(program_pir_trace.gpu_source_cnf_encodes, 0);
     assert_eq!(program_pir_trace.gpu_program_cnf_encodes, 4);
-    assert_eq!(program_pir_trace.cpu_only_probability_recomputations, 0);
-    assert_eq!(program_pir_trace.fixture_circuit_evaluations, 0);
     program_pir_trace
         .require_production_metric_eligibility()
         .expect(
@@ -7371,8 +6738,6 @@ fn accepted_split_quaternary_all_operator_batch_gates_probabilistic_pir_cnf_and_
     assert_eq!(query_trace.gpu_exact_source_compiles, 1);
     assert_eq!(query_trace.gpu_exact_query_evaluations, 4);
     assert_eq!(query_trace.gpu_exact_gradient_evaluations, 0);
-    assert_eq!(query_trace.cpu_only_probability_recomputations, 0);
-    assert_eq!(query_trace.fixture_circuit_evaluations, 0);
     query_trace
         .require_production_metric_eligibility()
         .expect("all-binary exact query trace must satisfy production probability metrics");
@@ -7415,8 +6780,6 @@ fn accepted_split_quaternary_all_operator_batch_gates_probabilistic_pir_cnf_and_
     assert_eq!(gradient_trace.gpu_exact_source_compiles, 1);
     assert_eq!(gradient_trace.gpu_exact_query_evaluations, 0);
     assert_eq!(gradient_trace.gpu_exact_gradient_evaluations, 4);
-    assert_eq!(gradient_trace.cpu_only_probability_recomputations, 0);
-    assert_eq!(gradient_trace.fixture_circuit_evaluations, 0);
     gradient_trace
         .require_production_metric_eligibility()
         .expect("exact gradient trace must satisfy production metrics");
@@ -7493,9 +6856,6 @@ fn accepted_split_quaternary_not_possible_batch_conditions_parsed_program_probab
     assert_eq!(batch.trace.component_count, 2);
     assert_eq!(batch.trace.know_operator_count, 1);
     assert_eq!(batch.trace.not_possible_operator_count, 1);
-    assert_eq!(batch.trace.cpu_recomposition_steps, 0);
-    assert_eq!(batch.trace.cpu_candidate_enumerations, 0);
-    assert_eq!(batch.trace.cpu_world_view_validations, 0);
     assert_eq!(batch.trace.tracked_dtoh_calls, 0);
     assert_eq!(batch.trace.per_candidate_host_round_trips, 0);
 
@@ -7622,8 +6982,6 @@ fn accepted_split_quaternary_not_possible_batch_conditions_parsed_program_probab
     assert_eq!(trace.gpu_exact_query_evaluations, 2);
     assert_eq!(trace.gpu_knowledge_compilation_end_to_end_runs, 2);
     assert_eq!(trace.gpu_program_knowledge_compilation_end_to_end_runs, 2);
-    assert_eq!(trace.cpu_only_probability_recomputations, 0);
-    assert_eq!(trace.fixture_circuit_evaluations, 0);
     trace
         .require_conditioned_evidence_metric_eligibility()
         .expect("parsed-program conditioned probability trace must satisfy production metrics");
@@ -7702,9 +7060,6 @@ fn accepted_split_quaternary_possible_and_not_know_batch_gates_solver_and_probab
     assert_eq!(batch.results.len(), 2);
     assert_eq!(batch.trace.component_count, 2);
     assert_eq!(batch.trace.gpu_runtime_component_executions, 2);
-    assert_eq!(batch.trace.cpu_recomposition_steps, 0);
-    assert_eq!(batch.trace.cpu_candidate_enumerations, 0);
-    assert_eq!(batch.trace.cpu_world_view_validations, 0);
     assert_eq!(batch.trace.tracked_dtoh_calls, 0);
     assert_eq!(batch.trace.per_candidate_host_round_trips, 0);
     assert!(batch.trace.aggregate_kernel_timing.is_recorded());
@@ -7892,8 +7247,6 @@ fn accepted_split_quaternary_possible_and_not_know_batch_gates_solver_and_probab
     assert_eq!(solver_trace.gpu_lifecycle_workspace_reuses, 2);
     assert_eq!(solver_trace.gpu_cdcl_sat_solves, 2);
     assert_eq!(solver_trace.gpu_cdcl_workspace_unsat_solves, 2);
-    assert_eq!(solver_trace.cpu_assignment_enumerations, 0);
-    assert_eq!(solver_trace.cpu_maxsat_enumerations, 0);
     solver_trace
         .require_production_metric_eligibility()
         .expect("split quaternary possible/not-know solver trace must satisfy production metrics");
@@ -7979,8 +7332,6 @@ fn accepted_split_quaternary_possible_and_not_know_batch_gates_solver_and_probab
         prob_trace.gpu_program_knowledge_compilation_end_to_end_runs,
         0
     );
-    assert_eq!(prob_trace.cpu_only_probability_recomputations, 0);
-    assert_eq!(prob_trace.fixture_circuit_evaluations, 0);
     prob_trace
         .require_conditioned_evidence_metric_eligibility()
         .expect(
@@ -8062,9 +7413,6 @@ fn accepted_split_quaternary_possible_and_not_know_batch_gates_probabilistic_gra
     assert_eq!(batch.trace.possible_operator_count, 1);
     assert_eq!(batch.trace.not_know_operator_count, 1);
     assert_eq!(batch.trace.not_possible_operator_count, 0);
-    assert_eq!(batch.trace.cpu_recomposition_steps, 0);
-    assert_eq!(batch.trace.cpu_candidate_enumerations, 0);
-    assert_eq!(batch.trace.cpu_world_view_validations, 0);
     assert_eq!(batch.trace.tracked_dtoh_calls, 0);
     assert_eq!(batch.trace.per_candidate_host_round_trips, 0);
     assert!(batch.trace.aggregate_kernel_timing.is_recorded());
@@ -8283,8 +7631,6 @@ fn accepted_split_quaternary_possible_and_not_know_batch_gates_probabilistic_gra
         source_gradient_trace.gpu_source_knowledge_compilation_end_to_end_runs,
         2
     );
-    assert_eq!(source_gradient_trace.cpu_only_probability_recomputations, 0);
-    assert_eq!(source_gradient_trace.fixture_circuit_evaluations, 0);
     source_gradient_trace
         .require_conditioned_evidence_metric_eligibility()
         .expect(
@@ -8379,11 +7725,6 @@ fn accepted_split_quaternary_possible_and_not_know_batch_gates_probabilistic_gra
         program_gradient_trace.gpu_program_knowledge_compilation_end_to_end_runs,
         2
     );
-    assert_eq!(
-        program_gradient_trace.cpu_only_probability_recomputations,
-        0
-    );
-    assert_eq!(program_gradient_trace.fixture_circuit_evaluations, 0);
     program_gradient_trace
         .require_conditioned_evidence_metric_eligibility()
         .expect(
@@ -8424,8 +7765,6 @@ fn accepted_split_quaternary_possible_and_not_know_batch_gates_probabilistic_gra
     assert_eq!(source_pir_trace.gpu_cnf_encodes, 2);
     assert_eq!(source_pir_trace.gpu_source_cnf_encodes, 2);
     assert_eq!(source_pir_trace.gpu_program_cnf_encodes, 0);
-    assert_eq!(source_pir_trace.cpu_only_probability_recomputations, 0);
-    assert_eq!(source_pir_trace.fixture_circuit_evaluations, 0);
     source_pir_trace
         .require_production_metric_eligibility()
         .expect("source PIR/CNF trace must satisfy production probability metrics");
@@ -8464,8 +7803,6 @@ fn accepted_split_quaternary_possible_and_not_know_batch_gates_probabilistic_gra
     assert_eq!(program_pir_trace.gpu_cnf_encodes, 2);
     assert_eq!(program_pir_trace.gpu_source_cnf_encodes, 0);
     assert_eq!(program_pir_trace.gpu_program_cnf_encodes, 2);
-    assert_eq!(program_pir_trace.cpu_only_probability_recomputations, 0);
-    assert_eq!(program_pir_trace.fixture_circuit_evaluations, 0);
     program_pir_trace
         .require_production_metric_eligibility()
         .expect(
@@ -8532,8 +7869,6 @@ fn accepted_split_quaternary_possible_and_not_know_batch_gates_probabilistic_gra
     assert_eq!(auto_source_pir_trace.gpu_cnf_encodes, 2);
     assert_eq!(auto_source_pir_trace.gpu_source_cnf_encodes, 2);
     assert_eq!(auto_source_pir_trace.gpu_program_cnf_encodes, 0);
-    assert_eq!(auto_source_pir_trace.cpu_only_probability_recomputations, 0);
-    assert_eq!(auto_source_pir_trace.fixture_circuit_evaluations, 0);
     auto_source_pir_trace
         .require_production_metric_eligibility()
         .expect("auto-derived source PIR/CNF trace must satisfy production probability metrics");
@@ -8593,11 +7928,6 @@ fn accepted_split_quaternary_possible_and_not_know_batch_gates_probabilistic_gra
     assert_eq!(auto_program_pir_trace.gpu_cnf_encodes, 2);
     assert_eq!(auto_program_pir_trace.gpu_source_cnf_encodes, 0);
     assert_eq!(auto_program_pir_trace.gpu_program_cnf_encodes, 2);
-    assert_eq!(
-        auto_program_pir_trace.cpu_only_probability_recomputations,
-        0
-    );
-    assert_eq!(auto_program_pir_trace.fixture_circuit_evaluations, 0);
     auto_program_pir_trace
         .require_production_metric_eligibility()
         .expect(
@@ -8646,11 +7976,6 @@ fn accepted_split_quaternary_possible_and_not_know_batch_gates_probabilistic_gra
     );
     assert_eq!(auto_source_exact_trace.gpu_exact_source_compiles, 2);
     assert_eq!(auto_source_exact_trace.gpu_exact_query_evaluations, 2);
-    assert_eq!(
-        auto_source_exact_trace.cpu_only_probability_recomputations,
-        0
-    );
-    assert_eq!(auto_source_exact_trace.fixture_circuit_evaluations, 0);
     auto_source_exact_trace
         .require_conditioned_evidence_metric_eligibility()
         .expect("auto-derived source exact trace must satisfy production probability metrics");
@@ -8697,11 +8022,6 @@ fn accepted_split_quaternary_possible_and_not_know_batch_gates_probabilistic_gra
     );
     assert_eq!(auto_program_exact_trace.gpu_exact_program_compiles, 2);
     assert_eq!(auto_program_exact_trace.gpu_exact_query_evaluations, 2);
-    assert_eq!(
-        auto_program_exact_trace.cpu_only_probability_recomputations,
-        0
-    );
-    assert_eq!(auto_program_exact_trace.fixture_circuit_evaluations, 0);
     auto_program_exact_trace
         .require_conditioned_evidence_metric_eligibility()
         .expect(
@@ -8749,14 +8069,6 @@ fn accepted_split_quaternary_possible_and_not_know_batch_gates_probabilistic_gra
     assert_eq!(
         auto_single_source_exact_trace.gpu_exact_query_evaluations,
         1
-    );
-    assert_eq!(
-        auto_single_source_exact_trace.cpu_only_probability_recomputations,
-        0
-    );
-    assert_eq!(
-        auto_single_source_exact_trace.fixture_circuit_evaluations,
-        0
     );
     auto_single_source_exact_trace
         .require_conditioned_evidence_metric_eligibility()
@@ -8818,11 +8130,6 @@ fn accepted_split_quaternary_possible_and_not_know_batch_gates_probabilistic_gra
     );
     assert_eq!(auto_multi_source_exact_trace.gpu_exact_source_compiles, 2);
     assert_eq!(auto_multi_source_exact_trace.gpu_exact_query_evaluations, 2);
-    assert_eq!(
-        auto_multi_source_exact_trace.cpu_only_probability_recomputations,
-        0
-    );
-    assert_eq!(auto_multi_source_exact_trace.fixture_circuit_evaluations, 0);
     auto_multi_source_exact_trace
         .require_conditioned_evidence_metric_eligibility()
         .expect(
@@ -8883,14 +8190,6 @@ fn accepted_split_quaternary_possible_and_not_know_batch_gates_probabilistic_gra
         auto_multi_source_gradient_trace.gpu_exact_gradient_evaluations,
         2
     );
-    assert_eq!(
-        auto_multi_source_gradient_trace.cpu_only_probability_recomputations,
-        0
-    );
-    assert_eq!(
-        auto_multi_source_gradient_trace.fixture_circuit_evaluations,
-        0
-    );
     auto_multi_source_gradient_trace
         .require_conditioned_evidence_metric_eligibility()
         .expect(
@@ -8943,14 +8242,6 @@ fn accepted_split_quaternary_possible_and_not_know_batch_gates_probabilistic_gra
     assert_eq!(
         auto_multi_program_exact_trace.gpu_exact_query_evaluations,
         2
-    );
-    assert_eq!(
-        auto_multi_program_exact_trace.cpu_only_probability_recomputations,
-        0
-    );
-    assert_eq!(
-        auto_multi_program_exact_trace.fixture_circuit_evaluations,
-        0
     );
     auto_multi_program_exact_trace
         .require_conditioned_evidence_metric_eligibility()
@@ -9014,14 +8305,6 @@ fn accepted_split_quaternary_possible_and_not_know_batch_gates_probabilistic_gra
         auto_multi_program_gradient_trace.gpu_exact_gradient_evaluations,
         2
     );
-    assert_eq!(
-        auto_multi_program_gradient_trace.cpu_only_probability_recomputations,
-        0
-    );
-    assert_eq!(
-        auto_multi_program_gradient_trace.fixture_circuit_evaluations,
-        0
-    );
     auto_multi_program_gradient_trace
         .require_conditioned_evidence_metric_eligibility()
         .expect(
@@ -9054,8 +8337,6 @@ fn accepted_split_quaternary_possible_and_not_know_batch_gates_probabilistic_gra
     );
     assert_eq!(missing_source_trace.gpu_pir_graph_uploads, 0);
     assert_eq!(missing_source_trace.gpu_cnf_encodes, 0);
-    assert_eq!(missing_source_trace.cpu_only_probability_recomputations, 0);
-    assert_eq!(missing_source_trace.fixture_circuit_evaluations, 0);
 
     let mut missing_program_pir_adapter = EpistemicProbProductionAdapter::new(config);
     let missing_program_err = missing_program_pir_adapter
@@ -9082,8 +8363,6 @@ fn accepted_split_quaternary_possible_and_not_know_batch_gates_probabilistic_gra
     );
     assert_eq!(missing_program_trace.gpu_pir_graph_uploads, 0);
     assert_eq!(missing_program_trace.gpu_cnf_encodes, 0);
-    assert_eq!(missing_program_trace.cpu_only_probability_recomputations, 0);
-    assert_eq!(missing_program_trace.fixture_circuit_evaluations, 0);
 
     let mut query_adapter = EpistemicProbProductionAdapter::new(config);
     let exact = query_adapter
@@ -9122,8 +8401,6 @@ fn accepted_split_quaternary_possible_and_not_know_batch_gates_probabilistic_gra
     assert_eq!(query_trace.gpu_exact_source_compiles, 1);
     assert_eq!(query_trace.gpu_exact_query_evaluations, 2);
     assert_eq!(query_trace.gpu_exact_gradient_evaluations, 0);
-    assert_eq!(query_trace.cpu_only_probability_recomputations, 0);
-    assert_eq!(query_trace.fixture_circuit_evaluations, 0);
     query_trace
         .require_production_metric_eligibility()
         .expect("not-possible exact query trace must satisfy production probability metrics");
@@ -9165,8 +8442,6 @@ fn accepted_split_quaternary_possible_and_not_know_batch_gates_probabilistic_gra
     assert_eq!(gradient_trace.gpu_exact_source_compiles, 1);
     assert_eq!(gradient_trace.gpu_exact_query_evaluations, 0);
     assert_eq!(gradient_trace.gpu_exact_gradient_evaluations, 2);
-    assert_eq!(gradient_trace.cpu_only_probability_recomputations, 0);
-    assert_eq!(gradient_trace.fixture_circuit_evaluations, 0);
     gradient_trace
         .require_production_metric_eligibility()
         .expect("not-possible exact gradient trace must satisfy production probability metrics");
@@ -9244,9 +8519,6 @@ fn accepted_split_quaternary_not_possible_batch_gates_probabilistic_gradient_pir
     assert_eq!(batch.trace.component_count, 2);
     assert_eq!(batch.trace.know_operator_count, 1);
     assert_eq!(batch.trace.not_possible_operator_count, 1);
-    assert_eq!(batch.trace.cpu_recomposition_steps, 0);
-    assert_eq!(batch.trace.cpu_candidate_enumerations, 0);
-    assert_eq!(batch.trace.cpu_world_view_validations, 0);
     assert_eq!(batch.trace.tracked_dtoh_calls, 0);
     assert_eq!(batch.trace.per_candidate_host_round_trips, 0);
 
@@ -9435,8 +8707,6 @@ fn accepted_split_quaternary_not_possible_batch_gates_probabilistic_gradient_pir
         source_gradient_trace.gpu_source_knowledge_compilation_end_to_end_runs,
         2
     );
-    assert_eq!(source_gradient_trace.cpu_only_probability_recomputations, 0);
-    assert_eq!(source_gradient_trace.fixture_circuit_evaluations, 0);
 
     let mut program_gradient_adapter = EpistemicProbProductionAdapter::new(config);
     let program_gradients = program_gradient_adapter
@@ -9516,11 +8786,6 @@ fn accepted_split_quaternary_not_possible_batch_gates_probabilistic_gradient_pir
         program_gradient_trace.gpu_program_knowledge_compilation_end_to_end_runs,
         2
     );
-    assert_eq!(
-        program_gradient_trace.cpu_only_probability_recomputations,
-        0
-    );
-    assert_eq!(program_gradient_trace.fixture_circuit_evaluations, 0);
 
     let mut source_pir_adapter = EpistemicProbProductionAdapter::new(config);
     let source_pir_cnfs = source_pir_adapter
@@ -9554,8 +8819,6 @@ fn accepted_split_quaternary_not_possible_batch_gates_probabilistic_gradient_pir
     assert_eq!(source_pir_trace.gpu_cnf_encodes, 2);
     assert_eq!(source_pir_trace.gpu_source_cnf_encodes, 2);
     assert_eq!(source_pir_trace.gpu_program_cnf_encodes, 0);
-    assert_eq!(source_pir_trace.cpu_only_probability_recomputations, 0);
-    assert_eq!(source_pir_trace.fixture_circuit_evaluations, 0);
     source_pir_trace
         .require_production_metric_eligibility()
         .expect("split quaternary source PIR/CNF trace must satisfy production metrics");
@@ -9592,8 +8855,6 @@ fn accepted_split_quaternary_not_possible_batch_gates_probabilistic_gradient_pir
     assert_eq!(program_pir_trace.gpu_cnf_encodes, 2);
     assert_eq!(program_pir_trace.gpu_source_cnf_encodes, 0);
     assert_eq!(program_pir_trace.gpu_program_cnf_encodes, 2);
-    assert_eq!(program_pir_trace.cpu_only_probability_recomputations, 0);
-    assert_eq!(program_pir_trace.fixture_circuit_evaluations, 0);
     program_pir_trace
         .require_production_metric_eligibility()
         .expect("split quaternary program PIR/CNF trace must satisfy production metrics");
@@ -9633,8 +8894,6 @@ fn accepted_split_quaternary_not_possible_batch_gates_probabilistic_gradient_pir
     assert_eq!(query_trace.gpu_exact_source_compiles, 1);
     assert_eq!(query_trace.gpu_exact_query_evaluations, 2);
     assert_eq!(query_trace.gpu_exact_gradient_evaluations, 0);
-    assert_eq!(query_trace.cpu_only_probability_recomputations, 0);
-    assert_eq!(query_trace.fixture_circuit_evaluations, 0);
     query_trace
         .require_production_metric_eligibility()
         .expect("split quaternary exact query trace must satisfy production metrics");
@@ -9674,8 +8933,6 @@ fn accepted_split_quaternary_not_possible_batch_gates_probabilistic_gradient_pir
     assert_eq!(gradient_trace.gpu_exact_source_compiles, 1);
     assert_eq!(gradient_trace.gpu_exact_query_evaluations, 0);
     assert_eq!(gradient_trace.gpu_exact_gradient_evaluations, 2);
-    assert_eq!(gradient_trace.cpu_only_probability_recomputations, 0);
-    assert_eq!(gradient_trace.fixture_circuit_evaluations, 0);
     gradient_trace
         .require_production_metric_eligibility()
         .expect("split quaternary exact gradient trace must satisfy production metrics");
@@ -9756,9 +9013,6 @@ fn accepted_split_all_binary_operator_batch_gates_probabilistic_program_and_grad
     assert_eq!(batch.trace.possible_operator_count, 1);
     assert_eq!(batch.trace.not_possible_operator_count, 1);
     assert_eq!(batch.trace.not_know_operator_count, 1);
-    assert_eq!(batch.trace.cpu_recomposition_steps, 0);
-    assert_eq!(batch.trace.cpu_candidate_enumerations, 0);
-    assert_eq!(batch.trace.cpu_world_view_validations, 0);
     assert_eq!(batch.trace.tracked_dtoh_calls, 0);
     assert_eq!(batch.trace.per_candidate_host_round_trips, 0);
 
@@ -9912,8 +9166,6 @@ fn accepted_split_all_binary_operator_batch_gates_probabilistic_program_and_grad
         program_trace.gpu_program_knowledge_compilation_end_to_end_runs,
         4
     );
-    assert_eq!(program_trace.cpu_only_probability_recomputations, 0);
-    assert_eq!(program_trace.fixture_circuit_evaluations, 0);
 
     let mut source_gradient_adapter = EpistemicProbProductionAdapter::new(config);
     let source_gradients = source_gradient_adapter
@@ -10001,8 +9253,6 @@ fn accepted_split_all_binary_operator_batch_gates_probabilistic_program_and_grad
         source_gradient_trace.gpu_source_knowledge_compilation_end_to_end_runs,
         4
     );
-    assert_eq!(source_gradient_trace.cpu_only_probability_recomputations, 0);
-    assert_eq!(source_gradient_trace.fixture_circuit_evaluations, 0);
 
     let mut program_gradient_adapter = EpistemicProbProductionAdapter::new(config);
     let program_gradients = program_gradient_adapter
@@ -10090,11 +9340,6 @@ fn accepted_split_all_binary_operator_batch_gates_probabilistic_program_and_grad
         program_gradient_trace.gpu_program_knowledge_compilation_end_to_end_runs,
         4
     );
-    assert_eq!(
-        program_gradient_trace.cpu_only_probability_recomputations,
-        0
-    );
-    assert_eq!(program_gradient_trace.fixture_circuit_evaluations, 0);
     program_gradient_trace
         .require_conditioned_evidence_metric_eligibility()
         .expect(
@@ -10178,9 +9423,6 @@ fn accepted_split_all_binary_operator_batch_gates_probabilistic_pir_cnf_and_exac
     assert_eq!(batch.trace.possible_operator_count, 1);
     assert_eq!(batch.trace.not_possible_operator_count, 1);
     assert_eq!(batch.trace.not_know_operator_count, 1);
-    assert_eq!(batch.trace.cpu_recomposition_steps, 0);
-    assert_eq!(batch.trace.cpu_candidate_enumerations, 0);
-    assert_eq!(batch.trace.cpu_world_view_validations, 0);
     assert_eq!(batch.trace.tracked_dtoh_calls, 0);
     assert_eq!(batch.trace.per_candidate_host_round_trips, 0);
 
@@ -10288,8 +9530,6 @@ fn accepted_split_all_binary_operator_batch_gates_probabilistic_pir_cnf_and_exac
     assert_eq!(source_pir_trace.gpu_cnf_encodes, 4);
     assert_eq!(source_pir_trace.gpu_source_cnf_encodes, 4);
     assert_eq!(source_pir_trace.gpu_program_cnf_encodes, 0);
-    assert_eq!(source_pir_trace.cpu_only_probability_recomputations, 0);
-    assert_eq!(source_pir_trace.fixture_circuit_evaluations, 0);
 
     let mut program_pir_adapter = EpistemicProbProductionAdapter::new(config);
     let program_pir_cnfs = program_pir_adapter
@@ -10323,8 +9563,6 @@ fn accepted_split_all_binary_operator_batch_gates_probabilistic_pir_cnf_and_exac
     assert_eq!(program_pir_trace.gpu_cnf_encodes, 4);
     assert_eq!(program_pir_trace.gpu_source_cnf_encodes, 0);
     assert_eq!(program_pir_trace.gpu_program_cnf_encodes, 4);
-    assert_eq!(program_pir_trace.cpu_only_probability_recomputations, 0);
-    assert_eq!(program_pir_trace.fixture_circuit_evaluations, 0);
 
     let mut query_adapter = EpistemicProbProductionAdapter::new(config);
     let exact = query_adapter
@@ -10361,8 +9599,6 @@ fn accepted_split_all_binary_operator_batch_gates_probabilistic_pir_cnf_and_exac
     assert_eq!(query_trace.gpu_exact_source_compiles, 1);
     assert_eq!(query_trace.gpu_exact_query_evaluations, 4);
     assert_eq!(query_trace.gpu_exact_gradient_evaluations, 0);
-    assert_eq!(query_trace.cpu_only_probability_recomputations, 0);
-    assert_eq!(query_trace.fixture_circuit_evaluations, 0);
 
     let mut gradient_adapter = EpistemicProbProductionAdapter::new(config);
     let exact = gradient_adapter
@@ -10399,8 +9635,6 @@ fn accepted_split_all_binary_operator_batch_gates_probabilistic_pir_cnf_and_exac
     assert_eq!(gradient_trace.gpu_exact_source_compiles, 1);
     assert_eq!(gradient_trace.gpu_exact_query_evaluations, 0);
     assert_eq!(gradient_trace.gpu_exact_gradient_evaluations, 4);
-    assert_eq!(gradient_trace.cpu_only_probability_recomputations, 0);
-    assert_eq!(gradient_trace.fixture_circuit_evaluations, 0);
     gradient_trace
         .require_production_metric_eligibility()
         .expect("all-binary exact gradient trace must satisfy production probability metrics");
@@ -10481,9 +9715,6 @@ fn accepted_split_all_binary_operator_batch_gates_solver_lifecycle_path() {
     assert_eq!(batch.trace.possible_operator_count, 1);
     assert_eq!(batch.trace.not_possible_operator_count, 1);
     assert_eq!(batch.trace.not_know_operator_count, 1);
-    assert_eq!(batch.trace.cpu_recomposition_steps, 0);
-    assert_eq!(batch.trace.cpu_candidate_enumerations, 0);
-    assert_eq!(batch.trace.cpu_world_view_validations, 0);
     assert_eq!(batch.trace.tracked_dtoh_calls, 0);
     assert_eq!(batch.trace.per_candidate_host_round_trips, 0);
 
@@ -10552,8 +9783,6 @@ fn accepted_split_all_binary_operator_batch_gates_solver_lifecycle_path() {
     assert_eq!(trace.gpu_cdcl_sat_solves, 4);
     assert_eq!(trace.gpu_cdcl_workspace_unsat_solves, 4);
     assert_eq!(trace.accepted_gpu_solver_production_path_events, 8);
-    assert_eq!(trace.cpu_assignment_enumerations, 0);
-    assert_eq!(trace.cpu_maxsat_enumerations, 0);
     trace
         .require_production_metric_eligibility()
         .expect("all-operator lifecycle trace must satisfy production solver metrics");
@@ -10630,9 +9859,6 @@ fn accepted_split_quaternary_not_possible_batch_gates_solver_lifecycle_path() {
     assert_eq!(batch.trace.component_count, 2);
     assert_eq!(batch.trace.know_operator_count, 1);
     assert_eq!(batch.trace.not_possible_operator_count, 1);
-    assert_eq!(batch.trace.cpu_recomposition_steps, 0);
-    assert_eq!(batch.trace.cpu_candidate_enumerations, 0);
-    assert_eq!(batch.trace.cpu_world_view_validations, 0);
     assert_eq!(batch.trace.tracked_dtoh_calls, 0);
     assert_eq!(batch.trace.per_candidate_host_round_trips, 0);
 
@@ -10759,8 +9985,6 @@ fn accepted_split_quaternary_not_possible_batch_gates_solver_lifecycle_path() {
     assert_eq!(trace.gpu_lifecycle_workspace_reuses, 2);
     assert_eq!(trace.gpu_cdcl_sat_solves, 2);
     assert_eq!(trace.gpu_cdcl_workspace_unsat_solves, 2);
-    assert_eq!(trace.cpu_assignment_enumerations, 0);
-    assert_eq!(trace.cpu_maxsat_enumerations, 0);
     trace
         .require_production_metric_eligibility()
         .expect("split quaternary solver lifecycle trace must satisfy production metrics");
@@ -10850,9 +10074,6 @@ fn accepted_split_quaternary_all_operator_batch_gates_solver_lifecycle_path() {
     assert_eq!(batch.results.len(), 4);
     assert_eq!(batch.trace.component_count, 4);
     assert_eq!(batch.trace.gpu_runtime_component_executions, 4);
-    assert_eq!(batch.trace.cpu_recomposition_steps, 0);
-    assert_eq!(batch.trace.cpu_candidate_enumerations, 0);
-    assert_eq!(batch.trace.cpu_world_view_validations, 0);
     assert_eq!(batch.trace.tracked_dtoh_calls, 0);
     assert_eq!(batch.trace.per_candidate_host_round_trips, 0);
     assert!(batch.trace.aggregate_kernel_timing.is_recorded());
@@ -11007,8 +10228,6 @@ fn accepted_split_quaternary_all_operator_batch_gates_solver_lifecycle_path() {
     assert_eq!(trace.gpu_cdcl_sat_solves, 4);
     assert_eq!(trace.gpu_cdcl_workspace_unsat_solves, 4);
     assert_eq!(trace.accepted_gpu_solver_production_path_events, 8);
-    assert_eq!(trace.cpu_assignment_enumerations, 0);
-    assert_eq!(trace.cpu_maxsat_enumerations, 0);
     trace.require_production_metric_eligibility().expect(
         "split quaternary all-operator lifecycle trace must satisfy production solver metrics",
     );
@@ -11028,9 +10247,6 @@ fn accepted_split_quaternary_all_operator_batch_gates_solver_reuse_and_maxsat_pa
     assert_eq!(batch.results.len(), 4);
     assert_eq!(batch.trace.component_count, 4);
     assert_eq!(batch.trace.gpu_runtime_component_executions, 4);
-    assert_eq!(batch.trace.cpu_recomposition_steps, 0);
-    assert_eq!(batch.trace.cpu_candidate_enumerations, 0);
-    assert_eq!(batch.trace.cpu_world_view_validations, 0);
     assert_eq!(batch.trace.tracked_dtoh_calls, 0);
     assert_eq!(batch.trace.per_candidate_host_round_trips, 0);
     assert!(batch.trace.aggregate_kernel_timing.is_recorded());
@@ -11108,7 +10324,6 @@ fn accepted_split_quaternary_all_operator_batch_gates_solver_reuse_and_maxsat_pa
     assert_eq!(reuse_report.gpu_learned_clause_arena_publications, 4);
     assert_eq!(reuse_report.gpu_learned_clause_imports, 4);
     assert_eq!(reuse_report.gpu_learned_clause_reused_solves, 4);
-    assert_eq!(reuse_report.cpu_learned_clause_transfers, 0);
 
     let reuse_trace = reuse_adapter.trace();
     assert_eq!(
@@ -11147,9 +10362,6 @@ fn accepted_split_quaternary_all_operator_batch_gates_solver_reuse_and_maxsat_pa
     assert_eq!(reuse_trace.gpu_learned_clause_imports, 4);
     assert_eq!(reuse_trace.gpu_learned_clause_reused_solves, 4);
     assert_eq!(reuse_trace.accepted_gpu_solver_production_path_events, 24);
-    assert_eq!(reuse_trace.cpu_learned_clause_transfers, 0);
-    assert_eq!(reuse_trace.cpu_assignment_enumerations, 0);
-    assert_eq!(reuse_trace.cpu_maxsat_enumerations, 0);
     reuse_trace
         .require_production_metric_eligibility()
         .expect("learned-clause reuse trace must satisfy production solver metrics");
@@ -11183,13 +10395,6 @@ fn accepted_split_quaternary_all_operator_batch_gates_solver_reuse_and_maxsat_pa
     assert_eq!(rejection_trace.gpu_learned_clause_arena_publications, 0);
     assert_eq!(rejection_trace.gpu_learned_clause_imports, 0);
     assert_eq!(rejection_trace.gpu_learned_clause_reused_solves, 0);
-    assert_eq!(rejection_trace.cpu_learned_clause_transfers, 0);
-    assert_eq!(rejection_trace.cpu_assignment_enumerations, 0);
-    assert_eq!(rejection_trace.cpu_maxsat_enumerations, 0);
-    rejection_trace
-        .require_zero_cpu_search()
-        .expect("learned-clause reuse rejection must not use CPU solver fallback");
-
     let candidate_low = SolveInstance::new(1, vec![Clause::new(vec![Literal::positive(0)])]);
     let candidate_high = SolveInstance::new(1, vec![Clause::new(vec![Literal::negative(0)])]);
     let gpu_candidate_low =
@@ -11264,8 +10469,6 @@ fn accepted_split_quaternary_all_operator_batch_gates_solver_reuse_and_maxsat_pa
     assert_eq!(maxsat_trace.gpu_maxsat_candidate_solves, 8);
     assert_eq!(maxsat_trace.gpu_maxsat_optima, 4);
     assert_eq!(maxsat_trace.accepted_gpu_solver_production_path_events, 16);
-    assert_eq!(maxsat_trace.cpu_assignment_enumerations, 0);
-    assert_eq!(maxsat_trace.cpu_maxsat_enumerations, 0);
     assert_uncertified_maxsat_metric_rejected(&maxsat_trace);
 }
 
@@ -11285,9 +10488,6 @@ fn accepted_split_quaternary_all_operator_batch_gates_solver_search_scheduler_an
     assert_eq!(batch.trace.possible_operator_count, 1);
     assert_eq!(batch.trace.not_possible_operator_count, 1);
     assert_eq!(batch.trace.not_know_operator_count, 1);
-    assert_eq!(batch.trace.cpu_recomposition_steps, 0);
-    assert_eq!(batch.trace.cpu_candidate_enumerations, 0);
-    assert_eq!(batch.trace.cpu_world_view_validations, 0);
     assert_eq!(batch.trace.tracked_dtoh_calls, 0);
     assert_eq!(batch.trace.per_candidate_host_round_trips, 0);
     assert!(batch.trace.aggregate_kernel_timing.is_recorded());
@@ -11342,8 +10542,6 @@ fn accepted_split_quaternary_all_operator_batch_gates_solver_search_scheduler_an
     let status_trace = status_adapter.trace();
     assert_eq!(status_trace.gpu_lifecycle_unknown_status_steps, 4);
     assert_eq!(status_trace.gpu_lifecycle_timeout_status_steps, 4);
-    assert_eq!(status_trace.cpu_assignment_enumerations, 0);
-    assert_eq!(status_trace.cpu_maxsat_enumerations, 0);
     status_trace
         .require_production_metric_eligibility()
         .expect("accepted lifecycle UNKNOWN/TIMEOUT statuses must satisfy production metric gate");
@@ -11422,8 +10620,6 @@ fn accepted_split_quaternary_all_operator_batch_gates_solver_search_scheduler_an
     assert_eq!(search_trace.gpu_maxsat_candidate_solves, 8);
     assert_eq!(search_trace.gpu_maxsat_unsat_candidate_prunes, 4);
     assert_eq!(search_trace.gpu_maxsat_optima, 4);
-    assert_eq!(search_trace.cpu_assignment_enumerations, 0);
-    assert_eq!(search_trace.cpu_maxsat_enumerations, 0);
 
     let weighted = SolveInstance::with_weights(
         1,
@@ -11508,8 +10704,6 @@ fn accepted_split_quaternary_all_operator_batch_gates_solver_search_scheduler_an
     assert_eq!(encoded_trace.gpu_maxsat_candidate_solves, 12);
     assert_eq!(encoded_trace.gpu_maxsat_unsat_candidate_prunes, 4);
     assert_eq!(encoded_trace.gpu_maxsat_optima, 4);
-    assert_eq!(encoded_trace.cpu_assignment_enumerations, 0);
-    assert_eq!(encoded_trace.cpu_maxsat_enumerations, 0);
     encoded_trace
         .require_production_metric_eligibility()
         .expect("split all-operator encoded MaxSAT trace must satisfy production metrics");
@@ -11629,8 +10823,6 @@ fn accepted_split_quaternary_all_operator_batch_gates_solver_search_scheduler_an
     assert_eq!(scheduler_trace.gpu_maxsat_candidate_solves, 28);
     assert_eq!(scheduler_trace.gpu_maxsat_unsat_candidate_prunes, 8);
     assert_eq!(scheduler_trace.gpu_maxsat_optima, 12);
-    assert_eq!(scheduler_trace.cpu_assignment_enumerations, 0);
-    assert_eq!(scheduler_trace.cpu_maxsat_enumerations, 0);
     assert_uncertified_maxsat_metric_rejected(&scheduler_trace);
 
     let portfolio_sat =
@@ -11737,8 +10929,6 @@ fn accepted_split_quaternary_all_operator_batch_gates_solver_search_scheduler_an
     assert_eq!(portfolio_trace.gpu_portfolio_maxsat_jobs, 8);
     assert_eq!(portfolio_trace.gpu_portfolio_unknown_status_jobs, 4);
     assert_eq!(portfolio_trace.gpu_portfolio_timeout_status_jobs, 4);
-    assert_eq!(portfolio_trace.cpu_assignment_enumerations, 0);
-    assert_eq!(portfolio_trace.cpu_maxsat_enumerations, 0);
     assert_uncertified_maxsat_metric_rejected(&portfolio_trace);
 
     let encoded_portfolio_jobs = [
@@ -11807,8 +10997,6 @@ fn accepted_split_quaternary_all_operator_batch_gates_solver_search_scheduler_an
     assert_eq!(encoded_portfolio_trace.gpu_portfolio_maxsat_jobs, 4);
     assert_eq!(encoded_portfolio_trace.gpu_portfolio_unknown_status_jobs, 4);
     assert_eq!(encoded_portfolio_trace.gpu_portfolio_timeout_status_jobs, 4);
-    assert_eq!(encoded_portfolio_trace.cpu_assignment_enumerations, 0);
-    assert_eq!(encoded_portfolio_trace.cpu_maxsat_enumerations, 0);
     encoded_portfolio_trace
         .require_production_metric_eligibility()
         .expect("encoded portfolio trace must satisfy production solver metrics");
@@ -11885,9 +11073,6 @@ fn accepted_split_quaternary_not_possible_batch_gates_solver_reuse_and_maxsat_pa
     assert_eq!(batch.trace.component_count, 2);
     assert_eq!(batch.trace.know_operator_count, 1);
     assert_eq!(batch.trace.not_possible_operator_count, 1);
-    assert_eq!(batch.trace.cpu_recomposition_steps, 0);
-    assert_eq!(batch.trace.cpu_candidate_enumerations, 0);
-    assert_eq!(batch.trace.cpu_world_view_validations, 0);
     assert_eq!(batch.trace.tracked_dtoh_calls, 0);
     assert_eq!(batch.trace.per_candidate_host_round_trips, 0);
 
@@ -11977,7 +11162,6 @@ fn accepted_split_quaternary_not_possible_batch_gates_solver_reuse_and_maxsat_pa
     assert_eq!(reuse_report.gpu_learned_clause_arena_publications, 2);
     assert_eq!(reuse_report.gpu_learned_clause_imports, 2);
     assert_eq!(reuse_report.gpu_learned_clause_reused_solves, 2);
-    assert_eq!(reuse_report.cpu_learned_clause_transfers, 0);
 
     let reuse_trace = reuse_adapter.trace();
     assert_eq!(
@@ -12015,9 +11199,6 @@ fn accepted_split_quaternary_not_possible_batch_gates_solver_reuse_and_maxsat_pa
     assert_eq!(reuse_trace.gpu_learned_count_buffer_publications, 2);
     assert_eq!(reuse_trace.gpu_learned_clause_imports, 2);
     assert_eq!(reuse_trace.gpu_learned_clause_reused_solves, 2);
-    assert_eq!(reuse_trace.cpu_learned_clause_transfers, 0);
-    assert_eq!(reuse_trace.cpu_assignment_enumerations, 0);
-    assert_eq!(reuse_trace.cpu_maxsat_enumerations, 0);
     reuse_trace
         .require_production_metric_eligibility()
         .expect("split quaternary learned-clause reuse trace must satisfy production metrics");
@@ -12095,8 +11276,6 @@ fn accepted_split_quaternary_not_possible_batch_gates_solver_reuse_and_maxsat_pa
     assert_eq!(maxsat_trace.gpu_cdcl_sat_solves, 4);
     assert_eq!(maxsat_trace.gpu_maxsat_candidate_solves, 4);
     assert_eq!(maxsat_trace.gpu_maxsat_optima, 2);
-    assert_eq!(maxsat_trace.cpu_assignment_enumerations, 0);
-    assert_eq!(maxsat_trace.cpu_maxsat_enumerations, 0);
     assert_uncertified_maxsat_metric_rejected(&maxsat_trace);
 }
 
@@ -12174,9 +11353,6 @@ fn accepted_split_quaternary_not_possible_batch_gates_solver_search_scheduler_an
     assert_eq!(batch.trace.possible_operator_count, 0);
     assert_eq!(batch.trace.not_know_operator_count, 0);
     assert_eq!(batch.trace.not_possible_operator_count, 1);
-    assert_eq!(batch.trace.cpu_recomposition_steps, 0);
-    assert_eq!(batch.trace.cpu_candidate_enumerations, 0);
-    assert_eq!(batch.trace.cpu_world_view_validations, 0);
     assert_eq!(batch.trace.tracked_dtoh_calls, 0);
     assert_eq!(batch.trace.per_candidate_host_round_trips, 0);
     assert!(batch.trace.aggregate_kernel_timing.is_recorded());
@@ -12322,8 +11498,6 @@ fn accepted_split_quaternary_not_possible_batch_gates_solver_search_scheduler_an
     assert_eq!(search_trace.gpu_maxsat_candidate_solves, 4);
     assert_eq!(search_trace.gpu_maxsat_unsat_candidate_prunes, 2);
     assert_eq!(search_trace.gpu_maxsat_optima, 2);
-    assert_eq!(search_trace.cpu_assignment_enumerations, 0);
-    assert_eq!(search_trace.cpu_maxsat_enumerations, 0);
     assert_uncertified_maxsat_metric_rejected(&search_trace);
 
     let weighted = SolveInstance::with_weights(
@@ -12401,8 +11575,6 @@ fn accepted_split_quaternary_not_possible_batch_gates_solver_search_scheduler_an
     assert_eq!(encoded_trace.gpu_maxsat_candidate_solves, 6);
     assert_eq!(encoded_trace.gpu_maxsat_unsat_candidate_prunes, 2);
     assert_eq!(encoded_trace.gpu_maxsat_optima, 2);
-    assert_eq!(encoded_trace.cpu_assignment_enumerations, 0);
-    assert_eq!(encoded_trace.cpu_maxsat_enumerations, 0);
     encoded_trace
         .require_production_metric_eligibility()
         .expect("split quaternary encoded MaxSAT trace must satisfy production metrics");
@@ -12514,8 +11686,6 @@ fn accepted_split_quaternary_not_possible_batch_gates_solver_search_scheduler_an
     assert_eq!(scheduler_trace.gpu_maxsat_candidate_solves, 14);
     assert_eq!(scheduler_trace.gpu_maxsat_unsat_candidate_prunes, 4);
     assert_eq!(scheduler_trace.gpu_maxsat_optima, 6);
-    assert_eq!(scheduler_trace.cpu_assignment_enumerations, 0);
-    assert_eq!(scheduler_trace.cpu_maxsat_enumerations, 0);
     assert_uncertified_maxsat_metric_rejected(&scheduler_trace);
 
     let portfolio_sat =
@@ -12589,8 +11759,6 @@ fn accepted_split_quaternary_not_possible_batch_gates_solver_search_scheduler_an
     assert_eq!(portfolio_trace.gpu_portfolio_maxsat_jobs, 2);
     assert_eq!(portfolio_trace.gpu_portfolio_unknown_status_jobs, 2);
     assert_eq!(portfolio_trace.gpu_portfolio_timeout_status_jobs, 2);
-    assert_eq!(portfolio_trace.cpu_assignment_enumerations, 0);
-    assert_eq!(portfolio_trace.cpu_maxsat_enumerations, 0);
     assert_uncertified_maxsat_metric_rejected(&portfolio_trace);
 }
 
@@ -12667,9 +11835,6 @@ fn accepted_split_quaternary_possible_and_not_know_batch_gates_solver_reuse_and_
     assert_eq!(batch.trace.possible_operator_count, 1);
     assert_eq!(batch.trace.not_know_operator_count, 1);
     assert_eq!(batch.trace.not_possible_operator_count, 0);
-    assert_eq!(batch.trace.cpu_recomposition_steps, 0);
-    assert_eq!(batch.trace.cpu_candidate_enumerations, 0);
-    assert_eq!(batch.trace.cpu_world_view_validations, 0);
     assert_eq!(batch.trace.tracked_dtoh_calls, 0);
     assert_eq!(batch.trace.per_candidate_host_round_trips, 0);
     assert!(batch.trace.aggregate_kernel_timing.is_recorded());
@@ -12777,7 +11942,6 @@ fn accepted_split_quaternary_possible_and_not_know_batch_gates_solver_reuse_and_
     assert_eq!(reuse_report.gpu_learned_clause_arena_publications, 2);
     assert_eq!(reuse_report.gpu_learned_clause_imports, 2);
     assert_eq!(reuse_report.gpu_learned_clause_reused_solves, 2);
-    assert_eq!(reuse_report.cpu_learned_clause_transfers, 0);
 
     let reuse_trace = reuse_adapter.trace();
     assert_eq!(
@@ -12815,9 +11979,6 @@ fn accepted_split_quaternary_possible_and_not_know_batch_gates_solver_reuse_and_
     assert_eq!(reuse_trace.gpu_learned_count_buffer_publications, 2);
     assert_eq!(reuse_trace.gpu_learned_clause_imports, 2);
     assert_eq!(reuse_trace.gpu_learned_clause_reused_solves, 2);
-    assert_eq!(reuse_trace.cpu_learned_clause_transfers, 0);
-    assert_eq!(reuse_trace.cpu_assignment_enumerations, 0);
-    assert_eq!(reuse_trace.cpu_maxsat_enumerations, 0);
     reuse_trace.require_production_metric_eligibility().expect(
         "split possible/not-know learned-clause reuse trace must satisfy production metrics",
     );
@@ -12897,8 +12058,6 @@ fn accepted_split_quaternary_possible_and_not_know_batch_gates_solver_reuse_and_
     assert_eq!(maxsat_trace.gpu_cdcl_sat_solves, 4);
     assert_eq!(maxsat_trace.gpu_maxsat_candidate_solves, 4);
     assert_eq!(maxsat_trace.gpu_maxsat_optima, 2);
-    assert_eq!(maxsat_trace.cpu_assignment_enumerations, 0);
-    assert_eq!(maxsat_trace.cpu_maxsat_enumerations, 0);
     assert_uncertified_maxsat_metric_rejected(&maxsat_trace);
 }
 
@@ -12976,9 +12135,6 @@ fn accepted_split_quaternary_possible_and_not_know_batch_gates_solver_search_sch
     assert_eq!(batch.trace.possible_operator_count, 1);
     assert_eq!(batch.trace.not_know_operator_count, 1);
     assert_eq!(batch.trace.not_possible_operator_count, 0);
-    assert_eq!(batch.trace.cpu_recomposition_steps, 0);
-    assert_eq!(batch.trace.cpu_candidate_enumerations, 0);
-    assert_eq!(batch.trace.cpu_world_view_validations, 0);
     assert_eq!(batch.trace.tracked_dtoh_calls, 0);
     assert_eq!(batch.trace.per_candidate_host_round_trips, 0);
     assert!(batch.trace.aggregate_kernel_timing.is_recorded());
@@ -13131,8 +12287,6 @@ fn accepted_split_quaternary_possible_and_not_know_batch_gates_solver_search_sch
     assert_eq!(search_trace.gpu_maxsat_candidate_solves, 4);
     assert_eq!(search_trace.gpu_maxsat_unsat_candidate_prunes, 2);
     assert_eq!(search_trace.gpu_maxsat_optima, 2);
-    assert_eq!(search_trace.cpu_assignment_enumerations, 0);
-    assert_eq!(search_trace.cpu_maxsat_enumerations, 0);
 
     let weighted = SolveInstance::with_weights(
         1,
@@ -13209,8 +12363,6 @@ fn accepted_split_quaternary_possible_and_not_know_batch_gates_solver_search_sch
     assert_eq!(encoded_trace.gpu_maxsat_candidate_solves, 6);
     assert_eq!(encoded_trace.gpu_maxsat_unsat_candidate_prunes, 2);
     assert_eq!(encoded_trace.gpu_maxsat_optima, 2);
-    assert_eq!(encoded_trace.cpu_assignment_enumerations, 0);
-    assert_eq!(encoded_trace.cpu_maxsat_enumerations, 0);
     encoded_trace
         .require_production_metric_eligibility()
         .expect("split possible/not-know encoded MaxSAT trace must satisfy production metrics");
@@ -13322,8 +12474,6 @@ fn accepted_split_quaternary_possible_and_not_know_batch_gates_solver_search_sch
     assert_eq!(scheduler_trace.gpu_maxsat_candidate_solves, 14);
     assert_eq!(scheduler_trace.gpu_maxsat_unsat_candidate_prunes, 4);
     assert_eq!(scheduler_trace.gpu_maxsat_optima, 6);
-    assert_eq!(scheduler_trace.cpu_assignment_enumerations, 0);
-    assert_eq!(scheduler_trace.cpu_maxsat_enumerations, 0);
     assert_uncertified_maxsat_metric_rejected(&scheduler_trace);
 
     let portfolio_sat =
@@ -13397,8 +12547,6 @@ fn accepted_split_quaternary_possible_and_not_know_batch_gates_solver_search_sch
     assert_eq!(portfolio_trace.gpu_portfolio_maxsat_jobs, 2);
     assert_eq!(portfolio_trace.gpu_portfolio_unknown_status_jobs, 2);
     assert_eq!(portfolio_trace.gpu_portfolio_timeout_status_jobs, 2);
-    assert_eq!(portfolio_trace.cpu_assignment_enumerations, 0);
-    assert_eq!(portfolio_trace.cpu_maxsat_enumerations, 0);
     assert_uncertified_maxsat_metric_rejected(&portfolio_trace);
 }
 
@@ -13477,9 +12625,6 @@ fn accepted_split_all_binary_operator_batch_gates_solver_reuse_and_maxsat_paths(
     assert_eq!(batch.trace.possible_operator_count, 1);
     assert_eq!(batch.trace.not_possible_operator_count, 1);
     assert_eq!(batch.trace.not_know_operator_count, 1);
-    assert_eq!(batch.trace.cpu_recomposition_steps, 0);
-    assert_eq!(batch.trace.cpu_candidate_enumerations, 0);
-    assert_eq!(batch.trace.cpu_world_view_validations, 0);
     assert_eq!(batch.trace.tracked_dtoh_calls, 0);
     assert_eq!(batch.trace.per_candidate_host_round_trips, 0);
 
@@ -13518,7 +12663,6 @@ fn accepted_split_all_binary_operator_batch_gates_solver_reuse_and_maxsat_paths(
     assert_eq!(reuse_report.gpu_learned_clause_arena_publications, 4);
     assert_eq!(reuse_report.gpu_learned_clause_imports, 4);
     assert_eq!(reuse_report.gpu_learned_clause_reused_solves, 4);
-    assert_eq!(reuse_report.cpu_learned_clause_transfers, 0);
 
     let reuse_trace = reuse_adapter.trace();
     assert_eq!(
@@ -13548,9 +12692,6 @@ fn accepted_split_all_binary_operator_batch_gates_solver_reuse_and_maxsat_paths(
     assert_eq!(reuse_trace.gpu_learned_count_buffer_publications, 4);
     assert_eq!(reuse_trace.gpu_learned_clause_imports, 4);
     assert_eq!(reuse_trace.gpu_learned_clause_reused_solves, 4);
-    assert_eq!(reuse_trace.cpu_learned_clause_transfers, 0);
-    assert_eq!(reuse_trace.cpu_assignment_enumerations, 0);
-    assert_eq!(reuse_trace.cpu_maxsat_enumerations, 0);
     reuse_trace
         .require_production_metric_eligibility()
         .expect("split all-operator learned-clause reuse trace must satisfy production metrics");
@@ -13620,8 +12761,6 @@ fn accepted_split_all_binary_operator_batch_gates_solver_reuse_and_maxsat_paths(
     assert_eq!(maxsat_trace.gpu_cdcl_sat_solves, 8);
     assert_eq!(maxsat_trace.gpu_maxsat_candidate_solves, 8);
     assert_eq!(maxsat_trace.gpu_maxsat_optima, 4);
-    assert_eq!(maxsat_trace.cpu_assignment_enumerations, 0);
-    assert_eq!(maxsat_trace.cpu_maxsat_enumerations, 0);
     assert_uncertified_maxsat_metric_rejected(&maxsat_trace);
 }
 
@@ -13700,9 +12839,6 @@ fn accepted_split_all_binary_operator_batch_gates_solver_search_scheduler_and_po
     assert_eq!(batch.trace.possible_operator_count, 1);
     assert_eq!(batch.trace.not_possible_operator_count, 1);
     assert_eq!(batch.trace.not_know_operator_count, 1);
-    assert_eq!(batch.trace.cpu_recomposition_steps, 0);
-    assert_eq!(batch.trace.cpu_candidate_enumerations, 0);
-    assert_eq!(batch.trace.cpu_world_view_validations, 0);
     assert_eq!(batch.trace.tracked_dtoh_calls, 0);
     assert_eq!(batch.trace.per_candidate_host_round_trips, 0);
     assert!(batch.trace.aggregate_kernel_timing.is_recorded());
@@ -13900,8 +13036,6 @@ fn accepted_split_all_binary_operator_batch_gates_solver_search_scheduler_and_po
     assert_eq!(search_trace.gpu_maxsat_candidate_solves, 8);
     assert_eq!(search_trace.gpu_maxsat_unsat_candidate_prunes, 4);
     assert_eq!(search_trace.gpu_maxsat_optima, 4);
-    assert_eq!(search_trace.cpu_assignment_enumerations, 0);
-    assert_eq!(search_trace.cpu_maxsat_enumerations, 0);
 
     let weighted = SolveInstance::with_weights(
         1,
@@ -13986,8 +13120,6 @@ fn accepted_split_all_binary_operator_batch_gates_solver_search_scheduler_and_po
     assert_eq!(encoded_trace.gpu_maxsat_candidate_solves, 12);
     assert_eq!(encoded_trace.gpu_maxsat_unsat_candidate_prunes, 4);
     assert_eq!(encoded_trace.gpu_maxsat_optima, 4);
-    assert_eq!(encoded_trace.cpu_assignment_enumerations, 0);
-    assert_eq!(encoded_trace.cpu_maxsat_enumerations, 0);
 
     let candidate_set = [
         GpuSolverProductionMaxSatCandidate {
@@ -14104,8 +13236,6 @@ fn accepted_split_all_binary_operator_batch_gates_solver_search_scheduler_and_po
     assert_eq!(scheduler_trace.gpu_maxsat_candidate_solves, 28);
     assert_eq!(scheduler_trace.gpu_maxsat_unsat_candidate_prunes, 8);
     assert_eq!(scheduler_trace.gpu_maxsat_optima, 12);
-    assert_eq!(scheduler_trace.cpu_assignment_enumerations, 0);
-    assert_eq!(scheduler_trace.cpu_maxsat_enumerations, 0);
 
     let portfolio_sat =
         GpuCnf::from_host(&sat_low, &fix.provider).expect("upload portfolio SAT CNF");
@@ -14186,8 +13316,6 @@ fn accepted_split_all_binary_operator_batch_gates_solver_search_scheduler_and_po
     assert_eq!(portfolio_trace.gpu_portfolio_maxsat_jobs, 4);
     assert_eq!(portfolio_trace.gpu_portfolio_unknown_status_jobs, 4);
     assert_eq!(portfolio_trace.gpu_portfolio_timeout_status_jobs, 4);
-    assert_eq!(portfolio_trace.cpu_assignment_enumerations, 0);
-    assert_eq!(portfolio_trace.cpu_maxsat_enumerations, 0);
     assert_uncertified_maxsat_metric_rejected(&portfolio_trace);
 }
 
@@ -14304,8 +13432,6 @@ fn accepted_split_batch_gates_probabilistic_source_and_program_end_to_end_paths(
         source_trace.gpu_program_knowledge_compilation_end_to_end_runs,
         0
     );
-    assert_eq!(source_trace.cpu_only_probability_recomputations, 0);
-    assert_eq!(source_trace.fixture_circuit_evaluations, 0);
     source_trace
         .require_production_metric_eligibility()
         .expect("split source probability trace must satisfy production metrics");
@@ -14351,8 +13477,6 @@ fn accepted_split_batch_gates_probabilistic_source_and_program_end_to_end_paths(
         program_trace.gpu_program_knowledge_compilation_end_to_end_runs,
         2
     );
-    assert_eq!(program_trace.cpu_only_probability_recomputations, 0);
-    assert_eq!(program_trace.fixture_circuit_evaluations, 0);
     program_trace
         .require_production_metric_eligibility()
         .expect("split parsed-program probability trace must satisfy production metrics");
@@ -14466,8 +13590,6 @@ fn accepted_split_batch_gates_probabilistic_conditioned_source_path() {
     assert_eq!(trace.gpu_exact_query_evaluations, 2);
     assert_eq!(trace.gpu_knowledge_compilation_end_to_end_runs, 2);
     assert_eq!(trace.gpu_source_knowledge_compilation_end_to_end_runs, 2);
-    assert_eq!(trace.cpu_only_probability_recomputations, 0);
-    assert_eq!(trace.fixture_circuit_evaluations, 0);
 
     let no_assumptions: &[EpistemicAssumption] = &[];
     let auto_assumption_groups = [no_assumptions, no_assumptions];
@@ -14550,8 +13672,6 @@ fn accepted_split_batch_gates_probabilistic_conditioned_source_path() {
         auto_trace.gpu_program_knowledge_compilation_end_to_end_runs,
         0
     );
-    assert_eq!(auto_trace.cpu_only_probability_recomputations, 0);
-    assert_eq!(auto_trace.fixture_circuit_evaluations, 0);
     auto_trace
         .require_conditioned_evidence_metric_eligibility()
         .expect("auto-derived conditioned probability trace must satisfy production metrics");
@@ -14669,8 +13789,6 @@ fn accepted_split_batch_gates_probabilistic_conditioned_program_path() {
     assert_eq!(trace.gpu_exact_query_evaluations, 2);
     assert_eq!(trace.gpu_knowledge_compilation_end_to_end_runs, 2);
     assert_eq!(trace.gpu_program_knowledge_compilation_end_to_end_runs, 2);
-    assert_eq!(trace.cpu_only_probability_recomputations, 0);
-    assert_eq!(trace.fixture_circuit_evaluations, 0);
     trace
         .require_conditioned_evidence_metric_eligibility()
         .expect("program-conditioned probability trace must satisfy production metrics");
@@ -14772,8 +13890,6 @@ fn accepted_split_batch_gates_probabilistic_conditioned_program_path() {
         auto_trace.gpu_program_knowledge_compilation_end_to_end_runs,
         2
     );
-    assert_eq!(auto_trace.cpu_only_probability_recomputations, 0);
-    assert_eq!(auto_trace.fixture_circuit_evaluations, 0);
     auto_trace
         .require_conditioned_evidence_metric_eligibility()
         .expect(
@@ -14891,8 +14007,6 @@ fn accepted_split_batch_gates_probabilistic_conditioned_source_gradients() {
     assert_eq!(trace.gpu_source_conditioned_gradient_evaluations, 2);
     assert_eq!(trace.gpu_knowledge_compilation_end_to_end_runs, 2);
     assert_eq!(trace.gpu_source_knowledge_compilation_end_to_end_runs, 2);
-    assert_eq!(trace.cpu_only_probability_recomputations, 0);
-    assert_eq!(trace.fixture_circuit_evaluations, 0);
     trace
         .require_conditioned_evidence_metric_eligibility()
         .expect("source-conditioned gradient trace must satisfy production metrics");
@@ -14971,8 +14085,6 @@ fn accepted_split_batch_gates_probabilistic_conditioned_source_gradients() {
         auto_trace.gpu_program_knowledge_compilation_end_to_end_runs,
         0
     );
-    assert_eq!(auto_trace.cpu_only_probability_recomputations, 0);
-    assert_eq!(auto_trace.fixture_circuit_evaluations, 0);
     auto_trace
         .require_conditioned_evidence_metric_eligibility()
         .expect("auto-derived source-conditioned gradient trace must satisfy production metrics");
@@ -15092,8 +14204,6 @@ fn accepted_split_batch_gates_probabilistic_conditioned_program_gradients() {
     assert_eq!(trace.gpu_program_conditioned_gradient_evaluations, 2);
     assert_eq!(trace.gpu_knowledge_compilation_end_to_end_runs, 2);
     assert_eq!(trace.gpu_program_knowledge_compilation_end_to_end_runs, 2);
-    assert_eq!(trace.cpu_only_probability_recomputations, 0);
-    assert_eq!(trace.fixture_circuit_evaluations, 0);
     trace
         .require_conditioned_evidence_metric_eligibility()
         .expect("program-conditioned gradient trace must satisfy production metrics");
@@ -15181,8 +14291,6 @@ fn accepted_split_batch_gates_probabilistic_conditioned_program_gradients() {
         auto_trace.gpu_program_knowledge_compilation_end_to_end_runs,
         2
     );
-    assert_eq!(auto_trace.cpu_only_probability_recomputations, 0);
-    assert_eq!(auto_trace.fixture_circuit_evaluations, 0);
     auto_trace
         .require_conditioned_evidence_metric_eligibility()
         .expect("auto-derived program-conditioned gradient trace must satisfy production metrics");
@@ -15304,8 +14412,6 @@ fn accepted_split_batch_gates_solver_lifecycle_path() {
     assert_eq!(trace.gpu_lifecycle_workspace_reuses, 2);
     assert_eq!(trace.gpu_cdcl_sat_solves, 2);
     assert_eq!(trace.gpu_cdcl_workspace_unsat_solves, 2);
-    assert_eq!(trace.cpu_assignment_enumerations, 0);
-    assert_eq!(trace.cpu_maxsat_enumerations, 0);
     trace
         .require_production_metric_eligibility()
         .expect("G91/FAEEL solver trace must satisfy production metrics");
@@ -15445,8 +14551,6 @@ fn accepted_split_batch_gates_solver_maxsat_lifecycle_path() {
     assert_eq!(trace.gpu_cdcl_workspace_unsat_solves, 2);
     assert_eq!(trace.gpu_maxsat_candidate_solves, 4);
     assert_eq!(trace.gpu_maxsat_optima, 2);
-    assert_eq!(trace.cpu_assignment_enumerations, 0);
-    assert_eq!(trace.cpu_maxsat_enumerations, 0);
     let err = trace
         .require_production_metric_eligibility()
         .expect_err(
@@ -15572,8 +14676,6 @@ fn accepted_split_batch_gates_solver_portfolio_path() {
     assert_eq!(trace.gpu_portfolio_maxsat_jobs, 2);
     assert_eq!(trace.gpu_portfolio_unknown_status_jobs, 2);
     assert_eq!(trace.gpu_portfolio_timeout_status_jobs, 2);
-    assert_eq!(trace.cpu_assignment_enumerations, 0);
-    assert_eq!(trace.cpu_maxsat_enumerations, 0);
     assert_uncertified_maxsat_metric_rejected(&trace);
 }
 
@@ -15670,7 +14772,6 @@ fn accepted_split_batch_gates_solver_learned_clause_reuse_path() {
     assert_eq!(report.gpu_learned_clause_arena_publications, 2);
     assert_eq!(report.gpu_learned_clause_imports, 2);
     assert_eq!(report.gpu_learned_clause_reused_solves, 2);
-    assert_eq!(report.cpu_learned_clause_transfers, 0);
 
     let trace = adapter.trace();
     assert_eq!(trace.accepted_gpu_batch_candidate_evidence_consumed, 1);
@@ -15684,9 +14785,6 @@ fn accepted_split_batch_gates_solver_learned_clause_reuse_path() {
     assert_eq!(trace.gpu_learned_count_buffer_publications, 2);
     assert_eq!(trace.gpu_learned_clause_imports, 2);
     assert_eq!(trace.gpu_learned_clause_reused_solves, 2);
-    assert_eq!(trace.cpu_learned_clause_transfers, 0);
-    assert_eq!(trace.cpu_assignment_enumerations, 0);
-    assert_eq!(trace.cpu_maxsat_enumerations, 0);
     trace
         .require_production_metric_eligibility()
         .expect("split learned-clause trace must satisfy production solver metrics");
@@ -15797,8 +14895,6 @@ fn accepted_split_batch_gates_solver_maxsat_path() {
     assert_eq!(trace.gpu_cdcl_sat_solves, 4);
     assert_eq!(trace.gpu_maxsat_candidate_solves, 4);
     assert_eq!(trace.gpu_maxsat_optima, 2);
-    assert_eq!(trace.cpu_assignment_enumerations, 0);
-    assert_eq!(trace.cpu_maxsat_enumerations, 0);
     assert_uncertified_maxsat_metric_rejected(&trace);
 }
 
@@ -15921,8 +15017,6 @@ fn accepted_split_batch_gates_solver_maxsat_search_pruning() {
     assert_eq!(trace.gpu_maxsat_candidate_solves, 4);
     assert_eq!(trace.gpu_maxsat_unsat_candidate_prunes, 2);
     assert_eq!(trace.gpu_maxsat_optima, 2);
-    assert_eq!(trace.cpu_assignment_enumerations, 0);
-    assert_eq!(trace.cpu_maxsat_enumerations, 0);
     assert_uncertified_maxsat_metric_rejected(&trace);
 }
 
@@ -16055,8 +15149,6 @@ fn accepted_split_batch_gates_solver_encoded_maxsat_and_scheduler_paths() {
     assert_eq!(encoded_trace.gpu_maxsat_candidate_solves, 6);
     assert_eq!(encoded_trace.gpu_maxsat_unsat_candidate_prunes, 2);
     assert_eq!(encoded_trace.gpu_maxsat_optima, 2);
-    assert_eq!(encoded_trace.cpu_assignment_enumerations, 0);
-    assert_eq!(encoded_trace.cpu_maxsat_enumerations, 0);
     encoded_trace
         .require_production_metric_eligibility()
         .expect("split-batch encoded MaxSAT trace must satisfy production metrics");
@@ -16162,8 +15254,6 @@ fn accepted_split_batch_gates_solver_encoded_maxsat_and_scheduler_paths() {
     assert_eq!(scheduler_trace.gpu_maxsat_candidate_solves, 14);
     assert_eq!(scheduler_trace.gpu_maxsat_unsat_candidate_prunes, 4);
     assert_eq!(scheduler_trace.gpu_maxsat_optima, 6);
-    assert_eq!(scheduler_trace.cpu_assignment_enumerations, 0);
-    assert_eq!(scheduler_trace.cpu_maxsat_enumerations, 0);
     assert_uncertified_maxsat_metric_rejected(&scheduler_trace);
 }
 
@@ -16285,8 +15375,6 @@ fn accepted_split_batch_completes_unsat_encoded_maxsat_scheduler_frontier() {
     assert_eq!(trace.gpu_maxsat_candidate_solves, 4);
     assert_eq!(trace.gpu_maxsat_unsat_candidate_prunes, 2);
     assert_eq!(trace.gpu_maxsat_optima, 2);
-    assert_eq!(trace.cpu_assignment_enumerations, 0);
-    assert_eq!(trace.cpu_maxsat_enumerations, 0);
     trace
         .require_production_metric_eligibility()
         .expect("completed encoded scheduler frontier must satisfy production metrics");
@@ -16332,8 +15420,6 @@ fn accepted_split_batch_completes_unsat_encoded_maxsat_scheduler_frontier() {
     assert_eq!(trace.gpu_maxsat_candidate_solves, 0);
     assert_eq!(trace.gpu_maxsat_unsat_candidate_prunes, 0);
     assert_eq!(trace.gpu_maxsat_optima, 0);
-    assert_eq!(trace.cpu_assignment_enumerations, 0);
-    assert_eq!(trace.cpu_maxsat_enumerations, 0);
 }
 
 #[test]
@@ -16414,8 +15500,6 @@ fn split_gpu_world_view_distinguishes_absent_possible_from_not_known() {
             result.model_membership.membership_source,
             EpistemicGpuModelMembershipSource::StableModelTupleBuffer
         );
-        assert_eq!(result.semantic_trace.cpu_candidate_enumerations, 0);
-        assert_eq!(result.semantic_trace.cpu_world_view_validations, 0);
         assert_eq!(result.transfer_budget.tracked_dtoh_calls, 0);
     }
 
@@ -16542,8 +15626,6 @@ fn accepted_gpu_execution_checks_reduced_constraints() {
         result.constraint_validation.violated_constraint_relations,
         0
     );
-    assert_eq!(result.semantic_trace.cpu_candidate_enumerations, 0);
-    assert_eq!(result.semantic_trace.cpu_world_view_validations, 0);
 }
 
 #[test]
@@ -16648,8 +15730,6 @@ fn accepted_gpu_execution_records_device_semantic_trace_counts() {
         result.semantic_trace.rejection_reason_metadata_bytes,
         2 * std::mem::size_of::<u32>() as u64
     );
-    assert_eq!(result.semantic_trace.cpu_candidate_enumerations, 0);
-    assert_eq!(result.semantic_trace.cpu_world_view_validations, 0);
     assert_eq!(result.transfer_budget.tracked_dtoh_calls, 0);
 }
 
@@ -16746,8 +15826,6 @@ fn accepted_gpu_execution_semantic_trace_matches_gpt_oracle_rejection_reason() {
             .expect("decode GPU rejection reasons"),
         vec![EpistemicGpuRejectionReason::UnsatisfiedMembership]
     );
-    assert_eq!(result.semantic_trace.cpu_candidate_enumerations, 0);
-    assert_eq!(result.semantic_trace.cpu_world_view_validations, 0);
     assert_eq!(result.transfer_budget.tracked_dtoh_calls, 0);
 }
 
@@ -17231,8 +16309,6 @@ fn accepted_ternary_membership_matches_gpt_oracle_parity() {
         result.model_membership.membership_source,
         EpistemicGpuModelMembershipSource::StableModelTupleBuffer
     );
-    assert_eq!(result.semantic_trace.cpu_candidate_enumerations, 0);
-    assert_eq!(result.semantic_trace.cpu_world_view_validations, 0);
     assert_eq!(result.transfer_budget.tracked_dtoh_calls, 0);
     assert_eq!(
         download_ternary_u32(&fix.provider, &result.final_output),
@@ -17336,8 +16412,6 @@ fn accepted_quaternary_membership_matches_gpt_oracle_parity() {
         result.model_membership.membership_source,
         EpistemicGpuModelMembershipSource::StableModelTupleBuffer
     );
-    assert_eq!(result.semantic_trace.cpu_candidate_enumerations, 0);
-    assert_eq!(result.semantic_trace.cpu_world_view_validations, 0);
     assert_eq!(result.transfer_budget.tracked_dtoh_calls, 0);
     assert_eq!(
         download_quaternary_u32(&fix.provider, &result.final_output),
@@ -17449,8 +16523,6 @@ fn accepted_quaternary_not_possible_membership_matches_gpt_oracle_parity() {
         result.model_membership.membership_source,
         EpistemicGpuModelMembershipSource::StableModelTupleBuffer
     );
-    assert_eq!(result.semantic_trace.cpu_candidate_enumerations, 0);
-    assert_eq!(result.semantic_trace.cpu_world_view_validations, 0);
     assert_eq!(result.transfer_budget.tracked_dtoh_calls, 0);
     assert_eq!(
         download_quaternary_u32(&fix.provider, &result.final_output),
@@ -17569,8 +16641,6 @@ fn accepted_quaternary_possible_and_not_know_memberships_match_gpt_oracle_parity
             result.model_membership.tuple_source_key_column_device_reads,
             4
         );
-        assert_eq!(result.semantic_trace.cpu_candidate_enumerations, 0);
-        assert_eq!(result.semantic_trace.cpu_world_view_validations, 0);
         assert_eq!(result.transfer_budget.tracked_dtoh_calls, 0);
         assert_eq!(
             download_quaternary_u32(&fix.provider, &result.final_output),
@@ -17912,8 +16982,6 @@ fn accepted_binary_not_know_membership_matches_gpt_oracle_parity() {
         result.model_membership.membership_source,
         EpistemicGpuModelMembershipSource::StableModelTupleBuffer
     );
-    assert_eq!(result.semantic_trace.cpu_candidate_enumerations, 0);
-    assert_eq!(result.semantic_trace.cpu_world_view_validations, 0);
     assert_eq!(result.transfer_budget.tracked_dtoh_calls, 0);
     assert_eq!(
         download_binary_u32(&fix.provider, &result.final_output),
@@ -18134,8 +17202,6 @@ fn accepted_mixed_memberships_match_gpt_oracle_parity() {
         result.final_tuple_materialization.negated_row_filter_count,
         0
     );
-    assert_eq!(result.semantic_trace.cpu_candidate_enumerations, 0);
-    assert_eq!(result.semantic_trace.cpu_world_view_validations, 0);
     assert_eq!(result.transfer_budget.tracked_dtoh_calls, 0);
     assert_eq!(
         download_unary_u32(&fix.provider, &result.final_output),
@@ -18261,8 +17327,6 @@ fn accepted_negated_mixed_memberships_match_gpt_oracle_parity() {
         result.final_tuple_materialization.negated_row_filter_count,
         2
     );
-    assert_eq!(result.semantic_trace.cpu_candidate_enumerations, 0);
-    assert_eq!(result.semantic_trace.cpu_world_view_validations, 0);
     assert_eq!(result.transfer_budget.tracked_dtoh_calls, 0);
     assert_eq!(
         download_unary_u32(&fix.provider, &result.final_output),
@@ -18376,8 +17440,6 @@ fn accepted_all_operator_mixed_memberships_match_gpt_oracle_parity() {
         result.final_tuple_materialization.negated_row_filter_count,
         2
     );
-    assert_eq!(result.semantic_trace.cpu_candidate_enumerations, 0);
-    assert_eq!(result.semantic_trace.cpu_world_view_validations, 0);
     assert_eq!(result.transfer_budget.tracked_dtoh_calls, 0);
     assert_eq!(
         download_unary_u32(&fix.provider, &result.final_output),
@@ -18490,8 +17552,6 @@ fn rejected_gpu_execution_result_cannot_gate_solver_or_probability() {
         EpistemicGpuModelMembershipSource::StableModelTupleBuffer
     );
     assert!(result.aggregate_kernel_timing().is_recorded());
-    assert_eq!(result.semantic_trace.cpu_candidate_enumerations, 0);
-    assert_eq!(result.semantic_trace.cpu_world_view_validations, 0);
 
     let sat_instance = SolveInstance::new(1, vec![Clause::new(vec![Literal::positive(0)])]);
     let sat_cnf = GpuCnf::from_host(&sat_instance, &fix.provider).expect("upload SAT CNF");
@@ -18524,8 +17584,6 @@ fn rejected_gpu_execution_result_cannot_gate_solver_or_probability() {
     assert_eq!(solver_trace.accepted_gpu_solver_production_path_events, 0);
     assert_eq!(solver_trace.gpu_assumption_pushes, 0);
     assert_eq!(solver_trace.gpu_cdcl_sat_solves, 0);
-    assert_eq!(solver_trace.cpu_assignment_enumerations, 0);
-    assert_eq!(solver_trace.cpu_maxsat_enumerations, 0);
 
     let mut config = GpuConfig::default();
     config.device_ordinal = 0;
@@ -18555,8 +17613,6 @@ fn rejected_gpu_execution_result_cannot_gate_solver_or_probability() {
     assert_eq!(prob_trace.accepted_gpu_production_path_events, 0);
     assert_eq!(prob_trace.gpu_exact_source_compiles, 0);
     assert_eq!(prob_trace.gpu_exact_query_evaluations, 0);
-    assert_eq!(prob_trace.cpu_only_probability_recomputations, 0);
-    assert_eq!(prob_trace.fixture_circuit_evaluations, 0);
 }
 
 #[test]
@@ -18648,8 +17704,6 @@ fn g91_self_supported_possible_reaches_gpu_runtime_path() {
         result.semantic_trace.rejected_candidate_indices,
         oracle.rejected_candidate_indices
     );
-    assert_eq!(result.semantic_trace.cpu_candidate_enumerations, 0);
-    assert_eq!(result.semantic_trace.cpu_world_view_validations, 0);
     assert_eq!(result.transfer_budget.tracked_dtoh_calls, 0);
     assert_eq!(
         read_device_row_count(&fix.provider, &result.final_output).expect("final row count"),
@@ -18865,8 +17919,6 @@ fn accepted_g91_and_faeel_modes_gate_probabilistic_production_trace() {
     assert_eq!(trace.gpu_conditioned_negative_evidence_facts, 0);
     assert_eq!(trace.gpu_exact_source_compiles, 2);
     assert_eq!(trace.gpu_exact_query_evaluations, 2);
-    assert_eq!(trace.cpu_only_probability_recomputations, 0);
-    assert_eq!(trace.fixture_circuit_evaluations, 0);
     trace
         .require_conditioned_evidence_metric_eligibility()
         .expect("G91/FAEEL conditioned trace must satisfy production metrics");
@@ -18995,8 +18047,6 @@ fn accepted_g91_and_faeel_modes_gate_solver_production_trace() {
     assert_eq!(trace.gpu_lifecycle_workspace_reuses, 2);
     assert_eq!(trace.gpu_cdcl_sat_solves, 2);
     assert_eq!(trace.gpu_cdcl_workspace_unsat_solves, 2);
-    assert_eq!(trace.cpu_assignment_enumerations, 0);
-    assert_eq!(trace.cpu_maxsat_enumerations, 0);
 }
 
 #[test]
@@ -19056,8 +18106,6 @@ fn accepted_gpu_execution_result_gates_probabilistic_exact_path() {
     let trace = adapter.trace();
     assert_eq!(trace.accepted_world_view_evidence_consumed, 1);
     assert_eq!(trace.gpu_exact_source_compiles, 1);
-    assert_eq!(trace.cpu_only_probability_recomputations, 0);
-    assert_eq!(trace.fixture_circuit_evaluations, 0);
     trace
         .require_production_metric_eligibility()
         .expect("source exact compile trace must satisfy production metrics");
@@ -19125,8 +18173,6 @@ fn accepted_gpu_execution_result_gates_probabilistic_program_compile_path() {
     assert_eq!(trace.accepted_world_view_evidence_consumed, 1);
     assert_eq!(trace.gpu_exact_program_compiles, 1);
     assert_eq!(trace.gpu_exact_source_compiles, 0);
-    assert_eq!(trace.cpu_only_probability_recomputations, 0);
-    assert_eq!(trace.fixture_circuit_evaluations, 0);
     trace
         .require_production_metric_eligibility()
         .expect("parsed-program exact compile trace must satisfy production metrics");
@@ -19216,8 +18262,6 @@ fn accepted_gpu_execution_batches_gate_probabilistic_exact_compile_paths() {
     assert_eq!(source_trace.accepted_evidence_assumptions_consumed, 2);
     assert_eq!(source_trace.gpu_exact_source_compiles, 2);
     assert_eq!(source_trace.gpu_exact_program_compiles, 0);
-    assert_eq!(source_trace.cpu_only_probability_recomputations, 0);
-    assert_eq!(source_trace.fixture_circuit_evaluations, 0);
     source_trace
         .require_production_metric_eligibility()
         .expect("batched source exact compile trace must satisfy production metrics");
@@ -19245,8 +18289,6 @@ fn accepted_gpu_execution_batches_gate_probabilistic_exact_compile_paths() {
     assert_eq!(program_trace.accepted_evidence_assumptions_consumed, 2);
     assert_eq!(program_trace.gpu_exact_source_compiles, 0);
     assert_eq!(program_trace.gpu_exact_program_compiles, 2);
-    assert_eq!(program_trace.cpu_only_probability_recomputations, 0);
-    assert_eq!(program_trace.fixture_circuit_evaluations, 0);
     program_trace
         .require_production_metric_eligibility()
         .expect("batched parsed-program exact compile trace must satisfy production metrics");
@@ -19294,8 +18336,6 @@ fn accepted_gpu_execution_batches_gate_probabilistic_exact_compile_paths() {
     assert_eq!(source_batch_trace.accepted_evidence_assumptions_consumed, 2);
     assert_eq!(source_batch_trace.gpu_exact_source_compiles, 2);
     assert_eq!(source_batch_trace.gpu_exact_program_compiles, 0);
-    assert_eq!(source_batch_trace.cpu_only_probability_recomputations, 0);
-    assert_eq!(source_batch_trace.fixture_circuit_evaluations, 0);
     source_batch_trace
         .require_production_metric_eligibility()
         .expect("split source exact compile trace must satisfy production metrics");
@@ -19325,8 +18365,6 @@ fn accepted_gpu_execution_batches_gate_probabilistic_exact_compile_paths() {
     );
     assert_eq!(program_batch_trace.gpu_exact_source_compiles, 0);
     assert_eq!(program_batch_trace.gpu_exact_program_compiles, 2);
-    assert_eq!(program_batch_trace.cpu_only_probability_recomputations, 0);
-    assert_eq!(program_batch_trace.fixture_circuit_evaluations, 0);
     program_batch_trace
         .require_production_metric_eligibility()
         .expect("split parsed-program exact compile trace must satisfy production metrics");
@@ -19400,8 +18438,6 @@ fn accepted_gpu_execution_result_gates_probabilistic_query_evaluation_path() {
     assert_eq!(trace.accepted_world_view_evidence_consumed, 2);
     assert_eq!(trace.gpu_exact_source_compiles, 1);
     assert_eq!(trace.gpu_exact_query_evaluations, 1);
-    assert_eq!(trace.cpu_only_probability_recomputations, 0);
-    assert_eq!(trace.fixture_circuit_evaluations, 0);
     trace
         .require_production_metric_eligibility()
         .expect("single-result exact query trace must satisfy production metrics");
@@ -19502,8 +18538,6 @@ fn accepted_gpu_execution_results_gate_batched_probabilistic_query_evaluations()
     assert_eq!(trace.gpu_exact_source_compiles, 1);
     assert_eq!(trace.gpu_exact_query_evaluations, 2);
     assert_eq!(trace.gpu_exact_gradient_evaluations, 0);
-    assert_eq!(trace.cpu_only_probability_recomputations, 0);
-    assert_eq!(trace.fixture_circuit_evaluations, 0);
     trace
         .require_production_metric_eligibility()
         .expect("batched exact query trace must satisfy production metrics");
@@ -19572,8 +18606,6 @@ fn accepted_gpu_execution_result_gates_probabilistic_end_to_end_knowledge_compil
     assert_eq!(trace.gpu_knowledge_compilation_end_to_end_runs, 1);
     assert_eq!(trace.gpu_source_knowledge_compilation_end_to_end_runs, 1);
     assert_eq!(trace.gpu_program_knowledge_compilation_end_to_end_runs, 0);
-    assert_eq!(trace.cpu_only_probability_recomputations, 0);
-    assert_eq!(trace.fixture_circuit_evaluations, 0);
     trace
         .require_production_metric_eligibility()
         .expect("source knowledge-compilation trace must satisfy production metrics");
@@ -19660,8 +18692,6 @@ fn accepted_gpu_execution_results_gate_batched_probabilistic_knowledge_compilati
     assert_eq!(trace.gpu_knowledge_compilation_end_to_end_runs, 2);
     assert_eq!(trace.gpu_source_knowledge_compilation_end_to_end_runs, 2);
     assert_eq!(trace.gpu_program_knowledge_compilation_end_to_end_runs, 0);
-    assert_eq!(trace.cpu_only_probability_recomputations, 0);
-    assert_eq!(trace.fixture_circuit_evaluations, 0);
     trace
         .require_production_metric_eligibility()
         .expect("batched source knowledge-compilation trace must satisfy production metrics");
@@ -19755,8 +18785,6 @@ fn accepted_gpu_execution_results_gate_batched_probabilistic_program_knowledge_c
     assert_eq!(trace.gpu_knowledge_compilation_end_to_end_runs, 2);
     assert_eq!(trace.gpu_source_knowledge_compilation_end_to_end_runs, 0);
     assert_eq!(trace.gpu_program_knowledge_compilation_end_to_end_runs, 2);
-    assert_eq!(trace.cpu_only_probability_recomputations, 0);
-    assert_eq!(trace.fixture_circuit_evaluations, 0);
     trace.require_production_metric_eligibility().expect(
         "batched parsed-program knowledge-compilation trace must satisfy production metrics",
     );
@@ -19833,8 +18861,6 @@ fn accepted_gpu_execution_result_conditions_zero_arity_probabilistic_evidence() 
     assert_eq!(trace.gpu_exact_source_compiles, 1);
     assert_eq!(trace.gpu_exact_query_evaluations, 1);
     assert_eq!(trace.gpu_knowledge_compilation_end_to_end_runs, 1);
-    assert_eq!(trace.cpu_only_probability_recomputations, 0);
-    assert_eq!(trace.fixture_circuit_evaluations, 0);
     trace
         .require_conditioned_evidence_metric_eligibility()
         .expect("zero-arity conditioned trace must satisfy production metrics");
@@ -19914,8 +18940,6 @@ fn accepted_gpu_execution_result_conditions_nonzero_arity_probabilistic_evidence
     assert_eq!(trace.gpu_exact_source_compiles, 1);
     assert_eq!(trace.gpu_exact_query_evaluations, 1);
     assert_eq!(trace.gpu_knowledge_compilation_end_to_end_runs, 1);
-    assert_eq!(trace.cpu_only_probability_recomputations, 0);
-    assert_eq!(trace.fixture_circuit_evaluations, 0);
     trace
         .require_conditioned_evidence_metric_eligibility()
         .expect("nonzero-arity conditioned trace must satisfy production metrics");
@@ -19984,8 +19008,6 @@ fn accepted_gpu_execution_result_updates_incremental_probability_circuit() {
     assert_eq!(trace.gpu_exact_source_compiles, 0);
     assert_eq!(trace.gpu_exact_program_compiles, 0);
     assert_eq!(trace.gpu_exact_query_evaluations, 0);
-    assert_eq!(trace.cpu_only_probability_recomputations, 0);
-    assert_eq!(trace.fixture_circuit_evaluations, 0);
     let metric_err = trace
         .require_production_metric_eligibility()
         .expect_err("incremental fixture circuit update alone must not satisfy production metrics");
@@ -20082,8 +19104,6 @@ fn accepted_ternary_probabilistic_evidence_records_nonzero_arity_trace() {
     assert_eq!(trace.gpu_program_conditioned_max_evidence_arity, 0);
     assert_eq!(trace.gpu_exact_source_compiles, 1);
     assert_eq!(trace.gpu_exact_query_evaluations, 1);
-    assert_eq!(trace.cpu_only_probability_recomputations, 0);
-    assert_eq!(trace.fixture_circuit_evaluations, 0);
     trace
         .require_conditioned_evidence_metric_eligibility()
         .expect("ternary source-conditioned trace must satisfy production metrics");
@@ -20183,8 +19203,6 @@ fn accepted_quaternary_source_probabilistic_evidence_records_nonzero_arity_trace
     assert_eq!(trace.gpu_knowledge_compilation_end_to_end_runs, 1);
     assert_eq!(trace.gpu_source_knowledge_compilation_end_to_end_runs, 1);
     assert_eq!(trace.gpu_program_knowledge_compilation_end_to_end_runs, 0);
-    assert_eq!(trace.cpu_only_probability_recomputations, 0);
-    assert_eq!(trace.fixture_circuit_evaluations, 0);
     trace
         .require_conditioned_evidence_metric_eligibility()
         .expect("quaternary source-conditioned trace must satisfy production metrics");
@@ -20288,8 +19306,6 @@ fn accepted_quaternary_parsed_program_probabilistic_evidence_records_nonzero_ari
     assert_eq!(trace.gpu_knowledge_compilation_end_to_end_runs, 1);
     assert_eq!(trace.gpu_program_knowledge_compilation_end_to_end_runs, 1);
     assert_eq!(trace.gpu_source_knowledge_compilation_end_to_end_runs, 0);
-    assert_eq!(trace.cpu_only_probability_recomputations, 0);
-    assert_eq!(trace.fixture_circuit_evaluations, 0);
     trace
         .require_conditioned_evidence_metric_eligibility()
         .expect("quaternary parsed-program conditioned trace must satisfy production metrics");
@@ -20345,8 +19361,6 @@ fn accepted_quaternary_gpu_execution_result_conditions_source_and_program_probab
         result.model_membership.tuple_source_key_column_device_reads,
         4
     );
-    assert_eq!(result.semantic_trace.cpu_candidate_enumerations, 0);
-    assert_eq!(result.semantic_trace.cpu_world_view_validations, 0);
 
     let probabilistic_source = r#"
         0.8::fact4(2, 3, 4, 5).
@@ -20418,8 +19432,6 @@ fn accepted_quaternary_gpu_execution_result_conditions_source_and_program_probab
     assert_eq!(trace.gpu_knowledge_compilation_end_to_end_runs, 2);
     assert_eq!(trace.gpu_source_knowledge_compilation_end_to_end_runs, 1);
     assert_eq!(trace.gpu_program_knowledge_compilation_end_to_end_runs, 1);
-    assert_eq!(trace.cpu_only_probability_recomputations, 0);
-    assert_eq!(trace.fixture_circuit_evaluations, 0);
     trace
         .require_conditioned_evidence_metric_eligibility()
         .expect("source/program conditioned evidence trace must satisfy production metrics");
@@ -20487,8 +19499,6 @@ fn accepted_quaternary_gpu_execution_result_gates_source_and_program_pir_cnf_and
         result.model_membership.tuple_source_key_column_device_reads,
         4
     );
-    assert_eq!(result.semantic_trace.cpu_candidate_enumerations, 0);
-    assert_eq!(result.semantic_trace.cpu_world_view_validations, 0);
     assert_eq!(result.transfer_budget.tracked_dtoh_calls, 0);
 
     let assumptions = [EpistemicAssumption::known_tuple(
@@ -20551,8 +19561,6 @@ fn accepted_quaternary_gpu_execution_result_gates_source_and_program_pir_cnf_and
     assert_eq!(pir_trace.gpu_cnf_encodes, 2);
     assert_eq!(pir_trace.gpu_source_cnf_encodes, 1);
     assert_eq!(pir_trace.gpu_program_cnf_encodes, 1);
-    assert_eq!(pir_trace.cpu_only_probability_recomputations, 0);
-    assert_eq!(pir_trace.fixture_circuit_evaluations, 0);
     pir_trace
         .require_production_metric_eligibility()
         .expect("quaternary source/program PIR/CNF trace must satisfy production metrics");
@@ -20601,8 +19609,6 @@ fn accepted_quaternary_gpu_execution_result_gates_source_and_program_pir_cnf_and
     assert_eq!(query_trace.gpu_exact_program_compiles, 1);
     assert_eq!(query_trace.gpu_exact_query_evaluations, 2);
     assert_eq!(query_trace.gpu_exact_gradient_evaluations, 0);
-    assert_eq!(query_trace.cpu_only_probability_recomputations, 0);
-    assert_eq!(query_trace.fixture_circuit_evaluations, 0);
     query_trace
         .require_production_metric_eligibility()
         .expect("quaternary source/program exact query trace must satisfy production metrics");
@@ -20651,8 +19657,6 @@ fn accepted_quaternary_gpu_execution_result_gates_source_and_program_pir_cnf_and
     assert_eq!(gradient_trace.gpu_exact_program_compiles, 1);
     assert_eq!(gradient_trace.gpu_exact_query_evaluations, 0);
     assert_eq!(gradient_trace.gpu_exact_gradient_evaluations, 2);
-    assert_eq!(gradient_trace.cpu_only_probability_recomputations, 0);
-    assert_eq!(gradient_trace.fixture_circuit_evaluations, 0);
     gradient_trace
         .require_production_metric_eligibility()
         .expect("quaternary source/program exact gradient trace must satisfy production metrics");
@@ -20763,8 +19767,6 @@ fn accepted_quaternary_not_possible_probabilistic_evidence_records_negative_nonz
     assert_eq!(trace.gpu_knowledge_compilation_end_to_end_runs, 1);
     assert_eq!(trace.gpu_source_knowledge_compilation_end_to_end_runs, 1);
     assert_eq!(trace.gpu_program_knowledge_compilation_end_to_end_runs, 0);
-    assert_eq!(trace.cpu_only_probability_recomputations, 0);
-    assert_eq!(trace.fixture_circuit_evaluations, 0);
     trace
         .require_conditioned_evidence_metric_eligibility()
         .expect("not-possible source-conditioned trace must satisfy production metrics");
@@ -20880,8 +19882,6 @@ fn accepted_quaternary_not_possible_parsed_program_probabilistic_evidence_record
     assert_eq!(trace.gpu_knowledge_compilation_end_to_end_runs, 1);
     assert_eq!(trace.gpu_program_knowledge_compilation_end_to_end_runs, 1);
     assert_eq!(trace.gpu_source_knowledge_compilation_end_to_end_runs, 0);
-    assert_eq!(trace.cpu_only_probability_recomputations, 0);
-    assert_eq!(trace.fixture_circuit_evaluations, 0);
     trace
         .require_conditioned_evidence_metric_eligibility()
         .expect("not-possible parsed-program conditioned trace must satisfy production metrics");
@@ -20940,8 +19940,6 @@ fn accepted_quaternary_not_possible_conditions_source_and_program_probabilistic_
         result.model_membership.tuple_source_key_column_device_reads,
         4
     );
-    assert_eq!(result.semantic_trace.cpu_candidate_enumerations, 0);
-    assert_eq!(result.semantic_trace.cpu_world_view_validations, 0);
 
     let probabilistic_source = r#"
         0.8::fact4(1, 2, 3, 4).
@@ -21018,8 +20016,6 @@ fn accepted_quaternary_not_possible_conditions_source_and_program_probabilistic_
     assert_eq!(trace.gpu_knowledge_compilation_end_to_end_runs, 2);
     assert_eq!(trace.gpu_source_knowledge_compilation_end_to_end_runs, 1);
     assert_eq!(trace.gpu_program_knowledge_compilation_end_to_end_runs, 1);
-    assert_eq!(trace.cpu_only_probability_recomputations, 0);
-    assert_eq!(trace.fixture_circuit_evaluations, 0);
     trace
         .require_conditioned_evidence_metric_eligibility()
         .expect("source/program conditioned evidence trace must satisfy production metrics");
@@ -21083,8 +20079,6 @@ fn accepted_quaternary_not_possible_gates_source_and_program_pir_cnf_and_exact_e
         result.model_membership.tuple_source_key_column_device_reads,
         4
     );
-    assert_eq!(result.semantic_trace.cpu_candidate_enumerations, 0);
-    assert_eq!(result.semantic_trace.cpu_world_view_validations, 0);
     assert_eq!(result.transfer_budget.tracked_dtoh_calls, 0);
 
     let assumptions = [EpistemicAssumption::possible_tuple(
@@ -21147,8 +20141,6 @@ fn accepted_quaternary_not_possible_gates_source_and_program_pir_cnf_and_exact_e
     assert_eq!(pir_trace.gpu_cnf_encodes, 2);
     assert_eq!(pir_trace.gpu_source_cnf_encodes, 1);
     assert_eq!(pir_trace.gpu_program_cnf_encodes, 1);
-    assert_eq!(pir_trace.cpu_only_probability_recomputations, 0);
-    assert_eq!(pir_trace.fixture_circuit_evaluations, 0);
     pir_trace
         .require_production_metric_eligibility()
         .expect("not-possible source/program PIR/CNF trace must satisfy production metrics");
@@ -21197,8 +20189,6 @@ fn accepted_quaternary_not_possible_gates_source_and_program_pir_cnf_and_exact_e
     assert_eq!(query_trace.gpu_exact_program_compiles, 1);
     assert_eq!(query_trace.gpu_exact_query_evaluations, 2);
     assert_eq!(query_trace.gpu_exact_gradient_evaluations, 0);
-    assert_eq!(query_trace.cpu_only_probability_recomputations, 0);
-    assert_eq!(query_trace.fixture_circuit_evaluations, 0);
     query_trace
         .require_production_metric_eligibility()
         .expect("not-possible source/program exact query trace must satisfy production metrics");
@@ -21247,8 +20237,6 @@ fn accepted_quaternary_not_possible_gates_source_and_program_pir_cnf_and_exact_e
     assert_eq!(gradient_trace.gpu_exact_program_compiles, 1);
     assert_eq!(gradient_trace.gpu_exact_query_evaluations, 0);
     assert_eq!(gradient_trace.gpu_exact_gradient_evaluations, 2);
-    assert_eq!(gradient_trace.cpu_only_probability_recomputations, 0);
-    assert_eq!(gradient_trace.fixture_circuit_evaluations, 0);
     gradient_trace
         .require_production_metric_eligibility()
         .expect("not-possible source/program exact gradient trace must satisfy production metrics");
@@ -21327,8 +20315,6 @@ fn accepted_quaternary_possible_and_not_know_results_gate_solver_and_probabilist
             result.model_membership.tuple_source_key_column_device_reads,
             4
         );
-        assert_eq!(result.semantic_trace.cpu_candidate_enumerations, 0);
-        assert_eq!(result.semantic_trace.cpu_world_view_validations, 0);
         assert_eq!(result.transfer_budget.tracked_dtoh_calls, 0);
         assert_eq!(
             download_quaternary_u32(&fix.provider, &result.final_output),
@@ -21405,8 +20391,6 @@ fn accepted_quaternary_possible_and_not_know_results_gate_solver_and_probabilist
         0
     );
     assert_eq!(solver_trace.gpu_cdcl_sat_solves, 2);
-    assert_eq!(solver_trace.cpu_assignment_enumerations, 0);
-    assert_eq!(solver_trace.cpu_maxsat_enumerations, 0);
     solver_trace
         .require_production_metric_eligibility()
         .expect("quaternary possible/not-know solver trace must satisfy production metrics");
@@ -21508,8 +20492,6 @@ fn accepted_quaternary_possible_and_not_know_results_gate_solver_and_probabilist
         prob_trace.gpu_program_knowledge_compilation_end_to_end_runs,
         0
     );
-    assert_eq!(prob_trace.cpu_only_probability_recomputations, 0);
-    assert_eq!(prob_trace.fixture_circuit_evaluations, 0);
     prob_trace
         .require_conditioned_evidence_metric_eligibility()
         .expect(
@@ -21591,8 +20573,6 @@ fn accepted_quaternary_possible_and_not_know_results_gate_solver_reuse_maxsat_an
             result.model_membership.tuple_source_key_column_device_reads,
             4
         );
-        assert_eq!(result.semantic_trace.cpu_candidate_enumerations, 0);
-        assert_eq!(result.semantic_trace.cpu_world_view_validations, 0);
         assert_eq!(result.transfer_budget.tracked_dtoh_calls, 0);
         assert_eq!(
             download_quaternary_u32(&fix.provider, &result.final_output),
@@ -21715,7 +20695,6 @@ fn accepted_quaternary_possible_and_not_know_results_gate_solver_reuse_maxsat_an
     assert_eq!(learned.gpu_learned_clause_arena_publications, 2);
     assert_eq!(learned.gpu_learned_clause_imports, 2);
     assert_eq!(learned.gpu_learned_clause_reused_solves, 2);
-    assert_eq!(learned.cpu_learned_clause_transfers, 0);
     assert_eq!(maxsat.candidate_evidence_records, 2);
     assert_eq!(maxsat.optimum_score, 7);
     assert_eq!(maxsat.candidates_checked, 4);
@@ -21749,7 +20728,6 @@ fn accepted_quaternary_possible_and_not_know_results_gate_solver_reuse_maxsat_an
     assert_eq!(trace.gpu_learned_clause_arena_publications, 2);
     assert_eq!(trace.gpu_learned_clause_imports, 2);
     assert_eq!(trace.gpu_learned_clause_reused_solves, 2);
-    assert_eq!(trace.cpu_learned_clause_transfers, 0);
     assert_eq!(trace.gpu_maxsat_candidate_solves, 6);
     assert_eq!(trace.gpu_maxsat_optima, 4);
     assert_eq!(trace.gpu_portfolio_jobs, 8);
@@ -21757,8 +20735,6 @@ fn accepted_quaternary_possible_and_not_know_results_gate_solver_reuse_maxsat_an
     assert_eq!(trace.gpu_portfolio_maxsat_jobs, 2);
     assert_eq!(trace.gpu_portfolio_unknown_status_jobs, 2);
     assert_eq!(trace.gpu_portfolio_timeout_status_jobs, 2);
-    assert_eq!(trace.cpu_assignment_enumerations, 0);
-    assert_eq!(trace.cpu_maxsat_enumerations, 0);
     assert_uncertified_maxsat_metric_rejected(&trace);
 }
 
@@ -21835,8 +20811,6 @@ fn accepted_quaternary_possible_and_not_know_results_gate_solver_search_and_sche
             result.model_membership.tuple_source_key_column_device_reads,
             4
         );
-        assert_eq!(result.semantic_trace.cpu_candidate_enumerations, 0);
-        assert_eq!(result.semantic_trace.cpu_world_view_validations, 0);
         assert_eq!(result.transfer_budget.tracked_dtoh_calls, 0);
         assert_eq!(
             download_quaternary_u32(&fix.provider, &result.final_output),
@@ -21949,8 +20923,6 @@ fn accepted_quaternary_possible_and_not_know_results_gate_solver_search_and_sche
     assert_eq!(search_trace.gpu_maxsat_candidate_solves, 4);
     assert_eq!(search_trace.gpu_maxsat_unsat_candidate_prunes, 2);
     assert_eq!(search_trace.gpu_maxsat_optima, 2);
-    assert_eq!(search_trace.cpu_assignment_enumerations, 0);
-    assert_eq!(search_trace.cpu_maxsat_enumerations, 0);
     assert_uncertified_maxsat_metric_rejected(&search_trace);
 
     let weighted = SolveInstance::with_weights(
@@ -22020,8 +20992,6 @@ fn accepted_quaternary_possible_and_not_know_results_gate_solver_search_and_sche
     assert_eq!(encoded_trace.gpu_maxsat_candidate_solves, 6);
     assert_eq!(encoded_trace.gpu_maxsat_unsat_candidate_prunes, 2);
     assert_eq!(encoded_trace.gpu_maxsat_optima, 2);
-    assert_eq!(encoded_trace.cpu_assignment_enumerations, 0);
-    assert_eq!(encoded_trace.cpu_maxsat_enumerations, 0);
     encoded_trace
         .require_production_metric_eligibility()
         .expect(
@@ -22127,8 +21097,6 @@ fn accepted_quaternary_possible_and_not_know_results_gate_solver_search_and_sche
     assert_eq!(scheduler_trace.gpu_maxsat_candidate_solves, 14);
     assert_eq!(scheduler_trace.gpu_maxsat_unsat_candidate_prunes, 4);
     assert_eq!(scheduler_trace.gpu_maxsat_optima, 6);
-    assert_eq!(scheduler_trace.cpu_assignment_enumerations, 0);
-    assert_eq!(scheduler_trace.cpu_maxsat_enumerations, 0);
     assert_uncertified_maxsat_metric_rejected(&scheduler_trace);
 }
 
@@ -22190,8 +21158,6 @@ fn accepted_quaternary_possible_and_not_know_results_gate_source_conditioned_pro
             result.model_membership.tuple_source_key_column_device_reads,
             4
         );
-        assert_eq!(result.semantic_trace.cpu_candidate_enumerations, 0);
-        assert_eq!(result.semantic_trace.cpu_world_view_validations, 0);
         assert_eq!(
             download_quaternary_u32(&fix.provider, &result.final_output),
             expected_rows,
@@ -22324,8 +21290,6 @@ fn accepted_quaternary_possible_and_not_know_results_gate_source_conditioned_pro
     assert_eq!(trace.gpu_knowledge_compilation_end_to_end_runs, 2);
     assert_eq!(trace.gpu_source_knowledge_compilation_end_to_end_runs, 2);
     assert_eq!(trace.gpu_program_knowledge_compilation_end_to_end_runs, 0);
-    assert_eq!(trace.cpu_only_probability_recomputations, 0);
-    assert_eq!(trace.fixture_circuit_evaluations, 0);
     trace
         .require_conditioned_evidence_metric_eligibility()
         .expect("quaternary source-conditioned gradient trace must satisfy production metrics");
@@ -22403,8 +21367,6 @@ fn accepted_quaternary_possible_and_not_know_results_gate_source_pir_cnf_and_exa
             result.model_membership.tuple_source_key_column_device_reads,
             4
         );
-        assert_eq!(result.semantic_trace.cpu_candidate_enumerations, 0);
-        assert_eq!(result.semantic_trace.cpu_world_view_validations, 0);
         assert_eq!(result.transfer_budget.tracked_dtoh_calls, 0);
         assert_eq!(
             download_quaternary_u32(&fix.provider, &result.final_output),
@@ -22515,8 +21477,6 @@ fn accepted_quaternary_possible_and_not_know_results_gate_source_pir_cnf_and_exa
     assert_eq!(pir_trace.gpu_cnf_encodes, 2);
     assert_eq!(pir_trace.gpu_source_cnf_encodes, 2);
     assert_eq!(pir_trace.gpu_program_cnf_encodes, 0);
-    assert_eq!(pir_trace.cpu_only_probability_recomputations, 0);
-    assert_eq!(pir_trace.fixture_circuit_evaluations, 0);
     pir_trace
         .require_production_metric_eligibility()
         .expect("quaternary source PIR/CNF trace must satisfy production metrics");
@@ -22558,8 +21518,6 @@ fn accepted_quaternary_possible_and_not_know_results_gate_source_pir_cnf_and_exa
     assert_eq!(query_trace.gpu_exact_program_compiles, 0);
     assert_eq!(query_trace.gpu_exact_query_evaluations, 2);
     assert_eq!(query_trace.gpu_exact_gradient_evaluations, 0);
-    assert_eq!(query_trace.cpu_only_probability_recomputations, 0);
-    assert_eq!(query_trace.fixture_circuit_evaluations, 0);
     query_trace
         .require_production_metric_eligibility()
         .expect("quaternary source exact query trace must satisfy production metrics");
@@ -22601,8 +21559,6 @@ fn accepted_quaternary_possible_and_not_know_results_gate_source_pir_cnf_and_exa
     assert_eq!(gradient_trace.gpu_exact_program_compiles, 0);
     assert_eq!(gradient_trace.gpu_exact_query_evaluations, 0);
     assert_eq!(gradient_trace.gpu_exact_gradient_evaluations, 2);
-    assert_eq!(gradient_trace.cpu_only_probability_recomputations, 0);
-    assert_eq!(gradient_trace.fixture_circuit_evaluations, 0);
     gradient_trace
         .require_production_metric_eligibility()
         .expect("quaternary source exact gradient trace must satisfy production metrics");
@@ -22671,8 +21627,6 @@ fn accepted_quaternary_possible_and_not_know_results_gate_parsed_program_probabi
             result.model_membership.tuple_source_key_column_device_reads,
             4
         );
-        assert_eq!(result.semantic_trace.cpu_candidate_enumerations, 0);
-        assert_eq!(result.semantic_trace.cpu_world_view_validations, 0);
         assert_eq!(
             download_quaternary_u32(&fix.provider, &result.final_output),
             expected_rows,
@@ -22841,8 +21795,6 @@ fn accepted_quaternary_possible_and_not_know_results_gate_parsed_program_probabi
     assert_eq!(trace.gpu_knowledge_compilation_end_to_end_runs, 4);
     assert_eq!(trace.gpu_source_knowledge_compilation_end_to_end_runs, 0);
     assert_eq!(trace.gpu_program_knowledge_compilation_end_to_end_runs, 4);
-    assert_eq!(trace.cpu_only_probability_recomputations, 0);
-    assert_eq!(trace.fixture_circuit_evaluations, 0);
     trace
         .require_conditioned_evidence_metric_eligibility()
         .expect(
@@ -22914,8 +21866,6 @@ fn accepted_quaternary_possible_and_not_know_results_gate_parsed_program_pir_cnf
             result.model_membership.tuple_source_key_column_device_reads,
             4
         );
-        assert_eq!(result.semantic_trace.cpu_candidate_enumerations, 0);
-        assert_eq!(result.semantic_trace.cpu_world_view_validations, 0);
         assert_eq!(
             download_quaternary_u32(&fix.provider, &result.final_output),
             expected_rows,
@@ -23028,8 +21978,6 @@ fn accepted_quaternary_possible_and_not_know_results_gate_parsed_program_pir_cnf
     assert_eq!(pir_trace.gpu_cnf_encodes, 2);
     assert_eq!(pir_trace.gpu_program_cnf_encodes, 2);
     assert_eq!(pir_trace.gpu_source_cnf_encodes, 0);
-    assert_eq!(pir_trace.cpu_only_probability_recomputations, 0);
-    assert_eq!(pir_trace.fixture_circuit_evaluations, 0);
     pir_trace
         .require_production_metric_eligibility()
         .expect("quaternary parsed-program PIR/CNF trace must satisfy production metrics");
@@ -23073,8 +22021,6 @@ fn accepted_quaternary_possible_and_not_know_results_gate_parsed_program_pir_cnf
     assert_eq!(query_trace.gpu_exact_program_compiles, 1);
     assert_eq!(query_trace.gpu_exact_query_evaluations, 2);
     assert_eq!(query_trace.gpu_exact_gradient_evaluations, 0);
-    assert_eq!(query_trace.cpu_only_probability_recomputations, 0);
-    assert_eq!(query_trace.fixture_circuit_evaluations, 0);
     query_trace
         .require_production_metric_eligibility()
         .expect("quaternary parsed-program exact query trace must satisfy production metrics");
@@ -23118,8 +22064,6 @@ fn accepted_quaternary_possible_and_not_know_results_gate_parsed_program_pir_cnf
     assert_eq!(gradient_trace.gpu_exact_program_compiles, 1);
     assert_eq!(gradient_trace.gpu_exact_query_evaluations, 0);
     assert_eq!(gradient_trace.gpu_exact_gradient_evaluations, 2);
-    assert_eq!(gradient_trace.cpu_only_probability_recomputations, 0);
-    assert_eq!(gradient_trace.fixture_circuit_evaluations, 0);
     gradient_trace
         .require_production_metric_eligibility()
         .expect("quaternary parsed-program exact gradient trace must satisfy production metrics");
@@ -23201,8 +22145,6 @@ fn accepted_gpu_execution_result_conditions_negative_nonzero_arity_probabilistic
     assert_eq!(trace.gpu_conditioned_negative_evidence_facts, 1);
     assert_eq!(trace.gpu_exact_source_compiles, 1);
     assert_eq!(trace.gpu_exact_query_evaluations, 1);
-    assert_eq!(trace.cpu_only_probability_recomputations, 0);
-    assert_eq!(trace.fixture_circuit_evaluations, 0);
     trace
         .require_conditioned_evidence_metric_eligibility()
         .expect("negative nonzero-arity conditioned trace must satisfy production metrics");
@@ -23264,8 +22206,6 @@ fn accepted_possible_operator_conditions_probabilistic_evidence() {
     assert_eq!(trace.gpu_conditioned_negative_evidence_facts, 0);
     assert_eq!(trace.gpu_exact_source_compiles, 1);
     assert_eq!(trace.gpu_exact_query_evaluations, 1);
-    assert_eq!(trace.cpu_only_probability_recomputations, 0);
-    assert_eq!(trace.fixture_circuit_evaluations, 0);
     trace
         .require_conditioned_evidence_metric_eligibility()
         .expect("possible operator conditioned trace must satisfy production metrics");
@@ -23331,8 +22271,6 @@ fn accepted_not_possible_operator_conditions_negative_probabilistic_evidence() {
     assert_eq!(trace.gpu_conditioned_negative_evidence_facts, 1);
     assert_eq!(trace.gpu_exact_source_compiles, 1);
     assert_eq!(trace.gpu_exact_query_evaluations, 1);
-    assert_eq!(trace.cpu_only_probability_recomputations, 0);
-    assert_eq!(trace.fixture_circuit_evaluations, 0);
     trace
         .require_conditioned_evidence_metric_eligibility()
         .expect("not-possible operator conditioned trace must satisfy production metrics");
@@ -23401,8 +22339,6 @@ fn accepted_binary_not_know_operator_conditions_negative_probabilistic_evidence(
     assert_eq!(trace.gpu_conditioned_negative_evidence_facts, 1);
     assert_eq!(trace.gpu_exact_source_compiles, 1);
     assert_eq!(trace.gpu_exact_query_evaluations, 1);
-    assert_eq!(trace.cpu_only_probability_recomputations, 0);
-    assert_eq!(trace.fixture_circuit_evaluations, 0);
     trace
         .require_conditioned_evidence_metric_eligibility()
         .expect("binary not-know operator conditioned trace must satisfy production metrics");
@@ -23467,8 +22403,6 @@ fn accepted_binary_possible_operator_conditions_probabilistic_evidence() {
     assert_eq!(trace.gpu_conditioned_negative_evidence_facts, 0);
     assert_eq!(trace.gpu_exact_source_compiles, 1);
     assert_eq!(trace.gpu_exact_query_evaluations, 1);
-    assert_eq!(trace.cpu_only_probability_recomputations, 0);
-    assert_eq!(trace.fixture_circuit_evaluations, 0);
     trace
         .require_conditioned_evidence_metric_eligibility()
         .expect("binary possible operator conditioned trace must satisfy production metrics");
@@ -23537,8 +22471,6 @@ fn accepted_binary_not_possible_operator_conditions_negative_probabilistic_evide
     assert_eq!(trace.gpu_conditioned_negative_evidence_facts, 1);
     assert_eq!(trace.gpu_exact_source_compiles, 1);
     assert_eq!(trace.gpu_exact_query_evaluations, 1);
-    assert_eq!(trace.cpu_only_probability_recomputations, 0);
-    assert_eq!(trace.fixture_circuit_evaluations, 0);
     trace
         .require_conditioned_evidence_metric_eligibility()
         .expect("binary not-possible operator conditioned trace must satisfy production metrics");
@@ -23695,8 +22627,6 @@ fn accepted_operator_conditions_record_probabilistic_operator_trace_counters() {
     assert_eq!(trace.gpu_conditioned_not_possible_evidence_facts, 1);
     assert_eq!(trace.gpu_exact_source_compiles, 4);
     assert_eq!(trace.gpu_exact_query_evaluations, 4);
-    assert_eq!(trace.cpu_only_probability_recomputations, 0);
-    assert_eq!(trace.fixture_circuit_evaluations, 0);
     trace
         .require_conditioned_evidence_metric_eligibility()
         .expect(
@@ -23726,8 +22656,6 @@ fn accepted_all_operator_mixed_membership_conditions_probabilistic_evidence() {
         result.final_tuple_materialization.negated_row_filter_count,
         2
     );
-    assert_eq!(result.semantic_trace.cpu_candidate_enumerations, 0);
-    assert_eq!(result.semantic_trace.cpu_world_view_validations, 0);
 
     let mut config = GpuConfig::default();
     config.device_ordinal = 0;
@@ -23778,8 +22706,6 @@ fn accepted_all_operator_mixed_membership_conditions_probabilistic_evidence() {
     assert_eq!(trace.gpu_source_conditioned_not_possible_evidence_facts, 1);
     assert_eq!(trace.gpu_exact_source_compiles, 1);
     assert_eq!(trace.gpu_exact_query_evaluations, 1);
-    assert_eq!(trace.cpu_only_probability_recomputations, 0);
-    assert_eq!(trace.fixture_circuit_evaluations, 0);
     trace
         .require_conditioned_evidence_metric_eligibility()
         .expect("all-operator mixed membership conditioned trace must satisfy production metrics");
@@ -23890,8 +22816,6 @@ fn accepted_all_operator_mixed_membership_gates_probabilistic_program_gradient_a
     assert_eq!(trace.gpu_program_pir_graph_uploads, 1);
     assert_eq!(trace.gpu_cnf_encodes, 1);
     assert_eq!(trace.gpu_program_cnf_encodes, 1);
-    assert_eq!(trace.cpu_only_probability_recomputations, 0);
-    assert_eq!(trace.fixture_circuit_evaluations, 0);
     trace
         .require_production_metric_eligibility()
         .expect("source/program PIR/CNF trace must satisfy production metrics");
@@ -23915,8 +22839,6 @@ fn accepted_all_operator_mixed_membership_pir_cnf_rejects_partial_evidence_condi
         result.final_tuple_materialization.negated_row_filter_count,
         2
     );
-    assert_eq!(result.semantic_trace.cpu_candidate_enumerations, 0);
-    assert_eq!(result.semantic_trace.cpu_world_view_validations, 0);
 
     let mut config = GpuConfig::default();
     config.device_ordinal = 0;
@@ -23954,8 +22876,6 @@ fn accepted_all_operator_mixed_membership_gates_probabilistic_source_pir_and_exa
     assert_eq!(result.prepared.preflight.possible_operator_count, 1);
     assert_eq!(result.prepared.preflight.not_know_operator_count, 1);
     assert_eq!(result.prepared.preflight.not_possible_operator_count, 1);
-    assert_eq!(result.semantic_trace.cpu_candidate_enumerations, 0);
-    assert_eq!(result.semantic_trace.cpu_world_view_validations, 0);
 
     let probabilistic_source = r#"
         0.3::edge(2).
@@ -24088,8 +23008,6 @@ fn accepted_all_operator_mixed_membership_gates_probabilistic_source_pir_and_exa
     assert_eq!(trace.gpu_cnf_encodes, 1);
     assert_eq!(trace.gpu_source_cnf_encodes, 1);
     assert_eq!(trace.gpu_program_cnf_encodes, 0);
-    assert_eq!(trace.cpu_only_probability_recomputations, 0);
-    assert_eq!(trace.fixture_circuit_evaluations, 0);
     trace
         .require_conditioned_evidence_metric_eligibility()
         .expect("all-operator source probability trace must satisfy production metrics");
@@ -24112,8 +23030,6 @@ fn accepted_all_operator_mixed_membership_gates_probabilistic_program_exact_eval
     assert_eq!(result.prepared.preflight.possible_operator_count, 1);
     assert_eq!(result.prepared.preflight.not_know_operator_count, 1);
     assert_eq!(result.prepared.preflight.not_possible_operator_count, 1);
-    assert_eq!(result.semantic_trace.cpu_candidate_enumerations, 0);
-    assert_eq!(result.semantic_trace.cpu_world_view_validations, 0);
 
     let prob_program = parse_program(
         r#"
@@ -24192,8 +23108,6 @@ fn accepted_all_operator_mixed_membership_gates_probabilistic_program_exact_eval
     assert_eq!(trace.gpu_exact_query_evaluations, 1);
     assert_eq!(trace.gpu_exact_gradient_evaluations, 1);
     assert_eq!(trace.gpu_program_exact_gradient_evaluations, 1);
-    assert_eq!(trace.cpu_only_probability_recomputations, 0);
-    assert_eq!(trace.fixture_circuit_evaluations, 0);
     trace
         .require_production_metric_eligibility()
         .expect("all-operator parsed-program exact trace must satisfy production metrics");
@@ -24302,8 +23216,6 @@ fn conditioned_probabilistic_evidence_records_source_and_program_trace_counters(
     assert_eq!(trace.gpu_exact_program_compiles, 1);
     assert_eq!(trace.gpu_source_knowledge_compilation_end_to_end_runs, 1);
     assert_eq!(trace.gpu_program_knowledge_compilation_end_to_end_runs, 1);
-    assert_eq!(trace.cpu_only_probability_recomputations, 0);
-    assert_eq!(trace.fixture_circuit_evaluations, 0);
     trace
         .require_conditioned_evidence_metric_eligibility()
         .expect("source/program conditioned evidence trace must satisfy production metrics");
@@ -24411,8 +23323,6 @@ fn conditioned_probabilistic_gradients_record_source_and_program_trace_counters(
     assert_eq!(trace.gpu_program_conditioned_gradient_evaluations, 1);
     assert_eq!(trace.gpu_source_knowledge_compilation_end_to_end_runs, 1);
     assert_eq!(trace.gpu_program_knowledge_compilation_end_to_end_runs, 1);
-    assert_eq!(trace.cpu_only_probability_recomputations, 0);
-    assert_eq!(trace.fixture_circuit_evaluations, 0);
     trace
         .require_conditioned_evidence_metric_eligibility()
         .expect("source/program conditioned gradient trace must satisfy production metrics");
@@ -24492,8 +23402,6 @@ fn accepted_gpu_execution_result_conditions_parsed_program_probabilistic_evidenc
     assert_eq!(trace.gpu_knowledge_compilation_end_to_end_runs, 1);
     assert_eq!(trace.gpu_program_knowledge_compilation_end_to_end_runs, 1);
     assert_eq!(trace.gpu_source_knowledge_compilation_end_to_end_runs, 0);
-    assert_eq!(trace.cpu_only_probability_recomputations, 0);
-    assert_eq!(trace.fixture_circuit_evaluations, 0);
     trace
         .require_conditioned_evidence_metric_eligibility()
         .expect("parsed-program conditioned trace must satisfy production metrics");
@@ -24583,8 +23491,6 @@ fn accepted_gpu_execution_result_conditions_negative_parsed_program_probabilisti
     assert_eq!(trace.gpu_knowledge_compilation_end_to_end_runs, 1);
     assert_eq!(trace.gpu_program_knowledge_compilation_end_to_end_runs, 1);
     assert_eq!(trace.gpu_source_knowledge_compilation_end_to_end_runs, 0);
-    assert_eq!(trace.cpu_only_probability_recomputations, 0);
-    assert_eq!(trace.fixture_circuit_evaluations, 0);
     trace
         .require_conditioned_evidence_metric_eligibility()
         .expect("negative parsed-program conditioned trace must satisfy production metrics");
@@ -24686,8 +23592,6 @@ fn accepted_gpu_execution_results_gate_batched_conditioned_probabilistic_queries
     assert_eq!(trace.gpu_knowledge_compilation_end_to_end_runs, 2);
     assert_eq!(trace.gpu_source_knowledge_compilation_end_to_end_runs, 2);
     assert_eq!(trace.gpu_program_knowledge_compilation_end_to_end_runs, 0);
-    assert_eq!(trace.cpu_only_probability_recomputations, 0);
-    assert_eq!(trace.fixture_circuit_evaluations, 0);
     trace
         .require_conditioned_evidence_metric_eligibility()
         .expect("batched source-conditioned query trace must satisfy production metrics");
@@ -24790,8 +23694,6 @@ fn accepted_gpu_execution_results_gate_batched_negative_conditioned_probabilisti
     assert_eq!(trace.gpu_knowledge_compilation_end_to_end_runs, 2);
     assert_eq!(trace.gpu_source_knowledge_compilation_end_to_end_runs, 2);
     assert_eq!(trace.gpu_program_knowledge_compilation_end_to_end_runs, 0);
-    assert_eq!(trace.cpu_only_probability_recomputations, 0);
-    assert_eq!(trace.fixture_circuit_evaluations, 0);
     trace
         .require_conditioned_evidence_metric_eligibility()
         .expect("batched negative source-conditioned query trace must satisfy production metrics");
@@ -24897,8 +23799,6 @@ fn accepted_gpu_execution_results_gate_batched_conditioned_parsed_program_querie
     assert_eq!(trace.gpu_knowledge_compilation_end_to_end_runs, 2);
     assert_eq!(trace.gpu_source_knowledge_compilation_end_to_end_runs, 0);
     assert_eq!(trace.gpu_program_knowledge_compilation_end_to_end_runs, 2);
-    assert_eq!(trace.cpu_only_probability_recomputations, 0);
-    assert_eq!(trace.fixture_circuit_evaluations, 0);
     trace
         .require_conditioned_evidence_metric_eligibility()
         .expect("batched parsed-program conditioned query trace must satisfy production metrics");
@@ -24978,8 +23878,6 @@ fn accepted_gpu_execution_result_conditions_probabilistic_gradient_evidence() {
     assert_eq!(trace.gpu_knowledge_compilation_end_to_end_runs, 1);
     assert_eq!(trace.gpu_source_knowledge_compilation_end_to_end_runs, 1);
     assert_eq!(trace.gpu_program_knowledge_compilation_end_to_end_runs, 0);
-    assert_eq!(trace.cpu_only_probability_recomputations, 0);
-    assert_eq!(trace.fixture_circuit_evaluations, 0);
     trace
         .require_conditioned_evidence_metric_eligibility()
         .expect("conditioned gradient trace must satisfy production metrics");
@@ -25086,8 +23984,6 @@ fn accepted_gpu_execution_results_gate_batched_conditioned_parsed_program_gradie
     assert_eq!(trace.gpu_knowledge_compilation_end_to_end_runs, 2);
     assert_eq!(trace.gpu_source_knowledge_compilation_end_to_end_runs, 0);
     assert_eq!(trace.gpu_program_knowledge_compilation_end_to_end_runs, 2);
-    assert_eq!(trace.cpu_only_probability_recomputations, 0);
-    assert_eq!(trace.fixture_circuit_evaluations, 0);
     trace
         .require_conditioned_evidence_metric_eligibility()
         .expect(
@@ -25162,8 +24058,6 @@ fn accepted_gpu_execution_result_gates_probabilistic_program_end_to_end_path() {
     assert_eq!(trace.gpu_knowledge_compilation_end_to_end_runs, 1);
     assert_eq!(trace.gpu_source_knowledge_compilation_end_to_end_runs, 0);
     assert_eq!(trace.gpu_program_knowledge_compilation_end_to_end_runs, 1);
-    assert_eq!(trace.cpu_only_probability_recomputations, 0);
-    assert_eq!(trace.fixture_circuit_evaluations, 0);
     trace
         .require_production_metric_eligibility()
         .expect("parsed-program probability trace must satisfy production metrics");
@@ -25245,8 +24139,6 @@ fn probabilistic_end_to_end_records_source_and_program_query_trace_counters() {
     assert_eq!(trace.gpu_knowledge_compilation_end_to_end_runs, 2);
     assert_eq!(trace.gpu_source_knowledge_compilation_end_to_end_runs, 1);
     assert_eq!(trace.gpu_program_knowledge_compilation_end_to_end_runs, 1);
-    assert_eq!(trace.cpu_only_probability_recomputations, 0);
-    assert_eq!(trace.fixture_circuit_evaluations, 0);
     trace
         .require_production_metric_eligibility()
         .expect("source/program probability trace must satisfy production metrics");
@@ -25315,8 +24207,6 @@ fn accepted_gpu_execution_result_gates_probabilistic_pir_cnf_path() {
     assert_eq!(trace.accepted_world_view_evidence_consumed, 1);
     assert_eq!(trace.gpu_pir_graph_uploads, 1);
     assert_eq!(trace.gpu_cnf_encodes, 1);
-    assert_eq!(trace.cpu_only_probability_recomputations, 0);
-    assert_eq!(trace.fixture_circuit_evaluations, 0);
     trace
         .require_production_metric_eligibility()
         .expect("single-result PIR/CNF trace must satisfy production metrics");
@@ -25398,8 +24288,6 @@ fn probabilistic_pir_cnf_records_source_and_program_trace_counters() {
     assert_eq!(trace.gpu_program_pir_graph_uploads, 1);
     assert_eq!(trace.gpu_source_cnf_encodes, 1);
     assert_eq!(trace.gpu_program_cnf_encodes, 1);
-    assert_eq!(trace.cpu_only_probability_recomputations, 0);
-    assert_eq!(trace.fixture_circuit_evaluations, 0);
     trace
         .require_production_metric_eligibility()
         .expect("source/program PIR/CNF counter trace must satisfy production metrics");
@@ -25495,8 +24383,6 @@ fn accepted_gpu_execution_results_gate_batched_probabilistic_source_pir_cnf_path
     assert_eq!(trace.accepted_evidence_assumptions_consumed, 2);
     assert_eq!(trace.gpu_pir_graph_uploads, 2);
     assert_eq!(trace.gpu_cnf_encodes, 2);
-    assert_eq!(trace.cpu_only_probability_recomputations, 0);
-    assert_eq!(trace.fixture_circuit_evaluations, 0);
     trace
         .require_production_metric_eligibility()
         .expect("batched source PIR/CNF trace must satisfy production metrics");
@@ -25596,8 +24482,6 @@ fn accepted_gpu_execution_results_gate_batched_probabilistic_program_pir_cnf_pat
     assert_eq!(trace.accepted_evidence_assumptions_consumed, 2);
     assert_eq!(trace.gpu_pir_graph_uploads, 2);
     assert_eq!(trace.gpu_cnf_encodes, 2);
-    assert_eq!(trace.cpu_only_probability_recomputations, 0);
-    assert_eq!(trace.fixture_circuit_evaluations, 0);
     trace
         .require_production_metric_eligibility()
         .expect("batched parsed-program PIR/CNF trace must satisfy production metrics");
@@ -25673,8 +24557,6 @@ fn accepted_gpu_execution_result_gates_probabilistic_gradient_evaluation_path() 
     assert_eq!(trace.accepted_world_view_evidence_consumed, 2);
     assert_eq!(trace.gpu_exact_source_compiles, 1);
     assert_eq!(trace.gpu_exact_gradient_evaluations, 1);
-    assert_eq!(trace.cpu_only_probability_recomputations, 0);
-    assert_eq!(trace.fixture_circuit_evaluations, 0);
     trace
         .require_production_metric_eligibility()
         .expect("single-result gradient trace must satisfy production metrics");
@@ -25778,8 +24660,6 @@ fn accepted_gpu_execution_results_gate_batched_probabilistic_gradient_evaluation
     assert_eq!(trace.gpu_exact_source_compiles, 1);
     assert_eq!(trace.gpu_exact_query_evaluations, 0);
     assert_eq!(trace.gpu_exact_gradient_evaluations, 2);
-    assert_eq!(trace.cpu_only_probability_recomputations, 0);
-    assert_eq!(trace.fixture_circuit_evaluations, 0);
     trace
         .require_production_metric_eligibility()
         .expect("batched gradient trace must satisfy production metrics");
@@ -25889,8 +24769,6 @@ fn accepted_split_batch_gates_probabilistic_pir_cnf_and_exact_evaluation_paths()
     assert_eq!(source_pir_trace.gpu_cnf_encodes, 2);
     assert_eq!(source_pir_trace.gpu_source_cnf_encodes, 2);
     assert_eq!(source_pir_trace.gpu_program_cnf_encodes, 0);
-    assert_eq!(source_pir_trace.cpu_only_probability_recomputations, 0);
-    assert_eq!(source_pir_trace.fixture_circuit_evaluations, 0);
     source_pir_trace
         .require_production_metric_eligibility()
         .expect("split source PIR/CNF trace must satisfy production metrics");
@@ -25926,8 +24804,6 @@ fn accepted_split_batch_gates_probabilistic_pir_cnf_and_exact_evaluation_paths()
     assert_eq!(program_pir_trace.gpu_cnf_encodes, 2);
     assert_eq!(program_pir_trace.gpu_source_cnf_encodes, 0);
     assert_eq!(program_pir_trace.gpu_program_cnf_encodes, 2);
-    assert_eq!(program_pir_trace.cpu_only_probability_recomputations, 0);
-    assert_eq!(program_pir_trace.fixture_circuit_evaluations, 0);
     program_pir_trace
         .require_production_metric_eligibility()
         .expect("split parsed-program PIR/CNF trace must satisfy production metrics");
@@ -25967,8 +24843,6 @@ fn accepted_split_batch_gates_probabilistic_pir_cnf_and_exact_evaluation_paths()
     assert_eq!(query_trace.gpu_exact_source_compiles, 1);
     assert_eq!(query_trace.gpu_exact_query_evaluations, 2);
     assert_eq!(query_trace.gpu_exact_gradient_evaluations, 0);
-    assert_eq!(query_trace.cpu_only_probability_recomputations, 0);
-    assert_eq!(query_trace.fixture_circuit_evaluations, 0);
     query_trace
         .require_production_metric_eligibility()
         .expect("split exact query trace must satisfy production metrics");
@@ -26008,8 +24882,6 @@ fn accepted_split_batch_gates_probabilistic_pir_cnf_and_exact_evaluation_paths()
     assert_eq!(gradient_trace.gpu_exact_source_compiles, 1);
     assert_eq!(gradient_trace.gpu_exact_query_evaluations, 0);
     assert_eq!(gradient_trace.gpu_exact_gradient_evaluations, 2);
-    assert_eq!(gradient_trace.cpu_only_probability_recomputations, 0);
-    assert_eq!(gradient_trace.fixture_circuit_evaluations, 0);
     gradient_trace
         .require_production_metric_eligibility()
         .expect("split exact gradient trace must satisfy production metrics");
@@ -26064,8 +24936,6 @@ fn accepted_gpu_execution_result_gates_solver_cdcl_sat_path() {
     let trace = adapter.trace();
     assert_eq!(trace.accepted_gpu_candidate_evidence_consumed, 1);
     assert_eq!(trace.gpu_cdcl_sat_solves, 1);
-    assert_eq!(trace.cpu_assignment_enumerations, 0);
-    assert_eq!(trace.cpu_maxsat_enumerations, 0);
     trace
         .require_production_metric_eligibility()
         .expect("CDCL SAT trace must satisfy production solver metrics");
@@ -26126,8 +24996,6 @@ fn accepted_gpu_execution_result_gates_solver_cdcl_unsat_path() {
     let trace = adapter.trace();
     assert_eq!(trace.accepted_gpu_candidate_evidence_consumed, 1);
     assert_eq!(trace.gpu_cdcl_unsat_solves, 1);
-    assert_eq!(trace.cpu_assignment_enumerations, 0);
-    assert_eq!(trace.cpu_maxsat_enumerations, 0);
     trace
         .require_production_metric_eligibility()
         .expect("CDCL UNSAT trace must satisfy production solver metrics");
@@ -26205,8 +25073,6 @@ fn accepted_gpu_execution_result_gates_solver_workspace_unsat_path() {
     let trace = adapter.trace();
     assert_eq!(trace.accepted_gpu_candidate_evidence_consumed, 1);
     assert_eq!(trace.gpu_cdcl_workspace_unsat_solves, 1);
-    assert_eq!(trace.cpu_assignment_enumerations, 0);
-    assert_eq!(trace.cpu_maxsat_enumerations, 0);
     trace
         .require_production_metric_eligibility()
         .expect("workspace UNSAT trace must satisfy production solver metrics");
@@ -26301,8 +25167,6 @@ fn accepted_gpu_execution_result_gates_solver_assumption_lifecycle_path() {
     assert_eq!(trace.gpu_lifecycle_workspace_reuses, 1);
     assert_eq!(trace.gpu_cdcl_sat_solves, 1);
     assert_eq!(trace.gpu_cdcl_workspace_unsat_solves, 1);
-    assert_eq!(trace.cpu_assignment_enumerations, 0);
-    assert_eq!(trace.cpu_maxsat_enumerations, 0);
     trace
         .require_production_metric_eligibility()
         .expect("assumption lifecycle trace must satisfy production solver metrics");
@@ -26410,8 +25274,6 @@ fn accepted_gpu_execution_result_gates_status_aware_solver_lifecycle_path() {
     assert_eq!(trace.gpu_cdcl_workspace_unsat_solves, 1);
     assert_eq!(trace.gpu_lifecycle_unknown_status_steps, 1);
     assert_eq!(trace.gpu_lifecycle_timeout_status_steps, 1);
-    assert_eq!(trace.cpu_assignment_enumerations, 0);
-    assert_eq!(trace.cpu_maxsat_enumerations, 0);
     trace
         .require_production_metric_eligibility()
         .expect("status-aware solver lifecycle trace must satisfy production metrics");
@@ -26510,8 +25372,6 @@ fn accepted_gpu_execution_results_gate_multi_candidate_solver_lifecycle_path() {
     assert_eq!(trace.gpu_lifecycle_workspace_reuses, 2);
     assert_eq!(trace.gpu_cdcl_sat_solves, 2);
     assert_eq!(trace.gpu_cdcl_workspace_unsat_solves, 2);
-    assert_eq!(trace.cpu_assignment_enumerations, 0);
-    assert_eq!(trace.cpu_maxsat_enumerations, 0);
     trace
         .require_production_metric_eligibility()
         .expect("multi-candidate lifecycle trace must satisfy production solver metrics");
@@ -26608,8 +25468,6 @@ fn accepted_gpu_execution_result_gates_solver_maxsat_lifecycle_path() {
     assert_eq!(trace.gpu_cdcl_workspace_unsat_solves, 1);
     assert_eq!(trace.gpu_maxsat_candidate_solves, 2);
     assert_eq!(trace.gpu_maxsat_optima, 1);
-    assert_eq!(trace.cpu_assignment_enumerations, 0);
-    assert_eq!(trace.cpu_maxsat_enumerations, 0);
     assert_uncertified_maxsat_metric_rejected(&trace);
 }
 
@@ -26682,8 +25540,6 @@ fn accepted_gpu_execution_result_rejects_empty_maxsat_lifecycle_before_lifecycle
     assert_eq!(trace.gpu_cdcl_workspace_unsat_solves, 0);
     assert_eq!(trace.gpu_maxsat_candidate_solves, 0);
     assert_eq!(trace.gpu_maxsat_optima, 0);
-    assert_eq!(trace.cpu_assignment_enumerations, 0);
-    assert_eq!(trace.cpu_maxsat_enumerations, 0);
 }
 
 #[test]
@@ -26876,8 +25732,6 @@ fn accepted_operator_gpu_execution_results_gate_solver_lifecycle_path() {
     assert_eq!(trace.gpu_lifecycle_workspace_reuses, 5);
     assert_eq!(trace.gpu_cdcl_sat_solves, 5);
     assert_eq!(trace.gpu_cdcl_workspace_unsat_solves, 5);
-    assert_eq!(trace.cpu_assignment_enumerations, 0);
-    assert_eq!(trace.cpu_maxsat_enumerations, 0);
     trace
         .require_production_metric_eligibility()
         .expect("operator lifecycle trace must satisfy production solver metrics");
@@ -26909,8 +25763,6 @@ fn accepted_all_operator_mixed_membership_gates_solver_lifecycle_path() {
         result.model_membership.tuple_source_key_column_device_reads,
         4
     );
-    assert_eq!(result.semantic_trace.cpu_candidate_enumerations, 0);
-    assert_eq!(result.semantic_trace.cpu_world_view_validations, 0);
 
     let sat_instance = SolveInstance::new(1, vec![Clause::new(vec![Literal::positive(0)])]);
     let unsat_instance = SolveInstance::new(
@@ -26980,8 +25832,6 @@ fn accepted_all_operator_mixed_membership_gates_solver_lifecycle_path() {
     assert_eq!(trace.gpu_lifecycle_workspace_reuses, 1);
     assert_eq!(trace.gpu_cdcl_sat_solves, 1);
     assert_eq!(trace.gpu_cdcl_workspace_unsat_solves, 1);
-    assert_eq!(trace.cpu_assignment_enumerations, 0);
-    assert_eq!(trace.cpu_maxsat_enumerations, 0);
     trace
         .require_production_metric_eligibility()
         .expect("all-operator lifecycle trace must satisfy production solver metrics");
@@ -27092,7 +25942,6 @@ fn accepted_all_operator_mixed_membership_gates_solver_reuse_maxsat_and_portfoli
     assert_eq!(learned.gpu_learned_clause_arena_publications, 1);
     assert_eq!(learned.gpu_learned_clause_imports, 1);
     assert_eq!(learned.gpu_learned_clause_reused_solves, 1);
-    assert_eq!(learned.cpu_learned_clause_transfers, 0);
     assert_eq!(maxsat.candidate_evidence_records, 1);
     assert_eq!(maxsat.optimum_score, 9);
     assert_eq!(maxsat.gpu_cdcl_candidate_encodes, 3);
@@ -27126,7 +25975,6 @@ fn accepted_all_operator_mixed_membership_gates_solver_reuse_maxsat_and_portfoli
     assert_eq!(trace.gpu_learned_clause_arena_publications, 1);
     assert_eq!(trace.gpu_learned_clause_imports, 1);
     assert_eq!(trace.gpu_learned_clause_reused_solves, 1);
-    assert_eq!(trace.cpu_learned_clause_transfers, 0);
     assert_eq!(trace.gpu_maxsat_candidate_encodes, 6);
     assert_eq!(trace.gpu_maxsat_candidate_solves, 6);
     assert_eq!(trace.gpu_maxsat_frontier_certified_candidate_solves, 6);
@@ -27137,8 +25985,6 @@ fn accepted_all_operator_mixed_membership_gates_solver_reuse_maxsat_and_portfoli
     assert_eq!(trace.gpu_portfolio_maxsat_jobs, 1);
     assert_eq!(trace.gpu_portfolio_unknown_status_jobs, 1);
     assert_eq!(trace.gpu_portfolio_timeout_status_jobs, 1);
-    assert_eq!(trace.cpu_assignment_enumerations, 0);
-    assert_eq!(trace.cpu_maxsat_enumerations, 0);
     trace
         .require_production_metric_eligibility()
         .expect("all-operator solver reuse trace must satisfy production metrics");
@@ -27164,8 +26010,6 @@ fn accepted_all_operator_mixed_membership_gates_solver_search_and_scheduler_path
         result.model_membership.tuple_source_key_column_device_reads,
         4
     );
-    assert_eq!(result.semantic_trace.cpu_candidate_enumerations, 0);
-    assert_eq!(result.semantic_trace.cpu_world_view_validations, 0);
 
     let sat_low = SolveInstance::new(1, vec![Clause::new(vec![Literal::positive(0)])]);
     let sat_high = SolveInstance::new(1, vec![Clause::new(vec![Literal::negative(0)])]);
@@ -27246,8 +26090,6 @@ fn accepted_all_operator_mixed_membership_gates_solver_search_and_scheduler_path
     assert_eq!(search_trace.gpu_maxsat_candidate_solves, 2);
     assert_eq!(search_trace.gpu_maxsat_unsat_candidate_prunes, 1);
     assert_eq!(search_trace.gpu_maxsat_optima, 1);
-    assert_eq!(search_trace.cpu_assignment_enumerations, 0);
-    assert_eq!(search_trace.cpu_maxsat_enumerations, 0);
 
     let weighted = SolveInstance::with_weights(
         1,
@@ -27324,8 +26166,6 @@ fn accepted_all_operator_mixed_membership_gates_solver_search_and_scheduler_path
     assert_eq!(encoded_trace.gpu_maxsat_candidate_solves, 3);
     assert_eq!(encoded_trace.gpu_maxsat_unsat_candidate_prunes, 1);
     assert_eq!(encoded_trace.gpu_maxsat_optima, 1);
-    assert_eq!(encoded_trace.cpu_assignment_enumerations, 0);
-    assert_eq!(encoded_trace.cpu_maxsat_enumerations, 0);
     encoded_trace
         .require_production_metric_eligibility()
         .expect("quaternary encoded MaxSAT trace must satisfy production metrics");
@@ -27437,8 +26277,6 @@ fn accepted_all_operator_mixed_membership_gates_solver_search_and_scheduler_path
     assert_eq!(scheduler_trace.gpu_maxsat_candidate_solves, 7);
     assert_eq!(scheduler_trace.gpu_maxsat_unsat_candidate_prunes, 2);
     assert_eq!(scheduler_trace.gpu_maxsat_optima, 3);
-    assert_eq!(scheduler_trace.cpu_assignment_enumerations, 0);
-    assert_eq!(scheduler_trace.cpu_maxsat_enumerations, 0);
     let scheduler_metric_err = scheduler_trace
         .require_production_metric_eligibility()
         .expect_err("mixed all-operator MaxSAT scheduler jobs must not satisfy production metrics");
@@ -27519,8 +26357,6 @@ fn accepted_ternary_gpu_execution_result_records_solver_nonzero_arity_evidence_t
     );
     assert_eq!(trace.accepted_know_gpu_candidate_evidence_consumed, 1);
     assert_eq!(trace.gpu_cdcl_sat_solves, 1);
-    assert_eq!(trace.cpu_assignment_enumerations, 0);
-    assert_eq!(trace.cpu_maxsat_enumerations, 0);
     trace
         .require_production_metric_eligibility()
         .expect("ternary solver nonzero-arity trace must satisfy production metrics");
@@ -27600,8 +26436,6 @@ fn accepted_quaternary_gpu_execution_result_records_solver_nonzero_arity_evidenc
     );
     assert_eq!(trace.accepted_know_gpu_candidate_evidence_consumed, 1);
     assert_eq!(trace.gpu_cdcl_sat_solves, 1);
-    assert_eq!(trace.cpu_assignment_enumerations, 0);
-    assert_eq!(trace.cpu_maxsat_enumerations, 0);
     trace
         .require_production_metric_eligibility()
         .expect("quaternary solver nonzero-arity trace must satisfy production metrics");
@@ -27668,8 +26502,6 @@ fn accepted_quaternary_gpu_execution_result_gates_solver_reuse_maxsat_and_portfo
         result.model_membership.membership_source,
         EpistemicGpuModelMembershipSource::StableModelTupleBuffer
     );
-    assert_eq!(result.semantic_trace.cpu_candidate_enumerations, 0);
-    assert_eq!(result.semantic_trace.cpu_world_view_validations, 0);
     assert_eq!(result.transfer_budget.tracked_dtoh_calls, 0);
 
     let sat_instance = SolveInstance::new(1, vec![Clause::new(vec![Literal::positive(0)])]);
@@ -27760,7 +26592,6 @@ fn accepted_quaternary_gpu_execution_result_gates_solver_reuse_maxsat_and_portfo
     assert_eq!(learned.gpu_learned_clause_arena_publications, 1);
     assert_eq!(learned.gpu_learned_clause_imports, 1);
     assert_eq!(learned.gpu_learned_clause_reused_solves, 1);
-    assert_eq!(learned.cpu_learned_clause_transfers, 0);
     assert_eq!(maxsat.candidate_evidence_records, 1);
     assert_eq!(maxsat.optimum_score, 9);
     assert_eq!(maxsat.gpu_cdcl_candidate_encodes, 3);
@@ -27794,7 +26625,6 @@ fn accepted_quaternary_gpu_execution_result_gates_solver_reuse_maxsat_and_portfo
     assert_eq!(trace.gpu_learned_clause_arena_publications, 1);
     assert_eq!(trace.gpu_learned_clause_imports, 1);
     assert_eq!(trace.gpu_learned_clause_reused_solves, 1);
-    assert_eq!(trace.cpu_learned_clause_transfers, 0);
     assert_eq!(trace.gpu_maxsat_candidate_encodes, 6);
     assert_eq!(trace.gpu_maxsat_candidate_solves, 6);
     assert_eq!(trace.gpu_maxsat_frontier_certified_candidate_solves, 6);
@@ -27805,8 +26635,6 @@ fn accepted_quaternary_gpu_execution_result_gates_solver_reuse_maxsat_and_portfo
     assert_eq!(trace.gpu_portfolio_maxsat_jobs, 1);
     assert_eq!(trace.gpu_portfolio_unknown_status_jobs, 1);
     assert_eq!(trace.gpu_portfolio_timeout_status_jobs, 1);
-    assert_eq!(trace.cpu_assignment_enumerations, 0);
-    assert_eq!(trace.cpu_maxsat_enumerations, 0);
     trace
         .require_production_metric_eligibility()
         .expect("quaternary solver reuse trace must satisfy production metrics");
@@ -27873,8 +26701,6 @@ fn accepted_quaternary_gpu_execution_result_gates_solver_search_and_scheduler_pa
         result.model_membership.membership_source,
         EpistemicGpuModelMembershipSource::StableModelTupleBuffer
     );
-    assert_eq!(result.semantic_trace.cpu_candidate_enumerations, 0);
-    assert_eq!(result.semantic_trace.cpu_world_view_validations, 0);
     assert_eq!(result.transfer_budget.tracked_dtoh_calls, 0);
 
     let sat_low = SolveInstance::new(1, vec![Clause::new(vec![Literal::positive(0)])]);
@@ -27956,8 +26782,6 @@ fn accepted_quaternary_gpu_execution_result_gates_solver_search_and_scheduler_pa
     assert_eq!(search_trace.gpu_maxsat_candidate_solves, 2);
     assert_eq!(search_trace.gpu_maxsat_unsat_candidate_prunes, 1);
     assert_eq!(search_trace.gpu_maxsat_optima, 1);
-    assert_eq!(search_trace.cpu_assignment_enumerations, 0);
-    assert_eq!(search_trace.cpu_maxsat_enumerations, 0);
     let search_metric_err = search_trace
         .require_production_metric_eligibility()
         .expect_err("uncertified quaternary MaxSAT search must not satisfy production metrics");
@@ -28038,8 +26862,6 @@ fn accepted_quaternary_gpu_execution_result_gates_solver_search_and_scheduler_pa
     assert_eq!(encoded_trace.gpu_maxsat_candidate_solves, 3);
     assert_eq!(encoded_trace.gpu_maxsat_unsat_candidate_prunes, 1);
     assert_eq!(encoded_trace.gpu_maxsat_optima, 1);
-    assert_eq!(encoded_trace.cpu_assignment_enumerations, 0);
-    assert_eq!(encoded_trace.cpu_maxsat_enumerations, 0);
     encoded_trace
         .require_production_metric_eligibility()
         .expect("quaternary encoded MaxSAT trace must satisfy production metrics");
@@ -28151,8 +26973,6 @@ fn accepted_quaternary_gpu_execution_result_gates_solver_search_and_scheduler_pa
     assert_eq!(scheduler_trace.gpu_maxsat_candidate_solves, 7);
     assert_eq!(scheduler_trace.gpu_maxsat_unsat_candidate_prunes, 2);
     assert_eq!(scheduler_trace.gpu_maxsat_optima, 3);
-    assert_eq!(scheduler_trace.cpu_assignment_enumerations, 0);
-    assert_eq!(scheduler_trace.cpu_maxsat_enumerations, 0);
     let scheduler_metric_err = scheduler_trace
         .require_production_metric_eligibility()
         .expect_err("mixed quaternary MaxSAT scheduler jobs must not satisfy production metrics");
@@ -28244,8 +27064,6 @@ fn accepted_quaternary_not_possible_solver_nonzero_arity_evidence_trace() {
     );
     assert_eq!(trace.accepted_not_know_gpu_candidate_evidence_consumed, 0);
     assert_eq!(trace.gpu_cdcl_sat_solves, 1);
-    assert_eq!(trace.cpu_assignment_enumerations, 0);
-    assert_eq!(trace.cpu_maxsat_enumerations, 0);
     trace
         .require_production_metric_eligibility()
         .expect("quaternary not-possible solver trace must satisfy production metrics");
@@ -28308,8 +27126,6 @@ fn accepted_quaternary_not_possible_gates_solver_reuse_maxsat_and_portfolio_path
         result.model_membership.membership_source,
         EpistemicGpuModelMembershipSource::StableModelTupleBuffer
     );
-    assert_eq!(result.semantic_trace.cpu_candidate_enumerations, 0);
-    assert_eq!(result.semantic_trace.cpu_world_view_validations, 0);
 
     let sat_instance = SolveInstance::new(1, vec![Clause::new(vec![Literal::positive(0)])]);
     let unsat_instance = SolveInstance::new(
@@ -28382,7 +27198,6 @@ fn accepted_quaternary_not_possible_gates_solver_reuse_maxsat_and_portfolio_path
     assert_eq!(learned.gpu_learned_clause_arena_publications, 1);
     assert_eq!(learned.gpu_learned_clause_imports, 1);
     assert_eq!(learned.gpu_learned_clause_reused_solves, 1);
-    assert_eq!(learned.cpu_learned_clause_transfers, 0);
     assert_eq!(maxsat.candidate_evidence_records, 1);
     assert_eq!(maxsat.optimum_score, 13);
     assert_eq!(maxsat.gpu_cdcl_candidate_solves, 1);
@@ -28414,7 +27229,6 @@ fn accepted_quaternary_not_possible_gates_solver_reuse_maxsat_and_portfolio_path
     assert_eq!(trace.gpu_learned_clause_arena_publications, 1);
     assert_eq!(trace.gpu_learned_clause_imports, 1);
     assert_eq!(trace.gpu_learned_clause_reused_solves, 1);
-    assert_eq!(trace.cpu_learned_clause_transfers, 0);
     assert_eq!(trace.gpu_maxsat_candidate_solves, 2);
     assert_eq!(trace.gpu_maxsat_optima, 2);
     assert_eq!(trace.gpu_portfolio_jobs, 4);
@@ -28422,8 +27236,6 @@ fn accepted_quaternary_not_possible_gates_solver_reuse_maxsat_and_portfolio_path
     assert_eq!(trace.gpu_portfolio_maxsat_jobs, 1);
     assert_eq!(trace.gpu_portfolio_unknown_status_jobs, 1);
     assert_eq!(trace.gpu_portfolio_timeout_status_jobs, 1);
-    assert_eq!(trace.cpu_assignment_enumerations, 0);
-    assert_eq!(trace.cpu_maxsat_enumerations, 0);
     let metric_err = trace
         .require_production_metric_eligibility()
         .expect_err("uncertified MaxSAT portfolio trace must not satisfy production metrics");
@@ -28487,8 +27299,6 @@ fn accepted_quaternary_not_possible_gates_solver_search_and_scheduler_paths() {
         result.model_membership.membership_source,
         EpistemicGpuModelMembershipSource::StableModelTupleBuffer
     );
-    assert_eq!(result.semantic_trace.cpu_candidate_enumerations, 0);
-    assert_eq!(result.semantic_trace.cpu_world_view_validations, 0);
 
     let sat_low = SolveInstance::new(1, vec![Clause::new(vec![Literal::positive(0)])]);
     let sat_high = SolveInstance::new(1, vec![Clause::new(vec![Literal::negative(0)])]);
@@ -28569,8 +27379,6 @@ fn accepted_quaternary_not_possible_gates_solver_search_and_scheduler_paths() {
     assert_eq!(search_trace.gpu_maxsat_candidate_solves, 2);
     assert_eq!(search_trace.gpu_maxsat_unsat_candidate_prunes, 1);
     assert_eq!(search_trace.gpu_maxsat_optima, 1);
-    assert_eq!(search_trace.cpu_assignment_enumerations, 0);
-    assert_eq!(search_trace.cpu_maxsat_enumerations, 0);
     let search_metric_err = search_trace
         .require_production_metric_eligibility()
         .expect_err(
@@ -28653,8 +27461,6 @@ fn accepted_quaternary_not_possible_gates_solver_search_and_scheduler_paths() {
     assert_eq!(encoded_trace.gpu_maxsat_candidate_solves, 3);
     assert_eq!(encoded_trace.gpu_maxsat_unsat_candidate_prunes, 1);
     assert_eq!(encoded_trace.gpu_maxsat_optima, 1);
-    assert_eq!(encoded_trace.cpu_assignment_enumerations, 0);
-    assert_eq!(encoded_trace.cpu_maxsat_enumerations, 0);
     encoded_trace
         .require_production_metric_eligibility()
         .expect("quaternary not-possible encoded MaxSAT trace must satisfy production metrics");
@@ -28766,8 +27572,6 @@ fn accepted_quaternary_not_possible_gates_solver_search_and_scheduler_paths() {
     assert_eq!(scheduler_trace.gpu_maxsat_candidate_solves, 7);
     assert_eq!(scheduler_trace.gpu_maxsat_unsat_candidate_prunes, 2);
     assert_eq!(scheduler_trace.gpu_maxsat_optima, 3);
-    assert_eq!(scheduler_trace.cpu_assignment_enumerations, 0);
-    assert_eq!(scheduler_trace.cpu_maxsat_enumerations, 0);
     let scheduler_metric_err = scheduler_trace
         .require_production_metric_eligibility()
         .expect_err(
@@ -28842,16 +27646,12 @@ fn accepted_gpu_execution_result_gates_solver_learned_clause_arena_publication()
     assert_eq!(report.unsat_solves, 1);
     assert_eq!(report.gpu_learned_clause_arena_publications, 1);
     assert_eq!(report.gpu_learned_count_buffer_publications, 1);
-    assert_eq!(report.cpu_learned_clause_transfers, 0);
 
     let trace = adapter.trace();
     assert_eq!(trace.accepted_gpu_candidate_evidence_consumed, 1);
     assert_eq!(trace.gpu_cdcl_workspace_unsat_solves, 1);
     assert_eq!(trace.gpu_learned_clause_arena_publications, 1);
     assert_eq!(trace.gpu_learned_count_buffer_publications, 1);
-    assert_eq!(trace.cpu_learned_clause_transfers, 0);
-    assert_eq!(trace.cpu_assignment_enumerations, 0);
-    assert_eq!(trace.cpu_maxsat_enumerations, 0);
     trace
         .require_production_metric_eligibility()
         .expect("learned-clause publication trace must satisfy production solver metrics");
@@ -28930,7 +27730,6 @@ fn accepted_gpu_execution_result_gates_solver_same_cnf_learned_clause_reuse() {
     assert_eq!(report.gpu_learned_clause_arena_publications, 1);
     assert_eq!(report.gpu_learned_clause_imports, 1);
     assert_eq!(report.gpu_learned_clause_reused_solves, 1);
-    assert_eq!(report.cpu_learned_clause_transfers, 0);
 
     let trace = adapter.trace();
     assert_eq!(trace.accepted_gpu_candidate_evidence_consumed, 1);
@@ -28938,9 +27737,6 @@ fn accepted_gpu_execution_result_gates_solver_same_cnf_learned_clause_reuse() {
     assert_eq!(trace.gpu_learned_clause_arena_publications, 1);
     assert_eq!(trace.gpu_learned_clause_imports, 1);
     assert_eq!(trace.gpu_learned_clause_reused_solves, 1);
-    assert_eq!(trace.cpu_learned_clause_transfers, 0);
-    assert_eq!(trace.cpu_assignment_enumerations, 0);
-    assert_eq!(trace.cpu_maxsat_enumerations, 0);
     trace
         .require_production_metric_eligibility()
         .expect("learned-clause reuse trace must satisfy production solver metrics");
@@ -29023,7 +27819,6 @@ fn accepted_gpu_execution_results_gate_multi_candidate_learned_clause_reuse() {
     assert_eq!(report.gpu_learned_clause_arena_publications, 2);
     assert_eq!(report.gpu_learned_clause_imports, 2);
     assert_eq!(report.gpu_learned_clause_reused_solves, 2);
-    assert_eq!(report.cpu_learned_clause_transfers, 0);
 
     let trace = adapter.trace();
     assert_eq!(trace.accepted_gpu_candidate_evidence_consumed, 2);
@@ -29031,9 +27826,6 @@ fn accepted_gpu_execution_results_gate_multi_candidate_learned_clause_reuse() {
     assert_eq!(trace.gpu_learned_clause_arena_publications, 2);
     assert_eq!(trace.gpu_learned_clause_imports, 2);
     assert_eq!(trace.gpu_learned_clause_reused_solves, 2);
-    assert_eq!(trace.cpu_learned_clause_transfers, 0);
-    assert_eq!(trace.cpu_assignment_enumerations, 0);
-    assert_eq!(trace.cpu_maxsat_enumerations, 0);
     trace
         .require_production_metric_eligibility()
         .expect("multi-candidate learned-clause trace must satisfy production solver metrics");
@@ -29122,9 +27914,6 @@ fn accepted_gpu_execution_result_rejects_distinct_cnf_learned_clause_reuse() {
     assert_eq!(trace.gpu_learned_clause_arena_publications, 0);
     assert_eq!(trace.gpu_learned_clause_imports, 0);
     assert_eq!(trace.gpu_learned_clause_reused_solves, 0);
-    assert_eq!(trace.cpu_learned_clause_transfers, 0);
-    assert_eq!(trace.cpu_assignment_enumerations, 0);
-    assert_eq!(trace.cpu_maxsat_enumerations, 0);
 }
 
 #[test]
@@ -29228,8 +28017,6 @@ fn accepted_gpu_execution_result_gates_solver_maxsat_and_portfolio_paths() {
     assert_eq!(trace.gpu_portfolio_maxsat_jobs, 1);
     assert_eq!(trace.gpu_portfolio_unknown_status_jobs, 1);
     assert_eq!(trace.gpu_portfolio_timeout_status_jobs, 1);
-    assert_eq!(trace.cpu_assignment_enumerations, 0);
-    assert_eq!(trace.cpu_maxsat_enumerations, 0);
     let metric_err = trace
         .require_production_metric_eligibility()
         .expect_err("uncertified MaxSAT portfolio trace must not satisfy production metrics");
@@ -29330,8 +28117,6 @@ fn accepted_gpu_execution_results_gate_multi_candidate_portfolio_path() {
     assert_eq!(trace.gpu_portfolio_maxsat_jobs, 2);
     assert_eq!(trace.gpu_portfolio_unknown_status_jobs, 2);
     assert_eq!(trace.gpu_portfolio_timeout_status_jobs, 2);
-    assert_eq!(trace.cpu_assignment_enumerations, 0);
-    assert_eq!(trace.cpu_maxsat_enumerations, 0);
     let metric_err = trace.require_production_metric_eligibility().expect_err(
         "uncertified multi-candidate portfolio MaxSAT must not satisfy production metrics",
     );
@@ -29418,8 +28203,6 @@ fn accepted_gpu_execution_results_gate_multi_candidate_maxsat_path() {
     assert_eq!(trace.accepted_gpu_candidate_evidence_consumed, 2);
     assert_eq!(trace.gpu_maxsat_candidate_solves, 4);
     assert_eq!(trace.gpu_maxsat_optima, 2);
-    assert_eq!(trace.cpu_assignment_enumerations, 0);
-    assert_eq!(trace.cpu_maxsat_enumerations, 0);
     let metric_err = trace
         .require_production_metric_eligibility()
         .expect_err("uncertified candidate-set MaxSAT must not satisfy production metrics");
@@ -29519,8 +28302,6 @@ fn accepted_gpu_execution_result_prunes_unsat_maxsat_search_candidates() {
     assert_eq!(trace.gpu_maxsat_frontier_upper_bound_certificates, 0);
     assert_eq!(trace.gpu_maxsat_unsat_candidate_prunes, 1);
     assert_eq!(trace.gpu_maxsat_optima, 1);
-    assert_eq!(trace.cpu_assignment_enumerations, 0);
-    assert_eq!(trace.cpu_maxsat_enumerations, 0);
     let metric_err = trace
         .require_production_metric_eligibility()
         .expect_err("uncertified MaxSAT search must not satisfy production metrics");
@@ -29587,8 +28368,6 @@ fn accepted_gpu_execution_result_rejects_all_unsat_maxsat_search_before_solver_w
     assert_eq!(trace.gpu_maxsat_candidate_solves, 0);
     assert_eq!(trace.gpu_maxsat_unsat_candidate_prunes, 0);
     assert_eq!(trace.gpu_maxsat_optima, 0);
-    assert_eq!(trace.cpu_assignment_enumerations, 0);
-    assert_eq!(trace.cpu_maxsat_enumerations, 0);
 }
 
 #[test]
@@ -29686,8 +28465,6 @@ fn accepted_gpu_execution_results_gate_multi_candidate_maxsat_search_pruning() {
     assert_eq!(trace.gpu_maxsat_candidate_solves, 4);
     assert_eq!(trace.gpu_maxsat_unsat_candidate_prunes, 2);
     assert_eq!(trace.gpu_maxsat_optima, 2);
-    assert_eq!(trace.cpu_assignment_enumerations, 0);
-    assert_eq!(trace.cpu_maxsat_enumerations, 0);
 }
 
 #[test]
@@ -29781,8 +28558,6 @@ fn accepted_gpu_execution_result_encodes_weighted_maxsat_search_candidates() {
     assert_eq!(trace.gpu_maxsat_frontier_upper_bound_certificates, 1);
     assert_eq!(trace.gpu_maxsat_unsat_candidate_prunes, 1);
     assert_eq!(trace.gpu_maxsat_optima, 1);
-    assert_eq!(trace.cpu_assignment_enumerations, 0);
-    assert_eq!(trace.cpu_maxsat_enumerations, 0);
     trace
         .require_production_metric_eligibility()
         .expect("encoded MaxSAT trace must satisfy production solver metrics");
@@ -29854,8 +28629,6 @@ fn accepted_gpu_execution_result_completes_unsat_encoded_maxsat_frontier() {
     assert_eq!(trace.gpu_maxsat_candidate_solves, 2);
     assert_eq!(trace.gpu_maxsat_unsat_candidate_prunes, 1);
     assert_eq!(trace.gpu_maxsat_optima, 1);
-    assert_eq!(trace.cpu_assignment_enumerations, 0);
-    assert_eq!(trace.cpu_maxsat_enumerations, 0);
     trace
         .require_production_metric_eligibility()
         .expect("completed encoded MaxSAT frontier must satisfy production solver metrics");
@@ -29928,8 +28701,6 @@ fn accepted_gpu_execution_result_completes_three_soft_clause_encoded_maxsat_fron
     assert_eq!(trace.gpu_maxsat_candidate_solves, 2);
     assert_eq!(trace.gpu_maxsat_unsat_candidate_prunes, 1);
     assert_eq!(trace.gpu_maxsat_optima, 1);
-    assert_eq!(trace.cpu_assignment_enumerations, 0);
-    assert_eq!(trace.cpu_maxsat_enumerations, 0);
     trace
         .require_production_metric_eligibility()
         .expect("three-soft-clause encoded MaxSAT frontier must satisfy production metrics");
@@ -30030,8 +28801,6 @@ fn accepted_gpu_execution_results_gate_multi_candidate_weighted_maxsat_encoded_s
     assert_eq!(trace.gpu_maxsat_frontier_upper_bound_certificates, 2);
     assert_eq!(trace.gpu_maxsat_unsat_candidate_prunes, 2);
     assert_eq!(trace.gpu_maxsat_optima, 2);
-    assert_eq!(trace.cpu_assignment_enumerations, 0);
-    assert_eq!(trace.cpu_maxsat_enumerations, 0);
     trace
         .require_production_metric_eligibility()
         .expect("multi-result encoded MaxSAT search trace must satisfy production metrics");
@@ -30192,8 +28961,6 @@ fn accepted_gpu_execution_results_gate_generalized_maxsat_scheduler() {
     assert_eq!(trace.gpu_maxsat_candidate_solves, 14);
     assert_eq!(trace.gpu_maxsat_unsat_candidate_prunes, 4);
     assert_eq!(trace.gpu_maxsat_optima, 6);
-    assert_eq!(trace.cpu_assignment_enumerations, 0);
-    assert_eq!(trace.cpu_maxsat_enumerations, 0);
     let metric_err = trace
         .require_production_metric_eligibility()
         .expect_err("mixed uncertified MaxSAT scheduler jobs must not satisfy production metrics");
@@ -30267,8 +29034,6 @@ fn accepted_gpu_execution_results_gate_generalized_maxsat_scheduler() {
     );
     assert_eq!(certified_trace.gpu_maxsat_unsat_candidate_prunes, 2);
     assert_eq!(certified_trace.gpu_maxsat_optima, 2);
-    assert_eq!(certified_trace.cpu_assignment_enumerations, 0);
-    assert_eq!(certified_trace.cpu_maxsat_enumerations, 0);
     certified_trace
         .require_production_metric_eligibility()
         .expect("certified encoded MaxSAT scheduler trace must satisfy production metrics");

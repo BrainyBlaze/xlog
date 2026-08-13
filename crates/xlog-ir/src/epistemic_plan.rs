@@ -41,6 +41,20 @@ pub enum EpistemicGpuBufferKind {
     RejectionReasons,
 }
 
+/// Execution backend selected by an epistemic production plan.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EpistemicExecutionBackend {
+    /// Execute the epistemic plan through the GPU production runtime.
+    Gpu,
+}
+
+/// Behavior when an epistemic shape is unsupported by the selected backend.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EpistemicFallbackPolicy {
+    /// Return the typed unsupported-construct error instead of changing backends.
+    RejectUnsupported,
+}
+
 /// WCOJ status for a reduced ordinary program.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EpistemicWcojReductionStatus {
@@ -48,29 +62,6 @@ pub enum EpistemicWcojReductionStatus {
     NotWcojCandidate,
     /// The reduced body must be submitted to the production WCOJ planner.
     RequiresPlannerEligibility,
-}
-
-/// CPU fallback counters that must remain zero on the accepted hot path.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct EpistemicCpuFallbackCounters {
-    /// CPU candidate enumeration count.
-    pub candidate_enumeration: u64,
-    /// CPU world-view validation count.
-    pub world_view_validation: u64,
-    /// CPU SAT/MaxSAT search count.
-    pub solver_search: u64,
-    /// CPU-only probabilistic recomputation count.
-    pub probabilistic_recompute: u64,
-}
-
-impl EpistemicCpuFallbackCounters {
-    /// Return true when every forbidden CPU fallback counter is zero.
-    pub fn is_zero(&self) -> bool {
-        self.candidate_enumeration == 0
-            && self.world_view_validation == 0
-            && self.solver_search == 0
-            && self.probabilistic_recompute == 0
-    }
 }
 
 /// One epistemic rule's reduced ordinary-program planning summary.
@@ -241,6 +232,10 @@ impl EpistemicSolverServiceContract {
 pub struct EpistemicGpuPlan {
     /// Selected epistemic semantics mode.
     pub mode: EirEpistemicMode,
+    /// Production execution backend selected for this plan.
+    pub execution_backend: EpistemicExecutionBackend,
+    /// Policy applied when the backend cannot execute a requested shape.
+    pub fallback_policy: EpistemicFallbackPolicy,
     /// Epistemic literals preserved from EIR.
     pub epistemic_literals: Vec<EirEpistemicLiteral>,
     /// Coarse Generate-Propagate-Test phases required by the hot path.
@@ -260,8 +255,6 @@ pub struct EpistemicGpuPlan {
     pub final_output_columns: Option<Vec<usize>>,
     /// Solver-service obligations exported by the epistemic semantic plan.
     pub solver_contract: EpistemicSolverServiceContract,
-    /// Forbidden CPU fallback counters. Release certification must keep these zero.
-    pub cpu_fallbacks: EpistemicCpuFallbackCounters,
 }
 
 impl EpistemicGpuPlan {
@@ -304,6 +297,8 @@ impl EpistemicGpuPlan {
 
         Self {
             mode,
+            execution_backend: EpistemicExecutionBackend::Gpu,
+            fallback_policy: EpistemicFallbackPolicy::RejectUnsupported,
             epistemic_literals,
             required_phases: vec![
                 EpistemicGpuHotPathPhase::CandidateGeneration,
@@ -334,7 +329,6 @@ impl EpistemicGpuPlan {
             solver_contract: EpistemicSolverServiceContract::production_default(
                 solver_assumption_bindings,
             ),
-            cpu_fallbacks: EpistemicCpuFallbackCounters::default(),
         }
     }
 

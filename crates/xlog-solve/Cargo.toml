@@ -13,6 +13,7 @@ readme = "../../README.md"
 [dependencies]
 xlog-core.workspace = true
 xlog-cuda.workspace = true
+xlog-ir.workspace = true
 xlog-runtime.workspace = true
 cudarc.workspace = true
 
@@ -21,7 +22,6 @@ criterion = "0.5"
 # Path-only (no version) dev-deps: keeps publish ordering robust by
 # omitting these from the packaged manifest (cargo drops version-less
 # dev-dependencies). In-workspace tests/benches still resolve via path.
-xlog-ir = { path = "../xlog-ir" }
 xlog-logic = { path = "../xlog-logic" }
 
 [[bench]]

@@ -1,5 +1,6 @@
 use xlog_core::XlogError;
 use xlog_ir::ExecutionPlan;
+use xlog_ir::{EpistemicExecutionBackend, EpistemicFallbackPolicy};
 use xlog_logic::epistemic::{
     build_epistemic_dependency_graph, classify_recursive_epistemic_program,
     compile_epistemic_gpu_split_execution, plan_epistemic_gpu_execution, prepare_epistemic_program,
@@ -764,7 +765,14 @@ fn valid_split_components_compile_through_gpu_executable_subplans() {
     assert_eq!(split.components.len(), 2);
     assert_eq!(split.recomposed_rule_indices(), vec![0, 1]);
     for component in &split.components {
-        assert!(component.executable.gpu_plan.cpu_fallbacks.is_zero());
+        assert_eq!(
+            component.executable.gpu_plan.execution_backend,
+            EpistemicExecutionBackend::Gpu
+        );
+        assert_eq!(
+            component.executable.gpu_plan.fallback_policy,
+            EpistemicFallbackPolicy::RejectUnsupported
+        );
         assert_eq!(component.executable.gpu_plan.epistemic_literals.len(), 1);
         assert_eq!(
             compiled_rule_count(&component.executable.reduced_runtime_plan),

@@ -10,6 +10,7 @@ use std::sync::Arc;
 use xlog_core::{Result, XlogError};
 use xlog_cuda::memory::TrackedCudaSlice;
 use xlog_cuda::{CudaKernelProvider, DeviceSlice};
+use xlog_ir::{EpistemicExecutionBackend, EpistemicFallbackPolicy};
 use xlog_runtime::{
     EpistemicGpuBatchExecutionResult, EpistemicGpuExecutionResult, EpistemicGpuKernelTimingTrace,
     EpistemicGpuProviderIdentity,
@@ -249,8 +250,6 @@ pub struct GpuSolverProductionLearnedClauseArenaReport {
     pub gpu_learned_clause_arena_publications: u64,
     /// Number of learned-count device buffers published with the arena.
     pub gpu_learned_count_buffer_publications: u64,
-    /// CPU learned-clause transfers performed by this adapter.
-    pub cpu_learned_clause_transfers: u64,
 }
 
 /// Summary of a bounded GPU CDCL learned-clause reuse run.
@@ -268,8 +267,6 @@ pub struct GpuSolverProductionLearnedClauseReuseReport {
     pub gpu_learned_clause_imports: u64,
     /// Number of UNSAT solves that reused imported GPU learned clauses.
     pub gpu_learned_clause_reused_solves: u64,
-    /// CPU learned-clause transfers performed by this adapter.
-    pub cpu_learned_clause_transfers: u64,
 }
 
 /// One GPU-CDCL-backed candidate for bounded weighted MaxSAT production solving.
@@ -651,12 +648,6 @@ pub struct GpuSolverProductionTrace {
     pub gpu_portfolio_unknown_status_jobs: u64,
     /// Number of accepted portfolio TIMEOUT statuses propagated without CPU search.
     pub gpu_portfolio_timeout_status_jobs: u64,
-    /// CPU exhaustive assignment enumerations performed by this adapter.
-    pub cpu_assignment_enumerations: u64,
-    /// CPU MaxSAT assignment enumerations performed by this adapter.
-    pub cpu_maxsat_enumerations: u64,
-    /// CPU learned-clause transfers performed by this adapter.
-    pub cpu_learned_clause_transfers: u64,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -839,29 +830,6 @@ impl GpuSolverProductionTrace {
                     self.gpu_maxsat_candidate_cnf_data_plane_htod_bytes,
                     self.gpu_maxsat_candidate_cnf_launch_metadata_htod_calls,
                     self.gpu_maxsat_candidate_cnf_launch_metadata_htod_bytes
-                ),
-            });
-        }
-        Ok(())
-    }
-
-    /// Require that no CPU search counters were used by the production adapter.
-    pub fn require_zero_cpu_search(&self) -> Result<()> {
-        if self.cpu_assignment_enumerations != 0 || self.cpu_maxsat_enumerations != 0 {
-            return Err(XlogError::UnsupportedEpistemicConstruct {
-                construct: "GPU solver production adapter".to_string(),
-                context: format!(
-                    "CPU solver search counters must be zero, got assignment={} maxsat={}",
-                    self.cpu_assignment_enumerations, self.cpu_maxsat_enumerations
-                ),
-            });
-        }
-        if self.cpu_learned_clause_transfers != 0 {
-            return Err(XlogError::UnsupportedEpistemicConstruct {
-                construct: "GPU solver production adapter".to_string(),
-                context: format!(
-                    "CPU learned-clause transfers must be zero, got {}",
-                    self.cpu_learned_clause_transfers
                 ),
             });
         }
@@ -1401,8 +1369,7 @@ impl GpuSolverProductionTrace {
             }
         }
         self.require_accepted_gpu_candidate_evidence_trace()?;
-        self.require_accepted_gpu_tuple_membership_trace()?;
-        self.require_zero_cpu_search()
+        self.require_accepted_gpu_tuple_membership_trace()
     }
 }
 
@@ -1419,12 +1386,7 @@ impl GpuSolverProductionAdapter {
         Self {
             solver: GpuCdclSolver::new(Arc::clone(&provider), config),
             provider,
-            trace: GpuSolverProductionTrace {
-                cpu_assignment_enumerations: 0,
-                cpu_maxsat_enumerations: 0,
-                cpu_learned_clause_transfers: 0,
-                ..GpuSolverProductionTrace::default()
-            },
+            trace: GpuSolverProductionTrace::default(),
         }
     }
 
@@ -1734,7 +1696,6 @@ impl GpuSolverProductionAdapter {
         )?;
         if let Err(err) = require_same_gpu_cnf_for_learned_clause_reuse(source_cnf, target_cnf) {
             checked_solver_trace_counter_inc!(self, gpu_learned_clause_reuse_rejections);
-            self.trace.require_zero_cpu_search()?;
             return Err(err);
         }
         self.require_workspace_capacity_for_cnf(
@@ -2065,7 +2026,6 @@ impl GpuSolverProductionAdapter {
         self.require_cnf_on_adapter_provider(cnf, "GPU solver production SAT")?;
         let assignment = self.solver.solve_expect_sat(cnf)?;
         checked_solver_trace_counter_inc!(self, gpu_cdcl_sat_solves);
-        self.trace.require_zero_cpu_search()?;
         Ok(assignment)
     }
 
@@ -2083,7 +2043,6 @@ impl GpuSolverProductionAdapter {
             let assignment = this.solve_expect_sat(cnf)?;
             this.record_accepted_gpu_solver_production_path_events_since(events_before, &state)?;
             this.record_accepted_gpu_candidate_state(&state)?;
-            this.trace.require_zero_cpu_search()?;
             Ok(assignment)
         })
     }
@@ -2102,7 +2061,7 @@ impl GpuSolverProductionAdapter {
             this.solve_expect_unsat(cnf)?;
             this.record_accepted_gpu_solver_production_path_events_since(events_before, &state)?;
             this.record_accepted_gpu_candidate_state(&state)?;
-            this.trace.require_zero_cpu_search()
+            Ok(())
         })
     }
 
@@ -2111,7 +2070,7 @@ impl GpuSolverProductionAdapter {
         self.require_cnf_on_adapter_provider(cnf, "GPU solver production UNSAT")?;
         self.solver.solve_expect_unsat(cnf)?;
         checked_solver_trace_counter_inc!(self, gpu_cdcl_unsat_solves);
-        self.trace.require_zero_cpu_search()
+        Ok(())
     }
 
     /// Solve and enforce UNSAT entirely on GPU using a reusable workspace.
@@ -2135,7 +2094,7 @@ impl GpuSolverProductionAdapter {
         self.solver
             .solve_expect_unsat_with_branch_limit_ws(workspace, cnf, branch_var_limit)?;
         checked_solver_trace_counter_inc!(self, gpu_cdcl_workspace_unsat_solves);
-        self.trace.require_zero_cpu_search()
+        Ok(())
     }
 
     /// Solve workspace-backed UNSAT through GPU CDCL after accepted GPU epistemic execution.
@@ -2164,7 +2123,7 @@ impl GpuSolverProductionAdapter {
             this.solve_expect_unsat_with_branch_limit_ws(workspace, cnf, branch_var_limit)?;
             this.record_accepted_gpu_solver_production_path_events_since(events_before, &state)?;
             this.record_accepted_gpu_candidate_state(&state)?;
-            this.trace.require_zero_cpu_search()
+            Ok(())
         })
     }
 
@@ -2356,7 +2315,6 @@ impl GpuSolverProductionAdapter {
             report.candidate_evidence_records = 1;
             this.record_accepted_gpu_solver_production_path_events_since(events_before, &state)?;
             this.record_accepted_gpu_candidate_state(&state)?;
-            this.trace.require_zero_cpu_search()?;
             Ok(report)
         })
     }
@@ -2429,16 +2387,14 @@ impl GpuSolverProductionAdapter {
             self.record_accepted_gpu_candidate_state(state)?;
         }
 
-        self.trace.require_zero_cpu_search()?;
         Ok(report)
     }
 
     /// Execute accepted split/batch push/solve/retract lifecycles through existing GPU CDCL calls.
     ///
-    /// The batch evidence must prove every split component ran through the
-    /// single-plan GPU runtime path with zero aggregate CPU recomposition,
-    /// candidate/world-view fallback, tracked hot-path device-to-host transfer, and per-candidate
-    /// host round trips, plus aggregate CUDA-event timing.
+    /// The batch evidence must carry the typed `Gpu`/`RejectUnsupported` policy for every
+    /// split component, plus observed GPU dispatch and candidate accounting, scoped transfer
+    /// accounting, and aggregate CUDA-event timing.
     pub fn solve_assumption_lifecycle_with_gpu_batch_execution_result(
         &mut self,
         provider: &CudaKernelProvider,
@@ -2457,7 +2413,6 @@ impl GpuSolverProductionAdapter {
                     provider, &results, workspace, steps,
                 )?;
             this.record_accepted_gpu_batch_candidate_evidence(results.len())?;
-            this.trace.require_zero_cpu_search()?;
             Ok(report)
         })
     }
@@ -2536,13 +2491,11 @@ impl GpuSolverProductionAdapter {
         checked_solver_trace_counter_inc!(self, gpu_learned_count_buffer_publications);
         self.record_accepted_gpu_solver_production_path_events_since(events_before, &state)?;
         self.record_accepted_gpu_candidate_state(&state)?;
-        self.trace.require_zero_cpu_search()?;
 
         Ok(GpuSolverProductionLearnedClauseArenaReport {
             unsat_solves: 1,
             gpu_learned_clause_arena_publications: 1,
             gpu_learned_count_buffer_publications: 1,
-            cpu_learned_clause_transfers: self.trace.cpu_learned_clause_transfers,
         })
     }
 
@@ -2634,7 +2587,6 @@ impl GpuSolverProductionAdapter {
 
         checked_solver_trace_counter_inc!(self, gpu_learned_clause_imports);
         checked_solver_trace_counter_inc!(self, gpu_learned_clause_reused_solves);
-        self.trace.require_zero_cpu_search()?;
 
         Ok(GpuSolverProductionLearnedClauseReuseReport {
             candidate_evidence_records: 0,
@@ -2643,7 +2595,6 @@ impl GpuSolverProductionAdapter {
             gpu_learned_clause_arena_publications: 1,
             gpu_learned_clause_imports: 1,
             gpu_learned_clause_reused_solves: 1,
-            cpu_learned_clause_transfers: self.trace.cpu_learned_clause_transfers,
         })
     }
 
@@ -2683,7 +2634,6 @@ impl GpuSolverProductionAdapter {
             report.candidate_evidence_records = 1;
             this.record_accepted_gpu_solver_production_path_events_since(events_before, &state)?;
             this.record_accepted_gpu_candidate_state(&state)?;
-            this.trace.require_zero_cpu_search()?;
             Ok(report)
         })
     }
@@ -2770,12 +2720,10 @@ impl GpuSolverProductionAdapter {
                 gpu_learned_clause_reused_solves,
                 step_report.gpu_learned_clause_reused_solves
             );
-            report.cpu_learned_clause_transfers = self.trace.cpu_learned_clause_transfers;
             self.record_accepted_gpu_solver_production_path_events_since(events_before, state)?;
             self.record_accepted_gpu_candidate_state(state)?;
         }
 
-        self.trace.require_zero_cpu_search()?;
         Ok(report)
     }
 
@@ -2817,7 +2765,6 @@ impl GpuSolverProductionAdapter {
                     target_branch_var_limit,
                 )?;
             this.record_accepted_gpu_batch_candidate_evidence(results.len())?;
-            this.trace.require_zero_cpu_search()?;
             Ok(report)
         })
     }
@@ -2853,7 +2800,6 @@ impl GpuSolverProductionAdapter {
             optimum_score = optimum_score.max(candidate.score);
         }
         checked_solver_trace_counter_inc!(self, gpu_maxsat_optima);
-        self.trace.require_zero_cpu_search()?;
         let gpu_cdcl_candidate_solves = Self::checked_report_counter_delta(
             self.trace.gpu_maxsat_candidate_solves,
             solves_before,
@@ -2911,7 +2857,6 @@ impl GpuSolverProductionAdapter {
             report.candidate_evidence_records = 1;
             this.record_accepted_gpu_solver_production_path_events_since(events_before, &state)?;
             this.record_accepted_gpu_candidate_state(&state)?;
-            this.trace.require_zero_cpu_search()?;
             Ok(report)
         })
     }
@@ -2975,7 +2920,6 @@ impl GpuSolverProductionAdapter {
         let maxsat = self.solve_weighted_maxsat_candidates(candidates, 0)?;
         self.record_accepted_gpu_solver_production_path_events_since(events_before, &state)?;
         self.record_accepted_gpu_candidate_state(&state)?;
-        self.trace.require_zero_cpu_search()?;
 
         Ok(GpuSolverProductionMaxSatLifecycleReport {
             candidate_evidence_records: 1,
@@ -3124,7 +3068,6 @@ impl GpuSolverProductionAdapter {
             )?;
         }
 
-        self.trace.require_zero_cpu_search()?;
         Ok(report)
     }
 
@@ -3147,7 +3090,6 @@ impl GpuSolverProductionAdapter {
                 provider, &results, workspace, steps, candidates,
             )?;
             this.record_accepted_gpu_batch_candidate_evidence(results.len())?;
-            this.trace.require_zero_cpu_search()?;
             Ok(report)
         })
     }
@@ -3222,7 +3164,6 @@ impl GpuSolverProductionAdapter {
             self.record_accepted_gpu_candidate_state(state)?;
         }
 
-        self.trace.require_zero_cpu_search()?;
         Ok(report)
     }
 
@@ -3245,7 +3186,6 @@ impl GpuSolverProductionAdapter {
                 provider, &results, candidates,
             )?;
             this.record_accepted_gpu_batch_candidate_evidence(results.len())?;
-            this.trace.require_zero_cpu_search()?;
             Ok(report)
         })
     }
@@ -3453,7 +3393,6 @@ impl GpuSolverProductionAdapter {
         }
 
         checked_solver_trace_counter_inc!(self, gpu_maxsat_optima);
-        self.trace.require_zero_cpu_search()?;
         let gpu_cdcl_candidate_solves = Self::checked_report_counter_delta(
             self.trace.gpu_maxsat_candidate_solves,
             solves_before,
@@ -4019,7 +3958,6 @@ impl GpuSolverProductionAdapter {
         report.candidate_evidence_records = 1;
         self.record_accepted_gpu_solver_production_path_events_since(events_before, &state)?;
         self.record_accepted_gpu_candidate_state(&state)?;
-        self.trace.require_zero_cpu_search()?;
         Ok(report)
     }
 
@@ -4041,7 +3979,6 @@ impl GpuSolverProductionAdapter {
                     provider, &results, workspace, candidates,
                 )?;
             this.record_accepted_gpu_batch_candidate_evidence(results.len())?;
-            this.trace.require_zero_cpu_search()?;
             Ok(report)
         })
     }
@@ -4120,7 +4057,6 @@ impl GpuSolverProductionAdapter {
             self.record_accepted_gpu_candidate_state(state)?;
         }
 
-        self.trace.require_zero_cpu_search()?;
         Ok(report)
     }
 
@@ -4199,7 +4135,6 @@ impl GpuSolverProductionAdapter {
         )?;
         self.record_accepted_gpu_solver_production_path_events_since(events_before, &state)?;
         self.record_accepted_gpu_candidate_state(&state)?;
-        self.trace.require_zero_cpu_search()?;
         Ok(report)
     }
 
@@ -4319,7 +4254,6 @@ impl GpuSolverProductionAdapter {
             self.record_accepted_gpu_candidate_state(state)?;
         }
 
-        self.trace.require_zero_cpu_search()?;
         Ok(report)
     }
 
@@ -4357,7 +4291,6 @@ impl GpuSolverProductionAdapter {
                     selections,
                 )?;
             this.record_accepted_gpu_batch_candidate_evidence(results.len())?;
-            this.trace.require_zero_cpu_search()?;
             Ok(report)
         })
     }
@@ -4503,7 +4436,6 @@ impl GpuSolverProductionAdapter {
             }
         }
 
-        self.trace.require_zero_cpu_search()?;
         Ok(report)
     }
 
@@ -4668,15 +4600,15 @@ impl GpuSolverProductionAdapter {
             self.record_accepted_gpu_candidate_state(state)?;
         }
 
-        self.trace.require_zero_cpu_search()?;
         Ok(report)
     }
 
     /// Execute a heterogeneous MaxSAT schedule once per accepted split-batch component.
     ///
-    /// This preserves the scheduler's existing GPU CNF/CDCL dispatch behavior while
-    /// requiring aggregate split-batch evidence with zero CPU recomposition,
-    /// fallback, and per-candidate host round trips before any scheduled job runs.
+    /// This preserves the scheduler's existing GPU CNF/CDCL dispatch behavior while requiring
+    /// the typed `Gpu`/`RejectUnsupported` policy plus observed GPU dispatch and candidate
+    /// accounting, scoped transfer accounting, and CUDA-event timing before any scheduled job
+    /// runs.
     pub fn solve_maxsat_schedule_with_gpu_batch_execution_result(
         &mut self,
         provider: &CudaKernelProvider,
@@ -4694,7 +4626,6 @@ impl GpuSolverProductionAdapter {
                 provider, &results, workspace, jobs,
             )?;
             this.record_accepted_gpu_batch_candidate_evidence(results.len())?;
-            this.trace.require_zero_cpu_search()?;
             Ok(report)
         })
     }
@@ -4781,7 +4712,6 @@ impl GpuSolverProductionAdapter {
             }
         }
 
-        self.trace.require_zero_cpu_search()?;
         Ok(report)
     }
 
@@ -4988,7 +4918,6 @@ impl GpuSolverProductionAdapter {
 
         self.record_accepted_gpu_solver_production_path_events_since(events_before, &state)?;
         self.record_accepted_gpu_candidate_state(&state)?;
-        self.trace.require_zero_cpu_search()?;
         Ok(report)
     }
 
@@ -5032,7 +4961,6 @@ impl GpuSolverProductionAdapter {
             self.record_accepted_gpu_candidate_state(state)?;
         }
 
-        self.trace.require_zero_cpu_search()?;
         Ok(report)
     }
 
@@ -5055,7 +4983,6 @@ impl GpuSolverProductionAdapter {
                 provider, &results, jobs,
             )?;
             this.record_accepted_gpu_batch_candidate_evidence(results.len())?;
-            this.trace.require_zero_cpu_search()?;
             Ok(report)
         })
     }
@@ -5092,10 +5019,17 @@ fn require_accepted_gpu_solver_evidence(
             ),
         });
     }
-    if !result.prepared.preflight.cpu_fallbacks.is_zero() {
+    if result.prepared.preflight.execution_backend != EpistemicExecutionBackend::Gpu
+        || result.prepared.preflight.fallback_policy != EpistemicFallbackPolicy::RejectUnsupported
+    {
         return Err(XlogError::UnsupportedEpistemicConstruct {
             construct: "accepted GPU solver candidate evidence".to_string(),
-            context: "solver evidence requires zero epistemic CPU fallback counters".to_string(),
+            context: format!(
+                "solver evidence requires execution_backend=Gpu and \
+                 fallback_policy=RejectUnsupported, got backend={:?} policy={:?}",
+                result.prepared.preflight.execution_backend,
+                result.prepared.preflight.fallback_policy
+            ),
         });
     }
     if result.candidate_generation.literal_count == 0
@@ -5277,16 +5211,14 @@ fn require_accepted_gpu_solver_semantic_trace(result: &EpistemicGpuExecutionResu
         || trace.rejected_candidates != trace.rejected_candidate_indices.len()
         || trace.accepted_world_views != trace.accepted_candidates
         || accounted_candidates != trace.generated_candidates
-        || trace.cpu_candidate_enumerations != 0
-        || trace.cpu_world_view_validations != 0
     {
         return Err(XlogError::UnsupportedEpistemicConstruct {
             construct: "accepted GPU solver candidate evidence".to_string(),
             context: format!(
-                "solver evidence requires a consistent GPU semantic trace with zero CPU \
-                 fallbacks, got generated={}, tested={}, expected_generated={}, \
+                "solver evidence requires a consistent GPU semantic trace, got \
+                 generated={}, tested={}, expected_generated={}, \
                  expected_tested={}, accepted={} accepted_indices={}, accepted_world_views={}, \
-                 rejected={} rejected_indices={}, cpu_candidates={}, cpu_world_views={}",
+                 rejected={} rejected_indices={}",
                 trace.generated_candidates,
                 trace.tested_candidates,
                 result.candidate_generation.generated_candidates,
@@ -5295,9 +5227,7 @@ fn require_accepted_gpu_solver_semantic_trace(result: &EpistemicGpuExecutionResu
                 trace.accepted_candidate_indices.len(),
                 trace.accepted_world_views,
                 trace.rejected_candidates,
-                trace.rejected_candidate_indices.len(),
-                trace.cpu_candidate_enumerations,
-                trace.cpu_world_view_validations
+                trace.rejected_candidate_indices.len()
             ),
         });
     }
@@ -5318,11 +5248,6 @@ fn require_accepted_gpu_solver_batch_evidence<'a>(
     let trace = batch.trace;
     if trace.component_count != batch.results.len()
         || trace.gpu_runtime_component_executions != batch.results.len()
-        || trace.cpu_recomposition_steps != 0
-        || trace.cpu_candidate_enumerations != 0
-        || trace.cpu_world_view_validations != 0
-        || trace.cpu_solver_search_fallbacks != 0
-        || trace.cpu_probability_recomputations != 0
         || trace.tracked_dtoh_calls != 0
         || trace.tracked_htod_calls != 0
         || trace.tracked_data_plane_htod_calls != 0
@@ -5333,20 +5258,13 @@ fn require_accepted_gpu_solver_batch_evidence<'a>(
         return Err(XlogError::UnsupportedEpistemicConstruct {
             construct: "accepted GPU solver batch evidence".to_string(),
             context: format!(
-                "solver batch evidence requires complete GPU component execution and zero \
-                 CPU/host fallback counters outside bounded launch metadata plus aggregate \
-                 CUDA-event timing, got \
-                 components={}/{}, recomposition={}, cpu_candidates={}, cpu_world_views={}, \
-                 cpu_solver_search={}, cpu_probability_recompute={}, dtoh_calls={}, \
+                "solver batch evidence requires complete GPU component execution, zero \
+                 observed hot-path transfers outside bounded launch metadata, and aggregate \
+                 CUDA-event timing, got components={}/{}, dtoh_calls={}, \
                  htod_calls={}, data_plane_htod_calls={}, launch_metadata_htod_calls={}, \
                  round_trips={}, constraint_violations={}, aggregate_timing_recorded={}",
                 trace.gpu_runtime_component_executions,
                 trace.component_count,
-                trace.cpu_recomposition_steps,
-                trace.cpu_candidate_enumerations,
-                trace.cpu_world_view_validations,
-                trace.cpu_solver_search_fallbacks,
-                trace.cpu_probability_recomputations,
                 trace.tracked_dtoh_calls,
                 trace.tracked_htod_calls,
                 trace.tracked_data_plane_htod_calls,
@@ -5584,10 +5502,8 @@ mod tests {
         assert_eq!(trace.gpu_cdcl_sat_solves, 1);
         assert_eq!(trace.gpu_cdcl_workspace_unsat_solves, 1);
         assert_eq!(trace.gpu_maxsat_optima, 1);
-        assert_eq!(trace.cpu_assignment_enumerations, 0);
-        assert_eq!(trace.cpu_maxsat_enumerations, 0);
         trace
-            .require_zero_cpu_search()
+            .require_production_metric_eligibility()
             .expect("MaxSAT production search must not use CPU search");
     }
 
@@ -5661,10 +5577,8 @@ mod tests {
         assert_eq!(trace.gpu_maxsat_candidate_solves, 2);
         assert_eq!(trace.gpu_maxsat_unsat_candidate_prunes, 1);
         assert_eq!(trace.gpu_maxsat_optima, 1);
-        assert_eq!(trace.cpu_assignment_enumerations, 0);
-        assert_eq!(trace.cpu_maxsat_enumerations, 0);
         trace
-            .require_zero_cpu_search()
+            .require_production_metric_eligibility()
             .expect("portfolio production search must not use CPU search");
     }
 
@@ -5711,7 +5625,6 @@ mod tests {
         assert_eq!(report.gpu_learned_clause_arena_publications, 1);
         assert_eq!(report.gpu_learned_clause_imports, 1);
         assert_eq!(report.gpu_learned_clause_reused_solves, 1);
-        assert_eq!(report.cpu_learned_clause_transfers, 0);
         assert_eq!(
             workspace.learned_offsets.device_ptr_value(),
             learned_offsets_ptr
@@ -5733,11 +5646,8 @@ mod tests {
         assert_eq!(trace.gpu_learned_count_buffer_publications, 1);
         assert_eq!(trace.gpu_learned_clause_imports, 1);
         assert_eq!(trace.gpu_learned_clause_reused_solves, 1);
-        assert_eq!(trace.cpu_assignment_enumerations, 0);
-        assert_eq!(trace.cpu_maxsat_enumerations, 0);
-        assert_eq!(trace.cpu_learned_clause_transfers, 0);
         trace
-            .require_zero_cpu_search()
+            .require_production_metric_eligibility()
             .expect("learned-clause production reuse must not use CPU search");
     }
 }

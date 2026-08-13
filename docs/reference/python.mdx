@@ -775,7 +775,7 @@ result = known.evaluate_conditioned("0.6::fact().\nquery(fact()).\n")
 result.log_z_e                                       # ln(0.6) ~= -0.5108256, log P(evidence)
 result.trace["gpu_conditioned_evidence_facts"]        # >= 1 when evidence conditioned the circuit
 result.trace["gpu_conditioned_know_evidence_facts"]   # the `know` share of that total
-result.trace["cpu_only_probability_recomputations"]   # must be 0
+result.trace["accepted_gpu_production_path_events"]   # positive observed GPU work
 ```
 
 On a CUDA device, conditioning `0.6::fact(). query(fact()).` on `know fact()` raises
@@ -796,7 +796,8 @@ or negated evidence all depart from the product form.
 
 **Trace invariant.** Conditioning reached the GPU exact path when
 `gpu_conditioned_evidence_facts` -- the total the engine itself validates -- is
-non-zero and `cpu_only_probability_recomputations == 0`. The four evidence classes
+non-zero and the required GPU exact, PIR/CNF, and knowledge-compilation event counters
+are positive. The four evidence classes
 (`gpu_conditioned_know_evidence_facts`, `gpu_conditioned_possible_evidence_facts`,
 `gpu_conditioned_not_known_evidence_facts`,
 `gpu_conditioned_not_possible_evidence_facts`) decompose that total; a `possible`-only
