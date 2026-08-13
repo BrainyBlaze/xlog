@@ -1,7 +1,7 @@
 {
   "archives": {
-    "tar": "C:/Users/User/flt-workspace/projects/xlog/runs/r_dkefqzow6ba4udiy/maritime_scout/data/MaritimeCompositeEvents.tar.gz",
-    "zip": "C:/Users/User/flt-workspace/projects/xlog/runs/r_dkefqzow6ba4udiy/maritime_scout/data/brest_critical.zip"
+    "tar": "/tmp/xlog-pr239-data.JfK87Y/MaritimeCompositeEvents.tar.gz",
+    "zip": "/tmp/xlog-pr239-data.JfK87Y/brest_critical.zip"
   },
   "vocab": "duration",
   "pointwise": {

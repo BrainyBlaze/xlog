@@ -363,21 +363,6 @@ def _covers(sorted_ivs: list[tuple[int, int]], t: int) -> bool:
     return st <= t < et
 
 
-def _covers_closed(sorted_ivs: list[tuple[int, int]], t: int) -> bool:
-    """`_covers` with a CLOSED right end: does some `[st, et]` component in
-    `sorted_ivs` (sorted, non-overlapping) contain `t`? Used only by
-    `sustained_240`, whose pre-registered rule grants the relation to every
-    pt inside `[st, et]` of a long-enough intersection component."""
-    if not sorted_ivs:
-        return False
-    starts = [iv[0] for iv in sorted_ivs]
-    idx = bisect_right(starts, t) - 1
-    if idx < 0:
-        return False
-    st, et = sorted_ivs[idx]
-    return st <= t <= et
-
-
 def _intersect_sorted(a: list[tuple[int, int]], b: list[tuple[int, int]]) -> list[tuple[int, int]]:
     """Intersection of two MERGED sorted half-open interval lists — the
     classic two-pointer sweep; output is again merged and sorted."""
@@ -493,16 +478,16 @@ def _vessel_near_ports_intervals(hle: dict, vessel: str) -> list[tuple[int, int]
 
 
 def convert(tar_path: str, zip_path: str, extra_relations: tuple[str, ...] = ()) -> dict:
-    """Full conversion. `extra_relations` (default `()` — byte-identical to
-    the pre-`extra_relations` behavior) opts additional relations into the
-    output vocabulary; the only known name is `"sustained_240"`
+    """Full conversion. `extra_relations` (default `()` — preserving the
+    pre-`extra_relations` conversion behavior) opts additional relations into
+    the output vocabulary; the only known name is `"sustained_240"`
     (PREREG_SOFT.md section (c)): per pair, the intersection of the
     CONTINUOUS merged interval lists `proximity ∩ both_low_or_stopped ∩
     both_open_sea` is computed by interval algebra (never from the sparse
     pt grid — a single-pt gold run inside a long intersection must still
-    count), and every pt lying in `[st, et]` (closed; the `== 240` tie
-    included) of a component with `et - st >= SUSTAINED_MIN_S` receives
-    the relation. An unknown name raises `ValueError`.
+    count), and every pt inside the half-open component `[st, et)` receives
+    the relation when `et - st >= SUSTAINED_MIN_S`; the duration equality
+    tie is included. An unknown name raises `ValueError`.
 
     Returns dict with keys:
     - "pairs": [pair, ...] in fixed order (positives sorted, then negatives sorted)
@@ -645,7 +630,7 @@ def convert(tar_path: str, zip_path: str, extra_relations: tuple[str, ...] = ())
                     relations["any_near_ports"].append(pt_idx)
                 if both_open_sea:
                     relations["both_open_sea"].append(pt_idx)
-                if with_sustained and _covers_closed(sustained_ivs, t):
+                if with_sustained and _covers(sustained_ivs, t):
                     relations["sustained_240"].append(pt_idx)
 
                 if prev_t is None:

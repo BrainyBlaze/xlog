@@ -1,11 +1,12 @@
 # Maritime (Brest AIS) rendezVous: soft-credit column and duration-vocabulary arm
 
-Status: **pre-registered, not yet run.** This document is committed BEFORE
-any code that executes these runs on the real archives; every parameter,
-mechanism, hypothesis and interpretive constraint below is fixed in
-advance. Results will be appended to this document only after the
-pre-registered runs complete; any deviation from the protocol below must
-be recorded as a deviation, not silently amended.
+Status: **pre-registered; runs completed.** Sections (a)-(f) were committed
+before any code executed these runs on the real archives; every parameter,
+mechanism, hypothesis and interpretive constraint below was fixed in
+advance. Results were appended after the pre-registered runs completed.
+The results section also records a 2026-08-13 review correction to make
+`sustained_240` membership follow the converter's half-open interval
+contract; no pre-registered parameter changed.
 
 The baseline this document extends is the hard-search column of
 `README.md` (micro pointwise F1 0.6746, shipped artifact
@@ -13,14 +14,14 @@ The baseline this document extends is the hard-search column of
 
 ### (a) Three pre-registered columns
 
-All three columns run on the byte-identical protocol of the baseline:
+All three columns run on the same evaluation protocol as the baseline:
 5-fold pair-atom CV, seed 7, the same md5-pinned corpus, the same
 metrics (pointwise + interval, per-fold P/R/F1 + median/min/max of
 per-fold F1 + micro):
 
 - **A-soft**: the 11-relation vocabulary (as the baseline), soft weights;
-- **B-hard**: the vocabulary + `sustained_240`, hard search (the
-  byte-same `run_maritime_cv`, only the vocabulary wider);
+- **B-hard**: the vocabulary + `sustained_240`, using the baseline hard
+  search with only the vocabulary widened;
 - **B-soft**: the vocabulary + `sustained_240`, soft weights.
 
 ### (b) Mechanism of A-soft / B-soft
@@ -43,8 +44,8 @@ Initialization w = -2.0 (every clause "off" — a sparse start).
 For each pair: the intersection of the CONTINUOUS intervals
 `proximity ∩ both_low_or_stopped ∩ both_open_sea` (interval algebra on
 the converter's merged interval lists); a pt row receives the relation
-if it lies in an intersection component whose duration is
-`et - st >= 240` seconds. The threshold 240 is the gold generator's
+if it lies in the half-open component `[st, et)`, and that component's
+duration is `et - st >= 240` seconds. The threshold 240 is the gold generator's
 constant (`rendezvousTime`) — LANGUAGE parity with RTEC, not a peek into
 the data; the tie `== 240` is included (gold: the minimal interval
 duration is 241 s by census — the defining body's recall is preserved).
@@ -71,7 +72,7 @@ column comparisons are internal only, on identical folds.
 ### (f) Provenance
 
 The code is committed before any real run; `verify_smoke` gates every
-run; results are byte-exact JSONs in `results/` plus an append to the
+run; results are runner-produced JSONs in `results/` plus an append to the
 README.
 
 ## Ceiling canon for Arm B (derived and committed BEFORE any CV run)
@@ -103,9 +104,9 @@ leaving 22. Two consequences, recorded before the CV runs:
    be read with saturation in mind. Hypotheses H-A, H-B-delta and all
    run parameters are unchanged.
 
-## Results (pre-registered runs of 2026-08-12, zero protocol deviations)
+## Results (pre-registered runs of 2026-08-12; corrected outputs of 2026-08-13)
 
-Shipped artifacts (byte-exact runner outputs, `-text` attribute):
+Shipped artifacts (runner-produced JSON outputs, `-text` attribute):
 `results/asoft_cv5/MARITIME_CV_ASOFT.json`,
 `results/bhard_cv5/MARITIME_CV_BHARD.json`,
 `results/bsoft_cv5/MARITIME_CV_BSOFT.json`.
@@ -118,20 +119,35 @@ Committed-bytes md5 pins (all four stored verbatim under the
 | artifact | md5 |
 |---|---|
 | `results/asoft_cv5/MARITIME_CV_ASOFT.json` | `6712569558ebf81a203708f1415407a3` |
-| `results/bhard_cv5/MARITIME_CV_BHARD.json` | `bed0fc9588d7c2fc20ebd9bc83526152` |
-| `results/bsoft_cv5/MARITIME_CV_BSOFT.json` | `3160c5567e3758cc41ef3d6c237af600` |
-| `results/ceiling_probe_duration/CEILING_PROBE_DURATION.json` | `0ca0666a64bb1cac346d71ff7211798e` |
+| `results/bhard_cv5/MARITIME_CV_BHARD.json` | `40f7e669ba226d4480b09331e3a57635` |
+| `results/bsoft_cv5/MARITIME_CV_BSOFT.json` | `1f1cc9983293f223432d276da275a896` |
+| `results/ceiling_probe_duration/CEILING_PROBE_DURATION.json` | `dd7fa007c1303374dc6d47437a8b6c38` |
 
 | column (5-fold CV, pair-atom) | micro point F1 | P / R | interval F1 | per-fold median |
 |---|---|---|---|---|
 | hard baseline (base vocab, shipped earlier) | 0.6746 | 0.5109 / 0.9925 | 0.6772 | 0.6596 |
 | **A-soft** (base vocab, weighted clauses) | **0.7398** | 0.8715 / 0.6426 | 0.7435 | 0.6928 |
-| **B-hard** (duration vocab, crisp) | **0.9968** | 0.9936 / 1.0 | 0.9970 | 0.9942 |
-| **B-soft** (duration vocab, weighted) | **0.9968** | 0.9936 / 1.0 | 0.9970 | 0.9942 |
+| **B-hard** (duration vocab, crisp) | **0.9969** | 0.9939 / 1.0 | 0.9970 | 0.9950 |
+| **B-soft** (duration vocab, weighted) | **0.9969** | 0.9939 / 1.0 | 0.9970 | 0.9950 |
 
 Section (f) also requires an append to `README.md`; that append was
 initially omitted and is added with this fix — recorded here per this
 document's own no-silent-amendment rule, not slipped in.
+
+On 2026-08-13, review found that the implementation admitted a point at an
+intersection component's right endpoint even though the converter's
+relations use half-open `[st, et)` membership. The implementation now uses
+the same half-open predicate for `sustained_240`; regression tests cover both
+a component longer than 240 seconds and the exact-duration tie, and require
+the right endpoint to remain excluded. The ceiling probe, B-hard and B-soft
+artifacts were regenerated through their production CLIs from the md5-pinned
+public archives, with `verify_smoke.ok == true` in both CV artifacts. The
+regenerated artifacts also identify the duration-vocabulary F1 0.9969 canon,
+rather than carrying the base-vocabulary operating-point note. The ceiling
+aggregate is unchanged. In each B column the correction removes one
+former endpoint false positive (23 -> 22), changes micro point F1 from 0.9968
+to 0.9969, and changes the per-fold median from 0.9942 to 0.9950. A-soft does
+not use `sustained_240` and is unchanged.
 
 ### Hypothesis verdicts
 
@@ -150,10 +166,8 @@ document's own no-silent-amendment rule, not slipped in.
   folds (0.8000 vs 0.6685; 0.6928 vs 0.5699) — the crisp column keeps
   folds 0, 1, 4. The claim is therefore "weights beat crisp on
   aggregate and median", not "on every fold".
-- **H-B-ceiling: CONFIRMED.** B-hard lands at 0.9968 against the
-  pre-committed canon 0.9969 (fp 23 vs the canon's 22 — per-fold
-  gating admits one extra false positive that the global definitional
-  body does not).
+- **H-B-ceiling: CONFIRMED.** B-hard lands at the pre-committed canon:
+  micro point F1 0.9969 with 22 false positives.
 - **H-B-delta: holds trivially at saturation.** B-soft equals B-hard on
   every fold — with `sustained_240` in the vocabulary both columns
   recover gold nearly perfectly, so there is no headroom for weights to

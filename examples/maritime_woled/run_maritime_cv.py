@@ -363,8 +363,8 @@ def run_fold_soft(
     vocab: str,
 ) -> dict:
     """One held-out fold of the pre-registered SOFT column (PREREG_SOFT.md
-    section (b)) — deliberately isolated from `run_fold`, which stays
-    byte-identical to the baseline. The pool is every 1..3-literal
+    section (b)) — deliberately isolated from `run_fold`, which preserves
+    the baseline hard-search implementation. The pool is every 1..3-literal
     conjunction over the corpus vocabulary (`enumerate_bodies.
     enumerate_bodies` — 1-literal bodies included, unlike the hard
     search's pool); the gate is THE SAME per-fold permutation-null
@@ -506,7 +506,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--min-new-covered", type=int, default=2, dest="min_new_covered")
     parser.add_argument("--tie-tolerance", type=float, default=None, dest="tie_tolerance")
     parser.add_argument("--column", choices=("hard", "soft"), default="hard",
-                        help="'hard' (default, byte-identical to the baseline runner) "
+                        help="'hard' (default, preserves the baseline hard-search path; "
+                             "the result schema additionally records column/vocab) "
                              "or the pre-registered noisy-OR soft-credit column "
                              "(PREREG_SOFT.md section (b))")
     parser.add_argument("--vocab", choices=("base", "duration"), default="base",
@@ -556,6 +557,25 @@ def _smoke_subset(converted: dict) -> dict:
             "n_pt": len(keep_pts),
         },
     }
+
+
+def _vocabulary_ceiling_note(vocab: str, *, pinned_corpus_verified: bool) -> str:
+    """Describe only corpus references established for this invocation."""
+    if not pinned_corpus_verified:
+        return (
+            "unverified or synthetic invocation; no pinned-corpus vocabulary reference "
+            "applies; no comparison with published 0.98 (different grid)"
+        )
+    if vocab == "duration":
+        return (
+            "duration-vocabulary definitional-body canon F1 0.9969 on the pinned corpus; "
+            "no comparison with published 0.98 (different grid)"
+        )
+    return (
+        "base-vocabulary definitional-body operating point F1 0.6599 on the pinned "
+        "corpus; weighted clauses are not bounded to this point; no comparison with "
+        "published 0.98 (different grid)"
+    )
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -629,11 +649,14 @@ def main(argv: list[str] | None = None) -> int:
     }
     fold_f1s = [r["scoring"]["point"]["f1"] for r in fold_records]
 
+    vocabulary_ceiling_note = _vocabulary_ceiling_note(
+        args.vocab, pinned_corpus_verified=not args.skip_verify,
+    )
+
     result = {
         "protocol": "maritime rendezVous direct-target CV "
                     "(docs/experiments/maritime/README.md pre-registration)",
-        "vocabulary_ceiling_note": "point-F1 vocabulary ceiling ~0.66 (pre-registered); "
-                                   "no comparison with published 0.98 (different grid)",
+        "vocabulary_ceiling_note": vocabulary_ceiling_note,
         "archives": {"tar": args.tar, "zip": args.zip},
         "verify_smoke": verify,
         "params": {

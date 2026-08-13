@@ -358,11 +358,14 @@ artifacts). Headline, same 5-fold pair-atom protocol as above:
 |---|---|---|
 | hard baseline (this README) | 0.6746 | 0.5109 / 0.9925 |
 | A-soft (base vocabulary, weighted clauses) | **0.7398** | 0.8715 / 0.6426 |
-| B-hard (duration vocabulary, crisp) | 0.9968 | 0.9936 / 1.0 |
-| B-soft (duration vocabulary, weighted) | 0.9968 | 0.9936 / 1.0 |
+| B-hard (duration vocabulary, crisp) | 0.9969 | 0.9939 / 1.0 |
+| B-soft (duration vocabulary, weighted) | 0.9969 | 0.9939 / 1.0 |
 
 Weighted clauses beat the crisp selection by +0.0652 micro F1 on the
 same vocabulary, folds and gate; with `sustained_240` in the vocabulary
 both columns operate at the pre-committed ceiling canon (0.9969) —
 saturation, mirroring the published maritime setting. No comparison
 with the published dense-grid figure is made (different temporal grid).
+The B-column artifacts were regenerated after a review correction aligned
+`sustained_240` point membership with the converter's half-open intervals;
+the correction and current md5 pins are recorded in `PREREG_SOFT.md`.

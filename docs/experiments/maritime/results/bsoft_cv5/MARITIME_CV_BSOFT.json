@@ -1,9 +1,9 @@
 {
   "protocol": "maritime rendezVous direct-target CV (docs/experiments/maritime/README.md pre-registration)",
-  "vocabulary_ceiling_note": "point-F1 vocabulary ceiling ~0.66 (pre-registered); no comparison with published 0.98 (different grid)",
+  "vocabulary_ceiling_note": "duration-vocabulary definitional-body canon F1 0.9969 on the pinned corpus; no comparison with published 0.98 (different grid)",
   "archives": {
-    "tar": "C:\\Users\\User\\flt-workspace\\projects\\xlog\\runs\\r_dkefqzow6ba4udiy\\maritime_scout\\data\\MaritimeCompositeEvents.tar.gz",
-    "zip": "C:\\Users\\User\\flt-workspace\\projects\\xlog\\runs\\r_dkefqzow6ba4udiy\\maritime_scout\\data\\brest_critical.zip"
+    "tar": "/tmp/xlog-pr239-data.JfK87Y/MaritimeCompositeEvents.tar.gz",
+    "zip": "/tmp/xlog-pr239-data.JfK87Y/brest_critical.zip"
   },
   "verify_smoke": {
     "ok": true,
@@ -859,7 +859,7 @@
     1,
     1
   ],
-  "convert_wall_s": 559.3342381000984,
+  "convert_wall_s": 463.2929939789974,
   "folds": [
     {
       "fold": 0,
@@ -868,16 +868,16 @@
       "n_bodies_pool": 298,
       "n_bodies_gated": 81,
       "weights_top10": {
-        "both_lowspeed&proximity&sustained_240": 0.9780791997909546,
-        "both_low_or_stopped&proximity&sustained_240": 0.9189635515213013,
-        "became_proximate&both_lowspeed&sustained_240": 0.8678726553916931,
-        "both_stopped_far&proximity&sustained_240": 0.7930925488471985,
-        "became_proximate&both_low_or_stopped&sustained_240": 0.1778523027896881,
-        "became_proximate&both_open_sea&sustained_240": 0.1778523027896881,
-        "became_proximate&either_low_or_stopped&sustained_240": 0.1778523027896881,
-        "became_proximate&proximity&sustained_240": 0.1778523027896881,
-        "became_proximate&sustained_240": 0.1778523027896881,
-        "became_proximate&both_stopped_far&sustained_240": 0.1517549753189087
+        "both_low_or_stopped&both_lowspeed&sustained_240": 0.7331222891807556,
+        "both_lowspeed&both_open_sea&sustained_240": 0.7331222891807556,
+        "both_lowspeed&either_low_or_stopped&sustained_240": 0.7331222891807556,
+        "both_lowspeed&proximity&sustained_240": 0.7331222891807556,
+        "both_lowspeed&sustained_240": 0.7331222891807556,
+        "became_proximate&both_lowspeed&sustained_240": 0.663239061832428,
+        "both_low_or_stopped&both_open_sea&sustained_240": 0.26297324895858765,
+        "both_low_or_stopped&either_low_or_stopped&sustained_240": 0.26297324895858765,
+        "both_low_or_stopped&proximity&sustained_240": 0.26297324895858765,
+        "both_low_or_stopped&sustained_240": 0.26297324895858765
       },
       "soft_params": {
         "steps": 300,
@@ -931,7 +931,7 @@
           "f1": 1.0
         }
       },
-      "wall_s": 199.93259129999205
+      "wall_s": 355.18998022699816
     },
     {
       "fold": 1,
@@ -940,16 +940,16 @@
       "n_bodies_pool": 298,
       "n_bodies_gated": 81,
       "weights_top10": {
-        "both_lowspeed&proximity&sustained_240": 0.9787599444389343,
-        "both_low_or_stopped&proximity&sustained_240": 0.9188694357872009,
-        "both_stopped_far&proximity&sustained_240": 0.8599162101745605,
-        "became_proximate&both_lowspeed&sustained_240": 0.8475158214569092,
-        "became_proximate&both_low_or_stopped&sustained_240": 0.2203754186630249,
-        "became_proximate&both_open_sea&sustained_240": 0.2203754186630249,
-        "became_proximate&either_low_or_stopped&sustained_240": 0.2203754186630249,
-        "became_proximate&proximity&sustained_240": 0.2203754186630249,
-        "became_proximate&sustained_240": 0.2203754186630249,
-        "became_proximate&both_stopped_far&sustained_240": 0.20270474255084991
+        "both_low_or_stopped&both_lowspeed&sustained_240": 0.7587658166885376,
+        "both_lowspeed&both_open_sea&sustained_240": 0.7587658166885376,
+        "both_lowspeed&either_low_or_stopped&sustained_240": 0.7587658166885376,
+        "both_lowspeed&proximity&sustained_240": 0.7587658166885376,
+        "both_lowspeed&sustained_240": 0.7587658166885376,
+        "became_proximate&both_lowspeed&sustained_240": 0.6456937789916992,
+        "both_low_or_stopped&both_stopped_far&sustained_240": 0.28280186653137207,
+        "both_open_sea&both_stopped_far&sustained_240": 0.28280186653137207,
+        "both_stopped_far&either_low_or_stopped&sustained_240": 0.28280186653137207,
+        "both_stopped_far&proximity&sustained_240": 0.28280186653137207
       },
       "soft_params": {
         "steps": 300,
@@ -1779,7 +1779,7 @@
           "f1": 0.9923793395427604
         }
       },
-      "wall_s": 237.0707741000224
+      "wall_s": 355.9041021760022
     },
     {
       "fold": 2,
@@ -1788,16 +1788,16 @@
       "n_bodies_pool": 298,
       "n_bodies_gated": 81,
       "weights_top10": {
-        "both_lowspeed&proximity&sustained_240": 0.978985071182251,
-        "both_low_or_stopped&proximity&sustained_240": 0.9128276109695435,
-        "became_proximate&both_lowspeed&sustained_240": 0.8485751152038574,
-        "both_stopped_far&proximity&sustained_240": 0.8085207939147949,
-        "became_proximate&both_low_or_stopped&sustained_240": 0.22994472086429596,
-        "became_proximate&both_open_sea&sustained_240": 0.22994472086429596,
-        "became_proximate&either_low_or_stopped&sustained_240": 0.22994472086429596,
-        "became_proximate&proximity&sustained_240": 0.22994472086429596,
-        "became_proximate&sustained_240": 0.22994472086429596,
-        "became_proximate&both_stopped_far&sustained_240": 0.21005022525787354
+        "both_low_or_stopped&both_lowspeed&sustained_240": 0.7378185391426086,
+        "both_lowspeed&both_open_sea&sustained_240": 0.7378185391426086,
+        "both_lowspeed&either_low_or_stopped&sustained_240": 0.7378185391426086,
+        "both_lowspeed&proximity&sustained_240": 0.7378185391426086,
+        "both_lowspeed&sustained_240": 0.7378185391426086,
+        "became_proximate&both_lowspeed&sustained_240": 0.611033022403717,
+        "both_low_or_stopped&both_open_sea&sustained_240": 0.254261314868927,
+        "both_low_or_stopped&either_low_or_stopped&sustained_240": 0.254261314868927,
+        "both_low_or_stopped&proximity&sustained_240": 0.254261314868927,
+        "both_low_or_stopped&sustained_240": 0.254261314868927
       },
       "soft_params": {
         "steps": 300,
@@ -2639,7 +2639,7 @@
           "f1": 1.0
         }
       },
-      "wall_s": 248.41417360003106
+      "wall_s": 218.33586464799737
     },
     {
       "fold": 3,
@@ -2648,16 +2648,16 @@
       "n_bodies_pool": 298,
       "n_bodies_gated": 81,
       "weights_top10": {
-        "both_lowspeed&proximity&sustained_240": 0.9792836308479309,
-        "both_low_or_stopped&proximity&sustained_240": 0.9152780771255493,
-        "both_stopped_far&proximity&sustained_240": 0.8604491949081421,
-        "became_proximate&both_lowspeed&sustained_240": 0.8426547050476074,
-        "became_proximate&both_low_or_stopped&sustained_240": 0.2382155954837799,
-        "became_proximate&both_open_sea&sustained_240": 0.2382155954837799,
-        "became_proximate&either_low_or_stopped&sustained_240": 0.2382155954837799,
-        "became_proximate&proximity&sustained_240": 0.2382155954837799,
-        "became_proximate&sustained_240": 0.2382155954837799,
-        "became_proximate&both_stopped_far&sustained_240": 0.22253043949604034
+        "both_low_or_stopped&both_lowspeed&sustained_240": 0.756349503993988,
+        "both_lowspeed&both_open_sea&sustained_240": 0.756349503993988,
+        "both_lowspeed&either_low_or_stopped&sustained_240": 0.756349503993988,
+        "both_lowspeed&proximity&sustained_240": 0.756349503993988,
+        "both_lowspeed&sustained_240": 0.756349503993988,
+        "became_proximate&both_lowspeed&sustained_240": 0.5980777740478516,
+        "both_low_or_stopped&both_stopped_far&sustained_240": 0.2523634731769562,
+        "both_open_sea&both_stopped_far&sustained_240": 0.2523634731769562,
+        "both_stopped_far&either_low_or_stopped&sustained_240": 0.2523634731769562,
+        "both_stopped_far&proximity&sustained_240": 0.2523634731769562
       },
       "soft_params": {
         "steps": 300,
@@ -3492,13 +3492,13 @@
       ],
       "scoring": {
         "point": {
-          "precision": 0.988391376451078,
+          "precision": 0.9900332225913622,
           "recall": 1.0,
-          "f1": 0.9941618015012511,
+          "f1": 0.994991652754591,
           "tp": 596,
-          "fp": 7,
+          "fp": 6,
           "fn": 0,
-          "tn": 94211,
+          "tn": 94212,
           "degenerate": false
         },
         "interval": {
@@ -3511,7 +3511,7 @@
           "f1": 0.9949066213921902
         }
       },
-      "wall_s": 241.34089450002648
+      "wall_s": 370.087832985002
     },
     {
       "fold": 4,
@@ -3520,16 +3520,16 @@
       "n_bodies_pool": 298,
       "n_bodies_gated": 81,
       "weights_top10": {
-        "both_lowspeed&proximity&sustained_240": 0.9774743914604187,
-        "both_low_or_stopped&proximity&sustained_240": 0.9326379895210266,
-        "became_proximate&both_lowspeed&sustained_240": 0.8025622963905334,
-        "both_stopped_far&proximity&sustained_240": 0.7598316073417664,
-        "became_proximate&both_low_or_stopped&sustained_240": 0.3201616406440735,
-        "became_proximate&both_open_sea&sustained_240": 0.3201616406440735,
-        "became_proximate&either_low_or_stopped&sustained_240": 0.3201616406440735,
-        "became_proximate&proximity&sustained_240": 0.3201616406440735,
-        "became_proximate&sustained_240": 0.3201616406440735,
-        "became_proximate&both_stopped_far&sustained_240": 0.3041115999221802
+        "both_low_or_stopped&both_lowspeed&sustained_240": 0.7155826687812805,
+        "both_lowspeed&both_open_sea&sustained_240": 0.7155826687812805,
+        "both_lowspeed&either_low_or_stopped&sustained_240": 0.7155826687812805,
+        "both_lowspeed&proximity&sustained_240": 0.7155826687812805,
+        "both_lowspeed&sustained_240": 0.7155826687812805,
+        "became_proximate&both_lowspeed&sustained_240": 0.5253157019615173,
+        "became_proximate&both_low_or_stopped&sustained_240": 0.3163887858390808,
+        "became_proximate&both_open_sea&sustained_240": 0.3163887858390808,
+        "became_proximate&either_low_or_stopped&sustained_240": 0.3163887858390808,
+        "became_proximate&proximity&sustained_240": 0.3163887858390808
       },
       "soft_params": {
         "steps": 300,
@@ -4403,17 +4403,17 @@
           "f1": 0.9949494949494949
         }
       },
-      "wall_s": 339.1447215999942
+      "wall_s": 233.46071015099733
     }
   ],
   "micro": {
     "point": {
       "tp": 3579,
-      "fp": 23,
+      "fp": 22,
       "fn": 0,
-      "precision": 0.9936146585230428,
+      "precision": 0.9938905859483477,
       "recall": 1.0,
-      "f1": 0.9967971034674836
+      "f1": 0.9969359331476324
     },
     "interval": {
       "n_matched_gold": 3548,
@@ -4430,10 +4430,10 @@
       1.0,
       0.9925187032418953,
       1.0,
-      0.9941618015012511,
+      0.994991652754591,
       0.9941618015012511
     ],
-    "median": 0.9941618015012511,
+    "median": 0.994991652754591,
     "min": 0.9925187032418953,
     "max": 1.0
   }

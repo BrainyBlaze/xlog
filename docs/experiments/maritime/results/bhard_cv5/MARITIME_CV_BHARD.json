@@ -1,9 +1,9 @@
 {
   "protocol": "maritime rendezVous direct-target CV (docs/experiments/maritime/README.md pre-registration)",
-  "vocabulary_ceiling_note": "point-F1 vocabulary ceiling ~0.66 (pre-registered); no comparison with published 0.98 (different grid)",
+  "vocabulary_ceiling_note": "duration-vocabulary definitional-body canon F1 0.9969 on the pinned corpus; no comparison with published 0.98 (different grid)",
   "archives": {
-    "tar": "C:\\Users\\User\\flt-workspace\\projects\\xlog\\runs\\r_dkefqzow6ba4udiy\\maritime_scout\\data\\MaritimeCompositeEvents.tar.gz",
-    "zip": "C:\\Users\\User\\flt-workspace\\projects\\xlog\\runs\\r_dkefqzow6ba4udiy\\maritime_scout\\data\\brest_critical.zip"
+    "tar": "/tmp/xlog-pr239-data.JfK87Y/MaritimeCompositeEvents.tar.gz",
+    "zip": "/tmp/xlog-pr239-data.JfK87Y/brest_critical.zip"
   },
   "verify_smoke": {
     "ok": true,
@@ -859,30 +859,28 @@
     1,
     1
   ],
-  "convert_wall_s": 1422.579699399881,
+  "convert_wall_s": 419.27137974200014,
   "folds": [
     {
       "fold": 0,
       "clauses": [
         [
           "both_low_or_stopped",
-          "proximity",
           "sustained_240"
         ]
       ],
       "stop_reason": "no positives remain in the residual",
       "selection_reasons_per_iteration": [
-        "won by 0.03531"
+        "holdout tie broken by Occam: every tied body covers an IDENTICAL fact set (indistinguishable on this training data), so the shortest/lexicographically-first body (both_low_or_stopped&sustained_240) is kept -- generalizes _select_from_holdout's relational-over-neural tie-break (equal generalization, simpler explanation) to 'simpler description, provably equal cover'"
       ],
       "iterations": [
         {
           "rule": [
             "both_low_or_stopped",
-            "proximity",
             "sustained_240"
           ],
           "reason": "committed",
-          "margin": 0.035312507787872316,
+          "margin": 0.0,
           "n_residual_pos_before": 2385,
           "n_newly_covered": 2385
         }
@@ -900,10 +898,10 @@
         "quantile": 0.95,
         "perm_seed": 7
       },
-      "n_bodies": 205,
+      "n_bodies": 182,
       "n_bodies_skipped_empty": {
-        "2": 6,
-        "3": 75
+        "2": 10,
+        "3": 94
       },
       "n_train_pt": 412765,
       "n_test_pt": 42093,
@@ -938,30 +936,28 @@
           "f1": 1.0
         }
       },
-      "wall_s": 102.81476349988952
+      "wall_s": 166.81544702300016
     },
     {
       "fold": 1,
       "clauses": [
         [
           "both_low_or_stopped",
-          "proximity",
           "sustained_240"
         ]
       ],
       "stop_reason": "no positives remain in the residual",
       "selection_reasons_per_iteration": [
-        "won by 0.02032"
+        "holdout tie broken by Occam: every tied body covers an IDENTICAL fact set (indistinguishable on this training data), so the shortest/lexicographically-first body (both_low_or_stopped&sustained_240) is kept -- generalizes _select_from_holdout's relational-over-neural tie-break (equal generalization, simpler explanation) to 'simpler description, provably equal cover'"
       ],
       "iterations": [
         {
           "rule": [
             "both_low_or_stopped",
-            "proximity",
             "sustained_240"
           ],
           "reason": "committed",
-          "margin": 0.020319802843730694,
+          "margin": 0.0,
           "n_residual_pos_before": 2982,
           "n_newly_covered": 2982
         }
@@ -979,10 +975,10 @@
         "quantile": 0.95,
         "perm_seed": 7
       },
-      "n_bodies": 205,
+      "n_bodies": 182,
       "n_bodies_skipped_empty": {
-        "2": 6,
-        "3": 75
+        "2": 10,
+        "3": 94
       },
       "n_train_pt": 334512,
       "n_test_pt": 120346,
@@ -1793,30 +1789,28 @@
           "f1": 0.9923793395427604
         }
       },
-      "wall_s": 98.45398590015247
+      "wall_s": 118.4512105089998
     },
     {
       "fold": 2,
       "clauses": [
         [
           "both_low_or_stopped",
-          "proximity",
           "sustained_240"
         ]
       ],
       "stop_reason": "no positives remain in the residual",
       "selection_reasons_per_iteration": [
-        "won by 0.02143"
+        "holdout tie broken by Occam: every tied body covers an IDENTICAL fact set (indistinguishable on this training data), so the shortest/lexicographically-first body (both_low_or_stopped&sustained_240) is kept -- generalizes _select_from_holdout's relational-over-neural tie-break (equal generalization, simpler explanation) to 'simpler description, provably equal cover'"
       ],
       "iterations": [
         {
           "rule": [
             "both_low_or_stopped",
-            "proximity",
             "sustained_240"
           ],
           "reason": "committed",
-          "margin": 0.021425464327175292,
+          "margin": 0.0,
           "n_residual_pos_before": 2983,
           "n_newly_covered": 2983
         }
@@ -1834,10 +1828,10 @@
         "quantile": 0.95,
         "perm_seed": 7
       },
-      "n_bodies": 205,
+      "n_bodies": 182,
       "n_bodies_skipped_empty": {
-        "2": 6,
-        "3": 75
+        "2": 10,
+        "3": 94
       },
       "n_train_pt": 380968,
       "n_test_pt": 73890,
@@ -2660,30 +2654,28 @@
           "f1": 1.0
         }
       },
-      "wall_s": 81.746552699944
+      "wall_s": 128.92725471099766
     },
     {
       "fold": 3,
       "clauses": [
         [
           "both_low_or_stopped",
-          "proximity",
           "sustained_240"
         ]
       ],
       "stop_reason": "no positives remain in the residual",
       "selection_reasons_per_iteration": [
-        "won by 0.02003"
+        "holdout tie broken by Occam: every tied body covers an IDENTICAL fact set (indistinguishable on this training data), so the shortest/lexicographically-first body (both_low_or_stopped&sustained_240) is kept -- generalizes _select_from_holdout's relational-over-neural tie-break (equal generalization, simpler explanation) to 'simpler description, provably equal cover'"
       ],
       "iterations": [
         {
           "rule": [
             "both_low_or_stopped",
-            "proximity",
             "sustained_240"
           ],
           "reason": "committed",
-          "margin": 0.020030738063624653,
+          "margin": 0.0,
           "n_residual_pos_before": 2983,
           "n_newly_covered": 2983
         }
@@ -2701,10 +2693,10 @@
         "quantile": 0.95,
         "perm_seed": 7
       },
-      "n_bodies": 202,
+      "n_bodies": 182,
       "n_bodies_skipped_empty": {
-        "2": 6,
-        "3": 78
+        "2": 10,
+        "3": 94
       },
       "n_train_pt": 360044,
       "n_test_pt": 94814,
@@ -3520,13 +3512,13 @@
       ],
       "scoring": {
         "point": {
-          "precision": 0.988391376451078,
+          "precision": 0.9900332225913622,
           "recall": 1.0,
-          "f1": 0.9941618015012511,
+          "f1": 0.994991652754591,
           "tp": 596,
-          "fp": 7,
+          "fp": 6,
           "fn": 0,
-          "tn": 94211,
+          "tn": 94212,
           "degenerate": false
         },
         "interval": {
@@ -3539,30 +3531,28 @@
           "f1": 0.9949066213921902
         }
       },
-      "wall_s": 75.84046370000578
+      "wall_s": 141.84044822600117
     },
     {
       "fold": 4,
       "clauses": [
         [
           "both_low_or_stopped",
-          "proximity",
           "sustained_240"
         ]
       ],
       "stop_reason": "no positives remain in the residual",
       "selection_reasons_per_iteration": [
-        "won by 0.02199"
+        "holdout tie broken by Occam: every tied body covers an IDENTICAL fact set (indistinguishable on this training data), so the shortest/lexicographically-first body (both_low_or_stopped&sustained_240) is kept -- generalizes _select_from_holdout's relational-over-neural tie-break (equal generalization, simpler explanation) to 'simpler description, provably equal cover'"
       ],
       "iterations": [
         {
           "rule": [
             "both_low_or_stopped",
-            "proximity",
             "sustained_240"
           ],
           "reason": "committed",
-          "margin": 0.021988672077757898,
+          "margin": 0.0,
           "n_residual_pos_before": 2983,
           "n_newly_covered": 2983
         }
@@ -3580,10 +3570,10 @@
         "quantile": 0.95,
         "perm_seed": 7
       },
-      "n_bodies": 204,
+      "n_bodies": 182,
       "n_bodies_skipped_empty": {
-        "2": 6,
-        "3": 76
+        "2": 10,
+        "3": 94
       },
       "n_train_pt": 331143,
       "n_test_pt": 123715,
@@ -4438,17 +4428,17 @@
           "f1": 0.9949494949494949
         }
       },
-      "wall_s": 73.14051729999483
+      "wall_s": 159.89140654400035
     }
   ],
   "micro": {
     "point": {
       "tp": 3579,
-      "fp": 23,
+      "fp": 22,
       "fn": 0,
-      "precision": 0.9936146585230428,
+      "precision": 0.9938905859483477,
       "recall": 1.0,
-      "f1": 0.9967971034674836
+      "f1": 0.9969359331476324
     },
     "interval": {
       "n_matched_gold": 3548,
@@ -4465,10 +4455,10 @@
       1.0,
       0.9925187032418953,
       1.0,
-      0.9941618015012511,
+      0.994991652754591,
       0.9941618015012511
     ],
-    "median": 0.9941618015012511,
+    "median": 0.994991652754591,
     "min": 0.9925187032418953,
     "max": 1.0
   }

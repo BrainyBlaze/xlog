@@ -168,8 +168,8 @@ def test_train_soft_weights_is_bitwise_deterministic():
 
 
 # ---------------------------------------------------------------------------
-# Task 4: sustained_240 — the Arm-B relation, computed on CONTINUOUS interval
-# intersections (PREREG_SOFT.md section (c)), never on the sparse pt grid
+# sustained_240 is computed on continuous interval intersections
+# (PREREG_SOFT.md section (c)), never on the sparse point grid.
 # ---------------------------------------------------------------------------
 
 import io
@@ -190,7 +190,7 @@ def _archives(tmp_path, hle_lines, lle_lines, stem="soft"):
     return str(tar_p), str(zip_p)
 
 
-def test_sustained_240_long_component_yes_short_component_no(tmp_path):
+def test_sustained_240_long_component_uses_half_open_membership(tmp_path):
     from maritime_convert import convert
 
     tar_p, zip_p = _archives(tmp_path, [
@@ -203,12 +203,12 @@ def test_sustained_240_long_component_yes_short_component_no(tmp_path):
     conv = convert(tar_p, zip_p, extra_relations=("sustained_240",))
     times = conv["pt_time"]
     assert times == [900, 1000, 1300, 2000, 2100, 2200]
-    # pts inside the 300 s component [1000, 1300] (closed, per PREREG_SOFT)
-    # receive the relation; the 100 s component's pts do not.
-    assert conv["relations"]["sustained_240"] == [times.index(1000), times.index(1300)]
+    # Only pts inside the 300 s half-open component [1000, 1300) receive
+    # the relation; its right endpoint and the 100 s component do not.
+    assert conv["relations"]["sustained_240"] == [times.index(1000)]
 
 
-def test_sustained_240_exactly_240_is_included(tmp_path):
+def test_sustained_240_exact_duration_component_uses_half_open_membership(tmp_path):
     from maritime_convert import convert
 
     tar_p, zip_p = _archives(tmp_path, [
@@ -219,7 +219,10 @@ def test_sustained_240_exactly_240_is_included(tmp_path):
     ])
     conv = convert(tar_p, zip_p, extra_relations=("sustained_240",))
     times = conv["pt_time"]
-    assert conv["relations"]["sustained_240"] == [times.index(1000), times.index(1240)]
+    sustained = set(conv["relations"]["sustained_240"])
+    assert sustained == {times.index(1000)}
+    for defining_relation in ("proximity", "both_low_or_stopped", "both_open_sea"):
+        assert sustained <= set(conv["relations"][defining_relation])
 
 
 def test_sustained_240_single_pt_inside_long_intersection_gets_it(tmp_path):
@@ -248,8 +251,8 @@ def test_sustained_240_single_pt_inside_long_intersection_gets_it(tmp_path):
 
 
 def test_convert_default_has_no_sustained_key_and_matches_main_snapshot(tmp_path):
-    # Byte-identity of the default path: convert() without the flag returns
-    # exactly what the pre-change (main 332a6837) code returned on the
+    # Default-path compatibility: convert() without the flag returns the
+    # selected snapshot values from the pre-change (main 332a6837) code on the
     # test_maritime_convert fixture — snapshot pinned below by value — and
     # deep-equals an explicit extra_relations=().
     from maritime_convert import convert
@@ -300,16 +303,16 @@ def test_convert_rejects_unknown_extra_relation(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# Task 5: ceiling_probe --vocab duration — the Arm-B ceiling derived BEFORE
-# any CV run (PREREG_SOFT.md hypothesis H-B-ceiling)
+# ceiling_probe --vocab duration derives the pre-registered
+# duration-vocabulary ceiling before any CV run.
 # ---------------------------------------------------------------------------
 
 
 def _duration_probe_archives(tmp_path):
-    """Hand-computed fixture (the Task-4 geometry plus one gold interval).
+    """Hand-computed fixture for the duration relation plus one gold interval.
     pts: 900/1000/1300/2000/2100/2200. The base definitional body covers
-    {1000, 2000} (half-open); sustained_240 covers {1000, 1300} (the 300 s
-    component, closed); gold rendezVous [1000, 1300) covers {1000}. So:
+    {1000, 2000} (half-open); sustained_240 covers {1000} (the 300 s
+    component is also half-open); gold rendezVous [1000, 1300) covers {1000}. So:
     base body tp=1 fp=1 fn=0; base ∧ sustained_240 tp=1 fp=0 fn=0."""
     return _archives(tmp_path, [
         "rendezVous|A|B|true|1000|1300",
@@ -361,8 +364,8 @@ def test_ceiling_probe_default_vocab_has_no_duration_block(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# Task 6: the CV runner's pre-registered columns — --column {hard,soft},
-# --vocab {base,duration}; defaults byte-identical to the baseline runner
+# The CV runner's pre-registered columns use --column {hard,soft} and
+# --vocab {base,duration}; hard/base preserves the selected baseline contract.
 # ---------------------------------------------------------------------------
 
 
@@ -406,7 +409,7 @@ def _run_cv(tmp_path, extra_args, out_name="out.json"):
     return json.loads(out.read_text(encoding="utf-8"))
 
 
-def test_cv_defaults_are_byte_identical_to_main_and_params_additive(tmp_path):
+def test_cv_hard_base_defaults_preserve_selected_baseline_contract(tmp_path):
     pytest.importorskip("torch")
     result = _run_cv(tmp_path, [])
     # snapshot of the pre-change (main 332a6837) runner on this fixture:
@@ -421,7 +424,12 @@ def test_cv_defaults_are_byte_identical_to_main_and_params_additive(tmp_path):
     assert result["per_fold_point_f1"]["values"] == [1.0, 1.0, 1.0]
     assert result["fold_of_pair"] == [0, 1, 2, 0, 1, 2, 0, 1, 2, 0, 1, 2]
     assert result["candidate_vocabulary"] == sorted(BASELINE_VOCABULARY)
-    # the ONLY addition over main's result shape: the params stamp
+    assert "unverified or synthetic invocation" in (
+        result["vocabulary_ceiling_note"]
+    )
+    assert "0.6599" not in result["vocabulary_ceiling_note"]
+    # The output contract is additive rather than byte-identical: the selected
+    # baseline fields above are pinned, and the result records these params.
     assert result["params"]["column"] == "hard"
     assert result["params"]["vocab"] == "base"
 
@@ -462,6 +470,19 @@ def test_cv_duration_vocab_reaches_the_converter(tmp_path):
     assert result["params"]["vocab"] == "duration"
     assert "sustained_240" in result["candidate_vocabulary"]
     assert len(result["candidate_vocabulary"]) == 12
+    assert "unverified or synthetic invocation" in (
+        result["vocabulary_ceiling_note"]
+    )
+    assert "0.9969" not in result["vocabulary_ceiling_note"]
+
+
+def test_cv_verified_vocabulary_notes_name_the_pinned_corpus_reference():
+    from run_maritime_cv import _vocabulary_ceiling_note
+
+    base = _vocabulary_ceiling_note("base", pinned_corpus_verified=True)
+    assert "base-vocabulary definitional-body operating point F1 0.6599" in base
+    duration = _vocabulary_ceiling_note("duration", pinned_corpus_verified=True)
+    assert "duration-vocabulary definitional-body canon F1 0.9969" in duration
 
 
 def test_cv_soft_column_two_runs_identical(tmp_path):
