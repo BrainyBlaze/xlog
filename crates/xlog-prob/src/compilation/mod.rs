@@ -4,6 +4,7 @@
 //!
 //! Production correctness requires the GPU CDCL equivalence verifier (see `validation`).
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -57,6 +58,71 @@ pub struct CircuitCompileProfile {
     /// BFS frontier item count after `frontier_depth` expansion steps
     /// (0 on cache hits or when profiling is disabled).
     pub frontier_items: u32,
+}
+
+/// Monotonic event ledger for one exact-circuit materialization path.
+///
+/// Mutation is private to this module so counts can only change at the GPU
+/// compiler, verified disk-restore, GPU-cache-hit, and successful
+/// materialization boundaries below. The exact state retains this ledger and
+/// snapshots it around every prepared evaluation.
+#[derive(Debug, Default)]
+pub(crate) struct CircuitCompilationLedger {
+    compiler_invocations: AtomicU64,
+    materializations: AtomicU64,
+    disk_cache_restores: AtomicU64,
+    gpu_cache_hits: AtomicU64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct CircuitCompilationSnapshot {
+    pub(crate) compiler_invocations: u64,
+    pub(crate) materializations: u64,
+    pub(crate) disk_cache_restores: u64,
+    pub(crate) gpu_cache_hits: u64,
+}
+
+impl CircuitCompilationLedger {
+    pub(crate) fn new() -> Self {
+        Self::default()
+    }
+
+    pub(crate) fn snapshot(&self) -> CircuitCompilationSnapshot {
+        CircuitCompilationSnapshot {
+            compiler_invocations: self.compiler_invocations.load(Ordering::Acquire),
+            materializations: self.materializations.load(Ordering::Acquire),
+            disk_cache_restores: self.disk_cache_restores.load(Ordering::Acquire),
+            gpu_cache_hits: self.gpu_cache_hits.load(Ordering::Acquire),
+        }
+    }
+
+    fn record_compiler_invocation(&self) -> Result<()> {
+        increment_circuit_event(
+            &self.compiler_invocations,
+            "GPU circuit compiler invocation",
+        )
+    }
+
+    fn record_materialization(&self) -> Result<()> {
+        increment_circuit_event(&self.materializations, "exact circuit materialization")
+    }
+
+    fn record_disk_cache_restore(&self) -> Result<()> {
+        increment_circuit_event(&self.disk_cache_restores, "verified disk-cache restoration")
+    }
+
+    fn record_gpu_cache_hit(&self) -> Result<()> {
+        increment_circuit_event(&self.gpu_cache_hits, "GPU circuit-cache hit")
+    }
+}
+
+fn increment_circuit_event(counter: &AtomicU64, event: &str) -> Result<()> {
+    counter
+        .fetch_update(Ordering::AcqRel, Ordering::Acquire, |value| {
+            value.checked_add(1)
+        })
+        .map(|_| ())
+        .map_err(|_| XlogError::Compilation(format!("{event} counter overflowed")))
 }
 
 pub(crate) fn warmup_profiling_enabled() -> bool {
@@ -200,6 +266,29 @@ pub fn compile_gpu_d4_and_verify_cached(
     random_vars: &DeviceRandomVarList,
     canonical_cnf_hash: Option<u64>,
 ) -> Result<(GpuCircuitCacheHandle, Option<CircuitCompileProfile>)> {
+    let ledger = CircuitCompilationLedger::new();
+    compile_gpu_d4_and_verify_cached_with_ledger(
+        cnf,
+        decision_var_limit,
+        provider,
+        config,
+        cache,
+        random_vars,
+        canonical_cnf_hash,
+        &ledger,
+    )
+}
+
+pub(crate) fn compile_gpu_d4_and_verify_cached_with_ledger(
+    cnf: &GpuCnf,
+    decision_var_limit: &TrackedCudaSlice<u32>,
+    provider: &Arc<CudaKernelProvider>,
+    config: &GpuCompileConfig,
+    cache: &mut GpuCircuitCache,
+    random_vars: &DeviceRandomVarList,
+    canonical_cnf_hash: Option<u64>,
+    ledger: &CircuitCompilationLedger,
+) -> Result<(GpuCircuitCacheHandle, Option<CircuitCompileProfile>)> {
     if config.cdcl_conflict_budget.is_some() {
         return Err(XlogError::Compilation(
             "cdcl_conflict_budget is not supported by the GPU CDCL verifier".to_string(),
@@ -258,6 +347,8 @@ pub fn compile_gpu_d4_and_verify_cached(
     // GPU cache hit — short-circuit the entire compile pipeline.
     if compile_needed == 0 {
         profile.gpu_cache_hit = true;
+        ledger.record_gpu_cache_hit()?;
+        ledger.record_materialization()?;
         let out_profile = if profiling { Some(profile) } else { None };
         return Ok((handle, out_profile));
     }
@@ -343,6 +434,8 @@ pub fn compile_gpu_d4_and_verify_cached(
                             XlogError::Kernel(format!("sync after disk cache restore: {}", e))
                         })?;
                         profile.disk_cache_hit = true;
+                        ledger.record_disk_cache_restore()?;
+                        ledger.record_materialization()?;
                         let out_profile = if profiling { Some(profile) } else { None };
                         return Ok((handle, out_profile));
                     }
@@ -374,6 +467,7 @@ pub fn compile_gpu_d4_and_verify_cached(
     } else {
         None
     };
+    ledger.record_compiler_invocation()?;
     let (circuit_base, frontier_items) = gpu_d4::compile_gpu_d4_gated_with_stats(
         cnf,
         provider,
@@ -400,6 +494,7 @@ pub fn compile_gpu_d4_and_verify_cached(
         // Defensive: the GPU-native Decision-DNNF compiler returned an empty circuit
         // (the primary GPU cache hit is handled by the compile_needed == 0 early return
         // above; this catches degenerate CNFs).
+        ledger.record_materialization()?;
         let out_profile = if profiling { Some(profile) } else { None };
         return Ok((handle, out_profile));
     }
@@ -594,6 +689,7 @@ pub fn compile_gpu_d4_and_verify_cached(
         }
     }
 
+    ledger.record_materialization()?;
     let out_profile = if profiling { Some(profile) } else { None };
     Ok((handle, out_profile))
 }

@@ -24,6 +24,7 @@ __doc__ = _native.__doc__ if _native is not None else "pyxlog pure-Python helper
 if _native is not None and hasattr(_native, "__all__"):
     __all__ = _native.__all__
     CompiledLogicProgram = _native.CompiledLogicProgram
+    CompiledConditionedProgram = _native.CompiledConditionedProgram
     LogicRelationSession = _native.LogicRelationSession
     CompiledProgram = _native.CompiledProgram
     LogicQueryResult = _native.LogicQueryResult

@@ -258,6 +258,17 @@ class CompiledLogicProgram:
         """
         ...
 
+    def prepare_conditioned(
+        self, prob_source: str, memory_mb: Optional[int] = None
+    ) -> CompiledConditionedProgram:
+        """Compile accepted evidence and an exact probabilistic circuit once.
+
+        The returned handle can be evaluated repeatedly and supports atomic
+        updates to independent probabilistic fact priors. It has the same
+        source-only epistemic input limitation as :meth:`evaluate_conditioned`.
+        """
+        ...
+
     def epistemic_evidence(self) -> EpistemicEvidence:
         """Run this epistemic program and report what its world view accepted.
 
@@ -270,6 +281,38 @@ class CompiledLogicProgram:
         censuses ``know_operator_count`` and ``possible_operator_count`` come
         from the plan rather than the execution, so they stay non-zero: it is the
         accepted/consumed family that goes to zero, not every counter.
+        """
+        ...
+
+class CompiledConditionedProgram:
+    """A reusable exact circuit conditioned on one accepted epistemic world view.
+
+    Evaluations and weight updates on the same prepared circuit do not overlap.
+    Only independent probabilistic fact entries may be changed.
+    If a failed device update cannot be rolled back, this circuit and every clone
+    become permanently invalid and all later operations raise ``RuntimeError``.
+    """
+
+    def evaluate(self) -> EpistemicEvalResult:
+        """Evaluate the current priors without recompiling source or structure."""
+        ...
+
+    def set_fact_probabilities(self, mapping: dict[int, float]) -> None:
+        """Atomically update independent fact priors by 1-based CNF variable id.
+
+        The entire mapping is validated before device mutation. Invalid ids,
+        non-finite or out-of-range probabilities, annotated-disjunction choices,
+        and compiler-introduced variables reject the complete batch.
+        A device-write failure is rolled back. If rollback also fails, the shared
+        circuit is permanently invalidated and every later operation raises.
+        """
+        ...
+
+    def prob_var_map(self) -> list[dict[str, Any]]:
+        """Return the current CNF-variable map, including updated fact priors.
+
+        Waiting for the native shared state does not hold the Python GIL; the
+        returned Python dictionaries are built after the native snapshot completes.
         """
         ...
 
@@ -524,7 +567,12 @@ class EpistemicEvalResult:
     ``gpu_conditioned_not_possible_evidence_facts``),
     ``accepted_faeel_world_view_evidence_consumed`` /
     ``accepted_g91_world_view_evidence_consumed``, and
-    ``cpu_only_probability_recomputations``."""
+    ``cpu_only_probability_recomputations``. Reusable conditioned results also
+    expose ``gpu_conditioned_circuit_preparation_compiles`` (actual GPU circuit
+    compiler invocations), ``gpu_conditioned_circuit_materializations``,
+    ``gpu_conditioned_circuit_disk_cache_restores``,
+    ``gpu_conditioned_circuit_gpu_cache_hits``, and the process-local
+    ``gpu_conditioned_circuit_generation`` / cache-slot identity."""
 
 class EpistemicEvidence:
     """Counters of one accepted epistemic GPU execution.

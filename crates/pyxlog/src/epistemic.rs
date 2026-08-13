@@ -3,7 +3,7 @@
 //
 // The #[pyclass] struct definitions remain in lib.rs, matching program.rs.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 #[cfg(feature = "host-io")]
 use std::sync::Arc;
 
@@ -26,10 +26,65 @@ use xlog_prob::exact::{ExactResult, GpuConfig};
 use super::program::atom_to_string;
 #[cfg(feature = "host-io")]
 use super::{dlpack_capsule_from_tensor, enforce_call_memory_limit};
-use super::{types, CompiledLogicProgram, EpistemicEvalResult, EpistemicEvidence};
+use super::{
+    types, CompiledConditionedProgram, CompiledLogicProgram, EpistemicEvalResult, EpistemicEvidence,
+};
 
 #[pymethods]
 impl CompiledLogicProgram {
+    /// Compile this program's accepted epistemic evidence and `prob_source` once.
+    ///
+    /// The returned handle can be evaluated repeatedly while independent
+    /// probabilistic fact priors are changed atomically. It does not accept
+    /// caller-supplied input relations, matching `evaluate_conditioned`.
+    #[cfg(feature = "host-io")]
+    #[pyo3(signature = (prob_source, memory_mb=None))]
+    pub fn prepare_conditioned(
+        &self,
+        py: Python<'_>,
+        prob_source: &str,
+        memory_mb: Option<u64>,
+    ) -> PyResult<CompiledConditionedProgram> {
+        enforce_call_memory_limit(&self.provider, memory_mb)?;
+        let logic_program = self.program.clone();
+        let evidence_provider = self.provider.clone();
+        let inputs = HashMap::new();
+        let prob_source = prob_source.to_owned();
+        let (program, result_provider) = py
+            .detach(move || {
+                let evidence =
+                    logic_program.execute_epistemic_evidence(evidence_provider.clone(), inputs)?;
+                let mut config = GpuConfig::default();
+                config.device_ordinal = evidence_provider.device().ordinal();
+                config.memory_bytes = evidence_provider.memory().budget().device_bytes;
+                let mut adapter = EpistemicProbProductionAdapter::new(config);
+                let program = adapter.prepare_conditioned_source_with_gpu_execution_result(
+                    &prob_source,
+                    &evidence_provider,
+                    &evidence,
+                    Vec::new(),
+                )?;
+                Ok::<_, xlog_core::XlogError>((program, evidence_provider))
+            })
+            .map_err(types::xlog_err)?;
+        Ok(CompiledConditionedProgram {
+            program,
+            result_provider,
+        })
+    }
+
+    #[cfg(not(feature = "host-io"))]
+    #[pyo3(signature = (prob_source, memory_mb=None))]
+    pub fn prepare_conditioned(
+        &self,
+        _py: Python<'_>,
+        prob_source: &str,
+        memory_mb: Option<u64>,
+    ) -> PyResult<CompiledConditionedProgram> {
+        let _ = (prob_source, memory_mb);
+        Err(types::host_io_disabled_pyerr())
+    }
+
     /// Run this epistemic program on the GPU and condition `prob_source` on what it knows.
     ///
     /// The compiled program must contain epistemic operators (`know`, `possible`, ...)
@@ -166,6 +221,100 @@ impl CompiledLogicProgram {
     }
 }
 
+#[pymethods]
+impl CompiledConditionedProgram {
+    /// Evaluate the prepared conditioned circuit without compiling source or program.
+    #[cfg(feature = "host-io")]
+    pub fn evaluate(&self, py: Python<'_>) -> PyResult<EpistemicEvalResult> {
+        let program = self.program.clone();
+        let result_provider = self.result_provider.clone();
+        let prepared = py
+            .detach(move || {
+                let (result, trace) = program.evaluate()?;
+                prepare_epistemic_eval_result(&result_provider, result, trace)
+            })
+            .map_err(types::xlog_err)?;
+        pack_epistemic_eval_result(py, prepared)
+    }
+
+    #[cfg(not(feature = "host-io"))]
+    pub fn evaluate(&self, _py: Python<'_>) -> PyResult<EpistemicEvalResult> {
+        Err(types::host_io_disabled_pyerr())
+    }
+
+    /// Atomically replace independent probabilistic fact priors by CNF variable id.
+    #[cfg(feature = "host-io")]
+    pub fn set_fact_probabilities(
+        &self,
+        py: Python<'_>,
+        updates: BTreeMap<u32, f64>,
+    ) -> PyResult<()> {
+        let program = self.program.clone();
+        py.detach(move || program.set_fact_probabilities(&updates))
+            .map_err(types::xlog_err)
+    }
+
+    #[cfg(not(feature = "host-io"))]
+    pub fn set_fact_probabilities(
+        &self,
+        _py: Python<'_>,
+        updates: BTreeMap<u32, f64>,
+    ) -> PyResult<()> {
+        let _ = updates;
+        Err(types::host_io_disabled_pyerr())
+    }
+
+    /// Describe the current probability assigned to each CNF variable.
+    #[cfg(feature = "host-io")]
+    pub fn prob_var_map(&self, py: Python<'_>) -> PyResult<Vec<Py<PyAny>>> {
+        use xlog_prob::exact::ProbVarInfo;
+
+        let program = self.program.clone();
+        let entries = py
+            .detach(move || program.prob_var_map())
+            .map_err(types::xlog_err)?;
+        let mut out = Vec::with_capacity(entries.len());
+        for entry in entries {
+            let dict = PyDict::new(py);
+            match entry {
+                ProbVarInfo::Fact { atom, prob } => {
+                    dict.set_item("kind", "fact")?;
+                    dict.set_item("atom", atom_to_string(&atom))?;
+                    dict.set_item("prob", prob)?;
+                }
+                ProbVarInfo::Choice {
+                    choices,
+                    choice_index,
+                    prob,
+                } => {
+                    dict.set_item("kind", "choice")?;
+                    dict.set_item(
+                        "atoms",
+                        choices
+                            .iter()
+                            .map(|(atom, _)| atom_to_string(atom))
+                            .collect::<Vec<_>>(),
+                    )?;
+                    dict.set_item(
+                        "probs",
+                        choices.iter().map(|(_, prob)| *prob).collect::<Vec<_>>(),
+                    )?;
+                    dict.set_item("choice_index", choice_index)?;
+                    dict.set_item("prob", prob)?;
+                }
+                ProbVarInfo::Other => dict.set_item("kind", "other")?,
+            }
+            out.push(dict.into());
+        }
+        Ok(out)
+    }
+
+    #[cfg(not(feature = "host-io"))]
+    pub fn prob_var_map(&self, _py: Python<'_>) -> PyResult<Vec<Py<PyAny>>> {
+        Err(types::host_io_disabled_pyerr())
+    }
+}
+
 #[cfg(feature = "host-io")]
 struct PreparedEpistemicEvalResult {
     atoms: Vec<String>,
@@ -267,6 +416,39 @@ fn pack_epistemic_eval_result(
     dict.set_item(
         "gpu_exact_query_evaluations",
         trace.gpu_exact_query_evaluations,
+    )?;
+    dict.set_item("gpu_exact_source_compiles", trace.gpu_exact_source_compiles)?;
+    dict.set_item(
+        "gpu_exact_program_compiles",
+        trace.gpu_exact_program_compiles,
+    )?;
+    dict.set_item(
+        "gpu_conditioned_circuit_reuses",
+        trace.gpu_conditioned_circuit_reuses,
+    )?;
+    dict.set_item(
+        "gpu_conditioned_circuit_preparation_compiles",
+        trace.gpu_conditioned_circuit_preparation_compiles,
+    )?;
+    dict.set_item(
+        "gpu_conditioned_circuit_materializations",
+        trace.gpu_conditioned_circuit_materializations,
+    )?;
+    dict.set_item(
+        "gpu_conditioned_circuit_disk_cache_restores",
+        trace.gpu_conditioned_circuit_disk_cache_restores,
+    )?;
+    dict.set_item(
+        "gpu_conditioned_circuit_gpu_cache_hits",
+        trace.gpu_conditioned_circuit_gpu_cache_hits,
+    )?;
+    dict.set_item(
+        "gpu_conditioned_circuit_generation",
+        trace.gpu_conditioned_circuit_generation,
+    )?;
+    dict.set_item(
+        "gpu_conditioned_circuit_cache_slot",
+        trace.gpu_conditioned_circuit_cache_slot,
     )?;
     dict.set_item(
         "gpu_knowledge_compilation_end_to_end_runs",
