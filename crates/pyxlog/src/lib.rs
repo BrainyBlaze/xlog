@@ -544,13 +544,26 @@ pub struct LogicProgram;
 
 #[pyclass]
 pub struct CompiledLogicProgram {
-    pub(crate) program: gpu_logic::LogicProgram,
+    pub(crate) program: Arc<gpu_logic::LogicProgram>,
     pub(crate) provider: Arc<CudaKernelProvider>,
+}
+
+/// A fixed accepted-evidence exact circuit with mutable independent fact priors.
+///
+/// Clones share one serialized native state. Updating or evaluating one clone
+/// excludes concurrent work on the same circuit and is visible to every clone.
+#[pyclass(skip_from_py_object)]
+#[derive(Clone)]
+pub struct CompiledConditionedProgram {
+    #[cfg(feature = "host-io")]
+    pub(crate) program: xlog_prob::epistemic_production::PreparedConditionedProgram,
+    #[cfg(feature = "host-io")]
+    pub(crate) result_provider: Arc<CudaKernelProvider>,
 }
 
 #[pyclass]
 pub struct LogicRelationSession {
-    pub(crate) program: gpu_logic::LogicProgram,
+    pub(crate) program: Arc<gpu_logic::LogicProgram>,
     pub(crate) provider: Arc<CudaKernelProvider>,
     pub(crate) relation_store: RelationStore,
     pub(crate) evaluation_store: Option<RelationStore>,
@@ -850,6 +863,7 @@ fn pyxlog(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<CompiledProgram>()?;
     m.add_class::<LogicProgram>()?;
     m.add_class::<CompiledLogicProgram>()?;
+    m.add_class::<CompiledConditionedProgram>()?;
     m.add_class::<LogicRelationSession>()?;
     m.add_class::<relation_metadata::RelationEvidence>()?;
     m.add_class::<LogicQueryResult>()?;

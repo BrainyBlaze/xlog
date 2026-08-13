@@ -4,12 +4,18 @@
 //! accepted world-view evidence, then routes into the existing GPU-native exact
 //! provenance path instead of using the bounded epistemic fixture circuit.
 
+#[cfg(feature = "host-io")]
+use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::sync::Arc;
+#[cfg(feature = "host-io")]
+use std::sync::{Mutex, MutexGuard};
 
 use xlog_core::{symbol, Result, XlogError};
 use xlog_cuda::CudaKernelProvider;
 use xlog_ir::EirEpistemicMode;
+#[cfg(feature = "host-io")]
+use xlog_logic::ast::ProbEngine;
 use xlog_logic::ast::{Atom, Evidence, Program, Term};
 use xlog_logic::parse_program;
 use xlog_runtime::{EpistemicGpuBatchExecutionResult, EpistemicGpuExecutionResult};
@@ -24,10 +30,12 @@ use crate::epistemic::{
 };
 #[cfg(feature = "host-io")]
 use crate::exact::ExactProgramOrigin;
-use crate::exact::{ExactDdnnfProgram, GpuConfig};
 #[cfg(feature = "host-io")]
-use crate::exact::{ExactResult, ExactResultWithGrads};
+use crate::exact::{ExactCircuitWitness, ExactResult, ExactResultWithGrads, ProbVarInfo};
+use crate::exact::{ExactDdnnfProgram, GpuConfig};
 use crate::pir::{PirNode, PirNodeId};
+#[cfg(feature = "host-io")]
+use crate::provenance::AggregateLiftStatus;
 use crate::provenance::Value;
 use crate::provenance::{extract_from_program, Provenance};
 
@@ -104,6 +112,20 @@ pub struct EpistemicProbProductionTrace {
     pub gpu_exact_source_compiles: u64,
     /// Number of parsed-program compiles routed through `ExactDdnnfProgram`.
     pub gpu_exact_program_compiles: u64,
+    /// Number of evaluations routed through an already compiled conditioned circuit.
+    pub gpu_conditioned_circuit_reuses: u64,
+    /// Actual GPU circuit-compiler invocations performed while preparing this handle.
+    pub gpu_conditioned_circuit_preparation_compiles: u64,
+    /// Successful exact-circuit materializations performed while preparing this handle.
+    pub gpu_conditioned_circuit_materializations: u64,
+    /// Verified disk-cache restorations used while preparing this handle.
+    pub gpu_conditioned_circuit_disk_cache_restores: u64,
+    /// GPU circuit-cache hits used while preparing this handle.
+    pub gpu_conditioned_circuit_gpu_cache_hits: u64,
+    /// Process-local immutable generation of the exact circuit used by this evaluation.
+    pub gpu_conditioned_circuit_generation: u64,
+    /// Device-cache slot held by the exact circuit used by this evaluation.
+    pub gpu_conditioned_circuit_cache_slot: u64,
     /// Number of accepted world-view evidence objects consumed as a gate.
     pub accepted_world_view_evidence_consumed: u64,
     /// Number of accepted Gelfond-1991 compatibility-mode GPU world-view
@@ -238,6 +260,7 @@ impl EpistemicProbProductionTrace {
             &[
                 self.gpu_exact_source_compiles,
                 self.gpu_exact_program_compiles,
+                self.gpu_conditioned_circuit_reuses,
                 self.gpu_exact_query_evaluations,
                 self.gpu_source_exact_query_evaluations,
                 self.gpu_program_exact_query_evaluations,
@@ -1078,6 +1101,380 @@ pub struct EpistemicProbProductionAdapter {
     trace: EpistemicProbProductionTrace,
 }
 
+/// One accepted-evidence exact circuit whose independent fact weights may change.
+///
+/// Clones share a single lock covering both host probability metadata and the
+/// device-resident weight tables. Evaluation and updates are therefore serialized
+/// for the same prepared circuit while unrelated circuits remain independent.
+/// If a failed device update cannot be rolled back, the shared circuit is
+/// permanently invalidated and every later operation through every clone fails.
+#[derive(Clone)]
+pub struct PreparedConditionedProgram {
+    #[cfg(feature = "host-io")]
+    state: Arc<Mutex<PreparedConditionedState>>,
+}
+
+/// Authoritative identity and preparation count for one conditioned circuit.
+///
+/// `circuit_generation` is process-local and opaque. Together with `cache_slot`
+/// it identifies the exact state and device-cache handle retained by a prepared
+/// program; callers should compare values only within that handle's lifetime.
+#[cfg(feature = "host-io")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ConditionedCircuitWitness {
+    /// Actual GPU circuit-compiler invocations performed while preparing this handle.
+    pub preparation_compiles: u64,
+    /// Successful exact-circuit materializations performed while preparing this handle.
+    pub materializations: u64,
+    /// Verified disk-cache restorations used while preparing this handle.
+    pub disk_cache_restores: u64,
+    /// GPU circuit-cache hits used while preparing this handle.
+    pub gpu_cache_hits: u64,
+    /// Opaque process-local generation assigned to the retained exact state.
+    pub circuit_generation: u64,
+    /// Device-cache slot retained by the exact state.
+    pub cache_slot: u32,
+}
+
+#[cfg(feature = "host-io")]
+fn source_has_only_gpu_count_lift_queries(provenance: &Provenance) -> bool {
+    !provenance.queries.is_empty()
+        && provenance.evidence.is_empty()
+        && provenance.choice_probs.is_empty()
+        && provenance.queries.iter().all(|query| {
+            provenance.aggregate_lifting.iter().any(|entry| {
+                entry.status == AggregateLiftStatus::Fired
+                    && entry.operator == "count"
+                    && entry.deterministic_rows == 0
+                    && entry.predicate == query.predicate
+            })
+        })
+}
+
+#[cfg(feature = "host-io")]
+struct PreparedConditionedState {
+    exact: ExactDdnnfProgram,
+    evaluation_trace: EpistemicProbProductionTrace,
+    initial_circuit: ExactCircuitWitness,
+    successful_reuses: u64,
+}
+
+#[cfg(feature = "host-io")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PreparedCircuitSnapshot {
+    circuit: ExactCircuitWitness,
+    successful_reuses: u64,
+}
+
+#[cfg(feature = "host-io")]
+impl PreparedConditionedState {
+    fn ensure_usable(&self) -> Result<()> {
+        self.exact.ensure_usable()
+    }
+
+    fn snapshot(&self) -> Result<PreparedCircuitSnapshot> {
+        self.ensure_usable()?;
+        let circuit = self.exact.circuit_witness()?;
+        if circuit.circuit_generation != self.initial_circuit.circuit_generation
+            || circuit.cache_slot != self.initial_circuit.cache_slot
+        {
+            return Err(XlogError::Compilation(
+                "Prepared conditioned circuit identity changed after preparation".to_string(),
+            ));
+        }
+        Ok(PreparedCircuitSnapshot {
+            circuit,
+            successful_reuses: self.successful_reuses,
+        })
+    }
+
+    fn record_successful_reuse(&mut self) -> Result<PreparedCircuitSnapshot> {
+        let before = self.snapshot()?;
+        self.successful_reuses = self.successful_reuses.checked_add(1).ok_or_else(|| {
+            XlogError::Compilation(
+                "Prepared conditioned circuit reuse counter overflowed".to_string(),
+            )
+        })?;
+        let after = self.snapshot()?;
+        debug_assert_eq!(
+            before.circuit.circuit_generation,
+            after.circuit.circuit_generation
+        );
+        debug_assert_eq!(before.circuit.cache_slot, after.circuit.cache_slot);
+        Ok(after)
+    }
+}
+
+#[cfg(feature = "host-io")]
+impl PreparedConditionedProgram {
+    fn new(
+        exact: ExactDdnnfProgram,
+        preparation_trace: EpistemicProbProductionTrace,
+    ) -> Result<Self> {
+        let initial_circuit = exact.circuit_witness()?;
+        validate_single_circuit_materialization(initial_circuit)?;
+        if initial_circuit.compiler_invocations > 1 {
+            return Err(XlogError::Compilation(format!(
+                "Prepared conditioned circuit invoked the GPU compiler {} times",
+                initial_circuit.compiler_invocations
+            )));
+        }
+        Ok(Self {
+            state: Arc::new(Mutex::new(PreparedConditionedState {
+                exact,
+                evaluation_trace: reuse_trace_template(preparation_trace),
+                initial_circuit,
+                successful_reuses: 0,
+            })),
+        })
+    }
+
+    fn lock_state(&self) -> Result<MutexGuard<'_, PreparedConditionedState>> {
+        self.state.lock().map_err(|_| {
+            XlogError::Execution(
+                "Prepared conditioned state mutex is poisoned and permanently invalid".to_string(),
+            )
+        })
+    }
+
+    fn apply_fact_probability_update(
+        &self,
+        apply: impl FnOnce(&mut ExactDdnnfProgram) -> Result<()>,
+    ) -> Result<()> {
+        let mut state = self.lock_state()?;
+        let before = state.snapshot()?;
+        let update_result = apply(&mut state.exact);
+        if let Err(update_error) = update_result {
+            if state.ensure_usable().is_err() {
+                return Err(update_error);
+            }
+            let after = state.snapshot()?;
+            if before != after {
+                return Err(XlogError::Compilation(
+                    "Failed fact probability update changed the prepared circuit identity or compile ledger"
+                        .to_string(),
+                ));
+            }
+            return Err(update_error);
+        }
+        let after = state.snapshot()?;
+        if before != after {
+            return Err(XlogError::Compilation(
+                "Fact probability update changed the prepared circuit identity or compile ledger"
+                    .to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Evaluate the prepared conditioned circuit without recompiling it.
+    #[cfg(feature = "host-io")]
+    pub fn evaluate(&self) -> Result<(ExactResult, EpistemicProbProductionTrace)> {
+        let mut state = self.lock_state()?;
+        let before = state.snapshot()?;
+        let result = state.exact.evaluate()?;
+        let after = state.record_successful_reuse()?;
+        let trace = query_reuse_trace(state.evaluation_trace, before, after)?;
+        trace.require_conditioned_evidence_metric_eligibility()?;
+        Ok((result, trace))
+    }
+
+    /// Evaluate probabilities and gradients without recompiling the circuit.
+    #[cfg(feature = "host-io")]
+    pub fn evaluate_with_grads(
+        &self,
+    ) -> Result<(ExactResultWithGrads, EpistemicProbProductionTrace)> {
+        let mut state = self.lock_state()?;
+        let before = state.snapshot()?;
+        let result = state.exact.evaluate_gpu_with_grads()?;
+        let after = state.record_successful_reuse()?;
+        let trace = gradient_reuse_trace(state.evaluation_trace, before, after)?;
+        trace.require_conditioned_evidence_metric_eligibility()?;
+        Ok((result, trace))
+    }
+
+    /// Return the current CNF-variable metadata, including updated fact priors.
+    pub fn prob_var_map(&self) -> Result<Vec<ProbVarInfo>> {
+        let state = self.lock_state()?;
+        state.snapshot()?;
+        state.exact.checked_prob_var_map()
+    }
+
+    /// Return the immutable exact-state identity and lifetime preparation count.
+    pub fn circuit_witness(&self) -> Result<ConditionedCircuitWitness> {
+        let state = self.lock_state()?;
+        conditioned_circuit_witness(state.snapshot()?)
+    }
+
+    /// Atomically update independent probabilistic fact weights.
+    ///
+    /// A failed device write is rolled back before this returns. If that rollback
+    /// also fails, the shared prepared circuit is permanently invalidated so that
+    /// neither this handle nor any clone can observe potentially partial weights.
+    #[cfg(feature = "host-io")]
+    pub fn set_fact_probabilities(&self, updates: &BTreeMap<u32, f64>) -> Result<()> {
+        self.apply_fact_probability_update(|exact| exact.set_fact_probabilities(updates))
+    }
+
+    #[cfg(all(test, feature = "host-io"))]
+    fn set_fact_probabilities_with_device_failures(
+        &self,
+        updates: &BTreeMap<u32, f64>,
+        fail_after_successful_writes: Option<usize>,
+        fail_after_successful_rollback_writes: Option<usize>,
+    ) -> Result<()> {
+        self.apply_fact_probability_update(|exact| {
+            exact.set_fact_probabilities_with_device_failures_for_test(
+                updates,
+                fail_after_successful_writes,
+                fail_after_successful_rollback_writes,
+            )
+        })
+    }
+}
+
+#[cfg(feature = "host-io")]
+fn conditioned_circuit_witness(
+    snapshot: PreparedCircuitSnapshot,
+) -> Result<ConditionedCircuitWitness> {
+    validate_single_circuit_materialization(snapshot.circuit)?;
+    Ok(ConditionedCircuitWitness {
+        preparation_compiles: snapshot.circuit.compiler_invocations,
+        materializations: snapshot.circuit.materializations,
+        disk_cache_restores: snapshot.circuit.disk_cache_restores,
+        gpu_cache_hits: snapshot.circuit.gpu_cache_hits,
+        circuit_generation: snapshot.circuit.circuit_generation,
+        cache_slot: snapshot.circuit.cache_slot,
+    })
+}
+
+#[cfg(feature = "host-io")]
+fn validate_single_circuit_materialization(circuit: ExactCircuitWitness) -> Result<()> {
+    let origins = circuit
+        .compiler_invocations
+        .checked_add(circuit.disk_cache_restores)
+        .and_then(|count| count.checked_add(circuit.gpu_cache_hits))
+        .ok_or_else(|| {
+            XlogError::Compilation(
+                "Prepared conditioned circuit materialization ledger overflowed".to_string(),
+            )
+        })?;
+    if circuit.materializations != 1 || origins != 1 {
+        return Err(XlogError::Compilation(format!(
+            "Prepared conditioned circuit requires one materialization from one compile/cache event, got materializations={} compiler_invocations={} disk_cache_restores={} gpu_cache_hits={}",
+            circuit.materializations,
+            circuit.compiler_invocations,
+            circuit.disk_cache_restores,
+            circuit.gpu_cache_hits
+        )));
+    }
+    Ok(())
+}
+
+#[cfg(feature = "host-io")]
+fn reuse_trace_template(
+    mut preparation_trace: EpistemicProbProductionTrace,
+) -> EpistemicProbProductionTrace {
+    preparation_trace.gpu_exact_query_evaluations = 0;
+    preparation_trace.gpu_source_exact_query_evaluations = 0;
+    preparation_trace.gpu_program_exact_query_evaluations = 0;
+    preparation_trace.gpu_exact_gradient_evaluations = 0;
+    preparation_trace.gpu_source_exact_gradient_evaluations = 0;
+    preparation_trace.gpu_program_exact_gradient_evaluations = 0;
+    preparation_trace.gpu_source_conditioned_gradient_evaluations = 0;
+    preparation_trace.gpu_program_conditioned_gradient_evaluations = 0;
+    preparation_trace.gpu_pir_graph_uploads = 0;
+    preparation_trace.gpu_source_pir_graph_uploads = 0;
+    preparation_trace.gpu_program_pir_graph_uploads = 0;
+    preparation_trace.gpu_cnf_encodes = 0;
+    preparation_trace.gpu_source_cnf_encodes = 0;
+    preparation_trace.gpu_program_cnf_encodes = 0;
+    preparation_trace.gpu_knowledge_compilation_end_to_end_runs = 0;
+    preparation_trace.gpu_source_knowledge_compilation_end_to_end_runs = 0;
+    preparation_trace.gpu_program_knowledge_compilation_end_to_end_runs = 0;
+    preparation_trace.accepted_gpu_production_path_events = 0;
+    preparation_trace
+}
+
+#[cfg(feature = "host-io")]
+fn query_reuse_trace(
+    mut trace: EpistemicProbProductionTrace,
+    before: PreparedCircuitSnapshot,
+    after: PreparedCircuitSnapshot,
+) -> Result<EpistemicProbProductionTrace> {
+    apply_authoritative_reuse_witness(&mut trace, before, after)?;
+    trace.gpu_exact_query_evaluations = trace.gpu_conditioned_circuit_reuses;
+    trace.gpu_source_exact_query_evaluations = trace.gpu_conditioned_circuit_reuses;
+    trace.accepted_gpu_production_path_events = trace.checked_gpu_production_path_events()?;
+    Ok(trace)
+}
+
+#[cfg(feature = "host-io")]
+fn gradient_reuse_trace(
+    mut trace: EpistemicProbProductionTrace,
+    before: PreparedCircuitSnapshot,
+    after: PreparedCircuitSnapshot,
+) -> Result<EpistemicProbProductionTrace> {
+    apply_authoritative_reuse_witness(&mut trace, before, after)?;
+    trace.gpu_exact_gradient_evaluations = trace.gpu_conditioned_circuit_reuses;
+    trace.gpu_source_exact_gradient_evaluations = trace.gpu_conditioned_circuit_reuses;
+    trace.gpu_source_conditioned_gradient_evaluations = trace.gpu_conditioned_circuit_reuses;
+    trace.accepted_gpu_production_path_events = trace.checked_gpu_production_path_events()?;
+    Ok(trace)
+}
+
+#[cfg(feature = "host-io")]
+fn apply_authoritative_reuse_witness(
+    trace: &mut EpistemicProbProductionTrace,
+    before: PreparedCircuitSnapshot,
+    after: PreparedCircuitSnapshot,
+) -> Result<()> {
+    if before.circuit.circuit_generation != after.circuit.circuit_generation
+        || before.circuit.cache_slot != after.circuit.cache_slot
+    {
+        return Err(XlogError::Compilation(
+            "Prepared conditioned circuit identity changed during evaluation".to_string(),
+        ));
+    }
+    trace.gpu_exact_source_compiles = after
+        .circuit
+        .compiler_invocations
+        .checked_sub(before.circuit.compiler_invocations)
+        .ok_or_else(|| {
+            XlogError::Compilation(
+                "Prepared conditioned compiler invocation ledger regressed".to_string(),
+            )
+        })?;
+    trace.gpu_exact_program_compiles = 0;
+    trace.gpu_conditioned_circuit_reuses = after
+        .successful_reuses
+        .checked_sub(before.successful_reuses)
+        .ok_or_else(|| {
+            XlogError::Compilation(
+                "Prepared conditioned circuit reuse counter regressed".to_string(),
+            )
+        })?;
+    let witness = conditioned_circuit_witness(after)?;
+    trace.gpu_conditioned_circuit_preparation_compiles = witness.preparation_compiles;
+    trace.gpu_conditioned_circuit_materializations = witness.materializations;
+    trace.gpu_conditioned_circuit_disk_cache_restores = witness.disk_cache_restores;
+    trace.gpu_conditioned_circuit_gpu_cache_hits = witness.gpu_cache_hits;
+    trace.gpu_conditioned_circuit_generation = witness.circuit_generation;
+    trace.gpu_conditioned_circuit_cache_slot = u64::from(witness.cache_slot);
+    if trace.gpu_exact_source_compiles != 0
+        || trace.gpu_exact_program_compiles != 0
+        || trace.gpu_conditioned_circuit_reuses != 1
+    {
+        return Err(XlogError::Compilation(format!(
+            "Prepared conditioned evaluation must not compile and must reuse one circuit, got source_compiles={} program_compiles={} reuses={}",
+            trace.gpu_exact_source_compiles,
+            trace.gpu_exact_program_compiles,
+            trace.gpu_conditioned_circuit_reuses
+        )));
+    }
+    Ok(())
+}
+
 #[cfg(feature = "host-io")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum EpistemicProbConditionedEvidencePath {
@@ -1754,6 +2151,81 @@ impl EpistemicProbProductionAdapter {
                 EpistemicProbConditionedEvidencePath::Source,
                 "epistemic probabilistic conditioned source exact compile/evaluate",
             )
+        })
+    }
+
+    /// Compile accepted epistemic evidence and an exact probabilistic source once.
+    ///
+    /// The returned handle reuses the conditioned circuit and permits atomic
+    /// updates only for independent probabilistic fact variables.
+    #[cfg(feature = "host-io")]
+    pub fn prepare_conditioned_source_with_gpu_execution_result(
+        &mut self,
+        source: &str,
+        provider: &CudaKernelProvider,
+        result: &EpistemicGpuExecutionResult,
+        assumptions: Vec<EpistemicAssumption>,
+    ) -> Result<PreparedConditionedProgram> {
+        epistemic_prob_trace_transaction!(self, {
+            let auto_derived = assumptions.is_empty();
+            let evidence = AcceptedWorldViewEvidence::from_gpu_execution_result(
+                provider,
+                result,
+                assumptions,
+            )?;
+            let program = parse_program(source)?;
+            if program.directives.prob_engine_or_default() != ProbEngine::ExactDdnnf {
+                return Err(XlogError::UnsupportedEpistemicConstruct {
+                    construct: "reusable conditioned circuit".to_string(),
+                    context: "reusable conditioned programs require the exact Decision-DNNF engine; Monte Carlo programs cannot expose mutable CNF fact weights"
+                        .to_string(),
+                });
+            }
+            let provenance = extract_from_program(&program)?;
+            if source_has_only_gpu_count_lift_queries(&provenance) {
+                return Err(XlogError::UnsupportedEpistemicConstruct {
+                    construct: "reusable conditioned circuit".to_string(),
+                    context:
+                        "GPU count-lift exact programs do not expose mutable CNF fact variables"
+                            .to_string(),
+                });
+            }
+            let filtered_evidence;
+            let evidence = if auto_derived {
+                filtered_evidence =
+                    evidence_with_provenance_backed_assumptions(&evidence, &provenance)?;
+                &filtered_evidence
+            } else {
+                &evidence
+            };
+            self.require_accepted_evidence(evidence)?;
+            let production_events_before = self.trace.checked_gpu_production_path_events()?;
+            let (conditioned_program, evidence_counts) =
+                condition_program_with_accepted_evidence_using_provenance(
+                    &program,
+                    &provenance,
+                    evidence,
+                )?;
+            let exact = ExactDdnnfProgram::compile_from_program(&conditioned_program, self.config)?;
+            if exact.uses_gpu_native_count_lift() {
+                return Err(XlogError::UnsupportedEpistemicConstruct {
+                    construct: "reusable conditioned circuit".to_string(),
+                    context: "GPU count-lift exact programs do not expose mutable CNF fact weights"
+                        .to_string(),
+                });
+            }
+            require_gpu_exact_backend(
+                &exact,
+                "epistemic probabilistic reusable conditioned source exact compile",
+            )?;
+            checked_prob_trace_counter_inc!(self, gpu_exact_source_compiles);
+            self.record_conditioned_evidence_counts(
+                evidence_counts,
+                EpistemicProbConditionedEvidencePath::Source,
+            )?;
+            self.record_accepted_gpu_production_path_events_since(production_events_before)?;
+            self.record_accepted_evidence(evidence)?;
+            PreparedConditionedProgram::new(exact, self.trace)
         })
     }
 
@@ -3507,4 +3979,103 @@ fn production_pir_roots(provenance: &Provenance) -> Result<Vec<PirNodeId>> {
     }
 
     Ok(roots.into_iter().collect())
+}
+
+#[cfg(all(test, feature = "host-io"))]
+mod prepared_conditioned_poison_tests {
+    use super::*;
+
+    #[test]
+    fn rollback_failure_permanently_invalidates_prepared_state_and_all_clones() {
+        let _gpu_guard = crate::test_gpu_lock::lock();
+        match xlog_cuda::CudaDevice::new(0) {
+            Ok(_) => {}
+            Err(error) if std::env::var("XLOG_REQUIRE_CUDA").as_deref() == Ok("1") => {
+                panic!("XLOG_REQUIRE_CUDA=1 but CUDA runtime initialization failed: {error}")
+            }
+            Err(error) => {
+                eprintln!("Skipping test: CUDA runtime unavailable: {error}");
+                return;
+            }
+        }
+
+        let exact = ExactDdnnfProgram::compile_source(
+            "0.5::rain().\n\
+             query(rain()).\n",
+        )
+        .expect("compile prepared exact program");
+        let prepared =
+            PreparedConditionedProgram::new(exact, EpistemicProbProductionTrace::default())
+                .expect("prepare exact circuit");
+        let rain_var = prepared
+            .prob_var_map()
+            .expect("read fact map before injected failure")
+            .iter()
+            .enumerate()
+            .find_map(|(var, info)| {
+                matches!(info, ProbVarInfo::Fact { atom, .. } if atom.predicate == "rain")
+                    .then_some(var as u32)
+            })
+            .expect("rain fact has a CNF variable");
+        let clone_before_failure = prepared.clone();
+
+        let error = prepared
+            .set_fact_probabilities_with_device_failures(
+                &BTreeMap::from([(rain_var, 0.9)]),
+                Some(1),
+                Some(1),
+            )
+            .expect_err("rollback failure must be reported");
+        let message = error.to_string();
+        assert!(message.contains("device update failed"), "{message}");
+        assert!(message.contains("rollback also failed"), "{message}");
+        assert!(
+            message.contains("injected fact probability device-write failure"),
+            "{message}"
+        );
+        assert!(
+            message.contains("injected fact probability rollback failure"),
+            "{message}"
+        );
+
+        let clone_after_failure = prepared.clone();
+        for (operation, result) in [
+            ("evaluate", prepared.evaluate().map(|_| ())),
+            ("gradient", prepared.evaluate_with_grads().map(|_| ())),
+            ("prob_var_map", prepared.prob_var_map().map(|_| ())),
+            (
+                "set_fact_probabilities",
+                prepared.set_fact_probabilities(&BTreeMap::from([(rain_var, 0.4)])),
+            ),
+            (
+                "clone-before evaluate",
+                clone_before_failure.evaluate().map(|_| ()),
+            ),
+            (
+                "clone-before prob_var_map",
+                clone_before_failure.prob_var_map().map(|_| ()),
+            ),
+            (
+                "clone-after gradient",
+                clone_after_failure.evaluate_with_grads().map(|_| ()),
+            ),
+            (
+                "clone-after set",
+                clone_after_failure.set_fact_probabilities(&BTreeMap::from([(rain_var, 0.4)])),
+            ),
+        ] {
+            let later = result
+                .err()
+                .unwrap_or_else(|| panic!("{operation} reused poisoned state"));
+            let later_message = later.to_string();
+            assert!(
+                later_message.contains("permanently invalid"),
+                "{operation}: {later_message}"
+            );
+            assert!(
+                later_message.contains("rollback also failed"),
+                "{operation}: {later_message}"
+            );
+        }
+    }
 }

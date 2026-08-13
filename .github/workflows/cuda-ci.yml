@@ -12,6 +12,7 @@ on:
       - "python/tests/test_logic_relation_provenance.py"
       - "python/tests/test_pyxlog_epistemic_api.py"
       - "python/tests/test_pyxlog_epistemic_gpu.py"
+      - "python/tests/test_pyxlog_conditioned_reuse.py"
       - "python/tests/test_pyxlog_ground_term_encoding.py"
       - "python/tests/test_relation_callbacks_runtime.py"
       - "python/tests/test_relation_provenance_contract.py"
@@ -143,6 +144,28 @@ jobs:
             python/tests/test_relation_callbacks_runtime.py \
             --timeout=300 \
             --junitxml=test-results/installed-pyxlog-contracts.xml
+      - name: Run reusable conditioned Python tests without skips
+        shell: bash
+        run: |
+          set -euo pipefail
+          result_file="$RUNNER_TEMP/pyxlog-conditioned-reuse-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT.txt"
+          python -m pytest -q \
+            python/tests/test_pyxlog_conditioned_reuse.py \
+            --timeout=300 2>&1 | tee "$result_file"
+          python - "$result_file" <<'PY'
+          import pathlib
+          import re
+          import sys
+
+          output = pathlib.Path(sys.argv[1]).read_text()
+          passed = sum(int(count) for count in re.findall(r"(\d+) passed", output))
+          skipped = sum(int(count) for count in re.findall(r"(\d+) skipped", output))
+          if passed == 0 or skipped != 0:
+              raise SystemExit(
+                  f"conditioned reuse tests require nonzero passes and zero skips; "
+                  f"got passed={passed} skipped={skipped}"
+              )
+          PY
       - name: Run membership-mask transfer tests
         run: cargo test -p xlog-cuda --test test_membership_mask --release -- --nocapture
       - name: Run host-IO probabilistic CLI tests
@@ -153,6 +176,63 @@ jobs:
         run: cargo test --locked --release -p xlog-cli --test explain_cli_tests -- --nocapture --test-threads=1
       - name: Run accepted epistemic probability adapter tests
         run: cargo test --locked --release -p xlog-prob --features host-io --test epistemic_prob_gpu_accepted_evidence --test epistemic_prob_production_reuse -- --nocapture --test-threads=1
+      - name: Run reusable conditioned Rust integration tests without skips
+        shell: bash
+        run: |
+          set -euo pipefail
+          result_file="$RUNNER_TEMP/xlog-prob-conditioned-reuse-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT.txt"
+          cargo test --locked --release -p xlog-prob --features host-io \
+            --test conditioned_program_reuse -- --nocapture --test-threads=1 \
+            2>&1 | tee "$result_file"
+          python - "$result_file" <<'PY'
+          import pathlib
+          import re
+          import sys
+
+          output = pathlib.Path(sys.argv[1]).read_text()
+          summaries = re.findall(
+              r"test result: ok\. (\d+) passed; (\d+) failed; (\d+) ignored;",
+              output,
+          )
+          if not summaries:
+              raise SystemExit("conditioned reuse integration emitted no test summary")
+          passed = sum(int(summary[0]) for summary in summaries)
+          failed = sum(int(summary[1]) for summary in summaries)
+          ignored = sum(int(summary[2]) for summary in summaries)
+          if passed == 0 or failed != 0 or ignored != 0:
+              raise SystemExit(
+                  f"conditioned reuse integration requires nonzero passes and zero "
+                  f"failures/skips; got passed={passed} failed={failed} ignored={ignored}"
+              )
+          PY
+      - name: Run host-IO probabilistic library tests without skips
+        shell: bash
+        run: |
+          set -euo pipefail
+          result_file="$RUNNER_TEMP/xlog-prob-host-io-lib-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT.txt"
+          cargo test --locked --release -p xlog-prob --features host-io --lib \
+            -- --nocapture --test-threads=1 2>&1 | tee "$result_file"
+          python - "$result_file" <<'PY'
+          import pathlib
+          import re
+          import sys
+
+          output = pathlib.Path(sys.argv[1]).read_text()
+          summaries = re.findall(
+              r"test result: ok\. (\d+) passed; (\d+) failed; (\d+) ignored;",
+              output,
+          )
+          if not summaries:
+              raise SystemExit("host-IO library tests emitted no test summary")
+          passed = sum(int(summary[0]) for summary in summaries)
+          failed = sum(int(summary[1]) for summary in summaries)
+          ignored = sum(int(summary[2]) for summary in summaries)
+          if passed == 0 or failed != 0 or ignored != 0:
+              raise SystemExit(
+                  f"host-IO library tests require nonzero passes and zero "
+                  f"failures/skips; got passed={passed} failed={failed} ignored={ignored}"
+              )
+          PY
       - name: Smoke test import + evaluate
         shell: bash
         run: |

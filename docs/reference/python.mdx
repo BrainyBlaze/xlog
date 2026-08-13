@@ -781,7 +781,73 @@ result.log_z_e                                       # ln(0.6) ~= -0.5108256, lo
 result.trace["gpu_conditioned_evidence_facts"]        # >= 1 when evidence conditioned the circuit
 result.trace["gpu_conditioned_know_evidence_facts"]   # the `know` share of that total
 result.trace["accepted_gpu_production_path_events"]   # positive observed GPU work
+result.trace["gpu_exact_query_evaluations"]            # positive GPU exact execution evidence
 ```
+
+When the circuit structure stays fixed and only independent fact priors change,
+prepare it once and reuse the returned handle:
+
+```python
+prepared = known.prepare_conditioned(
+    "0.5::target().\n0.6::fact().\nquery(target()).\nquery(fact()).\n"
+)
+target_var = next(
+    var for var, info in enumerate(prepared.prob_var_map())
+    if info.get("atom") == "target()"
+)
+
+for prior in (0.5, 0.9, 0.1):
+    prepared.set_fact_probabilities({target_var: prior})
+    result = prepared.evaluate()
+    assert result.trace["gpu_exact_source_compiles"] == 0
+    assert result.trace["gpu_exact_program_compiles"] == 0
+    assert result.trace["gpu_conditioned_circuit_reuses"] == 1
+    assert result.trace["gpu_conditioned_circuit_materializations"] == 1
+    assert (
+        result.trace["gpu_conditioned_circuit_preparation_compiles"]
+        + result.trace["gpu_conditioned_circuit_disk_cache_restores"]
+        + result.trace["gpu_conditioned_circuit_gpu_cache_hits"]
+    ) == 1
+```
+
+`gpu_conditioned_circuit_preparation_compiles` counts actual GPU circuit
+compiler invocations owned by that prepared handle: it is `1` after a fresh
+compile and `0` after a verified disk-cache restoration or GPU-cache hit. The
+three origin counters above are mutually exclusive for the handle's single
+materialization. Every later evaluation reports zero source/program compile
+deltas.
+
+For an independent lifetime-reuse check, compare the
+`gpu_conditioned_circuit_generation` and `gpu_conditioned_circuit_cache_slot`
+trace pair across evaluations. It is derived from the retained exact state and
+cache handle and must remain unchanged as priors are updated. The generation is
+opaque and process-local; do not persist it or compare it between processes.
+These reuse keys are present on every `EpistemicEvalResult`. Results returned
+directly by `evaluate_conditioned()` carry zeroes for the reuse fields;
+`gpu_conditioned_circuit_generation == 0` is the sentinel that no prepared
+circuit identity is attached. A prepared evaluation always reports a positive
+generation.
+
+`set_fact_probabilities()` validates the complete mapping before one serialized
+state change. Each variable id is its `prob_var_map()` list index. Index `0` is
+unused padding with `kind == "other"`, not a mutable variable id, and only
+entries with `kind == "fact"` are mutable. Annotated-disjunction choices,
+compiler-introduced entries, Monte Carlo and count-lift programs, non-finite
+probabilities, and values outside `[0, 1]` are rejected without a partial update.
+When a mutable fact is itself fixed by accepted evidence, changing its prior keeps
+the evidence assignment fixed and changes the evidence likelihood (`log_z_e`),
+matching a fresh conditioned compilation at the new prior.
+Evaluations and setters on the same prepared handle serialize. Coordinate access
+at a higher level when an application needs an update and its following evaluation
+to behave as one larger transaction.
+
+Waiting for the prepared handle's shared native state, including in
+`prob_var_map()`, releases the Python GIL. The Python dictionaries are constructed
+only after the native metadata snapshot completes. A failed device write is rolled
+back before `set_fact_probabilities()` returns. If that rollback also fails, the
+prepared circuit is permanently invalidated: every later evaluation, gradient,
+metadata read, or setter through that handle or any clone fails closed rather than
+using potentially partial device weights.
 
 On a CUDA device, conditioning `0.6::fact(). query(fact()).` on `know fact()` raises
 `P(fact())` from the unconditioned `0.6` to the exact `1.0`: the epistemic layer
@@ -801,8 +867,10 @@ or negated evidence all depart from the product form.
 
 **Trace invariant.** Conditioning reached the GPU exact path when
 `gpu_conditioned_evidence_facts` -- the total the engine itself validates -- is
-non-zero and the required GPU exact, PIR/CNF, and knowledge-compilation event counters
-are positive. The four evidence classes
+non-zero. A direct result also requires the GPU exact, PIR/CNF, and
+knowledge-compilation event counters to be positive; a prepared result instead requires
+the prepared-circuit reuse counter to be positive, reports one materialization, and
+identifies exactly one compile/cache origin. The four evidence classes
 (`gpu_conditioned_know_evidence_facts`, `gpu_conditioned_possible_evidence_facts`,
 `gpu_conditioned_not_known_evidence_facts`,
 `gpu_conditioned_not_possible_evidence_facts`) decompose that total; a `possible`-only
