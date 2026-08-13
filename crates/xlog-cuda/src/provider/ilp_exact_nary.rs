@@ -613,10 +613,10 @@ mod tests {
     /// tests on a machine that never touched a GPU — which is how this
     /// filter gets run when certifying the launcher on a rented device.
     ///
-    /// Note that `scripts/validate_release_gpu.sh` does not cover this
-    /// filter: it exports `XLOG_REQUIRE_CUDA=1` but runs only the `xlog-cli`,
-    /// `xlog-prob` and `xlog-cuda-tests` legs, so the guard below is the sole
-    /// thing standing between a device-less host and a green launcher claim.
+    /// The manual release gate exports `XLOG_REQUIRE_CUDA=1` and invokes this
+    /// crate's library tests alongside its `xlog-cli`, `xlog-prob`, pyxlog,
+    /// and `xlog-cuda-tests` legs, so a device-less release run fails here
+    /// instead of reporting a green skip.
     ///
     /// Mirrors `xlog_cuda_tests::harness::enforce_cuda_required`, which
     /// already covers the integration-level `TestContext`; that crate is a
