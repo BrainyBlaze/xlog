@@ -577,9 +577,9 @@ fn wiring_gate_on_symbol_triangle_dispatches_and_preserves_schema() {
     // Schema preservation: the kernel built its output schema
     // from the inputs' per-column types, so Symbol-input → Symbol-output.
     let tri_buf = executor.store().get("tri").expect("tri present");
-    assert_eq!(tri_buf.schema.column_type(0), Some(ScalarType::Symbol));
-    assert_eq!(tri_buf.schema.column_type(1), Some(ScalarType::Symbol));
-    assert_eq!(tri_buf.schema.column_type(2), Some(ScalarType::Symbol));
+    assert_eq!(tri_buf.schema().column_type(0), Some(ScalarType::Symbol));
+    assert_eq!(tri_buf.schema().column_type(1), Some(ScalarType::Symbol));
+    assert_eq!(tri_buf.schema().column_type(2), Some(ScalarType::Symbol));
 
     // Row count: the kernel's bit-equality joins produce the
     // same 5 triangles as the U32 path on the same bit-pattern
@@ -700,9 +700,9 @@ fn wiring_gate_on_u64_triangle_dispatches_and_preserves_schema() {
 
     // Schema preservation: output columns must remain U64.
     let tri_buf = executor.store().get("tri").expect("tri present");
-    assert_eq!(tri_buf.schema.column_type(0), Some(ScalarType::U64));
-    assert_eq!(tri_buf.schema.column_type(1), Some(ScalarType::U64));
-    assert_eq!(tri_buf.schema.column_type(2), Some(ScalarType::U64));
+    assert_eq!(tri_buf.schema().column_type(0), Some(ScalarType::U64));
+    assert_eq!(tri_buf.schema().column_type(1), Some(ScalarType::U64));
+    assert_eq!(tri_buf.schema().column_type(2), Some(ScalarType::U64));
 
     // Same 5 triangles as the U32 path on the same fixture shape.
     assert_eq!(tri_buf.num_rows() as usize, 5);

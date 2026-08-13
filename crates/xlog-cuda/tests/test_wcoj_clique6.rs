@@ -359,7 +359,7 @@ fn run_k6_test_u32_or_symbol(col_type: ScalarType) {
     // Schema preservation.
     for col_idx in 0..6 {
         assert_eq!(
-            out.schema.column_type(col_idx),
+            out.schema().column_type(col_idx),
             Some(col_type),
             "K=6 ({:?}) col {} schema must be preserved",
             col_type,
@@ -411,7 +411,7 @@ fn clique6_u64_round_trips_against_cpu_oracle() {
     assert_eq!(actual, expected, "K=6 (U64) row set must match CPU oracle");
     for col_idx in 0..6 {
         assert_eq!(
-            out.schema.column_type(col_idx),
+            out.schema().column_type(col_idx),
             Some(ScalarType::U64),
             "K=6 (U64) col {} schema must be preserved",
             col_idx

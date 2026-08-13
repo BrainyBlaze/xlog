@@ -360,7 +360,7 @@ fn run_k5_test_u32_or_symbol(col_type: ScalarType) {
     // Schema preservation.
     for col_idx in 0..5 {
         assert_eq!(
-            out.schema.column_type(col_idx),
+            out.schema().column_type(col_idx),
             Some(col_type),
             "K=5 ({:?}) col {} schema must be preserved",
             col_type,
@@ -412,7 +412,7 @@ fn clique5_u64_round_trips_against_cpu_oracle() {
     assert_eq!(actual, expected, "K=5 (U64) row set must match CPU oracle");
     for col_idx in 0..5 {
         assert_eq!(
-            out.schema.column_type(col_idx),
+            out.schema().column_type(col_idx),
             Some(ScalarType::U64),
             "K=5 (U64) col {} schema must be preserved",
             col_idx

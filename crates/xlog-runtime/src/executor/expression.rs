@@ -832,7 +832,7 @@ impl Executor {
         let mut output = self
             .provider
             .combine_columns(result_buffers, result_types)?;
-        output.schema = projected_schema;
+        output.set_schema(projected_schema);
         Ok(output)
     }
 

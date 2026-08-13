@@ -256,11 +256,17 @@ impl super::CudaKernelProvider {
         }
 
         if Self::is_full_row_key(key_cols, input.arity()) && input.arity() > 1 {
-            return self.dedup_full_row_deterministic(input);
+            let mut result = self.dedup_full_row_deterministic(input)?;
+            result.certify_canonical_full_row_set();
+            return Ok(result);
         }
 
         let sorted = self.sort(input, key_cols)?;
-        self.dedup_sorted(&sorted, key_cols)
+        let mut result = self.dedup_sorted(&sorted, key_cols)?;
+        if Self::is_full_row_key(key_cols, input.arity()) {
+            result.certify_canonical_full_row_set();
+        }
+        Ok(result)
     }
 
     /// Remove duplicate rows from a buffer that is already sorted by key columns
@@ -293,11 +299,17 @@ impl super::CudaKernelProvider {
         }
 
         if Self::is_full_row_key(key_cols, input.arity()) && input.arity() > 1 {
-            return self.dedup_full_row_deterministic(input);
+            let mut result = self.dedup_full_row_deterministic(input)?;
+            result.certify_canonical_full_row_set();
+            return Ok(result);
         }
 
         if input.num_rows() <= 1 {
-            return self.clone_buffer(input);
+            let mut result = self.clone_buffer(input)?;
+            if Self::is_full_row_key(key_cols, input.arity()) {
+                result.certify_canonical_full_row_set();
+            }
+            return Ok(result);
         }
 
         if input.num_rows() > u32::MAX as u64 {
@@ -435,12 +447,16 @@ impl super::CudaKernelProvider {
         self.device.synchronize()?;
 
         let d_out_count = self.capture_compact_count(&d_prefix_sum, &d_unique_mask, num_rows)?;
-        self.compact_buffer_by_device_mask_device_count(
+        let mut result = self.compact_buffer_by_device_mask_device_count(
             input,
             &d_unique_mask,
             &d_prefix_sum,
             d_out_count,
-        )
+        )?;
+        if Self::is_full_row_key(key_cols, input.arity()) {
+            result.certify_canonical_full_row_set();
+        }
+        Ok(result)
     }
     /// Compute union of two buffers (GPU-native, deduped)
     ///
@@ -858,9 +874,31 @@ impl super::CudaKernelProvider {
         }
 
         let schema = first.schema().clone();
-        let mut non_empty: Vec<(&CudaBuffer, usize)> = Vec::with_capacity(inputs.len());
-        for input in inputs {
-            let rows = self.device_row_count(input)?;
+
+        let possible_non_empty: Vec<&CudaBuffer> = inputs
+            .iter()
+            .copied()
+            .filter(|input| input.cached_row_count() != Some(0))
+            .collect();
+        if possible_non_empty.is_empty() {
+            return self.create_empty_buffer(schema);
+        }
+        // Known-empty inputs cannot affect a union. If the only remaining
+        // buffer carries a uniqueness proof, cloning it is exact even when
+        // its row-count cache is cold, so neither D2H nor re-dedup is needed.
+        if schema.arity() > 0
+            && possible_non_empty.len() == 1
+            && possible_non_empty[0].canonical_full_row_set_certified()
+        {
+            return self.clone_buffer(possible_non_empty[0]);
+        }
+
+        let mut non_empty: Vec<(&CudaBuffer, usize)> = Vec::with_capacity(possible_non_empty.len());
+        for input in possible_non_empty {
+            let rows = match input.cached_row_count() {
+                Some(rows) => rows as usize,
+                None => self.device_row_count(input)?,
+            };
             if rows > 0 {
                 non_empty.push((input, rows));
             }
@@ -881,7 +919,13 @@ impl super::CudaKernelProvider {
         // Set semantics require dedup even for a single non-empty input.
         let key_cols: Vec<usize> = (0..schema.arity()).collect();
         if non_empty.len() == 1 {
-            return self.dedup(non_empty[0].0, &key_cols);
+            let input = non_empty[0].0;
+            if input.canonical_full_row_set_certified() {
+                return self.clone_buffer(input);
+            }
+            let mut result = self.dedup(input, &key_cols)?;
+            result.certify_canonical_full_row_set();
+            return Ok(result);
         }
 
         let row_bytes: usize = (0..schema.arity())
@@ -918,7 +962,9 @@ impl super::CudaKernelProvider {
             }
             acc = Some(self.union_chunk_gpu(&chunk, chunk_rows, &key_cols)?);
         }
-        Ok(acc.expect("at least one non-empty input was folded"))
+        let mut result = acc.expect("at least one non-empty input was folded");
+        result.certify_canonical_full_row_set();
+        Ok(result)
     }
 
     /// Union one chunk of non-empty, type-compatible buffers: concatenate,
@@ -1419,11 +1465,15 @@ impl super::CudaKernelProvider {
                     )
                 });
                 if recorded_compatible {
-                    return self.dedup_full_row_recorded(input, launch_stream);
+                    let mut result = self.dedup_full_row_recorded(input, launch_stream)?;
+                    result.certify_canonical_full_row_set();
+                    return Ok(result);
                 }
             }
         }
-        self.dedup_full_row_deterministic(input)
+        let mut result = self.dedup_full_row_deterministic(input)?;
+        result.certify_canonical_full_row_set();
+        Ok(result)
     }
 
     /// Public deterministic full-row set difference. Equivalent to
@@ -1606,12 +1656,14 @@ impl super::CudaKernelProvider {
         // Step 4: gather the kept rows using the existing column-wise
         // compaction helper. This reuses the same machinery the
         // existing GPU dedup_sorted typed-columnar path uses.
-        self.compact_buffer_by_device_mask_device_count(
+        let mut result = self.compact_buffer_by_device_mask_device_count(
             &sorted,
             &d_unique_mask,
             &d_prefix_sum,
             d_out_count,
-        )
+        )?;
+        result.certify_canonical_full_row_set();
+        Ok(result)
     }
 
     fn small_sort_full_row_deterministic(
@@ -6105,7 +6157,7 @@ impl super::CudaKernelProvider {
             .dtod_copy(buffer.num_rows_device(), &mut d_num_rows)
             .map_err(|e| XlogError::Kernel(format!("Failed to clone row count: {}", e)))?;
 
-        let cloned = CudaBuffer::from_columns(
+        let mut cloned = CudaBuffer::from_columns(
             result_columns,
             buffer.row_cap,
             d_num_rows,
@@ -6115,6 +6167,9 @@ impl super::CudaKernelProvider {
         // a D2H read of num_rows_device() just to learn the row count.
         if let Some(cached) = buffer.cached_row_count() {
             cloned.set_cached_row_count_if_unset(cached);
+        }
+        if buffer.canonical_full_row_set_certified() {
+            cloned.certify_canonical_full_row_set();
         }
         Ok(cloned)
     }
@@ -6992,7 +7047,13 @@ impl super::CudaKernelProvider {
         })?;
 
         // Step 3: gather kept rows via the recorded compact tail.
-        self.compact_buffer_by_device_mask_counted_recorded(&sorted, &d_unique_mask, launch_stream)
+        let mut result = self.compact_buffer_by_device_mask_counted_recorded(
+            &sorted,
+            &d_unique_mask,
+            launch_stream,
+        )?;
+        result.certify_canonical_full_row_set();
+        Ok(result)
     }
 
     // ============== Recorded hash join: inner only ==============

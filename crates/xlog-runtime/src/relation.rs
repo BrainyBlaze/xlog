@@ -478,11 +478,11 @@ mod tests {
 
         {
             let buf_mut = store.get_mut("test").unwrap();
-            buf_mut.row_cap = 50;
+            buf_mut.set_row_capacity(50);
             provider
                 .device()
                 .inner()
-                .htod_sync_copy_into(&[50u32], &mut buf_mut.d_num_rows)
+                .htod_sync_copy_into(&[50u32], buf_mut.num_rows_device_mut())
                 .expect("htod row count");
         }
 
@@ -507,11 +507,11 @@ mod tests {
         {
             let buf_mut = store.get_or_insert_empty_mut("new_rel", &schema).unwrap();
             assert_eq!(device_row_count(&provider, buf_mut), 0);
-            buf_mut.row_cap = 42;
+            buf_mut.set_row_capacity(42);
             provider
                 .device()
                 .inner()
-                .htod_sync_copy_into(&[42u32], &mut buf_mut.d_num_rows)
+                .htod_sync_copy_into(&[42u32], buf_mut.num_rows_device_mut())
                 .expect("htod row count");
         }
 

@@ -261,8 +261,8 @@ fn wcoj_layout_u64_sorts_unsorted_input_lex() {
         .wcoj_layout_u64_recorded(&buf, stream)
         .expect("layout u64");
     sync_stream(&fix, stream);
-    assert_eq!(out.schema.column_type(0), Some(ScalarType::U64));
-    assert_eq!(out.schema.column_type(1), Some(ScalarType::U64));
+    assert_eq!(out.schema().column_type(0), Some(ScalarType::U64));
+    assert_eq!(out.schema().column_type(1), Some(ScalarType::U64));
     assert_eq!(download_pairs_u64(&out), cpu_sort_dedup(&input));
 }
 
@@ -413,9 +413,9 @@ fn wcoj_layout_then_triangle_u64_matches_cpu_oracle() {
         .wcoj_triangle_u64_recorded(&buf_xy, &buf_yz, &buf_xz, tri_stream)
         .expect("triangle u64");
     sync_stream(&fix, tri_stream);
-    assert_eq!(result.schema.column_type(0), Some(ScalarType::U64));
-    assert_eq!(result.schema.column_type(1), Some(ScalarType::U64));
-    assert_eq!(result.schema.column_type(2), Some(ScalarType::U64));
+    assert_eq!(result.schema().column_type(0), Some(ScalarType::U64));
+    assert_eq!(result.schema().column_type(1), Some(ScalarType::U64));
+    assert_eq!(result.schema().column_type(2), Some(ScalarType::U64));
 
     // CPU oracle on dedup'd inputs.
     let mut cpu_xy = raw_e_xy.clone();

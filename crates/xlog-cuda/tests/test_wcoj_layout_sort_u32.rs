@@ -188,10 +188,10 @@ fn arity_4_accepts_mixed_u32_symbol() {
         .wcoj_layout_sort_u32_recorded(&buf, StreamId::DEFAULT)
         .expect("mixed (U32, Symbol) at arity 4 must be accepted");
     assert_eq!(out.arity(), 4);
-    assert_eq!(out.schema.column_type(0), Some(ScalarType::U32));
-    assert_eq!(out.schema.column_type(1), Some(ScalarType::Symbol));
-    assert_eq!(out.schema.column_type(2), Some(ScalarType::U32));
-    assert_eq!(out.schema.column_type(3), Some(ScalarType::Symbol));
+    assert_eq!(out.schema().column_type(0), Some(ScalarType::U32));
+    assert_eq!(out.schema().column_type(1), Some(ScalarType::Symbol));
+    assert_eq!(out.schema().column_type(2), Some(ScalarType::U32));
+    assert_eq!(out.schema().column_type(3), Some(ScalarType::Symbol));
 }
 
 #[test]

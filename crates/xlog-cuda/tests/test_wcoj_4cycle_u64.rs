@@ -190,10 +190,10 @@ fn wcoj_4cycle_u64_matches_cpu_reference_perfect_square() {
         .wcoj_4cycle_u64_recorded(&buf_e1, &buf_e2, &buf_e3, &buf_e4, launch_stream)
         .expect("wcoj_4cycle_u64_recorded");
 
-    assert_eq!(result.schema.column_type(0), Some(ScalarType::U64));
-    assert_eq!(result.schema.column_type(1), Some(ScalarType::U64));
-    assert_eq!(result.schema.column_type(2), Some(ScalarType::U64));
-    assert_eq!(result.schema.column_type(3), Some(ScalarType::U64));
+    assert_eq!(result.schema().column_type(0), Some(ScalarType::U64));
+    assert_eq!(result.schema().column_type(1), Some(ScalarType::U64));
+    assert_eq!(result.schema().column_type(2), Some(ScalarType::U64));
+    assert_eq!(result.schema().column_type(3), Some(ScalarType::U64));
 
     let host = download_quads_u64(&result);
     let expected = cpu_4cycle_reference_u64(&edges, &edges, &edges, &edges);

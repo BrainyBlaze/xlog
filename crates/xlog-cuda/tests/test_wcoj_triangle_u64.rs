@@ -212,9 +212,9 @@ fn wcoj_triangle_u64_matches_cpu_reference_with_multiple_triangles() {
         .wcoj_triangle_u64_recorded(&buf_xy, &buf_yz, &buf_xz, stream)
         .expect("triangle u64");
     // Output schema must preserve U64 per column.
-    assert_eq!(result.schema.column_type(0), Some(ScalarType::U64));
-    assert_eq!(result.schema.column_type(1), Some(ScalarType::U64));
-    assert_eq!(result.schema.column_type(2), Some(ScalarType::U64));
+    assert_eq!(result.schema().column_type(0), Some(ScalarType::U64));
+    assert_eq!(result.schema().column_type(1), Some(ScalarType::U64));
+    assert_eq!(result.schema().column_type(2), Some(ScalarType::U64));
     let host = download_triples_u64(&result);
     let expected = cpu_triangle_reference_u64(&e_xy, &e_yz, &e_xz);
     assert_eq!(host, expected);
