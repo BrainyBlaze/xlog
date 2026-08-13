@@ -121,7 +121,10 @@ impl ListNormalizer {
             .iter()
             .map(|constraint| {
                 let body = self.normalize_body(&constraint.body)?;
-                Ok(crate::ast::Constraint { body })
+                Ok(crate::ast::Constraint {
+                    authored_index: constraint.authored_index,
+                    body,
+                })
             })
             .collect::<Result<Vec<_>>>()?;
         out.queries = program

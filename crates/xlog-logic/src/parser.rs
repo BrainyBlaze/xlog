@@ -674,7 +674,10 @@ fn build_constraint(pair: Pair<'_, Rule>) -> Result<Constraint> {
         .ok_or_else(|| XlogError::Parse("Missing constraint body".to_string()))?;
     let body = build_body(body_pair)?;
 
-    Ok(Constraint { body })
+    Ok(Constraint {
+        authored_index: None,
+        body,
+    })
 }
 
 /// Build a query

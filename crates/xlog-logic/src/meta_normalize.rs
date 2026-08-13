@@ -117,6 +117,7 @@ impl MetaNormalizer {
             .map(|constraint| {
                 let mut bound = HashMap::new();
                 Ok(Constraint {
+                    authored_index: constraint.authored_index,
                     body: self.normalize_body(&constraint.body, &mut bound)?,
                 })
             })

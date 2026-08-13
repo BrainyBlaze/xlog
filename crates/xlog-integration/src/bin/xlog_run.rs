@@ -196,6 +196,45 @@ fn format_constraint(body: &[BodyLiteral]) -> String {
     format!(":- {}.", lits)
 }
 
+fn authored_constraint_descriptors(
+    program: &xlog_logic::Program,
+) -> Result<Vec<(usize, String, String)>> {
+    program.validate_prepared_authored_constraint_identity()?;
+    program
+        .constraints
+        .iter()
+        .map(|constraint| {
+            let authored_index = constraint.require_authored_index()?;
+            Ok((
+                authored_index,
+                format!("__xlog_constraint_{authored_index}"),
+                format_constraint(&constraint.body),
+            ))
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod authored_constraint_identity_tests {
+    use super::*;
+
+    #[test]
+    fn reduced_constraint_descriptors_use_authored_identity_not_local_position() {
+        let mut program = parse_program(":- p(0).\n:- p(1).\n").expect("parse constraints");
+        program
+            .prepare_authored_constraint_identity_at_root()
+            .expect("prepare authored identities");
+        program.constraints.remove(0);
+
+        let descriptors = authored_constraint_descriptors(&program)
+            .expect("describe prepared reduced constraints");
+        assert_eq!(descriptors.len(), 1);
+        assert_eq!(descriptors[0].0, 1);
+        assert_eq!(descriptors[0].1, "__xlog_constraint_1");
+        assert_eq!(descriptors[0].2, ":- p(1).");
+    }
+}
+
 fn decode_column_to_strings(
     provider: &CudaKernelProvider,
     buf: &xlog_cuda::CudaBuffer,
@@ -380,9 +419,8 @@ fn main() -> Result<()> {
     executor.execute_plan(&plan)?;
 
     // Enforce constraints (if any): any non-empty `__xlog_constraint_i` is a violation.
-    let mut violated: Vec<usize> = Vec::new();
-    for i in 0..program.constraints.len() {
-        let name = format!("__xlog_constraint_{}", i);
+    let mut violated: Vec<(usize, String)> = Vec::new();
+    for (authored_index, name, body) in authored_constraint_descriptors(&program)? {
         let buf = executor.store().get(&name).ok_or_else(|| {
             XlogError::Execution(format!(
                 "Missing constraint result relation {} (compiler bug?)",
@@ -390,18 +428,14 @@ fn main() -> Result<()> {
             ))
         })?;
         if !buf.is_empty() && buf.num_rows() > 0 {
-            violated.push(i);
+            violated.push((authored_index, body));
         }
     }
 
     if !violated.is_empty() {
         eprintln!("Constraint violations:");
-        for &i in &violated {
-            eprintln!(
-                "  [{}] {}",
-                i,
-                format_constraint(&program.constraints[i].body)
-            );
+        for (authored_index, body) in &violated {
+            eprintln!("  [{authored_index}] {body}");
         }
         return Err(XlogError::Execution(format!(
             "{} constraint(s) violated",

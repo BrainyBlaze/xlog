@@ -11,6 +11,22 @@ fn create_test_provider() -> Option<Arc<CudaKernelProvider>> {
     Some(Arc::new(CudaKernelProvider::new(device, memory).ok()?))
 }
 
+#[test]
+fn normalize_program_for_execution_prepares_authored_identity_before_transforms() -> Result<()> {
+    let program = xlog_logic::parse_program(
+        r#"
+        :- p(0).
+        :- p(1).
+        "#,
+    )?;
+
+    let normalized = xlog_gpu::logic::normalize_program_for_execution(program)?;
+    assert_eq!(normalized.authored_constraint_source_bound, Some(2));
+    assert_eq!(normalized.constraints[0].authored_index, Some(0));
+    assert_eq!(normalized.constraints[1].authored_index, Some(1));
+    Ok(())
+}
+
 fn create_edge_buffer(provider: &CudaKernelProvider, edges: &[(u32, u32)]) -> Result<CudaBuffer> {
     let schema = Schema::new(vec![
         ("c0".to_string(), ScalarType::U32),
@@ -1184,6 +1200,565 @@ fn test_derived_head_coupling_stratified_equals_per_stratum_reference() -> Resul
         "stratified coupling must equal the per-stratum independent reference EXACTLY"
     );
 
+    Ok(())
+}
+
+#[test]
+fn stratified_ordinary_constraint_is_enforced() -> Result<()> {
+    let Some(provider) = create_test_provider() else {
+        if std::env::var("XLOG_REQUIRE_CUDA").as_deref() == Ok("1") {
+            panic!("XLOG_REQUIRE_CUDA=1 but CUDA initialization failed");
+        }
+        eprintln!("Skipping: no CUDA device");
+        return Ok(());
+    };
+
+    let source = r#"
+        #pragma epistemic_mode = faeel
+        pred base(u32). pred src(u32). pred src2(u32). pred a(u32). pred b(u32).
+        base(2). src(2). src2(2).
+        a(X) :- src(X), know base(X).
+        b(X) :- src2(X), know a(X).
+        b(X) :- b(X), know a(X).
+        :- b(X).
+        ?- b(X).
+    "#;
+    let mut authored = xlog_logic::parse_program(source)?;
+    authored.constraints[0].authored_index = Some(3);
+    authored.prepare_authored_constraint_identity(4)?;
+    let program = xlog_gpu::logic::LogicProgram::compile_program(authored)?;
+    let plan_json = program.epistemic_plan_json().expect("epistemic plan");
+    assert!(plan_json.contains("\"plan_kind\":\"epistemic_stratified\""));
+
+    let error = match program.evaluate(provider, std::collections::HashMap::new()) {
+        Ok(_) => panic!("the ordinary stratum constraint must reject b(2)"),
+        Err(error) => error,
+    };
+    assert!(
+        error
+            .to_string()
+            .contains("Constraint 3 violated: :- b(X)."),
+        "{error}"
+    );
+    Ok(())
+}
+
+#[test]
+fn stratified_cross_stratum_ordinary_constraint_false_body_succeeds() -> Result<()> {
+    let Some(provider) = create_test_provider() else {
+        if std::env::var("XLOG_REQUIRE_CUDA").as_deref() == Ok("1") {
+            panic!("XLOG_REQUIRE_CUDA=1 but CUDA initialization failed");
+        }
+        eprintln!("Skipping: no CUDA device");
+        return Ok(());
+    };
+
+    let source = r#"
+        #pragma epistemic_mode = faeel
+        pred base(u32). pred src(u32). pred a(u32). pred b(u32).
+        base(1). src(1). src(2).
+        a(X) :- src(X), know base(X).
+        b(X) :- src(X), know a(X).
+        :- a(2), b(2).
+        ?- b(X).
+    "#;
+    let mut authored = xlog_logic::parse_program(source)?;
+    authored.constraints[0].authored_index = Some(3);
+    authored.prepare_authored_constraint_identity(4)?;
+    let program = xlog_gpu::logic::LogicProgram::compile_program(authored)?;
+    assert!(program
+        .epistemic_plan_json()
+        .expect("epistemic plan")
+        .contains("\"plan_kind\":\"epistemic_stratified\""));
+    let result = program.evaluate(provider.clone(), std::collections::HashMap::new())?;
+    assert_eq!(read_unary(&provider, &result.queries[0].buffer), vec![1]);
+    Ok(())
+}
+
+#[test]
+fn stratified_cross_stratum_ordinary_constraint_true_body_reports_authored_identity() -> Result<()>
+{
+    let Some(provider) = create_test_provider() else {
+        if std::env::var("XLOG_REQUIRE_CUDA").as_deref() == Ok("1") {
+            panic!("XLOG_REQUIRE_CUDA=1 but CUDA initialization failed");
+        }
+        eprintln!("Skipping: no CUDA device");
+        return Ok(());
+    };
+
+    let source = r#"
+        #pragma epistemic_mode = faeel
+        pred base(u32). pred src(u32). pred a(u32). pred b(u32).
+        base(1). src(1).
+        a(X) :- src(X), know base(X).
+        b(X) :- src(X), know a(X).
+        :- a(X), b(X).
+        ?- b(X).
+    "#;
+    let mut authored = xlog_logic::parse_program(source)?;
+    authored.constraints[0].authored_index = Some(3);
+    authored.prepare_authored_constraint_identity(4)?;
+    let program = xlog_gpu::logic::LogicProgram::compile_program(authored)?;
+    assert!(program
+        .epistemic_plan_json()
+        .expect("epistemic plan")
+        .contains("\"plan_kind\":\"epistemic_stratified\""));
+
+    let error = match program.evaluate(provider, std::collections::HashMap::new()) {
+        Ok(_) => panic!("the true cross-stratum ordinary constraint must be rejected"),
+        Err(error) => error,
+    };
+    match error {
+        xlog_core::XlogError::Execution(message) => {
+            assert_eq!(message, "Constraint 3 violated: :- a(X), b(X).")
+        }
+        other => panic!("expected typed execution error, got {other}"),
+    }
+    Ok(())
+}
+
+#[test]
+fn stratified_post_ordinary_closure_false_constraint_succeeds() -> Result<()> {
+    let Some(provider) = create_test_provider() else {
+        if std::env::var("XLOG_REQUIRE_CUDA").as_deref() == Ok("1") {
+            panic!("XLOG_REQUIRE_CUDA=1 but CUDA initialization failed");
+        }
+        eprintln!("Skipping: no CUDA device");
+        return Ok(());
+    };
+
+    let source = r#"
+        #pragma epistemic_mode = faeel
+        pred base(u32). pred src(u32). pred a(u32). pred b(u32). pred c(u32).
+        base(1). src(1).
+        a(X) :- src(X), know base(X).
+        b(X) :- src(X), know a(X).
+        c(X) :- b(X).
+        :- c(2).
+        ?- b(X).
+    "#;
+    let mut authored = xlog_logic::parse_program(source)?;
+    authored.constraints[0].authored_index = Some(3);
+    authored.prepare_authored_constraint_identity(4)?;
+    let program = xlog_gpu::logic::LogicProgram::compile_program(authored)?;
+    let result = program.evaluate(provider.clone(), std::collections::HashMap::new())?;
+    assert_eq!(read_unary(&provider, &result.queries[0].buffer), vec![1]);
+    Ok(())
+}
+
+#[test]
+fn stratified_plan_json_exposes_ordinary_post_stage() -> Result<()> {
+    let source = r#"
+        #pragma epistemic_mode = faeel
+        pred base(u32). pred src(u32). pred a(u32). pred b(u32). pred c(u32).
+        base(1). src(1).
+        a(X) :- src(X), know base(X).
+        b(X) :- src(X), know a(X).
+        c(X) :- b(X).
+        ?- c(X).
+    "#;
+    let program = xlog_gpu::logic::LogicProgram::compile(source)?;
+    let plan_json = program.epistemic_plan_json().expect("epistemic plan");
+    assert!(
+        plan_json.contains(
+            "\"unit\":\"ordinary_post\",\"stage_kind\":\"ordinary_closure_and_constraints\""
+        ),
+        "the public plan must expose the ordinary post-stratification stage: {plan_json}"
+    );
+    Ok(())
+}
+
+#[test]
+fn stratified_post_ordinary_query_surfaces_authored_relation() -> Result<()> {
+    let Some(provider) = create_test_provider() else {
+        if std::env::var("XLOG_REQUIRE_CUDA").as_deref() == Ok("1") {
+            panic!("XLOG_REQUIRE_CUDA=1 but CUDA initialization failed");
+        }
+        eprintln!("Skipping: no CUDA device");
+        return Ok(());
+    };
+
+    let source = r#"
+        #pragma epistemic_mode = faeel
+        pred base(u32). pred src(u32). pred a(u32). pred b(u32). pred c(u32).
+        base(1). src(1).
+        a(X) :- src(X), know base(X).
+        b(X) :- src(X), know a(X).
+        c(X) :- b(X).
+        ?- c(X).
+    "#;
+    let program = xlog_gpu::logic::LogicProgram::compile(source)?;
+
+    let result =
+        program.evaluate_with_options(provider.clone(), std::collections::HashMap::new(), true)?;
+    assert_eq!(result.queries.len(), 1);
+    assert_eq!(result.queries[0].relation_name, "c");
+    assert_eq!(read_unary(&provider, &result.queries[0].buffer), vec![1]);
+    let stats = result.stats.expect("profiled stratified evaluation stats");
+    assert!(
+        stats.strata.len() >= 3,
+        "profiling must retain both modal strata plus the ordinary post stage: {stats:?}"
+    );
+    Ok(())
+}
+
+#[test]
+fn stratified_post_mixed_queries_preserve_authored_order() -> Result<()> {
+    let Some(provider) = create_test_provider() else {
+        if std::env::var("XLOG_REQUIRE_CUDA").as_deref() == Ok("1") {
+            panic!("XLOG_REQUIRE_CUDA=1 but CUDA initialization failed");
+        }
+        eprintln!("Skipping: no CUDA device");
+        return Ok(());
+    };
+
+    let source = r#"
+        #pragma epistemic_mode = faeel
+        pred base(u32). pred src(u32). pred a(u32). pred b(u32). pred c(u32).
+        base(1). src(1).
+        a(X) :- src(X), know base(X).
+        b(X) :- src(X), know a(X).
+        c(X) :- b(X).
+        ?- c(X).
+        ?- b(X).
+    "#;
+    let program = xlog_gpu::logic::LogicProgram::compile(source)?;
+    let result = program.evaluate(provider.clone(), std::collections::HashMap::new())?;
+    assert_eq!(result.queries.len(), 2);
+    assert_eq!(result.queries[0].relation_name, "c");
+    assert_eq!(read_unary(&provider, &result.queries[0].buffer), vec![1]);
+    assert_eq!(result.queries[1].relation_name, "b");
+    assert_eq!(read_unary(&provider, &result.queries[1].buffer), vec![1]);
+    Ok(())
+}
+
+#[test]
+fn stratified_post_preserves_projection_and_nullary_query_shape() -> Result<()> {
+    let Some(provider) = create_test_provider() else {
+        if std::env::var("XLOG_REQUIRE_CUDA").as_deref() == Ok("1") {
+            panic!("XLOG_REQUIRE_CUDA=1 but CUDA initialization failed");
+        }
+        eprintln!("Skipping: no CUDA device");
+        return Ok(());
+    };
+
+    let source = r#"
+        #pragma epistemic_mode = faeel
+        pred base(u32). pred src(u32). pred a(u32). pred b(u32). pred pair(u32, u32).
+        pred ready().
+        base(1). src(1).
+        a(X) :- src(X), know base(X).
+        b(X) :- src(X), know a(X).
+        pair(X, Y) :- b(X), base(Y).
+        ?- pair(Y, X).
+    "#;
+    let mut authored = xlog_logic::parse_program(source)?;
+    authored.rules.push(xlog_logic::ast::Rule {
+        head: xlog_logic::ast::Atom {
+            predicate: "ready".to_string(),
+            terms: Vec::new(),
+        },
+        body: vec![xlog_logic::ast::BodyLiteral::Positive(
+            xlog_logic::ast::Atom {
+                predicate: "b".to_string(),
+                terms: vec![xlog_logic::ast::Term::Integer(1)],
+            },
+        )],
+    });
+    authored.queries.push(xlog_logic::ast::Query {
+        atom: xlog_logic::ast::Atom {
+            predicate: "ready".to_string(),
+            terms: Vec::new(),
+        },
+    });
+    let program = xlog_gpu::logic::LogicProgram::compile_program(authored)?;
+    let result = program.evaluate(provider, std::collections::HashMap::new())?;
+    assert_eq!(result.queries.len(), 2);
+    assert_eq!(result.queries[0].relation_name, "pair");
+    assert_eq!(result.queries[0].columns, vec!["Y", "X"]);
+    assert_eq!(result.queries[1].relation_name, "ready");
+    assert!(result.queries[1].columns.is_empty());
+    assert_eq!(result.queries[1].buffer.schema().arity(), 0);
+    assert_eq!(result.queries[1].buffer.num_rows(), 1);
+    Ok(())
+}
+
+#[test]
+fn stratified_modal_query_preserves_projection_and_nullary_shape() -> Result<()> {
+    let Some(provider) = create_test_provider() else {
+        if std::env::var("XLOG_REQUIRE_CUDA").as_deref() == Ok("1") {
+            panic!("XLOG_REQUIRE_CUDA=1 but CUDA initialization failed");
+        }
+        eprintln!("Skipping: no CUDA device");
+        return Ok(());
+    };
+
+    let source = r#"
+        #pragma epistemic_mode = faeel
+        pred edge(u32, u32). pred src(u32). pred a(u32, u32). pred b(u32, u32).
+        edge(1, 2). src(1).
+        a(X, Y) :- src(X), know edge(X, Y).
+        b(X, Y) :- src(X), know a(X, Y).
+        ?- b(Y, X).
+        ?- b(1, Y).
+    "#;
+    let mut authored = xlog_logic::parse_program(source)?;
+    authored.queries.push(xlog_logic::ast::Query {
+        atom: xlog_logic::ast::Atom {
+            predicate: "b".to_string(),
+            terms: vec![
+                xlog_logic::ast::Term::Integer(1),
+                xlog_logic::ast::Term::Integer(2),
+            ],
+        },
+    });
+    authored.queries.push(xlog_logic::ast::Query {
+        atom: xlog_logic::ast::Atom {
+            predicate: "b".to_string(),
+            terms: vec![
+                xlog_logic::ast::Term::Integer(999),
+                xlog_logic::ast::Term::Integer(999),
+            ],
+        },
+    });
+    authored.queries.push(xlog_logic::ast::Query {
+        atom: xlog_logic::ast::Atom {
+            predicate: "b".to_string(),
+            terms: vec![
+                xlog_logic::ast::Term::Variable("X".to_string()),
+                xlog_logic::ast::Term::Variable("X".to_string()),
+            ],
+        },
+    });
+    let program = xlog_gpu::logic::LogicProgram::compile_program(authored)?;
+    let result = program.evaluate(provider, std::collections::HashMap::new())?;
+    assert_eq!(result.queries.len(), 5);
+    assert_eq!(result.queries[0].relation_name, "b");
+    assert_eq!(result.queries[0].columns, vec!["Y", "X"]);
+    assert_eq!(result.queries[1].relation_name, "b");
+    assert_eq!(result.queries[1].columns, vec!["Y"]);
+    assert_eq!(result.queries[1].buffer.schema().arity(), 1);
+    assert_eq!(result.queries[2].relation_name, "b");
+    assert!(result.queries[2].columns.is_empty());
+    assert_eq!(result.queries[2].buffer.schema().arity(), 0);
+    assert_eq!(result.queries[2].buffer.num_rows(), 1);
+    assert_eq!(result.queries[3].relation_name, "b");
+    assert!(result.queries[3].columns.is_empty());
+    assert_eq!(result.queries[3].buffer.schema().arity(), 0);
+    assert_eq!(result.queries[3].buffer.num_rows(), 0);
+    assert_eq!(result.queries[4].relation_name, "b");
+    assert_eq!(result.queries[4].columns, vec!["X"]);
+    assert_eq!(result.queries[4].buffer.schema().arity(), 1);
+    assert_eq!(result.queries[4].buffer.num_rows(), 0);
+    Ok(())
+}
+
+#[test]
+fn stratified_queries_across_modal_strata_do_not_collide() -> Result<()> {
+    let Some(provider) = create_test_provider() else {
+        if std::env::var("XLOG_REQUIRE_CUDA").as_deref() == Ok("1") {
+            panic!("XLOG_REQUIRE_CUDA=1 but CUDA initialization failed");
+        }
+        eprintln!("Skipping: no CUDA device");
+        return Ok(());
+    };
+
+    let source = r#"
+        #pragma epistemic_mode = faeel
+        pred base(u32). pred src(u32). pred edge(u32, u32).
+        pred a(u32). pred b(u32, u32).
+        base(1). src(1). edge(1, 2).
+        a(X) :- src(X), know base(X).
+        b(X, Y) :- edge(X, Y), know a(X).
+        ?- a(X).
+        ?- b(X, Y).
+    "#;
+    let program = xlog_gpu::logic::LogicProgram::compile(source)?;
+    let result = program.evaluate(provider.clone(), std::collections::HashMap::new())?;
+
+    assert_eq!(result.queries.len(), 2);
+    assert_eq!(result.queries[0].relation_name, "a");
+    assert_eq!(read_unary(&provider, &result.queries[0].buffer), vec![1]);
+    assert_eq!(result.queries[1].relation_name, "b");
+    assert_eq!(result.queries[1].columns, vec!["X", "Y"]);
+    assert_eq!(result.queries[1].buffer.schema().arity(), 2);
+    assert_eq!(
+        read_pairs(&provider, &result.queries[1].buffer),
+        vec![(1, 2)]
+    );
+    Ok(())
+}
+
+#[test]
+fn stratified_post_ordinary_closure_true_constraint_reports_authored_identity() -> Result<()> {
+    let Some(provider) = create_test_provider() else {
+        if std::env::var("XLOG_REQUIRE_CUDA").as_deref() == Ok("1") {
+            panic!("XLOG_REQUIRE_CUDA=1 but CUDA initialization failed");
+        }
+        eprintln!("Skipping: no CUDA device");
+        return Ok(());
+    };
+
+    let source = r#"
+        #pragma epistemic_mode = faeel
+        pred base(u32). pred src(u32). pred a(u32). pred b(u32). pred c(u32).
+        base(1). src(1).
+        a(X) :- src(X), know base(X).
+        b(X) :- src(X), know a(X).
+        c(X) :- b(X).
+        :- c(X).
+        ?- b(X).
+    "#;
+    let mut authored = xlog_logic::parse_program(source)?;
+    authored.constraints[0].authored_index = Some(3);
+    authored.prepare_authored_constraint_identity(4)?;
+    let program = xlog_gpu::logic::LogicProgram::compile_program(authored)?;
+
+    let error = match program.evaluate(provider, std::collections::HashMap::new()) {
+        Ok(_) => panic!("the post-stratification ordinary closure must derive c(1)"),
+        Err(error) => error,
+    };
+    match error {
+        xlog_core::XlogError::Execution(message) => {
+            assert_eq!(message, "Constraint 3 violated: :- c(X).")
+        }
+        other => panic!("expected typed execution error, got {other}"),
+    }
+    Ok(())
+}
+
+#[test]
+fn stratified_post_constraint_preserves_declared_augmented_head_schema() -> Result<()> {
+    let Some(provider) = create_test_provider() else {
+        if std::env::var("XLOG_REQUIRE_CUDA").as_deref() == Ok("1") {
+            panic!("XLOG_REQUIRE_CUDA=1 but CUDA initialization failed");
+        }
+        eprintln!("Skipping: no CUDA device");
+        return Ok(());
+    };
+
+    let source = r#"
+        #pragma epistemic_mode = faeel
+        pred node(u32). pred edge(u32, u32). pred a(u32). pred b(u32). pred c(u32).
+        node(1). edge(1, 7).
+        a(X) :- node(X), know edge(X, Y).
+        b(X) :- node(X), know a(X).
+        c(X) :- b(X).
+        :- c(X).
+        ?- b(X).
+    "#;
+    let mut authored = xlog_logic::parse_program(source)?;
+    authored.constraints[0].authored_index = Some(3);
+    authored.prepare_authored_constraint_identity(4)?;
+    let program = xlog_gpu::logic::LogicProgram::compile_program(authored)?;
+    assert!(program
+        .epistemic_plan_json()
+        .expect("epistemic plan")
+        .contains("\"plan_kind\":\"epistemic_stratified\""));
+
+    let error = match program.evaluate(provider, std::collections::HashMap::new()) {
+        Ok(_) => panic!("the deferred closure must derive c(1)"),
+        Err(error) => error,
+    };
+    match error {
+        xlog_core::XlogError::Execution(message) => {
+            assert_eq!(message, "Constraint 3 violated: :- c(X).")
+        }
+        other => panic!("expected authored constraint error, got {other}"),
+    }
+    assert_eq!(
+        program.schema("a").expect("compiled a schema").arity(),
+        2,
+        "the post stage must not replace a's widened tuple-key schema"
+    );
+    Ok(())
+}
+
+#[test]
+fn stratified_multi_head_post_constraint_false_preserves_all_outputs() -> Result<()> {
+    let Some(provider) = create_test_provider() else {
+        if std::env::var("XLOG_REQUIRE_CUDA").as_deref() == Ok("1") {
+            panic!("XLOG_REQUIRE_CUDA=1 but CUDA initialization failed");
+        }
+        eprintln!("Skipping: no CUDA device");
+        return Ok(());
+    };
+
+    let source = r#"
+        #pragma epistemic_mode = faeel
+        pred base(u32). pred other_base(u32). pred src(u32). pred shared(u32).
+        pred a(u32). pred d(u32). pred b(u32). pred c(u32).
+        base(1). other_base(1). src(1). shared(2).
+        a(X) :- src(X), know base(X).
+        d(X) :- src(X), know other_base(X).
+        b(X) :- src(X), know a(X).
+        c(X) :- src(X), know d(X).
+        :- shared(99).
+        ?- b(X). ?- c(X).
+    "#;
+    let mut authored = xlog_logic::parse_program(source)?;
+    authored.constraints[0].authored_index = Some(3);
+    authored.prepare_authored_constraint_identity(4)?;
+    let program = xlog_gpu::logic::LogicProgram::compile_program(authored)?;
+    let plan_json = program.epistemic_plan_json().expect("epistemic plan");
+    assert!(plan_json.contains("\"unit\":\"stratum[1].split[0]\""));
+    assert!(plan_json.contains("\"unit\":\"stratum[1].split[1]\""));
+    let result = program.evaluate(provider.clone(), std::collections::HashMap::new())?;
+    let outputs = result
+        .queries
+        .iter()
+        .map(|query| {
+            (
+                query.relation_name.as_str(),
+                read_unary(&provider, &query.buffer),
+            )
+        })
+        .collect::<std::collections::BTreeMap<_, _>>();
+    assert_eq!(outputs.get("b"), Some(&vec![1]));
+    assert_eq!(outputs.get("c"), Some(&vec![1]));
+    Ok(())
+}
+
+#[test]
+fn stratified_multi_head_post_constraint_on_fact_reports_authored_identity() -> Result<()> {
+    let Some(provider) = create_test_provider() else {
+        if std::env::var("XLOG_REQUIRE_CUDA").as_deref() == Ok("1") {
+            panic!("XLOG_REQUIRE_CUDA=1 but CUDA initialization failed");
+        }
+        eprintln!("Skipping: no CUDA device");
+        return Ok(());
+    };
+
+    let source = r#"
+        #pragma epistemic_mode = faeel
+        pred base(u32). pred other_base(u32). pred src(u32). pred shared(u32).
+        pred a(u32). pred d(u32). pred b(u32). pred c(u32).
+        base(1). other_base(1). src(1). shared(2).
+        a(X) :- src(X), know base(X).
+        d(X) :- src(X), know other_base(X).
+        b(X) :- src(X), know a(X).
+        c(X) :- src(X), know d(X).
+        :- shared(2).
+        ?- b(X). ?- c(X).
+    "#;
+    let mut authored = xlog_logic::parse_program(source)?;
+    authored.constraints[0].authored_index = Some(3);
+    authored.prepare_authored_constraint_identity(4)?;
+    let program = xlog_gpu::logic::LogicProgram::compile_program(authored)?;
+    let plan_json = program.epistemic_plan_json().expect("epistemic plan");
+    assert!(plan_json.contains("\"unit\":\"stratum[1].split[0]\""));
+    assert!(plan_json.contains("\"unit\":\"stratum[1].split[1]\""));
+
+    let error = match program.evaluate(provider, std::collections::HashMap::new()) {
+        Ok(_) => panic!("the fact-only post-stratification constraint must reject"),
+        Err(error) => error,
+    };
+    match error {
+        xlog_core::XlogError::Execution(message) => {
+            assert_eq!(message, "Constraint 3 violated: :- shared(2).")
+        }
+        other => panic!("expected typed execution error, got {other}"),
+    }
     Ok(())
 }
 

@@ -55,6 +55,16 @@ Determined-head stratification may combine these routes in order: a lower stratu
 is materialized first, then a higher stratum reads that relation through its local
 execution plan.
 
+After every modal stratum is materialized, XLOG runs one ordinary closure stage
+over the completed relations and then checks ordinary integrity constraints. This
+extra replay makes cross-stratum constraints authoritative: a program that an
+older route silently accepted can now be rejected when its authored constraint is
+violated. The plan JSON exposes this work as the `ordinary_post` unit; its cost is
+one additional ordinary fixpoint pass per stratified evaluation. The compiler's
+query rules run in that post stage over the final gated relations, so authored
+queries keep source order, constants, repeated-variable filters, projection order,
+and logical zero-column shape.
+
 ## Source surface
 
 The frontend represents epistemic constructs explicitly, so the programmer's

@@ -1724,6 +1724,7 @@ impl ModuleResolver {
             predicates: _,
             rules: _,
             constraints,
+            authored_constraint_source_bound: _,
             queries: _,
             prob_facts,
             annotated_disjunctions,
