@@ -26,6 +26,9 @@ pub struct DependencyGraph {
     /// Set of all predicate names in the graph.
     pub predicates: HashSet<String>,
     pub(crate) edges: Vec<DepEdge>,
+    /// Outgoing-edge indices per predicate, kept in insertion order so
+    /// `outgoing()` returns edges exactly as the linear scan over `edges` did.
+    adjacency: std::collections::HashMap<String, Vec<usize>>,
 }
 
 impl DependencyGraph {
@@ -42,11 +45,18 @@ impl DependencyGraph {
     pub(crate) fn add_edge(&mut self, from: String, to: String, dep_type: DepType) {
         self.predicates.insert(from.clone());
         self.predicates.insert(to.clone());
+        self.adjacency
+            .entry(from.clone())
+            .or_default()
+            .push(self.edges.len());
         self.edges.push(DepEdge { from, to, dep_type });
     }
 
     pub(crate) fn outgoing(&self, pred: &str) -> Vec<&DepEdge> {
-        self.edges.iter().filter(|e| e.from == pred).collect()
+        match self.adjacency.get(pred) {
+            Some(idxs) => idxs.iter().map(|&i| &self.edges[i]).collect(),
+            None => Vec::new(),
+        }
     }
 }
 
