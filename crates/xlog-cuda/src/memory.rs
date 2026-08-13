@@ -1311,16 +1311,20 @@ impl<'a> IntoKernelParamStorage for &'a mut CudaColumn {
 /// Each column is stored as a separate `CudaSlice<u8>`.
 pub struct CudaBuffer {
     /// Column data stored as raw bytes
-    pub columns: Vec<CudaColumn>,
+    pub(crate) columns: Vec<CudaColumn>,
     /// Row capacity for allocated columns
-    pub row_cap: u64,
+    pub(crate) row_cap: u64,
     /// Device-resident row count (len = 1)
-    pub d_num_rows: TrackedCudaSlice<u32>,
+    pub(crate) d_num_rows: TrackedCudaSlice<u32>,
     /// Schema describing the column types
-    pub schema: Schema,
+    pub(crate) schema: Schema,
     /// Cached host-side row count (u32::MAX = not yet cached).
-    /// Avoids repeated synchronous D2H transfers for the immutable row count.
+    /// Avoids repeated synchronous D2H transfers between explicit mutations,
+    /// whose public accessors invalidate this cache before returning.
     cached_row_count: AtomicU32,
+    /// True only when construction or a set operation proves that rows are
+    /// lexicographically sorted by every schema column and full-row unique.
+    canonical_full_row_set_certified: bool,
 }
 
 impl CudaBuffer {
@@ -1353,6 +1357,7 @@ impl CudaBuffer {
             d_num_rows,
             schema,
             cached_row_count: AtomicU32::new(u32::MAX),
+            canonical_full_row_set_certified: row_cap <= 1,
         }
     }
 
@@ -1378,6 +1383,7 @@ impl CudaBuffer {
             d_num_rows,
             schema,
             cached_row_count: AtomicU32::new(host_row_count),
+            canonical_full_row_set_certified: host_row_count <= 1,
         }
     }
 
@@ -1393,13 +1399,55 @@ impl CudaBuffer {
 
     /// Sets the cached row count if not already set (CAS from sentinel).
     /// No-op if already cached.
-    pub fn set_cached_row_count_if_unset(&self, count: u32) {
+    pub(crate) fn set_cached_row_count_if_unset(&self, count: u32) {
         let _ = self.cached_row_count.compare_exchange(
             u32::MAX,
             count,
             Ordering::Relaxed,
             Ordering::Relaxed,
         );
+    }
+
+    /// Whether rows are sorted in schema-column order and full-row unique.
+    pub fn canonical_full_row_set_certified(&self) -> bool {
+        self.canonical_full_row_set_certified
+    }
+
+    /// Record a full-schema ordering and uniqueness proof from a set operation.
+    pub(crate) fn certify_canonical_full_row_set(&mut self) {
+        self.canonical_full_row_set_certified = true;
+    }
+
+    /// Borrow every column without permitting mutation of certified contents.
+    pub fn columns(&self) -> &[CudaColumn] {
+        &self.columns
+    }
+
+    /// Mutably borrow columns after invalidating canonical-set metadata.
+    pub fn columns_mut(&mut self) -> &mut [CudaColumn] {
+        self.canonical_full_row_set_certified = false;
+        &mut self.columns
+    }
+
+    /// Replace the schema after invalidating canonical ordering metadata.
+    pub fn set_schema(&mut self, schema: Schema) {
+        assert_eq!(self.columns.len(), schema.arity());
+        self.schema = schema;
+        self.canonical_full_row_set_certified = false;
+    }
+
+    /// Set row capacity and invalidate all host-derived row metadata.
+    pub fn set_row_capacity(&mut self, row_cap: u64) {
+        self.row_cap = row_cap;
+        self.cached_row_count.store(u32::MAX, Ordering::Relaxed);
+        self.canonical_full_row_set_certified = false;
+    }
+
+    /// Mutably borrow the device row count after invalidating derived metadata.
+    pub fn num_rows_device_mut(&mut self) -> &mut TrackedCudaSlice<u32> {
+        self.cached_row_count.store(u32::MAX, Ordering::Relaxed);
+        self.canonical_full_row_set_certified = false;
+        &mut self.d_num_rows
     }
 
     /// Get the row capacity

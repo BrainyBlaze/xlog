@@ -896,7 +896,7 @@ impl ExactDdnnfProgram {
                     XlogError::Compilation("Neural fast-path missing prob column".to_string())
                 })?;
                 let out_col = out_grads_batch[q][g]
-                    .columns
+                    .columns_mut()
                     .get_mut(0)
                     .ok_or_else(|| XlogError::Compilation("Missing grad column".to_string()))?;
 
@@ -1041,7 +1041,7 @@ impl ExactDdnnfProgram {
                     XlogError::Compilation("Neural fast-path missing prob column".to_string())
                 })?;
                 let out_col = out_grads_batch[q][g]
-                    .columns
+                    .columns_mut()
                     .get_mut(0)
                     .ok_or_else(|| XlogError::Compilation("Missing grad column".to_string()))?;
 
@@ -1254,7 +1254,7 @@ impl ExactDdnnfProgram {
                 XlogError::Compilation("Neural fast-path missing prob column".to_string())
             })?;
             let out_col = out_buf
-                .columns
+                .columns_mut()
                 .get_mut(0)
                 .ok_or_else(|| XlogError::Compilation("Missing grad column".to_string()))?;
 
@@ -1338,7 +1338,7 @@ impl ExactDdnnfProgram {
                 XlogError::Compilation("Neural fast-path missing prob column".to_string())
             })?;
             let out_col = out_grads[g]
-                .columns
+                .columns_mut()
                 .get_mut(0)
                 .ok_or_else(|| XlogError::Compilation("Missing grad column".to_string()))?;
 

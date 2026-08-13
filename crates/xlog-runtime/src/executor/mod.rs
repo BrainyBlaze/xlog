@@ -1891,11 +1891,8 @@ impl Executor {
     }
 
     fn buffer_row_count(&self, buffer: &CudaBuffer) -> Result<u32> {
-        if let Some(n) = buffer.cached_row_count() {
-            return Ok(n);
-        }
         // Metadata-only read: row counts are control-plane state, not
-        // tuple data. Route through `dtoh_scalar_untracked` so the
+        // tuple data. Route through the provider's audited helper so the
         // metadata-vs-data-plane contract stays grepable and the
         // deterministic-D2H gate continues to allow it. Re-map the
         // provider-level `XlogError::Kernel` into `XlogError::Execution`
@@ -1903,10 +1900,11 @@ impl Executor {
         // context so callers see a consistent error category.
         let n = self
             .provider
-            .dtoh_scalar_untracked::<u32>(buffer.num_rows_device(), 0)
+            .device_row_count(buffer)
             .map_err(|e| XlogError::Execution(format!("Failed to read row count: {}", e)))?;
-        buffer.set_cached_row_count_if_unset(n);
-        Ok(n)
+        u32::try_from(n).map_err(|_| {
+            XlogError::Execution(format!("Row count {n} exceeds the supported u32 range"))
+        })
     }
 }
 
@@ -2188,18 +2186,10 @@ mod tests {
     }
 
     fn buffer_row_count(executor: &Executor, buffer: &CudaBuffer) -> u32 {
-        if let Some(n) = buffer.cached_row_count() {
-            return n;
-        }
-        let mut host_rows = [0u32];
         executor
             .provider
-            .device()
-            .inner()
-            .dtoh_sync_copy_into(buffer.num_rows_device(), &mut host_rows)
-            .expect("dtoh row count");
-        buffer.set_cached_row_count_if_unset(host_rows[0]);
-        host_rows[0]
+            .device_row_count(buffer)
+            .expect("dtoh row count") as u32
     }
 
     fn to_f64_column_bytes(values: &[f64]) -> Vec<u8> {

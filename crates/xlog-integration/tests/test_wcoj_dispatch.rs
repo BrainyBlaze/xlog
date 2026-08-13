@@ -584,9 +584,9 @@ fn dispatch_gate_on_matching_u64_triangle_returns_some() {
             .expect("must not error on U64 triangle")
             .expect("must dispatch on U64 triangle");
     // Output schema must be U64 × 3 (provider preserves it).
-    assert_eq!(dispatched.schema.column_type(0), Some(ScalarType::U64));
-    assert_eq!(dispatched.schema.column_type(1), Some(ScalarType::U64));
-    assert_eq!(dispatched.schema.column_type(2), Some(ScalarType::U64));
+    assert_eq!(dispatched.schema().column_type(0), Some(ScalarType::U64));
+    assert_eq!(dispatched.schema().column_type(1), Some(ScalarType::U64));
+    assert_eq!(dispatched.schema().column_type(2), Some(ScalarType::U64));
     assert_eq!(
         dispatched.num_rows() as usize,
         5,

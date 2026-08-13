@@ -536,11 +536,11 @@ fn output_proj_symbol_round_trip_preserves_dtype() {
     let rows: Vec<(u32, u32, u32)> = vec![(1, 2, 3)];
     let mut src = upload_3col_u32(&fix.memory, &rows);
     // Mutate schema to Symbol so the helper sees a 4-byte Symbol-typed input.
-    src.schema = Schema::new(vec![
+    src.set_schema(Schema::new(vec![
         ("a".to_string(), ScalarType::Symbol),
         ("b".to_string(), ScalarType::Symbol),
         ("c".to_string(), ScalarType::Symbol),
-    ]);
+    ]));
     let head_schema = Schema::new(vec![
         ("c".to_string(), ScalarType::Symbol),
         ("a".to_string(), ScalarType::Symbol),

@@ -255,8 +255,8 @@ fn fast_path_u32_sorted_unique_increments_counter() {
         "sorted+unique u32 input must hit fast-path exactly once"
     );
     assert_eq!(download_pairs_u32(&out), input);
-    assert_eq!(out.schema.column_type(0), Some(ScalarType::U32));
-    assert_eq!(out.schema.column_type(1), Some(ScalarType::U32));
+    assert_eq!(out.schema().column_type(0), Some(ScalarType::U32));
+    assert_eq!(out.schema().column_type(1), Some(ScalarType::U32));
 }
 
 #[test]
@@ -285,8 +285,8 @@ fn fast_path_u64_sorted_unique_increments_counter() {
         .map(|(a, b)| (a as u64, b as u64))
         .collect();
     assert_eq!(download_pairs_u64(&out), expected);
-    assert_eq!(out.schema.column_type(0), Some(ScalarType::U64));
-    assert_eq!(out.schema.column_type(1), Some(ScalarType::U64));
+    assert_eq!(out.schema().column_type(0), Some(ScalarType::U64));
+    assert_eq!(out.schema().column_type(1), Some(ScalarType::U64));
     let _ = big; // silence unused
 }
 
@@ -313,8 +313,8 @@ fn fast_path_symbol_sorted_unique_increments_counter() {
         "Symbol must follow u32 fast-path"
     );
     assert_eq!(download_pairs_u32(&out), input);
-    assert_eq!(out.schema.column_type(0), Some(ScalarType::Symbol));
-    assert_eq!(out.schema.column_type(1), Some(ScalarType::Symbol));
+    assert_eq!(out.schema().column_type(0), Some(ScalarType::Symbol));
+    assert_eq!(out.schema().column_type(1), Some(ScalarType::Symbol));
 }
 
 #[test]

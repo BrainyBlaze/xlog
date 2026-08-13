@@ -83,7 +83,7 @@ pub(crate) fn import_arrow_device(
         .map_err(types::xlog_err)?;
 
     let names: Vec<String> = buffer
-        .schema
+        .schema()
         .columns
         .iter()
         .map(|(n, _)| n.clone())

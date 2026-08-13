@@ -609,8 +609,8 @@ fn classify_two_col_wcoj_width(buf: &CudaBuffer) -> Option<WcojKeyWidth> {
     if buf.arity() != 2 {
         return None;
     }
-    let c0 = buf.schema.column_type(0)?;
-    let c1 = buf.schema.column_type(1)?;
+    let c0 = buf.schema().column_type(0)?;
+    let c1 = buf.schema().column_type(1)?;
     let w0 = scalar_wcoj_width(c0)?;
     let w1 = scalar_wcoj_width(c1)?;
     if w0 != w1 {
@@ -728,13 +728,13 @@ fn perm_indices_from_kernel_output_cols(cols: &[ProjectExpr]) -> Result<Vec<usiz
 /// `head_schema` argument to
 /// `wcoj_project_output_columns_recorded` on the leader-ordered path.
 fn build_triangle_head_schema(buf_xy: &CudaBuffer, buf_yz: &CudaBuffer) -> Result<Schema> {
-    let x_type = buf_xy.schema.column_type(0).ok_or_else(|| {
+    let x_type = buf_xy.schema().column_type(0).ok_or_else(|| {
         xlog_core::XlogError::Kernel("build_triangle_head_schema: e_xy.col0 type missing".into())
     })?;
-    let y_type = buf_xy.schema.column_type(1).ok_or_else(|| {
+    let y_type = buf_xy.schema().column_type(1).ok_or_else(|| {
         xlog_core::XlogError::Kernel("build_triangle_head_schema: e_xy.col1 type missing".into())
     })?;
-    let z_type = buf_yz.schema.column_type(1).ok_or_else(|| {
+    let z_type = buf_yz.schema().column_type(1).ok_or_else(|| {
         xlog_core::XlogError::Kernel("build_triangle_head_schema: e_yz.col1 type missing".into())
     })?;
     Schema::new(vec![
@@ -744,17 +744,17 @@ fn build_triangle_head_schema(buf_xy: &CudaBuffer, buf_yz: &CudaBuffer) -> Resul
     ])
     .with_sort_labels(vec![
         buf_xy
-            .schema
+            .schema()
             .column_sort_label(0)
             .unwrap_or("col0")
             .to_string(),
         buf_xy
-            .schema
+            .schema()
             .column_sort_label(1)
             .unwrap_or("col1")
             .to_string(),
         buf_yz
-            .schema
+            .schema()
             .column_sort_label(1)
             .unwrap_or("col2")
             .to_string(),
@@ -772,16 +772,16 @@ fn build_4cycle_head_schema(
     // `[e_wx, e_xy, e_yz, e_zw]` — canonical promoter order.
     // W = e_wx.col0, X = e_wx.col1 (= e_xy.col0), Y = e_xy.col1
     // (= e_yz.col0), Z = e_yz.col1 (= e_zw.col0).
-    let w_type = buf_e1.schema.column_type(0).ok_or_else(|| {
+    let w_type = buf_e1.schema().column_type(0).ok_or_else(|| {
         xlog_core::XlogError::Kernel("build_4cycle_head_schema: e_wx.col0 type missing".into())
     })?;
-    let x_type = buf_e1.schema.column_type(1).ok_or_else(|| {
+    let x_type = buf_e1.schema().column_type(1).ok_or_else(|| {
         xlog_core::XlogError::Kernel("build_4cycle_head_schema: e_wx.col1 type missing".into())
     })?;
-    let y_type = buf_e2.schema.column_type(1).ok_or_else(|| {
+    let y_type = buf_e2.schema().column_type(1).ok_or_else(|| {
         xlog_core::XlogError::Kernel("build_4cycle_head_schema: e_xy.col1 type missing".into())
     })?;
-    let z_type = buf_e3.schema.column_type(1).ok_or_else(|| {
+    let z_type = buf_e3.schema().column_type(1).ok_or_else(|| {
         xlog_core::XlogError::Kernel("build_4cycle_head_schema: e_yz.col1 type missing".into())
     })?;
     // Suppress the unused-import warning when ScalarType isn't
@@ -796,22 +796,22 @@ fn build_4cycle_head_schema(
     ])
     .with_sort_labels(vec![
         buf_e1
-            .schema
+            .schema()
             .column_sort_label(0)
             .unwrap_or("col0")
             .to_string(),
         buf_e1
-            .schema
+            .schema()
             .column_sort_label(1)
             .unwrap_or("col1")
             .to_string(),
         buf_e2
-            .schema
+            .schema()
             .column_sort_label(1)
             .unwrap_or("col2")
             .to_string(),
         buf_e3
-            .schema
+            .schema()
             .column_sort_label(1)
             .unwrap_or("col3")
             .to_string(),
@@ -3454,7 +3454,7 @@ impl Executor {
         // 5. Determine width-class from the first edge's column 0.
         // All edges must share the width-class; provider entries
         // re-validate.
-        let first_ty = match raw_bufs[0].schema.column_type(0) {
+        let first_ty = match raw_bufs[0].schema().column_type(0) {
             Some(t) => t,
             None => return Ok(None),
         };
@@ -3961,7 +3961,7 @@ fn build_kclique_head_schema(raw_bufs: &[&CudaBuffer], k: usize) -> Option<Schem
         } else {
             (clique_edge_idx_runtime(0, variable, k)?, 1)
         };
-        let ty = raw_bufs.get(edge_idx)?.schema.column_type(col_idx)?;
+        let ty = raw_bufs.get(edge_idx)?.schema().column_type(col_idx)?;
         columns.push((format!("col{}", variable), ty));
     }
     Some(Schema::new(columns))

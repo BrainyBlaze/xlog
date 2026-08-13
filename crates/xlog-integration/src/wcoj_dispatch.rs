@@ -334,8 +334,8 @@ fn classify_two_col_wcoj_width(buf: &CudaBuffer) -> Option<WcojKeyWidth> {
     if buf.arity() != 2 {
         return None;
     }
-    let c0 = buf.schema.column_type(0)?;
-    let c1 = buf.schema.column_type(1)?;
+    let c0 = buf.schema().column_type(0)?;
+    let c1 = buf.schema().column_type(1)?;
     let width0 = scalar_wcoj_width(c0)?;
     let width1 = scalar_wcoj_width(c1)?;
     if width0 != width1 {
@@ -360,7 +360,7 @@ fn scalar_wcoj_width(ty: ScalarType) -> Option<WcojKeyWidth> {
 fn schema_only_relation(buf: &CudaBuffer) -> RefRelation {
     let arity = buf.arity();
     let schema: Vec<ScalarType> = (0..arity)
-        .map(|i| buf.schema.column_type(i).unwrap_or(ScalarType::U32))
+        .map(|i| buf.schema().column_type(i).unwrap_or(ScalarType::U32))
         .collect();
     RefRelation {
         schema,

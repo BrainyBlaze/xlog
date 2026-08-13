@@ -364,10 +364,10 @@ fn wiring_gate_on_symbol_4cycle_dispatches_and_preserves_schema() {
     // Schema preservation: the kernel built its output schema from
     // the inputs' per-column types, so Symbol-input → Symbol-output.
     let buf = executor.store().get("cycle4").expect("cycle4 present");
-    assert_eq!(buf.schema.column_type(0), Some(ScalarType::Symbol));
-    assert_eq!(buf.schema.column_type(1), Some(ScalarType::Symbol));
-    assert_eq!(buf.schema.column_type(2), Some(ScalarType::Symbol));
-    assert_eq!(buf.schema.column_type(3), Some(ScalarType::Symbol));
+    assert_eq!(buf.schema().column_type(0), Some(ScalarType::Symbol));
+    assert_eq!(buf.schema().column_type(1), Some(ScalarType::Symbol));
+    assert_eq!(buf.schema().column_type(2), Some(ScalarType::Symbol));
+    assert_eq!(buf.schema().column_type(3), Some(ScalarType::Symbol));
 
     // Row set: the kernel's bit-equality joins produce the same
     // quads as the U32 path on the same bit-pattern fixture.

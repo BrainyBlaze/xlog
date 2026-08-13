@@ -409,7 +409,7 @@ fn run_roundtrip_4byte(arity: usize, wc: WidthClass, shape: Shape) {
     assert_eq!(out.arity(), arity);
     for col_idx in 0..arity {
         assert_eq!(
-            out.schema.column_type(col_idx),
+            out.schema().column_type(col_idx),
             Some(wc.col_type(col_idx)),
             "schema preservation: arity={} wc={:?} col={}",
             arity,
@@ -442,7 +442,7 @@ fn run_roundtrip_u64(arity: usize, shape: Shape) {
     assert_eq!(out.arity(), arity);
     for col_idx in 0..arity {
         assert_eq!(
-            out.schema.column_type(col_idx),
+            out.schema().column_type(col_idx),
             Some(ScalarType::U64),
             "schema preservation: arity={} U64 col={}",
             arity,

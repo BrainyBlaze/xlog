@@ -168,7 +168,7 @@ fn arity_4_accepts_uniform_u64() {
         .expect("uniform U64 at arity 4 must be accepted");
     assert_eq!(out.arity(), 4);
     for col_idx in 0..4 {
-        assert_eq!(out.schema.column_type(col_idx), Some(ScalarType::U64));
+        assert_eq!(out.schema().column_type(col_idx), Some(ScalarType::U64));
     }
 }
 

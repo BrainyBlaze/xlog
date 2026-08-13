@@ -636,6 +636,134 @@ fn test_union_many_gpu_single_input_dedups() {
 }
 
 #[test]
+fn test_union_many_gpu_single_certified_set_avoids_metadata_read_and_rededup() {
+    let Some(provider) = setup_provider() else {
+        eprintln!("Skipping: no CUDA device");
+        return;
+    };
+
+    let schema = Schema::new(vec![("val".to_string(), ScalarType::U32)]);
+    let bag = provider
+        .create_buffer_from_slice::<u32>(&[3, 1, 3, 2, 1], schema)
+        .unwrap();
+    provider.reset_host_transfer_stats();
+    let set = provider.union_many_gpu(&[&bag]).unwrap();
+    assert_eq!(
+        provider.host_transfer_stats().dtoh_calls,
+        0,
+        "a cached exact input count must not require a metadata D2H"
+    );
+    assert!(set.canonical_full_row_set_certified());
+    let empty = provider.create_empty_buffer(set.schema().clone()).unwrap();
+
+    provider.reset_host_transfer_stats();
+    provider.reset_untracked_metadata_dtoh_count();
+    provider.memory().reset_alloc_count();
+    let result = provider.union_many_gpu(&[&empty, &set, &empty]).unwrap();
+
+    let transfers = provider.host_transfer_stats();
+    assert_eq!(
+        transfers.dtoh_calls, 0,
+        "cached set reuse must stay on device"
+    );
+    assert_eq!(provider.untracked_metadata_dtoh_count(), 0);
+    assert_eq!(
+        provider.memory().alloc_count(),
+        (set.arity() + 1) as u64,
+        "the fast path should only clone columns and the device row count"
+    );
+    assert!(result.canonical_full_row_set_certified());
+    assert_eq!(
+        provider.download_column::<u32>(&result, 0).unwrap(),
+        vec![1, 2, 3]
+    );
+}
+
+#[test]
+fn test_union_many_gpu_partial_key_dedup_is_not_a_canonical_set_certificate() {
+    let Some(provider) = setup_provider() else {
+        eprintln!("Skipping: no CUDA device");
+        return;
+    };
+
+    let schema = Schema::new(vec![
+        ("left".to_string(), ScalarType::U32),
+        ("right".to_string(), ScalarType::U32),
+    ]);
+    let input = provider
+        .create_buffer_from_u32_columns(&[&[2, 1], &[1, 2]], schema)
+        .unwrap();
+    let by_second_column = provider.dedup(&input, &[1]).unwrap();
+    assert!(!by_second_column.canonical_full_row_set_certified());
+
+    let result = provider.union_many_gpu(&[&by_second_column]).unwrap();
+    assert_eq!(
+        provider.download_column::<u32>(&result, 0).unwrap(),
+        vec![1, 2]
+    );
+    assert_eq!(
+        provider.download_column::<u32>(&result, 1).unwrap(),
+        vec![2, 1]
+    );
+    assert!(result.canonical_full_row_set_certified());
+}
+
+#[test]
+fn test_union_many_gpu_public_mutation_invalidates_count_and_set_metadata() {
+    let Some(provider) = setup_provider() else {
+        eprintln!("Skipping: no CUDA device");
+        return;
+    };
+
+    let schema = Schema::new(vec![("val".to_string(), ScalarType::U32)]);
+    let mut empty = provider.create_empty_buffer(schema.clone()).unwrap();
+    assert_eq!(empty.cached_row_count(), Some(0));
+    let mut singleton_column = provider.memory().alloc::<u8>(4).unwrap();
+    provider
+        .device()
+        .inner()
+        .htod_sync_copy_into(&7u32.to_le_bytes(), &mut singleton_column)
+        .unwrap();
+    empty.columns_mut()[0] = singleton_column.into();
+    empty.set_row_capacity(1);
+    provider
+        .device()
+        .inner()
+        .htod_sync_copy_into(&[1], empty.num_rows_device_mut())
+        .unwrap();
+    assert_eq!(empty.cached_row_count(), None);
+    assert!(!empty.canonical_full_row_set_certified());
+    let singleton = provider.union_many_gpu(&[&empty]).unwrap();
+    assert_eq!(
+        provider.download_column::<u32>(&singleton, 0).unwrap(),
+        vec![7]
+    );
+
+    let bag = provider
+        .create_buffer_from_slice::<u32>(&[1, 2, 3], schema)
+        .unwrap();
+    let mut canonical = provider.union_many_gpu(&[&bag]).unwrap();
+    assert!(canonical.canonical_full_row_set_certified());
+    let mut duplicate_column = provider.memory().alloc::<u8>(12).unwrap();
+    let duplicate_bytes: Vec<u8> = [1u32, 1, 2]
+        .into_iter()
+        .flat_map(u32::to_le_bytes)
+        .collect();
+    provider
+        .device()
+        .inner()
+        .htod_sync_copy_into(&duplicate_bytes, &mut duplicate_column)
+        .unwrap();
+    canonical.columns_mut()[0] = duplicate_column.into();
+    assert!(!canonical.canonical_full_row_set_certified());
+    let deduped = provider.union_many_gpu(&[&canonical]).unwrap();
+    assert_eq!(
+        provider.download_column::<u32>(&deduped, 0).unwrap(),
+        vec![1, 2]
+    );
+}
+
+#[test]
 fn test_union_many_gpu_skips_empty_inputs() {
     let Some(provider) = setup_provider() else {
         eprintln!("Skipping: no CUDA device");

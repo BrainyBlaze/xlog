@@ -2670,11 +2670,7 @@ impl CudaKernelProvider {
         if let Some(n) = buffer.cached_row_count() {
             return Ok(n as usize);
         }
-        let mut host_rows = [0u32];
-        self.device
-            .inner()
-            .dtoh_sync_copy_into(buffer.num_rows_device(), &mut host_rows)
-            .map_err(|e| XlogError::Kernel(format!("Failed to read row count: {}", e)))?;
+        let host_rows = self.dtoh_small_metadata_untracked(buffer.num_rows_device(), 1)?;
         buffer.set_cached_row_count_if_unset(host_rows[0]);
         Ok(host_rows[0] as usize)
     }
@@ -3480,6 +3476,104 @@ mod tests {
             Some(4),
             "clone_buffer must propagate cached_row_count from source to clone",
         );
+    }
+
+    #[test]
+    fn certified_singleton_union_avoids_cold_row_count_read() {
+        let provider = match create_test_provider() {
+            Some(p) => p,
+            None => {
+                eprintln!("Skipping test: no CUDA device available");
+                return;
+            }
+        };
+
+        let source = create_test_buffer(&provider, &[1, 2, 3], "id");
+        let CudaBuffer {
+            columns,
+            row_cap,
+            d_num_rows,
+            schema,
+            ..
+        } = source;
+        let mut cold_set = CudaBuffer::from_columns(columns, row_cap, d_num_rows, schema);
+        cold_set.certify_canonical_full_row_set();
+        assert_eq!(cold_set.cached_row_count(), None);
+        let empty = provider
+            .create_empty_buffer(cold_set.schema().clone())
+            .unwrap();
+
+        provider.reset_host_transfer_stats();
+        provider.reset_untracked_metadata_dtoh_count();
+        provider.memory().reset_alloc_count();
+        let result = provider
+            .union_many_gpu(&[&empty, &cold_set, &empty])
+            .unwrap();
+
+        assert_eq!(
+            cold_set.cached_row_count(),
+            None,
+            "the certified fast path must not populate the cold count via D2H"
+        );
+        assert_eq!(provider.host_transfer_stats().dtoh_calls, 0);
+        assert_eq!(provider.untracked_metadata_dtoh_count(), 0);
+        assert_eq!(provider.memory().alloc_count(), 2);
+        assert!(result.canonical_full_row_set_certified());
+        assert_eq!(read_buffer_u32(&provider, &result, 0), vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn cold_row_count_read_uses_audited_metadata_counter_once() {
+        let provider = match create_test_provider() {
+            Some(p) => p,
+            None => {
+                eprintln!("Skipping test: no CUDA device available");
+                return;
+            }
+        };
+
+        let source = create_test_buffer(&provider, &[1, 2, 3], "id");
+        let CudaBuffer {
+            columns,
+            row_cap,
+            d_num_rows,
+            schema,
+            ..
+        } = source;
+        let cold_bag = CudaBuffer::from_columns(columns, row_cap, d_num_rows, schema);
+
+        provider.reset_untracked_metadata_dtoh_count();
+        assert_eq!(provider.device_row_count(&cold_bag).unwrap(), 3);
+
+        assert_eq!(provider.untracked_metadata_dtoh_count(), 1);
+        assert_eq!(cold_bag.cached_row_count(), Some(3));
+        provider.reset_untracked_metadata_dtoh_count();
+        let result = provider.union_many_gpu(&[&cold_bag]).unwrap();
+        assert_eq!(provider.untracked_metadata_dtoh_count(), 1);
+        assert_eq!(read_buffer_u32(&provider, &result, 0), vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn zero_arity_certificate_does_not_bypass_unit_set_semantics() {
+        let provider = match create_test_provider() {
+            Some(p) => p,
+            None => {
+                eprintln!("Skipping test: no CUDA device available");
+                return;
+            }
+        };
+
+        let d_num_rows = provider.upload_device_row_count(3).unwrap();
+        let mut multiplicity = CudaBuffer::from_columns(
+            Vec::new(),
+            3,
+            d_num_rows,
+            xlog_core::Schema::new(Vec::new()),
+        );
+        multiplicity.certify_canonical_full_row_set();
+
+        let unit = provider.union_many_gpu(&[&multiplicity]).unwrap();
+        assert_eq!(provider.device_row_count(&unit).unwrap(), 1);
     }
 
     // ============== Hash Join Tests ==============

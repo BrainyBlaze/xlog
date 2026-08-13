@@ -552,12 +552,12 @@ fn wcoj_layout_symbol_round_trips_with_correct_schema() {
     sync_stream(&fix, launch_stream);
     // Schema preservation: output columns must remain Symbol.
     assert_eq!(
-        out.schema.column_type(0),
+        out.schema().column_type(0),
         Some(ScalarType::Symbol),
         "Symbol input must produce Symbol output column 0"
     );
     assert_eq!(
-        out.schema.column_type(1),
+        out.schema().column_type(1),
         Some(ScalarType::Symbol),
         "Symbol input must produce Symbol output column 1"
     );
@@ -598,9 +598,9 @@ fn wcoj_triangle_symbol_matches_cpu_reference() {
     sync_stream(&fix, stream);
     // Output schema: each column must carry its input scalar
     // type (Symbol here, since all inputs are Symbol).
-    assert_eq!(result.schema.column_type(0), Some(ScalarType::Symbol));
-    assert_eq!(result.schema.column_type(1), Some(ScalarType::Symbol));
-    assert_eq!(result.schema.column_type(2), Some(ScalarType::Symbol));
+    assert_eq!(result.schema().column_type(0), Some(ScalarType::Symbol));
+    assert_eq!(result.schema().column_type(1), Some(ScalarType::Symbol));
+    assert_eq!(result.schema().column_type(2), Some(ScalarType::Symbol));
     let host = download_triples(&result);
     let expected = cpu_triangle_reference(&e_xy, &e_yz, &e_xz);
     assert_eq!(host, expected);
