@@ -8,7 +8,7 @@ pre-registered runs complete; any deviation from the protocol below must
 be recorded as a deviation, not silently amended.
 
 The baseline this document extends is the hard-search column of
-[`README.md`](README.md) (micro pointwise F1 0.6746, shipped artifact
+`README.md` (micro pointwise F1 0.6746, shipped artifact
 `results/baseline_cv5/MARITIME_CV_BASELINE.json`).
 
 ### (a) Three pre-registered columns
@@ -78,15 +78,19 @@ README.
 
 Per section (d), the canonical Arm-B ceiling is the committed output of
 `ceiling_probe.py --vocab duration` on the pinned archives:
-[`results/ceiling_probe_duration/CEILING_PROBE_DURATION.json`](results/ceiling_probe_duration/CEILING_PROBE_DURATION.json).
+`results/ceiling_probe_duration/CEILING_PROBE_DURATION.json`.
 
 **Canon: TP 3,579 / FP 22 / FN 0 -> P 0.9939 / R 1.0 / F1 0.9969.**
 
 This deviates (upward) from the pre-declared EXPECTATION of ~0.830/0.907:
 the expectation assumed `sustained_240` removes only the 2,956 short-run
 false positives and leaves the 733 negative-pair ones intact. Measured:
-the duration discriminator also eliminates 711 of the 733 negative-pair
-false positives — the excluded pairs' body-condition episodes are
+the duration discriminator also eliminates at least 711 of the 733
+negative-pair
+false positives ("at least": the artifact decomposes the BASE body's
+false positives; the duration body's residual 22 are not themselves
+decomposed, and a positive-pair FP with a short grid run can still sit
+inside a >=240 s continuous component) — the excluded pairs' body-condition episodes are
 themselves almost always shorter than 240 s on the continuous streams —
 leaving 22. Two consequences, recorded before the CV runs:
 
@@ -102,11 +106,21 @@ leaving 22. Two consequences, recorded before the CV runs:
 ## Results (pre-registered runs of 2026-08-12, zero protocol deviations)
 
 Shipped artifacts (byte-exact runner outputs, `-text` attribute):
-[`results/asoft_cv5/MARITIME_CV_ASOFT.json`](results/asoft_cv5/MARITIME_CV_ASOFT.json),
-[`results/bhard_cv5/MARITIME_CV_BHARD.json`](results/bhard_cv5/MARITIME_CV_BHARD.json),
-[`results/bsoft_cv5/MARITIME_CV_BSOFT.json`](results/bsoft_cv5/MARITIME_CV_BSOFT.json).
+`results/asoft_cv5/MARITIME_CV_ASOFT.json`,
+`results/bhard_cv5/MARITIME_CV_BHARD.json`,
+`results/bsoft_cv5/MARITIME_CV_BSOFT.json`.
 All three ran with the pre-registered parameters (recorded in each
 artifact's `params` block); verify_smoke gated each run.
+
+Committed-bytes md5 pins (all four stored verbatim under the
+`docs/experiments/maritime/results/** -text` attribute):
+
+| artifact | md5 |
+|---|---|
+| `results/asoft_cv5/MARITIME_CV_ASOFT.json` | `6712569558ebf81a203708f1415407a3` |
+| `results/bhard_cv5/MARITIME_CV_BHARD.json` | `bed0fc9588d7c2fc20ebd9bc83526152` |
+| `results/bsoft_cv5/MARITIME_CV_BSOFT.json` | `3160c5567e3758cc41ef3d6c237af600` |
+| `results/ceiling_probe_duration/CEILING_PROBE_DURATION.json` | `0ca0666a64bb1cac346d71ff7211798e` |
 
 | column (5-fold CV, pair-atom) | micro point F1 | P / R | interval F1 | per-fold median |
 |---|---|---|---|---|
@@ -114,6 +128,10 @@ artifact's `params` block); verify_smoke gated each run.
 | **A-soft** (base vocab, weighted clauses) | **0.7398** | 0.8715 / 0.6426 | 0.7435 | 0.6928 |
 | **B-hard** (duration vocab, crisp) | **0.9968** | 0.9936 / 1.0 | 0.9970 | 0.9942 |
 | **B-soft** (duration vocab, weighted) | **0.9968** | 0.9936 / 1.0 | 0.9970 | 0.9942 |
+
+Section (f) also requires an append to `README.md`; that append was
+initially omitted and is added with this fix — recorded here per this
+document's own no-silent-amendment rule, not slipped in.
 
 ### Hypothesis verdicts
 
