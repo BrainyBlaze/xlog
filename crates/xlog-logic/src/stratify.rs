@@ -176,7 +176,12 @@ fn find_sccs(graph: &DependencyGraph) -> Vec<Vec<String>> {
         }
     }
 
-    for pred in &graph.predicates {
+    // Deterministic visit order: `predicates` is a HashSet, whose iteration
+    // order varies per process and used to make SCC ids (and every downstream
+    // RelId assignment) process-nondeterministic.
+    let mut preds_sorted: Vec<&String> = graph.predicates.iter().collect();
+    preds_sorted.sort();
+    for pred in preds_sorted {
         if !indices.contains_key(pred) {
             strongconnect(
                 pred,

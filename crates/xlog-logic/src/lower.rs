@@ -980,8 +980,13 @@ impl Lowerer {
                 .push(rule);
         }
 
-        // Lower proper rules
-        for (pred, rules) in &rules_by_pred {
+        // Lower proper rules in sorted head order: HashMap iteration order
+        // varies per process, which used to make rule order (and RelId
+        // assignment for head-first predicates) process-nondeterministic.
+        let mut preds_sorted: Vec<&String> = rules_by_pred.keys().collect();
+        preds_sorted.sort();
+        for pred in preds_sorted {
+            let rules = &rules_by_pred[pred];
             let scc_id = self.find_scc_for_predicate(pred);
 
             for rule in rules {
