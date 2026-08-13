@@ -3,6 +3,7 @@ import gc
 import hashlib
 import math
 import os
+import re
 import struct
 
 import pytest
@@ -1611,11 +1612,34 @@ def test_late_full_recompute_budget_failure_rolls_back_all_session_state():
     before_stats = session.delta_stats()
     before_memory = session.memory_stats()["allocated_bytes"]
 
-    with pytest.raises(
-        RuntimeError,
-        match=r"Resource exhausted: GPU memory allocation, estimated 212000 bytes",
-    ):
+    with pytest.raises(RuntimeError) as pressure_error:
         session.apply_relation_delta_debug(update(), check_equivalence=True)
+
+    pressure = re.fullmatch(
+        r"Resource exhausted: GPU memory pressure: layer=manager_alloc "
+        r"current_bytes=(?P<current>\d+) requested_bytes=(?P<requested>\d+) "
+        r"required_bytes=(?P<required>\d+) "
+        r"required_u64_overflow=(?P<overflow>true|false) "
+        r"budget_bytes=(?P<budget>\d+) prior_peak_bytes=(?P<prior_peak>\d+), "
+        r"estimated (?P<estimated>\d+) bytes, budget (?P<display_budget>\d+) bytes",
+        str(pressure_error.value),
+    )
+    assert pressure is not None
+    fields = {
+        name: int(value)
+        for name, value in pressure.groupdict().items()
+        if name != "overflow"
+    }
+    assert fields["current"] >= before_memory
+    assert fields["requested"] == 212_000
+    assert fields["required"] == fields["current"] + fields["requested"]
+    assert pressure.group("overflow") == "false"
+    assert fields["budget"] == 1_048_576
+    assert fields["current"] <= fields["budget"] < fields["required"]
+    assert fields["estimated"] == fields["required"]
+    assert fields["display_budget"] == fields["budget"]
+    assert fields["prior_peak"] == session.memory_stats()["peak_memory_bytes"]
+    assert fields["current"] <= fields["prior_peak"] < fields["required"]
 
     assert session.evidence() == before_evidence
     assert session.delta_stats() == before_stats
