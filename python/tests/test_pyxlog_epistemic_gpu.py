@@ -68,8 +68,8 @@ def test_know_evidence_conditions_the_exact_query() -> None:
     assert trace["accepted_faeel_world_view_evidence_consumed"] == 1
     assert trace["gpu_knowledge_compilation_end_to_end_runs"] == 1
     assert trace["gpu_exact_query_evaluations"] == 1
-    assert trace["cpu_only_probability_recomputations"] == 0
-    assert trace["fixture_circuit_evaluations"] == 0
+    assert "cpu_only_probability_recomputations" not in trace
+    assert "fixture_circuit_evaluations" not in trace
 
 
 TUPLE_KEY = """
@@ -138,7 +138,8 @@ def test_only_known_atoms_are_conditioned() -> None:
     assert abs(result.log_z_e - math.log(0.25)) < 1e-9
     assert result.trace["gpu_conditioned_know_evidence_facts"] == 2
     assert result.trace["gpu_conditioned_evidence_facts"] == 2
-    assert result.trace["cpu_only_probability_recomputations"] == 0
+    assert "cpu_only_probability_recomputations" not in result.trace
+    assert "fixture_circuit_evaluations" not in result.trace
 
 
 def test_unconditioned_baseline_differs() -> None:
@@ -224,7 +225,8 @@ def test_non_recursive_g91_program_conditions_and_names_its_mode() -> None:
     assert trace["accepted_g91_world_view_evidence_consumed"] == 1
     assert trace["accepted_faeel_world_view_evidence_consumed"] == 0
     assert trace["gpu_conditioned_evidence_facts"] == 1
-    assert trace["cpu_only_probability_recomputations"] == 0
+    assert "cpu_only_probability_recomputations" not in trace
+    assert "fixture_circuit_evaluations" not in trace
 
 
 MISSING_CALLER_RELATION = """

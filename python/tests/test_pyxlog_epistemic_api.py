@@ -32,7 +32,6 @@ def test_xlog_pyxlog_004_epistemic_conditioned_api() -> None:
         "epistemic_evidence",
         "log_z_e",
         "gpu_conditioned_know_evidence_facts",
-        "cpu_only_probability_recomputations",
     ]:
         assert needle in native_stub, f"{needle} missing from _native.pyi"
         assert needle in docs, f"{needle} missing from {DOCS_PATH}"

@@ -323,8 +323,8 @@ impl EpistemicWorldView {
 ///
 /// This does not launch kernels. It proves that the semantic boundary can be
 /// represented as a GPU-native execution plan with explicit hot-path phases,
-/// required device buffers, WCOJ planning obligations, and zero CPU fallback
-/// counters.
+/// required device buffers, WCOJ planning obligations, and a typed policy that
+/// rejects unsupported execution shapes instead of falling back.
 pub fn plan_epistemic_gpu_execution(program: &Program) -> Result<EpistemicGpuPlan> {
     reject_recursive_epistemic_program(program)?;
     validate_epistemic_relation_shapes(program, &BTreeSet::new())?;

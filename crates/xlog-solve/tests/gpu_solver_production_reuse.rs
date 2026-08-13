@@ -288,45 +288,6 @@ fn production_solver_metric_gate_rejects_cpu_oracle_only_traces() {
     assert!(batch_eligible
         .require_production_metric_eligibility()
         .is_ok());
-
-    let cpu_fallback = GpuSolverProductionTrace {
-        accepted_gpu_candidate_evidence_consumed: 1,
-        accepted_gpu_candidate_state_transitions: 1,
-        accepted_gpu_world_view_state_transitions: 1,
-        accepted_gpu_candidate_final_output_rows_consumed: 1,
-        accepted_g91_gpu_candidate_evidence_consumed: 1,
-        accepted_solver_assumption_bindings_consumed: 1,
-        accepted_solver_required_capabilities_consumed: 5,
-        accepted_solver_required_statuses_consumed: 4,
-        accepted_gpu_solver_production_path_events: 1,
-        gpu_cdcl_sat_solves: 1,
-        cpu_assignment_enumerations: 1,
-        ..GpuSolverProductionTrace::default()
-    };
-    let err = cpu_fallback
-        .require_production_metric_eligibility()
-        .expect_err("CPU search trace must not satisfy production metrics");
-    assert!(format!("{err}").contains("CPU solver search counters must be zero"));
-
-    let cpu_maxsat_fallback = GpuSolverProductionTrace {
-        cpu_assignment_enumerations: 0,
-        cpu_maxsat_enumerations: 1,
-        ..cpu_fallback
-    };
-    let err = cpu_maxsat_fallback
-        .require_production_metric_eligibility()
-        .expect_err("CPU MaxSAT search trace must not satisfy production metrics");
-    assert!(format!("{err}").contains("CPU solver search counters must be zero"));
-
-    let cpu_learned_clause_transfer = GpuSolverProductionTrace {
-        cpu_assignment_enumerations: 0,
-        cpu_learned_clause_transfers: 1,
-        ..cpu_fallback
-    };
-    let err = cpu_learned_clause_transfer
-        .require_production_metric_eligibility()
-        .expect_err("CPU learned-clause transfer trace must not satisfy production metrics");
-    assert!(format!("{err}").contains("CPU learned-clause transfers must be zero"));
 }
 
 #[test]

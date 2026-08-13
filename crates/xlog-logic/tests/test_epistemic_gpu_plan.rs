@@ -1,12 +1,12 @@
 use xlog_ir::{
-    EirEpistemicMode, EirEpistemicOp, EirTerm, EpistemicGpuBufferKind, EpistemicGpuHotPathPhase,
-    EpistemicWcojReductionStatus,
+    EirEpistemicMode, EirEpistemicOp, EirTerm, EpistemicExecutionBackend, EpistemicFallbackPolicy,
+    EpistemicGpuBufferKind, EpistemicGpuHotPathPhase, EpistemicWcojReductionStatus,
 };
 use xlog_logic::epistemic::plan_epistemic_gpu_execution;
 use xlog_logic::parse_program;
 
 #[test]
-fn epistemic_gpu_plan_requires_buffers_phases_and_zero_cpu_fallbacks() {
+fn epistemic_gpu_plan_requires_buffers_phases_and_rejects_unsupported_fallbacks() {
     let program = parse_program(
         r#"
         accepted(X) :- node(X), know edge(X).
@@ -35,7 +35,11 @@ fn epistemic_gpu_plan_requires_buffers_phases_and_zero_cpu_fallbacks() {
             EpistemicGpuBufferKind::RejectionReasons,
         ]
     );
-    assert!(plan.cpu_fallbacks.is_zero());
+    assert_eq!(plan.execution_backend, EpistemicExecutionBackend::Gpu);
+    assert_eq!(
+        plan.fallback_policy,
+        EpistemicFallbackPolicy::RejectUnsupported
+    );
     assert_eq!(plan.epistemic_literals.len(), 1);
     assert_eq!(plan.epistemic_literals[0].op, EirEpistemicOp::Know);
     assert_eq!(plan.reductions[0].rule_index, 0);

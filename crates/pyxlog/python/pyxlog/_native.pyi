@@ -238,10 +238,10 @@ class CompiledLogicProgram:
         ``gpu_conditioned_not_known_evidence_facts``,
         ``gpu_conditioned_not_possible_evidence_facts``),
         ``accepted_faeel_world_view_evidence_consumed`` /
-        ``accepted_g91_world_view_evidence_consumed``, and
-        ``cpu_only_probability_recomputations``. Conditioning reached the GPU
-        exact path when the *total* is non-zero and
-        ``cpu_only_probability_recomputations == 0``; a ``possible``-only or
+        ``accepted_g91_world_view_evidence_consumed``, and positive GPU exact,
+        PIR/CNF, and knowledge-compilation event counters. Conditioning reached
+        the GPU exact path when the validated total and required GPU events are
+        non-zero; a ``possible``-only or
         negated-evidence program conditions correctly with the ``know`` class at
         ``0``.
 
@@ -523,8 +523,8 @@ class EpistemicEvalResult:
     ``gpu_conditioned_not_known_evidence_facts``,
     ``gpu_conditioned_not_possible_evidence_facts``),
     ``accepted_faeel_world_view_evidence_consumed`` /
-    ``accepted_g91_world_view_evidence_consumed``, and
-    ``cpu_only_probability_recomputations``."""
+    ``accepted_g91_world_view_evidence_consumed``, and positive GPU exact,
+    PIR/CNF, and knowledge-compilation event counters."""
 
 class EpistemicEvidence:
     """Counters of one accepted epistemic GPU execution.

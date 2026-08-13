@@ -45,6 +45,45 @@ fn read_unary(provider: &CudaKernelProvider, buffer: &CudaBuffer) -> Vec<u32> {
     v
 }
 
+fn assert_gpu_reject_unsupported_policy(plan_json: &str) {
+    assert!(
+        plan_json.contains("\"execution_backend\":\"gpu\""),
+        "epistemic plan must declare the GPU execution backend: {plan_json}"
+    );
+    assert!(
+        plan_json.contains("\"fallback_policy\":\"reject_unsupported\""),
+        "epistemic plan must reject unsupported execution shapes: {plan_json}"
+    );
+    for removed_key in [
+        "cpu_fallbacks",
+        "cpu_fallback_is_zero",
+        "cpu_fallback_total_zero",
+    ] {
+        assert!(
+            !plan_json.contains(&format!("\"{removed_key}\"")),
+            "epistemic plan must not present `{removed_key}` as measured evidence: {plan_json}"
+        );
+    }
+}
+
+#[test]
+fn test_single_pass_plan_summary_declares_gpu_reject_unsupported_policy() -> Result<()> {
+    let program = xlog_gpu::logic::LogicProgram::compile(
+        r#"
+            pred seed(u32). pred gate(u32). pred out(u32).
+            seed(7). gate(7).
+            out(X) :- seed(X), know gate(X).
+            ?- out(X).
+        "#,
+    )?;
+    let plan_json = program
+        .epistemic_plan_json()
+        .expect("single-pass epistemic plan summary");
+
+    assert_gpu_reject_unsupported_policy(&plan_json);
+    Ok(())
+}
+
 /// Evaluate an all-EDB program and return the first query's unary column, sorted.
 fn run_unary_query(provider: &Arc<CudaKernelProvider>, source: &str) -> Result<Vec<u32>> {
     let program = xlog_gpu::logic::LogicProgram::compile(source)?;
@@ -173,27 +212,23 @@ fn test_coevolving_recursive_epistemic_fixpoint_founded_tuples() -> Result<()> {
     // NON-VACUOUS dispatch proof: the co-evolving recursive program must compile to
     // the ORDINARY recursive plan (modal resolved into the SCC), NOT the single-pass
     // epistemic plan.
-    // This matters because the epistemic CPU-fallback counters (cpu_candidate_enumerations,
-    // cpu_world_view_validations, cpu_fallbacks) exist ONLY on the single-pass epistemic
-    // execution path; the ordinary semi-naive engine has no epistemic CPU code to count,
-    // so it is CPU-fallback-free BY CONSTRUCTION. The reduction tag is the
-    // discriminating, non-vacuous proof of WHICH path ran: a regression that rerouted
-    // the co-evolving program through the single-pass planner (and could then incur
-    // epistemic CPU fallbacks) would change this tag and FAIL here.
+    // The structural policy is explicit even though this family has no single-pass
+    // candidate units. The reduction tag remains the non-vacuous proof of which path ran.
     let plan_json = program
         .epistemic_plan_json()
         .expect("co-evolving recursive epistemic program must carry a provenance summary");
+    assert_gpu_reject_unsupported_policy(&plan_json);
     assert!(
         plan_json.contains("\"reduction\":\"ordinary_recursive_modal_reduction\""),
-        "co-evolving recursive fixpoint must route through the ORDINARY recursive reduction (no single-pass \
-         epistemic CPU-fallback surface), got: {plan_json}"
+        "co-evolving recursive fixpoint must route through the ORDINARY recursive reduction under the typed \
+         GPU/reject-unsupported policy, got: {plan_json}"
     );
     assert!(
         plan_json.contains("\"plan_kind\":\"epistemic_reduced_ordinary\""),
         "co-evolving recursive fixpoint plan kind must be the reduced-ordinary engine, got: {plan_json}"
     );
     // The reduced-ordinary plan carries NO epistemic GPU candidate-enumeration units
-    // (those would be the CPU-fallback-bearing surface); the units list is empty.
+    // because this family executes the founded ordinary reduction; the units list is empty.
     assert!(
         plan_json.contains("\"units\":[]"),
         "reduced-ordinary recursive modal plan carries no epistemic candidate-enumeration units: \
@@ -277,7 +312,7 @@ fn test_coevolving_recursive_ungated_mutation_flips_founded_result() -> Result<(
 
 /// Stratified negated modal over a recursive relation: `not know reach` sits above
 /// the recursive `reach` stratum and executes on the GPU production path as ordinary
-/// stratified negation, with exact tuples and zero CPU fallback.
+/// stratified negation, with exact tuples under the typed GPU/reject-unsupported policy.
 ///
 /// This is the canonical "negated modal literal in a recursive epistemic program"
 /// this fixture covers. It is admissible because the negation is STRATIFIED: `reach`
@@ -286,14 +321,9 @@ fn test_coevolving_recursive_ungated_mutation_flips_founded_result() -> Result<(
 /// `know link` -> `link`) has NO cycle through negation. The semi-naive engine
 /// completes the recursive `reach` fixpoint, THEN anti-joins it.
 ///
-/// NON-VACUOUS dispatch + zero-CPU-fallback proof (same convention as the co-evolving
-/// recursive test above): the program routes through the ORDINARY recursive reduction
-/// (`epistemic_reduced_ordinary`), which has NO epistemic CPU code surface at all
-/// -- the epistemic CPU-fallback counters
-/// (cpu_candidate_enumerations, cpu_world_view_validations, cpu_fallbacks) exist
-/// ONLY on the single-pass epistemic path, so the ordinary engine is
-/// CPU-fallback-free BY CONSTRUCTION. The "units":[] assertion proves no epistemic
-/// GPU candidate-enumeration units (the CPU-fallback-bearing surface) were emitted.
+/// NON-VACUOUS dispatch proof: the program routes through the ORDINARY recursive reduction
+/// (`epistemic_reduced_ordinary`) under the same explicit GPU/reject-unsupported policy.
+/// The "units":[] assertion proves no single-pass epistemic candidate units were emitted.
 /// A regression that rerouted this through the single-pass planner OR misclassified
 /// the cycle case as stratified would change the tag and FAIL here.
 ///
@@ -329,10 +359,11 @@ fn test_stratified_negated_modal_over_recursive_relation_executes_exact() -> Res
     let plan_json = program
         .epistemic_plan_json()
         .expect("stratified negated-modal recursion must carry a provenance summary");
+    assert_gpu_reject_unsupported_policy(&plan_json);
     assert!(
         plan_json.contains("\"reduction\":\"ordinary_recursive_modal_reduction\""),
         "stratified negated-modal recursion must route through the ORDINARY recursive \
-         reduction (no single-pass epistemic CPU-fallback surface), got: {plan_json}"
+         reduction under the typed GPU/reject-unsupported policy, got: {plan_json}"
     );
     assert!(
         plan_json.contains("\"plan_kind\":\"epistemic_reduced_ordinary\""),
@@ -340,8 +371,8 @@ fn test_stratified_negated_modal_over_recursive_relation_executes_exact() -> Res
     );
     assert!(
         plan_json.contains("\"units\":[]"),
-        "reduced-ordinary plan carries NO epistemic candidate-enumeration units (the \
-         CPU-fallback-bearing surface): {plan_json}"
+        "reduced-ordinary plan carries no single-pass epistemic candidate-enumeration units: \
+         {plan_json}"
     );
 
     let result = program.evaluate(provider.clone(), std::collections::HashMap::new())?;
@@ -444,6 +475,7 @@ fn test_cyclic_negated_modal_wfs_plan_kind_matrix_compiles_without_cuda() -> Res
         let plan_json = program
             .epistemic_plan_json()
             .expect("cyclic negated-modal recursion must carry a WFS provenance summary");
+        assert_gpu_reject_unsupported_policy(&plan_json);
         assert!(
             plan_json.contains("\"reduction\":\"wfs_gpu_recursive\""),
             "{mode}/{modal}: cyclic negated-modal recursion must use GPU WFS reduction, got: {plan_json}"
@@ -477,8 +509,8 @@ fn test_cyclic_negated_modal_wfs_plan_kind_matrix_compiles_without_cuda() -> Res
             "{mode}/{modal}: WFS plan JSON must expose the alternating GPU pass structure, got: {plan_json}"
         );
         assert!(
-            plan_json.contains("\"host_wfs_fallback_allowed\":false"),
-            "{mode}/{modal}: WFS plan JSON must explicitly forbid host WFS fallback, got: {plan_json}"
+            !plan_json.contains("host_wfs_fallback_allowed"),
+            "{mode}/{modal}: WFS plan JSON must omit synthetic host-fallback claims, got: {plan_json}"
         );
     }
 
@@ -702,8 +734,8 @@ fn test_cyclic_negated_modal_wfs_plan_clamps_zero_iteration_bound_without_cuda()
         "zero-depth WFS fixture must expose the alternating GPU pass structure, got: {plan_json}"
     );
     assert!(
-        plan_json.contains("\"host_wfs_fallback_allowed\":false"),
-        "zero-depth WFS fixture must explicitly forbid host WFS fallback, got: {plan_json}"
+        !plan_json.contains("host_wfs_fallback_allowed"),
+        "zero-depth WFS fixture must omit synthetic host-fallback claims, got: {plan_json}"
     );
 
     Ok(())
@@ -766,8 +798,8 @@ fn test_cyclic_negated_modal_wfs_plan_exposes_multiple_fixed_relation_maps_witho
         "multi-negated WFS fixture must expose the alternating GPU pass structure, got: {plan_json}"
     );
     assert!(
-        plan_json.contains("\"host_wfs_fallback_allowed\":false"),
-        "multi-negated WFS fixture must explicitly forbid host WFS fallback, got: {plan_json}"
+        !plan_json.contains("host_wfs_fallback_allowed"),
+        "multi-negated WFS fixture must omit synthetic host-fallback claims, got: {plan_json}"
     );
 
     Ok(())
@@ -821,8 +853,8 @@ fn test_cyclic_negated_modal_wfs_plan_exposes_fixed_relation_for_ordinary_edb_ne
         "mixed modal/ordinary-negation WFS fixture must expose the alternating GPU pass structure, got: {plan_json}"
     );
     assert!(
-        plan_json.contains("\"host_wfs_fallback_allowed\":false"),
-        "mixed modal/ordinary-negation WFS fixture must explicitly forbid host WFS fallback, got: {plan_json}"
+        !plan_json.contains("host_wfs_fallback_allowed"),
+        "mixed modal/ordinary-negation WFS fixture must omit synthetic host-fallback claims, got: {plan_json}"
     );
 
     Ok(())
@@ -892,8 +924,8 @@ fn test_cyclic_negated_modal_cycle_routes_to_gpu_wfs_matrix() -> Result<()> {
             "{mode}/{modal}: runtime WFS plan JSON must expose the alternating GPU pass structure, got: {plan_json}"
         );
         assert!(
-            plan_json.contains("\"host_wfs_fallback_allowed\":false"),
-            "{mode}/{modal}: runtime WFS plan JSON must explicitly forbid host WFS fallback, got: {plan_json}"
+            !plan_json.contains("host_wfs_fallback_allowed"),
+            "{mode}/{modal}: runtime WFS plan JSON must omit synthetic host-fallback claims, got: {plan_json}"
         );
 
         let result = program.evaluate(provider.clone(), std::collections::HashMap::new())?;
@@ -977,8 +1009,8 @@ fn test_cyclic_negated_modal_wfs_fixed_relation_names_avoid_user_collisions() ->
         "collision fixture must expose private internal WFS fixed names: {plan_json}"
     );
     assert!(
-        plan_json.contains("\"host_wfs_fallback_allowed\":false"),
-        "collision fixture must explicitly forbid host WFS fallback, got: {plan_json}"
+        !plan_json.contains("host_wfs_fallback_allowed"),
+        "collision fixture must omit synthetic host-fallback claims, got: {plan_json}"
     );
 
     let result = program.evaluate(provider.clone(), std::collections::HashMap::new())?;
@@ -1100,22 +1132,7 @@ fn test_derived_head_coupling_stratified_equals_per_stratum_reference() -> Resul
         plan_json.contains("\"plan_kind\":\"epistemic_stratified\""),
         "determined-derived-head coupling must route through the stratified plan, got: {plan_json}"
     );
-    assert!(
-        plan_json.contains("\"cpu_fallback_total_zero\":true"),
-        "full stratified epistemic plan must report aggregate zero CPU fallback: {plan_json}"
-    );
-    assert!(
-        plan_json.contains("\"cpu_fallback_is_zero\":true")
-            && !plan_json.contains("\"cpu_fallback_is_zero\":false"),
-        "every stratified epistemic GPU unit must report zero CPU fallback: {plan_json}"
-    );
-    assert!(
-        plan_json.contains("\"candidate_enumeration\":0")
-            && plan_json.contains("\"world_view_validation\":0")
-            && plan_json.contains("\"solver_search\":0")
-            && plan_json.contains("\"probabilistic_recompute\":0"),
-        "stratified epistemic plan must expose all forbidden CPU-fallback counters at zero: {plan_json}"
-    );
+    assert_gpu_reject_unsupported_policy(&plan_json);
     let joint_result =
         joint_program.evaluate(provider.clone(), std::collections::HashMap::new())?;
     let joint_b = read_unary(&provider, &joint_result.queries[0].buffer);

@@ -851,18 +851,17 @@ impl LogicProgram {
     /// programs this dumps the EIR-derived GPU plan(s): selected mode, the
     /// epistemic `know`/`possible` literals (with negation), required GPU hot-path
     /// phases/kernels, world-view integrity constraints, reduced-program head
-    /// summaries, the forbidden CPU-fallback counters (which must all be zero on
-    /// the accepted GPU hot path), and a deterministic plan id (a stable hash of
-    /// the canonical summary). This is the epistemic-plan/EIR dump surface:
-    /// it lets an external caller (pyxlog or CLI consumer) read the accepted
-    /// world-view structure and assert `cpu_fallback == 0` off a real run.
+    /// summaries, the fail-closed GPU execution policy, and a deterministic plan
+    /// id (a stable hash of the canonical summary). Runtime evidence separately
+    /// records observed dispatch, kernel, device-buffer, candidate-accounting,
+    /// solver/probability event, and scoped-transfer behavior.
     pub fn epistemic_plan_json(&self) -> Option<String> {
         let gpu_plans: Vec<(String, &xlog_ir::EpistemicGpuPlan)> = match &self.plan {
             // A program whose source was epistemic but whose executable plan is
             // ordinary either resolved admissible recursive modal literals into joins
             // or removed every unfounded FAEEL modal rule. It carries no epistemic GPU
-            // plan and executes through the ordinary GPU engine with no epistemic CPU
-            // fallback. Emit a provenance summary with a stable id so the reduction is
+            // plan and executes through the ordinary GPU engine under the same
+            // reject-unsupported policy. Emit a provenance summary with a stable id so the reduction is
             // auditable.
             LogicExecutionPlan::Ordinary(_) => {
                 let prov = self.epistemic_provenance.as_ref()?;
@@ -916,7 +915,8 @@ impl LogicProgram {
                         }
                         // Recursive/ordinary higher strata carry no epistemic GPU
                         // plan (the modal already resolved to an ordinary join over
-                        // a materialized base); they contribute no fallback counters.
+                        // a materialized base); the enclosing summary carries the
+                        // same fail-closed GPU execution policy.
                         StratumPlanKind::Ordinary { .. } => {}
                     }
                 }
@@ -3740,7 +3740,7 @@ fn collect_eir_epistemic_literals(program: &Program) -> Vec<xlog_ir::EirEpistemi
 /// execution plan without single-pass epistemic GPU candidate units. Case-A/B
 /// stratified reductions use the ordinary semi-naive engine; cyclic negated-modal
 /// reductions use the GPU-backed WFS alternating-fixpoint plan. In both cases the
-/// modal literals are recorded and CPU fallback is zero by construction.
+/// modal literals and the fail-closed GPU execution policy are recorded.
 fn epistemic_provenance_summary_json(
     plan_kind: &str,
     prov: &EpistemicProvenance,
@@ -3764,14 +3764,12 @@ fn epistemic_provenance_summary_json(
     } else {
         "null"
     };
-    let host_wfs_fallback_allowed = if wfs.is_some() { "false" } else { "null" };
     let body = format!(
         "{{\"plan_kind\":\"{}\",\"reduction\":\"{}\",\
 \"epistemic_literals\":[{}],\"units\":[],\"max_iterations\":{},\
 \"wfs_fixed_relations\":{},\"wfs_convergence_predicates\":{},\
-\"wfs_gpu_passes\":{},\
-\"host_wfs_fallback_allowed\":{},\
-\"cpu_fallback_total_zero\":true}}",
+\"wfs_gpu_passes\":{},\"execution_backend\":\"{}\",\
+\"fallback_policy\":\"{}\"}}",
         json_escape(plan_kind),
         json_escape(prov.reduction),
         literals,
@@ -3781,16 +3779,16 @@ fn epistemic_provenance_summary_json(
         wfs_fixed_relations,
         wfs_convergence_predicates,
         wfs_gpu_passes,
-        host_wfs_fallback_allowed
+        epistemic_execution_backend_json(xlog_ir::EpistemicExecutionBackend::Gpu),
+        epistemic_fallback_policy_json(xlog_ir::EpistemicFallbackPolicy::RejectUnsupported)
     );
     let plan_id = fnv1a_64(&body);
     format!(
         "{{\"plan_id\":\"epi-{:016x}\",\"plan_kind\":\"{}\",\
 \"reduction\":\"{}\",\"epistemic_literals\":[{}],\"units\":[],\
 \"max_iterations\":{},\"wfs_fixed_relations\":{},\
-\"wfs_convergence_predicates\":{},\"wfs_gpu_passes\":{},\
-\"host_wfs_fallback_allowed\":{},\
-\"cpu_fallback_total_zero\":true}}",
+\"wfs_convergence_predicates\":{},\"wfs_gpu_passes\":{},\"execution_backend\":\"{}\",\
+\"fallback_policy\":\"{}\"}}",
         plan_id,
         json_escape(plan_kind),
         json_escape(prov.reduction),
@@ -3801,7 +3799,8 @@ fn epistemic_provenance_summary_json(
         wfs_fixed_relations,
         wfs_convergence_predicates,
         wfs_gpu_passes,
-        host_wfs_fallback_allowed
+        epistemic_execution_backend_json(xlog_ir::EpistemicExecutionBackend::Gpu),
+        epistemic_fallback_policy_json(xlog_ir::EpistemicFallbackPolicy::RejectUnsupported)
     )
 }
 
@@ -3835,13 +3834,15 @@ fn g91_compatibility_summary_json(
 \"epistemic_literals\":[{}],\"units\":[],\"max_iterations\":{},\
 \"snapshot_relations\":{{{}}},\"convergence_predicates\":[{}],\
 \"gpu_passes\":[\"upper_bound\",\"refinement\"],\
-\"cpu_fallback_total_zero\":true}}",
+\"execution_backend\":\"{}\",\"fallback_policy\":\"{}\"}}",
         json_escape(plan_kind),
         json_escape(provenance.reduction),
         literals,
         plan.max_iterations,
         snapshots,
-        convergence
+        convergence,
+        epistemic_execution_backend_json(xlog_ir::EpistemicExecutionBackend::Gpu),
+        epistemic_fallback_policy_json(xlog_ir::EpistemicFallbackPolicy::RejectUnsupported)
     );
     let plan_id = fnv1a_64(&body);
     format!(
@@ -3850,13 +3851,15 @@ fn g91_compatibility_summary_json(
 \"max_iterations\":{},\"snapshot_relations\":{{{}}},\
 \"convergence_predicates\":[{}],\
 \"gpu_passes\":[\"upper_bound\",\"refinement\"],\
-\"cpu_fallback_total_zero\":true}}",
+\"execution_backend\":\"{}\",\"fallback_policy\":\"{}\"}}",
         json_escape(plan_kind),
         json_escape(provenance.reduction),
         literals,
         plan.max_iterations,
         snapshots,
-        convergence
+        convergence,
+        epistemic_execution_backend_json(xlog_ir::EpistemicExecutionBackend::Gpu),
+        epistemic_fallback_policy_json(xlog_ir::EpistemicFallbackPolicy::RejectUnsupported)
     )
 }
 
@@ -3917,6 +3920,18 @@ fn epistemic_literal_json(lit: &xlog_ir::EirEpistemicLiteral) -> String {
     )
 }
 
+fn epistemic_execution_backend_json(backend: xlog_ir::EpistemicExecutionBackend) -> &'static str {
+    match backend {
+        xlog_ir::EpistemicExecutionBackend::Gpu => "gpu",
+    }
+}
+
+fn epistemic_fallback_policy_json(policy: xlog_ir::EpistemicFallbackPolicy) -> &'static str {
+    match policy {
+        xlog_ir::EpistemicFallbackPolicy::RejectUnsupported => "reject_unsupported",
+    }
+}
+
 fn epistemic_gpu_plan_json(plan: &xlog_ir::EpistemicGpuPlan) -> String {
     let mode = match plan.mode {
         xlog_ir::EirEpistemicMode::G91 => "g91",
@@ -3971,23 +3986,18 @@ fn epistemic_gpu_plan_json(plan: &xlog_ir::EpistemicGpuPlan) -> String {
         })
         .collect::<Vec<_>>()
         .join(",");
-    let f = &plan.cpu_fallbacks;
     format!(
         "{{\"mode\":\"{}\",\"epistemic_literals\":[{}],\"required_phases\":[{}],\
 \"required_kernel_phases\":[{}],\"constraints\":[{}],\"reductions\":[{}],\
-\"cpu_fallbacks\":{{\"candidate_enumeration\":{},\"world_view_validation\":{},\
-\"solver_search\":{},\"probabilistic_recompute\":{}}},\"cpu_fallback_is_zero\":{}}}",
+\"execution_backend\":\"{}\",\"fallback_policy\":\"{}\"}}",
         mode,
         literals,
         phases,
         kernels,
         constraints,
         reductions,
-        f.candidate_enumeration,
-        f.world_view_validation,
-        f.solver_search,
-        f.probabilistic_recompute,
-        f.is_zero()
+        epistemic_execution_backend_json(plan.execution_backend),
+        epistemic_fallback_policy_json(plan.fallback_policy)
     )
 }
 
@@ -4006,23 +4016,22 @@ fn epistemic_plan_summary_json(
         })
         .collect::<Vec<_>>()
         .join(",");
-    let all_zero = gpu_plans
-        .iter()
-        .all(|(_, plan)| plan.cpu_fallbacks.is_zero());
     // Canonical body (without the id) hashed for the stable plan id.
     let body = format!(
-        "{{\"plan_kind\":\"{}\",\"units\":[{}],\"cpu_fallback_total_zero\":{}}}",
+        "{{\"plan_kind\":\"{}\",\"units\":[{}],\"execution_backend\":\"{}\",\"fallback_policy\":\"{}\"}}",
         json_escape(plan_kind),
         units,
-        all_zero
+        epistemic_execution_backend_json(xlog_ir::EpistemicExecutionBackend::Gpu),
+        epistemic_fallback_policy_json(xlog_ir::EpistemicFallbackPolicy::RejectUnsupported)
     );
     let plan_id = fnv1a_64(&body);
     format!(
-        "{{\"plan_id\":\"epi-{:016x}\",\"plan_kind\":\"{}\",\"units\":[{}],\"cpu_fallback_total_zero\":{}}}",
+        "{{\"plan_id\":\"epi-{:016x}\",\"plan_kind\":\"{}\",\"units\":[{}],\"execution_backend\":\"{}\",\"fallback_policy\":\"{}\"}}",
         plan_id,
         json_escape(plan_kind),
         units,
-        all_zero
+        epistemic_execution_backend_json(xlog_ir::EpistemicExecutionBackend::Gpu),
+        epistemic_fallback_policy_json(xlog_ir::EpistemicFallbackPolicy::RejectUnsupported)
     )
 }
 
@@ -4143,7 +4152,10 @@ mod tests {
             .expect("epistemic compatibility summary");
         assert!(summary.contains("epistemic_g91_compatibility_gpu"));
         assert!(summary.contains("\"gpu_passes\":[\"upper_bound\",\"refinement\"]"));
-        assert!(summary.contains("\"cpu_fallback_total_zero\":true"));
+        assert!(summary.contains("\"execution_backend\":\"gpu\""));
+        assert!(summary.contains("\"fallback_policy\":\"reject_unsupported\""));
+        assert!(!summary.contains("\"cpu_fallback_total_zero\""));
+        assert!(!summary.contains("\"cpu_fallback_is_zero\""));
         Ok(())
     }
 

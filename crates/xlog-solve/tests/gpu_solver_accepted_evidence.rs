@@ -5,8 +5,9 @@ use xlog_core::{symbol, MemoryBudget, RelId, ScalarType, Schema};
 use xlog_cuda::{CudaBuffer, CudaDevice, CudaKernelProvider, GpuMemoryManager};
 use xlog_ir::{
     CompiledRule, EirAtom, EirEpistemicLiteral, EirEpistemicMode, EirEpistemicOp, EirTerm,
-    EpistemicExecutablePlan, EpistemicGpuPlan, EpistemicReductionPlan,
-    EpistemicWcojReductionStatus, ExecutionPlan, RirMeta, RirNode, Scc, Stratum,
+    EpistemicExecutablePlan, EpistemicExecutionBackend, EpistemicFallbackPolicy, EpistemicGpuPlan,
+    EpistemicReductionPlan, EpistemicWcojReductionStatus, ExecutionPlan, RirMeta, RirNode, Scc,
+    Stratum,
 };
 use xlog_logic::epistemic::{
     compile_epistemic_gpu_execution, compile_epistemic_gpu_split_execution,
@@ -25,6 +26,9 @@ use xlog_solve::{
 fn try_provider() -> Option<Arc<CudaKernelProvider>> {
     let device = match CudaDevice::new(0) {
         Ok(d) => Arc::new(d),
+        Err(e) if std::env::var("XLOG_REQUIRE_CUDA").as_deref() == Ok("1") => {
+            panic!("XLOG_REQUIRE_CUDA=1 but CUDA runtime initialization failed: {e}")
+        }
         Err(e) => {
             eprintln!("Skipping test: CUDA runtime unavailable: {e}");
             return None;
@@ -34,6 +38,9 @@ fn try_provider() -> Option<Arc<CudaKernelProvider>> {
     let memory = Arc::new(GpuMemoryManager::new(device.clone(), budget));
     match CudaKernelProvider::new(device, memory) {
         Ok(p) => Some(Arc::new(p)),
+        Err(e) if std::env::var("XLOG_REQUIRE_CUDA").as_deref() == Ok("1") => {
+            panic!("XLOG_REQUIRE_CUDA=1 but CUDA kernel provider initialization failed: {e}")
+        }
         Err(e) => {
             eprintln!("Skipping test: failed to create CUDA kernel provider: {e}");
             None
@@ -48,6 +55,14 @@ fn public_adapter_consumes_real_runtime_accepted_evidence_before_gpu_sat() {
     };
 
     let result = execute_accepted_ground_literal(&provider);
+    assert_eq!(
+        result.prepared.preflight.execution_backend,
+        EpistemicExecutionBackend::Gpu
+    );
+    assert_eq!(
+        result.prepared.preflight.fallback_policy,
+        EpistemicFallbackPolicy::RejectUnsupported
+    );
 
     let sat_instance = SolveInstance::new(1, vec![Clause::new(vec![Literal::positive(0)])]);
     let sat_cnf = GpuCnf::from_host(&sat_instance, &provider).expect("SAT GpuCnf upload");
@@ -78,12 +93,6 @@ fn public_adapter_consumes_real_runtime_accepted_evidence_before_gpu_sat() {
     assert_eq!(trace.accepted_solver_required_statuses_consumed, 4);
     assert_eq!(trace.accepted_gpu_solver_production_path_events, 1);
     assert_eq!(trace.gpu_cdcl_sat_solves, 1);
-    assert_eq!(trace.cpu_assignment_enumerations, 0);
-    assert_eq!(trace.cpu_maxsat_enumerations, 0);
-    assert_eq!(trace.cpu_learned_clause_transfers, 0);
-    trace
-        .require_zero_cpu_search()
-        .expect("accepted production path must not use CPU solver search");
     trace
         .require_production_metric_eligibility()
         .expect("accepted runtime evidence plus public GPU SAT solve satisfies metric gate");
@@ -111,12 +120,6 @@ fn public_adapter_rejects_real_runtime_without_accepted_final_output_before_gpu_
     assert_eq!(trace.accepted_gpu_candidate_evidence_consumed, 0);
     assert_eq!(trace.accepted_gpu_solver_production_path_events, 0);
     assert_eq!(trace.gpu_cdcl_sat_solves, 0);
-    assert_eq!(trace.cpu_assignment_enumerations, 0);
-    assert_eq!(trace.cpu_maxsat_enumerations, 0);
-    assert_eq!(trace.cpu_learned_clause_transfers, 0);
-    trace
-        .require_zero_cpu_search()
-        .expect("rejected evidence gate must not fall back to CPU solver search");
     trace
         .require_production_metric_eligibility()
         .expect_err("rejected evidence must not satisfy solver production metrics");
@@ -152,12 +155,6 @@ fn public_adapter_rejects_provider_mismatched_runtime_evidence_before_gpu_sat() 
     assert_eq!(trace.accepted_gpu_candidate_evidence_consumed, 0);
     assert_eq!(trace.accepted_gpu_solver_production_path_events, 0);
     assert_eq!(trace.gpu_cdcl_sat_solves, 0);
-    assert_eq!(trace.cpu_assignment_enumerations, 0);
-    assert_eq!(trace.cpu_maxsat_enumerations, 0);
-    assert_eq!(trace.cpu_learned_clause_transfers, 0);
-    trace
-        .require_zero_cpu_search()
-        .expect("provider-mismatched evidence rejection must not fall back to CPU search");
     trace
         .require_production_metric_eligibility()
         .expect_err("provider-mismatched evidence must not satisfy solver production metrics");
@@ -229,12 +226,6 @@ fn public_adapter_consumes_real_runtime_accepted_evidence_before_encoded_maxsat(
     assert_eq!(trace.gpu_cdcl_sat_solves, 1);
     assert_eq!(trace.gpu_cdcl_workspace_unsat_solves, 1);
     assert_eq!(trace.gpu_maxsat_optima, 1);
-    assert_eq!(trace.cpu_assignment_enumerations, 0);
-    assert_eq!(trace.cpu_maxsat_enumerations, 0);
-    assert_eq!(trace.cpu_learned_clause_transfers, 0);
-    trace
-        .require_zero_cpu_search()
-        .expect("accepted MaxSAT path must not use CPU solver search");
     trace
         .require_production_metric_eligibility()
         .expect("accepted runtime evidence plus public GPU MaxSAT search satisfies metric gate");
@@ -279,11 +270,6 @@ fn public_adapter_rejects_mislabeled_encoded_maxsat_status_after_runtime_evidenc
     assert_eq!(trace.gpu_maxsat_unsat_candidate_prunes, 0);
     assert_eq!(trace.gpu_cdcl_sat_solves, 0);
     assert_eq!(trace.gpu_cdcl_workspace_unsat_solves, 0);
-    assert_eq!(trace.cpu_assignment_enumerations, 0);
-    assert_eq!(trace.cpu_maxsat_enumerations, 0);
-    trace
-        .require_zero_cpu_search()
-        .expect("mislabeled MaxSAT rejection must not fall back to CPU search");
     trace
         .require_production_metric_eligibility()
         .expect_err("rejected MaxSAT evidence must not satisfy production metrics");
@@ -359,11 +345,6 @@ fn public_adapter_certifies_independent_encoded_maxsat_frontiers_after_runtime_e
     assert_eq!(trace.gpu_cdcl_sat_solves, 1);
     assert_eq!(trace.gpu_cdcl_workspace_unsat_solves, 2);
     assert_eq!(trace.gpu_maxsat_optima, 1);
-    assert_eq!(trace.cpu_assignment_enumerations, 0);
-    assert_eq!(trace.cpu_maxsat_enumerations, 0);
-    trace
-        .require_zero_cpu_search()
-        .expect("independent-frontier MaxSAT path must not use CPU search");
     trace
         .require_production_metric_eligibility()
         .expect("independent-frontier GPU MaxSAT satisfies metric gate");
@@ -451,12 +432,6 @@ fn public_adapter_gates_encoded_maxsat_on_symbol_runtime_evidence() {
     assert_eq!(trace.gpu_cdcl_sat_solves, 1);
     assert_eq!(trace.gpu_cdcl_workspace_unsat_solves, 1);
     assert_eq!(trace.gpu_maxsat_optima, 1);
-    assert_eq!(trace.cpu_assignment_enumerations, 0);
-    assert_eq!(trace.cpu_maxsat_enumerations, 0);
-    assert_eq!(trace.cpu_learned_clause_transfers, 0);
-    trace
-        .require_zero_cpu_search()
-        .expect("symbol accepted MaxSAT path must not use CPU solver search");
     trace
         .require_production_metric_eligibility()
         .expect("symbol accepted evidence plus GPU MaxSAT search satisfies metric gate");
@@ -518,12 +493,6 @@ fn public_adapter_consumes_real_runtime_accepted_evidence_before_candidate_set_m
     assert_eq!(trace.gpu_cdcl_sat_solves, 2);
     assert_eq!(trace.gpu_maxsat_candidate_solves, 2);
     assert_eq!(trace.gpu_maxsat_optima, 1);
-    assert_eq!(trace.cpu_assignment_enumerations, 0);
-    assert_eq!(trace.cpu_maxsat_enumerations, 0);
-    assert_eq!(trace.cpu_learned_clause_transfers, 0);
-    trace
-        .require_zero_cpu_search()
-        .expect("accepted candidate-set MaxSAT path must not use CPU search");
     let err = trace
         .require_production_metric_eligibility()
         .expect_err("uncertified candidate-set MaxSAT must not satisfy production metrics");
@@ -615,12 +584,6 @@ fn public_adapter_gates_encoded_maxsat_on_parsed_all_operator_runtime_evidence()
     assert_eq!(trace.gpu_cdcl_sat_solves, 1);
     assert_eq!(trace.gpu_cdcl_workspace_unsat_solves, 1);
     assert_eq!(trace.gpu_maxsat_optima, 1);
-    assert_eq!(trace.cpu_assignment_enumerations, 0);
-    assert_eq!(trace.cpu_maxsat_enumerations, 0);
-    assert_eq!(trace.cpu_learned_clause_transfers, 0);
-    trace
-        .require_zero_cpu_search()
-        .expect("parsed accepted MaxSAT path must not use CPU search");
     trace.require_production_metric_eligibility().expect(
         "parsed all-operator runtime evidence plus encoded GPU MaxSAT satisfies metric gate",
     );
@@ -705,12 +668,6 @@ fn public_adapter_gates_encoded_maxsat_on_gelfond1991_runtime_evidence() {
     assert_eq!(trace.gpu_cdcl_sat_solves, 1);
     assert_eq!(trace.gpu_cdcl_workspace_unsat_solves, 1);
     assert_eq!(trace.gpu_maxsat_optima, 1);
-    assert_eq!(trace.cpu_assignment_enumerations, 0);
-    assert_eq!(trace.cpu_maxsat_enumerations, 0);
-    assert_eq!(trace.cpu_learned_clause_transfers, 0);
-    trace
-        .require_zero_cpu_search()
-        .expect("Gelfond-1991 compatibility MaxSAT path must not use CPU search");
     trace.require_production_metric_eligibility().expect(
         "Gelfond-1991 compatibility runtime evidence plus encoded GPU MaxSAT satisfies metric gate",
     );
@@ -791,12 +748,6 @@ fn public_adapter_gates_encoded_maxsat_on_quaternary_runtime_evidence() {
     assert_eq!(trace.gpu_cdcl_sat_solves, 1);
     assert_eq!(trace.gpu_cdcl_workspace_unsat_solves, 1);
     assert_eq!(trace.gpu_maxsat_optima, 1);
-    assert_eq!(trace.cpu_assignment_enumerations, 0);
-    assert_eq!(trace.cpu_maxsat_enumerations, 0);
-    assert_eq!(trace.cpu_learned_clause_transfers, 0);
-    trace
-        .require_zero_cpu_search()
-        .expect("quaternary accepted MaxSAT path must not use CPU search");
     trace.require_production_metric_eligibility().expect(
         "quaternary accepted runtime evidence plus encoded GPU MaxSAT satisfies metric gate",
     );
@@ -844,11 +795,6 @@ fn public_adapter_preserves_status_distinction_after_real_runtime_accepted_evide
     assert_eq!(trace.gpu_portfolio_sat_jobs, 1);
     assert_eq!(trace.gpu_portfolio_unknown_status_jobs, 1);
     assert_eq!(trace.gpu_portfolio_timeout_status_jobs, 1);
-    assert_eq!(trace.cpu_assignment_enumerations, 0);
-    assert_eq!(trace.cpu_maxsat_enumerations, 0);
-    trace
-        .require_zero_cpu_search()
-        .expect("status-aware portfolio path must not use CPU search");
     trace
         .require_production_metric_eligibility()
         .expect("GPU SAT plus UNKNOWN/TIMEOUT status propagation remains eligible");
@@ -949,12 +895,6 @@ fn public_adapter_dispatches_encoded_maxsat_portfolio_after_split_runtime_eviden
     assert_eq!(trace.gpu_maxsat_frontier_upper_bound_certificates, 2);
     assert_eq!(trace.gpu_maxsat_unsat_candidate_prunes, 2);
     assert_eq!(trace.gpu_maxsat_optima, 2);
-    assert_eq!(trace.cpu_assignment_enumerations, 0);
-    assert_eq!(trace.cpu_maxsat_enumerations, 0);
-    assert_eq!(trace.cpu_learned_clause_transfers, 0);
-    trace
-        .require_zero_cpu_search()
-        .expect("accepted portfolio MaxSAT path must not use CPU search");
     trace
         .require_production_metric_eligibility()
         .expect("accepted split batch plus GPU SAT/MaxSAT portfolio satisfies metric gate");
@@ -1050,12 +990,6 @@ fn public_adapter_dispatches_encoded_maxsat_scheduler_after_split_runtime_eviden
     assert_eq!(trace.gpu_maxsat_frontier_certified_candidate_solves, 4);
     assert_eq!(trace.gpu_maxsat_unsat_candidate_prunes, 2);
     assert_eq!(trace.gpu_maxsat_optima, 2);
-    assert_eq!(trace.cpu_assignment_enumerations, 0);
-    assert_eq!(trace.cpu_maxsat_enumerations, 0);
-    assert_eq!(trace.cpu_learned_clause_transfers, 0);
-    trace
-        .require_zero_cpu_search()
-        .expect("accepted MaxSAT scheduler path must not use CPU search");
     trace
         .require_production_metric_eligibility()
         .expect("accepted split batch plus encoded GPU MaxSAT scheduler satisfies metric gate");
@@ -1139,12 +1073,6 @@ fn public_adapter_runs_assumption_lifecycle_after_real_runtime_accepted_evidence
     assert_eq!(trace.gpu_lifecycle_workspace_reuses, 1);
     assert_eq!(trace.gpu_lifecycle_unknown_status_steps, 1);
     assert_eq!(trace.gpu_lifecycle_timeout_status_steps, 1);
-    assert_eq!(trace.cpu_assignment_enumerations, 0);
-    assert_eq!(trace.cpu_maxsat_enumerations, 0);
-    assert_eq!(trace.cpu_learned_clause_transfers, 0);
-    trace
-        .require_zero_cpu_search()
-        .expect("accepted lifecycle path must not use CPU search");
     trace
         .require_production_metric_eligibility()
         .expect("accepted runtime evidence plus GPU lifecycle work satisfies metric gate");
@@ -1193,11 +1121,6 @@ fn public_adapter_rejects_mislabeled_lifecycle_status_after_runtime_evidence() {
     assert_eq!(trace.gpu_cdcl_sat_solves, 0);
     assert_eq!(trace.gpu_cdcl_workspace_unsat_solves, 0);
     assert_eq!(trace.gpu_lifecycle_workspace_reuses, 0);
-    assert_eq!(trace.cpu_assignment_enumerations, 0);
-    assert_eq!(trace.cpu_maxsat_enumerations, 0);
-    trace
-        .require_zero_cpu_search()
-        .expect("mislabeled lifecycle rejection must not fall back to CPU search");
     trace
         .require_production_metric_eligibility()
         .expect_err("rejected lifecycle evidence must not satisfy production metrics");
@@ -1242,7 +1165,6 @@ fn public_adapter_reuses_learned_clause_arena_after_real_runtime_accepted_eviden
     assert_eq!(report.gpu_learned_clause_arena_publications, 1);
     assert_eq!(report.gpu_learned_clause_imports, 1);
     assert_eq!(report.gpu_learned_clause_reused_solves, 1);
-    assert_eq!(report.cpu_learned_clause_transfers, 0);
 
     let trace = adapter.trace();
     assert_eq!(trace.accepted_gpu_candidate_evidence_consumed, 1);
@@ -1253,12 +1175,6 @@ fn public_adapter_reuses_learned_clause_arena_after_real_runtime_accepted_eviden
     assert_eq!(trace.gpu_learned_count_buffer_publications, 1);
     assert_eq!(trace.gpu_learned_clause_imports, 1);
     assert_eq!(trace.gpu_learned_clause_reused_solves, 1);
-    assert_eq!(trace.cpu_assignment_enumerations, 0);
-    assert_eq!(trace.cpu_maxsat_enumerations, 0);
-    assert_eq!(trace.cpu_learned_clause_transfers, 0);
-    trace
-        .require_zero_cpu_search()
-        .expect("accepted learned-clause path must not use CPU search");
     trace
         .require_production_metric_eligibility()
         .expect("accepted runtime evidence plus learned-clause reuse satisfies metric gate");
@@ -1336,12 +1252,6 @@ fn public_adapter_runs_batch_assumption_lifecycle_after_split_runtime_evidence()
     assert_eq!(trace.gpu_cdcl_sat_solves, 2);
     assert_eq!(trace.gpu_cdcl_workspace_unsat_solves, 2);
     assert_eq!(trace.gpu_lifecycle_workspace_reuses, 2);
-    assert_eq!(trace.cpu_assignment_enumerations, 0);
-    assert_eq!(trace.cpu_maxsat_enumerations, 0);
-    assert_eq!(trace.cpu_learned_clause_transfers, 0);
-    trace
-        .require_zero_cpu_search()
-        .expect("accepted batch lifecycle path must not use CPU search");
     trace
         .require_production_metric_eligibility()
         .expect("accepted split batch plus GPU lifecycle work satisfies metric gate");
@@ -1435,12 +1345,6 @@ fn public_adapter_preserves_batch_lifecycle_statuses_after_split_runtime_evidenc
     assert_eq!(trace.gpu_lifecycle_workspace_reuses, 2);
     assert_eq!(trace.gpu_lifecycle_unknown_status_steps, 2);
     assert_eq!(trace.gpu_lifecycle_timeout_status_steps, 2);
-    assert_eq!(trace.cpu_assignment_enumerations, 0);
-    assert_eq!(trace.cpu_maxsat_enumerations, 0);
-    assert_eq!(trace.cpu_learned_clause_transfers, 0);
-    trace
-        .require_zero_cpu_search()
-        .expect("accepted batch lifecycle status path must not use CPU search");
     trace
         .require_production_metric_eligibility()
         .expect("accepted split batch plus GPU lifecycle statuses satisfies metric gate");
@@ -1514,12 +1418,6 @@ fn public_adapter_runs_batch_encoded_maxsat_after_split_runtime_evidence() {
     assert_eq!(trace.gpu_cdcl_sat_solves, 2);
     assert_eq!(trace.gpu_cdcl_workspace_unsat_solves, 2);
     assert_eq!(trace.gpu_maxsat_optima, 2);
-    assert_eq!(trace.cpu_assignment_enumerations, 0);
-    assert_eq!(trace.cpu_maxsat_enumerations, 0);
-    assert_eq!(trace.cpu_learned_clause_transfers, 0);
-    trace
-        .require_zero_cpu_search()
-        .expect("accepted batch encoded MaxSAT path must not use CPU search");
     trace
         .require_production_metric_eligibility()
         .expect("accepted split batch plus encoded GPU MaxSAT satisfies metric gate");
@@ -1611,12 +1509,6 @@ fn public_adapter_runs_batch_encoded_maxsat_after_modal_hidden_body_local_split_
     assert_eq!(trace.gpu_cdcl_sat_solves, 2);
     assert_eq!(trace.gpu_cdcl_workspace_unsat_solves, 2);
     assert_eq!(trace.gpu_maxsat_optima, 2);
-    assert_eq!(trace.cpu_assignment_enumerations, 0);
-    assert_eq!(trace.cpu_maxsat_enumerations, 0);
-    assert_eq!(trace.cpu_learned_clause_transfers, 0);
-    trace
-        .require_zero_cpu_search()
-        .expect("modal body-local batch encoded MaxSAT path must not use CPU search");
     trace
         .require_production_metric_eligibility()
         .expect("modal body-local split batch plus encoded GPU MaxSAT satisfies metric gate");
@@ -1698,8 +1590,6 @@ fn execute_runtime_without_accepted_final_output(
     );
     assert_eq!(result.semantic_trace.accepted_candidates, 0);
     assert_eq!(result.semantic_trace.rejected_candidates, 2);
-    assert_eq!(result.semantic_trace.cpu_candidate_enumerations, 0);
-    assert_eq!(result.semantic_trace.cpu_world_view_validations, 0);
     assert_eq!(result.final_result_transfer.final_output_rows, 0);
     result
         .require_runtime_dispatch_certification()
@@ -1777,8 +1667,6 @@ fn execute_parsed_all_operator_variable_bound_evidence(
     assert_eq!(result.semantic_trace.accepted_candidate_indices, vec![15]);
     assert_eq!(result.semantic_trace.accepted_candidates, 1);
     assert_eq!(result.semantic_trace.rejected_candidates, 15);
-    assert_eq!(result.semantic_trace.cpu_candidate_enumerations, 0);
-    assert_eq!(result.semantic_trace.cpu_world_view_validations, 0);
     assert_eq!(result.final_result_transfer.final_output_rows, 1);
 
     let values = provider
@@ -1855,8 +1743,6 @@ fn execute_accepted_symbol_variable_bound_literal(
     assert_eq!(result.semantic_trace.accepted_candidate_indices, vec![1]);
     assert_eq!(result.semantic_trace.accepted_candidates, 1);
     assert_eq!(result.semantic_trace.rejected_candidates, 1);
-    assert_eq!(result.semantic_trace.cpu_candidate_enumerations, 0);
-    assert_eq!(result.semantic_trace.cpu_world_view_validations, 0);
 
     let mut rows = provider
         .download_column::<u32>(&result.final_output, 0)
@@ -1872,7 +1758,7 @@ fn execute_accepted_symbol_variable_bound_literal(
 fn execute_accepted_gelfond1991_possible_literal(
     provider: &Arc<CudaKernelProvider>,
 ) -> xlog_runtime::EpistemicGpuExecutionResult {
-    let program = parse_program(
+    let compatibility_program = parse_program(
         r#"
         #pragma epistemic_mode = g91
         pred seed(u32).
@@ -1881,15 +1767,31 @@ fn execute_accepted_gelfond1991_possible_literal(
         p(X) :- seed(X), possible p(X).
         "#,
     )
-    .expect("parse Gelfond-1991 compatibility accepted solver evidence program");
-    let executable = compile_epistemic_gpu_execution(&program)
-        .expect("compile Gelfond-1991 compatibility epistemic GPU plan");
+    .expect("parse Gelfond-1991 compatibility fixture");
+    let compatibility_error = compile_epistemic_gpu_execution(&compatibility_program)
+        .expect_err("single-pass planner must reject the recursive Gelfond-1991 fixture");
+    assert!(format!("{compatibility_error}").contains("recursive epistemic program"));
+
+    let program = parse_program(
+        r#"
+        #pragma epistemic_mode = g91
+        pred seed(u32).
+        pred p(u32).
+        pred accepted(u32).
+
+        accepted(X) :- seed(X), possible p(X).
+        "#,
+    )
+    .expect("parse Gelfond-1991 accepted solver evidence program");
+    let executable =
+        compile_epistemic_gpu_execution(&program).expect("compile Gelfond-1991 epistemic GPU plan");
     let mut executor = Executor::new(provider.clone());
 
     for (name, rel) in &executable.relation_ids {
         executor.register_relation(*rel, name);
     }
     executor.put_relation("seed", upload_unary_u32(provider, &[7], "x"));
+    executor.put_relation("p", upload_unary_u32(provider, &[7], "x"));
 
     let result = executor
         .execute_epistemic_gpu_execution(
@@ -1900,7 +1802,7 @@ fn execute_accepted_gelfond1991_possible_literal(
                 max_models_per_reduction: 1,
             },
         )
-        .expect("Gelfond-1991 compatibility possible program should execute on GPU before solver handoff");
+        .expect("Gelfond-1991 possible program should execute on GPU before solver handoff");
 
     assert_eq!(
         result.prepared.preflight.epistemic_mode,
@@ -1921,12 +1823,10 @@ fn execute_accepted_gelfond1991_possible_literal(
     assert_eq!(result.semantic_trace.accepted_candidate_indices, vec![1]);
     assert_eq!(result.semantic_trace.accepted_candidates, 1);
     assert_eq!(result.semantic_trace.accepted_world_views, 1);
-    assert_eq!(result.semantic_trace.cpu_candidate_enumerations, 0);
-    assert_eq!(result.semantic_trace.cpu_world_view_validations, 0);
     assert_eq!(result.final_result_transfer.final_output_rows, 1);
-    result.require_runtime_dispatch_certification().expect(
-        "Gelfond-1991 compatibility solver evidence should retain GPU runtime certification",
-    );
+    result
+        .require_runtime_dispatch_certification()
+        .expect("Gelfond-1991 solver evidence should retain GPU runtime certification");
     result
 }
 
@@ -2004,8 +1904,6 @@ fn execute_accepted_quaternary_bound_literal(
     );
     assert_eq!(result.semantic_trace.accepted_candidates, 1);
     assert_eq!(result.semantic_trace.accepted_world_views, 1);
-    assert_eq!(result.semantic_trace.cpu_candidate_enumerations, 0);
-    assert_eq!(result.semantic_trace.cpu_world_view_validations, 0);
 
     let ws = provider
         .download_column::<u32>(&result.final_output, 0)
@@ -2063,11 +1961,6 @@ fn execute_accepted_split_batch(
         .expect("batch trace must match real component results");
     assert_eq!(batch.trace.component_count, 2);
     assert_eq!(batch.trace.gpu_runtime_component_executions, 2);
-    assert_eq!(batch.trace.cpu_recomposition_steps, 0);
-    assert_eq!(batch.trace.cpu_candidate_enumerations, 0);
-    assert_eq!(batch.trace.cpu_world_view_validations, 0);
-    assert_eq!(batch.trace.cpu_solver_search_fallbacks, 0);
-    assert_eq!(batch.trace.cpu_probability_recomputations, 0);
     assert_eq!(batch.trace.tracked_dtoh_calls, 0);
     assert_eq!(batch.trace.per_candidate_host_round_trips, 0);
     assert_eq!(batch.trace.final_output_rows, 2);
@@ -2134,11 +2027,6 @@ fn execute_modal_hidden_body_local_split_batch(
         .expect("modal hidden body-local split batch trace must match real component results");
     assert_eq!(batch.trace.component_count, 2);
     assert_eq!(batch.trace.gpu_runtime_component_executions, 2);
-    assert_eq!(batch.trace.cpu_recomposition_steps, 0);
-    assert_eq!(batch.trace.cpu_candidate_enumerations, 0);
-    assert_eq!(batch.trace.cpu_world_view_validations, 0);
-    assert_eq!(batch.trace.cpu_solver_search_fallbacks, 0);
-    assert_eq!(batch.trace.cpu_probability_recomputations, 0);
     assert_eq!(batch.trace.tracked_dtoh_calls, 0);
     assert_eq!(batch.trace.per_candidate_host_round_trips, 0);
     assert_eq!(batch.trace.final_output_rows, 4);

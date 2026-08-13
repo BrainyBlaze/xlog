@@ -25,11 +25,13 @@ use xlog_prob::exact::GpuConfig;
 use xlog_runtime::{read_device_row_count, EpistemicGpuWorkspaceCapacities, Executor};
 use xlog_solve::{
     Clause, GpuCdclConfig, GpuCnf, GpuSolverProductionAdapter, GpuSolverProductionExpectation,
-    GpuSolverProductionLifecycleStep, GpuSolverProductionMaxSatCandidate, Literal, SolveInstance,
+    GpuSolverProductionLifecycleStep, GpuSolverProductionMaxSatSearchStatus,
+    GpuSolverProductionWeightedMaxSatSelection, Literal, SolveInstance,
 };
 
 const MIB: usize = 1024 * 1024;
 const DEFAULT_EPISTEMIC_GPU_BUDGET_MIB: usize = 1024;
+type InputRelations = BTreeMap<String, (usize, Vec<Vec<u32>>)>;
 const GENERALIZATION_DECISION_DERIVED_RELATION_EXPORTS: &[&str] = &[
     "accepted_claim",
     "bfo_claim_support",
@@ -326,7 +328,7 @@ fn epistemic_runtime_config() -> RuntimeConfig {
     RuntimeConfig::default().with_wcoj_4cycle_dispatch(Some(true))
 }
 
-fn load_relations(path: &PathBuf) -> Result<BTreeMap<String, (usize, Vec<Vec<u32>>)>> {
+fn load_relations(path: &PathBuf) -> Result<InputRelations> {
     let payload: Value = serde_json::from_str(&fs::read_to_string(path).map_err(|err| {
         XlogError::Execution(format!("read relation payload {}: {err}", path.display()))
     })?)
@@ -400,7 +402,7 @@ fn execute_single(
     source_path: &Path,
     source_file_name: &str,
     source: &str,
-    relations: &BTreeMap<String, (usize, Vec<Vec<u32>>)>,
+    relations: &InputRelations,
     capacities: EpistemicGpuWorkspaceCapacities,
     solver_prob: bool,
 ) -> Result<Value> {
@@ -558,7 +560,7 @@ fn download_exported_relation_rows(
 ) -> Result<Value> {
     let mut rows_by_relation = serde_json::Map::new();
     for relation_name in relation_names {
-        let Some(buffer) = executor.store().get(*relation_name) else {
+        let Some(buffer) = executor.store().get(relation_name) else {
             continue;
         };
         let arity = buffer.arity();
@@ -578,7 +580,7 @@ fn execute_split(
     source_path: &Path,
     source_file_name: &str,
     source: &str,
-    relations: &BTreeMap<String, (usize, Vec<Vec<u32>>)>,
+    relations: &InputRelations,
     capacities: EpistemicGpuWorkspaceCapacities,
 ) -> Result<Value> {
     let program = parse_program_with_modules(source_path, source)?;
@@ -636,11 +638,6 @@ fn execute_split(
         "batch_trace": {
             "component_count": batch.trace.component_count,
             "gpu_runtime_component_executions": batch.trace.gpu_runtime_component_executions,
-            "cpu_recomposition_steps": batch.trace.cpu_recomposition_steps,
-            "cpu_candidate_enumerations": batch.trace.cpu_candidate_enumerations,
-            "cpu_world_view_validations": batch.trace.cpu_world_view_validations,
-            "cpu_solver_search_fallbacks": batch.trace.cpu_solver_search_fallbacks,
-            "cpu_probability_recomputations": batch.trace.cpu_probability_recomputations,
             "tracked_dtoh_calls": batch.trace.tracked_dtoh_calls,
             "tracked_data_plane_htod_calls": batch.trace.tracked_data_plane_htod_calls,
             "per_candidate_host_round_trips": batch.trace.per_candidate_host_round_trips,
@@ -660,7 +657,7 @@ fn execute_split(
 fn put_relations(
     executor: &mut Executor,
     fixture: &RuntimeFixture,
-    relations: &BTreeMap<String, (usize, Vec<Vec<u32>>)>,
+    relations: &InputRelations,
 ) -> Result<()> {
     for (name, (arity, rows)) in relations {
         executor.put_relation(name, upload_relation(&fixture.memory, *arity, rows)?);
@@ -781,14 +778,9 @@ fn download_rows(
                 .collect::<Vec<_>>(),
         );
     }
-    let mut out = Vec::with_capacity(rows);
-    for row_index in 0..rows {
-        out.push(
-            (0..arity)
-                .map(|column_index| columns[column_index][row_index])
-                .collect(),
-        );
-    }
+    let out = (0..rows)
+        .map(|row_index| columns.iter().map(|column| column[row_index]).collect())
+        .collect();
     Ok(out)
 }
 
@@ -869,24 +861,29 @@ fn run_solver_probability_evidence(
             },
         ],
     )?;
-    let maxsat = solver.solve_weighted_maxsat_candidates_with_gpu_execution_result(
+    let weighted = SolveInstance::with_weights(
+        1,
+        vec![
+            Clause::new(vec![Literal::positive(0)]),
+            Clause::new(vec![Literal::negative(0)]),
+        ],
+        vec![3.0, 7.0],
+    );
+    let contradictory_selection = [0usize, 1usize];
+    let selections = [GpuSolverProductionWeightedMaxSatSelection {
+        soft_clause_indices: &contradictory_selection,
+        status: GpuSolverProductionMaxSatSearchStatus::Unsatisfiable,
+    }];
+    let maxsat = solver.solve_weighted_maxsat_encoded_search_with_gpu_execution_result(
         &fixture.provider,
         result,
-        &[
-            GpuSolverProductionMaxSatCandidate {
-                score: 3,
-                cnf: &sat_cnf,
-                branch_var_limit: &branch_limit,
-            },
-            GpuSolverProductionMaxSatCandidate {
-                score: 7,
-                cnf: &sat_cnf,
-                branch_var_limit: &branch_limit,
-            },
-        ],
+        &mut workspace,
+        &weighted,
+        &branch_limit,
+        &selections,
     )?;
     let solver_trace = solver.trace();
-    solver_trace.require_zero_cpu_search()?;
+    solver_trace.require_production_metric_eligibility()?;
 
     let mut config = GpuConfig::default();
     config.device_ordinal = fixture.provider.device().ordinal();
@@ -941,7 +938,6 @@ fn run_solver_probability_evidence(
         ],
     )?;
     let prob_trace = probability.trace();
-    prob_trace.require_zero_cpu_recompute()?;
     prob_trace.require_production_metric_eligibility()?;
 
     Ok(json!({
@@ -958,46 +954,163 @@ fn run_solver_probability_evidence(
                 "candidates_checked": maxsat.candidates_checked,
                 "satisfiable_candidates": maxsat.satisfiable_candidates,
             },
-            "trace": {
-                "accepted_gpu_candidate_evidence_consumed": solver_trace.accepted_gpu_candidate_evidence_consumed,
-                "accepted_solver_assumption_bindings_consumed": solver_trace.accepted_solver_assumption_bindings_consumed,
-                "accepted_solver_required_capabilities_consumed": solver_trace.accepted_solver_required_capabilities_consumed,
-                "gpu_cdcl_sat_solves": solver_trace.gpu_cdcl_sat_solves,
-                "gpu_cdcl_unsat_solves": solver_trace.gpu_cdcl_unsat_solves,
-                "gpu_maxsat_candidate_solves": solver_trace.gpu_maxsat_candidate_solves,
-                "gpu_maxsat_optima": solver_trace.gpu_maxsat_optima,
-                "cpu_assignment_enumerations": solver_trace.cpu_assignment_enumerations,
-                "cpu_maxsat_enumerations": solver_trace.cpu_maxsat_enumerations,
-                "cpu_portfolio_fallbacks": 0,
-                "host_materialized_maxsat_fallback": false,
-            },
+            "trace": solver_production_trace_json(&solver_trace)?,
         },
         "probabilistic": {
             "pir_nodes": pir_cnf.pir_nodes,
             "root_count": pir_cnf.root_count,
             "cnf_var_cap": pir_cnf.cnf_var_cap,
             "cnf_clause_cap": pir_cnf.cnf_clause_cap,
-            "trace": {
-                "accepted_world_view_evidence_consumed": prob_trace.accepted_world_view_evidence_consumed,
-                "accepted_faeel_world_view_evidence_consumed": prob_trace.accepted_faeel_world_view_evidence_consumed,
-                "accepted_g91_world_view_evidence_consumed": prob_trace.accepted_g91_world_view_evidence_consumed,
-                "accepted_evidence_assumptions_consumed": prob_trace.accepted_evidence_assumptions_consumed,
-                "gpu_pir_graph_uploads": prob_trace.gpu_pir_graph_uploads,
-                "gpu_cnf_encodes": prob_trace.gpu_cnf_encodes,
-                "accepted_gpu_production_path_events": prob_trace.accepted_gpu_production_path_events,
-                "cpu_probability_recomputations": 0,
-                "cpu_only_probability_recomputations": prob_trace.cpu_only_probability_recomputations,
-                "host_probability_materialization_fallback": false,
-                "fixture_circuit_evaluations": prob_trace.fixture_circuit_evaluations,
-            },
+            "trace": probability_production_trace_json(&prob_trace),
         },
     }))
+}
+
+fn solver_production_trace_json(trace: &xlog_solve::GpuSolverProductionTrace) -> Result<Value> {
+    trace.require_production_metric_eligibility()?;
+    Ok(json!({
+        "accepted_gpu_candidate_evidence_consumed": trace.accepted_gpu_candidate_evidence_consumed,
+        "accepted_solver_assumption_bindings_consumed": trace.accepted_solver_assumption_bindings_consumed,
+        "accepted_solver_required_capabilities_consumed": trace.accepted_solver_required_capabilities_consumed,
+        "gpu_cdcl_sat_solves": trace.gpu_cdcl_sat_solves,
+        "gpu_cdcl_unsat_solves": trace.gpu_cdcl_unsat_solves,
+        "gpu_maxsat_candidate_solves": trace.gpu_maxsat_candidate_solves,
+        "gpu_maxsat_optima": trace.gpu_maxsat_optima,
+    }))
+}
+
+fn probability_production_trace_json(
+    trace: &xlog_prob::epistemic_production::EpistemicProbProductionTrace,
+) -> Value {
+    json!({
+        "accepted_world_view_evidence_consumed": trace.accepted_world_view_evidence_consumed,
+        "accepted_faeel_world_view_evidence_consumed": trace.accepted_faeel_world_view_evidence_consumed,
+        "accepted_g91_world_view_evidence_consumed": trace.accepted_g91_world_view_evidence_consumed,
+        "accepted_evidence_assumptions_consumed": trace.accepted_evidence_assumptions_consumed,
+        "gpu_pir_graph_uploads": trace.gpu_pir_graph_uploads,
+        "gpu_cnf_encodes": trace.gpu_cnf_encodes,
+        "accepted_gpu_production_path_events": trace.accepted_gpu_production_path_events,
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use xlog_logic::BodyLiteral;
+
+    #[test]
+    fn production_trace_json_excludes_default_only_cpu_claims() {
+        let err = solver_production_trace_json(&Default::default())
+            .expect_err("uncertified solver trace must not be serialized as production evidence");
+        assert!(format!("{err}").contains("accepted GPU candidate evidence"));
+        let solver = solver_production_trace_json(&xlog_solve::GpuSolverProductionTrace {
+            accepted_gpu_candidate_evidence_consumed: 1,
+            accepted_gpu_candidate_state_transitions: 1,
+            accepted_gpu_world_view_state_transitions: 1,
+            accepted_gpu_candidate_final_output_rows_consumed: 1,
+            accepted_g91_gpu_candidate_evidence_consumed: 1,
+            accepted_solver_assumption_bindings_consumed: 1,
+            accepted_solver_required_capabilities_consumed: 5,
+            accepted_solver_required_statuses_consumed: 4,
+            accepted_gpu_solver_production_path_events: 1,
+            gpu_cdcl_sat_solves: 1,
+            ..Default::default()
+        })
+        .expect("certified production solver trace must serialize");
+        let probability = probability_production_trace_json(&Default::default());
+        assert!(solver.get("gpu_cdcl_sat_solves").is_some());
+        assert!(probability.get("gpu_cnf_encodes").is_some());
+        for removed_key in [
+            "cpu_assignment_enumerations",
+            "cpu_maxsat_enumerations",
+            "cpu_learned_clause_transfers",
+        ] {
+            assert!(solver.get(removed_key).is_none());
+        }
+        for removed_key in [
+            "cpu_only_probability_recomputations",
+            "fixture_circuit_evaluations",
+        ] {
+            assert!(probability.get(removed_key).is_none());
+        }
+    }
+
+    #[test]
+    fn specialized_diagnostics_omit_unobserved_cpu_and_host_claims() -> Result<()> {
+        let fixture = match make_fixture(0, gpu_budget_bytes(DEFAULT_EPISTEMIC_GPU_BUDGET_MIB)?) {
+            Ok(fixture) => fixture,
+            Err(err) if std::env::var("XLOG_REQUIRE_CUDA").as_deref() == Ok("1") => {
+                panic!("CUDA fixture required by XLOG_REQUIRE_CUDA=1: {err}")
+            }
+            Err(_) => return Ok(()),
+        };
+        for (source_file, section, removed_keys) in [
+            (
+                "epistemic_dilp_proof_schema_selection.xlog",
+                "gpu_proof_schema_selection_diagnostics",
+                &["cpu_threshold_only_promotions", "threshold_only_promotion"][..],
+            ),
+            (
+                "epistemic_dilp_candidate_scoring.xlog",
+                "gpu_candidate_scoring_diagnostics",
+                &[
+                    "python_rank_score_materialization",
+                    "python_feature_weighted_ranking",
+                    "python_score_weight_constants_used",
+                    "host_materialized_score_fallback",
+                    "threshold_only_promotion",
+                ][..],
+            ),
+            (
+                "epistemic_generalization_candidate_scoring.xlog",
+                "gpu_candidate_scoring_diagnostics",
+                &[
+                    "python_rank_score_materialization",
+                    "python_feature_weighted_ranking",
+                    "python_score_weight_constants_used",
+                    "host_materialized_score_fallback",
+                    "threshold_only_promotion",
+                ][..],
+            ),
+            (
+                "epistemic_showcase_transfer_candidate_scoring.xlog",
+                "gpu_candidate_scoring_diagnostics",
+                &[
+                    "python_rank_score_materialization",
+                    "python_feature_weighted_ranking",
+                    "python_score_weight_constants_used",
+                    "host_materialized_score_fallback",
+                    "threshold_only_promotion",
+                ][..],
+            ),
+            (
+                "epistemic_generalization_explanation.xlog",
+                "gpu_explanation_diagnostics",
+                &[
+                    "cpu_template_expansions",
+                    "host_materialized_explanation_fallback",
+                ][..],
+            ),
+        ] {
+            let payload = execute_single(
+                &fixture,
+                Path::new(source_file),
+                source_file,
+                candidate_generation_source(),
+                &candidate_generation_relations(),
+                EpistemicGpuWorkspaceCapacities {
+                    max_candidates: 4096,
+                    max_worlds: 1,
+                    max_models_per_reduction: 64,
+                },
+                false,
+            )?;
+            let diagnostics = &payload["runtime"][section];
+            for key in removed_keys {
+                assert!(diagnostics.get(key).is_none(), "{source_file}: {key}");
+            }
+        }
+        Ok(())
+    }
 
     fn candidate_generation_source() -> &'static str {
         r#"
@@ -1030,7 +1143,7 @@ mod tests {
         "#
     }
 
-    fn candidate_generation_relations() -> BTreeMap<String, (usize, Vec<Vec<u32>>)> {
+    fn candidate_generation_relations() -> InputRelations {
         BTreeMap::from([
             ("blocked_candidate".to_string(), (3, Vec::new())),
             ("case_candidate_seed".to_string(), (5, Vec::new())),
@@ -1196,7 +1309,7 @@ mod tests {
         "#
     }
 
-    fn abstention_relations() -> BTreeMap<String, (usize, Vec<Vec<u32>>)> {
+    fn abstention_relations() -> InputRelations {
         BTreeMap::from([
             ("abstention_case".to_string(), (1, vec![vec![701]])),
             ("accepted_world_view".to_string(), (2, vec![vec![701, 801]])),
@@ -1267,31 +1380,13 @@ mod tests {
         Ok(())
     }
 
-    fn relation_rows_contain(rows: &Value, relation_name: &str, expected: &[u32]) -> bool {
-        rows.get(relation_name)
-            .and_then(|spec| spec.get("rows"))
-            .and_then(Value::as_array)
-            .map(|relation_rows| {
-                relation_rows.iter().any(|row| {
-                    row.as_array()
-                        .map(|values| {
-                            values
-                                .iter()
-                                .filter_map(Value::as_u64)
-                                .map(|value| value as u32)
-                                .collect::<Vec<_>>()
-                                == expected
-                        })
-                        .unwrap_or(false)
-                })
-            })
-            .unwrap_or(false)
-    }
-
     #[test]
     fn candidate_generation_owned_runtime_teardown_exits_cleanly() -> Result<()> {
         let fixture = match make_fixture(0, gpu_budget_bytes(DEFAULT_EPISTEMIC_GPU_BUDGET_MIB)?) {
             Ok(fixture) => fixture,
+            Err(err) if std::env::var("XLOG_REQUIRE_CUDA").as_deref() == Ok("1") => {
+                panic!("CUDA fixture required by XLOG_REQUIRE_CUDA=1: {err}")
+            }
             Err(_) => return Ok(()),
         };
         let payload = execute_single(
@@ -1349,6 +1444,18 @@ mod tests {
             false,
         )?;
         let diagnostics = &payload["runtime"]["gpu_probability_diagnostics"];
+        assert_eq!(payload["preflight"]["execution_backend"], "gpu");
+        assert_eq!(
+            payload["preflight"]["fallback_policy"],
+            "reject_unsupported"
+        );
+        assert!(payload["preflight"].get("cpu_fallbacks_zero").is_none());
+        assert!(payload["runtime"]["semantic_trace"]
+            .get("cpu_candidate_enumerations")
+            .is_none());
+        assert!(payload["runtime"]["semantic_trace"]
+            .get("cpu_world_view_validations")
+            .is_none());
         assert_eq!(
             diagnostics["resident_mc_source"],
             "xlog_v092_mc_resident_engine"
@@ -1359,11 +1466,23 @@ mod tests {
         assert_eq!(diagnostics["resident_mc_no_host"], true);
         assert_eq!(diagnostics["resident_mc_tracked_htod_calls"], 0);
         assert_eq!(diagnostics["resident_mc_tracked_dtoh_calls"], 0);
-        assert_eq!(diagnostics["resident_mc_untracked_metadata_reads"], 0);
-        assert_eq!(diagnostics["resident_mc_host_loop_iterations"], 0);
+        assert!(diagnostics
+            .get("resident_mc_untracked_metadata_reads")
+            .is_none());
         assert_eq!(diagnostics["resident_mc_per_sample_host_launches"], 0);
-        assert_eq!(diagnostics["resident_mc_host_fixpoint_iterations"], 0);
-        assert_eq!(diagnostics["resident_mc_per_operator_host_allocations"], 0);
+        assert!(diagnostics
+            .get("resident_mc_per_operator_host_allocations")
+            .is_none());
+        assert!(diagnostics
+            .get("resident_mc_host_loop_iterations")
+            .is_none());
+        assert!(diagnostics
+            .get("resident_mc_host_fixpoint_iterations")
+            .is_none());
+        assert!(diagnostics.get("cpu_probability_recomputations").is_none());
+        assert!(diagnostics
+            .get("cpu_only_probability_recomputations")
+            .is_none());
         assert_eq!(diagnostics["threshold_relation_rows_consumed"], 1);
         Ok(())
     }
@@ -1401,6 +1520,8 @@ mod tests {
 
 fn preflight_json(preflight: &xlog_runtime::EpistemicGpuRuntimePreflight) -> Value {
     json!({
+        "execution_backend": epistemic_execution_backend_label(preflight.execution_backend),
+        "fallback_policy": epistemic_fallback_policy_label(preflight.fallback_policy),
         "epistemic_mode": format!("{:?}", preflight.epistemic_mode),
         "reduced_runtime_rule_count": preflight.reduced_runtime_rule_count,
         "wcoj_required_reduction_count": preflight.wcoj_required_reduction_count,
@@ -1416,8 +1537,19 @@ fn preflight_json(preflight: &xlog_runtime::EpistemicGpuRuntimePreflight) -> Val
         "possible_operator_count": preflight.possible_operator_count,
         "not_know_operator_count": preflight.not_know_operator_count,
         "not_possible_operator_count": preflight.not_possible_operator_count,
-        "cpu_fallbacks_zero": preflight.cpu_fallbacks.is_zero(),
     })
+}
+
+fn epistemic_execution_backend_label(backend: xlog_ir::EpistemicExecutionBackend) -> &'static str {
+    match backend {
+        xlog_ir::EpistemicExecutionBackend::Gpu => "gpu",
+    }
+}
+
+fn epistemic_fallback_policy_label(policy: xlog_ir::EpistemicFallbackPolicy) -> &'static str {
+    match policy {
+        xlog_ir::EpistemicFallbackPolicy::RejectUnsupported => "reject_unsupported",
+    }
 }
 
 fn runtime_json(result: &xlog_runtime::EpistemicGpuExecutionResult) -> Value {
@@ -1440,8 +1572,6 @@ fn runtime_json(result: &xlog_runtime::EpistemicGpuExecutionResult) -> Value {
             "rejection_reasons": result.semantic_trace.rejection_reasons,
             "rejection_reason_device_reads": result.semantic_trace.rejection_reason_device_reads,
             "rejection_reason_metadata_bytes": result.semantic_trace.rejection_reason_metadata_bytes,
-            "cpu_candidate_enumerations": result.semantic_trace.cpu_candidate_enumerations,
-            "cpu_world_view_validations": result.semantic_trace.cpu_world_view_validations,
         },
         "reduced_output": {
             "row_count": result.output.cached_row_count(),
@@ -1500,10 +1630,7 @@ fn gpu_execution_dispatch_count(result: &xlog_runtime::EpistemicGpuExecutionResu
         + result.final_tuple_materialization.kernel_launches as u64
 }
 
-fn input_relation_row_count(
-    relations: &BTreeMap<String, (usize, Vec<Vec<u32>>)>,
-    relation_name: &str,
-) -> usize {
+fn input_relation_row_count(relations: &InputRelations, relation_name: &str) -> usize {
     relations
         .get(relation_name)
         .map(|(_, rows)| rows.len())
@@ -1522,7 +1649,7 @@ fn derived_relation_row_count(derived_relation_rows: &Value, relation_name: &str
 fn attach_program_runtime_diagnostics(
     source_file_name: &str,
     result: &xlog_runtime::EpistemicGpuExecutionResult,
-    relations: &BTreeMap<String, (usize, Vec<Vec<u32>>)>,
+    relations: &InputRelations,
     derived_relation_rows: &Value,
     runtime: &mut Value,
 ) {
@@ -1551,8 +1678,6 @@ fn attach_program_runtime_diagnostics(
                     "derived_selection_candidate_rows": derived_relation_row_count(derived_relation_rows, "selection_candidate"),
                     "derived_selected_promoted_proof_schema_rows": derived_relation_row_count(derived_relation_rows, "selected_promoted_proof_schema"),
                     "final_selected_promoted_proof_schema_rows": result.final_result_transfer.final_output_rows,
-                    "cpu_threshold_only_promotions": 0,
-                    "threshold_only_promotion": false,
                 }),
             );
         }
@@ -1575,11 +1700,6 @@ fn attach_program_runtime_diagnostics(
                     "derived_dilp_neural_instability_score_rows": derived_relation_row_count(derived_relation_rows, "dilp_neural_instability_score"),
                     "derived_bounded_dilp_metastable_transfer_margin_rows": derived_relation_row_count(derived_relation_rows, "bounded_dilp_metastable_transfer_margin"),
                     "derived_dilp_candidate_score_rows": result.final_result_transfer.final_output_rows,
-                    "python_rank_score_materialization": false,
-                    "python_feature_weighted_ranking": false,
-                    "python_score_weight_constants_used": false,
-                    "host_materialized_score_fallback": false,
-                    "threshold_only_promotion": false,
                 }),
             );
         }
@@ -1601,11 +1721,6 @@ fn attach_program_runtime_diagnostics(
                     "derived_transductive_transfer_signal_rows": derived_relation_row_count(derived_relation_rows, "transductive_transfer_signal"),
                     "derived_bounded_metastable_transfer_margin_rows": derived_relation_row_count(derived_relation_rows, "bounded_metastable_transfer_margin"),
                     "derived_xlog_candidate_score_rows": derived_relation_row_count(derived_relation_rows, "xlog_candidate_score"),
-                    "python_rank_score_materialization": false,
-                    "python_feature_weighted_ranking": false,
-                    "python_score_weight_constants_used": false,
-                    "host_materialized_score_fallback": false,
-                    "threshold_only_promotion": false,
                 }),
             );
         }
@@ -1628,11 +1743,6 @@ fn attach_program_runtime_diagnostics(
                     "derived_showcase_transductive_transfer_signal_rows": derived_relation_row_count(derived_relation_rows, "showcase_transductive_transfer_signal"),
                     "derived_bounded_showcase_metastable_transfer_margin_rows": derived_relation_row_count(derived_relation_rows, "bounded_showcase_metastable_transfer_margin"),
                     "derived_showcase_transfer_candidate_score_rows": derived_relation_row_count(derived_relation_rows, "showcase_transfer_candidate_score"),
-                    "python_rank_score_materialization": false,
-                    "python_feature_weighted_ranking": false,
-                    "python_score_weight_constants_used": false,
-                    "host_materialized_score_fallback": false,
-                    "threshold_only_promotion": false,
                 }),
             );
         }
@@ -1644,10 +1754,6 @@ fn attach_program_runtime_diagnostics(
                     "program": "programs/epistemic/epistemic_generalization_decision.xlog",
                     "xlog_decision_dispatches": dispatch_count,
                     "accepted_candidates": result.semantic_trace.accepted_candidates,
-                    "cpu_maxsat_enumerations": 0,
-                    "cpu_assignment_enumerations": 0,
-                    "cpu_portfolio_fallbacks": 0,
-                    "host_materialized_maxsat_fallback": false,
                 }),
             );
         }
@@ -1689,9 +1795,7 @@ fn attach_program_runtime_diagnostics(
                 .saturating_add(result.transfer_budget.tracked_data_plane_htod_calls);
             let resident_mc_no_host = resident_mc_tracked_dtoh_calls == 0
                 && resident_mc_tracked_htod_calls == 0
-                && result.transfer_budget.per_candidate_host_round_trips == 0
-                && result.semantic_trace.cpu_candidate_enumerations == 0
-                && result.semantic_trace.cpu_world_view_validations == 0;
+                && result.transfer_budget.per_candidate_host_round_trips == 0;
             runtime_object.insert(
                 "gpu_probability_diagnostics".to_string(),
                 json!({
@@ -1704,11 +1808,7 @@ fn attach_program_runtime_diagnostics(
                     "resident_mc_no_host": resident_mc_no_host,
                     "resident_mc_tracked_htod_calls": resident_mc_tracked_htod_calls,
                     "resident_mc_tracked_dtoh_calls": resident_mc_tracked_dtoh_calls,
-                    "resident_mc_untracked_metadata_reads": 0,
-                    "resident_mc_host_loop_iterations": result.semantic_trace.cpu_candidate_enumerations,
                     "resident_mc_per_sample_host_launches": result.transfer_budget.per_candidate_host_round_trips,
-                    "resident_mc_host_fixpoint_iterations": result.semantic_trace.cpu_world_view_validations,
-                    "resident_mc_per_operator_host_allocations": 0,
                     "abstention_kernel_dispatches": dispatch_count,
                     "accepted_world_view_count": accepted_world_view_rows,
                     "accepted_gpu_production_path_events": accepted_gpu_production_path_events,
@@ -1723,11 +1823,6 @@ fn attach_program_runtime_diagnostics(
                     "proof_confidence_relation_rows_consumed": proof_confidence_rows,
                     "threshold_relation_rows_consumed": threshold_rows,
                     "solver_probability_trace_rows_consumed": solver_probability_trace_rows,
-                    "cpu_probability_recomputations": 0,
-                    "cpu_only_probability_recomputations": 0,
-                    "cpu_threshold_only_decisions": 0,
-                    "threshold_only_decision": false,
-                    "host_probability_materialization_fallback": false,
                 }),
             );
         }
@@ -1768,8 +1863,6 @@ fn attach_program_runtime_diagnostics(
                     "derived_explanation_support_rows": explanation_support_rows,
                     "support_relation_device_reads": explanation_dependency_rows,
                     "final_xlog_explanation_rows": result.final_result_transfer.final_output_rows,
-                    "cpu_template_expansions": 0,
-                    "host_materialized_explanation_fallback": false,
                 }),
             );
         }
