@@ -463,9 +463,7 @@ pub struct EpistemicGpuSemanticTrace {
     /// constraint's declaration-order index; `None` for every other rejection
     /// reason. Surfaces constraint-specific rejection detail.
     pub constraint_violation_indices: Vec<Option<u32>>,
-    /// Bounded metadata reads from the device rejection buffer after the hot path.
-    pub rejection_reason_device_reads: u32,
-    /// Bytes read as bounded rejection-reason metadata after the hot path.
+    /// Bytes observed in the bounded rejection-reason metadata read after the hot path.
     pub rejection_reason_metadata_bytes: u64,
 }
 
@@ -1319,18 +1317,13 @@ impl EpistemicGpuSemanticTrace {
     pub fn require_rejection_metadata_accounting(&self, construct: &str) -> Result<()> {
         let expected_metadata_bytes =
             checked_product(self.generated_candidates, std::mem::size_of::<u32>())? as u64;
-        if self.rejection_reason_device_reads != 1
-            || self.rejection_reason_metadata_bytes != expected_metadata_bytes
-        {
+        if self.rejection_reason_metadata_bytes != expected_metadata_bytes {
             return Err(XlogError::UnsupportedEpistemicConstruct {
                 construct: construct.to_string(),
                 context: format!(
                     "semantic trace rejection metadata accounting must match the bounded device \
-                     rejection-buffer read, got reads={} bytes={} expected_reads=1 \
-                     expected_bytes={}",
-                    self.rejection_reason_device_reads,
-                    self.rejection_reason_metadata_bytes,
-                    expected_metadata_bytes
+                     rejection-buffer read, got bytes={} expected_bytes={}",
+                    self.rejection_reason_metadata_bytes, expected_metadata_bytes
                 ),
             });
         }
@@ -1520,6 +1513,8 @@ impl EpistemicGpuSemanticTrace {
 
         let raw_rejection_reasons = provider
             .dtoh_small_metadata_untracked(&workspace.rejection_reasons, candidate_count)?;
+        let rejection_reason_metadata_bytes =
+            checked_product(raw_rejection_reasons.len(), std::mem::size_of::<u32>())? as u64;
         // Bounded metadata read of the parallel constraint-violation index buffer.
         // Like `rejection_reasons`, this is an untracked post-hot-path metadata
         // read, not a data-plane transfer.
@@ -1566,9 +1561,6 @@ impl EpistemicGpuSemanticTrace {
             )?,
             model_membership.models_per_reduction,
         )?;
-        let rejection_reason_metadata_bytes =
-            checked_product(candidate_count, std::mem::size_of::<u32>())? as u64;
-
         Ok(Self {
             generated_candidates: candidate_count,
             guesses: checked_product(candidate_count, candidate_generation.literal_count)?,
@@ -1583,12 +1575,6 @@ impl EpistemicGpuSemanticTrace {
             rejected_candidate_indices,
             rejection_reasons,
             constraint_violation_indices,
-            // Counts the bounded metadata read of the rejection-reason code buffer
-            // specifically (the certification invariant scopes to that buffer's
-            // bytes). The parallel constraint-violation index buffer is a
-            // separate bounded metadata read tracked alongside it, not folded
-            // into this rejection-reason-specific counter.
-            rejection_reason_device_reads: 1,
             rejection_reason_metadata_bytes,
         })
     }

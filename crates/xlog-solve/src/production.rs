@@ -60,6 +60,13 @@ pub enum GpuSolverProductionCapabilityStatus {
     Blocked,
 }
 
+/// Backend policy for solver executions admitted to production metrics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GpuSolverProductionMetricBackend {
+    /// Only executions proved by retained GPU solver events are eligible.
+    GpuOnly,
+}
+
 /// Capability report for the solver production adapter.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct GpuSolverProductionCapabilities {
@@ -69,8 +76,8 @@ pub struct GpuSolverProductionCapabilities {
     pub gpu_maxsat: GpuSolverProductionCapabilityStatus,
     /// GPU SAT/MaxSAT/status-aware portfolio production execution.
     pub gpu_portfolio_sat_maxsat: GpuSolverProductionCapabilityStatus,
-    /// Whether the CPU semantic-oracle solver may satisfy production metrics.
-    pub cpu_oracle_solver_allowed: bool,
+    /// Backend policy enforced for production-metric eligibility.
+    pub production_metric_backend: GpuSolverProductionMetricBackend,
     /// Blocker reason for GPU-native MaxSAT, or empty when available.
     pub gpu_maxsat_blocker: &'static str,
     /// Blocker reason for GPU SAT/MaxSAT/status-aware portfolio execution.
@@ -516,7 +523,7 @@ pub fn production_capabilities() -> GpuSolverProductionCapabilities {
         gpu_cdcl_sat_unsat: GpuSolverProductionCapabilityStatus::Available,
         gpu_maxsat: GpuSolverProductionCapabilityStatus::Available,
         gpu_portfolio_sat_maxsat: GpuSolverProductionCapabilityStatus::Available,
-        cpu_oracle_solver_allowed: false,
+        production_metric_backend: GpuSolverProductionMetricBackend::GpuOnly,
         gpu_maxsat_blocker: "",
         gpu_portfolio_blocker: "",
     }
@@ -1104,12 +1111,8 @@ impl GpuSolverProductionTrace {
     /// cannot satisfy production metric evidence.
     pub fn require_production_metric_eligibility(&self) -> Result<()> {
         let capabilities = production_capabilities();
-        if capabilities.cpu_oracle_solver_allowed {
-            return Err(XlogError::UnsupportedEpistemicConstruct {
-                construct: "GPU solver production metric gate".to_string(),
-                context: "CPU semantic-oracle solver is not allowed for production metrics"
-                    .to_string(),
-            });
+        match capabilities.production_metric_backend {
+            GpuSolverProductionMetricBackend::GpuOnly => {}
         }
         if capabilities.gpu_cdcl_sat_unsat != GpuSolverProductionCapabilityStatus::Available {
             return Err(XlogError::UnsupportedEpistemicConstruct {

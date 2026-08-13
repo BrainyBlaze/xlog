@@ -2864,6 +2864,10 @@ fn parsed_epistemic_program_executes_compiled_gpu_plan_on_runtime_values() {
     assert_eq!(result.semantic_trace.accepted_candidate_indices, vec![15]);
     assert_eq!(result.semantic_trace.accepted_candidates, 1);
     assert_eq!(result.semantic_trace.rejected_candidates, 15);
+    assert_eq!(
+        result.semantic_trace.rejection_reason_metadata_bytes,
+        (result.semantic_trace.generated_candidates * std::mem::size_of::<u32>()) as u64
+    );
     assert_eq!(result.final_result_transfer.final_output_rows, 1);
     result
         .require_runtime_dispatch_certification()
