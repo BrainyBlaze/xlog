@@ -63,6 +63,9 @@ struct RuntimeFixture {
 fn runtime_fixture() -> Option<RuntimeFixture> {
     let device = match CudaDevice::new(0) {
         Ok(device) => Arc::new(device),
+        Err(err) if std::env::var("XLOG_REQUIRE_CUDA").as_deref() == Ok("1") => {
+            panic!("XLOG_REQUIRE_CUDA=1 but CUDA initialization failed: {err}")
+        }
         Err(err) => {
             eprintln!("Skipping test: CUDA runtime unavailable: {err}");
             return None;
@@ -92,6 +95,9 @@ fn runtime_fixture() -> Option<RuntimeFixture> {
     let provider = match CudaKernelProvider::with_runtime(Arc::clone(&device), Arc::clone(&memory))
     {
         Ok(provider) => Arc::new(provider),
+        Err(err) if std::env::var("XLOG_REQUIRE_CUDA").as_deref() == Ok("1") => {
+            panic!("XLOG_REQUIRE_CUDA=1 but CUDA kernel provider initialization failed: {err}")
+        }
         Err(err) => {
             eprintln!("Skipping test: CUDA kernel provider unavailable: {err}");
             return None;
@@ -3967,6 +3973,58 @@ fn parsed_bound_quaternary_know_filters_final_gpu_tuple_values() {
 // surviving candidates whose accepted world view satisfies the constraint
 // body. No ordinary-RIR constraint rewrite is involved.
 // =====================================================================
+
+#[cfg(feature = "epistemic-logic-tests")]
+#[test]
+fn authored_constraint_identity_typed_violation_uses_authored_index() {
+    let Some(fixture) = runtime_fixture() else {
+        return;
+    };
+    let mut program = parse_program(
+        r#"
+        pred seed(u32). pred gate(u32). pred out(u32).
+        out(X) :- seed(X), know gate(X).
+        :- out(X).
+        "#,
+    )
+    .expect("parse modal program with reduced ordinary constraint");
+    program.constraints[0].authored_index = Some(3);
+    program
+        .prepare_authored_constraint_identity(4)
+        .expect("prepare sparse authored identity");
+    let executable = compile_epistemic_gpu_execution(&program)
+        .expect("compile modal program with reduced ordinary constraint");
+    let mut executor = Executor::new(Arc::clone(&fixture.provider));
+    for (name, rel) in &executable.relation_ids {
+        executor.register_relation(*rel, name);
+    }
+    executor.put_relation("seed", upload_unary_u32(&fixture.memory, &[7], "x"));
+    executor.put_relation("gate", upload_unary_u32(&fixture.memory, &[7], "x"));
+
+    let error = match executor.execute_epistemic_gpu_execution(
+        &executable,
+        EpistemicGpuWorkspaceCapacities {
+            max_candidates: 8,
+            max_worlds: 4,
+            max_models_per_reduction: 1,
+        },
+    ) {
+        Err(error) => error,
+        Ok(_) => panic!("the reduced ordinary constraint must return a typed violation"),
+    };
+    match error {
+        xlog_core::XlogError::ConstraintViolation {
+            constraint_index,
+            relation_name,
+            witness_rows,
+        } => {
+            assert_eq!(constraint_index, 3);
+            assert_eq!(relation_name, "__xlog_constraint_3");
+            assert!(witness_rows > 0);
+        }
+        other => panic!("expected typed ConstraintViolation, got {other:?}"),
+    }
+}
 
 #[cfg(feature = "epistemic-logic-tests")]
 #[test]

@@ -992,6 +992,7 @@ pub fn expand_program_functions(
         queries: program.queries.clone(),
         predicates: program.predicates.clone(),
         constraints: expanded_constraints?,
+        authored_constraint_source_bound: program.authored_constraint_source_bound,
         imports: program.imports.clone(),
         functions: program.functions.clone(),
         domains: program.domains.clone(),
@@ -1032,6 +1033,7 @@ fn expand_constraint_functions(
         .map(ToOwned::to_owned)
         .collect();
     Ok(Constraint {
+        authored_index: constraint.authored_index,
         body: expand_body_functions(ctx, &constraint.body, &mut used_variables)?,
     })
 }

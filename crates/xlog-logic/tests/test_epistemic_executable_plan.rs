@@ -51,7 +51,6 @@ fn epistemic_executable_plan_lowers_reduced_program_through_runtime_plan() {
         "#,
     )
     .unwrap();
-
     let executable = compile_epistemic_gpu_execution(&program).unwrap();
 
     assert!(executable.gpu_plan.cpu_fallbacks.is_zero());
@@ -319,13 +318,17 @@ fn epistemic_constraint_reaches_typed_gpu_boundary() {
     // records which literal forms the body conjunction. They must NOT be rewritten
     // into ordinary RIR constraints (no `__xlog_constraint_*` relation), and they
     // must not be silently erased.
-    let program = parse_program(
+    let mut program = parse_program(
         r#"
         accepted() :- know fact().
         :- possible blocked().
         "#,
     )
     .unwrap();
+    program.constraints[0].authored_index = Some(3);
+    program
+        .prepare_authored_constraint_identity(4)
+        .expect("prepare sparse authored modal constraint identity");
 
     let executable = compile_epistemic_gpu_execution(&program)
         .expect("epistemic constraints reach the typed GPU boundary as world-view constraints");
@@ -334,7 +337,7 @@ fn epistemic_constraint_reaches_typed_gpu_boundary() {
     // The constraint's `possible blocked()` literal is preserved first-class.
     assert_eq!(gpu_plan.constraints.len(), 1);
     let constraint = &gpu_plan.constraints[0];
-    assert_eq!(constraint.constraint_index, 0);
+    assert_eq!(constraint.constraint_index, 3);
     assert_eq!(constraint.literal_indices.len(), 1);
     let body_literal = &gpu_plan.epistemic_literals[constraint.literal_indices[0]];
     assert_eq!(body_literal.atom.predicate, "blocked");
@@ -356,6 +359,73 @@ fn epistemic_constraint_reaches_typed_gpu_boundary() {
         executable.relation_ids.keys().collect::<Vec<_>>()
     );
     assert!(gpu_plan.cpu_fallbacks.is_zero());
+}
+
+#[test]
+fn reduced_ordinary_constraint_uses_authored_relation_index() {
+    let mut program = parse_program(
+        r#"
+        pred p(u32).
+        pred q(u32).
+        pred accepted(u32).
+        p(1).
+        accepted(X) :- p(X), know p(X).
+        :- q(X), know p(X).
+        :- p(X).
+        "#,
+    )
+    .unwrap();
+    program
+        .prepare_authored_constraint_identity(2)
+        .expect("assign authored constraint identities");
+
+    let reduced = reduce_epistemic_program_to_ordinary(&program).unwrap();
+    assert_eq!(reduced.constraints.len(), 1);
+    assert_eq!(reduced.constraints[0].authored_index, Some(1));
+
+    let mut compiler = Compiler::new();
+    let plan = compiler.compile_program(&reduced).unwrap();
+    let heads = plan
+        .rules_by_scc
+        .iter()
+        .flatten()
+        .map(|rule| rule.head.as_str())
+        .collect::<Vec<_>>();
+    assert!(heads.contains(&"__xlog_constraint_1"), "{:?}", heads);
+    assert!(!heads.contains(&"__xlog_constraint_0"));
+}
+
+#[test]
+fn public_epistemic_reduction_prepares_authored_constraint_identity_before_filtering() {
+    let program = parse_program(
+        r#"
+        pred p(u32). pred q(u32). pred out(u32).
+        p(1).
+        out(X) :- p(X), know p(X).
+        :- q(X), know p(X).
+        :- p(X).
+        "#,
+    )
+    .expect("parse unprepared authored program");
+
+    let reduced = reduce_epistemic_program_to_ordinary(&program)
+        .expect("public reduction prepares the full authored program");
+    assert_eq!(reduced.authored_constraint_source_bound, Some(2));
+    assert_eq!(reduced.constraints.len(), 1);
+    assert_eq!(reduced.constraints[0].authored_index, Some(1));
+
+    let mut compiler = Compiler::new();
+    let plan = compiler
+        .compile_prepared_program(&reduced)
+        .expect("reduced program compiles without re-enumeration");
+    let heads = plan
+        .rules_by_scc
+        .iter()
+        .flatten()
+        .map(|rule| rule.head.as_str())
+        .collect::<Vec<_>>();
+    assert!(heads.contains(&"__xlog_constraint_1"), "{heads:?}");
+    assert!(!heads.contains(&"__xlog_constraint_0"));
 }
 
 #[test]
