@@ -8,7 +8,7 @@ pre-registered runs complete; any deviation from the protocol below must
 be recorded as a deviation, not silently amended.
 
 The baseline this document extends is the batch soft-credit column
-A-soft of [`PREREG_SOFT.md`](PREREG_SOFT.md) (micro pointwise F1 0.7398,
+A-soft of `PREREG_SOFT.md` (micro pointwise F1 0.7398,
 shipped artifact `results/asoft_cv5/MARITIME_CV_ASOFT.json`). The column
 below is the last element of the OLED/WOLED framing on this corpus:
 their published numbers are F1 on held-out CV folds, and "online" in
@@ -77,10 +77,18 @@ its own rule.
 ## Results (pre-registered runs of 2026-08-12, zero protocol deviations)
 
 Shipped artifacts (byte-exact runner outputs):
-[`results/online_cv5/MARITIME_CV_ONLINE.json`](results/online_cv5/MARITIME_CV_ONLINE.json),
-[`results/online_reverse_cv5/MARITIME_CV_ONLINE_REVERSE.json`](results/online_reverse_cv5/MARITIME_CV_ONLINE_REVERSE.json).
+`results/online_cv5/MARITIME_CV_ONLINE.json`,
+`results/online_reverse_cv5/MARITIME_CV_ONLINE_REVERSE.json`.
 Both ran with the pre-registered parameters (window 1,000, lr 0.05, base
 vocabulary, one pass); verify_smoke gated each run.
+
+Committed-bytes md5 pins (stored verbatim under the
+`docs/experiments/maritime/results/** -text` attribute):
+
+| artifact | md5 |
+|---|---|
+| `results/online_cv5/MARITIME_CV_ONLINE.json` | `f9ccbc50a4db8c1a301995f4bf235907` |
+| `results/online_reverse_cv5/MARITIME_CV_ONLINE_REVERSE.json` | `d7e1c4381c6445e1a72e8745a44cfb8c` |
 
 | column (5-fold pair-atom CV) | micro point F1 | P / R | per-fold median |
 |---|---|---|---|
