@@ -291,6 +291,29 @@ fn test_stratify_with_learnable_rule() {
 }
 
 #[test]
+fn compiler_keeps_fact_only_relation_metadata_without_fact_rules() {
+    let mut compiler = Compiler::new();
+    let plan = compiler
+        .compile(
+            r#"
+                observed(1).
+                observed(2).
+                observed(2).
+            "#,
+        )
+        .expect("fact-only program must compile");
+
+    assert_eq!(plan.rules_by_scc.iter().map(Vec::len).sum::<usize>(), 0);
+    assert_eq!(compiler.schemas().get("observed").unwrap().arity(), 1);
+    let relation_id = compiler.rel_ids().get("observed").copied().unwrap();
+    assert_eq!(plan.rel_arities.get(&relation_id), Some(&1));
+    assert!(plan
+        .sccs
+        .iter()
+        .any(|scc| scc.predicates.iter().any(|name| name == "observed")));
+}
+
+#[test]
 fn test_compile_learnable_rule_produces_tmj() {
     let input = r#"
         edge(1, 2).

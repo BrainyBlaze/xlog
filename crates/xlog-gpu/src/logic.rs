@@ -4118,6 +4118,359 @@ mod tests {
     }
 
     #[test]
+    fn grouped_facts_preserve_fact_and_rule_results_without_seed_operations() -> Result<()> {
+        let Some(provider) = ground_term_encoding_test_provider() else {
+            return Ok(());
+        };
+        let program = LogicProgram::compile(
+            r#"
+                pred base(u32).
+                pred derived(u32).
+                base(1).
+                base(1).
+                base(2).
+                derived(X) :- base(X).
+                ?- base(X).
+                ?- derived(X).
+            "#,
+        )?;
+        let LogicExecutionPlan::Ordinary(plan) = &program.plan else {
+            panic!("ordinary source must compile to an ordinary plan");
+        };
+        let executable_rule_count = plan.rules_by_scc.iter().map(Vec::len).sum::<usize>();
+        assert_eq!(program.program.facts().count(), 3);
+        let expected_executable_rules =
+            program.program.proper_rules().count() + program.program.queries.len();
+        assert_eq!(
+            executable_rule_count, expected_executable_rules,
+            "compiled rules must correspond only to executable source and query rules"
+        );
+
+        provider.reset_host_transfer_stats();
+        let mut executor = program.prepare_executor(&provider, HashMap::new(), true)?;
+        let fact_load_transfers = provider.host_transfer_stats();
+        assert_eq!(fact_load_transfers.htod_calls, 1);
+        assert_eq!(
+            fact_load_transfers.htod_bytes,
+            3 * std::mem::size_of::<u32>() as u64
+        );
+        assert_eq!(fact_load_transfers.dtoh_calls, 0);
+        assert_eq!(fact_load_transfers.dtoh_bytes, 0);
+        let base = executor
+            .store()
+            .get("base")
+            .ok_or_else(|| XlogError::Execution("missing grouped base facts".to_string()))?;
+        assert_eq!(base.cached_row_count(), Some(2));
+        let mut materialized_base = provider.download_column::<u32>(base, 0)?;
+        materialized_base.sort_unstable();
+        assert_eq!(materialized_base, vec![1, 2]);
+
+        executor.execute_plan(plan)?;
+        for query_index in 0..2 {
+            let relation_name = format!("__xlog_query_{query_index}");
+            let query = executor.store().get(&relation_name).ok_or_else(|| {
+                XlogError::Execution(format!("missing query relation {relation_name}"))
+            })?;
+            let mut rows = provider.download_column::<u32>(query, 0)?;
+            rows.sort_unstable();
+            assert_eq!(rows, vec![1, 2]);
+        }
+
+        let stats = executor.execution_stats(4);
+        let scan_count = stats
+            .strata
+            .iter()
+            .flat_map(|stratum| &stratum.ops)
+            .filter(|op| op.op_name == "scan")
+            .count();
+        let union_count = stats
+            .strata
+            .iter()
+            .flat_map(|stratum| &stratum.ops)
+            .filter(|op| op.op_name == "union")
+            .count();
+        assert_eq!(scan_count, executable_rule_count);
+        assert_eq!(union_count, executable_rule_count);
+        Ok(())
+    }
+
+    #[test]
+    fn ordinary_execution_after_fact_setup_has_no_host_transfers() -> Result<()> {
+        let Some(provider) = ground_term_encoding_test_provider() else {
+            return Ok(());
+        };
+        let program = LogicProgram::compile(
+            r#"
+                pred base(u32).
+                pred derived(u32).
+                base(7).
+                derived(X) :- base(X).
+                ?- derived(X).
+            "#,
+        )?;
+        let LogicExecutionPlan::Ordinary(plan) = &program.plan else {
+            panic!("ordinary source must compile to an ordinary plan");
+        };
+
+        let mut executor = program.prepare_executor(&provider, HashMap::new(), false)?;
+        provider.reset_host_transfer_stats();
+        provider.reset_d2h_transfer_count();
+        provider.reset_untracked_metadata_dtoh_count();
+        provider.reset_deterministic_d2h_violations();
+        executor.execute_plan(plan)?;
+
+        let transfers = provider.host_transfer_stats();
+        assert_eq!(
+            transfers.htod_calls, 0,
+            "execution must not upload host data"
+        );
+        assert_eq!(
+            transfers.htod_bytes, 0,
+            "execution must not upload host bytes"
+        );
+        assert_eq!(
+            transfers.dtoh_calls, 0,
+            "execution must not download device data"
+        );
+        assert_eq!(
+            transfers.dtoh_bytes, 0,
+            "execution must not download device bytes"
+        );
+        assert_eq!(provider.d2h_transfer_count(), 0);
+        assert_eq!(provider.untracked_metadata_dtoh_count(), 0);
+        assert_eq!(provider.deterministic_d2h_violation_count(), 0);
+
+        let query = executor
+            .store()
+            .get("__xlog_query_0")
+            .ok_or_else(|| XlogError::Execution("missing query result".to_string()))?;
+        assert_eq!(provider.download_column::<u32>(query, 0)?, vec![7]);
+        Ok(())
+    }
+
+    #[test]
+    fn grouped_fact_loading_preserves_arity_qualified_relations() -> Result<()> {
+        let Some(provider) = ground_term_encoding_test_provider() else {
+            return Ok(());
+        };
+        let program = LogicProgram::compile(
+            r#"
+                #pragma epistemic_mode = faeel
+                pred node(symbol).
+                pred source(symbol, i64).
+                pred source(u32).
+                pred result(symbol).
+                node(key).
+                source(key, 5000000000).
+                source(key, 5000000000).
+                source(1).
+                source(1).
+                result(X) :- node(X), know source(X, Y).
+                ?- result(X).
+            "#,
+        )?;
+        let store = program.create_relation_store(provider.clone())?;
+        let unary = store
+            .get("source/1")
+            .ok_or_else(|| XlogError::Execution("missing unary source facts".to_string()))?;
+        let binary = store
+            .get("source/2")
+            .ok_or_else(|| XlogError::Execution("missing binary source facts".to_string()))?;
+
+        assert_eq!(unary.cached_row_count(), Some(1));
+        assert_eq!(binary.cached_row_count(), Some(1));
+        assert_eq!(provider.download_column::<u32>(unary, 0)?, vec![1]);
+        assert_eq!(
+            provider.download_column::<u32>(binary, 0)?,
+            vec![symbol::intern("key")]
+        );
+        assert_eq!(
+            provider.download_column::<i64>(binary, 1)?,
+            vec![5_000_000_000]
+        );
+
+        let evidence = program.execute_epistemic_evidence(provider.clone(), HashMap::new())?;
+        assert_eq!(
+            evidence.final_output.schema().arity(),
+            1,
+            "the epistemic evidence path must project the public result arity"
+        );
+        assert_eq!(
+            provider.download_column::<u32>(&evidence.final_output, 0)?,
+            vec![symbol::intern("key")],
+            "the epistemic evidence path must execute the binary modal source facts"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn recursive_execution_preserves_inline_fact_semantics() -> Result<()> {
+        let Some(provider) = ground_term_encoding_test_provider() else {
+            return Ok(());
+        };
+        let program = LogicProgram::compile(
+            r#"
+                pred edge(u32, u32).
+                pred reach(u32, u32).
+                edge(1, 2).
+                edge(2, 3).
+                reach(X, Y) :- edge(X, Y).
+                reach(X, Z) :- reach(X, Y), edge(Y, Z).
+                ?- reach(X, Z).
+            "#,
+        )?;
+
+        let result = program.evaluate(provider.clone(), HashMap::new())?;
+        assert_eq!(result.queries.len(), 1);
+        let xs = provider.download_column::<u32>(&result.queries[0].buffer, 0)?;
+        let zs = provider.download_column::<u32>(&result.queries[0].buffer, 1)?;
+        let mut rows = xs.into_iter().zip(zs).collect::<Vec<_>>();
+        rows.sort_unstable();
+        assert_eq!(
+            rows,
+            vec![(1, 2), (1, 3), (2, 3)],
+            "recursive production execution must derive the transitive inline-fact result"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn nullary_execution_preserves_asserted_inline_fact_truth() -> Result<()> {
+        let Some(provider) = ground_term_encoding_test_provider() else {
+            return Ok(());
+        };
+        let program = LogicProgram::compile(
+            r#"
+                pred enabled().
+                pred result().
+                enabled().
+                result() :- enabled().
+                ?- result().
+            "#,
+        )?;
+
+        let result = program.evaluate(provider.clone(), HashMap::new())?;
+        assert_eq!(result.queries.len(), 1);
+        assert_eq!(
+            provider.device_row_count(&result.queries[0].buffer)?,
+            1,
+            "an asserted nullary fact must make the derived nullary query true"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn caller_input_is_unioned_with_inline_facts_before_execution() -> Result<()> {
+        let Some(provider) = ground_term_encoding_test_provider() else {
+            return Ok(());
+        };
+        let program = LogicProgram::compile(
+            r#"
+                pred source(u32).
+                pred result(u32).
+                source(1).
+                result(X) :- source(X).
+                ?- result(X).
+            "#,
+        )?;
+        let source_schema = program
+            .schema("source")
+            .ok_or_else(|| XlogError::Execution("missing source schema".to_string()))?
+            .clone();
+        let caller_value = 2u32.to_le_bytes();
+        let caller_input =
+            provider.create_buffer_from_slices(&[caller_value.as_slice()], source_schema)?;
+
+        let result = program.evaluate(
+            provider.clone(),
+            HashMap::from([("source".to_string(), caller_input)]),
+        )?;
+        let mut rows = provider.download_column::<u32>(&result.queries[0].buffer, 0)?;
+        rows.sort_unstable();
+        assert_eq!(
+            rows,
+            vec![1, 2],
+            "caller-provided rows and inline facts must both reach the executable plan"
+        );
+        Ok(())
+    }
+
+    fn recursive_duplicate_fact_profile(
+        provider: Arc<CudaKernelProvider>,
+        fact_count: usize,
+    ) -> Result<(usize, usize, usize, Vec<(u32, u32)>)> {
+        let facts = "edge(1, 2).\n".repeat(fact_count);
+        let program = LogicProgram::compile(&format!(
+            r#"
+                pred edge(u32, u32).
+                pred reach(u32, u32).
+                {facts}
+                reach(X, Y) :- edge(X, Y).
+                reach(X, Z) :- reach(X, Y), edge(Y, Z).
+                ?- reach(X, Z).
+            "#
+        ))?;
+        assert_eq!(program.program.facts().count(), fact_count);
+        assert_eq!(
+            program.program.proper_rules().count(),
+            2,
+            "the recursive rule shape must remain constant across fact counts"
+        );
+        let LogicExecutionPlan::Ordinary(plan) = &program.plan else {
+            panic!("recursive source must compile to an ordinary plan");
+        };
+        let executable_rule_count = plan.rules_by_scc.iter().map(Vec::len).sum::<usize>();
+
+        let result = program.evaluate_with_options(provider.clone(), HashMap::new(), true)?;
+        let stats = result
+            .stats
+            .as_ref()
+            .ok_or_else(|| XlogError::Execution("missing execution profile".to_string()))?;
+        let scan_count = stats
+            .strata
+            .iter()
+            .flat_map(|stratum| &stratum.ops)
+            .filter(|op| op.op_name == "scan")
+            .count();
+        let union_count = stats
+            .strata
+            .iter()
+            .flat_map(|stratum| &stratum.ops)
+            .filter(|op| op.op_name == "union")
+            .count();
+        let xs = provider.download_column::<u32>(&result.queries[0].buffer, 0)?;
+        let ys = provider.download_column::<u32>(&result.queries[0].buffer, 1)?;
+        let mut rows = xs.into_iter().zip(ys).collect::<Vec<_>>();
+        rows.sort_unstable();
+        Ok((executable_rule_count, scan_count, union_count, rows))
+    }
+
+    #[test]
+    fn recursive_plan_operations_are_invariant_to_duplicate_fact_count() -> Result<()> {
+        let Some(provider) = ground_term_encoding_test_provider() else {
+            return Ok(());
+        };
+
+        let one_fact = recursive_duplicate_fact_profile(provider.clone(), 1)?;
+        let many_facts = recursive_duplicate_fact_profile(provider, 64)?;
+        assert_eq!(one_fact.3, vec![(1, 2)]);
+        assert_eq!(many_facts.3, one_fact.3);
+        assert_eq!(
+            many_facts.0, one_fact.0,
+            "executable rule count must not scale with source fact count"
+        );
+        assert_eq!(
+            many_facts.1, one_fact.1,
+            "executable scan count must not scale with source fact count"
+        );
+        assert_eq!(
+            many_facts.2, one_fact.2,
+            "executable union count must not scale with source fact count"
+        );
+        Ok(())
+    }
+
+    #[test]
     fn g91_compatibility_plan_records_gpu_upper_and_refinement_passes() -> Result<()> {
         let program = LogicProgram::compile(
             r#"
