@@ -25,7 +25,10 @@ pub(crate) struct DepEdge {
 pub struct DependencyGraph {
     /// Set of all predicate names in the graph.
     pub predicates: HashSet<String>,
-    pub(crate) edges: Vec<DepEdge>,
+    /// Private so every insertion goes through `add_edge`, which keeps
+    /// `adjacency` in sync — a bare `edges.push` would silently drop the edge
+    /// from `outgoing()`.
+    edges: Vec<DepEdge>,
     /// Outgoing-edge indices per predicate, kept in insertion order so
     /// `outgoing()` returns edges exactly as the linear scan over `edges` did.
     adjacency: std::collections::HashMap<String, Vec<usize>>,
@@ -54,7 +57,14 @@ impl DependencyGraph {
 
     pub(crate) fn outgoing(&self, pred: &str) -> Vec<&DepEdge> {
         match self.adjacency.get(pred) {
-            Some(idxs) => idxs.iter().map(|&i| &self.edges[i]).collect(),
+            Some(idxs) => idxs
+                .iter()
+                .map(|&i| {
+                    let edge = &self.edges[i];
+                    debug_assert_eq!(edge.from, pred, "adjacency index out of sync");
+                    edge
+                })
+                .collect(),
             None => Vec::new(),
         }
     }
@@ -295,6 +305,12 @@ pub fn stratify(program: &Program) -> Result<Vec<Stratum>> {
 
     for (pred, stratum) in stratum_map {
         strata[stratum].predicates.push(pred);
+    }
+
+    // `stratum_map` is a HashMap, so the drain order above varies per process;
+    // sort so `Stratum::predicates` is deterministic output.
+    for stratum in &mut strata {
+        stratum.predicates.sort();
     }
 
     strata.retain(|s| !s.predicates.is_empty());
