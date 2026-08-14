@@ -354,6 +354,103 @@ def run_fold(
     }
 
 
+def run_fold_soft(
+    fold: int,
+    converted: dict,
+    fold_of_pair: list[int],
+    *,
+    seed: int,
+    vocab: str,
+) -> dict:
+    """One held-out fold of the pre-registered SOFT column (PREREG_SOFT.md
+    section (b)) — deliberately isolated from `run_fold`, which preserves
+    the baseline hard-search implementation. The pool is every 1..3-literal
+    conjunction over the corpus vocabulary (`enumerate_bodies.
+    enumerate_bodies` — 1-literal bodies included, unlike the hard
+    search's pool); the gate is THE SAME per-fold permutation-null
+    construction the hard search uses (`permutation_null_threshold`, 1000
+    permutations, 0.95 quantile of the pool-max per-fold F1, perm_seed =
+    seed), applied to each body's own `kfold_scores(score="f1")` mean;
+    the surviving bodies get one trained noisy-OR logit each
+    (`soft_weights.train_soft_weights`, the pre-registered constants) on
+    the training slice, and the held-out rows are scored by
+    `soft_scores > 0.5` with the same point/interval metrics as the hard
+    column."""
+    from enumerate_bodies import coverage_matrix
+    from enumerate_bodies import enumerate_bodies as enumerate_soft_bodies
+    from relational_search import body_cover, kfold_scores, permutation_null_threshold
+    from scorer import prf1
+    from soft_weights import (
+        SOFT_LR,
+        SOFT_STEPS,
+        soft_scores,
+        train_soft_weights,
+    )
+    import torch
+
+    train_pts, test_pts = fold_pt_indices(converted, fold_of_pair, fold)
+    train_set, test_set = set(train_pts), set(test_pts)
+    train_relations = restrict_relations(converted["relations"], train_set)
+    train_labels = [converted["is_positive"][pt] for pt in train_pts]
+
+    vocabulary = sorted(converted["relations"])
+    pool = enumerate_soft_bodies(vocabulary, max_literals=MAX_LITERALS)
+    covers = {body: body_cover(body, train_relations) for body in pool}
+    null = permutation_null_threshold(
+        pool, train_relations, train_pts, train_labels,
+        folds=INNER_FOLDS, seed=seed,
+        n_permutations=NULL_PERMUTATIONS, quantile=NULL_QUANTILE,
+        perm_seed=seed, covers=covers,
+    )
+    pool_scores = kfold_scores(
+        pool, train_relations, train_pts, train_labels,
+        INNER_FOLDS, seed, covers=covers, score="f1",
+    )
+    gated = [body for body in pool if pool_scores[body] >= null["threshold"]]
+
+    # Local (dense) pt coordinates for the coverage matrices: row order =
+    # the sorted train/test pt lists `fold_pt_indices` returns.
+    def _local_matrix(pts: list[int], relations: dict[str, list]) -> "torch.Tensor":
+        pos_of = {pt: i for i, pt in enumerate(pts)}
+        local = {
+            name: {pos_of[pt] for pt in members if pt in pos_of}
+            for name, members in relations.items()
+        }
+        return coverage_matrix(gated, local, n_pt=len(pts))
+
+    cover_train = _local_matrix(train_pts, train_relations)
+    y_train = torch.tensor(train_labels, dtype=torch.bool)
+    weights = train_soft_weights(cover_train, y_train, seed=seed)
+
+    test_relations = restrict_relations(converted["relations"], test_set)
+    cover_test = _local_matrix(test_pts, test_relations)
+    scores_test = soft_scores(cover_test, weights)
+    pred = (scores_test > 0.5).tolist()
+    gold = [converted["is_positive"][pt] for pt in test_pts]
+    point = prf1(pred, gold)
+    interval = interval_prf1(pred, gold, _test_segment_bounds(converted, test_set))
+
+    sig = torch.sigmoid(weights).tolist()
+    ranked = sorted(zip(gated, sig), key=lambda bw: (-bw[1], bw[0]))
+    weights_top10 = {"&".join(body): weight for body, weight in ranked[:10]}
+
+    return {
+        "fold": fold,
+        "column": "soft",
+        "vocab": vocab,
+        "n_bodies_pool": len(pool),
+        "n_bodies_gated": len(gated),
+        "weights_top10": weights_top10,
+        "soft_params": {"steps": SOFT_STEPS, "lr": SOFT_LR, "seed": seed, "threshold": 0.5},
+        "min_fit": null["threshold"],
+        "null_summary": null,
+        "n_train_pt": len(train_pts),
+        "n_test_pt": len(test_pts),
+        "test_pairs": [list(converted["pairs"][p]) for p, f in enumerate(fold_of_pair) if f == fold],
+        "scoring": {"point": point, "interval": interval},
+    }
+
+
 def verify_smoke(converted: dict, tar_path: str, zip_path: str) -> dict:
     """The pre-registered pre-run gate, WITHOUT a second 31-minute
     conversion: both archives' md5 against the committed verifier's own
@@ -408,6 +505,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=7)
     parser.add_argument("--min-new-covered", type=int, default=2, dest="min_new_covered")
     parser.add_argument("--tie-tolerance", type=float, default=None, dest="tie_tolerance")
+    parser.add_argument("--column", choices=("hard", "soft"), default="hard",
+                        help="'hard' (default, preserves the baseline hard-search path; "
+                             "the result schema additionally records column/vocab) "
+                             "or the pre-registered noisy-OR soft-credit column "
+                             "(PREREG_SOFT.md section (b))")
+    parser.add_argument("--vocab", choices=("base", "duration"), default="base",
+                        help="'duration' adds sustained_240 to the converter's "
+                             "vocabulary (PREREG_SOFT.md section (c)); "
+                             "'base' (default) is the baseline's 11 relations")
     parser.add_argument("--smoke", action="store_true",
                         help=f"first {SMOKE_N_POS}+{SMOKE_N_NEG} pairs only (tests)")
     parser.add_argument("--skip-verify", action="store_true", dest="skip_verify",
@@ -453,12 +559,32 @@ def _smoke_subset(converted: dict) -> dict:
     }
 
 
+def _vocabulary_ceiling_note(vocab: str, *, pinned_corpus_verified: bool) -> str:
+    """Describe only corpus references established for this invocation."""
+    if not pinned_corpus_verified:
+        return (
+            "unverified or synthetic invocation; no pinned-corpus vocabulary reference "
+            "applies; no comparison with published 0.98 (different grid)"
+        )
+    if vocab == "duration":
+        return (
+            "duration-vocabulary definitional-body canon F1 0.9969 on the pinned corpus; "
+            "no comparison with published 0.98 (different grid)"
+        )
+    return (
+        "base-vocabulary definitional-body operating point F1 0.6599 on the pinned "
+        "corpus; weighted clauses are not bounded to this point; no comparison with "
+        "published 0.98 (different grid)"
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     from maritime_convert import convert
 
+    extra_relations = ("sustained_240",) if args.vocab == "duration" else ()
     t0 = time.monotonic()
-    converted = convert(args.tar, args.zip)
+    converted = convert(args.tar, args.zip, extra_relations=extra_relations)
     convert_s = time.monotonic() - t0
 
     if args.skip_verify:
@@ -481,15 +607,24 @@ def main(argv: list[str] | None = None) -> int:
     fold_records = []
     for fold in range(args.folds):
         t1 = time.monotonic()
-        record = run_fold(
-            fold, converted, fold_of_pair,
-            seed=args.seed, min_new_covered=args.min_new_covered,
-            tie_tolerance=args.tie_tolerance,
-        )
+        if args.column == "soft":
+            record = run_fold_soft(
+                fold, converted, fold_of_pair, seed=args.seed, vocab=args.vocab,
+            )
+        else:
+            record = run_fold(
+                fold, converted, fold_of_pair,
+                seed=args.seed, min_new_covered=args.min_new_covered,
+                tie_tolerance=args.tie_tolerance,
+            )
         record["wall_s"] = time.monotonic() - t1
         fold_records.append(record)
         point = record["scoring"]["point"]
-        print(f"fold {fold}: clauses={record['clauses']} point_f1={point['f1']:.4f}")
+        if args.column == "soft":
+            print(f"fold {fold}: gated={record['n_bodies_gated']}/{record['n_bodies_pool']} "
+                  f"point_f1={point['f1']:.4f}")
+        else:
+            print(f"fold {fold}: clauses={record['clauses']} point_f1={point['f1']:.4f}")
 
     tp = sum(r["scoring"]["point"]["tp"] for r in fold_records)
     fp = sum(r["scoring"]["point"]["fp"] for r in fold_records)
@@ -514,11 +649,14 @@ def main(argv: list[str] | None = None) -> int:
     }
     fold_f1s = [r["scoring"]["point"]["f1"] for r in fold_records]
 
+    vocabulary_ceiling_note = _vocabulary_ceiling_note(
+        args.vocab, pinned_corpus_verified=not args.skip_verify,
+    )
+
     result = {
         "protocol": "maritime rendezVous direct-target CV "
                     "(docs/experiments/maritime/README.md pre-registration)",
-        "vocabulary_ceiling_note": "point-F1 vocabulary ceiling ~0.66 (pre-registered); "
-                                   "no comparison with published 0.98 (different grid)",
+        "vocabulary_ceiling_note": vocabulary_ceiling_note,
         "archives": {"tar": args.tar, "zip": args.zip},
         "verify_smoke": verify,
         "params": {
@@ -529,6 +667,7 @@ def main(argv: list[str] | None = None) -> int:
             "max_literals": MAX_LITERALS, "max_clauses": MAX_CLAUSES,
             "null_permutations": NULL_PERMUTATIONS, "null_quantile": NULL_QUANTILE,
             "smoke": args.smoke,
+            "column": args.column, "vocab": args.vocab,
         },
         "candidate_vocabulary": sorted(converted["relations"]),
         "fold_of_pair": fold_of_pair,
