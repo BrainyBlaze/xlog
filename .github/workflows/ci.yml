@@ -33,9 +33,14 @@ jobs:
           set -euo pipefail
           sudo apt-get update
           sudo apt-get install -y shellcheck
-          curl -sSL \
-            "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz" \
-            | tar -xz actionlint
+          actionlint_archive=$(mktemp)
+          curl --fail --show-error --location \
+            --retry 3 \
+            --retry-all-errors \
+            --output "$actionlint_archive" \
+            "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
+          tar -tzf "$actionlint_archive" actionlint >/dev/null
+          tar -xzf "$actionlint_archive" actionlint
           install actionlint /usr/local/bin/actionlint
 
       - name: Run actionlint
