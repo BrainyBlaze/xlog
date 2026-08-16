@@ -405,6 +405,49 @@ impl Lowerer {
         Ok(())
     }
 
+    /// Reject an `is` expression whose target is already bound on the path that
+    /// production lowering will execute. Positive atoms are joined before any
+    /// arithmetic binding, then `is` expressions bind their targets in source order.
+    fn validate_is_expr_targets_are_fresh(program: &Program) -> Result<()> {
+        for rule in &program.rules {
+            let mut bound_variables = HashSet::new();
+            for literal in &rule.body {
+                let BodyLiteral::Positive(atom) = literal else {
+                    continue;
+                };
+                bound_variables.extend(
+                    atom.variables()
+                        .into_iter()
+                        .filter(|variable| *variable != "_")
+                        .map(str::to_string),
+                );
+            }
+
+            for literal in &rule.body {
+                let BodyLiteral::IsExpr(is_expr) = literal else {
+                    continue;
+                };
+                if bound_variables.contains(&is_expr.target) {
+                    return Err(XlogError::Compilation(format!(
+                        "Variable {} already bound; 'is' requires fresh variable",
+                        is_expr.target
+                    )));
+                }
+                if is_expr
+                    .expr
+                    .variables()
+                    .into_iter()
+                    .any(|variable| !bound_variables.contains(variable))
+                {
+                    break;
+                }
+                bound_variables.insert(is_expr.target.clone());
+            }
+        }
+
+        Ok(())
+    }
+
     fn infer_aggregate_result_type(
         rule: &Rule,
         aggregate: &crate::ast::AggExpr,
@@ -822,6 +865,7 @@ impl Lowerer {
     /// an execution plan. The inferred schemas remain available through
     /// [`Lowerer::schemas`].
     pub fn infer_and_validate_schemas(&mut self, program: &Program) -> Result<()> {
+        Self::validate_is_expr_targets_are_fresh(program)?;
         self.infer_schemas(program)?;
         self.validate_rule_types(program)
     }

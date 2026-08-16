@@ -647,6 +647,73 @@ mod tests {
     }
 
     #[test]
+    fn compiler_reports_bound_is_target_before_arithmetic_type_mismatch() {
+        let error = Compiler::new()
+            .compile(
+                r#"
+                val(10).
+                bad(Z) :- val(Z), Z is Z + 1.
+                ?- bad(Z).
+                "#,
+            )
+            .expect_err("an already-bound is-expression target must be rejected");
+
+        assert_eq!(
+            error.to_string(),
+            "Compilation error: Variable Z already bound; 'is' requires fresh variable"
+        );
+    }
+
+    #[test]
+    fn compiler_rejects_is_target_bound_by_an_earlier_is_expression() {
+        let error = Compiler::new()
+            .compile(
+                r#"
+                val(10).
+                bad(Z) :- val(X), Z is X + X, Z is X + X.
+                ?- bad(Z).
+                "#,
+            )
+            .expect_err("a prior is-expression target must stay bound");
+
+        assert_eq!(
+            error.to_string(),
+            "Compilation error: Variable Z already bound; 'is' requires fresh variable"
+        );
+    }
+
+    #[test]
+    fn compiler_accepts_fresh_chained_is_targets() {
+        Compiler::new()
+            .compile(
+                r#"
+                val(10).
+                good(Z) :- val(X), Y is X + X, Z is Y + Y.
+                ?- good(Z).
+                "#,
+            )
+            .expect("distinct source-ordered is-expression targets must remain valid");
+    }
+
+    #[test]
+    fn compiler_reports_unbound_is_input_before_a_later_duplicate_target() {
+        let error = Compiler::new()
+            .compile(
+                r#"
+                seed(1).
+                bad(Z) :- seed(X), Z is U + 1, Z is 1 + 1.
+                ?- bad(Z).
+                "#,
+            )
+            .expect_err("an unreachable later binding must not preempt the first is error");
+
+        assert_eq!(
+            error.to_string(),
+            "Compilation error: Variable U used in arithmetic but not bound"
+        );
+    }
+
+    #[test]
     fn test_compile_transitive_closure() {
         let mut compiler = Compiler::new();
         let result = compiler.compile(

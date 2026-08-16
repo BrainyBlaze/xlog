@@ -1877,8 +1877,9 @@ fn execute_accepted_gelfond1991_possible_literal(
         #pragma epistemic_mode = g91
         pred seed(u32).
         pred p(u32).
+        pred accepted(u32).
 
-        p(X) :- seed(X), possible p(X).
+        accepted(X) :- seed(X), possible p(X).
         "#,
     )
     .expect("parse Gelfond-1991 compatibility accepted solver evidence program");
@@ -1890,6 +1891,7 @@ fn execute_accepted_gelfond1991_possible_literal(
         executor.register_relation(*rel, name);
     }
     executor.put_relation("seed", upload_unary_u32(provider, &[7], "x"));
+    executor.put_relation("p", upload_unary_u32(provider, &[7], "x"));
 
     let result = executor
         .execute_epistemic_gpu_execution(

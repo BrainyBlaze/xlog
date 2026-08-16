@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 
 use cudarc::driver::sys;
@@ -9,6 +9,7 @@ use xlog_cuda::device_runtime::{
 };
 use xlog_cuda::memory::TrackedCudaSlice;
 use xlog_cuda::{CudaBuffer, CudaDevice, CudaKernelProvider, GpuMemoryManager};
+use xlog_gpu::logic::LogicProgram;
 use xlog_ir::{
     EirAtom, EirEpistemicLiteral, EirEpistemicMode, EirEpistemicOp, EirTerm,
     EpistemicCpuFallbackCounters, EpistemicGpuPlan, EpistemicReductionPlan,
@@ -16589,9 +16590,14 @@ fn accepted_gpu_execution_rejects_reduced_constraint_violation() {
     };
 
     match err {
-        xlog_core::XlogError::Execution(message) => {
-            assert!(message.contains("epistemic GPU reduced constraint violation"));
-            assert!(message.contains("__xlog_constraint_"));
+        xlog_core::XlogError::ConstraintViolation {
+            constraint_index,
+            relation_name,
+            witness_rows,
+        } => {
+            assert_eq!(constraint_index, 0);
+            assert_eq!(relation_name, "__xlog_constraint_0");
+            assert_eq!(witness_rows, 1);
         }
         other => panic!("expected reduced constraint execution error, got {other:?}"),
     }
@@ -18566,14 +18572,13 @@ fn g91_self_supported_possible_reaches_gpu_runtime_path() {
         return;
     };
 
-    let program = parse_program(
-        r#"
+    let source = r#"
         #pragma epistemic_mode = g91
         pred p().
         p() :- possible p().
-        "#,
-    )
-    .expect("parse G91 self-supported possible fixture");
+        ?- p().
+        "#;
+    let program = parse_program(source).expect("parse G91 self-supported possible fixture");
     let oracle = run_generate_propagate_test_with_mode(
         &program,
         vec![
@@ -18584,78 +18589,34 @@ fn g91_self_supported_possible_reaches_gpu_runtime_path() {
         EpistemicMode::G91,
     )
     .expect("run G91 compatibility oracle");
-    let executable = compile_epistemic_gpu_execution_with_stats_snapshot(&program, None)
-        .expect("compile G91 self-supported possible executable");
+    let oracle_output_rows =
+        u64::try_from(oracle.trace.accepted_world_views).expect("G91 oracle rows fit u64");
 
-    assert_eq!(executable.gpu_plan.mode, EirEpistemicMode::G91);
+    let executable = LogicProgram::compile(source)
+        .expect("compile G91 self-supported possible through production entry");
+    let plan_json = executable
+        .epistemic_plan_json()
+        .expect("G91 compatibility plan provenance");
+    assert!(plan_json.contains("epistemic_g91_compatibility_gpu"));
+    assert!(plan_json.contains("\"reduction\":\"g91_tuple_compatibility\""));
+    assert!(plan_json.contains("\"snapshot_relations\":{\"p\":\"__xlog_g91_snapshot_p\"}"));
+    assert!(plan_json.contains("\"convergence_predicates\":[\"p\"]"));
+    assert!(plan_json.contains("\"gpu_passes\":[\"upper_bound\",\"refinement\"]"));
+    assert!(plan_json.contains("\"cpu_fallback_total_zero\":true"));
 
-    let mut executor =
-        Executor::new_with_config(Arc::clone(&fix.provider), RuntimeConfig::default());
-    for (name, rel_id) in &executable.relation_ids {
-        executor.register_relation(*rel_id, name);
-    }
-    // The reduced G91 program is an empty-body nullary fact; seed it through
-    // the existing relation buffer path used by production fact loading.
-    executor.put_relation("p", upload_nullary(&fix.memory, 1));
-
-    let result = executor
-        .execute_epistemic_gpu_execution(
-            &executable,
-            EpistemicGpuWorkspaceCapacities {
-                max_candidates: 2,
-                max_worlds: 1,
-                max_models_per_reduction: 1,
-            },
-        )
-        .expect("execute G91 self-supported possible fixture");
-
+    let result = executable
+        .evaluate_with_options(Arc::clone(&fix.provider), HashMap::new(), true)
+        .expect("execute G91 self-supported possible through compatibility fixpoint");
+    assert_eq!(result.queries.len(), 1);
+    assert_eq!(result.queries[0].relation_name, "p");
     assert_eq!(
-        result.prepared.preflight.epistemic_mode,
-        EirEpistemicMode::G91
+        result.queries[0].buffer.num_rows(),
+        oracle_output_rows,
+        "production G91 compatibility output must match the semantic oracle"
     );
-    assert_eq!(result.prepared.preflight.possible_operator_count, 1);
-    assert_eq!(
-        result.model_membership.membership_source,
-        EpistemicGpuModelMembershipSource::StableModelTupleBuffer
-    );
-    assert_eq!(result.semantic_trace.accepted_world_views, 1);
-    assert_eq!(
-        result.semantic_trace.generated_candidates,
-        oracle.trace.generated
-    );
-    assert_eq!(
-        result.semantic_trace.propagated_candidates,
-        oracle.trace.propagated
-    );
-    assert_eq!(result.semantic_trace.tested_candidates, oracle.trace.tested);
-    assert_eq!(
-        result.semantic_trace.accepted_candidates,
-        oracle.trace.accepted
-    );
-    assert_eq!(
-        result.semantic_trace.accepted_world_views,
-        oracle.trace.accepted_world_views
-    );
-    assert_eq!(
-        result.semantic_trace.rejected_candidates,
-        oracle.trace.rejected
-    );
-    assert_eq!(
-        result.semantic_trace.accepted_candidate_indices,
-        oracle.accepted_candidate_indices
-    );
-    assert_eq!(
-        result.semantic_trace.rejected_candidate_indices,
-        oracle.rejected_candidate_indices
-    );
-    assert_eq!(result.semantic_trace.cpu_candidate_enumerations, 0);
-    assert_eq!(result.semantic_trace.cpu_world_view_validations, 0);
-    assert_eq!(result.transfer_budget.tracked_dtoh_calls, 0);
-    assert_eq!(
-        read_device_row_count(&fix.provider, &result.final_output).expect("final row count"),
-        1,
-        "explicit G91 compatibility should accept and materialize self-supported p()"
-    );
+    let stats = result.stats.expect("iterative G91 execution stats");
+    assert!(!stats.strata.is_empty());
+    assert_eq!(stats.total_output_rows, oracle_output_rows);
 }
 
 #[test]
@@ -18665,15 +18626,15 @@ fn faeel_independently_founded_self_possible_reaches_gpu_runtime_path() {
         return;
     };
 
-    let program = parse_program(
-        r#"
+    let source = r#"
         pred seed().
         pred p().
+        seed().
         p() :- seed().
         p() :- possible p().
-        "#,
-    )
-    .expect("parse independently founded FAEEL fixture");
+        ?- p().
+        "#;
+    let program = parse_program(source).expect("parse independently founded FAEEL fixture");
     let oracle = run_generate_propagate_test(
         &program,
         vec![
@@ -18683,72 +18644,29 @@ fn faeel_independently_founded_self_possible_reaches_gpu_runtime_path() {
         GeneratePropagateTestConfig { max_candidates: 2 },
     )
     .expect("run independently founded FAEEL oracle");
-    let executable = compile_epistemic_gpu_execution_with_stats_snapshot(&program, None)
-        .expect("compile independently founded FAEEL executable");
+    let oracle_output_rows =
+        u64::try_from(oracle.trace.accepted_world_views).expect("FAEEL oracle rows fit u64");
 
-    let mut executor =
-        Executor::new_with_config(Arc::clone(&fix.provider), RuntimeConfig::default());
-    for (name, rel_id) in &executable.relation_ids {
-        executor.register_relation(*rel_id, name);
-    }
-    executor.put_relation("seed", upload_nullary(&fix.memory, 1));
-    executor.put_relation("p", upload_nullary(&fix.memory, 0));
+    let executable = LogicProgram::compile(source)
+        .expect("compile independently founded FAEEL through production entry");
+    let plan_json = executable
+        .epistemic_plan_json()
+        .expect("FAEEL recursive reduction provenance");
+    assert!(plan_json.contains("ordinary_recursive_modal_reduction"));
 
-    let result = executor
-        .execute_epistemic_gpu_execution(
-            &executable,
-            EpistemicGpuWorkspaceCapacities {
-                max_candidates: 2,
-                max_worlds: 1,
-                max_models_per_reduction: 1,
-            },
-        )
-        .expect("execute independently founded FAEEL fixture");
-
+    let result = executable
+        .evaluate_with_options(Arc::clone(&fix.provider), HashMap::new(), true)
+        .expect("execute independently founded FAEEL through founded fixpoint");
+    assert_eq!(result.queries.len(), 1);
+    assert_eq!(result.queries[0].relation_name, "p");
     assert_eq!(
-        result.prepared.preflight.epistemic_mode,
-        EirEpistemicMode::Faeel
+        result.queries[0].buffer.num_rows(),
+        oracle_output_rows,
+        "production FAEEL founded output must match the semantic oracle"
     );
-    assert_eq!(result.prepared.preflight.possible_operator_count, 1);
-    assert_eq!(
-        result.model_membership.membership_source,
-        EpistemicGpuModelMembershipSource::StableModelTupleBuffer
-    );
-    assert_eq!(result.semantic_trace.accepted_world_views, 1);
-    assert_eq!(
-        result.semantic_trace.generated_candidates,
-        oracle.trace.generated
-    );
-    assert_eq!(
-        result.semantic_trace.propagated_candidates,
-        oracle.trace.propagated
-    );
-    assert_eq!(result.semantic_trace.tested_candidates, oracle.trace.tested);
-    assert_eq!(
-        result.semantic_trace.accepted_candidates,
-        oracle.trace.accepted
-    );
-    assert_eq!(
-        result.semantic_trace.accepted_world_views,
-        oracle.trace.accepted_world_views
-    );
-    assert_eq!(
-        result.semantic_trace.rejected_candidates,
-        oracle.trace.rejected
-    );
-    assert_eq!(
-        result.semantic_trace.accepted_candidate_indices,
-        oracle.accepted_candidate_indices
-    );
-    assert_eq!(
-        result.semantic_trace.rejected_candidate_indices,
-        oracle.rejected_candidate_indices
-    );
-    assert_eq!(
-        read_device_row_count(&fix.provider, &result.final_output).expect("final row count"),
-        1,
-        "independently founded self-possible FAEEL fixture should materialize p()"
-    );
+    let stats = result.stats.expect("iterative FAEEL execution stats");
+    assert!(!stats.strata.is_empty());
+    assert_eq!(stats.total_output_rows, oracle_output_rows);
 }
 
 #[test]
@@ -18762,12 +18680,13 @@ fn accepted_g91_and_faeel_modes_gate_probabilistic_production_trace() {
         r#"
         #pragma epistemic_mode = g91
         pred p().
-        p() :- possible p().
+        pred accepted().
+        accepted() :- possible p().
         "#,
     )
-    .expect("parse G91 self-supported possible fixture");
+    .expect("parse nonrecursive G91 evidence fixture");
     let g91_executable = compile_epistemic_gpu_execution_with_stats_snapshot(&g91_program, None)
-        .expect("compile G91 self-supported possible executable");
+        .expect("compile nonrecursive G91 evidence executable");
     let mut g91_executor =
         Executor::new_with_config(Arc::clone(&fix.provider), RuntimeConfig::default());
     for (name, rel_id) in &g91_executable.relation_ids {
@@ -18783,7 +18702,7 @@ fn accepted_g91_and_faeel_modes_gate_probabilistic_production_trace() {
                 max_models_per_reduction: 1,
             },
         )
-        .expect("execute G91 self-supported possible fixture");
+        .expect("execute nonrecursive G91 evidence fixture");
     assert_eq!(
         g91_result.prepared.preflight.epistemic_mode,
         EirEpistemicMode::G91
@@ -18791,23 +18710,21 @@ fn accepted_g91_and_faeel_modes_gate_probabilistic_production_trace() {
 
     let faeel_program = parse_program(
         r#"
-        pred seed().
         pred p().
-        p() :- seed().
-        p() :- possible p().
+        pred accepted().
+        accepted() :- know p().
         "#,
     )
-    .expect("parse independently founded FAEEL fixture");
+    .expect("parse nonrecursive FAEEL evidence fixture");
     let faeel_executable =
         compile_epistemic_gpu_execution_with_stats_snapshot(&faeel_program, None)
-            .expect("compile independently founded FAEEL executable");
+            .expect("compile nonrecursive FAEEL evidence executable");
     let mut faeel_executor =
         Executor::new_with_config(Arc::clone(&fix.provider), RuntimeConfig::default());
     for (name, rel_id) in &faeel_executable.relation_ids {
         faeel_executor.register_relation(*rel_id, name);
     }
-    faeel_executor.put_relation("seed", upload_nullary(&fix.memory, 1));
-    faeel_executor.put_relation("p", upload_nullary(&fix.memory, 0));
+    faeel_executor.put_relation("p", upload_nullary(&fix.memory, 1));
     let faeel_result = faeel_executor
         .execute_epistemic_gpu_execution(
             &faeel_executable,
@@ -18817,7 +18734,7 @@ fn accepted_g91_and_faeel_modes_gate_probabilistic_production_trace() {
                 max_models_per_reduction: 1,
             },
         )
-        .expect("execute independently founded FAEEL fixture");
+        .expect("execute nonrecursive FAEEL evidence fixture");
     assert_eq!(
         faeel_result.prepared.preflight.epistemic_mode,
         EirEpistemicMode::Faeel
@@ -18883,12 +18800,13 @@ fn accepted_g91_and_faeel_modes_gate_solver_production_trace() {
         r#"
         #pragma epistemic_mode = g91
         pred p().
-        p() :- possible p().
+        pred accepted().
+        accepted() :- possible p().
         "#,
     )
-    .expect("parse G91 self-supported possible fixture");
+    .expect("parse nonrecursive G91 evidence fixture");
     let g91_executable = compile_epistemic_gpu_execution_with_stats_snapshot(&g91_program, None)
-        .expect("compile G91 self-supported possible executable");
+        .expect("compile nonrecursive G91 evidence executable");
     let mut g91_executor =
         Executor::new_with_config(Arc::clone(&fix.provider), RuntimeConfig::default());
     for (name, rel_id) in &g91_executable.relation_ids {
@@ -18904,7 +18822,7 @@ fn accepted_g91_and_faeel_modes_gate_solver_production_trace() {
                 max_models_per_reduction: 1,
             },
         )
-        .expect("execute G91 self-supported possible fixture");
+        .expect("execute nonrecursive G91 evidence fixture");
     assert_eq!(
         g91_result.prepared.preflight.epistemic_mode,
         EirEpistemicMode::G91
@@ -18912,23 +18830,21 @@ fn accepted_g91_and_faeel_modes_gate_solver_production_trace() {
 
     let faeel_program = parse_program(
         r#"
-        pred seed().
         pred p().
-        p() :- seed().
-        p() :- possible p().
+        pred accepted().
+        accepted() :- know p().
         "#,
     )
-    .expect("parse independently founded FAEEL fixture");
+    .expect("parse nonrecursive FAEEL evidence fixture");
     let faeel_executable =
         compile_epistemic_gpu_execution_with_stats_snapshot(&faeel_program, None)
-            .expect("compile independently founded FAEEL executable");
+            .expect("compile nonrecursive FAEEL evidence executable");
     let mut faeel_executor =
         Executor::new_with_config(Arc::clone(&fix.provider), RuntimeConfig::default());
     for (name, rel_id) in &faeel_executable.relation_ids {
         faeel_executor.register_relation(*rel_id, name);
     }
-    faeel_executor.put_relation("seed", upload_nullary(&fix.memory, 1));
-    faeel_executor.put_relation("p", upload_nullary(&fix.memory, 0));
+    faeel_executor.put_relation("p", upload_nullary(&fix.memory, 1));
     let faeel_result = faeel_executor
         .execute_epistemic_gpu_execution(
             &faeel_executable,
@@ -18938,7 +18854,7 @@ fn accepted_g91_and_faeel_modes_gate_solver_production_trace() {
                 max_models_per_reduction: 1,
             },
         )
-        .expect("execute independently founded FAEEL fixture");
+        .expect("execute nonrecursive FAEEL evidence fixture");
     assert_eq!(
         faeel_result.prepared.preflight.epistemic_mode,
         EirEpistemicMode::Faeel
