@@ -98,6 +98,7 @@ jobs:
             python3 \
             python3-dev \
             python3-pip
+          python3 -m pip install --no-cache-dir tomli==2.2.1
 
       - name: Checkout repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
@@ -158,6 +159,22 @@ jobs:
         if: github.event_name == 'workflow_dispatch'
         run: bash scripts/preflight_release_publish.sh
 
+      - name: Prepare unpublished changelog regeneration
+        if: github.event_name != 'workflow_dispatch'
+        run: |
+          set -euo pipefail
+          python3 scripts/prepare_release_changelog.py
+
+          unexpected=()
+          while IFS= read -r entry; do
+            [[ "$entry" == " M CHANGELOG.md" ]] || unexpected+=("$entry")
+          done < <(git status --porcelain=v1 --untracked-files=all)
+          if ((${#unexpected[@]} != 0)); then
+            echo "Changelog preparation changed unexpected repository paths:" >&2
+            printf '  %s\n' "${unexpected[@]}" >&2
+            exit 1
+          fi
+
       - name: Run release-plz
         id: release
         run: |
@@ -209,6 +226,7 @@ jobs:
               --git-token "$GITHUB_TOKEN" \
               --repo-url "https://github.com/${GITHUB_REPOSITORY}" \
               --config release-plz.toml \
+              --allow-dirty \
               -o json)
             echo "release_pr_output: $release_pr_output"
 

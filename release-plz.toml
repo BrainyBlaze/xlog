@@ -6,6 +6,19 @@ changelog_path = "CHANGELOG.md"
 max_analyze_commits = 5000
 pr_branch_prefix = "release-plz-"
 pr_labels = ["release"]
+pr_body = """
+## Workspace release
+
+This pull request prepares one shared XLOG workspace release.
+
+### Package targets
+
+{% for release in releases %}
+- `{{ release.package }}`: workspace target `{{ release.next_version }}`{% if release.previous_version != release.next_version and release.package != "pyxlog" and release.package != "xlog-neural" and release.package != "xlog-induce" %} (crates.io baseline `{{ release.previous_version }}`){% endif %}{% if release.package == "pyxlog" %}; Python artifacts are published separately to PyPI{% elif release.package == "xlog-neural" or release.package == "xlog-induce" %}; workspace-only package, not published to crates.io{% endif %}
+{% endfor %}
+
+Review the generated `CHANGELOG.md` for package-specific changes. Publication remains a separate maintainer action after the complete GPU release gate passes.
+"""
 # Release worthiness is enforced as ONE workspace-level gate in
 # .github/workflows/release-plz.yml, not per package: a per-package
 # `release_commits` filter over a shared [workspace.package].version
@@ -14,6 +27,31 @@ pr_labels = ["release"]
 # release-plz's own cargo update.
 git_release_enable = false
 git_tag_enable = false
+
+[changelog]
+# Package labels distinguish the ten sections in the shared changelog. Only
+# xlog-cli owns a Git tag, so only its heading receives a compare link.
+body = """
+## {{ package }} [{{ version }}]{% if package == "xlog-cli" and release_link %}({{ release_link }}){% endif %} - {{ timestamp | date(format="%Y-%m-%d") }}
+
+{% for group, commits in commits | group_by(attribute="group") %}
+### {{ group | upper_first }}
+
+{% for commit in commits %}
+{%- if commit.scope -%}
+- *({{commit.scope}})* {% if commit.breaking %}[**breaking**] {% endif %}{{ commit.message }}{%- if commit.links %} ({% for link in commit.links %}[{{link.text}}]({{link.href}}) {% endfor -%}){% endif %}
+{% else -%}
+- {% if commit.breaking %}[**breaking**] {% endif %}{{ commit.message }}
+{% endif -%}
+{% endfor -%}
+{% endfor %}
+"""
+commit_preprocessors = [
+  { pattern = '^([A-Za-z][A-Za-z0-9-]*)!\(([^()]+)\):', replace = '${1}(${2})!:' },
+  { pattern = '^Merge [A-Z][A-Z0-9-]* epistemic possible-source probes into main$', replace = 'feat(runtime): expose epistemic uncertainty over accepted world views' },
+  { pattern = 'apply rustfmt to the [A-Z][A-Z0-9-]* epistemic sources', replace = 'format accepted-world-view epistemic exports' },
+  { pattern = '(?m)\Afix\(logic\): preserve predicate unions and recursive epistemic semantics \(#195\)$', replace = 'fix(logic): classify modal dependencies before single-pass planning, routing through Generate-Propagate-Test for acyclic programs, founded least fixpoints for positive FAEEL cycles, greatest compatible exact-tuple fixpoints for supported positive Gelfond-1991 possibility cycles, and GPU-backed WFS for supported cycles through negation; compute a GPU upper bound and reevaluate against frozen relation snapshots until concrete tuples converge, so disjoint tuple domains cannot manufacture support; return the empty founded extension for unseeded FAEEL cycles, including `p() :- possible p().` (#195)' },
+]
 
 [[package]]
 name = "xlog-core"
@@ -69,8 +107,8 @@ git_release_enable = true
 git_tag_enable = true
 git_tag_name = "xlog-cli-v{{ version }}"
 git_release_name = "xlog-cli v{{ version }}"
-# The shared workspace CHANGELOG.md contains one "## [x.y.z]" heading per crate
-# in the version group, which can leave "{{ changelog }}" empty at release time.
+# The shared CHANGELOG.md uses one package-labelled "## package [x.y.z]" heading
+# per crate, which can leave "{{ changelog }}" empty at release time.
 # Keep the install/docs footer so the GitHub release body is never blank.
 git_release_body = """
 {{ changelog }}

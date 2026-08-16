@@ -62,6 +62,36 @@ Workspace packages that are not published to crates.io:
 
 `pyxlog` ships as a Python package on PyPI, not as a crates.io Rust crate.
 
+## Release Automation Ownership
+
+XLOG versions the publishable crates and the Python package together, so release
+worthiness is a whole-workspace release-worthiness gate. The
+`.github/workflows/release-plz.yml` owns this gate: on a push to `main`, it looks
+for release-worthy Conventional Commits since the latest CLI tag before creating
+or updating the rolling release pull request.
+`release-plz.toml` does not decide release worthiness; it describes the shared
+version group, publication targets, generated changelog, release pull request,
+and tag formats after the workflow has admitted the workspace release.
+
+The workspace has a single authoritative Git tag, owned by `xlog-cli` and named
+`xlog-cli-v{{ version }}`. The shared changelog therefore uses package-labelled
+headings for all generated crate sections, while only the `xlog-cli` heading has
+a compare link. The preparation step removes unpublished sections for the
+current workspace version before regeneration, including sections written with
+the earlier unlabelled heading format. This keeps repeated automation runs
+convergent without changing sections once the authoritative tag exists.
+Release-plz attributes commits from the packaged file set for each crate, so a
+commit that changes a shared packaged file can appear in several package
+sections. Repeated appearances reflect package attribution; regeneration does
+not append another copy of an existing current-version section.
+
+A push to `main` can prepare a release pull request, but it cannot publish a
+release. Publication is a manual `workflow_dispatch` from the reviewed release
+commit. The operator must set `confirm_gpu_validation` and provide the GPU host,
+commit, and evidence after the complete release validation command has passed.
+Only that manual path invokes registry publication and creates the CLI tag; the
+Python wheel and GitHub release assets then use the same tag.
+
 ## CUDA Artifact Model
 
 XLOG runs GPU kernels, and those compiled kernels are not checked into the tree.

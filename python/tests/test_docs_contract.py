@@ -256,3 +256,17 @@ class LogicProgram:
     )
     assert "## LogicProgram" in result.stdout
     assert "compile(source: str, device: int = 0)" in result.stdout
+
+
+def test_release_process_documents_automation_ownership_and_single_tag_policy() -> None:
+    page = read("docs/architecture/release-process.mdx")
+
+    assert "whole-workspace release-worthiness gate" in page
+    assert "`.github/workflows/release-plz.yml` owns this gate" in page
+    assert "`release-plz.toml` does not decide release worthiness" in page
+    assert "single authoritative Git tag" in page
+    assert "`xlog-cli-v{{ version }}`" in page
+    assert "package-labelled" in page
+    assert "manual `workflow_dispatch`" in page
+    assert "confirm_gpu_validation" in page
+    assert "docs-internal" not in page

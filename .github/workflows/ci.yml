@@ -67,6 +67,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          fetch-depth: 0
 
       - name: Validate tracked files are not ignored
         shell: bash
@@ -80,6 +82,12 @@ jobs:
           fi
           echo "No tracked files match .gitignore rules."
 
+      - name: Validate newly introduced commit subjects
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: python3 scripts/validate_release_commit_subjects.py "$BASE_SHA" "$HEAD_SHA"
+
   python-contract:
     runs-on: ubuntu-latest
     steps:
@@ -90,10 +98,14 @@ jobs:
           python-version: "3.11"
 
       - name: Install pytest
-        run: python -m pip install --upgrade pip pytest
+        run: python -m pip install --upgrade pip pytest PyYAML
 
-      - name: Validate Python provenance stubs and documentation
-        run: python -m pytest -q python/tests/test_relation_provenance_contract.py
+      - name: Validate Python provenance, documentation, and release contracts
+        run: >-
+          python -m pytest -q
+          python/tests/test_relation_provenance_contract.py
+          python/tests/test_docs_contract.py
+          python/tests/test_release_changelog_generation.py
 
   # The CAVIAR and maritime example suites on CPU (review follow-up:
   # previously no workflow ran any of them; the maritime suites were
