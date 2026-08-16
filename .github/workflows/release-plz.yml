@@ -187,8 +187,14 @@ jobs:
             else
               range="HEAD"
             fi
-            if git log --format=%s "$range" | grep -qE '^(feat|fix|perf|refactor|docs|build|ci|test|revert)(\([^)]+\))?!?:' \
-              || git log --format=%B "$range" | grep -q 'BREAKING CHANGE:'; then
+            release_subject_pattern='^(feat|fix|perf|refactor|docs|build|ci|test|revert)(\([^)]+\))?!?:'
+            if ! printf '%s\n' 'feat(runtime)!: valid breaking subject' | grep -E "$release_subject_pattern" >/dev/null \
+              || printf '%s\n' 'feat!(runtime): malformed breaking subject' | grep -E "$release_subject_pattern" >/dev/null; then
+              echo "Release subject pattern must accept type(scope)!: and reject type!(scope):." >&2
+              exit 1
+            fi
+            if git log --format=%s "$range" | grep -E "$release_subject_pattern" >/dev/null \
+              || git log --format=%B "$range" | grep 'BREAKING CHANGE:' >/dev/null; then
               echo "Release-worthy commits found since ${last_tag:-repository start}."
             else
               echo "No release-worthy commits since ${last_tag:-repository start}; skipping release PR."
