@@ -236,6 +236,10 @@ pub struct Lowerer {
     sccs: Vec<Scc>,
     /// Maximum active rules for TensorMaskedJoin (default 32)
     max_active_rules: usize,
+    /// Predicate -> SCC id, rebuilt with `sccs` in `build_sccs`. A predicate
+    /// belongs to exactly one SCC, so lookups replace the linear scan that
+    /// made `find_scc_for_predicate` O(rules x SCCs).
+    scc_by_pred: std::collections::HashMap<String, u32>,
 }
 
 impl Default for Lowerer {
@@ -256,6 +260,7 @@ impl Lowerer {
             rel_ids: HashMap::new(),
             sccs: Vec::new(),
             max_active_rules: 32,
+            scc_by_pred: std::collections::HashMap::new(),
         }
     }
 
@@ -852,6 +857,7 @@ impl Lowerer {
         let scc_groups = find_sccs_for_lowering(&graph);
 
         self.sccs.clear();
+        self.scc_by_pred.clear();
         for (id, predicates) in scc_groups.iter().enumerate() {
             // An SCC is recursive if it has more than one predicate
             // or if a single predicate depends on itself positively
@@ -865,6 +871,9 @@ impl Lowerer {
                     .any(|e| e.to == *pred && e.dep_type == DepType::Positive)
             };
 
+            for p in predicates {
+                self.scc_by_pred.insert(p.clone(), id as u32);
+            }
             self.sccs.push(Scc {
                 id: id as u32,
                 predicates: predicates.clone(),
@@ -945,10 +954,12 @@ impl Lowerer {
         // Build strata from our strata field
         for (id, preds) in self.strata.iter().enumerate() {
             // Find which SCCs belong to this stratum
+            let pred_set: std::collections::HashSet<&str> =
+                preds.iter().map(|s| s.as_str()).collect();
             let scc_ids: Vec<u32> = self
                 .sccs
                 .iter()
-                .filter(|scc| scc.predicates.iter().any(|p| preds.contains(p)))
+                .filter(|scc| scc.predicates.iter().any(|p| pred_set.contains(p.as_str())))
                 .map(|scc| scc.id)
                 .collect();
 
@@ -969,8 +980,13 @@ impl Lowerer {
                 .push(rule);
         }
 
-        // Lower proper rules
-        for (pred, rules) in &rules_by_pred {
+        // Lower proper rules in sorted head order: HashMap iteration order
+        // varies per process, which used to make rule order (and RelId
+        // assignment for head-first predicates) process-nondeterministic.
+        let mut preds_sorted: Vec<&String> = rules_by_pred.keys().collect();
+        preds_sorted.sort();
+        for pred in preds_sorted {
+            let rules = &rules_by_pred[pred];
             let scc_id = self.find_scc_for_predicate(pred);
 
             for rule in rules {
@@ -1044,11 +1060,7 @@ impl Lowerer {
 
     /// Find the SCC ID for a predicate
     fn find_scc_for_predicate(&self, pred: &str) -> u32 {
-        self.sccs
-            .iter()
-            .find(|scc| scc.predicates.contains(&pred.to_string()))
-            .map(|scc| scc.id)
-            .unwrap_or(0)
+        self.scc_by_pred.get(pred).copied().unwrap_or(0)
     }
 
     /// Create metadata for a predicate

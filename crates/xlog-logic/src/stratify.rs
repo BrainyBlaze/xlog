@@ -25,7 +25,13 @@ pub(crate) struct DepEdge {
 pub struct DependencyGraph {
     /// Set of all predicate names in the graph.
     pub predicates: HashSet<String>,
-    pub(crate) edges: Vec<DepEdge>,
+    /// Private so every insertion goes through `add_edge`, which keeps
+    /// `adjacency` in sync — a bare `edges.push` would silently drop the edge
+    /// from `outgoing()`.
+    edges: Vec<DepEdge>,
+    /// Outgoing-edge indices per predicate, kept in insertion order so
+    /// `outgoing()` returns edges exactly as the linear scan over `edges` did.
+    adjacency: std::collections::HashMap<String, Vec<usize>>,
 }
 
 impl DependencyGraph {
@@ -42,11 +48,25 @@ impl DependencyGraph {
     pub(crate) fn add_edge(&mut self, from: String, to: String, dep_type: DepType) {
         self.predicates.insert(from.clone());
         self.predicates.insert(to.clone());
+        self.adjacency
+            .entry(from.clone())
+            .or_default()
+            .push(self.edges.len());
         self.edges.push(DepEdge { from, to, dep_type });
     }
 
     pub(crate) fn outgoing(&self, pred: &str) -> Vec<&DepEdge> {
-        self.edges.iter().filter(|e| e.from == pred).collect()
+        match self.adjacency.get(pred) {
+            Some(idxs) => idxs
+                .iter()
+                .map(|&i| {
+                    let edge = &self.edges[i];
+                    debug_assert_eq!(edge.from, pred, "adjacency index out of sync");
+                    edge
+                })
+                .collect(),
+            None => Vec::new(),
+        }
     }
 }
 
@@ -166,7 +186,12 @@ fn find_sccs(graph: &DependencyGraph) -> Vec<Vec<String>> {
         }
     }
 
-    for pred in &graph.predicates {
+    // Deterministic visit order: `predicates` is a HashSet, whose iteration
+    // order varies per process and used to make SCC ids (and every downstream
+    // RelId assignment) process-nondeterministic.
+    let mut preds_sorted: Vec<&String> = graph.predicates.iter().collect();
+    preds_sorted.sort();
+    for pred in preds_sorted {
         if !indices.contains_key(pred) {
             strongconnect(
                 pred,
@@ -280,6 +305,12 @@ pub fn stratify(program: &Program) -> Result<Vec<Stratum>> {
 
     for (pred, stratum) in stratum_map {
         strata[stratum].predicates.push(pred);
+    }
+
+    // `stratum_map` is a HashMap, so the drain order above varies per process;
+    // sort so `Stratum::predicates` is deterministic output.
+    for stratum in &mut strata {
+        stratum.predicates.sort();
     }
 
     strata.retain(|s| !s.predicates.is_empty());
