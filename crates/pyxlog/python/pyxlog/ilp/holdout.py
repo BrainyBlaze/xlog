@@ -93,7 +93,8 @@ def loo_holdout_f1(
                     source, device=config.device, memory_mb=config.memory_mb,
                 )
             trial = base.compile_variant(trial_source)
-            trial.evaluate()
+            # No evaluate(): compile already executed the plan; evaluate() on a
+            # fresh program only reloads the same facts and re-runs the same plan.
         except Exception:
             fold_f1s.append(0.0)
             continue
@@ -168,7 +169,8 @@ def k_fold_holdout_f1_and_variance(
                     source, device=config.device, memory_mb=config.memory_mb,
                 )
             trial = base.compile_variant(trial_source)
-            trial.evaluate()
+            # No evaluate(): compile already executed the plan; evaluate() on a
+            # fresh program only reloads the same facts and re-runs the same plan.
         except Exception:
             fold_f1s.append(0.0)
             continue

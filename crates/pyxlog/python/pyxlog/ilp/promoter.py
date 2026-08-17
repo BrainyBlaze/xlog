@@ -392,7 +392,8 @@ def _scan_ambiguity(
             # Variant of `prog`: same facts, one committed rule — reuses the
             # provider and uploaded facts instead of a full fresh compile.
             trial = prog.compile_variant(trial_source)
-            trial.evaluate()
+            # No evaluate(): compile already executed the plan; evaluate() on a
+            # fresh program only reloads the same facts and re-runs the same plan.
 
             all_pos = all(trial.fact_exists(r, v) for r, v in positives)
             no_neg = not any(trial.fact_exists(r, v) for r, v in negatives)
