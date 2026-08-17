@@ -135,6 +135,7 @@ jobs:
           python/tests/test_maritime_convert.py
           python/tests/test_maritime_cv.py
           python/tests/test_maritime_soft.py
+          python/tests/test_maritime_online.py
 
   fmt:
     runs-on: ubuntu-latest
