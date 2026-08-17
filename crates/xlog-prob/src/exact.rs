@@ -1,8 +1,12 @@
 //! Exact probabilistic inference via GPU-native Decision-DNNF knowledge compilation
 //! and weighted model counting.
 
+#[cfg(feature = "host-io")]
+use std::collections::BTreeMap;
 use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, Mutex};
+#[cfg(feature = "host-io")]
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use cudarc::driver::LaunchConfig;
 use xlog_core::{MemoryBudget, Result, ScalarType, XlogError};
@@ -17,8 +21,9 @@ use crate::compilation::gpu_cnf::GpuCnfVarTables;
 use crate::compilation::gpu_weights::map_nodes_to_vars_gpu;
 use crate::compilation::gpu_weights::{build_evidence_by_var_gpu, build_weights_gpu};
 use crate::compilation::{
-    compile_gpu_d4_and_verify_cached, encode_cnf_gpu, CircuitCompileProfile, DeviceRandomVarList,
-    GpuCompileConfig, GpuPirGraph, GpuPirRoots,
+    compile_gpu_d4_and_verify_cached_with_ledger, encode_cnf_gpu, CircuitCompilationContext,
+    CircuitCompilationLedger, CircuitCompileProfile, DeviceRandomVarList, GpuCompileConfig,
+    GpuPirGraph, GpuPirRoots,
 };
 #[cfg(feature = "host-io")]
 use crate::logsumexp::{validate_circuit_gradient_values, validate_circuit_value};
@@ -95,10 +100,46 @@ struct GpuExactState {
     provider: Arc<CudaKernelProvider>,
     cache: Mutex<GpuCircuitCache>,
     handle: GpuCircuitCacheHandle,
+    #[cfg(feature = "host-io")]
+    circuit_generation: u64,
+    #[cfg(feature = "host-io")]
+    compilation_ledger: Arc<CircuitCompilationLedger>,
+    invalid_reason: OnceLock<String>,
     /// Device-resident batched query-var metadata, keyed by the host vector of
     /// CNF query vars. Lets a warm training loop reuse a single upload instead
     /// of re-uploading (a tracked htod) on every batched force call.
     query_var_batch_cache: Mutex<HashMap<Vec<u32>, Arc<TrackedCudaSlice<u32>>>>,
+}
+
+#[cfg(feature = "host-io")]
+static NEXT_EXACT_CIRCUIT_GENERATION: AtomicU64 = AtomicU64::new(1);
+
+/// Immutable identity of one successfully materialized exact GPU circuit.
+///
+/// The generation is process-local and allocated only after compilation or
+/// cache restoration has produced the handle stored by [`GpuExactState`].
+#[cfg(feature = "host-io")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ExactCircuitWitness {
+    pub(crate) circuit_generation: u64,
+    pub(crate) compiler_invocations: u64,
+    pub(crate) materializations: u64,
+    pub(crate) disk_cache_restores: u64,
+    pub(crate) gpu_cache_hits: u64,
+    pub(crate) cache_slot: u32,
+}
+
+#[cfg(feature = "host-io")]
+fn next_exact_circuit_generation() -> Result<u64> {
+    NEXT_EXACT_CIRCUIT_GENERATION
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |generation| {
+            generation.checked_add(1)
+        })
+        .map_err(|_| {
+            XlogError::Compilation(
+                "Exact circuit compilation generation counter overflowed".to_string(),
+            )
+        })
 }
 
 /// GPU device selection and memory budget for probabilistic inference.
@@ -130,17 +171,38 @@ impl Default for GpuConfig {
 }
 
 impl GpuExactState {
+    #[cfg(feature = "host-io")]
     fn new(
         provider: Arc<CudaKernelProvider>,
         cache: GpuCircuitCache,
         handle: GpuCircuitCacheHandle,
+        compilation_ledger: Arc<CircuitCompilationLedger>,
     ) -> Result<Self> {
+        let circuit_generation = next_exact_circuit_generation()?;
         Ok(Self {
             provider,
             cache: Mutex::new(cache),
             handle,
+            circuit_generation,
+            compilation_ledger,
+            invalid_reason: OnceLock::new(),
             query_var_batch_cache: Mutex::new(HashMap::new()),
         })
+    }
+
+    #[cfg(not(feature = "host-io"))]
+    fn new(
+        provider: Arc<CudaKernelProvider>,
+        cache: GpuCircuitCache,
+        handle: GpuCircuitCacheHandle,
+    ) -> Self {
+        Self {
+            provider,
+            cache: Mutex::new(cache),
+            handle,
+            invalid_reason: OnceLock::new(),
+            query_var_batch_cache: Mutex::new(HashMap::new()),
+        }
     }
 
     fn provider(&self) -> &Arc<CudaKernelProvider> {
@@ -149,6 +211,33 @@ impl GpuExactState {
 
     fn handle(&self) -> &GpuCircuitCacheHandle {
         &self.handle
+    }
+
+    #[cfg(feature = "host-io")]
+    fn compilation_witness(&self) -> ExactCircuitWitness {
+        let ledger = self.compilation_ledger.snapshot();
+        ExactCircuitWitness {
+            circuit_generation: self.circuit_generation,
+            compiler_invocations: ledger.compiler_invocations,
+            materializations: ledger.materializations,
+            disk_cache_restores: ledger.disk_cache_restores,
+            gpu_cache_hits: ledger.gpu_cache_hits,
+            cache_slot: self.handle.slot_index(),
+        }
+    }
+
+    #[cfg(feature = "host-io")]
+    fn invalidate(&self, reason: String) {
+        let _ = self.invalid_reason.set(reason);
+    }
+
+    fn ensure_usable(&self) -> Result<()> {
+        if let Some(reason) = self.invalid_reason.get() {
+            return Err(XlogError::Execution(format!(
+                "Exact GPU circuit state is permanently invalid after a failed device rollback: {reason}"
+            )));
+        }
+        Ok(())
     }
 
     /// Device-resident batched query vars for `query_vars_host`, uploading once
@@ -298,6 +387,28 @@ pub enum ProbVarInfo {
     Other,
 }
 
+#[cfg(feature = "host-io")]
+#[derive(Debug, Clone, Copy)]
+struct FactWeightChange {
+    entry_index: usize,
+    var: u32,
+    old_prob: f64,
+    new_prob: f64,
+    evidence: Option<bool>,
+}
+
+#[cfg(feature = "host-io")]
+fn fact_log_weights(prob: f64, evidence: Option<bool>) -> (f64, f64) {
+    let mut log_true = prob.ln();
+    let mut log_false = (1.0 - prob).ln();
+    match evidence {
+        Some(true) => log_false = f64::NEG_INFINITY,
+        Some(false) => log_true = f64::NEG_INFINITY,
+        None => {}
+    }
+    (log_true, log_false)
+}
+
 #[derive(Clone)]
 pub struct ExactDdnnfProgram {
     gpu: Option<Arc<GpuExactState>>,
@@ -331,6 +442,10 @@ pub struct ExactDdnnfProgram {
     /// `prob_var_map()` below — an empty map there does not mean the program
     /// has no probabilistic facts).
     prob_var_entries: Vec<(u32, ProbVarInfo)>,
+    /// Fixed evidence assignments keyed by CNF variable; mutable fact updates
+    /// consult this map to preserve the compile-time evidence mask.
+    #[cfg(feature = "host-io")]
+    fixed_evidence_by_var: BTreeMap<u32, bool>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -434,6 +549,218 @@ impl ExactDdnnfProgram {
             }
         }
         dense
+    }
+
+    #[cfg(feature = "host-io")]
+    pub(crate) fn checked_prob_var_map(&self) -> Result<Vec<ProbVarInfo>> {
+        self.ensure_usable()?;
+        Ok(self.prob_var_map())
+    }
+
+    /// Atomically replace probabilities for independent probabilistic facts.
+    ///
+    /// The complete batch is validated before any device write. Annotated-
+    /// disjunction choices and compiler-introduced variables are deliberately
+    /// immutable through this surface because changing them requires additional
+    /// normalization or has no source probability at all.
+    #[cfg(feature = "host-io")]
+    pub(crate) fn set_fact_probabilities(&mut self, updates: &BTreeMap<u32, f64>) -> Result<()> {
+        self.set_fact_probabilities_with_device_failures(updates, None, None)
+    }
+
+    #[cfg(feature = "host-io")]
+    fn set_fact_probabilities_with_device_failures(
+        &mut self,
+        updates: &BTreeMap<u32, f64>,
+        fail_after_successful_writes: Option<usize>,
+        fail_after_successful_rollback_writes: Option<usize>,
+    ) -> Result<()> {
+        if self.count_lift_gpu.is_some() {
+            return Err(XlogError::UnsupportedEpistemicConstruct {
+                construct: "mutable exact fact probabilities".to_string(),
+                context: "GPU count-lift exact programs do not expose CNF fact variables"
+                    .to_string(),
+            });
+        }
+        let state = self.gpu_state()?;
+        state.ensure_usable()?;
+        let dense = self.prob_var_map();
+        let mut changes = Vec::with_capacity(updates.len());
+        for (&var, &new_prob) in updates {
+            if var == 0 {
+                return Err(XlogError::Compilation(
+                    "Cannot update CNF variable 0: exact variables are 1-indexed".to_string(),
+                ));
+            }
+            if var > self.max_var || var as usize >= dense.len() {
+                return Err(XlogError::Compilation(format!(
+                    "Cannot update CNF variable {var}: valid range is 1..={}",
+                    self.max_var
+                )));
+            }
+            if !new_prob.is_finite() || !(0.0..=1.0).contains(&new_prob) {
+                return Err(XlogError::Compilation(format!(
+                    "Probability for CNF variable {var} must be finite and within [0, 1], got {new_prob}"
+                )));
+            }
+            match &dense[var as usize] {
+                ProbVarInfo::Fact { prob, .. } => {
+                    let entry_index = self
+                        .prob_var_entries
+                        .iter()
+                        .rposition(|(entry_var, info)| {
+                            *entry_var == var && matches!(info, ProbVarInfo::Fact { .. })
+                        })
+                        .ok_or_else(|| {
+                            XlogError::Compilation(format!(
+                                "CNF variable {var} fact metadata is unavailable"
+                            ))
+                        })?;
+                    changes.push(FactWeightChange {
+                        entry_index,
+                        var,
+                        old_prob: *prob,
+                        new_prob,
+                        evidence: self.fixed_evidence_by_var.get(&var).copied(),
+                    });
+                }
+                ProbVarInfo::Choice { .. } => {
+                    return Err(XlogError::UnsupportedEpistemicConstruct {
+                        construct: "mutable exact fact probabilities".to_string(),
+                        context: format!(
+                            "CNF variable {var} is an annotated-disjunction choice; only independent probabilistic facts are mutable"
+                        ),
+                    });
+                }
+                ProbVarInfo::Other => {
+                    return Err(XlogError::UnsupportedEpistemicConstruct {
+                        construct: "mutable exact fact probabilities".to_string(),
+                        context: format!(
+                            "CNF variable {var} is compiler-introduced or unmapped; only independent probabilistic facts are mutable"
+                        ),
+                    });
+                }
+            }
+        }
+
+        if changes.is_empty() {
+            return Ok(());
+        }
+
+        let mut cache = state
+            .cache
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let var_stride = cache.var_stride()? as usize;
+        let slot_start = state.handle().slot_index() as usize * var_stride;
+        let provider = state.provider.clone();
+        let mut successful_writes = 0usize;
+        let write_result: Result<()> = (|| {
+            for change in &changes {
+                let index = slot_start.checked_add(change.var as usize).ok_or_else(|| {
+                    XlogError::Compilation("fact weight index overflow".to_string())
+                })?;
+                let (new_log_true, new_log_false) =
+                    fact_log_weights(change.new_prob, change.evidence);
+                {
+                    let (log_true, _) = cache.var_log_weights_mut();
+                    let mut destination = log_true.slice_mut(index..index + 1);
+                    provider.htod_sync_copy_into_tracked(&[new_log_true], &mut destination)?;
+                }
+                successful_writes += 1;
+                if fail_after_successful_writes == Some(successful_writes) {
+                    return Err(XlogError::Kernel(
+                        "injected fact probability device-write failure".to_string(),
+                    ));
+                }
+                {
+                    let (_, log_false) = cache.var_log_weights_mut();
+                    let mut destination = log_false.slice_mut(index..index + 1);
+                    provider.htod_sync_copy_into_tracked(&[new_log_false], &mut destination)?;
+                }
+                successful_writes += 1;
+                if fail_after_successful_writes == Some(successful_writes) {
+                    return Err(XlogError::Kernel(
+                        "injected fact probability device-write failure".to_string(),
+                    ));
+                }
+            }
+            Ok(())
+        })();
+
+        if let Err(write_error) = write_result {
+            let mut successful_rollback_writes = 0usize;
+            let rollback_result: Result<()> = (|| {
+                for change in &changes {
+                    let index = slot_start.checked_add(change.var as usize).ok_or_else(|| {
+                        XlogError::Compilation("fact weight rollback index overflow".to_string())
+                    })?;
+                    let (old_log_true, old_log_false) =
+                        fact_log_weights(change.old_prob, change.evidence);
+                    {
+                        let (log_true, _) = cache.var_log_weights_mut();
+                        let mut destination = log_true.slice_mut(index..index + 1);
+                        provider.htod_sync_copy_into_tracked(&[old_log_true], &mut destination)?;
+                    }
+                    successful_rollback_writes += 1;
+                    if fail_after_successful_rollback_writes == Some(successful_rollback_writes) {
+                        return Err(XlogError::Kernel(
+                            "injected fact probability rollback failure".to_string(),
+                        ));
+                    }
+                    {
+                        let (_, log_false) = cache.var_log_weights_mut();
+                        let mut destination = log_false.slice_mut(index..index + 1);
+                        provider.htod_sync_copy_into_tracked(&[old_log_false], &mut destination)?;
+                    }
+                    successful_rollback_writes += 1;
+                    if fail_after_successful_rollback_writes == Some(successful_rollback_writes) {
+                        return Err(XlogError::Kernel(
+                            "injected fact probability rollback failure".to_string(),
+                        ));
+                    }
+                }
+                Ok(())
+            })();
+            if let Err(rollback_error) = rollback_result {
+                let combined = format!(
+                    "Fact probability device update failed ({write_error}); rollback also failed ({rollback_error})"
+                );
+                state.invalidate(combined.clone());
+                return Err(XlogError::Kernel(combined));
+            }
+            return Err(write_error);
+        }
+
+        for change in changes {
+            match &mut self.prob_var_entries[change.entry_index].1 {
+                ProbVarInfo::Fact { prob, .. } => *prob = change.new_prob,
+                _ => unreachable!("validated fact metadata changed while holding exclusive state"),
+            }
+        }
+        Ok(())
+    }
+
+    #[cfg(all(test, feature = "host-io"))]
+    pub(crate) fn set_fact_probabilities_with_device_failures_for_test(
+        &mut self,
+        updates: &BTreeMap<u32, f64>,
+        fail_after_successful_writes: Option<usize>,
+        fail_after_successful_rollback_writes: Option<usize>,
+    ) -> Result<()> {
+        self.set_fact_probabilities_with_device_failures(
+            updates,
+            fail_after_successful_writes,
+            fail_after_successful_rollback_writes,
+        )
+    }
+
+    #[cfg(feature = "host-io")]
+    pub(crate) fn ensure_usable(&self) -> Result<()> {
+        if let Some(state) = &self.gpu {
+            state.ensure_usable()?;
+        }
+        Ok(())
     }
 
     #[doc(hidden)]
@@ -596,6 +923,7 @@ impl ExactDdnnfProgram {
         expected_true: bool,
     ) -> Result<TrackedCudaSlice<f64>> {
         let state = self.gpu_state()?;
+        state.ensure_usable()?;
         let mut loss = state.provider.memory().alloc::<f64>(1)?;
         self.neural_backward_nll_buffers_inner(
             slots,
@@ -1404,6 +1732,7 @@ impl ExactDdnnfProgram {
                 query_grads: Vec::new(),
             });
         }
+        self.ensure_usable()?;
 
         let weights_len = if self.max_var == 0 {
             0
@@ -1570,6 +1899,8 @@ impl ExactDdnnfProgram {
                 gpu_config: config,
                 last_compile_profile: None,
                 prob_var_entries: Vec::new(),
+                #[cfg(feature = "host-io")]
+                fixed_evidence_by_var: BTreeMap::new(),
             });
         }
 
@@ -1591,6 +1922,8 @@ impl ExactDdnnfProgram {
                 gpu_config: config,
                 last_compile_profile: None,
                 prob_var_entries: Vec::new(),
+                #[cfg(feature = "host-io")]
+                fixed_evidence_by_var: BTreeMap::new(),
             });
         }
 
@@ -1746,6 +2079,45 @@ impl ExactDdnnfProgram {
             )?
         };
 
+        #[cfg(feature = "host-io")]
+        let fixed_evidence_by_var = {
+            if evidence_formulas.is_empty() {
+                BTreeMap::new()
+            } else {
+                let evidence_nodes = evidence_formulas
+                    .iter()
+                    .map(|(node, _, _)| node.as_u32())
+                    .collect::<Vec<_>>();
+                let evidence_vars = map_nodes_to_vars_gpu(
+                    &encoding.vars.node_var,
+                    &upload_u32(&provider, &evidence_nodes)?,
+                    encoding.vars.max_var,
+                    &provider,
+                )?;
+                let mut vars_host = vec![0u32; evidence_vars.len()];
+                provider
+                    .device()
+                    .inner()
+                    .dtoh_sync_copy_into(&evidence_vars, &mut vars_host)
+                    .map_err(|error| {
+                        XlogError::Kernel(format!(
+                            "Failed to read exact evidence CNF variables: {error}"
+                        ))
+                    })?;
+                let mut assignments = BTreeMap::new();
+                for (var, (_, value, _)) in vars_host.into_iter().zip(&evidence_formulas) {
+                    if let Some(previous) = assignments.insert(var, *value) {
+                        if previous != *value {
+                            return Err(XlogError::Compilation(format!(
+                                "Conflicting exact evidence assignments for CNF variable {var}"
+                            )));
+                        }
+                    }
+                }
+                assignments
+            }
+        };
+
         let weights = build_weights_gpu(
             &encoding.vars,
             &leaf_probs,
@@ -1778,14 +2150,18 @@ impl ExactDdnnfProgram {
         let cache_config = default_cache_config(&encoding.cnf, &compile_config)?;
 
         let mut cache = GpuCircuitCache::new(&provider, cache_config)?;
-        let (handle, compile_profile) = compile_gpu_d4_and_verify_cached(
+        let compilation_ledger = Arc::new(CircuitCompilationLedger::new());
+        let (handle, compile_profile) = compile_gpu_d4_and_verify_cached_with_ledger(
             &encoding.cnf,
             &encoding.decision_var_limit,
             &provider,
             &compile_config,
             &mut cache,
             &random_vars,
-            Some(canonical_cnf_hash),
+            CircuitCompilationContext {
+                canonical_cnf_hash: Some(canonical_cnf_hash),
+                ledger: compilation_ledger.as_ref(),
+            },
         )?;
         cache.store_weights(&handle, &weights.log_true, &weights.log_false)?;
 
@@ -1816,7 +2192,10 @@ impl ExactDdnnfProgram {
             }
         }
 
-        let state = GpuExactState::new(provider, cache, handle)?;
+        #[cfg(feature = "host-io")]
+        let state = GpuExactState::new(provider, cache, handle, compilation_ledger)?;
+        #[cfg(not(feature = "host-io"))]
+        let state = GpuExactState::new(provider, cache, handle);
 
         Ok(Self {
             gpu: Some(Arc::new(state)),
@@ -1828,12 +2207,15 @@ impl ExactDdnnfProgram {
             gpu_config: config,
             last_compile_profile: compile_profile,
             prob_var_entries,
+            #[cfg(feature = "host-io")]
+            fixed_evidence_by_var,
         })
     }
 
     #[cfg(feature = "host-io")]
     fn eval_log_z_gpu(&self, query_true: Option<u32>) -> Result<f64> {
         let state = self.gpu_state()?;
+        state.ensure_usable()?;
         let mut cache = state
             .cache
             .lock()
@@ -1893,11 +2275,19 @@ impl ExactDdnnfProgram {
     }
 
     #[cfg(feature = "host-io")]
+    pub(crate) fn circuit_witness(&self) -> Result<ExactCircuitWitness> {
+        let state = self.gpu_state()?;
+        state.ensure_usable()?;
+        Ok(state.compilation_witness())
+    }
+
+    #[cfg(feature = "host-io")]
     fn eval_log_z_and_grads_gpu_cached(
         &self,
         query_true: Option<u32>,
     ) -> Result<(f64, Vec<f64>, Vec<f64>)> {
         let state = self.gpu_state()?;
+        state.ensure_usable()?;
         let mut cache = state
             .cache
             .lock()
@@ -2563,6 +2953,22 @@ mod tests {
     use xlog_cuda::CudaDevice;
 
     #[test]
+    fn fact_weight_updates_match_compile_kernel_and_preserve_fixed_evidence() {
+        let tiny = 1e-17;
+        let (log_true, log_false) = fact_log_weights(tiny, None);
+        assert_eq!(log_true.to_bits(), tiny.ln().to_bits());
+        assert_eq!(log_false.to_bits(), (1.0 - tiny).ln().to_bits());
+
+        let (fixed_true, impossible_false) = fact_log_weights(0.25, Some(true));
+        assert_eq!(fixed_true.to_bits(), 0.25f64.ln().to_bits());
+        assert_eq!(impossible_false, f64::NEG_INFINITY);
+
+        let (impossible_true, fixed_false) = fact_log_weights(0.25, Some(false));
+        assert_eq!(impossible_true, f64::NEG_INFINITY);
+        assert_eq!(fixed_false.to_bits(), (1.0f64 - 0.25).ln().to_bits());
+    }
+
+    #[test]
     fn exact_evidence_entries_deduplicate_schema_equivalent_values() {
         let provenance = extract_from_source(
             "0.5::gate(\"alpha\").\n\
@@ -2749,5 +3155,59 @@ query(sprinkler()).
             matches!(error, XlogError::Compilation(ref message) if message.contains("gradient") && message.contains("non-finite")),
             "unexpected error: {error}"
         );
+    }
+
+    #[test]
+    fn fact_probability_update_rolls_back_metadata_weights_and_fixed_evidence() {
+        let _gpu_guard = crate::test_gpu_lock::lock();
+        match CudaDevice::new(0) {
+            Ok(_) => {}
+            Err(error) if std::env::var("XLOG_REQUIRE_CUDA").as_deref() == Ok("1") => {
+                panic!("XLOG_REQUIRE_CUDA=1 but CUDA runtime initialization failed: {error}")
+            }
+            Err(error) => {
+                eprintln!("Skipping test: CUDA runtime unavailable: {error}");
+                return;
+            }
+        }
+
+        let mut program = ExactDdnnfProgram::compile_source(
+            "0.5::rain().\n\
+             evidence(rain(), true).\n\
+             query(rain()).\n",
+        )
+        .unwrap();
+        let rain_var = program
+            .prob_var_map()
+            .iter()
+            .enumerate()
+            .find_map(|(var, info)| {
+                matches!(info, ProbVarInfo::Fact { atom, .. } if atom.predicate == "rain")
+                    .then_some(var as u32)
+            })
+            .unwrap();
+        let before = program.evaluate().unwrap();
+        assert_eq!(before.query_probs.len(), 1);
+        assert!((before.query_probs[0].prob - 1.0).abs() < 1e-12);
+
+        let error = program
+            .set_fact_probabilities_with_device_failures(
+                &BTreeMap::from([(rain_var, 0.9)]),
+                Some(1),
+                None,
+            )
+            .expect_err("failure after the first device write must be reported");
+        assert!(error.to_string().contains("injected"));
+
+        assert!(matches!(
+            &program.prob_var_map()[rain_var as usize],
+            ProbVarInfo::Fact { prob, .. } if (*prob - 0.5).abs() < 1e-12
+        ));
+        let after = program.evaluate().unwrap();
+        assert!((after.log_z_e - before.log_z_e).abs() < 1e-12);
+        assert_eq!(after.query_probs.len(), 1);
+        assert!((after.query_probs[0].prob - 1.0).abs() < 1e-12);
+        assert!((after.query_probs[0].prob - before.query_probs[0].prob).abs() < 1e-12);
+        assert!((after.query_probs[0].log_prob - before.query_probs[0].log_prob).abs() < 1e-12);
     }
 }

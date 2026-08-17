@@ -146,7 +146,7 @@ impl LogicProgram {
         let provider = provider_from_config(config).map_err(types::xlog_err)?;
 
         Ok(CompiledLogicProgram {
-            program,
+            program: Arc::new(program),
             provider: Arc::new(provider),
         })
     }

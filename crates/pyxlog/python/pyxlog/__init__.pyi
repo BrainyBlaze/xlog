@@ -23,6 +23,7 @@ from pyxlog._native import (
     # Logic (pure Datalog)
     LogicProgram as LogicProgram,
     CompiledLogicProgram as CompiledLogicProgram,
+    CompiledConditionedProgram as CompiledConditionedProgram,
     LogicRelationSession as LogicRelationSession,
     LogicQueryResult as LogicQueryResult,
     LogicEvalResult as LogicEvalResult,
