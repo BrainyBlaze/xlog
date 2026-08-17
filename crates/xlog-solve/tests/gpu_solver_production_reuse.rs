@@ -1,9 +1,10 @@
 use xlog_solve::{
-    production_capabilities, GpuSolverProductionCapabilityStatus, GpuSolverProductionTrace,
+    production_capabilities, GpuSolverProductionCapabilityStatus, GpuSolverProductionMetricBackend,
+    GpuSolverProductionTrace,
 };
 
 #[test]
-fn production_solver_capabilities_are_gpu_backed_and_cpu_oracle_is_not_metric_eligible() {
+fn production_solver_capabilities_declare_gpu_only_metric_backend() {
     let capabilities = production_capabilities();
     assert_eq!(
         capabilities.gpu_cdcl_sat_unsat,
@@ -17,7 +18,9 @@ fn production_solver_capabilities_are_gpu_backed_and_cpu_oracle_is_not_metric_el
         capabilities.gpu_portfolio_sat_maxsat,
         GpuSolverProductionCapabilityStatus::Available
     );
-    assert!(!capabilities.cpu_oracle_solver_allowed);
+    match capabilities.production_metric_backend {
+        GpuSolverProductionMetricBackend::GpuOnly => {}
+    }
     assert_eq!(capabilities.gpu_maxsat_blocker, "");
     assert_eq!(capabilities.gpu_portfolio_blocker, "");
 }

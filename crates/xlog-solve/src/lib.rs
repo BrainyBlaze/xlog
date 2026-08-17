@@ -56,8 +56,8 @@ pub use production::{
     GpuSolverProductionMaxSatCandidate, GpuSolverProductionMaxSatLifecycleReport,
     GpuSolverProductionMaxSatReport, GpuSolverProductionMaxSatScheduleJob,
     GpuSolverProductionMaxSatScheduleReport, GpuSolverProductionMaxSatSearchCandidate,
-    GpuSolverProductionMaxSatSearchStatus, GpuSolverProductionPortfolioJob,
-    GpuSolverProductionPortfolioReport, GpuSolverProductionTrace,
+    GpuSolverProductionMaxSatSearchStatus, GpuSolverProductionMetricBackend,
+    GpuSolverProductionPortfolioJob, GpuSolverProductionPortfolioReport, GpuSolverProductionTrace,
     GpuSolverProductionWeightedMaxSatSelection,
 };
 pub use proof::{compute_checksum, SolveProof, SolveResult, SolveStats, SolveStatus};

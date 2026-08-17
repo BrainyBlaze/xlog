@@ -4724,13 +4724,11 @@ fn accepted_gpu_execution_result_rejects_tampered_rejection_metadata_accounting(
         vec![1]
     );
     assert_eq!(result.semantic_trace.generated_candidates, 2);
-    assert_eq!(result.semantic_trace.rejection_reason_device_reads, 1);
     assert_eq!(
         result.semantic_trace.rejection_reason_metadata_bytes,
         (result.semantic_trace.generated_candidates * std::mem::size_of::<u32>()) as u64
     );
 
-    result.semantic_trace.rejection_reason_device_reads = 0;
     result.semantic_trace.rejection_reason_metadata_bytes = 0;
 
     let sat_instance = SolveInstance::new(1, vec![Clause::new(vec![Literal::positive(0)])]);
@@ -15725,7 +15723,6 @@ fn accepted_gpu_execution_records_device_semantic_trace_counts() {
     assert_eq!(result.semantic_trace.accepted_candidates, 1);
     assert_eq!(result.semantic_trace.rejected_candidates, 1);
     assert_eq!(result.semantic_trace.rejection_reasons, vec![5]);
-    assert_eq!(result.semantic_trace.rejection_reason_device_reads, 1);
     assert_eq!(
         result.semantic_trace.rejection_reason_metadata_bytes,
         2 * std::mem::size_of::<u32>() as u64

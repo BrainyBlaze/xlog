@@ -210,6 +210,24 @@ still depends on the observed GPU evidence above. This contract does not claim z
 host traffic, because concrete tuple evidence is read from accepted output columns
 after the certified hot path.
 
+The public Rust capability report replaces
+`GpuSolverProductionCapabilities::cpu_oracle_solver_allowed` with the exhaustive
+`production_metric_backend` policy. Consumers must match its current
+`GpuSolverProductionMetricBackend::GpuOnly` variant instead of treating a constant
+boolean as evidence that CPU solving was excluded. The production metric gate still
+requires positive accepted-candidate and GPU solver event evidence from the executed
+route.
+
+The public Rust `EpistemicGpuSemanticTrace` and specialized epistemic runtime JSON
+no longer include `rejection_reason_device_reads`. Rust callers and fixed-schema
+JSON consumers must remove that field or key and use
+`rejection_reason_metadata_bytes` for the bounded rejection-reason payload. The
+retained byte count is derived from the length of the rejection-reason vector
+returned by the device read and must match one `u32` reason slot per generated
+candidate. The separate bounded read of constraint-violation indices remains part
+of the runtime boundary but is not folded into this rejection-reason-specific byte
+count.
+
 This handoff consumes `EpistemicGpuExecutionResult` records produced by the
 single-pass Generate-Propagate-Test route, including split batches. Recursive
 epistemic programs take a different route: the high-level `LogicProgram` evaluator

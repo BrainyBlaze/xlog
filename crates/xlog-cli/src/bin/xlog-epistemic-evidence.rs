@@ -1108,6 +1108,19 @@ mod tests {
             for key in removed_keys {
                 assert!(diagnostics.get(key).is_none(), "{source_file}: {key}");
             }
+            let semantic_trace = &payload["runtime"]["semantic_trace"];
+            assert!(
+                semantic_trace
+                    .get("rejection_reason_device_reads")
+                    .is_none(),
+                "{source_file}: fabricated rejection-read telemetry must be absent"
+            );
+            assert!(
+                semantic_trace["rejection_reason_metadata_bytes"]
+                    .as_u64()
+                    .is_some_and(|bytes| bytes > 0),
+                "{source_file}: bounded rejection metadata bytes must remain positive"
+            );
         }
         Ok(())
     }
@@ -1570,7 +1583,6 @@ fn runtime_json(result: &xlog_runtime::EpistemicGpuExecutionResult) -> Value {
             "rejected_candidates": result.semantic_trace.rejected_candidates,
             "rejected_candidate_indices": result.semantic_trace.rejected_candidate_indices,
             "rejection_reasons": result.semantic_trace.rejection_reasons,
-            "rejection_reason_device_reads": result.semantic_trace.rejection_reason_device_reads,
             "rejection_reason_metadata_bytes": result.semantic_trace.rejection_reason_metadata_bytes,
         },
         "reduced_output": {
