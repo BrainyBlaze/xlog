@@ -342,32 +342,6 @@ fn production_prob_metric_gate_rejects_fixture_only_traces() {
         );
     assert!(format!("{err}")
         .contains("existing GPU exact/provenance/PIR/CNF/knowledge-compilation counter"));
-
-    let fixture = EpistemicProbProductionTrace {
-        accepted_world_view_evidence_consumed: 1,
-        accepted_faeel_world_view_evidence_consumed: 1,
-        accepted_evidence_assumptions_consumed: 1,
-        gpu_pir_graph_uploads: 1,
-        gpu_source_pir_graph_uploads: 1,
-        gpu_cnf_encodes: 1,
-        gpu_source_cnf_encodes: 1,
-        accepted_gpu_production_path_events: 4,
-        fixture_circuit_evaluations: 1,
-        ..EpistemicProbProductionTrace::default()
-    };
-    let err = fixture
-        .require_production_metric_eligibility()
-        .expect_err("fixture circuit trace must not satisfy production metrics");
-    assert!(format!("{err}").contains("CPU probabilistic fallback counters must be zero"));
-
-    let cpu_recompute = EpistemicProbProductionTrace {
-        cpu_only_probability_recomputations: 1,
-        ..eligible
-    };
-    let err = cpu_recompute
-        .require_production_metric_eligibility()
-        .expect_err("CPU-only probability recompute trace must not satisfy production metrics");
-    assert!(format!("{err}").contains("CPU probabilistic fallback counters must be zero"));
 }
 
 #[test]

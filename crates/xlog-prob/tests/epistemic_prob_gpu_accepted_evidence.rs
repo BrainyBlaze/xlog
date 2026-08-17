@@ -8,8 +8,9 @@ use xlog_core::{MemoryBudget, RelId, ScalarType, Schema};
 use xlog_cuda::{CudaBuffer, CudaDevice, CudaKernelProvider, GpuMemoryManager};
 use xlog_ir::{
     CompiledRule, EirAtom, EirEpistemicLiteral, EirEpistemicMode, EirEpistemicOp, EirTerm,
-    EpistemicExecutablePlan, EpistemicGpuPlan, EpistemicReductionPlan,
-    EpistemicWcojReductionStatus, ExecutionPlan, RirMeta, RirNode, Scc, Stratum,
+    EpistemicExecutablePlan, EpistemicExecutionBackend, EpistemicFallbackPolicy, EpistemicGpuPlan,
+    EpistemicReductionPlan, EpistemicWcojReductionStatus, ExecutionPlan, RirMeta, RirNode, Scc,
+    Stratum,
 };
 #[cfg(feature = "host-io")]
 use xlog_logic::epistemic::{
@@ -100,6 +101,14 @@ fn g91_probability_evidence_fixture_compiles_for_single_pass_execution() {
         .expect("acyclic G91 probability evidence must use the single-pass planner");
 
     assert_eq!(executable.gpu_plan.mode, EirEpistemicMode::G91);
+    assert_eq!(
+        executable.gpu_plan.execution_backend,
+        EpistemicExecutionBackend::Gpu
+    );
+    assert_eq!(
+        executable.gpu_plan.fallback_policy,
+        EpistemicFallbackPolicy::RejectUnsupported
+    );
     assert_eq!(executable.gpu_plan.epistemic_literals.len(), 1);
     assert_eq!(executable.gpu_plan.reductions.len(), 1);
     assert_eq!(executable.gpu_plan.reductions[0].head_predicate, "accepted");
@@ -148,11 +157,6 @@ query(base(7)).
     assert_eq!(trace.gpu_cnf_encodes, 1);
     assert_eq!(trace.gpu_source_cnf_encodes, 1);
     assert_eq!(trace.accepted_gpu_production_path_events, 4);
-    assert_eq!(trace.cpu_only_probability_recomputations, 0);
-    assert_eq!(trace.fixture_circuit_evaluations, 0);
-    trace
-        .require_zero_cpu_recompute()
-        .expect("accepted probability path must not use CPU recomputation");
     trace
         .require_production_metric_eligibility()
         .expect("accepted runtime evidence plus GPU PIR/CNF reuse satisfies prob metric gate");
@@ -192,11 +196,6 @@ query(base(7)).
     assert_eq!(trace.accepted_gpu_production_path_events, 0);
     assert_eq!(trace.gpu_pir_graph_uploads, 0);
     assert_eq!(trace.gpu_cnf_encodes, 0);
-    assert_eq!(trace.cpu_only_probability_recomputations, 0);
-    assert_eq!(trace.fixture_circuit_evaluations, 0);
-    trace
-        .require_zero_cpu_recompute()
-        .expect("rejected evidence gate must not use probability recomputation");
     trace
         .require_production_metric_eligibility()
         .expect_err("rejected evidence must not satisfy probability production metrics");
@@ -244,11 +243,6 @@ query(base(7)).
     assert_eq!(trace.gpu_pir_graph_uploads, 1);
     assert_eq!(trace.gpu_cnf_encodes, 1);
     assert_eq!(trace.accepted_gpu_production_path_events, 4);
-    assert_eq!(trace.cpu_only_probability_recomputations, 0);
-    assert_eq!(trace.fixture_circuit_evaluations, 0);
-    trace
-        .require_zero_cpu_recompute()
-        .expect("variable-bound accepted probability path must not use CPU recomputation");
     trace
         .require_production_metric_eligibility()
         .expect("variable-bound accepted runtime evidence plus GPU PIR/CNF reuse is eligible");
@@ -300,11 +294,6 @@ query(base(7)).
     assert_eq!(trace.gpu_source_cnf_encodes, 0);
     assert_eq!(trace.gpu_program_cnf_encodes, 1);
     assert_eq!(trace.accepted_gpu_production_path_events, 4);
-    assert_eq!(trace.cpu_only_probability_recomputations, 0);
-    assert_eq!(trace.fixture_circuit_evaluations, 0);
-    trace
-        .require_zero_cpu_recompute()
-        .expect("parsed-program PIR/CNF path must not use CPU recomputation");
     trace
         .require_production_metric_eligibility()
         .expect("parsed-program accepted runtime evidence plus GPU PIR/CNF reuse is eligible");
@@ -363,11 +352,6 @@ query(base(7)).
     assert_eq!(trace.gpu_knowledge_compilation_end_to_end_runs, 1);
     assert_eq!(trace.gpu_source_knowledge_compilation_end_to_end_runs, 1);
     assert_eq!(trace.accepted_gpu_production_path_events, 5);
-    assert_eq!(trace.cpu_only_probability_recomputations, 0);
-    assert_eq!(trace.fixture_circuit_evaluations, 0);
-    trace
-        .require_zero_cpu_recompute()
-        .expect("conditioned exact path must not use CPU recomputation");
     trace
         .require_conditioned_evidence_metric_eligibility()
         .expect("conditioned GPU exact evidence should satisfy the stricter prob gate");
@@ -442,11 +426,6 @@ query(gate(2, 4)).
     assert_eq!(trace.gpu_knowledge_compilation_end_to_end_runs, 1);
     assert_eq!(trace.gpu_source_knowledge_compilation_end_to_end_runs, 1);
     assert_eq!(trace.accepted_gpu_production_path_events, 5);
-    assert_eq!(trace.cpu_only_probability_recomputations, 0);
-    assert_eq!(trace.fixture_circuit_evaluations, 0);
-    trace
-        .require_zero_cpu_recompute()
-        .expect("binary conditioned exact path must not use CPU recomputation");
     trace
         .require_conditioned_evidence_metric_eligibility()
         .expect("binary conditioned GPU exact evidence should satisfy the stricter prob gate");
@@ -539,11 +518,6 @@ query(missing_possible_gate(1, 2)).
     assert_eq!(trace.gpu_knowledge_compilation_end_to_end_runs, 1);
     assert_eq!(trace.gpu_source_knowledge_compilation_end_to_end_runs, 1);
     assert_eq!(trace.accepted_gpu_production_path_events, 5);
-    assert_eq!(trace.cpu_only_probability_recomputations, 0);
-    assert_eq!(trace.fixture_circuit_evaluations, 0);
-    trace
-        .require_zero_cpu_recompute()
-        .expect("binary negative conditioned exact path must not use CPU recomputation");
     trace
         .require_conditioned_evidence_metric_eligibility()
         .expect("binary negative evidence should satisfy the stricter prob gate");
@@ -638,11 +612,6 @@ query(gate(2, 3, 5, 8)).
     assert_eq!(trace.gpu_knowledge_compilation_end_to_end_runs, 1);
     assert_eq!(trace.gpu_source_knowledge_compilation_end_to_end_runs, 1);
     assert_eq!(trace.accepted_gpu_production_path_events, 5);
-    assert_eq!(trace.cpu_only_probability_recomputations, 0);
-    assert_eq!(trace.fixture_circuit_evaluations, 0);
-    trace
-        .require_zero_cpu_recompute()
-        .expect("quaternary conditioned exact path must not use CPU recomputation");
     trace
         .require_conditioned_evidence_metric_eligibility()
         .expect("quaternary conditioned GPU exact evidence should satisfy the stricter prob gate");
@@ -712,11 +681,6 @@ query(gate(gamma)).
     assert_eq!(trace.gpu_knowledge_compilation_end_to_end_runs, 1);
     assert_eq!(trace.gpu_source_knowledge_compilation_end_to_end_runs, 1);
     assert_eq!(trace.accepted_gpu_production_path_events, 5);
-    assert_eq!(trace.cpu_only_probability_recomputations, 0);
-    assert_eq!(trace.fixture_circuit_evaluations, 0);
-    trace
-        .require_zero_cpu_recompute()
-        .expect("symbol conditioned exact path must not use CPU recomputation");
     trace
         .require_conditioned_evidence_metric_eligibility()
         .expect("symbol conditioned GPU exact evidence should satisfy the stricter prob gate");
@@ -762,11 +726,6 @@ query(gate("gamma")).
     assert_eq!(trace.accepted_evidence_assumptions_consumed, 2);
     assert_eq!(trace.gpu_conditioned_evidence_facts, 2);
     assert_eq!(trace.gpu_conditioned_know_evidence_facts, 2);
-    assert_eq!(trace.cpu_only_probability_recomputations, 0);
-    assert_eq!(trace.fixture_circuit_evaluations, 0);
-    trace
-        .require_zero_cpu_recompute()
-        .expect("quoted symbol conditioned exact path must not use CPU recomputation");
     trace
         .require_conditioned_evidence_metric_eligibility()
         .expect(
@@ -831,11 +790,6 @@ query(p(7)).
     assert_eq!(trace.gpu_knowledge_compilation_end_to_end_runs, 1);
     assert_eq!(trace.gpu_source_knowledge_compilation_end_to_end_runs, 1);
     assert_eq!(trace.accepted_gpu_production_path_events, 5);
-    assert_eq!(trace.cpu_only_probability_recomputations, 0);
-    assert_eq!(trace.fixture_circuit_evaluations, 0);
-    trace
-        .require_zero_cpu_recompute()
-        .expect("G91 conditioned exact path must not use CPU recomputation");
     trace
         .require_conditioned_evidence_metric_eligibility()
         .expect("G91 conditioned GPU exact evidence should satisfy the stricter prob gate");
@@ -891,11 +845,6 @@ fn public_prob_adapter_applies_g91_possible_gpu_evidence_incrementally() {
     assert_eq!(trace.accepted_gpu_tuple_key_column_reads_consumed, 1);
     assert_eq!(trace.accepted_gpu_final_tuple_row_filters_consumed, 1);
     assert_eq!(trace.accepted_incremental_circuit_updates, 1);
-    assert_eq!(trace.cpu_only_probability_recomputations, 0);
-    assert_eq!(trace.fixture_circuit_evaluations, 0);
-    trace
-        .require_zero_cpu_recompute()
-        .expect("G91 incremental probability evidence must not use CPU recomputation");
 }
 
 #[test]
@@ -976,11 +925,6 @@ query(base(7)).
     assert_eq!(trace.gpu_knowledge_compilation_end_to_end_runs, 1);
     assert_eq!(trace.gpu_source_knowledge_compilation_end_to_end_runs, 1);
     assert_eq!(trace.accepted_gpu_production_path_events, 5);
-    assert_eq!(trace.cpu_only_probability_recomputations, 0);
-    assert_eq!(trace.fixture_circuit_evaluations, 0);
-    trace
-        .require_zero_cpu_recompute()
-        .expect("incremental plus exact path must not use CPU recomputation");
     trace
         .require_conditioned_evidence_metric_eligibility()
         .expect("incremental evidence plus GPU exact path should satisfy conditioned prob gate");
@@ -1063,11 +1007,6 @@ fn public_prob_adapter_applies_changed_gpu_evidence_incrementally_without_rebuil
     assert_eq!(trace.accepted_gpu_tuple_key_column_reads_consumed, 2);
     assert_eq!(trace.accepted_gpu_final_tuple_row_filters_consumed, 2);
     assert_eq!(trace.accepted_incremental_circuit_updates, 2);
-    assert_eq!(trace.cpu_only_probability_recomputations, 0);
-    assert_eq!(trace.fixture_circuit_evaluations, 0);
-    trace
-        .require_zero_cpu_recompute()
-        .expect("changed incremental GPU evidence must not use CPU recomputation");
 }
 
 #[test]
@@ -1151,11 +1090,6 @@ fn public_prob_adapter_applies_negated_gpu_operator_evidence_incrementally() {
         2
     );
     assert_eq!(trace.accepted_incremental_circuit_updates, 1);
-    assert_eq!(trace.cpu_only_probability_recomputations, 0);
-    assert_eq!(trace.fixture_circuit_evaluations, 0);
-    trace
-        .require_zero_cpu_recompute()
-        .expect("mixed-operator incremental GPU evidence must not use CPU recomputation");
 }
 
 #[test]
@@ -1239,11 +1173,6 @@ fn public_prob_adapter_applies_external_c2d_gpu_evidence_with_full_rebuild() {
         2
     );
     assert_eq!(trace.accepted_incremental_circuit_updates, 0);
-    assert_eq!(trace.cpu_only_probability_recomputations, 0);
-    assert_eq!(trace.fixture_circuit_evaluations, 0);
-    trace
-        .require_zero_cpu_recompute()
-        .expect("external c2d accepted GPU evidence must not use CPU recomputation");
     trace
         .require_production_metric_eligibility()
         .expect_err("external c2d circuit updates alone must not satisfy production metrics");
@@ -1324,11 +1253,6 @@ fn public_prob_adapter_applies_split_batch_gpu_evidence_to_incremental_circuit()
     assert_eq!(trace.accepted_gpu_batch_component_evidence_consumed, 2);
     assert_eq!(trace.accepted_incremental_circuit_updates, 2);
     assert_eq!(trace.accepted_gpu_production_path_events, 0);
-    assert_eq!(trace.cpu_only_probability_recomputations, 0);
-    assert_eq!(trace.fixture_circuit_evaluations, 0);
-    trace
-        .require_zero_cpu_recompute()
-        .expect("split-batch incremental GPU evidence must not use CPU recomputation");
     trace
         .require_production_metric_eligibility()
         .expect_err("incremental circuit updates alone must not satisfy production metrics");
@@ -1441,11 +1365,6 @@ fn public_prob_adapter_applies_hidden_body_local_batch_evidence_to_incremental_c
     assert_eq!(trace.accepted_gpu_batch_component_evidence_consumed, 2);
     assert_eq!(trace.accepted_incremental_circuit_updates, 2);
     assert_eq!(trace.accepted_gpu_production_path_events, 0);
-    assert_eq!(trace.cpu_only_probability_recomputations, 0);
-    assert_eq!(trace.fixture_circuit_evaluations, 0);
-    trace
-        .require_zero_cpu_recompute()
-        .expect("hidden split-batch incremental GPU evidence must not use CPU recomputation");
     trace
         .require_production_metric_eligibility()
         .expect_err("hidden incremental circuit updates alone must not satisfy production metrics");
@@ -1496,11 +1415,6 @@ query(right_base(9)).
     assert_eq!(trace.gpu_exact_query_evaluations, 0);
     assert_eq!(trace.gpu_knowledge_compilation_end_to_end_runs, 0);
     assert_eq!(trace.accepted_gpu_production_path_events, 0);
-    assert_eq!(trace.cpu_only_probability_recomputations, 0);
-    assert_eq!(trace.fixture_circuit_evaluations, 0);
-    trace
-        .require_zero_cpu_recompute()
-        .expect("rejected split-batch evidence must not use CPU recomputation");
     trace
         .require_conditioned_evidence_metric_eligibility()
         .expect_err("rejected split-batch evidence must not satisfy conditioned prob metrics");
@@ -1576,11 +1490,6 @@ query(not_possible_gate(7)).
     assert_eq!(trace.gpu_knowledge_compilation_end_to_end_runs, 1);
     assert_eq!(trace.gpu_source_knowledge_compilation_end_to_end_runs, 1);
     assert_eq!(trace.accepted_gpu_production_path_events, 5);
-    assert_eq!(trace.cpu_only_probability_recomputations, 0);
-    assert_eq!(trace.fixture_circuit_evaluations, 0);
-    trace
-        .require_zero_cpu_recompute()
-        .expect("parsed all-operator conditioned exact path must not use CPU recomputation");
     trace
         .require_conditioned_evidence_metric_eligibility()
         .expect("parsed all-operator evidence should satisfy the stricter prob gate");
@@ -1653,11 +1562,6 @@ query(gate(30)).
     assert_eq!(trace.gpu_exact_query_evaluations, 1);
     assert_eq!(trace.gpu_knowledge_compilation_end_to_end_runs, 1);
     assert_eq!(trace.accepted_gpu_production_path_events, 5);
-    assert_eq!(trace.cpu_only_probability_recomputations, 0);
-    assert_eq!(trace.fixture_circuit_evaluations, 0);
-    trace
-        .require_zero_cpu_recompute()
-        .expect("body-local conditioned exact path must not use CPU recomputation");
     trace
         .require_conditioned_evidence_metric_eligibility()
         .expect("body-local evidence should satisfy the stricter prob gate");
@@ -1732,11 +1636,6 @@ query(maybe_gate(30)).
     assert_eq!(trace.gpu_exact_query_evaluations, 1);
     assert_eq!(trace.gpu_knowledge_compilation_end_to_end_runs, 1);
     assert_eq!(trace.accepted_gpu_production_path_events, 5);
-    assert_eq!(trace.cpu_only_probability_recomputations, 0);
-    assert_eq!(trace.fixture_circuit_evaluations, 0);
-    trace
-        .require_zero_cpu_recompute()
-        .expect("body-local possible conditioned exact path must not use CPU recomputation");
     trace
         .require_conditioned_evidence_metric_eligibility()
         .expect("body-local possible evidence should satisfy the stricter prob gate");
@@ -1809,11 +1708,6 @@ query(gate(10)).
     assert_eq!(trace.gpu_exact_query_evaluations, 1);
     assert_eq!(trace.gpu_knowledge_compilation_end_to_end_runs, 1);
     assert_eq!(trace.accepted_gpu_production_path_events, 5);
-    assert_eq!(trace.cpu_only_probability_recomputations, 0);
-    assert_eq!(trace.fixture_circuit_evaluations, 0);
-    trace
-        .require_zero_cpu_recompute()
-        .expect("zero-arity body-local conditioned exact path must not use CPU recomputation");
     trace
         .require_conditioned_evidence_metric_eligibility()
         .expect("zero-arity body-local evidence should satisfy the stricter prob gate");
@@ -1888,11 +1782,6 @@ query(blocked(60)).
     assert_eq!(trace.gpu_exact_query_evaluations, 1);
     assert_eq!(trace.gpu_knowledge_compilation_end_to_end_runs, 1);
     assert_eq!(trace.accepted_gpu_production_path_events, 5);
-    assert_eq!(trace.cpu_only_probability_recomputations, 0);
-    assert_eq!(trace.fixture_circuit_evaluations, 0);
-    trace
-        .require_zero_cpu_recompute()
-        .expect("negated body-local conditioned exact path must not use CPU recomputation");
     trace
         .require_conditioned_evidence_metric_eligibility()
         .expect("negated body-local evidence should satisfy the stricter prob gate");
@@ -1967,11 +1856,6 @@ query(maybe_blocked(60)).
     assert_eq!(trace.gpu_exact_query_evaluations, 1);
     assert_eq!(trace.gpu_knowledge_compilation_end_to_end_runs, 1);
     assert_eq!(trace.accepted_gpu_production_path_events, 5);
-    assert_eq!(trace.cpu_only_probability_recomputations, 0);
-    assert_eq!(trace.fixture_circuit_evaluations, 0);
-    trace
-        .require_zero_cpu_recompute()
-        .expect("body-local not-possible conditioned exact path must not use CPU recomputation");
     trace
         .require_conditioned_evidence_metric_eligibility()
         .expect("body-local not-possible evidence should satisfy the stricter prob gate");
@@ -2051,11 +1935,6 @@ query(dry_when_known()).
     assert_eq!(trace.gpu_knowledge_compilation_end_to_end_runs, 1);
     assert_eq!(trace.gpu_source_knowledge_compilation_end_to_end_runs, 1);
     assert_eq!(trace.accepted_gpu_production_path_events, 6);
-    assert_eq!(trace.cpu_only_probability_recomputations, 0);
-    assert_eq!(trace.fixture_circuit_evaluations, 0);
-    trace
-        .require_zero_cpu_recompute()
-        .expect("parsed all-operator conditioned gradient path must not use CPU recomputation");
     trace
         .require_conditioned_evidence_metric_eligibility()
         .expect("parsed all-operator gradient evidence should satisfy the stricter prob gate");
@@ -2125,11 +2004,6 @@ query(right_base(9)).
     assert_eq!(trace.gpu_knowledge_compilation_end_to_end_runs, 2);
     assert_eq!(trace.gpu_source_knowledge_compilation_end_to_end_runs, 2);
     assert_eq!(trace.accepted_gpu_production_path_events, 10);
-    assert_eq!(trace.cpu_only_probability_recomputations, 0);
-    assert_eq!(trace.fixture_circuit_evaluations, 0);
-    trace
-        .require_zero_cpu_recompute()
-        .expect("batch conditioned exact path must not use CPU recomputation");
     trace
         .require_conditioned_evidence_metric_eligibility()
         .expect("split batch conditioned GPU exact evidence should satisfy the stricter prob gate");
@@ -2231,11 +2105,6 @@ query(right_blocked(60)).
     assert_eq!(trace.gpu_knowledge_compilation_end_to_end_runs, 2);
     assert_eq!(trace.gpu_source_knowledge_compilation_end_to_end_runs, 2);
     assert_eq!(trace.accepted_gpu_production_path_events, 10);
-    assert_eq!(trace.cpu_only_probability_recomputations, 0);
-    assert_eq!(trace.fixture_circuit_evaluations, 0);
-    trace
-        .require_zero_cpu_recompute()
-        .expect("hidden body-local batch conditioned exact path must not use CPU recomputation");
     trace
         .require_conditioned_evidence_metric_eligibility()
         .expect("hidden body-local batch evidence should satisfy the stricter prob gate");
@@ -2339,11 +2208,6 @@ query(right_maybe_blocked(60)).
     assert_eq!(trace.gpu_knowledge_compilation_end_to_end_runs, 2);
     assert_eq!(trace.gpu_source_knowledge_compilation_end_to_end_runs, 2);
     assert_eq!(trace.accepted_gpu_production_path_events, 10);
-    assert_eq!(trace.cpu_only_probability_recomputations, 0);
-    assert_eq!(trace.fixture_circuit_evaluations, 0);
-    trace
-        .require_zero_cpu_recompute()
-        .expect("modal body-local batch conditioned exact path must not use CPU recomputation");
     trace
         .require_conditioned_evidence_metric_eligibility()
         .expect("modal body-local batch evidence should satisfy the stricter prob gate");
@@ -2419,11 +2283,6 @@ query(right_base(9)).
     assert_eq!(trace.gpu_knowledge_compilation_end_to_end_runs, 2);
     assert_eq!(trace.gpu_program_knowledge_compilation_end_to_end_runs, 2);
     assert_eq!(trace.accepted_gpu_production_path_events, 10);
-    assert_eq!(trace.cpu_only_probability_recomputations, 0);
-    assert_eq!(trace.fixture_circuit_evaluations, 0);
-    trace
-        .require_zero_cpu_recompute()
-        .expect("parsed-program batch conditioned exact path must not use CPU recomputation");
     trace
         .require_conditioned_evidence_metric_eligibility()
         .expect(
@@ -2525,11 +2384,6 @@ query(dry_right()).
     assert_eq!(trace.gpu_knowledge_compilation_end_to_end_runs, 2);
     assert_eq!(trace.gpu_source_knowledge_compilation_end_to_end_runs, 2);
     assert_eq!(trace.accepted_gpu_production_path_events, 12);
-    assert_eq!(trace.cpu_only_probability_recomputations, 0);
-    assert_eq!(trace.fixture_circuit_evaluations, 0);
-    trace
-        .require_zero_cpu_recompute()
-        .expect("batch conditioned gradient path must not use CPU recomputation");
     trace
         .require_conditioned_evidence_metric_eligibility()
         .expect(
@@ -2611,8 +2465,6 @@ fn execute_runtime_without_accepted_final_output(
     );
     assert_eq!(result.semantic_trace.accepted_candidates, 0);
     assert_eq!(result.semantic_trace.rejected_candidates, 2);
-    assert_eq!(result.semantic_trace.cpu_candidate_enumerations, 0);
-    assert_eq!(result.semantic_trace.cpu_world_view_validations, 0);
     assert_eq!(result.final_result_transfer.final_output_rows, 0);
     result
         .require_runtime_dispatch_certification()
@@ -2832,8 +2684,6 @@ fn execute_accepted_g91_possible_literal(
     assert_eq!(result.semantic_trace.accepted_candidate_indices, vec![1]);
     assert_eq!(result.semantic_trace.accepted_candidates, 1);
     assert_eq!(result.semantic_trace.accepted_world_views, 1);
-    assert_eq!(result.semantic_trace.cpu_candidate_enumerations, 0);
-    assert_eq!(result.semantic_trace.cpu_world_view_validations, 0);
     result
 }
 
@@ -2894,8 +2744,6 @@ fn execute_accepted_symbol_variable_bound_literal(
     assert_eq!(result.semantic_trace.accepted_candidate_indices, vec![1]);
     assert_eq!(result.semantic_trace.accepted_candidates, 1);
     assert_eq!(result.semantic_trace.accepted_world_views, 1);
-    assert_eq!(result.semantic_trace.cpu_candidate_enumerations, 0);
-    assert_eq!(result.semantic_trace.cpu_world_view_validations, 0);
     result
 }
 
@@ -2958,8 +2806,6 @@ fn execute_parsed_all_operator_variable_bound_evidence(
         2
     );
     assert_eq!(result.semantic_trace.accepted_candidate_indices, vec![15]);
-    assert_eq!(result.semantic_trace.cpu_candidate_enumerations, 0);
-    assert_eq!(result.semantic_trace.cpu_world_view_validations, 0);
     result
 }
 
@@ -3015,8 +2861,6 @@ fn execute_parsed_body_local_tuple_key_evidence(
     );
     assert_eq!(result.semantic_trace.accepted_candidates, 1);
     assert_eq!(result.semantic_trace.accepted_world_views, 1);
-    assert_eq!(result.semantic_trace.cpu_candidate_enumerations, 0);
-    assert_eq!(result.semantic_trace.cpu_world_view_validations, 0);
     result
 }
 
@@ -3073,8 +2917,6 @@ fn execute_parsed_possible_body_local_tuple_key_evidence(
     );
     assert_eq!(result.semantic_trace.accepted_candidates, 1);
     assert_eq!(result.semantic_trace.accepted_world_views, 1);
-    assert_eq!(result.semantic_trace.cpu_candidate_enumerations, 0);
-    assert_eq!(result.semantic_trace.cpu_world_view_validations, 0);
     result
 }
 
@@ -3128,8 +2970,6 @@ fn execute_parsed_zero_arity_body_local_tuple_key_evidence(
     );
     assert_eq!(result.semantic_trace.accepted_candidates, 1);
     assert_eq!(result.semantic_trace.accepted_world_views, 1);
-    assert_eq!(result.semantic_trace.cpu_candidate_enumerations, 0);
-    assert_eq!(result.semantic_trace.cpu_world_view_validations, 0);
     result
 }
 
@@ -3185,8 +3025,6 @@ fn execute_parsed_negated_body_local_tuple_key_evidence(
     );
     assert_eq!(result.semantic_trace.accepted_candidates, 1);
     assert_eq!(result.semantic_trace.accepted_world_views, 1);
-    assert_eq!(result.semantic_trace.cpu_candidate_enumerations, 0);
-    assert_eq!(result.semantic_trace.cpu_world_view_validations, 0);
     result
 }
 
@@ -3243,8 +3081,6 @@ fn execute_parsed_not_possible_body_local_tuple_key_evidence(
     );
     assert_eq!(result.semantic_trace.accepted_candidates, 1);
     assert_eq!(result.semantic_trace.accepted_world_views, 1);
-    assert_eq!(result.semantic_trace.cpu_candidate_enumerations, 0);
-    assert_eq!(result.semantic_trace.cpu_world_view_validations, 0);
     result
 }
 
@@ -3308,8 +3144,6 @@ fn execute_parsed_binary_operator_evidence(
         2
     );
     assert_eq!(result.semantic_trace.accepted_candidate_indices, vec![15]);
-    assert_eq!(result.semantic_trace.cpu_candidate_enumerations, 0);
-    assert_eq!(result.semantic_trace.cpu_world_view_validations, 0);
     result
 }
 
@@ -3343,11 +3177,6 @@ fn execute_accepted_split_batch(
         .expect("batch trace must match real component results");
     assert_eq!(batch.trace.component_count, 2);
     assert_eq!(batch.trace.gpu_runtime_component_executions, 2);
-    assert_eq!(batch.trace.cpu_recomposition_steps, 0);
-    assert_eq!(batch.trace.cpu_candidate_enumerations, 0);
-    assert_eq!(batch.trace.cpu_world_view_validations, 0);
-    assert_eq!(batch.trace.cpu_solver_search_fallbacks, 0);
-    assert_eq!(batch.trace.cpu_probability_recomputations, 0);
     assert_eq!(batch.trace.tracked_dtoh_calls, 0);
     assert_eq!(batch.trace.per_candidate_host_round_trips, 0);
     assert_eq!(batch.trace.final_output_rows, 2);
@@ -3415,11 +3244,6 @@ fn execute_hidden_body_local_split_batch(
         .expect("hidden body-local split batch trace must match real component results");
     assert_eq!(batch.trace.component_count, 2);
     assert_eq!(batch.trace.gpu_runtime_component_executions, 2);
-    assert_eq!(batch.trace.cpu_recomposition_steps, 0);
-    assert_eq!(batch.trace.cpu_candidate_enumerations, 0);
-    assert_eq!(batch.trace.cpu_world_view_validations, 0);
-    assert_eq!(batch.trace.cpu_solver_search_fallbacks, 0);
-    assert_eq!(batch.trace.cpu_probability_recomputations, 0);
     assert_eq!(batch.trace.tracked_dtoh_calls, 0);
     assert_eq!(batch.trace.per_candidate_host_round_trips, 0);
     assert_eq!(batch.trace.final_output_rows, 4);
@@ -3517,11 +3341,6 @@ fn execute_modal_hidden_body_local_split_batch(
         .expect("modal hidden body-local split batch trace must match real component results");
     assert_eq!(batch.trace.component_count, 2);
     assert_eq!(batch.trace.gpu_runtime_component_executions, 2);
-    assert_eq!(batch.trace.cpu_recomposition_steps, 0);
-    assert_eq!(batch.trace.cpu_candidate_enumerations, 0);
-    assert_eq!(batch.trace.cpu_world_view_validations, 0);
-    assert_eq!(batch.trace.cpu_solver_search_fallbacks, 0);
-    assert_eq!(batch.trace.cpu_probability_recomputations, 0);
     assert_eq!(batch.trace.tracked_dtoh_calls, 0);
     assert_eq!(batch.trace.per_candidate_host_round_trips, 0);
     assert_eq!(batch.trace.final_output_rows, 4);

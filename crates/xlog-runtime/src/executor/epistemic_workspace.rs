@@ -13,8 +13,8 @@ use xlog_cuda::{
 };
 use xlog_ir::rir::{MultiwayPlan, PlannedHashReason, RirNode, StreamGroupId};
 use xlog_ir::{
-    EirEpistemicMode, EirEpistemicOp, EirTerm, EpistemicCpuFallbackCounters,
-    EpistemicExecutablePlan, EpistemicGpuBufferKind, EpistemicGpuHotPathPhase, EpistemicGpuPlan,
+    EirEpistemicMode, EirEpistemicOp, EirTerm, EpistemicExecutablePlan, EpistemicExecutionBackend,
+    EpistemicFallbackPolicy, EpistemicGpuBufferKind, EpistemicGpuHotPathPhase, EpistemicGpuPlan,
     EpistemicTupleMembershipBinding, EpistemicWcojReductionStatus,
 };
 
@@ -467,10 +467,6 @@ pub struct EpistemicGpuSemanticTrace {
     pub rejection_reason_device_reads: u32,
     /// Bytes read as bounded rejection-reason metadata after the hot path.
     pub rejection_reason_metadata_bytes: u64,
-    /// CPU candidate enumerations used by the accepted path.
-    pub cpu_candidate_enumerations: u32,
-    /// CPU world-view validations used by the accepted path.
-    pub cpu_world_view_validations: u32,
 }
 
 /// Trace proving model-membership staging was performed by a GPU kernel.
@@ -1594,8 +1590,6 @@ impl EpistemicGpuSemanticTrace {
             // into this rejection-reason-specific counter.
             rejection_reason_device_reads: 1,
             rejection_reason_metadata_bytes,
-            cpu_candidate_enumerations: 0,
-            cpu_world_view_validations: 0,
         })
     }
 }
@@ -1952,6 +1946,10 @@ impl EpistemicGpuWorkspaceResetTrace {
 pub struct EpistemicGpuRuntimePreflight {
     /// Selected epistemic semantics mode for the accepted GPU execution.
     pub epistemic_mode: EirEpistemicMode,
+    /// Production execution backend copied from the semantic plan.
+    pub execution_backend: EpistemicExecutionBackend,
+    /// Unsupported-shape behavior copied from the semantic plan.
+    pub fallback_policy: EpistemicFallbackPolicy,
     /// GPU workspace layout required by the executable plan.
     pub workspace_layout: EpistemicGpuWorkspaceLayout,
     /// Compiled reduced-runtime rule count.
@@ -2017,8 +2015,6 @@ pub struct EpistemicGpuRuntimePreflight {
     pub not_know_operator_count: usize,
     /// Negated `possible` operators represented as `not possible`.
     pub not_possible_operator_count: usize,
-    /// Forbidden CPU fallback counters copied from the GPU semantic contract.
-    pub cpu_fallbacks: EpistemicCpuFallbackCounters,
 }
 
 impl EpistemicGpuRuntimePreflight {
@@ -2037,12 +2033,6 @@ impl EpistemicGpuRuntimePreflight {
         executable: &EpistemicExecutablePlan,
         capacities: EpistemicGpuWorkspaceCapacities,
     ) -> Result<Self> {
-        if !executable.gpu_plan.cpu_fallbacks.is_zero() {
-            return Err(XlogError::UnsupportedEpistemicConstruct {
-                construct: "epistemic GPU runtime preflight".to_string(),
-                context: "nonzero CPU fallback counters".to_string(),
-            });
-        }
         executable.gpu_plan.validate_tuple_membership_bindings()?;
         executable.gpu_plan.validate_solver_contract()?;
         // A plan may carry MULTIPLE epistemic output heads: a JOINT-SOLVED
@@ -2173,6 +2163,8 @@ impl EpistemicGpuRuntimePreflight {
 
         Ok(Self {
             epistemic_mode: executable.gpu_plan.mode,
+            execution_backend: executable.gpu_plan.execution_backend,
+            fallback_policy: executable.gpu_plan.fallback_policy,
             workspace_layout,
             reduced_runtime_rule_count,
             reduced_constraint_relation_count: reduced_constraint_relation_names.len(),
@@ -2213,7 +2205,6 @@ impl EpistemicGpuRuntimePreflight {
             possible_operator_count,
             not_know_operator_count,
             not_possible_operator_count,
-            cpu_fallbacks: executable.gpu_plan.cpu_fallbacks,
         })
     }
 }
@@ -2868,16 +2859,6 @@ pub struct EpistemicGpuBatchExecutionTrace {
     pub component_count: usize,
     /// Number of components executed through `execute_epistemic_gpu_execution`.
     pub gpu_runtime_component_executions: usize,
-    /// CPU recomposition steps performed by this batch adapter.
-    pub cpu_recomposition_steps: u64,
-    /// CPU candidate enumerations observed across component semantic traces.
-    pub cpu_candidate_enumerations: u64,
-    /// CPU world-view validations observed across component semantic traces.
-    pub cpu_world_view_validations: u64,
-    /// CPU solver-search fallbacks observed across component preflight traces.
-    pub cpu_solver_search_fallbacks: u64,
-    /// CPU probability recomputations observed across component preflight traces.
-    pub cpu_probability_recomputations: u64,
     /// Hot-path device-to-host calls tracked across all components.
     pub tracked_dtoh_calls: u64,
     /// Hot-path data-plane host-to-device calls tracked across all components.
@@ -2949,35 +2930,6 @@ impl EpistemicGpuBatchExecutionTrace {
         Ok(Self {
             component_count: results.len(),
             gpu_runtime_component_executions: results.len(),
-            cpu_recomposition_steps: 0,
-            cpu_candidate_enumerations: checked_batch_sum_u64(
-                "cpu_candidate_enumerations",
-                results
-                    .iter()
-                    .map(|result| u64::from(result.semantic_trace.cpu_candidate_enumerations)),
-            )?,
-            cpu_world_view_validations: checked_batch_sum_u64(
-                "cpu_world_view_validations",
-                results
-                    .iter()
-                    .map(|result| u64::from(result.semantic_trace.cpu_world_view_validations)),
-            )?,
-            cpu_solver_search_fallbacks: checked_batch_sum_u64(
-                "cpu_solver_search_fallbacks",
-                results
-                    .iter()
-                    .map(|result| result.prepared.preflight.cpu_fallbacks.solver_search),
-            )?,
-            cpu_probability_recomputations: checked_batch_sum_u64(
-                "cpu_probability_recomputations",
-                results.iter().map(|result| {
-                    result
-                        .prepared
-                        .preflight
-                        .cpu_fallbacks
-                        .probabilistic_recompute
-                }),
-            )?,
             tracked_dtoh_calls: checked_batch_sum_u64(
                 "tracked_dtoh_calls",
                 results

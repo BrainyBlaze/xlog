@@ -60,9 +60,9 @@ impl CompiledLogicProgram {
     /// without catching an exception, call `epistemic_evidence()` first — it reports
     /// `accepted_world_views == 0` without raising.
     ///
-    /// The returned trace must show `cpu_only_probability_recomputations == 0` and a
-    /// non-zero `gpu_conditioned_evidence_facts` — otherwise the conditioning did not
-    /// reach the GPU exact path. `gpu_conditioned_evidence_facts` is the total the
+    /// The returned trace must show a non-zero `gpu_conditioned_evidence_facts` —
+    /// otherwise the conditioning did not reach the GPU exact path.
+    /// `gpu_conditioned_evidence_facts` is the total the
     /// engine itself validates; the per-class counters
     /// (`gpu_conditioned_know_evidence_facts`,
     /// `gpu_conditioned_possible_evidence_facts`,
@@ -275,14 +275,6 @@ fn pack_epistemic_eval_result(
     dict.set_item(
         "accepted_gpu_production_path_events",
         trace.accepted_gpu_production_path_events,
-    )?;
-    dict.set_item(
-        "cpu_only_probability_recomputations",
-        trace.cpu_only_probability_recomputations,
-    )?;
-    dict.set_item(
-        "fixture_circuit_evaluations",
-        trace.fixture_circuit_evaluations,
     )?;
 
     Ok(EpistemicEvalResult {

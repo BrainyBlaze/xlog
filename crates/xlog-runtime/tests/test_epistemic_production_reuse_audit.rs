@@ -1,5 +1,5 @@
 use xlog_cuda::provider::{HostLaunchMetadataTransferStats, HostTransferStats};
-use xlog_ir::{EirEpistemicMode, EpistemicCpuFallbackCounters};
+use xlog_ir::{EirEpistemicMode, EpistemicExecutionBackend, EpistemicFallbackPolicy};
 use xlog_runtime::{
     EpistemicGpuRuntimeCounters, EpistemicGpuRuntimePreflight, EpistemicGpuRuntimeTrace,
     EpistemicGpuRuntimeWcojCertification, EpistemicGpuTransferBudgetTrace,
@@ -180,6 +180,8 @@ fn host_transfer_stats(
 fn preflight_requiring_kclique_wcoj() -> EpistemicGpuRuntimePreflight {
     EpistemicGpuRuntimePreflight {
         epistemic_mode: EirEpistemicMode::Faeel,
+        execution_backend: EpistemicExecutionBackend::Gpu,
+        fallback_policy: EpistemicFallbackPolicy::RejectUnsupported,
         workspace_layout: EpistemicGpuWorkspaceLayout {
             candidate_assumption_bytes: 2,
             world_view_bytes: 2,
@@ -215,6 +217,5 @@ fn preflight_requiring_kclique_wcoj() -> EpistemicGpuRuntimePreflight {
         possible_operator_count: 0,
         not_know_operator_count: 0,
         not_possible_operator_count: 0,
-        cpu_fallbacks: EpistemicCpuFallbackCounters::default(),
     }
 }

@@ -105,10 +105,38 @@ plan does four things:
 - it binds each modal literal (a `know` or `possible` literal) to the reduced
   stable-model tuple source it draws from — where stable models are the answer
   sets a logic program admits;
-- it tracks CPU fallback counters.
+- it declares the typed structural policy `execution_backend=gpu` and
+  `fallback_policy=reject_unsupported`.
 
 The runtime rejects a single-pass plan whose required bindings, workspace sizes,
-or fallback counters do not satisfy this contract.
+or execution policy do not satisfy this contract. The same policy is serialized
+on the reduced-ordinary, stratified, WFS, and Gelfond-1991 compatibility plan
+summaries, including plan families with no single-pass candidate units.
+
+<Note>
+  The plan and evidence JSON intentionally no longer publish synthetic zero
+  measurements. The removed keys include `cpu_fallbacks`,
+  `cpu_fallbacks_zero`, `cpu_fallback_is_zero`, and
+  `cpu_fallback_total_zero`, along with the former semantic and split-batch
+  `cpu_candidate_enumerations`, `cpu_world_view_validations`,
+  `cpu_recomposition_steps`, `cpu_solver_search_fallbacks`, and
+  `cpu_probability_recomputations` fields. Production solver/probability traces
+  and their CLI/PyXLOG exports also dropped `cpu_assignment_enumerations`,
+  `cpu_maxsat_enumerations`, `cpu_learned_clause_transfers`,
+  `cpu_only_probability_recomputations`, and `fixture_circuit_evaluations`;
+  those values were default-only zeros rather than observations. Hardcoded
+  solver/probability no-fallback booleans were removed for the same reason.
+  WFS summaries likewise omit `host_wfs_fallback_allowed`; the typed fallback
+  policy is the structural contract. Specialized CLI evidence also omits
+  `cpu_threshold_only_promotions`, the Python/host score-materialization flags,
+  `cpu_template_expansions`, and `host_materialized_explanation_fallback`
+  because those values were constants rather than observed runtime events.
+  Consumers should gate acceptance on the typed policy plus observed dispatch,
+  kernel timing, device-buffer, candidate-accounting, solver/probability event,
+  and scoped-transfer evidence. The separately selected CPU solver oracle keeps
+  its real, incremented search counters, remains labeled as fixture-only, and is
+  not eligible as production GPU evidence.
+</Note>
 
 ## Reduced runtime plans
 

@@ -12,10 +12,11 @@ pub use eir::{
     EirProgram, EirRule, EirTerm,
 };
 pub use epistemic_plan::{
-    EpistemicConstraintPlan, EpistemicCpuFallbackCounters, EpistemicExecutablePlan,
-    EpistemicGpuBufferKind, EpistemicGpuHotPathPhase, EpistemicGpuPlan, EpistemicReductionPlan,
-    EpistemicSolverAssumptionBinding, EpistemicSolverCapability, EpistemicSolverServiceContract,
-    EpistemicSolverStatusKind, EpistemicTupleMembershipBinding, EpistemicWcojReductionStatus,
+    EpistemicConstraintPlan, EpistemicExecutablePlan, EpistemicExecutionBackend,
+    EpistemicFallbackPolicy, EpistemicGpuBufferKind, EpistemicGpuHotPathPhase, EpistemicGpuPlan,
+    EpistemicReductionPlan, EpistemicSolverAssumptionBinding, EpistemicSolverCapability,
+    EpistemicSolverServiceContract, EpistemicSolverStatusKind, EpistemicTupleMembershipBinding,
+    EpistemicWcojReductionStatus,
 };
 pub use metadata::{LayoutHint, RirMeta, SkewSignature};
 pub use plan::{CompiledRule, ExecutionPlan, PlanBuilder, Scc, Stratum};

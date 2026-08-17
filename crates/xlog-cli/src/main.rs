@@ -73,10 +73,10 @@ struct RunArgs {
     #[arg(long, value_delimiter = ':')]
     module_path: Vec<PathBuf>,
     /// Dump the compiled epistemic execution plan (EIR-derived GPU plan, world-view
-    /// integrity constraints, and CPU-fallback counters) as JSON to this path.
+    /// integrity constraints, and fail-closed execution policy) as JSON to this path.
     /// No-op for ordinary (non-epistemic) programs. This compiled
     /// epistemic-plan/EIR JSON dump exposes accepted `know`/`possible` literals
-    /// and lets a caller assert `cpu_fallback == 0` off a real GPU run.
+    /// and lets a caller verify that unsupported execution shapes are rejected.
     #[arg(long)]
     epistemic_plan_json: Option<PathBuf>,
     /// Engage the worst-case-optimal join (WCOJ) subsystem for eligible
@@ -625,13 +625,8 @@ fn explain_epistemic(program: &Program) -> serde_json::Value {
                     "required_capabilities": plan.solver_contract.required_capabilities.iter().map(|cap| format!("{:?}", cap)).collect::<Vec<_>>(),
                     "required_statuses": plan.solver_contract.required_statuses.iter().map(|status| format!("{:?}", status)).collect::<Vec<_>>(),
                 },
-                "cpu_fallbacks": {
-                    "candidate_enumeration": plan.cpu_fallbacks.candidate_enumeration,
-                    "world_view_validation": plan.cpu_fallbacks.world_view_validation,
-                    "solver_search": plan.cpu_fallbacks.solver_search,
-                    "probabilistic_recompute": plan.cpu_fallbacks.probabilistic_recompute,
-                    "is_zero": plan.cpu_fallbacks.is_zero(),
-                }
+                "execution_backend": epistemic_execution_backend_label(plan.execution_backend),
+                "fallback_policy": epistemic_fallback_policy_label(plan.fallback_policy),
             })
         }
         Err(err) => serde_json::json!({
@@ -647,6 +642,8 @@ fn explain_epistemic(program: &Program) -> serde_json::Value {
             "reduced_runtime_sccs": plan.reduced_runtime_plan.sccs.len(),
             "reduced_runtime_est_memory_peak": plan.reduced_runtime_plan.est_memory_peak,
             "gpu_plan_literal_count": plan.gpu_plan.epistemic_literals.len(),
+            "execution_backend": epistemic_execution_backend_label(plan.gpu_plan.execution_backend),
+            "fallback_policy": epistemic_fallback_policy_label(plan.gpu_plan.fallback_policy),
         }),
         Err(err) => serde_json::json!({
             "status": "error",
@@ -688,6 +685,18 @@ fn eir_epistemic_literal_json(lit: &xlog_ir::EirEpistemicLiteral) -> serde_json:
         "negated": lit.negated,
         "atom": eir_atom_json(&lit.atom),
     })
+}
+
+fn epistemic_execution_backend_label(backend: xlog_ir::EpistemicExecutionBackend) -> &'static str {
+    match backend {
+        xlog_ir::EpistemicExecutionBackend::Gpu => "gpu",
+    }
+}
+
+fn epistemic_fallback_policy_label(policy: xlog_ir::EpistemicFallbackPolicy) -> &'static str {
+    match policy {
+        xlog_ir::EpistemicFallbackPolicy::RejectUnsupported => "reject_unsupported",
+    }
 }
 
 fn eir_term_label(term: &EirTerm) -> String {

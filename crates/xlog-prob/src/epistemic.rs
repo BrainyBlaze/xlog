@@ -4,7 +4,10 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use xlog_core::{symbol, Result, ScalarType, XlogError};
 use xlog_cuda::{CompareOp, CudaBuffer, CudaKernelProvider};
-use xlog_ir::{EirEpistemicMode, EirEpistemicOp, EirTerm, EpistemicTupleMembershipBinding};
+use xlog_ir::{
+    EirEpistemicMode, EirEpistemicOp, EirTerm, EpistemicExecutionBackend, EpistemicFallbackPolicy,
+    EpistemicTupleMembershipBinding,
+};
 use xlog_logic::{
     ast::{Atom, EpistemicLiteral, EpistemicOp, Term},
     epistemic::{EpistemicWorldView, TruthValue},
@@ -402,12 +405,11 @@ impl AcceptedWorldViewEvidence {
                 ),
             });
         }
-        if !result.prepared.preflight.cpu_fallbacks.is_zero() {
-            return Err(XlogError::UnsupportedEpistemicConstruct {
-                construct: "accepted GPU world-view evidence".to_string(),
-                context: "probabilistic evidence requires zero epistemic CPU fallback counters"
-                    .to_string(),
-            });
+        match result.prepared.preflight.execution_backend {
+            EpistemicExecutionBackend::Gpu => {}
+        }
+        match result.prepared.preflight.fallback_policy {
+            EpistemicFallbackPolicy::RejectUnsupported => {}
         }
         result.require_runtime_dispatch_certification()?;
         result
@@ -726,16 +728,14 @@ fn require_accepted_gpu_semantic_trace(result: &EpistemicGpuExecutionResult) -> 
         || trace.rejected_candidates != trace.rejected_candidate_indices.len()
         || trace.accepted_world_views != trace.accepted_candidates
         || accounted_candidates != trace.generated_candidates
-        || trace.cpu_candidate_enumerations != 0
-        || trace.cpu_world_view_validations != 0
     {
         return Err(XlogError::UnsupportedEpistemicConstruct {
             construct: "accepted GPU world-view evidence".to_string(),
             context: format!(
-                "probabilistic evidence requires a consistent GPU semantic trace with zero CPU \
-                 fallbacks, got generated={}, tested={}, expected_generated={}, \
+                "probabilistic evidence requires a consistent GPU semantic trace, got \
+                 generated={}, tested={}, expected_generated={}, \
                  expected_tested={}, accepted={} accepted_indices={}, accepted_world_views={}, \
-                 rejected={} rejected_indices={}, cpu_candidates={}, cpu_world_views={}",
+                 rejected={} rejected_indices={}",
                 trace.generated_candidates,
                 trace.tested_candidates,
                 result.candidate_generation.generated_candidates,
@@ -744,9 +744,7 @@ fn require_accepted_gpu_semantic_trace(result: &EpistemicGpuExecutionResult) -> 
                 trace.accepted_candidate_indices.len(),
                 trace.accepted_world_views,
                 trace.rejected_candidates,
-                trace.rejected_candidate_indices.len(),
-                trace.cpu_candidate_enumerations,
-                trace.cpu_world_view_validations
+                trace.rejected_candidate_indices.len()
             ),
         });
     }
